@@ -62,28 +62,44 @@ impl XrpAdapter {
         XrpAdapter { chain_id }
     }
 
-    /// Build + threshold-sign a native-XRP withdrawal with an OPTIONAL destination
-    /// tag. The trait `sign_withdrawal` delegates here with `None`.
+    /// Build + threshold-sign a native-XRP withdrawal from the protocol SETTLEMENT
+    /// address, with an OPTIONAL destination tag. The trait `sign_withdrawal`
+    /// delegates here with `None`.
     pub async fn sign_withdrawal_with_tag(
         &self,
         recipient: &str,
         amount_drops_u128: u128,
         destination_tag: Option<u32>,
     ) -> Result<SignedWithdrawal, ChainAdapterError> {
-        // 1. Validate the recipient + amount at the boundary, BEFORE any await
-        //    (mirror Solana/Monad fail-fast discipline).
+        let path = ted25519::settlement_derivation_path(self.chain_id);
+        self.sign_xrp_payment_from(path, recipient, amount_drops_u128, destination_tag)
+            .await
+            .map(|(signed, _last_ledger_sequence)| signed)
+    }
+
+    /// Build + threshold-sign a native-XRP `Payment` from an ARBITRARY custody
+    /// derivation path — the settlement address, or a per-vault custody address for
+    /// P4 claim settlement. Validates the recipient + amount at the boundary,
+    /// derives the source address from `derivation_path`, reads its sequence/balance
+    /// + the base reserve, reserve-checks + builds the Payment, signs
+    /// `STX\0 ‖ blob` directly (Ed25519, no prehash), and returns the signed blob +
+    /// the LOCAL tx hash. The caller submits the blob (`xrp_rpc::submit_blob`).
+    pub async fn sign_xrp_payment_from(
+        &self,
+        derivation_path: Vec<Vec<u8>>,
+        recipient: &str,
+        amount_drops_u128: u128,
+        destination_tag: Option<u32>,
+    ) -> Result<(SignedWithdrawal, u32), ChainAdapterError> {
         let dest_id = decode_recipient(recipient)?;
         let amount_drops = checked_drops_u64(amount_drops_u128)?;
 
-        // 2. Derive the settlement (source) address + its raw pubkey.
-        let path = ted25519::settlement_derivation_path(self.chain_id);
-        let (pubkey, sender_addr) = ted25519::derive_xrp_address(path.clone())
+        let (pubkey, sender_addr) = ted25519::derive_xrp_address(derivation_path.clone())
             .await
             .map_err(ChainAdapterError::SignatureFailed)?;
         let sender_id = address::account_id_from_classic_address(&sender_addr)
             .map_err(ChainAdapterError::SignatureFailed)?;
 
-        // 3. Read sequence/balance/ledger + base reserve.
         let acct = xrp_rpc::fetch_account_info(&sender_addr)
             .await
             .map_err(|message| ChainAdapterError::RpcError {
@@ -97,7 +113,6 @@ impl XrpAdapter {
                 message,
             })?;
 
-        // 4. Reserve-check + build the Payment (pure; unit-tested).
         let payment = build_withdrawal_payment(
             sender_id,
             dest_id,
@@ -108,20 +123,21 @@ impl XrpAdapter {
             destination_tag,
         )?;
 
-        // 5. Sign `STX\0 ‖ unsigned_blob` directly (Ed25519, no prehash).
         let unsigned = codec::serialize_unsigned(&payment);
         let message = sign::signing_message(&unsigned);
-        let signature = ted25519::sign_message(message, path)
+        let signature = ted25519::sign_message(message, derivation_path)
             .await
             .map_err(ChainAdapterError::SignatureFailed)?;
-
-        // 6. Insert TxnSignature, re-serialize, compute the LOCAL tx hash.
+        let last_ledger_sequence = payment.last_ledger_sequence;
         let signed = codec::serialize_signed(&payment, &signature);
         let tx_hash = hex::encode_upper(sign::tx_hash(&signed));
-        Ok(SignedWithdrawal {
-            raw_tx: signed,
-            tx_hash,
-        })
+        Ok((
+            SignedWithdrawal {
+                raw_tx: signed,
+                tx_hash,
+            },
+            last_ledger_sequence,
+        ))
     }
 }
 

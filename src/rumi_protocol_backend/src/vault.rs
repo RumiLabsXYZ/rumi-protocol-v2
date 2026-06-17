@@ -1102,6 +1102,264 @@ pub async fn confirm_xrp_deposit(vault_id: u64) -> Result<u64, ProtocolError> {
     Ok(credited)
 }
 
+/// P4: record an unsettled XRP collateral claim and return its id. The OUT-paths
+/// (withdraw / liquidation / redemption) call this instead of an ICRC transfer when
+/// the collateral is native-XRP. `custody_owner`+`custody_nonce` (the source vault's
+/// owner + id) locate the XRPL custody address the protocol later pays the claimant
+/// from via `settle_xrp_claim`.
+pub(crate) fn record_xrp_claim(
+    s: &mut crate::state::State,
+    claimant: Principal,
+    custody_owner: Principal,
+    custody_nonce: u64,
+    drops: u64,
+    now_ns: u64,
+) -> u64 {
+    let claim_id = s.next_xrp_claim_id;
+    s.next_xrp_claim_id = s.next_xrp_claim_id.wrapping_add(1);
+    s.xrp_claims.insert(
+        claim_id,
+        crate::state::XrpClaim {
+            claimant,
+            drops,
+            custody_owner,
+            custody_nonce,
+            created_at_ns: now_ns,
+            settlement: None,
+        },
+    );
+    claim_id
+}
+
+/// P4: queue a collateral payout to `recipient`. ICRC collateral -> a
+/// PendingMarginTransfer (the ICRC transfer machinery pays it). Native-XRP -> an
+/// XrpClaim instead (settled later via settle_xrp_claim from the vault's custody
+/// address); native-XRP therefore never enters the ICRC pending-transfer flow.
+/// `custody_owner` is the SOURCE vault's owner (its threshold key controls the
+/// custody address), captured while the vault is in hand — safe even when
+/// cleanup_if_drained removes the vault immediately after.
+fn queue_collateral_payout(
+    s: &mut crate::state::State,
+    vault_id: u64,
+    custody_owner: Principal,
+    recipient: Principal,
+    margin: ICP,
+    collateral_type: Principal,
+    op_nonce: u128,
+    now_ns: u64,
+) {
+    let is_xrp = s
+        .get_collateral_config(&collateral_type)
+        .map(|c| c.is_native_xrp())
+        .unwrap_or(false);
+    if is_xrp {
+        record_xrp_claim(s, recipient, custody_owner, vault_id, margin.to_u64(), now_ns);
+    } else {
+        s.pending_margin_transfers.insert(
+            (vault_id, recipient),
+            PendingMarginTransfer {
+                owner: recipient,
+                margin,
+                collateral_type,
+                retry_count: 0,
+                op_nonce,
+            },
+        );
+    }
+}
+
+/// Pure: drops to actually send when settling a claim — the claimant bears the XRPL
+/// network fee (sends `drops - fee`). Errors if the claim cannot cover the fee.
+pub(crate) fn xrp_claim_send_amount(drops: u64, fee: u64) -> Result<u64, ProtocolError> {
+    match drops.checked_sub(fee) {
+        Some(n) if n > 0 => Ok(n),
+        _ => Err(ProtocolError::AmountTooLow {
+            minimum_amount: fee.saturating_add(1),
+        }),
+    }
+}
+
+/// P4: settle an XRP claim — sign + submit a `Payment` from the source vault's
+/// custody address (re-derived from the claim) to `destination`, for
+/// `claim.drops - fee` (the claimant bears the fee). Claimant-only. One in-flight
+/// Payment per custody address (sequence serialization, keyed on the source vault
+/// id). On success the claim is removed; returns the locally computed tx hash.
+pub async fn settle_xrp_claim(claim_id: u64, destination: String) -> Result<String, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let claim = match read_state(|s| s.xrp_claims.get(&claim_id).cloned()) {
+        Some(c) => c,
+        None => {
+            return Err(ProtocolError::GenericError(
+                "No such XRP claim (already settled or unknown).".to_string(),
+            ))
+        }
+    };
+    if claim.claimant != caller {
+        return Err(ProtocolError::CallerNotOwner);
+    }
+
+    let guard_principal = GuardPrincipal::new(caller, &format!("settle_xrp_claim_{}", claim_id))?;
+    // Per-custody-address sequence serialization: custody_nonce == the source vault
+    // id, so this per-vault lock prevents two concurrent Payments from one custody
+    // address colliding on the XRPL Sequence.
+    let _seq_guard = match VaultLiquidationGuard::new(claim.custody_nonce) {
+        Ok(g) => g,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(e);
+        }
+    };
+
+    let path = crate::chains::xrp::ted25519::custody_derivation_path(
+        crate::chains::xrp::XRP_CHAIN_ID,
+        claim.custody_owner,
+        claim.custody_nonce,
+    );
+
+    // Idempotency (anti double-pay): if a settlement Payment was already
+    // signed+submitted for this claim, CONFIRM it before signing a new one. A submit
+    // outcall can error AFTER rippled already broadcast the tx; without this check a
+    // retry would read the bumped account Sequence and send a second distinct
+    // Payment, paying the claimant twice out of the custody address.
+    if let Some(prev) = claim.settlement.clone() {
+        match crate::chains::xrp::xrp_rpc::fetch_tx_status(&prev.tx_hash).await {
+            Ok(crate::chains::xrp::xrp_rpc::XrpTxStatus::Validated { .. }) => {
+                // Already paid on-chain — finalize by removing the claim.
+                mutate_state(|s| {
+                    s.xrp_claims.remove(&claim_id);
+                });
+                guard_principal.complete();
+                return Ok(prev.tx_hash);
+            }
+            Ok(crate::chains::xrp::xrp_rpc::XrpTxStatus::NotFound) => {
+                // Not validated yet. Only sign a fresh tx if the prior one can NEVER
+                // apply anymore (its LastLedgerSequence has passed); otherwise it may
+                // still land, so refuse to sign a second one.
+                let addr = match crate::chains::xrp::ted25519::derive_xrp_address(path.clone()).await
+                {
+                    Ok((_pk, addr)) => addr,
+                    Err(e) => {
+                        guard_principal.fail();
+                        return Err(ProtocolError::GenericError(format!("xrp derive failed: {e}")));
+                    }
+                };
+                let acct = match crate::chains::xrp::xrp_rpc::fetch_account_info(&addr).await {
+                    Ok(a) => a,
+                    Err(e) => {
+                        guard_principal.fail();
+                        return Err(ProtocolError::GenericError(format!(
+                            "xrp account_info failed: {e}"
+                        )));
+                    }
+                };
+                if acct.ledger_index <= prev.last_ledger_sequence {
+                    guard_principal.fail();
+                    return Err(ProtocolError::GenericError(
+                        "XRP settlement already in flight; retry once it confirms or expires."
+                            .to_string(),
+                    ));
+                }
+                // Expired and never applied -> safe to sign a fresh settlement.
+            }
+            Ok(crate::chains::xrp::xrp_rpc::XrpTxStatus::Failed) => {
+                // Validated but failed -> funds did not move -> safe to re-sign.
+            }
+            Err(e) => {
+                guard_principal.fail();
+                return Err(ProtocolError::GenericError(format!("xrp tx status failed: {e}")));
+            }
+        }
+    }
+
+    // Sign a fresh settlement Payment (claimant bears the XRPL fee).
+    let send_drops =
+        match xrp_claim_send_amount(claim.drops, crate::chains::xrp::adapter::XRP_FEE_DROPS) {
+            Ok(n) => n,
+            Err(e) => {
+                guard_principal.fail();
+                return Err(e);
+            }
+        };
+    let adapter = crate::chains::xrp::adapter::XrpAdapter::new(crate::chains::xrp::XRP_CHAIN_ID);
+    let (signed, last_ledger_sequence) = match adapter
+        .sign_xrp_payment_from(path, &destination, send_drops as u128, None)
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "xrp claim sign failed: {e:?}"
+            )));
+        }
+    };
+
+    // Record the in-flight settlement BEFORE submitting, so a submit whose outcall
+    // errors after rippled broadcast is reconciled on the next settle (confirm) call
+    // rather than double-paid.
+    mutate_state(|s| {
+        if let Some(c) = s.xrp_claims.get_mut(&claim_id) {
+            c.settlement = Some(crate::state::XrpSettlement {
+                tx_hash: signed.tx_hash.clone(),
+                last_ledger_sequence,
+            });
+        }
+    });
+
+    if let Err(e) = crate::chains::xrp::xrp_rpc::submit_blob(&hex::encode_upper(&signed.raw_tx)).await
+    {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(format!(
+            "xrp claim submit failed (call settle again to confirm or retry): {e}"
+        )));
+    }
+
+    // Submitted. The claim is removed only once the tx is confirmed Validated on a
+    // later settle call; until then it keeps `settlement` set so a retry confirms
+    // instead of re-paying. Return the locally computed hash.
+    guard_principal.complete();
+    Ok(signed.tx_hash)
+}
+
+#[cfg(test)]
+mod xrp_p4_tests {
+    use super::*;
+
+    #[test]
+    fn claim_send_amount_subtracts_fee() {
+        assert_eq!(xrp_claim_send_amount(1_000_000, 20).unwrap(), 999_980);
+    }
+
+    #[test]
+    fn claim_send_amount_rejects_at_or_below_fee() {
+        assert!(matches!(
+            xrp_claim_send_amount(20, 20),
+            Err(ProtocolError::AmountTooLow { .. })
+        ));
+        assert!(matches!(
+            xrp_claim_send_amount(5, 20),
+            Err(ProtocolError::AmountTooLow { .. })
+        ));
+    }
+
+    #[test]
+    fn record_xrp_claim_allocates_incrementing_ids() {
+        let mut s = crate::state::State::default();
+        let owner = Principal::from_slice(&[0xaa; 16]);
+        let liq = Principal::from_slice(&[0xbb; 16]);
+        let id0 = record_xrp_claim(&mut s, liq, owner, 7, 4_000_000, 100);
+        let id1 = record_xrp_claim(&mut s, owner, owner, 8, 1_000_000, 200);
+        assert_eq!(id0, 0);
+        assert_eq!(id1, 1);
+        assert_eq!(s.next_xrp_claim_id, 2);
+        let c0 = s.xrp_claims.get(&id0).unwrap();
+        assert_eq!(c0.claimant, liq);
+        assert_eq!(c0.custody_owner, owner);
+        assert_eq!(c0.custody_nonce, 7);
+        assert_eq!(c0.drops, 4_000_000);
+    }
+}
+
 #[cfg(test)]
 mod xrp_p3_tests {
     use super::*;
@@ -2255,11 +2513,11 @@ pub async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
         return Err(ProtocolError::GenericError("No collateral to withdraw".to_string()));
     }
 
-    // Look up per-collateral config
-    let (ledger_canister_id, ledger_fee) = read_state(|s| {
+    // Look up per-collateral config (incl. custody kind for P4 native-XRP routing).
+    let (ledger_canister_id, ledger_fee, is_native_xrp) = read_state(|s| {
         let config = s.get_collateral_config(&vault.collateral_type)
             .ok_or(ProtocolError::GenericError("Collateral type not configured".to_string()))?;
-        Ok::<_, ProtocolError>((config.ledger_canister_id, config.ledger_fee))
+        Ok::<_, ProtocolError>((config.ledger_canister_id, config.ledger_fee, config.is_native_xrp()))
     })?;
 
     // Get the amount to transfer
@@ -2279,6 +2537,25 @@ pub async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
         // Wave-8b LIQ-002: collateral changed → re-key the index entry.
         state.reindex_vault_cr(vault_id);
     });
+
+    // P4: native-XRP collateral leaves the vault into an XrpClaim (settled later via
+    // settle_xrp_claim, signed from the vault's custody address) instead of an ICRC
+    // transfer. Collateral is already zeroed above; the XRPL fee is taken at settle
+    // time (claimant-bears-fee), so the full amount becomes the claim.
+    if is_native_xrp {
+        let now_ns = ic_cdk::api::time();
+        let claim_id = mutate_state(|s| {
+            crate::event::record_collateral_withdrawn(s, vault_id, amount_to_transfer, 0);
+            record_xrp_claim(s, caller, caller, vault_id, amount_to_transfer.to_u64(), now_ns)
+        });
+        log!(
+            INFO,
+            "[withdraw_collateral] vault #{} native-XRP collateral -> XRP claim #{}",
+            vault_id,
+            claim_id
+        );
+        return Ok(claim_id);
+    }
 
     // Make the collateral transfer with appropriate fee deduction
     let fee = ICP::from(ledger_fee);
@@ -2349,14 +2626,14 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
     mutate_state(|s| s.accrue_single_vault(vault_id, now));
 
     // Read vault, per-collateral price + config from state
-    let (vault, collateral_price, config_decimals, ledger_canister_id, ledger_fee, min_deposit) = match read_state(|s| {
+    let (vault, collateral_price, config_decimals, ledger_canister_id, ledger_fee, min_deposit, is_native_xrp) = match read_state(|s| {
         match s.vault_id_to_vaults.get(&vault_id) {
             Some(vault) => {
                 let price = s.get_collateral_price_decimal(&vault.collateral_type)
                     .ok_or("No price available for collateral. Price feed may be down.")?;
                 let config = s.get_collateral_config(&vault.collateral_type)
                     .ok_or("Collateral type not configured.")?;
-                Ok((vault.clone(), price, config.decimals, config.ledger_canister_id, config.ledger_fee, config.min_collateral_deposit))
+                Ok((vault.clone(), price, config.decimals, config.ledger_canister_id, config.ledger_fee, config.min_collateral_deposit, config.is_native_xrp()))
             },
             None => Err("Vault not found. Please check the vault ID.")
         }
@@ -2468,6 +2745,24 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
 
     // Note: margin is reduced in record_partial_collateral_withdrawn (via remove_margin_from_vault)
     // after the transfer succeeds. Do NOT also subtract here — that would double-deduct.
+
+    // P4: native-XRP collateral leaves into an XrpClaim instead of an ICRC transfer.
+    // Reduce the vault collateral (same as the ICRC success path) and record the
+    // claim; the full withdraw_amount becomes the claim (XRPL fee taken at settle).
+    if is_native_xrp {
+        let now_ns = ic_cdk::api::time();
+        let claim_id = mutate_state(|s| {
+            crate::event::record_partial_collateral_withdrawn(s, vault_id, withdraw_amount, 0);
+            record_xrp_claim(s, caller, caller, vault_id, withdraw_amount.to_u64(), now_ns)
+        });
+        log!(
+            INFO,
+            "[withdraw_partial_collateral] vault #{} native-XRP collateral -> XRP claim #{}",
+            vault_id,
+            claim_id
+        );
+        return Ok(claim_id);
+    }
 
     let fee = ICP::from(ledger_fee);
     let transfer_amount = withdraw_amount - fee;
@@ -2590,10 +2885,10 @@ async fn withdraw_and_close_vault_internal(caller: Principal, vault_id: u64) -> 
     }
     
     // Look up per-collateral config
-    let (ledger_canister_id, ledger_fee) = read_state(|s| {
+    let (ledger_canister_id, ledger_fee, is_native_xrp) = read_state(|s| {
         let config = s.get_collateral_config(&vault.collateral_type)
             .ok_or(ProtocolError::GenericError("Collateral type not configured".to_string()))?;
-        Ok::<_, ProtocolError>((config.ledger_canister_id, config.ledger_fee))
+        Ok::<_, ProtocolError>((config.ledger_canister_id, config.ledger_fee, config.is_native_xrp()))
     })?;
 
     // If there's collateral, withdraw it first
@@ -2617,6 +2912,21 @@ async fn withdraw_and_close_vault_internal(caller: Principal, vault_id: u64) -> 
             state.reindex_vault_cr(vault_id);
         });
 
+        // P4: native-XRP collateral leaves into an XrpClaim, not an ICRC transfer.
+        if is_native_xrp {
+            let now_ns = ic_cdk::api::time();
+            let claim_id = mutate_state(|s| {
+                crate::event::record_collateral_withdrawn(s, vault_id, amount_to_transfer, 0);
+                record_xrp_claim(s, caller, caller, vault_id, amount_to_transfer.to_u64(), now_ns)
+            });
+            log!(
+                INFO,
+                "[withdraw_and_close] vault #{} native-XRP collateral -> XRP claim #{}",
+                vault_id,
+                claim_id
+            );
+            block_index = Some(claim_id);
+        } else {
         // Make the collateral transfer with appropriate fee deduction
         let fee = ICP::from(ledger_fee);
         let transfer_amount = amount_to_transfer - fee;
@@ -2664,6 +2974,7 @@ async fn withdraw_and_close_vault_internal(caller: Principal, vault_id: u64) -> 
                 return Err(ProtocolError::TransferError(error));
             }
         }
+        } // end native-XRP `else` (the ICRC transfer path)
     } else {
         log!(INFO, "[withdraw_and_close] Vault #{} has no collateral to withdraw", vault_id);
     };
@@ -2982,17 +3293,18 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
         };
         crate::storage::record_event(&event);
 
-        // Create pending transfer for liquidator reward
+        // Liquidator-reward payout: PendingMarginTransfer for ICRC, XrpClaim for
+        // native-XRP. Capture vault.owner (custody key) BEFORE cleanup_if_drained.
         let nonce = s.next_op_nonce();
-        s.pending_margin_transfers.insert(
-            (vault_id, caller),
-            PendingMarginTransfer {
-                owner: caller,
-                margin: payout_to_liquidator,
-                collateral_type: vault.collateral_type,
-                retry_count: 0,
-                op_nonce: nonce,
-            },
+        queue_collateral_payout(
+            s,
+            vault_id,
+            vault.owner,
+            caller,
+            payout_to_liquidator,
+            vault.collateral_type,
+            nonce,
+            ic_cdk::api::time(),
         );
 
         // Shared drain rule (see state::cleanup_if_drained): remove the vault
@@ -3280,15 +3592,15 @@ pub async fn liquidate_vault_partial_with_stable(
 
         // Create pending transfer for liquidator reward
         let nonce = s.next_op_nonce();
-        s.pending_margin_transfers.insert(
-            (vault_id, caller),
-            PendingMarginTransfer {
-                owner: caller,
-                margin: payout_to_liquidator,
-                collateral_type: vault.collateral_type,
-                retry_count: 0,
-                op_nonce: nonce,
-            },
+        queue_collateral_payout(
+            s,
+            vault_id,
+            vault.owner,
+            caller,
+            payout_to_liquidator,
+            vault.collateral_type,
+            nonce,
+            ic_cdk::api::time(),
         );
 
         // Shared drain rule (see state::cleanup_if_drained): remove the vault
@@ -3694,15 +4006,15 @@ pub async fn liquidate_vault_debt_already_burned(
         }
 
         let nonce = s.next_op_nonce();
-        s.pending_margin_transfers.insert(
-            (vault_id, caller),
-            PendingMarginTransfer {
-                owner: caller,
-                margin: payout_to_liquidator,
-                collateral_type: vault.collateral_type,
-                retry_count: 0,
-                op_nonce: nonce,
-            },
+        queue_collateral_payout(
+            s,
+            vault_id,
+            vault.owner,
+            caller,
+            payout_to_liquidator,
+            vault.collateral_type,
+            nonce,
+            ic_cdk::api::time(),
         );
 
         // Shared drain rule (see state::cleanup_if_drained): remove the vault
@@ -3963,32 +4275,38 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
 
         // Create pending transfer for liquidator reward (minus protocol cut)
         let liquidator_nonce = s.next_op_nonce();
-        s.pending_margin_transfers.insert(
-            (vault_id, caller),
-            PendingMarginTransfer {
-                owner: caller,
-                margin: liquidator_pay,
-                collateral_type: vault.collateral_type,
-                retry_count: 0,
-                op_nonce: liquidator_nonce,
-            },
+        queue_collateral_payout(
+            s,
+            vault_id,
+            vault.owner,
+            caller,
+            liquidator_pay,
+            vault.collateral_type,
+            liquidator_nonce,
+            ic_cdk::api::time(),
         );
 
         // Create pending transfer for excess collateral to vault owner (if any)
         // (only for full liquidations, not recovery partial)
         if !is_recovery_partial && excess_pay > ICP::new(0) {
             log!(INFO, "[liquidate_vault] Scheduling excess collateral return to vault owner");
-            let excess_nonce = s.next_op_nonce();
-            s.pending_excess_transfers.insert(
-                (vault_id, vault.owner),
-                PendingMarginTransfer {
-                    owner: vault.owner,
-                    margin: excess_pay,
-                    collateral_type: vault.collateral_type,
-                    retry_count: 0,
-                    op_nonce: excess_nonce,
-                },
-            );
+            // Native-XRP excess returns to the owner as an XrpClaim; ICRC excess
+            // goes through the pending-excess transfer machinery.
+            if s.get_collateral_config(&vault.collateral_type).map(|c| c.is_native_xrp()).unwrap_or(false) {
+                record_xrp_claim(s, vault.owner, vault.owner, vault_id, excess_pay.to_u64(), ic_cdk::api::time());
+            } else {
+                let excess_nonce = s.next_op_nonce();
+                s.pending_excess_transfers.insert(
+                    (vault_id, vault.owner),
+                    PendingMarginTransfer {
+                        owner: vault.owner,
+                        margin: excess_pay,
+                        collateral_type: vault.collateral_type,
+                        retry_count: 0,
+                        op_nonce: excess_nonce,
+                    },
+                );
+            }
         }
 
         log!(INFO, "[liquidate_vault] Protocol state updated, {} pending transfers created",
@@ -4127,6 +4445,10 @@ async fn try_process_pending_transfers_immediate(vault_id: u64) -> Result<u32, S
 
     // Process each transfer
     for (transfer_type, transfer_vault_id, transfer_owner, transfer) in transfers_to_process {
+        // Note: native-XRP collateral never reaches this ICRC processor — it is
+        // converted to an XrpClaim at the moment of liquidation/withdrawal (see
+        // `queue_collateral_payout`), so a NativeXrp `collateral_type` cannot appear
+        // in pending_margin_transfers / pending_excess_transfers.
         // Look up per-collateral ledger fee and canister ID
         let (ledger_fee, ledger_canister_id) = read_state(|s| {
             match s.get_collateral_config(&transfer.collateral_type) {
@@ -4502,15 +4824,15 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
 
         // Create pending transfer for liquidator reward (minus protocol cut)
         let nonce = s.next_op_nonce();
-        s.pending_margin_transfers.insert(
-            (arg.vault_id, caller),
-            PendingMarginTransfer {
-                owner: caller,
-                margin: payout_to_liquidator,
-                collateral_type: vault.collateral_type,
-                retry_count: 0,
-                op_nonce: nonce,
-            },
+        queue_collateral_payout(
+            s,
+            arg.vault_id,
+            vault.owner,
+            caller,
+            payout_to_liquidator,
+            vault.collateral_type,
+            nonce,
+            ic_cdk::api::time(),
         );
 
         // Shared drain rule (see state::cleanup_if_drained): remove the vault

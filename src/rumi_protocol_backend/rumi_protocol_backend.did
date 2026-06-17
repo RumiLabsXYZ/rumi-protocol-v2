@@ -1196,4 +1196,5 @@ service : (ProtocolArg) -> {
   xrp_transform_tx : (TransformArgs) -> (HttpResponse) query;
   open_xrp_vault : () -> (XrpVaultOpenResult);
   confirm_xrp_deposit : (nat64) -> (Result_1);
+  settle_xrp_claim : (nat64, text) -> (Result_2);
 }

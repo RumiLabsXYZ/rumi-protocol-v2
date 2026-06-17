@@ -3247,6 +3247,17 @@ async fn confirm_xrp_deposit(vault_id: u64) -> Result<u64, ProtocolError> {
     check_postcondition(rumi_protocol_backend::vault::confirm_xrp_deposit(vault_id).await)
 }
 
+/// P4 (native-XRP collateral): settle an XRP collateral claim by signing +
+/// submitting a Payment from the source vault's custody address to `destination`
+/// (claimant bears the fee). Claimant-only. Returns the local tx hash.
+#[update]
+async fn settle_xrp_claim(claim_id: u64, destination: String) -> Result<String, ProtocolError> {
+    validate_call().await?;
+    check_postcondition(
+        rumi_protocol_backend::vault::settle_xrp_claim(claim_id, destination).await,
+    )
+}
+
 #[query]
 fn http_request(req: HttpRequest) -> HttpResponse {
     use ic_metrics_encoder::MetricsEncoder;
