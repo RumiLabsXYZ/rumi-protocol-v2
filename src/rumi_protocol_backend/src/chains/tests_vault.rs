@@ -131,3 +131,116 @@ fn open_no_price_when_symbol_key_absent() {
     assert!(matches!(res, Err(OpenVaultError::NoPrice)), "got {res:?}");
     assert!(s.chain_vaults.is_empty());
 }
+
+// ─── M2: borrow + nonce + per-owner cap ───────────────────────────────────────
+
+use super::vault::{borrow_chain_vault_in_state, BorrowError};
+use super::evm::settlement::confirm_mint_in_state;
+
+/// Insert an Open vault (confirmed collateral + debt, no mint in flight) owned by
+/// `owner`, and seed the chain supply to match its debt so the invariant holds.
+fn insert_open_vault(s: &mut MultiChainStateV4, owner: Principal, vault_id: u64, collateral: u128, debt: u128) {
+    use super::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
+    s.chain_vaults.insert(vault_id, ChainVaultV1 {
+        vault_id, owner, collateral_chain: CHAIN, custody_address: "custody".into(),
+        collateral_amount_native: collateral, debt_e8s: debt, mint_recipient: "good-address".into(),
+        pending_mint_e8s: 0, status: ChainVaultStatus::Open, opened_at_ns: 0,
+        owner_evm: Some("0xowner".into()),
+    });
+    *s.chain_supplies.entry(CHAIN).or_default() += debt;
+}
+
+#[test]
+fn borrow_open_vault_enqueues_mint_and_reserves_pending() {
+    let mut s = setup(PRICE_150_USD_E8);
+    // 100 SOL ($15000) collateral, 100 icUSD debt; borrow 50 more → CR fine.
+    insert_open_vault(&mut s, Principal::anonymous(), 7, 100 * ONE_SOL, 100_00000000);
+    let r = borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "good-address".into(), only_good, "SOL", 13_000, 1);
+    assert_eq!(r, Ok(()));
+    let v = s.chain_vaults.get(&7).unwrap();
+    assert_eq!(v.pending_mint_e8s, 50_00000000, "borrow reserves the additional as pending");
+    assert_eq!(v.debt_e8s, 100_00000000, "confirmed debt unchanged until mint observed");
+    assert_eq!(s.settlement_queues.get(&CHAIN).unwrap().pending_len(), 1, "one Mint op enqueued");
+}
+
+#[test]
+fn borrow_then_confirm_preserves_supply_invariant() {
+    let mut s = setup(PRICE_150_USD_E8);
+    insert_open_vault(&mut s, Principal::anonymous(), 7, 100 * ONE_SOL, 100_00000000);
+    borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "good-address".into(), only_good, "SOL", 13_000, 1).unwrap();
+    let pre = s.total_chain_vault_debt_e8s();
+    confirm_mint_in_state(&mut s, CHAIN, 7, 50_00000000, pre).expect("confirm");
+    let v = s.chain_vaults.get(&7).unwrap();
+    assert_eq!(v.debt_e8s, 150_00000000, "pending moved into confirmed debt");
+    assert_eq!(v.pending_mint_e8s, 0);
+    assert_eq!(s.chain_supplies.get(&CHAIN).copied().unwrap(), 150_00000000, "supply == total debt");
+    assert_eq!(s.chain_supplies.get(&CHAIN).copied().unwrap(), s.total_chain_vault_debt_e8s());
+}
+
+#[test]
+fn borrow_rejects_when_mint_in_flight() {
+    let mut s = setup(PRICE_150_USD_E8);
+    insert_open_vault(&mut s, Principal::anonymous(), 7, 100 * ONE_SOL, 100_00000000);
+    s.chain_vaults.get_mut(&7).unwrap().pending_mint_e8s = 1; // a mint already pending
+    let r = borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "good-address".into(), only_good, "SOL", 13_000, 1);
+    assert_eq!(r, Err(BorrowError::MintInFlight));
+}
+
+#[test]
+fn borrow_rejects_non_open_vault() {
+    use super::monad::chain_vault::ChainVaultStatus;
+    let mut s = setup(PRICE_150_USD_E8);
+    insert_open_vault(&mut s, Principal::anonymous(), 7, 100 * ONE_SOL, 100_00000000);
+    s.chain_vaults.get_mut(&7).unwrap().status = ChainVaultStatus::AwaitingDeposit;
+    let r = borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "good-address".into(), only_good, "SOL", 13_000, 1);
+    assert_eq!(r, Err(BorrowError::WrongStatus { status: ChainVaultStatus::AwaitingDeposit }));
+}
+
+#[test]
+fn borrow_rejects_below_min_cr() {
+    let mut s = setup(PRICE_150_USD_E8);
+    // 1 SOL ($150) collateral, 100 icUSD debt (CR 150%); borrow 50 more → new debt
+    // 150 icUSD, CR = 150/150 = 100% < 130% → reject.
+    insert_open_vault(&mut s, Principal::anonymous(), 7, ONE_SOL, 100_00000000);
+    let r = borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "good-address".into(), only_good, "SOL", 13_000, 1);
+    assert!(matches!(r, Err(BorrowError::BelowMinCr { .. })), "got {r:?}");
+    assert_eq!(s.chain_vaults.get(&7).unwrap().pending_mint_e8s, 0, "no mutation on reject");
+}
+
+#[test]
+fn borrow_rejects_zero_debt_and_bad_recipient() {
+    let mut s = setup(PRICE_150_USD_E8);
+    insert_open_vault(&mut s, Principal::anonymous(), 7, 100 * ONE_SOL, 100_00000000);
+    assert_eq!(borrow_chain_vault_in_state(&mut s, 7, 0, "good-address".into(), only_good, "SOL", 13_000, 1), Err(BorrowError::ZeroDebt));
+    assert_eq!(borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "bad".into(), only_good, "SOL", 13_000, 1), Err(BorrowError::InvalidAddress("bad".into())));
+}
+
+#[test]
+fn nonce_consume_is_monotonic_and_rejects_replay() {
+    let mut s = MultiChainStateV4::default();
+    let owner = Principal::from_slice(&[5, 5, 5]);
+    assert_eq!(s.expected_evm_nonce(&owner), 0);
+    assert_eq!(s.consume_evm_nonce(&owner, 0), Ok(()));
+    assert_eq!(s.expected_evm_nonce(&owner), 1);
+    assert_eq!(s.consume_evm_nonce(&owner, 0), Err(1), "replay of nonce 0 rejected");
+    assert_eq!(s.consume_evm_nonce(&owner, 5), Err(1), "out-of-order rejected");
+    assert_eq!(s.consume_evm_nonce(&owner, 1), Ok(()));
+    // A different owner has an independent sequence.
+    let other = Principal::from_slice(&[6, 6, 6]);
+    assert_eq!(s.consume_evm_nonce(&other, 0), Ok(()));
+}
+
+#[test]
+fn per_owner_cap_counts_non_terminal_only() {
+    use super::monad::chain_vault::ChainVaultStatus;
+    let mut s = MultiChainStateV4::default();
+    let owner = Principal::from_slice(&[9, 9, 9]);
+    insert_open_vault(&mut s, owner, 1, 0, 0);
+    insert_open_vault(&mut s, owner, 2, 0, 0);
+    s.chain_vaults.get_mut(&2).unwrap().status = ChainVaultStatus::AwaitingDeposit;
+    insert_open_vault(&mut s, owner, 3, 0, 0);
+    s.chain_vaults.get_mut(&3).unwrap().status = ChainVaultStatus::Closed; // terminal, not counted
+    // A different owner's vault is not counted.
+    insert_open_vault(&mut s, Principal::anonymous(), 4, 0, 0);
+    assert_eq!(s.count_owner_active_vaults(&owner), 2);
+}

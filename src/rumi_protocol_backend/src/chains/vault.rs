@@ -554,3 +554,104 @@ pub fn close_chain_vault_in_state(
         now_ns,
     )
 }
+
+// ─── M2: borrow + anti-spam ───────────────────────────────────────────────────
+
+/// Anti-spam: max non-terminal vaults a single synthetic owner may hold.
+pub const MAX_VAULTS_PER_OWNER: usize = 25;
+
+/// Reasons `borrow_chain_vault_in_state` can reject. No mutation on any error.
+#[derive(Debug, PartialEq, Eq)]
+pub enum BorrowError {
+    UnknownVault,
+    /// Vault is not `Open` (only an Open vault has confirmed collateral + debt).
+    WrongStatus { status: ChainVaultStatus },
+    /// A mint is already in flight for this vault (`pending_mint_e8s != 0`).
+    MintInFlight,
+    ZeroDebt,
+    NoPrice,
+    BelowMinCr { cr_e4: u64, min_e4: u64 },
+    QueueError(String),
+    InvalidAddress(String),
+}
+
+/// Borrow additional icUSD against an existing `Open` vault — a SECOND on-chain
+/// mint, gated by the per-op `IcUSD` idempotency (the mint op carries the
+/// settlement queue's unique-per-chain `op_id`). Sets `pending_mint_e8s =
+/// additional_e8s` and enqueues a `Mint` op; the settlement confirm moves
+/// pending→debt + chain supply at finality (Design B). The off-chain idempotency
+/// key embeds `now_ns` so it never collides with the genesis open mint key
+/// (`mint-{chain}-{vault}`).
+///
+/// `address_validator` / `price_symbol` are the same per-chain seams as the open
+/// helper. Rejections (no mutation on any path): `additional == 0` → `ZeroDebt`;
+/// malformed `recipient` → `InvalidAddress`; absent/non-Open vault →
+/// `UnknownVault`/`WrongStatus`; an in-flight mint → `MintInFlight`; no price →
+/// `NoPrice`; post-borrow CR `< min_cr_e4` → `BelowMinCr`.
+#[allow(clippy::too_many_arguments)]
+pub fn borrow_chain_vault_in_state(
+    state: &mut MultiChainStateV4,
+    vault_id: u64,
+    additional_e8s: u128,
+    recipient: String,
+    address_validator: fn(&str) -> bool,
+    price_symbol: &str,
+    min_cr_e4: u64,
+    now_ns: u64,
+) -> Result<(), BorrowError> {
+    if additional_e8s == 0 {
+        return Err(BorrowError::ZeroDebt);
+    }
+    if !address_validator(&recipient) {
+        return Err(BorrowError::InvalidAddress(recipient));
+    }
+    // Step 1: read-only validation — no mutation on any rejection path.
+    let (chain, collateral, new_debt) = {
+        let v = state.chain_vaults.get(&vault_id).ok_or(BorrowError::UnknownVault)?;
+        // Only an Open vault has confirmed, on-chain-deposited collateral AND
+        // confirmed debt to borrow against.
+        if v.status != ChainVaultStatus::Open {
+            return Err(BorrowError::WrongStatus { status: v.status.clone() });
+        }
+        // No stacked borrows: a non-zero pending means a mint is already in flight
+        // for this vault, and the settlement queue is sequential per chain.
+        if v.pending_mint_e8s != 0 {
+            return Err(BorrowError::MintInFlight);
+        }
+        (
+            v.collateral_chain,
+            v.collateral_amount_native,
+            v.debt_e8s.saturating_add(additional_e8s),
+        )
+    };
+    let price_e8 = *state
+        .manual_prices
+        .get(&(chain, price_symbol.to_string()))
+        .ok_or(BorrowError::NoPrice)?;
+    let native_decimals = state
+        .chain_configs
+        .get(&chain)
+        .map(|c| c.chain_native_decimals)
+        .unwrap_or(18);
+    let cr_e4 = collateral_ratio_e4(collateral, native_decimals, price_e8, new_debt);
+    if cr_e4 < min_cr_e4 {
+        return Err(BorrowError::BelowMinCr { cr_e4, min_e4: min_cr_e4 });
+    }
+    // Step 2: enqueue FIRST (can fail on a duplicate key). The `now_ns` suffix
+    // keeps this key distinct from the genesis open mint (`mint-{chain}-{vault}`).
+    let op = SettlementOp::new(
+        SettlementOpKind::Mint { recipient, amount_e8s: additional_e8s, vault_id },
+        format!("mint-{}-{}-{}", chain.0, vault_id, now_ns),
+        now_ns,
+    );
+    state
+        .settlement_queues
+        .entry(chain)
+        .or_default()
+        .enqueue(op)
+        .map_err(|e| BorrowError::QueueError(format!("{e:?}")))?;
+    // Step 3: only after a successful enqueue — reserve the borrow as pending.
+    let v = state.chain_vaults.get_mut(&vault_id).expect("vault present: checked above");
+    v.pending_mint_e8s = additional_e8s;
+    Ok(())
+}
