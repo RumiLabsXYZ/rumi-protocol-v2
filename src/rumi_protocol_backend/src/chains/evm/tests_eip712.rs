@@ -152,3 +152,90 @@ fn synthetic_owner_is_opaque_deterministic_and_distinct() {
     // Distinct per chain (same address on Monad differs).
     assert_ne!(p1, synthetic_owner(ChainId(10143), GOLDEN_OWNER).unwrap());
 }
+
+// ─── pure verify_intent (the rejection paths) ─────────────────────────────────
+
+/// Sign `intent` for `contract` with the fixed scalar=1 key → 65-byte sig.
+fn sign_for(intent: &VaultIntent, contract: &str) -> Vec<u8> {
+    use k256::ecdsa::{signature::hazmat::PrehashSigner, RecoveryId, Signature, SigningKey};
+    let mut b = [0u8; 32];
+    b[31] = 1;
+    let sk = SigningKey::from_bytes(&b.into()).unwrap();
+    let digest = intent_digest(
+        &domain_separator(intent.chain_id, contract).unwrap(),
+        &intent_struct_hash(intent).unwrap(),
+    );
+    let (sig, rid): (Signature, RecoveryId) = sk.sign_prehash_recoverable(&digest).unwrap();
+    let mut out = sig.to_bytes().to_vec();
+    out.push(27 + u8::from(rid));
+    out
+}
+
+#[test]
+fn verify_intent_happy_path_returns_owner_and_synthetic() {
+    let intent = golden_intent();
+    let sig = sign_for(&intent, GOLDEN_CONTRACT);
+    let (owner, synthetic) =
+        verify_intent(&intent, &sig, IntentAction::Open, GOLDEN_CONTRACT, 1000).unwrap();
+    assert_eq!(owner, GOLDEN_OWNER);
+    assert_eq!(synthetic, synthetic_owner(ChainId(71), GOLDEN_OWNER).unwrap());
+}
+
+#[test]
+fn verify_intent_rejects_action_mismatch() {
+    let intent = golden_intent(); // action = Open
+    let sig = sign_for(&intent, GOLDEN_CONTRACT);
+    // Endpoint expects Borrow, intent is Open.
+    assert_eq!(
+        verify_intent(&intent, &sig, IntentAction::Borrow, GOLDEN_CONTRACT, 1000),
+        Err(VerifyError::ActionMismatch)
+    );
+}
+
+#[test]
+fn verify_intent_rejects_expired_deadline() {
+    let mut intent = golden_intent();
+    intent.deadline_secs = 500;
+    let sig = sign_for(&intent, GOLDEN_CONTRACT);
+    assert_eq!(
+        verify_intent(&intent, &sig, IntentAction::Open, GOLDEN_CONTRACT, 501),
+        Err(VerifyError::Expired)
+    );
+}
+
+#[test]
+fn verify_intent_rejects_wrong_signer() {
+    // A signature over a DIFFERENT contract recovers a signer that won't match
+    // the intent's owner once we verify against the real contract domain.
+    let intent = golden_intent();
+    let sig = sign_for(&intent, "0x00000000000000000000000000000000deadbeef");
+    assert_eq!(
+        verify_intent(&intent, &sig, IntentAction::Open, GOLDEN_CONTRACT, 1000),
+        Err(VerifyError::SignerMismatch)
+    );
+}
+
+#[test]
+fn verify_intent_rejects_recipient_not_owner() {
+    let mut intent = golden_intent();
+    intent.recipient = "0x00000000000000000000000000000000deadbeef".into();
+    let sig = sign_for(&intent, GOLDEN_CONTRACT);
+    assert_eq!(
+        verify_intent(&intent, &sig, IntentAction::Open, GOLDEN_CONTRACT, 1000),
+        Err(VerifyError::RecipientNotOwner)
+    );
+}
+
+#[test]
+fn verify_intent_rejects_tampered_intent() {
+    // Sign the original, then tamper the debt — the recovered signer no longer
+    // matches owner (the signature is over the un-tampered digest).
+    let intent = golden_intent();
+    let sig = sign_for(&intent, GOLDEN_CONTRACT);
+    let mut tampered = intent.clone();
+    tampered.debt_e8s += 1;
+    assert_eq!(
+        verify_intent(&tampered, &sig, IntentAction::Open, GOLDEN_CONTRACT, 1000),
+        Err(VerifyError::SignerMismatch)
+    );
+}

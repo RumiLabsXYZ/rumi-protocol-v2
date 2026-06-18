@@ -175,6 +175,60 @@ pub fn recover_evm_address(digest: &[u8; 32], sig65: &[u8]) -> Result<String, St
     evm_address_from_pubkey(&pk)
 }
 
+/// Why a pure `verify_intent` rejected the request. The `main.rs` wrapper maps
+/// each to `ProtocolError::EvmAuth`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum VerifyError {
+    /// `intent.action` does not match the endpoint's expected action.
+    ActionMismatch,
+    /// `now_secs > intent.deadline_secs`.
+    Expired,
+    /// Domain/struct hashing or ecrecover failed (carries the detail).
+    Recover(String),
+    /// The recovered signer is not `intent.owner`.
+    SignerMismatch,
+    /// `intent.recipient != intent.owner` (M2 forces recipient == owner).
+    RecipientNotOwner,
+}
+
+/// Pure verification of a signed intent — NO IC state or time access (caller
+/// supplies `verifying_contract` and `now_secs`), so it is fully unit-testable.
+///
+/// Recomputes the EIP-712 digest, recovers the signer, and enforces: action
+/// matches the endpoint, deadline not passed, recovered signer == `owner`,
+/// `recipient == owner` (M2). On success returns
+/// `(owner_evm_lowercase, synthetic_owner_principal)`. The IC caller is never
+/// consulted — authenticity is the EVM signature alone.
+pub fn verify_intent(
+    intent: &VaultIntent,
+    sig: &[u8],
+    expected_action: IntentAction,
+    verifying_contract: &str,
+    now_secs: u64,
+) -> Result<(String, Principal), VerifyError> {
+    if IntentAction::from_u8(intent.action) != Some(expected_action) {
+        return Err(VerifyError::ActionMismatch);
+    }
+    if now_secs > intent.deadline_secs {
+        return Err(VerifyError::Expired);
+    }
+    let dsep = domain_separator(intent.chain_id, verifying_contract).map_err(VerifyError::Recover)?;
+    let sh = intent_struct_hash(intent).map_err(VerifyError::Recover)?;
+    let digest = intent_digest(&dsep, &sh);
+    let signer = recover_evm_address(&digest, sig).map_err(VerifyError::Recover)?;
+    if !signer.eq_ignore_ascii_case(&intent.owner) {
+        return Err(VerifyError::SignerMismatch);
+    }
+    // M2: the recipient (mint dest for open/borrow, collateral dest for
+    // withdraw/close) is forced to equal the owner — no mis-send footgun.
+    if !intent.recipient.eq_ignore_ascii_case(&intent.owner) {
+        return Err(VerifyError::RecipientNotOwner);
+    }
+    let synthetic =
+        synthetic_owner(ChainId(intent.chain_id as u32), &signer).map_err(VerifyError::Recover)?;
+    Ok((signer.to_lowercase(), synthetic))
+}
+
 /// Deterministic opaque-class synthetic owner principal for an EVM address on a
 /// chain. `keccak256("rumi.evm.owner.v1:" ‖ chain_le ‖ addr20)[0..28] ‖ 0x01`.
 /// The trailing `0x01` is the opaque type tag, so this can never equal a

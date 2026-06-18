@@ -743,6 +743,22 @@ type ProtocolError = variant {
   AmountTooLow : record { minimum_amount : nat64 };
   TransferFromError : record { TransferFromError; nat64 };
   CallerNotOwner;
+  EvmAuth : text;
+};
+
+// M2: an EIP-712 typed-data intent the user signs in their EVM wallet to drive a
+// self-serve foreign-chain vault op. `signature` is the 65-byte (r||s||v) sig.
+// `action`: 0 = Open, 1 = Borrow, 2 = WithdrawCollateral, 3 = Close.
+type VaultIntent = record {
+  action : nat8;
+  chain_id : nat64;
+  owner : text;
+  vault_id : nat64;
+  collateral_wei : nat;
+  debt_e8s : nat;
+  recipient : text;
+  nonce : nat64;
+  deadline_secs : nat64;
 };
 type ProtocolSnapshot = record {
   total_debt : nat64;
@@ -1072,6 +1088,13 @@ service : (ProtocolArg) -> {
   liquidate_vault_partial_with_stable : (VaultArgWithToken) -> (Result_3);
   list_chain_vaults : (nat32) -> (vec ChainVaultV1) query;
   open_chain_vault : (nat32, nat, nat, text) -> (Result_1);
+  // M2 EVM-native self-serve: authority is the EIP-712 signature, NOT the IC
+  // caller (anonymous ingress is accepted). The vault is owned by a synthetic
+  // principal derived from the recovered EVM signer. `blob` is the 65-byte sig.
+  open_chain_vault_evm : (VaultIntent, blob) -> (Result_1);
+  borrow_chain_vault_evm : (VaultIntent, blob) -> (Result);
+  withdraw_chain_collateral_evm : (VaultIntent, blob) -> (Result);
+  close_chain_vault_evm : (VaultIntent, blob) -> (Result);
   open_solana_vault : (nat, nat, text) -> (Result_9);
   open_vault : (nat64, opt principal) -> (Result_10);
   open_vault_and_borrow : (nat64, nat64, opt principal) -> (Result_10);
