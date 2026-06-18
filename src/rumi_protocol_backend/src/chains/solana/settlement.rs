@@ -463,7 +463,7 @@ fn confirm_succeeded(
                 if !still_inflight {
                     return MintConfirm::AlreadyHandled;
                 }
-                match confirm_mint_in_state(&mut s.multi_chain, chain, vault_id, amount_e8s, pre_total) {
+                match confirm_mint_in_state(&mut s.multi_chain, chain, vault_id, amount_e8s, pre_total, now) {
                     Ok(()) => {
                         if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
                             if let Some(o) = q.pending.get_mut(&op_id) {

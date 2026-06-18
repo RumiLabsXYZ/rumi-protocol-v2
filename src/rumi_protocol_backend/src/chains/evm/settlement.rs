@@ -101,6 +101,7 @@ pub fn confirm_mint_in_state(
     vault_id: u64,
     observed_e8s: u128,
     pre_mint_total_debt: u128,
+    now_ns: u64,
 ) -> Result<(), String> {
     // Step 1: validate (read-only — no mutation on failure).
     {
@@ -130,6 +131,10 @@ pub fn confirm_mint_in_state(
     v.debt_e8s = v.debt_e8s.saturating_add(observed_e8s);
     v.pending_mint_e8s = 0;
     v.status = ChainVaultStatus::Open;
+    // Task 12: the vault's debt is now live, so interest starts accruing from
+    // here. Stamp the accrual window start (a fresh vault decoded with 0 would
+    // otherwise bill interest from the unix epoch on its first harvest).
+    v.last_interest_accrual_ns = now_ns;
     Ok(())
 }
 
@@ -138,7 +143,7 @@ pub fn confirm_mint_in_state(
 /// advance `last_interest_accrual_ns` to the harvest snapshot, and clear the
 /// pending. `observed_e8s` (from the on-chain Mint log) must equal the vault's
 /// `pending_interest_mint_e8s`. `pre_total` is the PRE-mint
-/// `total_chain_vault_debt_e8s()`. STUB — real body in GREEN.
+/// `total_chain_vault_debt_e8s()`.
 pub fn confirm_interest_mint_in_state(
     state: &mut MultiChainStateV4,
     chain: ChainId,
@@ -1022,7 +1027,7 @@ async fn confirm_op(
             let pre_total = read_state(|s| s.multi_chain.total_chain_vault_debt_e8s());
 
             let result = mutate_state(|s| {
-                confirm_mint_in_state(&mut s.multi_chain, chain, vault_id, observed_e8s, pre_total)
+                confirm_mint_in_state(&mut s.multi_chain, chain, vault_id, observed_e8s, pre_total, now)
             });
 
             match result {

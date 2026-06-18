@@ -54,7 +54,7 @@ fn solana_confirm_mint_moves_pending_to_debt_and_increments_supply() {
     s.chain_supplies.insert(SOL, 0);
     solana_vault_pending(&mut s, 1, 10_000_000_000); // 100 icUSD pending (e8s)
                                                      // PRE-mint total_chain_vault_debt_e8s() == 0 (vault debt_e8s is still 0).
-    confirm_mint_in_state(&mut s, SOL, 1, 10_000_000_000, 0).expect("confirm");
+    confirm_mint_in_state(&mut s, SOL, 1, 10_000_000_000, 0, 0).expect("confirm");
     assert_eq!(s.chain_vaults[&1].debt_e8s, 10_000_000_000);
     assert_eq!(s.chain_vaults[&1].pending_mint_e8s, 0);
     assert!(matches!(s.chain_vaults[&1].status, ChainVaultStatus::Open));
@@ -67,7 +67,7 @@ fn solana_confirm_mint_rejects_amount_mismatch_no_mutation() {
     s.chain_supplies.insert(SOL, 0);
     solana_vault_pending(&mut s, 1, 10_000_000_000);
     // Observed != pending: reject before any supply mutation; nothing changes.
-    let res = confirm_mint_in_state(&mut s, SOL, 1, 9_999_999_999, 0);
+    let res = confirm_mint_in_state(&mut s, SOL, 1, 9_999_999_999, 0, 0);
     assert!(res.is_err());
     assert_eq!(s.chain_vaults[&1].pending_mint_e8s, 10_000_000_000);
     assert_eq!(s.chain_vaults[&1].debt_e8s, 0);
@@ -79,7 +79,7 @@ fn solana_confirm_mint_rejects_amount_mismatch_no_mutation() {
 fn solana_confirm_mint_unknown_vault_rejected() {
     let mut s = MultiChainStateV4::default();
     s.chain_supplies.insert(SOL, 0);
-    assert!(confirm_mint_in_state(&mut s, SOL, 999, 1, 0).is_err());
+    assert!(confirm_mint_in_state(&mut s, SOL, 999, 1, 0, 0).is_err());
 }
 
 #[test]
@@ -108,7 +108,7 @@ fn solana_confirm_mint_second_vault_uses_running_total() {
     );
     solana_vault_pending(&mut s, 2, 5_000_000_000);
     let pre_total = s.total_chain_vault_debt_e8s(); // == 10e8
-    confirm_mint_in_state(&mut s, SOL, 2, 5_000_000_000, pre_total).expect("confirm 2nd");
+    confirm_mint_in_state(&mut s, SOL, 2, 5_000_000_000, pre_total, 0).expect("confirm 2nd");
     assert_eq!(s.chain_vaults[&2].debt_e8s, 5_000_000_000);
     assert_eq!(s.chain_supplies[&SOL], 15_000_000_000);
 }

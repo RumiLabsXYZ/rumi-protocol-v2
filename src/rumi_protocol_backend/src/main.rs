@@ -591,6 +591,17 @@ fn post_upgrade(arg: ProtocolArg) {
         log!(INFO, "[upgrade]: migrated {} vaults: set last_accrual_time to {}", migrated, now);
     }
 
+    // Task 12: mirror the above for FOREIGN-CHAIN vaults — stamp
+    // last_interest_accrual_ns for any that decoded with 0 (a vault from a
+    // pre-interest-field snapshot), so the first interest harvest does not bill
+    // from the unix epoch. New vaults are stamped at mint-confirm; idempotent.
+    mutate_state(|s| {
+        rumi_protocol_backend::chains::supply::stamp_chain_interest_accrual_start(
+            &mut s.multi_chain,
+            now,
+        );
+    });
+
     // Safety net: if bot is configured but allowlist is empty, default to ICP
     mutate_state(|s| {
         if s.liquidation_bot_principal.is_some() && s.bot_allowed_collateral_types.is_empty() {
