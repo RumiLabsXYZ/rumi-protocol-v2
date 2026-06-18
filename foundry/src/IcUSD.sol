@@ -19,9 +19,12 @@ contract IcUSD is ERC20, AccessControl {
     event Mint(uint256 indexed vault_id, address indexed recipient, uint256 amount);
     event Burn(uint256 indexed vault_id, address indexed burner, uint256 amount);
 
-    /// @dev One mint per Rumi vault_id (idempotency guard): a canister
-    /// resubmit-after-transient-RPC-error must not double-mint on-chain.
-    mapping(uint64 => bool) public minted;
+    /// @dev One mint per settlement op_id (idempotency guard): a canister
+    /// resubmit-after-transient-RPC-error must not double-mint on-chain. Keyed
+    /// per-OP (not per-vault) so a vault can be minted to more than once across
+    /// distinct ops (borrow). `op_id` is the Rumi settlement queue's
+    /// unique-per-chain op id.
+    mapping(uint64 => bool) public mintedOps;
 
     constructor(address admin, address minter) ERC20("Rumi icUSD", "icUSD") {
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
@@ -33,10 +36,14 @@ contract IcUSD is ERC20, AccessControl {
     }
 
     /// @notice Mint icUSD. Only the canister settlement address (MINTER_ROLE).
-    /// Reverts if `vault_id` was already minted (idempotency).
-    function mint(address to, uint256 amount, uint64 vault_id) external onlyRole(MINTER_ROLE) {
-        require(!minted[vault_id], "vault already minted");
-        minted[vault_id] = true;
+    /// `op_id` is the settlement op's unique id; reverts if it was already minted
+    /// (per-op idempotency). `vault_id` stays the debt key carried in the `Mint`
+    /// event and used by `burn` (repay), so a vault can be minted to more than
+    /// once via distinct `op_id`s (borrow). The `Mint` event is UNCHANGED so the
+    /// backend log decoder (`MintLog`) is unaffected.
+    function mint(address to, uint256 amount, uint64 vault_id, uint64 op_id) external onlyRole(MINTER_ROLE) {
+        require(!mintedOps[op_id], "op already minted");
+        mintedOps[op_id] = true;
         _mint(to, amount);
         emit Mint(uint256(vault_id), to, amount);
     }

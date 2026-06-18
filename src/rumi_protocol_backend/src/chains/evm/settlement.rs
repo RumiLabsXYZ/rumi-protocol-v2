@@ -315,6 +315,7 @@ struct TxPlan {
 fn build_tx_plan(
     chain: ChainId,
     kind: &SettlementOpKind,
+    op_id: u64,
     nonce: u64,
     prio: u128,
     max_fee: u128,
@@ -328,6 +329,8 @@ fn build_tx_plan(
         SettlementOpKind::Mint { recipient, amount_e8s, vault_id } => {
             let contract = contract.ok_or_else(|| "icUSD contract not set".to_string())?;
             // Delegate the per-op-kind field shape to the single source of truth.
+            // `op_id` is the on-chain per-op idempotency key (so a resubmit of THIS
+            // op can't double-mint, while a borrow's distinct op_id can).
             let fields = tx::build_eip1559_fields(
                 chain.0 as u64,
                 tx::MonadTxKind::Mint {
@@ -335,6 +338,7 @@ fn build_tx_plan(
                     recipient,
                     amount_e8s: *amount_e8s,
                     vault_id: *vault_id,
+                    op_id,
                 },
                 nonce,
                 prio,
@@ -584,7 +588,7 @@ async fn submit_op(
 
     // 5. Resolve the contract (mints only) and build the tx plan.
     let contract = read_state(|s| s.multi_chain.chain_contracts.get(&chain).cloned());
-    let plan = match build_tx_plan(chain, &op.kind, nonce, prio, max_fee, contract.as_deref(), withdrawal_value) {
+    let plan = match build_tx_plan(chain, &op.kind, op_id, nonce, prio, max_fee, contract.as_deref(), withdrawal_value) {
         Ok(p) => p,
         Err(e) => {
             log!(INFO, "[settlement chain={:?}] build_tx_plan failed for op {}: {}; will retry", chain, op_id, e);
@@ -1072,7 +1076,7 @@ async fn resubmit_if_stuck(
     // Resolve the contract (mints only) and rebuild the SAME tx at the stored
     // nonce with the bumped fees.
     let contract = read_state(|s| s.multi_chain.chain_contracts.get(&chain).cloned());
-    let plan = match build_tx_plan(chain, &op.kind, nonce, bumped_prio, bumped_max, contract.as_deref(), withdrawal_value) {
+    let plan = match build_tx_plan(chain, &op.kind, op_id, nonce, bumped_prio, bumped_max, contract.as_deref(), withdrawal_value) {
         Ok(p) => p,
         Err(e) => {
             log!(INFO, "[settlement chain={:?}] resubmit build_tx_plan failed for op {}: {}; leaving Inflight", chain, op_id, e);

@@ -39,8 +39,11 @@ pub struct Eip1559Fields {
 /// The per-op-kind shape of a Monad settlement transaction (what varies between
 /// a mint and a native withdrawal: `to`, `value`, calldata, gas_limit).
 pub enum MonadTxKind<'a> {
-    /// `mint(address,uint256,uint64)` on the icUSD EVM contract.
-    Mint { contract: &'a str, recipient: &'a str, amount_e8s: u128, vault_id: u64 },
+    /// `mint(address,uint256,uint64,uint64)` on the icUSD EVM contract. `op_id`
+    /// is the settlement queue's unique-per-chain op id and is the on-chain
+    /// idempotency discriminator (per-op, not per-vault), so a vault can be
+    /// minted to more than once (borrow).
+    Mint { contract: &'a str, recipient: &'a str, amount_e8s: u128, vault_id: u64, op_id: u64 },
     /// A native MON transfer (`amount_wei` carried in the EIP-1559 `value`).
     NativeWithdrawal { recipient: &'a str, amount_wei: u128 },
 }
@@ -77,8 +80,8 @@ pub fn build_eip1559_fields(
     max_fee: u128,
 ) -> Result<Eip1559Fields, String> {
     match kind {
-        MonadTxKind::Mint { contract, recipient, amount_e8s, vault_id } => {
-            let data = encode_mint_calldata(recipient, amount_e8s, vault_id)?;
+        MonadTxKind::Mint { contract, recipient, amount_e8s, vault_id, op_id } => {
+            let data = encode_mint_calldata(recipient, amount_e8s, vault_id, op_id)?;
             Ok(Eip1559Fields {
                 chain_id,
                 nonce,
@@ -111,18 +114,27 @@ pub fn build_eip1559_fields(
 
 // ─── calldata helpers ─────────────────────────────────────────────────────────
 
-/// Build calldata for `mint(address,uint256,uint64)`.
-/// Signature string: `"mint(address,uint256,uint64)"`.
-/// Layout: 4-byte selector || word(address) || word(amount) || word(vault_id).
+/// Build calldata for `mint(address,uint256,uint64,uint64)`.
+/// Signature string: `"mint(address,uint256,uint64,uint64)"` (selector 0x31239e64).
+/// Layout: 4-byte selector || word(address) || word(amount) || word(vault_id) ||
+/// word(op_id). `op_id` is the settlement queue's unique-per-chain op id and is
+/// the on-chain per-op idempotency key (so a vault can be minted to more than
+/// once — borrow). `vault_id` stays the debt key for the `Mint` event + repay.
 ///
 /// Returns `Err` if `to` is not a valid 20-byte hex address.
-pub fn encode_mint_calldata(to: &str, amount_e8s: u128, vault_id: u64) -> Result<Vec<u8>, String> {
-    let selector = keccak_selector("mint(address,uint256,uint64)");
-    let mut out = Vec::with_capacity(4 + 96);
+pub fn encode_mint_calldata(
+    to: &str,
+    amount_e8s: u128,
+    vault_id: u64,
+    op_id: u64,
+) -> Result<Vec<u8>, String> {
+    let selector = keccak_selector("mint(address,uint256,uint64,uint64)");
+    let mut out = Vec::with_capacity(4 + 128);
     out.extend_from_slice(&selector);
     out.extend_from_slice(&abi_word_address(to)?);
     out.extend_from_slice(&abi_word_u128(amount_e8s));
     out.extend_from_slice(&abi_word_u128(vault_id as u128));
+    out.extend_from_slice(&abi_word_u128(op_id as u128));
     Ok(out)
 }
 

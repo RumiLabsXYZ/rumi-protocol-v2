@@ -156,7 +156,6 @@ pub fn intent_digest(domain_sep: &[u8; 32], struct_hash: &[u8; 32]) -> [u8; 32] 
 pub fn recover_evm_address(digest: &[u8; 32], sig65: &[u8]) -> Result<String, String> {
     use super::tecdsa::evm_address_from_pubkey;
     use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
-    use k256::elliptic_curve::sec1::ToEncodedPoint;
 
     if sig65.len() != 65 {
         return Err(format!("signature must be 65 bytes, got {}", sig65.len()));
