@@ -34,6 +34,7 @@ fn chain_vault_round_trips_via_candid() {
         pending_mint_e8s: 10_000_000_000, // 100 icUSD pending
         status: ChainVaultStatus::MintPending,
         opened_at_ns: 1_700_000_000_000_000_000,
+        owner_evm: None,
         last_interest_accrual_ns: 0,
         pending_interest_mint_e8s: 0,
     };
@@ -56,6 +57,7 @@ fn chain_vault_round_trips_via_cbor() {
         pending_mint_e8s: 0,
         status: ChainVaultStatus::Open,
         opened_at_ns: 0,
+        owner_evm: None,
         last_interest_accrual_ns: 0,
         pending_interest_mint_e8s: 0,
     };

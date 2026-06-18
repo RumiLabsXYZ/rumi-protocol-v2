@@ -248,6 +248,7 @@ async fn submit_op(chain: ChainId, op_id: u64, op: SettlementOp) {
                 amount_e8s: *amount_e8s,
                 vault_id: *vault_id,
                 idempotency_key: op.idempotency_key.clone(),
+                op_id: op.op_id,
             };
             match adapter.sign_mint(instr).await {
                 Ok(signed) => (

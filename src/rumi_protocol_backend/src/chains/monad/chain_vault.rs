@@ -27,8 +27,8 @@ use candid::Principal;
 // `super::chain_vault::{...}` resolves through these, so nothing downstream
 // changes.
 pub use crate::chains::vault::{
-    collateral_ratio_e4, verify_deposit_and_enqueue_mint_in_state, ChainVaultStatus, ChainVaultV1,
-    OpenVaultError, WithdrawError,
+    collateral_ratio_e4, verify_deposit_and_enqueue_mint_in_state, BorrowError, ChainVaultStatus,
+    ChainVaultV1, OpenVaultError, WithdrawError,
 };
 
 /// Minimum collateral ratio (e4: 13000 == 130.00%) required to open a Monad
@@ -87,6 +87,29 @@ pub fn withdraw_collateral_in_state(
         vault_id,
         amount_e18,
         dest_address,
+        crate::chains::monad::tecdsa::is_valid_evm_address,
+        "MON",
+        min_cr_e4,
+        now_ns,
+    )
+}
+
+/// Borrow more icUSD against an Open Monad vault. Thin wrapper over
+/// `crate::chains::vault::borrow_chain_vault_in_state` with the Monad EVM address
+/// validator and the `"MON"` price key baked in.
+pub fn borrow_chain_vault_in_state(
+    state: &mut MultiChainStateV4,
+    vault_id: u64,
+    additional_e8s: u128,
+    recipient: String,
+    min_cr_e4: u64,
+    now_ns: u64,
+) -> Result<(), BorrowError> {
+    crate::chains::vault::borrow_chain_vault_in_state(
+        state,
+        vault_id,
+        additional_e8s,
+        recipient,
         crate::chains::monad::tecdsa::is_valid_evm_address,
         "MON",
         min_cr_e4,

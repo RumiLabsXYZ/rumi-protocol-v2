@@ -70,6 +70,13 @@ pub struct ChainVaultV1 {
     pub pending_mint_e8s: u128,
     pub status: ChainVaultStatus,
     pub opened_at_ns: u64,
+    /// EVM owner address (lowercase `0x`) for vaults opened via the M2 self-serve
+    /// `_evm` path; `None` for developer-opened / Monad / Solana vaults. Used to
+    /// authorize borrow/withdraw/close by re-recovering the EIP-712 signer.
+    /// `#[serde(default)]` keeps pre-M2 ciborium snapshots decoding cleanly
+    /// (State is ciborium-encoded — see storage.rs).
+    #[serde(default)]
+    pub owner_evm: Option<String>,
     /// Phase 1b Task 12 (interest accrual). Start of the current accrual window
     /// (ns). Set when the vault becomes Open (mint confirm); advanced to the
     /// harvest snapshot time when an interest mint confirms. `#[serde(default)]`
@@ -144,6 +151,12 @@ pub enum WithdrawError {
     /// phantom collateral), and a `MintPending` vault has a mint in flight
     /// against its collateral. Carries the offending status.
     WrongStatus { status: ChainVaultStatus },
+    /// A borrow mint is in flight for this Open vault (`pending_mint_e8s != 0`).
+    /// The CR check would run against the STALE confirmed `debt_e8s` (which does
+    /// not yet include the pending borrow), so releasing collateral now could
+    /// leave the vault below `min_cr_e4` once the borrow mint confirms. Reject
+    /// until the mint settles (mirrors `BorrowError::MintInFlight`). M2 review-A.
+    MintInFlight,
     /// An interest mint is in flight (`pending_interest_mint_e8s > 0`):
     /// collateral cannot leave until it confirms. Otherwise a full close could
     /// confirm AFTER the collateral is withdrawn and credit the realized
@@ -279,6 +292,7 @@ pub fn open_chain_vault_in_state(
             pending_mint_e8s: debt_e8s,
             status: ChainVaultStatus::AwaitingDeposit,
             opened_at_ns: now_ns,
+            owner_evm: None,
             // Interest accrues only once the vault is Open with confirmed debt;
             // stamped to `now` at mint-confirm (Task 7). Open-time = 0 (debt 0).
             last_interest_accrual_ns: 0,
@@ -438,6 +452,14 @@ pub fn withdraw_collateral_in_state(
         if v.status != ChainVaultStatus::Open {
             return Err(WithdrawError::WrongStatus { status: v.status.clone() });
         }
+        // A borrow mint in flight means the CR check below would run against the
+        // stale confirmed debt (pending borrow not yet folded in); releasing
+        // collateral now could undercollateralize the vault once the mint
+        // confirms. Reject until it settles (the settlement queue is sequential,
+        // so this clears quickly). M2 review finding A.
+        if v.pending_mint_e8s != 0 {
+            return Err(WithdrawError::MintInFlight);
+        }
         // Task 12: refuse collateral-out while an interest mint is in flight.
         // The mint could confirm AFTER the collateral leaves and credit the
         // realized interest as unbacked debt on a (then-Closing/Closed) vault.
@@ -565,6 +587,15 @@ pub fn close_chain_vault_in_state(
         if v.debt_e8s != 0 {
             return Err(WithdrawError::HasDebt);
         }
+        // A repaid (debt 0) but still-Open vault CAN have a borrow mint in flight
+        // (pending_mint_e8s != 0). Closing it now would release all collateral,
+        // then the borrow mint confirms and leaves debt with no backing. Reject
+        // BEFORE the degenerate short-circuit below. M2 review finding A. (The
+        // delegate's withdraw path also guards this, but the zero-collateral
+        // short-circuit bypasses the delegate, so the check must live here too.)
+        if v.pending_mint_e8s != 0 {
+            return Err(WithdrawError::MintInFlight);
+        }
         (v.collateral_amount_native, v.status.clone())
     };
 
@@ -591,4 +622,152 @@ pub fn close_chain_vault_in_state(
         min_cr_e4,
         now_ns,
     )
+}
+
+// ─── M2: borrow + anti-spam ───────────────────────────────────────────────────
+
+/// Anti-spam: max non-terminal vaults a single synthetic owner may hold.
+pub const MAX_VAULTS_PER_OWNER: usize = 25;
+
+/// Reasons `borrow_chain_vault_in_state` can reject. No mutation on any error.
+#[derive(Debug, PartialEq, Eq)]
+pub enum BorrowError {
+    UnknownVault,
+    /// Vault is not `Open` (only an Open vault has confirmed collateral + debt).
+    WrongStatus { status: ChainVaultStatus },
+    /// A mint is already in flight for this vault (`pending_mint_e8s != 0`).
+    MintInFlight,
+    ZeroDebt,
+    NoPrice,
+    BelowMinCr { cr_e4: u64, min_e4: u64 },
+    QueueError(String),
+    InvalidAddress(String),
+}
+
+/// Borrow additional icUSD against an existing `Open` vault — a SECOND on-chain
+/// mint, gated by the per-op `IcUSD` idempotency (the mint op carries the
+/// settlement queue's unique-per-chain `op_id`). Sets `pending_mint_e8s =
+/// additional_e8s` and enqueues a `Mint` op; the settlement confirm moves
+/// pending→debt + chain supply at finality (Design B). The off-chain idempotency
+/// key embeds `now_ns` so it never collides with the genesis open mint key
+/// (`mint-{chain}-{vault}`).
+///
+/// `address_validator` / `price_symbol` are the same per-chain seams as the open
+/// helper. Rejections (no mutation on any path): `additional == 0` → `ZeroDebt`;
+/// malformed `recipient` → `InvalidAddress`; absent/non-Open vault →
+/// `UnknownVault`/`WrongStatus`; an in-flight mint → `MintInFlight`; no price →
+/// `NoPrice`; post-borrow CR `< min_cr_e4` → `BelowMinCr`.
+#[allow(clippy::too_many_arguments)]
+pub fn borrow_chain_vault_in_state(
+    state: &mut MultiChainStateV4,
+    vault_id: u64,
+    additional_e8s: u128,
+    recipient: String,
+    address_validator: fn(&str) -> bool,
+    price_symbol: &str,
+    min_cr_e4: u64,
+    now_ns: u64,
+) -> Result<(), BorrowError> {
+    if additional_e8s == 0 {
+        return Err(BorrowError::ZeroDebt);
+    }
+    if !address_validator(&recipient) {
+        return Err(BorrowError::InvalidAddress(recipient));
+    }
+    // Step 1: read-only validation — no mutation on any rejection path.
+    let (chain, collateral, new_debt) = {
+        let v = state.chain_vaults.get(&vault_id).ok_or(BorrowError::UnknownVault)?;
+        // Only an Open vault has confirmed, on-chain-deposited collateral AND
+        // confirmed debt to borrow against.
+        if v.status != ChainVaultStatus::Open {
+            return Err(BorrowError::WrongStatus { status: v.status.clone() });
+        }
+        // No stacked borrows: a non-zero pending means a mint is already in flight
+        // for this vault, and the settlement queue is sequential per chain.
+        if v.pending_mint_e8s != 0 {
+            return Err(BorrowError::MintInFlight);
+        }
+        (
+            v.collateral_chain,
+            v.collateral_amount_native,
+            v.debt_e8s.saturating_add(additional_e8s),
+        )
+    };
+    let price_e8 = *state
+        .manual_prices
+        .get(&(chain, price_symbol.to_string()))
+        .ok_or(BorrowError::NoPrice)?;
+    let native_decimals = state
+        .chain_configs
+        .get(&chain)
+        .map(|c| c.chain_native_decimals)
+        .unwrap_or(18);
+    let cr_e4 = collateral_ratio_e4(collateral, native_decimals, price_e8, new_debt);
+    if cr_e4 < min_cr_e4 {
+        return Err(BorrowError::BelowMinCr { cr_e4, min_e4: min_cr_e4 });
+    }
+    // Step 2: enqueue FIRST (can fail on a duplicate key). The `now_ns` suffix
+    // keeps this key distinct from the genesis open mint (`mint-{chain}-{vault}`).
+    let op = SettlementOp::new(
+        SettlementOpKind::Mint { recipient, amount_e8s: additional_e8s, vault_id },
+        format!("mint-{}-{}-{}", chain.0, vault_id, now_ns),
+        now_ns,
+    );
+    state
+        .settlement_queues
+        .entry(chain)
+        .or_default()
+        .enqueue(op)
+        .map_err(|e| BorrowError::QueueError(format!("{e:?}")))?;
+    // Step 3: only after a successful enqueue — reserve the borrow as pending.
+    let v = state.chain_vaults.get_mut(&vault_id).expect("vault present: checked above");
+    v.pending_mint_e8s = additional_e8s;
+    Ok(())
+}
+
+// ─── M2: stale AwaitingDeposit GC (anti-spam backstop) ────────────────────────
+
+/// TTL for an unfunded vault before the GC reaps it (24h in ns).
+pub const AWAITING_DEPOSIT_TTL_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
+
+/// Remove `AwaitingDeposit` vaults whose `opened_at_ns` is older than `ttl_ns`.
+/// Returns the number pruned.
+///
+/// Safe: an `AwaitingDeposit` vault has NO confirmed debt, NO enqueued mint, and
+/// contributes nothing to `chain_supplies`, so removing it cannot break the
+/// supply invariant. Only unfunded vaults are reaped — the observer flips a
+/// funded vault to `MintPending` within its tick (seconds–minutes) long before
+/// the 24h TTL, so a real deposit is never stranded. This is the anti-spam
+/// backstop: it bounds total unfunded state without the self-DoS of a hard cap.
+///
+/// M2 review finding F: a vault is reaped ONLY if its chain's observer is
+/// currently running — `status == Registered` AND not `reorg_halted`. If the
+/// observer is halted or the chain is disabled, a funded-but-not-yet-observed
+/// deposit could otherwise be stranded by the GC. A vault on an
+/// inactive-observer chain is left until the observer resumes (then it either
+/// flips to `MintPending` if funded, or ages out on a later GC tick once active).
+pub fn prune_stale_awaiting_deposit(
+    state: &mut MultiChainStateV4,
+    now_ns: u64,
+    ttl_ns: u64,
+) -> usize {
+    use crate::chains::config::ChainStatus;
+    let stale: Vec<u64> = state
+        .chain_vaults
+        .iter()
+        .filter(|(_, v)| {
+            let observer_active = matches!(
+                state.chain_configs.get(&v.collateral_chain).map(|c| c.status),
+                Some(ChainStatus::Registered)
+            ) && !state.reorg_halted.get(&v.collateral_chain).copied().unwrap_or(false);
+            observer_active
+                && v.status == ChainVaultStatus::AwaitingDeposit
+                && now_ns.saturating_sub(v.opened_at_ns) > ttl_ns
+        })
+        .map(|(&id, _)| id)
+        .collect();
+    for id in &stale {
+        state.chain_vaults.remove(id);
+    }
+    stale.len()
 }

@@ -141,12 +141,17 @@ fn minimal_bytes_for(mut n: usize) -> Vec<u8> {
 
 #[test]
 fn mint_calldata_has_correct_selector() {
-    // mint(address,uint256,uint64): 4-byte selector + 3*32-byte args = 100 bytes.
+    // mint(address,uint256,uint64,uint64): 4-byte selector + 4*32-byte args = 132 bytes.
     let calldata =
-        encode_mint_calldata("0x7e5f4552091a69125d5dfcb7b8c2659029395bdf", 10_000_000_000, 42)
+        encode_mint_calldata("0x7e5f4552091a69125d5dfcb7b8c2659029395bdf", 10_000_000_000, 42, 1234)
             .expect("valid address");
-    assert_eq!(calldata.len(), 4 + 32 * 3);
-    assert_ne!(&calldata[0..4], &[0u8; 4]);
+    assert_eq!(calldata.len(), 4 + 32 * 4);
+    // Selector for "mint(address,uint256,uint64,uint64)" (cast sig).
+    assert_eq!(&calldata[0..4], &[0x31, 0x23, 0x9e, 0x64]);
+    // 4th ABI word (bytes 100..132) carries the op_id (left-padded big-endian).
+    let mut expected_op = [0u8; 32];
+    expected_op[24..].copy_from_slice(&1234u64.to_be_bytes());
+    assert_eq!(&calldata[4 + 32 * 3..], &expected_op);
 }
 
 #[test]
@@ -525,7 +530,7 @@ fn signing_hash_returns_err_on_malformed_to() {
 /// `encode_mint_calldata` surfaces `Err` on a malformed recipient (no panic).
 #[test]
 fn encode_mint_calldata_returns_err_on_malformed_address() {
-    let result = encode_mint_calldata("0xbadhex!", 1_000_000, 1);
+    let result = encode_mint_calldata("0xbadhex!", 1_000_000, 1, 1);
     assert!(result.is_err(), "expected Err for bad hex recipient, got Ok");
 }
 

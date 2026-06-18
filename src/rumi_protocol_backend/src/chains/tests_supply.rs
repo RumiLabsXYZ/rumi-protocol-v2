@@ -121,6 +121,7 @@ fn stamp_sets_accrual_start_only_for_unstamped_vaults() {
         pending_mint_e8s: 0,
         status: ChainVaultStatus::Open,
         opened_at_ns: 0,
+        owner_evm: None,
         last_interest_accrual_ns: last,
         pending_interest_mint_e8s: 0,
     };

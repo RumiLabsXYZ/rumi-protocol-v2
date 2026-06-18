@@ -196,6 +196,7 @@ mod tests {
                 pending_mint_e8s: 0,
                 status,
                 opened_at_ns: 0,
+                owner_evm: None,
                 last_interest_accrual_ns: last_accrual_ns,
                 pending_interest_mint_e8s: pending_interest,
             },

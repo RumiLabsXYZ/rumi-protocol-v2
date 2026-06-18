@@ -168,6 +168,7 @@ fn v2_cbor_snapshot_decodes_into_v3_without_wiping_state() {
         pending_mint_e8s: 0,
         status: ChainVaultStatus::Open,
         opened_at_ns: 99,
+        owner_evm: None,
         last_interest_accrual_ns: 0,
         pending_interest_mint_e8s: 0,
     });
@@ -243,6 +244,7 @@ fn v3_cbor_snapshot_decodes_into_v4_without_wiping_state() {
         pending_mint_e8s: 0,
         status: ChainVaultStatus::Open,
         opened_at_ns: 99,
+        owner_evm: None,
         last_interest_accrual_ns: 0,
         pending_interest_mint_e8s: 0,
     });
@@ -292,6 +294,7 @@ fn chain_vault_debt_total_sums_only_chain_vaults() {
         pending_mint_e8s: 0,
         status: ChainVaultStatus::Open,
         opened_at_ns: 0,
+        owner_evm: None,
         last_interest_accrual_ns: 0,
         pending_interest_mint_e8s: 0,
     });
@@ -306,6 +309,7 @@ fn chain_vault_debt_total_sums_only_chain_vaults() {
         pending_mint_e8s: 0,
         status: ChainVaultStatus::Open,
         opened_at_ns: 0,
+        owner_evm: None,
         last_interest_accrual_ns: 0,
         pending_interest_mint_e8s: 0,
     });

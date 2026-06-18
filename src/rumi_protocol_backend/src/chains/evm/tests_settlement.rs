@@ -14,6 +14,7 @@ fn vault_pending(s: &mut MultiChainStateV4, vault_id: u64, pending: u128) {
         custody_address: "0xc".into(), collateral_amount_native: 0, debt_e8s: 0,
         mint_recipient: "0xr".into(), pending_mint_e8s: pending,
         status: ChainVaultStatus::MintPending, opened_at_ns: 0,
+        owner_evm: None,
         last_interest_accrual_ns: 0,
         pending_interest_mint_e8s: 0,
     });
@@ -76,6 +77,7 @@ fn vault_interest_pending(s: &mut MultiChainStateV4, vault_id: u64, debt: u128, 
         custody_address: "0xc".into(), collateral_amount_native: 1_400_000_000_000_000_000_000,
         debt_e8s: debt, mint_recipient: "0xr".into(), pending_mint_e8s: 0,
         status: ChainVaultStatus::Open, opened_at_ns: 0,
+    owner_evm: None,
         last_interest_accrual_ns: 1_000,
         pending_interest_mint_e8s: pending,
     });
@@ -146,6 +148,7 @@ fn confirm_mint_second_vault_uses_running_total() {
         custody_address: "0xc".into(), collateral_amount_native: 0, debt_e8s: 10_000_000_000,
         mint_recipient: "0xr".into(), pending_mint_e8s: 0,
         status: ChainVaultStatus::Open, opened_at_ns: 0,
+        owner_evm: None,
         last_interest_accrual_ns: 0,
         pending_interest_mint_e8s: 0,
     });

@@ -371,6 +371,7 @@ struct TxPlan {
 fn build_tx_plan(
     chain: ChainId,
     kind: &SettlementOpKind,
+    op_id: u64,
     nonce: u64,
     prio: u128,
     max_fee: u128,
@@ -384,6 +385,8 @@ fn build_tx_plan(
         SettlementOpKind::Mint { recipient, amount_e8s, vault_id } => {
             let contract = contract.ok_or_else(|| "icUSD contract not set".to_string())?;
             // Delegate the per-op-kind field shape to the single source of truth.
+            // `op_id` is the on-chain per-op idempotency key (so a resubmit of THIS
+            // op can't double-mint, while a borrow's distinct op_id can).
             let fields = tx::build_eip1559_fields(
                 chain.0 as u64,
                 tx::MonadTxKind::Mint {
@@ -391,6 +394,7 @@ fn build_tx_plan(
                     recipient,
                     amount_e8s: *amount_e8s,
                     vault_id: *vault_id,
+                    op_id,
                 },
                 nonce,
                 prio,
@@ -441,6 +445,10 @@ fn build_tx_plan(
                     recipient,
                     amount_e8s: *amount_e8s,
                     vault_id: *mint_id,
+                    // Per-op idempotency (M2): the settlement queue op_id is the
+                    // on-chain `mintedOps` key. Combined with the interest path's
+                    // synthetic `mint_id`, the interest mint is idempotent per op.
+                    op_id,
                 },
                 nonce,
                 prio,
@@ -673,7 +681,7 @@ async fn submit_op(
 
     // 5. Resolve the contract (mints only) and build the tx plan.
     let contract = read_state(|s| s.multi_chain.chain_contracts.get(&chain).cloned());
-    let plan = match build_tx_plan(chain, &op.kind, nonce, prio, max_fee, contract.as_deref(), withdrawal_value) {
+    let plan = match build_tx_plan(chain, &op.kind, op_id, nonce, prio, max_fee, contract.as_deref(), withdrawal_value) {
         Ok(p) => p,
         Err(e) => {
             log!(INFO, "[settlement chain={:?}] build_tx_plan failed for op {}: {}; will retry", chain, op_id, e);
@@ -967,25 +975,26 @@ async fn confirm_op(
                 }
             };
 
-            // Find the Mint log for this vault, preferring the one whose tx hash
-            // matches this op's submission (case-insensitive).
-            // `log_index` is threaded through from get_logs but not needed here
-            // (the settlement path selects by vault_id + tx_hash, not by log
-            // identity — each mint op maps to exactly one Mint event).
+            // Find THIS op's Mint log by EXACT tx-hash match (case-insensitive).
+            //
+            // M2 review finding B: the per-op IcUSD idempotency (`mintedOps[op_id]`,
+            // replacing `minted[vault_id]`) means a vault can be minted to more
+            // than once (borrow), so there can be MULTIPLE `Mint(vault_id, …)` logs
+            // for the same vault — possibly in the same block. The old fallback
+            // ("first vault-id match when no tx-hash match") could therefore bind
+            // an arbitrary same-vault mint's amount to THIS op. Require the exact
+            // tx-hash match: this op submitted exactly one tx (`tx_hash`), and that
+            // tx emitted exactly the `Mint` for this op. If no log's tx hash matches
+            // (transient RPC view), leave the op Inflight and retry next tick.
             let mut matched: Option<(u128, String)> = None;
             for (topics, data, log_tx, log_block, _log_index) in &logs {
+                if !log_tx.eq_ignore_ascii_case(&tx_hash) {
+                    continue;
+                }
                 match evm_rpc::decode_mint_log(topics, data, log_tx, *log_block) {
                     Ok(m) if m.vault_id == vault_id => {
-                        let exact = log_tx.eq_ignore_ascii_case(&tx_hash);
-                        // Prefer an exact tx-hash match; otherwise take the first
-                        // vault-id match as a fallback (safe: IcUSD.mint reverts a
-                        // repeat vault_id, so at most one Mint log per vault exists).
-                        if exact {
-                            matched = Some((m.amount_e8s, m.recipient));
-                            break;
-                        } else if matched.is_none() {
-                            matched = Some((m.amount_e8s, m.recipient));
-                        }
+                        matched = Some((m.amount_e8s, m.recipient));
+                        break;
                     }
                     Ok(_) => {}
                     Err(e) => {
@@ -1268,7 +1277,7 @@ async fn resubmit_if_stuck(
     // Resolve the contract (mints only) and rebuild the SAME tx at the stored
     // nonce with the bumped fees.
     let contract = read_state(|s| s.multi_chain.chain_contracts.get(&chain).cloned());
-    let plan = match build_tx_plan(chain, &op.kind, nonce, bumped_prio, bumped_max, contract.as_deref(), withdrawal_value) {
+    let plan = match build_tx_plan(chain, &op.kind, op_id, nonce, bumped_prio, bumped_max, contract.as_deref(), withdrawal_value) {
         Ok(p) => p,
         Err(e) => {
             log!(INFO, "[settlement chain={:?}] resubmit build_tx_plan failed for op {}: {}; leaving Inflight", chain, op_id, e);

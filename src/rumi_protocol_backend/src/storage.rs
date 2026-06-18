@@ -400,6 +400,7 @@ mod state_snapshot_tests {
                 pending_mint_e8s: 0,
                 status: ChainVaultStatus::Open,
                 opened_at_ns: 42,
+                owner_evm: None,
                 last_interest_accrual_ns: 0,
                 pending_interest_mint_e8s: 0,
             },
