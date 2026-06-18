@@ -70,6 +70,21 @@ pub struct ChainVaultV1 {
     pub pending_mint_e8s: u128,
     pub status: ChainVaultStatus,
     pub opened_at_ns: u64,
+    /// Phase 1b Task 12 (interest accrual). Start of the current accrual window
+    /// (ns). Set when the vault becomes Open (mint confirm); advanced to the
+    /// harvest snapshot time when an interest mint confirms. `#[serde(default)]`
+    /// = 0 for a vault decoded from a pre-field snapshot; `post_upgrade` then
+    /// stamps it to the upgrade time (a 0 would otherwise bill ~56yr of interest
+    /// on the first harvest). Added in-place per the repo's reorg-fields
+    /// precedent (phase-1b struct, never mainnet-persisted; serde-default is the
+    /// state-wipe safety).
+    #[serde(default)]
+    pub last_interest_accrual_ns: u64,
+    /// Interest amount locked in at harvest, awaiting its on-chain mint
+    /// confirmation (Design-B pending pattern, mirrors `pending_mint_e8s`).
+    /// `> 0` ⇒ one interest realization is in flight for this vault.
+    #[serde(default)]
+    pub pending_interest_mint_e8s: u128,
 }
 
 /// Reasons `open_chain_vault_in_state` / `verify_deposit_and_enqueue_mint_in_state`
@@ -258,6 +273,10 @@ pub fn open_chain_vault_in_state(
             pending_mint_e8s: debt_e8s,
             status: ChainVaultStatus::AwaitingDeposit,
             opened_at_ns: now_ns,
+            // Interest accrues only once the vault is Open with confirmed debt;
+            // stamped to `now` at mint-confirm (Task 7). Open-time = 0 (debt 0).
+            last_interest_accrual_ns: 0,
+            pending_interest_mint_e8s: 0,
         },
     );
     // No mint enqueued - that happens in verify_deposit_and_enqueue_mint_in_state.

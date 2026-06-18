@@ -168,6 +168,8 @@ fn v2_cbor_snapshot_decodes_into_v3_without_wiping_state() {
         pending_mint_e8s: 0,
         status: ChainVaultStatus::Open,
         opened_at_ns: 99,
+        last_interest_accrual_ns: 0,
+        pending_interest_mint_e8s: 0,
     });
     v2.chain_contracts.insert(ChainId(10143), "0xicusd".into());
     v2.last_observed_block.insert(ChainId(10143), 35_136_248);
@@ -241,6 +243,8 @@ fn v3_cbor_snapshot_decodes_into_v4_without_wiping_state() {
         pending_mint_e8s: 0,
         status: ChainVaultStatus::Open,
         opened_at_ns: 99,
+        last_interest_accrual_ns: 0,
+        pending_interest_mint_e8s: 0,
     });
     v3.chain_contracts.insert(ChainId(10143), "0xicusd".into());
     v3.last_observed_block.insert(ChainId(10143), 35_136_248);
@@ -288,6 +292,8 @@ fn chain_vault_debt_total_sums_only_chain_vaults() {
         pending_mint_e8s: 0,
         status: ChainVaultStatus::Open,
         opened_at_ns: 0,
+        last_interest_accrual_ns: 0,
+        pending_interest_mint_e8s: 0,
     });
     s.chain_vaults.insert(2, ChainVaultV1 {
         vault_id: 2,
@@ -300,6 +306,8 @@ fn chain_vault_debt_total_sums_only_chain_vaults() {
         pending_mint_e8s: 0,
         status: ChainVaultStatus::Open,
         opened_at_ns: 0,
+        last_interest_accrual_ns: 0,
+        pending_interest_mint_e8s: 0,
     });
     assert_eq!(s.total_chain_vault_debt_e8s(), 10_000_000_000);
 }
