@@ -1,0 +1,42 @@
+{
+  "anchor": "39a07cd1c3fcfbb0acedc975d4ba4ced2d25f71d",
+  "date": "2026-06-18",
+  "scope": "Conflux/Monad chains rail (src/rumi_protocol_backend/src/chains/ + foundry/src/IcUSD.sol)",
+  "summary": { "candidates_raised": 11, "confirmed_real": 4, "false_positives": 5, "informational_defense_in_depth": 1, "regressions_from_pr252": 0 },
+  "verdict": "GO for gated eSpace-mainnet soft-launch with conditions; no real bug in PR #252",
+  "findings": [
+    { "id": "F-01", "severity": "HIGH", "category": "cdp-domain", "subcategory": "oracle-integrity",
+      "title": "Manual price oracle has no staleness or sanity bounds",
+      "locations": ["chains/vault.rs:collateral_ratio_e4 + open/withdraw CR", "chains/multi_chain_state.rs:manual_prices", "main.rs:set_manual_collateral_price"],
+      "in_pr252": false, "prior_status": "PRE-EXISTING",
+      "exploit": "stale price -> vault opened over-MCR is undercollateralized at true price; zero/low price freezes vaults",
+      "mitigation_gated_launch": "dev-gated opens + small debt ceiling + active price monitoring", "owner": "chains rail (M2 session)" },
+    { "id": "F-02", "severity": "MEDIUM", "category": "ic-platform", "subcategory": "finality-reorg",
+      "title": "processed_burn_keys unbounded growth during deep-reorg/stalled-cursor",
+      "locations": ["chains/evm/deposit_watch.rs:advance_cursor_and_prune"],
+      "in_pr252": false, "prior_status": "PRE-EXISTING (documented in code)", "theoretical": true, "owner": "chains rail" },
+    { "id": "F-03", "severity": "LOW", "category": "cdp-domain", "subcategory": "oracle-integrity",
+      "title": "set_manual_collateral_price lacks bounds/delta/timelock", "locations": ["main.rs:set_manual_collateral_price"],
+      "in_pr252": false, "prior_status": "PRE-EXISTING", "note": "admin-gated, reversible; folds into F-01" },
+    { "id": "F-04", "severity": "LOW", "category": "ic-platform", "subcategory": "quorum",
+      "title": "RPC provider concentration (Confura-only); mainnet needs independent providers",
+      "locations": ["chains/evm/conflux/config.rs", "chains/evm/evm_rpc.rs"],
+      "in_pr252": false, "prior_status": "KNOWN MAINNET GATE", "note": "min_quorum=1 still requires strict-majority=2-of-3; risk is single operator" },
+    { "id": "F-05", "severity": "INFORMATIONAL", "category": "cdp-domain", "subcategory": "debt-interest-defense-in-depth",
+      "title": "confirm_interest_mint_in_state has no local status guard (currently unreachable to exploit)",
+      "locations": ["chains/evm/settlement.rs:confirm_interest_mint_in_state", "chains/vault.rs:close_chain_vault_in_state zero-collateral shortcut"],
+      "in_pr252": true, "prior_status": "NEW", "exploitable": false,
+      "reachability": "(Open, collateral==0) is unreachable: open requires collateral>0; partial withdraw stays CR-checked>0; full withdraw sets Closing; withdraw blocked while pending_interest>0",
+      "recommendation": "add status!=Open guard to confirm_interest_mint_in_state + pending_interest==0 to the close shortcut (cheap defense-in-depth)", "owner": "M2 session" },
+    { "id": "F-06", "severity": "LOW", "category": "cdp-domain", "subcategory": "cr-math",
+      "title": "Withdrawal CR validated at enqueue, not at settlement confirm", "locations": ["chains/vault.rs:withdraw_collateral_in_state"],
+      "in_pr252": false, "prior_status": "PRE-EXISTING", "theoretical": true, "note": "requires admin price-move on own op; folds into F-01" }
+  ],
+  "false_positives": [
+    { "title": "Interest harvest vs settlement confirm pre_total race", "why": "no .await between read_state(pre_total) and mutate_state(confirm); IC atomic between awaits" },
+    { "title": "Double add-back on reverted NativeWithdrawal", "why": "per-op CAS (still-Inflight?) inside the single mutate_state" },
+    { "title": "Reused vault IDs carry stale last_interest_accrual_ns", "why": "monotonic counter (never reused) + on-chain minted[vault_id] guard" },
+    { "title": "Interest rounding/resubmit double-count", "why": "pending_interest_mint_e8s!=0 harvest filter + resubmit reuses stored op.amount_e8s" },
+    { "title": "min_quorum=1 => 1-of-N reads", "why": "required agreement = max(1, strict_majority=2) = 2; reclassified as F-04 operator concentration" }
+  ]
+}
