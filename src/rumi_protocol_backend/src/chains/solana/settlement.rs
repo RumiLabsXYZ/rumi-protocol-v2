@@ -178,10 +178,12 @@ pub async fn run_settlement(chain: ChainId) {
 /// re-sign. See the module doc for the durable-nonce idempotency rationale.
 async fn submit_op(chain: ChainId, op_id: u64, op: SettlementOp) {
     // A Burn op is never signable in M2 - burns are user-initiated on-chain. Fail
-    // it up front (no RPC), mirroring Monad.
-    if matches!(op.kind, SettlementOpKind::Burn { .. }) {
+    // it up front (no RPC), mirroring Monad. Task 12: an InterestMint can never be
+    // enqueued on a Solana queue (interest harvest is EVM-only), but fail it
+    // defensively too so a stray op can never wedge the worker.
+    if matches!(op.kind, SettlementOpKind::Burn { .. } | SettlementOpKind::InterestMint { .. }) {
         let now = ic_cdk::api::time();
-        let reason = "burn not signable in M2 (burns are user-initiated on-chain)".to_string();
+        let reason = "op not signable on Solana in M2 (burns/interest-mints handled elsewhere)".to_string();
         mutate_state(|s| {
             if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
                 if let Some(o) = q.pending.get_mut(&op_id) {
@@ -278,7 +280,7 @@ async fn submit_op(chain: ChainId, op_id: u64, op: SettlementOp) {
                 Err(e) => return handle_adapter_error(chain, op_id, "sign_withdrawal", e),
             }
         }
-        SettlementOpKind::Burn { .. } => {
+        SettlementOpKind::Burn { .. } | SettlementOpKind::InterestMint { .. } => {
             // Unreachable: handled (marked Failed) at the top of this fn.
             return;
         }
@@ -462,7 +464,7 @@ fn confirm_succeeded(
                 if !still_inflight {
                     return MintConfirm::AlreadyHandled;
                 }
-                match confirm_mint_in_state(&mut s.multi_chain, chain, vault_id, amount_e8s, pre_total) {
+                match confirm_mint_in_state(&mut s.multi_chain, chain, vault_id, amount_e8s, pre_total, now) {
                     Ok(()) => {
                         if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
                             if let Some(o) = q.pending.get_mut(&op_id) {
@@ -519,10 +521,10 @@ fn confirm_succeeded(
             });
             log!(INFO, "[solana settlement chain={:?}] withdrawal op {} vault {} confirmed slot={} sig={} (Closing->Closed if applicable)", chain, op_id, vid, slot, signature);
         }
-        SettlementOpKind::Burn { .. } => {
-            // Unreachable: a Burn op is marked Failed on the submit path and never
-            // goes Inflight. Log defensively rather than panic.
-            log!(INFO, "[solana settlement chain={:?}] inflight Burn op {} reached confirm path unexpectedly", chain, op_id);
+        SettlementOpKind::Burn { .. } | SettlementOpKind::InterestMint { .. } => {
+            // Unreachable: Burn/InterestMint ops are marked Failed on the submit
+            // path and never go Inflight. Log defensively rather than panic.
+            log!(INFO, "[solana settlement chain={:?}] inflight non-signable op {} reached confirm path unexpectedly", chain, op_id);
         }
     }
 }
@@ -576,7 +578,7 @@ fn confirm_reverted(chain: ChainId, op_id: u64, op: &SettlementOp, signature: &s
                     }
                 }
             }
-            SettlementOpKind::Burn { .. } => {}
+            SettlementOpKind::Burn { .. } | SettlementOpKind::InterestMint { .. } => {}
         }
         if let Some(o) = s
             .multi_chain
@@ -603,7 +605,7 @@ fn confirm_reverted(chain: ChainId, op_id: u64, op: &SettlementOp, signature: &s
             SettlementOpKind::NativeWithdrawal { vault_id, amount_e18, .. } => {
                 log!(INFO, "[solana settlement chain={:?}] withdrawal op {} vault {} reverted on-chain (sig {}); marked Failed, restored {} lamports of reserved collateral", chain, op_id, vault_id, signature, amount_e18);
             }
-            SettlementOpKind::Burn { .. } => {}
+            SettlementOpKind::Burn { .. } | SettlementOpKind::InterestMint { .. } => {}
         }
     }
 }

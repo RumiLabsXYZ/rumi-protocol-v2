@@ -101,6 +101,7 @@ pub fn confirm_mint_in_state(
     vault_id: u64,
     observed_e8s: u128,
     pre_mint_total_debt: u128,
+    now_ns: u64,
 ) -> Result<(), String> {
     // Step 1: validate (read-only — no mutation on failure).
     {
@@ -130,6 +131,58 @@ pub fn confirm_mint_in_state(
     v.debt_e8s = v.debt_e8s.saturating_add(observed_e8s);
     v.pending_mint_e8s = 0;
     v.status = ChainVaultStatus::Open;
+    // Task 12: the vault's debt is now live, so interest starts accruing from
+    // here. Stamp the accrual window start (a fresh vault decoded with 0 would
+    // otherwise bill interest from the unix epoch on its first harvest).
+    v.last_interest_accrual_ns = now_ns;
+    Ok(())
+}
+
+/// Task 12 (Option B): confirm an on-chain interest mint — grow the REAL vault's
+/// `debt_e8s` and the chain supply by `observed_e8s` TOGETHER (invariant exact),
+/// advance `last_interest_accrual_ns` to the harvest snapshot, and clear the
+/// pending. `observed_e8s` (from the on-chain Mint log) must equal the vault's
+/// `pending_interest_mint_e8s`. `pre_total` is the PRE-mint
+/// `total_chain_vault_debt_e8s()`.
+pub fn confirm_interest_mint_in_state(
+    state: &mut MultiChainStateV4,
+    chain: ChainId,
+    vault_id: u64,
+    observed_e8s: u128,
+    accrual_through_ns: u64,
+    pre_total: u128,
+) -> Result<(), String> {
+    // Step 1: validate (read-only — no mutation on failure).
+    {
+        let v = state
+            .chain_vaults
+            .get(&vault_id)
+            .ok_or_else(|| format!("confirm_interest_mint: unknown vault {vault_id}"))?;
+        if v.pending_interest_mint_e8s != observed_e8s {
+            return Err(format!(
+                "confirm_interest_mint: observed {} != pending {}",
+                observed_e8s, v.pending_interest_mint_e8s
+            ));
+        }
+    }
+
+    // Step 2: supply delta. Debt and supply grow together by exactly the minted
+    // amount, so the foreign-chain invariant stays exact. Rejects (no mutation)
+    // on divergence/halt.
+    let post_total = pre_total.saturating_add(observed_e8s);
+    apply_supply_delta(state, chain, SupplyDelta::Increase(observed_e8s), post_total)
+        .map_err(|e| format!("{e:?}"))?;
+
+    // Step 3: only reached when the supply delta succeeded. Realize the interest
+    // into debt and advance the accrual window to the harvest snapshot time (NOT
+    // confirm time), so the harvest->confirm sliver accrues next round.
+    let v = state
+        .chain_vaults
+        .get_mut(&vault_id)
+        .expect("vault present: checked above");
+    v.debt_e8s = v.debt_e8s.saturating_add(observed_e8s);
+    v.pending_interest_mint_e8s = 0;
+    v.last_interest_accrual_ns = accrual_through_ns;
     Ok(())
 }
 
@@ -284,6 +337,9 @@ pub async fn run_settlement(chain: ChainId) {
 enum TxPlanKind {
     Mint,
     NativeWithdrawal,
+    /// Task 12: an interest-realization mint (to the treasury). Submit-path logs
+    /// it; the authoritative record is `ChainInterestMinted` on confirm.
+    InterestMint,
 }
 
 /// Per-op-kind tx shape mirroring `MonadAdapter`'s choices, so the submit and
@@ -374,6 +430,38 @@ fn build_tx_plan(
                 kind: TxPlanKind::NativeWithdrawal,
             })
         }
+        SettlementOpKind::InterestMint { vault_id, mint_id, amount_e8s, recipient, .. } => {
+            // Task 12: identical IcUSD.mint calldata to a normal Mint, but the
+            // on-chain `vault_id` arg is the SYNTHETIC `mint_id` (the real vault
+            // already minted once at open and IcUSD.mint reverts a repeat id),
+            // and the calldata `to:` is the interest-treasury `recipient`. Signed
+            // by the minter (resolve_op_signer). The `TxPlan.vault_id` carries the
+            // REAL vault for event attribution.
+            let contract = contract.ok_or_else(|| "icUSD contract not set".to_string())?;
+            let fields = tx::build_eip1559_fields(
+                chain.0 as u64,
+                tx::MonadTxKind::Mint {
+                    contract,
+                    recipient,
+                    amount_e8s: *amount_e8s,
+                    vault_id: *mint_id,
+                    // Per-op idempotency (M2): the settlement queue op_id is the
+                    // on-chain `mintedOps` key. Combined with the interest path's
+                    // synthetic `mint_id`, the interest mint is idempotent per op.
+                    op_id,
+                },
+                nonce,
+                prio,
+                max_fee,
+            )?;
+            Ok(TxPlan {
+                fields,
+                vault_id: *vault_id,
+                recipient: recipient.clone(),
+                amount: *amount_e8s,
+                kind: TxPlanKind::InterestMint,
+            })
+        }
         SettlementOpKind::Burn { .. } => Err("burn not signable in Phase 1b".to_string()),
     }
 }
@@ -395,6 +483,8 @@ async fn resolve_op_signer(
 ) -> Result<(Vec<Vec<u8>>, String), String> {
     match kind {
         SettlementOpKind::Mint { .. } => tecdsa::cached_settlement_address(chain).await,
+        // Task 12: interest mints are signed by the minter, same as a vault mint.
+        SettlementOpKind::InterestMint { .. } => tecdsa::cached_settlement_address(chain).await,
         SettlementOpKind::NativeWithdrawal { vault_id, .. } => {
             let vid = *vault_id;
             let info = read_state(|s| {
@@ -516,7 +606,10 @@ async fn submit_op(
     // by the vault's own custody address (which holds the collateral) and net
     // their gas out of the transfer, so the settlement-wallet floor is irrelevant
     // to them — never gate a withdrawal on it.
-    if matches!(op.kind, SettlementOpKind::Mint { .. }) {
+    // Task 12: interest mints are ALSO paid by the settlement hot wallet, so they
+    // are gated on its balance too (a vault open mint and an interest mint cost
+    // the same gas).
+    if matches!(op.kind, SettlementOpKind::Mint { .. } | SettlementOpKind::InterestMint { .. }) {
         let cached = read_state(|s| s.multi_chain.hot_wallet_balance_e18.get(&chain).copied());
         if let Some(bal) = cached {
             if !hardening::hot_wallet_ok(bal) {
@@ -667,6 +760,11 @@ async fn submit_op(
             });
             log!(INFO, "[settlement chain={:?}] withdrawal submitted: op={} vault={} amount_e18={} tx={}", chain, op_id, vault_id, amount, tx_hash);
         }
+        TxPlanKind::InterestMint => {
+            // Submit-path log only; the authoritative event is ChainInterestMinted
+            // on confirm (after the on-chain mint is observed at finality).
+            log!(INFO, "[settlement chain={:?}] interest mint submitted: op={} vault={} amount_e8s={} treasury={} tx={}", chain, op_id, vault_id, amount, recipient, tx_hash);
+        }
     }
 }
 
@@ -805,6 +903,15 @@ async fn confirm_op(
                         }
                     }
                 }
+                SettlementOpKind::InterestMint { vault_id, .. } => {
+                    // Task 12: no debt/supply was credited (the mint reverted), so
+                    // just clear the reservation. last_interest_accrual_ns is left
+                    // unchanged, so the same window is retried at the next harvest
+                    // (no double-charge, no loss).
+                    if let Some(v) = s.multi_chain.chain_vaults.get_mut(vault_id) {
+                        v.pending_interest_mint_e8s = 0;
+                    }
+                }
                 SettlementOpKind::Burn { .. } => {}
             }
             if let Some(o) = s
@@ -929,7 +1036,7 @@ async fn confirm_op(
             let pre_total = read_state(|s| s.multi_chain.total_chain_vault_debt_e8s());
 
             let result = mutate_state(|s| {
-                confirm_mint_in_state(&mut s.multi_chain, chain, vault_id, observed_e8s, pre_total)
+                confirm_mint_in_state(&mut s.multi_chain, chain, vault_id, observed_e8s, pre_total, now)
             });
 
             match result {
@@ -962,6 +1069,99 @@ async fn confirm_op(
                     // (divergence/halt/amount mismatch), NOT a tx failure. Leave
                     // the op Inflight for retry; do NOT mark it Failed.
                     log!(INFO, "[settlement chain={:?}] confirm_mint_in_state FAILED for op {} vault {}: {}; left Inflight", chain, op_id, vault_id, e);
+                }
+            }
+        }
+        SettlementOpKind::InterestMint { vault_id, mint_id, accrual_through_ns, recipient, .. } => {
+            // Task 12: same Mint-log read as a vault mint, but matched by the
+            // SYNTHETIC `mint_id` and recipient-verified against the interest
+            // treasury. On confirm, debt + supply grow together for the REAL vault.
+            let vault_id = *vault_id;
+            let mint_id = *mint_id;
+            let accrual_through_ns = *accrual_through_ns;
+            let intended_recipient = recipient.clone();
+
+            let contract = read_state(|s| s.multi_chain.chain_contracts.get(&chain).cloned());
+            let contract = match contract {
+                Some(c) => c,
+                None => {
+                    log!(INFO, "[settlement chain={:?}] no contract configured; cannot confirm interest mint op {}", chain, op_id);
+                    return;
+                }
+            };
+
+            let logs = match evm_rpc::get_logs(chain, &contract, evm_rpc::MINT_EVENT_TOPIC0, block_number, block_number).await {
+                Ok(l) => l,
+                Err(e) => {
+                    log!(INFO, "[settlement chain={:?}] get_logs(interest mint) failed confirming op {}: {}; will retry", chain, op_id, e);
+                    return;
+                }
+            };
+
+            let mut matched: Option<(u128, String)> = None;
+            for (topics, data, log_tx, log_block, _log_index) in &logs {
+                match evm_rpc::decode_mint_log(topics, data, log_tx, *log_block) {
+                    Ok(m) if m.vault_id == mint_id => {
+                        let exact = log_tx.eq_ignore_ascii_case(&tx_hash);
+                        if exact {
+                            matched = Some((m.amount_e8s, m.recipient));
+                            break;
+                        } else if matched.is_none() {
+                            matched = Some((m.amount_e8s, m.recipient));
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        log!(INFO, "[settlement chain={:?}] decode_mint_log failed confirming interest op {}: {}", chain, op_id, e);
+                    }
+                }
+            }
+
+            let (observed_e8s, observed_recipient) = match matched {
+                Some(pair) => pair,
+                None => {
+                    log!(INFO, "[settlement chain={:?}] no interest Mint log for mint_id {} in block {} confirming op {}; will retry", chain, mint_id, block_number, op_id);
+                    return;
+                }
+            };
+
+            // The interest mint MUST land at the per-chain interest-treasury
+            // address (the recipient stored on the op). A mismatch is a real
+            // divergence: leave Inflight, do NOT credit.
+            if !intended_recipient.eq_ignore_ascii_case(&observed_recipient) {
+                log!(INFO, "[settlement chain={:?}] interest-mint recipient mismatch op {} mint_id {}: on-chain {} != treasury {}; left Inflight (NOT credited)", chain, op_id, mint_id, observed_recipient, intended_recipient);
+                return;
+            }
+
+            let pre_total = read_state(|s| s.multi_chain.total_chain_vault_debt_e8s());
+            let result = mutate_state(|s| {
+                confirm_interest_mint_in_state(
+                    &mut s.multi_chain, chain, vault_id, observed_e8s, accrual_through_ns, pre_total,
+                )
+            });
+
+            match result {
+                Ok(()) => {
+                    mutate_state(|s| {
+                        if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
+                            if let Some(o) = q.pending.get_mut(&op_id) {
+                                o.mark_succeeded(tx_hash.clone(), now);
+                            }
+                        }
+                    });
+                    crate::storage::record_event(&crate::event::Event::ChainInterestMinted {
+                        chain_id: chain,
+                        vault_id,
+                        mint_id,
+                        amount_e8s: observed_e8s,
+                        tx_hash: tx_hash.clone(),
+                        block_number,
+                        timestamp: now,
+                    });
+                    log!(INFO, "[settlement chain={:?}] interest mint confirmed: op={} vault={} mint_id={} amount_e8s={} block={} tx={}", chain, op_id, vault_id, mint_id, observed_e8s, block_number, tx_hash);
+                }
+                Err(e) => {
+                    log!(INFO, "[settlement chain={:?}] confirm_interest_mint_in_state FAILED for op {} vault {}: {}; left Inflight", chain, op_id, vault_id, e);
                 }
             }
         }

@@ -145,6 +145,8 @@ fn insert_open_vault(s: &mut MultiChainStateV4, owner: Principal, vault_id: u64,
         vault_id, owner, collateral_chain: CHAIN, custody_address: "custody".into(),
         collateral_amount_native: collateral, debt_e8s: debt, mint_recipient: "good-address".into(),
         pending_mint_e8s: 0, status: ChainVaultStatus::Open, opened_at_ns: 0,
+    last_interest_accrual_ns: 0,
+    pending_interest_mint_e8s: 0,
         owner_evm: Some("0xowner".into()),
     });
     *s.chain_supplies.entry(CHAIN).or_default() += debt;
@@ -169,7 +171,7 @@ fn borrow_then_confirm_preserves_supply_invariant() {
     insert_open_vault(&mut s, Principal::anonymous(), 7, 100 * ONE_SOL, 100_00000000);
     borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "good-address".into(), only_good, "SOL", 13_000, 1).unwrap();
     let pre = s.total_chain_vault_debt_e8s();
-    confirm_mint_in_state(&mut s, CHAIN, 7, 50_00000000, pre).expect("confirm");
+    confirm_mint_in_state(&mut s, CHAIN, 7, 50_00000000, pre, 1).expect("confirm");
     let v = s.chain_vaults.get(&7).unwrap();
     assert_eq!(v.debt_e8s, 150_00000000, "pending moved into confirmed debt");
     assert_eq!(v.pending_mint_e8s, 0);
@@ -259,6 +261,8 @@ fn gc_prunes_only_stale_awaiting_deposit() {
         vault_id: id, owner: Principal::anonymous(), collateral_chain: CHAIN,
         custody_address: "c".into(), collateral_amount_native: 0, debt_e8s: 0,
         mint_recipient: "r".into(), pending_mint_e8s: 0, status: st, opened_at_ns: opened,
+    last_interest_accrual_ns: 0,
+    pending_interest_mint_e8s: 0,
         owner_evm: None,
     };
     let now = 100 * AWAITING_DEPOSIT_TTL_NS;
@@ -289,6 +293,8 @@ fn gc_skips_stale_vaults_when_observer_inactive() {
         mint_recipient: "r".into(), pending_mint_e8s: 0,
         status: ChainVaultStatus::AwaitingDeposit,
         opened_at_ns: now - AWAITING_DEPOSIT_TTL_NS - 1, owner_evm: None,
+        last_interest_accrual_ns: 0,
+        pending_interest_mint_e8s: 0,
     };
     // (a) Chain not registered at all -> no observer -> not reaped (would strand
     //     a funded-but-unobserved deposit).

@@ -219,6 +219,9 @@ thread_local! {
         const { std::cell::Cell::new(None) };
     static OBSERVER_TIMER_ID: std::cell::Cell<Option<ic_cdk_timers::TimerId>> =
         const { std::cell::Cell::new(None) };
+    // Task 12: foreign-chain interest harvest. Same transient lifecycle.
+    static CHAIN_INTEREST_TIMER_ID: std::cell::Cell<Option<ic_cdk_timers::TimerId>> =
+        const { std::cell::Cell::new(None) };
 }
 
 fn register_xrc_fetch_timer() {
@@ -355,6 +358,92 @@ fn register_settlement_timer() {
     });
 }
 
+/// Task 12: interest harvest fan-out — for each registered EVM chain, resolve its
+/// interest-treasury recipient + APR and enqueue `InterestMint` ops for every
+/// eligible vault. The settlement worker (Timer D) then mints/confirms them.
+/// Interest accrual is EVM-only in Phase 1b (Solana has no on-chain mint path
+/// here), so Solana is skipped. No-op in ReadOnly mode. No state borrow is held
+/// across the treasury-address derive `.await`.
+async fn run_all_chain_interest_harvests() {
+    if read_state(|s| s.mode == Mode::ReadOnly) {
+        return;
+    }
+    let (chains, _solana_enabled) = registered_chains_and_solana_flag();
+    let now = ic_cdk::api::time();
+    for chain in chains {
+        if chain == SOLANA_CHAIN_ID {
+            continue; // interest accrual is EVM-only in Phase 1b
+        }
+        if let Err(e) = harvest_one_chain_interest(chain, now).await {
+            log!(INFO, "[interest harvest chain={:?}] skipped: {}", chain, e);
+        }
+    }
+}
+
+/// Harvest interest for one EVM chain: resolve `apr_bps` + the interest-treasury
+/// address (async, cached), then run the in-state harvest. Interest-mint ids are
+/// drawn from the SAME `chain_vault_id_counter` as vault opens (guaranteeing
+/// global disjointness from real vault ids and prior interest mints): read the
+/// counter, hand the harvest a fresh-id closure over a LOCAL copy, write the
+/// advanced value back — all inside one `mutate_state`, so the closure never
+/// reborrows `s`.
+async fn harvest_one_chain_interest(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    now: u64,
+) -> Result<u64, String> {
+    let apr_bps =
+        match rumi_protocol_backend::chains::collateral_config::chain_collateral_config(chain) {
+            Some(c) if c.interest_apr_bps > 0 => c.interest_apr_bps,
+            Some(_) => return Ok(0), // a configured 0-rate chain accrues nothing
+            None => return Err(format!("no collateral config for chain {}", chain.0)),
+        };
+    let treasury =
+        rumi_protocol_backend::chains::evm::tecdsa::cached_interest_treasury_address(chain)
+            .await
+            .map(|(_path, addr)| addr)
+            .map_err(|e| format!("interest-treasury address derive failed: {e}"))?;
+    let threshold = read_state(|s| s.chain_interest_min_realize_e8s);
+    let enqueued = mutate_state(|s| {
+        let mut k = s.chain_vault_id_counter;
+        let ops = rumi_protocol_backend::chains::interest::harvest_chain_interest_in_state(
+            &mut s.multi_chain,
+            chain,
+            apr_bps,
+            threshold,
+            &treasury,
+            now,
+            || {
+                k += 1;
+                k
+            },
+        );
+        s.chain_vault_id_counter = k;
+        ops.len() as u64
+    });
+    if enqueued > 0 {
+        log!(INFO, "[interest harvest chain={:?}] enqueued {} interest mint(s) to treasury {}", chain, enqueued, treasury);
+    }
+    Ok(enqueued)
+}
+
+/// Task 12: register the interest-harvest timer. Clears + re-registers in place
+/// so the setter can re-tune live. FLOOR: a 0 interval is forced to the 1-year
+/// default (never a busy-loop), mirroring the settlement/observer timers.
+fn register_chain_interest_timer() {
+    let secs = read_state(|s| s.chain_interest_tick_interval_secs);
+    let secs = if secs == 0 { 31_536_000 } else { secs };
+    CHAIN_INTEREST_TIMER_ID.with(|cell| {
+        if let Some(old) = cell.get() {
+            ic_cdk_timers::clear_timer(old);
+        }
+        let new_id = ic_cdk_timers::set_timer_interval(
+            std::time::Duration::from_secs(secs),
+            || ic_cdk::spawn(run_all_chain_interest_harvests()),
+        );
+        cell.set(Some(new_id));
+    });
+}
+
 /// Phase 1b Task 15: register the inbound observer fan-out. Same
 /// clear-and-re-register-in-place + 0-floor protection as the settlement timer.
 fn register_observer_timer() {
@@ -448,6 +537,11 @@ fn setup_timers() {
     register_settlement_timer();
     register_observer_timer();
     register_chain_vault_gc_timer();
+    // Task 12: foreign-chain interest harvest. Defaults to a ~1-year interval
+    // (effectively OFF) so realization is deliberate; tunable via
+    // `set_chain_interest_tick_interval_secs`. No-op when no EVM chain is
+    // registered, so it is safe to register on staging before any chain exists.
+    register_chain_interest_timer();
 }
 
 /// M2 anti-spam backstop: hourly GC of stale `AwaitingDeposit` chain vaults
@@ -622,6 +716,17 @@ fn post_upgrade(arg: ProtocolArg) {
     if migrated > 0 {
         log!(INFO, "[upgrade]: migrated {} vaults: set last_accrual_time to {}", migrated, now);
     }
+
+    // Task 12: mirror the above for FOREIGN-CHAIN vaults — stamp
+    // last_interest_accrual_ns for any that decoded with 0 (a vault from a
+    // pre-interest-field snapshot), so the first interest harvest does not bill
+    // from the unix epoch. New vaults are stamped at mint-confirm; idempotent.
+    mutate_state(|s| {
+        rumi_protocol_backend::chains::supply::stamp_chain_interest_accrual_start(
+            &mut s.multi_chain,
+            now,
+        );
+    });
 
     // Safety net: if bot is configured but allowlist is empty, default to ICP
     mutate_state(|s| {
@@ -5716,6 +5821,85 @@ async fn set_settlement_tick_interval_secs(secs: u64) -> Result<(), ProtocolErro
     register_settlement_timer();
     log!(INFO, "[set_settlement_tick_interval_secs] Timer D interval set to {}s", secs);
     Ok(())
+}
+
+/// Task 12: tune the foreign-chain interest-harvest interval (seconds). Default
+/// ~1 year (effectively OFF). Re-registers the timer in place. Rejects `secs ==
+/// 0` (the register fn also floors a 0 to the 1-year default). Developer-gated.
+#[candid_method(update)]
+#[update]
+async fn set_chain_interest_tick_interval_secs(secs: u64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set the chain interest tick interval".to_string(),
+        ));
+    }
+    if secs == 0 {
+        return Err(ProtocolError::GenericError(
+            "Chain interest tick interval must be > 0".to_string(),
+        ));
+    }
+    mutate_state(|s| s.chain_interest_tick_interval_secs = secs);
+    register_chain_interest_timer();
+    log!(INFO, "[set_chain_interest_tick_interval_secs] interest harvest interval set to {}s", secs);
+    Ok(())
+}
+
+/// Task 12: tune the interest-realization dust floor (e8s) — accrued interest
+/// below this is not minted (its gas would dwarf the interest). Default 0.01
+/// icUSD. Developer-gated.
+#[candid_method(update)]
+#[update]
+async fn set_chain_interest_min_realize_e8s(e8s: u128) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set the chain interest dust floor".to_string(),
+        ));
+    }
+    mutate_state(|s| s.chain_interest_min_realize_e8s = e8s);
+    log!(INFO, "[set_chain_interest_min_realize_e8s] interest dust floor set to {} e8s", e8s);
+    Ok(())
+}
+
+/// Task 12: manually trigger one interest harvest for `chain` (developer-gated),
+/// for testing/ops independent of the off-by-default timer. Resolves the
+/// interest-treasury address + APR, enqueues an `InterestMint` for every
+/// eligible vault, and returns the number enqueued. The settlement worker then
+/// mints/confirms them on-chain.
+#[candid_method(update)]
+#[update]
+async fn harvest_chain_interest(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> Result<u64, ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let now = ic_cdk::api::time();
+    harvest_one_chain_interest(chain, now)
+        .await
+        .map_err(ProtocolError::ChainAdmin)
+}
+
+/// Task 12: derive the per-chain interest-treasury (revenue) address — the
+/// tECDSA-derived EVM address that receives minted interest, distinct from the
+/// settlement (minter) address. Developer-gated (derivation costs cycles + a
+/// signing-subnet call). Used by ops + tests to learn where revenue accrues.
+#[candid_method(update)]
+#[update]
+async fn get_chain_interest_treasury_address(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> Result<String, ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    rumi_protocol_backend::chains::evm::tecdsa::cached_interest_treasury_address(chain)
+        .await
+        .map(|(_path, addr)| addr)
+        .map_err(|e| ProtocolError::ChainAdmin(format!("derive: {e}")))
 }
 
 /// Phase 1b Task 15: tune the Monad inbound observer fan-out interval in

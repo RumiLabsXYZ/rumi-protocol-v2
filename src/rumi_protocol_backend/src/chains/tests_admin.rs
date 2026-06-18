@@ -46,7 +46,10 @@ fn dummy_vault(vault_id: u64, chain: ChainId) -> ChainVaultV1 {
         mint_recipient: "0x0000000000000000000000000000000000000000".into(),
         pending_mint_e8s: 0,
         status: ChainVaultStatus::AwaitingDeposit,
-        opened_at_ns: 0, owner_evm: None,
+        opened_at_ns: 0,
+        owner_evm: None,
+        last_interest_accrual_ns: 0,
+        pending_interest_mint_e8s: 0,
     }
 }
 

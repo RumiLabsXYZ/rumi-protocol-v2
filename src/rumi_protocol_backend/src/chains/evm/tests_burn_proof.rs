@@ -24,7 +24,10 @@ fn state_with_open_vault(debt: u128) -> MultiChainStateV4 {
             mint_recipient: "0xr".into(),
             pending_mint_e8s: 0,
             status: ChainVaultStatus::Open,
-            opened_at_ns: 0, owner_evm: None,
+            opened_at_ns: 0,
+            owner_evm: None,
+            last_interest_accrual_ns: 0,
+            pending_interest_mint_e8s: 0,
         },
     );
     s

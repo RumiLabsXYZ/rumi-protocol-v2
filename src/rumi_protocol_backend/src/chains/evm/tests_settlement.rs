@@ -1,4 +1,7 @@
-use super::settlement::{confirm_mint_in_state, fundable_withdrawal_value, select_next_op, OpAction};
+use super::settlement::{
+    confirm_interest_mint_in_state, confirm_mint_in_state, fundable_withdrawal_value,
+    select_next_op, OpAction,
+};
 use crate::chains::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
 use crate::chains::config::ChainId;
 use crate::chains::multi_chain_state::MultiChainStateV4;
@@ -10,7 +13,10 @@ fn vault_pending(s: &mut MultiChainStateV4, vault_id: u64, pending: u128) {
         vault_id, owner: Principal::anonymous(), collateral_chain: ChainId(10143),
         custody_address: "0xc".into(), collateral_amount_native: 0, debt_e8s: 0,
         mint_recipient: "0xr".into(), pending_mint_e8s: pending,
-        status: ChainVaultStatus::MintPending, opened_at_ns: 0, owner_evm: None,
+        status: ChainVaultStatus::MintPending, opened_at_ns: 0,
+        owner_evm: None,
+        last_interest_accrual_ns: 0,
+        pending_interest_mint_e8s: 0,
     });
 }
 
@@ -52,11 +58,64 @@ fn confirm_mint_moves_pending_to_debt_and_increments_supply() {
     vault_pending(&mut s, 1, 10_000_000_000); // 100 icUSD pending
     // PRE-mint total_chain_vault_debt_e8s() == 0 (vault debt_e8s is still 0).
     // confirm_mint_in_state adds observed_e8s internally to get the post-mint total.
-    confirm_mint_in_state(&mut s, ChainId(10143), 1, 10_000_000_000, 0).expect("confirm");
+    confirm_mint_in_state(&mut s, ChainId(10143), 1, 10_000_000_000, 0, 7_777).expect("confirm");
     assert_eq!(s.chain_vaults[&1].debt_e8s, 10_000_000_000);
     assert_eq!(s.chain_vaults[&1].pending_mint_e8s, 0);
     assert!(matches!(s.chain_vaults[&1].status, ChainVaultStatus::Open));
     assert_eq!(s.chain_supplies[&ChainId(10143)], 10_000_000_000);
+    assert_eq!(
+        s.chain_vaults[&1].last_interest_accrual_ns, 7_777,
+        "interest accrual window is stamped when the vault goes Open at mint-confirm"
+    );
+}
+
+/// An Open vault with confirmed `debt` and an interest mint of `pending` in
+/// flight (`last_interest_accrual_ns = 1_000`).
+fn vault_interest_pending(s: &mut MultiChainStateV4, vault_id: u64, debt: u128, pending: u128) {
+    s.chain_vaults.insert(vault_id, ChainVaultV1 {
+        vault_id, owner: Principal::anonymous(), collateral_chain: ChainId(71),
+        custody_address: "0xc".into(), collateral_amount_native: 1_400_000_000_000_000_000_000,
+        debt_e8s: debt, mint_recipient: "0xr".into(), pending_mint_e8s: 0,
+        status: ChainVaultStatus::Open, opened_at_ns: 0,
+    owner_evm: None,
+        last_interest_accrual_ns: 1_000,
+        pending_interest_mint_e8s: pending,
+    });
+}
+
+#[test]
+fn confirm_interest_mint_grows_debt_and_supply_equally() {
+    let mut s = MultiChainStateV4::default();
+    s.chain_supplies.insert(ChainId(71), 100 * 100_000_000); // 100 icUSD principal minted
+    vault_interest_pending(&mut s, 1, 100 * 100_000_000, 2 * 100_000_000); // 2 icUSD pending
+    let pre = s.total_chain_vault_debt_e8s(); // 100e8
+    confirm_interest_mint_in_state(&mut s, ChainId(71), 1, 2 * 100_000_000, 5_000, pre)
+        .expect("confirm");
+    assert_eq!(s.chain_vaults[&1].debt_e8s, 102 * 100_000_000, "debt += interest");
+    assert_eq!(s.chain_vaults[&1].pending_interest_mint_e8s, 0, "pending cleared");
+    assert_eq!(
+        s.chain_vaults[&1].last_interest_accrual_ns, 5_000,
+        "accrual window advanced to the harvest snapshot time"
+    );
+    assert_eq!(
+        s.chain_supplies[&ChainId(71)],
+        102 * 100_000_000,
+        "supply grows equally -> invariant gap stays 0"
+    );
+}
+
+#[test]
+fn confirm_interest_mint_rejects_amount_mismatch_no_mutation() {
+    let mut s = MultiChainStateV4::default();
+    s.chain_supplies.insert(ChainId(71), 100 * 100_000_000);
+    vault_interest_pending(&mut s, 1, 100 * 100_000_000, 2 * 100_000_000);
+    let pre = s.total_chain_vault_debt_e8s();
+    let err = confirm_interest_mint_in_state(&mut s, ChainId(71), 1, 3 * 100_000_000, 5_000, pre)
+        .unwrap_err();
+    assert!(err.contains("observed"), "mismatch error mentions observed/pending: {err}");
+    assert_eq!(s.chain_vaults[&1].debt_e8s, 100 * 100_000_000, "debt untouched on reject");
+    assert_eq!(s.chain_vaults[&1].pending_interest_mint_e8s, 2 * 100_000_000, "pending untouched");
+    assert_eq!(s.chain_supplies[&ChainId(71)], 100 * 100_000_000, "supply untouched");
 }
 
 #[test]
@@ -65,7 +124,7 @@ fn confirm_mint_rejects_amount_mismatch() {
     s.chain_supplies.insert(ChainId(10143), 0);
     vault_pending(&mut s, 1, 10_000_000_000);
     // Observed amount differs from pending: reject (caught before any supply mutation), do not mutate.
-    let res = confirm_mint_in_state(&mut s, ChainId(10143), 1, 9_999_999_999, 0);
+    let res = confirm_mint_in_state(&mut s, ChainId(10143), 1, 9_999_999_999, 0, 0);
     assert!(res.is_err());
     assert_eq!(s.chain_vaults[&1].pending_mint_e8s, 10_000_000_000);
     assert_eq!(s.chain_supplies[&ChainId(10143)], 0);
@@ -75,7 +134,7 @@ fn confirm_mint_rejects_amount_mismatch() {
 fn confirm_mint_unknown_vault_rejected() {
     let mut s = MultiChainStateV4::default();
     s.chain_supplies.insert(ChainId(10143), 0);
-    assert!(confirm_mint_in_state(&mut s, ChainId(10143), 999, 1, 0).is_err());
+    assert!(confirm_mint_in_state(&mut s, ChainId(10143), 999, 1, 0, 0).is_err());
 }
 
 #[test]
@@ -88,11 +147,14 @@ fn confirm_mint_second_vault_uses_running_total() {
         vault_id: 1, owner: Principal::anonymous(), collateral_chain: ChainId(10143),
         custody_address: "0xc".into(), collateral_amount_native: 0, debt_e8s: 10_000_000_000,
         mint_recipient: "0xr".into(), pending_mint_e8s: 0,
-        status: ChainVaultStatus::Open, opened_at_ns: 0, owner_evm: None,
+        status: ChainVaultStatus::Open, opened_at_ns: 0,
+        owner_evm: None,
+        last_interest_accrual_ns: 0,
+        pending_interest_mint_e8s: 0,
     });
     vault_pending(&mut s, 2, 5_000_000_000);
     let pre_total = s.total_chain_vault_debt_e8s(); // == 10e8
-    confirm_mint_in_state(&mut s, ChainId(10143), 2, 5_000_000_000, pre_total).expect("confirm 2nd");
+    confirm_mint_in_state(&mut s, ChainId(10143), 2, 5_000_000_000, pre_total, 0).expect("confirm 2nd");
     assert_eq!(s.chain_vaults[&2].debt_e8s, 5_000_000_000);
     assert_eq!(s.chain_supplies[&ChainId(10143)], 15_000_000_000);
 }

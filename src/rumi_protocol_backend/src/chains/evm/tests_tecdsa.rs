@@ -1,9 +1,26 @@
 use super::tecdsa::{
-    custody_derivation_path, evm_address_from_pubkey, is_valid_evm_address,
-    settlement_derivation_path,
+    custody_derivation_path, evm_address_from_pubkey, interest_treasury_derivation_path,
+    is_valid_evm_address, settlement_derivation_path,
 };
 use crate::chains::config::ChainId;
 use candid::Principal;
+
+// Task 12: the interest-treasury path is deterministic, distinct from the
+// settlement path, and uses the `b"interest-treasury"` label, so revenue lands
+// at a separate canister-controlled address per chain.
+#[test]
+fn interest_treasury_path_is_distinct_and_labeled() {
+    let chain = ChainId(71);
+    assert_eq!(
+        interest_treasury_derivation_path(chain),
+        vec![chain.0.to_le_bytes().to_vec(), b"interest-treasury".to_vec()]
+    );
+    assert_ne!(
+        interest_treasury_derivation_path(chain),
+        settlement_derivation_path(chain),
+        "interest treasury must not collide with the minter address"
+    );
+}
 
 #[test]
 fn evm_address_from_known_uncompressed_pubkey() {
