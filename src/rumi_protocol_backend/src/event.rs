@@ -881,6 +881,19 @@ pub enum Event {
         threshold_e18: u128,
         timestamp: u64,
     },
+    /// Task 12 (Option B): an interest mint confirmed on-chain. `mint_id` is the
+    /// synthetic on-chain mint id; `vault_id` is the REAL vault whose `debt_e8s`
+    /// grew by `amount_e8s` (matched by the chain supply growing equally).
+    #[serde(rename = "chain_interest_minted")]
+    ChainInterestMinted {
+        chain_id: crate::chains::config::ChainId,
+        vault_id: u64,
+        mint_id: u64,
+        amount_e8s: u128,
+        tx_hash: String,
+        block_number: u64,
+        timestamp: u64,
+    },
 }
 
 impl Event {
@@ -1001,6 +1014,7 @@ impl Event {
             | Event::ChainMintSubmitted { vault_id, .. }
             | Event::ChainMintConfirmed { vault_id, .. }
             | Event::ChainBurnObserved { vault_id, .. }
+            | Event::ChainInterestMinted { vault_id, .. }
             | Event::WithdrawalSigned { vault_id, .. } => vault_id == filter_vault_id,
             // Phase 1b: protocol-wide or op-scoped events, not vault-specific.
             Event::ChainSettlementFailed { .. }
@@ -2022,6 +2036,7 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             | Event::ChainMintSubmitted { .. }
             | Event::ChainMintConfirmed { .. }
             | Event::ChainBurnObserved { .. }
+            | Event::ChainInterestMinted { .. }
             | Event::WithdrawalSigned { .. }
             | Event::ChainSettlementFailed { .. }
             | Event::ChainReorgDetected { .. }

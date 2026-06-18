@@ -108,3 +108,38 @@ pub async fn cached_settlement_address(chain: ChainId) -> Result<(Vec<Vec<u8>>, 
     });
     Ok((path, addr))
 }
+
+// ─── Interest-treasury address (Task 12) ───────────────────────────────────────
+
+/// Derivation path for the per-chain interest-treasury (revenue) address.
+/// Distinct from the settlement (minter) path so realized interest revenue is
+/// held separately from the operational hot wallet while staying
+/// canister-controlled (it can later be swept via the same custody-withdrawal
+/// machinery).
+pub fn interest_treasury_derivation_path(chain: ChainId) -> Vec<Vec<u8>> {
+    vec![chain.0.to_le_bytes().to_vec(), b"interest-treasury".to_vec()]
+}
+
+thread_local! {
+    static INTEREST_TREASURY_ADDR_CACHE: std::cell::RefCell<std::collections::BTreeMap<ChainId, String>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
+/// Cached per-chain interest-treasury address (Task 12). Mirrors
+/// `cached_settlement_address`: derives + caches on first use (deterministic, no
+/// nonce). The minter (settlement) address SIGNS interest mints; this address is
+/// only the `to:` recipient that receives the minted interest revenue. Returns
+/// (path, address).
+pub async fn cached_interest_treasury_address(
+    chain: ChainId,
+) -> Result<(Vec<Vec<u8>>, String), String> {
+    let path = interest_treasury_derivation_path(chain);
+    if let Some(addr) = INTEREST_TREASURY_ADDR_CACHE.with(|c| c.borrow().get(&chain).cloned()) {
+        return Ok((path, addr));
+    }
+    let (_pubkey, addr) = derive_evm_address(path.clone()).await?;
+    INTEREST_TREASURY_ADDR_CACHE.with(|c| {
+        c.borrow_mut().insert(chain, addr.clone());
+    });
+    Ok((path, addr))
+}
