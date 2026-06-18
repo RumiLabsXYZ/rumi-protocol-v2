@@ -12,19 +12,19 @@ Goal: real CFX on **eSpace mainnet (chain 1030)**, tightly capped + dev-gated, m
 
 2. **The debt ceiling is NOT code-enforced** (`debt_ceiling_e8s` is carried in `ChainCollateralConfig` but the open path consumes only `min_cr_e4`). So the "small cap" is **operational** — it is you opening few small vaults, not a guardrail. Treat the cap as a discipline, not a safety net.
 
-3. **The ECDSA key is hardcoded to `test_key_1`** (`chains/monad/config.rs::monad_ecdsa_key_name`). Real CFX would be custodied by tECDSA `test_key_1`. Moving to production `key_1` is a **code change** (M2's area) + redeploy + a full re-derivation of every custody/settlement/interest-treasury address + an IcUSD.sol redeploy with the new minter. See Decision 0.
+3. **The ECDSA key is now a runtime setter (PR #254 — was hardcoded `test_key_1`).** `set_chains_ecdsa_key_name("key_1")` flips the EVM rail to the production threshold key — **no code change/rebuild**. BUT switching re-derives every custody/settlement/interest-treasury address, so it is **rejected once any chain vault exists**: set `key_1` on a FRESH canister BEFORE registering any chain, then deploy IcUSD.sol pointed at the new `key_1`-derived minter. kvg63 staging keeps `test_key_1`. See Decision 0.
 
 ---
 
 ## Decision 0 (REQUIRED — your call): which ECDSA key
-| | `test_key_1` (current) | `key_1` (production) |
+PR #254 made this a **runtime setter** — no code change either way.
+| | `test_key_1` (default) | `key_1` (production) |
 |---|---|---|
-| Code change | none | edit `monad_ecdsa_key_name()` → `"key_1"` (chains source = M2 session) + redeploy |
-| Addresses | already derived (testnet-proven) | ALL custody/settlement/treasury addresses change → IcUSD.sol must be redeployed with the new minter |
-| Risk for real CFX | `test_key_1` is a real threshold key but designated "test" (weaker operational guarantees) | production-grade |
-| Speed | fast (interim) | slower (code + coordination + key availability on the subnet) |
+| How | nothing (default) | `set_chains_ecdsa_key_name("key_1")` on a fresh canister, before any chain is registered |
+| Addresses | testnet-proven | all custody/settlement/treasury addresses derive from `key_1` → deploy IcUSD.sol pointed at the new minter |
+| Risk for real CFX | a real threshold key but designated "test" (weaker operational guarantees) | production-grade |
 
-**Recommendation:** for an *initial, tiny, short-duration* gated launch (a few CFX, you-only), `test_key_1` is the fast path and is consistent with "soft-launch". **Migrate to `key_1` before holding non-trivial value or lifting caps.** If you want real value from day one, do `key_1` first (it is a hard pre-req, not optional, for meaningful TVL).
+**Recommendation: use `key_1` for anything holding real CFX you'd be sad to lose** (the setter makes it cheap now). `test_key_1` only for a throwaway dust-only smoke test. Either way the key MUST be set before the first vault (the setter refuses once vaults exist — orphan guard).
 
 ## Decision 1 (your call): which canister
 - **kvg63 staging** (already runs the rail + interest, `test_key_1`): fastest. Adding chain 1030 here puts real eSpace-mainnet CFX on the staging canister. Fine for a tiny dev-only soft-launch; keep it small.
@@ -48,7 +48,11 @@ Goal: real CFX on **eSpace mainnet (chain 1030)**, tightly capped + dev-gated, m
 
 ## Operator sequence (templates — fill the placeholders; use `--identity rumi_identity`)
 
-> If Decision 0 = `key_1`: FIRST land the `monad_ecdsa_key_name()` → `"key_1"` change (M2 session) + redeploy the backend, because every address below changes with the key.
+**0. (If Decision 0 = `key_1`) set the production key FIRST**, on the fresh canister, before any chain is registered (it refuses once a vault exists — and every address below derives from it):
+```
+icp canister call <CANISTER> set_chains_ecdsa_key_name '("key_1")' -e <ENV> --identity rumi_identity
+icp canister call <CANISTER> get_chains_ecdsa_key_name '()' -e <ENV>   # verify -> "key_1"
+```
 
 **1. Get the canister's chain-1030 settlement (minter) address** (this is what IcUSD.sol's MINTER_ROLE must be):
 ```
