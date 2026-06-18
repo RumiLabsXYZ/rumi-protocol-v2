@@ -114,6 +114,12 @@ fn default_observer_tick_interval_secs() -> u64 { 300 }
 fn default_chain_interest_tick_interval_secs() -> u64 { 31_536_000 }
 /// Task 12: 0.01 icUSD dust floor for interest realization.
 fn default_chain_interest_min_realize_e8s() -> u128 { 1_000_000 }
+/// Production tECDSA key name for the EVM chains rail. Default `test_key_1`
+/// (single-sourced from `monad_ecdsa_key_name`); a fresh production canister sets
+/// `key_1` via `set_chains_ecdsa_key_name` before registering any chain.
+fn default_chains_ecdsa_key_name() -> String {
+    crate::chains::monad::config::monad_ecdsa_key_name()
+}
 
 pub fn default_interest_split() -> Vec<InterestRecipient> {
     vec![
@@ -888,6 +894,14 @@ pub struct State {
     /// crosses this.
     #[serde(default = "default_chain_interest_min_realize_e8s")]
     pub chain_interest_min_realize_e8s: u128,
+    /// Production tECDSA key name for the EVM chains rail: `test_key_1` (default,
+    /// staging/testnet) or `key_1` (production). Read by the EVM `key_id()` at
+    /// derive/sign time, so a fresh production canister uses the production
+    /// threshold key with no rebuild. Settable via `set_chains_ecdsa_key_name`
+    /// ONLY while no chain vault exists — changing it re-derives every per-vault
+    /// custody address, which would orphan already-deposited collateral.
+    #[serde(default = "default_chains_ecdsa_key_name")]
+    pub chains_ecdsa_key_name: String,
     pub fee: Ratio,
     pub developer_principal: Principal,
     pub next_available_vault_id: u64,
@@ -1485,6 +1499,7 @@ impl Default for State {
             observer_tick_interval_secs: default_observer_tick_interval_secs(),
             chain_interest_tick_interval_secs: default_chain_interest_tick_interval_secs(),
             chain_interest_min_realize_e8s: default_chain_interest_min_realize_e8s(),
+            chains_ecdsa_key_name: default_chains_ecdsa_key_name(),
             fee: Ratio::from(Decimal::ZERO),
             developer_principal: Principal::anonymous(),
             next_available_vault_id: 1,
@@ -1632,6 +1647,7 @@ impl From<InitArg> for State {
             observer_tick_interval_secs: default_observer_tick_interval_secs(),
             chain_interest_tick_interval_secs: default_chain_interest_tick_interval_secs(),
             chain_interest_min_realize_e8s: default_chain_interest_min_realize_e8s(),
+            chains_ecdsa_key_name: default_chains_ecdsa_key_name(),
             total_collateral_ratio: Ratio::from(Decimal::MAX),
             last_icp_timestamp: None,
             last_icp_rate: None,
