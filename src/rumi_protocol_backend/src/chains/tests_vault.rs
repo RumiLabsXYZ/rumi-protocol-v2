@@ -244,3 +244,35 @@ fn per_owner_cap_counts_non_terminal_only() {
     insert_open_vault(&mut s, Principal::anonymous(), 4, 0, 0);
     assert_eq!(s.count_owner_active_vaults(&owner), 2);
 }
+
+// ─── M2: stale AwaitingDeposit GC ─────────────────────────────────────────────
+
+use super::vault::{prune_stale_awaiting_deposit, AWAITING_DEPOSIT_TTL_NS};
+
+#[test]
+fn gc_prunes_only_stale_awaiting_deposit() {
+    use super::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
+    let mut s = MultiChainStateV4::default();
+    let mk = |id: u64, st: ChainVaultStatus, opened: u64| ChainVaultV1 {
+        vault_id: id, owner: Principal::anonymous(), collateral_chain: CHAIN,
+        custody_address: "c".into(), collateral_amount_native: 0, debt_e8s: 0,
+        mint_recipient: "r".into(), pending_mint_e8s: 0, status: st, opened_at_ns: opened,
+        owner_evm: None,
+    };
+    let now = 100 * AWAITING_DEPOSIT_TTL_NS;
+    // 1: stale AwaitingDeposit (older than TTL) -> pruned.
+    s.chain_vaults.insert(1, mk(1, ChainVaultStatus::AwaitingDeposit, now - AWAITING_DEPOSIT_TTL_NS - 1));
+    // 2: young AwaitingDeposit (within TTL) -> kept.
+    s.chain_vaults.insert(2, mk(2, ChainVaultStatus::AwaitingDeposit, now - 1));
+    // 3: old Open vault -> kept (only AwaitingDeposit is GC'd; a funded vault is safe).
+    s.chain_vaults.insert(3, mk(3, ChainVaultStatus::Open, 0));
+    // 4: old MintPending -> kept (a mint is in flight; not unfunded).
+    s.chain_vaults.insert(4, mk(4, ChainVaultStatus::MintPending, 0));
+
+    let pruned = prune_stale_awaiting_deposit(&mut s, now, AWAITING_DEPOSIT_TTL_NS);
+    assert_eq!(pruned, 1);
+    assert!(!s.chain_vaults.contains_key(&1), "stale AwaitingDeposit pruned");
+    assert!(s.chain_vaults.contains_key(&2), "young AwaitingDeposit kept");
+    assert!(s.chain_vaults.contains_key(&3), "Open kept");
+    assert!(s.chain_vaults.contains_key(&4), "MintPending kept");
+}

@@ -655,3 +655,37 @@ pub fn borrow_chain_vault_in_state(
     v.pending_mint_e8s = additional_e8s;
     Ok(())
 }
+
+// ─── M2: stale AwaitingDeposit GC (anti-spam backstop) ────────────────────────
+
+/// TTL for an unfunded vault before the GC reaps it (24h in ns).
+pub const AWAITING_DEPOSIT_TTL_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
+
+/// Remove `AwaitingDeposit` vaults whose `opened_at_ns` is older than `ttl_ns`.
+/// Returns the number pruned.
+///
+/// Safe: an `AwaitingDeposit` vault has NO confirmed debt, NO enqueued mint, and
+/// contributes nothing to `chain_supplies`, so removing it cannot break the
+/// supply invariant. Only unfunded vaults are reaped — the observer flips a
+/// funded vault to `MintPending` within its tick (seconds–minutes) long before
+/// the 24h TTL, so a real deposit is never stranded. This is the anti-spam
+/// backstop: it bounds total unfunded state without the self-DoS of a hard cap.
+pub fn prune_stale_awaiting_deposit(
+    state: &mut MultiChainStateV4,
+    now_ns: u64,
+    ttl_ns: u64,
+) -> usize {
+    let stale: Vec<u64> = state
+        .chain_vaults
+        .iter()
+        .filter(|(_, v)| {
+            v.status == ChainVaultStatus::AwaitingDeposit
+                && now_ns.saturating_sub(v.opened_at_ns) > ttl_ns
+        })
+        .map(|(&id, _)| id)
+        .collect();
+    for id in &stale {
+        state.chain_vaults.remove(id);
+    }
+    stale.len()
+}
