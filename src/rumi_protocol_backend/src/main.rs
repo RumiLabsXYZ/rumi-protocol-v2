@@ -5535,6 +5535,23 @@ async fn set_chain_interest_tick_interval_secs(secs: u64) -> Result<(), Protocol
     Ok(())
 }
 
+/// Task 12: tune the interest-realization dust floor (e8s) — accrued interest
+/// below this is not minted (its gas would dwarf the interest). Default 0.01
+/// icUSD. Developer-gated.
+#[candid_method(update)]
+#[update]
+async fn set_chain_interest_min_realize_e8s(e8s: u128) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set the chain interest dust floor".to_string(),
+        ));
+    }
+    mutate_state(|s| s.chain_interest_min_realize_e8s = e8s);
+    log!(INFO, "[set_chain_interest_min_realize_e8s] interest dust floor set to {} e8s", e8s);
+    Ok(())
+}
+
 /// Task 12: manually trigger one interest harvest for `chain` (developer-gated),
 /// for testing/ops independent of the off-by-default timer. Resolves the
 /// interest-treasury address + APR, enqueues an `InterestMint` for every
