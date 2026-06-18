@@ -252,7 +252,9 @@ use super::vault::{prune_stale_awaiting_deposit, AWAITING_DEPOSIT_TTL_NS};
 #[test]
 fn gc_prunes_only_stale_awaiting_deposit() {
     use super::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
-    let mut s = MultiChainStateV4::default();
+    // setup() registers CHAIN (status Registered), so its observer is "active"
+    // and the GC is allowed to reap stale unfunded vaults on it (finding F).
+    let mut s = setup(PRICE_150_USD_E8);
     let mk = |id: u64, st: ChainVaultStatus, opened: u64| ChainVaultV1 {
         vault_id: id, owner: Principal::anonymous(), collateral_chain: CHAIN,
         custody_address: "c".into(), collateral_amount_native: 0, debt_e8s: 0,
@@ -275,4 +277,67 @@ fn gc_prunes_only_stale_awaiting_deposit() {
     assert!(s.chain_vaults.contains_key(&2), "young AwaitingDeposit kept");
     assert!(s.chain_vaults.contains_key(&3), "Open kept");
     assert!(s.chain_vaults.contains_key(&4), "MintPending kept");
+}
+
+#[test]
+fn gc_skips_stale_vaults_when_observer_inactive() {
+    use super::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
+    let now = 100 * AWAITING_DEPOSIT_TTL_NS;
+    let stale = |id: u64| ChainVaultV1 {
+        vault_id: id, owner: Principal::anonymous(), collateral_chain: CHAIN,
+        custody_address: "c".into(), collateral_amount_native: 0, debt_e8s: 0,
+        mint_recipient: "r".into(), pending_mint_e8s: 0,
+        status: ChainVaultStatus::AwaitingDeposit,
+        opened_at_ns: now - AWAITING_DEPOSIT_TTL_NS - 1, owner_evm: None,
+    };
+    // (a) Chain not registered at all -> no observer -> not reaped (would strand
+    //     a funded-but-unobserved deposit).
+    let mut s = MultiChainStateV4::default();
+    s.chain_vaults.insert(1, stale(1));
+    assert_eq!(prune_stale_awaiting_deposit(&mut s, now, AWAITING_DEPOSIT_TTL_NS), 0);
+    assert!(s.chain_vaults.contains_key(&1), "unregistered-chain vault kept");
+    // (b) Chain registered but reorg-halted -> observer halted -> not reaped.
+    let mut s = setup(PRICE_150_USD_E8);
+    s.reorg_halted.insert(CHAIN, true);
+    s.chain_vaults.insert(1, stale(1));
+    assert_eq!(prune_stale_awaiting_deposit(&mut s, now, AWAITING_DEPOSIT_TTL_NS), 0);
+    assert!(s.chain_vaults.contains_key(&1), "reorg-halted-chain vault kept");
+}
+
+// ─── M2 review finding A: collateral release blocked while a borrow mint pends ─
+
+use super::vault::{close_chain_vault_in_state, withdraw_collateral_in_state, WithdrawError};
+
+#[test]
+fn withdraw_and_close_reject_while_borrow_mint_in_flight() {
+    let mut s = setup(PRICE_150_USD_E8);
+    // Open vault, 100 SOL collateral, debt 100e8; borrow 50 more (pending=50e8).
+    insert_open_vault(&mut s, Principal::anonymous(), 7, 100 * ONE_SOL, 100_00000000);
+    borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "good-address".into(), only_good, "SOL", 13_000, 1).unwrap();
+    assert_eq!(s.chain_vaults.get(&7).unwrap().pending_mint_e8s, 50_00000000);
+    // Withdraw must reject — releasing collateral now would undercollateralize
+    // once the borrow mint confirms (debt would jump 100e8 -> 150e8).
+    assert_eq!(
+        withdraw_collateral_in_state(&mut s, 7, 1, "good-address".into(), only_good, "SOL", 13_000, 2),
+        Err(WithdrawError::MintInFlight)
+    );
+    assert_eq!(s.settlement_queues.get(&CHAIN).unwrap().pending_len(), 1, "no withdraw enqueued");
+}
+
+#[test]
+fn close_rejects_while_borrow_mint_in_flight_even_if_debt_zero() {
+    let mut s = setup(PRICE_150_USD_E8);
+    // A repaid (debt 0) but still-Open vault that borrows: debt stays 0, pending=50e8.
+    insert_open_vault(&mut s, Principal::anonymous(), 7, 100 * ONE_SOL, 0);
+    borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "good-address".into(), only_good, "SOL", 13_000, 1).unwrap();
+    // Close (debt==0) must NOT release collateral while the borrow mint pends.
+    assert_eq!(
+        close_chain_vault_in_state(&mut s, 7, "good-address".into(), only_good, "SOL", 13_000, 2),
+        Err(WithdrawError::MintInFlight)
+    );
+    assert_eq!(
+        s.chain_vaults.get(&7).unwrap().status,
+        super::monad::chain_vault::ChainVaultStatus::Open,
+        "vault not closed"
+    );
 }

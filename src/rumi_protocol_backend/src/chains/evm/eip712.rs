@@ -115,6 +115,20 @@ pub fn parse_addr_20(addr: &str) -> Result<[u8; 20], String> {
 }
 
 /// `domainSeparator = keccak256(abi.encode(DOMAIN_TYPEHASH, keccak(name), keccak(version), chainId, verifyingContract))`
+///
+/// CROSS-DEPLOYMENT REPLAY (M2 review finding H — operational assumption): the
+/// domain binds to the chain (`chainId`) and the deployed IcUSD contract
+/// (`verifyingContract`), NOT to the IC backend canister id. Two Rumi backend
+/// deployments (e.g. staging vs mainnet) are therefore distinguished ONLY by
+/// pointing at DISTINCT IcUSD contract addresses. This holds in practice — each
+/// deployment deploys its own IcUSD and registers it via `set_chain_contract` —
+/// but it is an operational requirement, not an in-protocol guarantee: if two
+/// deployments ever shared the same IcUSD address on the same chain, a signed
+/// intent could replay across them. A stronger binding (an EIP-712 `salt` set to
+/// the backend canister id) is a mainnet-hardening follow-up; it is deferred here
+/// because it would couple the frontend signer to the canister id and is
+/// unnecessary on the testnet rail where the contract-per-deployment assumption
+/// is naturally satisfied.
 pub fn domain_separator(chain_id: u64, verifying_contract: &str) -> Result<[u8; 32], String> {
     let mut buf = Vec::with_capacity(32 * 5);
     buf.extend_from_slice(&domain_typehash());
@@ -208,6 +222,14 @@ pub fn verify_intent(
 ) -> Result<(String, Principal), VerifyError> {
     if IntentAction::from_u8(intent.action) != Some(expected_action) {
         return Err(VerifyError::ActionMismatch);
+    }
+    // The intent's `chain_id` is hashed into the digest as a u64, but `ChainId`
+    // is a u32; the caller truncates `intent.chain_id as u32` for config lookup
+    // and synthetic-owner derivation. Reject any value that would not round-trip
+    // through u32 so the digest-bound chain can never diverge from the resolved
+    // chain (M2 review finding D — latent on chains 71/10143, guarded anyway).
+    if intent.chain_id > u32::MAX as u64 {
+        return Err(VerifyError::Recover("chain_id exceeds u32 range".into()));
     }
     if now_secs > intent.deadline_secs {
         return Err(VerifyError::Expired);

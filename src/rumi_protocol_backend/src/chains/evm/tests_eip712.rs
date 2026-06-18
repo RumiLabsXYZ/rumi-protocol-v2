@@ -239,3 +239,16 @@ fn verify_intent_rejects_tampered_intent() {
         Err(VerifyError::SignerMismatch)
     );
 }
+
+#[test]
+fn verify_intent_rejects_chain_id_above_u32() {
+    // chain_id is hashed as u64 but resolved as u32; a value > u32::MAX must be
+    // rejected so the digest-bound chain cannot diverge from the resolved chain.
+    let mut intent = golden_intent();
+    intent.chain_id = (u32::MAX as u64) + 1;
+    let sig = sign_for(&intent, GOLDEN_CONTRACT);
+    assert!(matches!(
+        verify_intent(&intent, &sig, IntentAction::Open, GOLDEN_CONTRACT, 1000),
+        Err(VerifyError::Recover(_))
+    ));
+}

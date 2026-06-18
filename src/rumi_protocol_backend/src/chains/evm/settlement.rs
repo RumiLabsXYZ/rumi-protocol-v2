@@ -868,25 +868,26 @@ async fn confirm_op(
                 }
             };
 
-            // Find the Mint log for this vault, preferring the one whose tx hash
-            // matches this op's submission (case-insensitive).
-            // `log_index` is threaded through from get_logs but not needed here
-            // (the settlement path selects by vault_id + tx_hash, not by log
-            // identity — each mint op maps to exactly one Mint event).
+            // Find THIS op's Mint log by EXACT tx-hash match (case-insensitive).
+            //
+            // M2 review finding B: the per-op IcUSD idempotency (`mintedOps[op_id]`,
+            // replacing `minted[vault_id]`) means a vault can be minted to more
+            // than once (borrow), so there can be MULTIPLE `Mint(vault_id, …)` logs
+            // for the same vault — possibly in the same block. The old fallback
+            // ("first vault-id match when no tx-hash match") could therefore bind
+            // an arbitrary same-vault mint's amount to THIS op. Require the exact
+            // tx-hash match: this op submitted exactly one tx (`tx_hash`), and that
+            // tx emitted exactly the `Mint` for this op. If no log's tx hash matches
+            // (transient RPC view), leave the op Inflight and retry next tick.
             let mut matched: Option<(u128, String)> = None;
             for (topics, data, log_tx, log_block, _log_index) in &logs {
+                if !log_tx.eq_ignore_ascii_case(&tx_hash) {
+                    continue;
+                }
                 match evm_rpc::decode_mint_log(topics, data, log_tx, *log_block) {
                     Ok(m) if m.vault_id == vault_id => {
-                        let exact = log_tx.eq_ignore_ascii_case(&tx_hash);
-                        // Prefer an exact tx-hash match; otherwise take the first
-                        // vault-id match as a fallback (safe: IcUSD.mint reverts a
-                        // repeat vault_id, so at most one Mint log per vault exists).
-                        if exact {
-                            matched = Some((m.amount_e8s, m.recipient));
-                            break;
-                        } else if matched.is_none() {
-                            matched = Some((m.amount_e8s, m.recipient));
-                        }
+                        matched = Some((m.amount_e8s, m.recipient));
+                        break;
                     }
                     Ok(_) => {}
                     Err(e) => {

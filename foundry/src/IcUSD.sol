@@ -23,7 +23,17 @@ contract IcUSD is ERC20, AccessControl {
     /// resubmit-after-transient-RPC-error must not double-mint on-chain. Keyed
     /// per-OP (not per-vault) so a vault can be minted to more than once across
     /// distinct ops (borrow). `op_id` is the Rumi settlement queue's
-    /// unique-per-chain op id.
+    /// unique-per-chain op id, assigned monotonically from the queue tail.
+    ///
+    /// OPERATOR NOTE (M2 review finding I): `op_id` uniqueness vs this contract
+    /// relies on the backend's settlement-queue tail only ever increasing for a
+    /// given (chain, IcUSD contract). Resetting backend chain state to a lower
+    /// tail — `delete_chain` + re-register, or restoring an older state snapshot —
+    /// while keeping the SAME deployed IcUSD contract would replay op_ids that are
+    /// already `mintedOps[op_id] == true`, so every post-reset mint would revert
+    /// ("op already minted"). Re-registering an EVM chain against the same IcUSD
+    /// contract is therefore UNSUPPORTED: deploy a fresh IcUSD if the backend
+    /// chain state is ever reset.
     mapping(uint64 => bool) public mintedOps;
 
     constructor(address admin, address minter) ERC20("Rumi icUSD", "icUSD") {

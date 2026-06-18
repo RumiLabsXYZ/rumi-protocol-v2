@@ -136,6 +136,12 @@ pub enum WithdrawError {
     /// phantom collateral), and a `MintPending` vault has a mint in flight
     /// against its collateral. Carries the offending status.
     WrongStatus { status: ChainVaultStatus },
+    /// A borrow mint is in flight for this Open vault (`pending_mint_e8s != 0`).
+    /// The CR check would run against the STALE confirmed `debt_e8s` (which does
+    /// not yet include the pending borrow), so releasing collateral now could
+    /// leave the vault below `min_cr_e4` once the borrow mint confirms. Reject
+    /// until the mint settles (mirrors `BorrowError::MintInFlight`). M2 review-A.
+    MintInFlight,
 }
 
 /// Compute the collateral ratio (e4: 25000 == 250.00%) for a foreign-chain vault.
@@ -420,6 +426,14 @@ pub fn withdraw_collateral_in_state(
         if v.status != ChainVaultStatus::Open {
             return Err(WithdrawError::WrongStatus { status: v.status.clone() });
         }
+        // A borrow mint in flight means the CR check below would run against the
+        // stale confirmed debt (pending borrow not yet folded in); releasing
+        // collateral now could undercollateralize the vault once the mint
+        // confirms. Reject until it settles (the settlement queue is sequential,
+        // so this clears quickly). M2 review finding A.
+        if v.pending_mint_e8s != 0 {
+            return Err(WithdrawError::MintInFlight);
+        }
         if amount_e18 > v.collateral_amount_native {
             return Err(WithdrawError::InsufficientCollateral);
         }
@@ -526,6 +540,15 @@ pub fn close_chain_vault_in_state(
             .ok_or(WithdrawError::UnknownVault)?;
         if v.debt_e8s != 0 {
             return Err(WithdrawError::HasDebt);
+        }
+        // A repaid (debt 0) but still-Open vault CAN have a borrow mint in flight
+        // (pending_mint_e8s != 0). Closing it now would release all collateral,
+        // then the borrow mint confirms and leaves debt with no backing. Reject
+        // BEFORE the degenerate short-circuit below. M2 review finding A. (The
+        // delegate's withdraw path also guards this, but the zero-collateral
+        // short-circuit bypasses the delegate, so the check must live here too.)
+        if v.pending_mint_e8s != 0 {
+            return Err(WithdrawError::MintInFlight);
         }
         (v.collateral_amount_native, v.status.clone())
     };
@@ -670,16 +693,29 @@ pub const AWAITING_DEPOSIT_TTL_NS: u64 = 24 * 60 * 60 * 1_000_000_000;
 /// funded vault to `MintPending` within its tick (seconds–minutes) long before
 /// the 24h TTL, so a real deposit is never stranded. This is the anti-spam
 /// backstop: it bounds total unfunded state without the self-DoS of a hard cap.
+///
+/// M2 review finding F: a vault is reaped ONLY if its chain's observer is
+/// currently running — `status == Registered` AND not `reorg_halted`. If the
+/// observer is halted or the chain is disabled, a funded-but-not-yet-observed
+/// deposit could otherwise be stranded by the GC. A vault on an
+/// inactive-observer chain is left until the observer resumes (then it either
+/// flips to `MintPending` if funded, or ages out on a later GC tick once active).
 pub fn prune_stale_awaiting_deposit(
     state: &mut MultiChainStateV4,
     now_ns: u64,
     ttl_ns: u64,
 ) -> usize {
+    use crate::chains::config::ChainStatus;
     let stale: Vec<u64> = state
         .chain_vaults
         .iter()
         .filter(|(_, v)| {
-            v.status == ChainVaultStatus::AwaitingDeposit
+            let observer_active = matches!(
+                state.chain_configs.get(&v.collateral_chain).map(|c| c.status),
+                Some(ChainStatus::Registered)
+            ) && !state.reorg_halted.get(&v.collateral_chain).copied().unwrap_or(false);
+            observer_active
+                && v.status == ChainVaultStatus::AwaitingDeposit
                 && now_ns.saturating_sub(v.opened_at_ns) > ttl_ns
         })
         .map(|(&id, _)| id)

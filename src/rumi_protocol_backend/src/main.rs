@@ -1144,12 +1144,20 @@ fn withdraw_chain_collateral(
     }
     let now = ic_cdk::api::time();
     mutate_state(|s| {
-        let chain = s
+        let vault = s
             .multi_chain
             .chain_vaults
             .get(&vault_id)
-            .map(|v| v.collateral_chain)
             .ok_or_else(|| ProtocolError::ChainAdmin("unknown vault".into()))?;
+        // M2 review finding E: an EVM-owned (self-serve) vault may ONLY be driven
+        // by its EVM signer via the `_evm` methods — the operator must not be able
+        // to move a user's collateral. Refuse the dev path for such vaults.
+        if vault.owner_evm.is_some() {
+            return Err(ProtocolError::ChainAdmin(
+                "vault is EVM-owned; use the signed _evm endpoint".into(),
+            ));
+        }
+        let chain = vault.collateral_chain;
         let (symbol, min_cr) = evm_vault_params(chain)?;
         rumi_protocol_backend::chains::vault::withdraw_collateral_in_state(
             &mut s.multi_chain,
@@ -1183,12 +1191,20 @@ fn close_chain_vault(vault_id: u64, dest_address: String) -> Result<(), Protocol
     }
     let now = ic_cdk::api::time();
     mutate_state(|s| {
-        let chain = s
+        let vault = s
             .multi_chain
             .chain_vaults
             .get(&vault_id)
-            .map(|v| v.collateral_chain)
             .ok_or_else(|| ProtocolError::ChainAdmin("unknown vault".into()))?;
+        // M2 review finding E: an EVM-owned (self-serve) vault may ONLY be driven
+        // by its EVM signer via the `_evm` methods — the operator must not be able
+        // to move a user's collateral. Refuse the dev path for such vaults.
+        if vault.owner_evm.is_some() {
+            return Err(ProtocolError::ChainAdmin(
+                "vault is EVM-owned; use the signed _evm endpoint".into(),
+            ));
+        }
+        let chain = vault.collateral_chain;
         let (symbol, min_cr) = evm_vault_params(chain)?;
         rumi_protocol_backend::chains::vault::close_chain_vault_in_state(
             &mut s.multi_chain,
@@ -1312,6 +1328,18 @@ async fn open_chain_vault_evm(
     let now = ic_cdk::api::time();
     let owner_evm = v.owner_evm.clone();
     mutate_state(|s| {
+        // Re-check the per-owner cap on the AUTHORITATIVE map before inserting
+        // (M2 review finding C). The pre-await check can be raced: several opens
+        // for the same owner (distinct nonces) all pass their pre-await count
+        // while their vaults are still mid-derive and not yet inserted. Without
+        // this re-check, a pipelined burst could blow past MAX_VAULTS_PER_OWNER.
+        // The loser forfeits its (already-spent) nonce — consistent with the
+        // async open's spend-on-attempt semantics.
+        if s.multi_chain.count_owner_active_vaults(&v.synthetic)
+            >= rumi_protocol_backend::chains::vault::MAX_VAULTS_PER_OWNER
+        {
+            return Err(ProtocolError::EvmAuth("per-owner vault cap reached".into()));
+        }
         rumi_protocol_backend::chains::vault::open_chain_vault_in_state(
             &mut s.multi_chain,
             v.chain,
