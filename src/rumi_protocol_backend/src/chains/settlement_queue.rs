@@ -23,6 +23,24 @@ pub enum SettlementOpKind {
     /// which was never enqueued anywhere and carried the wrong unit + no id).
     NativeWithdrawal { recipient: String, amount_e18: u128, vault_id: u64 },
     Burn { amount_e8s: u128 },
+    /// Task 12 (Option B): realize accrued interest by minting `amount_e8s`
+    /// icUSD to the per-chain interest-treasury address. `mint_id` is a FRESH,
+    /// globally-unique id (from `chain_vault_id_counter`) used as the on-chain
+    /// `IcUSD.mint` vault_id arg + the Mint-log match key — the REAL vault
+    /// already minted once at open and `IcUSD.mint` reverts a repeat vault_id.
+    /// `vault_id` is the REAL vault the interest is charged to; the confirm path
+    /// grows ITS `debt_e8s` and advances its `last_interest_accrual_ns` to
+    /// `accrual_through_ns` (the harvest snapshot time). `recipient` is the
+    /// per-chain interest-treasury address (resolved once at harvest time), used
+    /// as the `IcUSD.mint` `to:` and recipient-verified on confirm. EVM-only in
+    /// Phase 1b.
+    InterestMint {
+        vault_id: u64,
+        mint_id: u64,
+        amount_e8s: u128,
+        accrual_through_ns: u64,
+        recipient: String,
+    },
 }
 
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
@@ -142,14 +160,16 @@ impl SettlementQueueV1 {
         })
     }
 
-    /// True iff the queue has a NON-terminal `Mint` op (`Queued` or `Inflight`).
-    /// Distinct from `has_active_op` (which also counts `NativeWithdrawal`):
-    /// only a `Mint` changes on-chain icUSD `totalSupply`, so only a live mint
-    /// can mask a burn from the observer's supply-equality backstop
-    /// (`backstop_should_scan`). Terminal (`Succeeded`/`Failed`) ops never count.
+    /// True iff the queue has a NON-terminal supply-increasing mint op (`Mint`
+    /// or, Task 12, `InterestMint`) in `Queued`/`Inflight`. Distinct from
+    /// `has_active_op` (which also counts `NativeWithdrawal`): only a mint changes
+    /// on-chain icUSD `totalSupply`, so only a live mint can mask a burn from the
+    /// observer's supply-equality backstop (`backstop_should_scan`). An interest
+    /// mint also raises `totalSupply`, so it counts too. Terminal
+    /// (`Succeeded`/`Failed`) ops never count.
     pub fn has_active_mint_op(&self) -> bool {
         self.pending.values().any(|op| {
-            matches!(op.kind, SettlementOpKind::Mint { .. })
+            matches!(op.kind, SettlementOpKind::Mint { .. } | SettlementOpKind::InterestMint { .. })
                 && matches!(
                     op.status,
                     SettlementOpStatus::Queued | SettlementOpStatus::Inflight { .. }

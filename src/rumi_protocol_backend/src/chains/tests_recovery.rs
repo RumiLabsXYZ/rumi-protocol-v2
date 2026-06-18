@@ -30,6 +30,8 @@ fn vault(vault_id: u64, status: ChainVaultStatus, pending: u128, collateral: u12
         pending_mint_e8s: pending,
         status,
         opened_at_ns: 0,
+        last_interest_accrual_ns: 0,
+        pending_interest_mint_e8s: 0,
     }
 }
 

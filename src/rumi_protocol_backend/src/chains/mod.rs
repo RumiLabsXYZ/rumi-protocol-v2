@@ -34,6 +34,7 @@ pub mod adapter;
 pub mod admin;
 pub mod collateral_config;
 pub mod config;
+pub mod interest;
 pub mod multi_chain_state;
 pub mod recovery;
 pub mod settlement_queue;

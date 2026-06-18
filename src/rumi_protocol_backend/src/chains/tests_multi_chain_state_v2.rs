@@ -168,6 +168,8 @@ fn v2_cbor_snapshot_decodes_into_v3_without_wiping_state() {
         pending_mint_e8s: 0,
         status: ChainVaultStatus::Open,
         opened_at_ns: 99,
+        last_interest_accrual_ns: 0,
+        pending_interest_mint_e8s: 0,
     });
     v2.chain_contracts.insert(ChainId(10143), "0xicusd".into());
     v2.last_observed_block.insert(ChainId(10143), 35_136_248);
@@ -241,6 +243,8 @@ fn v3_cbor_snapshot_decodes_into_v4_without_wiping_state() {
         pending_mint_e8s: 0,
         status: ChainVaultStatus::Open,
         opened_at_ns: 99,
+        last_interest_accrual_ns: 0,
+        pending_interest_mint_e8s: 0,
     });
     v3.chain_contracts.insert(ChainId(10143), "0xicusd".into());
     v3.last_observed_block.insert(ChainId(10143), 35_136_248);
@@ -288,6 +292,8 @@ fn chain_vault_debt_total_sums_only_chain_vaults() {
         pending_mint_e8s: 0,
         status: ChainVaultStatus::Open,
         opened_at_ns: 0,
+        last_interest_accrual_ns: 0,
+        pending_interest_mint_e8s: 0,
     });
     s.chain_vaults.insert(2, ChainVaultV1 {
         vault_id: 2,
@@ -300,6 +306,71 @@ fn chain_vault_debt_total_sums_only_chain_vaults() {
         pending_mint_e8s: 0,
         status: ChainVaultStatus::Open,
         opened_at_ns: 0,
+        last_interest_accrual_ns: 0,
+        pending_interest_mint_e8s: 0,
     });
     assert_eq!(s.total_chain_vault_debt_e8s(), 10_000_000_000);
+}
+
+// Task 12: a ChainVaultV1 snapshot written BEFORE the interest fields existed
+// (no `last_interest_accrual_ns` / `pending_interest_mint_e8s` keys) MUST decode
+// into the current ChainVaultV1 with those fields defaulting to 0, NOT error
+// (which on a real canister wipes multi_chain state via the replay fallback).
+// Then the post_upgrade stamp repairs the 0 so the first harvest doesn't bill
+// from the unix epoch.
+#[test]
+fn legacy_chain_vault_decodes_interest_fields_defaulted_then_stamped() {
+    use super::vault::{ChainVaultStatus, ChainVaultV1};
+    use candid::Principal;
+    use serde::Serialize;
+
+    // The exact pre-Task-12 ChainVaultV1 shape (same field names + serde rename).
+    #[derive(Serialize)]
+    struct LegacyChainVault {
+        vault_id: u64,
+        owner: Principal,
+        collateral_chain: ChainId,
+        custody_address: String,
+        #[serde(rename = "collateral_amount_e18")]
+        collateral_amount_native: u128,
+        debt_e8s: u128,
+        mint_recipient: String,
+        pending_mint_e8s: u128,
+        status: ChainVaultStatus,
+        opened_at_ns: u64,
+    }
+    let legacy = LegacyChainVault {
+        vault_id: 7,
+        owner: Principal::anonymous(),
+        collateral_chain: ChainId(71),
+        custody_address: "0xcustody".into(),
+        collateral_amount_native: 1_234,
+        debt_e8s: 555,
+        mint_recipient: "0xrecipient".into(),
+        pending_mint_e8s: 0,
+        status: ChainVaultStatus::Open,
+        opened_at_ns: 99,
+    };
+
+    let mut buf = Vec::new();
+    ciborium::ser::into_writer(&legacy, &mut buf).expect("encode legacy vault");
+    let decoded: ChainVaultV1 = ciborium::de::from_reader(buf.as_slice())
+        .expect("legacy ChainVaultV1 MUST decode into the new shape (no state wipe)");
+
+    // Pre-existing fields preserved exactly:
+    assert_eq!(decoded.vault_id, 7);
+    assert_eq!(decoded.debt_e8s, 555);
+    assert_eq!(decoded.collateral_amount_native, 1_234);
+    assert_eq!(decoded.opened_at_ns, 99);
+    assert_eq!(decoded.status, ChainVaultStatus::Open);
+    // New interest fields defaulted to 0:
+    assert_eq!(decoded.last_interest_accrual_ns, 0);
+    assert_eq!(decoded.pending_interest_mint_e8s, 0);
+
+    // The post_upgrade stamp repairs the 0 last_interest_accrual_ns.
+    let mut s = MultiChainState::default();
+    s.chain_vaults.insert(7, decoded);
+    super::supply::stamp_chain_interest_accrual_start(&mut s, 1_700_000_000_000_000_000);
+    assert_eq!(s.chain_vaults[&7].last_interest_accrual_ns, 1_700_000_000_000_000_000);
+    assert_eq!(s.chain_vaults[&7].debt_e8s, 555, "stamp does not touch debt");
 }

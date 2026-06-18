@@ -70,6 +70,21 @@ pub struct ChainVaultV1 {
     pub pending_mint_e8s: u128,
     pub status: ChainVaultStatus,
     pub opened_at_ns: u64,
+    /// Phase 1b Task 12 (interest accrual). Start of the current accrual window
+    /// (ns). Set when the vault becomes Open (mint confirm); advanced to the
+    /// harvest snapshot time when an interest mint confirms. `#[serde(default)]`
+    /// = 0 for a vault decoded from a pre-field snapshot; `post_upgrade` then
+    /// stamps it to the upgrade time (a 0 would otherwise bill ~56yr of interest
+    /// on the first harvest). Added in-place per the repo's reorg-fields
+    /// precedent (phase-1b struct, never mainnet-persisted; serde-default is the
+    /// state-wipe safety).
+    #[serde(default)]
+    pub last_interest_accrual_ns: u64,
+    /// Interest amount locked in at harvest, awaiting its on-chain mint
+    /// confirmation (Design-B pending pattern, mirrors `pending_mint_e8s`).
+    /// `> 0` ⇒ one interest realization is in flight for this vault.
+    #[serde(default)]
+    pub pending_interest_mint_e8s: u128,
 }
 
 /// Reasons `open_chain_vault_in_state` / `verify_deposit_and_enqueue_mint_in_state`
@@ -129,6 +144,12 @@ pub enum WithdrawError {
     /// phantom collateral), and a `MintPending` vault has a mint in flight
     /// against its collateral. Carries the offending status.
     WrongStatus { status: ChainVaultStatus },
+    /// An interest mint is in flight (`pending_interest_mint_e8s > 0`):
+    /// collateral cannot leave until it confirms. Otherwise a full close could
+    /// confirm AFTER the collateral is withdrawn and credit the realized
+    /// interest as unbacked debt on a Closed vault (Task 12). The window is a
+    /// few settlement ticks; the next harvest/confirm clears it.
+    InterestRealizationPending,
 }
 
 /// Compute the collateral ratio (e4: 25000 == 250.00%) for a foreign-chain vault.
@@ -258,6 +279,10 @@ pub fn open_chain_vault_in_state(
             pending_mint_e8s: debt_e8s,
             status: ChainVaultStatus::AwaitingDeposit,
             opened_at_ns: now_ns,
+            // Interest accrues only once the vault is Open with confirmed debt;
+            // stamped to `now` at mint-confirm (Task 7). Open-time = 0 (debt 0).
+            last_interest_accrual_ns: 0,
+            pending_interest_mint_e8s: 0,
         },
     );
     // No mint enqueued - that happens in verify_deposit_and_enqueue_mint_in_state.
@@ -396,7 +421,7 @@ pub fn withdraw_collateral_in_state(
     now_ns: u64,
 ) -> Result<(), WithdrawError> {
     // Step 1: read-only validation. No mutation on any rejection path.
-    let (chain, remaining, debt_e8s) = {
+    let (chain, remaining, debt_e8s, last_accrual_ns) = {
         let v = state
             .chain_vaults
             .get(&vault_id)
@@ -413,11 +438,17 @@ pub fn withdraw_collateral_in_state(
         if v.status != ChainVaultStatus::Open {
             return Err(WithdrawError::WrongStatus { status: v.status.clone() });
         }
+        // Task 12: refuse collateral-out while an interest mint is in flight.
+        // The mint could confirm AFTER the collateral leaves and credit the
+        // realized interest as unbacked debt on a (then-Closing/Closed) vault.
+        if v.pending_interest_mint_e8s > 0 {
+            return Err(WithdrawError::InterestRealizationPending);
+        }
         if amount_e18 > v.collateral_amount_native {
             return Err(WithdrawError::InsufficientCollateral);
         }
         let remaining = v.collateral_amount_native - amount_e18;
-        (v.collateral_chain, remaining, v.debt_e8s)
+        (v.collateral_chain, remaining, v.debt_e8s, v.last_interest_accrual_ns)
     };
 
     // Price is needed for the post-withdrawal CR check (only when debt remains).
@@ -432,8 +463,22 @@ pub fn withdraw_collateral_in_state(
         .unwrap_or(18);
 
     // A debt-free vault is trivially over-collateralized; skip the CR check.
+    // Task 12: the CR check counts accrued-but-unrealized interest, so interest
+    // can correctly push a vault toward min CR. apr_bps is self-resolved from the
+    // vault's chain config (0 for a chain without a collateral config -> no
+    // interest, behavior-preserving for non-CDP chains). This is a read-side
+    // adjustment only; no mint happens here.
     if debt_e8s > 0 {
-        let cr_e4 = collateral_ratio_e4(remaining, native_decimals, price_e8, debt_e8s);
+        let apr_bps = crate::chains::collateral_config::chain_collateral_config(chain)
+            .map(|c| c.interest_apr_bps)
+            .unwrap_or(0);
+        let accrued = crate::chains::interest::accrued_chain_interest_e8s(
+            debt_e8s,
+            apr_bps,
+            now_ns.saturating_sub(last_accrual_ns),
+        );
+        let effective_debt = debt_e8s.saturating_add(accrued);
+        let cr_e4 = collateral_ratio_e4(remaining, native_decimals, price_e8, effective_debt);
         if cr_e4 < min_cr_e4 {
             return Err(WithdrawError::BelowMinCr { cr_e4, min_e4: min_cr_e4 });
         }
