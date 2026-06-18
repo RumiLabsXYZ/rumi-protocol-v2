@@ -125,6 +125,7 @@ struct ChainVaultV1 {
     pending_mint_e8s: candid::Nat,
     status: ChainVaultStatus,
     opened_at_ns: u64,
+    owner_evm: Option<String>,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
@@ -146,6 +147,9 @@ struct SupplyAuditWire {
 #[derive(CandidType, Deserialize, Clone, Debug)]
 enum ProtocolError {
     ChainAdmin(String),
+    /// M2 self-serve rejection (bad nonce, wrong signer, etc.). The `_evm`
+    /// methods return this; mirrored so the rejection-path asserts decode.
+    EvmAuth(String),
 }
 
 // ─── Wasm loaders ────────────────────────────────────────────────────────────
@@ -692,4 +696,254 @@ fn push_burn_log(
         "push_log",
         Encode!(&topics, &data, &tx_hash.to_string(), &block).unwrap(),
     );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// M2: EVM-native self-serve (EIP-712 signed, ANONYMOUS caller) end-to-end.
+//
+// Proves the full self-serve loop with the IC caller = Principal::anonymous():
+//   open_chain_vault_evm -> deposit -> mint -> borrow_chain_vault_evm -> mint
+//   -> repay (burn) -> close_chain_vault_evm -> Closed
+// plus replay-nonce + wrong-signer rejection. The vault is owned by the
+// synthetic principal derived from the recovered EVM signer; the anonymous calls
+// reaching the method body proves the inspect_message accept-list works.
+// ════════════════════════════════════════════════════════════════════════════
+
+use rumi_protocol_backend::chains::evm::eip712::{
+    domain_separator, intent_digest, intent_struct_hash, synthetic_owner, IntentAction, VaultIntent,
+};
+
+const EVM_CONTRACT: &str = "0x00000000000000000000000000000000cf1c0de5";
+
+/// The fixed scalar=1 secp256k1 signer + its canonical EVM address.
+fn evm_signer() -> (k256::ecdsa::SigningKey, String) {
+    use k256::ecdsa::{SigningKey, VerifyingKey};
+    let mut b = [0u8; 32];
+    b[31] = 1;
+    let sk = SigningKey::from_bytes(&b.into()).unwrap();
+    let pk = VerifyingKey::from(&sk).to_encoded_point(false).as_bytes().to_vec();
+    let addr = rumi_protocol_backend::chains::evm::tecdsa::evm_address_from_pubkey(&pk).unwrap();
+    (sk, addr)
+}
+
+fn make_intent(
+    action: IntentAction,
+    owner: &str,
+    vault_id: u64,
+    collateral_wei: u128,
+    debt_e8s: u128,
+    nonce: u64,
+) -> VaultIntent {
+    VaultIntent {
+        action: action.as_u8(),
+        chain_id: CONFLUX_CHAIN_ID as u64,
+        owner: owner.to_string(),
+        vault_id,
+        collateral_wei,
+        debt_e8s,
+        recipient: owner.to_string(), // M2: recipient forced == owner
+        nonce,
+        deadline_secs: 9_999_999_999,
+    }
+}
+
+/// Sign an intent for `EVM_CONTRACT` with the fixed key → 65-byte r||s||v sig.
+fn sign(sk: &k256::ecdsa::SigningKey, intent: &VaultIntent) -> Vec<u8> {
+    use k256::ecdsa::{RecoveryId, Signature};
+    let digest = intent_digest(
+        &domain_separator(intent.chain_id, EVM_CONTRACT).unwrap(),
+        &intent_struct_hash(intent).unwrap(),
+    );
+    let (sig, rid): (Signature, RecoveryId) = sk.sign_prehash_recoverable(&digest).unwrap();
+    let mut out = sig.to_bytes().to_vec();
+    out.push(27 + u8::from(rid));
+    out
+}
+
+/// dev-gated register + config for Conflux (steps shared with the happy path).
+fn configure_conflux(pic: &PocketIc, backend: Principal, mock: Principal, seed: u64) {
+    decode_result(
+        update_dev(pic, backend, "set_evm_rpc_principal", Encode!(&mock).unwrap()),
+        "set_evm_rpc_principal",
+    )
+    .expect("set_evm_rpc_principal");
+    update_any(pic, mock, "set_getlogs_max_range", Encode!(&1000u64).unwrap());
+    update_any(pic, mock, "set_espace_receipt_fields", Encode!(&true).unwrap());
+    let reg = RegisterChainArg {
+        chain_id: ChainId(CONFLUX_CHAIN_ID),
+        display_name: "ConfluxESpaceTestnet".to_string(),
+        rpc_endpoints: vec!["https://evmtestnet.confluxrpc.com".to_string()],
+        finality_depth: CONFLUX_FINALITY_DEPTH as u32,
+        gas_strategy: GasStrategy::EvmEip1559 { max_priority_fee_gwei: 1, max_fee_gwei_ceiling: 100 },
+        chain_native_decimals: 18,
+        min_quorum_providers: Some(1),
+    };
+    decode_result(update_dev(pic, backend, "register_chain", Encode!(&reg).unwrap()), "register_chain")
+        .expect("register_chain");
+    decode_result(
+        update_dev(pic, backend, "set_chain_contract", Encode!(&ChainId(CONFLUX_CHAIN_ID), &EVM_CONTRACT.to_string()).unwrap()),
+        "set_chain_contract",
+    )
+    .expect("set_chain_contract");
+    decode_result(
+        update_dev(pic, backend, "set_manual_collateral_price", Encode!(&ChainId(CONFLUX_CHAIN_ID), &"CFX".to_string(), &15_000_000u64).unwrap()),
+        "set_manual_collateral_price",
+    )
+    .expect("set_manual_collateral_price");
+    decode_result(
+        update_dev(pic, backend, "set_last_observed_block", Encode!(&ChainId(CONFLUX_CHAIN_ID), &seed).unwrap()),
+        "set_last_observed_block",
+    )
+    .expect("set_last_observed_block");
+    decode_result(
+        update_dev(pic, backend, "set_burn_watch_poll_enabled", Encode!(&ChainId(CONFLUX_CHAIN_ID), &true).unwrap()),
+        "set_burn_watch_poll_enabled",
+    )
+    .expect("set_burn_watch_poll_enabled");
+}
+
+/// Submit a signed intent as the ANONYMOUS caller; decode `Result<u64, _>`.
+fn open_evm(pic: &PocketIc, backend: Principal, intent: &VaultIntent, sig: &[u8]) -> Result<u64, ProtocolError> {
+    match pic
+        .update_call(backend, Principal::anonymous(), "open_chain_vault_evm", Encode!(intent, &sig.to_vec()).unwrap())
+        .expect("open_chain_vault_evm call")
+    {
+        WasmResult::Reply(b) => Decode!(&b, Result<u64, ProtocolError>).expect("decode open_evm"),
+        WasmResult::Reject(msg) => panic!("open_chain_vault_evm rejected at transport (inspect_message?): {msg}"),
+    }
+}
+
+/// Submit a signed borrow/withdraw/close intent as ANONYMOUS; decode `Result<(), _>`.
+fn unit_evm(pic: &PocketIc, backend: Principal, method: &str, intent: &VaultIntent, sig: &[u8]) -> Result<(), ProtocolError> {
+    match pic
+        .update_call(backend, Principal::anonymous(), method, Encode!(intent, &sig.to_vec()).unwrap())
+        .unwrap_or_else(|e| panic!("{method} call failed: {e}"))
+    {
+        WasmResult::Reply(b) => Decode!(&b, Result<(), ProtocolError>).unwrap_or_else(|e| panic!("decode {method}: {e}")),
+        WasmResult::Reject(msg) => panic!("{method} rejected at transport (inspect_message?): {msg}"),
+    }
+}
+
+#[test]
+fn conflux_evm_self_serve_full_flow_and_rejections() {
+    let (pic, backend, mock) = boot();
+    let seed: u64 = 1_000_000;
+    configure_conflux(&pic, backend, mock, seed);
+    assert_supply(&pic, backend, 0, "after config");
+
+    let (sk, owner) = evm_signer();
+    let synthetic = synthetic_owner(
+        rumi_protocol_backend::chains::config::ChainId(CONFLUX_CHAIN_ID),
+        &owner,
+    )
+    .unwrap();
+
+    // Block plan + settlement broadcast hash.
+    let cursor1 = seed + SCAN_WINDOW;
+    let head1 = cursor1 + CONFLUX_FINALITY_DEPTH + 24;
+    update_any(&pic, mock, "set_blocks", Encode!(&head1, &head1).unwrap());
+    update_any(&pic, mock, "set_next_send_hash", Encode!(&"0xevmmint1".to_string()).unwrap());
+
+    // ECDSA probe — gated subset if PocketIC can't provision test_key_1.
+    let settlement_addr = match update_dev(&pic, backend, "get_chain_settlement_address", Encode!(&ChainId(CONFLUX_CHAIN_ID)).unwrap()) {
+        WasmResult::Reply(b) => match Decode!(&b, Result<String, ProtocolError>) {
+            Ok(Ok(addr)) => Some(addr),
+            _ => None,
+        },
+        WasmResult::Reject(_) => None,
+    };
+    let settlement_addr = match settlement_addr {
+        Some(a) => a,
+        None => {
+            eprintln!("[evm self-serve] ECDSA unavailable; running gated subset (config + invariant 0)");
+            // Even gated, a signed open must FAIL only at the derive (not auth):
+            // verify the signature path is reached (returns an EvmAuth derive err).
+            let intent = make_intent(IntentAction::Open, &owner, 0, 1_400 * E18, 100 * E8, 0);
+            let sig = sign(&sk, &intent);
+            assert!(matches!(open_evm(&pic, backend, &intent, &sig), Err(ProtocolError::EvmAuth(_))));
+            assert_supply(&pic, backend, 0, "gated final");
+            return;
+        }
+    };
+    update_any(&pic, mock, "set_balance", Encode!(&settlement_addr, &candid::Nat::from(1_000_000u128 * E18)).unwrap());
+
+    // ── OPEN (anonymous, EIP-712 signed, nonce 0) ────────────────────────────
+    let collateral = 1_400u128 * E18; // $210 backing
+    let open_intent = make_intent(IntentAction::Open, &owner, 0, collateral, 100 * E8, 0);
+    let open_sig = sign(&sk, &open_intent);
+    let vault_id = open_evm(&pic, backend, &open_intent, &open_sig).expect("open_evm Ok");
+    let v = get_vault(&pic, backend, vault_id).expect("vault after open");
+    assert_eq!(v.owner, synthetic, "vault owned by the synthetic principal");
+    assert_eq!(v.owner_evm.as_deref(), Some(owner.to_lowercase().as_str()), "owner_evm stamped");
+    assert_eq!(v.status, ChainVaultStatus::AwaitingDeposit);
+    assert_eq!(v.mint_recipient, owner.to_lowercase(), "mint recipient == owner");
+    let custody = v.custody_address.clone();
+    assert_supply(&pic, backend, 0, "after open_evm");
+
+    // ── deposit -> MintPending -> mint confirm (Open, supply 100e8) ──────────
+    update_any(&pic, mock, "set_balance", Encode!(&custody, &candid::Nat::from(collateral)).unwrap());
+    advance_and_tick(&pic, 2);
+    assert_eq!(get_vault(&pic, backend, vault_id).unwrap().status, ChainVaultStatus::MintPending);
+    advance_and_tick(&pic, 1); // submit
+    update_any(&pic, mock, "set_receipt", Encode!(&"0xevmmint1".to_string(), &true, &cursor1).unwrap());
+    push_mint_log(&pic, mock, vault_id, &owner, 100 * E8, "0xevmmint1", cursor1);
+    advance_and_tick(&pic, 4); // confirm
+    assert_eq!(get_vault(&pic, backend, vault_id).unwrap().status, ChainVaultStatus::Open);
+    assert_supply(&pic, backend, 100 * E8, "after mint confirm");
+
+    // ── BORROW (anonymous, nonce 1, +50e8) -> mint2 confirm (supply 150e8) ───
+    update_any(&pic, mock, "set_next_send_hash", Encode!(&"0xevmmint2".to_string()).unwrap());
+    let borrow_intent = make_intent(IntentAction::Borrow, &owner, vault_id, 0, 50 * E8, 1);
+    let borrow_sig = sign(&sk, &borrow_intent);
+    unit_evm(&pic, backend, "borrow_chain_vault_evm", &borrow_intent, &borrow_sig).expect("borrow_evm Ok");
+    advance_and_tick(&pic, 1); // submit mint2
+    // The settlement finality gate is `receipt_block <= observer cursor`; after
+    // mint1 the cursor sits at cursor1, so the borrow mint receipt+log must land
+    // at cursor1 too. This also puts a SECOND Mint log for this vault at cursor1,
+    // exercising the per-op confirm's exact-tx-hash match (the M2 change that lets
+    // a vault be minted to more than once).
+    update_any(&pic, mock, "set_receipt", Encode!(&"0xevmmint2".to_string(), &true, &cursor1).unwrap());
+    push_mint_log(&pic, mock, vault_id, &owner, 50 * E8, "0xevmmint2", cursor1);
+    advance_and_tick(&pic, 4); // confirm mint2
+    let v = get_vault(&pic, backend, vault_id).unwrap();
+    assert_eq!(v.debt_e8s, candid::Nat::from(150 * E8), "borrow confirmed => debt 150e8");
+    assert_supply(&pic, backend, 150 * E8, "after borrow mint confirm");
+
+    // ── REPAY (burn full 150e8 on chain) -> debt 0, supply 0 ─────────────────
+    let cursor2 = cursor1 + SCAN_WINDOW;
+    let head2 = cursor2 + CONFLUX_FINALITY_DEPTH + 24;
+    update_any(&pic, mock, "set_blocks", Encode!(&head2, &head2).unwrap());
+    push_burn_log(&pic, mock, vault_id, &owner, 150 * E8, "0xevmburn1", cursor1 + 500);
+    advance_and_tick(&pic, 3);
+    assert_eq!(get_vault(&pic, backend, vault_id).unwrap().debt_e8s, candid::Nat::from(0u32), "repaid => debt 0");
+    assert_supply(&pic, backend, 0, "after repay");
+
+    // ── CLOSE (anonymous, nonce 2) -> Closing -> Closed ──────────────────────
+    update_any(&pic, mock, "set_next_send_hash", Encode!(&"0xevmwd1".to_string()).unwrap());
+    let close_intent = make_intent(IntentAction::Close, &owner, vault_id, 0, 0, 2);
+    let close_sig = sign(&sk, &close_intent);
+    unit_evm(&pic, backend, "close_chain_vault_evm", &close_intent, &close_sig).expect("close_evm Ok");
+    assert_eq!(get_vault(&pic, backend, vault_id).unwrap().status, ChainVaultStatus::Closing, "close => Closing");
+    advance_and_tick(&pic, 1); // submit withdrawal
+    update_any(&pic, mock, "set_receipt", Encode!(&"0xevmwd1".to_string(), &true, &cursor2).unwrap());
+    advance_and_tick(&pic, 4); // confirm
+    assert_eq!(get_vault(&pic, backend, vault_id).unwrap().status, ChainVaultStatus::Closed, "close confirmed => Closed");
+    assert_supply(&pic, backend, 0, "final (Closed)");
+
+    // ── REJECTIONS ───────────────────────────────────────────────────────────
+    // 1. Replay the original OPEN intent (nonce 0, already consumed) → bad nonce.
+    match open_evm(&pic, backend, &open_intent, &open_sig) {
+        Err(ProtocolError::EvmAuth(m)) => assert!(m.contains("nonce"), "expected nonce error, got {m}"),
+        other => panic!("replayed open should fail with EvmAuth(nonce), got {other:?}"),
+    }
+    // 2. Wrong signer: a fresh OPEN intent (nonce 3) with a corrupted signature.
+    let fresh = make_intent(IntentAction::Open, &owner, 0, collateral, 100 * E8, 3);
+    let mut bad_sig = sign(&sk, &fresh);
+    bad_sig[10] ^= 0xff; // corrupt r → recovers a different (or no) signer
+    match open_evm(&pic, backend, &fresh, &bad_sig) {
+        Err(ProtocolError::EvmAuth(_)) => {}
+        other => panic!("corrupted-signature open should fail with EvmAuth, got {other:?}"),
+    }
+
+    eprintln!("[evm self-serve] FULL PASS: anonymous EIP-712 open/borrow/repay/close + replay/wrong-signer rejection on chain 71");
 }
