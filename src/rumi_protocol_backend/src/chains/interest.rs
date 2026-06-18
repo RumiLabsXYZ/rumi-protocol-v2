@@ -104,8 +104,18 @@ pub fn harvest_chain_interest_in_state(
                 enqueued.push(op_id);
             }
             // Duplicate idempotency key (a fresh mint_id makes this unreachable);
-            // skip and retry at the next harvest. No reservation made.
-            Err(_) => {}
+            // skip and retry at the next harvest. No reservation made. Log it —
+            // if it ever fires, something is wrong (mirrors accrue_single_vault's
+            // overflow-defer log).
+            Err(e) => {
+                ic_canister_log::log!(
+                    crate::logs::INFO,
+                    "[harvest chain={:?}] InterestMint enqueue failed for vault {} (unexpected with a fresh mint_id): {:?}; no reservation made",
+                    chain,
+                    vault_id,
+                    e
+                );
+            }
         }
     }
     enqueued
