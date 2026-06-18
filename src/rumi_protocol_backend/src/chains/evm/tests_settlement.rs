@@ -1,4 +1,4 @@
-use super::settlement::{confirm_mint_in_state, select_next_op, OpAction};
+use super::settlement::{confirm_mint_in_state, fundable_withdrawal_value, select_next_op, OpAction};
 use crate::chains::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
 use crate::chains::config::ChainId;
 use crate::chains::multi_chain_state::MultiChainStateV4;
@@ -95,4 +95,30 @@ fn confirm_mint_second_vault_uses_running_total() {
     confirm_mint_in_state(&mut s, ChainId(10143), 2, 5_000_000_000, pre_total).expect("confirm 2nd");
     assert_eq!(s.chain_vaults[&2].debt_e8s, 5_000_000_000);
     assert_eq!(s.chain_supplies[&ChainId(10143)], 15_000_000_000);
+}
+
+#[test]
+fn fundable_withdrawal_value_nets_gas_only_when_balance_is_tight() {
+    let amount = 20_000_000_000_000_000_000u128; // 20 native (full close)
+    let max_fee = 40_000_000_000u128; // 40 gwei ceiling
+    let gas_reserve = 21_000u128 * max_fee; // gas_limit * max_fee
+
+    // Full close: custody holds EXACTLY the requested amount -> value is netted
+    // down by the worst-case gas so the tx can still pay for itself.
+    assert_eq!(
+        fundable_withdrawal_value(amount, amount, max_fee),
+        amount - gas_reserve
+    );
+
+    // Partial withdrawal leaving a buffer >= gas: the full requested amount is
+    // sent (custody keeps the rest, which covers gas).
+    let bigger_balance = amount + 1_000_000_000_000_000_000; // 21 native
+    assert_eq!(
+        fundable_withdrawal_value(amount, bigger_balance, max_fee),
+        amount
+    );
+
+    // Degenerate: balance below the gas reserve -> saturates to 0 (never panics
+    // / underflows), so the worker sends a 0-value tx rather than trapping.
+    assert_eq!(fundable_withdrawal_value(amount, gas_reserve / 2, max_fee), 0);
 }

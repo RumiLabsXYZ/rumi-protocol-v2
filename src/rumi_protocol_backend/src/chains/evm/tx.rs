@@ -62,6 +62,13 @@ pub enum MonadTxKind<'a> {
 /// boundary validation at `set_chain_contract`/`open_chain_vault`/withdraw+close
 /// makes this unreachable in practice, but a malformed address must never trap
 /// the settlement worker after the re-entrancy guard is held).
+/// Intrinsic gas for a plain native-value transfer (no calldata). A native
+/// withdrawal carries no data, so 21_000 is exact on every EVM chain. Exported
+/// so the settlement worker can reserve the worst-case gas
+/// (`gas_limit * max_fee`) out of a full-close withdrawal value with the SAME
+/// number used to build the tx.
+pub const NATIVE_WITHDRAWAL_GAS_LIMIT: u64 = 21_000;
+
 pub fn build_eip1559_fields(
     chain_id: u64,
     kind: MonadTxKind,
@@ -94,7 +101,7 @@ pub fn build_eip1559_fields(
             nonce,
             max_priority_fee_per_gas: prio,
             max_fee_per_gas: max_fee,
-            gas_limit: 21_000,
+            gas_limit: NATIVE_WITHDRAWAL_GAS_LIMIT,
             to: recipient.to_string(),
             value: amount_wei,
             data: vec![],
