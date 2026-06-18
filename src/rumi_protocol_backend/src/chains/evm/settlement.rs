@@ -319,6 +319,10 @@ fn build_tx_plan(
     prio: u128,
     max_fee: u128,
     contract: Option<&str>,
+    // For NativeWithdrawal only: the value to actually send, already capped so
+    // the custody signer can also pay gas (see `fundable_withdrawal_value`).
+    // `None` (or a Mint op) sends the op's full declared amount.
+    withdrawal_value: Option<u128>,
 ) -> Result<TxPlan, String> {
     match kind {
         SettlementOpKind::Mint { recipient, amount_e8s, vault_id } => {
@@ -345,11 +349,15 @@ fn build_tx_plan(
             })
         }
         SettlementOpKind::NativeWithdrawal { recipient, amount_e18, vault_id } => {
-            // `amount_e18` is wei (1e18 scale) — it goes straight into the
-            // EIP-1559 `value` of a native MON transfer.
+            // `value` is wei (1e18 scale) — it goes straight into the EIP-1559
+            // `value` of a native transfer. The withdrawal is signed by the
+            // vault's own custody address, so `withdrawal_value` is the
+            // gas-netted amount (full `amount_e18` for a partial withdrawal that
+            // leaves a buffer; `custody_balance - gas` for a full close).
+            let value = withdrawal_value.unwrap_or(*amount_e18);
             let fields = tx::build_eip1559_fields(
                 chain.0 as u64,
-                tx::MonadTxKind::NativeWithdrawal { recipient, amount_wei: *amount_e18 },
+                tx::MonadTxKind::NativeWithdrawal { recipient, amount_wei: value },
                 nonce,
                 prio,
                 max_fee,
@@ -358,12 +366,59 @@ fn build_tx_plan(
                 fields,
                 vault_id: *vault_id,
                 recipient: recipient.clone(),
-                amount: *amount_e18,
+                amount: value,
                 kind: TxPlanKind::NativeWithdrawal,
             })
         }
         SettlementOpKind::Burn { .. } => Err("burn not signable in Phase 1b".to_string()),
     }
+}
+
+/// Resolve the `(derivation_path, from_address)` that signs an op's tx.
+///
+/// - **Mint** → the per-chain settlement (minter) hot wallet. It only ever pays
+///   icUSD-mint gas (tiny), never user collateral.
+/// - **NativeWithdrawal** → the VAULT'S OWN per-vault custody address, which
+///   holds the deposited collateral. Collateral is paid back out of the same
+///   address it was deposited to — never commingled into the hot wallet — so
+///   there is no custody-sweep dependency. The custody path is re-derived from
+///   the vault's `(chain, owner, vault_id)` exactly as `open_chain_vault` derived
+///   it; the stored `custody_address` is the matching signer address, so no
+///   extra tECDSA derive is needed here.
+async fn resolve_op_signer(
+    chain: ChainId,
+    kind: &SettlementOpKind,
+) -> Result<(Vec<Vec<u8>>, String), String> {
+    match kind {
+        SettlementOpKind::Mint { .. } => tecdsa::cached_settlement_address(chain).await,
+        SettlementOpKind::NativeWithdrawal { vault_id, .. } => {
+            let vid = *vault_id;
+            let info = read_state(|s| {
+                s.multi_chain
+                    .chain_vaults
+                    .get(&vid)
+                    .map(|v| (v.owner, v.custody_address.clone()))
+            });
+            let (owner, custody_addr) =
+                info.ok_or_else(|| format!("withdrawal signer: unknown vault {vid}"))?;
+            // The op's `chain` IS the vault's collateral chain (settlement queues
+            // are keyed by chain), so re-derive the custody path on it.
+            let path = tecdsa::custody_derivation_path(chain, owner, vid);
+            Ok((path, custody_addr))
+        }
+        SettlementOpKind::Burn { .. } => Err("burn not signable in Phase 1b".to_string()),
+    }
+}
+
+/// The native value to actually send for a withdrawal, capped so the custody
+/// signer can ALSO pay its own gas. For a full close the requested amount equals
+/// the entire custody balance, so the worst-case gas (`gas_limit * max_fee`) is
+/// netted out — the withdrawer bears their own gas, as on any native chain, and
+/// a tiny dust (`max_fee - actual_fee`) is left behind. A partial withdrawal
+/// that leaves a buffer sends the full requested amount.
+pub(crate) fn fundable_withdrawal_value(amount_e18: u128, custody_balance: u128, max_fee: u128) -> u128 {
+    let gas_reserve = (tx::NATIVE_WITHDRAWAL_GAS_LIMIT as u128).saturating_mul(max_fee);
+    amount_e18.min(custody_balance.saturating_sub(gas_reserve))
 }
 
 /// Submit path: sign + broadcast a `Queued` op, then mark it `Inflight`.
@@ -448,41 +503,46 @@ async fn submit_op(
         }
     }
 
-    // GAS GATE (Task 11): refuse a new outbound op when the cached settlement
-    // balance is below the hot-wallet floor. FAIL OPEN when the cache is unset
-    // (`None`): an unpopulated cache (fresh chain / observer hasn't run yet)
-    // must NEVER block a legitimate mint. The observer refreshes the cache each
-    // tick (deposit_watch::refresh_hot_wallet_balance).
-    let cached = read_state(|s| s.multi_chain.hot_wallet_balance_e18.get(&chain).copied());
-    if let Some(bal) = cached {
-        if !hardening::hot_wallet_ok(bal) {
-            let now = ic_cdk::api::time();
-            crate::storage::record_event(&crate::event::Event::ChainHotWalletLow {
-                chain_id: chain,
-                balance_e18: bal,
-                threshold_e18: hardening::HOT_WALLET_MIN_E18,
-                timestamp: now,
-            });
-            log!(INFO, "[settlement chain={:?}] hot-wallet balance {} e18 < threshold {} e18; skipping submit of op {} (reads/observer continue)", chain, bal, hardening::HOT_WALLET_MIN_E18, op_id);
-            return;
+    // GAS GATE (Task 11): MINTS ONLY. A mint is paid by the per-chain settlement
+    // hot wallet, so refuse a new mint when the cached settlement balance is
+    // below the hot-wallet floor. FAIL OPEN when the cache is unset (`None`): an
+    // unpopulated cache (fresh chain / observer hasn't run yet) must NEVER block
+    // a legitimate mint. The observer refreshes the cache each tick
+    // (deposit_watch::refresh_hot_wallet_balance). Native WITHDRAWALS are signed
+    // by the vault's own custody address (which holds the collateral) and net
+    // their gas out of the transfer, so the settlement-wallet floor is irrelevant
+    // to them — never gate a withdrawal on it.
+    if matches!(op.kind, SettlementOpKind::Mint { .. }) {
+        let cached = read_state(|s| s.multi_chain.hot_wallet_balance_e18.get(&chain).copied());
+        if let Some(bal) = cached {
+            if !hardening::hot_wallet_ok(bal) {
+                let now = ic_cdk::api::time();
+                crate::storage::record_event(&crate::event::Event::ChainHotWalletLow {
+                    chain_id: chain,
+                    balance_e18: bal,
+                    threshold_e18: hardening::HOT_WALLET_MIN_E18,
+                    timestamp: now,
+                });
+                log!(INFO, "[settlement chain={:?}] hot-wallet balance {} e18 < threshold {} e18; skipping submit of op {} (reads/observer continue)", chain, bal, hardening::HOT_WALLET_MIN_E18, op_id);
+                return;
+            }
         }
     }
 
-    // 1. Resolve the settlement (minter) address via the per-chain cache
-    //    (Task 11 M1): the address is deterministic, so we derive it once per
-    //    chain and reuse it every tick instead of paying a signing-subnet call
-    //    each submit. Returns the derivation PATH too, which the signer needs.
-    let (path, settlement_addr) = match tecdsa::cached_settlement_address(chain).await {
+    // 1. Resolve the signer: mints are signed by the per-chain settlement
+    //    (minter) hot wallet; native withdrawals by the vault's own custody
+    //    address. Returns the derivation PATH too, which the signer needs.
+    let (path, signer_addr) = match resolve_op_signer(chain, &op.kind).await {
         Ok(pair) => pair,
         Err(e) => {
-            log!(INFO, "[settlement chain={:?}] cached_settlement_address failed for op {}: {}; will retry", chain, op_id, e);
+            log!(INFO, "[settlement chain={:?}] resolve_op_signer failed for op {}: {}; will retry", chain, op_id, e);
             return;
         }
     };
 
-    // 2. Fetch the nonce ("latest") — we store it on the op so a stuck-tx
-    //    resubmit can replace-by-fee on the SAME nonce.
-    let nonce = match evm_rpc::get_transaction_count(chain, &settlement_addr).await {
+    // 2. Fetch the nonce ("latest") for the SIGNER — we store it on the op so a
+    //    stuck-tx resubmit can replace-by-fee on the SAME nonce.
+    let nonce = match evm_rpc::get_transaction_count(chain, &signer_addr).await {
         Ok(n) => n,
         Err(e) => {
             log!(INFO, "[settlement chain={:?}] get_transaction_count failed for op {}: {}; will retry", chain, op_id, e);
@@ -500,9 +560,31 @@ async fn submit_op(
     };
     let max_fee = base_fee.saturating_mul(2).saturating_add(prio);
 
-    // 4. Resolve the contract (mints only) and build the tx plan.
+    // 4. For a native withdrawal, cap the transfer value so the custody signer
+    //    can also pay gas (a full close requests the entire custody balance).
+    //    Read the custody balance ONCE here; the value is recomputed identically
+    //    on a stuck-tx resubmit. Mints don't carry a value, so skip the read.
+    let withdrawal_value = if matches!(op.kind, SettlementOpKind::NativeWithdrawal { .. }) {
+        match evm_rpc::get_balance(chain, &signer_addr).await {
+            Ok(bal) => {
+                if let SettlementOpKind::NativeWithdrawal { amount_e18, .. } = &op.kind {
+                    Some(fundable_withdrawal_value(*amount_e18, bal, max_fee))
+                } else {
+                    None
+                }
+            }
+            Err(e) => {
+                log!(INFO, "[settlement chain={:?}] get_balance(custody) failed for op {}: {}; will retry", chain, op_id, e);
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
+    // 5. Resolve the contract (mints only) and build the tx plan.
     let contract = read_state(|s| s.multi_chain.chain_contracts.get(&chain).cloned());
-    let plan = match build_tx_plan(chain, &op.kind, nonce, prio, max_fee, contract.as_deref()) {
+    let plan = match build_tx_plan(chain, &op.kind, nonce, prio, max_fee, contract.as_deref(), withdrawal_value) {
         Ok(p) => p,
         Err(e) => {
             log!(INFO, "[settlement chain={:?}] build_tx_plan failed for op {}: {}; will retry", chain, op_id, e);
@@ -511,8 +593,8 @@ async fn submit_op(
     };
     let TxPlan { fields, vault_id, recipient, amount, kind } = plan;
 
-    // 5. Sign.
-    let raw_hex = match tx::sign_eip1559(&fields, path, &settlement_addr).await {
+    // 6. Sign with the resolved signer (settlement for mints, custody for withdrawals).
+    let raw_hex = match tx::sign_eip1559(&fields, path, &signer_addr).await {
         Ok(h) => h,
         Err(e) => {
             log!(INFO, "[settlement chain={:?}] sign_eip1559 failed for op {}: {}; will retry", chain, op_id, e);
@@ -520,7 +602,7 @@ async fn submit_op(
         }
     };
 
-    // 6. Broadcast. A transient send error is logged and retried next tick — we
+    // 7. Broadcast. A transient send error is logged and retried next tick — we
     //    do NOT mark the op Failed (it may yet be re-signable / re-broadcastable).
     //
     //    ON-CHAIN DOUBLE-MINT DEPENDENCY: if send_raw_transaction returns Err but
@@ -543,7 +625,7 @@ async fn submit_op(
         }
     };
 
-    // 7. Mark Inflight + record the tx hash AND the submit nonce. Emit
+    // 8. Mark Inflight + record the tx hash AND the submit nonce. Emit
     //    ChainMintSubmitted for mints.
     let now = ic_cdk::api::time();
     mutate_state(|s| {
@@ -880,8 +962,8 @@ async fn confirm_op(
         }
         SettlementOpKind::NativeWithdrawal { vault_id, .. } => {
             // A confirmed (mined + ok + final) native transfer-out: the
-            // collateral has been paid out from the settlement hot wallet. Mark
-            // the op Succeeded,
+            // collateral has been paid out from the vault's own custody address.
+            // Mark the op Succeeded,
             // then if the vault is `Closing` (a full withdrawal / close) flip it
             // to `Closed` — collateral is gone and (close required) debt is 0, so
             // the vault is fully settled. A partial withdrawal leaves the vault
@@ -945,11 +1027,11 @@ async fn resubmit_if_stuck(
         }
     };
 
-    // Resolve the settlement address via the per-chain cache (Task 11 M1).
-    let (path, settlement_addr) = match tecdsa::cached_settlement_address(chain).await {
+    // Resolve the signer (settlement for mints, vault custody for withdrawals).
+    let (path, signer_addr) = match resolve_op_signer(chain, &op.kind).await {
         Ok(pair) => pair,
         Err(e) => {
-            log!(INFO, "[settlement chain={:?}] resubmit cached_settlement_address failed for op {}: {}; leaving Inflight", chain, op_id, e);
+            log!(INFO, "[settlement chain={:?}] resubmit resolve_op_signer failed for op {}: {}; leaving Inflight", chain, op_id, e);
             return;
         }
     };
@@ -966,10 +1048,31 @@ async fn resubmit_if_stuck(
     let base_max_fee = base_fee.saturating_mul(2).saturating_add(prio);
     let (bumped_prio, bumped_max) = hardening::bump_gas(prio, base_max_fee);
 
+    // Re-net the withdrawal value at the BUMPED fee so the replacement still
+    // fits within the custody balance (a higher gas reserve sends marginally
+    // less collateral — fine for a replace-by-fee). Mints carry no value.
+    let withdrawal_value = if matches!(op.kind, SettlementOpKind::NativeWithdrawal { .. }) {
+        match evm_rpc::get_balance(chain, &signer_addr).await {
+            Ok(bal) => {
+                if let SettlementOpKind::NativeWithdrawal { amount_e18, .. } = &op.kind {
+                    Some(fundable_withdrawal_value(*amount_e18, bal, bumped_max))
+                } else {
+                    None
+                }
+            }
+            Err(e) => {
+                log!(INFO, "[settlement chain={:?}] resubmit get_balance(custody) failed for op {}: {}; leaving Inflight", chain, op_id, e);
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
     // Resolve the contract (mints only) and rebuild the SAME tx at the stored
     // nonce with the bumped fees.
     let contract = read_state(|s| s.multi_chain.chain_contracts.get(&chain).cloned());
-    let plan = match build_tx_plan(chain, &op.kind, nonce, bumped_prio, bumped_max, contract.as_deref()) {
+    let plan = match build_tx_plan(chain, &op.kind, nonce, bumped_prio, bumped_max, contract.as_deref(), withdrawal_value) {
         Ok(p) => p,
         Err(e) => {
             log!(INFO, "[settlement chain={:?}] resubmit build_tx_plan failed for op {}: {}; leaving Inflight", chain, op_id, e);
@@ -977,8 +1080,8 @@ async fn resubmit_if_stuck(
         }
     };
 
-    // Re-sign on the stored nonce.
-    let raw_hex = match tx::sign_eip1559(&plan.fields, path, &settlement_addr).await {
+    // Re-sign on the stored nonce with the resolved signer.
+    let raw_hex = match tx::sign_eip1559(&plan.fields, path, &signer_addr).await {
         Ok(h) => h,
         Err(e) => {
             log!(INFO, "[settlement chain={:?}] resubmit sign_eip1559 failed for op {}: {}; leaving Inflight", chain, op_id, e);

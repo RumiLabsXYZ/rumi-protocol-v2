@@ -1256,6 +1256,18 @@ pub async fn send_raw_transaction(chain: ChainId, raw_tx_hex: &str) -> Result<St
         .map_err(|e| format!("eth_sendRawTransaction parse: {}", e))?;
 
     if let Some(err) = val.get("error") {
+        // IDEMPOTENT-SUCCESS: a broadcast that the node already has is NOT a
+        // failure. The IC executes one HTTPS outcall from MANY replicas, so the
+        // same signed tx is submitted N times; the first lands and the rest get
+        // "already known" / "already exists". Treating that as an error left the
+        // op Queued forever (never Inflight, never confirmed) even though the
+        // mint landed on-chain. The tx hash is a pure function of the signed
+        // bytes, so recover it locally and report success. (A genuine resubmit
+        // of a same-nonce tx is likewise safe — it's the identical tx.)
+        let msg = err.to_string().to_ascii_lowercase();
+        if msg.contains("already known") || msg.contains("already exists") {
+            return crate::chains::evm::tx::raw_tx_hash(raw_tx_hex);
+        }
         return Err(format!("eth_sendRawTransaction RPC error: {}", err));
     }
 
