@@ -4,6 +4,7 @@
 pub mod adapter;
 pub mod burn_proof;
 pub mod deposit_watch;
+pub mod eip712;
 pub mod evm_rpc;
 pub mod hardening;
 pub mod settlement;
@@ -20,6 +21,9 @@ mod tests_burn_proof;
 
 #[cfg(test)]
 mod tests_deposit_watch;
+
+#[cfg(test)]
+mod tests_eip712;
 
 #[cfg(test)]
 mod tests_evm_rpc;
