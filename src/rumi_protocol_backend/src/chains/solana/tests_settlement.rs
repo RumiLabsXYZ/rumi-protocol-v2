@@ -41,7 +41,7 @@ fn solana_vault_pending(s: &mut MultiChainStateV4, vault_id: u64, pending_e8s: u
             mint_recipient: "So11111111111111111111111111111111111111112".into(),
             pending_mint_e8s: pending_e8s,
             status: ChainVaultStatus::MintPending,
-            opened_at_ns: 0,
+            opened_at_ns: 0, owner_evm: None,
         },
     );
 }
@@ -99,7 +99,7 @@ fn solana_confirm_mint_second_vault_uses_running_total() {
             mint_recipient: "So11111111111111111111111111111111111111112".into(),
             pending_mint_e8s: 0,
             status: ChainVaultStatus::Open,
-            opened_at_ns: 0,
+            opened_at_ns: 0, owner_evm: None,
         },
     );
     solana_vault_pending(&mut s, 2, 5_000_000_000);

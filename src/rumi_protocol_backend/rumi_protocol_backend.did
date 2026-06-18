@@ -64,6 +64,7 @@ type ChainVaultV1 = record {
   collateral_chain : nat32;
   mint_recipient : text;
   debt_e8s : nat;
+  owner_evm : opt text;
 };
 type CustodyKind = variant { IcrcLedger; NativeXrp };
 type XrpVaultOpenInfo = record { vault_id : nat64; custody_address : text };

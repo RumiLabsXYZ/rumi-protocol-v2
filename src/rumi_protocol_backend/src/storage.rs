@@ -399,7 +399,7 @@ mod state_snapshot_tests {
                 mint_recipient: "0xabc0000000000000000000000000000000000002".into(),
                 pending_mint_e8s: 0,
                 status: ChainVaultStatus::Open,
-                opened_at_ns: 42,
+                opened_at_ns: 42, owner_evm: None,
             },
         );
 

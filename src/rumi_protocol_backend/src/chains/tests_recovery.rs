@@ -29,7 +29,7 @@ fn vault(vault_id: u64, status: ChainVaultStatus, pending: u128, collateral: u12
         mint_recipient: "0xrecipient".into(),
         pending_mint_e8s: pending,
         status,
-        opened_at_ns: 0,
+        opened_at_ns: 0, owner_evm: None,
     }
 }
 

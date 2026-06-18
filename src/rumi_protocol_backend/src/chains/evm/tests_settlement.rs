@@ -10,7 +10,7 @@ fn vault_pending(s: &mut MultiChainStateV4, vault_id: u64, pending: u128) {
         vault_id, owner: Principal::anonymous(), collateral_chain: ChainId(10143),
         custody_address: "0xc".into(), collateral_amount_native: 0, debt_e8s: 0,
         mint_recipient: "0xr".into(), pending_mint_e8s: pending,
-        status: ChainVaultStatus::MintPending, opened_at_ns: 0,
+        status: ChainVaultStatus::MintPending, opened_at_ns: 0, owner_evm: None,
     });
 }
 
@@ -88,7 +88,7 @@ fn confirm_mint_second_vault_uses_running_total() {
         vault_id: 1, owner: Principal::anonymous(), collateral_chain: ChainId(10143),
         custody_address: "0xc".into(), collateral_amount_native: 0, debt_e8s: 10_000_000_000,
         mint_recipient: "0xr".into(), pending_mint_e8s: 0,
-        status: ChainVaultStatus::Open, opened_at_ns: 0,
+        status: ChainVaultStatus::Open, opened_at_ns: 0, owner_evm: None,
     });
     vault_pending(&mut s, 2, 5_000_000_000);
     let pre_total = s.total_chain_vault_debt_e8s(); // == 10e8

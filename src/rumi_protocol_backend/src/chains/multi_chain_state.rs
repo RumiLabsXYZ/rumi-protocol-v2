@@ -32,7 +32,7 @@
 use super::config::{ChainConfigV1, ChainConfigV2, ChainConfigV3, ChainId};
 use super::monad::chain_vault::ChainVaultV1;
 use super::settlement_queue::SettlementQueueV1;
-use candid::{CandidType, Deserialize};
+use candid::{CandidType, Deserialize, Principal};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -264,6 +264,13 @@ pub struct MultiChainStateV4 {
     pub reorg_suspect_streak: BTreeMap<ChainId, u32>,
     #[serde(default)]
     pub processed_burn_keys: BTreeMap<u64, BTreeSet<String>>,
+    /// M2: per-synthetic-owner monotonic nonce for EIP-712 intent replay
+    /// protection. Keyed by `eip712::synthetic_owner(chain, evm_addr)` (which
+    /// embeds the chain → nonces are per-(owner,chain)). `#[serde(default)]`:
+    /// additive, ciborium-safe (no version-struct bump — coordinated with the
+    /// concurrent interest-accrual branch so both changes stay purely additive).
+    #[serde(default)]
+    pub evm_owner_nonces: BTreeMap<Principal, u64>,
 }
 
 impl MultiChainStateV4 {

@@ -13,7 +13,7 @@ fn seeded() -> MultiChainStateV4 {
         vault_id: 1, owner: Principal::anonymous(), collateral_chain: ChainId(10143),
         custody_address: "0xcustody".into(), collateral_amount_native: 0, debt_e8s: 0,
         mint_recipient: "0xr".into(), pending_mint_e8s: 0,
-        status: ChainVaultStatus::Open, opened_at_ns: 0,
+        status: ChainVaultStatus::Open, opened_at_ns: 0, owner_evm: None,
     });
     s
 }

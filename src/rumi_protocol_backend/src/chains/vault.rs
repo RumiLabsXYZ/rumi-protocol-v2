@@ -70,6 +70,13 @@ pub struct ChainVaultV1 {
     pub pending_mint_e8s: u128,
     pub status: ChainVaultStatus,
     pub opened_at_ns: u64,
+    /// EVM owner address (lowercase `0x`) for vaults opened via the M2 self-serve
+    /// `_evm` path; `None` for developer-opened / Monad / Solana vaults. Used to
+    /// authorize borrow/withdraw/close by re-recovering the EIP-712 signer.
+    /// `#[serde(default)]` keeps pre-M2 ciborium snapshots decoding cleanly
+    /// (State is ciborium-encoded — see storage.rs).
+    #[serde(default)]
+    pub owner_evm: Option<String>,
 }
 
 /// Reasons `open_chain_vault_in_state` / `verify_deposit_and_enqueue_mint_in_state`
@@ -257,7 +264,7 @@ pub fn open_chain_vault_in_state(
             // the custody-address balance covers the declared collateral.
             pending_mint_e8s: debt_e8s,
             status: ChainVaultStatus::AwaitingDeposit,
-            opened_at_ns: now_ns,
+            opened_at_ns: now_ns, owner_evm: None,
         },
     );
     // No mint enqueued - that happens in verify_deposit_and_enqueue_mint_in_state.
