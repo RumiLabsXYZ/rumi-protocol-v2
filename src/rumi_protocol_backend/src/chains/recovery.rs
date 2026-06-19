@@ -89,7 +89,7 @@ fn snapshot_inflight_op_tx(chain: ChainId, op_id: u64) -> Result<Option<String>,
 /// Returns `true` iff this call performed the reversal (the op was still
 /// Inflight).
 pub fn apply_resolve_reversal_in_state(
-    state: &mut crate::chains::multi_chain_state::MultiChainStateV4,
+    state: &mut crate::chains::multi_chain_state::MultiChainStateV5,
     chain: ChainId,
     op_id: u64,
     now: u64,
@@ -214,7 +214,7 @@ pub async fn resolve_stuck_settlement_op_verified(
 /// exists, is on `chain`, is `MintPending` with `pending_mint_e8s == 0`, and has
 /// NO live (Queued/Inflight) Mint op.
 pub fn precheck_recover_vault_in_state(
-    state: &crate::chains::multi_chain_state::MultiChainStateV4,
+    state: &crate::chains::multi_chain_state::MultiChainStateV5,
     chain: ChainId,
     vault_id: u64,
 ) -> Result<Vec<String>, RecoveryError> {
@@ -277,7 +277,7 @@ pub fn precheck_recover_vault(
 /// the guards inside the same `mutate_state` (defense against a state change
 /// between the precheck snapshot and commit). Returns `Ok(())` on success.
 pub fn apply_recover_vault_in_state(
-    state: &mut crate::chains::multi_chain_state::MultiChainStateV4,
+    state: &mut crate::chains::multi_chain_state::MultiChainStateV5,
     chain: ChainId,
     vault_id: u64,
 ) -> Result<(), RecoveryError> {

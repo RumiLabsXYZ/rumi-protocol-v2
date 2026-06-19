@@ -5,7 +5,7 @@ use crate::chains::monad::evm_rpc::{
     decode_burn_log, get_transaction_receipt_with_logs, is_block_final, BurnLog,
     TxReceiptWithLogs, BURN_EVENT_TOPIC0,
 };
-use crate::chains::multi_chain_state::MultiChainStateV4;
+use crate::chains::multi_chain_state::MultiChainStateV5;
 use crate::logs::INFO;
 use crate::state::{mutate_state, read_state};
 use ic_canister_log::log;
@@ -29,7 +29,7 @@ use ic_canister_log::log;
 /// apply+record commit in one message slice) — a retry re-skips them and
 /// re-attempts the halting burn. This matches the audited poll-path C-1 semantics.
 pub fn apply_receipt_burns_to_state(
-    state: &mut MultiChainStateV4,
+    state: &mut MultiChainStateV5,
     _chain: ChainId,
     contract: &str,
     tx_hash: &str,

@@ -4,11 +4,11 @@ use super::settlement::{
 };
 use crate::chains::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
 use crate::chains::config::ChainId;
-use crate::chains::multi_chain_state::MultiChainStateV4;
+use crate::chains::multi_chain_state::MultiChainStateV5;
 use crate::chains::settlement_queue::{SettlementOp, SettlementOpKind, SettlementOpStatus};
 use candid::Principal;
 
-fn vault_pending(s: &mut MultiChainStateV4, vault_id: u64, pending: u128) {
+fn vault_pending(s: &mut MultiChainStateV5, vault_id: u64, pending: u128) {
     s.chain_vaults.insert(vault_id, ChainVaultV1 {
         vault_id, owner: Principal::anonymous(), collateral_chain: ChainId(10143),
         custody_address: "0xc".into(), collateral_amount_native: 0, debt_e8s: 0,
@@ -53,7 +53,7 @@ fn select_next_op_confirms_inflight_before_submitting_new() {
 
 #[test]
 fn confirm_mint_moves_pending_to_debt_and_increments_supply() {
-    let mut s = MultiChainStateV4::default();
+    let mut s = MultiChainStateV5::default();
     s.chain_supplies.insert(ChainId(10143), 0);
     vault_pending(&mut s, 1, 10_000_000_000); // 100 icUSD pending
     // PRE-mint total_chain_vault_debt_e8s() == 0 (vault debt_e8s is still 0).
@@ -71,7 +71,7 @@ fn confirm_mint_moves_pending_to_debt_and_increments_supply() {
 
 /// An Open vault with confirmed `debt` and an interest mint of `pending` in
 /// flight (`last_interest_accrual_ns = 1_000`).
-fn vault_interest_pending(s: &mut MultiChainStateV4, vault_id: u64, debt: u128, pending: u128) {
+fn vault_interest_pending(s: &mut MultiChainStateV5, vault_id: u64, debt: u128, pending: u128) {
     s.chain_vaults.insert(vault_id, ChainVaultV1 {
         vault_id, owner: Principal::anonymous(), collateral_chain: ChainId(71),
         custody_address: "0xc".into(), collateral_amount_native: 1_400_000_000_000_000_000_000,
@@ -85,7 +85,7 @@ fn vault_interest_pending(s: &mut MultiChainStateV4, vault_id: u64, debt: u128, 
 
 #[test]
 fn confirm_interest_mint_grows_debt_and_supply_equally() {
-    let mut s = MultiChainStateV4::default();
+    let mut s = MultiChainStateV5::default();
     s.chain_supplies.insert(ChainId(71), 100 * 100_000_000); // 100 icUSD principal minted
     vault_interest_pending(&mut s, 1, 100 * 100_000_000, 2 * 100_000_000); // 2 icUSD pending
     let pre = s.total_chain_vault_debt_e8s(); // 100e8
@@ -106,7 +106,7 @@ fn confirm_interest_mint_grows_debt_and_supply_equally() {
 
 #[test]
 fn confirm_interest_mint_rejects_amount_mismatch_no_mutation() {
-    let mut s = MultiChainStateV4::default();
+    let mut s = MultiChainStateV5::default();
     s.chain_supplies.insert(ChainId(71), 100 * 100_000_000);
     vault_interest_pending(&mut s, 1, 100 * 100_000_000, 2 * 100_000_000);
     let pre = s.total_chain_vault_debt_e8s();
@@ -120,7 +120,7 @@ fn confirm_interest_mint_rejects_amount_mismatch_no_mutation() {
 
 #[test]
 fn confirm_mint_rejects_amount_mismatch() {
-    let mut s = MultiChainStateV4::default();
+    let mut s = MultiChainStateV5::default();
     s.chain_supplies.insert(ChainId(10143), 0);
     vault_pending(&mut s, 1, 10_000_000_000);
     // Observed amount differs from pending: reject (caught before any supply mutation), do not mutate.
@@ -132,7 +132,7 @@ fn confirm_mint_rejects_amount_mismatch() {
 
 #[test]
 fn confirm_mint_unknown_vault_rejected() {
-    let mut s = MultiChainStateV4::default();
+    let mut s = MultiChainStateV5::default();
     s.chain_supplies.insert(ChainId(10143), 0);
     assert!(confirm_mint_in_state(&mut s, ChainId(10143), 999, 1, 0, 0).is_err());
 }
@@ -141,7 +141,7 @@ fn confirm_mint_unknown_vault_rejected() {
 fn confirm_mint_second_vault_uses_running_total() {
     // Two vaults: first already confirmed (debt 100e8, supply 100e8). Confirming the
     // second (pending 50e8) must pass PRE-mint total = 100e8; helper computes 150e8.
-    let mut s = MultiChainStateV4::default();
+    let mut s = MultiChainStateV5::default();
     s.chain_supplies.insert(ChainId(10143), 10_000_000_000);
     s.chain_vaults.insert(1, ChainVaultV1 {
         vault_id: 1, owner: Principal::anonymous(), collateral_chain: ChainId(10143),

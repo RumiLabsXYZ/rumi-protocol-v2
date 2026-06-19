@@ -1,5 +1,6 @@
 use super::multi_chain_state::{
     MultiChainState, MultiChainStateV1, MultiChainStateV2, MultiChainStateV3, MultiChainStateV4,
+    MultiChainStateV5,
 };
 use super::config::ChainId;
 use super::supply::migrate_multi_chain_state;
@@ -120,8 +121,8 @@ fn migration_preserves_v1_fields_and_defaults_new_ones() {
 }
 
 #[test]
-fn active_alias_points_at_v4() {
-    fn _check(x: MultiChainState) -> MultiChainStateV4 { x }
+fn active_alias_points_at_v5() {
+    fn _check(x: MultiChainState) -> MultiChainStateV5 { x }
 }
 
 #[test]

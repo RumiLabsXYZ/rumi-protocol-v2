@@ -1,0 +1,28 @@
+{
+  "name": "cfx-price-monitor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Off-chain monitor + auto-refresher for the Rumi Protocol chains-rail manual CFX price (audit F-01 mitigation).",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "start": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@dfinity/agent": "^2.1.3",
+    "@dfinity/candid": "^2.1.3",
+    "@dfinity/identity-secp256k1": "^2.1.3",
+    "@dfinity/principal": "^2.1.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.21",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
+  }
+}

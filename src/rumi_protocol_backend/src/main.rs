@@ -1852,9 +1852,22 @@ fn set_chain_contract(
     Ok(())
 }
 
+/// Manual-price readout for `(chain, symbol)`: the USD e8 price plus the
+/// wall-clock nanosecond timestamp of the last write (audit F-01 freshness).
+/// `set_at_ns == 0` means the price was set before the V5 upgrade (timestamp
+/// not yet recorded); it self-heals on the next refresh.
+#[derive(CandidType, Deserialize, Debug, Clone)]
+pub struct ManualPriceInfo {
+    pub price_e8: u64,
+    pub set_at_ns: u64,
+}
+
 /// Set a manual collateral price override for `(chain, symbol)` as a USD e8
 /// value (e.g. $2.00 == 2_0000_0000). Phase 1b uses manual prices for foreign
-/// collateral; a real oracle is a later task. Developer-gated.
+/// collateral; a real oracle is a later task. Callable by the developer OR the
+/// narrowly-scoped price-pusher principal (audit F-01) so the always-online CFX
+/// price monitor can refresh without holding the full developer key. Stamps the
+/// write time so `get_manual_collateral_price` can expose freshness.
 #[candid_method(update)]
 #[update]
 fn set_manual_collateral_price(
@@ -1863,8 +1876,8 @@ fn set_manual_collateral_price(
     price_e8: u64,
 ) -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
-    if read_state(|s| s.developer_principal != caller) {
-        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    if read_state(|s| !s.is_price_setter_authorized(caller, chain.0, &symbol)) {
+        return Err(ProtocolError::ChainAdmin("not authorized to set price".into()));
     }
     // Reject a zero price. A 0 price drives `collateral_ratio_e4` to 0, which
     // fails-closed (every open/withdraw with debt rejects with BelowMinCr), so
@@ -1873,11 +1886,81 @@ fn set_manual_collateral_price(
     if price_e8 == 0 {
         return Err(ProtocolError::ChainAdmin("price_e8 must be greater than 0".into()));
     }
+    let now = ic_cdk::api::time();
     mutate_state(|s| {
-        s.multi_chain.manual_prices.insert((chain, symbol.clone()), price_e8);
+        s.multi_chain.set_manual_price(chain, symbol.clone(), price_e8, now);
     });
-    log!(INFO, "[set_manual_collateral_price] chain={:?} symbol={} price_e8={}", chain, symbol, price_e8);
+    log!(INFO, "[set_manual_collateral_price] chain={:?} symbol={} price_e8={} set_at_ns={}", chain, symbol, price_e8, now);
     Ok(())
+}
+
+/// Read the on-chain manual collateral price and its freshness timestamp for
+/// `(chain, symbol)`. Returns `None` if no price is set. This is the read path
+/// the off-chain CFX monitor uses to verify its writes landed and to know how
+/// stale the canister's own manual price is (audit F-01). Read-only query.
+#[candid_method(query)]
+#[query]
+fn get_manual_collateral_price(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    symbol: String,
+) -> Option<ManualPriceInfo> {
+    read_state(|s| {
+        s.multi_chain
+            .get_manual_price(chain, &symbol)
+            .map(|(price_e8, set_at_ns)| ManualPriceInfo { price_e8, set_at_ns })
+    })
+}
+
+/// Grant, rotate, or revoke (`None` principal) the narrowly-scoped price-pusher.
+/// `allowed` is the exact set of `(chain_id, symbol)` pairs the pusher may set —
+/// it may set NOTHING outside this list (and the developer is never constrained
+/// by it). Passing an empty `allowed` with a `Some` principal registers a pusher
+/// that can set nothing (fail-closed) until scope is granted. The pusher may ONLY
+/// call `set_manual_collateral_price`, never any other endpoint. Developer-gated.
+#[candid_method(update)]
+#[update]
+fn set_price_pusher_principal(
+    principal: Option<Principal>,
+    allowed: Vec<(u32, String)>,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    // The anonymous principal must never be the pusher: it would authorize ALL
+    // unauthenticated ingress to set prices for the allow-listed pairs.
+    if principal == Some(Principal::anonymous()) {
+        return Err(ProtocolError::ChainAdmin(
+            "price pusher cannot be the anonymous principal".into(),
+        ));
+    }
+    let allowed_set: std::collections::BTreeSet<(u32, String)> = allowed.into_iter().collect();
+    let allowed_count = allowed_set.len();
+    mutate_state(|s| {
+        s.price_pusher_principal = principal;
+        s.price_pusher_allowed = allowed_set;
+    });
+    log!(
+        INFO,
+        "[set_price_pusher_principal] principal={:?} allowed_pairs={}",
+        principal,
+        allowed_count
+    );
+    Ok(())
+}
+
+/// Read the currently-authorized price-pusher principal (`None` if unset).
+#[candid_method(query)]
+#[query]
+fn get_price_pusher_principal() -> Option<Principal> {
+    read_state(|s| s.price_pusher_principal)
+}
+
+/// Read the `(chain_id, symbol)` pairs the price-pusher principal is allowed to set.
+#[candid_method(query)]
+#[query]
+fn get_price_pusher_allowed() -> Vec<(u32, String)> {
+    read_state(|s| s.price_pusher_allowed.iter().cloned().collect())
 }
 
 /// Override the EVM RPC canister principal the Monad wrapper talks to. This is
@@ -3707,6 +3790,17 @@ async fn open_xrp_vault() -> Result<rumi_protocol_backend::vault::XrpVaultOpenIn
 async fn confirm_xrp_deposit(vault_id: u64) -> Result<u64, ProtocolError> {
     validate_call().await?;
     check_postcondition(rumi_protocol_backend::vault::confirm_xrp_deposit(vault_id).await)
+}
+
+/// P4 (native-XRP collateral): settle an XRP collateral claim by signing +
+/// submitting a Payment from the source vault's custody address to `destination`
+/// (claimant bears the fee). Claimant-only. Returns the local tx hash.
+#[update]
+async fn settle_xrp_claim(claim_id: u64, destination: String) -> Result<String, ProtocolError> {
+    validate_call().await?;
+    check_postcondition(
+        rumi_protocol_backend::vault::settle_xrp_claim(claim_id, destination).await,
+    )
 }
 
 #[query]

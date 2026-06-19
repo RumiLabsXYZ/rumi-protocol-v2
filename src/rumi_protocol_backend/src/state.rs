@@ -600,6 +600,37 @@ pub fn xrp_collateral_principal() -> Principal {
     Principal::from_slice(b"rumi-xrp-native")
 }
 
+/// P4: an unsettled claim on native-XRP collateral that left a vault. The XRP sits
+/// at the custody address derived from `(custody_owner, custody_nonce)` (the vault's
+/// owner + id, which the protocol controls via threshold Ed25519); `settle_xrp_claim`
+/// signs a Payment from there to an XRPL address the `claimant` supplies. The
+/// claimant (owner on withdrawal, liquidator on liquidation, redeemer on redemption)
+/// may differ from `custody_owner` — the protocol holds the custody key either way.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct XrpClaim {
+    pub claimant: Principal,
+    pub drops: u64,
+    pub custody_owner: Principal,
+    pub custody_nonce: u64,
+    pub created_at_ns: u64,
+    /// P4 idempotency: set once a settlement Payment has been signed + submitted for
+    /// this claim. On a retry, `settle_xrp_claim` confirms this tx BEFORE signing a
+    /// new one — so a submit whose outcall errored after rippled already broadcast it
+    /// is reconciled rather than paid twice. `None` = nothing submitted yet.
+    #[serde(default)]
+    pub settlement: Option<XrpSettlement>,
+}
+
+/// P4: the settlement Payment already signed + submitted for an `XrpClaim`.
+/// `tx_hash` is the locally computed (trustworthy) hash to confirm against;
+/// `last_ledger_sequence` is the ledger past which that tx can never apply, so
+/// settle knows when it is safe to sign a fresh one.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct XrpSettlement {
+    pub tx_hash: String,
+    pub last_ledger_sequence: u32,
+}
+
 impl CollateralConfig {
     /// Wave-14a CDP-14 follow-up: resolves the effective source-count floor
     /// for this collateral. Per-collateral override wins over the global
@@ -904,6 +935,22 @@ pub struct State {
     pub chains_ecdsa_key_name: String,
     pub fee: Ratio,
     pub developer_principal: Principal,
+    /// Optional narrowly-scoped principal (audit F-01) that may ONLY call
+    /// `set_manual_collateral_price`, and ONLY for the `(chain, symbol)` pairs in
+    /// `price_pusher_allowed` — nothing else. Granted/rotated by the developer via
+    /// `set_price_pusher_principal`. Lets the always-online CFX price monitor hold
+    /// a key whose blast radius is "set the CFX price", not the full developer key
+    /// and not every foreign collateral's price. `None` (the default) means no
+    /// pusher is authorized and only the developer can set prices. `#[serde(default)]`
+    /// lets an old ciborium snapshot decode cleanly to `None`.
+    #[serde(default)]
+    pub price_pusher_principal: Option<Principal>,
+    /// The `(chain_id, symbol)` pairs the price-pusher principal is allowed to
+    /// set. Empty (the default) means the pusher can set NOTHING (fail-closed) —
+    /// the developer grants scope explicitly. The developer is never constrained
+    /// by this set. `#[serde(default)]` for old-snapshot decode safety.
+    #[serde(default)]
+    pub price_pusher_allowed: std::collections::BTreeSet<(u32, String)>,
     pub next_available_vault_id: u64,
     pub total_collateral_ratio: Ratio,
     pub current_base_rate: Ratio,
@@ -1363,6 +1410,17 @@ pub struct State {
     #[serde(default)]
     pub xrp_pending_deposits: BTreeMap<u64, XrpPendingDeposit>,
 
+    /// P4: native-XRP collateral that has left a vault and is owed to a claimant
+    /// (owner withdrawal, liquidation payout, or redemption payout), settled later
+    /// via `settle_xrp_claim` (a threshold-signed XRPL Payment from the vault's
+    /// custody address). Recorded instead of an ICRC transfer because XRP is
+    /// custodied on the XRP Ledger. Empty on every pre-P4 snapshot via serde-default.
+    #[serde(default)]
+    pub xrp_claims: BTreeMap<u64, XrpClaim>,
+    /// P4: monotonic id allocator for `xrp_claims`. serde-default 0 on pre-P4 snapshots.
+    #[serde(default)]
+    pub next_xrp_claim_id: u64,
+
     /// Phase 1b Task 6: override for the EVM RPC canister principal.
     /// When `Some`, `chains::monad::evm_rpc::evm_rpc_principal()` uses this
     /// value instead of the hardcoded production canister
@@ -1502,6 +1560,8 @@ impl Default for State {
             chains_ecdsa_key_name: default_chains_ecdsa_key_name(),
             fee: Ratio::from(Decimal::ZERO),
             developer_principal: Principal::anonymous(),
+            price_pusher_principal: None,
+            price_pusher_allowed: std::collections::BTreeSet::new(),
             next_available_vault_id: 1,
             total_collateral_ratio: Ratio::from(Decimal::MAX),
             current_base_rate: Ratio::from(Decimal::ZERO),
@@ -1612,6 +1672,8 @@ impl Default for State {
             bot_cr_tolerance_bps: default_bot_cr_tolerance_bps(),
             multi_chain: crate::chains::MultiChainState::default(),
             xrp_pending_deposits: BTreeMap::new(),
+            xrp_claims: BTreeMap::new(),
+            next_xrp_claim_id: 0,
             evm_rpc_principal_override: None,
             sol_rpc_principal_override: None,
             solana_workers_enabled: false,
@@ -1628,6 +1690,8 @@ impl From<InitArg> for State {
             current_base_rate: Ratio::from(Decimal::ZERO),
             fee: Ratio::from(fee),
             developer_principal: args.developer_principal,
+            price_pusher_principal: None,
+            price_pusher_allowed: std::collections::BTreeSet::new(),
             principal_to_vault_ids: BTreeMap::new(),
             pending_redemption_transfer: BTreeMap::new(),
             pending_refunds: BTreeMap::new(),
@@ -1847,6 +1911,8 @@ impl From<InitArg> for State {
             bot_cr_tolerance_bps: default_bot_cr_tolerance_bps(),
             multi_chain: crate::chains::MultiChainState::default(),
             xrp_pending_deposits: BTreeMap::new(),
+            xrp_claims: BTreeMap::new(),
+            next_xrp_claim_id: 0,
             evm_rpc_principal_override: None,
             sol_rpc_principal_override: None,
             solana_workers_enabled: false,
@@ -1856,6 +1922,21 @@ impl From<InitArg> for State {
 }
 
 impl State {
+
+    /// True iff `caller` may set the manual price for `(chain_id, symbol)`:
+    /// the developer may set any pair; the narrowly-scoped price-pusher principal
+    /// (audit F-01) may set ONLY the pairs in `price_pusher_allowed`. Every other
+    /// developer-gated endpoint stays developer-only; setting these allow-listed
+    /// prices is the ONLY capability the pusher unlocks.
+    pub fn is_price_setter_authorized(&self, caller: Principal, chain_id: u32, symbol: &str) -> bool {
+        if self.developer_principal == caller {
+            return true;
+        }
+        self.price_pusher_principal == Some(caller)
+            && self
+                .price_pusher_allowed
+                .contains(&(chain_id, symbol.to_string()))
+    }
 
     // Rate limiting functions for close_vault operations
     pub fn check_close_vault_rate_limit(&mut self, principal: Principal) -> Result<(), ProtocolError> {
@@ -2294,6 +2375,14 @@ impl State {
         for (ct, config) in &self.collateral_configs {
             // Skip inactive or no-price collateral
             if !config.status.allows_redemption() {
+                continue;
+            }
+            // P4: native-XRP redemption (multi-vault water-fill -> per-vault XRP
+            // claims) is a focused follow-up; until it lands, exclude native-XRP
+            // from redemption priority so redemption never seizes XRP collateral
+            // (redeemers still redeem other collaterals; XRP simply isn't a target).
+            // Latent until P5 registers an XRP collateral.
+            if config.is_native_xrp() {
                 continue;
             }
             // Verify price exists (needed for CR computation inside compute_collateral_ratio)
@@ -6516,6 +6605,55 @@ mod tests {
     }
 
     #[test]
+    fn redemption_priority_excludes_native_xrp() {
+        // P4: native-XRP collateral must be excluded from redemption priority (so
+        // redemption never seizes XRP), WITHOUT over-excluding co-existing ICRC
+        // collateral. Pins the `if config.is_native_xrp() { continue }` skip.
+        let mut s = test_state();
+        let icp = s.icp_ledger_principal;
+        let xrp = xrp_collateral_principal();
+
+        // ICP collateral: give it a price + a debt-bearing vault so it's eligible.
+        if let Some(c) = s.collateral_configs.get_mut(&icp) {
+            c.last_price = Some(5.0);
+        }
+        s.open_vault(crate::vault::Vault {
+            owner: Principal::anonymous(),
+            vault_id: 1,
+            borrowed_icusd_amount: ICUSD::new(10_000_000_000),
+            collateral_amount: 1_000_000_000,
+            collateral_type: icp,
+            accrued_interest: ICUSD::new(0),
+            last_accrual_time: 0,
+            bot_processing: false,
+        });
+
+        // Native-XRP collateral: same shape, custody_kind = NativeXrp.
+        let mut xrp_cfg = s.collateral_configs.get(&icp).unwrap().clone();
+        xrp_cfg.ledger_canister_id = xrp;
+        xrp_cfg.custody_kind = Some(CustodyKind::NativeXrp);
+        xrp_cfg.last_price = Some(0.5);
+        s.collateral_configs.insert(xrp, xrp_cfg);
+        s.open_vault(crate::vault::Vault {
+            owner: Principal::anonymous(),
+            vault_id: 2,
+            borrowed_icusd_amount: ICUSD::new(10_000_000_000),
+            collateral_amount: 5_000_000,
+            collateral_type: xrp,
+            accrued_interest: ICUSD::new(0),
+            last_accrual_time: 0,
+            bot_processing: false,
+        });
+
+        let priority = s.get_collateral_types_by_redemption_priority();
+        assert!(priority.contains(&icp), "ICRC collateral must remain redeemable");
+        assert!(
+            !priority.contains(&xrp),
+            "native-XRP must be excluded from redemption priority"
+        );
+    }
+
+    #[test]
     fn xrp_collateral_principal_is_stable_and_not_a_canister_id() {
         let p = xrp_collateral_principal();
         assert_eq!(p, xrp_collateral_principal(), "must be deterministic");
@@ -6536,6 +6674,47 @@ mod tests {
         ciborium::ser::into_writer(&dep, &mut buf).unwrap();
         let back: XrpPendingDeposit = ciborium::de::from_reader(buf.as_slice()).unwrap();
         assert_eq!(dep, back);
+    }
+
+    #[test]
+    fn xrp_claims_default_empty_on_old_snapshot() {
+        // A pre-P4 ciborium snapshot lacks xrp_claims / next_xrp_claim_id. Removing
+        // the keys and re-decoding must succeed (serde default), not error.
+        let st = test_state();
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&st, &mut buf).unwrap();
+        let value: ciborium::Value = ciborium::de::from_reader(buf.as_slice()).unwrap();
+        let entries = match value {
+            ciborium::Value::Map(mut e) => {
+                e.retain(|(k, _)| {
+                    !matches!(k, ciborium::Value::Text(s) if s == "xrp_claims" || s == "next_xrp_claim_id")
+                });
+                e
+            }
+            other => panic!("expected a CBOR map, got {other:?}"),
+        };
+        let mut modified = Vec::new();
+        ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut modified).unwrap();
+        let restored: State =
+            ciborium::de::from_reader(modified.as_slice()).expect("old snapshot must decode");
+        assert!(restored.xrp_claims.is_empty());
+        assert_eq!(restored.next_xrp_claim_id, 0);
+    }
+
+    #[test]
+    fn xrp_claim_round_trips() {
+        let c = XrpClaim {
+            claimant: Principal::anonymous(),
+            drops: 4_000_000,
+            custody_owner: Principal::from_slice(&[0xab; 16]),
+            custody_nonce: 9,
+            created_at_ns: 42,
+            settlement: None,
+        };
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&c, &mut buf).unwrap();
+        let back: XrpClaim = ciborium::de::from_reader(buf.as_slice()).unwrap();
+        assert_eq!(c, back);
     }
 
     #[test]
@@ -6573,6 +6752,74 @@ mod tests {
             // Other fields should still be intact
             assert_eq!(restored.mode, state.mode);
             assert_eq!(restored.developer_principal, state.developer_principal);
+        } else {
+            panic!("expected CBOR map");
+        }
+    }
+
+    #[test]
+    fn price_setter_auth_allows_developer_anywhere_and_pusher_only_in_scope() {
+        let dev = Principal::from_slice(&[1; 29]);
+        let pusher = Principal::from_slice(&[2; 29]);
+        let stranger = Principal::from_slice(&[3; 29]);
+        let mut state = test_state();
+        state.developer_principal = dev;
+        state.price_pusher_principal = Some(pusher);
+        state.price_pusher_allowed.insert((1030, "CFX".to_string()));
+        // developer may set ANY pair
+        assert!(state.is_price_setter_authorized(dev, 1030, "CFX"));
+        assert!(state.is_price_setter_authorized(dev, 71, "MON"));
+        // pusher may set ONLY the allow-listed pair
+        assert!(state.is_price_setter_authorized(pusher, 1030, "CFX"));
+        assert!(!state.is_price_setter_authorized(pusher, 1030, "MON"), "out-of-scope symbol rejected");
+        assert!(!state.is_price_setter_authorized(pusher, 71, "CFX"), "out-of-scope chain rejected");
+        // stranger never
+        assert!(!state.is_price_setter_authorized(stranger, 1030, "CFX"));
+    }
+
+    #[test]
+    fn price_setter_auth_developer_only_when_no_pusher_set() {
+        let dev = Principal::from_slice(&[1; 29]);
+        let stranger = Principal::from_slice(&[3; 29]);
+        let mut state = test_state();
+        state.developer_principal = dev;
+        state.price_pusher_principal = None;
+        assert!(state.is_price_setter_authorized(dev, 1030, "CFX"));
+        assert!(!state.is_price_setter_authorized(stranger, 1030, "CFX"));
+    }
+
+    #[test]
+    fn price_setter_auth_pusher_with_empty_scope_can_set_nothing() {
+        let dev = Principal::from_slice(&[1; 29]);
+        let pusher = Principal::from_slice(&[2; 29]);
+        let mut state = test_state();
+        state.developer_principal = dev;
+        state.price_pusher_principal = Some(pusher);
+        // allow-list empty -> pusher is fail-closed even though it is the registered pusher
+        assert!(!state.is_price_setter_authorized(pusher, 1030, "CFX"));
+    }
+
+    #[test]
+    fn test_price_pusher_principal_defaults_none_on_old_snapshot() {
+        // An old snapshot predates the F-01 price-pusher principal. Prove a CBOR
+        // map missing `price_pusher_principal` decodes with the field defaulting
+        // to `None` (no accidental price-setter grant on upgrade).
+        let mut state = test_state();
+        state.price_pusher_principal = Some(Principal::from_slice(&[2; 29]));
+        state.price_pusher_allowed.insert((1030, "CFX".to_string()));
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&state, &mut buf).unwrap();
+
+        let value: ciborium::Value = ciborium::de::from_reader(buf.as_slice()).unwrap();
+        if let ciborium::Value::Map(mut entries) = value {
+            entries.retain(|(k, _)| {
+                !matches!(k, ciborium::Value::Text(key) if key == "price_pusher_principal" || key == "price_pusher_allowed")
+            });
+            let mut modified_buf = Vec::new();
+            ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut modified_buf).unwrap();
+            let restored: State = ciborium::de::from_reader(modified_buf.as_slice()).unwrap();
+            assert_eq!(restored.price_pusher_principal, None);
+            assert!(restored.price_pusher_allowed.is_empty(), "allow-list defaults empty");
         } else {
             panic!("expected CBOR map");
         }

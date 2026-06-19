@@ -673,6 +673,7 @@ type LiquidityStatus = record {
   available_liquidity_reward : nat64;
   total_available_returns : nat64;
 };
+type ManualPriceInfo = record { set_at_ns : nat64; price_e8 : nat64 };
 type Mode = variant { ReadOnly; GeneralAvailability; Recovery };
 type OpenVaultSuccess = record { block_index : nat64; vault_id : nat64 };
 type PerCollateralRateCurve = record {
@@ -1047,8 +1048,11 @@ service : (ProtocolArg) -> {
   get_liquidation_ordering_tolerance_bps : () -> (nat64) query;
   get_liquidation_protocol_share : () -> (float64) query;
   get_liquidity_status : (principal) -> (LiquidityStatus) query;
+  get_manual_collateral_price : (nat32, text) -> (opt ManualPriceInfo) query;
   get_min_icusd_amount : () -> (nat64) query;
   get_pending_amm1_donations_count : () -> (nat64) query;
+  get_price_pusher_allowed : () -> (vec record { nat32; text }) query;
+  get_price_pusher_principal : () -> (opt principal) query;
   get_protocol_3usd_reserves : () -> (nat64) query;
   get_protocol_config : () -> (ProtocolConfig) query;
   get_protocol_snapshots : (GetSnapshotsArg) -> (vec ProtocolSnapshot) query;
@@ -1169,6 +1173,9 @@ service : (ProtocolArg) -> {
   set_min_icusd_amount : (nat64) -> (Result);
   set_min_xrc_sources_used : (nat32) -> (Result);
   set_observer_tick_interval_secs : (nat64) -> (Result);
+  set_price_pusher_principal : (opt principal, vec record { nat32; text }) -> (
+      Result,
+    );
   set_rate_curve_markers : (opt principal, vec record { float64; float64 }) -> (
       Result,
     );
@@ -1196,6 +1203,7 @@ service : (ProtocolArg) -> {
   set_treasury_principal : (principal) -> (Result);
   set_vault_check_tick_interval_secs : (nat64) -> (Result);
   set_xrc_fetch_interval_secs : (nat64) -> (Result);
+  settle_xrp_claim : (nat64, text) -> (Result_2);
   solana_bootstrap_nonce : (opt text) -> (Result);
   solana_get_balance : (text) -> (Result_1);
   solana_get_mint_supply : () -> (Result_1);
