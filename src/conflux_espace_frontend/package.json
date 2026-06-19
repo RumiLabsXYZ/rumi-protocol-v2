@@ -1,0 +1,29 @@
+{
+  "name": "conflux_espace_frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Standalone MetaMask + viem UI for the Rumi M2 EVM-native self-serve CDP rail on Conflux eSpace testnet (chain 71). Testnet/staging-only.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "check": "svelte-check --tsconfig ./tsconfig.json"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^4.0.4",
+    "@tsconfig/svelte": "^5.0.4",
+    "svelte": "^5.22.6",
+    "svelte-check": "^4.1.4",
+    "typescript": "^5.7.3",
+    "vite": "^5.4.11",
+    "vitest": "^2.1.8"
+  },
+  "dependencies": {
+    "@dfinity/agent": "^2.3.0",
+    "@dfinity/candid": "^2.3.0",
+    "@dfinity/principal": "^2.3.0",
+    "viem": "^2.22.0"
+  }
+}
