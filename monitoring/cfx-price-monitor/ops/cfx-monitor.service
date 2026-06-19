@@ -1,0 +1,47 @@
+# systemd unit for the CFX price monitor (audit F-01 oracle keeper).
+# This is the RECOMMENDED host: a small always-on Linux VM/server.
+#
+# Install (replace every __PLACEHOLDER__ first):
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin cfxmon
+#   sudo install -d -o cfxmon -g cfxmon -m 700 /etc/cfx-monitor
+#   sudo install -o cfxmon -g cfxmon -m 600 cfx-pusher.pem /etc/cfx-monitor/cfx-pusher.pem
+#   # check out this repo to /opt/cfx-price-monitor and run `npm ci` in the daemon dir
+#   sudo cp cfx-monitor.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now cfx-monitor
+#   journalctl -u cfx-monitor -f          # watch ticks
+#
+[Unit]
+Description=Rumi CFX price monitor (audit F-01 oracle keeper)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cfxmon
+Group=cfxmon
+WorkingDirectory=/opt/cfx-price-monitor/monitoring/cfx-price-monitor
+# Ensure `npm`/`node` are on PATH for the service (adjust to your install).
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env npm start
+# A dead monitor is a frozen oracle: always restart.
+Restart=always
+RestartSec=10
+
+# --- config (override target/canister/key here) ---
+Environment=CANISTER_ID=__CANISTER_ID__
+Environment=IDENTITY_PEM=/etc/cfx-monitor/cfx-pusher.pem
+Environment=CHAIN_ID=__CHAIN_ID__
+Environment=SYMBOL=CFX
+Environment=COINGECKO_ID=conflux-token
+# Environment=SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
+# Environment=POLL_SEC=60
+
+# --- hardening ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadOnlyPaths=/etc/cfx-monitor
+
+[Install]
+WantedBy=multi-user.target
