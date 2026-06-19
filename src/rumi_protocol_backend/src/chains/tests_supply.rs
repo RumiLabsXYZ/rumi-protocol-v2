@@ -1,9 +1,9 @@
 use super::supply::{apply_supply_delta, SupplyDelta, SupplyInvariantError};
 use super::config::{ChainConfigV3, ChainId, ChainStatus, GasStrategy};
-use super::multi_chain_state::MultiChainStateV4;
+use super::multi_chain_state::MultiChainStateV5;
 
-fn fixture_state() -> MultiChainStateV4 {
-    let mut s = MultiChainStateV4::default();
+fn fixture_state() -> MultiChainStateV5 {
+    let mut s = MultiChainStateV5::default();
     s.chain_configs.insert(
         ChainId(101),
         ChainConfigV3 {

@@ -2,15 +2,15 @@ use crate::chains::config::ChainId;
 use crate::chains::monad::burn_proof::apply_receipt_burns_to_state;
 use crate::chains::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
 use crate::chains::monad::evm_rpc::{TxReceiptWithLogs, BURN_EVENT_TOPIC0};
-use crate::chains::multi_chain_state::MultiChainStateV4;
+use crate::chains::multi_chain_state::MultiChainStateV5;
 use candid::Principal;
 
 fn word(v: u128) -> String {
     format!("0x{:064x}", v)
 }
 
-fn state_with_open_vault(debt: u128) -> MultiChainStateV4 {
-    let mut s = MultiChainStateV4::default();
+fn state_with_open_vault(debt: u128) -> MultiChainStateV5 {
+    let mut s = MultiChainStateV5::default();
     s.chain_supplies.insert(ChainId(10143), debt);
     s.chain_vaults.insert(
         1,

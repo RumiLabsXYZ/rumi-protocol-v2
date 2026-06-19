@@ -51,7 +51,7 @@ use crate::Mode;
 // Reuse the chain-agnostic pure helpers from the Monad settlement module (the
 // FIFO one-in-flight selector and the supply-invariant mint-confirm). These are
 // chain-independent: `select_next_op` scans a `SettlementQueueV1` and
-// `confirm_mint_in_state` operates on `MultiChainStateV4`, neither of which is
+// `confirm_mint_in_state` operates on `MultiChainStateV5`, neither of which is
 // Monad-specific.
 use crate::chains::monad::settlement::{confirm_mint_in_state, select_next_op, OpAction};
 

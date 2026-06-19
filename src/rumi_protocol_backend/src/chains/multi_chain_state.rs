@@ -278,4 +278,139 @@ impl MultiChainStateV4 {
     }
 }
 
-pub type MultiChainState = MultiChainStateV4;
+/// Phase 1e snapshot (audit F-01 price-freshness mitigation). Identical to
+/// `MultiChainStateV4` in every field, plus ONE new map: `manual_price_set_at_ns`,
+/// the wall-clock nanosecond timestamp of the LAST `set_manual_collateral_price`
+/// write for each `(chain, symbol)`. This is a NON-BREAKING reshape under ciborium:
+///
+///  - The eleven V4 fields are byte-for-byte identical and map across by name
+///    (the four originals are always present; the V2-added maps keep their
+///    `#[serde(default)]`).
+///  - `manual_price_set_at_ns` is new and carries `#[serde(default)]`, so a live
+///    `MultiChainStateV4` CBOR snapshot (which lacks the key entirely) decodes
+///    into V5 with the map defaulting to empty. The existing `manual_prices` map
+///    is UNTOUCHED, so every collateral-ratio read of it is byte-identical — the
+///    timestamp is a pure side-channel for the off-chain monitor's getter.
+///
+/// A price set before this upgrade has an entry in `manual_prices` but NOT in
+/// `manual_price_set_at_ns`; the getter reports `set_at_ns = 0` for it until the
+/// next refresh writes both. Because the decode is in-place, NO explicit
+/// `post_upgrade` migration call is needed.
+///
+/// Add the NEXT field by bumping to `MultiChainStateV6` (keep V5 verbatim),
+/// `#[serde(default)]` on the new field, and rebinding the alias below.
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, Default)]
+pub struct MultiChainStateV5 {
+    pub chain_configs: BTreeMap<ChainId, ChainConfigV3>,
+    pub chain_supplies: BTreeMap<ChainId, u128>,
+    pub settlement_queues: BTreeMap<ChainId, SettlementQueueV1>,
+    pub invariant_halted: bool,
+    #[serde(default)]
+    pub chain_vaults: BTreeMap<u64, ChainVaultV1>,
+    #[serde(default)]
+    pub chain_contracts: BTreeMap<ChainId, String>,
+    #[serde(default)]
+    pub manual_prices: BTreeMap<(ChainId, String), u64>,
+    #[serde(default)]
+    pub last_observed_block: BTreeMap<ChainId, u64>,
+    #[serde(default)]
+    pub hot_wallet_balance_e18: BTreeMap<ChainId, u128>,
+    #[serde(default)]
+    pub reorg_halted: BTreeMap<ChainId, bool>,
+    #[serde(default)]
+    pub reorg_suspect_streak: BTreeMap<ChainId, u32>,
+    #[serde(default)]
+    pub processed_burn_keys: BTreeMap<u64, BTreeSet<String>>,
+    /// New in V5 (audit F-01): wall-clock ns of the last manual-price write per
+    /// `(chain, symbol)`. The off-chain monitor owns freshness; this lets the
+    /// getter expose how stale the canister's own manual price is. `#[serde(default)]`
+    /// is mandatory state-wipe defense (a V4 snapshot lacks this key).
+    #[serde(default)]
+    pub manual_price_set_at_ns: BTreeMap<(ChainId, String), u64>,
+}
+
+impl MultiChainStateV5 {
+    pub fn total_supply_all_chains_e8s(&self) -> u128 {
+        self.chain_supplies.values().copied().sum()
+    }
+
+    /// Sum of confirmed debt across all foreign-chain vaults (e8s). See the
+    /// V2 doc — same foreign-chain-only invariant.
+    pub fn total_chain_vault_debt_e8s(&self) -> u128 {
+        self.chain_vaults.values().map(|v| v.debt_e8s).sum()
+    }
+
+    /// Write a manual collateral price for `(chain, symbol)` and stamp the
+    /// wall-clock time of the write. Both maps are updated together so the
+    /// getter can never see a price without its freshness timestamp.
+    pub fn set_manual_price(&mut self, chain: ChainId, symbol: String, price_e8: u64, now_ns: u64) {
+        self.manual_prices.insert((chain, symbol.clone()), price_e8);
+        self.manual_price_set_at_ns.insert((chain, symbol), now_ns);
+    }
+
+    /// Read the manual collateral price for `(chain, symbol)` as
+    /// `(price_e8, set_at_ns)`. Returns `None` if no price is set. `set_at_ns` is
+    /// `0` for a price set before the V5 upgrade (timestamp not yet recorded).
+    pub fn get_manual_price(&self, chain: ChainId, symbol: &str) -> Option<(u64, u64)> {
+        let key = (chain, symbol.to_string());
+        let price = *self.manual_prices.get(&key)?;
+        let set_at = self.manual_price_set_at_ns.get(&key).copied().unwrap_or(0);
+        Some((price, set_at))
+    }
+}
+
+pub type MultiChainState = MultiChainStateV5;
+
+#[cfg(test)]
+mod manual_price_tests {
+    use super::*;
+
+    const CFX: ChainId = ChainId(1030);
+
+    #[test]
+    fn set_manual_price_stores_price_and_timestamp() {
+        let mut mc = MultiChainStateV5::default();
+        mc.set_manual_price(CFX, "CFX".to_string(), 15_000_000, 1234);
+        assert_eq!(mc.get_manual_price(CFX, "CFX"), Some((15_000_000, 1234)));
+    }
+
+    #[test]
+    fn get_manual_price_none_when_unset() {
+        let mc = MultiChainStateV5::default();
+        assert_eq!(mc.get_manual_price(CFX, "CFX"), None);
+    }
+
+    #[test]
+    fn set_manual_price_overwrites_price_and_timestamp() {
+        let mut mc = MultiChainStateV5::default();
+        mc.set_manual_price(CFX, "CFX".to_string(), 15_000_000, 1000);
+        mc.set_manual_price(CFX, "CFX".to_string(), 16_000_000, 2000);
+        assert_eq!(mc.get_manual_price(CFX, "CFX"), Some((16_000_000, 2000)));
+    }
+
+    #[test]
+    fn get_manual_price_reports_zero_timestamp_for_pre_v5_price() {
+        // A price written before V5 lives in `manual_prices` with NO entry in
+        // `manual_price_set_at_ns`. The getter must report set_at_ns = 0, not None.
+        let mut mc = MultiChainStateV5::default();
+        mc.manual_prices.insert((CFX, "CFX".to_string()), 15_000_000);
+        assert_eq!(mc.get_manual_price(CFX, "CFX"), Some((15_000_000, 0)));
+    }
+
+    #[test]
+    fn v4_snapshot_decodes_into_v5_without_wipe() {
+        // State-wipe defense: a live V4 CBOR snapshot (no manual_price_set_at_ns
+        // key) must decode into V5 with prices intact and the timestamp map empty.
+        let mut v4 = MultiChainStateV4::default();
+        v4.manual_prices.insert((CFX, "CFX".to_string()), 15_000_000);
+        v4.chain_supplies.insert(CFX, 42);
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&v4, &mut buf).unwrap();
+
+        let v5: MultiChainStateV5 = ciborium::de::from_reader(buf.as_slice()).unwrap();
+        assert_eq!(v5.manual_prices.get(&(CFX, "CFX".to_string())), Some(&15_000_000));
+        assert_eq!(v5.chain_supplies.get(&CFX), Some(&42));
+        assert!(v5.manual_price_set_at_ns.is_empty());
+        assert_eq!(v5.get_manual_price(CFX, "CFX"), Some((15_000_000, 0)));
+    }
+}

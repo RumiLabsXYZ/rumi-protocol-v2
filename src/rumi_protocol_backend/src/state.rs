@@ -901,6 +901,15 @@ pub struct State {
     pub observer_tick_interval_secs: u64,
     pub fee: Ratio,
     pub developer_principal: Principal,
+    /// Optional narrowly-scoped principal (audit F-01) that may ONLY call
+    /// `set_manual_collateral_price` — nothing else. Granted/rotated by the
+    /// developer via `set_price_pusher_principal`. Lets the always-online CFX
+    /// price monitor hold a key whose blast radius is "set chain prices", not the
+    /// full developer key. `None` (the default) means no pusher is authorized and
+    /// only the developer can set prices. `#[serde(default)]` lets an old ciborium
+    /// snapshot decode cleanly to `None` (State is ciborium/serde-encoded).
+    #[serde(default)]
+    pub price_pusher_principal: Option<Principal>,
     pub next_available_vault_id: u64,
     pub total_collateral_ratio: Ratio,
     pub current_base_rate: Ratio,
@@ -1507,6 +1516,7 @@ impl Default for State {
             observer_tick_interval_secs: default_observer_tick_interval_secs(),
             fee: Ratio::from(Decimal::ZERO),
             developer_principal: Principal::anonymous(),
+            price_pusher_principal: None,
             next_available_vault_id: 1,
             total_collateral_ratio: Ratio::from(Decimal::MAX),
             current_base_rate: Ratio::from(Decimal::ZERO),
@@ -1635,6 +1645,7 @@ impl From<InitArg> for State {
             current_base_rate: Ratio::from(Decimal::ZERO),
             fee: Ratio::from(fee),
             developer_principal: args.developer_principal,
+            price_pusher_principal: None,
             principal_to_vault_ids: BTreeMap::new(),
             pending_redemption_transfer: BTreeMap::new(),
             pending_refunds: BTreeMap::new(),
@@ -1862,6 +1873,14 @@ impl From<InitArg> for State {
 }
 
 impl State {
+
+    /// True iff `caller` is authorized to call `set_manual_collateral_price`:
+    /// either the developer, or the optional narrowly-scoped price-pusher
+    /// principal (audit F-01). Every other developer-gated endpoint stays
+    /// developer-only; this is the ONLY capability the pusher unlocks.
+    pub fn is_price_pusher_authorized(&self, caller: Principal) -> bool {
+        self.developer_principal == caller || self.price_pusher_principal == Some(caller)
+    }
 
     // Rate limiting functions for close_vault operations
     pub fn check_close_vault_rate_limit(&mut self, principal: Principal) -> Result<(), ProtocolError> {
@@ -6677,6 +6696,57 @@ mod tests {
             // Other fields should still be intact
             assert_eq!(restored.mode, state.mode);
             assert_eq!(restored.developer_principal, state.developer_principal);
+        } else {
+            panic!("expected CBOR map");
+        }
+    }
+
+    #[test]
+    fn price_pusher_auth_allows_developer_and_pusher_only() {
+        let dev = Principal::from_slice(&[1; 29]);
+        let pusher = Principal::from_slice(&[2; 29]);
+        let stranger = Principal::from_slice(&[3; 29]);
+        let mut state = test_state();
+        state.developer_principal = dev;
+        state.price_pusher_principal = Some(pusher);
+        assert!(state.is_price_pusher_authorized(dev), "developer authorized");
+        assert!(state.is_price_pusher_authorized(pusher), "pusher authorized");
+        assert!(!state.is_price_pusher_authorized(stranger), "stranger rejected");
+    }
+
+    #[test]
+    fn price_pusher_auth_developer_only_when_no_pusher_set() {
+        let dev = Principal::from_slice(&[1; 29]);
+        let stranger = Principal::from_slice(&[3; 29]);
+        let mut state = test_state();
+        state.developer_principal = dev;
+        state.price_pusher_principal = None;
+        assert!(state.is_price_pusher_authorized(dev), "developer authorized");
+        assert!(
+            !state.is_price_pusher_authorized(stranger),
+            "no pusher set -> stranger rejected"
+        );
+    }
+
+    #[test]
+    fn test_price_pusher_principal_defaults_none_on_old_snapshot() {
+        // An old snapshot predates the F-01 price-pusher principal. Prove a CBOR
+        // map missing `price_pusher_principal` decodes with the field defaulting
+        // to `None` (no accidental price-setter grant on upgrade).
+        let mut state = test_state();
+        state.price_pusher_principal = Some(Principal::from_slice(&[2; 29]));
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&state, &mut buf).unwrap();
+
+        let value: ciborium::Value = ciborium::de::from_reader(buf.as_slice()).unwrap();
+        if let ciborium::Value::Map(mut entries) = value {
+            entries.retain(|(k, _)| {
+                !matches!(k, ciborium::Value::Text(key) if key == "price_pusher_principal")
+            });
+            let mut modified_buf = Vec::new();
+            ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut modified_buf).unwrap();
+            let restored: State = ciborium::de::from_reader(modified_buf.as_slice()).unwrap();
+            assert_eq!(restored.price_pusher_principal, None);
         } else {
             panic!("expected CBOR map");
         }

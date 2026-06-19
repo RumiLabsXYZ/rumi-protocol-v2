@@ -16,7 +16,7 @@ use super::chain_vault::{
     ChainVaultStatus, OpenVaultError,
 };
 use crate::chains::config::{ChainId, GasStrategy, RegisterChainArg};
-use crate::chains::multi_chain_state::MultiChainStateV4;
+use crate::chains::multi_chain_state::MultiChainStateV5;
 use crate::chains::settlement_queue::SettlementOpKind;
 use candid::Principal;
 
@@ -31,8 +31,8 @@ const ONE_MON_E18: u128 = 1_000_000_000_000_000_000;
 /// Register chain 10143 and set its manual MON price. Mirrors what the live
 /// register_chain endpoint + a manual price override do (chain_supplies and
 /// settlement_queues are seeded by register_chain_in_state).
-fn setup(price_e8: u64) -> MultiChainStateV4 {
-    let mut s = MultiChainStateV4::default();
+fn setup(price_e8: u64) -> MultiChainStateV5 {
+    let mut s = MultiChainStateV5::default();
     let arg = RegisterChainArg {
         chain_id: CHAIN,
         display_name: "MonadTestnet".into(),
@@ -247,7 +247,7 @@ fn verify_unknown_vault_errors() {
 // 8. open rejects an unregistered chain
 #[test]
 fn open_rejects_unknown_chain() {
-    let mut s = MultiChainStateV4::default(); // no chain registered
+    let mut s = MultiChainStateV5::default(); // no chain registered
     let res = open_chain_vault_in_state(
         &mut s, CHAIN, owner(), "0xcustody".into(), 100 * ONE_MON_E18, 100_00000000,
         "0x000000000000000000000000000000000000c0de".into(), 13000, 0, 7,
@@ -306,7 +306,7 @@ fn open_rejects_invalid_recipient() {
 // 9. open rejects when no MON price is configured
 #[test]
 fn open_rejects_when_no_price() {
-    let mut s = MultiChainStateV4::default();
+    let mut s = MultiChainStateV5::default();
     // Register the chain but DON'T set a MON price.
     let arg = RegisterChainArg {
         chain_id: CHAIN,
