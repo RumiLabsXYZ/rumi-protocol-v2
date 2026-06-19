@@ -32,12 +32,15 @@
 
 pub mod adapter;
 pub mod admin;
+pub mod collateral_config;
 pub mod config;
+pub mod interest;
 pub mod multi_chain_state;
 pub mod recovery;
 pub mod settlement_queue;
 pub mod supply;
 pub mod vault;
+pub mod evm;
 pub mod monad;
 pub mod solana;
 pub mod xrp;

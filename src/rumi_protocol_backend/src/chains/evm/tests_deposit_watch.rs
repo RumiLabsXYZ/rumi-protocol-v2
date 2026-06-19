@@ -1,5 +1,5 @@
 use super::deposit_watch::{advance_cursor_and_prune, apply_burn_to_state, credit_deposit_to_state, BurnApplyError};
-use super::chain_vault::{ChainVaultStatus, ChainVaultV1};
+use crate::chains::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
 use crate::chains::config::ChainId;
 use crate::chains::multi_chain_state::MultiChainStateV5;
 use crate::chains::monad::evm_rpc::BurnLog;
@@ -14,6 +14,9 @@ fn seeded() -> MultiChainStateV5 {
         custody_address: "0xcustody".into(), collateral_amount_native: 0, debt_e8s: 0,
         mint_recipient: "0xr".into(), pending_mint_e8s: 0,
         status: ChainVaultStatus::Open, opened_at_ns: 0,
+        owner_evm: None,
+        last_interest_accrual_ns: 0,
+        pending_interest_mint_e8s: 0,
     });
     s
 }

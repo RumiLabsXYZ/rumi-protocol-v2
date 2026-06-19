@@ -109,6 +109,17 @@ fn default_vault_check_tick_interval_secs() -> u64 { 300 }
 /// developer-gated setters tune the live cadence without an upgrade.
 fn default_settlement_tick_interval_secs() -> u64 { 300 }
 fn default_observer_tick_interval_secs() -> u64 { 300 }
+/// Task 12: ~1 year (365 days) — effectively OFF by default (realization is
+/// deliberate, not an always-on heartbeat).
+fn default_chain_interest_tick_interval_secs() -> u64 { 31_536_000 }
+/// Task 12: 0.01 icUSD dust floor for interest realization.
+fn default_chain_interest_min_realize_e8s() -> u128 { 1_000_000 }
+/// Production tECDSA key name for the EVM chains rail. Default `test_key_1`
+/// (single-sourced from `monad_ecdsa_key_name`); a fresh production canister sets
+/// `key_1` via `set_chains_ecdsa_key_name` before registering any chain.
+fn default_chains_ecdsa_key_name() -> String {
+    crate::chains::monad::config::monad_ecdsa_key_name()
+}
 
 pub fn default_interest_split() -> Vec<InterestRecipient> {
     vec![
@@ -899,6 +910,29 @@ pub struct State {
     /// `set_observer_tick_interval_secs`. Same 0-floor protection as above.
     #[serde(default = "default_observer_tick_interval_secs")]
     pub observer_tick_interval_secs: u64,
+    /// Task 12: cadence (seconds) for the foreign-chain interest harvest
+    /// (`main::run_all_chain_interest_harvests`). Defaults to ~1 year, i.e.
+    /// effectively OFF on staging — interest realization mints on-chain (gas +
+    /// cycles), so it is deliberate, not an always-on heartbeat. Tunable via
+    /// `set_chain_interest_tick_interval_secs`; the register fn floors a 0 to the
+    /// 1-year default so a missing serde-default never busy-loops. (Accrual for
+    /// CR is lazy-on-read; only realization rides this timer.)
+    #[serde(default = "default_chain_interest_tick_interval_secs")]
+    pub chain_interest_tick_interval_secs: u64,
+    /// Task 12: dust floor (e8s) below which accrued interest is NOT realized, to
+    /// avoid sub-cent on-chain mints whose gas dwarfs the interest. Default 0.01
+    /// icUSD. The accrued interest keeps accumulating (in the CR read) until it
+    /// crosses this.
+    #[serde(default = "default_chain_interest_min_realize_e8s")]
+    pub chain_interest_min_realize_e8s: u128,
+    /// Production tECDSA key name for the EVM chains rail: `test_key_1` (default,
+    /// staging/testnet) or `key_1` (production). Read by the EVM `key_id()` at
+    /// derive/sign time, so a fresh production canister uses the production
+    /// threshold key with no rebuild. Settable via `set_chains_ecdsa_key_name`
+    /// ONLY while no chain vault exists — changing it re-derives every per-vault
+    /// custody address, which would orphan already-deposited collateral.
+    #[serde(default = "default_chains_ecdsa_key_name")]
+    pub chains_ecdsa_key_name: String,
     pub fee: Ratio,
     pub developer_principal: Principal,
     /// Optional narrowly-scoped principal (audit F-01) that may ONLY call
@@ -1521,6 +1555,9 @@ impl Default for State {
             vault_check_tick_interval_secs: default_vault_check_tick_interval_secs(),
             settlement_tick_interval_secs: default_settlement_tick_interval_secs(),
             observer_tick_interval_secs: default_observer_tick_interval_secs(),
+            chain_interest_tick_interval_secs: default_chain_interest_tick_interval_secs(),
+            chain_interest_min_realize_e8s: default_chain_interest_min_realize_e8s(),
+            chains_ecdsa_key_name: default_chains_ecdsa_key_name(),
             fee: Ratio::from(Decimal::ZERO),
             developer_principal: Principal::anonymous(),
             price_pusher_principal: None,
@@ -1672,6 +1709,9 @@ impl From<InitArg> for State {
             vault_check_tick_interval_secs: default_vault_check_tick_interval_secs(),
             settlement_tick_interval_secs: default_settlement_tick_interval_secs(),
             observer_tick_interval_secs: default_observer_tick_interval_secs(),
+            chain_interest_tick_interval_secs: default_chain_interest_tick_interval_secs(),
+            chain_interest_min_realize_e8s: default_chain_interest_min_realize_e8s(),
+            chains_ecdsa_key_name: default_chains_ecdsa_key_name(),
             total_collateral_ratio: Ratio::from(Decimal::MAX),
             last_icp_timestamp: None,
             last_icp_rate: None,

@@ -19,7 +19,7 @@ use ic_cdk::api::management_canister::ecdsa::{
     sign_with_ecdsa, EcdsaCurve, EcdsaKeyId, SignWithEcdsaArgument,
 };
 
-use super::config::monad_ecdsa_key_name;
+use crate::state::read_state;
 
 // ─── public types ────────────────────────────────────────────────────────────
 
@@ -39,8 +39,11 @@ pub struct Eip1559Fields {
 /// The per-op-kind shape of a Monad settlement transaction (what varies between
 /// a mint and a native withdrawal: `to`, `value`, calldata, gas_limit).
 pub enum MonadTxKind<'a> {
-    /// `mint(address,uint256,uint64)` on the icUSD EVM contract.
-    Mint { contract: &'a str, recipient: &'a str, amount_e8s: u128, vault_id: u64 },
+    /// `mint(address,uint256,uint64,uint64)` on the icUSD EVM contract. `op_id`
+    /// is the settlement queue's unique-per-chain op id and is the on-chain
+    /// idempotency discriminator (per-op, not per-vault), so a vault can be
+    /// minted to more than once (borrow).
+    Mint { contract: &'a str, recipient: &'a str, amount_e8s: u128, vault_id: u64, op_id: u64 },
     /// A native MON transfer (`amount_wei` carried in the EIP-1559 `value`).
     NativeWithdrawal { recipient: &'a str, amount_wei: u128 },
 }
@@ -62,6 +65,13 @@ pub enum MonadTxKind<'a> {
 /// boundary validation at `set_chain_contract`/`open_chain_vault`/withdraw+close
 /// makes this unreachable in practice, but a malformed address must never trap
 /// the settlement worker after the re-entrancy guard is held).
+/// Intrinsic gas for a plain native-value transfer (no calldata). A native
+/// withdrawal carries no data, so 21_000 is exact on every EVM chain. Exported
+/// so the settlement worker can reserve the worst-case gas
+/// (`gas_limit * max_fee`) out of a full-close withdrawal value with the SAME
+/// number used to build the tx.
+pub const NATIVE_WITHDRAWAL_GAS_LIMIT: u64 = 21_000;
+
 pub fn build_eip1559_fields(
     chain_id: u64,
     kind: MonadTxKind,
@@ -70,14 +80,20 @@ pub fn build_eip1559_fields(
     max_fee: u128,
 ) -> Result<Eip1559Fields, String> {
     match kind {
-        MonadTxKind::Mint { contract, recipient, amount_e8s, vault_id } => {
-            let data = encode_mint_calldata(recipient, amount_e8s, vault_id)?;
+        MonadTxKind::Mint { contract, recipient, amount_e8s, vault_id, op_id } => {
+            let data = encode_mint_calldata(recipient, amount_e8s, vault_id, op_id)?;
             Ok(Eip1559Fields {
                 chain_id,
                 nonce,
                 max_priority_fee_per_gas: prio,
                 max_fee_per_gas: max_fee,
-                gas_limit: 120_000,
+                // gas_limit is a CEILING (only gas actually used is charged), so a
+                // generous cap is safe across EVM chains. Conflux eSpace meters the
+                // icUSD `mint` at ~177.5k gas (measured via eth_estimateGas) — well
+                // above standard-EVM (~90k) — so the old 120k cap reverted every
+                // mint out-of-gas on eSpace. 300k clears eSpace with headroom and
+                // is still comfortably covered by the settlement hot-wallet float.
+                gas_limit: 300_000,
                 to: contract.to_string(),
                 value: 0,
                 data,
@@ -88,7 +104,7 @@ pub fn build_eip1559_fields(
             nonce,
             max_priority_fee_per_gas: prio,
             max_fee_per_gas: max_fee,
-            gas_limit: 21_000,
+            gas_limit: NATIVE_WITHDRAWAL_GAS_LIMIT,
             to: recipient.to_string(),
             value: amount_wei,
             data: vec![],
@@ -98,18 +114,27 @@ pub fn build_eip1559_fields(
 
 // ─── calldata helpers ─────────────────────────────────────────────────────────
 
-/// Build calldata for `mint(address,uint256,uint64)`.
-/// Signature string: `"mint(address,uint256,uint64)"`.
-/// Layout: 4-byte selector || word(address) || word(amount) || word(vault_id).
+/// Build calldata for `mint(address,uint256,uint64,uint64)`.
+/// Signature string: `"mint(address,uint256,uint64,uint64)"` (selector 0x31239e64).
+/// Layout: 4-byte selector || word(address) || word(amount) || word(vault_id) ||
+/// word(op_id). `op_id` is the settlement queue's unique-per-chain op id and is
+/// the on-chain per-op idempotency key (so a vault can be minted to more than
+/// once — borrow). `vault_id` stays the debt key for the `Mint` event + repay.
 ///
 /// Returns `Err` if `to` is not a valid 20-byte hex address.
-pub fn encode_mint_calldata(to: &str, amount_e8s: u128, vault_id: u64) -> Result<Vec<u8>, String> {
-    let selector = keccak_selector("mint(address,uint256,uint64)");
-    let mut out = Vec::with_capacity(4 + 96);
+pub fn encode_mint_calldata(
+    to: &str,
+    amount_e8s: u128,
+    vault_id: u64,
+    op_id: u64,
+) -> Result<Vec<u8>, String> {
+    let selector = keccak_selector("mint(address,uint256,uint64,uint64)");
+    let mut out = Vec::with_capacity(4 + 128);
     out.extend_from_slice(&selector);
     out.extend_from_slice(&abi_word_address(to)?);
     out.extend_from_slice(&abi_word_u128(amount_e8s));
     out.extend_from_slice(&abi_word_u128(vault_id as u128));
+    out.extend_from_slice(&abi_word_u128(op_id as u128));
     Ok(out)
 }
 
@@ -135,6 +160,21 @@ pub fn encode_transfer_calldata(to: &str, amount: u128) -> Result<Vec<u8>, Strin
 pub fn signing_hash(fields: &Eip1559Fields) -> Result<[u8; 32], String> {
     let payload = rlp_encode_eip1559(fields, None)?;
     Ok(Keccak256::digest(&payload).into())
+}
+
+/// The canonical transaction hash of an already-signed raw EIP-1559 tx:
+/// `keccak256(raw signed bytes)`, returned as a lowercase `"0x…"` 32-byte hex.
+///
+/// Used to recover the tx hash when a broadcast returns an idempotent
+/// "already known" / "already exists" response (the node accepted the tx on a
+/// prior attempt — common when the IC sends the same outcall from multiple
+/// replicas — and replies without echoing the hash). The hash is a pure
+/// function of the signed bytes, so it equals what the node assigned.
+pub fn raw_tx_hash(raw_tx_hex: &str) -> Result<String, String> {
+    let stripped = raw_tx_hex.strip_prefix("0x").unwrap_or(raw_tx_hex);
+    let bytes = hex::decode(stripped).map_err(|e| format!("raw_tx_hash: bad hex: {e}"))?;
+    let hash: [u8; 32] = Keccak256::digest(&bytes).into();
+    Ok(format!("0x{}", hex::encode(hash)))
 }
 
 /// Assemble the final signed EIP-1559 transaction bytes:
@@ -195,7 +235,12 @@ pub async fn sign_eip1559(
 ) -> Result<String, String> {
     let hash = signing_hash(fields)?;
 
-    let key_id = EcdsaKeyId { curve: EcdsaCurve::Secp256k1, name: monad_ecdsa_key_name() };
+    // Runtime-configurable key (State::chains_ecdsa_key_name): test_key_1 default,
+    // key_1 on production. sign_eip1559 is async/canister-only, so read_state is safe.
+    let key_id = EcdsaKeyId {
+        curve: EcdsaCurve::Secp256k1,
+        name: read_state(|s| s.chains_ecdsa_key_name.clone()),
+    };
     let arg = SignWithEcdsaArgument {
         message_hash: hash.to_vec(),
         derivation_path,

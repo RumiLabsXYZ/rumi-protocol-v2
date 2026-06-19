@@ -9,7 +9,7 @@
 //! transactions; broadcasting is handled by the settlement worker (Task 13).
 //!
 //! ## Phase scope
-//! - `sign_mint`: builds + signs the `mint(address,uint256,uint64)` call on the
+//! - `sign_mint`: builds + signs the `mint(address,uint256,uint64,uint64)` call on the
 //!   icUSD EVM contract.
 //! - `sign_withdrawal`: builds + signs a native MON transfer to the recipient.
 //! - `sign_burn`: reserved; Phase 1b burns are user-initiated on-chain.
@@ -162,7 +162,7 @@ impl ChainAdapter for MonadAdapter {
         })
     }
 
-    /// Build and sign a `mint(address,uint256,uint64)` call on the icUSD contract.
+    /// Build and sign a `mint(address,uint256,uint64,uint64)` call on the icUSD contract.
     ///
     /// gas_limit = 120_000 — generous for a typical ERC-20-style mint call,
     /// covers the vault-id event emission and any SSTORE on first-mint paths.
@@ -200,6 +200,7 @@ impl ChainAdapter for MonadAdapter {
                 recipient: &instr.recipient,
                 amount_e8s: instr.amount_e8s,
                 vault_id: instr.vault_id,
+                op_id: instr.op_id,
             },
             nonce,
             prio,

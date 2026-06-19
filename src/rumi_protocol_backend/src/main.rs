@@ -182,6 +182,16 @@ fn inspect_message() {
         "icrc21_canister_call_consent_message" | "icrc10_supported_standards" => {
             ic_cdk::api::call::accept_message();
         }
+        // M2 EVM-native self-serve: authority is the EIP-712 signature, so the IC
+        // caller is irrelevant and ANONYMOUS ingress MUST be accepted (a relayer or
+        // a wallet's anonymous agent forwards the signed intent). The in-method
+        // signature verification + per-owner nonce/cap are the real boundary; this
+        // accept just lets the message reach the method body. inspect_message is a
+        // single-replica pre-filter, never a security boundary.
+        "open_chain_vault_evm" | "borrow_chain_vault_evm" | "withdraw_chain_collateral_evm"
+        | "close_chain_vault_evm" => {
+            ic_cdk::api::call::accept_message();
+        }
         // Everything else requires a non-anonymous caller
         _ => {
             if caller != Principal::anonymous() {
@@ -208,6 +218,9 @@ thread_local! {
     static SETTLEMENT_TIMER_ID: std::cell::Cell<Option<ic_cdk_timers::TimerId>> =
         const { std::cell::Cell::new(None) };
     static OBSERVER_TIMER_ID: std::cell::Cell<Option<ic_cdk_timers::TimerId>> =
+        const { std::cell::Cell::new(None) };
+    // Task 12: foreign-chain interest harvest. Same transient lifecycle.
+    static CHAIN_INTEREST_TIMER_ID: std::cell::Cell<Option<ic_cdk_timers::TimerId>> =
         const { std::cell::Cell::new(None) };
 }
 
@@ -345,6 +358,92 @@ fn register_settlement_timer() {
     });
 }
 
+/// Task 12: interest harvest fan-out — for each registered EVM chain, resolve its
+/// interest-treasury recipient + APR and enqueue `InterestMint` ops for every
+/// eligible vault. The settlement worker (Timer D) then mints/confirms them.
+/// Interest accrual is EVM-only in Phase 1b (Solana has no on-chain mint path
+/// here), so Solana is skipped. No-op in ReadOnly mode. No state borrow is held
+/// across the treasury-address derive `.await`.
+async fn run_all_chain_interest_harvests() {
+    if read_state(|s| s.mode == Mode::ReadOnly) {
+        return;
+    }
+    let (chains, _solana_enabled) = registered_chains_and_solana_flag();
+    let now = ic_cdk::api::time();
+    for chain in chains {
+        if chain == SOLANA_CHAIN_ID {
+            continue; // interest accrual is EVM-only in Phase 1b
+        }
+        if let Err(e) = harvest_one_chain_interest(chain, now).await {
+            log!(INFO, "[interest harvest chain={:?}] skipped: {}", chain, e);
+        }
+    }
+}
+
+/// Harvest interest for one EVM chain: resolve `apr_bps` + the interest-treasury
+/// address (async, cached), then run the in-state harvest. Interest-mint ids are
+/// drawn from the SAME `chain_vault_id_counter` as vault opens (guaranteeing
+/// global disjointness from real vault ids and prior interest mints): read the
+/// counter, hand the harvest a fresh-id closure over a LOCAL copy, write the
+/// advanced value back — all inside one `mutate_state`, so the closure never
+/// reborrows `s`.
+async fn harvest_one_chain_interest(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    now: u64,
+) -> Result<u64, String> {
+    let apr_bps =
+        match rumi_protocol_backend::chains::collateral_config::chain_collateral_config(chain) {
+            Some(c) if c.interest_apr_bps > 0 => c.interest_apr_bps,
+            Some(_) => return Ok(0), // a configured 0-rate chain accrues nothing
+            None => return Err(format!("no collateral config for chain {}", chain.0)),
+        };
+    let treasury =
+        rumi_protocol_backend::chains::evm::tecdsa::cached_interest_treasury_address(chain)
+            .await
+            .map(|(_path, addr)| addr)
+            .map_err(|e| format!("interest-treasury address derive failed: {e}"))?;
+    let threshold = read_state(|s| s.chain_interest_min_realize_e8s);
+    let enqueued = mutate_state(|s| {
+        let mut k = s.chain_vault_id_counter;
+        let ops = rumi_protocol_backend::chains::interest::harvest_chain_interest_in_state(
+            &mut s.multi_chain,
+            chain,
+            apr_bps,
+            threshold,
+            &treasury,
+            now,
+            || {
+                k += 1;
+                k
+            },
+        );
+        s.chain_vault_id_counter = k;
+        ops.len() as u64
+    });
+    if enqueued > 0 {
+        log!(INFO, "[interest harvest chain={:?}] enqueued {} interest mint(s) to treasury {}", chain, enqueued, treasury);
+    }
+    Ok(enqueued)
+}
+
+/// Task 12: register the interest-harvest timer. Clears + re-registers in place
+/// so the setter can re-tune live. FLOOR: a 0 interval is forced to the 1-year
+/// default (never a busy-loop), mirroring the settlement/observer timers.
+fn register_chain_interest_timer() {
+    let secs = read_state(|s| s.chain_interest_tick_interval_secs);
+    let secs = if secs == 0 { 31_536_000 } else { secs };
+    CHAIN_INTEREST_TIMER_ID.with(|cell| {
+        if let Some(old) = cell.get() {
+            ic_cdk_timers::clear_timer(old);
+        }
+        let new_id = ic_cdk_timers::set_timer_interval(
+            std::time::Duration::from_secs(secs),
+            || ic_cdk::spawn(run_all_chain_interest_harvests()),
+        );
+        cell.set(Some(new_id));
+    });
+}
+
 /// Phase 1b Task 15: register the inbound observer fan-out. Same
 /// clear-and-re-register-in-place + 0-floor protection as the settlement timer.
 fn register_observer_timer() {
@@ -437,6 +536,33 @@ fn setup_timers() {
     // from double-processing an op.
     register_settlement_timer();
     register_observer_timer();
+    register_chain_vault_gc_timer();
+    // Task 12: foreign-chain interest harvest. Defaults to a ~1-year interval
+    // (effectively OFF) so realization is deliberate; tunable via
+    // `set_chain_interest_tick_interval_secs`. No-op when no EVM chain is
+    // registered, so it is safe to register on staging before any chain exists.
+    register_chain_interest_timer();
+}
+
+/// M2 anti-spam backstop: hourly GC of stale `AwaitingDeposit` chain vaults
+/// (unfunded opens older than the TTL). Bounds total unfunded state from
+/// anonymous `open_chain_vault_evm` spam without the self-DoS of a hard cap.
+/// Pruning an `AwaitingDeposit` vault is supply-invariant-safe (no confirmed
+/// debt / enqueued mint). Re-registered every upgrade via `setup_timers`.
+fn register_chain_vault_gc_timer() {
+    ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(3600), || {
+        let now = ic_cdk::api::time();
+        let pruned = mutate_state(|s| {
+            rumi_protocol_backend::chains::vault::prune_stale_awaiting_deposit(
+                &mut s.multi_chain,
+                now,
+                rumi_protocol_backend::chains::vault::AWAITING_DEPOSIT_TTL_NS,
+            )
+        });
+        if pruned > 0 {
+            log!(INFO, "[chain_vault_gc] pruned {} stale AwaitingDeposit vaults", pruned);
+        }
+    });
 }
 
 fn capture_protocol_snapshot() {
@@ -590,6 +716,17 @@ fn post_upgrade(arg: ProtocolArg) {
     if migrated > 0 {
         log!(INFO, "[upgrade]: migrated {} vaults: set last_accrual_time to {}", migrated, now);
     }
+
+    // Task 12: mirror the above for FOREIGN-CHAIN vaults — stamp
+    // last_interest_accrual_ns for any that decoded with 0 (a vault from a
+    // pre-interest-field snapshot), so the first interest harvest does not bill
+    // from the unix epoch. New vaults are stamped at mint-confirm; idempotent.
+    mutate_state(|s| {
+        rumi_protocol_backend::chains::supply::stamp_chain_interest_accrual_start(
+            &mut s.multi_chain,
+            now,
+        );
+    });
 
     // Safety net: if bot is configured but allowlist is empty, default to ICP
     mutate_state(|s| {
@@ -994,14 +1131,36 @@ fn set_chain_config(
     }
 }
 
-/// Phase 1b Task 12: open a foreign-chain (Monad) vault, OPEN-THEN-VERIFY.
+/// Resolve the per-chain EVM vault params (native price symbol + min CR) for a
+/// dev-gated chain-vault op. Errors if `chain` is not a known EVM chain or has
+/// no collateral config. For Monad (10143) this returns ("MON", 13_000) and for
+/// Conflux (71) ("CFX", 13_300), so the EVM endpoints are chain-agnostic.
+fn evm_vault_params(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> Result<(&'static str, u64), ProtocolError> {
+    let symbol = rumi_protocol_backend::chains::evm::evm_chain_config(chain)
+        .map(|c| c.native_symbol)
+        .ok_or_else(|| {
+            ProtocolError::ChainAdmin(format!("chain {} is not a known EVM chain", chain.0))
+        })?;
+    let min_cr = rumi_protocol_backend::chains::collateral_config::chain_collateral_config(chain)
+        .map(|c| c.min_cr_e4)
+        .ok_or_else(|| {
+            ProtocolError::ChainAdmin(format!("no collateral config for chain {}", chain.0))
+        })?;
+    Ok((symbol, min_cr))
+}
+
+/// Phase 1b Task 12: open a foreign-chain EVM (Monad or Conflux) vault, OPEN-THEN-VERIFY.
 ///
 /// Creates the vault in `AwaitingDeposit` with the DECLARED collateral and the
 /// intended mint in `pending_mint_e8s`; enqueues NO mint. The caller then reads
-/// the vault's `custody_address` (Task 14 `get_chain_vault`) and deposits MON
-/// there. deposit-watch verifies the on-chain balance covers the declared
-/// collateral at finality, flips the vault to `MintPending`, and enqueues the
-/// mint. icUSD is only ever minted against a verified on-chain deposit.
+/// the vault's `custody_address` (Task 14 `get_chain_vault`) and deposits the
+/// native token (MON on Monad, CFX on Conflux) there. deposit-watch verifies the
+/// on-chain balance covers the declared collateral at finality, flips the vault
+/// to `MintPending`, and enqueues the mint. icUSD is only ever minted against a
+/// verified on-chain deposit. The native price symbol and min CR are resolved
+/// per-chain from the compile-time configs (see `evm_vault_params`).
 ///
 /// Developer-gated for Phase 1b (matches the chain-admin endpoints). Async
 /// because deriving the per-user custody address calls tECDSA. Borrow
@@ -1019,24 +1178,26 @@ async fn open_chain_vault(
     if read_state(|s| s.developer_principal != caller) {
         return Err(ProtocolError::ChainAdmin("not developer".into()));
     }
+    // Resolve the per-chain price symbol + min CR early so a non-EVM chain fails
+    // fast (before reserving a vault id or paying for the tECDSA derive).
+    let (symbol, min_cr) = evm_vault_params(collateral_chain)?;
     // Reserve the vault id BEFORE the async derive so the derivation path
     // (chain, caller, vault_id) is unique even across concurrent opens.
     let vault_id = mutate_state(|s| {
         s.chain_vault_id_counter += 1;
         s.chain_vault_id_counter
     });
-    let path = rumi_protocol_backend::chains::monad::tecdsa::custody_derivation_path(
+    let path = rumi_protocol_backend::chains::evm::tecdsa::custody_derivation_path(
         collateral_chain,
         caller,
         vault_id,
     );
-    let (_pubkey, custody) =
-        rumi_protocol_backend::chains::monad::tecdsa::derive_evm_address(path)
-            .await
-            .map_err(|e| ProtocolError::ChainAdmin(format!("derive: {e}")))?;
+    let (_pubkey, custody) = rumi_protocol_backend::chains::evm::tecdsa::derive_evm_address(path)
+        .await
+        .map_err(|e| ProtocolError::ChainAdmin(format!("derive: {e}")))?;
     let now = ic_cdk::api::time();
     let res = mutate_state(|s| {
-        rumi_protocol_backend::chains::monad::chain_vault::open_chain_vault_in_state(
+        rumi_protocol_backend::chains::vault::open_chain_vault_in_state(
             &mut s.multi_chain,
             collateral_chain,
             caller,
@@ -1044,7 +1205,9 @@ async fn open_chain_vault(
             collateral_e18,
             debt_e8s,
             mint_recipient,
-            rumi_protocol_backend::chains::monad::chain_vault::MONAD_MIN_CR_E4,
+            rumi_protocol_backend::chains::evm::tecdsa::is_valid_evm_address,
+            symbol,
+            min_cr,
             now,
             vault_id,
         )
@@ -1053,15 +1216,16 @@ async fn open_chain_vault(
         .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
 }
 
-/// Phase 1b Task 13: withdraw foreign-chain (Monad) collateral.
+/// Phase 1b Task 13: withdraw foreign-chain EVM (Monad or Conflux) collateral.
 ///
-/// CR-checks the REMAINING collateral against `MONAD_MIN_CR_E4` (debt-free
-/// vaults skip the check), RESERVES the withdrawn amount (decrements
-/// `collateral_amount_native` at enqueue), and enqueues a `NativeWithdrawal` op
-/// that Timer D signs and broadcasts. A vault that becomes empty AND debt-free
-/// flips to `Closing` here and `Closed` once the transfer confirms.
+/// Resolves the vault's chain from state, then CR-checks the REMAINING
+/// collateral against that chain's `min_cr_e4` (debt-free vaults skip the
+/// check), RESERVES the withdrawn amount (decrements `collateral_amount_native`
+/// at enqueue), and enqueues a `NativeWithdrawal` op that Timer D signs and
+/// broadcasts. A vault that becomes empty AND debt-free flips to `Closing` here
+/// and `Closed` once the transfer confirms.
 ///
-/// There is NO repay endpoint: the user burns icUSD on Monad and the burn-watch
+/// There is NO repay endpoint: the user burns icUSD on-chain and the burn-watch
 /// observer decrements `debt_e8s` + chain supply. This path moves only
 /// collateral. Synchronous — `dest_address` is supplied by the caller, so no
 /// tECDSA derive is needed; signing happens later in Timer D. Developer-gated.
@@ -1085,22 +1249,39 @@ fn withdraw_chain_collateral(
     }
     let now = ic_cdk::api::time();
     mutate_state(|s| {
-        rumi_protocol_backend::chains::monad::chain_vault::withdraw_collateral_in_state(
+        let vault = s
+            .multi_chain
+            .chain_vaults
+            .get(&vault_id)
+            .ok_or_else(|| ProtocolError::ChainAdmin("unknown vault".into()))?;
+        // M2 review finding E: an EVM-owned (self-serve) vault may ONLY be driven
+        // by its EVM signer via the `_evm` methods — the operator must not be able
+        // to move a user's collateral. Refuse the dev path for such vaults.
+        if vault.owner_evm.is_some() {
+            return Err(ProtocolError::ChainAdmin(
+                "vault is EVM-owned; use the signed _evm endpoint".into(),
+            ));
+        }
+        let chain = vault.collateral_chain;
+        let (symbol, min_cr) = evm_vault_params(chain)?;
+        rumi_protocol_backend::chains::vault::withdraw_collateral_in_state(
             &mut s.multi_chain,
             vault_id,
             amount_e18,
             dest_address,
-            rumi_protocol_backend::chains::monad::chain_vault::MONAD_MIN_CR_E4,
+            rumi_protocol_backend::chains::evm::tecdsa::is_valid_evm_address,
+            symbol,
+            min_cr,
             now,
         )
+        .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
     })
-    .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
 }
 
-/// Phase 1b Task 13: close a debt-free foreign-chain (Monad) vault.
+/// Phase 1b Task 13: close a debt-free foreign-chain EVM (Monad or Conflux) vault.
 ///
-/// Requires the vault's `debt_e8s == 0` (repay first by burning icUSD on
-/// Monad), then withdraws the FULL remaining collateral to `dest_address`
+/// Requires the vault's `debt_e8s == 0` (repay first by burning icUSD on the
+/// foreign chain), then withdraws the FULL remaining collateral to `dest_address`
 /// (vault -> `Closing`, then `Closed` on the transfer's confirmation).
 /// Synchronous + developer-gated (mirrors `withdraw_chain_collateral`).
 /// CONCURRENCY INVARIANT (audit FLAG-16): keep synchronous — see
@@ -1115,15 +1296,296 @@ fn close_chain_vault(vault_id: u64, dest_address: String) -> Result<(), Protocol
     }
     let now = ic_cdk::api::time();
     mutate_state(|s| {
-        rumi_protocol_backend::chains::monad::chain_vault::close_chain_vault_in_state(
+        let vault = s
+            .multi_chain
+            .chain_vaults
+            .get(&vault_id)
+            .ok_or_else(|| ProtocolError::ChainAdmin("unknown vault".into()))?;
+        // M2 review finding E: an EVM-owned (self-serve) vault may ONLY be driven
+        // by its EVM signer via the `_evm` methods — the operator must not be able
+        // to move a user's collateral. Refuse the dev path for such vaults.
+        if vault.owner_evm.is_some() {
+            return Err(ProtocolError::ChainAdmin(
+                "vault is EVM-owned; use the signed _evm endpoint".into(),
+            ));
+        }
+        let chain = vault.collateral_chain;
+        let (symbol, min_cr) = evm_vault_params(chain)?;
+        rumi_protocol_backend::chains::vault::close_chain_vault_in_state(
             &mut s.multi_chain,
             vault_id,
             dest_address,
-            rumi_protocol_backend::chains::monad::chain_vault::MONAD_MIN_CR_E4,
+            rumi_protocol_backend::chains::evm::tecdsa::is_valid_evm_address,
+            symbol,
+            min_cr,
             now,
         )
+        .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
     })
-    .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
+}
+
+// ─── M2: EVM-native self-serve vault endpoints (EIP-712 signed, anonymous) ────
+//
+// Authority is the EVM signature, NEVER the IC caller (anonymous ingress is
+// accepted; see inspect_message). The vault is owned by a synthetic principal
+// derived from the recovered signer. The dev-gated endpoints above stay for
+// operator/test use; these are the self-serve variants.
+
+/// Verified, authenticated intent context shared by all four `_evm` methods.
+struct VerifiedIntent {
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    /// Lowercase `0x` recovered signer; the authoritative EVM owner.
+    owner_evm: String,
+    /// Vault owner key = `synthetic_owner(chain, signer)`.
+    synthetic: candid::Principal,
+    symbol: &'static str,
+    min_cr: u64,
+}
+
+/// Resolve per-chain params + the deployed IcUSD contract (for the EIP-712
+/// domain) + the current time, then delegate to the pure
+/// `eip712::verify_intent`. Maps every failure to `ProtocolError::EvmAuth`. No
+/// `.await` (callable from the synchronous methods).
+fn verify_intent_ctx(
+    intent: &rumi_protocol_backend::chains::evm::eip712::VaultIntent,
+    signature: &[u8],
+    expected_action: rumi_protocol_backend::chains::evm::eip712::IntentAction,
+) -> Result<VerifiedIntent, ProtocolError> {
+    let chain = rumi_protocol_backend::chains::config::ChainId(intent.chain_id as u32);
+    // Resolve symbol + min CR (fails fast for a non-EVM / unregistered chain).
+    let (symbol, min_cr) = evm_vault_params(chain)
+        .map_err(|e| ProtocolError::EvmAuth(format!("{e:?}")))?;
+    // The deployed IcUSD address binds the EIP-712 domain to this chain+deployment.
+    let contract = read_state(|s| s.multi_chain.chain_contracts.get(&chain).cloned())
+        .ok_or_else(|| ProtocolError::EvmAuth(format!("no contract set for chain {}", chain.0)))?;
+    let now_secs = ic_cdk::api::time() / 1_000_000_000;
+    let (owner_evm, synthetic) = rumi_protocol_backend::chains::evm::eip712::verify_intent(
+        intent,
+        signature,
+        expected_action,
+        &contract,
+        now_secs,
+    )
+    .map_err(|e| ProtocolError::EvmAuth(format!("{e:?}")))?;
+    Ok(VerifiedIntent { chain, owner_evm, synthetic, symbol, min_cr })
+}
+
+/// Authorize a borrow/withdraw/close `_evm` op against an existing vault: the
+/// vault must be owned by `synthetic` AND carry a matching `owner_evm`. Read-only.
+fn evm_owns_vault(s: &State, vault_id: u64, v: &VerifiedIntent) -> bool {
+    s.multi_chain
+        .chain_vaults
+        .get(&vault_id)
+        .map(|vault| {
+            vault.owner == v.synthetic
+                && vault
+                    .owner_evm
+                    .as_deref()
+                    .map(|a| a.eq_ignore_ascii_case(&v.owner_evm))
+                    .unwrap_or(false)
+        })
+        .unwrap_or(false)
+}
+
+/// EVM-signed `Open` (async — derives the per-vault custody address via tECDSA).
+///
+/// Saga/TOCTOU: the nonce is consumed + the per-owner cap checked + the vault id
+/// reserved in ONE pre-await `mutate_state` (spend-on-attempt), so a same-nonce
+/// double-submit is rejected before the costly derive and no duplicate vault can
+/// be created. A failed derive leaves the nonce spent — the user re-signs with
+/// `nonce + 1` (a spent counter is harmless; no funds move on this path).
+#[candid_method(update)]
+#[update]
+async fn open_chain_vault_evm(
+    intent: rumi_protocol_backend::chains::evm::eip712::VaultIntent,
+    signature: Vec<u8>,
+) -> Result<u64, ProtocolError> {
+    use rumi_protocol_backend::chains::evm::eip712::IntentAction;
+    let v = verify_intent_ctx(&intent, &signature, IntentAction::Open)?;
+    // Pre-await atomic: consume nonce, enforce per-owner cap, reserve vault id.
+    let vault_id = mutate_state(|s| {
+        s.multi_chain
+            .consume_evm_nonce(&v.synthetic, intent.nonce)
+            .map_err(|expected| {
+                ProtocolError::EvmAuth(format!(
+                    "bad nonce: got {}, expected {}",
+                    intent.nonce, expected
+                ))
+            })?;
+        if s.multi_chain.count_owner_active_vaults(&v.synthetic)
+            >= rumi_protocol_backend::chains::vault::MAX_VAULTS_PER_OWNER
+        {
+            return Err(ProtocolError::EvmAuth("per-owner vault cap reached".into()));
+        }
+        s.chain_vault_id_counter += 1;
+        Ok(s.chain_vault_id_counter)
+    })?;
+    // tECDSA derive of the per-vault custody address, keyed by the synthetic owner.
+    let path = rumi_protocol_backend::chains::evm::tecdsa::custody_derivation_path(
+        v.chain,
+        v.synthetic,
+        vault_id,
+    );
+    let (_pubkey, custody) =
+        rumi_protocol_backend::chains::evm::tecdsa::derive_evm_address(path)
+            .await
+            .map_err(|e| ProtocolError::EvmAuth(format!("derive: {e}")))?;
+    let now = ic_cdk::api::time();
+    let owner_evm = v.owner_evm.clone();
+    mutate_state(|s| {
+        // Re-check the per-owner cap on the AUTHORITATIVE map before inserting
+        // (M2 review finding C). The pre-await check can be raced: several opens
+        // for the same owner (distinct nonces) all pass their pre-await count
+        // while their vaults are still mid-derive and not yet inserted. Without
+        // this re-check, a pipelined burst could blow past MAX_VAULTS_PER_OWNER.
+        // The loser forfeits its (already-spent) nonce — consistent with the
+        // async open's spend-on-attempt semantics.
+        if s.multi_chain.count_owner_active_vaults(&v.synthetic)
+            >= rumi_protocol_backend::chains::vault::MAX_VAULTS_PER_OWNER
+        {
+            return Err(ProtocolError::EvmAuth("per-owner vault cap reached".into()));
+        }
+        rumi_protocol_backend::chains::vault::open_chain_vault_in_state(
+            &mut s.multi_chain,
+            v.chain,
+            v.synthetic,
+            custody,
+            intent.collateral_wei,
+            intent.debt_e8s,
+            owner_evm.clone(), // mint_recipient == owner (recipient forced == owner)
+            rumi_protocol_backend::chains::evm::tecdsa::is_valid_evm_address,
+            v.symbol,
+            v.min_cr,
+            now,
+            vault_id,
+        )
+        .map_err(|e| ProtocolError::EvmAuth(format!("{e:?}")))?;
+        // Stamp the EVM owner so borrow/withdraw/close can re-authorize.
+        if let Some(vault) = s.multi_chain.chain_vaults.get_mut(&vault_id) {
+            vault.owner_evm = Some(owner_evm.clone());
+        }
+        Ok(vault_id)
+    })
+}
+
+/// EVM-signed `Borrow` (synchronous — no `.await`, so the nonce check + op +
+/// nonce bump are atomic in one message; preserves the FLAG-16 sync invariant).
+/// Spend-on-success: a failed op does not burn the nonce.
+#[candid_method(update)]
+#[update]
+fn borrow_chain_vault_evm(
+    intent: rumi_protocol_backend::chains::evm::eip712::VaultIntent,
+    signature: Vec<u8>,
+) -> Result<(), ProtocolError> {
+    use rumi_protocol_backend::chains::evm::eip712::IntentAction;
+    let v = verify_intent_ctx(&intent, &signature, IntentAction::Borrow)?;
+    let now = ic_cdk::api::time();
+    mutate_state(|s| {
+        if !evm_owns_vault(s, intent.vault_id, &v) {
+            return Err(ProtocolError::EvmAuth("not the vault owner".into()));
+        }
+        let expected = s.multi_chain.expected_evm_nonce(&v.synthetic);
+        if intent.nonce != expected {
+            return Err(ProtocolError::EvmAuth(format!(
+                "bad nonce: got {}, expected {}",
+                intent.nonce, expected
+            )));
+        }
+        rumi_protocol_backend::chains::vault::borrow_chain_vault_in_state(
+            &mut s.multi_chain,
+            intent.vault_id,
+            intent.debt_e8s,
+            v.owner_evm.clone(),
+            rumi_protocol_backend::chains::evm::tecdsa::is_valid_evm_address,
+            v.symbol,
+            v.min_cr,
+            now,
+        )
+        .map_err(|e| ProtocolError::EvmAuth(format!("{e:?}")))?;
+        s.multi_chain
+            .evm_owner_nonces
+            .insert(v.synthetic, expected.saturating_add(1));
+        Ok(())
+    })
+}
+
+/// EVM-signed `WithdrawCollateral` (synchronous; spend-on-success). The released
+/// collateral goes to `owner_evm` (recipient forced == owner).
+#[candid_method(update)]
+#[update]
+fn withdraw_chain_collateral_evm(
+    intent: rumi_protocol_backend::chains::evm::eip712::VaultIntent,
+    signature: Vec<u8>,
+) -> Result<(), ProtocolError> {
+    use rumi_protocol_backend::chains::evm::eip712::IntentAction;
+    let v = verify_intent_ctx(&intent, &signature, IntentAction::WithdrawCollateral)?;
+    let now = ic_cdk::api::time();
+    mutate_state(|s| {
+        if !evm_owns_vault(s, intent.vault_id, &v) {
+            return Err(ProtocolError::EvmAuth("not the vault owner".into()));
+        }
+        let expected = s.multi_chain.expected_evm_nonce(&v.synthetic);
+        if intent.nonce != expected {
+            return Err(ProtocolError::EvmAuth(format!(
+                "bad nonce: got {}, expected {}",
+                intent.nonce, expected
+            )));
+        }
+        rumi_protocol_backend::chains::vault::withdraw_collateral_in_state(
+            &mut s.multi_chain,
+            intent.vault_id,
+            intent.collateral_wei,
+            v.owner_evm.clone(),
+            rumi_protocol_backend::chains::evm::tecdsa::is_valid_evm_address,
+            v.symbol,
+            v.min_cr,
+            now,
+        )
+        .map_err(|e| ProtocolError::EvmAuth(format!("{e:?}")))?;
+        s.multi_chain
+            .evm_owner_nonces
+            .insert(v.synthetic, expected.saturating_add(1));
+        Ok(())
+    })
+}
+
+/// EVM-signed `Close` (synchronous; spend-on-success). Requires `debt_e8s == 0`
+/// (repay first by burning icUSD on-chain); returns all collateral to `owner_evm`.
+#[candid_method(update)]
+#[update]
+fn close_chain_vault_evm(
+    intent: rumi_protocol_backend::chains::evm::eip712::VaultIntent,
+    signature: Vec<u8>,
+) -> Result<(), ProtocolError> {
+    use rumi_protocol_backend::chains::evm::eip712::IntentAction;
+    let v = verify_intent_ctx(&intent, &signature, IntentAction::Close)?;
+    let now = ic_cdk::api::time();
+    mutate_state(|s| {
+        if !evm_owns_vault(s, intent.vault_id, &v) {
+            return Err(ProtocolError::EvmAuth("not the vault owner".into()));
+        }
+        let expected = s.multi_chain.expected_evm_nonce(&v.synthetic);
+        if intent.nonce != expected {
+            return Err(ProtocolError::EvmAuth(format!(
+                "bad nonce: got {}, expected {}",
+                intent.nonce, expected
+            )));
+        }
+        rumi_protocol_backend::chains::vault::close_chain_vault_in_state(
+            &mut s.multi_chain,
+            intent.vault_id,
+            v.owner_evm.clone(),
+            rumi_protocol_backend::chains::evm::tecdsa::is_valid_evm_address,
+            v.symbol,
+            v.min_cr,
+            now,
+        )
+        .map_err(|e| ProtocolError::EvmAuth(format!("{e:?}")))?;
+        s.multi_chain
+            .evm_owner_nonces
+            .insert(v.synthetic, expected.saturating_add(1));
+        Ok(())
+    })
 }
 
 // ─── Solana M2 vault endpoints (developer-gated) ─────────────────────────────
@@ -5455,6 +5917,130 @@ async fn set_settlement_tick_interval_secs(secs: u64) -> Result<(), ProtocolErro
     Ok(())
 }
 
+/// Task 12: tune the foreign-chain interest-harvest interval (seconds). Default
+/// ~1 year (effectively OFF). Re-registers the timer in place. Rejects `secs ==
+/// 0` (the register fn also floors a 0 to the 1-year default). Developer-gated.
+#[candid_method(update)]
+#[update]
+async fn set_chain_interest_tick_interval_secs(secs: u64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set the chain interest tick interval".to_string(),
+        ));
+    }
+    if secs == 0 {
+        return Err(ProtocolError::GenericError(
+            "Chain interest tick interval must be > 0".to_string(),
+        ));
+    }
+    mutate_state(|s| s.chain_interest_tick_interval_secs = secs);
+    register_chain_interest_timer();
+    log!(INFO, "[set_chain_interest_tick_interval_secs] interest harvest interval set to {}s", secs);
+    Ok(())
+}
+
+/// Task 12: tune the interest-realization dust floor (e8s) — accrued interest
+/// below this is not minted (its gas would dwarf the interest). Default 0.01
+/// icUSD. Developer-gated.
+#[candid_method(update)]
+#[update]
+async fn set_chain_interest_min_realize_e8s(e8s: u128) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set the chain interest dust floor".to_string(),
+        ));
+    }
+    mutate_state(|s| s.chain_interest_min_realize_e8s = e8s);
+    log!(INFO, "[set_chain_interest_min_realize_e8s] interest dust floor set to {} e8s", e8s);
+    Ok(())
+}
+
+/// Pure validation for `set_chains_ecdsa_key_name`: the name must be a supported
+/// IC threshold key (`test_key_1` or `key_1`), and the key may change ONLY while
+/// no chain vault exists — switching the key re-derives every per-vault custody
+/// address, which would orphan already-deposited collateral.
+fn validate_ecdsa_key_change(name: &str, has_chain_vaults: bool) -> Result<(), ProtocolError> {
+    if name != "test_key_1" && name != "key_1" {
+        return Err(ProtocolError::ChainAdmin(format!(
+            "unsupported ecdsa key name '{name}' (expected test_key_1 or key_1)"
+        )));
+    }
+    if has_chain_vaults {
+        return Err(ProtocolError::ChainAdmin(
+            "cannot change the chains ECDSA key while chain vaults exist (it re-derives + orphans every per-vault custody address)".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Set the production tECDSA key name for the EVM chains rail (developer-gated).
+/// Intended for a FRESH production canister: set `key_1` BEFORE registering any
+/// chain, so all custody/settlement/treasury addresses derive from the
+/// production threshold key. Rejected once any chain vault exists (orphan guard).
+/// kvg63 staging keeps the default `test_key_1`.
+#[candid_method(update)]
+#[update]
+fn set_chains_ecdsa_key_name(name: String) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let has_vaults = read_state(|s| !s.multi_chain.chain_vaults.is_empty());
+    validate_ecdsa_key_change(&name, has_vaults)?;
+    mutate_state(|s| s.chains_ecdsa_key_name = name.clone());
+    log!(INFO, "[set_chains_ecdsa_key_name] chains EVM tECDSA key set to {}", name);
+    Ok(())
+}
+
+/// The current chains EVM tECDSA key name (`test_key_1` | `key_1`). Public read
+/// (non-sensitive config; the derived addresses are already public).
+#[candid_method(query)]
+#[query]
+fn get_chains_ecdsa_key_name() -> String {
+    read_state(|s| s.chains_ecdsa_key_name.clone())
+}
+
+/// Task 12: manually trigger one interest harvest for `chain` (developer-gated),
+/// for testing/ops independent of the off-by-default timer. Resolves the
+/// interest-treasury address + APR, enqueues an `InterestMint` for every
+/// eligible vault, and returns the number enqueued. The settlement worker then
+/// mints/confirms them on-chain.
+#[candid_method(update)]
+#[update]
+async fn harvest_chain_interest(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> Result<u64, ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let now = ic_cdk::api::time();
+    harvest_one_chain_interest(chain, now)
+        .await
+        .map_err(ProtocolError::ChainAdmin)
+}
+
+/// Task 12: derive the per-chain interest-treasury (revenue) address — the
+/// tECDSA-derived EVM address that receives minted interest, distinct from the
+/// settlement (minter) address. Developer-gated (derivation costs cycles + a
+/// signing-subnet call). Used by ops + tests to learn where revenue accrues.
+#[candid_method(update)]
+#[update]
+async fn get_chain_interest_treasury_address(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> Result<String, ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    rumi_protocol_backend::chains::evm::tecdsa::cached_interest_treasury_address(chain)
+        .await
+        .map(|(_path, addr)| addr)
+        .map_err(|e| ProtocolError::ChainAdmin(format!("derive: {e}")))
+}
+
 /// Phase 1b Task 15: tune the Monad inbound observer fan-out interval in
 /// seconds. Default 30. Re-registers in place.
 ///
@@ -7658,6 +8244,36 @@ fn forward_filtered_scan_windows_filters_and_advances_cursor() {
     assert!(r.events.is_empty());
     assert_eq!(r.next_start, 3);
     assert!(r.reached_end);
+}
+
+// Proves `evm_vault_params` resolves the native price symbol + min CR per chain
+// from the compile-time configs, and that Monad (10143) is behavior-preserving
+// (still ("MON", 13_000)) while Conflux (71) mirrors the ICP params ("CFX",
+// 13_300). Non-EVM / unknown chains error rather than silently defaulting.
+#[cfg(test)]
+mod chain_vault_param_tests {
+    use super::evm_vault_params;
+
+    #[test]
+    fn evm_vault_params_resolves_per_chain() {
+        use rumi_protocol_backend::chains::config::ChainId;
+        assert_eq!(evm_vault_params(ChainId(10143)).unwrap(), ("MON", 13_000)); // Monad preserved
+        assert_eq!(evm_vault_params(ChainId(71)).unwrap(), ("CFX", 13_300)); // Conflux = ICP mirror
+        assert!(evm_vault_params(ChainId(999)).is_err());
+    }
+
+    #[test]
+    fn ecdsa_key_change_rules() {
+        use super::validate_ecdsa_key_change;
+        // Both supported key names are accepted when no vault exists.
+        assert!(validate_ecdsa_key_change("key_1", false).is_ok());
+        assert!(validate_ecdsa_key_change("test_key_1", false).is_ok());
+        // An unknown key name is rejected (typo/foot-gun guard).
+        assert!(validate_ecdsa_key_change("bogus_key", false).is_err());
+        // Changing the key while chain vaults exist is blocked (would re-derive +
+        // orphan every custody address).
+        assert!(validate_ecdsa_key_change("key_1", true).is_err());
+    }
 }
 
 // Checks the real candid interface against the one declared in the did file

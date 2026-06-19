@@ -665,6 +665,12 @@ pub enum ProtocolError {
     /// structured `ChainAdminError` enum lives in `chains::config` and is
     /// stringified here so the Candid surface stays append-only.
     ChainAdmin(String),
+    /// M2 EVM-native self-serve auth failure (bad signature, recovered signer !=
+    /// owner, nonce replay, expired deadline, recipient != owner, per-owner cap,
+    /// unknown/unregistered chain, custody-derive failure, or an underlying vault
+    /// rejection). Wraps a developer-facing message. Appended AFTER `ChainAdmin`
+    /// so historical on-chain events keep decoding (append-only Candid surface).
+    EvmAuth(String),
 }
 
 impl From<GuardError> for ProtocolError {

@@ -16,19 +16,24 @@
   let rank = $state<number | null>(null);
   let shareBps = $state<number | null>(null);
 
-  onMount(async () => {
+  async function loadSeason() {
+    try {
+      [status, config] = await Promise.all([getEpochStatus(), getPointsConfig()]);
+    } catch (e) {
+      // Non-fatal: the banner degrades to its loading/unknown state. The service
+      // retries with backoff; Retry re-runs this so a transient blip recovers.
+      console.error('[points] season status load failed', e);
+    }
+  }
+
+  onMount(() => {
     // Route gate: the section is hidden in nav until the canister is configured;
     // also block direct-URL access so we never call an unconfigured canister.
     if (!POINTS_ENABLED) {
       goto('/');
       return;
     }
-    try {
-      [status, config] = await Promise.all([getEpochStatus(), getPointsConfig()]);
-    } catch (e) {
-      // Non-fatal: the banner degrades to its loading/unknown state.
-      console.error('[points] season status load failed', e);
-    }
+    loadSeason();
   });
 
   // Load / reset the connected wallet's points as the principal changes.
@@ -56,6 +61,8 @@
   });
 
   function retry() {
+    // Recover both the season banner and the personal points on one tap.
+    if (!status || !config) loadSeason();
     const p = $principal;
     if (p) myPointsStore.load(p);
   }

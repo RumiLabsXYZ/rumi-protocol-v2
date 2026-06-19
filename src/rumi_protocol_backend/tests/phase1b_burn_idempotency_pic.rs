@@ -91,6 +91,7 @@ struct RegisterChainArg {
     finality_depth: u32,
     gas_strategy: GasStrategy,
     chain_native_decimals: u8,
+    min_quorum_providers: Option<u32>,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -392,6 +393,9 @@ fn phase1b_burn_idempotency_skips_poison_and_never_double_applies() {
             max_fee_gwei_ceiling: 500,
         },
         chain_native_decimals: 18,
+        // One mock RPC provider: relax the per-chain quorum floor (default 3)
+        // to 1 so the mock-backed financial reads satisfy quorum.
+        min_quorum_providers: Some(1),
     };
     decode_result(
         update_dev(&pic, backend, "register_chain", Encode!(&reg).unwrap()),
@@ -451,8 +455,10 @@ fn phase1b_burn_idempotency_skips_poison_and_never_double_applies() {
     )
     .expect("set_burn_watch_poll_enabled");
 
-    // Chain head = seed + 1024 so the first tick advances 1_000_000 -> 1_001_024.
-    update_any(&pic, mock, "set_blocks", Encode!(&1_001_024u64, &1_001_024u64).unwrap());
+    // Chain head = seed + 1024 + finality_depth (1_001_025). M-07: the burn-watch
+    // cursor advances to the candidate seed + 1024 (1_001_024) only once that block
+    // is buried under finality_depth, i.e. block 1_001_025 also exists.
+    update_any(&pic, mock, "set_blocks", Encode!(&1_001_025u64, &1_001_025u64).unwrap());
     update_any(&pic, mock, "set_next_send_hash", Encode!(&"0xmint1".to_string()).unwrap());
 
     // ── ECDSA probe: decide full vs gated ────────────────────────────────────
@@ -556,7 +562,13 @@ fn phase1b_burn_idempotency_skips_poison_and_never_double_applies() {
     // Settlement submits + confirms the mint. Push the Mint log at the finalized
     // block so the confirm path reads the on-chain amount.
     push_mint_log(&pic, mock, vault_id, &recipient, debt_e8s, "0xmint1", 1_001_024);
-    advance_and_tick(&pic, 4);
+    // Window(s) 1: settlement submits the mint. M-07: pin its receipt to the
+    // Mint-log block (1_001_024 = the burn-watch candidate, buried by the head at
+    // 1_001_025) so confirm_op treats it as final; the auto-mine would otherwise
+    // leave the receipt at the unburied tip and the mint would never confirm.
+    advance_and_tick(&pic, 2);
+    update_any(&pic, mock, "set_receipt", Encode!(&"0xmint1".to_string(), &true, &1_001_024u64).unwrap());
+    advance_and_tick(&pic, 2);
 
     let v = get_vault(&pic, backend, vault_id).expect("vault after mint confirm");
     assert_eq!(v.status, ChainVaultStatus::Open, "mint confirmed => Open");
@@ -574,7 +586,9 @@ fn phase1b_burn_idempotency_skips_poison_and_never_double_applies() {
     // then hits the poison, sets burn_ok=false, and breaks WITHOUT advancing the
     // cursor — forcing the whole range to re-scan every tick and re-apply the 40e8.
     update_any(&pic, mock, "clear_logs", Encode!().unwrap());
-    update_any(&pic, mock, "set_blocks", Encode!(&1_002_048u64, &1_002_048u64).unwrap());
+    // M-07: head one block above the candidate (1_002_048) so the cursor advances
+    // onto it and scans the (1_001_024, 1_002_048] window containing both burns.
+    update_any(&pic, mock, "set_blocks", Encode!(&1_002_049u64, &1_002_049u64).unwrap());
     // Same block (1_001_500) for both; the good burn first, poison second.
     push_burn_log(&pic, mock, vault_id, &recipient, 40 * E8, "0xgoodburn", 1_001_500);
     push_burn_log(&pic, mock, vault_id, "0xattacker", 1_000 * E8, "0xpoisonburn", 1_001_500);
@@ -664,6 +678,9 @@ fn phase1b_burn_two_identical_burns_in_same_tx_both_applied() {
             max_fee_gwei_ceiling: 500,
         },
         chain_native_decimals: 18,
+        // One mock RPC provider: relax the per-chain quorum floor (default 3)
+        // to 1 so the mock-backed financial reads satisfy quorum.
+        min_quorum_providers: Some(1),
     };
     decode_result(
         update_dev(&pic, backend, "register_chain", Encode!(&reg).unwrap()),
@@ -722,7 +739,9 @@ fn phase1b_burn_two_identical_burns_in_same_tx_both_applied() {
     )
     .expect("set_burn_watch_poll_enabled");
 
-    update_any(&pic, mock, "set_blocks", Encode!(&2_001_024u64, &2_001_024u64).unwrap());
+    // Head = seed + 1024 + finality_depth (2_001_025) so the candidate 2_001_024 is
+    // buried under finality_depth (M-07) and the cursor can advance onto it.
+    update_any(&pic, mock, "set_blocks", Encode!(&2_001_025u64, &2_001_025u64).unwrap());
     update_any(&pic, mock, "set_next_send_hash", Encode!(&"0xmint_same_tx".to_string()).unwrap());
 
     // ── ECDSA probe ──────────────────────────────────────────────────────────
@@ -794,7 +813,11 @@ fn phase1b_burn_two_identical_burns_in_same_tx_both_applied() {
 
     // Settlement submits + confirms the mint.
     push_mint_log(&pic, mock, vault_id, &recipient, debt_e8s, "0xmint_same_tx", 2_001_024);
-    advance_and_tick(&pic, 4);
+    // M-07: pin the mint receipt to its Mint-log block (2_001_024 = the candidate,
+    // buried by the head at 2_001_025) so confirm_op finalizes it.
+    advance_and_tick(&pic, 2);
+    update_any(&pic, mock, "set_receipt", Encode!(&"0xmint_same_tx".to_string(), &true, &2_001_024u64).unwrap());
+    advance_and_tick(&pic, 2);
 
     let v = get_vault(&pic, backend, vault_id).expect("vault after mint confirm");
     assert_eq!(v.status, ChainVaultStatus::Open, "mint confirmed => Open");
@@ -803,7 +826,9 @@ fn phase1b_burn_two_identical_burns_in_same_tx_both_applied() {
     // ── Same-tx two-identical-burns scenario ─────────────────────────────────
     // Advance the mock chain head into the next scan window.
     update_any(&pic, mock, "clear_logs", Encode!().unwrap());
-    update_any(&pic, mock, "set_blocks", Encode!(&2_002_048u64, &2_002_048u64).unwrap());
+    // M-07: head one block above the candidate (2_002_048) so the cursor advances
+    // and scans the (2_001_024, 2_002_048] window where the two same-tx burns sit.
+    update_any(&pic, mock, "set_blocks", Encode!(&2_002_049u64, &2_002_049u64).unwrap());
 
     // Push TWO Burn logs with:
     //   - SAME tx_hash ("0xdualtx")

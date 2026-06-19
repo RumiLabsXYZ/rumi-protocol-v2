@@ -1,4 +1,12 @@
-//! Mock EVM RPC canister for the Phase 1b (Monad) PocketIC happy-path test.
+//! Mock EVM RPC canister for the EVM-chain PocketIC happy-path tests (Monad
+//! chain 10143 and Conflux eSpace testnet chain 71).
+//!
+//! The mock is chain-AGNOSTIC: it serves whatever chain the backend talks to
+//! through the shared EVM-RPC `request` escape-hatch (the JSON-RPC payload
+//! carries no chain id). Per-chain differences the tests need are scripted via
+//! the `set_*` test-control endpoints, e.g. `set_getlogs_max_range(1000)` for
+//! Conflux (whose backend `getlogs_max_range` is 1000, vs Monad's 100) and
+//! `set_espace_receipt_fields(true)` to attach the eSpace-only receipt fields.
 //!
 //! Speaks the REAL EVM RPC canister `request` escape-hatch interface so the
 //! production backend wrapper (`chains/monad/evm_rpc.rs`) can talk to it
@@ -276,6 +284,16 @@ struct Script {
     /// the test reliably catches a revert to the volatile `eth_blockNumber` read
     /// across ALL observer ticks, not just the first.
     fail_always: HashMap<String, String>,
+    /// Max `eth_getLogs` block range (`toBlock - fromBlock`) the mocked provider
+    /// accepts in a single query. Defaults to `MONAD_GETLOGS_MAX_RANGE` (100,
+    /// Monad fidelity); a Conflux test raises it to 1000 via
+    /// `set_getlogs_max_range` so the backend's chain-71 `getlogs_max_range`
+    /// (1000) chunking is exercised without the Monad cap wrongly rejecting it.
+    getlogs_max_range: u64,
+    /// When true, `eth_getTransactionReceipt` results carry the extra Conflux
+    /// eSpace receipt fields `gasFee`/`burntGasFee` so the decoder's tolerance of
+    /// those (non-Monad) fields is exercised. Toggled by `set_espace_receipt_fields`.
+    espace_receipt_fields: bool,
 }
 
 thread_local! {
@@ -291,6 +309,8 @@ fn init() {
         // 1 gwei default so fetch_fees has a non-zero gas price even if the
         // test never sets one.
         s.gas_price_wei = 1_000_000_000;
+        // Monad fidelity by default; a Conflux test raises this to 1000.
+        s.getlogs_max_range = MONAD_GETLOGS_MAX_RANGE;
     });
 }
 
@@ -377,9 +397,14 @@ fn request(_service: RpcService, json_payload: String, _max_response_bytes: u64)
     // that 413 to the backend as `HttpOutcallError::InvalidHttpJsonRpcResponse`.
     // The mock enforces the SAME cap so the wrapper's `get_logs` chunking is
     // exercised: an un-chunked wide-range scan fails here exactly as it does on
-    // staging, and only succeeds once `get_logs` pages the range into <=100-block
-    // sub-queries. (Mint-confirm scans a single block `[b, b]` — diff 0 — and is
-    // unaffected.)
+    // staging, and only succeeds once `get_logs` pages the range into sub-queries
+    // within the cap. (Mint-confirm scans a single block `[b, b]`, diff 0, and
+    // is unaffected.)
+    //
+    // The cap is per-instance-configurable (`set_getlogs_max_range`), defaulting
+    // to `MONAD_GETLOGS_MAX_RANGE` (100). Conflux's backend `getlogs_max_range`
+    // is 1000, so the Conflux test raises this to 1000; a chunk produced at
+    // exactly the chain's max must pass here (the mock and the chain's cap agree).
     if method == "eth_getLogs" {
         let filter = params.get(0).cloned().unwrap_or(serde_json::Value::Null);
         let from = filter
@@ -391,12 +416,15 @@ fn request(_service: RpcService, json_payload: String, _max_response_bytes: u64)
             .and_then(|v| v.as_str())
             .and_then(parse_hex_u64);
         if let (Some(f), Some(t)) = (from, to) {
-            if t.saturating_sub(f) > MONAD_GETLOGS_MAX_RANGE {
+            let cap = SCRIPT.with(|s| s.borrow().getlogs_max_range);
+            if t.saturating_sub(f) > cap {
                 return RequestResult::Err(RpcError::HttpOutcallError(
                     HttpOutcallError::InvalidHttpJsonRpcResponse(InvalidHttpJsonRpcRecord {
                         status: 413,
-                        body: r#"{"jsonrpc":"2.0","id":0,"error":{"code":-32614,"message":"eth_getLogs is limited to a 100 range"}}"#
-                            .to_string(),
+                        body: format!(
+                            r#"{{"jsonrpc":"2.0","id":0,"error":{{"code":-32614,"message":"eth_getLogs is limited to a {} range"}}}}"#,
+                            cap
+                        ),
                         parsing_error: None,
                     }),
                 ));
@@ -509,11 +537,23 @@ fn request(_service: RpcService, json_payload: String, _max_response_bytes: u64)
                             })
                             .collect::<Vec<_>>()
                             .join(",");
+                        // Conflux eSpace receipts carry extra fields `gasFee` and
+                        // `burntGasFee` that vanilla Ethereum/Monad receipts do
+                        // not. When enabled, include them so the backend's receipt
+                        // parser (which reads only `status`/`blockNumber`/`logs`)
+                        // is exercised against the richer eSpace wire shape and
+                        // must tolerate the unknown fields.
+                        let espace_extra = if script.espace_receipt_fields {
+                            r#","gasFee":"0x5208","burntGasFee":"0x4e20""#
+                        } else {
+                            ""
+                        };
                         format!(
-                            r#"{{"jsonrpc":"2.0","id":{},"result":{{"status":{:?},"blockNumber":{:?},"logs":[{}]}}}}"#,
+                            r#"{{"jsonrpc":"2.0","id":{},"result":{{"status":{:?},"blockNumber":{:?}{},"logs":[{}]}}}}"#,
                             id,
                             if r.ok { "0x1" } else { "0x0" },
                             hex_u64(r.block),
+                            espace_extra,
                             logs_json
                         )
                     }
@@ -747,6 +787,23 @@ fn clear_logs() {
 #[ic_cdk_macros::update]
 fn set_total_supply(value: u128) {
     SCRIPT.with(|s| s.borrow_mut().total_supply = value);
+}
+
+/// Set the max `eth_getLogs` block range (`toBlock - fromBlock`) the mock
+/// accepts before returning the 413 / -32614 range error. Default is
+/// `MONAD_GETLOGS_MAX_RANGE` (100). A Conflux test sets this to 1000 to match
+/// chain-71's backend `getlogs_max_range`.
+#[ic_cdk_macros::update]
+fn set_getlogs_max_range(range: u64) {
+    SCRIPT.with(|s| s.borrow_mut().getlogs_max_range = range);
+}
+
+/// Enable/disable the Conflux eSpace extra receipt fields (`gasFee`,
+/// `burntGasFee`) on `eth_getTransactionReceipt` results, so a test can confirm
+/// the backend receipt parser tolerates the eSpace wire shape.
+#[ic_cdk_macros::update]
+fn set_espace_receipt_fields(enabled: bool) {
+    SCRIPT.with(|s| s.borrow_mut().espace_receipt_fields = enabled);
 }
 
 /// Arm a one-shot real-wire IcError for the NEXT `request` whose JSON-RPC

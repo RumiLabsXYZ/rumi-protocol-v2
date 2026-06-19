@@ -127,6 +127,14 @@ pub fn apply_resolve_reversal_in_state(
                     }
                 }
             }
+            SettlementOpKind::InterestMint { vault_id, .. } => {
+                if let Some(v) = state.chain_vaults.get_mut(vault_id) {
+                    // Task 12: clear the orphaned interest reservation; nothing was
+                    // minted/credited. last_interest_accrual_ns is left unchanged so
+                    // the window is retried at the next harvest (no double-charge).
+                    v.pending_interest_mint_e8s = 0;
+                }
+            }
             SettlementOpKind::Burn { .. } => {}
         }
     }

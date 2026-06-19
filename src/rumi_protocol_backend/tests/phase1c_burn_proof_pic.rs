@@ -86,6 +86,7 @@ struct RegisterChainArg {
     finality_depth: u32,
     gas_strategy: GasStrategy,
     chain_native_decimals: u8,
+    min_quorum_providers: Option<u32>,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -437,6 +438,9 @@ fn configure_chain(pic: &PocketIc, backend: Principal, mock: Principal, seed: u6
             max_fee_gwei_ceiling: 500,
         },
         chain_native_decimals: 18,
+        // One mock RPC provider: relax the per-chain quorum floor (default 3)
+        // to 1 so the mock-backed financial reads satisfy quorum.
+        min_quorum_providers: Some(1),
     };
     decode_result(
         update_dev(pic, backend, "register_chain", Encode!(&reg).unwrap()),
@@ -502,10 +506,12 @@ fn phase1c_submit_burn_proof_verifies_one_tx_no_poll_scan() {
     let seed: u64 = 7_000_000;
     configure_chain(&pic, backend, mock, seed);
 
-    // Chain head one window above the seed so finality probes resolve. With
-    // finality_depth=1 a receipt at block B is final once finalized >= B+1.
+    // Chain head one window above the seed PLUS finality_depth (M-07). With
+    // finality_depth=1 a receipt at block B is final once the head >= B+1; the mint
+    // lands at `finalized` itself, so the head must sit at finalized + 1 for the
+    // mint's burn-watch candidate (= finalized) to be buried and confirm.
     let finalized = seed + SCAN_WINDOW;
-    update_any(&pic, mock, "set_blocks", Encode!(&finalized, &finalized).unwrap());
+    update_any(&pic, mock, "set_blocks", Encode!(&(finalized + 1), &(finalized + 1)).unwrap());
     update_any(&pic, mock, "set_next_send_hash", Encode!(&"0xmint1".to_string()).unwrap());
 
     let burner = "0x000000000000000000000000000000000000beef".to_string();
@@ -581,7 +587,12 @@ fn phase1c_submit_burn_proof_verifies_one_tx_no_poll_scan() {
             );
             advance_and_tick(&pic, 2);
             push_mint_log(&pic, mock, vault_id, &recipient, debt_e8s, "0xmint1", finalized);
-            advance_and_tick(&pic, 4);
+            // M-07: pin the mint receipt to its Mint-log block (finalized = the
+            // candidate, buried by the head at finalized + 1) so confirm_op
+            // finalizes it; the auto-mine would otherwise leave it at the unburied tip.
+            advance_and_tick(&pic, 2);
+            update_any(&pic, mock, "set_receipt", Encode!(&"0xmint1".to_string(), &true, &finalized).unwrap());
+            advance_and_tick(&pic, 2);
 
             let v = get_vault(&pic, backend, vault_id).expect("vault after mint confirm");
             assert_eq!(v.status, ChainVaultStatus::Open, "mint confirmed => Open");

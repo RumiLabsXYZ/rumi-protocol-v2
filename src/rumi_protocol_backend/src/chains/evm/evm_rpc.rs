@@ -96,6 +96,14 @@ pub const MAX_BLOCK_SCAN_WINDOW: u64 = 1024;
 /// sync with the same-named constant in `src/monad_rpc_mock/src/lib.rs`.
 pub const MONAD_GETLOGS_MAX_RANGE: u64 = 100;
 
+/// Per-chain max eth_getLogs range. Reads the compile-time EvmChainConfig;
+/// falls back to the conservative Monad cap (100) for unknown chains.
+pub(crate) fn getlogs_max_range_for(chain: ChainId) -> u64 {
+    crate::chains::evm::evm_chain_config(chain)
+        .map(|c| c.getlogs_max_range)
+        .unwrap_or(MONAD_GETLOGS_MAX_RANGE)
+}
+
 // ─── Topic0 constants ────────────────────────────────────────────────────────
 
 /// keccak256("Burn(uint256,address,uint256)")
@@ -1068,11 +1076,12 @@ pub async fn get_logs(
     if from_block > to_block {
         return Ok(Vec::new());
     }
+    let max_range = getlogs_max_range_for(chain);
     let mut out = Vec::new();
     let mut start = from_block;
     loop {
-        // `to - from <= MONAD_GETLOGS_MAX_RANGE` per sub-query (the provider cap).
-        let chunk_to = start.saturating_add(MONAD_GETLOGS_MAX_RANGE).min(to_block);
+        // `to - from <= max_range` per sub-query (the chain's provider cap).
+        let chunk_to = start.saturating_add(max_range).min(to_block);
         let mut chunk = get_logs_single_range(chain, contract, topic0, start, chunk_to).await?;
         out.append(&mut chunk);
         if chunk_to >= to_block {
@@ -1247,6 +1256,18 @@ pub async fn send_raw_transaction(chain: ChainId, raw_tx_hex: &str) -> Result<St
         .map_err(|e| format!("eth_sendRawTransaction parse: {}", e))?;
 
     if let Some(err) = val.get("error") {
+        // IDEMPOTENT-SUCCESS: a broadcast that the node already has is NOT a
+        // failure. The IC executes one HTTPS outcall from MANY replicas, so the
+        // same signed tx is submitted N times; the first lands and the rest get
+        // "already known" / "already exists". Treating that as an error left the
+        // op Queued forever (never Inflight, never confirmed) even though the
+        // mint landed on-chain. The tx hash is a pure function of the signed
+        // bytes, so recover it locally and report success. (A genuine resubmit
+        // of a same-nonce tx is likewise safe — it's the identical tx.)
+        let msg = err.to_string().to_ascii_lowercase();
+        if msg.contains("already known") || msg.contains("already exists") {
+            return crate::chains::evm::tx::raw_tx_hash(raw_tx_hex);
+        }
         return Err(format!("eth_sendRawTransaction RPC error: {}", err));
     }
 
@@ -1293,5 +1314,16 @@ pub async fn fetch_fees(chain: ChainId) -> Result<(u128, u128), String> {
             // Conservative default: 1 gwei base + 0.1 gwei priority.
             Ok((1_000_000_000, 100_000_000))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn getlogs_max_range_is_per_chain() {
+        assert_eq!(super::getlogs_max_range_for(crate::chains::config::ChainId(10143)), 100);
+        assert_eq!(super::getlogs_max_range_for(crate::chains::config::ChainId(71)), 1000);
+        // unknown chain falls back to the conservative Monad cap
+        assert_eq!(super::getlogs_max_range_for(crate::chains::config::ChainId(999)), 100);
     }
 }

@@ -9,15 +9,17 @@ minter (`MINTER_ROLE`); any holder may `burn` to repay their vault.
 `IcUSD.sol` is pinned to the backend's Monad adapter
 (`src/rumi_protocol_backend/src/chains/monad/`):
 
-- `mint(address to, uint256 amount, uint64 vault_id)` matches the selector built
-  by `tx::encode_mint_calldata` (`keccak256("mint(address,uint256,uint64)")[:4]`).
+- `mint(address to, uint256 amount, uint64 vault_id, uint64 op_id)` matches the
+  selector built by `tx::encode_mint_calldata` (`keccak256("mint(address,uint256,uint64,uint64)")[:4]` == `0x31239e64`).
 - `Mint(uint256,address,uint256)` / `Burn(uint256,address,uint256)` topic0 hashes
   match `MINT_EVENT_TOPIC0` / `BURN_EVENT_TOPIC0` in `evm_rpc.rs`. `vault_id` and
   `recipient`/`burner` are `indexed` so the observer reads them from
   `topics[1]`/`topics[2]` and `amount` from `data` (see `MintLog`/`BurnLog`).
 - 8 decimals so 1 base unit == 1 e8s (1:1 with the ICP-side e8s accounting).
-- `mapping(uint64 => bool) minted` is a per-`vault_id` idempotency guard: a
-  canister resubmit-after-transient-RPC-error cannot double-mint.
+- `mapping(uint64 => bool) mintedOps` is a per-`op_id` idempotency guard (was
+  per-`vault_id`): a canister resubmit-after-transient-RPC-error cannot
+  double-mint, while a borrow (a second mint to the same vault under a NEW
+  op_id) is allowed.
 
 ## Dependencies
 

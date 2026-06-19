@@ -118,3 +118,18 @@ pub fn check_invariant(
     }
     Ok(())
 }
+
+/// Phase 1b Task 12 migration: stamp `last_interest_accrual_ns = now_ns` for any
+/// chain vault that decoded with 0 (an existing vault from a snapshot written
+/// before the interest fields existed), so the first harvest does not bill
+/// interest from the unix epoch. New vaults are stamped to `now` at mint-confirm
+/// (`confirm_mint_in_state`) and never decode as 0, so this only ever touches
+/// pre-feature vaults. Idempotent (re-running is a no-op once stamped). Called
+/// from `post_upgrade` after `restore_state`.
+pub fn stamp_chain_interest_accrual_start(state: &mut MultiChainStateV5, now_ns: u64) {
+    for v in state.chain_vaults.values_mut() {
+        if v.last_interest_accrual_ns == 0 {
+            v.last_interest_accrual_ns = now_ns;
+        }
+    }
+}

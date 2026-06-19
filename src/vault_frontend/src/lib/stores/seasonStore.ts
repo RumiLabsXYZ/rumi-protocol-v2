@@ -26,8 +26,12 @@ async function ensureLoaded(): Promise<void> {
     const [status, config] = await Promise.all([getEpochStatus(), getPointsConfig()]);
     store.set({ status, config, loaded: true });
   } catch (e) {
-    console.error('[seasonStore] load failed', e);
-    store.set({ status: null, config: null, loaded: true });
+    // Don't latch a transient failure: release the guard so a later trigger
+    // (navigation, another component mounting) retries instead of leaving the
+    // season bar/badges stuck off for the rest of the session. The service
+    // layer already retries each call with backoff before we get here.
+    console.error('[seasonStore] load failed, will retry on next trigger', e);
+    started = false;
   }
 }
 

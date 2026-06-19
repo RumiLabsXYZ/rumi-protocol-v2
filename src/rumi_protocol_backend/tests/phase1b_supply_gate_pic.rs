@@ -73,6 +73,7 @@ struct RegisterChainArg {
     finality_depth: u32,
     gas_strategy: GasStrategy,
     chain_native_decimals: u8,
+    min_quorum_providers: Option<u32>,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -354,6 +355,9 @@ fn setup_chain(
             max_fee_gwei_ceiling: 500,
         },
         chain_native_decimals: 18,
+        // One mock RPC provider: relax the per-chain quorum floor (default 3)
+        // to 1 so the mock-backed financial reads satisfy quorum.
+        min_quorum_providers: Some(1),
     };
     decode_result(
         update_dev(pic, backend, "register_chain", Encode!(&reg).unwrap()),
@@ -400,8 +404,10 @@ fn setup_chain(
     )
     .expect("set_last_observed_block");
 
-    // Script the mock: chain head = finalized_block.
-    update_any(pic, mock, "set_blocks", Encode!(&finalized_block, &finalized_block).unwrap());
+    // Script the mock: chain head = finalized_block + finality_depth (M-07). The
+    // mint candidate (cursor_seed + 1024 = finalized_block) confirms and the cursor
+    // advances onto it only once that block is buried (finalized_block + 1 exists).
+    update_any(pic, mock, "set_blocks", Encode!(&(finalized_block + 1), &(finalized_block + 1)).unwrap());
     update_any(pic, mock, "set_next_send_hash", Encode!(&"0xmint1".to_string()).unwrap());
 
     // ECDSA probe: decides full vs gated.
@@ -474,7 +480,12 @@ fn setup_chain(
 
     // Settlement submits + confirms the mint. Push the Mint log at finalized_block.
     push_mint_log(pic, mock, vault_id, &recipient, debt_e8s, "0xmint1", finalized_block);
-    advance_and_tick(pic, 4);
+    // M-07: pin the mint receipt to its Mint-log block (finalized_block = the
+    // candidate, buried by the head) so confirm_op finalizes it; the auto-mine
+    // would otherwise leave the receipt at the unburied tip.
+    advance_and_tick(pic, 2);
+    update_any(pic, mock, "set_receipt", Encode!(&"0xmint1".to_string(), &true, &finalized_block).unwrap());
+    advance_and_tick(pic, 2);
 
     // Assert: vault is Open with debt = 100e8, chain_supplies[MONAD] = 100e8.
     let v = get_vault(pic, backend, vault_id).expect("vault after mint confirm");
@@ -576,7 +587,9 @@ fn phase1b_supply_gate_skips_on_match_scans_on_drop() {
     // Advance the mock chain head to PHASE_A_FINALIZED.
     // fetch_block_numbers probes block (cursor+1024 = PHASE_A_FINALIZED); the mock
     // returns that block as existing, so finalized = PHASE_A_FINALIZED > last_observed.
-    update_any(&pic, mock, "set_blocks", Encode!(&PHASE_A_FINALIZED, &PHASE_A_FINALIZED).unwrap());
+    // M-07: head one block above the candidate (PHASE_A_FINALIZED) so it is buried
+    // and the cursor advances onto it via advance_cursor_and_prune.
+    update_any(&pic, mock, "set_blocks", Encode!(&(PHASE_A_FINALIZED + 1), &(PHASE_A_FINALIZED + 1)).unwrap());
 
     // Run one observer tick.
     advance_and_tick(&pic, 1);
@@ -658,7 +671,9 @@ fn phase1b_supply_gate_skips_on_match_scans_on_drop() {
     );
 
     // Set mock finalized to PHASE_B_FINALIZED so fetch_block_numbers succeeds.
-    update_any(&pic, mock, "set_blocks", Encode!(&PHASE_B_FINALIZED, &PHASE_B_FINALIZED).unwrap());
+    // M-07: head one block above the candidate (PHASE_B_FINALIZED) so the cursor
+    // advances and the supply-drop sweep scans the window.
+    update_any(&pic, mock, "set_blocks", Encode!(&(PHASE_B_FINALIZED + 1), &(PHASE_B_FINALIZED + 1)).unwrap());
 
     // Run one observer tick.
     advance_and_tick(&pic, 1);
@@ -731,7 +746,9 @@ fn phase1b_supply_gate_skips_on_match_scans_on_drop() {
         "0xburnC_trap",
         PHASE_B_FINALIZED + 50,
     );
-    update_any(&pic, mock, "set_blocks", Encode!(&PHASE_C_FINALIZED, &PHASE_C_FINALIZED).unwrap());
+    // M-07: head one block above the candidate (PHASE_C_FINALIZED) so the cursor
+    // advances onto it even though the mint-excess sweep is skipped.
+    update_any(&pic, mock, "set_blocks", Encode!(&(PHASE_C_FINALIZED + 1), &(PHASE_C_FINALIZED + 1)).unwrap());
     advance_and_tick(&pic, 1);
 
     let v_c = get_vault(&pic, backend, vault_id).expect("vault in Phase C");

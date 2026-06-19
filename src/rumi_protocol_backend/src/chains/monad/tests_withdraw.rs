@@ -90,6 +90,61 @@ fn open_and_fund(
     v.status = ChainVaultStatus::Open;
 }
 
+/// One year in ns (matches `numeric::NANOS_PER_YEAR`).
+const NANOS_PER_YEAR: u64 = 365 * 24 * 60 * 60 * 1_000_000_000;
+
+// Task 12: a withdrawal is rejected while an interest mint is in flight for the
+// vault (`pending_interest_mint_e8s > 0`), so a full close cannot confirm after
+// the collateral leaves and credit unbacked interest debt to a Closed vault.
+#[test]
+fn withdraw_blocked_while_interest_mint_in_flight() {
+    let mut s = setup(PRICE_100_USD_E8);
+    open_and_fund(&mut s, 7, 5 * ONE_MON_E18, 100_0000_0000); // 5 MON, debt 100 icUSD
+    s.chain_vaults.get_mut(&7).unwrap().pending_interest_mint_e8s = 50_000_000; // in flight
+    let res = withdraw_collateral_in_state(
+        &mut s,
+        7,
+        ONE_MON_E18,
+        "0x000000000000000000000000000000000000dead".into(),
+        MIN_CR_E4,
+        555,
+    );
+    assert!(
+        matches!(res, Err(WithdrawError::InterestRealizationPending)),
+        "withdraw must be blocked while an interest mint is in flight, got {res:?}"
+    );
+}
+
+// Task 12: the post-withdrawal CR check counts accrued-but-unrealized interest.
+// 2 MON ($200) backing 100 icUSD; withdrawing 0.69 MON leaves 1.31 MON ($131) =
+// 131% on principal (>=130%), but a year of 2% interest makes effective debt
+// 102 icUSD => 128.4% (<130%). The IDENTICAL withdrawal with no elapsed interest
+// succeeds, isolating the interest as the cause.
+#[test]
+fn withdraw_cr_counts_accrued_interest() {
+    let now = 10 * NANOS_PER_YEAR;
+    let withdraw_amt = 690_000_000_000_000_000u128; // 0.69 MON
+    let debt = 100_0000_0000u128; // 100 icUSD
+    let dest = "0x000000000000000000000000000000000000dead".to_string();
+
+    // (a) a full year of accrued interest -> BelowMinCr.
+    let mut s = setup(PRICE_100_USD_E8);
+    open_and_fund(&mut s, 7, 2 * ONE_MON_E18, debt);
+    s.chain_vaults.get_mut(&7).unwrap().last_interest_accrual_ns = now - NANOS_PER_YEAR;
+    let res = withdraw_collateral_in_state(&mut s, 7, withdraw_amt, dest.clone(), MIN_CR_E4, now);
+    assert!(
+        matches!(res, Err(WithdrawError::BelowMinCr { .. })),
+        "accrued interest must raise effective debt for the CR check, got {res:?}"
+    );
+
+    // (b) the SAME vault + withdrawal with zero elapsed interest -> succeeds.
+    let mut s2 = setup(PRICE_100_USD_E8);
+    open_and_fund(&mut s2, 7, 2 * ONE_MON_E18, debt);
+    s2.chain_vaults.get_mut(&7).unwrap().last_interest_accrual_ns = now; // elapsed 0
+    let res2 = withdraw_collateral_in_state(&mut s2, 7, withdraw_amt, dest, MIN_CR_E4, now);
+    assert!(res2.is_ok(), "same withdrawal succeeds without accrued interest: {res2:?}");
+}
+
 // 1. full withdraw of a debt-free vault closes it (Closing) + enqueues one
 //    NativeWithdrawal carrying the real vault_id and the e18 amount.
 #[test]

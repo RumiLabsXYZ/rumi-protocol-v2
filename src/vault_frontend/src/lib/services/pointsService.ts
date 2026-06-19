@@ -56,6 +56,28 @@ export function invalidatePointsCache(prefix?: string): void {
   for (const key of cache.keys()) if (key.startsWith(prefix)) cache.delete(key);
 }
 
+/**
+ * Retry a read-only query through transient failures (boundary-node blips,
+ * momentary network drops, transient replica rejections). All points calls are
+ * idempotent queries, so retrying is always safe. Backoff: ~300ms, ~600ms.
+ * Throws the last error once attempts are exhausted, so genuine failures still
+ * surface to the UI (error state + Retry).
+ */
+async function withRetry<T>(fn: () => Promise<T>, attempts = 3, baseDelayMs = 300): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      if (i < attempts - 1) {
+        await new Promise((r) => setTimeout(r, baseDelayMs * 2 ** i));
+      }
+    }
+  }
+  throw lastErr;
+}
+
 let _actor: PointsService | null = null;
 function getActor(): PointsService {
   if (_actor) return _actor;
@@ -75,28 +97,28 @@ export async function getEpochStatus(): Promise<PublicEpochStatus> {
   const key = 'points:status';
   const c = getCached<PublicEpochStatus>(key, TTL.STATUS);
   if (c.hit) return c.value;
-  return setCache(key, await getActor().get_epoch_status());
+  return setCache(key, await withRetry(() => getActor().get_epoch_status()));
 }
 
 export async function getPointsConfig(): Promise<PointsConfig> {
   const key = 'points:config';
   const c = getCached<PointsConfig>(key, TTL.CONFIG);
   if (c.hit) return c.value;
-  return setCache(key, await getActor().get_points_config());
+  return setCache(key, await withRetry(() => getActor().get_points_config()));
 }
 
 export async function isRegistered(p: Principal): Promise<boolean> {
   const key = `points:reg:${p.toText()}`;
   const c = getCached<boolean>(key, TTL.PRINCIPAL);
   if (c.hit) return c.value;
-  return setCache(key, await getActor().is_registered(p));
+  return setCache(key, await withRetry(() => getActor().is_registered(p)));
 }
 
 export async function isExcluded(p: Principal): Promise<boolean> {
   const key = `points:excl:${p.toText()}`;
   const c = getCached<boolean>(key, TTL.PRINCIPAL);
   if (c.hit) return c.value;
-  return setCache(key, await getActor().is_excluded(p));
+  return setCache(key, await withRetry(() => getActor().is_excluded(p)));
 }
 
 export async function getPrincipalState(p: Principal): Promise<PrincipalState | null> {
@@ -104,7 +126,7 @@ export async function getPrincipalState(p: Principal): Promise<PrincipalState | 
   const c = getCached<PrincipalState | null>(key, TTL.PRINCIPAL);
   if (c.hit) return c.value;
   // get_principal_state returns a candid opt: [] | [PrincipalState].
-  const [val] = await getActor().get_principal_state(p);
+  const [val] = await withRetry(() => getActor().get_principal_state(p));
   return setCache<PrincipalState | null>(key, val ?? null);
 }
 
@@ -112,5 +134,5 @@ export async function getLeaderboard(offset: number, limit: number): Promise<Lea
   const key = `points:lb:${offset}:${limit}`;
   const c = getCached<LeaderboardEntry[]>(key, TTL.LEADERBOARD);
   if (c.hit) return c.value;
-  return setCache(key, await getActor().get_leaderboard(offset, limit));
+  return setCache(key, await withRetry(() => getActor().get_leaderboard(offset, limit)));
 }

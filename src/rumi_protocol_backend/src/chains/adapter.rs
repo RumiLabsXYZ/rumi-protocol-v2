@@ -56,6 +56,11 @@ pub struct MintInstruction {
     pub amount_e8s: u128,
     pub vault_id: u64,
     pub idempotency_key: String,
+    /// Settlement queue op id — the EVM `mint(...,uint64 op_id)` per-op
+    /// idempotency discriminator. Ignored by chains (e.g. Solana) whose
+    /// idempotency is durable-nonce based. `#[serde(default)]` keeps it additive.
+    #[serde(default)]
+    pub op_id: u64,
 }
 
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug)]

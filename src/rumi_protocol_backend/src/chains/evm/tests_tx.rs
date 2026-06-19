@@ -16,7 +16,7 @@
 use alloy_rlp::Encodable;
 
 use super::tx::{
-    assemble_signed_tx, encode_mint_calldata, encode_transfer_calldata, signing_hash,
+    assemble_signed_tx, encode_mint_calldata, encode_transfer_calldata, raw_tx_hash, signing_hash,
     Eip1559Fields,
 };
 
@@ -141,12 +141,17 @@ fn minimal_bytes_for(mut n: usize) -> Vec<u8> {
 
 #[test]
 fn mint_calldata_has_correct_selector() {
-    // mint(address,uint256,uint64): 4-byte selector + 3*32-byte args = 100 bytes.
+    // mint(address,uint256,uint64,uint64): 4-byte selector + 4*32-byte args = 132 bytes.
     let calldata =
-        encode_mint_calldata("0x7e5f4552091a69125d5dfcb7b8c2659029395bdf", 10_000_000_000, 42)
+        encode_mint_calldata("0x7e5f4552091a69125d5dfcb7b8c2659029395bdf", 10_000_000_000, 42, 1234)
             .expect("valid address");
-    assert_eq!(calldata.len(), 4 + 32 * 3);
-    assert_ne!(&calldata[0..4], &[0u8; 4]);
+    assert_eq!(calldata.len(), 4 + 32 * 4);
+    // Selector for "mint(address,uint256,uint64,uint64)" (cast sig).
+    assert_eq!(&calldata[0..4], &[0x31, 0x23, 0x9e, 0x64]);
+    // 4th ABI word (bytes 100..132) carries the op_id (left-padded big-endian).
+    let mut expected_op = [0u8; 32];
+    expected_op[24..].copy_from_slice(&1234u64.to_be_bytes());
+    assert_eq!(&calldata[4 + 32 * 3..], &expected_op);
 }
 
 #[test]
@@ -157,6 +162,42 @@ fn transfer_calldata_encodes_address_and_amount() {
     )
     .expect("valid address");
     assert_eq!(calldata.len(), 4 + 32 * 2);
+}
+
+#[test]
+fn raw_tx_hash_is_keccak_of_signed_bytes_with_or_without_prefix() {
+    use sha3::{Digest, Keccak256};
+    // raw_tx_hash must equal keccak256(decoded bytes), 0x-prefixed lowercase,
+    // and must accept the hex with or without a leading "0x".
+    let raw_bytes = [0x02u8, 0xab, 0xcd, 0xef, 0x10];
+    let expected: [u8; 32] = Keccak256::digest(raw_bytes).into();
+    let expected_hex = format!("0x{}", hex::encode(expected));
+
+    assert_eq!(raw_tx_hash("0x02abcdef10").unwrap(), expected_hex);
+    assert_eq!(raw_tx_hash("02abcdef10").unwrap(), expected_hex);
+    // Malformed hex is an error, never a panic.
+    assert!(raw_tx_hash("0xZZ").is_err());
+}
+
+#[test]
+fn raw_tx_hash_matches_assembled_tx() {
+    use sha3::{Digest, Keccak256};
+    // The hash recovered from a real signed tx's hex must equal keccak256 of
+    // its bytes — i.e. the canonical tx hash the node would assign.
+    let fields = Eip1559Fields {
+        chain_id: 71,
+        nonce: 5,
+        max_priority_fee_per_gas: 1_000_000_000,
+        max_fee_per_gas: 40_000_000_000,
+        gas_limit: 300_000,
+        to: "0xca8dff9e9fa48cbd3ecc43fe798c633afbdf69a3".into(),
+        value: 0,
+        data: vec![0x40, 0xc1, 0x0f, 0x19],
+    };
+    let signed = assemble_signed_tx(&fields, &[0x11u8; 32], &[0x22u8; 32], 0).expect("assemble");
+    let hex_str = format!("0x{}", hex::encode(&signed));
+    let expected: [u8; 32] = Keccak256::digest(&signed).into();
+    assert_eq!(raw_tx_hash(&hex_str).unwrap(), format!("0x{}", hex::encode(expected)));
 }
 
 #[test]
@@ -489,7 +530,7 @@ fn signing_hash_returns_err_on_malformed_to() {
 /// `encode_mint_calldata` surfaces `Err` on a malformed recipient (no panic).
 #[test]
 fn encode_mint_calldata_returns_err_on_malformed_address() {
-    let result = encode_mint_calldata("0xbadhex!", 1_000_000, 1);
+    let result = encode_mint_calldata("0xbadhex!", 1_000_000, 1, 1);
     assert!(result.is_err(), "expected Err for bad hex recipient, got Ok");
 }
 

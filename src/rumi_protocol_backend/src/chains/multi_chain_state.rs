@@ -32,7 +32,7 @@
 use super::config::{ChainConfigV1, ChainConfigV2, ChainConfigV3, ChainId};
 use super::monad::chain_vault::ChainVaultV1;
 use super::settlement_queue::SettlementQueueV1;
-use candid::{CandidType, Deserialize};
+use candid::{CandidType, Deserialize, Principal};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -264,6 +264,13 @@ pub struct MultiChainStateV4 {
     pub reorg_suspect_streak: BTreeMap<ChainId, u32>,
     #[serde(default)]
     pub processed_burn_keys: BTreeMap<u64, BTreeSet<String>>,
+    /// M2: per-synthetic-owner monotonic nonce for EIP-712 intent replay
+    /// protection. Keyed by `eip712::synthetic_owner(chain, evm_addr)` (which
+    /// embeds the chain → nonces are per-(owner,chain)). `#[serde(default)]`:
+    /// additive, ciborium-safe (no version-struct bump — coordinated with the
+    /// concurrent interest-accrual branch so both changes stay purely additive).
+    #[serde(default)]
+    pub evm_owner_nonces: BTreeMap<Principal, u64>,
 }
 
 impl MultiChainStateV4 {
@@ -275,6 +282,32 @@ impl MultiChainStateV4 {
     /// V2 doc — same foreign-chain-only invariant.
     pub fn total_chain_vault_debt_e8s(&self) -> u128 {
         self.chain_vaults.values().map(|v| v.debt_e8s).sum()
+    }
+
+    /// M2: the expected next EIP-712 nonce for a synthetic owner (0 if unseen).
+    pub fn expected_evm_nonce(&self, owner: &Principal) -> u64 {
+        self.evm_owner_nonces.get(owner).copied().unwrap_or(0)
+    }
+
+    /// M2: consume `nonce` for `owner`. Succeeds and bumps the counter iff
+    /// `nonce == expected`; else returns the expected value as `Err` (no mutation).
+    pub fn consume_evm_nonce(&mut self, owner: &Principal, nonce: u64) -> Result<(), u64> {
+        let expected = self.expected_evm_nonce(owner);
+        if nonce != expected {
+            return Err(expected);
+        }
+        self.evm_owner_nonces.insert(*owner, expected.saturating_add(1));
+        Ok(())
+    }
+
+    /// M2 anti-spam: count NON-terminal vaults (everything but `Closed`) owned by
+    /// `owner` — the per-owner open cap.
+    pub fn count_owner_active_vaults(&self, owner: &Principal) -> usize {
+        use crate::chains::vault::ChainVaultStatus;
+        self.chain_vaults
+            .values()
+            .filter(|v| &v.owner == owner && v.status != ChainVaultStatus::Closed)
+            .count()
     }
 }
 
@@ -321,6 +354,11 @@ pub struct MultiChainStateV5 {
     pub reorg_suspect_streak: BTreeMap<ChainId, u32>,
     #[serde(default)]
     pub processed_burn_keys: BTreeMap<u64, BTreeSet<String>>,
+    /// M2: per-synthetic-owner monotonic nonce for EIP-712 intent replay
+    /// protection (carried verbatim from V4). Keyed by
+    /// `eip712::synthetic_owner(chain, evm_addr)`. `#[serde(default)]` additive.
+    #[serde(default)]
+    pub evm_owner_nonces: BTreeMap<Principal, u64>,
     /// New in V5 (audit F-01): wall-clock ns of the last manual-price write per
     /// `(chain, symbol)`. The off-chain monitor owns freshness; this lets the
     /// getter expose how stale the canister's own manual price is. `#[serde(default)]`
@@ -338,6 +376,32 @@ impl MultiChainStateV5 {
     /// V2 doc — same foreign-chain-only invariant.
     pub fn total_chain_vault_debt_e8s(&self) -> u128 {
         self.chain_vaults.values().map(|v| v.debt_e8s).sum()
+    }
+
+    /// M2: the expected next EIP-712 nonce for a synthetic owner (0 if unseen).
+    pub fn expected_evm_nonce(&self, owner: &Principal) -> u64 {
+        self.evm_owner_nonces.get(owner).copied().unwrap_or(0)
+    }
+
+    /// M2: consume `nonce` for `owner`. Succeeds and bumps the counter iff
+    /// `nonce == expected`; else returns the expected value as `Err` (no mutation).
+    pub fn consume_evm_nonce(&mut self, owner: &Principal, nonce: u64) -> Result<(), u64> {
+        let expected = self.expected_evm_nonce(owner);
+        if nonce != expected {
+            return Err(expected);
+        }
+        self.evm_owner_nonces.insert(*owner, expected.saturating_add(1));
+        Ok(())
+    }
+
+    /// M2 anti-spam: count NON-terminal vaults (everything but `Closed`) owned by
+    /// `owner` — the per-owner open cap.
+    pub fn count_owner_active_vaults(&self, owner: &Principal) -> usize {
+        use crate::chains::vault::ChainVaultStatus;
+        self.chain_vaults
+            .values()
+            .filter(|v| &v.owner == owner && v.status != ChainVaultStatus::Closed)
+            .count()
     }
 
     /// Write a manual collateral price for `(chain, symbol)` and stamp the

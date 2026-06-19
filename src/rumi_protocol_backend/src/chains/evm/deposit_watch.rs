@@ -48,7 +48,7 @@ use crate::logs::INFO;
 use crate::state::{mutate_state, read_state};
 use crate::Mode;
 
-use super::chain_vault::{verify_deposit_and_enqueue_mint_in_state, ChainVaultStatus};
+use crate::chains::monad::chain_vault::{verify_deposit_and_enqueue_mint_in_state, ChainVaultStatus};
 use super::evm_rpc::{decode_burn_log, erc20_total_supply_at, fetch_block_numbers, get_balance, get_logs, BURN_EVENT_TOPIC0};
 use super::{hardening, tecdsa};
 
