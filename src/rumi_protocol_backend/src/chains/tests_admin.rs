@@ -177,12 +177,14 @@ fn delete_chain_removes_zero_supply_chain() {
     // Populate EVERY per-chain map so the purge can be observed.
     s.chain_contracts.insert(c, "0xabc".into());
     s.manual_prices.insert((c, "MON".to_string()), 2_0000_0000);
+    s.manual_price_set_at_ns.insert((c, "MON".to_string()), 123);
     s.last_observed_block.insert(c, 42);
     s.hot_wallet_balance_e18.insert(c, 1_000);
     s.reorg_halted.insert(c, true);
     s.reorg_suspect_streak.insert(c, 2);
     // An unrelated chain's manual_prices entry must SURVIVE the delete.
     s.manual_prices.insert((ChainId(7), "MON".to_string()), 3_0000_0000);
+    s.manual_price_set_at_ns.insert((ChainId(7), "MON".to_string()), 456);
 
     delete_chain_in_state(&mut s, c).expect("delete");
 
@@ -195,8 +197,13 @@ fn delete_chain_removes_zero_supply_chain() {
     assert!(!s.reorg_halted.contains_key(&c), "reorg_halted retained");
     assert!(!s.reorg_suspect_streak.contains_key(&c), "reorg_suspect_streak retained");
     assert!(!s.manual_prices.contains_key(&(c, "MON".to_string())), "manual_prices retained");
-    // The unrelated chain's price survives.
+    assert!(
+        !s.manual_price_set_at_ns.contains_key(&(c, "MON".to_string())),
+        "manual_price_set_at_ns leaked (paired-map divergence)"
+    );
+    // The unrelated chain's price + timestamp survive.
     assert_eq!(s.manual_prices[&(ChainId(7), "MON".to_string())], 3_0000_0000);
+    assert_eq!(s.manual_price_set_at_ns[&(ChainId(7), "MON".to_string())], 456);
 }
 
 #[test]

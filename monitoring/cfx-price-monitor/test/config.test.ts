@@ -12,10 +12,13 @@ describe("loadConfig", () => {
       crWarnBandE4: 16_000n,
       mcrE4: 13_000n,
       outlierPct: 5,
+      maxSpreadPct: 3,
       minSources: 2,
       pollSec: 60,
       downtimeIntervals: 3,
       nativeDecimals: 18,
+      callTimeoutSec: 15,
+      alertCooldownSec: 900,
     });
   });
 
@@ -63,5 +66,17 @@ describe("loadConfig", () => {
 
   it("throws when IDENTITY_PEM is missing", () => {
     expect(() => loadConfig({ CANISTER_ID: "x" })).toThrow(/IDENTITY_PEM/);
+  });
+
+  it("rejects MIN_SOURCES below 2", () => {
+    expect(() => loadConfig({ ...required, MIN_SOURCES: "1" })).toThrow(/MIN_SOURCES/);
+  });
+
+  it("rejects a call timeout that is not shorter than the poll interval", () => {
+    expect(() => loadConfig({ ...required, CALL_TIMEOUT_SEC: "60", POLL_SEC: "60" })).toThrow(/CALL_TIMEOUT_SEC/);
+  });
+
+  it("rejects a warn band below the MCR", () => {
+    expect(() => loadConfig({ ...required, CR_WARN_BAND_E4: "12000", MCR_E4: "13000" })).toThrow(/CR_WARN_BAND_E4/);
   });
 });

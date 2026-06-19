@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { aggregate, median } from "../src/aggregate.js";
 import type { PriceQuote } from "../src/types.js";
 
-const cfg = { minSources: 2, outlierPct: 5 };
+const cfg = { minSources: 2, outlierPct: 5, maxSpreadPct: 3 };
 const q = (source: string, priceUsd: number): PriceQuote => ({ source, priceUsd, ts: 1000 });
 
 describe("median", () => {
@@ -46,6 +46,14 @@ describe("aggregate", () => {
     // median of [0.10,0.20]=0.15; both are 33% off -> both rejected -> 0 survive.
     const out = aggregate([q("a", 0.10), q("b", 0.20)], cfg);
     expect(out.ok).toBe(false);
+  });
+
+  it("refuses when two in-band sources still spread wider than maxSpreadPct", () => {
+    // 0.150 vs 0.156: median 0.153, each ~1.96% off (within 5% outlier so both
+    // survive), but spread (0.156-0.150)/0.153 = 3.92% > 3% -> refuse.
+    const out = aggregate([q("a", 0.15), q("b", 0.156)], cfg);
+    expect(out.ok).toBe(false);
+    if (!out.ok) expect(out.reason).toMatch(/spread/i);
   });
 
   it("ignores zero, negative and NaN prices", () => {

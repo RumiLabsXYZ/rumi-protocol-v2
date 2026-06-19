@@ -10,10 +10,15 @@ export interface Thresholds {
   crWarnBandE4: bigint;
   mcrE4: bigint;
   outlierPct: number;
+  maxSpreadPct: number;
   minSources: number;
   pollSec: number;
   downtimeIntervals: number;
   nativeDecimals: number;
+  /** Hard per-call deadline (seconds) for every source + canister request. */
+  callTimeoutSec: number;
+  /** A persistent fault re-alerts at most once per this many seconds (anti-spam). */
+  alertCooldownSec: number;
 }
 
 export interface Config {
@@ -46,6 +51,29 @@ function num(env: Record<string, string | undefined>, key: string, fallback: num
   return n;
 }
 
+function validateThresholds(t: Thresholds): void {
+  const check = (cond: boolean, msg: string): void => {
+    if (!cond) throw new Error(`invalid threshold: ${msg}`);
+  };
+  // >= 2 sources is the whole point of a median; a single source has no quorum.
+  check(t.minSources >= 2, `MIN_SOURCES must be >= 2 (got ${t.minSources})`);
+  check(t.outlierPct > 0, `OUTLIER_PCT must be > 0 (got ${t.outlierPct})`);
+  check(t.maxSpreadPct > 0, `MAX_SPREAD_PCT must be > 0 (got ${t.maxSpreadPct})`);
+  check(t.driftBps > 0, `DRIFT_BPS must be > 0 (got ${t.driftBps})`);
+  check(t.maxAgeSec > 0, `MAX_AGE_SEC must be > 0 (got ${t.maxAgeSec})`);
+  check(t.pollSec > 0, `POLL_SEC must be > 0 (got ${t.pollSec})`);
+  check(t.downtimeIntervals >= 1, `DOWNTIME_INTERVALS must be >= 1 (got ${t.downtimeIntervals})`);
+  check(t.nativeDecimals > 0, `NATIVE_DECIMALS must be > 0 (got ${t.nativeDecimals})`);
+  check(t.crWarnBandE4 >= t.mcrE4, `CR_WARN_BAND_E4 (${t.crWarnBandE4}) must be >= MCR_E4 (${t.mcrE4})`);
+  // A per-call deadline only helps if it is comfortably shorter than the poll.
+  check(t.callTimeoutSec > 0, `CALL_TIMEOUT_SEC must be > 0 (got ${t.callTimeoutSec})`);
+  check(
+    t.callTimeoutSec < t.pollSec,
+    `CALL_TIMEOUT_SEC (${t.callTimeoutSec}) must be < POLL_SEC (${t.pollSec}) so a hung call surfaces within one cycle`,
+  );
+  check(t.alertCooldownSec > 0, `ALERT_COOLDOWN_SEC must be > 0 (got ${t.alertCooldownSec})`);
+}
+
 export function loadConfig(env: Record<string, string | undefined>): Config {
   const canisterId = required(env, "CANISTER_ID");
   const identityPemPath = required(env, "IDENTITY_PEM");
@@ -66,11 +94,16 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     crWarnBandE4: BigInt(num(env, "CR_WARN_BAND_E4", 16_000)),
     mcrE4: BigInt(num(env, "MCR_E4", 13_000)),
     outlierPct: num(env, "OUTLIER_PCT", 5),
+    maxSpreadPct: num(env, "MAX_SPREAD_PCT", 3),
     minSources: num(env, "MIN_SOURCES", 2),
     pollSec: num(env, "POLL_SEC", 60),
     downtimeIntervals: num(env, "DOWNTIME_INTERVALS", 3),
     nativeDecimals: num(env, "NATIVE_DECIMALS", 18),
+    callTimeoutSec: num(env, "CALL_TIMEOUT_SEC", 15),
+    alertCooldownSec: num(env, "ALERT_COOLDOWN_SEC", 900),
   };
+
+  validateThresholds(thresholds);
 
   return {
     network,

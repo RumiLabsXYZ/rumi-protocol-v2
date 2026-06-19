@@ -6,8 +6,11 @@ import { okxSource } from "./okx.js";
 /** A pluggable CFX/USD price source. */
 export interface PriceSource {
   readonly name: string;
-  /** Fetch the current CFX/USD price. `fetchImpl` is injectable for tests. */
-  fetchCfxUsd(fetchImpl?: typeof fetch): Promise<PriceQuote>;
+  /**
+   * Fetch the current CFX/USD price. `fetchImpl` is injectable for tests;
+   * `signal` (when provided) aborts the underlying request on timeout.
+   */
+  fetchCfxUsd(fetchImpl?: typeof fetch, signal?: AbortSignal): Promise<PriceQuote>;
 }
 
 export { coingeckoSource, parseCoingecko } from "./coingecko.js";

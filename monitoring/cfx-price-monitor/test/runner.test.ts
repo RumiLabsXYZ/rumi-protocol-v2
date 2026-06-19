@@ -8,7 +8,7 @@ import type { ChainVault, OnChainPrice, PriceQuote } from "../src/types.js";
 const NOW_MS = 1_700_000_000_000;
 const NOW_NS = BigInt(NOW_MS) * 1_000_000n;
 
-const aggregateCfg = { minSources: 2, outlierPct: 5 };
+const aggregateCfg = { minSources: 2, outlierPct: 5, maxSpreadPct: 5 };
 const policyCfg = {
   driftBps: 200,
   maxAgeSec: 300,
@@ -51,6 +51,7 @@ function deps(over: Partial<RunTickDeps>): RunTickDeps {
     client: fakeClient({}),
     alertSink: fakeSink(),
     nowNs: NOW_NS,
+    callTimeoutMs: 5_000,
     ...over,
   };
 }
@@ -77,9 +78,23 @@ describe("shouldAlertDowntime", () => {
 });
 
 describe("gatherQuotes", () => {
-  it("returns only the successful sources", async () => {
-    const qs = await gatherQuotes([source("a", 0.15), source("bad", new Error("down")), source("c", 0.16)]);
-    expect(qs.map((q) => q.source).sort()).toEqual(["a", "c"]);
+  it("returns successful quotes and surfaces failures", async () => {
+    const res = await gatherQuotes(
+      [source("a", 0.15), source("bad", new Error("down")), source("c", 0.16)],
+      undefined,
+      1_000,
+    );
+    expect(res.quotes.map((q) => q.source).sort()).toEqual(["a", "c"]);
+    expect(res.failures.map((f) => f.source)).toEqual(["bad"]);
+    expect(res.failures[0]!.reason).toContain("down");
+  });
+
+  it("drops a hung source via the per-call timeout instead of stalling", async () => {
+    const hung: PriceSource = { name: "hung", fetchCfxUsd: () => new Promise<never>(() => {}) };
+    const res = await gatherQuotes([source("a", 0.15), hung, source("c", 0.16)], undefined, 30);
+    expect(res.quotes.map((q) => q.source).sort()).toEqual(["a", "c"]);
+    expect(res.failures[0]!.source).toBe("hung");
+    expect(res.failures[0]!.reason).toMatch(/timed out/);
   });
 });
 
@@ -163,5 +178,55 @@ describe("runTick", () => {
     expect(r.ok).toBe(false);
     const codes = sink.emit.mock.calls.map((c) => (c[0] as { code: string }).code);
     expect(codes).toContain("verify_mismatch");
+  });
+
+  it("treats a failed verify RE-READ as a soft warning, not a stale oracle", async () => {
+    const sink = fakeSink();
+    const client = fakeClient({
+      getOnChainPrice: vi
+        .fn()
+        .mockResolvedValueOnce(onChain(10_000_000n, 60n)) // pre-write read ok
+        .mockRejectedValueOnce(new Error("read timeout")), // verify read throws
+      setPrice: vi.fn(async () => ({ ok: true })),
+    });
+    const r = await runTick(deps({ client, alertSink: sink }));
+    expect(r.ok).toBe(true); // the write itself succeeded
+    expect(r.refreshed).toBe(true);
+    const codes = sink.emit.mock.calls.map((c) => (c[0] as { code: string }).code);
+    expect(codes).toContain("verify_read_failed");
+    expect(codes).not.toContain("verify_mismatch");
+  });
+
+  it("refuses to write and alerts when the market price underflows the e8 scale", async () => {
+    const setPrice = vi.fn(async () => ({ ok: true }));
+    const sink = fakeSink();
+    const r = await runTick(
+      deps({
+        sources: [source("a", 1e-10), source("b", 1e-10)], // round(1e-10 * 1e8) = 0
+        client: fakeClient({ setPrice, getOnChainPrice: vi.fn(async () => onChain(15_000_000n, 60n)) }),
+        alertSink: sink,
+      }),
+    );
+    expect(r.ok).toBe(false);
+    expect(setPrice).not.toHaveBeenCalled();
+    const codes = sink.emit.mock.calls.map((c) => (c[0] as { code: string }).code);
+    expect(codes).toContain("price_underflow");
+  });
+
+  it("warns when vault coverage is truncated at the backend cap", async () => {
+    const sink = fakeSink();
+    const many = Array.from({ length: 500 }, (_, i) => ({
+      vaultId: BigInt(i),
+      collateralAmountE18: 10n ** 18n,
+      debtE8s: 1n, // huge CR, no CR alert noise
+    }));
+    const client = fakeClient({
+      getOnChainPrice: vi.fn(async () => onChain(15_000_000n, 60n)),
+      listChainVaults: vi.fn(async () => many),
+    });
+    const r = await runTick(deps({ client, alertSink: sink }));
+    const codes = sink.emit.mock.calls.map((c) => (c[0] as { code: string }).code);
+    expect(codes).toContain("vault_coverage_truncated");
+    expect(r.ok).toBe(true);
   });
 });

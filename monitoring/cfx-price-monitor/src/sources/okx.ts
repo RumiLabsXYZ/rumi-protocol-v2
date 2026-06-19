@@ -16,8 +16,8 @@ export function parseOkx(json: unknown): number {
 export function okxSource(instId = "CFX-USDT"): PriceSource {
   return {
     name: "okx",
-    async fetchCfxUsd(fetchImpl: typeof fetch = fetch): Promise<PriceQuote> {
-      const res = await fetchImpl(`${URL}?instId=${encodeURIComponent(instId)}`);
+    async fetchCfxUsd(fetchImpl: typeof fetch = fetch, signal?: AbortSignal): Promise<PriceQuote> {
+      const res = await fetchImpl(`${URL}?instId=${encodeURIComponent(instId)}`, { signal });
       if (!res.ok) throw new Error(`okx HTTP ${res.status}`);
       return { source: "okx", priceUsd: parseOkx(await res.json()), ts: Date.now() };
     },

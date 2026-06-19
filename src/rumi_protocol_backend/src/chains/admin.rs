@@ -149,8 +149,10 @@ pub fn delete_chain_in_state(
     state.hot_wallet_balance_e18.remove(&chain_id);
     state.reorg_halted.remove(&chain_id);
     state.reorg_suspect_streak.remove(&chain_id); // Task-11 reorg-debounce streak
-    // manual_prices is keyed by (ChainId, String) — drop all entries for this chain.
+    // manual_prices + its paired freshness map are keyed by (ChainId, String) —
+    // drop ALL entries for this chain from BOTH, or the timestamp map leaks.
     state.manual_prices.retain(|(c, _), _| *c != chain_id);
+    state.manual_price_set_at_ns.retain(|(c, _), _| *c != chain_id);
     Ok(())
 }
 

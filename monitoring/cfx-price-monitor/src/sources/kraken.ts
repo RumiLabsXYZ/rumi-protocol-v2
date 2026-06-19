@@ -22,8 +22,8 @@ export function parseKraken(json: unknown): number {
 export function krakenSource(pair = "CFXUSD"): PriceSource {
   return {
     name: "kraken",
-    async fetchCfxUsd(fetchImpl: typeof fetch = fetch): Promise<PriceQuote> {
-      const res = await fetchImpl(`${URL}?pair=${encodeURIComponent(pair)}`);
+    async fetchCfxUsd(fetchImpl: typeof fetch = fetch, signal?: AbortSignal): Promise<PriceQuote> {
+      const res = await fetchImpl(`${URL}?pair=${encodeURIComponent(pair)}`, { signal });
       if (!res.ok) throw new Error(`kraken HTTP ${res.status}`);
       return { source: "kraken", priceUsd: parseKraken(await res.json()), ts: Date.now() };
     },

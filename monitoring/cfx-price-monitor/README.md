@@ -32,7 +32,10 @@ This daemon relies on three additive endpoints shipped alongside it in
 
 - `get_manual_collateral_price(chain, symbol) -> opt record { price_e8; set_at_ns }`
 - `set_manual_collateral_price` widened to accept a scoped **price-pusher** principal
-- `set_price_pusher_principal(opt principal)` / `get_price_pusher_principal()` (developer-gated)
+- `set_price_pusher_principal(opt principal, vec record { nat32; text })` (developer-gated):
+  registers the pusher AND the exact `(chain_id, symbol)` pairs it may set — it can
+  set nothing else, and cannot be the anonymous principal
+- `get_price_pusher_principal()` / `get_price_pusher_allowed()` (read-only)
 
 ## Setup
 
@@ -43,10 +46,14 @@ npm install
 dfx identity new cfx-pusher
 dfx identity export cfx-pusher > pusher.pem        # secp256k1 EC private key
 
-# 2. Find its principal and register it on the backend (as the developer):
+# 2. Find its principal and register it on the backend (as the developer),
+#    scoped to ONLY the (chain_id, symbol) pairs it may set (CFX on 1030 here):
 dfx identity get-principal --identity cfx-pusher
-icp canister call <CANISTER> set_price_pusher_principal '(opt principal "<pusher-principal>")' \
+icp canister call <CANISTER> set_price_pusher_principal \
+  '(opt principal "<pusher-principal>", vec { record { 1030 : nat32; "CFX" } })' \
   -e <ENV> --identity rumi_identity
+# The pusher can set NOTHING outside that allow-list (and cannot be the anonymous
+# principal). To revoke: set_price_pusher_principal '(null, vec {})'.
 
 # 3. Configure + run:
 cp .env.example .env        # edit CANISTER_ID, IDENTITY_PEM, optional SLACK_WEBHOOK_URL

@@ -1027,6 +1027,7 @@ service : (ProtocolArg) -> {
   get_manual_collateral_price : (nat32, text) -> (opt ManualPriceInfo) query;
   get_min_icusd_amount : () -> (nat64) query;
   get_pending_amm1_donations_count : () -> (nat64) query;
+  get_price_pusher_allowed : () -> (vec record { nat32; text }) query;
   get_price_pusher_principal : () -> (opt principal) query;
   get_protocol_3usd_reserves : () -> (nat64) query;
   get_protocol_config : () -> (ProtocolConfig) query;
@@ -1142,7 +1143,9 @@ service : (ProtocolArg) -> {
   set_min_icusd_amount : (nat64) -> (Result);
   set_min_xrc_sources_used : (nat32) -> (Result);
   set_observer_tick_interval_secs : (nat64) -> (Result);
-  set_price_pusher_principal : (opt principal) -> (Result);
+  set_price_pusher_principal : (opt principal, vec record { nat32; text }) -> (
+      Result,
+    );
   set_rate_curve_markers : (opt principal, vec record { float64; float64 }) -> (
       Result,
     );

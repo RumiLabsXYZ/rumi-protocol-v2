@@ -143,7 +143,18 @@ fn boot() -> (PocketIc, Principal) {
 // ─── call helpers ────────────────────────────────────────────────────────────
 
 fn set_price(pic: &PocketIc, cid: Principal, sender: Principal, price_e8: u64) -> Result<(), ProtocolError> {
-    let args = encode_args((CFX_CHAIN, "CFX".to_string(), price_e8)).expect("encode");
+    set_price_for(pic, cid, sender, CFX_CHAIN, "CFX", price_e8)
+}
+
+fn set_price_for(
+    pic: &PocketIc,
+    cid: Principal,
+    sender: Principal,
+    chain: u32,
+    symbol: &str,
+    price_e8: u64,
+) -> Result<(), ProtocolError> {
+    let args = encode_args((chain, symbol.to_string(), price_e8)).expect("encode");
     let reply = pic
         .update_call(cid, sender, "set_manual_collateral_price", args)
         .expect("update call");
@@ -153,14 +164,25 @@ fn set_price(pic: &PocketIc, cid: Principal, sender: Principal, price_e8: u64) -
     }
 }
 
-fn set_pusher(pic: &PocketIc, cid: Principal, sender: Principal, p: Option<Principal>) -> Result<(), ProtocolError> {
+fn set_pusher(
+    pic: &PocketIc,
+    cid: Principal,
+    sender: Principal,
+    p: Option<Principal>,
+    allowed: Vec<(u32, String)>,
+) -> Result<(), ProtocolError> {
+    let args = encode_args((p, allowed)).expect("encode");
     let reply = pic
-        .update_call(cid, sender, "set_price_pusher_principal", encode_one(p).expect("encode"))
+        .update_call(cid, sender, "set_price_pusher_principal", args)
         .expect("update call");
     match reply {
         WasmResult::Reply(b) => Decode!(&b, Result<(), ProtocolError>).expect("decode Result"),
         WasmResult::Reject(msg) => panic!("set_price_pusher_principal rejected: {msg}"),
     }
+}
+
+fn cfx_scope() -> Vec<(u32, String)> {
+    vec![(CFX_CHAIN, "CFX".to_string())]
 }
 
 fn get_pusher(pic: &PocketIc, cid: Principal) -> Option<Principal> {
@@ -170,6 +192,16 @@ fn get_pusher(pic: &PocketIc, cid: Principal) -> Option<Principal> {
     match reply {
         WasmResult::Reply(b) => Decode!(&b, Option<Principal>).expect("decode"),
         WasmResult::Reject(msg) => panic!("get_price_pusher_principal rejected: {msg}"),
+    }
+}
+
+fn get_pusher_allowed(pic: &PocketIc, cid: Principal) -> Vec<(u32, String)> {
+    let reply = pic
+        .query_call(cid, Principal::anonymous(), "get_price_pusher_allowed", encode_one(()).expect("encode"))
+        .expect("query");
+    match reply {
+        WasmResult::Reply(b) => Decode!(&b, Vec<(u32, String)>).expect("decode"),
+        WasmResult::Reject(msg) => panic!("get_price_pusher_allowed rejected: {msg}"),
     }
 }
 
@@ -202,16 +234,23 @@ fn stranger_cannot_set_price_until_granted() {
     assert!(get_price(&pic, cid).is_none(), "no price should be set after a rejected call");
     set_price(&pic, cid, developer(), 5_000_000).expect("developer may set price");
 
-    // Developer grants the scoped pusher.
-    set_pusher(&pic, cid, developer(), Some(pusher())).expect("developer grants pusher");
+    // Developer grants the scoped pusher (CFX/1030 only).
+    set_pusher(&pic, cid, developer(), Some(pusher()), cfx_scope()).expect("developer grants pusher");
     assert_eq!(get_pusher(&pic, cid), Some(pusher()));
+    assert_eq!(get_pusher_allowed(&pic, cid), vec![(CFX_CHAIN, "CFX".to_string())]);
 
     // A stranger granting a pusher is rejected (setter is developer-gated).
-    assert_chain_admin_err(set_pusher(&pic, cid, stranger(), Some(stranger())));
+    assert_chain_admin_err(set_pusher(&pic, cid, stranger(), Some(stranger()), vec![]));
 
-    // The pusher can now set the price; a stranger still cannot.
-    set_price(&pic, cid, pusher(), 4_915_384).expect("pusher may set price");
+    // The pusher can set the IN-SCOPE price; a stranger still cannot.
+    set_price(&pic, cid, pusher(), 4_915_384).expect("pusher may set in-scope price");
     assert_chain_admin_err(set_price(&pic, cid, stranger(), 1));
+
+    // The pusher is scoped: it CANNOT set out-of-scope (chain, symbol) pairs.
+    assert_chain_admin_err(set_price_for(&pic, cid, pusher(), CFX_CHAIN, "MON", 1));
+    assert_chain_admin_err(set_price_for(&pic, cid, pusher(), 71, "CFX", 1));
+    // ...but the developer can set any pair.
+    set_price_for(&pic, cid, developer(), 71, "CFX", 2_000_000).expect("developer unconstrained by scope");
 
     let info = get_price(&pic, cid).expect("price is set");
     assert_eq!(info.price_e8, 4_915_384);
@@ -219,9 +258,16 @@ fn stranger_cannot_set_price_until_granted() {
 }
 
 #[test]
+fn anonymous_cannot_be_the_pusher() {
+    let (pic, cid) = boot();
+    assert_chain_admin_err(set_pusher(&pic, cid, developer(), Some(Principal::anonymous()), cfx_scope()));
+    assert_eq!(get_pusher(&pic, cid), None, "anonymous grant must not take effect");
+}
+
+#[test]
 fn zero_price_is_rejected_even_for_authorized_callers() {
     let (pic, cid) = boot();
-    set_pusher(&pic, cid, developer(), Some(pusher())).expect("grant");
+    set_pusher(&pic, cid, developer(), Some(pusher()), cfx_scope()).expect("grant");
     assert_chain_admin_err(set_price(&pic, cid, pusher(), 0));
     assert_chain_admin_err(set_price(&pic, cid, developer(), 0));
 }
@@ -229,7 +275,7 @@ fn zero_price_is_rejected_even_for_authorized_callers() {
 #[test]
 fn price_and_pusher_survive_upgrade() {
     let (pic, cid) = boot();
-    set_pusher(&pic, cid, developer(), Some(pusher())).expect("grant");
+    set_pusher(&pic, cid, developer(), Some(pusher()), cfx_scope()).expect("grant");
     set_price(&pic, cid, pusher(), 4_915_384).expect("set");
     let before = get_price(&pic, cid).expect("price set");
 
@@ -244,6 +290,11 @@ fn price_and_pusher_survive_upgrade() {
     // round-trip the price, its timestamp, and the registered pusher.
     assert_eq!(get_price(&pic, cid), Some(before), "price + timestamp survive upgrade");
     assert_eq!(get_pusher(&pic, cid), Some(pusher()), "pusher survives upgrade");
-    // And the pusher is still authorized after the upgrade.
+    assert_eq!(
+        get_pusher_allowed(&pic, cid),
+        vec![(CFX_CHAIN, "CFX".to_string())],
+        "pusher allow-list survives upgrade"
+    );
+    // And the pusher is still authorized (in scope) after the upgrade.
     set_price(&pic, cid, pusher(), 5_000_000).expect("pusher still authorized post-upgrade");
 }

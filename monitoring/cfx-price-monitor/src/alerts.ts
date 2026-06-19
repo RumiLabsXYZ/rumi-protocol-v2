@@ -37,6 +37,31 @@ export function formatSlackPayload(alert: Alert, monitorId: string): { text: str
   };
 }
 
+/** Stable dedup key: same code + same vault/source collapses into one stream. */
+export function alertKey(alert: Alert): string {
+  const id = alert.context?.["vaultId"] ?? alert.context?.["source"];
+  return id !== undefined ? `${alert.code}:${String(id)}` : alert.code;
+}
+
+/**
+ * Wrap a sink so a persistent fault re-alerts at most once per `cooldownMs`
+ * (per key) instead of on every poll. A new key, or a recurrence after the
+ * cooldown, still fires — so the signal stays visible without the spam.
+ */
+export function createDedupingSink(inner: AlertSink, cooldownMs: number, now: () => number = Date.now): AlertSink {
+  const lastEmit = new Map<string, number>();
+  return {
+    async emit(alert: Alert): Promise<void> {
+      const key = alertKey(alert);
+      const t = now();
+      const prev = lastEmit.get(key);
+      if (prev !== undefined && t - prev < cooldownMs) return;
+      lastEmit.set(key, t);
+      await inner.emit(alert);
+    },
+  };
+}
+
 async function defaultPostWebhook(url: string, body: string): Promise<void> {
   const res = await fetch(url, {
     method: "POST",

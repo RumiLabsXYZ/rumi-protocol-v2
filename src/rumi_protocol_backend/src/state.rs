@@ -902,14 +902,21 @@ pub struct State {
     pub fee: Ratio,
     pub developer_principal: Principal,
     /// Optional narrowly-scoped principal (audit F-01) that may ONLY call
-    /// `set_manual_collateral_price` — nothing else. Granted/rotated by the
-    /// developer via `set_price_pusher_principal`. Lets the always-online CFX
-    /// price monitor hold a key whose blast radius is "set chain prices", not the
-    /// full developer key. `None` (the default) means no pusher is authorized and
-    /// only the developer can set prices. `#[serde(default)]` lets an old ciborium
-    /// snapshot decode cleanly to `None` (State is ciborium/serde-encoded).
+    /// `set_manual_collateral_price`, and ONLY for the `(chain, symbol)` pairs in
+    /// `price_pusher_allowed` — nothing else. Granted/rotated by the developer via
+    /// `set_price_pusher_principal`. Lets the always-online CFX price monitor hold
+    /// a key whose blast radius is "set the CFX price", not the full developer key
+    /// and not every foreign collateral's price. `None` (the default) means no
+    /// pusher is authorized and only the developer can set prices. `#[serde(default)]`
+    /// lets an old ciborium snapshot decode cleanly to `None`.
     #[serde(default)]
     pub price_pusher_principal: Option<Principal>,
+    /// The `(chain_id, symbol)` pairs the price-pusher principal is allowed to
+    /// set. Empty (the default) means the pusher can set NOTHING (fail-closed) —
+    /// the developer grants scope explicitly. The developer is never constrained
+    /// by this set. `#[serde(default)]` for old-snapshot decode safety.
+    #[serde(default)]
+    pub price_pusher_allowed: std::collections::BTreeSet<(u32, String)>,
     pub next_available_vault_id: u64,
     pub total_collateral_ratio: Ratio,
     pub current_base_rate: Ratio,
@@ -1517,6 +1524,7 @@ impl Default for State {
             fee: Ratio::from(Decimal::ZERO),
             developer_principal: Principal::anonymous(),
             price_pusher_principal: None,
+            price_pusher_allowed: std::collections::BTreeSet::new(),
             next_available_vault_id: 1,
             total_collateral_ratio: Ratio::from(Decimal::MAX),
             current_base_rate: Ratio::from(Decimal::ZERO),
@@ -1646,6 +1654,7 @@ impl From<InitArg> for State {
             fee: Ratio::from(fee),
             developer_principal: args.developer_principal,
             price_pusher_principal: None,
+            price_pusher_allowed: std::collections::BTreeSet::new(),
             principal_to_vault_ids: BTreeMap::new(),
             pending_redemption_transfer: BTreeMap::new(),
             pending_refunds: BTreeMap::new(),
@@ -1874,12 +1883,19 @@ impl From<InitArg> for State {
 
 impl State {
 
-    /// True iff `caller` is authorized to call `set_manual_collateral_price`:
-    /// either the developer, or the optional narrowly-scoped price-pusher
-    /// principal (audit F-01). Every other developer-gated endpoint stays
-    /// developer-only; this is the ONLY capability the pusher unlocks.
-    pub fn is_price_pusher_authorized(&self, caller: Principal) -> bool {
-        self.developer_principal == caller || self.price_pusher_principal == Some(caller)
+    /// True iff `caller` may set the manual price for `(chain_id, symbol)`:
+    /// the developer may set any pair; the narrowly-scoped price-pusher principal
+    /// (audit F-01) may set ONLY the pairs in `price_pusher_allowed`. Every other
+    /// developer-gated endpoint stays developer-only; setting these allow-listed
+    /// prices is the ONLY capability the pusher unlocks.
+    pub fn is_price_setter_authorized(&self, caller: Principal, chain_id: u32, symbol: &str) -> bool {
+        if self.developer_principal == caller {
+            return true;
+        }
+        self.price_pusher_principal == Some(caller)
+            && self
+                .price_pusher_allowed
+                .contains(&(chain_id, symbol.to_string()))
     }
 
     // Rate limiting functions for close_vault operations
@@ -6702,30 +6718,45 @@ mod tests {
     }
 
     #[test]
-    fn price_pusher_auth_allows_developer_and_pusher_only() {
+    fn price_setter_auth_allows_developer_anywhere_and_pusher_only_in_scope() {
         let dev = Principal::from_slice(&[1; 29]);
         let pusher = Principal::from_slice(&[2; 29]);
         let stranger = Principal::from_slice(&[3; 29]);
         let mut state = test_state();
         state.developer_principal = dev;
         state.price_pusher_principal = Some(pusher);
-        assert!(state.is_price_pusher_authorized(dev), "developer authorized");
-        assert!(state.is_price_pusher_authorized(pusher), "pusher authorized");
-        assert!(!state.is_price_pusher_authorized(stranger), "stranger rejected");
+        state.price_pusher_allowed.insert((1030, "CFX".to_string()));
+        // developer may set ANY pair
+        assert!(state.is_price_setter_authorized(dev, 1030, "CFX"));
+        assert!(state.is_price_setter_authorized(dev, 71, "MON"));
+        // pusher may set ONLY the allow-listed pair
+        assert!(state.is_price_setter_authorized(pusher, 1030, "CFX"));
+        assert!(!state.is_price_setter_authorized(pusher, 1030, "MON"), "out-of-scope symbol rejected");
+        assert!(!state.is_price_setter_authorized(pusher, 71, "CFX"), "out-of-scope chain rejected");
+        // stranger never
+        assert!(!state.is_price_setter_authorized(stranger, 1030, "CFX"));
     }
 
     #[test]
-    fn price_pusher_auth_developer_only_when_no_pusher_set() {
+    fn price_setter_auth_developer_only_when_no_pusher_set() {
         let dev = Principal::from_slice(&[1; 29]);
         let stranger = Principal::from_slice(&[3; 29]);
         let mut state = test_state();
         state.developer_principal = dev;
         state.price_pusher_principal = None;
-        assert!(state.is_price_pusher_authorized(dev), "developer authorized");
-        assert!(
-            !state.is_price_pusher_authorized(stranger),
-            "no pusher set -> stranger rejected"
-        );
+        assert!(state.is_price_setter_authorized(dev, 1030, "CFX"));
+        assert!(!state.is_price_setter_authorized(stranger, 1030, "CFX"));
+    }
+
+    #[test]
+    fn price_setter_auth_pusher_with_empty_scope_can_set_nothing() {
+        let dev = Principal::from_slice(&[1; 29]);
+        let pusher = Principal::from_slice(&[2; 29]);
+        let mut state = test_state();
+        state.developer_principal = dev;
+        state.price_pusher_principal = Some(pusher);
+        // allow-list empty -> pusher is fail-closed even though it is the registered pusher
+        assert!(!state.is_price_setter_authorized(pusher, 1030, "CFX"));
     }
 
     #[test]
@@ -6735,18 +6766,20 @@ mod tests {
         // to `None` (no accidental price-setter grant on upgrade).
         let mut state = test_state();
         state.price_pusher_principal = Some(Principal::from_slice(&[2; 29]));
+        state.price_pusher_allowed.insert((1030, "CFX".to_string()));
         let mut buf = Vec::new();
         ciborium::ser::into_writer(&state, &mut buf).unwrap();
 
         let value: ciborium::Value = ciborium::de::from_reader(buf.as_slice()).unwrap();
         if let ciborium::Value::Map(mut entries) = value {
             entries.retain(|(k, _)| {
-                !matches!(k, ciborium::Value::Text(key) if key == "price_pusher_principal")
+                !matches!(k, ciborium::Value::Text(key) if key == "price_pusher_principal" || key == "price_pusher_allowed")
             });
             let mut modified_buf = Vec::new();
             ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut modified_buf).unwrap();
             let restored: State = ciborium::de::from_reader(modified_buf.as_slice()).unwrap();
             assert_eq!(restored.price_pusher_principal, None);
+            assert!(restored.price_pusher_allowed.is_empty(), "allow-list defaults empty");
         } else {
             panic!("expected CBOR map");
         }

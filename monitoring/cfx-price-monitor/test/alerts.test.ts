@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
-import { createAlertSink, formatAlertLine, formatSlackPayload } from "../src/alerts.js";
+import { createAlertSink, createDedupingSink, formatAlertLine, formatSlackPayload } from "../src/alerts.js";
+import type { AlertSink } from "../src/alerts.js";
 import type { Alert } from "../src/types.js";
 
 const alert: Alert = {
@@ -76,5 +77,40 @@ describe("createAlertSink", () => {
     // one line for the alert + one fallback line for the webhook failure
     expect(writeLine).toHaveBeenCalledTimes(2);
     expect(writeLine.mock.calls[1]![0]).toMatch(/webhook|slack/i);
+  });
+});
+
+describe("createDedupingSink", () => {
+  function counting(): AlertSink & { count: number } {
+    const s = { count: 0, async emit() { s.count += 1; } };
+    return s;
+  }
+
+  it("suppresses repeats of the same key within the cooldown", async () => {
+    const inner = counting();
+    let t = 0;
+    const sink = createDedupingSink(inner, 1000, () => t);
+    await sink.emit(alert);
+    await sink.emit(alert);
+    expect(inner.count).toBe(1);
+  });
+
+  it("re-alerts the same key after the cooldown elapses", async () => {
+    const inner = counting();
+    let t = 0;
+    const sink = createDedupingSink(inner, 1000, () => t);
+    await sink.emit(alert);
+    t = 1500;
+    await sink.emit(alert);
+    expect(inner.count).toBe(2);
+  });
+
+  it("treats different codes and different vaults as independent streams", async () => {
+    const inner = counting();
+    const sink = createDedupingSink(inner, 1000, () => 0);
+    await sink.emit({ ...alert, context: { vaultId: "3" } });
+    await sink.emit({ ...alert, context: { vaultId: "4" } }); // different vault
+    await sink.emit({ ...alert, code: "insufficient_sources", context: {} }); // different code
+    expect(inner.count).toBe(3);
   });
 });

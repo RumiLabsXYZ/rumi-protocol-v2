@@ -5,6 +5,14 @@ export interface AggregateConfig {
   minSources: number;
   /** Reject a quote that deviates more than this % from the provisional median. */
   outlierPct: number;
+  /**
+   * Refuse the whole aggregate if the surviving sources' spread (max-min as a %
+   * of the median) exceeds this. With only 2 sources the per-source outlier test
+   * has no real majority to anchor on, so this absolute spread gate stops one
+   * divergent source from quietly dragging the pushed price. There is no
+   * liquidation backstop, so we'd rather skip a write than push a soft price.
+   */
+  maxSpreadPct: number;
 }
 
 /** Plain median of a non-empty numeric array (average of the two middles for even counts). */
@@ -62,12 +70,19 @@ export function aggregate(quotes: PriceQuote[], cfg: AggregateConfig): Aggregate
     };
   }
 
+  const prices = survivors.map((qt) => qt.priceUsd);
+  const medianUsd = median(prices);
+  const spreadPct = ((Math.max(...prices) - Math.min(...prices)) / medianUsd) * 100;
+  if (spreadPct > cfg.maxSpreadPct) {
+    return {
+      ok: false,
+      reason: `source spread ${spreadPct.toFixed(2)}% > ${cfg.maxSpreadPct}% — sources disagree too much to trust`,
+      rejected: rejects,
+    };
+  }
+
   return {
     ok: true,
-    result: {
-      medianUsd: median(survivors.map((qt) => qt.priceUsd)),
-      used: survivors.map((qt) => qt.source),
-      rejected: rejects,
-    },
+    result: { medianUsd, used: survivors.map((qt) => qt.source), rejected: rejects },
   };
 }
