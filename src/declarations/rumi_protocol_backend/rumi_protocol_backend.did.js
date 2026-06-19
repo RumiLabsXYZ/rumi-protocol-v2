@@ -95,6 +95,7 @@ export const idlFactory = ({ IDL }) => {
     'AlreadyProcessing' : IDL.Null,
     'NotLowestCR' : IDL.Null,
     'SupplyInvariantHalted' : IDL.Null,
+    'EvmAuth' : IDL.Text,
     'AnonymousCallerNotAllowed' : IDL.Null,
     'ChainAdmin' : IDL.Text,
     'AmountTooLow' : IDL.Record({ 'minimum_amount' : IDL.Nat64 }),
@@ -110,6 +111,17 @@ export const idlFactory = ({ IDL }) => {
     'correct_borrowed_e8s' : IDL.Nat64,
   });
   const Result_2 = IDL.Variant({ 'Ok' : IDL.Text, 'Err' : ProtocolError });
+  const VaultIntent = IDL.Record({
+    'action' : IDL.Nat8,
+    'owner' : IDL.Text,
+    'recipient' : IDL.Text,
+    'collateral_wei' : IDL.Nat,
+    'vault_id' : IDL.Nat64,
+    'chain_id' : IDL.Nat64,
+    'nonce' : IDL.Nat64,
+    'deadline_secs' : IDL.Nat64,
+    'debt_e8s' : IDL.Nat,
+  });
   const SuccessWithFee = IDL.Record({
     'block_index' : IDL.Nat64,
     'debt_liquidated_e8s' : IDL.Opt(IDL.Nat64),
@@ -170,6 +182,7 @@ export const idlFactory = ({ IDL }) => {
   });
   const ChainVaultV1 = IDL.Record({
     'status' : ChainVaultStatus,
+    'owner_evm' : IDL.Opt(IDL.Text),
     'owner' : IDL.Principal,
     'pending_mint_e8s' : IDL.Nat,
     'pending_interest_mint_e8s' : IDL.Nat,
@@ -1108,6 +1121,11 @@ export const idlFactory = ({ IDL }) => {
       ),
     'admin_resolve_stuck_claim' : IDL.Func([IDL.Nat64, IDL.Bool], [Result], []),
     'admin_sweep_to_treasury' : IDL.Func([IDL.Text], [Result_1], []),
+    'borrow_chain_vault_evm' : IDL.Func(
+        [VaultIntent, IDL.Vec(IDL.Nat8)],
+        [Result],
+        [],
+      ),
     'borrow_from_vault' : IDL.Func([VaultArg], [Result_3], []),
     'bot_cancel_liquidation' : IDL.Func([IDL.Nat64], [Result], []),
     'bot_claim_liquidation' : IDL.Func([IDL.Nat64], [Result_4], []),
@@ -1127,6 +1145,11 @@ export const idlFactory = ({ IDL }) => {
         [],
       ),
     'close_chain_vault' : IDL.Func([IDL.Nat64, IDL.Text], [Result], []),
+    'close_chain_vault_evm' : IDL.Func(
+        [VaultIntent, IDL.Vec(IDL.Nat8)],
+        [Result],
+        [],
+      ),
     'close_solana_vault' : IDL.Func([IDL.Nat64, IDL.Text], [Result], []),
     'close_vault' : IDL.Func([IDL.Nat64], [Result_5], []),
     'coingecko_transform' : IDL.Func(
@@ -1163,6 +1186,7 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Opt(ChainVaultV1)],
         ['query'],
       ),
+    'get_chains_ecdsa_key_name' : IDL.Func([], [IDL.Text], ['query']),
     'get_ckstable_repay_fee' : IDL.Func([], [IDL.Float64], ['query']),
     'get_collateral_config' : IDL.Func(
         [IDL.Principal],
@@ -1356,6 +1380,11 @@ export const idlFactory = ({ IDL }) => {
         [Result_1],
         [],
       ),
+    'open_chain_vault_evm' : IDL.Func(
+        [VaultIntent, IDL.Vec(IDL.Nat8)],
+        [Result_1],
+        [],
+      ),
     'open_solana_vault' : IDL.Func(
         [IDL.Nat, IDL.Nat, IDL.Text],
         [Result_9],
@@ -1437,6 +1466,7 @@ export const idlFactory = ({ IDL }) => {
         [Result],
         [],
       ),
+    'set_chains_ecdsa_key_name' : IDL.Func([IDL.Text], [Result], []),
     'set_check_vaults_alert_band_bps' : IDL.Func([IDL.Nat64], [Result], []),
     'set_check_vaults_full_sweep_every_n_ticks' : IDL.Func(
         [IDL.Nat64],
@@ -1626,6 +1656,11 @@ export const idlFactory = ({ IDL }) => {
     'withdraw_and_close_vault' : IDL.Func([IDL.Nat64], [Result_5], []),
     'withdraw_chain_collateral' : IDL.Func(
         [IDL.Nat64, IDL.Nat, IDL.Text],
+        [Result],
+        [],
+      ),
+    'withdraw_chain_collateral_evm' : IDL.Func(
+        [VaultIntent, IDL.Vec(IDL.Nat8)],
         [Result],
         [],
       ),

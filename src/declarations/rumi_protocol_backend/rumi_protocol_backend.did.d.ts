@@ -60,6 +60,7 @@ export type ChainVaultStatus = { 'MintPending' : null } |
   { 'AwaitingDeposit' : null };
 export interface ChainVaultV1 {
   'status' : ChainVaultStatus,
+  'owner_evm' : [] | [string],
   'owner' : Principal,
   'pending_mint_e8s' : bigint,
   'pending_interest_mint_e8s' : bigint,
@@ -907,6 +908,7 @@ export type ProtocolError = { 'GenericError' : string } |
   { 'AlreadyProcessing' : null } |
   { 'NotLowestCR' : null } |
   { 'SupplyInvariantHalted' : null } |
+  { 'EvmAuth' : string } |
   { 'AnonymousCallerNotAllowed' : null } |
   { 'ChainAdmin' : string } |
   { 'AmountTooLow' : { 'minimum_amount' : bigint } } |
@@ -1133,6 +1135,17 @@ export interface VaultDebtCorrection {
   'vault_id' : bigint,
   'correct_borrowed_e8s' : bigint,
 }
+export interface VaultIntent {
+  'action' : number,
+  'owner' : string,
+  'recipient' : string,
+  'collateral_wei' : bigint,
+  'vault_id' : bigint,
+  'chain_id' : bigint,
+  'nonce' : bigint,
+  'deadline_secs' : bigint,
+  'debt_e8s' : bigint,
+}
 export interface VaultRedemption {
   'icusd_redeemed_e8s' : bigint,
   'vault_id' : bigint,
@@ -1163,6 +1176,10 @@ export interface _SERVICE {
   'admin_mint_icusd' : ActorMethod<[bigint, Principal, string], Result_1>,
   'admin_resolve_stuck_claim' : ActorMethod<[bigint, boolean], Result>,
   'admin_sweep_to_treasury' : ActorMethod<[string], Result_1>,
+  'borrow_chain_vault_evm' : ActorMethod<
+    [VaultIntent, Uint8Array | number[]],
+    Result
+  >,
   'borrow_from_vault' : ActorMethod<[VaultArg], Result_3>,
   'bot_cancel_liquidation' : ActorMethod<[bigint], Result>,
   'bot_claim_liquidation' : ActorMethod<[bigint], Result_4>,
@@ -1174,6 +1191,10 @@ export interface _SERVICE {
   'clear_reorg_halt' : ActorMethod<[number], Result>,
   'clear_stuck_operations' : ActorMethod<[[] | [Principal]], Result_1>,
   'close_chain_vault' : ActorMethod<[bigint, string], Result>,
+  'close_chain_vault_evm' : ActorMethod<
+    [VaultIntent, Uint8Array | number[]],
+    Result
+  >,
   'close_solana_vault' : ActorMethod<[bigint, string], Result>,
   'close_vault' : ActorMethod<[bigint], Result_5>,
   'coingecko_transform' : ActorMethod<[TransformArgs], HttpResponse>,
@@ -1194,6 +1215,7 @@ export interface _SERVICE {
   'get_chain_interest_treasury_address' : ActorMethod<[number], Result_2>,
   'get_chain_settlement_address' : ActorMethod<[number], Result_2>,
   'get_chain_vault' : ActorMethod<[bigint], [] | [ChainVaultV1]>,
+  'get_chains_ecdsa_key_name' : ActorMethod<[], string>,
   'get_ckstable_repay_fee' : ActorMethod<[], number>,
   'get_collateral_config' : ActorMethod<[Principal], [] | [CollateralConfig]>,
   'get_collateral_totals' : ActorMethod<[], Array<CollateralTotals>>,
@@ -1300,6 +1322,10 @@ export interface _SERVICE {
   >,
   'list_chain_vaults' : ActorMethod<[number], Array<ChainVaultV1>>,
   'open_chain_vault' : ActorMethod<[number, bigint, bigint, string], Result_1>,
+  'open_chain_vault_evm' : ActorMethod<
+    [VaultIntent, Uint8Array | number[]],
+    Result_1
+  >,
   'open_solana_vault' : ActorMethod<[bigint, bigint, string], Result_9>,
   'open_vault' : ActorMethod<[bigint, [] | [Principal]], Result_10>,
   'open_vault_and_borrow' : ActorMethod<
@@ -1339,6 +1365,7 @@ export interface _SERVICE {
   'set_chain_contract' : ActorMethod<[number, string], Result>,
   'set_chain_interest_min_realize_e8s' : ActorMethod<[bigint], Result>,
   'set_chain_interest_tick_interval_secs' : ActorMethod<[bigint], Result>,
+  'set_chains_ecdsa_key_name' : ActorMethod<[string], Result>,
   'set_check_vaults_alert_band_bps' : ActorMethod<[bigint], Result>,
   'set_check_vaults_full_sweep_every_n_ticks' : ActorMethod<[bigint], Result>,
   'set_ckstable_repay_fee' : ActorMethod<[number], Result>,
@@ -1445,6 +1472,10 @@ export interface _SERVICE {
   >,
   'withdraw_and_close_vault' : ActorMethod<[bigint], Result_5>,
   'withdraw_chain_collateral' : ActorMethod<[bigint, bigint, string], Result>,
+  'withdraw_chain_collateral_evm' : ActorMethod<
+    [VaultIntent, Uint8Array | number[]],
+    Result
+  >,
   'withdraw_collateral' : ActorMethod<[bigint], Result_1>,
   'withdraw_liquidity' : ActorMethod<[bigint], Result_1>,
   'withdraw_partial_collateral' : ActorMethod<[VaultArg], Result_1>,

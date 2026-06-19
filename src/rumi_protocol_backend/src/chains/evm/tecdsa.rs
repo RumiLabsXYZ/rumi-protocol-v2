@@ -14,7 +14,7 @@ use k256::elliptic_curve::sec1::ToEncodedPoint;
 use k256::PublicKey;
 use sha3::{Digest, Keccak256};
 
-use crate::chains::monad::config::monad_ecdsa_key_name;
+use crate::state::read_state;
 
 /// Derivation path for a per-user collateral custody address.
 /// `[chain_id (LE u32), principal bytes, nonce (LE u64)]`.
@@ -32,7 +32,13 @@ pub fn settlement_derivation_path(chain: ChainId) -> Vec<Vec<u8>> {
 }
 
 fn key_id() -> EcdsaKeyId {
-    EcdsaKeyId { curve: EcdsaCurve::Secp256k1, name: monad_ecdsa_key_name() }
+    // The key name is runtime-configurable (State::chains_ecdsa_key_name): default
+    // `test_key_1` (staging/testnet), `key_1` on a production canister. Only ever
+    // called from async canister paths (derive/sign), so reading State is safe.
+    EcdsaKeyId {
+        curve: EcdsaCurve::Secp256k1,
+        name: read_state(|s| s.chains_ecdsa_key_name.clone()),
+    }
 }
 
 /// Convert a secp256k1 public key (33-byte compressed or 65-byte uncompressed)

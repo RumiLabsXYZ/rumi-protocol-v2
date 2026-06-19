@@ -19,7 +19,7 @@ use ic_cdk::api::management_canister::ecdsa::{
     sign_with_ecdsa, EcdsaCurve, EcdsaKeyId, SignWithEcdsaArgument,
 };
 
-use crate::chains::monad::config::monad_ecdsa_key_name;
+use crate::state::read_state;
 
 // ─── public types ────────────────────────────────────────────────────────────
 
@@ -235,7 +235,12 @@ pub async fn sign_eip1559(
 ) -> Result<String, String> {
     let hash = signing_hash(fields)?;
 
-    let key_id = EcdsaKeyId { curve: EcdsaCurve::Secp256k1, name: monad_ecdsa_key_name() };
+    // Runtime-configurable key (State::chains_ecdsa_key_name): test_key_1 default,
+    // key_1 on production. sign_eip1559 is async/canister-only, so read_state is safe.
+    let key_id = EcdsaKeyId {
+        curve: EcdsaCurve::Secp256k1,
+        name: read_state(|s| s.chains_ecdsa_key_name.clone()),
+    };
     let arg = SignWithEcdsaArgument {
         message_hash: hash.to_vec(),
         derivation_path,

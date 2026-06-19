@@ -55,6 +55,7 @@ type ChainVaultStatus = variant {
 };
 type ChainVaultV1 = record {
   status : ChainVaultStatus;
+  owner_evm : opt text;
   owner : principal;
   pending_mint_e8s : nat;
   pending_interest_mint_e8s : nat;
@@ -66,7 +67,6 @@ type ChainVaultV1 = record {
   collateral_chain : nat32;
   mint_recipient : text;
   debt_e8s : nat;
-  owner_evm : opt text;
 };
 type CollateralConfig = record {
   last_redemption_time : nat64;
@@ -747,27 +747,12 @@ type ProtocolError = variant {
   AlreadyProcessing;
   NotLowestCR;
   SupplyInvariantHalted;
+  EvmAuth : text;
   AnonymousCallerNotAllowed;
   ChainAdmin : text;
   AmountTooLow : record { minimum_amount : nat64 };
   TransferFromError : record { TransferFromError; nat64 };
   CallerNotOwner;
-  EvmAuth : text;
-};
-
-// M2: an EIP-712 typed-data intent the user signs in their EVM wallet to drive a
-// self-serve foreign-chain vault op. `signature` is the 65-byte (r||s||v) sig.
-// `action`: 0 = Open, 1 = Borrow, 2 = WithdrawCollateral, 3 = Close.
-type VaultIntent = record {
-  action : nat8;
-  chain_id : nat64;
-  owner : text;
-  vault_id : nat64;
-  collateral_wei : nat;
-  debt_e8s : nat;
-  recipient : text;
-  nonce : nat64;
-  deadline_secs : nat64;
 };
 type ProtocolSnapshot = record {
   total_debt : nat64;
@@ -963,6 +948,17 @@ type VaultDebtCorrection = record {
   vault_id : nat64;
   correct_borrowed_e8s : nat64;
 };
+type VaultIntent = record {
+  action : nat8;
+  owner : text;
+  recipient : text;
+  collateral_wei : nat;
+  vault_id : nat64;
+  chain_id : nat64;
+  nonce : nat64;
+  deadline_secs : nat64;
+  debt_e8s : nat;
+};
 type VaultRedemption = record {
   icusd_redeemed_e8s : nat64;
   vault_id : nat64;
@@ -983,6 +979,7 @@ service : (ProtocolArg) -> {
   admin_mint_icusd : (nat64, principal, text) -> (Result_1);
   admin_resolve_stuck_claim : (nat64, bool) -> (Result);
   admin_sweep_to_treasury : (text) -> (Result_1);
+  borrow_chain_vault_evm : (VaultIntent, blob) -> (Result);
   borrow_from_vault : (VaultArg) -> (Result_3);
   bot_cancel_liquidation : (nat64) -> (Result);
   bot_claim_liquidation : (nat64) -> (Result_4);
@@ -994,6 +991,7 @@ service : (ProtocolArg) -> {
   clear_reorg_halt : (nat32) -> (Result);
   clear_stuck_operations : (opt principal) -> (Result_1);
   close_chain_vault : (nat64, text) -> (Result);
+  close_chain_vault_evm : (VaultIntent, blob) -> (Result);
   close_solana_vault : (nat64, text) -> (Result);
   close_vault : (nat64) -> (Result_5);
   coingecko_transform : (TransformArgs) -> (HttpResponse) query;
@@ -1014,6 +1012,7 @@ service : (ProtocolArg) -> {
   get_chain_interest_treasury_address : (nat32) -> (Result_2);
   get_chain_settlement_address : (nat32) -> (Result_2);
   get_chain_vault : (nat64) -> (opt ChainVaultV1) query;
+  get_chains_ecdsa_key_name : () -> (text) query;
   get_ckstable_repay_fee : () -> (float64) query;
   get_collateral_config : (principal) -> (opt CollateralConfig) query;
   get_collateral_totals : () -> (vec CollateralTotals) query;
@@ -1097,13 +1096,7 @@ service : (ProtocolArg) -> {
   liquidate_vault_partial_with_stable : (VaultArgWithToken) -> (Result_3);
   list_chain_vaults : (nat32) -> (vec ChainVaultV1) query;
   open_chain_vault : (nat32, nat, nat, text) -> (Result_1);
-  // M2 EVM-native self-serve: authority is the EIP-712 signature, NOT the IC
-  // caller (anonymous ingress is accepted). The vault is owned by a synthetic
-  // principal derived from the recovered EVM signer. `blob` is the 65-byte sig.
   open_chain_vault_evm : (VaultIntent, blob) -> (Result_1);
-  borrow_chain_vault_evm : (VaultIntent, blob) -> (Result);
-  withdraw_chain_collateral_evm : (VaultIntent, blob) -> (Result);
-  close_chain_vault_evm : (VaultIntent, blob) -> (Result);
   open_solana_vault : (nat, nat, text) -> (Result_9);
   open_vault : (nat64, opt principal) -> (Result_10);
   open_vault_and_borrow : (nat64, nat64, opt principal) -> (Result_10);
@@ -1137,6 +1130,7 @@ service : (ProtocolArg) -> {
   set_chain_contract : (nat32, text) -> (Result);
   set_chain_interest_min_realize_e8s : (nat) -> (Result);
   set_chain_interest_tick_interval_secs : (nat64) -> (Result);
+  set_chains_ecdsa_key_name : (text) -> (Result);
   set_check_vaults_alert_band_bps : (nat64) -> (Result);
   set_check_vaults_full_sweep_every_n_ticks : (nat64) -> (Result);
   set_ckstable_repay_fee : (float64) -> (Result);
@@ -1219,6 +1213,7 @@ service : (ProtocolArg) -> {
   update_collateral_config : (principal, CollateralConfig) -> (Result);
   withdraw_and_close_vault : (nat64) -> (Result_5);
   withdraw_chain_collateral : (nat64, nat, text) -> (Result);
+  withdraw_chain_collateral_evm : (VaultIntent, blob) -> (Result);
   withdraw_collateral : (nat64) -> (Result_1);
   withdraw_liquidity : (nat64) -> (Result_1);
   withdraw_partial_collateral : (VaultArg) -> (Result_1);

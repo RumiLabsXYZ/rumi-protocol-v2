@@ -5863,6 +5863,51 @@ async fn set_chain_interest_min_realize_e8s(e8s: u128) -> Result<(), ProtocolErr
     Ok(())
 }
 
+/// Pure validation for `set_chains_ecdsa_key_name`: the name must be a supported
+/// IC threshold key (`test_key_1` or `key_1`), and the key may change ONLY while
+/// no chain vault exists — switching the key re-derives every per-vault custody
+/// address, which would orphan already-deposited collateral.
+fn validate_ecdsa_key_change(name: &str, has_chain_vaults: bool) -> Result<(), ProtocolError> {
+    if name != "test_key_1" && name != "key_1" {
+        return Err(ProtocolError::ChainAdmin(format!(
+            "unsupported ecdsa key name '{name}' (expected test_key_1 or key_1)"
+        )));
+    }
+    if has_chain_vaults {
+        return Err(ProtocolError::ChainAdmin(
+            "cannot change the chains ECDSA key while chain vaults exist (it re-derives + orphans every per-vault custody address)".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Set the production tECDSA key name for the EVM chains rail (developer-gated).
+/// Intended for a FRESH production canister: set `key_1` BEFORE registering any
+/// chain, so all custody/settlement/treasury addresses derive from the
+/// production threshold key. Rejected once any chain vault exists (orphan guard).
+/// kvg63 staging keeps the default `test_key_1`.
+#[candid_method(update)]
+#[update]
+fn set_chains_ecdsa_key_name(name: String) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let has_vaults = read_state(|s| !s.multi_chain.chain_vaults.is_empty());
+    validate_ecdsa_key_change(&name, has_vaults)?;
+    mutate_state(|s| s.chains_ecdsa_key_name = name.clone());
+    log!(INFO, "[set_chains_ecdsa_key_name] chains EVM tECDSA key set to {}", name);
+    Ok(())
+}
+
+/// The current chains EVM tECDSA key name (`test_key_1` | `key_1`). Public read
+/// (non-sensitive config; the derived addresses are already public).
+#[candid_method(query)]
+#[query]
+fn get_chains_ecdsa_key_name() -> String {
+    read_state(|s| s.chains_ecdsa_key_name.clone())
+}
+
 /// Task 12: manually trigger one interest harvest for `chain` (developer-gated),
 /// for testing/ops independent of the off-by-default timer. Resolves the
 /// interest-treasury address + APR, enqueues an `InterestMint` for every
@@ -8121,6 +8166,19 @@ mod chain_vault_param_tests {
         assert_eq!(evm_vault_params(ChainId(10143)).unwrap(), ("MON", 13_000)); // Monad preserved
         assert_eq!(evm_vault_params(ChainId(71)).unwrap(), ("CFX", 13_300)); // Conflux = ICP mirror
         assert!(evm_vault_params(ChainId(999)).is_err());
+    }
+
+    #[test]
+    fn ecdsa_key_change_rules() {
+        use super::validate_ecdsa_key_change;
+        // Both supported key names are accepted when no vault exists.
+        assert!(validate_ecdsa_key_change("key_1", false).is_ok());
+        assert!(validate_ecdsa_key_change("test_key_1", false).is_ok());
+        // An unknown key name is rejected (typo/foot-gun guard).
+        assert!(validate_ecdsa_key_change("bogus_key", false).is_err());
+        // Changing the key while chain vaults exist is blocked (would re-derive +
+        // orphan every custody address).
+        assert!(validate_ecdsa_key_change("key_1", true).is_err());
     }
 }
 
