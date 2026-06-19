@@ -3,8 +3,8 @@
   import { backend, errText, type ChainVault } from "./backend";
   import { signIntent, toCandidIntent, type VaultIntentInput } from "./eip712";
   import {
-    connectMetaMask, connectDevKey, hasMetaMask, sendDeposit, icusdBalance, cfxBalance,
-    fmtCfx, fmtIcusd, parseEther, type Wallet,
+    connectMetaMask, connectDevKey, hasMetaMask, sendDeposit, burnIcusd, icusdBalance, cfxBalance,
+    fmtCfx, fmtIcusd, parseEther, toE8s, txUrl, type Wallet,
   } from "./evm";
   import VaultCard from "./VaultCard.svelte";
 
@@ -34,7 +34,7 @@
     return s === "AwaitingDeposit" || s === "MintPending" || s === "Closing";
   }));
 
-  const debtE8s = $derived(BigInt(Math.round((parseFloat(debtInput) || 0) * 1e8)));
+  const debtE8s = $derived(toE8s(debtInput));
   const requiredCfxWei = $derived.by(() => {
     const d = parseFloat(debtInput) || 0;
     const p = parseFloat(cfxPrice) || 0;
@@ -86,7 +86,10 @@
       if ("Ok" in res) { nonce += 1n; return res; }
       const msg = errText(res.Err);
       const m = msg.match(/expected (\d+)/);
-      if (m && attempt === 0) { nonce = BigInt(m[1]); continue; } // sync + retry once
+      if (m) {
+        nonce = BigInt(m[1]); // keep the local nonce fresh for the next action
+        if (attempt === 0) continue; // retry once with the corrected nonce
+      }
       return res;
     }
     return { Err: { GenericError: "nonce sync failed" } };
@@ -113,13 +116,11 @@
     try {
       if (kind === "deposit") {
         busy = "Confirm the CFX deposit in your wallet…";
-        const { txUrl } = await import("./evm");
         const hash = await sendDeposit(w, vault.custody_address as `0x${string}`, vault.collateral_amount_e18);
         ok = `Deposit sent (${hash.slice(0, 12)}…) — watch the status flip to Open.`;
         console.log("deposit tx", txUrl(hash));
       } else if (kind === "repay") {
         busy = "Confirm the on-chain burn in your wallet…";
-        const { burnIcusd } = await import("./evm");
         const amt = amountE8s ?? vault.debt_e8s;
         await burnIcusd(w, amt, vault.vault_id);
         ok = `Repaid ${fmtIcusd(amt)} icUSD on-chain — the observer will decrement the vault debt.`;

@@ -93,6 +93,8 @@ export type ChainVault = {
     | { Closed: null };
   opened_at_ns: bigint;
   owner_evm: [] | [string];
+  last_interest_accrual_ns: bigint;
+  pending_interest_mint_e8s: bigint;
 };
 
 type Res<T> = { Ok: T } | { Err: Record<string, unknown> };

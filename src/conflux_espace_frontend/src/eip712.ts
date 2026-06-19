@@ -3,7 +3,7 @@
 // `eip712.test.ts` golden-vector test pins this against the backend's own vector.
 
 import { hashTypedData, hexToBytes, type Account, type TypedDataDomain } from "viem";
-import { CHAIN_ID, EIP712_DOMAIN, ICUSD_CONTRACT } from "./config";
+import { CHAIN_ID, EIP712_DOMAIN } from "./config";
 
 /** Inputs a caller provides; `recipient` is always forced to `owner` (M2 rule). */
 export interface VaultIntentInput {
@@ -34,20 +34,17 @@ export const VAULT_INTENT_TYPES = {
   ],
 } as const;
 
+// `EIP712_DOMAIN` is the single source of truth for name/version/chainId/
+// verifyingContract; only the parity test overrides verifyingContract.
 function domainFor(verifyingContract: `0x${string}`): TypedDataDomain {
-  return {
-    name: EIP712_DOMAIN.name,
-    version: EIP712_DOMAIN.version,
-    chainId: CHAIN_ID,
-    verifyingContract,
-  };
+  return { ...EIP712_DOMAIN, verifyingContract };
 }
 
 /** The full typed-data object viem signs/hashes. `verifyingContract` defaults to
  *  the live IcUSD; the parity test overrides it to reproduce the backend vector. */
 export function typedData(
   i: VaultIntentInput,
-  verifyingContract: `0x${string}` = ICUSD_CONTRACT
+  verifyingContract: `0x${string}` = EIP712_DOMAIN.verifyingContract
 ) {
   return {
     domain: domainFor(verifyingContract),

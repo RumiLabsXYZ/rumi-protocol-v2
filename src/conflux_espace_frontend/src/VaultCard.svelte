@@ -1,6 +1,6 @@
 <script lang="ts">
   import { statusName, type ChainVault } from "./backend";
-  import { fmtCfx, fmtIcusd, parseEther } from "./evm";
+  import { fmtCfx, fmtIcusd, toE8s, toWei } from "./evm";
 
   let { vault, busy, onAction }: {
     vault: ChainVault;
@@ -14,8 +14,6 @@
   let borrowAmt = $state("0.1");
   let repayAmt = $state("");
   let withdrawAmt = $state("");
-
-  const toE8s = (s: string) => BigInt(Math.round((parseFloat(s) || 0) * 1e8));
 
   function copy() { navigator.clipboard?.writeText(custody); }
 </script>
@@ -53,14 +51,14 @@
       <label for="borrow-{vault.vault_id}">Borrow more icUSD</label>
       <div class="row">
         <input id="borrow-{vault.vault_id}" type="number" min="0" step="0.1" bind:value={borrowAmt} style="flex:1" />
-        <button disabled={!!busy} onclick={() => onAction("borrow", vault, toE8s(borrowAmt))}>Borrow</button>
+        <button disabled={!!busy || toE8s(borrowAmt) === 0n} onclick={() => onAction("borrow", vault, toE8s(borrowAmt))}>Borrow</button>
       </div>
     </div>
     <div class="field">
       <label for="repay-{vault.vault_id}">Repay icUSD (on-chain burn)</label>
       <div class="row">
         <input id="repay-{vault.vault_id}" type="number" min="0" step="0.1" placeholder={fmtIcusd(vault.debt_e8s)} bind:value={repayAmt} style="flex:1" />
-        <button disabled={!!busy || vault.debt_e8s === 0n}
+        <button disabled={!!busy || vault.debt_e8s === 0n || (repayAmt !== "" && toE8s(repayAmt) === 0n)}
           onclick={() => onAction("repay", vault, repayAmt ? toE8s(repayAmt) : vault.debt_e8s)}>Repay</button>
       </div>
     </div>
@@ -68,8 +66,8 @@
       <label for="withdraw-{vault.vault_id}">Withdraw CFX collateral</label>
       <div class="row">
         <input id="withdraw-{vault.vault_id}" type="number" min="0" step="0.1" bind:value={withdrawAmt} style="flex:1" />
-        <button disabled={!!busy || !withdrawAmt}
-          onclick={() => onAction("withdraw", vault, parseEther((parseFloat(withdrawAmt) || 0).toFixed(6)))}>Withdraw</button>
+        <button disabled={!!busy || toWei(withdrawAmt) === 0n}
+          onclick={() => onAction("withdraw", vault, toWei(withdrawAmt))}>Withdraw</button>
       </div>
     </div>
     <div class="row">

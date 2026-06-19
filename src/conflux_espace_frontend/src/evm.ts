@@ -7,6 +7,7 @@ import {
   custom,
   http,
   parseEther,
+  parseUnits,
   formatEther,
   formatUnits,
   type Address,
@@ -106,6 +107,19 @@ export async function icusdBalance(addr: Address): Promise<bigint> {
 
 export async function cfxBalance(addr: Address): Promise<bigint> {
   return publicClient.getBalance({ address: addr });
+}
+
+// Decimal-string -> base units via integer parsing (no float precision loss).
+// Returns 0n for empty/invalid/non-positive input so callers can gate on `=== 0n`.
+export function toE8s(s: string): bigint {
+  const n = parseFloat(s);
+  if (!Number.isFinite(n) || n <= 0) return 0n;
+  try { return parseUnits(s as `${number}`, ICUSD_DECIMALS); } catch { return 0n; }
+}
+export function toWei(s: string): bigint {
+  const n = parseFloat(s);
+  if (!Number.isFinite(n) || n <= 0) return 0n;
+  try { return parseEther(s as `${number}`); } catch { return 0n; }
 }
 
 export const fmtCfx = (wei: bigint) => Number(formatEther(wei)).toLocaleString(undefined, { maximumFractionDigits: 4 });
