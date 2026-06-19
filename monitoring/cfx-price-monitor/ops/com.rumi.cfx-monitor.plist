@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  macOS launchd LaunchAgent for the CFX price monitor (audit F-01 oracle keeper).
+  A laptop is NOT a good host for an oracle keeper (sleep/lid/Wi-Fi drops = a
+  frozen oracle). Prefer an always-on host + the systemd unit. Use this only for
+  a desktop/Mac-mini that stays awake and online.
+
+  Install (replace every __PLACEHOLDER__ first):
+    cp com.rumi.cfx-monitor.plist ~/Library/LaunchAgents/
+    launchctl load  ~/Library/LaunchAgents/com.rumi.cfx-monitor.plist   # start + enable
+    launchctl list | grep com.rumi.cfx-monitor                          # verify
+    tail -f __LOG_DIR__/cfx-monitor.log                                 # watch ticks
+  Stop / disable:
+    launchctl unload ~/Library/LaunchAgents/com.rumi.cfx-monitor.plist
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.rumi.cfx-monitor</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>__APP_DIR__/monitoring/cfx-price-monitor/ops/run.sh</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>NODE_BIN_DIR</key>  <string>__NODE_BIN_DIR__</string>
+    <key>APP_DIR</key>       <string>__APP_DIR__/monitoring/cfx-price-monitor</string>
+    <key>CANISTER_ID</key>   <string>__CANISTER_ID__</string>
+    <key>IDENTITY_PEM</key>  <string>__IDENTITY_PEM__</string>
+    <key>CHAIN_ID</key>      <string>__CHAIN_ID__</string>
+    <key>SYMBOL</key>        <string>CFX</string>
+    <key>COINGECKO_ID</key>  <string>conflux-token</string>
+    <!-- <key>SLACK_WEBHOOK_URL</key> <string>https://hooks.slack.com/services/...</string> -->
+  </dict>
+
+  <!-- start at login + restart if it ever exits (a dead monitor = a frozen oracle) -->
+  <key>RunAtLoad</key> <true/>
+  <key>KeepAlive</key> <true/>
+  <key>ThrottleInterval</key> <integer>10</integer>
+
+  <key>StandardOutPath</key>  <string>__LOG_DIR__/cfx-monitor.log</string>
+  <key>StandardErrorPath</key> <string>__LOG_DIR__/cfx-monitor.err.log</string>
+</dict>
+</plist>
