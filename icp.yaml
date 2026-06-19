@@ -675,6 +675,23 @@ canisters:
           - cp -R src/rumi_homepage/assets/.well-known src/rumi_homepage/dist/.well-known
           - cp -f src/rumi_homepage/assets/favicon.ico src/rumi_homepage/dist/favicon.ico
 
+  # Conflux eSpace self-serve CDP UI (experimental, testnet-only, staging-backend).
+  # Standalone Vite SPA — NOT in the npm root workspaces, so it builds in its own
+  # dir with its own lockfile (`npm ci && npm run build` -> dist/). The single
+  # tracked .ic-assets.json is copied into dist for the CSP (IC boundary + eSpace
+  # testnet RPC) and the SPA index.html fallback. Scoped to mainnet-staging ONLY
+  # (see the env block below) so this experimental rail never rides a production
+  # frontend. Deploy individually: `icp deploy conflux_espace_frontend -e mainnet-staging`.
+  - name: conflux_espace_frontend
+    recipe:
+      type: "@dfinity/asset-canister@v2.1.0"
+      configuration:
+        dir: src/conflux_espace_frontend/dist
+        build:
+          - bash -c 'cd src/conflux_espace_frontend && npm ci && npm run build'
+          - cp src/conflux_espace_frontend/.ic-assets.json src/conflux_espace_frontend/dist/.ic-assets.json
+          - rm -f src/conflux_espace_frontend/dist/.DS_Store
+
 networks:
   - name: local
     mode: managed
@@ -887,6 +904,7 @@ environments:
     network: ic
     canisters:
       - rumi_protocol_backend
+      - conflux_espace_frontend
     init_args:
       # The staging canister was first installed with the full Init variant during
       # Phase 1a (icusd_ledger_principal = `aaaaa-aa` so any accidental icUSD mint
