@@ -139,6 +139,80 @@ pub fn fresh_chain_price_e8(
     Ok(price_e8)
 }
 
+/// Bot->SP escalation predicate (spec §10, finding #10). A vault escalates when
+/// its bot LiquidationSwap op is terminally failed OR the bot has held it past
+/// `bot_timeout_ns`. The SP consumer (Increment 4) ANDs this with a cleared/
+/// resolvable marker; here it is the pure timing core (tested now, wired in Inc 4).
+pub fn should_escalate_to_sp(
+    bot_pending_since_ns: u64,
+    now_ns: u64,
+    bot_timeout_ns: u64,
+    op_terminally_failed: bool,
+) -> bool {
+    op_terminally_failed || now_ns.saturating_sub(bot_pending_since_ns) >= bot_timeout_ns
+}
+
+/// Clear routing state (`bot_pending_chain_vaults`, `sp_attempted_chain_vaults`)
+/// for any vault on `chain` that recovered above its liquidation threshold or
+/// resolved (Closed / zero-debt), and is no longer mid-liquidation. CR-derivable
+/// so an upgrade mid-episode cannot strand a stale entry (findings #26, #36).
+/// MUST be called UNCONDITIONALLY every detection tick (even quiet ticks). A
+/// missing/stale price is treated as "do not prune on CR" (conservative — keep
+/// the routing record); only resolved vaults are pruned in that case.
+pub fn prune_recovered_chain_routing_state(
+    state: &mut MultiChainState,
+    chain: ChainId,
+    price_symbol: &str,
+    liquidation_threshold_e4: u64,
+    now_ns: u64,
+) {
+    let max_age = state
+        .chain_liquidation_configs
+        .get(&chain)
+        .map(|c| c.max_price_age_ns)
+        .unwrap_or(0);
+    let price_e8 = fresh_chain_price_e8(state, chain, price_symbol, now_ns, max_age);
+    let native_decimals = state
+        .chain_configs
+        .get(&chain)
+        .map(|c| c.chain_native_decimals)
+        .unwrap_or(18);
+    let apr_bps = crate::chains::collateral_config::chain_collateral_config(chain)
+        .map(|c| c.interest_apr_bps)
+        .unwrap_or(0);
+
+    let mut recovered: Vec<u64> = Vec::new();
+    for (&vid, v) in state.chain_vaults.iter() {
+        if v.collateral_chain != chain || v.pending_liquidation.is_some() {
+            continue;
+        }
+        let resolved = matches!(
+            v.status,
+            crate::chains::monad::chain_vault::ChainVaultStatus::Closed
+        ) || v.debt_e8s == 0;
+        let recovered_above = match price_e8 {
+            Ok(p) => {
+                let eff = effective_debt_e8s(
+                    v.debt_e8s,
+                    v.pending_interest_mint_e8s,
+                    apr_bps,
+                    now_ns.saturating_sub(v.last_interest_accrual_ns),
+                );
+                crate::chains::vault::collateral_ratio_e4(v.collateral_amount_native, native_decimals, p, eff)
+                    >= liquidation_threshold_e4
+            }
+            Err(_) => false, // no fresh price -> do not prune on CR
+        };
+        if resolved || recovered_above {
+            recovered.push(vid);
+        }
+    }
+    for vid in recovered {
+        state.bot_pending_chain_vaults.remove(&vid);
+        state.sp_attempted_chain_vaults.remove(&vid);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,5 +341,93 @@ mod tests {
         // exactly at the age ceiling -> OK; one ns past -> Stale.
         assert_eq!(fresh_chain_price_e8(&s, ChainId(71), "CFX", 2_000, 1_000), Ok(15_000_000));
         assert_eq!(fresh_chain_price_e8(&s, ChainId(71), "CFX", 2_001, 1_000), Err(PriceError::Stale));
+    }
+
+    // ─── Task 7: escalation predicate + routing-state prune (findings #10/#26/#36) ───
+    use crate::chains::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
+
+    fn seed_cfg_unchecked(s: &mut MultiChainState) {
+        use crate::chains::liquidation_config::{ChainLiquidationConfigV1, DexKind};
+        s.chain_liquidation_configs.insert(
+            ChainId(71),
+            ChainLiquidationConfigV1 {
+                dex: DexKind::UniswapV2,
+                router: "0xr".into(),
+                factory: "0xf".into(),
+                pair: "0xp".into(),
+                collateral_token: "0xw".into(),
+                settle_stable_token: "0xu".into(),
+                slippage_cap_bps: 250,
+                restore_target_cr_e4: 15_500,
+                enabled: true,
+                max_swap_value_e8s: 2_000 * 100_000_000,
+                max_price_age_ns: 1_800_000_000_000,
+            },
+        );
+    }
+
+    fn insert_vault_liq(s: &mut MultiChainState, vault_id: u64, cfx_units: u128, debt_units: u128, status: ChainVaultStatus) {
+        s.chain_vaults.insert(
+            vault_id,
+            ChainVaultV1 {
+                vault_id,
+                owner: candid::Principal::anonymous(),
+                collateral_chain: ChainId(71),
+                custody_address: "0xc".into(),
+                collateral_amount_native: cfx_units * 1_000_000_000_000_000_000,
+                debt_e8s: debt_units * 100_000_000,
+                mint_recipient: "0xm".into(),
+                pending_mint_e8s: 0,
+                status,
+                opened_at_ns: 0,
+                owner_evm: None,
+                last_interest_accrual_ns: 0,
+                pending_interest_mint_e8s: 0,
+                pending_liquidation: None,
+            },
+        );
+    }
+
+    #[test]
+    fn escalation_predicate_timeout_and_terminal() {
+        // Not timed out, op still live -> no escalation.
+        assert!(!should_escalate_to_sp(1_000, 1_500, 1_000, false));
+        // Timed out -> escalate.
+        assert!(should_escalate_to_sp(1_000, 2_001, 1_000, false));
+        // Op terminally failed -> escalate regardless of timeout.
+        assert!(should_escalate_to_sp(1_000, 1_100, 1_000, true));
+    }
+
+    #[test]
+    fn prune_clears_recovered_and_resolved_vaults() {
+        let mut s = MultiChainState::default();
+        seed_cfg_unchecked(&mut s);
+        s.manual_prices.insert((ChainId(71), "CFX".into()), 15_000_000); // $0.15
+        s.manual_price_set_at_ns.insert((ChainId(71), "CFX".into()), 1_000);
+        // Vault 7 recovered above threshold (1400 CFX @ $0.15 = $210 vs 100 -> 210%).
+        insert_vault_liq(&mut s, 7, 1_400, 100, ChainVaultStatus::Open);
+        // Vault 8 closed (resolved).
+        insert_vault_liq(&mut s, 8, 0, 0, ChainVaultStatus::Closed);
+        s.bot_pending_chain_vaults.insert(7, 10);
+        s.bot_pending_chain_vaults.insert(8, 10);
+        s.sp_attempted_chain_vaults.insert(7);
+
+        prune_recovered_chain_routing_state(&mut s, ChainId(71), "CFX", 13_300, 5_000);
+
+        assert!(!s.bot_pending_chain_vaults.contains_key(&7), "recovered vault cleared");
+        assert!(!s.bot_pending_chain_vaults.contains_key(&8), "resolved vault cleared");
+        assert!(!s.sp_attempted_chain_vaults.contains(&7), "sp-attempted cleared on recovery");
+    }
+
+    #[test]
+    fn prune_keeps_still_liquidatable_marked_vault() {
+        let mut s = MultiChainState::default();
+        seed_cfg_unchecked(&mut s);
+        s.manual_prices.insert((ChainId(71), "CFX".into()), 8_000_000); // $0.08 -> CR 112%
+        s.manual_price_set_at_ns.insert((ChainId(71), "CFX".into()), 1_000);
+        insert_vault_liq(&mut s, 7, 1_400, 100, ChainVaultStatus::Open); // still underwater
+        s.bot_pending_chain_vaults.insert(7, 10);
+        prune_recovered_chain_routing_state(&mut s, ChainId(71), "CFX", 13_300, 5_000);
+        assert!(s.bot_pending_chain_vaults.contains_key(&7), "still-liquidatable vault NOT cleared");
     }
 }
