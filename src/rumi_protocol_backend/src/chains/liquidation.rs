@@ -213,6 +213,97 @@ pub fn prune_recovered_chain_routing_state(
     }
 }
 
+/// Synchronous per-chain liquidation detection (spec §4.5). Runs the routing-
+/// state prune (unconditional, findings #26/#36), then scans Open vaults with
+/// the §4.4 exclusions and routes each `CR < liquidation_threshold_e4` vault to
+/// `begin_liquidation_in_state` (Bot tier), capped at `max_per_tick`. Returns the
+/// number routed. The caller (the observer tick) has already applied the
+/// ReadOnly/halt skips; this is a SINGLE synchronous mutation (no `.await`), so
+/// the marker set in `begin_liquidation_in_state` is the dedup (finding #37) and
+/// routing keys off the marker, never op presence (finding #5).
+pub fn detect_and_route_chain_liquidations_in_state(
+    state: &mut MultiChainState,
+    chain: ChainId,
+    price_symbol: &str,
+    liquidation_threshold_e4: u64,
+    now_ns: u64,
+    max_per_tick: usize,
+) -> usize {
+    // Unconditional prune (findings #26/#36) — even on quiet ticks.
+    prune_recovered_chain_routing_state(state, chain, price_symbol, liquidation_threshold_e4, now_ns);
+
+    // Master gate: a config row that is enabled (spec §9).
+    let enabled = state
+        .chain_liquidation_configs
+        .get(&chain)
+        .map_or(false, |c| c.enabled);
+    if !enabled {
+        return 0;
+    }
+
+    let native_decimals = state
+        .chain_configs
+        .get(&chain)
+        .map(|c| c.chain_native_decimals)
+        .unwrap_or(18);
+    let apr_bps = crate::chains::collateral_config::chain_collateral_config(chain)
+        .map(|c| c.interest_apr_bps)
+        .unwrap_or(0);
+    let max_age = state
+        .chain_liquidation_configs
+        .get(&chain)
+        .map(|c| c.max_price_age_ns)
+        .unwrap_or(0);
+    let price_e8 = match fresh_chain_price_e8(state, chain, price_symbol, now_ns, max_age) {
+        Ok(p) => p,
+        Err(_) => return 0, // caller emits ChainLiquidationDeferred; defer all this chain
+    };
+
+    // Read-only pass to pick candidates (no borrow held across the routing below).
+    let mut candidates: Vec<u64> = Vec::new();
+    for (&vid, v) in state.chain_vaults.iter() {
+        if v.collateral_chain != chain
+            || v.status != crate::chains::monad::chain_vault::ChainVaultStatus::Open
+            || v.pending_mint_e8s != 0
+            || v.pending_interest_mint_e8s != 0
+            || v.pending_liquidation.is_some()
+        {
+            continue;
+        }
+        let eff = effective_debt_e8s(
+            v.debt_e8s,
+            v.pending_interest_mint_e8s,
+            apr_bps,
+            now_ns.saturating_sub(v.last_interest_accrual_ns),
+        );
+        let cr = crate::chains::vault::collateral_ratio_e4(v.collateral_amount_native, native_decimals, price_e8, eff);
+        if cr < liquidation_threshold_e4 {
+            candidates.push(vid);
+            if candidates.len() >= max_per_tick {
+                break;
+            }
+        }
+    }
+
+    let mut routed = 0;
+    for vid in candidates {
+        // begin_liquidation re-validates the full gate; ignore per-vault rejects.
+        if crate::chains::vault::begin_liquidation_in_state(
+            state,
+            vid,
+            crate::chains::evm::tecdsa::is_valid_evm_address,
+            price_symbol,
+            liquidation_threshold_e4,
+            now_ns,
+        )
+        .is_ok()
+        {
+            routed += 1;
+        }
+    }
+    routed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,11 +443,11 @@ mod tests {
             ChainId(71),
             ChainLiquidationConfigV1 {
                 dex: DexKind::UniswapV2,
-                router: "0xr".into(),
-                factory: "0xf".into(),
-                pair: "0xp".into(),
-                collateral_token: "0xw".into(),
-                settle_stable_token: "0xu".into(),
+                router: "0x1111111111111111111111111111111111111111".into(),
+                factory: "0x2222222222222222222222222222222222222222".into(),
+                pair: "0x3333333333333333333333333333333333333333".into(),
+                collateral_token: "0x4444444444444444444444444444444444444444".into(),
+                settle_stable_token: "0x5555555555555555555555555555555555555555".into(),
                 slippage_cap_bps: 250,
                 restore_target_cr_e4: 15_500,
                 enabled: true,
@@ -417,6 +508,53 @@ mod tests {
         assert!(!s.bot_pending_chain_vaults.contains_key(&7), "recovered vault cleared");
         assert!(!s.bot_pending_chain_vaults.contains_key(&8), "resolved vault cleared");
         assert!(!s.sp_attempted_chain_vaults.contains(&7), "sp-attempted cleared on recovery");
+    }
+
+    #[test]
+    fn detect_routes_liquidatable_and_caps_per_tick() {
+        let mut s = MultiChainState::default();
+        seed_cfg_unchecked(&mut s);
+        s.manual_prices.insert((ChainId(71), "CFX".into()), 8_000_000); // $0.08 -> CR 112%
+        s.manual_price_set_at_ns.insert((ChainId(71), "CFX".into()), 1_000);
+        for vid in 1..=4u64 {
+            insert_vault_liq(&mut s, vid, 1_400, 100, ChainVaultStatus::Open);
+        }
+        let routed = detect_and_route_chain_liquidations_in_state(&mut s, ChainId(71), "CFX", 13_300, 2_000, 2);
+        assert_eq!(routed, 2, "capped at 2 per tick");
+        let marked = s.chain_vaults.values().filter(|v| v.pending_liquidation.is_some()).count();
+        assert_eq!(marked, 2, "exactly the routed vaults are marked");
+        // Design B: debt untouched at trigger.
+        assert!(s.chain_vaults.values().all(|v| v.debt_e8s == 100 * 100_000_000));
+    }
+
+    #[test]
+    fn detect_skips_when_disabled_or_no_config() {
+        let mut s = MultiChainState::default();
+        s.manual_prices.insert((ChainId(71), "CFX".into()), 8_000_000);
+        s.manual_price_set_at_ns.insert((ChainId(71), "CFX".into()), 1_000);
+        insert_vault_liq(&mut s, 1, 1_400, 100, ChainVaultStatus::Open);
+        // No config row -> no routing (master gate, spec §9).
+        assert_eq!(detect_and_route_chain_liquidations_in_state(&mut s, ChainId(71), "CFX", 13_300, 2_000, 3), 0);
+        assert!(s.chain_vaults.get(&1).unwrap().pending_liquidation.is_none());
+        // Disabled config -> still no routing.
+        seed_cfg_unchecked(&mut s);
+        s.chain_liquidation_configs.get_mut(&ChainId(71)).unwrap().enabled = false;
+        assert_eq!(detect_and_route_chain_liquidations_in_state(&mut s, ChainId(71), "CFX", 13_300, 2_000, 3), 0);
+        assert!(s.chain_vaults.get(&1).unwrap().pending_liquidation.is_none());
+    }
+
+    #[test]
+    fn detect_skips_healthy_and_marked_vaults() {
+        let mut s = MultiChainState::default();
+        seed_cfg_unchecked(&mut s);
+        s.manual_prices.insert((ChainId(71), "CFX".into()), 8_000_000);
+        s.manual_price_set_at_ns.insert((ChainId(71), "CFX".into()), 1_000);
+        insert_vault_liq(&mut s, 1, 1_400, 100, ChainVaultStatus::Open); // underwater
+        insert_vault_liq(&mut s, 2, 5_000, 100, ChainVaultStatus::Open); // healthy (CR 400%)
+        let routed = detect_and_route_chain_liquidations_in_state(&mut s, ChainId(71), "CFX", 13_300, 2_000, 10);
+        assert_eq!(routed, 1, "only the underwater vault routes");
+        assert!(s.chain_vaults.get(&1).unwrap().pending_liquidation.is_some());
+        assert!(s.chain_vaults.get(&2).unwrap().pending_liquidation.is_none());
     }
 
     #[test]

@@ -1919,6 +1919,150 @@ fn get_chain_liquidation_config(
     read_state(|s| s.multi_chain.chain_liquidation_configs.get(&chain).cloned())
 }
 
+/// A chain vault currently liquidatable on `chain` (CR below the liquidation
+/// threshold), with its interest-aware CR + sizing surfaced for an operator/SP.
+/// The discovery channel for the eventual SP fallback (finding #30; SP-specific
+/// bot-failed filtering lands in Increment 4).
+#[derive(CandidType, Deserialize, Debug, Clone)]
+pub struct ChainLiquidatableVault {
+    pub vault_id: u64,
+    pub chain_id: rumi_protocol_backend::chains::config::ChainId,
+    pub debt_e8s: u128,
+    pub effective_debt_e8s: u128,
+    pub collateral_native: u128,
+    pub cr_e4: u64,
+    pub liquidation_threshold_e4: u64,
+    pub sized_repay_e8s: u128,
+}
+
+/// Resolve the chain's native collateral symbol (the manual-price key) for the
+/// liquidation path. `Err` if the chain is not a known EVM chain.
+fn liquidation_price_symbol(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> Result<&'static str, ProtocolError> {
+    rumi_protocol_backend::chains::evm::evm_chain_config(chain)
+        .map(|c| c.native_symbol)
+        .ok_or_else(|| ProtocolError::ChainAdmin(format!("chain {} is not a known EVM chain", chain.0)))
+}
+
+/// Dev-gated manual/permissionless liquidation trigger (spec §7). Runs the
+/// IDENTICAL gate as the detection tick (so a manual caller can never liquidate a
+/// vault the timer wouldn't). Synchronous: reads price from state, sizes, and
+/// enqueues in one mutate_state. Bot tier only in Increment 2; the enqueued
+/// `LiquidationSwap` op is inert until Increment 3.
+#[candid_method(update)]
+#[update]
+fn liquidate_chain_vault(vault_id: u64) -> Result<u64, ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let chain = read_state(|s| s.multi_chain.chain_vaults.get(&vault_id).map(|v| v.collateral_chain))
+        .ok_or_else(|| ProtocolError::ChainAdmin(format!("unknown vault {vault_id}")))?;
+    let threshold = rumi_protocol_backend::chains::collateral_config::chain_collateral_config(chain)
+        .map(|c| c.liquidation_threshold_e4)
+        .ok_or_else(|| ProtocolError::ChainAdmin(format!("no collateral config for chain {}", chain.0)))?;
+    let symbol = liquidation_price_symbol(chain)?;
+    let now = ic_cdk::api::time();
+    mutate_state(|s| {
+        rumi_protocol_backend::chains::vault::begin_liquidation_in_state(
+            &mut s.multi_chain,
+            vault_id,
+            rumi_protocol_backend::chains::evm::tecdsa::is_valid_evm_address,
+            symbol,
+            threshold,
+            now,
+        )
+    })
+    .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
+}
+
+/// Public read: vaults currently liquidatable on `chain` (CR below the
+/// liquidation threshold, Open, not already marked, no in-flight mint). Capped
+/// for DOS safety. Returns empty if the chain has no collateral config or no
+/// fresh price.
+#[candid_method(query)]
+#[query]
+fn get_chain_liquidatable_vaults(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> Vec<ChainLiquidatableVault> {
+    use rumi_protocol_backend::chains::collateral_config::chain_collateral_config;
+    use rumi_protocol_backend::chains::liquidation as liq;
+    use rumi_protocol_backend::chains::monad::chain_vault::ChainVaultStatus;
+    let symbol = match liquidation_price_symbol(chain) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let now = ic_cdk::api::time();
+    read_state(|s| {
+        let cc = chain_collateral_config(chain);
+        let threshold = match cc.map(|c| c.liquidation_threshold_e4) {
+            Some(t) => t,
+            None => return Vec::new(),
+        };
+        let apr_bps = cc.map(|c| c.interest_apr_bps).unwrap_or(0);
+        let max_age = s
+            .multi_chain
+            .chain_liquidation_configs
+            .get(&chain)
+            .map(|c| c.max_price_age_ns)
+            .unwrap_or(0);
+        let price = match liq::fresh_chain_price_e8(&s.multi_chain, chain, symbol, now, max_age) {
+            Ok(p) => p,
+            Err(_) => return Vec::new(),
+        };
+        let nd = s
+            .multi_chain
+            .chain_configs
+            .get(&chain)
+            .map(|c| c.chain_native_decimals)
+            .unwrap_or(18);
+        let bonus = liq::bonus_e4_from_penalty_bps(cc.map(|c| c.liquidation_penalty_bps).unwrap_or(0));
+        let target = cc.map(|c| c.recovery_target_cr_e4).unwrap_or(15_500);
+        s.multi_chain
+            .chain_vaults
+            .values()
+            .filter(|v| {
+                v.collateral_chain == chain
+                    && v.status == ChainVaultStatus::Open
+                    && v.pending_mint_e8s == 0
+                    && v.pending_interest_mint_e8s == 0
+                    && v.pending_liquidation.is_none()
+                    && v.debt_e8s > 0
+            })
+            .filter_map(|v| {
+                let eff = liq::effective_debt_e8s(
+                    v.debt_e8s,
+                    v.pending_interest_mint_e8s,
+                    apr_bps,
+                    now.saturating_sub(v.last_interest_accrual_ns),
+                );
+                let cr = rumi_protocol_backend::chains::vault::collateral_ratio_e4(
+                    v.collateral_amount_native,
+                    nd,
+                    price,
+                    eff,
+                );
+                if cr >= threshold {
+                    return None;
+                }
+                let cv = liq::collateral_value_e8s(v.collateral_amount_native, nd, price);
+                Some(ChainLiquidatableVault {
+                    vault_id: v.vault_id,
+                    chain_id: chain,
+                    debt_e8s: v.debt_e8s,
+                    effective_debt_e8s: eff,
+                    collateral_native: v.collateral_amount_native,
+                    cr_e4: cr,
+                    liquidation_threshold_e4: threshold,
+                    sized_repay_e8s: liq::sized_repay_e8s(eff, cv, target, bonus),
+                })
+            })
+            .take(500)
+            .collect()
+    })
+}
+
 /// Manual-price readout for `(chain, symbol)`: the USD e8 price plus the
 /// wall-clock nanosecond timestamp of the last write (audit F-01 freshness).
 /// `set_at_ns == 0` means the price was set before the V5 upgrade (timestamp

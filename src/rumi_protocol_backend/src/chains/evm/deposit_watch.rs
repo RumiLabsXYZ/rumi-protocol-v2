@@ -503,6 +503,59 @@ pub async fn run_observer(chain: ChainId) {
         }
     }
 
+    // ── Liquidation detection (spec §4.5) ────────────────────────────────────
+    // Rides this tick; inherits the ReadOnly / invariant_halted / reorg_halted
+    // skips already applied above. Gated behind the per-chain `enabled` liquidation
+    // config (master switch, default false) — no config row => no-op. Fail-closed
+    // on a stale price: defer ALL this chain's vaults + emit ChainLiquidationDeferred.
+    // Fully synchronous (no .await) so the marker set in begin_liquidation is the
+    // dedup (finding #37). Routing keys off the marker, never op presence (finding #5).
+    {
+        let now_ns = ic_cdk::api::time();
+        let liq_threshold_e4 =
+            crate::chains::collateral_config::chain_collateral_config(chain).map(|c| c.liquidation_threshold_e4);
+        let symbol = crate::chains::evm::evm_chain_config(chain).map(|c| c.native_symbol);
+        let enabled = read_state(|s| {
+            s.multi_chain.chain_liquidation_configs.get(&chain).map_or(false, |c| c.enabled)
+        });
+        if let (true, Some(threshold), Some(symbol)) = (enabled, liq_threshold_e4, symbol) {
+            // Probe price freshness so a stale price surfaces a deferral event
+            // (the in-state detect re-checks freshness and no-ops on Err too).
+            let price_ok = read_state(|s| {
+                let max_age = s
+                    .multi_chain
+                    .chain_liquidation_configs
+                    .get(&chain)
+                    .map(|c| c.max_price_age_ns)
+                    .unwrap_or(0);
+                crate::chains::liquidation::fresh_chain_price_e8(&s.multi_chain, chain, symbol, now_ns, max_age)
+                    .is_ok()
+            });
+            if !price_ok {
+                crate::storage::record_event(&crate::event::Event::ChainLiquidationDeferred {
+                    chain_id: chain,
+                    vault_id: 0, // chain-wide defer (no single vault)
+                    reason: "StalePrice".to_string(),
+                    timestamp: now_ns,
+                });
+            } else {
+                let routed = mutate_state(|s| {
+                    crate::chains::liquidation::detect_and_route_chain_liquidations_in_state(
+                        &mut s.multi_chain,
+                        chain,
+                        symbol,
+                        threshold,
+                        now_ns,
+                        3,
+                    )
+                });
+                if routed > 0 {
+                    log!(INFO, "[observer chain={:?}] liquidation detection routed {} vault(s)", chain, routed);
+                }
+            }
+        }
+    }
+
     // ── Burn watch — GATED on a seeded cursor + new blocks ───────────────────
     //
     // Everything below depends on a finalized block height. It is gated so a
