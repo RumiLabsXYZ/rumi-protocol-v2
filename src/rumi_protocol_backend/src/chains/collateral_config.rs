@@ -24,6 +24,14 @@ pub struct ChainCollateralConfig {
     pub min_vault_debt_e8s: u128,
     pub recovery_target_cr_e4: u64,
     pub debt_ceiling_e8s: Option<u128>,
+    /// The collateral ratio (e4) at or below which a vault is liquidatable. This
+    /// is the chains-rail analogue of ICP's liquidation threshold and is DISTINCT
+    /// from `min_cr_e4` (the open/borrow/withdraw gate). Inc 0 raised the Conflux
+    /// open gate into `min_cr_e4` (150%); this field carries the real liquidation
+    /// trigger (133%), so open=`min_cr_e4`, liquidate=`liquidation_threshold_e4`,
+    /// restore=`recovery_target_cr_e4`. (Compile-time; promoting to Tier-B
+    /// persisted config is an Inc-5 follow-up.)
+    pub liquidation_threshold_e4: u64,
 }
 
 /// ICP-mirrored defaults (the live dashboard values).
@@ -36,6 +44,7 @@ const ICP_MIRROR: ChainCollateralConfig = ChainCollateralConfig {
     min_vault_debt_e8s: 10_000_000,
     recovery_target_cr_e4: 15_500,
     debt_ceiling_e8s: None,
+    liquidation_threshold_e4: 13_300,
 };
 
 /// Compile-time per-chain collateral config. `None` for unknown chains.
@@ -57,6 +66,10 @@ pub fn chain_collateral_config(chain: ChainId) -> Option<ChainCollateralConfig> 
         // (behavior-preserving); other params ICP-mirrored but inert for Monad.
         10143 => Some(ChainCollateralConfig {
             min_cr_e4: 13_000,
+            // Below Monad's 130% open gate so a freshly-opened vault is never
+            // instantly liquidatable (inert until Monad gets a liquidation
+            // config row; Conflux is the first liquidating chain).
+            liquidation_threshold_e4: 12_500,
             ..ICP_MIRROR
         }),
         _ => None,
@@ -79,8 +92,34 @@ mod tests {
         assert_eq!(c.interest_apr_bps, 200);
         assert_eq!(c.min_vault_debt_e8s, 10_000_000);
         assert_eq!(c.recovery_target_cr_e4, 15_500);
+        // Liquidation trigger (133%), distinct from the 150% open gate.
+        assert_eq!(c.liquidation_threshold_e4, 13_300);
         // Depth-bound 500-icUSD gated ceiling.
         assert_eq!(c.debt_ceiling_e8s, Some(500 * 100_000_000));
+    }
+
+    #[test]
+    fn liquidation_threshold_below_open_gate_per_chain() {
+        // The liquidation trigger MUST be strictly below the open/borrow gate so a
+        // freshly-opened vault at exactly the open CR is never instantly liquidatable.
+        for chain in [ChainId(71), ChainId(10143)] {
+            let c = chain_collateral_config(chain).expect("known chain");
+            assert!(
+                c.liquidation_threshold_e4 < c.min_cr_e4,
+                "chain {}: liquidation_threshold_e4 {} must be < open gate min_cr_e4 {}",
+                chain.0,
+                c.liquidation_threshold_e4,
+                c.min_cr_e4
+            );
+        }
+    }
+
+    #[test]
+    fn conflux_liquidation_threshold_is_133() {
+        let c = chain_collateral_config(ChainId(71)).expect("conflux known");
+        assert_eq!(c.liquidation_threshold_e4, 13_300); // 133% — the ICP-mirrored liquidate ratio
+        assert_eq!(c.min_cr_e4, 15_000); // 150% open gate (unchanged from Inc 0)
+        assert_eq!(c.recovery_target_cr_e4, 15_500); // 155% restore target
     }
 
     #[test]
