@@ -37,9 +37,23 @@ type CandidVault = record {
   icp_margin_amount : nat64;
   borrowed_icusd_amount : nat64;
 };
+type ChainLiquidationConfigV1 = record {
+  dex : DexKind;
+  pair : text;
+  restore_target_cr_e4 : nat64;
+  enabled : bool;
+  collateral_token : text;
+  factory : text;
+  slippage_cap_bps : nat16;
+  router : text;
+  settle_stable_token : text;
+};
 type ChainSupplyReconciliation = record {
   recorded_supply_e8s : nat;
+  pending_chain_burn_e8s : nat;
+  reserve_backing_e8s : nat;
   gap_e8s : int;
+  reserve_usdc_native : nat;
   unbacked_excess : bool;
   finalized_block : nat64;
   in_flight_mint_e8s : nat;
@@ -64,6 +78,7 @@ type ChainVaultV1 = record {
   opened_at_ns : nat64;
   vault_id : nat64;
   last_interest_accrual_ns : nat64;
+  pending_liquidation : opt PendingLiquidationV1;
   collateral_chain : nat32;
   mint_recipient : text;
   debt_e8s : nat;
@@ -150,6 +165,7 @@ type DeviceSpec = variant {
   GenericDisplay;
   LineDisplay : record { characters_per_line : nat16; lines_per_page : nat16 };
 };
+type DexKind = variant { UniswapV2 };
 type ErrorInfo = record { description : text };
 type Event = variant {
   set_borrowing_fee : record { rate : text };
@@ -193,6 +209,19 @@ type Event = variant {
     chain_id : nat32;
     timestamp : nat64;
     tx_hash : text;
+  };
+  chain_liquidation_deferred : record {
+    vault_id : nat64;
+    chain_id : nat32;
+    timestamp : nat64;
+    reason : text;
+  };
+  chain_reserve_credited : record {
+    usdc_native : nat;
+    backing_added_e8s : nat;
+    vault_id : nat64;
+    chain_id : nat32;
+    timestamp : nat64;
   };
   provide_liquidity : record {
     block_index : nat64;
@@ -494,6 +523,13 @@ type Event = variant {
   set_icpswap_routing_enabled : record { enabled : bool };
   set_bot_budget : record { start_timestamp : nat64; total_e8s : nat64 };
   set_rmr_floor : record { value : text };
+  chain_cfx_claim_settled : record {
+    claim_id : nat64;
+    amount_native : nat;
+    recipient : text;
+    chain_id : nat32;
+    timestamp : nat64;
+  };
   set_redemption_fee_floor : record { rate : text };
   set_interest_rate : record {
     collateral_type : principal;
@@ -540,6 +576,15 @@ type Event = variant {
   set_collateral_borrow_threshold : record {
     borrow_threshold_ratio : text;
     collateral_type : principal;
+  };
+  chain_vault_liquidated : record {
+    collateral_seized_native : nat;
+    op_id : nat64;
+    tier : LiquidationTier;
+    vault_id : nat64;
+    chain_id : nat32;
+    timestamp : nat64;
+    debt_cleared_e8s : nat;
   };
   add_collateral_type : record {
     config : CollateralConfig;
@@ -666,6 +711,7 @@ type InitArg = record {
 type InterestSplitArg = record { bps : nat64; destination : text };
 type InterpolationMethod = variant { Linear };
 type LineDisplayPage = record { lines : vec text };
+type LiquidationTier = variant { Bot; StabilityPool };
 type LiquidityStatus = record {
   liquidity_provided : nat64;
   total_liquidity_provided : nat64;
@@ -676,6 +722,13 @@ type LiquidityStatus = record {
 type ManualPriceInfo = record { set_at_ns : nat64; price_e8 : nat64 };
 type Mode = variant { ReadOnly; GeneralAvailability; Recovery };
 type OpenVaultSuccess = record { block_index : nat64; vault_id : nat64 };
+type PendingLiquidationV1 = record {
+  started_at_ns : nat64;
+  op_id : nat64;
+  tier : LiquidationTier;
+  debt_to_clear_e8s : nat;
+  collateral_reserved_native : nat;
+};
 type PerCollateralRateCurve = record {
   markers : vec record { float64; float64 };
   base_rate : float64;
@@ -1011,6 +1064,9 @@ service : (ProtocolArg) -> {
   get_bot_cr_tolerance_bps : () -> (nat64) query;
   get_bot_stats : () -> (BotStatsResponse) query;
   get_chain_interest_treasury_address : (nat32) -> (Result_2);
+  get_chain_liquidation_config : (nat32) -> (
+      opt ChainLiquidationConfigV1,
+    ) query;
   get_chain_settlement_address : (nat32) -> (Result_2);
   get_chain_vault : (nat64) -> (opt ChainVaultV1) query;
   get_chains_ecdsa_key_name : () -> (text) query;
@@ -1134,6 +1190,7 @@ service : (ProtocolArg) -> {
   set_chain_contract : (nat32, text) -> (Result);
   set_chain_interest_min_realize_e8s : (nat) -> (Result);
   set_chain_interest_tick_interval_secs : (nat64) -> (Result);
+  set_chain_liquidation_config : (nat32, ChainLiquidationConfigV1) -> (Result);
   set_chains_ecdsa_key_name : (text) -> (Result);
   set_check_vaults_alert_band_bps : (nat64) -> (Result);
   set_check_vaults_full_sweep_every_n_ticks : (nat64) -> (Result);

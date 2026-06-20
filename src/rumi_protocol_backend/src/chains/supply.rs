@@ -12,7 +12,7 @@
 //! can call it without inventing the invariant under deadline pressure.
 
 use super::config::ChainId;
-use super::multi_chain_state::{MultiChainStateV1, MultiChainStateV2, MultiChainStateV5};
+use super::multi_chain_state::{MultiChainStateV1, MultiChainStateV2, MultiChainState};
 use candid::{CandidType, Deserialize};
 use serde::Serialize;
 
@@ -55,15 +55,47 @@ pub enum SupplyDelta {
 pub enum SupplyInvariantError {
     UnknownChain(ChainId),
     Underflow { chain: ChainId, current: u128, attempted_decrease: u128 },
+    /// `sum(chain_supplies)` did not equal the unified-invariant RHS. `total_debt`
+    /// carries that full RHS (debt + reserve_backing + pending_chain_burn — spec
+    /// 5.2), NOT the bare debt; the field name is kept for wire stability. With
+    /// all-zero reserve/pending (Increment 1) the RHS equals bare debt, so the
+    /// reported pair is byte-identical to the pre-Increment-1 behavior.
     Divergence { sum_after: u128, total_debt: u128 },
     HaltedAfterSelfCheckFailure,
 }
 
-/// Single-entry mutation path for `chain_supplies`. Caller passes the
-/// authoritative `total_debt_e8s` snapshot taken at the same logical
-/// moment; we reject any apply that would leave sum != total_debt.
+/// The unified supply-invariant right-hand side (spec 5.2): every circulating
+/// foreign icUSD is backed by EITHER an open vault's collateral (the
+/// `total_debt_e8s` term the caller passes), OR protocol-held USDC reserve
+/// (`total_reserve_backing_e8s`), OR an IC-side SP burn awaiting its eSpace burn
+/// (`total_pending_chain_burn_e8s`).
+///
+/// The caller passes the debt total it already computes (it owns the debt
+/// mutation); the reserve + pending-burn terms are read from `state` HERE, so a
+/// caller can never forget a term and FALSE-HALT the chain (finding #24). This is
+/// the SINGLE source of truth for the RHS — `apply_supply_delta` and
+/// `check_invariant` (hence the Timer-B self-check AND `clear_invariant_halt`) all
+/// route through it, so the consumers can never disagree (findings #2, #7).
+///
+/// Deliberately NOT terms: `reserve_usdc_native` tracks the physical USDC asset,
+/// not icUSD-denominated backing (spec 3.2, 5.6); `pending_interest_mint_e8s`
+/// mints new supply only on confirm and is excluded from
+/// `total_chain_vault_debt_e8s` (finding #1). With all-zero reserve/pending
+/// (Increment 1) this reduces to the old `supply == debt`, so it is
+/// behavior-preserving.
+pub fn chain_backing_rhs_e8s(state: &MultiChainState, total_debt_e8s: u128) -> u128 {
+    total_debt_e8s
+        .saturating_add(state.total_reserve_backing_e8s())
+        .saturating_add(state.total_pending_chain_burn_e8s())
+}
+
+/// Single-entry mutation path for `chain_supplies`. The caller passes the
+/// authoritative `total_debt_e8s` snapshot taken at the same logical moment; we
+/// reject any apply that would leave `sum(chain_supplies)` != the unified RHS
+/// (`chain_backing_rhs_e8s` = debt + reserve + pending-burn). No mutation on
+/// rejection.
 pub fn apply_supply_delta(
-    state: &mut MultiChainStateV5,
+    state: &mut MultiChainState,
     chain: ChainId,
     delta: SupplyDelta,
     total_debt_e8s: u128,
@@ -96,26 +128,122 @@ pub fn apply_supply_delta(
         .iter()
         .map(|(&id, &v)| if id == chain { new } else { v })
         .sum();
-    if sum_after != total_debt_e8s {
-        return Err(SupplyInvariantError::Divergence { sum_after, total_debt: total_debt_e8s });
+    // Compare against the unified RHS (debt + reserve + pending-burn), read from
+    // the SAME `state` so the check can never use a stale reserve/pending snapshot
+    // (finding #2). With all-zero reserve/pending this is `sum_after != total_debt`.
+    let rhs = chain_backing_rhs_e8s(state, total_debt_e8s);
+    if sum_after != rhs {
+        return Err(SupplyInvariantError::Divergence { sum_after, total_debt: rhs });
     }
 
     state.chain_supplies.insert(chain, new);
     Ok(())
 }
 
-/// Phase 1a periodic self-check (called from Timer B in Task 11).
-/// Returns `Ok(())` when sum == total_debt and `Err(...)` otherwise.
-/// On `Err`, the caller flips `state.invariant_halted = true` and emits
-/// an event.
+/// Periodic self-check (called from the Timer-B self-check AND from
+/// `clear_invariant_halt`). Returns `Ok(())` when `sum(chain_supplies)` equals the
+/// unified RHS (`chain_backing_rhs_e8s` = debt + reserve + pending-burn) and
+/// `Err(...)` otherwise. On `Err`, the Timer-B caller flips
+/// `state.invariant_halted = true` and flips to ReadOnly.
+///
+/// Both callers pass only `total_chain_vault_debt_e8s()`; the reserve + pending
+/// terms are added here, so the Timer-B self-check and `clear_invariant_halt` both
+/// pick up the generalized RHS WITHOUT any caller change — a bot liquidation that
+/// shifts debt->reserve no longer FALSE-HALTs the chain, and the un-halt path can
+/// succeed against the unified RHS (findings #2, #7).
 pub fn check_invariant(
-    state: &MultiChainStateV5,
+    state: &MultiChainState,
     total_debt_e8s: u128,
 ) -> Result<(), SupplyInvariantError> {
     let sum: u128 = state.chain_supplies.values().copied().sum();
-    if sum != total_debt_e8s {
-        return Err(SupplyInvariantError::Divergence { sum_after: sum, total_debt: total_debt_e8s });
+    let rhs = chain_backing_rhs_e8s(state, total_debt_e8s);
+    if sum != rhs {
+        return Err(SupplyInvariantError::Divergence { sum_after: sum, total_debt: rhs });
     }
+    Ok(())
+}
+
+/// Reasons `apply_debt_to_reserve_shift` rejects (no state mutation on any error).
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReserveShiftError {
+    /// The invariant self-check has halted the rail; do not move backing.
+    Halted,
+    /// No such chain vault.
+    UnknownVault(u64),
+    /// The vault's `collateral_chain` does not match the requested `chain`.
+    WrongChain { vault_chain: ChainId, requested: ChainId },
+    /// `cleared_e8s` exceeds the vault's live `debt_e8s` (would over-credit the
+    /// reserve term relative to debt actually retired).
+    ClearExceedsDebt { cleared_e8s: u128, vault_debt_e8s: u128 },
+    /// The post-move unified invariant would not hold. The move conserves
+    /// debt+reserve, so this only fires if the invariant was ALREADY diverged
+    /// before the call (defensive; no mutation).
+    InvariantBroken { sum_supplies: u128, rhs: u128 },
+}
+
+/// Bot/PSM Phase-2 accounting (spec 4.9, 5.3): atomically move `cleared_e8s` of a
+/// vault's debt into the chain's reserve backing (NO icUSD burn — `chain_supplies`
+/// is UNCHANGED) and record the realized `stable_native` USDC. This is the single
+/// gate for the reserve term. It conserves `debt + reserve`, so the unified
+/// invariant is preserved BY CONSTRUCTION; the pre-apply check is a defensive
+/// assert that catches pre-existing drift (no mutation on rejection).
+///
+/// NO caller until Increment 2 (the bot confirm path); Increment 1 ships it +
+/// proves a reserve shift keeps the invariant balanced.
+pub fn apply_debt_to_reserve_shift(
+    state: &mut MultiChainState,
+    chain: ChainId,
+    vault_id: u64,
+    cleared_e8s: u128,
+    stable_native: u128,
+) -> Result<(), ReserveShiftError> {
+    if state.invariant_halted {
+        return Err(ReserveShiftError::Halted);
+    }
+    // Validate (read-only — no mutation on any rejection path).
+    let vault_debt = {
+        let v = state
+            .chain_vaults
+            .get(&vault_id)
+            .ok_or(ReserveShiftError::UnknownVault(vault_id))?;
+        if v.collateral_chain != chain {
+            return Err(ReserveShiftError::WrongChain {
+                vault_chain: v.collateral_chain,
+                requested: chain,
+            });
+        }
+        v.debt_e8s
+    };
+    if cleared_e8s > vault_debt {
+        return Err(ReserveShiftError::ClearExceedsDebt {
+            cleared_e8s,
+            vault_debt_e8s: vault_debt,
+        });
+    }
+
+    // Pre-validate the post-move unified invariant WITHOUT mutating, so a
+    // divergence (only possible if the invariant was ALREADY broken before the
+    // call — the move conserves debt+reserve) leaves state untouched. chain_supplies
+    // is unchanged; debt drops by cleared_e8s and reserve_backing rises by the same,
+    // so the RHS is invariant. reserve_usdc_native is NOT an RHS term (spec 3.2/5.6).
+    let sum_supplies = state.total_supply_all_chains_e8s();
+    let post_debt_total = state.total_chain_vault_debt_e8s().saturating_sub(cleared_e8s);
+    let post_reserve_total = state.total_reserve_backing_e8s().saturating_add(cleared_e8s);
+    let post_rhs = post_debt_total
+        .saturating_add(post_reserve_total)
+        .saturating_add(state.total_pending_chain_burn_e8s());
+    if sum_supplies != post_rhs {
+        return Err(ReserveShiftError::InvariantBroken { sum_supplies, rhs: post_rhs });
+    }
+
+    // Apply atomically (every reject above happened before any mutation).
+    let v = state
+        .chain_vaults
+        .get_mut(&vault_id)
+        .expect("vault present: checked above");
+    v.debt_e8s -= cleared_e8s;
+    *state.reserve_backing_e8s.entry(chain).or_default() += cleared_e8s;
+    *state.reserve_usdc_native.entry(chain).or_default() += stable_native;
     Ok(())
 }
 
@@ -126,7 +254,7 @@ pub fn check_invariant(
 /// (`confirm_mint_in_state`) and never decode as 0, so this only ever touches
 /// pre-feature vaults. Idempotent (re-running is a no-op once stamped). Called
 /// from `post_upgrade` after `restore_state`.
-pub fn stamp_chain_interest_accrual_start(state: &mut MultiChainStateV5, now_ns: u64) {
+pub fn stamp_chain_interest_accrual_start(state: &mut MultiChainState, now_ns: u64) {
     for v in state.chain_vaults.values_mut() {
         if v.last_interest_accrual_ns == 0 {
             v.last_interest_accrual_ns = now_ns;

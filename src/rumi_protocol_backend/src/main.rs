@@ -1861,6 +1861,48 @@ fn set_chain_contract(
     Ok(())
 }
 
+/// Set (or replace) the per-chain liquidation config (spec 8, Tier B): the DEX
+/// wiring + risk knobs the bot path will read. Developer-gated. The config is
+/// validated (slippage cap <= 100%, restore target > par, required addresses
+/// present when `enabled`) before persisting; a rejected config mutates nothing.
+/// Inert until Increment 2+ reads it (Increment 1 ships only this scaffolding).
+#[candid_method(update)]
+#[update]
+fn set_chain_liquidation_config(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    config: rumi_protocol_backend::chains::liquidation_config::ChainLiquidationConfigV1,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    config
+        .validate()
+        .map_err(|e| ProtocolError::ChainAdmin(format!("invalid liquidation config: {e:?}")))?;
+    mutate_state(|s| {
+        s.multi_chain.chain_liquidation_configs.insert(chain, config.clone());
+    });
+    log!(
+        INFO,
+        "[set_chain_liquidation_config] chain={:?} dex={:?} enabled={}",
+        chain,
+        config.dex,
+        config.enabled
+    );
+    Ok(())
+}
+
+/// Return the per-chain liquidation config, or None if unset. Public read-only
+/// query (mirrors `get_chain_vault`); the config is operator DEX wiring + risk
+/// knobs, no secrets.
+#[candid_method(query)]
+#[query]
+fn get_chain_liquidation_config(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> Option<rumi_protocol_backend::chains::liquidation_config::ChainLiquidationConfigV1> {
+    read_state(|s| s.multi_chain.chain_liquidation_configs.get(&chain).cloned())
+}
+
 /// Manual-price readout for `(chain, symbol)`: the USD e8 price plus the
 /// wall-clock nanosecond timestamp of the last write (audit F-01 freshness).
 /// `set_at_ns == 0` means the price was set before the V5 upgrade (timestamp
@@ -2292,6 +2334,17 @@ pub struct ChainSupplyReconciliation {
     /// Signed gap = onchain - recorded. Positive => excess (possible unbacked
     /// mint); negative => deficit (an unsubmitted burn the backstop handles).
     pub gap_e8s: i128,
+    /// INFORMATIONAL breakdown of the unified supply invariant's RHS for this
+    /// chain (spec 5.4, findings #17/#20/#29). These are backing RECLASSIFICATION,
+    /// NOT on-chain supply, so they MUST NOT enter `unbacked_excess` (which is the
+    /// on-chain-vs-recorded truth check) — adding them there would mask a real
+    /// unbacked mint. They are surfaced purely so the operator sees the
+    /// debt/reserve/pending-burn split. 0 until Increment 2+ populates them.
+    pub reserve_backing_e8s: u128,
+    pub pending_chain_burn_e8s: u128,
+    /// Physical USDC the reserve address holds for this chain (native base units,
+    /// 18-dec on eSpace). Bookkeeping of the ASSET; informational only.
+    pub reserve_usdc_native: u128,
 }
 
 /// Developer-gated, on-demand supply reconciliation against the chain (audit
@@ -2312,33 +2365,39 @@ async fn reconcile_chain_supply(
     if read_state(|s| s.developer_principal != caller) {
         return Err(ProtocolError::ChainAdmin("not developer".into()));
     }
-    let (contract, recorded, in_flight, cursor) = read_state(|s| {
-        let contract = s.multi_chain.chain_contracts.get(&chain).cloned();
-        let recorded = s.multi_chain.chain_supplies.get(&chain).copied().unwrap_or(0);
-        let in_flight = s
-            .multi_chain
-            .settlement_queues
-            .get(&chain)
-            .map(|q| {
-                q.pending
-                    .values()
-                    .filter_map(|op| match &op.kind {
-                        SettlementOpKind::Mint { amount_e8s, .. }
-                            if matches!(
-                                op.status,
-                                SettlementOpStatus::Queued | SettlementOpStatus::Inflight { .. }
-                            ) =>
-                        {
-                            Some(*amount_e8s)
-                        }
-                        _ => None,
-                    })
-                    .sum::<u128>()
-            })
-            .unwrap_or(0);
-        let cursor = s.multi_chain.last_observed_block.get(&chain).copied().unwrap_or(0);
-        (contract, recorded, in_flight, cursor)
-    });
+    let (contract, recorded, in_flight, cursor, reserve_backing, pending_burn, reserve_usdc) =
+        read_state(|s| {
+            let contract = s.multi_chain.chain_contracts.get(&chain).cloned();
+            let recorded = s.multi_chain.chain_supplies.get(&chain).copied().unwrap_or(0);
+            let in_flight = s
+                .multi_chain
+                .settlement_queues
+                .get(&chain)
+                .map(|q| {
+                    q.pending
+                        .values()
+                        .filter_map(|op| match &op.kind {
+                            SettlementOpKind::Mint { amount_e8s, .. }
+                                if matches!(
+                                    op.status,
+                                    SettlementOpStatus::Queued | SettlementOpStatus::Inflight { .. }
+                                ) =>
+                            {
+                                Some(*amount_e8s)
+                            }
+                            _ => None,
+                        })
+                        .sum::<u128>()
+                })
+                .unwrap_or(0);
+            let cursor = s.multi_chain.last_observed_block.get(&chain).copied().unwrap_or(0);
+            // Informational RHS breakdown for this chain (NOT part of the
+            // unbacked_excess check — findings #17/#20/#29).
+            let reserve_backing = s.multi_chain.reserve_backing_e8s.get(&chain).copied().unwrap_or(0);
+            let pending_burn = s.multi_chain.pending_chain_burn_e8s.get(&chain).copied().unwrap_or(0);
+            let reserve_usdc = s.multi_chain.reserve_usdc_native.get(&chain).copied().unwrap_or(0);
+            (contract, recorded, in_flight, cursor, reserve_backing, pending_burn, reserve_usdc)
+        });
     let contract = contract.ok_or_else(|| {
         ProtocolError::ChainAdmin(format!("no icUSD contract configured for chain {:?}", chain))
     })?;
@@ -2354,6 +2413,11 @@ async fn reconcile_chain_supply(
                 ProtocolError::TemporarilyUnavailable(format!("totalSupply read failed; retry: {e}"))
             })?;
     let gap_e8s = onchain as i128 - recorded as i128;
+    // The unbacked-excess test compares on-chain totalSupply against recorded
+    // chain_supplies (+ in-flight mints) ONLY. reserve_backing / pending_chain_burn
+    // are internal backing reclassification that never change on-chain totalSupply,
+    // so they MUST stay out of this inequality or they would mask a real unbacked
+    // mint (findings #17/#20/#29). They are reported below as informational fields.
     let unbacked_excess = onchain > recorded.saturating_add(in_flight);
     if unbacked_excess {
         log!(INFO, "[reconcile_chain_supply] chain={:?} UNBACKED EXCESS: onchain {} > recorded {} + in_flight {} (block {})", chain, onchain, recorded, in_flight, cursor);
@@ -2366,6 +2430,9 @@ async fn reconcile_chain_supply(
         in_flight_mint_e8s: in_flight,
         unbacked_excess,
         gap_e8s,
+        reserve_backing_e8s: reserve_backing,
+        pending_chain_burn_e8s: pending_burn,
+        reserve_usdc_native: reserve_usdc,
     })
 }
 

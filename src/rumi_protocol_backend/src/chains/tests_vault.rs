@@ -12,7 +12,7 @@
 //! this file only asserts the parameterization itself.
 
 use super::config::{ChainId, GasStrategy, RegisterChainArg};
-use super::multi_chain_state::MultiChainStateV5;
+use super::multi_chain_state::MultiChainState;
 use super::vault::{open_chain_vault_in_state, OpenVaultError};
 use candid::Principal;
 
@@ -33,8 +33,8 @@ fn only_good(addr: &str) -> bool {
 
 /// Register chain 501 with 9-decimal native units and set its manual `"SOL"`
 /// price. Mirrors what register_chain + a manual price override do.
-fn setup(price_e8: u64) -> MultiChainStateV5 {
-    let mut s = MultiChainStateV5::default();
+fn setup(price_e8: u64) -> MultiChainState {
+    let mut s = MultiChainState::default();
     let arg = RegisterChainArg {
         chain_id: CHAIN,
         display_name: "SolanaDevnet".into(),
@@ -145,7 +145,7 @@ use super::evm::settlement::confirm_mint_in_state;
 
 /// Insert an Open vault (confirmed collateral + debt, no mint in flight) owned by
 /// `owner`, and seed the chain supply to match its debt so the invariant holds.
-fn insert_open_vault(s: &mut MultiChainStateV5, owner: Principal, vault_id: u64, collateral: u128, debt: u128) {
+fn insert_open_vault(s: &mut MultiChainState, owner: Principal, vault_id: u64, collateral: u128, debt: u128) {
     use super::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
     s.chain_vaults.insert(vault_id, ChainVaultV1 {
         vault_id, owner, collateral_chain: CHAIN, custody_address: "custody".into(),
@@ -153,7 +153,7 @@ fn insert_open_vault(s: &mut MultiChainStateV5, owner: Principal, vault_id: u64,
         pending_mint_e8s: 0, status: ChainVaultStatus::Open, opened_at_ns: 0,
     last_interest_accrual_ns: 0,
     pending_interest_mint_e8s: 0,
-        owner_evm: Some("0xowner".into()),
+    pending_liquidation: None,        owner_evm: Some("0xowner".into()),
     });
     *s.chain_supplies.entry(CHAIN).or_default() += debt;
 }
@@ -288,7 +288,7 @@ fn borrow_rejects_when_over_debt_ceiling() {
 
 #[test]
 fn nonce_consume_is_monotonic_and_rejects_replay() {
-    let mut s = MultiChainStateV5::default();
+    let mut s = MultiChainState::default();
     let owner = Principal::from_slice(&[5, 5, 5]);
     assert_eq!(s.expected_evm_nonce(&owner), 0);
     assert_eq!(s.consume_evm_nonce(&owner, 0), Ok(()));
@@ -304,7 +304,7 @@ fn nonce_consume_is_monotonic_and_rejects_replay() {
 #[test]
 fn per_owner_cap_counts_non_terminal_only() {
     use super::monad::chain_vault::ChainVaultStatus;
-    let mut s = MultiChainStateV5::default();
+    let mut s = MultiChainState::default();
     let owner = Principal::from_slice(&[9, 9, 9]);
     insert_open_vault(&mut s, owner, 1, 0, 0);
     insert_open_vault(&mut s, owner, 2, 0, 0);
@@ -332,7 +332,7 @@ fn gc_prunes_only_stale_awaiting_deposit() {
         mint_recipient: "r".into(), pending_mint_e8s: 0, status: st, opened_at_ns: opened,
     last_interest_accrual_ns: 0,
     pending_interest_mint_e8s: 0,
-        owner_evm: None,
+    pending_liquidation: None,        owner_evm: None,
     };
     let now = 100 * AWAITING_DEPOSIT_TTL_NS;
     // 1: stale AwaitingDeposit (older than TTL) -> pruned.
@@ -364,10 +364,10 @@ fn gc_skips_stale_vaults_when_observer_inactive() {
         opened_at_ns: now - AWAITING_DEPOSIT_TTL_NS - 1, owner_evm: None,
         last_interest_accrual_ns: 0,
         pending_interest_mint_e8s: 0,
-    };
+        pending_liquidation: None,    };
     // (a) Chain not registered at all -> no observer -> not reaped (would strand
     //     a funded-but-unobserved deposit).
-    let mut s = MultiChainStateV5::default();
+    let mut s = MultiChainState::default();
     s.chain_vaults.insert(1, stale(1));
     assert_eq!(prune_stale_awaiting_deposit(&mut s, now, AWAITING_DEPOSIT_TTL_NS), 0);
     assert!(s.chain_vaults.contains_key(&1), "unregistered-chain vault kept");
@@ -414,5 +414,90 @@ fn close_rejects_while_borrow_mint_in_flight_even_if_debt_zero() {
         s.chain_vaults.get(&7).unwrap().status,
         super::monad::chain_vault::ChainVaultStatus::Open,
         "vault not closed"
+    );
+}
+
+// ─── Increment 1 / Task 2: pending_liquidation marker write-guards (spec 3.1) ───
+
+use super::vault::{LiquidationTier, PendingLiquidationV1};
+
+/// A Bot-tier liquidation marker for the owner-write-guard tests.
+fn liq_marker() -> PendingLiquidationV1 {
+    PendingLiquidationV1 {
+        op_id: 1,
+        debt_to_clear_e8s: 10_00000000,
+        collateral_reserved_native: ONE_SOL,
+        tier: LiquidationTier::Bot,
+        started_at_ns: 100,
+    }
+}
+
+#[test]
+fn withdraw_rejected_while_liquidation_in_flight() {
+    let mut s = setup(PRICE_150_USD_E8);
+    insert_open_vault(&mut s, Principal::anonymous(), 7, 100 * ONE_SOL, 100_00000000);
+    // A liquidation is mid-flight: the vault's collateral is reserved/handed to a
+    // tier. An owner withdraw (even a tiny, CR-safe 1-lamport one) must be rejected
+    // so the collateral cannot be double-spent against an in-flight swap/burn.
+    s.chain_vaults.get_mut(&7).unwrap().pending_liquidation = Some(liq_marker());
+    assert_eq!(
+        withdraw_collateral_in_state(&mut s, 7, 1, "good-address".into(), only_good, "SOL", 13_000, 2),
+        Err(WithdrawError::LiquidationInFlight)
+    );
+    assert_eq!(
+        s.chain_vaults.get(&7).unwrap().collateral_amount_native,
+        100 * ONE_SOL,
+        "collateral untouched on rejection"
+    );
+    assert_eq!(s.settlement_queues.get(&CHAIN).unwrap().pending_len(), 0, "no withdraw enqueued");
+}
+
+#[test]
+fn borrow_rejected_while_liquidation_in_flight() {
+    let mut s = setup(PRICE_150_USD_E8);
+    insert_open_vault(&mut s, Principal::anonymous(), 7, 100 * ONE_SOL, 100_00000000);
+    s.chain_vaults.get_mut(&7).unwrap().pending_liquidation = Some(liq_marker());
+    assert_eq!(
+        borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "good-address".into(), only_good, "SOL", 13_000, 0, None, 2),
+        Err(BorrowError::LiquidationInFlight)
+    );
+    assert_eq!(s.chain_vaults.get(&7).unwrap().pending_mint_e8s, 0, "no borrow reserved on rejection");
+    assert_eq!(s.settlement_queues.get(&CHAIN).unwrap().pending_len(), 0, "no mint enqueued");
+}
+
+#[test]
+fn close_rejected_while_liquidation_in_flight_via_withdraw_delegate() {
+    let mut s = setup(PRICE_150_USD_E8);
+    // debt 0 but collateral > 0: close delegates to withdraw, which must reject on
+    // the marker (the non-degenerate path).
+    insert_open_vault(&mut s, Principal::anonymous(), 7, 100 * ONE_SOL, 0);
+    s.chain_vaults.get_mut(&7).unwrap().pending_liquidation = Some(liq_marker());
+    assert_eq!(
+        close_chain_vault_in_state(&mut s, 7, "good-address".into(), only_good, "SOL", 13_000, 2),
+        Err(WithdrawError::LiquidationInFlight)
+    );
+    assert_eq!(
+        s.chain_vaults.get(&7).unwrap().status,
+        super::monad::chain_vault::ChainVaultStatus::Open,
+        "vault not closed while liquidation in flight"
+    );
+}
+
+#[test]
+fn close_rejected_while_liquidation_in_flight_degenerate_zero_collateral() {
+    let mut s = setup(PRICE_150_USD_E8);
+    // debt 0, collateral 0, Open: close normally short-circuits straight to Closed.
+    // The marker must block even that degenerate path — the short-circuit bypasses
+    // the withdraw delegate, so the guard must live in close's OWN block.
+    insert_open_vault(&mut s, Principal::anonymous(), 7, 0, 0);
+    s.chain_vaults.get_mut(&7).unwrap().pending_liquidation = Some(liq_marker());
+    assert_eq!(
+        close_chain_vault_in_state(&mut s, 7, "good-address".into(), only_good, "SOL", 13_000, 2),
+        Err(WithdrawError::LiquidationInFlight)
+    );
+    assert_eq!(
+        s.chain_vaults.get(&7).unwrap().status,
+        super::monad::chain_vault::ChainVaultStatus::Open,
+        "vault not closed while liquidation in flight"
     );
 }

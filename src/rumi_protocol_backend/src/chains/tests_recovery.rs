@@ -8,7 +8,7 @@
 
 use super::config::ChainId;
 use super::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
-use super::multi_chain_state::MultiChainStateV5;
+use super::multi_chain_state::MultiChainState;
 use super::recovery::{
     apply_recover_vault_in_state, apply_resolve_reversal_in_state,
     precheck_recover_vault_in_state, RecoveryError,
@@ -33,7 +33,7 @@ fn vault(vault_id: u64, status: ChainVaultStatus, pending: u128, collateral: u12
         owner_evm: None,
         last_interest_accrual_ns: 0,
         pending_interest_mint_e8s: 0,
-    }
+        pending_liquidation: None,    }
 }
 
 fn inflight_op(op_id: u64, kind: SettlementOpKind, tx: Option<&str>) -> SettlementOp {
@@ -44,8 +44,8 @@ fn inflight_op(op_id: u64, kind: SettlementOpKind, tx: Option<&str>) -> Settleme
     op
 }
 
-fn state_with_op(op: SettlementOp) -> MultiChainStateV5 {
-    let mut s = MultiChainStateV5::default();
+fn state_with_op(op: SettlementOp) -> MultiChainState {
+    let mut s = MultiChainState::default();
     let mut q = super::settlement_queue::SettlementQueueV1::default();
     let id = op.op_id;
     q.pending.insert(id, op);
@@ -119,7 +119,7 @@ fn resolve_reversal_is_idempotent_cas() {
 fn precheck_recover_returns_terminal_mint_tx_hashes() {
     // A terminal (Failed) Mint op for the vault carries a tx hash the async path
     // must re-verify on-chain.
-    let mut s = MultiChainStateV5::default();
+    let mut s = MultiChainState::default();
     let mut q = super::settlement_queue::SettlementQueueV1::default();
     let mut op = inflight_op(
         0,
@@ -150,7 +150,7 @@ fn precheck_recover_rejects_live_mint_op() {
 
 #[test]
 fn precheck_recover_rejects_nonzero_pending_or_wrong_status() {
-    let mut s = MultiChainStateV5::default();
+    let mut s = MultiChainState::default();
     // Nonzero pending => not recoverable.
     s.chain_vaults.insert(1, vault(1, ChainVaultStatus::MintPending, 7, 9));
     assert!(matches!(
@@ -167,7 +167,7 @@ fn precheck_recover_rejects_nonzero_pending_or_wrong_status() {
 
 #[test]
 fn precheck_recover_rejects_wrong_chain_and_unknown() {
-    let mut s = MultiChainStateV5::default();
+    let mut s = MultiChainState::default();
     let mut v = vault(1, ChainVaultStatus::MintPending, 0, 9);
     v.collateral_chain = ChainId(999);
     s.chain_vaults.insert(1, v);
@@ -183,7 +183,7 @@ fn precheck_recover_rejects_wrong_chain_and_unknown() {
 
 #[test]
 fn apply_recover_vault_flips_mintpending_to_open() {
-    let mut s = MultiChainStateV5::default();
+    let mut s = MultiChainState::default();
     s.chain_vaults.insert(1, vault(1, ChainVaultStatus::MintPending, 0, 9));
     apply_recover_vault_in_state(&mut s, CHAIN, 1).expect("recover");
     assert_eq!(s.chain_vaults[&1].status, ChainVaultStatus::Open);

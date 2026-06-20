@@ -30,6 +30,7 @@
 //! incident (MEMORY.md: `project_amm_state_wipe_2026_05_18.md`).
 
 use super::config::{ChainConfigV1, ChainConfigV2, ChainConfigV3, ChainId};
+use super::liquidation_config::ChainLiquidationConfigV1;
 use super::monad::chain_vault::ChainVaultV1;
 use super::settlement_queue::SettlementQueueV1;
 use candid::{CandidType, Deserialize, Principal};
@@ -423,7 +424,175 @@ impl MultiChainStateV5 {
     }
 }
 
-pub type MultiChainState = MultiChainStateV5;
+/// Chains-liquidation Increment 1 snapshot. Carries every `MultiChainStateV5`
+/// field verbatim, plus the liquidation-engine accounting scaffolding: per-chain
+/// reserve backing (bot/PSM path), the physical USDC custody mirror, per-chain
+/// pending SP burn (pre-eSpace-burn), and the one-shot SP-attempted set. This is
+/// a NON-BREAKING reshape under ciborium, exactly like every prior bump:
+///
+///  - The fifteen V5 fields are byte-for-byte identical and map across by name
+///    (the four originals are always present; every V2+-added map keeps its
+///    `#[serde(default)]`).
+///  - The four new V6 fields each carry `#[serde(default)]`, so a live
+///    `MultiChainStateV5` CBOR snapshot (which lacks these keys entirely) decodes
+///    into V6 with them defaulting to empty — NOT a state wipe. Proven by
+///    `tests_multi_chain_state_v2::v5_cbor_snapshot_decodes_into_v6_without_wiping_state`.
+///
+/// All four new fields are 0/empty until Increment 2 wires the liquidation
+/// engine, so the unified supply invariant (debt + reserve + pending-burn)
+/// reduces to the old `supply == debt` on the live snapshot — the upgrade is
+/// behavior-preserving.
+///
+/// Because the decode is in-place, NO explicit `post_upgrade` migration call is
+/// needed; `migrate_multi_chain_state` in `supply.rs` remains the dormant
+/// template for the next BREAKING bump.
+///
+/// Add the NEXT field by bumping to `MultiChainStateV7` (keep V6 verbatim),
+/// `#[serde(default)]` on the new field, and rebinding the alias below.
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, Default)]
+pub struct MultiChainStateV6 {
+    pub chain_configs: BTreeMap<ChainId, ChainConfigV3>,
+    pub chain_supplies: BTreeMap<ChainId, u128>,
+    pub settlement_queues: BTreeMap<ChainId, SettlementQueueV1>,
+    pub invariant_halted: bool,
+    #[serde(default)]
+    pub chain_vaults: BTreeMap<u64, ChainVaultV1>,
+    #[serde(default)]
+    pub chain_contracts: BTreeMap<ChainId, String>,
+    #[serde(default)]
+    pub manual_prices: BTreeMap<(ChainId, String), u64>,
+    #[serde(default)]
+    pub last_observed_block: BTreeMap<ChainId, u64>,
+    #[serde(default)]
+    pub hot_wallet_balance_e18: BTreeMap<ChainId, u128>,
+    #[serde(default)]
+    pub reorg_halted: BTreeMap<ChainId, bool>,
+    #[serde(default)]
+    pub reorg_suspect_streak: BTreeMap<ChainId, u32>,
+    #[serde(default)]
+    pub processed_burn_keys: BTreeMap<u64, BTreeSet<String>>,
+    /// M2: per-synthetic-owner monotonic nonce for EIP-712 intent replay
+    /// protection (carried verbatim from V5).
+    #[serde(default)]
+    pub evm_owner_nonces: BTreeMap<Principal, u64>,
+    /// Audit F-01: wall-clock ns of the last manual-price write per
+    /// `(chain, symbol)` (carried verbatim from V5).
+    #[serde(default)]
+    pub manual_price_set_at_ns: BTreeMap<(ChainId, String), u64>,
+    // --- New in V6: chains-liquidation accounting scaffolding (Increment 1) ---
+    /// Bot-path (PSM) reserve backing per chain (e8s): icUSD value whose backing
+    /// shifted CFX->USDC, no longer an open vault's debt but not yet burned.
+    /// RHS term-2 of the unified supply invariant. Grows on bot-liquidation
+    /// confirm; shrinks ONLY when a human bridges + the foreign icUSD is burned.
+    /// Empty until Increment 2 wires the bot liquidation path. `#[serde(default)]`
+    /// is mandatory state-wipe defense (a V5 snapshot lacks this key).
+    #[serde(default)]
+    pub reserve_backing_e8s: BTreeMap<ChainId, u128>,
+    /// Physical settle-stable (USDC) the reserve address holds, per chain, in
+    /// native base units (18-dec on eSpace), pending the manual bridge to cUSDT
+    /// reserves. Bookkeeping of the ASSET, distinct from the icUSD-denominated
+    /// backing; the gap reveals realized slippage / penalty surplus. NOT on the
+    /// invariant RHS. Empty until Increment 2.
+    #[serde(default)]
+    pub reserve_usdc_native: BTreeMap<ChainId, u128>,
+    /// SP-path debt mid-burn per chain (e8s): the SP has absorbed it (icUSD
+    /// burned IC-side) but the matching eSpace burn is not yet confirmed. RHS
+    /// term-3 of the unified supply invariant. Moves to a `chain_supplies`
+    /// decrement when the eSpace Burn op confirms. Empty until Increment 4.
+    #[serde(default)]
+    pub pending_chain_burn_e8s: BTreeMap<ChainId, u128>,
+    /// Chains analog of the ICP `sp_attempted_vaults`: vaults whose bot
+    /// liquidation failed and were escalated to the SP exactly once (the
+    /// no-retry guard; once present, never re-attempted by the SP). Empty until
+    /// Increment 4. Rides V6 because it is in the persisted root, but it is
+    /// transient routing state (reset on resolution); surviving an upgrade is
+    /// harmless (worst case a vault waits one extra tick for manual).
+    #[serde(default)]
+    pub sp_attempted_chain_vaults: BTreeSet<u64>,
+    /// Per-chain, operator-settable liquidation config (spec 8): the DEX wiring +
+    /// risk knobs the bot path reads, keyed by chain. Added directly to V6 (not a
+    /// V7) because V6 has not yet been persisted to any live canister — same
+    /// pre-deploy rationale as the reorg fields were added directly to V2.
+    /// `#[serde(default)]` is mandatory state-wipe defense regardless. Inert until
+    /// Increment 2+ reads it; Increment 1 ships only the getter/setter.
+    #[serde(default)]
+    pub chain_liquidation_configs: BTreeMap<ChainId, ChainLiquidationConfigV1>,
+}
+
+impl MultiChainStateV6 {
+    pub fn total_supply_all_chains_e8s(&self) -> u128 {
+        self.chain_supplies.values().copied().sum()
+    }
+
+    /// Sum of confirmed debt across all foreign-chain vaults (e8s). RHS term-1 of
+    /// the unified supply invariant (spec 5.2). NOTE: counts only REALIZED
+    /// `debt_e8s`, so `pending_interest_mint_e8s` (accrued-but-unconfirmed
+    /// interest) is deliberately excluded — it mints new supply only on confirm
+    /// and is not yet in `chain_supplies` (finding #1).
+    pub fn total_chain_vault_debt_e8s(&self) -> u128 {
+        self.chain_vaults.values().map(|v| v.debt_e8s).sum()
+    }
+
+    /// RHS term-2 of the unified supply invariant (spec 3.3, 5.2): total icUSD
+    /// whose backing shifted CFX->USDC reserve (bot/PSM path), summed across
+    /// chains. 0 until Increment 2 wires the bot liquidation path.
+    pub fn total_reserve_backing_e8s(&self) -> u128 {
+        self.reserve_backing_e8s.values().copied().sum()
+    }
+
+    /// RHS term-3 of the unified supply invariant (spec 3.3, 5.2): total icUSD the
+    /// SP burned IC-side but whose matching eSpace burn is not yet confirmed,
+    /// summed across chains. 0 until Increment 4 wires the SP path.
+    pub fn total_pending_chain_burn_e8s(&self) -> u128 {
+        self.pending_chain_burn_e8s.values().copied().sum()
+    }
+
+    /// M2: the expected next EIP-712 nonce for a synthetic owner (0 if unseen).
+    pub fn expected_evm_nonce(&self, owner: &Principal) -> u64 {
+        self.evm_owner_nonces.get(owner).copied().unwrap_or(0)
+    }
+
+    /// M2: consume `nonce` for `owner`. Succeeds and bumps the counter iff
+    /// `nonce == expected`; else returns the expected value as `Err` (no mutation).
+    pub fn consume_evm_nonce(&mut self, owner: &Principal, nonce: u64) -> Result<(), u64> {
+        let expected = self.expected_evm_nonce(owner);
+        if nonce != expected {
+            return Err(expected);
+        }
+        self.evm_owner_nonces.insert(*owner, expected.saturating_add(1));
+        Ok(())
+    }
+
+    /// M2 anti-spam: count NON-terminal vaults (everything but `Closed`) owned by
+    /// `owner` — the per-owner open cap.
+    pub fn count_owner_active_vaults(&self, owner: &Principal) -> usize {
+        use crate::chains::vault::ChainVaultStatus;
+        self.chain_vaults
+            .values()
+            .filter(|v| &v.owner == owner && v.status != ChainVaultStatus::Closed)
+            .count()
+    }
+
+    /// Write a manual collateral price for `(chain, symbol)` and stamp the
+    /// wall-clock time of the write. Both maps are updated together so the
+    /// getter can never see a price without its freshness timestamp.
+    pub fn set_manual_price(&mut self, chain: ChainId, symbol: String, price_e8: u64, now_ns: u64) {
+        self.manual_prices.insert((chain, symbol.clone()), price_e8);
+        self.manual_price_set_at_ns.insert((chain, symbol), now_ns);
+    }
+
+    /// Read the manual collateral price for `(chain, symbol)` as
+    /// `(price_e8, set_at_ns)`. Returns `None` if no price is set. `set_at_ns` is
+    /// `0` for a price set before the V5 upgrade (timestamp not yet recorded).
+    pub fn get_manual_price(&self, chain: ChainId, symbol: &str) -> Option<(u64, u64)> {
+        let key = (chain, symbol.to_string());
+        let price = *self.manual_prices.get(&key)?;
+        let set_at = self.manual_price_set_at_ns.get(&key).copied().unwrap_or(0);
+        Some((price, set_at))
+    }
+}
+
+pub type MultiChainState = MultiChainStateV6;
 
 #[cfg(test)]
 mod manual_price_tests {
@@ -433,20 +602,20 @@ mod manual_price_tests {
 
     #[test]
     fn set_manual_price_stores_price_and_timestamp() {
-        let mut mc = MultiChainStateV5::default();
+        let mut mc = MultiChainState::default();
         mc.set_manual_price(CFX, "CFX".to_string(), 15_000_000, 1234);
         assert_eq!(mc.get_manual_price(CFX, "CFX"), Some((15_000_000, 1234)));
     }
 
     #[test]
     fn get_manual_price_none_when_unset() {
-        let mc = MultiChainStateV5::default();
+        let mc = MultiChainState::default();
         assert_eq!(mc.get_manual_price(CFX, "CFX"), None);
     }
 
     #[test]
     fn set_manual_price_overwrites_price_and_timestamp() {
-        let mut mc = MultiChainStateV5::default();
+        let mut mc = MultiChainState::default();
         mc.set_manual_price(CFX, "CFX".to_string(), 15_000_000, 1000);
         mc.set_manual_price(CFX, "CFX".to_string(), 16_000_000, 2000);
         assert_eq!(mc.get_manual_price(CFX, "CFX"), Some((16_000_000, 2000)));
@@ -456,7 +625,7 @@ mod manual_price_tests {
     fn get_manual_price_reports_zero_timestamp_for_pre_v5_price() {
         // A price written before V5 lives in `manual_prices` with NO entry in
         // `manual_price_set_at_ns`. The getter must report set_at_ns = 0, not None.
-        let mut mc = MultiChainStateV5::default();
+        let mut mc = MultiChainState::default();
         mc.manual_prices.insert((CFX, "CFX".to_string()), 15_000_000);
         assert_eq!(mc.get_manual_price(CFX, "CFX"), Some((15_000_000, 0)));
     }
