@@ -100,6 +100,45 @@ pub fn collateral_in_native_for_repay(
     grossed_value_e8s.saturating_mul(native_scale) / (price_e8 as u128)
 }
 
+use crate::chains::config::ChainId;
+use crate::chains::multi_chain_state::MultiChainState;
+
+/// Why a chain price was rejected by the fail-closed staleness gate (spec §4.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PriceError {
+    NoPrice,
+    ZeroPrice,
+    NoTimestamp, // pre-V5 price with no recorded set-time -> fail closed
+    Stale,
+}
+
+/// Fail-closed fresh-price gate (spec §4.3, audit F-01). Liquidation is the most
+/// dangerous consumer of a stale price (stale-high hides an underwater vault;
+/// stale-low liquidates a healthy one), so it MUST verify freshness. A stale
+/// price DEFERS chain liquidations only (caller emits ChainLiquidationDeferred +
+/// skips); it does NOT latch the protocol to ReadOnly (asymmetric with the ICP
+/// oracle breaker, deliberate). The off-chain monitor's uptime is thus a hard
+/// production SLO.
+pub fn fresh_chain_price_e8(
+    state: &MultiChainState,
+    chain: ChainId,
+    symbol: &str,
+    now_ns: u64,
+    max_price_age_ns: u64,
+) -> Result<u64, PriceError> {
+    let (price_e8, set_at_ns) = state.get_manual_price(chain, symbol).ok_or(PriceError::NoPrice)?;
+    if price_e8 == 0 {
+        return Err(PriceError::ZeroPrice);
+    }
+    if set_at_ns == 0 {
+        return Err(PriceError::NoTimestamp);
+    }
+    if now_ns.saturating_sub(set_at_ns) > max_price_age_ns {
+        return Err(PriceError::Stale);
+    }
+    Ok(price_e8)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,5 +228,44 @@ mod tests {
     #[test]
     fn bonus_from_penalty() {
         assert_eq!(bonus_e4_from_penalty_bps(1_200), 11_200);
+    }
+
+    // ─── Task 4: fail-closed price-staleness gate (spec §4.3) ───
+    // (ChainId + MultiChainState come in via `use super::*`.)
+
+    fn state_with_price(price: u64, set_at_ns: u64) -> MultiChainState {
+        let mut s = MultiChainState::default();
+        s.manual_prices.insert((ChainId(71), "CFX".into()), price);
+        s.manual_price_set_at_ns.insert((ChainId(71), "CFX".into()), set_at_ns);
+        s
+    }
+
+    #[test]
+    fn fresh_price_ok_within_window() {
+        let s = state_with_price(15_000_000, 1_000);
+        assert_eq!(fresh_chain_price_e8(&s, ChainId(71), "CFX", 1_500, 1_000), Ok(15_000_000));
+    }
+    #[test]
+    fn fresh_price_rejects_missing() {
+        let s = MultiChainState::default();
+        assert_eq!(fresh_chain_price_e8(&s, ChainId(71), "CFX", 1, 1_000), Err(PriceError::NoPrice));
+    }
+    #[test]
+    fn fresh_price_rejects_zero() {
+        let s = state_with_price(0, 1_000);
+        assert_eq!(fresh_chain_price_e8(&s, ChainId(71), "CFX", 1_500, 1_000), Err(PriceError::ZeroPrice));
+    }
+    #[test]
+    fn fresh_price_rejects_no_timestamp() {
+        // pre-V5 price (set_at == 0) -> fail closed.
+        let s = state_with_price(15_000_000, 0);
+        assert_eq!(fresh_chain_price_e8(&s, ChainId(71), "CFX", 1_500, 1_000), Err(PriceError::NoTimestamp));
+    }
+    #[test]
+    fn fresh_price_rejects_stale_and_accepts_boundary() {
+        let s = state_with_price(15_000_000, 1_000);
+        // exactly at the age ceiling -> OK; one ns past -> Stale.
+        assert_eq!(fresh_chain_price_e8(&s, ChainId(71), "CFX", 2_000, 1_000), Ok(15_000_000));
+        assert_eq!(fresh_chain_price_e8(&s, ChainId(71), "CFX", 2_001, 1_000), Err(PriceError::Stale));
     }
 }
