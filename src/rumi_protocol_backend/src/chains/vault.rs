@@ -227,6 +227,46 @@ pub enum WithdrawError {
     LiquidationInFlight,
 }
 
+/// Why `begin_liquidation_in_state` (spec §4.9 Phase 1) rejected. No state is
+/// mutated on any error.
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub enum LiquidationError {
+    UnknownVault,
+    /// Vault status is not `Open` (only an Open vault has confirmed collateral+debt).
+    WrongStatus { status: ChainVaultStatus },
+    /// A borrow mint is in flight; liquidating now could leave debt unbacked once
+    /// it confirms (spec §4.4). Exclude.
+    MintInFlight,
+    /// An interest mint is in flight; same exclusion (spec §4.4).
+    InterestRealizationPending,
+    /// The vault already carries a `pending_liquidation` marker (spec §4.4, finding
+    /// #5: the marker is the cross-tier mutex). No double-lock.
+    AlreadyLiquidating,
+    /// No `ChainLiquidationConfigV1` row for the chain (the engine refuses to run
+    /// without one, spec §9).
+    NoConfig,
+    /// The chain's liquidation config has `enabled == false` (master switch off).
+    NotEnabled,
+    /// No manual price for the chain's collateral symbol.
+    NoPrice,
+    /// The manual price is zero.
+    ZeroPrice,
+    /// The manual price has no recorded set-time (pre-V5) -> fail closed (spec §4.3).
+    NoTimestamp,
+    /// The manual price is older than the config's `max_price_age_ns` (spec §4.3).
+    StalePrice,
+    /// CR is at or above the liquidation threshold (not liquidatable).
+    NotLiquidatable { cr_e4: u64, threshold_e4: u64 },
+    /// The sized repay or its grossed-up collateral rounded to zero (nothing
+    /// economical to seize at the current price/depth cap).
+    NothingToLiquidate,
+    /// A swap-target address (router/pair/settle-stable) failed the chain address
+    /// validator. Rejected at the boundary so it can never panic the tx builder.
+    InvalidAddress(String),
+    /// The settlement queue rejected the enqueue (e.g. duplicate idempotency key).
+    QueueError(String),
+}
+
 /// Compute the collateral ratio (e4: 25000 == 250.00%) for a foreign-chain vault.
 ///
 /// `collateral_native` is the collateral amount in the chain's NATIVE base units
@@ -735,6 +775,158 @@ pub fn close_chain_vault_in_state(
         min_cr_e4,
         now_ns,
     )
+}
+
+/// Begin a Tier-1 BOT liquidation (spec §4.9 Phase 1). Read-only validate ->
+/// enqueue-first -> mutate-on-success (mirrors `withdraw_collateral_in_state`),
+/// fully synchronous so the marker-set-in-one-mutate is the dedup (finding #37).
+/// Sets the `pending_liquidation` marker (the single source of truth for routing
+/// + the durable lock, finding #5), RESERVES (decrements) collateral, and
+/// enqueues an INERT `LiquidationSwap` op (the swap submit/confirm is Increment
+/// 3; `select_next_op` skips it). Debt + supply are UNCHANGED (Design B); the
+/// debt->reserve shift happens at confirm in Increment 3. Returns the op_id.
+///
+/// `liquidation_threshold_e4` is the chain's liquidation trigger (e.g. 133% for
+/// Conflux) — distinct from the open gate; the caller reads it from
+/// `ChainCollateralConfig::liquidation_threshold_e4`. The DEX wiring + depth cap
+/// + staleness ceiling come from the chain's `ChainLiquidationConfigV1` (the
+/// master `enabled` gate). The penalty/interest/restore-target come from
+/// `ChainCollateralConfig`.
+pub fn begin_liquidation_in_state(
+    state: &mut MultiChainState,
+    vault_id: u64,
+    address_validator: fn(&str) -> bool,
+    price_symbol: &str,
+    liquidation_threshold_e4: u64,
+    now_ns: u64,
+) -> Result<u64, LiquidationError> {
+    use crate::chains::liquidation as liq;
+
+    // ── Step 1: read-only validation (no mutation on any reject). ──
+    let (chain, op_kind, debt_to_clear_e8s, collateral_in_native) = {
+        let v = state
+            .chain_vaults
+            .get(&vault_id)
+            .ok_or(LiquidationError::UnknownVault)?;
+        if v.status != ChainVaultStatus::Open {
+            return Err(LiquidationError::WrongStatus { status: v.status.clone() });
+        }
+        if v.pending_mint_e8s != 0 {
+            return Err(LiquidationError::MintInFlight);
+        }
+        if v.pending_interest_mint_e8s != 0 {
+            return Err(LiquidationError::InterestRealizationPending);
+        }
+        if v.pending_liquidation.is_some() {
+            return Err(LiquidationError::AlreadyLiquidating);
+        }
+        let chain = v.collateral_chain;
+
+        // Config (DEX wiring + depth cap + staleness ceiling). Master gate (§9).
+        let cfg = state
+            .chain_liquidation_configs
+            .get(&chain)
+            .ok_or(LiquidationError::NoConfig)?;
+        if !cfg.enabled {
+            return Err(LiquidationError::NotEnabled);
+        }
+
+        // Fresh, fail-closed price (spec §4.3).
+        let price_e8 = liq::fresh_chain_price_e8(state, chain, price_symbol, now_ns, cfg.max_price_age_ns)
+            .map_err(|e| match e {
+                liq::PriceError::NoPrice => LiquidationError::NoPrice,
+                liq::PriceError::ZeroPrice => LiquidationError::ZeroPrice,
+                liq::PriceError::NoTimestamp => LiquidationError::NoTimestamp,
+                liq::PriceError::Stale => LiquidationError::StalePrice,
+            })?;
+
+        let cc = crate::chains::collateral_config::chain_collateral_config(chain);
+        let apr_bps = cc.map(|c| c.interest_apr_bps).unwrap_or(0);
+        let penalty_bps = cc.map(|c| c.liquidation_penalty_bps).unwrap_or(0);
+        let target_cr_e4 = cc.map(|c| c.recovery_target_cr_e4).unwrap_or(cfg.restore_target_cr_e4);
+        let native_decimals = state
+            .chain_configs
+            .get(&chain)
+            .map(|c| c.chain_native_decimals)
+            .unwrap_or(18);
+
+        // Interest-aware CR check (spec §4.2). Window byte-identical to harvest.
+        let eff_debt = liq::effective_debt_e8s(
+            v.debt_e8s,
+            v.pending_interest_mint_e8s,
+            apr_bps,
+            now_ns.saturating_sub(v.last_interest_accrual_ns),
+        );
+        let cr_e4 = collateral_ratio_e4(v.collateral_amount_native, native_decimals, price_e8, eff_debt);
+        if cr_e4 >= liquidation_threshold_e4 {
+            return Err(LiquidationError::NotLiquidatable {
+                cr_e4,
+                threshold_e4: liquidation_threshold_e4,
+            });
+        }
+
+        // Size: restore to target, clamp to the ADVISORY depth cap (spec §4.6/§4.7).
+        let bonus_e4 = liq::bonus_e4_from_penalty_bps(penalty_bps);
+        let coll_value = liq::collateral_value_e8s(v.collateral_amount_native, native_decimals, price_e8);
+        let sized = liq::sized_repay_e8s(eff_debt, coll_value, target_cr_e4, bonus_e4);
+        let value_cap = liq::value_cap_to_repay(cfg.max_swap_value_e8s, bonus_e4);
+        let effective_repay = sized.min(value_cap);
+        let collateral_in = liq::collateral_in_native_for_repay(effective_repay, bonus_e4, native_decimals, price_e8)
+            .min(v.collateral_amount_native);
+        if effective_repay == 0 || collateral_in == 0 {
+            return Err(LiquidationError::NothingToLiquidate);
+        }
+
+        // Validate the swap targets BEFORE enqueue (avoid a deep tx-builder panic
+        // in Increment 3). The reserve recipient is the settle-stable sink for now;
+        // a dedicated tECDSA reserve address + config field land with the swap (Inc 3).
+        let reserve_recipient = cfg.settle_stable_token.clone();
+        for a in [cfg.router.as_str(), cfg.pair.as_str(), reserve_recipient.as_str()] {
+            if !address_validator(a) {
+                return Err(LiquidationError::InvalidAddress(a.to_string()));
+            }
+        }
+        let op_kind = SettlementOpKind::LiquidationSwap {
+            vault_id,
+            collateral_in_native: collateral_in,
+            min_usdc_out_native: 0, // advisory; recomputed JIT at submit (Inc 3)
+            debt_to_clear_e8s: effective_repay,
+            router: cfg.router.clone(),
+            pair: cfg.pair.clone(),
+            path: vec![cfg.collateral_token.clone(), cfg.settle_stable_token.clone()],
+            reserve_recipient,
+            deadline_secs: 180,
+        };
+        (chain, op_kind, effective_repay, collateral_in)
+    };
+
+    // ── Step 2: enqueue FIRST (idempotency key, spec §4.9 step 6). ──
+    let op_id = state
+        .settlement_queues
+        .entry(chain)
+        .or_default()
+        .enqueue(SettlementOp::new(
+            op_kind,
+            format!("liquidate-{}-{}-{}", chain.0, vault_id, now_ns),
+            now_ns,
+        ))
+        .map_err(|e| LiquidationError::QueueError(format!("{e:?}")))?;
+
+    // ── Step 3: only after enqueue — reserve collateral + set marker + record routing. ──
+    let v = state
+        .chain_vaults
+        .get_mut(&vault_id)
+        .expect("vault present: checked above");
+    v.collateral_amount_native -= collateral_in_native;
+    v.pending_liquidation = Some(PendingLiquidationV1 {
+        op_id,
+        debt_to_clear_e8s,
+        collateral_reserved_native: collateral_in_native,
+        tier: LiquidationTier::Bot,
+        started_at_ns: now_ns,
+    });
+    state.bot_pending_chain_vaults.insert(vault_id, now_ns);
+    Ok(op_id)
 }
 
 // ─── M2: borrow + anti-spam ───────────────────────────────────────────────────
