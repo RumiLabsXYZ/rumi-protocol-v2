@@ -74,6 +74,8 @@ fn seeded_awaiting_deposit(declared_lamports: u128) -> MultiChainStateV5 {
         is_valid_solana_address, // the REAL Solana validator seam
         "SOL",                   // the Solana native-asset price symbol
         super::config::SOLANA_MIN_CR_E4,
+        0,    // min_vault_debt: no floor in this test
+        None, // no debt ceiling in this test
         12345,
         7,
     )

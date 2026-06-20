@@ -119,6 +119,12 @@ pub enum OpenVaultError {
     /// helpers (e.g. `tx::abi_word_address`), which panic on malformed
     /// hex/length deep on the settlement worker path. Carries the bad address.
     InvalidAddress(String),
+    /// Declared debt is below the chain's `min_vault_debt_e8s` floor (a vault too
+    /// small to be economically liquidatable).
+    BelowMinDebt { debt_e8s: u128, min_e8s: u128 },
+    /// The open would push the chain's total outstanding+in-flight debt over the
+    /// configured `debt_ceiling_e8s`.
+    DebtCeilingExceeded { would_be_e8s: u128, ceiling_e8s: u128 },
 }
 
 /// Reasons `withdraw_collateral_in_state` / `close_chain_vault_in_state` can
@@ -199,6 +205,23 @@ pub fn collateral_ratio_e4(
     cr.min(u64::MAX as u128) as u64
 }
 
+/// Sum of confirmed debt + intended/in-flight mints for all non-Closed vaults on
+/// `chain`. Used to enforce a per-chain debt ceiling: an open/borrow must not push
+/// this total over the configured cap. Counts `pending_mint_e8s` and
+/// `pending_interest_mint_e8s` so concurrent in-flight opens/borrows cannot
+/// collectively breach the ceiling. Saturating throughout.
+pub fn total_chain_debt_including_pending_e8s(state: &MultiChainStateV5, chain: ChainId) -> u128 {
+    state
+        .chain_vaults
+        .values()
+        .filter(|v| v.collateral_chain == chain && v.status != ChainVaultStatus::Closed)
+        .fold(0u128, |acc, v| {
+            acc.saturating_add(v.debt_e8s)
+                .saturating_add(v.pending_mint_e8s)
+                .saturating_add(v.pending_interest_mint_e8s)
+        })
+}
+
 /// Open a foreign-chain vault in the `AwaitingDeposit` state (open-then-verify).
 ///
 /// CR-checks the DECLARED collateral against `min_cr_e4`. On success, inserts a
@@ -236,6 +259,8 @@ pub fn open_chain_vault_in_state(
     address_validator: fn(&str) -> bool,
     price_symbol: &str,
     min_cr_e4: u64,
+    min_vault_debt_e8s: u128,
+    debt_ceiling_e8s: Option<u128>,
     now_ns: u64,
     vault_id: u64,
 ) -> Result<(), OpenVaultError> {
@@ -274,6 +299,24 @@ pub fn open_chain_vault_in_state(
     let cr_e4 = collateral_ratio_e4(collateral_e18, native_decimals, price_e8, debt_e8s);
     if cr_e4 < min_cr_e4 {
         return Err(OpenVaultError::BelowMinCr { cr_e4, min_e4: min_cr_e4 });
+    }
+    // Min-debt floor: a vault too small is uneconomical to liquidate.
+    if debt_e8s < min_vault_debt_e8s {
+        return Err(OpenVaultError::BelowMinDebt { debt_e8s, min_e8s: min_vault_debt_e8s });
+    }
+    // Per-chain debt ceiling: the new vault's intended debt is added (as
+    // pending_mint) to the chain's outstanding+in-flight total; reject if that
+    // breaches the cap. Counts pending so concurrent opens cannot collectively
+    // exceed it (this runs inside one synchronous mutate_state, no await).
+    if let Some(ceiling) = debt_ceiling_e8s {
+        let would_be =
+            total_chain_debt_including_pending_e8s(state, chain).saturating_add(debt_e8s);
+        if would_be > ceiling {
+            return Err(OpenVaultError::DebtCeilingExceeded {
+                would_be_e8s: would_be,
+                ceiling_e8s: ceiling,
+            });
+        }
     }
 
     state.chain_vaults.insert(
@@ -642,6 +685,11 @@ pub enum BorrowError {
     BelowMinCr { cr_e4: u64, min_e4: u64 },
     QueueError(String),
     InvalidAddress(String),
+    /// Post-borrow debt is below the chain's `min_vault_debt_e8s` floor.
+    BelowMinDebt { debt_e8s: u128, min_e8s: u128 },
+    /// The borrow would push the chain's total outstanding+in-flight debt over
+    /// the configured `debt_ceiling_e8s`.
+    DebtCeilingExceeded { would_be_e8s: u128, ceiling_e8s: u128 },
 }
 
 /// Borrow additional icUSD against an existing `Open` vault — a SECOND on-chain
@@ -666,6 +714,8 @@ pub fn borrow_chain_vault_in_state(
     address_validator: fn(&str) -> bool,
     price_symbol: &str,
     min_cr_e4: u64,
+    min_vault_debt_e8s: u128,
+    debt_ceiling_e8s: Option<u128>,
     now_ns: u64,
 ) -> Result<(), BorrowError> {
     if additional_e8s == 0 {
@@ -705,6 +755,22 @@ pub fn borrow_chain_vault_in_state(
     let cr_e4 = collateral_ratio_e4(collateral, native_decimals, price_e8, new_debt);
     if cr_e4 < min_cr_e4 {
         return Err(BorrowError::BelowMinCr { cr_e4, min_e4: min_cr_e4 });
+    }
+    if new_debt < min_vault_debt_e8s {
+        return Err(BorrowError::BelowMinDebt { debt_e8s: new_debt, min_e8s: min_vault_debt_e8s });
+    }
+    // Debt ceiling: this borrow adds exactly `additional_e8s` to the chain's
+    // outstanding+in-flight total (the vault's pending_mint was 0, checked above,
+    // and becomes `additional_e8s`; debt_e8s is unchanged until confirm).
+    if let Some(ceiling) = debt_ceiling_e8s {
+        let would_be =
+            total_chain_debt_including_pending_e8s(state, chain).saturating_add(additional_e8s);
+        if would_be > ceiling {
+            return Err(BorrowError::DebtCeilingExceeded {
+                would_be_e8s: would_be,
+                ceiling_e8s: ceiling,
+            });
+        }
     }
     // Step 2: enqueue FIRST (can fail on a duplicate key). The `now_ns` suffix
     // keeps this key distinct from the genesis open mint (`mint-{chain}-{vault}`).

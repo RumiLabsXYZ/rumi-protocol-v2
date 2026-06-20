@@ -1137,18 +1137,17 @@ fn set_chain_config(
 /// Conflux (71) ("CFX", 13_300), so the EVM endpoints are chain-agnostic.
 fn evm_vault_params(
     chain: rumi_protocol_backend::chains::config::ChainId,
-) -> Result<(&'static str, u64), ProtocolError> {
+) -> Result<(&'static str, u64, u128, Option<u128>), ProtocolError> {
     let symbol = rumi_protocol_backend::chains::evm::evm_chain_config(chain)
         .map(|c| c.native_symbol)
         .ok_or_else(|| {
             ProtocolError::ChainAdmin(format!("chain {} is not a known EVM chain", chain.0))
         })?;
-    let min_cr = rumi_protocol_backend::chains::collateral_config::chain_collateral_config(chain)
-        .map(|c| c.min_cr_e4)
+    let cfg = rumi_protocol_backend::chains::collateral_config::chain_collateral_config(chain)
         .ok_or_else(|| {
             ProtocolError::ChainAdmin(format!("no collateral config for chain {}", chain.0))
         })?;
-    Ok((symbol, min_cr))
+    Ok((symbol, cfg.min_cr_e4, cfg.min_vault_debt_e8s, cfg.debt_ceiling_e8s))
 }
 
 /// Phase 1b Task 12: open a foreign-chain EVM (Monad or Conflux) vault, OPEN-THEN-VERIFY.
@@ -1180,7 +1179,7 @@ async fn open_chain_vault(
     }
     // Resolve the per-chain price symbol + min CR early so a non-EVM chain fails
     // fast (before reserving a vault id or paying for the tECDSA derive).
-    let (symbol, min_cr) = evm_vault_params(collateral_chain)?;
+    let (symbol, min_cr, min_debt, ceiling) = evm_vault_params(collateral_chain)?;
     // Reserve the vault id BEFORE the async derive so the derivation path
     // (chain, caller, vault_id) is unique even across concurrent opens.
     let vault_id = mutate_state(|s| {
@@ -1208,6 +1207,8 @@ async fn open_chain_vault(
             rumi_protocol_backend::chains::evm::tecdsa::is_valid_evm_address,
             symbol,
             min_cr,
+            min_debt,
+            ceiling,
             now,
             vault_id,
         )
@@ -1263,7 +1264,7 @@ fn withdraw_chain_collateral(
             ));
         }
         let chain = vault.collateral_chain;
-        let (symbol, min_cr) = evm_vault_params(chain)?;
+        let (symbol, min_cr, _, _) = evm_vault_params(chain)?;
         rumi_protocol_backend::chains::vault::withdraw_collateral_in_state(
             &mut s.multi_chain,
             vault_id,
@@ -1310,7 +1311,7 @@ fn close_chain_vault(vault_id: u64, dest_address: String) -> Result<(), Protocol
             ));
         }
         let chain = vault.collateral_chain;
-        let (symbol, min_cr) = evm_vault_params(chain)?;
+        let (symbol, min_cr, _, _) = evm_vault_params(chain)?;
         rumi_protocol_backend::chains::vault::close_chain_vault_in_state(
             &mut s.multi_chain,
             vault_id,
@@ -1340,6 +1341,8 @@ struct VerifiedIntent {
     synthetic: candid::Principal,
     symbol: &'static str,
     min_cr: u64,
+    min_vault_debt_e8s: u128,
+    debt_ceiling_e8s: Option<u128>,
 }
 
 /// Resolve per-chain params + the deployed IcUSD contract (for the EIP-712
@@ -1353,7 +1356,7 @@ fn verify_intent_ctx(
 ) -> Result<VerifiedIntent, ProtocolError> {
     let chain = rumi_protocol_backend::chains::config::ChainId(intent.chain_id as u32);
     // Resolve symbol + min CR (fails fast for a non-EVM / unregistered chain).
-    let (symbol, min_cr) = evm_vault_params(chain)
+    let (symbol, min_cr, min_vault_debt_e8s, debt_ceiling_e8s) = evm_vault_params(chain)
         .map_err(|e| ProtocolError::EvmAuth(format!("{e:?}")))?;
     // The deployed IcUSD address binds the EIP-712 domain to this chain+deployment.
     let contract = read_state(|s| s.multi_chain.chain_contracts.get(&chain).cloned())
@@ -1367,7 +1370,7 @@ fn verify_intent_ctx(
         now_secs,
     )
     .map_err(|e| ProtocolError::EvmAuth(format!("{e:?}")))?;
-    Ok(VerifiedIntent { chain, owner_evm, synthetic, symbol, min_cr })
+    Ok(VerifiedIntent { chain, owner_evm, synthetic, symbol, min_cr, min_vault_debt_e8s, debt_ceiling_e8s })
 }
 
 /// Authorize a borrow/withdraw/close `_evm` op against an existing vault: the
@@ -1456,6 +1459,8 @@ async fn open_chain_vault_evm(
             rumi_protocol_backend::chains::evm::tecdsa::is_valid_evm_address,
             v.symbol,
             v.min_cr,
+            v.min_vault_debt_e8s,
+            v.debt_ceiling_e8s,
             now,
             vault_id,
         )
@@ -1499,6 +1504,8 @@ fn borrow_chain_vault_evm(
             rumi_protocol_backend::chains::evm::tecdsa::is_valid_evm_address,
             v.symbol,
             v.min_cr,
+            v.min_vault_debt_e8s,
+            v.debt_ceiling_e8s,
             now,
         )
         .map_err(|e| ProtocolError::EvmAuth(format!("{e:?}")))?;
@@ -1649,6 +1656,8 @@ async fn open_solana_vault(
             ted25519::is_valid_solana_address,
             "SOL",
             config::SOLANA_MIN_CR_E4,
+            0,    // min_vault_debt: no floor for Solana (Increment 0 targets Conflux)
+            None, // no debt ceiling for Solana yet
             now,
             vault_id,
         )
@@ -8257,8 +8266,11 @@ mod chain_vault_param_tests {
     #[test]
     fn evm_vault_params_resolves_per_chain() {
         use rumi_protocol_backend::chains::config::ChainId;
-        assert_eq!(evm_vault_params(ChainId(10143)).unwrap(), ("MON", 13_000)); // Monad preserved
-        assert_eq!(evm_vault_params(ChainId(71)).unwrap(), ("CFX", 13_300)); // Conflux = ICP mirror
+        assert_eq!(evm_vault_params(ChainId(10143)).unwrap(), ("MON", 13_000, 10_000_000, None)); // Monad preserved
+        assert_eq!(
+            evm_vault_params(ChainId(71)).unwrap(),
+            ("CFX", 15_000, 10_000_000, Some(500 * 100_000_000))
+        ); // Conflux: 150% open gate + 500-icUSD ceiling
         assert!(evm_vault_params(ChainId(999)).is_err());
     }
 
