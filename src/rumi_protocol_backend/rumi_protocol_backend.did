@@ -39,7 +39,10 @@ type CandidVault = record {
 };
 type ChainSupplyReconciliation = record {
   recorded_supply_e8s : nat;
+  pending_chain_burn_e8s : nat;
+  reserve_backing_e8s : nat;
   gap_e8s : int;
+  reserve_usdc_native : nat;
   unbacked_excess : bool;
   finalized_block : nat64;
   in_flight_mint_e8s : nat;

@@ -515,10 +515,27 @@ impl MultiChainStateV6 {
         self.chain_supplies.values().copied().sum()
     }
 
-    /// Sum of confirmed debt across all foreign-chain vaults (e8s). See the
-    /// V2 doc — same foreign-chain-only invariant.
+    /// Sum of confirmed debt across all foreign-chain vaults (e8s). RHS term-1 of
+    /// the unified supply invariant (spec 5.2). NOTE: counts only REALIZED
+    /// `debt_e8s`, so `pending_interest_mint_e8s` (accrued-but-unconfirmed
+    /// interest) is deliberately excluded — it mints new supply only on confirm
+    /// and is not yet in `chain_supplies` (finding #1).
     pub fn total_chain_vault_debt_e8s(&self) -> u128 {
         self.chain_vaults.values().map(|v| v.debt_e8s).sum()
+    }
+
+    /// RHS term-2 of the unified supply invariant (spec 3.3, 5.2): total icUSD
+    /// whose backing shifted CFX->USDC reserve (bot/PSM path), summed across
+    /// chains. 0 until Increment 2 wires the bot liquidation path.
+    pub fn total_reserve_backing_e8s(&self) -> u128 {
+        self.reserve_backing_e8s.values().copied().sum()
+    }
+
+    /// RHS term-3 of the unified supply invariant (spec 3.3, 5.2): total icUSD the
+    /// SP burned IC-side but whose matching eSpace burn is not yet confirmed,
+    /// summed across chains. 0 until Increment 4 wires the SP path.
+    pub fn total_pending_chain_burn_e8s(&self) -> u128 {
+        self.pending_chain_burn_e8s.values().copied().sum()
     }
 
     /// M2: the expected next EIP-712 nonce for a synthetic owner (0 if unseen).

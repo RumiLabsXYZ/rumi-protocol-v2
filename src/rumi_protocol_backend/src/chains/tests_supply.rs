@@ -1,4 +1,4 @@
-use super::supply::{apply_supply_delta, SupplyDelta, SupplyInvariantError};
+use super::supply::{apply_supply_delta, check_invariant, SupplyDelta, SupplyInvariantError};
 use super::config::{ChainConfigV3, ChainId, ChainStatus, GasStrategy};
 use super::multi_chain_state::MultiChainState;
 
@@ -134,4 +134,109 @@ fn stamp_sets_accrual_start_only_for_unstamped_vaults() {
     // Idempotent: a second run does not re-stamp the now-stamped vault.
     super::supply::stamp_chain_interest_accrual_start(&mut s, 99_999);
     assert_eq!(s.chain_vaults[&1].last_interest_accrual_ns, 12_345, "idempotent");
+}
+
+// ─── Increment 1 / Task 3: unified supply invariant (debt + reserve + pending-burn)
+//
+// spec 5.2: sum(chain_supplies) == total_chain_vault_debt_e8s()
+//                                + total_reserve_backing_e8s()      (bot/PSM path)
+//                                + total_pending_chain_burn_e8s()   (SP path, pre-burn)
+// With all-zero reserve/pending (Increment 1) this reduces to the old
+// `supply == debt`, so it is behavior-preserving on the live snapshot.
+
+const CHAIN: ChainId = ChainId(101);
+
+/// An Open vault on CHAIN with the given realized debt and pending interest.
+fn vault_with(debt_e8s: u128, pending_interest_e8s: u128) -> super::vault::ChainVaultV1 {
+    use super::vault::ChainVaultStatus;
+    use candid::Principal;
+    super::vault::ChainVaultV1 {
+        vault_id: 1,
+        owner: Principal::anonymous(),
+        collateral_chain: CHAIN,
+        custody_address: "0xc".into(),
+        collateral_amount_native: 0,
+        debt_e8s,
+        mint_recipient: "0xr".into(),
+        pending_mint_e8s: 0,
+        status: ChainVaultStatus::Open,
+        opened_at_ns: 0,
+        owner_evm: None,
+        last_interest_accrual_ns: 0,
+        pending_interest_mint_e8s: pending_interest_e8s,
+        pending_liquidation: None,
+    }
+}
+
+// (a) The reserve term is part of the RHS: when the bot shifts debt -> reserve,
+// chain_supplies stays put while debt drops, and the invariant still holds. The
+// OLD bare-debt check would FALSE-HALT here (sum 100 != debt 70).
+#[test]
+fn invariant_holds_with_nonzero_reserve_backing() {
+    let mut s = fixture_state();
+    s.chain_supplies.insert(CHAIN, 100); // 100 icUSD circulating
+    s.reserve_backing_e8s.insert(CHAIN, 30); // 30 backed by bot-held USDC reserve
+    // debt component = 70; generalized RHS = 70 + 30 + 0 = 100 == supply.
+    assert_eq!(check_invariant(&s, 70), Ok(()));
+}
+
+// (b) The pending-burn term is part of the RHS: the SP burns IC-side first and
+// moves the amount into pending_chain_burn_e8s; chain_supplies drops only when the
+// eSpace burn confirms. The invariant must hold during that window.
+#[test]
+fn invariant_holds_with_nonzero_pending_chain_burn() {
+    let mut s = fixture_state();
+    s.chain_supplies.insert(CHAIN, 100);
+    s.pending_chain_burn_e8s.insert(CHAIN, 30);
+    assert_eq!(check_invariant(&s, 70), Ok(()));
+}
+
+// (c) HIGH #1: pending_interest_mint_e8s mints NEW foreign icUSD only when it
+// CONFIRMS, so it is NOT yet in chain_supplies and must NOT appear on the RHS.
+// Here a vault carries 70 realized debt + 50 pending interest, and 30 of debt has
+// shifted to bot reserve, so supply = 100 (= 70 + 30). The 50 pending interest is
+// excluded from BOTH total_chain_vault_debt_e8s() and the RHS.
+#[test]
+fn invariant_excludes_pending_interest_mint_from_rhs() {
+    let mut s = fixture_state();
+    s.chain_vaults.insert(1, vault_with(70, 50));
+    s.chain_supplies.insert(CHAIN, 100);
+    s.reserve_backing_e8s.insert(CHAIN, 30);
+    let debt = s.total_chain_vault_debt_e8s();
+    assert_eq!(debt, 70, "total debt counts only realized debt_e8s, excludes pending interest");
+    // RHS = 70 + 30 + 0 = 100 == supply. If the 50 pending interest leaked onto the
+    // RHS it would be 150 != 100 and this would FALSE-HALT.
+    assert_eq!(check_invariant(&s, debt), Ok(()));
+}
+
+// (d) HIGH #2: apply_supply_delta enforces the GENERALIZED equality — it accepts a
+// delta that preserves sum == debt + reserve + pending_burn and rejects (no
+// mutation) one that breaks it.
+#[test]
+fn apply_supply_delta_enforces_generalized_rhs() {
+    let mut s = fixture_state();
+    // Balanced start: supply 100 == debt 70 + reserve 30.
+    s.chain_supplies.insert(CHAIN, 100);
+    s.reserve_backing_e8s.insert(CHAIN, 30);
+    // A mint of +10 with debt now 80: 110 == 80 + 30 -> accept.
+    assert_eq!(apply_supply_delta(&mut s, CHAIN, SupplyDelta::Increase(10), 80), Ok(()));
+    assert_eq!(s.chain_supplies[&CHAIN], 110);
+    // A delta that breaks the generalized equality is rejected, no mutation:
+    // +5 while still claiming debt 80 -> 115 != 80 + 30 = 110 -> Divergence.
+    assert_eq!(
+        apply_supply_delta(&mut s, CHAIN, SupplyDelta::Increase(5), 80),
+        Err(SupplyInvariantError::Divergence { sum_after: 115, total_debt: 110 })
+    );
+    assert_eq!(s.chain_supplies[&CHAIN], 110, "no mutation on rejection");
+}
+
+// Behavior preservation: with all-zero reserve/pending the generalized RHS is
+// byte-identical to the old `supply == debt` (this is what makes the staging
+// upgrade a no-op behaviorally).
+#[test]
+fn invariant_reduces_to_bare_debt_when_reserve_and_pending_zero() {
+    let mut s = fixture_state();
+    s.chain_supplies.insert(CHAIN, 70);
+    assert_eq!(check_invariant(&s, 70), Ok(()));
+    assert_eq!(check_invariant(&s, 71), Err(SupplyInvariantError::Divergence { sum_after: 70, total_debt: 71 }));
 }
