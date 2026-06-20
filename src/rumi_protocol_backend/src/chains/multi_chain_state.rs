@@ -30,6 +30,7 @@
 //! incident (MEMORY.md: `project_amm_state_wipe_2026_05_18.md`).
 
 use super::config::{ChainConfigV1, ChainConfigV2, ChainConfigV3, ChainId};
+use super::liquidation_config::ChainLiquidationConfigV1;
 use super::monad::chain_vault::ChainVaultV1;
 use super::settlement_queue::SettlementQueueV1;
 use candid::{CandidType, Deserialize, Principal};
@@ -508,6 +509,14 @@ pub struct MultiChainStateV6 {
     /// harmless (worst case a vault waits one extra tick for manual).
     #[serde(default)]
     pub sp_attempted_chain_vaults: BTreeSet<u64>,
+    /// Per-chain, operator-settable liquidation config (spec 8): the DEX wiring +
+    /// risk knobs the bot path reads, keyed by chain. Added directly to V6 (not a
+    /// V7) because V6 has not yet been persisted to any live canister — same
+    /// pre-deploy rationale as the reorg fields were added directly to V2.
+    /// `#[serde(default)]` is mandatory state-wipe defense regardless. Inert until
+    /// Increment 2+ reads it; Increment 1 ships only the getter/setter.
+    #[serde(default)]
+    pub chain_liquidation_configs: BTreeMap<ChainId, ChainLiquidationConfigV1>,
 }
 
 impl MultiChainStateV6 {

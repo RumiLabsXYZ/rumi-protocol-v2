@@ -380,6 +380,56 @@ fn v5_cbor_snapshot_decodes_into_v6_without_wiping_state() {
 }
 
 #[test]
+fn v6_cbor_round_trip_preserves_new_liquidation_fields() {
+    // STATE-WIPE defense (the forward direction): once V6 is live, a V6 snapshot
+    // carrying the new liquidation-engine fields (reserve maps, pending-burn,
+    // sp-attempted set, the liquidation config) MUST survive an encode->decode
+    // round-trip with every value intact. This is the path a V6->V6 upgrade runs.
+    use super::liquidation_config::{ChainLiquidationConfigV1, DexKind};
+    use std::collections::BTreeSet;
+
+    const CFX: ChainId = ChainId(1030);
+
+    let mut v6 = MultiChainStateV6::default();
+    v6.chain_supplies.insert(CFX, 100);
+    v6.reserve_backing_e8s.insert(CFX, 40);
+    v6.reserve_usdc_native.insert(CFX, 45_000_000_000_000_000_000);
+    v6.pending_chain_burn_e8s.insert(CFX, 15);
+    v6.sp_attempted_chain_vaults.insert(7);
+    v6.sp_attempted_chain_vaults.insert(9);
+    v6.chain_liquidation_configs.insert(CFX, ChainLiquidationConfigV1 {
+        dex: DexKind::UniswapV2,
+        router: "0x14b2D3bC65e74DAE1030EAFd8ac30c533c976A9b".into(),
+        factory: "0xe2a6f7c0ce4d5d300f97aa7e125455f5cd3342f5".into(),
+        pair: "0xpair".into(),
+        collateral_token: "0x14b2D3bC65e74DAE1030EAFd8ac30c533c976A9b".into(),
+        settle_stable_token: "0x6963EfED0aB40F6C3d7BdA44A05dcf1437C44372".into(),
+        slippage_cap_bps: 250,
+        restore_target_cr_e4: 15_500,
+        enabled: true,
+    });
+
+    let mut buf = Vec::new();
+    ciborium::ser::into_writer(&v6, &mut buf).expect("cbor encode V6");
+    let decoded: MultiChainStateV6 =
+        ciborium::de::from_reader(buf.as_slice()).expect("V6 snapshot round-trips");
+
+    assert_eq!(decoded.reserve_backing_e8s.get(&CFX), Some(&40));
+    assert_eq!(decoded.reserve_usdc_native.get(&CFX), Some(&45_000_000_000_000_000_000));
+    assert_eq!(decoded.pending_chain_burn_e8s.get(&CFX), Some(&15));
+    assert_eq!(decoded.sp_attempted_chain_vaults, BTreeSet::from([7, 9]));
+    let cfg = decoded.chain_liquidation_configs.get(&CFX).expect("config survived");
+    assert_eq!(cfg.dex, DexKind::UniswapV2);
+    assert_eq!(cfg.slippage_cap_bps, 250);
+    assert_eq!(cfg.restore_target_cr_e4, 15_500);
+    assert!(cfg.enabled);
+    assert_eq!(cfg.settle_stable_token, "0x6963EfED0aB40F6C3d7BdA44A05dcf1437C44372");
+    // The aggregate accessors reflect the round-tripped reserve/pending terms.
+    assert_eq!(decoded.total_reserve_backing_e8s(), 40);
+    assert_eq!(decoded.total_pending_chain_burn_e8s(), 15);
+}
+
+#[test]
 fn chain_vault_debt_total_sums_only_chain_vaults() {
     use super::monad::chain_vault::{ChainVaultV1, ChainVaultStatus};
 

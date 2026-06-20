@@ -37,6 +37,17 @@ type CandidVault = record {
   icp_margin_amount : nat64;
   borrowed_icusd_amount : nat64;
 };
+type ChainLiquidationConfigV1 = record {
+  dex : DexKind;
+  pair : text;
+  restore_target_cr_e4 : nat64;
+  enabled : bool;
+  collateral_token : text;
+  factory : text;
+  slippage_cap_bps : nat16;
+  router : text;
+  settle_stable_token : text;
+};
 type ChainSupplyReconciliation = record {
   recorded_supply_e8s : nat;
   pending_chain_burn_e8s : nat;
@@ -154,6 +165,7 @@ type DeviceSpec = variant {
   GenericDisplay;
   LineDisplay : record { characters_per_line : nat16; lines_per_page : nat16 };
 };
+type DexKind = variant { UniswapV2 };
 type ErrorInfo = record { description : text };
 type Event = variant {
   set_borrowing_fee : record { rate : text };
@@ -1023,6 +1035,9 @@ service : (ProtocolArg) -> {
   get_bot_cr_tolerance_bps : () -> (nat64) query;
   get_bot_stats : () -> (BotStatsResponse) query;
   get_chain_interest_treasury_address : (nat32) -> (Result_2);
+  get_chain_liquidation_config : (nat32) -> (
+      opt ChainLiquidationConfigV1,
+    ) query;
   get_chain_settlement_address : (nat32) -> (Result_2);
   get_chain_vault : (nat64) -> (opt ChainVaultV1) query;
   get_chains_ecdsa_key_name : () -> (text) query;
@@ -1146,6 +1161,7 @@ service : (ProtocolArg) -> {
   set_chain_contract : (nat32, text) -> (Result);
   set_chain_interest_min_realize_e8s : (nat) -> (Result);
   set_chain_interest_tick_interval_secs : (nat64) -> (Result);
+  set_chain_liquidation_config : (nat32, ChainLiquidationConfigV1) -> (Result);
   set_chains_ecdsa_key_name : (text) -> (Result);
   set_check_vaults_alert_band_bps : (nat64) -> (Result);
   set_check_vaults_full_sweep_every_n_ticks : (nat64) -> (Result);

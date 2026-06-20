@@ -1861,6 +1861,48 @@ fn set_chain_contract(
     Ok(())
 }
 
+/// Set (or replace) the per-chain liquidation config (spec 8, Tier B): the DEX
+/// wiring + risk knobs the bot path will read. Developer-gated. The config is
+/// validated (slippage cap <= 100%, restore target > par, required addresses
+/// present when `enabled`) before persisting; a rejected config mutates nothing.
+/// Inert until Increment 2+ reads it (Increment 1 ships only this scaffolding).
+#[candid_method(update)]
+#[update]
+fn set_chain_liquidation_config(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    config: rumi_protocol_backend::chains::liquidation_config::ChainLiquidationConfigV1,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    config
+        .validate()
+        .map_err(|e| ProtocolError::ChainAdmin(format!("invalid liquidation config: {e:?}")))?;
+    mutate_state(|s| {
+        s.multi_chain.chain_liquidation_configs.insert(chain, config.clone());
+    });
+    log!(
+        INFO,
+        "[set_chain_liquidation_config] chain={:?} dex={:?} enabled={}",
+        chain,
+        config.dex,
+        config.enabled
+    );
+    Ok(())
+}
+
+/// Return the per-chain liquidation config, or None if unset. Public read-only
+/// query (mirrors `get_chain_vault`); the config is operator DEX wiring + risk
+/// knobs, no secrets.
+#[candid_method(query)]
+#[query]
+fn get_chain_liquidation_config(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> Option<rumi_protocol_backend::chains::liquidation_config::ChainLiquidationConfigV1> {
+    read_state(|s| s.multi_chain.chain_liquidation_configs.get(&chain).cloned())
+}
+
 /// Manual-price readout for `(chain, symbol)`: the USD e8 price plus the
 /// wall-clock nanosecond timestamp of the last write (audit F-01 freshness).
 /// `set_at_ns == 0` means the price was set before the V5 upgrade (timestamp

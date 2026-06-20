@@ -163,6 +163,90 @@ pub fn check_invariant(
     Ok(())
 }
 
+/// Reasons `apply_debt_to_reserve_shift` rejects (no state mutation on any error).
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReserveShiftError {
+    /// The invariant self-check has halted the rail; do not move backing.
+    Halted,
+    /// No such chain vault.
+    UnknownVault(u64),
+    /// The vault's `collateral_chain` does not match the requested `chain`.
+    WrongChain { vault_chain: ChainId, requested: ChainId },
+    /// `cleared_e8s` exceeds the vault's live `debt_e8s` (would over-credit the
+    /// reserve term relative to debt actually retired).
+    ClearExceedsDebt { cleared_e8s: u128, vault_debt_e8s: u128 },
+    /// The post-move unified invariant would not hold. The move conserves
+    /// debt+reserve, so this only fires if the invariant was ALREADY diverged
+    /// before the call (defensive; no mutation).
+    InvariantBroken { sum_supplies: u128, rhs: u128 },
+}
+
+/// Bot/PSM Phase-2 accounting (spec 4.9, 5.3): atomically move `cleared_e8s` of a
+/// vault's debt into the chain's reserve backing (NO icUSD burn — `chain_supplies`
+/// is UNCHANGED) and record the realized `stable_native` USDC. This is the single
+/// gate for the reserve term. It conserves `debt + reserve`, so the unified
+/// invariant is preserved BY CONSTRUCTION; the pre-apply check is a defensive
+/// assert that catches pre-existing drift (no mutation on rejection).
+///
+/// NO caller until Increment 2 (the bot confirm path); Increment 1 ships it +
+/// proves a reserve shift keeps the invariant balanced.
+pub fn apply_debt_to_reserve_shift(
+    state: &mut MultiChainState,
+    chain: ChainId,
+    vault_id: u64,
+    cleared_e8s: u128,
+    stable_native: u128,
+) -> Result<(), ReserveShiftError> {
+    if state.invariant_halted {
+        return Err(ReserveShiftError::Halted);
+    }
+    // Validate (read-only — no mutation on any rejection path).
+    let vault_debt = {
+        let v = state
+            .chain_vaults
+            .get(&vault_id)
+            .ok_or(ReserveShiftError::UnknownVault(vault_id))?;
+        if v.collateral_chain != chain {
+            return Err(ReserveShiftError::WrongChain {
+                vault_chain: v.collateral_chain,
+                requested: chain,
+            });
+        }
+        v.debt_e8s
+    };
+    if cleared_e8s > vault_debt {
+        return Err(ReserveShiftError::ClearExceedsDebt {
+            cleared_e8s,
+            vault_debt_e8s: vault_debt,
+        });
+    }
+
+    // Pre-validate the post-move unified invariant WITHOUT mutating, so a
+    // divergence (only possible if the invariant was ALREADY broken before the
+    // call — the move conserves debt+reserve) leaves state untouched. chain_supplies
+    // is unchanged; debt drops by cleared_e8s and reserve_backing rises by the same,
+    // so the RHS is invariant. reserve_usdc_native is NOT an RHS term (spec 3.2/5.6).
+    let sum_supplies = state.total_supply_all_chains_e8s();
+    let post_debt_total = state.total_chain_vault_debt_e8s().saturating_sub(cleared_e8s);
+    let post_reserve_total = state.total_reserve_backing_e8s().saturating_add(cleared_e8s);
+    let post_rhs = post_debt_total
+        .saturating_add(post_reserve_total)
+        .saturating_add(state.total_pending_chain_burn_e8s());
+    if sum_supplies != post_rhs {
+        return Err(ReserveShiftError::InvariantBroken { sum_supplies, rhs: post_rhs });
+    }
+
+    // Apply atomically (every reject above happened before any mutation).
+    let v = state
+        .chain_vaults
+        .get_mut(&vault_id)
+        .expect("vault present: checked above");
+    v.debt_e8s -= cleared_e8s;
+    *state.reserve_backing_e8s.entry(chain).or_default() += cleared_e8s;
+    *state.reserve_usdc_native.entry(chain).or_default() += stable_native;
+    Ok(())
+}
+
 /// Phase 1b Task 12 migration: stamp `last_interest_accrual_ns = now_ns` for any
 /// chain vault that decoded with 0 (an existing vault from a snapshot written
 /// before the interest fields existed), so the first harvest does not bill

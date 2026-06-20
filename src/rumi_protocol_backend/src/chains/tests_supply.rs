@@ -240,3 +240,71 @@ fn invariant_reduces_to_bare_debt_when_reserve_and_pending_zero() {
     assert_eq!(check_invariant(&s, 70), Ok(()));
     assert_eq!(check_invariant(&s, 71), Err(SupplyInvariantError::Divergence { sum_after: 70, total_debt: 71 }));
 }
+
+// ─── Increment 1 / Task 4: apply_debt_to_reserve_shift (the reserve-term gate) ───
+
+use super::supply::{apply_debt_to_reserve_shift, ReserveShiftError};
+
+// The bot path moves debt -> reserve WITHOUT burning icUSD: chain_supplies stays
+// put, debt drops, reserve rises by the same amount, and the unified invariant
+// stays balanced by construction.
+#[test]
+fn reserve_shift_moves_debt_to_reserve_and_preserves_invariant() {
+    let mut s = fixture_state();
+    s.chain_vaults.insert(1, vault_with(100, 0));
+    s.chain_supplies.insert(CHAIN, 100);
+    // pre: 100 == 100 (debt) + 0 (reserve) + 0 (pending)
+    assert_eq!(check_invariant(&s, s.total_chain_vault_debt_e8s()), Ok(()));
+
+    // Bot clears 40 of debt into reserve, realizing 45_000000000000000000 wei USDC
+    // (incl. the 12% penalty surplus over the 40 cleared).
+    apply_debt_to_reserve_shift(&mut s, CHAIN, 1, 40, 45_000_000_000_000_000_000)
+        .expect("reserve shift");
+
+    assert_eq!(s.chain_vaults[&1].debt_e8s, 60, "vault debt reduced by cleared amount");
+    assert_eq!(s.reserve_backing_e8s[&CHAIN], 40, "reserve_backing credited the cleared debt");
+    assert_eq!(
+        s.reserve_usdc_native[&CHAIN], 45_000_000_000_000_000_000,
+        "realized USDC recorded (NOT on the invariant RHS)"
+    );
+    assert_eq!(s.chain_supplies[&CHAIN], 100, "chain_supplies UNCHANGED (no burn)");
+    // post: 100 == 60 (debt) + 40 (reserve) + 0 (pending) -> invariant still holds
+    assert_eq!(check_invariant(&s, s.total_chain_vault_debt_e8s()), Ok(()));
+}
+
+#[test]
+fn reserve_shift_rejects_clearing_more_than_debt() {
+    let mut s = fixture_state();
+    s.chain_vaults.insert(1, vault_with(100, 0));
+    s.chain_supplies.insert(CHAIN, 100);
+    assert_eq!(
+        apply_debt_to_reserve_shift(&mut s, CHAIN, 1, 150, 1),
+        Err(ReserveShiftError::ClearExceedsDebt { cleared_e8s: 150, vault_debt_e8s: 100 })
+    );
+    // No mutation on rejection.
+    assert_eq!(s.chain_vaults[&1].debt_e8s, 100);
+    assert!(s.reserve_backing_e8s.get(&CHAIN).copied().unwrap_or(0) == 0);
+    assert!(s.reserve_usdc_native.get(&CHAIN).copied().unwrap_or(0) == 0);
+}
+
+#[test]
+fn reserve_shift_rejects_unknown_vault() {
+    let mut s = fixture_state();
+    assert_eq!(
+        apply_debt_to_reserve_shift(&mut s, CHAIN, 99, 10, 10),
+        Err(ReserveShiftError::UnknownVault(99))
+    );
+}
+
+#[test]
+fn reserve_shift_blocked_while_invariant_halted() {
+    let mut s = fixture_state();
+    s.chain_vaults.insert(1, vault_with(100, 0));
+    s.chain_supplies.insert(CHAIN, 100);
+    s.invariant_halted = true;
+    assert_eq!(
+        apply_debt_to_reserve_shift(&mut s, CHAIN, 1, 40, 1),
+        Err(ReserveShiftError::Halted)
+    );
+    assert_eq!(s.chain_vaults[&1].debt_e8s, 100, "no mutation while halted");
+}
