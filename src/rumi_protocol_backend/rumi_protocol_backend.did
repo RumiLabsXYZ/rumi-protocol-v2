@@ -39,7 +39,9 @@ type CandidVault = record {
 };
 type ChainLiquidationConfigV1 = record {
   dex : DexKind;
+  max_swap_value_e8s : nat;
   pair : text;
+  max_price_age_ns : nat64;
   restore_target_cr_e4 : nat64;
   enabled : bool;
   collateral_token : text;

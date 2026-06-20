@@ -1879,6 +1879,22 @@ fn set_chain_liquidation_config(
     config
         .validate()
         .map_err(|e| ProtocolError::ChainAdmin(format!("invalid liquidation config: {e:?}")))?;
+    // Finding #16: the penalty cushion MUST exceed the slippage budget, or a swap
+    // can structurally deliver less stable than the debt it clears (under-cover).
+    // (The max_dex_oracle_divergence_bps term joins this invariant in Increment 3.)
+    if config.enabled {
+        let penalty_bps = rumi_protocol_backend::chains::collateral_config::chain_collateral_config(chain)
+            .map(|c| c.liquidation_penalty_bps)
+            .ok_or_else(|| {
+                ProtocolError::ChainAdmin(format!("no collateral config for chain {}", chain.0))
+            })?;
+        if (config.slippage_cap_bps as u64) >= penalty_bps {
+            return Err(ProtocolError::ChainAdmin(format!(
+                "slippage_cap_bps {} must be < liquidation_penalty_bps {} (penalty cushion)",
+                config.slippage_cap_bps, penalty_bps
+            )));
+        }
+    }
     mutate_state(|s| {
         s.multi_chain.chain_liquidation_configs.insert(chain, config.clone());
     });

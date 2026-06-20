@@ -407,6 +407,8 @@ fn v6_cbor_round_trip_preserves_new_liquidation_fields() {
         slippage_cap_bps: 250,
         restore_target_cr_e4: 15_500,
         enabled: true,
+        max_swap_value_e8s: 2_000 * 100_000_000,
+        max_price_age_ns: 1_800_000_000_000,
     });
 
     let mut buf = Vec::new();
@@ -424,6 +426,8 @@ fn v6_cbor_round_trip_preserves_new_liquidation_fields() {
     assert_eq!(cfg.restore_target_cr_e4, 15_500);
     assert!(cfg.enabled);
     assert_eq!(cfg.settle_stable_token, "0x6963EfED0aB40F6C3d7BdA44A05dcf1437C44372");
+    assert_eq!(cfg.max_swap_value_e8s, 2_000 * 100_000_000);
+    assert_eq!(cfg.max_price_age_ns, 1_800_000_000_000);
     // The aggregate accessors reflect the round-tripped reserve/pending terms.
     assert_eq!(decoded.total_reserve_backing_e8s(), 40);
     assert_eq!(decoded.total_pending_chain_burn_e8s(), 15);
