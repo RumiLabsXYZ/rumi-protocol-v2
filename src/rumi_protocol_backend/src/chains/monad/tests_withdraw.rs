@@ -22,7 +22,7 @@ use super::chain_vault::{
     ChainVaultStatus, WithdrawError,
 };
 use crate::chains::config::{ChainId, GasStrategy, RegisterChainArg};
-use crate::chains::multi_chain_state::MultiChainStateV5;
+use crate::chains::multi_chain_state::MultiChainState;
 use crate::chains::settlement_queue::SettlementOpKind;
 use candid::Principal;
 
@@ -35,8 +35,8 @@ const ONE_MON_E18: u128 = 1_000_000_000_000_000_000;
 const MIN_CR_E4: u64 = 13_000;
 
 /// Register chain 10143 and set its manual MON price (mirrors `tests_open_vault`).
-fn setup(price_e8: u64) -> MultiChainStateV5 {
-    let mut s = MultiChainStateV5::default();
+fn setup(price_e8: u64) -> MultiChainState {
+    let mut s = MultiChainState::default();
     let arg = RegisterChainArg {
         chain_id: CHAIN,
         display_name: "MonadTestnet".into(),
@@ -63,7 +63,7 @@ fn owner() -> Principal {
 /// open helper records `pending_mint_e8s` and `debt_e8s == 0`; we set the
 /// fields directly here to skip the deposit-watch + settlement round trip.)
 fn open_and_fund(
-    s: &mut MultiChainStateV5,
+    s: &mut MultiChainState,
     vault_id: u64,
     collateral_e18: u128,
     debt_e8s: u128,

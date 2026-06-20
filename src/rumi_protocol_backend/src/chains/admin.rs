@@ -7,7 +7,7 @@ use super::config::{
     ChainAdminError, ChainConfigV3, ChainId, ChainStatus, GasStrategy, RegisterChainArg,
     UpdateChainConfigArg,
 };
-use super::multi_chain_state::MultiChainStateV5;
+use super::multi_chain_state::MultiChainState;
 use super::settlement_queue::SettlementQueueV1;
 
 /// EVM chains need >= 1 confirmation before a block is treated as final. A
@@ -39,7 +39,7 @@ fn dedup_endpoints(endpoints: Vec<String>) -> Vec<String> {
 }
 
 pub fn register_chain_in_state(
-    state: &mut MultiChainStateV5,
+    state: &mut MultiChainState,
     arg: RegisterChainArg,
     now_ns: u64,
 ) -> Result<ChainConfigV3, ChainAdminError> {
@@ -103,7 +103,7 @@ pub fn register_chain_in_state(
 }
 
 pub fn disable_chain_in_state(
-    state: &mut MultiChainStateV5,
+    state: &mut MultiChainState,
     chain_id: ChainId,
 ) -> Result<(), ChainAdminError> {
     let cfg = state
@@ -121,7 +121,7 @@ pub fn disable_chain_in_state(
 /// would be a silent state leak). All-or-nothing: every rejection path returns
 /// before the first mutation, so a refused delete leaves the chain fully intact.
 pub fn delete_chain_in_state(
-    state: &mut MultiChainStateV5,
+    state: &mut MultiChainState,
     chain_id: ChainId,
 ) -> Result<(), ChainAdminError> {
     if !state.chain_configs.contains_key(&chain_id) {
@@ -157,7 +157,7 @@ pub fn delete_chain_in_state(
 }
 
 pub fn update_chain_config_in_state(
-    state: &mut MultiChainStateV5,
+    state: &mut MultiChainState,
     chain_id: ChainId,
     update: UpdateChainConfigArg,
 ) -> Result<(), ChainAdminError> {

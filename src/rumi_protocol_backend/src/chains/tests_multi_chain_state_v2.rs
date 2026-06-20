@@ -1,6 +1,6 @@
 use super::multi_chain_state::{
     MultiChainState, MultiChainStateV1, MultiChainStateV2, MultiChainStateV3, MultiChainStateV4,
-    MultiChainStateV5,
+    MultiChainStateV5, MultiChainStateV6,
 };
 use super::config::ChainId;
 use super::supply::migrate_multi_chain_state;
@@ -121,8 +121,8 @@ fn migration_preserves_v1_fields_and_defaults_new_ones() {
 }
 
 #[test]
-fn active_alias_points_at_v5() {
-    fn _check(x: MultiChainState) -> MultiChainStateV5 { x }
+fn active_alias_points_at_v6() {
+    fn _check(x: MultiChainState) -> MultiChainStateV6 { x }
 }
 
 #[test]
@@ -276,6 +276,107 @@ fn v3_cbor_snapshot_decodes_into_v4_without_wiping_state() {
     // Total debt still reconciles (no state wipe).
     assert_eq!(v4.total_chain_vault_debt_e8s(), 50_000_000);
     assert_eq!(v4.total_supply_all_chains_e8s(), 50_000_000);
+}
+
+#[test]
+fn v5_cbor_snapshot_decodes_into_v6_without_wiping_state() {
+    // STATE-WIPE REGRESSION (chains-liquidation Increment 1). The live staging
+    // canister (kvg63) persists a `MultiChainStateV5`. This increment rebinds the
+    // `MultiChainState` alias to V6, which adds four NEW maps/sets
+    // (reserve_backing_e8s, reserve_usdc_native, pending_chain_burn_e8s,
+    // sp_attempted_chain_vaults). A populated V5 CBOR snapshot MUST decode into V6
+    // with:
+    //   - every carried field preserved (the four originals + every V2+-added map
+    //     incl. the V4 nonces and the V5 price timestamps), and
+    //   - each new V6 field supplied by its `#[serde(default)]` => empty.
+    // This is the exact ciborium decode path `load_state_from_stable()` runs on
+    // upgrade. WITHOUT field-level `#[serde(default)]` on the new V6 fields this
+    // decode fails with "missing field `reserve_backing_e8s`", which on the real
+    // canister silently WIPES multi_chain state via the event-replay fallback
+    // (the 2026-05-18 AMM incident class). Real Vault state lives on kvg63, so a
+    // wipe here would destroy live vaults/supply/contracts.
+    use super::config::{ChainConfigV3, ChainStatus, GasStrategy};
+    use super::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
+    use super::settlement_queue::SettlementQueueV1;
+    use std::collections::BTreeSet;
+
+    const CFX: ChainId = ChainId(1030);
+
+    let mut v5 = MultiChainStateV5::default();
+    v5.chain_configs.insert(CFX, ChainConfigV3 {
+        chain_id: CFX,
+        display_name: "ConfluxESpace".into(),
+        rpc_endpoints: vec!["https://evm.confluxrpc.com".into()],
+        finality_depth: 5,
+        gas_strategy: GasStrategy::EvmEip1559 { max_priority_fee_gwei: 1, max_fee_gwei_ceiling: 200 },
+        chain_native_decimals: 18,
+        registered_at_ns: 123,
+        status: ChainStatus::Registered,
+        burn_watch_poll_enabled: true,
+        min_quorum_providers: Some(3),
+    });
+    v5.chain_supplies.insert(CFX, 100 * 100_000_000); // 100 icUSD in e8s
+    v5.settlement_queues.insert(CFX, SettlementQueueV1::default());
+    v5.invariant_halted = false;
+    v5.chain_vaults.insert(3, ChainVaultV1 {
+        vault_id: 3,
+        owner: candid::Principal::anonymous(),
+        collateral_chain: CFX,
+        custody_address: "0xcustody".into(),
+        collateral_amount_native: 1_000_000_000_000_000_000,
+        debt_e8s: 100 * 100_000_000,
+        mint_recipient: "0xrecipient".into(),
+        pending_mint_e8s: 0,
+        status: ChainVaultStatus::Open,
+        opened_at_ns: 99,
+        owner_evm: Some("0xowner".into()),
+        last_interest_accrual_ns: 1_700_000_000_000_000_000,
+        pending_interest_mint_e8s: 0,
+    });
+    v5.chain_contracts.insert(CFX, "0xicusd".into());
+    v5.last_observed_block.insert(CFX, 35_136_248);
+    v5.processed_burn_keys.insert(35_136_200, BTreeSet::from(["0xtx:0".to_string()]));
+    v5.evm_owner_nonces.insert(candid::Principal::anonymous(), 7);
+    // Stamp a manual price + its freshness timestamp (the V5-added side-channel).
+    v5.set_manual_price(CFX, "CFX".to_string(), 4_800_000, 1_700_000_000_000_000_001);
+
+    // Encode as V5 (the bytes the live canister wrote), decode as V6 (new shape).
+    let mut buf = Vec::new();
+    ciborium::ser::into_writer(&v5, &mut buf).expect("cbor encode V5");
+    let v6: MultiChainStateV6 =
+        ciborium::de::from_reader(buf.as_slice()).expect("V5 snapshot MUST decode into V6");
+
+    // --- Every carried field survived (NOT wiped) ---
+    assert_eq!(v6.chain_supplies, v5.chain_supplies, "chain_supplies carried");
+    assert_eq!(v6.chain_supplies.get(&CFX), Some(&(100 * 100_000_000u128)));
+    assert_eq!(v6.chain_vaults.len(), 1);
+    assert_eq!(v6.chain_vaults[&3].debt_e8s, 100 * 100_000_000);
+    assert_eq!(v6.chain_vaults[&3].owner_evm, Some("0xowner".to_string()));
+    assert_eq!(v6.chain_vaults[&3].last_interest_accrual_ns, 1_700_000_000_000_000_000);
+    assert_eq!(v6.chain_contracts.get(&CFX), Some(&"0xicusd".to_string()));
+    assert_eq!(v6.last_observed_block.get(&CFX), Some(&35_136_248u64));
+    assert!(v6.processed_burn_keys.get(&35_136_200).unwrap().contains("0xtx:0"));
+    assert_eq!(v6.expected_evm_nonce(&candid::Principal::anonymous()), 7, "nonce carried");
+    assert_eq!(
+        v6.get_manual_price(CFX, "CFX"),
+        Some((4_800_000, 1_700_000_000_000_000_001)),
+        "manual price + freshness timestamp carried"
+    );
+    let cfg = v6.chain_configs.get(&CFX).expect("config preserved");
+    assert_eq!(cfg.finality_depth, 5);
+    assert!(cfg.burn_watch_poll_enabled);
+    assert_eq!(cfg.min_quorum_providers, Some(3));
+
+    // --- The four NEW V6 fields defaulted EMPTY (state-wipe defense, not a wipe) ---
+    assert!(v6.reserve_backing_e8s.is_empty(), "new field defaulted empty, not wiped");
+    assert!(v6.reserve_usdc_native.is_empty());
+    assert!(v6.pending_chain_burn_e8s.is_empty());
+    assert!(v6.sp_attempted_chain_vaults.is_empty());
+
+    // Total debt still reconciles with supply (the invariant is intact post-decode;
+    // with all-zero reserve/pending the generalized RHS reduces to bare debt).
+    assert_eq!(v6.total_chain_vault_debt_e8s(), 100 * 100_000_000);
+    assert_eq!(v6.total_supply_all_chains_e8s(), 100 * 100_000_000);
 }
 
 #[test]

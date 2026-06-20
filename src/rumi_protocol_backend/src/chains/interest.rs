@@ -38,7 +38,7 @@ pub fn accrued_chain_interest_e8s(debt_e8s: u128, apr_bps: u64, elapsed_ns: u64)
 }
 
 use crate::chains::config::ChainId;
-use crate::chains::multi_chain_state::MultiChainStateV5;
+use crate::chains::multi_chain_state::MultiChainState;
 use crate::chains::settlement_queue::{SettlementOp, SettlementOpKind};
 use crate::chains::vault::ChainVaultStatus;
 
@@ -52,7 +52,7 @@ use crate::chains::vault::ChainVaultStatus;
 /// `treasury_recipient` is the per-chain interest-treasury address (resolved by
 /// the async caller). Returns the op_ids enqueued.
 pub fn harvest_chain_interest_in_state(
-    state: &mut MultiChainStateV5,
+    state: &mut MultiChainState,
     chain: ChainId,
     apr_bps: u64,
     threshold_e8s: u128,
@@ -167,7 +167,7 @@ mod tests {
     // ─── harvest_chain_interest_in_state ────────────────────────────────────
     use super::harvest_chain_interest_in_state;
     use crate::chains::config::ChainId;
-    use crate::chains::multi_chain_state::MultiChainStateV5;
+    use crate::chains::multi_chain_state::MultiChainState;
     use crate::chains::settlement_queue::SettlementOpKind;
     use crate::chains::vault::{ChainVaultStatus, ChainVaultV1};
     use candid::Principal;
@@ -176,7 +176,7 @@ mod tests {
     const TREASURY: &str = "0x00000000000000000000000000000000000c0ffe";
 
     fn open_vault(
-        s: &mut MultiChainStateV5,
+        s: &mut MultiChainState,
         vault_id: u64,
         debt_e8s: u128,
         last_accrual_ns: u64,
@@ -205,7 +205,7 @@ mod tests {
 
     #[test]
     fn harvest_enqueues_one_interest_mint_per_eligible_vault() {
-        let mut s = MultiChainStateV5::default();
+        let mut s = MultiChainState::default();
         open_vault(&mut s, 1, 100 * E8, /*last accrual a year ago*/ 0, 0, ChainVaultStatus::Open);
         let now = NANOS_PER_YEAR;
         let mut next = 1000u64;
@@ -234,7 +234,7 @@ mod tests {
 
     #[test]
     fn harvest_skips_below_threshold() {
-        let mut s = MultiChainStateV5::default();
+        let mut s = MultiChainState::default();
         // 1ns elapsed on 100 icUSD -> 1 e8s accrued, below a 1e6 threshold.
         open_vault(&mut s, 1, 100 * E8, 0, 0, ChainVaultStatus::Open);
         let ops = harvest_chain_interest_in_state(&mut s, CHAIN, 200, 1_000_000, TREASURY, 1, || 99);
@@ -244,7 +244,7 @@ mod tests {
 
     #[test]
     fn harvest_skips_in_flight_non_open_and_zero_debt() {
-        let mut s = MultiChainStateV5::default();
+        let mut s = MultiChainState::default();
         open_vault(&mut s, 1, 100 * E8, 0, /*in flight*/ 50_000_000, ChainVaultStatus::Open);
         open_vault(&mut s, 2, 100 * E8, 0, 0, ChainVaultStatus::MintPending); // not Open
         open_vault(&mut s, 3, 0, 0, 0, ChainVaultStatus::Open); // zero debt
@@ -254,7 +254,7 @@ mod tests {
 
     #[test]
     fn harvest_allocates_disjoint_mint_ids_for_multiple_vaults() {
-        let mut s = MultiChainStateV5::default();
+        let mut s = MultiChainState::default();
         open_vault(&mut s, 1, 100 * E8, 0, 0, ChainVaultStatus::Open);
         open_vault(&mut s, 2, 100 * E8, 0, 0, ChainVaultStatus::Open);
         let mut next = 5000u64;

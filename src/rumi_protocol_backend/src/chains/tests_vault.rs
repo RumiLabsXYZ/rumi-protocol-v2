@@ -12,7 +12,7 @@
 //! this file only asserts the parameterization itself.
 
 use super::config::{ChainId, GasStrategy, RegisterChainArg};
-use super::multi_chain_state::MultiChainStateV5;
+use super::multi_chain_state::MultiChainState;
 use super::vault::{open_chain_vault_in_state, OpenVaultError};
 use candid::Principal;
 
@@ -33,8 +33,8 @@ fn only_good(addr: &str) -> bool {
 
 /// Register chain 501 with 9-decimal native units and set its manual `"SOL"`
 /// price. Mirrors what register_chain + a manual price override do.
-fn setup(price_e8: u64) -> MultiChainStateV5 {
-    let mut s = MultiChainStateV5::default();
+fn setup(price_e8: u64) -> MultiChainState {
+    let mut s = MultiChainState::default();
     let arg = RegisterChainArg {
         chain_id: CHAIN,
         display_name: "SolanaDevnet".into(),
@@ -145,7 +145,7 @@ use super::evm::settlement::confirm_mint_in_state;
 
 /// Insert an Open vault (confirmed collateral + debt, no mint in flight) owned by
 /// `owner`, and seed the chain supply to match its debt so the invariant holds.
-fn insert_open_vault(s: &mut MultiChainStateV5, owner: Principal, vault_id: u64, collateral: u128, debt: u128) {
+fn insert_open_vault(s: &mut MultiChainState, owner: Principal, vault_id: u64, collateral: u128, debt: u128) {
     use super::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
     s.chain_vaults.insert(vault_id, ChainVaultV1 {
         vault_id, owner, collateral_chain: CHAIN, custody_address: "custody".into(),
@@ -288,7 +288,7 @@ fn borrow_rejects_when_over_debt_ceiling() {
 
 #[test]
 fn nonce_consume_is_monotonic_and_rejects_replay() {
-    let mut s = MultiChainStateV5::default();
+    let mut s = MultiChainState::default();
     let owner = Principal::from_slice(&[5, 5, 5]);
     assert_eq!(s.expected_evm_nonce(&owner), 0);
     assert_eq!(s.consume_evm_nonce(&owner, 0), Ok(()));
@@ -304,7 +304,7 @@ fn nonce_consume_is_monotonic_and_rejects_replay() {
 #[test]
 fn per_owner_cap_counts_non_terminal_only() {
     use super::monad::chain_vault::ChainVaultStatus;
-    let mut s = MultiChainStateV5::default();
+    let mut s = MultiChainState::default();
     let owner = Principal::from_slice(&[9, 9, 9]);
     insert_open_vault(&mut s, owner, 1, 0, 0);
     insert_open_vault(&mut s, owner, 2, 0, 0);
@@ -367,7 +367,7 @@ fn gc_skips_stale_vaults_when_observer_inactive() {
     };
     // (a) Chain not registered at all -> no observer -> not reaped (would strand
     //     a funded-but-unobserved deposit).
-    let mut s = MultiChainStateV5::default();
+    let mut s = MultiChainState::default();
     s.chain_vaults.insert(1, stale(1));
     assert_eq!(prune_stale_awaiting_deposit(&mut s, now, AWAITING_DEPOSIT_TTL_NS), 0);
     assert!(s.chain_vaults.contains_key(&1), "unregistered-chain vault kept");

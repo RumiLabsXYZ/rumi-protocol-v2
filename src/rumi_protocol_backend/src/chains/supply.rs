@@ -12,7 +12,7 @@
 //! can call it without inventing the invariant under deadline pressure.
 
 use super::config::ChainId;
-use super::multi_chain_state::{MultiChainStateV1, MultiChainStateV2, MultiChainStateV5};
+use super::multi_chain_state::{MultiChainStateV1, MultiChainStateV2, MultiChainState};
 use candid::{CandidType, Deserialize};
 use serde::Serialize;
 
@@ -63,7 +63,7 @@ pub enum SupplyInvariantError {
 /// authoritative `total_debt_e8s` snapshot taken at the same logical
 /// moment; we reject any apply that would leave sum != total_debt.
 pub fn apply_supply_delta(
-    state: &mut MultiChainStateV5,
+    state: &mut MultiChainState,
     chain: ChainId,
     delta: SupplyDelta,
     total_debt_e8s: u128,
@@ -109,7 +109,7 @@ pub fn apply_supply_delta(
 /// On `Err`, the caller flips `state.invariant_halted = true` and emits
 /// an event.
 pub fn check_invariant(
-    state: &MultiChainStateV5,
+    state: &MultiChainState,
     total_debt_e8s: u128,
 ) -> Result<(), SupplyInvariantError> {
     let sum: u128 = state.chain_supplies.values().copied().sum();
@@ -126,7 +126,7 @@ pub fn check_invariant(
 /// (`confirm_mint_in_state`) and never decode as 0, so this only ever touches
 /// pre-feature vaults. Idempotent (re-running is a no-op once stamped). Called
 /// from `post_upgrade` after `restore_state`.
-pub fn stamp_chain_interest_accrual_start(state: &mut MultiChainStateV5, now_ns: u64) {
+pub fn stamp_chain_interest_accrual_start(state: &mut MultiChainState, now_ns: u64) {
     for v in state.chain_vaults.values_mut() {
         if v.last_interest_accrual_ns == 0 {
             v.last_interest_accrual_ns = now_ns;

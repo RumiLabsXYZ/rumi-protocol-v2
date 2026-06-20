@@ -7,7 +7,7 @@ use super::config::{
     GasStrategy, RegisterChainArg, UpdateChainConfigArg, DEFAULT_MIN_QUORUM_PROVIDERS,
 };
 use super::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
-use super::multi_chain_state::MultiChainStateV5;
+use super::multi_chain_state::MultiChainState;
 use crate::chains::admin::{delete_chain_in_state, disable_chain_in_state, register_chain_in_state, update_chain_config_in_state};
 use candid::Principal;
 
@@ -55,7 +55,7 @@ fn dummy_vault(vault_id: u64, chain: ChainId) -> ChainVaultV1 {
 
 #[test]
 fn register_chain_inserts_config_and_zero_supply() {
-    let mut s = MultiChainStateV5::default();
+    let mut s = MultiChainState::default();
     register_chain_in_state(&mut s, arg(), 1_700_000_000_000_000_000).expect("register");
     assert!(s.chain_configs.contains_key(&ChainId(101)));
     assert_eq!(s.chain_supplies[&ChainId(101)], 0);
@@ -72,7 +72,7 @@ fn register_chain_inserts_config_and_zero_supply() {
 
 #[test]
 fn register_chain_rejects_duplicates() {
-    let mut s = MultiChainStateV5::default();
+    let mut s = MultiChainState::default();
     register_chain_in_state(&mut s, arg(), 0).expect("first");
     let err = register_chain_in_state(&mut s, arg(), 0).expect_err("duplicate");
     assert!(matches!(err, ChainAdminError::ChainAlreadyRegistered(ChainId(101))));
@@ -80,7 +80,7 @@ fn register_chain_rejects_duplicates() {
 
 #[test]
 fn register_chain_rejects_empty_rpc_endpoints() {
-    let mut s = MultiChainStateV5::default();
+    let mut s = MultiChainState::default();
     let mut a = arg();
     a.rpc_endpoints = vec![];
     let err = register_chain_in_state(&mut s, a, 0).expect_err("empty endpoints");
@@ -89,7 +89,7 @@ fn register_chain_rejects_empty_rpc_endpoints() {
 
 #[test]
 fn register_chain_rejects_out_of_range_decimals() {
-    let mut s = MultiChainStateV5::default();
+    let mut s = MultiChainState::default();
     // 0 would make the CR native-scale 1 (collateral treated as whole units),
     // inflating every CR check and admitting under-collateralized opens.
     let mut zero = arg();
@@ -114,7 +114,7 @@ fn register_chain_rejects_out_of_range_decimals() {
 
 #[test]
 fn register_chain_enforces_evm_finality_floor() {
-    let mut s = MultiChainStateV5::default();
+    let mut s = MultiChainState::default();
     // EVM chain with finality_depth 0 is rejected.
     let mut a = arg(); // EvmEip1559 gas strategy
     a.finality_depth = 0;
@@ -135,7 +135,7 @@ fn register_chain_enforces_evm_finality_floor() {
 
 #[test]
 fn disable_chain_flips_status_and_preserves_supply() {
-    let mut s = MultiChainStateV5::default();
+    let mut s = MultiChainState::default();
     register_chain_in_state(&mut s, arg(), 0).expect("register");
     s.chain_supplies.insert(ChainId(101), 999);
     disable_chain_in_state(&mut s, ChainId(101)).expect("disable");
@@ -145,7 +145,7 @@ fn disable_chain_flips_status_and_preserves_supply() {
 
 #[test]
 fn set_chain_config_updates_supplied_fields_only() {
-    let mut s = MultiChainStateV5::default();
+    let mut s = MultiChainState::default();
     register_chain_in_state(&mut s, arg(), 0).expect("register");
     let original_name = s.chain_configs[&ChainId(101)].display_name.clone();
     let update = UpdateChainConfigArg {
@@ -163,7 +163,7 @@ fn set_chain_config_updates_supplied_fields_only() {
 
 #[test]
 fn set_chain_config_rejects_unknown_chain() {
-    let mut s = MultiChainStateV5::default();
+    let mut s = MultiChainState::default();
     let err = update_chain_config_in_state(
         &mut s,
         ChainId(404),
@@ -174,7 +174,7 @@ fn set_chain_config_rejects_unknown_chain() {
 
 #[test]
 fn delete_chain_removes_zero_supply_chain() {
-    let mut s = MultiChainStateV5::default();
+    let mut s = MultiChainState::default();
     let c = ChainId(999);
     register_chain_in_state(&mut s, config_arg_999(), 0).expect("register");
     // Populate EVERY per-chain map so the purge can be observed.
@@ -211,7 +211,7 @@ fn delete_chain_removes_zero_supply_chain() {
 
 #[test]
 fn delete_chain_refuses_when_supply_nonzero() {
-    let mut s = MultiChainStateV5::default();
+    let mut s = MultiChainState::default();
     let c = ChainId(999);
     register_chain_in_state(&mut s, config_arg_999(), 0).expect("register");
     s.chain_supplies.insert(c, 1);
@@ -224,7 +224,7 @@ fn delete_chain_refuses_when_supply_nonzero() {
 
 #[test]
 fn delete_chain_refuses_when_open_vaults_reference_it() {
-    let mut s = MultiChainStateV5::default();
+    let mut s = MultiChainState::default();
     let c = ChainId(999);
     register_chain_in_state(&mut s, config_arg_999(), 0).expect("register");
     s.chain_vaults.insert(1, dummy_vault(1, c));
@@ -237,7 +237,7 @@ fn delete_chain_refuses_when_open_vaults_reference_it() {
 
 #[test]
 fn delete_chain_unknown_is_rejected() {
-    let mut s = MultiChainStateV5::default();
+    let mut s = MultiChainState::default();
     let err = delete_chain_in_state(&mut s, ChainId(404)).expect_err("unknown chain");
     assert!(matches!(err, ChainAdminError::ChainNotRegistered(ChainId(404))));
 }

@@ -38,7 +38,7 @@ use ic_canister_log::log;
 
 use crate::chains::config::{ChainId, ChainStatus};
 use crate::chains::monad::chain_vault::ChainVaultStatus;
-use crate::chains::multi_chain_state::MultiChainStateV5;
+use crate::chains::multi_chain_state::MultiChainState;
 use crate::chains::settlement_queue::{SettlementOpKind, SettlementOpStatus, SettlementQueueV1};
 use crate::chains::supply::{apply_supply_delta, SupplyDelta};
 use crate::logs::INFO;
@@ -96,7 +96,7 @@ pub fn select_next_op(q: &SettlementQueueV1) -> Option<(u64, OpAction)> {
 /// 3. Only after (2) succeeds: move `pending_mint_e8s` -> `debt_e8s`, set
 ///    status `Open`.
 pub fn confirm_mint_in_state(
-    state: &mut MultiChainStateV5,
+    state: &mut MultiChainState,
     chain: ChainId,
     vault_id: u64,
     observed_e8s: u128,
@@ -145,7 +145,7 @@ pub fn confirm_mint_in_state(
 /// `pending_interest_mint_e8s`. `pre_total` is the PRE-mint
 /// `total_chain_vault_debt_e8s()`.
 pub fn confirm_interest_mint_in_state(
-    state: &mut MultiChainStateV5,
+    state: &mut MultiChainState,
     chain: ChainId,
     vault_id: u64,
     observed_e8s: u128,
