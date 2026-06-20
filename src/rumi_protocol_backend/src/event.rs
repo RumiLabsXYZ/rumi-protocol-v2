@@ -894,6 +894,55 @@ pub enum Event {
         block_number: u64,
         timestamp: u64,
     },
+    // ── Chains-liquidation engine (Increment 1: defined, NOT yet emitted) ──
+    // Forward-looking variants for the liquidation cascade. Additive to the
+    // append-only event candid surface; emitted starting Increment 2 (bot path)
+    // / Increment 4 (SP path). Defined now so the V6 bump + the event surface land
+    // together and a single deploy covers the engine.
+    /// Increment 2+: a bot (PSM) partial liquidation confirmed — `debt_cleared_e8s`
+    /// of the vault's debt was retired into reserve (no icUSD burn) and
+    /// `collateral_seized_native` was sold. Pairs with `ChainReserveCredited`.
+    #[serde(rename = "chain_vault_liquidated")]
+    ChainVaultLiquidated {
+        chain_id: crate::chains::config::ChainId,
+        vault_id: u64,
+        op_id: u64,
+        debt_cleared_e8s: u128,
+        collateral_seized_native: u128,
+        tier: crate::chains::vault::LiquidationTier,
+        timestamp: u64,
+    },
+    /// Increment 2+: reserve backing credited for a chain after a bot swap settled
+    /// (`backing_added_e8s` moved debt->reserve; `usdc_native` realized USDC
+    /// recorded). The accounting side of `ChainVaultLiquidated`.
+    #[serde(rename = "chain_reserve_credited")]
+    ChainReserveCredited {
+        chain_id: crate::chains::config::ChainId,
+        vault_id: u64,
+        backing_added_e8s: u128,
+        usdc_native: u128,
+        timestamp: u64,
+    },
+    /// Increment 4+: an SP depositor's CFX claim was settled (paid to their EVM
+    /// address) for a chain-vault liquidation. Claim-scoped, not vault-scoped.
+    #[serde(rename = "chain_cfx_claim_settled")]
+    ChainCfxClaimSettled {
+        chain_id: crate::chains::config::ChainId,
+        claim_id: u64,
+        recipient: String,
+        amount_native: u128,
+        timestamp: u64,
+    },
+    /// Increment 2+: a vault was liquidatable but liquidation was DEFERRED this
+    /// tick (stale price, halted chain, DEX depth too thin, etc.). Carries the
+    /// reason so the operator can see why a vault is stuck at a tier.
+    #[serde(rename = "chain_liquidation_deferred")]
+    ChainLiquidationDeferred {
+        chain_id: crate::chains::config::ChainId,
+        vault_id: u64,
+        reason: String,
+        timestamp: u64,
+    },
 }
 
 impl Event {
@@ -1015,10 +1064,16 @@ impl Event {
             | Event::ChainMintConfirmed { vault_id, .. }
             | Event::ChainBurnObserved { vault_id, .. }
             | Event::ChainInterestMinted { vault_id, .. }
+            // Increment 1: chains-liquidation events that name a vault.
+            | Event::ChainVaultLiquidated { vault_id, .. }
+            | Event::ChainReserveCredited { vault_id, .. }
+            | Event::ChainLiquidationDeferred { vault_id, .. }
             | Event::WithdrawalSigned { vault_id, .. } => vault_id == filter_vault_id,
             // Phase 1b: protocol-wide or op-scoped events, not vault-specific.
             Event::ChainSettlementFailed { .. }
             | Event::ChainReorgDetected { .. }
+            // Increment 1: an SP CFX claim is claim-scoped, not vault-scoped.
+            | Event::ChainCfxClaimSettled { .. }
             | Event::ChainHotWalletLow { .. } => false,
         }
     }
@@ -2040,6 +2095,13 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             | Event::WithdrawalSigned { .. }
             | Event::ChainSettlementFailed { .. }
             | Event::ChainReorgDetected { .. }
+            // Increment 1: chains-liquidation events are observability-only; the
+            // reserve/debt/supply mutations happen live in the bot/SP confirm
+            // paths (Increments 2-4), not on replay.
+            | Event::ChainVaultLiquidated { .. }
+            | Event::ChainReserveCredited { .. }
+            | Event::ChainCfxClaimSettled { .. }
+            | Event::ChainLiquidationDeferred { .. }
             | Event::ChainHotWalletLow { .. } => {},
         }
     }

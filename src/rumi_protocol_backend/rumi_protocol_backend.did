@@ -210,6 +210,19 @@ type Event = variant {
     timestamp : nat64;
     tx_hash : text;
   };
+  chain_liquidation_deferred : record {
+    vault_id : nat64;
+    chain_id : nat32;
+    timestamp : nat64;
+    reason : text;
+  };
+  chain_reserve_credited : record {
+    usdc_native : nat;
+    backing_added_e8s : nat;
+    vault_id : nat64;
+    chain_id : nat32;
+    timestamp : nat64;
+  };
   provide_liquidity : record {
     block_index : nat64;
     timestamp : opt nat64;
@@ -510,6 +523,13 @@ type Event = variant {
   set_icpswap_routing_enabled : record { enabled : bool };
   set_bot_budget : record { start_timestamp : nat64; total_e8s : nat64 };
   set_rmr_floor : record { value : text };
+  chain_cfx_claim_settled : record {
+    claim_id : nat64;
+    amount_native : nat;
+    recipient : text;
+    chain_id : nat32;
+    timestamp : nat64;
+  };
   set_redemption_fee_floor : record { rate : text };
   set_interest_rate : record {
     collateral_type : principal;
@@ -556,6 +576,15 @@ type Event = variant {
   set_collateral_borrow_threshold : record {
     borrow_threshold_ratio : text;
     collateral_type : principal;
+  };
+  chain_vault_liquidated : record {
+    collateral_seized_native : nat;
+    op_id : nat64;
+    tier : LiquidationTier;
+    vault_id : nat64;
+    chain_id : nat32;
+    timestamp : nat64;
+    debt_cleared_e8s : nat;
   };
   add_collateral_type : record {
     config : CollateralConfig;
