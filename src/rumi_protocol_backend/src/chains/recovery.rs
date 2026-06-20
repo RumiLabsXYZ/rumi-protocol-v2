@@ -136,6 +136,11 @@ pub fn apply_resolve_reversal_in_state(
                 }
             }
             SettlementOpKind::Burn { .. } => {}
+            SettlementOpKind::LiquidationSwap { .. } => {
+                // Unreachable in Increment 2 (swaps are never submitted). Increment
+                // 3 restores `collateral_reserved_native` + clears the
+                // `pending_liquidation` marker here under the manual-recovery CAS.
+            }
         }
     }
     if let Some(o) = state

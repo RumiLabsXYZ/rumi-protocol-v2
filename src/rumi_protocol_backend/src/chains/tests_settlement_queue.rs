@@ -141,3 +141,40 @@ fn has_active_mint_op_true_only_for_live_mint() {
     q.pending.get_mut(&mint_id).unwrap().mark_succeeded("0xhash".into(), 2);
     assert!(!q.has_active_mint_op(), "succeeded mint does not count");
 }
+
+// ─── Increment 2 / Task 5: inert LiquidationSwap op (enqueue-only until Inc 3) ───
+#[test]
+fn liquidation_swap_op_is_skipped_by_select_next_op_until_inc3() {
+    use super::evm::settlement::select_next_op;
+    let mut q = SettlementQueueV1::default();
+    // Enqueue an inert LiquidationSwap, then a normal Mint after it.
+    q.enqueue(SettlementOp::new(
+        SettlementOpKind::LiquidationSwap {
+            vault_id: 7,
+            collateral_in_native: 1,
+            min_usdc_out_native: 0,
+            debt_to_clear_e8s: 1,
+            router: "0xr".into(),
+            pair: "0xp".into(),
+            path: vec!["0xa".into(), "0xb".into()],
+            reserve_recipient: "0xres".into(),
+            deadline_secs: 180,
+        },
+        "liq-71-7-1".into(),
+        1,
+    ))
+    .unwrap();
+    q.enqueue(SettlementOp::new(
+        SettlementOpKind::Mint { recipient: "0xm".into(), amount_e8s: 5, vault_id: 7 },
+        "mint-71-7-2".into(),
+        2,
+    ))
+    .unwrap();
+    // The swap is skipped; the Mint is selected for Submit (no head-of-line block).
+    let (id, _action) = select_next_op(&q).expect("an actionable op");
+    let selected = q.pending.get(&id).unwrap();
+    assert!(
+        matches!(selected.kind, SettlementOpKind::Mint { .. }),
+        "swap must be skipped in Inc 2"
+    );
+}

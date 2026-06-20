@@ -41,6 +41,24 @@ pub enum SettlementOpKind {
         accrual_through_ns: u64,
         recipient: String,
     },
+    /// Tier-1 bot PSM swap: sell `collateral_in_native` seized collateral -> the
+    /// settle-stable (USDC) reserve to retire `debt_to_clear_e8s` (spec §4.8/§8).
+    /// Enqueued by `begin_liquidation_in_state` in Increment 2 but INERT until
+    /// Increment 3 wires the submit/confirm/revert arms: `select_next_op` SKIPS
+    /// it, so it never executes and never head-of-line-blocks user ops.
+    /// `min_usdc_out_native` is advisory — recomputed just-in-time at submit from
+    /// live reserves (Inc 3).
+    LiquidationSwap {
+        vault_id: u64,
+        collateral_in_native: u128,
+        min_usdc_out_native: u128,
+        debt_to_clear_e8s: u128,
+        router: String,
+        pair: String,
+        path: Vec<String>,
+        reserve_recipient: String,
+        deadline_secs: u64,
+    },
 }
 
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]

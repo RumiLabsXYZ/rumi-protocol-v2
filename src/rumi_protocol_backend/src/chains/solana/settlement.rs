@@ -280,7 +280,9 @@ async fn submit_op(chain: ChainId, op_id: u64, op: SettlementOp) {
                 Err(e) => return handle_adapter_error(chain, op_id, "sign_withdrawal", e),
             }
         }
-        SettlementOpKind::Burn { .. } | SettlementOpKind::InterestMint { .. } => {
+        SettlementOpKind::Burn { .. }
+        | SettlementOpKind::InterestMint { .. }
+        | SettlementOpKind::LiquidationSwap { .. } => {
             // Unreachable: handled (marked Failed) at the top of this fn.
             return;
         }
@@ -521,7 +523,9 @@ fn confirm_succeeded(
             });
             log!(INFO, "[solana settlement chain={:?}] withdrawal op {} vault {} confirmed slot={} sig={} (Closing->Closed if applicable)", chain, op_id, vid, slot, signature);
         }
-        SettlementOpKind::Burn { .. } | SettlementOpKind::InterestMint { .. } => {
+        SettlementOpKind::Burn { .. }
+        | SettlementOpKind::InterestMint { .. }
+        | SettlementOpKind::LiquidationSwap { .. } => {
             // Unreachable: Burn/InterestMint ops are marked Failed on the submit
             // path and never go Inflight. Log defensively rather than panic.
             log!(INFO, "[solana settlement chain={:?}] inflight non-signable op {} reached confirm path unexpectedly", chain, op_id);
@@ -578,7 +582,9 @@ fn confirm_reverted(chain: ChainId, op_id: u64, op: &SettlementOp, signature: &s
                     }
                 }
             }
-            SettlementOpKind::Burn { .. } | SettlementOpKind::InterestMint { .. } => {}
+            SettlementOpKind::Burn { .. }
+        | SettlementOpKind::InterestMint { .. }
+        | SettlementOpKind::LiquidationSwap { .. } => {}
         }
         if let Some(o) = s
             .multi_chain
@@ -605,7 +611,9 @@ fn confirm_reverted(chain: ChainId, op_id: u64, op: &SettlementOp, signature: &s
             SettlementOpKind::NativeWithdrawal { vault_id, amount_e18, .. } => {
                 log!(INFO, "[solana settlement chain={:?}] withdrawal op {} vault {} reverted on-chain (sig {}); marked Failed, restored {} lamports of reserved collateral", chain, op_id, vault_id, signature, amount_e18);
             }
-            SettlementOpKind::Burn { .. } | SettlementOpKind::InterestMint { .. } => {}
+            SettlementOpKind::Burn { .. }
+        | SettlementOpKind::InterestMint { .. }
+        | SettlementOpKind::LiquidationSwap { .. } => {}
         }
     }
 }
