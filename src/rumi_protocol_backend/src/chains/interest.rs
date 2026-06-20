@@ -199,7 +199,7 @@ mod tests {
                 owner_evm: None,
                 last_interest_accrual_ns: last_accrual_ns,
                 pending_interest_mint_e8s: pending_interest,
-            },
+                pending_liquidation: None,            },
         );
     }
 

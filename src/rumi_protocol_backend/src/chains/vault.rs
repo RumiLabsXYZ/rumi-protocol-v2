@@ -92,6 +92,56 @@ pub struct ChainVaultV1 {
     /// `> 0` ⇒ one interest realization is in flight for this vault.
     #[serde(default)]
     pub pending_interest_mint_e8s: u128,
+    /// Chains-liquidation marker (spec 3.1): `Some(..)` while a liquidation is
+    /// mid-flight for this vault. A MARKER, deliberately NOT a new
+    /// `ChainVaultStatus` variant — the vault stays `Open` throughout, so no
+    /// `match ChainVaultStatus` site needs a new arm and the existing owner-write
+    /// guards key off this exactly as they do off `pending_mint_e8s`. Set by
+    /// `begin_liquidation_in_state` (Increment 2), cleared on confirm/revert.
+    /// While `Some`, owner write-ops (withdraw/borrow/close) reject with
+    /// `LiquidationInFlight`. `#[serde(default)]` = `None` for a vault decoded
+    /// from a pre-field snapshot (mandatory state-wipe defense). Empty until
+    /// Increment 2 wires the engine.
+    #[serde(default)]
+    pub pending_liquidation: Option<PendingLiquidationV1>,
+}
+
+/// Which liquidation tier reserved a vault's collateral (spec 3.1, 6). The tier
+/// matters because the bot path (PSM swap) and the SP path reserve/clear
+/// collateral differently; it is recorded on the marker so the confirm/escalation
+/// logic (Increments 2-4) knows which path owns the in-flight liquidation.
+#[derive(CandidType, Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LiquidationTier {
+    /// Tier 1: canister-as-bot PSM swap (seized CFX -> USDC reserve, no icUSD burn).
+    Bot,
+    /// Tier 2: ICP Stability Pool fallback (burns icUSD, absorbs the chain debt).
+    StabilityPool,
+}
+
+/// Per-vault liquidation-in-flight marker (spec 3.1). Mirrors the existing
+/// Design-B pending markers (`pending_mint_e8s`, `pending_interest_mint_e8s`):
+/// "this much is mid-settlement and may revert." Carries enough to resolve the
+/// in-flight op on confirm and to restore the reserved collateral on revert.
+/// Inert until Increment 2 populates it; defined here so the V6 root + the
+/// owner-write guards are ready and a single bump covers the whole engine.
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct PendingLiquidationV1 {
+    /// Settlement-queue op id of the liquidation op (the bot swap, or the SP
+    /// eSpace burn). Phase 2 confirm matches on this id (and tolerates the op
+    /// already being pruned — finding #5: the marker, not the op, is the source
+    /// of truth for routing/settlement).
+    pub op_id: u64,
+    /// Debt (e8s) this liquidation is sized to retire.
+    pub debt_to_clear_e8s: u128,
+    /// Collateral (native base units, e.g. CFX wei) decremented from
+    /// `collateral_amount_native` and handed to the tier; restored under CAS on
+    /// revert.
+    pub collateral_reserved_native: u128,
+    /// Which tier owns this in-flight liquidation.
+    pub tier: LiquidationTier,
+    /// Wall-clock ns the liquidation was begun (for the bot-timeout / aged-marker
+    /// alarms in later increments).
+    pub started_at_ns: u64,
 }
 
 /// Reasons `open_chain_vault_in_state` / `verify_deposit_and_enqueue_mint_in_state`
@@ -169,6 +219,12 @@ pub enum WithdrawError {
     /// interest as unbacked debt on a Closed vault (Task 12). The window is a
     /// few settlement ticks; the next harvest/confirm clears it.
     InterestRealizationPending,
+    /// A liquidation is in flight for this vault (`pending_liquidation.is_some()`).
+    /// The vault's collateral is reserved/handed to the liquidation tier; an owner
+    /// withdraw or close while a swap/burn may still settle could double-spend the
+    /// collateral or under-collateralize the residual debt. Reject until the
+    /// marker clears (mirrors `MintInFlight`). Spec 3.1.
+    LiquidationInFlight,
 }
 
 /// Compute the collateral ratio (e4: 25000 == 250.00%) for a foreign-chain vault.
@@ -340,7 +396,7 @@ pub fn open_chain_vault_in_state(
             // stamped to `now` at mint-confirm (Task 7). Open-time = 0 (debt 0).
             last_interest_accrual_ns: 0,
             pending_interest_mint_e8s: 0,
-        },
+            pending_liquidation: None,        },
     );
     // No mint enqueued - that happens in verify_deposit_and_enqueue_mint_in_state.
     Ok(())
@@ -509,6 +565,13 @@ pub fn withdraw_collateral_in_state(
         if v.pending_interest_mint_e8s > 0 {
             return Err(WithdrawError::InterestRealizationPending);
         }
+        // Increment 1 (spec 3.1): a liquidation is in flight — the vault's
+        // collateral is reserved/handed to a tier and a swap/burn may still
+        // settle. Releasing collateral now could double-spend it or strand the
+        // residual debt. Reject until the marker clears (mirrors MintInFlight).
+        if v.pending_liquidation.is_some() {
+            return Err(WithdrawError::LiquidationInFlight);
+        }
         if amount_e18 > v.collateral_amount_native {
             return Err(WithdrawError::InsufficientCollateral);
         }
@@ -639,6 +702,13 @@ pub fn close_chain_vault_in_state(
         if v.pending_mint_e8s != 0 {
             return Err(WithdrawError::MintInFlight);
         }
+        // Increment 1 (spec 3.1): block close while a liquidation is in flight.
+        // The degenerate zero-collateral short-circuit below bypasses the withdraw
+        // delegate, so the marker guard must live here too (same rationale as the
+        // pending_mint guard above). The delegate path inherits the withdraw guard.
+        if v.pending_liquidation.is_some() {
+            return Err(WithdrawError::LiquidationInFlight);
+        }
         (v.collateral_amount_native, v.status.clone())
     };
 
@@ -690,6 +760,11 @@ pub enum BorrowError {
     /// The borrow would push the chain's total outstanding+in-flight debt over
     /// the configured `debt_ceiling_e8s`.
     DebtCeilingExceeded { would_be_e8s: u128, ceiling_e8s: u128 },
+    /// A liquidation is in flight for this vault (`pending_liquidation.is_some()`).
+    /// Borrowing more against collateral that is reserved/handed to a liquidation
+    /// tier could leave the post-confirm vault under-collateralized. Reject until
+    /// the marker clears (mirrors `MintInFlight`). Spec 3.1.
+    LiquidationInFlight,
 }
 
 /// Borrow additional icUSD against an existing `Open` vault — a SECOND on-chain
@@ -736,6 +811,12 @@ pub fn borrow_chain_vault_in_state(
         // for this vault, and the settlement queue is sequential per chain.
         if v.pending_mint_e8s != 0 {
             return Err(BorrowError::MintInFlight);
+        }
+        // Increment 1 (spec 3.1): no new borrow while a liquidation is in flight —
+        // the collateral is reserved/handed to a tier, so borrowing more against it
+        // could leave the post-confirm vault under-collateralized.
+        if v.pending_liquidation.is_some() {
+            return Err(BorrowError::LiquidationInFlight);
         }
         (
             v.collateral_chain,

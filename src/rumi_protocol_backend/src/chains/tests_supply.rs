@@ -124,7 +124,7 @@ fn stamp_sets_accrual_start_only_for_unstamped_vaults() {
         owner_evm: None,
         last_interest_accrual_ns: last,
         pending_interest_mint_e8s: 0,
-    };
+        pending_liquidation: None,    };
     let mut s = MultiChainState::default();
     s.chain_vaults.insert(1, mk(1, 0)); // unstamped (pre-field snapshot)
     s.chain_vaults.insert(2, mk(2, 5)); // already stamped

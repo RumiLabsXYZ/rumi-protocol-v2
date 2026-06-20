@@ -45,7 +45,7 @@ fn solana_vault_pending(s: &mut MultiChainState, vault_id: u64, pending_e8s: u12
             owner_evm: None,
             last_interest_accrual_ns: 0,
             pending_interest_mint_e8s: 0,
-        },
+            pending_liquidation: None,        },
     );
 }
 
@@ -106,7 +106,7 @@ fn solana_confirm_mint_second_vault_uses_running_total() {
             owner_evm: None,
             last_interest_accrual_ns: 0,
             pending_interest_mint_e8s: 0,
-        },
+            pending_liquidation: None,        },
     );
     solana_vault_pending(&mut s, 2, 5_000_000_000);
     let pre_total = s.total_chain_vault_debt_e8s(); // == 10e8

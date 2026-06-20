@@ -87,7 +87,7 @@ fn pre_m2_snapshot_decodes_with_defaulted_evm_fields() {
             opened_at_ns: 42,
             last_interest_accrual_ns: 0,
             pending_interest_mint_e8s: 0,
-            owner_evm: Some("0xfeed".into()),
+            pending_liquidation: None,            owner_evm: Some("0xfeed".into()),
         },
     );
 

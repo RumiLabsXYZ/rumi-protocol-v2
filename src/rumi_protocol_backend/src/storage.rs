@@ -403,7 +403,7 @@ mod state_snapshot_tests {
                 owner_evm: None,
                 last_interest_accrual_ns: 0,
                 pending_interest_mint_e8s: 0,
-            },
+                pending_liquidation: None,            },
         );
 
         let bytes = encode_state(&state);

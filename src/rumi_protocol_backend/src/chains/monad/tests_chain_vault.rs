@@ -37,7 +37,7 @@ fn chain_vault_round_trips_via_candid() {
         owner_evm: None,
         last_interest_accrual_ns: 0,
         pending_interest_mint_e8s: 0,
-    };
+        pending_liquidation: None,    };
     let bytes = Encode!(&v).expect("encode");
     let back: ChainVaultV1 = Decode!(&bytes, ChainVaultV1).expect("decode");
     assert_eq!(back.vault_id, 42);
@@ -60,7 +60,7 @@ fn chain_vault_round_trips_via_cbor() {
         owner_evm: None,
         last_interest_accrual_ns: 0,
         pending_interest_mint_e8s: 0,
-    };
+        pending_liquidation: None,    };
     let mut buf = Vec::new();
     ciborium::ser::into_writer(&v, &mut buf).expect("cbor encode");
     let back: ChainVaultV1 = ciborium::de::from_reader(buf.as_slice()).expect("cbor decode");

@@ -33,7 +33,7 @@ fn vault(vault_id: u64, status: ChainVaultStatus, pending: u128, collateral: u12
         owner_evm: None,
         last_interest_accrual_ns: 0,
         pending_interest_mint_e8s: 0,
-    }
+        pending_liquidation: None,    }
 }
 
 fn inflight_op(op_id: u64, kind: SettlementOpKind, tx: Option<&str>) -> SettlementOp {

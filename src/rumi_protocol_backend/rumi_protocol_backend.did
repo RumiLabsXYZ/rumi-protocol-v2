@@ -64,6 +64,7 @@ type ChainVaultV1 = record {
   opened_at_ns : nat64;
   vault_id : nat64;
   last_interest_accrual_ns : nat64;
+  pending_liquidation : opt PendingLiquidationV1;
   collateral_chain : nat32;
   mint_recipient : text;
   debt_e8s : nat;
@@ -666,6 +667,7 @@ type InitArg = record {
 type InterestSplitArg = record { bps : nat64; destination : text };
 type InterpolationMethod = variant { Linear };
 type LineDisplayPage = record { lines : vec text };
+type LiquidationTier = variant { Bot; StabilityPool };
 type LiquidityStatus = record {
   liquidity_provided : nat64;
   total_liquidity_provided : nat64;
@@ -676,6 +678,13 @@ type LiquidityStatus = record {
 type ManualPriceInfo = record { set_at_ns : nat64; price_e8 : nat64 };
 type Mode = variant { ReadOnly; GeneralAvailability; Recovery };
 type OpenVaultSuccess = record { block_index : nat64; vault_id : nat64 };
+type PendingLiquidationV1 = record {
+  started_at_ns : nat64;
+  op_id : nat64;
+  tier : LiquidationTier;
+  debt_to_clear_e8s : nat;
+  collateral_reserved_native : nat;
+};
 type PerCollateralRateCurve = record {
   markers : vec record { float64; float64 };
   base_rate : float64;
