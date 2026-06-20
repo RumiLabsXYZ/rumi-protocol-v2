@@ -71,6 +71,8 @@ fn open_succeeds_with_injected_validator_and_sol_price_symbol() {
         only_good, // injected validator accepts "good-address"
         "SOL",     // NON-"MON" price symbol
         13_000,
+        0,
+        None,
         12345,
         7,
     );
@@ -100,6 +102,8 @@ fn open_rejected_when_injected_validator_rejects() {
         only_good,
         "SOL",
         13_000,
+        0,
+        None,
         12345,
         7,
     );
@@ -125,6 +129,8 @@ fn open_no_price_when_symbol_key_absent() {
         only_good,
         "WSOL", // no manual price under this symbol
         13_000,
+        0,
+        None,
         12345,
         7,
     );
@@ -157,7 +163,7 @@ fn borrow_open_vault_enqueues_mint_and_reserves_pending() {
     let mut s = setup(PRICE_150_USD_E8);
     // 100 SOL ($15000) collateral, 100 icUSD debt; borrow 50 more → CR fine.
     insert_open_vault(&mut s, Principal::anonymous(), 7, 100 * ONE_SOL, 100_00000000);
-    let r = borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "good-address".into(), only_good, "SOL", 13_000, 1);
+    let r = borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "good-address".into(), only_good, "SOL", 13_000, 0, None, 1);
     assert_eq!(r, Ok(()));
     let v = s.chain_vaults.get(&7).unwrap();
     assert_eq!(v.pending_mint_e8s, 50_00000000, "borrow reserves the additional as pending");
@@ -169,7 +175,7 @@ fn borrow_open_vault_enqueues_mint_and_reserves_pending() {
 fn borrow_then_confirm_preserves_supply_invariant() {
     let mut s = setup(PRICE_150_USD_E8);
     insert_open_vault(&mut s, Principal::anonymous(), 7, 100 * ONE_SOL, 100_00000000);
-    borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "good-address".into(), only_good, "SOL", 13_000, 1).unwrap();
+    borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "good-address".into(), only_good, "SOL", 13_000, 0, None, 1).unwrap();
     let pre = s.total_chain_vault_debt_e8s();
     confirm_mint_in_state(&mut s, CHAIN, 7, 50_00000000, pre, 1).expect("confirm");
     let v = s.chain_vaults.get(&7).unwrap();
@@ -184,7 +190,7 @@ fn borrow_rejects_when_mint_in_flight() {
     let mut s = setup(PRICE_150_USD_E8);
     insert_open_vault(&mut s, Principal::anonymous(), 7, 100 * ONE_SOL, 100_00000000);
     s.chain_vaults.get_mut(&7).unwrap().pending_mint_e8s = 1; // a mint already pending
-    let r = borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "good-address".into(), only_good, "SOL", 13_000, 1);
+    let r = borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "good-address".into(), only_good, "SOL", 13_000, 0, None, 1);
     assert_eq!(r, Err(BorrowError::MintInFlight));
 }
 
@@ -194,7 +200,7 @@ fn borrow_rejects_non_open_vault() {
     let mut s = setup(PRICE_150_USD_E8);
     insert_open_vault(&mut s, Principal::anonymous(), 7, 100 * ONE_SOL, 100_00000000);
     s.chain_vaults.get_mut(&7).unwrap().status = ChainVaultStatus::AwaitingDeposit;
-    let r = borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "good-address".into(), only_good, "SOL", 13_000, 1);
+    let r = borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "good-address".into(), only_good, "SOL", 13_000, 0, None, 1);
     assert_eq!(r, Err(BorrowError::WrongStatus { status: ChainVaultStatus::AwaitingDeposit }));
 }
 
@@ -204,7 +210,7 @@ fn borrow_rejects_below_min_cr() {
     // 1 SOL ($150) collateral, 100 icUSD debt (CR 150%); borrow 50 more → new debt
     // 150 icUSD, CR = 150/150 = 100% < 130% → reject.
     insert_open_vault(&mut s, Principal::anonymous(), 7, ONE_SOL, 100_00000000);
-    let r = borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "good-address".into(), only_good, "SOL", 13_000, 1);
+    let r = borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "good-address".into(), only_good, "SOL", 13_000, 0, None, 1);
     assert!(matches!(r, Err(BorrowError::BelowMinCr { .. })), "got {r:?}");
     assert_eq!(s.chain_vaults.get(&7).unwrap().pending_mint_e8s, 0, "no mutation on reject");
 }
@@ -213,8 +219,71 @@ fn borrow_rejects_below_min_cr() {
 fn borrow_rejects_zero_debt_and_bad_recipient() {
     let mut s = setup(PRICE_150_USD_E8);
     insert_open_vault(&mut s, Principal::anonymous(), 7, 100 * ONE_SOL, 100_00000000);
-    assert_eq!(borrow_chain_vault_in_state(&mut s, 7, 0, "good-address".into(), only_good, "SOL", 13_000, 1), Err(BorrowError::ZeroDebt));
-    assert_eq!(borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "bad".into(), only_good, "SOL", 13_000, 1), Err(BorrowError::InvalidAddress("bad".into())));
+    assert_eq!(borrow_chain_vault_in_state(&mut s, 7, 0, "good-address".into(), only_good, "SOL", 13_000, 0, None, 1), Err(BorrowError::ZeroDebt));
+    assert_eq!(borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "bad".into(), only_good, "SOL", 13_000, 0, None, 1), Err(BorrowError::InvalidAddress("bad".into())));
+}
+
+// ─── Increment 0: min-debt floor + per-chain debt ceiling ─────────────────────
+
+#[test]
+fn open_rejects_debt_below_min_vault_debt() {
+    let mut s = setup(PRICE_150_USD_E8);
+    // 1 SOL ($150) collateral easily clears CR; debt 0.05 icUSD < the 0.1 floor.
+    let r = open_chain_vault_in_state(
+        &mut s, CHAIN, Principal::anonymous(), "custody".into(), ONE_SOL,
+        5_000_000, // 0.05 icUSD
+        "good-address".into(), only_good, "SOL",
+        13_000, /*min_vault_debt*/ 10_000_000, /*ceiling*/ None, 12345, 1,
+    );
+    assert!(matches!(r, Err(OpenVaultError::BelowMinDebt { min_e8s: 10_000_000, .. })), "got {r:?}");
+    assert!(s.chain_vaults.is_empty(), "no mutation on rejection");
+}
+
+#[test]
+fn open_rejects_when_over_debt_ceiling() {
+    let mut s = setup(PRICE_150_USD_E8);
+    // Seed 900 icUSD of existing chain debt, then open another 200 -> 1100 > 1000.
+    insert_open_vault(&mut s, Principal::anonymous(), 1, 100 * ONE_SOL, 900_00000000);
+    let r = open_chain_vault_in_state(
+        &mut s, CHAIN, Principal::anonymous(), "custody".into(), 100 * ONE_SOL,
+        200_00000000, "good-address".into(), only_good, "SOL",
+        13_000, 10_000_000, Some(1000_00000000), 12345, 2,
+    );
+    assert!(
+        matches!(r, Err(OpenVaultError::DebtCeilingExceeded { would_be_e8s, ceiling_e8s })
+            if would_be_e8s == 1100_00000000 && ceiling_e8s == 1000_00000000),
+        "got {r:?}"
+    );
+    assert!(!s.chain_vaults.contains_key(&2), "no vault created over the ceiling");
+}
+
+#[test]
+fn open_allows_debt_exactly_at_ceiling() {
+    let mut s = setup(PRICE_150_USD_E8);
+    insert_open_vault(&mut s, Principal::anonymous(), 1, 100 * ONE_SOL, 800_00000000);
+    // 800 + 200 == 1000 == ceiling -> allowed (only strictly over rejects).
+    let r = open_chain_vault_in_state(
+        &mut s, CHAIN, Principal::anonymous(), "custody".into(), 100 * ONE_SOL,
+        200_00000000, "good-address".into(), only_good, "SOL",
+        13_000, 10_000_000, Some(1000_00000000), 12345, 2,
+    );
+    assert_eq!(r, Ok(()), "open at exactly the ceiling is allowed");
+}
+
+#[test]
+fn borrow_rejects_when_over_debt_ceiling() {
+    let mut s = setup(PRICE_150_USD_E8);
+    // Vault 7 holds 900 icUSD; borrowing 200 more pushes the chain total to 1100 > 1000.
+    insert_open_vault(&mut s, Principal::anonymous(), 7, 1000 * ONE_SOL, 900_00000000);
+    let r = borrow_chain_vault_in_state(
+        &mut s, 7, 200_00000000, "good-address".into(), only_good, "SOL",
+        13_000, 10_000_000, Some(1000_00000000), 1,
+    );
+    assert!(
+        matches!(r, Err(BorrowError::DebtCeilingExceeded { ceiling_e8s, .. }) if ceiling_e8s == 1000_00000000),
+        "got {r:?}"
+    );
+    assert_eq!(s.chain_vaults.get(&7).unwrap().pending_mint_e8s, 0, "no mutation on reject");
 }
 
 #[test]
@@ -319,7 +388,7 @@ fn withdraw_and_close_reject_while_borrow_mint_in_flight() {
     let mut s = setup(PRICE_150_USD_E8);
     // Open vault, 100 SOL collateral, debt 100e8; borrow 50 more (pending=50e8).
     insert_open_vault(&mut s, Principal::anonymous(), 7, 100 * ONE_SOL, 100_00000000);
-    borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "good-address".into(), only_good, "SOL", 13_000, 1).unwrap();
+    borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "good-address".into(), only_good, "SOL", 13_000, 0, None, 1).unwrap();
     assert_eq!(s.chain_vaults.get(&7).unwrap().pending_mint_e8s, 50_00000000);
     // Withdraw must reject — releasing collateral now would undercollateralize
     // once the borrow mint confirms (debt would jump 100e8 -> 150e8).
@@ -335,7 +404,7 @@ fn close_rejects_while_borrow_mint_in_flight_even_if_debt_zero() {
     let mut s = setup(PRICE_150_USD_E8);
     // A repaid (debt 0) but still-Open vault that borrows: debt stays 0, pending=50e8.
     insert_open_vault(&mut s, Principal::anonymous(), 7, 100 * ONE_SOL, 0);
-    borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "good-address".into(), only_good, "SOL", 13_000, 1).unwrap();
+    borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "good-address".into(), only_good, "SOL", 13_000, 0, None, 1).unwrap();
     // Close (debt==0) must NOT release collateral while the borrow mint pends.
     assert_eq!(
         close_chain_vault_in_state(&mut s, 7, "good-address".into(), only_good, "SOL", 13_000, 2),

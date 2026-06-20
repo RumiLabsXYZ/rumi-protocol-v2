@@ -54,6 +54,9 @@ pub fn open_chain_vault_in_state(
     now_ns: u64,
     vault_id: u64,
 ) -> Result<(), OpenVaultError> {
+    // Test-only convenience wrapper. The min-debt floor + debt ceiling are not
+    // enforced here (0/None); production Monad opens go through the core helper
+    // via main.rs with the resolved per-chain config.
     crate::chains::vault::open_chain_vault_in_state(
         state,
         chain,
@@ -65,6 +68,8 @@ pub fn open_chain_vault_in_state(
         crate::chains::monad::tecdsa::is_valid_evm_address,
         "MON",
         min_cr_e4,
+        0,
+        None,
         now_ns,
         vault_id,
     )
@@ -105,6 +110,7 @@ pub fn borrow_chain_vault_in_state(
     min_cr_e4: u64,
     now_ns: u64,
 ) -> Result<(), BorrowError> {
+    // Test-only convenience wrapper; min-debt/ceiling not enforced here (0/None).
     crate::chains::vault::borrow_chain_vault_in_state(
         state,
         vault_id,
@@ -113,6 +119,8 @@ pub fn borrow_chain_vault_in_state(
         crate::chains::monad::tecdsa::is_valid_evm_address,
         "MON",
         min_cr_e4,
+        0,
+        None,
         now_ns,
     )
 }

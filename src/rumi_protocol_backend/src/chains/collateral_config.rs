@@ -41,8 +41,18 @@ const ICP_MIRROR: ChainCollateralConfig = ChainCollateralConfig {
 /// Compile-time per-chain collateral config. `None` for unknown chains.
 pub fn chain_collateral_config(chain: ChainId) -> Option<ChainCollateralConfig> {
     match chain.0 {
-        // Conflux eSpace testnet: full ICP mirror.
-        71 => Some(ICP_MIRROR),
+        // Conflux eSpace: ICP mirror, with two deliberate overrides for the
+        // gated launch. (1) The OPEN/borrow gate is raised to 150% (the ICP mint
+        // min CR); the prior 133% in `min_cr_e4` was really the liquidation
+        // threshold, which becomes an explicit field when the liquidation engine
+        // lands. (2) A depth-bound 500-icUSD debt ceiling: the eSpace DEX can only
+        // absorb ~$1-3k per liquidation swap (see the chains-liquidation spec), so
+        // total Conflux debt is capped well within that until liquidity grows.
+        71 => Some(ChainCollateralConfig {
+            min_cr_e4: 15_000,
+            debt_ceiling_e8s: Some(500 * 100_000_000),
+            ..ICP_MIRROR
+        }),
         // Monad testnet: preserve its historical 130% open threshold
         // (behavior-preserving); other params ICP-mirrored but inert for Monad.
         10143 => Some(ChainCollateralConfig {
@@ -61,14 +71,16 @@ mod tests {
     #[test]
     fn conflux_mirrors_icp() {
         let c = chain_collateral_config(ChainId(71)).expect("conflux known");
-        assert_eq!(c.min_cr_e4, 13_300);
+        // Open gate raised to 150% (ICP mint min CR) for the gated launch.
+        assert_eq!(c.min_cr_e4, 15_000);
         assert_eq!(c.borrow_threshold_e4, 15_000);
         assert_eq!(c.liquidation_penalty_bps, 1_200);
         assert_eq!(c.borrowing_fee_bps, 30);
         assert_eq!(c.interest_apr_bps, 200);
         assert_eq!(c.min_vault_debt_e8s, 10_000_000);
         assert_eq!(c.recovery_target_cr_e4, 15_500);
-        assert_eq!(c.debt_ceiling_e8s, None);
+        // Depth-bound 500-icUSD gated ceiling.
+        assert_eq!(c.debt_ceiling_e8s, Some(500 * 100_000_000));
     }
 
     #[test]

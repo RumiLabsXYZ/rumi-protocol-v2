@@ -868,7 +868,10 @@ fn conflux_evm_self_serve_full_flow_and_rejections() {
     update_any(&pic, mock, "set_balance", Encode!(&settlement_addr, &candid::Nat::from(1_000_000u128 * E18)).unwrap());
 
     // ── OPEN (anonymous, EIP-712 signed, nonce 0) ────────────────────────────
-    let collateral = 1_400u128 * E18; // $210 backing
+    // $240 backing: after the +50 icUSD borrow below (debt 150), CR = 240/150 =
+    // 160% stays above the 150% Conflux open/borrow gate (Increment 0 raised it
+    // from 133% to mirror ICP's mint min CR).
+    let collateral = 1_600u128 * E18; // $240 backing
     let open_intent = make_intent(IntentAction::Open, &owner, 0, collateral, 100 * E8, 0);
     let open_sig = sign(&sk, &open_intent);
     let vault_id = open_evm(&pic, backend, &open_intent, &open_sig).expect("open_evm Ok");
