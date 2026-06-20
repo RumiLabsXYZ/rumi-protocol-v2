@@ -84,6 +84,16 @@ pub fn apply_receipt_burns_to_state(
             Err(crate::chains::monad::deposit_watch::BurnApplyError::SupplyInvariant(e)) => {
                 return Err(format!("halt-class supply invariant: {:?}", e));
             }
+            Err(crate::chains::monad::deposit_watch::BurnApplyError::DeferredLiquidation) => {
+                // Vault mid-liquidation (findings #11/#19): skip without recording
+                // the key so a later proof submission re-applies it once the
+                // liquidation marker clears. Do not abort the whole proof.
+                log!(
+                    INFO,
+                    "[burn_proof] deferring burn for vault {} (mid-liquidation); will retry on a later proof",
+                    burn.vault_id
+                );
+            }
         }
     }
     Ok(applied)

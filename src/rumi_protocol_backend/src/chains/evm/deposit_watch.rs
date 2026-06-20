@@ -78,6 +78,14 @@ pub enum BurnApplyError {
     /// The protocol must NOT advance the cursor past this; the invariant
     /// machinery halts.
     SupplyInvariant(crate::chains::supply::SupplyInvariantError),
+    /// The target vault is mid-liquidation (`pending_liquidation.is_some()`).
+    /// Applying the burn now would let debt shrink out from under an in-flight
+    /// seizure -> over-liquidation (findings #11/#19). DEFER: no mutation, do NOT
+    /// advance the cursor, retry once the marker clears. NOT a halt (the invariant
+    /// machinery is untouched). Head-of-line: stalls this chain's burn-watch for
+    /// the (bounded, disabled-by-default) liquidation window; finding #14 (a
+    /// separate queue) is a future refinement.
+    DeferredLiquidation,
 }
 
 impl std::fmt::Display for BurnApplyError {
@@ -85,6 +93,7 @@ impl std::fmt::Display for BurnApplyError {
         match self {
             BurnApplyError::InvalidBurn(msg) => write!(f, "InvalidBurn({})", msg),
             BurnApplyError::SupplyInvariant(e) => write!(f, "SupplyInvariant({:?})", e),
+            BurnApplyError::DeferredLiquidation => write!(f, "DeferredLiquidation"),
         }
     }
 }
@@ -179,6 +188,14 @@ pub fn apply_burn_to_state(
         let vault = state.chain_vaults.get(&burn.vault_id).ok_or_else(|| {
             BurnApplyError::InvalidBurn(format!("apply_burn: unknown vault_id {}", burn.vault_id))
         })?;
+        // Findings #11/#19: never decrement a vault's debt while it is mid-
+        // liquidation. The `pending_liquidation` marker is the lock (spec §10);
+        // the burn is deferred (retried) until the liquidation resolves and clears
+        // the marker, so a concurrent repayment cannot shrink debt out from under
+        // an in-flight seizure (over-liquidation).
+        if vault.pending_liquidation.is_some() {
+            return Err(BurnApplyError::DeferredLiquidation);
+        }
         (vault.collateral_chain, vault.debt_e8s)
     };
 
@@ -849,6 +866,20 @@ pub async fn run_observer(chain: ChainId) {
                 burn_ok = false;
                 break;
             }
+            Err(BurnApplyError::DeferredLiquidation) => {
+                // Vault mid-liquidation (findings #11/#19): do NOT advance the
+                // cursor and do NOT record the key, so this burn re-applies once
+                // the marker clears. NOT a halt (the invariant is untouched). This
+                // stalls this chain's burn-watch for the bounded liquidation window
+                // (head-of-line; finding #14 is a future separate-queue refinement).
+                log!(
+                    INFO,
+                    "[observer chain={:?}] deferring burn for vault {} (mid-liquidation, tx {}); not advancing cursor",
+                    chain, burn.vault_id, burn.tx_hash
+                );
+                burn_ok = false;
+                break;
+            }
         }
     }
 
@@ -926,5 +957,72 @@ async fn refresh_hot_wallet_balance(chain: ChainId) {
         Err(e) => {
             log!(INFO, "[observer chain={:?}] hot-wallet get_balance failed: {}; keeping cached value", chain, e);
         }
+    }
+}
+
+// ─── Increment 2 / Task 8: burn-defer guard while mid-liquidation (#11/#19) ───
+#[cfg(test)]
+mod liq_defer_tests {
+    use super::{apply_burn_to_state, BurnApplyError};
+    use crate::chains::config::ChainId;
+    use crate::chains::evm::evm_rpc::BurnLog;
+    use crate::chains::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
+    use crate::chains::multi_chain_state::MultiChainState;
+    use crate::chains::vault::{LiquidationTier, PendingLiquidationV1};
+
+    const CFX: ChainId = ChainId(71);
+
+    fn vault(marker: bool) -> ChainVaultV1 {
+        ChainVaultV1 {
+            vault_id: 7,
+            owner: candid::Principal::anonymous(),
+            collateral_chain: CFX,
+            custody_address: "0xc".into(),
+            collateral_amount_native: 1_000,
+            debt_e8s: 100,
+            mint_recipient: "0xr".into(),
+            pending_mint_e8s: 0,
+            status: ChainVaultStatus::Open,
+            opened_at_ns: 0,
+            owner_evm: None,
+            last_interest_accrual_ns: 0,
+            pending_interest_mint_e8s: 0,
+            pending_liquidation: if marker {
+                Some(PendingLiquidationV1 {
+                    op_id: 1,
+                    debt_to_clear_e8s: 10,
+                    collateral_reserved_native: 10,
+                    tier: LiquidationTier::Bot,
+                    started_at_ns: 0,
+                })
+            } else {
+                None
+            },
+        }
+    }
+
+    fn burn(amount_e8s: u128) -> BurnLog {
+        BurnLog { vault_id: 7, amount_e8s, tx_hash: "0xburn".into(), block_number: 1 }
+    }
+
+    #[test]
+    fn burn_deferred_while_pending_liquidation() {
+        let mut s = MultiChainState::default();
+        s.chain_supplies.insert(CFX, 100);
+        s.chain_vaults.insert(7, vault(true));
+        let res = apply_burn_to_state(&mut s, &burn(50), 100);
+        assert!(matches!(res, Err(BurnApplyError::DeferredLiquidation)), "burn deferred, not applied");
+        assert_eq!(s.chain_vaults.get(&7).unwrap().debt_e8s, 100, "debt unchanged");
+        assert_eq!(*s.chain_supplies.get(&CFX).unwrap(), 100, "supply unchanged");
+    }
+
+    #[test]
+    fn burn_applies_when_no_marker() {
+        let mut s = MultiChainState::default();
+        s.chain_supplies.insert(CFX, 100);
+        s.chain_vaults.insert(7, vault(false));
+        apply_burn_to_state(&mut s, &burn(50), 100).expect("applies");
+        assert_eq!(s.chain_vaults.get(&7).unwrap().debt_e8s, 50);
+        assert_eq!(*s.chain_supplies.get(&CFX).unwrap(), 50);
     }
 }
