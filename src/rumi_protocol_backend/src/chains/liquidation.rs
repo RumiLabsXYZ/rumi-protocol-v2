@@ -264,6 +264,11 @@ pub fn detect_and_route_chain_liquidations_in_state(
             || v.pending_mint_e8s != 0
             || v.pending_interest_mint_e8s != 0
             || v.pending_liquidation.is_some()
+            // The bot already failed/gave up on this vault (escalated) — do NOT
+            // re-route it to the bot (no retry loop, finding #10). It falls to
+            // Tier-3 manual / the Tier-2 SP (Increment 4). The prune clears this
+            // once the vault recovers above the liquidation threshold.
+            || state.sp_attempted_chain_vaults.contains(&vid)
         {
             continue;
         }
@@ -603,6 +608,21 @@ mod tests {
         seed_cfg_unchecked(&mut s);
         s.chain_liquidation_configs.get_mut(&ChainId(71)).unwrap().enabled = false;
         assert_eq!(detect_and_route_chain_liquidations_in_state(&mut s, ChainId(71), "CFX", 13_300, 2_000, 3), 0);
+        assert!(s.chain_vaults.get(&1).unwrap().pending_liquidation.is_none());
+    }
+
+    #[test]
+    fn detect_skips_bot_failed_sp_attempted_vaults() {
+        // Finding #10: a vault the bot already failed (sp_attempted) is NOT
+        // re-routed to the bot (no retry loop), even while still liquidatable.
+        let mut s = MultiChainState::default();
+        seed_cfg_unchecked(&mut s);
+        s.manual_prices.insert((ChainId(71), "CFX".into()), 8_000_000);
+        s.manual_price_set_at_ns.insert((ChainId(71), "CFX".into()), 1_000);
+        insert_vault_liq(&mut s, 1, 1_400, 100, ChainVaultStatus::Open); // underwater
+        s.sp_attempted_chain_vaults.insert(1);
+        let routed = detect_and_route_chain_liquidations_in_state(&mut s, ChainId(71), "CFX", 13_300, 2_000, 10);
+        assert_eq!(routed, 0, "bot-failed vault not re-routed");
         assert!(s.chain_vaults.get(&1).unwrap().pending_liquidation.is_none());
     }
 
