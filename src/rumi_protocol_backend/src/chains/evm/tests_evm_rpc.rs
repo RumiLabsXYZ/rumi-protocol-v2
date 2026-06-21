@@ -350,3 +350,34 @@ fn parse_eth_call_u128_decodes_padded_word() {
     let too_big = format!("0x{}", "f".repeat(64));
     assert!(parse_eth_call_u128(&too_big).is_err());
 }
+
+// ─── Increment 3 / Task 4: DEX getReserves parse + Transfer-log decode ───
+#[test]
+fn parse_two_uint112_splits_getreserves() {
+    use super::evm_rpc::parse_two_uint112;
+    // ABI return (uint112, uint112, uint32) = THREE full 32-byte words (each value
+    // left-padded), 192 hex chars. parse reads word0 + word1.
+    let hex = format!("0x{:064x}{:064x}{:064x}", 1_000_000u128, 90_900u128, 12_345u128);
+    assert_eq!(parse_two_uint112(&hex).unwrap(), (1_000_000, 90_900));
+    // Too-short result fails closed.
+    assert!(parse_two_uint112("0x1234").is_err());
+}
+
+#[test]
+fn transfer_log_decodes_to_and_amount() {
+    use super::evm_rpc::{TransferLog, TRANSFER_EVENT_TOPIC0};
+    let to = "0x000000000000000000000000000000000000c0de";
+    let topics = vec![
+        TRANSFER_EVENT_TOPIC0.to_string(),
+        format!("0x{:064x}", 1u128), // from (indexed, padded)
+        format!("0x000000000000000000000000{}", to.trim_start_matches("0x")), // to (indexed, padded)
+    ];
+    let data = format!("0x{:064x}", 5_000_000u128);
+    let t = TransferLog::from_raw(&topics, &data).unwrap();
+    assert_eq!(t.to.to_lowercase(), to.to_lowercase());
+    assert_eq!(t.amount, 5_000_000);
+    // Wrong topic0 -> Err.
+    let mut bad = topics.clone();
+    bad[0] = format!("0x{}", "0".repeat(64));
+    assert!(TransferLog::from_raw(&bad, &data).is_err());
+}
