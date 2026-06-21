@@ -301,6 +301,57 @@ pub fn detect_and_route_chain_liquidations_in_state(
     routed
 }
 
+// ─── Increment 3: swap min-out + oracle cross-check (spec §4.8) ───
+
+/// UniswapV2 constant-product output with fee, plus the slippage haircut (spec
+/// §4.8). Returns `(expected_out, amount_out_min)` in the OUT token's native base
+/// units. Returns `(0, 0)` on any zero/degenerate input (the caller fail-closes:
+/// no swap without a satisfiable min-out).
+pub fn compute_amount_out_min(
+    amount_in: u128,
+    reserve_in: u128,
+    reserve_out: u128,
+    fee_bps: u16,
+    slippage_bps: u16,
+) -> (u128, u128) {
+    if amount_in == 0 || reserve_in == 0 || reserve_out == 0 || fee_bps as u32 >= 10_000 {
+        return (0, 0);
+    }
+    let amount_in_with_fee = amount_in.saturating_mul(10_000u128.saturating_sub(fee_bps as u128));
+    let numerator = amount_in_with_fee.saturating_mul(reserve_out);
+    let denominator = reserve_in.saturating_mul(10_000).saturating_add(amount_in_with_fee);
+    if denominator == 0 {
+        return (0, 0);
+    }
+    let expected_out = numerator / denominator;
+    let min_out = expected_out.saturating_mul(10_000u128.saturating_sub(slippage_bps as u128)) / 10_000;
+    (expected_out, min_out)
+}
+
+/// USD value (e8s) of `native` units of a `decimals`-decimal stable token.
+pub fn stable_native_to_e8s(native: u128, decimals: u8) -> u128 {
+    let scale = 10u128.saturating_pow(decimals as u32);
+    if scale == 0 {
+        return 0;
+    }
+    native.saturating_mul(100_000_000) / scale
+}
+
+/// The DEX-depth oracle cross-check (spec §4.8): the pool's expected stable-out
+/// must be at least `(1 - divergence)` of the oracle-implied USD value of the
+/// seized collateral. Fail-closed (false) on a thin/manipulated pool.
+pub fn oracle_corroborated(
+    expected_out_native: u128,
+    settle_decimals: u8,
+    oracle_value_e8: u128,
+    max_divergence_bps: u32,
+) -> bool {
+    let expected_out_e8 = stable_native_to_e8s(expected_out_native, settle_decimals);
+    let floor =
+        oracle_value_e8.saturating_mul(10_000u128.saturating_sub(max_divergence_bps as u128)) / 10_000;
+    expected_out_e8 >= floor
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -579,5 +630,45 @@ mod tests {
         s.bot_pending_chain_vaults.insert(7, 10);
         prune_recovered_chain_routing_state(&mut s, ChainId(71), "CFX", 13_300, 5_000);
         assert!(s.bot_pending_chain_vaults.contains_key(&7), "still-liquidatable vault NOT cleared");
+    }
+
+    // ─── Increment 3 / Task 2: pure swap min-out + oracle cross-check ───
+    const E18: u128 = 1_000_000_000_000_000_000;
+    const E8: u128 = 100_000_000;
+
+    #[test]
+    fn amount_out_min_v2_constant_product_with_fee_and_haircut() {
+        let (expected, min_out) = compute_amount_out_min(
+            2_000u128 * E18,
+            1_000_000u128 * E18,
+            90_900u128 * E18,
+            25,
+            250,
+        );
+        assert!(expected > 0 && min_out > 0 && min_out < expected);
+        // min_out is exactly the 2.5% haircut of expected.
+        assert_eq!(min_out, expected.saturating_mul(9_750) / 10_000);
+    }
+
+    #[test]
+    fn amount_out_min_zero_when_reserves_zero() {
+        assert_eq!(compute_amount_out_min(1, 0, 100, 25, 250), (0, 0));
+        assert_eq!(compute_amount_out_min(1, 100, 0, 25, 250), (0, 0));
+        assert_eq!(compute_amount_out_min(0, 100, 100, 25, 250), (0, 0));
+    }
+
+    #[test]
+    fn oracle_cross_check_rejects_thin_pool() {
+        // expected_out 95 USDC (18-dec) vs oracle-implied 100 USD: exactly 5% below.
+        let oracle_value_e8 = 100 * E8;
+        let expected_out_native = 95u128 * E18;
+        assert!(oracle_corroborated(expected_out_native, 18, oracle_value_e8, 500)); // at the edge: OK
+        assert!(!oracle_corroborated(expected_out_native, 18, oracle_value_e8, 499)); // one bp tighter: reject
+    }
+
+    #[test]
+    fn stable_native_to_e8s_scales_by_decimals() {
+        assert_eq!(stable_native_to_e8s(50u128 * E18, 18), 50 * E8); // 18-dec USDC -> e8s
+        assert_eq!(stable_native_to_e8s(50u128 * 1_000_000, 6), 50 * E8); // 6-dec -> e8s
     }
 }
