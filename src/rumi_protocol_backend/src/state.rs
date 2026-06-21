@@ -600,6 +600,57 @@ pub fn xrp_collateral_principal() -> Principal {
     Principal::from_slice(b"rumi-xrp-native")
 }
 
+/// P5: the `CollateralConfig` for native-XRP collateral. Parameters (Rob's):
+/// 150% borrow threshold / 133% liquidation / 12% liquidation penalty / $200 debt
+/// ceiling. Borrowing-fee + interest BASE are copied from ICP ("same as ICP"); the
+/// dynamic curves are global (`borrowing_fee_curve`) or inherited (`rate_curve` =
+/// None). custody_kind = `NativeXrp`; `ledger_canister_id` is the synthetic key; 6
+/// decimals (drops); `ledger_fee` = 0 (the XRPL fee is handled by the rail at settle
+/// time). Recovery CR = borrow × `recovery_cr_multiplier` (150% × 1.0333 = 155%).
+/// `redemption_tier` is irrelevant (native-XRP is excluded from redemption priority).
+pub fn xrp_collateral_config(
+    icp_borrowing_fee: Ratio,
+    icp_interest_rate_apr: Ratio,
+    recovery_cr_multiplier: Ratio,
+) -> CollateralConfig {
+    let borrow_threshold = Ratio::new(dec!(1.50));
+    CollateralConfig {
+        ledger_canister_id: xrp_collateral_principal(),
+        decimals: 6,
+        liquidation_ratio: Ratio::new(dec!(1.33)),
+        borrow_threshold_ratio: borrow_threshold,
+        liquidation_bonus: Ratio::new(dec!(1.12)),
+        borrowing_fee: icp_borrowing_fee,
+        interest_rate_apr: icp_interest_rate_apr,
+        debt_ceiling: 20_000_000_000, // $200 in icUSD e8s; bump via set_collateral_debt_ceiling
+        min_vault_debt: ICUSD::new(10_000_000), // 0.1 icUSD (matches ICP)
+        ledger_fee: 0,
+        price_source: PriceSource::Xrc {
+            base_asset: "XRP".to_string(),
+            base_asset_class: XrcAssetClass::Cryptocurrency,
+            quote_asset: "USD".to_string(),
+            quote_asset_class: XrcAssetClass::FiatCurrency,
+        },
+        status: CollateralStatus::Active,
+        last_price: None,
+        last_price_timestamp: None,
+        redemption_fee_floor: Ratio::new(dec!(0.005)),
+        redemption_fee_ceiling: Ratio::new(dec!(0.05)),
+        current_base_rate: Ratio::new(dec!(0)),
+        last_redemption_time: 0,
+        recovery_target_cr: borrow_threshold * recovery_cr_multiplier,
+        min_collateral_deposit: 1_000_000, // 1 XRP (drops) net of the base reserve
+        recovery_borrowing_fee: None,
+        recovery_interest_rate_apr: None,
+        display_color: Some("#23292F".to_string()),
+        healthy_cr: None,
+        rate_curve: None, // inherit the global interest-rate curve (same as ICP)
+        redemption_tier: 3,
+        min_xrc_sources: None,
+        custody_kind: Some(CustodyKind::NativeXrp),
+    }
+}
+
 /// P4: an unsettled claim on native-XRP collateral that left a vault. The XRP sits
 /// at the custody address derived from `(custody_owner, custody_nonce)` (the vault's
 /// owner + id, which the protocol controls via threshold Ed25519); `settle_xrp_claim`
@@ -3547,6 +3598,18 @@ impl State {
                 };
                 visited += 1;
                 if vault.bot_processing {
+                    continue;
+                }
+                // P5: native-XRP vaults are NOT auto-liquidated. XRP liquidation is
+                // manual/external (claim-based) only — automated SP/bot dispatch
+                // would strand the seized XRP (neither the SP nor the bot can settle
+                // an XrpClaim). External liquidators call liquidate_vault_partial /
+                // partial_liquidate_vault directly, where they become the claimant.
+                if self
+                    .get_collateral_config(&vault.collateral_type)
+                    .map(|c| c.is_native_xrp())
+                    .unwrap_or(false)
+                {
                     continue;
                 }
                 if compute_collateral_ratio(vault, rate, self)
@@ -6602,6 +6665,91 @@ mod tests {
         let restored: State =
             ciborium::de::from_reader(modified.as_slice()).expect("old snapshot must decode");
         assert!(restored.xrp_pending_deposits.is_empty());
+    }
+
+    #[test]
+    fn xrp_collateral_config_has_expected_params() {
+        // ICP fee/interest are passed in (inherited); recovery multiplier 1.0333.
+        let cfg = xrp_collateral_config(
+            Ratio::new(dec!(0.005)),
+            Ratio::new(dec!(0.0)),
+            Ratio::new(dec!(1.033333333333333333)),
+        );
+        assert!(cfg.is_native_xrp());
+        assert_eq!(cfg.custody(), CustodyKind::NativeXrp);
+        assert_eq!(cfg.ledger_canister_id, xrp_collateral_principal());
+        assert_eq!(cfg.decimals, 6);
+        assert_eq!(cfg.ledger_fee, 0);
+        assert_eq!(cfg.debt_ceiling, 20_000_000_000); // $200
+        assert_eq!(cfg.liquidation_ratio, Ratio::new(dec!(1.33)));
+        assert_eq!(cfg.borrow_threshold_ratio, Ratio::new(dec!(1.50)));
+        assert_eq!(cfg.liquidation_bonus, Ratio::new(dec!(1.12))); // 12% penalty
+        assert_eq!(cfg.borrowing_fee, Ratio::new(dec!(0.005))); // inherited from ICP
+        // recovery CR = 150% × 1.0333... = 155%
+        assert!(
+            (cfg.recovery_target_cr.to_f64() - 1.55).abs() < 0.001,
+            "recovery ~155%, got {}",
+            cfg.recovery_target_cr.to_f64()
+        );
+        match cfg.price_source {
+            PriceSource::Xrc { base_asset, quote_asset, .. } => {
+                assert_eq!(base_asset, "XRP");
+                assert_eq!(quote_asset, "USD");
+            }
+            other => panic!("expected XRC price source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scan_unhealthy_vaults_excludes_native_xrp() {
+        // P5: native-XRP vaults must NOT appear in the automated liquidation scan
+        // (they're liquidated manually). An ICP vault at the same underwater CR still
+        // appears. Pins the is_native_xrp() skip in scan_unhealthy_vaults so a future
+        // CR-index / banding refactor can't silently route XRP into SP/bot dispatch.
+        let mut s = test_state();
+        let icp = s.icp_ledger_principal;
+        let xrp = xrp_collateral_principal();
+        if let Some(c) = s.collateral_configs.get_mut(&icp) {
+            c.last_price = Some(5.0);
+        }
+        let mut xrp_cfg = s.collateral_configs.get(&icp).unwrap().clone();
+        xrp_cfg.ledger_canister_id = xrp;
+        xrp_cfg.custody_kind = Some(CustodyKind::NativeXrp);
+        xrp_cfg.last_price = Some(0.5);
+        s.collateral_configs.insert(xrp, xrp_cfg);
+
+        // Both vaults deeply underwater (CR ~0.05, far below the min liquidation ratio).
+        s.open_vault(crate::vault::Vault {
+            owner: Principal::anonymous(),
+            vault_id: 1,
+            borrowed_icusd_amount: ICUSD::new(10_000_000_000),
+            collateral_amount: 100_000_000,
+            collateral_type: icp,
+            accrued_interest: ICUSD::new(0),
+            last_accrual_time: 0,
+            bot_processing: false,
+        });
+        s.open_vault(crate::vault::Vault {
+            owner: Principal::anonymous(),
+            vault_id: 2,
+            borrowed_icusd_amount: ICUSD::new(10_000_000_000),
+            collateral_amount: 1_000_000,
+            collateral_type: xrp,
+            accrued_interest: ICUSD::new(0),
+            last_accrual_time: 0,
+            bot_processing: false,
+        });
+
+        let scan = s.scan_unhealthy_vaults(
+            crate::numeric::UsdIcp::from(rust_decimal::Decimal::ZERO),
+            true,
+        );
+        let ids: Vec<u64> = scan.unhealthy_vaults.iter().map(|v| v.vault_id).collect();
+        assert!(ids.contains(&1), "ICP vault should be flagged unhealthy: {ids:?}");
+        assert!(
+            !ids.contains(&2),
+            "native-XRP vault must be excluded from the automated scan: {ids:?}"
+        );
     }
 
     #[test]

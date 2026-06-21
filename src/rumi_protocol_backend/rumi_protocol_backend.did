@@ -1304,4 +1304,5 @@ service : (ProtocolArg) -> {
   xrp_transform_server : (TransformArgs) -> (HttpResponse) query;
   xrp_transform_submit : (TransformArgs) -> (HttpResponse) query;
   xrp_transform_tx : (TransformArgs) -> (HttpResponse) query;
+  register_xrp_collateral : () -> (Result);
 }
