@@ -237,6 +237,51 @@ impl Drop for VaultLiquidationGuard {
 }
 
 thread_local! {
+    /// Foreign-CHAIN vault ids with a liquidation in flight across an `await`
+    /// (the bot swap: begin -> submit -> confirm). Separate id-space from the
+    /// ICP `LIQUIDATING_VAULTS` (chain vault ids live in
+    /// `MultiChainState.chain_vaults`, keyed independently). Transient/heap;
+    /// ic-cdk `call_on_cleanup` drops the guard even on a post-`await`
+    /// continuation trap, so the lock is always released. The DURABLE lock is the
+    /// persisted `pending_liquidation` marker (spec §10); this heap guard just
+    /// serializes the async swap against concurrent triggers within one canister.
+    static CHAIN_LIQUIDATING_VAULTS: std::cell::RefCell<std::collections::HashSet<u64>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// Per-vault lock for a foreign-chain liquidation held across the async swap
+/// (spec §10). Mirrors `VaultLiquidationGuard` but on the chain vault id-space.
+#[must_use]
+pub struct ChainVaultLiquidationGuard(u64);
+
+impl ChainVaultLiquidationGuard {
+    /// Acquire the chain-liquidation lock for `vault_id`. Returns
+    /// `TemporarilyUnavailable` if another liquidation on the same chain vault is
+    /// in flight (the caller must NOT retry — per the no-retry rule it falls
+    /// through to the next tier/manual).
+    pub fn new(vault_id: u64) -> Result<Self, crate::ProtocolError> {
+        CHAIN_LIQUIDATING_VAULTS.with(|set| {
+            let mut set = set.borrow_mut();
+            if set.contains(&vault_id) {
+                return Err(crate::ProtocolError::TemporarilyUnavailable(format!(
+                    "Another liquidation on chain vault #{vault_id} is in flight; retry shortly"
+                )));
+            }
+            set.insert(vault_id);
+            Ok(Self(vault_id))
+        })
+    }
+}
+
+impl Drop for ChainVaultLiquidationGuard {
+    fn drop(&mut self) {
+        CHAIN_LIQUIDATING_VAULTS.with(|set| {
+            set.borrow_mut().remove(&self.0);
+        });
+    }
+}
+
+thread_local! {
     /// In-flight borrow reservations per collateral type (icUSD e8s). A borrow
     /// checks the debt ceiling / global mint cap, then mints icUSD across an
     /// `await`, then records the debt. Concurrent borrows from DIFFERENT owners
@@ -341,6 +386,19 @@ mod vault_liquidation_guard_tests {
         // Once vault 42's liquidation finishes (guard dropped), it can be re-acquired.
         let _g3 = VaultLiquidationGuard::new(42).expect("re-acquire vault 42 after release");
         drop(g2);
+    }
+
+    #[test]
+    fn chain_vault_liquidation_guard_is_exclusive_and_independent_of_icp() {
+        let g1 = ChainVaultLiquidationGuard::new(7).expect("first acquire chain vault 7");
+        assert!(
+            ChainVaultLiquidationGuard::new(7).is_err(),
+            "second concurrent chain liquidation of vault 7 must be rejected",
+        );
+        // Separate id-space from the ICP guard: the same id locks independently.
+        let _icp = VaultLiquidationGuard::new(7).expect("ICP guard for id 7 is independent");
+        drop(g1);
+        let _g2 = ChainVaultLiquidationGuard::new(7).expect("re-acquire chain vault 7 after release");
     }
 
     #[test]
