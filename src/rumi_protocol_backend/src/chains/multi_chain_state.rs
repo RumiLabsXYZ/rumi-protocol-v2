@@ -525,6 +525,15 @@ pub struct MultiChainStateV6 {
     /// same rationale as the maps above); `#[serde(default)]` is mandatory.
     #[serde(default)]
     pub bot_pending_chain_vaults: BTreeMap<u64, u64>,
+    /// Per-chain realized bad debt (e8s): when a bot swap's realized USDC valued
+    /// in USD is LESS than the debt it was sized to clear, the shortfall
+    /// (debt_to_clear - actual_cleared) is recorded here — reserve_backing is
+    /// NEVER credited more than the realized value (findings #16/#1). Strict
+    /// min-out makes this unreachable on the happy path; the counter exists so a
+    /// structural under-cover is visible, not silent. Added directly to V6
+    /// (pre-deploy); `#[serde(default)]` mandatory.
+    #[serde(default)]
+    pub chain_bad_debt_e8s: BTreeMap<ChainId, u128>,
 }
 
 impl MultiChainStateV6 {

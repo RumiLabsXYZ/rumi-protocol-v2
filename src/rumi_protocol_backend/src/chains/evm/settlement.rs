@@ -193,6 +193,95 @@ pub fn confirm_interest_mint_in_state(
     Ok(())
 }
 
+/// Phase 2 of the bot liquidation (spec §4.9): USDC is in hand — move
+/// `debt_e8s -> reserve_backing_e8s` (the ONLY invariant move; `chain_supplies`
+/// is NOT touched, no icUSD burned). Modeled on `confirm_interest_mint_in_state`:
+/// read-only validate -> single guarded mutation -> clear marker + emit events.
+///
+/// `realized_usdc_native` is the REAL output decoded from the on-chain Transfer
+/// log (never min-out). `actual_cleared = min(debt_to_clear, live_debt,
+/// realized_usd)` (findings #16/#1/#19): reserve_backing is NEVER credited more
+/// than the realized USD value, and any shortfall is recorded as per-chain bad
+/// debt. The marker (not the op) is the source of truth (finding #5): only
+/// `pending_liquidation.op_id == op_id` is required (a pruned op is tolerated).
+///
+/// State-only (no events / no `ic_cdk::api::time`), so it is unit-testable; the
+/// CALLER (`confirm_op`) emits `ChainVaultLiquidated` + `ChainReserveCredited`
+/// from the returned data (matching `confirm_interest_mint_in_state`'s split).
+pub fn apply_liquidation_settlement_in_state(
+    state: &mut MultiChainState,
+    chain: ChainId,
+    vault_id: u64,
+    op_id: u64,
+    realized_usdc_native: u128,
+    settle_decimals: u8,
+) -> Result<LiquidationSettlement, String> {
+    use crate::chains::monad::chain_vault::ChainVaultStatus;
+
+    // Step 1: validate (read-only — no mutation on failure). Capture sizing.
+    let (debt_to_clear, collateral_reserved, live_debt, tier) = {
+        let v = state
+            .chain_vaults
+            .get(&vault_id)
+            .ok_or_else(|| format!("apply_liquidation_settlement: unknown vault {vault_id}"))?;
+        let m = v
+            .pending_liquidation
+            .as_ref()
+            .ok_or_else(|| format!("apply_liquidation_settlement: vault {vault_id} has no liquidation marker"))?;
+        if m.op_id != op_id {
+            return Err(format!(
+                "apply_liquidation_settlement: marker op {} != confirming op {}",
+                m.op_id, op_id
+            ));
+        }
+        (m.debt_to_clear_e8s, m.collateral_reserved_native, v.debt_e8s, m.tier)
+    };
+
+    // Step 2: clamp — reserve_backing NEVER exceeds the realized USD value, nor the
+    // live debt (a concurrent burn is already blocked by the marker, so live_debt
+    // == debt_at_phase1; the min is belt-and-suspenders).
+    let realized_usd_e8 = crate::chains::liquidation::stable_native_to_e8s(realized_usdc_native, settle_decimals);
+    let actual_cleared = debt_to_clear.min(live_debt).min(realized_usd_e8);
+
+    // Step 3: the single guarded invariant move (debt -> reserve; supply untouched).
+    // apply_debt_to_reserve_shift re-validates the unified invariant + caps at debt.
+    crate::chains::supply::apply_debt_to_reserve_shift(state, chain, vault_id, actual_cleared, realized_usdc_native)
+        .map_err(|e| format!("apply_debt_to_reserve_shift: {e:?}"))?;
+
+    // Step 4: record any shortfall as per-chain bad debt (never silent).
+    if debt_to_clear > actual_cleared {
+        *state.chain_bad_debt_e8s.entry(chain).or_default() += debt_to_clear - actual_cleared;
+    }
+
+    // Step 5: clear the marker + routing record; close the vault if fully drained.
+    let v = state
+        .chain_vaults
+        .get_mut(&vault_id)
+        .expect("vault present: checked above");
+    v.pending_liquidation = None;
+    if v.debt_e8s == 0 && v.collateral_amount_native == 0 {
+        v.status = ChainVaultStatus::Closed;
+    }
+    state.bot_pending_chain_vaults.remove(&vault_id);
+
+    Ok(LiquidationSettlement {
+        actual_cleared,
+        collateral_seized_native: collateral_reserved,
+        tier,
+        realized_usdc_native,
+    })
+}
+
+/// Result of `apply_liquidation_settlement_in_state` — the data `confirm_op`
+/// needs to emit the `ChainVaultLiquidated` + `ChainReserveCredited` events.
+#[derive(Clone, Copy, Debug)]
+pub struct LiquidationSettlement {
+    pub actual_cleared: u128,
+    pub collateral_seized_native: u128,
+    pub tier: crate::chains::vault::LiquidationTier,
+    pub realized_usdc_native: u128,
+}
+
 // ─── Timer D tick (fan-out) ─────────────────────────────────────────────────
 
 /// Timer D entry point: run one settlement cycle for every registered+enabled
