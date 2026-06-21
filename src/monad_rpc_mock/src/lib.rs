@@ -294,6 +294,10 @@ struct Script {
     /// eSpace receipt fields `gasFee`/`burntGasFee` so the decoder's tolerance of
     /// those (non-Monad) fields is exercised. Toggled by `set_espace_receipt_fields`.
     espace_receipt_fields: bool,
+    /// Per-selector canned `eth_call` results (selector hex "0x........" lowercased
+    /// -> the full 0x result blob). Lets a swap test script getReserves / token0 /
+    /// balanceOf returns. Set via `set_eth_call_response`.
+    eth_call_responses: HashMap<String, String>,
 }
 
 thread_local! {
@@ -630,14 +634,26 @@ fn request(_service: RpcService, json_payload: String, _max_response_bytes: u64)
                 )
             }
             "eth_call" => {
-                // params = [{to, data}, "0x<block>"]. The observer's supply gate
-                // calls totalSupply() (selector 0x18160ddd) at a specific block.
-                // Return the scripted total_supply as a left-padded 32-byte word
-                // (the ABI encoding of a uint256), exactly as a real node would.
-                format!(
-                    r#"{{"jsonrpc":"2.0","id":{},"result":"0x{:064x}"}}"#,
-                    id, script.total_supply
-                )
+                // params = [{to, data}, "0x<block>"]. Dispatch by the 4-byte
+                // selector in `data`: a test can script per-selector returns (e.g.
+                // getReserves 0x0902f1ac, token0 0x0dfe1681, balanceOf 0x70a08231)
+                // via `set_eth_call_response`. Fall back to the scripted
+                // total_supply (selector 0x18160ddd) for the observer supply gate.
+                let selector = params
+                    .get(0)
+                    .and_then(|v| v.get("data"))
+                    .and_then(|v| v.as_str())
+                    .map(|d| d.chars().take(10).collect::<String>().to_lowercase())
+                    .unwrap_or_default();
+                if let Some(ret) = script.eth_call_responses.get(&selector) {
+                    format!(r#"{{"jsonrpc":"2.0","id":{},"result":{:?}}}"#, id, ret)
+                } else {
+                    // Default: the ABI-encoded uint256 totalSupply.
+                    format!(
+                        r#"{{"jsonrpc":"2.0","id":{},"result":"0x{:064x}"}}"#,
+                        id, script.total_supply
+                    )
+                }
             }
             other => {
                 // Unknown method: a JSON-RPC error so an unexpected wrapper call
@@ -787,6 +803,19 @@ fn clear_logs() {
 #[ic_cdk_macros::update]
 fn set_total_supply(value: u128) {
     SCRIPT.with(|s| s.borrow_mut().total_supply = value);
+}
+
+/// Script a per-selector `eth_call` result. `selector` is the 4-byte selector hex
+/// ("0x0902f1ac" etc.); `return_data` is the full 0x ABI-encoded result blob the
+/// mock returns for any `eth_call` whose `data` starts with that selector. Lets a
+/// swap test canned-respond getReserves / token0 / balanceOf.
+#[ic_cdk_macros::update]
+fn set_eth_call_response(selector: String, return_data: String) {
+    SCRIPT.with(|s| {
+        s.borrow_mut()
+            .eth_call_responses
+            .insert(selector.to_lowercase(), return_data);
+    });
 }
 
 /// Set the max `eth_getLogs` block range (`toBlock - fromBlock`) the mock
