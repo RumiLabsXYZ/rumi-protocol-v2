@@ -58,6 +58,18 @@ pub struct ChainLiquidationConfigV1 {
     /// Per-chain kill switch. `false` => no liquidation swap runs for this chain
     /// even if the rest of the rail is enabled.
     pub enabled: bool,
+    /// Depth-bound cap: the max USD value (e8s) of collateral sold in a single
+    /// liquidation swap (spec §4.7). ADVISORY at sizing time (finding #3): the
+    /// submit-time live-reserves min-out (Increment 3) is the real safety. Start
+    /// ~$2k for Conflux; re-tune as pool depth moves.
+    #[serde(default)]
+    pub max_swap_value_e8s: u128,
+    /// Staleness ceiling (ns) for the manual collateral price (spec §4.3). A
+    /// price older than this fails the fresh-price gate and DEFERS liquidation
+    /// for this chain (fail-closed). Recommended ~2-3x the off-chain monitor's
+    /// push interval (start ~30 min).
+    #[serde(default)]
+    pub max_price_age_ns: u64,
 }
 
 /// Reasons `set_chain_liquidation_config` rejects a config (no state mutation on
@@ -72,6 +84,12 @@ pub enum LiquidationConfigError {
     /// An `enabled` config left a required address empty (the swap could never
     /// build). Disabled configs may carry placeholder/empty addresses.
     MissingAddress(&'static str),
+    /// An `enabled` config left the depth cap at 0 (spec §4.7): no swap could be
+    /// sized. Disabled configs may carry 0.
+    ZeroDepthCap,
+    /// An `enabled` config left the price-staleness ceiling at 0 (spec §4.3):
+    /// every fresh-price check would fail closed. Disabled configs may carry 0.
+    ZeroPriceAge,
 }
 
 impl ChainLiquidationConfigV1 {
@@ -105,6 +123,12 @@ impl ChainLiquidationConfigV1 {
             if self.settle_stable_token.is_empty() {
                 return Err(LiquidationConfigError::MissingAddress("settle_stable_token"));
             }
+            if self.max_swap_value_e8s == 0 {
+                return Err(LiquidationConfigError::ZeroDepthCap);
+            }
+            if self.max_price_age_ns == 0 {
+                return Err(LiquidationConfigError::ZeroPriceAge);
+            }
         }
         Ok(())
     }
@@ -125,6 +149,8 @@ mod tests {
             slippage_cap_bps: 250,
             restore_target_cr_e4: 15_500,
             enabled: true,
+            max_swap_value_e8s: 2_000 * 100_000_000,
+            max_price_age_ns: 1_800_000_000_000,
         }
     }
 
@@ -161,6 +187,27 @@ mod tests {
     }
 
     #[test]
+    fn config_carries_depth_cap_and_staleness_ceiling() {
+        let cfg = enabled_cfg();
+        assert!(cfg.max_swap_value_e8s > 0);
+        assert!(cfg.max_price_age_ns > 0);
+    }
+
+    #[test]
+    fn enabled_config_rejects_zero_depth_cap() {
+        let mut cfg = enabled_cfg();
+        cfg.max_swap_value_e8s = 0;
+        assert_eq!(cfg.validate(), Err(LiquidationConfigError::ZeroDepthCap));
+    }
+
+    #[test]
+    fn enabled_config_rejects_zero_price_age() {
+        let mut cfg = enabled_cfg();
+        cfg.max_price_age_ns = 0;
+        assert_eq!(cfg.validate(), Err(LiquidationConfigError::ZeroPriceAge));
+    }
+
+    #[test]
     fn disabled_config_may_have_empty_addresses() {
         // An operator can stage a config (addresses TBD) while it is disabled.
         let c = ChainLiquidationConfigV1 {
@@ -173,6 +220,8 @@ mod tests {
             slippage_cap_bps: 250,
             restore_target_cr_e4: 15_500,
             enabled: false,
+            max_swap_value_e8s: 0,
+            max_price_age_ns: 0,
         };
         assert_eq!(c.validate(), Ok(()));
     }

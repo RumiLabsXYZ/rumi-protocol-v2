@@ -71,6 +71,13 @@ pub fn select_next_op(q: &SettlementQueueV1) -> Option<(u64, OpAction)> {
     }
     for (&id, op) in q.pending.iter() {
         if matches!(op.status, SettlementOpStatus::Queued) {
+            // Increment 2: LiquidationSwap ops are enqueued but INERT (the swap
+            // submit path is Increment 3). Skip them so they neither execute nor
+            // head-of-line-block user ops. Increment 3 removes this guard and
+            // wires the submit/confirm/revert arms.
+            if matches!(op.kind, SettlementOpKind::LiquidationSwap { .. }) {
+                continue;
+            }
             return Some((id, OpAction::Submit));
         }
     }
@@ -463,6 +470,9 @@ fn build_tx_plan(
             })
         }
         SettlementOpKind::Burn { .. } => Err("burn not signable in Phase 1b".to_string()),
+        SettlementOpKind::LiquidationSwap { .. } => {
+            Err("liquidation swap tx building is Increment 3".to_string())
+        }
     }
 }
 
@@ -501,6 +511,9 @@ async fn resolve_op_signer(
             Ok((path, custody_addr))
         }
         SettlementOpKind::Burn { .. } => Err("burn not signable in Phase 1b".to_string()),
+        SettlementOpKind::LiquidationSwap { .. } => {
+            Err("liquidation swap signing is Increment 3".to_string())
+        }
     }
 }
 
@@ -913,6 +926,12 @@ async fn confirm_op(
                     }
                 }
                 SettlementOpKind::Burn { .. } => {}
+                SettlementOpKind::LiquidationSwap { .. } => {
+                    // Unreachable in Increment 2 (select_next_op skips swaps, so
+                    // they never go Inflight). Increment 3 implements the CAS
+                    // revert here: restore `collateral_reserved_native` to the
+                    // vault, clear `pending_liquidation`, and escalate. No-op now.
+                }
             }
             if let Some(o) = s
                 .multi_chain
@@ -1193,6 +1212,12 @@ async fn confirm_op(
             // never goes Inflight. Log defensively rather than panic.
             log!(INFO, "[settlement chain={:?}] inflight Burn op {} reached confirm path unexpectedly", chain, op_id);
         }
+        SettlementOpKind::LiquidationSwap { .. } => {
+            // Unreachable in Increment 2: select_next_op skips LiquidationSwap so
+            // it never goes Inflight. Increment 3 wires the real confirm (Transfer
+            // decode -> reserve shift) here. Log defensively rather than panic.
+            log!(INFO, "[settlement chain={:?}] LiquidationSwap op {} reached confirm unexpectedly (Increment 3 wiring missing)", chain, op_id);
+        }
     }
 }
 
@@ -1221,6 +1246,14 @@ async fn resubmit_if_stuck(
     tries: u32,
     finality_depth: u32,
 ) {
+    // Liquidation swaps are NEVER replace-by-fee'd (spec §4.8): a replace minutes
+    // later would re-use a stale min-out and could execute into a moved price.
+    // A stuck swap simply hits its on-chain deadline and reverts; Increment 3's
+    // confirm-timeout marks it Failed -> escalate. (Inert in Increment 2.)
+    if matches!(op.kind, SettlementOpKind::LiquidationSwap { .. }) {
+        log!(INFO, "[settlement chain={:?}] op {} is a liquidation swap; never replace-by-fee (spec §4.8)", chain, op_id);
+        return;
+    }
     // We can only replace-by-fee if we know the nonce the op was first submitted
     // at. Without it, a resubmit would risk a fresh nonce (a second mint), so we
     // do NOT resubmit — leave Inflight for the next tick.

@@ -501,3 +501,221 @@ fn close_rejected_while_liquidation_in_flight_degenerate_zero_collateral() {
         "vault not closed while liquidation in flight"
     );
 }
+
+// ─── Increment 2 / Task 6: begin_liquidation_in_state (spec §4.9 Phase 1) ───
+mod begin_liquidation_tests {
+    use super::super::vault::{begin_liquidation_in_state, LiquidationError, LiquidationTier};
+    use super::super::config::ChainId;
+    use super::super::liquidation::{bonus_e4_from_penalty_bps, value_cap_to_repay};
+    use super::super::liquidation_config::{ChainLiquidationConfigV1, DexKind};
+    use super::super::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
+    use super::super::multi_chain_state::MultiChainState;
+    use super::super::settlement_queue::SettlementOpKind;
+    use candid::Principal;
+
+    const CFX: ChainId = ChainId(71);
+    const E8: u128 = 100_000_000;
+    const ONE_CFX: u128 = 1_000_000_000_000_000_000;
+
+    fn addr_ok(a: &str) -> bool {
+        a.starts_with("0x")
+    }
+
+    fn seed_cfg(s: &mut MultiChainState, enabled: bool, max_swap_value_e8s: u128) {
+        s.chain_liquidation_configs.insert(
+            CFX,
+            ChainLiquidationConfigV1 {
+                dex: DexKind::UniswapV2,
+                router: "0xrouter".into(),
+                factory: "0xfactory".into(),
+                pair: "0xpair".into(),
+                collateral_token: "0xwcfx".into(),
+                settle_stable_token: "0xusdc".into(),
+                slippage_cap_bps: 250,
+                restore_target_cr_e4: 15_500,
+                enabled,
+                max_swap_value_e8s,
+                max_price_age_ns: 1_800_000_000_000,
+            },
+        );
+    }
+
+    fn set_price(s: &mut MultiChainState, price_e8: u64, set_at_ns: u64) {
+        s.manual_prices.insert((CFX, "CFX".into()), price_e8);
+        s.manual_price_set_at_ns.insert((CFX, "CFX".into()), set_at_ns);
+    }
+
+    fn insert_vault(s: &mut MultiChainState, vault_id: u64, collateral_native: u128, debt_e8s: u128) {
+        s.chain_vaults.insert(
+            vault_id,
+            ChainVaultV1 {
+                vault_id,
+                owner: Principal::anonymous(),
+                collateral_chain: CFX,
+                custody_address: "0xcustody".into(),
+                collateral_amount_native: collateral_native,
+                debt_e8s,
+                mint_recipient: "0xmint".into(),
+                pending_mint_e8s: 0,
+                status: ChainVaultStatus::Open,
+                opened_at_ns: 0,
+                owner_evm: Some("0xowner".into()),
+                last_interest_accrual_ns: 0,
+                pending_interest_mint_e8s: 0,
+                pending_liquidation: None,
+            },
+        );
+        *s.chain_supplies.entry(CFX).or_default() += debt_e8s;
+    }
+
+    fn base_state(enabled: bool) -> MultiChainState {
+        let mut s = MultiChainState::default();
+        seed_cfg(&mut s, enabled, 2_000 * E8);
+        set_price(&mut s, 9_000_000, 1_000); // $0.09
+        s
+    }
+
+    #[test]
+    fn sets_marker_reserves_collateral_enqueues_inert_op() {
+        let mut s = base_state(true);
+        // 1400 CFX @ $0.09 = $126 vs 100 icUSD -> CR 126% < 133% threshold (partial).
+        insert_vault(&mut s, 7, 1_400 * ONE_CFX, 100 * E8);
+
+        let op_id = begin_liquidation_in_state(&mut s, 7, addr_ok, "CFX", 13_300, 2_000)
+            .expect("liquidatable vault begins");
+
+        let v = s.chain_vaults.get(&7).unwrap();
+        let m = v.pending_liquidation.as_ref().expect("marker set");
+        assert_eq!(m.tier, LiquidationTier::Bot);
+        assert_eq!(m.op_id, op_id);
+        assert!(m.collateral_reserved_native > 0 && m.collateral_reserved_native <= 1_400 * ONE_CFX);
+        assert!(v.collateral_amount_native < 1_400 * ONE_CFX, "collateral reserved (decremented)");
+        assert_eq!(
+            v.collateral_amount_native + m.collateral_reserved_native,
+            1_400 * ONE_CFX,
+            "reserved + remaining == original"
+        );
+        assert_eq!(v.debt_e8s, 100 * E8, "debt UNCHANGED at trigger (Design B)");
+        assert_eq!(*s.chain_supplies.get(&CFX).unwrap(), 100 * E8, "supply UNCHANGED");
+        assert_eq!(s.bot_pending_chain_vaults.get(&7), Some(&2_000), "bot routing timestamp recorded");
+        let q = s.settlement_queues.get(&CFX).unwrap();
+        assert!(q
+            .pending
+            .values()
+            .any(|o| matches!(o.kind, SettlementOpKind::LiquidationSwap { .. })));
+        // It is a genuine partial (debt_to_clear < full debt at this CR).
+        assert!(m.debt_to_clear_e8s > 0 && m.debt_to_clear_e8s < 100 * E8);
+    }
+
+    #[test]
+    fn rejects_healthy_vault() {
+        let mut s = base_state(true);
+        set_price(&mut s, 15_000_000, 1_000); // $0.15 -> CR 210%
+        insert_vault(&mut s, 7, 1_400 * ONE_CFX, 100 * E8);
+        assert!(matches!(
+            begin_liquidation_in_state(&mut s, 7, addr_ok, "CFX", 13_300, 2_000),
+            Err(LiquidationError::NotLiquidatable { .. })
+        ));
+        assert!(s.chain_vaults.get(&7).unwrap().pending_liquidation.is_none(), "no marker on reject");
+        assert!(
+            s.settlement_queues.get(&CFX).map_or(true, |q| q.pending.is_empty()),
+            "no op on reject"
+        );
+    }
+
+    #[test]
+    fn rejects_stale_price_no_mutation() {
+        let mut s = base_state(true);
+        insert_vault(&mut s, 7, 1_400 * ONE_CFX, 100 * E8);
+        let now = 1_000 + 1_800_000_000_000 + 1; // beyond max_price_age_ns
+        assert!(matches!(
+            begin_liquidation_in_state(&mut s, 7, addr_ok, "CFX", 13_300, now),
+            Err(LiquidationError::StalePrice)
+        ));
+        assert!(s.chain_vaults.get(&7).unwrap().pending_liquidation.is_none());
+        assert!(s.settlement_queues.get(&CFX).map_or(true, |q| q.pending.is_empty()));
+    }
+
+    #[test]
+    fn rejects_when_config_absent_or_disabled() {
+        let mut s = MultiChainState::default();
+        set_price(&mut s, 9_000_000, 1_000);
+        insert_vault(&mut s, 7, 1_400 * ONE_CFX, 100 * E8);
+        assert!(matches!(
+            begin_liquidation_in_state(&mut s, 7, addr_ok, "CFX", 13_300, 2_000),
+            Err(LiquidationError::NoConfig)
+        ));
+        seed_cfg(&mut s, false, 2_000 * E8);
+        assert!(matches!(
+            begin_liquidation_in_state(&mut s, 7, addr_ok, "CFX", 13_300, 2_000),
+            Err(LiquidationError::NotEnabled)
+        ));
+    }
+
+    #[test]
+    fn guards_pending_states_and_double_begin() {
+        let mut s = base_state(true);
+        insert_vault(&mut s, 7, 1_400 * ONE_CFX, 100 * E8);
+        // First begin succeeds.
+        begin_liquidation_in_state(&mut s, 7, addr_ok, "CFX", 13_300, 2_000).unwrap();
+        // Finding #37: a second begin on the SAME vault is rejected by the marker
+        // (one op + one marker), NOT by a now_ns idempotency key.
+        assert!(matches!(
+            begin_liquidation_in_state(&mut s, 7, addr_ok, "CFX", 13_300, 2_001),
+            Err(LiquidationError::AlreadyLiquidating)
+        ));
+        let q = s.settlement_queues.get(&CFX).unwrap();
+        assert_eq!(
+            q.pending
+                .values()
+                .filter(|o| matches!(o.kind, SettlementOpKind::LiquidationSwap { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn rejects_mint_and_interest_in_flight() {
+        let mut s = base_state(true);
+        insert_vault(&mut s, 7, 1_400 * ONE_CFX, 100 * E8);
+        s.chain_vaults.get_mut(&7).unwrap().pending_mint_e8s = 1;
+        assert!(matches!(
+            begin_liquidation_in_state(&mut s, 7, addr_ok, "CFX", 13_300, 2_000),
+            Err(LiquidationError::MintInFlight)
+        ));
+        s.chain_vaults.get_mut(&7).unwrap().pending_mint_e8s = 0;
+        s.chain_vaults.get_mut(&7).unwrap().pending_interest_mint_e8s = 1;
+        assert!(matches!(
+            begin_liquidation_in_state(&mut s, 7, addr_ok, "CFX", 13_300, 2_000),
+            Err(LiquidationError::InterestRealizationPending)
+        ));
+    }
+
+    #[test]
+    fn depth_cap_sizes_partial_of_partial() {
+        let mut s = base_state(true);
+        set_price(&mut s, 8_000_000, 1_000); // $0.08
+        // Tiny depth cap so the sized repay exceeds it -> effective_repay == cap.
+        seed_cfg(&mut s, true, 50 * E8);
+        insert_vault(&mut s, 7, 5_600 * ONE_CFX, 400 * E8); // big underwater vault
+        begin_liquidation_in_state(&mut s, 7, addr_ok, "CFX", 13_300, 2_000).unwrap();
+        let m = s.chain_vaults.get(&7).unwrap().pending_liquidation.as_ref().unwrap().clone();
+        let cap_repay = value_cap_to_repay(50 * E8, bonus_e4_from_penalty_bps(1_200));
+        assert!(m.debt_to_clear_e8s <= cap_repay, "sized down to depth cap");
+        assert!(m.debt_to_clear_e8s < 400 * E8, "well under full debt");
+    }
+
+    #[test]
+    fn rejects_invalid_router_address_no_mutation() {
+        let mut s = base_state(true);
+        // Router fails the validator (not 0x-prefixed).
+        s.chain_liquidation_configs.get_mut(&CFX).unwrap().router = "router-no-0x".into();
+        insert_vault(&mut s, 7, 1_400 * ONE_CFX, 100 * E8);
+        assert!(matches!(
+            begin_liquidation_in_state(&mut s, 7, addr_ok, "CFX", 13_300, 2_000),
+            Err(LiquidationError::InvalidAddress(_))
+        ));
+        assert!(s.chain_vaults.get(&7).unwrap().pending_liquidation.is_none());
+        assert!(s.settlement_queues.get(&CFX).map_or(true, |q| q.pending.is_empty()));
+    }
+}

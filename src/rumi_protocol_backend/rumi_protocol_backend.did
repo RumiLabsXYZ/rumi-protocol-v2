@@ -37,9 +37,21 @@ type CandidVault = record {
   icp_margin_amount : nat64;
   borrowed_icusd_amount : nat64;
 };
+type ChainLiquidatableVault = record {
+  sized_repay_e8s : nat;
+  cr_e4 : nat64;
+  collateral_native : nat;
+  vault_id : nat64;
+  chain_id : nat32;
+  liquidation_threshold_e4 : nat64;
+  effective_debt_e8s : nat;
+  debt_e8s : nat;
+};
 type ChainLiquidationConfigV1 = record {
   dex : DexKind;
+  max_swap_value_e8s : nat;
   pair : text;
+  max_price_age_ns : nat64;
   restore_target_cr_e4 : nat64;
   enabled : bool;
   collateral_token : text;
@@ -1064,6 +1076,7 @@ service : (ProtocolArg) -> {
   get_bot_cr_tolerance_bps : () -> (nat64) query;
   get_bot_stats : () -> (BotStatsResponse) query;
   get_chain_interest_treasury_address : (nat32) -> (Result_2);
+  get_chain_liquidatable_vaults : (nat32) -> (vec ChainLiquidatableVault) query;
   get_chain_liquidation_config : (nat32) -> (
       opt ChainLiquidationConfigV1,
     ) query;
@@ -1151,6 +1164,7 @@ service : (ProtocolArg) -> {
   icrc10_supported_standards : () -> (vec StandardRecord) query;
   icrc21_canister_call_consent_message : (ConsentMessageRequest) -> (Result_8);
   icrc28_trusted_origins : () -> (Icrc28TrustedOriginsResponse) query;
+  liquidate_chain_vault : (nat64) -> (Result_1);
   liquidate_vault : (nat64) -> (Result_3);
   liquidate_vault_partial : (VaultArg) -> (Result_3);
   liquidate_vault_partial_with_stable : (VaultArgWithToken) -> (Result_3);

@@ -517,6 +517,14 @@ pub struct MultiChainStateV6 {
     /// Increment 2+ reads it; Increment 1 ships only the getter/setter.
     #[serde(default)]
     pub chain_liquidation_configs: BTreeMap<ChainId, ChainLiquidationConfigV1>,
+    /// Vault_id -> first-bot-routed wall-clock ns. Set when
+    /// `begin_liquidation_in_state` routes a vault to the bot tier; the durable
+    /// timestamp the bot->SP escalation predicate reads (spec §10, finding #10).
+    /// Pruned when a vault recovers/resolves. The SP consumer lands in Increment
+    /// 4; the timestamp history must start now. Added directly to V6 (pre-deploy,
+    /// same rationale as the maps above); `#[serde(default)]` is mandatory.
+    #[serde(default)]
+    pub bot_pending_chain_vaults: BTreeMap<u64, u64>,
 }
 
 impl MultiChainStateV6 {
