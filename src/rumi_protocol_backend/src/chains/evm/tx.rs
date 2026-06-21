@@ -46,6 +46,17 @@ pub enum MonadTxKind<'a> {
     Mint { contract: &'a str, recipient: &'a str, amount_e8s: u128, vault_id: u64, op_id: u64 },
     /// A native MON transfer (`amount_wei` carried in the EIP-1559 `value`).
     NativeWithdrawal { recipient: &'a str, amount_wei: u128 },
+    /// UniswapV2 `swapExactETHForTokens`: native collateral carried in the
+    /// EIP-1559 `value`, sold for the settle-stable to `to` (the reserve address).
+    /// `path = [wrapped_collateral, settle_stable]`. Bot-liquidation swap (spec §4.8).
+    Swap {
+        router: &'a str,
+        amount_in: u128,
+        amount_out_min: u128,
+        path: [&'a str; 2],
+        to: &'a str,
+        deadline: u64,
+    },
 }
 
 /// Single source of truth for the per-op-kind EIP-1559 field shape (gas_limit,
@@ -109,6 +120,20 @@ pub fn build_eip1559_fields(
             value: amount_wei,
             data: vec![],
         }),
+        MonadTxKind::Swap { router, amount_in, amount_out_min, path, to, deadline } => {
+            let data = encode_swap_exact_eth_for_tokens_calldata(amount_out_min, &path, to, deadline)?;
+            Ok(Eip1559Fields {
+                chain_id,
+                nonce,
+                max_priority_fee_per_gas: prio,
+                max_fee_per_gas: max_fee,
+                gas_limit: LIQUIDATION_SWAP_GAS_LIMIT,
+                to: router.to_string(),
+                // Native CFX carried in `value`; the router wraps to WCFX internally.
+                value: amount_in,
+                data,
+            })
+        }
     }
 }
 
@@ -389,6 +414,46 @@ fn abi_word_u128(n: u128) -> [u8; 32] {
     let mut word = [0u8; 32];
     word[16..].copy_from_slice(&n.to_be_bytes());
     word
+}
+
+/// Gas ceiling for a UniswapV2 `swapExactETHForTokens` (wrap + swap + transfer +
+/// pair update). 250k per spec §4.8 — a CEILING (only used gas is charged), so a
+/// generous cap is safe. MEASURE on eSpace mainnet before enabling; the icUSD
+/// mint already meters ~177.5k, so a swap may want more headroom.
+pub const LIQUIDATION_SWAP_GAS_LIMIT: u64 = 250_000;
+
+/// ABI-encode `swapExactETHForTokens(uint256 amountOutMin, address[] path,
+/// address to, uint256 deadline)` (spec §4.8). The ONLY dynamic-type ABI encode
+/// in the codebase — pinned byte-for-byte by
+/// `swap_exact_eth_for_tokens_calldata_matches_reference`. Layout: 4-byte
+/// selector + head[amountOutMin, path-offset=0x80, to, deadline] +
+/// tail[path.len=2, path[0], path[1]]. Returns `Err` on any malformed address
+/// (defense-in-depth; never panics the settlement worker).
+///
+/// CRITICAL (spec §4.8/#31): the selector assumes the canonical UniswapV2
+/// signature (0x7ff36ab5). The operator MUST confirm the DEPLOYED Swappi router's
+/// signature before enabling — a wrong selector reverts every swap.
+pub fn encode_swap_exact_eth_for_tokens_calldata(
+    amount_out_min: u128,
+    path: &[&str; 2],
+    to: &str,
+    deadline: u64,
+) -> Result<Vec<u8>, String> {
+    let mut out = Vec::with_capacity(4 + 7 * 32);
+    out.extend_from_slice(&keccak_selector(
+        "swapExactETHForTokens(uint256,address[],address,uint256)",
+    ));
+    // head (4 words): amountOutMin, offset to `path` (0x80 = 4 words past the head
+    // start), to, deadline.
+    out.extend_from_slice(&abi_word_u128(amount_out_min));
+    out.extend_from_slice(&abi_word_u128(0x80));
+    out.extend_from_slice(&abi_word_address(to)?);
+    out.extend_from_slice(&abi_word_u128(deadline as u128));
+    // tail: dynamic `path` = length (2) then the two addresses.
+    out.extend_from_slice(&abi_word_u128(2));
+    out.extend_from_slice(&abi_word_address(path[0])?);
+    out.extend_from_slice(&abi_word_address(path[1])?);
+    Ok(out)
 }
 
 /// Parse a "0x…" hex address into 20 bytes.
