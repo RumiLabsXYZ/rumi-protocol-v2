@@ -90,3 +90,18 @@ fn is_valid_evm_address_accepts_well_formed_and_rejects_malformed() {
 fn hex_to_bytes(s: &str) -> Vec<u8> {
     (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
 }
+
+// ─── Increment 3 / Task 5: liquidation-reserve derivation path ───
+#[test]
+fn reserve_path_distinct_from_settlement_and_treasury() {
+    use super::tecdsa::{interest_treasury_derivation_path, reserve_derivation_path, settlement_derivation_path};
+    use crate::chains::config::ChainId;
+    let c = ChainId(71);
+    let reserve = reserve_derivation_path(c);
+    assert_ne!(reserve, settlement_derivation_path(c), "reserve path must differ from settlement");
+    assert_ne!(reserve, interest_treasury_derivation_path(c), "reserve path must differ from treasury");
+    // The label component is the distinguishing element.
+    assert_eq!(reserve[1], b"liquidation-reserve".to_vec());
+    // Per-chain: a different chain yields a different path.
+    assert_ne!(reserve_derivation_path(ChainId(1030)), reserve);
+}

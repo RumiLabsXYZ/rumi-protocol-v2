@@ -1084,6 +1084,7 @@ service : (ProtocolArg) -> {
   get_chain_liquidation_config : (nat32) -> (
       opt ChainLiquidationConfigV1,
     ) query;
+  get_chain_reserve_address : (nat32) -> (Result_2);
   get_chain_settlement_address : (nat32) -> (Result_2);
   get_chain_vault : (nat64) -> (opt ChainVaultV1) query;
   get_chains_ecdsa_key_name : () -> (text) query;

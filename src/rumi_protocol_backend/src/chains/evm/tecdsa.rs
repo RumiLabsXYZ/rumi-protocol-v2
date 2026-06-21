@@ -149,3 +149,34 @@ pub async fn cached_interest_treasury_address(
     });
     Ok((path, addr))
 }
+
+// ─── Liquidation-reserve address (Increment 3, spec §4.8) ───────────────────────
+
+/// Derivation path for the per-chain liquidation-RESERVE (PSM sink) address.
+/// Distinct from settlement/interest/custody paths. Bot-liquidation swaps settle
+/// their USDC output here; the bridge sweeps FROM it (out of scope). The vault's
+/// OWN custody key signs the swap (it holds the CFX); this is only the `to:`.
+pub fn reserve_derivation_path(chain: ChainId) -> Vec<Vec<u8>> {
+    vec![chain.0.to_le_bytes().to_vec(), b"liquidation-reserve".to_vec()]
+}
+
+thread_local! {
+    static RESERVE_ADDR_CACHE: std::cell::RefCell<std::collections::BTreeMap<ChainId, String>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
+/// Cached per-chain liquidation-reserve address (spec §4.8). Mirrors
+/// `cached_settlement_address`: deterministic (no nonce), derives + caches on
+/// first use. Resolved at swap submit (the USDC `to:`) and at confirm (to match
+/// the realized `Transfer(_, reserve, amount)` log). Returns (path, address).
+pub async fn cached_reserve_address(chain: ChainId) -> Result<(Vec<Vec<u8>>, String), String> {
+    let path = reserve_derivation_path(chain);
+    if let Some(addr) = RESERVE_ADDR_CACHE.with(|c| c.borrow().get(&chain).cloned()) {
+        return Ok((path, addr));
+    }
+    let (_pubkey, addr) = derive_evm_address(path.clone()).await?;
+    RESERVE_ADDR_CACHE.with(|c| {
+        c.borrow_mut().insert(chain, addr.clone());
+    });
+    Ok((path, addr))
+}
