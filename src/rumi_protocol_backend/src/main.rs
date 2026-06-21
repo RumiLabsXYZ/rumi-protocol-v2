@@ -1879,19 +1879,21 @@ fn set_chain_liquidation_config(
     config
         .validate()
         .map_err(|e| ProtocolError::ChainAdmin(format!("invalid liquidation config: {e:?}")))?;
-    // Finding #16: the penalty cushion MUST exceed the slippage budget, or a swap
-    // can structurally deliver less stable than the debt it clears (under-cover).
-    // (The max_dex_oracle_divergence_bps term joins this invariant in Increment 3.)
+    // Finding #16: the penalty cushion MUST exceed the slippage + oracle-divergence
+    // budget, or a swap can structurally deliver less stable than the debt it
+    // clears (under-cover). Increment 3 adds the max_dex_oracle_divergence_bps term.
     if config.enabled {
         let penalty_bps = rumi_protocol_backend::chains::collateral_config::chain_collateral_config(chain)
             .map(|c| c.liquidation_penalty_bps)
             .ok_or_else(|| {
                 ProtocolError::ChainAdmin(format!("no collateral config for chain {}", chain.0))
             })?;
-        if (config.slippage_cap_bps as u64) >= penalty_bps {
+        let budget_bps =
+            (config.slippage_cap_bps as u64).saturating_add(config.max_dex_oracle_divergence_bps as u64);
+        if budget_bps >= penalty_bps {
             return Err(ProtocolError::ChainAdmin(format!(
-                "slippage_cap_bps {} must be < liquidation_penalty_bps {} (penalty cushion)",
-                config.slippage_cap_bps, penalty_bps
+                "slippage_cap_bps {} + max_dex_oracle_divergence_bps {} must be < liquidation_penalty_bps {} (penalty cushion, finding #16)",
+                config.slippage_cap_bps, config.max_dex_oracle_divergence_bps, penalty_bps
             )));
         }
     }

@@ -461,6 +461,10 @@ mod tests {
                 enabled: true,
                 max_swap_value_e8s: 2_000 * 100_000_000,
                 max_price_age_ns: 1_800_000_000_000,
+                max_dex_oracle_divergence_bps: 500,
+                fee_bps: 25,
+                settle_stable_decimals: 18,
+                deadline_secs: 180,
             },
         );
     }
