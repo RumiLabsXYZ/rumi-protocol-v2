@@ -10,7 +10,15 @@
 use rumi_protocol_backend::chains::config::{
     ChainConfigV3, ChainId, ChainStatus, GasStrategy,
 };
-use rumi_protocol_backend::chains::multi_chain_state::MultiChainStateV4;
+// Canonical multi-chain state alias (currently `MultiChainStateV6`). The
+// liquidation-Increment-1 bump added the reserve-backing / pending-chain-burn /
+// sp-attempted scaffolding; `Default` brings those new fields up empty, so the
+// unified RHS (`chain_backing_rhs_e8s` = debt + reserve + pending_burn) reduces
+// to bare `debt` here and the invariant assertions below stay meaningful (the
+// supply helpers all take `&mut MultiChainState`). Using the alias keeps this
+// test pinned to the canonical state across future version bumps, matching the
+// convention in every `chains/` unit test.
+use rumi_protocol_backend::chains::multi_chain_state::MultiChainState;
 use rumi_protocol_backend::chains::supply::{apply_supply_delta, SupplyDelta};
 use rumi_protocol_backend::chains::monad::chain_vault::open_chain_vault_in_state;
 use rumi_protocol_backend::chains::monad::settlement::confirm_mint_in_state;
@@ -38,8 +46,8 @@ fn arb_op() -> impl Strategy<Value = Op> {
     ]
 }
 
-fn seeded_state() -> MultiChainStateV4 {
-    let mut state = MultiChainStateV4::default();
+fn seeded_state() -> MultiChainState {
+    let mut state = MultiChainState::default();
     for id in 1u32..=5u32 {
         state.chain_configs.insert(
             ChainId(id),
@@ -230,7 +238,11 @@ proptest! {
                     if opened {
                         // PRE-mint total is the current total_debt; the helper
                         // adds `amt` internally to derive the post-mint total.
-                        if confirm_mint_in_state(&mut state, cid, next_vault_id, amt, total_debt)
+                        // `now_ns = 0`: this test never harvests interest (it drives
+                        // open -> confirm -> direct-debt burn), so the
+                        // `last_interest_accrual_ns` stamp is inert here. Matches the
+                        // settlement unit tests' convention.
+                        if confirm_mint_in_state(&mut state, cid, next_vault_id, amt, total_debt, 0)
                             .is_ok()
                         {
                             total_debt += amt;
