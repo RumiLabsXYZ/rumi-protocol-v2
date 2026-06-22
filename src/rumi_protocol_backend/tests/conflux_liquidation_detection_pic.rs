@@ -151,6 +151,12 @@ struct ChainLiquidationConfigV1 {
     enabled: bool,
     max_swap_value_e8s: candid::Nat,
     max_price_age_ns: u64,
+    // Increment 3 fields (the backend struct gained these; the mirror MUST match
+    // or set_chain_liquidation_config fails to decode).
+    max_dex_oracle_divergence_bps: u32,
+    fee_bps: u16,
+    settle_stable_decimals: u8,
+    deadline_secs: u64,
 }
 
 /// Mirror of `main::ChainLiquidatableVault` (the discovery query row).
@@ -376,6 +382,10 @@ fn enabled_liq_config() -> ChainLiquidationConfigV1 {
         enabled: true,
         max_swap_value_e8s: candid::Nat::from(2_000u128 * E8),
         max_price_age_ns: 1_800_000_000_000, // 30 min
+        max_dex_oracle_divergence_bps: 500,
+        fee_bps: 25,
+        settle_stable_decimals: 18,
+        deadline_secs: 180,
     }
 }
 
@@ -598,6 +608,14 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
     assert!(v.pending_liquidation.is_none(), "healthy vault has no liquidation marker");
     assert_supply(&pic, backend, 100 * E8, "after mint");
 
+    // Inc 3: the LiquidationSwap op is now ACTIONABLE (the settlement worker would
+    // submit it). This test is about DETECTION only (the swap submit/confirm is the
+    // conflux_liquidation_swap_pic suite), so idle the settlement timer now (after
+    // the mint confirmed) — the swap op stays Queued and the `pending_liquidation`
+    // marker persists for the detection assertions below. The observer (detection)
+    // timer keeps firing.
+    let _ = update_dev(&pic, backend, "set_settlement_tick_interval_secs", Encode!(&31_536_000u64).unwrap());
+
     // ── Enable the liquidation config (master switch on) ─────────────────────
     decode_result(
         update_dev(
@@ -715,6 +733,13 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
     // (no marker set), and the discovery query fails closed (empty).
     // ════════════════════════════════════════════════════════════════════════
 
+    // Re-enable the settlement timer (it was idled above to keep vault 1's marker
+    // for the detection assertions, which are now done). Vault 2 needs settlement
+    // to mint. Vault 1's Queued swap will now submit + escalate (no DEX reads in
+    // this detection-only test -> getReserves read fails -> Failed, not Inflight),
+    // which is harmless here (vault 1's assertions already ran).
+    let _ = update_dev(&pic, backend, "set_settlement_tick_interval_secs", Encode!(&30u64).unwrap());
+
     // Refresh the price (re-stamp set_at_ns to "now") so the second vault can OPEN
     // at a healthy CR, then later go underwater while its price ages out.
     decode_result(
@@ -823,11 +848,17 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
         get_vault(&pic, backend, vault2_id).unwrap().pending_liquidation.is_none(),
         "stale price => detection deferred; vault2 NOT marked"
     );
-    // The first vault's marker is untouched; supply still unchanged by detection.
+    // Inc 3: once settlement was re-enabled (for vault 2's mint), vault 1's Queued
+    // swap submitted and ESCALATED (this detection-only test sets no DEX reads, so
+    // getReserves fails -> Failed, collateral restored, marker cleared, sp_attempted).
+    // Detection does NOT re-mark it (sp_attempted exclusion, finding #10). The full
+    // swap-success path is the conflux_liquidation_swap_pic suite.
     assert!(
-        get_vault(&pic, backend, vault_id).unwrap().pending_liquidation.is_some(),
-        "vault 1's marker survives the stale-price tick"
+        get_vault(&pic, backend, vault_id).unwrap().pending_liquidation.is_none(),
+        "vault 1 escalated (no DEX reads) and is not re-marked"
     );
+    // Supply is UNCHANGED throughout: escalation restores collateral, never touches
+    // debt/supply; detection never moves supply.
     assert_supply(&pic, backend, 200 * E8, "after stale-price tick (supply unchanged)");
 
     eprintln!("[liquidation-detection] FULL detection path PASSED: enabled-config-gated observer scan marked an underwater vault (Bot tier, collateral reserved, debt+supply unchanged), the discovery query lists pre-mark / excludes post-mark, the dev gate rejects an anonymous trigger, and a stale price defers detection (no marker, empty query) on chain 71.");
