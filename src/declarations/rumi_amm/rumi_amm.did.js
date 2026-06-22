@@ -9,6 +9,7 @@ export const idlFactory = ({ IDL }) => {
     'PoolCreationClosed' : IDL.Null,
     'InvalidInput' : IDL.Record({ 'reason' : IDL.Text }),
     'PoolNotFound' : IDL.Null,
+    'DuplicateNonce' : IDL.Null,
     'ZeroAmount' : IDL.Null,
     'DisproportionateLiquidity' : IDL.Null,
     'FeeBpsOutOfRange' : IDL.Null,
@@ -19,20 +20,19 @@ export const idlFactory = ({ IDL }) => {
     }),
     'MathOverflow' : IDL.Null,
     'Unauthorized' : IDL.Null,
+    'NoLiquidity' : IDL.Null,
     'PoolAlreadyExists' : IDL.Null,
     'PoolBusy' : IDL.Null,
+    'InsufficientOnChainBalance' : IDL.Record({
+      'actual' : IDL.Nat,
+      'expected' : IDL.Nat,
+    }),
     'InsufficientLiquidity' : IDL.Null,
     'MaintenanceMode' : IDL.Null,
+    'BelowMinClaim' : IDL.Record({ 'min' : IDL.Nat, 'claimable' : IDL.Nat }),
     'TransferFailed' : IDL.Record({ 'token' : IDL.Text, 'reason' : IDL.Text }),
     'ClaimNotFound' : IDL.Null,
-    'DuplicateNonce' : IDL.Null,
-    'NoLiquidity' : IDL.Null,
-    'BelowMinClaim' : IDL.Record({ 'claimable' : IDL.Nat, 'min' : IDL.Nat }),
     'RewardLedgerTransferFailed' : IDL.Record({ 'reason' : IDL.Text }),
-    'InsufficientOnChainBalance' : IDL.Record({
-      'expected' : IDL.Nat,
-      'actual' : IDL.Nat,
-    }),
   });
   const CurveType = IDL.Variant({ 'ConstantProduct' : IDL.Null });
   const CreatePoolArgs = IDL.Record({

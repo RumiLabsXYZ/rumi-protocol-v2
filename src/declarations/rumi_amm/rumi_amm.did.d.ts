@@ -58,6 +58,7 @@ export type AmmError = {
   { 'PoolCreationClosed' : null } |
   { 'InvalidInput' : { 'reason' : string } } |
   { 'PoolNotFound' : null } |
+  { 'DuplicateNonce' : null } |
   { 'ZeroAmount' : null } |
   { 'DisproportionateLiquidity' : null } |
   { 'FeeBpsOutOfRange' : null } |
@@ -65,17 +66,18 @@ export type AmmError = {
   { 'InsufficientLpShares' : { 'available' : bigint, 'required' : bigint } } |
   { 'MathOverflow' : null } |
   { 'Unauthorized' : null } |
+  { 'NoLiquidity' : null } |
   { 'PoolAlreadyExists' : null } |
   { 'PoolBusy' : null } |
+  {
+    'InsufficientOnChainBalance' : { 'actual' : bigint, 'expected' : bigint }
+  } |
   { 'InsufficientLiquidity' : null } |
   { 'MaintenanceMode' : null } |
+  { 'BelowMinClaim' : { 'min' : bigint, 'claimable' : bigint } } |
   { 'TransferFailed' : { 'token' : string, 'reason' : string } } |
   { 'ClaimNotFound' : null } |
-  { 'DuplicateNonce' : null } |
-  { 'NoLiquidity' : null } |
-  { 'BelowMinClaim' : { 'claimable' : bigint, 'min' : bigint } } |
-  { 'RewardLedgerTransferFailed' : { 'reason' : string } } |
-  { 'InsufficientOnChainBalance' : { 'expected' : bigint, 'actual' : bigint } };
+  { 'RewardLedgerTransferFailed' : { 'reason' : string } };
 export interface AmmEventsByPrincipalQuery {
   'who' : Principal,
   'pool' : string,
