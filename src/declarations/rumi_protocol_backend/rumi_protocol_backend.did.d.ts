@@ -44,9 +44,35 @@ export interface CandidVault {
   'icp_margin_amount' : bigint,
   'borrowed_icusd_amount' : bigint,
 }
+export interface ChainLiquidatableVault {
+  'sized_repay_e8s' : bigint,
+  'cr_e4' : bigint,
+  'collateral_native' : bigint,
+  'vault_id' : bigint,
+  'chain_id' : number,
+  'liquidation_threshold_e4' : bigint,
+  'effective_debt_e8s' : bigint,
+  'debt_e8s' : bigint,
+}
+export interface ChainLiquidationConfigV1 {
+  'dex' : DexKind,
+  'max_swap_value_e8s' : bigint,
+  'pair' : string,
+  'max_price_age_ns' : bigint,
+  'restore_target_cr_e4' : bigint,
+  'enabled' : boolean,
+  'collateral_token' : string,
+  'factory' : string,
+  'slippage_cap_bps' : number,
+  'router' : string,
+  'settle_stable_token' : string,
+}
 export interface ChainSupplyReconciliation {
   'recorded_supply_e8s' : bigint,
+  'pending_chain_burn_e8s' : bigint,
+  'reserve_backing_e8s' : bigint,
   'gap_e8s' : bigint,
+  'reserve_usdc_native' : bigint,
   'unbacked_excess' : boolean,
   'finalized_block' : bigint,
   'in_flight_mint_e8s' : bigint,
@@ -69,6 +95,7 @@ export interface ChainVaultV1 {
   'opened_at_ns' : bigint,
   'vault_id' : bigint,
   'last_interest_accrual_ns' : bigint,
+  'pending_liquidation' : [] | [PendingLiquidationV1],
   'collateral_chain' : number,
   'mint_recipient' : string,
   'debt_e8s' : bigint,
@@ -161,6 +188,7 @@ export type DeviceSpec = { 'GenericDisplay' : null } |
       'lines_per_page' : number,
     }
   };
+export type DexKind = { 'UniswapV2' : null };
 export interface ErrorInfo { 'description' : string }
 export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
   {
@@ -214,6 +242,23 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'chain_id' : number,
       'timestamp' : bigint,
       'tx_hash' : string,
+    }
+  } |
+  {
+    'chain_liquidation_deferred' : {
+      'vault_id' : bigint,
+      'chain_id' : number,
+      'timestamp' : bigint,
+      'reason' : string,
+    }
+  } |
+  {
+    'chain_reserve_credited' : {
+      'usdc_native' : bigint,
+      'backing_added_e8s' : bigint,
+      'vault_id' : bigint,
+      'chain_id' : number,
+      'timestamp' : bigint,
     }
   } |
   {
@@ -624,6 +669,15 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
   { 'set_icpswap_routing_enabled' : { 'enabled' : boolean } } |
   { 'set_bot_budget' : { 'start_timestamp' : bigint, 'total_e8s' : bigint } } |
   { 'set_rmr_floor' : { 'value' : string } } |
+  {
+    'chain_cfx_claim_settled' : {
+      'claim_id' : bigint,
+      'amount_native' : bigint,
+      'recipient' : string,
+      'chain_id' : number,
+      'timestamp' : bigint,
+    }
+  } |
   { 'set_redemption_fee_floor' : { 'rate' : string } } |
   {
     'set_interest_rate' : {
@@ -683,6 +737,17 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     'set_collateral_borrow_threshold' : {
       'borrow_threshold_ratio' : string,
       'collateral_type' : Principal,
+    }
+  } |
+  {
+    'chain_vault_liquidated' : {
+      'collateral_seized_native' : bigint,
+      'op_id' : bigint,
+      'tier' : LiquidationTier,
+      'vault_id' : bigint,
+      'chain_id' : number,
+      'timestamp' : bigint,
+      'debt_cleared_e8s' : bigint,
     }
   } |
   {
@@ -820,6 +885,8 @@ export interface InitArg {
 export interface InterestSplitArg { 'bps' : bigint, 'destination' : string }
 export type InterpolationMethod = { 'Linear' : null };
 export interface LineDisplayPage { 'lines' : Array<string> }
+export type LiquidationTier = { 'Bot' : null } |
+  { 'StabilityPool' : null };
 export interface LiquidityStatus {
   'liquidity_provided' : bigint,
   'total_liquidity_provided' : bigint,
@@ -827,12 +894,20 @@ export interface LiquidityStatus {
   'available_liquidity_reward' : bigint,
   'total_available_returns' : bigint,
 }
+export interface ManualPriceInfo { 'set_at_ns' : bigint, 'price_e8' : bigint }
 export type Mode = { 'ReadOnly' : null } |
   { 'GeneralAvailability' : null } |
   { 'Recovery' : null };
 export interface OpenVaultSuccess {
   'block_index' : bigint,
   'vault_id' : bigint,
+}
+export interface PendingLiquidationV1 {
+  'started_at_ns' : bigint,
+  'op_id' : bigint,
+  'tier' : LiquidationTier,
+  'debt_to_clear_e8s' : bigint,
+  'collateral_reserved_native' : bigint,
 }
 export interface PerCollateralRateCurve {
   'markers' : Array<[number, number]>,
@@ -1157,6 +1232,24 @@ export interface VaultsPageResponse {
 }
 export type XrcAssetClass = { 'Cryptocurrency' : null } |
   { 'FiatCurrency' : null };
+export interface XrpClaim {
+  'custody_nonce' : bigint,
+  'claimant' : Principal,
+  'created_at_ns' : bigint,
+  'custody_owner' : Principal,
+  'drops' : bigint,
+  'settlement' : [] | [XrpSettlement],
+}
+export interface XrpPendingDeposit {
+  'owner' : Principal,
+  'custody_address' : string,
+  'opened_at_ns' : bigint,
+  'derivation_nonce' : bigint,
+}
+export interface XrpSettlement {
+  'last_ledger_sequence' : number,
+  'tx_hash' : string,
+}
 export interface XrpVaultOpenInfo {
   'custody_address' : string,
   'vault_id' : bigint,
@@ -1213,6 +1306,14 @@ export interface _SERVICE {
   'get_bot_cr_tolerance_bps' : ActorMethod<[], bigint>,
   'get_bot_stats' : ActorMethod<[], BotStatsResponse>,
   'get_chain_interest_treasury_address' : ActorMethod<[number], Result_2>,
+  'get_chain_liquidatable_vaults' : ActorMethod<
+    [number],
+    Array<ChainLiquidatableVault>
+  >,
+  'get_chain_liquidation_config' : ActorMethod<
+    [number],
+    [] | [ChainLiquidationConfigV1]
+  >,
   'get_chain_settlement_address' : ActorMethod<[number], Result_2>,
   'get_chain_vault' : ActorMethod<[bigint], [] | [ChainVaultV1]>,
   'get_chains_ecdsa_key_name' : ActorMethod<[], string>,
@@ -1262,8 +1363,19 @@ export interface _SERVICE {
   'get_liquidation_ordering_tolerance_bps' : ActorMethod<[], bigint>,
   'get_liquidation_protocol_share' : ActorMethod<[], number>,
   'get_liquidity_status' : ActorMethod<[Principal], LiquidityStatus>,
+  'get_manual_collateral_price' : ActorMethod<
+    [number, string],
+    [] | [ManualPriceInfo]
+  >,
   'get_min_icusd_amount' : ActorMethod<[], bigint>,
+  'get_my_xrp_claims' : ActorMethod<[], Array<[bigint, XrpClaim]>>,
+  'get_my_xrp_pending_deposits' : ActorMethod<
+    [],
+    Array<[bigint, XrpPendingDeposit]>
+  >,
   'get_pending_amm1_donations_count' : ActorMethod<[], bigint>,
+  'get_price_pusher_allowed' : ActorMethod<[], Array<[number, string]>>,
+  'get_price_pusher_principal' : ActorMethod<[], [] | [Principal]>,
   'get_protocol_3usd_reserves' : ActorMethod<[], bigint>,
   'get_protocol_config' : ActorMethod<[], ProtocolConfig>,
   'get_protocol_snapshots' : ActorMethod<
@@ -1306,6 +1418,11 @@ export interface _SERVICE {
   'get_vault_interest_rate' : ActorMethod<[bigint], Result_7>,
   'get_vaults' : ActorMethod<[[] | [Principal]], Array<CandidVault>>,
   'get_vaults_page' : ActorMethod<[bigint, bigint], VaultsPageResponse>,
+  'get_xrp_claims' : ActorMethod<[], Array<[bigint, XrpClaim]>>,
+  'get_xrp_pending_deposits' : ActorMethod<
+    [],
+    Array<[bigint, XrpPendingDeposit]>
+  >,
   'harvest_chain_interest' : ActorMethod<[number], Result_1>,
   'http_request' : ActorMethod<[HttpRequest], HttpResponse_1>,
   'icrc10_supported_standards' : ActorMethod<[], Array<StandardRecord>>,
@@ -1314,6 +1431,7 @@ export interface _SERVICE {
     Result_8
   >,
   'icrc28_trusted_origins' : ActorMethod<[], Icrc28TrustedOriginsResponse>,
+  'liquidate_chain_vault' : ActorMethod<[bigint], Result_1>,
   'liquidate_vault' : ActorMethod<[bigint], Result_3>,
   'liquidate_vault_partial' : ActorMethod<[VaultArg], Result_3>,
   'liquidate_vault_partial_with_stable' : ActorMethod<
@@ -1347,6 +1465,7 @@ export interface _SERVICE {
   'redeem_icp' : ActorMethod<[bigint], Result_3>,
   'redeem_reserves' : ActorMethod<[bigint, [] | [Principal]], Result_14>,
   'register_chain' : ActorMethod<[RegisterChainArg], Result>,
+  'register_xrp_collateral' : ActorMethod<[], Result>,
   'repay_and_close_vault' : ActorMethod<[VaultArg], Result_15>,
   'repay_to_vault' : ActorMethod<[VaultArg], Result_1>,
   'repay_to_vault_with_stable' : ActorMethod<[VaultArgWithToken], Result_1>,
@@ -1365,6 +1484,10 @@ export interface _SERVICE {
   'set_chain_contract' : ActorMethod<[number, string], Result>,
   'set_chain_interest_min_realize_e8s' : ActorMethod<[bigint], Result>,
   'set_chain_interest_tick_interval_secs' : ActorMethod<[bigint], Result>,
+  'set_chain_liquidation_config' : ActorMethod<
+    [number, ChainLiquidationConfigV1],
+    Result
+  >,
   'set_chains_ecdsa_key_name' : ActorMethod<[string], Result>,
   'set_check_vaults_alert_band_bps' : ActorMethod<[bigint], Result>,
   'set_check_vaults_full_sweep_every_n_ticks' : ActorMethod<[bigint], Result>,
@@ -1416,6 +1539,10 @@ export interface _SERVICE {
   'set_min_icusd_amount' : ActorMethod<[bigint], Result>,
   'set_min_xrc_sources_used' : ActorMethod<[number], Result>,
   'set_observer_tick_interval_secs' : ActorMethod<[bigint], Result>,
+  'set_price_pusher_principal' : ActorMethod<
+    [[] | [Principal], Array<[number, string]>],
+    Result
+  >,
   'set_rate_curve_markers' : ActorMethod<
     [[] | [Principal], Array<[number, number]>],
     Result
@@ -1450,6 +1577,7 @@ export interface _SERVICE {
   'set_treasury_principal' : ActorMethod<[Principal], Result>,
   'set_vault_check_tick_interval_secs' : ActorMethod<[bigint], Result>,
   'set_xrc_fetch_interval_secs' : ActorMethod<[bigint], Result>,
+  'settle_xrp_claim' : ActorMethod<[bigint, string], Result_2>,
   'solana_bootstrap_nonce' : ActorMethod<[[] | [string]], Result>,
   'solana_get_balance' : ActorMethod<[string], Result_1>,
   'solana_get_mint_supply' : ActorMethod<[], Result_1>,

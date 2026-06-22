@@ -4148,6 +4148,39 @@ fn get_xrp_claims() -> Vec<(u64, rumi_protocol_backend::state::XrpClaim)> {
     })
 }
 
+/// P5 (frontend): the caller's OWN native-XRP pending deposits (those whose vault
+/// the caller opened). Unlike `get_xrp_pending_deposits` (developer-gated, all
+/// users), this is the per-user read the UI uses to show "send XRP to this custody
+/// address" for a deposit it is still waiting on. Returns `(reserved_vault_id, pending)`.
+#[candid_method(query)]
+#[query]
+fn get_my_xrp_pending_deposits() -> Vec<(u64, rumi_protocol_backend::state::XrpPendingDeposit)> {
+    let caller = ic_cdk::caller();
+    read_state(|s| {
+        s.xrp_pending_deposits
+            .iter()
+            .filter(|(_, d)| d.owner == caller)
+            .map(|(id, d)| (*id, d.clone()))
+            .collect()
+    })
+}
+
+/// P5 (frontend): the caller's OWN outstanding native-XRP claims (those the caller
+/// is the `claimant` of — XRP owed to them from a withdraw/close/liquidation). The UI
+/// uses this to list claims the user can `settle_xrp_claim` to an XRPL address.
+#[candid_method(query)]
+#[query]
+fn get_my_xrp_claims() -> Vec<(u64, rumi_protocol_backend::state::XrpClaim)> {
+    let caller = ic_cdk::caller();
+    read_state(|s| {
+        s.xrp_claims
+            .iter()
+            .filter(|(_, c)| c.claimant == caller)
+            .map(|(id, c)| (*id, c.clone()))
+            .collect()
+    })
+}
+
 #[query]
 fn http_request(req: HttpRequest) -> HttpResponse {
     use ic_metrics_encoder::MetricsEncoder;

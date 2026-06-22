@@ -1134,6 +1134,10 @@ service : (ProtocolArg) -> {
   get_liquidity_status : (principal) -> (LiquidityStatus) query;
   get_manual_collateral_price : (nat32, text) -> (opt ManualPriceInfo) query;
   get_min_icusd_amount : () -> (nat64) query;
+  get_my_xrp_claims : () -> (vec record { nat64; XrpClaim }) query;
+  get_my_xrp_pending_deposits : () -> (
+      vec record { nat64; XrpPendingDeposit },
+    ) query;
   get_pending_amm1_donations_count : () -> (nat64) query;
   get_price_pusher_allowed : () -> (vec record { nat32; text }) query;
   get_price_pusher_principal : () -> (opt principal) query;
