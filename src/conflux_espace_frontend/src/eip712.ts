@@ -74,7 +74,7 @@ export function intentDigest(
 
 type TypedDataSigner = { signTypedData: (args: any) => Promise<`0x${string}`> };
 
-/** Sign with a viem account (MetaMask `walletClient`, or a dev-key `Account`).
+/** Sign with a viem account (an injected `walletClient`, or a dev-key `Account`).
  *  Returns the 65-byte r‖s‖v signature ready for the canister `blob` argument. */
 export async function signIntent(
   signer: TypedDataSigner,

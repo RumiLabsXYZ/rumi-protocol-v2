@@ -3,8 +3,11 @@
   import { backend, errText, type ChainVault } from "./backend";
   import { signIntent, toCandidIntent, type VaultIntentInput } from "./eip712";
   import {
-    connectMetaMask, connectDevKey, hasMetaMask, sendDeposit, burnIcusd, icusdBalance, cfxBalance,
-    fmtCfx, fmtIcusd, parseEther, toE8s, txUrl, type Wallet,
+    connectInjected, connectLegacyInjected, connectDevKey, hasLegacyInjected,
+    getInjectedWallets, subscribeWallets, refreshInjectedWallets,
+    sendDeposit, burnIcusd, icusdBalance, cfxBalance,
+    fmtCfx, fmtIcusd, parseEther, toE8s, txUrl,
+    type Wallet, type EIP6963ProviderDetail,
   } from "./evm";
   import VaultCard from "./VaultCard.svelte";
 
@@ -17,6 +20,14 @@
   let busy = $state<string | null>(null);
   let err = $state<string | null>(null);
   let ok = $state<string | null>(null);
+
+  // EIP-6963: discovered injected wallets (Rabby, MetaMask, ...). The list grows as
+  // wallets announce; we re-request on mount in case one injected after page load.
+  let injectedWallets = $state<EIP6963ProviderDetail[]>(getInjectedWallets());
+  $effect(() => {
+    refreshInjectedWallets();
+    return subscribeWallets((list) => { injectedWallets = list; });
+  });
 
   // open form
   let debtInput = $state("0.2");
@@ -55,9 +66,15 @@
     } catch (e: any) { err = `Refresh failed: ${e?.message ?? e}`; }
   }
 
-  async function connectMM() {
+  async function connectWith(detail: EIP6963ProviderDetail) {
+    reset(); busy = `Connecting ${detail.info.name}…`;
+    try { wallet = await connectInjected(detail); await refresh(); }
+    catch (e: any) { err = e?.message ?? String(e); }
+    finally { busy = null; }
+  }
+  async function connectLegacy() {
     reset(); busy = "Connecting…";
-    try { wallet = await connectMetaMask(); await refresh(); }
+    try { wallet = await connectLegacyInjected(); await refresh(); }
     catch (e: any) { err = e?.message ?? String(e); }
     finally { busy = null; }
   }
@@ -170,10 +187,25 @@
       <h2>Connect</h2>
       <p class="hint">Open a CFX-collateralized icUSD vault by signing an EIP-712 intent — no IC login.
         Your wallet is the only identity; the canister verifies the signature.</p>
-      <div class="row">
-        <button class="primary" onclick={connectMM} disabled={!!busy || !hasMetaMask()}>
-          {hasMetaMask() ? "Connect MetaMask" : "MetaMask not detected"}
-        </button>
+      {#if injectedWallets.length > 0}
+        <div class="wallets">
+          {#each injectedWallets as w (w.info.rdns)}
+            <button class="wallet" onclick={() => connectWith(w)} disabled={!!busy}>
+              <img class="wicon" src={w.info.icon} alt="" />
+              <span>Connect {w.info.name}</span>
+            </button>
+          {/each}
+        </div>
+      {:else if hasLegacyInjected()}
+        <div class="row">
+          <button class="primary" onclick={connectLegacy} disabled={!!busy}>Connect wallet</button>
+        </div>
+      {:else}
+        <p class="hint" style="margin:0 0 4px">No EVM wallet detected. Install
+          <a href="https://rabby.io" target="_blank" rel="noreferrer">Rabby</a>
+          (or another EVM wallet) and reload.</p>
+      {/if}
+      <div class="row" style="margin-top:12px">
         <button class="ghost sm" onclick={() => (showDevKey = !showDevKey)}>{showDevKey ? "Hide" : "Use a dev key"}</button>
       </div>
       {#if showDevKey}
@@ -195,7 +227,7 @@
       <div class="kv"><span class="k">Address</span><span class="v mono">{wallet.address}</span></div>
       <div class="kv"><span class="k">CFX</span><span class="v">{fmtCfx(cfx)}</span></div>
       <div class="kv"><span class="k">icUSD</span><span class="v">{fmtIcusd(icusd)}</span></div>
-      <div class="kv"><span class="k">Signer</span><span class="v">{wallet.kind === "metamask" ? "MetaMask" : "dev key"}</span></div>
+      <div class="kv"><span class="k">Signer</span><span class="v">{wallet.walletName}</span></div>
     </div>
 
     <div class="card">
