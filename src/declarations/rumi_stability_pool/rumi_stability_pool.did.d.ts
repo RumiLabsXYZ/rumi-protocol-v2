@@ -72,6 +72,14 @@ export interface LiquidationResult {
   'success' : boolean,
   'collateral_type' : Principal,
 }
+export interface PendingRefund {
+  'id' : bigint,
+  'user' : Principal,
+  'created_at' : bigint,
+  'amount' : bigint,
+  'token_ledger' : Principal,
+  'reason' : string,
+}
 export interface PoolConfiguration {
   'emergency_pause' : boolean,
   'min_deposit_e8s' : bigint,
@@ -130,14 +138,6 @@ export type PoolEventType = {
       'token_ledger' : Principal,
     }
   };
-export interface PendingRefund {
-  'id' : bigint,
-  'user' : Principal,
-  'token_ledger' : Principal,
-  'amount' : bigint,
-  'reason' : string,
-  'created_at' : bigint,
-}
 export interface PoolLiquidationRecord {
   'collateral_price_e8s' : [] | [bigint],
   'stables_consumed' : Array<[Principal, bigint]>,
@@ -150,6 +150,7 @@ export interface PoolLiquidationRecord {
 export type StabilityPoolError = {
     'LedgerTransferFailed' : { 'reason' : string }
   } |
+  { 'RefundClaimNotFound' : null } |
   { 'EmergencyPaused' : null } |
   { 'AlreadyOptedOut' : { 'collateral' : Principal } } |
   { 'TokenNotActive' : { 'ledger' : Principal } } |
@@ -169,8 +170,7 @@ export type StabilityPoolError = {
   { 'SystemBusy' : null } |
   { 'AlreadyOptedIn' : { 'collateral' : Principal } } |
   { 'TokenNotAccepted' : { 'ledger' : Principal } } |
-  { 'InsufficientPoolBalance' : null } |
-  { 'RefundClaimNotFound' : null };
+  { 'InsufficientPoolBalance' : null };
 export interface StabilityPoolInitArgs {
   'protocol_canister_id' : Principal,
   'authorized_admins' : Array<Principal>,
@@ -257,10 +257,7 @@ export interface _SERVICE {
     [[] | [bigint]],
     Array<PoolLiquidationRecord>
   >,
-  'get_pending_refunds' : ActorMethod<
-    [[] | [Principal]],
-    Array<PendingRefund>
-  >,
+  'get_pending_refunds' : ActorMethod<[[] | [Principal]], Array<PendingRefund>>,
   'get_pool_event_count' : ActorMethod<[], bigint>,
   'get_pool_events' : ActorMethod<[bigint, bigint], Array<PoolEvent>>,
   'get_pool_status' : ActorMethod<[], StabilityPoolStatus>,

@@ -5,6 +5,7 @@ export const idlFactory = ({ IDL }) => {
   });
   const StabilityPoolError = IDL.Variant({
     'LedgerTransferFailed' : IDL.Record({ 'reason' : IDL.Text }),
+    'RefundClaimNotFound' : IDL.Null,
     'EmergencyPaused' : IDL.Null,
     'AlreadyOptedOut' : IDL.Record({ 'collateral' : IDL.Principal }),
     'TokenNotActive' : IDL.Record({ 'ledger' : IDL.Principal }),
@@ -29,15 +30,6 @@ export const idlFactory = ({ IDL }) => {
     'AlreadyOptedIn' : IDL.Record({ 'collateral' : IDL.Principal }),
     'TokenNotAccepted' : IDL.Record({ 'ledger' : IDL.Principal }),
     'InsufficientPoolBalance' : IDL.Null,
-    'RefundClaimNotFound' : IDL.Null,
-  });
-  const PendingRefund = IDL.Record({
-    'id' : IDL.Nat64,
-    'user' : IDL.Principal,
-    'token_ledger' : IDL.Principal,
-    'amount' : IDL.Nat64,
-    'reason' : IDL.Text,
-    'created_at' : IDL.Nat64,
   });
   const LiquidationResult = IDL.Record({
     'error_message' : IDL.Opt(IDL.Text),
@@ -55,6 +47,14 @@ export const idlFactory = ({ IDL }) => {
     'collateral_gained' : IDL.Nat64,
     'timestamp' : IDL.Nat64,
     'collateral_type' : IDL.Principal,
+  });
+  const PendingRefund = IDL.Record({
+    'id' : IDL.Nat64,
+    'user' : IDL.Principal,
+    'created_at' : IDL.Nat64,
+    'amount' : IDL.Nat64,
+    'token_ledger' : IDL.Principal,
+    'reason' : IDL.Text,
   });
   const PoolEventType = IDL.Variant({
     'Withdraw' : IDL.Record({
