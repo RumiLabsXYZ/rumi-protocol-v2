@@ -536,6 +536,10 @@ mod begin_liquidation_tests {
                 enabled,
                 max_swap_value_e8s,
                 max_price_age_ns: 1_800_000_000_000,
+                max_dex_oracle_divergence_bps: 500,
+                fee_bps: 25,
+                settle_stable_decimals: 18,
+                deadline_secs: 180,
             },
         );
     }

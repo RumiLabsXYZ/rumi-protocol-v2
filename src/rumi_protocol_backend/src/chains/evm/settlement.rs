@@ -71,13 +71,8 @@ pub fn select_next_op(q: &SettlementQueueV1) -> Option<(u64, OpAction)> {
     }
     for (&id, op) in q.pending.iter() {
         if matches!(op.status, SettlementOpStatus::Queued) {
-            // Increment 2: LiquidationSwap ops are enqueued but INERT (the swap
-            // submit path is Increment 3). Skip them so they neither execute nor
-            // head-of-line-block user ops. Increment 3 removes this guard and
-            // wires the submit/confirm/revert arms.
-            if matches!(op.kind, SettlementOpKind::LiquidationSwap { .. }) {
-                continue;
-            }
+            // Increment 3: LiquidationSwap ops are now actionable (submit_op routes
+            // them through the dedicated swap path). The Inc-2 skip is removed.
             return Some((id, OpAction::Submit));
         }
     }
@@ -191,6 +186,95 @@ pub fn confirm_interest_mint_in_state(
     v.pending_interest_mint_e8s = 0;
     v.last_interest_accrual_ns = accrual_through_ns;
     Ok(())
+}
+
+/// Phase 2 of the bot liquidation (spec §4.9): USDC is in hand — move
+/// `debt_e8s -> reserve_backing_e8s` (the ONLY invariant move; `chain_supplies`
+/// is NOT touched, no icUSD burned). Modeled on `confirm_interest_mint_in_state`:
+/// read-only validate -> single guarded mutation -> clear marker + emit events.
+///
+/// `realized_usdc_native` is the REAL output decoded from the on-chain Transfer
+/// log (never min-out). `actual_cleared = min(debt_to_clear, live_debt,
+/// realized_usd)` (findings #16/#1/#19): reserve_backing is NEVER credited more
+/// than the realized USD value, and any shortfall is recorded as per-chain bad
+/// debt. The marker (not the op) is the source of truth (finding #5): only
+/// `pending_liquidation.op_id == op_id` is required (a pruned op is tolerated).
+///
+/// State-only (no events / no `ic_cdk::api::time`), so it is unit-testable; the
+/// CALLER (`confirm_op`) emits `ChainVaultLiquidated` + `ChainReserveCredited`
+/// from the returned data (matching `confirm_interest_mint_in_state`'s split).
+pub fn apply_liquidation_settlement_in_state(
+    state: &mut MultiChainState,
+    chain: ChainId,
+    vault_id: u64,
+    op_id: u64,
+    realized_usdc_native: u128,
+    settle_decimals: u8,
+) -> Result<LiquidationSettlement, String> {
+    use crate::chains::monad::chain_vault::ChainVaultStatus;
+
+    // Step 1: validate (read-only — no mutation on failure). Capture sizing.
+    let (debt_to_clear, collateral_reserved, live_debt, tier) = {
+        let v = state
+            .chain_vaults
+            .get(&vault_id)
+            .ok_or_else(|| format!("apply_liquidation_settlement: unknown vault {vault_id}"))?;
+        let m = v
+            .pending_liquidation
+            .as_ref()
+            .ok_or_else(|| format!("apply_liquidation_settlement: vault {vault_id} has no liquidation marker"))?;
+        if m.op_id != op_id {
+            return Err(format!(
+                "apply_liquidation_settlement: marker op {} != confirming op {}",
+                m.op_id, op_id
+            ));
+        }
+        (m.debt_to_clear_e8s, m.collateral_reserved_native, v.debt_e8s, m.tier)
+    };
+
+    // Step 2: clamp — reserve_backing NEVER exceeds the realized USD value, nor the
+    // live debt (a concurrent burn is already blocked by the marker, so live_debt
+    // == debt_at_phase1; the min is belt-and-suspenders).
+    let realized_usd_e8 = crate::chains::liquidation::stable_native_to_e8s(realized_usdc_native, settle_decimals);
+    let actual_cleared = debt_to_clear.min(live_debt).min(realized_usd_e8);
+
+    // Step 3: the single guarded invariant move (debt -> reserve; supply untouched).
+    // apply_debt_to_reserve_shift re-validates the unified invariant + caps at debt.
+    crate::chains::supply::apply_debt_to_reserve_shift(state, chain, vault_id, actual_cleared, realized_usdc_native)
+        .map_err(|e| format!("apply_debt_to_reserve_shift: {e:?}"))?;
+
+    // Step 4: record any shortfall as per-chain bad debt (never silent).
+    if debt_to_clear > actual_cleared {
+        *state.chain_bad_debt_e8s.entry(chain).or_default() += debt_to_clear - actual_cleared;
+    }
+
+    // Step 5: clear the marker + routing record; close the vault if fully drained.
+    let v = state
+        .chain_vaults
+        .get_mut(&vault_id)
+        .expect("vault present: checked above");
+    v.pending_liquidation = None;
+    if v.debt_e8s == 0 && v.collateral_amount_native == 0 {
+        v.status = ChainVaultStatus::Closed;
+    }
+    state.bot_pending_chain_vaults.remove(&vault_id);
+
+    Ok(LiquidationSettlement {
+        actual_cleared,
+        collateral_seized_native: collateral_reserved,
+        tier,
+        realized_usdc_native,
+    })
+}
+
+/// Result of `apply_liquidation_settlement_in_state` — the data `confirm_op`
+/// needs to emit the `ChainVaultLiquidated` + `ChainReserveCredited` events.
+#[derive(Clone, Copy, Debug)]
+pub struct LiquidationSettlement {
+    pub actual_cleared: u128,
+    pub collateral_seized_native: u128,
+    pub tier: crate::chains::vault::LiquidationTier,
+    pub realized_usdc_native: u128,
 }
 
 // ─── Timer D tick (fan-out) ─────────────────────────────────────────────────
@@ -511,8 +595,21 @@ async fn resolve_op_signer(
             Ok((path, custody_addr))
         }
         SettlementOpKind::Burn { .. } => Err("burn not signable in Phase 1b".to_string()),
-        SettlementOpKind::LiquidationSwap { .. } => {
-            Err("liquidation swap signing is Increment 3".to_string())
+        SettlementOpKind::LiquidationSwap { vault_id, .. } => {
+            // The swap is signed by the vault's OWN custody address — it holds the
+            // CFX paid as the swap `value` (never commingled to the hot wallet),
+            // exactly like a NativeWithdrawal.
+            let vid = *vault_id;
+            let info = read_state(|s| {
+                s.multi_chain
+                    .chain_vaults
+                    .get(&vid)
+                    .map(|v| (v.owner, v.custody_address.clone()))
+            });
+            let (owner, custody_addr) =
+                info.ok_or_else(|| format!("swap signer: unknown vault {vid}"))?;
+            let path = tecdsa::custody_derivation_path(chain, owner, vid);
+            Ok((path, custody_addr))
         }
     }
 }
@@ -526,6 +623,15 @@ async fn resolve_op_signer(
 pub(crate) fn fundable_withdrawal_value(amount_e18: u128, custody_balance: u128, max_fee: u128) -> u128 {
     let gas_reserve = (tx::NATIVE_WITHDRAWAL_GAS_LIMIT as u128).saturating_mul(max_fee);
     amount_e18.min(custody_balance.saturating_sub(gas_reserve))
+}
+
+/// The native CFX to swap (carried as the EIP-1559 `value`), capped so the
+/// custody signer can ALSO pay the swap gas (spec §4.8). Mirrors
+/// `fundable_withdrawal_value` but reserves the larger swap gas budget. If this
+/// goes to 0 the caller must NOT submit (escalate).
+pub(crate) fn fundable_swap_value(collateral_in: u128, custody_balance: u128, max_fee: u128) -> u128 {
+    let gas_reserve = (tx::LIQUIDATION_SWAP_GAS_LIMIT as u128).saturating_mul(max_fee);
+    collateral_in.min(custody_balance.saturating_sub(gas_reserve))
 }
 
 /// Submit path: sign + broadcast a `Queued` op, then mark it `Inflight`.
@@ -558,6 +664,14 @@ async fn submit_op(
             timestamp: now,
         });
         log!(INFO, "[settlement chain={:?}] op {} is a Burn; marked Failed (burns are user-initiated in Phase 1b)", chain, op_id);
+        return;
+    }
+
+    // A LiquidationSwap has its own self-contained submit flow (live DEX reads,
+    // JIT min-out + oracle gate, fundable-value gas net, fail-closed escalation)
+    // — route it to the dedicated path instead of the generic mint/withdrawal one.
+    if matches!(op.kind, SettlementOpKind::LiquidationSwap { .. }) {
+        submit_liquidation_swap(chain, op_id, op).await;
         return;
     }
 
@@ -781,6 +895,211 @@ async fn submit_op(
     }
 }
 
+/// Fail a LiquidationSwap and escalate (spec §4.8 failure matrix, finding #10):
+/// mark the op `Failed`, restore the reserved collateral under a marker-CAS,
+/// clear the `pending_liquidation` marker, and mark the vault `sp_attempted` so
+/// detection does NOT re-route it to the bot (no retry loop). The Tier-2 SP
+/// consumer of `sp_attempted_chain_vaults` lands in Increment 4; until then the
+/// vault falls to Tier-3 manual. Emits the existing `ChainSettlementFailed` (no
+/// new Event variant). Used by both the submit do-not-swap branches and the
+/// confirm revert/timeout branches. Idempotent via the op_id marker-CAS.
+fn escalate_failed_swap(chain: ChainId, op_id: u64, vault_id: u64, reason: String) {
+    let now = ic_cdk::api::time();
+    mutate_state(|s| {
+        if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
+            if let Some(o) = q.pending.get_mut(&op_id) {
+                o.mark_failed(reason.clone(), now);
+            }
+        }
+        // Restore reserved collateral + clear the marker ONLY if THIS op still owns
+        // it (a concurrent confirm or a post-upgrade re-run cannot double-restore).
+        if let Some(v) = s.multi_chain.chain_vaults.get_mut(&vault_id) {
+            let owns = v.pending_liquidation.as_ref().map_or(false, |m| m.op_id == op_id);
+            if owns {
+                let reserved = v.pending_liquidation.as_ref().map(|m| m.collateral_reserved_native).unwrap_or(0);
+                v.collateral_amount_native = v.collateral_amount_native.saturating_add(reserved);
+                v.pending_liquidation = None;
+            }
+        }
+        s.multi_chain.bot_pending_chain_vaults.remove(&vault_id);
+        // The bot gave up; do not re-route to the bot. (Inc 4 SP consumes this.)
+        s.multi_chain.sp_attempted_chain_vaults.insert(vault_id);
+    });
+    crate::storage::record_event(&crate::event::Event::ChainSettlementFailed {
+        chain_id: chain,
+        op_id,
+        reason: reason.clone(),
+        timestamp: now,
+    });
+    log!(INFO, "[settlement chain={:?}] liquidation swap op {} vault {} FAILED -> escalated: {}", chain, op_id, vault_id, reason);
+}
+
+/// Dedicated submit path for a `LiquidationSwap` op (spec §4.8). Reads live DEX
+/// reserves PINNED to a finalized block (finding #13), computes a just-in-time
+/// `amount_out_min` (constant-product + slippage haircut) gated by the oracle
+/// cross-check, nets gas via `fundable_swap_value`, signs with the vault's custody
+/// key, and broadcasts to the router with native CFX in `value` and the USDC `to`
+/// = the tECDSA reserve address. FAIL-CLOSED: a bad DEX quote (reserves err/zero,
+/// min-out 0, oracle divergence, custody can't cover gas) escalates; a transient
+/// infra blip (block/nonce/fee/balance/sign/send) leaves the op Queued to retry.
+async fn submit_liquidation_swap(
+    chain: ChainId,
+    op_id: u64,
+    op: crate::chains::settlement_queue::SettlementOp,
+) {
+    use crate::chains::liquidation as liq;
+
+    // Op fields.
+    let (vault_id, collateral_in, router, pair, path0, path1, deadline_secs) = match &op.kind {
+        SettlementOpKind::LiquidationSwap {
+            vault_id, collateral_in_native, router, pair, path, deadline_secs, ..
+        } => {
+            if path.len() < 2 {
+                escalate_failed_swap(chain, op_id, *vault_id, "swap path malformed".into());
+                return;
+            }
+            (*vault_id, *collateral_in_native, router.clone(), pair.clone(), path[0].clone(), path[1].clone(), *deadline_secs)
+        }
+        _ => return, // unreachable: caller matched LiquidationSwap
+    };
+
+    let now = ic_cdk::api::time();
+    // Sync snapshot: liq-config knobs + fresh price + native decimals. A missing
+    // config/price/symbol is fail-closed (escalate) — the rail should not be
+    // enabled without them.
+    let snap = read_state(|s| {
+        let cfg = s.multi_chain.chain_liquidation_configs.get(&chain)?;
+        let native_decimals =
+            s.multi_chain.chain_configs.get(&chain).map(|c| c.chain_native_decimals).unwrap_or(18);
+        let symbol = crate::chains::evm::evm_chain_config(chain).map(|c| c.native_symbol)?;
+        let price = liq::fresh_chain_price_e8(&s.multi_chain, chain, symbol, now, cfg.max_price_age_ns).ok()?;
+        Some((cfg.fee_bps, cfg.slippage_cap_bps, cfg.max_dex_oracle_divergence_bps, cfg.settle_stable_decimals, native_decimals, price))
+    });
+    let (fee_bps, slippage_bps, divergence_bps, settle_decimals, native_decimals, price_e8) = match snap {
+        Some(t) => t,
+        None => {
+            escalate_failed_swap(chain, op_id, vault_id, "swap config/price unavailable".into());
+            return;
+        }
+    };
+
+    // Custody signer (holds the CFX) + the derived reserve `to`.
+    let (path, signer_addr) = match resolve_op_signer(chain, &op.kind).await {
+        Ok(p) => p,
+        Err(e) => {
+            escalate_failed_swap(chain, op_id, vault_id, format!("swap signer: {e}"));
+            return;
+        }
+    };
+    let reserve_to = match tecdsa::cached_reserve_address(chain).await {
+        Ok((_p, a)) => a,
+        Err(e) => {
+            escalate_failed_swap(chain, op_id, vault_id, format!("reserve address derive: {e}"));
+            return;
+        }
+    };
+
+    // Finalized block for the consensus-safe reserves read (transient -> retry).
+    let finalized = match evm_rpc::fetch_block_numbers(chain).await {
+        Ok((_l, f)) => f,
+        Err(e) => {
+            log!(INFO, "[settlement chain={:?}] swap op {}: fetch_block_numbers failed ({}); will retry", chain, op_id, e);
+            return;
+        }
+    };
+    // token0 + reserves (fail-CLOSED per spec §4.8: a DEX-quote read error escalates).
+    let token0 = match evm_rpc::get_pair_token0(chain, &pair, finalized).await {
+        Ok(a) => a,
+        Err(e) => {
+            escalate_failed_swap(chain, op_id, vault_id, format!("token0 read: {e}"));
+            return;
+        }
+    };
+    let (r0, r1) = match evm_rpc::get_reserves(chain, &pair, finalized).await {
+        Ok(r) => r,
+        Err(e) => {
+            escalate_failed_swap(chain, op_id, vault_id, format!("getReserves read: {e}"));
+            return;
+        }
+    };
+    let (reserve_in, reserve_out) = if token0.eq_ignore_ascii_case(&path0) { (r0, r1) } else { (r1, r0) };
+
+    // Infra reads (transient -> retry, do NOT escalate on a blip).
+    let nonce = match evm_rpc::get_transaction_count(chain, &signer_addr).await {
+        Ok(n) => n,
+        Err(e) => { log!(INFO, "[settlement chain={:?}] swap op {}: nonce read failed ({}); will retry", chain, op_id, e); return; }
+    };
+    let (base_fee, prio) = match evm_rpc::fetch_fees(chain).await {
+        Ok(p) => p,
+        Err(e) => { log!(INFO, "[settlement chain={:?}] swap op {}: fetch_fees failed ({}); will retry", chain, op_id, e); return; }
+    };
+    let max_fee = base_fee.saturating_mul(2).saturating_add(prio);
+    let custody_balance = match evm_rpc::get_balance(chain, &signer_addr).await {
+        Ok(b) => b,
+        Err(e) => { log!(INFO, "[settlement chain={:?}] swap op {}: get_balance failed ({}); will retry", chain, op_id, e); return; }
+    };
+
+    // Gas net + JIT min-out + oracle cross-check — all fail-CLOSED (escalate).
+    let fundable = fundable_swap_value(collateral_in, custody_balance, max_fee);
+    if fundable == 0 {
+        escalate_failed_swap(chain, op_id, vault_id, "custody cannot cover swap gas".into());
+        return;
+    }
+    let (expected_out, min_out) = liq::compute_amount_out_min(fundable, reserve_in, reserve_out, fee_bps, slippage_bps);
+    if min_out == 0 {
+        escalate_failed_swap(chain, op_id, vault_id, "min-out 0 (reserves zero/too thin)".into());
+        return;
+    }
+    let oracle_value_e8 = liq::collateral_value_e8s(fundable, native_decimals, price_e8);
+    if !liq::oracle_corroborated(expected_out, settle_decimals, oracle_value_e8, divergence_bps) {
+        escalate_failed_swap(chain, op_id, vault_id, "pool price diverges from oracle (thin/manipulated)".into());
+        return;
+    }
+
+    // Build + sign + broadcast. The on-chain deadline = now + horizon.
+    let deadline = now / 1_000_000_000 + deadline_secs;
+    let fields = match tx::build_eip1559_fields(
+        chain.0 as u64,
+        tx::MonadTxKind::Swap {
+            router: &router,
+            amount_in: fundable,
+            amount_out_min: min_out,
+            path: [&path0, &path1],
+            to: &reserve_to,
+            deadline,
+        },
+        nonce,
+        prio,
+        max_fee,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            // A malformed address is a config bug, not transient -> escalate.
+            escalate_failed_swap(chain, op_id, vault_id, format!("build swap tx: {e}"));
+            return;
+        }
+    };
+    let raw = match tx::sign_eip1559(&fields, path, &signer_addr).await {
+        Ok(h) => h,
+        Err(e) => { log!(INFO, "[settlement chain={:?}] swap op {}: sign failed ({}); will retry", chain, op_id, e); return; }
+    };
+    let tx_hash = match evm_rpc::send_raw_transaction(chain, &raw).await {
+        Ok(h) => h,
+        Err(e) => { log!(INFO, "[settlement chain={:?}] swap op {}: broadcast failed ({}); will retry", chain, op_id, e); return; }
+    };
+
+    mutate_state(|s| {
+        if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
+            if let Some(o) = q.pending.get_mut(&op_id) {
+                o.mark_inflight(now);
+                o.last_tx_hash = Some(tx_hash.clone());
+                o.submit_nonce = Some(nonce);
+            }
+        }
+    });
+    log!(INFO, "[settlement chain={:?}] liquidation swap submitted: op={} vault={} amount_in={} min_out={} to_reserve={} tx={}", chain, op_id, vault_id, fundable, min_out, reserve_to, tx_hash);
+}
+
 /// Confirm path: check an `Inflight` op's receipt and finalize on success.
 async fn confirm_op(
     chain: ChainId,
@@ -809,6 +1128,39 @@ async fn confirm_op(
     let (status_ok, block_number) = match receipt {
         Some(pair) => pair,
         None => {
+            // LiquidationSwap: NEVER replace-by-fee (spec §4.8). A never-mined swap
+            // instead TIMES OUT -> Failed -> escalate (findings #12/#22), so it can
+            // never wedge the vault marker + reserved collateral. The timeout
+            // (deadline + finality margin) exceeds chain finality, so a
+            // mined-then-reverted swap is caught by the revert branch first.
+            if let SettlementOpKind::LiquidationSwap { vault_id, deadline_secs, .. } = &op.kind {
+                let last_attempt = match &op.status {
+                    SettlementOpStatus::Inflight { last_attempt_ns, .. } => *last_attempt_ns,
+                    _ => return,
+                };
+                let now = ic_cdk::api::time();
+                if hardening::swap_confirm_timed_out(
+                    last_attempt,
+                    now,
+                    *deadline_secs,
+                    hardening::SWAP_CONFIRM_FINALITY_MARGIN_SECS,
+                ) {
+                    escalate_failed_swap(chain, op_id, *vault_id, "swap confirm timeout (never mined)".into());
+                    return;
+                }
+                // Not timed out yet: advance tries for visibility, never resubmit.
+                mutate_state(|s| {
+                    if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
+                        if let Some(o) = q.pending.get_mut(&op_id) {
+                            if let SettlementOpStatus::Inflight { tries, .. } = &mut o.status {
+                                *tries = tries.saturating_add(1);
+                            }
+                        }
+                    }
+                });
+                return;
+            }
+
             // Not mined yet. ADVANCE `tries` on EVERY not-mined tick (the prior
             // code only advanced on submit / successful-resubmit, so `is_stuck`
             // (>= 2) was unreachable and replace-by-fee never fired). The pure
@@ -886,6 +1238,14 @@ async fn confirm_op(
     //    re-entrancy guard is deferred to Task 15; this per-op CAS is the local
     //    defense-in-depth.
     if !status_ok {
+        // A reverted LiquidationSwap (deadline expiry / min-out unmet on-chain):
+        // restore the reserved collateral + clear the marker + escalate via the
+        // shared helper (the generic CAS below can't call it from inside its own
+        // mutate_state). The helper's marker-CAS prevents a double-restore.
+        if let SettlementOpKind::LiquidationSwap { vault_id, .. } = &op.kind {
+            escalate_failed_swap(chain, op_id, *vault_id, "swap reverted on-chain".into());
+            return;
+        }
         let reason = "tx reverted".to_string();
         let did_revert = mutate_state(|s| {
             // CAS: only the first tick to observe this op Inflight does the work.
@@ -1212,11 +1572,86 @@ async fn confirm_op(
             // never goes Inflight. Log defensively rather than panic.
             log!(INFO, "[settlement chain={:?}] inflight Burn op {} reached confirm path unexpectedly", chain, op_id);
         }
-        SettlementOpKind::LiquidationSwap { .. } => {
-            // Unreachable in Increment 2: select_next_op skips LiquidationSwap so
-            // it never goes Inflight. Increment 3 wires the real confirm (Transfer
-            // decode -> reserve shift) here. Log defensively rather than panic.
-            log!(INFO, "[settlement chain={:?}] LiquidationSwap op {} reached confirm unexpectedly (Increment 3 wiring missing)", chain, op_id);
+        SettlementOpKind::LiquidationSwap { vault_id, path, .. } => {
+            // Mined + ok + final: read the REALIZED settle-stable output from the
+            // `Transfer(_, reserve, amount)` log (never trust min-out), then move
+            // debt -> reserve via Phase 2 (spec §4.8/§4.9).
+            let vault_id = *vault_id;
+            let settle_stable = path.get(1).cloned().unwrap_or_default(); // path[1] = settle stable token
+            let reserve_to = match tecdsa::cached_reserve_address(chain).await {
+                Ok((_p, a)) => a,
+                Err(e) => {
+                    log!(INFO, "[settlement chain={:?}] swap confirm op {}: reserve address derive failed ({}); will retry", chain, op_id, e);
+                    return;
+                }
+            };
+            let settle_decimals = read_state(|s| {
+                s.multi_chain.chain_liquidation_configs.get(&chain).map(|c| c.settle_stable_decimals)
+            })
+            .unwrap_or(18);
+
+            let logs = match evm_rpc::get_logs(chain, &settle_stable, evm_rpc::TRANSFER_EVENT_TOPIC0, block_number, block_number).await {
+                Ok(l) => l,
+                Err(e) => {
+                    log!(INFO, "[settlement chain={:?}] swap confirm op {}: get_logs(Transfer) failed ({}); will retry", chain, op_id, e);
+                    return;
+                }
+            };
+            let mut realized: Option<u128> = None;
+            for (topics, data, _log_tx, _log_block, _log_index) in &logs {
+                if let Ok(t) = evm_rpc::TransferLog::from_raw(topics, data) {
+                    if t.to.eq_ignore_ascii_case(&reserve_to) {
+                        realized = Some(t.amount);
+                        break;
+                    }
+                }
+            }
+            let realized_usdc = match realized {
+                Some(a) => a,
+                None => {
+                    // Receipt is OK but no Transfer-to-reserve is visible yet (a
+                    // transient RPC view). Leave Inflight + retry; the confirm-
+                    // timeout backstops a permanently-missing log.
+                    log!(INFO, "[settlement chain={:?}] swap confirm op {}: no USDC Transfer to reserve {} in block {}; will retry", chain, op_id, reserve_to, block_number);
+                    return;
+                }
+            };
+
+            // Phase 2 (state-only): clamp + move debt -> reserve; events emitted here.
+            let settled = mutate_state(|s| {
+                apply_liquidation_settlement_in_state(&mut s.multi_chain, chain, vault_id, op_id, realized_usdc, settle_decimals)
+            });
+            match settled {
+                Ok(res) => {
+                    mutate_state(|s| {
+                        if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
+                            if let Some(o) = q.pending.get_mut(&op_id) {
+                                o.mark_succeeded(tx_hash.clone(), now);
+                            }
+                        }
+                    });
+                    crate::storage::record_event(&crate::event::Event::ChainVaultLiquidated {
+                        chain_id: chain,
+                        vault_id,
+                        op_id,
+                        debt_cleared_e8s: res.actual_cleared,
+                        collateral_seized_native: res.collateral_seized_native,
+                        tier: res.tier,
+                        timestamp: now,
+                    });
+                    crate::storage::record_event(&crate::event::Event::ChainReserveCredited {
+                        chain_id: chain,
+                        vault_id,
+                        backing_added_e8s: res.actual_cleared,
+                        usdc_native: res.realized_usdc_native,
+                        timestamp: now,
+                    });
+                    log!(INFO, "[settlement chain={:?}] liquidation swap confirmed: op={} vault={} cleared_e8s={} realized_usdc={} block={} tx={}", chain, op_id, vault_id, res.actual_cleared, realized_usdc, block_number, tx_hash);
+                }
+                Err(e) => {
+                    log!(INFO, "[settlement chain={:?}] apply_liquidation_settlement FAILED op {} vault {}: {}; left Inflight", chain, op_id, vault_id, e);
+                }
+            }
         }
     }
 }

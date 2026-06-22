@@ -184,3 +184,109 @@ fn fundable_withdrawal_value_nets_gas_only_when_balance_is_tight() {
     // / underflows), so the worker sends a 0-value tx rather than trapping.
     assert_eq!(fundable_withdrawal_value(amount, gas_reserve / 2, max_fee), 0);
 }
+
+// ─── Increment 3 / Task 7: apply_liquidation_settlement_in_state (Phase 2) ───
+mod phase2_tests {
+    use super::super::settlement::apply_liquidation_settlement_in_state;
+    use crate::chains::config::ChainId;
+    use crate::chains::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
+    use crate::chains::multi_chain_state::MultiChainState;
+    use crate::chains::vault::{LiquidationTier, PendingLiquidationV1};
+    use candid::Principal;
+
+    const CFX: ChainId = ChainId(71);
+    const E8: u128 = 100_000_000;
+    const E18: u128 = 1_000_000_000_000_000_000;
+
+    /// Insert an Open vault mid-liquidation (collateral already reserved in Phase 1)
+    /// with a Bot marker, and seed chain_supplies so the unified invariant holds.
+    fn marked(
+        s: &mut MultiChainState,
+        vault_id: u64,
+        debt_e8s: u128,
+        collateral_remaining: u128,
+        debt_to_clear: u128,
+        collateral_reserved: u128,
+    ) {
+        s.chain_vaults.insert(
+            vault_id,
+            ChainVaultV1 {
+                vault_id,
+                owner: Principal::anonymous(),
+                collateral_chain: CFX,
+                custody_address: "0xc".into(),
+                collateral_amount_native: collateral_remaining,
+                debt_e8s,
+                mint_recipient: "0xr".into(),
+                pending_mint_e8s: 0,
+                status: ChainVaultStatus::Open,
+                opened_at_ns: 0,
+                owner_evm: None,
+                last_interest_accrual_ns: 0,
+                pending_interest_mint_e8s: 0,
+                pending_liquidation: Some(PendingLiquidationV1 {
+                    op_id: 9,
+                    debt_to_clear_e8s: debt_to_clear,
+                    collateral_reserved_native: collateral_reserved,
+                    tier: LiquidationTier::Bot,
+                    started_at_ns: 0,
+                }),
+            },
+        );
+        *s.chain_supplies.entry(CFX).or_default() += debt_e8s;
+        s.bot_pending_chain_vaults.insert(vault_id, 0);
+    }
+
+    #[test]
+    fn shifts_debt_to_reserve_supply_unchanged() {
+        let mut s = MultiChainState::default();
+        marked(&mut s, 7, 100 * E8, 500 * E18, 67 * E8, 839 * E18);
+        // realized 75 USDC (18-dec) -> 75e8 >= debt_to_clear 67e8.
+        apply_liquidation_settlement_in_state(&mut s, CFX, 7, 9, 75 * E18, 18).expect("phase2 ok");
+        let v = s.chain_vaults.get(&7).unwrap();
+        assert_eq!(v.debt_e8s, 33 * E8, "debt -= actual_cleared");
+        assert_eq!(*s.reserve_backing_e8s.get(&CFX).unwrap(), 67 * E8, "backing += actual_cleared");
+        assert_eq!(*s.reserve_usdc_native.get(&CFX).unwrap(), 75 * E18, "usdc += realized");
+        assert_eq!(*s.chain_supplies.get(&CFX).unwrap(), 100 * E8, "supply UNCHANGED (PSM)");
+        assert!(v.pending_liquidation.is_none(), "marker cleared");
+        assert!(s.chain_bad_debt_e8s.get(&CFX).is_none(), "no shortfall");
+        // Unified invariant: supply == debt + reserve + pending_burn.
+        assert_eq!(
+            *s.chain_supplies.get(&CFX).unwrap(),
+            s.total_chain_vault_debt_e8s() + s.total_reserve_backing_e8s() + s.total_pending_chain_burn_e8s()
+        );
+    }
+
+    #[test]
+    fn shortfall_clamps_and_records_bad_debt() {
+        let mut s = MultiChainState::default();
+        marked(&mut s, 7, 100 * E8, 500 * E18, 67 * E8, 839 * E18);
+        // realized only 60 USDC -> 60e8 < debt_to_clear 67e8.
+        apply_liquidation_settlement_in_state(&mut s, CFX, 7, 9, 60 * E18, 18).expect("phase2 ok");
+        assert_eq!(s.chain_vaults.get(&7).unwrap().debt_e8s, 40 * E8);
+        assert_eq!(*s.reserve_backing_e8s.get(&CFX).unwrap(), 60 * E8, "backing capped at realized USD");
+        assert_eq!(*s.chain_bad_debt_e8s.get(&CFX).unwrap(), 7 * E8, "shortfall recorded");
+        assert_eq!(*s.chain_supplies.get(&CFX).unwrap(), 100 * E8, "supply unchanged");
+    }
+
+    #[test]
+    fn closes_vault_when_drained() {
+        let mut s = MultiChainState::default();
+        // collateral fully reserved in Phase 1 (remaining 0); clearing all debt drains it.
+        marked(&mut s, 7, 100 * E8, 0, 100 * E8, 1_400 * E18);
+        apply_liquidation_settlement_in_state(&mut s, CFX, 7, 9, 112 * E18, 18).expect("phase2 ok");
+        let v = s.chain_vaults.get(&7).unwrap();
+        assert_eq!(v.debt_e8s, 0);
+        assert_eq!(v.status, ChainVaultStatus::Closed, "drained vault closes");
+    }
+
+    #[test]
+    fn rejects_op_mismatch_no_mutation() {
+        let mut s = MultiChainState::default();
+        marked(&mut s, 7, 100 * E8, 500 * E18, 67 * E8, 839 * E18);
+        // confirming op 99 != marker op 9.
+        assert!(apply_liquidation_settlement_in_state(&mut s, CFX, 7, 99, 75 * E18, 18).is_err());
+        assert_eq!(s.chain_vaults.get(&7).unwrap().debt_e8s, 100 * E8, "no mutation on reject");
+        assert!(s.reserve_backing_e8s.get(&CFX).is_none());
+    }
+}

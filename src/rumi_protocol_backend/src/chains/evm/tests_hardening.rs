@@ -96,3 +96,15 @@ fn inflight_acquire_future_timestamp_treated_as_fresh() {
     let future_timestamp = now_ns + 999_999_999_999; // well beyond now
     assert!(!inflight_should_acquire(Some(future_timestamp), now_ns, INFLIGHT_STALE_NS));
 }
+
+// ─── Increment 3 / Task 8: swap confirm-timeout (findings #12/#22) ───
+#[test]
+fn swap_confirm_timed_out_after_deadline_plus_finality() {
+    use super::hardening::swap_confirm_timed_out;
+    let t0 = 1_000_000_000u64;
+    // Within deadline(180)+margin(600)=780s -> not timed out.
+    assert!(!swap_confirm_timed_out(t0, t0 + 100 * 1_000_000_000, 180, 600));
+    assert!(!swap_confirm_timed_out(t0, t0 + 780 * 1_000_000_000, 180, 600)); // exactly at edge: not yet (>)
+    // One ns past the window -> timed out.
+    assert!(swap_confirm_timed_out(t0, t0 + 780 * 1_000_000_000 + 1, 180, 600));
+}

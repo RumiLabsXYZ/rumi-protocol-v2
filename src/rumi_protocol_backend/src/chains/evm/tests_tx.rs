@@ -540,3 +540,44 @@ fn encode_transfer_calldata_returns_err_on_malformed_address() {
     let result = encode_transfer_calldata("0xbadhex!", 1_000_000);
     assert!(result.is_err(), "expected Err for bad hex recipient, got Ok");
 }
+
+// ─── Increment 3 / Task 3: dynamic address[] swap calldata encoder ───
+#[test]
+fn swap_exact_eth_for_tokens_calldata_matches_reference() {
+    // Reference = swapExactETHForTokens(uint256,address[],address,uint256), selector
+    // 0x7ff36ab5; head = [amountOutMin, path-offset=0x80, to, deadline]; tail =
+    // [path.len=2, path[0], path[1]]. amountOutMin=1000, to=0x..c0de, deadline=180,
+    // path=[WCFX, USDC]. (Hand-derived per the UniswapV2 ABI; matches `cast calldata`.)
+    let path = [
+        "0x14b2d3bc65e74dae1030eafd8ac30c533c976a9b",
+        "0x6963efed0ab40f6c3d7bda44a05dcf1437c44372",
+    ];
+    let data = super::tx::encode_swap_exact_eth_for_tokens_calldata(
+        1000,
+        &path,
+        "0x000000000000000000000000000000000000c0de",
+        180,
+    )
+    .expect("valid addresses encode");
+    let hex_out = format!("0x{}", hex::encode(&data));
+    let expected = "0x7ff36ab5\
+00000000000000000000000000000000000000000000000000000000000003e8\
+0000000000000000000000000000000000000000000000000000000000000080\
+000000000000000000000000000000000000000000000000000000000000c0de\
+00000000000000000000000000000000000000000000000000000000000000b4\
+0000000000000000000000000000000000000000000000000000000000000002\
+00000000000000000000000014b2d3bc65e74dae1030eafd8ac30c533c976a9b\
+0000000000000000000000006963efed0ab40f6c3d7bda44a05dcf1437c44372";
+    assert_eq!(hex_out, expected.replace('\n', ""));
+    // 4-byte selector + 7 words = 4 + 224 = 228 bytes.
+    assert_eq!(data.len(), 4 + 7 * 32);
+}
+
+#[test]
+fn swap_calldata_rejects_malformed_address() {
+    let path = ["0xnothex", "0x6963efed0ab40f6c3d7bda44a05dcf1437c44372"];
+    assert!(
+        super::tx::encode_swap_exact_eth_for_tokens_calldata(1, &path, "0x000000000000000000000000000000000000c0de", 1).is_err(),
+        "malformed path address must Err, never panic"
+    );
+}

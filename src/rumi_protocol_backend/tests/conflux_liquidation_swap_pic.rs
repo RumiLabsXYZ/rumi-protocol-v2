@@ -1,32 +1,37 @@
-//! Conflux eSpace testnet (chain 71) Increment-2 Tier-1 LIQUIDATION DETECTION
+//! Conflux eSpace testnet (chain 71) Increment-3 Tier-1 bot LIQUIDATION SWAP
 //! end-to-end integration test against the scripted mock EVM RPC canister.
 //!
-//! This is the integration PROOF that the Increment-2 detection scan +
-//! endpoints work end-to-end:
+//! This is the integration PROOF that the Increment-3 bot SWAP executes the full
+//! two-phase liquidation against the EVM-RPC mock:
 //!
-//!   - The per-chain observer tick (`run_observer`) runs a synchronous
-//!     liquidation-detection scan. For an `Open` chain vault whose
-//!     interest-aware collateral ratio falls below the chain's
-//!     `liquidation_threshold_e4` (133% == 13_300 for Conflux chain 71), it calls
-//!     `begin_liquidation_in_state`, which sets a `pending_liquidation` marker
-//!     (tier `Bot`), reserves (decrements) collateral, and enqueues an INERT
-//!     `LiquidationSwap` settlement op. Debt + `chain_supplies` are UNCHANGED at
-//!     trigger (Design B: no burn, no reserve shift in Inc 2).
-//!   - Detection is gated behind a per-chain `ChainLiquidationConfigV1` with
-//!     `enabled = true` (master switch; default false).
-//!   - New endpoints: `liquidate_chain_vault` (dev-gated #[update]),
-//!     `get_chain_liquidatable_vaults` (#[query]), `set_chain_liquidation_config`
-//!     (dev-gated; the config struct GAINED `max_swap_value_e8s` +
-//!     `max_price_age_ns`).
-//!   - A stale manual price (older than `max_price_age_ns`) makes detection defer
-//!     for the whole chain (no marker set; the query also fails closed).
+//!   1. DETECTION (Increment 2, reused verbatim): the observer tick marks an
+//!      underwater Open vault with a `pending_liquidation` (Bot tier) marker,
+//!      reserving its collateral and enqueueing a `LiquidationSwap` op. Debt +
+//!      `chain_supplies` are UNCHANGED at trigger (Design B).
+//!   2. SWAP SUBMIT (Increment 3): the settlement worker reads the DEX
+//!      token0/getReserves at the finalized block, computes a JIT min-out gated by
+//!      the oracle cross-check, nets gas via `fundable_swap_value`, signs with the
+//!      vault's custody key, and broadcasts a `swapExactETHForTokens` to the
+//!      router (CFX in `value`, USDC `to` = the tECDSA reserve address). The op
+//!      goes Inflight.
+//!   3. SWAP CONFIRM (Increment 3): once the receipt is mined + final, the worker
+//!      reads the REALIZED USDC output from the `Transfer(_, reserve, amount)` log
+//!      (never min-out) and moves `debt_e8s -> reserve_backing_e8s` (the ONLY
+//!      invariant move — NO icUSD burned, this is a PSM). The vault drains fully
+//!      to debt 0 and Closes; `chain_supplies` is UNCHANGED.
+//!
+//! The reserve is BACKING, not unbacked supply (findings #17/#20/#29):
+//! `reconcile_chain_supply` reports `reserve_backing_e8s` + `reserve_usdc_native`
+//! as informational RHS terms and `unbacked_excess == false` (on-chain totalSupply
+//! still == recorded chain supply).
 //!
 //! Harness (boot, register_chain, deposit->mint->Open sequence, ECDSA-gating,
-//! supply invariant) is copied from `conflux_espace_happy_path_pic.rs`. As in
-//! that test, the flow PROBES ECDSA via `get_chain_settlement_address`; if ECDSA
-//! is unavailable in this PocketIC build it runs a GATED subset (which still
-//! proves the new config fields decode + the new query is callable) and returns
-//! early.
+//! supply invariant, candid mirrors) is COPIED from
+//! `conflux_liquidation_detection_pic.rs`. As in that test, the flow PROBES ECDSA
+//! via `get_chain_settlement_address`; if ECDSA is unavailable in this PocketIC
+//! build it runs a GATED subset (which still proves the new config fields decode +
+//! the reserve/settlement address endpoints signal ECDSA-unavailable) and returns
+//! early. The swap is NEVER faked.
 
 use candid::{encode_args, encode_one, CandidType, Decode, Deserialize, Encode, Principal};
 use pocket_ic::{PocketIc, PocketIcBuilder, WasmResult};
@@ -90,7 +95,7 @@ enum ChainVaultStatus {
     Closed,
 }
 
-// ─── Liquidation mirrors (Increment 2) ───────────────────────────────────────
+// ─── Liquidation mirrors ──────────────────────────────────────────────────────
 
 /// Mirror of `chains::vault::LiquidationTier`.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -112,8 +117,7 @@ struct PendingLiquidationV1 {
 /// Mirror of `chains::vault::ChainVaultV1`, EXTENDED with `pending_liquidation`.
 /// Candid records decode by field name and ignore extra wire fields, so the
 /// happy-path subset of fields + the marker field is sufficient. NOTE: the wire
-/// field for the native collateral amount is `collateral_amount_e18` (a
-/// `#[serde(rename)]` on the backend keeps the candid name legacy-stable).
+/// field for the native collateral amount is `collateral_amount_e18`.
 #[derive(CandidType, Deserialize, Clone, Debug)]
 struct ChainVaultV1 {
     vault_id: u64,
@@ -136,8 +140,11 @@ enum DexKind {
     UniswapV2,
 }
 
-/// Mirror of `chains::liquidation_config::ChainLiquidationConfigV1`, INCLUDING
-/// the two Increment-2 fields (`max_swap_value_e8s`, `max_price_age_ns`).
+/// Mirror of `chains::liquidation_config::ChainLiquidationConfigV1`, INCLUDING the
+/// Increment-2 fields (`max_swap_value_e8s`, `max_price_age_ns`) AND the four
+/// Increment-3 fields (`max_dex_oracle_divergence_bps`, `fee_bps`,
+/// `settle_stable_decimals`, `deadline_secs`). Field set + types verified against
+/// `rumi_protocol_backend.did`'s `type ChainLiquidationConfigV1`.
 #[derive(CandidType, Deserialize, Clone, Debug)]
 struct ChainLiquidationConfigV1 {
     dex: DexKind,
@@ -151,25 +158,29 @@ struct ChainLiquidationConfigV1 {
     enabled: bool,
     max_swap_value_e8s: candid::Nat,
     max_price_age_ns: u64,
-    // Increment 3 fields (the backend struct gained these; the mirror MUST match
-    // or set_chain_liquidation_config fails to decode).
+    // ── Increment 3 ──
     max_dex_oracle_divergence_bps: u32,
     fee_bps: u16,
     settle_stable_decimals: u8,
     deadline_secs: u64,
 }
 
-/// Mirror of `main::ChainLiquidatableVault` (the discovery query row).
+/// Mirror of `main::ChainSupplyReconciliation`. Field set + types verified against
+/// `rumi_protocol_backend.did`'s `type ChainSupplyReconciliation` (10 fields). The
+/// swap assertions only read `reserve_backing_e8s` / `reserve_usdc_native` /
+/// `unbacked_excess`, but the full field set is mirrored so candid decodes.
 #[derive(CandidType, Deserialize, Clone, Debug)]
-struct ChainLiquidatableVault {
-    vault_id: u64,
+struct ChainSupplyReconciliation {
     chain_id: ChainId,
-    debt_e8s: candid::Nat,
-    effective_debt_e8s: candid::Nat,
-    collateral_native: candid::Nat,
-    cr_e4: u64,
-    liquidation_threshold_e4: u64,
-    sized_repay_e8s: candid::Nat,
+    finalized_block: u64,
+    onchain_total_supply_e8s: candid::Nat,
+    recorded_supply_e8s: candid::Nat,
+    in_flight_mint_e8s: candid::Nat,
+    unbacked_excess: bool,
+    gap_e8s: candid::Int,
+    reserve_backing_e8s: candid::Nat,
+    pending_chain_burn_e8s: candid::Nat,
+    reserve_usdc_native: candid::Nat,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
@@ -186,12 +197,15 @@ struct SupplyAuditWire {
 }
 
 /// Minimal mirror of `ProtocolError`: the chain endpoints here only ever return
-/// the `ChainAdmin(text)` variant. Any other variant fails the Candid decode
-/// loudly (the correct signal that something unexpected happened).
+/// `ChainAdmin(text)` or (on ECDSA-derive failures) the same. Any other variant
+/// fails the Candid decode loudly (the correct signal that something unexpected
+/// happened). `TemporarilyUnavailable`/`EvmAuth` are included for completeness so
+/// a transient reconcile error decodes rather than mis-tags.
 #[derive(CandidType, Deserialize, Clone, Debug)]
 enum ProtocolError {
     ChainAdmin(String),
     EvmAuth(String),
+    TemporarilyUnavailable(String),
 }
 
 // ─── Wasm loaders ────────────────────────────────────────────────────────────
@@ -213,17 +227,29 @@ const E8: u128 = 100_000_000;
 /// keccak256("Mint(uint256,address,uint256)"), must match evm_rpc.rs.
 const MINT_EVENT_TOPIC0: &str =
     "0x4e3883c75cc9c752bb1db2e406a822e4a75067ae77ad9a0a4d179f2709b9e1f6";
+/// keccak256("Transfer(address,address,uint256)"), must match evm_rpc.rs.
+const TRANSFER_TOPIC0: &str =
+    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+/// UniswapV2 pair `token0()` selector (must match evm_rpc.rs `TOKEN0_SELECTOR`).
+const TOKEN0_SELECTOR: &str = "0x0dfe1681";
+/// UniswapV2 pair `getReserves()` selector (must match `GET_RESERVES_SELECTOR`).
+const GET_RESERVES_SELECTOR: &str = "0x0902f1ac";
 
 /// Conflux register arg's `finality_depth` (mirrors conflux_testnet_register_arg()).
 const CONFLUX_FINALITY_DEPTH: u64 = 100;
 /// Observer block-scan window (`MAX_BLOCK_SCAN_WINDOW`).
 const SCAN_WINDOW: u64 = 1024;
-/// Conflux chain-71 liquidation threshold (133.00% in e4) — must match
-/// `collateral_config.rs`.
-const CONFLUX_LIQ_THRESHOLD_E4: u64 = 13_300;
-/// Valid EVM address used for every config wiring slot (the engine validates
-/// router/pair/settle_stable_token via `is_valid_evm_address` before enqueue).
-const VALID_EVM_ADDR: &str = "0x1111111111111111111111111111111111111111";
+
+/// The specific DEX wiring addresses (valid 42-char 0x). The collateral_token and
+/// settle_stable_token are REUSED below for the canned DEX reads + the Transfer
+/// log contract, so they must be byte-identical everywhere.
+const DEX_ROUTER: &str = "0x1111111111111111111111111111111111111111";
+const DEX_FACTORY: &str = "0x2222222222222222222222222222222222222222";
+const DEX_PAIR: &str = "0x3333333333333333333333333333333333333333";
+/// WCFX (the collateral token + path[0]).
+const WCFX: &str = "0x14b2d3bc65e74dae1030eafd8ac30c533c976a9b";
+/// USDC (the settle stable token + path[1]); 18-dec on eSpace.
+const USDC: &str = "0x6963efed0ab40f6c3d7bda44a05dcf1437c44372";
 
 // ─── PocketIC call helpers ───────────────────────────────────────────────────
 
@@ -322,7 +348,7 @@ fn advance_and_tick(pic: &PocketIc, windows: u32) {
     }
 }
 
-// ─── Supply-invariant assertion (Design B: marker does NOT move supply) ──────
+// ─── Supply-invariant assertion (PSM: a liquidation swap does NOT move supply) ─
 
 fn assert_supply(pic: &PocketIc, cid: Principal, expected_e8s: u128, step: &str) {
     let global: candid::Nat = query_unit(pic, cid, "get_global_icusd_supply");
@@ -353,7 +379,7 @@ fn assert_supply(pic: &PocketIc, cid: Principal, expected_e8s: u128, step: &str)
     }
 }
 
-// ─── 32-byte ABI word encoding for log topics / data ─────────────────────────
+// ─── 32-byte ABI word encoding for log topics / data / eth_call returns ───────
 
 fn word_u128(v: u128) -> String {
     format!("0x{:064x}", v)
@@ -364,19 +390,21 @@ fn word_addr(addr: &str) -> String {
     format!("0x{:0>64}", raw.to_lowercase())
 }
 
-// ─── liquidation config builders ─────────────────────────────────────────────
+// ─── liquidation config builder (ENABLED, with the Increment-3 fields) ────────
 
-/// An ENABLED Conflux liquidation config with valid wiring. slippage 250 bps
-/// (< the 1200-bps penalty cushion), restore target 155%, depth cap $2k,
-/// staleness ceiling 30 min.
+/// The ENABLED Conflux liquidation config used throughout this test. Uses the
+/// SPECIFIC WCFX/USDC token addresses (reused for the canned DEX reads + the
+/// realized Transfer log). 18-dec USDC, 0.25% pool fee, 2.5% slippage cap, 5%
+/// oracle-divergence ceiling, 155% restore target, $2k depth cap, 30-min
+/// staleness ceiling, 180s on-chain deadline.
 fn enabled_liq_config() -> ChainLiquidationConfigV1 {
     ChainLiquidationConfigV1 {
         dex: DexKind::UniswapV2,
-        router: VALID_EVM_ADDR.to_string(),
-        factory: VALID_EVM_ADDR.to_string(),
-        pair: VALID_EVM_ADDR.to_string(),
-        collateral_token: VALID_EVM_ADDR.to_string(),
-        settle_stable_token: VALID_EVM_ADDR.to_string(),
+        router: DEX_ROUTER.to_string(),
+        factory: DEX_FACTORY.to_string(),
+        pair: DEX_PAIR.to_string(),
+        collateral_token: WCFX.to_string(),
+        settle_stable_token: USDC.to_string(),
         slippage_cap_bps: 250,
         restore_target_cr_e4: 15_500,
         enabled: true,
@@ -392,7 +420,7 @@ fn enabled_liq_config() -> ChainLiquidationConfigV1 {
 // ─── The test ────────────────────────────────────────────────────────────────
 
 #[test]
-fn conflux_liquidation_detection_marks_and_endpoints() {
+fn conflux_liquidation_swap_executes_and_credits_reserve() {
     let (pic, backend, mock) = boot();
 
     // ── Step 1: point the backend's EVM wrapper at the mock + Conflux quirks ──
@@ -473,6 +501,9 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
     assert_supply(&pic, backend, 0, "after register/config");
 
     // ── Block plan (finality_depth = 100) ────────────────────────────────────
+    // The mint receipt + log AND the swap receipt + Transfer log all land at the
+    // SAME finalized cursor (cursor1), the deepest block the observer + settlement
+    // finality gate treat as final.
     let cursor1 = seed + SCAN_WINDOW;
     let head1 = cursor1 + CONFLUX_FINALITY_DEPTH + 24;
     update_any(&pic, mock, "set_blocks", Encode!(&head1, &head1).unwrap());
@@ -488,28 +519,29 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
         WasmResult::Reply(b) => match Decode!(&b, Result<String, ProtocolError>) {
             Ok(Ok(addr)) => Some(addr),
             Ok(Err(e)) => {
-                eprintln!("[liquidation-detection] ECDSA UNAVAILABLE (get_chain_settlement_address returned Err: {e:?}); running GATED subset");
+                eprintln!("[swap] ECDSA UNAVAILABLE (get_chain_settlement_address returned Err: {e:?}); running GATED subset");
                 None
             }
             Err(decode_err) => {
-                eprintln!("[liquidation-detection] get_chain_settlement_address decode error ({decode_err}); running GATED subset");
+                eprintln!("[swap] get_chain_settlement_address decode error ({decode_err}); running GATED subset");
                 None
             }
         },
         WasmResult::Reject(msg) => {
-            eprintln!("[liquidation-detection] ECDSA UNAVAILABLE (get_chain_settlement_address rejected: {msg}); running GATED subset");
+            eprintln!("[swap] ECDSA UNAVAILABLE (get_chain_settlement_address rejected: {msg}); running GATED subset");
             None
         }
     };
 
     let settlement_addr = match settlement_addr {
         Some(addr) => {
-            eprintln!("[liquidation-detection] ECDSA AVAILABLE; settlement address = {addr}; running FULL detection path");
+            eprintln!("[swap] ECDSA AVAILABLE; settlement address = {addr}; running FULL swap path");
             addr
         }
         None => {
-            // ── GATED subset: the new config fields decode + the new query is
-            // callable. No Open vaults exist yet, so the query is empty.
+            // ── GATED subset: the new config (incl. the 4 Increment-3 fields)
+            // decodes + round-trips, and the reserve/settlement address endpoints
+            // correctly signal ECDSA-unavailable. We do NOT fake the swap.
             decode_result(
                 update_dev(
                     &pic,
@@ -519,31 +551,34 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
                 ),
                 "set_chain_liquidation_config",
             )
-            .expect("gated: set_chain_liquidation_config (proves new fields decode)");
+            .expect("gated: set_chain_liquidation_config (proves the 4 Inc-3 fields decode)");
 
             let cfg = get_liq_config(&pic, backend).expect("gated: config round-trips");
-            assert_eq!(
-                cfg.max_swap_value_e8s,
-                candid::Nat::from(2_000u128 * E8),
-                "gated: max_swap_value_e8s round-trips"
-            );
-            assert_eq!(cfg.max_price_age_ns, 1_800_000_000_000, "gated: max_price_age_ns round-trips");
+            assert_eq!(cfg.max_dex_oracle_divergence_bps, 500, "gated: divergence bps round-trips");
+            assert_eq!(cfg.fee_bps, 25, "gated: fee_bps round-trips");
+            assert_eq!(cfg.settle_stable_decimals, 18, "gated: settle decimals round-trips");
+            assert_eq!(cfg.deadline_secs, 180, "gated: deadline_secs round-trips");
+            assert_eq!(cfg.collateral_token, WCFX, "gated: collateral_token round-trips");
+            assert_eq!(cfg.settle_stable_token, USDC, "gated: settle_stable_token round-trips");
             assert!(cfg.enabled, "gated: enabled round-trips");
 
-            let liq = get_liquidatable(&pic, backend);
-            assert!(liq.is_empty(), "gated: no Open vaults yet => empty liquidatable list");
+            // The reserve-address endpoint must ALSO signal ECDSA-unavailable.
+            match get_reserve_address(&pic, backend) {
+                Err(_) => { /* expected: ECDSA off */ }
+                Ok(a) => panic!("gated: reserve address returned Ok({a}) but settlement ECDSA was unavailable"),
+            }
 
             assert_supply(&pic, backend, 0, "gated: ECDSA unavailable, invariant at 0");
-            eprintln!("[liquidation-detection] ECDSA unavailable; ran gated subset");
+            eprintln!("[swap] ECDSA unavailable; ran gated subset (Inc-3 config decodes; reserve/settlement signal ECDSA-off)");
             return;
         }
     };
 
     // ════════════════════════════════════════════════════════════════════════
-    // FULL DETECTION PATH (ECDSA available)
+    // FULL SWAP PATH (ECDSA available)
     // ════════════════════════════════════════════════════════════════════════
 
-    // Fund the settlement (hot-wallet) address so the submit-path gas gate passes.
+    // Fund the settlement (hot-wallet) address so the mint submit-path gas gate passes.
     update_any(
         &pic,
         mock,
@@ -551,7 +586,7 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
         Encode!(&settlement_addr, &candid::Nat::from(1_000_000u128 * E18)).unwrap(),
     );
 
-    // ── Open a vault: 1400 CFX @ $0.15 = $210 backing 100 icUSD => 210% CR ────
+    // ── Step 1: Open a vault (1400 CFX @ $0.15 = $210 backing 100 icUSD = 210% CR) ──
     let collateral_e18 = 1_400u128 * E18;
     let debt_e8s = 100u128 * E8;
     let recipient = "0x000000000000000000000000000000000000c0de".to_string();
@@ -592,7 +627,7 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
         "deposit verified => MintPending"
     );
 
-    advance_and_tick(&pic, 1); // submit (Queued -> Inflight)
+    advance_and_tick(&pic, 1); // submit mint (Queued -> Inflight)
     update_any(
         &pic,
         mock,
@@ -600,7 +635,7 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
         Encode!(&"0xcfxmint1".to_string(), &true, &cursor1).unwrap(),
     );
     push_mint_log(&pic, mock, vault_id, &recipient, debt_e8s, "0xcfxmint1", cursor1);
-    advance_and_tick(&pic, 4); // confirm (receipt mined + final, Mint log read)
+    advance_and_tick(&pic, 4); // confirm mint
 
     let v = get_vault(&pic, backend, vault_id).expect("vault after mint confirm");
     assert_eq!(v.status, ChainVaultStatus::Open, "mint confirmed => Open");
@@ -608,15 +643,60 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
     assert!(v.pending_liquidation.is_none(), "healthy vault has no liquidation marker");
     assert_supply(&pic, backend, 100 * E8, "after mint");
 
-    // Inc 3: the LiquidationSwap op is now ACTIONABLE (the settlement worker would
-    // submit it). This test is about DETECTION only (the swap submit/confirm is the
-    // conflux_liquidation_swap_pic suite), so idle the settlement timer now (after
-    // the mint confirmed) — the swap op stays Queued and the `pending_liquidation`
-    // marker persists for the detection assertions below. The observer (detection)
-    // timer keeps firing.
-    let _ = update_dev(&pic, backend, "set_settlement_tick_interval_secs", Encode!(&31_536_000u64).unwrap());
+    // ── Step 2: learn the reserve address (the swap's USDC `to` + Transfer match) ──
+    // Derived from the tECDSA reserve key — independent of any vault state, so it is
+    // resolved up front (before detection) and reused to seed the canned reads.
+    let reserve = match get_reserve_address(&pic, backend) {
+        Ok(a) => a.to_lowercase(),
+        Err(e) => {
+            // ECDSA derived the SETTLEMENT address above but not the RESERVE
+            // address: we are in the gated regime after all. Bail honestly.
+            eprintln!("[swap] reserve address derive Err ({e:?}) despite settlement ECDSA; running gated subset");
+            return;
+        }
+    };
+    eprintln!("[swap] reserve address = {reserve}");
 
-    // ── Enable the liquidation config (master switch on) ─────────────────────
+    // ── Step 3: seed everything the swap SUBMIT reads, BEFORE detection ───────
+    // The settlement worker can pick up the freshly-enqueued LiquidationSwap op on
+    // the very next tick after detection marks it (both timers fire in the same
+    // advance_and_tick window). If the DEX reads / custody balance / send-hash are
+    // not in place by then, the swap fail-closes (escalates) and clears the marker.
+    // So seed them all FIRST, then drop the price to trigger detection.
+
+    // 3a. Fund custody so the swap is fundable (>= 1400 CFX collateral + gas).
+    update_any(
+        &pic,
+        mock,
+        "set_balance",
+        Encode!(&custody, &candid::Nat::from(2_000u128 * E18)).unwrap(),
+    );
+    // 3b. token0() == collateral_token (WCFX), ABI-encoded as a single 32-byte word.
+    update_any(
+        &pic,
+        mock,
+        "set_eth_call_response",
+        Encode!(&TOKEN0_SELECTOR.to_string(), &word_addr(WCFX)).unwrap(),
+    );
+    // 3c. getReserves() -> (reserve0, reserve1, ts). token0 == WCFX so reserve0 =
+    // WCFX reserve, reserve1 = USDC reserve. A DEEP pool priced at $0.08/CFX so the
+    // oracle cross-check passes: 1e24 WCFX vs 8e22 USDC (8e22/1e24 = 0.08).
+    let reserve0_wcfx = 1_000_000u128 * E18; // 1e24
+    let reserve1_usdc = 80_000u128 * E18; // 8e22
+    let getreserves_blob = format!(
+        "0x{:064x}{:064x}{:064x}",
+        reserve0_wcfx, reserve1_usdc, 0u128
+    );
+    update_any(
+        &pic,
+        mock,
+        "set_eth_call_response",
+        Encode!(&GET_RESERVES_SELECTOR.to_string(), &getreserves_blob).unwrap(),
+    );
+    // 3d. The hash the swap broadcast returns (so the confirm can match it).
+    update_any(&pic, mock, "set_next_send_hash", Encode!(&"0xcfxswap1".to_string()).unwrap());
+
+    // ── Step 4: enable the liquidation config + drop the price to $0.08 ──────
     decode_result(
         update_dev(
             &pic,
@@ -628,7 +708,7 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
     )
     .expect("set_chain_liquidation_config Ok");
 
-    // ── Drop the price to $0.08 => CR ~112% < 133% (liquidatable) ────────────
+    // $0.08 / CFX => 1400 * 0.08 = $112 vs 100 debt => CR ~112% < 133%.
     decode_result(
         update_dev(
             &pic,
@@ -636,232 +716,106 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
             "set_manual_collateral_price",
             Encode!(&ChainId(CONFLUX_CHAIN_ID), &"CFX".to_string(), &8_000_000u64).unwrap(),
         ),
-        "set_manual_collateral_price",
+        "set_manual_collateral_price (drop)",
     )
     .expect("set_manual_collateral_price (drop)");
 
-    // ── Pre-tick: the discovery query computes CR LIVE and lists the vault ────
-    let liq_before = get_liquidatable(&pic, backend);
-    let row = liq_before
-        .iter()
-        .find(|r| r.vault_id == vault_id)
-        .expect("liquidatable list includes the underwater vault (pre-mark)");
-    assert!(
-        row.cr_e4 < CONFLUX_LIQ_THRESHOLD_E4,
-        "pre-mark: cr_e4 {} must be below threshold {}",
-        row.cr_e4,
-        CONFLUX_LIQ_THRESHOLD_E4
-    );
-    assert_eq!(
-        row.liquidation_threshold_e4, CONFLUX_LIQ_THRESHOLD_E4,
-        "row carries the chain-71 threshold"
-    );
-    assert!(row.sized_repay_e8s > candid::Nat::from(0u32), "pre-mark: a non-zero repay is sized");
-
-    // ── Tick the observer; detection sets the marker (Bot tier) ──────────────
+    // ── Step 5: observer tick marks the vault (Bot tier; collateral reserved) +
+    // the settlement worker SUBMITS the swap (DEX reads + JIT min-out + oracle
+    // gate, all seeded above) -> the op goes Inflight, the marker persists. ─────
     advance_and_tick(&pic, 3);
 
-    let v = get_vault(&pic, backend, vault_id).expect("vault after detection");
+    let v = get_vault(&pic, backend, vault_id).expect("vault after detection + swap submit");
     let marker = v
         .pending_liquidation
         .clone()
-        .expect("detection set a pending_liquidation marker");
+        .expect("detection set a pending_liquidation marker (NOT escalated: the swap broadcast)");
     assert_eq!(marker.tier, LiquidationTier::Bot, "Tier-1 bot liquidation");
     assert!(
-        marker.collateral_reserved_native > candid::Nat::from(0u32),
-        "marker reserved a non-zero amount of collateral"
-    );
-    assert!(
         marker.debt_to_clear_e8s > candid::Nat::from(0u32),
-        "marker is sized to clear a non-zero debt"
+        "marker sized to clear a non-zero debt"
     );
-    // Reservation DECREMENTED the vault's remaining collateral (partial liq).
-    assert!(
-        v.collateral_amount_e18 < candid::Nat::from(collateral_e18),
-        "remaining collateral {} must be LESS than original {} (collateral reserved)",
-        v.collateral_amount_e18,
-        collateral_e18
-    );
-    // Debt is UNCHANGED at trigger (Design B: no burn in Inc 2).
+    // The full $112 of collateral covers the full $100 debt at the 1.12x bonus, so
+    // the entire 1400 CFX is reserved and the vault's remaining collateral is 0.
     assert_eq!(
-        v.debt_e8s,
-        candid::Nat::from(debt_e8s),
-        "debt UNCHANGED at trigger (Design B)"
+        v.collateral_amount_e18,
+        candid::Nat::from(0u32),
+        "all collateral reserved (full liquidation): remaining collateral == 0"
     );
-    // Vault stays Open throughout (marker, not a status variant).
+    assert_eq!(v.debt_e8s, candid::Nat::from(debt_e8s), "debt UNCHANGED at trigger (Design B)");
     assert_eq!(v.status, ChainVaultStatus::Open, "vault stays Open under the marker");
+    assert_supply(&pic, backend, 100 * E8, "after detection + swap submit (supply unchanged)");
 
-    // ── Supply UNCHANGED: Design B sets no burn / reserve shift in Inc 2 ──────
-    assert_supply(&pic, backend, 100 * E8, "after detection (supply unchanged)");
-
-    // ── The discovery query now EXCLUDES the vault (it is marked) ─────────────
-    let liq_after = get_liquidatable(&pic, backend);
-    assert!(
-        liq_after.iter().all(|r| r.vault_id != vault_id),
-        "marked vault is excluded from the liquidatable list"
-    );
-
-    // ── Dev-gate: a NON-dev caller cannot trigger liquidate_chain_vault ──────
-    // The endpoint is a dev-gated #[update]; the canister's `inspect_message`
-    // filter rejects an anonymous caller at the INGRESS boundary (before the
-    // method body), so `update_call` returns a transport-level `Err`. That is the
-    // correct, strongest rejection. (If the build ever lets the call through,
-    // the in-body developer check still returns `Err(ChainAdmin("not developer"))`,
-    // which we also accept.)
-    match pic.update_call(
-        backend,
-        Principal::anonymous(),
-        "liquidate_chain_vault",
-        Encode!(&vault_id).unwrap(),
-    ) {
-        Err(_) => { /* ingress-filter rejection — the expected, strongest gate */ }
-        Ok(WasmResult::Reject(_)) => { /* an explicit canister reject is also fine */ }
-        Ok(WasmResult::Reply(b)) => {
-            let r = Decode!(&b, Result<u64, ProtocolError>).expect("decode liquidate_chain_vault");
-            match r {
-                Err(ProtocolError::ChainAdmin(m)) => assert!(
-                    m.contains("developer"),
-                    "anonymous liquidate must be rejected as non-developer, got: {m}"
-                ),
-                other => panic!("anonymous liquidate_chain_vault should be rejected, got Ok {other:?}"),
-            }
-        }
-    }
-
-    // ════════════════════════════════════════════════════════════════════════
-    // STALE-PRICE sub-case: a fresh vault + a stale price defers detection
-    // (no marker set), and the discovery query fails closed (empty).
-    // ════════════════════════════════════════════════════════════════════════
-
-    // Re-enable the settlement timer (it was idled above to keep vault 1's marker
-    // for the detection assertions, which are now done). Vault 2 needs settlement
-    // to mint. Vault 1's Queued swap will now submit + escalate (no DEX reads in
-    // this detection-only test -> getReserves read fails -> Failed, not Inflight),
-    // which is harmless here (vault 1's assertions already ran).
-    let _ = update_dev(&pic, backend, "set_settlement_tick_interval_secs", Encode!(&30u64).unwrap());
-
-    // Refresh the price (re-stamp set_at_ns to "now") so the second vault can OPEN
-    // at a healthy CR, then later go underwater while its price ages out.
-    decode_result(
-        update_dev(
-            &pic,
-            backend,
-            "set_manual_collateral_price",
-            Encode!(&ChainId(CONFLUX_CHAIN_ID), &"CFX".to_string(), &15_000_000u64).unwrap(),
-        ),
-        "set_manual_collateral_price (refresh for vault 2 open)",
-    )
-    .expect("set_manual_collateral_price refresh");
-
-    update_any(&pic, mock, "set_next_send_hash", Encode!(&"0xcfxmint2".to_string()).unwrap());
-    let v2_collateral = 1_400u128 * E18;
-    let v2_debt = 100u128 * E8;
-    let v2_recipient = "0x000000000000000000000000000000000000c0d2".to_string();
-    let vault2_id: u64 = match update_dev(
-        &pic,
-        backend,
-        "open_chain_vault",
-        Encode!(
-            &ChainId(CONFLUX_CHAIN_ID),
-            &candid::Nat::from(v2_collateral),
-            &candid::Nat::from(v2_debt),
-            &v2_recipient
-        )
-        .unwrap(),
-    ) {
-        WasmResult::Reply(b) => Decode!(&b, Result<u64, ProtocolError>)
-            .expect("decode open vault2")
-            .expect("open vault2 Ok"),
-        WasmResult::Reject(msg) => panic!("open vault2 rejected: {msg}"),
-    };
-    let v2_custody = get_vault(&pic, backend, vault2_id).unwrap().custody_address;
-
-    // Mint vault2 to Open. Its mint receipt+log must land at the current observer
-    // cursor (still cursor1; the cursor only advances when the chain head allows).
-    update_any(
-        &pic,
-        mock,
-        "set_balance",
-        Encode!(&v2_custody, &candid::Nat::from(v2_collateral)).unwrap(),
-    );
-    advance_and_tick(&pic, 2); // deposit -> MintPending
-    advance_and_tick(&pic, 1); // submit
+    // ── Step 6: provide the realized-USDC Transfer log + receipt at the cursor ─
+    // The confirm reads the receipt (mined+final) then queries eth_getLogs on the
+    // USDC token for TRANSFER_TOPIC0 at [cursor1, cursor1]. The mock's get_logs
+    // filters by topic0 + block range (NOT contract address), so a push_log with
+    // the Transfer topic0 + the reserve `to` topic at cursor1 is returned.
     update_any(
         &pic,
         mock,
         "set_receipt",
-        Encode!(&"0xcfxmint2".to_string(), &true, &cursor1).unwrap(),
+        Encode!(&"0xcfxswap1".to_string(), &true, &cursor1).unwrap(),
     );
-    push_mint_log(&pic, mock, vault2_id, &v2_recipient, v2_debt, "0xcfxmint2", cursor1);
-    advance_and_tick(&pic, 4); // confirm
+    // realized = 110 USDC (18-dec) > the 100 icUSD debt; from(any), to(reserve).
+    let realized_usdc_native = 110u128 * E18;
+    let transfer_topics = vec![
+        TRANSFER_TOPIC0.to_string(),
+        word_addr("0x000000000000000000000000000000000000babe"), // from (any)
+        word_addr(&reserve),                                     // to == reserve
+    ];
+    update_any(
+        &pic,
+        mock,
+        "push_log",
+        Encode!(
+            &transfer_topics,
+            &word_u128(realized_usdc_native),
+            &"0xcfxswap1".to_string(),
+            &cursor1
+        )
+        .unwrap(),
+    );
+    advance_and_tick(&pic, 4); // confirm the swap (Phase 2: debt -> reserve)
+
+    // ════════════════════════════════════════════════════════════════════════
+    // HAPPY-PATH ASSERTIONS
+    // ════════════════════════════════════════════════════════════════════════
+    let v = get_vault(&pic, backend, vault_id).expect("vault after swap confirm");
+    assert_eq!(v.debt_e8s, candid::Nat::from(0u32), "swap cleared the full debt => debt_e8s 0");
     assert_eq!(
-        get_vault(&pic, backend, vault2_id).unwrap().status,
-        ChainVaultStatus::Open,
-        "vault2 minted to Open"
+        v.status,
+        ChainVaultStatus::Closed,
+        "fully drained (debt 0 + collateral 0) => Closed"
     );
     assert!(
-        get_vault(&pic, backend, vault2_id).unwrap().pending_liquidation.is_none(),
-        "vault2 unmarked after mint"
+        v.pending_liquidation.is_none(),
+        "swap settled => pending_liquidation marker cleared"
     );
-    // supply is now 200e8 (two 100e8 vaults).
-    assert_supply(&pic, backend, 200 * E8, "after vault2 mint");
 
-    // Drop the price so vault2 is underwater, then AGE the price past
-    // max_price_age_ns (30 min) WITHOUT re-stamping it. set_manual stamps the
-    // wall-clock at write time, so advancing time alone makes it stale.
-    decode_result(
-        update_dev(
-            &pic,
-            backend,
-            "set_manual_collateral_price",
-            Encode!(&ChainId(CONFLUX_CHAIN_ID), &"CFX".to_string(), &8_000_000u64).unwrap(),
-        ),
-        "set_manual_collateral_price (drop for vault2)",
-    )
-    .expect("set_manual_collateral_price drop2");
+    // PSM: NO icUSD burned. chain_supplies is UNCHANGED across the whole swap.
+    assert_supply(&pic, backend, 100 * E8, "after swap confirm (PSM: supply unchanged)");
 
-    // Confirm vault2 IS liquidatable on a FRESH price (sanity: the only thing that
-    // will keep it un-marked below is staleness, not a healthy CR).
-    let fresh_liq = get_liquidatable(&pic, backend);
+    // Reserve credited: reconcile reads on-chain totalSupply (== recorded => no
+    // unbacked excess) and reports the reserve backing + physical USDC.
+    update_any(&pic, mock, "set_total_supply", Encode!(&(100u128 * E8)).unwrap());
+    let recon = reconcile_chain_supply(&pic, backend).expect("reconcile_chain_supply Ok");
+    assert_eq!(
+        recon.reserve_backing_e8s,
+        candid::Nat::from(100u128 * E8),
+        "reserve_backing_e8s == the cleared debt (100e8)"
+    );
+    assert_eq!(
+        recon.reserve_usdc_native,
+        candid::Nat::from(110u128 * E18),
+        "reserve_usdc_native == the realized USDC (110e18)"
+    );
     assert!(
-        fresh_liq.iter().any(|r| r.vault_id == vault2_id),
-        "vault2 is liquidatable while the price is fresh"
+        !recon.unbacked_excess,
+        "reserve is BACKING, not unbacked supply (findings #17/#20/#29): unbacked_excess == false"
     );
 
-    // Age the price WAY past the 30-min staleness ceiling (without re-stamping).
-    pic.advance_time(Duration::from_secs(3_600)); // 1 hour > 30 min ceiling
-    for _ in 0..10 {
-        pic.tick();
-    }
-
-    // The discovery query fails closed on a stale price -> empty for the chain.
-    let stale_liq = get_liquidatable(&pic, backend);
-    assert!(
-        stale_liq.is_empty(),
-        "stale price => get_chain_liquidatable_vaults fails closed (empty), got {} rows",
-        stale_liq.len()
-    );
-
-    // Tick the observer: detection must DEFER on the stale price (no new marker).
-    advance_and_tick(&pic, 3);
-    assert!(
-        get_vault(&pic, backend, vault2_id).unwrap().pending_liquidation.is_none(),
-        "stale price => detection deferred; vault2 NOT marked"
-    );
-    // Inc 3: once settlement was re-enabled (for vault 2's mint), vault 1's Queued
-    // swap submitted and ESCALATED (this detection-only test sets no DEX reads, so
-    // getReserves fails -> Failed, collateral restored, marker cleared, sp_attempted).
-    // Detection does NOT re-mark it (sp_attempted exclusion, finding #10). The full
-    // swap-success path is the conflux_liquidation_swap_pic suite.
-    assert!(
-        get_vault(&pic, backend, vault_id).unwrap().pending_liquidation.is_none(),
-        "vault 1 escalated (no DEX reads) and is not re-marked"
-    );
-    // Supply is UNCHANGED throughout: escalation restores collateral, never touches
-    // debt/supply; detection never moves supply.
-    assert_supply(&pic, backend, 200 * E8, "after stale-price tick (supply unchanged)");
-
-    eprintln!("[liquidation-detection] FULL detection path PASSED: enabled-config-gated observer scan marked an underwater vault (Bot tier, collateral reserved, debt+supply unchanged), the discovery query lists pre-mark / excludes post-mark, the dev gate rejects an anonymous trigger, and a stale price defers detection (no marker, empty query) on chain 71.");
+    eprintln!("[swap] FULL swap path PASSED: detection marked an underwater vault (Bot tier, all collateral reserved), the settlement worker SUBMITTED swapExactETHForTokens (DEX reads + JIT min-out + oracle gate) and CONFIRMED it (decoded the realized 110 USDC Transfer to the reserve), moving 100e8 debt -> reserve_backing (vault Closed, debt 0). chain_supplies UNCHANGED (PSM, no icUSD burned); reconcile reports reserve_backing=100e8, reserve_usdc=110e18, unbacked_excess=false on chain 71.");
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -898,20 +852,36 @@ fn get_liq_config(pic: &PocketIc, backend: Principal) -> Option<ChainLiquidation
     }
 }
 
-fn get_liquidatable(pic: &PocketIc, backend: Principal) -> Vec<ChainLiquidatableVault> {
-    let reply = pic
-        .query_call(
-            backend,
-            Principal::anonymous(),
-            "get_chain_liquidatable_vaults",
-            Encode!(&ChainId(CONFLUX_CHAIN_ID)).unwrap(),
-        )
-        .expect("get_chain_liquidatable_vaults query");
-    match reply {
+fn get_reserve_address(pic: &PocketIc, backend: Principal) -> Result<String, ProtocolError> {
+    match update_dev(
+        pic,
+        backend,
+        "get_chain_reserve_address",
+        Encode!(&ChainId(CONFLUX_CHAIN_ID)).unwrap(),
+    ) {
         WasmResult::Reply(b) => {
-            Decode!(&b, Vec<ChainLiquidatableVault>).expect("decode get_chain_liquidatable_vaults")
+            Decode!(&b, Result<String, ProtocolError>).expect("decode get_chain_reserve_address")
         }
-        WasmResult::Reject(msg) => panic!("get_chain_liquidatable_vaults rejected: {msg}"),
+        WasmResult::Reject(msg) => {
+            // A transport-level reject (ECDSA off in this build) => treat as Err.
+            Err(ProtocolError::ChainAdmin(format!("reject: {msg}")))
+        }
+    }
+}
+
+fn reconcile_chain_supply(
+    pic: &PocketIc,
+    backend: Principal,
+) -> Result<ChainSupplyReconciliation, ProtocolError> {
+    match update_dev(
+        pic,
+        backend,
+        "reconcile_chain_supply",
+        Encode!(&ChainId(CONFLUX_CHAIN_ID)).unwrap(),
+    ) {
+        WasmResult::Reply(b) => Decode!(&b, Result<ChainSupplyReconciliation, ProtocolError>)
+            .expect("decode reconcile_chain_supply"),
+        WasmResult::Reject(msg) => panic!("reconcile_chain_supply rejected: {msg}"),
     }
 }
 
