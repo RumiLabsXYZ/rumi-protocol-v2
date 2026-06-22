@@ -78,19 +78,32 @@ function createCollateralStore() {
           const principalText = principal.toText();
           const ledgerId = config.ledger_canister_id.toText();
 
-          // Fetch symbol dynamically from the ledger's icrc1_symbol
+          // How the collateral is custodied. Absent (legacy) => IcrcLedger.
+          // NativeXrp is held off-chain on the XRP Ledger: its `ledger_canister_id`
+          // is a SYNTHETIC key, not a real canister, so it has no icrc1_symbol.
+          const ck = config.custody_kind?.[0];
+          const custodyKind: 'IcrcLedger' | 'NativeXrp' =
+            ck && 'NativeXrp' in ck ? 'NativeXrp' : 'IcrcLedger';
+          const isNativeXrp = custodyKind === 'NativeXrp';
+
+          // Symbol: native-XRP is fixed (no ledger to query); everything else reads
+          // icrc1_symbol off its ledger.
           let symbol = principalText.substring(0, 5).toUpperCase();
-          try {
-            const ledgerActor = await TokenService.createAnonymousActor(ledgerId, ICRC1_IDL);
-            symbol = await (ledgerActor as any).icrc1_symbol();
-          } catch (err) {
-            console.warn(`Failed to fetch icrc1_symbol for ${ledgerId}:`, err);
+          if (isNativeXrp) {
+            symbol = 'XRP';
+          } else {
+            try {
+              const ledgerActor = await TokenService.createAnonymousActor(ledgerId, ICRC1_IDL);
+              symbol = await (ledgerActor as any).icrc1_symbol();
+            } catch (err) {
+              console.warn(`Failed to fetch icrc1_symbol for ${ledgerId}:`, err);
+            }
           }
 
-          // Read display_color from backend config, fall back to neutral gray
-          const color = (config.display_color && config.display_color.length > 0)
-            ? config.display_color[0]
-            : '#94A3B8';
+          // Read display_color from backend config; fall back to an XRP-ish blue for
+          // native-XRP, neutral gray otherwise.
+          const displayColor = config.display_color?.[0];
+          const color = displayColor ?? (isNativeXrp ? '#4A90D9' : '#94A3B8');
 
           // Decode blob fields using Rust Decimal decoder
           const liquidationCr = decodeRustDecimal(config.liquidation_ratio);
@@ -122,6 +135,7 @@ function createCollateralStore() {
             ledgerFee: Number(config.ledger_fee),
             color,
             status: statusStr,
+            custodyKind,
           });
         }
 

@@ -4,6 +4,7 @@
   import { walletStore, isConnected, principal } from '$lib/stores/wallet';
   import { permissionStore } from '$lib/stores/permissionStore';
   import VaultCard from '$lib/components/vault/VaultCard.svelte';
+  import XrpVaultPanel from '$lib/components/vault/XrpVaultPanel.svelte';
   import { isDevelopment, CANISTER_IDS } from '$lib/config';
   import { developerAccess } from '$lib/stores/developer';
   import { collateralStore } from '$lib/stores/collateralStore';
@@ -15,6 +16,10 @@
 
   // Subscribe to collateral store so sort re-runs when configs load
   $: collateralState = $collateralStore;
+
+  // Show the native-XRP panel only once XRP collateral is registered (post-audit
+  // activation via register_xrp_collateral); inert/hidden until then.
+  $: hasXrpCollateral = collateralState.collaterals.some(c => c.custodyKind === 'NativeXrp');
 
   function handleToggle(e: CustomEvent<{ vaultId: number }>) {
     expandedVaultId = expandedVaultId === e.detail.vaultId ? null : e.detail.vaultId;
@@ -68,7 +73,9 @@
   }
 
   onMount(() => {
-    console.log('Vaults page mounted');
+    // Load collateral configs so the XRP panel gate (and per-collateral vault info)
+    // resolves; cached, so cheap if already fetched elsewhere.
+    collateralStore.fetchSupportedCollateral().catch((e) => console.warn('collateral load failed', e));
   });
 </script>
 
@@ -84,6 +91,12 @@
       </button>
     {/if}
   </div>
+
+  {#if $isConnected && hasXrpCollateral}
+    <div class="xrp-section">
+      <XrpVaultPanel on:confirmed={loadUserVaults} />
+    </div>
+  {/if}
 
   {#if !canViewVaults}
     <div class="empty-state glass-card">
@@ -123,6 +136,10 @@
   .btn-compact {
     padding: 0.375rem 0.875rem;
     font-size: 0.75rem;
+  }
+
+  .xrp-section {
+    margin-bottom: 1.25rem;
   }
 
   .vault-list {

@@ -124,7 +124,10 @@ export class XrpVaultService {
 
   /**
    * Verify the user's deposit landed on the custody address and credit the vault.
-   * Returns the credited collateral in drops. Idempotent on the backend.
+   * Returns the credited collateral in drops. NOT idempotent: a successful confirm
+   * removes the pending deposit on the backend, so a repeat call errors with
+   * "No pending XRP deposit for this vault". (The Oisy verifier below relies on this:
+   * pending-deposit-gone === confirmed.)
    */
   static async confirmXrpDeposit(vaultId: number): Promise<XrpOpResult<{ creditedDrops: bigint }>> {
     return ApiClient.executeSequentialOperation(async () => {
@@ -165,10 +168,16 @@ export class XrpVaultService {
         const actor = await this.actor();
         const result = await callWithOisyFalseNegativeGuard(
           () => actor.settle_xrp_claim(BigInt(claimId), destination),
-          // No cheap idempotent verifier (the claim may legitimately still exist
-          // after a successful submit-phase call); let the guard fall through to the
-          // reply and surface a transient signer error to the user.
-          async () => false,
+          // Verifier: the first settle phase records `claim.settlement` BEFORE the
+          // submit outcall (backend vault.rs), so if the canister executed at all the
+          // claim is now either gone (validated + removed) or carries a settlement.
+          // Either way the Payment is on its way — treat it as landed so an Oisy
+          // false-negative isn't reported as a hard failure.
+          async () => {
+            const claims = await actor.get_my_xrp_claims();
+            const entry = claims.find(([id]) => Number(id) === claimId);
+            return !entry || entry[1].settlement.length > 0;
+          },
           `settle_xrp_claim #${claimId}`
         );
         if (isOisyLandedSentinel(result)) {

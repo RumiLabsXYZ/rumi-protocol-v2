@@ -16,7 +16,7 @@
    * NOTE: the rail is gated behind the backend `register_xrp_collateral` switch and an
    * independent audit — this panel is inert until XRP collateral is registered.
    */
-  import { onMount } from 'svelte';
+  import { onMount, createEventDispatcher } from 'svelte';
   import {
     XrpVaultService,
     type XrpPendingDepositView,
@@ -25,6 +25,10 @@
   import { walletStore } from '$lib/stores/wallet';
   import { toastStore } from '$lib/stores/toast';
   import { formatAddress } from '$lib/utils/format';
+
+  // Notifies the vaults page to reload the main vault list once a deposit confirms
+  // (the confirmed vault becomes a normal VaultCard, which this panel doesn't own).
+  const dispatch = createEventDispatcher<{ confirmed: void }>();
 
   let pending: XrpPendingDepositView[] = [];
   let claims: XrpClaimView[] = [];
@@ -79,8 +83,16 @@
       const res = await XrpVaultService.confirmXrpDeposit(vaultId);
       if (res.success) {
         const xrp = res.data ? Number(res.data.creditedDrops) / 1_000_000 : 0;
-        toastStore.success(xrp > 0 ? `Deposit confirmed — credited ${xrp} XRP` : 'Deposit confirmed');
+        toastStore.success(
+          res.oisyResilient
+            ? 'Deposit confirmed — credited on-chain (refresh to see the new vault).'
+            : xrp > 0
+              ? `Deposit confirmed — credited ${xrp} XRP`
+              : 'Deposit confirmed'
+        );
         await refresh();
+        // The funded vault now renders as a normal VaultCard — reload the main list.
+        dispatch('confirmed');
       } else {
         toastStore.error(res.error ?? 'Deposit not found yet — send XRP first, then retry');
       }
@@ -90,17 +102,30 @@
   }
 
   async function settleClaim(claim: XrpClaimView) {
-    const dest = (claimDest[claim.claimId] ?? '').trim();
-    if (!dest.startsWith('r') || dest.length < 25) {
-      toastStore.error('Enter a valid XRPL destination address (starts with r)');
-      return;
+    // Phase 1 (not yet in flight) requires a valid XRPL destination. Phase 2 (the
+    // "Confirm" of an in-flight settlement) is a pure confirm: the backend ignores
+    // `destination` on the validated path, so we pass '' and never let a freshly
+    // typed address redirect an already-submitted (or to-be-re-signed) Payment.
+    let dest = '';
+    if (!claim.inFlight) {
+      dest = (claimDest[claim.claimId] ?? '').trim();
+      if (!isValidXrplClassicAddress(dest)) {
+        toastStore.error('Enter a valid XRPL classic address (starts with r)');
+        return;
+      }
     }
     busyClaimId = claim.claimId;
     try {
       const res = await XrpVaultService.settleXrpClaim(claim.claimId, dest);
       if (res.success) {
-        toastStore.success('Settlement submitted — confirming on the XRP Ledger…');
-        // The claim clears once the Payment validates; poll a couple of times.
+        // Two-phase: the first call submits the XRPL Payment but KEEPS the claim;
+        // it clears only after a follow-up "Confirm" once the Payment validates
+        // (a few seconds). We re-read so the button flips to "Confirm".
+        toastStore.success(
+          claim.inFlight
+            ? 'Confirming settlement…'
+            : 'Payment submitted — once it validates, click Confirm to clear the claim.'
+        );
         await refresh();
         setTimeout(refresh, 4000);
       } else {
@@ -109,6 +134,35 @@
     } finally {
       busyClaimId = null;
     }
+  }
+
+  // XRPL classic-address structural check. SYNC on purpose: it runs in the click
+  // handler before the signer call, and any async (e.g. crypto.subtle for a checksum)
+  // would burn the browser's user-gesture window and block the Oisy popup. Base58-
+  // decodes with the RIPPLE alphabet and requires a 25-byte payload with the classic-
+  // address version byte (0x00). The 4-byte checksum is NOT verified here — that needs
+  // SHA-256, and the backend already does a full base58+checksum decode before signing
+  // (chains/xrp/address.rs). This just catches typos / wrong-alphabet / X-addresses.
+  const RIPPLE_B58 = 'rpshnaf39wBUDNEGHJKLM4PQRST7VWXYZ2bcdeCg65jkm8oFqi1tuvAxyz';
+  function isValidXrplClassicAddress(addr: string): boolean {
+    if (!addr || addr[0] !== 'r' || addr.length < 25 || addr.length > 35) return false;
+    let num = 0n;
+    for (const ch of addr) {
+      const idx = RIPPLE_B58.indexOf(ch);
+      if (idx < 0) return false; // char outside the ripple base58 alphabet
+      num = num * 58n + BigInt(idx);
+    }
+    const bytes: number[] = [];
+    while (num > 0n) {
+      bytes.unshift(Number(num & 0xffn));
+      num >>= 8n;
+    }
+    // Leading 'r' (alphabet index 0) chars decode to leading zero bytes.
+    for (const ch of addr) {
+      if (ch === 'r') bytes.unshift(0);
+      else break;
+    }
+    return bytes.length === 25 && bytes[0] === 0x00;
   }
 
   function copy(text: string) {
@@ -140,7 +194,7 @@
               <button class="xrp-addr" title={p.custodyAddress} on:click={() => copy(p.custodyAddress)}>
                 {formatAddress(p.custodyAddress, 8, 6)} ⧉
               </button>
-              <span class="xrp-hint">Send XRP to this address, then confirm.</span>
+              <span class="xrp-hint">Send XRP from any XRPL wallet (e.g. Xaman) to this address, then confirm.</span>
             </div>
             <button
               class="xrp-action"
@@ -163,15 +217,18 @@
               <span class="xrp-label">Claim #{c.claimId}</span>
               <span class="xrp-amt">{c.xrp} XRP</span>
               {#if c.inFlight}
-                <span class="xrp-hint">Settlement in flight — confirming on-ledger.</span>
+                <span class="xrp-hint">
+                  Settlement in flight{c.inFlightTxHash ? ` (tx ${formatAddress(c.inFlightTxHash, 8, 6)})` : ''} — click Confirm once it validates.
+                </span>
+              {:else}
+                <input
+                  class="xrp-input"
+                  placeholder="Your XRPL address (r…)"
+                  bind:value={claimDest[c.claimId]}
+                  spellcheck="false"
+                  autocomplete="off"
+                />
               {/if}
-              <input
-                class="xrp-input"
-                placeholder="Your XRPL address (r…)"
-                bind:value={claimDest[c.claimId]}
-                spellcheck="false"
-                autocomplete="off"
-              />
             </div>
             <button class="xrp-action" disabled={busyClaimId === c.claimId} on:click={() => settleClaim(c)}>
               {busyClaimId === c.claimId ? 'Settling…' : c.inFlight ? 'Confirm' : 'Settle'}
