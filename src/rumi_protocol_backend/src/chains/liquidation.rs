@@ -319,17 +319,45 @@ pub fn compute_amount_out_min(
     fee_bps: u16,
     slippage_bps: u16,
 ) -> (u128, u128) {
+    use ethnum::U256;
     if amount_in == 0 || reserve_in == 0 || reserve_out == 0 || fee_bps as u32 >= 10_000 {
         return (0, 0);
     }
-    let amount_in_with_fee = amount_in.saturating_mul(10_000u128.saturating_sub(fee_bps as u128));
-    let numerator = amount_in_with_fee.saturating_mul(reserve_out);
-    let denominator = reserve_in.saturating_mul(10_000).saturating_add(amount_in_with_fee);
-    if denominator == 0 {
-        return (0, 0);
-    }
-    let expected_out = numerator / denominator;
-    let min_out = expected_out.saturating_mul(10_000u128.saturating_sub(slippage_bps as u128)) / 10_000;
+    // MUST use 256-bit intermediates: `amount_in_with_fee * reserve_out` overflows
+    // u128 at 18-decimal token magnitudes (~1e25 * 1e23 = 1e48 >> u128 max 3.4e38).
+    // All ops checked -> fail-closed (0,0) on any overflow, never wrap/panic.
+    let fee_mult = U256::from(10_000u32 - fee_bps as u32);
+    let amount_in_with_fee = match U256::from(amount_in).checked_mul(fee_mult) {
+        Some(v) => v,
+        None => return (0, 0),
+    };
+    let numerator = match amount_in_with_fee.checked_mul(U256::from(reserve_out)) {
+        Some(v) => v,
+        None => return (0, 0),
+    };
+    let denominator = match U256::from(reserve_in)
+        .checked_mul(U256::from(10_000u32))
+        .and_then(|x| x.checked_add(amount_in_with_fee))
+    {
+        Some(d) if d != 0 => d,
+        _ => return (0, 0),
+    };
+    let expected_u256 = numerator / denominator;
+    // `expected_out < reserve_out <= u128::MAX` for a real swap, so it fits u128;
+    // guard anyway (fail-closed) rather than truncate.
+    let expected_out = match u128::try_from(expected_u256) {
+        Ok(v) => v,
+        Err(_) => return (0, 0),
+    };
+    let slip_mult = U256::from(10_000u32 - slippage_bps.min(10_000) as u32);
+    let min_out = match U256::from(expected_out)
+        .checked_mul(slip_mult)
+        .map(|x| x / U256::from(10_000u32))
+        .and_then(|x| u128::try_from(x).ok())
+    {
+        Some(v) => v,
+        None => return (0, 0),
+    };
     (expected_out, min_out)
 }
 
@@ -665,7 +693,15 @@ mod tests {
             25,
             250,
         );
-        assert!(expected > 0 && min_out > 0 && min_out < expected);
+        // ABSOLUTE value, not just relations: pool price ~0.0909 USDC/CFX, so
+        // selling 2000 CFX yields ~181 USDC (18-dec) minus fee + small impact.
+        // This catches the u128-overflow bug (saturating_mul gave a garbage ~3.4e10).
+        assert!(
+            expected > 175 * E18 && expected < 182 * E18,
+            "expected_out {} not in the ~181e18 sane band (u256 math must not overflow)",
+            expected
+        );
+        assert!(min_out > 0 && min_out < expected);
         // min_out is exactly the 2.5% haircut of expected.
         assert_eq!(min_out, expected.saturating_mul(9_750) / 10_000);
     }

@@ -7296,6 +7296,7 @@ dependencies = [
  "candid_parser",
  "ciborium",
  "ed25519-dalek",
+ "ethnum",
  "flate2",
  "futures",
  "hex",

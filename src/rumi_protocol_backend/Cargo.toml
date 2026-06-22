@@ -41,6 +41,9 @@ icrc-ledger-types = { git = "https://github.com/Rumi-Protocol/ic", rev = "fc2787
 icrc-ledger-client-cdk = { git = "https://github.com/Rumi-Protocol/ic", rev = "fc278709" }
 rust_decimal = "1.32.0"
 rust_decimal_macros = "1.32"
+# 256-bit ints for the UniswapV2 swap math: amount_in * reserve_out overflows
+# u128 at 18-decimal token magnitudes (~1e48). Already in the dep tree.
+ethnum = "1.5"
 serde_bytes = "0.11"
 serde_json = "1.0.96"
 num-traits = "0.2"
