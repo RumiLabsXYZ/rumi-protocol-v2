@@ -81,6 +81,20 @@ struct VaultArg {
     amount: u64,
 }
 
+// Minimal views for the frontend-contract test. Candid record subtyping lets us
+// decode the full CollateralConfig into just the fields the UI reads.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+enum CustodyKindView {
+    IcrcLedger,
+    NativeXrp,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct CollateralConfigView {
+    decimals: u8,
+    custody_kind: Option<CustodyKindView>,
+}
+
 // ─── ICRC-1 ledger init types (mirror ic-icrc1-ledger candid) ────────────────
 
 #[derive(CandidType, Deserialize)]
@@ -636,6 +650,52 @@ fn xrp_native_liquidation_is_claim_based() {
     assert!(
         after.len() > before,
         "claim-based liquidation produced an XrpClaim (before={before}, after={after:?})"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Frontend↔backend contract: what the vault_frontend's XRP panel gate +
+// collateralStore read off a real registered XRP collateral. (No tEd25519 / XRPL
+// funds needed — this is the deterministic stand-in for the "does the UI light up"
+// browser check.)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn xrp_collateral_contract_matches_frontend_expectations() {
+    let Env { pic, backend, .. } = boot();
+    register_xrp(&pic, backend);
+    let xrp = xrp_collateral_principal();
+
+    // collateralStore.fetchSupportedCollateral iterates get_supported_collateral_types;
+    // the panel only renders if an entry with custody NativeXrp is present here.
+    let supported: Vec<(Principal, candid::Reserved)> = query_as(
+        &pic,
+        backend,
+        Principal::anonymous(),
+        "get_supported_collateral_types",
+        Encode!().unwrap(),
+    );
+    assert!(
+        supported.iter().any(|(p, _)| *p == xrp),
+        "native-XRP must appear in get_supported_collateral_types: {:?}",
+        supported.iter().map(|(p, _)| p.to_text()).collect::<Vec<_>>()
+    );
+
+    // The UI reads get_collateral_config(xrp): custody_kind drives `hasXrpCollateral`
+    // and the "XRP"/skip-icrc1_symbol branch; decimals (6) drives the collateral math.
+    let cfg: Option<CollateralConfigView> = query_as(
+        &pic,
+        backend,
+        Principal::anonymous(),
+        "get_collateral_config",
+        Encode!(&xrp).unwrap(),
+    );
+    let cfg = cfg.expect("XRP collateral config exists after register_xrp_collateral");
+    assert_eq!(cfg.decimals, 6, "native-XRP is 6 decimals (drops)");
+    assert_eq!(
+        cfg.custody_kind,
+        Some(CustodyKindView::NativeXrp),
+        "native-XRP custody_kind must be NativeXrp so the frontend detects it"
     );
 }
 
