@@ -4116,6 +4116,38 @@ async fn register_xrp_collateral() -> Result<(), ProtocolError> {
     Ok(())
 }
 
+/// P5 observability: all native-XRP vaults still awaiting their on-chain deposit
+/// (created by `open_xrp_vault`, removed by `confirm_xrp_deposit`). Developer-gated
+/// read (returns empty for non-developers) — ops + the e2e harness use it to see
+/// the deposit-staging queue. Returns `(reserved_vault_id, pending)` pairs.
+#[candid_method(query)]
+#[query]
+fn get_xrp_pending_deposits() -> Vec<(u64, rumi_protocol_backend::state::XrpPendingDeposit)> {
+    let caller = ic_cdk::caller();
+    read_state(|s| {
+        if s.developer_principal != caller {
+            return Vec::new();
+        }
+        s.xrp_pending_deposits.iter().map(|(id, d)| (*id, d.clone())).collect()
+    })
+}
+
+/// P5 observability: all outstanding native-XRP claims (XRP owed out of a custody
+/// address — created on withdraw/close/liquidation, removed once `settle_xrp_claim`
+/// confirms the Payment validated). Developer-gated read (empty for non-developers).
+/// Ops + the frontend use this to know which claims still need settling.
+#[candid_method(query)]
+#[query]
+fn get_xrp_claims() -> Vec<(u64, rumi_protocol_backend::state::XrpClaim)> {
+    let caller = ic_cdk::caller();
+    read_state(|s| {
+        if s.developer_principal != caller {
+            return Vec::new();
+        }
+        s.xrp_claims.iter().map(|(id, c)| (*id, c.clone())).collect()
+    })
+}
+
 #[query]
 fn http_request(req: HttpRequest) -> HttpResponse {
     use ic_metrics_encoder::MetricsEncoder;
