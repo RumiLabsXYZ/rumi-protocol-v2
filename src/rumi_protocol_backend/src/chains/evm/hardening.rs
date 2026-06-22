@@ -23,6 +23,30 @@ pub fn on_not_mined_tick(tries: u32, finality_depth: u32, has_submit_nonce: bool
     (new_tries, resubmit)
 }
 
+/// Default extra margin (secs) added to a swap's on-chain `deadline_secs` before
+/// the IC gives up on a never-mined LiquidationSwap. MUST exceed chain finality so
+/// a mined-then-reverted swap (deadline expiry) is observed on-chain BEFORE the IC
+/// timeout fires — else the SP could absorb debt the swap later settles (spec §4.8
+/// double-spend). 10 minutes is comfortably > eSpace finality.
+pub const SWAP_CONFIRM_FINALITY_MARGIN_SECS: u64 = 600;
+
+/// Net-new confirm-timeout for the LiquidationSwap kind (findings #12/#22): a
+/// never-mined swap (dropped from the mempool, no receipt ever) must transition
+/// to `Failed` so it cannot wedge the vault marker + reserved collateral forever
+/// (swaps are EXCLUDED from replace-by-fee, so without this they sit Inflight
+/// indefinitely). Returns true once `now - inflight_since > deadline + margin`.
+pub fn swap_confirm_timed_out(
+    inflight_since_ns: u64,
+    now_ns: u64,
+    deadline_secs: u64,
+    finality_margin_secs: u64,
+) -> bool {
+    let timeout_ns = deadline_secs
+        .saturating_add(finality_margin_secs)
+        .saturating_mul(1_000_000_000);
+    now_ns.saturating_sub(inflight_since_ns) > timeout_ns
+}
+
 /// Consecutive observer ticks a finalized-block regression must persist before
 /// it is treated as a real reorg (vs a transient single-provider RPC lag).
 /// fetch_block_numbers is un-quorumed (one provider at a time), so a single

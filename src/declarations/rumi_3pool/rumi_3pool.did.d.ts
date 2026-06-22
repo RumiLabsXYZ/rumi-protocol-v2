@@ -102,6 +102,11 @@ export interface FeeStats {
   'rebalancing_swap_pct' : number,
   'buckets' : Array<FeeBucket>,
 }
+export interface ForwardLiquidityEventsV2 {
+  'next_start' : bigint,
+  'reached_end' : boolean,
+  'events' : Array<[bigint, LiquidityEventV2]>,
+}
 export interface GetArchivesArgs { 'from' : [] | [Principal] }
 export interface GetArchivesResult { 'archives' : Array<ArchiveInfo> }
 export interface GetBlocksArgs { 'start' : bigint, 'length' : bigint }
@@ -314,6 +319,7 @@ export type ThreePoolError = {
   { 'InsufficientLiquidity' : null } |
   { 'TransferFailed' : { 'token' : string, 'reason' : string } } |
   { 'SlippageExceeded' : null } |
+  { 'ClaimNotFound' : null } |
   { 'PoolEmpty' : null } |
   {
     'InsufficientPoolBalance' : {
@@ -328,6 +334,16 @@ export interface ThreePoolInitArgs {
   'swap_fee_bps' : bigint,
   'initial_a' : bigint,
   'tokens' : Array<TokenConfig>,
+}
+export interface ThreePoolPendingClaim {
+  'id' : bigint,
+  'token_index' : number,
+  'claimant' : Principal,
+  'created_at' : bigint,
+  'ledger' : Principal,
+  'amount' : bigint,
+  'symbol' : string,
+  'reason' : string,
 }
 export interface TokenConfig {
   'decimals' : number,
@@ -422,6 +438,11 @@ export interface _SERVICE {
     { 'Ok' : bigint } |
       { 'Err' : ThreePoolError }
   >,
+  'claim_pending' : ActorMethod<
+    [bigint],
+    { 'Ok' : null } |
+      { 'Err' : ThreePoolError }
+  >,
   'donate' : ActorMethod<
     [number, bigint],
     { 'Ok' : null } |
@@ -458,7 +479,17 @@ export interface _SERVICE {
     [bigint, bigint],
     Array<LiquidityEventV2>
   >,
+  'get_liquidity_events_v2_forward' : ActorMethod<
+    [bigint, bigint],
+    ForwardLiquidityEventsV2
+  >,
   'get_lp_balance' : ActorMethod<[Principal], bigint>,
+  'get_lp_holders' : ActorMethod<[bigint, bigint], Array<[Principal, bigint]>>,
+  'get_pending_claim_count' : ActorMethod<[], bigint>,
+  'get_pending_claims' : ActorMethod<
+    [bigint, bigint],
+    Array<ThreePoolPendingClaim>
+  >,
   'get_pool_health' : ActorMethod<[], PoolHealth>,
   'get_pool_state' : ActorMethod<[], PoolStateView>,
   'get_pool_stats' : ActorMethod<[StatsWindow], PoolStats>,

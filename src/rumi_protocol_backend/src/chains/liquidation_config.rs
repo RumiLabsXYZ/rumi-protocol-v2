@@ -70,6 +70,23 @@ pub struct ChainLiquidationConfigV1 {
     /// push interval (start ~30 min).
     #[serde(default)]
     pub max_price_age_ns: u64,
+    /// Pool-vs-oracle divergence ceiling (bps) for the submit-time cross-check
+    /// (spec §4.8): if the pool prices collateral more than this below oracle, the
+    /// pool is thin/manipulated -> do NOT swap, escalate. Also half of the #16
+    /// penalty-cushion invariant (`penalty > slippage + divergence`).
+    #[serde(default)]
+    pub max_dex_oracle_divergence_bps: u32,
+    /// The DEX swap fee in bps (Swappi UniswapV2 = 25 = 0.25%); used by the
+    /// constant-product min-out (spec §4.8). CONFIRM against the live router.
+    #[serde(default)]
+    pub fee_bps: u16,
+    /// Decimals of `settle_stable_token` (18 on eSpace; a future chain may be 6).
+    /// Used at the realized-USD <-> e8s boundary. NOT a constant (spec §8).
+    #[serde(default)]
+    pub settle_stable_decimals: u8,
+    /// On-chain swap deadline horizon (secs, ~180). The tx deadline = now + this.
+    #[serde(default)]
+    pub deadline_secs: u64,
 }
 
 /// Reasons `set_chain_liquidation_config` rejects a config (no state mutation on
@@ -90,6 +107,12 @@ pub enum LiquidationConfigError {
     /// An `enabled` config left the price-staleness ceiling at 0 (spec §4.3):
     /// every fresh-price check would fail closed. Disabled configs may carry 0.
     ZeroPriceAge,
+    /// An `enabled` config has `settle_stable_decimals` of 0 or > 36 (spec §8): the
+    /// realized-USD <-> e8s conversion would be wrong. Disabled configs may carry 0.
+    BadSettleDecimals,
+    /// An `enabled` config left the swap `deadline_secs` at 0 (spec §4.8): a swap
+    /// with a zero deadline reverts immediately. Disabled configs may carry 0.
+    ZeroDeadline,
 }
 
 impl ChainLiquidationConfigV1 {
@@ -129,6 +152,12 @@ impl ChainLiquidationConfigV1 {
             if self.max_price_age_ns == 0 {
                 return Err(LiquidationConfigError::ZeroPriceAge);
             }
+            if self.settle_stable_decimals == 0 || self.settle_stable_decimals > 36 {
+                return Err(LiquidationConfigError::BadSettleDecimals);
+            }
+            if self.deadline_secs == 0 {
+                return Err(LiquidationConfigError::ZeroDeadline);
+            }
         }
         Ok(())
     }
@@ -151,7 +180,34 @@ mod tests {
             enabled: true,
             max_swap_value_e8s: 2_000 * 100_000_000,
             max_price_age_ns: 1_800_000_000_000,
+            max_dex_oracle_divergence_bps: 500,
+            fee_bps: 25,
+            settle_stable_decimals: 18,
+            deadline_secs: 180,
         }
+    }
+
+    #[test]
+    fn config_carries_inc3_swap_fields() {
+        let c = enabled_cfg();
+        assert!(c.max_dex_oracle_divergence_bps > 0);
+        assert!(c.fee_bps > 0);
+        assert_eq!(c.settle_stable_decimals, 18);
+        assert!(c.deadline_secs > 0);
+    }
+
+    #[test]
+    fn enabled_config_rejects_zero_settle_decimals() {
+        let mut c = enabled_cfg();
+        c.settle_stable_decimals = 0;
+        assert_eq!(c.validate(), Err(LiquidationConfigError::BadSettleDecimals));
+    }
+
+    #[test]
+    fn enabled_config_rejects_zero_deadline() {
+        let mut c = enabled_cfg();
+        c.deadline_secs = 0;
+        assert_eq!(c.validate(), Err(LiquidationConfigError::ZeroDeadline));
     }
 
     #[test]
@@ -222,6 +278,10 @@ mod tests {
             enabled: false,
             max_swap_value_e8s: 0,
             max_price_age_ns: 0,
+            max_dex_oracle_divergence_bps: 0,
+            fee_bps: 0,
+            settle_stable_decimals: 0,
+            deadline_secs: 0,
         };
         assert_eq!(c.validate(), Ok(()));
     }

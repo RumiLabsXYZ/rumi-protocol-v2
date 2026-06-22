@@ -59,13 +59,17 @@ export interface ChainLiquidationConfigV1 {
   'max_swap_value_e8s' : bigint,
   'pair' : string,
   'max_price_age_ns' : bigint,
+  'fee_bps' : number,
   'restore_target_cr_e4' : bigint,
+  'max_dex_oracle_divergence_bps' : number,
   'enabled' : boolean,
   'collateral_token' : string,
+  'settle_stable_decimals' : number,
   'factory' : string,
   'slippage_cap_bps' : number,
   'router' : string,
   'settle_stable_token' : string,
+  'deadline_secs' : bigint,
 }
 export interface ChainSupplyReconciliation {
   'recorded_supply_e8s' : bigint,
@@ -1314,6 +1318,7 @@ export interface _SERVICE {
     [number],
     [] | [ChainLiquidationConfigV1]
   >,
+  'get_chain_reserve_address' : ActorMethod<[number], Result_2>,
   'get_chain_settlement_address' : ActorMethod<[number], Result_2>,
   'get_chain_vault' : ActorMethod<[bigint], [] | [ChainVaultV1]>,
   'get_chains_ecdsa_key_name' : ActorMethod<[], string>,

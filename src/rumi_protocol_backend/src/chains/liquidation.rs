@@ -264,6 +264,11 @@ pub fn detect_and_route_chain_liquidations_in_state(
             || v.pending_mint_e8s != 0
             || v.pending_interest_mint_e8s != 0
             || v.pending_liquidation.is_some()
+            // The bot already failed/gave up on this vault (escalated) — do NOT
+            // re-route it to the bot (no retry loop, finding #10). It falls to
+            // Tier-3 manual / the Tier-2 SP (Increment 4). The prune clears this
+            // once the vault recovers above the liquidation threshold.
+            || state.sp_attempted_chain_vaults.contains(&vid)
         {
             continue;
         }
@@ -299,6 +304,85 @@ pub fn detect_and_route_chain_liquidations_in_state(
         }
     }
     routed
+}
+
+// ─── Increment 3: swap min-out + oracle cross-check (spec §4.8) ───
+
+/// UniswapV2 constant-product output with fee, plus the slippage haircut (spec
+/// §4.8). Returns `(expected_out, amount_out_min)` in the OUT token's native base
+/// units. Returns `(0, 0)` on any zero/degenerate input (the caller fail-closes:
+/// no swap without a satisfiable min-out).
+pub fn compute_amount_out_min(
+    amount_in: u128,
+    reserve_in: u128,
+    reserve_out: u128,
+    fee_bps: u16,
+    slippage_bps: u16,
+) -> (u128, u128) {
+    use ethnum::U256;
+    if amount_in == 0 || reserve_in == 0 || reserve_out == 0 || fee_bps as u32 >= 10_000 {
+        return (0, 0);
+    }
+    // MUST use 256-bit intermediates: `amount_in_with_fee * reserve_out` overflows
+    // u128 at 18-decimal token magnitudes (~1e25 * 1e23 = 1e48 >> u128 max 3.4e38).
+    // All ops checked -> fail-closed (0,0) on any overflow, never wrap/panic.
+    let fee_mult = U256::from(10_000u32 - fee_bps as u32);
+    let amount_in_with_fee = match U256::from(amount_in).checked_mul(fee_mult) {
+        Some(v) => v,
+        None => return (0, 0),
+    };
+    let numerator = match amount_in_with_fee.checked_mul(U256::from(reserve_out)) {
+        Some(v) => v,
+        None => return (0, 0),
+    };
+    let denominator = match U256::from(reserve_in)
+        .checked_mul(U256::from(10_000u32))
+        .and_then(|x| x.checked_add(amount_in_with_fee))
+    {
+        Some(d) if d != 0 => d,
+        _ => return (0, 0),
+    };
+    let expected_u256 = numerator / denominator;
+    // `expected_out < reserve_out <= u128::MAX` for a real swap, so it fits u128;
+    // guard anyway (fail-closed) rather than truncate.
+    let expected_out = match u128::try_from(expected_u256) {
+        Ok(v) => v,
+        Err(_) => return (0, 0),
+    };
+    let slip_mult = U256::from(10_000u32 - slippage_bps.min(10_000) as u32);
+    let min_out = match U256::from(expected_out)
+        .checked_mul(slip_mult)
+        .map(|x| x / U256::from(10_000u32))
+        .and_then(|x| u128::try_from(x).ok())
+    {
+        Some(v) => v,
+        None => return (0, 0),
+    };
+    (expected_out, min_out)
+}
+
+/// USD value (e8s) of `native` units of a `decimals`-decimal stable token.
+pub fn stable_native_to_e8s(native: u128, decimals: u8) -> u128 {
+    let scale = 10u128.saturating_pow(decimals as u32);
+    if scale == 0 {
+        return 0;
+    }
+    native.saturating_mul(100_000_000) / scale
+}
+
+/// The DEX-depth oracle cross-check (spec §4.8): the pool's expected stable-out
+/// must be at least `(1 - divergence)` of the oracle-implied USD value of the
+/// seized collateral. Fail-closed (false) on a thin/manipulated pool.
+pub fn oracle_corroborated(
+    expected_out_native: u128,
+    settle_decimals: u8,
+    oracle_value_e8: u128,
+    max_divergence_bps: u32,
+) -> bool {
+    let expected_out_e8 = stable_native_to_e8s(expected_out_native, settle_decimals);
+    let floor =
+        oracle_value_e8.saturating_mul(10_000u128.saturating_sub(max_divergence_bps as u128)) / 10_000;
+    expected_out_e8 >= floor
 }
 
 #[cfg(test)]
@@ -461,6 +545,10 @@ mod tests {
                 enabled: true,
                 max_swap_value_e8s: 2_000 * 100_000_000,
                 max_price_age_ns: 1_800_000_000_000,
+                max_dex_oracle_divergence_bps: 500,
+                fee_bps: 25,
+                settle_stable_decimals: 18,
+                deadline_secs: 180,
             },
         );
     }
@@ -552,6 +640,21 @@ mod tests {
     }
 
     #[test]
+    fn detect_skips_bot_failed_sp_attempted_vaults() {
+        // Finding #10: a vault the bot already failed (sp_attempted) is NOT
+        // re-routed to the bot (no retry loop), even while still liquidatable.
+        let mut s = MultiChainState::default();
+        seed_cfg_unchecked(&mut s);
+        s.manual_prices.insert((ChainId(71), "CFX".into()), 8_000_000);
+        s.manual_price_set_at_ns.insert((ChainId(71), "CFX".into()), 1_000);
+        insert_vault_liq(&mut s, 1, 1_400, 100, ChainVaultStatus::Open); // underwater
+        s.sp_attempted_chain_vaults.insert(1);
+        let routed = detect_and_route_chain_liquidations_in_state(&mut s, ChainId(71), "CFX", 13_300, 2_000, 10);
+        assert_eq!(routed, 0, "bot-failed vault not re-routed");
+        assert!(s.chain_vaults.get(&1).unwrap().pending_liquidation.is_none());
+    }
+
+    #[test]
     fn detect_skips_healthy_and_marked_vaults() {
         let mut s = MultiChainState::default();
         seed_cfg_unchecked(&mut s);
@@ -575,5 +678,53 @@ mod tests {
         s.bot_pending_chain_vaults.insert(7, 10);
         prune_recovered_chain_routing_state(&mut s, ChainId(71), "CFX", 13_300, 5_000);
         assert!(s.bot_pending_chain_vaults.contains_key(&7), "still-liquidatable vault NOT cleared");
+    }
+
+    // ─── Increment 3 / Task 2: pure swap min-out + oracle cross-check ───
+    const E18: u128 = 1_000_000_000_000_000_000;
+    const E8: u128 = 100_000_000;
+
+    #[test]
+    fn amount_out_min_v2_constant_product_with_fee_and_haircut() {
+        let (expected, min_out) = compute_amount_out_min(
+            2_000u128 * E18,
+            1_000_000u128 * E18,
+            90_900u128 * E18,
+            25,
+            250,
+        );
+        // ABSOLUTE value, not just relations: pool price ~0.0909 USDC/CFX, so
+        // selling 2000 CFX yields ~181 USDC (18-dec) minus fee + small impact.
+        // This catches the u128-overflow bug (saturating_mul gave a garbage ~3.4e10).
+        assert!(
+            expected > 175 * E18 && expected < 182 * E18,
+            "expected_out {} not in the ~181e18 sane band (u256 math must not overflow)",
+            expected
+        );
+        assert!(min_out > 0 && min_out < expected);
+        // min_out is exactly the 2.5% haircut of expected.
+        assert_eq!(min_out, expected.saturating_mul(9_750) / 10_000);
+    }
+
+    #[test]
+    fn amount_out_min_zero_when_reserves_zero() {
+        assert_eq!(compute_amount_out_min(1, 0, 100, 25, 250), (0, 0));
+        assert_eq!(compute_amount_out_min(1, 100, 0, 25, 250), (0, 0));
+        assert_eq!(compute_amount_out_min(0, 100, 100, 25, 250), (0, 0));
+    }
+
+    #[test]
+    fn oracle_cross_check_rejects_thin_pool() {
+        // expected_out 95 USDC (18-dec) vs oracle-implied 100 USD: exactly 5% below.
+        let oracle_value_e8 = 100 * E8;
+        let expected_out_native = 95u128 * E18;
+        assert!(oracle_corroborated(expected_out_native, 18, oracle_value_e8, 500)); // at the edge: OK
+        assert!(!oracle_corroborated(expected_out_native, 18, oracle_value_e8, 499)); // one bp tighter: reject
+    }
+
+    #[test]
+    fn stable_native_to_e8s_scales_by_decimals() {
+        assert_eq!(stable_native_to_e8s(50u128 * E18, 18), 50 * E8); // 18-dec USDC -> e8s
+        assert_eq!(stable_native_to_e8s(50u128 * 1_000_000, 6), 50 * E8); // 6-dec -> e8s
     }
 }

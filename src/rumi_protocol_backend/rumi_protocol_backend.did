@@ -52,13 +52,17 @@ type ChainLiquidationConfigV1 = record {
   max_swap_value_e8s : nat;
   pair : text;
   max_price_age_ns : nat64;
+  fee_bps : nat16;
   restore_target_cr_e4 : nat64;
+  max_dex_oracle_divergence_bps : nat32;
   enabled : bool;
   collateral_token : text;
+  settle_stable_decimals : nat8;
   factory : text;
   slippage_cap_bps : nat16;
   router : text;
   settle_stable_token : text;
+  deadline_secs : nat64;
 };
 type ChainSupplyReconciliation = record {
   recorded_supply_e8s : nat;
@@ -1095,6 +1099,7 @@ service : (ProtocolArg) -> {
   get_chain_liquidation_config : (nat32) -> (
       opt ChainLiquidationConfigV1,
     ) query;
+  get_chain_reserve_address : (nat32) -> (Result_2);
   get_chain_settlement_address : (nat32) -> (Result_2);
   get_chain_vault : (nat64) -> (opt ChainVaultV1) query;
   get_chains_ecdsa_key_name : () -> (text) query;

@@ -39,6 +39,7 @@ export const idlFactory = ({ IDL }) => {
     'InsufficientLiquidity' : IDL.Null,
     'TransferFailed' : IDL.Record({ 'token' : IDL.Text, 'reason' : IDL.Text }),
     'SlippageExceeded' : IDL.Null,
+    'ClaimNotFound' : IDL.Null,
     'PoolEmpty' : IDL.Null,
     'InsufficientPoolBalance' : IDL.Record({
       'token' : IDL.Text,
@@ -159,6 +160,21 @@ export const idlFactory = ({ IDL }) => {
     'timestamp' : IDL.Nat64,
     'caller' : IDL.Principal,
     'coin_index' : IDL.Opt(IDL.Nat8),
+  });
+  const ForwardLiquidityEventsV2 = IDL.Record({
+    'next_start' : IDL.Nat64,
+    'reached_end' : IDL.Bool,
+    'events' : IDL.Vec(IDL.Tuple(IDL.Nat64, LiquidityEventV2)),
+  });
+  const ThreePoolPendingClaim = IDL.Record({
+    'id' : IDL.Nat64,
+    'token_index' : IDL.Nat8,
+    'claimant' : IDL.Principal,
+    'created_at' : IDL.Nat64,
+    'ledger' : IDL.Principal,
+    'amount' : IDL.Nat,
+    'symbol' : IDL.Text,
+    'reason' : IDL.Text,
   });
   const PoolHealth = IDL.Record({
     'imbalance_trend_1h' : IDL.Int32,
@@ -467,6 +483,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Nat, 'Err' : ThreePoolError })],
         ['query'],
       ),
+    'claim_pending' : IDL.Func(
+        [IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : ThreePoolError })],
+        [],
+      ),
     'donate' : IDL.Func(
         [IDL.Nat8, IDL.Nat],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : ThreePoolError })],
@@ -528,7 +549,23 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Vec(LiquidityEventV2)],
         ['query'],
       ),
+    'get_liquidity_events_v2_forward' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [ForwardLiquidityEventsV2],
+        ['query'],
+      ),
     'get_lp_balance' : IDL.Func([IDL.Principal], [IDL.Nat], ['query']),
+    'get_lp_holders' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat))],
+        ['query'],
+      ),
+    'get_pending_claim_count' : IDL.Func([], [IDL.Nat64], ['query']),
+    'get_pending_claims' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [IDL.Vec(ThreePoolPendingClaim)],
+        ['query'],
+      ),
     'get_pool_health' : IDL.Func([], [PoolHealth], ['query']),
     'get_pool_state' : IDL.Func([], [PoolStateView], ['query']),
     'get_pool_stats' : IDL.Func([StatsWindow], [PoolStats], ['query']),

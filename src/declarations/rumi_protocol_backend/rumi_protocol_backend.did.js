@@ -189,13 +189,17 @@ export const idlFactory = ({ IDL }) => {
     'max_swap_value_e8s' : IDL.Nat,
     'pair' : IDL.Text,
     'max_price_age_ns' : IDL.Nat64,
+    'fee_bps' : IDL.Nat16,
     'restore_target_cr_e4' : IDL.Nat64,
+    'max_dex_oracle_divergence_bps' : IDL.Nat32,
     'enabled' : IDL.Bool,
     'collateral_token' : IDL.Text,
+    'settle_stable_decimals' : IDL.Nat8,
     'factory' : IDL.Text,
     'slippage_cap_bps' : IDL.Nat16,
     'router' : IDL.Text,
     'settle_stable_token' : IDL.Text,
+    'deadline_secs' : IDL.Nat64,
   });
   const ChainVaultStatus = IDL.Variant({
     'MintPending' : IDL.Null,
@@ -1280,6 +1284,7 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Opt(ChainLiquidationConfigV1)],
         ['query'],
       ),
+    'get_chain_reserve_address' : IDL.Func([IDL.Nat32], [Result_2], []),
     'get_chain_settlement_address' : IDL.Func([IDL.Nat32], [Result_2], []),
     'get_chain_vault' : IDL.Func(
         [IDL.Nat64],

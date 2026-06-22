@@ -116,6 +116,19 @@ pub const BURN_EVENT_TOPIC0: &str =
 pub const MINT_EVENT_TOPIC0: &str =
     "0x4e3883c75cc9c752bb1db2e406a822e4a75067ae77ad9a0a4d179f2709b9e1f6";
 
+/// keccak256("Transfer(address,address,uint256)") — the canonical ERC-20
+/// Transfer event topic0. Used by the liquidation-swap confirm to read the
+/// REALIZED settle-stable output (the `Transfer(_, reserve, amount)` log).
+pub const TRANSFER_EVENT_TOPIC0: &str =
+    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+
+/// `getReserves()[:4]` selector (UniswapV2 pair).
+pub const GET_RESERVES_SELECTOR: &str = "0x0902f1ac";
+/// `token0()[:4]` selector (UniswapV2 pair).
+pub const TOKEN0_SELECTOR: &str = "0x0dfe1681";
+/// `balanceOf(address)[:4]` selector (ERC-20).
+pub const BALANCE_OF_SELECTOR: &str = "0x70a08231";
+
 /// `keccak256("totalSupply()")[:4]`, the ERC-20 `totalSupply()` selector.
 /// `IcUSD.sol` uses 8 decimals, so the returned value is e8s (1:1 with the
 /// ICP-side `chain_supplies` accounting, no scaling needed).
@@ -512,6 +525,60 @@ impl MintLog {
             block_number,
         })
     }
+}
+
+/// A decoded ERC-20 `Transfer(from, to, amount)` log. The liquidation-swap
+/// confirm reads the `Transfer(_, reserve_recipient, amount)` log to learn the
+/// REALIZED settle-stable output (spec §4.8 — never trust min-out as the actual
+/// amount). `to` and `amount` are the indexed recipient + the data value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransferLog {
+    /// Recipient address (0x-prefixed, lowercase) from the indexed `to` topic.
+    pub to: String,
+    /// Transferred amount (native base units of the token).
+    pub amount: u128,
+}
+
+impl TransferLog {
+    /// Decode from `[Transfer topic0, from(indexed), to(indexed)]` + `data=amount`.
+    pub fn from_raw(topics: &[String], data: &str) -> Result<Self, String> {
+        if topics.len() < 3 {
+            return Err(format!("TransferLog: expected >=3 topics, got {}", topics.len()));
+        }
+        if !topics[0].eq_ignore_ascii_case(TRANSFER_EVENT_TOPIC0) {
+            return Err(format!("TransferLog: wrong topic0: {}", topics[0]));
+        }
+        let to = {
+            let raw = topics[2]
+                .strip_prefix("0x")
+                .or_else(|| topics[2].strip_prefix("0X"))
+                .unwrap_or(&topics[2]);
+            let addr_hex = if raw.len() >= 40 { &raw[raw.len() - 40..] } else { raw };
+            format!("0x{}", addr_hex.to_lowercase())
+        };
+        let amount = parse_hex_quantity(data)?;
+        Ok(TransferLog { to, amount })
+    }
+}
+
+/// Split a UniswapV2 `getReserves()` return `(uint112 reserve0, uint112
+/// reserve1, uint32)` into `(reserve0, reserve1)`. Each uint112 occupies a
+/// 32-byte ABI word, but only the low 28 hex chars (112 bits) are significant —
+/// we parse the full words to be safe (the high bits are zero for a uint112).
+pub fn parse_two_uint112(result_hex: &str) -> Result<(u128, u128), String> {
+    let hex = result_hex
+        .strip_prefix("0x")
+        .or_else(|| result_hex.strip_prefix("0X"))
+        .ok_or_else(|| format!("getReserves result missing 0x prefix: {:?}", result_hex))?;
+    // Two full 32-byte words for the two uint112 reserves = 128 hex chars.
+    if hex.len() < 128 {
+        return Err(format!("getReserves result too short: {:?}", result_hex));
+    }
+    let r0 = u128::from_str_radix(&hex[0..64], 16)
+        .map_err(|e| format!("getReserves reserve0 parse: {}", e))?;
+    let r1 = u128::from_str_radix(&hex[64..128], 16)
+        .map_err(|e| format!("getReserves reserve1 parse: {}", e))?;
+    Ok((r0, r1))
 }
 
 /// Convenience free fn delegating to `MintLog::from_raw`.
@@ -1012,6 +1079,60 @@ pub async fn erc20_total_supply_at(
         .as_str()
         .ok_or_else(|| format!("eth_call(totalSupply): missing result in {:?}", text))?;
     parse_eth_call_u128(hex)
+}
+
+/// Read a generic `eth_call` result hex at a PINNED finalized block (finding
+/// #13: a "latest" read returns different bytes per provider and fails the
+/// multi-provider quorum; pinning a finalized number is byte-identical across
+/// replicas). Shared by the DEX reads below.
+async fn eth_call_at_block(chain: ChainId, to: &str, data: &str, block: u64) -> Result<String, String> {
+    let payload = format!(
+        r#"{{"jsonrpc":"2.0","method":"eth_call","params":[{{"to":{:?},"data":{:?}}},"0x{:x}"],"id":{}}}"#,
+        to, data, block, next_rpc_id()
+    );
+    let text = call_evm_rpc(chain, &payload).await?;
+    let val: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("eth_call parse: {}", e))?;
+    if let Some(err) = val.get("error") {
+        return Err(format!("eth_call RPC error: {}", err));
+    }
+    val["result"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| format!("eth_call: missing result in {:?}", text))
+}
+
+/// UniswapV2 `getReserves()` at a pinned finalized block -> `(reserve0,
+/// reserve1)` (finding #13). The reserve ordering follows the pair's `token0()`,
+/// which the caller reads separately and orients against.
+pub async fn get_reserves(chain: ChainId, pair: &str, block: u64) -> Result<(u128, u128), String> {
+    let hex = eth_call_at_block(chain, pair, GET_RESERVES_SELECTOR, block).await?;
+    parse_two_uint112(&hex)
+}
+
+/// UniswapV2 `token0()` at a pinned block -> the pair's token0 address
+/// (0x-prefixed, lowercase). V2 pairs sort tokens by address, so the reserve
+/// ordering MUST be read, never assumed.
+pub async fn get_pair_token0(chain: ChainId, pair: &str, block: u64) -> Result<String, String> {
+    let hex = eth_call_at_block(chain, pair, TOKEN0_SELECTOR, block).await?;
+    let raw = hex.strip_prefix("0x").or_else(|| hex.strip_prefix("0X")).unwrap_or(&hex);
+    if raw.len() < 40 {
+        return Err(format!("token0: result too short: {:?}", hex));
+    }
+    Ok(format!("0x{}", raw[raw.len() - 40..].to_lowercase()))
+}
+
+/// ERC-20 `balanceOf(addr)` at a pinned block (native base units). Used to
+/// reconcile the reserve address's on-chain stable custody.
+pub async fn erc20_balance_of(chain: ChainId, token: &str, addr: &str, block: u64) -> Result<u128, String> {
+    let a = addr.strip_prefix("0x").or_else(|| addr.strip_prefix("0X")).unwrap_or(addr);
+    if a.len() != 40 || hex::decode(a).is_err() {
+        return Err(format!("erc20_balance_of: invalid address {:?}", addr));
+    }
+    // selector + 32-byte left-padded address arg.
+    let data = format!("{}{:0>64}", BALANCE_OF_SELECTOR, a.to_lowercase());
+    let hex = eth_call_at_block(chain, token, &data, block).await?;
+    parse_eth_call_u128(&hex)
 }
 
 /// Returns the transaction count (nonce) of `address` at the latest block.

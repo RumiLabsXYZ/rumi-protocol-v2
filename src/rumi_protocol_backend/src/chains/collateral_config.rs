@@ -62,6 +62,16 @@ pub fn chain_collateral_config(chain: ChainId) -> Option<ChainCollateralConfig> 
             debt_ceiling_e8s: Some(500 * 100_000_000),
             ..ICP_MIRROR
         }),
+        // Conflux eSpace MAINNET (chain 1030): same risk profile as testnet 71.
+        // This is where real Swappi DEX liquidity lives (the swap's real target);
+        // adding the row makes the rail 1030-ready (Inc 3, finding #23). Tests +
+        // the staging deploy stay on 71; onboarding 1030 is the operator's enable
+        // step (liquidation config row + manual price + mainnet-fork dry-run).
+        1030 => Some(ChainCollateralConfig {
+            min_cr_e4: 15_000,
+            debt_ceiling_e8s: Some(500 * 100_000_000),
+            ..ICP_MIRROR
+        }),
         // Monad testnet: preserve its historical 130% open threshold
         // (behavior-preserving); other params ICP-mirrored but inert for Monad.
         10143 => Some(ChainCollateralConfig {
@@ -99,10 +109,20 @@ mod tests {
     }
 
     #[test]
+    fn conflux_mainnet_1030_mirrors_71() {
+        let c = chain_collateral_config(ChainId(1030)).expect("conflux mainnet known");
+        assert_eq!(c.min_cr_e4, 15_000);
+        assert_eq!(c.liquidation_threshold_e4, 13_300);
+        assert_eq!(c.recovery_target_cr_e4, 15_500);
+        assert_eq!(c.liquidation_penalty_bps, 1_200);
+        assert_eq!(c.debt_ceiling_e8s, Some(500 * 100_000_000));
+    }
+
+    #[test]
     fn liquidation_threshold_below_open_gate_per_chain() {
         // The liquidation trigger MUST be strictly below the open/borrow gate so a
         // freshly-opened vault at exactly the open CR is never instantly liquidatable.
-        for chain in [ChainId(71), ChainId(10143)] {
+        for chain in [ChainId(71), ChainId(1030), ChainId(10143)] {
             let c = chain_collateral_config(chain).expect("known chain");
             assert!(
                 c.liquidation_threshold_e4 < c.min_cr_e4,
