@@ -121,6 +121,18 @@ pub fn backstop_should_scan(
     !has_inflight_mint && onchain_total_supply_e8s < recorded_supply_e8s
 }
 
+/// The burn-watch cycle gate can skip only when the chain has no remaining
+/// foreign-supply obligation: no live vault debt and no SP-path pending burn
+/// backing. A nonzero pending-burn term means IC-side icUSD has already been
+/// burned while the foreign representation is still outstanding, so the watcher
+/// must stay active for reconciliation/backstop observability.
+pub fn burn_watch_can_skip_for_no_supply_obligation(
+    total_chain_debt_e8s: u128,
+    pending_chain_burn_e8s: u128,
+) -> bool {
+    total_chain_debt_e8s == 0 && pending_chain_burn_e8s == 0
+}
+
 /// Credit a confirmed on-chain deposit to a ChainVaultV1 record.
 ///
 /// Increments `collateral_amount_native` by `amount_e18` (saturating — overflow
@@ -666,20 +678,23 @@ pub async fn run_observer(chain: ChainId) {
         return;
     }
 
-    // ── No-debt fast path (cycle gate) ───────────────────────────────────────
+    // ── No-supply-obligation fast path (cycle gate) ──────────────────────────
     //
-    // A Burn can only ever apply to a chain-vault that HAS debt. When the total
-    // foreign-chain vault debt is 0 there is nothing any Burn in this range could
-    // decrement, so skip the (expensive) get_logs scan entirely — that is
-    // ceil(window / MONAD_GETLOGS_MAX_RANGE) EVM-RPC outcalls per advancing tick
-    // (~764M cycles each, measured 2026-05-31). We STILL advance the cursor to
-    // `finalized` (and prune) so the consensus-safe finality probe
-    // `fetch_block_numbers` (= last_observed + MAX_BLOCK_SCAN_WINDOW) stays
-    // current: a stalled cursor would leave the next mint unable to reach
-    // finality — the Gate-4 failure mode. No burn is missed: with zero
-    // chain-vault debt there is no vault a burn in this range could have repaid.
-    let total_chain_debt = read_state(|s| s.multi_chain.total_chain_vault_debt_e8s());
-    if total_chain_debt == 0 {
+    // When there is no live vault debt AND no SP-path pending-burn backing, the
+    // chain has no foreign-supply obligation the burn watcher can resolve. Skip
+    // the expensive get_logs scan entirely — that is ceil(window /
+    // MONAD_GETLOGS_MAX_RANGE) EVM-RPC outcalls per advancing tick (~764M cycles
+    // each, measured 2026-05-31). A nonzero pending-burn term is different:
+    // IC-side icUSD was burned while the foreign representation is still
+    // outstanding, so the watcher/backstop must stay active for observability
+    // and later reconciliation.
+    let (total_chain_debt, pending_chain_burn) = read_state(|s| {
+        (
+            s.multi_chain.total_chain_vault_debt_e8s(),
+            s.multi_chain.total_pending_chain_burn_e8s(),
+        )
+    });
+    if burn_watch_can_skip_for_no_supply_obligation(total_chain_debt, pending_chain_burn) {
         mutate_state(|s| advance_cursor_and_prune(&mut s.multi_chain, chain, finalized));
         return;
     }
