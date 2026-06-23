@@ -1208,6 +1208,7 @@ mod tests {
     fn ckusdc_ledger() -> Principal { Principal::from_slice(&[12]) }
     fn icp_ledger() -> Principal { Principal::from_slice(&[20]) }
     fn ckbtc_ledger() -> Principal { Principal::from_slice(&[21]) }
+    fn cfx_sentinel() -> Principal { Principal::from_slice(&[30]) }
 
     /// Build a test state with:
     /// - icUSD (8 decimals, priority 1)
@@ -1645,6 +1646,10 @@ mod tests {
         // Has collateral gains -> not empty
         pos.collateral_gains.insert(icp_ledger(), 100);
         assert!(!pos.is_empty());
+
+        pos.collateral_gains.clear();
+        pos.cfx_claims.get_or_insert_with(BTreeMap::new).insert(cfx_sentinel(), 1_000_000_000_000_000_000);
+        assert!(!pos.is_empty(), "u128 CFX claims must prevent position cleanup");
     }
 
     // ─── Test: Mark gains claimed ───
@@ -2294,6 +2299,84 @@ mod tests {
             "pending refunds must start empty after a v1 upgrade",
         );
         assert_eq!(decoded.next_pending_refund_id.unwrap_or(0), 0);
+    }
+
+    #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+    struct DepositPositionPreCfx {
+        pub stablecoin_balances: BTreeMap<Principal, u64>,
+        pub collateral_gains: BTreeMap<Principal, u64>,
+        pub opted_out_collateral: BTreeSet<Principal>,
+        pub deposit_timestamp: u64,
+        pub total_claimed_gains: BTreeMap<Principal, u64>,
+        pub total_interest_earned_e8s: Option<u64>,
+    }
+
+    #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+    struct StabilityPoolStatePreCfx {
+        pub deposits: BTreeMap<Principal, DepositPositionPreCfx>,
+        pub total_stablecoin_balances: BTreeMap<Principal, u64>,
+        pub stablecoin_registry: BTreeMap<Principal, StablecoinConfig>,
+        pub collateral_registry: BTreeMap<Principal, CollateralInfo>,
+        pub protocol_canister_id: Principal,
+        pub configuration: PoolConfiguration,
+        pub liquidation_history: Vec<PoolLiquidationRecord>,
+        pub in_flight_liquidations: BTreeSet<u64>,
+        pub total_liquidations_executed: u64,
+        pub pool_creation_timestamp: u64,
+        pub total_interest_received_e8s: Option<u64>,
+        pub token_consecutive_failures: Option<BTreeMap<Principal, u32>>,
+        pub cached_virtual_prices: Option<BTreeMap<Principal, u128>>,
+        pub protocol_reserve_address: Option<Principal>,
+        pub is_initialized: bool,
+        pub pool_events: Option<Vec<PoolEvent>>,
+        pub next_event_id: Option<u64>,
+        pub pending_refunds: Option<BTreeMap<u64, PendingRefund>>,
+        pub next_pending_refund_id: Option<u64>,
+    }
+
+    #[test]
+    fn pre_cfx_snapshot_decodes_with_empty_cfx_claims() {
+        let mut current = test_state();
+        add_deposit_direct(&mut current, user_a(), icusd_ledger(), 42_00000000);
+        let pos = current.deposits.get(&user_a()).unwrap();
+        let mut deposits = BTreeMap::new();
+        deposits.insert(user_a(), DepositPositionPreCfx {
+            stablecoin_balances: pos.stablecoin_balances.clone(),
+            collateral_gains: pos.collateral_gains.clone(),
+            opted_out_collateral: pos.opted_out_collateral.clone(),
+            deposit_timestamp: pos.deposit_timestamp,
+            total_claimed_gains: pos.total_claimed_gains.clone(),
+            total_interest_earned_e8s: pos.total_interest_earned_e8s,
+        });
+        let pre_cfx = StabilityPoolStatePreCfx {
+            deposits,
+            total_stablecoin_balances: current.total_stablecoin_balances.clone(),
+            stablecoin_registry: current.stablecoin_registry.clone(),
+            collateral_registry: current.collateral_registry.clone(),
+            protocol_canister_id: current.protocol_canister_id,
+            configuration: current.configuration.clone(),
+            liquidation_history: current.liquidation_history.clone(),
+            in_flight_liquidations: current.in_flight_liquidations.clone(),
+            total_liquidations_executed: current.total_liquidations_executed,
+            pool_creation_timestamp: current.pool_creation_timestamp,
+            total_interest_received_e8s: current.total_interest_received_e8s,
+            token_consecutive_failures: current.token_consecutive_failures.clone(),
+            cached_virtual_prices: current.cached_virtual_prices.clone(),
+            protocol_reserve_address: current.protocol_reserve_address,
+            is_initialized: current.is_initialized,
+            pool_events: current.pool_events.clone(),
+            next_event_id: current.next_event_id,
+            pending_refunds: current.pending_refunds.clone(),
+            next_pending_refund_id: current.next_pending_refund_id,
+        };
+        let bytes = Encode!(&pre_cfx).expect("encode pre-CFX snapshot");
+
+        let decoded = try_decode_state(&bytes).expect("pre-CFX snapshot must decode");
+        let decoded_pos = decoded.deposits.get(&user_a()).expect("deposit survives");
+        assert!(
+            decoded_pos.cfx_claims.clone().unwrap_or_default().is_empty(),
+            "missing CFX claims field must decode as empty",
+        );
     }
 
     // ─── Test: Opt-out mid-liquidation burn escape (audit AR-S-002) ───

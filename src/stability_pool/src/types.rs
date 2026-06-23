@@ -68,6 +68,11 @@ pub struct DepositPosition {
     /// `Option` is required for Candid backward-compatible stable memory upgrades.
     #[serde(default)]
     pub total_interest_earned_e8s: Option<u64>,
+    /// Claimable native-chain collateral keyed by deterministic chain sentinel,
+    /// in native base units (wei for CFX). `Option` is required for Candid
+    /// backward-compatible stable memory upgrades.
+    #[serde(default)]
+    pub cfx_claims: Option<BTreeMap<Principal, u128>>,
 }
 
 impl DepositPosition {
@@ -79,6 +84,7 @@ impl DepositPosition {
             deposit_timestamp: timestamp,
             total_claimed_gains: BTreeMap::new(),
             total_interest_earned_e8s: Some(0),
+            cfx_claims: Some(BTreeMap::new()),
         }
     }
 
@@ -130,6 +136,7 @@ impl DepositPosition {
     pub fn is_empty(&self) -> bool {
         self.stablecoin_balances.values().all(|&v| v == 0)
             && self.collateral_gains.values().all(|&v| v == 0)
+            && self.cfx_claims.as_ref().map(|m| m.values().all(|&v| v == 0)).unwrap_or(true)
     }
 }
 
