@@ -26,6 +26,11 @@
   $: vaultCollateralInfo = collateralStore.getCollateralInfo(vaultCollateralType);
   $: collateralSymbol = vault.collateralSymbol || vaultCollateralInfo?.symbol || 'ICP';
   $: collateralColor = vaultCollateralInfo?.color ?? '#94A3B8';
+  // Native-XRP collateral lives off-chain on the XRP Ledger: there is no IC ledger to
+  // top up from (add-margin is backend-rejected) and withdraw/close produce a
+  // settle-able XrpClaim rather than a wallet transfer — so the deposit/withdraw UX
+  // differs from an ICRC vault. (Borrow/repay are pure icUSD and unchanged.)
+  $: isNativeXrp = vaultCollateralInfo?.custodyKind === 'NativeXrp';
   // Easter egg themes for specific tokens (user can toggle off via localStorage)
   import { writable } from 'svelte/store';
   const easterEggsEnabled = writable(
@@ -90,7 +95,9 @@
   // Per-collateral wallet balance for "Add Collateral" cap
   let nonIcpCollateralBalance = 0;
   let _lastFetchedCt = '';
-  $: if (vaultCollateralType !== CANISTER_IDS.ICP_LEDGER && $walletStore.isConnected && $walletStore.principal) {
+  // Skip native-XRP: its `ledgerCanisterId` is a synthetic principal (no ICRC
+  // ledger), so icrc1_balance_of would reject; there is no IC-side wallet balance.
+  $: if (vaultCollateralType !== CANISTER_IDS.ICP_LEDGER && !isNativeXrp && $walletStore.isConnected && $walletStore.principal) {
     // Fetch balance for this vault's collateral token
     const ct = vaultCollateralType;
     const ledger = vaultCollateralInfo?.ledgerCanisterId || ct;
@@ -629,12 +636,16 @@
     try {
       const result = await protocolService.withdrawPartialCollateral(vault.vaultId, amount, collateralDecimals);
       if (result.success) {
-        const msg = result.oisyResilient
-          ? `Withdrew ${amount} ${collateralSymbol} (wallet glitch ignored — operation confirmed on-chain).`
-          : `Withdrew ${amount} ${collateralSymbol}`;
+        // Native-XRP withdraw creates a settle-able XrpClaim (the XRP does NOT land in
+        // an IC wallet) — say so and don't refresh an IC-side balance that won't change.
+        const msg = isNativeXrp
+          ? `Withdrawal queued — a claim for ${amount} XRP was created. Settle it to your XRPL address in the Native XRP panel below.`
+          : result.oisyResilient
+            ? `Withdrew ${amount} ${collateralSymbol} (wallet glitch ignored — operation confirmed on-chain).`
+            : `Withdrew ${amount} ${collateralSymbol}`;
         toastStore.success(msg, 8000); withdrawAmount = '';
         await vaultStore.refreshVault(vault.vaultId);
-        walletStore.refreshBalance({ skipCache: true });
+        if (!isNativeXrp) walletStore.refreshBalance({ skipCache: true });
         dispatch('updated');
       } else { toastStore.error(result.error || 'Failed', 8000); }
     } catch (err) { toastStore.error(err instanceof Error ? err.message : 'Unknown error', 8000);
@@ -685,7 +696,11 @@
         result = await protocolManager.repayToVaultWithStable(vault.vaultId, amount, repayTokenType);
       }
       if (result.success) {
-        const actionLabel = isRepayAndClose ? 'Repaid and closed vault' : `Repaid ${amount} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}`;
+        const actionLabel = isRepayAndClose
+          ? (isNativeXrp
+              ? 'Repaid and closed vault — a claim for your XRP was created; settle it in the Native XRP panel below'
+              : 'Repaid and closed vault')
+          : `Repaid ${amount} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}`;
         const msg = result.oisyResilient
           ? `${actionLabel} (wallet glitch ignored — operation confirmed on-chain).`
           : actionLabel;
@@ -718,12 +733,14 @@
     try {
       const result = await protocolService.withdrawCollateralAndCloseVault(vault.vaultId);
       if (result.success) {
-        const msg = result.oisyResilient
-          ? 'Vault closed. Collateral returned. (Wallet glitch ignored — confirmed on-chain.)'
-          : 'Vault closed. Collateral returned.';
+        const msg = isNativeXrp
+          ? 'Vault closed — a claim for your XRP was created. Settle it to your XRPL address in the Native XRP panel below.'
+          : result.oisyResilient
+            ? 'Vault closed. Collateral returned. (Wallet glitch ignored — confirmed on-chain.)'
+            : 'Vault closed. Collateral returned.';
         toastStore.success(msg, 8000);
         await vaultStore.refreshVaults();
-        walletStore.refreshBalance({ skipCache: true });
+        if (!isNativeXrp) walletStore.refreshBalance({ skipCache: true });
         dispatch('updated');
       } else { toastStore.error(result.error || 'Failed', 8000); }
     } catch (err) { toastStore.error(err instanceof Error ? err.message : 'Unknown error', 8000);
@@ -802,8 +819,13 @@
         <!-- Pill groups: right column -->
         <div class="pill-groups">
           <div class="pill-group pill-group-collateral">
-            <button class="pill pill-collateral" class:pill-active-collateral={activeAction === 'add'}
-              on:click={() => selectAction('add')} disabled={isProcessing}>Deposit</button>
+            {#if !isNativeXrp}
+              <!-- Native-XRP has no IC-side top-up: add_margin is backend-rejected
+                   ("uses the XRP deposit flow"), so don't offer a Deposit that errors.
+                   New XRP collateral is funded via the Native XRP panel's open flow. -->
+              <button class="pill pill-collateral" class:pill-active-collateral={activeAction === 'add'}
+                on:click={() => selectAction('add')} disabled={isProcessing}>Deposit</button>
+            {/if}
             <button class="pill pill-collateral" class:pill-active-collateral={activeAction === 'withdraw'}
               class:pill-disabled={maxWithdrawable <= 0 && tickingDebt > 0}
               on:click={() => selectAction('withdraw')} disabled={isProcessing || (maxWithdrawable <= 0 && tickingDebt > 0)}>Withdraw</button>

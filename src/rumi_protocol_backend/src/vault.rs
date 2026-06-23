@@ -940,6 +940,33 @@ pub async fn open_xrp_vault() -> Result<XrpVaultOpenInfo, ProtocolError> {
         }
     }
 
+    // Hardening (P3/P4 review): bound per-caller pending deposits so a caller can't
+    // spam unfunded opens (each would consume a vault_id + a threshold derivation +
+    // a persisted state entry).
+    const MAX_XRP_PENDING_PER_CALLER: usize = 10;
+    // Global cap bounds total persisted pending-deposit state (and the O(N) per-caller
+    // scan below) across all callers — safe (refuses NEW opens when full; never
+    // orphans an existing entry, unlike a TTL prune of a maybe-funded deposit).
+    const MAX_XRP_PENDING_GLOBAL: usize = 10_000;
+    let (global_pending, caller_pending) = read_state(|s| {
+        (
+            s.xrp_pending_deposits.len(),
+            s.xrp_pending_deposits.values().filter(|d| d.owner == caller).count(),
+        )
+    });
+    if global_pending >= MAX_XRP_PENDING_GLOBAL {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(
+            "XRP deposit staging is full; please retry after pending deposits clear.".to_string(),
+        ));
+    }
+    if caller_pending >= MAX_XRP_PENDING_PER_CALLER {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(
+            "Too many open XRP deposits; confirm or settle existing ones first.".to_string(),
+        ));
+    }
+
     // Reserve a vault_id (also the threshold-derivation nonce). A derive failure
     // below just leaves a gap in the id sequence, which is harmless.
     let vault_id = mutate_state(|s| s.increment_vault_id());
@@ -1166,6 +1193,21 @@ fn queue_collateral_payout(
             },
         );
     }
+}
+
+/// P5: true iff `vault_id` is a native-XRP-collateral vault (custody on the XRP
+/// Ledger). Such vaults are excluded from AUTOMATED liquidation (the unhealthy-vault
+/// scan + the stability-pool / bot entry points): the SP and bot cannot settle an
+/// XrpClaim, so native-XRP is liquidated only MANUALLY by an external liquidator who
+/// provides an XRP address (via liquidate_vault_partial / partial_liquidate_vault).
+pub fn vault_is_native_xrp(vault_id: u64) -> bool {
+    read_state(|s| {
+        s.vault_id_to_vaults
+            .get(&vault_id)
+            .and_then(|v| s.get_collateral_config(&v.collateral_type))
+            .map(|c| c.is_native_xrp())
+            .unwrap_or(false)
+    })
 }
 
 /// Pure: drops to actually send when settling a claim — the claimant bears the XRPL
@@ -3327,8 +3369,20 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
 
     // Send protocol's liquidation fee cut to treasury (fire-and-forget)
     if protocol_cut > 0 {
-        let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
-        crate::treasury::send_liquidation_fee_to_treasury(protocol_cut, vault.collateral_type, asset_type).await;
+        if vault.collateral_type == crate::state::xrp_collateral_principal() {
+            // P5: native-XRP protocol fee -> a developer-settleable XrpClaim (the
+            // ICRC treasury transfer cannot target the synthetic XRP ledger). Keyed
+            // by collateral_type (not a vault lookup, since the vault may already be
+            // drained/removed by cleanup_if_drained above).
+            let dev = read_state(|s| s.developer_principal);
+            let now_ns = ic_cdk::api::time();
+            mutate_state(|s| {
+                record_xrp_claim(s, dev, vault.owner, vault.vault_id, protocol_cut.to_u64().unwrap_or(0), now_ns);
+            });
+        } else {
+            let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
+            crate::treasury::send_liquidation_fee_to_treasury(protocol_cut, vault.collateral_type, asset_type).await;
+        }
     }
 
     // Step 4: Process transfer (same as complete liquidation)
@@ -3651,8 +3705,20 @@ pub async fn liquidate_vault_partial_with_stable(
 
     // Send protocol's liquidation fee cut to treasury (fire-and-forget)
     if protocol_cut > 0 {
-        let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
-        crate::treasury::send_liquidation_fee_to_treasury(protocol_cut, vault.collateral_type, asset_type).await;
+        if vault.collateral_type == crate::state::xrp_collateral_principal() {
+            // P5: native-XRP protocol fee -> a developer-settleable XrpClaim (the
+            // ICRC treasury transfer cannot target the synthetic XRP ledger). Keyed
+            // by collateral_type (not a vault lookup, since the vault may already be
+            // drained/removed by cleanup_if_drained above).
+            let dev = read_state(|s| s.developer_principal);
+            let now_ns = ic_cdk::api::time();
+            mutate_state(|s| {
+                record_xrp_claim(s, dev, vault.owner, vault.vault_id, protocol_cut.to_u64().unwrap_or(0), now_ns);
+            });
+        } else {
+            let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
+            crate::treasury::send_liquidation_fee_to_treasury(protocol_cut, vault.collateral_type, asset_type).await;
+        }
     }
 
     // Step 4: Process transfer
@@ -4039,8 +4105,20 @@ pub async fn liquidate_vault_debt_already_burned(
 
     // Send protocol's liquidation fee cut to treasury
     if protocol_cut > 0 {
-        let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
-        crate::treasury::send_liquidation_fee_to_treasury(protocol_cut, vault.collateral_type, asset_type).await;
+        if vault.collateral_type == crate::state::xrp_collateral_principal() {
+            // P5: native-XRP protocol fee -> a developer-settleable XrpClaim (the
+            // ICRC treasury transfer cannot target the synthetic XRP ledger). Keyed
+            // by collateral_type (not a vault lookup, since the vault may already be
+            // drained/removed by cleanup_if_drained above).
+            let dev = read_state(|s| s.developer_principal);
+            let now_ns = ic_cdk::api::time();
+            mutate_state(|s| {
+                record_xrp_claim(s, dev, vault.owner, vault.vault_id, protocol_cut.to_u64().unwrap_or(0), now_ns);
+            });
+        } else {
+            let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
+            crate::treasury::send_liquidation_fee_to_treasury(protocol_cut, vault.collateral_type, asset_type).await;
+        }
     }
 
     // Step 4: Process collateral transfer to stability pool
@@ -4367,8 +4445,20 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
 
     // Send protocol's liquidation fee cut to treasury (fire-and-forget)
     if protocol_cut > 0 {
-        let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
-        crate::treasury::send_liquidation_fee_to_treasury(protocol_cut, vault.collateral_type, asset_type).await;
+        if vault.collateral_type == crate::state::xrp_collateral_principal() {
+            // P5: native-XRP protocol fee -> a developer-settleable XrpClaim (the
+            // ICRC treasury transfer cannot target the synthetic XRP ledger). Keyed
+            // by collateral_type (not a vault lookup, since the vault may already be
+            // drained/removed by cleanup_if_drained above).
+            let dev = read_state(|s| s.developer_principal);
+            let now_ns = ic_cdk::api::time();
+            mutate_state(|s| {
+                record_xrp_claim(s, dev, vault.owner, vault.vault_id, protocol_cut.to_u64().unwrap_or(0), now_ns);
+            });
+        } else {
+            let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
+            crate::treasury::send_liquidation_fee_to_treasury(protocol_cut, vault.collateral_type, asset_type).await;
+        }
     }
 
     // Step 5: Attempt immediate transfer processing (best effort)
@@ -4855,8 +4945,20 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
 
     // Send protocol's liquidation fee cut to treasury (fire-and-forget)
     if protocol_cut > 0 {
-        let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
-        crate::treasury::send_liquidation_fee_to_treasury(protocol_cut, vault.collateral_type, asset_type).await;
+        if vault.collateral_type == crate::state::xrp_collateral_principal() {
+            // P5: native-XRP protocol fee -> a developer-settleable XrpClaim (the
+            // ICRC treasury transfer cannot target the synthetic XRP ledger). Keyed
+            // by collateral_type (not a vault lookup, since the vault may already be
+            // drained/removed by cleanup_if_drained above).
+            let dev = read_state(|s| s.developer_principal);
+            let now_ns = ic_cdk::api::time();
+            mutate_state(|s| {
+                record_xrp_claim(s, dev, vault.owner, vault.vault_id, protocol_cut.to_u64().unwrap_or(0), now_ns);
+            });
+        } else {
+            let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
+            crate::treasury::send_liquidation_fee_to_treasury(protocol_cut, vault.collateral_type, asset_type).await;
+        }
     }
 
     // Step 6: Attempt immediate transfer processing

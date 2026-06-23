@@ -375,8 +375,14 @@ function createAppDataStore() {
     },
 
     async _fetchUserVaultsFromAPI(principal: Principal): Promise<VaultDTO[]> {
-      // Import here to avoid circular dependencies  
+      // Import here to avoid circular dependencies
       const { ApiClient } = await import('../services/protocol/apiClient');
+      const { collateralStore } = await import('./collateralStore');
+      // Ensure collateral configs (decimals/symbol/price) are loaded BEFORE mapping
+      // vaults — getUserVaults divides raw collateral by 10^decimals from the store,
+      // so an empty store bakes a wrong scale (e.g. XRP at 8 instead of 6 decimals =>
+      // 100x off) and the synthetic-principal symbol fallback. Cached 30s, so cheap.
+      await collateralStore.fetchSupportedCollateral().catch(() => {});
       return ApiClient.getUserVaults(true); // Always force refresh from API
     },
 

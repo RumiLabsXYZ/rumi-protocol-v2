@@ -3456,6 +3456,14 @@ async fn stability_pool_liquidate(vault_id: u64, max_debt_to_liquidate: u64) -> 
     validate_liquidation_not_frozen()?;
     validate_price_for_liquidation()?;
     validate_freshness_for_vault(vault_id).await?;
+    // P5: native-XRP collateral is liquidated MANUALLY (claim-based) only; automated
+    // stability-pool / bot liquidation cannot settle an XrpClaim (would strand the
+    // seized XRP and burn SP depositors), so reject native-XRP here.
+    if rumi_protocol_backend::vault::vault_is_native_xrp(vault_id) {
+        return Err(ProtocolError::GenericError(
+            "Native-XRP collateral is liquidated manually (claim-based), not via the stability pool or bot".to_string(),
+        ));
+    }
     let caller = ic_cdk::api::caller();
 
     // Authorization: only the registered stability pool canister can call this
@@ -3543,6 +3551,14 @@ async fn stability_pool_liquidate_debt_burned(
     validate_liquidation_not_frozen()?;
     validate_price_for_liquidation()?;
     validate_freshness_for_vault(vault_id).await?;
+    // P5: native-XRP collateral is liquidated MANUALLY (claim-based) only; automated
+    // stability-pool / bot liquidation cannot settle an XrpClaim (would strand the
+    // seized XRP and burn SP depositors), so reject native-XRP here.
+    if rumi_protocol_backend::vault::vault_is_native_xrp(vault_id) {
+        return Err(ProtocolError::GenericError(
+            "Native-XRP collateral is liquidated manually (claim-based), not via the stability pool or bot".to_string(),
+        ));
+    }
     let caller = ic_cdk::api::caller();
 
     let is_stability_pool = read_state(|s| {
@@ -3587,6 +3603,14 @@ async fn stability_pool_liquidate_with_reserves(
     validate_liquidation_not_frozen()?;
     validate_price_for_liquidation()?;
     validate_freshness_for_vault(vault_id).await?;
+    // P5: native-XRP collateral is liquidated MANUALLY (claim-based) only; automated
+    // stability-pool / bot liquidation cannot settle an XrpClaim (would strand the
+    // seized XRP and burn SP depositors), so reject native-XRP here.
+    if rumi_protocol_backend::vault::vault_is_native_xrp(vault_id) {
+        return Err(ProtocolError::GenericError(
+            "Native-XRP collateral is liquidated manually (claim-based), not via the stability pool or bot".to_string(),
+        ));
+    }
     let caller = ic_cdk::api::caller();
 
     let is_stability_pool = read_state(|s| {
@@ -4039,6 +4063,124 @@ async fn settle_xrp_claim(claim_id: u64, destination: String) -> Result<String, 
     check_postcondition(
         rumi_protocol_backend::vault::settle_xrp_claim(claim_id, destination).await,
     )
+}
+
+/// P5 (native-XRP collateral): register XRP as a collateral (developer-gated). XRP
+/// has no IC ledger, so decimals (6 / drops) and fee (0) are NOT queried;
+/// custody_kind = NativeXrp routes deposits/payouts through the chains::xrp rail +
+/// the XrpClaim model. Params: 150% borrow / 133% liquidation / 12% penalty / $200
+/// debt ceiling; borrowing-fee + interest inherited from ICP. Calling this is the
+/// deliberate act that ACTIVATES the native-XRP rail — do NOT call on mainnet
+/// before the security audit.
+#[update]
+async fn register_xrp_collateral() -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if !read_state(|s| s.developer_principal == caller) {
+        return Err(ProtocolError::GenericError(
+            "Only the developer can register XRP collateral".to_string(),
+        ));
+    }
+    let xrp_ct = rumi_protocol_backend::state::xrp_collateral_principal();
+    if read_state(|s| s.collateral_configs.contains_key(&xrp_ct)) {
+        return Err(ProtocolError::GenericError(
+            "XRP collateral already registered".to_string(),
+        ));
+    }
+
+    // Inherit ICP's borrowing-fee + interest base ("same as ICP"); the dynamic
+    // curves are global / inherited (rate_curve = None inside the config builder).
+    let (icp_borrowing_fee, icp_interest_apr, recovery_mult) = read_state(|s| {
+        let icp_ct = s.icp_collateral_type();
+        let icp = s.get_collateral_config(&icp_ct);
+        (
+            icp.map(|c| c.borrowing_fee).unwrap_or(Ratio::from_f64(0.0)),
+            icp.map(|c| c.interest_rate_apr).unwrap_or(Ratio::from_f64(0.0)),
+            s.recovery_cr_multiplier,
+        )
+    });
+
+    let config = rumi_protocol_backend::state::xrp_collateral_config(
+        icp_borrowing_fee,
+        icp_interest_apr,
+        recovery_mult,
+    );
+
+    mutate_state(|s| {
+        event::record_add_collateral_type(s, xrp_ct, config);
+    });
+    // Price-fetch timer for XRP (XRC base_asset "XRP"), like any non-ICP collateral.
+    rumi_protocol_backend::xrc::register_collateral_price_timer(xrp_ct);
+    log!(
+        INFO,
+        "[register_xrp_collateral] Registered native-XRP collateral {} (150/133/12, $200 ceiling)",
+        xrp_ct
+    );
+    Ok(())
+}
+
+/// P5 observability: all native-XRP vaults still awaiting their on-chain deposit
+/// (created by `open_xrp_vault`, removed by `confirm_xrp_deposit`). Developer-gated
+/// read (returns empty for non-developers) — ops + the e2e harness use it to see
+/// the deposit-staging queue. Returns `(reserved_vault_id, pending)` pairs.
+#[candid_method(query)]
+#[query]
+fn get_xrp_pending_deposits() -> Vec<(u64, rumi_protocol_backend::state::XrpPendingDeposit)> {
+    let caller = ic_cdk::caller();
+    read_state(|s| {
+        if s.developer_principal != caller {
+            return Vec::new();
+        }
+        s.xrp_pending_deposits.iter().map(|(id, d)| (*id, d.clone())).collect()
+    })
+}
+
+/// P5 observability: all outstanding native-XRP claims (XRP owed out of a custody
+/// address — created on withdraw/close/liquidation, removed once `settle_xrp_claim`
+/// confirms the Payment validated). Developer-gated read (empty for non-developers).
+/// Ops + the frontend use this to know which claims still need settling.
+#[candid_method(query)]
+#[query]
+fn get_xrp_claims() -> Vec<(u64, rumi_protocol_backend::state::XrpClaim)> {
+    let caller = ic_cdk::caller();
+    read_state(|s| {
+        if s.developer_principal != caller {
+            return Vec::new();
+        }
+        s.xrp_claims.iter().map(|(id, c)| (*id, c.clone())).collect()
+    })
+}
+
+/// P5 (frontend): the caller's OWN native-XRP pending deposits (those whose vault
+/// the caller opened). Unlike `get_xrp_pending_deposits` (developer-gated, all
+/// users), this is the per-user read the UI uses to show "send XRP to this custody
+/// address" for a deposit it is still waiting on. Returns `(reserved_vault_id, pending)`.
+#[candid_method(query)]
+#[query]
+fn get_my_xrp_pending_deposits() -> Vec<(u64, rumi_protocol_backend::state::XrpPendingDeposit)> {
+    let caller = ic_cdk::caller();
+    read_state(|s| {
+        s.xrp_pending_deposits
+            .iter()
+            .filter(|(_, d)| d.owner == caller)
+            .map(|(id, d)| (*id, d.clone()))
+            .collect()
+    })
+}
+
+/// P5 (frontend): the caller's OWN outstanding native-XRP claims (those the caller
+/// is the `claimant` of — XRP owed to them from a withdraw/close/liquidation). The UI
+/// uses this to list claims the user can `settle_xrp_claim` to an XRPL address.
+#[candid_method(query)]
+#[query]
+fn get_my_xrp_claims() -> Vec<(u64, rumi_protocol_backend::state::XrpClaim)> {
+    let caller = ic_cdk::caller();
+    read_state(|s| {
+        s.xrp_claims
+            .iter()
+            .filter(|(_, c)| c.claimant == caller)
+            .map(|(id, c)| (*id, c.clone()))
+            .collect()
+    })
 }
 
 #[query]
@@ -4498,6 +4640,14 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
     // allowlist is ICP-only, live the moment a non-ICP collateral is added.
     validate_liquidation_not_frozen()?;
     validate_freshness_for_vault(vault_id).await?;
+    // P5: native-XRP collateral is liquidated MANUALLY (claim-based) only; automated
+    // stability-pool / bot liquidation cannot settle an XrpClaim (would strand the
+    // seized XRP and burn SP depositors), so reject native-XRP here.
+    if rumi_protocol_backend::vault::vault_is_native_xrp(vault_id) {
+        return Err(ProtocolError::GenericError(
+            "Native-XRP collateral is liquidated manually (claim-based), not via the stability pool or bot".to_string(),
+        ));
+    }
     let caller = ic_cdk::api::caller();
 
     let is_bot = read_state(|s| {

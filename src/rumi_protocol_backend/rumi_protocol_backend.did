@@ -1039,6 +1039,21 @@ type VaultsPageResponse = record {
   next_start_id : opt nat64;
 };
 type XrcAssetClass = variant { Cryptocurrency; FiatCurrency };
+type XrpClaim = record {
+  custody_nonce : nat64;
+  claimant : principal;
+  created_at_ns : nat64;
+  custody_owner : principal;
+  drops : nat64;
+  settlement : opt XrpSettlement;
+};
+type XrpPendingDeposit = record {
+  owner : principal;
+  custody_address : text;
+  opened_at_ns : nat64;
+  derivation_nonce : nat64;
+};
+type XrpSettlement = record { last_ledger_sequence : nat32; tx_hash : text };
 type XrpVaultOpenInfo = record { custody_address : text; vault_id : nat64 };
 service : (ProtocolArg) -> {
   add_collateral_token : (AddCollateralArg) -> (Result);
@@ -1124,6 +1139,10 @@ service : (ProtocolArg) -> {
   get_liquidity_status : (principal) -> (LiquidityStatus) query;
   get_manual_collateral_price : (nat32, text) -> (opt ManualPriceInfo) query;
   get_min_icusd_amount : () -> (nat64) query;
+  get_my_xrp_claims : () -> (vec record { nat64; XrpClaim }) query;
+  get_my_xrp_pending_deposits : () -> (
+      vec record { nat64; XrpPendingDeposit },
+    ) query;
   get_pending_amm1_donations_count : () -> (nat64) query;
   get_price_pusher_allowed : () -> (vec record { nat32; text }) query;
   get_price_pusher_principal : () -> (opt principal) query;
@@ -1164,6 +1183,10 @@ service : (ProtocolArg) -> {
   get_vault_interest_rate : (nat64) -> (Result_7) query;
   get_vaults : (opt principal) -> (vec CandidVault) query;
   get_vaults_page : (nat64, nat64) -> (VaultsPageResponse) query;
+  get_xrp_claims : () -> (vec record { nat64; XrpClaim }) query;
+  get_xrp_pending_deposits : () -> (
+      vec record { nat64; XrpPendingDeposit },
+    ) query;
   harvest_chain_interest : (nat32) -> (Result_1);
   http_request : (HttpRequest) -> (HttpResponse_1) query;
   icrc10_supported_standards : () -> (vec StandardRecord) query;
@@ -1191,6 +1214,7 @@ service : (ProtocolArg) -> {
   redeem_icp : (nat64) -> (Result_3);
   redeem_reserves : (nat64, opt principal) -> (Result_14);
   register_chain : (RegisterChainArg) -> (Result);
+  register_xrp_collateral : () -> (Result);
   repay_and_close_vault : (VaultArg) -> (Result_15);
   repay_to_vault : (VaultArg) -> (Result_1);
   repay_to_vault_with_stable : (VaultArgWithToken) -> (Result_1);

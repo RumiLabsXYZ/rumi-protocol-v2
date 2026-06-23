@@ -59,13 +59,17 @@ export interface ChainLiquidationConfigV1 {
   'max_swap_value_e8s' : bigint,
   'pair' : string,
   'max_price_age_ns' : bigint,
+  'fee_bps' : number,
   'restore_target_cr_e4' : bigint,
+  'max_dex_oracle_divergence_bps' : number,
   'enabled' : boolean,
   'collateral_token' : string,
+  'settle_stable_decimals' : number,
   'factory' : string,
   'slippage_cap_bps' : number,
   'router' : string,
   'settle_stable_token' : string,
+  'deadline_secs' : bigint,
 }
 export interface ChainSupplyReconciliation {
   'recorded_supply_e8s' : bigint,
@@ -1232,6 +1236,24 @@ export interface VaultsPageResponse {
 }
 export type XrcAssetClass = { 'Cryptocurrency' : null } |
   { 'FiatCurrency' : null };
+export interface XrpClaim {
+  'custody_nonce' : bigint,
+  'claimant' : Principal,
+  'created_at_ns' : bigint,
+  'custody_owner' : Principal,
+  'drops' : bigint,
+  'settlement' : [] | [XrpSettlement],
+}
+export interface XrpPendingDeposit {
+  'owner' : Principal,
+  'custody_address' : string,
+  'opened_at_ns' : bigint,
+  'derivation_nonce' : bigint,
+}
+export interface XrpSettlement {
+  'last_ledger_sequence' : number,
+  'tx_hash' : string,
+}
 export interface XrpVaultOpenInfo {
   'custody_address' : string,
   'vault_id' : bigint,
@@ -1296,6 +1318,7 @@ export interface _SERVICE {
     [number],
     [] | [ChainLiquidationConfigV1]
   >,
+  'get_chain_reserve_address' : ActorMethod<[number], Result_2>,
   'get_chain_settlement_address' : ActorMethod<[number], Result_2>,
   'get_chain_vault' : ActorMethod<[bigint], [] | [ChainVaultV1]>,
   'get_chains_ecdsa_key_name' : ActorMethod<[], string>,
@@ -1350,6 +1373,11 @@ export interface _SERVICE {
     [] | [ManualPriceInfo]
   >,
   'get_min_icusd_amount' : ActorMethod<[], bigint>,
+  'get_my_xrp_claims' : ActorMethod<[], Array<[bigint, XrpClaim]>>,
+  'get_my_xrp_pending_deposits' : ActorMethod<
+    [],
+    Array<[bigint, XrpPendingDeposit]>
+  >,
   'get_pending_amm1_donations_count' : ActorMethod<[], bigint>,
   'get_price_pusher_allowed' : ActorMethod<[], Array<[number, string]>>,
   'get_price_pusher_principal' : ActorMethod<[], [] | [Principal]>,
@@ -1395,6 +1423,11 @@ export interface _SERVICE {
   'get_vault_interest_rate' : ActorMethod<[bigint], Result_7>,
   'get_vaults' : ActorMethod<[[] | [Principal]], Array<CandidVault>>,
   'get_vaults_page' : ActorMethod<[bigint, bigint], VaultsPageResponse>,
+  'get_xrp_claims' : ActorMethod<[], Array<[bigint, XrpClaim]>>,
+  'get_xrp_pending_deposits' : ActorMethod<
+    [],
+    Array<[bigint, XrpPendingDeposit]>
+  >,
   'harvest_chain_interest' : ActorMethod<[number], Result_1>,
   'http_request' : ActorMethod<[HttpRequest], HttpResponse_1>,
   'icrc10_supported_standards' : ActorMethod<[], Array<StandardRecord>>,
@@ -1437,6 +1470,7 @@ export interface _SERVICE {
   'redeem_icp' : ActorMethod<[bigint], Result_3>,
   'redeem_reserves' : ActorMethod<[bigint, [] | [Principal]], Result_14>,
   'register_chain' : ActorMethod<[RegisterChainArg], Result>,
+  'register_xrp_collateral' : ActorMethod<[], Result>,
   'repay_and_close_vault' : ActorMethod<[VaultArg], Result_15>,
   'repay_to_vault' : ActorMethod<[VaultArg], Result_1>,
   'repay_to_vault_with_stable' : ActorMethod<[VaultArgWithToken], Result_1>,
