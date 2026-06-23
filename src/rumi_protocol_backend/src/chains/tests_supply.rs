@@ -315,9 +315,9 @@ fn reserve_shift_blocked_while_invariant_halted() {
 // into pending_chain_burn_e8s (RHS term-3), NOT reserve_backing_e8s (term-2). Two
 // guarded mutations, mirroring apply_debt_to_reserve_shift / apply_supply_delta:
 //   (1) absorb time: apply_debt_to_pending_burn_shift moves debt -> pending_burn,
-//       chain_supplies UNCHANGED (the eSpace burn has not landed yet).
-//   (2) eSpace-burn confirm: apply_pending_burn_to_supply_shift drops pending_burn
-//       AND chain_supplies together (the foreign supply actually dropped).
+//       chain_supplies UNCHANGED (foreign representation remains outstanding).
+//   (2) later manual reconciliation: apply_pending_burn_to_supply_shift drops
+//       pending_burn AND chain_supplies together (foreign supply retired).
 // Both conserve the unified RHS by construction.
 
 use super::supply::{
@@ -339,7 +339,7 @@ fn pending_burn_shift_moves_debt_to_pending_and_preserves_invariant() {
 
     assert_eq!(s.chain_vaults[&1].debt_e8s, 60, "vault debt reduced by absorbed amount");
     assert_eq!(s.pending_chain_burn_e8s[&CHAIN], 40, "pending_chain_burn booked the absorbed debt");
-    assert_eq!(s.chain_supplies[&CHAIN], 100, "chain_supplies UNCHANGED (eSpace burn not yet confirmed)");
+    assert_eq!(s.chain_supplies[&CHAIN], 100, "chain_supplies UNCHANGED (foreign representation remains outstanding)");
     // post: 100 == 60 (debt) + 0 (reserve) + 40 (pending) -> invariant still holds
     assert_eq!(check_invariant(&s, s.total_chain_vault_debt_e8s()), Ok(()));
 }
@@ -391,7 +391,7 @@ fn pending_burn_shift_blocked_while_invariant_halted() {
     assert_eq!(s.chain_vaults[&1].debt_e8s, 100, "no mutation while halted");
 }
 
-// (2a) confirm: pending_burn AND chain_supplies both drop, invariant preserved.
+// (2a) reconcile: pending_burn AND chain_supplies both drop, invariant preserved.
 #[test]
 fn pending_burn_to_supply_drops_both_and_preserves_invariant() {
     let mut s = fixture_state();
@@ -401,11 +401,11 @@ fn pending_burn_to_supply_drops_both_and_preserves_invariant() {
     s.pending_chain_burn_e8s.insert(CHAIN, 40);
     assert_eq!(check_invariant(&s, s.total_chain_vault_debt_e8s()), Ok(()));
 
-    // The eSpace burn of 40 confirms.
+    // The operator has retired 40 of the foreign representation.
     apply_pending_burn_to_supply_shift(&mut s, CHAIN, 40).expect("pending-burn -> supply shift");
 
     assert_eq!(s.pending_chain_burn_e8s[&CHAIN], 0, "pending_chain_burn drained");
-    assert_eq!(s.chain_supplies[&CHAIN], 60, "chain_supplies dropped (real eSpace burn observed)");
+    assert_eq!(s.chain_supplies[&CHAIN], 60, "chain_supplies dropped (foreign representation retired)");
     // post: 60 == 60 (debt) + 0 (reserve) + 0 (pending) -> invariant still holds
     assert_eq!(check_invariant(&s, s.total_chain_vault_debt_e8s()), Ok(()));
 }

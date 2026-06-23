@@ -1,6 +1,6 @@
 # Chains-Rail Liquidation — Increment 4: Tier-2 ICP Stability Pool fallback
 
-Status: PLANNED (not started)
+Status: IN PROGRESS (Task 1 complete; plan corrected after burn-model review)
 Branch: `feat/chains-liquidation-inc4` (off merged `main` @ 67851b9)
 Spec: `docs/superpowers/specs/2026-06-19-chains-liquidation-design.md` §5–§6 + Appendix
 Surface map: workflow `wf_89c8bba2-ef9` (6 readers; file:line anchors below are post-Inc-3).
@@ -23,9 +23,13 @@ No existing depositor's risk profile changes silently. Reversible (can flip to o
 
 1. **Debt + supply (IC-side, synchronous at absorb).** SP burns IC icUSD → backend writes
    down `debt_e8s` and moves the amount into `pending_chain_burn_e8s` (NOT `chain_supplies`,
-   NOT `reserve_backing`) + enqueues an eSpace `Burn` op. When that Burn confirms at finality,
-   `pending_chain_burn` AND `chain_supplies` drop together. Decoupled (option A): the vault
-   reopens the instant debt is absorbed, independent of the slow eSpace leg.
+   NOT `reserve_backing`). There is **no automatic foreign-chain burn in Inc 4**: the eSpace
+   ERC-20 `burn(uint256,uint64)` can only burn the caller's own balance, and the protocol cannot
+   forcibly burn icUSD from the liquidated user's eSpace wallet. `pending_chain_burn` is the
+   durable backing/accounting term for "IC-side supply has already been burned; foreign
+   representation retirement is a later reconciliation step." A later Inc 5 manual settlement
+   can consume `pending_chain_burn` when an operator has acquired/bridged the foreign icUSD and
+   retired that representation.
 2. **Collateral (EVM-side, async).** Seized CFX stays in the vault's per-vault custody.
    Record a `ChainLiqClaimV1`; depositors pull via `claim_cfx` → backend `claim_chain_collateral`
    → a custody-signed payout op.
@@ -47,9 +51,10 @@ helper (never a raw map insert) or a single tick of imbalance false-halts the ch
   Vault #3). Add `chain_liquidation_claims` as a `#[serde(default)]` field on V6 (mirror how Inc 3
   added `chain_bad_debt_e8s`). NO V7. Gate: a V5→V6 + V6→V6 round-trip decode test (existing pattern).
 - **`SettlementOpKind`** is internal CBOR (NOT on the candid surface — confirmed by Inc 2's inert
-  LiquidationSwap). Add a NEW variant `EspaceBurn { vault_id, amount_e8s }` (do NOT mutate the dead
-  `Burn { amount_e8s }` variant — variant-add is additive-safe, field-add is a UPG hazard). Compiler
-  will force new match arms in EVM settlement, Solana settlement, and recovery.rs.
+  LiquidationSwap). Inc 4 does **not** activate the existing dead `Burn { amount_e8s }` variant and
+  does **not** add an automatic `EspaceBurn` variant. Foreign representation retirement belongs to
+  Inc 5's manual reconciliation flow, because the current eSpace `IcUSD.sol::burn` can only burn the
+  caller's own balance.
 - **stability_pool state** = Candid `Encode!/Decode!` (raw blob + `try_decode_state` V-fallback).
   Per the hard rule, serde(default) does NOT save Candid Decode! on a missing NON-Option field.
   Add new `DepositPosition` fields as `Option<...>` `#[serde(default)]` (the PROVEN additive pattern
@@ -60,7 +65,7 @@ helper (never a raw map insert) or a single tick of imbalance false-halts the ch
 
 ## Implementation decisions (grounded in spec; not user-facing forks)
 
-- **SP burns icUSD** by `icrc1_transfer` to the icUSD ledger minting account
+- **SP burns IC-native icUSD** by `icrc1_transfer` to the icUSD ledger minting account
   (`icrc1_minting_account`) with the `RUMI-LIQ-004:<vault_id BE>` memo, capturing the block index
   for the `SpWritedownProof`. Draw restricted to **icUSD only** in v1 (spec §6.6 resolved: icUSD-only).
 - **Trigger = dev-gated manual** for v1 (matches experimental/disabled posture; spec §7 "manual = a
@@ -83,84 +88,77 @@ Each task: write the failing test first, implement, `cargo test` green, commit.
 **Backend — invariant + settlement primitives**
 1. `apply_debt_to_pending_burn_shift(state, chain, vault_id, burned_e8s)` (supply.rs) — clone of
    `apply_debt_to_reserve_shift`; debt→pending_chain_burn, supply untouched; same halt/cap/pre-RHS-check.
-   `apply_pending_burn_to_supply_shift(state, chain, amt)` — pending_burn-=amt AND chain_supplies-=amt
-   together. Pure property tests: invariant conserved; underflow fail-closed.
-2. `SettlementOpKind::EspaceBurn { vault_id, amount_e8s }` + `MonadTxKind::Burn { contract, amount_e8s,
-   vault_id }` + `encode_burn_calldata` (verify the IcUSD.sol burn selector/args; reference-vector test)
-   + `TxPlanKind::Burn`. Compiler-forced match arms in EVM/Solana settlement + recovery.rs.
-3. Activate the Burn op: `build_tx_plan` Burn arm; `resolve_op_signer` Burn arm (minter/settlement
-   signer — verify IcUSD.sol burn auth); replace the `submit_op` fail-up-front stub; `confirm_op`
-   success arm (get_logs BURN_EVENT_TOPIC0 → `decode_burn_log` (exists, carries vault_id) → exact
-   tx-hash match → `apply_pending_burn_to_supply_shift`); revert/never-mined arm = retryable (NOT
-   escalate), leave to `resubmit_if_stuck` (Burn stays NON-excluded). Aged-pending alarm getter
-   (App-finding-4 dead-letter).
-4. `deposit_watch` backstop no-debt gate: change `total_chain_vault_debt_e8s()==0` →
-   `... == 0 && total_pending_chain_burn_e8s()==0` (failing test first — a Burn mid-flight must keep scanning).
+   `apply_pending_burn_to_supply_shift(state, chain, amt)` is retained as the future Inc 5 manual
+   settlement primitive (pending_burn-=amt AND chain_supplies-=amt together). Pure property tests:
+   invariant conserved; underflow fail-closed. **DONE in commit `6f0b16f`.**
+2. `deposit_watch` backstop no-debt gate: change `total_chain_vault_debt_e8s()==0` →
+   `... == 0 && total_pending_chain_burn_e8s()==0` (failing test first — a pending-burn balance means
+   foreign representation is still outstanding, so the burn watcher/reconciliation should not go idle).
 
 **Backend — claim record + SP-facing entries**
-5. `ChainLiqClaimV1 { vault_id, chain, custody_address, seized_native_total, paid_native }` +
+3. `ChainLiqClaimV1 { vault_id, chain, custody_address, seized_native_total, paid_native }` +
    `chain_liquidation_claims: BTreeMap<u64, ChainLiqClaimV1>` (#[serde(default)] on V6) + V5→V6/V6→V6
    round-trip decode test. Custody-claim invariant helper (`paid_native <= seized_native_total`).
-6. `ChainCollateralPayout { recipient, amount_e18, vault_id }` op + custody signer (reuse arm) +
+4. `ChainCollateralPayout { recipient, amount_e18, vault_id }` op + custody signer (reuse arm) +
    confirm (increment `paid_native`, do NOT close vault) + revert (re-credit SP via callback, NOT vault).
-7. `stability_pool_liquidate_chain_vault(vault_id, icusd_burned_e8s, proof, depositor_evm_claims)`
+5. `stability_pool_liquidate_chain_vault(vault_id, icusd_burned_e8s, proof, depositor_evm_claims)`
    #[update] — clone main.rs:3537 SP-caller gate; chains gates (invariant_halted/reorg_halted reject +
    fresh manual CFX price via `fresh_chain_price_e8`, NOT `validate_freshness_for_vault`); ChainVault
    per-vault guard; precondition `pending_liquidation.is_none()` + `sp_attempted` membership; TOCTOU
    live-debt re-read; `burned=min(req, live_debt)` (un-refundable — burn EXACTLY capped);
-   `apply_debt_to_pending_burn_shift`; enqueue EspaceBurn op; reserve CFX; record ChainLiqClaimV1; set
-   marker tier=StabilityPool, op_id=burn op id; emit ChainVaultLiquidated{tier:StabilityPool}; ONE shot
+   `apply_debt_to_pending_burn_shift`; reserve CFX; record ChainLiqClaimV1; emit
+   ChainVaultLiquidated{tier:StabilityPool}; ONE shot
    (on any failure insert sp_attempted, NO retry); verify burn proof via `fetch_and_validate_block`.
-8. `claim_chain_collateral(claimer, owed_wei, dest_evm)` #[update] — SP-caller gated; validate dest_evm
+6. `claim_chain_collateral(claimer, owed_wei, dest_evm)` #[update] — SP-caller gated; validate dest_evm
    (`is_valid_evm_address`) before mutation; enqueue ChainCollateralPayout; increment paid_native;
    Duplicate idempotency.
-9. Discovery: add `sp_attempted: bool` (+ chain + sentinel) to `ChainLiquidatableVault` so the SP/UI
+7. Discovery: add `sp_attempted: bool` (+ chain + sentinel) to `ChainLiquidatableVault` so the SP/UI
    distinguishes never-tried from bot-failed-needs-SP (get_chain_liquidatable_vaults already surfaces
    bot-failed vaults: marker None + CR<threshold).
 
 **stability_pool canister**
-10. `DepositPosition.cfx_claims: Option<BTreeMap<Principal, u128>>` (#[serde(default)]) + update
+8. `DepositPosition.cfx_claims: Option<BTreeMap<Principal, u128>>` (#[serde(default)]) + update
     `new()` + fix `is_empty()` to count cfx_claims (silent-loss landmine at state.rs:818 retain) +
     old→new Candid round-trip decode test (escalate to V2 snapshot only if it fails).
-11. CFX opt-IN: `opted_in_chain_collateral: Option<BTreeSet<Principal>>` on DepositPosition +
+9. CFX opt-IN: `opted_in_chain_collateral: Option<BTreeSet<Principal>>` on DepositPosition +
     `chain_collateral_sentinels: BTreeSet<Principal>` on state + `is_opted_in_for_chain(sentinel)`
     predicate + `opt_in_cfx`/`opt_out_cfx` state methods + #[update] endpoints (SpLiquidationGuard
     busy-guard, mirror lib.rs:147-175). Branch the 3 consumers (`effective_pool_for_collateral`,
     `compute_token_draw`, the new u128 gains sibling) to use the opt-in predicate for sentinels;
     keep default-in/opt-out for all non-sentinel collaterals.
-12. `process_chain_liquidation_gains_at` (u128 sibling of state.rs:678) crediting `cfx_claims` +
+10. `process_chain_liquidation_gains_at` (u128 sibling of state.rs:678) crediting `cfx_claims` +
     wrapper + `mark_cfx_claimed` (u128). Property test: $1–3k CFX seizure (~1e22 wei) credited with NO
     truncation; dust to first opted-in depositor.
-13. CFX sentinel: deterministic-from-chain_id principal helper (stable across upgrades, never collides
+11. CFX sentinel: deterministic-from-chain_id principal helper (stable across upgrades, never collides
     with a real ledger) + register via `register_collateral` (CollateralInfo{symbol:"CFX", decimals:18,
     status:Active}) + add to `chain_collateral_sentinels`. Exclude the sentinel from `validate_state`'s
     aggregate==ledger check (SP never physically holds CFX).
-14. SP icUSD-burn capability: burn icUSD (transfer to `icrc1_minting_account` with RUMI-LIQ-004 memo),
+12. SP icUSD-burn capability: burn IC-native icUSD (transfer to `icrc1_minting_account` with RUMI-LIQ-004 memo),
     capture block index. icUSD-only draw filter (v1).
-15. `sp_absorb_chain_vault(vault_id)` dev-gated #[update] orchestrator: coverage gate
+13. `sp_absorb_chain_vault(vault_id)` dev-gated #[update] orchestrator: coverage gate
     `effective_pool_for_collateral(cfx_sentinel) >= debt`; compute icUSD draw; burn; build proof; call
     backend `stability_pool_liquidate_chain_vault` under SpLiquidationGuard (ONE shot, no retry);
     credit `cfx_claims` u128 pro-rata on success; on failure → vault stays sp_attempted → Tier-3 manual.
-16. `claim_cfx(sentinel, dest_evm)` #[update] — clone `claim_collateral`; SP-102 busy guard; validate
+14. `claim_cfx(sentinel, dest_evm)` #[update] — clone `claim_collateral`; SP-102 busy guard; validate
     EVM addr before mutation; deduct-before-async on cfx_claims (u128, zero first); call backend
     `claim_chain_collateral`; rollback on Err except Duplicate. Backend revert callback re-credits.
 
 **Integration + ship**
-17. PocketIC e2e (bot→SP escalation): bot swap fails → vault bot-failed (marker cleared, collateral
+15. PocketIC e2e (bot→SP escalation): bot swap fails → vault bot-failed (marker cleared, collateral
     restored, sp_attempted set) → depositor opts into CFX → dev `sp_absorb_chain_vault` → debt→
-    pending_chain_burn, EspaceBurn enqueued, supply unchanged, invariant holds, vault reopens → Burn
-    confirms → pending_chain_burn→chain_supplies decrement → ChainLiqClaimV1 recorded → cfx_claims (u128)
+    pending_chain_burn, supply unchanged, invariant holds, vault reopens → ChainLiqClaimV1 recorded → cfx_claims (u128)
     credited pro-rata → claim_cfx → ChainCollateralPayout → confirm → paid_native bumped. Assert NO
     false-halt at any tick. Plus: no-retry (failed absorb → manual), over-burn cap, double-settle reject,
     zero-opt-in coverage → clean escalate-to-manual (finding #18), claim-revert re-credit.
-18. Candid regen + breaking-change check (additive) + full verification (lib/bin/all PocketIC suites)
+16. Candid regen + breaking-change check (additive) + full verification (lib/bin/all PocketIC suites)
     + plan/memory update + PR vs main. STOP. Ask before merge/deploy.
 
 ## Folded adversarial findings (spec Appendix)
 #1/#16/#19 over-burn clamp to live debt; #18 zero-opt-in → clean manual escalation (Rob's opt-in makes
 this explicit); #26/#36 sp_attempted set-on-dispatch + CR-prune (prune already CR-derivable, better than
-ICP); double-settle window (marker precondition); pending_chain_burn-stuck-forever (Burn retryable at
-settlement layer + aged-pending alarm, never an SP retry); discovery gap (sp_attempted flag on the DTO).
+ICP); double-settle window (marker precondition); pending_chain_burn-stuck-forever is handled by making
+it a durable reconciliation obligation for Inc 5 rather than a retry loop; discovery gap (sp_attempted
+flag on the DTO).
 
 ## What ships
 All write paths dev-gated; CFX sentinel inert until opt-in; no chain liquidation config enabled.

@@ -268,14 +268,15 @@ pub enum PendingBurnShiftError {
 
 /// Tier-2 SP-path absorb accounting (spec 5.3, 6.1 option A): atomically move
 /// `burned_e8s` of a vault's debt into the chain's pending-burn term (the SP has
-/// burned IC-native icUSD, but the matching eSpace burn has not confirmed yet, so
-/// `chain_supplies` is UNCHANGED). This is the SP analogue of
+/// burned IC-native icUSD, while the foreign-chain icUSD representation remains
+/// outstanding, so `chain_supplies` is UNCHANGED). This is the SP analogue of
 /// `apply_debt_to_reserve_shift`: it moves debt -> `pending_chain_burn_e8s`
 /// instead of -> `reserve_backing_e8s`. It conserves `debt + pending`, so the
 /// unified invariant (debt + reserve + pending) is preserved BY CONSTRUCTION; the
 /// pre-apply check is a defensive assert that catches pre-existing drift (no
-/// mutation on rejection). The paired `apply_pending_burn_to_supply_shift` drops
-/// both terms when the eSpace `Burn` op confirms at finality.
+/// mutation on rejection). The paired `apply_pending_burn_to_supply_shift` is the
+/// later manual-reconciliation primitive: it drops both terms when the foreign
+/// representation is actually retired.
 pub fn apply_debt_to_pending_burn_shift(
     state: &mut MultiChainState,
     chain: ChainId,
@@ -346,11 +347,11 @@ pub enum PendingBurnSupplyShiftError {
     InvariantBroken { sum_supplies: u128, rhs: u128 },
 }
 
-/// Tier-2 SP-path eSpace-burn confirm accounting (spec 5.3, 6.1 option A):
+/// Tier-2 SP-path foreign-representation retirement accounting (spec 5.3):
 /// atomically drop `amount_e8s` from BOTH the chain's `pending_chain_burn_e8s` and
-/// its `chain_supplies` when the eSpace `Burn` op confirms at finality (the real
-/// foreign-supply burn has now landed). Both sides of the unified invariant drop by
-/// the same amount, so it is preserved BY CONSTRUCTION. Mirrors
+/// its `chain_supplies` after the protocol has acquired and retired the foreign
+/// icUSD representation. Both sides of the unified invariant drop by the same
+/// amount, so it is preserved BY CONSTRUCTION. Mirrors
 /// `apply_debt_to_pending_burn_shift`'s single-guarded-mutate discipline (no
 /// mutation on any rejection). The `pending_chain_burn` entry is kept at 0 for audit.
 pub fn apply_pending_burn_to_supply_shift(

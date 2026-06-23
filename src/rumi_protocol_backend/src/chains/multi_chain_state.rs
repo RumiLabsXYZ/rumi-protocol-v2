@@ -495,10 +495,12 @@ pub struct MultiChainStateV6 {
     /// invariant RHS. Empty until Increment 2.
     #[serde(default)]
     pub reserve_usdc_native: BTreeMap<ChainId, u128>,
-    /// SP-path debt mid-burn per chain (e8s): the SP has absorbed it (icUSD
-    /// burned IC-side) but the matching eSpace burn is not yet confirmed. RHS
-    /// term-3 of the unified supply invariant. Moves to a `chain_supplies`
-    /// decrement when the eSpace Burn op confirms. Empty until Increment 4.
+    /// SP-path IC-side burn backing per chain (e8s): the SP has absorbed debt
+    /// by burning IC-native icUSD, while the foreign-chain icUSD representation
+    /// remains outstanding. RHS term-3 of the unified supply invariant. Later
+    /// manual reconciliation can consume this term together with a
+    /// `chain_supplies` decrement after the protocol acquires and retires the
+    /// foreign representation. Empty until Increment 4.
     #[serde(default)]
     pub pending_chain_burn_e8s: BTreeMap<ChainId, u128>,
     /// Chains analog of the ICP `sp_attempted_vaults`: vaults whose bot
