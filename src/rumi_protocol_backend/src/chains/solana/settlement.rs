@@ -179,9 +179,15 @@ pub async fn run_settlement(chain: ChainId) {
 async fn submit_op(chain: ChainId, op_id: u64, op: SettlementOp) {
     // A Burn op is never signable in M2 - burns are user-initiated on-chain. Fail
     // it up front (no RPC), mirroring Monad. Task 12: an InterestMint can never be
-    // enqueued on a Solana queue (interest harvest is EVM-only), but fail it
-    // defensively too so a stray op can never wedge the worker.
-    if matches!(op.kind, SettlementOpKind::Burn { .. } | SettlementOpKind::InterestMint { .. }) {
+    // enqueued on a Solana queue (interest harvest is EVM-only), and CFX claim
+    // payouts are EVM-custody only. Fail unsupported ops defensively so a stray
+    // op can never wedge the worker.
+    if matches!(
+        op.kind,
+        SettlementOpKind::Burn { .. }
+            | SettlementOpKind::InterestMint { .. }
+            | SettlementOpKind::ChainCollateralPayout { .. }
+    ) {
         let now = ic_cdk::api::time();
         let reason = "op not signable on Solana in M2 (burns/interest-mints handled elsewhere)".to_string();
         mutate_state(|s| {
@@ -282,7 +288,8 @@ async fn submit_op(chain: ChainId, op_id: u64, op: SettlementOp) {
         }
         SettlementOpKind::Burn { .. }
         | SettlementOpKind::InterestMint { .. }
-        | SettlementOpKind::LiquidationSwap { .. } => {
+        | SettlementOpKind::LiquidationSwap { .. }
+        | SettlementOpKind::ChainCollateralPayout { .. } => {
             // Unreachable: handled (marked Failed) at the top of this fn.
             return;
         }
@@ -525,7 +532,8 @@ fn confirm_succeeded(
         }
         SettlementOpKind::Burn { .. }
         | SettlementOpKind::InterestMint { .. }
-        | SettlementOpKind::LiquidationSwap { .. } => {
+        | SettlementOpKind::LiquidationSwap { .. }
+        | SettlementOpKind::ChainCollateralPayout { .. } => {
             // Unreachable: Burn/InterestMint ops are marked Failed on the submit
             // path and never go Inflight. Log defensively rather than panic.
             log!(INFO, "[solana settlement chain={:?}] inflight non-signable op {} reached confirm path unexpectedly", chain, op_id);
@@ -584,7 +592,8 @@ fn confirm_reverted(chain: ChainId, op_id: u64, op: &SettlementOp, signature: &s
             }
             SettlementOpKind::Burn { .. }
         | SettlementOpKind::InterestMint { .. }
-        | SettlementOpKind::LiquidationSwap { .. } => {}
+        | SettlementOpKind::LiquidationSwap { .. }
+        | SettlementOpKind::ChainCollateralPayout { .. } => {}
         }
         if let Some(o) = s
             .multi_chain
@@ -613,7 +622,8 @@ fn confirm_reverted(chain: ChainId, op_id: u64, op: &SettlementOp, signature: &s
             }
             SettlementOpKind::Burn { .. }
         | SettlementOpKind::InterestMint { .. }
-        | SettlementOpKind::LiquidationSwap { .. } => {}
+        | SettlementOpKind::LiquidationSwap { .. }
+        | SettlementOpKind::ChainCollateralPayout { .. } => {}
         }
     }
 }

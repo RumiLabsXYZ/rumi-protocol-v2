@@ -428,6 +428,7 @@ pub async fn run_settlement(chain: ChainId) {
 enum TxPlanKind {
     Mint,
     NativeWithdrawal,
+    ChainCollateralPayout,
     /// Task 12: an interest-realization mint (to the treasury). Submit-path logs
     /// it; the authoritative record is `ChainInterestMinted` on confirm.
     InterestMint,
@@ -521,6 +522,23 @@ fn build_tx_plan(
                 kind: TxPlanKind::NativeWithdrawal,
             })
         }
+        SettlementOpKind::ChainCollateralPayout { recipient, amount_e18, vault_id, .. } => {
+            let value = withdrawal_value.unwrap_or(*amount_e18);
+            let fields = tx::build_eip1559_fields(
+                chain.0 as u64,
+                tx::MonadTxKind::NativeWithdrawal { recipient, amount_wei: value },
+                nonce,
+                prio,
+                max_fee,
+            )?;
+            Ok(TxPlan {
+                fields,
+                vault_id: *vault_id,
+                recipient: recipient.clone(),
+                amount: value,
+                kind: TxPlanKind::ChainCollateralPayout,
+            })
+        }
         SettlementOpKind::InterestMint { vault_id, mint_id, amount_e8s, recipient, .. } => {
             // Task 12: identical IcUSD.mint calldata to a normal Mint, but the
             // on-chain `vault_id` arg is the SYNTHETIC `mint_id` (the real vault
@@ -579,7 +597,8 @@ async fn resolve_op_signer(
         SettlementOpKind::Mint { .. } => tecdsa::cached_settlement_address(chain).await,
         // Task 12: interest mints are signed by the minter, same as a vault mint.
         SettlementOpKind::InterestMint { .. } => tecdsa::cached_settlement_address(chain).await,
-        SettlementOpKind::NativeWithdrawal { vault_id, .. } => {
+        SettlementOpKind::NativeWithdrawal { vault_id, .. }
+        | SettlementOpKind::ChainCollateralPayout { vault_id, .. } => {
             let vid = *vault_id;
             let info = read_state(|s| {
                 s.multi_chain
@@ -588,7 +607,7 @@ async fn resolve_op_signer(
                     .map(|v| (v.owner, v.custody_address.clone()))
             });
             let (owner, custody_addr) =
-                info.ok_or_else(|| format!("withdrawal signer: unknown vault {vid}"))?;
+                info.ok_or_else(|| format!("custody signer: unknown vault {vid}"))?;
             // The op's `chain` IS the vault's collateral chain (settlement queues
             // are keyed by chain), so re-derive the custody path on it.
             let path = tecdsa::custody_derivation_path(chain, owner, vid);
@@ -788,10 +807,14 @@ async fn submit_op(
     //    can also pay gas (a full close requests the entire custody balance).
     //    Read the custody balance ONCE here; the value is recomputed identically
     //    on a stuck-tx resubmit. Mints don't carry a value, so skip the read.
-    let withdrawal_value = if matches!(op.kind, SettlementOpKind::NativeWithdrawal { .. }) {
+    let withdrawal_value = if matches!(
+        op.kind,
+        SettlementOpKind::NativeWithdrawal { .. } | SettlementOpKind::ChainCollateralPayout { .. }
+    ) {
         match evm_rpc::get_balance(chain, &signer_addr).await {
             Ok(bal) => {
-                if let SettlementOpKind::NativeWithdrawal { amount_e18, .. } = &op.kind {
+                if let SettlementOpKind::NativeWithdrawal { amount_e18, .. }
+                | SettlementOpKind::ChainCollateralPayout { amount_e18, .. } = &op.kind {
                     Some(fundable_withdrawal_value(*amount_e18, bal, max_fee))
                 } else {
                     None
@@ -886,6 +909,9 @@ async fn submit_op(
                 timestamp: now,
             });
             log!(INFO, "[settlement chain={:?}] withdrawal submitted: op={} vault={} amount_e18={} tx={}", chain, op_id, vault_id, amount, tx_hash);
+        }
+        TxPlanKind::ChainCollateralPayout => {
+            log!(INFO, "[settlement chain={:?}] chain-collateral payout submitted: op={} vault={} amount_e18={} recipient={} tx={}", chain, op_id, vault_id, amount, recipient, tx_hash);
         }
         TxPlanKind::InterestMint => {
             // Submit-path log only; the authoritative event is ChainInterestMinted
@@ -1276,6 +1302,11 @@ async fn confirm_op(
                         }
                     }
                 }
+                SettlementOpKind::ChainCollateralPayout { .. } => {
+                    // Claim payout reversals are NOT vault collateral reversals.
+                    // The SP-side cfx_claims rollback lands with claim_cfx; for
+                    // now just mark the op failed without touching the vault.
+                }
                 SettlementOpKind::InterestMint { vault_id, .. } => {
                     // Task 12: no debt/supply was credited (the mint reverted), so
                     // just clear the reservation. last_interest_accrual_ns is left
@@ -1567,6 +1598,26 @@ async fn confirm_op(
             });
             log!(INFO, "[settlement chain={:?}] withdrawal op {} vault {} confirmed tx={} (Closing->Closed if applicable)", chain, op_id, vid, tx_hash);
         }
+        SettlementOpKind::ChainCollateralPayout { vault_id, recipient, amount_e18, .. } => {
+            let vid = *vault_id;
+            let recipient = recipient.clone();
+            let amount = *amount_e18;
+            mutate_state(|s| {
+                if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
+                    if let Some(o) = q.pending.get_mut(&op_id) {
+                        o.mark_succeeded(tx_hash.clone(), now);
+                    }
+                }
+            });
+            crate::storage::record_event(&crate::event::Event::ChainCfxClaimSettled {
+                chain_id: chain,
+                claim_id: vid,
+                recipient: recipient.clone(),
+                amount_native: amount,
+                timestamp: now,
+            });
+            log!(INFO, "[settlement chain={:?}] chain-collateral payout op {} vault/claim {} confirmed tx={} recipient={} amount={}", chain, op_id, vid, tx_hash, recipient, amount);
+        }
         SettlementOpKind::Burn { .. } => {
             // Unreachable: a Burn op is marked Failed on the submit path and
             // never goes Inflight. Log defensively rather than panic.
@@ -1724,10 +1775,14 @@ async fn resubmit_if_stuck(
     // Re-net the withdrawal value at the BUMPED fee so the replacement still
     // fits within the custody balance (a higher gas reserve sends marginally
     // less collateral — fine for a replace-by-fee). Mints carry no value.
-    let withdrawal_value = if matches!(op.kind, SettlementOpKind::NativeWithdrawal { .. }) {
+    let withdrawal_value = if matches!(
+        op.kind,
+        SettlementOpKind::NativeWithdrawal { .. } | SettlementOpKind::ChainCollateralPayout { .. }
+    ) {
         match evm_rpc::get_balance(chain, &signer_addr).await {
             Ok(bal) => {
-                if let SettlementOpKind::NativeWithdrawal { amount_e18, .. } = &op.kind {
+                if let SettlementOpKind::NativeWithdrawal { amount_e18, .. }
+                | SettlementOpKind::ChainCollateralPayout { amount_e18, .. } = &op.kind {
                     Some(fundable_withdrawal_value(*amount_e18, bal, bumped_max))
                 } else {
                     None
