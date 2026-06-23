@@ -290,3 +290,124 @@ mod phase2_tests {
         assert!(s.reserve_backing_e8s.get(&CFX).is_none());
     }
 }
+
+// ─── Increment 4 / Task 5a: SP chain-vault absorb state transition ───
+mod sp_absorb_tests {
+    use super::super::settlement::apply_sp_chain_liquidation_absorb_in_state;
+    use crate::chains::config::ChainId;
+    use crate::chains::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
+    use crate::chains::multi_chain_state::MultiChainState;
+    use candid::Principal;
+
+    const CFX: ChainId = ChainId(1030);
+    const E8: u128 = 100_000_000;
+    const E18: u128 = 1_000_000_000_000_000_000;
+
+    fn open_sp_attempted_vault(
+        s: &mut MultiChainState,
+        vault_id: u64,
+        debt_e8s: u128,
+        collateral_native: u128,
+    ) {
+        s.chain_vaults.insert(
+            vault_id,
+            ChainVaultV1 {
+                vault_id,
+                owner: Principal::anonymous(),
+                collateral_chain: CFX,
+                custody_address: "0x00000000000000000000000000000000000000c7".into(),
+                collateral_amount_native: collateral_native,
+                debt_e8s,
+                mint_recipient: "0x00000000000000000000000000000000000000d7".into(),
+                pending_mint_e8s: 0,
+                status: ChainVaultStatus::Open,
+                opened_at_ns: 0,
+                owner_evm: None,
+                last_interest_accrual_ns: 0,
+                pending_interest_mint_e8s: 0,
+                pending_liquidation: None,
+            },
+        );
+        s.chain_supplies.insert(CFX, debt_e8s);
+        s.sp_attempted_chain_vaults.insert(vault_id);
+    }
+
+    #[test]
+    fn sp_absorb_moves_debt_to_pending_burn_and_reserves_claim_collateral() {
+        let mut s = MultiChainState::default();
+        open_sp_attempted_vault(&mut s, 7, 100 * E8, 1_000 * E18);
+
+        let result = apply_sp_chain_liquidation_absorb_in_state(
+            &mut s,
+            CFX,
+            7,
+            100 * E8,
+            50_000_000, // $0.50/CFX
+            18,
+            1_200,
+        )
+        .expect("sp absorb ok");
+
+        assert_eq!(result.actual_burned_e8s, 100 * E8);
+        assert_eq!(result.collateral_seized_native, 224 * E18);
+        let v = s.chain_vaults.get(&7).unwrap();
+        assert_eq!(v.debt_e8s, 0, "debt cleared by the IC-side SP burn");
+        assert_eq!(v.collateral_amount_native, 776 * E18, "claim collateral reserved out of borrower balance");
+        assert_eq!(*s.pending_chain_burn_e8s.get(&CFX).unwrap(), 100 * E8);
+        assert_eq!(*s.chain_supplies.get(&CFX).unwrap(), 100 * E8, "foreign-chain supply accounting unchanged");
+        assert!(v.pending_liquidation.is_none(), "SP absorb does not create a fake foreign-burn marker");
+
+        let claim = s.chain_liquidation_claims.get(&7).expect("claim record");
+        assert_eq!(claim.vault_id, 7);
+        assert_eq!(claim.chain, CFX);
+        assert_eq!(claim.custody_address, "0x00000000000000000000000000000000000000c7");
+        assert_eq!(claim.seized_native_total, 224 * E18);
+        assert_eq!(claim.paid_native, 0);
+        assert!(claim.paid_within_seized());
+
+        assert_eq!(
+            *s.chain_supplies.get(&CFX).unwrap(),
+            s.total_chain_vault_debt_e8s() + s.total_reserve_backing_e8s() + s.total_pending_chain_burn_e8s()
+        );
+    }
+
+    #[test]
+    fn sp_absorb_caps_overburn_to_live_debt() {
+        let mut s = MultiChainState::default();
+        open_sp_attempted_vault(&mut s, 8, 80 * E8, 200 * E18);
+
+        let result = apply_sp_chain_liquidation_absorb_in_state(
+            &mut s,
+            CFX,
+            8,
+            100 * E8,
+            100_000_000, // $1.00/CFX
+            18,
+            1_200,
+        )
+        .expect("sp absorb ok");
+
+        assert_eq!(result.actual_burned_e8s, 80 * E8, "backend never clears more than live debt");
+        assert_eq!(result.collateral_seized_native, 89_600_000_000_000_000_000);
+        assert_eq!(s.chain_vaults.get(&8).unwrap().debt_e8s, 0);
+        assert_eq!(*s.pending_chain_burn_e8s.get(&CFX).unwrap(), 80 * E8);
+        assert_eq!(*s.chain_supplies.get(&CFX).unwrap(), 80 * E8);
+    }
+
+    #[test]
+    fn sp_absorb_rejects_without_bot_escalation_no_mutation() {
+        let mut s = MultiChainState::default();
+        open_sp_attempted_vault(&mut s, 9, 100 * E8, 1_000 * E18);
+        s.sp_attempted_chain_vaults.remove(&9);
+
+        let err = apply_sp_chain_liquidation_absorb_in_state(&mut s, CFX, 9, 100 * E8, 50_000_000, 18, 1_200)
+            .unwrap_err();
+
+        assert!(err.contains("sp_attempted"), "error should name the missing escalation gate: {err}");
+        let v = s.chain_vaults.get(&9).unwrap();
+        assert_eq!(v.debt_e8s, 100 * E8);
+        assert_eq!(v.collateral_amount_native, 1_000 * E18);
+        assert!(s.pending_chain_burn_e8s.get(&CFX).is_none());
+        assert!(s.chain_liquidation_claims.get(&9).is_none());
+    }
+}

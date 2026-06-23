@@ -277,6 +277,106 @@ pub struct LiquidationSettlement {
     pub realized_usdc_native: u128,
 }
 
+/// Result of the state-only Tier-2 SP absorb transition. The caller emits
+/// `ChainVaultLiquidated { tier: StabilityPool }` from this data.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpChainLiquidationAbsorb {
+    pub actual_burned_e8s: u128,
+    pub collateral_seized_native: u128,
+    pub custody_address: String,
+}
+
+/// State-only Tier-2 SP absorb transition (spec §6.1):
+///
+/// - the Stability Pool has already burned IC-native icUSD,
+/// - backend moves live chain debt -> `pending_chain_burn_e8s`,
+/// - foreign-chain `chain_supplies` is NOT changed,
+/// - seized native CFX is reserved in a `ChainLiqClaimV1` for later pull claims.
+///
+/// No async, no events, no wall-clock reads. Public canister entrypoints perform
+/// caller/proof/price gates before calling this helper.
+pub fn apply_sp_chain_liquidation_absorb_in_state(
+    state: &mut MultiChainState,
+    chain: ChainId,
+    vault_id: u64,
+    icusd_burned_e8s: u128,
+    price_e8: u64,
+    native_decimals: u8,
+    liquidation_penalty_bps: u64,
+) -> Result<SpChainLiquidationAbsorb, String> {
+    use crate::chains::liquidation as liq;
+    use crate::chains::multi_chain_state::ChainLiqClaimV1;
+
+    let (live_debt, collateral_available, custody_address) = {
+        let v = state
+            .chain_vaults
+            .get(&vault_id)
+            .ok_or_else(|| format!("sp_absorb: unknown vault {vault_id}"))?;
+        if v.collateral_chain != chain {
+            return Err(format!("sp_absorb: vault chain {:?} != requested chain {:?}", v.collateral_chain, chain));
+        }
+        if v.status != ChainVaultStatus::Open {
+            return Err(format!("sp_absorb: vault {vault_id} is not Open"));
+        }
+        if v.pending_mint_e8s != 0 {
+            return Err(format!("sp_absorb: vault {vault_id} has pending mint"));
+        }
+        if v.pending_interest_mint_e8s != 0 {
+            return Err(format!("sp_absorb: vault {vault_id} has pending interest mint"));
+        }
+        if v.pending_liquidation.is_some() {
+            return Err(format!("sp_absorb: vault {vault_id} already has liquidation marker"));
+        }
+        if !state.sp_attempted_chain_vaults.contains(&vault_id) {
+            return Err(format!("sp_absorb: vault {vault_id} missing sp_attempted escalation gate"));
+        }
+        if state.chain_liquidation_claims.contains_key(&vault_id) {
+            return Err(format!("sp_absorb: vault {vault_id} already has chain liquidation claim"));
+        }
+        (v.debt_e8s, v.collateral_amount_native, v.custody_address.clone())
+    };
+
+    let actual_burned = icusd_burned_e8s.min(live_debt);
+    if actual_burned == 0 {
+        return Err(format!("sp_absorb: vault {vault_id} has nothing to absorb"));
+    }
+
+    let bonus_e4 = liq::bonus_e4_from_penalty_bps(liquidation_penalty_bps);
+    let collateral_seized = liq::collateral_in_native_for_repay(actual_burned, bonus_e4, native_decimals, price_e8)
+        .min(collateral_available);
+    if collateral_seized == 0 {
+        return Err(format!("sp_absorb: vault {vault_id} has no collateral to seize"));
+    }
+
+    crate::chains::supply::apply_debt_to_pending_burn_shift(state, chain, vault_id, actual_burned)
+        .map_err(|e| format!("apply_debt_to_pending_burn_shift: {e:?}"))?;
+
+    let v = state
+        .chain_vaults
+        .get_mut(&vault_id)
+        .expect("vault present: checked above");
+    v.collateral_amount_native = v.collateral_amount_native.saturating_sub(collateral_seized);
+    if v.debt_e8s == 0 && v.collateral_amount_native == 0 {
+        v.status = ChainVaultStatus::Closed;
+    }
+    state.chain_liquidation_claims.insert(
+        vault_id,
+        ChainLiqClaimV1 {
+            vault_id,
+            chain,
+            custody_address: custody_address.clone(),
+            seized_native_total: collateral_seized,
+            paid_native: 0,
+        },
+    );
+
+    Ok(SpChainLiquidationAbsorb {
+        actual_burned_e8s: actual_burned,
+        collateral_seized_native: collateral_seized,
+        custody_address,
+    })
+}
+
 // ─── Timer D tick (fan-out) ─────────────────────────────────────────────────
 
 /// Timer D entry point: run one settlement cycle for every registered+enabled
