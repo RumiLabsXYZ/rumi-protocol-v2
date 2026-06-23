@@ -424,31 +424,53 @@ impl MultiChainStateV5 {
     }
 }
 
-/// Chains-liquidation Increment 1 snapshot. Carries every `MultiChainStateV5`
-/// field verbatim, plus the liquidation-engine accounting scaffolding: per-chain
-/// reserve backing (bot/PSM path), the physical USDC custody mirror, per-chain
-/// pending SP burn (pre-eSpace-burn), and the one-shot SP-attempted set. This is
-/// a NON-BREAKING reshape under ciborium, exactly like every prior bump:
+/// Chains-liquidation working snapshot. Carries every `MultiChainStateV5` field
+/// verbatim, plus additive liquidation-engine accounting/routing fields:
+/// per-chain reserve backing (bot/PSM path), the physical USDC custody mirror,
+/// per-chain pending SP burn, the one-shot SP-attempted set, liquidation config,
+/// bot-pending timestamps, bad-debt counters, and SP claim records. This is a
+/// NON-BREAKING reshape under ciborium, exactly like every prior bump:
 ///
 ///  - The fifteen V5 fields are byte-for-byte identical and map across by name
 ///    (the four originals are always present; every V2+-added map keeps its
 ///    `#[serde(default)]`).
-///  - The four new V6 fields each carry `#[serde(default)]`, so a live
+///  - The V6-added fields each carry `#[serde(default)]`, so a live
 ///    `MultiChainStateV5` CBOR snapshot (which lacks these keys entirely) decodes
 ///    into V6 with them defaulting to empty — NOT a state wipe. Proven by
 ///    `tests_multi_chain_state_v2::v5_cbor_snapshot_decodes_into_v6_without_wiping_state`.
 ///
-/// All four new fields are 0/empty until Increment 2 wires the liquidation
-/// engine, so the unified supply invariant (debt + reserve + pending-burn)
-/// reduces to the old `supply == debt` on the live snapshot — the upgrade is
-/// behavior-preserving.
+/// All additive fields default to 0/empty on snapshots that predate them, so the
+/// unified supply invariant (debt + reserve + pending-burn) reduces to the old
+/// `supply == debt` until the corresponding increment writes them — the upgrade
+/// is behavior-preserving.
 ///
 /// Because the decode is in-place, NO explicit `post_upgrade` migration call is
 /// needed; `migrate_multi_chain_state` in `supply.rs` remains the dormant
 /// template for the next BREAKING bump.
 ///
-/// Add the NEXT field by bumping to `MultiChainStateV7` (keep V6 verbatim),
-/// `#[serde(default)]` on the new field, and rebinding the alias below.
+/// Any further additive field on this CBOR root MUST use `#[serde(default)]` and
+/// extend the V5->V6 and V6->V6 decode tests. A genuinely breaking reshape
+/// should bump to `MultiChainStateV7` (keep V6 verbatim) and rebind the alias
+/// below.
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct ChainLiqClaimV1 {
+    pub vault_id: u64,
+    pub chain: ChainId,
+    pub custody_address: String,
+    pub seized_native_total: u128,
+    pub paid_native: u128,
+}
+
+impl ChainLiqClaimV1 {
+    pub fn paid_within_seized(&self) -> bool {
+        self.paid_native <= self.seized_native_total
+    }
+
+    pub fn remaining_native(&self) -> u128 {
+        self.seized_native_total.saturating_sub(self.paid_native)
+    }
+}
+
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug, Default)]
 pub struct MultiChainStateV6 {
     pub chain_configs: BTreeMap<ChainId, ChainConfigV3>,
@@ -511,6 +533,13 @@ pub struct MultiChainStateV6 {
     /// harmless (worst case a vault waits one extra tick for manual).
     #[serde(default)]
     pub sp_attempted_chain_vaults: BTreeSet<u64>,
+    /// Vault_id -> SP liquidation claim record. Created when the Stability Pool
+    /// absorbs a foreign-chain vault; tracks how much seized native collateral is
+    /// reserved in that vault's custody address and how much has already been
+    /// paid out to CFX-claiming SP depositors. `#[serde(default)]` is mandatory:
+    /// live V6 snapshots written before Inc 4 lack this key.
+    #[serde(default)]
+    pub chain_liquidation_claims: BTreeMap<u64, ChainLiqClaimV1>,
     /// Per-chain, operator-settable liquidation config (spec 8): the DEX wiring +
     /// risk knobs the bot path reads, keyed by chain. Added directly to V6 (not a
     /// V7) because V6 has not yet been persisted to any live canister — same
