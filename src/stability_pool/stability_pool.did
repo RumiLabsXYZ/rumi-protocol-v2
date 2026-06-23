@@ -258,6 +258,7 @@ service : (StabilityPoolInitArgs) -> {
   // ── Admin: Registry ──
   register_stablecoin : (StablecoinConfig) -> (variant { Ok; Err : StabilityPoolError });
   register_collateral : (CollateralInfo) -> (variant { Ok; Err : StabilityPoolError });
+  register_cfx_collateral : (nat32) -> (variant { Ok : principal; Err : StabilityPoolError });
 
   // ── Admin: Configuration ──
   update_pool_configuration : (PoolConfiguration) -> (variant { Ok; Err : StabilityPoolError });
@@ -283,4 +284,5 @@ service : (StabilityPoolInitArgs) -> {
   get_pool_event_count : () -> (nat64) query;
   list_depositor_principals : () -> (vec principal) query;
   get_pending_refunds : (opt principal) -> (vec PendingRefund) query;
+  get_chain_collateral_sentinel : (nat32) -> (principal) query;
 };

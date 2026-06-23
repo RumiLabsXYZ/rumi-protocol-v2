@@ -11,6 +11,17 @@ use crate::logs::INFO;
 /// Older entries are dropped when this limit is exceeded.
 const MAX_LIQUIDATION_HISTORY: usize = 1_000;
 
+/// Deterministic Principal key for chain-native collateral. This is a metadata
+/// key, never an ICRC ledger canister. Must match the backend discovery helper.
+pub fn chain_collateral_sentinel(chain_id: u32) -> Principal {
+    let mut bytes = [0u8; 29];
+    let prefix = b"rumi-chain-collateral";
+    bytes[..prefix.len()].copy_from_slice(prefix);
+    bytes[24..28].copy_from_slice(&chain_id.to_le_bytes());
+    bytes[28] = 0x7f;
+    Principal::from_slice(&bytes)
+}
+
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
 pub struct StabilityPoolState {
     // Depositor positions
@@ -183,6 +194,23 @@ impl StabilityPoolState {
         self.chain_collateral_sentinels
             .get_or_insert_with(BTreeSet::new)
             .insert(sentinel);
+    }
+
+    pub fn register_chain_collateral(
+        &mut self,
+        chain_id: u32,
+        symbol: String,
+        decimals: u8,
+    ) -> Result<Principal, StabilityPoolError> {
+        let sentinel = chain_collateral_sentinel(chain_id);
+        self.register_collateral(CollateralInfo {
+            ledger_id: sentinel,
+            symbol,
+            decimals,
+            status: CollateralStatus::Active,
+        });
+        self.register_chain_collateral_sentinel(sentinel);
+        Ok(sentinel)
     }
 
     pub fn is_chain_collateral_sentinel(&self, collateral_type: &Principal) -> bool {
@@ -1950,6 +1978,27 @@ mod tests {
 
         state.opt_out_cfx(&user_a(), cfx_sentinel()).expect("user A opts back out");
         assert_eq!(state.effective_pool_for_collateral(&cfx_sentinel()), 0);
+    }
+
+    #[test]
+    fn chain_collateral_sentinel_registration_is_stable_and_validation_safe() {
+        let mut state = test_state();
+        let sentinel = chain_collateral_sentinel(1030);
+        assert_eq!(sentinel, chain_collateral_sentinel(1030));
+        assert_ne!(sentinel, chain_collateral_sentinel(71));
+        assert_ne!(sentinel, icusd_ledger());
+        assert_ne!(sentinel, icp_ledger());
+
+        let registered = state.register_chain_collateral(1030, "CFX".to_string(), 18)
+            .expect("register CFX sentinel");
+        assert_eq!(registered, sentinel);
+        assert!(state.is_chain_collateral_sentinel(&sentinel));
+        let info = state.collateral_registry.get(&sentinel).expect("sentinel registered as collateral");
+        assert_eq!(info.symbol, "CFX");
+        assert_eq!(info.decimals, 18);
+        assert!(matches!(info.status, CollateralStatus::Active));
+        assert_eq!(state.effective_pool_for_collateral(&sentinel), 0);
+        assert!(state.validate_state().is_ok(), "sentinel is metadata, not a ledger aggregate");
     }
 
     #[test]

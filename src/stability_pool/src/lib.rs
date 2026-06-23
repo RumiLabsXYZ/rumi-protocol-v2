@@ -341,6 +341,11 @@ pub fn get_pending_refunds(user: Option<Principal>) -> Vec<PendingRefund> {
 }
 
 #[query]
+pub fn get_chain_collateral_sentinel(chain_id: u32) -> Principal {
+    crate::state::chain_collateral_sentinel(chain_id)
+}
+
+#[query]
 pub fn check_pool_capacity(collateral_type: Principal, debt_amount_e8s: u64) -> bool {
     read_state(|s| s.effective_pool_for_collateral(&collateral_type) >= debt_amount_e8s)
 }
@@ -380,6 +385,24 @@ pub fn register_collateral(info: CollateralInfo) -> Result<(), StabilityPoolErro
         s.push_event(caller, PoolEventType::CollateralRegistered { ledger, symbol });
     });
     Ok(())
+}
+
+#[update]
+pub fn register_cfx_collateral(chain_id: u32) -> Result<Principal, StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    if !read_state(|s| s.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    let sentinel = mutate_state(|s| {
+        s.register_chain_collateral(chain_id, "CFX".to_string(), 18)
+    })?;
+    mutate_state(|s| {
+        s.push_event(caller, PoolEventType::CollateralRegistered {
+            ledger: sentinel,
+            symbol: "CFX".to_string(),
+        });
+    });
+    Ok(sentinel)
 }
 
 // ─── Admin: Configuration ───
