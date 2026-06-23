@@ -37,6 +37,10 @@ pub struct StabilityPoolState {
     /// Candid stable memory upgrade-compatible when decoding old snapshots.
     #[serde(default)]
     pub chain_collateral_sentinels: Option<BTreeSet<Principal>>,
+    /// Backend chain-liquidity claims available to pay SP depositor CFX claims,
+    /// keyed by chain sentinel. `Option` keeps Candid stable memory upgrades safe.
+    #[serde(default)]
+    pub chain_claim_sources: Option<BTreeMap<Principal, Vec<ChainClaimSource>>>,
 
     // Canister references
     pub protocol_canister_id: Principal,
@@ -86,6 +90,7 @@ impl Default for StabilityPoolState {
             stablecoin_registry: BTreeMap::new(),
             collateral_registry: BTreeMap::new(),
             chain_collateral_sentinels: Some(BTreeSet::new()),
+            chain_claim_sources: Some(BTreeMap::new()),
             protocol_canister_id: Principal::anonymous(),
             configuration: PoolConfiguration {
                 min_deposit_e8s: 1_000_000, // 0.01 USD
@@ -514,6 +519,29 @@ impl StabilityPoolState {
                     }
                 }
             }
+        }
+    }
+
+    pub fn record_chain_claim_source(
+        &mut self,
+        chain_sentinel: Principal,
+        claim_id: u64,
+        amount_native: u128,
+    ) {
+        if amount_native == 0 {
+            return;
+        }
+        let sources = self.chain_claim_sources
+            .get_or_insert_with(BTreeMap::new)
+            .entry(chain_sentinel)
+            .or_default();
+        if let Some(existing) = sources.iter_mut().find(|s| s.claim_id == claim_id) {
+            existing.remaining_native = existing.remaining_native.saturating_add(amount_native);
+        } else {
+            sources.push(ChainClaimSource {
+                claim_id,
+                remaining_native: amount_native,
+            });
         }
     }
 
@@ -1387,6 +1415,7 @@ impl From<StabilityPoolStateV1> for StabilityPoolState {
             stablecoin_registry: v1.stablecoin_registry,
             collateral_registry: v1.collateral_registry,
             chain_collateral_sentinels: Some(BTreeSet::new()),
+            chain_claim_sources: Some(BTreeMap::new()),
             protocol_canister_id: v1.protocol_canister_id,
             configuration: v1.configuration,
             liquidation_history: v1.liquidation_history,
@@ -2798,6 +2827,10 @@ mod tests {
         assert!(
             decoded.chain_collateral_sentinels.clone().unwrap_or_default().is_empty(),
             "missing chain sentinel registry must decode as empty",
+        );
+        assert!(
+            decoded.chain_claim_sources.clone().unwrap_or_default().is_empty(),
+            "missing chain claim source inventory must decode as empty",
         );
     }
 

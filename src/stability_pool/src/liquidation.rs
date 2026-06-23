@@ -134,6 +134,15 @@ pub(crate) struct ChainAbsorbPlan {
     pub stables_consumed: BTreeMap<Principal, u64>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CfxClaimPayoutPlan {
+    pub claimant: Principal,
+    pub chain_sentinel: Principal,
+    pub claim_id: u64,
+    pub amount_wei: u128,
+    pub dest_evm: String,
+}
+
 fn chain_id_from_sentinel(sentinel: &Principal) -> Option<ChainId> {
     let bytes = sentinel.as_slice();
     let prefix = b"rumi-chain-collateral";
@@ -255,6 +264,11 @@ pub(crate) fn apply_chain_absorb_success_in_state_at(
         });
     }
 
+    state.record_chain_claim_source(
+        plan.chain_sentinel,
+        result.claim_id,
+        result.collateral_received_native,
+    );
     state.process_chain_liquidation_gains_at(
         plan.vault_id,
         plan.chain_sentinel,
@@ -276,6 +290,102 @@ pub(crate) fn apply_chain_absorb_success_in_state_at(
         block_index: result.block_index,
         collateral_price_e8s: result.collateral_price_e8s,
     })
+}
+
+pub(crate) fn prepare_cfx_claim_payout_in_state(
+    state: &mut StabilityPoolState,
+    claimant: Principal,
+    chain_sentinel: Principal,
+    dest_evm: String,
+    address_validator: impl Fn(&str) -> bool,
+) -> Result<Option<CfxClaimPayoutPlan>, StabilityPoolError> {
+    if !address_validator(&dest_evm) {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id: 0,
+            reason: "invalid EVM address".to_string(),
+        });
+    }
+    if !state.is_chain_collateral_sentinel(&chain_sentinel) {
+        return Err(StabilityPoolError::CollateralNotFound {
+            ledger: chain_sentinel,
+        });
+    }
+    let owed = state.deposits
+        .get(&claimant)
+        .and_then(|pos| pos.cfx_claims.as_ref())
+        .and_then(|claims| claims.get(&chain_sentinel).copied())
+        .unwrap_or(0);
+    if owed == 0 {
+        return Ok(None);
+    }
+
+    let (claim_id, amount_wei) = {
+        let sources = state.chain_claim_sources
+            .as_mut()
+            .and_then(|m| m.get_mut(&chain_sentinel))
+            .ok_or_else(|| StabilityPoolError::LiquidationFailed {
+                vault_id: 0,
+                reason: "no backend chain claim source available".to_string(),
+            })?;
+        let source_index = sources.iter()
+            .position(|source| source.remaining_native > 0)
+            .ok_or_else(|| StabilityPoolError::LiquidationFailed {
+                vault_id: 0,
+                reason: "no funded backend chain claim source available".to_string(),
+            })?;
+        let source = &mut sources[source_index];
+        let amount_wei = owed.min(source.remaining_native);
+        let claim_id = source.claim_id;
+        source.remaining_native = source.remaining_native.saturating_sub(amount_wei);
+        if source.remaining_native == 0 {
+            sources.remove(source_index);
+        }
+        (claim_id, amount_wei)
+    };
+
+    if state.chain_claim_sources
+        .as_ref()
+        .and_then(|m| m.get(&chain_sentinel))
+        .map(|sources| sources.is_empty())
+        .unwrap_or(false)
+    {
+        if let Some(sources) = state.chain_claim_sources.as_mut() {
+            sources.remove(&chain_sentinel);
+        }
+    }
+
+    state.mark_cfx_claimed(&claimant, &chain_sentinel, amount_wei);
+
+    Ok(Some(CfxClaimPayoutPlan {
+        claimant,
+        chain_sentinel,
+        claim_id,
+        amount_wei,
+        dest_evm,
+    }))
+}
+
+pub(crate) fn rollback_cfx_claim_payout_in_state(
+    state: &mut StabilityPoolState,
+    plan: &CfxClaimPayoutPlan,
+) {
+    state.record_chain_claim_source(plan.chain_sentinel, plan.claim_id, plan.amount_wei);
+    let position = state.deposits
+        .entry(plan.claimant)
+        .or_insert_with(|| DepositPosition::new(0));
+    let claims = position.cfx_claims.get_or_insert_with(BTreeMap::new);
+    let entry = claims.entry(plan.chain_sentinel).or_insert(0);
+    *entry = entry.saturating_add(plan.amount_wei);
+}
+
+pub(crate) fn is_duplicate_chain_claim_error(error: &rumi_protocol_backend::ProtocolError) -> bool {
+    match error {
+        rumi_protocol_backend::ProtocolError::ChainAdmin(msg)
+        | rumi_protocol_backend::ProtocolError::GenericError(msg) => {
+            msg.contains("Duplicate chain collateral claim payout idempotency key")
+        }
+        _ => false,
+    }
 }
 
 /// Called by the backend when it detects liquidatable vaults (push model).
@@ -482,6 +592,61 @@ pub async fn sp_absorb_chain_vault(vault_id: u64) -> Result<ChainSpAbsorbResult,
     };
 
     mutate_state(|s| apply_chain_absorb_success_in_state(s, &plan, result))
+}
+
+pub async fn claim_cfx(
+    chain_sentinel: Principal,
+    dest_evm: String,
+) -> Result<u128, StabilityPoolError> {
+    if crate::pool_guard::liquidation_in_progress() {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    if read_state(|s| s.configuration.emergency_pause) {
+        return Err(StabilityPoolError::EmergencyPaused);
+    }
+
+    let plan = mutate_state(|s| {
+        prepare_cfx_claim_payout_in_state(
+            s,
+            caller,
+            chain_sentinel,
+            dest_evm,
+            rumi_protocol_backend::chains::evm::tecdsa::is_valid_evm_address,
+        )
+    })?;
+    let Some(plan) = plan else {
+        return Ok(0);
+    };
+
+    let protocol_id = read_state(|s| s.protocol_canister_id);
+    let backend_result: Result<(Result<u64, rumi_protocol_backend::ProtocolError>,), _> = call(
+        protocol_id,
+        "claim_chain_collateral",
+        (plan.claim_id, plan.claimant, plan.amount_wei, plan.dest_evm.clone()),
+    ).await;
+
+    match backend_result {
+        Ok((Ok(_op_id),)) => Ok(plan.amount_wei),
+        Ok((Err(error),)) if is_duplicate_chain_claim_error(&error) => Ok(plan.amount_wei),
+        Ok((Err(error),)) => {
+            mutate_state(|s| rollback_cfx_claim_payout_in_state(s, &plan));
+            Err(StabilityPoolError::LiquidationFailed {
+                vault_id: plan.claim_id,
+                reason: format!("backend rejected CFX claim: {:?}", error),
+            })
+        }
+        Err(_) => {
+            mutate_state(|s| rollback_cfx_claim_payout_in_state(s, &plan));
+            Err(StabilityPoolError::InterCanisterCallFailed {
+                target: format!("{}", protocol_id),
+                method: "claim_chain_collateral".to_string(),
+            })
+        }
+    }
 }
 
 /// Core liquidation logic for a single vault.
@@ -1079,5 +1244,74 @@ mod tests {
             .cfx_claims.as_ref().unwrap().get(&chain_collateral_sentinel(1030)).copied().unwrap_or(0);
         assert_eq!(claim_a, 4_000_000_000_000_000_000u128);
         assert_eq!(claim_b, 6_000_000_000_000_000_000u128);
+    }
+
+    #[test]
+    fn cfx_claim_payout_deducts_from_user_and_claim_source() {
+        let mut state = test_state();
+        let sentinel = state.register_chain_collateral(1030, "CFX".to_string(), 18).unwrap();
+        let mut pos = DepositPosition::new(0);
+        pos.cfx_claims.get_or_insert_with(BTreeMap::new).insert(sentinel, 12);
+        state.deposits.insert(user_a(), pos);
+        state.record_chain_claim_source(sentinel, 77, 10);
+
+        let invalid = prepare_cfx_claim_payout_in_state(
+            &mut state,
+            user_a(),
+            sentinel,
+            "not-evm".to_string(),
+            |_| false,
+        ).unwrap_err();
+        assert!(matches!(invalid, StabilityPoolError::LiquidationFailed { .. }));
+        assert_eq!(
+            state.deposits[&user_a()].cfx_claims.as_ref().unwrap()[&sentinel],
+            12,
+            "destination validation happens before mutation",
+        );
+        assert_eq!(state.chain_claim_sources.as_ref().unwrap()[&sentinel][0].remaining_native, 10);
+
+        let plan = prepare_cfx_claim_payout_in_state(
+            &mut state,
+            user_a(),
+            sentinel,
+            "0x000000000000000000000000000000000000c0de".to_string(),
+            rumi_protocol_backend::chains::evm::tecdsa::is_valid_evm_address,
+        ).expect("claim plan").expect("nonzero claim");
+        assert_eq!(plan.claim_id, 77);
+        assert_eq!(plan.amount_wei, 10);
+        assert_eq!(
+            state.deposits[&user_a()].cfx_claims.as_ref().unwrap()[&sentinel],
+            2,
+            "only the covered source amount is deducted",
+        );
+        assert!(
+            state.chain_claim_sources.as_ref().unwrap().get(&sentinel).is_none(),
+            "depleted source is pruned before await",
+        );
+
+        rollback_cfx_claim_payout_in_state(&mut state, &plan);
+        assert_eq!(
+            state.deposits[&user_a()].cfx_claims.as_ref().unwrap()[&sentinel],
+            12,
+            "rollback restores user claim",
+        );
+        assert_eq!(
+            state.chain_claim_sources.as_ref().unwrap()[&sentinel][0].remaining_native,
+            10,
+            "rollback restores backend claim source",
+        );
+    }
+
+    #[test]
+    fn duplicate_chain_claim_error_is_not_rolled_back() {
+        let duplicate = rumi_protocol_backend::ProtocolError::ChainAdmin(
+            "Duplicate chain collateral claim payout idempotency key chain-collateral-claim-77".to_string(),
+        );
+        let ordinary = rumi_protocol_backend::ProtocolError::ChainAdmin(
+            "chain collateral claim: unknown claim 77".to_string(),
+        );
+
+        assert!(is_duplicate_chain_claim_error(&duplicate));
+        assert!(!is_duplicate_chain_claim_error(&ordinary));
     }
 }

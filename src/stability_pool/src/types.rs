@@ -273,6 +273,12 @@ pub struct ChainSpAbsorbResult {
     pub collateral_price_e8s: u64,
 }
 
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChainClaimSource {
+    pub claim_id: u64,
+    pub remaining_native: u128,
+}
+
 /// Audit trail record for a completed liquidation.
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PoolLiquidationRecord {

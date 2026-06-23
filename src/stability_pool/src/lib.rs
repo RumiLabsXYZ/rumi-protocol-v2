@@ -142,6 +142,11 @@ pub async fn claim_pending_refund(refund_id: u64) -> Result<u64, StabilityPoolEr
     crate::deposits::claim_pending_refund(refund_id).await
 }
 
+#[update]
+pub async fn claim_cfx(chain_sentinel: Principal, dest_evm: String) -> Result<u128, StabilityPoolError> {
+    crate::liquidation::claim_cfx(chain_sentinel, dest_evm).await
+}
+
 // ─── Opt-in / Opt-out ───
 
 #[update]
@@ -492,6 +497,11 @@ pub fn icrc21_canister_call_consent_message(
         "claim_all_collateral" => {
             "## Claim All Collateral Rewards\n\n\
              You are claiming **all** of your collateral rewards from the Rumi Protocol Stability Pool."
+                .to_string()
+        }
+        "claim_cfx" => {
+            "## Claim CFX Rewards\n\n\
+             You are claiming CFX rewards from chain-vault liquidations."
                 .to_string()
         }
         "opt_out_collateral" => {

@@ -279,6 +279,7 @@ service : (StabilityPoolInitArgs) -> {
   claim_collateral : (principal) -> (variant { Ok : nat64; Err : StabilityPoolError });
   claim_all_collateral : () -> (variant { Ok : vec record { principal; nat64 }; Err : StabilityPoolError });
   claim_pending_refund : (nat64) -> (variant { Ok : nat64; Err : StabilityPoolError });
+  claim_cfx : (principal, text) -> (variant { Ok : nat; Err : StabilityPoolError });
 
   // ── Opt-in / Opt-out ──
   opt_out_collateral : (principal) -> (variant { Ok; Err : StabilityPoolError });
