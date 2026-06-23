@@ -3801,6 +3801,24 @@ pub async fn liquidate_vault_debt_already_burned(
         ));
     }
 
+    // Defense-in-depth: native-XRP collateral can NEVER be liquidated via the SP
+    // write-down path. This path proof-verifies + settles against the icUSD/3pool
+    // ledger, but the seized collateral here is XRP held on XRPL. The SP cannot
+    // settle that, so a write-down would strand the seized XRP (it never becomes
+    // an `XrpClaim`) and burn SP depositors. Native-XRP is liquidated only via the
+    // manual paths (`liquidate_vault` / `liquidate_vault_partial` /
+    // `partial_liquidate_vault` / `liquidate_vault_partial_with_stable`), which
+    // route collateral into an `XrpClaim`. The two `main.rs` entry points are the
+    // first line of defense; this in-function reject is the backstop so any future
+    // third caller (or a refactor that drops the caller-side check) cannot reach
+    // the write-down. Placed before `GuardPrincipal::new` so it returns without
+    // touching any guard/state (and before any `ic_cdk::api::time()` call).
+    if vault_is_native_xrp(vault_id) {
+        return Err(ProtocolError::GenericError(
+            "Native-XRP collateral cannot be liquidated via the SP write-down path".to_string(),
+        ));
+    }
+
     let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_debt_burned_{}", vault_id))?;
     reject_if_bot_processing(vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault (SP path)
     let _vault_liq_guard = VaultLiquidationGuard::new(vault_id)?; // BK-001/002 per-vault lock
@@ -5003,4 +5021,109 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         debt_liquidated_e8s: None, // SP-101
         stable_pulled_e6s: None, // SP-110
     })
+}
+
+#[cfg(test)]
+mod sp_writedown_native_xrp_guard_tests {
+    use super::*;
+    use crate::icrc3_proof::{SpProofLedger, SpWritedownProof};
+    use crate::state::{replace_state, xrp_collateral_principal, CustodyKind, State};
+
+    /// Install a thread-local state holding two vaults: an ICRC (ICP) vault at
+    /// `icp_vault_id` and a native-XRP vault at `xrp_vault_id`. The native-XRP
+    /// collateral config is the ICP config cloned with `custody_kind = NativeXrp`,
+    /// mirroring the P4/P5 registration shape.
+    fn install_two_collateral_state(xrp_vault_id: u64, icp_vault_id: u64) {
+        let mut s = State::from(crate::InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: Principal::anonymous(),
+            icp_ledger_principal: Principal::anonymous(),
+            fee_e8s: 0,
+            developer_principal: Principal::anonymous(),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        });
+        // Deterministic: never trip the min-amount gate before reaching the guard.
+        s.min_icusd_amount = ICUSD::new(0);
+
+        let icp = s.icp_collateral_type();
+        if let Some(c) = s.collateral_configs.get_mut(&icp) {
+            c.last_price = Some(5.0);
+        }
+        s.open_vault(Vault {
+            owner: Principal::anonymous(),
+            vault_id: icp_vault_id,
+            borrowed_icusd_amount: ICUSD::new(1_000_000_000),
+            collateral_amount: 1_000_000_000,
+            collateral_type: icp,
+            accrued_interest: ICUSD::new(0),
+            last_accrual_time: 0,
+            bot_processing: false,
+        });
+
+        let xrp = xrp_collateral_principal();
+        let mut xrp_cfg = s.collateral_configs.get(&icp).unwrap().clone();
+        xrp_cfg.ledger_canister_id = xrp;
+        xrp_cfg.custody_kind = Some(CustodyKind::NativeXrp);
+        xrp_cfg.last_price = Some(0.5);
+        s.collateral_configs.insert(xrp, xrp_cfg);
+        s.open_vault(Vault {
+            owner: Principal::anonymous(),
+            vault_id: xrp_vault_id,
+            borrowed_icusd_amount: ICUSD::new(1_000_000_000),
+            collateral_amount: 5_000_000,
+            collateral_type: xrp,
+            accrued_interest: ICUSD::new(0),
+            last_accrual_time: 0,
+            bot_processing: false,
+        });
+
+        replace_state(s);
+    }
+
+    fn dummy_proof(vault_id_memo: u64) -> SpWritedownProof {
+        SpWritedownProof {
+            block_index: 0,
+            ledger_kind: SpProofLedger::IcusdBurn,
+            vault_id_memo,
+        }
+    }
+
+    /// Defense-in-depth: the SP write-down core must reject a native-XRP vault
+    /// before doing anything else, regardless of caller. The SP settles against
+    /// the icUSD/3pool ledger but the seized XRP lives on XRPL as an XrpClaim the
+    /// SP cannot settle, so a write-down here would strand the XRP and burn SP
+    /// depositors. Native-XRP is liquidated only via the manual paths.
+    #[test]
+    fn sp_writedown_rejects_native_xrp_vault() {
+        install_two_collateral_state(2, 1);
+        let caller = Principal::from_slice(&[0xcc; 16]);
+        let result = futures::executor::block_on(liquidate_vault_debt_already_burned(
+            2,
+            1_000_000_000,
+            caller,
+            None,
+            dummy_proof(2),
+        ));
+        match result {
+            Err(ProtocolError::GenericError(msg)) => assert!(
+                msg.contains("Native-XRP collateral cannot be liquidated via the SP write-down path"),
+                "expected the native-XRP reject, got: {msg}"
+            ),
+            other => panic!("expected a native-XRP GenericError reject, got {other:?}"),
+        }
+    }
+
+    /// The predicate is scoped to native-XRP custody: ICRC collateral and a
+    /// missing vault must both read false, so the guard never short-circuits the
+    /// legitimate ICRC write-down flow nor masks the normal not-found error.
+    #[test]
+    fn vault_is_native_xrp_is_scoped_to_xrp_custody() {
+        install_two_collateral_state(2, 1);
+        assert!(vault_is_native_xrp(2), "native-XRP vault must be flagged");
+        assert!(!vault_is_native_xrp(1), "ICRC (ICP) vault must not be flagged");
+        assert!(!vault_is_native_xrp(999), "missing vault must not be flagged");
+    }
 }
