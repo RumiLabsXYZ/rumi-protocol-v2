@@ -42,6 +42,8 @@ type ChainLiquidatableVault = record {
   cr_e4 : nat64;
   collateral_native : nat;
   vault_id : nat64;
+  sp_attempted : bool;
+  chain_collateral_sentinel : principal;
   chain_id : nat32;
   liquidation_threshold_e4 : nat64;
   effective_debt_e8s : nat;

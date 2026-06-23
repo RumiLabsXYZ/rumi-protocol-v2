@@ -1929,6 +1929,8 @@ fn get_chain_liquidation_config(
 pub struct ChainLiquidatableVault {
     pub vault_id: u64,
     pub chain_id: rumi_protocol_backend::chains::config::ChainId,
+    pub chain_collateral_sentinel: Principal,
+    pub sp_attempted: bool,
     pub debt_e8s: u128,
     pub effective_debt_e8s: u128,
     pub collateral_native: u128,
@@ -2045,6 +2047,100 @@ fn liquidate_chain_vault(vault_id: u64) -> Result<u64, ProtocolError> {
     .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
 }
 
+/// Deterministic Principal key for chain-native collateral in the Stability Pool.
+/// This is a metadata key, never an ICRC ledger canister. The byte layout uses a
+/// reserved Rumi prefix plus the little-endian chain id and a non-canister tag.
+fn chain_collateral_sentinel(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> Principal {
+    let mut bytes = [0u8; 29];
+    let prefix = b"rumi-chain-collateral";
+    bytes[..prefix.len()].copy_from_slice(prefix);
+    bytes[24..28].copy_from_slice(&chain.0.to_le_bytes());
+    bytes[28] = 0x7f;
+    Principal::from_slice(&bytes)
+}
+
+fn chain_liquidatable_vaults_in_state(
+    state: &rumi_protocol_backend::chains::multi_chain_state::MultiChainState,
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    now: u64,
+) -> Vec<ChainLiquidatableVault> {
+    use rumi_protocol_backend::chains::collateral_config::chain_collateral_config;
+    use rumi_protocol_backend::chains::liquidation as liq;
+    use rumi_protocol_backend::chains::monad::chain_vault::ChainVaultStatus;
+    let symbol = match liquidation_price_symbol(chain) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let cc = chain_collateral_config(chain);
+    let threshold = match cc.map(|c| c.liquidation_threshold_e4) {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+    let apr_bps = cc.map(|c| c.interest_apr_bps).unwrap_or(0);
+    let max_age = state
+        .chain_liquidation_configs
+        .get(&chain)
+        .map(|c| c.max_price_age_ns)
+        .unwrap_or(0);
+    let price = match liq::fresh_chain_price_e8(state, chain, symbol, now, max_age) {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+    let nd = state
+        .chain_configs
+        .get(&chain)
+        .map(|c| c.chain_native_decimals)
+        .unwrap_or(18);
+    let bonus = liq::bonus_e4_from_penalty_bps(cc.map(|c| c.liquidation_penalty_bps).unwrap_or(0));
+    let target = cc.map(|c| c.recovery_target_cr_e4).unwrap_or(15_500);
+    let sentinel = chain_collateral_sentinel(chain);
+    state
+        .chain_vaults
+        .values()
+        .filter(|v| {
+            v.collateral_chain == chain
+                && v.status == ChainVaultStatus::Open
+                && v.pending_mint_e8s == 0
+                && v.pending_interest_mint_e8s == 0
+                && v.pending_liquidation.is_none()
+                && v.debt_e8s > 0
+        })
+        .filter_map(|v| {
+            let eff = liq::effective_debt_e8s(
+                v.debt_e8s,
+                v.pending_interest_mint_e8s,
+                apr_bps,
+                now.saturating_sub(v.last_interest_accrual_ns),
+            );
+            let cr = rumi_protocol_backend::chains::vault::collateral_ratio_e4(
+                v.collateral_amount_native,
+                nd,
+                price,
+                eff,
+            );
+            if cr >= threshold {
+                return None;
+            }
+            let cv = liq::collateral_value_e8s(v.collateral_amount_native, nd, price);
+            Some(ChainLiquidatableVault {
+                vault_id: v.vault_id,
+                chain_id: chain,
+                chain_collateral_sentinel: sentinel,
+                sp_attempted: state.sp_attempted_chain_vaults.contains(&v.vault_id),
+                debt_e8s: v.debt_e8s,
+                effective_debt_e8s: eff,
+                collateral_native: v.collateral_amount_native,
+                cr_e4: cr,
+                liquidation_threshold_e4: threshold,
+                sized_repay_e8s: liq::sized_repay_e8s(eff, cv, target, bonus),
+            })
+        })
+        .take(500)
+        .collect()
+}
+
 /// Public read: vaults currently liquidatable on `chain` (CR below the
 /// liquidation threshold, Open, not already marked, no in-flight mint). Capped
 /// for DOS safety. Returns empty if the chain has no collateral config or no
@@ -2054,81 +2150,8 @@ fn liquidate_chain_vault(vault_id: u64) -> Result<u64, ProtocolError> {
 fn get_chain_liquidatable_vaults(
     chain: rumi_protocol_backend::chains::config::ChainId,
 ) -> Vec<ChainLiquidatableVault> {
-    use rumi_protocol_backend::chains::collateral_config::chain_collateral_config;
-    use rumi_protocol_backend::chains::liquidation as liq;
-    use rumi_protocol_backend::chains::monad::chain_vault::ChainVaultStatus;
-    let symbol = match liquidation_price_symbol(chain) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
     let now = ic_cdk::api::time();
-    read_state(|s| {
-        let cc = chain_collateral_config(chain);
-        let threshold = match cc.map(|c| c.liquidation_threshold_e4) {
-            Some(t) => t,
-            None => return Vec::new(),
-        };
-        let apr_bps = cc.map(|c| c.interest_apr_bps).unwrap_or(0);
-        let max_age = s
-            .multi_chain
-            .chain_liquidation_configs
-            .get(&chain)
-            .map(|c| c.max_price_age_ns)
-            .unwrap_or(0);
-        let price = match liq::fresh_chain_price_e8(&s.multi_chain, chain, symbol, now, max_age) {
-            Ok(p) => p,
-            Err(_) => return Vec::new(),
-        };
-        let nd = s
-            .multi_chain
-            .chain_configs
-            .get(&chain)
-            .map(|c| c.chain_native_decimals)
-            .unwrap_or(18);
-        let bonus = liq::bonus_e4_from_penalty_bps(cc.map(|c| c.liquidation_penalty_bps).unwrap_or(0));
-        let target = cc.map(|c| c.recovery_target_cr_e4).unwrap_or(15_500);
-        s.multi_chain
-            .chain_vaults
-            .values()
-            .filter(|v| {
-                v.collateral_chain == chain
-                    && v.status == ChainVaultStatus::Open
-                    && v.pending_mint_e8s == 0
-                    && v.pending_interest_mint_e8s == 0
-                    && v.pending_liquidation.is_none()
-                    && v.debt_e8s > 0
-            })
-            .filter_map(|v| {
-                let eff = liq::effective_debt_e8s(
-                    v.debt_e8s,
-                    v.pending_interest_mint_e8s,
-                    apr_bps,
-                    now.saturating_sub(v.last_interest_accrual_ns),
-                );
-                let cr = rumi_protocol_backend::chains::vault::collateral_ratio_e4(
-                    v.collateral_amount_native,
-                    nd,
-                    price,
-                    eff,
-                );
-                if cr >= threshold {
-                    return None;
-                }
-                let cv = liq::collateral_value_e8s(v.collateral_amount_native, nd, price);
-                Some(ChainLiquidatableVault {
-                    vault_id: v.vault_id,
-                    chain_id: chain,
-                    debt_e8s: v.debt_e8s,
-                    effective_debt_e8s: eff,
-                    collateral_native: v.collateral_amount_native,
-                    cr_e4: cr,
-                    liquidation_threshold_e4: threshold,
-                    sized_repay_e8s: liq::sized_repay_e8s(eff, cv, target, bonus),
-                })
-            })
-            .take(500)
-            .collect()
-    })
+    read_state(|s| chain_liquidatable_vaults_in_state(&s.multi_chain, chain, now))
 }
 
 /// Manual-price readout for `(chain, symbol)`: the USD e8 price plus the
@@ -8818,7 +8841,7 @@ mod chain_vault_param_tests {
 
 #[cfg(test)]
 mod chain_sp_absorb_entry_tests {
-    use super::chain_sp_absorb_snapshot;
+    use super::{chain_collateral_sentinel, chain_liquidatable_vaults_in_state, chain_sp_absorb_snapshot};
     use rumi_protocol_backend::chains::config::{ChainConfigV3, ChainId, ChainStatus, GasStrategy};
     use rumi_protocol_backend::chains::liquidation_config::{ChainLiquidationConfigV1, DexKind};
     use rumi_protocol_backend::chains::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
@@ -8917,6 +8940,26 @@ mod chain_sp_absorb_entry_tests {
         assert_eq!(ok.price_e8, 50_000_000);
         assert_eq!(ok.native_decimals, 18);
         assert_eq!(ok.liquidation_penalty_bps, 1_200);
+    }
+
+    #[test]
+    fn chain_liquidatable_discovery_marks_bot_failed_and_sentinel() {
+        let mut s = configured_state();
+        s.set_manual_price(CFX, "CFX".into(), 1_000_000, 500);
+        let mut never_tried = s.chain_vaults.get(&7).unwrap().clone();
+        never_tried.vault_id = 8;
+        never_tried.owner = Principal::from_slice(&[8u8; 29]);
+        never_tried.custody_address = "0x00000000000000000000000000000000000000c8".into();
+        s.chain_vaults.insert(8, never_tried);
+
+        let rows = chain_liquidatable_vaults_in_state(&s, CFX, 600);
+        assert_eq!(rows.len(), 2);
+        let attempted = rows.iter().find(|r| r.vault_id == 7).unwrap();
+        assert!(attempted.sp_attempted);
+        assert_eq!(attempted.chain_collateral_sentinel, chain_collateral_sentinel(CFX));
+        let fresh = rows.iter().find(|r| r.vault_id == 8).unwrap();
+        assert!(!fresh.sp_attempted);
+        assert_eq!(fresh.chain_collateral_sentinel, chain_collateral_sentinel(CFX));
     }
 }
 
