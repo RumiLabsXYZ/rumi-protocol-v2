@@ -411,3 +411,84 @@ mod sp_absorb_tests {
         assert!(s.chain_liquidation_claims.get(&9).is_none());
     }
 }
+
+// ─── Increment 4 / Task 6: enqueue SP claim payout from reserved CFX ───
+mod chain_claim_tests {
+    use super::super::settlement::claim_chain_collateral_in_state;
+    use crate::chains::config::ChainId;
+    use crate::chains::multi_chain_state::{ChainLiqClaimV1, MultiChainState};
+    use crate::chains::settlement_queue::SettlementOpKind;
+    use candid::Principal;
+
+    const CFX: ChainId = ChainId(71);
+    const E18: u128 = 1_000_000_000_000_000_000;
+
+    fn valid_evm_address(a: &str) -> bool {
+        a.starts_with("0x") && a.len() == 42
+    }
+
+    fn claimant() -> Principal {
+        Principal::from_slice(&[7u8; 29])
+    }
+
+    fn state_with_claim() -> MultiChainState {
+        let mut s = MultiChainState::default();
+        s.chain_liquidation_claims.insert(7, ChainLiqClaimV1 {
+            vault_id: 7,
+            chain: CFX,
+            custody_address: "0x00000000000000000000000000000000000000c7".into(),
+            seized_native_total: 10 * E18,
+            paid_native: 2 * E18,
+        });
+        s
+    }
+
+    #[test]
+    fn claim_chain_collateral_enqueues_payout_and_marks_paid() {
+        let mut s = state_with_claim();
+        let dest = "0x0000000000000000000000000000000000000abc".to_string();
+
+        let op_id = claim_chain_collateral_in_state(&mut s, 7, claimant(), 3 * E18, dest.clone(), 42, valid_evm_address)
+            .expect("claim enqueued");
+
+        let claim = s.chain_liquidation_claims.get(&7).unwrap();
+        assert_eq!(claim.paid_native, 5 * E18, "claim is deducted before async payout");
+        let op = s.settlement_queues.get(&CFX).unwrap().pending.get(&op_id).unwrap();
+        match &op.kind {
+            SettlementOpKind::ChainCollateralPayout { recipient, amount_e18, vault_id, claimant: c } => {
+                assert_eq!(recipient, &dest);
+                assert_eq!(*amount_e18, 3 * E18);
+                assert_eq!(*vault_id, 7);
+                assert_eq!(*c, claimant());
+            }
+            other => panic!("expected ChainCollateralPayout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn claim_chain_collateral_rejects_duplicate_without_double_marking_paid() {
+        let mut s = state_with_claim();
+        let dest = "0x0000000000000000000000000000000000000abc".to_string();
+        claim_chain_collateral_in_state(&mut s, 7, claimant(), 3 * E18, dest.clone(), 42, valid_evm_address)
+            .expect("first claim enqueued");
+
+        let err = claim_chain_collateral_in_state(&mut s, 7, claimant(), 3 * E18, dest, 43, valid_evm_address)
+            .unwrap_err();
+
+        assert!(err.contains("Duplicate"), "expected duplicate idempotency error, got {err}");
+        assert_eq!(s.chain_liquidation_claims.get(&7).unwrap().paid_native, 5 * E18);
+        assert_eq!(s.settlement_queues.get(&CFX).unwrap().pending.len(), 1);
+    }
+
+    #[test]
+    fn claim_chain_collateral_validates_destination_before_mutation() {
+        let mut s = state_with_claim();
+
+        let err = claim_chain_collateral_in_state(&mut s, 7, claimant(), 3 * E18, "not-evm".into(), 42, valid_evm_address)
+            .unwrap_err();
+
+        assert!(err.contains("invalid EVM address"), "unexpected error: {err}");
+        assert_eq!(s.chain_liquidation_claims.get(&7).unwrap().paid_native, 2 * E18);
+        assert!(s.settlement_queues.get(&CFX).is_none());
+    }
+}

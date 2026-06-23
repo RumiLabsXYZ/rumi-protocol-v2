@@ -3777,6 +3777,69 @@ async fn stability_pool_liquidate_chain_vault(
     })
 }
 
+/// Called by the stability pool to enqueue a native CFX payout from a reserved
+/// chain-liquidation claim. The SP owns depositor apportionment; the backend owns
+/// custody, idempotency, and the settlement queue.
+#[update]
+#[candid_method(update)]
+fn claim_chain_collateral(
+    claim_id: u64,
+    claimant: Principal,
+    owed_wei: u128,
+    dest_evm: String,
+) -> Result<u64, ProtocolError> {
+    if ic_cdk::caller() == Principal::anonymous() {
+        return Err(ProtocolError::AnonymousCallerNotAllowed);
+    }
+    if read_state(|s| s.frozen) {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "Protocol is frozen. All operations are suspended pending admin review.".to_string(),
+        ));
+    }
+    validate_liquidation_not_frozen()?;
+    if read_state(|s| s.sp_writedown_disabled) {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "SP writedown path is disabled by admin".to_string(),
+        ));
+    }
+
+    let caller = ic_cdk::api::caller();
+    let is_stability_pool = read_state(|s| {
+        s.stability_pool_canister.map_or(false, |sp| sp == caller)
+    });
+    if !is_stability_pool {
+        return Err(ProtocolError::GenericError(
+            "Caller is not the registered stability pool canister".to_string(),
+        ));
+    }
+    if !rumi_protocol_backend::chains::evm::tecdsa::is_valid_evm_address(&dest_evm) {
+        return Err(ProtocolError::GenericError("invalid EVM address".to_string()));
+    }
+
+    let now = ic_cdk::api::time();
+    let op_id = mutate_state(|s| {
+        rumi_protocol_backend::chains::evm::settlement::claim_chain_collateral_in_state(
+            &mut s.multi_chain,
+            claim_id,
+            claimant,
+            owed_wei,
+            dest_evm.clone(),
+            now,
+            rumi_protocol_backend::chains::evm::tecdsa::is_valid_evm_address,
+        )
+        .map_err(ProtocolError::ChainAdmin)
+    })?;
+    log!(
+        INFO,
+        "[claim_chain_collateral] claim={} claimant={} amount_wei={} op_id={}",
+        claim_id,
+        claimant,
+        owed_wei,
+        op_id
+    );
+    Ok(op_id)
+}
+
 /// Called by the stability pool to liquidate a vault using 3USD reserves.
 /// The SP must have approved this canister to spend `three_usd_amount_e8s` on `three_usd_ledger`.
 /// Validates vault first, then pulls 3USD, then writes down debt and releases collateral.

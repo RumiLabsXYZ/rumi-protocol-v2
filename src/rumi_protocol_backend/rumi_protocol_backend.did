@@ -1070,6 +1070,7 @@ service : (ProtocolArg) -> {
   bot_claim_liquidation : (nat64) -> (Result_4);
   bot_confirm_liquidation : (nat64) -> (Result);
   chain_has_active_settlement_op : (nat32) -> (bool) query;
+  claim_chain_collateral : (nat64, principal, nat, text) -> (Result_1);
   claim_liquidity_returns : () -> (Result_1);
   clear_invariant_halt : () -> (Result);
   clear_liquidation_breaker : () -> (Result);

@@ -377,6 +377,91 @@ pub fn apply_sp_chain_liquidation_absorb_in_state(
     })
 }
 
+/// State-only SP claim payout enqueue. The SP canister computes each user's CFX
+/// entitlement from its own depositor accounting, then asks the backend to pay
+/// that exact amount from the reserved chain-liquidity claim.
+///
+/// Mutation order is important: enqueue first, then mark the claim as paid. A
+/// duplicate idempotency key therefore rejects without double-deducting the
+/// claim balance.
+pub fn claim_chain_collateral_in_state(
+    state: &mut MultiChainState,
+    claim_id: u64,
+    claimant: candid::Principal,
+    owed_wei: u128,
+    dest_evm: String,
+    now_ns: u64,
+    address_validator: impl Fn(&str) -> bool,
+) -> Result<u64, String> {
+    if owed_wei == 0 {
+        return Err("chain collateral claim: amount is zero".to_string());
+    }
+    if !address_validator(&dest_evm) {
+        return Err("chain collateral claim: invalid EVM address".to_string());
+    }
+
+    let (chain, remaining) = {
+        let claim = state
+            .chain_liquidation_claims
+            .get(&claim_id)
+            .ok_or_else(|| format!("chain collateral claim: unknown claim {claim_id}"))?;
+        if !claim.paid_within_seized() {
+            return Err(format!("chain collateral claim: claim {claim_id} is overpaid"));
+        }
+        (claim.chain, claim.remaining_native())
+    };
+
+    let idempotency_key = format!(
+        "chain-collateral-claim-{claim_id}-{claimant}-{}-{owed_wei}",
+        dest_evm.to_ascii_lowercase()
+    );
+
+    if state
+        .settlement_queues
+        .get(&chain)
+        .map(|q| q.seen_idempotency_keys.contains(&idempotency_key))
+        .unwrap_or(false)
+    {
+        return Err(format!(
+            "Duplicate chain collateral claim payout idempotency key {idempotency_key}"
+        ));
+    }
+
+    if owed_wei > remaining {
+        return Err(format!(
+            "chain collateral claim: requested {owed_wei} exceeds remaining {remaining}"
+        ));
+    }
+
+    let op = crate::chains::settlement_queue::SettlementOp::new(
+        SettlementOpKind::ChainCollateralPayout {
+            recipient: dest_evm,
+            amount_e18: owed_wei,
+            vault_id: claim_id,
+            claimant,
+        },
+        idempotency_key,
+        now_ns,
+    );
+    let op_id = state
+        .settlement_queues
+        .entry(chain)
+        .or_default()
+        .enqueue(op)
+        .map_err(|e| match e {
+            crate::chains::settlement_queue::SettlementQueueError::DuplicateIdempotencyKey(key) => {
+                format!("Duplicate chain collateral claim payout idempotency key {key}")
+            }
+        })?;
+
+    let claim = state
+        .chain_liquidation_claims
+        .get_mut(&claim_id)
+        .expect("claim present: checked above");
+    claim.paid_native += owed_wei;
+    Ok(op_id)
+}
+
 // ─── Timer D tick (fan-out) ─────────────────────────────────────────────────
 
 /// Timer D entry point: run one settlement cycle for every registered+enabled
