@@ -174,6 +174,34 @@ pub fn opt_in_collateral(collateral_type: Principal) -> Result<(), StabilityPool
     result
 }
 
+#[update]
+pub fn opt_in_cfx(chain_sentinel: Principal) -> Result<(), StabilityPoolError> {
+    // SP-102 / AR-S-002: see opt_out_collateral.
+    if crate::pool_guard::liquidation_in_progress() {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    let caller = ic_cdk::api::caller();
+    let result = mutate_state(|s| s.opt_in_cfx(&caller, chain_sentinel));
+    if result.is_ok() {
+        mutate_state(|s| s.push_event(caller, PoolEventType::OptInCollateral { collateral_type: chain_sentinel }));
+    }
+    result
+}
+
+#[update]
+pub fn opt_out_cfx(chain_sentinel: Principal) -> Result<(), StabilityPoolError> {
+    // SP-102 / AR-S-002: see opt_out_collateral.
+    if crate::pool_guard::liquidation_in_progress() {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    let caller = ic_cdk::api::caller();
+    let result = mutate_state(|s| s.opt_out_cfx(&caller, chain_sentinel));
+    if result.is_ok() {
+        mutate_state(|s| s.push_event(caller, PoolEventType::OptOutCollateral { collateral_type: chain_sentinel }));
+    }
+    result
+}
+
 // ─── Liquidation (Push + Fallback) ───
 
 /// Called by the backend to push liquidatable vault notifications.
@@ -446,6 +474,16 @@ pub fn icrc21_canister_call_consent_message(
         "opt_in_collateral" => {
             "## Opt In to Collateral\n\n\
              You are opting back in to receiving a specific collateral type from future liquidations."
+                .to_string()
+        }
+        "opt_in_cfx" => {
+            "## Opt In to CFX\n\n\
+             You are opting in to receiving CFX from future chain-vault liquidations."
+                .to_string()
+        }
+        "opt_out_cfx" => {
+            "## Opt Out of CFX\n\n\
+             You are opting out of receiving CFX from future chain-vault liquidations."
                 .to_string()
         }
         "deposit_as_3usd" => {

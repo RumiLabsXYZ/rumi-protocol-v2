@@ -60,6 +60,11 @@ pub struct DepositPosition {
     pub collateral_gains: BTreeMap<Principal, u64>,
     /// Collateral types this user has opted out of.
     pub opted_out_collateral: BTreeSet<Principal>,
+    /// Chain collateral sentinels this user has explicitly opted into.
+    /// Chain-native collateral is default-out; normal collateral remains
+    /// default-in via `opted_out_collateral`.
+    #[serde(default)]
+    pub opted_in_chain_collateral: Option<BTreeSet<Principal>>,
     /// First deposit timestamp (nanos).
     pub deposit_timestamp: u64,
     /// Lifetime claimed gains per collateral type.
@@ -81,6 +86,7 @@ impl DepositPosition {
             stablecoin_balances: BTreeMap::new(),
             collateral_gains: BTreeMap::new(),
             opted_out_collateral: BTreeSet::new(),
+            opted_in_chain_collateral: Some(BTreeSet::new()),
             deposit_timestamp: timestamp,
             total_claimed_gains: BTreeMap::new(),
             total_interest_earned_e8s: Some(0),
@@ -130,6 +136,14 @@ impl DepositPosition {
     /// Whether this user is opted in for a given collateral type.
     pub fn is_opted_in(&self, collateral_type: &Principal) -> bool {
         !self.opted_out_collateral.contains(collateral_type)
+    }
+
+    /// Whether this user has explicitly opted in for a chain-native sentinel.
+    pub fn is_opted_in_for_chain(&self, sentinel: &Principal) -> bool {
+        self.opted_in_chain_collateral
+            .as_ref()
+            .map(|s| s.contains(sentinel))
+            .unwrap_or(false)
     }
 
     /// Whether the position is entirely empty (no balances, no gains).

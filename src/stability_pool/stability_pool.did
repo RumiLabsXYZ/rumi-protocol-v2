@@ -245,6 +245,8 @@ service : (StabilityPoolInitArgs) -> {
   // ── Opt-in / Opt-out ──
   opt_out_collateral : (principal) -> (variant { Ok; Err : StabilityPoolError });
   opt_in_collateral : (principal) -> (variant { Ok; Err : StabilityPoolError });
+  opt_out_cfx : (principal) -> (variant { Ok; Err : StabilityPoolError });
+  opt_in_cfx : (principal) -> (variant { Ok; Err : StabilityPoolError });
 
   // ── Liquidation ──
   notify_liquidatable_vaults : (vec LiquidatableVaultInfo) -> (vec LiquidationResult);

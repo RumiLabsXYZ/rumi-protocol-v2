@@ -22,6 +22,10 @@ pub struct StabilityPoolState {
     // Registries
     pub stablecoin_registry: BTreeMap<Principal, StablecoinConfig>,
     pub collateral_registry: BTreeMap<Principal, CollateralInfo>,
+    /// Deterministic chain-native collateral sentinel principals. `Option` keeps
+    /// Candid stable memory upgrade-compatible when decoding old snapshots.
+    #[serde(default)]
+    pub chain_collateral_sentinels: Option<BTreeSet<Principal>>,
 
     // Canister references
     pub protocol_canister_id: Principal,
@@ -70,6 +74,7 @@ impl Default for StabilityPoolState {
             total_stablecoin_balances: BTreeMap::new(),
             stablecoin_registry: BTreeMap::new(),
             collateral_registry: BTreeMap::new(),
+            chain_collateral_sentinels: Some(BTreeSet::new()),
             protocol_canister_id: Principal::anonymous(),
             configuration: PoolConfiguration {
                 min_deposit_e8s: 1_000_000, // 0.01 USD
@@ -174,6 +179,27 @@ impl StabilityPoolState {
         self.collateral_registry.insert(info.ledger_id, info);
     }
 
+    pub fn register_chain_collateral_sentinel(&mut self, sentinel: Principal) {
+        self.chain_collateral_sentinels
+            .get_or_insert_with(BTreeSet::new)
+            .insert(sentinel);
+    }
+
+    pub fn is_chain_collateral_sentinel(&self, collateral_type: &Principal) -> bool {
+        self.chain_collateral_sentinels
+            .as_ref()
+            .map(|s| s.contains(collateral_type))
+            .unwrap_or(false)
+    }
+
+    fn position_opted_in_for(&self, pos: &DepositPosition, collateral_type: &Principal) -> bool {
+        if self.is_chain_collateral_sentinel(collateral_type) {
+            pos.is_opted_in_for_chain(collateral_type)
+        } else {
+            pos.is_opted_in(collateral_type)
+        }
+    }
+
     // ─── Deposits ───
 
     pub fn add_deposit(&mut self, user: Principal, token_ledger: Principal, amount: u64) {
@@ -216,6 +242,10 @@ impl StabilityPoolState {
         // Only icUSD-denominated balances earn the interest stream.
         // 3USD, ckUSDC, ckUSDT depositors still participate in liquidations
         // pro-rata but no longer earn the interest distribution.
+        let collateral_is_chain_sentinel = collateral_type
+            .as_ref()
+            .map(|ct| self.is_chain_collateral_sentinel(ct))
+            .unwrap_or(false);
         let holders: Vec<(Principal, u64)> = self.deposits.iter()
             .filter_map(|(p, pos)| {
                 let icusd_value = pos.icusd_value(&self.stablecoin_registry);
@@ -224,7 +254,12 @@ impl StabilityPoolState {
                 }
                 // If we know the collateral source, skip opted-out depositors
                 if let Some(ct) = &collateral_type {
-                    if !pos.is_opted_in(ct) {
+                    let opted_in = if collateral_is_chain_sentinel {
+                        pos.is_opted_in_for_chain(ct)
+                    } else {
+                        pos.is_opted_in(ct)
+                    };
+                    if !opted_in {
                         return None;
                     }
                 }
@@ -444,6 +479,9 @@ impl StabilityPoolState {
     // ─── Opt-in / Opt-out ───
 
     pub fn opt_out_collateral(&mut self, user: &Principal, collateral_type: Principal) -> Result<(), StabilityPoolError> {
+        if self.is_chain_collateral_sentinel(&collateral_type) {
+            return self.opt_out_cfx(user, collateral_type);
+        }
         let position = self.deposits.get_mut(user)
             .ok_or(StabilityPoolError::NoPositionFound)?;
         if !position.opted_out_collateral.insert(collateral_type) {
@@ -453,10 +491,39 @@ impl StabilityPoolState {
     }
 
     pub fn opt_in_collateral(&mut self, user: &Principal, collateral_type: Principal) -> Result<(), StabilityPoolError> {
+        if self.is_chain_collateral_sentinel(&collateral_type) {
+            return self.opt_in_cfx(user, collateral_type);
+        }
         let position = self.deposits.get_mut(user)
             .ok_or(StabilityPoolError::NoPositionFound)?;
         if !position.opted_out_collateral.remove(&collateral_type) {
             return Err(StabilityPoolError::AlreadyOptedIn { collateral: collateral_type });
+        }
+        Ok(())
+    }
+
+    pub fn opt_in_cfx(&mut self, user: &Principal, sentinel: Principal) -> Result<(), StabilityPoolError> {
+        if !self.is_chain_collateral_sentinel(&sentinel) {
+            return Err(StabilityPoolError::CollateralNotFound { ledger: sentinel });
+        }
+        let position = self.deposits.get_mut(user)
+            .ok_or(StabilityPoolError::NoPositionFound)?;
+        let opted_in = position.opted_in_chain_collateral.get_or_insert_with(BTreeSet::new);
+        if !opted_in.insert(sentinel) {
+            return Err(StabilityPoolError::AlreadyOptedIn { collateral: sentinel });
+        }
+        Ok(())
+    }
+
+    pub fn opt_out_cfx(&mut self, user: &Principal, sentinel: Principal) -> Result<(), StabilityPoolError> {
+        if !self.is_chain_collateral_sentinel(&sentinel) {
+            return Err(StabilityPoolError::CollateralNotFound { ledger: sentinel });
+        }
+        let position = self.deposits.get_mut(user)
+            .ok_or(StabilityPoolError::NoPositionFound)?;
+        let opted_in = position.opted_in_chain_collateral.get_or_insert_with(BTreeSet::new);
+        if !opted_in.remove(&sentinel) {
+            return Err(StabilityPoolError::AlreadyOptedOut { collateral: sentinel });
         }
         Ok(())
     }
@@ -524,7 +591,7 @@ impl StabilityPoolState {
     pub fn effective_pool_for_collateral(&self, collateral_type: &Principal) -> u64 {
         let vps = self.virtual_prices();
         self.deposits.values()
-            .filter(|pos| pos.is_opted_in(collateral_type))
+            .filter(|pos| self.position_opted_in_for(pos, collateral_type))
             .map(|pos| pos.total_usd_value(&self.stablecoin_registry, vps))
             .sum()
     }
@@ -546,7 +613,7 @@ impl StabilityPoolState {
 
         for (ledger, config) in &self.stablecoin_registry {
             let available_native: u64 = self.deposits.values()
-                .filter(|pos| pos.is_opted_in(collateral_type))
+                .filter(|pos| self.position_opted_in_for(pos, collateral_type))
                 .map(|pos| pos.stablecoin_balances.get(ledger).copied().unwrap_or(0))
                 .sum();
             if available_native > 0 {
@@ -597,7 +664,7 @@ impl StabilityPoolState {
         let mut priority_buckets: BTreeMap<u8, Vec<(Principal, u64, u8, bool)>> = BTreeMap::new();
         for (ledger, config) in &self.stablecoin_registry {
             let available_native: u64 = self.deposits.values()
-                .filter(|pos| pos.is_opted_in(collateral_type))
+                .filter(|pos| self.position_opted_in_for(pos, collateral_type))
                 .map(|pos| pos.stablecoin_balances.get(ledger).copied().unwrap_or(0))
                 .sum();
             if available_native > 0 {
@@ -686,7 +753,7 @@ impl StabilityPoolState {
     ) {
         // Phase 1: Compute each opted-in depositor's share of the consumed stables (in e8s)
         let opted_in_principals: Vec<Principal> = self.deposits.iter()
-            .filter(|(_, pos)| pos.is_opted_in(&collateral_type))
+            .filter(|(_, pos)| self.position_opted_in_for(pos, &collateral_type))
             .map(|(p, _)| *p)
             .collect();
 
@@ -874,7 +941,7 @@ impl StabilityPoolState {
         let vps = self.virtual_prices();
         self.collateral_registry.keys().map(|ct| {
             let eligible: u64 = self.deposits.values()
-                .filter(|pos| pos.is_opted_in(ct))
+                .filter(|pos| self.position_opted_in_for(pos, ct))
                 .map(|pos| pos.total_usd_value(&self.stablecoin_registry, vps))
                 .sum();
             (*ct, eligible)
@@ -1098,6 +1165,7 @@ impl From<StabilityPoolStateV1> for StabilityPoolState {
             total_stablecoin_balances: v1.total_stablecoin_balances,
             stablecoin_registry: v1.stablecoin_registry,
             collateral_registry: v1.collateral_registry,
+            chain_collateral_sentinels: Some(BTreeSet::new()),
             protocol_canister_id: v1.protocol_canister_id,
             configuration: v1.configuration,
             liquidation_history: v1.liquidation_history,
@@ -1697,6 +1765,34 @@ mod tests {
 
         // ckBTC effective pool still has everyone
         assert_eq!(state.effective_pool_for_collateral(&ckbtc_ledger()), 100_00000000);
+    }
+
+    #[test]
+    fn cfx_sentinel_requires_explicit_opt_in_without_breaking_default_collateral() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
+        add_deposit_direct(&mut state, user_b(), icusd_ledger(), 50_00000000);
+        state.register_chain_collateral_sentinel(cfx_sentinel());
+
+        assert_eq!(
+            state.effective_pool_for_collateral(&icp_ledger()),
+            150_00000000,
+            "non-chain collateral stays default-in",
+        );
+        assert_eq!(
+            state.effective_pool_for_collateral(&cfx_sentinel()),
+            0,
+            "chain sentinel starts default-out",
+        );
+        assert!(state.compute_token_draw(10_00000000, &cfx_sentinel()).is_empty());
+
+        state.opt_in_cfx(&user_a(), cfx_sentinel()).expect("user A opts into CFX");
+        assert_eq!(state.effective_pool_for_collateral(&cfx_sentinel()), 100_00000000);
+        let draw = state.compute_token_draw(10_00000000, &cfx_sentinel());
+        assert_eq!(draw.get(&icusd_ledger()).copied(), Some(10_00000000));
+
+        state.opt_out_cfx(&user_a(), cfx_sentinel()).expect("user A opts back out");
+        assert_eq!(state.effective_pool_for_collateral(&cfx_sentinel()), 0);
     }
 
     // ─── Test: Multi-token liquidation with mixed decimals ───
@@ -2376,6 +2472,14 @@ mod tests {
         assert!(
             decoded_pos.cfx_claims.clone().unwrap_or_default().is_empty(),
             "missing CFX claims field must decode as empty",
+        );
+        assert!(
+            decoded_pos.opted_in_chain_collateral.clone().unwrap_or_default().is_empty(),
+            "missing chain opt-in field must decode as empty",
+        );
+        assert!(
+            decoded.chain_collateral_sentinels.clone().unwrap_or_default().is_empty(),
+            "missing chain sentinel registry must decode as empty",
         );
     }
 
