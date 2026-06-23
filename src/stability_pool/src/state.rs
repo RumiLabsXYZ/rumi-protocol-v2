@@ -637,6 +637,21 @@ impl StabilityPoolState {
             .sum()
     }
 
+    pub fn icusd_ledger(&self) -> Option<Principal> {
+        self.stablecoin_registry.iter()
+            .find(|(_, config)| config.symbol == "icUSD")
+            .map(|(ledger, _)| *ledger)
+    }
+
+    /// Compute opted-in icUSD coverage only. Chain-native liquidations use
+    /// this instead of the mixed-token draw so Inc 4 burns only IC-native icUSD.
+    pub fn effective_icusd_pool_for_collateral(&self, collateral_type: &Principal) -> u64 {
+        self.deposits.values()
+            .filter(|pos| self.position_opted_in_for(pos, collateral_type))
+            .map(|pos| pos.icusd_value(&self.stablecoin_registry))
+            .sum()
+    }
+
     // ─── Liquidation Processing ───
 
     /// Compute the stablecoin draw for a liquidation of a given debt amount (e8s).
@@ -764,6 +779,27 @@ impl StabilityPoolState {
             remaining_e8s -= draw_e8s;
         }
 
+        result
+    }
+
+    /// Compute an Inc 4 chain-vault draw. Returns at most one token, icUSD, in
+    /// e8s. ckStables and 3USD are intentionally excluded from this path.
+    pub fn compute_icusd_chain_draw(
+        &self,
+        debt_e8s: u64,
+        chain_sentinel: &Principal,
+    ) -> BTreeMap<Principal, u64> {
+        let mut result = BTreeMap::new();
+        if debt_e8s == 0 || !self.is_chain_collateral_sentinel(chain_sentinel) {
+            return result;
+        }
+        let Some(icusd_ledger) = self.icusd_ledger() else {
+            return result;
+        };
+        let draw_e8s = debt_e8s.min(self.effective_icusd_pool_for_collateral(chain_sentinel));
+        if draw_e8s > 0 {
+            result.insert(icusd_ledger, draw_e8s);
+        }
         result
     }
 
@@ -2039,6 +2075,42 @@ mod tests {
         state.mark_cfx_claimed(&user_a(), &cfx_sentinel(), 9_997 * E18 + 1);
         assert!(state.deposits.get(&user_a()).unwrap()
             .cfx_claims.as_ref().unwrap().get(&cfx_sentinel()).is_none());
+    }
+
+    #[test]
+    fn chain_icusd_draw_ignores_ckstables_and_lp_tokens() {
+        let mut state = test_state_with_3usd();
+        state.register_chain_collateral_sentinel(cfx_sentinel());
+
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 40_00000000);
+        add_deposit_direct(&mut state, user_a(), ckusdc_ledger(), 500_000_000);
+        add_deposit_direct(&mut state, user_a(), three_usd_ledger(), 500_00000000);
+        add_deposit_direct(&mut state, user_b(), icusd_ledger(), 100_00000000);
+        state.opt_in_cfx(&user_a(), cfx_sentinel()).unwrap();
+
+        assert_eq!(
+            state.effective_icusd_pool_for_collateral(&cfx_sentinel()),
+            40_00000000,
+            "only opted-in icUSD counts toward chain absorb coverage",
+        );
+
+        let draw = state.compute_icusd_chain_draw(70_00000000, &cfx_sentinel());
+        assert_eq!(draw.len(), 1, "chain draw should contain only icUSD");
+        assert_eq!(
+            draw.get(&icusd_ledger()).copied(),
+            Some(40_00000000),
+            "chain draw caps to opted-in icUSD, not total stable value",
+        );
+        assert!(!draw.contains_key(&ckusdc_ledger()), "ckUSDC must not be burned for Inc 4 chain absorb");
+        assert!(!draw.contains_key(&three_usd_ledger()), "3USD LP must not be burned for Inc 4 chain absorb");
+
+        state.opt_in_cfx(&user_b(), cfx_sentinel()).unwrap();
+        let full_draw = state.compute_icusd_chain_draw(70_00000000, &cfx_sentinel());
+        assert_eq!(
+            full_draw.get(&icusd_ledger()).copied(),
+            Some(70_00000000),
+            "additional opted-in icUSD can cover the requested debt",
+        );
     }
 
     // ─── Test: Multi-token liquidation with mixed decimals ───

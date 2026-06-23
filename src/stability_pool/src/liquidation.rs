@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
-use candid::Principal;
+use candid::{Nat, Principal};
 use ic_canister_log::log;
 use ic_cdk::call;
 use icrc_ledger_types::icrc1::account::Account;
+use icrc_ledger_types::icrc1::transfer::{Memo, TransferArg, TransferError};
 use icrc_ledger_types::icrc2::approve::{ApproveArgs, ApproveError};
+use num_traits::ToPrimitive;
 
 use crate::logs::INFO;
 use crate::types::*;
@@ -16,6 +18,110 @@ use crate::state::{read_state, mutate_state};
 /// them as a fee=0 fallback would. The next successful liquidation reconciles.
 /// Shared with `claim_collateral`'s fee lookup (ICRC-004 / SP-203).
 pub(crate) const FALLBACK_COLLATERAL_FEE_E8S: u64 = 10_000;
+
+pub(crate) const CHAIN_WRITEDOWN_MEMO_PREFIX: &[u8] = b"RUMI-LIQ-004:";
+
+pub fn encode_chain_writedown_memo(vault_id: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(CHAIN_WRITEDOWN_MEMO_PREFIX.len() + 8);
+    out.extend_from_slice(CHAIN_WRITEDOWN_MEMO_PREFIX);
+    out.extend_from_slice(&vault_id.to_be_bytes());
+    out
+}
+
+pub fn build_icusd_burn_transfer_arg(
+    minting_account: Account,
+    amount_e8s: u64,
+    vault_id: u64,
+    created_at_time: u64,
+) -> TransferArg {
+    TransferArg {
+        from_subaccount: None,
+        to: minting_account,
+        fee: None,
+        created_at_time: Some(created_at_time),
+        memo: Some(Memo::from(encode_chain_writedown_memo(vault_id))),
+        amount: Nat::from(amount_e8s),
+    }
+}
+
+pub fn build_icusd_burn_proof(
+    block_index: u64,
+    vault_id: u64,
+) -> rumi_protocol_backend::icrc3_proof::SpWritedownProof {
+    rumi_protocol_backend::icrc3_proof::SpWritedownProof {
+        block_index,
+        ledger_kind: rumi_protocol_backend::icrc3_proof::SpProofLedger::IcusdBurn,
+        vault_id_memo: vault_id,
+    }
+}
+
+pub async fn burn_icusd_for_chain_writedown(
+    icusd_ledger: Principal,
+    amount_e8s: u64,
+    vault_id: u64,
+) -> Result<rumi_protocol_backend::icrc3_proof::SpWritedownProof, StabilityPoolError> {
+    if amount_e8s == 0 {
+        return Err(StabilityPoolError::AmountTooLow { minimum_e8s: 1 });
+    }
+
+    let minting_account = match call::<(), (Option<Account>,)>(
+        icusd_ledger,
+        "icrc1_minting_account",
+        (),
+    ).await {
+        Ok((Some(account),)) => account,
+        Ok((None,)) => {
+            return Err(StabilityPoolError::LedgerTransferFailed {
+                reason: "icUSD ledger has no minting account; cannot burn".to_string(),
+            });
+        }
+        Err(_) => {
+            return Err(StabilityPoolError::InterCanisterCallFailed {
+                target: format!("{}", icusd_ledger),
+                method: "icrc1_minting_account".to_string(),
+            });
+        }
+    };
+
+    let transfer_arg = build_icusd_burn_transfer_arg(
+        minting_account,
+        amount_e8s,
+        vault_id,
+        ic_cdk::api::time(),
+    );
+
+    let result: Result<(Result<Nat, TransferError>,), _> = call(
+        icusd_ledger,
+        "icrc1_transfer",
+        (transfer_arg,),
+    ).await;
+
+    let block_index = match result {
+        Ok((Ok(block_index),)) => nat_block_index_to_u64(block_index)?,
+        Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
+            nat_block_index_to_u64(duplicate_of)?
+        }
+        Ok((Err(error),)) => {
+            return Err(StabilityPoolError::LedgerTransferFailed {
+                reason: format!("{:?}", error),
+            });
+        }
+        Err(_) => {
+            return Err(StabilityPoolError::InterCanisterCallFailed {
+                target: format!("{}", icusd_ledger),
+                method: "icrc1_transfer".to_string(),
+            });
+        }
+    };
+
+    Ok(build_icusd_burn_proof(block_index, vault_id))
+}
+
+fn nat_block_index_to_u64(block_index: Nat) -> Result<u64, StabilityPoolError> {
+    block_index.0.to_u64().ok_or_else(|| StabilityPoolError::LedgerTransferFailed {
+        reason: format!("ledger block index {} does not fit in u64", block_index),
+    })
+}
 
 /// Called by the backend when it detects liquidatable vaults (push model).
 /// Processes each vault sequentially, consuming stablecoins and distributing collateral.
@@ -532,4 +638,60 @@ struct StabilityPoolLiquidationResult {
     pub block_index: u64,
     pub fee: u64,
     pub collateral_price_e8s: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candid::Nat;
+    use icrc_ledger_types::icrc1::transfer::Memo;
+
+    fn principal(byte: u8) -> Principal {
+        Principal::from_slice(&[byte])
+    }
+
+    #[test]
+    fn chain_writedown_memo_matches_backend_liq_004_shape() {
+        let vault_id: u64 = 0x0102_0304_0506_0708;
+        let memo = encode_chain_writedown_memo(vault_id);
+
+        assert_eq!(&memo[..13], b"RUMI-LIQ-004:");
+        assert_eq!(&memo[13..], &vault_id.to_be_bytes());
+        assert_eq!(
+            rumi_protocol_backend::icrc3_proof::decode_writedown_memo(&memo),
+            Ok(vault_id),
+            "SP burn memo must be accepted by backend proof verifier",
+        );
+    }
+
+    #[test]
+    fn icusd_burn_request_targets_minting_account_and_builds_proof() {
+        let minting_account = Account { owner: principal(90), subaccount: None };
+        let amount_e8s = 12_345_00000000;
+        let vault_id = 77;
+        let created_at_time = 123_456_789;
+        let block_index = 999;
+
+        let transfer = build_icusd_burn_transfer_arg(
+            minting_account,
+            amount_e8s,
+            vault_id,
+            created_at_time,
+        );
+
+        assert_eq!(transfer.to, minting_account);
+        assert_eq!(transfer.amount, Nat::from(amount_e8s));
+        assert_eq!(transfer.fee, None, "ICRC-1 burns to the minting account have zero fee");
+        assert_eq!(transfer.from_subaccount, None);
+        assert_eq!(transfer.created_at_time, Some(created_at_time));
+        assert_eq!(
+            transfer.memo,
+            Some(Memo::from(encode_chain_writedown_memo(vault_id))),
+        );
+
+        let proof = build_icusd_burn_proof(block_index, vault_id);
+        assert_eq!(proof.block_index, block_index);
+        assert_eq!(proof.ledger_kind, rumi_protocol_backend::icrc3_proof::SpProofLedger::IcusdBurn);
+        assert_eq!(proof.vault_id_memo, vault_id);
+    }
 }
