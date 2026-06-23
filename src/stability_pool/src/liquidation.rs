@@ -6,10 +6,11 @@ use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::{Memo, TransferArg, TransferError};
 use icrc_ledger_types::icrc2::approve::{ApproveArgs, ApproveError};
 use num_traits::ToPrimitive;
+use rumi_protocol_backend::chains::config::ChainId;
 
 use crate::logs::INFO;
 use crate::types::*;
-use crate::state::{read_state, mutate_state};
+use crate::state::{read_state, mutate_state, StabilityPoolState};
 
 /// Conservative fallback for a collateral ledger's transfer fee, used only when
 /// the live `icrc1_fee` query fails (SP-104). Set to the common ICRC fee
@@ -120,6 +121,160 @@ pub async fn burn_icusd_for_chain_writedown(
 fn nat_block_index_to_u64(block_index: Nat) -> Result<u64, StabilityPoolError> {
     block_index.0.to_u64().ok_or_else(|| StabilityPoolError::LedgerTransferFailed {
         reason: format!("ledger block index {} does not fit in u64", block_index),
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ChainAbsorbPlan {
+    pub vault_id: u64,
+    pub chain_id: ChainId,
+    pub chain_sentinel: Principal,
+    pub icusd_ledger: Principal,
+    pub icusd_to_burn_e8s: u64,
+    pub stables_consumed: BTreeMap<Principal, u64>,
+}
+
+fn chain_id_from_sentinel(sentinel: &Principal) -> Option<ChainId> {
+    let bytes = sentinel.as_slice();
+    let prefix = b"rumi-chain-collateral";
+    if bytes.len() != 29 || !bytes.starts_with(prefix) || bytes[28] != 0x7f {
+        return None;
+    }
+    if bytes[prefix.len()..24].iter().any(|b| *b != 0) {
+        return None;
+    }
+    let mut chain_bytes = [0u8; 4];
+    chain_bytes.copy_from_slice(&bytes[24..28]);
+    Some(ChainId(u32::from_le_bytes(chain_bytes)))
+}
+
+pub(crate) fn registered_chain_ids_from_sentinels(state: &StabilityPoolState) -> Vec<ChainId> {
+    let mut chains: Vec<ChainId> = state.chain_collateral_sentinels
+        .as_ref()
+        .into_iter()
+        .flat_map(|sentinels| sentinels.iter())
+        .filter_map(chain_id_from_sentinel)
+        .collect();
+    chains.sort();
+    chains.dedup();
+    chains
+}
+
+pub(crate) fn prepare_chain_absorb_plan_in_state(
+    state: &StabilityPoolState,
+    vault: &ChainLiquidatableVaultInfo,
+) -> Result<ChainAbsorbPlan, StabilityPoolError> {
+    if !vault.sp_attempted {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id: vault.vault_id,
+            reason: "chain vault has not been escalated to the stability pool".to_string(),
+        });
+    }
+    if !state.is_chain_collateral_sentinel(&vault.chain_collateral_sentinel) {
+        return Err(StabilityPoolError::CollateralNotFound {
+            ledger: vault.chain_collateral_sentinel,
+        });
+    }
+    if chain_id_from_sentinel(&vault.chain_collateral_sentinel) != Some(vault.chain_id) {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id: vault.vault_id,
+            reason: "chain collateral sentinel does not match chain id".to_string(),
+        });
+    }
+    let debt_e8s = u64::try_from(vault.debt_e8s).map_err(|_| {
+        StabilityPoolError::LiquidationFailed {
+            vault_id: vault.vault_id,
+            reason: format!("chain vault debt {} exceeds SP u64 burn amount", vault.debt_e8s),
+        }
+    })?;
+    if debt_e8s == 0 {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id: vault.vault_id,
+            reason: "chain vault has no debt to absorb".to_string(),
+        });
+    }
+
+    let available_icusd = state.effective_icusd_pool_for_collateral(&vault.chain_collateral_sentinel);
+    if available_icusd < debt_e8s {
+        return Err(StabilityPoolError::InsufficientPoolBalance);
+    }
+    let stables_consumed = state.compute_icusd_chain_draw(debt_e8s, &vault.chain_collateral_sentinel);
+    let icusd_ledger = state.icusd_ledger().ok_or(StabilityPoolError::TokenNotAccepted {
+        ledger: Principal::anonymous(),
+    })?;
+    if stables_consumed.get(&icusd_ledger).copied().unwrap_or(0) != debt_e8s {
+        return Err(StabilityPoolError::InsufficientPoolBalance);
+    }
+
+    Ok(ChainAbsorbPlan {
+        vault_id: vault.vault_id,
+        chain_id: vault.chain_id,
+        chain_sentinel: vault.chain_collateral_sentinel,
+        icusd_ledger,
+        icusd_to_burn_e8s: debt_e8s,
+        stables_consumed,
+    })
+}
+
+pub(crate) fn apply_chain_absorb_success_in_state(
+    state: &mut StabilityPoolState,
+    plan: &ChainAbsorbPlan,
+    result: ChainStabilityPoolLiquidationResult,
+) -> Result<ChainSpAbsorbResult, StabilityPoolError> {
+    apply_chain_absorb_success_in_state_at(state, plan, result, ic_cdk::api::time())
+}
+
+pub(crate) fn apply_chain_absorb_success_in_state_at(
+    state: &mut StabilityPoolState,
+    plan: &ChainAbsorbPlan,
+    result: ChainStabilityPoolLiquidationResult,
+    timestamp: u64,
+) -> Result<ChainSpAbsorbResult, StabilityPoolError> {
+    if !result.success {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id: plan.vault_id,
+            reason: "backend reported unsuccessful chain absorb".to_string(),
+        });
+    }
+    if result.vault_id != plan.vault_id || result.chain_id != plan.chain_id {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id: plan.vault_id,
+            reason: "backend chain absorb result does not match requested vault".to_string(),
+        });
+    }
+    if result.liquidated_debt_e8s > plan.icusd_to_burn_e8s as u128 {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id: plan.vault_id,
+            reason: "backend liquidated more debt than SP burned".to_string(),
+        });
+    }
+    if result.collateral_received_native == 0 {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id: plan.vault_id,
+            reason: "backend returned zero chain collateral".to_string(),
+        });
+    }
+
+    state.process_chain_liquidation_gains_at(
+        plan.vault_id,
+        plan.chain_sentinel,
+        &plan.stables_consumed,
+        result.collateral_received_native,
+        result.collateral_price_e8s,
+        timestamp,
+    );
+
+    Ok(ChainSpAbsorbResult {
+        success: true,
+        vault_id: result.vault_id,
+        chain_id: result.chain_id,
+        icusd_burned_e8s: plan.icusd_to_burn_e8s,
+        liquidated_debt_e8s: result.liquidated_debt_e8s,
+        collateral_received_native: result.collateral_received_native,
+        claim_id: result.claim_id,
+        custody_address: result.custody_address,
+        block_index: result.block_index,
+        collateral_price_e8s: result.collateral_price_e8s,
     })
 }
 
@@ -250,6 +405,83 @@ pub async fn execute_liquidation(vault_id: u64) -> Result<LiquidationResult, Sta
     mutate_state(|s| { s.in_flight_liquidations.remove(&vault_id); });
 
     Ok(result)
+}
+
+pub async fn sp_absorb_chain_vault(vault_id: u64) -> Result<ChainSpAbsorbResult, StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    if !read_state(|s| s.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    if read_state(|s| s.configuration.emergency_pause) {
+        return Err(StabilityPoolError::EmergencyPaused);
+    }
+
+    let _liq_guard = crate::pool_guard::SpLiquidationGuard::new()?;
+    let (protocol_id, chains) = read_state(|s| {
+        (s.protocol_canister_id, registered_chain_ids_from_sentinels(s))
+    });
+    if chains.is_empty() {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "no registered chain collateral sentinels".to_string(),
+        });
+    }
+
+    let mut candidate: Option<ChainLiquidatableVaultInfo> = None;
+    for chain in chains {
+        let call_result: Result<(Vec<ChainLiquidatableVaultInfo>,), _> = call(
+            protocol_id,
+            "get_chain_liquidatable_vaults",
+            (chain,),
+        ).await;
+        let (vaults,) = call_result.map_err(|_| StabilityPoolError::InterCanisterCallFailed {
+            target: format!("{}", protocol_id),
+            method: "get_chain_liquidatable_vaults".to_string(),
+        })?;
+        if let Some(vault) = vaults.into_iter().find(|v| v.vault_id == vault_id) {
+            candidate = Some(vault);
+            break;
+        }
+    }
+
+    let candidate = candidate.ok_or_else(|| StabilityPoolError::LiquidationFailed {
+        vault_id,
+        reason: "chain vault not found in liquidatable discovery".to_string(),
+    })?;
+    let plan = read_state(|s| prepare_chain_absorb_plan_in_state(s, &candidate))?;
+
+    let proof = burn_icusd_for_chain_writedown(
+        plan.icusd_ledger,
+        plan.icusd_to_burn_e8s,
+        vault_id,
+    ).await?;
+
+    let backend_result: Result<(Result<ChainStabilityPoolLiquidationResult, rumi_protocol_backend::ProtocolError>,), _> = call(
+        protocol_id,
+        "stability_pool_liquidate_chain_vault",
+        (vault_id, plan.icusd_to_burn_e8s, proof),
+    ).await;
+
+    let result = match backend_result {
+        Ok((Ok(result),)) => result,
+        Ok((Err(error),)) => {
+            return Err(StabilityPoolError::LiquidationFailed {
+                vault_id,
+                reason: format!("backend rejected chain absorb after burn: {:?}", error),
+            });
+        }
+        Err(_) => {
+            return Err(StabilityPoolError::InterCanisterCallFailed {
+                target: format!("{}", protocol_id),
+                method: "stability_pool_liquidate_chain_vault".to_string(),
+            });
+        }
+    };
+
+    mutate_state(|s| apply_chain_absorb_success_in_state(s, &plan, result))
 }
 
 /// Core liquidation logic for a single vault.
@@ -645,9 +877,80 @@ mod tests {
     use super::*;
     use candid::Nat;
     use icrc_ledger_types::icrc1::transfer::Memo;
+    use crate::state::{chain_collateral_sentinel, StabilityPoolState};
 
     fn principal(byte: u8) -> Principal {
         Principal::from_slice(&[byte])
+    }
+
+    fn icusd_ledger() -> Principal {
+        Principal::from_slice(&[10])
+    }
+
+    fn ckusdc_ledger() -> Principal {
+        Principal::from_slice(&[11])
+    }
+
+    fn user_a() -> Principal {
+        Principal::from_slice(&[1])
+    }
+
+    fn user_b() -> Principal {
+        Principal::from_slice(&[2])
+    }
+
+    fn test_state() -> StabilityPoolState {
+        let mut state = StabilityPoolState::default();
+        state.register_stablecoin(StablecoinConfig {
+            ledger_id: icusd_ledger(),
+            symbol: "icUSD".to_string(),
+            decimals: 8,
+            priority: 1,
+            is_active: true,
+            transfer_fee: Some(100_000),
+            is_lp_token: None,
+            underlying_pool: None,
+        });
+        state.register_stablecoin(StablecoinConfig {
+            ledger_id: ckusdc_ledger(),
+            symbol: "ckUSDC".to_string(),
+            decimals: 6,
+            priority: 2,
+            is_active: true,
+            transfer_fee: Some(10),
+            is_lp_token: None,
+            underlying_pool: None,
+        });
+        state
+    }
+
+    fn add_deposit_direct(
+        state: &mut StabilityPoolState,
+        user: Principal,
+        token: Principal,
+        amount: u64,
+    ) {
+        let position = state.deposits.entry(user).or_insert_with(|| DepositPosition::new(0));
+        *position.stablecoin_balances.entry(token).or_insert(0) += amount;
+        *state.total_stablecoin_balances.entry(token).or_insert(0) += amount;
+    }
+
+    fn chain_vault(
+        debt_e8s: u128,
+        sp_attempted: bool,
+    ) -> ChainLiquidatableVaultInfo {
+        ChainLiquidatableVaultInfo {
+            vault_id: 77,
+            chain_id: rumi_protocol_backend::chains::config::ChainId(1030),
+            chain_collateral_sentinel: chain_collateral_sentinel(1030),
+            sp_attempted,
+            debt_e8s,
+            effective_debt_e8s: debt_e8s,
+            collateral_native: 1_000_000_000_000_000_000_000,
+            cr_e4: 12_000,
+            liquidation_threshold_e4: 13_500,
+            sized_repay_e8s: debt_e8s,
+        }
     }
 
     #[test]
@@ -693,5 +996,88 @@ mod tests {
         assert_eq!(proof.block_index, block_index);
         assert_eq!(proof.ledger_kind, rumi_protocol_backend::icrc3_proof::SpProofLedger::IcusdBurn);
         assert_eq!(proof.vault_id_memo, vault_id);
+    }
+
+    #[test]
+    fn registered_chain_ids_decode_from_registered_sentinels() {
+        let mut state = test_state();
+        state.register_chain_collateral(1030, "CFX".to_string(), 18).unwrap();
+
+        assert_eq!(
+            registered_chain_ids_from_sentinels(&state),
+            vec![rumi_protocol_backend::chains::config::ChainId(1030)],
+        );
+    }
+
+    #[test]
+    fn chain_absorb_preflight_requires_escalation_and_icusd_coverage() {
+        let mut state = test_state();
+        state.register_chain_collateral(1030, "CFX".to_string(), 18).unwrap();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 40_00000000);
+        add_deposit_direct(&mut state, user_a(), ckusdc_ledger(), 5_000_000_000);
+        add_deposit_direct(&mut state, user_b(), icusd_ledger(), 100_00000000);
+
+        let not_escalated = prepare_chain_absorb_plan_in_state(&state, &chain_vault(70_00000000, false))
+            .unwrap_err();
+        assert!(matches!(not_escalated, StabilityPoolError::LiquidationFailed { .. }));
+
+        let no_opt_in = prepare_chain_absorb_plan_in_state(&state, &chain_vault(70_00000000, true))
+            .unwrap_err();
+        assert!(matches!(no_opt_in, StabilityPoolError::InsufficientPoolBalance));
+
+        state.opt_in_cfx(&user_a(), chain_collateral_sentinel(1030)).unwrap();
+        let undercovered = prepare_chain_absorb_plan_in_state(&state, &chain_vault(70_00000000, true))
+            .unwrap_err();
+        assert!(
+            matches!(undercovered, StabilityPoolError::InsufficientPoolBalance),
+            "ckUSDC must not count toward chain absorb coverage",
+        );
+
+        state.opt_in_cfx(&user_b(), chain_collateral_sentinel(1030)).unwrap();
+        let plan = prepare_chain_absorb_plan_in_state(&state, &chain_vault(70_00000000, true))
+            .expect("covered by opted-in icUSD");
+        assert_eq!(plan.icusd_to_burn_e8s, 70_00000000);
+        assert_eq!(plan.stables_consumed.get(&icusd_ledger()).copied(), Some(70_00000000));
+        assert_eq!(plan.stables_consumed.len(), 1);
+    }
+
+    #[test]
+    fn chain_absorb_success_credits_cfx_claims_and_deducts_burned_icusd() {
+        let mut state = test_state();
+        state.register_chain_collateral(1030, "CFX".to_string(), 18).unwrap();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 40_00000000);
+        add_deposit_direct(&mut state, user_b(), icusd_ledger(), 60_00000000);
+        state.opt_in_cfx(&user_a(), chain_collateral_sentinel(1030)).unwrap();
+        state.opt_in_cfx(&user_b(), chain_collateral_sentinel(1030)).unwrap();
+
+        let plan = prepare_chain_absorb_plan_in_state(&state, &chain_vault(100_00000000, true))
+            .expect("covered");
+        let result = ChainStabilityPoolLiquidationResult {
+            success: true,
+            vault_id: 77,
+            chain_id: rumi_protocol_backend::chains::config::ChainId(1030),
+            liquidated_debt_e8s: 100_00000000,
+            collateral_received_native: 10_000_000_000_000_000_000u128,
+            claim_id: 77,
+            custody_address: "0xcustody".to_string(),
+            block_index: 44,
+            collateral_price_e8s: 5_000_000,
+        };
+
+        let absorbed = apply_chain_absorb_success_in_state_at(&mut state, &plan, result, 123)
+            .expect("success finalizes");
+
+        assert_eq!(absorbed.icusd_burned_e8s, 100_00000000);
+        assert_eq!(
+            state.total_stablecoin_balances.get(&icusd_ledger()).copied(),
+            Some(0),
+            "SP aggregate tracks the burned icUSD",
+        );
+        let claim_a = state.deposits.get(&user_a()).unwrap()
+            .cfx_claims.as_ref().unwrap().get(&chain_collateral_sentinel(1030)).copied().unwrap_or(0);
+        let claim_b = state.deposits.get(&user_b()).unwrap()
+            .cfx_claims.as_ref().unwrap().get(&chain_collateral_sentinel(1030)).copied().unwrap_or(0);
+        assert_eq!(claim_a, 4_000_000_000_000_000_000u128);
+        assert_eq!(claim_b, 6_000_000_000_000_000_000u128);
     }
 }

@@ -232,6 +232,11 @@ pub async fn execute_liquidation(vault_id: u64) -> Result<LiquidationResult, Sta
     crate::liquidation::execute_liquidation(vault_id).await
 }
 
+#[update]
+pub async fn sp_absorb_chain_vault(vault_id: u64) -> Result<ChainSpAbsorbResult, StabilityPoolError> {
+    crate::liquidation::sp_absorb_chain_vault(vault_id).await
+}
+
 // ─── Interest Revenue ───
 
 /// Receive interest revenue from the protocol backend and distribute pro-rata to depositors.

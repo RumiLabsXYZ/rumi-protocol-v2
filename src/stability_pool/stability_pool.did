@@ -88,6 +88,44 @@ type LiquidationResult = record {
   error_message : opt text;
 };
 
+type ChainLiquidatableVaultInfo = record {
+  sized_repay_e8s : nat;
+  cr_e4 : nat64;
+  collateral_native : nat;
+  vault_id : nat64;
+  sp_attempted : bool;
+  chain_collateral_sentinel : principal;
+  chain_id : nat32;
+  liquidation_threshold_e4 : nat64;
+  effective_debt_e8s : nat;
+  debt_e8s : nat;
+};
+
+type ChainStabilityPoolLiquidationResult = record {
+  collateral_price_e8s : nat64;
+  liquidated_debt_e8s : nat;
+  collateral_received_native : nat;
+  block_index : nat64;
+  claim_id : nat64;
+  custody_address : text;
+  vault_id : nat64;
+  chain_id : nat32;
+  success : bool;
+};
+
+type ChainSpAbsorbResult = record {
+  collateral_price_e8s : nat64;
+  liquidated_debt_e8s : nat;
+  collateral_received_native : nat;
+  block_index : nat64;
+  claim_id : nat64;
+  custody_address : text;
+  vault_id : nat64;
+  chain_id : nat32;
+  icusd_burned_e8s : nat64;
+  success : bool;
+};
+
 type PoolLiquidationRecord = record {
   vault_id : nat64;
   timestamp : nat64;
@@ -251,6 +289,7 @@ service : (StabilityPoolInitArgs) -> {
   // ── Liquidation ──
   notify_liquidatable_vaults : (vec LiquidatableVaultInfo) -> (vec LiquidationResult);
   execute_liquidation : (nat64) -> (variant { Ok : LiquidationResult; Err : StabilityPoolError });
+  sp_absorb_chain_vault : (nat64) -> (variant { Ok : ChainSpAbsorbResult; Err : StabilityPoolError });
 
   // ── Interest Revenue ──
   receive_interest_revenue : (principal, nat64, opt principal) -> (variant { Ok; Err : StabilityPoolError });

@@ -229,6 +229,50 @@ pub struct LiquidationResult {
     pub error_message: Option<String>,
 }
 
+/// Mirror of the backend's `ChainLiquidatableVault` Candid record. Kept local
+/// because the backend exports that type from its canister binary, not its lib.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChainLiquidatableVaultInfo {
+    pub vault_id: u64,
+    pub chain_id: rumi_protocol_backend::chains::config::ChainId,
+    pub chain_collateral_sentinel: Principal,
+    pub sp_attempted: bool,
+    pub debt_e8s: u128,
+    pub effective_debt_e8s: u128,
+    pub collateral_native: u128,
+    pub cr_e4: u64,
+    pub liquidation_threshold_e4: u64,
+    pub sized_repay_e8s: u128,
+}
+
+/// Mirror of the backend's `ChainStabilityPoolLiquidationResult`.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChainStabilityPoolLiquidationResult {
+    pub success: bool,
+    pub vault_id: u64,
+    pub chain_id: rumi_protocol_backend::chains::config::ChainId,
+    pub liquidated_debt_e8s: u128,
+    pub collateral_received_native: u128,
+    pub claim_id: u64,
+    pub custody_address: String,
+    pub block_index: u64,
+    pub collateral_price_e8s: u64,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChainSpAbsorbResult {
+    pub success: bool,
+    pub vault_id: u64,
+    pub chain_id: rumi_protocol_backend::chains::config::ChainId,
+    pub icusd_burned_e8s: u64,
+    pub liquidated_debt_e8s: u128,
+    pub collateral_received_native: u128,
+    pub claim_id: u64,
+    pub custody_address: String,
+    pub block_index: u64,
+    pub collateral_price_e8s: u64,
+}
+
 /// Audit trail record for a completed liquidation.
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PoolLiquidationRecord {
