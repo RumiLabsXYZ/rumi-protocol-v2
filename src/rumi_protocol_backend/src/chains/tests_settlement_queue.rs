@@ -96,6 +96,36 @@ fn round_trip_via_candid() {
 }
 
 #[test]
+fn chain_collateral_payout_round_trips_and_is_not_a_mint() {
+    let mut q = SettlementQueueV1::default();
+    let op = SettlementOp::new(
+        SettlementOpKind::ChainCollateralPayout {
+            recipient: "0xclaimant".to_string(),
+            amount_e18: 42,
+            vault_id: 7,
+            claimant: candid::Principal::anonymous(),
+        },
+        "claim:7:2vxsx-fae:0xclaimant".to_string(),
+        0,
+    );
+    q.enqueue(op).expect("enqueue");
+    assert!(!q.has_active_mint_op(), "claim payout does not change icUSD supply");
+
+    let bytes = Encode!(&q).expect("encode");
+    let back: SettlementQueueV1 = Decode!(&bytes, SettlementQueueV1).expect("decode");
+    let op = back.pending.get(&0).expect("op survived");
+    match &op.kind {
+        SettlementOpKind::ChainCollateralPayout { recipient, amount_e18, vault_id, claimant } => {
+            assert_eq!(recipient, "0xclaimant");
+            assert_eq!(*amount_e18, 42);
+            assert_eq!(*vault_id, 7);
+            assert_eq!(*claimant, candid::Principal::anonymous());
+        }
+        other => panic!("unexpected op kind: {other:?}"),
+    }
+}
+
+#[test]
 fn op_status_transitions_only_to_terminal_states() {
     let mut op = SettlementOp::new(
         SettlementOpKind::Mint { recipient: "0xa".to_string(), amount_e8s: 1, vault_id: 1 },

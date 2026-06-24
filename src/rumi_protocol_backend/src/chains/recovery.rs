@@ -127,6 +127,10 @@ pub fn apply_resolve_reversal_in_state(
                     }
                 }
             }
+            SettlementOpKind::ChainCollateralPayout { .. } => {
+                // Claim payout recovery must not re-credit vault collateral. The
+                // SP-side claim rollback is handled by the claim path/callback.
+            }
             SettlementOpKind::InterestMint { vault_id, .. } => {
                 if let Some(v) = state.chain_vaults.get_mut(vault_id) {
                     // Task 12: clear the orphaned interest reservation; nothing was

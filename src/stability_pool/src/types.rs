@@ -60,6 +60,11 @@ pub struct DepositPosition {
     pub collateral_gains: BTreeMap<Principal, u64>,
     /// Collateral types this user has opted out of.
     pub opted_out_collateral: BTreeSet<Principal>,
+    /// Chain collateral sentinels this user has explicitly opted into.
+    /// Chain-native collateral is default-out; normal collateral remains
+    /// default-in via `opted_out_collateral`.
+    #[serde(default)]
+    pub opted_in_chain_collateral: Option<BTreeSet<Principal>>,
     /// First deposit timestamp (nanos).
     pub deposit_timestamp: u64,
     /// Lifetime claimed gains per collateral type.
@@ -68,6 +73,11 @@ pub struct DepositPosition {
     /// `Option` is required for Candid backward-compatible stable memory upgrades.
     #[serde(default)]
     pub total_interest_earned_e8s: Option<u64>,
+    /// Claimable native-chain collateral keyed by deterministic chain sentinel,
+    /// in native base units (wei for CFX). `Option` is required for Candid
+    /// backward-compatible stable memory upgrades.
+    #[serde(default)]
+    pub cfx_claims: Option<BTreeMap<Principal, u128>>,
 }
 
 impl DepositPosition {
@@ -76,9 +86,11 @@ impl DepositPosition {
             stablecoin_balances: BTreeMap::new(),
             collateral_gains: BTreeMap::new(),
             opted_out_collateral: BTreeSet::new(),
+            opted_in_chain_collateral: Some(BTreeSet::new()),
             deposit_timestamp: timestamp,
             total_claimed_gains: BTreeMap::new(),
             total_interest_earned_e8s: Some(0),
+            cfx_claims: Some(BTreeMap::new()),
         }
     }
 
@@ -126,10 +138,19 @@ impl DepositPosition {
         !self.opted_out_collateral.contains(collateral_type)
     }
 
+    /// Whether this user has explicitly opted in for a chain-native sentinel.
+    pub fn is_opted_in_for_chain(&self, sentinel: &Principal) -> bool {
+        self.opted_in_chain_collateral
+            .as_ref()
+            .map(|s| s.contains(sentinel))
+            .unwrap_or(false)
+    }
+
     /// Whether the position is entirely empty (no balances, no gains).
     pub fn is_empty(&self) -> bool {
         self.stablecoin_balances.values().all(|&v| v == 0)
             && self.collateral_gains.values().all(|&v| v == 0)
+            && self.cfx_claims.as_ref().map(|m| m.values().all(|&v| v == 0)).unwrap_or(true)
     }
 }
 
@@ -206,6 +227,56 @@ pub struct LiquidationResult {
     pub collateral_type: Principal,
     pub success: bool,
     pub error_message: Option<String>,
+}
+
+/// Mirror of the backend's `ChainLiquidatableVault` Candid record. Kept local
+/// because the backend exports that type from its canister binary, not its lib.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChainLiquidatableVaultInfo {
+    pub vault_id: u64,
+    pub chain_id: rumi_protocol_backend::chains::config::ChainId,
+    pub chain_collateral_sentinel: Principal,
+    pub sp_attempted: bool,
+    pub debt_e8s: u128,
+    pub effective_debt_e8s: u128,
+    pub collateral_native: u128,
+    pub cr_e4: u64,
+    pub liquidation_threshold_e4: u64,
+    pub sized_repay_e8s: u128,
+}
+
+/// Mirror of the backend's `ChainStabilityPoolLiquidationResult`.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChainStabilityPoolLiquidationResult {
+    pub success: bool,
+    pub vault_id: u64,
+    pub chain_id: rumi_protocol_backend::chains::config::ChainId,
+    pub liquidated_debt_e8s: u128,
+    pub collateral_received_native: u128,
+    pub claim_id: u64,
+    pub custody_address: String,
+    pub block_index: u64,
+    pub collateral_price_e8s: u64,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChainSpAbsorbResult {
+    pub success: bool,
+    pub vault_id: u64,
+    pub chain_id: rumi_protocol_backend::chains::config::ChainId,
+    pub icusd_burned_e8s: u64,
+    pub liquidated_debt_e8s: u128,
+    pub collateral_received_native: u128,
+    pub claim_id: u64,
+    pub custody_address: String,
+    pub block_index: u64,
+    pub collateral_price_e8s: u64,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChainClaimSource {
+    pub claim_id: u64,
+    pub remaining_native: u128,
 }
 
 /// Audit trail record for a completed liquidation.

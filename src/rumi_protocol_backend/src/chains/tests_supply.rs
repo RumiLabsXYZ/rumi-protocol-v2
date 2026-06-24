@@ -1,8 +1,9 @@
 use super::config::{ChainConfigV3, ChainId, ChainStatus, GasStrategy};
 use super::multi_chain_state::MultiChainState;
 use super::supply::{
-    apply_supply_delta, check_invariant, settle_pending_chain_burn, settle_reserve_burn,
-    BackingSettlementError, SupplyDelta, SupplyInvariantError,
+    apply_debt_to_pending_burn_shift, apply_pending_burn_to_supply_shift, apply_supply_delta,
+    check_invariant, settle_pending_chain_burn, settle_reserve_burn, BackingSettlementError,
+    PendingBurnShiftError, PendingBurnSupplyShiftError, SupplyDelta, SupplyInvariantError,
 };
 
 fn fixture_state() -> MultiChainState {
@@ -351,6 +352,165 @@ fn reserve_shift_blocked_while_invariant_halted() {
         Err(ReserveShiftError::Halted)
     );
     assert_eq!(s.chain_vaults[&1].debt_e8s, 100, "no mutation while halted");
+}
+
+// ─── Increment 4 / Task 1: the SP-path supply helpers ───
+//
+// The SP fallback BURNS IC-native icUSD, so unlike the bot/PSM path it moves debt
+// into pending_chain_burn_e8s (RHS term-3), NOT reserve_backing_e8s (term-2). Two
+// guarded mutations, mirroring apply_debt_to_reserve_shift / apply_supply_delta:
+//   (1) absorb time: apply_debt_to_pending_burn_shift moves debt -> pending_burn,
+//       chain_supplies UNCHANGED (foreign representation remains outstanding).
+//   (2) later manual reconciliation: apply_pending_burn_to_supply_shift drops
+//       pending_burn AND chain_supplies together (foreign supply retired).
+// Both conserve the unified RHS by construction.
+
+// (1a) absorb: debt -> pending_burn, supply unchanged, invariant preserved.
+#[test]
+fn pending_burn_shift_moves_debt_to_pending_and_preserves_invariant() {
+    let mut s = fixture_state();
+    s.chain_vaults.insert(1, vault_with(100, 0));
+    s.chain_supplies.insert(CHAIN, 100);
+    // pre: 100 == 100 (debt) + 0 (reserve) + 0 (pending)
+    assert_eq!(check_invariant(&s, s.total_chain_vault_debt_e8s()), Ok(()));
+
+    // SP burns 40 of IC icUSD and absorbs 40 of debt.
+    apply_debt_to_pending_burn_shift(&mut s, CHAIN, 1, 40).expect("pending-burn shift");
+
+    assert_eq!(
+        s.chain_vaults[&1].debt_e8s, 60,
+        "vault debt reduced by absorbed amount"
+    );
+    assert_eq!(
+        s.pending_chain_burn_e8s[&CHAIN], 40,
+        "pending_chain_burn booked the absorbed debt"
+    );
+    assert_eq!(
+        s.chain_supplies[&CHAIN], 100,
+        "chain_supplies UNCHANGED (foreign representation remains outstanding)"
+    );
+    // post: 100 == 60 (debt) + 0 (reserve) + 40 (pending) -> invariant still holds
+    assert_eq!(check_invariant(&s, s.total_chain_vault_debt_e8s()), Ok(()));
+}
+
+#[test]
+fn pending_burn_shift_rejects_clearing_more_than_debt() {
+    let mut s = fixture_state();
+    s.chain_vaults.insert(1, vault_with(100, 0));
+    s.chain_supplies.insert(CHAIN, 100);
+    assert_eq!(
+        apply_debt_to_pending_burn_shift(&mut s, CHAIN, 1, 150),
+        Err(PendingBurnShiftError::ClearExceedsDebt {
+            cleared_e8s: 150,
+            vault_debt_e8s: 100,
+        })
+    );
+    assert_eq!(s.chain_vaults[&1].debt_e8s, 100, "no mutation on rejection");
+    assert_eq!(
+        s.pending_chain_burn_e8s.get(&CHAIN).copied().unwrap_or(0),
+        0
+    );
+}
+
+#[test]
+fn pending_burn_shift_rejects_unknown_vault() {
+    let mut s = fixture_state();
+    assert_eq!(
+        apply_debt_to_pending_burn_shift(&mut s, CHAIN, 99, 10),
+        Err(PendingBurnShiftError::UnknownVault(99))
+    );
+}
+
+#[test]
+fn pending_burn_shift_rejects_wrong_chain() {
+    let mut s = fixture_state();
+    s.chain_vaults.insert(1, vault_with(100, 0)); // vault is on CHAIN (101)
+    s.chain_supplies.insert(CHAIN, 100);
+    assert_eq!(
+        apply_debt_to_pending_burn_shift(&mut s, ChainId(202), 1, 40),
+        Err(PendingBurnShiftError::WrongChain {
+            vault_chain: CHAIN,
+            requested: ChainId(202),
+        })
+    );
+    assert_eq!(s.chain_vaults[&1].debt_e8s, 100, "no mutation on rejection");
+}
+
+#[test]
+fn pending_burn_shift_blocked_while_invariant_halted() {
+    let mut s = fixture_state();
+    s.chain_vaults.insert(1, vault_with(100, 0));
+    s.chain_supplies.insert(CHAIN, 100);
+    s.invariant_halted = true;
+    assert_eq!(
+        apply_debt_to_pending_burn_shift(&mut s, CHAIN, 1, 40),
+        Err(PendingBurnShiftError::Halted)
+    );
+    assert_eq!(s.chain_vaults[&1].debt_e8s, 100, "no mutation while halted");
+}
+
+// (2a) reconcile: pending_burn AND chain_supplies both drop, invariant preserved.
+#[test]
+fn pending_burn_to_supply_drops_both_and_preserves_invariant() {
+    let mut s = fixture_state();
+    // State after an SP absorb of 40: debt 60, pending_burn 40, supply still 100.
+    s.chain_vaults.insert(1, vault_with(60, 0));
+    s.chain_supplies.insert(CHAIN, 100);
+    s.pending_chain_burn_e8s.insert(CHAIN, 40);
+    assert_eq!(check_invariant(&s, s.total_chain_vault_debt_e8s()), Ok(()));
+
+    // The operator has retired 40 of the foreign representation.
+    apply_pending_burn_to_supply_shift(&mut s, CHAIN, 40).expect("pending-burn -> supply shift");
+
+    assert_eq!(
+        s.pending_chain_burn_e8s[&CHAIN], 0,
+        "pending_chain_burn drained"
+    );
+    assert_eq!(
+        s.chain_supplies[&CHAIN], 60,
+        "chain_supplies dropped (foreign representation retired)"
+    );
+    // post: 60 == 60 (debt) + 0 (reserve) + 0 (pending) -> invariant still holds
+    assert_eq!(check_invariant(&s, s.total_chain_vault_debt_e8s()), Ok(()));
+}
+
+#[test]
+fn pending_burn_to_supply_rejects_amount_exceeding_pending() {
+    let mut s = fixture_state();
+    s.chain_vaults.insert(1, vault_with(60, 0));
+    s.chain_supplies.insert(CHAIN, 100);
+    s.pending_chain_burn_e8s.insert(CHAIN, 40);
+    assert_eq!(
+        apply_pending_burn_to_supply_shift(&mut s, CHAIN, 50),
+        Err(PendingBurnSupplyShiftError::PendingBurnUnderflow {
+            chain: CHAIN,
+            booked: 40,
+            attempted: 50,
+        })
+    );
+    assert_eq!(
+        s.pending_chain_burn_e8s[&CHAIN], 40,
+        "no mutation on rejection"
+    );
+    assert_eq!(s.chain_supplies[&CHAIN], 100, "no mutation on rejection");
+}
+
+#[test]
+fn pending_burn_to_supply_blocked_while_invariant_halted() {
+    let mut s = fixture_state();
+    s.chain_vaults.insert(1, vault_with(60, 0));
+    s.chain_supplies.insert(CHAIN, 100);
+    s.pending_chain_burn_e8s.insert(CHAIN, 40);
+    s.invariant_halted = true;
+    assert_eq!(
+        apply_pending_burn_to_supply_shift(&mut s, CHAIN, 40),
+        Err(PendingBurnSupplyShiftError::Halted)
+    );
+    assert_eq!(
+        s.pending_chain_burn_e8s[&CHAIN], 40,
+        "no mutation while halted"
+    );
+    assert_eq!(s.chain_supplies[&CHAIN], 100, "no mutation while halted");
 }
 
 // ─── Increment 5 / Task 1: manual foreign-burn reconciliation ───

@@ -8,7 +8,7 @@
 //! Versioned per the spec Section 3. Adding a field bumps to V2 plus a
 //! migration in `chains::supply::migrate_multi_chain_state`.
 
-use candid::{CandidType, Deserialize};
+use candid::{CandidType, Deserialize, Principal};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -58,6 +58,16 @@ pub enum SettlementOpKind {
         path: Vec<String>,
         reserve_recipient: String,
         deadline_secs: u64,
+    },
+    /// Tier-2 SP CFX claim payout. This is deliberately NOT a NativeWithdrawal:
+    /// a reverted claim payout must re-credit the SP depositor's claim, not add
+    /// collateral back to the vault. Signed by the vault custody address and
+    /// value-denominated in native wei (`amount_e18`).
+    ChainCollateralPayout {
+        recipient: String,
+        amount_e18: u128,
+        vault_id: u64,
+        claimant: Principal,
     },
 }
 

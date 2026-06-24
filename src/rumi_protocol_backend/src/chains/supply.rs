@@ -431,6 +431,160 @@ pub fn apply_debt_to_reserve_shift(
     Ok(())
 }
 
+/// Reasons `apply_debt_to_pending_burn_shift` rejects (no state mutation on any error).
+#[derive(Debug, PartialEq, Eq)]
+pub enum PendingBurnShiftError {
+    /// The invariant self-check has halted the rail; do not move backing.
+    Halted,
+    /// No such chain vault.
+    UnknownVault(u64),
+    /// The vault's `collateral_chain` does not match the requested `chain`.
+    WrongChain { vault_chain: ChainId, requested: ChainId },
+    /// `burned_e8s` exceeds the vault's live `debt_e8s` (IC icUSD cannot be
+    /// un-burned and there is no proportional refund — over-burn would be
+    /// un-refundable bad debt against SP depositors).
+    ClearExceedsDebt { cleared_e8s: u128, vault_debt_e8s: u128 },
+    /// The post-move unified invariant would not hold. The move conserves
+    /// debt+pending, so this only fires if the invariant was ALREADY diverged
+    /// before the call (defensive; no mutation).
+    InvariantBroken { sum_supplies: u128, rhs: u128 },
+}
+
+/// Tier-2 SP-path absorb accounting (spec 5.3, 6.1 option A): atomically move
+/// `burned_e8s` of a vault's debt into the chain's pending-burn term (the SP has
+/// burned IC-native icUSD, while the foreign-chain icUSD representation remains
+/// outstanding, so `chain_supplies` is UNCHANGED). This is the SP analogue of
+/// `apply_debt_to_reserve_shift`: it moves debt -> `pending_chain_burn_e8s`
+/// instead of -> `reserve_backing_e8s`. It conserves `debt + pending`, so the
+/// unified invariant (debt + reserve + pending) is preserved BY CONSTRUCTION; the
+/// pre-apply check is a defensive assert that catches pre-existing drift (no
+/// mutation on rejection). The paired `apply_pending_burn_to_supply_shift` is the
+/// later manual-reconciliation primitive: it drops both terms when the foreign
+/// representation is actually retired.
+pub fn apply_debt_to_pending_burn_shift(
+    state: &mut MultiChainState,
+    chain: ChainId,
+    vault_id: u64,
+    burned_e8s: u128,
+) -> Result<(), PendingBurnShiftError> {
+    if state.invariant_halted {
+        return Err(PendingBurnShiftError::Halted);
+    }
+    // Validate (read-only — no mutation on any rejection path).
+    let vault_debt = {
+        let v = state
+            .chain_vaults
+            .get(&vault_id)
+            .ok_or(PendingBurnShiftError::UnknownVault(vault_id))?;
+        if v.collateral_chain != chain {
+            return Err(PendingBurnShiftError::WrongChain {
+                vault_chain: v.collateral_chain,
+                requested: chain,
+            });
+        }
+        v.debt_e8s
+    };
+    if burned_e8s > vault_debt {
+        return Err(PendingBurnShiftError::ClearExceedsDebt {
+            cleared_e8s: burned_e8s,
+            vault_debt_e8s: vault_debt,
+        });
+    }
+
+    // Pre-validate the post-move unified invariant WITHOUT mutating. chain_supplies
+    // is unchanged; debt drops by burned_e8s and pending_chain_burn rises by the
+    // same, so the RHS is invariant. A divergence here means the invariant was
+    // ALREADY broken before the call.
+    let sum_supplies = state.total_supply_all_chains_e8s();
+    let post_debt_total = state.total_chain_vault_debt_e8s().saturating_sub(burned_e8s);
+    let post_pending_total = state.total_pending_chain_burn_e8s().saturating_add(burned_e8s);
+    let post_rhs = post_debt_total
+        .saturating_add(state.total_reserve_backing_e8s())
+        .saturating_add(post_pending_total);
+    if sum_supplies != post_rhs {
+        return Err(PendingBurnShiftError::InvariantBroken { sum_supplies, rhs: post_rhs });
+    }
+
+    // Apply atomically (every reject above happened before any mutation).
+    let v = state
+        .chain_vaults
+        .get_mut(&vault_id)
+        .expect("vault present: checked above");
+    v.debt_e8s -= burned_e8s;
+    *state.pending_chain_burn_e8s.entry(chain).or_default() += burned_e8s;
+    Ok(())
+}
+
+/// Reasons `apply_pending_burn_to_supply_shift` rejects (no state mutation on any error).
+#[derive(Debug, PartialEq, Eq)]
+pub enum PendingBurnSupplyShiftError {
+    /// The invariant self-check has halted the rail.
+    Halted,
+    /// No `chain_supplies` entry for the chain.
+    UnknownChain(ChainId),
+    /// `amount_e8s` exceeds the chain's booked `pending_chain_burn_e8s`.
+    PendingBurnUnderflow { chain: ChainId, booked: u128, attempted: u128 },
+    /// `amount_e8s` exceeds the chain's live `chain_supplies`.
+    SupplyUnderflow { chain: ChainId, current: u128, attempted: u128 },
+    /// The post-move unified invariant would not hold (defensive; only fires if
+    /// the invariant was already diverged — the move conserves supply+pending).
+    InvariantBroken { sum_supplies: u128, rhs: u128 },
+}
+
+/// Tier-2 SP-path foreign-representation retirement accounting (spec 5.3):
+/// atomically drop `amount_e8s` from BOTH the chain's `pending_chain_burn_e8s` and
+/// its `chain_supplies` after the protocol has acquired and retired the foreign
+/// icUSD representation. Both sides of the unified invariant drop by the same
+/// amount, so it is preserved BY CONSTRUCTION. Mirrors
+/// `apply_debt_to_pending_burn_shift`'s single-guarded-mutate discipline (no
+/// mutation on any rejection). The `pending_chain_burn` entry is kept at 0 for audit.
+pub fn apply_pending_burn_to_supply_shift(
+    state: &mut MultiChainState,
+    chain: ChainId,
+    amount_e8s: u128,
+) -> Result<(), PendingBurnSupplyShiftError> {
+    if state.invariant_halted {
+        return Err(PendingBurnSupplyShiftError::Halted);
+    }
+    let current_supply = match state.chain_supplies.get(&chain) {
+        Some(v) => *v,
+        None => return Err(PendingBurnSupplyShiftError::UnknownChain(chain)),
+    };
+    let booked = state.pending_chain_burn_e8s.get(&chain).copied().unwrap_or(0);
+    if amount_e8s > booked {
+        return Err(PendingBurnSupplyShiftError::PendingBurnUnderflow {
+            chain,
+            booked,
+            attempted: amount_e8s,
+        });
+    }
+    if amount_e8s > current_supply {
+        return Err(PendingBurnSupplyShiftError::SupplyUnderflow {
+            chain,
+            current: current_supply,
+            attempted: amount_e8s,
+        });
+    }
+
+    // Pre-validate the post-move unified invariant WITHOUT mutating. supply and
+    // pending both drop by amount_e8s; debt + reserve are untouched.
+    let sum_after = state.total_supply_all_chains_e8s().saturating_sub(amount_e8s);
+    let post_pending_total = state.total_pending_chain_burn_e8s().saturating_sub(amount_e8s);
+    let post_rhs = state
+        .total_chain_vault_debt_e8s()
+        .saturating_add(state.total_reserve_backing_e8s())
+        .saturating_add(post_pending_total);
+    if sum_after != post_rhs {
+        return Err(PendingBurnSupplyShiftError::InvariantBroken { sum_supplies: sum_after, rhs: post_rhs });
+    }
+
+    // Apply atomically. Keep the pending entry at 0 (audit), mirroring how
+    // apply_supply_delta keeps a drained chain_supplies entry.
+    state.pending_chain_burn_e8s.insert(chain, booked - amount_e8s);
+    state.chain_supplies.insert(chain, current_supply - amount_e8s);
+    Ok(())
+}
+
 /// Phase 1b Task 12 migration: stamp `last_interest_accrual_ns = now_ns` for any
 /// chain vault that decoded with 0 (an existing vault from a snapshot written
 /// before the interest fields existed), so the first harvest does not bill

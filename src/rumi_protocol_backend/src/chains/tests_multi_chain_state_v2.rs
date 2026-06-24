@@ -1,7 +1,7 @@
 use super::config::ChainId;
 use super::multi_chain_state::{
-    MultiChainState, MultiChainStateV1, MultiChainStateV2, MultiChainStateV3, MultiChainStateV4,
-    MultiChainStateV5, MultiChainStateV6,
+    ChainLiqClaimV1, MultiChainState, MultiChainStateV1, MultiChainStateV2, MultiChainStateV3,
+    MultiChainStateV4, MultiChainStateV5, MultiChainStateV6,
 };
 use super::supply::migrate_multi_chain_state;
 
@@ -480,6 +480,7 @@ fn v5_cbor_snapshot_decodes_into_v6_without_wiping_state() {
     assert!(v6.pending_chain_burn_e8s.is_empty());
     assert!(v6.sp_attempted_chain_vaults.is_empty());
     assert!(v6.chain_debt_configs.is_empty());
+    assert!(v6.chain_liquidation_claims.is_empty());
 
     // Total debt still reconciles with supply (the invariant is intact post-decode;
     // with all-zero reserve/pending the generalized RHS reduces to bare debt).
@@ -512,6 +513,16 @@ fn v6_cbor_round_trip_preserves_new_liquidation_fields() {
         ChainDebtConfigV1 {
             min_vault_debt_e8s: 25_000_000,
             debt_ceiling_e8s: Some(250 * 100_000_000),
+        },
+    );
+    v6.chain_liquidation_claims.insert(
+        7,
+        ChainLiqClaimV1 {
+            vault_id: 7,
+            chain: CFX,
+            custody_address: "0xcustody".into(),
+            seized_native_total: 12_345_000_000_000_000_000,
+            paid_native: 1_000_000_000_000_000_000,
         },
     );
     v6.chain_liquidation_configs.insert(
@@ -553,6 +564,19 @@ fn v6_cbor_round_trip_preserves_new_liquidation_fields() {
         .expect("debt config survived");
     assert_eq!(debt.min_vault_debt_e8s, 25_000_000);
     assert_eq!(debt.debt_ceiling_e8s, Some(250 * 100_000_000));
+    let claim = decoded
+        .chain_liquidation_claims
+        .get(&7)
+        .expect("claim survived");
+    assert_eq!(claim.vault_id, 7);
+    assert_eq!(claim.chain, CFX);
+    assert_eq!(claim.custody_address, "0xcustody");
+    assert_eq!(claim.seized_native_total, 12_345_000_000_000_000_000);
+    assert_eq!(claim.paid_native, 1_000_000_000_000_000_000);
+    assert!(
+        claim.paid_within_seized(),
+        "paid_native <= seized_native_total"
+    );
     let cfg = decoded
         .chain_liquidation_configs
         .get(&CFX)
@@ -574,6 +598,18 @@ fn v6_cbor_round_trip_preserves_new_liquidation_fields() {
     // The aggregate accessors reflect the round-tripped reserve/pending terms.
     assert_eq!(decoded.total_reserve_backing_e8s(), 40);
     assert_eq!(decoded.total_pending_chain_burn_e8s(), 15);
+}
+
+#[test]
+fn chain_liq_claim_invariant_rejects_overpaid_claims() {
+    let claim = ChainLiqClaimV1 {
+        vault_id: 9,
+        chain: ChainId(1030),
+        custody_address: "0xcustody".into(),
+        seized_native_total: 10,
+        paid_native: 11,
+    };
+    assert!(!claim.paid_within_seized());
 }
 
 #[test]

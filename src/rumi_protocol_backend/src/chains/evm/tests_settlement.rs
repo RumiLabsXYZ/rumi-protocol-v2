@@ -290,3 +290,205 @@ mod phase2_tests {
         assert!(s.reserve_backing_e8s.get(&CFX).is_none());
     }
 }
+
+// ─── Increment 4 / Task 5a: SP chain-vault absorb state transition ───
+mod sp_absorb_tests {
+    use super::super::settlement::apply_sp_chain_liquidation_absorb_in_state;
+    use crate::chains::config::ChainId;
+    use crate::chains::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
+    use crate::chains::multi_chain_state::MultiChainState;
+    use candid::Principal;
+
+    const CFX: ChainId = ChainId(1030);
+    const E8: u128 = 100_000_000;
+    const E18: u128 = 1_000_000_000_000_000_000;
+
+    fn open_sp_attempted_vault(
+        s: &mut MultiChainState,
+        vault_id: u64,
+        debt_e8s: u128,
+        collateral_native: u128,
+    ) {
+        s.chain_vaults.insert(
+            vault_id,
+            ChainVaultV1 {
+                vault_id,
+                owner: Principal::anonymous(),
+                collateral_chain: CFX,
+                custody_address: "0x00000000000000000000000000000000000000c7".into(),
+                collateral_amount_native: collateral_native,
+                debt_e8s,
+                mint_recipient: "0x00000000000000000000000000000000000000d7".into(),
+                pending_mint_e8s: 0,
+                status: ChainVaultStatus::Open,
+                opened_at_ns: 0,
+                owner_evm: None,
+                last_interest_accrual_ns: 0,
+                pending_interest_mint_e8s: 0,
+                pending_liquidation: None,
+            },
+        );
+        s.chain_supplies.insert(CFX, debt_e8s);
+        s.sp_attempted_chain_vaults.insert(vault_id);
+    }
+
+    #[test]
+    fn sp_absorb_moves_debt_to_pending_burn_and_reserves_claim_collateral() {
+        let mut s = MultiChainState::default();
+        open_sp_attempted_vault(&mut s, 7, 100 * E8, 1_000 * E18);
+
+        let result = apply_sp_chain_liquidation_absorb_in_state(
+            &mut s,
+            CFX,
+            7,
+            100 * E8,
+            50_000_000, // $0.50/CFX
+            18,
+            1_200,
+        )
+        .expect("sp absorb ok");
+
+        assert_eq!(result.actual_burned_e8s, 100 * E8);
+        assert_eq!(result.collateral_seized_native, 224 * E18);
+        let v = s.chain_vaults.get(&7).unwrap();
+        assert_eq!(v.debt_e8s, 0, "debt cleared by the IC-side SP burn");
+        assert_eq!(v.collateral_amount_native, 776 * E18, "claim collateral reserved out of borrower balance");
+        assert_eq!(*s.pending_chain_burn_e8s.get(&CFX).unwrap(), 100 * E8);
+        assert_eq!(*s.chain_supplies.get(&CFX).unwrap(), 100 * E8, "foreign-chain supply accounting unchanged");
+        assert!(v.pending_liquidation.is_none(), "SP absorb does not create a fake foreign-burn marker");
+
+        let claim = s.chain_liquidation_claims.get(&7).expect("claim record");
+        assert_eq!(claim.vault_id, 7);
+        assert_eq!(claim.chain, CFX);
+        assert_eq!(claim.custody_address, "0x00000000000000000000000000000000000000c7");
+        assert_eq!(claim.seized_native_total, 224 * E18);
+        assert_eq!(claim.paid_native, 0);
+        assert!(claim.paid_within_seized());
+
+        assert_eq!(
+            *s.chain_supplies.get(&CFX).unwrap(),
+            s.total_chain_vault_debt_e8s() + s.total_reserve_backing_e8s() + s.total_pending_chain_burn_e8s()
+        );
+    }
+
+    #[test]
+    fn sp_absorb_caps_overburn_to_live_debt() {
+        let mut s = MultiChainState::default();
+        open_sp_attempted_vault(&mut s, 8, 80 * E8, 200 * E18);
+
+        let result = apply_sp_chain_liquidation_absorb_in_state(
+            &mut s,
+            CFX,
+            8,
+            100 * E8,
+            100_000_000, // $1.00/CFX
+            18,
+            1_200,
+        )
+        .expect("sp absorb ok");
+
+        assert_eq!(result.actual_burned_e8s, 80 * E8, "backend never clears more than live debt");
+        assert_eq!(result.collateral_seized_native, 89_600_000_000_000_000_000);
+        assert_eq!(s.chain_vaults.get(&8).unwrap().debt_e8s, 0);
+        assert_eq!(*s.pending_chain_burn_e8s.get(&CFX).unwrap(), 80 * E8);
+        assert_eq!(*s.chain_supplies.get(&CFX).unwrap(), 80 * E8);
+    }
+
+    #[test]
+    fn sp_absorb_rejects_without_bot_escalation_no_mutation() {
+        let mut s = MultiChainState::default();
+        open_sp_attempted_vault(&mut s, 9, 100 * E8, 1_000 * E18);
+        s.sp_attempted_chain_vaults.remove(&9);
+
+        let err = apply_sp_chain_liquidation_absorb_in_state(&mut s, CFX, 9, 100 * E8, 50_000_000, 18, 1_200)
+            .unwrap_err();
+
+        assert!(err.contains("sp_attempted"), "error should name the missing escalation gate: {err}");
+        let v = s.chain_vaults.get(&9).unwrap();
+        assert_eq!(v.debt_e8s, 100 * E8);
+        assert_eq!(v.collateral_amount_native, 1_000 * E18);
+        assert!(s.pending_chain_burn_e8s.get(&CFX).is_none());
+        assert!(s.chain_liquidation_claims.get(&9).is_none());
+    }
+}
+
+// ─── Increment 4 / Task 6: enqueue SP claim payout from reserved CFX ───
+mod chain_claim_tests {
+    use super::super::settlement::claim_chain_collateral_in_state;
+    use crate::chains::config::ChainId;
+    use crate::chains::multi_chain_state::{ChainLiqClaimV1, MultiChainState};
+    use crate::chains::settlement_queue::SettlementOpKind;
+    use candid::Principal;
+
+    const CFX: ChainId = ChainId(71);
+    const E18: u128 = 1_000_000_000_000_000_000;
+
+    fn valid_evm_address(a: &str) -> bool {
+        a.starts_with("0x") && a.len() == 42
+    }
+
+    fn claimant() -> Principal {
+        Principal::from_slice(&[7u8; 29])
+    }
+
+    fn state_with_claim() -> MultiChainState {
+        let mut s = MultiChainState::default();
+        s.chain_liquidation_claims.insert(7, ChainLiqClaimV1 {
+            vault_id: 7,
+            chain: CFX,
+            custody_address: "0x00000000000000000000000000000000000000c7".into(),
+            seized_native_total: 10 * E18,
+            paid_native: 2 * E18,
+        });
+        s
+    }
+
+    #[test]
+    fn claim_chain_collateral_enqueues_payout_and_marks_paid() {
+        let mut s = state_with_claim();
+        let dest = "0x0000000000000000000000000000000000000abc".to_string();
+
+        let op_id = claim_chain_collateral_in_state(&mut s, 7, claimant(), 3 * E18, dest.clone(), 42, valid_evm_address)
+            .expect("claim enqueued");
+
+        let claim = s.chain_liquidation_claims.get(&7).unwrap();
+        assert_eq!(claim.paid_native, 5 * E18, "claim is deducted before async payout");
+        let op = s.settlement_queues.get(&CFX).unwrap().pending.get(&op_id).unwrap();
+        match &op.kind {
+            SettlementOpKind::ChainCollateralPayout { recipient, amount_e18, vault_id, claimant: c } => {
+                assert_eq!(recipient, &dest);
+                assert_eq!(*amount_e18, 3 * E18);
+                assert_eq!(*vault_id, 7);
+                assert_eq!(*c, claimant());
+            }
+            other => panic!("expected ChainCollateralPayout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn claim_chain_collateral_rejects_duplicate_without_double_marking_paid() {
+        let mut s = state_with_claim();
+        let dest = "0x0000000000000000000000000000000000000abc".to_string();
+        claim_chain_collateral_in_state(&mut s, 7, claimant(), 3 * E18, dest.clone(), 42, valid_evm_address)
+            .expect("first claim enqueued");
+
+        let err = claim_chain_collateral_in_state(&mut s, 7, claimant(), 3 * E18, dest, 43, valid_evm_address)
+            .unwrap_err();
+
+        assert!(err.contains("Duplicate"), "expected duplicate idempotency error, got {err}");
+        assert_eq!(s.chain_liquidation_claims.get(&7).unwrap().paid_native, 5 * E18);
+        assert_eq!(s.settlement_queues.get(&CFX).unwrap().pending.len(), 1);
+    }
+
+    #[test]
+    fn claim_chain_collateral_validates_destination_before_mutation() {
+        let mut s = state_with_claim();
+
+        let err = claim_chain_collateral_in_state(&mut s, 7, claimant(), 3 * E18, "not-evm".into(), 42, valid_evm_address)
+            .unwrap_err();
+
+        assert!(err.contains("invalid EVM address"), "unexpected error: {err}");
+        assert_eq!(s.chain_liquidation_claims.get(&7).unwrap().paid_native, 2 * E18);
+        assert!(s.settlement_queues.get(&CFX).is_none());
+    }
+}
