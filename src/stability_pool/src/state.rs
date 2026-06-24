@@ -11,6 +11,17 @@ use crate::logs::INFO;
 /// Older entries are dropped when this limit is exceeded.
 const MAX_LIQUIDATION_HISTORY: usize = 1_000;
 
+/// Deterministic Principal key for chain-native collateral. This is a metadata
+/// key, never an ICRC ledger canister. Must match the backend discovery helper.
+pub fn chain_collateral_sentinel(chain_id: u32) -> Principal {
+    let mut bytes = [0u8; 29];
+    let prefix = b"rumi-chain-collateral";
+    bytes[..prefix.len()].copy_from_slice(prefix);
+    bytes[24..28].copy_from_slice(&chain_id.to_le_bytes());
+    bytes[28] = 0x7f;
+    Principal::from_slice(&bytes)
+}
+
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
 pub struct StabilityPoolState {
     // Depositor positions
@@ -22,6 +33,14 @@ pub struct StabilityPoolState {
     // Registries
     pub stablecoin_registry: BTreeMap<Principal, StablecoinConfig>,
     pub collateral_registry: BTreeMap<Principal, CollateralInfo>,
+    /// Deterministic chain-native collateral sentinel principals. `Option` keeps
+    /// Candid stable memory upgrade-compatible when decoding old snapshots.
+    #[serde(default)]
+    pub chain_collateral_sentinels: Option<BTreeSet<Principal>>,
+    /// Backend chain-liquidity claims available to pay SP depositor CFX claims,
+    /// keyed by chain sentinel. `Option` keeps Candid stable memory upgrades safe.
+    #[serde(default)]
+    pub chain_claim_sources: Option<BTreeMap<Principal, Vec<ChainClaimSource>>>,
 
     // Canister references
     pub protocol_canister_id: Principal,
@@ -70,6 +89,8 @@ impl Default for StabilityPoolState {
             total_stablecoin_balances: BTreeMap::new(),
             stablecoin_registry: BTreeMap::new(),
             collateral_registry: BTreeMap::new(),
+            chain_collateral_sentinels: Some(BTreeSet::new()),
+            chain_claim_sources: Some(BTreeMap::new()),
             protocol_canister_id: Principal::anonymous(),
             configuration: PoolConfiguration {
                 min_deposit_e8s: 1_000_000, // 0.01 USD
@@ -174,6 +195,44 @@ impl StabilityPoolState {
         self.collateral_registry.insert(info.ledger_id, info);
     }
 
+    pub fn register_chain_collateral_sentinel(&mut self, sentinel: Principal) {
+        self.chain_collateral_sentinels
+            .get_or_insert_with(BTreeSet::new)
+            .insert(sentinel);
+    }
+
+    pub fn register_chain_collateral(
+        &mut self,
+        chain_id: u32,
+        symbol: String,
+        decimals: u8,
+    ) -> Result<Principal, StabilityPoolError> {
+        let sentinel = chain_collateral_sentinel(chain_id);
+        self.register_collateral(CollateralInfo {
+            ledger_id: sentinel,
+            symbol,
+            decimals,
+            status: CollateralStatus::Active,
+        });
+        self.register_chain_collateral_sentinel(sentinel);
+        Ok(sentinel)
+    }
+
+    pub fn is_chain_collateral_sentinel(&self, collateral_type: &Principal) -> bool {
+        self.chain_collateral_sentinels
+            .as_ref()
+            .map(|s| s.contains(collateral_type))
+            .unwrap_or(false)
+    }
+
+    fn position_opted_in_for(&self, pos: &DepositPosition, collateral_type: &Principal) -> bool {
+        if self.is_chain_collateral_sentinel(collateral_type) {
+            pos.is_opted_in_for_chain(collateral_type)
+        } else {
+            pos.is_opted_in(collateral_type)
+        }
+    }
+
     // ─── Deposits ───
 
     pub fn add_deposit(&mut self, user: Principal, token_ledger: Principal, amount: u64) {
@@ -216,6 +275,10 @@ impl StabilityPoolState {
         // Only icUSD-denominated balances earn the interest stream.
         // 3USD, ckUSDC, ckUSDT depositors still participate in liquidations
         // pro-rata but no longer earn the interest distribution.
+        let collateral_is_chain_sentinel = collateral_type
+            .as_ref()
+            .map(|ct| self.is_chain_collateral_sentinel(ct))
+            .unwrap_or(false);
         let holders: Vec<(Principal, u64)> = self.deposits.iter()
             .filter_map(|(p, pos)| {
                 let icusd_value = pos.icusd_value(&self.stablecoin_registry);
@@ -224,7 +287,12 @@ impl StabilityPoolState {
                 }
                 // If we know the collateral source, skip opted-out depositors
                 if let Some(ct) = &collateral_type {
-                    if !pos.is_opted_in(ct) {
+                    let opted_in = if collateral_is_chain_sentinel {
+                        pos.is_opted_in_for_chain(ct)
+                    } else {
+                        pos.is_opted_in(ct)
+                    };
+                    if !opted_in {
                         return None;
                     }
                 }
@@ -441,9 +509,48 @@ impl StabilityPoolState {
         }
     }
 
+    pub fn mark_cfx_claimed(&mut self, user: &Principal, chain_sentinel: &Principal, amount: u128) {
+        if let Some(position) = self.deposits.get_mut(user) {
+            if let Some(claims) = position.cfx_claims.as_mut() {
+                if let Some(gains) = claims.get_mut(chain_sentinel) {
+                    *gains = gains.saturating_sub(amount);
+                    if *gains == 0 {
+                        claims.remove(chain_sentinel);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn record_chain_claim_source(
+        &mut self,
+        chain_sentinel: Principal,
+        claim_id: u64,
+        amount_native: u128,
+    ) {
+        if amount_native == 0 {
+            return;
+        }
+        let sources = self.chain_claim_sources
+            .get_or_insert_with(BTreeMap::new)
+            .entry(chain_sentinel)
+            .or_default();
+        if let Some(existing) = sources.iter_mut().find(|s| s.claim_id == claim_id) {
+            existing.remaining_native = existing.remaining_native.saturating_add(amount_native);
+        } else {
+            sources.push(ChainClaimSource {
+                claim_id,
+                remaining_native: amount_native,
+            });
+        }
+    }
+
     // ─── Opt-in / Opt-out ───
 
     pub fn opt_out_collateral(&mut self, user: &Principal, collateral_type: Principal) -> Result<(), StabilityPoolError> {
+        if self.is_chain_collateral_sentinel(&collateral_type) {
+            return self.opt_out_cfx(user, collateral_type);
+        }
         let position = self.deposits.get_mut(user)
             .ok_or(StabilityPoolError::NoPositionFound)?;
         if !position.opted_out_collateral.insert(collateral_type) {
@@ -453,10 +560,39 @@ impl StabilityPoolState {
     }
 
     pub fn opt_in_collateral(&mut self, user: &Principal, collateral_type: Principal) -> Result<(), StabilityPoolError> {
+        if self.is_chain_collateral_sentinel(&collateral_type) {
+            return self.opt_in_cfx(user, collateral_type);
+        }
         let position = self.deposits.get_mut(user)
             .ok_or(StabilityPoolError::NoPositionFound)?;
         if !position.opted_out_collateral.remove(&collateral_type) {
             return Err(StabilityPoolError::AlreadyOptedIn { collateral: collateral_type });
+        }
+        Ok(())
+    }
+
+    pub fn opt_in_cfx(&mut self, user: &Principal, sentinel: Principal) -> Result<(), StabilityPoolError> {
+        if !self.is_chain_collateral_sentinel(&sentinel) {
+            return Err(StabilityPoolError::CollateralNotFound { ledger: sentinel });
+        }
+        let position = self.deposits.get_mut(user)
+            .ok_or(StabilityPoolError::NoPositionFound)?;
+        let opted_in = position.opted_in_chain_collateral.get_or_insert_with(BTreeSet::new);
+        if !opted_in.insert(sentinel) {
+            return Err(StabilityPoolError::AlreadyOptedIn { collateral: sentinel });
+        }
+        Ok(())
+    }
+
+    pub fn opt_out_cfx(&mut self, user: &Principal, sentinel: Principal) -> Result<(), StabilityPoolError> {
+        if !self.is_chain_collateral_sentinel(&sentinel) {
+            return Err(StabilityPoolError::CollateralNotFound { ledger: sentinel });
+        }
+        let position = self.deposits.get_mut(user)
+            .ok_or(StabilityPoolError::NoPositionFound)?;
+        let opted_in = position.opted_in_chain_collateral.get_or_insert_with(BTreeSet::new);
+        if !opted_in.remove(&sentinel) {
+            return Err(StabilityPoolError::AlreadyOptedOut { collateral: sentinel });
         }
         Ok(())
     }
@@ -524,8 +660,23 @@ impl StabilityPoolState {
     pub fn effective_pool_for_collateral(&self, collateral_type: &Principal) -> u64 {
         let vps = self.virtual_prices();
         self.deposits.values()
-            .filter(|pos| pos.is_opted_in(collateral_type))
+            .filter(|pos| self.position_opted_in_for(pos, collateral_type))
             .map(|pos| pos.total_usd_value(&self.stablecoin_registry, vps))
+            .sum()
+    }
+
+    pub fn icusd_ledger(&self) -> Option<Principal> {
+        self.stablecoin_registry.iter()
+            .find(|(_, config)| config.symbol == "icUSD")
+            .map(|(ledger, _)| *ledger)
+    }
+
+    /// Compute opted-in icUSD coverage only. Chain-native liquidations use
+    /// this instead of the mixed-token draw so Inc 4 burns only IC-native icUSD.
+    pub fn effective_icusd_pool_for_collateral(&self, collateral_type: &Principal) -> u64 {
+        self.deposits.values()
+            .filter(|pos| self.position_opted_in_for(pos, collateral_type))
+            .map(|pos| pos.icusd_value(&self.stablecoin_registry))
             .sum()
     }
 
@@ -546,7 +697,7 @@ impl StabilityPoolState {
 
         for (ledger, config) in &self.stablecoin_registry {
             let available_native: u64 = self.deposits.values()
-                .filter(|pos| pos.is_opted_in(collateral_type))
+                .filter(|pos| self.position_opted_in_for(pos, collateral_type))
                 .map(|pos| pos.stablecoin_balances.get(ledger).copied().unwrap_or(0))
                 .sum();
             if available_native > 0 {
@@ -597,7 +748,7 @@ impl StabilityPoolState {
         let mut priority_buckets: BTreeMap<u8, Vec<(Principal, u64, u8, bool)>> = BTreeMap::new();
         for (ledger, config) in &self.stablecoin_registry {
             let available_native: u64 = self.deposits.values()
-                .filter(|pos| pos.is_opted_in(collateral_type))
+                .filter(|pos| self.position_opted_in_for(pos, collateral_type))
                 .map(|pos| pos.stablecoin_balances.get(ledger).copied().unwrap_or(0))
                 .sum();
             if available_native > 0 {
@@ -659,6 +810,27 @@ impl StabilityPoolState {
         result
     }
 
+    /// Compute an Inc 4 chain-vault draw. Returns at most one token, icUSD, in
+    /// e8s. ckStables and 3USD are intentionally excluded from this path.
+    pub fn compute_icusd_chain_draw(
+        &self,
+        debt_e8s: u64,
+        chain_sentinel: &Principal,
+    ) -> BTreeMap<Principal, u64> {
+        let mut result = BTreeMap::new();
+        if debt_e8s == 0 || !self.is_chain_collateral_sentinel(chain_sentinel) {
+            return result;
+        }
+        let Some(icusd_ledger) = self.icusd_ledger() else {
+            return result;
+        };
+        let draw_e8s = debt_e8s.min(self.effective_icusd_pool_for_collateral(chain_sentinel));
+        if draw_e8s > 0 {
+            result.insert(icusd_ledger, draw_e8s);
+        }
+        result
+    }
+
     /// After a successful liquidation, reduce depositor balances and distribute collateral gains.
     /// `stables_consumed` is a map of token_ledger -> total amount consumed (native decimals).
     /// `collateral_gained` is the collateral received by the pool (native decimals).
@@ -674,6 +846,24 @@ impl StabilityPoolState {
         self.process_liquidation_gains_at(vault_id, collateral_type, stables_consumed, collateral_gained, collateral_price_e8s, ic_cdk::api::time());
     }
 
+    pub fn process_chain_liquidation_gains(
+        &mut self,
+        vault_id: u64,
+        chain_sentinel: Principal,
+        stables_consumed: &BTreeMap<Principal, u64>,
+        cfx_gained_native: u128,
+        collateral_price_e8s: u64,
+    ) {
+        self.process_chain_liquidation_gains_at(
+            vault_id,
+            chain_sentinel,
+            stables_consumed,
+            cfx_gained_native,
+            collateral_price_e8s,
+            ic_cdk::api::time(),
+        );
+    }
+
     /// Core liquidation gain processing logic with explicit timestamp (testable without IC runtime).
     pub fn process_liquidation_gains_at(
         &mut self,
@@ -686,7 +876,7 @@ impl StabilityPoolState {
     ) {
         // Phase 1: Compute each opted-in depositor's share of the consumed stables (in e8s)
         let opted_in_principals: Vec<Principal> = self.deposits.iter()
-            .filter(|(_, pos)| pos.is_opted_in(&collateral_type))
+            .filter(|(_, pos)| self.position_opted_in_for(pos, &collateral_type))
             .map(|(p, _)| *p)
             .collect();
 
@@ -828,6 +1018,132 @@ impl StabilityPoolState {
         );
     }
 
+    /// CFX/native-chain sibling of `process_liquidation_gains_at`. Stablecoin
+    /// draw and rounding are identical, but collateral claims are u128 wei and
+    /// live in `DepositPosition::cfx_claims` instead of the u64 ICRC gains map.
+    pub fn process_chain_liquidation_gains_at(
+        &mut self,
+        _vault_id: u64,
+        chain_sentinel: Principal,
+        stables_consumed: &BTreeMap<Principal, u64>,
+        cfx_gained_native: u128,
+        _collateral_price_e8s: u64,
+        _timestamp: u64,
+    ) {
+        if !self.is_chain_collateral_sentinel(&chain_sentinel) || cfx_gained_native == 0 {
+            return;
+        }
+
+        let opted_in_principals: Vec<Principal> = self.deposits.iter()
+            .filter(|(_, pos)| pos.is_opted_in_for_chain(&chain_sentinel))
+            .map(|(p, _)| *p)
+            .collect();
+        if opted_in_principals.is_empty() {
+            return;
+        }
+
+        let mut per_token_opted_in_totals: BTreeMap<Principal, u64> = BTreeMap::new();
+        for token_ledger in stables_consumed.keys() {
+            let total: u64 = opted_in_principals.iter()
+                .filter_map(|p| self.deposits.get(p))
+                .map(|pos| pos.stablecoin_balances.get(token_ledger).copied().unwrap_or(0))
+                .sum();
+            per_token_opted_in_totals.insert(*token_ledger, total);
+        }
+
+        let vps = self.virtual_prices().clone();
+        let registry_snapshot: BTreeMap<Principal, (u8, bool)> = stables_consumed.keys()
+            .filter_map(|ledger| {
+                self.stablecoin_registry.get(ledger).map(|c| {
+                    (*ledger, (c.decimals, c.is_lp_token.unwrap_or(false)))
+                })
+            })
+            .collect();
+        let total_consumed_e8s: u64 = stables_consumed.iter()
+            .map(|(ledger, &amount)| {
+                let (decimals, is_lp) = registry_snapshot.get(ledger).copied().unwrap_or((8, false));
+                if is_lp {
+                    vps.get(ledger).map(|&vp| lp_to_usd_e8s(amount, vp)).unwrap_or(0)
+                } else {
+                    normalize_to_e8s(amount, decimals)
+                }
+            })
+            .sum();
+        if total_consumed_e8s == 0 {
+            return;
+        }
+
+        let mut actual_deductions_per_token: BTreeMap<Principal, u64> = BTreeMap::new();
+        let mut total_cfx_distributed: u128 = 0;
+
+        for principal in &opted_in_principals {
+            let mut user_consumed_e8s: u64 = 0;
+
+            if let Some(position) = self.deposits.get_mut(principal) {
+                for (token_ledger, &total_consumed) in stables_consumed {
+                    let total_opted_in = per_token_opted_in_totals.get(token_ledger).copied().unwrap_or(0);
+                    if total_opted_in == 0 {
+                        continue;
+                    }
+                    let user_balance = position.stablecoin_balances.get(token_ledger).copied().unwrap_or(0);
+                    if user_balance == 0 {
+                        continue;
+                    }
+
+                    let user_share_native = (total_consumed as u128 * user_balance as u128 / total_opted_in as u128) as u64;
+                    let user_share_native = user_share_native.min(user_balance);
+                    if let Some(bal) = position.stablecoin_balances.get_mut(token_ledger) {
+                        *bal = bal.saturating_sub(user_share_native);
+                    }
+                    *actual_deductions_per_token.entry(*token_ledger).or_insert(0) += user_share_native;
+
+                    let (decimals, is_lp) = registry_snapshot.get(token_ledger).copied().unwrap_or((8, false));
+                    let share_e8s = if is_lp {
+                        vps.get(token_ledger).map(|&vp| lp_to_usd_e8s(user_share_native, vp)).unwrap_or(0)
+                    } else {
+                        normalize_to_e8s(user_share_native, decimals)
+                    };
+                    user_consumed_e8s = user_consumed_e8s.saturating_add(share_e8s);
+                }
+
+                if user_consumed_e8s > 0 {
+                    let user_cfx = cfx_gained_native
+                        .saturating_mul(user_consumed_e8s as u128)
+                        / total_consumed_e8s as u128;
+                    let claims = position.cfx_claims.get_or_insert_with(BTreeMap::new);
+                    let entry = claims.entry(chain_sentinel).or_insert(0);
+                    *entry = entry.saturating_add(user_cfx);
+                    total_cfx_distributed = total_cfx_distributed.saturating_add(user_cfx);
+                }
+            }
+        }
+
+        let cfx_dust = cfx_gained_native.saturating_sub(total_cfx_distributed);
+        if cfx_dust > 0 {
+            if let Some(first) = opted_in_principals.first() {
+                if let Some(pos) = self.deposits.get_mut(first) {
+                    let claims = pos.cfx_claims.get_or_insert_with(BTreeMap::new);
+                    let entry = claims.entry(chain_sentinel).or_insert(0);
+                    *entry = entry.saturating_add(cfx_dust);
+                }
+            }
+        }
+
+        for (token_ledger, &actual_deducted) in &actual_deductions_per_token {
+            if let Some(total) = self.total_stablecoin_balances.get_mut(token_ledger) {
+                *total = total.saturating_sub(actual_deducted);
+            }
+        }
+
+        self.total_liquidations_executed += 1;
+        self.deposits.retain(|_, pos| !pos.is_empty());
+        debug_assert!(
+            self.validate_state().is_ok(),
+            "stability pool aggregate/per-depositor invariant violated after \
+             process_chain_liquidation_gains_at"
+        );
+    }
+
     // ─── Query Helpers ───
 
     pub fn get_pool_status(&self) -> StabilityPoolStatus {
@@ -874,7 +1190,7 @@ impl StabilityPoolState {
         let vps = self.virtual_prices();
         self.collateral_registry.keys().map(|ct| {
             let eligible: u64 = self.deposits.values()
-                .filter(|pos| pos.is_opted_in(ct))
+                .filter(|pos| self.position_opted_in_for(pos, ct))
                 .map(|pos| pos.total_usd_value(&self.stablecoin_registry, vps))
                 .sum();
             (*ct, eligible)
@@ -1098,6 +1414,8 @@ impl From<StabilityPoolStateV1> for StabilityPoolState {
             total_stablecoin_balances: v1.total_stablecoin_balances,
             stablecoin_registry: v1.stablecoin_registry,
             collateral_registry: v1.collateral_registry,
+            chain_collateral_sentinels: Some(BTreeSet::new()),
+            chain_claim_sources: Some(BTreeMap::new()),
             protocol_canister_id: v1.protocol_canister_id,
             configuration: v1.configuration,
             liquidation_history: v1.liquidation_history,
@@ -1208,6 +1526,7 @@ mod tests {
     fn ckusdc_ledger() -> Principal { Principal::from_slice(&[12]) }
     fn icp_ledger() -> Principal { Principal::from_slice(&[20]) }
     fn ckbtc_ledger() -> Principal { Principal::from_slice(&[21]) }
+    fn cfx_sentinel() -> Principal { Principal::from_slice(&[30]) }
 
     /// Build a test state with:
     /// - icUSD (8 decimals, priority 1)
@@ -1645,6 +1964,10 @@ mod tests {
         // Has collateral gains -> not empty
         pos.collateral_gains.insert(icp_ledger(), 100);
         assert!(!pos.is_empty());
+
+        pos.collateral_gains.clear();
+        pos.cfx_claims.get_or_insert_with(BTreeMap::new).insert(cfx_sentinel(), 1_000_000_000_000_000_000);
+        assert!(!pos.is_empty(), "u128 CFX claims must prevent position cleanup");
     }
 
     // ─── Test: Mark gains claimed ───
@@ -1692,6 +2015,131 @@ mod tests {
 
         // ckBTC effective pool still has everyone
         assert_eq!(state.effective_pool_for_collateral(&ckbtc_ledger()), 100_00000000);
+    }
+
+    #[test]
+    fn cfx_sentinel_requires_explicit_opt_in_without_breaking_default_collateral() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
+        add_deposit_direct(&mut state, user_b(), icusd_ledger(), 50_00000000);
+        state.register_chain_collateral_sentinel(cfx_sentinel());
+
+        assert_eq!(
+            state.effective_pool_for_collateral(&icp_ledger()),
+            150_00000000,
+            "non-chain collateral stays default-in",
+        );
+        assert_eq!(
+            state.effective_pool_for_collateral(&cfx_sentinel()),
+            0,
+            "chain sentinel starts default-out",
+        );
+        assert!(state.compute_token_draw(10_00000000, &cfx_sentinel()).is_empty());
+
+        state.opt_in_cfx(&user_a(), cfx_sentinel()).expect("user A opts into CFX");
+        assert_eq!(state.effective_pool_for_collateral(&cfx_sentinel()), 100_00000000);
+        let draw = state.compute_token_draw(10_00000000, &cfx_sentinel());
+        assert_eq!(draw.get(&icusd_ledger()).copied(), Some(10_00000000));
+
+        state.opt_out_cfx(&user_a(), cfx_sentinel()).expect("user A opts back out");
+        assert_eq!(state.effective_pool_for_collateral(&cfx_sentinel()), 0);
+    }
+
+    #[test]
+    fn chain_collateral_sentinel_registration_is_stable_and_validation_safe() {
+        let mut state = test_state();
+        let sentinel = chain_collateral_sentinel(1030);
+        assert_eq!(sentinel, chain_collateral_sentinel(1030));
+        assert_ne!(sentinel, chain_collateral_sentinel(71));
+        assert_ne!(sentinel, icusd_ledger());
+        assert_ne!(sentinel, icp_ledger());
+
+        let registered = state.register_chain_collateral(1030, "CFX".to_string(), 18)
+            .expect("register CFX sentinel");
+        assert_eq!(registered, sentinel);
+        assert!(state.is_chain_collateral_sentinel(&sentinel));
+        let info = state.collateral_registry.get(&sentinel).expect("sentinel registered as collateral");
+        assert_eq!(info.symbol, "CFX");
+        assert_eq!(info.decimals, 18);
+        assert!(matches!(info.status, CollateralStatus::Active));
+        assert_eq!(state.effective_pool_for_collateral(&sentinel), 0);
+        assert!(state.validate_state().is_ok(), "sentinel is metadata, not a ledger aggregate");
+    }
+
+    #[test]
+    fn chain_liquidation_gains_credit_u128_cfx_claims_with_dust() {
+        const E18: u128 = 1_000_000_000_000_000_000;
+        let mut state = test_state();
+        state.register_chain_collateral_sentinel(cfx_sentinel());
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 1_00000000);
+        add_deposit_direct(&mut state, user_b(), icusd_ledger(), 1_00000000);
+        state.opt_in_cfx(&user_a(), cfx_sentinel()).unwrap();
+        state.opt_in_cfx(&user_b(), cfx_sentinel()).unwrap();
+        let mut stables_consumed = BTreeMap::new();
+        stables_consumed.insert(icusd_ledger(), 2_00000000);
+
+        state.process_chain_liquidation_gains_at(
+            99,
+            cfx_sentinel(),
+            &stables_consumed,
+            20_000 * E18 + 1,
+            5_000_000,
+            123,
+        );
+
+        let claim_a = state.deposits.get(&user_a()).unwrap()
+            .cfx_claims.as_ref().unwrap().get(&cfx_sentinel()).copied().unwrap_or(0);
+        let claim_b = state.deposits.get(&user_b()).unwrap()
+            .cfx_claims.as_ref().unwrap().get(&cfx_sentinel()).copied().unwrap_or(0);
+        assert_eq!(claim_a, 10_000 * E18 + 1, "first opted-in depositor receives wei dust");
+        assert_eq!(claim_b, 10_000 * E18);
+        assert!(claim_a > u64::MAX as u128, "CFX claim must not truncate to u64");
+        assert_eq!(state.total_stablecoin_balances.get(&icusd_ledger()).copied(), Some(0));
+        assert!(state.deposits.contains_key(&user_a()), "CFX claim keeps drained position alive");
+
+        state.mark_cfx_claimed(&user_a(), &cfx_sentinel(), 3 * E18);
+        let after_partial = state.deposits.get(&user_a()).unwrap()
+            .cfx_claims.as_ref().unwrap().get(&cfx_sentinel()).copied().unwrap_or(0);
+        assert_eq!(after_partial, 9_997 * E18 + 1);
+        state.mark_cfx_claimed(&user_a(), &cfx_sentinel(), 9_997 * E18 + 1);
+        assert!(state.deposits.get(&user_a()).unwrap()
+            .cfx_claims.as_ref().unwrap().get(&cfx_sentinel()).is_none());
+    }
+
+    #[test]
+    fn chain_icusd_draw_ignores_ckstables_and_lp_tokens() {
+        let mut state = test_state_with_3usd();
+        state.register_chain_collateral_sentinel(cfx_sentinel());
+
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 40_00000000);
+        add_deposit_direct(&mut state, user_a(), ckusdc_ledger(), 500_000_000);
+        add_deposit_direct(&mut state, user_a(), three_usd_ledger(), 500_00000000);
+        add_deposit_direct(&mut state, user_b(), icusd_ledger(), 100_00000000);
+        state.opt_in_cfx(&user_a(), cfx_sentinel()).unwrap();
+
+        assert_eq!(
+            state.effective_icusd_pool_for_collateral(&cfx_sentinel()),
+            40_00000000,
+            "only opted-in icUSD counts toward chain absorb coverage",
+        );
+
+        let draw = state.compute_icusd_chain_draw(70_00000000, &cfx_sentinel());
+        assert_eq!(draw.len(), 1, "chain draw should contain only icUSD");
+        assert_eq!(
+            draw.get(&icusd_ledger()).copied(),
+            Some(40_00000000),
+            "chain draw caps to opted-in icUSD, not total stable value",
+        );
+        assert!(!draw.contains_key(&ckusdc_ledger()), "ckUSDC must not be burned for Inc 4 chain absorb");
+        assert!(!draw.contains_key(&three_usd_ledger()), "3USD LP must not be burned for Inc 4 chain absorb");
+
+        state.opt_in_cfx(&user_b(), cfx_sentinel()).unwrap();
+        let full_draw = state.compute_icusd_chain_draw(70_00000000, &cfx_sentinel());
+        assert_eq!(
+            full_draw.get(&icusd_ledger()).copied(),
+            Some(70_00000000),
+            "additional opted-in icUSD can cover the requested debt",
+        );
     }
 
     // ─── Test: Multi-token liquidation with mixed decimals ───
@@ -2294,6 +2742,96 @@ mod tests {
             "pending refunds must start empty after a v1 upgrade",
         );
         assert_eq!(decoded.next_pending_refund_id.unwrap_or(0), 0);
+    }
+
+    #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+    struct DepositPositionPreCfx {
+        pub stablecoin_balances: BTreeMap<Principal, u64>,
+        pub collateral_gains: BTreeMap<Principal, u64>,
+        pub opted_out_collateral: BTreeSet<Principal>,
+        pub deposit_timestamp: u64,
+        pub total_claimed_gains: BTreeMap<Principal, u64>,
+        pub total_interest_earned_e8s: Option<u64>,
+    }
+
+    #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+    struct StabilityPoolStatePreCfx {
+        pub deposits: BTreeMap<Principal, DepositPositionPreCfx>,
+        pub total_stablecoin_balances: BTreeMap<Principal, u64>,
+        pub stablecoin_registry: BTreeMap<Principal, StablecoinConfig>,
+        pub collateral_registry: BTreeMap<Principal, CollateralInfo>,
+        pub protocol_canister_id: Principal,
+        pub configuration: PoolConfiguration,
+        pub liquidation_history: Vec<PoolLiquidationRecord>,
+        pub in_flight_liquidations: BTreeSet<u64>,
+        pub total_liquidations_executed: u64,
+        pub pool_creation_timestamp: u64,
+        pub total_interest_received_e8s: Option<u64>,
+        pub token_consecutive_failures: Option<BTreeMap<Principal, u32>>,
+        pub cached_virtual_prices: Option<BTreeMap<Principal, u128>>,
+        pub protocol_reserve_address: Option<Principal>,
+        pub is_initialized: bool,
+        pub pool_events: Option<Vec<PoolEvent>>,
+        pub next_event_id: Option<u64>,
+        pub pending_refunds: Option<BTreeMap<u64, PendingRefund>>,
+        pub next_pending_refund_id: Option<u64>,
+    }
+
+    #[test]
+    fn pre_cfx_snapshot_decodes_with_empty_cfx_claims() {
+        let mut current = test_state();
+        add_deposit_direct(&mut current, user_a(), icusd_ledger(), 42_00000000);
+        let pos = current.deposits.get(&user_a()).unwrap();
+        let mut deposits = BTreeMap::new();
+        deposits.insert(user_a(), DepositPositionPreCfx {
+            stablecoin_balances: pos.stablecoin_balances.clone(),
+            collateral_gains: pos.collateral_gains.clone(),
+            opted_out_collateral: pos.opted_out_collateral.clone(),
+            deposit_timestamp: pos.deposit_timestamp,
+            total_claimed_gains: pos.total_claimed_gains.clone(),
+            total_interest_earned_e8s: pos.total_interest_earned_e8s,
+        });
+        let pre_cfx = StabilityPoolStatePreCfx {
+            deposits,
+            total_stablecoin_balances: current.total_stablecoin_balances.clone(),
+            stablecoin_registry: current.stablecoin_registry.clone(),
+            collateral_registry: current.collateral_registry.clone(),
+            protocol_canister_id: current.protocol_canister_id,
+            configuration: current.configuration.clone(),
+            liquidation_history: current.liquidation_history.clone(),
+            in_flight_liquidations: current.in_flight_liquidations.clone(),
+            total_liquidations_executed: current.total_liquidations_executed,
+            pool_creation_timestamp: current.pool_creation_timestamp,
+            total_interest_received_e8s: current.total_interest_received_e8s,
+            token_consecutive_failures: current.token_consecutive_failures.clone(),
+            cached_virtual_prices: current.cached_virtual_prices.clone(),
+            protocol_reserve_address: current.protocol_reserve_address,
+            is_initialized: current.is_initialized,
+            pool_events: current.pool_events.clone(),
+            next_event_id: current.next_event_id,
+            pending_refunds: current.pending_refunds.clone(),
+            next_pending_refund_id: current.next_pending_refund_id,
+        };
+        let bytes = Encode!(&pre_cfx).expect("encode pre-CFX snapshot");
+
+        let decoded = try_decode_state(&bytes).expect("pre-CFX snapshot must decode");
+        let decoded_pos = decoded.deposits.get(&user_a()).expect("deposit survives");
+        assert!(
+            decoded_pos.cfx_claims.clone().unwrap_or_default().is_empty(),
+            "missing CFX claims field must decode as empty",
+        );
+        assert!(
+            decoded_pos.opted_in_chain_collateral.clone().unwrap_or_default().is_empty(),
+            "missing chain opt-in field must decode as empty",
+        );
+        assert!(
+            decoded.chain_collateral_sentinels.clone().unwrap_or_default().is_empty(),
+            "missing chain sentinel registry must decode as empty",
+        );
+        assert!(
+            decoded.chain_claim_sources.clone().unwrap_or_default().is_empty(),
+            "missing chain claim source inventory must decode as empty",
+        );
     }
 
     // ─── Test: Opt-out mid-liquidation burn escape (audit AR-S-002) ───

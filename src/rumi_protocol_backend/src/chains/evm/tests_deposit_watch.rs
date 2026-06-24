@@ -146,3 +146,21 @@ fn backstop_scans_only_on_supply_drop_and_no_inflight_mint() {
     // Zero/zero -> skip.
     assert!(!backstop_should_scan(0, 0, false));
 }
+
+#[test]
+fn no_debt_fast_path_stays_active_with_pending_chain_burn() {
+    use super::deposit_watch::burn_watch_can_skip_for_no_supply_obligation;
+
+    assert!(
+        burn_watch_can_skip_for_no_supply_obligation(0, 0),
+        "zero debt and zero pending burn has no foreign-supply obligation"
+    );
+    assert!(
+        !burn_watch_can_skip_for_no_supply_obligation(0, 42),
+        "pending_chain_burn means IC-side icUSD was burned but foreign representation remains outstanding"
+    );
+    assert!(
+        !burn_watch_can_skip_for_no_supply_obligation(42, 0),
+        "live debt means user burns can still repay a vault"
+    );
+}

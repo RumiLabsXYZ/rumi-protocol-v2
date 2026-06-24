@@ -1929,12 +1929,35 @@ fn get_chain_liquidation_config(
 pub struct ChainLiquidatableVault {
     pub vault_id: u64,
     pub chain_id: rumi_protocol_backend::chains::config::ChainId,
+    pub chain_collateral_sentinel: Principal,
+    pub sp_attempted: bool,
     pub debt_e8s: u128,
     pub effective_debt_e8s: u128,
     pub collateral_native: u128,
     pub cr_e4: u64,
     pub liquidation_threshold_e4: u64,
     pub sized_repay_e8s: u128,
+}
+
+#[derive(CandidType, Deserialize, Debug, Clone)]
+pub struct ChainStabilityPoolLiquidationResult {
+    pub success: bool,
+    pub vault_id: u64,
+    pub chain_id: rumi_protocol_backend::chains::config::ChainId,
+    pub liquidated_debt_e8s: u128,
+    pub collateral_received_native: u128,
+    pub claim_id: u64,
+    pub custody_address: String,
+    pub block_index: u64,
+    pub collateral_price_e8s: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ChainSpAbsorbSnapshot {
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    price_e8: u64,
+    native_decimals: u8,
+    liquidation_penalty_bps: u64,
 }
 
 /// Resolve the chain's native collateral symbol (the manual-price key) for the
@@ -1945,6 +1968,51 @@ fn liquidation_price_symbol(
     rumi_protocol_backend::chains::evm::evm_chain_config(chain)
         .map(|c| c.native_symbol)
         .ok_or_else(|| ProtocolError::ChainAdmin(format!("chain {} is not a known EVM chain", chain.0)))
+}
+
+fn chain_sp_absorb_snapshot(
+    state: &rumi_protocol_backend::chains::multi_chain_state::MultiChainState,
+    vault_id: u64,
+    now_ns: u64,
+) -> Result<ChainSpAbsorbSnapshot, ProtocolError> {
+    use rumi_protocol_backend::chains::collateral_config::chain_collateral_config;
+    use rumi_protocol_backend::chains::liquidation as liq;
+
+    if state.invariant_halted {
+        return Err(ProtocolError::SupplyInvariantHalted);
+    }
+    let vault = state
+        .chain_vaults
+        .get(&vault_id)
+        .ok_or_else(|| ProtocolError::ChainAdmin(format!("unknown chain vault {vault_id}")))?;
+    let chain = vault.collateral_chain;
+    if state.reorg_halted.get(&chain).copied().unwrap_or(false) {
+        return Err(ProtocolError::ChainAdmin(format!("chain {} reorg halted", chain.0)));
+    }
+    if !state.sp_attempted_chain_vaults.contains(&vault_id) {
+        return Err(ProtocolError::ChainAdmin(format!("chain vault {vault_id} missing sp_attempted escalation gate")));
+    }
+    let cfg = state
+        .chain_liquidation_configs
+        .get(&chain)
+        .ok_or_else(|| ProtocolError::ChainAdmin(format!("no chain liquidation config for chain {}", chain.0)))?;
+    let symbol = liquidation_price_symbol(chain)?;
+    let price_e8 = liq::fresh_chain_price_e8(state, chain, symbol, now_ns, cfg.max_price_age_ns)
+        .map_err(|e| ProtocolError::ChainAdmin(format!("fresh chain price unavailable for {symbol}: {e:?}")))?;
+    let native_decimals = state
+        .chain_configs
+        .get(&chain)
+        .map(|c| c.chain_native_decimals)
+        .unwrap_or(18);
+    let liquidation_penalty_bps = chain_collateral_config(chain)
+        .map(|c| c.liquidation_penalty_bps)
+        .ok_or_else(|| ProtocolError::ChainAdmin(format!("no collateral config for chain {}", chain.0)))?;
+    Ok(ChainSpAbsorbSnapshot {
+        chain,
+        price_e8,
+        native_decimals,
+        liquidation_penalty_bps,
+    })
 }
 
 /// Dev-gated manual/permissionless liquidation trigger (spec §7). Runs the
@@ -1979,6 +2047,100 @@ fn liquidate_chain_vault(vault_id: u64) -> Result<u64, ProtocolError> {
     .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
 }
 
+/// Deterministic Principal key for chain-native collateral in the Stability Pool.
+/// This is a metadata key, never an ICRC ledger canister. The byte layout uses a
+/// reserved Rumi prefix plus the little-endian chain id and a non-canister tag.
+fn chain_collateral_sentinel(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> Principal {
+    let mut bytes = [0u8; 29];
+    let prefix = b"rumi-chain-collateral";
+    bytes[..prefix.len()].copy_from_slice(prefix);
+    bytes[24..28].copy_from_slice(&chain.0.to_le_bytes());
+    bytes[28] = 0x7f;
+    Principal::from_slice(&bytes)
+}
+
+fn chain_liquidatable_vaults_in_state(
+    state: &rumi_protocol_backend::chains::multi_chain_state::MultiChainState,
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    now: u64,
+) -> Vec<ChainLiquidatableVault> {
+    use rumi_protocol_backend::chains::collateral_config::chain_collateral_config;
+    use rumi_protocol_backend::chains::liquidation as liq;
+    use rumi_protocol_backend::chains::monad::chain_vault::ChainVaultStatus;
+    let symbol = match liquidation_price_symbol(chain) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let cc = chain_collateral_config(chain);
+    let threshold = match cc.map(|c| c.liquidation_threshold_e4) {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+    let apr_bps = cc.map(|c| c.interest_apr_bps).unwrap_or(0);
+    let max_age = state
+        .chain_liquidation_configs
+        .get(&chain)
+        .map(|c| c.max_price_age_ns)
+        .unwrap_or(0);
+    let price = match liq::fresh_chain_price_e8(state, chain, symbol, now, max_age) {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+    let nd = state
+        .chain_configs
+        .get(&chain)
+        .map(|c| c.chain_native_decimals)
+        .unwrap_or(18);
+    let bonus = liq::bonus_e4_from_penalty_bps(cc.map(|c| c.liquidation_penalty_bps).unwrap_or(0));
+    let target = cc.map(|c| c.recovery_target_cr_e4).unwrap_or(15_500);
+    let sentinel = chain_collateral_sentinel(chain);
+    state
+        .chain_vaults
+        .values()
+        .filter(|v| {
+            v.collateral_chain == chain
+                && v.status == ChainVaultStatus::Open
+                && v.pending_mint_e8s == 0
+                && v.pending_interest_mint_e8s == 0
+                && v.pending_liquidation.is_none()
+                && v.debt_e8s > 0
+        })
+        .filter_map(|v| {
+            let eff = liq::effective_debt_e8s(
+                v.debt_e8s,
+                v.pending_interest_mint_e8s,
+                apr_bps,
+                now.saturating_sub(v.last_interest_accrual_ns),
+            );
+            let cr = rumi_protocol_backend::chains::vault::collateral_ratio_e4(
+                v.collateral_amount_native,
+                nd,
+                price,
+                eff,
+            );
+            if cr >= threshold {
+                return None;
+            }
+            let cv = liq::collateral_value_e8s(v.collateral_amount_native, nd, price);
+            Some(ChainLiquidatableVault {
+                vault_id: v.vault_id,
+                chain_id: chain,
+                chain_collateral_sentinel: sentinel,
+                sp_attempted: state.sp_attempted_chain_vaults.contains(&v.vault_id),
+                debt_e8s: v.debt_e8s,
+                effective_debt_e8s: eff,
+                collateral_native: v.collateral_amount_native,
+                cr_e4: cr,
+                liquidation_threshold_e4: threshold,
+                sized_repay_e8s: liq::sized_repay_e8s(eff, cv, target, bonus),
+            })
+        })
+        .take(500)
+        .collect()
+}
+
 /// Public read: vaults currently liquidatable on `chain` (CR below the
 /// liquidation threshold, Open, not already marked, no in-flight mint). Capped
 /// for DOS safety. Returns empty if the chain has no collateral config or no
@@ -1988,81 +2150,8 @@ fn liquidate_chain_vault(vault_id: u64) -> Result<u64, ProtocolError> {
 fn get_chain_liquidatable_vaults(
     chain: rumi_protocol_backend::chains::config::ChainId,
 ) -> Vec<ChainLiquidatableVault> {
-    use rumi_protocol_backend::chains::collateral_config::chain_collateral_config;
-    use rumi_protocol_backend::chains::liquidation as liq;
-    use rumi_protocol_backend::chains::monad::chain_vault::ChainVaultStatus;
-    let symbol = match liquidation_price_symbol(chain) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
     let now = ic_cdk::api::time();
-    read_state(|s| {
-        let cc = chain_collateral_config(chain);
-        let threshold = match cc.map(|c| c.liquidation_threshold_e4) {
-            Some(t) => t,
-            None => return Vec::new(),
-        };
-        let apr_bps = cc.map(|c| c.interest_apr_bps).unwrap_or(0);
-        let max_age = s
-            .multi_chain
-            .chain_liquidation_configs
-            .get(&chain)
-            .map(|c| c.max_price_age_ns)
-            .unwrap_or(0);
-        let price = match liq::fresh_chain_price_e8(&s.multi_chain, chain, symbol, now, max_age) {
-            Ok(p) => p,
-            Err(_) => return Vec::new(),
-        };
-        let nd = s
-            .multi_chain
-            .chain_configs
-            .get(&chain)
-            .map(|c| c.chain_native_decimals)
-            .unwrap_or(18);
-        let bonus = liq::bonus_e4_from_penalty_bps(cc.map(|c| c.liquidation_penalty_bps).unwrap_or(0));
-        let target = cc.map(|c| c.recovery_target_cr_e4).unwrap_or(15_500);
-        s.multi_chain
-            .chain_vaults
-            .values()
-            .filter(|v| {
-                v.collateral_chain == chain
-                    && v.status == ChainVaultStatus::Open
-                    && v.pending_mint_e8s == 0
-                    && v.pending_interest_mint_e8s == 0
-                    && v.pending_liquidation.is_none()
-                    && v.debt_e8s > 0
-            })
-            .filter_map(|v| {
-                let eff = liq::effective_debt_e8s(
-                    v.debt_e8s,
-                    v.pending_interest_mint_e8s,
-                    apr_bps,
-                    now.saturating_sub(v.last_interest_accrual_ns),
-                );
-                let cr = rumi_protocol_backend::chains::vault::collateral_ratio_e4(
-                    v.collateral_amount_native,
-                    nd,
-                    price,
-                    eff,
-                );
-                if cr >= threshold {
-                    return None;
-                }
-                let cv = liq::collateral_value_e8s(v.collateral_amount_native, nd, price);
-                Some(ChainLiquidatableVault {
-                    vault_id: v.vault_id,
-                    chain_id: chain,
-                    debt_e8s: v.debt_e8s,
-                    effective_debt_e8s: eff,
-                    collateral_native: v.collateral_amount_native,
-                    cr_e4: cr,
-                    liquidation_threshold_e4: threshold,
-                    sized_repay_e8s: liq::sized_repay_e8s(eff, cv, target, bonus),
-                })
-            })
-            .take(500)
-            .collect()
-    })
+    read_state(|s| chain_liquidatable_vaults_in_state(&s.multi_chain, chain, now))
 }
 
 /// Manual-price readout for `(chain, symbol)`: the USD e8 price plus the
@@ -3574,6 +3663,220 @@ async fn stability_pool_liquidate_debt_burned(
         vault_id, icusd_burned_e8s, caller, None, proof,
     )
     .await
+}
+
+async fn verify_sp_icusd_burn_proof(
+    vault_id: u64,
+    icusd_burned_e8s: u64,
+    caller: Principal,
+    proof: &rumi_protocol_backend::icrc3_proof::SpWritedownProof,
+) -> Result<(), ProtocolError> {
+    use rumi_protocol_backend::icrc3_proof::{ProofExpectations, SpProofLedger};
+
+    if proof.ledger_kind != SpProofLedger::IcusdBurn {
+        return Err(ProtocolError::GenericError(
+            "chain SP liquidation requires an icUSD burn proof".to_string(),
+        ));
+    }
+    if read_state(|s| {
+        s.consumed_writedown_proofs
+            .contains(&(proof.ledger_kind, proof.block_index))
+    }) {
+        return Err(ProtocolError::GenericError(format!(
+            "SP writedown proof replay rejected: ({:?}, block {}) already consumed",
+            proof.ledger_kind, proof.block_index
+        )));
+    }
+    let ledger_principal = read_state(|s| s.icusd_ledger_principal);
+    if ledger_principal == Principal::anonymous() {
+        return Err(ProtocolError::GenericError(
+            "icUSD ledger is not configured".to_string(),
+        ));
+    }
+
+    let expectations = ProofExpectations {
+        ledger_kind: proof.ledger_kind,
+        expected_amount_e8s: icusd_burned_e8s,
+        sp_principal: caller,
+        reserves_account: icrc_ledger_types::icrc1::account::Account {
+            owner: ic_cdk::id(),
+            subaccount: Some(rumi_protocol_backend::management::protocol_3usd_reserves_subaccount()),
+        },
+        vault_id_memo: vault_id,
+    };
+    if let Err(err) = rumi_protocol_backend::icrc3_proof::fetch_and_validate_block(
+        ledger_principal,
+        proof.block_index,
+        &expectations,
+    )
+    .await
+    {
+        return Err(ProtocolError::GenericError(format!(
+            "SP writedown proof verification failed: {}",
+            err
+        )));
+    }
+    if proof.vault_id_memo != vault_id {
+        return Err(ProtocolError::GenericError(format!(
+            "SP writedown proof vault_id_memo {} does not match call vault_id {}",
+            proof.vault_id_memo, vault_id
+        )));
+    }
+    Ok(())
+}
+
+/// Called by the stability pool after it has burned IC-native icUSD to absorb a
+/// bot-failed foreign-chain vault. This does NOT burn the eSpace icUSD
+/// representation; it writes debt -> pending_chain_burn and reserves seized CFX
+/// in a `ChainLiqClaimV1` for later SP depositor claims.
+#[update]
+#[candid_method(update)]
+async fn stability_pool_liquidate_chain_vault(
+    vault_id: u64,
+    icusd_burned_e8s: u64,
+    proof: rumi_protocol_backend::icrc3_proof::SpWritedownProof,
+) -> Result<ChainStabilityPoolLiquidationResult, ProtocolError> {
+    if ic_cdk::caller() == Principal::anonymous() {
+        return Err(ProtocolError::AnonymousCallerNotAllowed);
+    }
+    if read_state(|s| s.frozen) {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "Protocol is frozen. All operations are suspended pending admin review.".to_string(),
+        ));
+    }
+    validate_liquidation_not_frozen()?;
+    if read_state(|s| s.sp_writedown_disabled) {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "SP writedown path is disabled by admin".to_string(),
+        ));
+    }
+
+    let caller = ic_cdk::api::caller();
+    let is_stability_pool = read_state(|s| {
+        s.stability_pool_canister.map_or(false, |sp| sp == caller)
+    });
+    if !is_stability_pool {
+        return Err(ProtocolError::GenericError(
+            "Caller is not the registered stability pool canister".to_string(),
+        ));
+    }
+
+    let _guard = rumi_protocol_backend::guard::ChainVaultLiquidationGuard::new(vault_id)?;
+    let now = ic_cdk::api::time();
+    let snapshot = read_state(|s| chain_sp_absorb_snapshot(&s.multi_chain, vault_id, now))?;
+
+    verify_sp_icusd_burn_proof(vault_id, icusd_burned_e8s, caller, &proof).await?;
+
+    let proof_key = (proof.ledger_kind, proof.block_index);
+    let absorbed = mutate_state(|s| {
+        if s.consumed_writedown_proofs.contains(&proof_key) {
+            return Err(ProtocolError::GenericError(format!(
+                "SP writedown proof replay rejected: ({:?}, block {}) already consumed",
+                proof.ledger_kind, proof.block_index
+            )));
+        }
+        let absorbed = rumi_protocol_backend::chains::evm::settlement::apply_sp_chain_liquidation_absorb_in_state(
+            &mut s.multi_chain,
+            snapshot.chain,
+            vault_id,
+            icusd_burned_e8s as u128,
+            snapshot.price_e8,
+            snapshot.native_decimals,
+            snapshot.liquidation_penalty_bps,
+        )
+        .map_err(ProtocolError::ChainAdmin)?;
+        s.consumed_writedown_proofs.insert(proof_key);
+        Ok(absorbed)
+    })?;
+
+    rumi_protocol_backend::storage::record_event(&Event::ChainVaultLiquidated {
+        chain_id: snapshot.chain,
+        vault_id,
+        op_id: proof.block_index,
+        debt_cleared_e8s: absorbed.actual_burned_e8s,
+        collateral_seized_native: absorbed.collateral_seized_native,
+        tier: rumi_protocol_backend::chains::vault::LiquidationTier::StabilityPool,
+        timestamp: now,
+    });
+    log!(INFO,
+        "[stability_pool_liquidate_chain_vault] chain={:?} vault={} burned_e8s={} collateral_seized_native={} proof_block={}",
+        snapshot.chain, vault_id, absorbed.actual_burned_e8s, absorbed.collateral_seized_native, proof.block_index
+    );
+
+    Ok(ChainStabilityPoolLiquidationResult {
+        success: true,
+        vault_id,
+        chain_id: snapshot.chain,
+        liquidated_debt_e8s: absorbed.actual_burned_e8s,
+        collateral_received_native: absorbed.collateral_seized_native,
+        claim_id: vault_id,
+        custody_address: absorbed.custody_address,
+        block_index: proof.block_index,
+        collateral_price_e8s: snapshot.price_e8,
+    })
+}
+
+/// Called by the stability pool to enqueue a native CFX payout from a reserved
+/// chain-liquidation claim. The SP owns depositor apportionment; the backend owns
+/// custody, idempotency, and the settlement queue.
+#[update]
+#[candid_method(update)]
+fn claim_chain_collateral(
+    claim_id: u64,
+    claimant: Principal,
+    owed_wei: u128,
+    dest_evm: String,
+) -> Result<u64, ProtocolError> {
+    if ic_cdk::caller() == Principal::anonymous() {
+        return Err(ProtocolError::AnonymousCallerNotAllowed);
+    }
+    if read_state(|s| s.frozen) {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "Protocol is frozen. All operations are suspended pending admin review.".to_string(),
+        ));
+    }
+    validate_liquidation_not_frozen()?;
+    if read_state(|s| s.sp_writedown_disabled) {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "SP writedown path is disabled by admin".to_string(),
+        ));
+    }
+
+    let caller = ic_cdk::api::caller();
+    let is_stability_pool = read_state(|s| {
+        s.stability_pool_canister.map_or(false, |sp| sp == caller)
+    });
+    if !is_stability_pool {
+        return Err(ProtocolError::GenericError(
+            "Caller is not the registered stability pool canister".to_string(),
+        ));
+    }
+    if !rumi_protocol_backend::chains::evm::tecdsa::is_valid_evm_address(&dest_evm) {
+        return Err(ProtocolError::GenericError("invalid EVM address".to_string()));
+    }
+
+    let now = ic_cdk::api::time();
+    let op_id = mutate_state(|s| {
+        rumi_protocol_backend::chains::evm::settlement::claim_chain_collateral_in_state(
+            &mut s.multi_chain,
+            claim_id,
+            claimant,
+            owed_wei,
+            dest_evm.clone(),
+            now,
+            rumi_protocol_backend::chains::evm::tecdsa::is_valid_evm_address,
+        )
+        .map_err(ProtocolError::ChainAdmin)
+    })?;
+    log!(
+        INFO,
+        "[claim_chain_collateral] claim={} claimant={} amount_wei={} op_id={}",
+        claim_id,
+        claimant,
+        owed_wei,
+        op_id
+    );
+    Ok(op_id)
 }
 
 /// Called by the stability pool to liquidate a vault using 3USD reserves.
@@ -8686,6 +8989,130 @@ mod chain_vault_param_tests {
     }
 }
 
+#[cfg(test)]
+mod chain_sp_absorb_entry_tests {
+    use super::{chain_collateral_sentinel, chain_liquidatable_vaults_in_state, chain_sp_absorb_snapshot};
+    use rumi_protocol_backend::chains::config::{ChainConfigV3, ChainId, ChainStatus, GasStrategy};
+    use rumi_protocol_backend::chains::liquidation_config::{ChainLiquidationConfigV1, DexKind};
+    use rumi_protocol_backend::chains::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
+    use rumi_protocol_backend::chains::multi_chain_state::MultiChainState;
+    use candid::Principal;
+
+    const CFX: ChainId = ChainId(71);
+
+    fn cfg() -> ChainLiquidationConfigV1 {
+        ChainLiquidationConfigV1 {
+            dex: DexKind::UniswapV2,
+            router: "0xrouter".into(),
+            factory: "0xfactory".into(),
+            pair: "0xpair".into(),
+            collateral_token: "0xcollateral".into(),
+            settle_stable_token: "0xstable".into(),
+            slippage_cap_bps: 100,
+            restore_target_cr_e4: 15_500,
+            enabled: true,
+            max_swap_value_e8s: 1_000 * 100_000_000,
+            max_price_age_ns: 1_000,
+            max_dex_oracle_divergence_bps: 100,
+            fee_bps: 25,
+            settle_stable_decimals: 18,
+            deadline_secs: 180,
+        }
+    }
+
+    fn configured_state() -> MultiChainState {
+        let mut s = MultiChainState::default();
+        s.chain_configs.insert(CFX, ChainConfigV3 {
+            chain_id: CFX,
+            display_name: "Conflux eSpace".into(),
+            rpc_endpoints: vec![],
+            finality_depth: 12,
+            gas_strategy: GasStrategy::EvmEip1559 {
+                max_priority_fee_gwei: 1,
+                max_fee_gwei_ceiling: 100,
+            },
+            chain_native_decimals: 18,
+            registered_at_ns: 0,
+            status: ChainStatus::Registered,
+            burn_watch_poll_enabled: false,
+            min_quorum_providers: None,
+        });
+        s.chain_liquidation_configs.insert(CFX, cfg());
+        s.chain_vaults.insert(7, ChainVaultV1 {
+            vault_id: 7,
+            owner: Principal::anonymous(),
+            collateral_chain: CFX,
+            custody_address: "0x00000000000000000000000000000000000000c7".into(),
+            collateral_amount_native: 1_000_000_000_000_000_000_000,
+            debt_e8s: 100 * 100_000_000,
+            mint_recipient: "0x00000000000000000000000000000000000000d7".into(),
+            pending_mint_e8s: 0,
+            status: ChainVaultStatus::Open,
+            opened_at_ns: 0,
+            owner_evm: None,
+            last_interest_accrual_ns: 0,
+            pending_interest_mint_e8s: 0,
+            pending_liquidation: None,
+        });
+        s.sp_attempted_chain_vaults.insert(7);
+        s
+    }
+
+    #[test]
+    fn chain_sp_absorb_snapshot_rejects_halted_chain_rails() {
+        let mut s = configured_state();
+        s.set_manual_price(CFX, "CFX".into(), 50_000_000, 500);
+
+        s.invariant_halted = true;
+        let err = chain_sp_absorb_snapshot(&s, 7, 600).unwrap_err();
+        assert!(format!("{err:?}").to_ascii_lowercase().contains("invariant"), "unexpected error: {err:?}");
+
+        s.invariant_halted = false;
+        s.reorg_halted.insert(CFX, true);
+        let err = chain_sp_absorb_snapshot(&s, 7, 600).unwrap_err();
+        assert!(format!("{err:?}").contains("reorg"), "unexpected error: {err:?}");
+    }
+
+    #[test]
+    fn chain_sp_absorb_snapshot_requires_fresh_chain_manual_price() {
+        let mut s = configured_state();
+
+        let err = chain_sp_absorb_snapshot(&s, 7, 600).unwrap_err();
+        assert!(format!("{err:?}").contains("price"), "unexpected error: {err:?}");
+
+        s.set_manual_price(CFX, "CFX".into(), 50_000_000, 1);
+        let err = chain_sp_absorb_snapshot(&s, 7, 1_100_000).unwrap_err();
+        assert!(format!("{err:?}").contains("price"), "unexpected error: {err:?}");
+
+        s.set_manual_price(CFX, "CFX".into(), 50_000_000, 500);
+        let ok = chain_sp_absorb_snapshot(&s, 7, 600).expect("fresh price accepted");
+        assert_eq!(ok.chain, CFX);
+        assert_eq!(ok.price_e8, 50_000_000);
+        assert_eq!(ok.native_decimals, 18);
+        assert_eq!(ok.liquidation_penalty_bps, 1_200);
+    }
+
+    #[test]
+    fn chain_liquidatable_discovery_marks_bot_failed_and_sentinel() {
+        let mut s = configured_state();
+        s.set_manual_price(CFX, "CFX".into(), 1_000_000, 500);
+        let mut never_tried = s.chain_vaults.get(&7).unwrap().clone();
+        never_tried.vault_id = 8;
+        never_tried.owner = Principal::from_slice(&[8u8; 29]);
+        never_tried.custody_address = "0x00000000000000000000000000000000000000c8".into();
+        s.chain_vaults.insert(8, never_tried);
+
+        let rows = chain_liquidatable_vaults_in_state(&s, CFX, 600);
+        assert_eq!(rows.len(), 2);
+        let attempted = rows.iter().find(|r| r.vault_id == 7).unwrap();
+        assert!(attempted.sp_attempted);
+        assert_eq!(attempted.chain_collateral_sentinel, chain_collateral_sentinel(CFX));
+        let fresh = rows.iter().find(|r| r.vault_id == 8).unwrap();
+        assert!(!fresh.sp_attempted);
+        assert_eq!(fresh.chain_collateral_sentinel, chain_collateral_sentinel(CFX));
+    }
+}
+
 // Checks the real candid interface against the one declared in the did file
 #[test]
 fn check_candid_interface_compatibility() {
@@ -8746,4 +9173,3 @@ fn check_candid_interface_compatibility() {
         CandidSource::File(did_path.as_path()),
     );
 }
-

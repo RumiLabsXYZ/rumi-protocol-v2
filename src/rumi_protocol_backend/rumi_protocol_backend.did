@@ -42,6 +42,8 @@ type ChainLiquidatableVault = record {
   cr_e4 : nat64;
   collateral_native : nat;
   vault_id : nat64;
+  sp_attempted : bool;
+  chain_collateral_sentinel : principal;
   chain_id : nat32;
   liquidation_threshold_e4 : nat64;
   effective_debt_e8s : nat;
@@ -63,6 +65,17 @@ type ChainLiquidationConfigV1 = record {
   router : text;
   settle_stable_token : text;
   deadline_secs : nat64;
+};
+type ChainStabilityPoolLiquidationResult = record {
+  collateral_price_e8s : nat64;
+  liquidated_debt_e8s : nat;
+  collateral_received_native : nat;
+  block_index : nat64;
+  claim_id : nat64;
+  custody_address : text;
+  vault_id : nat64;
+  chain_id : nat32;
+  success : bool;
 };
 type ChainSupplyReconciliation = record {
   recorded_supply_e8s : nat;
@@ -912,7 +925,11 @@ type Result_17 = variant {
   Ok : StabilityPoolLiquidationResult;
   Err : ProtocolError;
 };
-type Result_18 = variant { Ok : nat32; Err : ProtocolError };
+type Result_18 = variant {
+  Ok : ChainStabilityPoolLiquidationResult;
+  Err : ProtocolError;
+};
+type Result_19 = variant { Ok : nat32; Err : ProtocolError };
 type Result_2 = variant { Ok : text; Err : ProtocolError };
 type Result_3 = variant { Ok : SuccessWithFee; Err : ProtocolError };
 type Result_4 = variant { Ok : BotLiquidationResult; Err : ProtocolError };
@@ -1070,6 +1087,7 @@ service : (ProtocolArg) -> {
   bot_claim_liquidation : (nat64) -> (Result_4);
   bot_confirm_liquidation : (nat64) -> (Result);
   chain_has_active_settlement_op : (nat32) -> (bool) query;
+  claim_chain_collateral : (nat64, principal, nat, text) -> (Result_1);
   claim_liquidity_returns : () -> (Result_1);
   clear_invariant_halt : () -> (Result);
   clear_liquidation_breaker : () -> (Result);
@@ -1310,13 +1328,16 @@ service : (ProtocolArg) -> {
   solana_settlement_address : () -> (Result_2);
   solana_sign_test_transfer : (text, nat64) -> (Result_16);
   stability_pool_liquidate : (nat64, nat64) -> (Result_17);
+  stability_pool_liquidate_chain_vault : (nat64, nat64, SpWritedownProof) -> (
+      Result_18,
+    );
   stability_pool_liquidate_debt_burned : (nat64, nat64, SpWritedownProof) -> (
       Result_17,
     );
   stability_pool_liquidate_with_reserves : (nat64, nat64, nat64, principal) -> (
       Result_17,
     );
-  submit_burn_proof : (nat32, text) -> (Result_18);
+  submit_burn_proof : (nat32, text) -> (Result_19);
   unfreeze_protocol : () -> (Result);
   update_collateral_config : (principal, CollateralConfig) -> (Result);
   withdraw_and_close_vault : (nat64) -> (Result_5);

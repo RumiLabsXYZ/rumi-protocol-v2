@@ -142,6 +142,11 @@ pub async fn claim_pending_refund(refund_id: u64) -> Result<u64, StabilityPoolEr
     crate::deposits::claim_pending_refund(refund_id).await
 }
 
+#[update]
+pub async fn claim_cfx(chain_sentinel: Principal, dest_evm: String) -> Result<u128, StabilityPoolError> {
+    crate::liquidation::claim_cfx(chain_sentinel, dest_evm).await
+}
+
 // ─── Opt-in / Opt-out ───
 
 #[update]
@@ -174,6 +179,34 @@ pub fn opt_in_collateral(collateral_type: Principal) -> Result<(), StabilityPool
     result
 }
 
+#[update]
+pub fn opt_in_cfx(chain_sentinel: Principal) -> Result<(), StabilityPoolError> {
+    // SP-102 / AR-S-002: see opt_out_collateral.
+    if crate::pool_guard::liquidation_in_progress() {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    let caller = ic_cdk::api::caller();
+    let result = mutate_state(|s| s.opt_in_cfx(&caller, chain_sentinel));
+    if result.is_ok() {
+        mutate_state(|s| s.push_event(caller, PoolEventType::OptInCollateral { collateral_type: chain_sentinel }));
+    }
+    result
+}
+
+#[update]
+pub fn opt_out_cfx(chain_sentinel: Principal) -> Result<(), StabilityPoolError> {
+    // SP-102 / AR-S-002: see opt_out_collateral.
+    if crate::pool_guard::liquidation_in_progress() {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    let caller = ic_cdk::api::caller();
+    let result = mutate_state(|s| s.opt_out_cfx(&caller, chain_sentinel));
+    if result.is_ok() {
+        mutate_state(|s| s.push_event(caller, PoolEventType::OptOutCollateral { collateral_type: chain_sentinel }));
+    }
+    result
+}
+
 // ─── Liquidation (Push + Fallback) ───
 
 /// Called by the backend to push liquidatable vault notifications.
@@ -202,6 +235,11 @@ pub async fn notify_liquidatable_vaults(vaults: Vec<LiquidatableVaultInfo>) -> V
 #[update]
 pub async fn execute_liquidation(vault_id: u64) -> Result<LiquidationResult, StabilityPoolError> {
     crate::liquidation::execute_liquidation(vault_id).await
+}
+
+#[update]
+pub async fn sp_absorb_chain_vault(vault_id: u64) -> Result<ChainSpAbsorbResult, StabilityPoolError> {
+    crate::liquidation::sp_absorb_chain_vault(vault_id).await
 }
 
 // ─── Interest Revenue ───
@@ -313,6 +351,11 @@ pub fn get_pending_refunds(user: Option<Principal>) -> Vec<PendingRefund> {
 }
 
 #[query]
+pub fn get_chain_collateral_sentinel(chain_id: u32) -> Principal {
+    crate::state::chain_collateral_sentinel(chain_id)
+}
+
+#[query]
 pub fn check_pool_capacity(collateral_type: Principal, debt_amount_e8s: u64) -> bool {
     read_state(|s| s.effective_pool_for_collateral(&collateral_type) >= debt_amount_e8s)
 }
@@ -352,6 +395,24 @@ pub fn register_collateral(info: CollateralInfo) -> Result<(), StabilityPoolErro
         s.push_event(caller, PoolEventType::CollateralRegistered { ledger, symbol });
     });
     Ok(())
+}
+
+#[update]
+pub fn register_cfx_collateral(chain_id: u32) -> Result<Principal, StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    if !read_state(|s| s.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    let sentinel = mutate_state(|s| {
+        s.register_chain_collateral(chain_id, "CFX".to_string(), 18)
+    })?;
+    mutate_state(|s| {
+        s.push_event(caller, PoolEventType::CollateralRegistered {
+            ledger: sentinel,
+            symbol: "CFX".to_string(),
+        });
+    });
+    Ok(sentinel)
 }
 
 // ─── Admin: Configuration ───
@@ -438,6 +499,11 @@ pub fn icrc21_canister_call_consent_message(
              You are claiming **all** of your collateral rewards from the Rumi Protocol Stability Pool."
                 .to_string()
         }
+        "claim_cfx" => {
+            "## Claim CFX Rewards\n\n\
+             You are claiming CFX rewards from chain-vault liquidations."
+                .to_string()
+        }
         "opt_out_collateral" => {
             "## Opt Out of Collateral\n\n\
              You are opting out of receiving a specific collateral type from future liquidations."
@@ -446,6 +512,16 @@ pub fn icrc21_canister_call_consent_message(
         "opt_in_collateral" => {
             "## Opt In to Collateral\n\n\
              You are opting back in to receiving a specific collateral type from future liquidations."
+                .to_string()
+        }
+        "opt_in_cfx" => {
+            "## Opt In to CFX\n\n\
+             You are opting in to receiving CFX from future chain-vault liquidations."
+                .to_string()
+        }
+        "opt_out_cfx" => {
+            "## Opt Out of CFX\n\n\
+             You are opting out of receiving CFX from future chain-vault liquidations."
                 .to_string()
         }
         "deposit_as_3usd" => {
