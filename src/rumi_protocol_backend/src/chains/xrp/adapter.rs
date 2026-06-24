@@ -55,6 +55,15 @@ pub struct XrpAdapter {
     chain_id: ChainId,
 }
 
+/// Fully signed XRPL Payment plus source-account metadata needed by settlement
+/// recovery. `source_sequence` is the account Sequence embedded in the signed tx.
+#[derive(Clone, Debug)]
+pub struct SignedXrpPayment {
+    pub signed: SignedWithdrawal,
+    pub last_ledger_sequence: u32,
+    pub source_sequence: u32,
+}
+
 impl XrpAdapter {
     /// Create a new `XrpAdapter`. In production this is `XRP_CHAIN_ID` (144);
     /// tests may pass an arbitrary id for isolation.
@@ -74,7 +83,7 @@ impl XrpAdapter {
         let path = ted25519::settlement_derivation_path(self.chain_id);
         self.sign_xrp_payment_from(path, recipient, amount_drops_u128, destination_tag)
             .await
-            .map(|(signed, _last_ledger_sequence)| signed)
+            .map(|payment| payment.signed)
     }
 
     /// Build + threshold-sign a native-XRP `Payment` from an ARBITRARY custody
@@ -90,7 +99,7 @@ impl XrpAdapter {
         recipient: &str,
         amount_drops_u128: u128,
         destination_tag: Option<u32>,
-    ) -> Result<(SignedWithdrawal, u32), ChainAdapterError> {
+    ) -> Result<SignedXrpPayment, ChainAdapterError> {
         let dest_id = decode_recipient(recipient)?;
         let amount_drops = checked_drops_u64(amount_drops_u128)?;
 
@@ -106,12 +115,13 @@ impl XrpAdapter {
                 provider: "rippled".to_string(),
                 message,
             })?;
-        let reserve = xrp_rpc::fetch_reserve_base()
-            .await
-            .map_err(|message| ChainAdapterError::RpcError {
-                provider: "rippled".to_string(),
-                message,
-            })?;
+        let reserve =
+            xrp_rpc::fetch_reserve_base()
+                .await
+                .map_err(|message| ChainAdapterError::RpcError {
+                    provider: "rippled".to_string(),
+                    message,
+                })?;
 
         let payment = build_withdrawal_payment(
             sender_id,
@@ -129,15 +139,17 @@ impl XrpAdapter {
             .await
             .map_err(ChainAdapterError::SignatureFailed)?;
         let last_ledger_sequence = payment.last_ledger_sequence;
+        let source_sequence = payment.sequence;
         let signed = codec::serialize_signed(&payment, &signature);
         let tx_hash = hex::encode_upper(sign::tx_hash(&signed));
-        Ok((
-            SignedWithdrawal {
+        Ok(SignedXrpPayment {
+            signed: SignedWithdrawal {
                 raw_tx: signed,
                 tx_hash,
             },
             last_ledger_sequence,
-        ))
+            source_sequence,
+        })
     }
 }
 
@@ -348,9 +360,16 @@ mod tests {
     #[test]
     fn build_payment_happy_path_sets_sequence_and_lls() {
         let (s, d, pk) = ids();
-        let p =
-            build_withdrawal_payment(s, d, &pk, &acct(42, 50_000_000), 1_000_000, 1_000_000, Some(99))
-                .unwrap();
+        let p = build_withdrawal_payment(
+            s,
+            d,
+            &pk,
+            &acct(42, 50_000_000),
+            1_000_000,
+            1_000_000,
+            Some(99),
+        )
+        .unwrap();
         assert_eq!(p.sequence, 42);
         assert_eq!(p.last_ledger_sequence, 9_000_000 + LAST_LEDGER_BUFFER);
         assert_eq!(p.fee_drops, XRP_FEE_DROPS);
@@ -377,16 +396,9 @@ mod tests {
         ));
         // Exactly affordable: balance == amount + fee + reserve.
         let need = 600_000u128 + u128::from(XRP_FEE_DROPS) + 1_000_000;
-        assert!(build_withdrawal_payment(
-            s,
-            d,
-            &pk,
-            &acct(1, need),
-            1_000_000,
-            600_000,
-            None
-        )
-        .is_ok());
+        assert!(
+            build_withdrawal_payment(s, d, &pk, &acct(1, need), 1_000_000, 600_000, None).is_ok()
+        );
     }
 
     #[test]

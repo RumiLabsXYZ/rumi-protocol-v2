@@ -159,15 +159,31 @@ export class XrpVaultService {
    * Settle an XRP claim: sign + broadcast the XRPL Payment to `destination`. This is
    * a two-phase, anti-double-pay flow on the backend — the first call signs+submits
    * (the claim stays until the Payment validates), a follow-up call confirms it and
-   * clears the claim. The UI should call this again (or rely on polling) until the
-   * claim disappears from {@link getMyClaims}. Returns the (local) tx hash.
+   * clears the claim. Pass `destinationTag` for exchange-hosted accounts that need
+   * one; ordinary self-custody addresses continue through the legacy untagged
+   * endpoint. The UI should call this again (or rely on polling) until the claim
+   * disappears from {@link getMyClaims}. Returns the (local) tx hash.
    */
-  static async settleXrpClaim(claimId: number, destination: string): Promise<XrpOpResult<{ txHash: string }>> {
+  static async settleXrpClaim(
+    claimId: number,
+    destination: string,
+    destinationTag?: number
+  ): Promise<XrpOpResult<{ txHash: string }>> {
     return ApiClient.executeSequentialOperation(async () => {
       try {
+        if (
+          destinationTag !== undefined &&
+          (!Number.isInteger(destinationTag) || destinationTag < 0 || destinationTag > 0xffffffff)
+        ) {
+          return { success: false, error: 'Destination tag must be a whole number from 0 to 4294967295.' };
+        }
         const actor = await this.actor();
+        const operation =
+          destinationTag === undefined
+            ? () => actor.settle_xrp_claim(BigInt(claimId), destination)
+            : () => actor.settle_xrp_claim_with_tag(BigInt(claimId), destination, destinationTag);
         const result = await callWithOisyFalseNegativeGuard(
-          () => actor.settle_xrp_claim(BigInt(claimId), destination),
+          operation,
           // Verifier: the first settle phase records `claim.settlement` BEFORE the
           // submit outcall (backend vault.rs), so if the canister executed at all the
           // claim is now either gone (validated + removed) or carries a settlement.
@@ -178,7 +194,7 @@ export class XrpVaultService {
             const entry = claims.find(([id]) => Number(id) === claimId);
             return !entry || entry[1].settlement.length > 0;
           },
-          `settle_xrp_claim #${claimId}`
+          destinationTag === undefined ? `settle_xrp_claim #${claimId}` : `settle_xrp_claim_with_tag #${claimId}`
         );
         if (isOisyLandedSentinel(result)) {
           return { success: true, oisyResilient: true, data: { txHash: '' } };

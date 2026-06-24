@@ -696,7 +696,7 @@ fn post_upgrade(arg: ProtocolArg) {
     };
 
     // Try to restore from stable memory (fast path, no drift)
-    let state = match rumi_protocol_backend::storage::load_state_from_stable() {
+    let mut state = match rumi_protocol_backend::storage::load_state_from_stable() {
         Some(mut state) => {
             log!(
                 INFO,
@@ -723,6 +723,23 @@ fn post_upgrade(arg: ProtocolArg) {
             })
         }
     };
+    let xrp_guardrail_migration =
+        rumi_protocol_backend::state::enforce_xrp_launch_guardrails(&mut state);
+    if let Some(previous) = xrp_guardrail_migration.previous_debt_ceiling {
+        log!(
+            INFO,
+            "[upgrade]: clamped XRP debt ceiling from {} to {} e8s",
+            previous,
+            rumi_protocol_backend::state::XRP_LAUNCH_DEBT_CEILING_E8S
+        );
+    }
+    if let Some(previous) = xrp_guardrail_migration.previous_status {
+        log!(
+            INFO,
+            "[upgrade]: froze XRP collateral status from {:?} because the configured Schnorr key is not production",
+            previous
+        );
+    }
 
     // Post-upgrade validation: ensure collateral_configs is consistent
     validate_collateral_state(&state);
@@ -4980,6 +4997,70 @@ fn xrp_require_developer() -> Result<(), ProtocolError> {
     }
 }
 
+fn xrp_require_production_schnorr_key() -> Result<(), ProtocolError> {
+    let configured_key = rumi_protocol_backend::chains::xrp::config::xrp_schnorr_key_name();
+    if rumi_protocol_backend::chains::xrp::config::is_xrp_production_key_name(&configured_key) {
+        return Ok(());
+    }
+    let required = rumi_protocol_backend::chains::xrp::config::XRP_PRODUCTION_SCHNORR_KEY_NAME;
+    Err(ProtocolError::GenericError(format!(
+        "XRP collateral registration requires production Schnorr key {required} (configured: {configured_key})"
+    )))
+}
+
+fn validate_xrp_schnorr_key_change(name: &str, has_xrp_state: bool) -> Result<(), ProtocolError> {
+    if name != rumi_protocol_backend::chains::xrp::config::XRP_TEST_SCHNORR_KEY_NAME
+        && name != rumi_protocol_backend::chains::xrp::config::XRP_PRODUCTION_SCHNORR_KEY_NAME
+    {
+        return Err(ProtocolError::GenericError(format!(
+            "unsupported XRP Schnorr key name '{name}' (expected test_key_1 or key_1)"
+        )));
+    }
+    if has_xrp_state {
+        return Err(ProtocolError::GenericError(
+            "cannot change the XRP Schnorr key after XRP collateral state exists".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn xrp_has_key_bound_state() -> bool {
+    let xrp_ct = rumi_protocol_backend::state::xrp_collateral_principal();
+    read_state(|s| {
+        s.collateral_configs.contains_key(&xrp_ct)
+            || !s.xrp_pending_deposits.is_empty()
+            || !s.xrp_claims.is_empty()
+            || s.vault_id_to_vaults
+                .values()
+                .any(|vault| vault.collateral_type == xrp_ct)
+    })
+}
+
+#[candid_method(update)]
+#[update]
+fn set_xrp_schnorr_key_name(name: String) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if !read_state(|s| s.developer_principal == caller) {
+        return Err(ProtocolError::GenericError(
+            "Only developer can set XRP Schnorr key".to_string(),
+        ));
+    }
+    validate_xrp_schnorr_key_change(&name, xrp_has_key_bound_state())?;
+    mutate_state(|s| s.xrp_schnorr_key_name = name.clone());
+    log!(
+        INFO,
+        "[set_xrp_schnorr_key_name] XRP Schnorr key set to {}",
+        name
+    );
+    Ok(())
+}
+
+#[candid_method(query)]
+#[query]
+fn get_xrp_schnorr_key_name() -> String {
+    rumi_protocol_backend::chains::xrp::config::xrp_schnorr_key_name()
+}
+
 /// P1 observability (developer-gated, no funds touched): derive the protocol's XRP
 /// settlement (custody) classic address via threshold Ed25519 and return it, so an
 /// operator can see it on XRPL testnet. The chains::xrp module is dormant; this
@@ -5054,10 +5135,46 @@ async fn settle_xrp_claim(claim_id: u64, destination: String) -> Result<String, 
     check_postcondition(rumi_protocol_backend::vault::settle_xrp_claim(claim_id, destination).await)
 }
 
+/// XRP-007: settle an XRP collateral claim to a destination that requires an XRPL
+/// destination tag. The legacy untagged endpoint remains available for ordinary
+/// self-custody addresses.
+#[update]
+async fn settle_xrp_claim_with_tag(
+    claim_id: u64,
+    destination: String,
+    destination_tag: u32,
+) -> Result<String, ProtocolError> {
+    validate_call().await?;
+    check_postcondition(
+        rumi_protocol_backend::vault::settle_xrp_claim_with_tag(
+            claim_id,
+            destination,
+            Some(destination_tag),
+        )
+        .await,
+    )
+}
+
+/// XRP-006: owner cleanup for an abandoned native-XRP open. The vault layer
+/// verifies live XRPL state and removes the pending entry only if it is unfunded.
+#[update]
+async fn cancel_xrp_pending_open(vault_id: u64) -> Result<(), ProtocolError> {
+    validate_call().await?;
+    check_postcondition(rumi_protocol_backend::vault::cancel_xrp_pending_open(vault_id).await)
+}
+
+/// XRP-006: developer cleanup for abandoned native-XRP opens. This is also
+/// unfunded-only; funded custody addresses remain confirmable by their owners.
+#[update]
+async fn sweep_xrp_pending_open(vault_id: u64) -> Result<(), ProtocolError> {
+    validate_call().await?;
+    check_postcondition(rumi_protocol_backend::vault::sweep_xrp_pending_open(vault_id).await)
+}
+
 /// P5 (native-XRP collateral): register XRP as a collateral (developer-gated). XRP
 /// has no IC ledger, so decimals (6 / drops) and fee (0) are NOT queried;
 /// custody_kind = NativeXrp routes deposits/payouts through the chains::xrp rail +
-/// the XrpClaim model. Params: 150% borrow / 133% liquidation / 12% penalty / $200
+/// the XrpClaim model. Params: 150% borrow / 133% liquidation / 12% penalty / $100
 /// debt ceiling; borrowing-fee + interest inherited from ICP. Calling this is the
 /// deliberate act that ACTIVATES the native-XRP rail — do NOT call on mainnet
 /// before the security audit.
@@ -5069,6 +5186,7 @@ async fn register_xrp_collateral() -> Result<(), ProtocolError> {
             "Only the developer can register XRP collateral".to_string(),
         ));
     }
+    xrp_require_production_schnorr_key()?;
     let xrp_ct = rumi_protocol_backend::state::xrp_collateral_principal();
     if read_state(|s| s.collateral_configs.contains_key(&xrp_ct)) {
         return Err(ProtocolError::GenericError(
@@ -5102,7 +5220,7 @@ async fn register_xrp_collateral() -> Result<(), ProtocolError> {
     rumi_protocol_backend::xrc::register_collateral_price_timer(xrp_ct);
     log!(
         INFO,
-        "[register_xrp_collateral] Registered native-XRP collateral {} (150/133/12, $200 ceiling)",
+        "[register_xrp_collateral] Registered native-XRP collateral {} (150/133/12, $100 ceiling)",
         xrp_ct
     );
     Ok(())
@@ -9406,6 +9524,15 @@ async fn set_collateral_status(
             "Collateral type not found".to_string(),
         ));
     }
+    if collateral_type == rumi_protocol_backend::state::xrp_collateral_principal()
+        && !matches!(
+            status,
+            rumi_protocol_backend::state::CollateralStatus::Frozen
+                | rumi_protocol_backend::state::CollateralStatus::Deprecated
+        )
+    {
+        xrp_require_production_schnorr_key()?;
+    }
 
     mutate_state(|s| {
         event::record_update_collateral_status(s, collateral_type, status);
@@ -9495,6 +9622,14 @@ async fn set_collateral_debt_ceiling(
         return Err(ProtocolError::GenericError(
             "Collateral type not found".to_string(),
         ));
+    }
+    if collateral_type == rumi_protocol_backend::state::xrp_collateral_principal()
+        && debt_ceiling > rumi_protocol_backend::state::XRP_LAUNCH_DEBT_CEILING_E8S
+    {
+        return Err(ProtocolError::GenericError(format!(
+            "XRP debt ceiling cannot exceed {} e8s (100 icUSD)",
+            rumi_protocol_backend::state::XRP_LAUNCH_DEBT_CEILING_E8S
+        )));
     }
 
     mutate_state(|s| {
@@ -10096,6 +10231,12 @@ async fn update_collateral_config(
             "ledger_canister_id in config must match collateral_type".to_string(),
         ));
     }
+    let configured_xrp_key = read_state(|s| s.xrp_schnorr_key_name.clone());
+    rumi_protocol_backend::state::validate_xrp_launch_config_update(
+        collateral_type,
+        &config,
+        &configured_xrp_key,
+    )?;
 
     mutate_state(|s| {
         event::record_update_collateral_config(s, collateral_type, config);
@@ -10463,6 +10604,15 @@ mod chain_vault_param_tests {
         // Changing the key while chain vaults exist is blocked (would re-derive +
         // orphan every custody address).
         assert!(validate_ecdsa_key_change("key_1", true).is_err());
+    }
+
+    #[test]
+    fn xrp_schnorr_key_change_rules() {
+        use super::validate_xrp_schnorr_key_change;
+        assert!(validate_xrp_schnorr_key_change("key_1", false).is_ok());
+        assert!(validate_xrp_schnorr_key_change("test_key_1", false).is_ok());
+        assert!(validate_xrp_schnorr_key_change("bogus_key", false).is_err());
+        assert!(validate_xrp_schnorr_key_change("key_1", true).is_err());
     }
 }
 
