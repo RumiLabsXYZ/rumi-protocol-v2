@@ -408,6 +408,17 @@ pub struct BurnLog {
     pub block_number: u64,
 }
 
+/// Parsed Burn log including the indexed `burner` address. The legacy
+/// `BurnLog` shape is kept because existing call sites only need the amount.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BurnLogWithBurner {
+    pub vault_id: u64,
+    pub burner: String,
+    pub amount_e8s: u128,
+    pub tx_hash: String,
+    pub block_number: u64,
+}
+
 impl BurnLog {
     /// Decode a `BurnLog` from raw log fields.
     ///
@@ -454,6 +465,34 @@ pub fn decode_burn_log(
     block_number: u64,
 ) -> Result<BurnLog, String> {
     BurnLog::from_raw(topics, data, tx_hash, block_number)
+}
+
+/// Decode a `Burn` event and return the indexed burner address as a normalized
+/// 0x-prefixed lowercase EVM address.
+pub fn decode_burn_log_with_burner(
+    topics: &[String],
+    data: &str,
+    tx_hash: &str,
+    block_number: u64,
+) -> Result<BurnLogWithBurner, String> {
+    let burn = BurnLog::from_raw(topics, data, tx_hash, block_number)?;
+    let raw = topics
+        .get(2)
+        .ok_or_else(|| "BurnLogWithBurner: missing burner topic".to_string())?;
+    let hex = raw
+        .strip_prefix("0x")
+        .or_else(|| raw.strip_prefix("0X"))
+        .unwrap_or(raw);
+    if hex.len() < 40 {
+        return Err(format!("BurnLogWithBurner: burner topic too short: {raw}"));
+    }
+    Ok(BurnLogWithBurner {
+        vault_id: burn.vault_id,
+        burner: format!("0x{}", hex[hex.len() - 40..].to_ascii_lowercase()),
+        amount_e8s: burn.amount_e8s,
+        tx_hash: burn.tx_hash,
+        block_number: burn.block_number,
+    })
 }
 
 // ─── MintLog ─────────────────────────────────────────────────────────────────

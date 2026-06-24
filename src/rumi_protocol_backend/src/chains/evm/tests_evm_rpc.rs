@@ -308,6 +308,26 @@ fn decodes_burn_log() {
 }
 
 #[test]
+fn burn_log_with_burner_decodes_indexed_burner_address() {
+    let topics = vec![
+        super::evm_rpc::BURN_EVENT_TOPIC0.to_string(),
+        format!("0x{:064x}", 7u64),
+        "0x0000000000000000000000001234567890abcdef1234567890abcdef12345678"
+            .to_string(),
+    ];
+    let burn = super::evm_rpc::decode_burn_log_with_burner(
+        &topics,
+        &format!("0x{:064x}", 40_000_000u128),
+        "0xabc",
+        99,
+    )
+    .expect("decode burn with burner");
+    assert_eq!(burn.vault_id, 7);
+    assert_eq!(burn.amount_e8s, 40_000_000);
+    assert_eq!(burn.burner, "0x1234567890abcdef1234567890abcdef12345678");
+}
+
+#[test]
 fn rejects_log_with_wrong_topic0() {
     let res = BurnLog::from_raw(
         &["0xdeadbeef".into(), format!("0x{:064x}", 1u64), format!("0x{:064x}", 0u8)],
