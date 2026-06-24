@@ -12,6 +12,9 @@
 //! accrual (later task), and the liquidation/fee fields by the deferred
 //! liquidation + fee work. They are carried here so the params live in one place.
 
+use candid::{CandidType, Deserialize};
+use serde::Serialize;
+
 use crate::chains::config::ChainId;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,6 +35,23 @@ pub struct ChainCollateralConfig {
     /// restore=`recovery_target_cr_e4`. (Compile-time; promoting to Tier-B
     /// persisted config is an Inc-5 follow-up.)
     pub liquidation_threshold_e4: u64,
+}
+
+/// Persisted Tier-B chain debt knobs. The absence of a row means "use
+/// `chain_collateral_config(chain)` exactly", preserving the pre-Inc-5 behavior.
+#[derive(CandidType, Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChainDebtConfigV1 {
+    pub min_vault_debt_e8s: u128,
+    pub debt_ceiling_e8s: Option<u128>,
+}
+
+impl ChainDebtConfigV1 {
+    pub fn from_collateral_config(config: ChainCollateralConfig) -> Self {
+        Self {
+            min_vault_debt_e8s: config.min_vault_debt_e8s,
+            debt_ceiling_e8s: config.debt_ceiling_e8s,
+        }
+    }
 }
 
 /// ICP-mirrored defaults (the live dashboard values).
@@ -116,6 +136,14 @@ mod tests {
         assert_eq!(c.recovery_target_cr_e4, 15_500);
         assert_eq!(c.liquidation_penalty_bps, 1_200);
         assert_eq!(c.debt_ceiling_e8s, Some(500 * 100_000_000));
+    }
+
+    #[test]
+    fn chain_debt_config_from_defaults_preserves_conflux_values() {
+        let c = chain_collateral_config(ChainId(71)).expect("conflux known");
+        let debt = ChainDebtConfigV1::from_collateral_config(c);
+        assert_eq!(debt.min_vault_debt_e8s, 10_000_000);
+        assert_eq!(debt.debt_ceiling_e8s, Some(500 * 100_000_000));
     }
 
     #[test]

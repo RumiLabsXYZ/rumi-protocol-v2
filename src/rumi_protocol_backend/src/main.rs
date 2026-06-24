@@ -1,36 +1,35 @@
 use candid::{candid_method, Principal};
+use candid::{CandidType, Deserialize};
 use ic_canister_log::log;
 use ic_canisters_http_types::{HttpRequest, HttpResponse, HttpResponseBuilder};
-use ic_cdk_macros::{init, pre_upgrade, post_upgrade, query, update};
+use ic_cdk_macros::{init, post_upgrade, pre_upgrade, query, update};
+use rumi_protocol_backend::event;
+use rumi_protocol_backend::logs::DEBUG;
+use rumi_protocol_backend::management;
+use rumi_protocol_backend::state::mutate_state;
+use rumi_protocol_backend::storage::events;
+use rumi_protocol_backend::treasury;
+use rumi_protocol_backend::LiquidityStatus;
 use rumi_protocol_backend::{
     event::Event,
     logs::INFO,
-    numeric::{ICUSD, ICP, Ratio, UsdIcp},
-    state::{read_state, replace_state, Mode, State, RateCurveV2},
+    numeric::{Ratio, UsdIcp, ICP, ICUSD},
+    state::{read_state, replace_state, Mode, RateCurveV2, State},
     vault::{CandidVault, OpenVaultSuccess, VaultArg},
-    EventTypeFilter, Fees, GetEventsArg, ProtocolArg, ProtocolError, ProtocolStatus, SuccessWithFee,
-    ReserveRedemptionResult, ReserveBalance, CollateralTotals, CollateralInterestInfo, PerCollateralRateCurve,
-    VaultArgWithToken, StableTokenType, InterestSplitArg,
-    GetSnapshotsArg, ProtocolSnapshot, CollateralSnapshot,
-    GetEventsFilteredResponse, ForwardFilteredEventsResponse, StabilityPoolLiquidationResult,
-    VaultHistoryPagedResponse, EventsByPrincipalPagedResponse, VaultsPageResponse,
-    SupplyAudit, SupplyAuditEntry,
-    MAX_VAULT_HISTORY, MAX_EVENTS_BY_PRINCIPAL_LEGACY, MAX_EVENTS_BY_PRINCIPAL_SCAN,
-    MAX_EVENTS_BY_PRINCIPAL_OUTPUT, MAX_VAULTS_LEGACY_PAGE, MAX_VAULTS_PAGE_LIMIT,
+    CollateralInterestInfo, CollateralSnapshot, CollateralTotals, EventTypeFilter,
+    EventsByPrincipalPagedResponse, Fees, ForwardFilteredEventsResponse, GetEventsArg,
+    GetEventsFilteredResponse, GetSnapshotsArg, InterestSplitArg, PerCollateralRateCurve,
+    ProtocolArg, ProtocolError, ProtocolSnapshot, ProtocolStatus, ReserveBalance,
+    ReserveRedemptionResult, StabilityPoolLiquidationResult, StableTokenType, SuccessWithFee,
+    SupplyAudit, SupplyAuditEntry, VaultArgWithToken, VaultHistoryPagedResponse,
+    VaultsPageResponse, MAX_EVENTS_BY_PRINCIPAL_LEGACY, MAX_EVENTS_BY_PRINCIPAL_OUTPUT,
+    MAX_EVENTS_BY_PRINCIPAL_SCAN, MAX_VAULTS_LEGACY_PAGE, MAX_VAULTS_PAGE_LIMIT, MAX_VAULT_HISTORY,
     PROTOCOL_STATUS_SNAPSHOT_TTL_NANOS, TREASURY_STATS_SNAPSHOT_TTL_NANOS,
 };
-use rumi_protocol_backend::logs::DEBUG;
-use rumi_protocol_backend::state::mutate_state;
-use rumi_protocol_backend::management;
-use rumi_protocol_backend::event;
-use rumi_protocol_backend::treasury;
 use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use rumi_protocol_backend::storage::events;
-use rumi_protocol_backend::LiquidityStatus;
-use candid::{CandidType, Deserialize};
 
 /// Stability pool configuration
 #[derive(CandidType, Deserialize, Debug)]
@@ -114,7 +113,7 @@ fn validate_mode() -> Result<(), ProtocolError> {
         // (audit RED-101).
         Mode::ReadOnly => Err(ProtocolError::read_only_mode()),
         Mode::GeneralAvailability => Ok(()),
-        Mode::Recovery => Ok(())
+        Mode::Recovery => Ok(()),
     }
 }
 
@@ -147,7 +146,9 @@ fn validate_liquidation_not_frozen() -> Result<(), ProtocolError> {
 /// own `Vault not found` error rather than masking it here.
 async fn validate_freshness_for_vault(vault_id: u64) -> Result<(), ProtocolError> {
     let collateral_type = read_state(|s| {
-        s.vault_id_to_vaults.get(&vault_id).map(|v| v.collateral_type)
+        s.vault_id_to_vaults
+            .get(&vault_id)
+            .map(|v| v.collateral_type)
     });
     match collateral_type {
         Some(ct) => rumi_protocol_backend::xrc::ensure_fresh_price_for(&ct).await,
@@ -188,7 +189,9 @@ fn inspect_message() {
         // signature verification + per-owner nonce/cap are the real boundary; this
         // accept just lets the message reach the method body. inspect_message is a
         // single-replica pre-filter, never a security boundary.
-        "open_chain_vault_evm" | "borrow_chain_vault_evm" | "withdraw_chain_collateral_evm"
+        "open_chain_vault_evm"
+        | "borrow_chain_vault_evm"
+        | "withdraw_chain_collateral_evm"
         | "close_chain_vault_evm" => {
             ic_cdk::api::call::accept_message();
         }
@@ -230,10 +233,10 @@ fn register_xrc_fetch_timer() {
         if let Some(old) = cell.get() {
             ic_cdk_timers::clear_timer(old);
         }
-        let new_id = ic_cdk_timers::set_timer_interval(
-            std::time::Duration::from_secs(secs),
-            || ic_cdk::spawn(rumi_protocol_backend::xrc::fetch_icp_rate()),
-        );
+        let new_id =
+            ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(secs), || {
+                ic_cdk::spawn(rumi_protocol_backend::xrc::fetch_icp_rate())
+            });
         cell.set(Some(new_id));
     });
 }
@@ -244,10 +247,10 @@ fn register_interest_treasury_timer() {
         if let Some(old) = cell.get() {
             ic_cdk_timers::clear_timer(old);
         }
-        let new_id = ic_cdk_timers::set_timer_interval(
-            std::time::Duration::from_secs(secs),
-            || ic_cdk::spawn(rumi_protocol_backend::xrc::interest_and_treasury_tick()),
-        );
+        let new_id =
+            ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(secs), || {
+                ic_cdk::spawn(rumi_protocol_backend::xrc::interest_and_treasury_tick())
+            });
         cell.set(Some(new_id));
     });
 }
@@ -258,10 +261,10 @@ fn register_vault_check_timer() {
         if let Some(old) = cell.get() {
             ic_cdk_timers::clear_timer(old);
         }
-        let new_id = ic_cdk_timers::set_timer_interval(
-            std::time::Duration::from_secs(secs),
-            || ic_cdk::spawn(rumi_protocol_backend::xrc::vault_check_tick()),
-        );
+        let new_id =
+            ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(secs), || {
+                ic_cdk::spawn(rumi_protocol_backend::xrc::vault_check_tick())
+            });
         cell.set(Some(new_id));
     });
 }
@@ -298,7 +301,10 @@ fn registered_chains_and_solana_flag() -> (Vec<rumi_protocol_backend::chains::co
             .chain_configs
             .iter()
             .filter(|(_, c)| {
-                matches!(c.status, rumi_protocol_backend::chains::config::ChainStatus::Registered)
+                matches!(
+                    c.status,
+                    rumi_protocol_backend::chains::config::ChainStatus::Registered
+                )
             })
             .map(|(id, _)| *id)
             .collect();
@@ -350,10 +356,10 @@ fn register_settlement_timer() {
         if let Some(old) = cell.get() {
             ic_cdk_timers::clear_timer(old);
         }
-        let new_id = ic_cdk_timers::set_timer_interval(
-            std::time::Duration::from_secs(secs),
-            || ic_cdk::spawn(run_all_settlements()),
-        );
+        let new_id =
+            ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(secs), || {
+                ic_cdk::spawn(run_all_settlements())
+            });
         cell.set(Some(new_id));
     });
 }
@@ -421,7 +427,13 @@ async fn harvest_one_chain_interest(
         ops.len() as u64
     });
     if enqueued > 0 {
-        log!(INFO, "[interest harvest chain={:?}] enqueued {} interest mint(s) to treasury {}", chain, enqueued, treasury);
+        log!(
+            INFO,
+            "[interest harvest chain={:?}] enqueued {} interest mint(s) to treasury {}",
+            chain,
+            enqueued,
+            treasury
+        );
     }
     Ok(enqueued)
 }
@@ -436,10 +448,10 @@ fn register_chain_interest_timer() {
         if let Some(old) = cell.get() {
             ic_cdk_timers::clear_timer(old);
         }
-        let new_id = ic_cdk_timers::set_timer_interval(
-            std::time::Duration::from_secs(secs),
-            || ic_cdk::spawn(run_all_chain_interest_harvests()),
-        );
+        let new_id =
+            ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(secs), || {
+                ic_cdk::spawn(run_all_chain_interest_harvests())
+            });
         cell.set(Some(new_id));
     });
 }
@@ -453,10 +465,10 @@ fn register_observer_timer() {
         if let Some(old) = cell.get() {
             ic_cdk_timers::clear_timer(old);
         }
-        let new_id = ic_cdk_timers::set_timer_interval(
-            std::time::Duration::from_secs(secs),
-            || ic_cdk::spawn(run_all_observers()),
-        );
+        let new_id =
+            ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(secs), || {
+                ic_cdk::spawn(run_all_observers())
+            });
         cell.set(Some(new_id));
     });
 }
@@ -472,14 +484,17 @@ fn setup_timers() {
     });
     let non_icp_collaterals_immediate: Vec<candid::Principal> = read_state(|s| {
         let icp = s.icp_collateral_type();
-        s.collateral_configs.keys()
+        s.collateral_configs
+            .keys()
             .filter(|ct| **ct != icp)
             .cloned()
             .collect()
     });
     for ledger_id in non_icp_collaterals_immediate {
         ic_cdk_timers::set_timer(std::time::Duration::ZERO, move || {
-            ic_cdk::spawn(rumi_protocol_backend::management::fetch_collateral_price(ledger_id))
+            ic_cdk::spawn(rumi_protocol_backend::management::fetch_collateral_price(
+                ledger_id,
+            ))
         });
     }
 
@@ -502,13 +517,18 @@ fn setup_timers() {
     // XRC call until status flips back to Active or Paused.
     let non_icp_collaterals: Vec<candid::Principal> = read_state(|s| {
         let icp = s.icp_collateral_type();
-        s.collateral_configs.keys()
+        s.collateral_configs
+            .keys()
             .filter(|ct| **ct != icp)
             .cloned()
             .collect()
     });
     for ledger_id in non_icp_collaterals {
-        log!(INFO, "[setup_timers] Registering price timer for collateral {}", ledger_id);
+        log!(
+            INFO,
+            "[setup_timers] Registering price timer for collateral {}",
+            ledger_id
+        );
         rumi_protocol_backend::xrc::register_collateral_price_timer(ledger_id);
     }
 
@@ -560,7 +580,11 @@ fn register_chain_vault_gc_timer() {
             )
         });
         if pruned > 0 {
-            log!(INFO, "[chain_vault_gc] pruned {} stale AwaitingDeposit vaults", pruned);
+            log!(
+                INFO,
+                "[chain_vault_gc] pruned {} stale AwaitingDeposit vaults",
+                pruned
+            );
         }
     });
 }
@@ -575,15 +599,16 @@ fn capture_protocol_snapshot() {
         for (ct, config) in s.collateral_configs.iter() {
             let col_total = s.total_collateral_for(ct);
             let debt = s.total_debt_for_collateral(ct).to_u64();
-            let vault_count = s.collateral_to_vault_ids
+            let vault_count = s
+                .collateral_to_vault_ids
                 .get(ct)
                 .map(|ids| ids.len() as u64)
                 .unwrap_or(0);
             let price = config.last_price.unwrap_or(0.0);
 
             // Convert collateral to USD value (e8s)
-            let col_decimal = Decimal::from(col_total)
-                / Decimal::from(10u64.pow(config.decimals as u32));
+            let col_decimal =
+                Decimal::from(col_total) / Decimal::from(10u64.pow(config.decimals as u32));
             let usd_value = (col_decimal * Decimal::try_from(price).unwrap_or_default())
                 * Decimal::from(100_000_000u64);
             let usd_e8s = usd_value.to_u64().unwrap_or(0);
@@ -664,11 +689,7 @@ fn post_upgrade(arg: ProtocolArg) {
     let upgrade_args = match arg {
         ProtocolArg::Init(_) => ic_cdk::trap("expected Upgrade got Init"),
         ProtocolArg::Upgrade(args) => {
-            log!(
-                INFO,
-                "[upgrade]: updating configuration with {:?}",
-                args
-            );
+            log!(INFO, "[upgrade]: updating configuration with {:?}", args);
             record_event(&Event::Upgrade(args.clone()));
             args
         }
@@ -677,7 +698,11 @@ fn post_upgrade(arg: ProtocolArg) {
     // Try to restore from stable memory (fast path, no drift)
     let state = match rumi_protocol_backend::storage::load_state_from_stable() {
         Some(mut state) => {
-            log!(INFO, "[upgrade]: restored state from stable memory (skipped event replay of {} events)", count_events());
+            log!(
+                INFO,
+                "[upgrade]: restored state from stable memory (skipped event replay of {} events)",
+                count_events()
+            );
             // Apply upgrade args to the restored state (the snapshot was taken
             // before this upgrade event, so we must apply it explicitly)
             state.upgrade(upgrade_args);
@@ -685,7 +710,11 @@ fn post_upgrade(arg: ProtocolArg) {
         }
         None => {
             // Fallback: replay events (first upgrade after this change, or recovery)
-            log!(INFO, "[upgrade]: no stable state found, replaying {} events", count_events());
+            log!(
+                INFO,
+                "[upgrade]: no stable state found, replaying {} events",
+                count_events()
+            );
             replay(events()).unwrap_or_else(|e| {
                 ic_cdk::trap(&format!(
                     "[upgrade]: failed to replay the event log: {:?}",
@@ -714,7 +743,12 @@ fn post_upgrade(arg: ProtocolArg) {
         count
     });
     if migrated > 0 {
-        log!(INFO, "[upgrade]: migrated {} vaults: set last_accrual_time to {}", migrated, now);
+        log!(
+            INFO,
+            "[upgrade]: migrated {} vaults: set last_accrual_time to {}",
+            migrated,
+            now
+        );
     }
 
     // Task 12: mirror the above for FOREIGN-CHAIN vaults — stamp
@@ -731,8 +765,12 @@ fn post_upgrade(arg: ProtocolArg) {
     // Safety net: if bot is configured but allowlist is empty, default to ICP
     mutate_state(|s| {
         if s.liquidation_bot_principal.is_some() && s.bot_allowed_collateral_types.is_empty() {
-            s.bot_allowed_collateral_types.insert(s.icp_ledger_principal);
-            log!(INFO, "[upgrade]: bot_allowed_collateral_types was empty, defaulted to ICP");
+            s.bot_allowed_collateral_types
+                .insert(s.icp_ledger_principal);
+            log!(
+                INFO,
+                "[upgrade]: bot_allowed_collateral_types was empty, defaulted to ICP"
+            );
         }
     });
 
@@ -746,7 +784,9 @@ fn post_upgrade(arg: ProtocolArg) {
     // this block runs they already have tuple keys.
     mutate_state(|s| {
         let mut backfilled = 0u64;
-        let margin_keys: Vec<(u64, candid::Principal)> = s.pending_margin_transfers.iter()
+        let margin_keys: Vec<(u64, candid::Principal)> = s
+            .pending_margin_transfers
+            .iter()
             .filter(|(_, t)| t.op_nonce == 0)
             .map(|(k, _)| *k)
             .collect();
@@ -757,7 +797,9 @@ fn post_upgrade(arg: ProtocolArg) {
                 backfilled += 1;
             }
         }
-        let excess_keys: Vec<(u64, candid::Principal)> = s.pending_excess_transfers.iter()
+        let excess_keys: Vec<(u64, candid::Principal)> = s
+            .pending_excess_transfers
+            .iter()
             .filter(|(_, t)| t.op_nonce == 0)
             .map(|(k, _)| *k)
             .collect();
@@ -768,7 +810,9 @@ fn post_upgrade(arg: ProtocolArg) {
                 backfilled += 1;
             }
         }
-        let redemption_ids: Vec<u64> = s.pending_redemption_transfer.iter()
+        let redemption_ids: Vec<u64> = s
+            .pending_redemption_transfer
+            .iter()
             .filter(|(_, t)| t.op_nonce == 0)
             .map(|(id, _)| *id)
             .collect();
@@ -780,7 +824,11 @@ fn post_upgrade(arg: ProtocolArg) {
             }
         }
         if backfilled > 0 {
-            log!(INFO, "[upgrade]: backfilled op_nonce on {} legacy pending transfers (Wave-3 migration)", backfilled);
+            log!(
+                INFO,
+                "[upgrade]: backfilled op_nonce on {} legacy pending transfers (Wave-3 migration)",
+                backfilled
+            );
         }
     });
 
@@ -788,10 +836,15 @@ fn post_upgrade(arg: ProtocolArg) {
     mutate_state(|s| {
         let phasma = candid::Principal::from_text("np5km-uyaaa-aaaaq-aadrq-cai").unwrap();
         if s.collateral_configs.remove(&phasma).is_some() {
-            log!(INFO, "[upgrade]: removed PHASMA test collateral from configs");
+            log!(
+                INFO,
+                "[upgrade]: removed PHASMA test collateral from configs"
+            );
         }
         // Remove empty vaults (fully liquidated shells with zero debt and zero collateral)
-        let empty_vault_ids: Vec<u64> = s.vault_id_to_vaults.iter()
+        let empty_vault_ids: Vec<u64> = s
+            .vault_id_to_vaults
+            .iter()
             .filter(|(_, v)| v.borrowed_icusd_amount.0 == 0 && v.collateral_amount == 0)
             .map(|(id, _)| *id)
             .collect();
@@ -799,7 +852,12 @@ fn post_upgrade(arg: ProtocolArg) {
             s.remove_vault_and_unindex(*vault_id);
         }
         if !empty_vault_ids.is_empty() {
-            log!(INFO, "[upgrade]: cleaned up {} empty vaults: {:?}", empty_vault_ids.len(), empty_vault_ids);
+            log!(
+                INFO,
+                "[upgrade]: cleaned up {} empty vaults: {:?}",
+                empty_vault_ids.len(),
+                empty_vault_ids
+            );
         }
     });
 
@@ -869,9 +927,17 @@ fn post_upgrade(arg: ProtocolArg) {
     // explicit migrate call is needed here; `migrate_multi_chain_state` exists
     // as the unit-tested template for the NEXT version bump.
     let (chains, chain_vaults) = read_state(|s| {
-        (s.multi_chain.chain_configs.len(), s.multi_chain.chain_vaults.len())
+        (
+            s.multi_chain.chain_configs.len(),
+            s.multi_chain.chain_vaults.len(),
+        )
     });
-    log!(INFO, "[post_upgrade] multi_chain: {} chains, {} chain_vaults", chains, chain_vaults);
+    log!(
+        INFO,
+        "[post_upgrade] multi_chain: {} chains, {} chain_vaults",
+        chains,
+        chain_vaults
+    );
 
     setup_timers();
 }
@@ -883,33 +949,70 @@ fn validate_collateral_state(state: &State) {
     // 1. Check that ICP is in collateral_configs
     let icp = state.icp_collateral_type();
     if !state.collateral_configs.contains_key(&icp) {
-        log!(INFO, "[post_upgrade_validation] WARNING: ICP ledger {} not found in collateral_configs!", icp);
+        log!(
+            INFO,
+            "[post_upgrade_validation] WARNING: ICP ledger {} not found in collateral_configs!",
+            icp
+        );
     } else {
-        log!(INFO, "[post_upgrade_validation] ICP collateral config present");
+        log!(
+            INFO,
+            "[post_upgrade_validation] ICP collateral config present"
+        );
     }
 
     // 2. Check that all vaults reference a known collateral type
     let mut orphaned_vaults = 0u64;
     for (vault_id, vault) in &state.vault_id_to_vaults {
         if vault.collateral_type == candid::Principal::anonymous() {
-            log!(INFO, "[post_upgrade_validation] WARNING: vault #{} still has anonymous collateral_type", vault_id);
+            log!(
+                INFO,
+                "[post_upgrade_validation] WARNING: vault #{} still has anonymous collateral_type",
+                vault_id
+            );
             orphaned_vaults += 1;
-        } else if !state.collateral_configs.contains_key(&vault.collateral_type) {
-            log!(INFO, "[post_upgrade_validation] WARNING: vault #{} references unknown collateral {}", vault_id, vault.collateral_type);
+        } else if !state
+            .collateral_configs
+            .contains_key(&vault.collateral_type)
+        {
+            log!(
+                INFO,
+                "[post_upgrade_validation] WARNING: vault #{} references unknown collateral {}",
+                vault_id,
+                vault.collateral_type
+            );
             orphaned_vaults += 1;
         }
     }
     if orphaned_vaults == 0 {
-        log!(INFO, "[post_upgrade_validation] All {} vaults have valid collateral_type", state.vault_id_to_vaults.len());
+        log!(
+            INFO,
+            "[post_upgrade_validation] All {} vaults have valid collateral_type",
+            state.vault_id_to_vaults.len()
+        );
     } else {
-        log!(INFO, "[post_upgrade_validation] {} vault(s) with invalid collateral_type!", orphaned_vaults);
+        log!(
+            INFO,
+            "[post_upgrade_validation] {} vault(s) with invalid collateral_type!",
+            orphaned_vaults
+        );
     }
 
     // 3. Log summary of collateral configs
-    log!(INFO, "[post_upgrade_validation] {} collateral types configured", state.collateral_configs.len());
+    log!(
+        INFO,
+        "[post_upgrade_validation] {} collateral types configured",
+        state.collateral_configs.len()
+    );
     for (ct, config) in &state.collateral_configs {
-        log!(INFO, "[post_upgrade_validation]   {} => status={:?}, decimals={}, price={:?}",
-            ct, config.status, config.decimals, config.last_price);
+        log!(
+            INFO,
+            "[post_upgrade_validation]   {} => status={:?}, decimals={}, price={:?}",
+            ct,
+            config.status,
+            config.decimals,
+            config.last_price
+        );
     }
 }
 
@@ -979,29 +1082,46 @@ fn get_protocol_status() -> ProtocolStatus {
         interest_pool_share: s.interest_pool_share.to_f64(),
         weighted_average_interest_rate: snapshot.weighted_average_interest_rate,
         borrowing_fee_curve_resolved: snapshot.borrowing_fee_curve_resolved.clone(),
-        per_collateral_interest: snapshot.per_collateral_interest.iter()
+        per_collateral_interest: snapshot
+            .per_collateral_interest
+            .iter()
             .map(|p| CollateralInterestInfo {
                 collateral_type: p.collateral_type,
                 total_debt_e8s: p.total_debt_e8s,
                 weighted_interest_rate: p.weighted_interest_rate,
             })
             .collect(),
-        per_collateral_rate_curves: snapshot.per_collateral_rate_curves.iter()
+        per_collateral_rate_curves: snapshot
+            .per_collateral_rate_curves
+            .iter()
             .map(|p| PerCollateralRateCurve {
                 collateral_type: p.collateral_type,
                 base_rate: p.base_rate,
                 markers: p.markers.clone(),
             })
             .collect(),
-        interest_split: s.interest_split.iter().map(|r| {
-            let dest = match &r.destination {
-                rumi_protocol_backend::state::InterestDestination::StabilityPool => "stability_pool".to_string(),
-                rumi_protocol_backend::state::InterestDestination::Treasury => "treasury".to_string(),
-                rumi_protocol_backend::state::InterestDestination::ThreePool => "three_pool".to_string(),
-                rumi_protocol_backend::state::InterestDestination::Amm1 => "amm1".to_string(),
-            };
-            InterestSplitArg { destination: dest, bps: r.bps }
-        }).collect(),
+        interest_split: s
+            .interest_split
+            .iter()
+            .map(|r| {
+                let dest = match &r.destination {
+                    rumi_protocol_backend::state::InterestDestination::StabilityPool => {
+                        "stability_pool".to_string()
+                    }
+                    rumi_protocol_backend::state::InterestDestination::Treasury => {
+                        "treasury".to_string()
+                    }
+                    rumi_protocol_backend::state::InterestDestination::ThreePool => {
+                        "three_pool".to_string()
+                    }
+                    rumi_protocol_backend::state::InterestDestination::Amm1 => "amm1".to_string(),
+                };
+                InterestSplitArg {
+                    destination: dest,
+                    bps: r.bps,
+                }
+            })
+            .collect(),
         // Wave-8e LIQ-005 — live (changes on liquidation/redemption + admin)
         protocol_deficit_icusd: s.protocol_deficit_icusd.to_u64(),
         total_deficit_repaid_icusd: s.total_deficit_repaid_icusd.to_u64(),
@@ -1040,7 +1160,12 @@ fn get_supply_audit() -> SupplyAudit {
     read_state(|s| {
         let mut per_chain = Vec::with_capacity(s.multi_chain.chain_configs.len());
         for (chain_id, cfg) in s.multi_chain.chain_configs.iter() {
-            let supply = s.multi_chain.chain_supplies.get(chain_id).copied().unwrap_or(0);
+            let supply = s
+                .multi_chain
+                .chain_supplies
+                .get(chain_id)
+                .copied()
+                .unwrap_or(0);
             per_chain.push(SupplyAuditEntry {
                 chain_id: *chain_id,
                 display_name: cfg.display_name.clone(),
@@ -1058,7 +1183,9 @@ fn get_supply_audit() -> SupplyAudit {
 
 #[candid_method(update)]
 #[update]
-fn register_chain(arg: rumi_protocol_backend::chains::config::RegisterChainArg) -> Result<(), ProtocolError> {
+fn register_chain(
+    arg: rumi_protocol_backend::chains::config::RegisterChainArg,
+) -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
@@ -1067,14 +1194,18 @@ fn register_chain(arg: rumi_protocol_backend::chains::config::RegisterChainArg) 
     let now = ic_cdk::api::time();
     let chain_id = arg.chain_id;
     let display_name = arg.display_name.clone();
-    let result = mutate_state(|s| rumi_protocol_backend::chains::admin::register_chain_in_state(&mut s.multi_chain, arg, now));
+    let result = mutate_state(|s| {
+        rumi_protocol_backend::chains::admin::register_chain_in_state(&mut s.multi_chain, arg, now)
+    });
     match result {
         Ok(_) => {
-            rumi_protocol_backend::storage::record_event(&rumi_protocol_backend::event::Event::ChainRegistered {
-                chain_id,
-                display_name,
-                timestamp: now,
-            });
+            rumi_protocol_backend::storage::record_event(
+                &rumi_protocol_backend::event::Event::ChainRegistered {
+                    chain_id,
+                    display_name,
+                    timestamp: now,
+                },
+            );
             log!(INFO, "[register_chain] chain_id={:?} registered", chain_id);
             Ok(())
         }
@@ -1084,20 +1215,26 @@ fn register_chain(arg: rumi_protocol_backend::chains::config::RegisterChainArg) 
 
 #[candid_method(update)]
 #[update]
-fn disable_chain(chain_id: rumi_protocol_backend::chains::config::ChainId) -> Result<(), ProtocolError> {
+fn disable_chain(
+    chain_id: rumi_protocol_backend::chains::config::ChainId,
+) -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
         return Err(ProtocolError::ChainAdmin("not developer".into()));
     }
-    let result = mutate_state(|s| rumi_protocol_backend::chains::admin::disable_chain_in_state(&mut s.multi_chain, chain_id));
+    let result = mutate_state(|s| {
+        rumi_protocol_backend::chains::admin::disable_chain_in_state(&mut s.multi_chain, chain_id)
+    });
     match result {
         Ok(()) => {
             let now = ic_cdk::api::time();
-            rumi_protocol_backend::storage::record_event(&rumi_protocol_backend::event::Event::ChainDisabled {
-                chain_id,
-                timestamp: now,
-            });
+            rumi_protocol_backend::storage::record_event(
+                &rumi_protocol_backend::event::Event::ChainDisabled {
+                    chain_id,
+                    timestamp: now,
+                },
+            );
             log!(INFO, "[disable_chain] chain_id={:?} disabled", chain_id);
             Ok(())
         }
@@ -1116,14 +1253,22 @@ fn set_chain_config(
     if !is_developer {
         return Err(ProtocolError::ChainAdmin("not developer".into()));
     }
-    let result = mutate_state(|s| rumi_protocol_backend::chains::admin::update_chain_config_in_state(&mut s.multi_chain, chain_id, update));
+    let result = mutate_state(|s| {
+        rumi_protocol_backend::chains::admin::update_chain_config_in_state(
+            &mut s.multi_chain,
+            chain_id,
+            update,
+        )
+    });
     match result {
         Ok(()) => {
             let now = ic_cdk::api::time();
-            rumi_protocol_backend::storage::record_event(&rumi_protocol_backend::event::Event::ChainConfigUpdated {
-                chain_id,
-                timestamp: now,
-            });
+            rumi_protocol_backend::storage::record_event(
+                &rumi_protocol_backend::event::Event::ChainConfigUpdated {
+                    chain_id,
+                    timestamp: now,
+                },
+            );
             log!(INFO, "[set_chain_config] chain_id={:?} updated", chain_id);
             Ok(())
         }
@@ -1147,7 +1292,16 @@ fn evm_vault_params(
         .ok_or_else(|| {
             ProtocolError::ChainAdmin(format!("no collateral config for chain {}", chain.0))
         })?;
-    Ok((symbol, cfg.min_cr_e4, cfg.min_vault_debt_e8s, cfg.debt_ceiling_e8s))
+    let debt_cfg = read_state(|s| s.multi_chain.chain_debt_configs.get(&chain).copied())
+        .unwrap_or_else(|| {
+            rumi_protocol_backend::chains::collateral_config::ChainDebtConfigV1::from_collateral_config(cfg)
+        });
+    Ok((
+        symbol,
+        cfg.min_cr_e4,
+        debt_cfg.min_vault_debt_e8s,
+        debt_cfg.debt_ceiling_e8s,
+    ))
 }
 
 /// Phase 1b Task 12: open a foreign-chain EVM (Monad or Conflux) vault, OPEN-THEN-VERIFY.
@@ -1356,8 +1510,8 @@ fn verify_intent_ctx(
 ) -> Result<VerifiedIntent, ProtocolError> {
     let chain = rumi_protocol_backend::chains::config::ChainId(intent.chain_id as u32);
     // Resolve symbol + min CR (fails fast for a non-EVM / unregistered chain).
-    let (symbol, min_cr, min_vault_debt_e8s, debt_ceiling_e8s) = evm_vault_params(chain)
-        .map_err(|e| ProtocolError::EvmAuth(format!("{e:?}")))?;
+    let (symbol, min_cr, min_vault_debt_e8s, debt_ceiling_e8s) =
+        evm_vault_params(chain).map_err(|e| ProtocolError::EvmAuth(format!("{e:?}")))?;
     // The deployed IcUSD address binds the EIP-712 domain to this chain+deployment.
     let contract = read_state(|s| s.multi_chain.chain_contracts.get(&chain).cloned())
         .ok_or_else(|| ProtocolError::EvmAuth(format!("no contract set for chain {}", chain.0)))?;
@@ -1370,7 +1524,15 @@ fn verify_intent_ctx(
         now_secs,
     )
     .map_err(|e| ProtocolError::EvmAuth(format!("{e:?}")))?;
-    Ok(VerifiedIntent { chain, owner_evm, synthetic, symbol, min_cr, min_vault_debt_e8s, debt_ceiling_e8s })
+    Ok(VerifiedIntent {
+        chain,
+        owner_evm,
+        synthetic,
+        symbol,
+        min_cr,
+        min_vault_debt_e8s,
+        debt_ceiling_e8s,
+    })
 }
 
 /// Authorize a borrow/withdraw/close `_evm` op against an existing vault: the
@@ -1429,10 +1591,9 @@ async fn open_chain_vault_evm(
         v.synthetic,
         vault_id,
     );
-    let (_pubkey, custody) =
-        rumi_protocol_backend::chains::evm::tecdsa::derive_evm_address(path)
-            .await
-            .map_err(|e| ProtocolError::EvmAuth(format!("derive: {e}")))?;
+    let (_pubkey, custody) = rumi_protocol_backend::chains::evm::tecdsa::derive_evm_address(path)
+        .await
+        .map_err(|e| ProtocolError::EvmAuth(format!("derive: {e}")))?;
     let now = ic_cdk::api::time();
     let owner_evm = v.owner_evm.clone();
     mutate_state(|s| {
@@ -1664,8 +1825,7 @@ async fn open_solana_vault(
         .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))?;
         // Return the inserted vault. `open_chain_vault_in_state` inserts it on
         // success, so the lookup cannot miss.
-        Ok(s
-            .multi_chain
+        Ok(s.multi_chain
             .chain_vaults
             .get(&vault_id)
             .cloned()
@@ -1815,9 +1975,7 @@ fn list_chain_vaults(
 /// read-only query; no gate (mirrors `get_chain_vault`).
 #[candid_method(query)]
 #[query]
-fn chain_has_active_settlement_op(
-    chain: rumi_protocol_backend::chains::config::ChainId,
-) -> bool {
+fn chain_has_active_settlement_op(chain: rumi_protocol_backend::chains::config::ChainId) -> bool {
     read_state(|s| {
         s.multi_chain
             .settlement_queues
@@ -1849,15 +2007,24 @@ fn set_chain_contract(
     // (Monad + any EVM chain) keeps the original EVM validation unchanged.
     if chain == rumi_protocol_backend::chains::solana::config::SOLANA_CHAIN_ID {
         if !rumi_protocol_backend::chains::solana::ted25519::is_valid_solana_address(&address) {
-            return Err(ProtocolError::ChainAdmin(format!("invalid Solana address: {address}")));
+            return Err(ProtocolError::ChainAdmin(format!(
+                "invalid Solana address: {address}"
+            )));
         }
     } else if !rumi_protocol_backend::chains::monad::tecdsa::is_valid_evm_address(&address) {
-        return Err(ProtocolError::ChainAdmin(format!("invalid EVM address: {address}")));
+        return Err(ProtocolError::ChainAdmin(format!(
+            "invalid EVM address: {address}"
+        )));
     }
     mutate_state(|s| {
         s.multi_chain.chain_contracts.insert(chain, address.clone());
     });
-    log!(INFO, "[set_chain_contract] chain={:?} address={}", chain, address);
+    log!(
+        INFO,
+        "[set_chain_contract] chain={:?} address={}",
+        chain,
+        address
+    );
     Ok(())
 }
 
@@ -1883,13 +2050,14 @@ fn set_chain_liquidation_config(
     // budget, or a swap can structurally deliver less stable than the debt it
     // clears (under-cover). Increment 3 adds the max_dex_oracle_divergence_bps term.
     if config.enabled {
-        let penalty_bps = rumi_protocol_backend::chains::collateral_config::chain_collateral_config(chain)
-            .map(|c| c.liquidation_penalty_bps)
-            .ok_or_else(|| {
-                ProtocolError::ChainAdmin(format!("no collateral config for chain {}", chain.0))
-            })?;
-        let budget_bps =
-            (config.slippage_cap_bps as u64).saturating_add(config.max_dex_oracle_divergence_bps as u64);
+        let penalty_bps =
+            rumi_protocol_backend::chains::collateral_config::chain_collateral_config(chain)
+                .map(|c| c.liquidation_penalty_bps)
+                .ok_or_else(|| {
+                    ProtocolError::ChainAdmin(format!("no collateral config for chain {}", chain.0))
+                })?;
+        let budget_bps = (config.slippage_cap_bps as u64)
+            .saturating_add(config.max_dex_oracle_divergence_bps as u64);
         if budget_bps >= penalty_bps {
             return Err(ProtocolError::ChainAdmin(format!(
                 "slippage_cap_bps {} + max_dex_oracle_divergence_bps {} must be < liquidation_penalty_bps {} (penalty cushion, finding #16)",
@@ -1898,7 +2066,9 @@ fn set_chain_liquidation_config(
         }
     }
     mutate_state(|s| {
-        s.multi_chain.chain_liquidation_configs.insert(chain, config.clone());
+        s.multi_chain
+            .chain_liquidation_configs
+            .insert(chain, config.clone());
     });
     log!(
         INFO,
@@ -1919,6 +2089,75 @@ fn get_chain_liquidation_config(
     chain: rumi_protocol_backend::chains::config::ChainId,
 ) -> Option<rumi_protocol_backend::chains::liquidation_config::ChainLiquidationConfigV1> {
     read_state(|s| s.multi_chain.chain_liquidation_configs.get(&chain).cloned())
+}
+
+fn validate_chain_debt_config(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    config: rumi_protocol_backend::chains::collateral_config::ChainDebtConfigV1,
+) -> Result<(), ProtocolError> {
+    if rumi_protocol_backend::chains::collateral_config::chain_collateral_config(chain).is_none() {
+        return Err(ProtocolError::ChainAdmin(format!(
+            "no collateral config for chain {}",
+            chain.0
+        )));
+    }
+    if let Some(ceiling) = config.debt_ceiling_e8s {
+        if ceiling < config.min_vault_debt_e8s {
+            return Err(ProtocolError::ChainAdmin(format!(
+                "debt_ceiling_e8s {} must be >= min_vault_debt_e8s {}",
+                ceiling, config.min_vault_debt_e8s
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Persist Tier-B debt knobs for a chain. Missing config means the compile-time
+/// defaults from `chain_collateral_config` remain authoritative.
+#[candid_method(update)]
+#[update]
+fn set_chain_debt_config(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    config: rumi_protocol_backend::chains::collateral_config::ChainDebtConfigV1,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    validate_chain_debt_config(chain, config)?;
+    mutate_state(|s| {
+        s.multi_chain.chain_debt_configs.insert(chain, config);
+    });
+    log!(
+        INFO,
+        "[set_chain_debt_config] chain={:?} min_vault_debt_e8s={} debt_ceiling_e8s={:?}",
+        chain,
+        config.min_vault_debt_e8s,
+        config.debt_ceiling_e8s
+    );
+    Ok(())
+}
+
+/// Return the explicit Tier-B debt override for `chain`, if one has been set.
+#[candid_method(query)]
+#[query]
+fn get_chain_debt_config(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> Option<rumi_protocol_backend::chains::collateral_config::ChainDebtConfigV1> {
+    read_state(|s| s.multi_chain.chain_debt_configs.get(&chain).copied())
+}
+
+/// Return the debt config actually used by EVM open/borrow: explicit override
+/// when present, otherwise the compile-time collateral default.
+#[candid_method(query)]
+#[query]
+fn get_effective_chain_debt_config(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> Option<rumi_protocol_backend::chains::collateral_config::ChainDebtConfigV1> {
+    let base = rumi_protocol_backend::chains::collateral_config::chain_collateral_config(chain)?;
+    Some(read_state(|s| s.multi_chain.chain_debt_configs.get(&chain).copied()).unwrap_or_else(
+        || rumi_protocol_backend::chains::collateral_config::ChainDebtConfigV1::from_collateral_config(base),
+    ))
 }
 
 /// A chain vault currently liquidatable on `chain` (CR below the liquidation
@@ -1967,7 +2206,9 @@ fn liquidation_price_symbol(
 ) -> Result<&'static str, ProtocolError> {
     rumi_protocol_backend::chains::evm::evm_chain_config(chain)
         .map(|c| c.native_symbol)
-        .ok_or_else(|| ProtocolError::ChainAdmin(format!("chain {} is not a known EVM chain", chain.0)))
+        .ok_or_else(|| {
+            ProtocolError::ChainAdmin(format!("chain {} is not a known EVM chain", chain.0))
+        })
 }
 
 fn chain_sp_absorb_snapshot(
@@ -1987,18 +2228,24 @@ fn chain_sp_absorb_snapshot(
         .ok_or_else(|| ProtocolError::ChainAdmin(format!("unknown chain vault {vault_id}")))?;
     let chain = vault.collateral_chain;
     if state.reorg_halted.get(&chain).copied().unwrap_or(false) {
-        return Err(ProtocolError::ChainAdmin(format!("chain {} reorg halted", chain.0)));
+        return Err(ProtocolError::ChainAdmin(format!(
+            "chain {} reorg halted",
+            chain.0
+        )));
     }
     if !state.sp_attempted_chain_vaults.contains(&vault_id) {
-        return Err(ProtocolError::ChainAdmin(format!("chain vault {vault_id} missing sp_attempted escalation gate")));
+        return Err(ProtocolError::ChainAdmin(format!(
+            "chain vault {vault_id} missing sp_attempted escalation gate"
+        )));
     }
-    let cfg = state
-        .chain_liquidation_configs
-        .get(&chain)
-        .ok_or_else(|| ProtocolError::ChainAdmin(format!("no chain liquidation config for chain {}", chain.0)))?;
+    let cfg = state.chain_liquidation_configs.get(&chain).ok_or_else(|| {
+        ProtocolError::ChainAdmin(format!("no chain liquidation config for chain {}", chain.0))
+    })?;
     let symbol = liquidation_price_symbol(chain)?;
     let price_e8 = liq::fresh_chain_price_e8(state, chain, symbol, now_ns, cfg.max_price_age_ns)
-        .map_err(|e| ProtocolError::ChainAdmin(format!("fresh chain price unavailable for {symbol}: {e:?}")))?;
+        .map_err(|e| {
+            ProtocolError::ChainAdmin(format!("fresh chain price unavailable for {symbol}: {e:?}"))
+        })?;
     let native_decimals = state
         .chain_configs
         .get(&chain)
@@ -2006,7 +2253,9 @@ fn chain_sp_absorb_snapshot(
         .unwrap_or(18);
     let liquidation_penalty_bps = chain_collateral_config(chain)
         .map(|c| c.liquidation_penalty_bps)
-        .ok_or_else(|| ProtocolError::ChainAdmin(format!("no collateral config for chain {}", chain.0)))?;
+        .ok_or_else(|| {
+            ProtocolError::ChainAdmin(format!("no collateral config for chain {}", chain.0))
+        })?;
     Ok(ChainSpAbsorbSnapshot {
         chain,
         price_e8,
@@ -2027,11 +2276,19 @@ fn liquidate_chain_vault(vault_id: u64) -> Result<u64, ProtocolError> {
     if read_state(|s| s.developer_principal != caller) {
         return Err(ProtocolError::ChainAdmin("not developer".into()));
     }
-    let chain = read_state(|s| s.multi_chain.chain_vaults.get(&vault_id).map(|v| v.collateral_chain))
-        .ok_or_else(|| ProtocolError::ChainAdmin(format!("unknown vault {vault_id}")))?;
-    let threshold = rumi_protocol_backend::chains::collateral_config::chain_collateral_config(chain)
-        .map(|c| c.liquidation_threshold_e4)
-        .ok_or_else(|| ProtocolError::ChainAdmin(format!("no collateral config for chain {}", chain.0)))?;
+    let chain = read_state(|s| {
+        s.multi_chain
+            .chain_vaults
+            .get(&vault_id)
+            .map(|v| v.collateral_chain)
+    })
+    .ok_or_else(|| ProtocolError::ChainAdmin(format!("unknown vault {vault_id}")))?;
+    let threshold =
+        rumi_protocol_backend::chains::collateral_config::chain_collateral_config(chain)
+            .map(|c| c.liquidation_threshold_e4)
+            .ok_or_else(|| {
+                ProtocolError::ChainAdmin(format!("no collateral config for chain {}", chain.0))
+            })?;
     let symbol = liquidation_price_symbol(chain)?;
     let now = ic_cdk::api::time();
     mutate_state(|s| {
@@ -2050,9 +2307,7 @@ fn liquidate_chain_vault(vault_id: u64) -> Result<u64, ProtocolError> {
 /// Deterministic Principal key for chain-native collateral in the Stability Pool.
 /// This is a metadata key, never an ICRC ledger canister. The byte layout uses a
 /// reserved Rumi prefix plus the little-endian chain id and a non-canister tag.
-fn chain_collateral_sentinel(
-    chain: rumi_protocol_backend::chains::config::ChainId,
-) -> Principal {
+fn chain_collateral_sentinel(chain: rumi_protocol_backend::chains::config::ChainId) -> Principal {
     let mut bytes = [0u8; 29];
     let prefix = b"rumi-chain-collateral";
     bytes[..prefix.len()].copy_from_slice(prefix);
@@ -2179,20 +2434,32 @@ fn set_manual_collateral_price(
 ) -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
     if read_state(|s| !s.is_price_setter_authorized(caller, chain.0, &symbol)) {
-        return Err(ProtocolError::ChainAdmin("not authorized to set price".into()));
+        return Err(ProtocolError::ChainAdmin(
+            "not authorized to set price".into(),
+        ));
     }
     // Reject a zero price. A 0 price drives `collateral_ratio_e4` to 0, which
     // fails-closed (every open/withdraw with debt rejects with BelowMinCr), so
     // it cannot mint under-collateralized — but it is never a legitimate value
     // and silently freezes the chain's vaults. Catch the fat-finger explicitly.
     if price_e8 == 0 {
-        return Err(ProtocolError::ChainAdmin("price_e8 must be greater than 0".into()));
+        return Err(ProtocolError::ChainAdmin(
+            "price_e8 must be greater than 0".into(),
+        ));
     }
     let now = ic_cdk::api::time();
     mutate_state(|s| {
-        s.multi_chain.set_manual_price(chain, symbol.clone(), price_e8, now);
+        s.multi_chain
+            .set_manual_price(chain, symbol.clone(), price_e8, now);
     });
-    log!(INFO, "[set_manual_collateral_price] chain={:?} symbol={} price_e8={} set_at_ns={}", chain, symbol, price_e8, now);
+    log!(
+        INFO,
+        "[set_manual_collateral_price] chain={:?} symbol={} price_e8={} set_at_ns={}",
+        chain,
+        symbol,
+        price_e8,
+        now
+    );
     Ok(())
 }
 
@@ -2209,7 +2476,10 @@ fn get_manual_collateral_price(
     read_state(|s| {
         s.multi_chain
             .get_manual_price(chain, &symbol)
-            .map(|(price_e8, set_at_ns)| ManualPriceInfo { price_e8, set_at_ns })
+            .map(|(price_e8, set_at_ns)| ManualPriceInfo {
+                price_e8,
+                set_at_ns,
+            })
     })
 }
 
@@ -2312,9 +2582,114 @@ fn clear_invariant_halt() -> Result<(), ProtocolError> {
         }
     });
     if result.is_ok() {
-        log!(INFO, "[clear_invariant_halt] global invariant halt cleared (invariant re-verified)");
+        log!(
+            INFO,
+            "[clear_invariant_halt] global invariant halt cleared (invariant re-verified)"
+        );
     }
     result
+}
+
+const MAX_RECONCILIATION_PROOF_BYTES: usize = 512;
+
+fn normalize_reconciliation_proof(proof: &str) -> Result<String, ProtocolError> {
+    let trimmed = proof.trim();
+    if trimmed.is_empty() {
+        return Err(ProtocolError::ChainAdmin("proof text required".into()));
+    }
+    if trimmed.as_bytes().len() > MAX_RECONCILIATION_PROOF_BYTES {
+        return Err(ProtocolError::ChainAdmin(format!(
+            "proof text too long: {} bytes > {}",
+            trimmed.as_bytes().len(),
+            MAX_RECONCILIATION_PROOF_BYTES
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn map_backing_settlement_error(
+    e: rumi_protocol_backend::chains::supply::BackingSettlementError,
+) -> ProtocolError {
+    ProtocolError::ChainAdmin(format!("{e:?}"))
+}
+
+/// Developer-gated manual reconciliation for the SP path: called after the
+/// operator verifies the matching foreign-chain icUSD burn for an amount already
+/// booked in `pending_chain_burn_e8s`.
+#[candid_method(update)]
+#[update]
+fn settle_pending_chain_burn(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    amount_e8s: u128,
+    proof: String,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let proof = normalize_reconciliation_proof(&proof)?;
+    mutate_state(|s| {
+        rumi_protocol_backend::chains::supply::settle_pending_chain_burn(
+            &mut s.multi_chain,
+            chain,
+            amount_e8s,
+        )
+    })
+    .map_err(map_backing_settlement_error)?;
+    let timestamp = ic_cdk::api::time();
+    rumi_protocol_backend::storage::record_event(&Event::ChainPendingBurnSettled {
+        chain_id: chain,
+        amount_e8s,
+        proof: proof.clone(),
+        timestamp,
+    });
+    log!(
+        INFO,
+        "[settle_pending_chain_burn] chain={:?} amount_e8s={} proof={}",
+        chain,
+        amount_e8s,
+        proof
+    );
+    Ok(())
+}
+
+/// Developer-gated manual reconciliation for Tier-1 reserve retirement: called
+/// after the operator verifies the reserve-backed foreign icUSD was burned.
+#[candid_method(update)]
+#[update]
+fn settle_reserve_burn(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    amount_e8s: u128,
+    proof: String,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let proof = normalize_reconciliation_proof(&proof)?;
+    mutate_state(|s| {
+        rumi_protocol_backend::chains::supply::settle_reserve_burn(
+            &mut s.multi_chain,
+            chain,
+            amount_e8s,
+        )
+    })
+    .map_err(map_backing_settlement_error)?;
+    let timestamp = ic_cdk::api::time();
+    rumi_protocol_backend::storage::record_event(&Event::ChainReserveBurnSettled {
+        chain_id: chain,
+        amount_e8s,
+        proof: proof.clone(),
+        timestamp,
+    });
+    log!(
+        INFO,
+        "[settle_reserve_burn] chain={:?} amount_e8s={} proof={}",
+        chain,
+        amount_e8s,
+        proof
+    );
+    Ok(())
 }
 
 /// Clear a chain's reorg circuit breaker. Resets BOTH `reorg_halted` AND the
@@ -2335,7 +2710,11 @@ fn clear_reorg_halt(
         s.multi_chain.reorg_halted.remove(&chain);
         s.multi_chain.reorg_suspect_streak.remove(&chain);
     });
-    log!(INFO, "[clear_reorg_halt] chain={:?} reorg halt + suspect streak cleared", chain);
+    log!(
+        INFO,
+        "[clear_reorg_halt] chain={:?} reorg halt + suspect streak cleared",
+        chain
+    );
     Ok(())
 }
 
@@ -2356,7 +2735,12 @@ fn set_last_observed_block(
     mutate_state(|s| {
         s.multi_chain.last_observed_block.insert(chain, block);
     });
-    log!(INFO, "[set_last_observed_block] chain={:?} block={}", chain, block);
+    log!(
+        INFO,
+        "[set_last_observed_block] chain={:?} block={}",
+        chain,
+        block
+    );
     Ok(())
 }
 
@@ -2365,10 +2749,14 @@ fn set_last_observed_block(
 /// confirm the cursor advances.
 #[candid_method(query)]
 #[query]
-fn get_last_observed_block(
-    chain: rumi_protocol_backend::chains::config::ChainId,
-) -> u64 {
-    read_state(|s| s.multi_chain.last_observed_block.get(&chain).copied().unwrap_or(0))
+fn get_last_observed_block(chain: rumi_protocol_backend::chains::config::ChainId) -> u64 {
+    read_state(|s| {
+        s.multi_chain
+            .last_observed_block
+            .get(&chain)
+            .copied()
+            .unwrap_or(0)
+    })
 }
 
 /// Phase 1c notify-then-verify: submit a burn transaction hash for verification.
@@ -2419,7 +2807,9 @@ async fn submit_burn_proof(
                 log!(
                     INFO,
                     "[submit_burn_proof] chain={:?} tx={} applied {} burn(s)",
-                    chain_id, tx_hash, n
+                    chain_id,
+                    tx_hash,
+                    n
                 );
             }
             Ok(n)
@@ -2436,7 +2826,10 @@ async fn submit_burn_proof(
         ))),
         // Terminal: reverted tx, unknown chain/contract, or a halt-class
         // supply-invariant failure. None of these is fixed by retrying.
-        Err(e) => Err(ProtocolError::ChainAdmin(format!("burn proof rejected: {:?}", e))),
+        Err(e) => Err(ProtocolError::ChainAdmin(format!(
+            "burn proof rejected: {:?}",
+            e
+        ))),
     }
 }
 
@@ -2487,7 +2880,11 @@ fn delete_chain(
     });
     match result {
         Ok(()) => {
-            log!(INFO, "[delete_chain] chain={:?} deleted (all per-chain state purged)", chain);
+            log!(
+                INFO,
+                "[delete_chain] chain={:?} deleted (all per-chain state purged)",
+                chain
+            );
             Ok(())
         }
         Err(e) => Err(ProtocolError::ChainAdmin(format!("{e:?}"))),
@@ -2598,6 +2995,139 @@ pub struct ChainSupplyReconciliation {
     pub reserve_usdc_native: u128,
 }
 
+/// Operator report for Inc 5 reserve/bridge reconciliation. Book values are
+/// always returned; the on-chain settle-stable balance is best-effort because it
+/// depends on configured DEX token, seeded finalized cursor, reserve-address
+/// derivation, and EVM RPC availability.
+#[derive(candid::CandidType, serde::Deserialize, Clone, Debug)]
+pub struct ChainReserveReport {
+    pub chain_id: rumi_protocol_backend::chains::config::ChainId,
+    pub recorded_supply_e8s: u128,
+    pub reserve_backing_e8s: u128,
+    pub reserve_usdc_native: u128,
+    pub pending_chain_burn_e8s: u128,
+    pub bad_debt_e8s: u128,
+    pub finalized_block: u64,
+    pub settle_stable_token: Option<String>,
+    pub reserve_address: Option<String>,
+    pub onchain_usdc_balance_native: Option<u128>,
+    pub onchain_usdc_error: Option<String>,
+}
+
+/// Developer-gated reserve reconciliation view. Uses an update method because
+/// the optional `balanceOf` probe makes an inter-canister EVM RPC call and burns
+/// cycles; no protocol state is mutated.
+#[candid_method(update)]
+#[update]
+async fn get_chain_reserves(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> Result<ChainReserveReport, ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let (
+        registered,
+        recorded_supply,
+        reserve_backing,
+        reserve_usdc,
+        pending_burn,
+        bad_debt,
+        finalized_block,
+        settle_stable_token,
+    ) = read_state(|s| {
+        (
+            s.multi_chain.chain_configs.contains_key(&chain),
+            s.multi_chain
+                .chain_supplies
+                .get(&chain)
+                .copied()
+                .unwrap_or(0),
+            s.multi_chain
+                .reserve_backing_e8s
+                .get(&chain)
+                .copied()
+                .unwrap_or(0),
+            s.multi_chain
+                .reserve_usdc_native
+                .get(&chain)
+                .copied()
+                .unwrap_or(0),
+            s.multi_chain
+                .pending_chain_burn_e8s
+                .get(&chain)
+                .copied()
+                .unwrap_or(0),
+            s.multi_chain
+                .chain_bad_debt_e8s
+                .get(&chain)
+                .copied()
+                .unwrap_or(0),
+            s.multi_chain
+                .last_observed_block
+                .get(&chain)
+                .copied()
+                .unwrap_or(0),
+            s.multi_chain
+                .chain_liquidation_configs
+                .get(&chain)
+                .map(|c| c.settle_stable_token.clone())
+                .filter(|token| !token.is_empty()),
+        )
+    });
+    if !registered {
+        return Err(ProtocolError::ChainAdmin(format!(
+            "chain {} is not registered",
+            chain.0
+        )));
+    }
+
+    let mut report = ChainReserveReport {
+        chain_id: chain,
+        recorded_supply_e8s: recorded_supply,
+        reserve_backing_e8s: reserve_backing,
+        reserve_usdc_native: reserve_usdc,
+        pending_chain_burn_e8s: pending_burn,
+        bad_debt_e8s: bad_debt,
+        finalized_block,
+        settle_stable_token: settle_stable_token.clone(),
+        reserve_address: None,
+        onchain_usdc_balance_native: None,
+        onchain_usdc_error: None,
+    };
+
+    let Some(token) = settle_stable_token else {
+        report.onchain_usdc_error = Some("settle stable token not configured".into());
+        return Ok(report);
+    };
+    if finalized_block == 0 {
+        report.onchain_usdc_error = Some("finalized cursor unseeded".into());
+        return Ok(report);
+    }
+
+    let reserve_address =
+        match rumi_protocol_backend::chains::evm::tecdsa::cached_reserve_address(chain).await {
+            Ok((_path, address)) => address,
+            Err(e) => {
+                report.onchain_usdc_error = Some(format!("reserve address derive failed: {e}"));
+                return Ok(report);
+            }
+        };
+    report.reserve_address = Some(reserve_address.clone());
+    match rumi_protocol_backend::chains::evm::evm_rpc::erc20_balance_of(
+        chain,
+        &token,
+        &reserve_address,
+        finalized_block,
+    )
+    .await
+    {
+        Ok(balance) => report.onchain_usdc_balance_native = Some(balance),
+        Err(e) => report.onchain_usdc_error = Some(format!("reserve balance read failed: {e}")),
+    }
+    Ok(report)
+}
+
 /// Developer-gated, on-demand supply reconciliation against the chain (audit
 /// FLAG-2). The Timer-B self-check only compares two INTERNAL mirror fields
 /// (`sum(chain_supplies)` vs `total_chain_vault_debt`), which are kept in
@@ -2619,7 +3149,12 @@ async fn reconcile_chain_supply(
     let (contract, recorded, in_flight, cursor, reserve_backing, pending_burn, reserve_usdc) =
         read_state(|s| {
             let contract = s.multi_chain.chain_contracts.get(&chain).cloned();
-            let recorded = s.multi_chain.chain_supplies.get(&chain).copied().unwrap_or(0);
+            let recorded = s
+                .multi_chain
+                .chain_supplies
+                .get(&chain)
+                .copied()
+                .unwrap_or(0);
             let in_flight = s
                 .multi_chain
                 .settlement_queues
@@ -2631,7 +3166,8 @@ async fn reconcile_chain_supply(
                             SettlementOpKind::Mint { amount_e8s, .. }
                                 if matches!(
                                     op.status,
-                                    SettlementOpStatus::Queued | SettlementOpStatus::Inflight { .. }
+                                    SettlementOpStatus::Queued
+                                        | SettlementOpStatus::Inflight { .. }
                                 ) =>
                             {
                                 Some(*amount_e8s)
@@ -2641,28 +3177,60 @@ async fn reconcile_chain_supply(
                         .sum::<u128>()
                 })
                 .unwrap_or(0);
-            let cursor = s.multi_chain.last_observed_block.get(&chain).copied().unwrap_or(0);
+            let cursor = s
+                .multi_chain
+                .last_observed_block
+                .get(&chain)
+                .copied()
+                .unwrap_or(0);
             // Informational RHS breakdown for this chain (NOT part of the
             // unbacked_excess check — findings #17/#20/#29).
-            let reserve_backing = s.multi_chain.reserve_backing_e8s.get(&chain).copied().unwrap_or(0);
-            let pending_burn = s.multi_chain.pending_chain_burn_e8s.get(&chain).copied().unwrap_or(0);
-            let reserve_usdc = s.multi_chain.reserve_usdc_native.get(&chain).copied().unwrap_or(0);
-            (contract, recorded, in_flight, cursor, reserve_backing, pending_burn, reserve_usdc)
+            let reserve_backing = s
+                .multi_chain
+                .reserve_backing_e8s
+                .get(&chain)
+                .copied()
+                .unwrap_or(0);
+            let pending_burn = s
+                .multi_chain
+                .pending_chain_burn_e8s
+                .get(&chain)
+                .copied()
+                .unwrap_or(0);
+            let reserve_usdc = s
+                .multi_chain
+                .reserve_usdc_native
+                .get(&chain)
+                .copied()
+                .unwrap_or(0);
+            (
+                contract,
+                recorded,
+                in_flight,
+                cursor,
+                reserve_backing,
+                pending_burn,
+                reserve_usdc,
+            )
         });
     let contract = contract.ok_or_else(|| {
-        ProtocolError::ChainAdmin(format!("no icUSD contract configured for chain {:?}", chain))
+        ProtocolError::ChainAdmin(format!(
+            "no icUSD contract configured for chain {:?}",
+            chain
+        ))
     })?;
     if cursor == 0 {
         return Err(ProtocolError::ChainAdmin(
             "finalized cursor unseeded; call set_last_observed_block(chain, <tip>) first".into(),
         ));
     }
-    let onchain =
-        rumi_protocol_backend::chains::monad::evm_rpc::erc20_total_supply_at(chain, &contract, cursor)
-            .await
-            .map_err(|e| {
-                ProtocolError::TemporarilyUnavailable(format!("totalSupply read failed; retry: {e}"))
-            })?;
+    let onchain = rumi_protocol_backend::chains::monad::evm_rpc::erc20_total_supply_at(
+        chain, &contract, cursor,
+    )
+    .await
+    .map_err(|e| {
+        ProtocolError::TemporarilyUnavailable(format!("totalSupply read failed; retry: {e}"))
+    })?;
     let gap_e8s = onchain as i128 - recorded as i128;
     // The unbacked-excess test compares on-chain totalSupply against recorded
     // chain_supplies (+ in-flight mints) ONLY. reserve_backing / pending_chain_burn
@@ -2717,24 +3285,44 @@ fn get_protocol_config() -> rumi_protocol_backend::ProtocolConfig {
         global_icusd_mint_cap: s.global_icusd_mint_cap,
         interest_flush_threshold_e8s: s.interest_flush_threshold_e8s,
 
-        interest_split: s.interest_split.iter().map(|r| {
-            let dest = match &r.destination {
-                rumi_protocol_backend::state::InterestDestination::StabilityPool => "stability_pool".to_string(),
-                rumi_protocol_backend::state::InterestDestination::Treasury => "treasury".to_string(),
-                rumi_protocol_backend::state::InterestDestination::ThreePool => "three_pool".to_string(),
-                rumi_protocol_backend::state::InterestDestination::Amm1 => "amm1".to_string(),
-            };
-            InterestSplitArg { destination: dest, bps: r.bps }
-        }).collect(),
+        interest_split: s
+            .interest_split
+            .iter()
+            .map(|r| {
+                let dest = match &r.destination {
+                    rumi_protocol_backend::state::InterestDestination::StabilityPool => {
+                        "stability_pool".to_string()
+                    }
+                    rumi_protocol_backend::state::InterestDestination::Treasury => {
+                        "treasury".to_string()
+                    }
+                    rumi_protocol_backend::state::InterestDestination::ThreePool => {
+                        "three_pool".to_string()
+                    }
+                    rumi_protocol_backend::state::InterestDestination::Amm1 => "amm1".to_string(),
+                };
+                InterestSplitArg {
+                    destination: dest,
+                    bps: r.bps,
+                }
+            })
+            .collect(),
 
-        global_rate_curve: s.global_rate_curve.markers.iter()
+        global_rate_curve: s
+            .global_rate_curve
+            .markers
+            .iter()
             .map(|m| (m.cr_level.to_f64(), m.multiplier.to_f64()))
             .collect(),
-        recovery_rate_curve: s.recovery_rate_curve.iter()
+        recovery_rate_curve: s
+            .recovery_rate_curve
+            .iter()
             .map(|m| (format!("{:?}", m.threshold), m.multiplier.to_f64()))
             .collect(),
         borrowing_fee_curve: match &s.borrowing_fee_curve {
-            Some(curve) => s.resolve_curve(curve, None).iter()
+            Some(curve) => s
+                .resolve_curve(curve, None)
+                .iter()
                 .map(|(cr, mult)| (cr.to_f64(), mult.to_f64()))
                 .collect(),
             None => vec![],
@@ -2758,7 +3346,9 @@ fn get_protocol_config() -> rumi_protocol_backend::ProtocolConfig {
         bot_allowed_collateral_types: s.bot_allowed_collateral_types.iter().cloned().collect(),
         bot_cr_tolerance_bps: s.bot_cr_tolerance_bps,
 
-        collateral_configs: s.collateral_configs.iter()
+        collateral_configs: s
+            .collateral_configs
+            .iter()
             .map(|(ct, config)| {
                 let mut cfg = config.clone();
                 cfg.recovery_target_cr = cfg.borrow_threshold_ratio * s.recovery_cr_multiplier;
@@ -2775,7 +3365,9 @@ fn get_fees(redeemed_amount: u64) -> Fees {
         let icp_ct = s.icp_collateral_type();
         Fees {
             borrowing_fee: s.get_borrowing_fee().to_f64(),
-            redemption_fee: s.get_redemption_fee_for(&icp_ct, redeemed_amount.into()).to_f64(),
+            redemption_fee: s
+                .get_redemption_fee_for(&icp_ct, redeemed_amount.into())
+                .to_f64(),
         }
     })
 }
@@ -2785,7 +3377,9 @@ fn get_fees(redeemed_amount: u64) -> Fees {
 fn get_fees_for_collateral(collateral_type: Principal, redeemed_amount: u64) -> Fees {
     read_state(|s| Fees {
         borrowing_fee: s.get_borrowing_fee().to_f64(),
-        redemption_fee: s.get_redemption_fee_for(&collateral_type, redeemed_amount.into()).to_f64(),
+        redemption_fee: s
+            .get_redemption_fee_for(&collateral_type, redeemed_amount.into())
+            .to_f64(),
     })
 }
 
@@ -2954,34 +3548,39 @@ fn get_events_filtered(args: GetEventsArg) -> GetEventsFilteredResponse {
             .unwrap_or(0)
     });
 
-    let types_set: Option<std::collections::HashSet<EventTypeFilter>> = args.types
+    let types_set: Option<std::collections::HashSet<EventTypeFilter>> = args
+        .types
         .as_ref()
         .filter(|v| !v.is_empty())
         .map(|v| v.iter().cloned().collect());
 
-    let admin_labels_set: Option<std::collections::HashSet<String>> = args.admin_labels
+    let admin_labels_set: Option<std::collections::HashSet<String>> = args
+        .admin_labels
         .as_ref()
         .filter(|v| !v.is_empty())
         .map(|v| v.iter().cloned().collect());
 
     let filtered: Vec<(u64, Event)> = events()
         .enumerate()
-        .filter(|(_, e)| e.passes_filters(
-            types_set.as_ref(),
-            args.principal.as_ref(),
-            args.collateral_token.as_ref(),
-            args.time_range.as_ref(),
-            args.min_size_e8s,
-            admin_labels_set.as_ref(),
-            &vault_lookup,
-            icp_price_e8s,
-        ))
+        .filter(|(_, e)| {
+            e.passes_filters(
+                types_set.as_ref(),
+                args.principal.as_ref(),
+                args.collateral_token.as_ref(),
+                args.time_range.as_ref(),
+                args.min_size_e8s,
+                admin_labels_set.as_ref(),
+                &vault_lookup,
+                icp_price_e8s,
+            )
+        })
         .map(|(i, e)| (i as u64, e))
         .collect();
 
     let total = filtered.len() as u64;
     let start_idx = page * page_size;
-    let page_events: Vec<(u64, Event)> = filtered.into_iter()
+    let page_events: Vec<(u64, Event)> = filtered
+        .into_iter()
         .rev()
         .skip(start_idx)
         .take(page_size)
@@ -3306,7 +3905,10 @@ fn get_vaults_page(start_id: u64, limit: u64) -> VaultsPageResponse {
             vaults.push(CandidVault::from(vault.clone()));
         }
         let next_start_id = iter.next().map(|(id, _)| *id);
-        VaultsPageResponse { vaults, next_start_id }
+        VaultsPageResponse {
+            vaults,
+            next_start_id,
+        }
     })
 }
 
@@ -3337,7 +3939,10 @@ async fn redeem_icp(icusd_amount: u64) -> Result<SuccessWithFee, ProtocolError> 
 /// `redeem_icp` remains as a convenience wrapper for ICP specifically.
 #[candid_method(update)]
 #[update]
-async fn redeem_collateral(collateral_type: Principal, icusd_amount: u64) -> Result<SuccessWithFee, ProtocolError> {
+async fn redeem_collateral(
+    collateral_type: Principal,
+    icusd_amount: u64,
+) -> Result<SuccessWithFee, ProtocolError> {
     validate_call().await?;
     // Wave-9 RED-003: gate redemption on protocol mode. ReadOnly auto-latches
     // when total collateral ratio drops below 100% (Wave-1) or when the
@@ -3353,7 +3958,9 @@ async fn redeem_collateral(collateral_type: Principal, icusd_amount: u64) -> Res
     // delegates to ensure_fresh_price for ICP (already handled), so this is
     // safe to call unconditionally.
     rumi_protocol_backend::xrc::ensure_fresh_price_for(&collateral_type).await?;
-    check_postcondition(rumi_protocol_backend::vault::redeem_collateral(collateral_type, icusd_amount).await)
+    check_postcondition(
+        rumi_protocol_backend::vault::redeem_collateral(collateral_type, icusd_amount).await,
+    )
 }
 
 #[candid_method(query)]
@@ -3361,15 +3968,21 @@ async fn redeem_collateral(collateral_type: Principal, icusd_amount: u64) -> Res
 fn get_redemption_rate() -> f64 {
     read_state(|s| {
         let icp_ct = s.icp_collateral_type();
-        s.get_redemption_fee_for(&icp_ct, ICUSD::from(100_000_000)).to_f64()
+        s.get_redemption_fee_for(&icp_ct, ICUSD::from(100_000_000))
+            .to_f64()
     })
 }
 
 #[candid_method(update)]
 #[update]
-async fn open_vault(collateral_amount: u64, collateral_type: Option<Principal>) -> Result<OpenVaultSuccess, ProtocolError> {
+async fn open_vault(
+    collateral_amount: u64,
+    collateral_type: Option<Principal>,
+) -> Result<OpenVaultSuccess, ProtocolError> {
     validate_call().await?;
-    check_postcondition(rumi_protocol_backend::vault::open_vault(collateral_amount, collateral_type).await)
+    check_postcondition(
+        rumi_protocol_backend::vault::open_vault(collateral_amount, collateral_type).await,
+    )
 }
 
 /// Compound open vault + borrow in a single canister call.
@@ -3386,7 +3999,12 @@ async fn open_vault_and_borrow(
     // ORACLE-001: refresh the (possibly non-ICP) collateral price before minting.
     validate_freshness_for_collateral(collateral_type).await?;
     check_postcondition(
-        rumi_protocol_backend::vault::open_vault_and_borrow(collateral_amount, borrow_amount, collateral_type).await,
+        rumi_protocol_backend::vault::open_vault_and_borrow(
+            collateral_amount,
+            borrow_amount,
+            collateral_type,
+        )
+        .await,
     )
 }
 
@@ -3428,7 +4046,9 @@ async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
 /// then calls open_vault_with_deposit or add_margin_with_deposit.
 #[candid_method(query)]
 #[query]
-fn get_deposit_account(_collateral_type: Option<Principal>) -> icrc_ledger_types::icrc1::account::Account {
+fn get_deposit_account(
+    _collateral_type: Option<Principal>,
+) -> icrc_ledger_types::icrc1::account::Account {
     let caller = ic_cdk::caller();
     rumi_protocol_backend::management::get_deposit_account_for(&caller)
 }
@@ -3437,12 +4057,17 @@ fn get_deposit_account(_collateral_type: Option<Principal>) -> icrc_ledger_types
 /// Use this instead of open_vault when the wallet cannot do ICRC-2 approve (e.g., Oisy).
 #[candid_method(update)]
 #[update]
-async fn open_vault_with_deposit(borrow_amount: u64, collateral_type: Option<Principal>) -> Result<OpenVaultSuccess, ProtocolError> {
+async fn open_vault_with_deposit(
+    borrow_amount: u64,
+    collateral_type: Option<Principal>,
+) -> Result<OpenVaultSuccess, ProtocolError> {
     validate_call().await?;
     validate_mode()?;
     // ORACLE-001: refresh the (possibly non-ICP) collateral price before minting.
     validate_freshness_for_collateral(collateral_type).await?;
-    check_postcondition(rumi_protocol_backend::vault::open_vault_with_deposit(borrow_amount, collateral_type).await)
+    check_postcondition(
+        rumi_protocol_backend::vault::open_vault_with_deposit(borrow_amount, collateral_type).await,
+    )
 }
 
 /// Add margin to a vault using funds already deposited to the caller's deposit account.
@@ -3473,11 +4098,15 @@ async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
 
 #[candid_method(update)]
 #[update]
-async fn withdraw_partial_collateral(arg: rumi_protocol_backend::vault::VaultArg) -> Result<u64, ProtocolError> {
+async fn withdraw_partial_collateral(
+    arg: rumi_protocol_backend::vault::VaultArg,
+) -> Result<u64, ProtocolError> {
     validate_call().await?;
     // ORACLE-001: refresh this vault's collateral price before releasing collateral.
     validate_freshness_for_vault(arg.vault_id).await?;
-    check_postcondition(rumi_protocol_backend::vault::withdraw_partial_collateral(arg.vault_id, arg.amount).await)
+    check_postcondition(
+        rumi_protocol_backend::vault::withdraw_partial_collateral(arg.vault_id, arg.amount).await,
+    )
 }
 
 #[candid_method(update)]
@@ -3491,7 +4120,9 @@ async fn withdraw_and_close_vault(vault_id: u64) -> Result<Option<u64>, Protocol
 /// Saves one Oisy consent screen for users closing borrowed vaults.
 #[candid_method(update)]
 #[update]
-async fn repay_and_close_vault(arg: VaultArg) -> Result<rumi_protocol_backend::vault::RepayAndCloseSuccess, ProtocolError> {
+async fn repay_and_close_vault(
+    arg: VaultArg,
+) -> Result<rumi_protocol_backend::vault::RepayAndCloseSuccess, ProtocolError> {
     validate_call().await?;
     check_postcondition(rumi_protocol_backend::vault::repay_and_close_vault(arg).await)
 }
@@ -3523,24 +4154,38 @@ async fn liquidate_vault_partial(arg: VaultArg) -> Result<SuccessWithFee, Protoc
     validate_liquidation_not_frozen()?;
     validate_price_for_liquidation()?;
     validate_freshness_for_vault(arg.vault_id).await?;
-    check_postcondition(rumi_protocol_backend::vault::liquidate_vault_partial(arg.vault_id, arg.amount).await)
+    check_postcondition(
+        rumi_protocol_backend::vault::liquidate_vault_partial(arg.vault_id, arg.amount).await,
+    )
 }
 
 /// Liquidate a vault using ckUSDT or ckUSDC (1:1 with icUSD)
 #[update]
 #[candid_method(update)]
-async fn liquidate_vault_partial_with_stable(arg: VaultArgWithToken) -> Result<SuccessWithFee, ProtocolError> {
+async fn liquidate_vault_partial_with_stable(
+    arg: VaultArgWithToken,
+) -> Result<SuccessWithFee, ProtocolError> {
     validate_call().await?;
     validate_liquidation_not_frozen()?;
     validate_price_for_liquidation()?;
     validate_freshness_for_vault(arg.vault_id).await?;
-    check_postcondition(rumi_protocol_backend::vault::liquidate_vault_partial_with_stable(arg.vault_id, arg.amount, arg.token_type).await)
+    check_postcondition(
+        rumi_protocol_backend::vault::liquidate_vault_partial_with_stable(
+            arg.vault_id,
+            arg.amount,
+            arg.token_type,
+        )
+        .await,
+    )
 }
 
 // Stability Pool Integration - allows stability pool to execute liquidations
 #[update]
 #[candid_method(update)]
-async fn stability_pool_liquidate(vault_id: u64, max_debt_to_liquidate: u64) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
+async fn stability_pool_liquidate(
+    vault_id: u64,
+    max_debt_to_liquidate: u64,
+) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
     validate_call().await?;
     validate_liquidation_not_frozen()?;
     validate_price_for_liquidation()?;
@@ -3556,9 +4201,8 @@ async fn stability_pool_liquidate(vault_id: u64, max_debt_to_liquidate: u64) -> 
     let caller = ic_cdk::api::caller();
 
     // Authorization: only the registered stability pool canister can call this
-    let is_stability_pool = read_state(|s| {
-        s.stability_pool_canister.map_or(false, |sp| sp == caller)
-    });
+    let is_stability_pool =
+        read_state(|s| s.stability_pool_canister.map_or(false, |sp| sp == caller));
     if !is_stability_pool {
         return Err(ProtocolError::GenericError(
             "Caller is not the registered stability pool canister".to_string(),
@@ -3570,10 +4214,12 @@ async fn stability_pool_liquidate(vault_id: u64, max_debt_to_liquidate: u64) -> 
         match s.vault_id_to_vaults.get(&vault_id) {
             Some(vault) => {
                 // Per-collateral price lookup
-                let price = s.get_collateral_price_decimal(&vault.collateral_type)
+                let price = s
+                    .get_collateral_price_decimal(&vault.collateral_type)
                     .ok_or("No price available for this collateral type")?;
                 let collateral_price_usd = UsdIcp::from(price);
-                let ratio = rumi_protocol_backend::compute_collateral_ratio(vault, collateral_price_usd, s);
+                let ratio =
+                    rumi_protocol_backend::compute_collateral_ratio(vault, collateral_price_usd, s);
 
                 let min_ratio = s.get_min_liquidation_ratio_for(&vault.collateral_type);
                 if ratio >= min_ratio {
@@ -3587,26 +4233,39 @@ async fn stability_pool_liquidate(vault_id: u64, max_debt_to_liquidate: u64) -> 
 
                 // Calculate optimal amount to restore vault to target CR
                 let optimal_amount = s.compute_partial_liquidation_cap(vault, collateral_price_usd);
-                let actual_liquidatable_debt = optimal_amount.min(vault.borrowed_icusd_amount).min(max_debt_to_liquidate.into());
+                let actual_liquidatable_debt = optimal_amount
+                    .min(vault.borrowed_icusd_amount)
+                    .min(max_debt_to_liquidate.into());
 
                 // Calculate collateral that will be seized (debt + liquidation bonus)
                 let liquidation_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
                 let icp_equivalent = actual_liquidatable_debt / collateral_price_usd;
                 let collateral_with_bonus = icp_equivalent * liquidation_bonus;
-                let collateral_to_seize = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
+                let collateral_to_seize =
+                    collateral_with_bonus.min(ICP::from(vault.collateral_amount));
 
-                Ok((vault.clone(), collateral_price_usd, actual_liquidatable_debt, collateral_to_seize))
-            },
+                Ok((
+                    vault.clone(),
+                    collateral_price_usd,
+                    actual_liquidatable_debt,
+                    collateral_to_seize,
+                ))
+            }
             None => Err(format!("Vault #{} not found", vault_id)),
         }
-    }).map_err(|e| ProtocolError::GenericError(e))?;
+    })
+    .map_err(|e| ProtocolError::GenericError(e))?;
 
     if liquidatable_debt == ICUSD::new(0) {
-        return Err(ProtocolError::GenericError("No liquidatable debt available".to_string()));
+        return Err(ProtocolError::GenericError(
+            "No liquidatable debt available".to_string(),
+        ));
     }
 
     // Execute the liquidation using existing logic
-    let result = rumi_protocol_backend::vault::liquidate_vault_partial(vault_id, liquidatable_debt.to_u64()).await?;
+    let result =
+        rumi_protocol_backend::vault::liquidate_vault_partial(vault_id, liquidatable_debt.to_u64())
+            .await?;
 
     // Return structured result for stability pool
     Ok(StabilityPoolLiquidationResult {
@@ -3650,9 +4309,8 @@ async fn stability_pool_liquidate_debt_burned(
     }
     let caller = ic_cdk::api::caller();
 
-    let is_stability_pool = read_state(|s| {
-        s.stability_pool_canister.map_or(false, |sp| sp == caller)
-    });
+    let is_stability_pool =
+        read_state(|s| s.stability_pool_canister.map_or(false, |sp| sp == caller));
     if !is_stability_pool {
         return Err(ProtocolError::GenericError(
             "Caller is not the registered stability pool canister".to_string(),
@@ -3660,7 +4318,11 @@ async fn stability_pool_liquidate_debt_burned(
     }
 
     rumi_protocol_backend::vault::liquidate_vault_debt_already_burned(
-        vault_id, icusd_burned_e8s, caller, None, proof,
+        vault_id,
+        icusd_burned_e8s,
+        caller,
+        None,
+        proof,
     )
     .await
 }
@@ -3700,7 +4362,9 @@ async fn verify_sp_icusd_burn_proof(
         sp_principal: caller,
         reserves_account: icrc_ledger_types::icrc1::account::Account {
             owner: ic_cdk::id(),
-            subaccount: Some(rumi_protocol_backend::management::protocol_3usd_reserves_subaccount()),
+            subaccount: Some(
+                rumi_protocol_backend::management::protocol_3usd_reserves_subaccount(),
+            ),
         },
         vault_id_memo: vault_id,
     };
@@ -3752,9 +4416,8 @@ async fn stability_pool_liquidate_chain_vault(
     }
 
     let caller = ic_cdk::api::caller();
-    let is_stability_pool = read_state(|s| {
-        s.stability_pool_canister.map_or(false, |sp| sp == caller)
-    });
+    let is_stability_pool =
+        read_state(|s| s.stability_pool_canister.map_or(false, |sp| sp == caller));
     if !is_stability_pool {
         return Err(ProtocolError::GenericError(
             "Caller is not the registered stability pool canister".to_string(),
@@ -3843,16 +4506,17 @@ fn claim_chain_collateral(
     }
 
     let caller = ic_cdk::api::caller();
-    let is_stability_pool = read_state(|s| {
-        s.stability_pool_canister.map_or(false, |sp| sp == caller)
-    });
+    let is_stability_pool =
+        read_state(|s| s.stability_pool_canister.map_or(false, |sp| sp == caller));
     if !is_stability_pool {
         return Err(ProtocolError::GenericError(
             "Caller is not the registered stability pool canister".to_string(),
         ));
     }
     if !rumi_protocol_backend::chains::evm::tecdsa::is_valid_evm_address(&dest_evm) {
-        return Err(ProtocolError::GenericError("invalid EVM address".to_string()));
+        return Err(ProtocolError::GenericError(
+            "invalid EVM address".to_string(),
+        ));
     }
 
     let now = ic_cdk::api::time();
@@ -3916,9 +4580,8 @@ async fn stability_pool_liquidate_with_reserves(
     }
     let caller = ic_cdk::api::caller();
 
-    let is_stability_pool = read_state(|s| {
-        s.stability_pool_canister.map_or(false, |sp| sp == caller)
-    });
+    let is_stability_pool =
+        read_state(|s| s.stability_pool_canister.map_or(false, |sp| sp == caller));
     if !is_stability_pool {
         return Err(ProtocolError::GenericError(
             "Caller is not the registered stability pool canister".to_string(),
@@ -3933,43 +4596,48 @@ async fn stability_pool_liquidate_with_reserves(
             minimum_amount: read_state(|s| s.min_icusd_amount).to_u64(),
         });
     }
-    read_state(|s| {
-        match s.vault_id_to_vaults.get(&vault_id) {
-            Some(vault) => {
-                if let Some(status) = s.get_collateral_status(&vault.collateral_type) {
-                    if !status.allows_liquidation() {
-                        return Err(ProtocolError::GenericError(
-                            "Liquidation is not allowed for this collateral type".to_string(),
-                        ));
-                    }
-                }
-                if s.get_collateral_price_decimal(&vault.collateral_type).is_none() {
+    read_state(|s| match s.vault_id_to_vaults.get(&vault_id) {
+        Some(vault) => {
+            if let Some(status) = s.get_collateral_status(&vault.collateral_type) {
+                if !status.allows_liquidation() {
                     return Err(ProtocolError::GenericError(
-                        "No price available for collateral. Price feed may be down.".to_string(),
+                        "Liquidation is not allowed for this collateral type".to_string(),
                     ));
                 }
-                let capped = liquidation_amount.min(vault.borrowed_icusd_amount);
-                if capped == rumi_protocol_backend::numeric::ICUSD::new(0) {
-                    return Err(ProtocolError::GenericError(
-                        "Cannot liquidate zero amount — vault has no debt".to_string(),
-                    ));
-                }
-                Ok(())
             }
-            None => Err(ProtocolError::GenericError(
-                format!("Vault #{} not found", vault_id),
-            )),
+            if s.get_collateral_price_decimal(&vault.collateral_type)
+                .is_none()
+            {
+                return Err(ProtocolError::GenericError(
+                    "No price available for collateral. Price feed may be down.".to_string(),
+                ));
+            }
+            let capped = liquidation_amount.min(vault.borrowed_icusd_amount);
+            if capped == rumi_protocol_backend::numeric::ICUSD::new(0) {
+                return Err(ProtocolError::GenericError(
+                    "Cannot liquidate zero amount — vault has no debt".to_string(),
+                ));
+            }
+            Ok(())
         }
+        None => Err(ProtocolError::GenericError(format!(
+            "Vault #{} not found",
+            vault_id
+        ))),
     })?;
 
     // Pull 3USD from the SP into protocol reserves subaccount (ICRC-2 transfer_from).
     // Only runs after validation passes — no tokens move if vault is stale.
     // The block index returned drives the Phase-2 internal proof below.
     let transfer_block_index = rumi_protocol_backend::management::transfer_3usd_to_reserves(
-        three_usd_ledger, caller, three_usd_amount_e8s
-    ).await.map_err(|e| ProtocolError::GenericError(
-        format!("Failed to pull 3USD from stability pool: {:?}", e)
-    ))?;
+        three_usd_ledger,
+        caller,
+        three_usd_amount_e8s,
+    )
+    .await
+    .map_err(|e| {
+        ProtocolError::GenericError(format!("Failed to pull 3USD from stability pool: {:?}", e))
+    })?;
 
     // Wave-8d LIQ-004 Phase 2: build the writedown proof from the just-
     // produced transfer block. Vault binding is set here at construction
@@ -3989,8 +4657,14 @@ async fn stability_pool_liquidate_with_reserves(
     // got a chance to mark it consumed. Refund it so the SP's ledger balance and
     // bookkeeping stay in sync.
     match rumi_protocol_backend::vault::liquidate_vault_debt_already_burned(
-        vault_id, icusd_debt_covered_e8s, caller, Some(three_usd_amount_e8s), proof,
-    ).await {
+        vault_id,
+        icusd_debt_covered_e8s,
+        caller,
+        Some(three_usd_amount_e8s),
+        proof,
+    )
+    .await
+    {
         Ok(success) => {
             // VER-002 (audit 2026-06-05): the full `three_usd_amount_e8s` was
             // pulled above, but the writedown is capped to the vault's current
@@ -4006,19 +4680,23 @@ async fn stability_pool_liquidate_with_reserves(
                     / (icusd_debt_covered_e8s as u128);
                 let excess = three_usd_amount_e8s.saturating_sub(realized_3usd as u64);
                 if excess > 0 {
-                    log!(INFO,
+                    log!(
+                        INFO,
                         "[stability_pool_liquidate_with_reserves] vault #{}: writedown capped \
                          ({} of {} icUSD realized); refunding {} excess 3USD to SP",
-                        vault_id, success.liquidated_debt, icusd_debt_covered_e8s, excess);
+                        vault_id,
+                        success.liquidated_debt,
+                        icusd_debt_covered_e8s,
+                        excess
+                    );
                     refund_3usd_to_stability_pool(three_usd_ledger, caller, excess, vault_id).await;
                 }
             }
             Ok(success)
         }
         Err(liq_error) => {
-            refund_3usd_to_stability_pool(
-                three_usd_ledger, caller, three_usd_amount_e8s, vault_id,
-            ).await;
+            refund_3usd_to_stability_pool(three_usd_ledger, caller, three_usd_amount_e8s, vault_id)
+                .await;
             Err(liq_error)
         }
     }
@@ -4056,10 +4734,14 @@ async fn refund_3usd_to_stability_pool(
         }
     };
     if amount_e8s <= fee {
-        log!(INFO,
+        log!(
+            INFO,
             "[stability_pool_liquidate_with_reserves] CRITICAL: refund of {} 3USD for vault {} \
              to SP {} aborted (amount does not cover ledger fee {}). Tokens stranded in reserves.",
-            amount_e8s, vault_id, sp_caller, fee
+            amount_e8s,
+            vault_id,
+            sp_caller,
+            fee
         );
         return;
     }
@@ -4068,7 +4750,10 @@ async fn refund_3usd_to_stability_pool(
     let result = rumi_protocol_backend::management::transfer_idempotent(
         three_usd_ledger,
         Some(rumi_protocol_backend::management::protocol_3usd_reserves_subaccount()),
-        icrc_ledger_types::icrc1::account::Account { owner: sp_caller, subaccount: None },
+        icrc_ledger_types::icrc1::account::Account {
+            owner: sp_caller,
+            subaccount: None,
+        },
         refund_amount as u128,
         refund_nonce,
         None,
@@ -4187,7 +4872,10 @@ fn get_liquidatable_vaults_page(start_id: u64, limit: u64) -> VaultsPageResponse
                 vaults.push(CandidVault::from(vault.clone()));
             }
         }
-        VaultsPageResponse { vaults, next_start_id }
+        VaultsPageResponse {
+            vaults,
+            next_start_id,
+        }
     })
 }
 
@@ -4363,9 +5051,7 @@ async fn confirm_xrp_deposit(vault_id: u64) -> Result<u64, ProtocolError> {
 #[update]
 async fn settle_xrp_claim(claim_id: u64, destination: String) -> Result<String, ProtocolError> {
     validate_call().await?;
-    check_postcondition(
-        rumi_protocol_backend::vault::settle_xrp_claim(claim_id, destination).await,
-    )
+    check_postcondition(rumi_protocol_backend::vault::settle_xrp_claim(claim_id, destination).await)
 }
 
 /// P5 (native-XRP collateral): register XRP as a collateral (developer-gated). XRP
@@ -4397,7 +5083,8 @@ async fn register_xrp_collateral() -> Result<(), ProtocolError> {
         let icp = s.get_collateral_config(&icp_ct);
         (
             icp.map(|c| c.borrowing_fee).unwrap_or(Ratio::from_f64(0.0)),
-            icp.map(|c| c.interest_rate_apr).unwrap_or(Ratio::from_f64(0.0)),
+            icp.map(|c| c.interest_rate_apr)
+                .unwrap_or(Ratio::from_f64(0.0)),
             s.recovery_cr_multiplier,
         )
     });
@@ -4433,7 +5120,10 @@ fn get_xrp_pending_deposits() -> Vec<(u64, rumi_protocol_backend::state::XrpPend
         if s.developer_principal != caller {
             return Vec::new();
         }
-        s.xrp_pending_deposits.iter().map(|(id, d)| (*id, d.clone())).collect()
+        s.xrp_pending_deposits
+            .iter()
+            .map(|(id, d)| (*id, d.clone()))
+            .collect()
     })
 }
 
@@ -4449,7 +5139,10 @@ fn get_xrp_claims() -> Vec<(u64, rumi_protocol_backend::state::XrpClaim)> {
         if s.developer_principal != caller {
             return Vec::new();
         }
-        s.xrp_claims.iter().map(|(id, c)| (*id, c.clone())).collect()
+        s.xrp_claims
+            .iter()
+            .map(|(id, c)| (*id, c.clone()))
+            .collect()
     })
 }
 
@@ -4576,15 +5269,12 @@ fn http_request(req: HttpRequest) -> HttpResponse {
 
                 let total_tvl = total_icp_dec * s.last_icp_rate.unwrap_or(UsdIcp::from(dec!(0))).0;
 
-                w.encode_gauge(
-                    "total_tvl",
-                    total_tvl.to_f64().unwrap(),
-                    "Total TVL.",
-                )?;
+                w.encode_gauge("total_tvl", total_tvl.to_f64().unwrap(), "Total TVL.")?;
 
-                let total_borrowed_icusd_amount = Decimal::from_u64(s.total_borrowed_icusd_amount().0)
-                    .expect("failed to construct decimal from u64")
-                    / dec!(100_000_000);
+                let total_borrowed_icusd_amount =
+                    Decimal::from_u64(s.total_borrowed_icusd_amount().0)
+                        .expect("failed to construct decimal from u64")
+                        / dec!(100_000_000);
 
                 w.encode_gauge(
                     "icusd_total_borrowed_amount",
@@ -4671,7 +5361,6 @@ fn http_request(req: HttpRequest) -> HttpResponse {
     }
 }
 
-
 #[candid_method(update)]
 #[update]
 async fn recover_pending_transfer(vault_id: u64) -> Result<bool, ProtocolError> {
@@ -4679,7 +5368,8 @@ async fn recover_pending_transfer(vault_id: u64) -> Result<bool, ProtocolError> 
     // ASYNC-003: serialize per-caller so two concurrent manual recoveries cannot
     // both pay out the same pending entry (the entry is only removed AFTER the
     // await below). Defense-in-depth on top of the nonce-dedup fix.
-    let _guard = rumi_protocol_backend::guard::GuardPrincipal::new(caller, "recover_pending_transfer")?;
+    let _guard =
+        rumi_protocol_backend::guard::GuardPrincipal::new(caller, "recover_pending_transfer")?;
 
     // Wave-4 LIQ-001: pending_margin_transfers and pending_excess_transfers are
     // keyed by (vault_id, owner). Look up the entry that belongs to the caller.
@@ -4688,29 +5378,35 @@ async fn recover_pending_transfer(vault_id: u64) -> Result<bool, ProtocolError> 
         if let Some(t) = s.pending_margin_transfers.get(&key).cloned() {
             Some(("margin", t))
         } else {
-            s.pending_excess_transfers.get(&key).cloned().map(|t| ("excess", t))
+            s.pending_excess_transfers
+                .get(&key)
+                .cloned()
+                .map(|t| ("excess", t))
         }
     });
 
     if let Some((source, transfer)) = transfer_info {
         // Look up per-collateral config for ledger and fee; fall back to global ICP defaults
-        let (ledger, transfer_fee) = read_state(|s| {
-            match s.get_collateral_config(&transfer.collateral_type) {
-                Some(config) => (config.ledger_canister_id, ICP::from(config.ledger_fee)),
-                None => (s.icp_ledger_principal, s.icp_ledger_fee),
-            }
-        });
+        let (ledger, transfer_fee) =
+            read_state(
+                |s| match s.get_collateral_config(&transfer.collateral_type) {
+                    Some(config) => (config.ledger_canister_id, ICP::from(config.ledger_fee)),
+                    None => (s.icp_ledger_principal, s.icp_ledger_fee),
+                },
+            );
 
         if transfer.margin <= transfer_fee {
             // Margin too small to cover fee — clean it up
-            mutate_state(|s| {
-                match source {
-                    "margin" => { s.pending_margin_transfers.remove(&key); },
-                    _ => { s.pending_excess_transfers.remove(&key); },
+            mutate_state(|s| match source {
+                "margin" => {
+                    s.pending_margin_transfers.remove(&key);
+                }
+                _ => {
+                    s.pending_excess_transfers.remove(&key);
                 }
             });
             return Err(ProtocolError::GenericError(
-                "Pending transfer margin is too small to cover the ledger fee".to_string()
+                "Pending transfer margin is too small to cover the ledger fee".to_string(),
             ));
         }
 
@@ -4724,14 +5420,17 @@ async fn recover_pending_transfer(vault_id: u64) -> Result<bool, ProtocolError> 
             transfer.owner,
             ledger,
             transfer.op_nonce,
-        ).await;
+        )
+        .await;
 
         match result {
             Ok(block_index) => {
-                mutate_state(|s| {
-                    match source {
-                        "margin" => { event::record_margin_transfer(s, vault_id, caller, block_index); },
-                        _ => { s.pending_excess_transfers.remove(&key); },
+                mutate_state(|s| match source {
+                    "margin" => {
+                        event::record_margin_transfer(s, vault_id, caller, block_index);
+                    }
+                    _ => {
+                        s.pending_excess_transfers.remove(&key);
                     }
                 });
                 Ok(true)
@@ -4749,7 +5448,9 @@ async fn recover_pending_transfer(vault_id: u64) -> Result<bool, ProtocolError> 
         }
     } else {
         // No pending transfer found for this caller + vault
-        Err(ProtocolError::GenericError("No pending transfer found for this vault".to_string()))
+        Err(ProtocolError::GenericError(
+            "No pending transfer found for this vault".to_string(),
+        ))
     }
 }
 
@@ -4758,18 +5459,24 @@ async fn recover_pending_transfer(vault_id: u64) -> Result<bool, ProtocolError> 
 #[update]
 async fn set_treasury_principal(treasury_principal: Principal) -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
-    
+
     // Only developer can set treasury principal
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
-        return Err(ProtocolError::GenericError("Only developer can set treasury principal".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Only developer can set treasury principal".to_string(),
+        ));
     }
-    
+
     mutate_state(|s| {
         rumi_protocol_backend::event::record_set_treasury_principal(s, treasury_principal);
     });
 
-    log!(INFO, "[set_treasury_principal] Treasury principal set to: {}", treasury_principal);
+    log!(
+        INFO,
+        "[set_treasury_principal] Treasury principal set to: {}",
+        treasury_principal
+    );
     Ok(())
 }
 
@@ -4782,20 +5489,31 @@ fn get_treasury_principal() -> Option<Principal> {
 // Add stability pool configuration endpoint (developer only)
 #[candid_method(update)]
 #[update]
-async fn set_stability_pool_principal(stability_pool_principal: Principal) -> Result<(), ProtocolError> {
+async fn set_stability_pool_principal(
+    stability_pool_principal: Principal,
+) -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
-    
+
     // Only developer can set stability pool principal
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
-        return Err(ProtocolError::GenericError("Only developer can set stability pool principal".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Only developer can set stability pool principal".to_string(),
+        ));
     }
-    
+
     mutate_state(|s| {
-        rumi_protocol_backend::event::record_set_stability_pool_principal(s, stability_pool_principal);
+        rumi_protocol_backend::event::record_set_stability_pool_principal(
+            s,
+            stability_pool_principal,
+        );
     });
 
-    log!(INFO, "[set_stability_pool_principal] Stability pool principal set to: {}", stability_pool_principal);
+    log!(
+        INFO,
+        "[set_stability_pool_principal] Stability pool principal set to: {}",
+        stability_pool_principal
+    );
     Ok(())
 }
 
@@ -4828,21 +5546,36 @@ pub struct BotStatsResponse {
 
 #[candid_method(update)]
 #[update]
-async fn set_liquidation_bot_config(bot_principal: Principal, monthly_budget_e8s: u64) -> Result<(), ProtocolError> {
+async fn set_liquidation_bot_config(
+    bot_principal: Principal,
+    monthly_budget_e8s: u64,
+) -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
-        return Err(ProtocolError::GenericError("Only developer can set liquidation bot config".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Only developer can set liquidation bot config".to_string(),
+        ));
     }
     mutate_state(|s| {
         rumi_protocol_backend::event::record_set_liquidation_bot_principal(s, bot_principal);
-        rumi_protocol_backend::event::record_set_bot_budget(s, monthly_budget_e8s, ic_cdk::api::time());
+        rumi_protocol_backend::event::record_set_bot_budget(
+            s,
+            monthly_budget_e8s,
+            ic_cdk::api::time(),
+        );
         // Default: allow ICP if the allowlist is empty (first-time setup)
         if s.bot_allowed_collateral_types.is_empty() {
-            s.bot_allowed_collateral_types.insert(s.icp_ledger_principal);
+            s.bot_allowed_collateral_types
+                .insert(s.icp_ledger_principal);
         }
     });
-    log!(INFO, "[set_liquidation_bot_config] Bot principal: {}, budget: {} e8s", bot_principal, monthly_budget_e8s);
+    log!(
+        INFO,
+        "[set_liquidation_bot_config] Bot principal: {}, budget: {} e8s",
+        bot_principal,
+        monthly_budget_e8s
+    );
     Ok(())
 }
 
@@ -4852,12 +5585,18 @@ async fn reset_bot_budget(new_budget_e8s: u64) -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
-        return Err(ProtocolError::GenericError("Only developer can reset bot budget".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Only developer can reset bot budget".to_string(),
+        ));
     }
     mutate_state(|s| {
         rumi_protocol_backend::event::record_set_bot_budget(s, new_budget_e8s, ic_cdk::api::time());
     });
-    log!(INFO, "[reset_bot_budget] Budget reset to {} e8s", new_budget_e8s);
+    log!(
+        INFO,
+        "[reset_bot_budget] Budget reset to {} e8s",
+        new_budget_e8s
+    );
     Ok(())
 }
 
@@ -4865,7 +5604,9 @@ async fn reset_bot_budget(new_budget_e8s: u64) -> Result<(), ProtocolError> {
 /// Pass an empty vec to disable bot liquidations entirely.
 #[candid_method(update)]
 #[update]
-async fn set_bot_allowed_collateral_types(collateral_types: Vec<Principal>) -> Result<(), ProtocolError> {
+async fn set_bot_allowed_collateral_types(
+    collateral_types: Vec<Principal>,
+) -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
@@ -4874,10 +5615,17 @@ async fn set_bot_allowed_collateral_types(collateral_types: Vec<Principal>) -> R
         ));
     }
     mutate_state(|s| {
-        rumi_protocol_backend::event::record_set_bot_allowed_collateral_types(s, collateral_types.clone());
+        rumi_protocol_backend::event::record_set_bot_allowed_collateral_types(
+            s,
+            collateral_types.clone(),
+        );
     });
-    log!(INFO, "[set_bot_allowed_collateral_types] Set {} allowed types: {:?}",
-        collateral_types.len(), collateral_types);
+    log!(
+        INFO,
+        "[set_bot_allowed_collateral_types] Set {} allowed types: {:?}",
+        collateral_types.len(),
+        collateral_types
+    );
     Ok(())
 }
 
@@ -4953,9 +5701,7 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
     }
     let caller = ic_cdk::api::caller();
 
-    let is_bot = read_state(|s| {
-        s.liquidation_bot_principal.map_or(false, |bp| bp == caller)
-    });
+    let is_bot = read_state(|s| s.liquidation_bot_principal.map_or(false, |bp| bp == caller));
     if !is_bot {
         return Err(ProtocolError::GenericError(
             "Caller is not the registered liquidation bot canister".to_string(),
@@ -4974,45 +5720,55 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
     let existing_claim = read_state(|s| s.bot_claims.contains_key(&vault_id));
     if existing_claim {
         return Err(ProtocolError::GenericError(format!(
-            "Vault #{} already has an active bot claim", vault_id
+            "Vault #{} already has an active bot claim",
+            vault_id
         )));
     }
 
     // Get vault info, validate collateral type, compute amounts, check budget
-    let (collateral_price_usd, liquidatable_debt, collateral_to_seize, collateral_type) = read_state(|s| {
-        let vault = s.vault_id_to_vaults.get(&vault_id)
-            .ok_or_else(|| ProtocolError::GenericError(format!("Vault #{} not found", vault_id)))?;
+    let (collateral_price_usd, liquidatable_debt, collateral_to_seize, collateral_type) =
+        read_state(|s| {
+            let vault = s.vault_id_to_vaults.get(&vault_id).ok_or_else(|| {
+                ProtocolError::GenericError(format!("Vault #{} not found", vault_id))
+            })?;
 
-        if vault.bot_processing {
-            return Err(ProtocolError::GenericError(format!(
-                "Vault #{} is already being processed", vault_id
-            )));
-        }
+            if vault.bot_processing {
+                return Err(ProtocolError::GenericError(format!(
+                    "Vault #{} is already being processed",
+                    vault_id
+                )));
+            }
 
-        // Guard: reject collateral types the bot isn't configured to handle
-        if !s.bot_allowed_collateral_types.contains(&vault.collateral_type) {
-            return Err(ProtocolError::GenericError(format!(
-                "Collateral type {} is not in the bot's allowed list.", vault.collateral_type
-            )));
-        }
+            // Guard: reject collateral types the bot isn't configured to handle
+            if !s
+                .bot_allowed_collateral_types
+                .contains(&vault.collateral_type)
+            {
+                return Err(ProtocolError::GenericError(format!(
+                    "Collateral type {} is not in the bot's allowed list.",
+                    vault.collateral_type
+                )));
+            }
 
-        let price = s.get_collateral_price_decimal(&vault.collateral_type)
-            .ok_or_else(|| ProtocolError::GenericError("No price available".to_string()))?;
-        let collateral_price_usd = UsdIcp::from(price);
-        let ratio = rumi_protocol_backend::compute_collateral_ratio(vault, collateral_price_usd, s);
-        let min_ratio = s.get_min_liquidation_ratio_for(&vault.collateral_type);
-        // Apply scan→claim TOCTOU tolerance. The scan in `check_vaults`
-        // flagged this vault as below `min_ratio`; an XRC tick between
-        // that scan and this call can recompute CR slightly above
-        // `min_ratio`. Allowing up to `min_ratio + tolerance` here
-        // closes the race without widening the strict threshold the
-        // manual liquidation paths enforce. The `actual > 0` guard
-        // below catches the Recovery-mode case where `min_ratio +
-        // tolerance` exceeds the partial-cap target CR.
-        let bot_max_ratio = s.get_bot_claim_max_ratio_for(&vault.collateral_type);
+            let price = s
+                .get_collateral_price_decimal(&vault.collateral_type)
+                .ok_or_else(|| ProtocolError::GenericError("No price available".to_string()))?;
+            let collateral_price_usd = UsdIcp::from(price);
+            let ratio =
+                rumi_protocol_backend::compute_collateral_ratio(vault, collateral_price_usd, s);
+            let min_ratio = s.get_min_liquidation_ratio_for(&vault.collateral_type);
+            // Apply scan→claim TOCTOU tolerance. The scan in `check_vaults`
+            // flagged this vault as below `min_ratio`; an XRC tick between
+            // that scan and this call can recompute CR slightly above
+            // `min_ratio`. Allowing up to `min_ratio + tolerance` here
+            // closes the race without widening the strict threshold the
+            // manual liquidation paths enforce. The `actual > 0` guard
+            // below catches the Recovery-mode case where `min_ratio +
+            // tolerance` exceeds the partial-cap target CR.
+            let bot_max_ratio = s.get_bot_claim_max_ratio_for(&vault.collateral_type);
 
-        if ratio >= bot_max_ratio {
-            return Err(ProtocolError::GenericError(format!(
+            if ratio >= bot_max_ratio {
+                return Err(ProtocolError::GenericError(format!(
                 "Vault #{} is not liquidatable (CR {:.2}% >= {:.2}%, base {:.2}% + tolerance {} bps)",
                 vault_id,
                 ratio.to_f64() * 100.0,
@@ -5020,55 +5776,77 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
                 min_ratio.to_f64() * 100.0,
                 s.bot_cr_tolerance_bps
             )));
-        }
+            }
 
-        let actual = s.compute_partial_liquidation_cap(vault, collateral_price_usd);
+            let actual = s.compute_partial_liquidation_cap(vault, collateral_price_usd);
 
-        // Defense-in-depth: with the tolerance applied, `ratio` may sit
-        // above the partial-cap target CR (`borrow_threshold_ratio`),
-        // in which case `compute_partial_liquidation_cap` returns 0.
-        // Reject explicitly rather than claiming a 0-debt liquidation,
-        // which would deduct nothing from the budget and seize 0
-        // collateral — pointless work that would still write a noisy
-        // BotClaim record.
-        if actual.to_u64() == 0 {
-            return Err(ProtocolError::GenericError(format!(
-                "Vault #{} has no liquidatable debt at current CR {:.2}% (target CR {:.2}%)",
-                vault_id,
-                ratio.to_f64() * 100.0,
-                s.get_min_collateral_ratio_for(&vault.collateral_type).to_f64() * 100.0
-            )));
-        }
+            // Defense-in-depth: with the tolerance applied, `ratio` may sit
+            // above the partial-cap target CR (`borrow_threshold_ratio`),
+            // in which case `compute_partial_liquidation_cap` returns 0.
+            // Reject explicitly rather than claiming a 0-debt liquidation,
+            // which would deduct nothing from the budget and seize 0
+            // collateral — pointless work that would still write a noisy
+            // BotClaim record.
+            if actual.to_u64() == 0 {
+                return Err(ProtocolError::GenericError(format!(
+                    "Vault #{} has no liquidatable debt at current CR {:.2}% (target CR {:.2}%)",
+                    vault_id,
+                    ratio.to_f64() * 100.0,
+                    s.get_min_collateral_ratio_for(&vault.collateral_type)
+                        .to_f64()
+                        * 100.0
+                )));
+            }
 
-        if s.bot_budget_remaining_e8s < actual.to_u64() {
-            return Err(ProtocolError::GenericError(format!(
-                "Bot budget insufficient: {} remaining, need {}",
-                s.bot_budget_remaining_e8s, actual.to_u64()
-            )));
-        }
+            if s.bot_budget_remaining_e8s < actual.to_u64() {
+                return Err(ProtocolError::GenericError(format!(
+                    "Bot budget insufficient: {} remaining, need {}",
+                    s.bot_budget_remaining_e8s,
+                    actual.to_u64()
+                )));
+            }
 
-        let decimals = s.get_collateral_config(&vault.collateral_type)
-            .map(|c| c.decimals)
-            .unwrap_or(8);
-        let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
-        let collateral_raw = rumi_protocol_backend::numeric::icusd_to_collateral_amount(actual, price, decimals);
-        let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
-        let collateral_to_seize = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
+            let decimals = s
+                .get_collateral_config(&vault.collateral_type)
+                .map(|c| c.decimals)
+                .unwrap_or(8);
+            let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
+            let collateral_raw =
+                rumi_protocol_backend::numeric::icusd_to_collateral_amount(actual, price, decimals);
+            let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
+            let collateral_to_seize = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
 
-        Ok((collateral_price_usd, actual, collateral_to_seize, vault.collateral_type))
-    })?;
+            Ok((
+                collateral_price_usd,
+                actual,
+                collateral_to_seize,
+                vault.collateral_type,
+            ))
+        })?;
 
     // Transfer collateral to bot
     match rumi_protocol_backend::management::transfer_collateral(
-        collateral_to_seize.to_u64(), caller, collateral_type
-    ).await {
+        collateral_to_seize.to_u64(),
+        caller,
+        collateral_type,
+    )
+    .await
+    {
         Ok(block) => {
             log!(INFO, "[bot_claim_liquidation] Transferred {} collateral ({}) to bot for vault #{}, block {}",
                 collateral_to_seize.to_u64(), collateral_type, vault_id, block);
         }
         Err(e) => {
-            log!(INFO, "[bot_claim_liquidation] Collateral transfer failed for vault #{}: {:?}", vault_id, e);
-            return Err(ProtocolError::GenericError(format!("Collateral transfer failed: {:?}", e)));
+            log!(
+                INFO,
+                "[bot_claim_liquidation] Collateral transfer failed for vault #{}: {:?}",
+                vault_id,
+                e
+            );
+            return Err(ProtocolError::GenericError(format!(
+                "Collateral transfer failed: {:?}",
+                e
+            )));
         }
     }
 
@@ -5078,20 +5856,30 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
             vault.bot_processing = true;
         }
-        s.bot_claims.insert(vault_id, rumi_protocol_backend::state::BotClaim {
+        s.bot_claims.insert(
             vault_id,
-            collateral_amount: collateral_to_seize.to_u64(),
-            debt_amount: liquidatable_debt.to_u64(),
-            collateral_type,
-            claimed_at: now,
-            collateral_price_e8s: collateral_price_usd.to_e8s(),
-        });
+            rumi_protocol_backend::state::BotClaim {
+                vault_id,
+                collateral_amount: collateral_to_seize.to_u64(),
+                debt_amount: liquidatable_debt.to_u64(),
+                collateral_type,
+                claimed_at: now,
+                collateral_price_e8s: collateral_price_usd.to_e8s(),
+            },
+        );
         // Deduct from budget immediately to prevent over-claiming
-        s.bot_budget_remaining_e8s = s.bot_budget_remaining_e8s.saturating_sub(liquidatable_debt.to_u64());
+        s.bot_budget_remaining_e8s = s
+            .bot_budget_remaining_e8s
+            .saturating_sub(liquidatable_debt.to_u64());
     });
 
-    log!(INFO, "[bot_claim_liquidation] Claimed vault #{}: debt={}, collateral={}",
-        vault_id, liquidatable_debt.to_u64(), collateral_to_seize.to_u64());
+    log!(
+        INFO,
+        "[bot_claim_liquidation] Claimed vault #{}: debt={}, collateral={}",
+        vault_id,
+        liquidatable_debt.to_u64(),
+        collateral_to_seize.to_u64()
+    );
 
     Ok(BotLiquidationResult {
         vault_id,
@@ -5109,19 +5897,16 @@ async fn bot_confirm_liquidation(vault_id: u64) -> Result<(), ProtocolError> {
     validate_call().await?;
     let caller = ic_cdk::api::caller();
 
-    let is_bot = read_state(|s| {
-        s.liquidation_bot_principal.map_or(false, |bp| bp == caller)
-    });
+    let is_bot = read_state(|s| s.liquidation_bot_principal.map_or(false, |bp| bp == caller));
     if !is_bot {
         return Err(ProtocolError::GenericError(
             "Caller is not the registered liquidation bot canister".to_string(),
         ));
     }
 
-    let claim = read_state(|s| s.bot_claims.get(&vault_id).cloned())
-        .ok_or_else(|| ProtocolError::GenericError(format!(
-            "No active claim for vault #{}", vault_id
-        )))?;
+    let claim = read_state(|s| s.bot_claims.get(&vault_id).cloned()).ok_or_else(|| {
+        ProtocolError::GenericError(format!("No active claim for vault #{}", vault_id))
+    })?;
 
     mutate_state(|s| {
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
@@ -5132,9 +5917,12 @@ async fn bot_confirm_liquidation(vault_id: u64) -> Result<(), ProtocolError> {
             // paid. The redemption skip + user-op rejection make that window
             // race-free today; saturating keeps a residual drift from ever
             // bricking the vault (it degrades to under-reduction instead).
-            vault.borrowed_icusd_amount =
-                vault.borrowed_icusd_amount.saturating_sub(ICUSD::new(claim.debt_amount));
-            vault.collateral_amount = vault.collateral_amount.saturating_sub(claim.collateral_amount);
+            vault.borrowed_icusd_amount = vault
+                .borrowed_icusd_amount
+                .saturating_sub(ICUSD::new(claim.debt_amount));
+            vault.collateral_amount = vault
+                .collateral_amount
+                .saturating_sub(claim.collateral_amount);
             vault.bot_processing = false;
         }
 
@@ -5143,7 +5931,9 @@ async fn bot_confirm_liquidation(vault_id: u64) -> Result<(), ProtocolError> {
             liquidator_payment: ICUSD::new(claim.debt_amount),
             icp_to_liquidator: ICP::from(claim.collateral_amount),
             liquidator: Some(caller),
-            icp_rate: Some(UsdIcp::from(Decimal::from(claim.collateral_price_e8s) / dec!(100_000_000))),
+            icp_rate: Some(UsdIcp::from(
+                Decimal::from(claim.collateral_price_e8s) / dec!(100_000_000),
+            )),
             protocol_fee_collateral: None,
             timestamp: Some(ic_cdk::api::time()),
             three_usd_reserves_e8s: None,
@@ -5157,12 +5947,21 @@ async fn bot_confirm_liquidation(vault_id: u64) -> Result<(), ProtocolError> {
         // the write-down emptied the vault it must be removed like every
         // other PartialLiquidateVault path, or replay diverges.
         if s.cleanup_if_drained(vault_id) {
-            log!(INFO, "[bot_confirm_liquidation] Vault #{} fully liquidated — removed", vault_id);
+            log!(
+                INFO,
+                "[bot_confirm_liquidation] Vault #{} fully liquidated — removed",
+                vault_id
+            );
         }
     });
 
-    log!(INFO, "[bot_confirm_liquidation] Confirmed liquidation for vault #{}: debt={}, collateral={}",
-        vault_id, claim.debt_amount, claim.collateral_amount);
+    log!(
+        INFO,
+        "[bot_confirm_liquidation] Confirmed liquidation for vault #{}: debt={}, collateral={}",
+        vault_id,
+        claim.debt_amount,
+        claim.collateral_amount
+    );
 
     Ok(())
 }
@@ -5176,19 +5975,16 @@ async fn bot_cancel_liquidation(vault_id: u64) -> Result<(), ProtocolError> {
     validate_call().await?;
     let caller = ic_cdk::api::caller();
 
-    let is_bot = read_state(|s| {
-        s.liquidation_bot_principal.map_or(false, |bp| bp == caller)
-    });
+    let is_bot = read_state(|s| s.liquidation_bot_principal.map_or(false, |bp| bp == caller));
     if !is_bot {
         return Err(ProtocolError::GenericError(
             "Caller is not the registered liquidation bot canister".to_string(),
         ));
     }
 
-    let claim = read_state(|s| s.bot_claims.get(&vault_id).cloned())
-        .ok_or_else(|| ProtocolError::GenericError(format!(
-            "No active claim for vault #{}", vault_id
-        )))?;
+    let claim = read_state(|s| s.bot_claims.get(&vault_id).cloned()).ok_or_else(|| {
+        ProtocolError::GenericError(format!("No active claim for vault #{}", vault_id))
+    })?;
 
     // Verify the collateral was actually returned by checking the backend's balance
     let backend_id = ic_cdk::id();
@@ -5199,7 +5995,8 @@ async fn bot_cancel_liquidation(vault_id: u64) -> Result<(), ProtocolError> {
             owner: backend_id,
             subaccount: None,
         },),
-    ).await;
+    )
+    .await;
 
     // Wave-12 BOT-001b: gate the explicit cancel on the protocol's collateral
     // balance having returned to (>=) `claim.collateral_amount - ledger_fee`.
@@ -5211,8 +6008,13 @@ async fn bot_cancel_liquidation(vault_id: u64) -> Result<(), ProtocolError> {
     let observed = match balance_result {
         Ok((bal,)) => bal.0.to_u64().unwrap_or(0),
         Err((code, msg)) => {
-            log!(INFO, "[BOT-001b] balance query failed for vault #{}: {:?} {}",
-                vault_id, code, msg);
+            log!(
+                INFO,
+                "[BOT-001b] balance query failed for vault #{}: {:?} {}",
+                vault_id,
+                code,
+                msg
+            );
             return Err(ProtocolError::TemporarilyUnavailable(format!(
                 "Could not verify collateral return for vault #{}: {:?} {}. Retry once the ledger is available.",
                 vault_id, code, msg
@@ -5237,8 +6039,13 @@ async fn bot_cancel_liquidation(vault_id: u64) -> Result<(), ProtocolError> {
         )));
     }
 
-    log!(INFO, "[BOT-001b] balance check passed for vault #{}: balance {} >= required {}",
-        vault_id, observed, required);
+    log!(
+        INFO,
+        "[BOT-001b] balance check passed for vault #{}: balance {} >= required {}",
+        vault_id,
+        observed,
+        required
+    );
 
     mutate_state(|s| {
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
@@ -5272,58 +6079,88 @@ async fn dev_force_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, 
             || s.liquidation_bot_principal.map_or(false, |bp| bp == caller)
     });
     if !is_authorized {
-        return Err(ProtocolError::GenericError("Only developer or bot can force bot liquidation".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Only developer or bot can force bot liquidation".to_string(),
+        ));
     }
 
     let existing_claim = read_state(|s| s.bot_claims.contains_key(&vault_id));
     if existing_claim {
         return Err(ProtocolError::GenericError(format!(
-            "Vault #{} already has an active bot claim", vault_id
+            "Vault #{} already has an active bot claim",
+            vault_id
         )));
     }
 
     // Get vault info — NO CR check, but still check collateral allowlist
-    let (collateral_price_usd, debt_to_cover, collateral_to_seize, collateral_type) = read_state(|s| {
-        let vault = s.vault_id_to_vaults.get(&vault_id)
-            .ok_or_else(|| ProtocolError::GenericError(format!("Vault #{} not found", vault_id)))?;
+    let (collateral_price_usd, debt_to_cover, collateral_to_seize, collateral_type) =
+        read_state(|s| {
+            let vault = s.vault_id_to_vaults.get(&vault_id).ok_or_else(|| {
+                ProtocolError::GenericError(format!("Vault #{} not found", vault_id))
+            })?;
 
-        if vault.bot_processing {
-            return Err(ProtocolError::GenericError(format!(
-                "Vault #{} is already being processed", vault_id
-            )));
-        }
+            if vault.bot_processing {
+                return Err(ProtocolError::GenericError(format!(
+                    "Vault #{} is already being processed",
+                    vault_id
+                )));
+            }
 
-        if !s.bot_allowed_collateral_types.contains(&vault.collateral_type) {
-            return Err(ProtocolError::GenericError(format!(
-                "Collateral type {} is not in the bot's allowed list.", vault.collateral_type
-            )));
-        }
+            if !s
+                .bot_allowed_collateral_types
+                .contains(&vault.collateral_type)
+            {
+                return Err(ProtocolError::GenericError(format!(
+                    "Collateral type {} is not in the bot's allowed list.",
+                    vault.collateral_type
+                )));
+            }
 
-        let price = s.get_collateral_price_decimal(&vault.collateral_type)
-            .ok_or_else(|| ProtocolError::GenericError("No price available".to_string()))?;
-        let collateral_price_usd = UsdIcp::from(price);
-        let decimals = s.get_collateral_config(&vault.collateral_type)
-            .map(|c| c.decimals)
-            .unwrap_or(8);
+            let price = s
+                .get_collateral_price_decimal(&vault.collateral_type)
+                .ok_or_else(|| ProtocolError::GenericError("No price available".to_string()))?;
+            let collateral_price_usd = UsdIcp::from(price);
+            let decimals = s
+                .get_collateral_config(&vault.collateral_type)
+                .map(|c| c.decimals)
+                .unwrap_or(8);
 
-        let debt = vault.borrowed_icusd_amount;
-        let collateral_raw = rumi_protocol_backend::numeric::icusd_to_collateral_amount(debt, price, decimals);
-        let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
-        let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
-        let collateral_to_seize = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
+            let debt = vault.borrowed_icusd_amount;
+            let collateral_raw =
+                rumi_protocol_backend::numeric::icusd_to_collateral_amount(debt, price, decimals);
+            let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
+            let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
+            let collateral_to_seize = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
 
-        Ok::<_, ProtocolError>((collateral_price_usd, debt, collateral_to_seize, vault.collateral_type))
-    })?;
+            Ok::<_, ProtocolError>((
+                collateral_price_usd,
+                debt,
+                collateral_to_seize,
+                vault.collateral_type,
+            ))
+        })?;
 
     // Transfer collateral
     match rumi_protocol_backend::management::transfer_collateral(
-        collateral_to_seize.to_u64(), caller, collateral_type
-    ).await {
+        collateral_to_seize.to_u64(),
+        caller,
+        collateral_type,
+    )
+    .await
+    {
         Ok(block) => {
-            log!(INFO, "[dev_force_bot_liquidate] Transferred {} collateral to caller, block {}", collateral_to_seize.to_u64(), block);
+            log!(
+                INFO,
+                "[dev_force_bot_liquidate] Transferred {} collateral to caller, block {}",
+                collateral_to_seize.to_u64(),
+                block
+            );
         }
         Err(e) => {
-            return Err(ProtocolError::GenericError(format!("Collateral transfer failed: {:?}", e)));
+            return Err(ProtocolError::GenericError(format!(
+                "Collateral transfer failed: {:?}",
+                e
+            )));
         }
     }
 
@@ -5333,18 +6170,26 @@ async fn dev_force_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, 
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
             vault.bot_processing = true;
         }
-        s.bot_claims.insert(vault_id, rumi_protocol_backend::state::BotClaim {
+        s.bot_claims.insert(
             vault_id,
-            collateral_amount: collateral_to_seize.to_u64(),
-            debt_amount: debt_to_cover.to_u64(),
-            collateral_type,
-            claimed_at: now,
-            collateral_price_e8s: collateral_price_usd.to_e8s(),
-        });
+            rumi_protocol_backend::state::BotClaim {
+                vault_id,
+                collateral_amount: collateral_to_seize.to_u64(),
+                debt_amount: debt_to_cover.to_u64(),
+                collateral_type,
+                claimed_at: now,
+                collateral_price_e8s: collateral_price_usd.to_e8s(),
+            },
+        );
     });
 
-    log!(INFO, "[dev_force_bot_liquidate] Force-claimed vault #{}: debt={}, collateral={}",
-        vault_id, debt_to_cover.to_u64(), collateral_to_seize.to_u64());
+    log!(
+        INFO,
+        "[dev_force_bot_liquidate] Force-claimed vault #{}: debt={}, collateral={}",
+        vault_id,
+        debt_to_cover.to_u64(),
+        collateral_to_seize.to_u64()
+    );
 
     Ok(BotLiquidationResult {
         vault_id,
@@ -5362,7 +6207,9 @@ async fn dev_force_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, 
 #[cfg(feature = "test_endpoints")]
 #[candid_method(update)]
 #[update]
-async fn dev_force_partial_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, ProtocolError> {
+async fn dev_force_partial_bot_liquidate(
+    vault_id: u64,
+) -> Result<BotLiquidationResult, ProtocolError> {
     validate_call().await?;
     let caller = ic_cdk::caller();
     let is_authorized = read_state(|s| {
@@ -5370,60 +6217,90 @@ async fn dev_force_partial_bot_liquidate(vault_id: u64) -> Result<BotLiquidation
             || s.liquidation_bot_principal.map_or(false, |bp| bp == caller)
     });
     if !is_authorized {
-        return Err(ProtocolError::GenericError("Only developer or bot can force partial bot liquidation".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Only developer or bot can force partial bot liquidation".to_string(),
+        ));
     }
 
     let existing_claim = read_state(|s| s.bot_claims.contains_key(&vault_id));
     if existing_claim {
         return Err(ProtocolError::GenericError(format!(
-            "Vault #{} already has an active bot claim", vault_id
+            "Vault #{} already has an active bot claim",
+            vault_id
         )));
     }
 
     // Get vault info — NO CR check, uses partial liquidation cap, checks collateral allowlist
-    let (collateral_price_usd, debt_to_cover, collateral_to_seize, collateral_type) = read_state(|s| {
-        let vault = s.vault_id_to_vaults.get(&vault_id)
-            .ok_or_else(|| ProtocolError::GenericError(format!("Vault #{} not found", vault_id)))?;
+    let (collateral_price_usd, debt_to_cover, collateral_to_seize, collateral_type) =
+        read_state(|s| {
+            let vault = s.vault_id_to_vaults.get(&vault_id).ok_or_else(|| {
+                ProtocolError::GenericError(format!("Vault #{} not found", vault_id))
+            })?;
 
-        if vault.bot_processing {
-            return Err(ProtocolError::GenericError(format!(
-                "Vault #{} is already being processed", vault_id
-            )));
-        }
+            if vault.bot_processing {
+                return Err(ProtocolError::GenericError(format!(
+                    "Vault #{} is already being processed",
+                    vault_id
+                )));
+            }
 
-        if !s.bot_allowed_collateral_types.contains(&vault.collateral_type) {
-            return Err(ProtocolError::GenericError(format!(
-                "Collateral type {} is not in the bot's allowed list.", vault.collateral_type
-            )));
-        }
+            if !s
+                .bot_allowed_collateral_types
+                .contains(&vault.collateral_type)
+            {
+                return Err(ProtocolError::GenericError(format!(
+                    "Collateral type {} is not in the bot's allowed list.",
+                    vault.collateral_type
+                )));
+            }
 
-        let price = s.get_collateral_price_decimal(&vault.collateral_type)
-            .ok_or_else(|| ProtocolError::GenericError("No price available".to_string()))?;
-        let collateral_price_usd = UsdIcp::from(price);
-        let decimals = s.get_collateral_config(&vault.collateral_type)
-            .map(|c| c.decimals)
-            .unwrap_or(8);
+            let price = s
+                .get_collateral_price_decimal(&vault.collateral_type)
+                .ok_or_else(|| ProtocolError::GenericError("No price available".to_string()))?;
+            let collateral_price_usd = UsdIcp::from(price);
+            let decimals = s
+                .get_collateral_config(&vault.collateral_type)
+                .map(|c| c.decimals)
+                .unwrap_or(8);
 
-        // Use partial liquidation cap — same as bot_claim_liquidation
-        let actual = s.compute_partial_liquidation_cap(vault, collateral_price_usd);
+            // Use partial liquidation cap — same as bot_claim_liquidation
+            let actual = s.compute_partial_liquidation_cap(vault, collateral_price_usd);
 
-        let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
-        let collateral_raw = rumi_protocol_backend::numeric::icusd_to_collateral_amount(actual, price, decimals);
-        let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
-        let collateral_to_seize = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
+            let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
+            let collateral_raw =
+                rumi_protocol_backend::numeric::icusd_to_collateral_amount(actual, price, decimals);
+            let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
+            let collateral_to_seize = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
 
-        Ok::<_, ProtocolError>((collateral_price_usd, actual, collateral_to_seize, vault.collateral_type))
-    })?;
+            Ok::<_, ProtocolError>((
+                collateral_price_usd,
+                actual,
+                collateral_to_seize,
+                vault.collateral_type,
+            ))
+        })?;
 
     // Transfer collateral
     match rumi_protocol_backend::management::transfer_collateral(
-        collateral_to_seize.to_u64(), caller, collateral_type
-    ).await {
+        collateral_to_seize.to_u64(),
+        caller,
+        collateral_type,
+    )
+    .await
+    {
         Ok(block) => {
-            log!(INFO, "[dev_force_partial_bot_liquidate] Transferred {} collateral to caller, block {}", collateral_to_seize.to_u64(), block);
+            log!(
+                INFO,
+                "[dev_force_partial_bot_liquidate] Transferred {} collateral to caller, block {}",
+                collateral_to_seize.to_u64(),
+                block
+            );
         }
         Err(e) => {
-            return Err(ProtocolError::GenericError(format!("Collateral transfer failed: {:?}", e)));
+            return Err(ProtocolError::GenericError(format!(
+                "Collateral transfer failed: {:?}",
+                e
+            )));
         }
     }
 
@@ -5433,18 +6310,26 @@ async fn dev_force_partial_bot_liquidate(vault_id: u64) -> Result<BotLiquidation
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
             vault.bot_processing = true;
         }
-        s.bot_claims.insert(vault_id, rumi_protocol_backend::state::BotClaim {
+        s.bot_claims.insert(
             vault_id,
-            collateral_amount: collateral_to_seize.to_u64(),
-            debt_amount: debt_to_cover.to_u64(),
-            collateral_type,
-            claimed_at: now,
-            collateral_price_e8s: collateral_price_usd.to_e8s(),
-        });
+            rumi_protocol_backend::state::BotClaim {
+                vault_id,
+                collateral_amount: collateral_to_seize.to_u64(),
+                debt_amount: debt_to_cover.to_u64(),
+                collateral_type,
+                claimed_at: now,
+                collateral_price_e8s: collateral_price_usd.to_e8s(),
+            },
+        );
     });
 
-    log!(INFO, "[dev_force_partial_bot_liquidate] Force-partial-claimed vault #{}: debt={}, collateral={}",
-        vault_id, debt_to_cover.to_u64(), collateral_to_seize.to_u64());
+    log!(
+        INFO,
+        "[dev_force_partial_bot_liquidate] Force-partial-claimed vault #{}: debt={}, collateral={}",
+        vault_id,
+        debt_to_cover.to_u64(),
+        collateral_to_seize.to_u64()
+    );
 
     Ok(BotLiquidationResult {
         vault_id,
@@ -5474,18 +6359,24 @@ async fn dev_test_pool_only_liquidation(vault_id: u64) -> Result<String, Protoco
 
     // Build vault notification (skips CR check — force test)
     let vault_info = read_state(|s| {
-        let vault = s.vault_id_to_vaults.get(&vault_id)
+        let vault = s
+            .vault_id_to_vaults
+            .get(&vault_id)
             .ok_or_else(|| ProtocolError::GenericError(format!("Vault #{} not found", vault_id)))?;
 
         if vault.bot_processing {
             return Err(ProtocolError::GenericError(format!(
-                "Vault #{} is locked by bot_processing", vault_id
+                "Vault #{} is locked by bot_processing",
+                vault_id
             )));
         }
 
-        let collateral_price_usd = s.get_collateral_price_decimal(&vault.collateral_type)
+        let collateral_price_usd = s
+            .get_collateral_price_decimal(&vault.collateral_type)
             .map(|p| UsdIcp::from(p))
-            .ok_or(ProtocolError::GenericError("No price available".to_string()))?;
+            .ok_or(ProtocolError::GenericError(
+                "No price available".to_string(),
+            ))?;
         let price_e8s = collateral_price_usd.to_e8s();
         let optimal_liq = s.compute_partial_liquidation_cap(vault, collateral_price_usd);
 
@@ -5504,18 +6395,25 @@ async fn dev_test_pool_only_liquidation(vault_id: u64) -> Result<String, Protoco
         pool_canister,
         "notify_liquidatable_vaults",
         (vec![vault_info],),
-    ).await;
+    )
+    .await;
 
     match result {
         Ok(()) => {
-            log!(INFO, "[dev_test_pool_only_liquidation] Sent vault #{} to stability pool", vault_id);
-            Ok(format!("Vault #{} sent to stability pool for liquidation", vault_id))
+            log!(
+                INFO,
+                "[dev_test_pool_only_liquidation] Sent vault #{} to stability pool",
+                vault_id
+            );
+            Ok(format!(
+                "Vault #{} sent to stability pool for liquidation",
+                vault_id
+            ))
         }
-        Err((code, msg)) => {
-            Err(ProtocolError::GenericError(format!(
-                "Stability pool notification failed: {:?} {}", code, msg
-            )))
-        }
+        Err((code, msg)) => Err(ProtocolError::GenericError(format!(
+            "Stability pool notification failed: {:?} {}",
+            code, msg
+        ))),
     }
 }
 
@@ -5526,7 +6424,10 @@ async fn dev_test_pool_only_liquidation(vault_id: u64) -> Result<String, Protoco
 #[cfg(feature = "test_endpoints")]
 #[candid_method(update)]
 #[update]
-async fn dev_set_collateral_price(collateral_type: Principal, price_usd: f64) -> Result<String, ProtocolError> {
+async fn dev_set_collateral_price(
+    collateral_type: Principal,
+    price_usd: f64,
+) -> Result<String, ProtocolError> {
     validate_call().await?;
     let caller = ic_cdk::caller();
     let is_dev = read_state(|s| s.developer_principal == caller);
@@ -5535,22 +6436,30 @@ async fn dev_set_collateral_price(collateral_type: Principal, price_usd: f64) ->
     }
 
     let ts = ic_cdk::api::time();
-    let old_price = mutate_state(|s| {
-        match s.collateral_configs.get_mut(&collateral_type) {
-            Some(config) => {
-                let old = config.last_price;
-                config.last_price = Some(price_usd);
-                config.last_price_timestamp = Some(ts);
-                Ok(old)
-            }
-            None => Err(ProtocolError::GenericError(
-                format!("Collateral type {} not found in configs", collateral_type)
-            ))
+    let old_price = mutate_state(|s| match s.collateral_configs.get_mut(&collateral_type) {
+        Some(config) => {
+            let old = config.last_price;
+            config.last_price = Some(price_usd);
+            config.last_price_timestamp = Some(ts);
+            Ok(old)
         }
+        None => Err(ProtocolError::GenericError(format!(
+            "Collateral type {} not found in configs",
+            collateral_type
+        ))),
     })?;
 
-    log!(INFO, "[dev_set_collateral_price] {} price set: {:?} → {}", collateral_type, old_price, price_usd);
-    Ok(format!("Price for {} set to ${:.6} (was {:?})", collateral_type, price_usd, old_price))
+    log!(
+        INFO,
+        "[dev_set_collateral_price] {} price set: {:?} → {}",
+        collateral_type,
+        old_price,
+        price_usd
+    );
+    Ok(format!(
+        "Price for {} set to ${:.6} (was {:?})",
+        collateral_type, price_usd, old_price
+    ))
 }
 
 #[candid_method(query)]
@@ -5588,17 +6497,21 @@ fn get_bot_claim_vault_ids() -> Vec<u64> {
 ///   so also write down the vault's debt and collateral (same as what confirm would do).
 #[candid_method(update)]
 #[update]
-fn admin_resolve_stuck_claim(vault_id: u64, apply_debt_reduction: bool) -> Result<(), ProtocolError> {
+fn admin_resolve_stuck_claim(
+    vault_id: u64,
+    apply_debt_reduction: bool,
+) -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
     let is_dev = read_state(|s| s.developer_principal == caller);
     if !is_dev {
-        return Err(ProtocolError::GenericError("Unauthorized: developer only".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Unauthorized: developer only".to_string(),
+        ));
     }
 
-    let claim = read_state(|s| s.bot_claims.get(&vault_id).cloned())
-        .ok_or_else(|| ProtocolError::GenericError(format!(
-            "No active claim for vault #{}", vault_id
-        )))?;
+    let claim = read_state(|s| s.bot_claims.get(&vault_id).cloned()).ok_or_else(|| {
+        ProtocolError::GenericError(format!("No active claim for vault #{}", vault_id))
+    })?;
 
     mutate_state(|s| {
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
@@ -5607,9 +6520,12 @@ fn admin_resolve_stuck_claim(vault_id: u64, apply_debt_reduction: bool) -> Resul
                 // bot_confirm_liquidation. The non-saturating `-=` made this
                 // recovery endpoint trap on exactly the stuck state it exists
                 // to resolve (debt already reduced below the claim amount).
-                vault.borrowed_icusd_amount =
-                    vault.borrowed_icusd_amount.saturating_sub(ICUSD::new(claim.debt_amount));
-                vault.collateral_amount = vault.collateral_amount.saturating_sub(claim.collateral_amount);
+                vault.borrowed_icusd_amount = vault
+                    .borrowed_icusd_amount
+                    .saturating_sub(ICUSD::new(claim.debt_amount));
+                vault.collateral_amount = vault
+                    .collateral_amount
+                    .saturating_sub(claim.collateral_amount);
                 s.bot_total_debt_covered_e8s += claim.debt_amount;
             }
             vault.bot_processing = false;
@@ -5642,17 +6558,27 @@ async fn set_ckstable_repay_fee(new_rate: f64) -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
-        return Err(ProtocolError::GenericError("Only developer can set ckstable repay fee".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Only developer can set ckstable repay fee".to_string(),
+        ));
     }
     if new_rate < 0.0 || new_rate > 0.05 {
-        return Err(ProtocolError::GenericError("Fee rate must be between 0 and 0.05 (5%)".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Fee rate must be between 0 and 0.05 (5%)".to_string(),
+        ));
     }
-    let rate = Ratio::from(rust_decimal::Decimal::try_from(new_rate)
-        .map_err(|_| ProtocolError::GenericError("Invalid fee rate".to_string()))?);
+    let rate = Ratio::from(
+        rust_decimal::Decimal::try_from(new_rate)
+            .map_err(|_| ProtocolError::GenericError("Invalid fee rate".to_string()))?,
+    );
     mutate_state(|s| {
         rumi_protocol_backend::event::record_set_ckstable_repay_fee(s, rate);
     });
-    log!(INFO, "[set_ckstable_repay_fee] Fee rate set to: {}", new_rate);
+    log!(
+        INFO,
+        "[set_ckstable_repay_fee] Fee rate set to: {}",
+        new_rate
+    );
     Ok(())
 }
 
@@ -5671,16 +6597,24 @@ async fn set_min_icusd_amount(new_amount_e8s: u64) -> Result<(), ProtocolError> 
     let caller = ic_cdk::caller();
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
-        return Err(ProtocolError::GenericError("Only developer can set min icUSD amount".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Only developer can set min icUSD amount".to_string(),
+        ));
     }
     if new_amount_e8s == 0 || new_amount_e8s > 10_000_000_000 {
-        return Err(ProtocolError::GenericError("Amount must be > 0 and <= 100 icUSD (10_000_000_000 e8s)".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Amount must be > 0 and <= 100 icUSD (10_000_000_000 e8s)".to_string(),
+        ));
     }
     let amount = ICUSD::new(new_amount_e8s);
     mutate_state(|s| {
         rumi_protocol_backend::event::record_set_min_icusd_amount(s, amount);
     });
-    log!(INFO, "[set_min_icusd_amount] Min icUSD amount set to: {} e8s", new_amount_e8s);
+    log!(
+        INFO,
+        "[set_min_icusd_amount] Min icUSD amount set to: {} e8s",
+        new_amount_e8s
+    );
     Ok(())
 }
 
@@ -5699,15 +6633,24 @@ async fn set_global_icusd_mint_cap(amount_e8s: u64) -> Result<(), ProtocolError>
     let caller = ic_cdk::caller();
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
-        return Err(ProtocolError::GenericError("Only developer can set global icUSD mint cap".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Only developer can set global icUSD mint cap".to_string(),
+        ));
     }
     if amount_e8s == 0 {
-        return Err(ProtocolError::GenericError("Amount must be > 0".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Amount must be > 0".to_string(),
+        ));
     }
     mutate_state(|s| {
         rumi_protocol_backend::event::record_set_global_icusd_mint_cap(s, amount_e8s);
     });
-    log!(INFO, "[set_global_icusd_mint_cap] Global icUSD mint cap set to: {} e8s ({} icUSD)", amount_e8s, amount_e8s as f64 / 1e8);
+    log!(
+        INFO,
+        "[set_global_icusd_mint_cap] Global icUSD mint cap set to: {} e8s ({} icUSD)",
+        amount_e8s,
+        amount_e8s as f64 / 1e8
+    );
     Ok(())
 }
 
@@ -5721,16 +6664,30 @@ fn get_global_icusd_mint_cap() -> u64 {
 /// Enable or disable a specific stable token for repayments/liquidations (developer only)
 #[candid_method(update)]
 #[update]
-async fn set_stable_token_enabled(token_type: StableTokenType, enabled: bool) -> Result<(), ProtocolError> {
+async fn set_stable_token_enabled(
+    token_type: StableTokenType,
+    enabled: bool,
+) -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
-        return Err(ProtocolError::GenericError("Only developer can toggle stable token acceptance".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Only developer can toggle stable token acceptance".to_string(),
+        ));
     }
     mutate_state(|s| {
-        rumi_protocol_backend::event::record_set_stable_token_enabled(s, token_type.clone(), enabled);
+        rumi_protocol_backend::event::record_set_stable_token_enabled(
+            s,
+            token_type.clone(),
+            enabled,
+        );
     });
-    log!(INFO, "[set_stable_token_enabled] {:?} enabled: {}", token_type, enabled);
+    log!(
+        INFO,
+        "[set_stable_token_enabled] {:?} enabled: {}",
+        token_type,
+        enabled
+    );
     Ok(())
 }
 
@@ -5747,16 +6704,30 @@ fn get_stable_token_enabled(token_type: StableTokenType) -> bool {
 /// Set the ckUSDT or ckUSDC ledger principal (developer only)
 #[candid_method(update)]
 #[update]
-async fn set_stable_ledger_principal(token_type: StableTokenType, principal: Principal) -> Result<(), ProtocolError> {
+async fn set_stable_ledger_principal(
+    token_type: StableTokenType,
+    principal: Principal,
+) -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
-        return Err(ProtocolError::GenericError("Only developer can set stable ledger principals".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Only developer can set stable ledger principals".to_string(),
+        ));
     }
     mutate_state(|s| {
-        rumi_protocol_backend::event::record_set_stable_ledger_principal(s, token_type.clone(), principal);
+        rumi_protocol_backend::event::record_set_stable_ledger_principal(
+            s,
+            token_type.clone(),
+            principal,
+        );
     });
-    log!(INFO, "[set_stable_ledger_principal] {:?} set to {}", token_type, principal);
+    log!(
+        INFO,
+        "[set_stable_ledger_principal] {:?} set to {}",
+        token_type,
+        principal
+    );
     Ok(())
 }
 
@@ -5768,17 +6739,27 @@ async fn set_liquidation_bonus(new_rate: f64) -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
-        return Err(ProtocolError::GenericError("Only developer can set liquidation bonus".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Only developer can set liquidation bonus".to_string(),
+        ));
     }
     if new_rate < 1.0 || new_rate > 1.5 {
-        return Err(ProtocolError::GenericError("Liquidation bonus must be between 1.0 and 1.5".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Liquidation bonus must be between 1.0 and 1.5".to_string(),
+        ));
     }
-    let rate = Ratio::from(rust_decimal::Decimal::try_from(new_rate)
-        .map_err(|_| ProtocolError::GenericError("Invalid rate".to_string()))?);
+    let rate = Ratio::from(
+        rust_decimal::Decimal::try_from(new_rate)
+            .map_err(|_| ProtocolError::GenericError("Invalid rate".to_string()))?,
+    );
     mutate_state(|s| {
         rumi_protocol_backend::event::record_set_liquidation_bonus(s, rate);
     });
-    log!(INFO, "[set_liquidation_bonus] Liquidation bonus set to: {}", new_rate);
+    log!(
+        INFO,
+        "[set_liquidation_bonus] Liquidation bonus set to: {}",
+        new_rate
+    );
     Ok(())
 }
 
@@ -5797,32 +6778,45 @@ fn set_redemption_tier(ledger_canister_id: Principal, tier: u8) -> Result<(), Pr
     let caller = ic_cdk::caller();
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
-        return Err(ProtocolError::GenericError("Only developer can set redemption tier".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Only developer can set redemption tier".to_string(),
+        ));
     }
     if tier < 1 || tier > 3 {
-        return Err(ProtocolError::GenericError("Tier must be 1, 2, or 3".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Tier must be 1, 2, or 3".to_string(),
+        ));
     }
-    mutate_state(|s| {
-        match s.collateral_configs.get_mut(&ledger_canister_id) {
+    mutate_state(
+        |s| match s.collateral_configs.get_mut(&ledger_canister_id) {
             Some(config) => {
                 config.redemption_tier = tier;
-                log!(INFO, "[set_redemption_tier] {} set to tier {}", ledger_canister_id, tier);
+                log!(
+                    INFO,
+                    "[set_redemption_tier] {} set to tier {}",
+                    ledger_canister_id,
+                    tier
+                );
                 Ok(())
             }
-            None => Err(ProtocolError::GenericError(format!("No collateral config for {}", ledger_canister_id))),
-        }
-    })
+            None => Err(ProtocolError::GenericError(format!(
+                "No collateral config for {}",
+                ledger_canister_id
+            ))),
+        },
+    )
 }
 
 /// Get the redemption priority tier for a collateral type.
 #[candid_method(query)]
 #[query]
 fn get_redemption_tier(ledger_canister_id: Principal) -> Result<u8, ProtocolError> {
-    read_state(|s| {
-        match s.collateral_configs.get(&ledger_canister_id) {
-            Some(config) => Ok(config.redemption_tier),
-            None => Err(ProtocolError::GenericError(format!("No collateral config for {}", ledger_canister_id))),
-        }
+    read_state(|s| match s.collateral_configs.get(&ledger_canister_id) {
+        Some(config) => Ok(config.redemption_tier),
+        None => Err(ProtocolError::GenericError(format!(
+            "No collateral config for {}",
+            ledger_canister_id
+        ))),
     })
 }
 
@@ -5834,17 +6828,27 @@ async fn set_borrowing_fee(new_rate: f64) -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
-        return Err(ProtocolError::GenericError("Only developer can set borrowing fee".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Only developer can set borrowing fee".to_string(),
+        ));
     }
     if new_rate < 0.0 || new_rate > 0.10 {
-        return Err(ProtocolError::GenericError("Borrowing fee must be between 0 and 0.10 (10%)".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Borrowing fee must be between 0 and 0.10 (10%)".to_string(),
+        ));
     }
-    let rate = Ratio::from(rust_decimal::Decimal::try_from(new_rate)
-        .map_err(|_| ProtocolError::GenericError("Invalid rate".to_string()))?);
+    let rate = Ratio::from(
+        rust_decimal::Decimal::try_from(new_rate)
+            .map_err(|_| ProtocolError::GenericError("Invalid rate".to_string()))?,
+    );
     mutate_state(|s| {
         rumi_protocol_backend::event::record_set_borrowing_fee(s, rate);
     });
-    log!(INFO, "[set_borrowing_fee] Borrowing fee set to: {}", new_rate);
+    log!(
+        INFO,
+        "[set_borrowing_fee] Borrowing fee set to: {}",
+        new_rate
+    );
     Ok(())
 }
 
@@ -5863,17 +6867,27 @@ async fn set_redemption_fee_floor(new_rate: f64) -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
-        return Err(ProtocolError::GenericError("Only developer can set redemption fee floor".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Only developer can set redemption fee floor".to_string(),
+        ));
     }
     if new_rate < 0.0 || new_rate > 0.10 {
-        return Err(ProtocolError::GenericError("Redemption fee floor must be between 0 and 0.10 (10%)".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Redemption fee floor must be between 0 and 0.10 (10%)".to_string(),
+        ));
     }
-    let rate = Ratio::from(rust_decimal::Decimal::try_from(new_rate)
-        .map_err(|_| ProtocolError::GenericError("Invalid rate".to_string()))?);
+    let rate = Ratio::from(
+        rust_decimal::Decimal::try_from(new_rate)
+            .map_err(|_| ProtocolError::GenericError("Invalid rate".to_string()))?,
+    );
     mutate_state(|s| {
         rumi_protocol_backend::event::record_set_redemption_fee_floor(s, rate);
     });
-    log!(INFO, "[set_redemption_fee_floor] Redemption fee floor set to: {}", new_rate);
+    log!(
+        INFO,
+        "[set_redemption_fee_floor] Redemption fee floor set to: {}",
+        new_rate
+    );
     Ok(())
 }
 
@@ -5892,17 +6906,27 @@ async fn set_redemption_fee_ceiling(new_rate: f64) -> Result<(), ProtocolError> 
     let caller = ic_cdk::caller();
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
-        return Err(ProtocolError::GenericError("Only developer can set redemption fee ceiling".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Only developer can set redemption fee ceiling".to_string(),
+        ));
     }
     if new_rate < 0.0 || new_rate > 0.50 {
-        return Err(ProtocolError::GenericError("Redemption fee ceiling must be between 0 and 0.50 (50%)".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Redemption fee ceiling must be between 0 and 0.50 (50%)".to_string(),
+        ));
     }
-    let rate = Ratio::from(rust_decimal::Decimal::try_from(new_rate)
-        .map_err(|_| ProtocolError::GenericError("Invalid rate".to_string()))?);
+    let rate = Ratio::from(
+        rust_decimal::Decimal::try_from(new_rate)
+            .map_err(|_| ProtocolError::GenericError("Invalid rate".to_string()))?,
+    );
     mutate_state(|s| {
         rumi_protocol_backend::event::record_set_redemption_fee_ceiling(s, rate);
     });
-    log!(INFO, "[set_redemption_fee_ceiling] Redemption fee ceiling set to: {}", new_rate);
+    log!(
+        INFO,
+        "[set_redemption_fee_ceiling] Redemption fee ceiling set to: {}",
+        new_rate
+    );
     Ok(())
 }
 
@@ -5922,12 +6946,18 @@ async fn set_reserve_redemptions_enabled(enabled: bool) -> Result<(), ProtocolEr
     let caller = ic_cdk::caller();
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
-        return Err(ProtocolError::GenericError("Only developer can toggle reserve redemptions".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Only developer can toggle reserve redemptions".to_string(),
+        ));
     }
     mutate_state(|s| {
         rumi_protocol_backend::event::record_set_reserve_redemptions_enabled(s, enabled);
     });
-    log!(INFO, "[set_reserve_redemptions_enabled] Reserve redemptions enabled: {}", enabled);
+    log!(
+        INFO,
+        "[set_reserve_redemptions_enabled] Reserve redemptions enabled: {}",
+        enabled
+    );
     Ok(())
 }
 
@@ -5955,7 +6985,11 @@ async fn set_icpswap_routing_enabled(enabled: bool) -> Result<(), ProtocolError>
     mutate_state(|s| {
         rumi_protocol_backend::event::record_set_icpswap_routing_enabled(s, enabled);
     });
-    log!(INFO, "[set_icpswap_routing_enabled] ICPswap routing enabled: {}", enabled);
+    log!(
+        INFO,
+        "[set_icpswap_routing_enabled] ICPswap routing enabled: {}",
+        enabled
+    );
     Ok(())
 }
 
@@ -5974,17 +7008,27 @@ async fn set_reserve_redemption_fee(new_rate: f64) -> Result<(), ProtocolError> 
     let caller = ic_cdk::caller();
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
-        return Err(ProtocolError::GenericError("Only developer can set reserve redemption fee".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Only developer can set reserve redemption fee".to_string(),
+        ));
     }
     if new_rate < 0.0 || new_rate > 0.10 {
-        return Err(ProtocolError::GenericError("Reserve redemption fee must be between 0 and 0.10 (10%)".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Reserve redemption fee must be between 0 and 0.10 (10%)".to_string(),
+        ));
     }
-    let rate = Ratio::from(rust_decimal::Decimal::try_from(new_rate)
-        .map_err(|_| ProtocolError::GenericError("Invalid rate".to_string()))?);
+    let rate = Ratio::from(
+        rust_decimal::Decimal::try_from(new_rate)
+            .map_err(|_| ProtocolError::GenericError("Invalid rate".to_string()))?,
+    );
     mutate_state(|s| {
         rumi_protocol_backend::event::record_set_reserve_redemption_fee(s, rate);
     });
-    log!(INFO, "[set_reserve_redemption_fee] Reserve redemption fee set to: {}", new_rate);
+    log!(
+        INFO,
+        "[set_reserve_redemption_fee] Reserve redemption fee set to: {}",
+        new_rate
+    );
     Ok(())
 }
 
@@ -6014,7 +7058,10 @@ fn enter_recovery_mode() -> Result<(), ProtocolError> {
     mutate_state(|s| {
         s.mode = Mode::Recovery;
         s.manual_mode_override = true;
-        log!(INFO, "[admin] entered Recovery mode (manual override active)");
+        log!(
+            INFO,
+            "[admin] entered Recovery mode (manual override active)"
+        );
     });
     Ok(())
 }
@@ -6028,7 +7075,10 @@ fn exit_recovery_mode() -> Result<(), ProtocolError> {
     mutate_state(|s| {
         s.mode = Mode::GeneralAvailability;
         s.manual_mode_override = false;
-        log!(INFO, "[admin] exited Recovery mode, automatic mode management restored");
+        log!(
+            INFO,
+            "[admin] exited Recovery mode, automatic mode management restored"
+        );
     });
     Ok(())
 }
@@ -6069,11 +7119,7 @@ fn set_liquidation_frozen(frozen: bool) -> Result<(), ProtocolError> {
     require_controller()?;
     mutate_state(|s| {
         s.liquidation_frozen = frozen;
-        log!(
-            INFO,
-            "[admin] liquidation_frozen set to {}",
-            frozen
-        );
+        log!(INFO, "[admin] liquidation_frozen set to {}", frozen);
     });
     Ok(())
 }
@@ -6098,11 +7144,7 @@ fn set_sp_writedown_disabled(disabled: bool) -> Result<(), ProtocolError> {
     require_controller()?;
     mutate_state(|s| {
         s.sp_writedown_disabled = disabled;
-        log!(
-            INFO,
-            "[admin] sp_writedown_disabled set to {}",
-            disabled
-        );
+        log!(INFO, "[admin] sp_writedown_disabled set to {}", disabled);
     });
     Ok(())
 }
@@ -6120,8 +7162,8 @@ fn get_sp_writedown_disabled() -> bool {
 /// than a Set so it round-trips cleanly through Candid.
 #[candid_method(query)]
 #[query]
-fn get_consumed_writedown_proofs(
-) -> Vec<(rumi_protocol_backend::icrc3_proof::SpProofLedger, u64)> {
+fn get_consumed_writedown_proofs() -> Vec<(rumi_protocol_backend::icrc3_proof::SpProofLedger, u64)>
+{
     read_state(|s| s.consumed_writedown_proofs.iter().copied().collect())
 }
 
@@ -6138,9 +7180,7 @@ fn set_liquidation_ordering_tolerance(tolerance_e4: u64) -> Result<(), ProtocolE
     // Argument is in basis points (10_000 = 1.0 = 100%). Convert to Decimal
     // by dividing by 10_000. This keeps the wire format integer-only and
     // matches `cr_index_key`'s scaling.
-    let tolerance = Ratio::from(
-        Decimal::from(tolerance_e4) / Decimal::from(10_000u64),
-    );
+    let tolerance = Ratio::from(Decimal::from(tolerance_e4) / Decimal::from(10_000u64));
     mutate_state(|s| {
         s.set_liquidation_ordering_tolerance(tolerance);
         log!(
@@ -6170,7 +7210,10 @@ fn get_liquidation_ordering_tolerance_bps() -> u64 {
 /// Redeem icUSD for ckStable tokens from reserves (with vault spillover fallback)
 #[candid_method(update)]
 #[update]
-async fn redeem_reserves(amount: u64, preferred_token: Option<Principal>) -> Result<ReserveRedemptionResult, ProtocolError> {
+async fn redeem_reserves(
+    amount: u64,
+    preferred_token: Option<Principal>,
+) -> Result<ReserveRedemptionResult, ProtocolError> {
     validate_call().await?;
     // Wave-9 RED-003: reserve redemption walks the same vault cr-index as
     // redeem_collateral on its spillover branch, so the same ReadOnly gate
@@ -6212,22 +7255,31 @@ fn get_reserve_balances() -> Vec<ReserveBalance> {
 /// Every use is recorded as an on-chain event with a stated reason.
 #[candid_method(update)]
 #[update]
-async fn admin_mint_icusd(amount_e8s: u64, to: Principal, reason: String) -> Result<u64, ProtocolError> {
+async fn admin_mint_icusd(
+    amount_e8s: u64,
+    to: Principal,
+    reason: String,
+) -> Result<u64, ProtocolError> {
     const ADMIN_MINT_CAP_E8S: u64 = 150_000_000_000; // 1,500 icUSD
     const ADMIN_MINT_COOLDOWN_NS: u64 = 72 * 3600 * 1_000_000_000; // 72 hours
 
     let caller = ic_cdk::caller();
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
-        return Err(ProtocolError::GenericError("Only developer can call admin_mint_icusd".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Only developer can call admin_mint_icusd".to_string(),
+        ));
     }
     if amount_e8s == 0 {
-        return Err(ProtocolError::GenericError("Amount must be > 0".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Amount must be > 0".to_string(),
+        ));
     }
     if amount_e8s > ADMIN_MINT_CAP_E8S {
-        return Err(ProtocolError::GenericError(
-            format!("Amount exceeds admin mint cap of {} e8s (1,500 icUSD)", ADMIN_MINT_CAP_E8S)
-        ));
+        return Err(ProtocolError::GenericError(format!(
+            "Amount exceeds admin mint cap of {} e8s (1,500 icUSD)",
+            ADMIN_MINT_CAP_E8S
+        )));
     }
 
     // Enforce 72-hour cooldown
@@ -6236,23 +7288,33 @@ async fn admin_mint_icusd(amount_e8s: u64, to: Principal, reason: String) -> Res
     if last_mint_time > 0 && now.saturating_sub(last_mint_time) < ADMIN_MINT_COOLDOWN_NS {
         let remaining_ns = ADMIN_MINT_COOLDOWN_NS - (now - last_mint_time);
         let remaining_hours = remaining_ns / (3600 * 1_000_000_000);
-        return Err(ProtocolError::GenericError(
-            format!("Admin mint cooldown active. ~{} hours remaining.", remaining_hours)
-        ));
+        return Err(ProtocolError::GenericError(format!(
+            "Admin mint cooldown active. ~{} hours remaining.",
+            remaining_hours
+        )));
     }
 
     let amount = rumi_protocol_backend::numeric::ICUSD::from(amount_e8s);
-    let block_index = rumi_protocol_backend::management::mint_icusd(amount, to).await
+    let block_index = rumi_protocol_backend::management::mint_icusd(amount, to)
+        .await
         .map_err(|e| ProtocolError::GenericError(format!("Mint failed: {:?}", e)))?;
 
     // Update cooldown timestamp
-    mutate_state(|s| { s.last_admin_mint_time = now; });
+    mutate_state(|s| {
+        s.last_admin_mint_time = now;
+    });
 
     // Record on-chain event for transparency
     rumi_protocol_backend::event::record_admin_mint(amount, to, reason.clone(), block_index);
 
-    log!(INFO, "[admin_mint_icusd] Minted {} e8s icUSD to {} (block {}). Reason: {}",
-        amount_e8s, to, block_index, reason);
+    log!(
+        INFO,
+        "[admin_mint_icusd] Minted {} e8s icUSD to {} (block {}). Reason: {}",
+        amount_e8s,
+        to,
+        block_index,
+        reason
+    );
     Ok(block_index)
 }
 
@@ -6271,15 +7333,23 @@ async fn set_recovery_cr_multiplier(new_multiplier: f64) -> Result<(), ProtocolE
     }
     if new_multiplier < 1.001 || new_multiplier > 1.5 {
         return Err(ProtocolError::GenericError(
-            "Recovery CR multiplier must be between 1.001 (0.1% buffer) and 1.5 (50% buffer)".to_string(),
+            "Recovery CR multiplier must be between 1.001 (0.1% buffer) and 1.5 (50% buffer)"
+                .to_string(),
         ));
     }
-    let multiplier = Ratio::from(rust_decimal::Decimal::try_from(new_multiplier)
-        .map_err(|_| ProtocolError::GenericError("Invalid multiplier value".to_string()))?);
+    let multiplier = Ratio::from(
+        rust_decimal::Decimal::try_from(new_multiplier)
+            .map_err(|_| ProtocolError::GenericError("Invalid multiplier value".to_string()))?,
+    );
     mutate_state(|s| {
         rumi_protocol_backend::event::record_set_recovery_cr_multiplier(s, multiplier);
     });
-    log!(INFO, "[set_recovery_cr_multiplier] Multiplier set to: {} ({}% buffer)", new_multiplier, (new_multiplier - 1.0) * 100.0);
+    log!(
+        INFO,
+        "[set_recovery_cr_multiplier] Multiplier set to: {} ({}% buffer)",
+        new_multiplier,
+        (new_multiplier - 1.0) * 100.0
+    );
     Ok(())
 }
 
@@ -6307,12 +7377,19 @@ async fn set_liquidation_protocol_share(new_share: f64) -> Result<(), ProtocolEr
             "Liquidation protocol share must be between 0.0 and 1.0".to_string(),
         ));
     }
-    let share = Ratio::from(rust_decimal::Decimal::try_from(new_share)
-        .map_err(|_| ProtocolError::GenericError("Invalid share value".to_string()))?);
+    let share = Ratio::from(
+        rust_decimal::Decimal::try_from(new_share)
+            .map_err(|_| ProtocolError::GenericError("Invalid share value".to_string()))?,
+    );
     mutate_state(|s| {
         rumi_protocol_backend::event::record_set_liquidation_protocol_share(s, share);
     });
-    log!(INFO, "[set_liquidation_protocol_share] Share set to: {} ({}%)", new_share, new_share * 100.0);
+    log!(
+        INFO,
+        "[set_liquidation_protocol_share] Share set to: {} ({}%)",
+        new_share,
+        new_share * 100.0
+    );
     Ok(())
 }
 
@@ -6378,7 +7455,11 @@ async fn set_deficit_readonly_threshold_e8s(new_threshold: u64) -> Result<(), Pr
         INFO,
         "[set_deficit_readonly_threshold_e8s] Threshold set to: {} e8s ({})",
         new_threshold,
-        if new_threshold == 0 { "latch disabled" } else { "latch armed" }
+        if new_threshold == 0 {
+            "latch disabled"
+        } else {
+            "latch armed"
+        }
     );
     Ok(())
 }
@@ -6403,7 +7484,11 @@ async fn set_breaker_window_ns(new_window_ns: u64) -> Result<(), ProtocolError> 
         INFO,
         "[set_breaker_window_ns] Window set to: {} ns ({})",
         new_window_ns,
-        if new_window_ns == 0 { "breaker disabled" } else { "breaker armed" }
+        if new_window_ns == 0 {
+            "breaker disabled"
+        } else {
+            "breaker armed"
+        }
     );
     Ok(())
 }
@@ -6429,7 +7514,11 @@ async fn set_breaker_window_debt_ceiling_e8s(new_ceiling: u64) -> Result<(), Pro
         INFO,
         "[set_breaker_window_debt_ceiling_e8s] Ceiling set to: {} e8s ({})",
         new_ceiling,
-        if new_ceiling == 0 { "breaker disabled" } else { "breaker armed" }
+        if new_ceiling == 0 {
+            "breaker disabled"
+        } else {
+            "breaker armed"
+        }
     );
     Ok(())
 }
@@ -6515,7 +7604,11 @@ async fn set_xrc_fetch_interval_secs(secs: u64) -> Result<(), ProtocolError> {
     }
     mutate_state(|s| s.xrc_fetch_interval_secs = secs);
     register_xrc_fetch_timer();
-    log!(INFO, "[set_xrc_fetch_interval_secs] Timer A interval set to {}s", secs);
+    log!(
+        INFO,
+        "[set_xrc_fetch_interval_secs] Timer A interval set to {}s",
+        secs
+    );
     Ok(())
 }
 
@@ -6544,7 +7637,11 @@ async fn set_interest_treasury_tick_interval_secs(secs: u64) -> Result<(), Proto
     }
     mutate_state(|s| s.interest_treasury_tick_interval_secs = secs);
     register_interest_treasury_timer();
-    log!(INFO, "[set_interest_treasury_tick_interval_secs] Timer B interval set to {}s", secs);
+    log!(
+        INFO,
+        "[set_interest_treasury_tick_interval_secs] Timer B interval set to {}s",
+        secs
+    );
     Ok(())
 }
 
@@ -6574,7 +7671,11 @@ async fn set_vault_check_tick_interval_secs(secs: u64) -> Result<(), ProtocolErr
     }
     mutate_state(|s| s.vault_check_tick_interval_secs = secs);
     register_vault_check_timer();
-    log!(INFO, "[set_vault_check_tick_interval_secs] Timer C interval set to {}s", secs);
+    log!(
+        INFO,
+        "[set_vault_check_tick_interval_secs] Timer C interval set to {}s",
+        secs
+    );
     Ok(())
 }
 
@@ -6604,7 +7705,11 @@ async fn set_settlement_tick_interval_secs(secs: u64) -> Result<(), ProtocolErro
     }
     mutate_state(|s| s.settlement_tick_interval_secs = secs);
     register_settlement_timer();
-    log!(INFO, "[set_settlement_tick_interval_secs] Timer D interval set to {}s", secs);
+    log!(
+        INFO,
+        "[set_settlement_tick_interval_secs] Timer D interval set to {}s",
+        secs
+    );
     Ok(())
 }
 
@@ -6627,7 +7732,11 @@ async fn set_chain_interest_tick_interval_secs(secs: u64) -> Result<(), Protocol
     }
     mutate_state(|s| s.chain_interest_tick_interval_secs = secs);
     register_chain_interest_timer();
-    log!(INFO, "[set_chain_interest_tick_interval_secs] interest harvest interval set to {}s", secs);
+    log!(
+        INFO,
+        "[set_chain_interest_tick_interval_secs] interest harvest interval set to {}s",
+        secs
+    );
     Ok(())
 }
 
@@ -6644,7 +7753,11 @@ async fn set_chain_interest_min_realize_e8s(e8s: u128) -> Result<(), ProtocolErr
         ));
     }
     mutate_state(|s| s.chain_interest_min_realize_e8s = e8s);
-    log!(INFO, "[set_chain_interest_min_realize_e8s] interest dust floor set to {} e8s", e8s);
+    log!(
+        INFO,
+        "[set_chain_interest_min_realize_e8s] interest dust floor set to {} e8s",
+        e8s
+    );
     Ok(())
 }
 
@@ -6681,7 +7794,11 @@ fn set_chains_ecdsa_key_name(name: String) -> Result<(), ProtocolError> {
     let has_vaults = read_state(|s| !s.multi_chain.chain_vaults.is_empty());
     validate_ecdsa_key_change(&name, has_vaults)?;
     mutate_state(|s| s.chains_ecdsa_key_name = name.clone());
-    log!(INFO, "[set_chains_ecdsa_key_name] chains EVM tECDSA key set to {}", name);
+    log!(
+        INFO,
+        "[set_chains_ecdsa_key_name] chains EVM tECDSA key set to {}",
+        name
+    );
     Ok(())
 }
 
@@ -6776,7 +7893,11 @@ async fn set_observer_tick_interval_secs(secs: u64) -> Result<(), ProtocolError>
     }
     mutate_state(|s| s.observer_tick_interval_secs = secs);
     register_observer_timer();
-    log!(INFO, "[set_observer_tick_interval_secs] Observer interval set to {}s", secs);
+    log!(
+        INFO,
+        "[set_observer_tick_interval_secs] Observer interval set to {}s",
+        secs
+    );
     Ok(())
 }
 
@@ -6969,7 +8090,11 @@ async fn set_solana_workers_enabled(enabled: bool) -> Result<(), ProtocolError> 
         return Err(ProtocolError::ChainAdmin("not developer".into()));
     }
     mutate_state(|s| s.solana_workers_enabled = enabled);
-    log!(INFO, "[set_solana_workers_enabled] Solana workers {}", if enabled { "ENABLED" } else { "disabled" });
+    log!(
+        INFO,
+        "[set_solana_workers_enabled] Solana workers {}",
+        if enabled { "ENABLED" } else { "disabled" }
+    );
     Ok(())
 }
 
@@ -6980,15 +8105,12 @@ async fn set_solana_workers_enabled(enabled: bool) -> Result<(), ProtocolError> 
 /// pre-Wave-9c behavior).
 #[candid_method(update)]
 #[update]
-async fn set_check_vaults_full_sweep_every_n_ticks(
-    new_n: u64,
-) -> Result<(), ProtocolError> {
+async fn set_check_vaults_full_sweep_every_n_ticks(new_n: u64) -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
         return Err(ProtocolError::GenericError(
-            "Only the developer principal can set check_vaults full-sweep cadence"
-                .to_string(),
+            "Only the developer principal can set check_vaults full-sweep cadence".to_string(),
         ));
     }
     mutate_state(|s| s.set_check_vaults_full_sweep_every_n_ticks(new_n));
@@ -7049,12 +8171,19 @@ async fn set_interest_pool_share(new_share: f64) -> Result<(), ProtocolError> {
             "Interest pool share must be between 0.0 and 1.0".to_string(),
         ));
     }
-    let share = Ratio::from(rust_decimal::Decimal::try_from(new_share)
-        .map_err(|_| ProtocolError::GenericError("Invalid share value".to_string()))?);
+    let share = Ratio::from(
+        rust_decimal::Decimal::try_from(new_share)
+            .map_err(|_| ProtocolError::GenericError("Invalid share value".to_string()))?,
+    );
     mutate_state(|s| {
         rumi_protocol_backend::event::record_set_interest_pool_share(s, share);
     });
-    log!(INFO, "[set_interest_pool_share] Set to: {} ({}% to stability pool)", new_share, new_share * 100.0);
+    log!(
+        INFO,
+        "[set_interest_pool_share] Set to: {} ({}% to stability pool)",
+        new_share,
+        new_share * 100.0
+    );
     Ok(())
 }
 
@@ -7084,9 +8213,10 @@ async fn set_interest_split(recipients: Vec<InterestSplitArg>) -> Result<(), Pro
     // Validate bps sum
     let total_bps: u64 = recipients.iter().map(|r| r.bps).sum();
     if total_bps != 10_000 {
-        return Err(ProtocolError::GenericError(
-            format!("Interest split bps must sum to 10000, got {}", total_bps),
-        ));
+        return Err(ProtocolError::GenericError(format!(
+            "Interest split bps must sum to 10000, got {}",
+            total_bps
+        )));
     }
 
     // Validate no zero-bps entries and no duplicate destinations
@@ -7098,30 +8228,40 @@ async fn set_interest_split(recipients: Vec<InterestSplitArg>) -> Result<(), Pro
             ));
         }
         if !seen.insert(r.destination.clone()) {
-            return Err(ProtocolError::GenericError(
-                format!("Duplicate destination: {}", r.destination),
-            ));
+            return Err(ProtocolError::GenericError(format!(
+                "Duplicate destination: {}",
+                r.destination
+            )));
         }
     }
 
     // Convert string destinations to enum
-    let split: Vec<rumi_protocol_backend::state::InterestRecipient> = recipients.iter().map(|r| {
-        let dest = match r.destination.as_str() {
-            "stability_pool" => rumi_protocol_backend::state::InterestDestination::StabilityPool,
-            "treasury" => rumi_protocol_backend::state::InterestDestination::Treasury,
-            "three_pool" => rumi_protocol_backend::state::InterestDestination::ThreePool,
-            "amm1" => rumi_protocol_backend::state::InterestDestination::Amm1,
-            _ => rumi_protocol_backend::state::InterestDestination::Treasury, // fallback
-        };
-        rumi_protocol_backend::state::InterestRecipient { destination: dest, bps: r.bps }
-    }).collect();
+    let split: Vec<rumi_protocol_backend::state::InterestRecipient> = recipients
+        .iter()
+        .map(|r| {
+            let dest = match r.destination.as_str() {
+                "stability_pool" => {
+                    rumi_protocol_backend::state::InterestDestination::StabilityPool
+                }
+                "treasury" => rumi_protocol_backend::state::InterestDestination::Treasury,
+                "three_pool" => rumi_protocol_backend::state::InterestDestination::ThreePool,
+                "amm1" => rumi_protocol_backend::state::InterestDestination::Amm1,
+                _ => rumi_protocol_backend::state::InterestDestination::Treasury, // fallback
+            };
+            rumi_protocol_backend::state::InterestRecipient {
+                destination: dest,
+                bps: r.bps,
+            }
+        })
+        .collect();
 
     // Validate destinations are known
     for r in &recipients {
         if !["stability_pool", "treasury", "three_pool", "amm1"].contains(&r.destination.as_str()) {
-            return Err(ProtocolError::GenericError(
-                format!("Unknown destination: '{}'. Valid: stability_pool, treasury, three_pool, amm1", r.destination),
-            ));
+            return Err(ProtocolError::GenericError(format!(
+                "Unknown destination: '{}'. Valid: stability_pool, treasury, three_pool, amm1",
+                r.destination
+            )));
         }
     }
 
@@ -7138,15 +8278,27 @@ async fn set_interest_split(recipients: Vec<InterestSplitArg>) -> Result<(), Pro
 #[query]
 fn get_interest_split() -> Vec<InterestSplitArg> {
     read_state(|s| {
-        s.interest_split.iter().map(|r| {
-            let dest = match &r.destination {
-                rumi_protocol_backend::state::InterestDestination::StabilityPool => "stability_pool".to_string(),
-                rumi_protocol_backend::state::InterestDestination::Treasury => "treasury".to_string(),
-                rumi_protocol_backend::state::InterestDestination::ThreePool => "three_pool".to_string(),
-                rumi_protocol_backend::state::InterestDestination::Amm1 => "amm1".to_string(),
-            };
-            InterestSplitArg { destination: dest, bps: r.bps }
-        }).collect()
+        s.interest_split
+            .iter()
+            .map(|r| {
+                let dest = match &r.destination {
+                    rumi_protocol_backend::state::InterestDestination::StabilityPool => {
+                        "stability_pool".to_string()
+                    }
+                    rumi_protocol_backend::state::InterestDestination::Treasury => {
+                        "treasury".to_string()
+                    }
+                    rumi_protocol_backend::state::InterestDestination::ThreePool => {
+                        "three_pool".to_string()
+                    }
+                    rumi_protocol_backend::state::InterestDestination::Amm1 => "amm1".to_string(),
+                };
+                InterestSplitArg {
+                    destination: dest,
+                    bps: r.bps,
+                }
+            })
+            .collect()
     })
 }
 
@@ -7296,10 +8448,7 @@ pub struct ProtocolStatusLite {
 #[query]
 fn get_icp_usd_price_e8s() -> ProtocolStatusLite {
     read_state(|s| ProtocolStatusLite {
-        price_e8s: s
-            .last_icp_rate
-            .map(|p| p.to_e8s() as u128)
-            .unwrap_or(0),
+        price_e8s: s.last_icp_rate.map(|p| p.to_e8s() as u128).unwrap_or(0),
     })
 }
 
@@ -7338,20 +8487,37 @@ fn get_rmr_ceiling_cr() -> f64 {
 #[update]
 async fn set_rmr_floor(value: f64) -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
-    let (is_dev, ceiling) = read_state(|s| (s.developer_principal == caller, s.rmr_ceiling.to_f64()));
+    let (is_dev, ceiling) =
+        read_state(|s| (s.developer_principal == caller, s.rmr_ceiling.to_f64()));
     if !is_dev {
-        return Err(ProtocolError::GenericError("Only the developer principal can set RMR floor".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set RMR floor".to_string(),
+        ));
     }
     if !(0.0..=1.0).contains(&value) {
-        return Err(ProtocolError::GenericError("RMR floor must be between 0.0 and 1.0".to_string()));
+        return Err(ProtocolError::GenericError(
+            "RMR floor must be between 0.0 and 1.0".to_string(),
+        ));
     }
     if value > ceiling {
-        return Err(ProtocolError::GenericError(format!("RMR floor ({}) must be ≤ RMR ceiling ({})", value, ceiling)));
+        return Err(ProtocolError::GenericError(format!(
+            "RMR floor ({}) must be ≤ RMR ceiling ({})",
+            value, ceiling
+        )));
     }
-    let ratio = Ratio::from(rust_decimal::Decimal::try_from(value)
-        .map_err(|_| ProtocolError::GenericError("Invalid value".to_string()))?);
-    mutate_state(|s| { rumi_protocol_backend::event::record_set_rmr_floor(s, ratio); });
-    log!(INFO, "[set_rmr_floor] Set to: {} ({}%)", value, value * 100.0);
+    let ratio = Ratio::from(
+        rust_decimal::Decimal::try_from(value)
+            .map_err(|_| ProtocolError::GenericError("Invalid value".to_string()))?,
+    );
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_rmr_floor(s, ratio);
+    });
+    log!(
+        INFO,
+        "[set_rmr_floor] Set to: {} ({}%)",
+        value,
+        value * 100.0
+    );
     Ok(())
 }
 
@@ -7362,18 +8528,34 @@ async fn set_rmr_ceiling(value: f64) -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
     let (is_dev, floor) = read_state(|s| (s.developer_principal == caller, s.rmr_floor.to_f64()));
     if !is_dev {
-        return Err(ProtocolError::GenericError("Only the developer principal can set RMR ceiling".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set RMR ceiling".to_string(),
+        ));
     }
     if !(0.0..=1.0).contains(&value) {
-        return Err(ProtocolError::GenericError("RMR ceiling must be between 0.0 and 1.0".to_string()));
+        return Err(ProtocolError::GenericError(
+            "RMR ceiling must be between 0.0 and 1.0".to_string(),
+        ));
     }
     if value < floor {
-        return Err(ProtocolError::GenericError(format!("RMR ceiling ({}) must be ≥ RMR floor ({})", value, floor)));
+        return Err(ProtocolError::GenericError(format!(
+            "RMR ceiling ({}) must be ≥ RMR floor ({})",
+            value, floor
+        )));
     }
-    let ratio = Ratio::from(rust_decimal::Decimal::try_from(value)
-        .map_err(|_| ProtocolError::GenericError("Invalid value".to_string()))?);
-    mutate_state(|s| { rumi_protocol_backend::event::record_set_rmr_ceiling(s, ratio); });
-    log!(INFO, "[set_rmr_ceiling] Set to: {} ({}%)", value, value * 100.0);
+    let ratio = Ratio::from(
+        rust_decimal::Decimal::try_from(value)
+            .map_err(|_| ProtocolError::GenericError("Invalid value".to_string()))?,
+    );
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_rmr_ceiling(s, ratio);
+    });
+    log!(
+        INFO,
+        "[set_rmr_ceiling] Set to: {} ({}%)",
+        value,
+        value * 100.0
+    );
     Ok(())
 }
 
@@ -7382,20 +8564,37 @@ async fn set_rmr_ceiling(value: f64) -> Result<(), ProtocolError> {
 #[update]
 async fn set_rmr_floor_cr(value: f64) -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
-    let (is_dev, ceiling_cr) = read_state(|s| (s.developer_principal == caller, s.rmr_ceiling_cr.to_f64()));
+    let (is_dev, ceiling_cr) =
+        read_state(|s| (s.developer_principal == caller, s.rmr_ceiling_cr.to_f64()));
     if !is_dev {
-        return Err(ProtocolError::GenericError("Only the developer principal can set RMR floor CR".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set RMR floor CR".to_string(),
+        ));
     }
     if value < 1.0 {
-        return Err(ProtocolError::GenericError("RMR floor CR must be ≥ 1.0".to_string()));
+        return Err(ProtocolError::GenericError(
+            "RMR floor CR must be ≥ 1.0".to_string(),
+        ));
     }
     if value < ceiling_cr {
-        return Err(ProtocolError::GenericError(format!("RMR floor CR ({}) must be ≥ RMR ceiling CR ({})", value, ceiling_cr)));
+        return Err(ProtocolError::GenericError(format!(
+            "RMR floor CR ({}) must be ≥ RMR ceiling CR ({})",
+            value, ceiling_cr
+        )));
     }
-    let ratio = Ratio::from(rust_decimal::Decimal::try_from(value)
-        .map_err(|_| ProtocolError::GenericError("Invalid value".to_string()))?);
-    mutate_state(|s| { rumi_protocol_backend::event::record_set_rmr_floor_cr(s, ratio); });
-    log!(INFO, "[set_rmr_floor_cr] Set to: {} ({}%)", value, value * 100.0);
+    let ratio = Ratio::from(
+        rust_decimal::Decimal::try_from(value)
+            .map_err(|_| ProtocolError::GenericError("Invalid value".to_string()))?,
+    );
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_rmr_floor_cr(s, ratio);
+    });
+    log!(
+        INFO,
+        "[set_rmr_floor_cr] Set to: {} ({}%)",
+        value,
+        value * 100.0
+    );
     Ok(())
 }
 
@@ -7404,20 +8603,37 @@ async fn set_rmr_floor_cr(value: f64) -> Result<(), ProtocolError> {
 #[update]
 async fn set_rmr_ceiling_cr(value: f64) -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
-    let (is_dev, floor_cr) = read_state(|s| (s.developer_principal == caller, s.rmr_floor_cr.to_f64()));
+    let (is_dev, floor_cr) =
+        read_state(|s| (s.developer_principal == caller, s.rmr_floor_cr.to_f64()));
     if !is_dev {
-        return Err(ProtocolError::GenericError("Only the developer principal can set RMR ceiling CR".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set RMR ceiling CR".to_string(),
+        ));
     }
     if value < 1.0 {
-        return Err(ProtocolError::GenericError("RMR ceiling CR must be ≥ 1.0".to_string()));
+        return Err(ProtocolError::GenericError(
+            "RMR ceiling CR must be ≥ 1.0".to_string(),
+        ));
     }
     if value > floor_cr {
-        return Err(ProtocolError::GenericError(format!("RMR ceiling CR ({}) must be ≤ RMR floor CR ({})", value, floor_cr)));
+        return Err(ProtocolError::GenericError(format!(
+            "RMR ceiling CR ({}) must be ≤ RMR floor CR ({})",
+            value, floor_cr
+        )));
     }
-    let ratio = Ratio::from(rust_decimal::Decimal::try_from(value)
-        .map_err(|_| ProtocolError::GenericError("Invalid value".to_string()))?);
-    mutate_state(|s| { rumi_protocol_backend::event::record_set_rmr_ceiling_cr(s, ratio); });
-    log!(INFO, "[set_rmr_ceiling_cr] Set to: {} ({}%)", value, value * 100.0);
+    let ratio = Ratio::from(
+        rust_decimal::Decimal::try_from(value)
+            .map_err(|_| ProtocolError::GenericError("Invalid value".to_string()))?,
+    );
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_rmr_ceiling_cr(s, ratio);
+    });
+    log!(
+        INFO,
+        "[set_rmr_ceiling_cr] Set to: {} ({}%)",
+        value,
+        value * 100.0
+    );
     Ok(())
 }
 
@@ -7513,12 +8729,19 @@ async fn set_recovery_target_cr(new_rate: f64) -> Result<(), ProtocolError> {
             multiplier_val, new_rate, threshold
         )));
     }
-    let multiplier = Ratio::from(rust_decimal::Decimal::try_from(multiplier_val)
-        .map_err(|_| ProtocolError::GenericError("Invalid rate".to_string()))?);
+    let multiplier = Ratio::from(
+        rust_decimal::Decimal::try_from(multiplier_val)
+            .map_err(|_| ProtocolError::GenericError("Invalid rate".to_string()))?,
+    );
     mutate_state(|s| {
         rumi_protocol_backend::event::record_set_recovery_cr_multiplier(s, multiplier);
     });
-    log!(INFO, "[set_recovery_target_cr] (legacy) → multiplier set to: {} ({}% buffer)", multiplier_val, (multiplier_val - 1.0) * 100.0);
+    log!(
+        INFO,
+        "[set_recovery_target_cr] (legacy) → multiplier set to: {} ({}% buffer)",
+        multiplier_val,
+        (multiplier_val - 1.0) * 100.0
+    );
     Ok(())
 }
 
@@ -7690,14 +8913,16 @@ async fn set_rate_curve_markers(
     // Validate finite values, sorted ascending, and positive multipliers
     for i in 0..markers.len() {
         if !markers[i].0.is_finite() || !markers[i].1.is_finite() {
-            return Err(ProtocolError::GenericError(
-                format!("Marker at index {} must contain finite numbers, got ({}, {})", i, markers[i].0, markers[i].1),
-            ));
+            return Err(ProtocolError::GenericError(format!(
+                "Marker at index {} must contain finite numbers, got ({}, {})",
+                i, markers[i].0, markers[i].1
+            )));
         }
         if markers[i].1 <= 0.0 {
-            return Err(ProtocolError::GenericError(
-                format!("Multiplier at index {} must be positive", i),
-            ));
+            return Err(ProtocolError::GenericError(format!(
+                "Multiplier at index {} must be positive",
+                i
+            )));
         }
         if i > 0 && markers[i].0 <= markers[i - 1].0 {
             return Err(ProtocolError::GenericError(
@@ -7709,15 +8934,24 @@ async fn set_rate_curve_markers(
     if let Some(ct) = collateral_type {
         let exists = read_state(|s| s.collateral_configs.contains_key(&ct));
         if !exists {
-            return Err(ProtocolError::GenericError("Unknown collateral type".to_string()));
+            return Err(ProtocolError::GenericError(
+                "Unknown collateral type".to_string(),
+            ));
         }
     }
     mutate_state(|s| {
         rumi_protocol_backend::event::record_set_rate_curve_markers(
-            s, collateral_type, markers.clone(),
+            s,
+            collateral_type,
+            markers.clone(),
         );
     });
-    log!(INFO, "[set_rate_curve_markers] collateral={:?}, markers={:?}", collateral_type, markers);
+    log!(
+        INFO,
+        "[set_rate_curve_markers] collateral={:?}, markers={:?}",
+        collateral_type,
+        markers
+    );
     Ok(())
 }
 
@@ -7725,9 +8959,7 @@ async fn set_rate_curve_markers(
 /// `markers`: Vec of (SystemThreshold variant name, multiplier) pairs.
 #[candid_method(update)]
 #[update]
-async fn set_recovery_rate_curve(
-    markers: Vec<(String, f64)>,
-) -> Result<(), ProtocolError> {
+async fn set_recovery_rate_curve(markers: Vec<(String, f64)>) -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
@@ -7745,9 +8977,10 @@ async fn set_recovery_rate_curve(
     let mut parsed: Vec<(SystemThreshold, f64)> = Vec::new();
     for (thresh_str, mult) in &markers {
         if !mult.is_finite() || *mult <= 0.0 {
-            return Err(ProtocolError::GenericError(
-                format!("Multiplier for {} must be a finite positive number, got {}", thresh_str, mult),
-            ));
+            return Err(ProtocolError::GenericError(format!(
+                "Multiplier for {} must be a finite positive number, got {}",
+                thresh_str, mult
+            )));
         }
         let threshold = match thresh_str.as_str() {
             "LiquidationRatio" => SystemThreshold::LiquidationRatio,
@@ -7773,9 +9006,7 @@ async fn set_recovery_rate_curve(
 /// Accepts a JSON-serialized RateCurveV2.
 #[candid_method(update)]
 #[update]
-async fn set_borrowing_fee_curve(
-    curve_json: Option<String>,
-) -> Result<(), ProtocolError> {
+async fn set_borrowing_fee_curve(curve_json: Option<String>) -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
@@ -7791,16 +9022,17 @@ async fn set_borrowing_fee_curve(
             // INT-003: validate structure and multiplier upper bound. The
             // upper bound prevents a runaway fee from underflowing
             // `amount - fee` in `borrow_from_vault_internal`.
-            parsed
-                .validate()
-                .map_err(ProtocolError::GenericError)?;
+            parsed.validate().map_err(ProtocolError::GenericError)?;
             Some(parsed)
         }
     };
     mutate_state(|s| {
         rumi_protocol_backend::event::record_set_borrowing_fee_curve(s, curve);
     });
-    log!(INFO, "[set_borrowing_fee_curve] Updated borrowing fee curve");
+    log!(
+        INFO,
+        "[set_borrowing_fee_curve] Updated borrowing fee curve"
+    );
     Ok(())
 }
 
@@ -7821,24 +9053,29 @@ async fn set_healthy_cr(
     }
     let exists = read_state(|s| s.collateral_configs.contains_key(&collateral_type));
     if !exists {
-        return Err(ProtocolError::GenericError("Unknown collateral type".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Unknown collateral type".to_string(),
+        ));
     }
     // Validate healthy_cr > borrow_threshold if set
     if let Some(cr) = healthy_cr {
         if !cr.is_finite() {
             return Err(ProtocolError::GenericError(format!(
-                "healthy_cr ({}) must be a finite number", cr
+                "healthy_cr ({}) must be a finite number",
+                cr
             )));
         }
         let borrow_threshold = read_state(|s| {
-            s.collateral_configs.get(&collateral_type)
+            s.collateral_configs
+                .get(&collateral_type)
                 .map(|c| c.borrow_threshold_ratio.to_f64())
                 .unwrap_or(1.5)
         });
         if cr <= borrow_threshold {
-            return Err(ProtocolError::GenericError(
-                format!("healthy_cr ({}) must be greater than borrow_threshold_ratio ({})", cr, borrow_threshold),
-            ));
+            return Err(ProtocolError::GenericError(format!(
+                "healthy_cr ({}) must be greater than borrow_threshold_ratio ({})",
+                cr, borrow_threshold
+            )));
         }
     }
     let ratio = healthy_cr
@@ -7849,7 +9086,12 @@ async fn set_healthy_cr(
     mutate_state(|s| {
         rumi_protocol_backend::event::record_set_healthy_cr(s, collateral_type, ratio);
     });
-    log!(INFO, "[set_healthy_cr] collateral={}, healthy_cr={:?}", collateral_type, healthy_cr);
+    log!(
+        INFO,
+        "[set_healthy_cr] collateral={}, healthy_cr={:?}",
+        collateral_type,
+        healthy_cr
+    );
     Ok(())
 }
 
@@ -7858,13 +9100,17 @@ async fn set_healthy_cr(
 #[query]
 fn get_vault_interest_rate(vault_id: u64) -> Result<f64, ProtocolError> {
     read_state(|s| {
-        let vault = s.vault_id_to_vaults.get(&vault_id)
+        let vault = s
+            .vault_id_to_vaults
+            .get(&vault_id)
             .ok_or_else(|| ProtocolError::GenericError(format!("Vault {} not found", vault_id)))?;
-        let config = s.get_collateral_config(&vault.collateral_type)
+        let config = s
+            .get_collateral_config(&vault.collateral_type)
             .ok_or_else(|| ProtocolError::GenericError("Unknown collateral type".to_string()))?;
         // Compute vault CR
-        let price = config.last_price
-            .ok_or_else(|| ProtocolError::GenericError("No price available for collateral".to_string()))?;
+        let price = config.last_price.ok_or_else(|| {
+            ProtocolError::GenericError("No price available for collateral".to_string())
+        })?;
         let price_dec = Decimal::from_f64(price).unwrap_or(Decimal::ZERO);
         let vault_value = rumi_protocol_backend::numeric::collateral_usd_value(
             vault.collateral_amount,
@@ -7876,7 +9122,10 @@ fn get_vault_interest_rate(vault_id: u64) -> Result<f64, ProtocolError> {
         } else {
             vault_value / vault.borrowed_icusd_amount
         };
-        Ok(s.get_dynamic_interest_rate_for(&vault.collateral_type, vault_cr).to_f64())
+        Ok(
+            s.get_dynamic_interest_rate_for(&vault.collateral_type, vault_cr)
+                .to_f64(),
+        )
     })
 }
 
@@ -7885,13 +9134,15 @@ fn get_vault_interest_rate(vault_id: u64) -> Result<f64, ProtocolError> {
 #[update]
 async fn clear_stuck_operations(principal_id: Option<Principal>) -> Result<u64, ProtocolError> {
     let caller = ic_cdk::caller();
-    
+
     // Only developer can clear stuck operations
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
-        return Err(ProtocolError::GenericError("Only developer can clear stuck operations".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Only developer can clear stuck operations".to_string(),
+        ));
     }
-    
+
     let cleared_count = mutate_state(|s| {
         use ic_cdk::api::time;
         let current_time = time();
@@ -7903,9 +9154,11 @@ async fn clear_stuck_operations(principal_id: Option<Principal>) -> Result<u64, 
             if s.principal_guards.contains(&target_principal) {
                 principals_to_remove.push(target_principal);
                 if let Some(op_name) = s.operation_names.get(&target_principal) {
-                    log!(INFO,
+                    log!(
+                        INFO,
                         "[clear_stuck_operations] Clearing operation '{}' for principal: {}",
-                        op_name, target_principal.to_string()
+                        op_name,
+                        target_principal.to_string()
                     );
                 }
                 count += 1;
@@ -7945,8 +9198,12 @@ async fn clear_stuck_operations(principal_id: Option<Principal>) -> Result<u64, 
 
         count
     });
-    
-    log!(INFO, "[clear_stuck_operations] Cleared {} stuck operations", cleared_count);
+
+    log!(
+        INFO,
+        "[clear_stuck_operations] Cleared {} stuck operations",
+        cleared_count
+    );
     Ok(cleared_count)
 }
 
@@ -7954,21 +9211,28 @@ async fn clear_stuck_operations(principal_id: Option<Principal>) -> Result<u64, 
 
 #[candid_method(update)]
 #[update]
-async fn add_collateral_token(arg: rumi_protocol_backend::AddCollateralArg) -> Result<(), ProtocolError> {
+async fn add_collateral_token(
+    arg: rumi_protocol_backend::AddCollateralArg,
+) -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
-        return Err(ProtocolError::GenericError("Only developer can add collateral types".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Only developer can add collateral types".to_string(),
+        ));
     }
 
     // Check it doesn't already exist
     let already_exists = read_state(|s| s.collateral_configs.contains_key(&arg.ledger_canister_id));
     if already_exists {
-        return Err(ProtocolError::GenericError("Collateral type already exists".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Collateral type already exists".to_string(),
+        ));
     }
 
     // Query icrc1_decimals from the ledger
-    let decimals_result: Result<(u8,), _> = ic_cdk::call(arg.ledger_canister_id, "icrc1_decimals", ()).await;
+    let decimals_result: Result<(u8,), _> =
+        ic_cdk::call(arg.ledger_canister_id, "icrc1_decimals", ()).await;
     let decimals = match decimals_result {
         Ok((d,)) => d,
         Err((code, msg)) => {
@@ -7980,7 +9244,8 @@ async fn add_collateral_token(arg: rumi_protocol_backend::AddCollateralArg) -> R
     };
 
     // Query icrc1_fee from the ledger
-    let fee_result: Result<(candid::Nat,), _> = ic_cdk::call(arg.ledger_canister_id, "icrc1_fee", ()).await;
+    let fee_result: Result<(candid::Nat,), _> =
+        ic_cdk::call(arg.ledger_canister_id, "icrc1_fee", ()).await;
     let ledger_fee = match fee_result {
         Ok((f,)) => {
             use num_traits::ToPrimitive;
@@ -8016,7 +9281,8 @@ async fn add_collateral_token(arg: rumi_protocol_backend::AddCollateralArg) -> R
         current_base_rate: Ratio::from_f64(0.0),
         last_redemption_time: 0,
         // Computed from borrow_threshold_ratio × recovery_cr_multiplier; not user-supplied.
-        recovery_target_cr: Ratio::from_f64(arg.borrow_threshold_ratio) * read_state(|s| s.recovery_cr_multiplier),
+        recovery_target_cr: Ratio::from_f64(arg.borrow_threshold_ratio)
+            * read_state(|s| s.recovery_cr_multiplier),
         min_collateral_deposit: arg.min_collateral_deposit,
         recovery_borrowing_fee: None,
         recovery_interest_rate_apr: None,
@@ -8049,11 +9315,20 @@ async fn add_collateral_token(arg: rumi_protocol_backend::AddCollateralArg) -> R
     let ledger_id = arg.ledger_canister_id;
     let is_icp = read_state(|s| s.icp_collateral_type() == ledger_id);
     if !is_icp {
-        log!(INFO, "[add_collateral_token] Registering price timer for collateral {}", ledger_id);
+        log!(
+            INFO,
+            "[add_collateral_token] Registering price timer for collateral {}",
+            ledger_id
+        );
         rumi_protocol_backend::xrc::register_collateral_price_timer(ledger_id);
     }
 
-    log!(INFO, "[add_collateral_token] Added collateral type: {} (decimals={})", arg.ledger_canister_id, decimals);
+    log!(
+        INFO,
+        "[add_collateral_token] Added collateral type: {} (decimals={})",
+        arg.ledger_canister_id,
+        decimals
+    );
 
     // Best-effort: register the new collateral on the stability pool so it
     // can accept liquidation proceeds in this token.  If the SP call fails
@@ -8077,7 +9352,9 @@ async fn add_collateral_token(arg: rumi_protocol_backend::AddCollateralArg) -> R
             status: SpCollateralStatus,
         }
         #[derive(candid::CandidType)]
-        enum SpCollateralStatus { Active }
+        enum SpCollateralStatus {
+            Active,
+        }
 
         let info = SpCollateralInfo {
             ledger_id: ledger_id,
@@ -8088,9 +9365,17 @@ async fn add_collateral_token(arg: rumi_protocol_backend::AddCollateralArg) -> R
 
         // We ignore the SP's Result return value — if the call itself succeeds,
         // registration worked (or the collateral already existed, which is fine).
-        match ic_cdk::call::<(SpCollateralInfo,), ()>(sp_canister, "register_collateral", (info,)).await {
+        match ic_cdk::call::<(SpCollateralInfo,), ()>(sp_canister, "register_collateral", (info,))
+            .await
+        {
             Ok(()) => {
-                log!(INFO, "[add_collateral_token] Registered {} ({}) on stability pool {}", symbol, ledger_id, sp_canister);
+                log!(
+                    INFO,
+                    "[add_collateral_token] Registered {} ({}) on stability pool {}",
+                    symbol,
+                    ledger_id,
+                    sp_canister
+                );
             }
             Err((code, msg)) => {
                 log!(INFO, "[add_collateral_token] WARNING: Failed to register collateral on SP: {:?} {} — register manually", code, msg);
@@ -8110,19 +9395,28 @@ async fn set_collateral_status(
     let caller = ic_cdk::caller();
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
-        return Err(ProtocolError::GenericError("Only developer can change collateral status".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Only developer can change collateral status".to_string(),
+        ));
     }
 
     let exists = read_state(|s| s.collateral_configs.contains_key(&collateral_type));
     if !exists {
-        return Err(ProtocolError::GenericError("Collateral type not found".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Collateral type not found".to_string(),
+        ));
     }
 
     mutate_state(|s| {
         event::record_update_collateral_status(s, collateral_type, status);
     });
 
-    log!(INFO, "[set_collateral_status] Collateral {} status set to {:?}", collateral_type, status);
+    log!(
+        INFO,
+        "[set_collateral_status] Collateral {} status set to {:?}",
+        collateral_type,
+        status
+    );
     Ok(())
 }
 
@@ -8191,12 +9485,16 @@ async fn set_collateral_debt_ceiling(
     let caller = ic_cdk::caller();
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
-        return Err(ProtocolError::GenericError("Only developer can change debt ceiling".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Only developer can change debt ceiling".to_string(),
+        ));
     }
 
     let exists = read_state(|s| s.collateral_configs.contains_key(&collateral_type));
     if !exists {
-        return Err(ProtocolError::GenericError("Collateral type not found".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Collateral type not found".to_string(),
+        ));
     }
 
     mutate_state(|s| {
@@ -8205,7 +9503,12 @@ async fn set_collateral_debt_ceiling(
         }
     });
 
-    log!(INFO, "[set_collateral_debt_ceiling] Collateral {} debt ceiling set to {}", collateral_type, debt_ceiling);
+    log!(
+        INFO,
+        "[set_collateral_debt_ceiling] Collateral {} debt ceiling set to {}",
+        collateral_type,
+        debt_ceiling
+    );
     Ok(())
 }
 
@@ -8213,14 +9516,13 @@ async fn set_collateral_debt_ceiling(
 /// Haircut is a decimal: 0.07 = 7%, range 0.0–0.50.
 #[candid_method(update)]
 #[update]
-async fn set_lst_haircut(
-    collateral_type: Principal,
-    haircut: f64,
-) -> Result<(), ProtocolError> {
+async fn set_lst_haircut(collateral_type: Principal, haircut: f64) -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
-        return Err(ProtocolError::GenericError("Only developer can set LST haircut".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Only developer can set LST haircut".to_string(),
+        ));
     }
 
     rumi_protocol_backend::validate_f64_inclusive("haircut", haircut, 0.0, 0.50)
@@ -8231,10 +9533,19 @@ async fn set_lst_haircut(
             match &mut config.price_source {
                 rumi_protocol_backend::state::PriceSource::LstWrapped { haircut: h, .. } => {
                     *h = haircut;
-                    log!(INFO, "[set_lst_haircut] Collateral {} haircut set to {}", collateral_type, haircut);
+                    log!(
+                        INFO,
+                        "[set_lst_haircut] Collateral {} haircut set to {}",
+                        collateral_type,
+                        haircut
+                    );
                 }
                 _ => {
-                    log!(INFO, "[set_lst_haircut] Collateral {} is not LstWrapped, ignoring", collateral_type);
+                    log!(
+                        INFO,
+                        "[set_lst_haircut] Collateral {} is not LstWrapped, ignoring",
+                        collateral_type
+                    );
                 }
             }
         }
@@ -8271,7 +9582,11 @@ async fn set_collateral_liquidation_ratio(
     });
     let borrow_threshold = match borrow_threshold {
         Some(bt) => bt,
-        None => return Err(ProtocolError::GenericError("Unknown collateral type".to_string())),
+        None => {
+            return Err(ProtocolError::GenericError(
+                "Unknown collateral type".to_string(),
+            ))
+        }
     };
     if liquidation_ratio >= borrow_threshold {
         return Err(ProtocolError::GenericError(format!(
@@ -8279,14 +9594,23 @@ async fn set_collateral_liquidation_ratio(
             liquidation_ratio, borrow_threshold
         )));
     }
-    let ratio = Ratio::from(
-        Decimal::try_from(liquidation_ratio)
-            .map_err(|_| ProtocolError::GenericError("Invalid liquidation_ratio value".to_string()))?,
-    );
+    let ratio =
+        Ratio::from(Decimal::try_from(liquidation_ratio).map_err(|_| {
+            ProtocolError::GenericError("Invalid liquidation_ratio value".to_string())
+        })?);
     mutate_state(|s| {
-        rumi_protocol_backend::event::record_set_collateral_liquidation_ratio(s, collateral_type, ratio);
+        rumi_protocol_backend::event::record_set_collateral_liquidation_ratio(
+            s,
+            collateral_type,
+            ratio,
+        );
     });
-    log!(INFO, "[set_collateral_liquidation_ratio] collateral={}, liquidation_ratio={}", collateral_type, liquidation_ratio);
+    log!(
+        INFO,
+        "[set_collateral_liquidation_ratio] collateral={}, liquidation_ratio={}",
+        collateral_type,
+        liquidation_ratio
+    );
     Ok(())
 }
 
@@ -8306,7 +9630,10 @@ async fn set_collateral_borrow_threshold(
             "Only the developer principal can set borrow threshold".to_string(),
         ));
     }
-    if !borrow_threshold_ratio.is_finite() || borrow_threshold_ratio <= 1.0 || borrow_threshold_ratio > 5.0 {
+    if !borrow_threshold_ratio.is_finite()
+        || borrow_threshold_ratio <= 1.0
+        || borrow_threshold_ratio > 5.0
+    {
         return Err(ProtocolError::GenericError(format!(
             "borrow_threshold_ratio ({}) must be a finite number > 1.0 and ≤ 5.0",
             borrow_threshold_ratio
@@ -8315,15 +9642,19 @@ async fn set_collateral_borrow_threshold(
     let (liq_ratio, healthy_cr) = read_state(|s| {
         s.collateral_configs
             .get(&collateral_type)
-            .map(|c| (
-                c.liquidation_ratio.to_f64(),
-                c.healthy_cr.map(|r| r.to_f64()),
-            ))
+            .map(|c| {
+                (
+                    c.liquidation_ratio.to_f64(),
+                    c.healthy_cr.map(|r| r.to_f64()),
+                )
+            })
             .unwrap_or((0.0, None))
     });
     let exists = read_state(|s| s.collateral_configs.contains_key(&collateral_type));
     if !exists {
-        return Err(ProtocolError::GenericError("Unknown collateral type".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Unknown collateral type".to_string(),
+        ));
     }
     if borrow_threshold_ratio <= liq_ratio {
         return Err(ProtocolError::GenericError(format!(
@@ -8339,14 +9670,22 @@ async fn set_collateral_borrow_threshold(
             )));
         }
     }
-    let ratio = Ratio::from(
-        Decimal::try_from(borrow_threshold_ratio)
-            .map_err(|_| ProtocolError::GenericError("Invalid borrow_threshold_ratio value".to_string()))?,
-    );
+    let ratio = Ratio::from(Decimal::try_from(borrow_threshold_ratio).map_err(|_| {
+        ProtocolError::GenericError("Invalid borrow_threshold_ratio value".to_string())
+    })?);
     mutate_state(|s| {
-        rumi_protocol_backend::event::record_set_collateral_borrow_threshold(s, collateral_type, ratio);
+        rumi_protocol_backend::event::record_set_collateral_borrow_threshold(
+            s,
+            collateral_type,
+            ratio,
+        );
     });
-    log!(INFO, "[set_collateral_borrow_threshold] collateral={}, borrow_threshold_ratio={}", collateral_type, borrow_threshold_ratio);
+    log!(
+        INFO,
+        "[set_collateral_borrow_threshold] collateral={}, borrow_threshold_ratio={}",
+        collateral_type,
+        borrow_threshold_ratio
+    );
     Ok(())
 }
 
@@ -8369,16 +9708,27 @@ async fn set_collateral_liquidation_bonus(
         .map_err(ProtocolError::GenericError)?;
     let exists = read_state(|s| s.collateral_configs.contains_key(&collateral_type));
     if !exists {
-        return Err(ProtocolError::GenericError("Unknown collateral type".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Unknown collateral type".to_string(),
+        ));
     }
-    let ratio = Ratio::from(
-        Decimal::try_from(liquidation_bonus)
-            .map_err(|_| ProtocolError::GenericError("Invalid liquidation_bonus value".to_string()))?,
-    );
+    let ratio =
+        Ratio::from(Decimal::try_from(liquidation_bonus).map_err(|_| {
+            ProtocolError::GenericError("Invalid liquidation_bonus value".to_string())
+        })?);
     mutate_state(|s| {
-        rumi_protocol_backend::event::record_set_collateral_liquidation_bonus(s, collateral_type, ratio);
+        rumi_protocol_backend::event::record_set_collateral_liquidation_bonus(
+            s,
+            collateral_type,
+            ratio,
+        );
     });
-    log!(INFO, "[set_collateral_liquidation_bonus] collateral={}, liquidation_bonus={}", collateral_type, liquidation_bonus);
+    log!(
+        INFO,
+        "[set_collateral_liquidation_bonus] collateral={}, liquidation_bonus={}",
+        collateral_type,
+        liquidation_bonus
+    );
     Ok(())
 }
 
@@ -8399,12 +9749,23 @@ async fn set_collateral_min_vault_debt(
     }
     let exists = read_state(|s| s.collateral_configs.contains_key(&collateral_type));
     if !exists {
-        return Err(ProtocolError::GenericError("Unknown collateral type".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Unknown collateral type".to_string(),
+        ));
     }
     mutate_state(|s| {
-        rumi_protocol_backend::event::record_set_collateral_min_vault_debt(s, collateral_type, min_vault_debt);
+        rumi_protocol_backend::event::record_set_collateral_min_vault_debt(
+            s,
+            collateral_type,
+            min_vault_debt,
+        );
     });
-    log!(INFO, "[set_collateral_min_vault_debt] collateral={}, min_vault_debt={}", collateral_type, min_vault_debt);
+    log!(
+        INFO,
+        "[set_collateral_min_vault_debt] collateral={}, min_vault_debt={}",
+        collateral_type,
+        min_vault_debt
+    );
     Ok(())
 }
 
@@ -8426,12 +9787,23 @@ async fn set_collateral_ledger_fee(
     }
     let exists = read_state(|s| s.collateral_configs.contains_key(&collateral_type));
     if !exists {
-        return Err(ProtocolError::GenericError("Unknown collateral type".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Unknown collateral type".to_string(),
+        ));
     }
     mutate_state(|s| {
-        rumi_protocol_backend::event::record_set_collateral_ledger_fee(s, collateral_type, ledger_fee);
+        rumi_protocol_backend::event::record_set_collateral_ledger_fee(
+            s,
+            collateral_type,
+            ledger_fee,
+        );
     });
-    log!(INFO, "[set_collateral_ledger_fee] collateral={}, ledger_fee={}", collateral_type, ledger_fee);
+    log!(
+        INFO,
+        "[set_collateral_ledger_fee] collateral={}, ledger_fee={}",
+        collateral_type,
+        ledger_fee
+    );
     Ok(())
 }
 
@@ -8450,8 +9822,13 @@ async fn set_collateral_redemption_fee_floor(
             "Only the developer principal can set redemption fee floor".to_string(),
         ));
     }
-    rumi_protocol_backend::validate_f64_inclusive("redemption_fee_floor", redemption_fee_floor, 0.0, 0.10)
-        .map_err(ProtocolError::GenericError)?;
+    rumi_protocol_backend::validate_f64_inclusive(
+        "redemption_fee_floor",
+        redemption_fee_floor,
+        0.0,
+        0.10,
+    )
+    .map_err(ProtocolError::GenericError)?;
     let ceiling = read_state(|s| {
         s.collateral_configs
             .get(&collateral_type)
@@ -8459,7 +9836,11 @@ async fn set_collateral_redemption_fee_floor(
     });
     let ceiling = match ceiling {
         Some(c) => c,
-        None => return Err(ProtocolError::GenericError("Unknown collateral type".to_string())),
+        None => {
+            return Err(ProtocolError::GenericError(
+                "Unknown collateral type".to_string(),
+            ))
+        }
     };
     if redemption_fee_floor > ceiling {
         return Err(ProtocolError::GenericError(format!(
@@ -8467,14 +9848,22 @@ async fn set_collateral_redemption_fee_floor(
             redemption_fee_floor, ceiling
         )));
     }
-    let ratio = Ratio::from(
-        Decimal::try_from(redemption_fee_floor)
-            .map_err(|_| ProtocolError::GenericError("Invalid redemption_fee_floor value".to_string()))?,
-    );
+    let ratio = Ratio::from(Decimal::try_from(redemption_fee_floor).map_err(|_| {
+        ProtocolError::GenericError("Invalid redemption_fee_floor value".to_string())
+    })?);
     mutate_state(|s| {
-        rumi_protocol_backend::event::record_set_collateral_redemption_fee_floor(s, collateral_type, ratio);
+        rumi_protocol_backend::event::record_set_collateral_redemption_fee_floor(
+            s,
+            collateral_type,
+            ratio,
+        );
     });
-    log!(INFO, "[set_collateral_redemption_fee_floor] collateral={}, redemption_fee_floor={}", collateral_type, redemption_fee_floor);
+    log!(
+        INFO,
+        "[set_collateral_redemption_fee_floor] collateral={}, redemption_fee_floor={}",
+        collateral_type,
+        redemption_fee_floor
+    );
     Ok(())
 }
 
@@ -8493,8 +9882,13 @@ async fn set_collateral_redemption_fee_ceiling(
             "Only the developer principal can set redemption fee ceiling".to_string(),
         ));
     }
-    rumi_protocol_backend::validate_f64_inclusive("redemption_fee_ceiling", redemption_fee_ceiling, 0.0, 0.50)
-        .map_err(ProtocolError::GenericError)?;
+    rumi_protocol_backend::validate_f64_inclusive(
+        "redemption_fee_ceiling",
+        redemption_fee_ceiling,
+        0.0,
+        0.50,
+    )
+    .map_err(ProtocolError::GenericError)?;
     let floor = read_state(|s| {
         s.collateral_configs
             .get(&collateral_type)
@@ -8502,7 +9896,11 @@ async fn set_collateral_redemption_fee_ceiling(
     });
     let floor = match floor {
         Some(f) => f,
-        None => return Err(ProtocolError::GenericError("Unknown collateral type".to_string())),
+        None => {
+            return Err(ProtocolError::GenericError(
+                "Unknown collateral type".to_string(),
+            ))
+        }
     };
     if redemption_fee_ceiling < floor {
         return Err(ProtocolError::GenericError(format!(
@@ -8510,14 +9908,22 @@ async fn set_collateral_redemption_fee_ceiling(
             redemption_fee_ceiling, floor
         )));
     }
-    let ratio = Ratio::from(
-        Decimal::try_from(redemption_fee_ceiling)
-            .map_err(|_| ProtocolError::GenericError("Invalid redemption_fee_ceiling value".to_string()))?,
-    );
+    let ratio = Ratio::from(Decimal::try_from(redemption_fee_ceiling).map_err(|_| {
+        ProtocolError::GenericError("Invalid redemption_fee_ceiling value".to_string())
+    })?);
     mutate_state(|s| {
-        rumi_protocol_backend::event::record_set_collateral_redemption_fee_ceiling(s, collateral_type, ratio);
+        rumi_protocol_backend::event::record_set_collateral_redemption_fee_ceiling(
+            s,
+            collateral_type,
+            ratio,
+        );
     });
-    log!(INFO, "[set_collateral_redemption_fee_ceiling] collateral={}, redemption_fee_ceiling={}", collateral_type, redemption_fee_ceiling);
+    log!(
+        INFO,
+        "[set_collateral_redemption_fee_ceiling] collateral={}, redemption_fee_ceiling={}",
+        collateral_type,
+        redemption_fee_ceiling
+    );
     Ok(())
 }
 
@@ -8538,12 +9944,23 @@ async fn set_collateral_min_deposit(
     }
     let exists = read_state(|s| s.collateral_configs.contains_key(&collateral_type));
     if !exists {
-        return Err(ProtocolError::GenericError("Unknown collateral type".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Unknown collateral type".to_string(),
+        ));
     }
     mutate_state(|s| {
-        rumi_protocol_backend::event::record_set_collateral_min_deposit(s, collateral_type, min_collateral_deposit);
+        rumi_protocol_backend::event::record_set_collateral_min_deposit(
+            s,
+            collateral_type,
+            min_collateral_deposit,
+        );
     });
-    log!(INFO, "[set_collateral_min_deposit] collateral={}, min_collateral_deposit={}", collateral_type, min_collateral_deposit);
+    log!(
+        INFO,
+        "[set_collateral_min_deposit] collateral={}, min_collateral_deposit={}",
+        collateral_type,
+        min_collateral_deposit
+    );
     Ok(())
 }
 
@@ -8571,31 +9988,48 @@ async fn set_collateral_display_color(
     }
     let exists = read_state(|s| s.collateral_configs.contains_key(&collateral_type));
     if !exists {
-        return Err(ProtocolError::GenericError("Unknown collateral type".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Unknown collateral type".to_string(),
+        ));
     }
     mutate_state(|s| {
-        rumi_protocol_backend::event::record_set_collateral_display_color(s, collateral_type, display_color.clone());
+        rumi_protocol_backend::event::record_set_collateral_display_color(
+            s,
+            collateral_type,
+            display_color.clone(),
+        );
     });
-    log!(INFO, "[set_collateral_display_color] collateral={}, display_color={:?}", collateral_type, display_color);
+    log!(
+        INFO,
+        "[set_collateral_display_color] collateral={}, display_color={:?}",
+        collateral_type,
+        display_color
+    );
     Ok(())
 }
 
 #[candid_method(query)]
 #[query]
-fn get_collateral_config(collateral_type: Principal) -> Option<rumi_protocol_backend::state::CollateralConfig> {
+fn get_collateral_config(
+    collateral_type: Principal,
+) -> Option<rumi_protocol_backend::state::CollateralConfig> {
     read_state(|s| {
-        s.get_collateral_config(&collateral_type).cloned().map(|mut config| {
-            // Always compute recovery_target_cr from the formula rather than returning
-            // the cached value, which may be stale if the multiplier changed after config creation.
-            config.recovery_target_cr = config.borrow_threshold_ratio * s.recovery_cr_multiplier;
-            config
-        })
+        s.get_collateral_config(&collateral_type)
+            .cloned()
+            .map(|mut config| {
+                // Always compute recovery_target_cr from the formula rather than returning
+                // the cached value, which may be stale if the multiplier changed after config creation.
+                config.recovery_target_cr =
+                    config.borrow_threshold_ratio * s.recovery_cr_multiplier;
+                config
+            })
     })
 }
 
 #[candid_method(query)]
 #[query]
-fn get_supported_collateral_types() -> Vec<(Principal, rumi_protocol_backend::state::CollateralStatus)> {
+fn get_supported_collateral_types(
+) -> Vec<(Principal, rumi_protocol_backend::state::CollateralStatus)> {
     read_state(|s| s.supported_collateral_types())
 }
 
@@ -8644,12 +10078,16 @@ async fn update_collateral_config(
     let caller = ic_cdk::caller();
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
-        return Err(ProtocolError::GenericError("Only developer can update collateral config".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Only developer can update collateral config".to_string(),
+        ));
     }
 
     let exists = read_state(|s| s.collateral_configs.contains_key(&collateral_type));
     if !exists {
-        return Err(ProtocolError::GenericError("Collateral type not found".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Collateral type not found".to_string(),
+        ));
     }
 
     // Ensure the ledger_canister_id in the config matches the collateral_type key
@@ -8663,7 +10101,11 @@ async fn update_collateral_config(
         event::record_update_collateral_config(s, collateral_type, config);
     });
 
-    log!(INFO, "[update_collateral_config] Updated config for collateral {}", collateral_type);
+    log!(
+        INFO,
+        "[update_collateral_config] Updated config for collateral {}",
+        collateral_type
+    );
     Ok(())
 }
 
@@ -8680,14 +10122,19 @@ async fn admin_correct_vault_collateral(
     let caller = ic_cdk::caller();
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
-        return Err(ProtocolError::GenericError("Only developer can correct vault collateral".to_string()));
+        return Err(ProtocolError::GenericError(
+            "Only developer can correct vault collateral".to_string(),
+        ));
     }
 
     let old_amount = read_state(|s| {
         s.vault_id_to_vaults
             .get(&vault_id)
             .map(|v| v.collateral_amount)
-            .ok_or(ProtocolError::GenericError(format!("Vault #{} not found", vault_id)))
+            .ok_or(ProtocolError::GenericError(format!(
+                "Vault #{} not found",
+                vault_id
+            )))
     })?;
 
     // Safety: only allow downward corrections. Reducing collateral is conservative
@@ -8695,21 +10142,31 @@ async fn admin_correct_vault_collateral(
     // against phantom value — if collateral was under-reported, the safe fix is for
     // the user to deposit more.
     if new_collateral_amount > old_amount {
-        return Err(ProtocolError::GenericError(
-            format!(
-                "Admin corrections can only reduce collateral (current: {}, requested: {}). \
+        return Err(ProtocolError::GenericError(format!(
+            "Admin corrections can only reduce collateral (current: {}, requested: {}). \
                  To increase collateral, the vault owner should deposit more.",
-                old_amount, new_collateral_amount
-            )
-        ));
+            old_amount, new_collateral_amount
+        )));
     }
 
     mutate_state(|s| {
-        event::record_admin_vault_correction(s, vault_id, old_amount, new_collateral_amount, reason.clone());
+        event::record_admin_vault_correction(
+            s,
+            vault_id,
+            old_amount,
+            new_collateral_amount,
+            reason.clone(),
+        );
     });
 
-    log!(INFO, "[admin_correct_vault_collateral] Vault #{}: {} -> {} raw units. Reason: {}",
-        vault_id, old_amount, new_collateral_amount, reason);
+    log!(
+        INFO,
+        "[admin_correct_vault_collateral] Vault #{}: {} -> {} raw units. Reason: {}",
+        vault_id,
+        old_amount,
+        new_collateral_amount,
+        reason
+    );
     Ok(())
 }
 
@@ -8730,7 +10187,11 @@ async fn admin_sweep_to_treasury(reason: String) -> Result<u64, ProtocolError> {
     }
 
     let (treasury, icp_ledger, icp_fee) = read_state(|s| {
-        (s.treasury_principal, s.icp_ledger_principal, s.icp_ledger_fee)
+        (
+            s.treasury_principal,
+            s.icp_ledger_principal,
+            s.icp_ledger_fee,
+        )
     });
     let treasury = treasury.ok_or(ProtocolError::GenericError(
         "Treasury principal not configured".to_string(),
@@ -8844,7 +10305,9 @@ struct VaultDebtCorrection {
 /// Records an auditable event for each correction.
 #[update]
 #[candid_method(update)]
-fn admin_correct_vault_debts(corrections: Vec<VaultDebtCorrection>) -> Result<String, ProtocolError> {
+fn admin_correct_vault_debts(
+    corrections: Vec<VaultDebtCorrection>,
+) -> Result<String, ProtocolError> {
     let caller = ic_cdk::caller();
     let is_developer = read_state(|s| s.developer_principal == caller);
     if !is_developer {
@@ -8875,8 +10338,11 @@ fn admin_correct_vault_debts(corrections: Vec<VaultDebtCorrection>) -> Result<St
 
                 results.push(format!(
                     "vault#{}: borrowed {}→{}, accrued {}→{}",
-                    c.vault_id, old_borrowed, c.correct_borrowed_e8s,
-                    old_accrued, c.correct_accrued_interest_e8s
+                    c.vault_id,
+                    old_borrowed,
+                    c.correct_borrowed_e8s,
+                    old_accrued,
+                    c.correct_accrued_interest_e8s
                 ));
 
                 // Wave-8b LIQ-002: admin correction changes debt → re-key.
@@ -8887,7 +10353,11 @@ fn admin_correct_vault_debts(corrections: Vec<VaultDebtCorrection>) -> Result<St
         }
     });
 
-    log!(INFO, "[admin_correct_vault_debts] Applied {} corrections", results.len());
+    log!(
+        INFO,
+        "[admin_correct_vault_debts] Applied {} corrections",
+        results.len()
+    );
     Ok(results.join("\n"))
 }
 
@@ -8928,10 +10398,12 @@ fn forward_filtered_scan_windows_filters_and_advances_cursor() {
     let close_filter: HashSet<EventTypeFilter> = HashSet::from([EventTypeFilter::CloseVault]);
     let borrow_filter: HashSet<EventTypeFilter> = HashSet::from([EventTypeFilter::Borrow]);
 
-    let ids = |r: &ForwardFilteredEventsResponse| r.events.iter().map(|(i, _)| *i).collect::<Vec<_>>();
+    let ids =
+        |r: &ForwardFilteredEventsResponse| r.events.iter().map(|(i, _)| *i).collect::<Vec<_>>();
 
     // Full scan: all three match, tagged with their global indices, caught up.
-    let r = scan_events_forward_filtered(evs.clone().into_iter(), 0, 10, count, Some(&close_filter));
+    let r =
+        scan_events_forward_filtered(evs.clone().into_iter(), 0, 10, count, Some(&close_filter));
     assert_eq!(ids(&r), vec![0, 1, 2]);
     assert_eq!(r.next_start, 3);
     assert!(r.reached_end);
@@ -8943,7 +10415,8 @@ fn forward_filtered_scan_windows_filters_and_advances_cursor() {
     assert!(!r.reached_end);
 
     // Resume from cursor 2: only index 2, then caught up.
-    let r = scan_events_forward_filtered(evs.clone().into_iter(), 2, 10, count, Some(&close_filter));
+    let r =
+        scan_events_forward_filtered(evs.clone().into_iter(), 2, 10, count, Some(&close_filter));
     assert_eq!(ids(&r), vec![2]);
     assert_eq!(r.next_start, 3);
     assert!(r.reached_end);
@@ -8962,12 +10435,16 @@ fn forward_filtered_scan_windows_filters_and_advances_cursor() {
 // 13_300). Non-EVM / unknown chains error rather than silently defaulting.
 #[cfg(test)]
 mod chain_vault_param_tests {
-    use super::evm_vault_params;
+    use super::{evm_vault_params, replace_state, State};
 
     #[test]
     fn evm_vault_params_resolves_per_chain() {
         use rumi_protocol_backend::chains::config::ChainId;
-        assert_eq!(evm_vault_params(ChainId(10143)).unwrap(), ("MON", 13_000, 10_000_000, None)); // Monad preserved
+        replace_state(State::default());
+        assert_eq!(
+            evm_vault_params(ChainId(10143)).unwrap(),
+            ("MON", 13_000, 10_000_000, None)
+        ); // Monad preserved
         assert_eq!(
             evm_vault_params(ChainId(71)).unwrap(),
             ("CFX", 15_000, 10_000_000, Some(500 * 100_000_000))
@@ -8991,12 +10468,14 @@ mod chain_vault_param_tests {
 
 #[cfg(test)]
 mod chain_sp_absorb_entry_tests {
-    use super::{chain_collateral_sentinel, chain_liquidatable_vaults_in_state, chain_sp_absorb_snapshot};
+    use super::{
+        chain_collateral_sentinel, chain_liquidatable_vaults_in_state, chain_sp_absorb_snapshot,
+    };
+    use candid::Principal;
     use rumi_protocol_backend::chains::config::{ChainConfigV3, ChainId, ChainStatus, GasStrategy};
     use rumi_protocol_backend::chains::liquidation_config::{ChainLiquidationConfigV1, DexKind};
     use rumi_protocol_backend::chains::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
     use rumi_protocol_backend::chains::multi_chain_state::MultiChainState;
-    use candid::Principal;
 
     const CFX: ChainId = ChainId(71);
 
@@ -9022,38 +10501,44 @@ mod chain_sp_absorb_entry_tests {
 
     fn configured_state() -> MultiChainState {
         let mut s = MultiChainState::default();
-        s.chain_configs.insert(CFX, ChainConfigV3 {
-            chain_id: CFX,
-            display_name: "Conflux eSpace".into(),
-            rpc_endpoints: vec![],
-            finality_depth: 12,
-            gas_strategy: GasStrategy::EvmEip1559 {
-                max_priority_fee_gwei: 1,
-                max_fee_gwei_ceiling: 100,
+        s.chain_configs.insert(
+            CFX,
+            ChainConfigV3 {
+                chain_id: CFX,
+                display_name: "Conflux eSpace".into(),
+                rpc_endpoints: vec![],
+                finality_depth: 12,
+                gas_strategy: GasStrategy::EvmEip1559 {
+                    max_priority_fee_gwei: 1,
+                    max_fee_gwei_ceiling: 100,
+                },
+                chain_native_decimals: 18,
+                registered_at_ns: 0,
+                status: ChainStatus::Registered,
+                burn_watch_poll_enabled: false,
+                min_quorum_providers: None,
             },
-            chain_native_decimals: 18,
-            registered_at_ns: 0,
-            status: ChainStatus::Registered,
-            burn_watch_poll_enabled: false,
-            min_quorum_providers: None,
-        });
+        );
         s.chain_liquidation_configs.insert(CFX, cfg());
-        s.chain_vaults.insert(7, ChainVaultV1 {
-            vault_id: 7,
-            owner: Principal::anonymous(),
-            collateral_chain: CFX,
-            custody_address: "0x00000000000000000000000000000000000000c7".into(),
-            collateral_amount_native: 1_000_000_000_000_000_000_000,
-            debt_e8s: 100 * 100_000_000,
-            mint_recipient: "0x00000000000000000000000000000000000000d7".into(),
-            pending_mint_e8s: 0,
-            status: ChainVaultStatus::Open,
-            opened_at_ns: 0,
-            owner_evm: None,
-            last_interest_accrual_ns: 0,
-            pending_interest_mint_e8s: 0,
-            pending_liquidation: None,
-        });
+        s.chain_vaults.insert(
+            7,
+            ChainVaultV1 {
+                vault_id: 7,
+                owner: Principal::anonymous(),
+                collateral_chain: CFX,
+                custody_address: "0x00000000000000000000000000000000000000c7".into(),
+                collateral_amount_native: 1_000_000_000_000_000_000_000,
+                debt_e8s: 100 * 100_000_000,
+                mint_recipient: "0x00000000000000000000000000000000000000d7".into(),
+                pending_mint_e8s: 0,
+                status: ChainVaultStatus::Open,
+                opened_at_ns: 0,
+                owner_evm: None,
+                last_interest_accrual_ns: 0,
+                pending_interest_mint_e8s: 0,
+                pending_liquidation: None,
+            },
+        );
         s.sp_attempted_chain_vaults.insert(7);
         s
     }
@@ -9065,12 +10550,20 @@ mod chain_sp_absorb_entry_tests {
 
         s.invariant_halted = true;
         let err = chain_sp_absorb_snapshot(&s, 7, 600).unwrap_err();
-        assert!(format!("{err:?}").to_ascii_lowercase().contains("invariant"), "unexpected error: {err:?}");
+        assert!(
+            format!("{err:?}")
+                .to_ascii_lowercase()
+                .contains("invariant"),
+            "unexpected error: {err:?}"
+        );
 
         s.invariant_halted = false;
         s.reorg_halted.insert(CFX, true);
         let err = chain_sp_absorb_snapshot(&s, 7, 600).unwrap_err();
-        assert!(format!("{err:?}").contains("reorg"), "unexpected error: {err:?}");
+        assert!(
+            format!("{err:?}").contains("reorg"),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[test]
@@ -9078,11 +10571,17 @@ mod chain_sp_absorb_entry_tests {
         let mut s = configured_state();
 
         let err = chain_sp_absorb_snapshot(&s, 7, 600).unwrap_err();
-        assert!(format!("{err:?}").contains("price"), "unexpected error: {err:?}");
+        assert!(
+            format!("{err:?}").contains("price"),
+            "unexpected error: {err:?}"
+        );
 
         s.set_manual_price(CFX, "CFX".into(), 50_000_000, 1);
         let err = chain_sp_absorb_snapshot(&s, 7, 1_100_000).unwrap_err();
-        assert!(format!("{err:?}").contains("price"), "unexpected error: {err:?}");
+        assert!(
+            format!("{err:?}").contains("price"),
+            "unexpected error: {err:?}"
+        );
 
         s.set_manual_price(CFX, "CFX".into(), 50_000_000, 500);
         let ok = chain_sp_absorb_snapshot(&s, 7, 600).expect("fresh price accepted");
@@ -9106,10 +10605,16 @@ mod chain_sp_absorb_entry_tests {
         assert_eq!(rows.len(), 2);
         let attempted = rows.iter().find(|r| r.vault_id == 7).unwrap();
         assert!(attempted.sp_attempted);
-        assert_eq!(attempted.chain_collateral_sentinel, chain_collateral_sentinel(CFX));
+        assert_eq!(
+            attempted.chain_collateral_sentinel,
+            chain_collateral_sentinel(CFX)
+        );
         let fresh = rows.iter().find(|r| r.vault_id == 8).unwrap();
         assert!(!fresh.sp_attempted);
-        assert_eq!(fresh.chain_collateral_sentinel, chain_collateral_sentinel(CFX));
+        assert_eq!(
+            fresh.chain_collateral_sentinel,
+            chain_collateral_sentinel(CFX)
+        );
     }
 }
 
@@ -9120,13 +10625,11 @@ fn check_candid_interface_compatibility() {
 
     fn source_to_str(source: &CandidSource) -> String {
         match source {
-            CandidSource::File(f) => {
-                std::fs::read_to_string(f).unwrap_or_else(|_| "".to_string())
-            }
+            CandidSource::File(f) => std::fs::read_to_string(f).unwrap_or_else(|_| "".to_string()),
             CandidSource::Text(t) => t.to_string(),
         }
     }
-    
+
     fn check_service_compatible(
         new_name: &str,
         new: CandidSource,
@@ -9172,4 +10675,30 @@ fn check_candid_interface_compatibility() {
         "declared candid interface in rumi_protocol_backend.did file",
         CandidSource::File(did_path.as_path()),
     );
+}
+
+#[cfg(test)]
+mod inc5_reconciliation_tests {
+    use super::normalize_reconciliation_proof;
+
+    #[test]
+    fn reconciliation_proof_accepts_trimmed_nonempty_text() {
+        assert_eq!(
+            normalize_reconciliation_proof("  cfx burn tx 0xabc:7  ").expect("valid proof"),
+            "cfx burn tx 0xabc:7"
+        );
+    }
+
+    #[test]
+    fn reconciliation_proof_rejects_empty_text() {
+        let err = normalize_reconciliation_proof("   ").unwrap_err();
+        assert!(format!("{err:?}").contains("proof text required"));
+    }
+
+    #[test]
+    fn reconciliation_proof_rejects_text_over_512_bytes() {
+        let proof = "x".repeat(513);
+        let err = normalize_reconciliation_proof(&proof).unwrap_err();
+        assert!(format!("{err:?}").contains("proof text too long"));
+    }
 }

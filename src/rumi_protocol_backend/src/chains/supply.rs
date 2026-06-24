@@ -12,7 +12,7 @@
 //! can call it without inventing the invariant under deadline pressure.
 
 use super::config::ChainId;
-use super::multi_chain_state::{MultiChainStateV1, MultiChainStateV2, MultiChainState};
+use super::multi_chain_state::{MultiChainState, MultiChainStateV1, MultiChainStateV2};
 use candid::{CandidType, Deserialize};
 use serde::Serialize;
 
@@ -54,13 +54,20 @@ pub enum SupplyDelta {
 #[derive(Debug, PartialEq, Eq)]
 pub enum SupplyInvariantError {
     UnknownChain(ChainId),
-    Underflow { chain: ChainId, current: u128, attempted_decrease: u128 },
+    Underflow {
+        chain: ChainId,
+        current: u128,
+        attempted_decrease: u128,
+    },
     /// `sum(chain_supplies)` did not equal the unified-invariant RHS. `total_debt`
     /// carries that full RHS (debt + reserve_backing + pending_chain_burn — spec
     /// 5.2), NOT the bare debt; the field name is kept for wire stability. With
     /// all-zero reserve/pending (Increment 1) the RHS equals bare debt, so the
     /// reported pair is byte-identical to the pre-Increment-1 behavior.
-    Divergence { sum_after: u128, total_debt: u128 },
+    Divergence {
+        sum_after: u128,
+        total_debt: u128,
+    },
     HaltedAfterSelfCheckFailure,
 }
 
@@ -133,7 +140,10 @@ pub fn apply_supply_delta(
     // (finding #2). With all-zero reserve/pending this is `sum_after != total_debt`.
     let rhs = chain_backing_rhs_e8s(state, total_debt_e8s);
     if sum_after != rhs {
-        return Err(SupplyInvariantError::Divergence { sum_after, total_debt: rhs });
+        return Err(SupplyInvariantError::Divergence {
+            sum_after,
+            total_debt: rhs,
+        });
     }
 
     state.chain_supplies.insert(chain, new);
@@ -158,7 +168,10 @@ pub fn check_invariant(
     let sum: u128 = state.chain_supplies.values().copied().sum();
     let rhs = chain_backing_rhs_e8s(state, total_debt_e8s);
     if sum != rhs {
-        return Err(SupplyInvariantError::Divergence { sum_after: sum, total_debt: rhs });
+        return Err(SupplyInvariantError::Divergence {
+            sum_after: sum,
+            total_debt: rhs,
+        });
     }
     Ok(())
 }
@@ -171,14 +184,178 @@ pub enum ReserveShiftError {
     /// No such chain vault.
     UnknownVault(u64),
     /// The vault's `collateral_chain` does not match the requested `chain`.
-    WrongChain { vault_chain: ChainId, requested: ChainId },
+    WrongChain {
+        vault_chain: ChainId,
+        requested: ChainId,
+    },
     /// `cleared_e8s` exceeds the vault's live `debt_e8s` (would over-credit the
     /// reserve term relative to debt actually retired).
-    ClearExceedsDebt { cleared_e8s: u128, vault_debt_e8s: u128 },
+    ClearExceedsDebt {
+        cleared_e8s: u128,
+        vault_debt_e8s: u128,
+    },
     /// The post-move unified invariant would not hold. The move conserves
     /// debt+reserve, so this only fires if the invariant was ALREADY diverged
     /// before the call (defensive; no mutation).
     InvariantBroken { sum_supplies: u128, rhs: u128 },
+}
+
+/// Reasons a manual foreign-burn reconciliation rejects (no state mutation on
+/// any error). Covers both SP pending-burn settlement and Tier-1 reserve
+/// retirement because both operations burn circulating foreign icUSD and debit an
+/// internal RHS backing term by the same amount.
+#[derive(Debug, PartialEq, Eq)]
+pub enum BackingSettlementError {
+    /// The invariant self-check has halted the rail; do not move backing.
+    Halted,
+    /// No `chain_supplies` entry exists for this chain.
+    UnknownChain(ChainId),
+    /// A zero-value burn proof is meaningless and would only produce noise.
+    ZeroAmount,
+    /// The requested foreign burn exceeds the recorded circulating supply.
+    SupplyUnderflow {
+        chain: ChainId,
+        current: u128,
+        attempted_decrease: u128,
+    },
+    /// The requested settlement exceeds the selected backing term.
+    BackingUnderflow {
+        chain: ChainId,
+        current: u128,
+        attempted_decrease: u128,
+    },
+    /// The post-move unified invariant would not hold. Since the operation
+    /// debits supply and a backing term by the same amount, this indicates the
+    /// invariant was already diverged before the call.
+    InvariantBroken { sum_after: u128, rhs: u128 },
+}
+
+#[derive(Clone, Copy)]
+enum BackingTerm {
+    PendingChainBurn,
+    ReserveBacking,
+}
+
+fn backing_term_value(state: &MultiChainState, chain: ChainId, term: BackingTerm) -> u128 {
+    match term {
+        BackingTerm::PendingChainBurn => state
+            .pending_chain_burn_e8s
+            .get(&chain)
+            .copied()
+            .unwrap_or(0),
+        BackingTerm::ReserveBacking => state.reserve_backing_e8s.get(&chain).copied().unwrap_or(0),
+    }
+}
+
+fn backing_rhs_after_settlement(
+    state: &MultiChainState,
+    amount_e8s: u128,
+    term: BackingTerm,
+) -> u128 {
+    let debt = state.total_chain_vault_debt_e8s();
+    let reserve = match term {
+        BackingTerm::ReserveBacking => state.total_reserve_backing_e8s().saturating_sub(amount_e8s),
+        BackingTerm::PendingChainBurn => state.total_reserve_backing_e8s(),
+    };
+    let pending = match term {
+        BackingTerm::PendingChainBurn => state
+            .total_pending_chain_burn_e8s()
+            .saturating_sub(amount_e8s),
+        BackingTerm::ReserveBacking => state.total_pending_chain_burn_e8s(),
+    };
+    debt.saturating_add(reserve).saturating_add(pending)
+}
+
+fn debit_backing_term(
+    state: &mut MultiChainState,
+    chain: ChainId,
+    amount_e8s: u128,
+    term: BackingTerm,
+) {
+    let map = match term {
+        BackingTerm::PendingChainBurn => &mut state.pending_chain_burn_e8s,
+        BackingTerm::ReserveBacking => &mut state.reserve_backing_e8s,
+    };
+    let new = map.get(&chain).copied().unwrap_or(0) - amount_e8s;
+    if new == 0 {
+        map.remove(&chain);
+    } else {
+        map.insert(chain, new);
+    }
+}
+
+fn settle_backing_burn(
+    state: &mut MultiChainState,
+    chain: ChainId,
+    amount_e8s: u128,
+    term: BackingTerm,
+) -> Result<(), BackingSettlementError> {
+    if state.invariant_halted {
+        return Err(BackingSettlementError::Halted);
+    }
+    if amount_e8s == 0 {
+        return Err(BackingSettlementError::ZeroAmount);
+    }
+
+    let current_supply = state
+        .chain_supplies
+        .get(&chain)
+        .copied()
+        .ok_or(BackingSettlementError::UnknownChain(chain))?;
+    if amount_e8s > current_supply {
+        return Err(BackingSettlementError::SupplyUnderflow {
+            chain,
+            current: current_supply,
+            attempted_decrease: amount_e8s,
+        });
+    }
+
+    let current_backing = backing_term_value(state, chain, term);
+    if amount_e8s > current_backing {
+        return Err(BackingSettlementError::BackingUnderflow {
+            chain,
+            current: current_backing,
+            attempted_decrease: amount_e8s,
+        });
+    }
+
+    let sum_after = state
+        .total_supply_all_chains_e8s()
+        .saturating_sub(amount_e8s);
+    let rhs = backing_rhs_after_settlement(state, amount_e8s, term);
+    if sum_after != rhs {
+        return Err(BackingSettlementError::InvariantBroken { sum_after, rhs });
+    }
+
+    state
+        .chain_supplies
+        .insert(chain, current_supply - amount_e8s);
+    debit_backing_term(state, chain, amount_e8s, term);
+    Ok(())
+}
+
+/// Settle the SP path's slow foreign burn leg: the SP already burned IC-side
+/// icUSD and the backend moved matching debt into `pending_chain_burn_e8s`; once
+/// the foreign-chain burn is manually verified, debit both `chain_supplies` and
+/// `pending_chain_burn_e8s` by the same amount.
+pub fn settle_pending_chain_burn(
+    state: &mut MultiChainState,
+    chain: ChainId,
+    amount_e8s: u128,
+) -> Result<(), BackingSettlementError> {
+    settle_backing_burn(state, chain, amount_e8s, BackingTerm::PendingChainBurn)
+}
+
+/// Settle the Tier-1 reserve retirement leg: after the operator burns
+/// reserve-backed foreign icUSD, debit both circulating chain supply and the
+/// reserve-backing obligation. `reserve_usdc_native` is intentionally untouched;
+/// it remains the realized USDC/protocol-surplus book.
+pub fn settle_reserve_burn(
+    state: &mut MultiChainState,
+    chain: ChainId,
+    amount_e8s: u128,
+) -> Result<(), BackingSettlementError> {
+    settle_backing_burn(state, chain, amount_e8s, BackingTerm::ReserveBacking)
 }
 
 /// Bot/PSM Phase-2 accounting (spec 4.9, 5.3): atomically move `cleared_e8s` of a
@@ -227,13 +404,20 @@ pub fn apply_debt_to_reserve_shift(
     // is unchanged; debt drops by cleared_e8s and reserve_backing rises by the same,
     // so the RHS is invariant. reserve_usdc_native is NOT an RHS term (spec 3.2/5.6).
     let sum_supplies = state.total_supply_all_chains_e8s();
-    let post_debt_total = state.total_chain_vault_debt_e8s().saturating_sub(cleared_e8s);
-    let post_reserve_total = state.total_reserve_backing_e8s().saturating_add(cleared_e8s);
+    let post_debt_total = state
+        .total_chain_vault_debt_e8s()
+        .saturating_sub(cleared_e8s);
+    let post_reserve_total = state
+        .total_reserve_backing_e8s()
+        .saturating_add(cleared_e8s);
     let post_rhs = post_debt_total
         .saturating_add(post_reserve_total)
         .saturating_add(state.total_pending_chain_burn_e8s());
     if sum_supplies != post_rhs {
-        return Err(ReserveShiftError::InvariantBroken { sum_supplies, rhs: post_rhs });
+        return Err(ReserveShiftError::InvariantBroken {
+            sum_supplies,
+            rhs: post_rhs,
+        });
     }
 
     // Apply atomically (every reject above happened before any mutation).

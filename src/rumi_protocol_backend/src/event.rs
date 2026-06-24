@@ -1,11 +1,13 @@
-use crate::numeric::{Ratio, UsdIcp, ICUSD, ICP};
-use crate::state::{CollateralConfig, CollateralStatus, CollateralType, PendingMarginTransfer, RateCurveV2, State};
+use crate::numeric::{Ratio, UsdIcp, ICP, ICUSD};
+use crate::state::{
+    CollateralConfig, CollateralStatus, CollateralType, PendingMarginTransfer, RateCurveV2, State,
+};
 use crate::storage::record_event;
 use crate::vault::Vault;
 use crate::{EventTimeRange, EventTypeFilter, InitArg, Mode, StableTokenType, UpgradeArg};
 use candid::{CandidType, Principal};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -301,14 +303,10 @@ pub enum Event {
     },
 
     #[serde(rename = "set_ckstable_repay_fee")]
-    SetCkstableRepayFee {
-        rate: String,
-    },
+    SetCkstableRepayFee { rate: String },
 
     #[serde(rename = "set_min_icusd_amount")]
-    SetMinIcusdAmount {
-        amount: String,
-    },
+    SetMinIcusdAmount { amount: String },
 
     /// Admin set global icUSD mint cap.
     /// Field `cap` is a legacy alias kept for replay compat.
@@ -333,19 +331,13 @@ pub enum Event {
     },
 
     #[serde(rename = "set_treasury_principal")]
-    SetTreasuryPrincipal {
-        principal: Principal,
-    },
+    SetTreasuryPrincipal { principal: Principal },
 
     #[serde(rename = "set_stability_pool_principal")]
-    SetStabilityPoolPrincipal {
-        principal: Principal,
-    },
+    SetStabilityPoolPrincipal { principal: Principal },
 
     #[serde(rename = "set_liquidation_bot_principal")]
-    SetLiquidationBotPrincipal {
-        principal: Principal,
-    },
+    SetLiquidationBotPrincipal { principal: Principal },
 
     #[serde(rename = "set_bot_budget")]
     SetBotBudget {
@@ -354,14 +346,10 @@ pub enum Event {
     },
 
     #[serde(rename = "set_bot_allowed_collateral_types")]
-    SetBotAllowedCollateralTypes {
-        collateral_types: Vec<Principal>,
-    },
+    SetBotAllowedCollateralTypes { collateral_types: Vec<Principal> },
 
     #[serde(rename = "set_bot_cr_tolerance_bps")]
-    SetBotCrToleranceBps {
-        bps: u64,
-    },
+    SetBotCrToleranceBps { bps: u64 },
 
     /// Wave-14a CDP-14 follow-up: per-collateral override for the XRC
     /// source-count floor (None = inherit global). Emitted when an admin
@@ -375,45 +363,34 @@ pub enum Event {
     },
 
     #[serde(rename = "set_liquidation_bonus")]
-    SetLiquidationBonus {
-        rate: String,
-    },
+    SetLiquidationBonus { rate: String },
 
     #[serde(rename = "set_borrowing_fee")]
-    SetBorrowingFee {
-        rate: String,
-    },
+    SetBorrowingFee { rate: String },
 
     #[serde(rename = "set_redemption_fee_floor")]
-    SetRedemptionFeeFloor {
-        rate: String,
-    },
+    SetRedemptionFeeFloor { rate: String },
 
     #[serde(rename = "set_redemption_fee_ceiling")]
-    SetRedemptionFeeCeiling {
-        rate: String,
-    },
+    SetRedemptionFeeCeiling { rate: String },
 
     #[serde(rename = "set_max_partial_liquidation_ratio")]
-    SetMaxPartialLiquidationRatio {
-        rate: String,
-    },
+    SetMaxPartialLiquidationRatio { rate: String },
 
     #[serde(rename = "set_recovery_target_cr")]
-    SetRecoveryTargetCr {
-        rate: String,
-    },
+    SetRecoveryTargetCr { rate: String },
 
-    #[serde(rename = "set_recovery_cr_multiplier", alias = "set_recovery_liquidation_buffer")]
+    #[serde(
+        rename = "set_recovery_cr_multiplier",
+        alias = "set_recovery_liquidation_buffer"
+    )]
     SetRecoveryCrMultiplier {
         #[serde(alias = "buffer")]
         multiplier: String,
     },
 
     #[serde(rename = "set_liquidation_protocol_share")]
-    SetLiquidationProtocolShare {
-        share: String,
-    },
+    SetLiquidationProtocolShare { share: String },
 
     #[serde(rename = "add_collateral_type")]
     AddCollateralType {
@@ -434,19 +411,13 @@ pub enum Event {
     },
 
     #[serde(rename = "set_reserve_redemptions_enabled")]
-    SetReserveRedemptionsEnabled {
-        enabled: bool,
-    },
+    SetReserveRedemptionsEnabled { enabled: bool },
 
     #[serde(rename = "set_icpswap_routing_enabled")]
-    SetIcpswapRoutingEnabled {
-        enabled: bool,
-    },
+    SetIcpswapRoutingEnabled { enabled: bool },
 
     #[serde(rename = "set_reserve_redemption_fee")]
-    SetReserveRedemptionFee {
-        fee: String,
-    },
+    SetReserveRedemptionFee { fee: String },
 
     #[serde(rename = "reserve_redemption")]
     ReserveRedemption {
@@ -488,14 +459,14 @@ pub enum Event {
     /// Admin set rate curve markers (per-asset or global)
     #[serde(rename = "set_rate_curve_markers")]
     SetRateCurveMarkers {
-        collateral_type: Option<String>,  // None for global
-        markers: String,                  // JSON-serialized marker pairs
+        collateral_type: Option<String>, // None for global
+        markers: String,                 // JSON-serialized marker pairs
     },
 
     /// Admin set recovery rate curve (system-wide Layer 2)
     #[serde(rename = "set_recovery_rate_curve")]
     SetRecoveryRateCurve {
-        markers: String,  // JSON-serialized (threshold, multiplier) pairs
+        markers: String, // JSON-serialized (threshold, multiplier) pairs
     },
 
     /// Admin set healthy CR for a collateral type
@@ -528,15 +499,11 @@ pub enum Event {
     /// Per-vault interest accrual tick. One event per timer tick.
     /// On replay, calls accrue_all_vault_interest(timestamp).
     #[serde(rename = "accrue_interest")]
-    AccrueInterest {
-        timestamp: u64,
-    },
+    AccrueInterest { timestamp: u64 },
 
     /// Admin set the interest revenue split ratio (stability pool share).
     #[serde(rename = "set_interest_pool_share")]
-    SetInterestPoolShare {
-        share: String,
-    },
+    SetInterestPoolShare { share: String },
 
     /// Admin set an RMR parameter.
     #[serde(rename = "set_rmr_floor")]
@@ -558,12 +525,9 @@ pub enum Event {
     },
 
     // (Legacy duplicates removed — merged into primary definitions above)
-
     /// Admin set the dynamic borrowing fee curve.
     #[serde(rename = "set_borrowing_fee_curve")]
-    SetBorrowingFeeCurve {
-        markers: String,
-    },
+    SetBorrowingFeeCurve { markers: String },
 
     /// Admin set the N-way interest split (replaces interest_pool_share).
     #[serde(rename = "set_interest_split")]
@@ -574,24 +538,18 @@ pub enum Event {
 
     /// Admin set the 3pool canister principal for interest donations.
     #[serde(rename = "set_three_pool_canister")]
-    SetThreePoolCanister {
-        canister: Principal,
-    },
+    SetThreePoolCanister { canister: Principal },
 
     /// Admin set the AMM1 canister principal for interest donations.
     #[serde(rename = "set_amm1_canister")]
-    SetAmm1Canister {
-        canister: Principal,
-    },
+    SetAmm1Canister { canister: Principal },
 
     /// Admin set the canonical AMM1 pool_id used by `donate_icusd_to_amm1`.
     /// Must match `make_pool_id(token_a, token_b)` on rumi_amm exactly,
     /// otherwise `notify_reward_received` returns PoolNotFound and donations
     /// re-queue indefinitely.
     #[serde(rename = "set_amm1_pool_id")]
-    SetAmm1PoolId {
-        pool_id: String,
-    },
+    SetAmm1PoolId { pool_id: String },
 
     /// Price update from XRC or other oracle. Recorded every time a collateral
     /// price is fetched so we have a complete price history.
@@ -681,18 +639,12 @@ pub enum Event {
     /// Wave-8e LIQ-005: admin tunes the per-fee fraction routed to deficit
     /// repayment. Default 0.5; bounded [0, 1].
     #[serde(rename = "set_deficit_repayment_fraction")]
-    SetDeficitRepaymentFraction {
-        fraction: Ratio,
-        timestamp: u64,
-    },
+    SetDeficitRepaymentFraction { fraction: Ratio, timestamp: u64 },
 
     /// Wave-8e LIQ-005: admin sets the deficit-driven ReadOnly auto-latch
     /// threshold. 0 disables the latch.
     #[serde(rename = "set_deficit_readonly_threshold_e8s")]
-    SetDeficitReadonlyThresholdE8s {
-        threshold_e8s: u64,
-        timestamp: u64,
-    },
+    SetDeficitReadonlyThresholdE8s { threshold_e8s: u64, timestamp: u64 },
 
     /// Wave-10 LIQ-008: circuit breaker auto-tripped because the rolling-
     /// window cumulative liquidation debt crossed the configured ceiling.
@@ -717,18 +669,12 @@ pub enum Event {
 
     /// Wave-10 LIQ-008: admin tuned the rolling-window length.
     #[serde(rename = "set_breaker_window_ns")]
-    SetBreakerWindowNs {
-        window_ns: u64,
-        timestamp: u64,
-    },
+    SetBreakerWindowNs { window_ns: u64, timestamp: u64 },
 
     /// Wave-10 LIQ-008: admin tuned the cumulative-debt ceiling. 0 disables
     /// the breaker.
     #[serde(rename = "set_breaker_window_debt_ceiling_e8s")]
-    SetBreakerWindowDebtCeilingE8s {
-        ceiling_e8s: u64,
-        timestamp: u64,
-    },
+    SetBreakerWindowDebtCeilingE8s { ceiling_e8s: u64, timestamp: u64 },
 
     /// Wave-11 BOT-001: `check_vaults` detected an expired `bot_claims` entry
     /// whose collateral was not returned (`icrc1_balance_of` < required).
@@ -923,6 +869,24 @@ pub enum Event {
         usdc_native: u128,
         timestamp: u64,
     },
+    /// Increment 5: the operator verified the foreign-chain burn for SP-absorbed
+    /// debt and settled `pending_chain_burn_e8s -> chain_supplies`.
+    #[serde(rename = "chain_pending_burn_settled")]
+    ChainPendingBurnSettled {
+        chain_id: crate::chains::config::ChainId,
+        amount_e8s: u128,
+        proof: String,
+        timestamp: u64,
+    },
+    /// Increment 5: the operator verified the reserve-backed foreign icUSD burn
+    /// after the slow bridge leg and settled `reserve_backing_e8s -> chain_supplies`.
+    #[serde(rename = "chain_reserve_burn_settled")]
+    ChainReserveBurnSettled {
+        chain_id: crate::chains::config::ChainId,
+        amount_e8s: u128,
+        proof: String,
+        timestamp: u64,
+    },
     /// Increment 4+: an SP depositor's CFX claim was settled (paid to their EVM
     /// address) for a chain-vault liquidation. Claim-scoped, not vault-scoped.
     #[serde(rename = "chain_cfx_claim_settled")]
@@ -1074,13 +1038,18 @@ impl Event {
             | Event::ChainReorgDetected { .. }
             // Increment 1: an SP CFX claim is claim-scoped, not vault-scoped.
             | Event::ChainCfxClaimSettled { .. }
+            | Event::ChainPendingBurnSettled { .. }
+            | Event::ChainReserveBurnSettled { .. }
             | Event::ChainHotWalletLow { .. } => false,
         }
     }
 
     /// Returns true if this is a noisy periodic event (hidden from explorer).
     pub fn is_accrue_interest(&self) -> bool {
-        matches!(self, Event::AccrueInterest { .. } | Event::PriceUpdate { .. })
+        matches!(
+            self,
+            Event::AccrueInterest { .. } | Event::PriceUpdate { .. }
+        )
     }
 
     /// Coarse type classification for the explorer's `types` facet.
@@ -1189,8 +1158,12 @@ impl Event {
             Event::SetCollateralLiquidationBonus { .. } => Some("SetCollateralLiquidationBonus"),
             Event::SetCollateralMinVaultDebt { .. } => Some("SetCollateralMinVaultDebt"),
             Event::SetCollateralLedgerFee { .. } => Some("SetCollateralLedgerFee"),
-            Event::SetCollateralRedemptionFeeFloor { .. } => Some("SetCollateralRedemptionFeeFloor"),
-            Event::SetCollateralRedemptionFeeCeiling { .. } => Some("SetCollateralRedemptionFeeCeiling"),
+            Event::SetCollateralRedemptionFeeFloor { .. } => {
+                Some("SetCollateralRedemptionFeeFloor")
+            }
+            Event::SetCollateralRedemptionFeeCeiling { .. } => {
+                Some("SetCollateralRedemptionFeeCeiling")
+            }
             Event::SetCollateralMinDeposit { .. } => Some("SetCollateralMinDeposit"),
             Event::SetCollateralDisplayColor { .. } => Some("SetCollateralDisplayColor"),
             Event::SetDeficitRepaymentFraction { .. } => Some("SetDeficitRepaymentFraction"),
@@ -1252,7 +1225,9 @@ impl Event {
             Event::VaultWithdrawnAndClosed { timestamp, .. } => Some(*timestamp),
             Event::PriceUpdate { timestamp, .. } => Some(*timestamp),
             Event::AccrueInterest { timestamp } => Some(*timestamp),
-            Event::SetBotBudget { start_timestamp, .. } => Some(*start_timestamp),
+            Event::SetBotBudget {
+                start_timestamp, ..
+            } => Some(*start_timestamp),
             // Wave-10 LIQ-008: surface breaker events in time-range queries so
             // operators can audit "every trip in the last 24h" and admin sets.
             Event::BreakerTripped { timestamp, .. } => Some(*timestamp),
@@ -1277,25 +1252,64 @@ impl Event {
     pub fn collateral_token(&self, vault_lookup: &HashMap<u64, Principal>) -> Option<Principal> {
         match self {
             Event::OpenVault { vault, .. } => Some(vault.collateral_type),
-            Event::AddCollateralType { collateral_type, .. }
-            | Event::UpdateCollateralStatus { collateral_type, .. }
-            | Event::UpdateCollateralConfig { collateral_type, .. }
-            | Event::SetCollateralBorrowingFee { collateral_type, .. }
-            | Event::SetInterestRate { collateral_type, .. }
-            | Event::SetRecoveryParameters { collateral_type, .. }
-            | Event::SetCollateralLiquidationRatio { collateral_type, .. }
-            | Event::SetCollateralBorrowThreshold { collateral_type, .. }
-            | Event::SetCollateralLiquidationBonus { collateral_type, .. }
-            | Event::SetCollateralMinVaultDebt { collateral_type, .. }
-            | Event::SetCollateralLedgerFee { collateral_type, .. }
-            | Event::SetCollateralRedemptionFeeFloor { collateral_type, .. }
-            | Event::SetCollateralRedemptionFeeCeiling { collateral_type, .. }
-            | Event::SetCollateralMinDeposit { collateral_type, .. }
-            | Event::SetCollateralDisplayColor { collateral_type, .. }
-            | Event::SetCollateralMinXrcSources { collateral_type, .. }
-            | Event::PriceUpdate { collateral_type, .. } => Some(*collateral_type),
-            Event::RedemptionOnVaults { collateral_type, .. } => *collateral_type,
-            Event::ReserveRedemption { stable_token_ledger, .. } => Some(*stable_token_ledger),
+            Event::AddCollateralType {
+                collateral_type, ..
+            }
+            | Event::UpdateCollateralStatus {
+                collateral_type, ..
+            }
+            | Event::UpdateCollateralConfig {
+                collateral_type, ..
+            }
+            | Event::SetCollateralBorrowingFee {
+                collateral_type, ..
+            }
+            | Event::SetInterestRate {
+                collateral_type, ..
+            }
+            | Event::SetRecoveryParameters {
+                collateral_type, ..
+            }
+            | Event::SetCollateralLiquidationRatio {
+                collateral_type, ..
+            }
+            | Event::SetCollateralBorrowThreshold {
+                collateral_type, ..
+            }
+            | Event::SetCollateralLiquidationBonus {
+                collateral_type, ..
+            }
+            | Event::SetCollateralMinVaultDebt {
+                collateral_type, ..
+            }
+            | Event::SetCollateralLedgerFee {
+                collateral_type, ..
+            }
+            | Event::SetCollateralRedemptionFeeFloor {
+                collateral_type, ..
+            }
+            | Event::SetCollateralRedemptionFeeCeiling {
+                collateral_type, ..
+            }
+            | Event::SetCollateralMinDeposit {
+                collateral_type, ..
+            }
+            | Event::SetCollateralDisplayColor {
+                collateral_type, ..
+            }
+            | Event::SetCollateralMinXrcSources {
+                collateral_type, ..
+            }
+            | Event::PriceUpdate {
+                collateral_type, ..
+            } => Some(*collateral_type),
+            Event::RedemptionOnVaults {
+                collateral_type, ..
+            } => *collateral_type,
+            Event::ReserveRedemption {
+                stable_token_ledger,
+                ..
+            } => Some(*stable_token_ledger),
             Event::CloseVault { vault_id, .. }
             | Event::MarginTransfer { vault_id, .. }
             | Event::LiquidateVault { vault_id, .. }
@@ -1327,7 +1341,9 @@ impl Event {
             ((native_amount as u128) * (icp_price_e8s as u128) / 100_000_000u128) as u64
         };
         match self {
-            Event::BorrowFromVault { borrowed_amount, .. } => Some(borrowed_amount.0),
+            Event::BorrowFromVault {
+                borrowed_amount, ..
+            } => Some(borrowed_amount.0),
             Event::RepayToVault { repayed_amount, .. } => Some(repayed_amount.0),
             Event::RedemptionOnVaults { icusd_amount, .. } => Some(icusd_amount.0),
             Event::ReserveRedemption { icusd_amount, .. } => Some(icusd_amount.0),
@@ -1335,7 +1351,9 @@ impl Event {
             Event::DustForgiven { amount, .. } => Some(amount.0),
             Event::ProvideLiquidity { amount, .. } => Some(amount.0),
             Event::WithdrawLiquidity { amount, .. } => Some(amount.0),
-            Event::PartialLiquidateVault { liquidator_payment, .. } => Some(liquidator_payment.0),
+            Event::PartialLiquidateVault {
+                liquidator_payment, ..
+            } => Some(liquidator_payment.0),
             Event::OpenVault { vault, .. } => Some(convert(vault.collateral_amount)),
             Event::AddMarginToVault { margin_added, .. } => Some(convert(margin_added.0)),
             Event::CollateralWithdrawn { amount, .. } => Some(convert(amount.0)),
@@ -2101,6 +2119,8 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             | Event::ChainVaultLiquidated { .. }
             | Event::ChainReserveCredited { .. }
             | Event::ChainCfxClaimSettled { .. }
+            | Event::ChainPendingBurnSettled { .. }
+            | Event::ChainReserveBurnSettled { .. }
             | Event::ChainLiquidationDeferred { .. }
             | Event::ChainHotWalletLow { .. } => {},
         }
@@ -2110,9 +2130,16 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
 }
 
 /// Helper: current canister time in nanoseconds.
-fn now() -> u64 { ic_cdk::api::time() }
+fn now() -> u64 {
+    ic_cdk::api::time()
+}
 
-pub fn record_liquidate_vault(state: &mut State, vault_id: u64, mode: Mode, collateral_price: UsdIcp) {
+pub fn record_liquidate_vault(
+    state: &mut State,
+    vault_id: u64,
+    mode: Mode,
+    collateral_price: UsdIcp,
+) {
     record_event(&Event::LiquidateVault {
         vault_id,
         mode,
@@ -2124,7 +2151,10 @@ pub fn record_liquidate_vault(state: &mut State, vault_id: u64, mode: Mode, coll
 }
 
 pub fn record_redistribute_vault(state: &mut State, vault_id: u64) {
-    record_event(&Event::RedistributeVault { vault_id, timestamp: Some(now()) });
+    record_event(&Event::RedistributeVault {
+        vault_id,
+        timestamp: Some(now()),
+    });
     state.redistribute_vault(vault_id);
 }
 
@@ -2191,7 +2221,12 @@ pub fn record_close_vault(state: &mut State, vault_id: u64, block_index: Option<
     state.close_vault(vault_id);
 }
 
-pub fn record_margin_transfer(state: &mut State, vault_id: u64, owner: Principal, block_index: u64) {
+pub fn record_margin_transfer(
+    state: &mut State,
+    vault_id: u64,
+    owner: Principal,
+    block_index: u64,
+) {
     record_event(&Event::MarginTransfer {
         vault_id,
         block_index,
@@ -2275,8 +2310,7 @@ pub fn record_set_deficit_readonly_threshold_e8s(state: &mut State, threshold_e8
 /// already tripped — vault.rs sites can call this unconditionally.
 pub fn record_liquidation_for_breaker(state: &mut State, debt_e8s: u64) {
     let now_ns = now();
-    let just_tripped =
-        crate::state::record_recent_liquidation(state, debt_e8s, now_ns);
+    let just_tripped = crate::state::record_recent_liquidation(state, debt_e8s, now_ns);
     if just_tripped {
         let total = state.windowed_liquidation_total(now_ns);
         let ceiling = state.breaker_window_debt_ceiling_e8s;
@@ -2430,7 +2464,8 @@ pub fn record_redemption_on_vaults(
     // Use the selected collateral type's price for both water-filling and
     // pending transfer amount calculation. The caller's collateral_price
     // parameter may be for a different collateral type.
-    let ct_price = state.get_collateral_config(&redeem_ct)
+    let ct_price = state
+        .get_collateral_config(&redeem_ct)
         .and_then(|c| c.last_price)
         .and_then(rust_decimal::Decimal::from_f64_retain)
         .map(UsdIcp::from)
@@ -2441,9 +2476,11 @@ pub fn record_redemption_on_vaults(
     // walked. `redeem_on_vaults` mutates state but doesn't touch
     // `collateral_configs`, so reading after is also safe — we read
     // here to keep the data flow explicit.
-    let (price_decimal, decimals) = state.get_collateral_config(&redeem_ct)
+    let (price_decimal, decimals) = state
+        .get_collateral_config(&redeem_ct)
         .map(|c| {
-            let p = c.last_price
+            let p = c
+                .last_price
                 .and_then(rust_decimal::Decimal::from_f64_retain)
                 .unwrap_or(ct_price.0);
             (p, c.decimals)
@@ -2459,7 +2496,11 @@ pub fn record_redemption_on_vaults(
         icusd_block_index,
         collateral_type: Some(redeem_ct),
         timestamp: Some(now()),
-        vault_redemptions: if vault_redemptions.is_empty() { None } else { Some(vault_redemptions.clone()) },
+        vault_redemptions: if vault_redemptions.is_empty() {
+            None
+        } else {
+            Some(vault_redemptions.clone())
+        },
     });
 
     // RED-001 (audit 2026-06-09): the payout is derived from the icUSD the
@@ -2472,7 +2513,10 @@ pub fn record_redemption_on_vaults(
     // genuine bad debt; the unconsumed remainder is not a deficit once it is
     // refunded.
     let consumed = ICUSD::from(
-        vault_redemptions.iter().map(|v| v.icusd_redeemed_e8s).sum::<u64>(),
+        vault_redemptions
+            .iter()
+            .map(|v| v.icusd_redeemed_e8s)
+            .sum::<u64>(),
     );
 
     // Wave-9 RED-002: route any redemption-side shortfall into the
@@ -2492,9 +2536,16 @@ pub fn record_redemption_on_vaults(
     let margin: ICP = consumed / ct_price;
     if margin.to_u64() > 0 {
         let op_nonce = state.next_op_nonce();
-        state
-            .pending_redemption_transfer
-            .insert(icusd_block_index, PendingMarginTransfer { owner, margin, collateral_type: redeem_ct, retry_count: 0, op_nonce });
+        state.pending_redemption_transfer.insert(
+            icusd_block_index,
+            PendingMarginTransfer {
+                owner,
+                margin,
+                collateral_type: redeem_ct,
+                retry_count: 0,
+                op_nonce,
+            },
+        );
     }
     RedemptionOutcome { consumed, margin }
 }
@@ -2521,8 +2572,7 @@ pub fn compute_redemption_shortfall(
     price_decimal: rust_decimal::Decimal,
     decimals: u8,
 ) -> ICUSD {
-    let total_collateral_seized: u64 =
-        vault_redemptions.iter().map(|v| v.collateral_seized).sum();
+    let total_collateral_seized: u64 = vault_redemptions.iter().map(|v| v.collateral_seized).sum();
     let value_seized_at_oracle =
         crate::numeric::collateral_usd_value(total_collateral_seized, price_decimal, decimals);
     target_icusd.saturating_sub(value_seized_at_oracle)
@@ -2546,12 +2596,8 @@ pub fn accrue_redemption_shortfall_at(
     decimals: u8,
     timestamp: u64,
 ) -> ICUSD {
-    let shortfall = compute_redemption_shortfall(
-        target_icusd,
-        vault_redemptions,
-        price_decimal,
-        decimals,
-    );
+    let shortfall =
+        compute_redemption_shortfall(target_icusd, vault_redemptions, price_decimal, decimals);
     if shortfall.0 > 0 {
         record_deficit_accrued(
             state,
@@ -2620,7 +2666,7 @@ pub fn record_withdraw_and_close_vault(
     state: &mut State,
     vault_id: u64,
     amount: ICP,
-    block_index: Option<u64>
+    block_index: Option<u64>,
 ) {
     record_event(&Event::WithdrawAndCloseVault {
         vault_id,
@@ -2656,7 +2702,11 @@ pub fn record_set_global_icusd_mint_cap(state: &mut State, amount: u64) {
     state.global_icusd_mint_cap = amount;
 }
 
-pub fn record_set_stable_token_enabled(state: &mut State, token_type: StableTokenType, enabled: bool) {
+pub fn record_set_stable_token_enabled(
+    state: &mut State,
+    token_type: StableTokenType,
+    enabled: bool,
+) {
     record_event(&Event::SetStableTokenEnabled {
         token_type: token_type.clone(),
         enabled,
@@ -2667,7 +2717,11 @@ pub fn record_set_stable_token_enabled(state: &mut State, token_type: StableToke
     }
 }
 
-pub fn record_set_stable_ledger_principal(state: &mut State, token_type: StableTokenType, principal: Principal) {
+pub fn record_set_stable_ledger_principal(
+    state: &mut State,
+    token_type: StableTokenType,
+    principal: Principal,
+) {
     record_event(&Event::SetStableLedgerPrincipal {
         token_type: token_type.clone(),
         principal,
@@ -2694,14 +2748,22 @@ pub fn record_set_liquidation_bot_principal(state: &mut State, principal: Princi
 }
 
 pub fn record_set_bot_budget(state: &mut State, total_e8s: u64, start_timestamp: u64) {
-    record_event(&Event::SetBotBudget { total_e8s, start_timestamp });
+    record_event(&Event::SetBotBudget {
+        total_e8s,
+        start_timestamp,
+    });
     state.bot_budget_total_e8s = total_e8s;
     state.bot_budget_remaining_e8s = total_e8s;
     state.bot_budget_start_timestamp = start_timestamp;
 }
 
-pub fn record_set_bot_allowed_collateral_types(state: &mut State, collateral_types: Vec<Principal>) {
-    record_event(&Event::SetBotAllowedCollateralTypes { collateral_types: collateral_types.clone() });
+pub fn record_set_bot_allowed_collateral_types(
+    state: &mut State,
+    collateral_types: Vec<Principal>,
+) {
+    record_event(&Event::SetBotAllowedCollateralTypes {
+        collateral_types: collateral_types.clone(),
+    });
     state.bot_allowed_collateral_types = collateral_types.into_iter().collect();
 }
 
@@ -2798,22 +2860,30 @@ pub fn record_set_interest_pool_share(state: &mut State, share: Ratio) {
 }
 
 pub fn record_set_rmr_floor(state: &mut State, value: Ratio) {
-    record_event(&Event::SetRmrFloor { value: value.0.to_string() });
+    record_event(&Event::SetRmrFloor {
+        value: value.0.to_string(),
+    });
     state.rmr_floor = value;
 }
 
 pub fn record_set_rmr_ceiling(state: &mut State, value: Ratio) {
-    record_event(&Event::SetRmrCeiling { value: value.0.to_string() });
+    record_event(&Event::SetRmrCeiling {
+        value: value.0.to_string(),
+    });
     state.rmr_ceiling = value;
 }
 
 pub fn record_set_rmr_floor_cr(state: &mut State, value: Ratio) {
-    record_event(&Event::SetRmrFloorCr { value: value.0.to_string() });
+    record_event(&Event::SetRmrFloorCr {
+        value: value.0.to_string(),
+    });
     state.rmr_floor_cr = value;
 }
 
 pub fn record_set_rmr_ceiling_cr(state: &mut State, value: Ratio) {
-    record_event(&Event::SetRmrCeilingCr { value: value.0.to_string() });
+    record_event(&Event::SetRmrCeilingCr {
+        value: value.0.to_string(),
+    });
     state.rmr_ceiling_cr = value;
 }
 
@@ -2893,12 +2963,7 @@ pub fn record_reserve_redemption(
     });
 }
 
-pub fn record_admin_mint(
-    amount: ICUSD,
-    to: Principal,
-    reason: String,
-    block_index: u64,
-) {
+pub fn record_admin_mint(amount: ICUSD, to: Principal, reason: String, block_index: u64) {
     record_event(&Event::AdminMint {
         amount,
         to,
@@ -2962,8 +3027,9 @@ pub fn record_set_rate_curve_markers(
     collateral_type: Option<CollateralType>,
     markers: Vec<(f64, f64)>,
 ) {
-    use crate::state::{RateMarker, RateCurve, InterpolationMethod};
-    let serialized: Vec<(String, String)> = markers.iter()
+    use crate::state::{InterpolationMethod, RateCurve, RateMarker};
+    let serialized: Vec<(String, String)> = markers
+        .iter()
         .map(|(cr, mult)| (cr.to_string(), mult.to_string()))
         .collect();
     let markers_json = serde_json::to_string(&serialized).unwrap_or_default();
@@ -2971,15 +3037,21 @@ pub fn record_set_rate_curve_markers(
         collateral_type: collateral_type.map(|ct| ct.to_text()),
         markers: markers_json,
     });
-    let parsed: Vec<RateMarker> = markers.iter()
+    let parsed: Vec<RateMarker> = markers
+        .iter()
         .map(|(cr, mult)| RateMarker {
             cr_level: Ratio::from_f64(*cr),
             multiplier: Ratio::from_f64(*mult),
         })
         .collect();
-    let curve = RateCurve { markers: parsed, method: InterpolationMethod::Linear };
+    let curve = RateCurve {
+        markers: parsed,
+        method: InterpolationMethod::Linear,
+    };
     match collateral_type {
-        None => { state.global_rate_curve = curve; },
+        None => {
+            state.global_rate_curve = curve;
+        }
         Some(ct) => {
             if let Some(config) = state.collateral_configs.get_mut(&ct) {
                 config.rate_curve = Some(curve);
@@ -2993,7 +3065,8 @@ pub fn record_set_recovery_rate_curve(
     markers: Vec<(crate::state::SystemThreshold, f64)>,
 ) {
     use crate::state::{RecoveryRateMarker, SystemThreshold};
-    let serialized: Vec<(String, String)> = markers.iter()
+    let serialized: Vec<(String, String)> = markers
+        .iter()
         .map(|(thresh, mult)| {
             let thresh_str = match thresh {
                 SystemThreshold::LiquidationRatio => "LiquidationRatio",
@@ -3009,7 +3082,8 @@ pub fn record_set_recovery_rate_curve(
     record_event(&Event::SetRecoveryRateCurve {
         markers: markers_json,
     });
-    state.recovery_rate_curve = markers.iter()
+    state.recovery_rate_curve = markers
+        .iter()
         .map(|(thresh, mult)| RecoveryRateMarker {
             threshold: thresh.clone(),
             multiplier: Ratio::from_f64(*mult),
@@ -3017,10 +3091,7 @@ pub fn record_set_recovery_rate_curve(
         .collect();
 }
 
-pub fn record_set_borrowing_fee_curve(
-    state: &mut State,
-    curve: Option<RateCurveV2>,
-) {
+pub fn record_set_borrowing_fee_curve(state: &mut State, curve: Option<RateCurveV2>) {
     let markers_json = match &curve {
         Some(c) => serde_json::to_string(&c).unwrap_or_default(),
         None => "null".to_string(),
@@ -3062,7 +3133,9 @@ pub fn record_set_amm1_canister(state: &mut State, canister: Principal) {
 }
 
 pub fn record_set_amm1_pool_id(state: &mut State, pool_id: String) {
-    record_event(&Event::SetAmm1PoolId { pool_id: pool_id.clone() });
+    record_event(&Event::SetAmm1PoolId {
+        pool_id: pool_id.clone(),
+    });
     state.amm1_pool_id = Some(pool_id);
 }
 
@@ -3226,7 +3299,9 @@ pub fn record_set_collateral_display_color(
 }
 
 pub fn record_accrue_interest(state: &mut State, now_nanos: u64) {
-    record_event(&Event::AccrueInterest { timestamp: now_nanos });
+    record_event(&Event::AccrueInterest {
+        timestamp: now_nanos,
+    });
     state.accrue_all_vault_interest(now_nanos);
 }
 
@@ -3247,10 +3322,18 @@ mod filter_tests {
         Principal::self_authenticating([seed; 32])
     }
 
-    fn caller_a() -> Principal { p(1) }
-    fn caller_b() -> Principal { p(2) }
-    fn icp_token() -> Principal { p(10) }
-    fn ckbtc_token() -> Principal { p(11) }
+    fn caller_a() -> Principal {
+        p(1)
+    }
+    fn caller_b() -> Principal {
+        p(2)
+    }
+    fn icp_token() -> Principal {
+        p(10)
+    }
+    fn ckbtc_token() -> Principal {
+        p(11)
+    }
 
     fn vault_with(id: u64, owner: Principal, ct: Principal, collateral_e8s: u64) -> Vault {
         Vault {
@@ -3309,7 +3392,11 @@ mod filter_tests {
     }
 
     fn price_event(ct: Principal, ts: u64) -> Event {
-        Event::PriceUpdate { collateral_type: ct, price: "5.0".into(), timestamp: ts }
+        Event::PriceUpdate {
+            collateral_type: ct,
+            price: "5.0".into(),
+            timestamp: ts,
+        }
     }
 
     /// Build a vault_id → collateral_type lookup for tests.
@@ -3321,15 +3408,35 @@ mod filter_tests {
 
     #[test]
     fn type_filter_classifies_each_user_facing_variant() {
-        assert_eq!(open_vault_event(1, caller_a(), icp_token()).type_filter(), EventTypeFilter::OpenVault);
-        assert_eq!(borrow_event(1, caller_a(), 100, 0).type_filter(), EventTypeFilter::Borrow);
-        assert_eq!(repay_event(1, caller_a(), 100, 0).type_filter(), EventTypeFilter::Repay);
-        assert_eq!(liquidate_event(1, caller_a(), 0).type_filter(), EventTypeFilter::Liquidation);
-        assert_eq!(accrue_event(0).type_filter(), EventTypeFilter::AccrueInterest);
-        assert_eq!(price_event(icp_token(), 0).type_filter(), EventTypeFilter::PriceUpdate);
+        assert_eq!(
+            open_vault_event(1, caller_a(), icp_token()).type_filter(),
+            EventTypeFilter::OpenVault
+        );
+        assert_eq!(
+            borrow_event(1, caller_a(), 100, 0).type_filter(),
+            EventTypeFilter::Borrow
+        );
+        assert_eq!(
+            repay_event(1, caller_a(), 100, 0).type_filter(),
+            EventTypeFilter::Repay
+        );
+        assert_eq!(
+            liquidate_event(1, caller_a(), 0).type_filter(),
+            EventTypeFilter::Liquidation
+        );
+        assert_eq!(
+            accrue_event(0).type_filter(),
+            EventTypeFilter::AccrueInterest
+        );
+        assert_eq!(
+            price_event(icp_token(), 0).type_filter(),
+            EventTypeFilter::PriceUpdate
+        );
 
         // Setter falls into Admin
-        let setter = Event::SetBorrowingFee { rate: "0.005".into() };
+        let setter = Event::SetBorrowingFee {
+            rate: "0.005".into(),
+        };
         assert_eq!(setter.type_filter(), EventTypeFilter::Admin);
     }
 
@@ -3337,7 +3444,10 @@ mod filter_tests {
 
     #[test]
     fn timestamp_ns_extracts_when_present_and_returns_none_otherwise() {
-        assert_eq!(borrow_event(1, caller_a(), 100, 12_345).timestamp_ns(), Some(12_345));
+        assert_eq!(
+            borrow_event(1, caller_a(), 100, 12_345).timestamp_ns(),
+            Some(12_345)
+        );
         assert_eq!(accrue_event(7).timestamp_ns(), Some(7));
 
         // Init has no timestamp.
@@ -3388,16 +3498,29 @@ mod filter_tests {
         let icp_e8s = 100_000_000u64;
         let price_e8s = 500_000_000u64;
         let ev = open_vault_event(1, caller_a(), icp_token());
-        let ev = if let Event::OpenVault { mut vault, block_index, timestamp } = ev {
+        let ev = if let Event::OpenVault {
+            mut vault,
+            block_index,
+            timestamp,
+        } = ev
+        {
             vault.collateral_amount = icp_e8s;
-            Event::OpenVault { vault, block_index, timestamp }
-        } else { unreachable!() };
+            Event::OpenVault {
+                vault,
+                block_index,
+                timestamp,
+            }
+        } else {
+            unreachable!()
+        };
         assert_eq!(ev.size_e8s_usd(price_e8s), Some(500_000_000));
     }
 
     #[test]
     fn size_returns_none_for_admin_setters() {
-        let ev = Event::SetBorrowingFee { rate: "0.005".into() };
+        let ev = Event::SetBorrowingFee {
+            rate: "0.005".into(),
+        };
         assert_eq!(ev.size_e8s_usd(500_000_000), None);
     }
 
@@ -3407,46 +3530,125 @@ mod filter_tests {
     fn empty_filter_excludes_accrue_interest_and_price_update() {
         let lookup = HashMap::new();
         assert!(!accrue_event(0).passes_filters(None, None, None, None, None, None, &lookup, 0));
-        assert!(!price_event(icp_token(), 0).passes_filters(None, None, None, None, None, None, &lookup, 0));
-        assert!(borrow_event(1, caller_a(), 100, 0).passes_filters(None, None, None, None, None, None, &lookup, 0));
+        assert!(!price_event(icp_token(), 0)
+            .passes_filters(None, None, None, None, None, None, &lookup, 0));
+        assert!(borrow_event(1, caller_a(), 100, 0)
+            .passes_filters(None, None, None, None, None, None, &lookup, 0));
     }
 
     #[test]
     fn explicit_type_set_includes_accrue_interest_when_requested() {
         let lookup = HashMap::new();
         let set: HashSet<_> = [EventTypeFilter::AccrueInterest].into_iter().collect();
-        assert!(accrue_event(0).passes_filters(Some(&set), None, None, None, None, None, &lookup, 0));
-        assert!(!borrow_event(1, caller_a(), 100, 0).passes_filters(Some(&set), None, None, None, None, None, &lookup, 0));
+        assert!(accrue_event(0).passes_filters(
+            Some(&set),
+            None,
+            None,
+            None,
+            None,
+            None,
+            &lookup,
+            0
+        ));
+        assert!(!borrow_event(1, caller_a(), 100, 0).passes_filters(
+            Some(&set),
+            None,
+            None,
+            None,
+            None,
+            None,
+            &lookup,
+            0
+        ));
     }
 
     #[test]
     fn type_filter_or_combines_within_the_set() {
         let lookup = HashMap::new();
-        let set: HashSet<_> = [EventTypeFilter::Borrow, EventTypeFilter::Repay].into_iter().collect();
-        assert!(borrow_event(1, caller_a(), 100, 0).passes_filters(Some(&set), None, None, None, None, None, &lookup, 0));
-        assert!(repay_event(1, caller_a(), 100, 0).passes_filters(Some(&set), None, None, None, None, None, &lookup, 0));
-        assert!(!liquidate_event(1, caller_a(), 0).passes_filters(Some(&set), None, None, None, None, None, &lookup, 0));
+        let set: HashSet<_> = [EventTypeFilter::Borrow, EventTypeFilter::Repay]
+            .into_iter()
+            .collect();
+        assert!(borrow_event(1, caller_a(), 100, 0).passes_filters(
+            Some(&set),
+            None,
+            None,
+            None,
+            None,
+            None,
+            &lookup,
+            0
+        ));
+        assert!(repay_event(1, caller_a(), 100, 0).passes_filters(
+            Some(&set),
+            None,
+            None,
+            None,
+            None,
+            None,
+            &lookup,
+            0
+        ));
+        assert!(!liquidate_event(1, caller_a(), 0).passes_filters(
+            Some(&set),
+            None,
+            None,
+            None,
+            None,
+            None,
+            &lookup,
+            0
+        ));
     }
 
     #[test]
     fn principal_filter_matches_caller_or_owner() {
         let lookup = HashMap::new();
-        assert!(borrow_event(1, caller_a(), 100, 0).passes_filters(None, Some(&caller_a()), None, None, None, None, &lookup, 0));
-        assert!(!borrow_event(1, caller_a(), 100, 0).passes_filters(None, Some(&caller_b()), None, None, None, None, &lookup, 0));
+        assert!(borrow_event(1, caller_a(), 100, 0).passes_filters(
+            None,
+            Some(&caller_a()),
+            None,
+            None,
+            None,
+            None,
+            &lookup,
+            0
+        ));
+        assert!(!borrow_event(1, caller_a(), 100, 0).passes_filters(
+            None,
+            Some(&caller_b()),
+            None,
+            None,
+            None,
+            None,
+            &lookup,
+            0
+        ));
     }
 
     #[test]
     fn collateral_token_filter_matches_via_vault_lookup() {
         let lookup = lookup(&[(1, ckbtc_token())]);
         let ev = borrow_event(1, caller_a(), 100, 0);
-        assert!(ev.passes_filters(None, None, Some(&ckbtc_token()), None, None, None, &lookup, 0));
+        assert!(ev.passes_filters(
+            None,
+            None,
+            Some(&ckbtc_token()),
+            None,
+            None,
+            None,
+            &lookup,
+            0
+        ));
         assert!(!ev.passes_filters(None, None, Some(&icp_token()), None, None, None, &lookup, 0));
     }
 
     #[test]
     fn time_range_excludes_outside_window_and_no_timestamp_events() {
         let lookup = HashMap::new();
-        let range = EventTimeRange { start_ns: 1_000, end_ns: 2_000 };
+        let range = EventTimeRange {
+            start_ns: 1_000,
+            end_ns: 2_000,
+        };
 
         let inside = borrow_event(1, caller_a(), 100, 1_500);
         let outside = borrow_event(1, caller_a(), 100, 5_000);
@@ -3480,7 +3682,9 @@ mod filter_tests {
         assert!(big.passes_filters(None, None, None, None, Some(threshold), None, &lookup, 0));
 
         // Admin setter has no size — passes through any threshold.
-        let setter = Event::SetBorrowingFee { rate: "0.005".into() };
+        let setter = Event::SetBorrowingFee {
+            rate: "0.005".into(),
+        };
         assert!(setter.passes_filters(None, None, None, None, Some(u64::MAX), None, &lookup, 0));
     }
 
@@ -3493,34 +3697,79 @@ mod filter_tests {
 
         // Right type AND right principal → match
         assert!(borrow_event(1, caller_a(), 100, 0).passes_filters(
-            Some(&types), Some(&caller_a()), None, None, None, None, &lookup, 0,
+            Some(&types),
+            Some(&caller_a()),
+            None,
+            None,
+            None,
+            None,
+            &lookup,
+            0,
         ));
         // Right type, wrong principal → reject
         assert!(!borrow_event(1, caller_a(), 100, 0).passes_filters(
-            Some(&types), Some(&caller_b()), None, None, None, None, &lookup, 0,
+            Some(&types),
+            Some(&caller_b()),
+            None,
+            None,
+            None,
+            None,
+            &lookup,
+            0,
         ));
         // Wrong type, right principal → reject
         assert!(!repay_event(1, caller_a(), 100, 0).passes_filters(
-            Some(&types), Some(&caller_a()), None, None, None, None, &lookup, 0,
+            Some(&types),
+            Some(&caller_a()),
+            None,
+            None,
+            None,
+            None,
+            &lookup,
+            0,
         ));
     }
 
     #[test]
     fn time_and_token_combine_with_and_semantics() {
         let lookup = lookup(&[(1, ckbtc_token())]);
-        let range = EventTimeRange { start_ns: 1_000, end_ns: 2_000 };
+        let range = EventTimeRange {
+            start_ns: 1_000,
+            end_ns: 2_000,
+        };
 
         // In-window, right token → match
         assert!(borrow_event(1, caller_a(), 100, 1_500).passes_filters(
-            None, None, Some(&ckbtc_token()), Some(&range), None, None, &lookup, 0,
+            None,
+            None,
+            Some(&ckbtc_token()),
+            Some(&range),
+            None,
+            None,
+            &lookup,
+            0,
         ));
         // Out-of-window, right token → reject
         assert!(!borrow_event(1, caller_a(), 100, 9_999).passes_filters(
-            None, None, Some(&ckbtc_token()), Some(&range), None, None, &lookup, 0,
+            None,
+            None,
+            Some(&ckbtc_token()),
+            Some(&range),
+            None,
+            None,
+            &lookup,
+            0,
         ));
         // In-window, wrong token → reject
         assert!(!borrow_event(1, caller_a(), 100, 1_500).passes_filters(
-            None, None, Some(&icp_token()), Some(&range), None, None, &lookup, 0,
+            None,
+            None,
+            Some(&icp_token()),
+            Some(&range),
+            None,
+            None,
+            &lookup,
+            0,
         ));
     }
 
@@ -3528,7 +3777,9 @@ mod filter_tests {
 
     #[test]
     fn admin_label_returns_variant_name_for_admin_variants() {
-        let borrow_fee = Event::SetBorrowingFee { rate: "0.005".into() };
+        let borrow_fee = Event::SetBorrowingFee {
+            rate: "0.005".into(),
+        };
         assert_eq!(borrow_fee.admin_label(), Some("SetBorrowingFee"));
         let healthy = Event::SetHealthyCr {
             collateral_type: "ICP".to_string(),
@@ -3551,17 +3802,33 @@ mod filter_tests {
         let types: HashSet<_> = [EventTypeFilter::Admin].into_iter().collect();
         let labels: HashSet<String> = ["SetBorrowingFee".to_string()].into_iter().collect();
 
-        let borrow_fee = Event::SetBorrowingFee { rate: "0.005".into() };
+        let borrow_fee = Event::SetBorrowingFee {
+            rate: "0.005".into(),
+        };
         let healthy = Event::SetHealthyCr {
             collateral_type: "ICP".to_string(),
             healthy_cr: Some("1.2".to_string()),
         };
 
         assert!(borrow_fee.passes_filters(
-            Some(&types), None, None, None, None, Some(&labels), &lookup, 0,
+            Some(&types),
+            None,
+            None,
+            None,
+            None,
+            Some(&labels),
+            &lookup,
+            0,
         ));
         assert!(!healthy.passes_filters(
-            Some(&types), None, None, None, None, Some(&labels), &lookup, 0,
+            Some(&types),
+            None,
+            None,
+            None,
+            None,
+            Some(&labels),
+            &lookup,
+            0,
         ));
     }
 
@@ -3574,14 +3841,30 @@ mod filter_tests {
         let labels: HashSet<String> = ["SetBorrowingFee".to_string()].into_iter().collect();
 
         assert!(borrow_event(1, caller_a(), 100, 0).passes_filters(
-            Some(&types), None, None, None, None, Some(&labels), &lookup, 0,
+            Some(&types),
+            None,
+            None,
+            None,
+            None,
+            Some(&labels),
+            &lookup,
+            0,
         ));
 
         // An admin event is excluded because the types filter doesn't include
         // Admin. admin_labels doesn't re-enable it.
-        let setter = Event::SetBorrowingFee { rate: "0.005".into() };
+        let setter = Event::SetBorrowingFee {
+            rate: "0.005".into(),
+        };
         assert!(!setter.passes_filters(
-            Some(&types), None, None, None, None, Some(&labels), &lookup, 0,
+            Some(&types),
+            None,
+            None,
+            None,
+            None,
+            Some(&labels),
+            &lookup,
+            0,
         ));
     }
 
@@ -3593,7 +3876,9 @@ mod filter_tests {
         let lookup = HashMap::new();
         let labels: HashSet<String> = ["SetBorrowingFee".to_string()].into_iter().collect();
 
-        let matching_admin = Event::SetBorrowingFee { rate: "0.005".into() };
+        let matching_admin = Event::SetBorrowingFee {
+            rate: "0.005".into(),
+        };
         let non_matching_admin = Event::SetHealthyCr {
             collateral_type: "ICP".to_string(),
             healthy_cr: Some("1.2".to_string()),
@@ -3601,14 +3886,26 @@ mod filter_tests {
         let non_admin = borrow_event(1, caller_a(), 100, 0);
 
         assert!(matching_admin.passes_filters(
-            None, None, None, None, None, Some(&labels), &lookup, 0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&labels),
+            &lookup,
+            0,
         ));
         assert!(!non_matching_admin.passes_filters(
-            None, None, None, None, None, Some(&labels), &lookup, 0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&labels),
+            &lookup,
+            0,
         ));
-        assert!(non_admin.passes_filters(
-            None, None, None, None, None, Some(&labels), &lookup, 0,
-        ));
+        assert!(non_admin.passes_filters(None, None, None, None, None, Some(&labels), &lookup, 0,));
     }
 
     #[test]
@@ -3618,9 +3915,18 @@ mod filter_tests {
         let types: HashSet<_> = [EventTypeFilter::Admin].into_iter().collect();
         let empty: HashSet<String> = HashSet::new();
 
-        let setter = Event::SetBorrowingFee { rate: "0.005".into() };
+        let setter = Event::SetBorrowingFee {
+            rate: "0.005".into(),
+        };
         assert!(setter.passes_filters(
-            Some(&types), None, None, None, None, Some(&empty), &lookup, 0,
+            Some(&types),
+            None,
+            None,
+            None,
+            None,
+            Some(&empty),
+            &lookup,
+            0,
         ));
     }
 }
