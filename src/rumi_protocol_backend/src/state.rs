@@ -1,4 +1,5 @@
-use crate::numeric::{Ratio, UsdIcp, ICUSD, ICP};
+use crate::guard::OperationState;
+use crate::numeric::{Ratio, UsdIcp, ICP, ICUSD};
 use crate::vault::Vault;
 use crate::{
     compute_collateral_ratio, InitArg, ProtocolError, UpgradeArg, MINIMUM_COLLATERAL_RATIO,
@@ -15,7 +16,6 @@ use std::collections::btree_map::Entry::{Occupied, Vacant};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::ops::Bound;
-use crate::guard::OperationState;
 
 // Like assert_eq, but returns an error instead of panicking.
 macro_rules! ensure_eq {
@@ -81,21 +81,31 @@ pub struct InterestRecipient {
 }
 
 /// Default interest split: 50% 3pool, 40% stability pool, 10% treasury.
-fn default_flush_threshold() -> u64 { 10_000_000 } // 0.1 icUSD
+fn default_flush_threshold() -> u64 {
+    10_000_000
+} // 0.1 icUSD
 
 /// Wave-14a CDP-14: production default for the XRC source-count floor.
 /// Mirrors `xrc::MIN_XRC_SOURCES`. Lives here (not in `xrc.rs`) so the
 /// `#[serde(default = ...)]` attribute on `State::min_xrc_sources_used`
 /// can reference it without a cross-module import dance.
-fn default_min_xrc_sources_used() -> u32 { 3 }
+fn default_min_xrc_sources_used() -> u32 {
+    3
+}
 
 /// Wave-14b CDP-12 follow-up: production defaults for the three timer
 /// cadences. Mirror the consts in `xrc.rs` so legacy snapshots without
 /// these fields hydrate to the same cadence the canister has shipped
 /// with from Wave 14b onward.
-fn default_xrc_fetch_interval_secs() -> u64 { 300 }
-fn default_interest_treasury_tick_interval_secs() -> u64 { 60 }
-fn default_vault_check_tick_interval_secs() -> u64 { 300 }
+fn default_xrc_fetch_interval_secs() -> u64 {
+    300
+}
+fn default_interest_treasury_tick_interval_secs() -> u64 {
+    60
+}
+fn default_vault_check_tick_interval_secs() -> u64 {
+    300
+}
 
 /// Phase 1b Task 15: production defaults for the Monad async-loop cadences.
 /// Timer D (settlement) and the observer both default to 300s. The previous 30s
@@ -107,25 +117,45 @@ fn default_vault_check_tick_interval_secs() -> u64 { 300 }
 /// these fields) off the catastrophic 30s cadence. The register fns still floor a
 /// 0 to 30 so a busy-loop is impossible even with a corrupt value, and the
 /// developer-gated setters tune the live cadence without an upgrade.
-fn default_settlement_tick_interval_secs() -> u64 { 300 }
-fn default_observer_tick_interval_secs() -> u64 { 300 }
+fn default_settlement_tick_interval_secs() -> u64 {
+    300
+}
+fn default_observer_tick_interval_secs() -> u64 {
+    300
+}
 /// Task 12: ~1 year (365 days) — effectively OFF by default (realization is
 /// deliberate, not an always-on heartbeat).
-fn default_chain_interest_tick_interval_secs() -> u64 { 31_536_000 }
+fn default_chain_interest_tick_interval_secs() -> u64 {
+    31_536_000
+}
 /// Task 12: 0.01 icUSD dust floor for interest realization.
-fn default_chain_interest_min_realize_e8s() -> u128 { 1_000_000 }
+fn default_chain_interest_min_realize_e8s() -> u128 {
+    1_000_000
+}
 /// Production tECDSA key name for the EVM chains rail. Default `test_key_1`
 /// (single-sourced from `monad_ecdsa_key_name`); a fresh production canister sets
 /// `key_1` via `set_chains_ecdsa_key_name` before registering any chain.
 fn default_chains_ecdsa_key_name() -> String {
     crate::chains::monad::config::monad_ecdsa_key_name()
 }
+fn default_xrp_schnorr_key_name() -> String {
+    crate::chains::xrp::config::XRP_TEST_SCHNORR_KEY_NAME.to_string()
+}
 
 pub fn default_interest_split() -> Vec<InterestRecipient> {
     vec![
-        InterestRecipient { destination: InterestDestination::ThreePool, bps: 5000 },
-        InterestRecipient { destination: InterestDestination::StabilityPool, bps: 4000 },
-        InterestRecipient { destination: InterestDestination::Treasury, bps: 1000 },
+        InterestRecipient {
+            destination: InterestDestination::ThreePool,
+            bps: 5000,
+        },
+        InterestRecipient {
+            destination: InterestDestination::StabilityPool,
+            bps: 4000,
+        },
+        InterestRecipient {
+            destination: InterestDestination::Treasury,
+            bps: 1000,
+        },
     ]
 }
 pub const DUST_DEBT_THRESHOLD: u64 = 50_000; // 0.0005 icUSD — debt below this is forgiven on withdrawal
@@ -179,10 +209,10 @@ pub const DEFAULT_HEALTHY_CR_MULTIPLIER: Ratio = Ratio::new(dec!(1.5));
 
 /// Default Redemption Margin Ratio parameters (admin-configurable).
 /// Redeemers receive RMR × face value of their icUSD.
-pub const DEFAULT_RMR_FLOOR: Ratio = Ratio::new(dec!(0.96));      // 96% at healthy system
-pub const DEFAULT_RMR_CEILING: Ratio = Ratio::new(dec!(1.0));     // 100% at/below stressed CR
-pub const DEFAULT_RMR_FLOOR_CR: Ratio = Ratio::new(dec!(2.25));   // CR above which floor applies (recovery × 1.5)
-pub const DEFAULT_RMR_CEILING_CR: Ratio = Ratio::new(dec!(1.5));  // CR below which ceiling applies (= recovery)
+pub const DEFAULT_RMR_FLOOR: Ratio = Ratio::new(dec!(0.96)); // 96% at healthy system
+pub const DEFAULT_RMR_CEILING: Ratio = Ratio::new(dec!(1.0)); // 100% at/below stressed CR
+pub const DEFAULT_RMR_FLOOR_CR: Ratio = Ratio::new(dec!(2.25)); // CR above which floor applies (recovery × 1.5)
+pub const DEFAULT_RMR_CEILING_CR: Ratio = Ratio::new(dec!(1.5)); // CR below which ceiling applies (= recovery)
 
 /// Wave-5 LIQ-007: minimum tolerated ratio between a new XRC sample and the
 /// stored price. A new rate is considered "in band" when
@@ -236,7 +266,10 @@ impl CollateralStatus {
 
     /// Whether repaying debt is allowed
     pub fn allows_repay(&self) -> bool {
-        matches!(self, CollateralStatus::Active | CollateralStatus::Paused | CollateralStatus::Sunset)
+        matches!(
+            self,
+            CollateralStatus::Active | CollateralStatus::Paused | CollateralStatus::Sunset
+        )
     }
 
     /// Whether adding collateral is allowed
@@ -251,7 +284,10 @@ impl CollateralStatus {
 
     /// Whether closing a vault is allowed (requires zero debt and zero collateral)
     pub fn allows_close(&self) -> bool {
-        matches!(self, CollateralStatus::Active | CollateralStatus::Paused | CollateralStatus::Sunset)
+        matches!(
+            self,
+            CollateralStatus::Active | CollateralStatus::Paused | CollateralStatus::Sunset
+        )
     }
 
     /// Whether liquidations are allowed
@@ -342,23 +378,56 @@ impl PartialEq for PriceSource {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (
-                PriceSource::Xrc { base_asset: ba1, base_asset_class: bac1, quote_asset: qa1, quote_asset_class: qac1 },
-                PriceSource::Xrc { base_asset: ba2, base_asset_class: bac2, quote_asset: qa2, quote_asset_class: qac2 },
+                PriceSource::Xrc {
+                    base_asset: ba1,
+                    base_asset_class: bac1,
+                    quote_asset: qa1,
+                    quote_asset_class: qac1,
+                },
+                PriceSource::Xrc {
+                    base_asset: ba2,
+                    base_asset_class: bac2,
+                    quote_asset: qa2,
+                    quote_asset_class: qac2,
+                },
             ) => ba1 == ba2 && bac1 == bac2 && qa1 == qa2 && qac1 == qac2,
             (
                 PriceSource::LstWrapped {
-                    base_asset: ba1, base_asset_class: bac1, quote_asset: qa1, quote_asset_class: qac1,
-                    rate_canister_id: rc1, rate_method: rm1, haircut: h1,
+                    base_asset: ba1,
+                    base_asset_class: bac1,
+                    quote_asset: qa1,
+                    quote_asset_class: qac1,
+                    rate_canister_id: rc1,
+                    rate_method: rm1,
+                    haircut: h1,
                 },
                 PriceSource::LstWrapped {
-                    base_asset: ba2, base_asset_class: bac2, quote_asset: qa2, quote_asset_class: qac2,
-                    rate_canister_id: rc2, rate_method: rm2, haircut: h2,
+                    base_asset: ba2,
+                    base_asset_class: bac2,
+                    quote_asset: qa2,
+                    quote_asset_class: qac2,
+                    rate_canister_id: rc2,
+                    rate_method: rm2,
+                    haircut: h2,
                 },
-            ) => ba1 == ba2 && bac1 == bac2 && qa1 == qa2 && qac1 == qac2
-                && rc1 == rc2 && rm1 == rm2 && h1.to_bits() == h2.to_bits(),
+            ) => {
+                ba1 == ba2
+                    && bac1 == bac2
+                    && qa1 == qa2
+                    && qac1 == qac2
+                    && rc1 == rc2
+                    && rm1 == rm2
+                    && h1.to_bits() == h2.to_bits()
+            }
             (
-                PriceSource::CoinGecko { coin_id: c1, vs_currency: v1 },
-                PriceSource::CoinGecko { coin_id: c2, vs_currency: v2 },
+                PriceSource::CoinGecko {
+                    coin_id: c1,
+                    vs_currency: v1,
+                },
+                PriceSource::CoinGecko {
+                    coin_id: c2,
+                    vs_currency: v2,
+                },
             ) => c1 == c2 && v1 == v2,
             _ => false,
         }
@@ -390,13 +459,16 @@ pub struct RateMarker {
 /// A per-asset rate curve: ordered markers + interpolation method.
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub struct RateCurve {
-    pub markers: Vec<RateMarker>,  // sorted by cr_level ascending
+    pub markers: Vec<RateMarker>, // sorted by cr_level ascending
     pub method: InterpolationMethod,
 }
 
 impl Default for RateCurve {
     fn default() -> Self {
-        Self { markers: Vec::new(), method: InterpolationMethod::default() }
+        Self {
+            markers: Vec::new(),
+            method: InterpolationMethod::default(),
+        }
     }
 }
 
@@ -600,8 +672,11 @@ pub fn xrp_collateral_principal() -> Principal {
     Principal::from_slice(b"rumi-xrp-native")
 }
 
+/// Launch cap for native-XRP borrowing: 100 icUSD, in e8s.
+pub const XRP_LAUNCH_DEBT_CEILING_E8S: u64 = 10_000_000_000;
+
 /// P5: the `CollateralConfig` for native-XRP collateral. Parameters (Rob's):
-/// 150% borrow threshold / 133% liquidation / 12% liquidation penalty / $200 debt
+/// 150% borrow threshold / 133% liquidation / 12% liquidation penalty / $100 debt
 /// ceiling. Borrowing-fee + interest BASE are copied from ICP ("same as ICP"); the
 /// dynamic curves are global (`borrowing_fee_curve`) or inherited (`rate_curve` =
 /// None). custody_kind = `NativeXrp`; `ledger_canister_id` is the synthetic key; 6
@@ -622,7 +697,7 @@ pub fn xrp_collateral_config(
         liquidation_bonus: Ratio::new(dec!(1.12)),
         borrowing_fee: icp_borrowing_fee,
         interest_rate_apr: icp_interest_rate_apr,
-        debt_ceiling: 20_000_000_000, // $200 in icUSD e8s; bump via set_collateral_debt_ceiling
+        debt_ceiling: XRP_LAUNCH_DEBT_CEILING_E8S,
         min_vault_debt: ICUSD::new(10_000_000), // 0.1 icUSD (matches ICP)
         ledger_fee: 0,
         price_source: PriceSource::Xrc {
@@ -649,6 +724,73 @@ pub fn xrp_collateral_config(
         min_xrc_sources: None,
         custody_kind: Some(CustodyKind::NativeXrp),
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct XrpLaunchGuardrailMigration {
+    pub previous_debt_ceiling: Option<u64>,
+    pub previous_status: Option<CollateralStatus>,
+}
+
+/// Converges already-registered native-XRP collateral onto launch guardrails.
+/// This is intentionally idempotent so upgrades, replay recovery, and tests can
+/// call it without needing a one-shot migration flag.
+pub fn enforce_xrp_launch_guardrails(state: &mut State) -> XrpLaunchGuardrailMigration {
+    let mut migration = XrpLaunchGuardrailMigration::default();
+    let xrp_ct = xrp_collateral_principal();
+    let Some(config) = state.collateral_configs.get_mut(&xrp_ct) else {
+        return migration;
+    };
+
+    if config.debt_ceiling > XRP_LAUNCH_DEBT_CEILING_E8S {
+        migration.previous_debt_ceiling = Some(config.debt_ceiling);
+        config.debt_ceiling = XRP_LAUNCH_DEBT_CEILING_E8S;
+    }
+
+    if !crate::chains::xrp::config::is_xrp_production_key_name(&state.xrp_schnorr_key_name)
+        && !matches!(
+            config.status,
+            CollateralStatus::Frozen | CollateralStatus::Deprecated
+        )
+    {
+        migration.previous_status = Some(config.status);
+        config.status = CollateralStatus::Frozen;
+    }
+
+    migration
+}
+
+pub fn validate_xrp_launch_config_update(
+    collateral_type: Principal,
+    config: &CollateralConfig,
+    configured_key: &str,
+) -> Result<(), ProtocolError> {
+    if collateral_type != xrp_collateral_principal() {
+        return Ok(());
+    }
+    if !config.is_native_xrp() {
+        return Err(ProtocolError::GenericError(
+            "XRP collateral config must keep custody_kind = NativeXrp".to_string(),
+        ));
+    }
+    if config.debt_ceiling > XRP_LAUNCH_DEBT_CEILING_E8S {
+        return Err(ProtocolError::GenericError(format!(
+            "XRP debt ceiling cannot exceed {} e8s (100 icUSD)",
+            XRP_LAUNCH_DEBT_CEILING_E8S
+        )));
+    }
+    if !matches!(
+        config.status,
+        CollateralStatus::Frozen | CollateralStatus::Deprecated
+    ) && !crate::chains::xrp::config::is_xrp_production_key_name(configured_key)
+    {
+        return Err(ProtocolError::GenericError(format!(
+            "XRP collateral cannot be activated without production Schnorr key {} (configured: {})",
+            crate::chains::xrp::config::XRP_PRODUCTION_SCHNORR_KEY_NAME,
+            configured_key
+        )));
+    }
+    Ok(())
 }
 
 /// P4: an unsettled claim on native-XRP collateral that left a vault. The XRP sits
@@ -680,6 +822,20 @@ pub struct XrpClaim {
 pub struct XrpSettlement {
     pub tx_hash: String,
     pub last_ledger_sequence: u32,
+    /// Source account `Sequence` used by the signed Payment. `None` means this
+    /// settlement was decoded from a pre-XRP-004 snapshot and must not be replaced
+    /// after expiry because the canister cannot prove whether that sequence was
+    /// consumed by the missing transaction.
+    #[serde(default)]
+    pub source_sequence: Option<u32>,
+    /// Original XRPL destination used for this settlement. Re-signing an expired
+    /// or failed payment must reuse this value so UI confirm calls do not need to
+    /// expose an address field while a settlement is in flight.
+    #[serde(default)]
+    pub destination: Option<String>,
+    /// Original optional destination tag used for this settlement.
+    #[serde(default)]
+    pub destination_tag: Option<u32>,
 }
 
 impl CollateralConfig {
@@ -702,7 +858,9 @@ impl CollateralConfig {
     }
 }
 
-fn default_redemption_tier() -> u8 { 1 }
+fn default_redemption_tier() -> u8 {
+    1
+}
 
 impl PartialEq for CollateralConfig {
     fn eq(&self, other: &Self) -> bool {
@@ -751,7 +909,6 @@ pub enum Mode {
     Recovery,
 }
 
-
 impl Mode {
     pub fn is_available(&self) -> bool {
         match self {
@@ -785,8 +942,6 @@ impl Default for Mode {
         Self::GeneralAvailability
     }
 }
-
-
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize, Copy)]
 pub struct PendingMarginTransfer {
@@ -828,11 +983,9 @@ pub struct PendingRefund {
     pub op_nonce: u128,
 }
 
-
 thread_local! {
     static __STATE: RefCell<Option<State>> = RefCell::default();
 }
-
 
 // Wave-4 LIQ-001: pending_margin_transfers and pending_excess_transfers are keyed
 // by (VaultId, Principal) so concurrent liquidators on the same vault each have
@@ -865,7 +1018,9 @@ where
         type Value = BTreeMap<(VaultId, Principal), PendingMarginTransfer>;
 
         fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-            f.write_str("a map of pending margin transfers (legacy u64 keys or new (u64, Principal) keys)")
+            f.write_str(
+                "a map of pending margin transfers (legacy u64 keys or new (u64, Principal) keys)",
+            )
         }
 
         fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -984,6 +1139,12 @@ pub struct State {
     /// custody address, which would orphan already-deposited collateral.
     #[serde(default = "default_chains_ecdsa_key_name")]
     pub chains_ecdsa_key_name: String,
+    /// Threshold Schnorr Ed25519 key name for the native-XRP rail. Like the EVM
+    /// tECDSA key, this must be set to `key_1` on a fresh production canister
+    /// before registering XRP collateral; changing it later would re-derive every
+    /// XRP custody address.
+    #[serde(default = "default_xrp_schnorr_key_name")]
+    pub xrp_schnorr_key_name: String,
     pub fee: Ratio,
     pub developer_principal: Principal,
     /// Optional narrowly-scoped principal (audit F-01) that may ONLY call
@@ -1017,7 +1178,7 @@ pub struct State {
     pub principal_guards: BTreeSet<Principal>,
     pub principal_guard_timestamps: BTreeMap<Principal, u64>, // Add timestamps for guards
     pub operation_states: BTreeMap<Principal, OperationState>, // Track operation states
-    pub operation_names: BTreeMap<Principal, String>, // Track operation names
+    pub operation_names: BTreeMap<Principal, String>,         // Track operation names
     /// Transient runtime lock for `TimerLogicGuard`. Cleared on guard `Drop`.
     /// `serde(default, skip_serializing)`: NEVER persisted across upgrades —
     /// otherwise an upgrade caught with the lock held would leave it stuck `true`
@@ -1064,10 +1225,10 @@ pub struct State {
     pub ckusdt_enabled: bool,
     pub ckusdc_enabled: bool,
     // Cached ckstable prices (from XRC, on-demand only)
-    pub last_ckusdt_rate: Option<rust_decimal::Decimal>,  // USDT/USD price (should be ~1.0)
-    pub last_ckusdt_timestamp: Option<u64>,                // nanos
-    pub last_ckusdc_rate: Option<rust_decimal::Decimal>,  // USDC/USD price (should be ~1.0)
-    pub last_ckusdc_timestamp: Option<u64>,                // nanos
+    pub last_ckusdt_rate: Option<rust_decimal::Decimal>, // USDT/USD price (should be ~1.0)
+    pub last_ckusdt_timestamp: Option<u64>,              // nanos
+    pub last_ckusdc_rate: Option<rust_decimal::Decimal>, // USDC/USD price (should be ~1.0)
+    pub last_ckusdc_timestamp: Option<u64>,              // nanos
     pub liquidation_bonus: Ratio,
     pub max_partial_liquidation_ratio: Ratio,
     pub redemption_fee_floor: Ratio,
@@ -1306,7 +1467,6 @@ pub struct State {
     //
     // `serde(default)` on every field — pre-Wave-8e snapshots decode to
     // zero deficit, half-fraction repayment, and a disabled ReadOnly latch.
-
     /// Cumulative bad debt the protocol has absorbed from underwater
     /// liquidations. Increments via `accrue_deficit_shortfall` at every
     /// liquidation site that nets seized USD < debt cleared. Decreases only
@@ -1349,7 +1509,6 @@ pub struct State {
     // serde(default) on every field — pre-Wave-10 snapshots decode to an
     // empty log, the 30-minute default window, a disabled ceiling (0), and
     // a not-tripped flag.
-
     /// Rolling-window log of liquidations for circuit-breaker gating.
     /// Each entry is `(timestamp_ns, debt_cleared_icusd_e8s)`. Pruned in
     /// place inside `record_recent_liquidation` to keep entries within
@@ -1389,7 +1548,6 @@ pub struct State {
     //
     // `serde(default)`: pre-Wave-9b snapshots decode `None`, the next
     // query recomputes and the result is cached.
-
     /// Wave-9b DOS-006: cached `get_protocol_status` heavy aggregates
     /// with the nanosecond timestamp at which they were computed.
     #[serde(default)]
@@ -1414,7 +1572,6 @@ pub struct State {
     // matching `default_*` fn (or 0 for the counter), so the post-
     // upgrade behavior matches the audit-spec defaults without a
     // snapshot-format migration.
-
     /// Wave-9c DOS-005: alert band (in bps) above the worst per-
     /// collateral `min_liquidation_ratio` within which `check_vaults`
     /// walks the sorted-troves index on band-only ticks. Default
@@ -1609,6 +1766,7 @@ impl Default for State {
             chain_interest_tick_interval_secs: default_chain_interest_tick_interval_secs(),
             chain_interest_min_realize_e8s: default_chain_interest_min_realize_e8s(),
             chains_ecdsa_key_name: default_chains_ecdsa_key_name(),
+            xrp_schnorr_key_name: default_xrp_schnorr_key_name(),
             fee: Ratio::from(Decimal::ZERO),
             developer_principal: Principal::anonymous(),
             price_pusher_principal: None,
@@ -1717,8 +1875,7 @@ impl Default for State {
             treasury_stats_snapshot: None,
             // Wave-9c DOS-005
             check_vaults_alert_band_bps: default_check_vaults_alert_band_bps(),
-            check_vaults_full_sweep_every_n_ticks:
-                default_check_vaults_full_sweep_every_n_ticks(),
+            check_vaults_full_sweep_every_n_ticks: default_check_vaults_full_sweep_every_n_ticks(),
             ticks_since_full_sweep: 0,
             bot_cr_tolerance_bps: default_bot_cr_tolerance_bps(),
             multi_chain: crate::chains::MultiChainState::default(),
@@ -1763,6 +1920,7 @@ impl From<InitArg> for State {
             chain_interest_tick_interval_secs: default_chain_interest_tick_interval_secs(),
             chain_interest_min_realize_e8s: default_chain_interest_min_realize_e8s(),
             chains_ecdsa_key_name: default_chains_ecdsa_key_name(),
+            xrp_schnorr_key_name: default_xrp_schnorr_key_name(),
             total_collateral_ratio: Ratio::from(Decimal::MAX),
             last_icp_timestamp: None,
             last_icp_rate: None,
@@ -1820,41 +1978,44 @@ impl From<InitArg> for State {
             // Multi-collateral: initialize with ICP as the default collateral
             collateral_configs: {
                 let mut configs = BTreeMap::new();
-                configs.insert(args.icp_ledger_principal, CollateralConfig {
-                    ledger_canister_id: args.icp_ledger_principal,
-                    decimals: 8,
-                    liquidation_ratio: MINIMUM_COLLATERAL_RATIO,
-                    borrow_threshold_ratio: RECOVERY_COLLATERAL_RATIO,
-                    liquidation_bonus: DEFAULT_LIQUIDATION_BONUS,
-                    borrowing_fee: Ratio::from(fee),
-                    interest_rate_apr: DEFAULT_INTEREST_RATE_APR,
-                    debt_ceiling: u64::MAX,
-                    min_vault_debt: ICUSD::new(10_000_000), // 0.1 icUSD
-                    ledger_fee: ICP_TRANSFER_FEE.to_u64(),
-                    price_source: PriceSource::Xrc {
-                        base_asset: "ICP".to_string(),
-                        base_asset_class: XrcAssetClass::Cryptocurrency,
-                        quote_asset: "USD".to_string(),
-                        quote_asset_class: XrcAssetClass::FiatCurrency,
+                configs.insert(
+                    args.icp_ledger_principal,
+                    CollateralConfig {
+                        ledger_canister_id: args.icp_ledger_principal,
+                        decimals: 8,
+                        liquidation_ratio: MINIMUM_COLLATERAL_RATIO,
+                        borrow_threshold_ratio: RECOVERY_COLLATERAL_RATIO,
+                        liquidation_bonus: DEFAULT_LIQUIDATION_BONUS,
+                        borrowing_fee: Ratio::from(fee),
+                        interest_rate_apr: DEFAULT_INTEREST_RATE_APR,
+                        debt_ceiling: u64::MAX,
+                        min_vault_debt: ICUSD::new(10_000_000), // 0.1 icUSD
+                        ledger_fee: ICP_TRANSFER_FEE.to_u64(),
+                        price_source: PriceSource::Xrc {
+                            base_asset: "ICP".to_string(),
+                            base_asset_class: XrcAssetClass::Cryptocurrency,
+                            quote_asset: "USD".to_string(),
+                            quote_asset_class: XrcAssetClass::FiatCurrency,
+                        },
+                        status: CollateralStatus::Active,
+                        last_price: None,
+                        last_price_timestamp: None,
+                        redemption_fee_floor: DEFAULT_REDEMPTION_FEE_FLOOR,
+                        redemption_fee_ceiling: DEFAULT_REDEMPTION_FEE_CEILING,
+                        current_base_rate: Ratio::from(Decimal::ZERO),
+                        last_redemption_time: 0,
+                        recovery_target_cr: DEFAULT_RECOVERY_TARGET_CR,
+                        min_collateral_deposit: 100_000, // 0.001 ICP
+                        recovery_borrowing_fee: None,
+                        recovery_interest_rate_apr: None,
+                        display_color: Some("#2DD4BF".to_string()),
+                        healthy_cr: None,
+                        rate_curve: None,
+                        redemption_tier: 1,
+                        min_xrc_sources: None, // inherit global floor for ICP
+                        custody_kind: None,    // ICRC (ICP ledger) — legacy default
                     },
-                    status: CollateralStatus::Active,
-                    last_price: None,
-                    last_price_timestamp: None,
-                    redemption_fee_floor: DEFAULT_REDEMPTION_FEE_FLOOR,
-                    redemption_fee_ceiling: DEFAULT_REDEMPTION_FEE_CEILING,
-                    current_base_rate: Ratio::from(Decimal::ZERO),
-                    last_redemption_time: 0,
-                    recovery_target_cr: DEFAULT_RECOVERY_TARGET_CR,
-                    min_collateral_deposit: 100_000, // 0.001 ICP
-                    recovery_borrowing_fee: None,
-                    recovery_interest_rate_apr: None,
-                    display_color: Some("#2DD4BF".to_string()),
-                    healthy_cr: None,
-                    rate_curve: None,
-                    redemption_tier: 1,
-                    min_xrc_sources: None, // inherit global floor for ICP
-                    custody_kind: None,    // ICRC (ICP ledger) — legacy default
-                });
+                );
                 configs
             },
             collateral_to_vault_ids: BTreeMap::new(),
@@ -1862,18 +2023,42 @@ impl From<InitArg> for State {
             // Dynamic interest rates
             global_rate_curve: RateCurve {
                 markers: vec![
-                    RateMarker { cr_level: Ratio::new(dec!(0)), multiplier: DEFAULT_RATE_MULTIPLIER_LIQUIDATION },
-                    RateMarker { cr_level: Ratio::new(dec!(0)), multiplier: DEFAULT_RATE_MULTIPLIER_BORROW_THRESHOLD },
-                    RateMarker { cr_level: Ratio::new(dec!(0)), multiplier: DEFAULT_RATE_MULTIPLIER_WARNING },
-                    RateMarker { cr_level: Ratio::new(dec!(0)), multiplier: DEFAULT_RATE_MULTIPLIER_HEALTHY },
+                    RateMarker {
+                        cr_level: Ratio::new(dec!(0)),
+                        multiplier: DEFAULT_RATE_MULTIPLIER_LIQUIDATION,
+                    },
+                    RateMarker {
+                        cr_level: Ratio::new(dec!(0)),
+                        multiplier: DEFAULT_RATE_MULTIPLIER_BORROW_THRESHOLD,
+                    },
+                    RateMarker {
+                        cr_level: Ratio::new(dec!(0)),
+                        multiplier: DEFAULT_RATE_MULTIPLIER_WARNING,
+                    },
+                    RateMarker {
+                        cr_level: Ratio::new(dec!(0)),
+                        multiplier: DEFAULT_RATE_MULTIPLIER_HEALTHY,
+                    },
                 ],
                 method: InterpolationMethod::Linear,
             },
             recovery_rate_curve: vec![
-                RecoveryRateMarker { threshold: SystemThreshold::LiquidationRatio, multiplier: DEFAULT_RECOVERY_MULTIPLIER_LIQUIDATION },
-                RecoveryRateMarker { threshold: SystemThreshold::BorrowThreshold, multiplier: DEFAULT_RECOVERY_MULTIPLIER_BORROW_THRESHOLD },
-                RecoveryRateMarker { threshold: SystemThreshold::WarningCr, multiplier: DEFAULT_RECOVERY_MULTIPLIER_WARNING },
-                RecoveryRateMarker { threshold: SystemThreshold::HealthyCr, multiplier: DEFAULT_RECOVERY_MULTIPLIER_HEALTHY },
+                RecoveryRateMarker {
+                    threshold: SystemThreshold::LiquidationRatio,
+                    multiplier: DEFAULT_RECOVERY_MULTIPLIER_LIQUIDATION,
+                },
+                RecoveryRateMarker {
+                    threshold: SystemThreshold::BorrowThreshold,
+                    multiplier: DEFAULT_RECOVERY_MULTIPLIER_BORROW_THRESHOLD,
+                },
+                RecoveryRateMarker {
+                    threshold: SystemThreshold::WarningCr,
+                    multiplier: DEFAULT_RECOVERY_MULTIPLIER_WARNING,
+                },
+                RecoveryRateMarker {
+                    threshold: SystemThreshold::HealthyCr,
+                    multiplier: DEFAULT_RECOVERY_MULTIPLIER_HEALTHY,
+                },
             ],
             weighted_avg_recovery_cr: Ratio::new(dec!(0)),
             weighted_avg_warning_cr: Ratio::new(dec!(0)),
@@ -1891,7 +2076,9 @@ impl From<InitArg> for State {
                     RateMarkerV2 {
                         cr_anchor: CrAnchor::Midpoint(
                             Box::new(CrAnchor::SystemThreshold(SystemThreshold::BorrowThreshold)),
-                            Box::new(CrAnchor::SystemThreshold(SystemThreshold::TotalCollateralRatio)),
+                            Box::new(CrAnchor::SystemThreshold(
+                                SystemThreshold::TotalCollateralRatio,
+                            )),
                         ),
                         multiplier: Ratio::new(dec!(1.75)),
                     },
@@ -1956,8 +2143,7 @@ impl From<InitArg> for State {
             treasury_stats_snapshot: None,
             // Wave-9c DOS-005
             check_vaults_alert_band_bps: default_check_vaults_alert_band_bps(),
-            check_vaults_full_sweep_every_n_ticks:
-                default_check_vaults_full_sweep_every_n_ticks(),
+            check_vaults_full_sweep_every_n_ticks: default_check_vaults_full_sweep_every_n_ticks(),
             ticks_since_full_sweep: 0,
             bot_cr_tolerance_bps: default_bot_cr_tolerance_bps(),
             multi_chain: crate::chains::MultiChainState::default(),
@@ -1973,13 +2159,17 @@ impl From<InitArg> for State {
 }
 
 impl State {
-
     /// True iff `caller` may set the manual price for `(chain_id, symbol)`:
     /// the developer may set any pair; the narrowly-scoped price-pusher principal
     /// (audit F-01) may set ONLY the pairs in `price_pusher_allowed`. Every other
     /// developer-gated endpoint stays developer-only; setting these allow-listed
     /// prices is the ONLY capability the pusher unlocks.
-    pub fn is_price_setter_authorized(&self, caller: Principal, chain_id: u32, symbol: &str) -> bool {
+    pub fn is_price_setter_authorized(
+        &self,
+        caller: Principal,
+        chain_id: u32,
+        symbol: &str,
+    ) -> bool {
         if self.developer_principal == caller {
             return true;
         }
@@ -1990,19 +2180,22 @@ impl State {
     }
 
     // Rate limiting functions for close_vault operations
-    pub fn check_close_vault_rate_limit(&mut self, principal: Principal) -> Result<(), ProtocolError> {
+    pub fn check_close_vault_rate_limit(
+        &mut self,
+        principal: Principal,
+    ) -> Result<(), ProtocolError> {
         let current_time = ic_cdk::api::time();
         let minute_nanos = 60 * 1_000_000_000; // 1 minute in nanoseconds
         let day_nanos = 24 * 60 * minute_nanos; // 24 hours in nanoseconds
-        
+
         // Clean old timestamps (older than 24 hours)
         let cutoff_time = current_time.saturating_sub(day_nanos);
-        
+
         // Clean user's timestamps
         if let Some(user_requests) = self.close_vault_requests.get_mut(&principal) {
             user_requests.retain(|&timestamp| timestamp > cutoff_time);
         }
-        
+
         // Clean global timestamps. Wave-14c CDP-09: timestamps are appended
         // chronologically, so the deque is sorted ascending. `partition_point`
         // gives the first index whose timestamp is > cutoff in O(log N), and
@@ -2011,30 +2204,37 @@ impl State {
             .global_close_requests
             .partition_point(|&timestamp| timestamp <= cutoff_time);
         self.global_close_requests.drain(..expired_until);
-        
+
         // Check user rate limits (5 per minute, 60 per day)
-        let user_recent_requests = self.close_vault_requests
+        let user_recent_requests = self
+            .close_vault_requests
             .get(&principal)
-            .map(|requests| requests.iter().filter(|&&timestamp| timestamp > current_time - minute_nanos).count())
+            .map(|requests| {
+                requests
+                    .iter()
+                    .filter(|&&timestamp| timestamp > current_time - minute_nanos)
+                    .count()
+            })
             .unwrap_or(0);
-            
-        let user_daily_requests = self.close_vault_requests
+
+        let user_daily_requests = self
+            .close_vault_requests
             .get(&principal)
             .map(|requests| requests.len())
             .unwrap_or(0);
-            
+
         if user_recent_requests >= 5 {
             return Err(ProtocolError::GenericError(
-                "Rate limit exceeded: Maximum 5 close_vault calls per minute per user".to_string()
+                "Rate limit exceeded: Maximum 5 close_vault calls per minute per user".to_string(),
             ));
         }
-        
+
         if user_daily_requests >= 60 {
             return Err(ProtocolError::GenericError(
-                "Rate limit exceeded: Maximum 60 close_vault calls per day per user".to_string()
+                "Rate limit exceeded: Maximum 60 close_vault calls per day per user".to_string(),
             ));
         }
-        
+
         // Check global rate limits (300 per minute, 30,000 per day).
         // Wave-14c CDP-09: deque is sorted ascending, so `partition_point`
         // finds the first index whose timestamp is past the minute cutoff
@@ -2044,47 +2244,49 @@ impl State {
             .global_close_requests
             .partition_point(|&timestamp| timestamp <= minute_cutoff);
         let global_recent_requests = self.global_close_requests.len() - recent_start;
-            
+
         let global_daily_requests = self.global_close_requests.len();
-        
+
         if global_recent_requests >= 300 {
             return Err(ProtocolError::GenericError(
-                "Rate limit exceeded: Maximum 300 close_vault calls per minute globally".to_string()
+                "Rate limit exceeded: Maximum 300 close_vault calls per minute globally"
+                    .to_string(),
             ));
         }
-        
+
         if global_daily_requests >= 30_000 {
             return Err(ProtocolError::GenericError(
-                "Rate limit exceeded: Maximum 30,000 close_vault calls per day globally".to_string()
+                "Rate limit exceeded: Maximum 30,000 close_vault calls per day globally"
+                    .to_string(),
             ));
         }
-        
+
         // Check concurrent operations limit (200)
         if self.concurrent_close_operations >= 200 {
             return Err(ProtocolError::GenericError(
-                "Rate limit exceeded: Maximum 200 concurrent close_vault operations".to_string()
+                "Rate limit exceeded: Maximum 200 concurrent close_vault operations".to_string(),
             ));
         }
-        
+
         Ok(())
     }
-    
+
     pub fn record_close_vault_request(&mut self, principal: Principal) {
         let current_time = ic_cdk::api::time();
-        
+
         // Record user request
         self.close_vault_requests
             .entry(principal)
             .or_insert_with(Vec::new)
             .push(current_time);
-            
+
         // Record global request. Wave-14c CDP-09: VecDeque, append to back.
         self.global_close_requests.push_back(current_time);
-        
+
         // Increment concurrent operations
         self.concurrent_close_operations += 1;
     }
-    
+
     pub fn complete_close_vault_request(&mut self) {
         // Decrement concurrent operations
         if self.concurrent_close_operations > 0 {
@@ -2131,11 +2333,7 @@ impl State {
     /// arbitrarily, including triggering the `rate < $0.01` ReadOnly latch
     /// (ORACLE-009). With the gate, an outlier needs N consecutive consistent
     /// confirmations before it's accepted.
-    pub fn check_price_sanity_band(
-        &mut self,
-        collateral_type: &Principal,
-        new_rate: f64,
-    ) -> bool {
+    pub fn check_price_sanity_band(&mut self, collateral_type: &Principal, new_rate: f64) -> bool {
         if !new_rate.is_finite() || new_rate <= 0.0 {
             return false;
         }
@@ -2171,9 +2369,7 @@ impl State {
         }
 
         let cand_ratio = new_rate / candidate;
-        if cand_ratio >= PRICE_SANITY_BAND_RATIO
-            && cand_ratio <= 1.0 / PRICE_SANITY_BAND_RATIO
-        {
+        if cand_ratio >= PRICE_SANITY_BAND_RATIO && cand_ratio <= 1.0 / PRICE_SANITY_BAND_RATIO {
             entry.1 = entry.1.saturating_add(1);
             if entry.1 >= PRICE_OUTLIER_CONFIRM_COUNT {
                 self.pending_outlier_prices.remove(collateral_type);
@@ -2279,8 +2475,7 @@ impl State {
         if total_debt == ICUSD::new(0) {
             return RECOVERY_COLLATERAL_RATIO;
         }
-        let total_debt_dec = Decimal::from_u64(total_debt.to_u64())
-            .unwrap_or(Decimal::ZERO);
+        let total_debt_dec = Decimal::from_u64(total_debt.to_u64()).unwrap_or(Decimal::ZERO);
 
         let mut weighted_sum = Decimal::ZERO;
         for (ct, config) in &self.collateral_configs {
@@ -2288,8 +2483,7 @@ impl State {
             if debt_i == ICUSD::new(0) {
                 continue;
             }
-            let debt_i_dec = Decimal::from_u64(debt_i.to_u64())
-                .unwrap_or(Decimal::ZERO);
+            let debt_i_dec = Decimal::from_u64(debt_i.to_u64()).unwrap_or(Decimal::ZERO);
             weighted_sum += (debt_i_dec / total_debt_dec) * config.borrow_threshold_ratio.0;
         }
 
@@ -2316,8 +2510,7 @@ impl State {
                 RECOVERY_COLLATERAL_RATIO * DEFAULT_HEALTHY_CR_MULTIPLIER,
             );
         }
-        let total_debt_dec = Decimal::from_u64(total_debt.to_u64())
-            .unwrap_or(Decimal::ZERO);
+        let total_debt_dec = Decimal::from_u64(total_debt.to_u64()).unwrap_or(Decimal::ZERO);
 
         let mut w_recovery = Decimal::ZERO;
         let mut w_warning = Decimal::ZERO;
@@ -2328,12 +2521,13 @@ impl State {
             if debt_i == ICUSD::new(0) {
                 continue;
             }
-            let weight = Decimal::from_u64(debt_i.to_u64())
-                .unwrap_or(Decimal::ZERO) / total_debt_dec;
+            let weight =
+                Decimal::from_u64(debt_i.to_u64()).unwrap_or(Decimal::ZERO) / total_debt_dec;
 
             let recovery_cr = config.borrow_threshold_ratio.0 * self.recovery_cr_multiplier.0;
             let warning_cr = recovery_cr + recovery_cr - config.borrow_threshold_ratio.0;
-            let healthy_cr = config.healthy_cr
+            let healthy_cr = config
+                .healthy_cr
                 .map(|h| h.0)
                 .unwrap_or(config.borrow_threshold_ratio.0 * DEFAULT_HEALTHY_CR_MULTIPLIER.0);
 
@@ -2342,7 +2536,11 @@ impl State {
             w_healthy += weight * healthy_cr;
         }
 
-        (Ratio::from(w_recovery), Ratio::from(w_warning), Ratio::from(w_healthy))
+        (
+            Ratio::from(w_recovery),
+            Ratio::from(w_warning),
+            Ratio::from(w_healthy),
+        )
     }
 
     pub fn get_redemption_fee(&self, redeemed_amount: ICUSD) -> Ratio {
@@ -2402,7 +2600,10 @@ impl State {
 
     /// Get a mutable reference to the collateral config.
     /// Resolves `Principal::anonymous()` to the ICP ledger.
-    pub fn get_collateral_config_mut(&mut self, ct: &CollateralType) -> Option<&mut CollateralConfig> {
+    pub fn get_collateral_config_mut(
+        &mut self,
+        ct: &CollateralType,
+    ) -> Option<&mut CollateralConfig> {
         let resolved = if ct == &Principal::anonymous() {
             self.icp_ledger_principal
         } else {
@@ -2438,7 +2639,7 @@ impl State {
             }
             // Verify price exists (needed for CR computation inside compute_collateral_ratio)
             match config.last_price {
-                Some(p) if p > 0.0 => { /* price is available */ },
+                Some(p) if p > 0.0 => { /* price is available */ }
                 _ => continue,
             };
 
@@ -2478,9 +2679,8 @@ impl State {
 
         // Sort: tier ascending, then worst health ascending (most vulnerable first)
         entries.sort_by(|a, b| {
-            a.0.cmp(&b.0).then_with(|| {
-                a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
-            })
+            a.0.cmp(&b.0)
+                .then_with(|| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
         });
 
         entries.into_iter().map(|(_, _, ct)| ct).collect()
@@ -2538,7 +2738,8 @@ impl State {
                     let first_mult = &resolved.first().unwrap().1;
                     let last_mult = &resolved.last().unwrap().1;
                     if last_mult.0 > first_mult.0 {
-                        return resolved.iter()
+                        return resolved
+                            .iter()
                             .max_by(|a, b| a.1 .0.cmp(&b.1 .0))
                             .map(|(_, m)| *m)
                             .unwrap_or(Ratio::new(dec!(1.0)));
@@ -2559,13 +2760,17 @@ impl State {
                 .or_else(|| config.map(|c| c.interest_rate_apr))
                 .unwrap_or(DEFAULT_INTEREST_RATE_APR);
         }
-        config.map(|c| c.interest_rate_apr).unwrap_or(DEFAULT_INTEREST_RATE_APR)
+        config
+            .map(|c| c.interest_rate_apr)
+            .unwrap_or(DEFAULT_INTEREST_RATE_APR)
     }
 
     /// Per-asset recovery CR = borrow_threshold_ratio × recovery_cr_multiplier.
     /// E.g., 150% × 1.0333 = 155%.
     pub fn get_recovery_cr_for(&self, ct: &CollateralType) -> Ratio {
-        let borrow_threshold = self.collateral_configs.get(ct)
+        let borrow_threshold = self
+            .collateral_configs
+            .get(ct)
             .map(|c| c.borrow_threshold_ratio)
             .unwrap_or(RECOVERY_COLLATERAL_RATIO);
         borrow_threshold * self.recovery_cr_multiplier
@@ -2574,7 +2779,9 @@ impl State {
     /// Per-asset warning CR = 2 * recovery_cr - borrow_threshold.
     /// E.g., 2 * 155% - 150% = 160%.
     pub fn get_warning_cr_for(&self, ct: &CollateralType) -> Ratio {
-        let borrow_threshold = self.collateral_configs.get(ct)
+        let borrow_threshold = self
+            .collateral_configs
+            .get(ct)
             .map(|c| c.borrow_threshold_ratio)
             .unwrap_or(RECOVERY_COLLATERAL_RATIO);
         let recovery_cr = borrow_threshold * self.recovery_cr_multiplier;
@@ -2621,12 +2828,12 @@ impl State {
             let lo = &resolved_markers[i];
             let hi = &resolved_markers[i + 1];
             if cr >= lo.0 && cr <= hi.0 {
-                let range = hi.0.0 - lo.0.0;
+                let range = hi.0 .0 - lo.0 .0;
                 if range == Decimal::ZERO {
                     return lo.1;
                 }
-                let t = (cr.0 - lo.0.0) / range;
-                let multiplier = lo.1.0 + t * (hi.1.0 - lo.1.0);
+                let t = (cr.0 - lo.0 .0) / range;
+                let multiplier = lo.1 .0 + t * (hi.1 .0 - lo.1 .0);
                 return Ratio::from(multiplier);
             }
         }
@@ -2643,7 +2850,9 @@ impl State {
 
         // If asset has a per-asset rate_curve, use it directly (markers already have concrete CRs)
         if let Some(curve) = config.and_then(|c| c.rate_curve.as_ref()) {
-            return curve.markers.iter()
+            return curve
+                .markers
+                .iter()
                 .map(|m| (m.cr_level, m.multiplier))
                 .collect();
         }
@@ -2663,21 +2872,28 @@ impl State {
         let cr_levels = [liq_ratio, borrow_threshold, warning_cr, healthy_cr];
         let markers = &self.global_rate_curve.markers;
 
-        let mut resolved: Vec<(Ratio, Ratio)> = markers.iter()
+        let mut resolved: Vec<(Ratio, Ratio)> = markers
+            .iter()
             .enumerate()
             .map(|(i, m)| {
-                let cr = if i < cr_levels.len() { cr_levels[i] } else { m.cr_level };
+                let cr = if i < cr_levels.len() {
+                    cr_levels[i]
+                } else {
+                    m.cr_level
+                };
                 (cr, m.multiplier)
             })
             .collect();
-        resolved.sort_by(|a, b| a.0.0.cmp(&b.0.0));
+        resolved.sort_by(|a, b| a.0 .0.cmp(&b.0 .0));
         resolved
     }
 
     /// Resolve Layer 2 recovery rate markers to concrete (cr_level, multiplier) pairs
     /// using the cached weighted average thresholds.
     fn resolve_layer2_markers(&self) -> Vec<(Ratio, Ratio)> {
-        let mut resolved: Vec<(Ratio, Ratio)> = self.recovery_rate_curve.iter()
+        let mut resolved: Vec<(Ratio, Ratio)> = self
+            .recovery_rate_curve
+            .iter()
             .map(|m| {
                 let cr = match m.threshold {
                     SystemThreshold::LiquidationRatio => self.compute_weighted_liquidation_ratio(),
@@ -2689,7 +2905,7 @@ impl State {
                 (cr, m.multiplier)
             })
             .collect();
-        resolved.sort_by(|a, b| a.0.0.cmp(&b.0.0));
+        resolved.sort_by(|a, b| a.0 .0.cmp(&b.0 .0));
         resolved
     }
 
@@ -2706,11 +2922,11 @@ impl State {
                 let ct = asset_context.expect("AssetThreshold requires asset context");
                 match t {
                     AssetThreshold::LiquidationRatio => self.get_liquidation_ratio_for(ct),
-                    AssetThreshold::BorrowThreshold => {
-                        self.collateral_configs.get(ct)
-                            .map(|c| c.borrow_threshold_ratio)
-                            .unwrap_or(RECOVERY_COLLATERAL_RATIO)
-                    }
+                    AssetThreshold::BorrowThreshold => self
+                        .collateral_configs
+                        .get(ct)
+                        .map(|c| c.borrow_threshold_ratio)
+                        .unwrap_or(RECOVERY_COLLATERAL_RATIO),
                     AssetThreshold::WarningCr => self.get_warning_cr_for(ct),
                     AssetThreshold::HealthyCr => self.get_healthy_cr_for(ct),
                 }
@@ -2748,8 +2964,15 @@ impl State {
         curve: &RateCurveV2,
         asset_context: Option<&CollateralType>,
     ) -> Vec<(Ratio, Ratio)> {
-        let mut resolved: Vec<(Ratio, Ratio)> = curve.markers.iter()
-            .map(|m| (self.resolve_anchor(&m.cr_anchor, asset_context), m.multiplier))
+        let mut resolved: Vec<(Ratio, Ratio)> = curve
+            .markers
+            .iter()
+            .map(|m| {
+                (
+                    self.resolve_anchor(&m.cr_anchor, asset_context),
+                    m.multiplier,
+                )
+            })
             .collect();
         resolved.sort_by(|a, b| a.0 .0.cmp(&b.0 .0));
         resolved
@@ -2761,16 +2984,15 @@ impl State {
         if total_debt == ICUSD::new(0) {
             return MINIMUM_COLLATERAL_RATIO;
         }
-        let total_debt_dec = Decimal::from_u64(total_debt.to_u64())
-            .unwrap_or(Decimal::ZERO);
+        let total_debt_dec = Decimal::from_u64(total_debt.to_u64()).unwrap_or(Decimal::ZERO);
         let mut weighted_sum = Decimal::ZERO;
         for (ct, config) in &self.collateral_configs {
             let debt_i = self.total_debt_for_collateral(ct);
             if debt_i == ICUSD::new(0) {
                 continue;
             }
-            let weight = Decimal::from_u64(debt_i.to_u64())
-                .unwrap_or(Decimal::ZERO) / total_debt_dec;
+            let weight =
+                Decimal::from_u64(debt_i.to_u64()).unwrap_or(Decimal::ZERO) / total_debt_dec;
             weighted_sum += weight * config.liquidation_ratio.0;
         }
         if weighted_sum == Decimal::ZERO {
@@ -2809,7 +3031,8 @@ impl State {
         // Layer 2: system-wide recovery multiplier (only in Recovery mode)
         if self.mode == Mode::Recovery {
             let layer2_markers = self.resolve_layer2_markers();
-            let layer2_mult = Self::interpolate_multiplier(&layer2_markers, self.total_collateral_ratio);
+            let layer2_mult =
+                Self::interpolate_multiplier(&layer2_markers, self.total_collateral_ratio);
             return layer1_rate * layer2_mult;
         }
 
@@ -2831,8 +3054,7 @@ impl State {
             let s: &State = &*self;
             match s.vault_id_to_vaults.get(&vault_id) {
                 Some(vault)
-                    if vault.borrowed_icusd_amount.0 > 0
-                        && vault.last_accrual_time < now_nanos =>
+                    if vault.borrowed_icusd_amount.0 > 0 && vault.last_accrual_time < now_nanos =>
                 {
                     let dummy_rate = s
                         .last_icp_rate
@@ -2894,13 +3116,10 @@ impl State {
                 .unwrap_or(UsdIcp::from(rust_decimal_macros::dec!(1.0)));
             s.vault_id_to_vaults
                 .iter()
-                .filter(|(_, v)| {
-                    v.borrowed_icusd_amount.0 > 0 && v.last_accrual_time < now_nanos
-                })
+                .filter(|(_, v)| v.borrowed_icusd_amount.0 > 0 && v.last_accrual_time < now_nanos)
                 .map(|(id, vault)| {
                     let cr = crate::compute_collateral_ratio(vault, dummy_rate, s);
-                    let rate =
-                        s.get_dynamic_interest_rate_for(&vault.collateral_type, cr);
+                    let rate = s.get_dynamic_interest_rate_for(&vault.collateral_type, cr);
                     let elapsed = now_nanos.saturating_sub(vault.last_accrual_time);
                     (*id, rate, elapsed)
                 })
@@ -3114,8 +3333,7 @@ impl State {
 
     /// Get the last known price for a collateral type (USD per 1 whole token)
     pub fn get_price_for(&self, ct: &CollateralType) -> Option<f64> {
-        self.get_collateral_config(ct)
-            .and_then(|c| c.last_price)
+        self.get_collateral_config(ct).and_then(|c| c.last_price)
     }
 
     /// Get the collateral's USD price as Decimal, or None.
@@ -3138,8 +3356,8 @@ impl State {
     /// - Recovery: `config.borrow_threshold_ratio` (e.g., 1.50) — recovery mode liquidates more aggressively
     pub fn get_min_liquidation_ratio_for(&self, ct: &CollateralType) -> Ratio {
         match self.mode {
-            Mode::Recovery => self.get_min_collateral_ratio_for(ct),     // borrow_threshold_ratio
-            _ => self.get_liquidation_ratio_for(ct),                      // liquidation_ratio
+            Mode::Recovery => self.get_min_collateral_ratio_for(ct), // borrow_threshold_ratio
+            _ => self.get_liquidation_ratio_for(ct),                 // liquidation_ratio
         }
     }
 
@@ -3294,9 +3512,10 @@ impl State {
             fresh.entry(vault.collateral_type).or_default().insert(*id);
         }
 
-        let in_index = |index: &BTreeMap<CollateralType, BTreeSet<u64>>,
-                        ct: &CollateralType,
-                        id: &u64| index.get(ct).is_some_and(|ids| ids.contains(id));
+        let in_index =
+            |index: &BTreeMap<CollateralType, BTreeSet<u64>>, ct: &CollateralType, id: &u64| {
+                index.get(ct).is_some_and(|ids| ids.contains(id))
+            };
         let stale_removed = self
             .collateral_to_vault_ids
             .iter()
@@ -3454,8 +3673,7 @@ impl State {
             Some(k) => *k,
             None => return false,
         };
-        let tolerance_bps = (self.liquidation_ordering_tolerance.0
-            * Decimal::from(10_000u64))
+        let tolerance_bps = (self.liquidation_ordering_tolerance.0 * Decimal::from(10_000u64))
             .to_u64()
             .unwrap_or(0);
         my_key.saturating_sub(bottom_key) <= tolerance_bps
@@ -3555,9 +3773,8 @@ impl State {
     /// liquidation paths still enforce.
     pub fn get_bot_claim_max_ratio_for(&self, ct: &CollateralType) -> Ratio {
         let base = self.get_min_liquidation_ratio_for(ct);
-        let tolerance = Ratio::from(
-            Decimal::from(self.bot_cr_tolerance_bps) / Decimal::from(10_000u64),
-        );
+        let tolerance =
+            Ratio::from(Decimal::from(self.bot_cr_tolerance_bps) / Decimal::from(10_000u64));
         base + tolerance
     }
 
@@ -3795,7 +4012,9 @@ impl State {
                     log!(
                         crate::INFO,
                         "[remove_margin_from_vault] clamp: vault #{} collateral {} < withdraw {}",
-                        vault_id, vault.collateral_amount, amount.to_u64()
+                        vault_id,
+                        vault.collateral_amount,
+                        amount.to_u64()
                     );
                 }
                 vault.collateral_amount = vault.collateral_amount.saturating_sub(amount.to_u64());
@@ -3818,25 +4037,28 @@ impl State {
                 // clamp instead of asserting so any residual drift degrades
                 // to a smaller applied repayment, never a trap-after-pull.
                 let repayed_amount = repayed_amount.min(vault.borrowed_icusd_amount);
-                let interest_share = if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
-                    let share = (rust_decimal::Decimal::from(repayed_amount.0)
-                        * rust_decimal::Decimal::from(vault.accrued_interest.0)
-                        / rust_decimal::Decimal::from(vault.borrowed_icusd_amount.0))
-                        .to_u64().unwrap_or(0);
-                    // INT-001: also cap by `repayed_amount` so the saturating
-                    // subtraction below cannot lose principal silently. The
-                    // deduct-side clamp keeps `accrued <= borrowed`, but defense
-                    // in depth here pins the property even on legacy state.
-                    ICUSD::new(share.min(vault.accrued_interest.0).min(repayed_amount.0))
-                } else {
-                    ICUSD::new(0)
-                };
+                let interest_share =
+                    if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
+                        let share = (rust_decimal::Decimal::from(repayed_amount.0)
+                            * rust_decimal::Decimal::from(vault.accrued_interest.0)
+                            / rust_decimal::Decimal::from(vault.borrowed_icusd_amount.0))
+                        .to_u64()
+                        .unwrap_or(0);
+                        // INT-001: also cap by `repayed_amount` so the saturating
+                        // subtraction below cannot lose principal silently. The
+                        // deduct-side clamp keeps `accrued <= borrowed`, but defense
+                        // in depth here pins the property even on legacy state.
+                        ICUSD::new(share.min(vault.accrued_interest.0).min(repayed_amount.0))
+                    } else {
+                        ICUSD::new(0)
+                    };
                 // INT-001: saturating subtraction so a stale `accrued > borrowed`
                 // state cannot panic the canister via `Token::Sub`. With the
                 // `.min(repayed_amount)` cap above this can never under-flow
                 // in practice, but the saturating form documents the contract.
                 let principal_share = repayed_amount.saturating_sub(interest_share);
-                vault.borrowed_icusd_amount = vault.borrowed_icusd_amount.saturating_sub(repayed_amount);
+                vault.borrowed_icusd_amount =
+                    vault.borrowed_icusd_amount.saturating_sub(repayed_amount);
                 vault.accrued_interest = vault.accrued_interest.saturating_sub(interest_share);
                 (interest_share, principal_share)
             }
@@ -3898,30 +4120,35 @@ impl State {
     }
 
     pub fn get_provided_liquidity(&self, principal: Principal) -> ICUSD {
-        *self.liquidity_pool.get(&principal).unwrap_or(&ICUSD::from(0))
+        *self
+            .liquidity_pool
+            .get(&principal)
+            .unwrap_or(&ICUSD::from(0))
     }
 
     /// Compute the icUSD repayment needed to restore a vault's CR to recovery_target_cr.
     /// Returns None if not applicable (not in recovery, or vault CR outside the per-collateral
     /// liquidation_ratio..borrow_threshold_ratio range).
-    pub fn compute_recovery_repay_cap(&self, vault: &Vault, collateral_price: UsdIcp) -> Option<ICUSD> {
+    pub fn compute_recovery_repay_cap(
+        &self,
+        vault: &Vault,
+        collateral_price: UsdIcp,
+    ) -> Option<ICUSD> {
         if self.mode != Mode::Recovery {
             return None;
         }
         let vault_cr = compute_collateral_ratio(vault, collateral_price, self);
         let per_collateral_liq_ratio = self.get_liquidation_ratio_for(&vault.collateral_type);
-        let per_collateral_borrow_threshold = self.get_min_collateral_ratio_for(&vault.collateral_type);
+        let per_collateral_borrow_threshold =
+            self.get_min_collateral_ratio_for(&vault.collateral_type);
         if vault_cr <= per_collateral_liq_ratio || vault_cr >= per_collateral_borrow_threshold {
             return None;
         }
         let ct = &vault.collateral_type;
         let config = self.get_collateral_config(ct)?;
         let price = Decimal::from_f64(config.last_price?)?;
-        let collateral_value: ICUSD = crate::numeric::collateral_usd_value(
-            vault.collateral_amount,
-            price,
-            config.decimals,
-        );
+        let collateral_value: ICUSD =
+            crate::numeric::collateral_usd_value(vault.collateral_amount, price, config.decimals);
         let recovery_target = self.get_recovery_target_cr_for(ct);
         let liq_bonus = self.get_liquidation_bonus_for(ct);
         let numerator_icusd = vault.borrowed_icusd_amount * recovery_target;
@@ -3937,11 +4164,19 @@ impl State {
     /// Compute the max partial liquidation amount: enough to restore a vault's CR to
     /// recovery_target_cr. Works in all modes. Returns the full debt if the vault is
     /// so deeply undercollateralized that the formula exceeds 100%.
-    pub fn compute_partial_liquidation_cap(&self, vault: &Vault, _collateral_price: UsdIcp) -> ICUSD {
+    pub fn compute_partial_liquidation_cap(
+        &self,
+        vault: &Vault,
+        _collateral_price: UsdIcp,
+    ) -> ICUSD {
         let ct = &vault.collateral_type;
         let collateral_value: ICUSD = if let Some(config) = self.get_collateral_config(ct) {
             if let Some(price) = config.last_price.and_then(Decimal::from_f64) {
-                crate::numeric::collateral_usd_value(vault.collateral_amount, price, config.decimals)
+                crate::numeric::collateral_usd_value(
+                    vault.collateral_amount,
+                    price,
+                    config.decimals,
+                )
             } else {
                 // No price — conservatively return full debt (allows full liquidation)
                 return vault.borrowed_icusd_amount;
@@ -3990,8 +4225,7 @@ impl State {
         if self.protocol_deficit_icusd.0 == 0 || self.deficit_repayment_fraction.0.is_zero() {
             return ICUSD::new(0);
         }
-        let candidate_dec =
-            rust_decimal::Decimal::from(fee.0) * self.deficit_repayment_fraction.0;
+        let candidate_dec = rust_decimal::Decimal::from(fee.0) * self.deficit_repayment_fraction.0;
         let candidate_e8s = candidate_dec.to_u64().unwrap_or(0);
         let capped = candidate_e8s.min(self.protocol_deficit_icusd.0);
         ICUSD::new(capped)
@@ -4033,11 +4267,14 @@ impl State {
     /// collateral rollups. Pure read; no mutation. Cached by callers
     /// in `protocol_status_snapshot`.
     pub fn compute_protocol_status_snapshot(&self) -> ProtocolStatusSnapshot {
-        let total_icp_margin = ICP::from(self.total_collateral_for(&self.icp_ledger_principal)).to_u64();
+        let total_icp_margin =
+            ICP::from(self.total_collateral_for(&self.icp_ledger_principal)).to_u64();
         let total_icusd_borrowed = self.total_borrowed_icusd_amount().to_u64();
         let weighted_average_interest_rate = self.weighted_average_interest_rate().to_f64();
 
-        let per_collateral_interest: Vec<PerCollateralInterestSnap> = self.collateral_configs.keys()
+        let per_collateral_interest: Vec<PerCollateralInterestSnap> = self
+            .collateral_configs
+            .keys()
             .map(|ct| PerCollateralInterestSnap {
                 collateral_type: *ct,
                 total_debt_e8s: self.total_debt_for_collateral(ct).to_u64(),
@@ -4045,22 +4282,31 @@ impl State {
             })
             .collect();
 
-        let per_collateral_rate_curves: Vec<PerCollateralRateCurveSnap> = self.collateral_configs.keys()
+        let per_collateral_rate_curves: Vec<PerCollateralRateCurveSnap> = self
+            .collateral_configs
+            .keys()
             .map(|ct| {
                 let markers = self.resolve_layer1_markers(ct);
-                let base = self.collateral_configs.get(ct)
+                let base = self
+                    .collateral_configs
+                    .get(ct)
                     .map(|c| c.interest_rate_apr)
                     .unwrap_or(DEFAULT_INTEREST_RATE_APR);
                 PerCollateralRateCurveSnap {
                     collateral_type: *ct,
                     base_rate: base.to_f64(),
-                    markers: markers.iter().map(|(cr, m)| (cr.to_f64(), m.to_f64())).collect(),
+                    markers: markers
+                        .iter()
+                        .map(|(cr, m)| (cr.to_f64(), m.to_f64()))
+                        .collect(),
                 }
             })
             .collect();
 
         let borrowing_fee_curve_resolved: Vec<(f64, f64)> = match &self.borrowing_fee_curve {
-            Some(curve) => self.resolve_curve(curve, None).iter()
+            Some(curve) => self
+                .resolve_curve(curve, None)
+                .iter()
                 .map(|(cr, mult)| (cr.to_f64(), mult.to_f64()))
                 .collect(),
             None => vec![],
@@ -4082,7 +4328,9 @@ impl State {
     /// (sum across every vault); the rest of `TreasuryStats` is read
     /// fresh by the caller.
     pub fn compute_treasury_stats_snapshot(&self) -> TreasuryStatsSnapshot {
-        let total_accrued_interest_system = self.vault_id_to_vaults.values()
+        let total_accrued_interest_system = self
+            .vault_id_to_vaults
+            .values()
             .map(|v| v.accrued_interest.to_u64())
             .sum();
         TreasuryStatsSnapshot {
@@ -4135,7 +4383,12 @@ impl State {
 
     /// Liquidate a vault. Returns the interest share of the debt reduction
     /// so callers can route it to treasury.
-    pub fn liquidate_vault(&mut self, vault_id: u64, mode: Mode, collateral_price: UsdIcp) -> ICUSD {
+    pub fn liquidate_vault(
+        &mut self,
+        vault_id: u64,
+        mode: Mode,
+        collateral_price: UsdIcp,
+    ) -> ICUSD {
         // ASYNC-002 defense-in-depth: never trap on a missing vault. The
         // vault-level `vault::liquidate_vault` now presence-checks and refunds
         // the liquidator before reaching here, but a concurrent liquidation
@@ -4163,11 +4416,8 @@ impl State {
             };
             let decimals = config.decimals;
 
-            let collateral_value: ICUSD = crate::numeric::collateral_usd_value(
-                vault.collateral_amount,
-                price,
-                decimals,
-            );
+            let collateral_value: ICUSD =
+                crate::numeric::collateral_usd_value(vault.collateral_amount, price, decimals);
             let recovery_target = self.get_recovery_target_cr_for(&ct);
             let liq_bonus = self.get_liquidation_bonus_for(&ct);
             let numerator_icusd = vault.borrowed_icusd_amount * recovery_target;
@@ -4182,25 +4432,29 @@ impl State {
 
             // Collateral seized = icusd_to_collateral_amount(repay_amount * bonus)
             let repay_with_bonus: ICUSD = repay_amount * liq_bonus;
-            let collateral_seized = crate::numeric::icusd_to_collateral_amount(
-                repay_with_bonus,
-                price,
-                decimals,
-            ).min(vault.collateral_amount);
+            let collateral_seized =
+                crate::numeric::icusd_to_collateral_amount(repay_with_bonus, price, decimals)
+                    .min(vault.collateral_amount);
 
             let interest_share = match self.vault_id_to_vaults.get_mut(&vault_id) {
                 Some(vault) => {
                     // Compute interest share proportionally before reducing debt
-                    let interest_share = if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
-                        let share = (rust_decimal::Decimal::from(repay_amount.0)
-                            * rust_decimal::Decimal::from(vault.accrued_interest.0)
-                            / rust_decimal::Decimal::from(vault.borrowed_icusd_amount.0))
-                            .to_u64().unwrap_or(0);
-                        ICUSD::new(share.min(vault.accrued_interest.0))
-                    } else { ICUSD::new(0) };
+                    let interest_share =
+                        if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
+                            let share = (rust_decimal::Decimal::from(repay_amount.0)
+                                * rust_decimal::Decimal::from(vault.accrued_interest.0)
+                                / rust_decimal::Decimal::from(vault.borrowed_icusd_amount.0))
+                            .to_u64()
+                            .unwrap_or(0);
+                            ICUSD::new(share.min(vault.accrued_interest.0))
+                        } else {
+                            ICUSD::new(0)
+                        };
 
-                    vault.borrowed_icusd_amount = vault.borrowed_icusd_amount.saturating_sub(repay_amount);
-                    vault.collateral_amount = vault.collateral_amount.saturating_sub(collateral_seized);
+                    vault.borrowed_icusd_amount =
+                        vault.borrowed_icusd_amount.saturating_sub(repay_amount);
+                    vault.collateral_amount =
+                        vault.collateral_amount.saturating_sub(collateral_seized);
                     vault.accrued_interest = vault.accrued_interest.saturating_sub(interest_share);
                     interest_share
                 }
@@ -4219,7 +4473,6 @@ impl State {
         }
     }
 
-        
     pub fn redistribute_vault(&mut self, vault_id: u64) {
         let vault = self
             .vault_id_to_vaults
@@ -4244,7 +4497,7 @@ impl State {
             self.reindex_vault_cr(tid);
         }
     }
-    
+
     /// Water-filling redemption: spread redemptions across vaults to equalize CR.
     ///
     /// Instead of draining the lowest-CR vault completely, this algorithm raises
@@ -4268,7 +4521,8 @@ impl State {
         // so fall back to the price stored in the event (passed as collateral_price).
         let (price, decimals) = match self.get_collateral_config(collateral_type) {
             Some(config) => {
-                let p = config.last_price
+                let p = config
+                    .last_price
                     .and_then(Decimal::from_f64)
                     .unwrap_or(collateral_price.0);
                 (p, config.decimals)
@@ -4337,10 +4591,19 @@ impl State {
 
             // Compute total debt in the current band
             let band_vault_ids: Vec<VaultId> = vault_entries[band_start..band_end]
-                .iter().map(|(_, id)| *id).collect();
-            let band_debts: Vec<u128> = band_vault_ids.iter().map(|id| {
-                self.vault_id_to_vaults.get(id).unwrap().borrowed_icusd_amount.to_u64() as u128
-            }).collect();
+                .iter()
+                .map(|(_, id)| *id)
+                .collect();
+            let band_debts: Vec<u128> = band_vault_ids
+                .iter()
+                .map(|id| {
+                    self.vault_id_to_vaults
+                        .get(id)
+                        .unwrap()
+                        .borrowed_icusd_amount
+                        .to_u64() as u128
+                })
+                .collect();
             let total_band_debt: u128 = band_debts.iter().sum();
 
             if total_band_debt == 0 {
@@ -4351,8 +4614,13 @@ impl State {
             if band_end >= vault_entries.len() {
                 // No next tier — distribute all remaining proportionally across band
                 self.distribute_redemption_across_band(
-                    &band_vault_ids, &band_debts, total_band_debt,
-                    remaining, price, decimals, &mut results,
+                    &band_vault_ids,
+                    &band_debts,
+                    total_band_debt,
+                    remaining,
+                    price,
+                    decimals,
+                    &mut results,
                 );
                 break;
             }
@@ -4365,8 +4633,13 @@ impl State {
             if cr_denom <= Decimal::ZERO {
                 // Safety: if next CR <= 1, just drain proportionally
                 self.distribute_redemption_across_band(
-                    &band_vault_ids, &band_debts, total_band_debt,
-                    remaining, price, decimals, &mut results,
+                    &band_vault_ids,
+                    &band_debts,
+                    total_band_debt,
+                    remaining,
+                    price,
+                    decimals,
+                    &mut results,
                 );
                 break;
             }
@@ -4378,8 +4651,13 @@ impl State {
             if remaining >= total_needed && total_needed > 0 {
                 // Level up the entire band
                 self.distribute_redemption_across_band(
-                    &band_vault_ids, &band_debts, total_band_debt,
-                    total_needed, price, decimals, &mut results,
+                    &band_vault_ids,
+                    &band_debts,
+                    total_band_debt,
+                    total_needed,
+                    price,
+                    decimals,
+                    &mut results,
                 );
                 remaining -= total_needed;
 
@@ -4395,8 +4673,13 @@ impl State {
             } else {
                 // Can't reach next tier. Distribute remaining proportionally.
                 self.distribute_redemption_across_band(
-                    &band_vault_ids, &band_debts, total_band_debt,
-                    remaining, price, decimals, &mut results,
+                    &band_vault_ids,
+                    &band_debts,
+                    total_band_debt,
+                    remaining,
+                    price,
+                    decimals,
+                    &mut results,
                 );
                 break;
             }
@@ -4442,11 +4725,8 @@ impl State {
             let actual_share = share.min(max_share);
 
             let icusd_to_deduct = ICUSD::from(actual_share as u64);
-            let collateral_to_deduct = crate::numeric::icusd_to_collateral_amount(
-                icusd_to_deduct,
-                price,
-                decimals,
-            );
+            let collateral_to_deduct =
+                crate::numeric::icusd_to_collateral_amount(icusd_to_deduct, price, decimals);
             // Wave-9 RED-002: capture the actual collateral seized (post
             // saturating-sub). For solvent vaults this equals
             // `collateral_to_deduct`; for underwater vaults the
@@ -4545,9 +4825,12 @@ impl State {
                 // Use saturating arithmetic: during event replay, interest
                 // drift can inflate debt/collateral values, causing the
                 // deduction to exceed the vault's balance.
-                vault.borrowed_icusd_amount = vault.borrowed_icusd_amount.saturating_sub(icusd_amount_to_deduct);
+                vault.borrowed_icusd_amount = vault
+                    .borrowed_icusd_amount
+                    .saturating_sub(icusd_amount_to_deduct);
                 let pre_collateral = vault.collateral_amount;
-                vault.collateral_amount = vault.collateral_amount.saturating_sub(collateral_to_deduct);
+                vault.collateral_amount =
+                    vault.collateral_amount.saturating_sub(collateral_to_deduct);
                 let actual = pre_collateral.saturating_sub(vault.collateral_amount);
                 // INT-001: redemption can shrink `borrowed_icusd_amount` below
                 // `accrued_interest`, breaking the invariant that drives the
@@ -4689,7 +4972,7 @@ impl State {
             *state = OperationState::Failed;
         }
     }
-    
+
     // clean_stale_operations REMOVED — it contained a dangerous Recovery→GA auto-reset
     // that could silently exit Recovery mode based on a timeout. Mode transitions are now
     // handled exclusively by update_mode() (automatic, based on collateral ratio) or by
@@ -4746,7 +5029,7 @@ pub(crate) fn distribute_across_vaults(
             .iter()
             .filter(|&(&vault_id, _vault)| vault_id != target_vault_id)
             .map(|(_vault_id, vault)| vault.collateral_amount)
-            .sum::<u64>()
+            .sum::<u64>(),
     );
     assert_ne!(total_icp_margin, ICP::new(0));
 
@@ -4778,7 +5061,6 @@ pub(crate) fn distribute_across_vaults(
     result
 }
 
-
 pub fn compute_redemption_fee(
     elapsed_hours: u64,
     redeemed_amount: ICUSD,
@@ -4801,12 +5083,8 @@ pub fn compute_redemption_fee(
     let rate = current_base_rate * DECAY_FACTOR.pow(elapsed_hours);
     let total_rate = rate + redeemed_amount / total_borrowed_icusd_amount * REEDEMED_PROPORTION;
     debug_assert!(total_rate < Ratio::from(dec!(1.0)));
-    total_rate
-        .max(fee_floor)
-        .min(fee_ceiling)
+    total_rate.max(fee_floor).min(fee_ceiling)
 }
-
-
 
 pub fn mutate_state<F, R>(f: F) -> R
 where
@@ -4832,8 +5110,6 @@ pub fn replace_state(state: State) {
     });
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4855,15 +5131,27 @@ mod tests {
 
         // ICP vault: CR = 1.50, liq_ratio = 1.33 → health = 1.50 / 1.33 ≈ 1.1278
         let health = vault.health_score(1.50, 1.33);
-        assert!((health - 1.1278).abs() < 0.001, "Expected ~1.1278, got {}", health);
+        assert!(
+            (health - 1.1278).abs() < 0.001,
+            "Expected ~1.1278, got {}",
+            health
+        );
 
         // ckBTC vault: CR = 1.25, liq_ratio = 1.15 → health = 1.25 / 1.15 ≈ 1.0870
         let health2 = vault.health_score(1.25, 1.15);
-        assert!((health2 - 1.0870).abs() < 0.001, "Expected ~1.0870, got {}", health2);
+        assert!(
+            (health2 - 1.0870).abs() < 0.001,
+            "Expected ~1.0870, got {}",
+            health2
+        );
 
         // At exact liquidation threshold: health = 1.0
         let health3 = vault.health_score(1.33, 1.33);
-        assert!((health3 - 1.0).abs() < 0.0001, "Expected 1.0, got {}", health3);
+        assert!(
+            (health3 - 1.0).abs() < 0.0001,
+            "Expected 1.0, got {}",
+            health3
+        );
 
         // Zero-debt vault: should return f64::MAX (infinite health)
         let zero_debt_vault = Vault {
@@ -4871,27 +5159,31 @@ mod tests {
             ..vault.clone()
         };
         let health4 = zero_debt_vault.health_score(1.50, 1.33);
-        assert!(health4 > 1_000_000.0, "Zero-debt vault should have very high health score");
+        assert!(
+            health4 > 1_000_000.0,
+            "Zero-debt vault should have very high health score"
+        );
     }
 
     #[test]
     fn test_tiered_redemption_ordering() {
         // Verify sort logic: tier ascending, then health score ascending
         let mut entries: Vec<(u8, f64, u64)> = vec![
-            (2, 1.05, 10),  // tier 2, low health
-            (1, 1.20, 20),  // tier 1, moderate health
-            (1, 1.08, 30),  // tier 1, low health
-            (3, 1.01, 40),  // tier 3, very low health
-            (1, 1.15, 50),  // tier 1, moderate health
+            (2, 1.05, 10), // tier 2, low health
+            (1, 1.20, 20), // tier 1, moderate health
+            (1, 1.08, 30), // tier 1, low health
+            (3, 1.01, 40), // tier 3, very low health
+            (1, 1.15, 50), // tier 1, moderate health
         ];
 
-        entries.sort_by(|a, b| {
-            a.0.cmp(&b.0).then_with(|| a.1.partial_cmp(&b.1).unwrap())
-        });
+        entries.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.partial_cmp(&b.1).unwrap()));
 
         let order: Vec<u64> = entries.iter().map(|e| e.2).collect();
-        assert_eq!(order, vec![30, 50, 20, 10, 40],
-            "Expected tier-1 vaults first (health-sorted), then tier-2, then tier-3");
+        assert_eq!(
+            order,
+            vec![30, 50, 20, 10, 40],
+            "Expected tier-1 vaults first (health-sorted), then tier-2, then tier-3"
+        );
     }
 
     #[test]
@@ -4905,7 +5197,7 @@ mod tests {
         state.open_vault(crate::vault::Vault {
             owner: Principal::anonymous(),
             vault_id: 1,
-            collateral_amount: 500_000_000, // 5 ICP
+            collateral_amount: 500_000_000,                 // 5 ICP
             borrowed_icusd_amount: ICUSD::new(300_000_000), // 3 icUSD
             collateral_type: icp_ct,
             last_accrual_time: 0,
@@ -4915,7 +5207,7 @@ mod tests {
         state.open_vault(crate::vault::Vault {
             owner: Principal::anonymous(),
             vault_id: 2,
-            collateral_amount: 800_000_000, // 8 ICP
+            collateral_amount: 800_000_000,                 // 8 ICP
             borrowed_icusd_amount: ICUSD::new(500_000_000), // 5 icUSD
             collateral_type: icp_ct,
             last_accrual_time: 0,
@@ -4998,8 +5290,7 @@ mod tests {
         // Repay all 5M residual; pre-fix this panics with `underflow` in
         // `Token::Sub`. Post-fix the saturating subtraction zeroes the
         // principal share without panicking.
-        let (interest_share, principal_share) =
-            state.repay_to_vault(1, ICUSD::new(5_000_000));
+        let (interest_share, principal_share) = state.repay_to_vault(1, ICUSD::new(5_000_000));
 
         assert_eq!(interest_share, ICUSD::new(5_000_000));
         assert_eq!(principal_share, ICUSD::new(0));
@@ -5076,7 +5367,7 @@ mod tests {
         state.open_vault(Vault {
             owner,
             vault_id,
-            collateral_amount: 1_000_000, // 0.01 ICP
+            collateral_amount: 1_000_000,                   // 0.01 ICP
             borrowed_icusd_amount: ICUSD::new(200_000_000), // 2 icUSD
             collateral_type: Principal::anonymous(),
             last_accrual_time: 0,
@@ -5098,28 +5389,40 @@ mod tests {
         let mut state = accrual_test_state();
         let icp = state.icp_ledger_principal;
 
-        state.vault_id_to_vaults.insert(1, Vault {
-            owner: Principal::anonymous(),
-            vault_id: 1,
-            collateral_amount: 150_000_000,
-            borrowed_icusd_amount: ICUSD::new(500_000_000), // 5 icUSD total
-            collateral_type: icp,
-            last_accrual_time: 0,
-            accrued_interest: ICUSD::new(100_000_000), // 1 icUSD is interest
-            bot_processing: false,
-        });
+        state.vault_id_to_vaults.insert(
+            1,
+            Vault {
+                owner: Principal::anonymous(),
+                vault_id: 1,
+                collateral_amount: 150_000_000,
+                borrowed_icusd_amount: ICUSD::new(500_000_000), // 5 icUSD total
+                collateral_type: icp,
+                last_accrual_time: 0,
+                accrued_interest: ICUSD::new(100_000_000), // 1 icUSD is interest
+                bot_processing: false,
+            },
+        );
 
         let (interest_share, principal_share) = state.repay_to_vault(1, ICUSD::new(250_000_000));
 
         let vault = state.vault_id_to_vaults.get(&1).unwrap();
         assert_eq!(vault.borrowed_icusd_amount.0, 250_000_000);
         // 100/500 = 20% is interest, so 20% of 250M = 50M
-        assert_eq!(interest_share.0, 50_000_000,
-            "interest share of repayment should be 50M, got {}", interest_share.0);
-        assert_eq!(principal_share.0, 200_000_000,
-            "principal share should be 200M, got {}", principal_share.0);
-        assert_eq!(vault.accrued_interest.0, 50_000_000,
-            "remaining accrued_interest should be 50M, got {}", vault.accrued_interest.0);
+        assert_eq!(
+            interest_share.0, 50_000_000,
+            "interest share of repayment should be 50M, got {}",
+            interest_share.0
+        );
+        assert_eq!(
+            principal_share.0, 200_000_000,
+            "principal share should be 200M, got {}",
+            principal_share.0
+        );
+        assert_eq!(
+            vault.accrued_interest.0, 50_000_000,
+            "remaining accrued_interest should be 50M, got {}",
+            vault.accrued_interest.0
+        );
     }
 
     // Pre-existing test failure: this test exercises a code path that calls
@@ -5146,9 +5449,18 @@ mod tests {
             bot_processing: false,
         });
 
-        crate::event::record_borrow_from_vault(&mut state, 1, ICUSD::new(100_000_000), ICUSD::new(500_000), 0);
-        assert_eq!(state.get_provided_liquidity(dev).0, 0,
-            "Borrowing fee should NOT go to developer liquidity pool");
+        crate::event::record_borrow_from_vault(
+            &mut state,
+            1,
+            ICUSD::new(100_000_000),
+            ICUSD::new(500_000),
+            0,
+        );
+        assert_eq!(
+            state.get_provided_liquidity(dev).0,
+            0,
+            "Borrowing fee should NOT go to developer liquidity pool"
+        );
     }
 
     #[test]
@@ -5194,8 +5506,11 @@ mod tests {
             let vault = s.vault_id_to_vaults.get(&vault_id).unwrap();
             compute_collateral_ratio(vault, collateral_price, s)
         });
-        assert!(cr_before.to_f64() > 1.33 && cr_before.to_f64() < 1.50,
-            "CR before should be between 133% and 150%, got {}", cr_before.to_f64());
+        assert!(
+            cr_before.to_f64() > 1.33 && cr_before.to_f64() < 1.50,
+            "CR before should be between 133% and 150%, got {}",
+            cr_before.to_f64()
+        );
 
         // Execute protocol's recovery liquidation logic
         mutate_state(|s| s.liquidate_vault(vault_id, s.mode, collateral_price));
@@ -5206,14 +5521,22 @@ mod tests {
         // - CR should be approximately 1.55 (recovery_target_cr)
         let (borrowed_amount, cr_after) = read_state(|s| {
             let vault = s.vault_id_to_vaults.get(&vault_id).unwrap();
-            (vault.borrowed_icusd_amount, compute_collateral_ratio(vault, collateral_price, s))
+            (
+                vault.borrowed_icusd_amount,
+                compute_collateral_ratio(vault, collateral_price, s),
+            )
         });
-        assert!(borrowed_amount > ICUSD::new(0),
-            "Debt should not be zero after targeted recovery liquidation");
+        assert!(
+            borrowed_amount > ICUSD::new(0),
+            "Debt should not be zero after targeted recovery liquidation"
+        );
 
         let cr_f64 = cr_after.to_f64();
-        assert!(cr_f64 > 1.54 && cr_f64 < 1.56,
-            "CR after should be approximately 1.55 (155%), got {:.4}", cr_f64);
+        assert!(
+            cr_f64 > 1.54 && cr_f64 < 1.56,
+            "CR after should be approximately 1.55 (155%), got {:.4}",
+            cr_f64
+        );
     }
 
     // --- Dynamic Interest Rate Tests ---
@@ -5257,15 +5580,21 @@ mod tests {
         ];
         // Midpoint between 150% and 160% => t=0.5 => 2.5 - 0.5*(2.5-1.75) = 2.125
         let m = State::interpolate_multiplier(&markers, Ratio::from_f64(1.55));
-        assert!((m.to_f64() - 2.125).abs() < 0.001,
-            "Expected 2.125, got {}", m.to_f64());
+        assert!(
+            (m.to_f64() - 2.125).abs() < 0.001,
+            "Expected 2.125, got {}",
+            m.to_f64()
+        );
     }
 
     #[test]
     fn test_interpolate_multiplier_empty_markers() {
         let markers: Vec<(Ratio, Ratio)> = vec![];
         let m = State::interpolate_multiplier(&markers, Ratio::from_f64(1.5));
-        assert!((m.to_f64() - 1.0).abs() < 0.001, "Empty markers should return 1.0x");
+        assert!(
+            (m.to_f64() - 1.0).abs() < 0.001,
+            "Empty markers should return 1.0x"
+        );
     }
 
     #[test]
@@ -5286,18 +5615,27 @@ mod tests {
         // ICP: borrow_threshold=1.5, multiplier=1.0333
         // recovery_cr = 1.5 * 1.0333 ≈ 1.55
         let recovery_cr = state.get_recovery_cr_for(&icp);
-        assert!((recovery_cr.to_f64() - 1.55).abs() < 0.001,
-            "Expected recovery_cr 1.55, got {}", recovery_cr.to_f64());
+        assert!(
+            (recovery_cr.to_f64() - 1.55).abs() < 0.001,
+            "Expected recovery_cr 1.55, got {}",
+            recovery_cr.to_f64()
+        );
 
         // warning_cr = 2 * 1.55 - 1.5 = 1.6
         let warning_cr = state.get_warning_cr_for(&icp);
-        assert!((warning_cr.to_f64() - 1.60).abs() < 0.001,
-            "Expected warning_cr 1.60, got {}", warning_cr.to_f64());
+        assert!(
+            (warning_cr.to_f64() - 1.60).abs() < 0.001,
+            "Expected warning_cr 1.60, got {}",
+            warning_cr.to_f64()
+        );
 
         // healthy_cr = 1.5 * 1.5 = 2.25
         let healthy_cr = state.get_healthy_cr_for(&icp);
-        assert!((healthy_cr.to_f64() - 2.25).abs() < 0.001,
-            "Expected healthy_cr 2.25, got {}", healthy_cr.to_f64());
+        assert!(
+            (healthy_cr.to_f64() - 2.25).abs() < 0.001,
+            "Expected healthy_cr 2.25, got {}",
+            healthy_cr.to_f64()
+        );
     }
 
     #[test]
@@ -5318,8 +5656,12 @@ mod tests {
         // A vault at 300% CR (well above healthy 225%) → multiplier = 1.0x
         let rate = state.get_dynamic_interest_rate_for(&icp, Ratio::from_f64(3.0));
         let base = DEFAULT_INTEREST_RATE_APR.to_f64();
-        assert!((rate.to_f64() - base).abs() < 0.0001,
-            "Healthy vault should get base rate {}, got {}", base, rate.to_f64());
+        assert!(
+            (rate.to_f64() - base).abs() < 0.0001,
+            "Healthy vault should get base rate {}, got {}",
+            base,
+            rate.to_f64()
+        );
     }
 
     #[test]
@@ -5341,8 +5683,12 @@ mod tests {
         // Expected: interpolation between 2.5x and 1.75x at t=0.5 => 2.125x
         let rate = state.get_dynamic_interest_rate_for(&icp, Ratio::from_f64(1.55));
         let expected = DEFAULT_INTEREST_RATE_APR.to_f64() * 2.125;
-        assert!((rate.to_f64() - expected).abs() < 0.001,
-            "Expected rate {}, got {}", expected, rate.to_f64());
+        assert!(
+            (rate.to_f64() - expected).abs() < 0.001,
+            "Expected rate {}, got {}",
+            expected,
+            rate.to_f64()
+        );
     }
 
     #[test]
@@ -5363,8 +5709,12 @@ mod tests {
         // Vault at exactly liquidation_ratio (133%) → 5.0x multiplier
         let rate = state.get_dynamic_interest_rate_for(&icp, Ratio::from_f64(1.33));
         let expected = DEFAULT_INTEREST_RATE_APR.to_f64() * 5.0;
-        assert!((rate.to_f64() - expected).abs() < 0.001,
-            "Expected rate {}, got {}", expected, rate.to_f64());
+        assert!(
+            (rate.to_f64() - expected).abs() < 0.001,
+            "Expected rate {}, got {}",
+            expected,
+            rate.to_f64()
+        );
     }
 
     #[test]
@@ -5390,8 +5740,11 @@ mod tests {
 
         // Should return the static override regardless of vault CR
         let rate = state.get_dynamic_interest_rate_for(&icp, Ratio::from_f64(3.0));
-        assert!((rate.to_f64() - 0.10).abs() < 0.001,
-            "Expected static override 0.10, got {}", rate.to_f64());
+        assert!(
+            (rate.to_f64() - 0.10).abs() < 0.001,
+            "Expected static override 0.10, got {}",
+            rate.to_f64()
+        );
     }
 
     // --- Interest Accrual Tests ---
@@ -5431,7 +5784,7 @@ mod tests {
         let vault = Vault {
             owner: Principal::anonymous(),
             vault_id: 1,
-            collateral_amount: 150_000_000, // 1.5 ICP
+            collateral_amount: 150_000_000,                 // 1.5 ICP
             borrowed_icusd_amount: ICUSD::new(500_000_000), // 5 icUSD
             collateral_type: icp,
             last_accrual_time: 0, // t=0
@@ -5449,12 +5802,17 @@ mod tests {
         // rate = 5% × 1.0 = 5%
         // After 1 year: debt = 500_000_000 × 1.05 = 525_000_000, plus at most
         // one e8s unit of DBT-001 ceil rounding (protocol favor).
-        assert!((525_000_000..=525_000_001).contains(&vault_after.borrowed_icusd_amount.0),
+        assert!(
+            (525_000_000..=525_000_001).contains(&vault_after.borrowed_icusd_amount.0),
             "After 1 year at 5%, 500M should become 525M (+<=1 ceil unit), got {}",
-            vault_after.borrowed_icusd_amount.0);
+            vault_after.borrowed_icusd_amount.0
+        );
         assert_eq!(vault_after.last_accrual_time, one_year_nanos);
-        assert!((25_000_000..=25_000_001).contains(&vault_after.accrued_interest.0),
-            "accrued_interest should track the 25M delta (+<=1 ceil unit), got {}", vault_after.accrued_interest.0);
+        assert!(
+            (25_000_000..=25_000_001).contains(&vault_after.accrued_interest.0),
+            "accrued_interest should track the 25M delta (+<=1 ceil unit), got {}",
+            vault_after.accrued_interest.0
+        );
     }
 
     #[test]
@@ -5463,16 +5821,19 @@ mod tests {
         let icp = state.icp_ledger_principal;
 
         // Start with some pre-existing accrued interest
-        state.vault_id_to_vaults.insert(1, Vault {
-            owner: Principal::anonymous(),
-            vault_id: 1,
-            collateral_amount: 150_000_000, // 1.5 ICP
-            borrowed_icusd_amount: ICUSD::new(500_000_000), // 5 icUSD
-            collateral_type: icp,
-            last_accrual_time: 0,
-            accrued_interest: ICUSD::new(10_000_000), // 0.1 icUSD pre-existing
-            bot_processing: false,
-        });
+        state.vault_id_to_vaults.insert(
+            1,
+            Vault {
+                owner: Principal::anonymous(),
+                vault_id: 1,
+                collateral_amount: 150_000_000, // 1.5 ICP
+                borrowed_icusd_amount: ICUSD::new(500_000_000), // 5 icUSD
+                collateral_type: icp,
+                last_accrual_time: 0,
+                accrued_interest: ICUSD::new(10_000_000), // 0.1 icUSD pre-existing
+                bot_processing: false,
+            },
+        );
 
         state.accrue_single_vault(1, crate::numeric::NANOS_PER_YEAR);
 
@@ -5480,8 +5841,11 @@ mod tests {
         // DBT-001: ceil rounding may add one e8s unit (protocol favor).
         assert!((525_000_000..=525_000_001).contains(&vault.borrowed_icusd_amount.0));
         // 10M pre-existing + 25M new delta = 35M (+<=1 ceil unit)
-        assert!((35_000_000..=35_000_001).contains(&vault.accrued_interest.0),
-            "accrued_interest should be 10M + 25M = 35M (+<=1), got {}", vault.accrued_interest.0);
+        assert!(
+            (35_000_000..=35_000_001).contains(&vault.accrued_interest.0),
+            "accrued_interest should be 10M + 25M = 35M (+<=1), got {}",
+            vault.accrued_interest.0
+        );
     }
 
     #[test]
@@ -5538,40 +5902,49 @@ mod tests {
         let icp = state.icp_ledger_principal;
 
         // Vault 1: 1.5 ICP, 5 icUSD → CR = 300% (above healthy 225%)
-        state.vault_id_to_vaults.insert(1, Vault {
-            owner: Principal::anonymous(),
-            vault_id: 1,
-            collateral_amount: 150_000_000,
-            borrowed_icusd_amount: ICUSD::new(500_000_000),
-            collateral_type: icp,
-            last_accrual_time: 0,
-            accrued_interest: ICUSD::new(0),
-            bot_processing: false,
-        });
+        state.vault_id_to_vaults.insert(
+            1,
+            Vault {
+                owner: Principal::anonymous(),
+                vault_id: 1,
+                collateral_amount: 150_000_000,
+                borrowed_icusd_amount: ICUSD::new(500_000_000),
+                collateral_type: icp,
+                last_accrual_time: 0,
+                accrued_interest: ICUSD::new(0),
+                bot_processing: false,
+            },
+        );
 
         // Vault 2: 2 ICP, 5 icUSD → CR = 400% (above healthy 225%)
-        state.vault_id_to_vaults.insert(2, Vault {
-            owner: Principal::anonymous(),
-            vault_id: 2,
-            collateral_amount: 200_000_000,
-            borrowed_icusd_amount: ICUSD::new(500_000_000),
-            collateral_type: icp,
-            last_accrual_time: 0,
-            accrued_interest: ICUSD::new(0),
-            bot_processing: false,
-        });
+        state.vault_id_to_vaults.insert(
+            2,
+            Vault {
+                owner: Principal::anonymous(),
+                vault_id: 2,
+                collateral_amount: 200_000_000,
+                borrowed_icusd_amount: ICUSD::new(500_000_000),
+                collateral_type: icp,
+                last_accrual_time: 0,
+                accrued_interest: ICUSD::new(0),
+                bot_processing: false,
+            },
+        );
 
         // Vault 3: zero debt (should be skipped)
-        state.vault_id_to_vaults.insert(3, Vault {
-            owner: Principal::anonymous(),
-            vault_id: 3,
-            collateral_amount: 100_000_000,
-            borrowed_icusd_amount: ICUSD::new(0),
-            collateral_type: icp,
-            last_accrual_time: 0,
-            accrued_interest: ICUSD::new(0),
-            bot_processing: false,
-        });
+        state.vault_id_to_vaults.insert(
+            3,
+            Vault {
+                owner: Principal::anonymous(),
+                vault_id: 3,
+                collateral_amount: 100_000_000,
+                borrowed_icusd_amount: ICUSD::new(0),
+                collateral_type: icp,
+                last_accrual_time: 0,
+                accrued_interest: ICUSD::new(0),
+                bot_processing: false,
+            },
+        );
 
         let one_year = crate::numeric::NANOS_PER_YEAR;
         state.accrue_all_vault_interest(one_year);
@@ -5579,14 +5952,20 @@ mod tests {
         // Vault 1 (300% CR, above healthy): multiplier = 1.0x, rate = 5%
         // DBT-001: ceil rounding may add one e8s unit (protocol favor).
         let v1 = state.vault_id_to_vaults.get(&1).unwrap();
-        assert!((525_000_000..=525_000_001).contains(&v1.borrowed_icusd_amount.0),
-            "Vault 1 expected ~525M (+<=1 ceil unit), got {}", v1.borrowed_icusd_amount.0);
+        assert!(
+            (525_000_000..=525_000_001).contains(&v1.borrowed_icusd_amount.0),
+            "Vault 1 expected ~525M (+<=1 ceil unit), got {}",
+            v1.borrowed_icusd_amount.0
+        );
         assert_eq!(v1.last_accrual_time, one_year);
 
         // Vault 2 (400% CR, well above healthy): multiplier = 1.0x, rate = 5%
         let v2 = state.vault_id_to_vaults.get(&2).unwrap();
-        assert!((525_000_000..=525_000_001).contains(&v2.borrowed_icusd_amount.0),
-            "Vault 2 expected ~525M (+<=1 ceil unit), got {}", v2.borrowed_icusd_amount.0);
+        assert!(
+            (525_000_000..=525_000_001).contains(&v2.borrowed_icusd_amount.0),
+            "Vault 2 expected ~525M (+<=1 ceil unit), got {}",
+            v2.borrowed_icusd_amount.0
+        );
         assert_eq!(v2.last_accrual_time, one_year);
 
         // Vault 3 (zero debt): unchanged
@@ -5601,16 +5980,19 @@ mod tests {
         let icp = state.icp_ledger_principal;
 
         // 1.5 ICP, 5 icUSD debt → CR = 300% (above healthy) → multiplier 1.0x
-        state.vault_id_to_vaults.insert(1, Vault {
-            owner: Principal::anonymous(),
-            vault_id: 1,
-            collateral_amount: 150_000_000,
-            borrowed_icusd_amount: ICUSD::new(500_000_000),
-            collateral_type: icp,
-            last_accrual_time: 0,
-            accrued_interest: ICUSD::new(0),
-            bot_processing: false,
-        });
+        state.vault_id_to_vaults.insert(
+            1,
+            Vault {
+                owner: Principal::anonymous(),
+                vault_id: 1,
+                collateral_amount: 150_000_000,
+                borrowed_icusd_amount: ICUSD::new(500_000_000),
+                collateral_type: icp,
+                last_accrual_time: 0,
+                accrued_interest: ICUSD::new(0),
+                bot_processing: false,
+            },
+        );
 
         // 300 seconds in nanos
         let tick = 300_000_000_000u64;
@@ -5624,10 +6006,16 @@ mod tests {
         // ≈ 1.00000047565
         // new_debt = 500_000_000 * 1.00000047565 ≈ 500_000_237
         // With u64 truncation it should be 500_000_237 or close
-        assert!(v.borrowed_icusd_amount.0 > 500_000_000,
-            "Debt should increase after 300s tick, got {}", v.borrowed_icusd_amount.0);
-        assert!(v.borrowed_icusd_amount.0 < 500_001_000,
-            "Debt increase should be small for 300s, got {}", v.borrowed_icusd_amount.0);
+        assert!(
+            v.borrowed_icusd_amount.0 > 500_000_000,
+            "Debt should increase after 300s tick, got {}",
+            v.borrowed_icusd_amount.0
+        );
+        assert!(
+            v.borrowed_icusd_amount.0 < 500_001_000,
+            "Debt increase should be small for 300s, got {}",
+            v.borrowed_icusd_amount.0
+        );
         assert_eq!(v.last_accrual_time, tick);
     }
 
@@ -5640,41 +6028,68 @@ mod tests {
         let start = 1_000_000_000_000u64; // 1 trillion nanos
 
         // Vault with 1.5 ICP ($15), 5 icUSD debt → CR = 300% (healthy)
-        state.vault_id_to_vaults.insert(1, Vault {
-            owner: Principal::anonymous(),
-            vault_id: 1,
-            collateral_amount: 150_000_000,
-            borrowed_icusd_amount: ICUSD::new(500_000_000),
-            collateral_type: icp,
-            last_accrual_time: start,
-            accrued_interest: ICUSD::new(0),
-            bot_processing: false,
-        });
+        state.vault_id_to_vaults.insert(
+            1,
+            Vault {
+                owner: Principal::anonymous(),
+                vault_id: 1,
+                collateral_amount: 150_000_000,
+                borrowed_icusd_amount: ICUSD::new(500_000_000),
+                collateral_type: icp,
+                last_accrual_time: start,
+                accrued_interest: ICUSD::new(0),
+                bot_processing: false,
+            },
+        );
 
-        let initial_debt = state.vault_id_to_vaults.get(&1).unwrap().borrowed_icusd_amount;
+        let initial_debt = state
+            .vault_id_to_vaults
+            .get(&1)
+            .unwrap()
+            .borrowed_icusd_amount;
 
         // Simulate timer tick: 300 seconds later
         let tick1 = start + 300 * 1_000_000_000;
         state.accrue_all_vault_interest(tick1);
 
-        let debt_after_tick1 = state.vault_id_to_vaults.get(&1).unwrap().borrowed_icusd_amount;
-        assert!(debt_after_tick1 > initial_debt,
-            "Debt should increase after first tick: {} > {}", debt_after_tick1.0, initial_debt.0);
+        let debt_after_tick1 = state
+            .vault_id_to_vaults
+            .get(&1)
+            .unwrap()
+            .borrowed_icusd_amount;
+        assert!(
+            debt_after_tick1 > initial_debt,
+            "Debt should increase after first tick: {} > {}",
+            debt_after_tick1.0,
+            initial_debt.0
+        );
 
         // Simulate second timer tick: another 300 seconds
         let tick2 = tick1 + 300 * 1_000_000_000;
         state.accrue_all_vault_interest(tick2);
 
-        let debt_after_tick2 = state.vault_id_to_vaults.get(&1).unwrap().borrowed_icusd_amount;
-        assert!(debt_after_tick2 > debt_after_tick1,
-            "Debt should increase after second tick: {} > {}", debt_after_tick2.0, debt_after_tick1.0);
+        let debt_after_tick2 = state
+            .vault_id_to_vaults
+            .get(&1)
+            .unwrap()
+            .borrowed_icusd_amount;
+        assert!(
+            debt_after_tick2 > debt_after_tick1,
+            "Debt should increase after second tick: {} > {}",
+            debt_after_tick2.0,
+            debt_after_tick1.0
+        );
 
         // Verify the increase is proportional across ticks
         let increase1 = debt_after_tick1.0 - initial_debt.0;
         let increase2 = debt_after_tick2.0 - debt_after_tick1.0;
         // Second increase should be >= first (compounding on larger base)
-        assert!(increase2 >= increase1,
-            "Compounding: second increase {} should be >= first {}", increase2, increase1);
+        assert!(
+            increase2 >= increase1,
+            "Compounding: second increase {} should be >= first {}",
+            increase2,
+            increase1
+        );
     }
 
     #[test]
@@ -5691,22 +6106,28 @@ mod tests {
 
         // Single vault at CR = 300% (above healthy_cr 225%) → multiplier 1.0x
         // Base APR = 5%, so weighted avg should be 5%
-        state.vault_id_to_vaults.insert(1, Vault {
-            owner: Principal::anonymous(),
-            vault_id: 1,
-            collateral_amount: 150_000_000, // 1.5 ICP
-            borrowed_icusd_amount: ICUSD::new(500_000_000), // 5 icUSD
-            collateral_type: icp,
-            last_accrual_time: 0,
-            accrued_interest: ICUSD::new(0),
-            bot_processing: false,
-        });
+        state.vault_id_to_vaults.insert(
+            1,
+            Vault {
+                owner: Principal::anonymous(),
+                vault_id: 1,
+                collateral_amount: 150_000_000, // 1.5 ICP
+                borrowed_icusd_amount: ICUSD::new(500_000_000), // 5 icUSD
+                collateral_type: icp,
+                last_accrual_time: 0,
+                accrued_interest: ICUSD::new(0),
+                bot_processing: false,
+            },
+        );
 
         let avg = state.weighted_average_interest_rate();
         // At 300% CR with base 5% and 1.0x multiplier, should be ~0.05
         let diff = (avg.0 - rust_decimal_macros::dec!(0.05)).abs();
-        assert!(diff < rust_decimal_macros::dec!(0.001),
-            "Weighted avg rate should be ~5%, got {}", avg.0);
+        assert!(
+            diff < rust_decimal_macros::dec!(0.001),
+            "Weighted avg rate should be ~5%, got {}",
+            avg.0
+        );
     }
 
     #[test]
@@ -5719,8 +6140,11 @@ mod tests {
         let collateral_price = UsdIcp::from(dec!(10.0));
 
         // Verify default protocol share is 3%
-        assert_eq!(state.get_liquidation_protocol_share().0, dec!(0.03),
-            "Default liquidation_protocol_share should be 3%");
+        assert_eq!(
+            state.get_liquidation_protocol_share().0,
+            dec!(0.03),
+            "Default liquidation_protocol_share should be 3%"
+        );
 
         // Vault with 1.5 ICP ($15), $11.5 debt → CR = 15/11.5 ≈ 1.304
         state.open_vault(Vault {
@@ -5740,36 +6164,54 @@ mod tests {
         let protocol_share = state.get_liquidation_protocol_share(); // 0.03
 
         // collateral_raw: 5 icUSD / $10 = 0.5 ICP = 50_000_000 e8s
-        let collateral_raw = crate::numeric::icusd_to_collateral_amount(
-            liquidator_payment, dec!(10.0), 8
+        let collateral_raw =
+            crate::numeric::icusd_to_collateral_amount(liquidator_payment, dec!(10.0), 8);
+        assert_eq!(
+            collateral_raw, 50_000_000,
+            "collateral_raw should be 0.5 ICP"
         );
-        assert_eq!(collateral_raw, 50_000_000, "collateral_raw should be 0.5 ICP");
 
         // total_to_seize = 0.5 ICP * 1.15 = 0.575 ICP = 57_500_000 e8s
         let total_to_seize = (ICP::from(collateral_raw) * liq_bonus).min(ICP::from(150_000_000u64));
-        assert_eq!(total_to_seize.to_u64(), 57_500_000, "total_to_seize should be 0.575 ICP");
+        assert_eq!(
+            total_to_seize.to_u64(),
+            57_500_000,
+            "total_to_seize should be 0.575 ICP"
+        );
 
         // bonus_portion = 57_500_000 - 50_000_000 = 7_500_000 (0.075 ICP)
         let bonus_portion = total_to_seize.to_u64().saturating_sub(collateral_raw);
-        assert_eq!(bonus_portion, 7_500_000, "bonus_portion should be 0.075 ICP");
+        assert_eq!(
+            bonus_portion, 7_500_000,
+            "bonus_portion should be 0.075 ICP"
+        );
 
         // protocol_cut = 7_500_000 * 0.03 = 225_000 (0.00225 ICP)
         let protocol_cut = (rust_decimal::Decimal::from(bonus_portion) * protocol_share.0)
-            .to_u64().unwrap_or(0);
+            .to_u64()
+            .unwrap_or(0);
         assert_eq!(protocol_cut, 225_000, "protocol_cut should be 0.00225 ICP");
 
         // collateral_to_liquidator = 57_500_000 - 225_000 = 57_275_000
         let collateral_to_liquidator = total_to_seize.to_u64() - protocol_cut;
-        assert_eq!(collateral_to_liquidator, 57_275_000,
-            "liquidator should get total_to_seize minus protocol_cut");
+        assert_eq!(
+            collateral_to_liquidator, 57_275_000,
+            "liquidator should get total_to_seize minus protocol_cut"
+        );
 
         // Verify the sync State::liquidate_vault still works correctly
         // (it doesn't split the fee — the async callers do that)
         let interest_share = state.liquidate_vault(10, Mode::GeneralAvailability, collateral_price);
         // Full liquidation: all accrued_interest is returned
-        assert_eq!(interest_share.0, 100_000_000, "Full liquidation should return all accrued_interest");
+        assert_eq!(
+            interest_share.0, 100_000_000,
+            "Full liquidation should return all accrued_interest"
+        );
         // Vault should be removed
-        assert!(state.vault_id_to_vaults.get(&10).is_none(), "Vault should be removed after full liquidation");
+        assert!(
+            state.vault_id_to_vaults.get(&10).is_none(),
+            "Vault should be removed after full liquidation"
+        );
     }
 
     #[test]
@@ -5863,16 +6305,19 @@ mod tests {
         let icp = state.icp_ledger_principal;
 
         // Create vault with 100 icUSD debt, 5 icUSD accrued interest
-        state.vault_id_to_vaults.insert(1, Vault {
-            owner: Principal::anonymous(),
-            vault_id: 1,
-            borrowed_icusd_amount: ICUSD::new(10_000_000_000), // 100 icUSD
-            collateral_amount: 1_000_000_000,
-            collateral_type: icp,
-            accrued_interest: ICUSD::new(500_000_000), // 5 icUSD interest
-            last_accrual_time: 0,
-            bot_processing: false,
-        });
+        state.vault_id_to_vaults.insert(
+            1,
+            Vault {
+                owner: Principal::anonymous(),
+                vault_id: 1,
+                borrowed_icusd_amount: ICUSD::new(10_000_000_000), // 100 icUSD
+                collateral_amount: 1_000_000_000,
+                collateral_type: icp,
+                accrued_interest: ICUSD::new(500_000_000), // 5 icUSD interest
+                last_accrual_time: 0,
+                bot_processing: false,
+            },
+        );
 
         // Repay 50 icUSD worth
         let (interest_share, principal_share) = state.repay_to_vault(1, ICUSD::new(5_000_000_000));
@@ -5945,7 +6390,11 @@ mod tests {
             "bot-claimed vault must be skipped by the redemption water-fill"
         );
         assert_eq!(
-            state.vault_id_to_vaults.get(&1).unwrap().borrowed_icusd_amount,
+            state
+                .vault_id_to_vaults
+                .get(&1)
+                .unwrap()
+                .borrowed_icusd_amount,
             ICUSD::new(300_000_000),
             "bot-claimed vault untouched"
         );
@@ -5987,9 +6436,15 @@ mod tests {
         // Claim 10 icUSD against 3 icUSD of total debt.
         let results = state.redeem_on_vaults(ICUSD::new(1_000_000_000), price, &icp_ct);
         let consumed: u64 = results.iter().map(|r| r.icusd_redeemed_e8s).sum();
-        assert_eq!(consumed, 300_000_000, "consumed capped at total redeemable debt");
+        assert_eq!(
+            consumed, 300_000_000,
+            "consumed capped at total redeemable debt"
+        );
         let seized: u64 = results.iter().map(|r| r.collateral_seized).sum();
-        assert!(seized <= 500_000_000, "seized cannot exceed vault collateral");
+        assert!(
+            seized <= 500_000_000,
+            "seized cannot exceed vault collateral"
+        );
     }
 
     #[test]
@@ -6017,15 +6472,26 @@ mod tests {
         state.open_vault(audit_vault(1, icp_ct, 500_000_000, 300_000_000));
 
         let vrs = vec![
-            crate::event::VaultRedemption { vault_id: 1, icusd_redeemed_e8s: 100_000_000, collateral_seized: 20_000_000 },
-            crate::event::VaultRedemption { vault_id: 99, icusd_redeemed_e8s: 50_000_000, collateral_seized: 10_000_000 },
+            crate::event::VaultRedemption {
+                vault_id: 1,
+                icusd_redeemed_e8s: 100_000_000,
+                collateral_seized: 20_000_000,
+            },
+            crate::event::VaultRedemption {
+                vault_id: 99,
+                icusd_redeemed_e8s: 50_000_000,
+                collateral_seized: 10_000_000,
+            },
         ];
         state.apply_vault_redemptions(&vrs);
 
         let v1 = state.vault_id_to_vaults.get(&1).unwrap();
         assert_eq!(v1.borrowed_icusd_amount, ICUSD::new(200_000_000));
         assert_eq!(v1.collateral_amount, 480_000_000);
-        assert!(!state.vault_id_to_vaults.contains_key(&99), "unknown vault skipped, no trap");
+        assert!(
+            !state.vault_id_to_vaults.contains_key(&99),
+            "unknown vault skipped, no trap"
+        );
     }
 
     #[test]
@@ -6041,7 +6507,11 @@ mod tests {
         assert_eq!(interest, ICUSD::new(0));
         assert_eq!(principal, ICUSD::new(100_000_000), "clamped to live debt");
         assert_eq!(
-            state.vault_id_to_vaults.get(&1).unwrap().borrowed_icusd_amount,
+            state
+                .vault_id_to_vaults
+                .get(&1)
+                .unwrap()
+                .borrowed_icusd_amount,
             ICUSD::new(0)
         );
     }
@@ -6066,7 +6536,7 @@ mod tests {
         // vault's gap is booked, but an unconsumed remainder (refunded to the
         // redeemer) is NOT.
         let consumed = ICUSD::new(300_000_000); // 3 icUSD retired
-        // Seized only 0.4 ICP at $5 = $2 of collateral for $3 of debt.
+                                                // Seized only 0.4 ICP at $5 = $2 of collateral for $3 of debt.
         let vrs = vec![crate::event::VaultRedemption {
             vault_id: 1,
             icusd_redeemed_e8s: 300_000_000,
@@ -6078,7 +6548,11 @@ mod tests {
             rust_decimal_macros::dec!(5.0),
             8,
         );
-        assert_eq!(shortfall, ICUSD::new(100_000_000), "underwater gap booked: $3 - $2 = $1");
+        assert_eq!(
+            shortfall,
+            ICUSD::new(100_000_000),
+            "underwater gap booked: $3 - $2 = $1"
+        );
     }
 
     #[test]
@@ -6112,7 +6586,8 @@ mod tests {
         let rmr = state.get_redemption_margin_ratio();
         assert!(
             (rmr.to_f64() - 0.96).abs() < 0.001,
-            "RMR at 1.5x recovery should be 0.96, got {}", rmr.to_f64()
+            "RMR at 1.5x recovery should be 0.96, got {}",
+            rmr.to_f64()
         );
     }
 
@@ -6124,7 +6599,8 @@ mod tests {
         let rmr = state.get_redemption_margin_ratio();
         assert!(
             (rmr.to_f64() - 1.0).abs() < 0.001,
-            "RMR at recovery threshold should be 1.0, got {}", rmr.to_f64()
+            "RMR at recovery threshold should be 1.0, got {}",
+            rmr.to_f64()
         );
     }
 
@@ -6136,7 +6612,8 @@ mod tests {
         let rmr = state.get_redemption_margin_ratio();
         assert!(
             (rmr.to_f64() - 0.98).abs() < 0.001,
-            "RMR at midpoint should be 0.98, got {}", rmr.to_f64()
+            "RMR at midpoint should be 0.98, got {}",
+            rmr.to_f64()
         );
     }
 
@@ -6148,7 +6625,8 @@ mod tests {
         let rmr = state.get_redemption_margin_ratio();
         assert!(
             (rmr.to_f64() - 1.0).abs() < 0.001,
-            "RMR below recovery should be 1.0, got {}", rmr.to_f64()
+            "RMR below recovery should be 1.0, got {}",
+            rmr.to_f64()
         );
     }
 
@@ -6160,7 +6638,8 @@ mod tests {
         let rmr = state.get_redemption_margin_ratio();
         assert!(
             (rmr.to_f64() - 0.96).abs() < 0.001,
-            "RMR above 1.5x should be capped at 0.96, got {}", rmr.to_f64()
+            "RMR above 1.5x should be capped at 0.96, got {}",
+            rmr.to_f64()
         );
     }
 
@@ -6169,24 +6648,27 @@ mod tests {
         let state = test_state();
         assert!(
             (state.interest_pool_share.to_f64() - 0.75).abs() < 0.001,
-            "Default interest pool share should be 0.75, got {}", state.interest_pool_share.to_f64()
+            "Default interest pool share should be 0.75, got {}",
+            state.interest_pool_share.to_f64()
         );
 
         let interest = ICUSD::from(100_000_000_00u64); // 100 icUSD
         let pool_share = ICUSD::from(
             (Decimal::from(interest.to_u64()) * state.interest_pool_share.0)
                 .to_u64()
-                .unwrap_or(0)
+                .unwrap_or(0),
         );
         let treasury_share = ICUSD::from(interest.to_u64() - pool_share.to_u64());
 
         assert!(
             (pool_share.to_u64() as f64 / 1e8 - 75.0).abs() < 0.01,
-            "Pool share should be ~75, got {}", pool_share.to_u64() as f64 / 1e8
+            "Pool share should be ~75, got {}",
+            pool_share.to_u64() as f64 / 1e8
         );
         assert!(
             (treasury_share.to_u64() as f64 / 1e8 - 25.0).abs() < 0.01,
-            "Treasury share should be ~25, got {}", treasury_share.to_u64() as f64 / 1e8
+            "Treasury share should be ~25, got {}",
+            treasury_share.to_u64() as f64 / 1e8
         );
     }
 
@@ -6199,17 +6681,19 @@ mod tests {
         let pool_share = ICUSD::from(
             (Decimal::from(interest.to_u64()) * state.interest_pool_share.0)
                 .to_u64()
-                .unwrap_or(0)
+                .unwrap_or(0),
         );
         let treasury_share = ICUSD::from(interest.to_u64() - pool_share.to_u64());
 
         assert!(
             (pool_share.to_u64() as f64 / 1e8 - 100.0).abs() < 0.01,
-            "Pool share should be ~100, got {}", pool_share.to_u64() as f64 / 1e8
+            "Pool share should be ~100, got {}",
+            pool_share.to_u64() as f64 / 1e8
         );
         assert!(
             (treasury_share.to_u64() as f64 / 1e8 - 100.0).abs() < 0.01,
-            "Treasury share should be ~100, got {}", treasury_share.to_u64() as f64 / 1e8
+            "Treasury share should be ~100, got {}",
+            treasury_share.to_u64() as f64 / 1e8
         );
     }
 
@@ -6220,12 +6704,20 @@ mod tests {
         let pool_share = ICUSD::from(
             (Decimal::from(interest.to_u64()) * state.interest_pool_share.0)
                 .to_u64()
-                .unwrap_or(0)
+                .unwrap_or(0),
         );
         let treasury_share = ICUSD::from(interest.to_u64() - pool_share.to_u64());
 
-        assert_eq!(pool_share.to_u64(), 0, "Pool share should be 0 for zero interest");
-        assert_eq!(treasury_share.to_u64(), 0, "Treasury share should be 0 for zero interest");
+        assert_eq!(
+            pool_share.to_u64(),
+            0,
+            "Pool share should be 0 for zero interest"
+        );
+        assert_eq!(
+            treasury_share.to_u64(),
+            0,
+            "Treasury share should be 0 for zero interest"
+        );
     }
 
     #[test]
@@ -6237,7 +6729,7 @@ mod tests {
         let treasury_e8s = interest_e8s - pool_e8s;
 
         // Convert to e6s (ckStable)
-        let pool_e6s = pool_e8s / 100;      // 3_750_000 = 3.75 ckUSDT
+        let pool_e6s = pool_e8s / 100; // 3_750_000 = 3.75 ckUSDT
         let treasury_e6s = treasury_e8s / 100; // 1_250_000 = 1.25 ckUSDT
 
         assert_eq!(pool_e6s, 3_750_000);
@@ -6277,11 +6769,16 @@ mod tests {
         state.recovery_mode_threshold = Ratio::from_f64(1.5);
         let anchor = CrAnchor::Midpoint(
             Box::new(CrAnchor::SystemThreshold(SystemThreshold::BorrowThreshold)),
-            Box::new(CrAnchor::SystemThreshold(SystemThreshold::TotalCollateralRatio)),
+            Box::new(CrAnchor::SystemThreshold(
+                SystemThreshold::TotalCollateralRatio,
+            )),
         );
         let result = state.resolve_anchor(&anchor, None);
-        assert!((result.to_f64() - 1.75).abs() < 0.001,
-            "Midpoint of 1.5 and 2.0 should be 1.75, got {}", result.to_f64());
+        assert!(
+            (result.to_f64() - 1.75).abs() < 0.001,
+            "Midpoint of 1.5 and 2.0 should be 1.75, got {}",
+            result.to_f64()
+        );
     }
 
     #[test]
@@ -6293,8 +6790,11 @@ mod tests {
             Ratio::from_f64(0.05),
         );
         let result = state.resolve_anchor(&anchor, None);
-        assert!((result.to_f64() - 1.55).abs() < 0.001,
-            "1.5 + 0.05 should be 1.55, got {}", result.to_f64());
+        assert!(
+            (result.to_f64() - 1.55).abs() < 0.001,
+            "1.5 + 0.05 should be 1.55, got {}",
+            result.to_f64()
+        );
     }
 
     #[test]
@@ -6304,8 +6804,11 @@ mod tests {
         let anchor = CrAnchor::AssetThreshold(AssetThreshold::BorrowThreshold);
         let result = state.resolve_anchor(&anchor, Some(&icp));
         // ICP borrow threshold — check what accrual_test_state sets
-        assert!(result.to_f64() > 1.0,
-            "ICP borrow threshold should be > 1.0, got {}", result.to_f64());
+        assert!(
+            result.to_f64() > 1.0,
+            "ICP borrow threshold should be > 1.0, got {}",
+            result.to_f64()
+        );
     }
 
     #[test]
@@ -6328,8 +6831,12 @@ mod tests {
             method: InterpolationMethod::Linear,
         };
         let resolved = state.resolve_curve(&curve, None);
-        assert!(resolved[0].0.to_f64() < resolved[1].0.to_f64(),
-            "Should be sorted ascending: {} < {}", resolved[0].0.to_f64(), resolved[1].0.to_f64());
+        assert!(
+            resolved[0].0.to_f64() < resolved[1].0.to_f64(),
+            "Should be sorted ascending: {} < {}",
+            resolved[0].0.to_f64(),
+            resolved[1].0.to_f64()
+        );
         assert!((resolved[0].0.to_f64() - 1.5).abs() < 0.01);
         assert!((resolved[1].0.to_f64() - 2.0).abs() < 0.01);
     }
@@ -6342,8 +6849,11 @@ mod tests {
 
         // Vault CR = 2.0 (above TCR of 1.75) → multiplier should be 1.0
         let mult = state.get_borrowing_fee_multiplier(Ratio::from_f64(2.0));
-        assert!((mult.to_f64() - 1.0).abs() < 0.01,
-            "Above TCR should be 1.0x, got {}", mult.to_f64());
+        assert!(
+            (mult.to_f64() - 1.0).abs() < 0.01,
+            "Above TCR should be 1.0x, got {}",
+            mult.to_f64()
+        );
     }
 
     #[test]
@@ -6354,8 +6864,11 @@ mod tests {
         // Midpoint = (1.5 + 2.0) / 2 = 1.75
 
         let mult = state.get_borrowing_fee_multiplier(Ratio::from_f64(1.75));
-        assert!((mult.to_f64() - 1.75).abs() < 0.01,
-            "At midpoint should be 1.75x, got {}", mult.to_f64());
+        assert!(
+            (mult.to_f64() - 1.75).abs() < 0.01,
+            "At midpoint should be 1.75x, got {}",
+            mult.to_f64()
+        );
     }
 
     #[test]
@@ -6366,8 +6879,11 @@ mod tests {
         // Floor = BorrowThreshold + 0.05 = 1.55
 
         let mult = state.get_borrowing_fee_multiplier(Ratio::from_f64(1.55));
-        assert!((mult.to_f64() - 3.0).abs() < 0.01,
-            "At floor should be 3.0x, got {}", mult.to_f64());
+        assert!(
+            (mult.to_f64() - 3.0).abs() < 0.01,
+            "At floor should be 3.0x, got {}",
+            mult.to_f64()
+        );
     }
 
     #[test]
@@ -6377,8 +6893,11 @@ mod tests {
         state.recovery_mode_threshold = Ratio::from_f64(1.5);
 
         let mult = state.get_borrowing_fee_multiplier(Ratio::from_f64(1.4));
-        assert!((mult.to_f64() - 3.0).abs() < 0.01,
-            "Below floor should still be 3.0x (capped), got {}", mult.to_f64());
+        assert!(
+            (mult.to_f64() - 3.0).abs() < 0.01,
+            "Below floor should still be 3.0x (capped), got {}",
+            mult.to_f64()
+        );
     }
 
     #[test]
@@ -6400,12 +6919,18 @@ mod tests {
         // A healthy vault at CR=2.0 should NOT get 3.0x from interpolation above the last marker.
         // The inversion guard should return 3.0x (max multiplier) for all CRs.
         let mult_healthy = state.get_borrowing_fee_multiplier(Ratio::from_f64(2.0));
-        assert!((mult_healthy.to_f64() - 3.0).abs() < 0.01,
-            "Inverted curve should return max multiplier (3.0x), got {}", mult_healthy.to_f64());
+        assert!(
+            (mult_healthy.to_f64() - 3.0).abs() < 0.01,
+            "Inverted curve should return max multiplier (3.0x), got {}",
+            mult_healthy.to_f64()
+        );
 
         let mult_low = state.get_borrowing_fee_multiplier(Ratio::from_f64(1.0));
-        assert!((mult_low.to_f64() - 3.0).abs() < 0.01,
-            "Inverted curve should return max multiplier (3.0x) for low CR too, got {}", mult_low.to_f64());
+        assert!(
+            (mult_low.to_f64() - 3.0).abs() < 0.01,
+            "Inverted curve should return max multiplier (3.0x) for low CR too, got {}",
+            mult_low.to_f64()
+        );
     }
 
     // ─── Regression Tests (bugs caught on mainnet) ───
@@ -6435,18 +6960,25 @@ mod tests {
         }
 
         assert_eq!(state.vault_id_to_vaults.len(), 5);
-        assert!(state.pending_margin_transfers.is_empty(),
-            "No pending transfers before closing");
+        assert!(
+            state.pending_margin_transfers.is_empty(),
+            "No pending transfers before closing"
+        );
 
         // Close all 5 vaults
         for i in 1..=5u64 {
             state.close_vault(i);
         }
 
-        assert!(state.vault_id_to_vaults.is_empty(), "All vaults should be removed");
-        assert!(state.pending_margin_transfers.is_empty(),
+        assert!(
+            state.vault_id_to_vaults.is_empty(),
+            "All vaults should be removed"
+        );
+        assert!(
+            state.pending_margin_transfers.is_empty(),
             "close_vault must NOT create phantom pending_margin_transfers, found {}",
-            state.pending_margin_transfers.len());
+            state.pending_margin_transfers.len()
+        );
     }
 
     /// Regression: RMR must be applied exactly once during reserve redemption spillover.
@@ -6484,23 +7016,33 @@ mod tests {
         let effective_spillover_buggy = (spillover_icusd - vault_fee) * rmr;
 
         // The correct value should be higher than the buggy value
-        assert!(effective_spillover_correct > effective_spillover_buggy,
+        assert!(
+            effective_spillover_correct > effective_spillover_buggy,
             "Correct spillover ({}) must be > buggy double-RMR spillover ({})",
-            effective_spillover_correct.to_u64(), effective_spillover_buggy.to_u64());
+            effective_spillover_correct.to_u64(),
+            effective_spillover_buggy.to_u64()
+        );
 
         // Verify the difference is exactly the second RMR application
         // buggy = correct * 0.96, so correct / buggy ≈ 1/0.96 ≈ 1.0417
-        let ratio = effective_spillover_correct.to_u64() as f64
-            / effective_spillover_buggy.to_u64() as f64;
-        assert!((ratio - 1.0 / 0.96).abs() < 0.001,
-            "Difference should be exactly the second RMR factor, ratio = {}", ratio);
+        let ratio =
+            effective_spillover_correct.to_u64() as f64 / effective_spillover_buggy.to_u64() as f64;
+        assert!(
+            (ratio - 1.0 / 0.96).abs() < 0.001,
+            "Difference should be exactly the second RMR factor, ratio = {}",
+            ratio
+        );
 
         // Verify the effective spillover is exactly: (original * (1-fee) * rmr) * (1 - vault_fee_ratio)
         // NOT: (original * (1-fee) * rmr) * (1 - vault_fee_ratio) * rmr
         let expected = 100.0 * (1.0 - 0.003) * 0.96 * (1.0 - 0.005);
         let actual = effective_spillover_correct.to_u64() as f64 / 1e8;
-        assert!((actual - expected).abs() < 0.01,
-            "Effective spillover should be {:.4} icUSD, got {:.4}", expected, actual);
+        assert!(
+            (actual - expected).abs() < 0.01,
+            "Effective spillover should be {:.4} icUSD, got {:.4}",
+            expected,
+            actual
+        );
     }
 
     // ─── Liquidation Bot Tests ───
@@ -6520,7 +7062,11 @@ mod tests {
         let seized = l * b;
         let new_collateral = c - seized;
         let new_cr = new_collateral / new_debt;
-        assert!((new_cr - 1.50).abs() < 0.01, "New CR should be 1.50, got {}", new_cr);
+        assert!(
+            (new_cr - 1.50).abs() < 0.01,
+            "New CR should be 1.50, got {}",
+            new_cr
+        );
     }
 
     #[test]
@@ -6534,7 +7080,10 @@ mod tests {
         state.bot_budget_remaining_e8s -= liquidation_amount;
         state.bot_total_debt_covered_e8s += liquidation_amount;
 
-        assert_eq!(state.bot_budget_remaining_e8s, 1_000_000_000_000 - 28_571_000_000);
+        assert_eq!(
+            state.bot_budget_remaining_e8s,
+            1_000_000_000_000 - 28_571_000_000
+        );
         assert_eq!(state.bot_total_debt_covered_e8s, 28_571_000_000);
     }
 
@@ -6544,8 +7093,10 @@ mod tests {
         state.bot_budget_remaining_e8s = 10_000_000; // 0.1 icUSD remaining
 
         let liquidation_amount = 28_571_000_000u64; // 285.71 icUSD
-        assert!(state.bot_budget_remaining_e8s < liquidation_amount,
-            "Budget should be insufficient");
+        assert!(
+            state.bot_budget_remaining_e8s < liquidation_amount,
+            "Budget should be insufficient"
+        );
     }
 
     #[test]
@@ -6566,7 +7117,8 @@ mod tests {
             bot_processing: false,
         };
         state.vault_id_to_vaults.insert(42, vault);
-        state.principal_to_vault_ids
+        state
+            .principal_to_vault_ids
             .entry(Principal::anonymous())
             .or_default()
             .insert(42);
@@ -6579,7 +7131,10 @@ mod tests {
         let restored: State = ciborium::de::from_reader(buf.as_slice()).unwrap();
 
         // Verify vault fields are preserved exactly
-        assert_eq!(restored.vault_id_to_vaults.len(), state.vault_id_to_vaults.len());
+        assert_eq!(
+            restored.vault_id_to_vaults.len(),
+            state.vault_id_to_vaults.len()
+        );
         let v = &restored.vault_id_to_vaults[&42];
         assert_eq!(v.borrowed_icusd_amount, ICUSD::new(100_000_000));
         assert_eq!(v.accrued_interest, ICUSD::new(5_000_000));
@@ -6591,7 +7146,10 @@ mod tests {
         assert_eq!(restored.fee, state.fee);
         assert_eq!(restored.developer_principal, state.developer_principal);
         assert_eq!(restored.icp_ledger_principal, state.icp_ledger_principal);
-        assert_eq!(restored.next_available_vault_id, state.next_available_vault_id);
+        assert_eq!(
+            restored.next_available_vault_id,
+            state.next_available_vault_id
+        );
     }
 
     #[test]
@@ -6630,7 +7188,11 @@ mod tests {
             ciborium::Value::Map(mut e) => {
                 let before = e.len();
                 e.retain(|(k, _)| !matches!(k, ciborium::Value::Text(s) if s == "custody_kind"));
-                assert_eq!(e.len(), before - 1, "custody_kind key should have been present");
+                assert_eq!(
+                    e.len(),
+                    before - 1,
+                    "custody_kind key should have been present"
+                );
                 e
             }
             other => panic!("expected a CBOR map, got {other:?}"),
@@ -6680,24 +7242,73 @@ mod tests {
         assert_eq!(cfg.ledger_canister_id, xrp_collateral_principal());
         assert_eq!(cfg.decimals, 6);
         assert_eq!(cfg.ledger_fee, 0);
-        assert_eq!(cfg.debt_ceiling, 20_000_000_000); // $200
+        assert_eq!(XRP_LAUNCH_DEBT_CEILING_E8S, 10_000_000_000); // $100
+        assert_eq!(cfg.debt_ceiling, XRP_LAUNCH_DEBT_CEILING_E8S);
         assert_eq!(cfg.liquidation_ratio, Ratio::new(dec!(1.33)));
         assert_eq!(cfg.borrow_threshold_ratio, Ratio::new(dec!(1.50)));
         assert_eq!(cfg.liquidation_bonus, Ratio::new(dec!(1.12))); // 12% penalty
         assert_eq!(cfg.borrowing_fee, Ratio::new(dec!(0.005))); // inherited from ICP
-        // recovery CR = 150% × 1.0333... = 155%
+                                                                // recovery CR = 150% × 1.0333... = 155%
         assert!(
             (cfg.recovery_target_cr.to_f64() - 1.55).abs() < 0.001,
             "recovery ~155%, got {}",
             cfg.recovery_target_cr.to_f64()
         );
         match cfg.price_source {
-            PriceSource::Xrc { base_asset, quote_asset, .. } => {
+            PriceSource::Xrc {
+                base_asset,
+                quote_asset,
+                ..
+            } => {
                 assert_eq!(base_asset, "XRP");
                 assert_eq!(quote_asset, "USD");
             }
             other => panic!("expected XRC price source, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn xrp_launch_guardrails_clamp_existing_cap_and_freeze_non_production_key() {
+        let mut state = test_state();
+        let xrp = xrp_collateral_principal();
+        let mut cfg = xrp_collateral_config(
+            Ratio::new(dec!(0.005)),
+            Ratio::new(dec!(0.0)),
+            Ratio::new(dec!(1.033333333333333333)),
+        );
+        cfg.debt_ceiling = 20_000_000_000;
+        cfg.status = CollateralStatus::Active;
+        state.collateral_configs.insert(xrp, cfg);
+        state.xrp_schnorr_key_name =
+            crate::chains::xrp::config::XRP_TEST_SCHNORR_KEY_NAME.to_string();
+
+        let migration = enforce_xrp_launch_guardrails(&mut state);
+        let migrated = state.collateral_configs.get(&xrp).unwrap();
+
+        assert_eq!(migration.previous_debt_ceiling, Some(20_000_000_000));
+        assert_eq!(migration.previous_status, Some(CollateralStatus::Active));
+        assert_eq!(migrated.debt_ceiling, XRP_LAUNCH_DEBT_CEILING_E8S);
+        assert_eq!(migrated.status, CollateralStatus::Frozen);
+    }
+
+    #[test]
+    fn xrp_launch_config_update_rejects_cap_above_launch_ceiling() {
+        let xrp = xrp_collateral_principal();
+        let mut cfg = xrp_collateral_config(
+            Ratio::new(dec!(0.005)),
+            Ratio::new(dec!(0.0)),
+            Ratio::new(dec!(1.033333333333333333)),
+        );
+        cfg.debt_ceiling = XRP_LAUNCH_DEBT_CEILING_E8S + 1;
+
+        assert!(matches!(
+            validate_xrp_launch_config_update(
+                xrp,
+                &cfg,
+                crate::chains::xrp::config::XRP_PRODUCTION_SCHNORR_KEY_NAME,
+            ),
+            Err(ProtocolError::GenericError(_))
+        ));
     }
 
     #[test]
@@ -6745,7 +7356,10 @@ mod tests {
             true,
         );
         let ids: Vec<u64> = scan.unhealthy_vaults.iter().map(|v| v.vault_id).collect();
-        assert!(ids.contains(&1), "ICP vault should be flagged unhealthy: {ids:?}");
+        assert!(
+            ids.contains(&1),
+            "ICP vault should be flagged unhealthy: {ids:?}"
+        );
         assert!(
             !ids.contains(&2),
             "native-XRP vault must be excluded from the automated scan: {ids:?}"
@@ -6794,7 +7408,10 @@ mod tests {
         });
 
         let priority = s.get_collateral_types_by_redemption_priority();
-        assert!(priority.contains(&icp), "ICRC collateral must remain redeemable");
+        assert!(
+            priority.contains(&icp),
+            "ICRC collateral must remain redeemable"
+        );
         assert!(
             !priority.contains(&xrp),
             "native-XRP must be excluded from redemption priority"
@@ -6866,6 +7483,55 @@ mod tests {
     }
 
     #[test]
+    fn xrp_settlement_round_trips_source_sequence() {
+        let settlement = XrpSettlement {
+            tx_hash: "ABC".to_string(),
+            last_ledger_sequence: 9_000_000,
+            source_sequence: Some(42),
+            destination: Some("rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh".to_string()),
+            destination_tag: Some(7),
+        };
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&settlement, &mut buf).unwrap();
+        let back: XrpSettlement = ciborium::de::from_reader(buf.as_slice()).unwrap();
+        assert_eq!(settlement, back);
+    }
+
+    #[test]
+    fn xrp_settlement_source_sequence_defaults_none_on_old_snapshot() {
+        let settlement = XrpSettlement {
+            tx_hash: "ABC".to_string(),
+            last_ledger_sequence: 9_000_000,
+            source_sequence: Some(42),
+            destination: Some("rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh".to_string()),
+            destination_tag: Some(7),
+        };
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&settlement, &mut buf).unwrap();
+        let value: ciborium::Value = ciborium::de::from_reader(buf.as_slice()).unwrap();
+        let entries = match value {
+            ciborium::Value::Map(mut e) => {
+                e.retain(|(k, _)| {
+                    !matches!(
+                        k,
+                        ciborium::Value::Text(s)
+                            if s == "source_sequence" || s == "destination" || s == "destination_tag"
+                    )
+                });
+                e
+            }
+            other => panic!("expected a CBOR map, got {other:?}"),
+        };
+        let mut modified = Vec::new();
+        ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut modified).unwrap();
+        let restored: XrpSettlement =
+            ciborium::de::from_reader(modified.as_slice()).expect("old snapshot must decode");
+        assert_eq!(restored.source_sequence, None);
+        assert_eq!(restored.destination, None);
+        assert_eq!(restored.destination_tag, None);
+    }
+
+    #[test]
     fn test_serde_default_handles_missing_fields() {
         // Simulate old CBOR that's missing a field by serializing a subset,
         // then verifying ciborium + serde(default) fills in the missing field.
@@ -6887,7 +7553,11 @@ mod tests {
                     true
                 }
             });
-            assert_eq!(entries.len(), original_len - 1, "should have removed one field");
+            assert_eq!(
+                entries.len(),
+                original_len - 1,
+                "should have removed one field"
+            );
 
             // Re-encode the modified map
             let mut modified_buf = Vec::new();
@@ -6919,8 +7589,14 @@ mod tests {
         assert!(state.is_price_setter_authorized(dev, 71, "MON"));
         // pusher may set ONLY the allow-listed pair
         assert!(state.is_price_setter_authorized(pusher, 1030, "CFX"));
-        assert!(!state.is_price_setter_authorized(pusher, 1030, "MON"), "out-of-scope symbol rejected");
-        assert!(!state.is_price_setter_authorized(pusher, 71, "CFX"), "out-of-scope chain rejected");
+        assert!(
+            !state.is_price_setter_authorized(pusher, 1030, "MON"),
+            "out-of-scope symbol rejected"
+        );
+        assert!(
+            !state.is_price_setter_authorized(pusher, 71, "CFX"),
+            "out-of-scope chain rejected"
+        );
         // stranger never
         assert!(!state.is_price_setter_authorized(stranger, 1030, "CFX"));
     }
@@ -6967,7 +7643,10 @@ mod tests {
             ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut modified_buf).unwrap();
             let restored: State = ciborium::de::from_reader(modified_buf.as_slice()).unwrap();
             assert_eq!(restored.price_pusher_principal, None);
-            assert!(restored.price_pusher_allowed.is_empty(), "allow-list defaults empty");
+            assert!(
+                restored.price_pusher_allowed.is_empty(),
+                "allow-list defaults empty"
+            );
         } else {
             panic!("expected CBOR map");
         }
@@ -7025,7 +7704,10 @@ mod tests {
     #[test]
     fn test_bot_cr_tolerance_default_is_two_percent() {
         let state = test_state();
-        assert_eq!(state.bot_cr_tolerance_bps, crate::DEFAULT_BOT_CR_TOLERANCE_BPS);
+        assert_eq!(
+            state.bot_cr_tolerance_bps,
+            crate::DEFAULT_BOT_CR_TOLERANCE_BPS
+        );
         assert_eq!(crate::DEFAULT_BOT_CR_TOLERANCE_BPS, 200);
     }
 
@@ -7036,8 +7718,7 @@ mod tests {
 
         // Default tolerance (200 bps) → 133% + 2% = 135%.
         let max = state.get_bot_claim_max_ratio_for(&icp);
-        let expected = state.get_min_liquidation_ratio_for(&icp)
-            + Ratio::from(dec!(0.02));
+        let expected = state.get_min_liquidation_ratio_for(&icp) + Ratio::from(dec!(0.02));
         assert_eq!(max, expected);
 
         // 0 bps → no slack; bot threshold collapses to the strict
@@ -7049,8 +7730,7 @@ mod tests {
         // 500 bps (the configured admin cap) → 133% + 5% = 138%.
         state.set_bot_cr_tolerance_bps(500);
         let max_500 = state.get_bot_claim_max_ratio_for(&icp);
-        let expected_500 = state.get_min_liquidation_ratio_for(&icp)
-            + Ratio::from(dec!(0.05));
+        let expected_500 = state.get_min_liquidation_ratio_for(&icp) + Ratio::from(dec!(0.05));
         assert_eq!(max_500, expected_500);
     }
 
@@ -7065,9 +7745,8 @@ mod tests {
 
         let max = state.get_bot_claim_max_ratio_for(&icp);
         let base = state.get_min_liquidation_ratio_for(&icp);
-        let tolerance = Ratio::from(
-            Decimal::from(state.bot_cr_tolerance_bps) / Decimal::from(10_000u64),
-        );
+        let tolerance =
+            Ratio::from(Decimal::from(state.bot_cr_tolerance_bps) / Decimal::from(10_000u64));
         assert_eq!(max, base + tolerance);
 
         // Sanity: in Recovery the base is at or above the borrow threshold.

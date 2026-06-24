@@ -9,7 +9,7 @@
 //!     test mocks them (native canister-http mocking — a first for this repo;
 //!     every other chain test redirects to a mock *canister*).
 //!   * claim settlement       — `settle_xrp_claim` threshold-Ed25519 signs an XRPL
-//!     Payment (`test_key_1`, provisioned by PocketIC's II subnet) and makes
+//!     Payment (`key_1`, provisioned by PocketIC's II subnet) and makes
 //!     `submit` + `tx` outcalls, again mocked here.
 //!
 //! Happy path: register XRP -> open -> confirm deposit -> borrow -> repay ->
@@ -23,17 +23,17 @@
 //! ## tEd25519-in-PocketIC: full vs gated
 //!
 //! `open_xrp_vault` / `settle_xrp_claim` call the management-canister threshold
-//! Schnorr (Ed25519) API with key `test_key_1`. We boot `.with_ii_subnet()
-//! .with_application_subnet()`. If this build cannot provision `test_key_1`,
+//! Schnorr (Ed25519) API with key `key_1`. We boot `.with_ii_subnet()
+//! .with_application_subnet()`. If this build cannot provision `key_1`,
 //! `open_xrp_vault` errors and the test degrades to a gated subset (the same
 //! auto-degrade split the Solana/Monad happy-path tests use).
 
-use candid::{encode_args, encode_one, CandidType, Decode, Deserialize, Encode, Principal, Reserved};
+use candid::{
+    encode_args, encode_one, CandidType, Decode, Deserialize, Encode, Principal, Reserved,
+};
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc2::approve::ApproveArgs;
-use pocket_ic::common::rest::{
-    CanisterHttpReply, CanisterHttpResponse, MockCanisterHttpResponse,
-};
+use pocket_ic::common::rest::{CanisterHttpReply, CanisterHttpResponse, MockCanisterHttpResponse};
 use pocket_ic::{PocketIc, PocketIcBuilder, WasmResult};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -194,7 +194,13 @@ fn xrp_collateral_principal() -> Principal {
 
 // ─── Call helpers ────────────────────────────────────────────────────────────
 
-fn update_as(pic: &PocketIc, cid: Principal, sender: Principal, method: &str, args: Vec<u8>) -> WasmResult {
+fn update_as(
+    pic: &PocketIc,
+    cid: Principal,
+    sender: Principal,
+    method: &str,
+    args: Vec<u8>,
+) -> WasmResult {
     pic.update_call(cid, sender, method, args)
         .unwrap_or_else(|e| panic!("update {method} failed: {e}"))
 }
@@ -203,7 +209,10 @@ fn query_as<T>(pic: &PocketIc, cid: Principal, sender: Principal, method: &str, 
 where
     T: CandidType + for<'a> Deserialize<'a>,
 {
-    match pic.query_call(cid, sender, method, args).expect("query call") {
+    match pic
+        .query_call(cid, sender, method, args)
+        .expect("query call")
+    {
         WasmResult::Reply(b) => Decode!(&b, T).expect("decode query reply"),
         WasmResult::Reject(m) => panic!("query {method} rejected: {m}"),
     }
@@ -217,9 +226,8 @@ where
     T: CandidType + for<'a> Deserialize<'a>,
 {
     match reply {
-        WasmResult::Reply(b) => {
-            Decode!(&b, Result<T, Reserved>).unwrap_or_else(|e| panic!("decode {method} Result: {e}"))
-        }
+        WasmResult::Reply(b) => Decode!(&b, Result<T, Reserved>)
+            .unwrap_or_else(|e| panic!("decode {method} Result: {e}")),
         WasmResult::Reject(m) => panic!("{method} rejected: {m}"),
     }
 }
@@ -312,10 +320,11 @@ fn rippled_submit_ok() -> Value {
 }
 
 /// `tx` reporting a validated Payment delivering `delivered_drops`.
-fn rippled_tx_validated(delivered_drops: u64, ledger_index: u32) -> Value {
+fn rippled_tx_validated(tx_hash: &str, delivered_drops: u64, ledger_index: u32) -> Value {
     json!({
         "result": {
             "validated": true,
+            "hash": tx_hash,
             "ledger_index": ledger_index,
             "meta": {
                 "TransactionResult": "tesSUCCESS",
@@ -376,18 +385,31 @@ fn boot() -> Env {
         ckusdt_ledger_principal: None,
         ckusdc_ledger_principal: None,
     });
-    pic.install_canister(backend, backend_wasm(), encode_args((init,)).expect("encode init"), None);
+    pic.install_canister(
+        backend,
+        backend_wasm(),
+        encode_args((init,)).expect("encode init"),
+        None,
+    );
 
     for _ in 0..5 {
         pic.tick();
     }
 
-    Env { pic, backend, icusd, xrc }
+    Env {
+        pic,
+        backend,
+        icusd,
+        xrc,
+    }
 }
 
 fn install_ledger(pic: &PocketIc, ledger: Principal, minter: Principal, name: &str, symbol: &str) {
     let args = LedgerArg::Init(LedgerInitArgs {
-        minting_account: Account { owner: minter, subaccount: None },
+        minting_account: Account {
+            owner: minter,
+            subaccount: None,
+        },
         fee_collector_account: None,
         transfer_fee: candid::Nat::from(10_000u64),
         decimals: Some(8),
@@ -410,14 +432,24 @@ fn install_ledger(pic: &PocketIc, ledger: Principal, minter: Principal, name: &s
             more_controller_ids: None,
         },
     });
-    pic.install_canister(ledger, ledger_wasm(), encode_one(args).expect("encode ledger init"), None);
+    pic.install_canister(
+        ledger,
+        ledger_wasm(),
+        encode_one(args).expect("encode ledger init"),
+        None,
+    );
 }
 
 // ─── Reads ───────────────────────────────────────────────────────────────────
 
 fn get_vault(pic: &PocketIc, backend: Principal, vault_id: u64) -> Option<CandidVault> {
-    let vaults: Vec<CandidVault> =
-        query_as(pic, backend, Principal::anonymous(), "get_vaults", Encode!(&Some(user())).unwrap());
+    let vaults: Vec<CandidVault> = query_as(
+        pic,
+        backend,
+        Principal::anonymous(),
+        "get_vaults",
+        Encode!(&Some(user())).unwrap(),
+    );
     vaults.into_iter().find(|v| v.vault_id == vault_id)
 }
 
@@ -427,7 +459,11 @@ fn icusd_balance(pic: &PocketIc, icusd: Principal, who: Principal) -> u64 {
         icusd,
         Principal::anonymous(),
         "icrc1_balance_of",
-        Encode!(&Account { owner: who, subaccount: None }).unwrap(),
+        Encode!(&Account {
+            owner: who,
+            subaccount: None
+        })
+        .unwrap(),
     );
     bal.0.try_into().unwrap_or(u64::MAX)
 }
@@ -436,17 +472,43 @@ fn icusd_balance(pic: &PocketIc, icusd: Principal, who: Principal) -> u64 {
 /// on failure. Probes tEd25519 availability and skips the test body if absent.
 fn register_xrp(pic: &PocketIc, backend: Principal) {
     decode_result::<()>(
-        update_as(pic, backend, dev(), "register_xrp_collateral", Encode!().unwrap()),
+        update_as(
+            pic,
+            backend,
+            dev(),
+            "set_xrp_schnorr_key_name",
+            Encode!(&"key_1".to_string()).unwrap(),
+        ),
+        "set_xrp_schnorr_key_name",
+    )
+    .expect("set_xrp_schnorr_key_name");
+    decode_result::<()>(
+        update_as(
+            pic,
+            backend,
+            dev(),
+            "register_xrp_collateral",
+            Encode!().unwrap(),
+        ),
         "register_xrp_collateral",
     )
     .expect("register_xrp_collateral");
 }
 
 /// icrc2-approve the backend to pull `amount` icUSD from `owner` (for repay/liquidate).
-fn approve_icusd(pic: &PocketIc, icusd: Principal, owner: Principal, spender: Principal, amount: u64) {
+fn approve_icusd(
+    pic: &PocketIc,
+    icusd: Principal,
+    owner: Principal,
+    spender: Principal,
+    amount: u64,
+) {
     let args = ApproveArgs {
         from_subaccount: None,
-        spender: Account { owner: spender, subaccount: None },
+        spender: Account {
+            owner: spender,
+            subaccount: None,
+        },
         amount: candid::Nat::from(amount),
         expected_allowance: None,
         expires_at: None,
@@ -457,7 +519,9 @@ fn approve_icusd(pic: &PocketIc, icusd: Principal, owner: Principal, spender: Pr
     let reply = update_as(pic, icusd, owner, "icrc2_approve", Encode!(&args).unwrap());
     match reply {
         WasmResult::Reply(b) => {
-            Decode!(&b, Result<candid::Nat, Reserved>).expect("decode approve").expect("approve ok");
+            Decode!(&b, Result<candid::Nat, Reserved>)
+                .expect("decode approve")
+                .expect("approve ok");
         }
         WasmResult::Reject(m) => panic!("icrc2_approve rejected: {m}"),
     }
@@ -469,58 +533,100 @@ fn approve_icusd(pic: &PocketIc, icusd: Principal, owner: Principal, spender: Pr
 
 #[test]
 fn xrp_native_happy_path_open_deposit_borrow_repay_close_settle() {
-    let Env { pic, backend, icusd, xrc: _ } = boot();
+    let Env {
+        pic,
+        backend,
+        icusd,
+        xrc: _,
+    } = boot();
     register_xrp(&pic, backend);
 
     // ── open_xrp_vault (derives custody address via tEd25519) ────────────────
-    // If PocketIC cannot provision test_key_1, this errors -> gated skip.
+    // If PocketIC cannot provision key_1, this errors -> gated skip.
     let open_reply = update_as(&pic, backend, user(), "open_xrp_vault", Encode!().unwrap());
-    let open: XrpVaultOpenInfo = match decode_result::<XrpVaultOpenInfo>(open_reply, "open_xrp_vault") {
-        Ok(info) => info,
-        Err(_) => {
-            eprintln!("[gated] tEd25519 unavailable in this PocketIC build; skipping XRP e2e");
-            return;
-        }
-    };
+    let open: XrpVaultOpenInfo =
+        match decode_result::<XrpVaultOpenInfo>(open_reply, "open_xrp_vault") {
+            Ok(info) => info,
+            Err(_) => {
+                eprintln!("[gated] tEd25519 unavailable in this PocketIC build; skipping XRP e2e");
+                return;
+            }
+        };
     let vault_id = open.vault_id;
     assert!(!open.custody_address.is_empty(), "custody address derived");
-    assert!(open.custody_address.starts_with('r'), "XRPL classic address starts with r");
+    assert!(
+        open.custody_address.starts_with('r'),
+        "XRPL classic address starts with r"
+    );
     // No vault yet (deposit unconfirmed).
-    assert!(get_vault(&pic, backend, vault_id).is_none(), "no Vault before deposit confirm");
+    assert!(
+        get_vault(&pic, backend, vault_id).is_none(),
+        "no Vault before deposit confirm"
+    );
 
     // ── confirm_xrp_deposit: 500 XRP funded on custody (native http mock) ─────
     let deposit_drops = 500 * XRP;
     let credited = decode_result::<u64>(
-        call_with_rippled(&pic, backend, user(), "confirm_xrp_deposit", Encode!(&vault_id).unwrap(), |m| {
-            match m {
+        call_with_rippled(
+            &pic,
+            backend,
+            user(),
+            "confirm_xrp_deposit",
+            Encode!(&vault_id).unwrap(),
+            |m| match m {
                 "account_info" => rippled_account_info(deposit_drops, 1, 100),
                 "server_state" => rippled_server_state(RESERVE_DROPS),
                 other => panic!("unexpected rippled method in confirm: {other}"),
-            }
-        }),
+            },
+        ),
         "confirm_xrp_deposit",
     )
     .expect("confirm_xrp_deposit ok");
     // Credited = balance - reserve = 500 XRP - 1 XRP.
-    assert_eq!(credited, deposit_drops - RESERVE_DROPS, "credited = balance - base reserve");
+    assert_eq!(
+        credited,
+        deposit_drops - RESERVE_DROPS,
+        "credited = balance - base reserve"
+    );
 
     let v = get_vault(&pic, backend, vault_id).expect("Vault exists after confirm");
-    assert_eq!(v.collateral_type, xrp_collateral_principal(), "collateral is native-XRP");
-    assert_eq!(v.collateral_amount, deposit_drops - RESERVE_DROPS, "collateral credited in drops");
+    assert_eq!(
+        v.collateral_type,
+        xrp_collateral_principal(),
+        "collateral is native-XRP"
+    );
+    assert_eq!(
+        v.collateral_amount,
+        deposit_drops - RESERVE_DROPS,
+        "collateral credited in drops"
+    );
     assert_eq!(v.borrowed_icusd_amount, 0, "no debt yet");
 
     // ── borrow 50 icUSD (XRP price auto-pulled from XRC: $0.50) ──────────────
     // 499 XRP * $0.50 = ~$249 collateral; $50 debt -> CR ~498% (> 150%).
     let borrow_amount = 50 * E8;
     decode_result::<rumi_protocol_backend::SuccessWithFee>(
-        update_as(&pic, backend, user(), "borrow_from_vault", Encode!(&VaultArg { vault_id, amount: borrow_amount }).unwrap()),
+        update_as(
+            &pic,
+            backend,
+            user(),
+            "borrow_from_vault",
+            Encode!(&VaultArg {
+                vault_id,
+                amount: borrow_amount
+            })
+            .unwrap(),
+        ),
         "borrow_from_vault",
     )
     .expect("borrow ok");
     let v = get_vault(&pic, backend, vault_id).expect("vault");
     assert_eq!(v.borrowed_icusd_amount, borrow_amount, "debt = borrowed");
     let bal = icusd_balance(&pic, icusd, user());
-    assert!(bal >= borrow_amount - E8, "user received ~50 icUSD (net of borrow fee): {bal}");
+    assert!(
+        bal >= borrow_amount - E8,
+        "user received ~50 icUSD (net of borrow fee): {bal}"
+    );
 
     // ── repay the full debt (approve backend to pull icUSD, then repay) ───────
     // Top up the user so they can cover the debt + the one-time borrow fee + ledger
@@ -529,7 +635,17 @@ fn xrp_native_happy_path_open_deposit_borrow_repay_close_settle() {
     mint_icusd(&pic, icusd, backend, user(), 5 * E8);
     approve_icusd(&pic, icusd, user(), backend, borrow_amount + 5 * E8);
     decode_result::<u64>(
-        update_as(&pic, backend, user(), "repay_to_vault", Encode!(&VaultArg { vault_id, amount: borrow_amount }).unwrap()),
+        update_as(
+            &pic,
+            backend,
+            user(),
+            "repay_to_vault",
+            Encode!(&VaultArg {
+                vault_id,
+                amount: borrow_amount
+            })
+            .unwrap(),
+        ),
         "repay_to_vault",
     )
     .expect("repay ok");
@@ -538,7 +654,13 @@ fn xrp_native_happy_path_open_deposit_borrow_repay_close_settle() {
 
     // ── withdraw & close: creates an XrpClaim for the full collateral ─────────
     decode_result::<Option<u64>>(
-        update_as(&pic, backend, user(), "withdraw_and_close_vault", Encode!(&vault_id).unwrap()),
+        update_as(
+            &pic,
+            backend,
+            user(),
+            "withdraw_and_close_vault",
+            Encode!(&vault_id).unwrap(),
+        ),
         "withdraw_and_close_vault",
     )
     .expect("withdraw_and_close ok");
@@ -555,36 +677,60 @@ fn xrp_native_happy_path_open_deposit_borrow_repay_close_settle() {
     // so a retry confirms instead of re-paying.
     let dest = "rPdvC6ccq8hCdPKSPJkPmyZ4Mi1oG2FFkT".to_string(); // a valid XRPL classic addr
     let tx_hash = decode_result::<String>(
-        call_with_rippled(&pic, backend, user(), "settle_xrp_claim", Encode!(&claim_id, &dest).unwrap(), |m| {
-            match m {
+        call_with_rippled(
+            &pic,
+            backend,
+            user(),
+            "settle_xrp_claim",
+            Encode!(&claim_id, &dest).unwrap(),
+            |m| match m {
                 "account_info" => rippled_account_info(deposit_drops, 5, 200),
                 "server_state" => rippled_server_state(RESERVE_DROPS),
                 "submit" => rippled_submit_ok(),
-                "tx" => rippled_tx_validated(deposit_drops - RESERVE_DROPS, 201),
+                "tx" => rippled_tx_validated(
+                    "E2E0000000000000000000000000000000000000000000000000000000000001",
+                    deposit_drops - RESERVE_DROPS,
+                    201,
+                ),
                 other => panic!("unexpected rippled method in settle (submit phase): {other}"),
-            }
-        }),
+            },
+        ),
         "settle_xrp_claim (submit)",
     )
     .expect("settle submit ok");
     assert!(!tx_hash.is_empty(), "settle returns the local tx hash");
-    assert_eq!(xrp_claims(&pic, backend).len(), 1, "claim retained until the Payment validates");
+    assert_eq!(
+        xrp_claims(&pic, backend).len(),
+        1,
+        "claim retained until the Payment validates"
+    );
 
     // Call 2 confirms the recorded settlement: fetch_tx_status -> Validated -> remove.
     let confirm_hash = decode_result::<String>(
-        call_with_rippled(&pic, backend, user(), "settle_xrp_claim", Encode!(&claim_id, &dest).unwrap(), |m| {
-            match m {
-                "tx" => rippled_tx_validated(deposit_drops - RESERVE_DROPS, 201),
+        call_with_rippled(
+            &pic,
+            backend,
+            user(),
+            "settle_xrp_claim",
+            Encode!(&claim_id, &dest).unwrap(),
+            |m| match m {
+                "tx" => rippled_tx_validated(&tx_hash, deposit_drops - RESERVE_DROPS, 201),
                 "account_info" => rippled_account_info(deposit_drops, 6, 250),
                 "server_state" => rippled_server_state(RESERVE_DROPS),
                 other => panic!("unexpected rippled method in settle (confirm phase): {other}"),
-            }
-        }),
+            },
+        ),
         "settle_xrp_claim (confirm)",
     )
     .expect("settle confirm ok");
-    assert_eq!(confirm_hash, tx_hash, "confirm returns the same (already-broadcast) hash");
-    assert!(xrp_claims(&pic, backend).is_empty(), "claim removed after validated settlement");
+    assert_eq!(
+        confirm_hash, tx_hash,
+        "confirm returns the same (already-broadcast) hash"
+    );
+    assert!(
+        xrp_claims(&pic, backend).is_empty(),
+        "claim removed after validated settlement"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -593,26 +739,39 @@ fn xrp_native_happy_path_open_deposit_borrow_repay_close_settle() {
 
 #[test]
 fn xrp_native_liquidation_is_claim_based() {
-    let Env { pic, backend, icusd, xrc } = boot();
+    let Env {
+        pic,
+        backend,
+        icusd,
+        xrc,
+    } = boot();
     register_xrp(&pic, backend);
 
     let open_reply = update_as(&pic, backend, user(), "open_xrp_vault", Encode!().unwrap());
-    let open: XrpVaultOpenInfo = match decode_result::<XrpVaultOpenInfo>(open_reply, "open_xrp_vault") {
-        Ok(info) => info,
-        Err(_) => {
-            eprintln!("[gated] tEd25519 unavailable; skipping XRP liquidation e2e");
-            return;
-        }
-    };
+    let open: XrpVaultOpenInfo =
+        match decode_result::<XrpVaultOpenInfo>(open_reply, "open_xrp_vault") {
+            Ok(info) => info,
+            Err(_) => {
+                eprintln!("[gated] tEd25519 unavailable; skipping XRP liquidation e2e");
+                return;
+            }
+        };
     let vault_id = open.vault_id;
 
     let deposit_drops = 200 * XRP;
     decode_result::<u64>(
-        call_with_rippled(&pic, backend, user(), "confirm_xrp_deposit", Encode!(&vault_id).unwrap(), |m| match m {
-            "account_info" => rippled_account_info(deposit_drops, 1, 100),
-            "server_state" => rippled_server_state(RESERVE_DROPS),
-            other => panic!("unexpected rippled method: {other}"),
-        }),
+        call_with_rippled(
+            &pic,
+            backend,
+            user(),
+            "confirm_xrp_deposit",
+            Encode!(&vault_id).unwrap(),
+            |m| match m {
+                "account_info" => rippled_account_info(deposit_drops, 1, 100),
+                "server_state" => rippled_server_state(RESERVE_DROPS),
+                other => panic!("unexpected rippled method: {other}"),
+            },
+        ),
         "confirm_xrp_deposit",
     )
     .expect("confirm ok");
@@ -620,7 +779,17 @@ fn xrp_native_liquidation_is_claim_based() {
     // Borrow near the limit at $0.50: ~199 XRP * $0.50 = ~$99.5; borrow $60 -> CR ~165%.
     let borrow_amount = 60 * E8;
     decode_result::<rumi_protocol_backend::SuccessWithFee>(
-        update_as(&pic, backend, user(), "borrow_from_vault", Encode!(&VaultArg { vault_id, amount: borrow_amount }).unwrap()),
+        update_as(
+            &pic,
+            backend,
+            user(),
+            "borrow_from_vault",
+            Encode!(&VaultArg {
+                vault_id,
+                amount: borrow_amount
+            })
+            .unwrap(),
+        ),
         "borrow_from_vault",
     )
     .expect("borrow ok");
@@ -642,7 +811,17 @@ fn xrp_native_liquidation_is_claim_based() {
     // the seized XRP becomes an XrpClaim they later settle to an XRPL address.
     let before = xrp_claims(&pic, backend).len();
     decode_result::<rumi_protocol_backend::SuccessWithFee>(
-        update_as(&pic, backend, liquidator(), "liquidate_vault_partial", Encode!(&VaultArg { vault_id, amount: 30 * E8 }).unwrap()),
+        update_as(
+            &pic,
+            backend,
+            liquidator(),
+            "liquidate_vault_partial",
+            Encode!(&VaultArg {
+                vault_id,
+                amount: 30 * E8
+            })
+            .unwrap(),
+        ),
         "liquidate_vault_partial",
     )
     .expect("claim-based partial liquidation ok");
@@ -678,7 +857,10 @@ fn xrp_collateral_contract_matches_frontend_expectations() {
     assert!(
         supported.iter().any(|(p, _)| *p == xrp),
         "native-XRP must appear in get_supported_collateral_types: {:?}",
-        supported.iter().map(|(p, _)| p.to_text()).collect::<Vec<_>>()
+        supported
+            .iter()
+            .map(|(p, _)| p.to_text())
+            .collect::<Vec<_>>()
     );
 
     // The UI reads get_collateral_config(xrp): custody_kind drives `hasXrpCollateral`
@@ -727,7 +909,13 @@ struct XrpClaimView {
 /// re-fetch resets the timestamp, so the price is FRESH (within the 10-min hard
 /// ceiling) when liquidation reads it.
 fn crash_xrp_price(pic: &PocketIc, xrc: Principal, price_e8: u64) {
-    let reply = update_as(pic, xrc, Principal::anonymous(), "set_exchange_rate", Encode!(&"XRP".to_string(), &"USD".to_string(), &price_e8).unwrap());
+    let reply = update_as(
+        pic,
+        xrc,
+        Principal::anonymous(),
+        "set_exchange_rate",
+        Encode!(&"XRP".to_string(), &"USD".to_string(), &price_e8).unwrap(),
+    );
     if let WasmResult::Reject(m) = reply {
         panic!("set_exchange_rate rejected: {m}");
     }
@@ -746,7 +934,10 @@ fn mint_icusd(pic: &PocketIc, icusd: Principal, minter: Principal, to: Principal
 fn transfer_icusd(pic: &PocketIc, icusd: Principal, from: Principal, to: Principal, amount: u64) {
     let args = icrc_ledger_types::icrc1::transfer::TransferArg {
         from_subaccount: None,
-        to: Account { owner: to, subaccount: None },
+        to: Account {
+            owner: to,
+            subaccount: None,
+        },
         fee: None,
         created_at_time: None,
         memo: None,
@@ -755,7 +946,9 @@ fn transfer_icusd(pic: &PocketIc, icusd: Principal, from: Principal, to: Princip
     let reply = update_as(pic, icusd, from, "icrc1_transfer", Encode!(&args).unwrap());
     match reply {
         WasmResult::Reply(b) => {
-            Decode!(&b, Result<candid::Nat, Reserved>).expect("decode transfer").expect("transfer ok");
+            Decode!(&b, Result<candid::Nat, Reserved>)
+                .expect("decode transfer")
+                .expect("transfer ok");
         }
         WasmResult::Reject(m) => panic!("icrc1_transfer rejected: {m}"),
     }

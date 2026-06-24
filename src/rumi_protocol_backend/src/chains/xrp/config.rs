@@ -26,23 +26,34 @@ pub const XRP_NATIVE_DECIMALS: u8 = 6;
 /// configurability is a later refinement.
 pub const XRP_MIN_CR_E4: u64 = 13_000;
 
+/// Production threshold-Ed25519 key name. Higher-level deployment/config wiring
+/// must opt into this explicitly; local/test defaults stay on `test_key_1`.
+pub const XRP_PRODUCTION_SCHNORR_KEY_NAME: &str = "key_1";
+
+/// Non-production threshold-Ed25519 key name used by default.
+pub const XRP_TEST_SCHNORR_KEY_NAME: &str = "test_key_1";
+
+/// True only for the management-canister production Schnorr key.
+pub fn is_xrp_production_key_name(name: &str) -> bool {
+    name == XRP_PRODUCTION_SCHNORR_KEY_NAME
+}
+
 /// Threshold-Ed25519 key name. XRPL Ed25519 reuses the SAME threshold Schnorr
 /// Ed25519 key as Solana (`test_key_1` is the mainnet test key — Ed25519 has no
 /// local dfx key); switch to `key_1` for production. The XRP rail keeps its keys
 /// distinct from Solana's by using a DIFFERENT derivation path (the chain-id 144
 /// prefix), not a different key name — see `ted25519`.
 pub fn xrp_schnorr_key_name() -> String {
-    "test_key_1".to_string()
+    crate::read_state(|s| s.xrp_schnorr_key_name.clone())
 }
 
 /// Default registration payload for the XRP Ledger.
 ///
-/// `rpc_endpoints` is left empty: `xrp_rpc` selects the public rippled cluster by
-/// key name (mainnet for `key_1`, the altnet testnet otherwise), like Solana's
+/// `rpc_endpoints` is left empty: `xrp_rpc` selects its hardcoded XRPL provider
+/// quorum by key name (mainnet only for `key_1`, testnet otherwise), like Solana's
 /// built-in providers. `finality_depth` is 0 — XRPL has no block-depth finality;
 /// a validated ledger IS final, and reads use `ledger_index: "validated"`.
-/// `min_quorum_providers` is `None`: like Solana, XRP does not use the EVM quorum
-/// floor (Phase 1 is single-cluster; multi-node agreement is Phase 2).
+/// `min_quorum_providers` is `None`: XRP does not use the EVM quorum floor.
 pub fn xrp_default_register_arg() -> RegisterChainArg {
     RegisterChainArg {
         chain_id: XRP_CHAIN_ID,
@@ -76,6 +87,23 @@ mod tests {
         // SLIP-44: XRP = 144, Solana = 501. A collision would alias derivation
         // paths and merge the two chains' keys/state.
         assert_eq!(XRP_CHAIN_ID.0, 144);
-        assert_ne!(XRP_CHAIN_ID.0, crate::chains::solana::config::SOLANA_CHAIN_ID.0);
+        assert_ne!(
+            XRP_CHAIN_ID.0,
+            crate::chains::solana::config::SOLANA_CHAIN_ID.0
+        );
+    }
+
+    #[test]
+    fn key_names_are_explicit_and_default_to_test_key() {
+        assert_eq!(XRP_PRODUCTION_SCHNORR_KEY_NAME, "key_1");
+        assert_eq!(XRP_TEST_SCHNORR_KEY_NAME, "test_key_1");
+        assert_eq!(
+            crate::state::State::default().xrp_schnorr_key_name,
+            XRP_TEST_SCHNORR_KEY_NAME
+        );
+
+        assert!(is_xrp_production_key_name(XRP_PRODUCTION_SCHNORR_KEY_NAME));
+        assert!(!is_xrp_production_key_name(XRP_TEST_SCHNORR_KEY_NAME));
+        assert!(!is_xrp_production_key_name("key_10"));
     }
 }

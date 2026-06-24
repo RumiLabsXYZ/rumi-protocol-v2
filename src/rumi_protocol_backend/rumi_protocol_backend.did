@@ -1100,7 +1100,13 @@ type XrpPendingDeposit = record {
   opened_at_ns : nat64;
   derivation_nonce : nat64;
 };
-type XrpSettlement = record { last_ledger_sequence : nat32; tx_hash : text };
+type XrpSettlement = record {
+  destination : opt text;
+  source_sequence : opt nat32;
+  destination_tag : opt nat32;
+  last_ledger_sequence : nat32;
+  tx_hash : text;
+};
 type XrpVaultOpenInfo = record { custody_address : text; vault_id : nat64 };
 service : (ProtocolArg) -> {
   add_collateral_token : (AddCollateralArg) -> (Result);
@@ -1116,6 +1122,7 @@ service : (ProtocolArg) -> {
   bot_cancel_liquidation : (nat64) -> (Result);
   bot_claim_liquidation : (nat64) -> (Result_4);
   bot_confirm_liquidation : (nat64) -> (Result);
+  cancel_xrp_pending_open : (nat64) -> (Result);
   chain_has_active_settlement_op : (nat32) -> (bool) query;
   claim_chain_collateral : (nat64, principal, nat, text) -> (Result_1);
   claim_liquidity_returns : () -> (Result_1);
@@ -1238,6 +1245,7 @@ service : (ProtocolArg) -> {
   get_xrp_pending_deposits : () -> (
       vec record { nat64; XrpPendingDeposit },
     ) query;
+  get_xrp_schnorr_key_name : () -> (text) query;
   harvest_chain_interest : (nat32) -> (Result_1);
   http_request : (HttpRequest) -> (HttpResponse_1) query;
   icrc10_supported_standards : () -> (vec StandardRecord) query;
@@ -1355,9 +1363,11 @@ service : (ProtocolArg) -> {
   set_treasury_principal : (principal) -> (Result);
   set_vault_check_tick_interval_secs : (nat64) -> (Result);
   set_xrc_fetch_interval_secs : (nat64) -> (Result);
+  set_xrp_schnorr_key_name : (text) -> (Result);
   settle_pending_chain_burn : (nat32, nat, text) -> (Result);
   settle_reserve_burn : (nat32, nat, text) -> (Result);
   settle_xrp_claim : (nat64, text) -> (Result_2);
+  settle_xrp_claim_with_tag : (nat64, text, nat32) -> (Result_2);
   solana_bootstrap_nonce : (opt text) -> (Result);
   solana_get_balance : (text) -> (Result_1);
   solana_get_mint_supply : () -> (Result_1);
@@ -1374,6 +1384,7 @@ service : (ProtocolArg) -> {
       Result_18,
     );
   submit_burn_proof : (nat32, text) -> (Result_20);
+  sweep_xrp_pending_open : (nat64) -> (Result);
   unfreeze_protocol : () -> (Result);
   update_collateral_config : (principal, CollateralConfig) -> (Result);
   withdraw_and_close_vault : (nat64) -> (Result_5);

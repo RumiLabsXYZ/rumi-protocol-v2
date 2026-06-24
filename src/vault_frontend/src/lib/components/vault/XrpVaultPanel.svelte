@@ -38,6 +38,7 @@
   let busyClaimId: number | null = null;
   // Per-claim destination address inputs, keyed by claim id.
   let claimDest: Record<number, string> = {};
+  let claimTag: Record<number, string> = {};
 
   $: connected = $walletStore.isConnected;
 
@@ -106,17 +107,32 @@
     // "Confirm" of an in-flight settlement) is a pure confirm: the backend ignores
     // `destination` on the validated path, so we pass '' and never let a freshly
     // typed address redirect an already-submitted (or to-be-re-signed) Payment.
-    let dest = '';
+    let dest = (claimDest[claim.claimId] ?? '').trim();
+    let destinationTag: number | undefined;
     if (!claim.inFlight) {
-      dest = (claimDest[claim.claimId] ?? '').trim();
       if (!isValidXrplClassicAddress(dest)) {
         toastStore.error('Enter a valid XRPL classic address (starts with r)');
+        return;
+      }
+    } else if (dest !== '' && !isValidXrplClassicAddress(dest)) {
+      toastStore.error('Enter a valid replacement XRPL classic address (starts with r)');
+      return;
+    }
+    const tag = (claimTag[claim.claimId] ?? '').trim();
+    if (tag !== '') {
+      if (!/^\d+$/.test(tag)) {
+        toastStore.error('Destination tag must be a whole number');
+        return;
+      }
+      destinationTag = Number(tag);
+      if (!Number.isSafeInteger(destinationTag) || destinationTag > 0xffffffff) {
+        toastStore.error('Destination tag must be between 0 and 4294967295');
         return;
       }
     }
     busyClaimId = claim.claimId;
     try {
-      const res = await XrpVaultService.settleXrpClaim(claim.claimId, dest);
+      const res = await XrpVaultService.settleXrpClaim(claim.claimId, dest, destinationTag);
       if (res.success) {
         // Two-phase: the first call submits the XRPL Payment but KEEPS the claim;
         // it clears only after a follow-up "Confirm" once the Payment validates
@@ -218,17 +234,27 @@
               <span class="xrp-amt">{c.xrp} XRP</span>
               {#if c.inFlight}
                 <span class="xrp-hint">
-                  Settlement in flight{c.inFlightTxHash ? ` (tx ${formatAddress(c.inFlightTxHash, 8, 6)})` : ''} — click Confirm once it validates.
+                  Settlement in flight{c.inFlightTxHash ? ` (tx ${formatAddress(c.inFlightTxHash, 8, 6)})` : ''} — click Confirm once it validates, or enter replacement details if it expired or failed.
                 </span>
-              {:else}
-                <input
-                  class="xrp-input"
-                  placeholder="Your XRPL address (r…)"
-                  bind:value={claimDest[c.claimId]}
-                  spellcheck="false"
-                  autocomplete="off"
-                />
               {/if}
+                <div class="xrp-inputs">
+                  <input
+                    class="xrp-input"
+                    placeholder={c.inFlight ? 'Replacement address (optional)' : 'Your XRPL address (r…)'}
+                    bind:value={claimDest[c.claimId]}
+                    spellcheck="false"
+                    autocomplete="off"
+                  />
+                  <input
+                    class="xrp-input xrp-tag-input"
+                    placeholder="Destination tag"
+                    bind:value={claimTag[c.claimId]}
+                    spellcheck="false"
+                    autocomplete="off"
+                    inputmode="numeric"
+                    pattern="[0-9]*"
+                  />
+                </div>
             </div>
             <button class="xrp-action" disabled={busyClaimId === c.claimId} on:click={() => settleClaim(c)}>
               {busyClaimId === c.claimId ? 'Settling…' : c.inFlight ? 'Confirm' : 'Settle'}
@@ -335,6 +361,15 @@
     font-family: ui-monospace, monospace;
     font-size: 0.82rem;
     min-width: 240px;
+  }
+  .xrp-inputs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .xrp-tag-input {
+    min-width: 150px;
+    max-width: 180px;
   }
   .xrp-action {
     padding: 7px 13px;

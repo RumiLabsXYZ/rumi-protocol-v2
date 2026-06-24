@@ -3,28 +3,29 @@ use crate::event::{
     record_redemption_on_vaults, record_repayed_to_vault,
 };
 use crate::guard::{GuardPrincipal, VaultLiquidationGuard};
-use crate::GuardError;
 use crate::logs::INFO;
-use crate::management::{mint_icusd, transfer_collateral, transfer_collateral_from, transfer_icusd_from, transfer_stable_from};
-use crate::numeric::{ICUSD, ICP, Ratio, UsdIcp};
-use crate::{
-    mutate_state, read_state, ProtocolError, SuccessWithFee,
-    StabilityPoolLiquidationResult,
-    DUST_THRESHOLD,
-    StableTokenType, VaultArgWithToken,
+use crate::management;
+use crate::management::{
+    mint_icusd, transfer_collateral, transfer_collateral_from, transfer_icusd_from,
+    transfer_stable_from,
 };
+use crate::numeric::{Ratio, UsdIcp, ICP, ICUSD};
 use crate::state::Mode;
+use crate::GuardError;
+use crate::PendingMarginTransfer;
+use crate::DEBUG;
+use crate::{
+    mutate_state, read_state, ProtocolError, StabilityPoolLiquidationResult, StableTokenType,
+    SuccessWithFee, VaultArgWithToken, DUST_THRESHOLD,
+};
 use candid::{CandidType, Deserialize, Principal};
 use ic_canister_log::log;
 use icrc_ledger_types::icrc2::transfer_from::TransferFromError;
+use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use serde::Serialize;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use crate::DEBUG;
-use crate::management;
-use crate::PendingMarginTransfer;
-use rust_decimal::Decimal;
-use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
-use rust_decimal_macros::dec;
 
 use crate::compute_collateral_ratio;
 
@@ -165,7 +166,8 @@ impl Vault {
 pub fn require_vault_not_processing(vault: &Vault) -> Result<(), ProtocolError> {
     if vault.bot_processing {
         Err(ProtocolError::GenericError(format!(
-            "Vault #{} is locked — bot liquidation in progress", vault.vault_id
+            "Vault #{} is locked — bot liquidation in progress",
+            vault.vault_id
         )))
     } else {
         Ok(())
@@ -217,7 +219,10 @@ impl From<Vault> for CandidVault {
 
 /// Redeem icUSD for ckStable tokens from the protocol's reserves.
 /// Two-tier system: reserves first (flat fee), then vault spillover (dynamic fee).
-pub async fn redeem_reserves(icusd_amount_raw: u64, preferred_token: Option<Principal>) -> Result<crate::ReserveRedemptionResult, ProtocolError> {
+pub async fn redeem_reserves(
+    icusd_amount_raw: u64,
+    preferred_token: Option<Principal>,
+) -> Result<crate::ReserveRedemptionResult, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let _guard_principal = GuardPrincipal::new(caller, "redeem_reserves")?;
 
@@ -239,13 +244,15 @@ pub async fn redeem_reserves(icusd_amount_raw: u64, preferred_token: Option<Prin
     }
 
     // Check reserve redemptions are enabled
-    let (enabled, reserve_fee_ratio, ckusdt_ledger, ckusdc_ledger, treasury) = read_state(|s| (
-        s.reserve_redemptions_enabled,
-        s.reserve_redemption_fee,
-        s.ckusdt_ledger_principal,
-        s.ckusdc_ledger_principal,
-        s.treasury_principal,
-    ));
+    let (enabled, reserve_fee_ratio, ckusdt_ledger, ckusdc_ledger, treasury) = read_state(|s| {
+        (
+            s.reserve_redemptions_enabled,
+            s.reserve_redemption_fee,
+            s.ckusdt_ledger_principal,
+            s.ckusdc_ledger_principal,
+            s.treasury_principal,
+        )
+    });
 
     if !enabled {
         return Err(ProtocolError::GenericError(
@@ -265,9 +272,9 @@ pub async fn redeem_reserves(icusd_amount_raw: u64, preferred_token: Option<Prin
         }
     } else {
         // Default: try ckUSDT first, then ckUSDC
-        ckusdt_ledger
-            .or(ckusdc_ledger)
-            .ok_or_else(|| ProtocolError::GenericError("No reserve token ledgers configured.".to_string()))?
+        ckusdt_ledger.or(ckusdc_ledger).ok_or_else(|| {
+            ProtocolError::GenericError("No reserve token ledgers configured.".to_string())
+        })?
     };
 
     // Calculate fee (flat rate)
@@ -289,15 +296,23 @@ pub async fn redeem_reserves(icusd_amount_raw: u64, preferred_token: Option<Prin
     }
 
     // Check reserve balance before pulling icUSD
-    let reserve_balance = management::get_token_balance(stable_ledger).await
-        .map_err(|e| ProtocolError::TemporarilyUnavailable(format!("Cannot query reserve balance: {}", e)))?;
+    let reserve_balance = management::get_token_balance(stable_ledger)
+        .await
+        .map_err(|e| {
+            ProtocolError::TemporarilyUnavailable(format!("Cannot query reserve balance: {}", e))
+        })?;
 
     // Determine how much can come from reserves vs vault spillover.
     // Each ICRC-1 transfer also costs a ledger fee (deducted from sender balance).
     // Query the actual fee from the ledger rather than hardcoding.
-    let ledger_fee = management::get_ledger_fee(stable_ledger).await
+    let ledger_fee = management::get_ledger_fee(stable_ledger)
+        .await
         .unwrap_or(10_000); // fallback to 10_000 e6s (0.01 USD) if query fails
-    let fee_budget = if fee_e6s > 0 { ledger_fee * 2 } else { ledger_fee };
+    let fee_budget = if fee_e6s > 0 {
+        ledger_fee * 2
+    } else {
+        ledger_fee
+    };
     let total_needed_e6s = net_e6s + fee_e6s + fee_budget;
     let available_for_user = if reserve_balance >= total_needed_e6s {
         net_e6s
@@ -312,7 +327,8 @@ pub async fn redeem_reserves(icusd_amount_raw: u64, preferred_token: Option<Prin
     let spillover_e8s = spillover_e6s * 100; // convert back to icUSD e8s
 
     // Pull icUSD from caller (effectively burns it)
-    let icusd_block_index = transfer_icusd_from(icusd_amount, caller).await
+    let icusd_block_index = transfer_icusd_from(icusd_amount, caller)
+        .await
         .map_err(|e| ProtocolError::TransferFromError(e, icusd_amount.to_u64()))?;
 
     // Transfer ckStable to user from reserves.
@@ -325,17 +341,25 @@ pub async fn redeem_reserves(icusd_amount_raw: u64, preferred_token: Option<Prin
     // retries it until success or MAX_PENDING_RETRIES. The op_nonce is minted
     // once and reused across retries (idempotent at the icUSD ledger).
     if available_for_user > 0 {
-        if let Err(transfer_err) = management::transfer_collateral(available_for_user, caller, stable_ledger).await {
-            log!(crate::INFO,
+        if let Err(transfer_err) =
+            management::transfer_collateral(available_for_user, caller, stable_ledger).await
+        {
+            log!(
+                crate::INFO,
                 "[redeem_reserves] ckStable transfer failed for {}: {:?}. Refunding {} icUSD.",
-                caller, transfer_err, icusd_amount.to_u64()
+                caller,
+                transfer_err,
+                icusd_amount.to_u64()
             );
             let refund_nonce = mutate_state(|s| s.next_op_nonce());
             match management::transfer_icusd_with_nonce(icusd_amount, caller, refund_nonce).await {
                 Ok(refund_block) => {
-                    log!(crate::INFO,
+                    log!(
+                        crate::INFO,
                         "[redeem_reserves] Refunded {} icUSD to {} (block {})",
-                        icusd_amount.to_u64(), caller, refund_block
+                        icusd_amount.to_u64(),
+                        caller,
+                        refund_block
                     );
                 }
                 Err(refund_err) => {
@@ -361,16 +385,19 @@ pub async fn redeem_reserves(icusd_amount_raw: u64, preferred_token: Option<Prin
                     });
                 }
             }
-            return Err(ProtocolError::GenericError(
-                format!("Reserve transfer failed; your icUSD refund is in flight. Error: {:?}", transfer_err),
-            ));
+            return Err(ProtocolError::GenericError(format!(
+                "Reserve transfer failed; your icUSD refund is in flight. Error: {:?}",
+                transfer_err
+            )));
         }
     }
 
     // Transfer fee to treasury (if configured), otherwise fee stays in reserves
     if fee_e6s > 0 {
         if let Some(treasury_principal) = treasury {
-            if let Err(e) = management::transfer_collateral(fee_e6s, treasury_principal, stable_ledger).await {
+            if let Err(e) =
+                management::transfer_collateral(fee_e6s, treasury_principal, stable_ledger).await
+            {
                 log!(crate::INFO,
                     "[redeem_reserves] WARNING: treasury fee transfer failed ({} e6s to {}): {:?}. Fee stays in reserves.",
                     fee_e6s, treasury_principal, e
@@ -420,8 +447,11 @@ pub async fn redeem_reserves(icusd_amount_raw: u64, preferred_token: Option<Prin
         // spillover collateral's price on-demand so the redeemer can't capture a
         // stale price during the 300s background-timer window.
         crate::xrc::ensure_fresh_price_for(&best_ct).await?;
-        let collateral_price = read_state(|s| s.get_collateral_price_decimal(&best_ct))
-            .ok_or(ProtocolError::TemporarilyUnavailable("No price for vault spillover collateral".to_string()))?;
+        let collateral_price = read_state(|s| s.get_collateral_price_decimal(&best_ct)).ok_or(
+            ProtocolError::TemporarilyUnavailable(
+                "No price for vault spillover collateral".to_string(),
+            ),
+        )?;
         let current_price = UsdIcp::from(collateral_price);
 
         let refund_e8s = mutate_state(|s| {
@@ -431,12 +461,7 @@ pub async fn redeem_reserves(icusd_amount_raw: u64, preferred_token: Option<Prin
             // so the base rate is read from and written back to that
             // collateral's config alone.
             let base_fee = s.get_redemption_fee_for(&best_ct, spillover_icusd);
-            crate::record_per_collateral_redemption_fee(
-                s,
-                &best_ct,
-                base_fee,
-                ic_cdk::api::time(),
-            );
+            crate::record_per_collateral_redemption_fee(s, &best_ct, base_fee, ic_cdk::api::time());
             let vault_fee = spillover_icusd * base_fee;
 
             // Note: RMR was already applied when computing spillover_e8s (line 160).
@@ -464,15 +489,26 @@ pub async fn redeem_reserves(icusd_amount_raw: u64, preferred_token: Option<Prin
             // RED-001: unconsumed spillover is refunded (RMR already applied
             // upstream, so the unconsumed effective amount IS the raw refund;
             // the fee stays with the protocol as priced).
-            effective_spillover.saturating_sub(outcome.consumed).to_u64()
+            effective_spillover
+                .saturating_sub(outcome.consumed)
+                .to_u64()
         });
         if refund_e8s > 0 {
             let refund_nonce = mutate_state(|s| s.next_op_nonce());
-            match management::transfer_icusd_with_nonce(ICUSD::from(refund_e8s), caller, refund_nonce).await {
+            match management::transfer_icusd_with_nonce(
+                ICUSD::from(refund_e8s),
+                caller,
+                refund_nonce,
+            )
+            .await
+            {
                 Ok(refund_block) => {
-                    log!(crate::INFO,
+                    log!(
+                        crate::INFO,
                         "[redeem_reserves] Refunded {} unconsumed spillover icUSD to {} (block {})",
-                        refund_e8s, caller, refund_block
+                        refund_e8s,
+                        caller,
+                        refund_block
                     );
                 }
                 Err(refund_err) => {
@@ -521,7 +557,10 @@ pub async fn redeem_icp(icusd_amount: u64) -> Result<SuccessWithFee, ProtocolErr
 /// Currently the redemption logic (vault sorting, pending transfers) is ICP-centric,
 /// but the API surface supports any collateral type. The internal logic will be
 /// generalized per-collateral when a second collateral type is actually added.
-pub async fn redeem_collateral(collateral_type: Principal, _icusd_amount: u64) -> Result<SuccessWithFee, ProtocolError> {
+pub async fn redeem_collateral(
+    collateral_type: Principal,
+    _icusd_amount: u64,
+) -> Result<SuccessWithFee, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let _guard_principal = GuardPrincipal::new(caller, "redeem_collateral")?;
 
@@ -551,9 +590,10 @@ pub async fn redeem_collateral(collateral_type: Principal, _icusd_amount: u64) -
     // caller's argument cannot target a specific collateral (priority order
     // is a protocol-level peg defense).
     if read_state(|s| s.get_collateral_status(&collateral_type)).is_none() {
-        return Err(ProtocolError::GenericError(
-            format!("Collateral type {} not found.", collateral_type),
-        ));
+        return Err(ProtocolError::GenericError(format!(
+            "Collateral type {} not found.",
+            collateral_type
+        )));
     }
 
     // RED-002 (audit 2026-06-09): resolve the redemption-priority winner
@@ -572,22 +612,25 @@ pub async fn redeem_collateral(collateral_type: Principal, _icusd_amount: u64) -
     let redeem_status = read_state(|s| s.get_collateral_status(&redeem_ct));
     if let Some(status) = redeem_status {
         if !status.allows_redemption() {
-            return Err(ProtocolError::GenericError(
-                format!("Redemption is not allowed for collateral type {}.", redeem_ct),
-            ));
+            return Err(ProtocolError::GenericError(format!(
+                "Redemption is not allowed for collateral type {}.",
+                redeem_ct
+            )));
         }
     } else {
-        return Err(ProtocolError::GenericError(
-            format!("Collateral type {} not found.", redeem_ct),
-        ));
+        return Err(ProtocolError::GenericError(format!(
+            "Collateral type {} not found.",
+            redeem_ct
+        )));
     }
 
     // Fail closed on a stale price for the collateral actually being seized
     // (VER-001 ceiling applies inside ensure_fresh_price_for).
     crate::xrc::ensure_fresh_price_for(&redeem_ct).await?;
 
-    let collateral_price = read_state(|s| s.get_collateral_price_decimal(&redeem_ct))
-        .ok_or(ProtocolError::TemporarilyUnavailable("No price available for collateral".to_string()))?;
+    let collateral_price = read_state(|s| s.get_collateral_price_decimal(&redeem_ct)).ok_or(
+        ProtocolError::TemporarilyUnavailable("No price available for collateral".to_string()),
+    )?;
     let current_collateral_price = UsdIcp::from(collateral_price);
 
     // RED-001 (audit 2026-06-09): reject claims that exceed what the
@@ -652,14 +695,15 @@ pub async fn redeem_collateral(collateral_type: Principal, _icusd_amount: u64) -
                 // priced). Floor division favors the protocol; capped at the
                 // post-fee pull so a refund can never exceed what was taken.
                 let unconsumed = effective_icusd.saturating_sub(outcome.consumed);
-                let refund_e8s: u64 = if unconsumed.to_u64() == 0 || rmr.0 <= rust_decimal::Decimal::ZERO {
-                    0
-                } else {
-                    let raw = (rust_decimal::Decimal::from(unconsumed.to_u64()) / rmr.0)
-                        .to_u64()
-                        .unwrap_or(0);
-                    raw.min((icusd_amount - fee_amount).to_u64())
-                };
+                let refund_e8s: u64 =
+                    if unconsumed.to_u64() == 0 || rmr.0 <= rust_decimal::Decimal::ZERO {
+                        0
+                    } else {
+                        let raw = (rust_decimal::Decimal::from(unconsumed.to_u64()) / rmr.0)
+                            .to_u64()
+                            .unwrap_or(0);
+                        raw.min((icusd_amount - fee_amount).to_u64())
+                    };
 
                 // Wave-8e LIQ-005: route a configurable fraction of the
                 // redemption fee toward deficit repayment. The redeemer's
@@ -682,11 +726,20 @@ pub async fn redeem_collateral(collateral_type: Principal, _icusd_amount: u64) -
             // nonce reused across retries) if the inline transfer fails.
             if refund_e8s > 0 {
                 let refund_nonce = mutate_state(|s| s.next_op_nonce());
-                match management::transfer_icusd_with_nonce(ICUSD::from(refund_e8s), caller, refund_nonce).await {
+                match management::transfer_icusd_with_nonce(
+                    ICUSD::from(refund_e8s),
+                    caller,
+                    refund_nonce,
+                )
+                .await
+                {
                     Ok(refund_block) => {
-                        log!(INFO,
+                        log!(
+                            INFO,
                             "[redeem_collateral] Refunded {} unconsumed icUSD to {} (block {})",
-                            refund_e8s, caller, refund_block
+                            refund_e8s,
+                            caller,
+                            refund_block
                         );
                     }
                     Err(refund_err) => {
@@ -717,7 +770,7 @@ pub async fn redeem_collateral(collateral_type: Principal, _icusd_amount: u64) -
                 fee_amount_paid: fee_amount.to_u64(),
                 collateral_amount_received: Some(outcome.margin.to_u64()),
                 debt_liquidated_e8s: None, // SP-101
-                stable_pulled_e6s: None, // SP-110
+                stable_pulled_e6s: None,   // SP-110
             })
         }
         Err(transfer_from_error) => Err(ProtocolError::TransferFromError(
@@ -727,39 +780,53 @@ pub async fn redeem_collateral(collateral_type: Principal, _icusd_amount: u64) -
     }
 }
 
-pub async fn open_vault(collateral_amount_raw: u64, collateral_type_opt: Option<Principal>) -> Result<OpenVaultSuccess, ProtocolError> {
+pub async fn open_vault(
+    collateral_amount_raw: u64,
+    collateral_type_opt: Option<Principal>,
+) -> Result<OpenVaultSuccess, ProtocolError> {
     let caller = ic_cdk::api::caller();
     // Pass operation name to guard for better tracking
     let guard_principal = match GuardPrincipal::new(caller, "open_vault") {
         Ok(guard) => guard,
         Err(GuardError::AlreadyProcessing) => {
-            log!(INFO, "[open_vault] Principal {:?} already has an ongoing operation", caller);
+            log!(
+                INFO,
+                "[open_vault] Principal {:?} already has an ongoing operation",
+                caller
+            );
             return Err(ProtocolError::AlreadyProcessing);
-        },
+        }
         Err(GuardError::StaleOperation) => {
-            log!(INFO, "[open_vault] Principal {:?} has a stale operation that's being cleaned up", caller);
+            log!(
+                INFO,
+                "[open_vault] Principal {:?} has a stale operation that's being cleaned up",
+                caller
+            );
             return Err(ProtocolError::TemporarilyUnavailable(
-                "Previous operation is being cleaned up. Please try again in a few seconds.".to_string()
+                "Previous operation is being cleaned up. Please try again in a few seconds."
+                    .to_string(),
             ));
-        },
+        }
         Err(err) => return Err(err.into()),
     };
 
     // Resolve collateral type: default to ICP if not specified
-    let collateral_type = collateral_type_opt.unwrap_or_else(|| read_state(|s| s.icp_collateral_type()));
+    let collateral_type =
+        collateral_type_opt.unwrap_or_else(|| read_state(|s| s.icp_collateral_type()));
 
     // Look up CollateralConfig; check status is Active
-    let (config_ledger, config_status, min_deposit, is_native_xrp) = read_state(|s| {
-        match s.get_collateral_config(&collateral_type) {
+    let (config_ledger, config_status, min_deposit, is_native_xrp) =
+        read_state(|s| match s.get_collateral_config(&collateral_type) {
             Some(config) => Ok((
                 config.ledger_canister_id,
                 config.status,
                 config.min_collateral_deposit,
                 config.is_native_xrp(),
             )),
-            None => Err(ProtocolError::GenericError("Collateral type not supported.".to_string())),
-        }
-    })?;
+            None => Err(ProtocolError::GenericError(
+                "Collateral type not supported.".to_string(),
+            )),
+        })?;
 
     // P2: native-XRP collateral is custodied on the XRP Ledger (chains::xrp), not
     // pulled via an ICRC `transfer_from`. Its deposit flow (open-then-verify) is
@@ -842,11 +909,16 @@ pub async fn open_vault(collateral_amount_raw: u64, collateral_type_opt: Option<
                             collateral_amount_raw - ledger_fee,
                             caller,
                             config_ledger,
-                        ).await {
+                        )
+                        .await
+                        {
                             Ok(refund_block) => {
-                                log!(INFO,
+                                log!(
+                                    INFO,
                                     "[open_vault] Refunded {} collateral to {} (block {})",
-                                    collateral_amount_raw - ledger_fee, caller, refund_block
+                                    collateral_amount_raw - ledger_fee,
+                                    caller,
+                                    refund_block
                                 );
                             }
                             Err(refund_err) => {
@@ -902,6 +974,16 @@ pub struct XrpVaultOpenInfo {
     pub custody_address: String,
 }
 
+fn require_xrp_production_key() -> Result<(), ProtocolError> {
+    let configured_key = crate::chains::xrp::config::xrp_schnorr_key_name();
+    if crate::chains::xrp::config::is_xrp_production_key_name(&configured_key) {
+        return Ok(());
+    }
+    Err(ProtocolError::GenericError(format!(
+        "native-XRP operations require production Schnorr key key_1 (configured: {configured_key})"
+    )))
+}
+
 /// P3 (native-XRP collateral): open a vault in the open-then-verify staging area.
 /// Derives the per-vault XRPL custody address (threshold Ed25519), records an
 /// `XrpPendingDeposit` under a freshly reserved vault_id, and returns the address
@@ -911,6 +993,10 @@ pub struct XrpVaultOpenInfo {
 pub async fn open_xrp_vault() -> Result<XrpVaultOpenInfo, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal = GuardPrincipal::new(caller, "open_xrp_vault")?;
+    if let Err(e) = require_xrp_production_key() {
+        guard_principal.fail();
+        return Err(e);
+    }
 
     let xrp_ct = crate::state::xrp_collateral_principal();
     let cfg = read_state(|s| {
@@ -951,7 +1037,10 @@ pub async fn open_xrp_vault() -> Result<XrpVaultOpenInfo, ProtocolError> {
     let (global_pending, caller_pending) = read_state(|s| {
         (
             s.xrp_pending_deposits.len(),
-            s.xrp_pending_deposits.values().filter(|d| d.owner == caller).count(),
+            s.xrp_pending_deposits
+                .values()
+                .filter(|d| d.owner == caller)
+                .count(),
         )
     });
     if global_pending >= MAX_XRP_PENDING_GLOBAL {
@@ -1036,6 +1125,10 @@ pub async fn confirm_xrp_deposit(vault_id: u64) -> Result<u64, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal =
         GuardPrincipal::new(caller, &format!("confirm_xrp_deposit_{}", vault_id))?;
+    if let Err(e) = require_xrp_production_key() {
+        guard_principal.fail();
+        return Err(e);
+    }
 
     let pending = match read_state(|s| s.xrp_pending_deposits.get(&vault_id).cloned()) {
         Some(p) => p,
@@ -1059,16 +1152,16 @@ pub async fn confirm_xrp_deposit(vault_id: u64) -> Result<u64, ProtocolError> {
     });
 
     // Verify on the XRP Ledger (consensus-retry-wrapped reads).
-    let acct =
-        match crate::chains::xrp::xrp_rpc::fetch_account_info(&pending.custody_address).await {
-            Ok(a) => a,
-            Err(e) => {
-                guard_principal.fail();
-                return Err(ProtocolError::GenericError(format!(
-                    "xrp account_info failed: {e}"
-                )));
-            }
-        };
+    let acct = match crate::chains::xrp::xrp_rpc::fetch_account_info(&pending.custody_address).await
+    {
+        Ok(a) => a,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "xrp account_info failed: {e}"
+            )));
+        }
+    };
     if !acct.exists {
         guard_principal.fail();
         return Err(ProtocolError::GenericError(
@@ -1180,7 +1273,14 @@ fn queue_collateral_payout(
         .map(|c| c.is_native_xrp())
         .unwrap_or(false);
     if is_xrp {
-        record_xrp_claim(s, recipient, custody_owner, vault_id, margin.to_u64(), now_ns);
+        record_xrp_claim(
+            s,
+            recipient,
+            custody_owner,
+            vault_id,
+            margin.to_u64(),
+            now_ns,
+        );
     } else {
         s.pending_margin_transfers.insert(
             (vault_id, recipient),
@@ -1221,14 +1321,354 @@ pub(crate) fn xrp_claim_send_amount(drops: u64, fee: u64) -> Result<u64, Protoco
     }
 }
 
+pub(crate) fn xrp_unresolved_claim_drops_for_custody(
+    s: &crate::state::State,
+    custody_owner: Principal,
+    custody_nonce: u64,
+) -> Result<u128, ProtocolError> {
+    s.xrp_claims
+        .values()
+        .filter(|claim| {
+            claim.custody_owner == custody_owner && claim.custody_nonce == custody_nonce
+        })
+        .try_fold(0u128, |total, claim| {
+            total.checked_add(u128::from(claim.drops)).ok_or_else(|| {
+                ProtocolError::GenericError(
+                    "Aggregate XRP claims exceed supported drops range".to_string(),
+                )
+            })
+        })
+}
+
+pub(crate) fn xrp_inflight_claims_for_custody(
+    s: &crate::state::State,
+    current_claim_id: u64,
+    custody_owner: Principal,
+    custody_nonce: u64,
+) -> Vec<(u64, crate::state::XrpSettlement)> {
+    s.xrp_claims
+        .iter()
+        .filter_map(|(claim_id, claim)| {
+            if *claim_id != current_claim_id
+                && claim.custody_owner == custody_owner
+                && claim.custody_nonce == custody_nonce
+            {
+                claim
+                    .settlement
+                    .as_ref()
+                    .map(|settlement| (*claim_id, settlement.clone()))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum XrpSettlementReconciliation {
+    Paid,
+    FailedFeeCharged,
+    ExpiredNotFound,
+}
+
+pub(crate) fn reconcile_xrp_settlement_snapshot(
+    s: &mut crate::state::State,
+    claim_id: u64,
+    tx_hash: &str,
+    outcome: XrpSettlementReconciliation,
+) -> bool {
+    let hash_matches = s
+        .xrp_claims
+        .get(&claim_id)
+        .and_then(|claim| claim.settlement.as_ref())
+        .map(|settlement| settlement.tx_hash == tx_hash)
+        .unwrap_or(false);
+    if !hash_matches {
+        return false;
+    }
+
+    match outcome {
+        XrpSettlementReconciliation::Paid => {
+            s.xrp_claims.remove(&claim_id);
+        }
+        XrpSettlementReconciliation::FailedFeeCharged => {
+            if let Some(claim) = s.xrp_claims.get_mut(&claim_id) {
+                claim.drops = claim
+                    .drops
+                    .saturating_sub(crate::chains::xrp::adapter::XRP_FEE_DROPS);
+                claim.settlement = None;
+            }
+        }
+        XrpSettlementReconciliation::ExpiredNotFound => {
+            if let Some(claim) = s.xrp_claims.get_mut(&claim_id) {
+                claim.settlement = None;
+            }
+        }
+    }
+    true
+}
+
+async fn reconcile_xrp_other_inflight_claims(
+    current_claim_id: u64,
+    custody_owner: Principal,
+    custody_nonce: u64,
+    acct: &crate::chains::xrp::xrp_rpc::XrpAccountInfo,
+) -> Result<Option<u64>, ProtocolError> {
+    let in_flight = read_state(|s| {
+        xrp_inflight_claims_for_custody(s, current_claim_id, custody_owner, custody_nonce)
+    });
+    for (other_claim_id, settlement) in in_flight {
+        match crate::chains::xrp::xrp_rpc::fetch_tx_status(&settlement.tx_hash).await {
+            Ok(crate::chains::xrp::xrp_rpc::XrpTxStatus::Validated { .. }) => {
+                mutate_state(|s| {
+                    reconcile_xrp_settlement_snapshot(
+                        s,
+                        other_claim_id,
+                        &settlement.tx_hash,
+                        XrpSettlementReconciliation::Paid,
+                    );
+                });
+            }
+            Ok(crate::chains::xrp::xrp_rpc::XrpTxStatus::Failed) => {
+                mutate_state(|s| {
+                    reconcile_xrp_settlement_snapshot(
+                        s,
+                        other_claim_id,
+                        &settlement.tx_hash,
+                        XrpSettlementReconciliation::FailedFeeCharged,
+                    );
+                });
+            }
+            Ok(crate::chains::xrp::xrp_rpc::XrpTxStatus::NotFound) => {
+                if acct.ledger_index <= settlement.last_ledger_sequence {
+                    return Ok(Some(other_claim_id));
+                }
+                mutate_state(|s| {
+                    reconcile_xrp_settlement_snapshot(
+                        s,
+                        other_claim_id,
+                        &settlement.tx_hash,
+                        XrpSettlementReconciliation::ExpiredNotFound,
+                    );
+                });
+            }
+            Err(e) => {
+                return Err(ProtocolError::GenericError(format!(
+                    "xrp tx status for claim #{other_claim_id} failed: {e}"
+                )));
+            }
+        }
+    }
+    Ok(None)
+}
+
+pub(crate) fn ensure_xrp_claim_aggregate_solvency(
+    acct: &crate::chains::xrp::xrp_rpc::XrpAccountInfo,
+    reserve_drops: u128,
+    unresolved_claim_drops: u128,
+) -> Result<(), ProtocolError> {
+    if !acct.exists {
+        return Err(ProtocolError::GenericError(
+            "XRP custody account is unfunded; cannot settle claim.".to_string(),
+        ));
+    }
+    let required = reserve_drops
+        .checked_add(unresolved_claim_drops)
+        .ok_or_else(|| {
+            ProtocolError::GenericError(
+                "Aggregate XRP claims plus reserve exceed supported drops range".to_string(),
+            )
+        })?;
+    if acct.balance_drops < required {
+        return Err(ProtocolError::GenericError(format!(
+            "insufficient XRP for unresolved claims: balance {} drops < aggregate claims {} + reserve {}",
+            acct.balance_drops, unresolved_claim_drops, reserve_drops
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn ensure_xrp_replacement_sequence_safe(
+    prev: &crate::state::XrpSettlement,
+    acct: &crate::chains::xrp::xrp_rpc::XrpAccountInfo,
+) -> Result<(), ProtocolError> {
+    let Some(source_sequence) = prev.source_sequence else {
+        return Err(ProtocolError::GenericError(
+            "Cannot replace XRP settlement from legacy state without source sequence.".to_string(),
+        ));
+    };
+    if acct.sequence > source_sequence {
+        return Err(ProtocolError::GenericError(format!(
+            "Cannot replace XRP settlement: source sequence advanced from {} to {}.",
+            source_sequence, acct.sequence
+        )));
+    }
+    if acct.sequence < source_sequence {
+        return Err(ProtocolError::GenericError(format!(
+            "Cannot replace XRP settlement: live source sequence {} is behind stored sequence {}.",
+            acct.sequence, source_sequence
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn remove_xrp_pending_deposit_if_unfunded_snapshot(
+    s: &mut crate::state::State,
+    vault_id: u64,
+    expected: &crate::state::XrpPendingDeposit,
+    acct: &crate::chains::xrp::xrp_rpc::XrpAccountInfo,
+) -> Result<bool, ProtocolError> {
+    if acct.exists {
+        return Err(ProtocolError::GenericError(
+            "XRP custody account is funded; confirm the deposit instead of cancelling.".to_string(),
+        ));
+    }
+    match s.xrp_pending_deposits.get(&vault_id) {
+        Some(current) if current == expected => {
+            s.xrp_pending_deposits.remove(&vault_id);
+            Ok(true)
+        }
+        Some(_) | None => Ok(false),
+    }
+}
+
+const XRP_PENDING_CLEANUP_MIN_AGE_NS: u64 = 10 * 60 * 1_000_000_000;
+
+pub(crate) fn ensure_xrp_pending_cleanup_age(
+    pending: &crate::state::XrpPendingDeposit,
+    now_ns: u64,
+) -> Result<(), ProtocolError> {
+    let age_ns = now_ns.saturating_sub(pending.opened_at_ns);
+    if age_ns < XRP_PENDING_CLEANUP_MIN_AGE_NS {
+        return Err(ProtocolError::GenericError(
+            "XRP pending deposit is too new to cancel; wait for the XRPL funding window to pass."
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// XRP-006: owner cleanup for an unfunded native-XRP open. This never removes a
+/// funded custody account; users must confirm funded deposits into real vaults.
+pub async fn cancel_xrp_pending_open(vault_id: u64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let guard_principal =
+        GuardPrincipal::new(caller, &format!("cancel_xrp_pending_open_{}", vault_id))?;
+
+    let pending = match read_state(|s| s.xrp_pending_deposits.get(&vault_id).cloned()) {
+        Some(p) => p,
+        None => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "No pending XRP deposit for this vault.".to_string(),
+            ));
+        }
+    };
+    if pending.owner != caller {
+        guard_principal.fail();
+        return Err(ProtocolError::CallerNotOwner);
+    }
+    if let Err(e) = ensure_xrp_pending_cleanup_age(&pending, ic_cdk::api::time()) {
+        guard_principal.fail();
+        return Err(e);
+    }
+
+    let acct = match crate::chains::xrp::xrp_rpc::fetch_account_info(&pending.custody_address).await
+    {
+        Ok(a) => a,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "xrp account_info failed: {e}"
+            )));
+        }
+    };
+
+    let removed = mutate_state(|s| {
+        ensure_xrp_pending_cleanup_age(&pending, ic_cdk::api::time())?;
+        remove_xrp_pending_deposit_if_unfunded_snapshot(s, vault_id, &pending, &acct)
+    })?;
+    if !removed {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(
+            "XRP pending deposit changed concurrently; refresh and retry.".to_string(),
+        ));
+    }
+
+    guard_principal.complete();
+    Ok(())
+}
+
+/// XRP-006: developer cleanup for abandoned unfunded native-XRP opens. This is
+/// deliberately unfunded-only; if XRP has reached the custody address the entry
+/// must remain confirmable by its owner.
+pub async fn sweep_xrp_pending_open(vault_id: u64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    if !read_state(|s| s.developer_principal == caller) {
+        return Err(ProtocolError::GenericError(
+            "Only the developer can sweep XRP pending opens.".to_string(),
+        ));
+    }
+    let guard_principal =
+        GuardPrincipal::new(caller, &format!("sweep_xrp_pending_open_{}", vault_id))?;
+
+    let pending = match read_state(|s| s.xrp_pending_deposits.get(&vault_id).cloned()) {
+        Some(p) => p,
+        None => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "No pending XRP deposit for this vault.".to_string(),
+            ));
+        }
+    };
+    if let Err(e) = ensure_xrp_pending_cleanup_age(&pending, ic_cdk::api::time()) {
+        guard_principal.fail();
+        return Err(e);
+    }
+
+    let acct = match crate::chains::xrp::xrp_rpc::fetch_account_info(&pending.custody_address).await
+    {
+        Ok(a) => a,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "xrp account_info failed: {e}"
+            )));
+        }
+    };
+
+    let removed = mutate_state(|s| {
+        ensure_xrp_pending_cleanup_age(&pending, ic_cdk::api::time())?;
+        remove_xrp_pending_deposit_if_unfunded_snapshot(s, vault_id, &pending, &acct)
+    })?;
+    if !removed {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(
+            "XRP pending deposit changed concurrently; refresh and retry.".to_string(),
+        ));
+    }
+
+    guard_principal.complete();
+    Ok(())
+}
+
 /// P4: settle an XRP claim — sign + submit a `Payment` from the source vault's
 /// custody address (re-derived from the claim) to `destination`, for
 /// `claim.drops - fee` (the claimant bears the fee). Claimant-only. One in-flight
 /// Payment per custody address (sequence serialization, keyed on the source vault
 /// id). On success the claim is removed; returns the locally computed tx hash.
 pub async fn settle_xrp_claim(claim_id: u64, destination: String) -> Result<String, ProtocolError> {
+    settle_xrp_claim_with_tag(claim_id, destination, None).await
+}
+
+pub async fn settle_xrp_claim_with_tag(
+    claim_id: u64,
+    destination: String,
+    destination_tag: Option<u32>,
+) -> Result<String, ProtocolError> {
     let caller = ic_cdk::api::caller();
-    let claim = match read_state(|s| s.xrp_claims.get(&claim_id).cloned()) {
+    require_xrp_production_key()?;
+    let mut claim = match read_state(|s| s.xrp_claims.get(&claim_id).cloned()) {
         Some(c) => c,
         None => {
             return Err(ProtocolError::GenericError(
@@ -1236,6 +1676,8 @@ pub async fn settle_xrp_claim(claim_id: u64, destination: String) -> Result<Stri
             ))
         }
     };
+    let mut replacement_destination = destination;
+    let mut replacement_destination_tag = destination_tag;
     if claim.claimant != caller {
         return Err(ProtocolError::CallerNotOwner);
     }
@@ -1277,14 +1719,16 @@ pub async fn settle_xrp_claim(claim_id: u64, destination: String) -> Result<Stri
                 // Not validated yet. Only sign a fresh tx if the prior one can NEVER
                 // apply anymore (its LastLedgerSequence has passed); otherwise it may
                 // still land, so refuse to sign a second one.
-                let addr = match crate::chains::xrp::ted25519::derive_xrp_address(path.clone()).await
-                {
-                    Ok((_pk, addr)) => addr,
-                    Err(e) => {
-                        guard_principal.fail();
-                        return Err(ProtocolError::GenericError(format!("xrp derive failed: {e}")));
-                    }
-                };
+                let addr =
+                    match crate::chains::xrp::ted25519::derive_xrp_address(path.clone()).await {
+                        Ok((_pk, addr)) => addr,
+                        Err(e) => {
+                            guard_principal.fail();
+                            return Err(ProtocolError::GenericError(format!(
+                                "xrp derive failed: {e}"
+                            )));
+                        }
+                    };
                 let acct = match crate::chains::xrp::xrp_rpc::fetch_account_info(&addr).await {
                     Ok(a) => a,
                     Err(e) => {
@@ -1301,14 +1745,57 @@ pub async fn settle_xrp_claim(claim_id: u64, destination: String) -> Result<Stri
                             .to_string(),
                     ));
                 }
+                if let Err(e) = ensure_xrp_replacement_sequence_safe(&prev, &acct) {
+                    guard_principal.fail();
+                    return Err(e);
+                }
+                if replacement_destination.trim().is_empty() {
+                    replacement_destination = match prev.destination.clone() {
+                        Some(dest) => dest,
+                        None => {
+                            guard_principal.fail();
+                            return Err(ProtocolError::GenericError(
+                                "XRP settlement replacement requires a destination address."
+                                    .to_string(),
+                            ));
+                        }
+                    };
+                }
+                if replacement_destination_tag.is_none() {
+                    replacement_destination_tag = prev.destination_tag;
+                }
                 // Expired and never applied -> safe to sign a fresh settlement.
             }
             Ok(crate::chains::xrp::xrp_rpc::XrpTxStatus::Failed) => {
-                // Validated but failed -> funds did not move -> safe to re-sign.
+                // Validated but failed -> funds did not move, but XRPL still
+                // consumed the source-account fee. Charge it to this claim once,
+                // clear the failed settlement, and allow a replacement.
+                let fee = crate::chains::xrp::adapter::XRP_FEE_DROPS;
+                claim.drops = claim.drops.saturating_sub(fee);
+                mutate_state(|s| {
+                    if let Some(c) = s.xrp_claims.get_mut(&claim_id) {
+                        if c.settlement
+                            .as_ref()
+                            .map(|settlement| settlement.tx_hash == prev.tx_hash)
+                            .unwrap_or(false)
+                        {
+                            c.drops = claim.drops;
+                            c.settlement = None;
+                        }
+                    }
+                });
+                if replacement_destination.trim().is_empty() {
+                    replacement_destination = prev.destination.clone().unwrap_or_default();
+                }
+                if replacement_destination_tag.is_none() {
+                    replacement_destination_tag = prev.destination_tag;
+                }
             }
             Err(e) => {
                 guard_principal.fail();
-                return Err(ProtocolError::GenericError(format!("xrp tx status failed: {e}")));
+                return Err(ProtocolError::GenericError(format!(
+                    "xrp tx status failed: {e}"
+                )));
             }
         }
     }
@@ -1322,9 +1809,83 @@ pub async fn settle_xrp_claim(claim_id: u64, destination: String) -> Result<Stri
                 return Err(e);
             }
         };
+
+    let (source_address, acct) =
+        match crate::chains::xrp::ted25519::derive_xrp_address(path.clone()).await {
+            Ok((_pk, addr)) => match crate::chains::xrp::xrp_rpc::fetch_account_info(&addr).await {
+                Ok(a) => (addr, a),
+                Err(e) => {
+                    guard_principal.fail();
+                    return Err(ProtocolError::GenericError(format!(
+                        "xrp account_info failed: {e}"
+                    )));
+                }
+            },
+            Err(e) => {
+                guard_principal.fail();
+                return Err(ProtocolError::GenericError(format!(
+                    "xrp derive failed: {e}"
+                )));
+            }
+        };
+    let reserve = match crate::chains::xrp::xrp_rpc::fetch_reserve_base().await {
+        Ok(r) => r,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "xrp server_state failed: {e}"
+            )));
+        }
+    };
+    let blocking_other_claim = match reconcile_xrp_other_inflight_claims(
+        claim_id,
+        claim.custody_owner,
+        claim.custody_nonce,
+        &acct,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(e);
+        }
+    };
+    if let Some(other_claim_id) = blocking_other_claim {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(format!(
+            "XRP settlement for claim #{other_claim_id} is already in flight for this custody address; confirm it before settling another claim."
+        )));
+    }
+    let unresolved_claim_drops = match read_state(|s| {
+        xrp_unresolved_claim_drops_for_custody(s, claim.custody_owner, claim.custody_nonce)
+    }) {
+        Ok(drops) => drops,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(e);
+        }
+    };
+    if let Err(e) = ensure_xrp_claim_aggregate_solvency(&acct, reserve, unresolved_claim_drops) {
+        log!(
+            INFO,
+            "[settle_xrp_claim] aggregate solvency rejected claim #{} from {}: {:?}",
+            claim_id,
+            source_address,
+            e
+        );
+        guard_principal.fail();
+        return Err(e);
+    }
+
     let adapter = crate::chains::xrp::adapter::XrpAdapter::new(crate::chains::xrp::XRP_CHAIN_ID);
-    let (signed, last_ledger_sequence) = match adapter
-        .sign_xrp_payment_from(path, &destination, send_drops as u128, None)
+    let payment = match adapter
+        .sign_xrp_payment_from(
+            path,
+            &replacement_destination,
+            send_drops as u128,
+            replacement_destination_tag,
+        )
         .await
     {
         Ok(v) => v,
@@ -1335,6 +1896,7 @@ pub async fn settle_xrp_claim(claim_id: u64, destination: String) -> Result<Stri
             )));
         }
     };
+    let signed = payment.signed;
 
     // Record the in-flight settlement BEFORE submitting, so a submit whose outcall
     // errors after rippled broadcast is reconciled on the next settle (confirm) call
@@ -1343,12 +1905,16 @@ pub async fn settle_xrp_claim(claim_id: u64, destination: String) -> Result<Stri
         if let Some(c) = s.xrp_claims.get_mut(&claim_id) {
             c.settlement = Some(crate::state::XrpSettlement {
                 tx_hash: signed.tx_hash.clone(),
-                last_ledger_sequence,
+                last_ledger_sequence: payment.last_ledger_sequence,
+                source_sequence: Some(payment.source_sequence),
+                destination: Some(replacement_destination.clone()),
+                destination_tag: replacement_destination_tag,
             });
         }
     });
 
-    if let Err(e) = crate::chains::xrp::xrp_rpc::submit_blob(&hex::encode_upper(&signed.raw_tx)).await
+    if let Err(e) =
+        crate::chains::xrp::xrp_rpc::submit_blob(&hex::encode_upper(&signed.raw_tx)).await
     {
         guard_principal.fail();
         return Err(ProtocolError::GenericError(format!(
@@ -1366,6 +1932,32 @@ pub async fn settle_xrp_claim(claim_id: u64, destination: String) -> Result<Stri
 #[cfg(test)]
 mod xrp_p4_tests {
     use super::*;
+
+    fn claim(
+        claimant: Principal,
+        custody_owner: Principal,
+        custody_nonce: u64,
+        drops: u64,
+    ) -> crate::state::XrpClaim {
+        crate::state::XrpClaim {
+            claimant,
+            drops,
+            custody_owner,
+            custody_nonce,
+            created_at_ns: 0,
+            settlement: None,
+        }
+    }
+
+    fn settlement(tx_hash: &str) -> crate::state::XrpSettlement {
+        crate::state::XrpSettlement {
+            tx_hash: tx_hash.to_string(),
+            last_ledger_sequence: 9_000_000,
+            source_sequence: Some(41),
+            destination: Some("rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh".to_string()),
+            destination_tag: None,
+        }
+    }
 
     #[test]
     fn claim_send_amount_subtracts_fee() {
@@ -1400,16 +1992,263 @@ mod xrp_p4_tests {
         assert_eq!(c0.custody_nonce, 7);
         assert_eq!(c0.drops, 4_000_000);
     }
+
+    #[test]
+    fn unresolved_claim_drops_aggregates_only_same_custody_address() {
+        let mut s = crate::state::State::default();
+        let claimant = Principal::from_slice(&[0x11; 16]);
+        let owner = Principal::from_slice(&[0xaa; 16]);
+        let other_owner = Principal::from_slice(&[0xbb; 16]);
+        s.xrp_claims.insert(0, claim(claimant, owner, 7, 2_000_000));
+        s.xrp_claims.insert(1, claim(claimant, owner, 7, 3_000_000));
+        s.xrp_claims.insert(2, claim(claimant, owner, 8, 5_000_000));
+        s.xrp_claims
+            .insert(3, claim(claimant, other_owner, 7, 7_000_000));
+
+        assert_eq!(
+            xrp_unresolved_claim_drops_for_custody(&s, owner, 7).unwrap(),
+            5_000_000
+        );
+    }
+
+    #[test]
+    fn inflight_claims_for_custody_detects_same_custody_only() {
+        let mut s = crate::state::State::default();
+        let claimant = Principal::from_slice(&[0x11; 16]);
+        let owner = Principal::from_slice(&[0xaa; 16]);
+        let other_owner = Principal::from_slice(&[0xbb; 16]);
+        s.xrp_claims.insert(0, claim(claimant, owner, 7, 2_000_000));
+        s.xrp_claims.insert(1, {
+            let mut c = claim(claimant, owner, 7, 3_000_000);
+            c.settlement = Some(settlement("ABC"));
+            c
+        });
+        s.xrp_claims.insert(2, {
+            let mut c = claim(claimant, other_owner, 7, 5_000_000);
+            c.settlement = Some(crate::state::XrpSettlement {
+                tx_hash: "DEF".to_string(),
+                last_ledger_sequence: 9_000_000,
+                source_sequence: Some(12),
+                destination: Some("rLUEXYuLiQptky37CqLcm9USQpPiz5rkpD".to_string()),
+                destination_tag: Some(99),
+            });
+            c
+        });
+
+        assert_eq!(
+            xrp_inflight_claims_for_custody(&s, 0, owner, 7)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert!(xrp_inflight_claims_for_custody(&s, 1, owner, 7).is_empty());
+        assert!(xrp_inflight_claims_for_custody(&s, 0, owner, 8).is_empty());
+    }
+
+    #[test]
+    fn inflight_claims_for_custody_returns_settlement_snapshots() {
+        let mut s = crate::state::State::default();
+        let claimant = Principal::from_slice(&[0x11; 16]);
+        let owner = Principal::from_slice(&[0xaa; 16]);
+        s.xrp_claims.insert(0, claim(claimant, owner, 7, 2_000_000));
+        s.xrp_claims.insert(1, {
+            let mut c = claim(claimant, owner, 7, 3_000_000);
+            c.settlement = Some(settlement("ABC"));
+            c
+        });
+
+        let in_flight = xrp_inflight_claims_for_custody(&s, 0, owner, 7);
+
+        assert_eq!(in_flight.len(), 1);
+        assert_eq!(in_flight[0].0, 1);
+        assert_eq!(in_flight[0].1.tx_hash, "ABC");
+    }
+
+    #[test]
+    fn reconcile_paid_settlement_removes_claim_only_for_matching_hash() {
+        let mut s = crate::state::State::default();
+        let claimant = Principal::from_slice(&[0x11; 16]);
+        let owner = Principal::from_slice(&[0xaa; 16]);
+        let mut c = claim(claimant, owner, 7, 3_000_000);
+        c.settlement = Some(settlement("ABC"));
+        s.xrp_claims.insert(1, c);
+
+        assert!(!reconcile_xrp_settlement_snapshot(
+            &mut s,
+            1,
+            "DEF",
+            XrpSettlementReconciliation::Paid,
+        ));
+        assert!(s.xrp_claims.contains_key(&1));
+        assert!(reconcile_xrp_settlement_snapshot(
+            &mut s,
+            1,
+            "ABC",
+            XrpSettlementReconciliation::Paid,
+        ));
+        assert!(!s.xrp_claims.contains_key(&1));
+    }
+
+    #[test]
+    fn reconcile_failed_settlement_charges_fee_once_and_clears_blocker() {
+        let mut s = crate::state::State::default();
+        let claimant = Principal::from_slice(&[0x11; 16]);
+        let owner = Principal::from_slice(&[0xaa; 16]);
+        let mut c = claim(claimant, owner, 7, 3_000_000);
+        c.settlement = Some(settlement("ABC"));
+        s.xrp_claims.insert(1, c);
+
+        assert!(reconcile_xrp_settlement_snapshot(
+            &mut s,
+            1,
+            "ABC",
+            XrpSettlementReconciliation::FailedFeeCharged,
+        ));
+        let claim = s.xrp_claims.get(&1).unwrap();
+        assert_eq!(
+            claim.drops,
+            3_000_000 - crate::chains::xrp::adapter::XRP_FEE_DROPS
+        );
+        assert!(claim.settlement.is_none());
+    }
+
+    #[test]
+    fn reconcile_expired_not_found_clears_blocker_without_charging_fee() {
+        let mut s = crate::state::State::default();
+        let claimant = Principal::from_slice(&[0x11; 16]);
+        let owner = Principal::from_slice(&[0xaa; 16]);
+        let mut c = claim(claimant, owner, 7, 3_000_000);
+        c.settlement = Some(settlement("ABC"));
+        s.xrp_claims.insert(1, c);
+
+        assert!(reconcile_xrp_settlement_snapshot(
+            &mut s,
+            1,
+            "ABC",
+            XrpSettlementReconciliation::ExpiredNotFound,
+        ));
+        let claim = s.xrp_claims.get(&1).unwrap();
+        assert_eq!(claim.drops, 3_000_000);
+        assert!(claim.settlement.is_none());
+    }
+
+    #[test]
+    fn aggregate_solvency_rejects_balance_that_only_covers_current_claim() {
+        let acct = crate::chains::xrp::xrp_rpc::XrpAccountInfo {
+            exists: true,
+            sequence: 41,
+            balance_drops: 4_000_020,
+            ledger_index: 9_000_000,
+        };
+
+        assert!(matches!(
+            ensure_xrp_claim_aggregate_solvency(&acct, 1_000_000, 5_000_000),
+            Err(ProtocolError::GenericError(_))
+        ));
+    }
+
+    #[test]
+    fn aggregate_solvency_accepts_exact_balance_for_all_unresolved_claims() {
+        let acct = crate::chains::xrp::xrp_rpc::XrpAccountInfo {
+            exists: true,
+            sequence: 41,
+            balance_drops: 6_000_000,
+            ledger_index: 9_000_000,
+        };
+
+        assert!(ensure_xrp_claim_aggregate_solvency(&acct, 1_000_000, 5_000_000).is_ok());
+    }
+
+    #[test]
+    fn replacement_rejects_missing_prior_source_sequence() {
+        let prev = crate::state::XrpSettlement {
+            tx_hash: "ABC".to_string(),
+            last_ledger_sequence: 9_000_000,
+            source_sequence: None,
+            destination: Some("rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh".to_string()),
+            destination_tag: None,
+        };
+        let acct = crate::chains::xrp::xrp_rpc::XrpAccountInfo {
+            exists: true,
+            sequence: 41,
+            balance_drops: 10_000_000,
+            ledger_index: 9_000_100,
+        };
+
+        assert!(matches!(
+            ensure_xrp_replacement_sequence_safe(&prev, &acct),
+            Err(ProtocolError::GenericError(_))
+        ));
+    }
+
+    #[test]
+    fn replacement_rejects_when_live_sequence_advanced_past_prior_source_sequence() {
+        let prev = crate::state::XrpSettlement {
+            tx_hash: "ABC".to_string(),
+            last_ledger_sequence: 9_000_000,
+            source_sequence: Some(41),
+            destination: Some("rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh".to_string()),
+            destination_tag: None,
+        };
+        let acct = crate::chains::xrp::xrp_rpc::XrpAccountInfo {
+            exists: true,
+            sequence: 42,
+            balance_drops: 10_000_000,
+            ledger_index: 9_000_100,
+        };
+
+        assert!(matches!(
+            ensure_xrp_replacement_sequence_safe(&prev, &acct),
+            Err(ProtocolError::GenericError(_))
+        ));
+    }
+
+    #[test]
+    fn replacement_allows_same_live_sequence_after_expiry() {
+        let prev = crate::state::XrpSettlement {
+            tx_hash: "ABC".to_string(),
+            last_ledger_sequence: 9_000_000,
+            source_sequence: Some(41),
+            destination: Some("rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh".to_string()),
+            destination_tag: None,
+        };
+        let acct = crate::chains::xrp::xrp_rpc::XrpAccountInfo {
+            exists: true,
+            sequence: 41,
+            balance_drops: 10_000_000,
+            ledger_index: 9_000_100,
+        };
+
+        assert!(ensure_xrp_replacement_sequence_safe(&prev, &acct).is_ok());
+    }
+
+    #[test]
+    fn settle_xrp_claim_with_tag_is_exposed_at_vault_level() {
+        let _ = settle_xrp_claim_with_tag;
+    }
 }
 
 #[cfg(test)]
 mod xrp_p3_tests {
     use super::*;
 
+    fn pending(owner: Principal, custody_address: &str) -> crate::state::XrpPendingDeposit {
+        crate::state::XrpPendingDeposit {
+            owner,
+            custody_address: custody_address.to_string(),
+            derivation_nonce: 7,
+            opened_at_ns: 123,
+        }
+    }
+
     #[test]
     fn credit_nets_the_base_reserve() {
         // 5 XRP balance, 1 XRP reserve -> 4 XRP (drops) credited.
-        assert_eq!(xrp_credit_amount(5_000_000, 1_000_000, 0).unwrap(), 4_000_000);
+        assert_eq!(
+            xrp_credit_amount(5_000_000, 1_000_000, 0).unwrap(),
+            4_000_000
+        );
     }
 
     #[test]
@@ -1422,6 +2261,88 @@ mod xrp_p3_tests {
             xrp_credit_amount(1_000_000, 1_000_000, 0),
             Err(ProtocolError::AmountTooLow { .. })
         ));
+    }
+
+    #[test]
+    fn pending_cleanup_removes_only_when_live_account_is_unfunded() {
+        let owner = Principal::from_slice(&[0x44; 16]);
+        let dep = pending(owner, "rLUEXYuLiQptky37CqLcm9USQpPiz5rkpD");
+        let mut s = crate::state::State::default();
+        s.xrp_pending_deposits.insert(7, dep.clone());
+        let acct = crate::chains::xrp::xrp_rpc::XrpAccountInfo {
+            exists: false,
+            sequence: 0,
+            balance_drops: 0,
+            ledger_index: 9_000_000,
+        };
+
+        assert_eq!(
+            remove_xrp_pending_deposit_if_unfunded_snapshot(&mut s, 7, &dep, &acct).unwrap(),
+            true
+        );
+        assert!(!s.xrp_pending_deposits.contains_key(&7));
+    }
+
+    #[test]
+    fn pending_cleanup_refuses_funded_account() {
+        let owner = Principal::from_slice(&[0x44; 16]);
+        let dep = pending(owner, "rLUEXYuLiQptky37CqLcm9USQpPiz5rkpD");
+        let mut s = crate::state::State::default();
+        s.xrp_pending_deposits.insert(7, dep.clone());
+        let acct = crate::chains::xrp::xrp_rpc::XrpAccountInfo {
+            exists: true,
+            sequence: 1,
+            balance_drops: 1_000_000,
+            ledger_index: 9_000_000,
+        };
+
+        assert!(matches!(
+            remove_xrp_pending_deposit_if_unfunded_snapshot(&mut s, 7, &dep, &acct),
+            Err(ProtocolError::GenericError(_))
+        ));
+        assert!(s.xrp_pending_deposits.contains_key(&7));
+    }
+
+    #[test]
+    fn pending_cleanup_rechecks_snapshot_after_await_before_removing() {
+        let owner = Principal::from_slice(&[0x44; 16]);
+        let dep = pending(owner, "rLUEXYuLiQptky37CqLcm9USQpPiz5rkpD");
+        let changed = pending(owner, "rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh");
+        let mut s = crate::state::State::default();
+        s.xrp_pending_deposits.insert(7, changed);
+        let acct = crate::chains::xrp::xrp_rpc::XrpAccountInfo {
+            exists: false,
+            sequence: 0,
+            balance_drops: 0,
+            ledger_index: 9_000_000,
+        };
+
+        assert_eq!(
+            remove_xrp_pending_deposit_if_unfunded_snapshot(&mut s, 7, &dep, &acct).unwrap(),
+            false
+        );
+        assert!(s.xrp_pending_deposits.contains_key(&7));
+    }
+
+    #[test]
+    fn pending_cleanup_age_rejects_recent_entries() {
+        let owner = Principal::from_slice(&[0x44; 16]);
+        let dep = pending(owner, "rLUEXYuLiQptky37CqLcm9USQpPiz5rkpD");
+        assert!(matches!(
+            ensure_xrp_pending_cleanup_age(&dep, dep.opened_at_ns + 1),
+            Err(ProtocolError::GenericError(_))
+        ));
+    }
+
+    #[test]
+    fn pending_cleanup_age_accepts_old_entries() {
+        let owner = Principal::from_slice(&[0x44; 16]);
+        let dep = pending(owner, "rLUEXYuLiQptky37CqLcm9USQpPiz5rkpD");
+        assert!(ensure_xrp_pending_cleanup_age(
+            &dep,
+            dep.opened_at_ns + XRP_PENDING_CLEANUP_MIN_AGE_NS
+        )
+        .is_ok());
     }
 
     #[test]
@@ -1459,33 +2380,44 @@ pub async fn open_vault_and_borrow(
     let guard_principal = match GuardPrincipal::new(caller, "open_vault_and_borrow") {
         Ok(guard) => guard,
         Err(GuardError::AlreadyProcessing) => {
-            log!(INFO, "[open_vault_and_borrow] Principal {:?} already has an ongoing operation", caller);
+            log!(
+                INFO,
+                "[open_vault_and_borrow] Principal {:?} already has an ongoing operation",
+                caller
+            );
             return Err(ProtocolError::AlreadyProcessing);
-        },
+        }
         Err(GuardError::StaleOperation) => {
-            log!(INFO, "[open_vault_and_borrow] Principal {:?} has a stale operation being cleaned up", caller);
+            log!(
+                INFO,
+                "[open_vault_and_borrow] Principal {:?} has a stale operation being cleaned up",
+                caller
+            );
             return Err(ProtocolError::TemporarilyUnavailable(
-                "Previous operation is being cleaned up. Please try again in a few seconds.".to_string()
+                "Previous operation is being cleaned up. Please try again in a few seconds."
+                    .to_string(),
             ));
-        },
+        }
         Err(err) => return Err(err.into()),
     };
 
     // Resolve collateral type: default to ICP if not specified
-    let collateral_type = collateral_type_opt.unwrap_or_else(|| read_state(|s| s.icp_collateral_type()));
+    let collateral_type =
+        collateral_type_opt.unwrap_or_else(|| read_state(|s| s.icp_collateral_type()));
 
     // Look up CollateralConfig; check status is Active
-    let (config_ledger, config_status, min_deposit, is_native_xrp) = read_state(|s| {
-        match s.get_collateral_config(&collateral_type) {
+    let (config_ledger, config_status, min_deposit, is_native_xrp) =
+        read_state(|s| match s.get_collateral_config(&collateral_type) {
             Some(config) => Ok((
                 config.ledger_canister_id,
                 config.status,
                 config.min_collateral_deposit,
                 config.is_native_xrp(),
             )),
-            None => Err(ProtocolError::GenericError("Collateral type not supported.".to_string())),
-        }
-    })?;
+            None => Err(ProtocolError::GenericError(
+                "Collateral type not supported.".to_string(),
+            )),
+        })?;
 
     // P2: native-XRP collateral is custodied on the XRP Ledger (chains::xrp), not
     // pulled via an ICRC `transfer_from`. Its deposit flow (open-then-verify) is
@@ -1515,25 +2447,26 @@ pub async fn open_vault_and_borrow(
     }
 
     // Pull collateral via ICRC-2 transfer_from (caller must have approved first)
-    let block_index = match transfer_collateral_from(collateral_amount_raw, caller, config_ledger).await {
-        Ok(bi) => bi,
-        Err(transfer_from_error) => {
-            guard_principal.fail();
-            if let TransferFromError::BadFee { expected_fee } = transfer_from_error.clone() {
-                mutate_state(|s| {
-                    if let Ok(fee) = u64::try_from(expected_fee.0) {
-                        if let Some(config) = s.get_collateral_config_mut(&collateral_type) {
-                            config.ledger_fee = fee;
+    let block_index =
+        match transfer_collateral_from(collateral_amount_raw, caller, config_ledger).await {
+            Ok(bi) => bi,
+            Err(transfer_from_error) => {
+                guard_principal.fail();
+                if let TransferFromError::BadFee { expected_fee } = transfer_from_error.clone() {
+                    mutate_state(|s| {
+                        if let Ok(fee) = u64::try_from(expected_fee.0) {
+                            if let Some(config) = s.get_collateral_config_mut(&collateral_type) {
+                                config.ledger_fee = fee;
+                            }
                         }
-                    }
-                });
-            };
-            return Err(ProtocolError::TransferFromError(
-                transfer_from_error,
-                icp_margin_amount.to_u64(),
-            ));
-        }
-    };
+                    });
+                };
+                return Err(ProtocolError::TransferFromError(
+                    transfer_from_error,
+                    icp_margin_amount.to_u64(),
+                ));
+            }
+        };
 
     // Create the vault
     let vault_id = mutate_state(|s| {
@@ -1555,7 +2488,10 @@ pub async fn open_vault_and_borrow(
         vault_id
     });
 
-    log!(INFO, "[open_vault_and_borrow] opened vault {vault_id}, now borrowing {borrow_amount_raw}");
+    log!(
+        INFO,
+        "[open_vault_and_borrow] opened vault {vault_id}, now borrowing {borrow_amount_raw}"
+    );
 
     // Borrow icUSD — reuse internal fn to avoid guard conflict
     if borrow_amount_raw > 0 {
@@ -1570,11 +2506,24 @@ pub async fn open_vault_and_borrow(
                 )));
             }
         };
-        match borrow_from_vault_internal(caller, VaultArg { vault_id, amount: borrow_amount_raw }).await {
-            Ok(borrow_result) => {
-                log!(INFO, "[open_vault_and_borrow] vault {} borrow of {} succeeded (fee: {})",
-                    vault_id, borrow_amount_raw, borrow_result.fee_amount_paid);
+        match borrow_from_vault_internal(
+            caller,
+            VaultArg {
+                vault_id,
+                amount: borrow_amount_raw,
             },
+        )
+        .await
+        {
+            Ok(borrow_result) => {
+                log!(
+                    INFO,
+                    "[open_vault_and_borrow] vault {} borrow of {} succeeded (fee: {})",
+                    vault_id,
+                    borrow_amount_raw,
+                    borrow_result.fee_amount_paid
+                );
+            }
             Err(e) => {
                 guard_principal.fail();
                 return Err(ProtocolError::GenericError(format!(
@@ -1586,13 +2535,19 @@ pub async fn open_vault_and_borrow(
     }
 
     guard_principal.complete();
-    Ok(OpenVaultSuccess { vault_id, block_index })
+    Ok(OpenVaultSuccess {
+        vault_id,
+        block_index,
+    })
 }
 
 /// Internal borrow logic without guard management.
 /// Called by both `borrow_from_vault` (which acquires its own guard) and
 /// `open_vault_with_deposit` (which already holds a guard for the same principal).
-async fn borrow_from_vault_internal(caller: Principal, arg: VaultArg) -> Result<SuccessWithFee, ProtocolError> {
+async fn borrow_from_vault_internal(
+    caller: Principal,
+    arg: VaultArg,
+) -> Result<SuccessWithFee, ProtocolError> {
     let amount: ICUSD = arg.amount.into();
 
     if amount < read_state(|s| s.min_icusd_amount) {
@@ -1605,21 +2560,25 @@ async fn borrow_from_vault_internal(caller: Principal, arg: VaultArg) -> Result<
     let now = ic_cdk::api::time();
     mutate_state(|s| s.accrue_single_vault(arg.vault_id, now));
 
-    let (vault, collateral_price, config_decimals) = read_state(|s| {
-        match s.vault_id_to_vaults.get(&arg.vault_id) {
+    let (vault, collateral_price, config_decimals, is_native_xrp) =
+        read_state(|s| match s.vault_id_to_vaults.get(&arg.vault_id) {
             Some(vault) => {
-                let price = s.get_collateral_price_decimal(&vault.collateral_type)
+                let price = s
+                    .get_collateral_price_decimal(&vault.collateral_type)
                     .ok_or("No price available for collateral. Price feed may be down.")?;
-                let decimals = s.get_collateral_config(&vault.collateral_type)
-                    .map(|c| c.decimals)
-                    .unwrap_or(8);
-                Ok((vault.clone(), price, decimals))
-            },
-            None => {
-                Err("Vault not found. Please check the vault ID.")
+                let config = s
+                    .get_collateral_config(&vault.collateral_type)
+                    .ok_or("Collateral type not configured.")?;
+                Ok((
+                    vault.clone(),
+                    price,
+                    config.decimals,
+                    config.is_native_xrp(),
+                ))
             }
-        }
-    }).map_err(|msg: &str| ProtocolError::GenericError(msg.to_string()))?;
+            None => Err("Vault not found. Please check the vault ID."),
+        })
+        .map_err(|msg: &str| ProtocolError::GenericError(msg.to_string()))?;
 
     require_vault_not_processing(&vault)?;
 
@@ -1631,6 +2590,9 @@ async fn borrow_from_vault_internal(caller: Principal, arg: VaultArg) -> Result<
                 "Borrowing is not allowed for this collateral type.".to_string(),
             ));
         }
+    }
+    if is_native_xrp {
+        require_xrp_production_key()?;
     }
 
     if caller != vault.owner {
@@ -1653,7 +2615,8 @@ async fn borrow_from_vault_internal(caller: Principal, arg: VaultArg) -> Result<
             .map(|c| c.debt_ceiling)
             .unwrap_or(u64::MAX)
     });
-    let (global_cap, total_borrowed) = read_state(|s| (s.global_icusd_mint_cap, s.total_borrowed_icusd_amount()));
+    let (global_cap, total_borrowed) =
+        read_state(|s| (s.global_icusd_mint_cap, s.total_borrowed_icusd_amount()));
     let _borrow_reservation = crate::guard::BorrowReservationGuard::try_reserve(
         vault.collateral_type,
         amount.to_u64(),
@@ -1664,12 +2627,20 @@ async fn borrow_from_vault_internal(caller: Principal, arg: VaultArg) -> Result<
     )
     .map_err(ProtocolError::GenericError)?;
 
-    let collateral_value = crate::numeric::collateral_usd_value(vault.collateral_amount, collateral_price, config_decimals);
+    let collateral_value = crate::numeric::collateral_usd_value(
+        vault.collateral_amount,
+        collateral_price,
+        config_decimals,
+    );
     let min_ratio = read_state(|s| {
         let base = s.get_min_collateral_ratio_for(&vault.collateral_type);
         if s.mode == Mode::Recovery {
             let recovery_cr = s.get_recovery_cr_for(&vault.collateral_type);
-            if recovery_cr > base { recovery_cr } else { base }
+            if recovery_cr > base {
+                recovery_cr
+            } else {
+                base
+            }
         } else {
             base
         }
@@ -1690,7 +2661,7 @@ async fn borrow_from_vault_internal(caller: Principal, arg: VaultArg) -> Result<
     } else {
         Ratio::from(
             Decimal::from_u64(collateral_value.to_u64()).unwrap_or(Decimal::ZERO)
-                / Decimal::from_u64(new_total_debt.to_u64()).unwrap_or(Decimal::ONE)
+                / Decimal::from_u64(new_total_debt.to_u64()).unwrap_or(Decimal::ONE),
         )
     };
 
@@ -1719,25 +2690,28 @@ async fn borrow_from_vault_internal(caller: Principal, arg: VaultArg) -> Result<
                 fee_amount_paid: fee.to_u64(),
                 collateral_amount_received: None,
                 debt_liquidated_e8s: None, // SP-101
-                stable_pulled_e6s: None, // SP-110
+                stable_pulled_e6s: None,   // SP-110
             })
         }
-        Err(mint_error) => {
-            Err(ProtocolError::TransferError(mint_error))
-        }
+        Err(mint_error) => Err(ProtocolError::TransferError(mint_error)),
     }
 }
 
 pub async fn borrow_from_vault(arg: VaultArg) -> Result<SuccessWithFee, ProtocolError> {
     let caller = ic_cdk::api::caller();
-    let guard_principal = match GuardPrincipal::new(caller, &format!("borrow_vault_{}", arg.vault_id)) {
-        Ok(guard) => guard,
-        Err(GuardError::AlreadyProcessing) => {
-            log!(INFO, "[borrow_from_vault] Principal {:?} already has an ongoing operation", caller);
-            return Err(ProtocolError::AlreadyProcessing);
-        },
-        Err(err) => return Err(err.into()),
-    };
+    let guard_principal =
+        match GuardPrincipal::new(caller, &format!("borrow_vault_{}", arg.vault_id)) {
+            Ok(guard) => guard,
+            Err(GuardError::AlreadyProcessing) => {
+                log!(
+                    INFO,
+                    "[borrow_from_vault] Principal {:?} already has an ongoing operation",
+                    caller
+                );
+                return Err(ProtocolError::AlreadyProcessing);
+            }
+            Err(err) => return Err(err.into()),
+        };
 
     // AR-B-003 (audit 2026-06-09): per-vault op lock. The per-caller guard
     // above does not exclude a concurrent liquidation/redemption of this
@@ -1781,7 +2755,11 @@ pub async fn borrow_from_vault(arg: VaultArg) -> Result<SuccessWithFee, Protocol
 /// guarantee — an explicit flag (rather than `amount == debt` equality) avoids
 /// brittleness from interest accruing between the caller's debt fetch and
 /// this helper's read.
-async fn repay_to_vault_internal(caller: Principal, arg: VaultArg, is_full_close: bool) -> Result<u64, ProtocolError> {
+async fn repay_to_vault_internal(
+    caller: Principal,
+    arg: VaultArg,
+    is_full_close: bool,
+) -> Result<u64, ProtocolError> {
     let amount: ICUSD = arg.amount.into();
 
     // Accrue interest before repayment so the correct debt balance is used.
@@ -1832,12 +2810,19 @@ async fn repay_to_vault_internal(caller: Principal, arg: VaultArg, is_full_close
 
     match transfer_icusd_from(amount, caller).await {
         Ok(block_index) => {
-            let interest_share = mutate_state(|s| record_repayed_to_vault(s, arg.vault_id, amount, block_index));
+            let interest_share =
+                mutate_state(|s| record_repayed_to_vault(s, arg.vault_id, amount, block_index));
             // IC-B-002 (audit 2026-06-09): re-queue any unminted interest share so the
             // next flush retries it instead of silently dropping treasury revenue.
-            let unminted_interest = crate::treasury::distribute_interest(interest_share, vault.collateral_type).await;
+            let unminted_interest =
+                crate::treasury::distribute_interest(interest_share, vault.collateral_type).await;
             if unminted_interest.to_u64() > 0 {
-                mutate_state(|s| s.restore_pending_interest_for_pool(vault.collateral_type, unminted_interest.to_u64()));
+                mutate_state(|s| {
+                    s.restore_pending_interest_for_pool(
+                        vault.collateral_type,
+                        unminted_interest.to_u64(),
+                    )
+                });
             }
             Ok(block_index)
         }
@@ -1875,7 +2860,8 @@ pub async fn repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
 /// Repay vault debt using ckUSDT or ckUSDC (1:1 with icUSD, plus configurable fee)
 pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, ProtocolError> {
     let caller = ic_cdk::api::caller();
-    let guard_principal = GuardPrincipal::new(caller, &format!("repay_vault_stable_{}", arg.vault_id))?;
+    let guard_principal =
+        GuardPrincipal::new(caller, &format!("repay_vault_stable_{}", arg.vault_id))?;
     // AR-B-003: per-vault op lock; see guard.rs::VaultLiquidationGuard.
     let _vault_op_guard = match VaultLiquidationGuard::new(arg.vault_id) {
         Ok(g) => g,
@@ -1892,7 +2878,10 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
     });
     if !is_enabled {
         guard_principal.fail();
-        return Err(ProtocolError::GenericError(format!("{:?} repayments are currently disabled", arg.token_type)));
+        return Err(ProtocolError::GenericError(format!(
+            "{:?} repayments are currently disabled",
+            arg.token_type
+        )));
     }
 
     // Depeg protection: fetch fresh stablecoin price and reject if outside $0.95–$1.05
@@ -1969,13 +2958,15 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
     let base_stable_e6s = raw_amount_e8s / 100;
     let fee_rate = read_state(|s| s.ckstable_repay_fee);
     let fee_e6s = (rust_decimal::Decimal::from(base_stable_e6s) * fee_rate.0)
-        .to_u64().unwrap_or(0);
+        .to_u64()
+        .unwrap_or(0);
     let total_pull_e6s = base_stable_e6s + fee_e6s;
 
     // Transfer the stable token from user (in 6-decimal units)
     match transfer_stable_from(arg.token_type.clone(), total_pull_e6s, caller).await {
         Ok(block_index) => {
-            let interest_share = mutate_state(|s| record_repayed_to_vault(s, arg.vault_id, amount, block_index));
+            let interest_share =
+                mutate_state(|s| record_repayed_to_vault(s, arg.vault_id, amount, block_index));
 
             // Route interest via N-way split (stablecoin-denominated)
             if interest_share.to_u64() > 0 {
@@ -1983,7 +2974,8 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
                     interest_share.to_u64(),
                     vault.collateral_type,
                     arg.token_type.clone(),
-                ).await;
+                )
+                .await;
             }
 
             // Route fee surcharge to treasury as stablecoins
@@ -1996,11 +2988,19 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
                     (s.treasury_principal, ledger)
                 });
                 if let (Some(treasury_principal), Some(stable_ledger)) = (treasury, stable_ledger) {
-                    match management::transfer_collateral(fee_e6s, treasury_principal, stable_ledger).await {
+                    match management::transfer_collateral(
+                        fee_e6s,
+                        treasury_principal,
+                        stable_ledger,
+                    )
+                    .await
+                    {
                         Ok(block) => {
-                            log!(INFO,
+                            log!(
+                                INFO,
                                 "[repay_with_stable] Transferred {} e6s fee to treasury (block {})",
-                                fee_e6s, block
+                                fee_e6s,
+                                block
                             );
                         }
                         Err(e) => {
@@ -2029,7 +3029,8 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
 
 pub async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
     let caller = ic_cdk::api::caller();
-    let guard_principal = GuardPrincipal::new(caller, &format!("add_margin_vault_{}", arg.vault_id))?;
+    let guard_principal =
+        GuardPrincipal::new(caller, &format!("add_margin_vault_{}", arg.vault_id))?;
     // AR-B-003: per-vault op lock; see guard.rs::VaultLiquidationGuard.
     let _vault_op_guard = match VaultLiquidationGuard::new(arg.vault_id) {
         Ok(g) => g,
@@ -2040,10 +3041,11 @@ pub async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
     };
     let amount: ICP = arg.amount.into();
 
-    let (vault, config_ledger, min_deposit, is_native_xrp) = match read_state(|s| {
-        match s.vault_id_to_vaults.get(&arg.vault_id) {
+    let (vault, config_ledger, min_deposit, is_native_xrp) =
+        match read_state(|s| match s.vault_id_to_vaults.get(&arg.vault_id) {
             Some(v) => {
-                let config = s.get_collateral_config(&v.collateral_type)
+                let config = s
+                    .get_collateral_config(&v.collateral_type)
                     .ok_or("Collateral type not configured")?;
                 Ok((
                     v.clone(),
@@ -2051,16 +3053,15 @@ pub async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
                     config.min_collateral_deposit,
                     config.is_native_xrp(),
                 ))
-            },
+            }
             None => Err("Vault not found"),
-        }
-    }) {
-        Ok(result) => result,
-        Err(msg) => {
-            guard_principal.fail();
-            return Err(ProtocolError::GenericError(msg.to_string()));
-        }
-    };
+        }) {
+            Ok(result) => result,
+            Err(msg) => {
+                guard_principal.fail();
+                return Err(ProtocolError::GenericError(msg.to_string()));
+            }
+        };
 
     // P2: native-XRP collateral is not custodied via ICRC; its add-collateral flow
     // is wired with the XRP deposit path (P3). Reject so XRP collateral can never be
@@ -2138,18 +3139,23 @@ pub async fn open_vault_with_deposit(
     let guard_principal = match GuardPrincipal::new(caller, "open_vault_with_deposit") {
         Ok(guard) => guard,
         Err(GuardError::AlreadyProcessing) => {
-            log!(INFO, "[open_vault_with_deposit] Principal {:?} already has an ongoing operation", caller);
+            log!(
+                INFO,
+                "[open_vault_with_deposit] Principal {:?} already has an ongoing operation",
+                caller
+            );
             return Err(ProtocolError::AlreadyProcessing);
-        },
+        }
         Err(err) => return Err(err.into()),
     };
 
     // Resolve collateral type: default to ICP if not specified
-    let collateral_type = collateral_type_opt.unwrap_or_else(|| read_state(|s| s.icp_collateral_type()));
+    let collateral_type =
+        collateral_type_opt.unwrap_or_else(|| read_state(|s| s.icp_collateral_type()));
 
     // Look up CollateralConfig
-    let (config_ledger, config_status, config_fee, min_deposit, is_native_xrp) = read_state(|s| {
-        match s.get_collateral_config(&collateral_type) {
+    let (config_ledger, config_status, config_fee, min_deposit, is_native_xrp) =
+        read_state(|s| match s.get_collateral_config(&collateral_type) {
             Some(config) => Ok((
                 config.ledger_canister_id,
                 config.status,
@@ -2157,9 +3163,10 @@ pub async fn open_vault_with_deposit(
                 config.min_collateral_deposit,
                 config.is_native_xrp(),
             )),
-            None => Err(ProtocolError::GenericError("Collateral type not supported.".to_string())),
-        }
-    })?;
+            None => Err(ProtocolError::GenericError(
+                "Collateral type not supported.".to_string(),
+            )),
+        })?;
 
     // P2: native-XRP collateral is custodied on the XRP Ledger (chains::xrp), not
     // swept from an ICRC deposit subaccount. Reject until the XRP deposit flow (P3).
@@ -2178,7 +3185,13 @@ pub async fn open_vault_with_deposit(
     }
 
     // Sweep funds from the caller's deposit subaccount
-    let (collateral_amount, sweep_block_index) = match management::sweep_deposit(&caller, config_ledger, config_fee).await {
+    let (collateral_amount, sweep_block_index) = match management::sweep_deposit(
+        &caller,
+        config_ledger,
+        config_fee,
+    )
+    .await
+    {
         Ok(result) => result,
         Err(e) => {
             guard_principal.fail();
@@ -2225,11 +3238,24 @@ pub async fn open_vault_with_deposit(
     if borrow_amount_raw > 0 {
         // AR-B-003: per-vault op lock across the borrow's mint await.
         let _vault_op_guard = VaultLiquidationGuard::new(vault_id)?;
-        match borrow_from_vault_internal(caller, VaultArg { vault_id, amount: borrow_amount_raw }).await {
-            Ok(borrow_result) => {
-                log!(INFO, "[open_vault_with_deposit] vault {} initial borrow of {} succeeded (fee: {})",
-                    vault_id, borrow_amount_raw, borrow_result.fee_amount_paid);
+        match borrow_from_vault_internal(
+            caller,
+            VaultArg {
+                vault_id,
+                amount: borrow_amount_raw,
             },
+        )
+        .await
+        {
+            Ok(borrow_result) => {
+                log!(
+                    INFO,
+                    "[open_vault_with_deposit] vault {} initial borrow of {} succeeded (fee: {})",
+                    vault_id,
+                    borrow_amount_raw,
+                    borrow_result.fee_amount_paid
+                );
+            }
             Err(e) => {
                 guard_principal.fail();
                 return Err(ProtocolError::GenericError(format!(
@@ -2259,10 +3285,11 @@ pub async fn add_margin_with_deposit(vault_id: u64) -> Result<u64, ProtocolError
         }
     };
 
-    let (vault, config_ledger, config_fee, min_deposit, is_native_xrp) = match read_state(|s| {
-        match s.vault_id_to_vaults.get(&vault_id) {
+    let (vault, config_ledger, config_fee, min_deposit, is_native_xrp) =
+        match read_state(|s| match s.vault_id_to_vaults.get(&vault_id) {
             Some(v) => {
-                let config = s.get_collateral_config(&v.collateral_type)
+                let config = s
+                    .get_collateral_config(&v.collateral_type)
                     .ok_or("Collateral type not configured")?;
                 Ok((
                     v.clone(),
@@ -2271,16 +3298,15 @@ pub async fn add_margin_with_deposit(vault_id: u64) -> Result<u64, ProtocolError
                     config.min_collateral_deposit,
                     config.is_native_xrp(),
                 ))
-            },
+            }
             None => Err("Vault not found"),
-        }
-    }) {
-        Ok(result) => result,
-        Err(msg) => {
-            guard_principal.fail();
-            return Err(ProtocolError::GenericError(msg.to_string()));
-        }
-    };
+        }) {
+            Ok(result) => result,
+            Err(msg) => {
+                guard_principal.fail();
+                return Err(ProtocolError::GenericError(msg.to_string()));
+            }
+        };
 
     // P2: native-XRP collateral is not custodied via ICRC; its add-collateral flow
     // is wired with the XRP deposit path (P3). Reject so XRP collateral can never be
@@ -2314,7 +3340,13 @@ pub async fn add_margin_with_deposit(vault_id: u64) -> Result<u64, ProtocolError
     }
 
     // Sweep funds from deposit subaccount
-    let (collateral_amount, sweep_block_index) = match management::sweep_deposit(&caller, config_ledger, config_fee).await {
+    let (collateral_amount, sweep_block_index) = match management::sweep_deposit(
+        &caller,
+        config_ledger,
+        config_fee,
+    )
+    .await
+    {
         Ok(result) => result,
         Err(e) => {
             guard_principal.fail();
@@ -2349,7 +3381,7 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
 
     // Check rate limits first
     mutate_state(|s| s.check_close_vault_rate_limit(caller))?;
-    
+
     // Record the close request for rate limiting
     mutate_state(|s| s.record_close_vault_request(caller));
 
@@ -2359,7 +3391,7 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
 
     // Check if the vault exists first
     let vault_exists = read_state(|s| s.vault_id_to_vaults.contains_key(&vault_id));
-    
+
     if !vault_exists {
         mutate_state(|s| s.complete_close_vault_request());
         log!(
@@ -2368,9 +3400,12 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
             vault_id,
             caller
         );
-        return Err(ProtocolError::GenericError(format!("Vault #{} not found", vault_id)));
+        return Err(ProtocolError::GenericError(format!(
+            "Vault #{} not found",
+            vault_id
+        )));
     }
-    
+
     // Get the vault
     let vault = read_state(|s| {
         s.vault_id_to_vaults
@@ -2412,13 +3447,13 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
             vault.borrowed_icusd_amount,
             vault_id
         );
-        
+
         // Record dust forgiveness (no real payment, no treasury routing)
         mutate_state(|s| {
             s.dust_forgiven_total += vault.borrowed_icusd_amount;
             let _ = s.repay_to_vault(vault_id, vault.borrowed_icusd_amount);
         });
-        
+
         // Record dust forgiveness event
         crate::storage::record_event(&crate::event::Event::DustForgiven {
             vault_id,
@@ -2434,7 +3469,7 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
             vault.borrowed_icusd_amount
         );
         return Err(ProtocolError::GenericError(
-            "Cannot close vault with outstanding debt. Repay all debt first.".to_string()
+            "Cannot close vault with outstanding debt. Repay all debt first.".to_string(),
         ));
     }
 
@@ -2448,7 +3483,7 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
             vault.collateral_amount
         );
         return Err(ProtocolError::GenericError(
-            "Cannot close vault with remaining collateral. Withdraw collateral first.".to_string()
+            "Cannot close vault with remaining collateral. Withdraw collateral first.".to_string(),
         ));
     }
 
@@ -2466,7 +3501,7 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
 
             // Complete the close request
             s.complete_close_vault_request();
-            
+
             log!(
                 INFO,
                 "[close_vault] Successfully closed vault #{} for principal {}",
@@ -2483,14 +3518,15 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
             s.complete_close_vault_request();
         }
     });
-    
+
     // Return success with no block index (since no transfer was made)
     Ok(None)
 }
 
 pub async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
     let caller = ic_cdk::caller();
-    let _guard_principal = GuardPrincipal::new(caller, &format!("withdraw_collateral_{}", vault_id))?;
+    let _guard_principal =
+        GuardPrincipal::new(caller, &format!("withdraw_collateral_{}", vault_id))?;
     // AR-B-003: per-vault op lock; see guard.rs::VaultLiquidationGuard.
     let _vault_op_guard = VaultLiquidationGuard::new(vault_id)?;
 
@@ -2500,10 +3536,11 @@ pub async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
         vault_id,
         caller
     );
-    
+
     // Check vault exists and caller is owner
     let vault = read_state(|state| {
-        state.vault_id_to_vaults
+        state
+            .vault_id_to_vaults
             .get(&vault_id)
             .cloned()
             .ok_or(ProtocolError::GenericError("Vault not found".to_string()))
@@ -2530,7 +3567,7 @@ pub async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
         );
         return Err(ProtocolError::CallerNotOwner);
     }
-    
+
     // Check there's no debt
     if vault.borrowed_icusd_amount > ICUSD::new(0) {
         log!(
@@ -2544,7 +3581,7 @@ pub async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
             vault.borrowed_icusd_amount
         )));
     }
-    
+
     // Check there's collateral to withdraw
     if vault.collateral_amount == 0 {
         log!(
@@ -2552,15 +3589,23 @@ pub async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
             "[withdraw_collateral] Vault #{} has no collateral to withdraw",
             vault_id
         );
-        return Err(ProtocolError::GenericError("No collateral to withdraw".to_string()));
+        return Err(ProtocolError::GenericError(
+            "No collateral to withdraw".to_string(),
+        ));
     }
 
     // Look up per-collateral config (incl. custody kind for P4 native-XRP routing).
-    let (ledger_canister_id, ledger_fee, is_native_xrp) = read_state(|s| {
-        let config = s.get_collateral_config(&vault.collateral_type)
-            .ok_or(ProtocolError::GenericError("Collateral type not configured".to_string()))?;
-        Ok::<_, ProtocolError>((config.ledger_canister_id, config.ledger_fee, config.is_native_xrp()))
-    })?;
+    let (ledger_canister_id, ledger_fee, is_native_xrp) =
+        read_state(|s| {
+            let config = s.get_collateral_config(&vault.collateral_type).ok_or(
+                ProtocolError::GenericError("Collateral type not configured".to_string()),
+            )?;
+            Ok::<_, ProtocolError>((
+                config.ledger_canister_id,
+                config.ledger_fee,
+                config.is_native_xrp(),
+            ))
+        })?;
 
     // Get the amount to transfer
     let amount_to_transfer = ICP::from(vault.collateral_amount);
@@ -2588,7 +3633,14 @@ pub async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
         let now_ns = ic_cdk::api::time();
         let claim_id = mutate_state(|s| {
             crate::event::record_collateral_withdrawn(s, vault_id, amount_to_transfer, 0);
-            record_xrp_claim(s, caller, caller, vault_id, amount_to_transfer.to_u64(), now_ns)
+            record_xrp_claim(
+                s,
+                caller,
+                caller,
+                vault_id,
+                amount_to_transfer.to_u64(),
+                now_ns,
+            )
         });
         log!(
             INFO,
@@ -2610,11 +3662,20 @@ pub async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
         caller
     );
 
-    match management::transfer_collateral(transfer_amount.to_u64(), caller, ledger_canister_id).await {
+    match management::transfer_collateral(transfer_amount.to_u64(), caller, ledger_canister_id)
+        .await
+    {
         Ok(block_index) => {
             // Fix for the lifetime issue - we need to use a separate mutate_state call
             // Rather than passing a mutable reference to the state
-            mutate_state(|s| crate::event::record_collateral_withdrawn(s, vault_id, amount_to_transfer, block_index));
+            mutate_state(|s| {
+                crate::event::record_collateral_withdrawn(
+                    s,
+                    vault_id,
+                    amount_to_transfer,
+                    block_index,
+                )
+            });
 
             log!(
                 INFO,
@@ -2625,7 +3686,7 @@ pub async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
             );
 
             Ok(block_index)
-        },
+        }
         Err(error) => {
             // If the transfer fails, we need to restore the collateral in the vault
             mutate_state(|state| {
@@ -2668,17 +3729,33 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
     mutate_state(|s| s.accrue_single_vault(vault_id, now));
 
     // Read vault, per-collateral price + config from state
-    let (vault, collateral_price, config_decimals, ledger_canister_id, ledger_fee, min_deposit, is_native_xrp) = match read_state(|s| {
-        match s.vault_id_to_vaults.get(&vault_id) {
-            Some(vault) => {
-                let price = s.get_collateral_price_decimal(&vault.collateral_type)
-                    .ok_or("No price available for collateral. Price feed may be down.")?;
-                let config = s.get_collateral_config(&vault.collateral_type)
-                    .ok_or("Collateral type not configured.")?;
-                Ok((vault.clone(), price, config.decimals, config.ledger_canister_id, config.ledger_fee, config.min_collateral_deposit, config.is_native_xrp()))
-            },
-            None => Err("Vault not found. Please check the vault ID.")
+    let (
+        vault,
+        collateral_price,
+        config_decimals,
+        ledger_canister_id,
+        ledger_fee,
+        min_deposit,
+        is_native_xrp,
+    ) = match read_state(|s| match s.vault_id_to_vaults.get(&vault_id) {
+        Some(vault) => {
+            let price = s
+                .get_collateral_price_decimal(&vault.collateral_type)
+                .ok_or("No price available for collateral. Price feed may be down.")?;
+            let config = s
+                .get_collateral_config(&vault.collateral_type)
+                .ok_or("Collateral type not configured.")?;
+            Ok((
+                vault.clone(),
+                price,
+                config.decimals,
+                config.ledger_canister_id,
+                config.ledger_fee,
+                config.min_collateral_deposit,
+                config.is_native_xrp(),
+            ))
         }
+        None => Err("Vault not found. Please check the vault ID."),
     }) {
         Ok(result) => result,
         Err(msg) => return Err(ProtocolError::GenericError(msg.to_string())),
@@ -2717,7 +3794,9 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
     let vault_collateral = ICP::from(vault.collateral_amount);
 
     if vault_collateral == ICP::new(0) {
-        return Err(ProtocolError::GenericError("No collateral to withdraw".to_string()));
+        return Err(ProtocolError::GenericError(
+            "No collateral to withdraw".to_string(),
+        ));
     }
 
     // Forgive dust debt: if remaining debt is below threshold, zero it out
@@ -2752,13 +3831,21 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
             let base = s.get_min_collateral_ratio_for(&vault.collateral_type);
             if s.mode == Mode::Recovery {
                 let recovery_cr = s.get_recovery_cr_for(&vault.collateral_type);
-                if recovery_cr > base { recovery_cr } else { base }
+                if recovery_cr > base {
+                    recovery_cr
+                } else {
+                    base
+                }
             } else {
                 base
             }
         });
         let min_collateral_value: ICUSD = vault.borrowed_icusd_amount * min_ratio;
-        let min_collateral_raw = crate::numeric::icusd_to_collateral_amount(min_collateral_value, collateral_price, config_decimals);
+        let min_collateral_raw = crate::numeric::icusd_to_collateral_amount(
+            min_collateral_value,
+            collateral_price,
+            config_decimals,
+        );
         let min_collateral = ICP::from(min_collateral_raw);
 
         if vault_collateral <= min_collateral {
@@ -2795,7 +3882,14 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
         let now_ns = ic_cdk::api::time();
         let claim_id = mutate_state(|s| {
             crate::event::record_partial_collateral_withdrawn(s, vault_id, withdraw_amount, 0);
-            record_xrp_claim(s, caller, caller, vault_id, withdraw_amount.to_u64(), now_ns)
+            record_xrp_claim(
+                s,
+                caller,
+                caller,
+                vault_id,
+                withdraw_amount.to_u64(),
+                now_ns,
+            )
         });
         log!(
             INFO,
@@ -2816,9 +3910,18 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
         caller
     );
 
-    match management::transfer_collateral(transfer_amount.to_u64(), caller, ledger_canister_id).await {
+    match management::transfer_collateral(transfer_amount.to_u64(), caller, ledger_canister_id)
+        .await
+    {
         Ok(block_index) => {
-            mutate_state(|s| crate::event::record_partial_collateral_withdrawn(s, vault_id, withdraw_amount, block_index));
+            mutate_state(|s| {
+                crate::event::record_partial_collateral_withdrawn(
+                    s,
+                    vault_id,
+                    withdraw_amount,
+                    block_index,
+                )
+            });
 
             log!(
                 INFO,
@@ -2829,7 +3932,7 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
             );
 
             Ok(block_index)
-        },
+        }
         Err(error) => {
             // No need to restore vault state — collateral is only deducted on success
             // (in record_partial_collateral_withdrawn via remove_margin_from_vault).
@@ -2856,7 +3959,10 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
 /// Forgives dust debt, validates collateral status, optimistically zeroes the
 /// vault's collateral, transfers it out, and deletes the vault entry. On
 /// transfer failure the collateral amount is restored and the vault stays open.
-async fn withdraw_and_close_vault_internal(caller: Principal, vault_id: u64) -> Result<Option<u64>, ProtocolError> {
+async fn withdraw_and_close_vault_internal(
+    caller: Principal,
+    vault_id: u64,
+) -> Result<Option<u64>, ProtocolError> {
     log!(
         INFO,
         "[withdraw_and_close] Request for vault #{} by principal {}",
@@ -2869,7 +3975,10 @@ async fn withdraw_and_close_vault_internal(caller: Principal, vault_id: u64) -> 
         s.vault_id_to_vaults
             .get(&vault_id)
             .cloned()
-            .ok_or(ProtocolError::GenericError(format!("Vault #{} not found", vault_id)))
+            .ok_or(ProtocolError::GenericError(format!(
+                "Vault #{} not found",
+                vault_id
+            )))
     })?;
 
     require_vault_not_processing(&vault)?;
@@ -2925,13 +4034,19 @@ async fn withdraw_and_close_vault_internal(caller: Principal, vault_id: u64) -> 
             vault.borrowed_icusd_amount
         )));
     }
-    
+
     // Look up per-collateral config
-    let (ledger_canister_id, ledger_fee, is_native_xrp) = read_state(|s| {
-        let config = s.get_collateral_config(&vault.collateral_type)
-            .ok_or(ProtocolError::GenericError("Collateral type not configured".to_string()))?;
-        Ok::<_, ProtocolError>((config.ledger_canister_id, config.ledger_fee, config.is_native_xrp()))
-    })?;
+    let (ledger_canister_id, ledger_fee, is_native_xrp) =
+        read_state(|s| {
+            let config = s.get_collateral_config(&vault.collateral_type).ok_or(
+                ProtocolError::GenericError("Collateral type not configured".to_string()),
+            )?;
+            Ok::<_, ProtocolError>((
+                config.ledger_canister_id,
+                config.ledger_fee,
+                config.is_native_xrp(),
+            ))
+        })?;
 
     // If there's collateral, withdraw it first
     let mut block_index: Option<u64> = None;
@@ -2959,7 +4074,14 @@ async fn withdraw_and_close_vault_internal(caller: Principal, vault_id: u64) -> 
             let now_ns = ic_cdk::api::time();
             let claim_id = mutate_state(|s| {
                 crate::event::record_collateral_withdrawn(s, vault_id, amount_to_transfer, 0);
-                record_xrp_claim(s, caller, caller, vault_id, amount_to_transfer.to_u64(), now_ns)
+                record_xrp_claim(
+                    s,
+                    caller,
+                    caller,
+                    vault_id,
+                    amount_to_transfer.to_u64(),
+                    now_ns,
+                )
             });
             log!(
                 INFO,
@@ -2969,23 +4091,36 @@ async fn withdraw_and_close_vault_internal(caller: Principal, vault_id: u64) -> 
             );
             block_index = Some(claim_id);
         } else {
-        // Make the collateral transfer with appropriate fee deduction
-        let fee = ICP::from(ledger_fee);
-        let transfer_amount = amount_to_transfer - fee;
+            // Make the collateral transfer with appropriate fee deduction
+            let fee = ICP::from(ledger_fee);
+            let transfer_amount = amount_to_transfer - fee;
 
-        log!(
-            INFO,
-            "[withdraw_and_close] Transferring {} (after fee deduction) to {}",
-            transfer_amount,
-            caller
-        );
+            log!(
+                INFO,
+                "[withdraw_and_close] Transferring {} (after fee deduction) to {}",
+                transfer_amount,
+                caller
+            );
 
-        match management::transfer_collateral(transfer_amount.to_u64(), caller, ledger_canister_id).await {
-            Ok(idx) => {
-                // Record the withdrawal event
-                mutate_state(|s| crate::event::record_collateral_withdrawn(s, vault_id, amount_to_transfer, idx));
+            match management::transfer_collateral(
+                transfer_amount.to_u64(),
+                caller,
+                ledger_canister_id,
+            )
+            .await
+            {
+                Ok(idx) => {
+                    // Record the withdrawal event
+                    mutate_state(|s| {
+                        crate::event::record_collateral_withdrawn(
+                            s,
+                            vault_id,
+                            amount_to_transfer,
+                            idx,
+                        )
+                    });
 
-                log!(
+                    log!(
                     INFO,
                     "[withdraw_and_close] Successfully withdrew {} from vault #{}, block_index: {}",
                     amount_to_transfer,
@@ -2993,42 +4128,51 @@ async fn withdraw_and_close_vault_internal(caller: Principal, vault_id: u64) -> 
                     idx
                 );
 
-                block_index = Some(idx);
-            },
-            Err(error) => {
-                // CRITICAL: If the transfer fails, restore the collateral and exit WITHOUT closing the vault
-                mutate_state(|state| {
-                    if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
-                        vault.collateral_amount = amount_to_transfer.to_u64();
-                    }
-                    // Wave-8b LIQ-002: rollback restores collateral → re-key.
-                    state.reindex_vault_cr(vault_id);
-                });
+                    block_index = Some(idx);
+                }
+                Err(error) => {
+                    // CRITICAL: If the transfer fails, restore the collateral and exit WITHOUT closing the vault
+                    mutate_state(|state| {
+                        if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
+                            vault.collateral_amount = amount_to_transfer.to_u64();
+                        }
+                        // Wave-8b LIQ-002: rollback restores collateral → re-key.
+                        state.reindex_vault_cr(vault_id);
+                    });
 
-                log!(
-                    DEBUG,
-                    "[withdraw_and_close] Failed to transfer {} to {}, error: {}",
-                    transfer_amount,
-                    caller,
-                    error
-                );
+                    log!(
+                        DEBUG,
+                        "[withdraw_and_close] Failed to transfer {} to {}, error: {}",
+                        transfer_amount,
+                        caller,
+                        error
+                    );
 
-                return Err(ProtocolError::TransferError(error));
+                    return Err(ProtocolError::TransferError(error));
+                }
             }
-        }
         } // end native-XRP `else` (the ICRC transfer path)
     } else {
-        log!(INFO, "[withdraw_and_close] Vault #{} has no collateral to withdraw", vault_id);
+        log!(
+            INFO,
+            "[withdraw_and_close] Vault #{} has no collateral to withdraw",
+            vault_id
+        );
     };
-    
+
     // Now close the vault - only if we've successfully transferred any funds
     // or if there were no funds to transfer
     mutate_state(|s| {
         // Make sure vault exists before attempting to remove
         if s.vault_id_to_vaults.contains_key(&vault_id) {
             // Record the combined withdraw and close event
-            crate::event::record_withdraw_and_close_vault(s, vault_id, amount_to_transfer, block_index);
-            
+            crate::event::record_withdraw_and_close_vault(
+                s,
+                vault_id,
+                amount_to_transfer,
+                block_index,
+            );
+
             log!(
                 INFO,
                 "[withdraw_and_close] Successfully closed vault #{} for principal {}",
@@ -3044,7 +4188,7 @@ async fn withdraw_and_close_vault_internal(caller: Principal, vault_id: u64) -> 
             );
         }
     });
-    
+
     // Return the block index if we did a transfer, otherwise None
     Ok(block_index)
 }
@@ -3052,7 +4196,8 @@ async fn withdraw_and_close_vault_internal(caller: Principal, vault_id: u64) -> 
 pub async fn withdraw_and_close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
     let caller = ic_cdk::caller();
     // Use a specific name for better tracking
-    let _guard_principal = GuardPrincipal::new(caller, &format!("withdraw_and_close_{}", vault_id))?;
+    let _guard_principal =
+        GuardPrincipal::new(caller, &format!("withdraw_and_close_{}", vault_id))?;
     // AR-B-003: per-vault op lock; see guard.rs::VaultLiquidationGuard.
     let _vault_op_guard = VaultLiquidationGuard::new(vault_id)?;
 
@@ -3132,12 +4277,16 @@ pub async fn repay_and_close_vault(arg: VaultArg) -> Result<RepayAndCloseSuccess
     }
 }
 
-pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result<SuccessWithFee, ProtocolError> {
+pub async fn liquidate_vault_partial(
+    vault_id: u64,
+    icusd_amount: u64,
+) -> Result<SuccessWithFee, ProtocolError> {
     let caller = ic_cdk::api::caller();
-    let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_partial_{}", vault_id))?;
+    let guard_principal =
+        GuardPrincipal::new(caller, &format!("liquidate_vault_partial_{}", vault_id))?;
     reject_if_bot_processing(vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault
-    // BK-001/002: per-vault lock so two different callers can't race this vault
-    // and both be paid the full pre-state collateral from the shared pool.
+                                         // BK-001/002: per-vault lock so two different callers can't race this vault
+                                         // and both be paid the full pre-state collateral from the shared pool.
     let _vault_liq_guard = VaultLiquidationGuard::new(vault_id)?;
 
     // Wave-8b LIQ-002 band gate deactivated 2026-05-18. The per-vault CR
@@ -3156,21 +4305,37 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
             minimum_amount: read_state(|s| s.min_icusd_amount).to_u64(),
         });
     }
-    
+
     // Step 1: Validate vault is liquidatable and get partial liquidation amounts
-    let (vault, collateral_price, config_decimals, collateral_price_usd, _mode, max_liquidatable_debt, collateral_to_liquidator, total_to_seize, protocol_cut) = match read_state(|s| {
+    let (
+        vault,
+        collateral_price,
+        config_decimals,
+        collateral_price_usd,
+        _mode,
+        max_liquidatable_debt,
+        collateral_to_liquidator,
+        total_to_seize,
+        protocol_cut,
+    ) = match read_state(|s| {
         match s.vault_id_to_vaults.get(&vault_id) {
             Some(vault) => {
                 // Check collateral status allows liquidation
                 if let Some(status) = s.get_collateral_status(&vault.collateral_type) {
                     if !status.allows_liquidation() {
-                        return Err("Liquidation is not allowed for this collateral type.".to_string());
+                        return Err(
+                            "Liquidation is not allowed for this collateral type.".to_string()
+                        );
                     }
                 }
 
-                let price = s.get_collateral_price_decimal(&vault.collateral_type)
-                    .ok_or_else(|| "No price available for collateral. Price feed may be down.".to_string())?;
-                let decimals = s.get_collateral_config(&vault.collateral_type)
+                let price = s
+                    .get_collateral_price_decimal(&vault.collateral_type)
+                    .ok_or_else(|| {
+                        "No price available for collateral. Price feed may be down.".to_string()
+                    })?;
+                let decimals = s
+                    .get_collateral_config(&vault.collateral_type)
                     .map(|c| c.decimals)
                     .unwrap_or(8);
                 let collateral_price_usd = UsdIcp::from(price);
@@ -3186,17 +4351,22 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
                     ))
                 } else {
                     // Cap at the amount needed to restore vault CR to recovery_target_cr
-                    let max_liquidatable = s.compute_partial_liquidation_cap(vault, collateral_price_usd);
+                    let max_liquidatable =
+                        s.compute_partial_liquidation_cap(vault, collateral_price_usd);
 
                     // Ensure requested amount doesn't exceed maximum
-                    let capped_amount = liquidation_amount.min(max_liquidatable).min(vault.borrowed_icusd_amount);
+                    let capped_amount = liquidation_amount
+                        .min(max_liquidatable)
+                        .min(vault.borrowed_icusd_amount);
 
                     // LIQ-003: round residual up to full debt if it would land
                     // in (0, min_vault_debt). Mirrors the repay-side invariant.
-                    let min_vault_debt = s.get_collateral_config(&vault.collateral_type)
+                    let min_vault_debt = s
+                        .get_collateral_config(&vault.collateral_type)
                         .map(|c| c.min_vault_debt)
                         .unwrap_or(ICUSD::new(0));
-                    let actual_liquidation_amount = round_up_partial_liq_dust(vault, capped_amount, min_vault_debt);
+                    let actual_liquidation_amount =
+                        round_up_partial_liq_dust(vault, capped_amount, min_vault_debt);
 
                     if actual_liquidation_amount == ICUSD::new(0) {
                         return Err("Cannot liquidate zero amount".to_string());
@@ -3205,19 +4375,37 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
                     // Calculate collateral to transfer (debt + liquidation bonus)
                     let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
                     let protocol_share = s.get_liquidation_protocol_share();
-                    let collateral_raw = crate::numeric::icusd_to_collateral_amount(actual_liquidation_amount, price, decimals);
+                    let collateral_raw = crate::numeric::icusd_to_collateral_amount(
+                        actual_liquidation_amount,
+                        price,
+                        decimals,
+                    );
                     let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
-                    let total_to_seize = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
+                    let total_to_seize =
+                        collateral_with_bonus.min(ICP::from(vault.collateral_amount));
 
                     // Split: protocol gets a share of the bonus portion (liquidator's profit)
                     let bonus_portion = total_to_seize.to_u64().saturating_sub(collateral_raw);
-                    let protocol_cut = (rust_decimal::Decimal::from(bonus_portion) * protocol_share.0)
-                        .to_u64().unwrap_or(0);
-                    let collateral_to_liquidator = ICP::from(total_to_seize.to_u64() - protocol_cut);
+                    let protocol_cut = (rust_decimal::Decimal::from(bonus_portion)
+                        * protocol_share.0)
+                        .to_u64()
+                        .unwrap_or(0);
+                    let collateral_to_liquidator =
+                        ICP::from(total_to_seize.to_u64() - protocol_cut);
 
-                    Ok((vault.clone(), price, decimals, collateral_price_usd, s.mode, actual_liquidation_amount, collateral_to_liquidator, total_to_seize, protocol_cut))
+                    Ok((
+                        vault.clone(),
+                        price,
+                        decimals,
+                        collateral_price_usd,
+                        s.mode,
+                        actual_liquidation_amount,
+                        collateral_to_liquidator,
+                        total_to_seize,
+                        protocol_cut,
+                    ))
                 }
-            },
+            }
             None => Err(format!("Vault #{} not found", vault_id)),
         }
     }) {
@@ -3240,12 +4428,19 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
     // Step 2: Take icUSD from liquidator
     let icusd_block_index = match transfer_icusd_from(max_liquidatable_debt, caller).await {
         Ok(block_index) => {
-            log!(INFO, "[liquidate_vault_partial] Received {} icUSD from liquidator", max_liquidatable_debt.to_u64());
+            log!(
+                INFO,
+                "[liquidate_vault_partial] Received {} icUSD from liquidator",
+                max_liquidatable_debt.to_u64()
+            );
             block_index
-        },
+        }
         Err(transfer_from_error) => {
             guard_principal.fail();
-            return Err(ProtocolError::TransferFromError(transfer_from_error, max_liquidatable_debt.to_u64()));
+            return Err(ProtocolError::TransferFromError(
+                transfer_from_error,
+                max_liquidatable_debt.to_u64(),
+            ));
         }
     };
 
@@ -3257,10 +4452,15 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
                 let share = (rust_decimal::Decimal::from(max_liquidatable_debt.0)
                     * rust_decimal::Decimal::from(vault.accrued_interest.0)
                     / rust_decimal::Decimal::from(vault.borrowed_icusd_amount.0))
-                    .to_u64().unwrap_or(0);
+                .to_u64()
+                .unwrap_or(0);
                 ICUSD::new(share.min(vault.accrued_interest.0))
-            } else { ICUSD::new(0) }
-        } else { ICUSD::new(0) };
+            } else {
+                ICUSD::new(0)
+            }
+        } else {
+            ICUSD::new(0)
+        };
 
         // Reduce vault debt and collateral directly
         // Vault loses total_to_seize (liquidator + protocol cut)
@@ -3329,7 +4529,11 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
             icp_to_liquidator: payout_to_liquidator,
             liquidator: Some(caller),
             icp_rate: Some(collateral_price_usd),
-            protocol_fee_collateral: if protocol_cut > 0 { Some(protocol_cut.min(collateral_applied)) } else { None },
+            protocol_fee_collateral: if protocol_cut > 0 {
+                Some(protocol_cut.min(collateral_applied))
+            } else {
+                None
+            },
             timestamp: Some(ic_cdk::api::time()),
             three_usd_reserves_e8s: None,
         };
@@ -3352,19 +4556,30 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
         // Shared drain rule (see state::cleanup_if_drained): remove the vault
         // if this liquidation emptied it, else re-key its CR index entry.
         if s.cleanup_if_drained(vault_id) {
-            log!(INFO, "[liquidate_vault_partial] Vault #{} fully liquidated — removed", vault_id);
+            log!(
+                INFO,
+                "[liquidate_vault_partial] Vault #{} fully liquidated — removed",
+                vault_id
+            );
         }
 
-        log!(INFO, "[liquidate_vault_partial] Partial liquidation completed, {} pending transfers created", 1);
+        log!(
+            INFO,
+            "[liquidate_vault_partial] Partial liquidation completed, {} pending transfers created",
+            1
+        );
         interest_share
     });
 
     // Route interest share via N-way split
     // IC-B-002 (audit 2026-06-09): re-queue any unminted interest share so the
     // next flush retries it instead of silently dropping treasury revenue.
-    let unminted_interest = crate::treasury::distribute_interest(interest_share, vault.collateral_type).await;
+    let unminted_interest =
+        crate::treasury::distribute_interest(interest_share, vault.collateral_type).await;
     if unminted_interest.to_u64() > 0 {
-        mutate_state(|s| s.restore_pending_interest_for_pool(vault.collateral_type, unminted_interest.to_u64()));
+        mutate_state(|s| {
+            s.restore_pending_interest_for_pool(vault.collateral_type, unminted_interest.to_u64())
+        });
     }
 
     // Send protocol's liquidation fee cut to treasury (fire-and-forget)
@@ -3377,36 +4592,60 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
             let dev = read_state(|s| s.developer_principal);
             let now_ns = ic_cdk::api::time();
             mutate_state(|s| {
-                record_xrp_claim(s, dev, vault.owner, vault.vault_id, protocol_cut.to_u64().unwrap_or(0), now_ns);
+                record_xrp_claim(
+                    s,
+                    dev,
+                    vault.owner,
+                    vault.vault_id,
+                    protocol_cut.to_u64().unwrap_or(0),
+                    now_ns,
+                );
             });
         } else {
             let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
-            crate::treasury::send_liquidation_fee_to_treasury(protocol_cut, vault.collateral_type, asset_type).await;
+            crate::treasury::send_liquidation_fee_to_treasury(
+                protocol_cut,
+                vault.collateral_type,
+                asset_type,
+            )
+            .await;
         }
     }
 
     // Step 4: Process transfer (same as complete liquidation)
     match try_process_pending_transfers_immediate(vault_id).await {
         Ok(processed_count) => {
-            log!(INFO, "[liquidate_vault_partial] Successfully processed {} transfers immediately", processed_count);
-        },
+            log!(
+                INFO,
+                "[liquidate_vault_partial] Successfully processed {} transfers immediately",
+                processed_count
+            );
+        }
         Err(e) => {
             log!(INFO, "[liquidate_vault_partial] Immediate processing failed: {}. Transfers will be retried via timer", e);
             schedule_transfer_retry(vault_id, 0);
         }
     }
-    
+
     ic_cdk_timers::set_timer(std::time::Duration::from_secs(2), move || {
         ic_cdk::spawn(async move {
-            log!(INFO, "[liquidate_vault_partial] Backup timer processing transfers for vault #{}", vault_id);
+            log!(
+                INFO,
+                "[liquidate_vault_partial] Backup timer processing transfers for vault #{}",
+                vault_id
+            );
             let _ = crate::process_pending_transfer().await;
         })
     });
-    
+
     guard_principal.complete();
-    
+
     // Calculate fee (liquidator bonus)
-    let liquidator_value_received = crate::numeric::collateral_usd_value(collateral_to_liquidator.to_u64(), collateral_price, config_decimals);
+    let liquidator_value_received = crate::numeric::collateral_usd_value(
+        collateral_to_liquidator.to_u64(),
+        collateral_price,
+        config_decimals,
+    );
     let fee_amount = if liquidator_value_received > max_liquidatable_debt {
         liquidator_value_received - max_liquidatable_debt
     } else {
@@ -3429,10 +4668,11 @@ pub async fn liquidate_vault_partial(vault_id: u64, icusd_amount: u64) -> Result
 pub async fn liquidate_vault_partial_with_stable(
     vault_id: u64,
     stable_amount: u64,
-    token_type: StableTokenType
+    token_type: StableTokenType,
 ) -> Result<SuccessWithFee, ProtocolError> {
     let caller = ic_cdk::api::caller();
-    let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_stable_{}", vault_id))?;
+    let guard_principal =
+        GuardPrincipal::new(caller, &format!("liquidate_vault_stable_{}", vault_id))?;
     reject_if_bot_processing(vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault
     let _vault_liq_guard = VaultLiquidationGuard::new(vault_id)?; // BK-001/002 per-vault lock
 
@@ -3446,7 +4686,10 @@ pub async fn liquidate_vault_partial_with_stable(
     });
     if !is_enabled {
         guard_principal.fail();
-        return Err(ProtocolError::GenericError(format!("{:?} liquidations are currently disabled", token_type)));
+        return Err(ProtocolError::GenericError(format!(
+            "{:?} liquidations are currently disabled",
+            token_type
+        )));
     }
 
     // Depeg protection: fetch fresh stablecoin price and reject if outside $0.95–$1.05
@@ -3467,19 +4710,35 @@ pub async fn liquidate_vault_partial_with_stable(
     }
 
     // Step 1: Validate vault is liquidatable and get partial liquidation amounts
-    let (vault, collateral_price, config_decimals, collateral_price_usd, _mode, max_liquidatable_debt, collateral_to_liquidator, total_to_seize, protocol_cut) = match read_state(|s| {
+    let (
+        vault,
+        collateral_price,
+        config_decimals,
+        collateral_price_usd,
+        _mode,
+        max_liquidatable_debt,
+        collateral_to_liquidator,
+        total_to_seize,
+        protocol_cut,
+    ) = match read_state(|s| {
         match s.vault_id_to_vaults.get(&vault_id) {
             Some(vault) => {
                 // Check collateral status allows liquidation
                 if let Some(status) = s.get_collateral_status(&vault.collateral_type) {
                     if !status.allows_liquidation() {
-                        return Err("Liquidation is not allowed for this collateral type.".to_string());
+                        return Err(
+                            "Liquidation is not allowed for this collateral type.".to_string()
+                        );
                     }
                 }
 
-                let price = s.get_collateral_price_decimal(&vault.collateral_type)
-                    .ok_or_else(|| "No price available for collateral. Price feed may be down.".to_string())?;
-                let decimals = s.get_collateral_config(&vault.collateral_type)
+                let price = s
+                    .get_collateral_price_decimal(&vault.collateral_type)
+                    .ok_or_else(|| {
+                        "No price available for collateral. Price feed may be down.".to_string()
+                    })?;
+                let decimals = s
+                    .get_collateral_config(&vault.collateral_type)
                     .map(|c| c.decimals)
                     .unwrap_or(8);
                 let collateral_price_usd = UsdIcp::from(price);
@@ -3495,16 +4754,21 @@ pub async fn liquidate_vault_partial_with_stable(
                     ))
                 } else {
                     // Cap at the amount needed to restore vault CR to recovery_target_cr
-                    let max_liquidatable = s.compute_partial_liquidation_cap(vault, collateral_price_usd);
+                    let max_liquidatable =
+                        s.compute_partial_liquidation_cap(vault, collateral_price_usd);
 
-                    let capped_amount = liquidation_amount.min(max_liquidatable).min(vault.borrowed_icusd_amount);
+                    let capped_amount = liquidation_amount
+                        .min(max_liquidatable)
+                        .min(vault.borrowed_icusd_amount);
 
                     // LIQ-003: round residual up to full debt if it would land
                     // in (0, min_vault_debt). Mirrors the repay-side invariant.
-                    let min_vault_debt = s.get_collateral_config(&vault.collateral_type)
+                    let min_vault_debt = s
+                        .get_collateral_config(&vault.collateral_type)
                         .map(|c| c.min_vault_debt)
                         .unwrap_or(ICUSD::new(0));
-                    let actual_liquidation_amount = round_up_partial_liq_dust(vault, capped_amount, min_vault_debt);
+                    let actual_liquidation_amount =
+                        round_up_partial_liq_dust(vault, capped_amount, min_vault_debt);
 
                     if actual_liquidation_amount == ICUSD::new(0) {
                         return Err("Cannot liquidate zero amount".to_string());
@@ -3512,19 +4776,37 @@ pub async fn liquidate_vault_partial_with_stable(
 
                     let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
                     let protocol_share = s.get_liquidation_protocol_share();
-                    let collateral_raw = crate::numeric::icusd_to_collateral_amount(actual_liquidation_amount, price, decimals);
+                    let collateral_raw = crate::numeric::icusd_to_collateral_amount(
+                        actual_liquidation_amount,
+                        price,
+                        decimals,
+                    );
                     let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
-                    let total_to_seize = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
+                    let total_to_seize =
+                        collateral_with_bonus.min(ICP::from(vault.collateral_amount));
 
                     // Split: protocol gets a share of the bonus portion
                     let bonus_portion = total_to_seize.to_u64().saturating_sub(collateral_raw);
-                    let protocol_cut = (rust_decimal::Decimal::from(bonus_portion) * protocol_share.0)
-                        .to_u64().unwrap_or(0);
-                    let collateral_to_liquidator = ICP::from(total_to_seize.to_u64() - protocol_cut);
+                    let protocol_cut = (rust_decimal::Decimal::from(bonus_portion)
+                        * protocol_share.0)
+                        .to_u64()
+                        .unwrap_or(0);
+                    let collateral_to_liquidator =
+                        ICP::from(total_to_seize.to_u64() - protocol_cut);
 
-                    Ok((vault.clone(), price, decimals, collateral_price_usd, s.mode, actual_liquidation_amount, collateral_to_liquidator, total_to_seize, protocol_cut))
+                    Ok((
+                        vault.clone(),
+                        price,
+                        decimals,
+                        collateral_price_usd,
+                        s.mode,
+                        actual_liquidation_amount,
+                        collateral_to_liquidator,
+                        total_to_seize,
+                        protocol_cut,
+                    ))
                 }
-            },
+            }
             None => Err(format!("Vault #{} not found", vault_id)),
         }
     }) {
@@ -3550,19 +4832,30 @@ pub async fn liquidate_vault_partial_with_stable(
     let base_stable_e6s = debt_e8s / 100;
     let fee_rate = read_state(|s| s.ckstable_repay_fee);
     let fee_e6s = (rust_decimal::Decimal::from(base_stable_e6s) * fee_rate.0)
-        .to_u64().unwrap_or(0);
+        .to_u64()
+        .unwrap_or(0);
     let total_pull_e6s = base_stable_e6s + fee_e6s;
 
-    let stable_block_index = match transfer_stable_from(token_type.clone(), total_pull_e6s, caller).await {
-        Ok(block_index) => {
-            log!(INFO, "[liquidate_vault_stable] Received {} e6s {:?} from liquidator (fee: {} e6s)", total_pull_e6s, token_type, fee_e6s);
-            block_index
-        },
-        Err(transfer_from_error) => {
-            guard_principal.fail();
-            return Err(ProtocolError::TransferFromError(transfer_from_error, total_pull_e6s));
-        }
-    };
+    let stable_block_index =
+        match transfer_stable_from(token_type.clone(), total_pull_e6s, caller).await {
+            Ok(block_index) => {
+                log!(
+                    INFO,
+                    "[liquidate_vault_stable] Received {} e6s {:?} from liquidator (fee: {} e6s)",
+                    total_pull_e6s,
+                    token_type,
+                    fee_e6s
+                );
+                block_index
+            }
+            Err(transfer_from_error) => {
+                guard_principal.fail();
+                return Err(ProtocolError::TransferFromError(
+                    transfer_from_error,
+                    total_pull_e6s,
+                ));
+            }
+        };
 
     // Step 3: Update protocol state (partial liquidation)
     let interest_share = mutate_state(|s| {
@@ -3572,10 +4865,15 @@ pub async fn liquidate_vault_partial_with_stable(
                 let share = (rust_decimal::Decimal::from(max_liquidatable_debt.0)
                     * rust_decimal::Decimal::from(vault.accrued_interest.0)
                     / rust_decimal::Decimal::from(vault.borrowed_icusd_amount.0))
-                    .to_u64().unwrap_or(0);
+                .to_u64()
+                .unwrap_or(0);
                 ICUSD::new(share.min(vault.accrued_interest.0))
-            } else { ICUSD::new(0) }
-        } else { ICUSD::new(0) };
+            } else {
+                ICUSD::new(0)
+            }
+        } else {
+            ICUSD::new(0)
+        };
 
         // Reduce vault debt and collateral directly
         // Vault loses total_to_seize (liquidator + protocol cut)
@@ -3638,7 +4936,11 @@ pub async fn liquidate_vault_partial_with_stable(
             icp_to_liquidator: payout_to_liquidator,
             liquidator: Some(caller),
             icp_rate: Some(collateral_price_usd),
-            protocol_fee_collateral: if protocol_cut > 0 { Some(protocol_cut.min(collateral_applied)) } else { None },
+            protocol_fee_collateral: if protocol_cut > 0 {
+                Some(protocol_cut.min(collateral_applied))
+            } else {
+                None
+            },
             timestamp: Some(ic_cdk::api::time()),
             three_usd_reserves_e8s: None,
         };
@@ -3660,10 +4962,17 @@ pub async fn liquidate_vault_partial_with_stable(
         // Shared drain rule (see state::cleanup_if_drained): remove the vault
         // if this liquidation emptied it, else re-key its CR index entry.
         if s.cleanup_if_drained(vault_id) {
-            log!(INFO, "[liquidate_vault_stable] Vault #{} fully liquidated — removed", vault_id);
+            log!(
+                INFO,
+                "[liquidate_vault_stable] Vault #{} fully liquidated — removed",
+                vault_id
+            );
         }
 
-        log!(INFO, "[liquidate_vault_stable] Partial liquidation completed, pending transfer created");
+        log!(
+            INFO,
+            "[liquidate_vault_stable] Partial liquidation completed, pending transfer created"
+        );
         interest_share
     });
 
@@ -3673,7 +4982,8 @@ pub async fn liquidate_vault_partial_with_stable(
             interest_share.to_u64(),
             vault.collateral_type,
             token_type.clone(),
-        ).await;
+        )
+        .await;
     }
 
     // Route fee surcharge to treasury as stablecoins (mirrors repay_to_vault_with_stable)
@@ -3686,7 +4996,8 @@ pub async fn liquidate_vault_partial_with_stable(
             (s.treasury_principal, ledger)
         });
         if let (Some(treasury_principal), Some(stable_ledger)) = (treasury, stable_ledger) {
-            match management::transfer_collateral(fee_e6s, treasury_principal, stable_ledger).await {
+            match management::transfer_collateral(fee_e6s, treasury_principal, stable_ledger).await
+            {
                 Ok(block) => {
                     log!(INFO,
                         "[liquidate_vault_stable] Transferred {} e6s fee surcharge to treasury (block {})",
@@ -3713,19 +5024,35 @@ pub async fn liquidate_vault_partial_with_stable(
             let dev = read_state(|s| s.developer_principal);
             let now_ns = ic_cdk::api::time();
             mutate_state(|s| {
-                record_xrp_claim(s, dev, vault.owner, vault.vault_id, protocol_cut.to_u64().unwrap_or(0), now_ns);
+                record_xrp_claim(
+                    s,
+                    dev,
+                    vault.owner,
+                    vault.vault_id,
+                    protocol_cut.to_u64().unwrap_or(0),
+                    now_ns,
+                );
             });
         } else {
             let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
-            crate::treasury::send_liquidation_fee_to_treasury(protocol_cut, vault.collateral_type, asset_type).await;
+            crate::treasury::send_liquidation_fee_to_treasury(
+                protocol_cut,
+                vault.collateral_type,
+                asset_type,
+            )
+            .await;
         }
     }
 
     // Step 4: Process transfer
     match try_process_pending_transfers_immediate(vault_id).await {
         Ok(processed_count) => {
-            log!(INFO, "[liquidate_vault_stable] Successfully processed {} transfers immediately", processed_count);
-        },
+            log!(
+                INFO,
+                "[liquidate_vault_stable] Successfully processed {} transfers immediately",
+                processed_count
+            );
+        }
         Err(e) => {
             log!(INFO, "[liquidate_vault_stable] Immediate processing failed: {}. Transfers will be retried via timer", e);
             schedule_transfer_retry(vault_id, 0);
@@ -3734,7 +5061,11 @@ pub async fn liquidate_vault_partial_with_stable(
 
     ic_cdk_timers::set_timer(std::time::Duration::from_secs(2), move || {
         ic_cdk::spawn(async move {
-            log!(INFO, "[liquidate_vault_stable] Backup timer processing transfers for vault #{}", vault_id);
+            log!(
+                INFO,
+                "[liquidate_vault_stable] Backup timer processing transfers for vault #{}",
+                vault_id
+            );
             let _ = crate::process_pending_transfer().await;
         })
     });
@@ -3742,15 +5073,24 @@ pub async fn liquidate_vault_partial_with_stable(
     guard_principal.complete();
 
     // Calculate fee (liquidator bonus)
-    let liquidator_value_received = crate::numeric::collateral_usd_value(collateral_to_liquidator.to_u64(), collateral_price, config_decimals);
+    let liquidator_value_received = crate::numeric::collateral_usd_value(
+        collateral_to_liquidator.to_u64(),
+        collateral_price,
+        config_decimals,
+    );
     let fee_amount = if liquidator_value_received > max_liquidatable_debt {
         liquidator_value_received - max_liquidatable_debt
     } else {
         ICUSD::new(0)
     };
 
-    log!(INFO, "[liquidate_vault_stable] Liquidation completed. Block index: {}, Fee: {}, Collateral: {}",
-         stable_block_index, fee_amount.to_u64(), collateral_to_liquidator.to_u64());
+    log!(
+        INFO,
+        "[liquidate_vault_stable] Liquidation completed. Block index: {}, Fee: {}, Collateral: {}",
+        stable_block_index,
+        fee_amount.to_u64(),
+        collateral_to_liquidator.to_u64()
+    );
 
     Ok(SuccessWithFee {
         block_index: stable_block_index,
@@ -3819,7 +5159,8 @@ pub async fn liquidate_vault_debt_already_burned(
         ));
     }
 
-    let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_debt_burned_{}", vault_id))?;
+    let guard_principal =
+        GuardPrincipal::new(caller, &format!("liquidate_vault_debt_burned_{}", vault_id))?;
     reject_if_bot_processing(vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault (SP path)
     let _vault_liq_guard = VaultLiquidationGuard::new(vault_id)?; // BK-001/002 per-vault lock
 
@@ -3874,9 +5215,7 @@ pub async fn liquidate_vault_debt_already_burned(
 
     let expected_amount_e8s = match proof.ledger_kind {
         crate::icrc3_proof::SpProofLedger::IcusdBurn => icusd_burned_e8s,
-        crate::icrc3_proof::SpProofLedger::ThreePoolTransfer => {
-            three_usd_received_e8s.unwrap_or(0)
-        }
+        crate::icrc3_proof::SpProofLedger::ThreePoolTransfer => three_usd_received_e8s.unwrap_or(0),
     };
 
     let expectations = crate::icrc3_proof::ProofExpectations {
@@ -3895,10 +5234,14 @@ pub async fn liquidate_vault_debt_already_burned(
     .await
     {
         guard_principal.fail();
-        log!(INFO,
+        log!(
+            INFO,
             "[liquidate_vault_debt_burned] [LIQ-004] proof verification FAILED for vault #{} \
              ({:?} block {}): {}",
-            vault_id, proof.ledger_kind, proof.block_index, err
+            vault_id,
+            proof.ledger_kind,
+            proof.block_index,
+            err
         );
         return Err(ProtocolError::GenericError(format!(
             "SP writedown proof verification failed: {}",
@@ -3920,18 +5263,33 @@ pub async fn liquidate_vault_debt_already_burned(
     }
 
     // Step 1: Validate vault is liquidatable and compute collateral to release
-    let (vault, collateral_price, config_decimals, collateral_price_usd, max_liquidatable_debt, collateral_to_liquidator, total_to_seize, protocol_cut) = match read_state(|s| {
+    let (
+        vault,
+        collateral_price,
+        config_decimals,
+        collateral_price_usd,
+        max_liquidatable_debt,
+        collateral_to_liquidator,
+        total_to_seize,
+        protocol_cut,
+    ) = match read_state(|s| {
         match s.vault_id_to_vaults.get(&vault_id) {
             Some(vault) => {
                 if let Some(status) = s.get_collateral_status(&vault.collateral_type) {
                     if !status.allows_liquidation() {
-                        return Err("Liquidation is not allowed for this collateral type.".to_string());
+                        return Err(
+                            "Liquidation is not allowed for this collateral type.".to_string()
+                        );
                     }
                 }
 
-                let price = s.get_collateral_price_decimal(&vault.collateral_type)
-                    .ok_or_else(|| "No price available for collateral. Price feed may be down.".to_string())?;
-                let decimals = s.get_collateral_config(&vault.collateral_type)
+                let price = s
+                    .get_collateral_price_decimal(&vault.collateral_type)
+                    .ok_or_else(|| {
+                        "No price available for collateral. Price feed may be down.".to_string()
+                    })?;
+                let decimals = s
+                    .get_collateral_config(&vault.collateral_type)
                     .map(|c| c.decimals)
                     .unwrap_or(8);
                 let collateral_price_usd = UsdIcp::from(price);
@@ -3940,7 +5298,8 @@ pub async fn liquidate_vault_debt_already_burned(
                 // The backend MUST honor the write-down regardless of vault health.
                 // Rejecting would leave burned icUSD unaccounted for.
                 {
-                    let actual_liquidation_amount = liquidation_amount.min(vault.borrowed_icusd_amount);
+                    let actual_liquidation_amount =
+                        liquidation_amount.min(vault.borrowed_icusd_amount);
 
                     if actual_liquidation_amount == ICUSD::new(0) {
                         return Err("Cannot liquidate zero amount".to_string());
@@ -3948,18 +5307,35 @@ pub async fn liquidate_vault_debt_already_burned(
 
                     let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
                     let protocol_share = s.get_liquidation_protocol_share();
-                    let collateral_raw = crate::numeric::icusd_to_collateral_amount(actual_liquidation_amount, price, decimals);
+                    let collateral_raw = crate::numeric::icusd_to_collateral_amount(
+                        actual_liquidation_amount,
+                        price,
+                        decimals,
+                    );
                     let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
-                    let total_to_seize = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
+                    let total_to_seize =
+                        collateral_with_bonus.min(ICP::from(vault.collateral_amount));
 
                     let bonus_portion = total_to_seize.to_u64().saturating_sub(collateral_raw);
-                    let protocol_cut = (rust_decimal::Decimal::from(bonus_portion) * protocol_share.0)
-                        .to_u64().unwrap_or(0);
-                    let collateral_to_liquidator = ICP::from(total_to_seize.to_u64() - protocol_cut);
+                    let protocol_cut = (rust_decimal::Decimal::from(bonus_portion)
+                        * protocol_share.0)
+                        .to_u64()
+                        .unwrap_or(0);
+                    let collateral_to_liquidator =
+                        ICP::from(total_to_seize.to_u64() - protocol_cut);
 
-                    Ok((vault.clone(), price, decimals, collateral_price_usd, actual_liquidation_amount, collateral_to_liquidator, total_to_seize, protocol_cut))
+                    Ok((
+                        vault.clone(),
+                        price,
+                        decimals,
+                        collateral_price_usd,
+                        actual_liquidation_amount,
+                        collateral_to_liquidator,
+                        total_to_seize,
+                        protocol_cut,
+                    ))
                 }
-            },
+            }
             None => Err(format!("Vault #{} not found", vault_id)),
         }
     }) {
@@ -4008,10 +5384,15 @@ pub async fn liquidate_vault_debt_already_burned(
                 let share = (rust_decimal::Decimal::from(max_liquidatable_debt.0)
                     * rust_decimal::Decimal::from(vault.accrued_interest.0)
                     / rust_decimal::Decimal::from(vault.borrowed_icusd_amount.0))
-                    .to_u64().unwrap_or(0);
+                .to_u64()
+                .unwrap_or(0);
                 ICUSD::new(share.min(vault.accrued_interest.0))
-            } else { ICUSD::new(0) }
-        } else { ICUSD::new(0) };
+            } else {
+                ICUSD::new(0)
+            }
+        } else {
+            ICUSD::new(0)
+        };
 
         // AR-B-001/BK-001 (audit 2026-06-09): capture applied amounts and
         // re-cap the payout, mirroring `liquidate_vault_partial`.
@@ -4078,7 +5459,11 @@ pub async fn liquidate_vault_debt_already_burned(
             icp_to_liquidator: payout_to_liquidator,
             liquidator: Some(caller),
             icp_rate: Some(collateral_price_usd),
-            protocol_fee_collateral: if protocol_cut > 0 { Some(protocol_cut.min(collateral_applied)) } else { None },
+            protocol_fee_collateral: if protocol_cut > 0 {
+                Some(protocol_cut.min(collateral_applied))
+            } else {
+                None
+            },
             timestamp: Some(ic_cdk::api::time()),
             three_usd_reserves_e8s: three_usd_received_e8s,
         };
@@ -4107,7 +5492,11 @@ pub async fn liquidate_vault_debt_already_burned(
         // 2026-05-18, but `check_vaults`' at-risk-band sharding (Wave-9c
         // DOS-005) still relies on accurate CR keys.
         if s.cleanup_if_drained(vault_id) {
-            log!(INFO, "[liquidate_vault_debt_burned] Vault #{} fully liquidated — removed", vault_id);
+            log!(
+                INFO,
+                "[liquidate_vault_debt_burned] Vault #{} fully liquidated — removed",
+                vault_id
+            );
         }
 
         interest_share
@@ -4116,9 +5505,12 @@ pub async fn liquidate_vault_debt_already_burned(
     // Route interest share via N-way split
     // IC-B-002 (audit 2026-06-09): re-queue any unminted interest share so the
     // next flush retries it instead of silently dropping treasury revenue.
-    let unminted_interest = crate::treasury::distribute_interest(interest_share, vault.collateral_type).await;
+    let unminted_interest =
+        crate::treasury::distribute_interest(interest_share, vault.collateral_type).await;
     if unminted_interest.to_u64() > 0 {
-        mutate_state(|s| s.restore_pending_interest_for_pool(vault.collateral_type, unminted_interest.to_u64()));
+        mutate_state(|s| {
+            s.restore_pending_interest_for_pool(vault.collateral_type, unminted_interest.to_u64())
+        });
     }
 
     // Send protocol's liquidation fee cut to treasury
@@ -4131,43 +5523,75 @@ pub async fn liquidate_vault_debt_already_burned(
             let dev = read_state(|s| s.developer_principal);
             let now_ns = ic_cdk::api::time();
             mutate_state(|s| {
-                record_xrp_claim(s, dev, vault.owner, vault.vault_id, protocol_cut.to_u64().unwrap_or(0), now_ns);
+                record_xrp_claim(
+                    s,
+                    dev,
+                    vault.owner,
+                    vault.vault_id,
+                    protocol_cut.to_u64().unwrap_or(0),
+                    now_ns,
+                );
             });
         } else {
             let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
-            crate::treasury::send_liquidation_fee_to_treasury(protocol_cut, vault.collateral_type, asset_type).await;
+            crate::treasury::send_liquidation_fee_to_treasury(
+                protocol_cut,
+                vault.collateral_type,
+                asset_type,
+            )
+            .await;
         }
     }
 
     // Step 4: Process collateral transfer to stability pool
     match try_process_pending_transfers_immediate(vault_id).await {
         Ok(processed_count) => {
-            log!(INFO, "[liquidate_vault_debt_burned] Processed {} transfers immediately", processed_count);
-        },
+            log!(
+                INFO,
+                "[liquidate_vault_debt_burned] Processed {} transfers immediately",
+                processed_count
+            );
+        }
         Err(e) => {
-            log!(INFO, "[liquidate_vault_debt_burned] Immediate processing failed: {}. Retrying via timer", e);
+            log!(
+                INFO,
+                "[liquidate_vault_debt_burned] Immediate processing failed: {}. Retrying via timer",
+                e
+            );
             schedule_transfer_retry(vault_id, 0);
         }
     }
 
     ic_cdk_timers::set_timer(std::time::Duration::from_secs(2), move || {
         ic_cdk::spawn(async move {
-            log!(INFO, "[liquidate_vault_debt_burned] Backup timer for vault #{}", vault_id);
+            log!(
+                INFO,
+                "[liquidate_vault_debt_burned] Backup timer for vault #{}",
+                vault_id
+            );
             let _ = crate::process_pending_transfer().await;
         })
     });
 
     guard_principal.complete();
 
-    let liquidator_value_received = crate::numeric::collateral_usd_value(collateral_to_liquidator.to_u64(), collateral_price, config_decimals);
+    let liquidator_value_received = crate::numeric::collateral_usd_value(
+        collateral_to_liquidator.to_u64(),
+        collateral_price,
+        config_decimals,
+    );
     let fee_amount = if liquidator_value_received > max_liquidatable_debt {
         liquidator_value_received - max_liquidatable_debt
     } else {
         ICUSD::new(0)
     };
 
-    log!(INFO, "[liquidate_vault_debt_burned] Completed. Fee: {}, Collateral: {}",
-         fee_amount.to_u64(), collateral_to_liquidator.to_u64());
+    log!(
+        INFO,
+        "[liquidate_vault_debt_burned] Completed. Fee: {}, Collateral: {}",
+        fee_amount.to_u64(),
+        collateral_to_liquidator.to_u64()
+    );
 
     Ok(StabilityPoolLiquidationResult {
         success: true,
@@ -4191,75 +5615,110 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
     // `liquidate_vault_partial` above for rationale).
 
     // Step 1: Validate vault is liquidatable
-    let (vault, collateral_price, config_decimals, collateral_price_usd, mode) = match read_state(|s| {
-        match s.vault_id_to_vaults.get(&vault_id) {
-            Some(vault) => {
-                // Check collateral status allows liquidation
-                if let Some(status) = s.get_collateral_status(&vault.collateral_type) {
-                    if !status.allows_liquidation() {
-                        return Err("Liquidation is not allowed for this collateral type.".to_string());
+    let (vault, collateral_price, config_decimals, collateral_price_usd, mode) =
+        match read_state(|s| {
+            match s.vault_id_to_vaults.get(&vault_id) {
+                Some(vault) => {
+                    // Check collateral status allows liquidation
+                    if let Some(status) = s.get_collateral_status(&vault.collateral_type) {
+                        if !status.allows_liquidation() {
+                            return Err(
+                                "Liquidation is not allowed for this collateral type.".to_string()
+                            );
+                        }
+                    }
+
+                    let price = s
+                        .get_collateral_price_decimal(&vault.collateral_type)
+                        .ok_or_else(|| {
+                            "No price available for collateral. Price feed may be down.".to_string()
+                        })?;
+                    let decimals = s
+                        .get_collateral_config(&vault.collateral_type)
+                        .map(|c| c.decimals)
+                        .unwrap_or(8);
+                    let collateral_price_usd = UsdIcp::from(price);
+                    let ratio = compute_collateral_ratio(vault, collateral_price_usd, s);
+                    let min_liq_ratio = s.get_min_liquidation_ratio_for(&vault.collateral_type);
+
+                    if ratio >= min_liq_ratio {
+                        Err(format!(
+                            "Vault #{} is not liquidatable. Current ratio: {}, minimum: {}",
+                            vault_id,
+                            ratio.to_f64(),
+                            min_liq_ratio.to_f64()
+                        ))
+                    } else {
+                        Ok((vault.clone(), price, decimals, collateral_price_usd, s.mode))
                     }
                 }
-
-                let price = s.get_collateral_price_decimal(&vault.collateral_type)
-                    .ok_or_else(|| "No price available for collateral. Price feed may be down.".to_string())?;
-                let decimals = s.get_collateral_config(&vault.collateral_type)
-                    .map(|c| c.decimals)
-                    .unwrap_or(8);
-                let collateral_price_usd = UsdIcp::from(price);
-                let ratio = compute_collateral_ratio(vault, collateral_price_usd, s);
-                let min_liq_ratio = s.get_min_liquidation_ratio_for(&vault.collateral_type);
-
-                if ratio >= min_liq_ratio {
-                    Err(format!(
-                        "Vault #{} is not liquidatable. Current ratio: {}, minimum: {}",
-                        vault_id,
-                        ratio.to_f64(),
-                        min_liq_ratio.to_f64()
-                    ))
-                } else {
-                    Ok((vault.clone(), price, decimals, collateral_price_usd, s.mode))
-                }
-            },
-            None => Err(format!("Vault #{} not found", vault_id)),
-        }
-    }) {
-        Ok(result) => result,
-        Err(msg) => {
-            guard_principal.fail();
-            return Err(ProtocolError::GenericError(msg));
-        }
-    };
+                None => Err(format!("Vault #{} not found", vault_id)),
+            }
+        }) {
+            Ok(result) => result,
+            Err(msg) => {
+                guard_principal.fail();
+                return Err(ProtocolError::GenericError(msg));
+            }
+        };
 
     // Step 2: Calculate liquidation amounts
     // Check if this is a recovery-mode targeted liquidation (vault CR between 133-150%)
     let vault_collateral = ICP::from(vault.collateral_amount);
-    let (debt_amount, collateral_to_liquidator, total_to_seize, protocol_cut, excess_collateral, is_recovery_partial) = read_state(|s| {
+    let (
+        debt_amount,
+        collateral_to_liquidator,
+        total_to_seize,
+        protocol_cut,
+        excess_collateral,
+        is_recovery_partial,
+    ) = read_state(|s| {
         let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
         let protocol_share = s.get_liquidation_protocol_share();
         if let Some(repay_cap) = s.compute_recovery_repay_cap(&vault, collateral_price_usd) {
             // Recovery mode: only liquidate enough to restore CR to target
-            let collateral_raw = crate::numeric::icusd_to_collateral_amount(repay_cap, collateral_price, config_decimals);
+            let collateral_raw = crate::numeric::icusd_to_collateral_amount(
+                repay_cap,
+                collateral_price,
+                config_decimals,
+            );
             let total_to_seize = (ICP::from(collateral_raw) * liq_bonus).min(vault_collateral);
             // Split: protocol gets a share of the bonus portion (liquidator's profit)
             let bonus_portion = total_to_seize.to_u64().saturating_sub(collateral_raw);
             let protocol_cut = (rust_decimal::Decimal::from(bonus_portion) * protocol_share.0)
-                .to_u64().unwrap_or(0);
+                .to_u64()
+                .unwrap_or(0);
             let collateral_to_liquidator = ICP::from(total_to_seize.to_u64() - protocol_cut);
-            (repay_cap, collateral_to_liquidator, total_to_seize, protocol_cut, ICP::new(0), true)
+            (
+                repay_cap,
+                collateral_to_liquidator,
+                total_to_seize,
+                protocol_cut,
+                ICP::new(0),
+                true,
+            )
         } else {
             // Normal full liquidation
             let debt = vault.borrowed_icusd_amount;
-            let collateral_raw = crate::numeric::icusd_to_collateral_amount(debt, collateral_price, config_decimals);
+            let collateral_raw =
+                crate::numeric::icusd_to_collateral_amount(debt, collateral_price, config_decimals);
             let icp_with_bonus = ICP::from(collateral_raw) * liq_bonus;
             let total_to_seize = icp_with_bonus.min(vault_collateral);
             // Split: protocol gets a share of the bonus portion (liquidator's profit)
             let bonus_portion = total_to_seize.to_u64().saturating_sub(collateral_raw);
             let protocol_cut = (rust_decimal::Decimal::from(bonus_portion) * protocol_share.0)
-                .to_u64().unwrap_or(0);
+                .to_u64()
+                .unwrap_or(0);
             let collateral_to_liquidator = ICP::from(total_to_seize.to_u64() - protocol_cut);
             let excess = vault_collateral.saturating_sub(total_to_seize);
-            (debt, collateral_to_liquidator, total_to_seize, protocol_cut, excess, false)
+            (
+                debt,
+                collateral_to_liquidator,
+                total_to_seize,
+                protocol_cut,
+                excess,
+                false,
+            )
         }
     });
 
@@ -4276,12 +5735,19 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
     // Step 3: Take icUSD from liquidator (this must succeed for liquidation to proceed)
     let icusd_block_index = match transfer_icusd_from(debt_amount, caller).await {
         Ok(block_index) => {
-            log!(INFO, "[liquidate_vault] Received {} icUSD from liquidator", debt_amount.to_u64());
+            log!(
+                INFO,
+                "[liquidate_vault] Received {} icUSD from liquidator",
+                debt_amount.to_u64()
+            );
             block_index
-        },
+        }
         Err(transfer_from_error) => {
             guard_principal.fail();
-            return Err(ProtocolError::TransferFromError(transfer_from_error, debt_amount.to_u64()));
+            return Err(ProtocolError::TransferFromError(
+                transfer_from_error,
+                debt_amount.to_u64(),
+            ));
         }
     };
 
@@ -4385,11 +5851,24 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         // Create pending transfer for excess collateral to vault owner (if any)
         // (only for full liquidations, not recovery partial)
         if !is_recovery_partial && excess_pay > ICP::new(0) {
-            log!(INFO, "[liquidate_vault] Scheduling excess collateral return to vault owner");
+            log!(
+                INFO,
+                "[liquidate_vault] Scheduling excess collateral return to vault owner"
+            );
             // Native-XRP excess returns to the owner as an XrpClaim; ICRC excess
             // goes through the pending-excess transfer machinery.
-            if s.get_collateral_config(&vault.collateral_type).map(|c| c.is_native_xrp()).unwrap_or(false) {
-                record_xrp_claim(s, vault.owner, vault.owner, vault_id, excess_pay.to_u64(), ic_cdk::api::time());
+            if s.get_collateral_config(&vault.collateral_type)
+                .map(|c| c.is_native_xrp())
+                .unwrap_or(false)
+            {
+                record_xrp_claim(
+                    s,
+                    vault.owner,
+                    vault.owner,
+                    vault_id,
+                    excess_pay.to_u64(),
+                    ic_cdk::api::time(),
+                );
             } else {
                 let excess_nonce = s.next_op_nonce();
                 s.pending_excess_transfers.insert(
@@ -4405,8 +5884,15 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
             }
         }
 
-        log!(INFO, "[liquidate_vault] Protocol state updated, {} pending transfers created",
-             if !is_recovery_partial && excess_pay > ICP::new(0) { 2 } else { 1 });
+        log!(
+            INFO,
+            "[liquidate_vault] Protocol state updated, {} pending transfers created",
+            if !is_recovery_partial && excess_pay > ICP::new(0) {
+                2
+            } else {
+                1
+            }
+        );
         Some(interest_share)
     }) {
         Some(share) => share,
@@ -4422,8 +5908,13 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
             let refund_nonce = mutate_state(|s| s.next_op_nonce());
             match management::transfer_icusd_with_nonce(debt_amount, caller, refund_nonce).await {
                 Ok(refund_block) => {
-                    log!(INFO, "[liquidate_vault] Refunded {} icUSD to {} (block {})",
-                        debt_amount.to_u64(), caller, refund_block);
+                    log!(
+                        INFO,
+                        "[liquidate_vault] Refunded {} icUSD to {} (block {})",
+                        debt_amount.to_u64(),
+                        caller,
+                        refund_block
+                    );
                 }
                 Err(refund_err) => {
                     log!(INFO,
@@ -4456,9 +5947,12 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
     // Route interest share via N-way split
     // IC-B-002 (audit 2026-06-09): re-queue any unminted interest share so the
     // next flush retries it instead of silently dropping treasury revenue.
-    let unminted_interest = crate::treasury::distribute_interest(interest_share, vault.collateral_type).await;
+    let unminted_interest =
+        crate::treasury::distribute_interest(interest_share, vault.collateral_type).await;
     if unminted_interest.to_u64() > 0 {
-        mutate_state(|s| s.restore_pending_interest_for_pool(vault.collateral_type, unminted_interest.to_u64()));
+        mutate_state(|s| {
+            s.restore_pending_interest_for_pool(vault.collateral_type, unminted_interest.to_u64())
+        });
     }
 
     // Send protocol's liquidation fee cut to treasury (fire-and-forget)
@@ -4471,43 +5965,70 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
             let dev = read_state(|s| s.developer_principal);
             let now_ns = ic_cdk::api::time();
             mutate_state(|s| {
-                record_xrp_claim(s, dev, vault.owner, vault.vault_id, protocol_cut.to_u64().unwrap_or(0), now_ns);
+                record_xrp_claim(
+                    s,
+                    dev,
+                    vault.owner,
+                    vault.vault_id,
+                    protocol_cut.to_u64().unwrap_or(0),
+                    now_ns,
+                );
             });
         } else {
             let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
-            crate::treasury::send_liquidation_fee_to_treasury(protocol_cut, vault.collateral_type, asset_type).await;
+            crate::treasury::send_liquidation_fee_to_treasury(
+                protocol_cut,
+                vault.collateral_type,
+                asset_type,
+            )
+            .await;
         }
     }
 
     // Step 5: Attempt immediate transfer processing (best effort)
-    log!(INFO, "[liquidate_vault] Attempting immediate transfer processing...");
-    
+    log!(
+        INFO,
+        "[liquidate_vault] Attempting immediate transfer processing..."
+    );
+
     // Try to process transfers immediately
     match try_process_pending_transfers_immediate(vault_id).await {
         Ok(processed_count) => {
-            log!(INFO, "[liquidate_vault] Successfully processed {} transfers immediately", processed_count);
-        },
+            log!(
+                INFO,
+                "[liquidate_vault] Successfully processed {} transfers immediately",
+                processed_count
+            );
+        }
         Err(e) => {
             log!(INFO, "[liquidate_vault] Immediate processing failed: {}. Transfers will be retried via timer", e);
-            
+
             // Schedule retry with exponential backoff
             schedule_transfer_retry(vault_id, 0);
         }
     }
-    
+
     // Step 6: Always schedule a backup timer (in case immediate processing failed)
     ic_cdk_timers::set_timer(std::time::Duration::from_secs(2), move || {
         ic_cdk::spawn(async move {
-            log!(INFO, "[liquidate_vault] Backup timer processing transfers for vault #{}", vault_id);
+            log!(
+                INFO,
+                "[liquidate_vault] Backup timer processing transfers for vault #{}",
+                vault_id
+            );
             let _ = crate::process_pending_transfer().await;
         })
     });
-    
+
     // Step 7: Liquidation is successful (protocol state is consistent)
     guard_principal.complete();
-    
+
     // Calculate fee
-    let liquidator_value_received = crate::numeric::collateral_usd_value(collateral_to_liquidator.to_u64(), collateral_price, config_decimals);
+    let liquidator_value_received = crate::numeric::collateral_usd_value(
+        collateral_to_liquidator.to_u64(),
+        collateral_price,
+        config_decimals,
+    );
     let fee_amount = if liquidator_value_received > debt_amount {
         liquidator_value_received - debt_amount
     } else {
@@ -4522,7 +6043,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         fee_amount_paid: fee_amount.to_u64(),
         collateral_amount_received: Some(collateral_to_liquidator.to_u64()),
         debt_liquidated_e8s: None, // SP-101
-        stable_pulled_e6s: None, // SP-110
+        stable_pulled_e6s: None,   // SP-110
     })
 }
 
@@ -4558,12 +6079,13 @@ async fn try_process_pending_transfers_immediate(vault_id: u64) -> Result<u32, S
         // `queue_collateral_payout`), so a NativeXrp `collateral_type` cannot appear
         // in pending_margin_transfers / pending_excess_transfers.
         // Look up per-collateral ledger fee and canister ID
-        let (ledger_fee, ledger_canister_id) = read_state(|s| {
-            match s.get_collateral_config(&transfer.collateral_type) {
-                Some(config) => (ICP::from(config.ledger_fee), config.ledger_canister_id),
-                None => (s.icp_ledger_fee, s.icp_ledger_principal),
-            }
-        });
+        let (ledger_fee, ledger_canister_id) =
+            read_state(
+                |s| match s.get_collateral_config(&transfer.collateral_type) {
+                    Some(config) => (ICP::from(config.ledger_fee), config.ledger_canister_id),
+                    None => (s.icp_ledger_fee, s.icp_ledger_principal),
+                },
+            );
 
         if transfer.margin <= ledger_fee {
             log!(INFO, "[immediate_transfer] Skipping {} transfer {} owner {} - margin {} <= fee {}, removing",
@@ -4571,8 +6093,12 @@ async fn try_process_pending_transfers_immediate(vault_id: u64) -> Result<u32, S
             mutate_state(|s| {
                 let key = (transfer_vault_id, transfer_owner);
                 match transfer_type {
-                    "margin" => { s.pending_margin_transfers.remove(&key); },
-                    "excess" => { s.pending_excess_transfers.remove(&key); },
+                    "margin" => {
+                        s.pending_margin_transfers.remove(&key);
+                    }
+                    "excess" => {
+                        s.pending_excess_transfers.remove(&key);
+                    }
                     _ => {}
                 }
             });
@@ -4581,29 +6107,56 @@ async fn try_process_pending_transfers_immediate(vault_id: u64) -> Result<u32, S
         }
         let transfer_amount = transfer.margin - ledger_fee;
 
-        log!(INFO, "[immediate_transfer] Processing {} transfer {} of {} collateral to {}",
-             transfer_type, transfer_vault_id, transfer_amount.to_u64(), transfer.owner);
+        log!(
+            INFO,
+            "[immediate_transfer] Processing {} transfer {} of {} collateral to {}",
+            transfer_type,
+            transfer_vault_id,
+            transfer_amount.to_u64(),
+            transfer.owner
+        );
 
-        match management::transfer_collateral_with_nonce(transfer_amount.to_u64(), transfer.owner, ledger_canister_id, transfer.op_nonce).await {
+        match management::transfer_collateral_with_nonce(
+            transfer_amount.to_u64(),
+            transfer.owner,
+            ledger_canister_id,
+            transfer.op_nonce,
+        )
+        .await
+        {
             Ok(block_index) => {
-                log!(INFO, "[immediate_transfer] Transfer {} owner {} successful, block: {}",
-                    transfer_vault_id, transfer_owner, block_index);
+                log!(
+                    INFO,
+                    "[immediate_transfer] Transfer {} owner {} successful, block: {}",
+                    transfer_vault_id,
+                    transfer_owner,
+                    block_index
+                );
 
                 // Remove from the appropriate pending map
                 mutate_state(|s| {
                     let key = (transfer_vault_id, transfer_owner);
                     match transfer_type {
-                        "margin" => { s.pending_margin_transfers.remove(&key); },
-                        "excess" => { s.pending_excess_transfers.remove(&key); },
+                        "margin" => {
+                            s.pending_margin_transfers.remove(&key);
+                        }
+                        "excess" => {
+                            s.pending_excess_transfers.remove(&key);
+                        }
                         _ => {}
                     }
                 });
 
                 processed_count += 1;
-            },
+            }
             Err(error) => {
-                log!(INFO, "[immediate_transfer] Transfer {} owner {} failed: {}. Will retry later",
-                    transfer_vault_id, transfer_owner, error);
+                log!(
+                    INFO,
+                    "[immediate_transfer] Transfer {} owner {} failed: {}. Will retry later",
+                    transfer_vault_id,
+                    transfer_owner,
+                    error
+                );
                 // Leave in pending transfers for retry
                 return Err(format!("Transfer {} failed: {}", transfer_vault_id, error));
             }
@@ -4617,26 +6170,49 @@ async fn try_process_pending_transfers_immediate(vault_id: u64) -> Result<u32, S
 fn schedule_transfer_retry(vault_id: u64, retry_count: u32) {
     let max_retries = 5;
     if retry_count >= max_retries {
-        log!(INFO, "[retry_scheduler] Max retries reached for vault #{}", vault_id);
+        log!(
+            INFO,
+            "[retry_scheduler] Max retries reached for vault #{}",
+            vault_id
+        );
         return;
     }
-    
+
     // Exponential backoff: 1s, 2s, 4s, 8s, 16s
     let delay_seconds = 1u64 << retry_count;
-    
-    log!(INFO, "[retry_scheduler] Scheduling retry #{} for vault #{} in {}s", 
-         retry_count + 1, vault_id, delay_seconds);
-    
+
+    log!(
+        INFO,
+        "[retry_scheduler] Scheduling retry #{} for vault #{} in {}s",
+        retry_count + 1,
+        vault_id,
+        delay_seconds
+    );
+
     ic_cdk_timers::set_timer(std::time::Duration::from_secs(delay_seconds), move || {
         ic_cdk::spawn(async move {
-            log!(INFO, "[retry_scheduler] Retry #{} executing for vault #{}", retry_count + 1, vault_id);
-            
+            log!(
+                INFO,
+                "[retry_scheduler] Retry #{} executing for vault #{}",
+                retry_count + 1,
+                vault_id
+            );
+
             match try_process_pending_transfers_immediate(vault_id).await {
                 Ok(processed) => {
-                    log!(INFO, "[retry_scheduler] Retry #{} successful, processed {} transfers", retry_count + 1, processed);
-                },
+                    log!(
+                        INFO,
+                        "[retry_scheduler] Retry #{} successful, processed {} transfers",
+                        retry_count + 1,
+                        processed
+                    );
+                }
                 Err(_) => {
-                    log!(INFO, "[retry_scheduler] Retry #{} failed, scheduling next retry", retry_count + 1);
+                    log!(
+                        INFO,
+                        "[retry_scheduler] Retry #{} failed, scheduling next retry",
+                        retry_count + 1
+                    );
                     schedule_transfer_retry(vault_id, retry_count + 1);
                 }
             }
@@ -4646,7 +6222,8 @@ fn schedule_transfer_retry(vault_id: u64, retry_count: u32) {
 
 pub async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
     let caller = ic_cdk::api::caller();
-    let guard_principal = GuardPrincipal::new(caller, &format!("partial_repay_vault_{}", arg.vault_id))?;
+    let guard_principal =
+        GuardPrincipal::new(caller, &format!("partial_repay_vault_{}", arg.vault_id))?;
     // AR-B-003: per-vault op lock; see guard.rs::VaultLiquidationGuard. This
     // endpoint pulls icUSD across an await then commits via repay_to_vault, so
     // it needs the same serialization vs liquidation/redemption as its siblings.
@@ -4667,7 +6244,10 @@ pub async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError>
         Some(v) => v,
         None => {
             guard_principal.fail();
-            return Err(ProtocolError::GenericError(format!("Vault #{} not found", arg.vault_id)));
+            return Err(ProtocolError::GenericError(format!(
+                "Vault #{} not found",
+                arg.vault_id
+            )));
         }
     };
 
@@ -4676,9 +6256,10 @@ pub async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError>
     if let Some(status) = collateral_status {
         if !status.allows_repay() {
             guard_principal.fail();
-            return Err(ProtocolError::TemporarilyUnavailable(
-                format!("Collateral is {:?}, repayment not allowed", status)
-            ));
+            return Err(ProtocolError::TemporarilyUnavailable(format!(
+                "Collateral is {:?}, repayment not allowed",
+                status
+            )));
         }
     }
 
@@ -4716,12 +6297,19 @@ pub async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError>
 
     match transfer_icusd_from(amount, caller).await {
         Ok(block_index) => {
-            let interest_share = mutate_state(|s| record_repayed_to_vault(s, arg.vault_id, amount, block_index));
+            let interest_share =
+                mutate_state(|s| record_repayed_to_vault(s, arg.vault_id, amount, block_index));
             // IC-B-002 (audit 2026-06-09): re-queue any unminted interest share so the
             // next flush retries it instead of silently dropping treasury revenue.
-            let unminted_interest = crate::treasury::distribute_interest(interest_share, vault.collateral_type).await;
+            let unminted_interest =
+                crate::treasury::distribute_interest(interest_share, vault.collateral_type).await;
             if unminted_interest.to_u64() > 0 {
-                mutate_state(|s| s.restore_pending_interest_for_pool(vault.collateral_type, unminted_interest.to_u64()));
+                mutate_state(|s| {
+                    s.restore_pending_interest_for_pool(
+                        vault.collateral_type,
+                        unminted_interest.to_u64(),
+                    )
+                });
             }
             guard_principal.complete(); // Mark as completed
             Ok(block_index)
@@ -4738,7 +6326,8 @@ pub async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError>
 
 pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, ProtocolError> {
     let caller = ic_cdk::api::caller();
-    let guard_principal = GuardPrincipal::new(caller, &format!("partial_liquidate_vault_{}", arg.vault_id))?;
+    let guard_principal =
+        GuardPrincipal::new(caller, &format!("partial_liquidate_vault_{}", arg.vault_id))?;
     reject_if_bot_processing(arg.vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault
     let _vault_liq_guard = VaultLiquidationGuard::new(arg.vault_id)?; // BK-001/002 per-vault lock
 
@@ -4752,45 +6341,52 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
     mutate_state(|s| s.accrue_single_vault(arg.vault_id, now));
 
     // Step 1: Validate vault is liquidatable
-    let (vault, collateral_price, config_decimals, collateral_price_usd, _mode) = match read_state(|s| {
-        match s.vault_id_to_vaults.get(&arg.vault_id) {
-            Some(vault) => {
-                // Check collateral status allows liquidation
-                if let Some(status) = s.get_collateral_status(&vault.collateral_type) {
-                    if !status.allows_liquidation() {
-                        return Err("Liquidation is not allowed for this collateral type.".to_string());
+    let (vault, collateral_price, config_decimals, collateral_price_usd, _mode) =
+        match read_state(|s| {
+            match s.vault_id_to_vaults.get(&arg.vault_id) {
+                Some(vault) => {
+                    // Check collateral status allows liquidation
+                    if let Some(status) = s.get_collateral_status(&vault.collateral_type) {
+                        if !status.allows_liquidation() {
+                            return Err(
+                                "Liquidation is not allowed for this collateral type.".to_string()
+                            );
+                        }
+                    }
+
+                    let price = s
+                        .get_collateral_price_decimal(&vault.collateral_type)
+                        .ok_or_else(|| {
+                            "No price available for collateral. Price feed may be down.".to_string()
+                        })?;
+                    let decimals = s
+                        .get_collateral_config(&vault.collateral_type)
+                        .map(|c| c.decimals)
+                        .unwrap_or(8);
+                    let collateral_price_usd = UsdIcp::from(price);
+                    let ratio = compute_collateral_ratio(vault, collateral_price_usd, s);
+                    let min_liq_ratio = s.get_min_liquidation_ratio_for(&vault.collateral_type);
+
+                    if ratio >= min_liq_ratio {
+                        Err(format!(
+                            "Vault #{} is not liquidatable. Current ratio: {}, minimum: {}",
+                            arg.vault_id,
+                            ratio.to_f64(),
+                            min_liq_ratio.to_f64()
+                        ))
+                    } else {
+                        Ok((vault.clone(), price, decimals, collateral_price_usd, s.mode))
                     }
                 }
-
-                let price = s.get_collateral_price_decimal(&vault.collateral_type)
-                    .ok_or_else(|| "No price available for collateral. Price feed may be down.".to_string())?;
-                let decimals = s.get_collateral_config(&vault.collateral_type)
-                    .map(|c| c.decimals)
-                    .unwrap_or(8);
-                let collateral_price_usd = UsdIcp::from(price);
-                let ratio = compute_collateral_ratio(vault, collateral_price_usd, s);
-                let min_liq_ratio = s.get_min_liquidation_ratio_for(&vault.collateral_type);
-
-                if ratio >= min_liq_ratio {
-                    Err(format!(
-                        "Vault #{} is not liquidatable. Current ratio: {}, minimum: {}",
-                        arg.vault_id,
-                        ratio.to_f64(),
-                        min_liq_ratio.to_f64()
-                    ))
-                } else {
-                    Ok((vault.clone(), price, decimals, collateral_price_usd, s.mode))
-                }
-            },
-            None => Err(format!("Vault #{} not found", arg.vault_id)),
-        }
-    }) {
-        Ok(result) => result,
-        Err(msg) => {
-            guard_principal.fail();
-            return Err(ProtocolError::GenericError(msg));
-        }
-    };
+                None => Err(format!("Vault #{} not found", arg.vault_id)),
+            }
+        }) {
+            Ok(result) => result,
+            Err(msg) => {
+                guard_principal.fail();
+                return Err(ProtocolError::GenericError(msg));
+            }
+        };
 
     // Step 2: Validate liquidator payment amount
     if liquidator_payment < read_state(|s| s.min_icusd_amount) {
@@ -4806,7 +6402,8 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
     let liquidator_payment = read_state(|s| {
         let cap = s.compute_partial_liquidation_cap(&vault, collateral_price_usd);
         let capped = liquidator_payment.min(cap);
-        let min_vault_debt = s.get_collateral_config(&vault.collateral_type)
+        let min_vault_debt = s
+            .get_collateral_config(&vault.collateral_type)
             .map(|c| c.min_vault_debt)
             .unwrap_or(ICUSD::new(0));
         round_up_partial_liq_dust(&vault, capped, min_vault_debt)
@@ -4822,16 +6419,24 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
 
     // Step 3: Calculate liquidation amounts with liquidation bonus and protocol fee
     let (liq_bonus, protocol_share) = read_state(|s| {
-        (s.get_liquidation_bonus_for(&vault.collateral_type), s.get_liquidation_protocol_share())
+        (
+            s.get_liquidation_bonus_for(&vault.collateral_type),
+            s.get_liquidation_protocol_share(),
+        )
     });
-    let collateral_raw = crate::numeric::icusd_to_collateral_amount(liquidator_payment, collateral_price, config_decimals);
+    let collateral_raw = crate::numeric::icusd_to_collateral_amount(
+        liquidator_payment,
+        collateral_price,
+        config_decimals,
+    );
     let icp_with_bonus = ICP::from(collateral_raw) * liq_bonus;
     let total_to_seize = icp_with_bonus.min(ICP::from(vault.collateral_amount));
 
     // Split: protocol gets a share of the bonus portion (liquidator's profit)
     let bonus_portion = total_to_seize.to_u64().saturating_sub(collateral_raw);
     let protocol_cut = (rust_decimal::Decimal::from(bonus_portion) * protocol_share.0)
-        .to_u64().unwrap_or(0);
+        .to_u64()
+        .unwrap_or(0);
     let collateral_to_liquidator = ICP::from(total_to_seize.to_u64() - protocol_cut);
 
     log!(INFO,
@@ -4842,19 +6447,26 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         protocol_cut,
         liq_bonus.to_f64()
     );
-    
+
     // Step 4: Take icUSD from liquidator
     let icusd_block_index = match transfer_icusd_from(liquidator_payment, caller).await {
         Ok(block_index) => {
-            log!(INFO, "[partial_liquidate_vault] Received {} icUSD from liquidator", liquidator_payment.to_u64());
+            log!(
+                INFO,
+                "[partial_liquidate_vault] Received {} icUSD from liquidator",
+                liquidator_payment.to_u64()
+            );
             block_index
-        },
+        }
         Err(transfer_from_error) => {
             guard_principal.fail();
-            return Err(ProtocolError::TransferFromError(transfer_from_error, liquidator_payment.to_u64()));
+            return Err(ProtocolError::TransferFromError(
+                transfer_from_error,
+                liquidator_payment.to_u64(),
+            ));
         }
     };
-    
+
     // Step 5: Update protocol state ATOMICALLY
     let interest_share = mutate_state(|s| {
         // Compute proportional interest share before reducing debt
@@ -4863,10 +6475,15 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
                 let share = (rust_decimal::Decimal::from(liquidator_payment.0)
                     * rust_decimal::Decimal::from(vault.accrued_interest.0)
                     / rust_decimal::Decimal::from(vault.borrowed_icusd_amount.0))
-                    .to_u64().unwrap_or(0);
+                .to_u64()
+                .unwrap_or(0);
                 ICUSD::new(share.min(vault.accrued_interest.0))
-            } else { ICUSD::new(0) }
-        } else { ICUSD::new(0) };
+            } else {
+                ICUSD::new(0)
+            }
+        } else {
+            ICUSD::new(0)
+        };
 
         // Reduce the vault's debt by the liquidator payment amount
         // Vault loses total_to_seize (liquidator + protocol cut)
@@ -4905,7 +6522,9 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         if shortfall.0 > 0 {
             crate::event::record_deficit_accrued(
                 s,
-                crate::event::DeficitSource::Liquidation { vault_id: arg.vault_id },
+                crate::event::DeficitSource::Liquidation {
+                    vault_id: arg.vault_id,
+                },
                 shortfall,
                 ic_cdk::api::time(),
             );
@@ -4924,7 +6543,11 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
             icp_to_liquidator: payout_to_liquidator,
             liquidator: Some(caller),
             icp_rate: Some(collateral_price_usd),
-            protocol_fee_collateral: if protocol_cut > 0 { Some(protocol_cut.min(collateral_applied)) } else { None },
+            protocol_fee_collateral: if protocol_cut > 0 {
+                Some(protocol_cut.min(collateral_applied))
+            } else {
+                None
+            },
             timestamp: Some(ic_cdk::api::time()),
             three_usd_reserves_e8s: None,
         };
@@ -4946,19 +6569,29 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         // Shared drain rule (see state::cleanup_if_drained): remove the vault
         // if this liquidation emptied it, else re-key its CR index entry.
         if s.cleanup_if_drained(arg.vault_id) {
-            log!(INFO, "[partial_liquidate_vault] Vault #{} fully liquidated — removed", arg.vault_id);
+            log!(
+                INFO,
+                "[partial_liquidate_vault] Vault #{} fully liquidated — removed",
+                arg.vault_id
+            );
         }
 
-        log!(INFO, "[partial_liquidate_vault] Protocol state updated, pending transfer created");
+        log!(
+            INFO,
+            "[partial_liquidate_vault] Protocol state updated, pending transfer created"
+        );
         interest_share
     });
 
     // Route interest share via N-way split
     // IC-B-002 (audit 2026-06-09): re-queue any unminted interest share so the
     // next flush retries it instead of silently dropping treasury revenue.
-    let unminted_interest = crate::treasury::distribute_interest(interest_share, vault.collateral_type).await;
+    let unminted_interest =
+        crate::treasury::distribute_interest(interest_share, vault.collateral_type).await;
     if unminted_interest.to_u64() > 0 {
-        mutate_state(|s| s.restore_pending_interest_for_pool(vault.collateral_type, unminted_interest.to_u64()));
+        mutate_state(|s| {
+            s.restore_pending_interest_for_pool(vault.collateral_type, unminted_interest.to_u64())
+        });
     }
 
     // Send protocol's liquidation fee cut to treasury (fire-and-forget)
@@ -4971,40 +6604,67 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
             let dev = read_state(|s| s.developer_principal);
             let now_ns = ic_cdk::api::time();
             mutate_state(|s| {
-                record_xrp_claim(s, dev, vault.owner, vault.vault_id, protocol_cut.to_u64().unwrap_or(0), now_ns);
+                record_xrp_claim(
+                    s,
+                    dev,
+                    vault.owner,
+                    vault.vault_id,
+                    protocol_cut.to_u64().unwrap_or(0),
+                    now_ns,
+                );
             });
         } else {
             let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
-            crate::treasury::send_liquidation_fee_to_treasury(protocol_cut, vault.collateral_type, asset_type).await;
+            crate::treasury::send_liquidation_fee_to_treasury(
+                protocol_cut,
+                vault.collateral_type,
+                asset_type,
+            )
+            .await;
         }
     }
 
     // Step 6: Attempt immediate transfer processing
-    log!(INFO, "[partial_liquidate_vault] Attempting immediate transfer processing...");
-    
+    log!(
+        INFO,
+        "[partial_liquidate_vault] Attempting immediate transfer processing..."
+    );
+
     match try_process_pending_transfers_immediate(arg.vault_id).await {
         Ok(processed_count) => {
-            log!(INFO, "[partial_liquidate_vault] Successfully processed {} transfers immediately", processed_count);
-        },
+            log!(
+                INFO,
+                "[partial_liquidate_vault] Successfully processed {} transfers immediately",
+                processed_count
+            );
+        }
         Err(e) => {
             log!(INFO, "[partial_liquidate_vault] Immediate processing failed: {}. Transfers will be retried via timer", e);
             schedule_transfer_retry(arg.vault_id, 0);
         }
     }
-    
+
     // Step 7: Schedule backup timer
     ic_cdk_timers::set_timer(std::time::Duration::from_secs(2), move || {
         ic_cdk::spawn(async move {
-            log!(INFO, "[partial_liquidate_vault] Backup timer processing transfers for vault #{}", arg.vault_id);
+            log!(
+                INFO,
+                "[partial_liquidate_vault] Backup timer processing transfers for vault #{}",
+                arg.vault_id
+            );
             let _ = crate::process_pending_transfer().await;
         })
     });
-    
+
     // Step 8: Liquidation is successful
     guard_principal.complete();
-    
+
     // Calculate fee (the 10% discount is the fee)
-    let liquidator_value_received = crate::numeric::collateral_usd_value(collateral_to_liquidator.to_u64(), collateral_price, config_decimals);
+    let liquidator_value_received = crate::numeric::collateral_usd_value(
+        collateral_to_liquidator.to_u64(),
+        collateral_price,
+        config_decimals,
+    );
     let fee_amount = if liquidator_value_received > liquidator_payment {
         liquidator_value_received - liquidator_payment
     } else {
@@ -5019,7 +6679,7 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         fee_amount_paid: fee_amount.to_u64(),
         collateral_amount_received: Some(collateral_to_liquidator.to_u64()),
         debt_liquidated_e8s: None, // SP-101
-        stable_pulled_e6s: None, // SP-110
+        stable_pulled_e6s: None,   // SP-110
     })
 }
 
@@ -5109,7 +6769,9 @@ mod sp_writedown_native_xrp_guard_tests {
         ));
         match result {
             Err(ProtocolError::GenericError(msg)) => assert!(
-                msg.contains("Native-XRP collateral cannot be liquidated via the SP write-down path"),
+                msg.contains(
+                    "Native-XRP collateral cannot be liquidated via the SP write-down path"
+                ),
                 "expected the native-XRP reject, got: {msg}"
             ),
             other => panic!("expected a native-XRP GenericError reject, got {other:?}"),
@@ -5123,7 +6785,13 @@ mod sp_writedown_native_xrp_guard_tests {
     fn vault_is_native_xrp_is_scoped_to_xrp_custody() {
         install_two_collateral_state(2, 1);
         assert!(vault_is_native_xrp(2), "native-XRP vault must be flagged");
-        assert!(!vault_is_native_xrp(1), "ICRC (ICP) vault must not be flagged");
-        assert!(!vault_is_native_xrp(999), "missing vault must not be flagged");
+        assert!(
+            !vault_is_native_xrp(1),
+            "ICRC (ICP) vault must not be flagged"
+        );
+        assert!(
+            !vault_is_native_xrp(999),
+            "missing vault must not be flagged"
+        );
     }
 }
