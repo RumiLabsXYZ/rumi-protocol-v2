@@ -154,6 +154,12 @@ pub enum OpenVaultError {
     /// No manual native-asset price is set for the chain
     /// (`manual_prices[(chain, price_symbol)]`).
     NoPrice,
+    /// A staleness-gated price has no freshness timestamp.
+    NoPriceTimestamp,
+    /// A staleness-gated price is older than the configured max age.
+    StalePrice,
+    /// A staleness-gated price is zero.
+    ZeroPrice,
     /// Declared collateral ratio is below the minimum.
     BelowMinCr { cr_e4: u64, min_e4: u64 },
     /// Declared debt is zero. A zero-debt vault has nothing to mint; allowing it
@@ -174,7 +180,10 @@ pub enum OpenVaultError {
     BelowMinDebt { debt_e8s: u128, min_e8s: u128 },
     /// The open would push the chain's total outstanding+in-flight debt over the
     /// configured `debt_ceiling_e8s`.
-    DebtCeilingExceeded { would_be_e8s: u128, ceiling_e8s: u128 },
+    DebtCeilingExceeded {
+        would_be_e8s: u128,
+        ceiling_e8s: u128,
+    },
 }
 
 /// Reasons `withdraw_collateral_in_state` / `close_chain_vault_in_state` can
@@ -186,6 +195,12 @@ pub enum WithdrawError {
     /// No manual native-asset price is set for the chain
     /// (`manual_prices[(chain, price_symbol)]`).
     NoPrice,
+    /// A staleness-gated price has no freshness timestamp.
+    NoPriceTimestamp,
+    /// A staleness-gated price is older than the configured max age.
+    StalePrice,
+    /// A staleness-gated price is zero.
+    ZeroPrice,
     /// Requested amount exceeds the vault's `collateral_amount_native`.
     InsufficientCollateral,
     /// The post-withdrawal collateral ratio would fall below `min_cr_e4`.
@@ -233,7 +248,9 @@ pub enum WithdrawError {
 pub enum LiquidationError {
     UnknownVault,
     /// Vault status is not `Open` (only an Open vault has confirmed collateral+debt).
-    WrongStatus { status: ChainVaultStatus },
+    WrongStatus {
+        status: ChainVaultStatus,
+    },
     /// A borrow mint is in flight; liquidating now could leave debt unbacked once
     /// it confirms (spec §4.4). Exclude.
     MintInFlight,
@@ -256,7 +273,10 @@ pub enum LiquidationError {
     /// The manual price is older than the config's `max_price_age_ns` (spec §4.3).
     StalePrice,
     /// CR is at or above the liquidation threshold (not liquidatable).
-    NotLiquidatable { cr_e4: u64, threshold_e4: u64 },
+    NotLiquidatable {
+        cr_e4: u64,
+        threshold_e4: u64,
+    },
     /// The sized repay or its grossed-up collateral rounded to zero (nothing
     /// economical to seize at the current price/depth cap).
     NothingToLiquidate,
@@ -292,13 +312,79 @@ pub fn collateral_ratio_e4(
     // Dividing by the native scale drops the base-unit scale and leaves a USD
     // value in e8. Saturating so a colossal collateral input cannot overflow.
     let native_scale = 10u128.saturating_pow(native_decimals as u32);
-    let collateral_usd_e8 = collateral_native
-        .saturating_mul(price_e8 as u128)
-        / native_scale;
+    let collateral_usd_e8 = collateral_native.saturating_mul(price_e8 as u128) / native_scale;
     // cr_e4 = collateral_usd_e8 / debt_e8s * 10_000. Multiply first (saturating)
     // then divide so we keep e4 precision; both are e8 so the e8 scales cancel.
     let cr = collateral_usd_e8.saturating_mul(10_000) / debt_e8s;
     cr.min(u64::MAX as u128) as u64
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum VaultPriceError {
+    NoPrice,
+    NoTimestamp,
+    Stale,
+    ZeroPrice,
+}
+
+fn gated_chain_price_e8(
+    state: &MultiChainState,
+    chain: ChainId,
+    price_symbol: &str,
+    now_ns: u64,
+) -> Result<u64, VaultPriceError> {
+    let max_age = state
+        .chain_liquidation_configs
+        .get(&chain)
+        .map(|c| c.max_price_age_ns)
+        .unwrap_or(0);
+    if max_age > 0 {
+        return crate::chains::liquidation::fresh_chain_price_e8(
+            state,
+            chain,
+            price_symbol,
+            now_ns,
+            max_age,
+        )
+        .map_err(|e| match e {
+            crate::chains::liquidation::PriceError::NoPrice => VaultPriceError::NoPrice,
+            crate::chains::liquidation::PriceError::ZeroPrice => VaultPriceError::ZeroPrice,
+            crate::chains::liquidation::PriceError::NoTimestamp => VaultPriceError::NoTimestamp,
+            crate::chains::liquidation::PriceError::Stale => VaultPriceError::Stale,
+        });
+    }
+    state
+        .manual_prices
+        .get(&(chain, price_symbol.to_string()))
+        .copied()
+        .ok_or(VaultPriceError::NoPrice)
+}
+
+fn map_open_price_error(e: VaultPriceError) -> OpenVaultError {
+    match e {
+        VaultPriceError::NoPrice => OpenVaultError::NoPrice,
+        VaultPriceError::NoTimestamp => OpenVaultError::NoPriceTimestamp,
+        VaultPriceError::Stale => OpenVaultError::StalePrice,
+        VaultPriceError::ZeroPrice => OpenVaultError::ZeroPrice,
+    }
+}
+
+fn map_withdraw_price_error(e: VaultPriceError) -> WithdrawError {
+    match e {
+        VaultPriceError::NoPrice => WithdrawError::NoPrice,
+        VaultPriceError::NoTimestamp => WithdrawError::NoPriceTimestamp,
+        VaultPriceError::Stale => WithdrawError::StalePrice,
+        VaultPriceError::ZeroPrice => WithdrawError::ZeroPrice,
+    }
+}
+
+fn map_borrow_price_error(e: VaultPriceError) -> BorrowError {
+    match e {
+        VaultPriceError::NoPrice => BorrowError::NoPrice,
+        VaultPriceError::NoTimestamp => BorrowError::NoPriceTimestamp,
+        VaultPriceError::Stale => BorrowError::StalePrice,
+        VaultPriceError::ZeroPrice => BorrowError::ZeroPrice,
+    }
 }
 
 /// Sum of confirmed debt + intended/in-flight mints for all non-Closed vaults on
@@ -380,10 +466,8 @@ pub fn open_chain_vault_in_state(
         return Err(OpenVaultError::InvalidAddress(mint_recipient));
     }
     // Native-asset price (USD e8) for the declared-collateral CR check.
-    let price_e8 = *state
-        .manual_prices
-        .get(&(chain, price_symbol.to_string()))
-        .ok_or(OpenVaultError::NoPrice)?;
+    let price_e8 =
+        gated_chain_price_e8(state, chain, price_symbol, now_ns).map_err(map_open_price_error)?;
     // Native-asset decimals for the chain (18 for MON; falls back to 18 if the
     // config is somehow absent, though `chain` was verified registered above).
     let native_decimals = state
@@ -394,11 +478,17 @@ pub fn open_chain_vault_in_state(
 
     let cr_e4 = collateral_ratio_e4(collateral_e18, native_decimals, price_e8, debt_e8s);
     if cr_e4 < min_cr_e4 {
-        return Err(OpenVaultError::BelowMinCr { cr_e4, min_e4: min_cr_e4 });
+        return Err(OpenVaultError::BelowMinCr {
+            cr_e4,
+            min_e4: min_cr_e4,
+        });
     }
     // Min-debt floor: a vault too small is uneconomical to liquidate.
     if debt_e8s < min_vault_debt_e8s {
-        return Err(OpenVaultError::BelowMinDebt { debt_e8s, min_e8s: min_vault_debt_e8s });
+        return Err(OpenVaultError::BelowMinDebt {
+            debt_e8s,
+            min_e8s: min_vault_debt_e8s,
+        });
     }
     // Per-chain debt ceiling: the new vault's intended debt is added (as
     // pending_mint) to the chain's outstanding+in-flight total; reject if that
@@ -436,7 +526,8 @@ pub fn open_chain_vault_in_state(
             // stamped to `now` at mint-confirm (Task 7). Open-time = 0 (debt 0).
             last_interest_accrual_ns: 0,
             pending_interest_mint_e8s: 0,
-            pending_liquidation: None,        },
+            pending_liquidation: None,
+        },
     );
     // No mint enqueued - that happens in verify_deposit_and_enqueue_mint_in_state.
     Ok(())
@@ -492,7 +583,11 @@ pub fn verify_deposit_and_enqueue_mint_in_state(
     // Enqueue FIRST (it can fail on a duplicate idempotency key). The key is
     // per (chain, vault) so a retried tick cannot double-enqueue.
     let op = SettlementOp::new(
-        SettlementOpKind::Mint { recipient, amount_e8s, vault_id },
+        SettlementOpKind::Mint {
+            recipient,
+            amount_e8s,
+            vault_id,
+        },
         format!("mint-{}-{}", chain.0, vault_id),
         now_ns,
     );
@@ -589,7 +684,9 @@ pub fn withdraw_collateral_in_state(
         // mutating anything. (close_chain_vault_in_state delegates here, so it
         // inherits this gate after its own debt==0 check.)
         if v.status != ChainVaultStatus::Open {
-            return Err(WithdrawError::WrongStatus { status: v.status.clone() });
+            return Err(WithdrawError::WrongStatus {
+                status: v.status.clone(),
+            });
         }
         // A borrow mint in flight means the CR check below would run against the
         // stale confirmed debt (pending borrow not yet folded in); releasing
@@ -616,14 +713,17 @@ pub fn withdraw_collateral_in_state(
             return Err(WithdrawError::InsufficientCollateral);
         }
         let remaining = v.collateral_amount_native - amount_e18;
-        (v.collateral_chain, remaining, v.debt_e8s, v.last_interest_accrual_ns)
+        (
+            v.collateral_chain,
+            remaining,
+            v.debt_e8s,
+            v.last_interest_accrual_ns,
+        )
     };
 
     // Price is needed for the post-withdrawal CR check (only when debt remains).
-    let price_e8 = *state
-        .manual_prices
-        .get(&(chain, price_symbol.to_string()))
-        .ok_or(WithdrawError::NoPrice)?;
+    let price_e8 = gated_chain_price_e8(state, chain, price_symbol, now_ns)
+        .map_err(map_withdraw_price_error)?;
     let native_decimals = state
         .chain_configs
         .get(&chain)
@@ -648,7 +748,10 @@ pub fn withdraw_collateral_in_state(
         let effective_debt = debt_e8s.saturating_add(accrued);
         let cr_e4 = collateral_ratio_e4(remaining, native_decimals, price_e8, effective_debt);
         if cr_e4 < min_cr_e4 {
-            return Err(WithdrawError::BelowMinCr { cr_e4, min_e4: min_cr_e4 });
+            return Err(WithdrawError::BelowMinCr {
+                cr_e4,
+                min_e4: min_cr_e4,
+            });
         }
     }
 
@@ -809,7 +912,9 @@ pub fn begin_liquidation_in_state(
             .get(&vault_id)
             .ok_or(LiquidationError::UnknownVault)?;
         if v.status != ChainVaultStatus::Open {
-            return Err(LiquidationError::WrongStatus { status: v.status.clone() });
+            return Err(LiquidationError::WrongStatus {
+                status: v.status.clone(),
+            });
         }
         if v.pending_mint_e8s != 0 {
             return Err(LiquidationError::MintInFlight);
@@ -832,18 +937,21 @@ pub fn begin_liquidation_in_state(
         }
 
         // Fresh, fail-closed price (spec §4.3).
-        let price_e8 = liq::fresh_chain_price_e8(state, chain, price_symbol, now_ns, cfg.max_price_age_ns)
-            .map_err(|e| match e {
-                liq::PriceError::NoPrice => LiquidationError::NoPrice,
-                liq::PriceError::ZeroPrice => LiquidationError::ZeroPrice,
-                liq::PriceError::NoTimestamp => LiquidationError::NoTimestamp,
-                liq::PriceError::Stale => LiquidationError::StalePrice,
-            })?;
+        let price_e8 =
+            liq::fresh_chain_price_e8(state, chain, price_symbol, now_ns, cfg.max_price_age_ns)
+                .map_err(|e| match e {
+                    liq::PriceError::NoPrice => LiquidationError::NoPrice,
+                    liq::PriceError::ZeroPrice => LiquidationError::ZeroPrice,
+                    liq::PriceError::NoTimestamp => LiquidationError::NoTimestamp,
+                    liq::PriceError::Stale => LiquidationError::StalePrice,
+                })?;
 
         let cc = crate::chains::collateral_config::chain_collateral_config(chain);
         let apr_bps = cc.map(|c| c.interest_apr_bps).unwrap_or(0);
         let penalty_bps = cc.map(|c| c.liquidation_penalty_bps).unwrap_or(0);
-        let target_cr_e4 = cc.map(|c| c.recovery_target_cr_e4).unwrap_or(cfg.restore_target_cr_e4);
+        let target_cr_e4 = cc
+            .map(|c| c.recovery_target_cr_e4)
+            .unwrap_or(cfg.restore_target_cr_e4);
         let native_decimals = state
             .chain_configs
             .get(&chain)
@@ -857,7 +965,12 @@ pub fn begin_liquidation_in_state(
             apr_bps,
             now_ns.saturating_sub(v.last_interest_accrual_ns),
         );
-        let cr_e4 = collateral_ratio_e4(v.collateral_amount_native, native_decimals, price_e8, eff_debt);
+        let cr_e4 = collateral_ratio_e4(
+            v.collateral_amount_native,
+            native_decimals,
+            price_e8,
+            eff_debt,
+        );
         if cr_e4 >= liquidation_threshold_e4 {
             return Err(LiquidationError::NotLiquidatable {
                 cr_e4,
@@ -867,12 +980,18 @@ pub fn begin_liquidation_in_state(
 
         // Size: restore to target, clamp to the ADVISORY depth cap (spec §4.6/§4.7).
         let bonus_e4 = liq::bonus_e4_from_penalty_bps(penalty_bps);
-        let coll_value = liq::collateral_value_e8s(v.collateral_amount_native, native_decimals, price_e8);
+        let coll_value =
+            liq::collateral_value_e8s(v.collateral_amount_native, native_decimals, price_e8);
         let sized = liq::sized_repay_e8s(eff_debt, coll_value, target_cr_e4, bonus_e4);
         let value_cap = liq::value_cap_to_repay(cfg.max_swap_value_e8s, bonus_e4);
         let effective_repay = sized.min(value_cap);
-        let collateral_in = liq::collateral_in_native_for_repay(effective_repay, bonus_e4, native_decimals, price_e8)
-            .min(v.collateral_amount_native);
+        let collateral_in = liq::collateral_in_native_for_repay(
+            effective_repay,
+            bonus_e4,
+            native_decimals,
+            price_e8,
+        )
+        .min(v.collateral_amount_native);
         if effective_repay == 0 || collateral_in == 0 {
             return Err(LiquidationError::NothingToLiquidate);
         }
@@ -881,7 +1000,11 @@ pub fn begin_liquidation_in_state(
         // in Increment 3). The reserve recipient is the settle-stable sink for now;
         // a dedicated tECDSA reserve address + config field land with the swap (Inc 3).
         let reserve_recipient = cfg.settle_stable_token.clone();
-        for a in [cfg.router.as_str(), cfg.pair.as_str(), reserve_recipient.as_str()] {
+        for a in [
+            cfg.router.as_str(),
+            cfg.pair.as_str(),
+            reserve_recipient.as_str(),
+        ] {
             if !address_validator(a) {
                 return Err(LiquidationError::InvalidAddress(a.to_string()));
             }
@@ -893,7 +1016,10 @@ pub fn begin_liquidation_in_state(
             debt_to_clear_e8s: effective_repay,
             router: cfg.router.clone(),
             pair: cfg.pair.clone(),
-            path: vec![cfg.collateral_token.clone(), cfg.settle_stable_token.clone()],
+            path: vec![
+                cfg.collateral_token.clone(),
+                cfg.settle_stable_token.clone(),
+            ],
             reserve_recipient,
             deadline_secs: 180,
         };
@@ -939,19 +1065,33 @@ pub const MAX_VAULTS_PER_OWNER: usize = 25;
 pub enum BorrowError {
     UnknownVault,
     /// Vault is not `Open` (only an Open vault has confirmed collateral + debt).
-    WrongStatus { status: ChainVaultStatus },
+    WrongStatus {
+        status: ChainVaultStatus,
+    },
     /// A mint is already in flight for this vault (`pending_mint_e8s != 0`).
     MintInFlight,
     ZeroDebt,
     NoPrice,
-    BelowMinCr { cr_e4: u64, min_e4: u64 },
+    NoPriceTimestamp,
+    StalePrice,
+    ZeroPrice,
+    BelowMinCr {
+        cr_e4: u64,
+        min_e4: u64,
+    },
     QueueError(String),
     InvalidAddress(String),
     /// Post-borrow debt is below the chain's `min_vault_debt_e8s` floor.
-    BelowMinDebt { debt_e8s: u128, min_e8s: u128 },
+    BelowMinDebt {
+        debt_e8s: u128,
+        min_e8s: u128,
+    },
     /// The borrow would push the chain's total outstanding+in-flight debt over
     /// the configured `debt_ceiling_e8s`.
-    DebtCeilingExceeded { would_be_e8s: u128, ceiling_e8s: u128 },
+    DebtCeilingExceeded {
+        would_be_e8s: u128,
+        ceiling_e8s: u128,
+    },
     /// A liquidation is in flight for this vault (`pending_liquidation.is_some()`).
     /// Borrowing more against collateral that is reserved/handed to a liquidation
     /// tier could leave the post-confirm vault under-collateralized. Reject until
@@ -993,11 +1133,16 @@ pub fn borrow_chain_vault_in_state(
     }
     // Step 1: read-only validation — no mutation on any rejection path.
     let (chain, collateral, new_debt) = {
-        let v = state.chain_vaults.get(&vault_id).ok_or(BorrowError::UnknownVault)?;
+        let v = state
+            .chain_vaults
+            .get(&vault_id)
+            .ok_or(BorrowError::UnknownVault)?;
         // Only an Open vault has confirmed, on-chain-deposited collateral AND
         // confirmed debt to borrow against.
         if v.status != ChainVaultStatus::Open {
-            return Err(BorrowError::WrongStatus { status: v.status.clone() });
+            return Err(BorrowError::WrongStatus {
+                status: v.status.clone(),
+            });
         }
         // No stacked borrows: a non-zero pending means a mint is already in flight
         // for this vault, and the settlement queue is sequential per chain.
@@ -1016,10 +1161,8 @@ pub fn borrow_chain_vault_in_state(
             v.debt_e8s.saturating_add(additional_e8s),
         )
     };
-    let price_e8 = *state
-        .manual_prices
-        .get(&(chain, price_symbol.to_string()))
-        .ok_or(BorrowError::NoPrice)?;
+    let price_e8 =
+        gated_chain_price_e8(state, chain, price_symbol, now_ns).map_err(map_borrow_price_error)?;
     let native_decimals = state
         .chain_configs
         .get(&chain)
@@ -1027,10 +1170,16 @@ pub fn borrow_chain_vault_in_state(
         .unwrap_or(18);
     let cr_e4 = collateral_ratio_e4(collateral, native_decimals, price_e8, new_debt);
     if cr_e4 < min_cr_e4 {
-        return Err(BorrowError::BelowMinCr { cr_e4, min_e4: min_cr_e4 });
+        return Err(BorrowError::BelowMinCr {
+            cr_e4,
+            min_e4: min_cr_e4,
+        });
     }
     if new_debt < min_vault_debt_e8s {
-        return Err(BorrowError::BelowMinDebt { debt_e8s: new_debt, min_e8s: min_vault_debt_e8s });
+        return Err(BorrowError::BelowMinDebt {
+            debt_e8s: new_debt,
+            min_e8s: min_vault_debt_e8s,
+        });
     }
     // Debt ceiling: this borrow adds exactly `additional_e8s` to the chain's
     // outstanding+in-flight total (the vault's pending_mint was 0, checked above,
@@ -1048,7 +1197,11 @@ pub fn borrow_chain_vault_in_state(
     // Step 2: enqueue FIRST (can fail on a duplicate key). The `now_ns` suffix
     // keeps this key distinct from the genesis open mint (`mint-{chain}-{vault}`).
     let op = SettlementOp::new(
-        SettlementOpKind::Mint { recipient, amount_e8s: additional_e8s, vault_id },
+        SettlementOpKind::Mint {
+            recipient,
+            amount_e8s: additional_e8s,
+            vault_id,
+        },
         format!("mint-{}-{}-{}", chain.0, vault_id, now_ns),
         now_ns,
     );
@@ -1059,7 +1212,10 @@ pub fn borrow_chain_vault_in_state(
         .enqueue(op)
         .map_err(|e| BorrowError::QueueError(format!("{e:?}")))?;
     // Step 3: only after a successful enqueue — reserve the borrow as pending.
-    let v = state.chain_vaults.get_mut(&vault_id).expect("vault present: checked above");
+    let v = state
+        .chain_vaults
+        .get_mut(&vault_id)
+        .expect("vault present: checked above");
     v.pending_mint_e8s = additional_e8s;
     Ok(())
 }
@@ -1096,9 +1252,16 @@ pub fn prune_stale_awaiting_deposit(
         .iter()
         .filter(|(_, v)| {
             let observer_active = matches!(
-                state.chain_configs.get(&v.collateral_chain).map(|c| c.status),
+                state
+                    .chain_configs
+                    .get(&v.collateral_chain)
+                    .map(|c| c.status),
                 Some(ChainStatus::Registered)
-            ) && !state.reorg_halted.get(&v.collateral_chain).copied().unwrap_or(false);
+            ) && !state
+                .reorg_halted
+                .get(&v.collateral_chain)
+                .copied()
+                .unwrap_or(false);
             observer_active
                 && v.status == ChainVaultStatus::AwaitingDeposit
                 && now_ns.saturating_sub(v.opened_at_ns) > ttl_ns

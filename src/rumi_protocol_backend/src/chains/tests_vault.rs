@@ -53,6 +53,30 @@ fn setup(price_e8: u64) -> MultiChainState {
     s
 }
 
+fn enable_price_age_gate(s: &mut MultiChainState, max_price_age_ns: u64) {
+    use super::liquidation_config::{ChainLiquidationConfigV1, DexKind};
+    s.chain_liquidation_configs.insert(
+        CHAIN,
+        ChainLiquidationConfigV1 {
+            dex: DexKind::UniswapV2,
+            router: String::new(),
+            factory: String::new(),
+            pair: String::new(),
+            collateral_token: String::new(),
+            settle_stable_token: String::new(),
+            slippage_cap_bps: 0,
+            restore_target_cr_e4: 13_000,
+            enabled: false,
+            max_swap_value_e8s: 0,
+            max_price_age_ns,
+            max_dex_oracle_divergence_bps: 0,
+            fee_bps: 0,
+            settle_stable_decimals: 0,
+            deadline_secs: 0,
+        },
+    );
+}
+
 // 1. A vault opens through the generalized helper when the injected validator
 //    accepts the recipient AND the (chain, "SOL") manual price is set. Proves the
 //    price_symbol seam reads a NON-"MON" key and the validator seam is honored.
@@ -76,7 +100,10 @@ fn open_succeeds_with_injected_validator_and_sol_price_symbol() {
         12345,
         7,
     );
-    assert!(res.is_ok(), "open should succeed via the generalized seam: {res:?}");
+    assert!(
+        res.is_ok(),
+        "open should succeed via the generalized seam: {res:?}"
+    );
     let v = s.chain_vaults.get(&7).expect("vault 7 created");
     assert_eq!(v.collateral_amount_native, 100 * ONE_SOL);
     assert_eq!(v.pending_mint_e8s, 100_00000000);
@@ -107,7 +134,10 @@ fn open_rejected_when_injected_validator_rejects() {
         12345,
         7,
     );
-    assert!(matches!(res, Err(OpenVaultError::InvalidAddress(_))), "got {res:?}");
+    assert!(
+        matches!(res, Err(OpenVaultError::InvalidAddress(_))),
+        "got {res:?}"
+    );
     assert!(s.chain_vaults.is_empty(), "no vault on a rejected address");
     assert_eq!(s.settlement_queues[&CHAIN].pending_len(), 0);
 }
@@ -138,23 +168,66 @@ fn open_no_price_when_symbol_key_absent() {
     assert!(s.chain_vaults.is_empty());
 }
 
+#[test]
+fn open_rejects_stale_price_when_age_gate_configured() {
+    let mut s = setup(PRICE_150_USD_E8);
+    s.manual_price_set_at_ns
+        .insert((CHAIN, "SOL".into()), 1_000);
+    enable_price_age_gate(&mut s, 100);
+    let res = open_chain_vault_in_state(
+        &mut s,
+        CHAIN,
+        Principal::anonymous(),
+        "custody".into(),
+        100 * ONE_SOL,
+        100_00000000,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        0,
+        None,
+        1_101,
+        7,
+    );
+    assert_eq!(res, Err(OpenVaultError::StalePrice));
+    assert!(s.chain_vaults.is_empty(), "no mutation on stale price");
+}
+
 // ─── M2: borrow + nonce + per-owner cap ───────────────────────────────────────
 
-use super::vault::{borrow_chain_vault_in_state, BorrowError};
 use super::evm::settlement::confirm_mint_in_state;
+use super::vault::{borrow_chain_vault_in_state, BorrowError};
 
 /// Insert an Open vault (confirmed collateral + debt, no mint in flight) owned by
 /// `owner`, and seed the chain supply to match its debt so the invariant holds.
-fn insert_open_vault(s: &mut MultiChainState, owner: Principal, vault_id: u64, collateral: u128, debt: u128) {
+fn insert_open_vault(
+    s: &mut MultiChainState,
+    owner: Principal,
+    vault_id: u64,
+    collateral: u128,
+    debt: u128,
+) {
     use super::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
-    s.chain_vaults.insert(vault_id, ChainVaultV1 {
-        vault_id, owner, collateral_chain: CHAIN, custody_address: "custody".into(),
-        collateral_amount_native: collateral, debt_e8s: debt, mint_recipient: "good-address".into(),
-        pending_mint_e8s: 0, status: ChainVaultStatus::Open, opened_at_ns: 0,
-    last_interest_accrual_ns: 0,
-    pending_interest_mint_e8s: 0,
-    pending_liquidation: None,        owner_evm: Some("0xowner".into()),
-    });
+    s.chain_vaults.insert(
+        vault_id,
+        ChainVaultV1 {
+            vault_id,
+            owner,
+            collateral_chain: CHAIN,
+            custody_address: "custody".into(),
+            collateral_amount_native: collateral,
+            debt_e8s: debt,
+            mint_recipient: "good-address".into(),
+            pending_mint_e8s: 0,
+            status: ChainVaultStatus::Open,
+            opened_at_ns: 0,
+            last_interest_accrual_ns: 0,
+            pending_interest_mint_e8s: 0,
+            pending_liquidation: None,
+            owner_evm: Some("0xowner".into()),
+        },
+    );
     *s.chain_supplies.entry(CHAIN).or_default() += debt;
 }
 
@@ -162,35 +235,107 @@ fn insert_open_vault(s: &mut MultiChainState, owner: Principal, vault_id: u64, c
 fn borrow_open_vault_enqueues_mint_and_reserves_pending() {
     let mut s = setup(PRICE_150_USD_E8);
     // 100 SOL ($15000) collateral, 100 icUSD debt; borrow 50 more → CR fine.
-    insert_open_vault(&mut s, Principal::anonymous(), 7, 100 * ONE_SOL, 100_00000000);
-    let r = borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "good-address".into(), only_good, "SOL", 13_000, 0, None, 1);
+    insert_open_vault(
+        &mut s,
+        Principal::anonymous(),
+        7,
+        100 * ONE_SOL,
+        100_00000000,
+    );
+    let r = borrow_chain_vault_in_state(
+        &mut s,
+        7,
+        50_00000000,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        0,
+        None,
+        1,
+    );
     assert_eq!(r, Ok(()));
     let v = s.chain_vaults.get(&7).unwrap();
-    assert_eq!(v.pending_mint_e8s, 50_00000000, "borrow reserves the additional as pending");
-    assert_eq!(v.debt_e8s, 100_00000000, "confirmed debt unchanged until mint observed");
-    assert_eq!(s.settlement_queues.get(&CHAIN).unwrap().pending_len(), 1, "one Mint op enqueued");
+    assert_eq!(
+        v.pending_mint_e8s, 50_00000000,
+        "borrow reserves the additional as pending"
+    );
+    assert_eq!(
+        v.debt_e8s, 100_00000000,
+        "confirmed debt unchanged until mint observed"
+    );
+    assert_eq!(
+        s.settlement_queues.get(&CHAIN).unwrap().pending_len(),
+        1,
+        "one Mint op enqueued"
+    );
 }
 
 #[test]
 fn borrow_then_confirm_preserves_supply_invariant() {
     let mut s = setup(PRICE_150_USD_E8);
-    insert_open_vault(&mut s, Principal::anonymous(), 7, 100 * ONE_SOL, 100_00000000);
-    borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "good-address".into(), only_good, "SOL", 13_000, 0, None, 1).unwrap();
+    insert_open_vault(
+        &mut s,
+        Principal::anonymous(),
+        7,
+        100 * ONE_SOL,
+        100_00000000,
+    );
+    borrow_chain_vault_in_state(
+        &mut s,
+        7,
+        50_00000000,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        0,
+        None,
+        1,
+    )
+    .unwrap();
     let pre = s.total_chain_vault_debt_e8s();
     confirm_mint_in_state(&mut s, CHAIN, 7, 50_00000000, pre, 1).expect("confirm");
     let v = s.chain_vaults.get(&7).unwrap();
-    assert_eq!(v.debt_e8s, 150_00000000, "pending moved into confirmed debt");
+    assert_eq!(
+        v.debt_e8s, 150_00000000,
+        "pending moved into confirmed debt"
+    );
     assert_eq!(v.pending_mint_e8s, 0);
-    assert_eq!(s.chain_supplies.get(&CHAIN).copied().unwrap(), 150_00000000, "supply == total debt");
-    assert_eq!(s.chain_supplies.get(&CHAIN).copied().unwrap(), s.total_chain_vault_debt_e8s());
+    assert_eq!(
+        s.chain_supplies.get(&CHAIN).copied().unwrap(),
+        150_00000000,
+        "supply == total debt"
+    );
+    assert_eq!(
+        s.chain_supplies.get(&CHAIN).copied().unwrap(),
+        s.total_chain_vault_debt_e8s()
+    );
 }
 
 #[test]
 fn borrow_rejects_when_mint_in_flight() {
     let mut s = setup(PRICE_150_USD_E8);
-    insert_open_vault(&mut s, Principal::anonymous(), 7, 100 * ONE_SOL, 100_00000000);
+    insert_open_vault(
+        &mut s,
+        Principal::anonymous(),
+        7,
+        100 * ONE_SOL,
+        100_00000000,
+    );
     s.chain_vaults.get_mut(&7).unwrap().pending_mint_e8s = 1; // a mint already pending
-    let r = borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "good-address".into(), only_good, "SOL", 13_000, 0, None, 1);
+    let r = borrow_chain_vault_in_state(
+        &mut s,
+        7,
+        50_00000000,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        0,
+        None,
+        1,
+    );
     assert_eq!(r, Err(BorrowError::MintInFlight));
 }
 
@@ -198,10 +343,32 @@ fn borrow_rejects_when_mint_in_flight() {
 fn borrow_rejects_non_open_vault() {
     use super::monad::chain_vault::ChainVaultStatus;
     let mut s = setup(PRICE_150_USD_E8);
-    insert_open_vault(&mut s, Principal::anonymous(), 7, 100 * ONE_SOL, 100_00000000);
+    insert_open_vault(
+        &mut s,
+        Principal::anonymous(),
+        7,
+        100 * ONE_SOL,
+        100_00000000,
+    );
     s.chain_vaults.get_mut(&7).unwrap().status = ChainVaultStatus::AwaitingDeposit;
-    let r = borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "good-address".into(), only_good, "SOL", 13_000, 0, None, 1);
-    assert_eq!(r, Err(BorrowError::WrongStatus { status: ChainVaultStatus::AwaitingDeposit }));
+    let r = borrow_chain_vault_in_state(
+        &mut s,
+        7,
+        50_00000000,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        0,
+        None,
+        1,
+    );
+    assert_eq!(
+        r,
+        Err(BorrowError::WrongStatus {
+            status: ChainVaultStatus::AwaitingDeposit
+        })
+    );
 }
 
 #[test]
@@ -210,17 +377,98 @@ fn borrow_rejects_below_min_cr() {
     // 1 SOL ($150) collateral, 100 icUSD debt (CR 150%); borrow 50 more → new debt
     // 150 icUSD, CR = 150/150 = 100% < 130% → reject.
     insert_open_vault(&mut s, Principal::anonymous(), 7, ONE_SOL, 100_00000000);
-    let r = borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "good-address".into(), only_good, "SOL", 13_000, 0, None, 1);
-    assert!(matches!(r, Err(BorrowError::BelowMinCr { .. })), "got {r:?}");
-    assert_eq!(s.chain_vaults.get(&7).unwrap().pending_mint_e8s, 0, "no mutation on reject");
+    let r = borrow_chain_vault_in_state(
+        &mut s,
+        7,
+        50_00000000,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        0,
+        None,
+        1,
+    );
+    assert!(
+        matches!(r, Err(BorrowError::BelowMinCr { .. })),
+        "got {r:?}"
+    );
+    assert_eq!(
+        s.chain_vaults.get(&7).unwrap().pending_mint_e8s,
+        0,
+        "no mutation on reject"
+    );
 }
 
 #[test]
 fn borrow_rejects_zero_debt_and_bad_recipient() {
     let mut s = setup(PRICE_150_USD_E8);
-    insert_open_vault(&mut s, Principal::anonymous(), 7, 100 * ONE_SOL, 100_00000000);
-    assert_eq!(borrow_chain_vault_in_state(&mut s, 7, 0, "good-address".into(), only_good, "SOL", 13_000, 0, None, 1), Err(BorrowError::ZeroDebt));
-    assert_eq!(borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "bad".into(), only_good, "SOL", 13_000, 0, None, 1), Err(BorrowError::InvalidAddress("bad".into())));
+    insert_open_vault(
+        &mut s,
+        Principal::anonymous(),
+        7,
+        100 * ONE_SOL,
+        100_00000000,
+    );
+    assert_eq!(
+        borrow_chain_vault_in_state(
+            &mut s,
+            7,
+            0,
+            "good-address".into(),
+            only_good,
+            "SOL",
+            13_000,
+            0,
+            None,
+            1
+        ),
+        Err(BorrowError::ZeroDebt)
+    );
+    assert_eq!(
+        borrow_chain_vault_in_state(
+            &mut s,
+            7,
+            50_00000000,
+            "bad".into(),
+            only_good,
+            "SOL",
+            13_000,
+            0,
+            None,
+            1
+        ),
+        Err(BorrowError::InvalidAddress("bad".into()))
+    );
+}
+
+#[test]
+fn borrow_rejects_stale_price_when_age_gate_configured() {
+    let mut s = setup(PRICE_150_USD_E8);
+    insert_open_vault(
+        &mut s,
+        Principal::anonymous(),
+        7,
+        100 * ONE_SOL,
+        100_00000000,
+    );
+    s.manual_price_set_at_ns
+        .insert((CHAIN, "SOL".into()), 1_000);
+    enable_price_age_gate(&mut s, 100);
+    let res = borrow_chain_vault_in_state(
+        &mut s,
+        7,
+        50_00000000,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        0,
+        None,
+        1_101,
+    );
+    assert_eq!(res, Err(BorrowError::StalePrice));
+    assert_eq!(s.chain_vaults.get(&7).unwrap().pending_mint_e8s, 0);
 }
 
 // ─── Increment 0: min-debt floor + per-chain debt ceiling ─────────────────────
@@ -230,12 +478,31 @@ fn open_rejects_debt_below_min_vault_debt() {
     let mut s = setup(PRICE_150_USD_E8);
     // 1 SOL ($150) collateral easily clears CR; debt 0.05 icUSD < the 0.1 floor.
     let r = open_chain_vault_in_state(
-        &mut s, CHAIN, Principal::anonymous(), "custody".into(), ONE_SOL,
+        &mut s,
+        CHAIN,
+        Principal::anonymous(),
+        "custody".into(),
+        ONE_SOL,
         5_000_000, // 0.05 icUSD
-        "good-address".into(), only_good, "SOL",
-        13_000, /*min_vault_debt*/ 10_000_000, /*ceiling*/ None, 12345, 1,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        /*min_vault_debt*/ 10_000_000,
+        /*ceiling*/ None,
+        12345,
+        1,
     );
-    assert!(matches!(r, Err(OpenVaultError::BelowMinDebt { min_e8s: 10_000_000, .. })), "got {r:?}");
+    assert!(
+        matches!(
+            r,
+            Err(OpenVaultError::BelowMinDebt {
+                min_e8s: 10_000_000,
+                ..
+            })
+        ),
+        "got {r:?}"
+    );
     assert!(s.chain_vaults.is_empty(), "no mutation on rejection");
 }
 
@@ -243,29 +510,66 @@ fn open_rejects_debt_below_min_vault_debt() {
 fn open_rejects_when_over_debt_ceiling() {
     let mut s = setup(PRICE_150_USD_E8);
     // Seed 900 icUSD of existing chain debt, then open another 200 -> 1100 > 1000.
-    insert_open_vault(&mut s, Principal::anonymous(), 1, 100 * ONE_SOL, 900_00000000);
+    insert_open_vault(
+        &mut s,
+        Principal::anonymous(),
+        1,
+        100 * ONE_SOL,
+        900_00000000,
+    );
     let r = open_chain_vault_in_state(
-        &mut s, CHAIN, Principal::anonymous(), "custody".into(), 100 * ONE_SOL,
-        200_00000000, "good-address".into(), only_good, "SOL",
-        13_000, 10_000_000, Some(1000_00000000), 12345, 2,
+        &mut s,
+        CHAIN,
+        Principal::anonymous(),
+        "custody".into(),
+        100 * ONE_SOL,
+        200_00000000,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        10_000_000,
+        Some(1000_00000000),
+        12345,
+        2,
     );
     assert!(
         matches!(r, Err(OpenVaultError::DebtCeilingExceeded { would_be_e8s, ceiling_e8s })
             if would_be_e8s == 1100_00000000 && ceiling_e8s == 1000_00000000),
         "got {r:?}"
     );
-    assert!(!s.chain_vaults.contains_key(&2), "no vault created over the ceiling");
+    assert!(
+        !s.chain_vaults.contains_key(&2),
+        "no vault created over the ceiling"
+    );
 }
 
 #[test]
 fn open_allows_debt_exactly_at_ceiling() {
     let mut s = setup(PRICE_150_USD_E8);
-    insert_open_vault(&mut s, Principal::anonymous(), 1, 100 * ONE_SOL, 800_00000000);
+    insert_open_vault(
+        &mut s,
+        Principal::anonymous(),
+        1,
+        100 * ONE_SOL,
+        800_00000000,
+    );
     // 800 + 200 == 1000 == ceiling -> allowed (only strictly over rejects).
     let r = open_chain_vault_in_state(
-        &mut s, CHAIN, Principal::anonymous(), "custody".into(), 100 * ONE_SOL,
-        200_00000000, "good-address".into(), only_good, "SOL",
-        13_000, 10_000_000, Some(1000_00000000), 12345, 2,
+        &mut s,
+        CHAIN,
+        Principal::anonymous(),
+        "custody".into(),
+        100 * ONE_SOL,
+        200_00000000,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        10_000_000,
+        Some(1000_00000000),
+        12345,
+        2,
     );
     assert_eq!(r, Ok(()), "open at exactly the ceiling is allowed");
 }
@@ -274,16 +578,34 @@ fn open_allows_debt_exactly_at_ceiling() {
 fn borrow_rejects_when_over_debt_ceiling() {
     let mut s = setup(PRICE_150_USD_E8);
     // Vault 7 holds 900 icUSD; borrowing 200 more pushes the chain total to 1100 > 1000.
-    insert_open_vault(&mut s, Principal::anonymous(), 7, 1000 * ONE_SOL, 900_00000000);
+    insert_open_vault(
+        &mut s,
+        Principal::anonymous(),
+        7,
+        1000 * ONE_SOL,
+        900_00000000,
+    );
     let r = borrow_chain_vault_in_state(
-        &mut s, 7, 200_00000000, "good-address".into(), only_good, "SOL",
-        13_000, 10_000_000, Some(1000_00000000), 1,
+        &mut s,
+        7,
+        200_00000000,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        10_000_000,
+        Some(1000_00000000),
+        1,
     );
     assert!(
         matches!(r, Err(BorrowError::DebtCeilingExceeded { ceiling_e8s, .. }) if ceiling_e8s == 1000_00000000),
         "got {r:?}"
     );
-    assert_eq!(s.chain_vaults.get(&7).unwrap().pending_mint_e8s, 0, "no mutation on reject");
+    assert_eq!(
+        s.chain_vaults.get(&7).unwrap().pending_mint_e8s,
+        0,
+        "no mutation on reject"
+    );
 }
 
 #[test]
@@ -293,8 +615,16 @@ fn nonce_consume_is_monotonic_and_rejects_replay() {
     assert_eq!(s.expected_evm_nonce(&owner), 0);
     assert_eq!(s.consume_evm_nonce(&owner, 0), Ok(()));
     assert_eq!(s.expected_evm_nonce(&owner), 1);
-    assert_eq!(s.consume_evm_nonce(&owner, 0), Err(1), "replay of nonce 0 rejected");
-    assert_eq!(s.consume_evm_nonce(&owner, 5), Err(1), "out-of-order rejected");
+    assert_eq!(
+        s.consume_evm_nonce(&owner, 0),
+        Err(1),
+        "replay of nonce 0 rejected"
+    );
+    assert_eq!(
+        s.consume_evm_nonce(&owner, 5),
+        Err(1),
+        "out-of-order rejected"
+    );
     assert_eq!(s.consume_evm_nonce(&owner, 1), Ok(()));
     // A different owner has an independent sequence.
     let other = Principal::from_slice(&[6, 6, 6]);
@@ -311,7 +641,7 @@ fn per_owner_cap_counts_non_terminal_only() {
     s.chain_vaults.get_mut(&2).unwrap().status = ChainVaultStatus::AwaitingDeposit;
     insert_open_vault(&mut s, owner, 3, 0, 0);
     s.chain_vaults.get_mut(&3).unwrap().status = ChainVaultStatus::Closed; // terminal, not counted
-    // A different owner's vault is not counted.
+                                                                           // A different owner's vault is not counted.
     insert_open_vault(&mut s, Principal::anonymous(), 4, 0, 0);
     assert_eq!(s.count_owner_active_vaults(&owner), 2);
 }
@@ -327,27 +657,50 @@ fn gc_prunes_only_stale_awaiting_deposit() {
     // and the GC is allowed to reap stale unfunded vaults on it (finding F).
     let mut s = setup(PRICE_150_USD_E8);
     let mk = |id: u64, st: ChainVaultStatus, opened: u64| ChainVaultV1 {
-        vault_id: id, owner: Principal::anonymous(), collateral_chain: CHAIN,
-        custody_address: "c".into(), collateral_amount_native: 0, debt_e8s: 0,
-        mint_recipient: "r".into(), pending_mint_e8s: 0, status: st, opened_at_ns: opened,
-    last_interest_accrual_ns: 0,
-    pending_interest_mint_e8s: 0,
-    pending_liquidation: None,        owner_evm: None,
+        vault_id: id,
+        owner: Principal::anonymous(),
+        collateral_chain: CHAIN,
+        custody_address: "c".into(),
+        collateral_amount_native: 0,
+        debt_e8s: 0,
+        mint_recipient: "r".into(),
+        pending_mint_e8s: 0,
+        status: st,
+        opened_at_ns: opened,
+        last_interest_accrual_ns: 0,
+        pending_interest_mint_e8s: 0,
+        pending_liquidation: None,
+        owner_evm: None,
     };
     let now = 100 * AWAITING_DEPOSIT_TTL_NS;
     // 1: stale AwaitingDeposit (older than TTL) -> pruned.
-    s.chain_vaults.insert(1, mk(1, ChainVaultStatus::AwaitingDeposit, now - AWAITING_DEPOSIT_TTL_NS - 1));
+    s.chain_vaults.insert(
+        1,
+        mk(
+            1,
+            ChainVaultStatus::AwaitingDeposit,
+            now - AWAITING_DEPOSIT_TTL_NS - 1,
+        ),
+    );
     // 2: young AwaitingDeposit (within TTL) -> kept.
-    s.chain_vaults.insert(2, mk(2, ChainVaultStatus::AwaitingDeposit, now - 1));
+    s.chain_vaults
+        .insert(2, mk(2, ChainVaultStatus::AwaitingDeposit, now - 1));
     // 3: old Open vault -> kept (only AwaitingDeposit is GC'd; a funded vault is safe).
     s.chain_vaults.insert(3, mk(3, ChainVaultStatus::Open, 0));
     // 4: old MintPending -> kept (a mint is in flight; not unfunded).
-    s.chain_vaults.insert(4, mk(4, ChainVaultStatus::MintPending, 0));
+    s.chain_vaults
+        .insert(4, mk(4, ChainVaultStatus::MintPending, 0));
 
     let pruned = prune_stale_awaiting_deposit(&mut s, now, AWAITING_DEPOSIT_TTL_NS);
     assert_eq!(pruned, 1);
-    assert!(!s.chain_vaults.contains_key(&1), "stale AwaitingDeposit pruned");
-    assert!(s.chain_vaults.contains_key(&2), "young AwaitingDeposit kept");
+    assert!(
+        !s.chain_vaults.contains_key(&1),
+        "stale AwaitingDeposit pruned"
+    );
+    assert!(
+        s.chain_vaults.contains_key(&2),
+        "young AwaitingDeposit kept"
+    );
     assert!(s.chain_vaults.contains_key(&3), "Open kept");
     assert!(s.chain_vaults.contains_key(&4), "MintPending kept");
 }
@@ -357,26 +710,45 @@ fn gc_skips_stale_vaults_when_observer_inactive() {
     use super::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
     let now = 100 * AWAITING_DEPOSIT_TTL_NS;
     let stale = |id: u64| ChainVaultV1 {
-        vault_id: id, owner: Principal::anonymous(), collateral_chain: CHAIN,
-        custody_address: "c".into(), collateral_amount_native: 0, debt_e8s: 0,
-        mint_recipient: "r".into(), pending_mint_e8s: 0,
+        vault_id: id,
+        owner: Principal::anonymous(),
+        collateral_chain: CHAIN,
+        custody_address: "c".into(),
+        collateral_amount_native: 0,
+        debt_e8s: 0,
+        mint_recipient: "r".into(),
+        pending_mint_e8s: 0,
         status: ChainVaultStatus::AwaitingDeposit,
-        opened_at_ns: now - AWAITING_DEPOSIT_TTL_NS - 1, owner_evm: None,
+        opened_at_ns: now - AWAITING_DEPOSIT_TTL_NS - 1,
+        owner_evm: None,
         last_interest_accrual_ns: 0,
         pending_interest_mint_e8s: 0,
-        pending_liquidation: None,    };
+        pending_liquidation: None,
+    };
     // (a) Chain not registered at all -> no observer -> not reaped (would strand
     //     a funded-but-unobserved deposit).
     let mut s = MultiChainState::default();
     s.chain_vaults.insert(1, stale(1));
-    assert_eq!(prune_stale_awaiting_deposit(&mut s, now, AWAITING_DEPOSIT_TTL_NS), 0);
-    assert!(s.chain_vaults.contains_key(&1), "unregistered-chain vault kept");
+    assert_eq!(
+        prune_stale_awaiting_deposit(&mut s, now, AWAITING_DEPOSIT_TTL_NS),
+        0
+    );
+    assert!(
+        s.chain_vaults.contains_key(&1),
+        "unregistered-chain vault kept"
+    );
     // (b) Chain registered but reorg-halted -> observer halted -> not reaped.
     let mut s = setup(PRICE_150_USD_E8);
     s.reorg_halted.insert(CHAIN, true);
     s.chain_vaults.insert(1, stale(1));
-    assert_eq!(prune_stale_awaiting_deposit(&mut s, now, AWAITING_DEPOSIT_TTL_NS), 0);
-    assert!(s.chain_vaults.contains_key(&1), "reorg-halted-chain vault kept");
+    assert_eq!(
+        prune_stale_awaiting_deposit(&mut s, now, AWAITING_DEPOSIT_TTL_NS),
+        0
+    );
+    assert!(
+        s.chain_vaults.contains_key(&1),
+        "reorg-halted-chain vault kept"
+    );
 }
 
 // ─── M2 review finding A: collateral release blocked while a borrow mint pends ─
@@ -387,16 +759,50 @@ use super::vault::{close_chain_vault_in_state, withdraw_collateral_in_state, Wit
 fn withdraw_and_close_reject_while_borrow_mint_in_flight() {
     let mut s = setup(PRICE_150_USD_E8);
     // Open vault, 100 SOL collateral, debt 100e8; borrow 50 more (pending=50e8).
-    insert_open_vault(&mut s, Principal::anonymous(), 7, 100 * ONE_SOL, 100_00000000);
-    borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "good-address".into(), only_good, "SOL", 13_000, 0, None, 1).unwrap();
-    assert_eq!(s.chain_vaults.get(&7).unwrap().pending_mint_e8s, 50_00000000);
+    insert_open_vault(
+        &mut s,
+        Principal::anonymous(),
+        7,
+        100 * ONE_SOL,
+        100_00000000,
+    );
+    borrow_chain_vault_in_state(
+        &mut s,
+        7,
+        50_00000000,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        0,
+        None,
+        1,
+    )
+    .unwrap();
+    assert_eq!(
+        s.chain_vaults.get(&7).unwrap().pending_mint_e8s,
+        50_00000000
+    );
     // Withdraw must reject — releasing collateral now would undercollateralize
     // once the borrow mint confirms (debt would jump 100e8 -> 150e8).
     assert_eq!(
-        withdraw_collateral_in_state(&mut s, 7, 1, "good-address".into(), only_good, "SOL", 13_000, 2),
+        withdraw_collateral_in_state(
+            &mut s,
+            7,
+            1,
+            "good-address".into(),
+            only_good,
+            "SOL",
+            13_000,
+            2
+        ),
         Err(WithdrawError::MintInFlight)
     );
-    assert_eq!(s.settlement_queues.get(&CHAIN).unwrap().pending_len(), 1, "no withdraw enqueued");
+    assert_eq!(
+        s.settlement_queues.get(&CHAIN).unwrap().pending_len(),
+        1,
+        "no withdraw enqueued"
+    );
 }
 
 #[test]
@@ -404,10 +810,30 @@ fn close_rejects_while_borrow_mint_in_flight_even_if_debt_zero() {
     let mut s = setup(PRICE_150_USD_E8);
     // A repaid (debt 0) but still-Open vault that borrows: debt stays 0, pending=50e8.
     insert_open_vault(&mut s, Principal::anonymous(), 7, 100 * ONE_SOL, 0);
-    borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "good-address".into(), only_good, "SOL", 13_000, 0, None, 1).unwrap();
+    borrow_chain_vault_in_state(
+        &mut s,
+        7,
+        50_00000000,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        0,
+        None,
+        1,
+    )
+    .unwrap();
     // Close (debt==0) must NOT release collateral while the borrow mint pends.
     assert_eq!(
-        close_chain_vault_in_state(&mut s, 7, "good-address".into(), only_good, "SOL", 13_000, 2),
+        close_chain_vault_in_state(
+            &mut s,
+            7,
+            "good-address".into(),
+            only_good,
+            "SOL",
+            13_000,
+            2
+        ),
         Err(WithdrawError::MintInFlight)
     );
     assert_eq!(
@@ -415,6 +841,37 @@ fn close_rejects_while_borrow_mint_in_flight_even_if_debt_zero() {
         super::monad::chain_vault::ChainVaultStatus::Open,
         "vault not closed"
     );
+}
+
+#[test]
+fn withdraw_rejects_stale_price_when_age_gate_configured() {
+    let mut s = setup(PRICE_150_USD_E8);
+    insert_open_vault(
+        &mut s,
+        Principal::anonymous(),
+        7,
+        100 * ONE_SOL,
+        100_00000000,
+    );
+    s.manual_price_set_at_ns
+        .insert((CHAIN, "SOL".into()), 1_000);
+    enable_price_age_gate(&mut s, 100);
+    let res = withdraw_collateral_in_state(
+        &mut s,
+        7,
+        ONE_SOL,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        1_101,
+    );
+    assert_eq!(res, Err(WithdrawError::StalePrice));
+    assert_eq!(
+        s.chain_vaults.get(&7).unwrap().collateral_amount_native,
+        100 * ONE_SOL
+    );
+    assert_eq!(s.settlement_queues.get(&CHAIN).unwrap().pending_len(), 0);
 }
 
 // ─── Increment 1 / Task 2: pending_liquidation marker write-guards (spec 3.1) ───
@@ -435,13 +892,28 @@ fn liq_marker() -> PendingLiquidationV1 {
 #[test]
 fn withdraw_rejected_while_liquidation_in_flight() {
     let mut s = setup(PRICE_150_USD_E8);
-    insert_open_vault(&mut s, Principal::anonymous(), 7, 100 * ONE_SOL, 100_00000000);
+    insert_open_vault(
+        &mut s,
+        Principal::anonymous(),
+        7,
+        100 * ONE_SOL,
+        100_00000000,
+    );
     // A liquidation is mid-flight: the vault's collateral is reserved/handed to a
     // tier. An owner withdraw (even a tiny, CR-safe 1-lamport one) must be rejected
     // so the collateral cannot be double-spent against an in-flight swap/burn.
     s.chain_vaults.get_mut(&7).unwrap().pending_liquidation = Some(liq_marker());
     assert_eq!(
-        withdraw_collateral_in_state(&mut s, 7, 1, "good-address".into(), only_good, "SOL", 13_000, 2),
+        withdraw_collateral_in_state(
+            &mut s,
+            7,
+            1,
+            "good-address".into(),
+            only_good,
+            "SOL",
+            13_000,
+            2
+        ),
         Err(WithdrawError::LiquidationInFlight)
     );
     assert_eq!(
@@ -449,20 +921,49 @@ fn withdraw_rejected_while_liquidation_in_flight() {
         100 * ONE_SOL,
         "collateral untouched on rejection"
     );
-    assert_eq!(s.settlement_queues.get(&CHAIN).unwrap().pending_len(), 0, "no withdraw enqueued");
+    assert_eq!(
+        s.settlement_queues.get(&CHAIN).unwrap().pending_len(),
+        0,
+        "no withdraw enqueued"
+    );
 }
 
 #[test]
 fn borrow_rejected_while_liquidation_in_flight() {
     let mut s = setup(PRICE_150_USD_E8);
-    insert_open_vault(&mut s, Principal::anonymous(), 7, 100 * ONE_SOL, 100_00000000);
+    insert_open_vault(
+        &mut s,
+        Principal::anonymous(),
+        7,
+        100 * ONE_SOL,
+        100_00000000,
+    );
     s.chain_vaults.get_mut(&7).unwrap().pending_liquidation = Some(liq_marker());
     assert_eq!(
-        borrow_chain_vault_in_state(&mut s, 7, 50_00000000, "good-address".into(), only_good, "SOL", 13_000, 0, None, 2),
+        borrow_chain_vault_in_state(
+            &mut s,
+            7,
+            50_00000000,
+            "good-address".into(),
+            only_good,
+            "SOL",
+            13_000,
+            0,
+            None,
+            2
+        ),
         Err(BorrowError::LiquidationInFlight)
     );
-    assert_eq!(s.chain_vaults.get(&7).unwrap().pending_mint_e8s, 0, "no borrow reserved on rejection");
-    assert_eq!(s.settlement_queues.get(&CHAIN).unwrap().pending_len(), 0, "no mint enqueued");
+    assert_eq!(
+        s.chain_vaults.get(&7).unwrap().pending_mint_e8s,
+        0,
+        "no borrow reserved on rejection"
+    );
+    assert_eq!(
+        s.settlement_queues.get(&CHAIN).unwrap().pending_len(),
+        0,
+        "no mint enqueued"
+    );
 }
 
 #[test]
@@ -473,7 +974,15 @@ fn close_rejected_while_liquidation_in_flight_via_withdraw_delegate() {
     insert_open_vault(&mut s, Principal::anonymous(), 7, 100 * ONE_SOL, 0);
     s.chain_vaults.get_mut(&7).unwrap().pending_liquidation = Some(liq_marker());
     assert_eq!(
-        close_chain_vault_in_state(&mut s, 7, "good-address".into(), only_good, "SOL", 13_000, 2),
+        close_chain_vault_in_state(
+            &mut s,
+            7,
+            "good-address".into(),
+            only_good,
+            "SOL",
+            13_000,
+            2
+        ),
         Err(WithdrawError::LiquidationInFlight)
     );
     assert_eq!(
@@ -492,7 +1001,15 @@ fn close_rejected_while_liquidation_in_flight_degenerate_zero_collateral() {
     insert_open_vault(&mut s, Principal::anonymous(), 7, 0, 0);
     s.chain_vaults.get_mut(&7).unwrap().pending_liquidation = Some(liq_marker());
     assert_eq!(
-        close_chain_vault_in_state(&mut s, 7, "good-address".into(), only_good, "SOL", 13_000, 2),
+        close_chain_vault_in_state(
+            &mut s,
+            7,
+            "good-address".into(),
+            only_good,
+            "SOL",
+            13_000,
+            2
+        ),
         Err(WithdrawError::LiquidationInFlight)
     );
     assert_eq!(
@@ -504,13 +1021,13 @@ fn close_rejected_while_liquidation_in_flight_degenerate_zero_collateral() {
 
 // ─── Increment 2 / Task 6: begin_liquidation_in_state (spec §4.9 Phase 1) ───
 mod begin_liquidation_tests {
-    use super::super::vault::{begin_liquidation_in_state, LiquidationError, LiquidationTier};
     use super::super::config::ChainId;
     use super::super::liquidation::{bonus_e4_from_penalty_bps, value_cap_to_repay};
     use super::super::liquidation_config::{ChainLiquidationConfigV1, DexKind};
     use super::super::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
     use super::super::multi_chain_state::MultiChainState;
     use super::super::settlement_queue::SettlementOpKind;
+    use super::super::vault::{begin_liquidation_in_state, LiquidationError, LiquidationTier};
     use candid::Principal;
 
     const CFX: ChainId = ChainId(71);
@@ -546,10 +1063,16 @@ mod begin_liquidation_tests {
 
     fn set_price(s: &mut MultiChainState, price_e8: u64, set_at_ns: u64) {
         s.manual_prices.insert((CFX, "CFX".into()), price_e8);
-        s.manual_price_set_at_ns.insert((CFX, "CFX".into()), set_at_ns);
+        s.manual_price_set_at_ns
+            .insert((CFX, "CFX".into()), set_at_ns);
     }
 
-    fn insert_vault(s: &mut MultiChainState, vault_id: u64, collateral_native: u128, debt_e8s: u128) {
+    fn insert_vault(
+        s: &mut MultiChainState,
+        vault_id: u64,
+        collateral_native: u128,
+        debt_e8s: u128,
+    ) {
         s.chain_vaults.insert(
             vault_id,
             ChainVaultV1 {
@@ -592,16 +1115,29 @@ mod begin_liquidation_tests {
         let m = v.pending_liquidation.as_ref().expect("marker set");
         assert_eq!(m.tier, LiquidationTier::Bot);
         assert_eq!(m.op_id, op_id);
-        assert!(m.collateral_reserved_native > 0 && m.collateral_reserved_native <= 1_400 * ONE_CFX);
-        assert!(v.collateral_amount_native < 1_400 * ONE_CFX, "collateral reserved (decremented)");
+        assert!(
+            m.collateral_reserved_native > 0 && m.collateral_reserved_native <= 1_400 * ONE_CFX
+        );
+        assert!(
+            v.collateral_amount_native < 1_400 * ONE_CFX,
+            "collateral reserved (decremented)"
+        );
         assert_eq!(
             v.collateral_amount_native + m.collateral_reserved_native,
             1_400 * ONE_CFX,
             "reserved + remaining == original"
         );
         assert_eq!(v.debt_e8s, 100 * E8, "debt UNCHANGED at trigger (Design B)");
-        assert_eq!(*s.chain_supplies.get(&CFX).unwrap(), 100 * E8, "supply UNCHANGED");
-        assert_eq!(s.bot_pending_chain_vaults.get(&7), Some(&2_000), "bot routing timestamp recorded");
+        assert_eq!(
+            *s.chain_supplies.get(&CFX).unwrap(),
+            100 * E8,
+            "supply UNCHANGED"
+        );
+        assert_eq!(
+            s.bot_pending_chain_vaults.get(&7),
+            Some(&2_000),
+            "bot routing timestamp recorded"
+        );
         let q = s.settlement_queues.get(&CFX).unwrap();
         assert!(q
             .pending
@@ -620,9 +1156,18 @@ mod begin_liquidation_tests {
             begin_liquidation_in_state(&mut s, 7, addr_ok, "CFX", 13_300, 2_000),
             Err(LiquidationError::NotLiquidatable { .. })
         ));
-        assert!(s.chain_vaults.get(&7).unwrap().pending_liquidation.is_none(), "no marker on reject");
         assert!(
-            s.settlement_queues.get(&CFX).map_or(true, |q| q.pending.is_empty()),
+            s.chain_vaults
+                .get(&7)
+                .unwrap()
+                .pending_liquidation
+                .is_none(),
+            "no marker on reject"
+        );
+        assert!(
+            s.settlement_queues
+                .get(&CFX)
+                .map_or(true, |q| q.pending.is_empty()),
             "no op on reject"
         );
     }
@@ -636,8 +1181,16 @@ mod begin_liquidation_tests {
             begin_liquidation_in_state(&mut s, 7, addr_ok, "CFX", 13_300, now),
             Err(LiquidationError::StalePrice)
         ));
-        assert!(s.chain_vaults.get(&7).unwrap().pending_liquidation.is_none());
-        assert!(s.settlement_queues.get(&CFX).map_or(true, |q| q.pending.is_empty()));
+        assert!(s
+            .chain_vaults
+            .get(&7)
+            .unwrap()
+            .pending_liquidation
+            .is_none());
+        assert!(s
+            .settlement_queues
+            .get(&CFX)
+            .map_or(true, |q| q.pending.is_empty()));
     }
 
     #[test]
@@ -688,7 +1241,10 @@ mod begin_liquidation_tests {
             Err(LiquidationError::MintInFlight)
         ));
         s.chain_vaults.get_mut(&7).unwrap().pending_mint_e8s = 0;
-        s.chain_vaults.get_mut(&7).unwrap().pending_interest_mint_e8s = 1;
+        s.chain_vaults
+            .get_mut(&7)
+            .unwrap()
+            .pending_interest_mint_e8s = 1;
         assert!(matches!(
             begin_liquidation_in_state(&mut s, 7, addr_ok, "CFX", 13_300, 2_000),
             Err(LiquidationError::InterestRealizationPending)
@@ -699,11 +1255,18 @@ mod begin_liquidation_tests {
     fn depth_cap_sizes_partial_of_partial() {
         let mut s = base_state(true);
         set_price(&mut s, 8_000_000, 1_000); // $0.08
-        // Tiny depth cap so the sized repay exceeds it -> effective_repay == cap.
+                                             // Tiny depth cap so the sized repay exceeds it -> effective_repay == cap.
         seed_cfg(&mut s, true, 50 * E8);
         insert_vault(&mut s, 7, 5_600 * ONE_CFX, 400 * E8); // big underwater vault
         begin_liquidation_in_state(&mut s, 7, addr_ok, "CFX", 13_300, 2_000).unwrap();
-        let m = s.chain_vaults.get(&7).unwrap().pending_liquidation.as_ref().unwrap().clone();
+        let m = s
+            .chain_vaults
+            .get(&7)
+            .unwrap()
+            .pending_liquidation
+            .as_ref()
+            .unwrap()
+            .clone();
         let cap_repay = value_cap_to_repay(50 * E8, bonus_e4_from_penalty_bps(1_200));
         assert!(m.debt_to_clear_e8s <= cap_repay, "sized down to depth cap");
         assert!(m.debt_to_clear_e8s < 400 * E8, "well under full debt");
@@ -719,7 +1282,15 @@ mod begin_liquidation_tests {
             begin_liquidation_in_state(&mut s, 7, addr_ok, "CFX", 13_300, 2_000),
             Err(LiquidationError::InvalidAddress(_))
         ));
-        assert!(s.chain_vaults.get(&7).unwrap().pending_liquidation.is_none());
-        assert!(s.settlement_queues.get(&CFX).map_or(true, |q| q.pending.is_empty()));
+        assert!(s
+            .chain_vaults
+            .get(&7)
+            .unwrap()
+            .pending_liquidation
+            .is_none());
+        assert!(s
+            .settlement_queues
+            .get(&CFX)
+            .map_or(true, |q| q.pending.is_empty()));
     }
 }

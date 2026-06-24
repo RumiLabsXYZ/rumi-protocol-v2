@@ -29,6 +29,7 @@
 //! See spec Section 3 ("State wipe on upgrade") and the 2026-05-18 AMM
 //! incident (MEMORY.md: `project_amm_state_wipe_2026_05_18.md`).
 
+use super::collateral_config::ChainDebtConfigV1;
 use super::config::{ChainConfigV1, ChainConfigV2, ChainConfigV3, ChainId};
 use super::liquidation_config::ChainLiquidationConfigV1;
 use super::monad::chain_vault::ChainVaultV1;
@@ -297,7 +298,8 @@ impl MultiChainStateV4 {
         if nonce != expected {
             return Err(expected);
         }
-        self.evm_owner_nonces.insert(*owner, expected.saturating_add(1));
+        self.evm_owner_nonces
+            .insert(*owner, expected.saturating_add(1));
         Ok(())
     }
 
@@ -391,7 +393,8 @@ impl MultiChainStateV5 {
         if nonce != expected {
             return Err(expected);
         }
-        self.evm_owner_nonces.insert(*owner, expected.saturating_add(1));
+        self.evm_owner_nonces
+            .insert(*owner, expected.saturating_add(1));
         Ok(())
     }
 
@@ -517,6 +520,10 @@ pub struct MultiChainStateV6 {
     /// Increment 2+ reads it; Increment 1 ships only the getter/setter.
     #[serde(default)]
     pub chain_liquidation_configs: BTreeMap<ChainId, ChainLiquidationConfigV1>,
+    /// Optional Tier-B per-chain debt overrides. Missing row means the
+    /// compile-time `chain_collateral_config` values remain authoritative.
+    #[serde(default)]
+    pub chain_debt_configs: BTreeMap<ChainId, ChainDebtConfigV1>,
     /// Vault_id -> first-bot-routed wall-clock ns. Set when
     /// `begin_liquidation_in_state` routes a vault to the bot tier; the durable
     /// timestamp the bot->SP escalation predicate reads (spec §10, finding #10).
@@ -576,7 +583,8 @@ impl MultiChainStateV6 {
         if nonce != expected {
             return Err(expected);
         }
-        self.evm_owner_nonces.insert(*owner, expected.saturating_add(1));
+        self.evm_owner_nonces
+            .insert(*owner, expected.saturating_add(1));
         Ok(())
     }
 
@@ -643,7 +651,8 @@ mod manual_price_tests {
         // A price written before V5 lives in `manual_prices` with NO entry in
         // `manual_price_set_at_ns`. The getter must report set_at_ns = 0, not None.
         let mut mc = MultiChainState::default();
-        mc.manual_prices.insert((CFX, "CFX".to_string()), 15_000_000);
+        mc.manual_prices
+            .insert((CFX, "CFX".to_string()), 15_000_000);
         assert_eq!(mc.get_manual_price(CFX, "CFX"), Some((15_000_000, 0)));
     }
 
@@ -652,13 +661,17 @@ mod manual_price_tests {
         // State-wipe defense: a live V4 CBOR snapshot (no manual_price_set_at_ns
         // key) must decode into V5 with prices intact and the timestamp map empty.
         let mut v4 = MultiChainStateV4::default();
-        v4.manual_prices.insert((CFX, "CFX".to_string()), 15_000_000);
+        v4.manual_prices
+            .insert((CFX, "CFX".to_string()), 15_000_000);
         v4.chain_supplies.insert(CFX, 42);
         let mut buf = Vec::new();
         ciborium::ser::into_writer(&v4, &mut buf).unwrap();
 
         let v5: MultiChainStateV5 = ciborium::de::from_reader(buf.as_slice()).unwrap();
-        assert_eq!(v5.manual_prices.get(&(CFX, "CFX".to_string())), Some(&15_000_000));
+        assert_eq!(
+            v5.manual_prices.get(&(CFX, "CFX".to_string())),
+            Some(&15_000_000)
+        );
         assert_eq!(v5.chain_supplies.get(&CFX), Some(&42));
         assert!(v5.manual_price_set_at_ns.is_empty());
         assert_eq!(v5.get_manual_price(CFX, "CFX"), Some((15_000_000, 0)));
