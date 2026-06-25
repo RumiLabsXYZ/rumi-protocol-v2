@@ -36,7 +36,7 @@
   let started = false;
 
   $: copy = nativeXrpDepositCopy({ collateralAmount, icusdAmount, collateralInfo });
-  $: paymentUri = opened ? buildXrpPaymentUri(opened.custodyAddress, collateralAmount) : '';
+  $: paymentUri = opened ? buildXrpPaymentUri(opened.custodyAddress, copy.sendAmount) : '';
   $: hasDepositAddress = Boolean(opened?.custodyAddress);
   $: shouldRenderModal = nativeXrpModalShouldRender(phase, hasDepositAddress);
   $: modalTitle = nativeXrpModalTitle(phase, hasDepositAddress);
@@ -63,17 +63,17 @@
 
       opened = result.data;
       phase = 'awaiting';
-      await generateQr();
+      await generateQr(buildXrpPaymentUri(result.data.custodyAddress, copy.sendAmount));
     } catch (err) {
       phase = 'error';
       errorMessage = err instanceof Error ? err.message : 'Could not reserve an XRP custody address.';
     }
   }
 
-  async function generateQr() {
-    if (!paymentUri) return;
+  async function generateQr(uri = paymentUri) {
+    if (!uri) return;
     try {
-      qrDataUrl = await QRCode.toDataURL(paymentUri, {
+      qrDataUrl = await QRCode.toDataURL(uri, {
         width: 196,
         margin: 2,
         color: { dark: '#020617', light: '#ffffff' },
@@ -167,6 +167,8 @@
       </div>
     </div>
 
+    <p class="reserve-note">{copy.reserveExplanation}</p>
+
     {#if phase === 'opening'}
       <div class="loading-pane">
         <span class="spinner"></span>
@@ -188,7 +190,7 @@
             <span>{formatAddress(opened.custodyAddress, 12, 8)}</span>
             <small>{copied ? 'Copied' : 'Copy'}</small>
           </button>
-          <p class="detail-line">Vault #{opened.vaultId} will mint {copy.borrowAmountLabel} after the deposit is confirmed.</p>
+          <p class="detail-line">Vault #{opened.vaultId} will credit {copy.collateralAmountLabel} as collateral and mint {copy.borrowAmountLabel} after the deposit is confirmed.</p>
         </div>
       </div>
     {/if}
@@ -348,6 +350,17 @@
     width: 1px;
     height: 2.25rem;
     background: var(--rumi-border);
+  }
+
+  .reserve-note {
+    margin: -0.5rem 0 1rem;
+    padding: 0.75rem 0.875rem;
+    border: 1px solid rgba(45, 212, 191, 0.16);
+    border-radius: 8px;
+    background: rgba(45, 212, 191, 0.06);
+    color: var(--rumi-text-secondary);
+    font-size: 0.875rem;
+    line-height: 1.45;
   }
 
   .loading-pane {

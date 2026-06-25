@@ -3,6 +3,7 @@ import {
   buildXrpPaymentUri,
   formatXrpAmount,
   isNativeXrpCollateral,
+  NATIVE_XRP_ACCOUNT_RESERVE,
   nativeXrpDepositCopy,
   nativeXrpKeepOpenCloseCopy,
   nativeXrpModalOpeningCopy,
@@ -45,9 +46,28 @@ describe('native XRP borrow flow helpers', () => {
       collateralInfo: xrpCollateral,
     });
 
-    expect(copy.sendAmountLabel).toBe('12.345678 XRP');
+    expect(copy.sendAmountLabel).toBe('13.345678 XRP');
+    expect(copy.collateralAmountLabel).toBe('12.345678 XRP');
+    expect(copy.reserveAmountLabel).toBe('1 XRP');
+    expect(copy.sendAmount).toBe(13.345678);
+    expect(copy.reserveAmount).toBe(NATIVE_XRP_ACCOUNT_RESERVE);
     expect(copy.borrowAmountLabel).toBe('4.50 icUSD');
     expect(copy.assetName).toBe('XRP');
+  });
+
+  it('explains the split between credited XRP collateral and the XRPL reserve', () => {
+    const copy = nativeXrpDepositCopy({
+      collateralAmount: 2,
+      icusdAmount: 0.5,
+      collateralInfo: xrpCollateral,
+    });
+
+    expect(copy.sendAmountLabel).toBe('3 XRP');
+    expect(copy.reserveExplanation).toContain('2 XRP collateral');
+    expect(copy.reserveExplanation).toContain('1 XRP XRPL account reserve');
+    expect(buildXrpPaymentUri('rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh', copy.sendAmount)).toBe(
+      'ripple:rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh?amount=3'
+    );
   });
 
   it('explains that native XRP reserve stays locked and the vault stays open', () => {

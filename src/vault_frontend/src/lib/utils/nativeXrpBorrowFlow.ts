@@ -1,5 +1,7 @@
 import type { CollateralInfo } from '$lib/services/types';
 
+export const NATIVE_XRP_ACCOUNT_RESERVE = 1;
+
 export interface NativeXrpDepositIntent {
   collateralAmount: number;
   icusdAmount: number;
@@ -8,8 +10,13 @@ export interface NativeXrpDepositIntent {
 
 export interface NativeXrpDepositCopy {
   assetName: string;
+  sendAmount: number;
+  reserveAmount: number;
   sendAmountLabel: string;
+  collateralAmountLabel: string;
+  reserveAmountLabel: string;
   borrowAmountLabel: string;
+  reserveExplanation: string;
 }
 
 export type NativeXrpBorrowPhase =
@@ -38,10 +45,19 @@ export function buildXrpPaymentUri(address: string, amount: number): string {
 
 export function nativeXrpDepositCopy(intent: NativeXrpDepositIntent): NativeXrpDepositCopy {
   const assetName = intent.collateralInfo?.symbol || 'XRP';
+  const reserveAmount = NATIVE_XRP_ACCOUNT_RESERVE;
+  const sendAmount = intent.collateralAmount + reserveAmount;
+  const collateralAmountLabel = formatXrpAmount(intent.collateralAmount);
+  const reserveAmountLabel = formatXrpAmount(reserveAmount);
   return {
     assetName,
-    sendAmountLabel: formatXrpAmount(intent.collateralAmount),
+    sendAmount,
+    reserveAmount,
+    sendAmountLabel: formatXrpAmount(sendAmount),
+    collateralAmountLabel,
+    reserveAmountLabel,
     borrowAmountLabel: `${intent.icusdAmount.toFixed(2)} icUSD`,
+    reserveExplanation: `${collateralAmountLabel} collateral + ${reserveAmountLabel} XRPL account reserve. The reserve activates this XRP address and stays locked there; your vault stays open so you do not pay it again.`,
   };
 }
 
