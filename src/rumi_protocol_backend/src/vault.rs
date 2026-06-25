@@ -972,6 +972,7 @@ pub async fn open_vault(
 pub struct XrpVaultOpenInfo {
     pub vault_id: u64,
     pub custody_address: String,
+    pub reserve_base_drops: u64,
 }
 
 fn require_xrp_production_key() -> Result<(), ProtocolError> {
@@ -1056,6 +1057,24 @@ pub async fn open_xrp_vault() -> Result<XrpVaultOpenInfo, ProtocolError> {
         ));
     }
 
+    let reserve_base_drops = match crate::chains::xrp::xrp_rpc::fetch_reserve_base().await {
+        Ok(r) => match u64::try_from(r) {
+            Ok(drops) => drops,
+            Err(_) => {
+                guard_principal.fail();
+                return Err(ProtocolError::GenericError(
+                    "xrp reserve base exceeds u64 drops".to_string(),
+                ));
+            }
+        },
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "xrp server_state failed: {e}"
+            )));
+        }
+    };
+
     // Reserve a vault_id (also the threshold-derivation nonce). A derive failure
     // below just leaves a gap in the id sequence, which is harmless.
     let vault_id = mutate_state(|s| s.increment_vault_id());
@@ -1084,6 +1103,7 @@ pub async fn open_xrp_vault() -> Result<XrpVaultOpenInfo, ProtocolError> {
                 custody_address: custody_address.clone(),
                 derivation_nonce: vault_id,
                 opened_at_ns,
+                reserve_base_drops,
             },
         );
     });
@@ -1092,6 +1112,7 @@ pub async fn open_xrp_vault() -> Result<XrpVaultOpenInfo, ProtocolError> {
     Ok(XrpVaultOpenInfo {
         vault_id,
         custody_address,
+        reserve_base_drops,
     })
 }
 
@@ -1119,8 +1140,9 @@ pub(crate) fn xrp_credit_amount(
 /// user then borrows icUSD via the normal `borrow_from_vault` (the borrow→mint path
 /// is collateral-generic and mints on the IC). Owner-only and idempotent: the
 /// pending entry is removed on success, so a second call errors. Credits
-/// `balance - reserve_base` drops — the user funds the ~1 XRP base reserve, which
-/// stays locked at the custody account. Returns the credited drops.
+/// `balance - reserve_base` drops — the user funds the XRPL base reserve returned
+/// by server_state, which stays locked at the custody account. Returns the credited
+/// drops.
 pub async fn confirm_xrp_deposit(vault_id: u64) -> Result<u64, ProtocolError> {
     let caller = ic_cdk::api::caller();
     let guard_principal =
@@ -2251,6 +2273,7 @@ mod xrp_p3_tests {
             custody_address: custody_address.to_string(),
             derivation_nonce: 7,
             opened_at_ns: 123,
+            reserve_base_drops: 1_000_000,
         }
     }
 

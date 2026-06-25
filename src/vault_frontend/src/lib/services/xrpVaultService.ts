@@ -41,12 +41,15 @@ export interface XrpVaultOpenView {
   vaultId: number;
   /** The per-vault XRPL classic custody address (starts with `r`). */
   custodyAddress: string;
+  /** XRPL reserve base fetched by the backend when the custody address was prepared. */
+  reserveBaseDrops: bigint;
 }
 
 export interface XrpPendingDepositView {
   vaultId: number;
   custodyAddress: string;
   openedAtMs: number;
+  reserveBaseDrops: bigint;
 }
 
 export interface XrpClaimView {
@@ -106,13 +109,21 @@ export class XrpVaultService {
           return {
             success: true,
             oisyResilient: true,
-            data: { vaultId: Number(vaultId), custodyAddress: dep.custody_address },
+            data: {
+              vaultId: Number(vaultId),
+              custodyAddress: dep.custody_address,
+              reserveBaseDrops: dep.reserve_base_drops,
+            },
           };
         }
         if ('Ok' in result) {
           return {
             success: true,
-            data: { vaultId: Number(result.Ok.vault_id), custodyAddress: result.Ok.custody_address },
+            data: {
+              vaultId: Number(result.Ok.vault_id),
+              custodyAddress: result.Ok.custody_address,
+              reserveBaseDrops: result.Ok.reserve_base_drops,
+            },
           };
         }
         return { success: false, error: ApiClient.formatProtocolError(result.Err) };
@@ -218,6 +229,7 @@ export class XrpVaultService {
         vaultId: Number(vaultId),
         custodyAddress: dep.custody_address,
         openedAtMs: Number(dep.opened_at_ns / 1_000_000n),
+        reserveBaseDrops: dep.reserve_base_drops,
       }));
     } catch (e) {
       console.error('getMyPendingDeposits failed:', e);

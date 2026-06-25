@@ -1295,6 +1295,7 @@ export interface XrpClaim {
   'settlement' : [] | [XrpSettlement],
 }
 export interface XrpPendingDeposit {
+  'reserve_base_drops' : bigint,
   'owner' : Principal,
   'custody_address' : string,
   'opened_at_ns' : bigint,
@@ -1308,6 +1309,7 @@ export interface XrpSettlement {
   'tx_hash' : string,
 }
 export interface XrpVaultOpenInfo {
+  'reserve_base_drops' : bigint,
   'custody_address' : string,
   'vault_id' : bigint,
 }

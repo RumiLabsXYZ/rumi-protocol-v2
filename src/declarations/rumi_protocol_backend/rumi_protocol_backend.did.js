@@ -930,6 +930,7 @@ export const idlFactory = ({ IDL }) => {
     'settlement' : IDL.Opt(XrpSettlement),
   });
   const XrpPendingDeposit = IDL.Record({
+    'reserve_base_drops' : IDL.Nat64,
     'owner' : IDL.Principal,
     'custody_address' : IDL.Text,
     'opened_at_ns' : IDL.Nat64,
@@ -1140,6 +1141,7 @@ export const idlFactory = ({ IDL }) => {
     'Err' : ProtocolError,
   });
   const XrpVaultOpenInfo = IDL.Record({
+    'reserve_base_drops' : IDL.Nat64,
     'custody_address' : IDL.Text,
     'vault_id' : IDL.Nat64,
   });

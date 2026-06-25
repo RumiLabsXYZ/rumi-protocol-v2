@@ -3,7 +3,6 @@ import {
   buildXrpPaymentUri,
   formatXrpAmount,
   isNativeXrpCollateral,
-  NATIVE_XRP_ACCOUNT_RESERVE,
   nativeXrpDepositCopy,
   nativeXrpKeepOpenCloseCopy,
   nativeXrpModalOpeningCopy,
@@ -43,14 +42,15 @@ describe('native XRP borrow flow helpers', () => {
     const copy = nativeXrpDepositCopy({
       collateralAmount: 12.345678,
       icusdAmount: 4.5,
+      reserveBaseDrops: 1_250_000n,
       collateralInfo: xrpCollateral,
     });
 
-    expect(copy.sendAmountLabel).toBe('13.345678 XRP');
+    expect(copy.sendAmountLabel).toBe('13.595678 XRP');
     expect(copy.collateralAmountLabel).toBe('12.345678 XRP');
-    expect(copy.reserveAmountLabel).toBe('1 XRP');
-    expect(copy.sendAmount).toBe(13.345678);
-    expect(copy.reserveAmount).toBe(NATIVE_XRP_ACCOUNT_RESERVE);
+    expect(copy.reserveAmountLabel).toBe('1.25 XRP');
+    expect(copy.sendAmount).toBe(13.595678);
+    expect(copy.reserveAmount).toBe(1.25);
     expect(copy.borrowAmountLabel).toBe('4.50 icUSD');
     expect(copy.assetName).toBe('XRP');
   });
@@ -59,6 +59,7 @@ describe('native XRP borrow flow helpers', () => {
     const copy = nativeXrpDepositCopy({
       collateralAmount: 2,
       icusdAmount: 0.5,
+      reserveBaseDrops: 1_000_000n,
       collateralInfo: xrpCollateral,
     });
 

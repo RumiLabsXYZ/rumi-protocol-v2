@@ -655,12 +655,21 @@ pub enum CustodyKind {
 /// `confirm_xrp_deposit` once the deposit to `custody_address` is verified and a
 /// real `Vault` is created. `derivation_nonce` (= the reserved vault_id) plus the
 /// owner pin the threshold-Ed25519 custody path, so the address is reproducible.
+fn default_xrp_pending_reserve_base_drops() -> u64 {
+    0
+}
+
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub struct XrpPendingDeposit {
     pub owner: Principal,
     pub custody_address: String,
     pub derivation_nonce: u64,
     pub opened_at_ns: u64,
+    /// XRPL reserve base, in drops, fetched from server_state when the deposit
+    /// address was prepared. Old pending deposits decode to 0 because the value
+    /// was not recorded before this field existed.
+    #[serde(default = "default_xrp_pending_reserve_base_drops")]
+    pub reserve_base_drops: u64,
 }
 
 /// Synthetic `collateral_type` / `CollateralConfig` map key for native XRP. XRP has
@@ -7434,11 +7443,34 @@ mod tests {
             custody_address: "rLUEXYuLiQptky37CqLcm9USQpPiz5rkpD".to_string(),
             derivation_nonce: 7,
             opened_at_ns: 123,
+            reserve_base_drops: 1_000_000,
         };
         let mut buf = Vec::new();
         ciborium::ser::into_writer(&dep, &mut buf).unwrap();
         let back: XrpPendingDeposit = ciborium::de::from_reader(buf.as_slice()).unwrap();
         assert_eq!(dep, back);
+    }
+
+    #[test]
+    fn xrp_pending_deposit_defaults_missing_reserve_on_old_snapshot() {
+        #[derive(Serialize)]
+        struct LegacyXrpPendingDeposit {
+            owner: Principal,
+            custody_address: String,
+            derivation_nonce: u64,
+            opened_at_ns: u64,
+        }
+
+        let legacy = LegacyXrpPendingDeposit {
+            owner: Principal::anonymous(),
+            custody_address: "rLUEXYuLiQptky37CqLcm9USQpPiz5rkpD".to_string(),
+            derivation_nonce: 7,
+            opened_at_ns: 123,
+        };
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&legacy, &mut buf).unwrap();
+        let back: XrpPendingDeposit = ciborium::de::from_reader(buf.as_slice()).unwrap();
+        assert_eq!(back.reserve_base_drops, 0);
     }
 
     #[test]
