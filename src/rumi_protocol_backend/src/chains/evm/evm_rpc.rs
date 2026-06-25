@@ -408,6 +408,17 @@ pub struct BurnLog {
     pub block_number: u64,
 }
 
+/// Parsed Burn log including the indexed `burner` address. The legacy
+/// `BurnLog` shape is kept because existing call sites only need the amount.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BurnLogWithBurner {
+    pub vault_id: u64,
+    pub burner: String,
+    pub amount_e8s: u128,
+    pub tx_hash: String,
+    pub block_number: u64,
+}
+
 impl BurnLog {
     /// Decode a `BurnLog` from raw log fields.
     ///
@@ -454,6 +465,34 @@ pub fn decode_burn_log(
     block_number: u64,
 ) -> Result<BurnLog, String> {
     BurnLog::from_raw(topics, data, tx_hash, block_number)
+}
+
+/// Decode a `Burn` event and return the indexed burner address as a normalized
+/// 0x-prefixed lowercase EVM address.
+pub fn decode_burn_log_with_burner(
+    topics: &[String],
+    data: &str,
+    tx_hash: &str,
+    block_number: u64,
+) -> Result<BurnLogWithBurner, String> {
+    let burn = BurnLog::from_raw(topics, data, tx_hash, block_number)?;
+    let raw = topics
+        .get(2)
+        .ok_or_else(|| "BurnLogWithBurner: missing burner topic".to_string())?;
+    let hex = raw
+        .strip_prefix("0x")
+        .or_else(|| raw.strip_prefix("0X"))
+        .unwrap_or(raw);
+    if hex.len() < 40 {
+        return Err(format!("BurnLogWithBurner: burner topic too short: {raw}"));
+    }
+    Ok(BurnLogWithBurner {
+        vault_id: burn.vault_id,
+        burner: format!("0x{}", hex[hex.len() - 40..].to_ascii_lowercase()),
+        amount_e8s: burn.amount_e8s,
+        tx_hash: burn.tx_hash,
+        block_number: burn.block_number,
+    })
 }
 
 // ─── MintLog ─────────────────────────────────────────────────────────────────
@@ -1303,6 +1342,7 @@ pub async fn get_transaction_receipt(
 /// `(address_lowercased, topics, data, log_index)`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TxReceiptWithLogs {
+    pub tx_hash: Option<String>,
     pub success: bool,
     pub block_number: u64,
     pub logs: Vec<(String, Vec<String>, String, u64)>,
@@ -1320,6 +1360,9 @@ pub fn parse_receipt_with_logs(text: &str) -> Result<Option<TxReceiptWithLogs>, 
         return Ok(None);
     }
     let res = &val["result"];
+    let tx_hash = res["transactionHash"]
+        .as_str()
+        .map(|hash| hash.to_ascii_lowercase());
     let success = parse_hex_quantity(res["status"].as_str().unwrap_or("0x0"))? == 1;
     let block_number = parse_hex_quantity(
         res["blockNumber"]
@@ -1343,6 +1386,7 @@ pub fn parse_receipt_with_logs(text: &str) -> Result<Option<TxReceiptWithLogs>, 
         }
     }
     Ok(Some(TxReceiptWithLogs {
+        tx_hash,
         success,
         block_number,
         logs,
