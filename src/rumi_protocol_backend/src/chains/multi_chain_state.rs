@@ -603,6 +603,16 @@ pub struct MultiChainStateV6 {
     /// both burn and stable-transfer receipt identities.
     #[serde(default)]
     pub settled_reserve_burn_proofs: BTreeMap<String, SettlementProofRecord>,
+    /// Burn log identities already consumed by either pending-chain-burn or
+    /// reserve-burn settlement. This closes cross-domain replay where the same
+    /// foreign icUSD burn could otherwise debit both backing buckets.
+    #[serde(default)]
+    pub settled_settlement_burn_logs: BTreeSet<String>,
+    /// Reserve transfer log identity -> e8s capacity already consumed by
+    /// reserve-burn settlements. One reserve transfer can fund several burns,
+    /// but cumulative consumption must never exceed the verified transfer size.
+    #[serde(default)]
+    pub settled_reserve_transfer_e8s: BTreeMap<String, u128>,
 }
 
 impl MultiChainStateV6 {

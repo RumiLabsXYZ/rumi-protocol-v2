@@ -665,6 +665,8 @@ fn settlement_proof_state_defaults_empty_from_pre_inc6_v6_snapshot() {
     assert_eq!(decoded.reserve_backing_e8s.get(&CFX), Some(&30));
     assert!(decoded.settled_pending_burn_proofs.is_empty());
     assert!(decoded.settled_reserve_burn_proofs.is_empty());
+    assert!(decoded.settled_settlement_burn_logs.is_empty());
+    assert!(decoded.settled_reserve_transfer_e8s.is_empty());
 }
 
 #[test]
@@ -694,6 +696,14 @@ fn settlement_proof_state_round_trip_preserves_compact_records() {
         .insert(pending.proof_id.clone(), pending.clone());
     v6.settled_reserve_burn_proofs
         .insert(reserve.proof_id.clone(), reserve.clone());
+    v6.settled_settlement_burn_logs.insert(format!(
+        "{}:{}",
+        pending.tx_hash, pending.log_index
+    ));
+    v6.settled_reserve_transfer_e8s.insert(
+        "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc:8".to_string(),
+        50_000_000,
+    );
 
     let mut buf = Vec::new();
     ciborium::ser::into_writer(&v6, &mut buf).expect("cbor encode V6");
@@ -707,6 +717,15 @@ fn settlement_proof_state_round_trip_preserves_compact_records() {
     assert_eq!(
         decoded.settled_reserve_burn_proofs[&reserve.proof_id],
         reserve
+    );
+    assert!(decoded.settled_settlement_burn_logs.contains(&format!(
+        "{}:{}",
+        pending.tx_hash, pending.log_index
+    )));
+    assert_eq!(
+        decoded.settled_reserve_transfer_e8s
+            [&"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc:8".to_string()],
+        50_000_000
     );
 }
 

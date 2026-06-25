@@ -1342,6 +1342,7 @@ pub async fn get_transaction_receipt(
 /// `(address_lowercased, topics, data, log_index)`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TxReceiptWithLogs {
+    pub tx_hash: Option<String>,
     pub success: bool,
     pub block_number: u64,
     pub logs: Vec<(String, Vec<String>, String, u64)>,
@@ -1359,6 +1360,9 @@ pub fn parse_receipt_with_logs(text: &str) -> Result<Option<TxReceiptWithLogs>, 
         return Ok(None);
     }
     let res = &val["result"];
+    let tx_hash = res["transactionHash"]
+        .as_str()
+        .map(|hash| hash.to_ascii_lowercase());
     let success = parse_hex_quantity(res["status"].as_str().unwrap_or("0x0"))? == 1;
     let block_number = parse_hex_quantity(
         res["blockNumber"]
@@ -1382,6 +1386,7 @@ pub fn parse_receipt_with_logs(text: &str) -> Result<Option<TxReceiptWithLogs>, 
         }
     }
     Ok(Some(TxReceiptWithLogs {
+        tx_hash,
         success,
         block_number,
         logs,

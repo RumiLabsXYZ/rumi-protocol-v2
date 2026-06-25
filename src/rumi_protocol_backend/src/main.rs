@@ -2641,6 +2641,7 @@ struct SettlementProofContext {
     contract: String,
     finality_depth: u64,
     settle_stable_token: Option<String>,
+    settle_stable_decimals: Option<u8>,
     reserve_address: Option<String>,
 }
 
@@ -2679,10 +2680,11 @@ fn settlement_proof_context(
         .ok_or_else(|| {
             ProtocolError::ChainAdmin(format!("no icUSD contract for chain {}", chain.0))
         })?;
-    let settle_stable_token = match kind {
-        SettlementProofKind::Pending => None,
-        SettlementProofKind::Reserve => Some(
-            s.multi_chain
+    let (settle_stable_token, settle_stable_decimals) = match kind {
+        SettlementProofKind::Pending => (None, None),
+        SettlementProofKind::Reserve => {
+            let liq_cfg = s
+                .multi_chain
                 .chain_liquidation_configs
                 .get(&chain)
                 .ok_or_else(|| {
@@ -2690,16 +2692,19 @@ fn settlement_proof_context(
                         "no chain liquidation config for chain {}",
                         chain.0
                     ))
-                })?
-                .settle_stable_token
-                .clone(),
-        ),
+                })?;
+            (
+                Some(liq_cfg.settle_stable_token.clone()),
+                Some(liq_cfg.settle_stable_decimals),
+            )
+        }
     };
 
     Ok(SettlementProofContext {
         contract,
         finality_depth: cfg.finality_depth as u64,
         settle_stable_token,
+        settle_stable_decimals,
         reserve_address: None,
     })
 }
@@ -2876,6 +2881,8 @@ async fn settle_reserve_burn_with_proof(
             ctx.reserve_address
                 .as_deref()
                 .expect("reserve address derived"),
+            ctx.settle_stable_decimals
+                .expect("reserve context has settle stable decimals"),
             &proof,
             &burn_receipt,
             &reserve_receipt,
@@ -11254,6 +11261,7 @@ mod inc6_settlement_proof_context_tests {
         );
         assert_eq!(pending.finality_depth, 12);
         assert!(pending.settle_stable_token.is_none());
+        assert!(pending.settle_stable_decimals.is_none());
 
         let reserve =
             settlement_proof_context(&s, CFX, SettlementProofKind::Reserve).expect("reserve ctx");
@@ -11261,6 +11269,7 @@ mod inc6_settlement_proof_context_tests {
             reserve.settle_stable_token.as_deref(),
             Some("0x5555555555555555555555555555555555555555")
         );
+        assert_eq!(reserve.settle_stable_decimals, Some(18));
     }
 
     #[test]

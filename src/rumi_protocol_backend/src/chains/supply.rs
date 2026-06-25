@@ -364,7 +364,27 @@ pub fn settle_reserve_burn(
 #[derive(Debug, PartialEq, Eq)]
 pub enum ProofBackedSettlementError {
     DuplicateProof(String),
+    DuplicateBurnLog {
+        burn_key: String,
+    },
+    ReserveTransferOverConsumed {
+        transfer_key: String,
+        current_e8s: u128,
+        attempted_e8s: u128,
+        capacity_e8s: u128,
+    },
+    ReserveTransferConsumptionOverflow {
+        transfer_key: String,
+    },
     BackingSettlement(BackingSettlementError),
+}
+
+fn settlement_burn_key(tx_hash: &str, log_index: u64) -> String {
+    format!("{}:{}", tx_hash.to_ascii_lowercase(), log_index)
+}
+
+fn reserve_transfer_key(tx_hash: &str, log_index: u64) -> String {
+    format!("{}:{}", tx_hash.to_ascii_lowercase(), log_index)
 }
 
 pub fn settle_pending_chain_burn_with_verified_proof(
@@ -379,10 +399,15 @@ pub fn settle_pending_chain_burn_with_verified_proof(
     {
         return Err(ProofBackedSettlementError::DuplicateProof(proof.proof_id));
     }
+    let burn_key = settlement_burn_key(&proof.tx_hash, proof.log_index);
+    if state.settled_settlement_burn_logs.contains(&burn_key) {
+        return Err(ProofBackedSettlementError::DuplicateBurnLog { burn_key });
+    }
 
     let mut next = state.clone();
     settle_pending_chain_burn(&mut next, chain, proof.amount_e8s)
         .map_err(ProofBackedSettlementError::BackingSettlement)?;
+    next.settled_settlement_burn_logs.insert(burn_key);
     next.settled_pending_burn_proofs.insert(
         proof.proof_id.clone(),
         SettlementProofRecord {
@@ -411,10 +436,37 @@ pub fn settle_reserve_burn_with_verified_proof(
     {
         return Err(ProofBackedSettlementError::DuplicateProof(proof.proof_id));
     }
+    let burn_key = settlement_burn_key(&proof.burn_tx_hash, proof.burn_log_index);
+    if state.settled_settlement_burn_logs.contains(&burn_key) {
+        return Err(ProofBackedSettlementError::DuplicateBurnLog { burn_key });
+    }
+    let transfer_key =
+        reserve_transfer_key(&proof.reserve_tx_hash, proof.reserve_transfer_log_index);
+    let current_transfer_consumed = state
+        .settled_reserve_transfer_e8s
+        .get(&transfer_key)
+        .copied()
+        .unwrap_or(0);
+    let next_transfer_consumed = current_transfer_consumed
+        .checked_add(proof.amount_e8s)
+        .ok_or_else(|| ProofBackedSettlementError::ReserveTransferConsumptionOverflow {
+            transfer_key: transfer_key.clone(),
+        })?;
+    if next_transfer_consumed > proof.reserve_transfer_amount_e8s {
+        return Err(ProofBackedSettlementError::ReserveTransferOverConsumed {
+            transfer_key,
+            current_e8s: current_transfer_consumed,
+            attempted_e8s: proof.amount_e8s,
+            capacity_e8s: proof.reserve_transfer_amount_e8s,
+        });
+    }
 
     let mut next = state.clone();
     settle_reserve_burn(&mut next, chain, proof.amount_e8s)
         .map_err(ProofBackedSettlementError::BackingSettlement)?;
+    next.settled_settlement_burn_logs.insert(burn_key);
+    next.settled_reserve_transfer_e8s
+        .insert(transfer_key, next_transfer_consumed);
     next.settled_reserve_burn_proofs.insert(
         proof.proof_id.clone(),
         SettlementProofRecord {

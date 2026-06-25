@@ -51,6 +51,7 @@ pub struct VerifiedReserveSettlementProof {
     pub burner: String,
     pub amount_e8s: u128,
     pub reserve_transfer_amount_native: u128,
+    pub reserve_transfer_amount_e8s: u128,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -64,11 +65,16 @@ pub enum SettlementProofError {
         expected: String,
         actual: String,
     },
+    ReceiptTxHashMismatch {
+        expected: String,
+        actual: String,
+    },
     ReserveTransferMissing,
     ReserveTransferTooSmall {
         expected_e8s: u128,
-        actual_native: u128,
+        actual_e8s: u128,
     },
+    ReserveTransferScaleOverflow,
 }
 
 pub fn verify_pending_burn_receipt(
@@ -77,6 +83,7 @@ pub fn verify_pending_burn_receipt(
     receipt: &TxReceiptWithLogs,
 ) -> Result<VerifiedBurnSettlementProof, SettlementProofError> {
     let tx_hash = canonical_tx_hash(&proof.tx_hash)?;
+    verify_receipt_tx_hash(receipt, &tx_hash)?;
     verify_receipt_success(receipt)?;
     let icusd_contract = canonical_address(icusd_contract)?;
     let expected_burner = proof
@@ -125,6 +132,7 @@ pub fn verify_reserve_burn_receipts(
     icusd_contract: &str,
     settle_stable_token: &str,
     reserve_address: &str,
+    settle_stable_decimals: u8,
     proof: &ReserveSettlementProofArg,
     burn_receipt: &TxReceiptWithLogs,
     reserve_receipt: &TxReceiptWithLogs,
@@ -137,6 +145,7 @@ pub fn verify_reserve_burn_receipts(
     let burn = verify_pending_burn_receipt(icusd_contract, &burn_proof, burn_receipt)?;
 
     let reserve_tx_hash = canonical_tx_hash(&proof.reserve_tx_hash)?;
+    verify_receipt_tx_hash(reserve_receipt, &reserve_tx_hash)?;
     verify_receipt_success(reserve_receipt)?;
     let settle_stable_token = canonical_address(settle_stable_token)?;
     let reserve_address = canonical_address(reserve_address)?;
@@ -159,10 +168,12 @@ pub fn verify_reserve_burn_receipts(
     if transfer.to != reserve_address {
         return Err(SettlementProofError::ReserveTransferMissing);
     }
-    if transfer.amount < burn.amount_e8s {
+    let reserve_transfer_amount_e8s =
+        stable_native_to_e8s(transfer.amount, settle_stable_decimals)?;
+    if reserve_transfer_amount_e8s < burn.amount_e8s {
         return Err(SettlementProofError::ReserveTransferTooSmall {
             expected_e8s: burn.amount_e8s,
-            actual_native: transfer.amount,
+            actual_e8s: reserve_transfer_amount_e8s,
         });
     }
 
@@ -181,6 +192,7 @@ pub fn verify_reserve_burn_receipts(
         burner: burn.burner,
         amount_e8s: burn.amount_e8s,
         reserve_transfer_amount_native: transfer.amount,
+        reserve_transfer_amount_e8s,
     })
 }
 
@@ -190,6 +202,52 @@ fn verify_receipt_success(receipt: &TxReceiptWithLogs) -> Result<(), SettlementP
     } else {
         Err(SettlementProofError::ReceiptReverted)
     }
+}
+
+fn verify_receipt_tx_hash(
+    receipt: &TxReceiptWithLogs,
+    expected: &str,
+) -> Result<(), SettlementProofError> {
+    match receipt.tx_hash.as_deref() {
+        Some(actual) if actual.eq_ignore_ascii_case(expected) => Ok(()),
+        Some(actual) => Err(SettlementProofError::ReceiptTxHashMismatch {
+            expected: expected.to_string(),
+            actual: actual.to_ascii_lowercase(),
+        }),
+        None => Err(SettlementProofError::ReceiptTxHashMismatch {
+            expected: expected.to_string(),
+            actual: "<missing>".to_string(),
+        }),
+    }
+}
+
+fn stable_native_to_e8s(
+    amount_native: u128,
+    decimals: u8,
+) -> Result<u128, SettlementProofError> {
+    match decimals.cmp(&8) {
+        core::cmp::Ordering::Equal => Ok(amount_native),
+        core::cmp::Ordering::Greater => {
+            let scale = pow10_u128(decimals - 8)?;
+            Ok(amount_native / scale)
+        }
+        core::cmp::Ordering::Less => {
+            let scale = pow10_u128(8 - decimals)?;
+            amount_native
+                .checked_mul(scale)
+                .ok_or(SettlementProofError::ReserveTransferScaleOverflow)
+        }
+    }
+}
+
+fn pow10_u128(exp: u8) -> Result<u128, SettlementProofError> {
+    let mut out = 1u128;
+    for _ in 0..exp {
+        out = out
+            .checked_mul(10)
+            .ok_or(SettlementProofError::ReserveTransferScaleOverflow)?;
+    }
+    Ok(out)
 }
 
 fn canonical_address(address: &str) -> Result<String, SettlementProofError> {

@@ -536,7 +536,7 @@ fn pending_chain_burn_settlement_reduces_pending_and_supply() {
 #[test]
 fn pending_chain_burn_settlement_rejects_over_settlement_without_mutation() {
     let mut s = fixture_state();
-    s.chain_vaults.insert(1, vault_with(70, 0));
+    s.chain_vaults.insert(1, vault_with(80, 0));
     s.chain_supplies.insert(CHAIN, 100);
     s.pending_chain_burn_e8s.insert(CHAIN, 30);
 
@@ -621,6 +621,7 @@ fn verified_reserve(proof_id: &str, amount_e8s: u128) -> VerifiedReserveSettleme
         burner: "0x000000000000000000000000000000000000beef".to_string(),
         amount_e8s,
         reserve_transfer_amount_native: amount_e8s,
+        reserve_transfer_amount_e8s: amount_e8s,
     }
 }
 
@@ -734,6 +735,76 @@ fn proof_backed_settlement_rejects_duplicate_reserve_proof_without_mutating_acco
         s.settled_reserve_burn_proofs[&proof.proof_id],
         record_after_first
     );
+}
+
+#[test]
+fn proof_backed_settlement_rejects_reserve_transfer_over_consumption_without_mutating_accounting() {
+    let mut s = fixture_state();
+    s.chain_vaults.insert(1, vault_with(70, 0));
+    s.chain_supplies.insert(CHAIN, 100);
+    s.reserve_backing_e8s.insert(CHAIN, 30);
+    let first = verified_reserve(
+        "reserve:0x1111111111111111111111111111111111111111111111111111111111111111:1:0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc:8",
+        10,
+    );
+    let mut second = verified_reserve(
+        "reserve:0x2222222222222222222222222222222222222222222222222222222222222222:2:0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc:8",
+        10,
+    );
+    second.burn_tx_hash =
+        "0x2222222222222222222222222222222222222222222222222222222222222222".to_string();
+    second.burn_log_index = 2;
+    second.reserve_transfer_amount_e8s = 15;
+
+    settle_reserve_burn_with_verified_proof(&mut s, CHAIN, first, 1_800)
+        .expect("first settlement");
+    let supply_after_first = s.chain_supplies[&CHAIN];
+    let reserve_after_first = s.reserve_backing_e8s[&CHAIN];
+    let proof_count_after_first = s.settled_reserve_burn_proofs.len();
+
+    assert!(matches!(
+        settle_reserve_burn_with_verified_proof(&mut s, CHAIN, second, 1_801),
+        Err(ProofBackedSettlementError::ReserveTransferOverConsumed { .. })
+    ));
+    assert_eq!(s.chain_supplies[&CHAIN], supply_after_first);
+    assert_eq!(s.reserve_backing_e8s[&CHAIN], reserve_after_first);
+    assert_eq!(
+        s.settled_reserve_burn_proofs.len(),
+        proof_count_after_first
+    );
+}
+
+#[test]
+fn proof_backed_settlement_rejects_burn_log_reuse_across_pending_and_reserve_domains() {
+    let mut s = fixture_state();
+    s.chain_vaults.insert(1, vault_with(80, 0));
+    s.chain_supplies.insert(CHAIN, 100);
+    s.pending_chain_burn_e8s.insert(CHAIN, 10);
+    s.reserve_backing_e8s.insert(CHAIN, 10);
+    let pending = verified_pending(
+        "pending:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:7",
+        10,
+    );
+    let mut reserve = verified_reserve(
+        "reserve:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:7:0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc:8",
+        10,
+    );
+    reserve.burn_tx_hash = pending.tx_hash.clone();
+    reserve.burn_log_index = pending.log_index;
+
+    settle_pending_chain_burn_with_verified_proof(&mut s, CHAIN, pending.clone(), 1_700)
+        .expect("pending settlement");
+    let supply_after_pending = s.chain_supplies[&CHAIN];
+    let reserve_backing_before = s.reserve_backing_e8s[&CHAIN];
+    let reserve_count_before = s.settled_reserve_burn_proofs.len();
+
+    assert!(matches!(
+        settle_reserve_burn_with_verified_proof(&mut s, CHAIN, reserve, 1_800),
+        Err(ProofBackedSettlementError::DuplicateBurnLog { .. })
+    ));
+    assert_eq!(s.chain_supplies[&CHAIN], supply_after_pending);
+    assert_eq!(s.reserve_backing_e8s[&CHAIN], reserve_backing_before);
+    assert_eq!(s.settled_reserve_burn_proofs.len(), reserve_count_before);
 }
 
 #[test]

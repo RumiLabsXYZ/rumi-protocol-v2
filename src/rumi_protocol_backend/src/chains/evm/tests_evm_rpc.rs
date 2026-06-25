@@ -339,11 +339,16 @@ fn rejects_log_with_wrong_topic0() {
 fn receipt_with_logs_parses_status_block_and_logs() {
     // A minimal eth_getTransactionReceipt JSON with one log.
     let json = r#"{"jsonrpc":"2.0","id":1,"result":{
+        "transactionHash":"0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         "status":"0x1","blockNumber":"0x10",
         "logs":[{"address":"0xCAFE","topics":["0xTOPIC0","0xVAULT","0xBURNER"],
                  "data":"0x2a","logIndex":"0x3"}]}}"#;
     let parsed = super::evm_rpc::parse_receipt_with_logs(json).expect("parse");
     let r = parsed.expect("receipt present");
+    assert_eq!(
+        r.tx_hash.as_deref(),
+        Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    );
     assert!(r.success);
     assert_eq!(r.block_number, 16);
     assert_eq!(r.logs.len(), 1);

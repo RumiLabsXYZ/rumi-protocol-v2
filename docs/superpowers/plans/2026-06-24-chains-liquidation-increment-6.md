@@ -4,7 +4,7 @@
 
 **Goal:** Replace Inc 5's manual reconciliation proof strings with finalized on-chain proof verification for pending-chain-burn and reserve-burn settlement, while keeping the existing manual endpoints as developer fallback.
 
-**Architecture:** Add an EVM settlement-proof module that reuses the existing `eth_getTransactionReceipt` and finality helpers, verifies exact receipt log identities, and returns compact verified proof metadata. Add separate proof-id dedupe maps to `MultiChainStateV6` so pending-burn and reserve-burn settlements cannot collide with user burn proofs. The async endpoints fetch and verify receipts before entering a synchronous `mutate_state` section that dedupes, settles accounting, stores proof metadata, and records the existing Inc 5 events atomically.
+**Architecture:** Add an EVM settlement-proof module that reuses the existing `eth_getTransactionReceipt` and finality helpers, verifies exact receipt log identities, and returns compact verified proof metadata. Add separate proof-id dedupe maps to `MultiChainStateV6` so pending-burn and reserve-burn settlements cannot collide with user burn proofs, plus a shared settlement-burn-log ledger and reserve-transfer capacity ledger so a burn log cannot settle across domains and one reserve transfer cannot be over-consumed. The async endpoints fetch and verify receipts before entering a synchronous `mutate_state` section that dedupes, settles accounting, stores proof metadata, and records the existing Inc 5 events atomically.
 
 **Tech Stack:** Rust 2021, `ic-cdk` update methods, existing hand-rolled EVM RPC wrapper on the repo's `ic-cdk` 0.12 pin, Candid, CBOR/serde stable snapshots, Cargo unit tests and targeted PocketIC tests.
 
@@ -18,6 +18,14 @@
 - PASS: `cargo test -p rumi_protocol_backend --lib` (650 passed, 1 ignored)
 - PASS: `cargo test -p rumi_protocol_backend --bin rumi_protocol_backend` (16 passed)
 - PASS: final post-review rerun `cargo test -p rumi_protocol_backend --bin rumi_protocol_backend` (16 passed)
+- ROUND 1 ADVERSARIAL REVIEW: FAIL, fixed confirmed blockers: 18-decimal reserve transfer scaling, reserve transfer aggregate replay, cross-domain burn-log replay, and receipt transaction-hash binding.
+- PASS: red/green replay fix `cargo test -p rumi_protocol_backend settlement_proof --lib -- --nocapture` (8 passed)
+- PASS: red/green replay fix `cargo test -p rumi_protocol_backend proof_backed_settlement --lib -- --nocapture` (8 passed)
+- PASS: red/green replay fix `cargo test -p rumi_protocol_backend receipt_with_logs_parses_status_block_and_logs --lib -- --nocapture`
+- PASS: red/green replay fix `cargo test -p rumi_protocol_backend settlement_proof_context --bin rumi_protocol_backend -- --nocapture` (5 passed)
+- PASS: post-fix `cargo test -p rumi_protocol_backend --lib` (654 passed, 1 ignored)
+- PASS: post-fix `cargo test -p rumi_protocol_backend --bin rumi_protocol_backend` (16 passed)
+- PASS: post-fix `cargo test -p rumi_protocol_backend check_candid_interface_compatibility --bin rumi_protocol_backend -- --nocapture`
 - PASS: `git diff --check`
 - CAVEAT: the broad targeted `rustfmt --edition 2021 --check ... src/lib.rs` command fails on pre-existing formatting/trailing-whitespace outside this increment because rustfmt follows the full module tree from `lib.rs` (for example `test_helpers.rs` and `icrc21.rs`). No mass-formatting was applied.
 
