@@ -1,7 +1,7 @@
 use super::config::ChainId;
 use super::multi_chain_state::{
     ChainLiqClaimV1, MultiChainState, MultiChainStateV1, MultiChainStateV2, MultiChainStateV3,
-    MultiChainStateV4, MultiChainStateV5, MultiChainStateV6,
+    MultiChainStateV4, MultiChainStateV5, MultiChainStateV6, SettlementProofRecord,
 };
 use super::supply::migrate_multi_chain_state;
 
@@ -610,6 +610,102 @@ fn chain_liq_claim_invariant_rejects_overpaid_claims() {
         paid_native: 11,
     };
     assert!(!claim.paid_within_seized());
+}
+
+#[test]
+fn settlement_proof_state_defaults_empty_from_pre_inc6_v6_snapshot() {
+    use super::collateral_config::ChainDebtConfigV1;
+    use super::config::ChainConfigV3;
+    use super::liquidation_config::ChainLiquidationConfigV1;
+    use super::monad::chain_vault::ChainVaultV1;
+    use super::settlement_queue::SettlementQueueV1;
+    use candid::Principal;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    #[derive(serde::Serialize, Default)]
+    struct PreInc6MultiChainStateV6 {
+        pub chain_configs: BTreeMap<ChainId, ChainConfigV3>,
+        pub chain_supplies: BTreeMap<ChainId, u128>,
+        pub settlement_queues: BTreeMap<ChainId, SettlementQueueV1>,
+        pub invariant_halted: bool,
+        pub chain_vaults: BTreeMap<u64, ChainVaultV1>,
+        pub chain_contracts: BTreeMap<ChainId, String>,
+        pub manual_prices: BTreeMap<(ChainId, String), u64>,
+        pub last_observed_block: BTreeMap<ChainId, u64>,
+        pub hot_wallet_balance_e18: BTreeMap<ChainId, u128>,
+        pub reorg_halted: BTreeMap<ChainId, bool>,
+        pub reorg_suspect_streak: BTreeMap<ChainId, u32>,
+        pub processed_burn_keys: BTreeMap<u64, BTreeSet<String>>,
+        pub evm_owner_nonces: BTreeMap<Principal, u64>,
+        pub manual_price_set_at_ns: BTreeMap<(ChainId, String), u64>,
+        pub reserve_backing_e8s: BTreeMap<ChainId, u128>,
+        pub reserve_usdc_native: BTreeMap<ChainId, u128>,
+        pub pending_chain_burn_e8s: BTreeMap<ChainId, u128>,
+        pub sp_attempted_chain_vaults: BTreeSet<u64>,
+        pub chain_liquidation_claims: BTreeMap<u64, ChainLiqClaimV1>,
+        pub chain_liquidation_configs: BTreeMap<ChainId, ChainLiquidationConfigV1>,
+        pub chain_debt_configs: BTreeMap<ChainId, ChainDebtConfigV1>,
+        pub bot_pending_chain_vaults: BTreeMap<u64, u64>,
+        pub chain_bad_debt_e8s: BTreeMap<ChainId, u128>,
+    }
+
+    const CFX: ChainId = ChainId(1030);
+    let mut pre = PreInc6MultiChainStateV6::default();
+    pre.chain_supplies.insert(CFX, 100);
+    pre.pending_chain_burn_e8s.insert(CFX, 20);
+    pre.reserve_backing_e8s.insert(CFX, 30);
+
+    let mut buf = Vec::new();
+    ciborium::ser::into_writer(&pre, &mut buf).expect("cbor encode pre-Inc6 V6");
+    let decoded: MultiChainStateV6 =
+        ciborium::de::from_reader(buf.as_slice()).expect("pre-Inc6 V6 decodes");
+
+    assert_eq!(decoded.chain_supplies.get(&CFX), Some(&100));
+    assert_eq!(decoded.pending_chain_burn_e8s.get(&CFX), Some(&20));
+    assert_eq!(decoded.reserve_backing_e8s.get(&CFX), Some(&30));
+    assert!(decoded.settled_pending_burn_proofs.is_empty());
+    assert!(decoded.settled_reserve_burn_proofs.is_empty());
+}
+
+#[test]
+fn settlement_proof_state_round_trip_preserves_compact_records() {
+    let mut v6 = MultiChainStateV6::default();
+    let pending = SettlementProofRecord {
+        proof_id: "pending:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:7"
+            .to_string(),
+        tx_hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+        log_index: 7,
+        amount_e8s: 25_000_000,
+        block_number: 55,
+        recorded_at_ns: 1_700,
+    };
+    let reserve = SettlementProofRecord {
+        proof_id: "reserve:0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:2:0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc:8"
+            .to_string(),
+        tx_hash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+        log_index: 2,
+        amount_e8s: 50_000_000,
+        block_number: 88,
+        recorded_at_ns: 1_800,
+    };
+    v6.settled_pending_burn_proofs
+        .insert(pending.proof_id.clone(), pending.clone());
+    v6.settled_reserve_burn_proofs
+        .insert(reserve.proof_id.clone(), reserve.clone());
+
+    let mut buf = Vec::new();
+    ciborium::ser::into_writer(&v6, &mut buf).expect("cbor encode V6");
+    let decoded: MultiChainStateV6 =
+        ciborium::de::from_reader(buf.as_slice()).expect("V6 snapshot round-trips");
+
+    assert_eq!(
+        decoded.settled_pending_burn_proofs[&pending.proof_id],
+        pending
+    );
+    assert_eq!(
+        decoded.settled_reserve_burn_proofs[&reserve.proof_id],
+        reserve
+    );
 }
 
 #[test]

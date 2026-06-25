@@ -474,6 +474,18 @@ impl ChainLiqClaimV1 {
     }
 }
 
+/// Compact durable marker for an operator-settled foreign-chain burn proof.
+/// Full receipts/logs are intentionally not stored in stable state.
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct SettlementProofRecord {
+    pub proof_id: String,
+    pub tx_hash: String,
+    pub log_index: u64,
+    pub amount_e8s: u128,
+    pub block_number: u64,
+    pub recorded_at_ns: u64,
+}
+
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug, Default)]
 pub struct MultiChainStateV6 {
     pub chain_configs: BTreeMap<ChainId, ChainConfigV3>,
@@ -572,6 +584,15 @@ pub struct MultiChainStateV6 {
     /// (pre-deploy); `#[serde(default)]` mandatory.
     #[serde(default)]
     pub chain_bad_debt_e8s: BTreeMap<ChainId, u128>,
+    /// Proof ids already consumed to settle SP pending-chain-burn backing. Kept
+    /// separate from user burn ids and reserve-burn ids so domains cannot collide.
+    #[serde(default)]
+    pub settled_pending_burn_proofs: BTreeMap<String, SettlementProofRecord>,
+    /// Proof ids already consumed to settle Tier-1 reserve-backed burns. Kept
+    /// separate from pending-chain-burn proofs because a reserve proof id encodes
+    /// both burn and stable-transfer receipt identities.
+    #[serde(default)]
+    pub settled_reserve_burn_proofs: BTreeMap<String, SettlementProofRecord>,
 }
 
 impl MultiChainStateV6 {
