@@ -38,6 +38,7 @@ fn applies_burn_log_from_correct_contract_and_dedups() {
     let mut s = state_with_open_vault(100);
     let contract = "0xcafe";
     let receipt = TxReceiptWithLogs {
+        tx_hash: None,
         success: true,
         block_number: 10,
         logs: vec![(
@@ -66,6 +67,7 @@ fn applies_burn_log_from_correct_contract_and_dedups() {
 fn rejects_log_from_wrong_contract() {
     let mut s = state_with_open_vault(100);
     let receipt = TxReceiptWithLogs {
+        tx_hash: None,
         success: true,
         block_number: 10,
         logs: vec![(

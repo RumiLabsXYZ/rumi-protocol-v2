@@ -8,6 +8,7 @@ pub mod eip712;
 pub mod evm_rpc;
 pub mod hardening;
 pub mod settlement;
+pub mod settlement_proof;
 pub mod tecdsa;
 pub mod tx;
 
@@ -33,6 +34,9 @@ mod tests_hardening;
 
 #[cfg(test)]
 mod tests_settlement;
+
+#[cfg(test)]
+mod tests_settlement_proof;
 
 #[cfg(test)]
 mod tests_tecdsa;

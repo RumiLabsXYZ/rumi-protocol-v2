@@ -474,6 +474,28 @@ impl ChainLiqClaimV1 {
     }
 }
 
+/// Compact durable marker for an operator-settled foreign-chain burn proof.
+/// Full receipts/logs are intentionally not stored in stable state.
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct SettlementProofRecord {
+    pub proof_id: String,
+    pub chain_id: ChainId,
+    pub tx_hash: String,
+    pub log_index: u64,
+    pub amount_e8s: u128,
+    pub block_number: u64,
+    pub recorded_at_ns: u64,
+}
+
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct PendingChainBurnAging {
+    pub chain_id: ChainId,
+    pub pending_chain_burn_e8s: u128,
+    pub oldest_reference_ns: Option<u64>,
+    pub age_ns: Option<u64>,
+    pub proof_count: u64,
+}
+
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug, Default)]
 pub struct MultiChainStateV6 {
     pub chain_configs: BTreeMap<ChainId, ChainConfigV3>,
@@ -572,6 +594,25 @@ pub struct MultiChainStateV6 {
     /// (pre-deploy); `#[serde(default)]` mandatory.
     #[serde(default)]
     pub chain_bad_debt_e8s: BTreeMap<ChainId, u128>,
+    /// Proof ids already consumed to settle SP pending-chain-burn backing. Kept
+    /// separate from user burn ids and reserve-burn ids so domains cannot collide.
+    #[serde(default)]
+    pub settled_pending_burn_proofs: BTreeMap<String, SettlementProofRecord>,
+    /// Proof ids already consumed to settle Tier-1 reserve-backed burns. Kept
+    /// separate from pending-chain-burn proofs because a reserve proof id encodes
+    /// both burn and stable-transfer receipt identities.
+    #[serde(default)]
+    pub settled_reserve_burn_proofs: BTreeMap<String, SettlementProofRecord>,
+    /// Burn log identities already consumed by either pending-chain-burn or
+    /// reserve-burn settlement. This closes cross-domain replay where the same
+    /// foreign icUSD burn could otherwise debit both backing buckets.
+    #[serde(default)]
+    pub settled_settlement_burn_logs: BTreeSet<String>,
+    /// Reserve transfer log identity -> e8s capacity already consumed by
+    /// reserve-burn settlements. One reserve transfer can fund several burns,
+    /// but cumulative consumption must never exceed the verified transfer size.
+    #[serde(default)]
+    pub settled_reserve_transfer_e8s: BTreeMap<String, u128>,
 }
 
 impl MultiChainStateV6 {
@@ -600,6 +641,38 @@ impl MultiChainStateV6 {
     /// summed across chains. 0 until Increment 4 wires the SP path.
     pub fn total_pending_chain_burn_e8s(&self) -> u128 {
         self.pending_chain_burn_e8s.values().copied().sum()
+    }
+
+    pub fn pending_chain_burn_aging(&self, now_ns: u64) -> Vec<PendingChainBurnAging> {
+        self.pending_chain_burn_e8s
+            .iter()
+            .filter_map(|(&chain_id, &pending_chain_burn_e8s)| {
+                if pending_chain_burn_e8s == 0 {
+                    return None;
+                }
+                let mut proof_count = 0u64;
+                let mut oldest_reference_ns: Option<u64> = None;
+                for record in self
+                    .settled_pending_burn_proofs
+                    .values()
+                    .filter(|record| record.chain_id == chain_id)
+                {
+                    proof_count = proof_count.saturating_add(1);
+                    oldest_reference_ns = Some(match oldest_reference_ns {
+                        Some(oldest) => oldest.min(record.recorded_at_ns),
+                        None => record.recorded_at_ns,
+                    });
+                }
+                let age_ns = oldest_reference_ns.map(|oldest| now_ns.saturating_sub(oldest));
+                Some(PendingChainBurnAging {
+                    chain_id,
+                    pending_chain_burn_e8s,
+                    oldest_reference_ns,
+                    age_ns,
+                    proof_count,
+                })
+            })
+            .collect()
     }
 
     /// M2: the expected next EIP-712 nonce for a synthetic owner (0 if unseen).
