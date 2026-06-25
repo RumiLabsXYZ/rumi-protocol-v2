@@ -2904,6 +2904,14 @@ fn get_settlement_proof_ids(
     read_state(settlement_proof_ids_from_state)
 }
 
+#[candid_method(query)]
+#[query]
+fn get_pending_chain_burn_aging(
+) -> Vec<rumi_protocol_backend::chains::multi_chain_state::PendingChainBurnAging> {
+    let now_ns = ic_cdk::api::time();
+    read_state(|s| s.multi_chain.pending_chain_burn_aging(now_ns))
+}
+
 /// Developer-gated manual reconciliation for the SP path: called after the
 /// operator verifies the matching foreign-chain icUSD burn for an amount already
 /// booked in `pending_chain_burn_e8s`.
@@ -11245,6 +11253,7 @@ mod inc6_settlement_proof_context_tests {
         let mut s = State::default();
         let pending_a = SettlementProofRecord {
             proof_id: "pending:a".into(),
+            chain_id: CFX,
             tx_hash: "0xa".into(),
             log_index: 1,
             amount_e8s: 10,
@@ -11253,6 +11262,7 @@ mod inc6_settlement_proof_context_tests {
         };
         let pending_b = SettlementProofRecord {
             proof_id: "pending:b".into(),
+            chain_id: CFX,
             tx_hash: "0xb".into(),
             log_index: 2,
             amount_e8s: 20,
@@ -11261,6 +11271,7 @@ mod inc6_settlement_proof_context_tests {
         };
         let reserve = SettlementProofRecord {
             proof_id: "reserve:a".into(),
+            chain_id: CFX,
             tx_hash: "0xc".into(),
             log_index: 3,
             amount_e8s: 30,

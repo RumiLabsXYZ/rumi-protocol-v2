@@ -387,6 +387,7 @@ pub fn settle_pending_chain_burn_with_verified_proof(
         proof.proof_id.clone(),
         SettlementProofRecord {
             proof_id: proof.proof_id,
+            chain_id: chain,
             tx_hash: proof.tx_hash,
             log_index: proof.log_index,
             amount_e8s: proof.amount_e8s,
@@ -418,6 +419,7 @@ pub fn settle_reserve_burn_with_verified_proof(
         proof.proof_id.clone(),
         SettlementProofRecord {
             proof_id: proof.proof_id,
+            chain_id: chain,
             tx_hash: proof.burn_tx_hash,
             log_index: proof.burn_log_index,
             amount_e8s: proof.amount_e8s,

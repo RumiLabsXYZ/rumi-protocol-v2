@@ -673,6 +673,7 @@ fn settlement_proof_state_round_trip_preserves_compact_records() {
     let pending = SettlementProofRecord {
         proof_id: "pending:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:7"
             .to_string(),
+        chain_id: ChainId(1030),
         tx_hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
         log_index: 7,
         amount_e8s: 25_000_000,
@@ -682,6 +683,7 @@ fn settlement_proof_state_round_trip_preserves_compact_records() {
     let reserve = SettlementProofRecord {
         proof_id: "reserve:0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:2:0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc:8"
             .to_string(),
+        chain_id: ChainId(1030),
         tx_hash: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
         log_index: 2,
         amount_e8s: 50_000_000,
@@ -706,6 +708,61 @@ fn settlement_proof_state_round_trip_preserves_compact_records() {
         decoded.settled_reserve_burn_proofs[&reserve.proof_id],
         reserve
     );
+}
+
+#[test]
+fn pending_chain_burn_aging_surfaces_nonzero_pending_and_proof_counts() {
+    let mut v6 = MultiChainStateV6::default();
+    let cfx = ChainId(1030);
+    let monad = ChainId(10143);
+    v6.pending_chain_burn_e8s.insert(cfx, 20);
+    v6.pending_chain_burn_e8s.insert(monad, 0);
+    v6.settled_pending_burn_proofs.insert(
+        "pending:newer".into(),
+        SettlementProofRecord {
+            proof_id: "pending:newer".into(),
+            chain_id: cfx,
+            tx_hash: "0xaaa".into(),
+            log_index: 1,
+            amount_e8s: 5,
+            block_number: 10,
+            recorded_at_ns: 200,
+        },
+    );
+    v6.settled_pending_burn_proofs.insert(
+        "pending:older".into(),
+        SettlementProofRecord {
+            proof_id: "pending:older".into(),
+            chain_id: cfx,
+            tx_hash: "0xbbb".into(),
+            log_index: 2,
+            amount_e8s: 7,
+            block_number: 9,
+            recorded_at_ns: 100,
+        },
+    );
+
+    let rows = v6.pending_chain_burn_aging(250);
+    assert_eq!(rows.len(), 1, "zero-pending chain omitted");
+    assert_eq!(rows[0].chain_id, cfx);
+    assert_eq!(rows[0].pending_chain_burn_e8s, 20);
+    assert_eq!(rows[0].proof_count, 2);
+    assert_eq!(rows[0].oldest_reference_ns, Some(100));
+    assert_eq!(rows[0].age_ns, Some(150));
+}
+
+#[test]
+fn pending_chain_burn_aging_uses_none_when_pending_has_no_proof_timestamp() {
+    let mut v6 = MultiChainStateV6::default();
+    let cfx = ChainId(1030);
+    v6.pending_chain_burn_e8s.insert(cfx, 20);
+
+    let rows = v6.pending_chain_burn_aging(250);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].chain_id, cfx);
+    assert_eq!(rows[0].oldest_reference_ns, None);
+    assert_eq!(rows[0].age_ns, None);
+    assert_eq!(rows[0].proof_count, 0);
 }
 
 #[test]

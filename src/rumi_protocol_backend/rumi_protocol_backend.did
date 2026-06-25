@@ -785,6 +785,13 @@ type LiquidityStatus = record {
 type ManualPriceInfo = record { set_at_ns : nat64; price_e8 : nat64 };
 type Mode = variant { ReadOnly; GeneralAvailability; Recovery };
 type OpenVaultSuccess = record { block_index : nat64; vault_id : nat64 };
+type PendingChainBurnAging = record {
+  pending_chain_burn_e8s : nat;
+  proof_count : nat64;
+  age_ns : opt nat64;
+  chain_id : nat32;
+  oldest_reference_ns : opt nat64;
+};
 type PendingLiquidationV1 = record {
   started_at_ns : nat64;
   op_id : nat64;
@@ -1215,6 +1222,7 @@ service : (ProtocolArg) -> {
       vec record { nat64; XrpPendingDeposit },
     ) query;
   get_pending_amm1_donations_count : () -> (nat64) query;
+  get_pending_chain_burn_aging : () -> (vec PendingChainBurnAging) query;
   get_price_pusher_allowed : () -> (vec record { nat32; text }) query;
   get_price_pusher_principal : () -> (opt principal) query;
   get_protocol_3usd_reserves : () -> (nat64) query;
