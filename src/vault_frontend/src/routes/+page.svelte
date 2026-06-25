@@ -14,6 +14,9 @@
   import ProtocolStats from '$lib/components/dashboard/ProtocolStats.svelte';
   import MultiplierBadge from '$lib/components/points/MultiplierBadge.svelte';
   import { seasonStore, earningActive } from '$lib/stores/seasonStore';
+  import XrpBorrowModal from '$lib/components/borrow/XrpBorrowModal.svelte';
+  import { isNativeXrpCollateral } from '$lib/utils/nativeXrpBorrowFlow';
+  import type { CollateralInfo } from '$lib/services/types';
 
   let collateralAmount = 1;
   let icusdAmount = 5;
@@ -21,9 +24,15 @@
   let successMessage = '';
   let actionInProgress = false;
   let showDevInput = false;
+  let xrpBorrowIntent: {
+    collateralAmount: number;
+    icusdAmount: number;
+    collateralInfo: CollateralInfo;
+  } | null = null;
+  $: xrpBorrowFlowActive = Boolean(xrpBorrowIntent);
 
   // Collateral token selector
-  let selectedCollateralPrincipal = CANISTER_IDS.ICP_LEDGER;
+  let selectedCollateralPrincipal: string = CANISTER_IDS.ICP_LEDGER;
   let showCollateralDropdown = false;
 
   // Populate collateral token list from store, with ICP fallback
@@ -38,6 +47,7 @@
   // Derive per-collateral reactive values — subscribe to $collateralStore so updates
   // propagate when data loads AND when the user switches tokens
   $: selectedCollateralInfo = $collateralStore.collaterals.find(c => c.principal === selectedCollateralPrincipal);
+  $: isNativeXrpSelected = isNativeXrpCollateral(selectedCollateralInfo);
   $: selectedSymbol = selectedCollateralInfo?.symbol ?? 'ICP';
   $: selectedMinCR = selectedCollateralInfo?.minimumCr ?? MINIMUM_CR;
   $: selectedLiqCR = selectedCollateralInfo?.liquidationCr ?? LIQUIDATION_CR;
@@ -196,10 +206,21 @@
   }
 
   async function createVault() {
+    if (xrpBorrowFlowActive) return;
     if (!$isConnected) { errorMessage = 'Please connect your wallet first'; return; }
     if (collateralAmount <= 0) { errorMessage = 'Please enter a valid collateral amount'; return; }
     if (icusdAmount <= 0) { errorMessage = 'Please enter a valid icUSD amount to borrow'; return; }
     if (!isValidCollateralRatio) { errorMessage = `Collateral ratio must be at least ${(selectedMinCR * 100).toFixed(0)}%`; return; }
+    if (isNativeXrpSelected && selectedCollateralInfo) {
+      errorMessage = '';
+      successMessage = '';
+      xrpBorrowIntent = {
+        collateralAmount,
+        icusdAmount,
+        collateralInfo: selectedCollateralInfo,
+      };
+      return;
+    }
     actionInProgress = true; errorMessage = ''; successMessage = '';
     try {
       // Compound: open vault + borrow in one backend call.
@@ -218,6 +239,18 @@
       console.error('Error creating vault:', error);
       errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
     } finally { actionInProgress = false; }
+  }
+
+  async function handleXrpBorrowComplete(event: CustomEvent<{ vaultId: number; oisyResilient?: boolean }>) {
+    const intent = xrpBorrowIntent;
+    const vaultLabel = `vault #${event.detail.vaultId}`;
+    successMessage = event.detail.oisyResilient
+      ? `Submitted: created ${vaultLabel} and borrowed ${intent?.icusdAmount ?? icusdAmount} icUSD. (Wallet glitch ignored — confirmed on-chain.)`
+      : `Successfully created ${vaultLabel} and borrowed ${intent?.icusdAmount ?? icusdAmount} icUSD!`;
+    xrpBorrowIntent = null;
+    if ($principal) await appDataStore.refreshAll($principal);
+    collateralAmount = 1;
+    icusdAmount = 5;
   }
 </script>
 
@@ -249,8 +282,9 @@
               </div>
               <div class="input-wrap">
                 <input id="collateral-amount" type="number" bind:value={collateralAmount} min="0" step="0.01"
-                  class="icp-input form-input" placeholder="0.00" disabled={actionInProgress} />
+                  class="icp-input form-input" placeholder="0.00" disabled={actionInProgress || xrpBorrowFlowActive} />
                 <button class="token-selector"
+                  disabled={xrpBorrowFlowActive}
                   on:click|stopPropagation={() => { showCollateralDropdown = !showCollateralDropdown; }}>
                   <span class="token-dot" style="background:{collateralTokens.find(t => t.id === selectedCollateralPrincipal)?.color || '#2DD4BF'}"></span>
                   {selectedSymbol}
@@ -278,7 +312,7 @@
               <label for="icusd-amount" class="form-label">icUSD to Borrow</label>
               <div class="input-wrap">
                 <input id="icusd-amount" type="number" bind:value={icusdAmount} min="0" step="0.01"
-                  class="icp-input form-input form-input-with-max" placeholder="0.00" disabled={actionInProgress} />
+                  class="icp-input form-input form-input-with-max" placeholder="0.00" disabled={actionInProgress || xrpBorrowFlowActive} />
                 <div class="input-suffix-group">
                   {#if maxBorrow > 0}
                     <button class="max-btn" on:click={setMaxBorrow}>Max</button>
@@ -346,10 +380,11 @@
             <button
               class="btn-primary cta-button"
               on:click={createVault}
-              disabled={actionInProgress || !$isConnected}
+              disabled={actionInProgress || xrpBorrowFlowActive || !$isConnected}
             >
               {#if !$isConnected}Connect Wallet to Continue
               {:else if actionInProgress}Creating Vault…
+              {:else if xrpBorrowFlowActive}Preparing XRP vault...
               {:else}Create Vault & Borrow icUSD{/if}
             </button>
           </div>
@@ -517,3 +552,13 @@
     .action-card { max-width: none; }
   }
 </style>
+
+{#if xrpBorrowIntent}
+  <XrpBorrowModal
+    collateralAmount={xrpBorrowIntent.collateralAmount}
+    icusdAmount={xrpBorrowIntent.icusdAmount}
+    collateralInfo={xrpBorrowIntent.collateralInfo}
+    on:close={() => { xrpBorrowIntent = null; }}
+    on:complete={handleXrpBorrowComplete}
+  />
+{/if}

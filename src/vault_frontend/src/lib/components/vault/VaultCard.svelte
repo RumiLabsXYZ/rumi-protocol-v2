@@ -16,6 +16,7 @@
   import { ApiClient } from '../../services/protocol/apiClient';
   import MultiplierBadge from '../points/MultiplierBadge.svelte';
   import { seasonStore, earningActive } from '$lib/stores/seasonStore';
+  import { nativeXrpKeepOpenCloseCopy } from '$lib/utils/nativeXrpBorrowFlow';
 
   export let vault: Vault;
   export let icpPrice: number = 0;
@@ -515,11 +516,12 @@
   // (DUST, MIN_ICUSD) band) can ONLY clear via repay_and_close, which bypasses
   // the floor — so we don't offer them the choice; they always close.
   $: canKeepVaultOpenOnFullRepay = fullIcusdRepayWithCollateral && maxRepayable >= MIN_ICUSD;
-  // Force-close when keeping-open isn't viable; otherwise honor the user's
-  // choice (defaults to close — what most people want).
+  // Native XRP releases withdrawable collateral into a settlement claim, but the
+  // vault stays open because the XRPL reserve remains locked at its address.
+  // Other collateral can still honor the user's keep-open choice.
   $: isRepayAndClose =
       fullIcusdRepayWithCollateral
-      && (closeOnFullRepay || !canKeepVaultOpenOnFullRepay);
+      && (isNativeXrp || closeOnFullRepay || !canKeepVaultOpenOnFullRepay);
 
   function clearMessages() { /* toasts auto-dismiss */ }
 
@@ -639,7 +641,7 @@
         // Native-XRP withdraw creates a settle-able XrpClaim (the XRP does NOT land in
         // an IC wallet) — say so and don't refresh an IC-side balance that won't change.
         const msg = isNativeXrp
-          ? `Withdrawal queued — a claim for ${amount} XRP was created. Settle it to your XRPL address in the Native XRP panel below.`
+          ? `Withdrawal queued. A claim for ${amount} XRP was created for XRPL settlement.`
           : result.oisyResilient
             ? `Withdrew ${amount} ${collateralSymbol} (wallet glitch ignored — operation confirmed on-chain).`
             : `Withdrew ${amount} ${collateralSymbol}`;
@@ -698,7 +700,7 @@
       if (result.success) {
         const actionLabel = isRepayAndClose
           ? (isNativeXrp
-              ? 'Repaid and closed vault — a claim for your XRP was created; settle it in the Native XRP panel below'
+              ? `Repaid all debt and queued your withdrawable XRP for settlement. ${nativeXrpKeepOpenCloseCopy()}`
               : 'Repaid and closed vault')
           : `Repaid ${amount} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}`;
         const msg = result.oisyResilient
@@ -706,9 +708,9 @@
           : actionLabel;
         toastStore.success(msg, 8000); repayAmount = '';
         await new Promise(r => setTimeout(r, 1000));
-        // For repay-and-close, refresh the full vault list (vault is gone);
-        // for partial repay, refresh just this vault.
-        if (isRepayAndClose) {
+        // For non-XRP repay-and-close, refresh the full vault list because the
+        // vault is gone. Native-XRP vaults remain open.
+        if (isRepayAndClose && !isNativeXrp) {
           await vaultStore.refreshVaults();
         } else {
           await vaultStore.refreshVault(vault.vaultId);
@@ -734,12 +736,16 @@
       const result = await protocolService.withdrawCollateralAndCloseVault(vault.vaultId);
       if (result.success) {
         const msg = isNativeXrp
-          ? 'Vault closed — a claim for your XRP was created. Settle it to your XRPL address in the Native XRP panel below.'
+          ? `Withdrawable XRP queued for settlement. ${nativeXrpKeepOpenCloseCopy()}`
           : result.oisyResilient
             ? 'Vault closed. Collateral returned. (Wallet glitch ignored — confirmed on-chain.)'
             : 'Vault closed. Collateral returned.';
         toastStore.success(msg, 8000);
-        await vaultStore.refreshVaults();
+        if (isNativeXrp) {
+          await vaultStore.refreshVault(vault.vaultId);
+        } else {
+          await vaultStore.refreshVaults();
+        }
         if (!isNativeXrp) walletStore.refreshBalance({ skipCache: true });
         dispatch('updated');
       } else { toastStore.error(result.error || 'Failed', 8000); }
@@ -968,6 +974,8 @@
                   disabled={isProcessing || isWithdrawingAndClosing || !withdrawAmount || withdrawOverMax}>
                   {#if isProcessing || isWithdrawingAndClosing}
                     ...
+                  {:else if isNativeXrp && isWithdrawAndClose}
+                    Withdraw &amp; Keep Open
                   {:else if isWithdrawAndClose}
                     Withdraw & Close
                   {:else}
@@ -1047,7 +1055,7 @@
                   </div>
                 {/if}
               </div>
-              {#if canKeepVaultOpenOnFullRepay}
+              {#if canKeepVaultOpenOnFullRepay && !isNativeXrp}
                 <div class="repay-close-toggle" role="radiogroup" aria-label="After repaying full debt">
                   <button type="button" class="repay-close-option" class:repay-close-option-active={closeOnFullRepay}
                     role="radio" aria-checked={closeOnFullRepay}
@@ -1067,6 +1075,10 @@
                     Repays all debt and leaves the vault open with {collateralSymbol} deposited.
                   {/if}
                 </span>
+              {:else if isNativeXrp && fullIcusdRepayWithCollateral}
+                <span class="repay-close-hint">
+                  Repays all debt, queues your withdrawable XRP for settlement, and keeps the vault open because the XRP account reserve remains locked.
+                </span>
               {/if}
               <div class="input-submit-row">
                 {#if !hasChangedToken}
@@ -1076,6 +1088,8 @@
                   disabled={isProcessing || !repayAmount || repayOverMax}>
                   {#if isProcessing}
                     ...
+                  {:else if isNativeXrp && isRepayAndClose}
+                    Repay &amp; Keep Open
                   {:else if isRepayAndClose}
                     Repay &amp; Close
                   {:else}

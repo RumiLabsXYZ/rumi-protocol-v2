@@ -1994,6 +1994,18 @@ mod xrp_p4_tests {
     }
 
     #[test]
+    fn native_xrp_withdraw_and_close_policy_preserves_custody_vault() {
+        assert_eq!(
+            withdraw_close_completion_policy(true),
+            WithdrawCloseCompletionPolicy::KeepNativeXrpVaultOpen
+        );
+        assert_eq!(
+            withdraw_close_completion_policy(false),
+            WithdrawCloseCompletionPolicy::CloseVault
+        );
+    }
+
+    #[test]
     fn unresolved_claim_drops_aggregates_only_same_custody_address() {
         let mut s = crate::state::State::default();
         let claimant = Principal::from_slice(&[0x11; 16]);
@@ -3373,6 +3385,25 @@ pub async fn add_margin_with_deposit(vault_id: u64) -> Result<u64, ProtocolError
     Ok(sweep_block_index)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WithdrawCloseCompletionPolicy {
+    CloseVault,
+    KeepNativeXrpVaultOpen,
+}
+
+fn withdraw_close_completion_policy(is_native_xrp: bool) -> WithdrawCloseCompletionPolicy {
+    if is_native_xrp {
+        WithdrawCloseCompletionPolicy::KeepNativeXrpVaultOpen
+    } else {
+        WithdrawCloseCompletionPolicy::CloseVault
+    }
+}
+
+fn native_xrp_reserve_locked_message() -> String {
+    "Native-XRP vaults stay open because the XRP account reserve remains locked on XRPL."
+        .to_string()
+}
+
 pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
     let caller = ic_cdk::caller();
     let _guard_principal = GuardPrincipal::new(caller, &format!("close_vault_{}", vault_id))?;
@@ -3484,6 +3515,25 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
         );
         return Err(ProtocolError::GenericError(
             "Cannot close vault with remaining collateral. Withdraw collateral first.".to_string(),
+        ));
+    }
+
+    let is_native_xrp = read_state(|s| {
+        s.get_collateral_config(&vault.collateral_type)
+            .map(|config| config.is_native_xrp())
+            .unwrap_or(false)
+    });
+    if withdraw_close_completion_policy(is_native_xrp)
+        == WithdrawCloseCompletionPolicy::KeepNativeXrpVaultOpen
+    {
+        mutate_state(|s| s.complete_close_vault_request());
+        log!(
+            INFO,
+            "[close_vault] Keeping native-XRP vault #{} open because the XRPL reserve remains locked",
+            vault_id
+        );
+        return Err(ProtocolError::GenericError(
+            native_xrp_reserve_locked_message(),
         ));
     }
 
@@ -3957,8 +4007,9 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
 /// a single `repay_and_close_{id}` guard spanning repay + withdraw + close).
 ///
 /// Forgives dust debt, validates collateral status, optimistically zeroes the
-/// vault's collateral, transfers it out, and deletes the vault entry. On
-/// transfer failure the collateral amount is restored and the vault stays open.
+/// vault's collateral, and transfers it out. ICRC collateral closes the vault
+/// after transfer; native-XRP collateral creates a claim and leaves the vault
+/// open because the XRPL account reserve stays locked.
 async fn withdraw_and_close_vault_internal(
     caller: Principal,
     vault_id: u64,
@@ -4159,6 +4210,17 @@ async fn withdraw_and_close_vault_internal(
             vault_id
         );
     };
+
+    if withdraw_close_completion_policy(is_native_xrp)
+        == WithdrawCloseCompletionPolicy::KeepNativeXrpVaultOpen
+    {
+        log!(
+            INFO,
+            "[withdraw_and_close] Keeping native-XRP vault #{} open because the XRPL reserve remains locked",
+            vault_id
+        );
+        return Ok(block_index);
+    }
 
     // Now close the vault - only if we've successfully transferred any funds
     // or if there were no funds to transfer
