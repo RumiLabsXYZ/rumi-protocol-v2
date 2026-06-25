@@ -2630,6 +2630,280 @@ fn map_backing_settlement_error(
     ProtocolError::ChainAdmin(format!("{e:?}"))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SettlementProofKind {
+    Pending,
+    Reserve,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SettlementProofContext {
+    contract: String,
+    finality_depth: u64,
+    settle_stable_token: Option<String>,
+    reserve_address: Option<String>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SettlementProofIds {
+    pub pending: Vec<String>,
+    pub reserve: Vec<String>,
+}
+
+fn chain_finality_depth_or_default(
+    s: &State,
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> u64 {
+    s.multi_chain
+        .chain_configs
+        .get(&chain)
+        .map(|cfg| cfg.finality_depth as u64)
+        .unwrap_or(0)
+}
+
+fn settlement_proof_context(
+    s: &State,
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    kind: SettlementProofKind,
+) -> Result<SettlementProofContext, ProtocolError> {
+    let cfg = s
+        .multi_chain
+        .chain_configs
+        .get(&chain)
+        .ok_or_else(|| ProtocolError::ChainAdmin(format!("unknown chain {}", chain.0)))?;
+    let contract = s
+        .multi_chain
+        .chain_contracts
+        .get(&chain)
+        .cloned()
+        .ok_or_else(|| {
+            ProtocolError::ChainAdmin(format!("no icUSD contract for chain {}", chain.0))
+        })?;
+    let settle_stable_token = match kind {
+        SettlementProofKind::Pending => None,
+        SettlementProofKind::Reserve => Some(
+            s.multi_chain
+                .chain_liquidation_configs
+                .get(&chain)
+                .ok_or_else(|| {
+                    ProtocolError::ChainAdmin(format!(
+                        "no chain liquidation config for chain {}",
+                        chain.0
+                    ))
+                })?
+                .settle_stable_token
+                .clone(),
+        ),
+    };
+
+    Ok(SettlementProofContext {
+        contract,
+        finality_depth: cfg.finality_depth as u64,
+        settle_stable_token,
+        reserve_address: None,
+    })
+}
+
+fn settlement_proof_ids_from_state(s: &State) -> SettlementProofIds {
+    let mut pending: Vec<String> = s
+        .multi_chain
+        .settled_pending_burn_proofs
+        .keys()
+        .cloned()
+        .collect();
+    let mut reserve: Vec<String> = s
+        .multi_chain
+        .settled_reserve_burn_proofs
+        .keys()
+        .cloned()
+        .collect();
+    pending.sort();
+    reserve.sort();
+    SettlementProofIds { pending, reserve }
+}
+
+fn map_settlement_proof_error(
+    e: rumi_protocol_backend::chains::evm::settlement_proof::SettlementProofError,
+) -> ProtocolError {
+    ProtocolError::ChainAdmin(format!("settlement proof rejected: {e:?}"))
+}
+
+fn map_proof_backed_settlement_error(
+    e: rumi_protocol_backend::chains::supply::ProofBackedSettlementError,
+) -> ProtocolError {
+    ProtocolError::ChainAdmin(format!("{e:?}"))
+}
+
+async fn fetch_settlement_receipt(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    tx_hash: &str,
+) -> Result<rumi_protocol_backend::chains::evm::evm_rpc::TxReceiptWithLogs, ProtocolError> {
+    rumi_protocol_backend::chains::evm::evm_rpc::get_transaction_receipt_with_logs(chain, tx_hash)
+        .await
+        .map_err(|e| {
+            ProtocolError::TemporarilyUnavailable(format!("receipt RPC error; retry: {e}"))
+        })?
+        .ok_or_else(|| ProtocolError::TemporarilyUnavailable("receipt not found; retry".into()))
+}
+
+async fn require_settlement_receipt_final(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    block_number: u64,
+    finality_depth: u64,
+) -> Result<(), ProtocolError> {
+    let final_enough = rumi_protocol_backend::chains::evm::evm_rpc::is_block_final(
+        chain,
+        block_number,
+        finality_depth,
+    )
+    .await
+    .map_err(|e| {
+        ProtocolError::TemporarilyUnavailable(format!("finality check failed; retry: {e}"))
+    })?;
+    if final_enough {
+        Ok(())
+    } else {
+        Err(ProtocolError::TemporarilyUnavailable(
+            "receipt not yet final; retry".into(),
+        ))
+    }
+}
+
+/// Developer-gated proof-backed reconciliation for the SP pending-burn path.
+#[candid_method(update)]
+#[update]
+async fn settle_pending_chain_burn_with_proof(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    proof: rumi_protocol_backend::chains::evm::settlement_proof::BurnSettlementProofArg,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+
+    let ctx =
+        read_state(|s| settlement_proof_context(s, chain, SettlementProofKind::Pending))?;
+    let receipt = fetch_settlement_receipt(chain, &proof.tx_hash).await?;
+    require_settlement_receipt_final(chain, receipt.block_number, ctx.finality_depth).await?;
+    let verified =
+        rumi_protocol_backend::chains::evm::settlement_proof::verify_pending_burn_receipt(
+            &ctx.contract,
+            &proof,
+            &receipt,
+        )
+        .map_err(map_settlement_proof_error)?;
+    let amount_e8s = verified.amount_e8s;
+    let proof_id = verified.proof_id.clone();
+    let timestamp = ic_cdk::api::time();
+
+    mutate_state(|s| {
+        rumi_protocol_backend::chains::supply::settle_pending_chain_burn_with_verified_proof(
+            &mut s.multi_chain,
+            chain,
+            verified,
+            timestamp,
+        )
+    })
+    .map_err(map_proof_backed_settlement_error)?;
+
+    rumi_protocol_backend::storage::record_event(&Event::ChainPendingBurnSettled {
+        chain_id: chain,
+        amount_e8s,
+        proof: proof_id.clone(),
+        timestamp,
+    });
+    log!(
+        INFO,
+        "[settle_pending_chain_burn_with_proof] chain={:?} amount_e8s={} proof_id={}",
+        chain,
+        amount_e8s,
+        proof_id
+    );
+    Ok(())
+}
+
+/// Developer-gated proof-backed reconciliation for Tier-1 reserve retirement.
+#[candid_method(update)]
+#[update]
+async fn settle_reserve_burn_with_proof(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    proof: rumi_protocol_backend::chains::evm::settlement_proof::ReserveSettlementProofArg,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+
+    let mut ctx =
+        read_state(|s| settlement_proof_context(s, chain, SettlementProofKind::Reserve))?;
+    let (_, reserve_address) =
+        rumi_protocol_backend::chains::evm::tecdsa::cached_reserve_address(chain)
+            .await
+            .map_err(|e| {
+                ProtocolError::TemporarilyUnavailable(format!(
+                    "reserve address derivation failed; retry: {e}"
+                ))
+            })?;
+    ctx.reserve_address = Some(reserve_address);
+
+    let burn_receipt = fetch_settlement_receipt(chain, &proof.burn_tx_hash).await?;
+    require_settlement_receipt_final(chain, burn_receipt.block_number, ctx.finality_depth).await?;
+    let reserve_receipt = fetch_settlement_receipt(chain, &proof.reserve_tx_hash).await?;
+    require_settlement_receipt_final(chain, reserve_receipt.block_number, ctx.finality_depth)
+        .await?;
+
+    let verified =
+        rumi_protocol_backend::chains::evm::settlement_proof::verify_reserve_burn_receipts(
+            &ctx.contract,
+            ctx.settle_stable_token
+                .as_deref()
+                .expect("reserve context has settle stable token"),
+            ctx.reserve_address
+                .as_deref()
+                .expect("reserve address derived"),
+            &proof,
+            &burn_receipt,
+            &reserve_receipt,
+        )
+        .map_err(map_settlement_proof_error)?;
+    let amount_e8s = verified.amount_e8s;
+    let proof_id = verified.proof_id.clone();
+    let timestamp = ic_cdk::api::time();
+
+    mutate_state(|s| {
+        rumi_protocol_backend::chains::supply::settle_reserve_burn_with_verified_proof(
+            &mut s.multi_chain,
+            chain,
+            verified,
+            timestamp,
+        )
+    })
+    .map_err(map_proof_backed_settlement_error)?;
+
+    rumi_protocol_backend::storage::record_event(&Event::ChainReserveBurnSettled {
+        chain_id: chain,
+        amount_e8s,
+        proof: proof_id.clone(),
+        timestamp,
+    });
+    log!(
+        INFO,
+        "[settle_reserve_burn_with_proof] chain={:?} amount_e8s={} proof_id={}",
+        chain,
+        amount_e8s,
+        proof_id
+    );
+    Ok(())
+}
+
+#[candid_method(query)]
+#[query]
+fn get_settlement_proof_ids(
+    _chain: Option<rumi_protocol_backend::chains::config::ChainId>,
+) -> SettlementProofIds {
+    read_state(settlement_proof_ids_from_state)
+}
+
 /// Developer-gated manual reconciliation for the SP path: called after the
 /// operator verifies the matching foreign-chain icUSD burn for an amount already
 /// booked in `pending_chain_burn_e8s`.
@@ -10850,5 +11124,161 @@ mod inc5_reconciliation_tests {
         let proof = "x".repeat(513);
         let err = normalize_reconciliation_proof(&proof).unwrap_err();
         assert!(format!("{err:?}").contains("proof text too long"));
+    }
+}
+
+#[cfg(test)]
+mod inc6_settlement_proof_context_tests {
+    use super::{
+        chain_finality_depth_or_default, settlement_proof_context, settlement_proof_ids_from_state,
+        SettlementProofKind,
+    };
+    use rumi_protocol_backend::chains::config::{
+        ChainConfigV3, ChainId, ChainStatus, GasStrategy,
+    };
+    use rumi_protocol_backend::chains::liquidation_config::{ChainLiquidationConfigV1, DexKind};
+    use rumi_protocol_backend::chains::multi_chain_state::SettlementProofRecord;
+    use rumi_protocol_backend::state::State;
+
+    const CFX: ChainId = ChainId(1030);
+
+    fn chain_config() -> ChainConfigV3 {
+        ChainConfigV3 {
+            chain_id: CFX,
+            display_name: "ConfluxESpace".into(),
+            rpc_endpoints: vec!["https://evm.confluxrpc.com".into()],
+            finality_depth: 12,
+            gas_strategy: GasStrategy::EvmEip1559 {
+                max_priority_fee_gwei: 1,
+                max_fee_gwei_ceiling: 200,
+            },
+            chain_native_decimals: 18,
+            registered_at_ns: 1,
+            status: ChainStatus::Registered,
+            burn_watch_poll_enabled: true,
+            min_quorum_providers: Some(2),
+        }
+    }
+
+    fn liquidation_config() -> ChainLiquidationConfigV1 {
+        ChainLiquidationConfigV1 {
+            dex: DexKind::UniswapV2,
+            router: "0x1111111111111111111111111111111111111111".into(),
+            factory: "0x2222222222222222222222222222222222222222".into(),
+            pair: "0x3333333333333333333333333333333333333333".into(),
+            collateral_token: "0x4444444444444444444444444444444444444444".into(),
+            settle_stable_token: "0x5555555555555555555555555555555555555555".into(),
+            slippage_cap_bps: 250,
+            restore_target_cr_e4: 15_500,
+            enabled: true,
+            max_swap_value_e8s: 1_000_000_000,
+            max_price_age_ns: 1_800_000_000_000,
+            max_dex_oracle_divergence_bps: 500,
+            fee_bps: 25,
+            settle_stable_decimals: 18,
+            deadline_secs: 180,
+        }
+    }
+
+    #[test]
+    fn settlement_proof_context_rejects_missing_chain_before_rpc() {
+        let s = State::default();
+        let err = settlement_proof_context(&s, CFX, SettlementProofKind::Pending)
+            .expect_err("missing chain rejects");
+        assert!(format!("{err:?}").contains("unknown chain"));
+    }
+
+    #[test]
+    fn settlement_proof_context_rejects_missing_icusd_contract_before_rpc() {
+        let mut s = State::default();
+        s.multi_chain.chain_configs.insert(CFX, chain_config());
+
+        let err = settlement_proof_context(&s, CFX, SettlementProofKind::Pending)
+            .expect_err("missing contract rejects");
+        assert!(format!("{err:?}").contains("no icUSD contract"));
+    }
+
+    #[test]
+    fn settlement_proof_context_rejects_missing_reserve_config_before_rpc() {
+        let mut s = State::default();
+        s.multi_chain.chain_configs.insert(CFX, chain_config());
+        s.multi_chain
+            .chain_contracts
+            .insert(CFX, "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into());
+
+        let err = settlement_proof_context(&s, CFX, SettlementProofKind::Reserve)
+            .expect_err("missing reserve config rejects");
+        assert!(format!("{err:?}").contains("no chain liquidation config"));
+    }
+
+    #[test]
+    fn settlement_proof_context_returns_contract_finality_and_reserve_token() {
+        let mut s = State::default();
+        s.multi_chain.chain_configs.insert(CFX, chain_config());
+        s.multi_chain
+            .chain_contracts
+            .insert(CFX, "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into());
+        s.multi_chain
+            .chain_liquidation_configs
+            .insert(CFX, liquidation_config());
+
+        assert_eq!(chain_finality_depth_or_default(&s, CFX), 12);
+        let pending =
+            settlement_proof_context(&s, CFX, SettlementProofKind::Pending).expect("pending ctx");
+        assert_eq!(
+            pending.contract,
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(pending.finality_depth, 12);
+        assert!(pending.settle_stable_token.is_none());
+
+        let reserve =
+            settlement_proof_context(&s, CFX, SettlementProofKind::Reserve).expect("reserve ctx");
+        assert_eq!(
+            reserve.settle_stable_token.as_deref(),
+            Some("0x5555555555555555555555555555555555555555")
+        );
+    }
+
+    #[test]
+    fn settlement_proof_ids_are_sorted_and_domain_separated() {
+        let mut s = State::default();
+        let pending_a = SettlementProofRecord {
+            proof_id: "pending:a".into(),
+            tx_hash: "0xa".into(),
+            log_index: 1,
+            amount_e8s: 10,
+            block_number: 11,
+            recorded_at_ns: 12,
+        };
+        let pending_b = SettlementProofRecord {
+            proof_id: "pending:b".into(),
+            tx_hash: "0xb".into(),
+            log_index: 2,
+            amount_e8s: 20,
+            block_number: 21,
+            recorded_at_ns: 22,
+        };
+        let reserve = SettlementProofRecord {
+            proof_id: "reserve:a".into(),
+            tx_hash: "0xc".into(),
+            log_index: 3,
+            amount_e8s: 30,
+            block_number: 31,
+            recorded_at_ns: 32,
+        };
+        s.multi_chain
+            .settled_pending_burn_proofs
+            .insert(pending_b.proof_id.clone(), pending_b);
+        s.multi_chain
+            .settled_pending_burn_proofs
+            .insert(pending_a.proof_id.clone(), pending_a);
+        s.multi_chain
+            .settled_reserve_burn_proofs
+            .insert(reserve.proof_id.clone(), reserve);
+
+        let ids = settlement_proof_ids_from_state(&s);
+        assert_eq!(ids.pending, vec!["pending:a", "pending:b"]);
+        assert_eq!(ids.reserve, vec!["reserve:a"]);
     }
 }

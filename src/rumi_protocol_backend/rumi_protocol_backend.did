@@ -28,6 +28,11 @@ type BotStatsResponse = record {
   budget_total_e8s : nat64;
   budget_start_timestamp : nat64;
 };
+type BurnSettlementProofArg = record {
+  log_index : nat64;
+  expected_burner : opt text;
+  tx_hash : text;
+};
 type CandidVault = record {
   collateral_amount : nat64;
   owner : principal;
@@ -938,6 +943,13 @@ type ReserveRedemptionResult = record {
   fee_amount : nat64;
   stable_amount_sent : nat64;
 };
+type ReserveSettlementProofArg = record {
+  expected_burner : opt text;
+  burn_tx_hash : text;
+  burn_log_index : nat64;
+  reserve_tx_hash : text;
+  reserve_transfer_log_index : nat64;
+};
 type Result = variant { Ok; Err : ProtocolError };
 type Result_1 = variant { Ok : nat64; Err : ProtocolError };
 type Result_10 = variant { Ok : ChainVaultV1; Err : ProtocolError };
@@ -968,6 +980,7 @@ type Result_6 = variant { Ok : ChainReserveReport; Err : ProtocolError };
 type Result_7 = variant { Ok : nat8; Err : ProtocolError };
 type Result_8 = variant { Ok : float64; Err : ProtocolError };
 type Result_9 = variant { Ok : ConsentInfo; Err : Icrc21Error };
+type SettlementProofIds = record { pending : vec text; reserve : vec text };
 type SpProofLedger = variant { IcusdBurn; ThreePoolTransfer };
 type SpWritedownProof = record {
   block_index : nat64;
@@ -1221,6 +1234,7 @@ service : (ProtocolArg) -> {
   get_rmr_ceiling_cr : () -> (float64) query;
   get_rmr_floor : () -> (float64) query;
   get_rmr_floor_cr : () -> (float64) query;
+  get_settlement_proof_ids : (opt nat32) -> (SettlementProofIds) query;
   get_snapshot_count : () -> (nat64) query;
   get_sp_writedown_disabled : () -> (bool) query;
   get_stability_pool_config : () -> (StabilityPoolConfig) query;
@@ -1365,7 +1379,13 @@ service : (ProtocolArg) -> {
   set_xrc_fetch_interval_secs : (nat64) -> (Result);
   set_xrp_schnorr_key_name : (text) -> (Result);
   settle_pending_chain_burn : (nat32, nat, text) -> (Result);
+  settle_pending_chain_burn_with_proof : (nat32, BurnSettlementProofArg) -> (
+      Result,
+    );
   settle_reserve_burn : (nat32, nat, text) -> (Result);
+  settle_reserve_burn_with_proof : (nat32, ReserveSettlementProofArg) -> (
+      Result,
+    );
   settle_xrp_claim : (nat64, text) -> (Result_2);
   settle_xrp_claim_with_tag : (nat64, text, nat32) -> (Result_2);
   solana_bootstrap_nonce : (opt text) -> (Result);
