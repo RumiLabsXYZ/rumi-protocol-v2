@@ -890,7 +890,7 @@ environments:
         (variant {
           Upgrade = record {
             mode = null;
-            description = opt "PR #241: heal collateral_to_vault_ids stale ids (post_upgrade sweep) + fix close_vault double-remove trap + replay drain parity; rides with PR #240 explorer admin_label event labels"
+            description = opt "PR #276: add XRP mainnet read provider fallback so account_info quorum tolerates one unreachable public endpoint"
           }
         })
 
