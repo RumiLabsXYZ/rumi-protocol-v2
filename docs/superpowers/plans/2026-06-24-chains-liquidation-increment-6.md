@@ -8,6 +8,18 @@
 
 **Tech Stack:** Rust 2021, `ic-cdk` update methods, existing hand-rolled EVM RPC wrapper on the repo's `ic-cdk` 0.12 pin, Candid, CBOR/serde stable snapshots, Cargo unit tests and targeted PocketIC tests.
 
+## Verification Results
+
+- PASS: `cargo test -p rumi_protocol_backend settlement_proof --lib -- --nocapture`
+- PASS: `cargo test -p rumi_protocol_backend proof_backed_settlement --lib -- --nocapture`
+- PASS: `cargo test -p rumi_protocol_backend pending_chain_burn_aging --lib -- --nocapture`
+- PASS: `cargo test -p rumi_protocol_backend settlement_proof --bin rumi_protocol_backend -- --nocapture`
+- PASS: `cargo test -p rumi_protocol_backend check_candid_interface_compatibility --bin rumi_protocol_backend -- --nocapture`
+- PASS: `cargo test -p rumi_protocol_backend --lib` (650 passed, 1 ignored)
+- PASS: `cargo test -p rumi_protocol_backend --bin rumi_protocol_backend` (16 passed)
+- PASS: `git diff --check`
+- CAVEAT: the broad targeted `rustfmt --edition 2021 --check ... src/lib.rs` command fails on pre-existing formatting/trailing-whitespace outside this increment because rustfmt follows the full module tree from `lib.rs` (for example `test_helpers.rs` and `icrc21.rs`). No mass-formatting was applied.
+
 ## Global Constraints
 
 - TDD is mandatory: write failing tests first, run them red, then implement the minimum code to turn them green.
