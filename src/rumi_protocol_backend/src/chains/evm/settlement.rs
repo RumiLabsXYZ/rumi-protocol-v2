@@ -838,7 +838,61 @@ pub(crate) fn fundable_swap_value(collateral_in: u128, custody_balance: u128, ma
     collateral_in.min(custody_balance.saturating_sub(gas_reserve))
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ClaimLiquidationSwapSubmitError {
+    MissingOp,
+    WrongOpKind,
+    NotQueued,
+    MissingMarker,
+}
+
+/// Atomically claim a queued liquidation swap immediately before broadcast.
+/// Without this CAS, an observer timeout tick can clear the marker while the
+/// settlement worker is suspended across RPC awaits with a stale cloned op.
+pub(crate) fn claim_liquidation_swap_submit_in_state(
+    state: &mut MultiChainState,
+    chain: ChainId,
+    op_id: u64,
+    vault_id: u64,
+    now_ns: u64,
+    tx_hash: String,
+    nonce: u64,
+) -> Result<(), ClaimLiquidationSwapSubmitError> {
+    let marker_owned = state
+        .chain_vaults
+        .get(&vault_id)
+        .and_then(|v| v.pending_liquidation.as_ref())
+        .map_or(false, |marker| {
+            marker.op_id == op_id
+                && marker.tier == crate::chains::vault::LiquidationTier::Bot
+        });
+    if !marker_owned {
+        return Err(ClaimLiquidationSwapSubmitError::MissingMarker);
+    }
+
+    let op = state
+        .settlement_queues
+        .get_mut(&chain)
+        .and_then(|q| q.pending.get_mut(&op_id))
+        .ok_or(ClaimLiquidationSwapSubmitError::MissingOp)?;
+    match &op.kind {
+        SettlementOpKind::LiquidationSwap { vault_id: live_vault_id, .. }
+            if *live_vault_id == vault_id => {}
+        _ => return Err(ClaimLiquidationSwapSubmitError::WrongOpKind),
+    }
+    if !matches!(op.status, SettlementOpStatus::Queued) {
+        return Err(ClaimLiquidationSwapSubmitError::NotQueued);
+    }
+
+    op.mark_inflight(now_ns);
+    op.last_tx_hash = Some(tx_hash);
+    op.submit_nonce = Some(nonce);
+    Ok(())
+}
+
 /// Submit path: sign + broadcast a `Queued` op, then mark it `Inflight`.
+/// Liquidation swaps narrow the async race window further by claiming the live
+/// op as `Inflight` immediately before broadcast.
 ///
 /// Approach A (Task 11): the worker fetches the nonce itself and builds/signs
 /// the tx directly via `build_tx_plan` + `tx::sign_eip1559` (NOT through the
@@ -1294,17 +1348,35 @@ async fn submit_liquidation_swap(
         Ok(h) => h,
         Err(e) => { log!(INFO, "[settlement chain={:?}] swap op {}: sign failed ({}); will retry", chain, op_id, e); return; }
     };
+    let local_tx_hash = match tx::raw_tx_hash(&raw) {
+        Ok(h) => h,
+        Err(e) => { log!(INFO, "[settlement chain={:?}] swap op {}: signed tx hash failed ({}); will retry", chain, op_id, e); return; }
+    };
+    let claim = mutate_state(|s| {
+        claim_liquidation_swap_submit_in_state(
+            &mut s.multi_chain,
+            chain,
+            op_id,
+            vault_id,
+            ic_cdk::api::time(),
+            local_tx_hash.clone(),
+            nonce,
+        )
+    });
+    if let Err(e) = claim {
+        log!(INFO, "[settlement chain={:?}] swap op {}: submit CAS aborted before broadcast ({:?})", chain, op_id, e);
+        return;
+    }
+
     let tx_hash = match evm_rpc::send_raw_transaction(chain, &raw).await {
         Ok(h) => h,
-        Err(e) => { log!(INFO, "[settlement chain={:?}] swap op {}: broadcast failed ({}); will retry", chain, op_id, e); return; }
+        Err(e) => { log!(INFO, "[settlement chain={:?}] swap op {}: broadcast failed after submit claim ({}); receipt timeout path will resolve", chain, op_id, e); return; }
     };
 
     mutate_state(|s| {
         if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
             if let Some(o) = q.pending.get_mut(&op_id) {
-                o.mark_inflight(now);
                 o.last_tx_hash = Some(tx_hash.clone());
-                o.submit_nonce = Some(nonce);
             }
         }
     });

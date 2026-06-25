@@ -531,6 +531,32 @@ pub async fn run_observer(chain: ChainId) {
             s.multi_chain.chain_liquidation_configs.get(&chain).map_or(false, |c| c.enabled)
         });
         if let (true, Some(threshold), Some(symbol)) = (enabled, liq_threshold_e4, symbol) {
+            let escalated = mutate_state(|s| {
+                crate::chains::liquidation::escalate_timed_out_bot_liquidations_in_state(
+                    &mut s.multi_chain,
+                    chain,
+                    now_ns,
+                    crate::chains::liquidation::DEFAULT_BOT_TO_SP_TIMEOUT_NS,
+                    3,
+                )
+            });
+            for escalation in &escalated {
+                crate::storage::record_event(&crate::event::Event::ChainSettlementFailed {
+                    chain_id: chain,
+                    op_id: escalation.op_id,
+                    reason: escalation.reason.clone(),
+                    timestamp: now_ns,
+                });
+            }
+            if !escalated.is_empty() {
+                log!(
+                    INFO,
+                    "[observer chain={:?}] liquidation timeout escalated {} vault(s) to SP/manual fallback",
+                    chain,
+                    escalated.len()
+                );
+            }
+
             // Probe price freshness so a stale price surfaces a deferral event
             // (the in-state detect re-checks freshness and no-ops on Err too).
             let price_ok = read_state(|s| {

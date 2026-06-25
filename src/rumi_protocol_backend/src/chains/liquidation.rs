@@ -100,6 +100,10 @@ pub fn collateral_in_native_for_repay(
 use crate::chains::config::ChainId;
 use crate::chains::multi_chain_state::MultiChainState;
 
+/// Default wall-clock time a bot-path liquidation swap may hold a vault before
+/// the backend routes the vault to the SP/manual fallback surface.
+pub const DEFAULT_BOT_TO_SP_TIMEOUT_NS: u64 = 30 * 60 * 1_000_000_000;
+
 /// Why a chain price was rejected by the fail-closed staleness gate (spec §4.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PriceError {
@@ -147,6 +151,113 @@ pub fn should_escalate_to_sp(
     op_terminally_failed: bool,
 ) -> bool {
     op_terminally_failed || now_ns.saturating_sub(bot_pending_since_ns) >= bot_timeout_ns
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChainBotSpEscalation {
+    pub vault_id: u64,
+    pub op_id: u64,
+    pub reason: String,
+}
+
+/// Escalate stale bot-path liquidations to the SP/manual fallback surface. This
+/// is a synchronous state repair primitive: it fails the bot swap op when it
+/// still exists, restores only the collateral reserved by that exact marker, and
+/// moves the vault from `bot_pending_chain_vaults` to `sp_attempted_chain_vaults`.
+/// It deliberately does NOT burn SP icUSD or mutate chain supply; the existing
+/// SP/manual path consumes the resulting marker under its own authorization.
+pub fn escalate_timed_out_bot_liquidations_in_state(
+    state: &mut MultiChainState,
+    chain: ChainId,
+    now_ns: u64,
+    bot_timeout_ns: u64,
+    max_per_tick: usize,
+) -> Vec<ChainBotSpEscalation> {
+    use crate::chains::settlement_queue::SettlementOpStatus;
+    use crate::chains::vault::LiquidationTier;
+
+    if max_per_tick == 0 {
+        return Vec::new();
+    }
+
+    let candidates: Vec<(u64, u64, u128, String)> = state
+        .bot_pending_chain_vaults
+        .iter()
+        .filter_map(|(&vault_id, &pending_since_ns)| {
+            let vault = state.chain_vaults.get(&vault_id)?;
+            if vault.collateral_chain != chain {
+                return None;
+            }
+            let marker = vault.pending_liquidation.as_ref()?;
+            if marker.tier != LiquidationTier::Bot {
+                return None;
+            }
+
+            let status = state
+                .settlement_queues
+                .get(&chain)
+                .and_then(|q| q.pending.get(&marker.op_id))
+                .map(|op| &op.status);
+            let reason = match status {
+                Some(SettlementOpStatus::Failed { .. }) => {
+                    "bot liquidation swap failed; escalated to stability pool".to_string()
+                }
+                Some(SettlementOpStatus::Queued) => {
+                    if !should_escalate_to_sp(pending_since_ns, now_ns, bot_timeout_ns, false) {
+                        return None;
+                    }
+                    format!(
+                        "bot liquidation timed out after {}ns; escalated to stability pool",
+                        now_ns.saturating_sub(pending_since_ns)
+                    )
+                }
+                Some(SettlementOpStatus::Inflight { .. })
+                | Some(SettlementOpStatus::Succeeded { .. }) => return None,
+                None => {
+                    if !should_escalate_to_sp(pending_since_ns, now_ns, bot_timeout_ns, false) {
+                        return None;
+                    }
+                    format!(
+                        "bot liquidation settlement op missing after {}ns; escalated to stability pool",
+                        now_ns.saturating_sub(pending_since_ns)
+                    )
+                }
+            };
+            Some((vault_id, marker.op_id, marker.collateral_reserved_native, reason))
+        })
+        .take(max_per_tick)
+        .collect();
+
+    let mut escalated = Vec::with_capacity(candidates.len());
+    for (vault_id, op_id, reserved_native, reason) in candidates {
+        let mut marker_owned_by_op = false;
+        if let Some(vault) = state.chain_vaults.get_mut(&vault_id) {
+            marker_owned_by_op = vault.pending_liquidation.as_ref().map_or(false, |marker| {
+                marker.op_id == op_id && marker.tier == LiquidationTier::Bot
+            });
+            if marker_owned_by_op {
+                vault.collateral_amount_native = vault.collateral_amount_native.saturating_add(reserved_native);
+                vault.pending_liquidation = None;
+            }
+        }
+        if !marker_owned_by_op {
+            continue;
+        }
+
+        if let Some(op) = state
+            .settlement_queues
+            .get_mut(&chain)
+            .and_then(|q| q.pending.get_mut(&op_id))
+        {
+            if !matches!(op.status, SettlementOpStatus::Succeeded { .. }) {
+                op.mark_failed(reason.clone(), now_ns);
+            }
+        }
+        state.bot_pending_chain_vaults.remove(&vault_id);
+        state.sp_attempted_chain_vaults.insert(vault_id);
+        escalated.push(ChainBotSpEscalation { vault_id, op_id, reason });
+    }
+    escalated
 }
 
 /// Clear routing state (`bot_pending_chain_vaults`, `sp_attempted_chain_vaults`)
@@ -583,6 +694,232 @@ mod tests {
         assert!(should_escalate_to_sp(1_000, 2_001, 1_000, false));
         // Op terminally failed -> escalate regardless of timeout.
         assert!(should_escalate_to_sp(1_000, 1_100, 1_000, true));
+    }
+
+    fn enqueue_bot_liquidation_swap(s: &mut MultiChainState, vault_id: u64, now_ns: u64) -> u64 {
+        use crate::chains::settlement_queue::{SettlementOp, SettlementOpKind};
+
+        s.settlement_queues
+            .entry(ChainId(71))
+            .or_default()
+            .enqueue(SettlementOp::new(
+                SettlementOpKind::LiquidationSwap {
+                    vault_id,
+                    collateral_in_native: 100 * E18,
+                    min_usdc_out_native: 0,
+                    debt_to_clear_e8s: 50 * E8,
+                    router: "0x1111111111111111111111111111111111111111".into(),
+                    pair: "0x3333333333333333333333333333333333333333".into(),
+                    path: vec![
+                        "0x4444444444444444444444444444444444444444".into(),
+                        "0x5555555555555555555555555555555555555555".into(),
+                    ],
+                    reserve_recipient: "0x5555555555555555555555555555555555555555".into(),
+                    deadline_secs: 180,
+                },
+                format!("liq-test-{vault_id}-{now_ns}"),
+                now_ns,
+            ))
+            .expect("enqueue liquidation swap")
+    }
+
+    fn mark_bot_liquidation_reserved(
+        s: &mut MultiChainState,
+        vault_id: u64,
+        op_id: u64,
+        reserved_native: u128,
+        started_at_ns: u64,
+    ) {
+        use crate::chains::vault::{LiquidationTier, PendingLiquidationV1};
+
+        let vault = s.chain_vaults.get_mut(&vault_id).expect("vault exists");
+        vault.collateral_amount_native = vault
+            .collateral_amount_native
+            .checked_sub(reserved_native)
+            .expect("test reserves available collateral");
+        vault.pending_liquidation = Some(PendingLiquidationV1 {
+            op_id,
+            debt_to_clear_e8s: 50 * E8,
+            collateral_reserved_native: reserved_native,
+            tier: LiquidationTier::Bot,
+            started_at_ns,
+        });
+        s.bot_pending_chain_vaults.insert(vault_id, started_at_ns);
+    }
+
+    #[test]
+    fn timeout_escalation_restores_collateral_fails_op_and_sets_sp_attempted() {
+        use crate::chains::settlement_queue::SettlementOpStatus;
+
+        let mut s = MultiChainState::default();
+        seed_cfg_unchecked(&mut s);
+        insert_vault_liq(&mut s, 7, 1_400, 100, ChainVaultStatus::Open);
+        let op_id = enqueue_bot_liquidation_swap(&mut s, 7, 10);
+        mark_bot_liquidation_reserved(&mut s, 7, op_id, 100 * E18, 10);
+
+        let escalated = escalate_timed_out_bot_liquidations_in_state(
+            &mut s,
+            ChainId(71),
+            10 + DEFAULT_BOT_TO_SP_TIMEOUT_NS,
+            DEFAULT_BOT_TO_SP_TIMEOUT_NS,
+            10,
+        );
+
+        assert_eq!(escalated.len(), 1);
+        assert_eq!(escalated[0].vault_id, 7);
+        assert_eq!(escalated[0].op_id, op_id);
+        assert!(escalated[0].reason.contains("timed out"));
+        assert!(s.sp_attempted_chain_vaults.contains(&7));
+        assert!(!s.bot_pending_chain_vaults.contains_key(&7));
+        let v = s.chain_vaults.get(&7).unwrap();
+        assert!(v.pending_liquidation.is_none());
+        assert_eq!(v.collateral_amount_native, 1_400 * E18);
+        let op = s
+            .settlement_queues
+            .get(&ChainId(71))
+            .unwrap()
+            .pending
+            .get(&op_id)
+            .unwrap();
+        assert!(matches!(op.status, SettlementOpStatus::Failed { .. }));
+    }
+
+    #[test]
+    fn timeout_escalation_does_not_mutate_before_timeout() {
+        let mut s = MultiChainState::default();
+        seed_cfg_unchecked(&mut s);
+        insert_vault_liq(&mut s, 7, 1_400, 100, ChainVaultStatus::Open);
+        let op_id = enqueue_bot_liquidation_swap(&mut s, 7, 10);
+        mark_bot_liquidation_reserved(&mut s, 7, op_id, 100 * E18, 10);
+        let before = s.clone();
+
+        let escalated = escalate_timed_out_bot_liquidations_in_state(
+            &mut s,
+            ChainId(71),
+            10 + DEFAULT_BOT_TO_SP_TIMEOUT_NS - 1,
+            DEFAULT_BOT_TO_SP_TIMEOUT_NS,
+            10,
+        );
+
+        assert!(escalated.is_empty());
+        assert_eq!(s.bot_pending_chain_vaults, before.bot_pending_chain_vaults);
+        assert_eq!(s.sp_attempted_chain_vaults, before.sp_attempted_chain_vaults);
+        assert_eq!(
+            s.chain_vaults.get(&7).unwrap().pending_liquidation,
+            before.chain_vaults.get(&7).unwrap().pending_liquidation
+        );
+        assert_eq!(
+            s.chain_vaults.get(&7).unwrap().collateral_amount_native,
+            before.chain_vaults.get(&7).unwrap().collateral_amount_native
+        );
+    }
+
+    #[test]
+    fn timeout_escalation_skips_succeeded_swap_to_avoid_double_restore() {
+        let mut s = MultiChainState::default();
+        seed_cfg_unchecked(&mut s);
+        insert_vault_liq(&mut s, 7, 1_400, 100, ChainVaultStatus::Open);
+        let op_id = enqueue_bot_liquidation_swap(&mut s, 7, 10);
+        mark_bot_liquidation_reserved(&mut s, 7, op_id, 100 * E18, 10);
+        s.settlement_queues
+            .get_mut(&ChainId(71))
+            .unwrap()
+            .pending
+            .get_mut(&op_id)
+            .unwrap()
+            .mark_succeeded("0xtx".into(), 20);
+
+        let escalated = escalate_timed_out_bot_liquidations_in_state(
+            &mut s,
+            ChainId(71),
+            10 + DEFAULT_BOT_TO_SP_TIMEOUT_NS,
+            DEFAULT_BOT_TO_SP_TIMEOUT_NS,
+            10,
+        );
+
+        assert!(escalated.is_empty());
+        assert!(!s.sp_attempted_chain_vaults.contains(&7));
+        assert!(s.bot_pending_chain_vaults.contains_key(&7));
+        assert!(
+            s.chain_vaults.get(&7).unwrap().pending_liquidation.is_some(),
+            "do not double-restore an already-succeeded op; leave for manual repair"
+        );
+        assert_eq!(s.chain_vaults.get(&7).unwrap().collateral_amount_native, 1_300 * E18);
+    }
+
+    #[test]
+    fn timeout_escalation_skips_inflight_swap_to_avoid_live_submit_race() {
+        let mut s = MultiChainState::default();
+        seed_cfg_unchecked(&mut s);
+        insert_vault_liq(&mut s, 7, 1_400, 100, ChainVaultStatus::Open);
+        let op_id = enqueue_bot_liquidation_swap(&mut s, 7, 10);
+        mark_bot_liquidation_reserved(&mut s, 7, op_id, 100 * E18, 10);
+        s.settlement_queues
+            .get_mut(&ChainId(71))
+            .unwrap()
+            .pending
+            .get_mut(&op_id)
+            .unwrap()
+            .mark_inflight(20);
+
+        let escalated = escalate_timed_out_bot_liquidations_in_state(
+            &mut s,
+            ChainId(71),
+            10 + DEFAULT_BOT_TO_SP_TIMEOUT_NS,
+            DEFAULT_BOT_TO_SP_TIMEOUT_NS,
+            10,
+        );
+
+        assert!(escalated.is_empty());
+        assert!(!s.sp_attempted_chain_vaults.contains(&7));
+        assert!(s.bot_pending_chain_vaults.contains_key(&7));
+        assert!(
+            s.chain_vaults.get(&7).unwrap().pending_liquidation.is_some(),
+            "settlement worker confirm-timeout owns inflight swap cleanup"
+        );
+        assert_eq!(s.chain_vaults.get(&7).unwrap().collateral_amount_native, 1_300 * E18);
+    }
+
+    #[test]
+    fn timeout_escalation_repairs_missing_swap_op_after_timeout() {
+        use crate::chains::settlement_queue::SettlementOpStatus;
+
+        let mut s = MultiChainState::default();
+        seed_cfg_unchecked(&mut s);
+        insert_vault_liq(&mut s, 7, 1_400, 100, ChainVaultStatus::Open);
+        let op_id = enqueue_bot_liquidation_swap(&mut s, 7, 10);
+        mark_bot_liquidation_reserved(&mut s, 7, op_id, 100 * E18, 10);
+        s.settlement_queues
+            .get_mut(&ChainId(71))
+            .unwrap()
+            .pending
+            .get_mut(&op_id)
+            .unwrap()
+            .status = SettlementOpStatus::Failed {
+                reason: "manual recovery".into(),
+                failed_ns: 20,
+            };
+        s.settlement_queues
+            .get_mut(&ChainId(71))
+            .unwrap()
+            .prune_terminal();
+
+        let escalated = escalate_timed_out_bot_liquidations_in_state(
+            &mut s,
+            ChainId(71),
+            10 + DEFAULT_BOT_TO_SP_TIMEOUT_NS,
+            DEFAULT_BOT_TO_SP_TIMEOUT_NS,
+            10,
+        );
+
+        assert_eq!(escalated.len(), 1);
+        assert_eq!(escalated[0].vault_id, 7);
+        assert_eq!(escalated[0].op_id, op_id);
+        assert!(escalated[0].reason.contains("missing"));
+        assert!(s.sp_attempted_chain_vaults.contains(&7));
+        assert!(!s.bot_pending_chain_vaults.contains_key(&7));
+        assert!(s.chain_vaults.get(&7).unwrap().pending_liquidation.is_none());
+        assert_eq!(s.chain_vaults.get(&7).unwrap().collateral_amount_native, 1_400 * E18);
     }
 
     #[test]

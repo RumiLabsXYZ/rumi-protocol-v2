@@ -1,4 +1,5 @@
 use super::settlement::{
+    claim_liquidation_swap_submit_in_state, ClaimLiquidationSwapSubmitError,
     confirm_interest_mint_in_state, confirm_mint_in_state, fundable_withdrawal_value,
     select_next_op, OpAction,
 };
@@ -49,6 +50,138 @@ fn select_next_op_confirms_inflight_before_submitting_new() {
         Some((oid, OpAction::Confirm)) => assert_eq!(oid, id0),
         other => panic!("expected Confirm of inflight op, got {other:?}"),
     }
+}
+
+fn queued_liquidation_swap(s: &mut MultiChainState, vault_id: u64) -> u64 {
+    s.settlement_queues
+        .entry(ChainId(71))
+        .or_default()
+        .enqueue(SettlementOp::new(
+            SettlementOpKind::LiquidationSwap {
+                vault_id,
+                collateral_in_native: 100,
+                min_usdc_out_native: 0,
+                debt_to_clear_e8s: 50,
+                router: "0x1111111111111111111111111111111111111111".into(),
+                pair: "0x3333333333333333333333333333333333333333".into(),
+                path: vec![
+                    "0x4444444444444444444444444444444444444444".into(),
+                    "0x5555555555555555555555555555555555555555".into(),
+                ],
+                reserve_recipient: "0x5555555555555555555555555555555555555555".into(),
+                deadline_secs: 180,
+            },
+            format!("liq-{vault_id}"),
+            0,
+        ))
+        .expect("enqueue swap")
+}
+
+fn marked_bot_liquidation(s: &mut MultiChainState, vault_id: u64, op_id: u64) {
+    use crate::chains::vault::{LiquidationTier, PendingLiquidationV1};
+
+    s.chain_vaults.insert(
+        vault_id,
+        ChainVaultV1 {
+            vault_id,
+            owner: Principal::anonymous(),
+            collateral_chain: ChainId(71),
+            custody_address: "0xc".into(),
+            collateral_amount_native: 100,
+            debt_e8s: 50,
+            mint_recipient: "0xr".into(),
+            pending_mint_e8s: 0,
+            status: ChainVaultStatus::Open,
+            opened_at_ns: 0,
+            owner_evm: None,
+            last_interest_accrual_ns: 0,
+            pending_interest_mint_e8s: 0,
+            pending_liquidation: Some(PendingLiquidationV1 {
+                op_id,
+                debt_to_clear_e8s: 50,
+                collateral_reserved_native: 100,
+                tier: LiquidationTier::Bot,
+                started_at_ns: 0,
+            }),
+        },
+    );
+    s.bot_pending_chain_vaults.insert(vault_id, 0);
+}
+
+#[test]
+fn claim_liquidation_swap_submit_marks_queued_op_inflight_before_broadcast() {
+    let mut s = MultiChainState::default();
+    let op_id = queued_liquidation_swap(&mut s, 7);
+    marked_bot_liquidation(&mut s, 7, op_id);
+
+    claim_liquidation_swap_submit_in_state(
+        &mut s,
+        ChainId(71),
+        op_id,
+        7,
+        42,
+        "0xabc".into(),
+        9,
+    )
+    .expect("claim submit");
+
+    let op = s.settlement_queues.get(&ChainId(71)).unwrap().pending.get(&op_id).unwrap();
+    assert_eq!(op.last_tx_hash.as_deref(), Some("0xabc"));
+    assert_eq!(op.submit_nonce, Some(9));
+    assert!(matches!(
+        op.status,
+        SettlementOpStatus::Inflight { tries: 1, last_attempt_ns: 42 }
+    ));
+}
+
+#[test]
+fn claim_liquidation_swap_submit_rejects_if_observer_already_cleared_marker() {
+    let mut s = MultiChainState::default();
+    let op_id = queued_liquidation_swap(&mut s, 7);
+
+    let err = claim_liquidation_swap_submit_in_state(
+        &mut s,
+        ChainId(71),
+        op_id,
+        7,
+        42,
+        "0xabc".into(),
+        9,
+    )
+    .unwrap_err();
+
+    assert_eq!(err, ClaimLiquidationSwapSubmitError::MissingMarker);
+    let op = s.settlement_queues.get(&ChainId(71)).unwrap().pending.get(&op_id).unwrap();
+    assert!(matches!(op.status, SettlementOpStatus::Queued));
+    assert!(op.last_tx_hash.is_none());
+    assert!(op.submit_nonce.is_none());
+}
+
+#[test]
+fn claim_liquidation_swap_submit_rejects_live_inflight_op() {
+    let mut s = MultiChainState::default();
+    let op_id = queued_liquidation_swap(&mut s, 7);
+    marked_bot_liquidation(&mut s, 7, op_id);
+    s.settlement_queues
+        .get_mut(&ChainId(71))
+        .unwrap()
+        .pending
+        .get_mut(&op_id)
+        .unwrap()
+        .mark_inflight(41);
+
+    let err = claim_liquidation_swap_submit_in_state(
+        &mut s,
+        ChainId(71),
+        op_id,
+        7,
+        42,
+        "0xabc".into(),
+        9,
+    )
+    .unwrap_err();
+
+    assert_eq!(err, ClaimLiquidationSwapSubmitError::NotQueued);
 }
 
 #[test]
