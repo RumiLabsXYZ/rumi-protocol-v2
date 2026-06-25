@@ -2769,6 +2769,18 @@ async fn require_settlement_receipt_final(
     }
 }
 
+fn require_settlement_receipt_success(
+    receipt: &rumi_protocol_backend::chains::evm::evm_rpc::TxReceiptWithLogs,
+) -> Result<(), ProtocolError> {
+    if receipt.success {
+        Ok(())
+    } else {
+        Err(ProtocolError::ChainAdmin(
+            "settlement proof rejected: ReceiptReverted".into(),
+        ))
+    }
+}
+
 /// Developer-gated proof-backed reconciliation for the SP pending-burn path.
 #[candid_method(update)]
 #[update]
@@ -2784,6 +2796,7 @@ async fn settle_pending_chain_burn_with_proof(
     let ctx =
         read_state(|s| settlement_proof_context(s, chain, SettlementProofKind::Pending))?;
     let receipt = fetch_settlement_receipt(chain, &proof.tx_hash).await?;
+    require_settlement_receipt_success(&receipt)?;
     require_settlement_receipt_final(chain, receipt.block_number, ctx.finality_depth).await?;
     let verified =
         rumi_protocol_backend::chains::evm::settlement_proof::verify_pending_burn_receipt(
@@ -2847,8 +2860,10 @@ async fn settle_reserve_burn_with_proof(
     ctx.reserve_address = Some(reserve_address);
 
     let burn_receipt = fetch_settlement_receipt(chain, &proof.burn_tx_hash).await?;
+    require_settlement_receipt_success(&burn_receipt)?;
     require_settlement_receipt_final(chain, burn_receipt.block_number, ctx.finality_depth).await?;
     let reserve_receipt = fetch_settlement_receipt(chain, &proof.reserve_tx_hash).await?;
+    require_settlement_receipt_success(&reserve_receipt)?;
     require_settlement_receipt_final(chain, reserve_receipt.block_number, ctx.finality_depth)
         .await?;
 
