@@ -238,8 +238,6 @@ pub fn transform_server(args: TransformArgs) -> HttpResponse {
     let reduced = match serde_json::from_slice::<Value>(&args.response.body) {
         Ok(v) => json!({
             "reserve_base": v.pointer("/result/state/validated_ledger/reserve_base"),
-            "ledger_index": v.pointer("/result/state/validated_ledger/seq"),
-            "ledger_hash": v.pointer("/result/state/validated_ledger/hash"),
             "error": v.pointer("/result/error"),
         }),
         Err(_) => json!({ "parse_error": true }),
@@ -441,18 +439,22 @@ fn is_transient(code: RejectionCode, msg: &str) -> bool {
 }
 
 const READ_QUORUM: usize = 2;
+const RESERVE_READ_MIN_RESPONSES: usize = 1;
 
-fn require_minimum_provider_set(provider_bodies: &[Vec<u8>]) -> Result<(), String> {
-    if provider_bodies.len() < READ_QUORUM {
+fn require_minimum_provider_set(
+    provider_bodies: &[Vec<u8>],
+    min_responses: usize,
+) -> Result<(), String> {
+    if provider_bodies.len() < min_responses {
         return Err(format!(
-            "read quorum requires at least {READ_QUORUM} provider responses"
+            "read quorum requires at least {min_responses} provider responses"
         ));
     }
     Ok(())
 }
 
 fn quorum_account_info(provider_bodies: &[Vec<u8>]) -> Result<XrpAccountInfo, String> {
-    require_minimum_provider_set(provider_bodies)?;
+    require_minimum_provider_set(provider_bodies, READ_QUORUM)?;
     let mut parsed = Vec::with_capacity(provider_bodies.len());
     let mut parse_errors = Vec::new();
     for (idx, body) in provider_bodies.iter().enumerate() {
@@ -489,7 +491,7 @@ fn quorum_account_info(provider_bodies: &[Vec<u8>]) -> Result<XrpAccountInfo, St
 }
 
 fn quorum_reserve_base(provider_bodies: &[Vec<u8>]) -> Result<u128, String> {
-    require_minimum_provider_set(provider_bodies)?;
+    require_minimum_provider_set(provider_bodies, RESERVE_READ_MIN_RESPONSES)?;
     let mut parsed = Vec::with_capacity(provider_bodies.len());
     let mut parse_errors = Vec::new();
     for (idx, body) in provider_bodies.iter().enumerate() {
@@ -497,6 +499,15 @@ fn quorum_reserve_base(provider_bodies: &[Vec<u8>]) -> Result<u128, String> {
             Ok(reserve) => parsed.push((idx, reserve)),
             Err(e) => parse_errors.push(format!("provider {idx}: {e}")),
         }
+    }
+
+    // `reserve_base` is a network-wide XRPL parameter and the only field consumed
+    // by this read. Prefer the normal two-provider semantic quorum when two
+    // providers answer; allow a single successfully-consensed provider when the
+    // secondary public endpoint is temporarily unreachable so vault setup does not
+    // depend on a hardcoded reserve.
+    if parsed.len() == 1 && provider_bodies.len() == 1 {
+        return Ok(parsed[0].1);
     }
 
     for (_, candidate) in &parsed {
@@ -520,7 +531,7 @@ fn quorum_tx_status(
     provider_bodies: &[Vec<u8>],
     expected_hash: &str,
 ) -> Result<XrpTxStatus, String> {
-    require_minimum_provider_set(provider_bodies)?;
+    require_minimum_provider_set(provider_bodies, READ_QUORUM)?;
     let mut parsed = Vec::with_capacity(provider_bodies.len());
     let mut parse_errors = Vec::new();
     for (idx, body) in provider_bodies.iter().enumerate() {
@@ -547,16 +558,20 @@ fn quorum_tx_status(
     ))
 }
 
-async fn outcall_read_provider_bodies<F>(
+async fn outcall_read_provider_bodies_with_min<F>(
     provider_urls: &[&str],
     mut build: F,
+    min_responses: usize,
 ) -> Result<Vec<Vec<u8>>, String>
 where
     F: FnMut(&str) -> CanisterHttpRequestArgument,
 {
-    if provider_urls.len() < READ_QUORUM {
+    if min_responses == 0 {
+        return Err("read quorum requires at least 1 provider response".to_string());
+    }
+    if provider_urls.len() < min_responses {
         return Err(format!(
-            "read quorum requires at least {READ_QUORUM} configured providers"
+            "read quorum requires at least {min_responses} configured providers"
         ));
     }
 
@@ -579,7 +594,7 @@ where
             }
         }
 
-        if provider_bodies.len() >= READ_QUORUM {
+        if provider_bodies.len() >= min_responses {
             return Ok(provider_bodies);
         }
 
@@ -591,6 +606,16 @@ where
     Err(format!(
         "read quorum failed after {READ_RETRIES} attempts ({last})"
     ))
+}
+
+async fn outcall_read_provider_bodies<F>(
+    provider_urls: &[&str],
+    build: F,
+) -> Result<Vec<Vec<u8>>, String>
+where
+    F: FnMut(&str) -> CanisterHttpRequestArgument,
+{
+    outcall_read_provider_bodies_with_min(provider_urls, build, READ_QUORUM).await
 }
 
 async fn outcall_read_quorum<F, T, Q>(
@@ -605,6 +630,31 @@ where
     let mut last = String::new();
     for attempt in 0..READ_RETRIES {
         let bodies = outcall_read_provider_bodies(provider_urls, |url| build(url)).await?;
+        match quorum(&bodies) {
+            Ok(value) => return Ok(value),
+            Err(e) => last = format!("attempt {}: {e}", attempt + 1),
+        }
+    }
+    Err(format!(
+        "read semantic quorum failed after {READ_RETRIES} attempts ({last})"
+    ))
+}
+
+async fn outcall_read_quorum_with_min<F, T, Q>(
+    provider_urls: &[&str],
+    mut build: F,
+    min_responses: usize,
+    quorum: Q,
+) -> Result<T, String>
+where
+    F: FnMut(&str) -> CanisterHttpRequestArgument,
+    Q: Fn(&[Vec<u8>]) -> Result<T, String>,
+{
+    let mut last = String::new();
+    for attempt in 0..READ_RETRIES {
+        let bodies =
+            outcall_read_provider_bodies_with_min(provider_urls, |url| build(url), min_responses)
+                .await?;
         match quorum(&bodies) {
             Ok(value) => return Ok(value),
             Err(e) => last = format!("attempt {}: {e}", attempt + 1),
@@ -640,9 +690,10 @@ pub async fn fetch_account_info(account: &str) -> Result<XrpAccountInfo, String>
 /// Read the base reserve (drops) from `server_state`.
 pub async fn fetch_reserve_base() -> Result<u128, String> {
     let key_name = xrp_schnorr_key_name();
-    outcall_read_quorum(
+    outcall_read_quorum_with_min(
         read_provider_urls(&key_name),
         server_state_request_to_url,
+        RESERVE_READ_MIN_RESPONSES,
         quorum_reserve_base,
     )
     .await
@@ -814,8 +865,11 @@ mod tests {
 
     #[test]
     fn transform_server_strips_volatile_fields() {
-        // Two replicas: identical reserve_base, different server time/load.
-        let mk = |t: &str| -> TransformArgs {
+        // Two replicas: identical reserve_base, different server time/load and
+        // validated ledger identity. The reserve parser only consumes
+        // reserve_base, so ledger identity must not leak through the transform and
+        // break IC HTTPS-outcall consensus.
+        let mk = |t: &str, seq: u32, hash: &str| -> TransformArgs {
             TransformArgs {
                 response: HttpResponse {
                     status: candid::Nat::from(200u32),
@@ -824,21 +878,21 @@ mod tests {
                         value: "now".into(),
                     }],
                     body: format!(
-                        r#"{{"result":{{"state":{{"server_state":"full","time":"{t}","load_factor":256,"validated_ledger":{{"reserve_base":1000000,"seq":9000000}}}}}}}}"#
+                        r#"{{"result":{{"state":{{"server_state":"full","time":"{t}","load_factor":256,"validated_ledger":{{"reserve_base":1000000,"seq":{seq},"hash":"{hash}"}}}}}}}}"#
                     )
                     .into_bytes(),
                 },
                 context: vec![],
             }
         };
-        let a = transform_server(mk("A"));
-        let b = transform_server(mk("B"));
+        let a = transform_server(mk("A", 9_000_000, "A"));
+        let b = transform_server(mk("B", 9_000_001, "B"));
         assert_eq!(a.body, b.body, "replicas converge");
         assert_eq!(parse_reserve_base(&a.body).unwrap(), 1_000_000);
     }
 
     #[test]
-    fn transform_server_keeps_validated_ledger_identity_for_quorum() {
+    fn transform_server_strips_validated_ledger_identity_not_consumed_by_parser() {
         let reduced = transform_server(TransformArgs {
             response: HttpResponse {
                 status: candid::Nat::from(200u32),
@@ -850,8 +904,8 @@ mod tests {
         });
         let v: Value = serde_json::from_slice(&reduced.body).unwrap();
         assert_eq!(v.get("reserve_base"), Some(&json!(1_000_000)));
-        assert_eq!(v.get("ledger_index"), Some(&json!(9_000_000)));
-        assert_eq!(v.get("ledger_hash"), Some(&json!("ABCDEF")));
+        assert_eq!(v.get("ledger_index"), None);
+        assert_eq!(v.get("ledger_hash"), None);
     }
 
     #[test]
@@ -1022,6 +1076,20 @@ mod tests {
             quorum_reserve_base(&[provider_a, provider_b]).unwrap(),
             1_000_000
         );
+    }
+
+    #[test]
+    fn reserve_quorum_accepts_single_success_when_secondary_provider_is_unavailable() {
+        let provider_a = br#"{"reserve_base":1250000,"error":null}"#.to_vec();
+        assert_eq!(quorum_reserve_base(&[provider_a]).unwrap(), 1_250_000);
+    }
+
+    #[test]
+    fn reserve_quorum_rejects_disagreement_when_two_providers_answer() {
+        let provider_a = br#"{"reserve_base":1000000,"error":null}"#.to_vec();
+        let provider_b = br#"{"reserve_base":1250000,"error":null}"#.to_vec();
+        let err = quorum_reserve_base(&[provider_a, provider_b]).unwrap_err();
+        assert!(err.contains("semantic quorum failed"), "{err}");
     }
 
     #[test]

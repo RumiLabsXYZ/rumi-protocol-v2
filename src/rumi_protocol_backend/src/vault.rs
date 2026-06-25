@@ -1190,17 +1190,23 @@ pub async fn confirm_xrp_deposit(vault_id: u64) -> Result<u64, ProtocolError> {
             "XRP custody account is unfunded; deposit not yet received.".to_string(),
         ));
     }
-    let reserve = match crate::chains::xrp::xrp_rpc::fetch_reserve_base().await {
-        Ok(r) => r,
-        Err(e) => {
-            guard_principal.fail();
-            return Err(ProtocolError::GenericError(format!(
-                "xrp server_state failed: {e}"
-            )));
+    let reserve = if pending.reserve_base_drops > 0 {
+        u128::from(pending.reserve_base_drops)
+    } else {
+        match crate::chains::xrp::xrp_rpc::fetch_reserve_base().await {
+            Ok(r) => r,
+            Err(e) => {
+                guard_principal.fail();
+                return Err(ProtocolError::GenericError(format!(
+                    "xrp server_state failed: {e}"
+                )));
+            }
         }
     };
 
-    // Credit balance net of the base reserve (user funds the reserve).
+    // Credit balance net of the reserve quoted when the deposit address was
+    // prepared. Legacy pending deposits did not store it, so they fall back to a
+    // live reserve read above.
     let credited = match xrp_credit_amount(acct.balance_drops, reserve, min_deposit) {
         Ok(c) => c,
         Err(e) => {
