@@ -681,12 +681,9 @@ pub fn xrp_collateral_principal() -> Principal {
     Principal::from_slice(b"rumi-xrp-native")
 }
 
-/// Launch cap for native-XRP borrowing: 100 icUSD, in e8s.
-pub const XRP_LAUNCH_DEBT_CEILING_E8S: u64 = 10_000_000_000;
-
 /// P5: the `CollateralConfig` for native-XRP collateral. Parameters (Rob's):
-/// 150% borrow threshold / 133% liquidation / 12% liquidation penalty / $100 debt
-/// ceiling. Borrowing-fee + interest BASE are copied from ICP ("same as ICP"); the
+/// 150% borrow threshold / 133% liquidation / 12% liquidation penalty / 2,500 icUSD
+/// debt ceiling. Borrowing-fee + interest BASE are copied from ICP ("same as ICP"); the
 /// dynamic curves are global (`borrowing_fee_curve`) or inherited (`rate_curve` =
 /// None). custody_kind = `NativeXrp`; `ledger_canister_id` is the synthetic key; 6
 /// decimals (drops); `ledger_fee` = 0 (the XRPL fee is handled by the rail at settle
@@ -706,7 +703,10 @@ pub fn xrp_collateral_config(
         liquidation_bonus: Ratio::new(dec!(1.12)),
         borrowing_fee: icp_borrowing_fee,
         interest_rate_apr: icp_interest_rate_apr,
-        debt_ceiling: XRP_LAUNCH_DEBT_CEILING_E8S,
+        // 2,500 icUSD e8s. This default applies to a FRESH registration only; an
+        // already-registered config keeps its live ceiling across upgrade (no clamp),
+        // so raise the live config via set_collateral_debt_ceiling(xrp, 250_000_000_000).
+        debt_ceiling: 250_000_000_000,
         min_vault_debt: ICUSD::new(10_000_000), // 0.1 icUSD (matches ICP)
         ledger_fee: 0,
         price_source: PriceSource::Xrc {
@@ -737,24 +737,20 @@ pub fn xrp_collateral_config(
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct XrpLaunchGuardrailMigration {
-    pub previous_debt_ceiling: Option<u64>,
     pub previous_status: Option<CollateralStatus>,
 }
 
-/// Converges already-registered native-XRP collateral onto launch guardrails.
-/// This is intentionally idempotent so upgrades, replay recovery, and tests can
-/// call it without needing a one-shot migration flag.
+/// Converges already-registered native-XRP collateral onto the launch guardrail:
+/// native-XRP cannot be left Active while signing off a non-production Schnorr key
+/// (the audit's F-01 fix). Intentionally idempotent so upgrades, replay recovery,
+/// and tests can call it without a one-shot migration flag. The debt ceiling is NOT
+/// clamped here — XRP uses a normal `debt_ceiling` like every other collateral.
 pub fn enforce_xrp_launch_guardrails(state: &mut State) -> XrpLaunchGuardrailMigration {
     let mut migration = XrpLaunchGuardrailMigration::default();
     let xrp_ct = xrp_collateral_principal();
     let Some(config) = state.collateral_configs.get_mut(&xrp_ct) else {
         return migration;
     };
-
-    if config.debt_ceiling > XRP_LAUNCH_DEBT_CEILING_E8S {
-        migration.previous_debt_ceiling = Some(config.debt_ceiling);
-        config.debt_ceiling = XRP_LAUNCH_DEBT_CEILING_E8S;
-    }
 
     if !crate::chains::xrp::config::is_xrp_production_key_name(&state.xrp_schnorr_key_name)
         && !matches!(
@@ -781,12 +777,6 @@ pub fn validate_xrp_launch_config_update(
         return Err(ProtocolError::GenericError(
             "XRP collateral config must keep custody_kind = NativeXrp".to_string(),
         ));
-    }
-    if config.debt_ceiling > XRP_LAUNCH_DEBT_CEILING_E8S {
-        return Err(ProtocolError::GenericError(format!(
-            "XRP debt ceiling cannot exceed {} e8s (100 icUSD)",
-            XRP_LAUNCH_DEBT_CEILING_E8S
-        )));
     }
     if !matches!(
         config.status,
@@ -7251,8 +7241,7 @@ mod tests {
         assert_eq!(cfg.ledger_canister_id, xrp_collateral_principal());
         assert_eq!(cfg.decimals, 6);
         assert_eq!(cfg.ledger_fee, 0);
-        assert_eq!(XRP_LAUNCH_DEBT_CEILING_E8S, 10_000_000_000); // $100
-        assert_eq!(cfg.debt_ceiling, XRP_LAUNCH_DEBT_CEILING_E8S);
+        assert_eq!(cfg.debt_ceiling, 250_000_000_000); // 2,500 icUSD
         assert_eq!(cfg.liquidation_ratio, Ratio::new(dec!(1.33)));
         assert_eq!(cfg.borrow_threshold_ratio, Ratio::new(dec!(1.50)));
         assert_eq!(cfg.liquidation_bonus, Ratio::new(dec!(1.12))); // 12% penalty
@@ -7277,7 +7266,7 @@ mod tests {
     }
 
     #[test]
-    fn xrp_launch_guardrails_clamp_existing_cap_and_freeze_non_production_key() {
+    fn xrp_launch_guardrails_freeze_non_production_key_without_clamping_ceiling() {
         let mut state = test_state();
         let xrp = xrp_collateral_principal();
         let mut cfg = xrp_collateral_config(
@@ -7294,27 +7283,37 @@ mod tests {
         let migration = enforce_xrp_launch_guardrails(&mut state);
         let migrated = state.collateral_configs.get(&xrp).unwrap();
 
-        assert_eq!(migration.previous_debt_ceiling, Some(20_000_000_000));
+        // F-01 key gate still freezes a non-production key...
         assert_eq!(migration.previous_status, Some(CollateralStatus::Active));
-        assert_eq!(migrated.debt_ceiling, XRP_LAUNCH_DEBT_CEILING_E8S);
         assert_eq!(migrated.status, CollateralStatus::Frozen);
+        // ...but the debt ceiling is no longer clamped — XRP is a normal asset now.
+        assert_eq!(migrated.debt_ceiling, 20_000_000_000);
     }
 
     #[test]
-    fn xrp_launch_config_update_rejects_cap_above_launch_ceiling() {
+    fn xrp_launch_config_update_allows_any_ceiling_but_keeps_key_gate() {
         let xrp = xrp_collateral_principal();
         let mut cfg = xrp_collateral_config(
             Ratio::new(dec!(0.005)),
             Ratio::new(dec!(0.0)),
             Ratio::new(dec!(1.033333333333333333)),
         );
-        cfg.debt_ceiling = XRP_LAUNCH_DEBT_CEILING_E8S + 1;
+        // A ceiling well above the old launch cap is now accepted (production key).
+        cfg.debt_ceiling = 500_000_000_000;
+        assert!(validate_xrp_launch_config_update(
+            xrp,
+            &cfg,
+            crate::chains::xrp::config::XRP_PRODUCTION_SCHNORR_KEY_NAME,
+        )
+        .is_ok());
 
+        // The F-01 key gate is still enforced: a non-production key on an Active
+        // config is rejected regardless of the ceiling.
         assert!(matches!(
             validate_xrp_launch_config_update(
                 xrp,
                 &cfg,
-                crate::chains::xrp::config::XRP_PRODUCTION_SCHNORR_KEY_NAME,
+                crate::chains::xrp::config::XRP_TEST_SCHNORR_KEY_NAME,
             ),
             Err(ProtocolError::GenericError(_))
         ));
