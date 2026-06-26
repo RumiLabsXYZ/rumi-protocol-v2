@@ -207,6 +207,25 @@ pub fn opt_out_cfx(chain_sentinel: Principal) -> Result<(), StabilityPoolError> 
     result
 }
 
+#[update]
+pub fn opt_in_native_collateral(
+    collateral_type: Principal,
+    payout_address: String,
+) -> Result<(), StabilityPoolError> {
+    // SP-102 / AR-S-002: see opt_out_collateral.
+    if crate::pool_guard::liquidation_in_progress() {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    let caller = ic_cdk::api::caller();
+    let result = mutate_state(|s| {
+        s.opt_in_native_collateral(&caller, collateral_type, payout_address)
+    });
+    if result.is_ok() {
+        mutate_state(|s| s.push_event(caller, PoolEventType::OptInCollateral { collateral_type }));
+    }
+    result
+}
+
 // ─── Liquidation (Push + Fallback) ───
 
 /// Called by the backend to push liquidatable vault notifications.
@@ -523,6 +542,27 @@ pub fn icrc21_canister_call_consent_message(
             "## Opt Out of CFX\n\n\
              You are opting out of receiving CFX from future chain-vault liquidations."
                 .to_string()
+        }
+        "opt_in_native_collateral" => {
+            match candid::decode_args::<(Principal, String)>(&request.arg) {
+                Ok((collateral_ledger, payout_address)) => {
+                    let symbol = read_state(|s| {
+                        s.collateral_registry
+                            .get(&collateral_ledger)
+                            .map(|c| c.symbol.clone())
+                            .unwrap_or_else(|| format!("collateral {}", collateral_ledger))
+                    });
+                    format!(
+                        "## Opt In to Native Collateral\n\n\
+                         You are opting in to receive **{}** from future liquidations. \
+                         Payouts will be sent to XRP Ledger address `{}`.",
+                        symbol, payout_address
+                    )
+                }
+                Err(_) => {
+                    "Opt in to native collateral liquidations with a payout address.".to_string()
+                }
+            }
         }
         "deposit_as_3usd" => {
             match candid::decode_args::<(Principal, u64)>(&request.arg) {

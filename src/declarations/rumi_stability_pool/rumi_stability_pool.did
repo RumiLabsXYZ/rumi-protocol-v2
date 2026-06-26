@@ -64,6 +64,7 @@ type UserStabilityPosition = record {
   stablecoin_balances : vec record { principal; nat64 };
   collateral_gains : vec record { principal; nat64 };
   opted_out_collateral : vec principal;
+  native_payout_addresses : vec record { principal; text };
   deposit_timestamp : nat64;
   total_claimed_gains : vec record { principal; nat64 };
   total_usd_value_e8s : nat64;
@@ -127,6 +128,8 @@ type StabilityPoolError = variant {
   SystemBusy;
   AlreadyOptedOut : record { collateral : principal };
   AlreadyOptedIn : record { collateral : principal };
+  PayoutAddressRequired : record { collateral : principal };
+  InvalidPayoutAddress : record { reason : text };
   RefundClaimNotFound;
 };
 
@@ -245,6 +248,7 @@ service : (StabilityPoolInitArgs) -> {
   // ── Opt-in / Opt-out ──
   opt_out_collateral : (principal) -> (variant { Ok; Err : StabilityPoolError });
   opt_in_collateral : (principal) -> (variant { Ok; Err : StabilityPoolError });
+  opt_in_native_collateral : (principal, text) -> (variant { Ok; Err : StabilityPoolError });
 
   // ── Liquidation ──
   notify_liquidatable_vaults : (vec LiquidatableVaultInfo) -> (vec LiquidationResult);
