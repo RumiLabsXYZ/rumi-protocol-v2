@@ -229,13 +229,14 @@ impl StabilityPoolState {
     /// Today XRP is the only such collateral in the SP registry. It is opt-in by
     /// stored payout address rather than opt-out by default.
     pub fn collateral_requires_payout_address(&self, collateral_type: &Principal) -> bool {
-        if *collateral_type == rumi_protocol_backend::state::xrp_collateral_principal() {
-            return true;
-        }
-        self.collateral_registry
-            .get(collateral_type)
-            .map(|info| info.symbol.eq_ignore_ascii_case("XRP"))
-            .unwrap_or(false)
+        // Gate strictly on the native-XRP synthetic principal identity. XRP is
+        // registered in the SP under `xrp_collateral_principal()`, so this is
+        // exact. A symbol heuristic ("XRP") would misclassify any future
+        // chain-registered collateral that happens to carry the XRP symbol
+        // (e.g. bridged XRP on an EVM sidechain): it would route a CFX-style
+        // sentinel opt-in through the payout-address branch and silently break
+        // that depositor's absorption. Identity-only avoids that hazard.
+        *collateral_type == rumi_protocol_backend::state::xrp_collateral_principal()
     }
 
     pub fn native_payout_address(&self, user: &Principal, collateral_type: &Principal) -> Option<String> {
@@ -2041,6 +2042,29 @@ mod tests {
         assert_eq!(state.effective_pool_for_collateral(&xrp_ledger()), 0);
     }
 
+    #[test]
+    fn chain_sentinel_named_xrp_routes_to_chain_optin_not_payout_address() {
+        // Regression (review MEDIUM-1): a chain-registered collateral that happens
+        // to carry the "XRP" symbol must NOT be treated as native XRP. It must use
+        // the CFX-style sentinel opt-in, not the payout-address branch. Gating
+        // `collateral_requires_payout_address` on principal identity (not symbol)
+        // preserves this so a CFX-style opt-in depositor keeps absorbing it.
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 10_00000000);
+
+        let sentinel = state
+            .register_chain_collateral(9999, "XRP".to_string(), 6)
+            .unwrap();
+        assert_ne!(sentinel, xrp_ledger());
+        assert!(!state.collateral_requires_payout_address(&sentinel));
+
+        // Opts in via the chain (CFX) path; the payout-address endpoint is wrong here.
+        state.opt_in_cfx(&user_a(), sentinel).unwrap();
+        let pos = state.deposits.get(&user_a()).unwrap();
+        assert!(state.position_opted_in_for(pos, &sentinel));
+        assert_eq!(state.native_payout_address(&user_a(), &sentinel), None);
+    }
+
     // ─── Test: Normalize E8s Conversions ───
 
     #[test]
@@ -3002,6 +3026,10 @@ mod tests {
         assert!(
             decoded_pos.cfx_claims.clone().unwrap_or_default().is_empty(),
             "missing CFX claims field must decode as empty",
+        );
+        assert!(
+            decoded_pos.native_payout_addresses.clone().unwrap_or_default().is_empty(),
+            "missing native payout-address field must decode as empty (no UPG-002 wipe)",
         );
         assert!(
             decoded_pos.opted_in_chain_collateral.clone().unwrap_or_default().is_empty(),
