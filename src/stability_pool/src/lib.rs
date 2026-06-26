@@ -1,19 +1,37 @@
-use ic_cdk::{query, update, init, pre_upgrade, post_upgrade};
 use candid::Principal;
 use ic_canister_log::log;
+use ic_cdk::{init, post_upgrade, pre_upgrade, query, update};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-pub mod types;
-pub mod state;
 pub mod deposits;
 pub mod liquidation;
 pub mod logs;
 pub mod pool_guard;
+pub mod state;
+pub mod types;
 
-use crate::types::*;
-use crate::state::{mutate_state, read_state};
 use crate::logs::INFO;
+use crate::state::{mutate_state, read_state};
+use crate::types::*;
+
+pub(crate) fn pool_balance_mutation_blocked() -> bool {
+    crate::pool_guard::liquidation_in_progress() || read_state(|s| s.has_pending_chain_absorbs())
+}
+
+pub(crate) fn ensure_pool_balance_mutation_allowed() -> Result<(), StabilityPoolError> {
+    if pool_balance_mutation_blocked() {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    Ok(())
+}
+
+pub(crate) fn ensure_no_pool_balance_async_in_flight() -> Result<(), StabilityPoolError> {
+    if crate::pool_guard::balance_async_in_flight() {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    Ok(())
+}
 
 // ─── Init / Upgrade ───
 
@@ -28,22 +46,31 @@ fn init(args: StabilityPoolInitArgs) {
         "refusing to init: stable memory non-empty; use upgrade mode not reinstall"
     );
     mutate_state(|s| s.initialize(args));
-    log!(INFO, "Stability Pool initialized. Protocol: {}",
-        read_state(|s| s.protocol_canister_id));
+    log!(
+        INFO,
+        "Stability Pool initialized. Protocol: {}",
+        read_state(|s| s.protocol_canister_id)
+    );
 }
 
 #[pre_upgrade]
 fn pre_upgrade() {
-    log!(INFO, "Stability Pool pre-upgrade: saving state to stable memory");
+    log!(
+        INFO,
+        "Stability Pool pre-upgrade: saving state to stable memory"
+    );
     state::save_to_stable_memory();
 }
 
 #[post_upgrade]
 fn post_upgrade(_args: StabilityPoolInitArgs) {
     state::load_from_stable_memory();
-    log!(INFO, "Stability Pool post-upgrade: state restored. {} depositors, {} liquidations",
+    log!(
+        INFO,
+        "Stability Pool post-upgrade: state restored. {} depositors, {} liquidations",
         read_state(|s| s.deposits.len()),
-        read_state(|s| s.total_liquidations_executed));
+        read_state(|s| s.total_liquidations_executed)
+    );
 
     if let Err(error) = read_state(|s| s.validate_state()) {
         ic_cdk::trap(&format!("State validation failed after upgrade: {}", error));
@@ -53,8 +80,12 @@ fn post_upgrade(_args: StabilityPoolInitArgs) {
     mutate_state(|s| {
         for config in s.stablecoin_registry.values_mut() {
             match config.symbol.as_str() {
-                "icUSD" => { config.transfer_fee = Some(100_000); }
-                "3USD"  => { config.transfer_fee = Some(0); }
+                "icUSD" => {
+                    config.transfer_fee = Some(100_000);
+                }
+                "3USD" => {
+                    config.transfer_fee = Some(0);
+                }
                 _ => {}
             }
         }
@@ -79,16 +110,16 @@ fn setup_virtual_price_timer() {
 
 async fn fetch_virtual_prices() {
     let lp_configs: Vec<(Principal, Principal)> = read_state(|s| {
-        s.stablecoin_registry.iter()
+        s.stablecoin_registry
+            .iter()
             .filter(|(_, c)| c.is_lp_token.unwrap_or(false))
             .filter_map(|(ledger, c)| c.underlying_pool.map(|pool| (*ledger, pool)))
             .collect()
     });
 
     for (lp_ledger, pool_canister) in lp_configs {
-        let result: Result<(ThreePoolStatus,), _> = ic_cdk::call(
-            pool_canister, "get_pool_status", ()
-        ).await;
+        let result: Result<(ThreePoolStatus,), _> =
+            ic_cdk::call(pool_canister, "get_pool_status", ()).await;
 
         match result {
             Ok((status,)) => {
@@ -99,7 +130,12 @@ async fn fetch_virtual_prices() {
                 });
             }
             Err(e) => {
-                log!(INFO, "Failed to fetch virtual price from {}: {:?}", pool_canister, e);
+                log!(
+                    INFO,
+                    "Failed to fetch virtual price from {}: {:?}",
+                    pool_canister,
+                    e
+                );
             }
         }
     }
@@ -130,7 +166,10 @@ pub async fn claim_all_collateral() -> Result<BTreeMap<Principal, u64>, Stabilit
 /// Convenience: deposit a stablecoin (icUSD, ckUSDT, ckUSDC) and have the pool
 /// mint 3USD on the user's behalf by depositing into the 3pool.
 #[update]
-pub async fn deposit_as_3usd(token_ledger: Principal, amount: u64) -> Result<u64, StabilityPoolError> {
+pub async fn deposit_as_3usd(
+    token_ledger: Principal,
+    amount: u64,
+) -> Result<u64, StabilityPoolError> {
     crate::deposits::deposit_as_3usd(token_ledger, amount).await
 }
 
@@ -143,7 +182,10 @@ pub async fn claim_pending_refund(refund_id: u64) -> Result<u64, StabilityPoolEr
 }
 
 #[update]
-pub async fn claim_cfx(chain_sentinel: Principal, dest_evm: String) -> Result<u128, StabilityPoolError> {
+pub async fn claim_cfx(
+    chain_sentinel: Principal,
+    dest_evm: String,
+) -> Result<u128, StabilityPoolError> {
     crate::liquidation::claim_cfx(chain_sentinel, dest_evm).await
 }
 
@@ -154,7 +196,8 @@ pub fn opt_out_collateral(collateral_type: Principal) -> Result<(), StabilityPoo
     // SP-102 / AR-S-002: opt-in/out changes the apportionment denominator, so
     // it must not land between a liquidation's snapshot and its apportionment
     // (escape-the-burn + aggregate drift above the ledger balance).
-    if crate::pool_guard::liquidation_in_progress() {
+    // `pool_balance_mutation_blocked` includes `liquidation_in_progress`.
+    if pool_balance_mutation_blocked() {
         return Err(StabilityPoolError::SystemBusy);
     }
     let caller = ic_cdk::api::caller();
@@ -168,7 +211,8 @@ pub fn opt_out_collateral(collateral_type: Principal) -> Result<(), StabilityPoo
 #[update]
 pub fn opt_in_collateral(collateral_type: Principal) -> Result<(), StabilityPoolError> {
     // SP-102 / AR-S-002: see opt_out_collateral.
-    if crate::pool_guard::liquidation_in_progress() {
+    // `pool_balance_mutation_blocked` includes `liquidation_in_progress`.
+    if pool_balance_mutation_blocked() {
         return Err(StabilityPoolError::SystemBusy);
     }
     let caller = ic_cdk::api::caller();
@@ -182,13 +226,20 @@ pub fn opt_in_collateral(collateral_type: Principal) -> Result<(), StabilityPool
 #[update]
 pub fn opt_in_cfx(chain_sentinel: Principal) -> Result<(), StabilityPoolError> {
     // SP-102 / AR-S-002: see opt_out_collateral.
-    if crate::pool_guard::liquidation_in_progress() {
+    if pool_balance_mutation_blocked() {
         return Err(StabilityPoolError::SystemBusy);
     }
     let caller = ic_cdk::api::caller();
     let result = mutate_state(|s| s.opt_in_cfx(&caller, chain_sentinel));
     if result.is_ok() {
-        mutate_state(|s| s.push_event(caller, PoolEventType::OptInCollateral { collateral_type: chain_sentinel }));
+        mutate_state(|s| {
+            s.push_event(
+                caller,
+                PoolEventType::OptInCollateral {
+                    collateral_type: chain_sentinel,
+                },
+            )
+        });
     }
     result
 }
@@ -196,13 +247,20 @@ pub fn opt_in_cfx(chain_sentinel: Principal) -> Result<(), StabilityPoolError> {
 #[update]
 pub fn opt_out_cfx(chain_sentinel: Principal) -> Result<(), StabilityPoolError> {
     // SP-102 / AR-S-002: see opt_out_collateral.
-    if crate::pool_guard::liquidation_in_progress() {
+    if pool_balance_mutation_blocked() {
         return Err(StabilityPoolError::SystemBusy);
     }
     let caller = ic_cdk::api::caller();
     let result = mutate_state(|s| s.opt_out_cfx(&caller, chain_sentinel));
     if result.is_ok() {
-        mutate_state(|s| s.push_event(caller, PoolEventType::OptOutCollateral { collateral_type: chain_sentinel }));
+        mutate_state(|s| {
+            s.push_event(
+                caller,
+                PoolEventType::OptOutCollateral {
+                    collateral_type: chain_sentinel,
+                },
+            )
+        });
     }
     result
 }
@@ -218,16 +276,27 @@ pub fn opt_out_cfx(chain_sentinel: Principal) -> Result<(), StabilityPoolError> 
 /// with the per-token bookkeeping path), so the gate matches the pattern
 /// used by `receive_interest_revenue` below.
 #[update]
-pub async fn notify_liquidatable_vaults(vaults: Vec<LiquidatableVaultInfo>) -> Vec<LiquidationResult> {
+pub async fn notify_liquidatable_vaults(
+    vaults: Vec<LiquidatableVaultInfo>,
+) -> Vec<LiquidationResult> {
     let caller = ic_cdk::api::caller();
     let expected = read_state(|s| s.protocol_canister_id);
     if caller != expected {
-        log!(INFO, "notify_liquidatable_vaults: rejected caller {} (expected protocol {})",
-            caller, expected);
+        log!(
+            INFO,
+            "notify_liquidatable_vaults: rejected caller {} (expected protocol {})",
+            caller,
+            expected
+        );
         return Vec::new();
     }
     let vault_count = vaults.len() as u64;
-    mutate_state(|s| s.push_event(caller, PoolEventType::LiquidationNotification { vault_count }));
+    mutate_state(|s| {
+        s.push_event(
+            caller,
+            PoolEventType::LiquidationNotification { vault_count },
+        )
+    });
     crate::liquidation::notify_liquidatable_vaults(vaults).await
 }
 
@@ -238,8 +307,17 @@ pub async fn execute_liquidation(vault_id: u64) -> Result<LiquidationResult, Sta
 }
 
 #[update]
-pub async fn sp_absorb_chain_vault(vault_id: u64) -> Result<ChainSpAbsorbResult, StabilityPoolError> {
+pub async fn sp_absorb_chain_vault(
+    vault_id: u64,
+) -> Result<ChainSpAbsorbResult, StabilityPoolError> {
     crate::liquidation::sp_absorb_chain_vault(vault_id).await
+}
+
+#[update]
+pub async fn scan_chain_absorb_candidates(
+    max_per_chain: Option<u64>,
+) -> Result<Vec<ChainSpAbsorbCandidate>, StabilityPoolError> {
+    crate::liquidation::scan_chain_absorb_candidates(max_per_chain).await
 }
 
 // ─── Interest Revenue ───
@@ -251,27 +329,46 @@ pub async fn sp_absorb_chain_vault(vault_id: u64) -> Result<ChainSpAbsorbResult,
 /// Depositors who opted out of that collateral are excluded from the distribution.
 /// The parameter is optional for backward compatibility with older backend versions.
 #[update]
-pub fn receive_interest_revenue(token_ledger: Principal, amount: u64, collateral_type: Option<Principal>) -> Result<(), StabilityPoolError> {
+pub fn receive_interest_revenue(
+    token_ledger: Principal,
+    amount: u64,
+    collateral_type: Option<Principal>,
+) -> Result<(), StabilityPoolError> {
     let caller = ic_cdk::api::caller();
     let expected = read_state(|s| s.protocol_canister_id);
     if caller != expected {
         return Err(StabilityPoolError::Unauthorized);
     }
+    ensure_pool_balance_mutation_allowed()?;
 
     if read_state(|s| s.configuration.emergency_pause) {
         return Err(StabilityPoolError::EmergencyPaused);
     }
 
     if !read_state(|s| s.stablecoin_registry.contains_key(&token_ledger)) {
-        return Err(StabilityPoolError::TokenNotAccepted { ledger: token_ledger });
+        return Err(StabilityPoolError::TokenNotAccepted {
+            ledger: token_ledger,
+        });
     }
 
     mutate_state(|s| {
         s.distribute_interest_revenue(token_ledger, amount, collateral_type);
-        s.push_event(caller, PoolEventType::InterestReceived { token_ledger, amount });
+        s.push_event(
+            caller,
+            PoolEventType::InterestReceived {
+                token_ledger,
+                amount,
+            },
+        );
     });
 
-    log!(INFO, "Distributed {} interest for token {} (collateral: {:?}) from backend", amount, token_ledger, collateral_type);
+    log!(
+        INFO,
+        "Distributed {} interest for token {} (collateral: {:?}) from backend",
+        amount,
+        token_ledger,
+        collateral_type
+    );
     Ok(())
 }
 
@@ -292,7 +389,12 @@ pub fn get_user_position(user: Option<Principal>) -> Option<UserStabilityPositio
 pub fn get_liquidation_history(limit: Option<u64>) -> Vec<PoolLiquidationRecord> {
     let limit = limit.unwrap_or(50).min(100) as usize;
     read_state(|s| {
-        s.liquidation_history.iter().rev().take(limit).cloned().collect()
+        s.liquidation_history
+            .iter()
+            .rev()
+            .take(limit)
+            .cloned()
+            .collect()
     })
 }
 
@@ -351,6 +453,17 @@ pub fn get_pending_refunds(user: Option<Principal>) -> Vec<PendingRefund> {
 }
 
 #[query]
+pub fn get_pending_chain_absorbs() -> Vec<ChainSpAbsorbIntent> {
+    read_state(|s| s.pending_chain_absorbs())
+}
+
+#[query]
+pub fn get_completed_chain_absorbs(limit: Option<u64>) -> Vec<ChainSpAbsorbCompletion> {
+    let limit = limit.unwrap_or(50).min(500) as usize;
+    read_state(|s| s.completed_chain_absorbs(limit))
+}
+
+#[query]
 pub fn get_chain_collateral_sentinel(chain_id: u32) -> Principal {
     crate::state::chain_collateral_sentinel(chain_id)
 }
@@ -361,8 +474,19 @@ pub fn check_pool_capacity(collateral_type: Principal, debt_amount_e8s: u64) -> 
 }
 
 #[query]
+pub fn check_chain_absorb_capacity(chain_sentinel: Principal, debt_amount_e8s: u64) -> bool {
+    read_state(|s| {
+        s.is_chain_collateral_sentinel(&chain_sentinel)
+            && s.effective_icusd_pool_for_collateral(&chain_sentinel) >= debt_amount_e8s
+    })
+}
+
+#[query]
 pub fn validate_pool_state() -> Result<String, String> {
-    read_state(|s| s.validate_state().map(|_| "Pool state is consistent".to_string()))
+    read_state(|s| {
+        s.validate_state()
+            .map(|_| "Pool state is consistent".to_string())
+    })
 }
 
 // ─── Admin: Registry Management ───
@@ -377,7 +501,10 @@ pub fn register_stablecoin(config: StablecoinConfig) -> Result<(), StabilityPool
     let symbol = config.symbol.clone();
     mutate_state(|s| {
         s.register_stablecoin(config);
-        s.push_event(caller, PoolEventType::StablecoinRegistered { ledger, symbol });
+        s.push_event(
+            caller,
+            PoolEventType::StablecoinRegistered { ledger, symbol },
+        );
     });
     Ok(())
 }
@@ -392,7 +519,10 @@ pub fn register_collateral(info: CollateralInfo) -> Result<(), StabilityPoolErro
     let symbol = info.symbol.clone();
     mutate_state(|s| {
         s.register_collateral(info);
-        s.push_event(caller, PoolEventType::CollateralRegistered { ledger, symbol });
+        s.push_event(
+            caller,
+            PoolEventType::CollateralRegistered { ledger, symbol },
+        );
     });
     Ok(())
 }
@@ -403,14 +533,15 @@ pub fn register_cfx_collateral(chain_id: u32) -> Result<Principal, StabilityPool
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
     }
-    let sentinel = mutate_state(|s| {
-        s.register_chain_collateral(chain_id, "CFX".to_string(), 18)
-    })?;
+    let sentinel = mutate_state(|s| s.register_chain_collateral(chain_id, "CFX".to_string(), 18))?;
     mutate_state(|s| {
-        s.push_event(caller, PoolEventType::CollateralRegistered {
-            ledger: sentinel,
-            symbol: "CFX".to_string(),
-        });
+        s.push_event(
+            caller,
+            PoolEventType::CollateralRegistered {
+                ledger: sentinel,
+                symbol: "CFX".to_string(),
+            },
+        );
     });
     Ok(sentinel)
 }
@@ -637,13 +768,17 @@ pub fn admin_correct_balance(
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
     }
+    ensure_pool_balance_mutation_allowed()?;
     let msg = mutate_state(|s| {
         let result = s.correct_balance(user, token_ledger, correct_amount);
-        s.push_event(caller, PoolEventType::BalanceCorrected {
-            user,
-            token_ledger,
-            new_amount: correct_amount,
-        });
+        s.push_event(
+            caller,
+            PoolEventType::BalanceCorrected {
+                user,
+                token_ledger,
+                new_amount: correct_amount,
+            },
+        );
         result
     });
     log!(INFO, "Admin balance correction by {}: {}", caller, msg);
@@ -662,13 +797,95 @@ pub fn admin_correct_collateral_gain(
     }
     let msg = mutate_state(|s| {
         let result = s.correct_collateral_gain(user, collateral_ledger, correct_amount);
-        s.push_event(caller, PoolEventType::CollateralGainCorrected {
-            user,
-            collateral_ledger,
-            new_amount: correct_amount,
-        });
+        s.push_event(
+            caller,
+            PoolEventType::CollateralGainCorrected {
+                user,
+                collateral_ledger,
+                new_amount: correct_amount,
+            },
+        );
         result
     });
-    log!(INFO, "Admin collateral gain correction by {}: {}", caller, msg);
+    log!(
+        INFO,
+        "Admin collateral gain correction by {}: {}",
+        caller,
+        msg
+    );
     Ok(msg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use icrc_ledger_types::icrc1::account::Account;
+    use rumi_protocol_backend::chains::config::ChainId;
+
+    fn principal(byte: u8) -> Principal {
+        Principal::from_slice(&[byte])
+    }
+
+    fn pending_intent() -> ChainSpAbsorbIntent {
+        let mut stables_consumed = BTreeMap::new();
+        stables_consumed.insert(principal(10), 100_00000000);
+        ChainSpAbsorbIntent {
+            vault_id: 77,
+            chain_id: ChainId(1030),
+            chain_sentinel: crate::state::chain_collateral_sentinel(1030),
+            icusd_ledger: principal(10),
+            icusd_minting_account: Account {
+                owner: principal(90),
+                subaccount: None,
+            },
+            icusd_to_burn_e8s: 100_00000000,
+            stables_consumed,
+            burn_created_at_time_ns: 123,
+            status: ChainSpAbsorbIntentStatus::Burned,
+            burn_proof: Some(rumi_protocol_backend::icrc3_proof::SpWritedownProof {
+                block_index: 44,
+                ledger_kind: rumi_protocol_backend::icrc3_proof::SpProofLedger::IcusdBurn,
+                vault_id_memo: 77,
+            }),
+            backend_result: None,
+            last_error: None,
+            created_at_ns: 123,
+            updated_at_ns: 456,
+        }
+    }
+
+    #[test]
+    fn pending_chain_absorb_blocks_pool_balance_mutations() {
+        crate::state::replace_state(crate::state::StabilityPoolState::default());
+        assert!(
+            ensure_pool_balance_mutation_allowed().is_ok(),
+            "empty journal does not block ordinary mutations",
+        );
+
+        mutate_state(|s| s.put_pending_chain_absorb(pending_intent()).unwrap());
+        assert!(
+            matches!(
+                ensure_pool_balance_mutation_allowed(),
+                Err(StabilityPoolError::SystemBusy)
+            ),
+            "interest revenue and admin balance correction must not mutate live denominator while pending",
+        );
+
+        crate::state::replace_state(crate::state::StabilityPoolState::default());
+    }
+
+    #[test]
+    fn in_flight_balance_async_blocks_chain_absorb_start() {
+        assert!(ensure_no_pool_balance_async_in_flight().is_ok());
+        let guard = crate::pool_guard::PoolBalanceAsyncGuard::new();
+        assert!(
+            matches!(
+                ensure_no_pool_balance_async_in_flight(),
+                Err(StabilityPoolError::SystemBusy)
+            ),
+            "SP chain absorb must not start while withdrawal rollback could still restore balances",
+        );
+        drop(guard);
+        assert!(ensure_no_pool_balance_async_in_flight().is_ok());
+    }
 }

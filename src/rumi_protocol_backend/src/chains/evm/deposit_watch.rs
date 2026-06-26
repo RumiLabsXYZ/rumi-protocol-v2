@@ -12,7 +12,8 @@
 //! The function enforces a strict no-mutation-on-rejection guarantee:
 //!
 //! 1. Look up vault (reject if unknown — no mutation).
-//! 2. Reject if `burn.amount_e8s > debt_e8s` (no mutation).
+//! 2. Defer if the vault is locked for liquidation/SP absorb, or reject if
+//!    `burn.amount_e8s > debt_e8s` (no mutation).
 //! 3. Call `apply_supply_delta(state, chain, Decrease(amount), new_total_debt)`.
 //!    `apply_supply_delta` validates underflow, divergence, and halt BEFORE
 //!    mutating chain_supplies; on any error it returns `Err` with state
@@ -78,13 +79,13 @@ pub enum BurnApplyError {
     /// The protocol must NOT advance the cursor past this; the invariant
     /// machinery halts.
     SupplyInvariant(crate::chains::supply::SupplyInvariantError),
-    /// The target vault is mid-liquidation (`pending_liquidation.is_some()`).
-    /// Applying the burn now would let debt shrink out from under an in-flight
-    /// seizure -> over-liquidation (findings #11/#19). DEFER: no mutation, do NOT
-    /// advance the cursor, retry once the marker clears. NOT a halt (the invariant
-    /// machinery is untouched). Head-of-line: stalls this chain's burn-watch for
-    /// the (bounded, disabled-by-default) liquidation window; finding #14 (a
-    /// separate queue) is a future refinement.
+    /// The target vault is locked by bot liquidation (`pending_liquidation`) or
+    /// by SP absorb escalation (`sp_attempted_chain_vaults`). Applying the burn
+    /// now would let debt shrink out from under an in-flight seizure/SP burn.
+    /// DEFER: no mutation, do NOT advance the cursor, retry once the lock clears.
+    /// NOT a halt (the invariant machinery is untouched). Head-of-line: stalls
+    /// this chain's burn-watch for the bounded liquidation/SP absorb window;
+    /// finding #14 (a separate queue) is a future refinement.
     DeferredLiquidation,
 }
 
@@ -200,12 +201,14 @@ pub fn apply_burn_to_state(
         let vault = state.chain_vaults.get(&burn.vault_id).ok_or_else(|| {
             BurnApplyError::InvalidBurn(format!("apply_burn: unknown vault_id {}", burn.vault_id))
         })?;
-        // Findings #11/#19: never decrement a vault's debt while it is mid-
-        // liquidation. The `pending_liquidation` marker is the lock (spec §10);
-        // the burn is deferred (retried) until the liquidation resolves and clears
-        // the marker, so a concurrent repayment cannot shrink debt out from under
-        // an in-flight seizure (over-liquidation).
-        if vault.pending_liquidation.is_some() {
+        // Findings #11/#19 + Inc8: never decrement a vault's debt while it is
+        // mid-liquidation or after it has escalated to SP absorb. The SP path
+        // burns IC-side icUSD before calling the backend; a foreign-chain burn
+        // applied during that await would make the proof amount stale and create
+        // an unrecoverable overburn unless deferred here.
+        if vault.pending_liquidation.is_some()
+            || state.sp_attempted_chain_vaults.contains(&burn.vault_id)
+        {
             return Err(BurnApplyError::DeferredLiquidation);
         }
         (vault.collateral_chain, vault.debt_e8s)
@@ -1105,6 +1108,20 @@ mod liq_defer_tests {
         s.chain_supplies.insert(CFX, 100);
         s.chain_vaults.insert(7, vault(true));
         let res = apply_burn_to_state(&mut s, &burn(50), 100);
+        assert!(matches!(res, Err(BurnApplyError::DeferredLiquidation)), "burn deferred, not applied");
+        assert_eq!(s.chain_vaults.get(&7).unwrap().debt_e8s, 100, "debt unchanged");
+        assert_eq!(*s.chain_supplies.get(&CFX).unwrap(), 100, "supply unchanged");
+    }
+
+    #[test]
+    fn burn_deferred_while_sp_absorb_escalated() {
+        let mut s = MultiChainState::default();
+        s.chain_supplies.insert(CFX, 100);
+        s.chain_vaults.insert(7, vault(false));
+        s.sp_attempted_chain_vaults.insert(7);
+
+        let res = apply_burn_to_state(&mut s, &burn(50), 100);
+
         assert!(matches!(res, Err(BurnApplyError::DeferredLiquidation)), "burn deferred, not applied");
         assert_eq!(s.chain_vaults.get(&7).unwrap().debt_e8s, 100, "debt unchanged");
         assert_eq!(*s.chain_supplies.get(&CFX).unwrap(), 100, "supply unchanged");

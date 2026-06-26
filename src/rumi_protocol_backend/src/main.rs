@@ -2798,8 +2798,7 @@ async fn settle_pending_chain_burn_with_proof(
         return Err(ProtocolError::ChainAdmin("not developer".into()));
     }
 
-    let ctx =
-        read_state(|s| settlement_proof_context(s, chain, SettlementProofKind::Pending))?;
+    let ctx = read_state(|s| settlement_proof_context(s, chain, SettlementProofKind::Pending))?;
     let receipt = fetch_settlement_receipt(chain, &proof.tx_hash).await?;
     require_settlement_receipt_success(&receipt)?;
     require_settlement_receipt_final(chain, receipt.block_number, ctx.finality_depth).await?;
@@ -2852,8 +2851,7 @@ async fn settle_reserve_burn_with_proof(
         return Err(ProtocolError::ChainAdmin("not developer".into()));
     }
 
-    let mut ctx =
-        read_state(|s| settlement_proof_context(s, chain, SettlementProofKind::Reserve))?;
+    let mut ctx = read_state(|s| settlement_proof_context(s, chain, SettlementProofKind::Reserve))?;
     let (_, reserve_address) =
         rumi_protocol_backend::chains::evm::tecdsa::cached_reserve_address(chain)
             .await
@@ -4710,6 +4708,60 @@ async fn verify_sp_icusd_burn_proof(
     Ok(())
 }
 
+fn chain_sp_absorb_result_from_stored(
+    stored: rumi_protocol_backend::state::StoredChainSpAbsorbResult,
+) -> ChainStabilityPoolLiquidationResult {
+    ChainStabilityPoolLiquidationResult {
+        success: true,
+        vault_id: stored.vault_id,
+        chain_id: stored.chain_id,
+        liquidated_debt_e8s: stored.liquidated_debt_e8s,
+        collateral_received_native: stored.collateral_received_native,
+        claim_id: stored.claim_id,
+        custody_address: stored.custody_address,
+        block_index: stored.block_index,
+        collateral_price_e8s: stored.collateral_price_e8s,
+    }
+}
+
+fn stored_chain_sp_absorb_matches_retry(
+    stored: &rumi_protocol_backend::state::StoredChainSpAbsorbResult,
+    vault_id: u64,
+    icusd_burned_e8s: u64,
+    caller: Principal,
+    proof: &rumi_protocol_backend::icrc3_proof::SpWritedownProof,
+) -> bool {
+    proof.ledger_kind == rumi_protocol_backend::icrc3_proof::SpProofLedger::IcusdBurn
+        && proof.vault_id_memo == vault_id
+        && stored.caller == caller
+        && stored.vault_id == vault_id
+        && stored.icusd_burned_e8s == icusd_burned_e8s
+        && stored.block_index == proof.block_index
+}
+
+fn record_sp_chain_absorb_result_bounded(
+    state: &mut State,
+    proof_key: (rumi_protocol_backend::icrc3_proof::SpProofLedger, u64),
+    stored: rumi_protocol_backend::state::StoredChainSpAbsorbResult,
+) {
+    state
+        .sp_chain_absorb_results_by_proof
+        .insert(proof_key, stored);
+    while state.sp_chain_absorb_results_by_proof.len()
+        > rumi_protocol_backend::state::MAX_SP_CHAIN_ABSORB_RESULTS_BY_PROOF
+    {
+        let Some(oldest_key) = state
+            .sp_chain_absorb_results_by_proof
+            .keys()
+            .copied()
+            .find(|key| *key != proof_key)
+        else {
+            break;
+        };
+        state.sp_chain_absorb_results_by_proof.remove(&oldest_key);
+    }
+}
+
 /// Called by the stability pool after it has burned IC-native icUSD to absorb a
 /// bot-failed foreign-chain vault. This does NOT burn the eSpace icUSD
 /// representation; it writes debt -> pending_chain_burn and reserves seized CFX
@@ -4744,6 +4796,19 @@ async fn stability_pool_liquidate_chain_vault(
             "Caller is not the registered stability pool canister".to_string(),
         ));
     }
+    let proof_key = (proof.ledger_kind, proof.block_index);
+    if let Some(stored) =
+        read_state(|s| s.sp_chain_absorb_results_by_proof.get(&proof_key).cloned())
+    {
+        if stored_chain_sp_absorb_matches_retry(&stored, vault_id, icusd_burned_e8s, caller, &proof)
+        {
+            return Ok(chain_sp_absorb_result_from_stored(stored));
+        }
+        return Err(ProtocolError::GenericError(format!(
+            "SP writedown proof replay rejected: ({:?}, block {}) already consumed for a different request",
+            proof.ledger_kind, proof.block_index
+        )));
+    }
 
     let _guard = rumi_protocol_backend::guard::ChainVaultLiquidationGuard::new(vault_id)?;
     let now = ic_cdk::api::time();
@@ -4751,8 +4816,7 @@ async fn stability_pool_liquidate_chain_vault(
 
     verify_sp_icusd_burn_proof(vault_id, icusd_burned_e8s, caller, &proof).await?;
 
-    let proof_key = (proof.ledger_kind, proof.block_index);
-    let absorbed = mutate_state(|s| {
+    let stored = mutate_state(|s| {
         if s.consumed_writedown_proofs.contains(&proof_key) {
             return Err(ProtocolError::GenericError(format!(
                 "SP writedown proof replay rejected: ({:?}, block {}) already consumed",
@@ -4770,34 +4834,37 @@ async fn stability_pool_liquidate_chain_vault(
         )
         .map_err(ProtocolError::ChainAdmin)?;
         s.consumed_writedown_proofs.insert(proof_key);
-        Ok(absorbed)
+        let stored = rumi_protocol_backend::state::StoredChainSpAbsorbResult {
+            caller,
+            vault_id,
+            chain_id: snapshot.chain,
+            icusd_burned_e8s,
+            liquidated_debt_e8s: absorbed.actual_burned_e8s,
+            collateral_received_native: absorbed.collateral_seized_native,
+            claim_id: vault_id,
+            custody_address: absorbed.custody_address,
+            block_index: proof.block_index,
+            collateral_price_e8s: snapshot.price_e8,
+        };
+        record_sp_chain_absorb_result_bounded(s, proof_key, stored.clone());
+        Ok(stored)
     })?;
 
     rumi_protocol_backend::storage::record_event(&Event::ChainVaultLiquidated {
         chain_id: snapshot.chain,
         vault_id,
         op_id: proof.block_index,
-        debt_cleared_e8s: absorbed.actual_burned_e8s,
-        collateral_seized_native: absorbed.collateral_seized_native,
+        debt_cleared_e8s: stored.liquidated_debt_e8s,
+        collateral_seized_native: stored.collateral_received_native,
         tier: rumi_protocol_backend::chains::vault::LiquidationTier::StabilityPool,
         timestamp: now,
     });
     log!(INFO,
         "[stability_pool_liquidate_chain_vault] chain={:?} vault={} burned_e8s={} collateral_seized_native={} proof_block={}",
-        snapshot.chain, vault_id, absorbed.actual_burned_e8s, absorbed.collateral_seized_native, proof.block_index
+        snapshot.chain, vault_id, stored.liquidated_debt_e8s, stored.collateral_received_native, proof.block_index
     );
 
-    Ok(ChainStabilityPoolLiquidationResult {
-        success: true,
-        vault_id,
-        chain_id: snapshot.chain,
-        liquidated_debt_e8s: absorbed.actual_burned_e8s,
-        collateral_received_native: absorbed.collateral_seized_native,
-        claim_id: vault_id,
-        custody_address: absorbed.custody_address,
-        block_index: proof.block_index,
-        collateral_price_e8s: snapshot.price_e8,
-    })
+    Ok(chain_sp_absorb_result_from_stored(stored))
 }
 
 /// Called by the stability pool to enqueue a native CFX payout from a reserved
@@ -10924,12 +10991,17 @@ mod chain_vault_param_tests {
 mod chain_sp_absorb_entry_tests {
     use super::{
         chain_collateral_sentinel, chain_liquidatable_vaults_in_state, chain_sp_absorb_snapshot,
+        record_sp_chain_absorb_result_bounded, stored_chain_sp_absorb_matches_retry,
     };
     use candid::Principal;
     use rumi_protocol_backend::chains::config::{ChainConfigV3, ChainId, ChainStatus, GasStrategy};
     use rumi_protocol_backend::chains::liquidation_config::{ChainLiquidationConfigV1, DexKind};
     use rumi_protocol_backend::chains::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
     use rumi_protocol_backend::chains::multi_chain_state::MultiChainState;
+    use rumi_protocol_backend::icrc3_proof::{SpProofLedger, SpWritedownProof};
+    use rumi_protocol_backend::state::{
+        StoredChainSpAbsorbResult, MAX_SP_CHAIN_ABSORB_RESULTS_BY_PROOF,
+    };
 
     const CFX: ChainId = ChainId(71);
 
@@ -10995,6 +11067,157 @@ mod chain_sp_absorb_entry_tests {
         );
         s.sp_attempted_chain_vaults.insert(7);
         s
+    }
+
+    fn stored_absorb_result(caller: Principal) -> StoredChainSpAbsorbResult {
+        StoredChainSpAbsorbResult {
+            caller,
+            vault_id: 77,
+            chain_id: CFX,
+            icusd_burned_e8s: 100_00000000,
+            liquidated_debt_e8s: 100_00000000,
+            collateral_received_native: 10_000_000_000_000_000_000u128,
+            claim_id: 77,
+            custody_address: "0xcustody".into(),
+            block_index: 44,
+            collateral_price_e8s: 5_000_000,
+        }
+    }
+
+    fn stored_absorb_result_for(caller: Principal, vault_id: u64) -> StoredChainSpAbsorbResult {
+        StoredChainSpAbsorbResult {
+            caller,
+            vault_id,
+            chain_id: CFX,
+            icusd_burned_e8s: 100_00000000,
+            liquidated_debt_e8s: 100_00000000,
+            collateral_received_native: 10_000_000_000_000_000_000u128,
+            claim_id: vault_id,
+            custody_address: "0xcustody".into(),
+            block_index: vault_id,
+            collateral_price_e8s: 5_000_000,
+        }
+    }
+
+    fn proof(block_index: u64, vault_id_memo: u64, ledger_kind: SpProofLedger) -> SpWritedownProof {
+        SpWritedownProof {
+            block_index,
+            ledger_kind,
+            vault_id_memo,
+        }
+    }
+
+    #[test]
+    fn stored_chain_sp_absorb_retry_match_requires_same_burn_proof_shape() {
+        let caller = Principal::from_slice(&[3u8; 29]);
+        let stored = stored_absorb_result(caller);
+        let exact = proof(44, 77, SpProofLedger::IcusdBurn);
+
+        assert!(stored_chain_sp_absorb_matches_retry(
+            &stored,
+            77,
+            100_00000000,
+            caller,
+            &exact,
+        ));
+        assert!(!stored_chain_sp_absorb_matches_retry(
+            &stored,
+            78,
+            100_00000000,
+            caller,
+            &proof(44, 78, SpProofLedger::IcusdBurn),
+        ));
+        assert!(!stored_chain_sp_absorb_matches_retry(
+            &stored,
+            77,
+            99_99999999,
+            caller,
+            &exact,
+        ));
+        assert!(!stored_chain_sp_absorb_matches_retry(
+            &stored,
+            77,
+            100_00000000,
+            Principal::from_slice(&[4u8; 29]),
+            &exact,
+        ));
+        assert!(!stored_chain_sp_absorb_matches_retry(
+            &stored,
+            77,
+            100_00000000,
+            caller,
+            &proof(44, 77, SpProofLedger::ThreePoolTransfer),
+        ));
+        assert!(!stored_chain_sp_absorb_matches_retry(
+            &stored,
+            77,
+            100_00000000,
+            caller,
+            &proof(45, 77, SpProofLedger::IcusdBurn),
+        ));
+    }
+
+    #[test]
+    fn backend_sp_chain_absorb_result_cache_is_bounded() {
+        let caller = Principal::from_slice(&[3u8; 29]);
+        let mut state = rumi_protocol_backend::state::State::default();
+
+        for block_index in 0..(MAX_SP_CHAIN_ABSORB_RESULTS_BY_PROOF as u64 + 5) {
+            record_sp_chain_absorb_result_bounded(
+                &mut state,
+                (SpProofLedger::IcusdBurn, block_index),
+                stored_absorb_result_for(caller, block_index),
+            );
+        }
+
+        assert_eq!(
+            state.sp_chain_absorb_results_by_proof.len(),
+            MAX_SP_CHAIN_ABSORB_RESULTS_BY_PROOF,
+        );
+        assert!(!state
+            .sp_chain_absorb_results_by_proof
+            .contains_key(&(SpProofLedger::IcusdBurn, 0)));
+        assert!(state.sp_chain_absorb_results_by_proof.contains_key(&(
+            SpProofLedger::IcusdBurn,
+            MAX_SP_CHAIN_ABSORB_RESULTS_BY_PROOF as u64 + 4
+        )));
+    }
+
+    #[test]
+    fn backend_sp_chain_absorb_result_cache_keeps_just_recorded_old_proof() {
+        let caller = Principal::from_slice(&[3u8; 29]);
+        let mut state = rumi_protocol_backend::state::State::default();
+
+        for block_index in 1..=(MAX_SP_CHAIN_ABSORB_RESULTS_BY_PROOF as u64) {
+            record_sp_chain_absorb_result_bounded(
+                &mut state,
+                (SpProofLedger::IcusdBurn, block_index),
+                stored_absorb_result_for(caller, block_index),
+            );
+        }
+
+        record_sp_chain_absorb_result_bounded(
+            &mut state,
+            (SpProofLedger::IcusdBurn, 0),
+            stored_absorb_result_for(caller, 0),
+        );
+
+        assert_eq!(
+            state.sp_chain_absorb_results_by_proof.len(),
+            MAX_SP_CHAIN_ABSORB_RESULTS_BY_PROOF,
+        );
+        assert!(
+            state
+                .sp_chain_absorb_results_by_proof
+                .contains_key(&(SpProofLedger::IcusdBurn, 0)),
+            "lost-reply retry must remain possible for the proof just accepted",
+        );
+        assert!(
+            !state
+                .sp_chain_absorb_results_by_proof
+                .contains_key(&(SpProofLedger::IcusdBurn, 1)),
+            "one older non-current entry should be evicted to preserve the new result",
+        );
     }
 
     #[test]
@@ -11163,9 +11386,7 @@ mod inc6_settlement_proof_context_tests {
         chain_finality_depth_or_default, settlement_proof_context, settlement_proof_ids_from_state,
         SettlementProofKind,
     };
-    use rumi_protocol_backend::chains::config::{
-        ChainConfigV3, ChainId, ChainStatus, GasStrategy,
-    };
+    use rumi_protocol_backend::chains::config::{ChainConfigV3, ChainId, ChainStatus, GasStrategy};
     use rumi_protocol_backend::chains::liquidation_config::{ChainLiquidationConfigV1, DexKind};
     use rumi_protocol_backend::chains::multi_chain_state::SettlementProofRecord;
     use rumi_protocol_backend::state::State;

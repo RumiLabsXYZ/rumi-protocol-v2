@@ -336,10 +336,16 @@ pub fn apply_sp_chain_liquidation_absorb_in_state(
         (v.debt_e8s, v.collateral_amount_native, v.custody_address.clone())
     };
 
-    let actual_burned = icusd_burned_e8s.min(live_debt);
-    if actual_burned == 0 {
+    if live_debt == 0 {
         return Err(format!("sp_absorb: vault {vault_id} has nothing to absorb"));
     }
+    if icusd_burned_e8s != live_debt {
+        return Err(format!(
+            "sp_absorb: burned amount {} does not match live debt {} for vault {}",
+            icusd_burned_e8s, live_debt, vault_id
+        ));
+    }
+    let actual_burned = icusd_burned_e8s;
 
     let bonus_e4 = liq::bonus_e4_from_penalty_bps(liquidation_penalty_bps);
     let collateral_seized = liq::collateral_in_native_for_repay(actual_burned, bonus_e4, native_decimals, price_e8)

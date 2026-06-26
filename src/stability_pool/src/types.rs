@@ -102,28 +102,26 @@ impl DepositPosition {
         stablecoin_registry: &BTreeMap<Principal, StablecoinConfig>,
         virtual_prices: &BTreeMap<Principal, u128>,
     ) -> u64 {
-        self.stablecoin_balances.iter().map(|(ledger, &amount)| {
-            match stablecoin_registry.get(ledger) {
-                Some(config) if config.is_lp_token.unwrap_or(false) => {
-                    virtual_prices.get(ledger)
-                        .map(|&vp| lp_to_usd_e8s(amount, vp))
-                        .unwrap_or(0)
-                }
+        self.stablecoin_balances
+            .iter()
+            .map(|(ledger, &amount)| match stablecoin_registry.get(ledger) {
+                Some(config) if config.is_lp_token.unwrap_or(false) => virtual_prices
+                    .get(ledger)
+                    .map(|&vp| lp_to_usd_e8s(amount, vp))
+                    .unwrap_or(0),
                 Some(config) => normalize_to_e8s(amount, config.decimals),
                 None => 0,
-            }
-        }).sum()
+            })
+            .sum()
     }
 
     /// icUSD-only stablecoin value in e8s.
     /// Identifies the icUSD ledger by symbol from the registry. Returns 0 if
     /// no icUSD ledger is registered or the depositor holds no icUSD.
     /// icUSD is 8 decimals, so the raw balance is the e8s value directly.
-    pub fn icusd_value(
-        &self,
-        stablecoin_registry: &BTreeMap<Principal, StablecoinConfig>,
-    ) -> u64 {
-        let icusd_ledger = stablecoin_registry.iter()
+    pub fn icusd_value(&self, stablecoin_registry: &BTreeMap<Principal, StablecoinConfig>) -> u64 {
+        let icusd_ledger = stablecoin_registry
+            .iter()
             .find(|(_, c)| c.symbol == "icUSD")
             .map(|(id, _)| *id);
 
@@ -150,7 +148,11 @@ impl DepositPosition {
     pub fn is_empty(&self) -> bool {
         self.stablecoin_balances.values().all(|&v| v == 0)
             && self.collateral_gains.values().all(|&v| v == 0)
-            && self.cfx_claims.as_ref().map(|m| m.values().all(|&v| v == 0)).unwrap_or(true)
+            && self
+                .cfx_claims
+                .as_ref()
+                .map(|m| m.values().all(|&v| v == 0))
+                .unwrap_or(true)
     }
 }
 
@@ -185,7 +187,9 @@ pub fn lp_to_usd_e8s(lp_amount: u64, virtual_price: u128) -> u64 {
 
 /// Convert a USD e8s amount to the equivalent 3USD LP token amount.
 pub fn usd_e8s_to_lp(usd_e8s: u64, virtual_price: u128) -> u64 {
-    if virtual_price == 0 { return 0; }
+    if virtual_price == 0 {
+        return 0;
+    }
     (usd_e8s as u128 * 1_000_000_000_000_000_000u128 / virtual_price) as u64
 }
 
@@ -208,8 +212,8 @@ pub fn normalize_from_e8s(amount_e8s: u64, decimals: u8) -> u64 {
 pub struct LiquidatableVaultInfo {
     pub vault_id: u64,
     pub collateral_type: Principal,
-    pub debt_amount: u64,         // icUSD e8s
-    pub collateral_amount: u64,   // native decimals
+    pub debt_amount: u64,       // icUSD e8s
+    pub collateral_amount: u64, // native decimals
     /// Recommended partial liquidation amount (e8s). Sent by backend, 0 if unknown.
     #[serde(default)]
     pub recommended_liquidation_amount: u64,
@@ -223,7 +227,7 @@ pub struct LiquidatableVaultInfo {
 pub struct LiquidationResult {
     pub vault_id: u64,
     pub stables_consumed: BTreeMap<Principal, u64>, // ledger -> amount consumed (native decimals)
-    pub collateral_gained: u64,                      // native decimals of collateral received
+    pub collateral_gained: u64,                     // native decimals of collateral received
     pub collateral_type: Principal,
     pub success: bool,
     pub error_message: Option<String>,
@@ -271,6 +275,47 @@ pub struct ChainSpAbsorbResult {
     pub custody_address: String,
     pub block_index: u64,
     pub collateral_price_e8s: u64,
+}
+
+#[derive(CandidType, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChainSpAbsorbIntentStatus {
+    Prepared,
+    Burned,
+    BackendAccepted,
+    LocalApplied,
+    BackendRejected,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChainSpAbsorbCandidate {
+    pub vault: ChainLiquidatableVaultInfo,
+    pub icusd_to_burn_e8s: u64,
+    pub pending_status: Option<ChainSpAbsorbIntentStatus>,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChainSpAbsorbIntent {
+    pub vault_id: u64,
+    pub chain_id: rumi_protocol_backend::chains::config::ChainId,
+    pub chain_sentinel: Principal,
+    pub icusd_ledger: Principal,
+    pub icusd_minting_account: icrc_ledger_types::icrc1::account::Account,
+    pub icusd_to_burn_e8s: u64,
+    pub stables_consumed: BTreeMap<Principal, u64>,
+    pub burn_created_at_time_ns: u64,
+    pub status: ChainSpAbsorbIntentStatus,
+    pub burn_proof: Option<rumi_protocol_backend::icrc3_proof::SpWritedownProof>,
+    pub backend_result: Option<ChainStabilityPoolLiquidationResult>,
+    pub last_error: Option<String>,
+    pub created_at_ns: u64,
+    pub updated_at_ns: u64,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChainSpAbsorbCompletion {
+    pub vault_id: u64,
+    pub result: ChainSpAbsorbResult,
+    pub completed_at_ns: u64,
 }
 
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -361,21 +406,45 @@ pub struct UserStabilityPosition {
 
 #[derive(CandidType, Debug, Clone, Deserialize)]
 pub enum StabilityPoolError {
-    InsufficientBalance { token: Principal, required: u64, available: u64 },
-    AmountTooLow { minimum_e8s: u64 },
+    InsufficientBalance {
+        token: Principal,
+        required: u64,
+        available: u64,
+    },
+    AmountTooLow {
+        minimum_e8s: u64,
+    },
     NoPositionFound,
     InsufficientPoolBalance,
     Unauthorized,
-    TokenNotAccepted { ledger: Principal },
-    TokenNotActive { ledger: Principal },
-    CollateralNotFound { ledger: Principal },
-    LedgerTransferFailed { reason: String },
-    InterCanisterCallFailed { target: String, method: String },
-    LiquidationFailed { vault_id: u64, reason: String },
+    TokenNotAccepted {
+        ledger: Principal,
+    },
+    TokenNotActive {
+        ledger: Principal,
+    },
+    CollateralNotFound {
+        ledger: Principal,
+    },
+    LedgerTransferFailed {
+        reason: String,
+    },
+    InterCanisterCallFailed {
+        target: String,
+        method: String,
+    },
+    LiquidationFailed {
+        vault_id: u64,
+        reason: String,
+    },
     EmergencyPaused,
     SystemBusy,
-    AlreadyOptedOut { collateral: Principal },
-    AlreadyOptedIn { collateral: Principal },
+    AlreadyOptedOut {
+        collateral: Principal,
+    },
+    AlreadyOptedIn {
+        collateral: Principal,
+    },
     RefundClaimNotFound,
 }
 
@@ -453,7 +522,10 @@ pub struct Icrc21LineDisplayLine {
 pub enum Icrc21Error {
     UnsupportedCanisterCall(Icrc21ErrorInfo),
     ConsentMessageUnavailable(Icrc21ErrorInfo),
-    GenericError { error_code: Nat, description: String },
+    GenericError {
+        error_code: Nat,
+        description: String,
+    },
 }
 
 #[derive(CandidType, Serialize, Clone, Debug)]
@@ -493,22 +565,41 @@ pub struct ThreePoolTokenInfo {
 /// Remote 3pool error (for deserialization only).
 #[derive(CandidType, Clone, Debug, Deserialize)]
 pub enum ThreePoolErrorRemote {
-    InsufficientOutput { expected_min: u128, actual: u128 },
+    InsufficientOutput {
+        expected_min: u128,
+        actual: u128,
+    },
     InsufficientLiquidity,
     InvalidCoinIndex,
     ZeroAmount,
     PoolEmpty,
     SlippageExceeded,
-    TransferFailed { token: String, reason: String },
+    TransferFailed {
+        token: String,
+        reason: String,
+    },
     Unauthorized,
     MathOverflow,
     InvariantNotConverged,
     PoolPaused,
     NotAuthorizedBurnCaller,
-    BurnSlippageExceeded { max_bps: u16, actual_bps: u16 },
-    InsufficientPoolBalance { token: String, required: u128, available: u128 },
-    InsufficientLpBalance { required: u128, available: u128 },
-    BurnFailed { token: String, reason: String },
+    BurnSlippageExceeded {
+        max_bps: u16,
+        actual_bps: u16,
+    },
+    InsufficientPoolBalance {
+        token: String,
+        required: u128,
+        available: u128,
+    },
+    InsufficientLpBalance {
+        required: u128,
+        available: u128,
+    },
+    BurnFailed {
+        token: String,
+        reason: String,
+    },
     /// Audit fence B-01 (Wave 14a): rumi_3pool returns this when another
     /// concurrent operation holds the pool lock. The SP `add_liquidity`
     /// path will refund the user and surface a transient call failure.
@@ -617,7 +708,13 @@ mod icusd_value_tests {
     use candid::Principal;
     use std::collections::BTreeMap;
 
-    fn config(ledger: Principal, symbol: &str, decimals: u8, priority: u8, is_lp: bool) -> StablecoinConfig {
+    fn config(
+        ledger: Principal,
+        symbol: &str,
+        decimals: u8,
+        priority: u8,
+        is_lp: bool,
+    ) -> StablecoinConfig {
         StablecoinConfig {
             ledger_id: ledger,
             symbol: symbol.to_string(),
@@ -643,11 +740,14 @@ mod icusd_value_tests {
 
         let mut pos = DepositPosition::new(0);
         pos.stablecoin_balances.insert(icusd, 100_00_000_000); // 100 icUSD (e8s)
-        pos.stablecoin_balances.insert(ckusdc, 200_000_000);   // 200 ckUSDC (e6s)
+        pos.stablecoin_balances.insert(ckusdc, 200_000_000); // 200 ckUSDC (e6s)
         pos.stablecoin_balances.insert(three_usd, 50_00_000_000); // 50 3USD (e8s)
 
         let v = pos.icusd_value(&registry);
-        assert_eq!(v, 100_00_000_000, "should return only the icUSD balance in e8s");
+        assert_eq!(
+            v, 100_00_000_000,
+            "should return only the icUSD balance in e8s"
+        );
     }
 
     #[test]
@@ -673,7 +773,10 @@ mod icusd_value_tests {
         let mut pos = DepositPosition::new(0);
         pos.stablecoin_balances.insert(icusd, 100_00_000_000);
 
-        assert_eq!(pos.icusd_value(&registry), 0,
-            "registry without icUSD config means we can't identify which ledger is icUSD");
+        assert_eq!(
+            pos.icusd_value(&registry),
+            0,
+            "registry without icUSD config means we can't identify which ledger is icUSD"
+        );
     }
 }

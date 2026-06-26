@@ -126,6 +126,59 @@ type ChainSpAbsorbResult = record {
   success : bool;
 };
 
+type IcrcAccount = record {
+  owner : principal;
+  subaccount : opt vec nat8;
+};
+
+type SpProofLedger = variant {
+  IcusdBurn;
+  ThreePoolTransfer;
+};
+
+type SpWritedownProof = record {
+  block_index : nat64;
+  ledger_kind : SpProofLedger;
+  vault_id_memo : nat64;
+};
+
+type ChainSpAbsorbIntentStatus = variant {
+  Prepared;
+  Burned;
+  BackendAccepted;
+  LocalApplied;
+  BackendRejected;
+};
+
+type ChainSpAbsorbCandidate = record {
+  vault : ChainLiquidatableVaultInfo;
+  icusd_to_burn_e8s : nat64;
+  pending_status : opt ChainSpAbsorbIntentStatus;
+};
+
+type ChainSpAbsorbIntent = record {
+  vault_id : nat64;
+  chain_id : nat32;
+  chain_sentinel : principal;
+  icusd_ledger : principal;
+  icusd_minting_account : IcrcAccount;
+  icusd_to_burn_e8s : nat64;
+  stables_consumed : vec record { principal; nat64 };
+  burn_created_at_time_ns : nat64;
+  status : ChainSpAbsorbIntentStatus;
+  burn_proof : opt SpWritedownProof;
+  backend_result : opt ChainStabilityPoolLiquidationResult;
+  last_error : opt text;
+  created_at_ns : nat64;
+  updated_at_ns : nat64;
+};
+
+type ChainSpAbsorbCompletion = record {
+  vault_id : nat64;
+  result : ChainSpAbsorbResult;
+  completed_at_ns : nat64;
+};
+
 type PoolLiquidationRecord = record {
   vault_id : nat64;
   timestamp : nat64;
@@ -291,6 +344,7 @@ service : (StabilityPoolInitArgs) -> {
   notify_liquidatable_vaults : (vec LiquidatableVaultInfo) -> (vec LiquidationResult);
   execute_liquidation : (nat64) -> (variant { Ok : LiquidationResult; Err : StabilityPoolError });
   sp_absorb_chain_vault : (nat64) -> (variant { Ok : ChainSpAbsorbResult; Err : StabilityPoolError });
+  scan_chain_absorb_candidates : (opt nat64) -> (variant { Ok : vec ChainSpAbsorbCandidate; Err : StabilityPoolError });
 
   // ── Interest Revenue ──
   receive_interest_revenue : (principal, nat64, opt principal) -> (variant { Ok; Err : StabilityPoolError });
@@ -318,11 +372,14 @@ service : (StabilityPoolInitArgs) -> {
   get_user_position : (opt principal) -> (opt UserStabilityPosition) query;
   get_liquidation_history : (opt nat64) -> (vec PoolLiquidationRecord) query;
   check_pool_capacity : (principal, nat64) -> (bool) query;
+  check_chain_absorb_capacity : (principal, nat64) -> (bool) query;
   validate_pool_state : () -> (variant { Ok : text; Err : text }) query;
   get_suspended_tokens : () -> (vec record { principal; nat32 }) query;
   get_pool_events : (nat64, nat64) -> (vec PoolEvent) query;
   get_pool_event_count : () -> (nat64) query;
   list_depositor_principals : () -> (vec principal) query;
   get_pending_refunds : (opt principal) -> (vec PendingRefund) query;
+  get_pending_chain_absorbs : () -> (vec ChainSpAbsorbIntent) query;
+  get_completed_chain_absorbs : (opt nat64) -> (vec ChainSpAbsorbCompletion) query;
   get_chain_collateral_sentinel : (nat32) -> (principal) query;
 };

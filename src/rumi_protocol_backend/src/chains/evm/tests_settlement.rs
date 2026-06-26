@@ -505,11 +505,12 @@ mod sp_absorb_tests {
     }
 
     #[test]
-    fn sp_absorb_caps_overburn_to_live_debt() {
+    fn sp_absorb_rejects_stale_overburn_without_mutation() {
         let mut s = MultiChainState::default();
         open_sp_attempted_vault(&mut s, 8, 80 * E8, 200 * E18);
 
-        let result = apply_sp_chain_liquidation_absorb_in_state(
+        let before = s.clone();
+        let err = apply_sp_chain_liquidation_absorb_in_state(
             &mut s,
             CFX,
             8,
@@ -518,13 +519,14 @@ mod sp_absorb_tests {
             18,
             1_200,
         )
-        .expect("sp absorb ok");
+        .unwrap_err();
 
-        assert_eq!(result.actual_burned_e8s, 80 * E8, "backend never clears more than live debt");
-        assert_eq!(result.collateral_seized_native, 89_600_000_000_000_000_000);
-        assert_eq!(s.chain_vaults.get(&8).unwrap().debt_e8s, 0);
-        assert_eq!(*s.pending_chain_burn_e8s.get(&CFX).unwrap(), 80 * E8);
-        assert_eq!(*s.chain_supplies.get(&CFX).unwrap(), 80 * E8);
+        assert!(err.contains("does not match live debt"), "error should reject stale SP burn amount: {err}");
+        assert_eq!(s.chain_vaults.get(&8).unwrap().debt_e8s, 80 * E8);
+        assert_eq!(s.chain_vaults.get(&8).unwrap().collateral_amount_native, 200 * E18);
+        assert_eq!(s.pending_chain_burn_e8s.get(&CFX), before.pending_chain_burn_e8s.get(&CFX));
+        assert_eq!(s.chain_liquidation_claims.get(&8), before.chain_liquidation_claims.get(&8));
+        assert_eq!(s.chain_supplies.get(&CFX), before.chain_supplies.get(&CFX));
     }
 
     #[test]
