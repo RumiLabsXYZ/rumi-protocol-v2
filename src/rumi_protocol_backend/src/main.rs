@@ -725,14 +725,6 @@ fn post_upgrade(arg: ProtocolArg) {
     };
     let xrp_guardrail_migration =
         rumi_protocol_backend::state::enforce_xrp_launch_guardrails(&mut state);
-    if let Some(previous) = xrp_guardrail_migration.previous_debt_ceiling {
-        log!(
-            INFO,
-            "[upgrade]: clamped XRP debt ceiling from {} to {} e8s",
-            previous,
-            rumi_protocol_backend::state::XRP_LAUNCH_DEBT_CEILING_E8S
-        );
-    }
     if let Some(previous) = xrp_guardrail_migration.previous_status {
         log!(
             INFO,
@@ -5524,7 +5516,7 @@ async fn register_xrp_collateral() -> Result<(), ProtocolError> {
     rumi_protocol_backend::xrc::register_collateral_price_timer(xrp_ct);
     log!(
         INFO,
-        "[register_xrp_collateral] Registered native-XRP collateral {} (150/133/12, $100 ceiling)",
+        "[register_xrp_collateral] Registered native-XRP collateral {} (150/133/12, 2,500 icUSD ceiling)",
         xrp_ct
     );
     Ok(())
@@ -9927,15 +9919,6 @@ async fn set_collateral_debt_ceiling(
             "Collateral type not found".to_string(),
         ));
     }
-    if collateral_type == rumi_protocol_backend::state::xrp_collateral_principal()
-        && debt_ceiling > rumi_protocol_backend::state::XRP_LAUNCH_DEBT_CEILING_E8S
-    {
-        return Err(ProtocolError::GenericError(format!(
-            "XRP debt ceiling cannot exceed {} e8s (100 icUSD)",
-            rumi_protocol_backend::state::XRP_LAUNCH_DEBT_CEILING_E8S
-        )));
-    }
-
     mutate_state(|s| {
         if let Some(config) = s.collateral_configs.get_mut(&collateral_type) {
             config.debt_ceiling = debt_ceiling;
