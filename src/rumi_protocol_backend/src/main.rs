@@ -2216,6 +2216,8 @@ struct ChainSpAbsorbSnapshot {
     liquidation_penalty_bps: u64,
 }
 
+const CHAIN_SP_ABSORB_PREFLIGHT_TTL_NS: u64 = 15 * 60 * 1_000_000_000;
+
 /// Resolve the chain's native collateral symbol (the manual-price key) for the
 /// liquidation path. `Err` if the chain is not a known EVM chain.
 fn liquidation_price_symbol(
@@ -2268,17 +2270,83 @@ fn chain_sp_absorb_snapshot(
         .get(&chain)
         .map(|c| c.chain_native_decimals)
         .unwrap_or(18);
-    let liquidation_penalty_bps = chain_collateral_config(chain)
-        .map(|c| c.liquidation_penalty_bps)
-        .ok_or_else(|| {
-            ProtocolError::ChainAdmin(format!("no collateral config for chain {}", chain.0))
-        })?;
+    let collateral_cfg = chain_collateral_config(chain).ok_or_else(|| {
+        ProtocolError::ChainAdmin(format!("no collateral config for chain {}", chain.0))
+    })?;
+    let eff_debt = liq::effective_debt_e8s(
+        vault.debt_e8s,
+        vault.pending_interest_mint_e8s,
+        collateral_cfg.interest_apr_bps,
+        now_ns.saturating_sub(vault.last_interest_accrual_ns),
+    );
+    let cr_e4 = rumi_protocol_backend::chains::vault::collateral_ratio_e4(
+        vault.collateral_amount_native,
+        native_decimals,
+        price_e8,
+        eff_debt,
+    );
+    if cr_e4 >= collateral_cfg.liquidation_threshold_e4 {
+        return Err(ProtocolError::ChainAdmin(format!(
+            "chain vault {vault_id} is no longer liquidatable: cr_e4 {} >= threshold {}",
+            cr_e4, collateral_cfg.liquidation_threshold_e4
+        )));
+    }
     Ok(ChainSpAbsorbSnapshot {
         chain,
         price_e8,
         native_decimals,
-        liquidation_penalty_bps,
+        liquidation_penalty_bps: collateral_cfg.liquidation_penalty_bps,
     })
+}
+
+fn chain_sp_absorb_preflight_snapshot(
+    state: &rumi_protocol_backend::chains::multi_chain_state::MultiChainState,
+    vault_id: u64,
+    expected_icusd_burn_e8s: u64,
+    now_ns: u64,
+) -> Result<ChainSpAbsorbSnapshot, ProtocolError> {
+    let snapshot = chain_sp_absorb_snapshot(state, vault_id, now_ns)?;
+    let live_debt = state
+        .chain_vaults
+        .get(&vault_id)
+        .map(|v| v.debt_e8s)
+        .ok_or_else(|| ProtocolError::ChainAdmin(format!("unknown chain vault {vault_id}")))?;
+    if live_debt != expected_icusd_burn_e8s as u128 {
+        return Err(ProtocolError::GenericError(format!(
+            "SP chain absorb preflight rejected: expected burn {} does not match live debt {} for vault {}",
+            expected_icusd_burn_e8s, live_debt, vault_id
+        )));
+    }
+    Ok(snapshot)
+}
+
+fn chain_sp_absorb_snapshot_from_preflight(
+    preflight: &rumi_protocol_backend::state::StoredChainSpAbsorbPreflight,
+) -> ChainSpAbsorbSnapshot {
+    ChainSpAbsorbSnapshot {
+        chain: preflight.chain_id,
+        price_e8: preflight.price_e8,
+        native_decimals: preflight.native_decimals,
+        liquidation_penalty_bps: preflight.liquidation_penalty_bps,
+    }
+}
+
+fn matching_chain_absorb_preflight(
+    state: &rumi_protocol_backend::state::State,
+    vault_id: u64,
+    icusd_burned_e8s: u64,
+    caller: Principal,
+    now_ns: u64,
+) -> Option<rumi_protocol_backend::state::StoredChainSpAbsorbPreflight> {
+    let preflight = state.sp_chain_absorb_preflights.get(&vault_id)?;
+    if preflight.caller == caller
+        && preflight.icusd_burn_e8s == icusd_burned_e8s
+        && preflight.expires_at_ns >= now_ns
+    {
+        Some(preflight.clone())
+    } else {
+        None
+    }
 }
 
 /// Dev-gated manual/permissionless liquidation trigger (spec §7). Runs the
@@ -4776,17 +4844,6 @@ async fn stability_pool_liquidate_chain_vault(
     if ic_cdk::caller() == Principal::anonymous() {
         return Err(ProtocolError::AnonymousCallerNotAllowed);
     }
-    if read_state(|s| s.frozen) {
-        return Err(ProtocolError::TemporarilyUnavailable(
-            "Protocol is frozen. All operations are suspended pending admin review.".to_string(),
-        ));
-    }
-    validate_liquidation_not_frozen()?;
-    if read_state(|s| s.sp_writedown_disabled) {
-        return Err(ProtocolError::TemporarilyUnavailable(
-            "SP writedown path is disabled by admin".to_string(),
-        ));
-    }
 
     let caller = ic_cdk::api::caller();
     let is_stability_pool =
@@ -4812,7 +4869,29 @@ async fn stability_pool_liquidate_chain_vault(
 
     let _guard = rumi_protocol_backend::guard::ChainVaultLiquidationGuard::new(vault_id)?;
     let now = ic_cdk::api::time();
-    let snapshot = read_state(|s| chain_sp_absorb_snapshot(&s.multi_chain, vault_id, now))?;
+    let preflight = read_state(|s| {
+        matching_chain_absorb_preflight(s, vault_id, icusd_burned_e8s, caller, now)
+    });
+    if preflight.is_none() {
+        if read_state(|s| s.frozen) {
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "Protocol is frozen. All operations are suspended pending admin review."
+                    .to_string(),
+            ));
+        }
+        validate_liquidation_not_frozen()?;
+        if read_state(|s| s.sp_writedown_disabled) {
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "SP writedown path is disabled by admin".to_string(),
+            ));
+        }
+    }
+    let snapshot = match &preflight {
+        Some(preflight) => chain_sp_absorb_snapshot_from_preflight(preflight),
+        None => read_state(|s| {
+            chain_sp_absorb_preflight_snapshot(&s.multi_chain, vault_id, icusd_burned_e8s, now)
+        })?,
+    };
 
     verify_sp_icusd_burn_proof(vault_id, icusd_burned_e8s, caller, &proof).await?;
 
@@ -4834,6 +4913,7 @@ async fn stability_pool_liquidate_chain_vault(
         )
         .map_err(ProtocolError::ChainAdmin)?;
         s.consumed_writedown_proofs.insert(proof_key);
+        s.sp_chain_absorb_preflights.remove(&vault_id);
         let stored = rumi_protocol_backend::state::StoredChainSpAbsorbResult {
             caller,
             vault_id,
@@ -4865,6 +4945,62 @@ async fn stability_pool_liquidate_chain_vault(
     );
 
     Ok(chain_sp_absorb_result_from_stored(stored))
+}
+
+/// Called by the stability pool immediately before a fresh IC-native icUSD burn.
+/// This lets the backend kill switch and live-debt check reject before the SP
+/// spends funds. It is intentionally non-mutating; the post-burn endpoint still
+/// performs the same checks before consuming the proof.
+#[update]
+#[candid_method(update)]
+fn stability_pool_preflight_chain_absorb(
+    vault_id: u64,
+    expected_icusd_burn_e8s: u64,
+) -> Result<(), ProtocolError> {
+    if ic_cdk::caller() == Principal::anonymous() {
+        return Err(ProtocolError::AnonymousCallerNotAllowed);
+    }
+    if read_state(|s| s.frozen) {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "Protocol is frozen. All operations are suspended pending admin review.".to_string(),
+        ));
+    }
+    validate_liquidation_not_frozen()?;
+
+    let caller = ic_cdk::api::caller();
+    let is_stability_pool =
+        read_state(|s| s.stability_pool_canister.map_or(false, |sp| sp == caller));
+    if !is_stability_pool {
+        return Err(ProtocolError::GenericError(
+            "Caller is not the registered stability pool canister".to_string(),
+        ));
+    }
+    if read_state(|s| s.sp_writedown_disabled) {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "SP writedown path is disabled by admin".to_string(),
+        ));
+    }
+
+    let now = ic_cdk::api::time();
+    let snapshot = read_state(|s| {
+        chain_sp_absorb_preflight_snapshot(&s.multi_chain, vault_id, expected_icusd_burn_e8s, now)
+    })?;
+    mutate_state(|s| {
+        s.sp_chain_absorb_preflights.insert(
+            vault_id,
+            rumi_protocol_backend::state::StoredChainSpAbsorbPreflight {
+                caller,
+                vault_id,
+                icusd_burn_e8s: expected_icusd_burn_e8s,
+                chain_id: snapshot.chain,
+                price_e8: snapshot.price_e8,
+                native_decimals: snapshot.native_decimals,
+                liquidation_penalty_bps: snapshot.liquidation_penalty_bps,
+                expires_at_ns: now.saturating_add(CHAIN_SP_ABSORB_PREFLIGHT_TTL_NS),
+            },
+        );
+    });
+    Ok(())
 }
 
 /// Called by the stability pool to enqueue a native CFX payout from a reserved
@@ -10990,8 +11126,10 @@ mod chain_vault_param_tests {
 #[cfg(test)]
 mod chain_sp_absorb_entry_tests {
     use super::{
-        chain_collateral_sentinel, chain_liquidatable_vaults_in_state, chain_sp_absorb_snapshot,
-        record_sp_chain_absorb_result_bounded, stored_chain_sp_absorb_matches_retry,
+        chain_collateral_sentinel, chain_liquidatable_vaults_in_state,
+        chain_sp_absorb_preflight_snapshot, chain_sp_absorb_snapshot,
+        matching_chain_absorb_preflight, record_sp_chain_absorb_result_bounded,
+        stored_chain_sp_absorb_matches_retry,
     };
     use candid::Principal;
     use rumi_protocol_backend::chains::config::{ChainConfigV3, ChainId, ChainStatus, GasStrategy};
@@ -11000,7 +11138,8 @@ mod chain_sp_absorb_entry_tests {
     use rumi_protocol_backend::chains::multi_chain_state::MultiChainState;
     use rumi_protocol_backend::icrc3_proof::{SpProofLedger, SpWritedownProof};
     use rumi_protocol_backend::state::{
-        StoredChainSpAbsorbResult, MAX_SP_CHAIN_ABSORB_RESULTS_BY_PROOF,
+        StoredChainSpAbsorbPreflight, StoredChainSpAbsorbResult,
+        MAX_SP_CHAIN_ABSORB_RESULTS_BY_PROOF,
     };
 
     const CFX: ChainId = ChainId(71);
@@ -11221,6 +11360,31 @@ mod chain_sp_absorb_entry_tests {
     }
 
     #[test]
+    fn chain_sp_absorb_preflight_reservation_requires_exact_unexpired_match() {
+        let caller = Principal::from_slice(&[3u8; 29]);
+        let other = Principal::from_slice(&[4u8; 29]);
+        let mut state = rumi_protocol_backend::state::State::default();
+        state.sp_chain_absorb_preflights.insert(
+            7,
+            StoredChainSpAbsorbPreflight {
+                caller,
+                vault_id: 7,
+                icusd_burn_e8s: 100_00000000,
+                chain_id: CFX,
+                price_e8: 1_000_000,
+                native_decimals: 18,
+                liquidation_penalty_bps: 1_200,
+                expires_at_ns: 10_000,
+            },
+        );
+
+        assert!(matching_chain_absorb_preflight(&state, 7, 100_00000000, caller, 9_999).is_some());
+        assert!(matching_chain_absorb_preflight(&state, 7, 99_99999999, caller, 9_999).is_none());
+        assert!(matching_chain_absorb_preflight(&state, 7, 100_00000000, other, 9_999).is_none());
+        assert!(matching_chain_absorb_preflight(&state, 7, 100_00000000, caller, 10_001).is_none());
+    }
+
+    #[test]
     fn chain_sp_absorb_snapshot_rejects_halted_chain_rails() {
         let mut s = configured_state();
         s.set_manual_price(CFX, "CFX".into(), 50_000_000, 500);
@@ -11260,12 +11424,40 @@ mod chain_sp_absorb_entry_tests {
             "unexpected error: {err:?}"
         );
 
-        s.set_manual_price(CFX, "CFX".into(), 50_000_000, 500);
+        s.set_manual_price(CFX, "CFX".into(), 1_000_000, 500);
         let ok = chain_sp_absorb_snapshot(&s, 7, 600).expect("fresh price accepted");
         assert_eq!(ok.chain, CFX);
-        assert_eq!(ok.price_e8, 50_000_000);
+        assert_eq!(ok.price_e8, 1_000_000);
         assert_eq!(ok.native_decimals, 18);
         assert_eq!(ok.liquidation_penalty_bps, 1_200);
+    }
+
+    #[test]
+    fn chain_sp_absorb_preflight_rejects_stale_burn_amount() {
+        let mut s = configured_state();
+        s.set_manual_price(CFX, "CFX".into(), 1_000_000, 500);
+
+        assert!(chain_sp_absorb_preflight_snapshot(&s, 7, 100 * 100_000_000, 600).is_ok());
+
+        let err = chain_sp_absorb_preflight_snapshot(&s, 7, 99 * 100_000_000, 600)
+            .expect_err("stale expected burn should be rejected");
+        assert!(
+            format!("{err:?}").contains("does not match live debt"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn chain_sp_absorb_preflight_rejects_recovered_healthy_vault() {
+        let mut s = configured_state();
+        s.set_manual_price(CFX, "CFX".into(), 50_000_000, 500);
+
+        let err = chain_sp_absorb_preflight_snapshot(&s, 7, 100 * 100_000_000, 600)
+            .expect_err("healthy recovered vault should not absorb through SP");
+        assert!(
+            format!("{err:?}").contains("no longer liquidatable"),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[test]

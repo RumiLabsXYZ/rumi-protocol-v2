@@ -1896,6 +1896,11 @@ export const idlFactory = ({ IDL }) => {
         [Result_18],
         [],
       ),
+    'stability_pool_preflight_chain_absorb' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [Result],
+        [],
+      ),
     'submit_burn_proof' : IDL.Func([IDL.Nat32, IDL.Text], [Result_20], []),
     'sweep_xrp_pending_open' : IDL.Func([IDL.Nat64], [Result], []),
     'unfreeze_protocol' : IDL.Func([], [Result], []),

@@ -1476,6 +1476,12 @@ pub struct State {
     #[serde(default)]
     pub sp_chain_absorb_results_by_proof:
         BTreeMap<(crate::icrc3_proof::SpProofLedger, u64), StoredChainSpAbsorbResult>,
+    /// Inc 9: short-lived pre-burn reservations keyed by vault id. The SP must
+    /// obtain one immediately before burning; a matching reservation lets the
+    /// backend finalize an already-burned absorb even if an admin kill switch
+    /// flips before the post-burn call returns.
+    #[serde(default)]
+    pub sp_chain_absorb_preflights: BTreeMap<u64, StoredChainSpAbsorbPreflight>,
 
     // ─── Wave-8e LIQ-005: bad-debt deficit account ───
     //
@@ -1763,6 +1769,18 @@ pub struct TreasuryStatsSnapshot {
     pub total_accrued_interest_system: u64,
 }
 
+#[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct StoredChainSpAbsorbPreflight {
+    pub caller: Principal,
+    pub vault_id: u64,
+    pub icusd_burn_e8s: u64,
+    pub chain_id: crate::chains::config::ChainId,
+    pub price_e8: u64,
+    pub native_decimals: u8,
+    pub liquidation_penalty_bps: u64,
+    pub expires_at_ns: u64,
+}
+
 /// Serde-only fallback: provides zero/empty/None defaults for fields missing from
 /// old CBOR snapshots. Never used for actual State construction (use From<InitArg>).
 impl Default for State {
@@ -1882,6 +1900,7 @@ impl Default for State {
             sp_writedown_disabled: false,
             consumed_writedown_proofs: BTreeSet::new(),
             sp_chain_absorb_results_by_proof: BTreeMap::new(),
+            sp_chain_absorb_preflights: BTreeMap::new(),
             // Wave-8e LIQ-005
             protocol_deficit_icusd: ICUSD::new(0),
             total_deficit_repaid_icusd: ICUSD::new(0),
@@ -2151,6 +2170,7 @@ impl From<InitArg> for State {
             sp_writedown_disabled: false,
             consumed_writedown_proofs: BTreeSet::new(),
             sp_chain_absorb_results_by_proof: BTreeMap::new(),
+            sp_chain_absorb_preflights: BTreeMap::new(),
             // Wave-8e LIQ-005
             protocol_deficit_icusd: ICUSD::new(0),
             total_deficit_repaid_icusd: ICUSD::new(0),

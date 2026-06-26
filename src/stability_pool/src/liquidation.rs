@@ -351,6 +351,23 @@ pub(crate) fn mark_chain_absorb_error_in_state(
     }
 }
 
+pub(crate) fn clear_unburned_chain_absorb_intent_in_state(
+    state: &mut StabilityPoolState,
+    vault_id: u64,
+) -> bool {
+    let Some(intent) = state.get_pending_chain_absorb(vault_id) else {
+        return false;
+    };
+    if intent.status == ChainSpAbsorbIntentStatus::Prepared
+        && intent.burn_proof.is_none()
+        && intent.backend_result.is_none()
+    {
+        state.take_pending_chain_absorb(vault_id);
+        return true;
+    }
+    false
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CfxClaimPayoutPlan {
     pub claimant: Principal,
@@ -778,6 +795,12 @@ pub async fn scan_chain_absorb_candidates(
         return Err(StabilityPoolError::Unauthorized);
     }
 
+    discover_chain_absorb_candidates(max_per_chain).await
+}
+
+async fn discover_chain_absorb_candidates(
+    max_per_chain: Option<u64>,
+) -> Result<Vec<ChainSpAbsorbCandidate>, StabilityPoolError> {
     let (protocol_id, chains) = read_state(|s| {
         (
             s.protocol_canister_id,
@@ -794,11 +817,8 @@ pub async fn scan_chain_absorb_candidates(
             method: "get_chain_liquidatable_vaults".to_string(),
         })?;
 
-        for vault in vaults
-            .into_iter()
-            .filter(|v| v.sp_attempted)
-            .take(per_chain)
-        {
+        let mut eligible_for_chain = 0usize;
+        for vault in vaults.into_iter().filter(|v| v.sp_attempted) {
             if let Ok(plan) = read_state(|s| prepare_chain_absorb_plan_in_state(s, &vault)) {
                 let pending_status = read_state(|s| s.pending_chain_absorb_status(vault.vault_id));
                 candidates.push(ChainSpAbsorbCandidate {
@@ -806,11 +826,27 @@ pub async fn scan_chain_absorb_candidates(
                     icusd_to_burn_e8s: plan.icusd_to_burn_e8s,
                     pending_status,
                 });
+                eligible_for_chain += 1;
+                if eligible_for_chain >= per_chain {
+                    break;
+                }
             }
         }
     }
 
     Ok(candidates)
+}
+
+pub(crate) fn select_chain_absorb_auto_vault(
+    state: &StabilityPoolState,
+    candidates: &[ChainSpAbsorbCandidate],
+) -> Option<u64> {
+    state
+        .pending_chain_absorbs()
+        .into_iter()
+        .map(|intent| intent.vault_id)
+        .next()
+        .or_else(|| candidates.first().map(|candidate| candidate.vault.vault_id))
 }
 
 async fn submit_chain_absorb_to_backend(
@@ -872,6 +908,31 @@ async fn submit_chain_absorb_to_backend(
     }
 }
 
+async fn preflight_chain_absorb_with_backend(
+    protocol_id: Principal,
+    vault_id: u64,
+    icusd_to_burn_e8s: u64,
+) -> Result<(), StabilityPoolError> {
+    let preflight_result: Result<(Result<(), rumi_protocol_backend::ProtocolError>,), _> = call(
+        protocol_id,
+        "stability_pool_preflight_chain_absorb",
+        (vault_id, icusd_to_burn_e8s),
+    )
+    .await;
+
+    match preflight_result {
+        Ok((Ok(()),)) => Ok(()),
+        Ok((Err(error),)) => Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: format!("backend rejected chain absorb preflight: {:?}", error),
+        }),
+        Err(_) => Err(StabilityPoolError::InterCanisterCallFailed {
+            target: format!("{}", protocol_id),
+            method: "stability_pool_preflight_chain_absorb".to_string(),
+        }),
+    }
+}
+
 pub async fn sp_absorb_chain_vault(
     vault_id: u64,
 ) -> Result<ChainSpAbsorbResult, StabilityPoolError> {
@@ -882,9 +943,12 @@ pub async fn sp_absorb_chain_vault(
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
     }
-    if read_state(|s| s.configuration.emergency_pause) {
-        return Err(StabilityPoolError::EmergencyPaused);
-    }
+    sp_absorb_chain_vault_core(vault_id).await
+}
+
+async fn sp_absorb_chain_vault_core(
+    vault_id: u64,
+) -> Result<ChainSpAbsorbResult, StabilityPoolError> {
     if let Some(completion) = read_state(|s| s.completed_chain_absorb(vault_id)) {
         return Ok(completion.result);
     }
@@ -903,6 +967,57 @@ pub async fn sp_absorb_chain_vault(
                 submit_chain_absorb_to_backend(protocol_id, vault_id, &plan, proof).await?;
             return mutate_state(|s| apply_chain_absorb_success_in_state(s, &plan, result));
         }
+
+        if read_state(|s| s.configuration.emergency_pause) {
+            return Err(StabilityPoolError::EmergencyPaused);
+        }
+        let protocol_id = read_state(|s| s.protocol_canister_id);
+        if let Err(error) =
+            preflight_chain_absorb_with_backend(protocol_id, vault_id, plan.icusd_to_burn_e8s).await
+        {
+            mutate_state(|s| {
+                clear_unburned_chain_absorb_intent_in_state(s, vault_id);
+            });
+            return Err(error);
+        }
+        if read_state(|s| s.configuration.emergency_pause) {
+            return Err(StabilityPoolError::EmergencyPaused);
+        }
+
+        let proof = match burn_icusd_for_chain_writedown_with_account(
+            intent.icusd_ledger,
+            intent.icusd_minting_account,
+            intent.icusd_to_burn_e8s,
+            intent.vault_id,
+            intent.burn_created_at_time_ns,
+        )
+        .await
+        {
+            Ok(proof) => {
+                mutate_state(|s| {
+                    mark_chain_absorb_burned_in_state(
+                        s,
+                        vault_id,
+                        proof.clone(),
+                        ic_cdk::api::time(),
+                    )
+                })?;
+                proof
+            }
+            Err(error) => {
+                mutate_state(|s| {
+                    clear_unburned_chain_absorb_intent_in_state(s, vault_id);
+                });
+                return Err(error);
+            }
+        };
+
+        let result = submit_chain_absorb_to_backend(protocol_id, vault_id, &plan, proof).await?;
+        return mutate_state(|s| apply_chain_absorb_success_in_state(s, &plan, result));
+    }
+
+    if read_state(|s| s.configuration.emergency_pause) {
+        return Err(StabilityPoolError::EmergencyPaused);
     }
 
     let (protocol_id, chains) = read_state(|s| {
@@ -942,10 +1057,23 @@ pub async fn sp_absorb_chain_vault(
         Some(intent) => intent.icusd_minting_account,
         None => fetch_icusd_minting_account(plan.icusd_ledger).await?,
     };
+    if read_state(|s| s.configuration.emergency_pause) {
+        return Err(StabilityPoolError::EmergencyPaused);
+    }
+    preflight_chain_absorb_with_backend(protocol_id, vault_id, plan.icusd_to_burn_e8s).await?;
+    if read_state(|s| s.configuration.emergency_pause) {
+        return Err(StabilityPoolError::EmergencyPaused);
+    }
     let now = ic_cdk::api::time();
     let mut intent = mutate_state(|s| {
         prepare_or_reuse_chain_absorb_intent_in_state(s, &plan, minting_account, now)
     })?;
+    if read_state(|s| s.configuration.emergency_pause) {
+        mutate_state(|s| {
+            clear_unburned_chain_absorb_intent_in_state(s, vault_id);
+        });
+        return Err(StabilityPoolError::EmergencyPaused);
+    }
 
     let proof = if let Some(proof) = intent.burn_proof.clone() {
         proof
@@ -972,13 +1100,7 @@ pub async fn sp_absorb_chain_vault(
             }
             Err(error) => {
                 mutate_state(|s| {
-                    mark_chain_absorb_error_in_state(
-                        s,
-                        vault_id,
-                        ChainSpAbsorbIntentStatus::Prepared,
-                        format!("icUSD burn failed: {:?}", error),
-                        ic_cdk::api::time(),
-                    );
+                    clear_unburned_chain_absorb_intent_in_state(s, vault_id);
                 });
                 return Err(error);
             }
@@ -992,6 +1114,103 @@ pub async fn sp_absorb_chain_vault(
     };
 
     mutate_state(|s| apply_chain_absorb_success_in_state(s, &plan, result))
+}
+
+pub async fn run_chain_absorb_auto_tick(
+) -> Result<Option<ChainAbsorbAutoTickRecord>, StabilityPoolError> {
+    let started_at_ns = ic_cdk::api::time();
+    if !read_state(|s| s.chain_absorb_auto_due(started_at_ns)) {
+        return Ok(None);
+    }
+
+    let _tick_guard = crate::pool_guard::ChainAbsorbAutoTickGuard::new()?;
+    let config = read_state(|s| s.chain_absorb_auto_config());
+    if !config.enabled || !read_state(|s| s.chain_absorb_auto_due(started_at_ns)) {
+        return Ok(None);
+    }
+
+    if read_state(|s| s.configuration.emergency_pause) {
+        let tick = ChainAbsorbAutoTickRecord {
+            started_at_ns,
+            completed_at_ns: ic_cdk::api::time(),
+            attempted_vault_id: None,
+            candidates_scanned: 0,
+            absorbed: None,
+            error: None,
+            skipped_reason: Some("emergency pause".to_string()),
+        };
+        mutate_state(|s| s.record_chain_absorb_auto_tick(tick.clone()));
+        return Ok(Some(tick));
+    }
+
+    let pending_vault = read_state(|s| {
+        s.pending_chain_absorbs()
+            .into_iter()
+            .map(|intent| intent.vault_id)
+            .next()
+    });
+    let (vault_id, candidates_scanned) = if let Some(vault_id) = pending_vault {
+        (vault_id, 0)
+    } else {
+        let candidates =
+            match discover_chain_absorb_candidates(Some(config.max_scan_per_chain)).await {
+                Ok(candidates) => candidates,
+                Err(error) => {
+                    let tick = ChainAbsorbAutoTickRecord {
+                        started_at_ns,
+                        completed_at_ns: ic_cdk::api::time(),
+                        attempted_vault_id: None,
+                        candidates_scanned: 0,
+                        absorbed: None,
+                        error: Some(format!("{error:?}")),
+                        skipped_reason: None,
+                    };
+                    mutate_state(|s| s.record_chain_absorb_auto_tick(tick.clone()));
+                    return Ok(Some(tick));
+                }
+            };
+        let candidates_scanned = candidates.len() as u64;
+        match read_state(|s| select_chain_absorb_auto_vault(s, &candidates)) {
+            Some(vault_id) => (vault_id, candidates_scanned),
+            None => {
+                let tick = ChainAbsorbAutoTickRecord {
+                    started_at_ns,
+                    completed_at_ns: ic_cdk::api::time(),
+                    attempted_vault_id: None,
+                    candidates_scanned,
+                    absorbed: None,
+                    error: None,
+                    skipped_reason: Some("no eligible candidates".to_string()),
+                };
+                mutate_state(|s| s.record_chain_absorb_auto_tick(tick.clone()));
+                return Ok(Some(tick));
+            }
+        }
+    };
+
+    let result = sp_absorb_chain_vault_core(vault_id).await;
+    let tick = match result {
+        Ok(absorbed) => ChainAbsorbAutoTickRecord {
+            started_at_ns,
+            completed_at_ns: ic_cdk::api::time(),
+            attempted_vault_id: Some(vault_id),
+            candidates_scanned,
+            absorbed: Some(absorbed),
+            error: None,
+            skipped_reason: None,
+        },
+        Err(error) => ChainAbsorbAutoTickRecord {
+            started_at_ns,
+            completed_at_ns: ic_cdk::api::time(),
+            attempted_vault_id: Some(vault_id),
+            candidates_scanned,
+            absorbed: None,
+            error: Some(format!("{error:?}")),
+            skipped_reason: None,
+        },
+    };
+    mutate_state(|s| s.record_chain_absorb_auto_tick(tick.clone()));
+    Ok(Some(tick))
 }
 
 pub async fn claim_cfx(
@@ -1852,6 +2071,53 @@ mod tests {
     }
 
     #[test]
+    fn unburned_prepared_chain_absorb_intent_can_be_cleared_after_failure() {
+        let mut state = test_state();
+        state
+            .register_chain_collateral(1030, "CFX".to_string(), 18)
+            .unwrap();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
+        state
+            .opt_in_cfx(&user_a(), chain_collateral_sentinel(1030))
+            .unwrap();
+        let plan = prepare_chain_absorb_plan_in_state(&state, &chain_vault(100_00000000, true))
+            .expect("covered");
+        prepare_or_reuse_chain_absorb_intent_in_state(&mut state, &plan, minting_account(), 123)
+            .expect("intent is recorded");
+
+        assert!(state.has_pending_chain_absorbs());
+        assert!(clear_unburned_chain_absorb_intent_in_state(&mut state, 77));
+        assert!(
+            !state.has_pending_chain_absorbs(),
+            "a failed pre-burn attempt must not wedge pool balance operations"
+        );
+    }
+
+    #[test]
+    fn burned_chain_absorb_intent_is_not_cleared_as_unburned_failure() {
+        let mut state = test_state();
+        state
+            .register_chain_collateral(1030, "CFX".to_string(), 18)
+            .unwrap();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
+        state
+            .opt_in_cfx(&user_a(), chain_collateral_sentinel(1030))
+            .unwrap();
+        let plan = prepare_chain_absorb_plan_in_state(&state, &chain_vault(100_00000000, true))
+            .expect("covered");
+        prepare_or_reuse_chain_absorb_intent_in_state(&mut state, &plan, minting_account(), 123)
+            .expect("intent is recorded");
+        mark_chain_absorb_burned_in_state(&mut state, 77, build_icusd_burn_proof(44, 77), 456)
+            .expect("proof recorded");
+
+        assert!(!clear_unburned_chain_absorb_intent_in_state(&mut state, 77));
+        assert!(
+            state.has_pending_chain_absorbs(),
+            "burned intents must remain for backend finalization/retry"
+        );
+    }
+
+    #[test]
     fn burned_chain_absorb_intent_replays_backend_without_discovery() {
         let mut state = test_state();
         state
@@ -1890,9 +2156,11 @@ mod tests {
             .opt_in_cfx(&user_a(), chain_collateral_sentinel(1030))
             .unwrap();
 
-        let plan_a =
-            prepare_chain_absorb_plan_in_state(&state, &chain_vault_with_id(77, 100_00000000, true))
-                .expect("vault A covered");
+        let plan_a = prepare_chain_absorb_plan_in_state(
+            &state,
+            &chain_vault_with_id(77, 100_00000000, true),
+        )
+        .expect("vault A covered");
         prepare_or_reuse_chain_absorb_intent_in_state(&mut state, &plan_a, minting_account(), 123)
             .expect("intent A is recorded");
         mark_chain_absorb_burned_in_state(&mut state, 77, build_icusd_burn_proof(44, 77), 456)
@@ -1908,6 +2176,59 @@ mod tests {
                 Err(StabilityPoolError::SystemBusy)
             ),
             "a burned pending intent reserves its icUSD until local finalization",
+        );
+    }
+
+    #[test]
+    fn auto_absorb_selection_prefers_pending_intent_before_new_candidate() {
+        let mut state = test_state();
+        state
+            .register_chain_collateral(1030, "CFX".to_string(), 18)
+            .unwrap();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
+        state
+            .opt_in_cfx(&user_a(), chain_collateral_sentinel(1030))
+            .unwrap();
+
+        let plan = prepare_chain_absorb_plan_in_state(
+            &state,
+            &chain_vault_with_id(77, 100_00000000, true),
+        )
+        .expect("covered");
+        prepare_or_reuse_chain_absorb_intent_in_state(&mut state, &plan, minting_account(), 123)
+            .expect("pending intent");
+
+        let candidates = vec![ChainSpAbsorbCandidate {
+            vault: chain_vault_with_id(88, 100_00000000, true),
+            icusd_to_burn_e8s: 100_00000000,
+            pending_status: None,
+        }];
+
+        assert_eq!(
+            select_chain_absorb_auto_vault(&state, &candidates),
+            Some(77)
+        );
+    }
+
+    #[test]
+    fn auto_absorb_selection_uses_first_candidate_when_no_pending_intent() {
+        let state = test_state();
+        let candidates = vec![
+            ChainSpAbsorbCandidate {
+                vault: chain_vault_with_id(88, 100_00000000, true),
+                icusd_to_burn_e8s: 100_00000000,
+                pending_status: None,
+            },
+            ChainSpAbsorbCandidate {
+                vault: chain_vault_with_id(99, 100_00000000, true),
+                icusd_to_burn_e8s: 100_00000000,
+                pending_status: None,
+            },
+        ];
+
+        assert_eq!(
+            select_chain_absorb_auto_vault(&state, &candidates),
+            Some(88)
         );
     }
 

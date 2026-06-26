@@ -15,6 +15,8 @@ use crate::logs::INFO;
 use crate::state::{mutate_state, read_state};
 use crate::types::*;
 
+const CHAIN_ABSORB_AUTO_TIMER_POLL_SECONDS: u64 = 60;
+
 pub(crate) fn pool_balance_mutation_blocked() -> bool {
     crate::pool_guard::liquidation_in_progress() || read_state(|s| s.has_pending_chain_absorbs())
 }
@@ -51,6 +53,10 @@ fn init(args: StabilityPoolInitArgs) {
         "Stability Pool initialized. Protocol: {}",
         read_state(|s| s.protocol_canister_id)
     );
+    ic_cdk_timers::set_timer(Duration::ZERO, || {
+        setup_virtual_price_timer();
+        setup_chain_absorb_auto_timer();
+    });
 }
 
 #[pre_upgrade]
@@ -95,6 +101,7 @@ fn post_upgrade(_args: StabilityPoolInitArgs) {
     // Defer timer setup to avoid ic0_call_new restriction during upgrade
     ic_cdk_timers::set_timer(Duration::ZERO, || {
         setup_virtual_price_timer();
+        setup_chain_absorb_auto_timer();
     });
 }
 
@@ -106,6 +113,19 @@ fn setup_virtual_price_timer() {
     ic_cdk_timers::set_timer_interval(Duration::from_secs(300), || {
         ic_cdk::spawn(fetch_virtual_prices());
     });
+}
+
+fn setup_chain_absorb_auto_timer() {
+    ic_cdk_timers::set_timer_interval(
+        Duration::from_secs(CHAIN_ABSORB_AUTO_TIMER_POLL_SECONDS),
+        || {
+            ic_cdk::spawn(async {
+                if let Err(error) = crate::liquidation::run_chain_absorb_auto_tick().await {
+                    log!(INFO, "chain absorb auto tick skipped: {:?}", error);
+                }
+            });
+        },
+    );
 }
 
 async fn fetch_virtual_prices() {
@@ -318,6 +338,33 @@ pub async fn scan_chain_absorb_candidates(
     max_per_chain: Option<u64>,
 ) -> Result<Vec<ChainSpAbsorbCandidate>, StabilityPoolError> {
     crate::liquidation::scan_chain_absorb_candidates(max_per_chain).await
+}
+
+#[update]
+pub fn set_chain_absorb_auto_config(
+    config: ChainAbsorbAutoConfig,
+) -> Result<(), StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    if !read_state(|s| s.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    mutate_state(|s| {
+        s.set_chain_absorb_auto_config(config)?;
+        s.push_event(caller, PoolEventType::ConfigurationUpdated);
+        Ok(())
+    })
+}
+
+#[query]
+pub fn get_chain_absorb_auto_status() -> ChainAbsorbAutoStatus {
+    read_state(|s| ChainAbsorbAutoStatus {
+        config: s.chain_absorb_auto_config(),
+        tick_in_flight: crate::pool_guard::chain_absorb_auto_tick_in_flight(),
+        last_tick: s.chain_absorb_auto_last_tick(),
+    })
 }
 
 // ─── Interest Revenue ───

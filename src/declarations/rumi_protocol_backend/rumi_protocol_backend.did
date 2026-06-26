@@ -1326,6 +1326,7 @@ service : (ProtocolArg) -> {
   stability_pool_liquidate_with_reserves : (nat64, nat64, nat64, principal) -> (
       Result_17,
     );
+  stability_pool_preflight_chain_absorb : (nat64, nat64) -> (Result);
   submit_burn_proof : (nat32, text) -> (Result_18);
   sweep_xrp_pending_open : (nat64) -> (Result);
   unfreeze_protocol : () -> (Result);

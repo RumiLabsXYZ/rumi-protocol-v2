@@ -1671,6 +1671,10 @@ export interface _SERVICE {
     [bigint, bigint, bigint, Principal],
     Result_18
   >,
+  'stability_pool_preflight_chain_absorb' : ActorMethod<
+    [bigint, bigint],
+    Result
+  >,
   'submit_burn_proof' : ActorMethod<[number, string], Result_20>,
   'sweep_xrp_pending_open' : ActorMethod<[bigint], Result>,
   'unfreeze_protocol' : ActorMethod<[], Result>,

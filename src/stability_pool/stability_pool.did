@@ -179,6 +179,28 @@ type ChainSpAbsorbCompletion = record {
   completed_at_ns : nat64;
 };
 
+type ChainAbsorbAutoConfig = record {
+  enabled : bool;
+  interval_seconds : nat64;
+  max_scan_per_chain : nat64;
+};
+
+type ChainAbsorbAutoTickRecord = record {
+  started_at_ns : nat64;
+  completed_at_ns : nat64;
+  attempted_vault_id : opt nat64;
+  candidates_scanned : nat64;
+  absorbed : opt ChainSpAbsorbResult;
+  error : opt text;
+  skipped_reason : opt text;
+};
+
+type ChainAbsorbAutoStatus = record {
+  config : ChainAbsorbAutoConfig;
+  tick_in_flight : bool;
+  last_tick : opt ChainAbsorbAutoTickRecord;
+};
+
 type PoolLiquidationRecord = record {
   vault_id : nat64;
   timestamp : nat64;
@@ -345,6 +367,7 @@ service : (StabilityPoolInitArgs) -> {
   execute_liquidation : (nat64) -> (variant { Ok : LiquidationResult; Err : StabilityPoolError });
   sp_absorb_chain_vault : (nat64) -> (variant { Ok : ChainSpAbsorbResult; Err : StabilityPoolError });
   scan_chain_absorb_candidates : (opt nat64) -> (variant { Ok : vec ChainSpAbsorbCandidate; Err : StabilityPoolError });
+  set_chain_absorb_auto_config : (ChainAbsorbAutoConfig) -> (variant { Ok; Err : StabilityPoolError });
 
   // ── Interest Revenue ──
   receive_interest_revenue : (principal, nat64, opt principal) -> (variant { Ok; Err : StabilityPoolError });
@@ -381,5 +404,6 @@ service : (StabilityPoolInitArgs) -> {
   get_pending_refunds : (opt principal) -> (vec PendingRefund) query;
   get_pending_chain_absorbs : () -> (vec ChainSpAbsorbIntent) query;
   get_completed_chain_absorbs : (opt nat64) -> (vec ChainSpAbsorbCompletion) query;
+  get_chain_absorb_auto_status : () -> (ChainAbsorbAutoStatus) query;
   get_chain_collateral_sentinel : (nat32) -> (principal) query;
 };
