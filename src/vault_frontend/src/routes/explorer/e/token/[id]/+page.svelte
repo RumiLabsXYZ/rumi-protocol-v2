@@ -39,6 +39,7 @@
     getTokenInfo,
     shortenPrincipal,
     formatBps,
+    XRP_NATIVE_PRINCIPAL,
   } from '$utils/explorerHelpers';
   import { extractEventTimestamp } from '$utils/displayEvent';
   import type { DisplayEvent } from '$utils/displayEvent';
@@ -102,6 +103,29 @@
       const pid = c.ledger_canister_id?.toText?.() ?? String(c.ledger_canister_id ?? '');
       return pid === tokenPrincipal;
     }),
+  );
+  // Native-XRP is a synthetic collateral key, not an ICRC ledger: it's custodied
+  // off-chain on the XRP Ledger, so holders / ICRC supply don't apply and the
+  // identity card needs different labels (see special-casing below).
+  const isNativeXrp = $derived(tokenPrincipal === XRP_NATIVE_PRINCIPAL);
+
+  // ── Derived: native-XRP locked as collateral ───────────────────────────────
+  // Stands in for "total supply" on the XRP page. collateral_amount is stored in
+  // drops (6 decimals), matching tokenDecimals for the XRP synthetic principal.
+  const xrpLockedDrops = $derived.by<bigint>(() => {
+    if (!isNativeXrp) return 0n;
+    let total = 0n;
+    for (const v of allVaults) {
+      const ct = v.collateral_type?.toText?.() ?? String(v.collateral_type ?? '');
+      if (ct === tokenPrincipal) total += BigInt(v.collateral_amount ?? 0);
+    }
+    return total;
+  });
+
+  const subtitle = $derived(
+    isNativeXrp
+      ? 'Native XRP · off-chain custody on the XRP Ledger'
+      : `${tokenName} · ledger ${shortenPrincipal(tokenPrincipal)}`,
   );
 
   // ── Derived: total supply ──────────────────────────────────────────────────
@@ -574,7 +598,8 @@
 
       // Live total supply for tokens analytics doesn't track. icUSD/3USD
       // already get total_supply from the holder snapshot, so skip the call.
-      if (topHoldersRes.source !== 'balance_tracker') {
+      // Native-XRP has no ICRC ledger to query — it uses xrpLockedDrops instead.
+      if (topHoldersRes.source !== 'balance_tracker' && !isNativeXrp) {
         liveTotalSupply = await fetchIcrc1TotalSupply(tokenPrincipal).catch(() => null);
       }
 
@@ -654,7 +679,7 @@
 
 <EntityShell
   title={symbol}
-  subtitle="{tokenName} · ledger {shortenPrincipal(tokenPrincipal)}"
+  {subtitle}
   {loading}
   {error}
   onRetry={loadToken}
@@ -662,9 +687,13 @@
   {#snippet identity()}
     <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
       <div class="rounded-lg border border-gray-700/60 bg-gray-900/40 p-3">
-        <div class="text-xs text-gray-500 uppercase tracking-wider">Total supply</div>
+        <div class="text-xs text-gray-500 uppercase tracking-wider">{isNativeXrp ? 'Locked as collateral' : 'Total supply'}</div>
         <div class="mt-1 text-lg font-semibold text-white">
-          {totalSupplyE8s > 0n ? formatE8s(totalSupplyE8s, tokenDecimals) : '—'}
+          {#if isNativeXrp}
+            {xrpLockedDrops > 0n ? formatE8s(xrpLockedDrops, tokenDecimals) : '—'}
+          {:else}
+            {totalSupplyE8s > 0n ? formatE8s(totalSupplyE8s, tokenDecimals) : '—'}
+          {/if}
         </div>
         <div class="text-xs text-gray-500">{symbol}</div>
       </div>
@@ -699,6 +728,12 @@
             <div class="mt-1 text-sm text-gray-500">—</div>
           {/if}
         </div>
+      {:else if isNativeXrp}
+        <div class="rounded-lg border border-gray-700/60 bg-gray-900/40 p-3">
+          <div class="text-xs text-gray-500 uppercase tracking-wider">Custody</div>
+          <div class="mt-1 text-lg font-semibold text-white">Off-chain</div>
+          <div class="text-xs text-gray-500">XRP Ledger · {tokenDecimals} decimals (drops)</div>
+        </div>
       {:else}
         <div class="rounded-lg border border-gray-700/60 bg-gray-900/40 p-3">
           <div class="text-xs text-gray-500 uppercase tracking-wider">Decimals</div>
@@ -709,12 +744,18 @@
     </div>
 
     <div class="flex items-center gap-2 text-xs text-gray-400">
-      <span class="text-gray-500">Ledger:</span>
+      <span class="text-gray-500">{isNativeXrp ? 'Synthetic key:' : 'Ledger:'}</span>
       <code class="font-mono text-gray-300">{tokenPrincipal}</code>
       <CopyButton text={tokenPrincipal} />
     </div>
 
-    {#if !knownToken}
+    {#if isNativeXrp}
+      <div class="rounded-lg border border-blue-500/20 bg-blue-500/5 p-4 text-sm text-gray-400">
+        Native XRP is custodied off-chain on the XRP Ledger, so there is no ICRC-1 ledger —
+        holder counts and on-chain supply don't apply. Price is the XRC oracle feed, and the
+        figure above is the total XRP currently locked across XRP collateral vaults.
+      </div>
+    {:else if !knownToken}
       <div class="rounded-lg border border-gray-700/60 bg-gray-900/40 p-4 text-sm text-gray-400">
         Limited data available for this token. Symbol, decimals, and price feeds
         aren't registered in the explorer; only on-chain ICRC-1 calls work.
@@ -929,11 +970,13 @@
       <!-- Supply over time -->
       <div class="rounded-lg border border-gray-700/60 bg-gray-900/40 p-4">
         <h3 class="text-sm font-semibold text-white mb-3">
-          {isIcUsd ? 'Supply over time (vault debt)' : isThreeUsd ? 'LP supply over time' : 'Tracked supply over time'}
+          {isNativeXrp ? 'XRP locked over time' : isIcUsd ? 'Supply over time (vault debt)' : isThreeUsd ? 'LP supply over time' : 'Tracked supply over time'}
         </h3>
         {#if supplySeries.length < 2}
           <div class="text-sm text-gray-500">
-            {isCollateral
+            {isNativeXrp
+              ? 'Custody totals over time aren\'t tracked yet — see the price chart above.'
+              : isCollateral
               ? 'Supply timeseries not collected for collateral tokens.'
               : 'Not enough data points yet.'}
           </div>

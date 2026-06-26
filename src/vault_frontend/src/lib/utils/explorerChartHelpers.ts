@@ -2,6 +2,7 @@
  * Shared chart utilities for the explorer.
  * Formatters, scales, and color constants for SVG charts.
  */
+import { getTokenSymbol, XRP_NATIVE_PRINCIPAL } from './explorerHelpers';
 
 /** Format a number with K/M/B suffixes for large magnitudes and appropriate
  *  decimals for small magnitudes. The previous version always used 0
@@ -71,9 +72,20 @@ export const CHART_COLORS = {
   textMuted: '#605a75',
 } as const;
 
-/** Known collateral symbols by principal. */
+/**
+ * Collateral principals the explorer's lenses chart. The explorer lenses
+ * (CollateralLens, RedemptionsLens) DRIVE their fetch + render loop from
+ * `Object.keys(COLLATERAL_SYMBOLS)`, so a collateral missing here is invisible in
+ * those lenses, not merely mislabeled. Keep this list in sync with registered
+ * collateral types. The displayed symbol text comes from `getCollateralSymbol`
+ * (single source of truth = KNOWN_TOKENS), so these values are only a fallback.
+ *
+ * Native-XRP uses the synthetic principal (XRP_NATIVE_PRINCIPAL); it has no ICRC
+ * ledger but does have an XRC price feed, so the lenses can chart it.
+ */
 export const COLLATERAL_SYMBOLS: Record<string, string> = {
   'ryjl3-tyaaa-aaaaa-aaaba-cai': 'ICP',
+  [XRP_NATIVE_PRINCIPAL]: 'XRP',
   'mxzaz-hqaaa-aaaar-qaada-cai': 'ckBTC',
   'ss2fx-dyaaa-aaaar-qacoq-cai': 'ckETH',
   'nza5v-qaaaa-aaaar-qahzq-cai': 'ckXAUT',
@@ -82,14 +94,20 @@ export const COLLATERAL_SYMBOLS: Record<string, string> = {
   'rh2pm-ryaaa-aaaan-qeniq-cai': 'EXE',
 };
 
-/** Get symbol for a collateral principal. */
+/**
+ * Get the display symbol for a collateral principal. Delegates to the shared
+ * KNOWN_TOKENS registry (`getTokenSymbol`) so symbol resolution has ONE source of
+ * truth across the explorer — adding a token to KNOWN_TOKENS fixes it everywhere,
+ * and this map can't drift out of sync the way it did for native-XRP.
+ */
 export function getCollateralSymbol(principal: string): string {
-  return COLLATERAL_SYMBOLS[principal] ?? principal.slice(0, 5) + '...';
+  return getTokenSymbol(principal);
 }
 
 /** Collateral brand colors. */
 export const COLLATERAL_COLORS: Record<string, string> = {
   ICP: '#29ABE2',
+  XRP: '#23292F',
   ckBTC: '#F7931A',
   ckETH: '#627EEA',
   ckXAUT: '#C9A96E',
