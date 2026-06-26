@@ -45,9 +45,11 @@ export interface UserPosition {
   stablecoin_balances: Array<[Principal, bigint]>;
   collateral_gains: Array<[Principal, bigint]>;
   opted_out_collateral: Principal[];
+  native_payout_addresses?: Array<[Principal, string]>;
   deposit_timestamp: bigint;
   total_claimed_gains: Array<[Principal, bigint]>;
   total_usd_value_e8s: bigint;
+  total_interest_earned_e8s?: bigint;
 }
 
 export interface LiquidationRecord {
@@ -428,6 +430,34 @@ class StabilityPoolService {
     }
   }
 
+  async optInNativeCollateral(collateralType: Principal, payoutAddress: string): Promise<void> {
+    const wallet = get(walletStore);
+    if (!wallet.isConnected) throw new Error('Wallet not connected');
+
+    const address = payoutAddress.trim();
+    if (!address) throw new Error('Enter an XRP address');
+
+    if (isOisyWallet() && wallet.principal) {
+      console.log(`[Oisy] Sequential SP opt_in_native_collateral via @icp-sdk/signer v5`);
+      const signerAgent = await getOisySignerAgent(wallet.principal);
+      const poolActor = createOisyActor(
+        STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool, signerAgent
+      );
+      const result = await poolActor.opt_in_native_collateral(collateralType, address);
+      if ('Err' in result) {
+        throw new Error(this.formatError(result.Err));
+      }
+    } else {
+      const poolActor = await walletStore.getActor(
+        STABILITY_POOL_CANISTER_ID, canisterIDLs.stability_pool
+      ) as any;
+      const result = await poolActor.opt_in_native_collateral(collateralType, address) as { Ok: null } | { Err: any };
+      if ('Err' in result) {
+        throw new Error(this.formatError(result.Err));
+      }
+    }
+  }
+
   async executeLiquidation(vaultId: bigint): Promise<any> {
     const wallet = get(walletStore);
     if (!wallet.isConnected) throw new Error('Wallet not connected');
@@ -477,6 +507,8 @@ class StabilityPoolService {
     if ('SystemBusy' in err) return 'System is busy, try again';
     if ('AlreadyOptedOut' in err) return 'Already opted out of this collateral';
     if ('AlreadyOptedIn' in err) return 'Already opted in for this collateral';
+    if ('PayoutAddressRequired' in err) return 'XRP requires a payout address';
+    if ('InvalidPayoutAddress' in err) return `Invalid XRP address: ${err.InvalidPayoutAddress.reason}`;
     return 'Unknown error';
   }
 }

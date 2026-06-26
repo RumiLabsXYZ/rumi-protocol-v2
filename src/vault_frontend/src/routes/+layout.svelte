@@ -7,6 +7,7 @@
   import PositionStrip from "../lib/components/layout/PositionStrip.svelte";
   import PriceDebug from "../lib/components/debug/PriceDebug.svelte";
   import WalletDebug from "../lib/components/debug/WalletDebug.svelte";
+  import XrpPendingDepositBanner from "../lib/components/vault/XrpPendingDepositBanner.svelte";
   import "../app.css";
   import { protocolService } from "../lib/services/protocol";
   import { isDevelopment } from "../lib/config";
@@ -113,6 +114,7 @@
   </div>
 </header>
 <PositionStrip />
+<XrpPendingDepositBanner />
 <ToastContainer />
 <main class="main-content">{#if POINTS_ENABLED && !currentPath.startsWith('/points')}<SeasonBar />{/if}<slot /></main>
 <footer class="app-footer">

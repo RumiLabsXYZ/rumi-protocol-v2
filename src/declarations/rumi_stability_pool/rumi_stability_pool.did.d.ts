@@ -161,11 +161,13 @@ export type StabilityPoolError = {
       'required' : bigint,
     }
   } |
+  { 'InvalidPayoutAddress' : { 'reason' : string } } |
   { 'CollateralNotFound' : { 'ledger' : Principal } } |
   { 'NoPositionFound' : null } |
   { 'AmountTooLow' : { 'minimum_e8s' : bigint } } |
   { 'Unauthorized' : null } |
   { 'InterCanisterCallFailed' : { 'method' : string, 'target' : string } } |
+  { 'PayoutAddressRequired' : { 'collateral' : Principal } } |
   { 'LiquidationFailed' : { 'vault_id' : bigint, 'reason' : string } } |
   { 'SystemBusy' : null } |
   { 'AlreadyOptedIn' : { 'collateral' : Principal } } |
@@ -203,6 +205,7 @@ export interface UserStabilityPosition {
   'collateral_gains' : Array<[Principal, bigint]>,
   'stablecoin_balances' : Array<[Principal, bigint]>,
   'total_claimed_gains' : Array<[Principal, bigint]>,
+  'native_payout_addresses' : Array<[Principal, string]>,
   'total_usd_value_e8s' : bigint,
   'opted_out_collateral' : Array<Principal>,
 }
@@ -281,6 +284,11 @@ export interface _SERVICE {
   >,
   'opt_in_collateral' : ActorMethod<
     [Principal],
+    { 'Ok' : null } |
+      { 'Err' : StabilityPoolError }
+  >,
+  'opt_in_native_collateral' : ActorMethod<
+    [Principal, string],
     { 'Ok' : null } |
       { 'Err' : StabilityPoolError }
   >,

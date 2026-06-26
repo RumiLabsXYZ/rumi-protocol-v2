@@ -78,6 +78,11 @@ pub struct DepositPosition {
     /// backward-compatible stable memory upgrades.
     #[serde(default)]
     pub cfx_claims: Option<BTreeMap<Principal, u128>>,
+    /// Payout destinations for native/off-IC collateral types keyed by synthetic
+    /// collateral principal. XRP uses this as its opt-in marker: no address means
+    /// the depositor does not absorb or earn from XRP liquidations.
+    #[serde(default)]
+    pub native_payout_addresses: Option<BTreeMap<Principal, String>>,
 }
 
 impl DepositPosition {
@@ -91,6 +96,7 @@ impl DepositPosition {
             total_claimed_gains: BTreeMap::new(),
             total_interest_earned_e8s: Some(0),
             cfx_claims: Some(BTreeMap::new()),
+            native_payout_addresses: Some(BTreeMap::new()),
         }
     }
 
@@ -349,6 +355,7 @@ pub struct UserStabilityPosition {
     pub stablecoin_balances: BTreeMap<Principal, u64>,
     pub collateral_gains: BTreeMap<Principal, u64>,
     pub opted_out_collateral: Vec<Principal>,
+    pub native_payout_addresses: BTreeMap<Principal, String>,
     pub deposit_timestamp: u64,
     pub total_claimed_gains: BTreeMap<Principal, u64>,
     pub total_usd_value_e8s: u64,
@@ -376,6 +383,8 @@ pub enum StabilityPoolError {
     SystemBusy,
     AlreadyOptedOut { collateral: Principal },
     AlreadyOptedIn { collateral: Principal },
+    PayoutAddressRequired { collateral: Principal },
+    InvalidPayoutAddress { reason: String },
     RefundClaimNotFound,
 }
 
