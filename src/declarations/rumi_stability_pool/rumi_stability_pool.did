@@ -63,6 +63,7 @@ type StabilityPoolStatus = record {
 type UserStabilityPosition = record {
   stablecoin_balances : vec record { principal; nat64 };
   collateral_gains : vec record { principal; nat64 };
+  cfx_claims : opt vec record { principal; nat };
   opted_out_collateral : vec principal;
   deposit_timestamp : nat64;
   total_claimed_gains : vec record { principal; nat64 };
@@ -177,6 +178,16 @@ type ChainSpAbsorbCompletion = record {
   vault_id : nat64;
   result : ChainSpAbsorbResult;
   completed_at_ns : nat64;
+};
+
+type CfxClaimPayoutRecovery = record {
+  chain_sentinel : principal;
+  op_id : nat64;
+  claim_id : nat64;
+  claimant : principal;
+  amount_wei : nat;
+  reason : text;
+  failed_at_ns : nat64;
 };
 
 type ChainAbsorbAutoConfig = record {
@@ -355,6 +366,7 @@ service : (StabilityPoolInitArgs) -> {
   claim_all_collateral : () -> (variant { Ok : vec record { principal; nat64 }; Err : StabilityPoolError });
   claim_pending_refund : (nat64) -> (variant { Ok : nat64; Err : StabilityPoolError });
   claim_cfx : (principal, text) -> (variant { Ok : nat; Err : StabilityPoolError });
+  recredit_failed_cfx_claim_payout : (CfxClaimPayoutRecovery) -> (variant { Ok : bool; Err : StabilityPoolError });
 
   // ── Opt-in / Opt-out ──
   opt_out_collateral : (principal) -> (variant { Ok; Err : StabilityPoolError });

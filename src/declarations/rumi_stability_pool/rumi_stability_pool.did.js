@@ -241,6 +241,7 @@ export const idlFactory = ({ IDL }) => {
     'total_interest_earned_e8s' : IDL.Nat64,
     'collateral_gains' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
     'stablecoin_balances' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
+    'cfx_claims' : IDL.Opt(IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat))),
     'total_claimed_gains' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
     'total_usd_value_e8s' : IDL.Nat64,
     'opted_out_collateral' : IDL.Vec(IDL.Principal),
@@ -305,6 +306,15 @@ export const idlFactory = ({ IDL }) => {
     'debt_amount' : IDL.Nat64,
     'vault_id' : IDL.Nat64,
     'collateral_type' : IDL.Principal,
+  });
+  const CfxClaimPayoutRecovery = IDL.Record({
+    'claim_id' : IDL.Nat64,
+    'claimant' : IDL.Principal,
+    'op_id' : IDL.Nat64,
+    'chain_sentinel' : IDL.Principal,
+    'amount_wei' : IDL.Nat,
+    'failed_at_ns' : IDL.Nat64,
+    'reason' : IDL.Text,
   });
   const ChainLiquidatableVaultInfo = IDL.Record({
     'sized_repay_e8s' : IDL.Nat,
@@ -485,6 +495,11 @@ export const idlFactory = ({ IDL }) => {
     'receive_interest_revenue' : IDL.Func(
         [IDL.Principal, IDL.Nat64, IDL.Opt(IDL.Principal)],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
+        [],
+      ),
+    'recredit_failed_cfx_claim_payout' : IDL.Func(
+        [CfxClaimPayoutRecovery],
+        [IDL.Variant({ 'Ok' : IDL.Bool, 'Err' : StabilityPoolError })],
         [],
       ),
     'register_cfx_collateral' : IDL.Func(

@@ -2,6 +2,15 @@ import type { Principal } from '@dfinity/principal';
 import type { ActorMethod } from '@dfinity/agent';
 import type { IDL } from '@dfinity/candid';
 
+export interface CfxClaimPayoutRecovery {
+  'claim_id' : bigint,
+  'claimant' : Principal,
+  'op_id' : bigint,
+  'chain_sentinel' : Principal,
+  'amount_wei' : bigint,
+  'failed_at_ns' : bigint,
+  'reason' : string,
+}
 export interface ChainAbsorbAutoConfig {
   'enabled' : boolean,
   'interval_seconds' : bigint,
@@ -298,6 +307,7 @@ export interface UserStabilityPosition {
   'total_interest_earned_e8s' : bigint,
   'collateral_gains' : Array<[Principal, bigint]>,
   'stablecoin_balances' : Array<[Principal, bigint]>,
+  'cfx_claims' : [] | [Array<[Principal, bigint]>],
   'total_claimed_gains' : Array<[Principal, bigint]>,
   'total_usd_value_e8s' : bigint,
   'opted_out_collateral' : Array<Principal>,
@@ -411,6 +421,11 @@ export interface _SERVICE {
   'receive_interest_revenue' : ActorMethod<
     [Principal, bigint, [] | [Principal]],
     { 'Ok' : null } |
+      { 'Err' : StabilityPoolError }
+  >,
+  'recredit_failed_cfx_claim_payout' : ActorMethod<
+    [CfxClaimPayoutRecovery],
+    { 'Ok' : boolean } |
       { 'Err' : StabilityPoolError }
   >,
   'register_cfx_collateral' : ActorMethod<

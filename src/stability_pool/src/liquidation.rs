@@ -605,6 +605,73 @@ pub(crate) fn rollback_cfx_claim_payout_in_state(
     *entry = entry.saturating_add(plan.amount_wei);
 }
 
+pub(crate) fn recredit_failed_cfx_claim_payout_in_state(
+    state: &mut StabilityPoolState,
+    recovery: CfxClaimPayoutRecovery,
+) -> Result<bool, StabilityPoolError> {
+    recredit_failed_cfx_claim_payout_in_state_at(state, recovery.clone(), recovery.failed_at_ns)
+}
+
+pub(crate) fn recredit_failed_cfx_claim_payout_in_state_at(
+    state: &mut StabilityPoolState,
+    recovery: CfxClaimPayoutRecovery,
+    recovered_at_ns: u64,
+) -> Result<bool, StabilityPoolError> {
+    if recovery.amount_wei == 0 {
+        return Err(StabilityPoolError::AmountTooLow { minimum_e8s: 1 });
+    }
+    if !state.is_chain_collateral_sentinel(&recovery.chain_sentinel) {
+        return Err(StabilityPoolError::CollateralNotFound {
+            ledger: recovery.chain_sentinel,
+        });
+    }
+
+    let key = recovery.key();
+    if let Some(existing) = state.completed_cfx_claim_payout_recovery(&key) {
+        if existing.claim_id == recovery.claim_id
+            && existing.claimant == recovery.claimant
+            && existing.amount_wei == recovery.amount_wei
+        {
+            return Ok(false);
+        }
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id: recovery.claim_id,
+            reason: format!(
+                "completed CFX claim payout recovery conflicts for op {}",
+                recovery.op_id
+            ),
+        });
+    }
+    if state.completed_cfx_claim_payout_recovery_was_evicted(&key) {
+        return Ok(false);
+    }
+
+    state.record_chain_claim_source(
+        recovery.chain_sentinel,
+        recovery.claim_id,
+        recovery.amount_wei,
+    );
+    let position = state
+        .deposits
+        .entry(recovery.claimant)
+        .or_insert_with(|| DepositPosition::new(0));
+    let claims = position.cfx_claims.get_or_insert_with(BTreeMap::new);
+    let entry = claims.entry(recovery.chain_sentinel).or_insert(0);
+    *entry = entry.saturating_add(recovery.amount_wei);
+
+    state.record_completed_cfx_claim_payout_recovery(CfxClaimPayoutRecoveryRecord {
+        key,
+        claim_id: recovery.claim_id,
+        claimant: recovery.claimant,
+        amount_wei: recovery.amount_wei,
+        reason: recovery.reason,
+        failed_at_ns: recovery.failed_at_ns,
+        recovered_at_ns,
+    });
+
+    Ok(true)
+}
+
 pub(crate) fn is_duplicate_chain_claim_error(error: &rumi_protocol_backend::ProtocolError) -> bool {
     match error {
         rumi_protocol_backend::ProtocolError::ChainAdmin(msg)
@@ -2480,6 +2547,386 @@ mod tests {
             state.chain_claim_sources.as_ref().unwrap()[&sentinel][0].remaining_native,
             10,
             "rollback restores backend claim source",
+        );
+    }
+
+    #[test]
+    fn failed_cfx_claim_payout_recredit_restores_user_claim_and_source_once() {
+        let mut state = test_state();
+        let sentinel = state
+            .register_chain_collateral(1030, "CFX".to_string(), 18)
+            .unwrap();
+        let mut pos = DepositPosition::new(0);
+        pos.cfx_claims
+            .get_or_insert_with(BTreeMap::new)
+            .insert(sentinel, 12);
+        state.deposits.insert(user_a(), pos);
+        state.record_chain_claim_source(sentinel, 77, 10);
+        let plan = prepare_cfx_claim_payout_in_state(
+            &mut state,
+            user_a(),
+            sentinel,
+            "0x000000000000000000000000000000000000c0de".to_string(),
+            rumi_protocol_backend::chains::evm::tecdsa::is_valid_evm_address,
+        )
+        .expect("claim plan")
+        .expect("nonzero claim");
+
+        let recovered = recredit_failed_cfx_claim_payout_in_state(
+            &mut state,
+            CfxClaimPayoutRecovery {
+                chain_sentinel: sentinel,
+                op_id: 42,
+                claim_id: plan.claim_id,
+                claimant: user_a(),
+                amount_wei: plan.amount_wei,
+                reason: "tx reverted".to_string(),
+                failed_at_ns: 123,
+            },
+        )
+        .expect("first recovery succeeds");
+
+        assert!(recovered, "first recovery mutates state");
+        assert_eq!(
+            state.deposits[&user_a()].cfx_claims.as_ref().unwrap()[&sentinel],
+            12,
+            "failed payout recredits the user claim",
+        );
+        assert_eq!(
+            state.chain_claim_sources.as_ref().unwrap()[&sentinel][0].remaining_native,
+            10,
+            "failed payout restores backend claim source",
+        );
+
+        let replay = recredit_failed_cfx_claim_payout_in_state(
+            &mut state,
+            CfxClaimPayoutRecovery {
+                chain_sentinel: sentinel,
+                op_id: 42,
+                claim_id: plan.claim_id,
+                claimant: user_a(),
+                amount_wei: plan.amount_wei,
+                reason: "same failed op replay".to_string(),
+                failed_at_ns: 124,
+            },
+        )
+        .expect("same recovery replay succeeds without mutation");
+
+        assert!(!replay, "replay is recognized as already recovered");
+        assert_eq!(
+            state.deposits[&user_a()].cfx_claims.as_ref().unwrap()[&sentinel],
+            12,
+            "replay must not double-credit the user claim",
+        );
+        assert_eq!(
+            state.chain_claim_sources.as_ref().unwrap()[&sentinel][0].remaining_native,
+            10,
+            "replay must not double-restore backend claim source",
+        );
+    }
+
+    #[test]
+    fn failed_cfx_claim_payout_replay_is_idempotent() {
+        let mut state = test_state();
+        let sentinel = state
+            .register_chain_collateral(1030, "CFX".to_string(), 18)
+            .unwrap();
+        let mut pos = DepositPosition::new(0);
+        pos.cfx_claims
+            .get_or_insert_with(BTreeMap::new)
+            .insert(sentinel, 10);
+        state.deposits.insert(user_a(), pos);
+        state.record_chain_claim_source(sentinel, 77, 10);
+        let plan = prepare_cfx_claim_payout_in_state(
+            &mut state,
+            user_a(),
+            sentinel,
+            "0x000000000000000000000000000000000000c0de".to_string(),
+            rumi_protocol_backend::chains::evm::tecdsa::is_valid_evm_address,
+        )
+        .expect("claim plan")
+        .expect("nonzero claim");
+        let recovery = CfxClaimPayoutRecovery {
+            chain_sentinel: sentinel,
+            op_id: 43,
+            claim_id: plan.claim_id,
+            claimant: user_a(),
+            amount_wei: plan.amount_wei,
+            reason: "tx reverted".to_string(),
+            failed_at_ns: 123,
+        };
+
+        assert!(
+            recredit_failed_cfx_claim_payout_in_state(&mut state, recovery.clone())
+                .expect("first recovery succeeds")
+        );
+        assert!(
+            !recredit_failed_cfx_claim_payout_in_state(&mut state, recovery)
+                .expect("exact replay succeeds")
+        );
+        assert_eq!(
+            state
+                .completed_cfx_claim_payout_recoveries
+                .as_ref()
+                .map(|m| m.len()),
+            Some(1),
+            "journal stores one durable recovery record",
+        );
+    }
+
+    #[test]
+    fn evicted_failed_cfx_claim_payout_replay_remains_idempotent() {
+        let mut state = test_state();
+        let sentinel = state
+            .register_chain_collateral(1030, "CFX".to_string(), 18)
+            .unwrap();
+
+        for op_id in 0..=(crate::state::MAX_COMPLETED_CFX_CLAIM_PAYOUT_RECOVERIES as u64) {
+            assert!(
+                recredit_failed_cfx_claim_payout_in_state(
+                    &mut state,
+                    CfxClaimPayoutRecovery {
+                        chain_sentinel: sentinel,
+                        op_id,
+                        claim_id: op_id,
+                        claimant: user_a(),
+                        amount_wei: 1,
+                        reason: "tx reverted".to_string(),
+                        failed_at_ns: op_id,
+                    },
+                )
+                .expect("recovery succeeds"),
+                "first recovery for op {op_id} mutates state",
+            );
+        }
+
+        assert!(
+            !state
+                .completed_cfx_claim_payout_recoveries
+                .as_ref()
+                .unwrap()
+                .contains_key(&CfxClaimPayoutRecoveryKey {
+                    chain_sentinel: sentinel,
+                    op_id: 0,
+                }),
+            "oldest recovery record should be evicted at the bound",
+        );
+        let before_claims = state.deposits[&user_a()].cfx_claims.clone();
+        let before_sources = state.chain_claim_sources.clone();
+
+        let replay = recredit_failed_cfx_claim_payout_in_state(
+            &mut state,
+            CfxClaimPayoutRecovery {
+                chain_sentinel: sentinel,
+                op_id: 0,
+                claim_id: 0,
+                claimant: user_a(),
+                amount_wei: 1,
+                reason: "old op replay after eviction".to_string(),
+                failed_at_ns: 999_999,
+            },
+        )
+        .expect("evicted replay succeeds without mutation");
+
+        assert!(!replay, "evicted replay is treated as already recovered");
+        assert_eq!(state.deposits[&user_a()].cfx_claims, before_claims);
+        assert_eq!(state.chain_claim_sources, before_sources);
+    }
+
+    #[test]
+    fn failed_cfx_claim_payout_conflicting_replay_rejects_without_mutation() {
+        let mut state = test_state();
+        let sentinel = state
+            .register_chain_collateral(1030, "CFX".to_string(), 18)
+            .unwrap();
+        let mut pos = DepositPosition::new(0);
+        pos.cfx_claims
+            .get_or_insert_with(BTreeMap::new)
+            .insert(sentinel, 10);
+        state.deposits.insert(user_a(), pos);
+        state.record_chain_claim_source(sentinel, 77, 10);
+        let plan = prepare_cfx_claim_payout_in_state(
+            &mut state,
+            user_a(),
+            sentinel,
+            "0x000000000000000000000000000000000000c0de".to_string(),
+            rumi_protocol_backend::chains::evm::tecdsa::is_valid_evm_address,
+        )
+        .expect("claim plan")
+        .expect("nonzero claim");
+        assert!(recredit_failed_cfx_claim_payout_in_state(
+            &mut state,
+            CfxClaimPayoutRecovery {
+                chain_sentinel: sentinel,
+                op_id: 44,
+                claim_id: plan.claim_id,
+                claimant: user_a(),
+                amount_wei: plan.amount_wei,
+                reason: "tx reverted".to_string(),
+                failed_at_ns: 123,
+            },
+        )
+        .expect("first recovery succeeds"));
+        let before_claims = state.deposits[&user_a()].cfx_claims.clone();
+        let before_sources = state.chain_claim_sources.clone();
+
+        let err = recredit_failed_cfx_claim_payout_in_state(
+            &mut state,
+            CfxClaimPayoutRecovery {
+                chain_sentinel: sentinel,
+                op_id: 44,
+                claim_id: plan.claim_id,
+                claimant: user_b(),
+                amount_wei: plan.amount_wei,
+                reason: "conflicting replay".to_string(),
+                failed_at_ns: 124,
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, StabilityPoolError::LiquidationFailed { .. }));
+        assert_eq!(
+            state.deposits[&user_a()].cfx_claims,
+            before_claims,
+            "conflict must not mutate user claims",
+        );
+        assert_eq!(
+            state.chain_claim_sources, before_sources,
+            "conflict must not mutate backend claim sources",
+        );
+    }
+
+    #[test]
+    fn distinct_failed_cfx_claim_payout_ops_can_recredit_separate_payouts() {
+        let mut state = test_state();
+        let sentinel = state
+            .register_chain_collateral(1030, "CFX".to_string(), 18)
+            .unwrap();
+        let mut pos = DepositPosition::new(0);
+        pos.cfx_claims
+            .get_or_insert_with(BTreeMap::new)
+            .insert(sentinel, 20);
+        state.deposits.insert(user_a(), pos);
+        state.record_chain_claim_source(sentinel, 77, 20);
+
+        let first = prepare_cfx_claim_payout_in_state(
+            &mut state,
+            user_a(),
+            sentinel,
+            "0x000000000000000000000000000000000000c0de".to_string(),
+            rumi_protocol_backend::chains::evm::tecdsa::is_valid_evm_address,
+        )
+        .expect("first claim plan")
+        .expect("nonzero first claim");
+        assert!(recredit_failed_cfx_claim_payout_in_state(
+            &mut state,
+            CfxClaimPayoutRecovery {
+                chain_sentinel: sentinel,
+                op_id: 45,
+                claim_id: first.claim_id,
+                claimant: user_a(),
+                amount_wei: first.amount_wei,
+                reason: "first tx reverted".to_string(),
+                failed_at_ns: 123,
+            },
+        )
+        .expect("first recovery succeeds"));
+
+        let second = prepare_cfx_claim_payout_in_state(
+            &mut state,
+            user_a(),
+            sentinel,
+            "0x000000000000000000000000000000000000c0de".to_string(),
+            rumi_protocol_backend::chains::evm::tecdsa::is_valid_evm_address,
+        )
+        .expect("second claim plan")
+        .expect("nonzero second claim");
+        assert!(recredit_failed_cfx_claim_payout_in_state(
+            &mut state,
+            CfxClaimPayoutRecovery {
+                chain_sentinel: sentinel,
+                op_id: 46,
+                claim_id: second.claim_id,
+                claimant: user_a(),
+                amount_wei: second.amount_wei,
+                reason: "second tx reverted".to_string(),
+                failed_at_ns: 124,
+            },
+        )
+        .expect("second recovery succeeds"));
+
+        assert_eq!(
+            state.deposits[&user_a()].cfx_claims.as_ref().unwrap()[&sentinel],
+            20,
+            "separate failed ops restore separate payout attempts",
+        );
+        assert_eq!(
+            state
+                .completed_cfx_claim_payout_recoveries
+                .as_ref()
+                .map(|m| m.len()),
+            Some(2),
+            "journal keeps one record per failed backend op",
+        );
+    }
+
+    #[test]
+    fn failed_cfx_claim_payout_recovery_rejects_invalid_input_without_mutation() {
+        let mut state = test_state();
+        let sentinel = state
+            .register_chain_collateral(1030, "CFX".to_string(), 18)
+            .unwrap();
+        let mut pos = DepositPosition::new(0);
+        pos.cfx_claims
+            .get_or_insert_with(BTreeMap::new)
+            .insert(sentinel, 5);
+        state.deposits.insert(user_a(), pos);
+        state.record_chain_claim_source(sentinel, 77, 5);
+        let before_claims = state.deposits[&user_a()].cfx_claims.clone();
+        let before_sources = state.chain_claim_sources.clone();
+
+        let zero = recredit_failed_cfx_claim_payout_in_state(
+            &mut state,
+            CfxClaimPayoutRecovery {
+                chain_sentinel: sentinel,
+                op_id: 47,
+                claim_id: 77,
+                claimant: user_a(),
+                amount_wei: 0,
+                reason: "zero amount".to_string(),
+                failed_at_ns: 123,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(zero, StabilityPoolError::AmountTooLow { .. }));
+
+        let missing_sentinel = Principal::from_slice(&[99]);
+        let invalid_sentinel = recredit_failed_cfx_claim_payout_in_state(
+            &mut state,
+            CfxClaimPayoutRecovery {
+                chain_sentinel: missing_sentinel,
+                op_id: 48,
+                claim_id: 77,
+                claimant: user_a(),
+                amount_wei: 5,
+                reason: "bad sentinel".to_string(),
+                failed_at_ns: 124,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            invalid_sentinel,
+            StabilityPoolError::CollateralNotFound { .. }
+        ));
+        assert_eq!(state.deposits[&user_a()].cfx_claims, before_claims);
+        assert_eq!(state.chain_claim_sources, before_sources);
+        assert!(
+            state
+                .completed_cfx_claim_payout_recoveries
+                .clone()
+                .unwrap_or_default()
+                .is_empty(),
+            "invalid input must not journal a recovery",
         );
     }
 
