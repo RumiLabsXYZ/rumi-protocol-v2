@@ -213,6 +213,8 @@ const E8: u128 = 100_000_000;
 /// keccak256("Mint(uint256,address,uint256)"), must match evm_rpc.rs.
 const MINT_EVENT_TOPIC0: &str =
     "0x4e3883c75cc9c752bb1db2e406a822e4a75067ae77ad9a0a4d179f2709b9e1f6";
+/// UniswapV2 factory `getPair(address,address)` selector.
+const GET_PAIR_SELECTOR: &str = "0xe6a43905";
 
 /// Conflux register arg's `finality_depth` (mirrors conflux_testnet_register_arg()).
 const CONFLUX_FINALITY_DEPTH: u64 = 100;
@@ -364,6 +366,15 @@ fn word_addr(addr: &str) -> String {
     format!("0x{:0>64}", raw.to_lowercase())
 }
 
+fn script_factory_pair_sanity(pic: &PocketIc, mock: Principal, pair: &str) {
+    let _ = update_any(
+        pic,
+        mock,
+        "set_eth_call_response",
+        Encode!(&GET_PAIR_SELECTOR.to_string(), &word_addr(pair)).unwrap(),
+    );
+}
+
 // ─── liquidation config builders ─────────────────────────────────────────────
 
 /// An ENABLED Conflux liquidation config with valid wiring. slippage 250 bps
@@ -510,6 +521,7 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
         None => {
             // ── GATED subset: the new config fields decode + the new query is
             // callable. No Open vaults exist yet, so the query is empty.
+            script_factory_pair_sanity(&pic, mock, VALID_EVM_ADDR);
             decode_result(
                 update_dev(
                     &pic,
@@ -617,6 +629,7 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
     let _ = update_dev(&pic, backend, "set_settlement_tick_interval_secs", Encode!(&31_536_000u64).unwrap());
 
     // ── Enable the liquidation config (master switch on) ─────────────────────
+    script_factory_pair_sanity(&pic, mock, VALID_EVM_ADDR);
     decode_result(
         update_dev(
             &pic,

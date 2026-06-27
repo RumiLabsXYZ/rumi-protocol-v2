@@ -376,6 +376,45 @@ fn parse_eth_call_u128_decodes_padded_word() {
     assert!(parse_eth_call_u128(&too_big).is_err());
 }
 
+#[test]
+fn parse_eth_call_address_decodes_padded_word() {
+    use crate::chains::monad::evm_rpc::parse_eth_call_address;
+
+    let word = "0x000000000000000000000000ABCDEFabcdefABCDEFabcdefABCDEFabcdefABCD";
+    assert_eq!(
+        parse_eth_call_address(word).unwrap(),
+        "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+    );
+    assert!(parse_eth_call_address("0x1234").is_err());
+    assert!(parse_eth_call_address(
+        "0x00000000000000000000000000000000000000000000000000000000000000001234"
+    )
+    .is_err());
+    assert!(parse_eth_call_address(
+        "0x100000000000000000000000ABCDEFabcdefABCDEFabcdefABCDEFabcdefABCD"
+    )
+    .is_err());
+    assert!(parse_eth_call_address(
+        "0x0000000000000000000000000000000000000000000000000000000000000000"
+    )
+    .is_err());
+    assert!(parse_eth_call_address("0xzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz").is_err());
+}
+
+#[test]
+fn encode_get_pair_calldata_matches_uniswap_v2_factory_shape() {
+    use crate::chains::monad::evm_rpc::{encode_get_pair_calldata, GET_PAIR_SELECTOR};
+
+    let a = "0x1111111111111111111111111111111111111111";
+    let b = "0x2222222222222222222222222222222222222222";
+    let calldata = encode_get_pair_calldata(a, b).unwrap();
+    assert!(calldata.starts_with(GET_PAIR_SELECTOR));
+    assert_eq!(calldata.len(), 2 + 8 + 64 + 64);
+    assert_eq!(&calldata[10..74], &format!("{:0>64}", a.trim_start_matches("0x")));
+    assert_eq!(&calldata[74..138], &format!("{:0>64}", b.trim_start_matches("0x")));
+    assert!(encode_get_pair_calldata("0x1234", b).is_err());
+}
+
 // ─── Increment 3 / Task 4: DEX getReserves parse + Transfer-log decode ───
 #[test]
 fn parse_two_uint112_splits_getreserves() {

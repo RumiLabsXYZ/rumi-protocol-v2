@@ -351,6 +351,23 @@ pub(crate) fn mark_chain_absorb_error_in_state(
     }
 }
 
+pub(crate) fn clear_unburned_chain_absorb_intent_in_state(
+    state: &mut StabilityPoolState,
+    vault_id: u64,
+) -> bool {
+    let Some(intent) = state.get_pending_chain_absorb(vault_id) else {
+        return false;
+    };
+    if intent.status == ChainSpAbsorbIntentStatus::Prepared
+        && intent.burn_proof.is_none()
+        && intent.backend_result.is_none()
+    {
+        state.take_pending_chain_absorb(vault_id);
+        return true;
+    }
+    false
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CfxClaimPayoutPlan {
     pub claimant: Principal,
@@ -588,6 +605,73 @@ pub(crate) fn rollback_cfx_claim_payout_in_state(
     *entry = entry.saturating_add(plan.amount_wei);
 }
 
+pub(crate) fn recredit_failed_cfx_claim_payout_in_state(
+    state: &mut StabilityPoolState,
+    recovery: CfxClaimPayoutRecovery,
+) -> Result<bool, StabilityPoolError> {
+    recredit_failed_cfx_claim_payout_in_state_at(state, recovery.clone(), recovery.failed_at_ns)
+}
+
+pub(crate) fn recredit_failed_cfx_claim_payout_in_state_at(
+    state: &mut StabilityPoolState,
+    recovery: CfxClaimPayoutRecovery,
+    recovered_at_ns: u64,
+) -> Result<bool, StabilityPoolError> {
+    if recovery.amount_wei == 0 {
+        return Err(StabilityPoolError::AmountTooLow { minimum_e8s: 1 });
+    }
+    if !state.is_chain_collateral_sentinel(&recovery.chain_sentinel) {
+        return Err(StabilityPoolError::CollateralNotFound {
+            ledger: recovery.chain_sentinel,
+        });
+    }
+
+    let key = recovery.key();
+    if let Some(existing) = state.completed_cfx_claim_payout_recovery(&key) {
+        if existing.claim_id == recovery.claim_id
+            && existing.claimant == recovery.claimant
+            && existing.amount_wei == recovery.amount_wei
+        {
+            return Ok(false);
+        }
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id: recovery.claim_id,
+            reason: format!(
+                "completed CFX claim payout recovery conflicts for op {}",
+                recovery.op_id
+            ),
+        });
+    }
+    if state.completed_cfx_claim_payout_recovery_was_evicted(&key) {
+        return Ok(false);
+    }
+
+    state.record_chain_claim_source(
+        recovery.chain_sentinel,
+        recovery.claim_id,
+        recovery.amount_wei,
+    );
+    let position = state
+        .deposits
+        .entry(recovery.claimant)
+        .or_insert_with(|| DepositPosition::new(0));
+    let claims = position.cfx_claims.get_or_insert_with(BTreeMap::new);
+    let entry = claims.entry(recovery.chain_sentinel).or_insert(0);
+    *entry = entry.saturating_add(recovery.amount_wei);
+
+    state.record_completed_cfx_claim_payout_recovery(CfxClaimPayoutRecoveryRecord {
+        key,
+        claim_id: recovery.claim_id,
+        claimant: recovery.claimant,
+        amount_wei: recovery.amount_wei,
+        reason: recovery.reason,
+        failed_at_ns: recovery.failed_at_ns,
+        recovered_at_ns,
+    });
+
+    Ok(true)
+}
+
 pub(crate) fn is_duplicate_chain_claim_error(error: &rumi_protocol_backend::ProtocolError) -> bool {
     match error {
         rumi_protocol_backend::ProtocolError::ChainAdmin(msg)
@@ -778,6 +862,12 @@ pub async fn scan_chain_absorb_candidates(
         return Err(StabilityPoolError::Unauthorized);
     }
 
+    discover_chain_absorb_candidates(max_per_chain).await
+}
+
+async fn discover_chain_absorb_candidates(
+    max_per_chain: Option<u64>,
+) -> Result<Vec<ChainSpAbsorbCandidate>, StabilityPoolError> {
     let (protocol_id, chains) = read_state(|s| {
         (
             s.protocol_canister_id,
@@ -794,11 +884,8 @@ pub async fn scan_chain_absorb_candidates(
             method: "get_chain_liquidatable_vaults".to_string(),
         })?;
 
-        for vault in vaults
-            .into_iter()
-            .filter(|v| v.sp_attempted)
-            .take(per_chain)
-        {
+        let mut eligible_for_chain = 0usize;
+        for vault in vaults.into_iter().filter(|v| v.sp_attempted) {
             if let Ok(plan) = read_state(|s| prepare_chain_absorb_plan_in_state(s, &vault)) {
                 let pending_status = read_state(|s| s.pending_chain_absorb_status(vault.vault_id));
                 candidates.push(ChainSpAbsorbCandidate {
@@ -806,11 +893,27 @@ pub async fn scan_chain_absorb_candidates(
                     icusd_to_burn_e8s: plan.icusd_to_burn_e8s,
                     pending_status,
                 });
+                eligible_for_chain += 1;
+                if eligible_for_chain >= per_chain {
+                    break;
+                }
             }
         }
     }
 
     Ok(candidates)
+}
+
+pub(crate) fn select_chain_absorb_auto_vault(
+    state: &StabilityPoolState,
+    candidates: &[ChainSpAbsorbCandidate],
+) -> Option<u64> {
+    state
+        .pending_chain_absorbs()
+        .into_iter()
+        .map(|intent| intent.vault_id)
+        .next()
+        .or_else(|| candidates.first().map(|candidate| candidate.vault.vault_id))
 }
 
 async fn submit_chain_absorb_to_backend(
@@ -872,6 +975,31 @@ async fn submit_chain_absorb_to_backend(
     }
 }
 
+async fn preflight_chain_absorb_with_backend(
+    protocol_id: Principal,
+    vault_id: u64,
+    icusd_to_burn_e8s: u64,
+) -> Result<(), StabilityPoolError> {
+    let preflight_result: Result<(Result<(), rumi_protocol_backend::ProtocolError>,), _> = call(
+        protocol_id,
+        "stability_pool_preflight_chain_absorb",
+        (vault_id, icusd_to_burn_e8s),
+    )
+    .await;
+
+    match preflight_result {
+        Ok((Ok(()),)) => Ok(()),
+        Ok((Err(error),)) => Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: format!("backend rejected chain absorb preflight: {:?}", error),
+        }),
+        Err(_) => Err(StabilityPoolError::InterCanisterCallFailed {
+            target: format!("{}", protocol_id),
+            method: "stability_pool_preflight_chain_absorb".to_string(),
+        }),
+    }
+}
+
 pub async fn sp_absorb_chain_vault(
     vault_id: u64,
 ) -> Result<ChainSpAbsorbResult, StabilityPoolError> {
@@ -882,9 +1010,12 @@ pub async fn sp_absorb_chain_vault(
     if !read_state(|s| s.is_admin(&caller)) {
         return Err(StabilityPoolError::Unauthorized);
     }
-    if read_state(|s| s.configuration.emergency_pause) {
-        return Err(StabilityPoolError::EmergencyPaused);
-    }
+    sp_absorb_chain_vault_core(vault_id).await
+}
+
+async fn sp_absorb_chain_vault_core(
+    vault_id: u64,
+) -> Result<ChainSpAbsorbResult, StabilityPoolError> {
     if let Some(completion) = read_state(|s| s.completed_chain_absorb(vault_id)) {
         return Ok(completion.result);
     }
@@ -903,6 +1034,57 @@ pub async fn sp_absorb_chain_vault(
                 submit_chain_absorb_to_backend(protocol_id, vault_id, &plan, proof).await?;
             return mutate_state(|s| apply_chain_absorb_success_in_state(s, &plan, result));
         }
+
+        if read_state(|s| s.configuration.emergency_pause) {
+            return Err(StabilityPoolError::EmergencyPaused);
+        }
+        let protocol_id = read_state(|s| s.protocol_canister_id);
+        if let Err(error) =
+            preflight_chain_absorb_with_backend(protocol_id, vault_id, plan.icusd_to_burn_e8s).await
+        {
+            mutate_state(|s| {
+                clear_unburned_chain_absorb_intent_in_state(s, vault_id);
+            });
+            return Err(error);
+        }
+        if read_state(|s| s.configuration.emergency_pause) {
+            return Err(StabilityPoolError::EmergencyPaused);
+        }
+
+        let proof = match burn_icusd_for_chain_writedown_with_account(
+            intent.icusd_ledger,
+            intent.icusd_minting_account,
+            intent.icusd_to_burn_e8s,
+            intent.vault_id,
+            intent.burn_created_at_time_ns,
+        )
+        .await
+        {
+            Ok(proof) => {
+                mutate_state(|s| {
+                    mark_chain_absorb_burned_in_state(
+                        s,
+                        vault_id,
+                        proof.clone(),
+                        ic_cdk::api::time(),
+                    )
+                })?;
+                proof
+            }
+            Err(error) => {
+                mutate_state(|s| {
+                    clear_unburned_chain_absorb_intent_in_state(s, vault_id);
+                });
+                return Err(error);
+            }
+        };
+
+        let result = submit_chain_absorb_to_backend(protocol_id, vault_id, &plan, proof).await?;
+        return mutate_state(|s| apply_chain_absorb_success_in_state(s, &plan, result));
+    }
+
+    if read_state(|s| s.configuration.emergency_pause) {
+        return Err(StabilityPoolError::EmergencyPaused);
     }
 
     let (protocol_id, chains) = read_state(|s| {
@@ -942,10 +1124,23 @@ pub async fn sp_absorb_chain_vault(
         Some(intent) => intent.icusd_minting_account,
         None => fetch_icusd_minting_account(plan.icusd_ledger).await?,
     };
+    if read_state(|s| s.configuration.emergency_pause) {
+        return Err(StabilityPoolError::EmergencyPaused);
+    }
+    preflight_chain_absorb_with_backend(protocol_id, vault_id, plan.icusd_to_burn_e8s).await?;
+    if read_state(|s| s.configuration.emergency_pause) {
+        return Err(StabilityPoolError::EmergencyPaused);
+    }
     let now = ic_cdk::api::time();
     let mut intent = mutate_state(|s| {
         prepare_or_reuse_chain_absorb_intent_in_state(s, &plan, minting_account, now)
     })?;
+    if read_state(|s| s.configuration.emergency_pause) {
+        mutate_state(|s| {
+            clear_unburned_chain_absorb_intent_in_state(s, vault_id);
+        });
+        return Err(StabilityPoolError::EmergencyPaused);
+    }
 
     let proof = if let Some(proof) = intent.burn_proof.clone() {
         proof
@@ -972,13 +1167,7 @@ pub async fn sp_absorb_chain_vault(
             }
             Err(error) => {
                 mutate_state(|s| {
-                    mark_chain_absorb_error_in_state(
-                        s,
-                        vault_id,
-                        ChainSpAbsorbIntentStatus::Prepared,
-                        format!("icUSD burn failed: {:?}", error),
-                        ic_cdk::api::time(),
-                    );
+                    clear_unburned_chain_absorb_intent_in_state(s, vault_id);
                 });
                 return Err(error);
             }
@@ -992,6 +1181,103 @@ pub async fn sp_absorb_chain_vault(
     };
 
     mutate_state(|s| apply_chain_absorb_success_in_state(s, &plan, result))
+}
+
+pub async fn run_chain_absorb_auto_tick(
+) -> Result<Option<ChainAbsorbAutoTickRecord>, StabilityPoolError> {
+    let started_at_ns = ic_cdk::api::time();
+    if !read_state(|s| s.chain_absorb_auto_due(started_at_ns)) {
+        return Ok(None);
+    }
+
+    let _tick_guard = crate::pool_guard::ChainAbsorbAutoTickGuard::new()?;
+    let config = read_state(|s| s.chain_absorb_auto_config());
+    if !config.enabled || !read_state(|s| s.chain_absorb_auto_due(started_at_ns)) {
+        return Ok(None);
+    }
+
+    if read_state(|s| s.configuration.emergency_pause) {
+        let tick = ChainAbsorbAutoTickRecord {
+            started_at_ns,
+            completed_at_ns: ic_cdk::api::time(),
+            attempted_vault_id: None,
+            candidates_scanned: 0,
+            absorbed: None,
+            error: None,
+            skipped_reason: Some("emergency pause".to_string()),
+        };
+        mutate_state(|s| s.record_chain_absorb_auto_tick(tick.clone()));
+        return Ok(Some(tick));
+    }
+
+    let pending_vault = read_state(|s| {
+        s.pending_chain_absorbs()
+            .into_iter()
+            .map(|intent| intent.vault_id)
+            .next()
+    });
+    let (vault_id, candidates_scanned) = if let Some(vault_id) = pending_vault {
+        (vault_id, 0)
+    } else {
+        let candidates =
+            match discover_chain_absorb_candidates(Some(config.max_scan_per_chain)).await {
+                Ok(candidates) => candidates,
+                Err(error) => {
+                    let tick = ChainAbsorbAutoTickRecord {
+                        started_at_ns,
+                        completed_at_ns: ic_cdk::api::time(),
+                        attempted_vault_id: None,
+                        candidates_scanned: 0,
+                        absorbed: None,
+                        error: Some(format!("{error:?}")),
+                        skipped_reason: None,
+                    };
+                    mutate_state(|s| s.record_chain_absorb_auto_tick(tick.clone()));
+                    return Ok(Some(tick));
+                }
+            };
+        let candidates_scanned = candidates.len() as u64;
+        match read_state(|s| select_chain_absorb_auto_vault(s, &candidates)) {
+            Some(vault_id) => (vault_id, candidates_scanned),
+            None => {
+                let tick = ChainAbsorbAutoTickRecord {
+                    started_at_ns,
+                    completed_at_ns: ic_cdk::api::time(),
+                    attempted_vault_id: None,
+                    candidates_scanned,
+                    absorbed: None,
+                    error: None,
+                    skipped_reason: Some("no eligible candidates".to_string()),
+                };
+                mutate_state(|s| s.record_chain_absorb_auto_tick(tick.clone()));
+                return Ok(Some(tick));
+            }
+        }
+    };
+
+    let result = sp_absorb_chain_vault_core(vault_id).await;
+    let tick = match result {
+        Ok(absorbed) => ChainAbsorbAutoTickRecord {
+            started_at_ns,
+            completed_at_ns: ic_cdk::api::time(),
+            attempted_vault_id: Some(vault_id),
+            candidates_scanned,
+            absorbed: Some(absorbed),
+            error: None,
+            skipped_reason: None,
+        },
+        Err(error) => ChainAbsorbAutoTickRecord {
+            started_at_ns,
+            completed_at_ns: ic_cdk::api::time(),
+            attempted_vault_id: Some(vault_id),
+            candidates_scanned,
+            absorbed: None,
+            error: Some(format!("{error:?}")),
+            skipped_reason: None,
+        },
+    };
+    mutate_state(|s| s.record_chain_absorb_auto_tick(tick.clone()));
+    Ok(Some(tick))
 }
 
 pub async fn claim_cfx(
@@ -1852,6 +2138,53 @@ mod tests {
     }
 
     #[test]
+    fn unburned_prepared_chain_absorb_intent_can_be_cleared_after_failure() {
+        let mut state = test_state();
+        state
+            .register_chain_collateral(1030, "CFX".to_string(), 18)
+            .unwrap();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
+        state
+            .opt_in_cfx(&user_a(), chain_collateral_sentinel(1030))
+            .unwrap();
+        let plan = prepare_chain_absorb_plan_in_state(&state, &chain_vault(100_00000000, true))
+            .expect("covered");
+        prepare_or_reuse_chain_absorb_intent_in_state(&mut state, &plan, minting_account(), 123)
+            .expect("intent is recorded");
+
+        assert!(state.has_pending_chain_absorbs());
+        assert!(clear_unburned_chain_absorb_intent_in_state(&mut state, 77));
+        assert!(
+            !state.has_pending_chain_absorbs(),
+            "a failed pre-burn attempt must not wedge pool balance operations"
+        );
+    }
+
+    #[test]
+    fn burned_chain_absorb_intent_is_not_cleared_as_unburned_failure() {
+        let mut state = test_state();
+        state
+            .register_chain_collateral(1030, "CFX".to_string(), 18)
+            .unwrap();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
+        state
+            .opt_in_cfx(&user_a(), chain_collateral_sentinel(1030))
+            .unwrap();
+        let plan = prepare_chain_absorb_plan_in_state(&state, &chain_vault(100_00000000, true))
+            .expect("covered");
+        prepare_or_reuse_chain_absorb_intent_in_state(&mut state, &plan, minting_account(), 123)
+            .expect("intent is recorded");
+        mark_chain_absorb_burned_in_state(&mut state, 77, build_icusd_burn_proof(44, 77), 456)
+            .expect("proof recorded");
+
+        assert!(!clear_unburned_chain_absorb_intent_in_state(&mut state, 77));
+        assert!(
+            state.has_pending_chain_absorbs(),
+            "burned intents must remain for backend finalization/retry"
+        );
+    }
+
+    #[test]
     fn burned_chain_absorb_intent_replays_backend_without_discovery() {
         let mut state = test_state();
         state
@@ -1890,9 +2223,11 @@ mod tests {
             .opt_in_cfx(&user_a(), chain_collateral_sentinel(1030))
             .unwrap();
 
-        let plan_a =
-            prepare_chain_absorb_plan_in_state(&state, &chain_vault_with_id(77, 100_00000000, true))
-                .expect("vault A covered");
+        let plan_a = prepare_chain_absorb_plan_in_state(
+            &state,
+            &chain_vault_with_id(77, 100_00000000, true),
+        )
+        .expect("vault A covered");
         prepare_or_reuse_chain_absorb_intent_in_state(&mut state, &plan_a, minting_account(), 123)
             .expect("intent A is recorded");
         mark_chain_absorb_burned_in_state(&mut state, 77, build_icusd_burn_proof(44, 77), 456)
@@ -1908,6 +2243,59 @@ mod tests {
                 Err(StabilityPoolError::SystemBusy)
             ),
             "a burned pending intent reserves its icUSD until local finalization",
+        );
+    }
+
+    #[test]
+    fn auto_absorb_selection_prefers_pending_intent_before_new_candidate() {
+        let mut state = test_state();
+        state
+            .register_chain_collateral(1030, "CFX".to_string(), 18)
+            .unwrap();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
+        state
+            .opt_in_cfx(&user_a(), chain_collateral_sentinel(1030))
+            .unwrap();
+
+        let plan = prepare_chain_absorb_plan_in_state(
+            &state,
+            &chain_vault_with_id(77, 100_00000000, true),
+        )
+        .expect("covered");
+        prepare_or_reuse_chain_absorb_intent_in_state(&mut state, &plan, minting_account(), 123)
+            .expect("pending intent");
+
+        let candidates = vec![ChainSpAbsorbCandidate {
+            vault: chain_vault_with_id(88, 100_00000000, true),
+            icusd_to_burn_e8s: 100_00000000,
+            pending_status: None,
+        }];
+
+        assert_eq!(
+            select_chain_absorb_auto_vault(&state, &candidates),
+            Some(77)
+        );
+    }
+
+    #[test]
+    fn auto_absorb_selection_uses_first_candidate_when_no_pending_intent() {
+        let state = test_state();
+        let candidates = vec![
+            ChainSpAbsorbCandidate {
+                vault: chain_vault_with_id(88, 100_00000000, true),
+                icusd_to_burn_e8s: 100_00000000,
+                pending_status: None,
+            },
+            ChainSpAbsorbCandidate {
+                vault: chain_vault_with_id(99, 100_00000000, true),
+                icusd_to_burn_e8s: 100_00000000,
+                pending_status: None,
+            },
+        ];
+
+        assert_eq!(
+            select_chain_absorb_auto_vault(&state, &candidates),
+            Some(88)
         );
     }
 
@@ -2159,6 +2547,386 @@ mod tests {
             state.chain_claim_sources.as_ref().unwrap()[&sentinel][0].remaining_native,
             10,
             "rollback restores backend claim source",
+        );
+    }
+
+    #[test]
+    fn failed_cfx_claim_payout_recredit_restores_user_claim_and_source_once() {
+        let mut state = test_state();
+        let sentinel = state
+            .register_chain_collateral(1030, "CFX".to_string(), 18)
+            .unwrap();
+        let mut pos = DepositPosition::new(0);
+        pos.cfx_claims
+            .get_or_insert_with(BTreeMap::new)
+            .insert(sentinel, 12);
+        state.deposits.insert(user_a(), pos);
+        state.record_chain_claim_source(sentinel, 77, 10);
+        let plan = prepare_cfx_claim_payout_in_state(
+            &mut state,
+            user_a(),
+            sentinel,
+            "0x000000000000000000000000000000000000c0de".to_string(),
+            rumi_protocol_backend::chains::evm::tecdsa::is_valid_evm_address,
+        )
+        .expect("claim plan")
+        .expect("nonzero claim");
+
+        let recovered = recredit_failed_cfx_claim_payout_in_state(
+            &mut state,
+            CfxClaimPayoutRecovery {
+                chain_sentinel: sentinel,
+                op_id: 42,
+                claim_id: plan.claim_id,
+                claimant: user_a(),
+                amount_wei: plan.amount_wei,
+                reason: "tx reverted".to_string(),
+                failed_at_ns: 123,
+            },
+        )
+        .expect("first recovery succeeds");
+
+        assert!(recovered, "first recovery mutates state");
+        assert_eq!(
+            state.deposits[&user_a()].cfx_claims.as_ref().unwrap()[&sentinel],
+            12,
+            "failed payout recredits the user claim",
+        );
+        assert_eq!(
+            state.chain_claim_sources.as_ref().unwrap()[&sentinel][0].remaining_native,
+            10,
+            "failed payout restores backend claim source",
+        );
+
+        let replay = recredit_failed_cfx_claim_payout_in_state(
+            &mut state,
+            CfxClaimPayoutRecovery {
+                chain_sentinel: sentinel,
+                op_id: 42,
+                claim_id: plan.claim_id,
+                claimant: user_a(),
+                amount_wei: plan.amount_wei,
+                reason: "same failed op replay".to_string(),
+                failed_at_ns: 124,
+            },
+        )
+        .expect("same recovery replay succeeds without mutation");
+
+        assert!(!replay, "replay is recognized as already recovered");
+        assert_eq!(
+            state.deposits[&user_a()].cfx_claims.as_ref().unwrap()[&sentinel],
+            12,
+            "replay must not double-credit the user claim",
+        );
+        assert_eq!(
+            state.chain_claim_sources.as_ref().unwrap()[&sentinel][0].remaining_native,
+            10,
+            "replay must not double-restore backend claim source",
+        );
+    }
+
+    #[test]
+    fn failed_cfx_claim_payout_replay_is_idempotent() {
+        let mut state = test_state();
+        let sentinel = state
+            .register_chain_collateral(1030, "CFX".to_string(), 18)
+            .unwrap();
+        let mut pos = DepositPosition::new(0);
+        pos.cfx_claims
+            .get_or_insert_with(BTreeMap::new)
+            .insert(sentinel, 10);
+        state.deposits.insert(user_a(), pos);
+        state.record_chain_claim_source(sentinel, 77, 10);
+        let plan = prepare_cfx_claim_payout_in_state(
+            &mut state,
+            user_a(),
+            sentinel,
+            "0x000000000000000000000000000000000000c0de".to_string(),
+            rumi_protocol_backend::chains::evm::tecdsa::is_valid_evm_address,
+        )
+        .expect("claim plan")
+        .expect("nonzero claim");
+        let recovery = CfxClaimPayoutRecovery {
+            chain_sentinel: sentinel,
+            op_id: 43,
+            claim_id: plan.claim_id,
+            claimant: user_a(),
+            amount_wei: plan.amount_wei,
+            reason: "tx reverted".to_string(),
+            failed_at_ns: 123,
+        };
+
+        assert!(
+            recredit_failed_cfx_claim_payout_in_state(&mut state, recovery.clone())
+                .expect("first recovery succeeds")
+        );
+        assert!(
+            !recredit_failed_cfx_claim_payout_in_state(&mut state, recovery)
+                .expect("exact replay succeeds")
+        );
+        assert_eq!(
+            state
+                .completed_cfx_claim_payout_recoveries
+                .as_ref()
+                .map(|m| m.len()),
+            Some(1),
+            "journal stores one durable recovery record",
+        );
+    }
+
+    #[test]
+    fn evicted_failed_cfx_claim_payout_replay_remains_idempotent() {
+        let mut state = test_state();
+        let sentinel = state
+            .register_chain_collateral(1030, "CFX".to_string(), 18)
+            .unwrap();
+
+        for op_id in 0..=(crate::state::MAX_COMPLETED_CFX_CLAIM_PAYOUT_RECOVERIES as u64) {
+            assert!(
+                recredit_failed_cfx_claim_payout_in_state(
+                    &mut state,
+                    CfxClaimPayoutRecovery {
+                        chain_sentinel: sentinel,
+                        op_id,
+                        claim_id: op_id,
+                        claimant: user_a(),
+                        amount_wei: 1,
+                        reason: "tx reverted".to_string(),
+                        failed_at_ns: op_id,
+                    },
+                )
+                .expect("recovery succeeds"),
+                "first recovery for op {op_id} mutates state",
+            );
+        }
+
+        assert!(
+            !state
+                .completed_cfx_claim_payout_recoveries
+                .as_ref()
+                .unwrap()
+                .contains_key(&CfxClaimPayoutRecoveryKey {
+                    chain_sentinel: sentinel,
+                    op_id: 0,
+                }),
+            "oldest recovery record should be evicted at the bound",
+        );
+        let before_claims = state.deposits[&user_a()].cfx_claims.clone();
+        let before_sources = state.chain_claim_sources.clone();
+
+        let replay = recredit_failed_cfx_claim_payout_in_state(
+            &mut state,
+            CfxClaimPayoutRecovery {
+                chain_sentinel: sentinel,
+                op_id: 0,
+                claim_id: 0,
+                claimant: user_a(),
+                amount_wei: 1,
+                reason: "old op replay after eviction".to_string(),
+                failed_at_ns: 999_999,
+            },
+        )
+        .expect("evicted replay succeeds without mutation");
+
+        assert!(!replay, "evicted replay is treated as already recovered");
+        assert_eq!(state.deposits[&user_a()].cfx_claims, before_claims);
+        assert_eq!(state.chain_claim_sources, before_sources);
+    }
+
+    #[test]
+    fn failed_cfx_claim_payout_conflicting_replay_rejects_without_mutation() {
+        let mut state = test_state();
+        let sentinel = state
+            .register_chain_collateral(1030, "CFX".to_string(), 18)
+            .unwrap();
+        let mut pos = DepositPosition::new(0);
+        pos.cfx_claims
+            .get_or_insert_with(BTreeMap::new)
+            .insert(sentinel, 10);
+        state.deposits.insert(user_a(), pos);
+        state.record_chain_claim_source(sentinel, 77, 10);
+        let plan = prepare_cfx_claim_payout_in_state(
+            &mut state,
+            user_a(),
+            sentinel,
+            "0x000000000000000000000000000000000000c0de".to_string(),
+            rumi_protocol_backend::chains::evm::tecdsa::is_valid_evm_address,
+        )
+        .expect("claim plan")
+        .expect("nonzero claim");
+        assert!(recredit_failed_cfx_claim_payout_in_state(
+            &mut state,
+            CfxClaimPayoutRecovery {
+                chain_sentinel: sentinel,
+                op_id: 44,
+                claim_id: plan.claim_id,
+                claimant: user_a(),
+                amount_wei: plan.amount_wei,
+                reason: "tx reverted".to_string(),
+                failed_at_ns: 123,
+            },
+        )
+        .expect("first recovery succeeds"));
+        let before_claims = state.deposits[&user_a()].cfx_claims.clone();
+        let before_sources = state.chain_claim_sources.clone();
+
+        let err = recredit_failed_cfx_claim_payout_in_state(
+            &mut state,
+            CfxClaimPayoutRecovery {
+                chain_sentinel: sentinel,
+                op_id: 44,
+                claim_id: plan.claim_id,
+                claimant: user_b(),
+                amount_wei: plan.amount_wei,
+                reason: "conflicting replay".to_string(),
+                failed_at_ns: 124,
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, StabilityPoolError::LiquidationFailed { .. }));
+        assert_eq!(
+            state.deposits[&user_a()].cfx_claims,
+            before_claims,
+            "conflict must not mutate user claims",
+        );
+        assert_eq!(
+            state.chain_claim_sources, before_sources,
+            "conflict must not mutate backend claim sources",
+        );
+    }
+
+    #[test]
+    fn distinct_failed_cfx_claim_payout_ops_can_recredit_separate_payouts() {
+        let mut state = test_state();
+        let sentinel = state
+            .register_chain_collateral(1030, "CFX".to_string(), 18)
+            .unwrap();
+        let mut pos = DepositPosition::new(0);
+        pos.cfx_claims
+            .get_or_insert_with(BTreeMap::new)
+            .insert(sentinel, 20);
+        state.deposits.insert(user_a(), pos);
+        state.record_chain_claim_source(sentinel, 77, 20);
+
+        let first = prepare_cfx_claim_payout_in_state(
+            &mut state,
+            user_a(),
+            sentinel,
+            "0x000000000000000000000000000000000000c0de".to_string(),
+            rumi_protocol_backend::chains::evm::tecdsa::is_valid_evm_address,
+        )
+        .expect("first claim plan")
+        .expect("nonzero first claim");
+        assert!(recredit_failed_cfx_claim_payout_in_state(
+            &mut state,
+            CfxClaimPayoutRecovery {
+                chain_sentinel: sentinel,
+                op_id: 45,
+                claim_id: first.claim_id,
+                claimant: user_a(),
+                amount_wei: first.amount_wei,
+                reason: "first tx reverted".to_string(),
+                failed_at_ns: 123,
+            },
+        )
+        .expect("first recovery succeeds"));
+
+        let second = prepare_cfx_claim_payout_in_state(
+            &mut state,
+            user_a(),
+            sentinel,
+            "0x000000000000000000000000000000000000c0de".to_string(),
+            rumi_protocol_backend::chains::evm::tecdsa::is_valid_evm_address,
+        )
+        .expect("second claim plan")
+        .expect("nonzero second claim");
+        assert!(recredit_failed_cfx_claim_payout_in_state(
+            &mut state,
+            CfxClaimPayoutRecovery {
+                chain_sentinel: sentinel,
+                op_id: 46,
+                claim_id: second.claim_id,
+                claimant: user_a(),
+                amount_wei: second.amount_wei,
+                reason: "second tx reverted".to_string(),
+                failed_at_ns: 124,
+            },
+        )
+        .expect("second recovery succeeds"));
+
+        assert_eq!(
+            state.deposits[&user_a()].cfx_claims.as_ref().unwrap()[&sentinel],
+            20,
+            "separate failed ops restore separate payout attempts",
+        );
+        assert_eq!(
+            state
+                .completed_cfx_claim_payout_recoveries
+                .as_ref()
+                .map(|m| m.len()),
+            Some(2),
+            "journal keeps one record per failed backend op",
+        );
+    }
+
+    #[test]
+    fn failed_cfx_claim_payout_recovery_rejects_invalid_input_without_mutation() {
+        let mut state = test_state();
+        let sentinel = state
+            .register_chain_collateral(1030, "CFX".to_string(), 18)
+            .unwrap();
+        let mut pos = DepositPosition::new(0);
+        pos.cfx_claims
+            .get_or_insert_with(BTreeMap::new)
+            .insert(sentinel, 5);
+        state.deposits.insert(user_a(), pos);
+        state.record_chain_claim_source(sentinel, 77, 5);
+        let before_claims = state.deposits[&user_a()].cfx_claims.clone();
+        let before_sources = state.chain_claim_sources.clone();
+
+        let zero = recredit_failed_cfx_claim_payout_in_state(
+            &mut state,
+            CfxClaimPayoutRecovery {
+                chain_sentinel: sentinel,
+                op_id: 47,
+                claim_id: 77,
+                claimant: user_a(),
+                amount_wei: 0,
+                reason: "zero amount".to_string(),
+                failed_at_ns: 123,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(zero, StabilityPoolError::AmountTooLow { .. }));
+
+        let missing_sentinel = Principal::from_slice(&[99]);
+        let invalid_sentinel = recredit_failed_cfx_claim_payout_in_state(
+            &mut state,
+            CfxClaimPayoutRecovery {
+                chain_sentinel: missing_sentinel,
+                op_id: 48,
+                claim_id: 77,
+                claimant: user_a(),
+                amount_wei: 5,
+                reason: "bad sentinel".to_string(),
+                failed_at_ns: 124,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            invalid_sentinel,
+            StabilityPoolError::CollateralNotFound { .. }
+        ));
+        assert_eq!(state.deposits[&user_a()].cfx_claims, before_claims);
+        assert_eq!(state.chain_claim_sources, before_sources);
+        assert!(
+            state
+                .completed_cfx_claim_payout_recoveries
+                .clone()
+                .unwrap_or_default()
+                .is_empty(),
+            "invalid input must not journal a recovery",
         );
     }
 

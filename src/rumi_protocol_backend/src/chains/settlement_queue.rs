@@ -14,15 +14,25 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
 pub enum SettlementOpKind {
-    Mint { recipient: String, amount_e8s: u128, vault_id: u64 },
+    Mint {
+        recipient: String,
+        amount_e8s: u128,
+        vault_id: u64,
+    },
     /// Return native gas-asset (MON) collateral to `recipient`. `amount_e18`
     /// is wei (1e18 scale, NOT e8s — it goes straight into the EIP-1559
     /// `value`). `vault_id` lets the settlement worker emit `WithdrawalSigned`
     /// with the real id and flip the vault `Closing -> Closed` on confirmation
     /// (replaces the old placeholder `Withdrawal { recipient, amount_e8s }`,
     /// which was never enqueued anywhere and carried the wrong unit + no id).
-    NativeWithdrawal { recipient: String, amount_e18: u128, vault_id: u64 },
-    Burn { amount_e8s: u128 },
+    NativeWithdrawal {
+        recipient: String,
+        amount_e18: u128,
+        vault_id: u64,
+    },
+    Burn {
+        amount_e8s: u128,
+    },
     /// Task 12 (Option B): realize accrued interest by minting `amount_e8s`
     /// icUSD to the per-chain interest-treasury address. `mint_id` is a FRESH,
     /// globally-unique id (from `chain_vault_id_counter`) used as the on-chain
@@ -100,6 +110,19 @@ pub struct SettlementOp {
     /// pre-existing snapshot decoding cleanly.
     #[serde(default)]
     pub submit_nonce: Option<u64>,
+    /// Same-nonce transaction hashes that may have been accepted by an RPC
+    /// provider. This is primarily for retry-safe native payouts: an RBF
+    /// replacement can be pre-recorded before an ambiguous broadcast boundary,
+    /// but a definite rejection must not make the confirm path forget the
+    /// original same-nonce hash.
+    #[serde(default)]
+    pub tx_hash_candidates: Vec<String>,
+    /// `Some(true)` only for ChainCollateralPayout ops enqueued after Inc10,
+    /// where payout capacity is reserved in `ChainLiqClaimV1.pending_native`.
+    /// Older decoded payout ops have `None` and their live reservation remains
+    /// in `paid_native`.
+    #[serde(default)]
+    pub chain_payout_uses_pending_reservation: Option<bool>,
 }
 
 impl SettlementOp {
@@ -112,6 +135,8 @@ impl SettlementOp {
             status: SettlementOpStatus::Queued,
             last_tx_hash: None,
             submit_nonce: None,
+            tx_hash_candidates: Vec::new(),
+            chain_payout_uses_pending_reservation: None,
         }
     }
 
@@ -120,15 +145,53 @@ impl SettlementOp {
             SettlementOpStatus::Inflight { tries, .. } => tries.saturating_add(1),
             _ => 1,
         };
-        self.status = SettlementOpStatus::Inflight { tries, last_attempt_ns: now_ns };
+        self.status = SettlementOpStatus::Inflight {
+            tries,
+            last_attempt_ns: now_ns,
+        };
     }
 
     pub fn mark_succeeded(&mut self, tx_hash: String, now_ns: u64) {
-        self.status = SettlementOpStatus::Succeeded { tx_hash, confirmed_ns: now_ns };
+        self.status = SettlementOpStatus::Succeeded {
+            tx_hash,
+            confirmed_ns: now_ns,
+        };
     }
 
     pub fn mark_failed(&mut self, reason: String, now_ns: u64) {
-        self.status = SettlementOpStatus::Failed { reason, failed_ns: now_ns };
+        self.status = SettlementOpStatus::Failed {
+            reason,
+            failed_ns: now_ns,
+        };
+    }
+
+    pub fn record_tx_hash_candidate(&mut self, tx_hash: String) {
+        if self.tx_hash_candidates.is_empty() {
+            if let Some(existing) = &self.last_tx_hash {
+                if existing != &tx_hash {
+                    self.tx_hash_candidates.push(existing.clone());
+                }
+            }
+        }
+        if self.tx_hash_candidates.iter().any(|h| h == &tx_hash) {
+            self.last_tx_hash = Some(tx_hash);
+            return;
+        }
+        self.tx_hash_candidates.push(tx_hash.clone());
+        self.last_tx_hash = Some(tx_hash);
+    }
+
+    pub fn receipt_tx_hash_candidates(&self) -> Vec<String> {
+        let mut hashes = Vec::with_capacity(self.tx_hash_candidates.len() + 1);
+        if let Some(h) = &self.last_tx_hash {
+            hashes.push(h.clone());
+        }
+        for h in &self.tx_hash_candidates {
+            if !hashes.iter().any(|existing| existing == h) {
+                hashes.push(h.clone());
+            }
+        }
+        hashes
     }
 }
 
@@ -161,7 +224,8 @@ impl SettlementQueueV1 {
         }
         let assigned = self.tail;
         op.op_id = assigned;
-        self.seen_idempotency_keys.insert(op.idempotency_key.clone());
+        self.seen_idempotency_keys
+            .insert(op.idempotency_key.clone());
         self.drain_order.push_back(assigned);
         self.pending.insert(assigned, op);
         self.tail = self.tail.saturating_add(1);
@@ -197,11 +261,13 @@ impl SettlementQueueV1 {
     /// (`Succeeded`/`Failed`) ops never count.
     pub fn has_active_mint_op(&self) -> bool {
         self.pending.values().any(|op| {
-            matches!(op.kind, SettlementOpKind::Mint { .. } | SettlementOpKind::InterestMint { .. })
-                && matches!(
-                    op.status,
-                    SettlementOpStatus::Queued | SettlementOpStatus::Inflight { .. }
-                )
+            matches!(
+                op.kind,
+                SettlementOpKind::Mint { .. } | SettlementOpKind::InterestMint { .. }
+            ) && matches!(
+                op.status,
+                SettlementOpStatus::Queued | SettlementOpStatus::Inflight { .. }
+            )
         })
     }
 
@@ -274,8 +340,14 @@ mod tests {
         assert_eq!(q.pending_len(), 3);
 
         // Mark op 0 Succeeded and op 1 Failed; op 2 stays Queued (live).
-        q.pending.get_mut(&id0).unwrap().mark_succeeded("0xhash".to_string(), 10);
-        q.pending.get_mut(&id1).unwrap().mark_failed("reverted".to_string(), 11);
+        q.pending
+            .get_mut(&id0)
+            .unwrap()
+            .mark_succeeded("0xhash".to_string(), 10);
+        q.pending
+            .get_mut(&id1)
+            .unwrap()
+            .mark_failed("reverted".to_string(), 11);
 
         q.prune_terminal();
 
@@ -297,7 +369,10 @@ mod tests {
         assert!(matches!(dup, Err(SettlementQueueError::DuplicateIdempotencyKey(k)) if k == "k0"));
 
         // select_next_op still returns the live Queued op (semantics unchanged).
-        let live = q.pending.values().find(|o| matches!(o.status, SettlementOpStatus::Queued));
+        let live = q
+            .pending
+            .values()
+            .find(|o| matches!(o.status, SettlementOpStatus::Queued));
         assert!(live.is_some());
     }
 
@@ -306,8 +381,14 @@ mod tests {
         let mut q = SettlementQueueV1::default();
         let id0 = q.enqueue(mint_op("a")).unwrap();
         let id1 = q.enqueue(mint_op("b")).unwrap();
-        q.pending.get_mut(&id0).unwrap().mark_succeeded("0x1".to_string(), 1);
-        q.pending.get_mut(&id1).unwrap().mark_succeeded("0x2".to_string(), 2);
+        q.pending
+            .get_mut(&id0)
+            .unwrap()
+            .mark_succeeded("0x1".to_string(), 1);
+        q.pending
+            .get_mut(&id1)
+            .unwrap()
+            .mark_succeeded("0x2".to_string(), 2);
 
         q.prune_terminal();
 
@@ -327,5 +408,35 @@ mod tests {
         q.prune_terminal();
         assert_eq!(q.pending_len(), 1);
         assert_eq!(q.head, before_head);
+    }
+
+    #[test]
+    fn tx_hash_candidates_seed_legacy_last_hash_and_do_not_evict_ambiguous_replacements() {
+        let mut op = mint_op("k");
+        op.last_tx_hash = Some("0xlegacy".to_string());
+        for i in 0..16 {
+            op.record_tx_hash_candidate(format!("0xreplacement{i}"));
+        }
+
+        assert_eq!(op.tx_hash_candidates.len(), 17);
+        assert_eq!(op.tx_hash_candidates.first().unwrap(), "0xlegacy");
+        assert_eq!(op.tx_hash_candidates.last().unwrap(), "0xreplacement15");
+        assert_eq!(
+            op.receipt_tx_hash_candidates().first().unwrap(),
+            op.last_tx_hash.as_ref().unwrap(),
+            "receipt polling still starts with the latest replacement"
+        );
+        assert!(
+            op.receipt_tx_hash_candidates()
+                .iter()
+                .any(|h| h == "0xlegacy"),
+            "a decoded legacy last_tx_hash remains observable after replacement recording"
+        );
+        assert!(
+            op.receipt_tx_hash_candidates()
+                .iter()
+                .any(|h| h == "0xreplacement0"),
+            "older ambiguous replacements remain observable"
+        );
     }
 }

@@ -758,13 +758,8 @@ pub async fn run_observer(chain: ChainId) {
         let recorded_supply = read_state(|s| {
             s.multi_chain.chain_supplies.get(&chain).copied().unwrap_or(0)
         });
-        let has_inflight_mint = read_state(|s| {
-            s.multi_chain
-                .settlement_queues
-                .get(&chain)
-                .map(|q| q.has_active_mint_op())
-                .unwrap_or(false)
-        });
+        let has_inflight_mint =
+            read_state(|s| s.multi_chain.has_supply_increasing_settlement_op(chain));
         // Run the catch-up sweep ONLY on a proven divergence: no mint in flight
         // AND a readable totalSupply that has DROPPED below `recorded` (an
         // unsubmitted burn). Mint-in-flight, probe errors, and a mint EXCESS

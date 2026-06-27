@@ -48,6 +48,23 @@ pub struct StabilityPoolState {
     /// Local idempotency record for completed chain-vault SP absorbs.
     #[serde(default)]
     pub completed_chain_absorbs: Option<BTreeMap<u64, ChainSpAbsorbCompletion>>,
+    /// Disabled-by-default automatic chain absorb scheduler configuration.
+    #[serde(default)]
+    pub chain_absorb_auto_config: Option<ChainAbsorbAutoConfig>,
+    /// Latest automatic chain absorb tick, retained as bounded operator status.
+    #[serde(default)]
+    pub chain_absorb_auto_last_tick: Option<ChainAbsorbAutoTickRecord>,
+    /// Durable idempotency journal for backend-confirmed failed CFX claim payout
+    /// recovery. Without this, retrying the backend callback would double-credit
+    /// both the depositor claim and the backend claim source.
+    #[serde(default)]
+    pub completed_cfx_claim_payout_recoveries:
+        Option<BTreeMap<CfxClaimPayoutRecoveryKey, CfxClaimPayoutRecoveryRecord>>,
+    /// Compact idempotency watermark for recovery records evicted from
+    /// `completed_cfx_claim_payout_recoveries`. A replay with an op_id at or
+    /// below the per-sentinel floor is treated as already recovered.
+    #[serde(default)]
+    pub completed_cfx_claim_payout_recovery_floor: Option<BTreeMap<Principal, u64>>,
 
     // Canister references
     pub protocol_canister_id: Principal,
@@ -100,6 +117,10 @@ impl Default for StabilityPoolState {
             chain_claim_sources: Some(BTreeMap::new()),
             pending_chain_absorbs: Some(BTreeMap::new()),
             completed_chain_absorbs: Some(BTreeMap::new()),
+            chain_absorb_auto_config: Some(ChainAbsorbAutoConfig::default()),
+            chain_absorb_auto_last_tick: None,
+            completed_cfx_claim_payout_recoveries: Some(BTreeMap::new()),
+            completed_cfx_claim_payout_recovery_floor: Some(BTreeMap::new()),
             protocol_canister_id: Principal::anonymous(),
             configuration: PoolConfiguration {
                 min_deposit_e8s: 1_000_000, // 0.01 USD
@@ -134,6 +155,7 @@ const MAX_POOL_EVENTS: usize = 10_000;
 pub const MAX_PENDING_REFUNDS: usize = 10_000;
 pub const MAX_PENDING_CHAIN_ABSORBS: usize = 1_000;
 pub const MAX_COMPLETED_CHAIN_ABSORBS: usize = 10_000;
+pub const MAX_COMPLETED_CFX_CLAIM_PAYOUT_RECOVERIES: usize = 10_000;
 
 impl StabilityPoolState {
     pub fn initialize(&mut self, args: StabilityPoolInitArgs) {
@@ -707,6 +729,102 @@ impl StabilityPoolState {
         self.completed_chain_absorbs
             .as_ref()
             .and_then(|m| m.get(&vault_id).cloned())
+    }
+
+    pub fn completed_cfx_claim_payout_recovery(
+        &self,
+        key: &CfxClaimPayoutRecoveryKey,
+    ) -> Option<CfxClaimPayoutRecoveryRecord> {
+        self.completed_cfx_claim_payout_recoveries
+            .as_ref()
+            .and_then(|m| m.get(key).cloned())
+    }
+
+    pub fn completed_cfx_claim_payout_recovery_was_evicted(
+        &self,
+        key: &CfxClaimPayoutRecoveryKey,
+    ) -> bool {
+        self.completed_cfx_claim_payout_recovery_floor
+            .as_ref()
+            .and_then(|m| m.get(&key.chain_sentinel))
+            .map(|floor| key.op_id <= *floor)
+            .unwrap_or(false)
+    }
+
+    pub fn record_completed_cfx_claim_payout_recovery(
+        &mut self,
+        record: CfxClaimPayoutRecoveryRecord,
+    ) {
+        let completed = self
+            .completed_cfx_claim_payout_recoveries
+            .get_or_insert_with(BTreeMap::new);
+        completed.insert(record.key.clone(), record);
+        while completed.len() > MAX_COMPLETED_CFX_CLAIM_PAYOUT_RECOVERIES {
+            let Some(oldest_key) = completed
+                .iter()
+                .min_by_key(|(key, record)| (record.recovered_at_ns, (*key).clone()))
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            if let Some(evicted) = completed.remove(&oldest_key) {
+                let floors = self
+                    .completed_cfx_claim_payout_recovery_floor
+                    .get_or_insert_with(BTreeMap::new);
+                let floor = floors.entry(evicted.key.chain_sentinel).or_insert(0);
+                *floor = (*floor).max(evicted.key.op_id);
+            }
+        }
+    }
+
+    pub fn chain_absorb_auto_config(&self) -> ChainAbsorbAutoConfig {
+        self.chain_absorb_auto_config.clone().unwrap_or_default()
+    }
+
+    pub fn set_chain_absorb_auto_config(
+        &mut self,
+        mut config: ChainAbsorbAutoConfig,
+    ) -> Result<(), StabilityPoolError> {
+        if config.interval_seconds < MIN_CHAIN_ABSORB_AUTO_INTERVAL_SECONDS {
+            return Err(StabilityPoolError::LiquidationFailed {
+                vault_id: 0,
+                reason: format!(
+                    "chain absorb auto interval must be at least {} seconds",
+                    MIN_CHAIN_ABSORB_AUTO_INTERVAL_SECONDS
+                ),
+            });
+        }
+        if config.max_scan_per_chain == 0 {
+            return Err(StabilityPoolError::LiquidationFailed {
+                vault_id: 0,
+                reason: "chain absorb auto max_scan_per_chain must be greater than 0".to_string(),
+            });
+        }
+        config.max_scan_per_chain = config
+            .max_scan_per_chain
+            .min(MAX_CHAIN_ABSORB_AUTO_SCAN_PER_CHAIN);
+        self.chain_absorb_auto_config = Some(config);
+        Ok(())
+    }
+
+    pub fn chain_absorb_auto_last_tick(&self) -> Option<ChainAbsorbAutoTickRecord> {
+        self.chain_absorb_auto_last_tick.clone()
+    }
+
+    pub fn record_chain_absorb_auto_tick(&mut self, tick: ChainAbsorbAutoTickRecord) {
+        self.chain_absorb_auto_last_tick = Some(tick);
+    }
+
+    pub fn chain_absorb_auto_due(&self, now_ns: u64) -> bool {
+        let config = self.chain_absorb_auto_config();
+        if !config.enabled {
+            return false;
+        }
+        let Some(last) = &self.chain_absorb_auto_last_tick else {
+            return true;
+        };
+        let elapsed_ns = now_ns.saturating_sub(last.completed_at_ns);
+        elapsed_ns >= config.interval_seconds.saturating_mul(1_000_000_000)
     }
 
     // ─── Opt-in / Opt-out ───
@@ -1519,6 +1637,7 @@ impl StabilityPoolState {
         self.deposits.get(user).map(|pos| UserStabilityPosition {
             stablecoin_balances: pos.stablecoin_balances.clone(),
             collateral_gains: pos.collateral_gains.clone(),
+            cfx_claims: pos.cfx_claims.clone(),
             opted_out_collateral: pos.opted_out_collateral.iter().cloned().collect(),
             deposit_timestamp: pos.deposit_timestamp,
             total_claimed_gains: pos.total_claimed_gains.clone(),
@@ -1772,6 +1891,10 @@ impl From<StabilityPoolStateV1> for StabilityPoolState {
             chain_claim_sources: Some(BTreeMap::new()),
             pending_chain_absorbs: Some(BTreeMap::new()),
             completed_chain_absorbs: Some(BTreeMap::new()),
+            chain_absorb_auto_config: Some(ChainAbsorbAutoConfig::default()),
+            chain_absorb_auto_last_tick: None,
+            completed_cfx_claim_payout_recoveries: Some(BTreeMap::new()),
+            completed_cfx_claim_payout_recovery_floor: Some(BTreeMap::new()),
             protocol_canister_id: v1.protocol_canister_id,
             configuration: v1.configuration,
             liquidation_history: v1.liquidation_history,
@@ -2462,6 +2585,144 @@ mod tests {
         assert!(state.validate_state().is_ok());
     }
 
+    #[test]
+    fn chain_absorb_auto_fields_decode_disabled_when_missing() {
+        let mut current = StabilityPoolState::default();
+        current
+            .register_chain_collateral(1030, "CFX".to_string(), 18)
+            .unwrap();
+
+        #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+        struct PreInc9State {
+            deposits: BTreeMap<Principal, DepositPosition>,
+            total_stablecoin_balances: BTreeMap<Principal, u64>,
+            stablecoin_registry: BTreeMap<Principal, StablecoinConfig>,
+            collateral_registry: BTreeMap<Principal, CollateralInfo>,
+            chain_collateral_sentinels: Option<BTreeSet<Principal>>,
+            chain_claim_sources: Option<BTreeMap<Principal, Vec<ChainClaimSource>>>,
+            pending_chain_absorbs: Option<BTreeMap<u64, ChainSpAbsorbIntent>>,
+            completed_chain_absorbs: Option<BTreeMap<u64, ChainSpAbsorbCompletion>>,
+            protocol_canister_id: Principal,
+            configuration: PoolConfiguration,
+            liquidation_history: Vec<PoolLiquidationRecord>,
+            in_flight_liquidations: BTreeSet<u64>,
+            total_liquidations_executed: u64,
+            pool_creation_timestamp: u64,
+            total_interest_received_e8s: Option<u64>,
+            token_consecutive_failures: Option<BTreeMap<Principal, u32>>,
+            cached_virtual_prices: Option<BTreeMap<Principal, u128>>,
+            protocol_reserve_address: Option<Principal>,
+            is_initialized: bool,
+            pool_events: Option<Vec<PoolEvent>>,
+            next_event_id: Option<u64>,
+            pending_refunds: Option<BTreeMap<u64, PendingRefund>>,
+            next_pending_refund_id: Option<u64>,
+        }
+
+        let old = PreInc9State {
+            deposits: current.deposits.clone(),
+            total_stablecoin_balances: current.total_stablecoin_balances.clone(),
+            stablecoin_registry: current.stablecoin_registry.clone(),
+            collateral_registry: current.collateral_registry.clone(),
+            chain_collateral_sentinels: current.chain_collateral_sentinels.clone(),
+            chain_claim_sources: current.chain_claim_sources.clone(),
+            pending_chain_absorbs: current.pending_chain_absorbs.clone(),
+            completed_chain_absorbs: current.completed_chain_absorbs.clone(),
+            protocol_canister_id: current.protocol_canister_id,
+            configuration: current.configuration.clone(),
+            liquidation_history: current.liquidation_history.clone(),
+            in_flight_liquidations: current.in_flight_liquidations.clone(),
+            total_liquidations_executed: current.total_liquidations_executed,
+            pool_creation_timestamp: current.pool_creation_timestamp,
+            total_interest_received_e8s: current.total_interest_received_e8s,
+            token_consecutive_failures: current.token_consecutive_failures.clone(),
+            cached_virtual_prices: current.cached_virtual_prices.clone(),
+            protocol_reserve_address: current.protocol_reserve_address,
+            is_initialized: current.is_initialized,
+            pool_events: current.pool_events.clone(),
+            next_event_id: current.next_event_id,
+            pending_refunds: current.pending_refunds.clone(),
+            next_pending_refund_id: current.next_pending_refund_id,
+        };
+
+        let bytes = Encode!(&old).unwrap();
+        let decoded = Decode!(&bytes, StabilityPoolState).unwrap();
+        let config = decoded.chain_absorb_auto_config();
+
+        assert!(!config.enabled);
+        assert_eq!(
+            config.interval_seconds,
+            DEFAULT_CHAIN_ABSORB_AUTO_INTERVAL_SECONDS
+        );
+        assert_eq!(
+            config.max_scan_per_chain,
+            DEFAULT_CHAIN_ABSORB_AUTO_MAX_SCAN_PER_CHAIN
+        );
+        assert!(decoded.chain_absorb_auto_last_tick().is_none());
+    }
+
+    #[test]
+    fn chain_absorb_auto_config_validation_rejects_saturating_timer_values() {
+        let mut state = StabilityPoolState::default();
+        let too_fast = ChainAbsorbAutoConfig {
+            enabled: true,
+            interval_seconds: MIN_CHAIN_ABSORB_AUTO_INTERVAL_SECONDS - 1,
+            max_scan_per_chain: 1,
+        };
+        assert!(matches!(
+            state.set_chain_absorb_auto_config(too_fast),
+            Err(StabilityPoolError::LiquidationFailed { .. })
+        ));
+
+        let no_scan = ChainAbsorbAutoConfig {
+            enabled: true,
+            interval_seconds: DEFAULT_CHAIN_ABSORB_AUTO_INTERVAL_SECONDS,
+            max_scan_per_chain: 0,
+        };
+        assert!(matches!(
+            state.set_chain_absorb_auto_config(no_scan),
+            Err(StabilityPoolError::LiquidationFailed { .. })
+        ));
+
+        let accepted = ChainAbsorbAutoConfig {
+            enabled: true,
+            interval_seconds: MIN_CHAIN_ABSORB_AUTO_INTERVAL_SECONDS,
+            max_scan_per_chain: 500,
+        };
+        state
+            .set_chain_absorb_auto_config(accepted.clone())
+            .unwrap();
+        assert_eq!(state.chain_absorb_auto_config(), accepted);
+    }
+
+    #[test]
+    fn chain_absorb_auto_due_requires_enabled_and_elapsed_interval() {
+        let mut state = StabilityPoolState::default();
+        assert!(!state.chain_absorb_auto_due(1_000_000_000_000));
+
+        state
+            .set_chain_absorb_auto_config(ChainAbsorbAutoConfig {
+                enabled: true,
+                interval_seconds: 300,
+                max_scan_per_chain: 1,
+            })
+            .unwrap();
+        assert!(state.chain_absorb_auto_due(1_000_000_000_000));
+
+        state.record_chain_absorb_auto_tick(ChainAbsorbAutoTickRecord {
+            started_at_ns: 1_000_000_000_000,
+            completed_at_ns: 1_001_000_000_000,
+            attempted_vault_id: None,
+            candidates_scanned: 0,
+            absorbed: None,
+            error: None,
+            skipped_reason: Some("no eligible candidates".to_string()),
+        });
+
+        assert!(!state.chain_absorb_auto_due(1_100_000_000_000));
+        assert!(state.chain_absorb_auto_due(1_301_000_000_000));
+    }
+
     // ─── Test: DepositPosition helpers ───
 
     #[test]
@@ -2962,6 +3223,13 @@ mod tests {
 
         add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
         add_deposit_direct(&mut state, user_a(), ckusdt_ledger(), 25_000_000);
+        state
+            .deposits
+            .get_mut(&user_a())
+            .unwrap()
+            .cfx_claims
+            .get_or_insert_with(BTreeMap::new)
+            .insert(cfx_sentinel(), 1_000_000_000_000_000_000);
 
         let pos = state.get_user_position(&user_a()).unwrap();
         assert_eq!(pos.total_usd_value_e8s, 125_00000000); // 100 + 25
@@ -2973,9 +3241,24 @@ mod tests {
             pos.stablecoin_balances.get(&ckusdt_ledger()),
             Some(&25_000_000)
         );
+        assert_eq!(
+            pos.cfx_claims
+                .as_ref()
+                .and_then(|claims| claims.get(&cfx_sentinel()))
+                .copied(),
+            Some(1_000_000_000_000_000_000),
+            "user position exposes restored CFX claims for auditability",
+        );
+
+        add_deposit_direct(&mut state, user_b(), icusd_ledger(), 1_00000000);
+        let pos_b = state.get_user_position(&user_b()).unwrap();
+        assert!(
+            pos_b.cfx_claims.clone().unwrap_or_default().is_empty(),
+            "normal depositors without chain claims expose an empty optional map",
+        );
 
         // Nonexistent user
-        assert!(state.get_user_position(&user_b()).is_none());
+        assert!(state.get_user_position(&user_c()).is_none());
     }
 
     // ─── Test: Multiple deposits accumulate ───
@@ -3788,6 +4071,22 @@ mod tests {
                 .unwrap_or_default()
                 .is_empty(),
             "missing completed chain absorb journal must decode as empty",
+        );
+        assert!(
+            decoded
+                .completed_cfx_claim_payout_recoveries
+                .clone()
+                .unwrap_or_default()
+                .is_empty(),
+            "missing CFX claim payout recovery journal must decode as empty",
+        );
+        assert!(
+            decoded
+                .completed_cfx_claim_payout_recovery_floor
+                .clone()
+                .unwrap_or_default()
+                .is_empty(),
+            "missing CFX claim payout recovery floor must decode as empty",
         );
     }
 

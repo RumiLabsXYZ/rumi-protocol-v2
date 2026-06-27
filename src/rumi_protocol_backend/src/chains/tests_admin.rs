@@ -8,7 +8,10 @@ use super::config::{
 };
 use super::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
 use super::multi_chain_state::MultiChainState;
-use crate::chains::admin::{delete_chain_in_state, disable_chain_in_state, register_chain_in_state, update_chain_config_in_state};
+use crate::chains::admin::{
+    delete_chain_in_state, disable_chain_in_state, register_chain_in_state,
+    update_chain_config_in_state,
+};
 use candid::Principal;
 
 fn arg() -> RegisterChainArg {
@@ -17,7 +20,10 @@ fn arg() -> RegisterChainArg {
         display_name: "Monad".into(),
         rpc_endpoints: vec!["https://rpc.example".into()],
         finality_depth: 1,
-        gas_strategy: GasStrategy::EvmEip1559 { max_priority_fee_gwei: 2, max_fee_gwei_ceiling: 200 },
+        gas_strategy: GasStrategy::EvmEip1559 {
+            max_priority_fee_gwei: 2,
+            max_fee_gwei_ceiling: 200,
+        },
         chain_native_decimals: 18,
         min_quorum_providers: None,
     }
@@ -29,7 +35,10 @@ fn config_arg_999() -> RegisterChainArg {
         display_name: "ScratchChain".into(),
         rpc_endpoints: vec!["https://rpc.scratch".into()],
         finality_depth: 1,
-        gas_strategy: GasStrategy::EvmEip1559 { max_priority_fee_gwei: 2, max_fee_gwei_ceiling: 200 },
+        gas_strategy: GasStrategy::EvmEip1559 {
+            max_priority_fee_gwei: 2,
+            max_fee_gwei_ceiling: 200,
+        },
         chain_native_decimals: 18,
         min_quorum_providers: None,
     }
@@ -50,7 +59,8 @@ fn dummy_vault(vault_id: u64, chain: ChainId) -> ChainVaultV1 {
         owner_evm: None,
         last_interest_accrual_ns: 0,
         pending_interest_mint_e8s: 0,
-        pending_liquidation: None,    }
+        pending_liquidation: None,
+    }
 }
 
 #[test]
@@ -75,7 +85,10 @@ fn register_chain_rejects_duplicates() {
     let mut s = MultiChainState::default();
     register_chain_in_state(&mut s, arg(), 0).expect("first");
     let err = register_chain_in_state(&mut s, arg(), 0).expect_err("duplicate");
-    assert!(matches!(err, ChainAdminError::ChainAlreadyRegistered(ChainId(101))));
+    assert!(matches!(
+        err,
+        ChainAdminError::ChainAlreadyRegistered(ChainId(101))
+    ));
 }
 
 #[test]
@@ -96,7 +109,10 @@ fn register_chain_rejects_out_of_range_decimals() {
     zero.chain_native_decimals = 0;
     let err = register_chain_in_state(&mut s, zero, 0).expect_err("zero decimals");
     assert!(matches!(err, ChainAdminError::InvalidConfig(_)));
-    assert!(!s.chain_configs.contains_key(&ChainId(101)), "no partial insert on reject");
+    assert!(
+        !s.chain_configs.contains_key(&ChainId(101)),
+        "no partial insert on reject"
+    );
 
     // Absurdly large decimals are also rejected.
     let mut huge = arg();
@@ -120,14 +136,19 @@ fn register_chain_enforces_evm_finality_floor() {
     a.finality_depth = 0;
     let err = register_chain_in_state(&mut s, a, 0).expect_err("evm finality 0");
     assert!(matches!(err, ChainAdminError::InvalidConfig(_)));
-    assert!(!s.chain_configs.contains_key(&ChainId(101)), "no partial insert on reject");
+    assert!(
+        !s.chain_configs.contains_key(&ChainId(101)),
+        "no partial insert on reject"
+    );
 
     // A Solana-style chain (non-EVM gas) MAY use finality_depth 0 (reads at the
     // `finalized` commitment).
     let mut sol = arg();
     sol.chain_id = ChainId(202);
     sol.chain_native_decimals = 9;
-    sol.gas_strategy = GasStrategy::SolanaPriorityFee { lamports_per_cu_ceiling: 10_000 };
+    sol.gas_strategy = GasStrategy::SolanaPriorityFee {
+        lamports_per_cu_ceiling: 10_000,
+    };
     sol.finality_depth = 0;
     register_chain_in_state(&mut s, sol, 0).expect("solana finality 0 ok");
     assert_eq!(s.chain_configs[&ChainId(202)].finality_depth, 0);
@@ -139,7 +160,10 @@ fn disable_chain_flips_status_and_preserves_supply() {
     register_chain_in_state(&mut s, arg(), 0).expect("register");
     s.chain_supplies.insert(ChainId(101), 999);
     disable_chain_in_state(&mut s, ChainId(101)).expect("disable");
-    assert!(matches!(s.chain_configs[&ChainId(101)].status, ChainStatus::Disabled));
+    assert!(matches!(
+        s.chain_configs[&ChainId(101)].status,
+        ChainStatus::Disabled
+    ));
     assert_eq!(s.chain_supplies[&ChainId(101)], 999);
 }
 
@@ -164,11 +188,8 @@ fn set_chain_config_updates_supplied_fields_only() {
 #[test]
 fn set_chain_config_rejects_unknown_chain() {
     let mut s = MultiChainState::default();
-    let err = update_chain_config_in_state(
-        &mut s,
-        ChainId(404),
-        UpdateChainConfigArg::default(),
-    ).expect_err("unknown chain");
+    let err = update_chain_config_in_state(&mut s, ChainId(404), UpdateChainConfigArg::default())
+        .expect_err("unknown chain");
     assert!(matches!(err, ChainAdminError::ChainNotRegistered(_)));
 }
 
@@ -185,28 +206,73 @@ fn delete_chain_removes_zero_supply_chain() {
     s.hot_wallet_balance_e18.insert(c, 1_000);
     s.reorg_halted.insert(c, true);
     s.reorg_suspect_streak.insert(c, 2);
+    s.chain_bad_debt_e8s.insert(c, 77);
+    s.chain_bad_debt_circuit_threshold_e8s.insert(c, 100);
+    s.chain_bad_debt_circuit_tripped_at_ns.insert(c, 456);
     // An unrelated chain's manual_prices entry must SURVIVE the delete.
-    s.manual_prices.insert((ChainId(7), "MON".to_string()), 3_0000_0000);
-    s.manual_price_set_at_ns.insert((ChainId(7), "MON".to_string()), 456);
+    s.manual_prices
+        .insert((ChainId(7), "MON".to_string()), 3_0000_0000);
+    s.manual_price_set_at_ns
+        .insert((ChainId(7), "MON".to_string()), 456);
 
     delete_chain_in_state(&mut s, c).expect("delete");
 
     assert!(!s.chain_configs.contains_key(&c), "chain_configs retained");
-    assert!(!s.chain_supplies.contains_key(&c), "chain_supplies retained");
-    assert!(!s.settlement_queues.contains_key(&c), "settlement_queues retained");
-    assert!(!s.chain_contracts.contains_key(&c), "chain_contracts retained");
-    assert!(!s.last_observed_block.contains_key(&c), "last_observed_block retained");
-    assert!(!s.hot_wallet_balance_e18.contains_key(&c), "hot_wallet_balance_e18 retained");
-    assert!(!s.reorg_halted.contains_key(&c), "reorg_halted retained");
-    assert!(!s.reorg_suspect_streak.contains_key(&c), "reorg_suspect_streak retained");
-    assert!(!s.manual_prices.contains_key(&(c, "MON".to_string())), "manual_prices retained");
     assert!(
-        !s.manual_price_set_at_ns.contains_key(&(c, "MON".to_string())),
+        !s.chain_supplies.contains_key(&c),
+        "chain_supplies retained"
+    );
+    assert!(
+        !s.settlement_queues.contains_key(&c),
+        "settlement_queues retained"
+    );
+    assert!(
+        !s.chain_contracts.contains_key(&c),
+        "chain_contracts retained"
+    );
+    assert!(
+        !s.last_observed_block.contains_key(&c),
+        "last_observed_block retained"
+    );
+    assert!(
+        !s.hot_wallet_balance_e18.contains_key(&c),
+        "hot_wallet_balance_e18 retained"
+    );
+    assert!(!s.reorg_halted.contains_key(&c), "reorg_halted retained");
+    assert!(
+        !s.reorg_suspect_streak.contains_key(&c),
+        "reorg_suspect_streak retained"
+    );
+    assert!(
+        !s.chain_bad_debt_e8s.contains_key(&c),
+        "chain_bad_debt_e8s retained"
+    );
+    assert!(
+        !s.chain_bad_debt_circuit_threshold_e8s.contains_key(&c),
+        "chain_bad_debt_circuit_threshold_e8s retained"
+    );
+    assert!(
+        !s.chain_bad_debt_circuit_tripped_at_ns.contains_key(&c),
+        "chain_bad_debt_circuit_tripped_at_ns retained"
+    );
+    assert!(
+        !s.manual_prices.contains_key(&(c, "MON".to_string())),
+        "manual_prices retained"
+    );
+    assert!(
+        !s.manual_price_set_at_ns
+            .contains_key(&(c, "MON".to_string())),
         "manual_price_set_at_ns leaked (paired-map divergence)"
     );
     // The unrelated chain's price + timestamp survive.
-    assert_eq!(s.manual_prices[&(ChainId(7), "MON".to_string())], 3_0000_0000);
-    assert_eq!(s.manual_price_set_at_ns[&(ChainId(7), "MON".to_string())], 456);
+    assert_eq!(
+        s.manual_prices[&(ChainId(7), "MON".to_string())],
+        3_0000_0000
+    );
+    assert_eq!(
+        s.manual_price_set_at_ns[&(ChainId(7), "MON".to_string())],
+        456
+    );
 }
 
 #[test]
@@ -218,7 +284,10 @@ fn delete_chain_refuses_when_supply_nonzero() {
     let err = delete_chain_in_state(&mut s, c).expect_err("nonzero supply");
     assert!(matches!(err, ChainAdminError::InvalidConfig(_)));
     // No partial delete: the chain is STILL registered with its supply intact.
-    assert!(s.chain_configs.contains_key(&c), "chain dropped despite refusal");
+    assert!(
+        s.chain_configs.contains_key(&c),
+        "chain dropped despite refusal"
+    );
     assert_eq!(s.chain_supplies[&c], 1);
 }
 
@@ -231,7 +300,10 @@ fn delete_chain_refuses_when_open_vaults_reference_it() {
     let err = delete_chain_in_state(&mut s, c).expect_err("referencing vault");
     assert!(matches!(err, ChainAdminError::InvalidConfig(_)));
     // No partial delete: the chain is STILL registered and the vault remains.
-    assert!(s.chain_configs.contains_key(&c), "chain dropped despite refusal");
+    assert!(
+        s.chain_configs.contains_key(&c),
+        "chain dropped despite refusal"
+    );
     assert!(s.chain_vaults.contains_key(&1));
 }
 
@@ -239,5 +311,8 @@ fn delete_chain_refuses_when_open_vaults_reference_it() {
 fn delete_chain_unknown_is_rejected() {
     let mut s = MultiChainState::default();
     let err = delete_chain_in_state(&mut s, ChainId(404)).expect_err("unknown chain");
-    assert!(matches!(err, ChainAdminError::ChainNotRegistered(ChainId(404))));
+    assert!(matches!(
+        err,
+        ChainAdminError::ChainNotRegistered(ChainId(404))
+    ));
 }

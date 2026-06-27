@@ -10,8 +10,8 @@ use super::config::ChainId;
 use super::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
 use super::multi_chain_state::MultiChainState;
 use super::recovery::{
-    apply_recover_vault_in_state, apply_resolve_reversal_in_state,
-    precheck_recover_vault_in_state, RecoveryError,
+    apply_recover_vault_in_state, apply_resolve_reversal_in_state, precheck_recover_vault_in_state,
+    RecoveryError,
 };
 use super::settlement_queue::{SettlementOp, SettlementOpKind, SettlementOpStatus};
 use candid::Principal;
@@ -33,13 +33,17 @@ fn vault(vault_id: u64, status: ChainVaultStatus, pending: u128, collateral: u12
         owner_evm: None,
         last_interest_accrual_ns: 0,
         pending_interest_mint_e8s: 0,
-        pending_liquidation: None,    }
+        pending_liquidation: None,
+    }
 }
 
 fn inflight_op(op_id: u64, kind: SettlementOpKind, tx: Option<&str>) -> SettlementOp {
     let mut op = SettlementOp::new(kind, format!("key-{op_id}"), 0);
     op.op_id = op_id;
-    op.status = SettlementOpStatus::Inflight { tries: 1, last_attempt_ns: 0 };
+    op.status = SettlementOpStatus::Inflight {
+        tries: 1,
+        last_attempt_ns: 0,
+    };
     op.last_tx_hash = tx.map(|s| s.to_string());
     op
 }
@@ -60,12 +64,17 @@ fn state_with_op(op: SettlementOp) -> MultiChainState {
 fn resolve_reversal_mint_clears_pending_and_marks_failed() {
     let mut s = state_with_op(inflight_op(
         0,
-        SettlementOpKind::Mint { recipient: "0xr".into(), amount_e8s: 5, vault_id: 1 },
+        SettlementOpKind::Mint {
+            recipient: "0xr".into(),
+            amount_e8s: 5,
+            vault_id: 1,
+        },
         Some("0xtx"),
     ));
-    s.chain_vaults.insert(1, vault(1, ChainVaultStatus::MintPending, 5, 0));
+    s.chain_vaults
+        .insert(1, vault(1, ChainVaultStatus::MintPending, 5, 0));
 
-    let did = apply_resolve_reversal_in_state(&mut s, CHAIN, 0, 100);
+    let did = apply_resolve_reversal_in_state(&mut s, CHAIN, 0, 100).expect("mint reversal");
     assert!(did, "first reversal applies");
     // Pending cleared, status stays MintPending (Design B: no debt was counted).
     assert_eq!(s.chain_vaults[&1].pending_mint_e8s, 0);
@@ -81,12 +90,17 @@ fn resolve_reversal_mint_clears_pending_and_marks_failed() {
 fn resolve_reversal_withdrawal_restores_collateral_and_reopens() {
     let mut s = state_with_op(inflight_op(
         0,
-        SettlementOpKind::NativeWithdrawal { recipient: "0xr".into(), amount_e18: 1_000, vault_id: 1 },
+        SettlementOpKind::NativeWithdrawal {
+            recipient: "0xr".into(),
+            amount_e18: 1_000,
+            vault_id: 1,
+        },
         Some("0xtx"),
     ));
-    s.chain_vaults.insert(1, vault(1, ChainVaultStatus::Closing, 0, 0));
+    s.chain_vaults
+        .insert(1, vault(1, ChainVaultStatus::Closing, 0, 0));
 
-    let did = apply_resolve_reversal_in_state(&mut s, CHAIN, 0, 100);
+    let did = apply_resolve_reversal_in_state(&mut s, CHAIN, 0, 100).expect("withdrawal reversal");
     assert!(did);
     // Reserved collateral added back; Closing -> Open.
     assert_eq!(s.chain_vaults[&1].collateral_amount_native, 1_000);
@@ -99,18 +113,49 @@ fn resolve_reversal_is_idempotent_cas() {
     // the withdrawal collateral (the CAS guard prevents 2x amount_e18).
     let mut s = state_with_op(inflight_op(
         0,
-        SettlementOpKind::NativeWithdrawal { recipient: "0xr".into(), amount_e18: 1_000, vault_id: 1 },
+        SettlementOpKind::NativeWithdrawal {
+            recipient: "0xr".into(),
+            amount_e18: 1_000,
+            vault_id: 1,
+        },
         Some("0xtx"),
     ));
-    s.chain_vaults.insert(1, vault(1, ChainVaultStatus::Closing, 0, 0));
+    s.chain_vaults
+        .insert(1, vault(1, ChainVaultStatus::Closing, 0, 0));
 
-    assert!(apply_resolve_reversal_in_state(&mut s, CHAIN, 0, 100));
-    let second = apply_resolve_reversal_in_state(&mut s, CHAIN, 0, 200);
-    assert!(!second, "second reversal is a no-op (op no longer Inflight)");
+    assert!(apply_resolve_reversal_in_state(&mut s, CHAIN, 0, 100).expect("first reversal"));
+    let second = apply_resolve_reversal_in_state(&mut s, CHAIN, 0, 200).expect("second reversal");
+    assert!(
+        !second,
+        "second reversal is a no-op (op no longer Inflight)"
+    );
     assert_eq!(
         s.chain_vaults[&1].collateral_amount_native, 1_000,
         "collateral credited exactly once"
     );
+}
+
+#[test]
+fn resolve_reversal_rejects_chain_collateral_payout_without_mutation() {
+    let mut s = state_with_op(inflight_op(
+        0,
+        SettlementOpKind::ChainCollateralPayout {
+            recipient: "0xr".into(),
+            amount_e18: 1_000,
+            vault_id: 7,
+            claimant: Principal::anonymous(),
+        },
+        Some("0xtx"),
+    ));
+
+    let err = apply_resolve_reversal_in_state(&mut s, CHAIN, 0, 100)
+        .expect_err("claim payout needs specialized recovery");
+
+    assert!(matches!(err, RecoveryError::UnsupportedOpKind(_)));
+    assert!(matches!(
+        s.settlement_queues[&CHAIN].pending[&0].status,
+        SettlementOpStatus::Inflight { .. }
+    ));
 }
 
 // ── M-09: precheck + transition ───────────────────────────────────────────────
@@ -123,14 +168,22 @@ fn precheck_recover_returns_terminal_mint_tx_hashes() {
     let mut q = super::settlement_queue::SettlementQueueV1::default();
     let mut op = inflight_op(
         0,
-        SettlementOpKind::Mint { recipient: "0xr".into(), amount_e8s: 5, vault_id: 1 },
+        SettlementOpKind::Mint {
+            recipient: "0xr".into(),
+            amount_e8s: 5,
+            vault_id: 1,
+        },
         Some("0xmint_tx"),
     );
-    op.status = SettlementOpStatus::Failed { reason: "x".into(), failed_ns: 1 };
+    op.status = SettlementOpStatus::Failed {
+        reason: "x".into(),
+        failed_ns: 1,
+    };
     q.pending.insert(0, op);
     q.tail = 1;
     s.settlement_queues.insert(CHAIN, q);
-    s.chain_vaults.insert(1, vault(1, ChainVaultStatus::MintPending, 0, 9));
+    s.chain_vaults
+        .insert(1, vault(1, ChainVaultStatus::MintPending, 0, 9));
 
     let hashes = precheck_recover_vault_in_state(&s, CHAIN, 1).expect("precheck ok");
     assert_eq!(hashes, vec!["0xmint_tx".to_string()]);
@@ -140,10 +193,15 @@ fn precheck_recover_returns_terminal_mint_tx_hashes() {
 fn precheck_recover_rejects_live_mint_op() {
     let mut s = state_with_op(inflight_op(
         0,
-        SettlementOpKind::Mint { recipient: "0xr".into(), amount_e8s: 5, vault_id: 1 },
+        SettlementOpKind::Mint {
+            recipient: "0xr".into(),
+            amount_e8s: 5,
+            vault_id: 1,
+        },
         Some("0xtx"),
     )); // Inflight == live
-    s.chain_vaults.insert(1, vault(1, ChainVaultStatus::MintPending, 0, 9));
+    s.chain_vaults
+        .insert(1, vault(1, ChainVaultStatus::MintPending, 0, 9));
     let err = precheck_recover_vault_in_state(&s, CHAIN, 1).expect_err("live mint");
     assert!(matches!(err, RecoveryError::LiveMintOp(1)));
 }
@@ -152,13 +210,15 @@ fn precheck_recover_rejects_live_mint_op() {
 fn precheck_recover_rejects_nonzero_pending_or_wrong_status() {
     let mut s = MultiChainState::default();
     // Nonzero pending => not recoverable.
-    s.chain_vaults.insert(1, vault(1, ChainVaultStatus::MintPending, 7, 9));
+    s.chain_vaults
+        .insert(1, vault(1, ChainVaultStatus::MintPending, 7, 9));
     assert!(matches!(
         precheck_recover_vault_in_state(&s, CHAIN, 1),
         Err(RecoveryError::NotRecoverable(_))
     ));
     // Wrong status (Open) => not recoverable.
-    s.chain_vaults.insert(2, vault(2, ChainVaultStatus::Open, 0, 9));
+    s.chain_vaults
+        .insert(2, vault(2, ChainVaultStatus::Open, 0, 9));
     assert!(matches!(
         precheck_recover_vault_in_state(&s, CHAIN, 2),
         Err(RecoveryError::NotRecoverable(_))
@@ -184,7 +244,8 @@ fn precheck_recover_rejects_wrong_chain_and_unknown() {
 #[test]
 fn apply_recover_vault_flips_mintpending_to_open() {
     let mut s = MultiChainState::default();
-    s.chain_vaults.insert(1, vault(1, ChainVaultStatus::MintPending, 0, 9));
+    s.chain_vaults
+        .insert(1, vault(1, ChainVaultStatus::MintPending, 0, 9));
     apply_recover_vault_in_state(&mut s, CHAIN, 1).expect("recover");
     assert_eq!(s.chain_vaults[&1].status, ChainVaultStatus::Open);
 }
@@ -195,10 +256,15 @@ fn apply_recover_vault_rechecks_guards_at_commit() {
     // (defense-in-depth re-check inside apply_recover_vault_in_state).
     let mut s = state_with_op(inflight_op(
         0,
-        SettlementOpKind::Mint { recipient: "0xr".into(), amount_e8s: 5, vault_id: 1 },
+        SettlementOpKind::Mint {
+            recipient: "0xr".into(),
+            amount_e8s: 5,
+            vault_id: 1,
+        },
         Some("0xtx"),
     ));
-    s.chain_vaults.insert(1, vault(1, ChainVaultStatus::MintPending, 0, 9));
+    s.chain_vaults
+        .insert(1, vault(1, ChainVaultStatus::MintPending, 0, 9));
     let err = apply_recover_vault_in_state(&mut s, CHAIN, 1).expect_err("live mint at commit");
     assert!(matches!(err, RecoveryError::LiveMintOp(1)));
     // Vault NOT flipped.

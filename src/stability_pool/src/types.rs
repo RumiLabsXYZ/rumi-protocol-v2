@@ -318,10 +318,87 @@ pub struct ChainSpAbsorbCompletion {
     pub completed_at_ns: u64,
 }
 
+pub const MIN_CHAIN_ABSORB_AUTO_INTERVAL_SECONDS: u64 = 60;
+pub const DEFAULT_CHAIN_ABSORB_AUTO_INTERVAL_SECONDS: u64 = 300;
+pub const DEFAULT_CHAIN_ABSORB_AUTO_MAX_SCAN_PER_CHAIN: u64 = 1;
+pub const MAX_CHAIN_ABSORB_AUTO_SCAN_PER_CHAIN: u64 = 500;
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChainAbsorbAutoConfig {
+    pub enabled: bool,
+    pub interval_seconds: u64,
+    pub max_scan_per_chain: u64,
+}
+
+impl Default for ChainAbsorbAutoConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_seconds: DEFAULT_CHAIN_ABSORB_AUTO_INTERVAL_SECONDS,
+            max_scan_per_chain: DEFAULT_CHAIN_ABSORB_AUTO_MAX_SCAN_PER_CHAIN,
+        }
+    }
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChainAbsorbAutoTickRecord {
+    pub started_at_ns: u64,
+    pub completed_at_ns: u64,
+    pub attempted_vault_id: Option<u64>,
+    pub candidates_scanned: u64,
+    pub absorbed: Option<ChainSpAbsorbResult>,
+    pub error: Option<String>,
+    pub skipped_reason: Option<String>,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChainAbsorbAutoStatus {
+    pub config: ChainAbsorbAutoConfig,
+    pub tick_in_flight: bool,
+    pub last_tick: Option<ChainAbsorbAutoTickRecord>,
+}
+
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChainClaimSource {
     pub claim_id: u64,
     pub remaining_native: u128,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CfxClaimPayoutRecoveryKey {
+    pub chain_sentinel: Principal,
+    pub op_id: u64,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CfxClaimPayoutRecovery {
+    pub chain_sentinel: Principal,
+    pub op_id: u64,
+    pub claim_id: u64,
+    pub claimant: Principal,
+    pub amount_wei: u128,
+    pub reason: String,
+    pub failed_at_ns: u64,
+}
+
+impl CfxClaimPayoutRecovery {
+    pub fn key(&self) -> CfxClaimPayoutRecoveryKey {
+        CfxClaimPayoutRecoveryKey {
+            chain_sentinel: self.chain_sentinel,
+            op_id: self.op_id,
+        }
+    }
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CfxClaimPayoutRecoveryRecord {
+    pub key: CfxClaimPayoutRecoveryKey,
+    pub claim_id: u64,
+    pub claimant: Principal,
+    pub amount_wei: u128,
+    pub reason: String,
+    pub failed_at_ns: u64,
+    pub recovered_at_ns: u64,
 }
 
 /// Audit trail record for a completed liquidation.
@@ -393,6 +470,7 @@ pub struct StabilityPoolStatus {
 pub struct UserStabilityPosition {
     pub stablecoin_balances: BTreeMap<Principal, u64>,
     pub collateral_gains: BTreeMap<Principal, u64>,
+    pub cfx_claims: Option<BTreeMap<Principal, u128>>,
     pub opted_out_collateral: Vec<Principal>,
     pub deposit_timestamp: u64,
     pub total_claimed_gains: BTreeMap<Principal, u64>,

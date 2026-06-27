@@ -2045,24 +2045,32 @@ fn set_chain_contract(
     Ok(())
 }
 
-/// Set (or replace) the per-chain liquidation config (spec 8, Tier B): the DEX
-/// wiring + risk knobs the bot path will read. Developer-gated. The config is
-/// validated (slippage cap <= 100%, restore target > par, required addresses
-/// present when `enabled`) before persisting; a rejected config mutates nothing.
-/// Inert until Increment 2+ reads it (Increment 1 ships only this scaffolding).
-#[candid_method(update)]
-#[update]
-fn set_chain_liquidation_config(
+fn validate_chain_liquidation_config_inputs(
     chain: rumi_protocol_backend::chains::config::ChainId,
-    config: rumi_protocol_backend::chains::liquidation_config::ChainLiquidationConfigV1,
+    config: &rumi_protocol_backend::chains::liquidation_config::ChainLiquidationConfigV1,
 ) -> Result<(), ProtocolError> {
-    let caller = ic_cdk::caller();
-    if read_state(|s| s.developer_principal != caller) {
-        return Err(ProtocolError::ChainAdmin("not developer".into()));
-    }
     config
         .validate()
         .map_err(|e| ProtocolError::ChainAdmin(format!("invalid liquidation config: {e:?}")))?;
+    if rumi_protocol_backend::chains::evm::evm_chain_config(chain).is_none() {
+        return Err(ProtocolError::ChainAdmin(format!(
+            "chain {} is not a known EVM chain",
+            chain.0
+        )));
+    }
+    let chain_status = read_state(|s| s.multi_chain.chain_configs.get(&chain).map(|c| c.status));
+    match chain_status {
+        Some(rumi_protocol_backend::chains::config::ChainStatus::Registered) => {}
+        Some(status) => {
+            return Err(ProtocolError::ChainAdmin(format!(
+                "chain {} is not registered: {:?}",
+                chain.0, status
+            )));
+        }
+        None => {
+            return Err(ProtocolError::ChainAdmin(format!("unknown chain {}", chain.0)));
+        }
+    }
     // Finding #16: the penalty cushion MUST exceed the slippage + oracle-divergence
     // budget, or a swap can structurally deliver less stable than the debt it
     // clears (under-cover). Increment 3 adds the max_dex_oracle_divergence_bps term.
@@ -2081,6 +2089,72 @@ fn set_chain_liquidation_config(
                 config.slippage_cap_bps, config.max_dex_oracle_divergence_bps, penalty_bps
             )));
         }
+    }
+    Ok(())
+}
+
+async fn validate_liquidation_factory_pair(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    config: &rumi_protocol_backend::chains::liquidation_config::ChainLiquidationConfigV1,
+) -> Result<(), ProtocolError> {
+    match config.dex {
+        rumi_protocol_backend::chains::liquidation_config::DexKind::UniswapV2 => {}
+    }
+    let (_latest, finalized) = rumi_protocol_backend::chains::evm::evm_rpc::fetch_block_numbers(chain)
+        .await
+        .map_err(|e| ProtocolError::ChainAdmin(format!("factory pair sanity block read failed: {e}")))?;
+    let derived_pair = rumi_protocol_backend::chains::evm::evm_rpc::get_factory_pair(
+        chain,
+        &config.factory,
+        &config.collateral_token,
+        &config.settle_stable_token,
+        finalized,
+    )
+    .await
+    .map_err(|e| ProtocolError::ChainAdmin(format!("factory pair sanity getPair failed: {e}")))?;
+    validate_liquidation_factory_pair_match(config, &derived_pair)
+}
+
+fn validate_liquidation_factory_pair_match(
+    config: &rumi_protocol_backend::chains::liquidation_config::ChainLiquidationConfigV1,
+    derived_pair: &str,
+) -> Result<(), ProtocolError> {
+    let derived_pair =
+        rumi_protocol_backend::chains::liquidation_config::canonical_evm_address(derived_pair)
+            .map_err(|e| ProtocolError::ChainAdmin(format!("invalid factory pair: {e:?}")))?;
+    let pinned_pair =
+        rumi_protocol_backend::chains::liquidation_config::canonical_evm_address(&config.pair)
+            .map_err(|e| ProtocolError::ChainAdmin(format!("invalid pinned pair: {e:?}")))?;
+    if derived_pair != pinned_pair {
+        return Err(ProtocolError::ChainAdmin(format!(
+            "factory getPair({}, {}) returned {}, expected pinned pair {}",
+            config.collateral_token, config.settle_stable_token, derived_pair, pinned_pair
+        )));
+    }
+    Ok(())
+}
+
+/// Set (or replace) the per-chain liquidation config (spec 8, Tier B): the DEX
+/// wiring + risk knobs the bot path will read. Developer-gated. The config is
+/// validated (chain registered, EVM addresses well-formed, penalty cushion safe)
+/// before persisting; enabling also checks the UniswapV2 factory-derived pair
+/// matches the pinned pair. A rejected config mutates nothing.
+#[candid_method(update)]
+#[update]
+async fn set_chain_liquidation_config(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    config: rumi_protocol_backend::chains::liquidation_config::ChainLiquidationConfigV1,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    validate_chain_liquidation_config_inputs(chain, &config)?;
+    if config.enabled {
+        validate_liquidation_factory_pair(chain, &config).await?;
+        // State may have changed during the RPC await. Re-check all synchronous
+        // invariants immediately before mutating.
+        validate_chain_liquidation_config_inputs(chain, &config)?;
     }
     mutate_state(|s| {
         s.multi_chain
@@ -2177,6 +2251,144 @@ fn get_effective_chain_debt_config(
     ))
 }
 
+#[derive(candid::CandidType, serde::Deserialize, Clone, Debug)]
+pub struct ChainBadDebtCircuitStatus {
+    pub chain_id: rumi_protocol_backend::chains::config::ChainId,
+    pub registered: bool,
+    pub bad_debt_e8s: u128,
+    pub threshold_e8s: Option<u128>,
+    pub tripped: bool,
+    pub tripped_at_ns: Option<u64>,
+}
+
+/// Public read-only status for the per-chain bad-debt circuit. No secrets.
+#[candid_method(query)]
+#[query]
+fn get_chain_bad_debt_circuit_status(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> ChainBadDebtCircuitStatus {
+    read_state(|s| ChainBadDebtCircuitStatus {
+        chain_id: chain,
+        registered: s.multi_chain.chain_configs.contains_key(&chain),
+        bad_debt_e8s: s
+            .multi_chain
+            .chain_bad_debt_e8s
+            .get(&chain)
+            .copied()
+            .unwrap_or(0),
+        threshold_e8s: s
+            .multi_chain
+            .chain_bad_debt_circuit_threshold_e8s
+            .get(&chain)
+            .copied(),
+        tripped: s.multi_chain.chain_bad_debt_circuit_tripped(chain),
+        tripped_at_ns: s
+            .multi_chain
+            .chain_bad_debt_circuit_tripped_at_ns
+            .get(&chain)
+            .copied(),
+    })
+}
+
+/// Developer-gated threshold setter. `None` disables the circuit for the chain
+/// and clears any existing latch; `Some(0)` is rejected to avoid ambiguous
+/// always-trip semantics.
+#[candid_method(update)]
+#[update]
+fn set_chain_bad_debt_circuit_threshold(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    threshold_e8s: Option<u128>,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    if !read_state(|s| s.multi_chain.chain_configs.contains_key(&chain)) {
+        return Err(ProtocolError::ChainAdmin(format!(
+            "chain {} is not registered",
+            chain.0
+        )));
+    }
+    let now = ic_cdk::api::time();
+    let was_tripped = read_state(|s| s.multi_chain.chain_bad_debt_circuit_tripped(chain));
+    mutate_state(|s| {
+        s.multi_chain
+            .set_chain_bad_debt_circuit_threshold(chain, threshold_e8s, now)
+    })
+    .map_err(ProtocolError::ChainAdmin)?;
+    let status = get_chain_bad_debt_circuit_status(chain);
+    rumi_protocol_backend::storage::record_event(
+        &rumi_protocol_backend::event::Event::ChainBadDebtCircuitThresholdSet {
+            chain_id: chain,
+            threshold_e8s,
+            timestamp: now,
+        },
+    );
+    if status.tripped && !was_tripped {
+        rumi_protocol_backend::storage::record_event(
+            &rumi_protocol_backend::event::Event::ChainBadDebtCircuitTripped {
+                chain_id: chain,
+                bad_debt_e8s: status.bad_debt_e8s,
+                total_bad_debt_e8s: status.bad_debt_e8s,
+                threshold_e8s: status.threshold_e8s.unwrap_or(0),
+                timestamp: now,
+            },
+        );
+    }
+    log!(
+        INFO,
+        "[set_chain_bad_debt_circuit_threshold] chain={:?} threshold={:?} tripped={}",
+        chain,
+        threshold_e8s,
+        status.tripped
+    );
+    Ok(())
+}
+
+/// Developer-gated manual clear for the bad-debt circuit. Cumulative bad-debt
+/// accounting and the configured threshold are preserved.
+#[candid_method(update)]
+#[update]
+fn clear_chain_bad_debt_circuit(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    if !read_state(|s| s.multi_chain.chain_configs.contains_key(&chain)) {
+        return Err(ProtocolError::ChainAdmin(format!(
+            "chain {} is not registered",
+            chain.0
+        )));
+    }
+    let now = ic_cdk::api::time();
+    let cleared = mutate_state(|s| s.multi_chain.clear_chain_bad_debt_circuit(chain));
+    if cleared {
+        let total_bad_debt_e8s = read_state(|s| {
+            s.multi_chain
+                .chain_bad_debt_e8s
+                .get(&chain)
+                .copied()
+                .unwrap_or(0)
+        });
+        rumi_protocol_backend::storage::record_event(
+            &rumi_protocol_backend::event::Event::ChainBadDebtCircuitCleared {
+                chain_id: chain,
+                total_bad_debt_e8s,
+                timestamp: now,
+            },
+        );
+    }
+    log!(
+        INFO,
+        "[clear_chain_bad_debt_circuit] chain={:?} cleared={}",
+        chain,
+        cleared
+    );
+    Ok(())
+}
+
 /// A chain vault currently liquidatable on `chain` (CR below the liquidation
 /// threshold), with its interest-aware CR + sizing surfaced for an operator/SP.
 /// The discovery channel for the eventual SP fallback (finding #30; SP-specific
@@ -2215,6 +2427,8 @@ struct ChainSpAbsorbSnapshot {
     native_decimals: u8,
     liquidation_penalty_bps: u64,
 }
+
+const CHAIN_SP_ABSORB_PREFLIGHT_TTL_NS: u64 = 15 * 60 * 1_000_000_000;
 
 /// Resolve the chain's native collateral symbol (the manual-price key) for the
 /// liquidation path. `Err` if the chain is not a known EVM chain.
@@ -2268,17 +2482,83 @@ fn chain_sp_absorb_snapshot(
         .get(&chain)
         .map(|c| c.chain_native_decimals)
         .unwrap_or(18);
-    let liquidation_penalty_bps = chain_collateral_config(chain)
-        .map(|c| c.liquidation_penalty_bps)
-        .ok_or_else(|| {
-            ProtocolError::ChainAdmin(format!("no collateral config for chain {}", chain.0))
-        })?;
+    let collateral_cfg = chain_collateral_config(chain).ok_or_else(|| {
+        ProtocolError::ChainAdmin(format!("no collateral config for chain {}", chain.0))
+    })?;
+    let eff_debt = liq::effective_debt_e8s(
+        vault.debt_e8s,
+        vault.pending_interest_mint_e8s,
+        collateral_cfg.interest_apr_bps,
+        now_ns.saturating_sub(vault.last_interest_accrual_ns),
+    );
+    let cr_e4 = rumi_protocol_backend::chains::vault::collateral_ratio_e4(
+        vault.collateral_amount_native,
+        native_decimals,
+        price_e8,
+        eff_debt,
+    );
+    if cr_e4 >= collateral_cfg.liquidation_threshold_e4 {
+        return Err(ProtocolError::ChainAdmin(format!(
+            "chain vault {vault_id} is no longer liquidatable: cr_e4 {} >= threshold {}",
+            cr_e4, collateral_cfg.liquidation_threshold_e4
+        )));
+    }
     Ok(ChainSpAbsorbSnapshot {
         chain,
         price_e8,
         native_decimals,
-        liquidation_penalty_bps,
+        liquidation_penalty_bps: collateral_cfg.liquidation_penalty_bps,
     })
+}
+
+fn chain_sp_absorb_preflight_snapshot(
+    state: &rumi_protocol_backend::chains::multi_chain_state::MultiChainState,
+    vault_id: u64,
+    expected_icusd_burn_e8s: u64,
+    now_ns: u64,
+) -> Result<ChainSpAbsorbSnapshot, ProtocolError> {
+    let snapshot = chain_sp_absorb_snapshot(state, vault_id, now_ns)?;
+    let live_debt = state
+        .chain_vaults
+        .get(&vault_id)
+        .map(|v| v.debt_e8s)
+        .ok_or_else(|| ProtocolError::ChainAdmin(format!("unknown chain vault {vault_id}")))?;
+    if live_debt != expected_icusd_burn_e8s as u128 {
+        return Err(ProtocolError::GenericError(format!(
+            "SP chain absorb preflight rejected: expected burn {} does not match live debt {} for vault {}",
+            expected_icusd_burn_e8s, live_debt, vault_id
+        )));
+    }
+    Ok(snapshot)
+}
+
+fn chain_sp_absorb_snapshot_from_preflight(
+    preflight: &rumi_protocol_backend::state::StoredChainSpAbsorbPreflight,
+) -> ChainSpAbsorbSnapshot {
+    ChainSpAbsorbSnapshot {
+        chain: preflight.chain_id,
+        price_e8: preflight.price_e8,
+        native_decimals: preflight.native_decimals,
+        liquidation_penalty_bps: preflight.liquidation_penalty_bps,
+    }
+}
+
+fn matching_chain_absorb_preflight(
+    state: &rumi_protocol_backend::state::State,
+    vault_id: u64,
+    icusd_burned_e8s: u64,
+    caller: Principal,
+    now_ns: u64,
+) -> Option<rumi_protocol_backend::state::StoredChainSpAbsorbPreflight> {
+    let preflight = state.sp_chain_absorb_preflights.get(&vault_id)?;
+    if preflight.caller == caller
+        && preflight.icusd_burn_e8s == icusd_burned_e8s
+        && preflight.expires_at_ns >= now_ns
+    {
+        Some(preflight.clone())
+    } else {
+        None
+    }
 }
 
 /// Dev-gated manual/permissionless liquidation trigger (spec §7). Runs the
@@ -4776,17 +5056,6 @@ async fn stability_pool_liquidate_chain_vault(
     if ic_cdk::caller() == Principal::anonymous() {
         return Err(ProtocolError::AnonymousCallerNotAllowed);
     }
-    if read_state(|s| s.frozen) {
-        return Err(ProtocolError::TemporarilyUnavailable(
-            "Protocol is frozen. All operations are suspended pending admin review.".to_string(),
-        ));
-    }
-    validate_liquidation_not_frozen()?;
-    if read_state(|s| s.sp_writedown_disabled) {
-        return Err(ProtocolError::TemporarilyUnavailable(
-            "SP writedown path is disabled by admin".to_string(),
-        ));
-    }
 
     let caller = ic_cdk::api::caller();
     let is_stability_pool =
@@ -4812,7 +5081,28 @@ async fn stability_pool_liquidate_chain_vault(
 
     let _guard = rumi_protocol_backend::guard::ChainVaultLiquidationGuard::new(vault_id)?;
     let now = ic_cdk::api::time();
-    let snapshot = read_state(|s| chain_sp_absorb_snapshot(&s.multi_chain, vault_id, now))?;
+    let preflight =
+        read_state(|s| matching_chain_absorb_preflight(s, vault_id, icusd_burned_e8s, caller, now));
+    if preflight.is_none() {
+        if read_state(|s| s.frozen) {
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "Protocol is frozen. All operations are suspended pending admin review."
+                    .to_string(),
+            ));
+        }
+        validate_liquidation_not_frozen()?;
+        if read_state(|s| s.sp_writedown_disabled) {
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "SP writedown path is disabled by admin".to_string(),
+            ));
+        }
+    }
+    let snapshot = match &preflight {
+        Some(preflight) => chain_sp_absorb_snapshot_from_preflight(preflight),
+        None => read_state(|s| {
+            chain_sp_absorb_preflight_snapshot(&s.multi_chain, vault_id, icusd_burned_e8s, now)
+        })?,
+    };
 
     verify_sp_icusd_burn_proof(vault_id, icusd_burned_e8s, caller, &proof).await?;
 
@@ -4834,6 +5124,7 @@ async fn stability_pool_liquidate_chain_vault(
         )
         .map_err(ProtocolError::ChainAdmin)?;
         s.consumed_writedown_proofs.insert(proof_key);
+        s.sp_chain_absorb_preflights.remove(&vault_id);
         let stored = rumi_protocol_backend::state::StoredChainSpAbsorbResult {
             caller,
             vault_id,
@@ -4865,6 +5156,62 @@ async fn stability_pool_liquidate_chain_vault(
     );
 
     Ok(chain_sp_absorb_result_from_stored(stored))
+}
+
+/// Called by the stability pool immediately before a fresh IC-native icUSD burn.
+/// This lets the backend kill switch and live-debt check reject before the SP
+/// spends funds. It is intentionally non-mutating; the post-burn endpoint still
+/// performs the same checks before consuming the proof.
+#[update]
+#[candid_method(update)]
+fn stability_pool_preflight_chain_absorb(
+    vault_id: u64,
+    expected_icusd_burn_e8s: u64,
+) -> Result<(), ProtocolError> {
+    if ic_cdk::caller() == Principal::anonymous() {
+        return Err(ProtocolError::AnonymousCallerNotAllowed);
+    }
+    if read_state(|s| s.frozen) {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "Protocol is frozen. All operations are suspended pending admin review.".to_string(),
+        ));
+    }
+    validate_liquidation_not_frozen()?;
+
+    let caller = ic_cdk::api::caller();
+    let is_stability_pool =
+        read_state(|s| s.stability_pool_canister.map_or(false, |sp| sp == caller));
+    if !is_stability_pool {
+        return Err(ProtocolError::GenericError(
+            "Caller is not the registered stability pool canister".to_string(),
+        ));
+    }
+    if read_state(|s| s.sp_writedown_disabled) {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "SP writedown path is disabled by admin".to_string(),
+        ));
+    }
+
+    let now = ic_cdk::api::time();
+    let snapshot = read_state(|s| {
+        chain_sp_absorb_preflight_snapshot(&s.multi_chain, vault_id, expected_icusd_burn_e8s, now)
+    })?;
+    mutate_state(|s| {
+        s.sp_chain_absorb_preflights.insert(
+            vault_id,
+            rumi_protocol_backend::state::StoredChainSpAbsorbPreflight {
+                caller,
+                vault_id,
+                icusd_burn_e8s: expected_icusd_burn_e8s,
+                chain_id: snapshot.chain,
+                price_e8: snapshot.price_e8,
+                native_decimals: snapshot.native_decimals,
+                liquidation_penalty_bps: snapshot.liquidation_penalty_bps,
+                expires_at_ns: now.saturating_add(CHAIN_SP_ABSORB_PREFLIGHT_TTL_NS),
+            },
+        );
+    });
+    Ok(())
 }
 
 /// Called by the stability pool to enqueue a native CFX payout from a reserved
@@ -10961,6 +11308,10 @@ mod chain_vault_param_tests {
             evm_vault_params(ChainId(71)).unwrap(),
             ("CFX", 15_000, 10_000_000, Some(500 * 100_000_000))
         ); // Conflux: 150% open gate + 500-icUSD ceiling
+        assert_eq!(
+            evm_vault_params(ChainId(1030)).unwrap(),
+            ("CFX", 15_000, 10_000_000, Some(500 * 100_000_000))
+        ); // Conflux mainnet mirrors testnet risk params
         assert!(evm_vault_params(ChainId(999)).is_err());
     }
 
@@ -10990,8 +11341,10 @@ mod chain_vault_param_tests {
 #[cfg(test)]
 mod chain_sp_absorb_entry_tests {
     use super::{
-        chain_collateral_sentinel, chain_liquidatable_vaults_in_state, chain_sp_absorb_snapshot,
-        record_sp_chain_absorb_result_bounded, stored_chain_sp_absorb_matches_retry,
+        chain_collateral_sentinel, chain_liquidatable_vaults_in_state,
+        chain_sp_absorb_preflight_snapshot, chain_sp_absorb_snapshot,
+        matching_chain_absorb_preflight, record_sp_chain_absorb_result_bounded,
+        stored_chain_sp_absorb_matches_retry,
     };
     use candid::Principal;
     use rumi_protocol_backend::chains::config::{ChainConfigV3, ChainId, ChainStatus, GasStrategy};
@@ -11000,7 +11353,8 @@ mod chain_sp_absorb_entry_tests {
     use rumi_protocol_backend::chains::multi_chain_state::MultiChainState;
     use rumi_protocol_backend::icrc3_proof::{SpProofLedger, SpWritedownProof};
     use rumi_protocol_backend::state::{
-        StoredChainSpAbsorbResult, MAX_SP_CHAIN_ABSORB_RESULTS_BY_PROOF,
+        StoredChainSpAbsorbPreflight, StoredChainSpAbsorbResult,
+        MAX_SP_CHAIN_ABSORB_RESULTS_BY_PROOF,
     };
 
     const CFX: ChainId = ChainId(71);
@@ -11221,6 +11575,31 @@ mod chain_sp_absorb_entry_tests {
     }
 
     #[test]
+    fn chain_sp_absorb_preflight_reservation_requires_exact_unexpired_match() {
+        let caller = Principal::from_slice(&[3u8; 29]);
+        let other = Principal::from_slice(&[4u8; 29]);
+        let mut state = rumi_protocol_backend::state::State::default();
+        state.sp_chain_absorb_preflights.insert(
+            7,
+            StoredChainSpAbsorbPreflight {
+                caller,
+                vault_id: 7,
+                icusd_burn_e8s: 100_00000000,
+                chain_id: CFX,
+                price_e8: 1_000_000,
+                native_decimals: 18,
+                liquidation_penalty_bps: 1_200,
+                expires_at_ns: 10_000,
+            },
+        );
+
+        assert!(matching_chain_absorb_preflight(&state, 7, 100_00000000, caller, 9_999).is_some());
+        assert!(matching_chain_absorb_preflight(&state, 7, 99_99999999, caller, 9_999).is_none());
+        assert!(matching_chain_absorb_preflight(&state, 7, 100_00000000, other, 9_999).is_none());
+        assert!(matching_chain_absorb_preflight(&state, 7, 100_00000000, caller, 10_001).is_none());
+    }
+
+    #[test]
     fn chain_sp_absorb_snapshot_rejects_halted_chain_rails() {
         let mut s = configured_state();
         s.set_manual_price(CFX, "CFX".into(), 50_000_000, 500);
@@ -11260,12 +11639,40 @@ mod chain_sp_absorb_entry_tests {
             "unexpected error: {err:?}"
         );
 
-        s.set_manual_price(CFX, "CFX".into(), 50_000_000, 500);
+        s.set_manual_price(CFX, "CFX".into(), 1_000_000, 500);
         let ok = chain_sp_absorb_snapshot(&s, 7, 600).expect("fresh price accepted");
         assert_eq!(ok.chain, CFX);
-        assert_eq!(ok.price_e8, 50_000_000);
+        assert_eq!(ok.price_e8, 1_000_000);
         assert_eq!(ok.native_decimals, 18);
         assert_eq!(ok.liquidation_penalty_bps, 1_200);
+    }
+
+    #[test]
+    fn chain_sp_absorb_preflight_rejects_stale_burn_amount() {
+        let mut s = configured_state();
+        s.set_manual_price(CFX, "CFX".into(), 1_000_000, 500);
+
+        assert!(chain_sp_absorb_preflight_snapshot(&s, 7, 100 * 100_000_000, 600).is_ok());
+
+        let err = chain_sp_absorb_preflight_snapshot(&s, 7, 99 * 100_000_000, 600)
+            .expect_err("stale expected burn should be rejected");
+        assert!(
+            format!("{err:?}").contains("does not match live debt"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn chain_sp_absorb_preflight_rejects_recovered_healthy_vault() {
+        let mut s = configured_state();
+        s.set_manual_price(CFX, "CFX".into(), 50_000_000, 500);
+
+        let err = chain_sp_absorb_preflight_snapshot(&s, 7, 100 * 100_000_000, 600)
+            .expect_err("healthy recovered vault should not absorb through SP");
+        assert!(
+            format!("{err:?}").contains("no longer liquidatable"),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[test]
@@ -11352,6 +11759,61 @@ fn check_candid_interface_compatibility() {
         "declared candid interface in rumi_protocol_backend.did file",
         CandidSource::File(did_path.as_path()),
     );
+}
+
+#[cfg(test)]
+mod inc12_liquidation_config_tests {
+    use super::validate_liquidation_factory_pair_match;
+    use rumi_protocol_backend::chains::liquidation_config::{ChainLiquidationConfigV1, DexKind};
+
+    fn cfg() -> ChainLiquidationConfigV1 {
+        ChainLiquidationConfigV1 {
+            dex: DexKind::UniswapV2,
+            router: "0x1111111111111111111111111111111111111111".into(),
+            factory: "0x2222222222222222222222222222222222222222".into(),
+            pair: "0x3333333333333333333333333333333333333333".into(),
+            collateral_token: "0x4444444444444444444444444444444444444444".into(),
+            settle_stable_token: "0x5555555555555555555555555555555555555555".into(),
+            slippage_cap_bps: 250,
+            restore_target_cr_e4: 15_500,
+            enabled: true,
+            max_swap_value_e8s: 2_000 * 100_000_000,
+            max_price_age_ns: 1_800_000_000_000,
+            max_dex_oracle_divergence_bps: 500,
+            fee_bps: 25,
+            settle_stable_decimals: 18,
+            deadline_secs: 180,
+        }
+    }
+
+    #[test]
+    fn factory_pair_match_accepts_case_normalized_pair() {
+        assert!(validate_liquidation_factory_pair_match(
+            &cfg(),
+            "0X3333333333333333333333333333333333333333"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn factory_pair_match_rejects_different_pair() {
+        let err = validate_liquidation_factory_pair_match(
+            &cfg(),
+            "0x9999999999999999999999999999999999999999",
+        )
+        .expect_err("mismatched factory pair rejects");
+        assert!(format!("{err:?}").contains("expected pinned pair"));
+    }
+
+    #[test]
+    fn factory_pair_match_rejects_zero_factory_pair() {
+        let err = validate_liquidation_factory_pair_match(
+            &cfg(),
+            "0x0000000000000000000000000000000000000000",
+        )
+        .expect_err("zero factory pair rejects");
+        assert!(format!("{err:?}").contains("invalid factory pair"));
+    }
 }
 
 #[cfg(test)]
