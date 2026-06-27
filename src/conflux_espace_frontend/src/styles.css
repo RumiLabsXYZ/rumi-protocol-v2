@@ -94,6 +94,12 @@ button.sm { padding: 7px 11px; font-size: 12px; }
 .spin { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; vertical-align: -2px; margin-right: 7px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* EIP-6963 injected-wallet picker */
+.wallets { display: flex; flex-direction: column; gap: 10px; }
+.wallet { display: flex; align-items: center; gap: 12px; justify-content: flex-start; text-align: left; width: 100%; }
+.wallet:hover:not(:disabled) { border-color: var(--accent); }
+.wicon { width: 24px; height: 24px; border-radius: 6px; flex: none; object-fit: contain; }
+
 .copy { cursor: pointer; color: var(--accent-2); }
 .muted { color: var(--muted); }
 .divider { height: 1px; background: var(--border); margin: 16px 0; }
