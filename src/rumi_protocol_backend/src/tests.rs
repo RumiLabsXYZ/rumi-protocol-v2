@@ -2,9 +2,9 @@ use crate::Vault;
 use crate::{ICP, ICUSD};
 use candid::Principal;
 use ic_base_types::PrincipalId;
+use proptest::collection::vec as pvec;
 use proptest::prelude::*;
 use std::collections::BTreeMap;
-use proptest::collection::vec as pvec;
 
 fn arb_vault() -> impl Strategy<Value = Vault> {
     (arb_principal(), any::<u64>(), arb_amount()).prop_map(|(owner, borrowed_icusd, icp_margin)| {
@@ -34,14 +34,18 @@ fn arb_usd_amount() -> impl Strategy<Value = ICUSD> {
 }
 
 fn arb_amount() -> impl Strategy<Value = u64> {
-    1..1_000_000u64  // Reduced maximum to avoid impossible distributions
+    1..1_000_000u64 // Reduced maximum to avoid impossible distributions
 }
 
 fn vault_vec_to_map(vaults: Vec<Vault>) -> BTreeMap<u64, Vault> {
-    vaults.into_iter().enumerate().map(|(i, mut v)| {
-        v.vault_id = i as u64;
-        (i as u64, v)
-    }).collect()
+    vaults
+        .into_iter()
+        .enumerate()
+        .map(|(i, mut v)| {
+            v.vault_id = i as u64;
+            (i as u64, v)
+        })
+        .collect()
 }
 
 proptest! {
@@ -66,7 +70,7 @@ proptest! {
                 accrued_interest: ICUSD::new(0),
                 bot_processing: false,
             };
-            
+
             let result = crate::state::distribute_across_vaults(&vaults, target_vault);
             let icusd_distributed: ICUSD = result.iter().map(|e| e.icusd_share_amount).sum();
             let icp_distributed: ICP = result.iter().map(|e| e.icp_share_amount).sum();
@@ -94,7 +98,10 @@ mod candid_compat {
 
     #[test]
     fn legacy_two_field_arg_decodes_into_extended_struct() {
-        let legacy = LegacyGetEventsArg { start: 0, length: 100 };
+        let legacy = LegacyGetEventsArg {
+            start: 0,
+            length: 100,
+        };
         let bytes = encode_one(&legacy).expect("encode legacy");
         let decoded: GetEventsArg = decode_one(&bytes).expect("decode into extended");
 
@@ -151,8 +158,8 @@ mod validate_f64_inclusive {
 
 #[test]
 fn protocol_error_carries_multi_chain_variants() {
-    use candid::{Decode, Encode};
     use crate::ProtocolError;
+    use candid::{Decode, Encode};
     let halt = ProtocolError::SupplyInvariantHalted;
     let admin = ProtocolError::ChainAdmin("not developer".to_string());
     let halt_bytes = Encode!(&halt).expect("encode halt");
@@ -163,15 +170,23 @@ fn protocol_error_carries_multi_chain_variants() {
 
 #[test]
 fn supply_audit_round_trips_via_candid() {
-    use candid::{Decode, Encode};
-    use crate::{SupplyAudit, SupplyAuditEntry};
     use crate::chains::config::ChainId;
+    use crate::{SupplyAudit, SupplyAuditEntry};
+    use candid::{Decode, Encode};
 
     let audit = SupplyAudit {
         total_e8s: 150_000,
         per_chain: vec![
-            SupplyAuditEntry { chain_id: ChainId(1), display_name: "ICP".into(), supply_e8s: 100_000 },
-            SupplyAuditEntry { chain_id: ChainId(2), display_name: "Monad".into(), supply_e8s: 50_000 },
+            SupplyAuditEntry {
+                chain_id: ChainId(1),
+                display_name: "ICP".into(),
+                supply_e8s: 100_000,
+            },
+            SupplyAuditEntry {
+                chain_id: ChainId(2),
+                display_name: "Monad".into(),
+                supply_e8s: 50_000,
+            },
         ],
     };
     let bytes = Encode!(&audit).expect("encode");
@@ -182,40 +197,89 @@ fn supply_audit_round_trips_via_candid() {
 
 #[test]
 fn monad_event_variants_round_trip_via_candid() {
-    use candid::{Decode, Encode};
-    use crate::event::Event;
     use crate::chains::config::ChainId;
+    use crate::event::Event;
+    use candid::{Decode, Encode};
 
     let events = vec![
         Event::DepositObserved {
-            chain_id: ChainId(10143), vault_id: 1,
-            custody_address: "0xa".into(), amount_e18: 5, tx_hash: "0xh".into(),
-            block_number: 100, timestamp: 1,
+            chain_id: ChainId(10143),
+            vault_id: 1,
+            custody_address: "0xa".into(),
+            amount_e18: 5,
+            tx_hash: "0xh".into(),
+            block_number: 100,
+            timestamp: 1,
         },
         Event::ChainMintSubmitted {
-            chain_id: ChainId(10143), vault_id: 1, op_id: 0,
-            recipient: "0xr".into(), amount_e8s: 10, tx_hash: "0xs".into(), timestamp: 2,
+            chain_id: ChainId(10143),
+            vault_id: 1,
+            op_id: 0,
+            recipient: "0xr".into(),
+            amount_e8s: 10,
+            tx_hash: "0xs".into(),
+            timestamp: 2,
         },
         Event::ChainMintConfirmed {
-            chain_id: ChainId(10143), vault_id: 1, op_id: 0,
-            amount_e8s: 10, tx_hash: "0xs".into(), block_number: 102, timestamp: 3,
+            chain_id: ChainId(10143),
+            vault_id: 1,
+            op_id: 0,
+            amount_e8s: 10,
+            tx_hash: "0xs".into(),
+            block_number: 102,
+            timestamp: 3,
         },
         Event::ChainBurnObserved {
-            chain_id: ChainId(10143), vault_id: 1,
-            amount_e8s: 4, tx_hash: "0xb".into(), block_number: 110, timestamp: 4,
+            chain_id: ChainId(10143),
+            vault_id: 1,
+            amount_e8s: 4,
+            tx_hash: "0xb".into(),
+            block_number: 110,
+            timestamp: 4,
         },
         Event::WithdrawalSigned {
-            chain_id: ChainId(10143), vault_id: 1, op_id: 1,
-            recipient: "0xw".into(), amount_e18: 5, tx_hash: "0xt".into(), timestamp: 5,
+            chain_id: ChainId(10143),
+            vault_id: 1,
+            op_id: 1,
+            recipient: "0xw".into(),
+            amount_e18: 5,
+            tx_hash: "0xt".into(),
+            timestamp: 5,
         },
         Event::ChainSettlementFailed {
-            chain_id: ChainId(10143), op_id: 1, reason: "reverted".into(), timestamp: 6,
+            chain_id: ChainId(10143),
+            op_id: 1,
+            reason: "reverted".into(),
+            timestamp: 6,
         },
         Event::ChainReorgDetected {
-            chain_id: ChainId(10143), observed_block: 100, reorg_depth: 5, timestamp: 7,
+            chain_id: ChainId(10143),
+            observed_block: 100,
+            reorg_depth: 5,
+            timestamp: 7,
         },
         Event::ChainHotWalletLow {
-            chain_id: ChainId(10143), balance_e18: 1, threshold_e18: 100, timestamp: 8,
+            chain_id: ChainId(10143),
+            balance_e18: 1,
+            threshold_e18: 100,
+            timestamp: 8,
+        },
+        Event::ChainBadDebtCircuitThresholdSet {
+            chain_id: ChainId(10143),
+            threshold_e8s: Some(10),
+            timestamp: 9,
+        },
+        Event::ChainBadDebtCircuitTripped {
+            chain_id: ChainId(10143),
+            bad_debt_e8s: 1,
+            total_bad_debt_e8s: 10,
+            threshold_e8s: 10,
+            timestamp: 10,
+        },
+        Event::ChainBadDebtCircuitCleared {
+            chain_id: ChainId(10143),
+            total_bad_debt_e8s: 10,
+            timestamp: 11,
         },
     ];
     for e in events {

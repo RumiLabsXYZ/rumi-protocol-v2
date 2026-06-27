@@ -13,7 +13,9 @@
 
 use super::config::{ChainId, GasStrategy, RegisterChainArg};
 use super::multi_chain_state::MultiChainState;
-use super::vault::{open_chain_vault_in_state, OpenVaultError};
+use super::vault::{
+    open_chain_vault_in_state, verify_deposit_and_enqueue_mint_in_state, OpenVaultError,
+};
 use candid::Principal;
 
 /// A non-Monad chain id (Solana's SLIP-44 coin type) so nothing here can lean on
@@ -192,6 +194,75 @@ fn open_rejects_stale_price_when_age_gate_configured() {
     );
     assert_eq!(res, Err(OpenVaultError::StalePrice));
     assert!(s.chain_vaults.is_empty(), "no mutation on stale price");
+}
+
+#[test]
+fn open_rejects_when_chain_bad_debt_circuit_tripped() {
+    let mut s = setup(PRICE_150_USD_E8);
+    s.chain_bad_debt_circuit_tripped_at_ns.insert(CHAIN, 42);
+
+    let res = open_chain_vault_in_state(
+        &mut s,
+        CHAIN,
+        Principal::anonymous(),
+        "custody".into(),
+        100 * ONE_SOL,
+        100_00000000,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        0,
+        None,
+        12345,
+        7,
+    );
+
+    assert_eq!(
+        res,
+        Err(OpenVaultError::ChainBadDebtCircuitTripped { chain: CHAIN })
+    );
+    assert!(
+        s.chain_vaults.is_empty(),
+        "no mutation while circuit is tripped"
+    );
+    assert_eq!(s.settlement_queues[&CHAIN].pending_len(), 0);
+}
+
+#[test]
+fn verify_deposit_rejects_mint_enqueue_when_chain_bad_debt_circuit_tripped() {
+    let mut s = setup(PRICE_150_USD_E8);
+    open_chain_vault_in_state(
+        &mut s,
+        CHAIN,
+        Principal::anonymous(),
+        "custody".into(),
+        100 * ONE_SOL,
+        100_00000000,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        0,
+        None,
+        12345,
+        7,
+    )
+    .expect("open awaiting deposit");
+    s.chain_bad_debt_circuit_tripped_at_ns.insert(CHAIN, 42);
+
+    let res = verify_deposit_and_enqueue_mint_in_state(&mut s, 7, 100 * ONE_SOL, 12346);
+
+    assert_eq!(
+        res,
+        Err(OpenVaultError::ChainBadDebtCircuitTripped { chain: CHAIN })
+    );
+    assert_eq!(
+        s.chain_vaults.get(&7).unwrap().status,
+        super::monad::chain_vault::ChainVaultStatus::AwaitingDeposit,
+        "vault remains retryable after clear"
+    );
+    assert_eq!(s.settlement_queues[&CHAIN].pending_len(), 0);
 }
 
 // ─── M2: borrow + nonce + per-owner cap ───────────────────────────────────────
@@ -469,6 +540,39 @@ fn borrow_rejects_stale_price_when_age_gate_configured() {
     );
     assert_eq!(res, Err(BorrowError::StalePrice));
     assert_eq!(s.chain_vaults.get(&7).unwrap().pending_mint_e8s, 0);
+}
+
+#[test]
+fn borrow_rejects_when_chain_bad_debt_circuit_tripped() {
+    let mut s = setup(PRICE_150_USD_E8);
+    insert_open_vault(
+        &mut s,
+        Principal::anonymous(),
+        7,
+        100 * ONE_SOL,
+        100_00000000,
+    );
+    s.chain_bad_debt_circuit_tripped_at_ns.insert(CHAIN, 42);
+
+    let res = borrow_chain_vault_in_state(
+        &mut s,
+        7,
+        50_00000000,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        0,
+        None,
+        1,
+    );
+
+    assert_eq!(
+        res,
+        Err(BorrowError::ChainBadDebtCircuitTripped { chain: CHAIN })
+    );
+    assert_eq!(s.chain_vaults.get(&7).unwrap().pending_mint_e8s, 0);
+    assert_eq!(s.settlement_queues[&CHAIN].pending_len(), 0);
 }
 
 // ─── Increment 0: min-debt floor + per-chain debt ceiling ─────────────────────
@@ -867,6 +971,40 @@ fn withdraw_rejects_stale_price_when_age_gate_configured() {
         1_101,
     );
     assert_eq!(res, Err(WithdrawError::StalePrice));
+    assert_eq!(
+        s.chain_vaults.get(&7).unwrap().collateral_amount_native,
+        100 * ONE_SOL
+    );
+    assert_eq!(s.settlement_queues.get(&CHAIN).unwrap().pending_len(), 0);
+}
+
+#[test]
+fn withdraw_rejects_debt_bearing_vault_when_bad_debt_circuit_tripped() {
+    let mut s = setup(PRICE_150_USD_E8);
+    insert_open_vault(
+        &mut s,
+        Principal::anonymous(),
+        7,
+        100 * ONE_SOL,
+        100_00000000,
+    );
+    s.chain_bad_debt_circuit_tripped_at_ns.insert(CHAIN, 42);
+
+    let res = withdraw_collateral_in_state(
+        &mut s,
+        7,
+        ONE_SOL,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        1_101,
+    );
+
+    assert_eq!(
+        res,
+        Err(WithdrawError::ChainBadDebtCircuitTripped { chain: CHAIN })
+    );
     assert_eq!(
         s.chain_vaults.get(&7).unwrap().collateral_amount_native,
         100 * ONE_SOL

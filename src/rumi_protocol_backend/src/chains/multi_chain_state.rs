@@ -33,7 +33,7 @@ use super::collateral_config::ChainDebtConfigV1;
 use super::config::{ChainConfigV1, ChainConfigV2, ChainConfigV3, ChainId};
 use super::liquidation_config::ChainLiquidationConfigV1;
 use super::monad::chain_vault::ChainVaultV1;
-use super::settlement_queue::SettlementQueueV1;
+use super::settlement_queue::{SettlementOpKind, SettlementOpStatus, SettlementQueueV1};
 use candid::{CandidType, Deserialize, Principal};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -619,6 +619,16 @@ pub struct MultiChainStateV6 {
     /// but cumulative consumption must never exceed the verified transfer size.
     #[serde(default)]
     pub settled_reserve_transfer_e8s: BTreeMap<String, u128>,
+    /// Optional per-chain bad-debt circuit threshold (e8s). Missing row means the
+    /// circuit is disabled for that chain and `chain_bad_debt_e8s` remains pure
+    /// accounting.
+    #[serde(default)]
+    pub chain_bad_debt_circuit_threshold_e8s: BTreeMap<ChainId, u128>,
+    /// Per-chain bad-debt circuit latch timestamp. Presence means the circuit is
+    /// tripped; clearing removes only this latch and never erases cumulative bad
+    /// debt accounting.
+    #[serde(default)]
+    pub chain_bad_debt_circuit_tripped_at_ns: BTreeMap<ChainId, u64>,
 }
 
 impl MultiChainStateV6 {
@@ -679,6 +689,125 @@ impl MultiChainStateV6 {
                 })
             })
             .collect()
+    }
+
+    pub fn chain_bad_debt_circuit_tripped(&self, chain: ChainId) -> bool {
+        self.chain_bad_debt_circuit_tripped_at_ns
+            .contains_key(&chain)
+    }
+
+    pub fn set_chain_bad_debt_circuit_threshold(
+        &mut self,
+        chain: ChainId,
+        threshold_e8s: Option<u128>,
+        now_ns: u64,
+    ) -> Result<(), String> {
+        match threshold_e8s {
+            Some(0) => Err("threshold must be > 0; use null/None to disable".to_string()),
+            Some(threshold) => {
+                self.chain_bad_debt_circuit_threshold_e8s
+                    .insert(chain, threshold);
+                let debt = self.chain_bad_debt_e8s.get(&chain).copied().unwrap_or(0);
+                if debt >= threshold {
+                    self.chain_bad_debt_circuit_tripped_at_ns
+                        .entry(chain)
+                        .or_insert(now_ns);
+                }
+                Ok(())
+            }
+            None => {
+                self.chain_bad_debt_circuit_threshold_e8s.remove(&chain);
+                self.chain_bad_debt_circuit_tripped_at_ns.remove(&chain);
+                Ok(())
+            }
+        }
+    }
+
+    pub fn clear_chain_bad_debt_circuit(&mut self, chain: ChainId) -> bool {
+        self.chain_bad_debt_circuit_tripped_at_ns
+            .remove(&chain)
+            .is_some()
+    }
+
+    /// Add realized bad debt and latch the per-chain circuit exactly once if the
+    /// post-add cumulative debt meets the configured threshold. Returns true only
+    /// on the transition from untripped -> tripped.
+    pub fn record_chain_bad_debt_and_maybe_trip(
+        &mut self,
+        chain: ChainId,
+        amount_e8s: u128,
+        now_ns: u64,
+    ) -> bool {
+        if amount_e8s == 0 {
+            return false;
+        }
+        let total = self
+            .chain_bad_debt_e8s
+            .entry(chain)
+            .and_modify(|v| *v = v.saturating_add(amount_e8s))
+            .or_insert(amount_e8s);
+        let Some(threshold) = self
+            .chain_bad_debt_circuit_threshold_e8s
+            .get(&chain)
+            .copied()
+        else {
+            return false;
+        };
+        if *total < threshold || self.chain_bad_debt_circuit_tripped(chain) {
+            return false;
+        }
+        self.chain_bad_debt_circuit_tripped_at_ns
+            .insert(chain, now_ns);
+        true
+    }
+
+    /// True when a queued settlement op would increase protocol risk while the
+    /// chain's bad-debt circuit is tripped. Reconciliation and exposure-reducing
+    /// ops intentionally remain allowed.
+    pub fn bad_debt_circuit_blocks_settlement_op(
+        &self,
+        chain: ChainId,
+        kind: &SettlementOpKind,
+    ) -> bool {
+        if !self.chain_bad_debt_circuit_tripped(chain) {
+            return false;
+        }
+        match kind {
+            SettlementOpKind::Mint { .. } | SettlementOpKind::InterestMint { .. } => true,
+            SettlementOpKind::NativeWithdrawal { vault_id, .. } => self
+                .chain_vaults
+                .get(vault_id)
+                .map(|v| v.debt_e8s > 0)
+                .unwrap_or(true),
+            SettlementOpKind::Burn { .. }
+            | SettlementOpKind::LiquidationSwap { .. }
+            | SettlementOpKind::ChainCollateralPayout { .. } => false,
+        }
+    }
+
+    /// True when a mint-like settlement op can still explain an on-chain supply
+    /// increase. Inflight mints always count because they may already have
+    /// landed. Queued mints count only when the bad-debt circuit would permit
+    /// submission; a circuit-blocked queued mint must not suppress burn catch-up.
+    pub fn has_supply_increasing_settlement_op(&self, chain: ChainId) -> bool {
+        self.settlement_queues
+            .get(&chain)
+            .map(|q| {
+                q.pending.values().any(|op| {
+                    matches!(
+                        op.kind,
+                        SettlementOpKind::Mint { .. } | SettlementOpKind::InterestMint { .. }
+                    ) && match op.status {
+                        SettlementOpStatus::Inflight { .. } => true,
+                        SettlementOpStatus::Queued => {
+                            !self.bad_debt_circuit_blocks_settlement_op(chain, &op.kind)
+                        }
+                        SettlementOpStatus::Succeeded { .. }
+                        | SettlementOpStatus::Failed { .. } => false,
+                    }
+                })
+            })
+            .unwrap_or(false)
     }
 
     /// M2: the expected next EIP-712 nonce for a synthetic owner (0 if unseen).

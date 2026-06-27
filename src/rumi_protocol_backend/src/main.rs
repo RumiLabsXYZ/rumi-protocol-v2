@@ -2177,6 +2177,144 @@ fn get_effective_chain_debt_config(
     ))
 }
 
+#[derive(candid::CandidType, serde::Deserialize, Clone, Debug)]
+pub struct ChainBadDebtCircuitStatus {
+    pub chain_id: rumi_protocol_backend::chains::config::ChainId,
+    pub registered: bool,
+    pub bad_debt_e8s: u128,
+    pub threshold_e8s: Option<u128>,
+    pub tripped: bool,
+    pub tripped_at_ns: Option<u64>,
+}
+
+/// Public read-only status for the per-chain bad-debt circuit. No secrets.
+#[candid_method(query)]
+#[query]
+fn get_chain_bad_debt_circuit_status(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> ChainBadDebtCircuitStatus {
+    read_state(|s| ChainBadDebtCircuitStatus {
+        chain_id: chain,
+        registered: s.multi_chain.chain_configs.contains_key(&chain),
+        bad_debt_e8s: s
+            .multi_chain
+            .chain_bad_debt_e8s
+            .get(&chain)
+            .copied()
+            .unwrap_or(0),
+        threshold_e8s: s
+            .multi_chain
+            .chain_bad_debt_circuit_threshold_e8s
+            .get(&chain)
+            .copied(),
+        tripped: s.multi_chain.chain_bad_debt_circuit_tripped(chain),
+        tripped_at_ns: s
+            .multi_chain
+            .chain_bad_debt_circuit_tripped_at_ns
+            .get(&chain)
+            .copied(),
+    })
+}
+
+/// Developer-gated threshold setter. `None` disables the circuit for the chain
+/// and clears any existing latch; `Some(0)` is rejected to avoid ambiguous
+/// always-trip semantics.
+#[candid_method(update)]
+#[update]
+fn set_chain_bad_debt_circuit_threshold(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    threshold_e8s: Option<u128>,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    if !read_state(|s| s.multi_chain.chain_configs.contains_key(&chain)) {
+        return Err(ProtocolError::ChainAdmin(format!(
+            "chain {} is not registered",
+            chain.0
+        )));
+    }
+    let now = ic_cdk::api::time();
+    let was_tripped = read_state(|s| s.multi_chain.chain_bad_debt_circuit_tripped(chain));
+    mutate_state(|s| {
+        s.multi_chain
+            .set_chain_bad_debt_circuit_threshold(chain, threshold_e8s, now)
+    })
+    .map_err(ProtocolError::ChainAdmin)?;
+    let status = get_chain_bad_debt_circuit_status(chain);
+    rumi_protocol_backend::storage::record_event(
+        &rumi_protocol_backend::event::Event::ChainBadDebtCircuitThresholdSet {
+            chain_id: chain,
+            threshold_e8s,
+            timestamp: now,
+        },
+    );
+    if status.tripped && !was_tripped {
+        rumi_protocol_backend::storage::record_event(
+            &rumi_protocol_backend::event::Event::ChainBadDebtCircuitTripped {
+                chain_id: chain,
+                bad_debt_e8s: status.bad_debt_e8s,
+                total_bad_debt_e8s: status.bad_debt_e8s,
+                threshold_e8s: status.threshold_e8s.unwrap_or(0),
+                timestamp: now,
+            },
+        );
+    }
+    log!(
+        INFO,
+        "[set_chain_bad_debt_circuit_threshold] chain={:?} threshold={:?} tripped={}",
+        chain,
+        threshold_e8s,
+        status.tripped
+    );
+    Ok(())
+}
+
+/// Developer-gated manual clear for the bad-debt circuit. Cumulative bad-debt
+/// accounting and the configured threshold are preserved.
+#[candid_method(update)]
+#[update]
+fn clear_chain_bad_debt_circuit(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    if !read_state(|s| s.multi_chain.chain_configs.contains_key(&chain)) {
+        return Err(ProtocolError::ChainAdmin(format!(
+            "chain {} is not registered",
+            chain.0
+        )));
+    }
+    let now = ic_cdk::api::time();
+    let cleared = mutate_state(|s| s.multi_chain.clear_chain_bad_debt_circuit(chain));
+    if cleared {
+        let total_bad_debt_e8s = read_state(|s| {
+            s.multi_chain
+                .chain_bad_debt_e8s
+                .get(&chain)
+                .copied()
+                .unwrap_or(0)
+        });
+        rumi_protocol_backend::storage::record_event(
+            &rumi_protocol_backend::event::Event::ChainBadDebtCircuitCleared {
+                chain_id: chain,
+                total_bad_debt_e8s,
+                timestamp: now,
+            },
+        );
+    }
+    log!(
+        INFO,
+        "[clear_chain_bad_debt_circuit] chain={:?} cleared={}",
+        chain,
+        cleared
+    );
+    Ok(())
+}
+
 /// A chain vault currently liquidatable on `chain` (CR below the liquidation
 /// threshold), with its interest-aware CR + sizing surfaced for an operator/SP.
 /// The discovery channel for the eventual SP fallback (finding #30; SP-specific
@@ -4869,9 +5007,8 @@ async fn stability_pool_liquidate_chain_vault(
 
     let _guard = rumi_protocol_backend::guard::ChainVaultLiquidationGuard::new(vault_id)?;
     let now = ic_cdk::api::time();
-    let preflight = read_state(|s| {
-        matching_chain_absorb_preflight(s, vault_id, icusd_burned_e8s, caller, now)
-    });
+    let preflight =
+        read_state(|s| matching_chain_absorb_preflight(s, vault_id, icusd_burned_e8s, caller, now));
     if preflight.is_none() {
         if read_state(|s| s.frozen) {
             return Err(ProtocolError::TemporarilyUnavailable(
