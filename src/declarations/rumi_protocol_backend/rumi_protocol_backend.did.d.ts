@@ -35,6 +35,11 @@ export interface BotStatsResponse {
   'budget_total_e8s' : bigint,
   'budget_start_timestamp' : bigint,
 }
+export interface BurnSettlementProofArg {
+  'log_index' : bigint,
+  'expected_burner' : [] | [string],
+  'tx_hash' : string,
+}
 export interface CandidVault {
   'collateral_amount' : bigint,
   'owner' : Principal,
@@ -952,6 +957,13 @@ export interface OpenVaultSuccess {
   'block_index' : bigint,
   'vault_id' : bigint,
 }
+export interface PendingChainBurnAging {
+  'pending_chain_burn_e8s' : bigint,
+  'proof_count' : bigint,
+  'age_ns' : [] | [bigint],
+  'chain_id' : number,
+  'oldest_reference_ns' : [] | [bigint],
+}
 export interface PendingLiquidationV1 {
   'started_at_ns' : bigint,
   'op_id' : bigint,
@@ -1114,6 +1126,13 @@ export interface ReserveRedemptionResult {
   'fee_amount' : bigint,
   'stable_amount_sent' : bigint,
 }
+export interface ReserveSettlementProofArg {
+  'expected_burner' : [] | [string],
+  'burn_tx_hash' : string,
+  'burn_log_index' : bigint,
+  'reserve_tx_hash' : string,
+  'reserve_transfer_log_index' : bigint,
+}
 export type Result = { 'Ok' : null } |
   { 'Err' : ProtocolError };
 export type Result_1 = { 'Ok' : bigint } |
@@ -1156,6 +1175,10 @@ export type Result_8 = { 'Ok' : number } |
   { 'Err' : ProtocolError };
 export type Result_9 = { 'Ok' : ConsentInfo } |
   { 'Err' : Icrc21Error };
+export interface SettlementProofIds {
+  'pending' : Array<string>,
+  'reserve' : Array<string>,
+}
 export type SpProofLedger = { 'IcusdBurn' : null } |
   { 'ThreePoolTransfer' : null };
 export interface SpWritedownProof {
@@ -1290,10 +1313,13 @@ export interface XrpClaim {
   'custody_nonce' : bigint,
   'claimant' : Principal,
   'created_at_ns' : bigint,
+  'quarantine_reason' : [] | [string],
   'custody_owner' : Principal,
   'drops' : bigint,
   'settlement' : [] | [XrpSettlement],
 }
+export type XrpClaimResolution = { 'ReleaseForRetry' : null } |
+  { 'ConfirmPaid' : null };
 export interface XrpPendingDeposit {
   'reserve_base_drops' : bigint,
   'owner' : Principal,
@@ -1326,7 +1352,9 @@ export interface _SERVICE {
     Result_2
   >,
   'admin_mint_icusd' : ActorMethod<[bigint, Principal, string], Result_1>,
+  'admin_quarantine_xrp_claim' : ActorMethod<[bigint, string], Result>,
   'admin_resolve_stuck_claim' : ActorMethod<[bigint, boolean], Result>,
+  'admin_resolve_xrp_claim' : ActorMethod<[bigint, XrpClaimResolution], Result>,
   'admin_sweep_to_treasury' : ActorMethod<[string], Result_1>,
   'borrow_chain_vault_evm' : ActorMethod<
     [VaultIntent, Uint8Array | number[]],
@@ -1445,6 +1473,10 @@ export interface _SERVICE {
     Array<[bigint, XrpPendingDeposit]>
   >,
   'get_pending_amm1_donations_count' : ActorMethod<[], bigint>,
+  'get_pending_chain_burn_aging' : ActorMethod<
+    [],
+    Array<PendingChainBurnAging>
+  >,
   'get_price_pusher_allowed' : ActorMethod<[], Array<[number, string]>>,
   'get_price_pusher_principal' : ActorMethod<[], [] | [Principal]>,
   'get_protocol_3usd_reserves' : ActorMethod<[], bigint>,
@@ -1467,6 +1499,7 @@ export interface _SERVICE {
   'get_rmr_ceiling_cr' : ActorMethod<[], number>,
   'get_rmr_floor' : ActorMethod<[], number>,
   'get_rmr_floor_cr' : ActorMethod<[], number>,
+  'get_settlement_proof_ids' : ActorMethod<[[] | [number]], SettlementProofIds>,
   'get_snapshot_count' : ActorMethod<[], bigint>,
   'get_sp_writedown_disabled' : ActorMethod<[], boolean>,
   'get_stability_pool_config' : ActorMethod<[], StabilityPoolConfig>,
@@ -1494,6 +1527,7 @@ export interface _SERVICE {
     [],
     Array<[bigint, XrpPendingDeposit]>
   >,
+  'get_xrp_quarantined_claims' : ActorMethod<[], Array<[bigint, XrpClaim]>>,
   'get_xrp_schnorr_key_name' : ActorMethod<[], string>,
   'harvest_chain_interest' : ActorMethod<[number], Result_1>,
   'http_request' : ActorMethod<[HttpRequest], HttpResponse_1>,
@@ -1652,7 +1686,15 @@ export interface _SERVICE {
   'set_xrc_fetch_interval_secs' : ActorMethod<[bigint], Result>,
   'set_xrp_schnorr_key_name' : ActorMethod<[string], Result>,
   'settle_pending_chain_burn' : ActorMethod<[number, bigint, string], Result>,
+  'settle_pending_chain_burn_with_proof' : ActorMethod<
+    [number, BurnSettlementProofArg],
+    Result
+  >,
   'settle_reserve_burn' : ActorMethod<[number, bigint, string], Result>,
+  'settle_reserve_burn_with_proof' : ActorMethod<
+    [number, ReserveSettlementProofArg],
+    Result
+  >,
   'settle_xrp_claim' : ActorMethod<[bigint, string], Result_2>,
   'settle_xrp_claim_with_tag' : ActorMethod<[bigint, string, number], Result_2>,
   'solana_bootstrap_nonce' : ActorMethod<[[] | [string]], Result>,

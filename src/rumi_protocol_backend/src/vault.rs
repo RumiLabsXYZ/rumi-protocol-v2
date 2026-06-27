@@ -1274,6 +1274,7 @@ pub(crate) fn record_xrp_claim(
             custody_nonce,
             created_at_ns: now_ns,
             settlement: None,
+            quarantine_reason: None,
         },
     );
     claim_id
@@ -1436,6 +1437,60 @@ pub(crate) fn reconcile_xrp_settlement_snapshot(
     true
 }
 
+/// F-03: durably flag a claim as quarantined because a settlement divergence is
+/// suspected (its custody Sequence advanced past the recorded `source_sequence` while
+/// the recorded tx_hash is NotFound on-ledger). Idempotent: keeps the first reason set,
+/// so repeated detection does not overwrite the most precise diagnostic. While a claim
+/// is quarantined `settle_xrp_claim` refuses to sign; an admin clears it via
+/// `admin_resolve_xrp_claim`. Returns true if the claim exists.
+pub(crate) fn quarantine_xrp_claim_snapshot(
+    s: &mut crate::state::State,
+    claim_id: u64,
+    reason: &str,
+) -> bool {
+    if let Some(claim) = s.xrp_claims.get_mut(&claim_id) {
+        if claim.quarantine_reason.is_none() {
+            claim.quarantine_reason = Some(reason.to_string());
+        }
+        true
+    } else {
+        false
+    }
+}
+
+/// F-03: apply an admin resolution to a quarantined claim after off-ledger
+/// reconciliation. `confirm_paid = true` means the admin verified the divergent Payment
+/// DID deliver -> remove the claim (no re-pay). `false` means it did NOT deliver -> clear
+/// the quarantine + settlement so the claimant can retry settle and be paid exactly once.
+/// Errors WITHOUT mutating if the claim is absent or not quarantined, so a resolve can
+/// never silently drop a healthy, still-settle-able claim. `pub` for the main.rs endpoint.
+pub fn resolve_quarantined_xrp_claim_snapshot(
+    s: &mut crate::state::State,
+    claim_id: u64,
+    confirm_paid: bool,
+) -> Result<(), ProtocolError> {
+    match s.xrp_claims.get(&claim_id) {
+        Some(c) if c.quarantine_reason.is_some() => {}
+        Some(_) => {
+            return Err(ProtocolError::GenericError(format!(
+                "XRP claim #{claim_id} is not quarantined; refusing to resolve a healthy claim"
+            )))
+        }
+        None => {
+            return Err(ProtocolError::GenericError(format!(
+                "No such XRP claim #{claim_id}"
+            )))
+        }
+    }
+    if confirm_paid {
+        s.xrp_claims.remove(&claim_id);
+    } else if let Some(c) = s.xrp_claims.get_mut(&claim_id) {
+        c.quarantine_reason = None;
+        c.settlement = None;
+    }
+    Ok(())
+}
+
 async fn reconcile_xrp_other_inflight_claims(
     current_claim_id: u64,
     custody_owner: Principal,
@@ -1488,15 +1543,23 @@ async fn reconcile_xrp_other_inflight_claims(
                 });
             }
             // F-03: the sibling's Payment consumed its source Sequence under a hash that
-            // differs from the one we recorded, so it may already have paid out. Refuse to
-            // clear the blocker (which would let it be re-signed and double-paid) and fail
-            // the current settle closed; the sibling stays quarantined until reconciled.
+            // differs from the one we recorded, so it may already have paid out. Durably
+            // quarantine the sibling (so future settles refuse it too), refuse to clear the
+            // blocker (which would let it be re-signed and double-paid), and fail the
+            // current settle closed; an admin resolves the sibling via admin_resolve_xrp_claim.
             XrpSiblingReconcileDecision::QuarantineDiverged => {
+                let reason = format!(
+                    "settlement diverged: custody account sequence advanced past source \
+                     sequence while tx_hash {} is NotFound on-ledger; Payment may already \
+                     have settled under a different hash",
+                    settlement.tx_hash
+                );
+                mutate_state(|s| {
+                    quarantine_xrp_claim_snapshot(s, other_claim_id, &reason);
+                });
                 return Err(ProtocolError::GenericError(format!(
-                    "xrp sibling claim #{other_claim_id} settlement diverged: custody account \
-                     sequence advanced past its source sequence, so its Payment may already \
-                     have settled under a different hash. Refusing to clear the blocker to \
-                     avoid a double-pay; manual reconciliation required."
+                    "xrp sibling claim #{other_claim_id} quarantined ({reason}). Refusing to \
+                     clear the blocker to avoid a double-pay; manual reconciliation required."
                 )));
             }
         }
@@ -1776,6 +1839,14 @@ pub async fn settle_xrp_claim_with_tag(
         return Err(ProtocolError::CallerNotOwner);
     }
 
+    // F-03: a quarantined claim may already have been paid under a divergent hash.
+    // Refuse to sign anything until an admin resolves it (admin_resolve_xrp_claim).
+    if let Some(reason) = claim.quarantine_reason.clone() {
+        return Err(ProtocolError::GenericError(format!(
+            "XRP claim #{claim_id} is quarantined ({reason}); awaiting admin reconciliation."
+        )));
+    }
+
     let guard_principal = GuardPrincipal::new(caller, &format!("settle_xrp_claim_{}", claim_id))?;
     // Per-custody-address sequence serialization: custody_nonce == the source vault
     // id, so this per-vault lock prevents two concurrent Payments from one custody
@@ -1840,6 +1911,16 @@ pub async fn settle_xrp_claim_with_tag(
                     ));
                 }
                 if let Err(e) = ensure_xrp_replacement_sequence_safe(&prev, &acct) {
+                    // F-03: the prior Payment's source Sequence was consumed (under some
+                    // hash) yet our recorded tx_hash is NotFound on-ledger — a divergence.
+                    // Durably quarantine so future settles short-circuit, then fail closed.
+                    let reason = format!(
+                        "settlement diverged: {:?} (tx_hash {} NotFound on-ledger)",
+                        e, prev.tx_hash
+                    );
+                    mutate_state(|s| {
+                        quarantine_xrp_claim_snapshot(s, claim_id, &reason);
+                    });
                     guard_principal.fail();
                     return Err(e);
                 }
@@ -2040,6 +2121,7 @@ mod xrp_p4_tests {
             custody_nonce,
             created_at_ns: 0,
             settlement: None,
+            quarantine_reason: None,
         }
     }
 
@@ -2425,6 +2507,89 @@ mod xrp_p4_tests {
             xrp_sibling_reconcile_decision(&status, &st, &acct),
             XrpSiblingReconcileDecision::QuarantineDiverged
         );
+    }
+
+    // ── F-03 quarantine set + admin resolve ──────────────────────────────────
+
+    #[test]
+    fn quarantine_snapshot_sets_reason_idempotently() {
+        let mut s = crate::state::State::default();
+        let claimant = Principal::from_slice(&[0x11; 16]);
+        let owner = Principal::from_slice(&[0xaa; 16]);
+        s.xrp_claims.insert(7, claim(claimant, owner, 7, 2_000_000));
+
+        assert!(quarantine_xrp_claim_snapshot(&mut s, 7, "first reason"));
+        assert_eq!(
+            s.xrp_claims.get(&7).unwrap().quarantine_reason.as_deref(),
+            Some("first reason")
+        );
+        // Idempotent: a second detection keeps the first (most precise) reason.
+        assert!(quarantine_xrp_claim_snapshot(&mut s, 7, "second reason"));
+        assert_eq!(
+            s.xrp_claims.get(&7).unwrap().quarantine_reason.as_deref(),
+            Some("first reason")
+        );
+    }
+
+    #[test]
+    fn quarantine_snapshot_missing_claim_is_noop_false() {
+        let mut s = crate::state::State::default();
+        assert!(!quarantine_xrp_claim_snapshot(&mut s, 999, "x"));
+    }
+
+    #[test]
+    fn resolve_confirm_paid_removes_quarantined_claim() {
+        let mut s = crate::state::State::default();
+        let claimant = Principal::from_slice(&[0x11; 16]);
+        let owner = Principal::from_slice(&[0xaa; 16]);
+        let mut c = claim(claimant, owner, 7, 2_000_000);
+        c.settlement = Some(settlement("ABC"));
+        c.quarantine_reason = Some("diverged".to_string());
+        s.xrp_claims.insert(7, c);
+
+        assert!(resolve_quarantined_xrp_claim_snapshot(&mut s, 7, true).is_ok());
+        assert!(!s.xrp_claims.contains_key(&7));
+    }
+
+    #[test]
+    fn resolve_release_for_retry_clears_quarantine_and_settlement() {
+        let mut s = crate::state::State::default();
+        let claimant = Principal::from_slice(&[0x11; 16]);
+        let owner = Principal::from_slice(&[0xaa; 16]);
+        let mut c = claim(claimant, owner, 7, 2_000_000);
+        c.settlement = Some(settlement("ABC"));
+        c.quarantine_reason = Some("diverged".to_string());
+        s.xrp_claims.insert(7, c);
+
+        assert!(resolve_quarantined_xrp_claim_snapshot(&mut s, 7, false).is_ok());
+        let c = s.xrp_claims.get(&7).unwrap();
+        assert!(c.quarantine_reason.is_none());
+        assert!(c.settlement.is_none());
+        assert_eq!(c.drops, 2_000_000); // claim preserved for a clean retry
+    }
+
+    #[test]
+    fn resolve_refuses_healthy_claim() {
+        let mut s = crate::state::State::default();
+        let claimant = Principal::from_slice(&[0x11; 16]);
+        let owner = Principal::from_slice(&[0xaa; 16]);
+        s.xrp_claims.insert(7, claim(claimant, owner, 7, 2_000_000)); // not quarantined
+
+        assert!(matches!(
+            resolve_quarantined_xrp_claim_snapshot(&mut s, 7, true),
+            Err(ProtocolError::GenericError(_))
+        ));
+        // The healthy claim is untouched (not dropped).
+        assert!(s.xrp_claims.contains_key(&7));
+    }
+
+    #[test]
+    fn resolve_missing_claim_errors() {
+        let mut s = crate::state::State::default();
+        assert!(matches!(
+            resolve_quarantined_xrp_claim_snapshot(&mut s, 404, true),
+            Err(ProtocolError::GenericError(_))
+        ));
     }
 }
 
