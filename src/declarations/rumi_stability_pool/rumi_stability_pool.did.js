@@ -41,6 +41,42 @@ export const idlFactory = ({ IDL }) => {
     'success' : IDL.Bool,
     'collateral_type' : IDL.Principal,
   });
+  const ChainSpAbsorbResult = IDL.Record({
+    'collateral_price_e8s' : IDL.Nat64,
+    'liquidated_debt_e8s' : IDL.Nat,
+    'collateral_received_native' : IDL.Nat,
+    'block_index' : IDL.Nat64,
+    'claim_id' : IDL.Nat64,
+    'custody_address' : IDL.Text,
+    'vault_id' : IDL.Nat64,
+    'chain_id' : IDL.Nat32,
+    'icusd_burned_e8s' : IDL.Nat64,
+    'success' : IDL.Bool,
+  });
+  const ChainAbsorbAutoTickRecord = IDL.Record({
+    'skipped_reason' : IDL.Opt(IDL.Text),
+    'started_at_ns' : IDL.Nat64,
+    'attempted_vault_id' : IDL.Opt(IDL.Nat64),
+    'candidates_scanned' : IDL.Nat64,
+    'completed_at_ns' : IDL.Nat64,
+    'error' : IDL.Opt(IDL.Text),
+    'absorbed' : IDL.Opt(ChainSpAbsorbResult),
+  });
+  const ChainAbsorbAutoConfig = IDL.Record({
+    'enabled' : IDL.Bool,
+    'interval_seconds' : IDL.Nat64,
+    'max_scan_per_chain' : IDL.Nat64,
+  });
+  const ChainAbsorbAutoStatus = IDL.Record({
+    'tick_in_flight' : IDL.Bool,
+    'last_tick' : IDL.Opt(ChainAbsorbAutoTickRecord),
+    'config' : ChainAbsorbAutoConfig,
+  });
+  const ChainSpAbsorbCompletion = IDL.Record({
+    'result' : ChainSpAbsorbResult,
+    'completed_at_ns' : IDL.Nat64,
+    'vault_id' : IDL.Nat64,
+  });
   const PoolLiquidationRecord = IDL.Record({
     'collateral_price_e8s' : IDL.Opt(IDL.Nat64),
     'stables_consumed' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
@@ -49,6 +85,53 @@ export const idlFactory = ({ IDL }) => {
     'collateral_gained' : IDL.Nat64,
     'timestamp' : IDL.Nat64,
     'collateral_type' : IDL.Principal,
+  });
+  const ChainSpAbsorbIntentStatus = IDL.Variant({
+    'BackendRejected' : IDL.Null,
+    'Burned' : IDL.Null,
+    'BackendAccepted' : IDL.Null,
+    'Prepared' : IDL.Null,
+    'LocalApplied' : IDL.Null,
+  });
+  const SpProofLedger = IDL.Variant({
+    'IcusdBurn' : IDL.Null,
+    'ThreePoolTransfer' : IDL.Null,
+  });
+  const SpWritedownProof = IDL.Record({
+    'block_index' : IDL.Nat64,
+    'ledger_kind' : SpProofLedger,
+    'vault_id_memo' : IDL.Nat64,
+  });
+  const ChainStabilityPoolLiquidationResult = IDL.Record({
+    'collateral_price_e8s' : IDL.Nat64,
+    'liquidated_debt_e8s' : IDL.Nat,
+    'collateral_received_native' : IDL.Nat,
+    'block_index' : IDL.Nat64,
+    'claim_id' : IDL.Nat64,
+    'custody_address' : IDL.Text,
+    'vault_id' : IDL.Nat64,
+    'chain_id' : IDL.Nat32,
+    'success' : IDL.Bool,
+  });
+  const IcrcAccount = IDL.Record({
+    'owner' : IDL.Principal,
+    'subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+  });
+  const ChainSpAbsorbIntent = IDL.Record({
+    'last_error' : IDL.Opt(IDL.Text),
+    'status' : ChainSpAbsorbIntentStatus,
+    'icusd_to_burn_e8s' : IDL.Nat64,
+    'burn_proof' : IDL.Opt(SpWritedownProof),
+    'stables_consumed' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
+    'updated_at_ns' : IDL.Nat64,
+    'vault_id' : IDL.Nat64,
+    'chain_sentinel' : IDL.Principal,
+    'created_at_ns' : IDL.Nat64,
+    'burn_created_at_time_ns' : IDL.Nat64,
+    'chain_id' : IDL.Nat32,
+    'backend_result' : IDL.Opt(ChainStabilityPoolLiquidationResult),
+    'icusd_ledger' : IDL.Principal,
+    'icusd_minting_account' : IcrcAccount,
   });
   const PendingRefund = IDL.Record({
     'id' : IDL.Nat64,
@@ -160,6 +243,7 @@ export const idlFactory = ({ IDL }) => {
     'total_interest_earned_e8s' : IDL.Nat64,
     'collateral_gains' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
     'stablecoin_balances' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
+    'cfx_claims' : IDL.Opt(IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat))),
     'total_claimed_gains' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
     'native_payout_addresses' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Text)),
     'total_usd_value_e8s' : IDL.Nat64,
@@ -226,6 +310,32 @@ export const idlFactory = ({ IDL }) => {
     'vault_id' : IDL.Nat64,
     'collateral_type' : IDL.Principal,
   });
+  const CfxClaimPayoutRecovery = IDL.Record({
+    'claim_id' : IDL.Nat64,
+    'claimant' : IDL.Principal,
+    'op_id' : IDL.Nat64,
+    'chain_sentinel' : IDL.Principal,
+    'amount_wei' : IDL.Nat,
+    'failed_at_ns' : IDL.Nat64,
+    'reason' : IDL.Text,
+  });
+  const ChainLiquidatableVaultInfo = IDL.Record({
+    'sized_repay_e8s' : IDL.Nat,
+    'cr_e4' : IDL.Nat64,
+    'collateral_native' : IDL.Nat,
+    'vault_id' : IDL.Nat64,
+    'sp_attempted' : IDL.Bool,
+    'chain_collateral_sentinel' : IDL.Principal,
+    'chain_id' : IDL.Nat32,
+    'liquidation_threshold_e4' : IDL.Nat64,
+    'effective_debt_e8s' : IDL.Nat,
+    'debt_e8s' : IDL.Nat,
+  });
+  const ChainSpAbsorbCandidate = IDL.Record({
+    'icusd_to_burn_e8s' : IDL.Nat64,
+    'vault' : ChainLiquidatableVaultInfo,
+    'pending_status' : IDL.Opt(ChainSpAbsorbIntentStatus),
+  });
   const PoolConfiguration = IDL.Record({
     'emergency_pause' : IDL.Bool,
     'min_deposit_e8s' : IDL.Nat64,
@@ -243,6 +353,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Text, 'Err' : StabilityPoolError })],
         [],
       ),
+    'check_chain_absorb_capacity' : IDL.Func(
+        [IDL.Principal, IDL.Nat64],
+        [IDL.Bool],
+        ['query'],
+      ),
     'check_pool_capacity' : IDL.Func(
         [IDL.Principal, IDL.Nat64],
         [IDL.Bool],
@@ -256,6 +371,11 @@ export const idlFactory = ({ IDL }) => {
             'Err' : StabilityPoolError,
           }),
         ],
+        [],
+      ),
+    'claim_cfx' : IDL.Func(
+        [IDL.Principal, IDL.Text],
+        [IDL.Variant({ 'Ok' : IDL.Nat, 'Err' : StabilityPoolError })],
         [],
       ),
     'claim_collateral' : IDL.Func(
@@ -288,9 +408,29 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : LiquidationResult, 'Err' : StabilityPoolError })],
         [],
       ),
+    'get_chain_absorb_auto_status' : IDL.Func(
+        [],
+        [ChainAbsorbAutoStatus],
+        ['query'],
+      ),
+    'get_chain_collateral_sentinel' : IDL.Func(
+        [IDL.Nat32],
+        [IDL.Principal],
+        ['query'],
+      ),
+    'get_completed_chain_absorbs' : IDL.Func(
+        [IDL.Opt(IDL.Nat64)],
+        [IDL.Vec(ChainSpAbsorbCompletion)],
+        ['query'],
+      ),
     'get_liquidation_history' : IDL.Func(
         [IDL.Opt(IDL.Nat64)],
         [IDL.Vec(PoolLiquidationRecord)],
+        ['query'],
+      ),
+    'get_pending_chain_absorbs' : IDL.Func(
+        [],
+        [IDL.Vec(ChainSpAbsorbIntent)],
         ['query'],
       ),
     'get_pending_refunds' : IDL.Func(
@@ -335,6 +475,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Vec(LiquidationResult)],
         [],
       ),
+    'opt_in_cfx' : IDL.Func(
+        [IDL.Principal],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
+        [],
+      ),
     'opt_in_collateral' : IDL.Func(
         [IDL.Principal],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
@@ -342,6 +487,11 @@ export const idlFactory = ({ IDL }) => {
       ),
     'opt_in_native_collateral' : IDL.Func(
         [IDL.Principal, IDL.Text],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
+        [],
+      ),
+    'opt_out_cfx' : IDL.Func(
+        [IDL.Principal],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
         [],
       ),
@@ -353,6 +503,16 @@ export const idlFactory = ({ IDL }) => {
     'receive_interest_revenue' : IDL.Func(
         [IDL.Principal, IDL.Nat64, IDL.Opt(IDL.Principal)],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
+        [],
+      ),
+    'recredit_failed_cfx_claim_payout' : IDL.Func(
+        [CfxClaimPayoutRecovery],
+        [IDL.Variant({ 'Ok' : IDL.Bool, 'Err' : StabilityPoolError })],
+        [],
+      ),
+    'register_cfx_collateral' : IDL.Func(
+        [IDL.Nat32],
+        [IDL.Variant({ 'Ok' : IDL.Principal, 'Err' : StabilityPoolError })],
         [],
       ),
     'register_collateral' : IDL.Func(
@@ -368,6 +528,31 @@ export const idlFactory = ({ IDL }) => {
     'resume_operations' : IDL.Func(
         [],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
+        [],
+      ),
+    'scan_chain_absorb_candidates' : IDL.Func(
+        [IDL.Opt(IDL.Nat64)],
+        [
+          IDL.Variant({
+            'Ok' : IDL.Vec(ChainSpAbsorbCandidate),
+            'Err' : StabilityPoolError,
+          }),
+        ],
+        [],
+      ),
+    'set_chain_absorb_auto_config' : IDL.Func(
+        [ChainAbsorbAutoConfig],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
+        [],
+      ),
+    'sp_absorb_chain_vault' : IDL.Func(
+        [IDL.Nat64],
+        [
+          IDL.Variant({
+            'Ok' : ChainSpAbsorbResult,
+            'Err' : StabilityPoolError,
+          }),
+        ],
         [],
       ),
     'update_pool_configuration' : IDL.Func(

@@ -49,6 +49,14 @@ export interface CandidVault {
   'icp_margin_amount' : bigint,
   'borrowed_icusd_amount' : bigint,
 }
+export interface ChainBadDebtCircuitStatus {
+  'tripped_at_ns' : [] | [bigint],
+  'tripped' : boolean,
+  'bad_debt_e8s' : bigint,
+  'chain_id' : number,
+  'threshold_e8s' : [] | [bigint],
+  'registered' : boolean,
+}
 export interface ChainDebtConfigV1 {
   'debt_ceiling_e8s' : [] | [bigint],
   'min_vault_debt_e8s' : bigint,
@@ -296,6 +304,13 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'usdc_native' : bigint,
       'backing_added_e8s' : bigint,
       'vault_id' : bigint,
+      'chain_id' : number,
+      'timestamp' : bigint,
+    }
+  } |
+  {
+    'chain_bad_debt_circuit_cleared' : {
+      'total_bad_debt_e8s' : bigint,
       'chain_id' : number,
       'timestamp' : bigint,
     }
@@ -584,6 +599,13 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
     }
   } |
   {
+    'chain_bad_debt_circuit_threshold_set' : {
+      'chain_id' : number,
+      'threshold_e8s' : [] | [bigint],
+      'timestamp' : bigint,
+    }
+  } |
+  {
     'set_rate_curve_markers' : {
       'markers' : string,
       'collateral_type' : [] | [string],
@@ -608,6 +630,15 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'vault_id' : bigint,
       'timestamp' : [] | [bigint],
       'amount' : bigint,
+    }
+  } |
+  {
+    'chain_bad_debt_circuit_tripped' : {
+      'total_bad_debt_e8s' : bigint,
+      'bad_debt_e8s' : bigint,
+      'chain_id' : number,
+      'threshold_e8s' : bigint,
+      'timestamp' : bigint,
     }
   } |
   { 'set_breaker_window_ns' : { 'window_ns' : bigint, 'timestamp' : bigint } } |
@@ -1371,6 +1402,7 @@ export interface _SERVICE {
     Result_1
   >,
   'claim_liquidity_returns' : ActorMethod<[], Result_1>,
+  'clear_chain_bad_debt_circuit' : ActorMethod<[number], Result>,
   'clear_invariant_halt' : ActorMethod<[], Result>,
   'clear_liquidation_breaker' : ActorMethod<[], Result>,
   'clear_reorg_halt' : ActorMethod<[number], Result>,
@@ -1397,6 +1429,10 @@ export interface _SERVICE {
   'get_bot_claim_vault_ids' : ActorMethod<[], BigUint64Array | bigint[]>,
   'get_bot_cr_tolerance_bps' : ActorMethod<[], bigint>,
   'get_bot_stats' : ActorMethod<[], BotStatsResponse>,
+  'get_chain_bad_debt_circuit_status' : ActorMethod<
+    [number],
+    ChainBadDebtCircuitStatus
+  >,
   'get_chain_debt_config' : ActorMethod<[number], [] | [ChainDebtConfigV1]>,
   'get_chain_interest_treasury_address' : ActorMethod<[number], Result_2>,
   'get_chain_liquidatable_vaults' : ActorMethod<
@@ -1586,6 +1622,10 @@ export interface _SERVICE {
   'set_breaker_window_debt_ceiling_e8s' : ActorMethod<[bigint], Result>,
   'set_breaker_window_ns' : ActorMethod<[bigint], Result>,
   'set_burn_watch_poll_enabled' : ActorMethod<[number, boolean], Result>,
+  'set_chain_bad_debt_circuit_threshold' : ActorMethod<
+    [number, [] | [bigint]],
+    Result
+  >,
   'set_chain_config' : ActorMethod<[number, UpdateChainConfigArg], Result>,
   'set_chain_contract' : ActorMethod<[number, string], Result>,
   'set_chain_debt_config' : ActorMethod<[number, ChainDebtConfigV1], Result>,
@@ -1714,6 +1754,10 @@ export interface _SERVICE {
   'stability_pool_liquidate_with_reserves' : ActorMethod<
     [bigint, bigint, bigint, Principal],
     Result_18
+  >,
+  'stability_pool_preflight_chain_absorb' : ActorMethod<
+    [bigint, bigint],
+    Result
   >,
   'submit_burn_proof' : ActorMethod<[number, string], Result_20>,
   'sweep_xrp_pending_open' : ActorMethod<[bigint], Result>,

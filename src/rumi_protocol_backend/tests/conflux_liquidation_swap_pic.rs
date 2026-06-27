@@ -458,6 +458,8 @@ const TRANSFER_TOPIC0: &str =
 const TOKEN0_SELECTOR: &str = "0x0dfe1681";
 /// UniswapV2 pair `getReserves()` selector (must match `GET_RESERVES_SELECTOR`).
 const GET_RESERVES_SELECTOR: &str = "0x0902f1ac";
+/// UniswapV2 factory `getPair(address,address)` selector.
+const GET_PAIR_SELECTOR: &str = "0xe6a43905";
 
 /// Conflux register arg's `finality_depth` (mirrors conflux_testnet_register_arg()).
 const CONFLUX_FINALITY_DEPTH: u64 = 100;
@@ -739,6 +741,15 @@ fn word_addr(addr: &str) -> String {
     format!("0x{:0>64}", raw.to_lowercase())
 }
 
+fn script_factory_pair_sanity(pic: &PocketIc, mock: Principal, pair: &str) {
+    let _ = update_any(
+        pic,
+        mock,
+        "set_eth_call_response",
+        Encode!(&GET_PAIR_SELECTOR.to_string(), &word_addr(pair)).unwrap(),
+    );
+}
+
 // ─── liquidation config builder (ENABLED, with the Increment-3 fields) ────────
 
 /// The ENABLED Conflux liquidation config used throughout this test. Uses the
@@ -891,6 +902,7 @@ fn conflux_liquidation_swap_executes_and_credits_reserve() {
             // ── GATED subset: the new config (incl. the 4 Increment-3 fields)
             // decodes + round-trips, and the reserve/settlement address endpoints
             // correctly signal ECDSA-unavailable. We do NOT fake the swap.
+            script_factory_pair_sanity(&pic, mock, DEX_PAIR);
             decode_result(
                 update_dev(
                     &pic,
@@ -1046,6 +1058,7 @@ fn conflux_liquidation_swap_executes_and_credits_reserve() {
     update_any(&pic, mock, "set_next_send_hash", Encode!(&"0xcfxswap1".to_string()).unwrap());
 
     // ── Step 4: enable the liquidation config + drop the price to $0.08 ──────
+    script_factory_pair_sanity(&pic, mock, DEX_PAIR);
     decode_result(
         update_dev(
             &pic,
@@ -1337,6 +1350,7 @@ fn conflux_liquidation_bot_failure_sp_absorb_claims_cfx() {
     );
     assert_supply(&pic, backend, 100 * E8, "after mint");
 
+    script_factory_pair_sanity(&pic, mock, DEX_PAIR);
     decode_result(
         update_dev(
             &pic,
@@ -1469,12 +1483,21 @@ fn conflux_liquidation_bot_failure_sp_absorb_claims_cfx() {
     assert!(v.pending_liquidation.is_none(), "SP absorb does not create a marker");
     assert_supply(&pic, backend, 100 * E8, "after SP absorb (foreign supply unchanged)");
     let duplicate_absorb = sp_absorb_chain_vault(&pic, sp, vault_id)
-        .expect_err("second SP absorb must reject");
-    assert!(
-        matches!(duplicate_absorb, StabilityPoolError::LiquidationFailed { .. }),
-        "duplicate absorb should reject cleanly, got {:?}",
-        duplicate_absorb
+        .expect("duplicate SP absorb returns the stored idempotent result");
+    assert!(duplicate_absorb.success, "duplicate SP absorb returns success");
+    assert_eq!(duplicate_absorb.vault_id, absorb.vault_id);
+    assert_eq!(duplicate_absorb.chain_id, absorb.chain_id);
+    assert_eq!(duplicate_absorb.icusd_burned_e8s, absorb.icusd_burned_e8s);
+    assert_eq!(
+        duplicate_absorb.liquidated_debt_e8s, absorb.liquidated_debt_e8s,
+        "duplicate SP absorb must not burn or absorb a different debt amount"
     );
+    assert_eq!(
+        duplicate_absorb.collateral_received_native, absorb.collateral_received_native,
+        "duplicate SP absorb must replay the stored collateral seizure"
+    );
+    assert_eq!(duplicate_absorb.claim_id, absorb.claim_id);
+    assert_eq!(duplicate_absorb.block_index, absorb.block_index);
 
     update_any(&pic, mock, "set_total_supply", Encode!(&(100u128 * E8)).unwrap());
     let recon = reconcile_chain_supply(&pic, backend).expect("reconcile_chain_supply Ok");

@@ -1,11 +1,11 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::cell::RefCell;
-use candid::{CandidType, Principal, Decode, Encode};
+use candid::{CandidType, Decode, Encode, Principal};
 use ic_canister_log::log;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 
-use crate::types::*;
 use crate::logs::INFO;
+use crate::types::*;
 
 /// Maximum number of liquidation records retained in memory.
 /// Older entries are dropped when this limit is exceeded.
@@ -41,6 +41,30 @@ pub struct StabilityPoolState {
     /// keyed by chain sentinel. `Option` keeps Candid stable memory upgrades safe.
     #[serde(default)]
     pub chain_claim_sources: Option<BTreeMap<Principal, Vec<ChainClaimSource>>>,
+    /// Retry journal for chain-vault SP absorbs that may have burned icUSD but
+    /// not yet finalized local depositor accounting.
+    #[serde(default)]
+    pub pending_chain_absorbs: Option<BTreeMap<u64, ChainSpAbsorbIntent>>,
+    /// Local idempotency record for completed chain-vault SP absorbs.
+    #[serde(default)]
+    pub completed_chain_absorbs: Option<BTreeMap<u64, ChainSpAbsorbCompletion>>,
+    /// Disabled-by-default automatic chain absorb scheduler configuration.
+    #[serde(default)]
+    pub chain_absorb_auto_config: Option<ChainAbsorbAutoConfig>,
+    /// Latest automatic chain absorb tick, retained as bounded operator status.
+    #[serde(default)]
+    pub chain_absorb_auto_last_tick: Option<ChainAbsorbAutoTickRecord>,
+    /// Durable idempotency journal for backend-confirmed failed CFX claim payout
+    /// recovery. Without this, retrying the backend callback would double-credit
+    /// both the depositor claim and the backend claim source.
+    #[serde(default)]
+    pub completed_cfx_claim_payout_recoveries:
+        Option<BTreeMap<CfxClaimPayoutRecoveryKey, CfxClaimPayoutRecoveryRecord>>,
+    /// Compact idempotency watermark for recovery records evicted from
+    /// `completed_cfx_claim_payout_recoveries`. A replay with an op_id at or
+    /// below the per-sentinel floor is treated as already recovered.
+    #[serde(default)]
+    pub completed_cfx_claim_payout_recovery_floor: Option<BTreeMap<Principal, u64>>,
 
     // Canister references
     pub protocol_canister_id: Principal,
@@ -91,6 +115,12 @@ impl Default for StabilityPoolState {
             collateral_registry: BTreeMap::new(),
             chain_collateral_sentinels: Some(BTreeSet::new()),
             chain_claim_sources: Some(BTreeMap::new()),
+            pending_chain_absorbs: Some(BTreeMap::new()),
+            completed_chain_absorbs: Some(BTreeMap::new()),
+            chain_absorb_auto_config: Some(ChainAbsorbAutoConfig::default()),
+            chain_absorb_auto_last_tick: None,
+            completed_cfx_claim_payout_recoveries: Some(BTreeMap::new()),
+            completed_cfx_claim_payout_recovery_floor: Some(BTreeMap::new()),
             protocol_canister_id: Principal::anonymous(),
             configuration: PoolConfiguration {
                 min_deposit_e8s: 1_000_000, // 0.01 USD
@@ -123,6 +153,9 @@ const MAX_POOL_EVENTS: usize = 10_000;
 /// which is not caller-controllable, so this is a memory-safety bound rather
 /// than an anti-DoS one (mirrors rumi_3pool's MAX_PENDING_CLAIMS).
 pub const MAX_PENDING_REFUNDS: usize = 10_000;
+pub const MAX_PENDING_CHAIN_ABSORBS: usize = 1_000;
+pub const MAX_COMPLETED_CHAIN_ABSORBS: usize = 10_000;
+pub const MAX_COMPLETED_CFX_CLAIM_PAYOUT_RECOVERIES: usize = 10_000;
 
 impl StabilityPoolState {
     pub fn initialize(&mut self, args: StabilityPoolInitArgs) {
@@ -160,7 +193,10 @@ impl StabilityPoolState {
     }
 
     pub fn pool_event_count(&self) -> u64 {
-        self.pool_events.as_ref().map(|v| v.len() as u64).unwrap_or(0)
+        self.pool_events
+            .as_ref()
+            .map(|v| v.len() as u64)
+            .unwrap_or(0)
     }
 
     pub fn is_admin(&self, caller: &Principal) -> bool {
@@ -170,7 +206,9 @@ impl StabilityPoolState {
     // ─── Stablecoin Registry ───
 
     pub fn register_stablecoin(&mut self, config: StablecoinConfig) {
-        self.total_stablecoin_balances.entry(config.ledger_id).or_insert(0);
+        self.total_stablecoin_balances
+            .entry(config.ledger_id)
+            .or_insert(0);
         self.stablecoin_registry.insert(config.ledger_id, config);
     }
 
@@ -179,7 +217,10 @@ impl StabilityPoolState {
     }
 
     pub fn is_accepted_stablecoin(&self, ledger: &Principal) -> bool {
-        self.stablecoin_registry.get(ledger).map(|c| c.is_active).unwrap_or(false)
+        self.stablecoin_registry
+            .get(ledger)
+            .map(|c| c.is_active)
+            .unwrap_or(false)
     }
 
     /// Get cached virtual prices (empty if None for upgrade compat).
@@ -267,11 +308,18 @@ impl StabilityPoolState {
     // ─── Deposits ───
 
     pub fn add_deposit(&mut self, user: Principal, token_ledger: Principal, amount: u64) {
-        let position = self.deposits.entry(user).or_insert_with(|| {
-            DepositPosition::new(ic_cdk::api::time())
-        });
-        *position.stablecoin_balances.entry(token_ledger).or_insert(0) += amount;
-        *self.total_stablecoin_balances.entry(token_ledger).or_insert(0) += amount;
+        let position = self
+            .deposits
+            .entry(user)
+            .or_insert_with(|| DepositPosition::new(ic_cdk::api::time()));
+        *position
+            .stablecoin_balances
+            .entry(token_ledger)
+            .or_insert(0) += amount;
+        *self
+            .total_stablecoin_balances
+            .entry(token_ledger)
+            .or_insert(0) += amount;
     }
 
     /// Distribute icUSD interest revenue to eligible icUSD-holding depositors.
@@ -294,19 +342,28 @@ impl StabilityPoolState {
     /// the icUSD will be picked up on the next distribution that has eligible
     /// depositors, or will need manual reconciliation if the no-icUSD-depositors
     /// state persists.
-    pub fn distribute_interest_revenue(&mut self, token_ledger: Principal, amount: u64, collateral_type: Option<Principal>) {
+    pub fn distribute_interest_revenue(
+        &mut self,
+        token_ledger: Principal,
+        amount: u64,
+        collateral_type: Option<Principal>,
+    ) {
         if amount == 0 {
             return;
         }
 
-        let decimals = self.stablecoin_registry.get(&token_ledger)
+        let decimals = self
+            .stablecoin_registry
+            .get(&token_ledger)
             .map(|c| c.decimals)
             .unwrap_or(8);
 
         // Only icUSD-denominated balances earn the interest stream.
         // 3USD, ckUSDC, ckUSDT depositors still participate in liquidations
         // pro-rata but no longer earn the interest distribution.
-        let holders: Vec<(Principal, u64)> = self.deposits.iter()
+        let holders: Vec<(Principal, u64)> = self
+            .deposits
+            .iter()
             .filter_map(|(p, pos)| {
                 let icusd_value = pos.icusd_value(&self.stablecoin_registry);
                 if icusd_value == 0 {
@@ -348,7 +405,8 @@ impl StabilityPoolState {
             if credit > 0 {
                 if let Some(pos) = self.deposits.get_mut(principal) {
                     *pos.stablecoin_balances.entry(token_ledger).or_insert(0) += credit;
-                    *pos.total_interest_earned_e8s.get_or_insert(0) += normalize_to_e8s(credit, decimals);
+                    *pos.total_interest_earned_e8s.get_or_insert(0) +=
+                        normalize_to_e8s(credit, decimals);
                 }
                 distributed += credit;
             }
@@ -360,21 +418,36 @@ impl StabilityPoolState {
             if let Some(first) = first_eligible {
                 if let Some(pos) = self.deposits.get_mut(&first) {
                     *pos.stablecoin_balances.entry(token_ledger).or_insert(0) += dust;
-                    *pos.total_interest_earned_e8s.get_or_insert(0) += normalize_to_e8s(dust, decimals);
+                    *pos.total_interest_earned_e8s.get_or_insert(0) +=
+                        normalize_to_e8s(dust, decimals);
                 }
             }
         }
 
         // Update aggregate totals
-        *self.total_stablecoin_balances.entry(token_ledger).or_insert(0) += amount;
+        *self
+            .total_stablecoin_balances
+            .entry(token_ledger)
+            .or_insert(0) += amount;
         *self.total_interest_received_e8s.get_or_insert(0) += normalize_to_e8s(amount, decimals);
     }
 
-    pub fn process_withdrawal(&mut self, user: Principal, token_ledger: Principal, amount: u64) -> Result<(), StabilityPoolError> {
-        let position = self.deposits.get_mut(&user)
+    pub fn process_withdrawal(
+        &mut self,
+        user: Principal,
+        token_ledger: Principal,
+        amount: u64,
+    ) -> Result<(), StabilityPoolError> {
+        let position = self
+            .deposits
+            .get_mut(&user)
             .ok_or(StabilityPoolError::NoPositionFound)?;
 
-        let balance = position.stablecoin_balances.get(&token_ledger).copied().unwrap_or(0);
+        let balance = position
+            .stablecoin_balances
+            .get(&token_ledger)
+            .copied()
+            .unwrap_or(0);
         if balance < amount {
             return Err(StabilityPoolError::InsufficientBalance {
                 token: token_ledger,
@@ -411,17 +484,31 @@ impl StabilityPoolState {
     /// migration quirk or an external reconciliation). `correct_balance` is the
     /// per-depositor-targeted analogue for surgical corrections.
     pub fn deduct_burned_lp_from_balances(&mut self, token_ledger: Principal, burned_amount: u64) {
-        let total = self.total_stablecoin_balances.get(&token_ledger).copied().unwrap_or(0);
+        let total = self
+            .total_stablecoin_balances
+            .get(&token_ledger)
+            .copied()
+            .unwrap_or(0);
         if total == 0 || burned_amount == 0 {
             return;
         }
         let actual_deduct = burned_amount.min(total);
 
         // Distribute proportionally across depositors
-        let depositors: Vec<(Principal, u64)> = self.deposits.iter()
+        let depositors: Vec<(Principal, u64)> = self
+            .deposits
+            .iter()
             .filter_map(|(p, pos)| {
-                let bal = pos.stablecoin_balances.get(&token_ledger).copied().unwrap_or(0);
-                if bal > 0 { Some((*p, bal)) } else { None }
+                let bal = pos
+                    .stablecoin_balances
+                    .get(&token_ledger)
+                    .copied()
+                    .unwrap_or(0);
+                if bal > 0 {
+                    Some((*p, bal))
+                } else {
+                    None
+                }
             })
             .collect();
 
@@ -440,7 +527,8 @@ impl StabilityPoolState {
         // Assign rounding dust to largest holder to prevent aggregate/individual drift
         let dust = actual_deduct.saturating_sub(total_deducted);
         if dust > 0 {
-            if let Some(largest_p) = depositors.iter()
+            if let Some(largest_p) = depositors
+                .iter()
                 .max_by_key(|(_, bal)| *bal)
                 .map(|(p, _)| *p)
             {
@@ -469,13 +557,26 @@ impl StabilityPoolState {
             return;
         }
         // Add back to aggregate
-        *self.total_stablecoin_balances.entry(token_ledger).or_insert(0) += amount;
+        *self
+            .total_stablecoin_balances
+            .entry(token_ledger)
+            .or_insert(0) += amount;
 
         // Distribute proportionally across depositors who hold this token
-        let holders: Vec<(Principal, u64)> = self.deposits.iter()
+        let holders: Vec<(Principal, u64)> = self
+            .deposits
+            .iter()
             .filter_map(|(p, pos)| {
-                let bal = pos.stablecoin_balances.get(&token_ledger).copied().unwrap_or(0);
-                if bal > 0 { Some((*p, bal)) } else { None }
+                let bal = pos
+                    .stablecoin_balances
+                    .get(&token_ledger)
+                    .copied()
+                    .unwrap_or(0);
+                if bal > 0 {
+                    Some((*p, bal))
+                } else {
+                    None
+                }
             })
             .collect();
 
@@ -514,12 +615,18 @@ impl StabilityPoolState {
     // ─── Collateral Gains ───
 
     pub fn get_collateral_gains(&self, user: &Principal) -> BTreeMap<Principal, u64> {
-        self.deposits.get(user)
+        self.deposits
+            .get(user)
             .map(|p| p.collateral_gains.clone())
             .unwrap_or_default()
     }
 
-    pub fn mark_gains_claimed(&mut self, user: &Principal, collateral_ledger: &Principal, amount: u64) {
+    pub fn mark_gains_claimed(
+        &mut self,
+        user: &Principal,
+        collateral_ledger: &Principal,
+        amount: u64,
+    ) {
         if let Some(position) = self.deposits.get_mut(user) {
             if let Some(gains) = position.collateral_gains.get_mut(collateral_ledger) {
                 *gains = gains.saturating_sub(amount);
@@ -527,7 +634,10 @@ impl StabilityPoolState {
                     position.collateral_gains.remove(collateral_ledger);
                 }
             }
-            *position.total_claimed_gains.entry(*collateral_ledger).or_insert(0) += amount;
+            *position
+                .total_claimed_gains
+                .entry(*collateral_ledger)
+                .or_insert(0) += amount;
         }
     }
 
@@ -553,7 +663,8 @@ impl StabilityPoolState {
         if amount_native == 0 {
             return;
         }
-        let sources = self.chain_claim_sources
+        let sources = self
+            .chain_claim_sources
             .get_or_insert_with(BTreeMap::new)
             .entry(chain_sentinel)
             .or_default();
@@ -567,69 +678,282 @@ impl StabilityPoolState {
         }
     }
 
+    pub fn pending_chain_absorb_count(&self) -> usize {
+        self.pending_chain_absorbs
+            .as_ref()
+            .map(|m| m.len())
+            .unwrap_or(0)
+    }
+
+    pub fn has_pending_chain_absorbs(&self) -> bool {
+        self.pending_chain_absorb_count() > 0
+    }
+
+    pub fn pending_chain_absorb_status(&self, vault_id: u64) -> Option<ChainSpAbsorbIntentStatus> {
+        self.pending_chain_absorbs
+            .as_ref()
+            .and_then(|m| m.get(&vault_id))
+            .map(|intent| intent.status)
+    }
+
+    pub fn pending_chain_absorbs(&self) -> Vec<ChainSpAbsorbIntent> {
+        self.pending_chain_absorbs
+            .as_ref()
+            .map(|m| m.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn completed_chain_absorbs(&self, limit: usize) -> Vec<ChainSpAbsorbCompletion> {
+        self.completed_chain_absorbs
+            .as_ref()
+            .map(|m| m.values().rev().take(limit).cloned().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn get_pending_chain_absorb(&self, vault_id: u64) -> Option<ChainSpAbsorbIntent> {
+        self.pending_chain_absorbs
+            .as_ref()
+            .and_then(|m| m.get(&vault_id).cloned())
+    }
+
+    pub fn put_pending_chain_absorb(
+        &mut self,
+        intent: ChainSpAbsorbIntent,
+    ) -> Result<(), StabilityPoolError> {
+        let pending = self.pending_chain_absorbs.get_or_insert_with(BTreeMap::new);
+        if !pending.contains_key(&intent.vault_id) && pending.len() >= MAX_PENDING_CHAIN_ABSORBS {
+            return Err(StabilityPoolError::SystemBusy);
+        }
+        pending.insert(intent.vault_id, intent);
+        Ok(())
+    }
+
+    pub fn take_pending_chain_absorb(&mut self, vault_id: u64) -> Option<ChainSpAbsorbIntent> {
+        self.pending_chain_absorbs
+            .as_mut()
+            .and_then(|m| m.remove(&vault_id))
+    }
+
+    pub fn record_completed_chain_absorb(&mut self, completion: ChainSpAbsorbCompletion) {
+        let completed = self
+            .completed_chain_absorbs
+            .get_or_insert_with(BTreeMap::new);
+        completed.insert(completion.vault_id, completion);
+        while completed.len() > MAX_COMPLETED_CHAIN_ABSORBS {
+            let Some(oldest_vault_id) = completed.keys().next().copied() else {
+                break;
+            };
+            completed.remove(&oldest_vault_id);
+        }
+    }
+
+    pub fn completed_chain_absorb(&self, vault_id: u64) -> Option<ChainSpAbsorbCompletion> {
+        self.completed_chain_absorbs
+            .as_ref()
+            .and_then(|m| m.get(&vault_id).cloned())
+    }
+
+    pub fn completed_cfx_claim_payout_recovery(
+        &self,
+        key: &CfxClaimPayoutRecoveryKey,
+    ) -> Option<CfxClaimPayoutRecoveryRecord> {
+        self.completed_cfx_claim_payout_recoveries
+            .as_ref()
+            .and_then(|m| m.get(key).cloned())
+    }
+
+    pub fn completed_cfx_claim_payout_recovery_was_evicted(
+        &self,
+        key: &CfxClaimPayoutRecoveryKey,
+    ) -> bool {
+        self.completed_cfx_claim_payout_recovery_floor
+            .as_ref()
+            .and_then(|m| m.get(&key.chain_sentinel))
+            .map(|floor| key.op_id <= *floor)
+            .unwrap_or(false)
+    }
+
+    pub fn record_completed_cfx_claim_payout_recovery(
+        &mut self,
+        record: CfxClaimPayoutRecoveryRecord,
+    ) {
+        let completed = self
+            .completed_cfx_claim_payout_recoveries
+            .get_or_insert_with(BTreeMap::new);
+        completed.insert(record.key.clone(), record);
+        while completed.len() > MAX_COMPLETED_CFX_CLAIM_PAYOUT_RECOVERIES {
+            let Some(oldest_key) = completed
+                .iter()
+                .min_by_key(|(key, record)| (record.recovered_at_ns, (*key).clone()))
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            if let Some(evicted) = completed.remove(&oldest_key) {
+                let floors = self
+                    .completed_cfx_claim_payout_recovery_floor
+                    .get_or_insert_with(BTreeMap::new);
+                let floor = floors.entry(evicted.key.chain_sentinel).or_insert(0);
+                *floor = (*floor).max(evicted.key.op_id);
+            }
+        }
+    }
+
+    pub fn chain_absorb_auto_config(&self) -> ChainAbsorbAutoConfig {
+        self.chain_absorb_auto_config.clone().unwrap_or_default()
+    }
+
+    pub fn set_chain_absorb_auto_config(
+        &mut self,
+        mut config: ChainAbsorbAutoConfig,
+    ) -> Result<(), StabilityPoolError> {
+        if config.interval_seconds < MIN_CHAIN_ABSORB_AUTO_INTERVAL_SECONDS {
+            return Err(StabilityPoolError::LiquidationFailed {
+                vault_id: 0,
+                reason: format!(
+                    "chain absorb auto interval must be at least {} seconds",
+                    MIN_CHAIN_ABSORB_AUTO_INTERVAL_SECONDS
+                ),
+            });
+        }
+        if config.max_scan_per_chain == 0 {
+            return Err(StabilityPoolError::LiquidationFailed {
+                vault_id: 0,
+                reason: "chain absorb auto max_scan_per_chain must be greater than 0".to_string(),
+            });
+        }
+        config.max_scan_per_chain = config
+            .max_scan_per_chain
+            .min(MAX_CHAIN_ABSORB_AUTO_SCAN_PER_CHAIN);
+        self.chain_absorb_auto_config = Some(config);
+        Ok(())
+    }
+
+    pub fn chain_absorb_auto_last_tick(&self) -> Option<ChainAbsorbAutoTickRecord> {
+        self.chain_absorb_auto_last_tick.clone()
+    }
+
+    pub fn record_chain_absorb_auto_tick(&mut self, tick: ChainAbsorbAutoTickRecord) {
+        self.chain_absorb_auto_last_tick = Some(tick);
+    }
+
+    pub fn chain_absorb_auto_due(&self, now_ns: u64) -> bool {
+        let config = self.chain_absorb_auto_config();
+        if !config.enabled {
+            return false;
+        }
+        let Some(last) = &self.chain_absorb_auto_last_tick else {
+            return true;
+        };
+        let elapsed_ns = now_ns.saturating_sub(last.completed_at_ns);
+        elapsed_ns >= config.interval_seconds.saturating_mul(1_000_000_000)
+    }
+
     // ─── Opt-in / Opt-out ───
 
-    pub fn opt_out_collateral(&mut self, user: &Principal, collateral_type: Principal) -> Result<(), StabilityPoolError> {
+    pub fn opt_out_collateral(
+        &mut self,
+        user: &Principal,
+        collateral_type: Principal,
+    ) -> Result<(), StabilityPoolError> {
         if self.collateral_requires_payout_address(&collateral_type) {
-            let position = self.deposits.get_mut(user)
+            let position = self
+                .deposits
+                .get_mut(user)
                 .ok_or(StabilityPoolError::NoPositionFound)?;
             let removed = position
                 .native_payout_addresses
                 .get_or_insert_with(BTreeMap::new)
                 .remove(&collateral_type);
             if removed.is_none() {
-                return Err(StabilityPoolError::AlreadyOptedOut { collateral: collateral_type });
+                return Err(StabilityPoolError::AlreadyOptedOut {
+                    collateral: collateral_type,
+                });
             }
             return Ok(());
         }
         if self.is_chain_collateral_sentinel(&collateral_type) {
             return self.opt_out_cfx(user, collateral_type);
         }
-        let position = self.deposits.get_mut(user)
+        let position = self
+            .deposits
+            .get_mut(user)
             .ok_or(StabilityPoolError::NoPositionFound)?;
         if !position.opted_out_collateral.insert(collateral_type) {
-            return Err(StabilityPoolError::AlreadyOptedOut { collateral: collateral_type });
+            return Err(StabilityPoolError::AlreadyOptedOut {
+                collateral: collateral_type,
+            });
         }
         Ok(())
     }
 
-    pub fn opt_in_collateral(&mut self, user: &Principal, collateral_type: Principal) -> Result<(), StabilityPoolError> {
+    pub fn opt_in_collateral(
+        &mut self,
+        user: &Principal,
+        collateral_type: Principal,
+    ) -> Result<(), StabilityPoolError> {
         if self.collateral_requires_payout_address(&collateral_type) {
-            return Err(StabilityPoolError::PayoutAddressRequired { collateral: collateral_type });
+            return Err(StabilityPoolError::PayoutAddressRequired {
+                collateral: collateral_type,
+            });
         }
         if self.is_chain_collateral_sentinel(&collateral_type) {
             return self.opt_in_cfx(user, collateral_type);
         }
-        let position = self.deposits.get_mut(user)
+        let position = self
+            .deposits
+            .get_mut(user)
             .ok_or(StabilityPoolError::NoPositionFound)?;
         if !position.opted_out_collateral.remove(&collateral_type) {
-            return Err(StabilityPoolError::AlreadyOptedIn { collateral: collateral_type });
+            return Err(StabilityPoolError::AlreadyOptedIn {
+                collateral: collateral_type,
+            });
         }
         Ok(())
     }
 
-    pub fn opt_in_cfx(&mut self, user: &Principal, sentinel: Principal) -> Result<(), StabilityPoolError> {
+    pub fn opt_in_cfx(
+        &mut self,
+        user: &Principal,
+        sentinel: Principal,
+    ) -> Result<(), StabilityPoolError> {
         if !self.is_chain_collateral_sentinel(&sentinel) {
             return Err(StabilityPoolError::CollateralNotFound { ledger: sentinel });
         }
-        let position = self.deposits.get_mut(user)
+        let position = self
+            .deposits
+            .get_mut(user)
             .ok_or(StabilityPoolError::NoPositionFound)?;
-        let opted_in = position.opted_in_chain_collateral.get_or_insert_with(BTreeSet::new);
+        let opted_in = position
+            .opted_in_chain_collateral
+            .get_or_insert_with(BTreeSet::new);
         if !opted_in.insert(sentinel) {
-            return Err(StabilityPoolError::AlreadyOptedIn { collateral: sentinel });
+            return Err(StabilityPoolError::AlreadyOptedIn {
+                collateral: sentinel,
+            });
         }
         Ok(())
     }
 
-    pub fn opt_out_cfx(&mut self, user: &Principal, sentinel: Principal) -> Result<(), StabilityPoolError> {
+    pub fn opt_out_cfx(
+        &mut self,
+        user: &Principal,
+        sentinel: Principal,
+    ) -> Result<(), StabilityPoolError> {
         if !self.is_chain_collateral_sentinel(&sentinel) {
             return Err(StabilityPoolError::CollateralNotFound { ledger: sentinel });
         }
-        let position = self.deposits.get_mut(user)
+        let position = self
+            .deposits
+            .get_mut(user)
             .ok_or(StabilityPoolError::NoPositionFound)?;
-        let opted_in = position.opted_in_chain_collateral.get_or_insert_with(BTreeSet::new);
+        let opted_in = position
+            .opted_in_chain_collateral
+            .get_or_insert_with(BTreeSet::new);
         if !opted_in.remove(&sentinel) {
-            return Err(StabilityPoolError::AlreadyOptedOut { collateral: sentinel });
+            return Err(StabilityPoolError::AlreadyOptedOut {
+                collateral: sentinel,
+            });
         }
         Ok(())
     }
@@ -684,14 +1008,17 @@ impl StabilityPoolState {
         }
         let id = self.next_pending_refund_id.unwrap_or(0);
         self.next_pending_refund_id = Some(id + 1);
-        refunds.insert(id, PendingRefund {
+        refunds.insert(
             id,
-            user,
-            token_ledger,
-            amount,
-            reason,
-            created_at: now,
-        });
+            PendingRefund {
+                id,
+                user,
+                token_ledger,
+                amount,
+                reason,
+                created_at: now,
+            },
+        );
         id
     }
 
@@ -720,14 +1047,16 @@ impl StabilityPoolState {
     /// Compute total opted-in stablecoin value (e8s) for a given collateral type.
     pub fn effective_pool_for_collateral(&self, collateral_type: &Principal) -> u64 {
         let vps = self.virtual_prices();
-        self.deposits.values()
+        self.deposits
+            .values()
             .filter(|pos| self.position_opted_in_for(pos, collateral_type))
             .map(|pos| pos.total_usd_value(&self.stablecoin_registry, vps))
             .sum()
     }
 
     pub fn icusd_ledger(&self) -> Option<Principal> {
-        self.stablecoin_registry.iter()
+        self.stablecoin_registry
+            .iter()
             .find(|(_, config)| config.symbol == "icUSD")
             .map(|(ledger, _)| *ledger)
     }
@@ -735,7 +1064,8 @@ impl StabilityPoolState {
     /// Compute opted-in icUSD coverage only. Chain-native liquidations use
     /// this instead of the mixed-token draw so Inc 4 burns only IC-native icUSD.
     pub fn effective_icusd_pool_for_collateral(&self, collateral_type: &Principal) -> u64 {
-        self.deposits.values()
+        self.deposits
+            .values()
             .filter(|pos| self.position_opted_in_for(pos, collateral_type))
             .map(|pos| pos.icusd_value(&self.stablecoin_registry))
             .sum()
@@ -749,7 +1079,11 @@ impl StabilityPoolState {
     /// For small debts (< 1 icUSD / 100_000_000 e8s), uses a single token — whichever
     /// has the highest balance — to avoid splitting into amounts too small for the backend.
     /// For larger debts, follows priority ordering with proportional splits.
-    pub fn compute_token_draw(&self, debt_e8s: u64, collateral_type: &Principal) -> BTreeMap<Principal, u64> {
+    pub fn compute_token_draw(
+        &self,
+        debt_e8s: u64,
+        collateral_type: &Principal,
+    ) -> BTreeMap<Principal, u64> {
         let vps = self.virtual_prices();
 
         // Gather all available tokens with their e8s-equivalent balances
@@ -757,19 +1091,29 @@ impl StabilityPoolState {
         let mut all_tokens: Vec<(Principal, u64, u8, bool, u64)> = Vec::new();
 
         for (ledger, config) in &self.stablecoin_registry {
-            let available_native: u64 = self.deposits.values()
+            let available_native: u64 = self
+                .deposits
+                .values()
                 .filter(|pos| self.position_opted_in_for(pos, collateral_type))
                 .map(|pos| pos.stablecoin_balances.get(ledger).copied().unwrap_or(0))
                 .sum();
             if available_native > 0 {
                 let is_lp = config.is_lp_token.unwrap_or(false);
                 let available_e8s = if is_lp {
-                    vps.get(ledger).map(|&vp| lp_to_usd_e8s(available_native, vp)).unwrap_or(0)
+                    vps.get(ledger)
+                        .map(|&vp| lp_to_usd_e8s(available_native, vp))
+                        .unwrap_or(0)
                 } else {
                     normalize_to_e8s(available_native, config.decimals)
                 };
                 if available_e8s > 0 {
-                    all_tokens.push((*ledger, available_native, config.decimals, is_lp, available_e8s));
+                    all_tokens.push((
+                        *ledger,
+                        available_native,
+                        config.decimals,
+                        is_lp,
+                        available_e8s,
+                    ));
                 }
             }
         }
@@ -782,14 +1126,17 @@ impl StabilityPoolState {
         // This avoids splitting into amounts that all fall below the backend minimum.
         const SMALL_DEBT_THRESHOLD: u64 = 100_000_000; // 1 icUSD
         if debt_e8s < SMALL_DEBT_THRESHOLD {
-            let best = all_tokens.iter()
+            let best = all_tokens
+                .iter()
                 .max_by_key(|(_, _, _, _, e8s)| *e8s)
                 .unwrap(); // safe: all_tokens is non-empty
 
             let (ledger, available_native, decimals, is_lp, available_e8s) = *best;
             let draw_e8s = debt_e8s.min(available_e8s);
             let draw_native = if is_lp {
-                vps.get(&ledger).map(|&vp| usd_e8s_to_lp(draw_e8s, vp)).unwrap_or(0)
+                vps.get(&ledger)
+                    .map(|&vp| usd_e8s_to_lp(draw_e8s, vp))
+                    .unwrap_or(0)
             } else {
                 normalize_from_e8s(draw_e8s, decimals)
             };
@@ -808,14 +1155,20 @@ impl StabilityPoolState {
         // Group by priority
         let mut priority_buckets: BTreeMap<u8, Vec<(Principal, u64, u8, bool)>> = BTreeMap::new();
         for (ledger, config) in &self.stablecoin_registry {
-            let available_native: u64 = self.deposits.values()
+            let available_native: u64 = self
+                .deposits
+                .values()
                 .filter(|pos| self.position_opted_in_for(pos, collateral_type))
                 .map(|pos| pos.stablecoin_balances.get(ledger).copied().unwrap_or(0))
                 .sum();
             if available_native > 0 {
                 let is_lp = config.is_lp_token.unwrap_or(false);
-                priority_buckets.entry(config.priority).or_default()
-                    .push((*ledger, available_native, config.decimals, is_lp));
+                priority_buckets.entry(config.priority).or_default().push((
+                    *ledger,
+                    available_native,
+                    config.decimals,
+                    is_lp,
+                ));
             }
         }
 
@@ -829,10 +1182,13 @@ impl StabilityPoolState {
             }
             let tokens = priority_buckets.get(&priority).unwrap();
 
-            let total_available_e8s: u64 = tokens.iter()
+            let total_available_e8s: u64 = tokens
+                .iter()
                 .map(|(ledger, amount, decimals, is_lp)| {
                     if *is_lp {
-                        vps.get(ledger).map(|&vp| lp_to_usd_e8s(*amount, vp)).unwrap_or(0)
+                        vps.get(ledger)
+                            .map(|&vp| lp_to_usd_e8s(*amount, vp))
+                            .unwrap_or(0)
                     } else {
                         normalize_to_e8s(*amount, *decimals)
                     }
@@ -847,16 +1203,21 @@ impl StabilityPoolState {
 
             for (ledger, available_native, decimals, is_lp) in tokens {
                 let token_available_e8s = if *is_lp {
-                    vps.get(ledger).map(|&vp| lp_to_usd_e8s(*available_native, vp)).unwrap_or(0)
+                    vps.get(ledger)
+                        .map(|&vp| lp_to_usd_e8s(*available_native, vp))
+                        .unwrap_or(0)
                 } else {
                     normalize_to_e8s(*available_native, *decimals)
                 };
                 if token_available_e8s == 0 {
                     continue;
                 }
-                let token_draw_e8s = (draw_e8s as u128 * token_available_e8s as u128 / total_available_e8s as u128) as u64;
+                let token_draw_e8s = (draw_e8s as u128 * token_available_e8s as u128
+                    / total_available_e8s as u128) as u64;
                 let token_draw_native = if *is_lp {
-                    vps.get(ledger).map(|&vp| usd_e8s_to_lp(token_draw_e8s, vp)).unwrap_or(0)
+                    vps.get(ledger)
+                        .map(|&vp| usd_e8s_to_lp(token_draw_e8s, vp))
+                        .unwrap_or(0)
                 } else {
                     normalize_from_e8s(token_draw_e8s, *decimals)
                 };
@@ -904,7 +1265,14 @@ impl StabilityPoolState {
         collateral_gained: u64,
         collateral_price_e8s: u64,
     ) {
-        self.process_liquidation_gains_at(vault_id, collateral_type, stables_consumed, collateral_gained, collateral_price_e8s, ic_cdk::api::time());
+        self.process_liquidation_gains_at(
+            vault_id,
+            collateral_type,
+            stables_consumed,
+            collateral_gained,
+            collateral_price_e8s,
+            ic_cdk::api::time(),
+        );
     }
 
     pub fn process_chain_liquidation_gains(
@@ -936,7 +1304,9 @@ impl StabilityPoolState {
         timestamp: u64,
     ) {
         // Phase 1: Compute each opted-in depositor's share of the consumed stables (in e8s)
-        let opted_in_principals: Vec<Principal> = self.deposits.iter()
+        let opted_in_principals: Vec<Principal> = self
+            .deposits
+            .iter()
             .filter(|(_, pos)| self.position_opted_in_for(pos, &collateral_type))
             .map(|(p, _)| *p)
             .collect();
@@ -944,9 +1314,15 @@ impl StabilityPoolState {
         // For each consumed token, compute total opted-in balance for that token
         let mut per_token_opted_in_totals: BTreeMap<Principal, u64> = BTreeMap::new();
         for token_ledger in stables_consumed.keys() {
-            let total: u64 = opted_in_principals.iter()
+            let total: u64 = opted_in_principals
+                .iter()
                 .filter_map(|p| self.deposits.get(p))
-                .map(|pos| pos.stablecoin_balances.get(token_ledger).copied().unwrap_or(0))
+                .map(|pos| {
+                    pos.stablecoin_balances
+                        .get(token_ledger)
+                        .copied()
+                        .unwrap_or(0)
+                })
                 .sum();
             per_token_opted_in_totals.insert(*token_ledger, total);
         }
@@ -955,18 +1331,23 @@ impl StabilityPoolState {
         // LP tokens are valued at virtual price, not face value.
         // Clone virtual prices and registry info upfront to avoid borrow conflicts with Phase 3.
         let vps = self.virtual_prices().clone();
-        let registry_snapshot: BTreeMap<Principal, (u8, bool)> = stables_consumed.keys()
+        let registry_snapshot: BTreeMap<Principal, (u8, bool)> = stables_consumed
+            .keys()
             .filter_map(|ledger| {
-                self.stablecoin_registry.get(ledger).map(|c| {
-                    (*ledger, (c.decimals, c.is_lp_token.unwrap_or(false)))
-                })
+                self.stablecoin_registry
+                    .get(ledger)
+                    .map(|c| (*ledger, (c.decimals, c.is_lp_token.unwrap_or(false))))
             })
             .collect();
-        let total_consumed_e8s: u64 = stables_consumed.iter()
+        let total_consumed_e8s: u64 = stables_consumed
+            .iter()
             .map(|(ledger, &amount)| {
-                let (decimals, is_lp) = registry_snapshot.get(ledger).copied().unwrap_or((8, false));
+                let (decimals, is_lp) =
+                    registry_snapshot.get(ledger).copied().unwrap_or((8, false));
                 if is_lp {
-                    vps.get(ledger).map(|&vp| lp_to_usd_e8s(amount, vp)).unwrap_or(0)
+                    vps.get(ledger)
+                        .map(|&vp| lp_to_usd_e8s(amount, vp))
+                        .unwrap_or(0)
                 } else {
                     normalize_to_e8s(amount, decimals)
                 }
@@ -987,17 +1368,26 @@ impl StabilityPoolState {
 
             if let Some(position) = self.deposits.get_mut(principal) {
                 for (token_ledger, &total_consumed) in stables_consumed {
-                    let total_opted_in = per_token_opted_in_totals.get(token_ledger).copied().unwrap_or(0);
+                    let total_opted_in = per_token_opted_in_totals
+                        .get(token_ledger)
+                        .copied()
+                        .unwrap_or(0);
                     if total_opted_in == 0 {
                         continue;
                     }
-                    let user_balance = position.stablecoin_balances.get(token_ledger).copied().unwrap_or(0);
+                    let user_balance = position
+                        .stablecoin_balances
+                        .get(token_ledger)
+                        .copied()
+                        .unwrap_or(0);
                     if user_balance == 0 {
                         continue;
                     }
 
                     // User's share of this token's consumption
-                    let user_share_native = (total_consumed as u128 * user_balance as u128 / total_opted_in as u128) as u64;
+                    let user_share_native = (total_consumed as u128 * user_balance as u128
+                        / total_opted_in as u128)
+                        as u64;
                     let user_share_native = user_share_native.min(user_balance);
 
                     // Reduce balance
@@ -1006,13 +1396,20 @@ impl StabilityPoolState {
                     }
 
                     // Track actual deduction for aggregate update
-                    *actual_deductions_per_token.entry(*token_ledger).or_insert(0) += user_share_native;
+                    *actual_deductions_per_token
+                        .entry(*token_ledger)
+                        .or_insert(0) += user_share_native;
 
                     // Track consumed value in e8s for collateral distribution.
                     // LP tokens valued at virtual price, not face value.
-                    let (decimals, is_lp) = registry_snapshot.get(token_ledger).copied().unwrap_or((8, false));
+                    let (decimals, is_lp) = registry_snapshot
+                        .get(token_ledger)
+                        .copied()
+                        .unwrap_or((8, false));
                     let share_e8s = if is_lp {
-                        vps.get(token_ledger).map(|&vp| lp_to_usd_e8s(user_share_native, vp)).unwrap_or(0)
+                        vps.get(token_ledger)
+                            .map(|&vp| lp_to_usd_e8s(user_share_native, vp))
+                            .unwrap_or(0)
                     } else {
                         normalize_to_e8s(user_share_native, decimals)
                     };
@@ -1021,8 +1418,13 @@ impl StabilityPoolState {
 
                 // Distribute collateral proportional to e8s consumed
                 if user_consumed_e8s > 0 {
-                    let user_collateral = (collateral_gained as u128 * user_consumed_e8s as u128 / total_consumed_e8s as u128) as u64;
-                    *position.collateral_gains.entry(collateral_type).or_insert(0) += user_collateral;
+                    let user_collateral = (collateral_gained as u128 * user_consumed_e8s as u128
+                        / total_consumed_e8s as u128)
+                        as u64;
+                    *position
+                        .collateral_gains
+                        .entry(collateral_type)
+                        .or_insert(0) += user_collateral;
                     total_collateral_distributed += user_collateral;
                 }
             }
@@ -1095,7 +1497,9 @@ impl StabilityPoolState {
             return;
         }
 
-        let opted_in_principals: Vec<Principal> = self.deposits.iter()
+        let opted_in_principals: Vec<Principal> = self
+            .deposits
+            .iter()
             .filter(|(_, pos)| pos.is_opted_in_for_chain(&chain_sentinel))
             .map(|(p, _)| *p)
             .collect();
@@ -1105,26 +1509,37 @@ impl StabilityPoolState {
 
         let mut per_token_opted_in_totals: BTreeMap<Principal, u64> = BTreeMap::new();
         for token_ledger in stables_consumed.keys() {
-            let total: u64 = opted_in_principals.iter()
+            let total: u64 = opted_in_principals
+                .iter()
                 .filter_map(|p| self.deposits.get(p))
-                .map(|pos| pos.stablecoin_balances.get(token_ledger).copied().unwrap_or(0))
+                .map(|pos| {
+                    pos.stablecoin_balances
+                        .get(token_ledger)
+                        .copied()
+                        .unwrap_or(0)
+                })
                 .sum();
             per_token_opted_in_totals.insert(*token_ledger, total);
         }
 
         let vps = self.virtual_prices().clone();
-        let registry_snapshot: BTreeMap<Principal, (u8, bool)> = stables_consumed.keys()
+        let registry_snapshot: BTreeMap<Principal, (u8, bool)> = stables_consumed
+            .keys()
             .filter_map(|ledger| {
-                self.stablecoin_registry.get(ledger).map(|c| {
-                    (*ledger, (c.decimals, c.is_lp_token.unwrap_or(false)))
-                })
+                self.stablecoin_registry
+                    .get(ledger)
+                    .map(|c| (*ledger, (c.decimals, c.is_lp_token.unwrap_or(false))))
             })
             .collect();
-        let total_consumed_e8s: u64 = stables_consumed.iter()
+        let total_consumed_e8s: u64 = stables_consumed
+            .iter()
             .map(|(ledger, &amount)| {
-                let (decimals, is_lp) = registry_snapshot.get(ledger).copied().unwrap_or((8, false));
+                let (decimals, is_lp) =
+                    registry_snapshot.get(ledger).copied().unwrap_or((8, false));
                 if is_lp {
-                    vps.get(ledger).map(|&vp| lp_to_usd_e8s(amount, vp)).unwrap_or(0)
+                    vps.get(ledger)
+                        .map(|&vp| lp_to_usd_e8s(amount, vp))
+                        .unwrap_or(0)
                 } else {
                     normalize_to_e8s(amount, decimals)
                 }
@@ -1142,25 +1557,41 @@ impl StabilityPoolState {
 
             if let Some(position) = self.deposits.get_mut(principal) {
                 for (token_ledger, &total_consumed) in stables_consumed {
-                    let total_opted_in = per_token_opted_in_totals.get(token_ledger).copied().unwrap_or(0);
+                    let total_opted_in = per_token_opted_in_totals
+                        .get(token_ledger)
+                        .copied()
+                        .unwrap_or(0);
                     if total_opted_in == 0 {
                         continue;
                     }
-                    let user_balance = position.stablecoin_balances.get(token_ledger).copied().unwrap_or(0);
+                    let user_balance = position
+                        .stablecoin_balances
+                        .get(token_ledger)
+                        .copied()
+                        .unwrap_or(0);
                     if user_balance == 0 {
                         continue;
                     }
 
-                    let user_share_native = (total_consumed as u128 * user_balance as u128 / total_opted_in as u128) as u64;
+                    let user_share_native = (total_consumed as u128 * user_balance as u128
+                        / total_opted_in as u128)
+                        as u64;
                     let user_share_native = user_share_native.min(user_balance);
                     if let Some(bal) = position.stablecoin_balances.get_mut(token_ledger) {
                         *bal = bal.saturating_sub(user_share_native);
                     }
-                    *actual_deductions_per_token.entry(*token_ledger).or_insert(0) += user_share_native;
+                    *actual_deductions_per_token
+                        .entry(*token_ledger)
+                        .or_insert(0) += user_share_native;
 
-                    let (decimals, is_lp) = registry_snapshot.get(token_ledger).copied().unwrap_or((8, false));
+                    let (decimals, is_lp) = registry_snapshot
+                        .get(token_ledger)
+                        .copied()
+                        .unwrap_or((8, false));
                     let share_e8s = if is_lp {
-                        vps.get(token_ledger).map(|&vp| lp_to_usd_e8s(user_share_native, vp)).unwrap_or(0)
+                        vps.get(token_ledger)
+                            .map(|&vp| lp_to_usd_e8s(user_share_native, vp))
+                            .unwrap_or(0)
                     } else {
                         normalize_to_e8s(user_share_native, decimals)
                     };
@@ -1168,8 +1599,7 @@ impl StabilityPoolState {
                 }
 
                 if user_consumed_e8s > 0 {
-                    let user_cfx = cfx_gained_native
-                        .saturating_mul(user_consumed_e8s as u128)
+                    let user_cfx = cfx_gained_native.saturating_mul(user_consumed_e8s as u128)
                         / total_consumed_e8s as u128;
                     let claims = position.cfx_claims.get_or_insert_with(BTreeMap::new);
                     let entry = claims.entry(chain_sentinel).or_insert(0);
@@ -1209,11 +1639,18 @@ impl StabilityPoolState {
 
     pub fn get_pool_status(&self) -> StabilityPoolStatus {
         let vps = self.virtual_prices();
-        let total_e8s: u64 = self.total_stablecoin_balances.iter()
+        let total_e8s: u64 = self
+            .total_stablecoin_balances
+            .iter()
             .map(|(ledger, &amount)| {
                 let config = self.stablecoin_registry.get(ledger);
-                if config.map(|c| c.is_lp_token.unwrap_or(false)).unwrap_or(false) {
-                    vps.get(ledger).map(|&vp| lp_to_usd_e8s(amount, vp)).unwrap_or(0)
+                if config
+                    .map(|c| c.is_lp_token.unwrap_or(false))
+                    .unwrap_or(false)
+                {
+                    vps.get(ledger)
+                        .map(|&vp| lp_to_usd_e8s(amount, vp))
+                        .unwrap_or(0)
                 } else {
                     let decimals = config.map(|c| c.decimals).unwrap_or(8);
                     normalize_to_e8s(amount, decimals)
@@ -1249,24 +1686,31 @@ impl StabilityPoolState {
     /// now earn interest proportional to their total deposit value.
     fn eligible_icusd_per_collateral(&self) -> Vec<(Principal, u64)> {
         let vps = self.virtual_prices();
-        self.collateral_registry.keys().map(|ct| {
-            let eligible: u64 = self.deposits.values()
-                .filter(|pos| self.position_opted_in_for(pos, ct))
-                .map(|pos| pos.total_usd_value(&self.stablecoin_registry, vps))
-                .sum();
-            (*ct, eligible)
-        }).collect()
+        self.collateral_registry
+            .keys()
+            .map(|ct| {
+                let eligible: u64 = self
+                    .deposits
+                    .values()
+                    .filter(|pos| self.position_opted_in_for(pos, ct))
+                    .map(|pos| pos.total_usd_value(&self.stablecoin_registry, vps))
+                    .sum();
+                (*ct, eligible)
+            })
+            .collect()
     }
 
     pub fn get_user_position(&self, user: &Principal) -> Option<UserStabilityPosition> {
         self.deposits.get(user).map(|pos| UserStabilityPosition {
             stablecoin_balances: pos.stablecoin_balances.clone(),
             collateral_gains: pos.collateral_gains.clone(),
+            cfx_claims: pos.cfx_claims.clone(),
             opted_out_collateral: pos.opted_out_collateral.iter().cloned().collect(),
             native_payout_addresses: pos.native_payout_addresses.clone().unwrap_or_default(),
             deposit_timestamp: pos.deposit_timestamp,
             total_claimed_gains: pos.total_claimed_gains.clone(),
-            total_usd_value_e8s: pos.total_usd_value(&self.stablecoin_registry, self.virtual_prices()),
+            total_usd_value_e8s: pos
+                .total_usd_value(&self.stablecoin_registry, self.virtual_prices()),
             total_interest_earned_e8s: pos.total_interest_earned_e8s.unwrap_or(0),
         })
     }
@@ -1312,13 +1756,23 @@ impl StabilityPoolState {
     /// Set a depositor's balance for a specific token to `correct_amount`,
     /// adjusting the aggregate total accordingly.  Used to fix phantom balances
     /// that exist in state but not on the actual ledger.
-    pub fn correct_balance(&mut self, user: Principal, token_ledger: Principal, correct_amount: u64) -> String {
-        let old_amount = self.deposits.get(&user)
+    pub fn correct_balance(
+        &mut self,
+        user: Principal,
+        token_ledger: Principal,
+        correct_amount: u64,
+    ) -> String {
+        let old_amount = self
+            .deposits
+            .get(&user)
             .and_then(|pos| pos.stablecoin_balances.get(&token_ledger).copied())
             .unwrap_or(0);
 
         if old_amount == correct_amount {
-            return format!("No change needed: user {} balance for {} is already {}", user, token_ledger, correct_amount);
+            return format!(
+                "No change needed: user {} balance for {} is already {}",
+                user, token_ledger, correct_amount
+            );
         }
 
         let diff = old_amount as i128 - correct_amount as i128;
@@ -1343,36 +1797,55 @@ impl StabilityPoolState {
             }
         }
 
-        format!("Corrected {} balance for {}: {} -> {}", token_ledger, user, old_amount, correct_amount)
+        format!(
+            "Corrected {} balance for {}: {} -> {}",
+            token_ledger, user, old_amount, correct_amount
+        )
     }
 
     /// Set a depositor's collateral gain for a specific collateral type to `correct_amount`.
     /// Used to fix drift between tracked gains and actual ledger balance (e.g., transfer fee dust).
-    pub fn correct_collateral_gain(&mut self, user: Principal, collateral_ledger: Principal, correct_amount: u64) -> String {
-        let old_amount = self.deposits.get(&user)
+    pub fn correct_collateral_gain(
+        &mut self,
+        user: Principal,
+        collateral_ledger: Principal,
+        correct_amount: u64,
+    ) -> String {
+        let old_amount = self
+            .deposits
+            .get(&user)
             .and_then(|pos| pos.collateral_gains.get(&collateral_ledger).copied())
             .unwrap_or(0);
 
         if old_amount == correct_amount {
-            return format!("No change needed: user {} gain for {} is already {}", user, collateral_ledger, correct_amount);
+            return format!(
+                "No change needed: user {} gain for {} is already {}",
+                user, collateral_ledger, correct_amount
+            );
         }
 
         if let Some(pos) = self.deposits.get_mut(&user) {
             if correct_amount == 0 {
                 pos.collateral_gains.remove(&collateral_ledger);
             } else {
-                pos.collateral_gains.insert(collateral_ledger, correct_amount);
+                pos.collateral_gains
+                    .insert(collateral_ledger, correct_amount);
             }
         }
 
-        format!("Corrected {} collateral gain for {}: {} -> {}", collateral_ledger, user, old_amount, correct_amount)
+        format!(
+            "Corrected {} collateral gain for {}: {} -> {}",
+            collateral_ledger, user, old_amount, correct_amount
+        )
     }
 
     // ─── State Validation ───
 
     pub fn validate_state(&self) -> Result<(), String> {
         for (ledger, &tracked_total) in &self.total_stablecoin_balances {
-            let computed_total: u64 = self.deposits.values()
+            let computed_total: u64 = self
+                .deposits
+                .values()
                 .map(|pos| pos.stablecoin_balances.get(ledger).copied().unwrap_or(0))
                 .sum();
             if computed_total != tracked_total {
@@ -1393,17 +1866,23 @@ thread_local! {
 }
 
 pub fn mutate_state<F, R>(f: F) -> R
-where F: FnOnce(&mut StabilityPoolState) -> R {
+where
+    F: FnOnce(&mut StabilityPoolState) -> R,
+{
     STATE.with(|s| f(&mut s.borrow_mut()))
 }
 
 pub fn read_state<F, R>(f: F) -> R
-where F: FnOnce(&StabilityPoolState) -> R {
+where
+    F: FnOnce(&StabilityPoolState) -> R,
+{
     STATE.with(|s| f(&s.borrow()))
 }
 
 pub fn replace_state(state: StabilityPoolState) {
-    STATE.with(|s| { *s.borrow_mut() = state; });
+    STATE.with(|s| {
+        *s.borrow_mut() = state;
+    });
 }
 
 /// Serialize state to stable memory (called from pre_upgrade).
@@ -1478,6 +1957,12 @@ impl From<StabilityPoolStateV1> for StabilityPoolState {
             collateral_registry: v1.collateral_registry,
             chain_collateral_sentinels: Some(BTreeSet::new()),
             chain_claim_sources: Some(BTreeMap::new()),
+            pending_chain_absorbs: Some(BTreeMap::new()),
+            completed_chain_absorbs: Some(BTreeMap::new()),
+            chain_absorb_auto_config: Some(ChainAbsorbAutoConfig::default()),
+            chain_absorb_auto_last_tick: None,
+            completed_cfx_claim_payout_recoveries: Some(BTreeMap::new()),
+            completed_cfx_claim_payout_recovery_floor: Some(BTreeMap::new()),
             protocol_canister_id: v1.protocol_canister_id,
             configuration: v1.configuration,
             liquidation_history: v1.liquidation_history,
@@ -1580,17 +2065,39 @@ mod tests {
     use std::collections::BTreeMap;
 
     // Deterministic test principals
-    fn user_a() -> Principal { Principal::from_slice(&[1]) }
-    fn user_b() -> Principal { Principal::from_slice(&[2]) }
-    fn user_c() -> Principal { Principal::from_slice(&[3]) }
-    fn icusd_ledger() -> Principal { Principal::from_slice(&[10]) }
-    fn ckusdt_ledger() -> Principal { Principal::from_slice(&[11]) }
-    fn ckusdc_ledger() -> Principal { Principal::from_slice(&[12]) }
-    fn icp_ledger() -> Principal { Principal::from_slice(&[20]) }
-    fn ckbtc_ledger() -> Principal { Principal::from_slice(&[21]) }
-    fn cfx_sentinel() -> Principal { Principal::from_slice(&[30]) }
-    fn xrp_ledger() -> Principal { rumi_protocol_backend::state::xrp_collateral_principal() }
-    fn valid_xrp_address() -> String { "rUn84CUYbNjRoTQ6mSW7BVJPSVJNLb1QLo".to_string() }
+    fn user_a() -> Principal {
+        Principal::from_slice(&[1])
+    }
+    fn user_b() -> Principal {
+        Principal::from_slice(&[2])
+    }
+    fn user_c() -> Principal {
+        Principal::from_slice(&[3])
+    }
+    fn icusd_ledger() -> Principal {
+        Principal::from_slice(&[10])
+    }
+    fn ckusdt_ledger() -> Principal {
+        Principal::from_slice(&[11])
+    }
+    fn ckusdc_ledger() -> Principal {
+        Principal::from_slice(&[12])
+    }
+    fn icp_ledger() -> Principal {
+        Principal::from_slice(&[20])
+    }
+    fn ckbtc_ledger() -> Principal {
+        Principal::from_slice(&[21])
+    }
+    fn cfx_sentinel() -> Principal {
+        Principal::from_slice(&[30])
+    }
+    fn xrp_ledger() -> Principal {
+        rumi_protocol_backend::state::xrp_collateral_principal()
+    }
+    fn valid_xrp_address() -> String {
+        "rUn84CUYbNjRoTQ6mSW7BVJPSVJNLb1QLo".to_string()
+    }
 
     /// Build a test state with:
     /// - icUSD (8 decimals, priority 1)
@@ -1661,7 +2168,10 @@ mod tests {
         token: Principal,
         amount: u64,
     ) {
-        let position = state.deposits.entry(user).or_insert_with(|| DepositPosition::new(0));
+        let position = state
+            .deposits
+            .entry(user)
+            .or_insert_with(|| DepositPosition::new(0));
         *position.stablecoin_balances.entry(token).or_insert(0) += amount;
         *state.total_stablecoin_balances.entry(token).or_insert(0) += amount;
     }
@@ -1674,34 +2184,63 @@ mod tests {
 
         // Add deposits for user_a
         add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_000_000); // 1 icUSD
-        add_deposit_direct(&mut state, user_a(), ckusdt_ledger(), 2_000_000);  // 2 ckUSDT
+        add_deposit_direct(&mut state, user_a(), ckusdt_ledger(), 2_000_000); // 2 ckUSDT
 
         // Verify balances
         let pos = state.deposits.get(&user_a()).unwrap();
-        assert_eq!(pos.stablecoin_balances.get(&icusd_ledger()), Some(&100_000_000));
-        assert_eq!(pos.stablecoin_balances.get(&ckusdt_ledger()), Some(&2_000_000));
+        assert_eq!(
+            pos.stablecoin_balances.get(&icusd_ledger()),
+            Some(&100_000_000)
+        );
+        assert_eq!(
+            pos.stablecoin_balances.get(&ckusdt_ledger()),
+            Some(&2_000_000)
+        );
 
         // Verify aggregate totals
-        assert_eq!(state.total_stablecoin_balances.get(&icusd_ledger()), Some(&100_000_000));
-        assert_eq!(state.total_stablecoin_balances.get(&ckusdt_ledger()), Some(&2_000_000));
+        assert_eq!(
+            state.total_stablecoin_balances.get(&icusd_ledger()),
+            Some(&100_000_000)
+        );
+        assert_eq!(
+            state.total_stablecoin_balances.get(&ckusdt_ledger()),
+            Some(&2_000_000)
+        );
 
         // Partial withdrawal
-        state.process_withdrawal(user_a(), icusd_ledger(), 30_000_000).unwrap();
+        state
+            .process_withdrawal(user_a(), icusd_ledger(), 30_000_000)
+            .unwrap();
         let pos = state.deposits.get(&user_a()).unwrap();
-        assert_eq!(pos.stablecoin_balances.get(&icusd_ledger()), Some(&70_000_000));
-        assert_eq!(state.total_stablecoin_balances.get(&icusd_ledger()), Some(&70_000_000));
+        assert_eq!(
+            pos.stablecoin_balances.get(&icusd_ledger()),
+            Some(&70_000_000)
+        );
+        assert_eq!(
+            state.total_stablecoin_balances.get(&icusd_ledger()),
+            Some(&70_000_000)
+        );
 
         // Full withdrawal of ckUSDT -- zero-balance entry should be cleaned up
-        state.process_withdrawal(user_a(), ckusdt_ledger(), 2_000_000).unwrap();
+        state
+            .process_withdrawal(user_a(), ckusdt_ledger(), 2_000_000)
+            .unwrap();
         let pos = state.deposits.get(&user_a()).unwrap();
         assert_eq!(pos.stablecoin_balances.get(&ckusdt_ledger()), None);
 
         // Full withdrawal of remaining icUSD -- empty position should be removed
-        state.process_withdrawal(user_a(), icusd_ledger(), 70_000_000).unwrap();
-        assert!(state.deposits.get(&user_a()).is_none(), "Empty position should be removed");
+        state
+            .process_withdrawal(user_a(), icusd_ledger(), 70_000_000)
+            .unwrap();
+        assert!(
+            state.deposits.get(&user_a()).is_none(),
+            "Empty position should be removed"
+        );
 
         // Attempt to withdraw from nonexistent position
-        let err = state.process_withdrawal(user_a(), icusd_ledger(), 1).unwrap_err();
+        let err = state
+            .process_withdrawal(user_a(), icusd_ledger(), 1)
+            .unwrap_err();
         assert!(matches!(err, StabilityPoolError::NoPositionFound));
     }
 
@@ -1710,9 +2249,15 @@ mod tests {
         let mut state = test_state();
         add_deposit_direct(&mut state, user_a(), icusd_ledger(), 50_000_000);
 
-        let err = state.process_withdrawal(user_a(), icusd_ledger(), 100_000_000).unwrap_err();
+        let err = state
+            .process_withdrawal(user_a(), icusd_ledger(), 100_000_000)
+            .unwrap_err();
         match err {
-            StabilityPoolError::InsufficientBalance { token, required, available } => {
+            StabilityPoolError::InsufficientBalance {
+                token,
+                required,
+                available,
+            } => {
                 assert_eq!(token, icusd_ledger());
                 assert_eq!(required, 100_000_000);
                 assert_eq!(available, 50_000_000);
@@ -1761,7 +2306,10 @@ mod tests {
         let usdt_draw = draw.get(&ckusdt_ledger()).copied().unwrap_or(0);
         let icusd_draw = draw.get(&icusd_ledger()).copied().unwrap_or(0);
 
-        assert_eq!(usdt_draw, 80_000_000, "All 80 USD should come from ckUSDT (priority 2)");
+        assert_eq!(
+            usdt_draw, 80_000_000,
+            "All 80 USD should come from ckUSDT (priority 2)"
+        );
         assert_eq!(icusd_draw, 0, "icUSD (priority 1) should not be touched");
     }
 
@@ -1813,8 +2361,8 @@ mod tests {
             1, // vault_id
             icp_ledger(),
             &stables_consumed,
-            5_00000000, // 5 ICP
-            7_50000000, // collateral price $7.50
+            5_00000000,    // 5 ICP
+            7_50000000,    // collateral price $7.50
             1_000_000_000, // timestamp
         );
 
@@ -1826,21 +2374,67 @@ mod tests {
         let pos_b = state.deposits.get(&user_b()).unwrap();
         let pos_c = state.deposits.get(&user_c()).unwrap();
 
-        assert_eq!(pos_a.stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0), 45_00000000);
-        assert_eq!(pos_b.stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0), 27_00000000);
-        assert_eq!(pos_c.stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0), 18_00000000);
+        assert_eq!(
+            pos_a
+                .stablecoin_balances
+                .get(&icusd_ledger())
+                .copied()
+                .unwrap_or(0),
+            45_00000000
+        );
+        assert_eq!(
+            pos_b
+                .stablecoin_balances
+                .get(&icusd_ledger())
+                .copied()
+                .unwrap_or(0),
+            27_00000000
+        );
+        assert_eq!(
+            pos_c
+                .stablecoin_balances
+                .get(&icusd_ledger())
+                .copied()
+                .unwrap_or(0),
+            18_00000000
+        );
 
         // Check proportional collateral gains:
         // user_a gain: 5 ICP * (5/10) = 2.5 ICP = 2_50000000
         // user_b gain: 5 ICP * (3/10) = 1.5 ICP = 1_50000000
         // user_c gain: 5 ICP * (2/10) = 1.0 ICP = 1_00000000
-        assert_eq!(pos_a.collateral_gains.get(&icp_ledger()).copied().unwrap_or(0), 2_50000000);
-        assert_eq!(pos_b.collateral_gains.get(&icp_ledger()).copied().unwrap_or(0), 1_50000000);
-        assert_eq!(pos_c.collateral_gains.get(&icp_ledger()).copied().unwrap_or(0), 1_00000000);
+        assert_eq!(
+            pos_a
+                .collateral_gains
+                .get(&icp_ledger())
+                .copied()
+                .unwrap_or(0),
+            2_50000000
+        );
+        assert_eq!(
+            pos_b
+                .collateral_gains
+                .get(&icp_ledger())
+                .copied()
+                .unwrap_or(0),
+            1_50000000
+        );
+        assert_eq!(
+            pos_c
+                .collateral_gains
+                .get(&icp_ledger())
+                .copied()
+                .unwrap_or(0),
+            1_00000000
+        );
 
         // Verify aggregate total was reduced
         assert_eq!(
-            state.total_stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0),
+            state
+                .total_stablecoin_balances
+                .get(&icusd_ledger())
+                .copied()
+                .unwrap_or(0),
             90_00000000, // 100 - 10 = 90
         );
 
@@ -1866,11 +2460,17 @@ mod tests {
 
         // Effective pool for ICP should only include user_a
         let effective = state.effective_pool_for_collateral(&icp_ledger());
-        assert_eq!(effective, 60_00000000, "Only user_a's 60 icUSD should be in effective pool");
+        assert_eq!(
+            effective, 60_00000000,
+            "Only user_a's 60 icUSD should be in effective pool"
+        );
 
         // Effective pool for ckBTC should include both (user_b only opted out of ICP)
         let effective_btc = state.effective_pool_for_collateral(&ckbtc_ledger());
-        assert_eq!(effective_btc, 100_00000000, "Both users should be in ckBTC pool");
+        assert_eq!(
+            effective_btc, 100_00000000,
+            "Both users should be in ckBTC pool"
+        );
 
         // Token draw for ICP should only draw from user_a's balance
         let draw = state.compute_token_draw(30_00000000, &icp_ledger());
@@ -1881,18 +2481,51 @@ mod tests {
         stables_consumed.insert(icusd_ledger(), 20_00000000);
 
         state.process_liquidation_gains_at(
-            2, icp_ledger(), &stables_consumed, 10_00000000, 7_50000000, 2_000_000_000,
+            2,
+            icp_ledger(),
+            &stables_consumed,
+            10_00000000,
+            7_50000000,
+            2_000_000_000,
         );
 
         // user_a should lose all 20 icUSD (only opted-in depositor)
         let pos_a = state.deposits.get(&user_a()).unwrap();
-        assert_eq!(pos_a.stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0), 40_00000000);
-        assert_eq!(pos_a.collateral_gains.get(&icp_ledger()).copied().unwrap_or(0), 10_00000000);
+        assert_eq!(
+            pos_a
+                .stablecoin_balances
+                .get(&icusd_ledger())
+                .copied()
+                .unwrap_or(0),
+            40_00000000
+        );
+        assert_eq!(
+            pos_a
+                .collateral_gains
+                .get(&icp_ledger())
+                .copied()
+                .unwrap_or(0),
+            10_00000000
+        );
 
         // user_b should be completely untouched
         let pos_b = state.deposits.get(&user_b()).unwrap();
-        assert_eq!(pos_b.stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0), 40_00000000);
-        assert_eq!(pos_b.collateral_gains.get(&icp_ledger()).copied().unwrap_or(0), 0);
+        assert_eq!(
+            pos_b
+                .stablecoin_balances
+                .get(&icusd_ledger())
+                .copied()
+                .unwrap_or(0),
+            40_00000000
+        );
+        assert_eq!(
+            pos_b
+                .collateral_gains
+                .get(&icp_ledger())
+                .copied()
+                .unwrap_or(0),
+            0
+        );
     }
 
     #[test]
@@ -1904,14 +2537,18 @@ mod tests {
         state.opt_out_collateral(&user_a(), icp_ledger()).unwrap();
 
         // Second opt-out of same collateral should fail
-        let err = state.opt_out_collateral(&user_a(), icp_ledger()).unwrap_err();
+        let err = state
+            .opt_out_collateral(&user_a(), icp_ledger())
+            .unwrap_err();
         assert!(matches!(err, StabilityPoolError::AlreadyOptedOut { .. }));
 
         // Opt back in
         state.opt_in_collateral(&user_a(), icp_ledger()).unwrap();
 
         // Double opt-in should fail
-        let err = state.opt_in_collateral(&user_a(), icp_ledger()).unwrap_err();
+        let err = state
+            .opt_in_collateral(&user_a(), icp_ledger())
+            .unwrap_err();
         assert!(matches!(err, StabilityPoolError::AlreadyOptedIn { .. }));
     }
 
@@ -1920,11 +2557,15 @@ mod tests {
         let mut state = test_state();
 
         // Opt-out on nonexistent position
-        let err = state.opt_out_collateral(&user_a(), icp_ledger()).unwrap_err();
+        let err = state
+            .opt_out_collateral(&user_a(), icp_ledger())
+            .unwrap_err();
         assert!(matches!(err, StabilityPoolError::NoPositionFound));
 
         // Opt-in on nonexistent position
-        let err = state.opt_in_collateral(&user_a(), icp_ledger()).unwrap_err();
+        let err = state
+            .opt_in_collateral(&user_a(), icp_ledger())
+            .unwrap_err();
         assert!(matches!(err, StabilityPoolError::NoPositionFound));
     }
 
@@ -2094,11 +2735,17 @@ mod tests {
 
         // Round-trip for 6-decimal
         let original = 12_345_678u64;
-        assert_eq!(normalize_from_e8s(normalize_to_e8s(original, 6), 6), original);
+        assert_eq!(
+            normalize_from_e8s(normalize_to_e8s(original, 6), 6),
+            original
+        );
 
         // Round-trip for 8-decimal
         let original = 98_765_432u64;
-        assert_eq!(normalize_from_e8s(normalize_to_e8s(original, 8), 8), original);
+        assert_eq!(
+            normalize_from_e8s(normalize_to_e8s(original, 8), 8),
+            original
+        );
 
         // Hypothetical 12-decimal token (greater than 8): e.g. 1.0 = 1_000_000_000_000
         // normalize_to_e8s: divide by 10^4 = 10_000
@@ -2122,15 +2769,29 @@ mod tests {
         assert!(state.validate_state().is_ok());
 
         // Corrupt the tracked total to create a mismatch
-        *state.total_stablecoin_balances.get_mut(&icusd_ledger()).unwrap() = 999;
+        *state
+            .total_stablecoin_balances
+            .get_mut(&icusd_ledger())
+            .unwrap() = 999;
         let err = state.validate_state();
         assert!(err.is_err());
         let msg = err.unwrap_err();
-        assert!(msg.contains("mismatch"), "Error should mention mismatch: {}", msg);
-        assert!(msg.contains("tracked=999"), "Error should show tracked value: {}", msg);
+        assert!(
+            msg.contains("mismatch"),
+            "Error should mention mismatch: {}",
+            msg
+        );
+        assert!(
+            msg.contains("tracked=999"),
+            "Error should show tracked value: {}",
+            msg
+        );
 
         // Fix the corruption
-        *state.total_stablecoin_balances.get_mut(&icusd_ledger()).unwrap() = 150_00000000;
+        *state
+            .total_stablecoin_balances
+            .get_mut(&icusd_ledger())
+            .unwrap() = 150_00000000;
         assert!(state.validate_state().is_ok());
     }
 
@@ -2139,6 +2800,144 @@ mod tests {
         let state = test_state();
         // Empty state with zero totals should pass
         assert!(state.validate_state().is_ok());
+    }
+
+    #[test]
+    fn chain_absorb_auto_fields_decode_disabled_when_missing() {
+        let mut current = StabilityPoolState::default();
+        current
+            .register_chain_collateral(1030, "CFX".to_string(), 18)
+            .unwrap();
+
+        #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
+        struct PreInc9State {
+            deposits: BTreeMap<Principal, DepositPosition>,
+            total_stablecoin_balances: BTreeMap<Principal, u64>,
+            stablecoin_registry: BTreeMap<Principal, StablecoinConfig>,
+            collateral_registry: BTreeMap<Principal, CollateralInfo>,
+            chain_collateral_sentinels: Option<BTreeSet<Principal>>,
+            chain_claim_sources: Option<BTreeMap<Principal, Vec<ChainClaimSource>>>,
+            pending_chain_absorbs: Option<BTreeMap<u64, ChainSpAbsorbIntent>>,
+            completed_chain_absorbs: Option<BTreeMap<u64, ChainSpAbsorbCompletion>>,
+            protocol_canister_id: Principal,
+            configuration: PoolConfiguration,
+            liquidation_history: Vec<PoolLiquidationRecord>,
+            in_flight_liquidations: BTreeSet<u64>,
+            total_liquidations_executed: u64,
+            pool_creation_timestamp: u64,
+            total_interest_received_e8s: Option<u64>,
+            token_consecutive_failures: Option<BTreeMap<Principal, u32>>,
+            cached_virtual_prices: Option<BTreeMap<Principal, u128>>,
+            protocol_reserve_address: Option<Principal>,
+            is_initialized: bool,
+            pool_events: Option<Vec<PoolEvent>>,
+            next_event_id: Option<u64>,
+            pending_refunds: Option<BTreeMap<u64, PendingRefund>>,
+            next_pending_refund_id: Option<u64>,
+        }
+
+        let old = PreInc9State {
+            deposits: current.deposits.clone(),
+            total_stablecoin_balances: current.total_stablecoin_balances.clone(),
+            stablecoin_registry: current.stablecoin_registry.clone(),
+            collateral_registry: current.collateral_registry.clone(),
+            chain_collateral_sentinels: current.chain_collateral_sentinels.clone(),
+            chain_claim_sources: current.chain_claim_sources.clone(),
+            pending_chain_absorbs: current.pending_chain_absorbs.clone(),
+            completed_chain_absorbs: current.completed_chain_absorbs.clone(),
+            protocol_canister_id: current.protocol_canister_id,
+            configuration: current.configuration.clone(),
+            liquidation_history: current.liquidation_history.clone(),
+            in_flight_liquidations: current.in_flight_liquidations.clone(),
+            total_liquidations_executed: current.total_liquidations_executed,
+            pool_creation_timestamp: current.pool_creation_timestamp,
+            total_interest_received_e8s: current.total_interest_received_e8s,
+            token_consecutive_failures: current.token_consecutive_failures.clone(),
+            cached_virtual_prices: current.cached_virtual_prices.clone(),
+            protocol_reserve_address: current.protocol_reserve_address,
+            is_initialized: current.is_initialized,
+            pool_events: current.pool_events.clone(),
+            next_event_id: current.next_event_id,
+            pending_refunds: current.pending_refunds.clone(),
+            next_pending_refund_id: current.next_pending_refund_id,
+        };
+
+        let bytes = Encode!(&old).unwrap();
+        let decoded = Decode!(&bytes, StabilityPoolState).unwrap();
+        let config = decoded.chain_absorb_auto_config();
+
+        assert!(!config.enabled);
+        assert_eq!(
+            config.interval_seconds,
+            DEFAULT_CHAIN_ABSORB_AUTO_INTERVAL_SECONDS
+        );
+        assert_eq!(
+            config.max_scan_per_chain,
+            DEFAULT_CHAIN_ABSORB_AUTO_MAX_SCAN_PER_CHAIN
+        );
+        assert!(decoded.chain_absorb_auto_last_tick().is_none());
+    }
+
+    #[test]
+    fn chain_absorb_auto_config_validation_rejects_saturating_timer_values() {
+        let mut state = StabilityPoolState::default();
+        let too_fast = ChainAbsorbAutoConfig {
+            enabled: true,
+            interval_seconds: MIN_CHAIN_ABSORB_AUTO_INTERVAL_SECONDS - 1,
+            max_scan_per_chain: 1,
+        };
+        assert!(matches!(
+            state.set_chain_absorb_auto_config(too_fast),
+            Err(StabilityPoolError::LiquidationFailed { .. })
+        ));
+
+        let no_scan = ChainAbsorbAutoConfig {
+            enabled: true,
+            interval_seconds: DEFAULT_CHAIN_ABSORB_AUTO_INTERVAL_SECONDS,
+            max_scan_per_chain: 0,
+        };
+        assert!(matches!(
+            state.set_chain_absorb_auto_config(no_scan),
+            Err(StabilityPoolError::LiquidationFailed { .. })
+        ));
+
+        let accepted = ChainAbsorbAutoConfig {
+            enabled: true,
+            interval_seconds: MIN_CHAIN_ABSORB_AUTO_INTERVAL_SECONDS,
+            max_scan_per_chain: 500,
+        };
+        state
+            .set_chain_absorb_auto_config(accepted.clone())
+            .unwrap();
+        assert_eq!(state.chain_absorb_auto_config(), accepted);
+    }
+
+    #[test]
+    fn chain_absorb_auto_due_requires_enabled_and_elapsed_interval() {
+        let mut state = StabilityPoolState::default();
+        assert!(!state.chain_absorb_auto_due(1_000_000_000_000));
+
+        state
+            .set_chain_absorb_auto_config(ChainAbsorbAutoConfig {
+                enabled: true,
+                interval_seconds: 300,
+                max_scan_per_chain: 1,
+            })
+            .unwrap();
+        assert!(state.chain_absorb_auto_due(1_000_000_000_000));
+
+        state.record_chain_absorb_auto_tick(ChainAbsorbAutoTickRecord {
+            started_at_ns: 1_000_000_000_000,
+            completed_at_ns: 1_001_000_000_000,
+            attempted_vault_id: None,
+            candidates_scanned: 0,
+            absorbed: None,
+            error: None,
+            skipped_reason: Some("no eligible candidates".to_string()),
+        });
+
+        assert!(!state.chain_absorb_auto_due(1_100_000_000_000));
+        assert!(state.chain_absorb_auto_due(1_301_000_000_000));
     }
 
     // ─── Test: DepositPosition helpers ───
@@ -2173,8 +2972,13 @@ mod tests {
         assert!(!pos.is_empty());
 
         pos.collateral_gains.clear();
-        pos.cfx_claims.get_or_insert_with(BTreeMap::new).insert(cfx_sentinel(), 1_000_000_000_000_000_000);
-        assert!(!pos.is_empty(), "u128 CFX claims must prevent position cleanup");
+        pos.cfx_claims
+            .get_or_insert_with(BTreeMap::new)
+            .insert(cfx_sentinel(), 1_000_000_000_000_000_000);
+        assert!(
+            !pos.is_empty(),
+            "u128 CFX claims must prevent position cleanup"
+        );
     }
 
     // ─── Test: Mark gains claimed ───
@@ -2185,20 +2989,46 @@ mod tests {
         add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
 
         // Manually add collateral gains
-        state.deposits.get_mut(&user_a()).unwrap()
-            .collateral_gains.insert(icp_ledger(), 5_00000000);
+        state
+            .deposits
+            .get_mut(&user_a())
+            .unwrap()
+            .collateral_gains
+            .insert(icp_ledger(), 5_00000000);
 
         // Partially claim
         state.mark_gains_claimed(&user_a(), &icp_ledger(), 2_00000000);
         let pos = state.deposits.get(&user_a()).unwrap();
-        assert_eq!(pos.collateral_gains.get(&icp_ledger()).copied().unwrap_or(0), 3_00000000);
-        assert_eq!(pos.total_claimed_gains.get(&icp_ledger()).copied().unwrap_or(0), 2_00000000);
+        assert_eq!(
+            pos.collateral_gains
+                .get(&icp_ledger())
+                .copied()
+                .unwrap_or(0),
+            3_00000000
+        );
+        assert_eq!(
+            pos.total_claimed_gains
+                .get(&icp_ledger())
+                .copied()
+                .unwrap_or(0),
+            2_00000000
+        );
 
         // Claim the rest
         state.mark_gains_claimed(&user_a(), &icp_ledger(), 3_00000000);
         let pos = state.deposits.get(&user_a()).unwrap();
-        assert_eq!(pos.collateral_gains.get(&icp_ledger()), None, "Zero gains should be cleaned up");
-        assert_eq!(pos.total_claimed_gains.get(&icp_ledger()).copied().unwrap_or(0), 5_00000000);
+        assert_eq!(
+            pos.collateral_gains.get(&icp_ledger()),
+            None,
+            "Zero gains should be cleaned up"
+        );
+        assert_eq!(
+            pos.total_claimed_gains
+                .get(&icp_ledger())
+                .copied()
+                .unwrap_or(0),
+            5_00000000
+        );
     }
 
     // ─── Test: Effective pool computation ───
@@ -2214,14 +3044,23 @@ mod tests {
         add_deposit_direct(&mut state, user_b(), icusd_ledger(), 30_00000000);
 
         // All opted in -> total = 100 USD e8s
-        assert_eq!(state.effective_pool_for_collateral(&icp_ledger()), 100_00000000);
+        assert_eq!(
+            state.effective_pool_for_collateral(&icp_ledger()),
+            100_00000000
+        );
 
         // user_a opts out of ICP -> only user_b remains
         state.opt_out_collateral(&user_a(), icp_ledger()).unwrap();
-        assert_eq!(state.effective_pool_for_collateral(&icp_ledger()), 30_00000000);
+        assert_eq!(
+            state.effective_pool_for_collateral(&icp_ledger()),
+            30_00000000
+        );
 
         // ckBTC effective pool still has everyone
-        assert_eq!(state.effective_pool_for_collateral(&ckbtc_ledger()), 100_00000000);
+        assert_eq!(
+            state.effective_pool_for_collateral(&ckbtc_ledger()),
+            100_00000000
+        );
     }
 
     #[test]
@@ -2241,14 +3080,23 @@ mod tests {
             0,
             "chain sentinel starts default-out",
         );
-        assert!(state.compute_token_draw(10_00000000, &cfx_sentinel()).is_empty());
+        assert!(state
+            .compute_token_draw(10_00000000, &cfx_sentinel())
+            .is_empty());
 
-        state.opt_in_cfx(&user_a(), cfx_sentinel()).expect("user A opts into CFX");
-        assert_eq!(state.effective_pool_for_collateral(&cfx_sentinel()), 100_00000000);
+        state
+            .opt_in_cfx(&user_a(), cfx_sentinel())
+            .expect("user A opts into CFX");
+        assert_eq!(
+            state.effective_pool_for_collateral(&cfx_sentinel()),
+            100_00000000
+        );
         let draw = state.compute_token_draw(10_00000000, &cfx_sentinel());
         assert_eq!(draw.get(&icusd_ledger()).copied(), Some(10_00000000));
 
-        state.opt_out_cfx(&user_a(), cfx_sentinel()).expect("user A opts back out");
+        state
+            .opt_out_cfx(&user_a(), cfx_sentinel())
+            .expect("user A opts back out");
         assert_eq!(state.effective_pool_for_collateral(&cfx_sentinel()), 0);
     }
 
@@ -2261,16 +3109,23 @@ mod tests {
         assert_ne!(sentinel, icusd_ledger());
         assert_ne!(sentinel, icp_ledger());
 
-        let registered = state.register_chain_collateral(1030, "CFX".to_string(), 18)
+        let registered = state
+            .register_chain_collateral(1030, "CFX".to_string(), 18)
             .expect("register CFX sentinel");
         assert_eq!(registered, sentinel);
         assert!(state.is_chain_collateral_sentinel(&sentinel));
-        let info = state.collateral_registry.get(&sentinel).expect("sentinel registered as collateral");
+        let info = state
+            .collateral_registry
+            .get(&sentinel)
+            .expect("sentinel registered as collateral");
         assert_eq!(info.symbol, "CFX");
         assert_eq!(info.decimals, 18);
         assert!(matches!(info.status, CollateralStatus::Active));
         assert_eq!(state.effective_pool_for_collateral(&sentinel), 0);
-        assert!(state.validate_state().is_ok(), "sentinel is metadata, not a ledger aggregate");
+        assert!(
+            state.validate_state().is_ok(),
+            "sentinel is metadata, not a ledger aggregate"
+        );
     }
 
     #[test]
@@ -2294,23 +3149,70 @@ mod tests {
             123,
         );
 
-        let claim_a = state.deposits.get(&user_a()).unwrap()
-            .cfx_claims.as_ref().unwrap().get(&cfx_sentinel()).copied().unwrap_or(0);
-        let claim_b = state.deposits.get(&user_b()).unwrap()
-            .cfx_claims.as_ref().unwrap().get(&cfx_sentinel()).copied().unwrap_or(0);
-        assert_eq!(claim_a, 10_000 * E18 + 1, "first opted-in depositor receives wei dust");
+        let claim_a = state
+            .deposits
+            .get(&user_a())
+            .unwrap()
+            .cfx_claims
+            .as_ref()
+            .unwrap()
+            .get(&cfx_sentinel())
+            .copied()
+            .unwrap_or(0);
+        let claim_b = state
+            .deposits
+            .get(&user_b())
+            .unwrap()
+            .cfx_claims
+            .as_ref()
+            .unwrap()
+            .get(&cfx_sentinel())
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(
+            claim_a,
+            10_000 * E18 + 1,
+            "first opted-in depositor receives wei dust"
+        );
         assert_eq!(claim_b, 10_000 * E18);
-        assert!(claim_a > u64::MAX as u128, "CFX claim must not truncate to u64");
-        assert_eq!(state.total_stablecoin_balances.get(&icusd_ledger()).copied(), Some(0));
-        assert!(state.deposits.contains_key(&user_a()), "CFX claim keeps drained position alive");
+        assert!(
+            claim_a > u64::MAX as u128,
+            "CFX claim must not truncate to u64"
+        );
+        assert_eq!(
+            state
+                .total_stablecoin_balances
+                .get(&icusd_ledger())
+                .copied(),
+            Some(0)
+        );
+        assert!(
+            state.deposits.contains_key(&user_a()),
+            "CFX claim keeps drained position alive"
+        );
 
         state.mark_cfx_claimed(&user_a(), &cfx_sentinel(), 3 * E18);
-        let after_partial = state.deposits.get(&user_a()).unwrap()
-            .cfx_claims.as_ref().unwrap().get(&cfx_sentinel()).copied().unwrap_or(0);
+        let after_partial = state
+            .deposits
+            .get(&user_a())
+            .unwrap()
+            .cfx_claims
+            .as_ref()
+            .unwrap()
+            .get(&cfx_sentinel())
+            .copied()
+            .unwrap_or(0);
         assert_eq!(after_partial, 9_997 * E18 + 1);
         state.mark_cfx_claimed(&user_a(), &cfx_sentinel(), 9_997 * E18 + 1);
-        assert!(state.deposits.get(&user_a()).unwrap()
-            .cfx_claims.as_ref().unwrap().get(&cfx_sentinel()).is_none());
+        assert!(state
+            .deposits
+            .get(&user_a())
+            .unwrap()
+            .cfx_claims
+            .as_ref()
+            .unwrap()
+            .get(&cfx_sentinel())
+            .is_none());
     }
 
     #[test]
@@ -2337,8 +3239,14 @@ mod tests {
             Some(40_00000000),
             "chain draw caps to opted-in icUSD, not total stable value",
         );
-        assert!(!draw.contains_key(&ckusdc_ledger()), "ckUSDC must not be burned for Inc 4 chain absorb");
-        assert!(!draw.contains_key(&three_usd_ledger()), "3USD LP must not be burned for Inc 4 chain absorb");
+        assert!(
+            !draw.contains_key(&ckusdc_ledger()),
+            "ckUSDC must not be burned for Inc 4 chain absorb"
+        );
+        assert!(
+            !draw.contains_key(&three_usd_ledger()),
+            "3USD LP must not be burned for Inc 4 chain absorb"
+        );
 
         state.opt_in_cfx(&user_b(), cfx_sentinel()).unwrap();
         let full_draw = state.compute_icusd_chain_draw(70_00000000, &cfx_sentinel());
@@ -2367,27 +3275,67 @@ mod tests {
         let mut stables_consumed = BTreeMap::new();
         stables_consumed.insert(ckusdt_ledger(), 20_000_000); // 20 ckUSDT consumed
         stables_consumed.insert(ckusdc_ledger(), 20_000_000); // 20 ckUSDC consumed
-        // total consumed = 40 USD
+                                                              // total consumed = 40 USD
 
         state.process_liquidation_gains_at(
-            10, icp_ledger(), &stables_consumed, 20_00000000, 7_50000000, 3_000_000_000,
+            10,
+            icp_ledger(),
+            &stables_consumed,
+            20_00000000,
+            7_50000000,
+            3_000_000_000,
         );
 
         // user_a has all the ckUSDT, so consumes all 20 ckUSDT
         let pos_a = state.deposits.get(&user_a()).unwrap();
-        assert_eq!(pos_a.stablecoin_balances.get(&ckusdt_ledger()).copied().unwrap_or(0), 30_000_000); // 50 - 20
-        // user_a's icUSD should be untouched (not consumed)
-        assert_eq!(pos_a.stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0), 100_00000000);
+        assert_eq!(
+            pos_a
+                .stablecoin_balances
+                .get(&ckusdt_ledger())
+                .copied()
+                .unwrap_or(0),
+            30_000_000
+        ); // 50 - 20
+           // user_a's icUSD should be untouched (not consumed)
+        assert_eq!(
+            pos_a
+                .stablecoin_balances
+                .get(&icusd_ledger())
+                .copied()
+                .unwrap_or(0),
+            100_00000000
+        );
 
         // user_b has all the ckUSDC, so consumes all 20 ckUSDC
         let pos_b = state.deposits.get(&user_b()).unwrap();
-        assert_eq!(pos_b.stablecoin_balances.get(&ckusdc_ledger()).copied().unwrap_or(0), 30_000_000); // 50 - 20
+        assert_eq!(
+            pos_b
+                .stablecoin_balances
+                .get(&ckusdc_ledger())
+                .copied()
+                .unwrap_or(0),
+            30_000_000
+        ); // 50 - 20
 
         // Collateral distribution: each consumed 20 USD worth out of 40 total = 50% each
         // user_a: 50% of 20 ICP = 10 ICP
         // user_b: 50% of 20 ICP = 10 ICP
-        assert_eq!(pos_a.collateral_gains.get(&icp_ledger()).copied().unwrap_or(0), 10_00000000);
-        assert_eq!(pos_b.collateral_gains.get(&icp_ledger()).copied().unwrap_or(0), 10_00000000);
+        assert_eq!(
+            pos_a
+                .collateral_gains
+                .get(&icp_ledger())
+                .copied()
+                .unwrap_or(0),
+            10_00000000
+        );
+        assert_eq!(
+            pos_b
+                .collateral_gains
+                .get(&icp_ledger())
+                .copied()
+                .unwrap_or(0),
+            10_00000000
+        );
     }
 
     // ─── Test: Liquidation cleans up fully consumed positions ───
@@ -2403,16 +3351,36 @@ mod tests {
         stables_consumed.insert(icusd_ledger(), 100_00000000); // consume all 100 icUSD
 
         state.process_liquidation_gains_at(
-            5, icp_ledger(), &stables_consumed, 50_00000000, 7_50000000, 4_000_000_000,
+            5,
+            icp_ledger(),
+            &stables_consumed,
+            50_00000000,
+            7_50000000,
+            4_000_000_000,
         );
 
         // user_a's stablecoin balance is zero, but they have collateral gains
         // so position should NOT be removed
         let pos = state.deposits.get(&user_a());
-        assert!(pos.is_some(), "Position with collateral gains should not be cleaned up");
+        assert!(
+            pos.is_some(),
+            "Position with collateral gains should not be cleaned up"
+        );
         let pos = pos.unwrap();
-        assert_eq!(pos.stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0), 0);
-        assert_eq!(pos.collateral_gains.get(&icp_ledger()).copied().unwrap_or(0), 50_00000000);
+        assert_eq!(
+            pos.stablecoin_balances
+                .get(&icusd_ledger())
+                .copied()
+                .unwrap_or(0),
+            0
+        );
+        assert_eq!(
+            pos.collateral_gains
+                .get(&icp_ledger())
+                .copied()
+                .unwrap_or(0),
+            50_00000000
+        );
     }
 
     // ─── Test: Token draw with no available balance ───
@@ -2433,9 +3401,18 @@ mod tests {
         let state = test_state();
 
         // Registration should initialize zero balances in total tracking
-        assert_eq!(state.total_stablecoin_balances.get(&icusd_ledger()), Some(&0));
-        assert_eq!(state.total_stablecoin_balances.get(&ckusdt_ledger()), Some(&0));
-        assert_eq!(state.total_stablecoin_balances.get(&ckusdc_ledger()), Some(&0));
+        assert_eq!(
+            state.total_stablecoin_balances.get(&icusd_ledger()),
+            Some(&0)
+        );
+        assert_eq!(
+            state.total_stablecoin_balances.get(&ckusdt_ledger()),
+            Some(&0)
+        );
+        assert_eq!(
+            state.total_stablecoin_balances.get(&ckusdc_ledger()),
+            Some(&0)
+        );
     }
 
     // ─── Test: Pool status query ───
@@ -2463,14 +3440,42 @@ mod tests {
 
         add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
         add_deposit_direct(&mut state, user_a(), ckusdt_ledger(), 25_000_000);
+        state
+            .deposits
+            .get_mut(&user_a())
+            .unwrap()
+            .cfx_claims
+            .get_or_insert_with(BTreeMap::new)
+            .insert(cfx_sentinel(), 1_000_000_000_000_000_000);
 
         let pos = state.get_user_position(&user_a()).unwrap();
         assert_eq!(pos.total_usd_value_e8s, 125_00000000); // 100 + 25
-        assert_eq!(pos.stablecoin_balances.get(&icusd_ledger()), Some(&100_00000000));
-        assert_eq!(pos.stablecoin_balances.get(&ckusdt_ledger()), Some(&25_000_000));
+        assert_eq!(
+            pos.stablecoin_balances.get(&icusd_ledger()),
+            Some(&100_00000000)
+        );
+        assert_eq!(
+            pos.stablecoin_balances.get(&ckusdt_ledger()),
+            Some(&25_000_000)
+        );
+        assert_eq!(
+            pos.cfx_claims
+                .as_ref()
+                .and_then(|claims| claims.get(&cfx_sentinel()))
+                .copied(),
+            Some(1_000_000_000_000_000_000),
+            "user position exposes restored CFX claims for auditability",
+        );
+
+        add_deposit_direct(&mut state, user_b(), icusd_ledger(), 1_00000000);
+        let pos_b = state.get_user_position(&user_b()).unwrap();
+        assert!(
+            pos_b.cfx_claims.clone().unwrap_or_default().is_empty(),
+            "normal depositors without chain claims expose an empty optional map",
+        );
 
         // Nonexistent user
-        assert!(state.get_user_position(&user_b()).is_none());
+        assert!(state.get_user_position(&user_c()).is_none());
     }
 
     // ─── Test: Multiple deposits accumulate ───
@@ -2484,8 +3489,14 @@ mod tests {
         add_deposit_direct(&mut state, user_a(), icusd_ledger(), 20_00000000);
 
         let pos = state.deposits.get(&user_a()).unwrap();
-        assert_eq!(pos.stablecoin_balances.get(&icusd_ledger()), Some(&100_00000000));
-        assert_eq!(state.total_stablecoin_balances.get(&icusd_ledger()), Some(&100_00000000));
+        assert_eq!(
+            pos.stablecoin_balances.get(&icusd_ledger()),
+            Some(&100_00000000)
+        );
+        assert_eq!(
+            state.total_stablecoin_balances.get(&icusd_ledger()),
+            Some(&100_00000000)
+        );
     }
 
     // ─── Test: Interest Distribution ───
@@ -2501,7 +3512,10 @@ mod tests {
         assert_eq!(pos.stablecoin_balances[&icusd_ledger()], 105_00000000);
         assert_eq!(pos.total_interest_earned_e8s, Some(5_00000000)); // icUSD is 8 decimals = e8s
         assert_eq!(state.total_interest_received_e8s, Some(5_00000000));
-        assert_eq!(state.total_stablecoin_balances[&icusd_ledger()], 105_00000000);
+        assert_eq!(
+            state.total_stablecoin_balances[&icusd_ledger()],
+            105_00000000
+        );
     }
 
     #[test]
@@ -2519,7 +3533,10 @@ mod tests {
         assert_eq!(a.stablecoin_balances[&icusd_ledger()], 82_50000000);
         assert_eq!(b.stablecoin_balances[&icusd_ledger()], 27_50000000);
         // Total should be exactly original + interest
-        assert_eq!(state.total_stablecoin_balances[&icusd_ledger()], 110_00000000);
+        assert_eq!(
+            state.total_stablecoin_balances[&icusd_ledger()],
+            110_00000000
+        );
     }
 
     #[test]
@@ -2536,13 +3553,25 @@ mod tests {
         // 3 depositors with equal balances, interest = 10 (not divisible by 3)
         add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100);
         add_deposit_direct(&mut state, user_b(), icusd_ledger(), 100);
-        add_deposit_direct(&mut state, Principal::from_slice(&[99]), icusd_ledger(), 100);
+        add_deposit_direct(
+            &mut state,
+            Principal::from_slice(&[99]),
+            icusd_ledger(),
+            100,
+        );
 
         state.distribute_interest_revenue(icusd_ledger(), 10, None);
 
         // Each gets floor(10 * 100/300) = 3. Dust = 10 - 9 = 1 goes to first depositor.
-        let total: u64 = state.deposits.values()
-            .map(|p| p.stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0))
+        let total: u64 = state
+            .deposits
+            .values()
+            .map(|p| {
+                p.stablecoin_balances
+                    .get(&icusd_ledger())
+                    .copied()
+                    .unwrap_or(0)
+            })
             .sum();
         assert_eq!(total, 310, "All interest must be accounted for");
         assert_eq!(state.total_stablecoin_balances[&icusd_ledger()], 310);
@@ -2565,13 +3594,30 @@ mod tests {
         let a = state.deposits.get(&user_a()).unwrap();
         let b = state.deposits.get(&user_b()).unwrap();
         let a_interest = a.stablecoin_balances[&icusd_ledger()] - 50_00000000;
-        let b_interest = b.stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0);
+        let b_interest = b
+            .stablecoin_balances
+            .get(&icusd_ledger())
+            .copied()
+            .unwrap_or(0);
         // icUSD-only rule: A (the icUSD depositor) gets the full 10 icUSD,
         // B (the ckUSDT depositor) gets nothing.
-        assert_eq!(a_interest, 10_00000000, "icUSD depositor should receive the full 10 icUSD interest");
-        assert_eq!(b_interest, 0, "ckUSDT depositor should earn no interest under icUSD-only rule");
-        assert_eq!(b.stablecoin_balances[&ckusdt_ledger()], 50_000_000, "B: ckUSDT unchanged");
-        assert_eq!(state.total_stablecoin_balances[&icusd_ledger()], 60_00000000);
+        assert_eq!(
+            a_interest, 10_00000000,
+            "icUSD depositor should receive the full 10 icUSD interest"
+        );
+        assert_eq!(
+            b_interest, 0,
+            "ckUSDT depositor should earn no interest under icUSD-only rule"
+        );
+        assert_eq!(
+            b.stablecoin_balances[&ckusdt_ledger()],
+            50_000_000,
+            "B: ckUSDT unchanged"
+        );
+        assert_eq!(
+            state.total_stablecoin_balances[&icusd_ledger()],
+            60_00000000
+        );
     }
 
     #[test]
@@ -2591,12 +3637,26 @@ mod tests {
         let a = state.deposits.get(&user_a()).unwrap();
         let b = state.deposits.get(&user_b()).unwrap();
         let a_interest = a.stablecoin_balances[&icusd_ledger()] - 100_00000000;
-        let b_interest = b.stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0);
+        let b_interest = b
+            .stablecoin_balances
+            .get(&icusd_ledger())
+            .copied()
+            .unwrap_or(0);
         // icUSD-only rule: A (the icUSD depositor) takes the entire 20 icUSD,
         // B (the 3USD LP depositor) gets nothing.
-        assert_eq!(a_interest, 20_00000000, "icUSD depositor should receive the full 20 icUSD interest");
-        assert_eq!(b_interest, 0, "3USD depositor should earn no interest under icUSD-only rule");
-        assert_eq!(b.stablecoin_balances[&three_usd_ledger()], 100_00000000, "B: 3USD position unchanged");
+        assert_eq!(
+            a_interest, 20_00000000,
+            "icUSD depositor should receive the full 20 icUSD interest"
+        );
+        assert_eq!(
+            b_interest, 0,
+            "3USD depositor should earn no interest under icUSD-only rule"
+        );
+        assert_eq!(
+            b.stablecoin_balances[&three_usd_ledger()],
+            100_00000000,
+            "B: 3USD position unchanged"
+        );
     }
 
     #[test]
@@ -2614,15 +3674,32 @@ mod tests {
 
         state.distribute_interest_revenue(icusd_ledger(), 10_00000000, Some(icp_ledger()));
 
-        let alice_icusd = state.deposits.get(&user_a()).unwrap()
-            .stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0);
-        let bob_icusd = state.deposits.get(&user_b()).unwrap()
-            .stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0);
+        let alice_icusd = state
+            .deposits
+            .get(&user_a())
+            .unwrap()
+            .stablecoin_balances
+            .get(&icusd_ledger())
+            .copied()
+            .unwrap_or(0);
+        let bob_icusd = state
+            .deposits
+            .get(&user_b())
+            .unwrap()
+            .stablecoin_balances
+            .get(&icusd_ledger())
+            .copied()
+            .unwrap_or(0);
 
-        assert_eq!(alice_icusd, 100_00000000 + 10_00000000,
-            "icUSD depositor should receive the full 10 icUSD interest");
-        assert_eq!(bob_icusd, 0,
-            "3USD depositor should receive no icUSD interest");
+        assert_eq!(
+            alice_icusd,
+            100_00000000 + 10_00000000,
+            "icUSD depositor should receive the full 10 icUSD interest"
+        );
+        assert_eq!(
+            bob_icusd, 0,
+            "3USD depositor should receive no icUSD interest"
+        );
     }
 
     #[test]
@@ -2645,19 +3722,43 @@ mod tests {
 
         state.distribute_interest_revenue(icusd_ledger(), 20_00000000, None);
 
-        let alice_icusd = state.deposits.get(&user_a()).unwrap()
-            .stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0);
-        let bob_icusd = state.deposits.get(&user_b()).unwrap()
-            .stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0);
-        let bob_three_usd = state.deposits.get(&user_b()).unwrap()
-            .stablecoin_balances.get(&three_usd_ledger()).copied().unwrap_or(0);
+        let alice_icusd = state
+            .deposits
+            .get(&user_a())
+            .unwrap()
+            .stablecoin_balances
+            .get(&icusd_ledger())
+            .copied()
+            .unwrap_or(0);
+        let bob_icusd = state
+            .deposits
+            .get(&user_b())
+            .unwrap()
+            .stablecoin_balances
+            .get(&icusd_ledger())
+            .copied()
+            .unwrap_or(0);
+        let bob_three_usd = state
+            .deposits
+            .get(&user_b())
+            .unwrap()
+            .stablecoin_balances
+            .get(&three_usd_ledger())
+            .copied()
+            .unwrap_or(0);
 
-        assert_eq!(alice_icusd, 110_00000000,
-            "user_a (100 icUSD) earns 10 icUSD on equal-icUSD share");
-        assert_eq!(bob_icusd, 110_00000000,
-            "user_b's icUSD slice (100) earns 10 icUSD (same as user_a)");
-        assert_eq!(bob_three_usd, 100_00000000,
-            "user_b's 3USD balance is not credited and not touched");
+        assert_eq!(
+            alice_icusd, 110_00000000,
+            "user_a (100 icUSD) earns 10 icUSD on equal-icUSD share"
+        );
+        assert_eq!(
+            bob_icusd, 110_00000000,
+            "user_b's icUSD slice (100) earns 10 icUSD (same as user_a)"
+        );
+        assert_eq!(
+            bob_three_usd, 100_00000000,
+            "user_b's 3USD balance is not credited and not touched"
+        );
     }
 
     #[test]
@@ -2673,25 +3774,49 @@ mod tests {
         add_deposit_direct(&mut state, user_b(), three_usd_ledger(), 100_00000000);
 
         let total_received_before = state.total_interest_received_e8s.unwrap_or(0);
-        let stable_balance_before = state.total_stablecoin_balances
-            .get(&icusd_ledger()).copied().unwrap_or(0);
+        let stable_balance_before = state
+            .total_stablecoin_balances
+            .get(&icusd_ledger())
+            .copied()
+            .unwrap_or(0);
 
         state.distribute_interest_revenue(icusd_ledger(), 10_00000000, None);
 
         // Aggregates unchanged
-        assert_eq!(state.total_interest_received_e8s.unwrap_or(0), total_received_before,
-            "total_interest_received_e8s should not advance when no icUSD depositors");
-        assert_eq!(state.total_stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0),
+        assert_eq!(
+            state.total_interest_received_e8s.unwrap_or(0),
+            total_received_before,
+            "total_interest_received_e8s should not advance when no icUSD depositors"
+        );
+        assert_eq!(
+            state
+                .total_stablecoin_balances
+                .get(&icusd_ledger())
+                .copied()
+                .unwrap_or(0),
             stable_balance_before,
-            "total_stablecoin_balances[icusd] should not advance");
+            "total_stablecoin_balances[icusd] should not advance"
+        );
 
         // Neither depositor's balances changed
         for user in [user_a(), user_b()] {
             let pos = state.deposits.get(&user).unwrap();
-            assert_eq!(pos.stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0), 0,
-                "depositor without icUSD should not be credited");
-            assert_eq!(pos.stablecoin_balances.get(&three_usd_ledger()).copied().unwrap_or(0),
-                100_00000000, "3USD balance unchanged");
+            assert_eq!(
+                pos.stablecoin_balances
+                    .get(&icusd_ledger())
+                    .copied()
+                    .unwrap_or(0),
+                0,
+                "depositor without icUSD should not be credited"
+            );
+            assert_eq!(
+                pos.stablecoin_balances
+                    .get(&three_usd_ledger())
+                    .copied()
+                    .unwrap_or(0),
+                100_00000000,
+                "3USD balance unchanged"
+            );
         }
     }
 
@@ -2719,25 +3844,51 @@ mod tests {
         consumed.insert(icusd_ledger(), 1_000_000);
 
         state.process_liquidation_gains_at(
-            1, icp_ledger(), &consumed, 500_000, 7_50000000, 1_000_000_000,
+            1,
+            icp_ledger(),
+            &consumed,
+            500_000,
+            7_50000000,
+            1_000_000_000,
         );
 
         // The critical assertion: aggregate should match sum of individual balances
         // even when rounding dust occurs. validate_state() checks this.
-        assert!(state.validate_state().is_ok(), "State must remain consistent after rounding");
+        assert!(
+            state.validate_state().is_ok(),
+            "State must remain consistent after rounding"
+        );
 
         // Verify individual balances sum to aggregate
-        let sum: u64 = state.deposits.values()
-            .map(|p| p.stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0))
+        let sum: u64 = state
+            .deposits
+            .values()
+            .map(|p| {
+                p.stablecoin_balances
+                    .get(&icusd_ledger())
+                    .copied()
+                    .unwrap_or(0)
+            })
             .sum();
-        let tracked = state.total_stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0);
-        assert_eq!(sum, tracked, "Sum of individual balances must equal aggregate");
+        let tracked = state
+            .total_stablecoin_balances
+            .get(&icusd_ledger())
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(
+            sum, tracked,
+            "Sum of individual balances must equal aggregate"
+        );
     }
 
     // ─── 3USD / LP Token Tests ───
 
-    fn three_usd_ledger() -> Principal { Principal::from_slice(&[30]) }
-    fn three_pool_canister() -> Principal { Principal::from_slice(&[31]) }
+    fn three_usd_ledger() -> Principal {
+        Principal::from_slice(&[30])
+    }
+    fn three_pool_canister() -> Principal {
+        Principal::from_slice(&[31])
+    }
 
     /// Build a test state with 3USD LP token registered.
     fn test_state_with_3usd() -> StabilityPoolState {
@@ -2753,7 +3904,8 @@ mod tests {
             underlying_pool: Some(three_pool_canister()),
         });
         // Set virtual price to ~1.0492 (scaled 1e18)
-        state.cached_virtual_prices
+        state
+            .cached_virtual_prices
             .get_or_insert_with(BTreeMap::new)
             .insert(three_usd_ledger(), 1_049_200_000_000_000_000u128);
         state
@@ -2772,7 +3924,10 @@ mod tests {
         assert_eq!(lp_to_usd_e8s(0, vp), 0);
 
         // vp=1.0 (exactly 1e18)
-        assert_eq!(lp_to_usd_e8s(100_000_000, 1_000_000_000_000_000_000), 100_000_000);
+        assert_eq!(
+            lp_to_usd_e8s(100_000_000, 1_000_000_000_000_000_000),
+            100_000_000
+        );
     }
 
     #[test]
@@ -2780,11 +3935,18 @@ mod tests {
         let vp = 1_049_200_000_000_000_000u128;
         // 1 USD → ~0.9531 3USD LP
         let lp = usd_e8s_to_lp(100_000_000, vp);
-        assert!(lp > 95_000_000 && lp < 96_000_000, "Expected ~95.3M, got {}", lp);
+        assert!(
+            lp > 95_000_000 && lp < 96_000_000,
+            "Expected ~95.3M, got {}",
+            lp
+        );
 
         // Round-trip: lp_to_usd then back (may lose 1 unit to rounding)
         let usd = lp_to_usd_e8s(lp, vp);
-        assert!((usd as i64 - 100_000_000i64).abs() <= 1, "Round-trip drift too large");
+        assert!(
+            (usd as i64 - 100_000_000i64).abs() <= 1,
+            "Round-trip drift too large"
+        );
 
         // Zero virtual price → 0
         assert_eq!(usd_e8s_to_lp(100_000_000, 0), 0);
@@ -2799,7 +3961,8 @@ mod tests {
         // 1 icUSD (e8s)
         pos.stablecoin_balances.insert(icusd_ledger(), 100_000_000);
         // 1 3USD LP (worth ~1.0492 USD)
-        pos.stablecoin_balances.insert(three_usd_ledger(), 100_000_000);
+        pos.stablecoin_balances
+            .insert(three_usd_ledger(), 100_000_000);
 
         let total = pos.total_usd_value(&state.stablecoin_registry, vp_map);
         // 100_000_000 + 104_920_000 = 204_920_000
@@ -2813,7 +3976,8 @@ mod tests {
         state.cached_virtual_prices = Some(BTreeMap::new());
 
         let mut pos = DepositPosition::new(0);
-        pos.stablecoin_balances.insert(three_usd_ledger(), 100_000_000);
+        pos.stablecoin_balances
+            .insert(three_usd_ledger(), 100_000_000);
 
         // Without virtual price, LP tokens valued at 0
         let total = pos.total_usd_value(&state.stablecoin_registry, state.virtual_prices());
@@ -2826,20 +3990,35 @@ mod tests {
 
         // Add deposits: 1 icUSD (priority 1), 2 ckUSDT (priority 2), 5 3USD (priority 0)
         add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_000_000); // 1 icUSD
-        add_deposit_direct(&mut state, user_a(), ckusdt_ledger(), 2_000_000);  // 2 ckUSDT
+        add_deposit_direct(&mut state, user_a(), ckusdt_ledger(), 2_000_000); // 2 ckUSDT
         add_deposit_direct(&mut state, user_a(), three_usd_ledger(), 500_000_000); // 5 3USD
 
         // Draw 3 USD — should consume ckUSDT first (priority 2), then icUSD (priority 1)
         let draw = state.compute_token_draw(300_000_000, &icp_ledger()); // 3 USD e8s
-        assert!(draw.contains_key(&ckusdt_ledger()), "Should draw from ckUSDT (priority 2)");
-        assert!(draw.contains_key(&icusd_ledger()), "Should draw from icUSD (priority 1)");
-        assert!(!draw.contains_key(&three_usd_ledger()), "Should NOT draw from 3USD yet (priority 0)");
+        assert!(
+            draw.contains_key(&ckusdt_ledger()),
+            "Should draw from ckUSDT (priority 2)"
+        );
+        assert!(
+            draw.contains_key(&icusd_ledger()),
+            "Should draw from icUSD (priority 1)"
+        );
+        assert!(
+            !draw.contains_key(&three_usd_ledger()),
+            "Should NOT draw from 3USD yet (priority 0)"
+        );
 
         // Draw 5 USD — should consume all ckUSDT + icUSD, then dip into 3USD
         let draw = state.compute_token_draw(500_000_000, &icp_ledger()); // 5 USD e8s
-        assert!(draw.contains_key(&ckusdt_ledger()), "Should draw from ckUSDT");
+        assert!(
+            draw.contains_key(&ckusdt_ledger()),
+            "Should draw from ckUSDT"
+        );
         assert!(draw.contains_key(&icusd_ledger()), "Should draw from icUSD");
-        assert!(draw.contains_key(&three_usd_ledger()), "Should draw from 3USD for remainder");
+        assert!(
+            draw.contains_key(&three_usd_ledger()),
+            "Should draw from 3USD for remainder"
+        );
     }
 
     #[test]
@@ -2862,11 +4041,26 @@ mod tests {
 
         // Record two refunds for user_a and one for user_b.
         let id0 = state.record_pending_refund(
-            user_a(), icusd_ledger(), 5_00000000, "approve failed".to_string(), 100);
+            user_a(),
+            icusd_ledger(),
+            5_00000000,
+            "approve failed".to_string(),
+            100,
+        );
         let id1 = state.record_pending_refund(
-            user_a(), ckusdt_ledger(), 7_000_000, "add_liquidity failed".to_string(), 200);
+            user_a(),
+            ckusdt_ledger(),
+            7_000_000,
+            "add_liquidity failed".to_string(),
+            200,
+        );
         let id2 = state.record_pending_refund(
-            user_b(), icusd_ledger(), 1_00000000, "approve failed".to_string(), 300);
+            user_b(),
+            icusd_ledger(),
+            1_00000000,
+            "approve failed".to_string(),
+            300,
+        );
         assert_eq!((id0, id1, id2), (0, 1, 2), "refund ids must be monotonic");
 
         // Per-user listing only returns the owner's records.
@@ -2880,7 +4074,10 @@ mod tests {
         // returns None, so two concurrent claims cannot both pay out.
         let taken = state.take_pending_refund(id0).expect("first take succeeds");
         assert_eq!(taken.amount, 5_00000000);
-        assert!(state.take_pending_refund(id0).is_none(), "double-claim must not pay twice");
+        assert!(
+            state.take_pending_refund(id0).is_none(),
+            "double-claim must not pay twice"
+        );
 
         // put_pending_refund restores the record after a failed payout transfer.
         state.put_pending_refund(taken);
@@ -2896,18 +4093,30 @@ mod tests {
         let mut state = test_state();
         for i in 0..MAX_PENDING_REFUNDS {
             state.record_pending_refund(
-                user_a(), icusd_ledger(), i as u64 + 1, "fail".to_string(), i as u64);
+                user_a(),
+                icusd_ledger(),
+                i as u64 + 1,
+                "fail".to_string(),
+                i as u64,
+            );
         }
-        assert_eq!(state.pending_refunds_for(&user_a()).len(), MAX_PENDING_REFUNDS);
+        assert_eq!(
+            state.pending_refunds_for(&user_a()).len(),
+            MAX_PENDING_REFUNDS
+        );
 
-        let id = state.record_pending_refund(user_a(), icusd_ledger(), 999, "fail".to_string(), 999);
+        let id =
+            state.record_pending_refund(user_a(), icusd_ledger(), 999, "fail".to_string(), 999);
         assert_eq!(id as usize, MAX_PENDING_REFUNDS);
         assert_eq!(
             state.pending_refunds_for(&user_a()).len(),
             MAX_PENDING_REFUNDS,
             "cap must hold",
         );
-        assert!(state.take_pending_refund(0).is_none(), "oldest record dropped at cap");
+        assert!(
+            state.take_pending_refund(0).is_none(),
+            "oldest record dropped at cap"
+        );
     }
 
     #[test]
@@ -2939,13 +4148,19 @@ mod tests {
 
         let decoded = try_decode_state(&bytes).expect("v1 snapshot must decode");
         assert_eq!(
-            decoded.deposits.get(&user_a())
+            decoded
+                .deposits
+                .get(&user_a())
                 .and_then(|p| p.stablecoin_balances.get(&icusd_ledger()).copied()),
             Some(42_00000000),
             "depositor positions must survive the v1 fallback",
         );
         assert!(
-            decoded.pending_refunds.clone().unwrap_or_default().is_empty(),
+            decoded
+                .pending_refunds
+                .clone()
+                .unwrap_or_default()
+                .is_empty(),
             "pending refunds must start empty after a v1 upgrade",
         );
         assert_eq!(decoded.next_pending_refund_id.unwrap_or(0), 0);
@@ -2990,14 +4205,17 @@ mod tests {
         add_deposit_direct(&mut current, user_a(), icusd_ledger(), 42_00000000);
         let pos = current.deposits.get(&user_a()).unwrap();
         let mut deposits = BTreeMap::new();
-        deposits.insert(user_a(), DepositPositionPreCfx {
-            stablecoin_balances: pos.stablecoin_balances.clone(),
-            collateral_gains: pos.collateral_gains.clone(),
-            opted_out_collateral: pos.opted_out_collateral.clone(),
-            deposit_timestamp: pos.deposit_timestamp,
-            total_claimed_gains: pos.total_claimed_gains.clone(),
-            total_interest_earned_e8s: pos.total_interest_earned_e8s,
-        });
+        deposits.insert(
+            user_a(),
+            DepositPositionPreCfx {
+                stablecoin_balances: pos.stablecoin_balances.clone(),
+                collateral_gains: pos.collateral_gains.clone(),
+                opted_out_collateral: pos.opted_out_collateral.clone(),
+                deposit_timestamp: pos.deposit_timestamp,
+                total_claimed_gains: pos.total_claimed_gains.clone(),
+                total_interest_earned_e8s: pos.total_interest_earned_e8s,
+            },
+        );
         let pre_cfx = StabilityPoolStatePreCfx {
             deposits,
             total_stablecoin_balances: current.total_stablecoin_balances.clone(),
@@ -3024,25 +4242,105 @@ mod tests {
         let decoded = try_decode_state(&bytes).expect("pre-CFX snapshot must decode");
         let decoded_pos = decoded.deposits.get(&user_a()).expect("deposit survives");
         assert!(
-            decoded_pos.cfx_claims.clone().unwrap_or_default().is_empty(),
+            decoded_pos
+                .cfx_claims
+                .clone()
+                .unwrap_or_default()
+                .is_empty(),
             "missing CFX claims field must decode as empty",
         );
         assert!(
-            decoded_pos.native_payout_addresses.clone().unwrap_or_default().is_empty(),
+            decoded_pos
+                .native_payout_addresses
+                .clone()
+                .unwrap_or_default()
+                .is_empty(),
             "missing native payout-address field must decode as empty (no UPG-002 wipe)",
         );
         assert!(
-            decoded_pos.opted_in_chain_collateral.clone().unwrap_or_default().is_empty(),
+            decoded_pos
+                .opted_in_chain_collateral
+                .clone()
+                .unwrap_or_default()
+                .is_empty(),
             "missing chain opt-in field must decode as empty",
         );
         assert!(
-            decoded.chain_collateral_sentinels.clone().unwrap_or_default().is_empty(),
+            decoded
+                .chain_collateral_sentinels
+                .clone()
+                .unwrap_or_default()
+                .is_empty(),
             "missing chain sentinel registry must decode as empty",
         );
         assert!(
-            decoded.chain_claim_sources.clone().unwrap_or_default().is_empty(),
+            decoded
+                .chain_claim_sources
+                .clone()
+                .unwrap_or_default()
+                .is_empty(),
             "missing chain claim source inventory must decode as empty",
         );
+        assert!(
+            decoded
+                .pending_chain_absorbs
+                .clone()
+                .unwrap_or_default()
+                .is_empty(),
+            "missing pending chain absorb journal must decode as empty",
+        );
+        assert!(
+            decoded
+                .completed_chain_absorbs
+                .clone()
+                .unwrap_or_default()
+                .is_empty(),
+            "missing completed chain absorb journal must decode as empty",
+        );
+        assert!(
+            decoded
+                .completed_cfx_claim_payout_recoveries
+                .clone()
+                .unwrap_or_default()
+                .is_empty(),
+            "missing CFX claim payout recovery journal must decode as empty",
+        );
+        assert!(
+            decoded
+                .completed_cfx_claim_payout_recovery_floor
+                .clone()
+                .unwrap_or_default()
+                .is_empty(),
+            "missing CFX claim payout recovery floor must decode as empty",
+        );
+    }
+
+    #[test]
+    fn completed_chain_absorbs_are_bounded() {
+        let mut state = StabilityPoolState::default();
+        for vault_id in 0..(MAX_COMPLETED_CHAIN_ABSORBS as u64 + 5) {
+            state.record_completed_chain_absorb(ChainSpAbsorbCompletion {
+                vault_id,
+                result: ChainSpAbsorbResult {
+                    success: true,
+                    vault_id,
+                    chain_id: rumi_protocol_backend::chains::config::ChainId(1030),
+                    icusd_burned_e8s: 100_00000000,
+                    liquidated_debt_e8s: 100_00000000,
+                    collateral_received_native: 10_000_000_000_000_000_000u128,
+                    claim_id: vault_id,
+                    custody_address: "0xcustody".to_string(),
+                    block_index: vault_id,
+                    collateral_price_e8s: 5_000_000,
+                },
+                completed_at_ns: vault_id,
+            });
+        }
+
+        let completed = state.completed_chain_absorbs.as_ref().unwrap();
+        assert_eq!(completed.len(), MAX_COMPLETED_CHAIN_ABSORBS);
+        assert!(!completed.contains_key(&0));
+        assert!(completed.contains_key(&(MAX_COMPLETED_CHAIN_ABSORBS as u64 + 4)));
     }
 
     // ─── Test: Opt-out mid-liquidation burn escape (audit AR-S-002) ───
@@ -3069,7 +4367,12 @@ mod tests {
         state.opt_out_collateral(&user_b(), icp_ledger()).unwrap();
 
         state.process_liquidation_gains_at(
-            1, icp_ledger(), &draw, 10_00000000, 7_50000000, 1_000_000_000,
+            1,
+            icp_ledger(),
+            &draw,
+            10_00000000,
+            7_50000000,
+            1_000_000_000,
         );
 
         // user_b escaped the burn entirely (balance untouched, no gains)...
@@ -3079,7 +4382,14 @@ mod tests {
             Some(50_00000000),
             "opt-out mid-liquidation escapes the burn",
         );
-        assert_eq!(pos_b.collateral_gains.get(&icp_ledger()).copied().unwrap_or(0), 0);
+        assert_eq!(
+            pos_b
+                .collateral_gains
+                .get(&icp_ledger())
+                .copied()
+                .unwrap_or(0),
+            0
+        );
 
         // ...while user_a absorbed the FULL 40 instead of their fair 20.
         let pos_a = state.deposits.get(&user_a()).unwrap();

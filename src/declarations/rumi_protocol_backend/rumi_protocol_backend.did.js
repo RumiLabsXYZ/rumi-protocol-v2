@@ -177,6 +177,14 @@ export const idlFactory = ({ IDL }) => {
     'budget_total_e8s' : IDL.Nat64,
     'budget_start_timestamp' : IDL.Nat64,
   });
+  const ChainBadDebtCircuitStatus = IDL.Record({
+    'tripped_at_ns' : IDL.Opt(IDL.Nat64),
+    'tripped' : IDL.Bool,
+    'bad_debt_e8s' : IDL.Nat,
+    'chain_id' : IDL.Nat32,
+    'threshold_e8s' : IDL.Opt(IDL.Nat),
+    'registered' : IDL.Bool,
+  });
   const ChainDebtConfigV1 = IDL.Record({
     'debt_ceiling_e8s' : IDL.Opt(IDL.Nat),
     'min_vault_debt_e8s' : IDL.Nat,
@@ -448,6 +456,11 @@ export const idlFactory = ({ IDL }) => {
       'chain_id' : IDL.Nat32,
       'timestamp' : IDL.Nat64,
     }),
+    'chain_bad_debt_circuit_cleared' : IDL.Record({
+      'total_bad_debt_e8s' : IDL.Nat,
+      'chain_id' : IDL.Nat32,
+      'timestamp' : IDL.Nat64,
+    }),
     'provide_liquidity' : IDL.Record({
       'block_index' : IDL.Nat64,
       'timestamp' : IDL.Opt(IDL.Nat64),
@@ -664,6 +677,11 @@ export const idlFactory = ({ IDL }) => {
       'reject_code' : IDL.Int32,
       'timestamp' : IDL.Nat64,
     }),
+    'chain_bad_debt_circuit_threshold_set' : IDL.Record({
+      'chain_id' : IDL.Nat32,
+      'threshold_e8s' : IDL.Opt(IDL.Nat),
+      'timestamp' : IDL.Nat64,
+    }),
     'set_rate_curve_markers' : IDL.Record({
       'markers' : IDL.Text,
       'collateral_type' : IDL.Opt(IDL.Text),
@@ -682,6 +700,13 @@ export const idlFactory = ({ IDL }) => {
       'vault_id' : IDL.Nat64,
       'timestamp' : IDL.Opt(IDL.Nat64),
       'amount' : IDL.Nat64,
+    }),
+    'chain_bad_debt_circuit_tripped' : IDL.Record({
+      'total_bad_debt_e8s' : IDL.Nat,
+      'bad_debt_e8s' : IDL.Nat,
+      'chain_id' : IDL.Nat32,
+      'threshold_e8s' : IDL.Nat,
+      'timestamp' : IDL.Nat64,
     }),
     'set_breaker_window_ns' : IDL.Record({
       'window_ns' : IDL.Nat64,
@@ -1329,6 +1354,7 @@ export const idlFactory = ({ IDL }) => {
         [],
       ),
     'claim_liquidity_returns' : IDL.Func([], [Result_1], []),
+    'clear_chain_bad_debt_circuit' : IDL.Func([IDL.Nat32], [Result], []),
     'clear_invariant_halt' : IDL.Func([], [Result], []),
     'clear_liquidation_breaker' : IDL.Func([], [Result], []),
     'clear_reorg_halt' : IDL.Func([IDL.Nat32], [Result], []),
@@ -1368,6 +1394,11 @@ export const idlFactory = ({ IDL }) => {
     'get_bot_claim_vault_ids' : IDL.Func([], [IDL.Vec(IDL.Nat64)], ['query']),
     'get_bot_cr_tolerance_bps' : IDL.Func([], [IDL.Nat64], ['query']),
     'get_bot_stats' : IDL.Func([], [BotStatsResponse], ['query']),
+    'get_chain_bad_debt_circuit_status' : IDL.Func(
+        [IDL.Nat32],
+        [ChainBadDebtCircuitStatus],
+        ['query'],
+      ),
     'get_chain_debt_config' : IDL.Func(
         [IDL.Nat32],
         [IDL.Opt(ChainDebtConfigV1)],
@@ -1722,6 +1753,11 @@ export const idlFactory = ({ IDL }) => {
         [Result],
         [],
       ),
+    'set_chain_bad_debt_circuit_threshold' : IDL.Func(
+        [IDL.Nat32, IDL.Opt(IDL.Nat)],
+        [Result],
+        [],
+      ),
     'set_chain_config' : IDL.Func(
         [IDL.Nat32, UpdateChainConfigArg],
         [Result],
@@ -1959,6 +1995,11 @@ export const idlFactory = ({ IDL }) => {
     'stability_pool_liquidate_with_reserves' : IDL.Func(
         [IDL.Nat64, IDL.Nat64, IDL.Nat64, IDL.Principal],
         [Result_18],
+        [],
+      ),
+    'stability_pool_preflight_chain_absorb' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [Result],
         [],
       ),
     'submit_burn_proof' : IDL.Func([IDL.Nat32, IDL.Text], [Result_20], []),
