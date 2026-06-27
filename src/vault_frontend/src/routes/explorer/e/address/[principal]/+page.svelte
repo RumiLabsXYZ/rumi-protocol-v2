@@ -24,8 +24,7 @@
     fetchIcrc1BalanceOf,
     fetchIcusdSubaccounts,
     fetchThreeUsdSubaccounts,
-    fetchStabilityPoolEvents,
-    fetchStabilityPoolEventCount,
+    fetchAllStabilityPoolEvents,
     fetchAmmSwapEvents,
     fetchAmmSwapEventCount,
     fetchAmmLiquidityEvents,
@@ -678,9 +677,7 @@
             return [ledger, bal] as [string, bigint];
           }),
         ),
-        fetchStabilityPoolEventCount()
-          .then((c) => (Number(c) > 0 ? fetchStabilityPoolEvents(0n, c) : []))
-          .catch(() => []),
+        fetchAllStabilityPoolEvents().catch(() => []),
         fetchAmmSwapEventCount()
           .then((c) => (Number(c) > 0 ? fetchAmmSwapEvents(0n, c) : []))
           .catch(() => []),

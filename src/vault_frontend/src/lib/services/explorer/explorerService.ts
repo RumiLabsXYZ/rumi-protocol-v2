@@ -18,6 +18,10 @@ import type { _SERVICE as IcusdLedgerService } from '$declarations/icusd_ledger/
 import type { _SERVICE as IcusdIndexService } from '$declarations/icusd_index/icusd_index.did';
 import type { UserStabilityPosition } from '$declarations/rumi_stability_pool/rumi_stability_pool.did';
 import { idlFactory as stabilityPoolIDL } from '$declarations/rumi_stability_pool/rumi_stability_pool.did.js';
+import {
+	fetchAllSequentialEvents,
+	fetchSequentialEventById,
+} from './stabilityPoolEventPagination';
 import type {
 	_SERVICE as LiquidationBotService,
 	LiquidationRecordV1,
@@ -1144,6 +1148,11 @@ export async function fetchStabilityPoolEventCount(): Promise<bigint> {
 	}
 }
 
+export async function fetchAllStabilityPoolEvents(): Promise<any[]> {
+	const count = await fetchStabilityPoolEventCount();
+	return fetchAllSequentialEvents(count, fetchStabilityPoolEvents);
+}
+
 // ── Current SP depositors (SP canister as source of truth) ─────────────────
 
 export type CurrentSpDepositor = {
@@ -1640,11 +1649,13 @@ export type DexEventSource = '3pool_swap' | 'amm_swap' | 'amm_liquidity' | 'amm_
  *
  * Canister pagination semantics differ across sources: 3pool's v2 liquidity
  * endpoint is newest-first (offset = skip-from-newest), while AMM / SP / 3pool
- * v1 endpoints are oldest-first where `start` happens to equal the id because
- * ids are assigned sequentially. Rather than hand-craft each code path, we
- * fetch the full event log (reusing the cache populated by list views) and
- * find the matching id client-side. Current event counts are small (~tens),
- * and fetches are cached, so this is cheap.
+ * v1 endpoints are oldest-first.
+ *
+ * Stability-pool event detail must fetch the exact page: the SP canister caps
+ * `get_pool_events` at 500 rows, so a full-log request can omit event ids above
+ * the first page and incorrectly render "event not found". SP ids are
+ * monotonic, but the retained vector can trim old rows, so the helper computes
+ * the retained offset from the first returned id instead of assuming id==index.
  */
 export async function fetchDexEvent(source: DexEventSource, id: number): Promise<any | null> {
 	const key = `dex:event:${source}:${id}`;
@@ -1652,6 +1663,12 @@ export async function fetchDexEvent(source: DexEventSource, id: number): Promise
 	if (cached) return cached;
 
 	try {
+		if (source === 'stability_pool') {
+			const match = await fetchSequentialEventById(id, fetchStabilityPoolEvents);
+			if (match) return setCache(key, match);
+			return null;
+		}
+
 		const all = await fetchAllDexEvents(source);
 		const match = all.find((e: any) => Number(e.id ?? 0) === id) ?? null;
 		if (match) return setCache(key, match);
@@ -1711,8 +1728,7 @@ export async function fetchAllDexEvents(source: DexEventSource): Promise<any[]> 
 			return Number(count) > 0 ? fetch3PoolAdminEvents(0n, count) : [];
 		}
 		case 'stability_pool': {
-			const count = await fetchStabilityPoolEventCount();
-			return Number(count) > 0 ? fetchStabilityPoolEvents(0n, count) : [];
+			return fetchAllStabilityPoolEvents();
 		}
 		default:
 			return [];

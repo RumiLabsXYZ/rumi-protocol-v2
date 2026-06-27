@@ -16,7 +16,7 @@
 		fetchAmmLiquidityEvents, fetchAmmLiquidityEventCount,
 		fetchAmmAdminEvents, fetchAmmAdminEventCount,
 		fetch3PoolAdminEvents, fetch3PoolAdminEventCount,
-		fetchStabilityPoolEvents, fetchStabilityPoolEventCount,
+		fetchAllStabilityPoolEvents,
 		fetch3PoolSwapEventsByPrincipal,
 		fetch3PoolLiquidityEventsByPrincipal,
 		fetchAmmSwapEventsByPrincipal,
@@ -564,9 +564,7 @@
 		if (sourceExcludedByTypeFacet('stability_pool', activeFacets)) return [];
 		// SP has no per-principal/time index — always tail-fetch, client-side
 		// post-filter narrows. Flagged as a Tier 2 follow-up if it bottlenecks.
-		const spCount = await fetchStabilityPoolEventCount();
-		if (Number(spCount) === 0) return [];
-		const events = await fetchStabilityPoolEvents(0n, spCount);
+		const events = await fetchAllStabilityPoolEvents();
 		return events.filter((e: any) => {
 			const et = e.event_type ?? {};
 			return !('InterestReceived' in et);
