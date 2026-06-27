@@ -1446,8 +1446,15 @@ async fn reconcile_xrp_other_inflight_claims(
         xrp_inflight_claims_for_custody(s, current_claim_id, custody_owner, custody_nonce)
     });
     for (other_claim_id, settlement) in in_flight {
-        match crate::chains::xrp::xrp_rpc::fetch_tx_status(&settlement.tx_hash).await {
-            Ok(crate::chains::xrp::xrp_rpc::XrpTxStatus::Validated { .. }) => {
+        let status = crate::chains::xrp::xrp_rpc::fetch_tx_status(&settlement.tx_hash)
+            .await
+            .map_err(|e| {
+                ProtocolError::GenericError(format!(
+                    "xrp tx status for claim #{other_claim_id} failed: {e}"
+                ))
+            })?;
+        match xrp_sibling_reconcile_decision(&status, &settlement, acct) {
+            XrpSiblingReconcileDecision::Paid => {
                 mutate_state(|s| {
                     reconcile_xrp_settlement_snapshot(
                         s,
@@ -1457,7 +1464,7 @@ async fn reconcile_xrp_other_inflight_claims(
                     );
                 });
             }
-            Ok(crate::chains::xrp::xrp_rpc::XrpTxStatus::Failed) => {
+            XrpSiblingReconcileDecision::FailedFeeCharged => {
                 mutate_state(|s| {
                     reconcile_xrp_settlement_snapshot(
                         s,
@@ -1467,10 +1474,10 @@ async fn reconcile_xrp_other_inflight_claims(
                     );
                 });
             }
-            Ok(crate::chains::xrp::xrp_rpc::XrpTxStatus::NotFound) => {
-                if acct.ledger_index <= settlement.last_ledger_sequence {
-                    return Ok(Some(other_claim_id));
-                }
+            XrpSiblingReconcileDecision::StillInFlight => {
+                return Ok(Some(other_claim_id));
+            }
+            XrpSiblingReconcileDecision::ExpiredSafeToClear => {
                 mutate_state(|s| {
                     reconcile_xrp_settlement_snapshot(
                         s,
@@ -1480,9 +1487,16 @@ async fn reconcile_xrp_other_inflight_claims(
                     );
                 });
             }
-            Err(e) => {
+            // F-03: the sibling's Payment consumed its source Sequence under a hash that
+            // differs from the one we recorded, so it may already have paid out. Refuse to
+            // clear the blocker (which would let it be re-signed and double-paid) and fail
+            // the current settle closed; the sibling stays quarantined until reconciled.
+            XrpSiblingReconcileDecision::QuarantineDiverged => {
                 return Err(ProtocolError::GenericError(format!(
-                    "xrp tx status for claim #{other_claim_id} failed: {e}"
+                    "xrp sibling claim #{other_claim_id} settlement diverged: custody account \
+                     sequence advanced past its source sequence, so its Payment may already \
+                     have settled under a different hash. Refusing to clear the blocker to \
+                     avoid a double-pay; manual reconciliation required."
                 )));
             }
         }
@@ -1538,6 +1552,58 @@ pub(crate) fn ensure_xrp_replacement_sequence_safe(
         )));
     }
     Ok(())
+}
+
+/// How to reconcile an OTHER in-flight sibling settlement (one sharing a custody
+/// address with the claim currently being settled), given the sibling's on-ledger tx
+/// status and the live custody account. Split out of `reconcile_xrp_other_inflight_claims`
+/// so the F-03 sibling-divergence guard is unit-testable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum XrpSiblingReconcileDecision {
+    /// Sibling Payment validated on-ledger -> finalize (remove the sibling claim).
+    Paid,
+    /// Sibling Payment validated but failed (`tec*`) -> charge the fee once, clear blocker.
+    FailedFeeCharged,
+    /// Sibling Payment may still land (its LastLedgerSequence has not passed) -> back off
+    /// until it confirms or expires.
+    StillInFlight,
+    /// Sibling Payment expired AND the live custody Sequence still equals its
+    /// `source_sequence`, proving nothing consumed that Sequence (the Payment never
+    /// applied under ANY hash) -> safe to clear the blocker.
+    ExpiredSafeToClear,
+    /// Sibling Payment is NotFound by our local hash and expired, but the live custody
+    /// Sequence has ADVANCED past its `source_sequence`. On the XRPL a sequence is
+    /// consumed strictly in order and only by a transaction from that account, so the
+    /// sibling's own Payment provably consumed it — under a hash that differs from the one
+    /// we recorded (the F-03 codec/canonicalization divergence). It may already have paid
+    /// the claimant, so the blocker must NOT be cleared (clearing would let the sibling be
+    /// re-signed and double-paid). Quarantine for manual reconciliation.
+    QuarantineDiverged,
+}
+
+/// Pure F-03 guard. The NotFound branch is gated on `ensure_xrp_replacement_sequence_safe`
+/// exactly like the primary settle path (`settle_xrp_claim_with_tag`); previously the
+/// sibling-reconcile path cleared the blocker on expiry WITHOUT a Sequence check, which
+/// let a diverged-hash sibling be reset to `settlement = None` and re-paid a second time.
+pub(crate) fn xrp_sibling_reconcile_decision(
+    status: &crate::chains::xrp::xrp_rpc::XrpTxStatus,
+    settlement: &crate::state::XrpSettlement,
+    acct: &crate::chains::xrp::xrp_rpc::XrpAccountInfo,
+) -> XrpSiblingReconcileDecision {
+    use crate::chains::xrp::xrp_rpc::XrpTxStatus;
+    match status {
+        XrpTxStatus::Validated { .. } => XrpSiblingReconcileDecision::Paid,
+        XrpTxStatus::Failed => XrpSiblingReconcileDecision::FailedFeeCharged,
+        XrpTxStatus::NotFound => {
+            if acct.ledger_index <= settlement.last_ledger_sequence {
+                XrpSiblingReconcileDecision::StillInFlight
+            } else if ensure_xrp_replacement_sequence_safe(settlement, acct).is_ok() {
+                XrpSiblingReconcileDecision::ExpiredSafeToClear
+            } else {
+                XrpSiblingReconcileDecision::QuarantineDiverged
+            }
+        }
+    }
 }
 
 pub(crate) fn remove_xrp_pending_deposit_if_unfunded_snapshot(
@@ -2266,6 +2332,99 @@ mod xrp_p4_tests {
     #[test]
     fn settle_xrp_claim_with_tag_is_exposed_at_vault_level() {
         let _ = settle_xrp_claim_with_tag;
+    }
+
+    // ── F-03 sibling-reconcile divergence guard ──────────────────────────────
+    //
+    // `reconcile_xrp_other_inflight_claims` clears an expired, NotFound-by-local-hash
+    // SIBLING settlement to `None` so the current claim can proceed. Before the guard,
+    // that clear ran unconditionally on expiry (see `reconcile_expired_not_found_clears_
+    // blocker_without_charging_fee`, which still encodes the pure snapshot behavior). The
+    // primary settle path already refuses to re-sign once the custody Sequence advances
+    // (`replacement_rejects_when_live_sequence_advanced_past_prior_source_sequence`); the
+    // sibling path did not. These tests pin the now-symmetric decision.
+
+    fn sibling_acct(sequence: u32, ledger_index: u32) -> crate::chains::xrp::xrp_rpc::XrpAccountInfo {
+        crate::chains::xrp::xrp_rpc::XrpAccountInfo {
+            exists: true,
+            sequence,
+            balance_drops: 100_000_000,
+            ledger_index,
+        }
+    }
+
+    #[test]
+    fn sibling_reconcile_validated_is_paid() {
+        let st = settlement("SIB"); // last_ledger_sequence = 9_000_000
+        let acct = sibling_acct(41, 9_000_100);
+        let status = crate::chains::xrp::xrp_rpc::XrpTxStatus::Validated {
+            ledger_index: 9_000_050,
+            delivered_drops: 1_000_000,
+        };
+        assert_eq!(
+            xrp_sibling_reconcile_decision(&status, &st, &acct),
+            XrpSiblingReconcileDecision::Paid
+        );
+    }
+
+    #[test]
+    fn sibling_reconcile_failed_charges_fee() {
+        let st = settlement("SIB");
+        let acct = sibling_acct(41, 9_000_100);
+        let status = crate::chains::xrp::xrp_rpc::XrpTxStatus::Failed;
+        assert_eq!(
+            xrp_sibling_reconcile_decision(&status, &st, &acct),
+            XrpSiblingReconcileDecision::FailedFeeCharged
+        );
+    }
+
+    #[test]
+    fn sibling_reconcile_notfound_unexpired_is_still_in_flight() {
+        let st = settlement("SIB"); // last_ledger_sequence = 9_000_000
+        let acct = sibling_acct(41, 9_000_000); // ledger_index == LLS -> not yet expired
+        let status = crate::chains::xrp::xrp_rpc::XrpTxStatus::NotFound;
+        assert_eq!(
+            xrp_sibling_reconcile_decision(&status, &st, &acct),
+            XrpSiblingReconcileDecision::StillInFlight
+        );
+    }
+
+    #[test]
+    fn sibling_reconcile_expired_sequence_unchanged_is_safe_to_clear() {
+        let st = settlement("SIB"); // source_sequence = Some(41)
+        let acct = sibling_acct(41, 9_000_100); // expired, sequence UNCHANGED -> never applied
+        let status = crate::chains::xrp::xrp_rpc::XrpTxStatus::NotFound;
+        assert_eq!(
+            xrp_sibling_reconcile_decision(&status, &st, &acct),
+            XrpSiblingReconcileDecision::ExpiredSafeToClear
+        );
+    }
+
+    /// THE F-03 sibling double-pay guard. A sibling whose tx is NotFound by our local
+    /// hash but whose custody Sequence ADVANCED (its Payment consumed the sequence under a
+    /// diverged hash) must be QUARANTINED, not cleared. Pre-fix this case cleared the
+    /// blocker, after which the sibling was treated as fresh, re-signed, and double-paid.
+    #[test]
+    fn sibling_reconcile_expired_sequence_advanced_quarantines_diverged() {
+        let st = settlement("SIB"); // source_sequence = Some(41)
+        let acct = sibling_acct(42, 9_000_100); // expired, sequence ADVANCED past source
+        let status = crate::chains::xrp::xrp_rpc::XrpTxStatus::NotFound;
+        assert_eq!(
+            xrp_sibling_reconcile_decision(&status, &st, &acct),
+            XrpSiblingReconcileDecision::QuarantineDiverged
+        );
+    }
+
+    #[test]
+    fn sibling_reconcile_legacy_no_source_sequence_quarantines() {
+        let mut st = settlement("SIB");
+        st.source_sequence = None; // legacy settlement cannot prove its sequence -> never clear
+        let acct = sibling_acct(41, 9_000_100);
+        let status = crate::chains::xrp::xrp_rpc::XrpTxStatus::NotFound;
+        assert_eq!(
+            xrp_sibling_reconcile_decision(&status, &st, &acct),
+            XrpSiblingReconcileDecision::QuarantineDiverged
+        );
     }
 }
 
