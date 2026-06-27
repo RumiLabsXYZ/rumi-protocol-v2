@@ -40,7 +40,11 @@ use super::config::{is_xrp_production_key_name, xrp_schnorr_key_name};
 
 const MAINNET_URL: &str = "https://xrplcluster.com/";
 const TESTNET_URL: &str = "https://s.altnet.rippletest.net:51234/";
-const MAINNET_READ_URLS: &[&str] = &[MAINNET_URL, "https://s1.ripple.com:51234/"];
+const MAINNET_READ_URLS: &[&str] = &[
+    MAINNET_URL,
+    "https://xrpl.link/",
+    "https://s1.ripple.com:51234/",
+];
 const TESTNET_READ_URLS: &[&str] = &[TESTNET_URL, "https://testnet.xrpl-labs.com/"];
 
 pub const MAX_READ_BYTES: u64 = 8_192;
@@ -1128,5 +1132,18 @@ mod tests {
     fn rpc_url_selects_network_by_key() {
         assert_eq!(rpc_url("key_1"), MAINNET_URL);
         assert_eq!(rpc_url("test_key_1"), TESTNET_URL);
+    }
+
+    #[test]
+    fn production_reads_can_tolerate_one_provider_outage() {
+        let providers = read_provider_urls("key_1");
+        assert!(
+            providers.len() > READ_QUORUM,
+            "mainnet reads need spare providers so one unreachable public endpoint does not block deposits"
+        );
+        assert!(
+            providers.iter().any(|url| *url == "https://xrpl.link/"),
+            "xrpl.link is the 443 fallback for IC HTTPS outcalls when s1.ripple.com:51234 is unreachable"
+        );
     }
 }

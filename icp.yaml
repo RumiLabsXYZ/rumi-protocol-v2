@@ -890,7 +890,7 @@ environments:
         (variant {
           Upgrade = record {
             mode = null;
-            description = opt "PRs #287/#288: F-03 native-XRP settlement hardening - sibling-reconcile Sequence guard (closes the residual double-pay) + claim quarantine with admin_resolve_xrp_claim/admin_quarantine_xrp_claim/get_xrp_quarantined_claims + XrpClaim.quarantine_reason field (ciborium serde-default, non-breaking candid)"
+            description = opt "PRs #276/#287/#288: XRP mainnet read provider fallback so account_info quorum tolerates one unreachable public endpoint + F-03 native-XRP settlement hardening - sibling-reconcile Sequence guard (closes the residual double-pay) + claim quarantine with admin_resolve_xrp_claim/admin_quarantine_xrp_claim/get_xrp_quarantined_claims + XrpClaim.quarantine_reason field (ciborium serde-default, non-breaking candid)"
           }
         })
 
