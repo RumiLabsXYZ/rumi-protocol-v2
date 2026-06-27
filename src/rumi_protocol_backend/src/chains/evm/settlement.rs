@@ -34,12 +34,15 @@
 //! bump-gas/resubmit on the Confirm path. Both are marked with `TASK 11 SEAM:`
 //! comments. This task references no hardening symbol.
 
+use candid::{CandidType, Deserialize, Principal};
 use ic_canister_log::log;
 
 use crate::chains::config::{ChainId, ChainStatus};
 use crate::chains::monad::chain_vault::ChainVaultStatus;
 use crate::chains::multi_chain_state::MultiChainState;
-use crate::chains::settlement_queue::{SettlementOpKind, SettlementOpStatus, SettlementQueueV1};
+use crate::chains::settlement_queue::{
+    SettlementOp, SettlementOpKind, SettlementOpStatus, SettlementQueueV1,
+};
 use crate::chains::supply::{apply_supply_delta, SupplyDelta};
 use crate::logs::INFO;
 use crate::state::{mutate_state, read_state};
@@ -58,19 +61,200 @@ pub enum OpAction {
     Confirm,
 }
 
-/// Pick the next op to act on. Enforces one-in-flight-per-queue: if ANY op is
-/// `Inflight`, only that op (action `Confirm`) is actionable; otherwise the
-/// lowest-op_id `Queued` op (action `Submit`). `pending` is a
-/// `BTreeMap<u64, SettlementOp>`, so iteration is op_id-ascending and the
-/// drain is FIFO. Returns `None` when nothing is actionable.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct SpCfxClaimPayoutRecovery {
+    chain_sentinel: Principal,
+    op_id: u64,
+    claim_id: u64,
+    claimant: Principal,
+    amount_wei: u128,
+    reason: String,
+    failed_at_ns: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+enum SpStabilityPoolError {
+    InsufficientBalance {
+        token: Principal,
+        required: u64,
+        available: u64,
+    },
+    AmountTooLow {
+        minimum_e8s: u64,
+    },
+    NoPositionFound,
+    InsufficientPoolBalance,
+    Unauthorized,
+    TokenNotAccepted {
+        ledger: Principal,
+    },
+    TokenNotActive {
+        ledger: Principal,
+    },
+    CollateralNotFound {
+        ledger: Principal,
+    },
+    LedgerTransferFailed {
+        reason: String,
+    },
+    InterCanisterCallFailed {
+        target: String,
+        method: String,
+    },
+    LiquidationFailed {
+        vault_id: u64,
+        reason: String,
+    },
+    EmergencyPaused,
+    SystemBusy,
+    AlreadyOptedOut {
+        collateral: Principal,
+    },
+    AlreadyOptedIn {
+        collateral: Principal,
+    },
+    RefundClaimNotFound,
+}
+
+fn sp_chain_collateral_sentinel(chain: ChainId) -> Principal {
+    let mut bytes = [0u8; 29];
+    let prefix = b"rumi-chain-collateral";
+    bytes[..prefix.len()].copy_from_slice(prefix);
+    bytes[24..28].copy_from_slice(&chain.0.to_le_bytes());
+    bytes[28] = 0x7f;
+    Principal::from_slice(&bytes)
+}
+
+async fn notify_sp_failed_cfx_claim_payout(
+    chain: ChainId,
+    op_id: u64,
+    claim_id: u64,
+    claimant: Principal,
+    amount_wei: u128,
+    reason: String,
+    failed_at_ns: u64,
+) -> Result<bool, String> {
+    let Some(sp_canister) = read_state(|s| s.stability_pool_canister) else {
+        return Err("no stability pool canister is configured for recredit".to_string());
+    };
+
+    let payload = SpCfxClaimPayoutRecovery {
+        chain_sentinel: sp_chain_collateral_sentinel(chain),
+        op_id,
+        claim_id,
+        claimant,
+        amount_wei,
+        reason,
+        failed_at_ns,
+    };
+    let result: Result<(Result<bool, SpStabilityPoolError>,), _> =
+        ic_cdk::call(sp_canister, "recredit_failed_cfx_claim_payout", (payload,)).await;
+
+    match result {
+        Ok((Ok(true),)) => {
+            log!(
+                INFO,
+                "[settlement chain={:?}] claim payout op {} recredited on stability pool",
+                chain,
+                op_id,
+            );
+            Ok(true)
+        }
+        Ok((Ok(false),)) => {
+            log!(
+                INFO,
+                "[settlement chain={:?}] claim payout op {} stability pool recredit already recorded",
+                chain,
+                op_id,
+            );
+            Ok(false)
+        }
+        Ok((Err(error),)) => Err(format!("stability pool recredit rejected: {error:?}")),
+        Err((code, msg)) => Err(format!(
+            "stability pool recredit call failed: {code:?} {msg}"
+        )),
+    }
+}
+
+async fn recredit_and_fail_chain_collateral_payout(
+    chain: ChainId,
+    op_id: u64,
+    claim_id: u64,
+    claimant: Principal,
+    amount_wei: u128,
+    reason: String,
+    now_ns: u64,
+) -> bool {
+    if let Err(error) = notify_sp_failed_cfx_claim_payout(
+        chain,
+        op_id,
+        claim_id,
+        claimant,
+        amount_wei,
+        reason.clone(),
+        now_ns,
+    )
+    .await
+    {
+        log!(INFO, "[settlement chain={:?}] claim payout op {} cannot be failed yet because stability pool recredit failed: {}", chain, op_id, error);
+        return false;
+    }
+
+    match mutate_state(|s| {
+        fail_chain_collateral_payout_in_state(
+            &mut s.multi_chain,
+            chain,
+            op_id,
+            reason.clone(),
+            now_ns,
+        )
+    }) {
+        Ok(true) => {
+            crate::storage::record_event(&crate::event::Event::ChainSettlementFailed {
+                chain_id: chain,
+                op_id,
+                reason,
+                timestamp: now_ns,
+            });
+            true
+        }
+        Ok(false) => true,
+        Err(error) => {
+            log!(INFO, "[settlement chain={:?}] claim payout op {} failed after stability pool recredit but backend release failed: {}; left for retry", chain, op_id, error);
+            false
+        }
+    }
+}
+
+/// Pick the next op to act on without additional submit-time filters. Enforces
+/// one-in-flight-per-queue: if ANY op is `Inflight`, only that op (action
+/// `Confirm`) is actionable; otherwise the lowest-op_id `Queued` op (action
+/// `Submit`) is returned.
 pub fn select_next_op(q: &SettlementQueueV1) -> Option<(u64, OpAction)> {
+    select_next_op_with_submit_filter(q, |_, _| false)
+}
+
+/// Pick the next op to act on, treating queued ops for which
+/// `submit_blocked(id, op)` is true as temporarily non-actionable. Inflight ops
+/// are never skipped: one-in-flight-per-queue remains the first rule.
+///
+/// `pending` is a `BTreeMap<u64, SettlementOp>`, so iteration is op_id-ascending
+/// and the drain stays FIFO among actionable queued ops. Returns `None` when
+/// nothing is actionable.
+pub fn select_next_op_with_submit_filter<F>(
+    q: &SettlementQueueV1,
+    mut submit_blocked: F,
+) -> Option<(u64, OpAction)>
+where
+    F: FnMut(u64, &SettlementOp) -> bool,
+{
     for (&id, op) in q.pending.iter() {
         if matches!(op.status, SettlementOpStatus::Inflight { .. }) {
             return Some((id, OpAction::Confirm));
         }
     }
     for (&id, op) in q.pending.iter() {
-        if matches!(op.status, SettlementOpStatus::Queued) {
+        if matches!(op.status, SettlementOpStatus::Queued) && !submit_blocked(id, op) {
             // Increment 3: LiquidationSwap ops are now actionable (submit_op routes
             // them through the dedicated swap path). The Inc-2 skip is removed.
             return Some((id, OpAction::Submit));
@@ -122,8 +306,13 @@ pub fn confirm_mint_in_state(
     // Step 2: supply delta. The post-mint total is the pre-mint total plus the
     // amount this mint adds to the foreign-chain debt pool.
     let post_mint_total = pre_mint_total_debt.saturating_add(observed_e8s);
-    apply_supply_delta(state, chain, SupplyDelta::Increase(observed_e8s), post_mint_total)
-        .map_err(|e| format!("{e:?}"))?;
+    apply_supply_delta(
+        state,
+        chain,
+        SupplyDelta::Increase(observed_e8s),
+        post_mint_total,
+    )
+    .map_err(|e| format!("{e:?}"))?;
 
     // Step 3: only reached when the supply delta succeeded — move pending -> debt.
     let v = state
@@ -172,8 +361,13 @@ pub fn confirm_interest_mint_in_state(
     // amount, so the foreign-chain invariant stays exact. Rejects (no mutation)
     // on divergence/halt.
     let post_total = pre_total.saturating_add(observed_e8s);
-    apply_supply_delta(state, chain, SupplyDelta::Increase(observed_e8s), post_total)
-        .map_err(|e| format!("{e:?}"))?;
+    apply_supply_delta(
+        state,
+        chain,
+        SupplyDelta::Increase(observed_e8s),
+        post_total,
+    )
+    .map_err(|e| format!("{e:?}"))?;
 
     // Step 3: only reached when the supply delta succeeded. Realize the interest
     // into debt and advance the accrual window to the harvest snapshot time (NOT
@@ -210,6 +404,7 @@ pub fn apply_liquidation_settlement_in_state(
     op_id: u64,
     realized_usdc_native: u128,
     settle_decimals: u8,
+    now_ns: u64,
 ) -> Result<LiquidationSettlement, String> {
     use crate::chains::monad::chain_vault::ChainVaultStatus;
 
@@ -219,34 +414,45 @@ pub fn apply_liquidation_settlement_in_state(
             .chain_vaults
             .get(&vault_id)
             .ok_or_else(|| format!("apply_liquidation_settlement: unknown vault {vault_id}"))?;
-        let m = v
-            .pending_liquidation
-            .as_ref()
-            .ok_or_else(|| format!("apply_liquidation_settlement: vault {vault_id} has no liquidation marker"))?;
+        let m = v.pending_liquidation.as_ref().ok_or_else(|| {
+            format!("apply_liquidation_settlement: vault {vault_id} has no liquidation marker")
+        })?;
         if m.op_id != op_id {
             return Err(format!(
                 "apply_liquidation_settlement: marker op {} != confirming op {}",
                 m.op_id, op_id
             ));
         }
-        (m.debt_to_clear_e8s, m.collateral_reserved_native, v.debt_e8s, m.tier)
+        (
+            m.debt_to_clear_e8s,
+            m.collateral_reserved_native,
+            v.debt_e8s,
+            m.tier,
+        )
     };
 
     // Step 2: clamp — reserve_backing NEVER exceeds the realized USD value, nor the
     // live debt (a concurrent burn is already blocked by the marker, so live_debt
     // == debt_at_phase1; the min is belt-and-suspenders).
-    let realized_usd_e8 = crate::chains::liquidation::stable_native_to_e8s(realized_usdc_native, settle_decimals);
+    let realized_usd_e8 =
+        crate::chains::liquidation::stable_native_to_e8s(realized_usdc_native, settle_decimals);
     let actual_cleared = debt_to_clear.min(live_debt).min(realized_usd_e8);
 
     // Step 3: the single guarded invariant move (debt -> reserve; supply untouched).
     // apply_debt_to_reserve_shift re-validates the unified invariant + caps at debt.
-    crate::chains::supply::apply_debt_to_reserve_shift(state, chain, vault_id, actual_cleared, realized_usdc_native)
-        .map_err(|e| format!("apply_debt_to_reserve_shift: {e:?}"))?;
+    crate::chains::supply::apply_debt_to_reserve_shift(
+        state,
+        chain,
+        vault_id,
+        actual_cleared,
+        realized_usdc_native,
+    )
+    .map_err(|e| format!("apply_debt_to_reserve_shift: {e:?}"))?;
 
     // Step 4: record any shortfall as per-chain bad debt (never silent).
-    if debt_to_clear > actual_cleared {
-        *state.chain_bad_debt_e8s.entry(chain).or_default() += debt_to_clear - actual_cleared;
-    }
+    let bad_debt_added_e8s = debt_to_clear.saturating_sub(actual_cleared);
+    let bad_debt_circuit_tripped =
+        state.record_chain_bad_debt_and_maybe_trip(chain, bad_debt_added_e8s, now_ns);
 
     // Step 5: clear the marker + routing record; close the vault if fully drained.
     let v = state
@@ -264,6 +470,8 @@ pub fn apply_liquidation_settlement_in_state(
         collateral_seized_native: collateral_reserved,
         tier,
         realized_usdc_native,
+        bad_debt_added_e8s,
+        bad_debt_circuit_tripped,
     })
 }
 
@@ -275,6 +483,8 @@ pub struct LiquidationSettlement {
     pub collateral_seized_native: u128,
     pub tier: crate::chains::vault::LiquidationTier,
     pub realized_usdc_native: u128,
+    pub bad_debt_added_e8s: u128,
+    pub bad_debt_circuit_tripped: bool,
 }
 
 /// Result of the state-only Tier-2 SP absorb transition. The caller emits
@@ -313,7 +523,10 @@ pub fn apply_sp_chain_liquidation_absorb_in_state(
             .get(&vault_id)
             .ok_or_else(|| format!("sp_absorb: unknown vault {vault_id}"))?;
         if v.collateral_chain != chain {
-            return Err(format!("sp_absorb: vault chain {:?} != requested chain {:?}", v.collateral_chain, chain));
+            return Err(format!(
+                "sp_absorb: vault chain {:?} != requested chain {:?}",
+                v.collateral_chain, chain
+            ));
         }
         if v.status != ChainVaultStatus::Open {
             return Err(format!("sp_absorb: vault {vault_id} is not Open"));
@@ -322,30 +535,51 @@ pub fn apply_sp_chain_liquidation_absorb_in_state(
             return Err(format!("sp_absorb: vault {vault_id} has pending mint"));
         }
         if v.pending_interest_mint_e8s != 0 {
-            return Err(format!("sp_absorb: vault {vault_id} has pending interest mint"));
+            return Err(format!(
+                "sp_absorb: vault {vault_id} has pending interest mint"
+            ));
         }
         if v.pending_liquidation.is_some() {
-            return Err(format!("sp_absorb: vault {vault_id} already has liquidation marker"));
+            return Err(format!(
+                "sp_absorb: vault {vault_id} already has liquidation marker"
+            ));
         }
         if !state.sp_attempted_chain_vaults.contains(&vault_id) {
-            return Err(format!("sp_absorb: vault {vault_id} missing sp_attempted escalation gate"));
+            return Err(format!(
+                "sp_absorb: vault {vault_id} missing sp_attempted escalation gate"
+            ));
         }
         if state.chain_liquidation_claims.contains_key(&vault_id) {
-            return Err(format!("sp_absorb: vault {vault_id} already has chain liquidation claim"));
+            return Err(format!(
+                "sp_absorb: vault {vault_id} already has chain liquidation claim"
+            ));
         }
-        (v.debt_e8s, v.collateral_amount_native, v.custody_address.clone())
+        (
+            v.debt_e8s,
+            v.collateral_amount_native,
+            v.custody_address.clone(),
+        )
     };
 
-    let actual_burned = icusd_burned_e8s.min(live_debt);
-    if actual_burned == 0 {
+    if live_debt == 0 {
         return Err(format!("sp_absorb: vault {vault_id} has nothing to absorb"));
     }
+    if icusd_burned_e8s != live_debt {
+        return Err(format!(
+            "sp_absorb: burned amount {} does not match live debt {} for vault {}",
+            icusd_burned_e8s, live_debt, vault_id
+        ));
+    }
+    let actual_burned = icusd_burned_e8s;
 
     let bonus_e4 = liq::bonus_e4_from_penalty_bps(liquidation_penalty_bps);
-    let collateral_seized = liq::collateral_in_native_for_repay(actual_burned, bonus_e4, native_decimals, price_e8)
-        .min(collateral_available);
+    let collateral_seized =
+        liq::collateral_in_native_for_repay(actual_burned, bonus_e4, native_decimals, price_e8)
+            .min(collateral_available);
     if collateral_seized == 0 {
-        return Err(format!("sp_absorb: vault {vault_id} has no collateral to seize"));
+        return Err(format!(
+            "sp_absorb: vault {vault_id} has no collateral to seize"
+        ));
     }
 
     crate::chains::supply::apply_debt_to_pending_burn_shift(state, chain, vault_id, actual_burned)
@@ -367,6 +601,7 @@ pub fn apply_sp_chain_liquidation_absorb_in_state(
             custody_address: custody_address.clone(),
             seized_native_total: collateral_seized,
             paid_native: 0,
+            pending_native: 0,
         },
     );
 
@@ -381,9 +616,10 @@ pub fn apply_sp_chain_liquidation_absorb_in_state(
 /// entitlement from its own depositor accounting, then asks the backend to pay
 /// that exact amount from the reserved chain-liquidity claim.
 ///
-/// Mutation order is important: enqueue first, then mark the claim as paid. A
-/// duplicate idempotency key therefore rejects without double-deducting the
-/// claim balance.
+/// Mutation order is important: enqueue first, then reserve the claim as
+/// pending. A duplicate idempotency key therefore rejects without
+/// double-reserving the claim balance. The amount only moves to `paid_native`
+/// after the outbound chain transaction is confirmed final.
 pub fn claim_chain_collateral_in_state(
     state: &mut MultiChainState,
     claim_id: u64,
@@ -406,7 +642,9 @@ pub fn claim_chain_collateral_in_state(
             .get(&claim_id)
             .ok_or_else(|| format!("chain collateral claim: unknown claim {claim_id}"))?;
         if !claim.paid_within_seized() {
-            return Err(format!("chain collateral claim: claim {claim_id} is overpaid"));
+            return Err(format!(
+                "chain collateral claim: claim {claim_id} is overpaid"
+            ));
         }
         (claim.chain, claim.remaining_native())
     };
@@ -433,7 +671,7 @@ pub fn claim_chain_collateral_in_state(
         ));
     }
 
-    let op = crate::chains::settlement_queue::SettlementOp::new(
+    let mut op = crate::chains::settlement_queue::SettlementOp::new(
         SettlementOpKind::ChainCollateralPayout {
             recipient: dest_evm,
             amount_e18: owed_wei,
@@ -443,6 +681,7 @@ pub fn claim_chain_collateral_in_state(
         idempotency_key,
         now_ns,
     );
+    op.chain_payout_uses_pending_reservation = Some(true);
     let op_id = state
         .settlement_queues
         .entry(chain)
@@ -458,8 +697,191 @@ pub fn claim_chain_collateral_in_state(
         .chain_liquidation_claims
         .get_mut(&claim_id)
         .expect("claim present: checked above");
-    claim.paid_native += owed_wei;
+    claim.pending_native = claim
+        .pending_native
+        .checked_add(owed_wei)
+        .ok_or_else(|| format!("chain collateral claim: pending overflow for claim {claim_id}"))?;
     Ok(op_id)
+}
+
+pub fn confirm_chain_collateral_payout_in_state(
+    state: &mut MultiChainState,
+    chain: ChainId,
+    op_id: u64,
+    tx_hash: String,
+    now_ns: u64,
+) -> Result<bool, String> {
+    let (claim_id, amount, uses_pending_reservation) = {
+        let op = state
+            .settlement_queues
+            .get(&chain)
+            .and_then(|q| q.pending.get(&op_id))
+            .ok_or_else(|| format!("chain collateral payout confirm: unknown op {op_id}"))?;
+        match &op.status {
+            SettlementOpStatus::Succeeded { .. } => return Ok(false),
+            SettlementOpStatus::Failed { reason, .. } => {
+                return Err(format!(
+                    "chain collateral payout confirm: op {op_id} already failed: {reason}"
+                ));
+            }
+            SettlementOpStatus::Queued | SettlementOpStatus::Inflight { .. } => {}
+        }
+        match &op.kind {
+            SettlementOpKind::ChainCollateralPayout {
+                vault_id,
+                amount_e18,
+                ..
+            } => (
+                *vault_id,
+                *amount_e18,
+                op.chain_payout_uses_pending_reservation.unwrap_or(false),
+            ),
+            other => {
+                return Err(format!(
+                    "chain collateral payout confirm: op {op_id} is not a claim payout: {other:?}"
+                ));
+            }
+        }
+    };
+
+    let claim = state
+        .chain_liquidation_claims
+        .get_mut(&claim_id)
+        .ok_or_else(|| format!("chain collateral payout confirm: unknown claim {claim_id}"))?;
+    if claim.chain != chain {
+        return Err(format!(
+            "chain collateral payout confirm: claim {claim_id} chain {:?} != op chain {:?}",
+            claim.chain, chain
+        ));
+    }
+    if uses_pending_reservation {
+        if claim.pending_native < amount {
+            return Err(format!(
+                "chain collateral payout confirm: claim {claim_id} pending {} is below payout {amount}",
+                claim.pending_native
+            ));
+        }
+        let paid = claim.paid_native.checked_add(amount).ok_or_else(|| {
+            format!("chain collateral payout confirm: paid overflow for claim {claim_id}")
+        })?;
+        if paid > claim.seized_native_total {
+            return Err(format!(
+                "chain collateral payout confirm: claim {claim_id} paid {paid} exceeds seized {}",
+                claim.seized_native_total
+            ));
+        }
+        claim.pending_native -= amount;
+        claim.paid_native = paid;
+    } else if claim.paid_native >= amount {
+        if claim.paid_native > claim.seized_native_total {
+            return Err(format!(
+                "chain collateral payout confirm: legacy claim {claim_id} paid {} exceeds seized {}",
+                claim.paid_native, claim.seized_native_total
+            ));
+        }
+        // Pre-Inc10 live payout ops had already reserved capacity in
+        // `paid_native`. Confirmation only makes that reservation final.
+    } else {
+        return Err(format!(
+            "chain collateral payout confirm: claim {claim_id} pending {} is below payout {amount}",
+            claim.pending_native
+        ));
+    }
+
+    let op = state
+        .settlement_queues
+        .get_mut(&chain)
+        .and_then(|q| q.pending.get_mut(&op_id))
+        .expect("op present: checked above");
+    op.mark_succeeded(tx_hash, now_ns);
+    Ok(true)
+}
+
+pub fn fail_chain_collateral_payout_in_state(
+    state: &mut MultiChainState,
+    chain: ChainId,
+    op_id: u64,
+    reason: String,
+    now_ns: u64,
+) -> Result<bool, String> {
+    let (claim_id, amount, idempotency_key, uses_pending_reservation) = {
+        let op = state
+            .settlement_queues
+            .get(&chain)
+            .and_then(|q| q.pending.get(&op_id))
+            .ok_or_else(|| format!("chain collateral payout fail: unknown op {op_id}"))?;
+        match &op.status {
+            SettlementOpStatus::Failed { .. } => return Ok(false),
+            SettlementOpStatus::Succeeded { .. } => {
+                return Err(format!(
+                    "chain collateral payout fail: op {op_id} already succeeded"
+                ));
+            }
+            SettlementOpStatus::Queued | SettlementOpStatus::Inflight { .. } => {}
+        }
+        match &op.kind {
+            SettlementOpKind::ChainCollateralPayout {
+                vault_id,
+                amount_e18,
+                ..
+            } => (
+                *vault_id,
+                *amount_e18,
+                op.idempotency_key.clone(),
+                op.chain_payout_uses_pending_reservation.unwrap_or(false),
+            ),
+            other => {
+                return Err(format!(
+                    "chain collateral payout fail: op {op_id} is not a claim payout: {other:?}"
+                ));
+            }
+        }
+    };
+
+    let release_error = match state.chain_liquidation_claims.get_mut(&claim_id) {
+        Some(claim) if claim.chain == chain && uses_pending_reservation => {
+            if claim.pending_native >= amount {
+                claim.pending_native -= amount;
+                None
+            } else {
+                Some(format!(
+                    "claim {claim_id} pending {} is below payout {amount}",
+                    claim.pending_native
+                ))
+            }
+        }
+        Some(claim) if claim.chain == chain && claim.paid_native >= amount => {
+            // Pre-Inc10 live payout ops had already reserved capacity in
+            // `paid_native`. A reverted tx must release that legacy reservation.
+            claim.paid_native -= amount;
+            None
+        }
+        Some(claim) if claim.chain == chain => Some(format!(
+            "claim {claim_id} paid {} is below legacy payout {amount}",
+            claim.paid_native
+        )),
+        Some(claim) => Some(format!(
+            "claim {claim_id} chain {:?} != op chain {:?}",
+            claim.chain, chain
+        )),
+        None => Some(format!("unknown claim {claim_id}")),
+    };
+
+    let queue = state
+        .settlement_queues
+        .get_mut(&chain)
+        .expect("queue present: checked above");
+    let op = queue
+        .pending
+        .get_mut(&op_id)
+        .expect("op present: checked above");
+    let terminal_reason = match release_error {
+        Some(error) => format!("{reason}; backend reservation release skipped: {error}"),
+        None => reason,
+    };
+    op.mark_failed(terminal_reason, now_ns);
+    queue.seen_idempotency_keys.remove(&idempotency_key);
+    Ok(true)
 }
 
 // ─── Timer D tick (fan-out) ─────────────────────────────────────────────────
@@ -569,26 +991,31 @@ pub async fn run_settlement(chain: ChainId) {
     let should_skip = read_state(|s| {
         s.mode == Mode::ReadOnly
             || s.multi_chain.invariant_halted
-            || s.multi_chain.reorg_halted.get(&chain).copied().unwrap_or(false)
+            || s.multi_chain
+                .reorg_halted
+                .get(&chain)
+                .copied()
+                .unwrap_or(false)
     });
     if should_skip {
         return;
     }
 
-    // Snapshot this chain's queue and pick the next actionable op.
-    let queue = read_state(|s| s.multi_chain.settlement_queues.get(&chain).cloned());
-    let queue = match queue {
-        Some(q) => q,
+    // Snapshot this chain's next actionable op. A tripped bad-debt circuit skips
+    // queued risk-increasing ops at selection time so later burns, liquidation
+    // swaps, and claim payouts can still reconcile.
+    let selected = read_state(|s| {
+        let q = s.multi_chain.settlement_queues.get(&chain)?;
+        let (op_id, action) = select_next_op_with_submit_filter(q, |_, op| {
+            s.multi_chain
+                .bad_debt_circuit_blocks_settlement_op(chain, &op.kind)
+        })?;
+        let op = q.pending.get(&op_id)?.clone();
+        Some((op_id, action, op))
+    });
+    let (op_id, action, op) = match selected {
+        Some(selected) => selected,
         None => return, // chain not registered / no queue
-    };
-    let (op_id, action) = match select_next_op(&queue) {
-        Some(pair) => pair,
-        None => return, // nothing to do
-    };
-    // Clone the op out so we can drop the queue snapshot before awaiting.
-    let op = match queue.pending.get(&op_id).cloned() {
-        Some(o) => o,
-        None => return,
     };
 
     match action {
@@ -659,7 +1086,11 @@ fn build_tx_plan(
     withdrawal_value: Option<u128>,
 ) -> Result<TxPlan, String> {
     match kind {
-        SettlementOpKind::Mint { recipient, amount_e8s, vault_id } => {
+        SettlementOpKind::Mint {
+            recipient,
+            amount_e8s,
+            vault_id,
+        } => {
             let contract = contract.ok_or_else(|| "icUSD contract not set".to_string())?;
             // Delegate the per-op-kind field shape to the single source of truth.
             // `op_id` is the on-chain per-op idempotency key (so a resubmit of THIS
@@ -685,7 +1116,11 @@ fn build_tx_plan(
                 kind: TxPlanKind::Mint,
             })
         }
-        SettlementOpKind::NativeWithdrawal { recipient, amount_e18, vault_id } => {
+        SettlementOpKind::NativeWithdrawal {
+            recipient,
+            amount_e18,
+            vault_id,
+        } => {
             // `value` is wei (1e18 scale) — it goes straight into the EIP-1559
             // `value` of a native transfer. The withdrawal is signed by the
             // vault's own custody address, so `withdrawal_value` is the
@@ -694,7 +1129,10 @@ fn build_tx_plan(
             let value = withdrawal_value.unwrap_or(*amount_e18);
             let fields = tx::build_eip1559_fields(
                 chain.0 as u64,
-                tx::MonadTxKind::NativeWithdrawal { recipient, amount_wei: value },
+                tx::MonadTxKind::NativeWithdrawal {
+                    recipient,
+                    amount_wei: value,
+                },
                 nonce,
                 prio,
                 max_fee,
@@ -707,11 +1145,18 @@ fn build_tx_plan(
                 kind: TxPlanKind::NativeWithdrawal,
             })
         }
-        SettlementOpKind::ChainCollateralPayout { recipient, amount_e18, vault_id, .. } => {
-            let value = withdrawal_value.unwrap_or(*amount_e18);
+        SettlementOpKind::ChainCollateralPayout {
+            recipient,
+            amount_e18,
+            vault_id,
+            ..
+        } => {
             let fields = tx::build_eip1559_fields(
                 chain.0 as u64,
-                tx::MonadTxKind::NativeWithdrawal { recipient, amount_wei: value },
+                tx::MonadTxKind::NativeWithdrawal {
+                    recipient,
+                    amount_wei: *amount_e18,
+                },
                 nonce,
                 prio,
                 max_fee,
@@ -720,11 +1165,17 @@ fn build_tx_plan(
                 fields,
                 vault_id: *vault_id,
                 recipient: recipient.clone(),
-                amount: value,
+                amount: *amount_e18,
                 kind: TxPlanKind::ChainCollateralPayout,
             })
         }
-        SettlementOpKind::InterestMint { vault_id, mint_id, amount_e8s, recipient, .. } => {
+        SettlementOpKind::InterestMint {
+            vault_id,
+            mint_id,
+            amount_e8s,
+            recipient,
+            ..
+        } => {
             // Task 12: identical IcUSD.mint calldata to a normal Mint, but the
             // on-chain `vault_id` arg is the SYNTHETIC `mint_id` (the real vault
             // already minted once at open and IcUSD.mint reverts a repeat id),
@@ -824,16 +1275,33 @@ async fn resolve_op_signer(
 /// netted out — the withdrawer bears their own gas, as on any native chain, and
 /// a tiny dust (`max_fee - actual_fee`) is left behind. A partial withdrawal
 /// that leaves a buffer sends the full requested amount.
-pub(crate) fn fundable_withdrawal_value(amount_e18: u128, custody_balance: u128, max_fee: u128) -> u128 {
+pub(crate) fn fundable_withdrawal_value(
+    amount_e18: u128,
+    custody_balance: u128,
+    max_fee: u128,
+) -> u128 {
     let gas_reserve = (tx::NATIVE_WITHDRAWAL_GAS_LIMIT as u128).saturating_mul(max_fee);
     amount_e18.min(custody_balance.saturating_sub(gas_reserve))
+}
+
+pub(crate) fn exact_native_transfer_is_funded(
+    amount_e18: u128,
+    custody_balance: u128,
+    max_fee: u128,
+) -> bool {
+    let gas_reserve = (tx::NATIVE_WITHDRAWAL_GAS_LIMIT as u128).saturating_mul(max_fee);
+    custody_balance >= amount_e18.saturating_add(gas_reserve)
 }
 
 /// The native CFX to swap (carried as the EIP-1559 `value`), capped so the
 /// custody signer can ALSO pay the swap gas (spec §4.8). Mirrors
 /// `fundable_withdrawal_value` but reserves the larger swap gas budget. If this
 /// goes to 0 the caller must NOT submit (escalate).
-pub(crate) fn fundable_swap_value(collateral_in: u128, custody_balance: u128, max_fee: u128) -> u128 {
+pub(crate) fn fundable_swap_value(
+    collateral_in: u128,
+    custody_balance: u128,
+    max_fee: u128,
+) -> u128 {
     let gas_reserve = (tx::LIQUIDATION_SWAP_GAS_LIMIT as u128).saturating_mul(max_fee);
     collateral_in.min(custody_balance.saturating_sub(gas_reserve))
 }
@@ -844,6 +1312,20 @@ pub(crate) enum ClaimLiquidationSwapSubmitError {
     WrongOpKind,
     NotQueued,
     MissingMarker,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ClaimChainPayoutSubmitError {
+    MissingOp,
+    WrongOpKind,
+    NotQueued,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RecordChainPayoutReplacementError {
+    MissingOp,
+    WrongOpKind,
+    NotInflight,
 }
 
 /// Atomically claim a queued liquidation swap immediately before broadcast.
@@ -863,8 +1345,7 @@ pub(crate) fn claim_liquidation_swap_submit_in_state(
         .get(&vault_id)
         .and_then(|v| v.pending_liquidation.as_ref())
         .map_or(false, |marker| {
-            marker.op_id == op_id
-                && marker.tier == crate::chains::vault::LiquidationTier::Bot
+            marker.op_id == op_id && marker.tier == crate::chains::vault::LiquidationTier::Bot
         });
     if !marker_owned {
         return Err(ClaimLiquidationSwapSubmitError::MissingMarker);
@@ -876,8 +1357,10 @@ pub(crate) fn claim_liquidation_swap_submit_in_state(
         .and_then(|q| q.pending.get_mut(&op_id))
         .ok_or(ClaimLiquidationSwapSubmitError::MissingOp)?;
     match &op.kind {
-        SettlementOpKind::LiquidationSwap { vault_id: live_vault_id, .. }
-            if *live_vault_id == vault_id => {}
+        SettlementOpKind::LiquidationSwap {
+            vault_id: live_vault_id,
+            ..
+        } if *live_vault_id == vault_id => {}
         _ => return Err(ClaimLiquidationSwapSubmitError::WrongOpKind),
     }
     if !matches!(op.status, SettlementOpStatus::Queued) {
@@ -885,8 +1368,71 @@ pub(crate) fn claim_liquidation_swap_submit_in_state(
     }
 
     op.mark_inflight(now_ns);
-    op.last_tx_hash = Some(tx_hash);
+    op.record_tx_hash_candidate(tx_hash);
     op.submit_nonce = Some(nonce);
+    Ok(())
+}
+
+/// Atomically claim a queued CFX payout op before calling `eth_sendRawTransaction`.
+///
+/// A native payout has no contract-level idempotency discriminator. If the RPC
+/// accepted the signed tx but returned an error/timeout, retrying from Queued
+/// with a fresh nonce can pay the same SP claim twice. Recording the locally
+/// computed tx hash and nonce before the ambiguous send boundary makes all later
+/// retries use the receipt/replace-by-fee path for the same nonce.
+pub(crate) fn claim_chain_collateral_payout_submit_in_state(
+    state: &mut MultiChainState,
+    chain: ChainId,
+    op_id: u64,
+    now_ns: u64,
+    tx_hash: String,
+    nonce: u64,
+) -> Result<(), ClaimChainPayoutSubmitError> {
+    let op = state
+        .settlement_queues
+        .get_mut(&chain)
+        .and_then(|q| q.pending.get_mut(&op_id))
+        .ok_or(ClaimChainPayoutSubmitError::MissingOp)?;
+    if !matches!(op.kind, SettlementOpKind::ChainCollateralPayout { .. }) {
+        return Err(ClaimChainPayoutSubmitError::WrongOpKind);
+    }
+    if !matches!(op.status, SettlementOpStatus::Queued) {
+        return Err(ClaimChainPayoutSubmitError::NotQueued);
+    }
+
+    op.mark_inflight(now_ns);
+    op.record_tx_hash_candidate(tx_hash);
+    op.submit_nonce = Some(nonce);
+    Ok(())
+}
+
+/// Record the locally computed hash of a same-nonce replacement payout before
+/// rebroadcast. If the RPC accepts the replacement but returns an error, the
+/// confirm path must watch the replacement hash rather than the stale tx.
+pub(crate) fn record_chain_collateral_payout_replacement_in_state(
+    state: &mut MultiChainState,
+    chain: ChainId,
+    op_id: u64,
+    now_ns: u64,
+    tx_hash: String,
+) -> Result<(), RecordChainPayoutReplacementError> {
+    let op = state
+        .settlement_queues
+        .get_mut(&chain)
+        .and_then(|q| q.pending.get_mut(&op_id))
+        .ok_or(RecordChainPayoutReplacementError::MissingOp)?;
+    if !matches!(op.kind, SettlementOpKind::ChainCollateralPayout { .. }) {
+        return Err(RecordChainPayoutReplacementError::WrongOpKind);
+    }
+    match &mut op.status {
+        SettlementOpStatus::Inflight {
+            last_attempt_ns, ..
+        } => {
+            *last_attempt_ns = now_ns;
+        }
+        _ => return Err(RecordChainPayoutReplacementError::NotInflight),
+    }
+    op.record_tx_hash_candidate(tx_hash);
     Ok(())
 }
 
@@ -899,11 +1445,7 @@ pub(crate) fn claim_liquidation_swap_submit_in_state(
 /// adapter), so it KNOWS the exact nonce used and can store it on the op. The
 /// stuck-tx resubmit (`confirm_op`) re-signs on this stored nonce, making a
 /// bumped-gas resubmit a true replace-by-fee rather than a second mint.
-async fn submit_op(
-    chain: ChainId,
-    op_id: u64,
-    op: crate::chains::settlement_queue::SettlementOp,
-) {
+async fn submit_op(chain: ChainId, op_id: u64, op: crate::chains::settlement_queue::SettlementOp) {
     // A Burn op is never signable in Phase 1b — fail it up front (no RPC).
     if matches!(op.kind, SettlementOpKind::Burn { .. }) {
         let now = ic_cdk::api::time();
@@ -933,6 +1475,20 @@ async fn submit_op(
         return;
     }
 
+    if read_state(|s| {
+        s.multi_chain
+            .bad_debt_circuit_blocks_settlement_op(chain, &op.kind)
+    }) {
+        log!(
+            INFO,
+            "[settlement chain={:?}] bad-debt circuit tripped; deferring submit of op {} {:?}",
+            chain,
+            op_id,
+            op.kind
+        );
+        return;
+    }
+
     // DEPOSIT FINALITY GATE (Mint ops only): the deposit-watch flips a vault to
     // MintPending on a `"latest"` (chain-tip, depth-0) custody balance for
     // liveness (the Gate-4 design keeps DETECTION robust to block-height read
@@ -948,7 +1504,12 @@ async fn submit_op(
     if let SettlementOpKind::Mint { vault_id, .. } = &op.kind {
         let vid = *vault_id;
         let (cursor, vinfo) = read_state(|s| {
-            let cursor = s.multi_chain.last_observed_block.get(&chain).copied().unwrap_or(0);
+            let cursor = s
+                .multi_chain
+                .last_observed_block
+                .get(&chain)
+                .copied()
+                .unwrap_or(0);
             let v = s
                 .multi_chain
                 .chain_vaults
@@ -959,7 +1520,13 @@ async fn submit_op(
         let (custody, declared) = match vinfo {
             Some(p) => p,
             None => {
-                log!(INFO, "[settlement chain={:?}] mint op {}: unknown vault {}; will retry", chain, op_id, vid);
+                log!(
+                    INFO,
+                    "[settlement chain={:?}] mint op {}: unknown vault {}; will retry",
+                    chain,
+                    op_id,
+                    vid
+                );
                 return;
             }
         };
@@ -994,7 +1561,10 @@ async fn submit_op(
     // Task 12: interest mints are ALSO paid by the settlement hot wallet, so they
     // are gated on its balance too (a vault open mint and an interest mint cost
     // the same gas).
-    if matches!(op.kind, SettlementOpKind::Mint { .. } | SettlementOpKind::InterestMint { .. }) {
+    if matches!(
+        op.kind,
+        SettlementOpKind::Mint { .. } | SettlementOpKind::InterestMint { .. }
+    ) {
         let cached = read_state(|s| s.multi_chain.hot_wallet_balance_e18.get(&chain).copied());
         if let Some(bal) = cached {
             if !hardening::hot_wallet_ok(bal) {
@@ -1017,7 +1587,13 @@ async fn submit_op(
     let (path, signer_addr) = match resolve_op_signer(chain, &op.kind).await {
         Ok(pair) => pair,
         Err(e) => {
-            log!(INFO, "[settlement chain={:?}] resolve_op_signer failed for op {}: {}; will retry", chain, op_id, e);
+            log!(
+                INFO,
+                "[settlement chain={:?}] resolve_op_signer failed for op {}: {}; will retry",
+                chain,
+                op_id,
+                e
+            );
             return;
         }
     };
@@ -1027,7 +1603,13 @@ async fn submit_op(
     let nonce = match evm_rpc::get_transaction_count(chain, &signer_addr).await {
         Ok(n) => n,
         Err(e) => {
-            log!(INFO, "[settlement chain={:?}] get_transaction_count failed for op {}: {}; will retry", chain, op_id, e);
+            log!(
+                INFO,
+                "[settlement chain={:?}] get_transaction_count failed for op {}: {}; will retry",
+                chain,
+                op_id,
+                e
+            );
             return;
         }
     };
@@ -1036,77 +1618,193 @@ async fn submit_op(
     let (base_fee, prio) = match evm_rpc::fetch_fees(chain).await {
         Ok(pair) => pair,
         Err(e) => {
-            log!(INFO, "[settlement chain={:?}] fetch_fees failed for op {}: {}; will retry", chain, op_id, e);
+            log!(
+                INFO,
+                "[settlement chain={:?}] fetch_fees failed for op {}: {}; will retry",
+                chain,
+                op_id,
+                e
+            );
             return;
         }
     };
     let max_fee = base_fee.saturating_mul(2).saturating_add(prio);
 
-    // 4. For a native withdrawal, cap the transfer value so the custody signer
-    //    can also pay gas (a full close requests the entire custody balance).
-    //    Read the custody balance ONCE here; the value is recomputed identically
-    //    on a stuck-tx resubmit. Mints don't carry a value, so skip the read.
-    let withdrawal_value = if matches!(
-        op.kind,
-        SettlementOpKind::NativeWithdrawal { .. } | SettlementOpKind::ChainCollateralPayout { .. }
-    ) {
-        match evm_rpc::get_balance(chain, &signer_addr).await {
-            Ok(bal) => {
-                if let SettlementOpKind::NativeWithdrawal { amount_e18, .. }
-                | SettlementOpKind::ChainCollateralPayout { amount_e18, .. } = &op.kind {
-                    Some(fundable_withdrawal_value(*amount_e18, bal, max_fee))
-                } else {
-                    None
+    // 4. Native withdrawals may net gas from the transfer value; claim payouts
+    //    are exact entitlements and must have enough custody balance for both
+    //    the full amount and gas before submission.
+    let withdrawal_value = match &op.kind {
+        SettlementOpKind::NativeWithdrawal { amount_e18, .. } => {
+            match evm_rpc::get_balance(chain, &signer_addr).await {
+                Ok(bal) => Some(fundable_withdrawal_value(*amount_e18, bal, max_fee)),
+                Err(e) => {
+                    log!(
+                        INFO,
+                        "[settlement chain={:?}] get_balance(custody) failed for op {}: {}; will retry",
+                        chain,
+                        op_id,
+                        e
+                    );
+                    return;
                 }
             }
+        }
+        SettlementOpKind::ChainCollateralPayout {
+            vault_id,
+            amount_e18,
+            claimant,
+            ..
+        } => match evm_rpc::get_balance(chain, &signer_addr).await {
+            Ok(bal) => {
+                if !exact_native_transfer_is_funded(*amount_e18, bal, max_fee) {
+                    let now = ic_cdk::api::time();
+                    let reason = format!(
+                        "custody balance {bal} cannot fund exact payout {amount_e18} plus gas"
+                    );
+                    if recredit_and_fail_chain_collateral_payout(
+                        chain,
+                        op_id,
+                        *vault_id,
+                        *claimant,
+                        *amount_e18,
+                        reason,
+                        now,
+                    )
+                    .await
+                    {
+                        log!(INFO, "[settlement chain={:?}] claim payout op {} failed before submit because custody balance {} cannot fund exact amount {} plus gas", chain, op_id, bal, amount_e18);
+                    }
+                    return;
+                }
+                None
+            }
             Err(e) => {
-                log!(INFO, "[settlement chain={:?}] get_balance(custody) failed for op {}: {}; will retry", chain, op_id, e);
+                log!(
+                    INFO,
+                    "[settlement chain={:?}] get_balance(custody) failed for op {}: {}; will retry",
+                    chain,
+                    op_id,
+                    e
+                );
+                return;
+            }
+        },
+        _ => None,
+    };
+
+    // 5. Resolve the contract (mints only) and build the tx plan.
+    let contract = read_state(|s| s.multi_chain.chain_contracts.get(&chain).cloned());
+    let plan = match build_tx_plan(
+        chain,
+        &op.kind,
+        op_id,
+        nonce,
+        prio,
+        max_fee,
+        contract.as_deref(),
+        withdrawal_value,
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            log!(
+                INFO,
+                "[settlement chain={:?}] build_tx_plan failed for op {}: {}; will retry",
+                chain,
+                op_id,
+                e
+            );
+            return;
+        }
+    };
+    let TxPlan {
+        fields,
+        vault_id,
+        recipient,
+        amount,
+        kind,
+    } = plan;
+
+    // 6. Sign with the resolved signer (settlement for mints, custody for withdrawals).
+    let raw_hex = match tx::sign_eip1559(&fields, path, &signer_addr).await {
+        Ok(h) => h,
+        Err(e) => {
+            log!(
+                INFO,
+                "[settlement chain={:?}] sign_eip1559 failed for op {}: {}; will retry",
+                chain,
+                op_id,
+                e
+            );
+            return;
+        }
+    };
+    let chain_payout_local_tx_hash = if kind == TxPlanKind::ChainCollateralPayout {
+        match tx::raw_tx_hash(&raw_hex) {
+            Ok(h) => Some(h),
+            Err(e) => {
+                log!(
+                    INFO,
+                    "[settlement chain={:?}] signed tx hash failed for claim payout op {}: {}; will retry",
+                    chain,
+                    op_id,
+                    e
+                );
                 return;
             }
         }
     } else {
         None
     };
-
-    // 5. Resolve the contract (mints only) and build the tx plan.
-    let contract = read_state(|s| s.multi_chain.chain_contracts.get(&chain).cloned());
-    let plan = match build_tx_plan(chain, &op.kind, op_id, nonce, prio, max_fee, contract.as_deref(), withdrawal_value) {
-        Ok(p) => p,
-        Err(e) => {
-            log!(INFO, "[settlement chain={:?}] build_tx_plan failed for op {}: {}; will retry", chain, op_id, e);
+    if let Some(local_tx_hash) = &chain_payout_local_tx_hash {
+        let claim = mutate_state(|s| {
+            claim_chain_collateral_payout_submit_in_state(
+                &mut s.multi_chain,
+                chain,
+                op_id,
+                ic_cdk::api::time(),
+                local_tx_hash.clone(),
+                nonce,
+            )
+        });
+        if let Err(e) = claim {
+            log!(
+                INFO,
+                "[settlement chain={:?}] claim payout op {}: submit CAS aborted before broadcast ({:?})",
+                chain,
+                op_id,
+                e
+            );
             return;
         }
-    };
-    let TxPlan { fields, vault_id, recipient, amount, kind } = plan;
+    }
 
-    // 6. Sign with the resolved signer (settlement for mints, custody for withdrawals).
-    let raw_hex = match tx::sign_eip1559(&fields, path, &signer_addr).await {
-        Ok(h) => h,
-        Err(e) => {
-            log!(INFO, "[settlement chain={:?}] sign_eip1559 failed for op {}: {}; will retry", chain, op_id, e);
-            return;
-        }
-    };
-
-    // 7. Broadcast. A transient send error is logged and retried next tick — we
-    //    do NOT mark the op Failed (it may yet be re-signable / re-broadcastable).
+    // 7. Broadcast. A transient send error is logged and retried next tick. For
+    //    ChainCollateralPayout, the op is already Inflight with its local hash
+    //    and nonce recorded, so an ambiguous RPC error cannot lead to a fresh
+    //    nonce duplicate payout.
     //
     //    ON-CHAIN DOUBLE-MINT DEPENDENCY: if send_raw_transaction returns Err but
-    //    the tx actually landed (an RPC false negative), this op stays Queued
-    //    with no submit_nonce recorded, so the next tick re-reads "latest" and
-    //    signs a NEW tx at nonce+1 — a genuine second on-chain mint. The
-    //    canister's supply accounting stays correct (confirm requires
-    //    observed_e8s == pending_mint_e8s and credits exactly once), but on-chain
-    //    icUSD could be minted twice. Protection lives OUTSIDE this function:
-    //    (a) IcUSD.mint MUST guard per vault_id (Task 19: `mapping(uint64 => bool)
-    //    minted`, revert on repeat — asserted by a Task 20 test), and (b) once an
-    //    op IS Inflight, Task-11's stuck-tx path resubmits on the SAME stored
-    //    nonce (true replace-by-fee). The unguarded window is only the
-    //    transient-error-before-Inflight case.
+    //    a Mint actually landed (an RPC false negative), the mint op stays
+    //    Queued with no submit_nonce recorded, so the next tick can re-read
+    //    "latest" and sign a NEW tx at nonce+1. The canister's supply accounting
+    //    stays correct (confirm requires observed_e8s == pending_mint_e8s and
+    //    credits exactly once), but on-chain icUSD could be minted twice unless
+    //    IcUSD.mint guards per op/vault id. Plain CFX claim payouts cannot rely
+    //    on that contract guard, so they are claimed Inflight before broadcast.
     let tx_hash = match evm_rpc::send_raw_transaction(chain, &raw_hex).await {
         Ok(h) => h,
         Err(e) => {
-            log!(INFO, "[settlement chain={:?}] send_raw_transaction failed for op {}: {}; will retry", chain, op_id, e);
+            if kind == TxPlanKind::ChainCollateralPayout {
+                log!(INFO, "[settlement chain={:?}] claim payout op {}: broadcast failed after submit claim ({}); receipt/replace-by-fee path will resolve", chain, op_id, e);
+            } else {
+                log!(
+                    INFO,
+                    "[settlement chain={:?}] send_raw_transaction failed for op {}: {}; will retry",
+                    chain,
+                    op_id,
+                    e
+                );
+            }
             return;
         }
     };
@@ -1114,15 +1812,25 @@ async fn submit_op(
     // 8. Mark Inflight + record the tx hash AND the submit nonce. Emit
     //    ChainMintSubmitted for mints.
     let now = ic_cdk::api::time();
-    mutate_state(|s| {
-        if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
-            if let Some(o) = q.pending.get_mut(&op_id) {
-                o.mark_inflight(now);
-                o.last_tx_hash = Some(tx_hash.clone());
-                o.submit_nonce = Some(nonce);
+    if kind == TxPlanKind::ChainCollateralPayout {
+        mutate_state(|s| {
+            if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
+                if let Some(o) = q.pending.get_mut(&op_id) {
+                    o.record_tx_hash_candidate(tx_hash.clone());
+                }
             }
-        }
-    });
+        });
+    } else {
+        mutate_state(|s| {
+            if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
+                if let Some(o) = q.pending.get_mut(&op_id) {
+                    o.mark_inflight(now);
+                    o.last_tx_hash = Some(tx_hash.clone());
+                    o.submit_nonce = Some(nonce);
+                }
+            }
+        });
+    }
 
     match kind {
         TxPlanKind::Mint => {
@@ -1135,7 +1843,15 @@ async fn submit_op(
                 tx_hash: tx_hash.clone(),
                 timestamp: now,
             });
-            log!(INFO, "[settlement chain={:?}] mint submitted: op={} vault={} amount_e8s={} tx={}", chain, op_id, vault_id, amount, tx_hash);
+            log!(
+                INFO,
+                "[settlement chain={:?}] mint submitted: op={} vault={} amount_e8s={} tx={}",
+                chain,
+                op_id,
+                vault_id,
+                amount,
+                tx_hash
+            );
         }
         TxPlanKind::NativeWithdrawal => {
             crate::storage::record_event(&crate::event::Event::WithdrawalSigned {
@@ -1147,7 +1863,15 @@ async fn submit_op(
                 tx_hash: tx_hash.clone(),
                 timestamp: now,
             });
-            log!(INFO, "[settlement chain={:?}] withdrawal submitted: op={} vault={} amount_e18={} tx={}", chain, op_id, vault_id, amount, tx_hash);
+            log!(
+                INFO,
+                "[settlement chain={:?}] withdrawal submitted: op={} vault={} amount_e18={} tx={}",
+                chain,
+                op_id,
+                vault_id,
+                amount,
+                tx_hash
+            );
         }
         TxPlanKind::ChainCollateralPayout => {
             log!(INFO, "[settlement chain={:?}] chain-collateral payout submitted: op={} vault={} amount_e18={} recipient={} tx={}", chain, op_id, vault_id, amount, recipient, tx_hash);
@@ -1179,9 +1903,16 @@ fn escalate_failed_swap(chain: ChainId, op_id: u64, vault_id: u64, reason: Strin
         // Restore reserved collateral + clear the marker ONLY if THIS op still owns
         // it (a concurrent confirm or a post-upgrade re-run cannot double-restore).
         if let Some(v) = s.multi_chain.chain_vaults.get_mut(&vault_id) {
-            let owns = v.pending_liquidation.as_ref().map_or(false, |m| m.op_id == op_id);
+            let owns = v
+                .pending_liquidation
+                .as_ref()
+                .map_or(false, |m| m.op_id == op_id);
             if owns {
-                let reserved = v.pending_liquidation.as_ref().map(|m| m.collateral_reserved_native).unwrap_or(0);
+                let reserved = v
+                    .pending_liquidation
+                    .as_ref()
+                    .map(|m| m.collateral_reserved_native)
+                    .unwrap_or(0);
                 v.collateral_amount_native = v.collateral_amount_native.saturating_add(reserved);
                 v.pending_liquidation = None;
             }
@@ -1196,7 +1927,14 @@ fn escalate_failed_swap(chain: ChainId, op_id: u64, vault_id: u64, reason: Strin
         reason: reason.clone(),
         timestamp: now,
     });
-    log!(INFO, "[settlement chain={:?}] liquidation swap op {} vault {} FAILED -> escalated: {}", chain, op_id, vault_id, reason);
+    log!(
+        INFO,
+        "[settlement chain={:?}] liquidation swap op {} vault {} FAILED -> escalated: {}",
+        chain,
+        op_id,
+        vault_id,
+        reason
+    );
 }
 
 /// Dedicated submit path for a `LiquidationSwap` op (spec §4.8). Reads live DEX
@@ -1217,13 +1955,27 @@ async fn submit_liquidation_swap(
     // Op fields.
     let (vault_id, collateral_in, router, pair, path0, path1, deadline_secs) = match &op.kind {
         SettlementOpKind::LiquidationSwap {
-            vault_id, collateral_in_native, router, pair, path, deadline_secs, ..
+            vault_id,
+            collateral_in_native,
+            router,
+            pair,
+            path,
+            deadline_secs,
+            ..
         } => {
             if path.len() < 2 {
                 escalate_failed_swap(chain, op_id, *vault_id, "swap path malformed".into());
                 return;
             }
-            (*vault_id, *collateral_in_native, router.clone(), pair.clone(), path[0].clone(), path[1].clone(), *deadline_secs)
+            (
+                *vault_id,
+                *collateral_in_native,
+                router.clone(),
+                pair.clone(),
+                path[0].clone(),
+                path[1].clone(),
+                *deadline_secs,
+            )
         }
         _ => return, // unreachable: caller matched LiquidationSwap
     };
@@ -1234,19 +1986,38 @@ async fn submit_liquidation_swap(
     // enabled without them.
     let snap = read_state(|s| {
         let cfg = s.multi_chain.chain_liquidation_configs.get(&chain)?;
-        let native_decimals =
-            s.multi_chain.chain_configs.get(&chain).map(|c| c.chain_native_decimals).unwrap_or(18);
+        let native_decimals = s
+            .multi_chain
+            .chain_configs
+            .get(&chain)
+            .map(|c| c.chain_native_decimals)
+            .unwrap_or(18);
         let symbol = crate::chains::evm::evm_chain_config(chain).map(|c| c.native_symbol)?;
-        let price = liq::fresh_chain_price_e8(&s.multi_chain, chain, symbol, now, cfg.max_price_age_ns).ok()?;
-        Some((cfg.fee_bps, cfg.slippage_cap_bps, cfg.max_dex_oracle_divergence_bps, cfg.settle_stable_decimals, native_decimals, price))
+        let price =
+            liq::fresh_chain_price_e8(&s.multi_chain, chain, symbol, now, cfg.max_price_age_ns)
+                .ok()?;
+        Some((
+            cfg.fee_bps,
+            cfg.slippage_cap_bps,
+            cfg.max_dex_oracle_divergence_bps,
+            cfg.settle_stable_decimals,
+            native_decimals,
+            price,
+        ))
     });
-    let (fee_bps, slippage_bps, divergence_bps, settle_decimals, native_decimals, price_e8) = match snap {
-        Some(t) => t,
-        None => {
-            escalate_failed_swap(chain, op_id, vault_id, "swap config/price unavailable".into());
-            return;
-        }
-    };
+    let (fee_bps, slippage_bps, divergence_bps, settle_decimals, native_decimals, price_e8) =
+        match snap {
+            Some(t) => t,
+            None => {
+                escalate_failed_swap(
+                    chain,
+                    op_id,
+                    vault_id,
+                    "swap config/price unavailable".into(),
+                );
+                return;
+            }
+        };
 
     // Custody signer (holds the CFX) + the derived reserve `to`.
     let (path, signer_addr) = match resolve_op_signer(chain, &op.kind).await {
@@ -1259,7 +2030,12 @@ async fn submit_liquidation_swap(
     let reserve_to = match tecdsa::cached_reserve_address(chain).await {
         Ok((_p, a)) => a,
         Err(e) => {
-            escalate_failed_swap(chain, op_id, vault_id, format!("reserve address derive: {e}"));
+            escalate_failed_swap(
+                chain,
+                op_id,
+                vault_id,
+                format!("reserve address derive: {e}"),
+            );
             return;
         }
     };
@@ -1268,7 +2044,13 @@ async fn submit_liquidation_swap(
     let finalized = match evm_rpc::fetch_block_numbers(chain).await {
         Ok((_l, f)) => f,
         Err(e) => {
-            log!(INFO, "[settlement chain={:?}] swap op {}: fetch_block_numbers failed ({}); will retry", chain, op_id, e);
+            log!(
+                INFO,
+                "[settlement chain={:?}] swap op {}: fetch_block_numbers failed ({}); will retry",
+                chain,
+                op_id,
+                e
+            );
             return;
         }
     };
@@ -1287,37 +2069,89 @@ async fn submit_liquidation_swap(
             return;
         }
     };
-    let (reserve_in, reserve_out) = if token0.eq_ignore_ascii_case(&path0) { (r0, r1) } else { (r1, r0) };
+    let (reserve_in, reserve_out) = if token0.eq_ignore_ascii_case(&path0) {
+        (r0, r1)
+    } else {
+        (r1, r0)
+    };
 
     // Infra reads (transient -> retry, do NOT escalate on a blip).
     let nonce = match evm_rpc::get_transaction_count(chain, &signer_addr).await {
         Ok(n) => n,
-        Err(e) => { log!(INFO, "[settlement chain={:?}] swap op {}: nonce read failed ({}); will retry", chain, op_id, e); return; }
+        Err(e) => {
+            log!(
+                INFO,
+                "[settlement chain={:?}] swap op {}: nonce read failed ({}); will retry",
+                chain,
+                op_id,
+                e
+            );
+            return;
+        }
     };
     let (base_fee, prio) = match evm_rpc::fetch_fees(chain).await {
         Ok(p) => p,
-        Err(e) => { log!(INFO, "[settlement chain={:?}] swap op {}: fetch_fees failed ({}); will retry", chain, op_id, e); return; }
+        Err(e) => {
+            log!(
+                INFO,
+                "[settlement chain={:?}] swap op {}: fetch_fees failed ({}); will retry",
+                chain,
+                op_id,
+                e
+            );
+            return;
+        }
     };
     let max_fee = base_fee.saturating_mul(2).saturating_add(prio);
     let custody_balance = match evm_rpc::get_balance(chain, &signer_addr).await {
         Ok(b) => b,
-        Err(e) => { log!(INFO, "[settlement chain={:?}] swap op {}: get_balance failed ({}); will retry", chain, op_id, e); return; }
+        Err(e) => {
+            log!(
+                INFO,
+                "[settlement chain={:?}] swap op {}: get_balance failed ({}); will retry",
+                chain,
+                op_id,
+                e
+            );
+            return;
+        }
     };
 
     // Gas net + JIT min-out + oracle cross-check — all fail-CLOSED (escalate).
     let fundable = fundable_swap_value(collateral_in, custody_balance, max_fee);
     if fundable == 0 {
-        escalate_failed_swap(chain, op_id, vault_id, "custody cannot cover swap gas".into());
+        escalate_failed_swap(
+            chain,
+            op_id,
+            vault_id,
+            "custody cannot cover swap gas".into(),
+        );
         return;
     }
-    let (expected_out, min_out) = liq::compute_amount_out_min(fundable, reserve_in, reserve_out, fee_bps, slippage_bps);
+    let (expected_out, min_out) =
+        liq::compute_amount_out_min(fundable, reserve_in, reserve_out, fee_bps, slippage_bps);
     if min_out == 0 {
-        escalate_failed_swap(chain, op_id, vault_id, "min-out 0 (reserves zero/too thin)".into());
+        escalate_failed_swap(
+            chain,
+            op_id,
+            vault_id,
+            "min-out 0 (reserves zero/too thin)".into(),
+        );
         return;
     }
     let oracle_value_e8 = liq::collateral_value_e8s(fundable, native_decimals, price_e8);
-    if !liq::oracle_corroborated(expected_out, settle_decimals, oracle_value_e8, divergence_bps) {
-        escalate_failed_swap(chain, op_id, vault_id, "pool price diverges from oracle (thin/manipulated)".into());
+    if !liq::oracle_corroborated(
+        expected_out,
+        settle_decimals,
+        oracle_value_e8,
+        divergence_bps,
+    ) {
+        escalate_failed_swap(
+            chain,
+            op_id,
+            vault_id,
+            "pool price diverges from oracle (thin/manipulated)".into(),
+        );
         return;
     }
 
@@ -1346,11 +2180,29 @@ async fn submit_liquidation_swap(
     };
     let raw = match tx::sign_eip1559(&fields, path, &signer_addr).await {
         Ok(h) => h,
-        Err(e) => { log!(INFO, "[settlement chain={:?}] swap op {}: sign failed ({}); will retry", chain, op_id, e); return; }
+        Err(e) => {
+            log!(
+                INFO,
+                "[settlement chain={:?}] swap op {}: sign failed ({}); will retry",
+                chain,
+                op_id,
+                e
+            );
+            return;
+        }
     };
     let local_tx_hash = match tx::raw_tx_hash(&raw) {
         Ok(h) => h,
-        Err(e) => { log!(INFO, "[settlement chain={:?}] swap op {}: signed tx hash failed ({}); will retry", chain, op_id, e); return; }
+        Err(e) => {
+            log!(
+                INFO,
+                "[settlement chain={:?}] swap op {}: signed tx hash failed ({}); will retry",
+                chain,
+                op_id,
+                e
+            );
+            return;
+        }
     };
     let claim = mutate_state(|s| {
         claim_liquidation_swap_submit_in_state(
@@ -1364,13 +2216,22 @@ async fn submit_liquidation_swap(
         )
     });
     if let Err(e) = claim {
-        log!(INFO, "[settlement chain={:?}] swap op {}: submit CAS aborted before broadcast ({:?})", chain, op_id, e);
+        log!(
+            INFO,
+            "[settlement chain={:?}] swap op {}: submit CAS aborted before broadcast ({:?})",
+            chain,
+            op_id,
+            e
+        );
         return;
     }
 
     let tx_hash = match evm_rpc::send_raw_transaction(chain, &raw).await {
         Ok(h) => h,
-        Err(e) => { log!(INFO, "[settlement chain={:?}] swap op {}: broadcast failed after submit claim ({}); receipt timeout path will resolve", chain, op_id, e); return; }
+        Err(e) => {
+            log!(INFO, "[settlement chain={:?}] swap op {}: broadcast failed after submit claim ({}); receipt timeout path will resolve", chain, op_id, e);
+            return;
+        }
     };
 
     mutate_state(|s| {
@@ -1384,41 +2245,63 @@ async fn submit_liquidation_swap(
 }
 
 /// Confirm path: check an `Inflight` op's receipt and finalize on success.
-async fn confirm_op(
-    chain: ChainId,
-    op_id: u64,
-    op: crate::chains::settlement_queue::SettlementOp,
-) {
-    // The submit path always sets last_tx_hash before going Inflight; a None
-    // here is defensive (e.g. a manually-poked state) — log and bail.
-    let tx_hash = match &op.last_tx_hash {
+async fn confirm_op(chain: ChainId, op_id: u64, op: crate::chains::settlement_queue::SettlementOp) {
+    // The submit path always records at least one hash before going Inflight.
+    // `tx_hash_candidates` can include older same-nonce hashes retained across
+    // payout RBF attempts; if any candidate landed, that receipt is canonical.
+    let tx_hashes = op.receipt_tx_hash_candidates();
+    let latest_tx_hash = match tx_hashes.first() {
         Some(h) => h.clone(),
         None => {
-            log!(INFO, "[settlement chain={:?}] inflight op {} has no last_tx_hash; skipping", chain, op_id);
+            log!(
+                INFO,
+                "[settlement chain={:?}] inflight op {} has no tx hash candidates; skipping",
+                chain,
+                op_id
+            );
             return;
         }
     };
 
     // 1. Fetch the receipt.
-    let receipt = match evm_rpc::get_transaction_receipt(chain, &tx_hash).await {
-        Ok(r) => r,
-        Err(e) => {
-            log!(INFO, "[settlement chain={:?}] get_transaction_receipt failed for op {} tx {}: {}; will retry", chain, op_id, tx_hash, e);
-            return;
+    let mut mined_receipt = None;
+    let mut receipt_errors = Vec::new();
+    for candidate in &tx_hashes {
+        match evm_rpc::get_transaction_receipt(chain, candidate).await {
+            Ok(Some(pair)) => {
+                mined_receipt = Some((candidate.clone(), pair));
+                break;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                receipt_errors.push((candidate.clone(), e));
+            }
         }
-    };
+    }
+    if mined_receipt.is_none() && !receipt_errors.is_empty() {
+        let (candidate, err) = &receipt_errors[0];
+        log!(INFO, "[settlement chain={:?}] get_transaction_receipt failed for op {} tx {}: {}; will retry", chain, op_id, candidate, err);
+        return;
+    }
 
-    let (status_ok, block_number) = match receipt {
-        Some(pair) => pair,
+    let (tx_hash, status_ok, block_number) = match mined_receipt {
+        Some((hash, pair)) => (hash, pair.0, pair.1),
         None => {
             // LiquidationSwap: NEVER replace-by-fee (spec §4.8). A never-mined swap
             // instead TIMES OUT -> Failed -> escalate (findings #12/#22), so it can
             // never wedge the vault marker + reserved collateral. The timeout
             // (deadline + finality margin) exceeds chain finality, so a
             // mined-then-reverted swap is caught by the revert branch first.
-            if let SettlementOpKind::LiquidationSwap { vault_id, deadline_secs, .. } = &op.kind {
+            if let SettlementOpKind::LiquidationSwap {
+                vault_id,
+                deadline_secs,
+                ..
+            } = &op.kind
+            {
                 let last_attempt = match &op.status {
-                    SettlementOpStatus::Inflight { last_attempt_ns, .. } => *last_attempt_ns,
+                    SettlementOpStatus::Inflight {
+                        last_attempt_ns, ..
+                    } => *last_attempt_ns,
                     _ => return,
                 };
                 let now = ic_cdk::api::time();
@@ -1428,7 +2311,12 @@ async fn confirm_op(
                     *deadline_secs,
                     hardening::SWAP_CONFIRM_FINALITY_MARGIN_SECS,
                 ) {
-                    escalate_failed_swap(chain, op_id, *vault_id, "swap confirm timeout (never mined)".into());
+                    escalate_failed_swap(
+                        chain,
+                        op_id,
+                        *vault_id,
+                        "swap confirm timeout (never mined)".into(),
+                    );
                     return;
                 }
                 // Not timed out yet: advance tries for visibility, never resubmit.
@@ -1459,7 +2347,10 @@ async fn confirm_op(
                 }
             };
             let finality_depth = read_state(|s| {
-                s.multi_chain.chain_configs.get(&chain).map(|c| c.finality_depth)
+                s.multi_chain
+                    .chain_configs
+                    .get(&chain)
+                    .map(|c| c.finality_depth)
             })
             .unwrap_or(1);
             let has_nonce = op.submit_nonce.is_some();
@@ -1485,7 +2376,15 @@ async fn confirm_op(
             // re-sign + rebroadcast and does NOT advance tries again (confirm_op
             // owns the per-tick advance now), avoiding a double-advance.
             if do_resubmit {
-                resubmit_if_stuck(chain, op_id, &op, &tx_hash, new_tries, finality_depth).await;
+                resubmit_if_stuck(
+                    chain,
+                    op_id,
+                    &op,
+                    &latest_tx_hash,
+                    new_tries,
+                    finality_depth,
+                )
+                .await;
             }
             return;
         }
@@ -1530,6 +2429,25 @@ async fn confirm_op(
             return;
         }
         let reason = "tx reverted".to_string();
+        if let SettlementOpKind::ChainCollateralPayout {
+            vault_id,
+            amount_e18,
+            claimant,
+            ..
+        } = &op.kind
+        {
+            let claim_id = *vault_id;
+            let amount_wei = *amount_e18;
+            let claimant = *claimant;
+            if recredit_and_fail_chain_collateral_payout(
+                chain, op_id, claim_id, claimant, amount_wei, reason, now,
+            )
+            .await
+            {
+                log!(INFO, "[settlement chain={:?}] claim payout op {} tx {} reverted; marked Failed and released pending claim", chain, op_id, tx_hash);
+            }
+            return;
+        }
         let did_revert = mutate_state(|s| {
             // CAS: only the first tick to observe this op Inflight does the work.
             let still_inflight = s
@@ -1550,7 +2468,11 @@ async fn confirm_op(
                         v.pending_mint_e8s = 0;
                     }
                 }
-                SettlementOpKind::NativeWithdrawal { vault_id, amount_e18, .. } => {
+                SettlementOpKind::NativeWithdrawal {
+                    vault_id,
+                    amount_e18,
+                    ..
+                } => {
                     if let Some(v) = s.multi_chain.chain_vaults.get_mut(vault_id) {
                         v.collateral_amount_native =
                             v.collateral_amount_native.saturating_add(*amount_e18);
@@ -1560,9 +2482,9 @@ async fn confirm_op(
                     }
                 }
                 SettlementOpKind::ChainCollateralPayout { .. } => {
-                    // Claim payout reversals are NOT vault collateral reversals.
-                    // The SP-side cfx_claims rollback lands with claim_cfx; for
-                    // now just mark the op failed without touching the vault.
+                    // Handled above through fail_chain_collateral_payout_in_state
+                    // so backend claim capacity is released atomically with the
+                    // terminal op transition.
                 }
                 SettlementOpKind::InterestMint { vault_id, .. } => {
                     // Task 12: no debt/supply was credited (the mint reverted), so
@@ -1601,7 +2523,13 @@ async fn confirm_op(
                 reason,
                 timestamp: now,
             });
-            log!(INFO, "[settlement chain={:?}] op {} tx {} reverted; marked Failed", chain, op_id, tx_hash);
+            log!(
+                INFO,
+                "[settlement chain={:?}] op {} tx {} reverted; marked Failed",
+                chain,
+                op_id,
+                tx_hash
+            );
         }
         return;
     }
@@ -1634,7 +2562,15 @@ async fn confirm_op(
                 }
             };
 
-            let logs = match evm_rpc::get_logs(chain, &contract, evm_rpc::MINT_EVENT_TOPIC0, block_number, block_number).await {
+            let logs = match evm_rpc::get_logs(
+                chain,
+                &contract,
+                evm_rpc::MINT_EVENT_TOPIC0,
+                block_number,
+                block_number,
+            )
+            .await
+            {
                 Ok(l) => l,
                 Err(e) => {
                     log!(INFO, "[settlement chain={:?}] get_logs(mint) failed confirming op {}: {}; will retry", chain, op_id, e);
@@ -1665,7 +2601,13 @@ async fn confirm_op(
                     }
                     Ok(_) => {}
                     Err(e) => {
-                        log!(INFO, "[settlement chain={:?}] decode_mint_log failed confirming op {}: {}", chain, op_id, e);
+                        log!(
+                            INFO,
+                            "[settlement chain={:?}] decode_mint_log failed confirming op {}: {}",
+                            chain,
+                            op_id,
+                            e
+                        );
                     }
                 }
             }
@@ -1683,8 +2625,12 @@ async fn confirm_op(
             // recipient-agnostic, so without this check a mint to the WRONG
             // address would still balance and be marked Succeeded. A mismatch is a
             // real divergence: leave the op Inflight and do NOT credit.
-            let intended_recipient =
-                read_state(|s| s.multi_chain.chain_vaults.get(&vault_id).map(|v| v.mint_recipient.clone()));
+            let intended_recipient = read_state(|s| {
+                s.multi_chain
+                    .chain_vaults
+                    .get(&vault_id)
+                    .map(|v| v.mint_recipient.clone())
+            });
             match intended_recipient {
                 Some(intended) if intended.eq_ignore_ascii_case(&observed_recipient) => {}
                 Some(intended) => {
@@ -1703,7 +2649,14 @@ async fn confirm_op(
             let pre_total = read_state(|s| s.multi_chain.total_chain_vault_debt_e8s());
 
             let result = mutate_state(|s| {
-                confirm_mint_in_state(&mut s.multi_chain, chain, vault_id, observed_e8s, pre_total, now)
+                confirm_mint_in_state(
+                    &mut s.multi_chain,
+                    chain,
+                    vault_id,
+                    observed_e8s,
+                    pre_total,
+                    now,
+                )
             });
 
             match result {
@@ -1739,7 +2692,13 @@ async fn confirm_op(
                 }
             }
         }
-        SettlementOpKind::InterestMint { vault_id, mint_id, accrual_through_ns, recipient, .. } => {
+        SettlementOpKind::InterestMint {
+            vault_id,
+            mint_id,
+            accrual_through_ns,
+            recipient,
+            ..
+        } => {
             // Task 12: same Mint-log read as a vault mint, but matched by the
             // SYNTHETIC `mint_id` and recipient-verified against the interest
             // treasury. On confirm, debt + supply grow together for the REAL vault.
@@ -1757,7 +2716,15 @@ async fn confirm_op(
                 }
             };
 
-            let logs = match evm_rpc::get_logs(chain, &contract, evm_rpc::MINT_EVENT_TOPIC0, block_number, block_number).await {
+            let logs = match evm_rpc::get_logs(
+                chain,
+                &contract,
+                evm_rpc::MINT_EVENT_TOPIC0,
+                block_number,
+                block_number,
+            )
+            .await
+            {
                 Ok(l) => l,
                 Err(e) => {
                     log!(INFO, "[settlement chain={:?}] get_logs(interest mint) failed confirming op {}: {}; will retry", chain, op_id, e);
@@ -1803,7 +2770,12 @@ async fn confirm_op(
             let pre_total = read_state(|s| s.multi_chain.total_chain_vault_debt_e8s());
             let result = mutate_state(|s| {
                 confirm_interest_mint_in_state(
-                    &mut s.multi_chain, chain, vault_id, observed_e8s, accrual_through_ns, pre_total,
+                    &mut s.multi_chain,
+                    chain,
+                    vault_id,
+                    observed_e8s,
+                    accrual_through_ns,
+                    pre_total,
                 )
             });
 
@@ -1855,30 +2827,49 @@ async fn confirm_op(
             });
             log!(INFO, "[settlement chain={:?}] withdrawal op {} vault {} confirmed tx={} (Closing->Closed if applicable)", chain, op_id, vid, tx_hash);
         }
-        SettlementOpKind::ChainCollateralPayout { vault_id, recipient, amount_e18, .. } => {
+        SettlementOpKind::ChainCollateralPayout {
+            vault_id,
+            recipient,
+            amount_e18,
+            ..
+        } => {
             let vid = *vault_id;
             let recipient = recipient.clone();
             let amount = *amount_e18;
-            mutate_state(|s| {
-                if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
-                    if let Some(o) = q.pending.get_mut(&op_id) {
-                        o.mark_succeeded(tx_hash.clone(), now);
-                    }
+            match mutate_state(|s| {
+                confirm_chain_collateral_payout_in_state(
+                    &mut s.multi_chain,
+                    chain,
+                    op_id,
+                    tx_hash.clone(),
+                    now,
+                )
+            }) {
+                Ok(true) => {
+                    crate::storage::record_event(&crate::event::Event::ChainCfxClaimSettled {
+                        chain_id: chain,
+                        claim_id: vid,
+                        recipient: recipient.clone(),
+                        amount_native: amount,
+                        timestamp: now,
+                    });
+                    log!(INFO, "[settlement chain={:?}] chain-collateral payout op {} vault/claim {} confirmed tx={} recipient={} amount={}", chain, op_id, vid, tx_hash, recipient, amount);
                 }
-            });
-            crate::storage::record_event(&crate::event::Event::ChainCfxClaimSettled {
-                chain_id: chain,
-                claim_id: vid,
-                recipient: recipient.clone(),
-                amount_native: amount,
-                timestamp: now,
-            });
-            log!(INFO, "[settlement chain={:?}] chain-collateral payout op {} vault/claim {} confirmed tx={} recipient={} amount={}", chain, op_id, vid, tx_hash, recipient, amount);
+                Ok(false) => {}
+                Err(e) => {
+                    log!(INFO, "[settlement chain={:?}] chain-collateral payout confirm FAILED for op {} claim {}: {}; left Inflight", chain, op_id, vid, e);
+                }
+            }
         }
         SettlementOpKind::Burn { .. } => {
             // Unreachable: a Burn op is marked Failed on the submit path and
             // never goes Inflight. Log defensively rather than panic.
-            log!(INFO, "[settlement chain={:?}] inflight Burn op {} reached confirm path unexpectedly", chain, op_id);
+            log!(
+                INFO,
+                "[settlement chain={:?}] inflight Burn op {} reached confirm path unexpectedly",
+                chain,
+                op_id
+            );
         }
         SettlementOpKind::LiquidationSwap { vault_id, path, .. } => {
             // Mined + ok + final: read the REALIZED settle-stable output from the
@@ -1894,11 +2885,22 @@ async fn confirm_op(
                 }
             };
             let settle_decimals = read_state(|s| {
-                s.multi_chain.chain_liquidation_configs.get(&chain).map(|c| c.settle_stable_decimals)
+                s.multi_chain
+                    .chain_liquidation_configs
+                    .get(&chain)
+                    .map(|c| c.settle_stable_decimals)
             })
             .unwrap_or(18);
 
-            let logs = match evm_rpc::get_logs(chain, &settle_stable, evm_rpc::TRANSFER_EVENT_TOPIC0, block_number, block_number).await {
+            let logs = match evm_rpc::get_logs(
+                chain,
+                &settle_stable,
+                evm_rpc::TRANSFER_EVENT_TOPIC0,
+                block_number,
+                block_number,
+            )
+            .await
+            {
                 Ok(l) => l,
                 Err(e) => {
                     log!(INFO, "[settlement chain={:?}] swap confirm op {}: get_logs(Transfer) failed ({}); will retry", chain, op_id, e);
@@ -1927,7 +2929,15 @@ async fn confirm_op(
 
             // Phase 2 (state-only): clamp + move debt -> reserve; events emitted here.
             let settled = mutate_state(|s| {
-                apply_liquidation_settlement_in_state(&mut s.multi_chain, chain, vault_id, op_id, realized_usdc, settle_decimals)
+                apply_liquidation_settlement_in_state(
+                    &mut s.multi_chain,
+                    chain,
+                    vault_id,
+                    op_id,
+                    realized_usdc,
+                    settle_decimals,
+                    now,
+                )
             });
             match settled {
                 Ok(res) => {
@@ -1954,6 +2964,29 @@ async fn confirm_op(
                         usdc_native: res.realized_usdc_native,
                         timestamp: now,
                     });
+                    if res.bad_debt_circuit_tripped {
+                        crate::storage::record_event(
+                            &crate::event::Event::ChainBadDebtCircuitTripped {
+                                chain_id: chain,
+                                bad_debt_e8s: res.bad_debt_added_e8s,
+                                total_bad_debt_e8s: read_state(|s| {
+                                    s.multi_chain
+                                        .chain_bad_debt_e8s
+                                        .get(&chain)
+                                        .copied()
+                                        .unwrap_or(0)
+                                }),
+                                threshold_e8s: read_state(|s| {
+                                    s.multi_chain
+                                        .chain_bad_debt_circuit_threshold_e8s
+                                        .get(&chain)
+                                        .copied()
+                                        .unwrap_or(0)
+                                }),
+                                timestamp: now,
+                            },
+                        );
+                    }
                     log!(INFO, "[settlement chain={:?}] liquidation swap confirmed: op={} vault={} cleared_e8s={} realized_usdc={} block={} tx={}", chain, op_id, vault_id, res.actual_cleared, realized_usdc, block_number, tx_hash);
                 }
                 Err(e) => {
@@ -1994,7 +3027,12 @@ async fn resubmit_if_stuck(
     // A stuck swap simply hits its on-chain deadline and reverts; Increment 3's
     // confirm-timeout marks it Failed -> escalate. (Inert in Increment 2.)
     if matches!(op.kind, SettlementOpKind::LiquidationSwap { .. }) {
-        log!(INFO, "[settlement chain={:?}] op {} is a liquidation swap; never replace-by-fee (spec §4.8)", chain, op_id);
+        log!(
+            INFO,
+            "[settlement chain={:?}] op {} is a liquidation swap; never replace-by-fee (spec §4.8)",
+            chain,
+            op_id
+        );
         return;
     }
     // We can only replace-by-fee if we know the nonce the op was first submitted
@@ -2029,35 +3067,50 @@ async fn resubmit_if_stuck(
     let base_max_fee = base_fee.saturating_mul(2).saturating_add(prio);
     let (bumped_prio, bumped_max) = hardening::bump_gas(prio, base_max_fee);
 
-    // Re-net the withdrawal value at the BUMPED fee so the replacement still
-    // fits within the custody balance (a higher gas reserve sends marginally
-    // less collateral — fine for a replace-by-fee). Mints carry no value.
-    let withdrawal_value = if matches!(
-        op.kind,
-        SettlementOpKind::NativeWithdrawal { .. } | SettlementOpKind::ChainCollateralPayout { .. }
-    ) {
-        match evm_rpc::get_balance(chain, &signer_addr).await {
-            Ok(bal) => {
-                if let SettlementOpKind::NativeWithdrawal { amount_e18, .. }
-                | SettlementOpKind::ChainCollateralPayout { amount_e18, .. } = &op.kind {
-                    Some(fundable_withdrawal_value(*amount_e18, bal, bumped_max))
-                } else {
-                    None
+    // Re-net withdrawal value at the BUMPED fee. Claim payouts remain exact:
+    // if custody cannot fund amount + bumped gas, leave the original tx Inflight
+    // and retry receipt/replacement later.
+    let withdrawal_value = match &op.kind {
+        SettlementOpKind::NativeWithdrawal { amount_e18, .. } => {
+            match evm_rpc::get_balance(chain, &signer_addr).await {
+                Ok(bal) => Some(fundable_withdrawal_value(*amount_e18, bal, bumped_max)),
+                Err(e) => {
+                    log!(INFO, "[settlement chain={:?}] resubmit get_balance(custody) failed for op {}: {}; leaving Inflight", chain, op_id, e);
+                    return;
                 }
             }
-            Err(e) => {
-                log!(INFO, "[settlement chain={:?}] resubmit get_balance(custody) failed for op {}: {}; leaving Inflight", chain, op_id, e);
-                return;
+        }
+        SettlementOpKind::ChainCollateralPayout { amount_e18, .. } => {
+            match evm_rpc::get_balance(chain, &signer_addr).await {
+                Ok(bal) => {
+                    if !exact_native_transfer_is_funded(*amount_e18, bal, bumped_max) {
+                        log!(INFO, "[settlement chain={:?}] resubmit claim payout op {} custody balance {} cannot fund exact amount {} plus bumped gas; leaving Inflight", chain, op_id, bal, amount_e18);
+                        return;
+                    }
+                    None
+                }
+                Err(e) => {
+                    log!(INFO, "[settlement chain={:?}] resubmit get_balance(custody) failed for op {}: {}; leaving Inflight", chain, op_id, e);
+                    return;
+                }
             }
         }
-    } else {
-        None
+        _ => None,
     };
 
     // Resolve the contract (mints only) and rebuild the SAME tx at the stored
     // nonce with the bumped fees.
     let contract = read_state(|s| s.multi_chain.chain_contracts.get(&chain).cloned());
-    let plan = match build_tx_plan(chain, &op.kind, op_id, nonce, bumped_prio, bumped_max, contract.as_deref(), withdrawal_value) {
+    let plan = match build_tx_plan(
+        chain,
+        &op.kind,
+        op_id,
+        nonce,
+        bumped_prio,
+        bumped_max,
+        contract.as_deref(),
+        withdrawal_value,
+    ) {
         Ok(p) => p,
         Err(e) => {
             log!(INFO, "[settlement chain={:?}] resubmit build_tx_plan failed for op {}: {}; leaving Inflight", chain, op_id, e);
@@ -2073,12 +3126,45 @@ async fn resubmit_if_stuck(
             return;
         }
     };
+    let chain_payout_replacement_hash = if matches!(
+        op.kind,
+        SettlementOpKind::ChainCollateralPayout { .. }
+    ) {
+        match tx::raw_tx_hash(&raw_hex) {
+            Ok(h) => Some(h),
+            Err(e) => {
+                log!(INFO, "[settlement chain={:?}] resubmit signed tx hash failed for claim payout op {}: {}; leaving Inflight", chain, op_id, e);
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(local_tx_hash) = &chain_payout_replacement_hash {
+        let recorded = mutate_state(|s| {
+            record_chain_collateral_payout_replacement_in_state(
+                &mut s.multi_chain,
+                chain,
+                op_id,
+                ic_cdk::api::time(),
+                local_tx_hash.clone(),
+            )
+        });
+        if let Err(e) = recorded {
+            log!(INFO, "[settlement chain={:?}] resubmit claim payout op {}: replacement record aborted before broadcast ({:?})", chain, op_id, e);
+            return;
+        }
+    }
 
     // Rebroadcast.
     let new_tx_hash = match evm_rpc::send_raw_transaction(chain, &raw_hex).await {
         Ok(h) => h,
         Err(e) => {
-            log!(INFO, "[settlement chain={:?}] resubmit send_raw_transaction failed for op {}: {}; leaving Inflight", chain, op_id, e);
+            if matches!(op.kind, SettlementOpKind::ChainCollateralPayout { .. }) {
+                log!(INFO, "[settlement chain={:?}] resubmit claim payout op {}: broadcast failed after replacement record ({}); receipt path will watch replacement hash", chain, op_id, e);
+            } else {
+                log!(INFO, "[settlement chain={:?}] resubmit send_raw_transaction failed for op {}: {}; leaving Inflight", chain, op_id, e);
+            }
             return;
         }
     };
@@ -2092,8 +3178,15 @@ async fn resubmit_if_stuck(
     mutate_state(|s| {
         if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
             if let Some(o) = q.pending.get_mut(&op_id) {
-                o.last_tx_hash = Some(new_tx_hash.clone());
-                if let SettlementOpStatus::Inflight { last_attempt_ns, .. } = &mut o.status {
+                if matches!(o.kind, SettlementOpKind::ChainCollateralPayout { .. }) {
+                    o.record_tx_hash_candidate(new_tx_hash.clone());
+                } else {
+                    o.last_tx_hash = Some(new_tx_hash.clone());
+                }
+                if let SettlementOpStatus::Inflight {
+                    last_attempt_ns, ..
+                } = &mut o.status
+                {
                     *last_attempt_ns = now;
                 }
             }

@@ -84,6 +84,13 @@ pub fn evm_chain_config(chain: ChainId) -> Option<EvmChainConfig> {
             native_decimals: 18,
             native_symbol: "CFX",
         }),
+        1030 => Some(EvmChainConfig {
+            chain_id: ChainId(1030),
+            ecdsa_key_name: "test_key_1",
+            getlogs_max_range: 1000,
+            native_decimals: 18,
+            native_symbol: "CFX",
+        }),
         _ => None,
     }
 }
@@ -107,6 +114,15 @@ mod tests {
         assert_eq!(c.getlogs_max_range, 1000);
         assert_eq!(c.native_symbol, "CFX");
         assert_eq!(c.native_decimals, 18);
+    }
+
+    #[test]
+    fn conflux_mainnet_1030_getlogs_range_1000() {
+        let c = evm_chain_config(ChainId(1030)).expect("conflux mainnet known");
+        assert_eq!(c.getlogs_max_range, 1000);
+        assert_eq!(c.native_symbol, "CFX");
+        assert_eq!(c.native_decimals, 18);
+        assert_eq!(c.ecdsa_key_name, "test_key_1");
     }
 
     #[test]

@@ -159,6 +159,21 @@ pub fn default_interest_split() -> Vec<InterestRecipient> {
     ]
 }
 pub const DUST_DEBT_THRESHOLD: u64 = 50_000; // 0.0005 icUSD — debt below this is forgiven on withdrawal
+pub const MAX_SP_CHAIN_ABSORB_RESULTS_BY_PROOF: usize = 10_000;
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct StoredChainSpAbsorbResult {
+    pub caller: Principal,
+    pub vault_id: u64,
+    pub chain_id: crate::chains::config::ChainId,
+    pub icusd_burned_e8s: u64,
+    pub liquidated_debt_e8s: u128,
+    pub collateral_received_native: u128,
+    pub claim_id: u64,
+    pub custody_address: String,
+    pub block_index: u64,
+    pub collateral_price_e8s: u64,
+}
 
 /// Wave-8b LIQ-002: default tolerance band (in absolute CR units) above the
 /// worst-CR vault inside which liquidations are accepted. 0.01 = 1% CR. With
@@ -1456,6 +1471,17 @@ pub struct State {
     /// concern.
     #[serde(default)]
     pub consumed_writedown_proofs: BTreeSet<(crate::icrc3_proof::SpProofLedger, u64)>,
+    /// Inc 8: idempotent result cache for SP chain-vault absorbs keyed by the
+    /// consumed proof. Lets the SP recover a lost reply without burning again.
+    #[serde(default)]
+    pub sp_chain_absorb_results_by_proof:
+        BTreeMap<(crate::icrc3_proof::SpProofLedger, u64), StoredChainSpAbsorbResult>,
+    /// Inc 9: short-lived pre-burn reservations keyed by vault id. The SP must
+    /// obtain one immediately before burning; a matching reservation lets the
+    /// backend finalize an already-burned absorb even if an admin kill switch
+    /// flips before the post-burn call returns.
+    #[serde(default)]
+    pub sp_chain_absorb_preflights: BTreeMap<u64, StoredChainSpAbsorbPreflight>,
 
     // ─── Wave-8e LIQ-005: bad-debt deficit account ───
     //
@@ -1743,6 +1769,18 @@ pub struct TreasuryStatsSnapshot {
     pub total_accrued_interest_system: u64,
 }
 
+#[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct StoredChainSpAbsorbPreflight {
+    pub caller: Principal,
+    pub vault_id: u64,
+    pub icusd_burn_e8s: u64,
+    pub chain_id: crate::chains::config::ChainId,
+    pub price_e8: u64,
+    pub native_decimals: u8,
+    pub liquidation_penalty_bps: u64,
+    pub expires_at_ns: u64,
+}
+
 /// Serde-only fallback: provides zero/empty/None defaults for fields missing from
 /// old CBOR snapshots. Never used for actual State construction (use From<InitArg>).
 impl Default for State {
@@ -1861,6 +1899,8 @@ impl Default for State {
             liquidation_ordering_tolerance: DEFAULT_LIQUIDATION_ORDERING_TOLERANCE,
             sp_writedown_disabled: false,
             consumed_writedown_proofs: BTreeSet::new(),
+            sp_chain_absorb_results_by_proof: BTreeMap::new(),
+            sp_chain_absorb_preflights: BTreeMap::new(),
             // Wave-8e LIQ-005
             protocol_deficit_icusd: ICUSD::new(0),
             total_deficit_repaid_icusd: ICUSD::new(0),
@@ -2129,6 +2169,8 @@ impl From<InitArg> for State {
             liquidation_ordering_tolerance: DEFAULT_LIQUIDATION_ORDERING_TOLERANCE,
             sp_writedown_disabled: false,
             consumed_writedown_proofs: BTreeSet::new(),
+            sp_chain_absorb_results_by_proof: BTreeMap::new(),
+            sp_chain_absorb_preflights: BTreeMap::new(),
             // Wave-8e LIQ-005
             protocol_deficit_icusd: ICUSD::new(0),
             total_deficit_repaid_icusd: ICUSD::new(0),
@@ -7122,6 +7164,21 @@ mod tests {
             .entry(Principal::anonymous())
             .or_default()
             .insert(42);
+        state.sp_chain_absorb_results_by_proof.insert(
+            (crate::icrc3_proof::SpProofLedger::IcusdBurn, 44),
+            StoredChainSpAbsorbResult {
+                caller: Principal::anonymous(),
+                vault_id: 77,
+                chain_id: crate::chains::config::ChainId(1030),
+                icusd_burned_e8s: 100_00000000,
+                liquidated_debt_e8s: 100_00000000,
+                collateral_received_native: 10_000_000_000_000_000_000u128,
+                claim_id: 77,
+                custody_address: "0xcustody".to_string(),
+                block_index: 44,
+                collateral_price_e8s: 5_000_000,
+            },
+        );
 
         // Serialize
         let mut buf = Vec::new();
@@ -7149,6 +7206,10 @@ mod tests {
         assert_eq!(
             restored.next_available_vault_id,
             state.next_available_vault_id
+        );
+        assert_eq!(
+            restored.sp_chain_absorb_results_by_proof, state.sp_chain_absorb_results_by_proof,
+            "SP chain absorb replay cache must survive upgrade round-trip",
         );
     }
 
@@ -7570,6 +7631,33 @@ mod tests {
             // Other fields should still be intact
             assert_eq!(restored.mode, state.mode);
             assert_eq!(restored.developer_principal, state.developer_principal);
+        } else {
+            panic!("expected CBOR map");
+        }
+    }
+
+    #[test]
+    fn sp_chain_absorb_results_decode_empty_when_missing() {
+        let state = test_state();
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&state, &mut buf).unwrap();
+
+        let value: ciborium::Value = ciborium::de::from_reader(buf.as_slice()).unwrap();
+        if let ciborium::Value::Map(mut entries) = value {
+            let original_len = entries.len();
+            entries.retain(|(k, _)| {
+                !matches!(k, ciborium::Value::Text(key) if key == "sp_chain_absorb_results_by_proof")
+            });
+            assert_eq!(
+                entries.len(),
+                original_len - 1,
+                "should have removed sp_chain_absorb_results_by_proof",
+            );
+
+            let mut modified_buf = Vec::new();
+            ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut modified_buf).unwrap();
+            let restored: State = ciborium::de::from_reader(modified_buf.as_slice()).unwrap();
+            assert!(restored.sp_chain_absorb_results_by_proof.is_empty());
         } else {
             panic!("expected CBOR map");
         }

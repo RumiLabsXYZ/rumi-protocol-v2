@@ -289,7 +289,7 @@ pub fn prune_recovered_chain_routing_state(
         .map(|c| c.interest_apr_bps)
         .unwrap_or(0);
 
-    let mut recovered: Vec<u64> = Vec::new();
+    let mut recovered: Vec<(u64, bool)> = Vec::new();
     for (&vid, v) in state.chain_vaults.iter() {
         if v.collateral_chain != chain || v.pending_liquidation.is_some() {
             continue;
@@ -312,12 +312,14 @@ pub fn prune_recovered_chain_routing_state(
             Err(_) => false, // no fresh price -> do not prune on CR
         };
         if resolved || recovered_above {
-            recovered.push(vid);
+            recovered.push((vid, resolved));
         }
     }
-    for vid in recovered {
+    for (vid, resolved) in recovered {
         state.bot_pending_chain_vaults.remove(&vid);
-        state.sp_attempted_chain_vaults.remove(&vid);
+        if resolved {
+            state.sp_attempted_chain_vaults.remove(&vid);
+        }
     }
 }
 
@@ -923,7 +925,7 @@ mod tests {
     }
 
     #[test]
-    fn prune_clears_recovered_and_resolved_vaults() {
+    fn prune_keeps_sp_attempted_on_recovery_until_absorb_or_resolution() {
         let mut s = MultiChainState::default();
         seed_cfg_unchecked(&mut s);
         s.manual_prices.insert((ChainId(71), "CFX".into()), 15_000_000); // $0.15
@@ -940,7 +942,17 @@ mod tests {
 
         assert!(!s.bot_pending_chain_vaults.contains_key(&7), "recovered vault cleared");
         assert!(!s.bot_pending_chain_vaults.contains_key(&8), "resolved vault cleared");
-        assert!(!s.sp_attempted_chain_vaults.contains(&7), "sp-attempted cleared on recovery");
+        assert!(
+            s.sp_attempted_chain_vaults.contains(&7),
+            "sp-attempted must survive CR recovery so a just-burned SP absorb cannot be pruned before backend finalization",
+        );
+
+        s.chain_vaults.get_mut(&7).unwrap().status = ChainVaultStatus::Closed;
+        prune_recovered_chain_routing_state(&mut s, ChainId(71), "CFX", 13_300, 6_000);
+        assert!(
+            !s.sp_attempted_chain_vaults.contains(&7),
+            "resolved vaults still clear stale SP routing state",
+        );
     }
 
     #[test]
