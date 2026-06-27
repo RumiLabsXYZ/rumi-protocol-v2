@@ -26,8 +26,7 @@ pub fn accrued_chain_interest_e8s(debt_e8s: u128, apr_bps: u64, elapsed_ns: u64)
         None => return 0,
     };
     let rate = Decimal::from(apr_bps) / Decimal::from(10_000u64);
-    let factor =
-        Decimal::ONE + rate * Decimal::from(elapsed_ns) / Decimal::from(NANOS_PER_YEAR);
+    let factor = Decimal::ONE + rate * Decimal::from(elapsed_ns) / Decimal::from(NANOS_PER_YEAR);
     // new_debt = ceil(debt * factor); the accrued interest is the delta. Defer
     // on a Decimal->u128 overflow (unreachable at real debt scales).
     let new_debt = match (debt * factor).ceil().to_u128() {
@@ -60,6 +59,15 @@ pub fn harvest_chain_interest_in_state(
     now_ns: u64,
     mut alloc_mint_id: impl FnMut() -> u64,
 ) -> Vec<u64> {
+    if state.chain_bad_debt_circuit_tripped(chain) {
+        ic_canister_log::log!(
+            crate::logs::INFO,
+            "[harvest chain={:?}] bad-debt circuit tripped; skipping interest mint enqueue",
+            chain
+        );
+        return Vec::new();
+    }
+
     // Phase 1: pick eligible vaults + locked-in amounts (immutable scan, so the
     // mint-id allocator + enqueue can borrow `state` mutably in phase 2).
     let eligible: Vec<(u64, u128)> = state
@@ -96,7 +104,12 @@ pub fn harvest_chain_interest_in_state(
             format!("interest-{}-{}", chain.0, mint_id),
             now_ns,
         );
-        match state.settlement_queues.entry(chain).or_default().enqueue(op) {
+        match state
+            .settlement_queues
+            .entry(chain)
+            .or_default()
+            .enqueue(op)
+        {
             Ok(op_id) => {
                 if let Some(v) = state.chain_vaults.get_mut(&vault_id) {
                     v.pending_interest_mint_e8s = amount;
@@ -129,12 +142,18 @@ mod tests {
 
     #[test]
     fn two_percent_full_year_on_100_icusd_is_2_icusd() {
-        assert_eq!(accrued_chain_interest_e8s(100 * E8, 200, NANOS_PER_YEAR), 2 * E8);
+        assert_eq!(
+            accrued_chain_interest_e8s(100 * E8, 200, NANOS_PER_YEAR),
+            2 * E8
+        );
     }
 
     #[test]
     fn half_year_is_half_the_interest() {
-        assert_eq!(accrued_chain_interest_e8s(100 * E8, 200, NANOS_PER_YEAR / 2), E8);
+        assert_eq!(
+            accrued_chain_interest_e8s(100 * E8, 200, NANOS_PER_YEAR / 2),
+            E8
+        );
     }
 
     #[test]
@@ -161,7 +180,10 @@ mod tests {
     #[test]
     fn overflow_defers_to_zero_not_panic() {
         // u128::MAX exceeds Decimal's range -> defer (0), never panic.
-        assert_eq!(accrued_chain_interest_e8s(u128::MAX, 200, NANOS_PER_YEAR), 0);
+        assert_eq!(
+            accrued_chain_interest_e8s(u128::MAX, 200, NANOS_PER_YEAR),
+            0
+        );
     }
 
     // ─── harvest_chain_interest_in_state ────────────────────────────────────
@@ -199,29 +221,51 @@ mod tests {
                 owner_evm: None,
                 last_interest_accrual_ns: last_accrual_ns,
                 pending_interest_mint_e8s: pending_interest,
-                pending_liquidation: None,            },
+                pending_liquidation: None,
+            },
         );
     }
 
     #[test]
     fn harvest_enqueues_one_interest_mint_per_eligible_vault() {
         let mut s = MultiChainState::default();
-        open_vault(&mut s, 1, 100 * E8, /*last accrual a year ago*/ 0, 0, ChainVaultStatus::Open);
+        open_vault(
+            &mut s,
+            1,
+            100 * E8,
+            /*last accrual a year ago*/ 0,
+            0,
+            ChainVaultStatus::Open,
+        );
         let now = NANOS_PER_YEAR;
         let mut next = 1000u64;
-        let ops = harvest_chain_interest_in_state(&mut s, CHAIN, 200, 1_000_000, TREASURY, now, || {
-            next += 1;
-            next
-        });
+        let ops =
+            harvest_chain_interest_in_state(&mut s, CHAIN, 200, 1_000_000, TREASURY, now, || {
+                next += 1;
+                next
+            });
         assert_eq!(ops.len(), 1, "one eligible vault -> one op");
         let v = &s.chain_vaults[&1];
-        assert_eq!(v.pending_interest_mint_e8s, 2 * E8, "reserved 2% of 100 for a year");
+        assert_eq!(
+            v.pending_interest_mint_e8s,
+            2 * E8,
+            "reserved 2% of 100 for a year"
+        );
         assert_eq!(v.debt_e8s, 100 * E8, "debt untouched until confirm");
-        assert_eq!(v.last_interest_accrual_ns, 0, "accrual window not advanced at harvest");
+        assert_eq!(
+            v.last_interest_accrual_ns, 0,
+            "accrual window not advanced at harvest"
+        );
         let q = &s.settlement_queues[&CHAIN];
         let op = q.pending.values().next().expect("op enqueued");
         match &op.kind {
-            SettlementOpKind::InterestMint { vault_id, mint_id, amount_e8s, accrual_through_ns, recipient } => {
+            SettlementOpKind::InterestMint {
+                vault_id,
+                mint_id,
+                amount_e8s,
+                accrual_through_ns,
+                recipient,
+            } => {
                 assert_eq!(*vault_id, 1);
                 assert_eq!(*mint_id, 1001, "id from the allocator");
                 assert_eq!(*amount_e8s, 2 * E8);
@@ -233,11 +277,38 @@ mod tests {
     }
 
     #[test]
+    fn harvest_skips_interest_mint_when_bad_debt_circuit_tripped() {
+        let mut s = MultiChainState::default();
+        s.chain_bad_debt_circuit_tripped_at_ns.insert(CHAIN, 42);
+        open_vault(
+            &mut s,
+            1,
+            100 * E8,
+            /*last accrual a year ago*/ 0,
+            0,
+            ChainVaultStatus::Open,
+        );
+        let now = NANOS_PER_YEAR;
+        let mut next = 1000u64;
+
+        let ops =
+            harvest_chain_interest_in_state(&mut s, CHAIN, 200, 1_000_000, TREASURY, now, || {
+                next += 1;
+                next
+            });
+
+        assert!(ops.is_empty());
+        assert_eq!(s.chain_vaults[&1].pending_interest_mint_e8s, 0);
+        assert!(s.settlement_queues.get(&CHAIN).is_none());
+    }
+
+    #[test]
     fn harvest_skips_below_threshold() {
         let mut s = MultiChainState::default();
         // 1ns elapsed on 100 icUSD -> 1 e8s accrued, below a 1e6 threshold.
         open_vault(&mut s, 1, 100 * E8, 0, 0, ChainVaultStatus::Open);
-        let ops = harvest_chain_interest_in_state(&mut s, CHAIN, 200, 1_000_000, TREASURY, 1, || 99);
+        let ops =
+            harvest_chain_interest_in_state(&mut s, CHAIN, 200, 1_000_000, TREASURY, 1, || 99);
         assert!(ops.is_empty(), "below-threshold accrual is not realized");
         assert_eq!(s.chain_vaults[&1].pending_interest_mint_e8s, 0);
     }
@@ -245,11 +316,22 @@ mod tests {
     #[test]
     fn harvest_skips_in_flight_non_open_and_zero_debt() {
         let mut s = MultiChainState::default();
-        open_vault(&mut s, 1, 100 * E8, 0, /*in flight*/ 50_000_000, ChainVaultStatus::Open);
+        open_vault(
+            &mut s,
+            1,
+            100 * E8,
+            0,
+            /*in flight*/ 50_000_000,
+            ChainVaultStatus::Open,
+        );
         open_vault(&mut s, 2, 100 * E8, 0, 0, ChainVaultStatus::MintPending); // not Open
         open_vault(&mut s, 3, 0, 0, 0, ChainVaultStatus::Open); // zero debt
-        let ops = harvest_chain_interest_in_state(&mut s, CHAIN, 200, 1, TREASURY, NANOS_PER_YEAR, || 99);
-        assert!(ops.is_empty(), "in-flight / non-Open / zero-debt vaults are all skipped");
+        let ops =
+            harvest_chain_interest_in_state(&mut s, CHAIN, 200, 1, TREASURY, NANOS_PER_YEAR, || 99);
+        assert!(
+            ops.is_empty(),
+            "in-flight / non-Open / zero-debt vaults are all skipped"
+        );
     }
 
     #[test]
@@ -258,10 +340,18 @@ mod tests {
         open_vault(&mut s, 1, 100 * E8, 0, 0, ChainVaultStatus::Open);
         open_vault(&mut s, 2, 100 * E8, 0, 0, ChainVaultStatus::Open);
         let mut next = 5000u64;
-        let ops = harvest_chain_interest_in_state(&mut s, CHAIN, 200, 1, TREASURY, NANOS_PER_YEAR, || {
-            next += 1;
-            next
-        });
+        let ops = harvest_chain_interest_in_state(
+            &mut s,
+            CHAIN,
+            200,
+            1,
+            TREASURY,
+            NANOS_PER_YEAR,
+            || {
+                next += 1;
+                next
+            },
+        );
         assert_eq!(ops.len(), 2);
         let mint_ids: Vec<u64> = s.settlement_queues[&CHAIN]
             .pending

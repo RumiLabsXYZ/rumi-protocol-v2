@@ -184,6 +184,9 @@ pub enum OpenVaultError {
         would_be_e8s: u128,
         ceiling_e8s: u128,
     },
+    /// The chain's bad-debt circuit is tripped; new debt or pending mint creation
+    /// is blocked until the developer clears the circuit.
+    ChainBadDebtCircuitTripped { chain: ChainId },
 }
 
 /// Reasons `withdraw_collateral_in_state` / `close_chain_vault_in_state` can
@@ -240,6 +243,9 @@ pub enum WithdrawError {
     /// collateral or under-collateralize the residual debt. Reject until the
     /// marker clears (mirrors `MintInFlight`). Spec 3.1.
     LiquidationInFlight,
+    /// The chain's bad-debt circuit is tripped; collateral-out from a debt-bearing
+    /// vault is blocked, while debt-free close payouts remain allowed.
+    ChainBadDebtCircuitTripped { chain: ChainId },
 }
 
 /// Why `begin_liquidation_in_state` (spec §4.9 Phase 1) rejected. No state is
@@ -450,6 +456,9 @@ pub fn open_chain_vault_in_state(
     if !state.chain_configs.contains_key(&chain) {
         return Err(OpenVaultError::UnknownChain);
     }
+    if state.chain_bad_debt_circuit_tripped(chain) {
+        return Err(OpenVaultError::ChainBadDebtCircuitTripped { chain });
+    }
     // A zero-debt vault has nothing to mint; with debt 0 the CR check is a
     // no-op (u64::MAX) and deposit-watch would later enqueue a wasted
     // zero-value on-chain mint. Reject up front. (A zero-collateral vault with
@@ -578,6 +587,9 @@ pub fn verify_deposit_and_enqueue_mint_in_state(
     // Not enough on-chain collateral yet - no mutation, retry next tick.
     if observed_balance_e18 < declared_e18 {
         return Ok(false);
+    }
+    if state.chain_bad_debt_circuit_tripped(chain) {
+        return Err(OpenVaultError::ChainBadDebtCircuitTripped { chain });
     }
 
     // Enqueue FIRST (it can fail on a duplicate idempotency key). The key is
@@ -711,6 +723,11 @@ pub fn withdraw_collateral_in_state(
         }
         if amount_e18 > v.collateral_amount_native {
             return Err(WithdrawError::InsufficientCollateral);
+        }
+        if v.debt_e8s > 0 && state.chain_bad_debt_circuit_tripped(v.collateral_chain) {
+            return Err(WithdrawError::ChainBadDebtCircuitTripped {
+                chain: v.collateral_chain,
+            });
         }
         let remaining = v.collateral_amount_native - amount_e18;
         (
@@ -1097,6 +1114,11 @@ pub enum BorrowError {
     /// tier could leave the post-confirm vault under-collateralized. Reject until
     /// the marker clears (mirrors `MintInFlight`). Spec 3.1.
     LiquidationInFlight,
+    /// The chain's bad-debt circuit is tripped; additional debt creation is
+    /// blocked until the developer clears the circuit.
+    ChainBadDebtCircuitTripped {
+        chain: ChainId,
+    },
 }
 
 /// Borrow additional icUSD against an existing `Open` vault — a SECOND on-chain
@@ -1154,6 +1176,11 @@ pub fn borrow_chain_vault_in_state(
         // could leave the post-confirm vault under-collateralized.
         if v.pending_liquidation.is_some() {
             return Err(BorrowError::LiquidationInFlight);
+        }
+        if state.chain_bad_debt_circuit_tripped(v.collateral_chain) {
+            return Err(BorrowError::ChainBadDebtCircuitTripped {
+                chain: v.collateral_chain,
+            });
         }
         (
             v.collateral_chain,

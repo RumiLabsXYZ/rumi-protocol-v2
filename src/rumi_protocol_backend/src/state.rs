@@ -159,6 +159,21 @@ pub fn default_interest_split() -> Vec<InterestRecipient> {
     ]
 }
 pub const DUST_DEBT_THRESHOLD: u64 = 50_000; // 0.0005 icUSD — debt below this is forgiven on withdrawal
+pub const MAX_SP_CHAIN_ABSORB_RESULTS_BY_PROOF: usize = 10_000;
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct StoredChainSpAbsorbResult {
+    pub caller: Principal,
+    pub vault_id: u64,
+    pub chain_id: crate::chains::config::ChainId,
+    pub icusd_burned_e8s: u64,
+    pub liquidated_debt_e8s: u128,
+    pub collateral_received_native: u128,
+    pub claim_id: u64,
+    pub custody_address: String,
+    pub block_index: u64,
+    pub collateral_price_e8s: u64,
+}
 
 /// Wave-8b LIQ-002: default tolerance band (in absolute CR units) above the
 /// worst-CR vault inside which liquidations are accepted. 0.01 = 1% CR. With
@@ -681,12 +696,9 @@ pub fn xrp_collateral_principal() -> Principal {
     Principal::from_slice(b"rumi-xrp-native")
 }
 
-/// Launch cap for native-XRP borrowing: 100 icUSD, in e8s.
-pub const XRP_LAUNCH_DEBT_CEILING_E8S: u64 = 10_000_000_000;
-
 /// P5: the `CollateralConfig` for native-XRP collateral. Parameters (Rob's):
-/// 150% borrow threshold / 133% liquidation / 12% liquidation penalty / $100 debt
-/// ceiling. Borrowing-fee + interest BASE are copied from ICP ("same as ICP"); the
+/// 150% borrow threshold / 133% liquidation / 12% liquidation penalty / 2,500 icUSD
+/// debt ceiling. Borrowing-fee + interest BASE are copied from ICP ("same as ICP"); the
 /// dynamic curves are global (`borrowing_fee_curve`) or inherited (`rate_curve` =
 /// None). custody_kind = `NativeXrp`; `ledger_canister_id` is the synthetic key; 6
 /// decimals (drops); `ledger_fee` = 0 (the XRPL fee is handled by the rail at settle
@@ -706,7 +718,10 @@ pub fn xrp_collateral_config(
         liquidation_bonus: Ratio::new(dec!(1.12)),
         borrowing_fee: icp_borrowing_fee,
         interest_rate_apr: icp_interest_rate_apr,
-        debt_ceiling: XRP_LAUNCH_DEBT_CEILING_E8S,
+        // 2,500 icUSD e8s. This default applies to a FRESH registration only; an
+        // already-registered config keeps its live ceiling across upgrade (no clamp),
+        // so raise the live config via set_collateral_debt_ceiling(xrp, 250_000_000_000).
+        debt_ceiling: 250_000_000_000,
         min_vault_debt: ICUSD::new(10_000_000), // 0.1 icUSD (matches ICP)
         ledger_fee: 0,
         price_source: PriceSource::Xrc {
@@ -737,24 +752,20 @@ pub fn xrp_collateral_config(
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct XrpLaunchGuardrailMigration {
-    pub previous_debt_ceiling: Option<u64>,
     pub previous_status: Option<CollateralStatus>,
 }
 
-/// Converges already-registered native-XRP collateral onto launch guardrails.
-/// This is intentionally idempotent so upgrades, replay recovery, and tests can
-/// call it without needing a one-shot migration flag.
+/// Converges already-registered native-XRP collateral onto the launch guardrail:
+/// native-XRP cannot be left Active while signing off a non-production Schnorr key
+/// (the audit's F-01 fix). Intentionally idempotent so upgrades, replay recovery,
+/// and tests can call it without a one-shot migration flag. The debt ceiling is NOT
+/// clamped here — XRP uses a normal `debt_ceiling` like every other collateral.
 pub fn enforce_xrp_launch_guardrails(state: &mut State) -> XrpLaunchGuardrailMigration {
     let mut migration = XrpLaunchGuardrailMigration::default();
     let xrp_ct = xrp_collateral_principal();
     let Some(config) = state.collateral_configs.get_mut(&xrp_ct) else {
         return migration;
     };
-
-    if config.debt_ceiling > XRP_LAUNCH_DEBT_CEILING_E8S {
-        migration.previous_debt_ceiling = Some(config.debt_ceiling);
-        config.debt_ceiling = XRP_LAUNCH_DEBT_CEILING_E8S;
-    }
 
     if !crate::chains::xrp::config::is_xrp_production_key_name(&state.xrp_schnorr_key_name)
         && !matches!(
@@ -781,12 +792,6 @@ pub fn validate_xrp_launch_config_update(
         return Err(ProtocolError::GenericError(
             "XRP collateral config must keep custody_kind = NativeXrp".to_string(),
         ));
-    }
-    if config.debt_ceiling > XRP_LAUNCH_DEBT_CEILING_E8S {
-        return Err(ProtocolError::GenericError(format!(
-            "XRP debt ceiling cannot exceed {} e8s (100 icUSD)",
-            XRP_LAUNCH_DEBT_CEILING_E8S
-        )));
     }
     if !matches!(
         config.status,
@@ -821,6 +826,15 @@ pub struct XrpClaim {
     /// is reconciled rather than paid twice. `None` = nothing submitted yet.
     #[serde(default)]
     pub settlement: Option<XrpSettlement>,
+    /// F-03 quarantine: set with a human-readable reason when the settle path detects
+    /// that this claim's custody-account Sequence advanced past the recorded
+    /// `source_sequence` while the recorded `tx_hash` is NotFound on-ledger — i.e. the
+    /// signed Payment may already have settled under a divergent hash. While `Some`,
+    /// `settle_xrp_claim` refuses to sign (so the claim cannot be double-paid); an
+    /// admin resolves it via `admin_resolve_xrp_claim` after off-chain reconciliation.
+    /// `None` = healthy. ciborium `#[serde(default)]` so older snapshots decode healthy.
+    #[serde(default)]
+    pub quarantine_reason: Option<String>,
 }
 
 /// P4: the settlement Payment already signed + submitted for an `XrpClaim`.
@@ -1465,6 +1479,17 @@ pub struct State {
     /// concern.
     #[serde(default)]
     pub consumed_writedown_proofs: BTreeSet<(crate::icrc3_proof::SpProofLedger, u64)>,
+    /// Inc 8: idempotent result cache for SP chain-vault absorbs keyed by the
+    /// consumed proof. Lets the SP recover a lost reply without burning again.
+    #[serde(default)]
+    pub sp_chain_absorb_results_by_proof:
+        BTreeMap<(crate::icrc3_proof::SpProofLedger, u64), StoredChainSpAbsorbResult>,
+    /// Inc 9: short-lived pre-burn reservations keyed by vault id. The SP must
+    /// obtain one immediately before burning; a matching reservation lets the
+    /// backend finalize an already-burned absorb even if an admin kill switch
+    /// flips before the post-burn call returns.
+    #[serde(default)]
+    pub sp_chain_absorb_preflights: BTreeMap<u64, StoredChainSpAbsorbPreflight>,
 
     // ─── Wave-8e LIQ-005: bad-debt deficit account ───
     //
@@ -1752,6 +1777,18 @@ pub struct TreasuryStatsSnapshot {
     pub total_accrued_interest_system: u64,
 }
 
+#[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct StoredChainSpAbsorbPreflight {
+    pub caller: Principal,
+    pub vault_id: u64,
+    pub icusd_burn_e8s: u64,
+    pub chain_id: crate::chains::config::ChainId,
+    pub price_e8: u64,
+    pub native_decimals: u8,
+    pub liquidation_penalty_bps: u64,
+    pub expires_at_ns: u64,
+}
+
 /// Serde-only fallback: provides zero/empty/None defaults for fields missing from
 /// old CBOR snapshots. Never used for actual State construction (use From<InitArg>).
 impl Default for State {
@@ -1870,6 +1907,8 @@ impl Default for State {
             liquidation_ordering_tolerance: DEFAULT_LIQUIDATION_ORDERING_TOLERANCE,
             sp_writedown_disabled: false,
             consumed_writedown_proofs: BTreeSet::new(),
+            sp_chain_absorb_results_by_proof: BTreeMap::new(),
+            sp_chain_absorb_preflights: BTreeMap::new(),
             // Wave-8e LIQ-005
             protocol_deficit_icusd: ICUSD::new(0),
             total_deficit_repaid_icusd: ICUSD::new(0),
@@ -2138,6 +2177,8 @@ impl From<InitArg> for State {
             liquidation_ordering_tolerance: DEFAULT_LIQUIDATION_ORDERING_TOLERANCE,
             sp_writedown_disabled: false,
             consumed_writedown_proofs: BTreeSet::new(),
+            sp_chain_absorb_results_by_proof: BTreeMap::new(),
+            sp_chain_absorb_preflights: BTreeMap::new(),
             // Wave-8e LIQ-005
             protocol_deficit_icusd: ICUSD::new(0),
             total_deficit_repaid_icusd: ICUSD::new(0),
@@ -7131,6 +7172,21 @@ mod tests {
             .entry(Principal::anonymous())
             .or_default()
             .insert(42);
+        state.sp_chain_absorb_results_by_proof.insert(
+            (crate::icrc3_proof::SpProofLedger::IcusdBurn, 44),
+            StoredChainSpAbsorbResult {
+                caller: Principal::anonymous(),
+                vault_id: 77,
+                chain_id: crate::chains::config::ChainId(1030),
+                icusd_burned_e8s: 100_00000000,
+                liquidated_debt_e8s: 100_00000000,
+                collateral_received_native: 10_000_000_000_000_000_000u128,
+                claim_id: 77,
+                custody_address: "0xcustody".to_string(),
+                block_index: 44,
+                collateral_price_e8s: 5_000_000,
+            },
+        );
 
         // Serialize
         let mut buf = Vec::new();
@@ -7158,6 +7214,10 @@ mod tests {
         assert_eq!(
             restored.next_available_vault_id,
             state.next_available_vault_id
+        );
+        assert_eq!(
+            restored.sp_chain_absorb_results_by_proof, state.sp_chain_absorb_results_by_proof,
+            "SP chain absorb replay cache must survive upgrade round-trip",
         );
     }
 
@@ -7251,8 +7311,7 @@ mod tests {
         assert_eq!(cfg.ledger_canister_id, xrp_collateral_principal());
         assert_eq!(cfg.decimals, 6);
         assert_eq!(cfg.ledger_fee, 0);
-        assert_eq!(XRP_LAUNCH_DEBT_CEILING_E8S, 10_000_000_000); // $100
-        assert_eq!(cfg.debt_ceiling, XRP_LAUNCH_DEBT_CEILING_E8S);
+        assert_eq!(cfg.debt_ceiling, 250_000_000_000); // 2,500 icUSD
         assert_eq!(cfg.liquidation_ratio, Ratio::new(dec!(1.33)));
         assert_eq!(cfg.borrow_threshold_ratio, Ratio::new(dec!(1.50)));
         assert_eq!(cfg.liquidation_bonus, Ratio::new(dec!(1.12))); // 12% penalty
@@ -7277,7 +7336,7 @@ mod tests {
     }
 
     #[test]
-    fn xrp_launch_guardrails_clamp_existing_cap_and_freeze_non_production_key() {
+    fn xrp_launch_guardrails_freeze_non_production_key_without_clamping_ceiling() {
         let mut state = test_state();
         let xrp = xrp_collateral_principal();
         let mut cfg = xrp_collateral_config(
@@ -7294,27 +7353,37 @@ mod tests {
         let migration = enforce_xrp_launch_guardrails(&mut state);
         let migrated = state.collateral_configs.get(&xrp).unwrap();
 
-        assert_eq!(migration.previous_debt_ceiling, Some(20_000_000_000));
+        // F-01 key gate still freezes a non-production key...
         assert_eq!(migration.previous_status, Some(CollateralStatus::Active));
-        assert_eq!(migrated.debt_ceiling, XRP_LAUNCH_DEBT_CEILING_E8S);
         assert_eq!(migrated.status, CollateralStatus::Frozen);
+        // ...but the debt ceiling is no longer clamped — XRP is a normal asset now.
+        assert_eq!(migrated.debt_ceiling, 20_000_000_000);
     }
 
     #[test]
-    fn xrp_launch_config_update_rejects_cap_above_launch_ceiling() {
+    fn xrp_launch_config_update_allows_any_ceiling_but_keeps_key_gate() {
         let xrp = xrp_collateral_principal();
         let mut cfg = xrp_collateral_config(
             Ratio::new(dec!(0.005)),
             Ratio::new(dec!(0.0)),
             Ratio::new(dec!(1.033333333333333333)),
         );
-        cfg.debt_ceiling = XRP_LAUNCH_DEBT_CEILING_E8S + 1;
+        // A ceiling well above the old launch cap is now accepted (production key).
+        cfg.debt_ceiling = 500_000_000_000;
+        assert!(validate_xrp_launch_config_update(
+            xrp,
+            &cfg,
+            crate::chains::xrp::config::XRP_PRODUCTION_SCHNORR_KEY_NAME,
+        )
+        .is_ok());
 
+        // The F-01 key gate is still enforced: a non-production key on an Active
+        // config is rejected regardless of the ceiling.
         assert!(matches!(
             validate_xrp_launch_config_update(
                 xrp,
                 &cfg,
-                crate::chains::xrp::config::XRP_PRODUCTION_SCHNORR_KEY_NAME,
+                crate::chains::xrp::config::XRP_TEST_SCHNORR_KEY_NAME,
             ),
             Err(ProtocolError::GenericError(_))
         ));
@@ -7507,11 +7576,42 @@ mod tests {
             custody_nonce: 9,
             created_at_ns: 42,
             settlement: None,
+            quarantine_reason: Some("diverged".to_string()),
         };
         let mut buf = Vec::new();
         ciborium::ser::into_writer(&c, &mut buf).unwrap();
         let back: XrpClaim = ciborium::de::from_reader(buf.as_slice()).unwrap();
         assert_eq!(c, back);
+    }
+
+    /// Migration safety: a pre-quarantine ciborium snapshot (a map WITHOUT the
+    /// `quarantine_reason` key) must decode as a healthy claim (`None`), not trap —
+    /// the `#[serde(default)]` analogue of the existing `settlement` field handling.
+    #[test]
+    fn xrp_claim_decodes_pre_quarantine_snapshot_as_healthy() {
+        // Encode a struct with the OLD shape (no quarantine_reason) via a serde map.
+        #[derive(serde::Serialize)]
+        struct OldXrpClaim {
+            claimant: Principal,
+            drops: u64,
+            custody_owner: Principal,
+            custody_nonce: u64,
+            created_at_ns: u64,
+            settlement: Option<XrpSettlement>,
+        }
+        let old = OldXrpClaim {
+            claimant: Principal::anonymous(),
+            drops: 4_000_000,
+            custody_owner: Principal::from_slice(&[0xab; 16]),
+            custody_nonce: 9,
+            created_at_ns: 42,
+            settlement: None,
+        };
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&old, &mut buf).unwrap();
+        let restored: XrpClaim = ciborium::de::from_reader(buf.as_slice()).unwrap();
+        assert_eq!(restored.quarantine_reason, None);
+        assert_eq!(restored.drops, 4_000_000);
     }
 
     #[test]
@@ -7602,6 +7702,33 @@ mod tests {
             // Other fields should still be intact
             assert_eq!(restored.mode, state.mode);
             assert_eq!(restored.developer_principal, state.developer_principal);
+        } else {
+            panic!("expected CBOR map");
+        }
+    }
+
+    #[test]
+    fn sp_chain_absorb_results_decode_empty_when_missing() {
+        let state = test_state();
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&state, &mut buf).unwrap();
+
+        let value: ciborium::Value = ciborium::de::from_reader(buf.as_slice()).unwrap();
+        if let ciborium::Value::Map(mut entries) = value {
+            let original_len = entries.len();
+            entries.retain(|(k, _)| {
+                !matches!(k, ciborium::Value::Text(key) if key == "sp_chain_absorb_results_by_proof")
+            });
+            assert_eq!(
+                entries.len(),
+                original_len - 1,
+                "should have removed sp_chain_absorb_results_by_proof",
+            );
+
+            let mut modified_buf = Vec::new();
+            ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut modified_buf).unwrap();
+            let restored: State = ciborium::de::from_reader(modified_buf.as_slice()).unwrap();
+            assert!(restored.sp_chain_absorb_results_by_proof.is_empty());
         } else {
             panic!("expected CBOR map");
         }

@@ -748,6 +748,26 @@ pub enum Event {
         chain_id: crate::chains::config::ChainId,
         timestamp: u64,
     },
+    #[serde(rename = "chain_bad_debt_circuit_threshold_set")]
+    ChainBadDebtCircuitThresholdSet {
+        chain_id: crate::chains::config::ChainId,
+        threshold_e8s: Option<u128>,
+        timestamp: u64,
+    },
+    #[serde(rename = "chain_bad_debt_circuit_tripped")]
+    ChainBadDebtCircuitTripped {
+        chain_id: crate::chains::config::ChainId,
+        bad_debt_e8s: u128,
+        total_bad_debt_e8s: u128,
+        threshold_e8s: u128,
+        timestamp: u64,
+    },
+    #[serde(rename = "chain_bad_debt_circuit_cleared")]
+    ChainBadDebtCircuitCleared {
+        chain_id: crate::chains::config::ChainId,
+        total_bad_debt_e8s: u128,
+        timestamp: u64,
+    },
     // Phase 1a Task 11: Timer B supply-invariant self-check failure.
     #[serde(rename = "supply_invariant_self_check_failed")]
     SupplyInvariantSelfCheckFailed {
@@ -1019,7 +1039,10 @@ impl Event {
             // Phase 1a: chain-admin events are protocol-wide, not vault-scoped.
             Event::ChainRegistered { .. }
             | Event::ChainDisabled { .. }
-            | Event::ChainConfigUpdated { .. } => false,
+            | Event::ChainConfigUpdated { .. }
+            | Event::ChainBadDebtCircuitThresholdSet { .. }
+            | Event::ChainBadDebtCircuitTripped { .. }
+            | Event::ChainBadDebtCircuitCleared { .. } => false,
             // Phase 1a Task 11: supply invariant failure is protocol-wide.
             Event::SupplyInvariantSelfCheckFailed { .. } => false,
             // Phase 1b: vault-carrying foreign-chain events surface per-vault history.
@@ -1186,6 +1209,11 @@ impl Event {
             Event::ChainRegistered { .. } => Some("ChainRegistered"),
             Event::ChainDisabled { .. } => Some("ChainDisabled"),
             Event::ChainConfigUpdated { .. } => Some("ChainConfigUpdated"),
+            Event::ChainBadDebtCircuitThresholdSet { .. } => {
+                Some("ChainBadDebtCircuitThresholdSet")
+            }
+            Event::ChainBadDebtCircuitTripped { .. } => Some("ChainBadDebtCircuitTripped"),
+            Event::ChainBadDebtCircuitCleared { .. } => Some("ChainBadDebtCircuitCleared"),
             Event::ChainSettlementFailed { .. } => Some("ChainSettlementFailed"),
             Event::ChainReorgDetected { .. } => Some("ChainReorgDetected"),
             Event::ChainHotWalletLow { .. } => Some("ChainHotWalletLow"),
@@ -1241,6 +1269,9 @@ impl Event {
             Event::StabilityPoolCallFailed { timestamp, .. } => Some(*timestamp),
             Event::OracleCircuitBreaker { timestamp, .. } => Some(*timestamp),
             Event::OracleSourceCountInsufficient { timestamp, .. } => Some(*timestamp),
+            Event::ChainBadDebtCircuitThresholdSet { timestamp, .. } => Some(*timestamp),
+            Event::ChainBadDebtCircuitTripped { timestamp, .. } => Some(*timestamp),
+            Event::ChainBadDebtCircuitCleared { timestamp, .. } => Some(*timestamp),
             _ => None,
         }
     }
@@ -2099,7 +2130,10 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             // before recording the event; nothing to replay.
             Event::ChainRegistered { .. }
             | Event::ChainDisabled { .. }
-            | Event::ChainConfigUpdated { .. } => {},
+            | Event::ChainConfigUpdated { .. }
+            | Event::ChainBadDebtCircuitThresholdSet { .. }
+            | Event::ChainBadDebtCircuitTripped { .. }
+            | Event::ChainBadDebtCircuitCleared { .. } => {},
             // Phase 1a Task 11: informational audit trail; state mutation
             // (invariant_halted + mode flip) happens live in the timer tick.
             Event::SupplyInvariantSelfCheckFailed { .. } => {},

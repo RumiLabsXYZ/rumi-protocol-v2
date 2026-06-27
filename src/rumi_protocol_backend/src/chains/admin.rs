@@ -16,7 +16,10 @@ use super::settlement_queue::SettlementQueueV1;
 /// (which reads at the `finalized` commitment) legitimately uses 0, so the floor
 /// applies only to EVM gas strategies.
 fn is_evm(gas: &GasStrategy) -> bool {
-    matches!(gas, GasStrategy::EvmEip1559 { .. } | GasStrategy::EvmLegacy { .. })
+    matches!(
+        gas,
+        GasStrategy::EvmEip1559 { .. } | GasStrategy::EvmLegacy { .. }
+    )
 }
 
 /// Audit M-04 (QUORUM-1): de-duplicate `rpc_endpoints` by URL, preserving the
@@ -98,7 +101,9 @@ pub fn register_chain_in_state(
     };
     state.chain_configs.insert(arg.chain_id, cfg.clone());
     state.chain_supplies.insert(arg.chain_id, 0);
-    state.settlement_queues.insert(arg.chain_id, SettlementQueueV1::default());
+    state
+        .settlement_queues
+        .insert(arg.chain_id, SettlementQueueV1::default());
     Ok(cfg)
 }
 
@@ -134,7 +139,11 @@ pub fn delete_chain_in_state(
             chain_id.0, supply
         )));
     }
-    if state.chain_vaults.values().any(|v| v.collateral_chain == chain_id) {
+    if state
+        .chain_vaults
+        .values()
+        .any(|v| v.collateral_chain == chain_id)
+    {
         return Err(ChainAdminError::InvalidConfig(format!(
             "chain {} still has vaults",
             chain_id.0
@@ -149,10 +158,15 @@ pub fn delete_chain_in_state(
     state.hot_wallet_balance_e18.remove(&chain_id);
     state.reorg_halted.remove(&chain_id);
     state.reorg_suspect_streak.remove(&chain_id); // Task-11 reorg-debounce streak
+    state.chain_bad_debt_e8s.remove(&chain_id);
+    state.chain_bad_debt_circuit_threshold_e8s.remove(&chain_id);
+    state.chain_bad_debt_circuit_tripped_at_ns.remove(&chain_id);
     // manual_prices + its paired freshness map are keyed by (ChainId, String) —
     // drop ALL entries for this chain from BOTH, or the timestamp map leaks.
     state.manual_prices.retain(|(c, _), _| *c != chain_id);
-    state.manual_price_set_at_ns.retain(|(c, _), _| *c != chain_id);
+    state
+        .manual_price_set_at_ns
+        .retain(|(c, _), _| *c != chain_id);
     Ok(())
 }
 

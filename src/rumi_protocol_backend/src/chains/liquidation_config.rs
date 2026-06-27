@@ -28,11 +28,10 @@ pub enum DexKind {
 }
 
 /// Per-chain liquidation config (operator-set, dev-gated). Holds the DEX wiring
-/// + the two risk knobs the bot path needs. Addresses are chain-native hex
-/// strings (validated by the engine's address validator at swap-build time, not
-/// here). `enabled` is the per-chain kill switch: even with the whole chains rail
-/// dev-gated, an operator must explicitly flip this on before any liquidation
-/// swap can run for the chain.
+/// + the two risk knobs the bot path needs. DEX/token addresses are EVM
+/// 0x-prefixed 20-byte hex strings validated at setter time. `enabled` is the
+/// per-chain kill switch: even with the whole chains rail dev-gated, an operator
+/// must explicitly flip this on before any liquidation swap can run for the chain.
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct ChainLiquidationConfigV1 {
     /// Which DEX family to route the collateral->stable swap through.
@@ -101,6 +100,8 @@ pub enum LiquidationConfigError {
     /// An `enabled` config left a required address empty (the swap could never
     /// build). Disabled configs may carry placeholder/empty addresses.
     MissingAddress(&'static str),
+    /// A non-empty address is not an EVM `0x` + 40 hex digit address.
+    InvalidAddress { field: &'static str, address: String },
     /// An `enabled` config left the depth cap at 0 (spec §4.7): no swap could be
     /// sized. Disabled configs may carry 0.
     ZeroDepthCap,
@@ -130,22 +131,12 @@ impl ChainLiquidationConfigV1 {
                 restore_target_cr_e4: self.restore_target_cr_e4,
             });
         }
+        validate_evm_address_field("router", &self.router, self.enabled)?;
+        validate_evm_address_field("factory", &self.factory, self.enabled)?;
+        validate_evm_address_field("pair", &self.pair, self.enabled)?;
+        validate_evm_address_field("collateral_token", &self.collateral_token, self.enabled)?;
+        validate_evm_address_field("settle_stable_token", &self.settle_stable_token, self.enabled)?;
         if self.enabled {
-            if self.router.is_empty() {
-                return Err(LiquidationConfigError::MissingAddress("router"));
-            }
-            if self.factory.is_empty() {
-                return Err(LiquidationConfigError::MissingAddress("factory"));
-            }
-            if self.pair.is_empty() {
-                return Err(LiquidationConfigError::MissingAddress("pair"));
-            }
-            if self.collateral_token.is_empty() {
-                return Err(LiquidationConfigError::MissingAddress("collateral_token"));
-            }
-            if self.settle_stable_token.is_empty() {
-                return Err(LiquidationConfigError::MissingAddress("settle_stable_token"));
-            }
             if self.max_swap_value_e8s == 0 {
                 return Err(LiquidationConfigError::ZeroDepthCap);
             }
@@ -163,6 +154,49 @@ impl ChainLiquidationConfigV1 {
     }
 }
 
+fn validate_evm_address_field(
+    field: &'static str,
+    address: &str,
+    required: bool,
+) -> Result<(), LiquidationConfigError> {
+    if address.is_empty() {
+        return if required {
+            Err(LiquidationConfigError::MissingAddress(field))
+        } else {
+            Ok(())
+        };
+    }
+    canonical_evm_address(address).map(|_| ()).map_err(|_| LiquidationConfigError::InvalidAddress {
+        field,
+        address: address.to_string(),
+    })
+}
+
+/// Normalize an EVM address for equality checks after a value has passed the same
+/// setter-time validation as liquidation config addresses.
+pub fn canonical_evm_address(address: &str) -> Result<String, LiquidationConfigError> {
+    let hex = address
+        .strip_prefix("0x")
+        .or_else(|| address.strip_prefix("0X"))
+        .ok_or_else(|| LiquidationConfigError::InvalidAddress {
+            field: "address",
+            address: address.to_string(),
+        })?;
+    if hex.len() != 40 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(LiquidationConfigError::InvalidAddress {
+            field: "address",
+            address: address.to_string(),
+        });
+    }
+    if hex.bytes().all(|b| b == b'0') {
+        return Err(LiquidationConfigError::InvalidAddress {
+            field: "address",
+            address: address.to_string(),
+        });
+    }
+    Ok(format!("0x{}", hex.to_lowercase()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,11 +204,11 @@ mod tests {
     fn enabled_cfg() -> ChainLiquidationConfigV1 {
         ChainLiquidationConfigV1 {
             dex: DexKind::UniswapV2,
-            router: "0xrouter".into(),
-            factory: "0xfactory".into(),
-            pair: "0xpair".into(),
-            collateral_token: "0xwcfx".into(),
-            settle_stable_token: "0xusdc".into(),
+            router: "0x1111111111111111111111111111111111111111".into(),
+            factory: "0x2222222222222222222222222222222222222222".into(),
+            pair: "0x3333333333333333333333333333333333333333".into(),
+            collateral_token: "0x4444444444444444444444444444444444444444".into(),
+            settle_stable_token: "0x5555555555555555555555555555555555555555".into(),
             slippage_cap_bps: 250,
             restore_target_cr_e4: 15_500,
             enabled: true,
@@ -240,6 +274,71 @@ mod tests {
         let mut c = enabled_cfg();
         c.pair = String::new();
         assert_eq!(c.validate(), Err(LiquidationConfigError::MissingAddress("pair")));
+    }
+
+    #[test]
+    fn enabled_config_with_malformed_address_rejected() {
+        let mut c = enabled_cfg();
+        c.router = "router-no-0x".into();
+        assert_eq!(
+            c.validate(),
+            Err(LiquidationConfigError::InvalidAddress {
+                field: "router",
+                address: "router-no-0x".into()
+            })
+        );
+    }
+
+    #[test]
+    fn disabled_config_rejects_malformed_non_empty_address() {
+        let mut c = enabled_cfg();
+        c.enabled = false;
+        c.max_swap_value_e8s = 0;
+        c.max_price_age_ns = 0;
+        c.settle_stable_decimals = 0;
+        c.deadline_secs = 0;
+        c.factory = "0xnothex".into();
+        assert_eq!(
+            c.validate(),
+            Err(LiquidationConfigError::InvalidAddress {
+                field: "factory",
+                address: "0xnothex".into()
+            })
+        );
+    }
+
+    #[test]
+    fn canonical_evm_address_lowercases_valid_input() {
+        assert_eq!(
+            canonical_evm_address("0XABCDEFabcdefABCDEFabcdefABCDEFabcdefABCD").unwrap(),
+            "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+        );
+        assert!(canonical_evm_address("0x1234").is_err());
+        assert!(canonical_evm_address("0x0000000000000000000000000000000000000000").is_err());
+    }
+
+    #[test]
+    fn enabled_config_rejects_zero_addresses_for_all_evm_fields() {
+        let zero = "0x0000000000000000000000000000000000000000".to_string();
+        for field in ["router", "factory", "pair", "collateral_token", "settle_stable_token"] {
+            let mut c = enabled_cfg();
+            match field {
+                "router" => c.router = zero.clone(),
+                "factory" => c.factory = zero.clone(),
+                "pair" => c.pair = zero.clone(),
+                "collateral_token" => c.collateral_token = zero.clone(),
+                "settle_stable_token" => c.settle_stable_token = zero.clone(),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                c.validate(),
+                Err(LiquidationConfigError::InvalidAddress {
+                    field,
+                    address: zero.clone()
+                }),
+                "{field} zero address must reject"
+            );
+        }
     }
 
     #[test]

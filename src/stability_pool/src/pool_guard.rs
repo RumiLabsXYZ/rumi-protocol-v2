@@ -24,6 +24,8 @@ use std::cell::RefCell;
 
 thread_local! {
     static LIQUIDATION_ACTIVE: RefCell<bool> = const { RefCell::new(false) };
+    static BALANCE_ASYNC_IN_FLIGHT: RefCell<u32> = const { RefCell::new(0) };
+    static CHAIN_ABSORB_AUTO_TICK_ACTIVE: RefCell<bool> = const { RefCell::new(false) };
 }
 
 #[must_use]
@@ -58,6 +60,68 @@ pub fn liquidation_in_progress() -> bool {
     LIQUIDATION_ACTIVE.with(|f| *f.borrow())
 }
 
+#[must_use]
+pub struct PoolBalanceAsyncGuard;
+
+impl PoolBalanceAsyncGuard {
+    /// Mark a deduct-before-transfer balance operation as in flight across an
+    /// outbound ledger await. SP chain absorb must not start in this window:
+    /// rollback may need to restore stable balances if the ledger rejects.
+    pub fn new() -> Self {
+        BALANCE_ASYNC_IN_FLIGHT.with(|f| {
+            let mut count = f.borrow_mut();
+            *count = count.saturating_add(1);
+        });
+        Self
+    }
+}
+
+impl Drop for PoolBalanceAsyncGuard {
+    fn drop(&mut self) {
+        BALANCE_ASYNC_IN_FLIGHT.with(|f| {
+            let mut count = f.borrow_mut();
+            *count = count.saturating_sub(1);
+        });
+    }
+}
+
+/// True while a deduct-before-transfer balance operation is awaiting a ledger
+/// response. Chain absorb refuses to start while this is true, so a failed
+/// withdrawal rollback cannot mutate the stablecoin denominator after an SP
+/// chain burn intent has been prepared.
+pub fn balance_async_in_flight() -> bool {
+    BALANCE_ASYNC_IN_FLIGHT.with(|f| *f.borrow() > 0)
+}
+
+#[must_use]
+pub struct ChainAbsorbAutoTickGuard;
+
+impl ChainAbsorbAutoTickGuard {
+    /// Acquire the exclusive automatic chain-absorb tick lock. Timer ticks may
+    /// overlap when an earlier tick is awaiting ledger/backend responses; the
+    /// second tick exits with `SystemBusy` instead of spawning another burn.
+    pub fn new() -> Result<Self, StabilityPoolError> {
+        CHAIN_ABSORB_AUTO_TICK_ACTIVE.with(|f| {
+            let mut held = f.borrow_mut();
+            if *held {
+                return Err(StabilityPoolError::SystemBusy);
+            }
+            *held = true;
+            Ok(Self)
+        })
+    }
+}
+
+impl Drop for ChainAbsorbAutoTickGuard {
+    fn drop(&mut self) {
+        CHAIN_ABSORB_AUTO_TICK_ACTIVE.with(|f| *f.borrow_mut() = false);
+    }
+}
+
+pub fn chain_absorb_auto_tick_in_flight() -> bool {
+    CHAIN_ABSORB_AUTO_TICK_ACTIVE.with(|f| *f.borrow())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -66,7 +130,10 @@ mod tests {
     fn sp_liquidation_guard_is_exclusive_and_blocks_ops() {
         assert!(!liquidation_in_progress());
         let g = SpLiquidationGuard::new().expect("first acquire");
-        assert!(liquidation_in_progress(), "deposit/withdraw/claim see the lock as held");
+        assert!(
+            liquidation_in_progress(),
+            "deposit/withdraw/claim see the lock as held"
+        );
         assert!(
             SpLiquidationGuard::new().is_err(),
             "a second concurrent liquidation must be rejected (SystemBusy)",
@@ -74,5 +141,38 @@ mod tests {
         drop(g);
         assert!(!liquidation_in_progress(), "lock released on drop");
         let _g2 = SpLiquidationGuard::new().expect("re-acquire after release");
+    }
+
+    #[test]
+    fn pool_balance_async_guard_tracks_nested_inflight_operations() {
+        assert!(!balance_async_in_flight());
+        let g1 = PoolBalanceAsyncGuard::new();
+        assert!(balance_async_in_flight());
+        {
+            let _g2 = PoolBalanceAsyncGuard::new();
+            assert!(balance_async_in_flight());
+        }
+        assert!(
+            balance_async_in_flight(),
+            "outer balance operation still blocks SP absorb",
+        );
+        drop(g1);
+        assert!(!balance_async_in_flight());
+    }
+
+    #[test]
+    fn chain_absorb_auto_tick_guard_is_exclusive() {
+        assert!(!chain_absorb_auto_tick_in_flight());
+        let guard = ChainAbsorbAutoTickGuard::new().expect("first tick starts");
+        assert!(chain_absorb_auto_tick_in_flight());
+        assert!(
+            matches!(
+                ChainAbsorbAutoTickGuard::new(),
+                Err(StabilityPoolError::SystemBusy)
+            ),
+            "a second timer tick must not overlap the first"
+        );
+        drop(guard);
+        assert!(!chain_absorb_auto_tick_in_flight());
     }
 }

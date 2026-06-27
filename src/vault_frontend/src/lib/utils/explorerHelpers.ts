@@ -99,6 +99,15 @@ export interface TokenInfo {
   decimals: number;
 }
 
+/**
+ * Synthetic collateral principal for native-XRP — `Principal::from_slice(b"rumi-xrp-native")`
+ * in the backend's `xrp_collateral_principal()`. This is NOT a real ICRC ledger: native-XRP
+ * is custodied off-chain on the XRP Ledger, so there is no `icrc1_symbol`/`icrc1_total_supply`
+ * to query. Anything that needs to special-case native-XRP (e.g. the token detail page)
+ * should compare against this constant rather than re-hardcoding the text form.
+ */
+export const XRP_NATIVE_PRINCIPAL = '5zjma-7dsov-wwsll-yojyc-23tbo-ruxmz-i';
+
 export const KNOWN_TOKENS: Record<string, TokenInfo> = {
   // Core protocol tokens
   [CANISTER_IDS.ICP_LEDGER]: { symbol: 'ICP', name: 'Internet Computer', decimals: 8 },
@@ -106,6 +115,11 @@ export const KNOWN_TOKENS: Record<string, TokenInfo> = {
   [CANISTER_IDS.CKUSDT_LEDGER]: { symbol: 'ckUSDT', name: 'Chain-Key USDT', decimals: 6 },
   [CANISTER_IDS.CKUSDC_LEDGER]: { symbol: 'ckUSDC', name: 'Chain-Key USDC', decimals: 6 },
   [CANISTER_IDS.THREEPOOL]: { symbol: '3USD', name: 'Rumi 3Pool LP Token', decimals: 8 },
+  // Native-XRP collateral (see XRP_NATIVE_PRINCIPAL above). Listed statically because
+  // there is no icrc1 ledger to query. 6 decimals (drops): the backend stores XRP
+  // collateral_amount in drops, so the explorer must format with 6 decimals or amounts
+  // read 100x too small.
+  [XRP_NATIVE_PRINCIPAL]: { symbol: 'XRP', name: 'XRP (XRP Ledger)', decimals: 6 },
   // Collateral tokens
   'mxzaz-hqaaa-aaaar-qaada-cai': { symbol: 'ckBTC', name: 'Chain-Key Bitcoin', decimals: 8 },
   'ss2fx-dyaaa-aaaar-qacoq-cai': { symbol: 'ckETH', name: 'Chain-Key Ethereum', decimals: 18 },

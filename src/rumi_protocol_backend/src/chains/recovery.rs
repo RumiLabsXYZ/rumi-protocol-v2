@@ -51,6 +51,9 @@ pub enum RecoveryError {
     /// On-chain state shows the op DID land — reversing/releasing would create an
     /// unbacked mint or double-release collateral. Refused.
     OnChainLanded(String),
+    /// The op kind needs a specialized recovery path; generic stuck-op reversal
+    /// would leave cross-canister accounting inconsistent.
+    UnsupportedOpKind(String),
 }
 
 impl std::fmt::Display for RecoveryError {
@@ -72,7 +75,10 @@ fn snapshot_inflight_op_tx(chain: ChainId, op_id: u64) -> Result<Option<String>,
             .settlement_queues
             .get(&chain)
             .ok_or(RecoveryError::UnknownChain(chain))?;
-        let op = q.pending.get(&op_id).ok_or(RecoveryError::UnknownOp(op_id))?;
+        let op = q
+            .pending
+            .get(&op_id)
+            .ok_or(RecoveryError::UnknownOp(op_id))?;
         if !matches!(op.status, SettlementOpStatus::Inflight { .. }) {
             return Err(RecoveryError::NotInflight(format!(
                 "op {op_id} status {:?}",
@@ -93,7 +99,7 @@ pub fn apply_resolve_reversal_in_state(
     chain: ChainId,
     op_id: u64,
     now: u64,
-) -> bool {
+) -> Result<bool, RecoveryError> {
     let still_inflight = state
         .settlement_queues
         .get(&chain)
@@ -101,7 +107,7 @@ pub fn apply_resolve_reversal_in_state(
         .map(|o| matches!(o.status, SettlementOpStatus::Inflight { .. }))
         .unwrap_or(false);
     if !still_inflight {
-        return false;
+        return Ok(false);
     }
     // Clone the kind out so we can mutate vaults and the op without overlapping
     // borrows.
@@ -118,7 +124,11 @@ pub fn apply_resolve_reversal_in_state(
                     v.pending_mint_e8s = 0;
                 }
             }
-            SettlementOpKind::NativeWithdrawal { vault_id, amount_e18, .. } => {
+            SettlementOpKind::NativeWithdrawal {
+                vault_id,
+                amount_e18,
+                ..
+            } => {
                 if let Some(v) = state.chain_vaults.get_mut(vault_id) {
                     v.collateral_amount_native =
                         v.collateral_amount_native.saturating_add(*amount_e18);
@@ -128,8 +138,10 @@ pub fn apply_resolve_reversal_in_state(
                 }
             }
             SettlementOpKind::ChainCollateralPayout { .. } => {
-                // Claim payout recovery must not re-credit vault collateral. The
-                // SP-side claim rollback is handled by the claim path/callback.
+                return Err(RecoveryError::UnsupportedOpKind(
+                    "ChainCollateralPayout requires SP claim recredit; use settlement retry path"
+                        .to_string(),
+                ));
             }
             SettlementOpKind::InterestMint { vault_id, .. } => {
                 if let Some(v) = state.chain_vaults.get_mut(vault_id) {
@@ -152,9 +164,12 @@ pub fn apply_resolve_reversal_in_state(
         .get_mut(&chain)
         .and_then(|q| q.pending.get_mut(&op_id))
     {
-        o.mark_failed("manually resolved (stuck Inflight, on-chain-verified not landed)".to_string(), now);
+        o.mark_failed(
+            "manually resolved (stuck Inflight, on-chain-verified not landed)".to_string(),
+            now,
+        );
     }
-    true
+    Ok(true)
 }
 
 /// M-08 (RECOV-01): resolve a stuck `Inflight` settlement op, but ONLY after
@@ -209,9 +224,7 @@ pub async fn resolve_stuck_settlement_op_verified(
     }
 
     let now = ic_cdk::api::time();
-    let did_reverse =
-        mutate_state(|s| apply_resolve_reversal_in_state(&mut s.multi_chain, chain, op_id, now));
-    Ok(did_reverse)
+    mutate_state(|s| apply_resolve_reversal_in_state(&mut s.multi_chain, chain, op_id, now))
 }
 
 // ─── M-09: recover a stuck chain vault, on-chain-verified ─────────────────────
@@ -275,10 +288,7 @@ pub fn precheck_recover_vault_in_state(
 }
 
 /// `read_state` wrapper over `precheck_recover_vault_in_state` for the async path.
-pub fn precheck_recover_vault(
-    chain: ChainId,
-    vault_id: u64,
-) -> Result<Vec<String>, RecoveryError> {
+pub fn precheck_recover_vault(chain: ChainId, vault_id: u64) -> Result<Vec<String>, RecoveryError> {
     read_state(|s| precheck_recover_vault_in_state(&s.multi_chain, chain, vault_id))
 }
 
@@ -374,8 +384,18 @@ pub async fn recover_stuck_chain_vault_verified(
     // cursor yet (then there can be no confirmed on-chain mint to find).
     let (contract, cursor, recorded_supply, in_flight_mint) = read_state(|s| {
         let contract = s.multi_chain.chain_contracts.get(&chain).cloned();
-        let cursor = s.multi_chain.last_observed_block.get(&chain).copied().unwrap_or(0);
-        let recorded_supply = s.multi_chain.chain_supplies.get(&chain).copied().unwrap_or(0);
+        let cursor = s
+            .multi_chain
+            .last_observed_block
+            .get(&chain)
+            .copied()
+            .unwrap_or(0);
+        let recorded_supply = s
+            .multi_chain
+            .chain_supplies
+            .get(&chain)
+            .copied()
+            .unwrap_or(0);
         let in_flight_mint: u128 = s
             .multi_chain
             .chain_vaults
