@@ -11308,6 +11308,10 @@ mod chain_vault_param_tests {
             evm_vault_params(ChainId(71)).unwrap(),
             ("CFX", 15_000, 10_000_000, Some(500 * 100_000_000))
         ); // Conflux: 150% open gate + 500-icUSD ceiling
+        assert_eq!(
+            evm_vault_params(ChainId(1030)).unwrap(),
+            ("CFX", 15_000, 10_000_000, Some(500 * 100_000_000))
+        ); // Conflux mainnet mirrors testnet risk params
         assert!(evm_vault_params(ChainId(999)).is_err());
     }
 

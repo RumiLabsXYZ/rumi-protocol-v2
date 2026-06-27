@@ -1,4 +1,4 @@
-//! Conflux eSpace TESTNET configuration (chain id 71).
+//! Conflux eSpace configuration.
 //!
 //! eSpace is EVM-compatible and supports EIP-1559 (since the v2.4.0 hardfork),
 //! so the shared EVM tx builder / tECDSA / EVM-RPC path applies unchanged.
@@ -11,9 +11,16 @@ use crate::chains::config::{ChainId, GasStrategy, RegisterChainArg};
 
 /// Conflux eSpace TESTNET chain id (mainnet is 1030).
 pub const CONFLUX_TESTNET_CHAIN_ID: ChainId = ChainId(71);
+/// Conflux eSpace MAINNET chain id. This is where real Swappi liquidity lives.
+pub const CONFLUX_MAINNET_CHAIN_ID: ChainId = ChainId(1030);
 
 /// CFX native gas asset decimals (wei-style, like ETH).
 pub const CFX_NATIVE_DECIMALS: u8 = 18;
+
+/// Mainnet finality default used by the gated-launch runbook.
+pub const CONFLUX_MAINNET_FINALITY_DEPTH: u32 = 400;
+/// Minimum independent-provider quorum floor for mainnet financial reads.
+pub const CONFLUX_MAINNET_MIN_QUORUM_PROVIDERS: u32 = 2;
 
 /// Candidate Conflux eSpace TESTNET RPC endpoints. VERIFY live at deploy time.
 /// NOTE: all three are Confura (the Conflux Foundation's own service, one
@@ -51,6 +58,26 @@ pub fn conflux_testnet_register_arg() -> RegisterChainArg {
     }
 }
 
+/// Registration payload for Conflux eSpace mainnet.
+///
+/// Operators must pass independent, deployment-vetted RPC endpoints. This helper
+/// deliberately does not carry baked-in provider URLs because the safety property
+/// is provider independence, not any specific public endpoint.
+pub fn conflux_mainnet_register_arg(rpc_endpoints: Vec<String>) -> RegisterChainArg {
+    RegisterChainArg {
+        chain_id: CONFLUX_MAINNET_CHAIN_ID,
+        display_name: "ConfluxESpaceMainnet".to_string(),
+        rpc_endpoints,
+        finality_depth: CONFLUX_MAINNET_FINALITY_DEPTH,
+        gas_strategy: GasStrategy::EvmEip1559 {
+            max_priority_fee_gwei: 1,
+            max_fee_gwei_ceiling: 200,
+        },
+        chain_native_decimals: CFX_NATIVE_DECIMALS,
+        min_quorum_providers: Some(CONFLUX_MAINNET_MIN_QUORUM_PROVIDERS),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,5 +91,31 @@ mod tests {
         assert_eq!(arg.rpc_endpoints.len(), 3);
         assert!(matches!(arg.gas_strategy, GasStrategy::EvmEip1559 { .. }));
         assert!(arg.finality_depth >= 1); // register validation requires >= 1
+    }
+
+    #[test]
+    fn register_arg_is_conflux_mainnet() {
+        let endpoints = vec![
+            "https://evm.confluxrpc.com".to_string(),
+            "https://conflux-espace.example-rpc-a.invalid".to_string(),
+            "https://conflux-espace.example-rpc-b.invalid".to_string(),
+        ];
+        let arg = conflux_mainnet_register_arg(endpoints.clone());
+        assert_eq!(arg.chain_id, ChainId(1030));
+        assert_eq!(arg.display_name, "ConfluxESpaceMainnet");
+        assert_eq!(arg.rpc_endpoints, endpoints);
+        assert_eq!(arg.finality_depth, CONFLUX_MAINNET_FINALITY_DEPTH);
+        assert_eq!(arg.chain_native_decimals, CFX_NATIVE_DECIMALS);
+        assert_eq!(
+            arg.min_quorum_providers,
+            Some(CONFLUX_MAINNET_MIN_QUORUM_PROVIDERS)
+        );
+        assert!(matches!(
+            arg.gas_strategy,
+            GasStrategy::EvmEip1559 {
+                max_priority_fee_gwei: 1,
+                max_fee_gwei_ceiling: 200
+            }
+        ));
     }
 }
