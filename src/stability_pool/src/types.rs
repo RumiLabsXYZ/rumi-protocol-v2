@@ -364,6 +364,43 @@ pub struct ChainClaimSource {
     pub remaining_native: u128,
 }
 
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CfxClaimPayoutRecoveryKey {
+    pub chain_sentinel: Principal,
+    pub op_id: u64,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CfxClaimPayoutRecovery {
+    pub chain_sentinel: Principal,
+    pub op_id: u64,
+    pub claim_id: u64,
+    pub claimant: Principal,
+    pub amount_wei: u128,
+    pub reason: String,
+    pub failed_at_ns: u64,
+}
+
+impl CfxClaimPayoutRecovery {
+    pub fn key(&self) -> CfxClaimPayoutRecoveryKey {
+        CfxClaimPayoutRecoveryKey {
+            chain_sentinel: self.chain_sentinel,
+            op_id: self.op_id,
+        }
+    }
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CfxClaimPayoutRecoveryRecord {
+    pub key: CfxClaimPayoutRecoveryKey,
+    pub claim_id: u64,
+    pub claimant: Principal,
+    pub amount_wei: u128,
+    pub reason: String,
+    pub failed_at_ns: u64,
+    pub recovered_at_ns: u64,
+}
+
 /// Audit trail record for a completed liquidation.
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PoolLiquidationRecord {
@@ -433,6 +470,7 @@ pub struct StabilityPoolStatus {
 pub struct UserStabilityPosition {
     pub stablecoin_balances: BTreeMap<Principal, u64>,
     pub collateral_gains: BTreeMap<Principal, u64>,
+    pub cfx_claims: Option<BTreeMap<Principal, u128>>,
     pub opted_out_collateral: Vec<Principal>,
     pub deposit_timestamp: u64,
     pub total_claimed_gains: BTreeMap<Principal, u64>,

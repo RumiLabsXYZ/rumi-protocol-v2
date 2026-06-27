@@ -54,6 +54,17 @@ pub struct StabilityPoolState {
     /// Latest automatic chain absorb tick, retained as bounded operator status.
     #[serde(default)]
     pub chain_absorb_auto_last_tick: Option<ChainAbsorbAutoTickRecord>,
+    /// Durable idempotency journal for backend-confirmed failed CFX claim payout
+    /// recovery. Without this, retrying the backend callback would double-credit
+    /// both the depositor claim and the backend claim source.
+    #[serde(default)]
+    pub completed_cfx_claim_payout_recoveries:
+        Option<BTreeMap<CfxClaimPayoutRecoveryKey, CfxClaimPayoutRecoveryRecord>>,
+    /// Compact idempotency watermark for recovery records evicted from
+    /// `completed_cfx_claim_payout_recoveries`. A replay with an op_id at or
+    /// below the per-sentinel floor is treated as already recovered.
+    #[serde(default)]
+    pub completed_cfx_claim_payout_recovery_floor: Option<BTreeMap<Principal, u64>>,
 
     // Canister references
     pub protocol_canister_id: Principal,
@@ -108,6 +119,8 @@ impl Default for StabilityPoolState {
             completed_chain_absorbs: Some(BTreeMap::new()),
             chain_absorb_auto_config: Some(ChainAbsorbAutoConfig::default()),
             chain_absorb_auto_last_tick: None,
+            completed_cfx_claim_payout_recoveries: Some(BTreeMap::new()),
+            completed_cfx_claim_payout_recovery_floor: Some(BTreeMap::new()),
             protocol_canister_id: Principal::anonymous(),
             configuration: PoolConfiguration {
                 min_deposit_e8s: 1_000_000, // 0.01 USD
@@ -142,6 +155,7 @@ const MAX_POOL_EVENTS: usize = 10_000;
 pub const MAX_PENDING_REFUNDS: usize = 10_000;
 pub const MAX_PENDING_CHAIN_ABSORBS: usize = 1_000;
 pub const MAX_COMPLETED_CHAIN_ABSORBS: usize = 10_000;
+pub const MAX_COMPLETED_CFX_CLAIM_PAYOUT_RECOVERIES: usize = 10_000;
 
 impl StabilityPoolState {
     pub fn initialize(&mut self, args: StabilityPoolInitArgs) {
@@ -715,6 +729,52 @@ impl StabilityPoolState {
         self.completed_chain_absorbs
             .as_ref()
             .and_then(|m| m.get(&vault_id).cloned())
+    }
+
+    pub fn completed_cfx_claim_payout_recovery(
+        &self,
+        key: &CfxClaimPayoutRecoveryKey,
+    ) -> Option<CfxClaimPayoutRecoveryRecord> {
+        self.completed_cfx_claim_payout_recoveries
+            .as_ref()
+            .and_then(|m| m.get(key).cloned())
+    }
+
+    pub fn completed_cfx_claim_payout_recovery_was_evicted(
+        &self,
+        key: &CfxClaimPayoutRecoveryKey,
+    ) -> bool {
+        self.completed_cfx_claim_payout_recovery_floor
+            .as_ref()
+            .and_then(|m| m.get(&key.chain_sentinel))
+            .map(|floor| key.op_id <= *floor)
+            .unwrap_or(false)
+    }
+
+    pub fn record_completed_cfx_claim_payout_recovery(
+        &mut self,
+        record: CfxClaimPayoutRecoveryRecord,
+    ) {
+        let completed = self
+            .completed_cfx_claim_payout_recoveries
+            .get_or_insert_with(BTreeMap::new);
+        completed.insert(record.key.clone(), record);
+        while completed.len() > MAX_COMPLETED_CFX_CLAIM_PAYOUT_RECOVERIES {
+            let Some(oldest_key) = completed
+                .iter()
+                .min_by_key(|(key, record)| (record.recovered_at_ns, (*key).clone()))
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            if let Some(evicted) = completed.remove(&oldest_key) {
+                let floors = self
+                    .completed_cfx_claim_payout_recovery_floor
+                    .get_or_insert_with(BTreeMap::new);
+                let floor = floors.entry(evicted.key.chain_sentinel).or_insert(0);
+                *floor = (*floor).max(evicted.key.op_id);
+            }
+        }
     }
 
     pub fn chain_absorb_auto_config(&self) -> ChainAbsorbAutoConfig {
@@ -1577,6 +1637,7 @@ impl StabilityPoolState {
         self.deposits.get(user).map(|pos| UserStabilityPosition {
             stablecoin_balances: pos.stablecoin_balances.clone(),
             collateral_gains: pos.collateral_gains.clone(),
+            cfx_claims: pos.cfx_claims.clone(),
             opted_out_collateral: pos.opted_out_collateral.iter().cloned().collect(),
             deposit_timestamp: pos.deposit_timestamp,
             total_claimed_gains: pos.total_claimed_gains.clone(),
@@ -1832,6 +1893,8 @@ impl From<StabilityPoolStateV1> for StabilityPoolState {
             completed_chain_absorbs: Some(BTreeMap::new()),
             chain_absorb_auto_config: Some(ChainAbsorbAutoConfig::default()),
             chain_absorb_auto_last_tick: None,
+            completed_cfx_claim_payout_recoveries: Some(BTreeMap::new()),
+            completed_cfx_claim_payout_recovery_floor: Some(BTreeMap::new()),
             protocol_canister_id: v1.protocol_canister_id,
             configuration: v1.configuration,
             liquidation_history: v1.liquidation_history,
@@ -3160,6 +3223,13 @@ mod tests {
 
         add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
         add_deposit_direct(&mut state, user_a(), ckusdt_ledger(), 25_000_000);
+        state
+            .deposits
+            .get_mut(&user_a())
+            .unwrap()
+            .cfx_claims
+            .get_or_insert_with(BTreeMap::new)
+            .insert(cfx_sentinel(), 1_000_000_000_000_000_000);
 
         let pos = state.get_user_position(&user_a()).unwrap();
         assert_eq!(pos.total_usd_value_e8s, 125_00000000); // 100 + 25
@@ -3171,9 +3241,24 @@ mod tests {
             pos.stablecoin_balances.get(&ckusdt_ledger()),
             Some(&25_000_000)
         );
+        assert_eq!(
+            pos.cfx_claims
+                .as_ref()
+                .and_then(|claims| claims.get(&cfx_sentinel()))
+                .copied(),
+            Some(1_000_000_000_000_000_000),
+            "user position exposes restored CFX claims for auditability",
+        );
+
+        add_deposit_direct(&mut state, user_b(), icusd_ledger(), 1_00000000);
+        let pos_b = state.get_user_position(&user_b()).unwrap();
+        assert!(
+            pos_b.cfx_claims.clone().unwrap_or_default().is_empty(),
+            "normal depositors without chain claims expose an empty optional map",
+        );
 
         // Nonexistent user
-        assert!(state.get_user_position(&user_b()).is_none());
+        assert!(state.get_user_position(&user_c()).is_none());
     }
 
     // ─── Test: Multiple deposits accumulate ───
@@ -3986,6 +4071,22 @@ mod tests {
                 .unwrap_or_default()
                 .is_empty(),
             "missing completed chain absorb journal must decode as empty",
+        );
+        assert!(
+            decoded
+                .completed_cfx_claim_payout_recoveries
+                .clone()
+                .unwrap_or_default()
+                .is_empty(),
+            "missing CFX claim payout recovery journal must decode as empty",
+        );
+        assert!(
+            decoded
+                .completed_cfx_claim_payout_recovery_floor
+                .clone()
+                .unwrap_or_default()
+                .is_empty(),
+            "missing CFX claim payout recovery floor must decode as empty",
         );
     }
 

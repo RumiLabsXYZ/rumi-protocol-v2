@@ -209,6 +209,21 @@ pub async fn claim_cfx(
     crate::liquidation::claim_cfx(chain_sentinel, dest_evm).await
 }
 
+#[update]
+pub fn recredit_failed_cfx_claim_payout(
+    recovery: CfxClaimPayoutRecovery,
+) -> Result<bool, StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    let expected = read_state(|s| s.protocol_canister_id);
+    if caller != expected {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    let now = ic_cdk::api::time();
+    mutate_state(|s| {
+        crate::liquidation::recredit_failed_cfx_claim_payout_in_state_at(s, recovery, now)
+    })
+}
+
 // ─── Opt-in / Opt-out ───
 
 #[update]

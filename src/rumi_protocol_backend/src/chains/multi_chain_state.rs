@@ -462,15 +462,21 @@ pub struct ChainLiqClaimV1 {
     pub custody_address: String,
     pub seized_native_total: u128,
     pub paid_native: u128,
+    #[serde(default)]
+    pub pending_native: u128,
 }
 
 impl ChainLiqClaimV1 {
     pub fn paid_within_seized(&self) -> bool {
-        self.paid_native <= self.seized_native_total
+        self.paid_native
+            .checked_add(self.pending_native)
+            .map(|reserved| reserved <= self.seized_native_total)
+            .unwrap_or(false)
     }
 
     pub fn remaining_native(&self) -> u128 {
-        self.seized_native_total.saturating_sub(self.paid_native)
+        self.seized_native_total
+            .saturating_sub(self.paid_native.saturating_add(self.pending_native))
     }
 }
 

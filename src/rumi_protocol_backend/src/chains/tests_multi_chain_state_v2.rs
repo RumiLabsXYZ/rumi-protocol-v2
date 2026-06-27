@@ -523,6 +523,7 @@ fn v6_cbor_round_trip_preserves_new_liquidation_fields() {
             custody_address: "0xcustody".into(),
             seized_native_total: 12_345_000_000_000_000_000,
             paid_native: 1_000_000_000_000_000_000,
+            pending_native: 0,
         },
     );
     v6.chain_liquidation_configs.insert(
@@ -608,6 +609,17 @@ fn chain_liq_claim_invariant_rejects_overpaid_claims() {
         custody_address: "0xcustody".into(),
         seized_native_total: 10,
         paid_native: 11,
+        pending_native: 0,
+    };
+    assert!(!claim.paid_within_seized());
+
+    let claim = ChainLiqClaimV1 {
+        vault_id: 10,
+        chain: ChainId(1030),
+        custody_address: "0xcustody".into(),
+        seized_native_total: 10,
+        paid_native: 6,
+        pending_native: 5,
     };
     assert!(!claim.paid_within_seized());
 }
@@ -696,10 +708,8 @@ fn settlement_proof_state_round_trip_preserves_compact_records() {
         .insert(pending.proof_id.clone(), pending.clone());
     v6.settled_reserve_burn_proofs
         .insert(reserve.proof_id.clone(), reserve.clone());
-    v6.settled_settlement_burn_logs.insert(format!(
-        "{}:{}",
-        pending.tx_hash, pending.log_index
-    ));
+    v6.settled_settlement_burn_logs
+        .insert(format!("{}:{}", pending.tx_hash, pending.log_index));
     v6.settled_reserve_transfer_e8s.insert(
         "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc:8".to_string(),
         50_000_000,
@@ -718,10 +728,9 @@ fn settlement_proof_state_round_trip_preserves_compact_records() {
         decoded.settled_reserve_burn_proofs[&reserve.proof_id],
         reserve
     );
-    assert!(decoded.settled_settlement_burn_logs.contains(&format!(
-        "{}:{}",
-        pending.tx_hash, pending.log_index
-    )));
+    assert!(decoded
+        .settled_settlement_burn_logs
+        .contains(&format!("{}:{}", pending.tx_hash, pending.log_index)));
     assert_eq!(
         decoded.settled_reserve_transfer_e8s
             [&"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc:8".to_string()],
