@@ -126,6 +126,8 @@ pub const TRANSFER_EVENT_TOPIC0: &str =
 pub const GET_RESERVES_SELECTOR: &str = "0x0902f1ac";
 /// `token0()[:4]` selector (UniswapV2 pair).
 pub const TOKEN0_SELECTOR: &str = "0x0dfe1681";
+/// `getPair(address,address)[:4]` selector (UniswapV2 factory).
+pub const GET_PAIR_SELECTOR: &str = "0xe6a43905";
 /// `balanceOf(address)[:4]` selector (ERC-20).
 pub const BALANCE_OF_SELECTOR: &str = "0x70a08231";
 
@@ -388,6 +390,48 @@ pub fn parse_eth_call_u128(result_hex: &str) -> Result<u128, String> {
     }
     u128::from_str_radix(hex, 16)
         .map_err(|e| format!("eth_call result {:?} not a u128: {}", result_hex, e))
+}
+
+/// Decode an `eth_call` result word containing an ABI address into a normalized
+/// lowercase `0x` EVM address. Used for UniswapV2 factory `getPair`.
+pub fn parse_eth_call_address(result_hex: &str) -> Result<String, String> {
+    let hex = result_hex
+        .strip_prefix("0x")
+        .or_else(|| result_hex.strip_prefix("0X"))
+        .ok_or_else(|| format!("eth_call address result missing 0x prefix: {:?}", result_hex))?;
+    if hex.len() != 64 {
+        return Err(format!("eth_call address result must be one ABI word: {:?}", result_hex));
+    }
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!("eth_call address result not hex: {:?}", result_hex));
+    }
+    let word = hex;
+    if !word[..24].bytes().all(|b| b == b'0') {
+        return Err(format!("eth_call address result has non-zero padding: {:?}", result_hex));
+    }
+    let address = &word[24..64];
+    if address.bytes().all(|b| b == b'0') {
+        return Err(format!("eth_call address result is zero address: {:?}", result_hex));
+    }
+    Ok(format!("0x{}", address.to_lowercase()))
+}
+
+fn abi_word_address_hex(addr: &str) -> Result<String, String> {
+    let hex = addr.strip_prefix("0x").or_else(|| addr.strip_prefix("0X")).unwrap_or(addr);
+    if hex.len() != 40 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!("invalid EVM address {:?}", addr));
+    }
+    Ok(format!("{:0>64}", hex.to_lowercase()))
+}
+
+/// ABI-encode UniswapV2 factory `getPair(address,address)`.
+pub fn encode_get_pair_calldata(token_a: &str, token_b: &str) -> Result<String, String> {
+    Ok(format!(
+        "{}{}{}",
+        GET_PAIR_SELECTOR,
+        abi_word_address_hex(token_a)?,
+        abi_word_address_hex(token_b)?
+    ))
 }
 
 // ─── BurnLog ─────────────────────────────────────────────────────────────────
@@ -1159,6 +1203,21 @@ pub async fn get_pair_token0(chain: ChainId, pair: &str, block: u64) -> Result<S
         return Err(format!("token0: result too short: {:?}", hex));
     }
     Ok(format!("0x{}", raw[raw.len() - 40..].to_lowercase()))
+}
+
+/// UniswapV2 factory `getPair(tokenA, tokenB)` at a pinned block -> the pair
+/// address registered by the factory. Used by config onboarding to ensure the
+/// operator-pinned pair is the canonical pool for the configured token path.
+pub async fn get_factory_pair(
+    chain: ChainId,
+    factory: &str,
+    token_a: &str,
+    token_b: &str,
+    block: u64,
+) -> Result<String, String> {
+    let data = encode_get_pair_calldata(token_a, token_b)?;
+    let hex = eth_call_at_block(chain, factory, &data, block).await?;
+    parse_eth_call_address(&hex)
 }
 
 /// ERC-20 `balanceOf(addr)` at a pinned block (native base units). Used to

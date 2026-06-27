@@ -2045,24 +2045,32 @@ fn set_chain_contract(
     Ok(())
 }
 
-/// Set (or replace) the per-chain liquidation config (spec 8, Tier B): the DEX
-/// wiring + risk knobs the bot path will read. Developer-gated. The config is
-/// validated (slippage cap <= 100%, restore target > par, required addresses
-/// present when `enabled`) before persisting; a rejected config mutates nothing.
-/// Inert until Increment 2+ reads it (Increment 1 ships only this scaffolding).
-#[candid_method(update)]
-#[update]
-fn set_chain_liquidation_config(
+fn validate_chain_liquidation_config_inputs(
     chain: rumi_protocol_backend::chains::config::ChainId,
-    config: rumi_protocol_backend::chains::liquidation_config::ChainLiquidationConfigV1,
+    config: &rumi_protocol_backend::chains::liquidation_config::ChainLiquidationConfigV1,
 ) -> Result<(), ProtocolError> {
-    let caller = ic_cdk::caller();
-    if read_state(|s| s.developer_principal != caller) {
-        return Err(ProtocolError::ChainAdmin("not developer".into()));
-    }
     config
         .validate()
         .map_err(|e| ProtocolError::ChainAdmin(format!("invalid liquidation config: {e:?}")))?;
+    if rumi_protocol_backend::chains::evm::evm_chain_config(chain).is_none() {
+        return Err(ProtocolError::ChainAdmin(format!(
+            "chain {} is not a known EVM chain",
+            chain.0
+        )));
+    }
+    let chain_status = read_state(|s| s.multi_chain.chain_configs.get(&chain).map(|c| c.status));
+    match chain_status {
+        Some(rumi_protocol_backend::chains::config::ChainStatus::Registered) => {}
+        Some(status) => {
+            return Err(ProtocolError::ChainAdmin(format!(
+                "chain {} is not registered: {:?}",
+                chain.0, status
+            )));
+        }
+        None => {
+            return Err(ProtocolError::ChainAdmin(format!("unknown chain {}", chain.0)));
+        }
+    }
     // Finding #16: the penalty cushion MUST exceed the slippage + oracle-divergence
     // budget, or a swap can structurally deliver less stable than the debt it
     // clears (under-cover). Increment 3 adds the max_dex_oracle_divergence_bps term.
@@ -2081,6 +2089,72 @@ fn set_chain_liquidation_config(
                 config.slippage_cap_bps, config.max_dex_oracle_divergence_bps, penalty_bps
             )));
         }
+    }
+    Ok(())
+}
+
+async fn validate_liquidation_factory_pair(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    config: &rumi_protocol_backend::chains::liquidation_config::ChainLiquidationConfigV1,
+) -> Result<(), ProtocolError> {
+    match config.dex {
+        rumi_protocol_backend::chains::liquidation_config::DexKind::UniswapV2 => {}
+    }
+    let (_latest, finalized) = rumi_protocol_backend::chains::evm::evm_rpc::fetch_block_numbers(chain)
+        .await
+        .map_err(|e| ProtocolError::ChainAdmin(format!("factory pair sanity block read failed: {e}")))?;
+    let derived_pair = rumi_protocol_backend::chains::evm::evm_rpc::get_factory_pair(
+        chain,
+        &config.factory,
+        &config.collateral_token,
+        &config.settle_stable_token,
+        finalized,
+    )
+    .await
+    .map_err(|e| ProtocolError::ChainAdmin(format!("factory pair sanity getPair failed: {e}")))?;
+    validate_liquidation_factory_pair_match(config, &derived_pair)
+}
+
+fn validate_liquidation_factory_pair_match(
+    config: &rumi_protocol_backend::chains::liquidation_config::ChainLiquidationConfigV1,
+    derived_pair: &str,
+) -> Result<(), ProtocolError> {
+    let derived_pair =
+        rumi_protocol_backend::chains::liquidation_config::canonical_evm_address(derived_pair)
+            .map_err(|e| ProtocolError::ChainAdmin(format!("invalid factory pair: {e:?}")))?;
+    let pinned_pair =
+        rumi_protocol_backend::chains::liquidation_config::canonical_evm_address(&config.pair)
+            .map_err(|e| ProtocolError::ChainAdmin(format!("invalid pinned pair: {e:?}")))?;
+    if derived_pair != pinned_pair {
+        return Err(ProtocolError::ChainAdmin(format!(
+            "factory getPair({}, {}) returned {}, expected pinned pair {}",
+            config.collateral_token, config.settle_stable_token, derived_pair, pinned_pair
+        )));
+    }
+    Ok(())
+}
+
+/// Set (or replace) the per-chain liquidation config (spec 8, Tier B): the DEX
+/// wiring + risk knobs the bot path will read. Developer-gated. The config is
+/// validated (chain registered, EVM addresses well-formed, penalty cushion safe)
+/// before persisting; enabling also checks the UniswapV2 factory-derived pair
+/// matches the pinned pair. A rejected config mutates nothing.
+#[candid_method(update)]
+#[update]
+async fn set_chain_liquidation_config(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    config: rumi_protocol_backend::chains::liquidation_config::ChainLiquidationConfigV1,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    validate_chain_liquidation_config_inputs(chain, &config)?;
+    if config.enabled {
+        validate_liquidation_factory_pair(chain, &config).await?;
+        // State may have changed during the RPC await. Re-check all synchronous
+        // invariants immediately before mutating.
+        validate_chain_liquidation_config_inputs(chain, &config)?;
     }
     mutate_state(|s| {
         s.multi_chain
@@ -11681,6 +11755,61 @@ fn check_candid_interface_compatibility() {
         "declared candid interface in rumi_protocol_backend.did file",
         CandidSource::File(did_path.as_path()),
     );
+}
+
+#[cfg(test)]
+mod inc12_liquidation_config_tests {
+    use super::validate_liquidation_factory_pair_match;
+    use rumi_protocol_backend::chains::liquidation_config::{ChainLiquidationConfigV1, DexKind};
+
+    fn cfg() -> ChainLiquidationConfigV1 {
+        ChainLiquidationConfigV1 {
+            dex: DexKind::UniswapV2,
+            router: "0x1111111111111111111111111111111111111111".into(),
+            factory: "0x2222222222222222222222222222222222222222".into(),
+            pair: "0x3333333333333333333333333333333333333333".into(),
+            collateral_token: "0x4444444444444444444444444444444444444444".into(),
+            settle_stable_token: "0x5555555555555555555555555555555555555555".into(),
+            slippage_cap_bps: 250,
+            restore_target_cr_e4: 15_500,
+            enabled: true,
+            max_swap_value_e8s: 2_000 * 100_000_000,
+            max_price_age_ns: 1_800_000_000_000,
+            max_dex_oracle_divergence_bps: 500,
+            fee_bps: 25,
+            settle_stable_decimals: 18,
+            deadline_secs: 180,
+        }
+    }
+
+    #[test]
+    fn factory_pair_match_accepts_case_normalized_pair() {
+        assert!(validate_liquidation_factory_pair_match(
+            &cfg(),
+            "0X3333333333333333333333333333333333333333"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn factory_pair_match_rejects_different_pair() {
+        let err = validate_liquidation_factory_pair_match(
+            &cfg(),
+            "0x9999999999999999999999999999999999999999",
+        )
+        .expect_err("mismatched factory pair rejects");
+        assert!(format!("{err:?}").contains("expected pinned pair"));
+    }
+
+    #[test]
+    fn factory_pair_match_rejects_zero_factory_pair() {
+        let err = validate_liquidation_factory_pair_match(
+            &cfg(),
+            "0x0000000000000000000000000000000000000000",
+        )
+        .expect_err("zero factory pair rejects");
+        assert!(format!("{err:?}").contains("invalid factory pair"));
+    }
 }
 
 #[cfg(test)]
