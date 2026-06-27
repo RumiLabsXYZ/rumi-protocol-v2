@@ -811,6 +811,15 @@ pub struct XrpClaim {
     /// is reconciled rather than paid twice. `None` = nothing submitted yet.
     #[serde(default)]
     pub settlement: Option<XrpSettlement>,
+    /// F-03 quarantine: set with a human-readable reason when the settle path detects
+    /// that this claim's custody-account Sequence advanced past the recorded
+    /// `source_sequence` while the recorded `tx_hash` is NotFound on-ledger — i.e. the
+    /// signed Payment may already have settled under a divergent hash. While `Some`,
+    /// `settle_xrp_claim` refuses to sign (so the claim cannot be double-paid); an
+    /// admin resolves it via `admin_resolve_xrp_claim` after off-chain reconciliation.
+    /// `None` = healthy. ciborium `#[serde(default)]` so older snapshots decode healthy.
+    #[serde(default)]
+    pub quarantine_reason: Option<String>,
 }
 
 /// P4: the settlement Payment already signed + submitted for an `XrpClaim`.
@@ -7506,11 +7515,42 @@ mod tests {
             custody_nonce: 9,
             created_at_ns: 42,
             settlement: None,
+            quarantine_reason: Some("diverged".to_string()),
         };
         let mut buf = Vec::new();
         ciborium::ser::into_writer(&c, &mut buf).unwrap();
         let back: XrpClaim = ciborium::de::from_reader(buf.as_slice()).unwrap();
         assert_eq!(c, back);
+    }
+
+    /// Migration safety: a pre-quarantine ciborium snapshot (a map WITHOUT the
+    /// `quarantine_reason` key) must decode as a healthy claim (`None`), not trap —
+    /// the `#[serde(default)]` analogue of the existing `settlement` field handling.
+    #[test]
+    fn xrp_claim_decodes_pre_quarantine_snapshot_as_healthy() {
+        // Encode a struct with the OLD shape (no quarantine_reason) via a serde map.
+        #[derive(serde::Serialize)]
+        struct OldXrpClaim {
+            claimant: Principal,
+            drops: u64,
+            custody_owner: Principal,
+            custody_nonce: u64,
+            created_at_ns: u64,
+            settlement: Option<XrpSettlement>,
+        }
+        let old = OldXrpClaim {
+            claimant: Principal::anonymous(),
+            drops: 4_000_000,
+            custody_owner: Principal::from_slice(&[0xab; 16]),
+            custody_nonce: 9,
+            created_at_ns: 42,
+            settlement: None,
+        };
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&old, &mut buf).unwrap();
+        let restored: XrpClaim = ciborium::de::from_reader(buf.as_slice()).unwrap();
+        assert_eq!(restored.quarantine_reason, None);
+        assert_eq!(restored.drops, 4_000_000);
     }
 
     #[test]
