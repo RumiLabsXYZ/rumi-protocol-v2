@@ -890,7 +890,7 @@ environments:
         (variant {
           Upgrade = record {
             mode = null;
-            description = opt "PR #241: heal collateral_to_vault_ids stale ids (post_upgrade sweep) + fix close_vault double-remove trap + replay drain parity; rides with PR #240 explorer admin_label event labels"
+            description = opt "PRs #287/#288: F-03 native-XRP settlement hardening - sibling-reconcile Sequence guard (closes the residual double-pay) + claim quarantine with admin_resolve_xrp_claim/admin_quarantine_xrp_claim/get_xrp_quarantined_claims + XrpClaim.quarantine_reason field (ciborium serde-default, non-breaking candid)"
           }
         })
 
