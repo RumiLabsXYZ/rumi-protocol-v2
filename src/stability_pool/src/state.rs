@@ -1706,7 +1706,7 @@ impl StabilityPoolState {
             collateral_gains: pos.collateral_gains.clone(),
             cfx_claims: pos.cfx_claims.clone(),
             opted_out_collateral: pos.opted_out_collateral.iter().cloned().collect(),
-            native_payout_addresses: pos.native_payout_addresses.clone().unwrap_or_default(),
+            native_payout_addresses: Some(pos.native_payout_addresses.clone().unwrap_or_default()),
             deposit_timestamp: pos.deposit_timestamp,
             total_claimed_gains: pos.total_claimed_gains.clone(),
             total_usd_value_e8s: pos

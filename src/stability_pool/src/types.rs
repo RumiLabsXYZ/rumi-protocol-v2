@@ -478,7 +478,12 @@ pub struct UserStabilityPosition {
     pub collateral_gains: BTreeMap<Principal, u64>,
     pub cfx_claims: Option<BTreeMap<Principal, u128>>,
     pub opted_out_collateral: Vec<Principal>,
-    pub native_payout_addresses: BTreeMap<Principal, String>,
+    /// `Option` (candid `opt`) so a frontend built with this declaration can
+    /// still decode a `get_user_position` response from an older SP canister
+    /// that predates native collateral (the field simply decodes to `None`).
+    /// A required field here silently breaks position decoding whenever the
+    /// frontend is deployed ahead of the canister.
+    pub native_payout_addresses: Option<BTreeMap<Principal, String>>,
     pub deposit_timestamp: u64,
     pub total_claimed_gains: BTreeMap<Principal, u64>,
     pub total_usd_value_e8s: u64,

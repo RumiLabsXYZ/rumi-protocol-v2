@@ -245,7 +245,9 @@ export const idlFactory = ({ IDL }) => {
     'stablecoin_balances' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
     'cfx_claims' : IDL.Opt(IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat))),
     'total_claimed_gains' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
-    'native_payout_addresses' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Text)),
+    'native_payout_addresses' : IDL.Opt(
+      IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Text))
+    ),
     'total_usd_value_e8s' : IDL.Nat64,
     'opted_out_collateral' : IDL.Vec(IDL.Principal),
   });

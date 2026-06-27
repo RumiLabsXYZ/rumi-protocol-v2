@@ -38,7 +38,8 @@
   $: totalUsdValue = userPosition ? formatStableTokenDisplay(userPosition.total_usd_value_e8s, 8) : '0.0000';
   $: gains = userPosition?.collateral_gains ?? [];
   $: optedOut = new Set((userPosition?.opted_out_collateral ?? []).map(p => p.toText()));
-  $: nativePayoutByCollateral = new Map((userPosition?.native_payout_addresses ?? []).map(([p, address]) => [p.toText(), address]));
+  // `native_payout_addresses` is candid `opt vec` → unwrap the outer opt (`[]` or `[[...]]`).
+  $: nativePayoutByCollateral = new Map((userPosition?.native_payout_addresses?.[0] ?? []).map(([p, address]) => [p.toText(), address]));
 
   $: {
     let nextInputs = nativeAddressInputs;
