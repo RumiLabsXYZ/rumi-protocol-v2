@@ -1,10 +1,11 @@
 import type { CollateralInfo } from '$lib/services/types';
 
-export const NATIVE_XRP_ACCOUNT_RESERVE = 1;
+export const XRP_DROPS_PER_XRP = 1_000_000;
 
 export interface NativeXrpDepositIntent {
   collateralAmount: number;
   icusdAmount: number;
+  reserveBaseDrops: bigint | number;
   collateralInfo?: Pick<CollateralInfo, 'symbol' | 'custodyKind'>;
 }
 
@@ -38,6 +39,10 @@ export function formatXrpAmount(amount: number): string {
   return `${rounded} XRP`;
 }
 
+export function xrpAmountFromDrops(drops: bigint | number): number {
+  return Number(drops) / XRP_DROPS_PER_XRP;
+}
+
 export function buildXrpPaymentUri(address: string, amount: number): string {
   const amountParam = formatXrpAmount(amount).replace(/ XRP$/, '');
   return `ripple:${encodeURIComponent(address)}?amount=${encodeURIComponent(amountParam)}`;
@@ -45,7 +50,7 @@ export function buildXrpPaymentUri(address: string, amount: number): string {
 
 export function nativeXrpDepositCopy(intent: NativeXrpDepositIntent): NativeXrpDepositCopy {
   const assetName = intent.collateralInfo?.symbol || 'XRP';
-  const reserveAmount = NATIVE_XRP_ACCOUNT_RESERVE;
+  const reserveAmount = xrpAmountFromDrops(intent.reserveBaseDrops);
   const sendAmount = intent.collateralAmount + reserveAmount;
   const collateralAmountLabel = formatXrpAmount(intent.collateralAmount);
   const reserveAmountLabel = formatXrpAmount(reserveAmount);

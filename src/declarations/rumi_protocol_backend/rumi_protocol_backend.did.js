@@ -111,6 +111,10 @@ export const idlFactory = ({ IDL }) => {
     'correct_borrowed_e8s' : IDL.Nat64,
   });
   const Result_2 = IDL.Variant({ 'Ok' : IDL.Text, 'Err' : ProtocolError });
+  const XrpClaimResolution = IDL.Variant({
+    'ReleaseForRetry' : IDL.Null,
+    'ConfirmPaid' : IDL.Null,
+  });
   const VaultIntent = IDL.Record({
     'action' : IDL.Nat8,
     'owner' : IDL.Text,
@@ -950,11 +954,13 @@ export const idlFactory = ({ IDL }) => {
     'custody_nonce' : IDL.Nat64,
     'claimant' : IDL.Principal,
     'created_at_ns' : IDL.Nat64,
+    'quarantine_reason' : IDL.Opt(IDL.Text),
     'custody_owner' : IDL.Principal,
     'drops' : IDL.Nat64,
     'settlement' : IDL.Opt(XrpSettlement),
   });
   const XrpPendingDeposit = IDL.Record({
+    'reserve_base_drops' : IDL.Nat64,
     'owner' : IDL.Principal,
     'custody_address' : IDL.Text,
     'opened_at_ns' : IDL.Nat64,
@@ -1176,6 +1182,7 @@ export const idlFactory = ({ IDL }) => {
     'Err' : ProtocolError,
   });
   const XrpVaultOpenInfo = IDL.Record({
+    'reserve_base_drops' : IDL.Nat64,
     'custody_address' : IDL.Text,
     'vault_id' : IDL.Nat64,
   });
@@ -1314,7 +1321,17 @@ export const idlFactory = ({ IDL }) => {
         [Result_1],
         [],
       ),
+    'admin_quarantine_xrp_claim' : IDL.Func(
+        [IDL.Nat64, IDL.Text],
+        [Result],
+        [],
+      ),
     'admin_resolve_stuck_claim' : IDL.Func([IDL.Nat64, IDL.Bool], [Result], []),
+    'admin_resolve_xrp_claim' : IDL.Func(
+        [IDL.Nat64, XrpClaimResolution],
+        [Result],
+        [],
+      ),
     'admin_sweep_to_treasury' : IDL.Func([IDL.Text], [Result_1], []),
     'borrow_chain_vault_evm' : IDL.Func(
         [VaultIntent, IDL.Vec(IDL.Nat8)],
@@ -1618,6 +1635,11 @@ export const idlFactory = ({ IDL }) => {
     'get_xrp_pending_deposits' : IDL.Func(
         [],
         [IDL.Vec(IDL.Tuple(IDL.Nat64, XrpPendingDeposit))],
+        ['query'],
+      ),
+    'get_xrp_quarantined_claims' : IDL.Func(
+        [],
+        [IDL.Vec(IDL.Tuple(IDL.Nat64, XrpClaim))],
         ['query'],
       ),
     'get_xrp_schnorr_key_name' : IDL.Func([], [IDL.Text], ['query']),

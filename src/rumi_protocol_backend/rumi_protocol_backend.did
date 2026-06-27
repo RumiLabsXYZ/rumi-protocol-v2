@@ -1135,11 +1135,14 @@ type XrpClaim = record {
   custody_nonce : nat64;
   claimant : principal;
   created_at_ns : nat64;
+  quarantine_reason : opt text;
   custody_owner : principal;
   drops : nat64;
   settlement : opt XrpSettlement;
 };
+type XrpClaimResolution = variant { ReleaseForRetry; ConfirmPaid };
 type XrpPendingDeposit = record {
+  reserve_base_drops : nat64;
   owner : principal;
   custody_address : text;
   opened_at_ns : nat64;
@@ -1152,7 +1155,11 @@ type XrpSettlement = record {
   last_ledger_sequence : nat32;
   tx_hash : text;
 };
-type XrpVaultOpenInfo = record { custody_address : text; vault_id : nat64 };
+type XrpVaultOpenInfo = record {
+  reserve_base_drops : nat64;
+  custody_address : text;
+  vault_id : nat64;
+};
 service : (ProtocolArg) -> {
   add_collateral_token : (AddCollateralArg) -> (Result);
   add_margin_to_vault : (VaultArg) -> (Result_1);
@@ -1160,7 +1167,9 @@ service : (ProtocolArg) -> {
   admin_correct_vault_collateral : (nat64, nat64, text) -> (Result);
   admin_correct_vault_debts : (vec VaultDebtCorrection) -> (Result_2);
   admin_mint_icusd : (nat64, principal, text) -> (Result_1);
+  admin_quarantine_xrp_claim : (nat64, text) -> (Result);
   admin_resolve_stuck_claim : (nat64, bool) -> (Result);
+  admin_resolve_xrp_claim : (nat64, XrpClaimResolution) -> (Result);
   admin_sweep_to_treasury : (text) -> (Result_1);
   borrow_chain_vault_evm : (VaultIntent, blob) -> (Result);
   borrow_from_vault : (VaultArg) -> (Result_3);
@@ -1296,6 +1305,7 @@ service : (ProtocolArg) -> {
   get_xrp_pending_deposits : () -> (
       vec record { nat64; XrpPendingDeposit },
     ) query;
+  get_xrp_quarantined_claims : () -> (vec record { nat64; XrpClaim }) query;
   get_xrp_schnorr_key_name : () -> (text) query;
   harvest_chain_interest : (nat32) -> (Result_1);
   http_request : (HttpRequest) -> (HttpResponse_1) query;

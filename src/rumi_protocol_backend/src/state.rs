@@ -670,12 +670,21 @@ pub enum CustodyKind {
 /// `confirm_xrp_deposit` once the deposit to `custody_address` is verified and a
 /// real `Vault` is created. `derivation_nonce` (= the reserved vault_id) plus the
 /// owner pin the threshold-Ed25519 custody path, so the address is reproducible.
+fn default_xrp_pending_reserve_base_drops() -> u64 {
+    0
+}
+
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub struct XrpPendingDeposit {
     pub owner: Principal,
     pub custody_address: String,
     pub derivation_nonce: u64,
     pub opened_at_ns: u64,
+    /// XRPL reserve base, in drops, fetched from server_state when the deposit
+    /// address was prepared. Old pending deposits decode to 0 because the value
+    /// was not recorded before this field existed.
+    #[serde(default = "default_xrp_pending_reserve_base_drops")]
+    pub reserve_base_drops: u64,
 }
 
 /// Synthetic `collateral_type` / `CollateralConfig` map key for native XRP. XRP has
@@ -687,12 +696,9 @@ pub fn xrp_collateral_principal() -> Principal {
     Principal::from_slice(b"rumi-xrp-native")
 }
 
-/// Launch cap for native-XRP borrowing: 100 icUSD, in e8s.
-pub const XRP_LAUNCH_DEBT_CEILING_E8S: u64 = 10_000_000_000;
-
 /// P5: the `CollateralConfig` for native-XRP collateral. Parameters (Rob's):
-/// 150% borrow threshold / 133% liquidation / 12% liquidation penalty / $100 debt
-/// ceiling. Borrowing-fee + interest BASE are copied from ICP ("same as ICP"); the
+/// 150% borrow threshold / 133% liquidation / 12% liquidation penalty / 2,500 icUSD
+/// debt ceiling. Borrowing-fee + interest BASE are copied from ICP ("same as ICP"); the
 /// dynamic curves are global (`borrowing_fee_curve`) or inherited (`rate_curve` =
 /// None). custody_kind = `NativeXrp`; `ledger_canister_id` is the synthetic key; 6
 /// decimals (drops); `ledger_fee` = 0 (the XRPL fee is handled by the rail at settle
@@ -712,7 +718,10 @@ pub fn xrp_collateral_config(
         liquidation_bonus: Ratio::new(dec!(1.12)),
         borrowing_fee: icp_borrowing_fee,
         interest_rate_apr: icp_interest_rate_apr,
-        debt_ceiling: XRP_LAUNCH_DEBT_CEILING_E8S,
+        // 2,500 icUSD e8s. This default applies to a FRESH registration only; an
+        // already-registered config keeps its live ceiling across upgrade (no clamp),
+        // so raise the live config via set_collateral_debt_ceiling(xrp, 250_000_000_000).
+        debt_ceiling: 250_000_000_000,
         min_vault_debt: ICUSD::new(10_000_000), // 0.1 icUSD (matches ICP)
         ledger_fee: 0,
         price_source: PriceSource::Xrc {
@@ -743,24 +752,20 @@ pub fn xrp_collateral_config(
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct XrpLaunchGuardrailMigration {
-    pub previous_debt_ceiling: Option<u64>,
     pub previous_status: Option<CollateralStatus>,
 }
 
-/// Converges already-registered native-XRP collateral onto launch guardrails.
-/// This is intentionally idempotent so upgrades, replay recovery, and tests can
-/// call it without needing a one-shot migration flag.
+/// Converges already-registered native-XRP collateral onto the launch guardrail:
+/// native-XRP cannot be left Active while signing off a non-production Schnorr key
+/// (the audit's F-01 fix). Intentionally idempotent so upgrades, replay recovery,
+/// and tests can call it without a one-shot migration flag. The debt ceiling is NOT
+/// clamped here — XRP uses a normal `debt_ceiling` like every other collateral.
 pub fn enforce_xrp_launch_guardrails(state: &mut State) -> XrpLaunchGuardrailMigration {
     let mut migration = XrpLaunchGuardrailMigration::default();
     let xrp_ct = xrp_collateral_principal();
     let Some(config) = state.collateral_configs.get_mut(&xrp_ct) else {
         return migration;
     };
-
-    if config.debt_ceiling > XRP_LAUNCH_DEBT_CEILING_E8S {
-        migration.previous_debt_ceiling = Some(config.debt_ceiling);
-        config.debt_ceiling = XRP_LAUNCH_DEBT_CEILING_E8S;
-    }
 
     if !crate::chains::xrp::config::is_xrp_production_key_name(&state.xrp_schnorr_key_name)
         && !matches!(
@@ -787,12 +792,6 @@ pub fn validate_xrp_launch_config_update(
         return Err(ProtocolError::GenericError(
             "XRP collateral config must keep custody_kind = NativeXrp".to_string(),
         ));
-    }
-    if config.debt_ceiling > XRP_LAUNCH_DEBT_CEILING_E8S {
-        return Err(ProtocolError::GenericError(format!(
-            "XRP debt ceiling cannot exceed {} e8s (100 icUSD)",
-            XRP_LAUNCH_DEBT_CEILING_E8S
-        )));
     }
     if !matches!(
         config.status,
@@ -827,6 +826,15 @@ pub struct XrpClaim {
     /// is reconciled rather than paid twice. `None` = nothing submitted yet.
     #[serde(default)]
     pub settlement: Option<XrpSettlement>,
+    /// F-03 quarantine: set with a human-readable reason when the settle path detects
+    /// that this claim's custody-account Sequence advanced past the recorded
+    /// `source_sequence` while the recorded `tx_hash` is NotFound on-ledger — i.e. the
+    /// signed Payment may already have settled under a divergent hash. While `Some`,
+    /// `settle_xrp_claim` refuses to sign (so the claim cannot be double-paid); an
+    /// admin resolves it via `admin_resolve_xrp_claim` after off-chain reconciliation.
+    /// `None` = healthy. ciborium `#[serde(default)]` so older snapshots decode healthy.
+    #[serde(default)]
+    pub quarantine_reason: Option<String>,
 }
 
 /// P4: the settlement Payment already signed + submitted for an `XrpClaim`.
@@ -7303,8 +7311,7 @@ mod tests {
         assert_eq!(cfg.ledger_canister_id, xrp_collateral_principal());
         assert_eq!(cfg.decimals, 6);
         assert_eq!(cfg.ledger_fee, 0);
-        assert_eq!(XRP_LAUNCH_DEBT_CEILING_E8S, 10_000_000_000); // $100
-        assert_eq!(cfg.debt_ceiling, XRP_LAUNCH_DEBT_CEILING_E8S);
+        assert_eq!(cfg.debt_ceiling, 250_000_000_000); // 2,500 icUSD
         assert_eq!(cfg.liquidation_ratio, Ratio::new(dec!(1.33)));
         assert_eq!(cfg.borrow_threshold_ratio, Ratio::new(dec!(1.50)));
         assert_eq!(cfg.liquidation_bonus, Ratio::new(dec!(1.12))); // 12% penalty
@@ -7329,7 +7336,7 @@ mod tests {
     }
 
     #[test]
-    fn xrp_launch_guardrails_clamp_existing_cap_and_freeze_non_production_key() {
+    fn xrp_launch_guardrails_freeze_non_production_key_without_clamping_ceiling() {
         let mut state = test_state();
         let xrp = xrp_collateral_principal();
         let mut cfg = xrp_collateral_config(
@@ -7346,27 +7353,37 @@ mod tests {
         let migration = enforce_xrp_launch_guardrails(&mut state);
         let migrated = state.collateral_configs.get(&xrp).unwrap();
 
-        assert_eq!(migration.previous_debt_ceiling, Some(20_000_000_000));
+        // F-01 key gate still freezes a non-production key...
         assert_eq!(migration.previous_status, Some(CollateralStatus::Active));
-        assert_eq!(migrated.debt_ceiling, XRP_LAUNCH_DEBT_CEILING_E8S);
         assert_eq!(migrated.status, CollateralStatus::Frozen);
+        // ...but the debt ceiling is no longer clamped — XRP is a normal asset now.
+        assert_eq!(migrated.debt_ceiling, 20_000_000_000);
     }
 
     #[test]
-    fn xrp_launch_config_update_rejects_cap_above_launch_ceiling() {
+    fn xrp_launch_config_update_allows_any_ceiling_but_keeps_key_gate() {
         let xrp = xrp_collateral_principal();
         let mut cfg = xrp_collateral_config(
             Ratio::new(dec!(0.005)),
             Ratio::new(dec!(0.0)),
             Ratio::new(dec!(1.033333333333333333)),
         );
-        cfg.debt_ceiling = XRP_LAUNCH_DEBT_CEILING_E8S + 1;
+        // A ceiling well above the old launch cap is now accepted (production key).
+        cfg.debt_ceiling = 500_000_000_000;
+        assert!(validate_xrp_launch_config_update(
+            xrp,
+            &cfg,
+            crate::chains::xrp::config::XRP_PRODUCTION_SCHNORR_KEY_NAME,
+        )
+        .is_ok());
 
+        // The F-01 key gate is still enforced: a non-production key on an Active
+        // config is rejected regardless of the ceiling.
         assert!(matches!(
             validate_xrp_launch_config_update(
                 xrp,
                 &cfg,
-                crate::chains::xrp::config::XRP_PRODUCTION_SCHNORR_KEY_NAME,
+                crate::chains::xrp::config::XRP_TEST_SCHNORR_KEY_NAME,
             ),
             Err(ProtocolError::GenericError(_))
         ));
@@ -7495,11 +7512,34 @@ mod tests {
             custody_address: "rLUEXYuLiQptky37CqLcm9USQpPiz5rkpD".to_string(),
             derivation_nonce: 7,
             opened_at_ns: 123,
+            reserve_base_drops: 1_000_000,
         };
         let mut buf = Vec::new();
         ciborium::ser::into_writer(&dep, &mut buf).unwrap();
         let back: XrpPendingDeposit = ciborium::de::from_reader(buf.as_slice()).unwrap();
         assert_eq!(dep, back);
+    }
+
+    #[test]
+    fn xrp_pending_deposit_defaults_missing_reserve_on_old_snapshot() {
+        #[derive(Serialize)]
+        struct LegacyXrpPendingDeposit {
+            owner: Principal,
+            custody_address: String,
+            derivation_nonce: u64,
+            opened_at_ns: u64,
+        }
+
+        let legacy = LegacyXrpPendingDeposit {
+            owner: Principal::anonymous(),
+            custody_address: "rLUEXYuLiQptky37CqLcm9USQpPiz5rkpD".to_string(),
+            derivation_nonce: 7,
+            opened_at_ns: 123,
+        };
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&legacy, &mut buf).unwrap();
+        let back: XrpPendingDeposit = ciborium::de::from_reader(buf.as_slice()).unwrap();
+        assert_eq!(back.reserve_base_drops, 0);
     }
 
     #[test]
@@ -7536,11 +7576,42 @@ mod tests {
             custody_nonce: 9,
             created_at_ns: 42,
             settlement: None,
+            quarantine_reason: Some("diverged".to_string()),
         };
         let mut buf = Vec::new();
         ciborium::ser::into_writer(&c, &mut buf).unwrap();
         let back: XrpClaim = ciborium::de::from_reader(buf.as_slice()).unwrap();
         assert_eq!(c, back);
+    }
+
+    /// Migration safety: a pre-quarantine ciborium snapshot (a map WITHOUT the
+    /// `quarantine_reason` key) must decode as a healthy claim (`None`), not trap —
+    /// the `#[serde(default)]` analogue of the existing `settlement` field handling.
+    #[test]
+    fn xrp_claim_decodes_pre_quarantine_snapshot_as_healthy() {
+        // Encode a struct with the OLD shape (no quarantine_reason) via a serde map.
+        #[derive(serde::Serialize)]
+        struct OldXrpClaim {
+            claimant: Principal,
+            drops: u64,
+            custody_owner: Principal,
+            custody_nonce: u64,
+            created_at_ns: u64,
+            settlement: Option<XrpSettlement>,
+        }
+        let old = OldXrpClaim {
+            claimant: Principal::anonymous(),
+            drops: 4_000_000,
+            custody_owner: Principal::from_slice(&[0xab; 16]),
+            custody_nonce: 9,
+            created_at_ns: 42,
+            settlement: None,
+        };
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&old, &mut buf).unwrap();
+        let restored: XrpClaim = ciborium::de::from_reader(buf.as_slice()).unwrap();
+        assert_eq!(restored.quarantine_reason, None);
+        assert_eq!(restored.drops, 4_000_000);
     }
 
     #[test]

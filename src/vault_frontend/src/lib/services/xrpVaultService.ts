@@ -21,8 +21,11 @@
 
 import type { _SERVICE } from '$declarations/rumi_protocol_backend/rumi_protocol_backend.did';
 import { idlFactory as rumi_backendIDL } from '$declarations/rumi_protocol_backend/rumi_protocol_backend.did.js';
+import { browser } from '$app/environment';
+import { get } from 'svelte/store';
 import { CONFIG } from '../config';
 import { walletStore } from '../stores/wallet';
+import { currentWalletType, WALLET_TYPES } from './auth';
 import { ApiClient } from './protocol/apiClient';
 import { callWithOisyFalseNegativeGuard, isOisyLandedSentinel } from './protocol/oisyResilience';
 
@@ -41,12 +44,15 @@ export interface XrpVaultOpenView {
   vaultId: number;
   /** The per-vault XRPL classic custody address (starts with `r`). */
   custodyAddress: string;
+  /** XRPL reserve base fetched by the backend when the custody address was prepared. */
+  reserveBaseDrops: bigint;
 }
 
 export interface XrpPendingDepositView {
   vaultId: number;
   custodyAddress: string;
   openedAtMs: number;
+  reserveBaseDrops: bigint;
 }
 
 export interface XrpClaimView {
@@ -68,6 +74,131 @@ export interface XrpOpResult<T> {
   error?: string;
   /** Set when the Oisy false-negative guard confirmed the op landed despite a signer error. */
   oisyResilient?: boolean;
+}
+
+interface CachedXrpPendingDeposit extends XrpPendingDepositView {
+  updatedAtMs: number;
+}
+
+interface XrpReadOptions {
+  /**
+   * Oisy calls route through the popup signer. Passive UI refreshes must keep
+   * this false; explicit user-triggered refreshes can opt in.
+   */
+  allowSigner?: boolean;
+}
+
+const XRP_PENDING_CACHE_PREFIX = 'rumi_xrp_pending_deposits:';
+const XRP_HIDDEN_PENDING_PREFIX = 'rumi_xrp_hidden_pending_deposits:';
+export const XRP_PENDING_DEPOSITS_CHANGED = 'rumi:xrp-pending-deposits-changed';
+
+function currentPrincipalText(): string | null {
+  return get(walletStore).principal?.toText?.() ?? null;
+}
+
+function isOisySignerWallet(): boolean {
+  return get(currentWalletType) === WALLET_TYPES.OISY;
+}
+
+function pendingCacheKey(owner: string): string {
+  return `${XRP_PENDING_CACHE_PREFIX}${owner}`;
+}
+
+function hiddenPendingCacheKey(owner: string): string {
+  return `${XRP_HIDDEN_PENDING_PREFIX}${owner}`;
+}
+
+function readHiddenPendingIds(owner = currentPrincipalText()): Set<number> {
+  if (!browser || !owner) return new Set();
+  try {
+    const raw = localStorage.getItem(hiddenPendingCacheKey(owner));
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw) as number[];
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter((id) => Number.isFinite(id)));
+  } catch {
+    return new Set();
+  }
+}
+
+function writeHiddenPendingIds(ids: Set<number>, owner = currentPrincipalText()) {
+  if (!browser || !owner) return;
+  localStorage.setItem(hiddenPendingCacheKey(owner), JSON.stringify([...ids].sort((a, b) => a - b)));
+}
+
+function emitPendingDepositsChanged() {
+  if (browser) window.dispatchEvent(new CustomEvent(XRP_PENDING_DEPOSITS_CHANGED));
+}
+
+function visiblePendingDeposits(pending: XrpPendingDepositView[], owner = currentPrincipalText()): XrpPendingDepositView[] {
+  const hidden = readHiddenPendingIds(owner);
+  return pending.filter((p) => !hidden.has(p.vaultId));
+}
+
+function readCachedPendingDeposits(owner = currentPrincipalText()): XrpPendingDepositView[] {
+  if (!browser || !owner) return [];
+  try {
+    const raw = localStorage.getItem(pendingCacheKey(owner));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as CachedXrpPendingDeposit[];
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((p) => Number.isFinite(p.vaultId) && typeof p.custodyAddress === 'string')
+      .map((p) => ({
+        vaultId: p.vaultId,
+        custodyAddress: p.custodyAddress,
+        openedAtMs: Number.isFinite(p.openedAtMs) ? p.openedAtMs : p.updatedAtMs,
+      }));
+  } catch {
+    return [];
+  }
+}
+
+function writeCachedPendingDeposits(pending: XrpPendingDepositView[], owner = currentPrincipalText()) {
+  if (!browser || !owner) return;
+  const deduped = new Map<number, CachedXrpPendingDeposit>();
+  for (const p of pending) {
+    deduped.set(p.vaultId, {
+      ...p,
+      updatedAtMs: Date.now(),
+    });
+  }
+  localStorage.setItem(pendingCacheKey(owner), JSON.stringify([...deduped.values()]));
+}
+
+function rememberPendingDeposit(pending: XrpPendingDepositView, owner = currentPrincipalText()) {
+  const existing = readCachedPendingDeposits(owner).filter((p) => p.vaultId !== pending.vaultId);
+  writeCachedPendingDeposits([...existing, pending], owner);
+  const hidden = readHiddenPendingIds(owner);
+  hidden.delete(pending.vaultId);
+  writeHiddenPendingIds(hidden, owner);
+  emitPendingDepositsChanged();
+}
+
+function forgetPendingDeposit(vaultId: number, owner = currentPrincipalText()) {
+  writeCachedPendingDeposits(
+    readCachedPendingDeposits(owner).filter((p) => p.vaultId !== vaultId),
+    owner
+  );
+  const hidden = readHiddenPendingIds(owner);
+  hidden.delete(vaultId);
+  writeHiddenPendingIds(hidden, owner);
+  emitPendingDepositsChanged();
+}
+
+function normalizeXrpError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const lower = message.toLowerCase();
+  if (lower.includes('xrp account_info failed') && lower.includes('network is unreachable')) {
+    return 'Could not reach the XRP Ledger to verify this deposit. Your XRP is not lost; wait a minute and try Confirm again.';
+  }
+  if (lower.includes('xrp account_info failed')) {
+    return 'Could not verify the XRP deposit right now. The custody address is still yours; try Confirm again in a minute.';
+  }
+  if (lower.includes('xrp custody account is unfunded')) {
+    return 'No XRP has reached this custody address yet. If you just sent it, wait for the XRPL transaction to settle and try again.';
+  }
+  return message;
 }
 
 // ─── Service ─────────────────────────────────────────────────────────────────
@@ -103,21 +234,40 @@ export class XrpVaultService {
             return { success: false, error: 'Vault opened but no pending deposit found; refresh and retry.' };
           }
           const [vaultId, dep] = pending[pending.length - 1];
+          const view = {
+            vaultId: Number(vaultId),
+            custodyAddress: dep.custody_address,
+            openedAtMs: Number(dep.opened_at_ns / 1_000_000n),
+          };
+          rememberPendingDeposit(view);
           return {
             success: true,
             oisyResilient: true,
-            data: { vaultId: Number(vaultId), custodyAddress: dep.custody_address },
+            data: {
+              vaultId: Number(vaultId),
+              custodyAddress: dep.custody_address,
+              reserveBaseDrops: dep.reserve_base_drops,
+            },
           };
         }
         if ('Ok' in result) {
+          rememberPendingDeposit({
+            vaultId: Number(result.Ok.vault_id),
+            custodyAddress: result.Ok.custody_address,
+            openedAtMs: Date.now(),
+          });
           return {
             success: true,
-            data: { vaultId: Number(result.Ok.vault_id), custodyAddress: result.Ok.custody_address },
+            data: {
+              vaultId: Number(result.Ok.vault_id),
+              custodyAddress: result.Ok.custody_address,
+              reserveBaseDrops: result.Ok.reserve_base_drops,
+            },
           };
         }
-        return { success: false, error: ApiClient.formatProtocolError(result.Err) };
+        return { success: false, error: normalizeXrpError(ApiClient.formatProtocolError(result.Err)) };
       } catch (e) {
-        return { success: false, error: e instanceof Error ? e.message : String(e) };
+        return { success: false, error: normalizeXrpError(e) };
       }
     });
   }
@@ -143,14 +293,16 @@ export class XrpVaultService {
           `confirm_xrp_deposit #${vaultId}`
         );
         if (isOisyLandedSentinel(result)) {
+          forgetPendingDeposit(vaultId);
           return { success: true, oisyResilient: true, data: { creditedDrops: 0n } };
         }
         if ('Ok' in result) {
+          forgetPendingDeposit(vaultId);
           return { success: true, data: { creditedDrops: result.Ok } };
         }
-        return { success: false, error: ApiClient.formatProtocolError(result.Err) };
+        return { success: false, error: normalizeXrpError(ApiClient.formatProtocolError(result.Err)) };
       } catch (e) {
-        return { success: false, error: e instanceof Error ? e.message : String(e) };
+        return { success: false, error: normalizeXrpError(e) };
       }
     });
   }
@@ -210,23 +362,53 @@ export class XrpVaultService {
   }
 
   /** The caller's native-XRP vaults still awaiting their on-chain deposit. */
-  static async getMyPendingDeposits(): Promise<XrpPendingDepositView[]> {
+  static async getMyPendingDeposits(options: XrpReadOptions = {}): Promise<XrpPendingDepositView[]> {
+    if (isOisySignerWallet() && !options.allowSigner) {
+      return visiblePendingDeposits(readCachedPendingDeposits());
+    }
+
     try {
       const actor = await this.actor();
       const pending = await actor.get_my_xrp_pending_deposits();
-      return pending.map(([vaultId, dep]) => ({
+      const views = pending.map(([vaultId, dep]) => ({
         vaultId: Number(vaultId),
         custodyAddress: dep.custody_address,
         openedAtMs: Number(dep.opened_at_ns / 1_000_000n),
+        reserveBaseDrops: dep.reserve_base_drops,
       }));
+      writeCachedPendingDeposits(views);
+      return visiblePendingDeposits(views);
     } catch (e) {
       console.error('getMyPendingDeposits failed:', e);
-      return [];
+      return isOisySignerWallet() ? visiblePendingDeposits(readCachedPendingDeposits()) : [];
     }
   }
 
+  static getHiddenPendingDeposits(): XrpPendingDepositView[] {
+    const hidden = readHiddenPendingIds();
+    return readCachedPendingDeposits().filter((p) => hidden.has(p.vaultId));
+  }
+
+  static hidePendingDeposit(vaultId: number) {
+    const hidden = readHiddenPendingIds();
+    hidden.add(vaultId);
+    writeHiddenPendingIds(hidden);
+    emitPendingDepositsChanged();
+  }
+
+  static restorePendingDeposit(vaultId: number) {
+    const hidden = readHiddenPendingIds();
+    hidden.delete(vaultId);
+    writeHiddenPendingIds(hidden);
+    emitPendingDepositsChanged();
+  }
+
   /** The caller's outstanding native-XRP claims (XRP owed back to them). */
-  static async getMyClaims(): Promise<XrpClaimView[]> {
+  static async getMyClaims(options: XrpReadOptions = {}): Promise<XrpClaimView[]> {
+    if (isOisySignerWallet() && !options.allowSigner) {
+      return [];
+    }
+
     try {
       const actor = await this.actor();
       const claims = await actor.get_my_xrp_claims();

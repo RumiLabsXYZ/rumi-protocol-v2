@@ -266,12 +266,43 @@ impl StabilityPoolState {
             .unwrap_or(false)
     }
 
+    /// Native/off-IC collateral cannot be paid out by an ICRC ledger transfer.
+    /// Today XRP is the only such collateral in the SP registry. It is opt-in by
+    /// stored payout address rather than opt-out by default.
+    pub fn collateral_requires_payout_address(&self, collateral_type: &Principal) -> bool {
+        // Gate strictly on the native-XRP synthetic principal identity. XRP is
+        // registered in the SP under `xrp_collateral_principal()`, so this is
+        // exact. A symbol heuristic ("XRP") would misclassify any future
+        // chain-registered collateral that happens to carry the XRP symbol
+        // (e.g. bridged XRP on an EVM sidechain): it would route a CFX-style
+        // sentinel opt-in through the payout-address branch and silently break
+        // that depositor's absorption. Identity-only avoids that hazard.
+        *collateral_type == rumi_protocol_backend::state::xrp_collateral_principal()
+    }
+
+    pub fn native_payout_address(&self, user: &Principal, collateral_type: &Principal) -> Option<String> {
+        self.deposits
+            .get(user)
+            .and_then(|pos| pos.native_payout_addresses.as_ref())
+            .and_then(|addresses| addresses.get(collateral_type).cloned())
+    }
+
+    /// Unified opt-in check across all collateral models:
+    /// - XRP-style native collateral opts in by storing a payout address.
+    /// - CFX-style chain collateral opts in via the sentinel set.
+    /// - Normal ICP collateral is opt-out by default.
     fn position_opted_in_for(&self, pos: &DepositPosition, collateral_type: &Principal) -> bool {
-        if self.is_chain_collateral_sentinel(collateral_type) {
-            pos.is_opted_in_for_chain(collateral_type)
-        } else {
-            pos.is_opted_in(collateral_type)
+        if self.collateral_requires_payout_address(collateral_type) {
+            return pos
+                .native_payout_addresses
+                .as_ref()
+                .map(|addresses| addresses.contains_key(collateral_type))
+                .unwrap_or(false);
         }
+        if self.is_chain_collateral_sentinel(collateral_type) {
+            return pos.is_opted_in_for_chain(collateral_type);
+        }
+        pos.is_opted_in(collateral_type)
     }
 
     // ─── Deposits ───
@@ -330,10 +361,6 @@ impl StabilityPoolState {
         // Only icUSD-denominated balances earn the interest stream.
         // 3USD, ckUSDC, ckUSDT depositors still participate in liquidations
         // pro-rata but no longer earn the interest distribution.
-        let collateral_is_chain_sentinel = collateral_type
-            .as_ref()
-            .map(|ct| self.is_chain_collateral_sentinel(ct))
-            .unwrap_or(false);
         let holders: Vec<(Principal, u64)> = self
             .deposits
             .iter()
@@ -344,12 +371,7 @@ impl StabilityPoolState {
                 }
                 // If we know the collateral source, skip opted-out depositors
                 if let Some(ct) = &collateral_type {
-                    let opted_in = if collateral_is_chain_sentinel {
-                        pos.is_opted_in_for_chain(ct)
-                    } else {
-                        pos.is_opted_in(ct)
-                    };
-                    if !opted_in {
+                    if !self.position_opted_in_for(pos, ct) {
                         return None;
                     }
                 }
@@ -834,6 +856,22 @@ impl StabilityPoolState {
         user: &Principal,
         collateral_type: Principal,
     ) -> Result<(), StabilityPoolError> {
+        if self.collateral_requires_payout_address(&collateral_type) {
+            let position = self
+                .deposits
+                .get_mut(user)
+                .ok_or(StabilityPoolError::NoPositionFound)?;
+            let removed = position
+                .native_payout_addresses
+                .get_or_insert_with(BTreeMap::new)
+                .remove(&collateral_type);
+            if removed.is_none() {
+                return Err(StabilityPoolError::AlreadyOptedOut {
+                    collateral: collateral_type,
+                });
+            }
+            return Ok(());
+        }
         if self.is_chain_collateral_sentinel(&collateral_type) {
             return self.opt_out_cfx(user, collateral_type);
         }
@@ -854,6 +892,11 @@ impl StabilityPoolState {
         user: &Principal,
         collateral_type: Principal,
     ) -> Result<(), StabilityPoolError> {
+        if self.collateral_requires_payout_address(&collateral_type) {
+            return Err(StabilityPoolError::PayoutAddressRequired {
+                collateral: collateral_type,
+            });
+        }
         if self.is_chain_collateral_sentinel(&collateral_type) {
             return self.opt_in_cfx(user, collateral_type);
         }
@@ -912,6 +955,30 @@ impl StabilityPoolState {
                 collateral: sentinel,
             });
         }
+        Ok(())
+    }
+
+    pub fn opt_in_native_collateral(
+        &mut self,
+        user: &Principal,
+        collateral_type: Principal,
+        payout_address: String,
+    ) -> Result<(), StabilityPoolError> {
+        if !self.collateral_requires_payout_address(&collateral_type) {
+            return self.opt_in_collateral(user, collateral_type);
+        }
+
+        let address = payout_address.trim().to_string();
+        rumi_protocol_backend::chains::xrp::address::account_id_from_classic_address(&address)
+            .map_err(|reason| StabilityPoolError::InvalidPayoutAddress { reason })?;
+
+        let position = self.deposits.get_mut(user)
+            .ok_or(StabilityPoolError::NoPositionFound)?;
+        position.opted_out_collateral.remove(&collateral_type);
+        position
+            .native_payout_addresses
+            .get_or_insert_with(BTreeMap::new)
+            .insert(collateral_type, address);
         Ok(())
     }
 
@@ -1639,6 +1706,7 @@ impl StabilityPoolState {
             collateral_gains: pos.collateral_gains.clone(),
             cfx_claims: pos.cfx_claims.clone(),
             opted_out_collateral: pos.opted_out_collateral.iter().cloned().collect(),
+            native_payout_addresses: pos.native_payout_addresses.clone().unwrap_or_default(),
             deposit_timestamp: pos.deposit_timestamp,
             total_claimed_gains: pos.total_claimed_gains.clone(),
             total_usd_value_e8s: pos
@@ -2024,6 +2092,12 @@ mod tests {
     fn cfx_sentinel() -> Principal {
         Principal::from_slice(&[30])
     }
+    fn xrp_ledger() -> Principal {
+        rumi_protocol_backend::state::xrp_collateral_principal()
+    }
+    fn valid_xrp_address() -> String {
+        "rUn84CUYbNjRoTQ6mSW7BVJPSVJNLb1QLo".to_string()
+    }
 
     /// Build a test state with:
     /// - icUSD (8 decimals, priority 1)
@@ -2075,6 +2149,12 @@ mod tests {
             ledger_id: ckbtc_ledger(),
             symbol: "ckBTC".to_string(),
             decimals: 8,
+            status: CollateralStatus::Active,
+        });
+        state.register_collateral(CollateralInfo {
+            ledger_id: xrp_ledger(),
+            symbol: "XRP".to_string(),
+            decimals: 6,
             status: CollateralStatus::Active,
         });
 
@@ -2487,6 +2567,143 @@ mod tests {
             .opt_in_collateral(&user_a(), icp_ledger())
             .unwrap_err();
         assert!(matches!(err, StabilityPoolError::NoPositionFound));
+    }
+
+    #[test]
+    fn xrp_requires_payout_address_before_participating() {
+        let mut state = test_state();
+
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
+        add_deposit_direct(&mut state, user_b(), icusd_ledger(), 50_00000000);
+
+        assert_eq!(
+            state.effective_pool_for_collateral(&xrp_ledger()),
+            0,
+            "XRP must be opt-in only; default depositors cannot absorb XRP liquidations"
+        );
+        assert!(
+            state.compute_token_draw(10_00000000, &xrp_ledger()).is_empty(),
+            "XRP liquidations must not draw from users without a payout address"
+        );
+
+        let err = state.opt_in_collateral(&user_a(), xrp_ledger()).unwrap_err();
+        assert!(matches!(err, StabilityPoolError::PayoutAddressRequired { .. }));
+
+        state
+            .opt_in_native_collateral(&user_a(), xrp_ledger(), valid_xrp_address())
+            .unwrap();
+
+        assert_eq!(
+            state.native_payout_address(&user_a(), &xrp_ledger()),
+            Some(valid_xrp_address()),
+        );
+        assert_eq!(
+            state.effective_pool_for_collateral(&xrp_ledger()),
+            100_00000000,
+            "only the depositor with an XRP payout address is eligible"
+        );
+
+        let draw = state.compute_token_draw(25_00000000, &xrp_ledger());
+        assert_eq!(draw.get(&icusd_ledger()).copied().unwrap_or(0), 25_00000000);
+
+        let mut consumed = BTreeMap::new();
+        consumed.insert(icusd_ledger(), 20_00000000);
+        state.process_liquidation_gains_at(
+            144,
+            xrp_ledger(),
+            &consumed,
+            5_000_000,
+            50_00000000,
+            3_000_000_000,
+        );
+
+        let pos_a = state.deposits.get(&user_a()).unwrap();
+        let pos_b = state.deposits.get(&user_b()).unwrap();
+        assert_eq!(pos_a.stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0), 80_00000000);
+        assert_eq!(pos_a.collateral_gains.get(&xrp_ledger()).copied().unwrap_or(0), 5_000_000);
+        assert_eq!(pos_b.stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0), 50_00000000);
+        assert_eq!(pos_b.collateral_gains.get(&xrp_ledger()).copied().unwrap_or(0), 0);
+    }
+
+    #[test]
+    fn xrp_interest_only_goes_to_address_opted_depositors() {
+        let mut state = test_state();
+
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
+        add_deposit_direct(&mut state, user_b(), icusd_ledger(), 50_00000000);
+
+        state.distribute_interest_revenue(icusd_ledger(), 9_00000000, Some(xrp_ledger()));
+        assert_eq!(
+            state.deposits.get(&user_a()).unwrap().stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0),
+            100_00000000,
+            "XRP interest must not be distributed until a depositor provides a payout address"
+        );
+        assert_eq!(
+            state.deposits.get(&user_b()).unwrap().stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0),
+            50_00000000,
+        );
+
+        state
+            .opt_in_native_collateral(&user_a(), xrp_ledger(), valid_xrp_address())
+            .unwrap();
+        state.distribute_interest_revenue(icusd_ledger(), 9_00000000, Some(xrp_ledger()));
+
+        let pos_a = state.deposits.get(&user_a()).unwrap();
+        let pos_b = state.deposits.get(&user_b()).unwrap();
+        assert_eq!(pos_a.stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0), 109_00000000);
+        assert_eq!(pos_b.stablecoin_balances.get(&icusd_ledger()).copied().unwrap_or(0), 50_00000000);
+        assert_eq!(pos_a.total_interest_earned_e8s.unwrap_or(0), 9_00000000);
+        assert_eq!(pos_b.total_interest_earned_e8s.unwrap_or(0), 0);
+    }
+
+    #[test]
+    fn xrp_opt_in_rejects_invalid_payout_address() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 10_00000000);
+
+        let err = state
+            .opt_in_native_collateral(&user_a(), xrp_ledger(), "not-an-xrpl-address".to_string())
+            .unwrap_err();
+        assert!(matches!(err, StabilityPoolError::InvalidPayoutAddress { .. }));
+        assert_eq!(state.native_payout_address(&user_a(), &xrp_ledger()), None);
+        assert_eq!(state.effective_pool_for_collateral(&xrp_ledger()), 0);
+    }
+
+    #[test]
+    fn xrp_opt_out_clears_payout_address() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 10_00000000);
+
+        state
+            .opt_in_native_collateral(&user_a(), xrp_ledger(), valid_xrp_address())
+            .unwrap();
+        state.opt_out_collateral(&user_a(), xrp_ledger()).unwrap();
+
+        assert_eq!(state.native_payout_address(&user_a(), &xrp_ledger()), None);
+        assert_eq!(state.effective_pool_for_collateral(&xrp_ledger()), 0);
+    }
+
+    #[test]
+    fn chain_sentinel_named_xrp_routes_to_chain_optin_not_payout_address() {
+        // Regression (review MEDIUM-1): a chain-registered collateral that happens
+        // to carry the "XRP" symbol must NOT be treated as native XRP. It must use
+        // the CFX-style sentinel opt-in, not the payout-address branch. Gating
+        // `collateral_requires_payout_address` on principal identity (not symbol)
+        // preserves this so a CFX-style opt-in depositor keeps absorbing it.
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 10_00000000);
+
+        let sentinel = state
+            .register_chain_collateral(9999, "XRP".to_string(), 6)
+            .unwrap();
+        assert_ne!(sentinel, xrp_ledger());
+        assert!(!state.collateral_requires_payout_address(&sentinel));
+
+        // Opts in via the chain (CFX) path; the payout-address endpoint is wrong here.
+        state.opt_in_cfx(&user_a(), sentinel).unwrap();
+        let pos = state.deposits.get(&user_a()).unwrap();
+        assert!(state.position_opted_in_for(pos, &sentinel));
+        assert_eq!(state.native_payout_address(&user_a(), &sentinel), None);
     }
 
     // ─── Test: Normalize E8s Conversions ───
@@ -4031,6 +4248,14 @@ mod tests {
                 .unwrap_or_default()
                 .is_empty(),
             "missing CFX claims field must decode as empty",
+        );
+        assert!(
+            decoded_pos
+                .native_payout_addresses
+                .clone()
+                .unwrap_or_default()
+                .is_empty(),
+            "missing native payout-address field must decode as empty (no UPG-002 wipe)",
         );
         assert!(
             decoded_pos

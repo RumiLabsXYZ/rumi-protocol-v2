@@ -1344,11 +1344,15 @@ export interface XrpClaim {
   'custody_nonce' : bigint,
   'claimant' : Principal,
   'created_at_ns' : bigint,
+  'quarantine_reason' : [] | [string],
   'custody_owner' : Principal,
   'drops' : bigint,
   'settlement' : [] | [XrpSettlement],
 }
+export type XrpClaimResolution = { 'ReleaseForRetry' : null } |
+  { 'ConfirmPaid' : null };
 export interface XrpPendingDeposit {
+  'reserve_base_drops' : bigint,
   'owner' : Principal,
   'custody_address' : string,
   'opened_at_ns' : bigint,
@@ -1362,6 +1366,7 @@ export interface XrpSettlement {
   'tx_hash' : string,
 }
 export interface XrpVaultOpenInfo {
+  'reserve_base_drops' : bigint,
   'custody_address' : string,
   'vault_id' : bigint,
 }
@@ -1378,7 +1383,9 @@ export interface _SERVICE {
     Result_2
   >,
   'admin_mint_icusd' : ActorMethod<[bigint, Principal, string], Result_1>,
+  'admin_quarantine_xrp_claim' : ActorMethod<[bigint, string], Result>,
   'admin_resolve_stuck_claim' : ActorMethod<[bigint, boolean], Result>,
+  'admin_resolve_xrp_claim' : ActorMethod<[bigint, XrpClaimResolution], Result>,
   'admin_sweep_to_treasury' : ActorMethod<[string], Result_1>,
   'borrow_chain_vault_evm' : ActorMethod<
     [VaultIntent, Uint8Array | number[]],
@@ -1556,6 +1563,7 @@ export interface _SERVICE {
     [],
     Array<[bigint, XrpPendingDeposit]>
   >,
+  'get_xrp_quarantined_claims' : ActorMethod<[], Array<[bigint, XrpClaim]>>,
   'get_xrp_schnorr_key_name' : ActorMethod<[], string>,
   'harvest_chain_interest' : ActorMethod<[number], Result_1>,
   'http_request' : ActorMethod<[HttpRequest], HttpResponse_1>,

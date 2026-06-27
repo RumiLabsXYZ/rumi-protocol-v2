@@ -31,37 +31,85 @@
   const dispatch = createEventDispatcher<{ confirmed: void }>();
 
   let pending: XrpPendingDepositView[] = [];
+  let hiddenPending: XrpPendingDepositView[] = [];
   let claims: XrpClaimView[] = [];
   let loading = false;
   let opening = false;
+  let checkingWallet = false;
   let busyVaultId: number | null = null;
   let busyClaimId: number | null = null;
+  let lastConnected = false;
   // Per-claim destination address inputs, keyed by claim id.
   let claimDest: Record<number, string> = {};
   let claimTag: Record<number, string> = {};
 
   $: connected = $walletStore.isConnected;
 
-  async function refresh() {
+  function refreshHiddenPending() {
+    hiddenPending = connected ? XrpVaultService.getHiddenPendingDeposits() : [];
+  }
+
+  async function refresh(options: { allowSigner?: boolean } = {}) {
     if (!connected) {
       pending = [];
+      hiddenPending = [];
       claims = [];
       return;
     }
     loading = true;
     try {
-      [pending, claims] = await Promise.all([
-        XrpVaultService.getMyPendingDeposits(),
-        XrpVaultService.getMyClaims(),
-      ]);
+      if (options.allowSigner) {
+        // Oisy signer requests must be serialized; parallel calls can leave the
+        // wallet popup in a busy/retry loop.
+        pending = await XrpVaultService.getMyPendingDeposits(options);
+        claims = await XrpVaultService.getMyClaims(options);
+      } else {
+        [pending, claims] = await Promise.all([
+          XrpVaultService.getMyPendingDeposits(options),
+          XrpVaultService.getMyClaims(options),
+        ]);
+      }
     } finally {
+      refreshHiddenPending();
       loading = false;
     }
   }
 
-  onMount(refresh);
+  async function checkWalletStatus() {
+    checkingWallet = true;
+    loading = true;
+    try {
+      pending = await XrpVaultService.getMyPendingDeposits({ allowSigner: true });
+      refreshHiddenPending();
+    } finally {
+      loading = false;
+      checkingWallet = false;
+    }
+  }
+
+  function hidePendingDeposit(vaultId: number) {
+    XrpVaultService.hidePendingDeposit(vaultId);
+    pending = pending.filter((p) => p.vaultId !== vaultId);
+    refreshHiddenPending();
+    toastStore.info('Hidden from this browser. Use Restore if you need it again.');
+  }
+
+  function restorePendingDeposit(vaultId: number) {
+    XrpVaultService.restorePendingDeposit(vaultId);
+    const restored = hiddenPending.find((p) => p.vaultId === vaultId);
+    if (restored) pending = [...pending, restored].sort((a, b) => a.vaultId - b.vaultId);
+    refreshHiddenPending();
+  }
+
+  onMount(() => {
+    lastConnected = connected;
+    refresh();
+  });
   // Reload when the wallet connects/disconnects.
-  $: if (connected !== undefined) refresh();
+  $: if (connected !== lastConnected) {
+    lastConnected = connected;
+    refresh();
+  }
 
   async function openVault() {
     opening = true;
@@ -192,9 +240,14 @@
 <section class="xrp-panel">
   <header class="xrp-head">
     <h3>Native XRP</h3>
-    <button class="xrp-open" disabled={!connected || opening} on:click={openVault}>
-      {opening ? 'Opening…' : 'Open XRP vault'}
-    </button>
+    <div class="xrp-head-actions">
+      <button class="xrp-secondary" disabled={!connected || checkingWallet || opening} on:click={checkWalletStatus}>
+        {checkingWallet ? 'Checking...' : 'Check deposits'}
+      </button>
+      <button class="xrp-open" disabled={!connected || opening} on:click={openVault}>
+        {opening ? 'Opening…' : 'Open XRP vault'}
+      </button>
+    </div>
   </header>
 
   {#if !connected}
@@ -212,13 +265,41 @@
               </button>
               <span class="xrp-hint">Send XRP from any XRPL wallet (e.g. Xaman) to this address, then confirm.</span>
             </div>
-            <button
-              class="xrp-action"
-              disabled={busyVaultId === p.vaultId}
-              on:click={() => confirmDeposit(p.vaultId)}
-            >
-              {busyVaultId === p.vaultId ? 'Checking…' : "I've sent it — confirm"}
-            </button>
+            <div class="xrp-row-actions">
+              <button
+                class="xrp-action"
+                disabled={busyVaultId === p.vaultId}
+                on:click={() => confirmDeposit(p.vaultId)}
+              >
+                {busyVaultId === p.vaultId ? 'Checking…' : "I've sent it — confirm"}
+              </button>
+              <button
+                class="xrp-hide"
+                disabled={busyVaultId === p.vaultId}
+                title="Hide this pending deposit locally. The custody address remains recoverable."
+                on:click={() => hidePendingDeposit(p.vaultId)}
+              >
+                Hide
+              </button>
+            </div>
+          </div>
+        {/each}
+      </div>
+    {/if}
+
+    {#if hiddenPending.length > 0}
+      <div class="xrp-group xrp-hidden-group">
+        <div class="xrp-group-title">Hidden pending deposits</div>
+        {#each hiddenPending as p (p.vaultId)}
+          <div class="xrp-row xrp-hidden-row">
+            <div class="xrp-row-main">
+              <span class="xrp-label">Vault #{p.vaultId}</span>
+              <button class="xrp-addr" title={p.custodyAddress} on:click={() => copy(p.custodyAddress)}>
+                {formatAddress(p.custodyAddress, 8, 6)} ⧉
+              </button>
+              <span class="xrp-hint">Hidden only in this browser. Restore it before confirming a deposit.</span>
+            </div>
+            <button class="xrp-action" on:click={() => restorePendingDeposit(p.vaultId)}>Restore</button>
           </div>
         {/each}
       </div>
@@ -264,7 +345,7 @@
       </div>
     {/if}
 
-    {#if !loading && pending.length === 0 && claims.length === 0}
+    {#if !loading && pending.length === 0 && claims.length === 0 && hiddenPending.length === 0}
       <p class="xrp-muted">No pending XRP deposits or claims.</p>
     {/if}
   {/if}
@@ -284,11 +365,19 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 12px;
   }
   .xrp-head h3 {
     margin: 0;
     font-size: 1rem;
     color: var(--rumi-text, #e2e8f0);
+  }
+  .xrp-head-actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+    justify-content: flex-end;
   }
   .xrp-open {
     padding: 7px 14px;
@@ -300,6 +389,19 @@
     cursor: pointer;
   }
   .xrp-open:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .xrp-secondary {
+    padding: 7px 13px;
+    border-radius: 10px;
+    border: 1px solid var(--rumi-border, rgba(148, 163, 184, 0.25));
+    background: rgba(15, 23, 42, 0.45);
+    color: var(--rumi-text-secondary, #cbd5e1);
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .xrp-secondary:disabled {
     opacity: 0.5;
     cursor: not-allowed;
   }
@@ -322,6 +424,13 @@
     padding: 10px 12px;
     border-radius: 10px;
     background: var(--rumi-surface-2, rgba(30, 41, 59, 0.5));
+  }
+  .xrp-hidden-row {
+    opacity: 0.72;
+  }
+  .xrp-hidden-group {
+    border-top: 1px solid var(--rumi-border, rgba(148, 163, 184, 0.18));
+    padding-top: 10px;
   }
   .xrp-row-main {
     display: flex;
@@ -382,6 +491,26 @@
     white-space: nowrap;
   }
   .xrp-action:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .xrp-row-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  .xrp-hide {
+    padding: 7px 11px;
+    border-radius: 10px;
+    border: 1px solid var(--rumi-border, rgba(148, 163, 184, 0.25));
+    background: rgba(15, 23, 42, 0.45);
+    color: var(--rumi-text-muted, #94a3b8);
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .xrp-hide:disabled {
     opacity: 0.5;
     cursor: not-allowed;
   }

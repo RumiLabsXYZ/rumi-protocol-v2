@@ -14,6 +14,7 @@ export const idlFactory = ({ IDL }) => {
       'available' : IDL.Nat64,
       'required' : IDL.Nat64,
     }),
+    'InvalidPayoutAddress' : IDL.Record({ 'reason' : IDL.Text }),
     'CollateralNotFound' : IDL.Record({ 'ledger' : IDL.Principal }),
     'NoPositionFound' : IDL.Null,
     'AmountTooLow' : IDL.Record({ 'minimum_e8s' : IDL.Nat64 }),
@@ -22,6 +23,7 @@ export const idlFactory = ({ IDL }) => {
       'method' : IDL.Text,
       'target' : IDL.Text,
     }),
+    'PayoutAddressRequired' : IDL.Record({ 'collateral' : IDL.Principal }),
     'LiquidationFailed' : IDL.Record({
       'vault_id' : IDL.Nat64,
       'reason' : IDL.Text,
@@ -243,6 +245,7 @@ export const idlFactory = ({ IDL }) => {
     'stablecoin_balances' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
     'cfx_claims' : IDL.Opt(IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat))),
     'total_claimed_gains' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
+    'native_payout_addresses' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Text)),
     'total_usd_value_e8s' : IDL.Nat64,
     'opted_out_collateral' : IDL.Vec(IDL.Principal),
   });
@@ -479,6 +482,11 @@ export const idlFactory = ({ IDL }) => {
       ),
     'opt_in_collateral' : IDL.Func(
         [IDL.Principal],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
+        [],
+      ),
+    'opt_in_native_collateral' : IDL.Func(
+        [IDL.Principal, IDL.Text],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
         [],
       ),

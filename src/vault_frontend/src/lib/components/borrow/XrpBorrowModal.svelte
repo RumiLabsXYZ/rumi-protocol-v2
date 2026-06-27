@@ -35,7 +35,12 @@
   let copied = false;
   let started = false;
 
-  $: copy = nativeXrpDepositCopy({ collateralAmount, icusdAmount, collateralInfo });
+  $: copy = nativeXrpDepositCopy({
+    collateralAmount,
+    icusdAmount,
+    collateralInfo,
+    reserveBaseDrops: opened?.reserveBaseDrops ?? 0n,
+  });
   $: paymentUri = opened ? buildXrpPaymentUri(opened.custodyAddress, copy.sendAmount) : '';
   $: hasDepositAddress = Boolean(opened?.custodyAddress);
   $: shouldRenderModal = nativeXrpModalShouldRender(phase, hasDepositAddress);
@@ -63,7 +68,13 @@
 
       opened = result.data;
       phase = 'awaiting';
-      await generateQr(buildXrpPaymentUri(result.data.custodyAddress, copy.sendAmount));
+      const openedCopy = nativeXrpDepositCopy({
+        collateralAmount,
+        icusdAmount,
+        collateralInfo,
+        reserveBaseDrops: result.data.reserveBaseDrops,
+      });
+      await generateQr(buildXrpPaymentUri(result.data.custodyAddress, openedCopy.sendAmount));
     } catch (err) {
       phase = 'error';
       errorMessage = err instanceof Error ? err.message : 'Could not reserve an XRP custody address.';
@@ -155,19 +166,21 @@
       </div>
     </div>
 
-    <div class="intent-strip">
-      <div class="intent-item">
-        <span class="intent-label">Send</span>
-        <strong>{copy.sendAmountLabel}</strong>
+    {#if hasDepositAddress}
+      <div class="intent-strip">
+        <div class="intent-item">
+          <span class="intent-label">Send</span>
+          <strong>{copy.sendAmountLabel}</strong>
+        </div>
+        <div class="intent-divider"></div>
+        <div class="intent-item">
+          <span class="intent-label">Borrow</span>
+          <strong>{copy.borrowAmountLabel}</strong>
+        </div>
       </div>
-      <div class="intent-divider"></div>
-      <div class="intent-item">
-        <span class="intent-label">Borrow</span>
-        <strong>{copy.borrowAmountLabel}</strong>
-      </div>
-    </div>
 
-    <p class="reserve-note">{copy.reserveExplanation}</p>
+      <p class="reserve-note">{copy.reserveExplanation}</p>
+    {/if}
 
     {#if phase === 'opening'}
       <div class="loading-pane">

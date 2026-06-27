@@ -725,14 +725,6 @@ fn post_upgrade(arg: ProtocolArg) {
     };
     let xrp_guardrail_migration =
         rumi_protocol_backend::state::enforce_xrp_launch_guardrails(&mut state);
-    if let Some(previous) = xrp_guardrail_migration.previous_debt_ceiling {
-        log!(
-            INFO,
-            "[upgrade]: clamped XRP debt ceiling from {} to {} e8s",
-            previous,
-            rumi_protocol_backend::state::XRP_LAUNCH_DEBT_CEILING_E8S
-        );
-    }
     if let Some(previous) = xrp_guardrail_migration.previous_status {
         log!(
             INFO,
@@ -5938,7 +5930,7 @@ async fn register_xrp_collateral() -> Result<(), ProtocolError> {
     rumi_protocol_backend::xrc::register_collateral_price_timer(xrp_ct);
     log!(
         INFO,
-        "[register_xrp_collateral] Registered native-XRP collateral {} (150/133/12, $100 ceiling)",
+        "[register_xrp_collateral] Registered native-XRP collateral {} (150/133/12, 2,500 icUSD ceiling)",
         xrp_ct
     );
     Ok(())
@@ -5980,6 +5972,95 @@ fn get_xrp_claims() -> Vec<(u64, rumi_protocol_backend::state::XrpClaim)> {
             .map(|(id, c)| (*id, c.clone()))
             .collect()
     })
+}
+
+/// F-03 resolution action for a quarantined native-XRP claim. The admin first verifies
+/// OFF-ledger (custody `account_info` balance/Sequence + an XRPL explorer) whether the
+/// divergent Payment actually delivered to the claimant, then applies one of these.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub enum XrpClaimResolution {
+    /// The divergent Payment DID deliver — finalize by removing the claim (no re-pay).
+    ConfirmPaid,
+    /// The Payment did NOT deliver — clear the quarantine + settlement so the claimant
+    /// can retry `settle_xrp_claim` and be paid exactly once.
+    ReleaseForRetry,
+}
+
+/// F-03 observability: native-XRP claims currently quarantined (a settlement divergence
+/// is suspected — resolve via `admin_resolve_xrp_claim`). Developer-gated read.
+#[candid_method(query)]
+#[query]
+fn get_xrp_quarantined_claims() -> Vec<(u64, rumi_protocol_backend::state::XrpClaim)> {
+    let caller = ic_cdk::caller();
+    read_state(|s| {
+        if s.developer_principal != caller {
+            return Vec::new();
+        }
+        s.xrp_claims
+            .iter()
+            .filter(|(_, c)| c.quarantine_reason.is_some())
+            .map(|(id, c)| (*id, c.clone()))
+            .collect()
+    })
+}
+
+/// F-03 defense-in-depth: manually quarantine a native-XRP claim (e.g. ops suspects a
+/// divergence the automatic Sequence guard has not yet hit). Developer-gated, idempotent.
+#[candid_method(update)]
+#[update]
+fn admin_quarantine_xrp_claim(claim_id: u64, reason: String) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::GenericError(
+            "Only the developer can quarantine XRP claims".to_string(),
+        ));
+    }
+    mutate_state(|s| match s.xrp_claims.get_mut(&claim_id) {
+        Some(c) => {
+            if c.quarantine_reason.is_none() {
+                c.quarantine_reason = Some(if reason.trim().is_empty() {
+                    "manually quarantined by admin".to_string()
+                } else {
+                    reason
+                });
+            }
+            log!(INFO, "[admin_quarantine_xrp_claim] claim #{} quarantined", claim_id);
+            Ok(())
+        }
+        None => Err(ProtocolError::GenericError(format!(
+            "No such XRP claim #{claim_id}"
+        ))),
+    })
+}
+
+/// F-03: resolve a quarantined native-XRP claim after off-ledger reconciliation.
+/// Developer-gated. Errors if the claim is absent or not quarantined, so a resolve can
+/// never silently drop a healthy, still-settle-able claim. See `XrpClaimResolution`.
+#[candid_method(update)]
+#[update]
+fn admin_resolve_xrp_claim(
+    claim_id: u64,
+    resolution: XrpClaimResolution,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::GenericError(
+            "Only the developer can resolve XRP claims".to_string(),
+        ));
+    }
+    let confirm_paid = matches!(resolution, XrpClaimResolution::ConfirmPaid);
+    mutate_state(|s| {
+        rumi_protocol_backend::vault::resolve_quarantined_xrp_claim_snapshot(
+            s, claim_id, confirm_paid,
+        )
+    })?;
+    log!(
+        INFO,
+        "[admin_resolve_xrp_claim] claim #{} resolved {:?}",
+        claim_id,
+        resolution
+    );
+    Ok(())
 }
 
 /// P5 (frontend): the caller's OWN native-XRP pending deposits (those whose vault
@@ -10341,15 +10422,6 @@ async fn set_collateral_debt_ceiling(
             "Collateral type not found".to_string(),
         ));
     }
-    if collateral_type == rumi_protocol_backend::state::xrp_collateral_principal()
-        && debt_ceiling > rumi_protocol_backend::state::XRP_LAUNCH_DEBT_CEILING_E8S
-    {
-        return Err(ProtocolError::GenericError(format!(
-            "XRP debt ceiling cannot exceed {} e8s (100 icUSD)",
-            rumi_protocol_backend::state::XRP_LAUNCH_DEBT_CEILING_E8S
-        )));
-    }
-
     mutate_state(|s| {
         if let Some(config) = s.collateral_configs.get_mut(&collateral_type) {
             config.debt_ceiling = debt_ceiling;
