@@ -311,7 +311,7 @@ export interface UserStabilityPosition {
   'stablecoin_balances' : Array<[Principal, bigint]>,
   'cfx_claims' : [] | [Array<[Principal, bigint]>],
   'total_claimed_gains' : Array<[Principal, bigint]>,
-  'native_payout_addresses' : Array<[Principal, string]>,
+  'native_payout_addresses' : [] | [Array<[Principal, string]>],
   'total_usd_value_e8s' : bigint,
   'opted_out_collateral' : Array<Principal>,
 }

@@ -65,7 +65,7 @@ type UserStabilityPosition = record {
   collateral_gains : vec record { principal; nat64 };
   cfx_claims : opt vec record { principal; nat };
   opted_out_collateral : vec principal;
-  native_payout_addresses : vec record { principal; text };
+  native_payout_addresses : opt vec record { principal; text };
   deposit_timestamp : nat64;
   total_claimed_gains : vec record { principal; nat64 };
   total_usd_value_e8s : nat64;

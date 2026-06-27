@@ -71,8 +71,17 @@
 
       if (isConnected && principal) {
         const [position, history] = await Promise.all([
-          stabilityPoolService.getUserPosition(principal).catch(() => null),
-          stabilityPoolService.getLiquidationHistory(50).catch(() => []),
+          // Log rather than silently swallow: a candid decode skew (frontend
+          // declarations ahead of the deployed SP canister) surfaces here as a
+          // throw, and silently returning null hides every depositor's position.
+          stabilityPoolService.getUserPosition(principal).catch((err) => {
+            console.error('[StabilityPool] getUserPosition failed; hiding position:', err);
+            return null;
+          }),
+          stabilityPoolService.getLiquidationHistory(50).catch((err) => {
+            console.error('[StabilityPool] getLiquidationHistory failed:', err);
+            return [];
+          }),
         ]);
         userPosition = position;
         liquidationHistory = history;

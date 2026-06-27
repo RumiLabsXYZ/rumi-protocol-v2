@@ -45,7 +45,9 @@ export interface UserPosition {
   stablecoin_balances: Array<[Principal, bigint]>;
   collateral_gains: Array<[Principal, bigint]>;
   opted_out_collateral: Principal[];
-  native_payout_addresses?: Array<[Principal, string]>;
+  // Candid `opt vec` — decodes as `[]` (absent / older canister) or `[[...]]`.
+  // Unwrap with `native_payout_addresses?.[0] ?? []` before use.
+  native_payout_addresses?: [] | [Array<[Principal, string]>];
   deposit_timestamp: bigint;
   total_claimed_gains: Array<[Principal, bigint]>;
   total_usd_value_e8s: bigint;
