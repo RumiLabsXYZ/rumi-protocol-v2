@@ -1,7 +1,7 @@
 use super::settlement::{
     claim_liquidation_swap_submit_in_state, confirm_interest_mint_in_state, confirm_mint_in_state,
     exact_native_transfer_is_funded, fundable_withdrawal_value, select_next_op,
-    ClaimLiquidationSwapSubmitError, OpAction,
+    select_next_op_with_submit_filter, ClaimLiquidationSwapSubmitError, OpAction,
 };
 use crate::chains::config::ChainId;
 use crate::chains::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
@@ -82,6 +82,42 @@ fn select_next_op_confirms_inflight_before_submitting_new() {
     match select_next_op(&q) {
         Some((oid, OpAction::Confirm)) => assert_eq!(oid, id0),
         other => panic!("expected Confirm of inflight op, got {other:?}"),
+    }
+}
+
+#[test]
+fn select_next_op_filter_skips_blocked_queued_without_starving_later_allowed_ops() {
+    let mut q = crate::chains::settlement_queue::SettlementQueueV1::default();
+    let blocked_id = q
+        .enqueue(SettlementOp::new(
+            SettlementOpKind::Mint {
+                recipient: "0xr".into(),
+                amount_e8s: 10,
+                vault_id: 1,
+            },
+            "blocked-mint".into(),
+            0,
+        ))
+        .unwrap();
+    let allowed_id = q
+        .enqueue(SettlementOp::new(
+            SettlementOpKind::ChainCollateralPayout {
+                recipient: "0x0000000000000000000000000000000000000abc".into(),
+                amount_e18: 1,
+                vault_id: 2,
+                claimant: Principal::anonymous(),
+            },
+            "allowed-payout".into(),
+            0,
+        ))
+        .unwrap();
+
+    assert_eq!(blocked_id, 0);
+    match select_next_op_with_submit_filter(&q, |_, op| {
+        matches!(op.kind, SettlementOpKind::Mint { .. })
+    }) {
+        Some((oid, OpAction::Submit)) => assert_eq!(oid, allowed_id),
+        other => panic!("expected later allowed op to submit, got {other:?}"),
     }
 }
 
@@ -440,6 +476,7 @@ mod phase2_tests {
     fn marked(
         s: &mut MultiChainState,
         vault_id: u64,
+        op_id: u64,
         debt_e8s: u128,
         collateral_remaining: u128,
         debt_to_clear: u128,
@@ -462,7 +499,7 @@ mod phase2_tests {
                 last_interest_accrual_ns: 0,
                 pending_interest_mint_e8s: 0,
                 pending_liquidation: Some(PendingLiquidationV1 {
-                    op_id: 9,
+                    op_id,
                     debt_to_clear_e8s: debt_to_clear,
                     collateral_reserved_native: collateral_reserved,
                     tier: LiquidationTier::Bot,
@@ -477,9 +514,10 @@ mod phase2_tests {
     #[test]
     fn shifts_debt_to_reserve_supply_unchanged() {
         let mut s = MultiChainState::default();
-        marked(&mut s, 7, 100 * E8, 500 * E18, 67 * E8, 839 * E18);
+        marked(&mut s, 7, 9, 100 * E8, 500 * E18, 67 * E8, 839 * E18);
         // realized 75 USDC (18-dec) -> 75e8 >= debt_to_clear 67e8.
-        apply_liquidation_settlement_in_state(&mut s, CFX, 7, 9, 75 * E18, 18).expect("phase2 ok");
+        apply_liquidation_settlement_in_state(&mut s, CFX, 7, 9, 75 * E18, 18, 1)
+            .expect("phase2 ok");
         let v = s.chain_vaults.get(&7).unwrap();
         assert_eq!(v.debt_e8s, 33 * E8, "debt -= actual_cleared");
         assert_eq!(
@@ -511,9 +549,10 @@ mod phase2_tests {
     #[test]
     fn shortfall_clamps_and_records_bad_debt() {
         let mut s = MultiChainState::default();
-        marked(&mut s, 7, 100 * E8, 500 * E18, 67 * E8, 839 * E18);
+        marked(&mut s, 7, 9, 100 * E8, 500 * E18, 67 * E8, 839 * E18);
         // realized only 60 USDC -> 60e8 < debt_to_clear 67e8.
-        apply_liquidation_settlement_in_state(&mut s, CFX, 7, 9, 60 * E18, 18).expect("phase2 ok");
+        apply_liquidation_settlement_in_state(&mut s, CFX, 7, 9, 60 * E18, 18, 1)
+            .expect("phase2 ok");
         assert_eq!(s.chain_vaults.get(&7).unwrap().debt_e8s, 40 * E8);
         assert_eq!(
             *s.reserve_backing_e8s.get(&CFX).unwrap(),
@@ -525,6 +564,10 @@ mod phase2_tests {
             7 * E8,
             "shortfall recorded"
         );
+        assert!(
+            !s.chain_bad_debt_circuit_tripped(CFX),
+            "no threshold means accounting-only bad debt does not halt the chain"
+        );
         assert_eq!(
             *s.chain_supplies.get(&CFX).unwrap(),
             100 * E8,
@@ -533,11 +576,59 @@ mod phase2_tests {
     }
 
     #[test]
+    fn shortfall_below_threshold_records_bad_debt_without_tripping_circuit() {
+        let mut s = MultiChainState::default();
+        s.set_chain_bad_debt_circuit_threshold(CFX, Some(10 * E8), 10)
+            .expect("set threshold");
+        marked(&mut s, 7, 9, 100 * E8, 500 * E18, 67 * E8, 839 * E18);
+
+        let settled = apply_liquidation_settlement_in_state(&mut s, CFX, 7, 9, 60 * E18, 18, 20)
+            .expect("phase2 ok");
+
+        assert_eq!(settled.bad_debt_added_e8s, 7 * E8);
+        assert!(!settled.bad_debt_circuit_tripped);
+        assert_eq!(s.chain_bad_debt_e8s.get(&CFX), Some(&(7 * E8)));
+        assert!(!s.chain_bad_debt_circuit_tripped(CFX));
+        assert_eq!(s.chain_bad_debt_circuit_tripped_at_ns.get(&CFX), None);
+    }
+
+    #[test]
+    fn shortfall_at_threshold_trips_bad_debt_circuit_once() {
+        let mut s = MultiChainState::default();
+        s.set_chain_bad_debt_circuit_threshold(CFX, Some(7 * E8), 10)
+            .expect("set threshold");
+        marked(&mut s, 7, 9, 100 * E8, 500 * E18, 67 * E8, 839 * E18);
+
+        let first = apply_liquidation_settlement_in_state(&mut s, CFX, 7, 9, 60 * E18, 18, 20)
+            .expect("phase2 ok");
+
+        assert_eq!(first.bad_debt_added_e8s, 7 * E8);
+        assert!(first.bad_debt_circuit_tripped);
+        assert_eq!(s.chain_bad_debt_circuit_tripped_at_ns.get(&CFX), Some(&20));
+
+        marked(&mut s, 8, 10, 100 * E8, 500 * E18, 67 * E8, 839 * E18);
+        let second = apply_liquidation_settlement_in_state(&mut s, CFX, 8, 10, 60 * E18, 18, 30)
+            .expect("second phase2 ok");
+
+        assert_eq!(second.bad_debt_added_e8s, 7 * E8);
+        assert!(
+            !second.bad_debt_circuit_tripped,
+            "already-tripped circuit must not emit duplicate trip decisions"
+        );
+        assert_eq!(
+            s.chain_bad_debt_circuit_tripped_at_ns.get(&CFX),
+            Some(&20),
+            "original trip timestamp is preserved"
+        );
+    }
+
+    #[test]
     fn closes_vault_when_drained() {
         let mut s = MultiChainState::default();
         // collateral fully reserved in Phase 1 (remaining 0); clearing all debt drains it.
-        marked(&mut s, 7, 100 * E8, 0, 100 * E8, 1_400 * E18);
-        apply_liquidation_settlement_in_state(&mut s, CFX, 7, 9, 112 * E18, 18).expect("phase2 ok");
+        marked(&mut s, 7, 9, 100 * E8, 0, 100 * E8, 1_400 * E18);
+        apply_liquidation_settlement_in_state(&mut s, CFX, 7, 9, 112 * E18, 18, 1)
+            .expect("phase2 ok");
         let v = s.chain_vaults.get(&7).unwrap();
         assert_eq!(v.debt_e8s, 0);
         assert_eq!(v.status, ChainVaultStatus::Closed, "drained vault closes");
@@ -546,9 +637,11 @@ mod phase2_tests {
     #[test]
     fn rejects_op_mismatch_no_mutation() {
         let mut s = MultiChainState::default();
-        marked(&mut s, 7, 100 * E8, 500 * E18, 67 * E8, 839 * E18);
+        marked(&mut s, 7, 9, 100 * E8, 500 * E18, 67 * E8, 839 * E18);
         // confirming op 99 != marker op 9.
-        assert!(apply_liquidation_settlement_in_state(&mut s, CFX, 7, 99, 75 * E18, 18).is_err());
+        assert!(
+            apply_liquidation_settlement_in_state(&mut s, CFX, 7, 99, 75 * E18, 18, 1).is_err()
+        );
         assert_eq!(
             s.chain_vaults.get(&7).unwrap().debt_e8s,
             100 * E8,

@@ -53,7 +53,9 @@ use crate::Mode;
 // chain-independent: `select_next_op` scans a `SettlementQueueV1` and
 // `confirm_mint_in_state` operates on `MultiChainState`, neither of which is
 // Monad-specific.
-use crate::chains::monad::settlement::{confirm_mint_in_state, select_next_op, OpAction};
+use crate::chains::monad::settlement::{
+    confirm_mint_in_state, select_next_op_with_submit_filter, OpAction,
+};
 
 use super::adapter::SolanaAdapter;
 use super::{hardening, sol_rpc, ted25519, tx};
@@ -138,20 +140,21 @@ pub async fn run_settlement(chain: ChainId) {
         return;
     }
 
-    // Snapshot this chain's queue and pick the next actionable op.
-    let queue = read_state(|s| s.multi_chain.settlement_queues.get(&chain).cloned());
-    let queue = match queue {
-        Some(q) => q,
+    // Snapshot this chain's next actionable op. A tripped bad-debt circuit skips
+    // queued risk-increasing ops at selection time so later reconciliation ops
+    // are not starved behind the blocked head of queue.
+    let selected = read_state(|s| {
+        let q = s.multi_chain.settlement_queues.get(&chain)?;
+        let (op_id, action) = select_next_op_with_submit_filter(q, |_, op| {
+            s.multi_chain
+                .bad_debt_circuit_blocks_settlement_op(chain, &op.kind)
+        })?;
+        let op = q.pending.get(&op_id)?.clone();
+        Some((op_id, action, op))
+    });
+    let (op_id, action, op) = match selected {
+        Some(selected) => selected,
         None => return, // chain not registered / no queue
-    };
-    let (op_id, action) = match select_next_op(&queue) {
-        Some(pair) => pair,
-        None => return, // nothing to do
-    };
-    // Clone the op out so we can drop the queue snapshot before awaiting.
-    let op = match queue.pending.get(&op_id).cloned() {
-        Some(o) => o,
-        None => return,
     };
 
     match action {
@@ -189,7 +192,8 @@ async fn submit_op(chain: ChainId, op_id: u64, op: SettlementOp) {
             | SettlementOpKind::ChainCollateralPayout { .. }
     ) {
         let now = ic_cdk::api::time();
-        let reason = "op not signable on Solana in M2 (burns/interest-mints handled elsewhere)".to_string();
+        let reason =
+            "op not signable on Solana in M2 (burns/interest-mints handled elsewhere)".to_string();
         mutate_state(|s| {
             if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
                 if let Some(o) = q.pending.get_mut(&op_id) {
@@ -207,6 +211,20 @@ async fn submit_op(chain: ChainId, op_id: u64, op: SettlementOp) {
         return;
     }
 
+    if read_state(|s| {
+        s.multi_chain
+            .bad_debt_circuit_blocks_settlement_op(chain, &op.kind)
+    }) {
+        log!(
+            INFO,
+            "[solana settlement chain={:?}] bad-debt circuit tripped; deferring submit of op {} {:?}",
+            chain,
+            op_id,
+            op.kind
+        );
+        return;
+    }
+
     // GAS GATE: refuse a new outbound op when the settlement (mint-authority +
     // fee-payer) address lacks enough SOL for fees + a fresh-ATA rent touch.
     // Unlike Monad (which reads a cached balance the observer refreshes), the
@@ -215,18 +233,25 @@ async fn submit_op(chain: ChainId, op_id: u64, op: SettlementOp) {
     // `hardening::hot_wallet_ok`. A derive/read failure logs and leaves the op
     // Queued (retry next tick); it does NOT fail the op.
     let settlement_path = ted25519::settlement_derivation_path(chain);
-    let (_settlement_pk, settlement_addr) =
-        match ted25519::derive_solana_address(settlement_path).await {
-            Ok(pair) => pair,
-            Err(e) => {
-                log!(INFO, "[solana settlement chain={:?}] derive settlement address failed for op {}: {}; will retry", chain, op_id, e);
-                return;
-            }
-        };
+    let (_settlement_pk, settlement_addr) = match ted25519::derive_solana_address(settlement_path)
+        .await
+    {
+        Ok(pair) => pair,
+        Err(e) => {
+            log!(INFO, "[solana settlement chain={:?}] derive settlement address failed for op {}: {}; will retry", chain, op_id, e);
+            return;
+        }
+    };
     let balance = match sol_rpc::get_balance(&settlement_addr).await {
         Ok(b) => b,
         Err(e) => {
-            log!(INFO, "[solana settlement chain={:?}] get_balance failed for op {}: {}; will retry", chain, op_id, e);
+            log!(
+                INFO,
+                "[solana settlement chain={:?}] get_balance failed for op {}: {}; will retry",
+                chain,
+                op_id,
+                e
+            );
             return;
         }
     };
@@ -248,7 +273,11 @@ async fn submit_op(chain: ChainId, op_id: u64, op: SettlementOp) {
     // NO state borrow is held across these awaits.
     let adapter = SolanaAdapter::new(chain);
     let (raw_tx, vault_id, recipient, amount, kind) = match &op.kind {
-        SettlementOpKind::Mint { recipient, amount_e8s, vault_id } => {
+        SettlementOpKind::Mint {
+            recipient,
+            amount_e8s,
+            vault_id,
+        } => {
             let instr = MintInstruction {
                 recipient: recipient.clone(),
                 amount_e8s: *amount_e8s,
@@ -267,7 +296,11 @@ async fn submit_op(chain: ChainId, op_id: u64, op: SettlementOp) {
                 Err(e) => return handle_adapter_error(chain, op_id, "sign_mint", e),
             }
         }
-        SettlementOpKind::NativeWithdrawal { recipient, amount_e18, vault_id } => {
+        SettlementOpKind::NativeWithdrawal {
+            recipient,
+            amount_e18,
+            vault_id,
+        } => {
             // `amount_e18` carries SOL lamports here (the e18 field is the shared
             // amount wart); the adapter does the checked u128 -> u64 conversion.
             let req = WithdrawalRequest {
@@ -395,7 +428,12 @@ async fn confirm_op(chain: ChainId, op_id: u64, op: SettlementOp) {
     let signature = match &op.last_tx_hash {
         Some(h) => h.clone(),
         None => {
-            log!(INFO, "[solana settlement chain={:?}] inflight op {} has no last_tx_hash; skipping", chain, op_id);
+            log!(
+                INFO,
+                "[solana settlement chain={:?}] inflight op {} has no last_tx_hash; skipping",
+                chain,
+                op_id
+            );
             return;
         }
     };
@@ -417,7 +455,13 @@ async fn confirm_op(chain: ChainId, op_id: u64, op: SettlementOp) {
             // Not finalized yet (or never landed). Leave Inflight; the next tick
             // re-confirms. A same-bytes resend for a truly-stuck tx is the
             // deferred M2 seam - we do NOT re-broadcast or re-sign here.
-            log!(INFO, "[solana settlement chain={:?}] op {} sig {} not finalized yet; leaving Inflight", chain, op_id, signature);
+            log!(
+                INFO,
+                "[solana settlement chain={:?}] op {} sig {} not finalized yet; leaving Inflight",
+                chain,
+                op_id,
+                signature
+            );
         }
         sol_rpc::TxStatus::Confirmed { slot } => {
             confirm_succeeded(chain, op_id, &op, &signature, slot, now);
@@ -439,7 +483,11 @@ fn confirm_succeeded(
     now: u64,
 ) {
     match &op.kind {
-        SettlementOpKind::Mint { vault_id, amount_e8s, .. } => {
+        SettlementOpKind::Mint {
+            vault_id,
+            amount_e8s,
+            ..
+        } => {
             let vault_id = *vault_id;
             let amount_e8s = *amount_e8s;
             // PRE-mint total: sum of foreign-chain vault debt BEFORE this mint
@@ -473,7 +521,14 @@ fn confirm_succeeded(
                 if !still_inflight {
                     return MintConfirm::AlreadyHandled;
                 }
-                match confirm_mint_in_state(&mut s.multi_chain, chain, vault_id, amount_e8s, pre_total, now) {
+                match confirm_mint_in_state(
+                    &mut s.multi_chain,
+                    chain,
+                    vault_id,
+                    amount_e8s,
+                    pre_total,
+                    now,
+                ) {
                     Ok(()) => {
                         if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
                             if let Some(o) = q.pending.get_mut(&op_id) {
@@ -577,7 +632,11 @@ fn confirm_reverted(chain: ChainId, op_id: u64, op: &SettlementOp, signature: &s
                     v.pending_mint_e8s = 0;
                 }
             }
-            SettlementOpKind::NativeWithdrawal { vault_id, amount_e18, .. } => {
+            SettlementOpKind::NativeWithdrawal {
+                vault_id,
+                amount_e18,
+                ..
+            } => {
                 // The transfer did not happen, so the reserved collateral was not
                 // paid out. ADD it back (undo the reserve-at-enqueue) and, if the
                 // vault had gone `Closing` (full withdrawal / close), revert it to
@@ -591,9 +650,9 @@ fn confirm_reverted(chain: ChainId, op_id: u64, op: &SettlementOp, signature: &s
                 }
             }
             SettlementOpKind::Burn { .. }
-        | SettlementOpKind::InterestMint { .. }
-        | SettlementOpKind::LiquidationSwap { .. }
-        | SettlementOpKind::ChainCollateralPayout { .. } => {}
+            | SettlementOpKind::InterestMint { .. }
+            | SettlementOpKind::LiquidationSwap { .. }
+            | SettlementOpKind::ChainCollateralPayout { .. } => {}
         }
         if let Some(o) = s
             .multi_chain
@@ -617,13 +676,17 @@ fn confirm_reverted(chain: ChainId, op_id: u64, op: &SettlementOp, signature: &s
             SettlementOpKind::Mint { vault_id, .. } => {
                 log!(INFO, "[solana settlement chain={:?}] MINT op {} vault {} REVERTED on-chain (sig {}); marked Failed, pending_mint cleared, vault left MintPending for manual resolution", chain, op_id, vault_id, signature);
             }
-            SettlementOpKind::NativeWithdrawal { vault_id, amount_e18, .. } => {
+            SettlementOpKind::NativeWithdrawal {
+                vault_id,
+                amount_e18,
+                ..
+            } => {
                 log!(INFO, "[solana settlement chain={:?}] withdrawal op {} vault {} reverted on-chain (sig {}); marked Failed, restored {} lamports of reserved collateral", chain, op_id, vault_id, signature, amount_e18);
             }
             SettlementOpKind::Burn { .. }
-        | SettlementOpKind::InterestMint { .. }
-        | SettlementOpKind::LiquidationSwap { .. }
-        | SettlementOpKind::ChainCollateralPayout { .. } => {}
+            | SettlementOpKind::InterestMint { .. }
+            | SettlementOpKind::LiquidationSwap { .. }
+            | SettlementOpKind::ChainCollateralPayout { .. } => {}
         }
     }
 }
@@ -668,7 +731,14 @@ fn handle_adapter_error(
             log!(INFO, "[solana settlement chain={:?}] {} returned permanent InvalidPayload for op {}: {}; marked Failed", chain, what, op_id, reason);
         }
         other => {
-            log!(INFO, "[solana settlement chain={:?}] {} failed (transient) for op {}: {:?}; will retry", chain, what, op_id, other);
+            log!(
+                INFO,
+                "[solana settlement chain={:?}] {} failed (transient) for op {}: {:?}; will retry",
+                chain,
+                what,
+                op_id,
+                other
+            );
         }
     }
 }

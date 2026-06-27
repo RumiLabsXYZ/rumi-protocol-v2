@@ -682,6 +682,230 @@ fn settlement_proof_state_defaults_empty_from_pre_inc6_v6_snapshot() {
 }
 
 #[test]
+fn inc11_bad_debt_circuit_state_defaults_empty_from_v6_snapshot() {
+    use super::collateral_config::ChainDebtConfigV1;
+    use super::config::ChainConfigV3;
+    use super::liquidation_config::ChainLiquidationConfigV1;
+    use super::monad::chain_vault::ChainVaultV1;
+    use super::settlement_queue::SettlementQueueV1;
+    use candid::Principal;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    #[derive(serde::Serialize, Default)]
+    struct PreInc11MultiChainStateV6 {
+        pub chain_configs: BTreeMap<ChainId, ChainConfigV3>,
+        pub chain_supplies: BTreeMap<ChainId, u128>,
+        pub settlement_queues: BTreeMap<ChainId, SettlementQueueV1>,
+        pub invariant_halted: bool,
+        pub chain_vaults: BTreeMap<u64, ChainVaultV1>,
+        pub chain_contracts: BTreeMap<ChainId, String>,
+        pub manual_prices: BTreeMap<(ChainId, String), u64>,
+        pub last_observed_block: BTreeMap<ChainId, u64>,
+        pub hot_wallet_balance_e18: BTreeMap<ChainId, u128>,
+        pub reorg_halted: BTreeMap<ChainId, bool>,
+        pub reorg_suspect_streak: BTreeMap<ChainId, u32>,
+        pub processed_burn_keys: BTreeMap<u64, BTreeSet<String>>,
+        pub evm_owner_nonces: BTreeMap<Principal, u64>,
+        pub manual_price_set_at_ns: BTreeMap<(ChainId, String), u64>,
+        pub reserve_backing_e8s: BTreeMap<ChainId, u128>,
+        pub reserve_usdc_native: BTreeMap<ChainId, u128>,
+        pub pending_chain_burn_e8s: BTreeMap<ChainId, u128>,
+        pub sp_attempted_chain_vaults: BTreeSet<u64>,
+        pub chain_liquidation_claims: BTreeMap<u64, ChainLiqClaimV1>,
+        pub chain_liquidation_configs: BTreeMap<ChainId, ChainLiquidationConfigV1>,
+        pub chain_debt_configs: BTreeMap<ChainId, ChainDebtConfigV1>,
+        pub bot_pending_chain_vaults: BTreeMap<u64, u64>,
+        pub chain_bad_debt_e8s: BTreeMap<ChainId, u128>,
+    }
+
+    const CFX: ChainId = ChainId(1030);
+    let mut pre = PreInc11MultiChainStateV6::default();
+    pre.chain_supplies.insert(CFX, 100);
+    pre.chain_bad_debt_e8s.insert(CFX, 7);
+
+    let mut buf = Vec::new();
+    ciborium::ser::into_writer(&pre, &mut buf).expect("cbor encode pre-Inc11 V6");
+    let decoded: MultiChainState =
+        ciborium::de::from_reader(buf.as_slice()).expect("pre-Inc11 V6 decodes");
+
+    assert_eq!(decoded.chain_supplies.get(&CFX), Some(&100));
+    assert_eq!(decoded.chain_bad_debt_e8s.get(&CFX), Some(&7));
+    assert!(decoded.chain_bad_debt_circuit_threshold_e8s.is_empty());
+    assert!(decoded.chain_bad_debt_circuit_tripped_at_ns.is_empty());
+    assert!(!decoded.chain_bad_debt_circuit_tripped(CFX));
+}
+
+#[test]
+fn bad_debt_circuit_blocks_only_risk_increasing_settlement_ops() {
+    use super::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
+    use super::settlement_queue::SettlementOpKind;
+    use candid::Principal;
+
+    const CFX: ChainId = ChainId(1030);
+    let mut state = MultiChainState::default();
+    state.chain_bad_debt_circuit_tripped_at_ns.insert(CFX, 42);
+    state.chain_vaults.insert(
+        1,
+        ChainVaultV1 {
+            vault_id: 1,
+            owner: Principal::anonymous(),
+            collateral_chain: CFX,
+            custody_address: "0xc".into(),
+            collateral_amount_native: 100,
+            debt_e8s: 10,
+            mint_recipient: "0xr".into(),
+            pending_mint_e8s: 0,
+            status: ChainVaultStatus::Open,
+            opened_at_ns: 0,
+            owner_evm: None,
+            last_interest_accrual_ns: 0,
+            pending_interest_mint_e8s: 0,
+            pending_liquidation: None,
+        },
+    );
+    state.chain_vaults.insert(
+        2,
+        ChainVaultV1 {
+            vault_id: 2,
+            owner: Principal::anonymous(),
+            collateral_chain: CFX,
+            custody_address: "0xc".into(),
+            collateral_amount_native: 100,
+            debt_e8s: 0,
+            mint_recipient: "0xr".into(),
+            pending_mint_e8s: 0,
+            status: ChainVaultStatus::Open,
+            opened_at_ns: 0,
+            owner_evm: None,
+            last_interest_accrual_ns: 0,
+            pending_interest_mint_e8s: 0,
+            pending_liquidation: None,
+        },
+    );
+
+    assert!(state.bad_debt_circuit_blocks_settlement_op(
+        CFX,
+        &SettlementOpKind::Mint {
+            recipient: "0xr".into(),
+            amount_e8s: 1,
+            vault_id: 1,
+        }
+    ));
+    assert!(state.bad_debt_circuit_blocks_settlement_op(
+        CFX,
+        &SettlementOpKind::InterestMint {
+            vault_id: 1,
+            mint_id: 99,
+            amount_e8s: 1,
+            accrual_through_ns: 1,
+            recipient: "0xt".into(),
+        }
+    ));
+    assert!(state.bad_debt_circuit_blocks_settlement_op(
+        CFX,
+        &SettlementOpKind::NativeWithdrawal {
+            recipient: "0xr".into(),
+            amount_e18: 1,
+            vault_id: 1,
+        }
+    ));
+    assert!(!state.bad_debt_circuit_blocks_settlement_op(
+        CFX,
+        &SettlementOpKind::NativeWithdrawal {
+            recipient: "0xr".into(),
+            amount_e18: 1,
+            vault_id: 2,
+        }
+    ));
+    assert!(!state.bad_debt_circuit_blocks_settlement_op(
+        CFX,
+        &SettlementOpKind::LiquidationSwap {
+            vault_id: 1,
+            collateral_in_native: 1,
+            min_usdc_out_native: 1,
+            debt_to_clear_e8s: 1,
+            router: "0x1".into(),
+            pair: "0x2".into(),
+            path: vec![],
+            reserve_recipient: "0x3".into(),
+            deadline_secs: 1,
+        }
+    ));
+    assert!(!state.bad_debt_circuit_blocks_settlement_op(
+        CFX,
+        &SettlementOpKind::ChainCollateralPayout {
+            vault_id: 1,
+            claimant: Principal::anonymous(),
+            recipient: "0xr".into(),
+            amount_e18: 1,
+        }
+    ));
+}
+
+#[test]
+fn supply_increasing_settlement_op_ignores_circuit_blocked_queued_mints() {
+    use super::settlement_queue::{
+        SettlementOp, SettlementOpKind, SettlementOpStatus, SettlementQueueV1,
+    };
+
+    const CFX: ChainId = ChainId(1030);
+    let mut state = MultiChainState::default();
+    state.chain_bad_debt_circuit_tripped_at_ns.insert(CFX, 42);
+    state
+        .settlement_queues
+        .insert(CFX, SettlementQueueV1::default());
+    let mint_id = state
+        .settlement_queues
+        .get_mut(&CFX)
+        .unwrap()
+        .enqueue(SettlementOp::new(
+            SettlementOpKind::Mint {
+                recipient: "0xr".into(),
+                amount_e8s: 1,
+                vault_id: 1,
+            },
+            "blocked-mint".into(),
+            0,
+        ))
+        .expect("enqueue mint");
+
+    assert!(
+        !state.has_supply_increasing_settlement_op(CFX),
+        "circuit-blocked queued mint cannot explain a supply increase"
+    );
+
+    state
+        .settlement_queues
+        .get_mut(&CFX)
+        .unwrap()
+        .pending
+        .get_mut(&mint_id)
+        .unwrap()
+        .status = SettlementOpStatus::Inflight {
+        tries: 1,
+        last_attempt_ns: 1,
+    };
+    assert!(
+        state.has_supply_increasing_settlement_op(CFX),
+        "inflight mint can already have landed and must still mask backstop scans"
+    );
+
+    state
+        .settlement_queues
+        .get_mut(&CFX)
+        .unwrap()
+        .pending
+        .get_mut(&mint_id)
+        .unwrap()
+        .status = SettlementOpStatus::Queued;
+    state.chain_bad_debt_circuit_tripped_at_ns.remove(&CFX);
+    assert!(
+        state.has_supply_increasing_settlement_op(CFX),
+        "queued mint is supply-increasing again once the circuit is clear"
+    );
+}
+
+#[test]
 fn settlement_proof_state_round_trip_preserves_compact_records() {
     let mut v6 = MultiChainStateV6::default();
     let pending = SettlementProofRecord {

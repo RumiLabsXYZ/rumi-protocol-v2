@@ -40,7 +40,9 @@ use ic_canister_log::log;
 use crate::chains::config::{ChainId, ChainStatus};
 use crate::chains::monad::chain_vault::ChainVaultStatus;
 use crate::chains::multi_chain_state::MultiChainState;
-use crate::chains::settlement_queue::{SettlementOpKind, SettlementOpStatus, SettlementQueueV1};
+use crate::chains::settlement_queue::{
+    SettlementOp, SettlementOpKind, SettlementOpStatus, SettlementQueueV1,
+};
 use crate::chains::supply::{apply_supply_delta, SupplyDelta};
 use crate::logs::INFO;
 use crate::state::{mutate_state, read_state};
@@ -224,19 +226,35 @@ async fn recredit_and_fail_chain_collateral_payout(
     }
 }
 
-/// Pick the next op to act on. Enforces one-in-flight-per-queue: if ANY op is
-/// `Inflight`, only that op (action `Confirm`) is actionable; otherwise the
-/// lowest-op_id `Queued` op (action `Submit`). `pending` is a
-/// `BTreeMap<u64, SettlementOp>`, so iteration is op_id-ascending and the
-/// drain is FIFO. Returns `None` when nothing is actionable.
+/// Pick the next op to act on without additional submit-time filters. Enforces
+/// one-in-flight-per-queue: if ANY op is `Inflight`, only that op (action
+/// `Confirm`) is actionable; otherwise the lowest-op_id `Queued` op (action
+/// `Submit`) is returned.
 pub fn select_next_op(q: &SettlementQueueV1) -> Option<(u64, OpAction)> {
+    select_next_op_with_submit_filter(q, |_, _| false)
+}
+
+/// Pick the next op to act on, treating queued ops for which
+/// `submit_blocked(id, op)` is true as temporarily non-actionable. Inflight ops
+/// are never skipped: one-in-flight-per-queue remains the first rule.
+///
+/// `pending` is a `BTreeMap<u64, SettlementOp>`, so iteration is op_id-ascending
+/// and the drain stays FIFO among actionable queued ops. Returns `None` when
+/// nothing is actionable.
+pub fn select_next_op_with_submit_filter<F>(
+    q: &SettlementQueueV1,
+    mut submit_blocked: F,
+) -> Option<(u64, OpAction)>
+where
+    F: FnMut(u64, &SettlementOp) -> bool,
+{
     for (&id, op) in q.pending.iter() {
         if matches!(op.status, SettlementOpStatus::Inflight { .. }) {
             return Some((id, OpAction::Confirm));
         }
     }
     for (&id, op) in q.pending.iter() {
-        if matches!(op.status, SettlementOpStatus::Queued) {
+        if matches!(op.status, SettlementOpStatus::Queued) && !submit_blocked(id, op) {
             // Increment 3: LiquidationSwap ops are now actionable (submit_op routes
             // them through the dedicated swap path). The Inc-2 skip is removed.
             return Some((id, OpAction::Submit));
@@ -386,6 +404,7 @@ pub fn apply_liquidation_settlement_in_state(
     op_id: u64,
     realized_usdc_native: u128,
     settle_decimals: u8,
+    now_ns: u64,
 ) -> Result<LiquidationSettlement, String> {
     use crate::chains::monad::chain_vault::ChainVaultStatus;
 
@@ -431,9 +450,9 @@ pub fn apply_liquidation_settlement_in_state(
     .map_err(|e| format!("apply_debt_to_reserve_shift: {e:?}"))?;
 
     // Step 4: record any shortfall as per-chain bad debt (never silent).
-    if debt_to_clear > actual_cleared {
-        *state.chain_bad_debt_e8s.entry(chain).or_default() += debt_to_clear - actual_cleared;
-    }
+    let bad_debt_added_e8s = debt_to_clear.saturating_sub(actual_cleared);
+    let bad_debt_circuit_tripped =
+        state.record_chain_bad_debt_and_maybe_trip(chain, bad_debt_added_e8s, now_ns);
 
     // Step 5: clear the marker + routing record; close the vault if fully drained.
     let v = state
@@ -451,6 +470,8 @@ pub fn apply_liquidation_settlement_in_state(
         collateral_seized_native: collateral_reserved,
         tier,
         realized_usdc_native,
+        bad_debt_added_e8s,
+        bad_debt_circuit_tripped,
     })
 }
 
@@ -462,6 +483,8 @@ pub struct LiquidationSettlement {
     pub collateral_seized_native: u128,
     pub tier: crate::chains::vault::LiquidationTier,
     pub realized_usdc_native: u128,
+    pub bad_debt_added_e8s: u128,
+    pub bad_debt_circuit_tripped: bool,
 }
 
 /// Result of the state-only Tier-2 SP absorb transition. The caller emits
@@ -978,20 +1001,21 @@ pub async fn run_settlement(chain: ChainId) {
         return;
     }
 
-    // Snapshot this chain's queue and pick the next actionable op.
-    let queue = read_state(|s| s.multi_chain.settlement_queues.get(&chain).cloned());
-    let queue = match queue {
-        Some(q) => q,
+    // Snapshot this chain's next actionable op. A tripped bad-debt circuit skips
+    // queued risk-increasing ops at selection time so later burns, liquidation
+    // swaps, and claim payouts can still reconcile.
+    let selected = read_state(|s| {
+        let q = s.multi_chain.settlement_queues.get(&chain)?;
+        let (op_id, action) = select_next_op_with_submit_filter(q, |_, op| {
+            s.multi_chain
+                .bad_debt_circuit_blocks_settlement_op(chain, &op.kind)
+        })?;
+        let op = q.pending.get(&op_id)?.clone();
+        Some((op_id, action, op))
+    });
+    let (op_id, action, op) = match selected {
+        Some(selected) => selected,
         None => return, // chain not registered / no queue
-    };
-    let (op_id, action) = match select_next_op(&queue) {
-        Some(pair) => pair,
-        None => return, // nothing to do
-    };
-    // Clone the op out so we can drop the queue snapshot before awaiting.
-    let op = match queue.pending.get(&op_id).cloned() {
-        Some(o) => o,
-        None => return,
     };
 
     match action {
@@ -1448,6 +1472,20 @@ async fn submit_op(chain: ChainId, op_id: u64, op: crate::chains::settlement_que
     // — route it to the dedicated path instead of the generic mint/withdrawal one.
     if matches!(op.kind, SettlementOpKind::LiquidationSwap { .. }) {
         submit_liquidation_swap(chain, op_id, op).await;
+        return;
+    }
+
+    if read_state(|s| {
+        s.multi_chain
+            .bad_debt_circuit_blocks_settlement_op(chain, &op.kind)
+    }) {
+        log!(
+            INFO,
+            "[settlement chain={:?}] bad-debt circuit tripped; deferring submit of op {} {:?}",
+            chain,
+            op_id,
+            op.kind
+        );
         return;
     }
 
@@ -2898,6 +2936,7 @@ async fn confirm_op(chain: ChainId, op_id: u64, op: crate::chains::settlement_qu
                     op_id,
                     realized_usdc,
                     settle_decimals,
+                    now,
                 )
             });
             match settled {
@@ -2925,6 +2964,29 @@ async fn confirm_op(chain: ChainId, op_id: u64, op: crate::chains::settlement_qu
                         usdc_native: res.realized_usdc_native,
                         timestamp: now,
                     });
+                    if res.bad_debt_circuit_tripped {
+                        crate::storage::record_event(
+                            &crate::event::Event::ChainBadDebtCircuitTripped {
+                                chain_id: chain,
+                                bad_debt_e8s: res.bad_debt_added_e8s,
+                                total_bad_debt_e8s: read_state(|s| {
+                                    s.multi_chain
+                                        .chain_bad_debt_e8s
+                                        .get(&chain)
+                                        .copied()
+                                        .unwrap_or(0)
+                                }),
+                                threshold_e8s: read_state(|s| {
+                                    s.multi_chain
+                                        .chain_bad_debt_circuit_threshold_e8s
+                                        .get(&chain)
+                                        .copied()
+                                        .unwrap_or(0)
+                                }),
+                                timestamp: now,
+                            },
+                        );
+                    }
                     log!(INFO, "[settlement chain={:?}] liquidation swap confirmed: op={} vault={} cleared_e8s={} realized_usdc={} block={} tx={}", chain, op_id, vault_id, res.actual_cleared, realized_usdc, block_number, tx_hash);
                 }
                 Err(e) => {
