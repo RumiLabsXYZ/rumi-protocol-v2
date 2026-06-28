@@ -19,6 +19,7 @@ serde_bytes = "0.11"
 sha2 = "0.10"
 ciborium = "0.2"
 ic-canisters-http-types = { git = "https://github.com/Rumi-Protocol/ic", rev = "fc278709" }
+rumi_cycle_manager = { path = "../rumi_cycle_manager" }
 
 [dev-dependencies]
 pocket-ic = "6.0.0"

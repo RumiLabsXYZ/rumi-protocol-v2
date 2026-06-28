@@ -33,6 +33,21 @@ export interface BotStats {
   'events_count' : bigint,
   'total_collateral_received_e8s' : bigint,
 }
+export interface CycleManagerCyclesStatus {
+  'idle_burn_cycles_per_day' : [] | [bigint],
+  'stable_memory_bytes' : [] | [bigint],
+  'low_watermark' : bigint,
+  'balance' : bigint,
+  'heap_memory_bytes' : [] | [bigint],
+  'healthy' : boolean,
+  'freeze_threshold_secs' : bigint,
+}
+export interface CycleManagerMetric {
+  'key' : string,
+  'value' : bigint,
+  'count' : bigint,
+  'label' : [] | [string],
+}
 export interface LiquidatableVaultInfo {
   'collateral_amount' : bigint,
   'recommended_liquidation_amount' : bigint,
@@ -78,6 +93,8 @@ export interface _SERVICE {
   'admin_retry_stuck_claim' : ActorMethod<[bigint], undefined>,
   'admin_sweep_ckusdc' : ActorMethod<[Principal, [] | [bigint]], undefined>,
   'admin_test_swap' : ActorMethod<[bigint], TestSwapResult>,
+  'cycle_manager_metrics' : ActorMethod<[], Array<CycleManagerMetric>>,
+  'cycles_status' : ActorMethod<[], CycleManagerCyclesStatus>,
   'get_admin_event_count' : ActorMethod<[], bigint>,
   'get_admin_events' : ActorMethod<[bigint, bigint], Array<BotAdminEvent>>,
   'get_bot_stats' : ActorMethod<[], BotStats>,

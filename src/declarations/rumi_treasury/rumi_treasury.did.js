@@ -7,6 +7,21 @@ export const idlFactory = ({ IDL }) => {
     'ckbtc_ledger' : IDL.Opt(IDL.Principal),
     'icusd_ledger' : IDL.Principal,
   });
+  const CycleManagerMetric = IDL.Record({
+    'key' : IDL.Text,
+    'value' : IDL.Nat,
+    'count' : IDL.Nat64,
+    'label' : IDL.Opt(IDL.Text),
+  });
+  const CycleManagerCyclesStatus = IDL.Record({
+    'idle_burn_cycles_per_day' : IDL.Opt(IDL.Nat),
+    'stable_memory_bytes' : IDL.Opt(IDL.Nat64),
+    'low_watermark' : IDL.Nat,
+    'balance' : IDL.Nat,
+    'heap_memory_bytes' : IDL.Opt(IDL.Nat64),
+    'healthy' : IDL.Bool,
+    'freeze_threshold_secs' : IDL.Nat64,
+  });
   const AssetType = IDL.Variant({
     'ICP' : IDL.Null,
     'CKUSDC' : IDL.Null,
@@ -79,6 +94,12 @@ export const idlFactory = ({ IDL }) => {
     'amount_transferred' : IDL.Nat64,
   });
   return IDL.Service({
+    'cycle_manager_metrics' : IDL.Func(
+        [],
+        [IDL.Vec(CycleManagerMetric)],
+        ['query'],
+      ),
+    'cycles_status' : IDL.Func([], [CycleManagerCyclesStatus], ['query']),
     'deposit' : IDL.Func(
         [DepositArgs],
         [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : IDL.Text })],

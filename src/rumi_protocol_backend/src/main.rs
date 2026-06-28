@@ -1148,6 +1148,53 @@ fn get_protocol_status() -> ProtocolStatus {
     })
 }
 
+#[candid_method(query)]
+#[query]
+fn cycles_status() -> rumi_cycle_manager::CycleManagerCyclesStatus {
+    let operational = read_state(|s| !s.frozen && !s.liquidation_breaker_tripped);
+    rumi_cycle_manager::self_cycles_status(
+        5_000_000_000_000,
+        operational,
+        rumi_cycle_manager::DEFAULT_FREEZE_THRESHOLD_SECS,
+    )
+}
+
+#[candid_method(query)]
+#[query]
+fn cycle_manager_metrics() -> Vec<rumi_cycle_manager::CycleManagerMetric> {
+    read_state(|s| {
+        vec![
+            rumi_cycle_manager::metric(
+                "op:vault:count",
+                s.vault_id_to_vaults.len() as u64,
+                s.vault_id_to_vaults.len() as u64,
+                Some("active protocol vault records"),
+            ),
+            rumi_cycle_manager::metric(
+                "op:liquidation:count",
+                s.bot_claims.len() as u64,
+                s.bot_claims.len() as u64,
+                Some("pending liquidation bot claims"),
+            ),
+            rumi_cycle_manager::metric(
+                "ledger:icusd:count",
+                1,
+                s.multi_chain.total_supply_all_chains_e8s(),
+                Some("multi-chain icUSD supply in e8s"),
+            ),
+            rumi_cycle_manager::metric(
+                "call:pending_transfers:count",
+                s.pending_margin_transfers
+                    .len()
+                    .saturating_add(s.pending_excess_transfers.len())
+                    .saturating_add(s.pending_redemption_transfer.len()) as u64,
+                0u64,
+                Some("pending ledger transfer journals"),
+            ),
+        ]
+    })
+}
+
 /// Phase 1a: canonical multi-chain icUSD supply (sum across all chains).
 /// Equals `sum(state.multi_chain.chain_supplies.values())`. Returns 0 when
 /// no chains are registered (the Phase 1a default state).

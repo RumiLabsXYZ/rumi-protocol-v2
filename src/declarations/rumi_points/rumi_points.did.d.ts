@@ -7,6 +7,21 @@ export type AssetType = { 'Icp' : null } |
   { 'CkUsdc' : null } |
   { 'CkUsdt' : null } |
   { 'ThreeUsd' : null };
+export interface CycleManagerCyclesStatus {
+  'idle_burn_cycles_per_day' : [] | [bigint],
+  'stable_memory_bytes' : [] | [bigint],
+  'low_watermark' : bigint,
+  'balance' : bigint,
+  'heap_memory_bytes' : [] | [bigint],
+  'healthy' : boolean,
+  'freeze_threshold_secs' : bigint,
+}
+export interface CycleManagerMetric {
+  'key' : string,
+  'value' : bigint,
+  'count' : bigint,
+  'label' : [] | [string],
+}
 export interface DepositKey { 'asset' : AssetType, 'venue' : Venue }
 export interface DepositRecord {
   'asset' : AssetType,
@@ -143,6 +158,8 @@ export type Venue = { 'Amm' : null } |
   { 'StabilityPool' : null };
 export interface _SERVICE {
   'add_excluded_principal' : ActorMethod<[Principal], Result>,
+  'cycle_manager_metrics' : ActorMethod<[], Array<CycleManagerMetric>>,
+  'cycles_status' : ActorMethod<[], CycleManagerCyclesStatus>,
   'force_epoch_tick' : ActorMethod<[], Result>,
   'get_asset_ledgers' : ActorMethod<[], Array<[number, Principal]>>,
   'get_epoch_history' : ActorMethod<[number, number], Array<EpochSummary>>,

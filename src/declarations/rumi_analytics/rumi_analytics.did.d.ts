@@ -98,6 +98,47 @@ export interface CursorStatus {
   'last_success_ns' : bigint,
   'cursor_position' : bigint,
 }
+export type CycleManagerCriticality = { 'Important' : null } |
+  { 'Experimental' : null } |
+  { 'Critical' : null } |
+  { 'Standard' : null };
+export interface CycleManagerCyclesStatus {
+  'idle_burn_cycles_per_day' : [] | [bigint],
+  'stable_memory_bytes' : [] | [bigint],
+  'low_watermark' : bigint,
+  'balance' : bigint,
+  'heap_memory_bytes' : [] | [bigint],
+  'healthy' : boolean,
+  'freeze_threshold_secs' : bigint,
+}
+export type CycleManagerEnvironment = { 'Local' : null } |
+  { 'Production' : null } |
+  { 'Test' : null } |
+  { 'Archived' : null } |
+  { 'Staging' : null };
+export interface CycleManagerMetric {
+  'key' : string,
+  'value' : bigint,
+  'count' : bigint,
+  'label' : [] | [string],
+}
+export interface CycleManagerTarget {
+  'low_threshold_cycles' : bigint,
+  'topup_cycles' : bigint,
+  'owner' : [] | [string],
+  'kind' : CycleManagerTargetKind,
+  'name' : string,
+  'tags' : Array<string>,
+  'canister_id' : Principal,
+  'expected_freeze_threshold_secs' : [] | [bigint],
+  'expected_controllers' : Array<Principal>,
+  'criticality' : CycleManagerCriticality,
+  'environment' : CycleManagerEnvironment,
+  'metrics_schema_version' : number,
+  'project' : string,
+}
+export type CycleManagerTargetKind = { 'SelfReport' : null } |
+  { 'Controlled' : null };
 export interface CycleSeriesResponse {
   'rows' : Array<HourlyCycleSnapshot>,
   'next_from_ts' : [] | [bigint],
@@ -444,6 +485,9 @@ export interface VolatilityResponse {
 }
 export interface _SERVICE {
   'admin_backfill_add_margin_events' : ActorMethod<[bigint], Result>,
+  'cycle_manager_metrics' : ActorMethod<[], Array<CycleManagerMetric>>,
+  'cycle_manager_targets' : ActorMethod<[], Array<CycleManagerTarget>>,
+  'cycles_status' : ActorMethod<[], CycleManagerCyclesStatus>,
   'debug_get_amm_event_counts' : ActorMethod<[], [bigint, bigint]>,
   'debug_get_amm_liquidity_events_raw' : ActorMethod<
     [bigint, bigint],

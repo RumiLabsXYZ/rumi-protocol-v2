@@ -64,6 +64,7 @@ bs58 = { version = "0.5", features = ["check"] }
 # (chains/xrp/address.rs). Tiny, no_std-capable, wasm32 compatible, no serde — the
 # only hash the codebase needs beyond sha2/sha3/k256.
 ripemd = "0.1"
+rumi_cycle_manager = { path = "../rumi_cycle_manager" }
 # base64 for Solana sendTransaction wire encoding. Resolves to 0.22.1 (already a
 # transitive dep), so adding it as a direct dep does not shift resolution. The
 # `alloc` feature is enough for the canister (no std-only APIs needed).
@@ -105,4 +106,3 @@ flate2 = "1.0"
 # zeroize) do NOT activate its optional serde dep, so the serde 1.0.217 pin holds.
 # This is a dev-dependency, so it does not affect the wasm artifact.
 ed25519-dalek = "2.1.1"
-

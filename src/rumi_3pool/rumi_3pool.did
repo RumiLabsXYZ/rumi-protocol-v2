@@ -23,6 +23,22 @@ type PoolStatus = record {
   tokens : vec TokenConfig;
 };
 
+type CycleManagerCyclesStatus = record {
+  balance : nat;
+  low_watermark : nat;
+  healthy : bool;
+  freeze_threshold_secs : nat64;
+  stable_memory_bytes : opt nat64;
+  heap_memory_bytes : opt nat64;
+  idle_burn_cycles_per_day : opt nat;
+};
+type CycleManagerMetric = record {
+  key : text;
+  count : nat64;
+  value : nat;
+  label : opt text;
+};
+
 type VirtualPriceSnapshot = record {
   timestamp_secs : nat64;
   virtual_price : nat;
@@ -485,6 +501,8 @@ type PoolHealth = record {
 };
 
 service : (ThreePoolInitArgs) -> {
+  cycles_status : () -> (CycleManagerCyclesStatus) query;
+  cycle_manager_metrics : () -> (vec CycleManagerMetric) query;
   health : () -> (text) query;
   swap : (nat8, nat8, nat, nat) -> (variant { Ok : nat; Err : ThreePoolError });
   add_liquidity : (vec nat, nat) -> (variant { Ok : nat; Err : ThreePoolError });

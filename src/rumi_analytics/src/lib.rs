@@ -16,6 +16,150 @@ pub mod pull_schedule;
 
 use crate::storage::{SlimState, SourceCanisterIds};
 
+const PRODUCTION_BACKEND: &str = "tfesu-vyaaa-aaaap-qrd7a-cai";
+const STAGING_BACKEND: &str = "kvg63-wiaaa-aaaao-bbabq-cai";
+const PRODUCTION_TREASURY: &str = "tlg74-oiaaa-aaaap-qrd6a-cai";
+const PRODUCTION_LIQUIDATION_BOT: &str = "nygob-3qaaa-aaaap-qttcq-cai";
+const PRODUCTION_POINTS: &str = "bfnu3-6aaaa-aaaab-qhanq-cai";
+
+fn principal_from_text(text: &str) -> Principal {
+    Principal::from_text(text).expect("hard-coded principal must be valid")
+}
+
+fn cycle_manager_environment(sources: &SourceCanisterIds) -> rumi_cycle_manager::CycleManagerEnvironment {
+    if sources.backend == principal_from_text(PRODUCTION_BACKEND) {
+        rumi_cycle_manager::CycleManagerEnvironment::Production
+    } else if sources.backend == principal_from_text(STAGING_BACKEND) {
+        rumi_cycle_manager::CycleManagerEnvironment::Staging
+    } else {
+        rumi_cycle_manager::CycleManagerEnvironment::Local
+    }
+}
+
+fn push_target(
+    targets: &mut Vec<rumi_cycle_manager::CycleManagerTarget>,
+    canister_id: Principal,
+    name: &str,
+    environment: rumi_cycle_manager::CycleManagerEnvironment,
+    criticality: rumi_cycle_manager::CycleManagerCriticality,
+    low_threshold_cycles: u128,
+    topup_cycles: u128,
+    tags: &[&str],
+) {
+    if canister_id == Principal::anonymous()
+        || targets.iter().any(|target| target.canister_id == canister_id)
+    {
+        return;
+    }
+    targets.push(rumi_cycle_manager::target(
+        canister_id,
+        name,
+        environment,
+        criticality,
+        low_threshold_cycles,
+        topup_cycles,
+        tags,
+    ));
+}
+
+fn build_cycle_manager_targets(self_id: Principal) -> Vec<rumi_cycle_manager::CycleManagerTarget> {
+    use rumi_cycle_manager::{
+        CycleManagerCriticality::{Critical, Important, Standard},
+        CycleManagerEnvironment::Production,
+        DEFAULT_LOW_WATERMARK_CYCLES, DEFAULT_TOPUP_CYCLES,
+    };
+
+    let sources = state::read_state(|s| s.sources.clone());
+    let environment = cycle_manager_environment(&sources);
+    let mut targets = Vec::new();
+
+    push_target(
+        &mut targets,
+        self_id,
+        "rumi_analytics",
+        environment.clone(),
+        Important,
+        DEFAULT_LOW_WATERMARK_CYCLES,
+        DEFAULT_TOPUP_CYCLES,
+        &["analytics", "discovery", "self-report"],
+    );
+    push_target(
+        &mut targets,
+        sources.backend,
+        "rumi_protocol_backend",
+        environment.clone(),
+        Critical,
+        5_000_000_000_000,
+        10_000_000_000_000,
+        &["backend", "vaults", "oracles", "self-report"],
+    );
+    push_target(
+        &mut targets,
+        sources.three_pool,
+        "rumi_3pool",
+        environment.clone(),
+        Critical,
+        3_000_000_000_000,
+        7_000_000_000_000,
+        &["amm", "3pool", "ledger", "self-report"],
+    );
+    push_target(
+        &mut targets,
+        sources.stability_pool,
+        "rumi_stability_pool",
+        environment.clone(),
+        Critical,
+        3_000_000_000_000,
+        7_000_000_000_000,
+        &["stability-pool", "liquidations", "self-report"],
+    );
+    push_target(
+        &mut targets,
+        sources.amm,
+        "rumi_amm",
+        environment.clone(),
+        Important,
+        2_000_000_000_000,
+        5_000_000_000_000,
+        &["amm", "liquidity", "self-report"],
+    );
+
+    if matches!(environment, Production) {
+        push_target(
+            &mut targets,
+            principal_from_text(PRODUCTION_TREASURY),
+            "rumi_treasury",
+            environment.clone(),
+            Critical,
+            3_000_000_000_000,
+            7_000_000_000_000,
+            &["treasury", "self-report"],
+        );
+        push_target(
+            &mut targets,
+            principal_from_text(PRODUCTION_LIQUIDATION_BOT),
+            "liquidation_bot",
+            environment.clone(),
+            Important,
+            2_000_000_000_000,
+            5_000_000_000_000,
+            &["liquidation-bot", "self-report"],
+        );
+        push_target(
+            &mut targets,
+            principal_from_text(PRODUCTION_POINTS),
+            "rumi_points",
+            environment,
+            Standard,
+            DEFAULT_LOW_WATERMARK_CYCLES,
+            DEFAULT_TOPUP_CYCLES,
+            &["points", "self-report"],
+        );
+    }
+
+    targets
+}
+
 #[derive(candid::CandidType, candid::Deserialize)]
 pub struct InitArgs {
     pub admin: Principal,
@@ -66,6 +210,68 @@ fn post_upgrade() {
 #[ic_cdk_macros::query]
 fn ping() -> &'static str {
     "rumi_analytics ok"
+}
+
+#[ic_cdk_macros::query]
+fn cycles_status() -> rumi_cycle_manager::CycleManagerCyclesStatus {
+    rumi_cycle_manager::self_cycles_status(
+        rumi_cycle_manager::DEFAULT_LOW_WATERMARK_CYCLES,
+        true,
+        rumi_cycle_manager::DEFAULT_FREEZE_THRESHOLD_SECS,
+    )
+}
+
+fn build_cycle_manager_metrics(target_count: u64) -> Vec<rumi_cycle_manager::CycleManagerMetric> {
+    let (errors, last_pull_cycle_ns, source_count) = state::read_state(|s| {
+        (
+            s.error_counters.clone(),
+            s.last_pull_cycle_ns.unwrap_or(0),
+            [
+                s.sources.backend,
+                s.sources.icusd_ledger,
+                s.sources.three_pool,
+                s.sources.stability_pool,
+                s.sources.amm,
+            ]
+            .into_iter()
+            .filter(|p| *p != Principal::anonymous())
+            .count() as u64,
+        )
+    });
+    vec![
+        rumi_cycle_manager::metric(
+            "op:pull_cycle:count",
+            if last_pull_cycle_ns > 0 { 1 } else { 0 },
+            last_pull_cycle_ns,
+            Some("last successful pull cycle timestamp in ns"),
+        ),
+        rumi_cycle_manager::metric(
+            "op:source_error:rejects",
+            errors.backend
+                .saturating_add(errors.icusd_ledger)
+                .saturating_add(errors.three_pool)
+                .saturating_add(errors.stability_pool)
+                .saturating_add(errors.amm),
+            0u64,
+            Some("cumulative source pull errors"),
+        ),
+        rumi_cycle_manager::metric(
+            "op:discovery:count",
+            source_count,
+            target_count,
+            Some("configured sources and discoverable self-report targets"),
+        ),
+    ]
+}
+
+#[ic_cdk_macros::query]
+fn cycle_manager_metrics() -> Vec<rumi_cycle_manager::CycleManagerMetric> {
+    build_cycle_manager_metrics(build_cycle_manager_targets(ic_cdk::id()).len() as u64)
+}
+
+#[ic_cdk_macros::query]
+fn cycle_manager_targets() -> Vec<rumi_cycle_manager::CycleManagerTarget> {
+    build_cycle_manager_targets(ic_cdk::id())
 }
 
 #[ic_cdk_macros::query]
@@ -444,3 +650,71 @@ fn reset_error_counters(args: types::ResetErrorCountersArgs) -> Result<(), Strin
 }
 
 ic_cdk::export_candid!();
+
+#[cfg(test)]
+mod cycle_manager_tests {
+    use super::*;
+    use rumi_cycle_manager::{CycleManagerCriticality, CycleManagerTargetKind};
+
+    fn principal(byte: u8) -> Principal {
+        Principal::from_slice(&[byte])
+    }
+
+    #[test]
+    fn cycle_manager_targets_include_self_and_configured_sources() {
+        state::replace_state(SlimState {
+            admin: principal(1),
+            sources: SourceCanisterIds {
+                backend: principal(2),
+                icusd_ledger: principal(3),
+                three_pool: principal(4),
+                stability_pool: principal(5),
+                amm: principal(6),
+            },
+            ..SlimState::default()
+        });
+
+        let targets = build_cycle_manager_targets(principal(9));
+
+        assert!(targets.iter().any(|t| {
+            t.canister_id == principal(9)
+                && t.name == "rumi_analytics"
+                && matches!(t.kind, CycleManagerTargetKind::SelfReport)
+        }));
+        assert!(targets.iter().any(|t| {
+            t.canister_id == principal(2)
+                && t.name == "rumi_protocol_backend"
+                && matches!(t.criticality, CycleManagerCriticality::Critical)
+        }));
+        assert!(targets.iter().any(|t| {
+            t.canister_id == principal(5)
+                && t.name == "rumi_stability_pool"
+                && t.tags.iter().any(|tag| tag == "stability-pool")
+        }));
+    }
+
+    #[test]
+    fn cycle_manager_metrics_report_discovery_target_count() {
+        state::replace_state(SlimState {
+            admin: principal(1),
+            sources: SourceCanisterIds {
+                backend: principal(2),
+                icusd_ledger: principal(3),
+                three_pool: principal(4),
+                stability_pool: principal(5),
+                amm: principal(6),
+            },
+            ..SlimState::default()
+        });
+
+        let self_id = principal(9);
+        let target_count = build_cycle_manager_targets(self_id).len() as u64;
+        let metric = build_cycle_manager_metrics(target_count)
+            .into_iter()
+            .find(|metric| metric.key == "op:discovery:count")
+            .expect("cycle manager target count metric should be present");
+
+        assert_eq!(metric.count, target_count);
+        assert_eq!(metric.value, candid::Nat::from(target_count));
+    }
+}

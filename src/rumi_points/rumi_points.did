@@ -124,8 +124,25 @@ type RevealedSeed = record {
 };
 type SourceStatus = record { tag : nat8; cursor : nat64; canister : principal };
 type Venue = variant { Amm; ThreePool; Vault; StabilityPool };
+type CycleManagerCyclesStatus = record {
+  balance : nat;
+  low_watermark : nat;
+  healthy : bool;
+  freeze_threshold_secs : nat64;
+  stable_memory_bytes : opt nat64;
+  heap_memory_bytes : opt nat64;
+  idle_burn_cycles_per_day : opt nat;
+};
+type CycleManagerMetric = record {
+  key : text;
+  count : nat64;
+  value : nat;
+  label : opt text;
+};
 service : (opt InitArgs) -> {
   add_excluded_principal : (principal) -> (Result);
+  cycle_manager_metrics : () -> (vec CycleManagerMetric) query;
+  cycles_status : () -> (CycleManagerCyclesStatus) query;
   force_epoch_tick : () -> (Result);
   get_asset_ledgers : () -> (vec record { nat8; principal }) query;
   get_epoch_history : (nat32, nat32) -> (vec EpochSummary) query;

@@ -16,6 +16,53 @@ export const idlFactory = ({ IDL }) => {
     'total_events' : IDL.Nat64,
   });
   const Result = IDL.Variant({ 'Ok' : BackfillProgress, 'Err' : IDL.Text });
+  const CycleManagerMetric = IDL.Record({
+    'key' : IDL.Text,
+    'value' : IDL.Nat,
+    'count' : IDL.Nat64,
+    'label' : IDL.Opt(IDL.Text),
+  });
+  const CycleManagerTargetKind = IDL.Variant({
+    'SelfReport' : IDL.Null,
+    'Controlled' : IDL.Null,
+  });
+  const CycleManagerCriticality = IDL.Variant({
+    'Important' : IDL.Null,
+    'Experimental' : IDL.Null,
+    'Critical' : IDL.Null,
+    'Standard' : IDL.Null,
+  });
+  const CycleManagerEnvironment = IDL.Variant({
+    'Local' : IDL.Null,
+    'Production' : IDL.Null,
+    'Test' : IDL.Null,
+    'Archived' : IDL.Null,
+    'Staging' : IDL.Null,
+  });
+  const CycleManagerTarget = IDL.Record({
+    'low_threshold_cycles' : IDL.Nat,
+    'topup_cycles' : IDL.Nat,
+    'owner' : IDL.Opt(IDL.Text),
+    'kind' : CycleManagerTargetKind,
+    'name' : IDL.Text,
+    'tags' : IDL.Vec(IDL.Text),
+    'canister_id' : IDL.Principal,
+    'expected_freeze_threshold_secs' : IDL.Opt(IDL.Nat64),
+    'expected_controllers' : IDL.Vec(IDL.Principal),
+    'criticality' : CycleManagerCriticality,
+    'environment' : CycleManagerEnvironment,
+    'metrics_schema_version' : IDL.Nat32,
+    'project' : IDL.Text,
+  });
+  const CycleManagerCyclesStatus = IDL.Record({
+    'idle_burn_cycles_per_day' : IDL.Opt(IDL.Nat),
+    'stable_memory_bytes' : IDL.Opt(IDL.Nat64),
+    'low_watermark' : IDL.Nat,
+    'balance' : IDL.Nat,
+    'heap_memory_bytes' : IDL.Opt(IDL.Nat64),
+    'healthy' : IDL.Bool,
+    'freeze_threshold_secs' : IDL.Nat64,
+  });
   const LiquidityAction = IDL.Variant({
     'Add' : IDL.Null,
     'Remove' : IDL.Null,
@@ -446,6 +493,17 @@ export const idlFactory = ({ IDL }) => {
   const Result_1 = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text });
   return IDL.Service({
     'admin_backfill_add_margin_events' : IDL.Func([IDL.Nat64], [Result], []),
+    'cycle_manager_metrics' : IDL.Func(
+        [],
+        [IDL.Vec(CycleManagerMetric)],
+        ['query'],
+      ),
+    'cycle_manager_targets' : IDL.Func(
+        [],
+        [IDL.Vec(CycleManagerTarget)],
+        ['query'],
+      ),
+    'cycles_status' : IDL.Func([], [CycleManagerCyclesStatus], ['query']),
     'debug_get_amm_event_counts' : IDL.Func(
         [],
         [IDL.Nat64, IDL.Nat64],

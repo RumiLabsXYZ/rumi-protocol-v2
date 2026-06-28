@@ -1218,6 +1218,42 @@ pub fn get_lp_holders(offset: u64, limit: u64) -> Vec<(Principal, u128)> {
 }
 
 #[query]
+pub fn cycles_status() -> rumi_cycle_manager::CycleManagerCyclesStatus {
+    let operational = read_state(|s| !s.is_paused);
+    rumi_cycle_manager::self_cycles_status(
+        3_000_000_000_000,
+        operational,
+        rumi_cycle_manager::DEFAULT_FREEZE_THRESHOLD_SECS,
+    )
+}
+
+#[query]
+pub fn cycle_manager_metrics() -> Vec<rumi_cycle_manager::CycleManagerMetric> {
+    read_state(|s| {
+        vec![
+            rumi_cycle_manager::metric(
+                "op:lp_holder:count",
+                storage::lp_balance_len() as u64,
+                storage::lp_balance_len() as u64,
+                Some("3pool LP holder records"),
+            ),
+            rumi_cycle_manager::metric(
+                "op:swap:count",
+                storage::swap_v2::len(),
+                storage::swap_v2::len(),
+                Some("cumulative 3pool v2 swaps"),
+            ),
+            rumi_cycle_manager::metric(
+                "ledger:3usd:supply",
+                1,
+                s.lp_total_supply,
+                Some("3USD LP total supply"),
+            ),
+        ]
+    })
+}
+
+#[query]
 pub fn calc_swap(i: u8, j: u8, dx: u128) -> Result<u128, ThreePoolError> {
     let amp = get_current_a();
     let precision_muls = get_precision_muls();
