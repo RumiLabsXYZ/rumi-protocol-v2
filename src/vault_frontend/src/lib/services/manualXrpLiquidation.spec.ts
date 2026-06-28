@@ -2,10 +2,28 @@ import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
+  deserializeManualXrpClaims,
+  groupManualXrpClaimsByVault,
   recoverManualXrpClaimsForVault,
+  removeManualXrpPendingClaim,
+  serializeManualXrpClaims,
   settleManualXrpClaim,
+  upsertManualXrpPendingClaim,
+  upsertManualXrpPendingClaims,
   type ManualXrpPendingClaim,
+  type ManualXrpPendingClaimMap,
 } from './manualXrpLiquidation';
+
+const claimAt = (
+  claimId: string,
+  vaultId: number,
+  overrides: Partial<ManualXrpPendingClaim> = {}
+): ManualXrpPendingClaim => ({
+  claimId,
+  vaultId,
+  payoutAddress: `r${claimId}`,
+  ...overrides,
+});
 
 describe('manual XRP liquidation settlement flow', () => {
   it('settles the exact claim id returned by liquidation with the entered address and tag', async () => {
@@ -111,5 +129,94 @@ describe('manual XRP liquidation settlement flow', () => {
 
     expect(settleCall).toContain('XrpVaultService.settleXrpClaim(claimId, payoutAddress, destinationTag)');
     expect(settleCall).toContain('XrpVaultService.hasOutstandingClaim(claimId)');
+  });
+});
+
+describe('manual XRP pending claim store (keyed by claim id)', () => {
+  it('keeps two distinct claims on the same vault instead of overwriting the first', () => {
+    let map: ManualXrpPendingClaimMap = {};
+    map = upsertManualXrpPendingClaim(map, claimAt('100', 5));
+    map = upsertManualXrpPendingClaim(map, claimAt('101', 5));
+
+    expect(Object.keys(map).sort()).toEqual(['100', '101']);
+    expect(map['100'].vaultId).toBe(5);
+    expect(map['101'].vaultId).toBe(5);
+  });
+
+  it('replaces an existing claim when re-upserted under the same claim id', () => {
+    let map: ManualXrpPendingClaimMap = {};
+    map = upsertManualXrpPendingClaim(map, claimAt('100', 5, { payoutAddress: 'rOld' }));
+    map = upsertManualXrpPendingClaim(map, claimAt('100', 5, { payoutAddress: 'rNew' }));
+
+    expect(Object.keys(map)).toEqual(['100']);
+    expect(map['100'].payoutAddress).toBe('rNew');
+  });
+
+  it('adds every recovered claim for the same vault (ambiguous-recovery path)', () => {
+    const map = upsertManualXrpPendingClaims({}, [claimAt('100', 5), claimAt('101', 5)]);
+
+    expect(Object.keys(map).sort()).toEqual(['100', '101']);
+  });
+
+  it('removes a single claim by id without touching its sibling on the same vault', () => {
+    let map = upsertManualXrpPendingClaims({}, [claimAt('100', 5), claimAt('101', 5)]);
+    map = removeManualXrpPendingClaim(map, '100');
+
+    expect(Object.keys(map)).toEqual(['101']);
+    expect(map['101'].vaultId).toBe(5);
+  });
+
+  it('groups multiple same-vault claims under the vault, sorted by claim id numerically', () => {
+    const map = upsertManualXrpPendingClaims({}, [
+      claimAt('101', 5),
+      claimAt('100', 5),
+      claimAt('50', 9),
+    ]);
+
+    const grouped = groupManualXrpClaimsByVault(map);
+
+    expect(grouped[5].map((claim) => claim.claimId)).toEqual(['100', '101']);
+    expect(grouped[9].map((claim) => claim.claimId)).toEqual(['50']);
+  });
+
+  it('round-trips two same-vault claims through serialize/deserialize', () => {
+    const map = upsertManualXrpPendingClaims({}, [
+      claimAt('100', 5, { destinationTag: 7, drops: 123n }),
+      claimAt('101', 5),
+    ]);
+
+    const restored = deserializeManualXrpClaims(JSON.stringify(serializeManualXrpClaims(map)));
+
+    expect(Object.keys(restored).sort()).toEqual(['100', '101']);
+    expect(restored['100'].vaultId).toBe(5);
+    expect(restored['100'].destinationTag).toBe(7);
+    expect(restored['100'].drops).toBe(123n);
+    expect(restored['101'].vaultId).toBe(5);
+  });
+
+  it('migrates a legacy vault-id-keyed store to claim-id keys', () => {
+    const legacy = JSON.stringify({
+      '5': { claimId: '100', vaultId: 5, payoutAddress: 'rA' },
+    });
+
+    const restored = deserializeManualXrpClaims(legacy);
+
+    expect(Object.keys(restored)).toEqual(['100']);
+    expect(restored['100'].vaultId).toBe(5);
+  });
+
+  it('drops malformed persisted entries and tolerates missing or invalid input', () => {
+    expect(deserializeManualXrpClaims(null)).toEqual({});
+    expect(deserializeManualXrpClaims('not json')).toEqual({});
+
+    const restored = deserializeManualXrpClaims(
+      JSON.stringify({
+        good: { claimId: '100', vaultId: 5, payoutAddress: 'rA' },
+        noAddress: { claimId: '101', vaultId: 5 },
+        noClaimId: { vaultId: 5, payoutAddress: 'rB' },
+      })
+    );
+
+    expect(Object.keys(restored)).toEqual(['100']);
   });
 });
