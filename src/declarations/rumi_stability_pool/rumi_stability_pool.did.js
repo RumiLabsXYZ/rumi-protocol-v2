@@ -24,10 +24,12 @@ export const idlFactory = ({ IDL }) => {
       'target' : IDL.Text,
     }),
     'PayoutAddressRequired' : IDL.Record({ 'collateral' : IDL.Principal }),
+    'XrpClaimStillOutstanding' : IDL.Record({ 'claim_id' : IDL.Nat64 }),
     'LiquidationFailed' : IDL.Record({
       'vault_id' : IDL.Nat64,
       'reason' : IDL.Text,
     }),
+    'XrpClaimStatusCheckFailed' : IDL.Record({ 'reason' : IDL.Text }),
     'SystemBusy' : IDL.Null,
     'AlreadyOptedIn' : IDL.Record({ 'collateral' : IDL.Principal }),
     'TokenNotAccepted' : IDL.Record({ 'ledger' : IDL.Principal }),
@@ -85,6 +87,15 @@ export const idlFactory = ({ IDL }) => {
     'collateral_gained' : IDL.Nat64,
     'timestamp' : IDL.Nat64,
     'collateral_type' : IDL.Principal,
+  });
+  const NativeXrpPendingPayout = IDL.Record({
+    'claim_id' : IDL.Nat64,
+    'vault_id' : IDL.Nat64,
+    'destination_tag' : IDL.Opt(IDL.Nat32),
+    'created_at_ns' : IDL.Nat64,
+    'collateral_type' : IDL.Principal,
+    'payout_address' : IDL.Text,
+    'drops' : IDL.Nat64,
   });
   const ChainSpAbsorbIntentStatus = IDL.Variant({
     'BackendRejected' : IDL.Null,
@@ -243,6 +254,9 @@ export const idlFactory = ({ IDL }) => {
     'total_interest_earned_e8s' : IDL.Nat64,
     'collateral_gains' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
     'stablecoin_balances' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
+    'native_payout_destination_tags' : IDL.Opt(
+      IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat32))
+    ),
     'cfx_claims' : IDL.Opt(IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat))),
     'total_claimed_gains' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
     'native_payout_addresses' : IDL.Opt(
@@ -345,6 +359,11 @@ export const idlFactory = ({ IDL }) => {
     'max_liquidations_per_batch' : IDL.Nat64,
   });
   return IDL.Service({
+    'ack_native_xrp_payout_settled' : IDL.Func(
+        [IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
+        [],
+      ),
     'admin_correct_balance' : IDL.Func(
         [IDL.Principal, IDL.Principal, IDL.Nat64],
         [IDL.Variant({ 'Ok' : IDL.Text, 'Err' : StabilityPoolError })],
@@ -430,6 +449,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Vec(PoolLiquidationRecord)],
         ['query'],
       ),
+    'get_my_native_xrp_payouts' : IDL.Func(
+        [],
+        [IDL.Vec(NativeXrpPendingPayout)],
+        ['query'],
+      ),
     'get_pending_chain_absorbs' : IDL.Func(
         [],
         [IDL.Vec(ChainSpAbsorbIntent)],
@@ -489,6 +513,11 @@ export const idlFactory = ({ IDL }) => {
       ),
     'opt_in_native_collateral' : IDL.Func(
         [IDL.Principal, IDL.Text],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
+        [],
+      ),
+    'opt_in_native_collateral_with_tag' : IDL.Func(
+        [IDL.Principal, IDL.Text, IDL.Opt(IDL.Nat32)],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
         [],
       ),

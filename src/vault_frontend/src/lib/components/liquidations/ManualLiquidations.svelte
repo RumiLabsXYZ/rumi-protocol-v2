@@ -10,13 +10,31 @@
   import { CONFIG, CANISTER_IDS } from "$lib/config";
   import { collateralStore } from '$lib/stores/collateralStore';
   import { getLiquidationCR, getMinimumCR } from '$lib/protocol';
+  import { XrpVaultService } from '$lib/services/xrpVaultService';
+  import {
+    isNativeXrpPrincipal,
+    validateXrpPayoutInput,
+    type XrpClaimId,
+  } from '$lib/services/xrpPayoutHelpers';
+  import {
+    recoverManualXrpClaimsForVault,
+    settleManualXrpClaim,
+    type ManualXrpPendingClaim,
+  } from '$lib/services/manualXrpLiquidation';
 
   const ANON_PRINCIPAL = '2vxsx-fae';
+  const MANUAL_XRP_PENDING_CLAIMS_PREFIX = 'rumi_manual_xrp_pending_claims:';
+
+  type StoredManualXrpPendingClaim = Omit<ManualXrpPendingClaim, 'drops'> & { drops?: string };
 
   function resolveCollateralPrincipal(vault: CandidVault): string {
-    const raw = vault.collateral_type;
+    const raw: unknown = vault.collateral_type;
     if (!raw) return CANISTER_IDS.ICP_LEDGER;
-    const text = typeof raw === 'string' ? raw : raw.toText?.() || CANISTER_IDS.ICP_LEDGER;
+    const text = typeof raw === 'string'
+      ? raw
+      : typeof raw === 'object' && 'toText' in raw && typeof raw.toText === 'function'
+        ? raw.toText()
+        : CANISTER_IDS.ICP_LEDGER;
     return text === ANON_PRINCIPAL ? CANISTER_IDS.ICP_LEDGER : text;
   }
 
@@ -101,6 +119,11 @@
   let isApprovingAllowance = false;
   let liquidationAmounts: { [vaultId: number]: string } = {};
   let liquidationTokens: { [vaultId: number]: 'icUSD' | 'CKUSDT' | 'CKUSDC' } = {};
+  let xrpPayoutAddresses: Record<number, string> = {};
+  let xrpDestinationTags: Record<number, string> = {};
+  let pendingManualXrpClaims: Record<number, ManualXrpPendingClaim> = {};
+  let retryingXrpClaimId: XrpClaimId | null = null;
+  let loadedPendingXrpClaimsOwner: string | null = null;
   let otherVaultsPage = 0;
   let otherVaultsPageSize = 25;
 
@@ -111,6 +134,11 @@
   }
 
   $: isConnected = $wallet.isConnected;
+  $: manualXrpClaimsOwner = $wallet.principal?.toText() ?? null;
+  $: if (manualXrpClaimsOwner !== loadedPendingXrpClaimsOwner) {
+    loadedPendingXrpClaimsOwner = manualXrpClaimsOwner;
+    pendingManualXrpClaims = manualXrpClaimsOwner ? loadPersistedManualXrpClaims(manualXrpClaimsOwner) : {};
+  }
 
   $: walletIcusd = $wallet.tokenBalances?.ICUSD
     ? parseFloat($wallet.tokenBalances.ICUSD.formatted) : 0;
@@ -146,6 +174,10 @@
     });
   })();
 
+  $: orphanedPendingManualXrpClaims = Object.values(pendingManualXrpClaims)
+    .filter((claim) => claim.vaultId !== undefined && !sortedVaults.some((vault) => vault.vault_id === claim.vaultId))
+    .sort((a, b) => Number(a.vaultId ?? 0) - Number(b.vaultId ?? 0));
+
   function calculateCollateralRatio(vault: CandidVault): number {
     const ctPrincipal = resolveCollateralPrincipal(vault);
     const ctInfo = collateralStore.getCollateralInfo(ctPrincipal);
@@ -180,6 +212,11 @@
     const collateralAmount = Number(vault.collateral_amount || vault.icp_margin_amount || 0) / Math.pow(10, decimals);
     const ledgerFee = ctInfo?.ledgerFee ? ctInfo.ledgerFee / Math.pow(10, decimals) : 0.0001;
     return { ctPrincipal, decimals, price, symbol, collateralAmount, ledgerFee };
+  }
+
+  function isNativeXrpVault(vault: CandidVault): boolean {
+    const ci = getVaultCollateralInfo(vault);
+    return isNativeXrpPrincipal(ci.ctPrincipal);
   }
 
   function getMaxLiquidation(vault: CandidVault): number {
@@ -240,14 +277,127 @@
   function normalizeVault(vault: CandidVault): CandidVault {
     return {
       ...vault,
-      original_icp_margin_amount: vault.icp_margin_amount,
-      original_borrowed_icusd_amount: vault.borrowed_icusd_amount,
       icp_margin_amount: Number(vault.icp_margin_amount || 0),
       collateral_amount: Number(vault.collateral_amount || vault.icp_margin_amount || 0),
       borrowed_icusd_amount: Number(vault.borrowed_icusd_amount || 0),
       vault_id: Number(vault.vault_id || 0),
       owner: vault.owner.toString()
     };
+  }
+
+  function isAmbiguousLiquidationError(message: string): boolean {
+    const lower = message.toLowerCase();
+    return lower.includes('_arr') ||
+      lower.includes('network') ||
+      lower.includes('timeout') ||
+      lower.includes('unknown') ||
+      lower.includes('connection') ||
+      lower.includes('signature') ||
+      lower.includes('signer');
+  }
+
+  function manualXrpPendingStorageKey(owner: string | null): string | null {
+    return owner ? `${MANUAL_XRP_PENDING_CLAIMS_PREFIX}${owner}` : null;
+  }
+
+  function loadPersistedManualXrpClaims(owner: string): Record<number, ManualXrpPendingClaim> {
+    if (typeof localStorage === 'undefined') return {};
+    const key = manualXrpPendingStorageKey(owner);
+    if (!key) return {};
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) return {};
+      const parsed = JSON.parse(raw) as Record<string, StoredManualXrpPendingClaim>;
+      return Object.fromEntries(
+        Object.entries(parsed).flatMap(([vaultIdText, claim]) => {
+          const vaultId = Number(vaultIdText);
+          if (!Number.isSafeInteger(vaultId) || vaultId < 0 || !claim?.claimId || !claim.payoutAddress) {
+            return [];
+          }
+          return [[vaultId, {
+            ...claim,
+            vaultId,
+            claimId: String(claim.claimId),
+            drops: claim.drops !== undefined ? BigInt(claim.drops) : undefined,
+          } satisfies ManualXrpPendingClaim]];
+        })
+      );
+    } catch {
+      return {};
+    }
+  }
+
+  function persistManualXrpClaims() {
+    if (typeof localStorage === 'undefined') return;
+    const key = manualXrpPendingStorageKey(manualXrpClaimsOwner);
+    if (!key) return;
+    const rows = Object.fromEntries(
+      Object.entries(pendingManualXrpClaims).map(([vaultId, claim]) => [
+        vaultId,
+        {
+          ...claim,
+          drops: claim.drops !== undefined ? claim.drops.toString() : undefined,
+        } satisfies StoredManualXrpPendingClaim,
+      ])
+    );
+    if (Object.keys(rows).length === 0) {
+      localStorage.removeItem(key);
+      return;
+    }
+    localStorage.setItem(key, JSON.stringify(rows));
+  }
+
+  function addPendingManualXrpClaim(vaultId: number, pendingClaim: ManualXrpPendingClaim) {
+    pendingManualXrpClaims = { ...pendingManualXrpClaims, [vaultId]: pendingClaim };
+    persistManualXrpClaims();
+  }
+
+  function clearPendingManualXrpClaim(vaultId: number) {
+    const next = { ...pendingManualXrpClaims };
+    delete next[vaultId];
+    pendingManualXrpClaims = next;
+    persistManualXrpClaims();
+  }
+
+  async function recoverXrpClaimsForVault(vault: CandidVault): Promise<ManualXrpPendingClaim[]> {
+    const validation = validateXrpPayoutInput(
+      xrpPayoutAddresses[vault.vault_id] ?? '',
+      xrpDestinationTags[vault.vault_id] ?? ''
+    );
+    if (!validation.ok) return [];
+
+    const claims = await recoverManualXrpClaimsForVault(vault.vault_id, () =>
+      XrpVaultService.getMyClaims({ allowSigner: true })
+    );
+    return claims.map((claim) => ({
+      claimId: String(claim.claimId),
+      vaultId: vault.vault_id,
+      payoutAddress: validation.address ?? '',
+      destinationTag: validation.destinationTag,
+      drops: claim.drops,
+    }));
+  }
+
+  async function settlePendingManualXrpClaim(vaultId: number, pendingClaim: ManualXrpPendingClaim) {
+    retryingXrpClaimId = pendingClaim.claimId;
+    try {
+      const settlement = await settleManualXrpClaim(
+        pendingClaim,
+        (claimId, payoutAddress, destinationTag) =>
+          XrpVaultService.settleXrpClaim(claimId, payoutAddress, destinationTag),
+        (claimId) => XrpVaultService.hasOutstandingClaim(claimId)
+      );
+      liquidationSuccess = settlement.message;
+      liquidationError = '';
+      if (settlement.status === 'settled') {
+        clearPendingManualXrpClaim(vaultId);
+        await loadLiquidatableVaults();
+      } else {
+        addPendingManualXrpClaim(vaultId, settlement.pendingClaim);
+      }
+    } finally {
+      retryingXrpClaimId = null;
+    }
   }
 
   async function loadLiquidatableVaults() {
@@ -301,6 +451,14 @@
     const inputAmount = getInputVal(vault);
     if (inputAmount <= 0) { liquidationError = "Enter an amount"; return; }
     if (isOverMax(vault)) { liquidationError = "Amount exceeds maximum"; return; }
+    const isXrp = isNativeXrpVault(vault);
+    const xrpPayout = isXrp
+      ? validateXrpPayoutInput(xrpPayoutAddresses[vault.vault_id] ?? '', xrpDestinationTags[vault.vault_id] ?? '')
+      : null;
+    if (xrpPayout && !xrpPayout.ok) {
+      liquidationError = xrpPayout.error ?? 'Enter XRP payout details';
+      return;
+    }
 
     const token = getLiqToken(vault.vault_id);
     const vaultDebt = getVaultDebt(vault);
@@ -342,20 +500,61 @@
 
       if (result.success) {
         const seizure = calculateSeizure(vault, inputAmount);
-        liquidationSuccess = `Liquidated vault #${vault.vault_id}. Paid ${formatStableTx(inputAmount)} ${token}, received ${formatNumber(seizure.collateralSeized, 4)} ${seizure.symbol}.`;
-        liquidationAmounts[vault.vault_id] = '';
-        await loadLiquidatableVaults();
+        if (isXrp && xrpPayout?.ok) {
+          if (result.xrpClaimId) {
+            const pendingClaim: ManualXrpPendingClaim = {
+              claimId: result.xrpClaimId,
+              vaultId: vault.vault_id,
+              payoutAddress: xrpPayout.address ?? '',
+              destinationTag: xrpPayout.destinationTag,
+            };
+            await settlePendingManualXrpClaim(vault.vault_id, pendingClaim);
+            liquidationAmounts[vault.vault_id] = '';
+          } else {
+            const recovered = await recoverXrpClaimsForVault(vault);
+            if (recovered.length > 0) {
+              addPendingManualXrpClaim(vault.vault_id, recovered[0]);
+              liquidationSuccess = `Liquidation accepted for vault #${vault.vault_id}. XRP claim #${recovered[0].claimId} remains outstanding and can be settled from this screen.`;
+              liquidationAmounts[vault.vault_id] = '';
+            } else {
+              liquidationSuccess = `Liquidation accepted for vault #${vault.vault_id}. XRP settlement claim is being indexed; refresh claims and retry settlement from this screen.`;
+            }
+            await loadLiquidatableVaults();
+          }
+        } else {
+          liquidationSuccess = `Liquidated vault #${vault.vault_id}. Paid ${formatStableTx(inputAmount)} ${token}, received ${formatNumber(seizure.collateralSeized, 4)} ${seizure.symbol}.`;
+          liquidationAmounts[vault.vault_id] = '';
+          await loadLiquidatableVaults();
+        }
       } else {
         const msg = result.error || "Liquidation failed";
         if (msg.includes('Click Liquidate again')) {
           liquidationSuccess = 'Approved! Click Liquidate again to complete.';
+        } else if (isXrp && isAmbiguousLiquidationError(msg)) {
+          const recovered = await recoverXrpClaimsForVault(vault);
+          if (recovered.length > 0) {
+            addPendingManualXrpClaim(vault.vault_id, recovered[0]);
+            liquidationSuccess = `Liquidation may have landed for vault #${vault.vault_id}. XRP claim #${recovered[0].claimId} remains outstanding and can be settled from this screen.`;
+          } else {
+            liquidationError = `${msg}. No matching XRP claim is visible yet; refresh and retry before submitting another liquidation.`;
+          }
         } else {
           liquidationError = msg;
         }
       }
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      liquidationError = msg.includes('underflow') ? "Vault state changed. Try again." : msg;
+      if (isXrp && isAmbiguousLiquidationError(msg)) {
+        const recovered = await recoverXrpClaimsForVault(vault);
+        if (recovered.length > 0) {
+          addPendingManualXrpClaim(vault.vault_id, recovered[0]);
+          liquidationSuccess = `Liquidation may have landed for vault #${vault.vault_id}. XRP claim #${recovered[0].claimId} remains outstanding and can be settled from this screen.`;
+        } else {
+          liquidationError = `${msg}. No matching XRP claim is visible yet; refresh and retry before submitting another liquidation.`;
+        }
+      } else {
+        liquidationError = msg.includes('underflow') ? "Vault state changed. Try again." : msg;
+      }
     } finally { processingVaultId = null; }
   }
 
@@ -417,6 +616,28 @@
   {#if liquidationError}<div class="msg msg-error">{liquidationError}</div>{/if}
   {#if liquidationSuccess}<div class="msg msg-success">{liquidationSuccess}</div>{/if}
 
+  {#if orphanedPendingManualXrpClaims.length > 0}
+    <div class="xrp-orphaned-pending">
+      {#each orphanedPendingManualXrpClaims as pendingXrpClaim (pendingXrpClaim.claimId)}
+        <div class="xrp-pending-claim">
+          <span>
+            XRP claim #{pendingXrpClaim.claimId} remains outstanding.
+            <span class="xrp-pending-dest">
+              Vault #{pendingXrpClaim.vaultId} · settle to {pendingXrpClaim.payoutAddress}{pendingXrpClaim.destinationTag !== undefined ? ` · tag ${pendingXrpClaim.destinationTag}` : ''}
+            </span>
+          </span>
+          <button
+            class="xrp-retry-btn"
+            on:click={() => settlePendingManualXrpClaim(Number(pendingXrpClaim.vaultId), pendingXrpClaim)}
+            disabled={retryingXrpClaimId !== null || processingVaultId !== null}
+          >
+            {retryingXrpClaimId === pendingXrpClaim.claimId ? 'Settling…' : 'Retry'}
+          </button>
+        </div>
+      {/each}
+    </div>
+  {/if}
+
   {#if isLoading && liquidatableVaults.length === 0}
     <div class="loading-state"><div class="spinner"></div></div>
   {:else if sortedVaults.length === 0}
@@ -436,6 +657,8 @@
         {@const overMax = inputVal > 0 && maxLiq > 0 && inputVal > maxLiq}
         {@const s = inputVal > 0 && !overMax ? calculateSeizure(vault, inputVal) : null}
         {@const ci = getVaultCollateralInfo(vault)}
+        {@const isXrp = isNativeXrpPrincipal(ci.ctPrincipal)}
+        {@const pendingXrpClaim = pendingManualXrpClaims[vault.vault_id]}
 
         <div class="liq-card">
           <div class="card-body">
@@ -458,12 +681,54 @@
 
             <div class="card-center">
               {#if s}
-                <span class="outcome-label">You receive</span>
-                <span class="outcome-line">{formatNumber(s.collateralSeized, 4)} {s.symbol} <span class="outcome-usd">${formatNumber(s.usdValue, 2)}</span></span>
+                <span class="outcome-label">{isXrp ? 'XRP claim' : 'You receive'}</span>
+                <span class="outcome-line">
+                  {formatNumber(s.collateralSeized, 4)} {s.symbol}
+                  <span class="outcome-usd">${formatNumber(s.usdValue, 2)}</span>
+                  {#if isXrp}
+                    <span class="outcome-note">settles after claim submission</span>
+                  {/if}
+                </span>
               {/if}
             </div>
 
             <div class="card-right">
+              {#if isXrp}
+                <div class="xrp-payout-fields">
+                  <label class="xrp-field-label" for={`xrp-address-${vault.vault_id}`}>XRP payout address</label>
+                  <input
+                    id={`xrp-address-${vault.vault_id}`}
+                    class="xrp-payout-input"
+                    type="text"
+                    placeholder="XRPL address"
+                    bind:value={xrpPayoutAddresses[vault.vault_id]}
+                    disabled={isProcessingThis}
+                  />
+                  <input
+                    class="xrp-tag-input"
+                    type="text"
+                    inputmode="numeric"
+                    placeholder="Destination tag (optional)"
+                    bind:value={xrpDestinationTags[vault.vault_id]}
+                    disabled={isProcessingThis}
+                  />
+                </div>
+                {#if pendingXrpClaim}
+                  <div class="xrp-pending-claim">
+                    <span>
+                      XRP claim #{pendingXrpClaim.claimId} remains outstanding.
+                      <span class="xrp-pending-dest">Settle to {pendingXrpClaim.payoutAddress}{pendingXrpClaim.destinationTag !== undefined ? ` · tag ${pendingXrpClaim.destinationTag}` : ''}</span>
+                    </span>
+                    <button
+                      class="xrp-retry-btn"
+                      on:click={() => settlePendingManualXrpClaim(vault.vault_id, pendingXrpClaim)}
+                      disabled={retryingXrpClaimId !== null || isProcessingThis}
+                    >
+                      {retryingXrpClaimId === pendingXrpClaim.claimId ? 'Settling…' : 'Retry'}
+                    </button>
+                  </div>
+                {/if}
+              {/if}
               <div class="input-label-row">
                 <span class="input-label">Amount to liquidate</span>
                 {#if maxLiq > 0}
@@ -491,7 +756,7 @@
                 </div>
                 <button class="btn-primary btn-sm btn-liquidate"
                   on:click={() => handleLiquidate(vault)}
-                  disabled={!isConnected || processingVaultId !== null || inputVal <= 0}>
+                  disabled={!isConnected || processingVaultId !== null || inputVal <= 0 || (isXrp && !(xrpPayoutAddresses[vault.vault_id] ?? '').trim())}>
                   {#if isProcessingThis}
                     {isApprovingAllowance ? 'Approving…' : 'Liquidating…'}
                   {:else}
@@ -616,6 +881,84 @@
   .empty-text { font-size: 0.875rem; color: var(--rumi-text-secondary); }
 
   .liq-list { display: flex; flex-direction: column; gap: 0.625rem; }
+
+  .outcome-note {
+    display: block;
+    margin-top: 0.125rem;
+    font-size: 0.625rem;
+    color: var(--rumi-text-muted);
+    font-weight: 500;
+  }
+
+  .xrp-payout-fields {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 9rem);
+    gap: 0.375rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .xrp-field-label {
+    grid-column: 1 / -1;
+    font-size: 0.6875rem;
+    color: var(--rumi-text-secondary);
+  }
+
+  .xrp-payout-input,
+  .xrp-tag-input {
+    min-width: 0;
+    height: 2rem;
+    padding: 0 0.5rem;
+    background: var(--rumi-bg-surface2);
+    border: 1px solid var(--rumi-border);
+    border-radius: 0.375rem;
+    color: var(--rumi-text-primary);
+    font-size: 0.75rem;
+  }
+
+  .xrp-pending-claim {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+    padding: 0.5rem;
+    background: rgba(167,139,250,0.08);
+    border: 1px solid rgba(167,139,250,0.18);
+    border-radius: 0.375rem;
+    color: #c4b5fd;
+    font-size: 0.6875rem;
+    line-height: 1.35;
+  }
+
+  .xrp-orphaned-pending {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .xrp-pending-dest {
+    display: block;
+    overflow-wrap: anywhere;
+    color: var(--rumi-text-secondary);
+  }
+
+  .xrp-retry-btn {
+    flex-shrink: 0;
+    border: 1px solid var(--rumi-border-teal);
+    border-radius: 0.375rem;
+    background: var(--rumi-teal-dim);
+    color: var(--rumi-teal);
+    font-size: 0.6875rem;
+    font-weight: 700;
+    padding: 0.3125rem 0.5rem;
+    cursor: pointer;
+  }
+
+  .xrp-retry-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
 
   .liq-card {
     background: var(--rumi-bg-surface1);

@@ -170,6 +170,15 @@ export interface LiquidationResult {
   'success' : boolean,
   'collateral_type' : Principal,
 }
+export interface NativeXrpPendingPayout {
+  'claim_id' : bigint,
+  'vault_id' : bigint,
+  'destination_tag' : [] | [number],
+  'created_at_ns' : bigint,
+  'collateral_type' : Principal,
+  'payout_address' : string,
+  'drops' : bigint,
+}
 export interface PendingRefund {
   'id' : bigint,
   'user' : Principal,
@@ -273,7 +282,9 @@ export type StabilityPoolError = {
   { 'Unauthorized' : null } |
   { 'InterCanisterCallFailed' : { 'method' : string, 'target' : string } } |
   { 'PayoutAddressRequired' : { 'collateral' : Principal } } |
+  { 'XrpClaimStillOutstanding' : { 'claim_id' : bigint } } |
   { 'LiquidationFailed' : { 'vault_id' : bigint, 'reason' : string } } |
+  { 'XrpClaimStatusCheckFailed' : { 'reason' : string } } |
   { 'SystemBusy' : null } |
   { 'AlreadyOptedIn' : { 'collateral' : Principal } } |
   { 'TokenNotAccepted' : { 'ledger' : Principal } } |
@@ -309,6 +320,7 @@ export interface UserStabilityPosition {
   'total_interest_earned_e8s' : bigint,
   'collateral_gains' : Array<[Principal, bigint]>,
   'stablecoin_balances' : Array<[Principal, bigint]>,
+  'native_payout_destination_tags' : [] | [Array<[Principal, number]>],
   'cfx_claims' : [] | [Array<[Principal, bigint]>],
   'total_claimed_gains' : Array<[Principal, bigint]>,
   'native_payout_addresses' : [] | [Array<[Principal, string]>],
@@ -316,6 +328,11 @@ export interface UserStabilityPosition {
   'opted_out_collateral' : Array<Principal>,
 }
 export interface _SERVICE {
+  'ack_native_xrp_payout_settled' : ActorMethod<
+    [bigint],
+    { 'Ok' : null } |
+      { 'Err' : StabilityPoolError }
+  >,
   'admin_correct_balance' : ActorMethod<
     [Principal, Principal, bigint],
     { 'Ok' : string } |
@@ -378,6 +395,7 @@ export interface _SERVICE {
     [[] | [bigint]],
     Array<PoolLiquidationRecord>
   >,
+  'get_my_native_xrp_payouts' : ActorMethod<[], Array<NativeXrpPendingPayout>>,
   'get_pending_chain_absorbs' : ActorMethod<[], Array<ChainSpAbsorbIntent>>,
   'get_pending_refunds' : ActorMethod<[[] | [Principal]], Array<PendingRefund>>,
   'get_pool_event_count' : ActorMethod<[], bigint>,
@@ -413,6 +431,11 @@ export interface _SERVICE {
   >,
   'opt_in_native_collateral' : ActorMethod<
     [Principal, string],
+    { 'Ok' : null } |
+      { 'Err' : StabilityPoolError }
+  >,
+  'opt_in_native_collateral_with_tag' : ActorMethod<
+    [Principal, string, [] | [number]],
     { 'Ok' : null } |
       { 'Err' : StabilityPoolError }
   >,

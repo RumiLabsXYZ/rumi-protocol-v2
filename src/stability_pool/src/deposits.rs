@@ -372,6 +372,8 @@ pub async fn claim_collateral(collateral_ledger: Principal) -> Result<u64, Stabi
         return Err(StabilityPoolError::EmergencyPaused);
     }
 
+    read_state(|s| s.ensure_icrc_claimable_collateral(&collateral_ledger))?;
+
     // Read and deduct gains atomically BEFORE transfer.
     // mark_gains_claimed uses saturating_sub and cleans up zero entries.
     let gains = mutate_state(|s| {
@@ -541,7 +543,7 @@ pub async fn claim_all_collateral() -> Result<BTreeMap<Principal, u64>, Stabilit
         return Err(StabilityPoolError::EmergencyPaused);
     }
 
-    let all_gains = read_state(|s| s.get_collateral_gains(&caller));
+    let all_gains = read_state(|s| s.get_claimable_icrc_collateral_gains(&caller));
     let nonzero_gains: BTreeMap<Principal, u64> =
         all_gains.into_iter().filter(|(_, v)| *v > 0).collect();
 

@@ -18,7 +18,7 @@ use crate::types::*;
 const CHAIN_ABSORB_AUTO_TIMER_POLL_SECONDS: u64 = 60;
 
 pub(crate) fn pool_balance_mutation_blocked() -> bool {
-    crate::pool_guard::liquidation_in_progress() || read_state(|s| s.has_pending_chain_absorbs())
+    crate::pool_guard::liquidation_in_progress() || read_state(|s| s.has_pending_pool_absorbs())
 }
 
 pub(crate) fn ensure_pool_balance_mutation_allowed() -> Result<(), StabilityPoolError> {
@@ -305,18 +305,72 @@ pub fn opt_in_native_collateral(
     collateral_type: Principal,
     payout_address: String,
 ) -> Result<(), StabilityPoolError> {
+    opt_in_native_collateral_with_tag(collateral_type, payout_address, None)
+}
+
+#[update]
+pub fn opt_in_native_collateral_with_tag(
+    collateral_type: Principal,
+    payout_address: String,
+    destination_tag: Option<u32>,
+) -> Result<(), StabilityPoolError> {
     // SP-102 / AR-S-002: see opt_out_collateral.
-    if crate::pool_guard::liquidation_in_progress() {
+    if pool_balance_mutation_blocked() {
         return Err(StabilityPoolError::SystemBusy);
     }
     let caller = ic_cdk::api::caller();
     let result = mutate_state(|s| {
-        s.opt_in_native_collateral(&caller, collateral_type, payout_address)
+        s.opt_in_native_collateral_with_tag(
+            &caller,
+            collateral_type,
+            payout_address,
+            destination_tag,
+        )
     });
     if result.is_ok() {
         mutate_state(|s| s.push_event(caller, PoolEventType::OptInCollateral { collateral_type }));
     }
     result
+}
+
+#[query]
+pub fn get_my_native_xrp_payouts() -> Vec<NativeXrpPendingPayout> {
+    let caller = ic_cdk::api::caller();
+    read_state(|s| s.native_xrp_pending_payouts_for(&caller))
+}
+
+#[update]
+pub async fn ack_native_xrp_payout_settled(claim_id: u64) -> Result<(), StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    let protocol_canister_id = read_state(|s| {
+        s.native_xrp_pending_payout_for(&caller, claim_id)
+            .map(|_| s.protocol_canister_id)
+    })
+    .ok_or(StabilityPoolError::RefundClaimNotFound)?;
+
+    ensure_backend_xrp_claim_absent(protocol_canister_id, claim_id, caller).await?;
+    mutate_state(|s| s.ack_native_xrp_payout_settled(&caller, claim_id))
+}
+
+async fn ensure_backend_xrp_claim_absent(
+    protocol_canister_id: Principal,
+    claim_id: u64,
+    claimant: Principal,
+) -> Result<(), StabilityPoolError> {
+    let method = "stability_pool_xrp_claim_outstanding";
+    let response: Result<(Result<bool, rumi_protocol_backend::ProtocolError>,), _> =
+        ic_cdk::call(protocol_canister_id, method, (claim_id, claimant)).await;
+
+    match response {
+        Ok((Ok(false),)) => Ok(()),
+        Ok((Ok(true),)) => Err(StabilityPoolError::XrpClaimStillOutstanding { claim_id }),
+        Ok((Err(err),)) => Err(StabilityPoolError::XrpClaimStatusCheckFailed {
+            reason: format!("{err:?}"),
+        }),
+        Err((code, message)) => Err(StabilityPoolError::XrpClaimStatusCheckFailed {
+            reason: format!("{method} rejected by {protocol_canister_id}: {code:?}: {message}"),
+        }),
+    }
 }
 
 // ─── Liquidation (Push + Fallback) ───
@@ -756,6 +810,36 @@ pub fn icrc21_canister_call_consent_message(
                     "Opt in to native collateral liquidations with a payout address.".to_string()
                 }
             }
+        }
+        "opt_in_native_collateral_with_tag" => {
+            match candid::decode_args::<(Principal, String, Option<u32>)>(&request.arg) {
+                Ok((collateral_ledger, payout_address, destination_tag)) => {
+                    let symbol = read_state(|s| {
+                        s.collateral_registry
+                            .get(&collateral_ledger)
+                            .map(|c| c.symbol.clone())
+                            .unwrap_or_else(|| format!("collateral {}", collateral_ledger))
+                    });
+                    let tag_text = destination_tag
+                        .map(|tag| format!(" with destination tag `{}`", tag))
+                        .unwrap_or_default();
+                    format!(
+                        "## Opt In to Native Collateral\n\n\
+                         You are opting in to receive **{}** from future liquidations. \
+                         Payouts will be sent to XRP Ledger address `{}`{}.",
+                        symbol, payout_address, tag_text
+                    )
+                }
+                Err(_) => {
+                    "Opt in to native collateral liquidations with a payout address and optional destination tag."
+                        .to_string()
+                }
+            }
+        }
+        "ack_native_xrp_payout_settled" => {
+            "## Clear Settled XRP Payout\n\n\
+             You are clearing a settled native XRP payout reminder from the Stability Pool."
+                .to_string()
         }
         "deposit_as_3usd" => {
             match candid::decode_args::<(Principal, u64)>(&request.arg) {

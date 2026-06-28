@@ -1004,7 +1004,9 @@ type Result_19 = variant {
   Err : ProtocolError;
 };
 type Result_2 = variant { Ok : text; Err : ProtocolError };
-type Result_20 = variant { Ok : nat32; Err : ProtocolError };
+type Result_20 = variant { Ok : XrpSpAbsorbResult; Err : ProtocolError };
+type Result_21 = variant { Ok : XrpSpAbsorbPreflight; Err : ProtocolError };
+type Result_22 = variant { Ok : nat32; Err : ProtocolError };
 type Result_3 = variant { Ok : SuccessWithFee; Err : ProtocolError };
 type Result_4 = variant { Ok : BotLiquidationResult; Err : ProtocolError };
 type Result_5 = variant { Ok : opt nat64; Err : ProtocolError };
@@ -1042,6 +1044,7 @@ type SuccessWithFee = record {
   fee_amount_paid : nat64;
   stable_pulled_e6s : opt nat64;
   collateral_amount_received : opt nat64;
+  xrp_claim_id : opt nat64;
 };
 type SupplyAudit = record { total_e8s : nat; per_chain : vec SupplyAuditEntry };
 type SupplyAuditEntry = record {
@@ -1135,10 +1138,12 @@ type XrpClaim = record {
   custody_nonce : nat64;
   claimant : principal;
   created_at_ns : nat64;
+  quarantine_reason : opt text;
   custody_owner : principal;
   drops : nat64;
   settlement : opt XrpSettlement;
 };
+type XrpClaimResolution = variant { ReleaseForRetry; ConfirmPaid };
 type XrpPendingDeposit = record {
   reserve_base_drops : nat64;
   owner : principal;
@@ -1153,6 +1158,41 @@ type XrpSettlement = record {
   last_ledger_sequence : nat32;
   tx_hash : text;
 };
+type XrpSpAbsorbPreflight = record {
+  collateral_price_e8s : nat64;
+  icusd_burn_e8s : nat64;
+  vault_id : nat64;
+  collateral_received_drops : nat64;
+  expires_at_ns : nat64;
+};
+type XrpSpAbsorbRequest = record {
+  vault_id : nat64;
+  allocations : vec XrpSpPayoutAllocation;
+  icusd_burned_e8s : nat64;
+  proof : SpWritedownProof;
+};
+type XrpSpAbsorbResult = record {
+  collateral_price_e8s : nat64;
+  liquidated_debt_e8s : nat64;
+  block_index : nat64;
+  vault_id : nat64;
+  payout_claims : vec XrpSpPayoutClaim;
+  collateral_received_drops : nat64;
+  success : bool;
+};
+type XrpSpPayoutAllocation = record {
+  claimant : principal;
+  destination_tag : opt nat32;
+  payout_address : text;
+  drops : nat64;
+};
+type XrpSpPayoutClaim = record {
+  claim_id : nat64;
+  claimant : principal;
+  destination_tag : opt nat32;
+  payout_address : text;
+  drops : nat64;
+};
 type XrpVaultOpenInfo = record {
   reserve_base_drops : nat64;
   custody_address : text;
@@ -1165,7 +1205,9 @@ service : (ProtocolArg) -> {
   admin_correct_vault_collateral : (nat64, nat64, text) -> (Result);
   admin_correct_vault_debts : (vec VaultDebtCorrection) -> (Result_2);
   admin_mint_icusd : (nat64, principal, text) -> (Result_1);
+  admin_quarantine_xrp_claim : (nat64, text) -> (Result);
   admin_resolve_stuck_claim : (nat64, bool) -> (Result);
+  admin_resolve_xrp_claim : (nat64, XrpClaimResolution) -> (Result);
   admin_sweep_to_treasury : (text) -> (Result_1);
   borrow_chain_vault_evm : (VaultIntent, blob) -> (Result);
   borrow_from_vault : (VaultArg) -> (Result_3);
@@ -1301,6 +1343,7 @@ service : (ProtocolArg) -> {
   get_xrp_pending_deposits : () -> (
       vec record { nat64; XrpPendingDeposit },
     ) query;
+  get_xrp_quarantined_claims : () -> (vec record { nat64; XrpClaim }) query;
   get_xrp_schnorr_key_name : () -> (text) query;
   harvest_chain_interest : (nat32) -> (Result_1);
   http_request : (HttpRequest) -> (HttpResponse_1) query;
@@ -1446,8 +1489,11 @@ service : (ProtocolArg) -> {
   stability_pool_liquidate_with_reserves : (nat64, nat64, nat64, principal) -> (
       Result_18,
     );
+  stability_pool_liquidate_xrp_vault : (XrpSpAbsorbRequest) -> (Result_20);
   stability_pool_preflight_chain_absorb : (nat64, nat64) -> (Result);
-  submit_burn_proof : (nat32, text) -> (Result_20);
+  stability_pool_preflight_xrp_absorb : (nat64, nat64) -> (Result_21);
+  stability_pool_xrp_claim_outstanding : (nat64, principal) -> (Result_14);
+  submit_burn_proof : (nat32, text) -> (Result_22);
   sweep_xrp_pending_open : (nat64) -> (Result);
   unfreeze_protocol : () -> (Result);
   update_collateral_config : (principal, CollateralConfig) -> (Result);

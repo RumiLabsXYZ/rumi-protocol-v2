@@ -132,6 +132,7 @@ export const idlFactory = ({ IDL }) => {
     'fee_amount_paid' : IDL.Nat64,
     'stable_pulled_e6s' : IDL.Opt(IDL.Nat64),
     'collateral_amount_received' : IDL.Opt(IDL.Nat64),
+    'xrp_claim_id' : IDL.Opt(IDL.Nat64),
   });
   const Result_3 = IDL.Variant({
     'Ok' : SuccessWithFee,
@@ -1301,7 +1302,50 @@ export const idlFactory = ({ IDL }) => {
     'Ok' : ChainStabilityPoolLiquidationResult,
     'Err' : ProtocolError,
   });
-  const Result_20 = IDL.Variant({ 'Ok' : IDL.Nat32, 'Err' : ProtocolError });
+  const XrpSpPayoutAllocation = IDL.Record({
+    'claimant' : IDL.Principal,
+    'destination_tag' : IDL.Opt(IDL.Nat32),
+    'payout_address' : IDL.Text,
+    'drops' : IDL.Nat64,
+  });
+  const XrpSpAbsorbRequest = IDL.Record({
+    'vault_id' : IDL.Nat64,
+    'allocations' : IDL.Vec(XrpSpPayoutAllocation),
+    'icusd_burned_e8s' : IDL.Nat64,
+    'proof' : SpWritedownProof,
+  });
+  const XrpSpPayoutClaim = IDL.Record({
+    'claim_id' : IDL.Nat64,
+    'claimant' : IDL.Principal,
+    'destination_tag' : IDL.Opt(IDL.Nat32),
+    'payout_address' : IDL.Text,
+    'drops' : IDL.Nat64,
+  });
+  const XrpSpAbsorbResult = IDL.Record({
+    'collateral_price_e8s' : IDL.Nat64,
+    'liquidated_debt_e8s' : IDL.Nat64,
+    'block_index' : IDL.Nat64,
+    'vault_id' : IDL.Nat64,
+    'payout_claims' : IDL.Vec(XrpSpPayoutClaim),
+    'collateral_received_drops' : IDL.Nat64,
+    'success' : IDL.Bool,
+  });
+  const Result_20 = IDL.Variant({
+    'Ok' : XrpSpAbsorbResult,
+    'Err' : ProtocolError,
+  });
+  const XrpSpAbsorbPreflight = IDL.Record({
+    'collateral_price_e8s' : IDL.Nat64,
+    'icusd_burn_e8s' : IDL.Nat64,
+    'vault_id' : IDL.Nat64,
+    'collateral_received_drops' : IDL.Nat64,
+    'expires_at_ns' : IDL.Nat64,
+  });
+  const Result_21 = IDL.Variant({
+    'Ok' : XrpSpAbsorbPreflight,
+    'Err' : ProtocolError,
+  });
+  const Result_22 = IDL.Variant({ 'Ok' : IDL.Nat32, 'Err' : ProtocolError });
   return IDL.Service({
     'add_collateral_token' : IDL.Func([AddCollateralArg], [Result], []),
     'add_margin_to_vault' : IDL.Func([VaultArg], [Result_1], []),
@@ -1997,12 +2041,27 @@ export const idlFactory = ({ IDL }) => {
         [Result_18],
         [],
       ),
+    'stability_pool_liquidate_xrp_vault' : IDL.Func(
+        [XrpSpAbsorbRequest],
+        [Result_20],
+        [],
+      ),
     'stability_pool_preflight_chain_absorb' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
         [Result],
         [],
       ),
-    'submit_burn_proof' : IDL.Func([IDL.Nat32, IDL.Text], [Result_20], []),
+    'stability_pool_preflight_xrp_absorb' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [Result_21],
+        [],
+      ),
+    'stability_pool_xrp_claim_outstanding' : IDL.Func(
+        [IDL.Nat64, IDL.Principal],
+        [Result_14],
+        [],
+      ),
+    'submit_burn_proof' : IDL.Func([IDL.Nat32, IDL.Text], [Result_22], []),
     'sweep_xrp_pending_open' : IDL.Func([IDL.Nat64], [Result], []),
     'unfreeze_protocol' : IDL.Func([], [Result], []),
     'update_collateral_config' : IDL.Func(

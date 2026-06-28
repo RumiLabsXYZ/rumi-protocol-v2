@@ -25,6 +25,7 @@ use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use crate::compute_collateral_ratio;
@@ -771,6 +772,7 @@ pub async fn redeem_collateral(
                 collateral_amount_received: Some(outcome.margin.to_u64()),
                 debt_liquidated_e8s: None, // SP-101
                 stable_pulled_e6s: None,   // SP-110
+                xrp_claim_id: None,
             })
         }
         Err(transfer_from_error) => Err(ProtocolError::TransferFromError(
@@ -1296,20 +1298,20 @@ fn queue_collateral_payout(
     collateral_type: Principal,
     op_nonce: u128,
     now_ns: u64,
-) {
+) -> Option<u64> {
     let is_xrp = s
         .get_collateral_config(&collateral_type)
         .map(|c| c.is_native_xrp())
         .unwrap_or(false);
     if is_xrp {
-        record_xrp_claim(
+        Some(record_xrp_claim(
             s,
             recipient,
             custody_owner,
             vault_id,
             margin.to_u64(),
             now_ns,
-        );
+        ))
     } else {
         s.pending_margin_transfers.insert(
             (vault_id, recipient),
@@ -1321,7 +1323,509 @@ fn queue_collateral_payout(
                 op_nonce,
             },
         );
+        None
     }
+}
+
+pub const XRP_SP_ABSORB_PREFLIGHT_TTL_NS: u64 = 15 * 60 * 1_000_000_000;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct XrpSpAbsorbSizing {
+    preflight: crate::XrpSpAbsorbPreflight,
+    total_to_seize_drops: u64,
+}
+
+fn ensure_registered_sp(
+    state: &crate::state::State,
+    caller: Principal,
+) -> Result<(), ProtocolError> {
+    if state.stability_pool_canister != Some(caller) {
+        return Err(ProtocolError::GenericError(
+            "Caller is not the registered stability pool canister".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn stability_pool_xrp_claim_outstanding_in_state(
+    state: &crate::state::State,
+    caller: Principal,
+    claim_id: u64,
+    claimant: Principal,
+) -> Result<bool, ProtocolError> {
+    ensure_registered_sp(state, caller)?;
+    match state.xrp_claims.get(&claim_id) {
+        Some(claim) if claim.claimant == claimant => Ok(true),
+        Some(_) => Err(ProtocolError::GenericError(format!(
+            "XRP claim #{claim_id} belongs to a different claimant"
+        ))),
+        None => Ok(false),
+    }
+}
+
+fn xrp_sp_absorb_sizing(
+    state: &crate::state::State,
+    vault_id: u64,
+    expected_icusd_burn_e8s: u64,
+) -> Result<XrpSpAbsorbSizing, ProtocolError> {
+    if expected_icusd_burn_e8s == 0 {
+        return Err(ProtocolError::GenericError(
+            "XRP SP absorb burn amount must be non-zero".to_string(),
+        ));
+    }
+    let vault = state
+        .vault_id_to_vaults
+        .get(&vault_id)
+        .ok_or_else(|| ProtocolError::GenericError(format!("Vault #{vault_id} not found")))?;
+    let cfg = state
+        .get_collateral_config(&vault.collateral_type)
+        .ok_or_else(|| {
+            ProtocolError::GenericError(format!("No collateral config for vault #{vault_id}"))
+        })?;
+    if !cfg.is_native_xrp() {
+        return Err(ProtocolError::GenericError(
+            "XRP SP absorb requires a native-XRP vault".to_string(),
+        ));
+    }
+    if !cfg.status.allows_liquidation() {
+        return Err(ProtocolError::GenericError(
+            "Liquidation is not allowed for this collateral type.".to_string(),
+        ));
+    }
+    if vault.borrowed_icusd_amount.to_u64() != expected_icusd_burn_e8s {
+        return Err(ProtocolError::GenericError(format!(
+            "XRP SP absorb burn {} does not match live debt {} for vault {}",
+            expected_icusd_burn_e8s,
+            vault.borrowed_icusd_amount.to_u64(),
+            vault_id
+        )));
+    }
+    let price = state
+        .get_collateral_price_decimal(&vault.collateral_type)
+        .ok_or_else(|| {
+            ProtocolError::GenericError(
+                "No price available for collateral. Price feed may be down.".to_string(),
+            )
+        })?;
+    let price_usd = UsdIcp::from(price);
+    let cr = compute_collateral_ratio(vault, price_usd, state);
+    let min_liq = state.get_min_liquidation_ratio_for(&vault.collateral_type);
+    if cr >= min_liq {
+        return Err(ProtocolError::GenericError(format!(
+            "native-XRP vault {vault_id} is no longer liquidatable"
+        )));
+    }
+
+    let liquidation_amount = ICUSD::new(expected_icusd_burn_e8s);
+    let collateral_raw =
+        crate::numeric::icusd_to_collateral_amount(liquidation_amount, price, cfg.decimals);
+    let collateral_with_bonus =
+        ICP::from(collateral_raw) * state.get_liquidation_bonus_for(&vault.collateral_type);
+    let total_to_seize = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
+    let total_to_seize_drops = total_to_seize.to_u64();
+    let bonus_portion = total_to_seize_drops.saturating_sub(collateral_raw);
+    let protocol_cut = (Decimal::from(bonus_portion) * state.get_liquidation_protocol_share().0)
+        .to_u64()
+        .unwrap_or(0)
+        .min(total_to_seize_drops);
+    let collateral_received_drops = total_to_seize_drops.saturating_sub(protocol_cut);
+    if collateral_received_drops == 0 {
+        return Err(ProtocolError::GenericError(
+            "XRP SP absorb would receive zero collateral".to_string(),
+        ));
+    }
+
+    Ok(XrpSpAbsorbSizing {
+        preflight: crate::XrpSpAbsorbPreflight {
+            vault_id,
+            icusd_burn_e8s: expected_icusd_burn_e8s,
+            collateral_received_drops,
+            collateral_price_e8s: price_usd.to_e8s(),
+            expires_at_ns: 0,
+        },
+        total_to_seize_drops,
+    })
+}
+
+pub fn stability_pool_preflight_xrp_absorb_in_state(
+    state: &mut crate::state::State,
+    caller: Principal,
+    vault_id: u64,
+    expected_icusd_burn_e8s: u64,
+    now_ns: u64,
+) -> Result<crate::XrpSpAbsorbPreflight, ProtocolError> {
+    ensure_registered_sp(state, caller)?;
+    if state.frozen {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "Protocol is frozen. All operations are suspended pending admin review.".to_string(),
+        ));
+    }
+    if state.liquidation_frozen {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "Liquidations are currently frozen by admin.".to_string(),
+        ));
+    }
+    if state.sp_writedown_disabled {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "SP writedown path is disabled by admin".to_string(),
+        ));
+    }
+    if crate::guard::is_vault_liquidating(vault_id) {
+        return Err(ProtocolError::TemporarilyUnavailable(format!(
+            "Vault #{vault_id} has another operation in flight; retry shortly"
+        )));
+    }
+
+    let sizing = xrp_sp_absorb_sizing(state, vault_id, expected_icusd_burn_e8s)?;
+    let mut preflight = sizing.preflight;
+    preflight.expires_at_ns = now_ns.saturating_add(XRP_SP_ABSORB_PREFLIGHT_TTL_NS);
+    state.sp_xrp_absorb_preflights.insert(
+        vault_id,
+        crate::state::StoredXrpSpAbsorbPreflight {
+            caller,
+            vault_id,
+            icusd_burn_e8s: expected_icusd_burn_e8s,
+            total_to_seize_drops: sizing.total_to_seize_drops,
+            collateral_received_drops: preflight.collateral_received_drops,
+            collateral_price_e8s: preflight.collateral_price_e8s,
+            expires_at_ns: preflight.expires_at_ns,
+        },
+    );
+    Ok(preflight)
+}
+
+fn matching_xrp_absorb_preflight(
+    state: &crate::state::State,
+    vault_id: u64,
+    icusd_burned_e8s: u64,
+    caller: Principal,
+    now_ns: u64,
+) -> Option<crate::state::StoredXrpSpAbsorbPreflight> {
+    let preflight = state.sp_xrp_absorb_preflights.get(&vault_id)?;
+    if preflight.caller == caller
+        && preflight.icusd_burn_e8s == icusd_burned_e8s
+        && preflight.expires_at_ns >= now_ns
+    {
+        Some(preflight.clone())
+    } else {
+        None
+    }
+}
+
+fn ensure_no_active_xrp_sp_absorb_preflight(
+    state: &crate::state::State,
+    vault_id: u64,
+    now_ns: u64,
+) -> Result<(), ProtocolError> {
+    if let Some(preflight) = state.sp_xrp_absorb_preflights.get(&vault_id) {
+        if preflight.expires_at_ns >= now_ns {
+            return Err(ProtocolError::TemporarilyUnavailable(format!(
+                "Vault #{vault_id} has a pending native-XRP stability-pool liquidation reservation; retry after it expires or completes"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn reject_active_xrp_sp_absorb_preflight(
+    vault_id: u64,
+    now_ns: u64,
+) -> Result<(), ProtocolError> {
+    read_state(|s| ensure_no_active_xrp_sp_absorb_preflight(s, vault_id, now_ns))
+}
+
+fn ensure_xrp_sp_absorb_preflight_vault(
+    state: &crate::state::State,
+    vault_id: u64,
+) -> Result<&Vault, ProtocolError> {
+    let vault = state
+        .vault_id_to_vaults
+        .get(&vault_id)
+        .ok_or_else(|| ProtocolError::GenericError(format!("Vault #{vault_id} not found")))?;
+    let cfg = state
+        .get_collateral_config(&vault.collateral_type)
+        .ok_or_else(|| {
+            ProtocolError::GenericError(format!("No collateral config for vault #{vault_id}"))
+        })?;
+    if !cfg.is_native_xrp() {
+        return Err(ProtocolError::GenericError(
+            "XRP SP absorb requires a native-XRP vault".to_string(),
+        ));
+    }
+    Ok(vault)
+}
+
+fn canonical_xrp_allocations(
+    allocations: &[crate::XrpSpPayoutAllocation],
+) -> Vec<crate::XrpSpPayoutAllocation> {
+    let mut sorted = allocations.to_vec();
+    sorted.sort_by(|a, b| {
+        a.claimant
+            .as_slice()
+            .cmp(b.claimant.as_slice())
+            .then_with(|| a.payout_address.cmp(&b.payout_address))
+            .then_with(|| a.destination_tag.cmp(&b.destination_tag))
+            .then_with(|| a.drops.cmp(&b.drops))
+    });
+    sorted
+}
+
+fn validate_xrp_sp_allocations(
+    allocations: &[crate::XrpSpPayoutAllocation],
+    expected_drops: u64,
+) -> Result<Vec<crate::XrpSpPayoutAllocation>, ProtocolError> {
+    if allocations.is_empty() {
+        return Err(ProtocolError::GenericError(
+            "XRP SP absorb requires at least one payout allocation".to_string(),
+        ));
+    }
+    if allocations.len() > crate::MAX_XRP_SP_PAYOUT_ALLOCATIONS {
+        return Err(ProtocolError::GenericError(format!(
+            "XRP SP absorb supports at most {} payout allocations",
+            crate::MAX_XRP_SP_PAYOUT_ALLOCATIONS
+        )));
+    }
+    let mut sum: u128 = 0;
+    for allocation in allocations {
+        if allocation.payout_address.trim().is_empty() {
+            return Err(ProtocolError::GenericError(
+                "XRP SP absorb payout address is required".to_string(),
+            ));
+        }
+        if allocation.drops == 0 {
+            return Err(ProtocolError::GenericError(
+                "XRP SP absorb payout allocation drops must be non-zero".to_string(),
+            ));
+        }
+        sum = sum.saturating_add(u128::from(allocation.drops));
+    }
+    if sum != u128::from(expected_drops) {
+        return Err(ProtocolError::GenericError(format!(
+            "XRP SP absorb allocation sum {} does not match collateral received {}",
+            sum, expected_drops
+        )));
+    }
+    Ok(canonical_xrp_allocations(allocations))
+}
+
+fn hash_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_be_bytes());
+    hasher.update(bytes);
+}
+
+fn xrp_sp_allocation_fingerprint(
+    caller: Principal,
+    request: &crate::XrpSpAbsorbRequest,
+    allocations: &[crate::XrpSpPayoutAllocation],
+) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hash_len_prefixed(&mut hasher, caller.as_slice());
+    hasher.update(request.vault_id.to_be_bytes());
+    hasher.update(request.icusd_burned_e8s.to_be_bytes());
+    let proof_kind = match request.proof.ledger_kind {
+        crate::icrc3_proof::SpProofLedger::IcusdBurn => 0u8,
+        crate::icrc3_proof::SpProofLedger::ThreePoolTransfer => 1u8,
+    };
+    hasher.update([proof_kind]);
+    hasher.update(request.proof.block_index.to_be_bytes());
+    hasher.update(request.proof.vault_id_memo.to_be_bytes());
+    hasher.update((allocations.len() as u64).to_be_bytes());
+    for allocation in allocations {
+        hash_len_prefixed(&mut hasher, allocation.claimant.as_slice());
+        hash_len_prefixed(&mut hasher, allocation.payout_address.as_bytes());
+        match allocation.destination_tag {
+            Some(tag) => {
+                hasher.update([1u8]);
+                hasher.update(tag.to_be_bytes());
+            }
+            None => hasher.update([0u8]),
+        }
+        hasher.update(allocation.drops.to_be_bytes());
+    }
+    hasher.finalize().to_vec()
+}
+
+fn stored_xrp_sp_absorb_matches_retry(
+    stored: &crate::state::StoredXrpSpAbsorbResult,
+    caller: Principal,
+    request: &crate::XrpSpAbsorbRequest,
+    allocation_fingerprint: &[u8],
+) -> bool {
+    stored.caller == caller
+        && stored.vault_id == request.vault_id
+        && stored.icusd_burned_e8s == request.icusd_burned_e8s
+        && stored.proof_ledger == request.proof.ledger_kind
+        && stored.proof_block_index == request.proof.block_index
+        && stored.allocation_fingerprint == allocation_fingerprint
+}
+
+pub fn record_sp_xrp_absorb_result_bounded(
+    state: &mut crate::state::State,
+    proof_key: (crate::icrc3_proof::SpProofLedger, u64),
+    stored: crate::state::StoredXrpSpAbsorbResult,
+) {
+    state
+        .sp_xrp_absorb_results_by_proof
+        .insert(proof_key, stored);
+    while state.sp_xrp_absorb_results_by_proof.len()
+        > crate::state::MAX_SP_XRP_ABSORB_RESULTS_BY_PROOF
+    {
+        let Some(oldest_key) = state
+            .sp_xrp_absorb_results_by_proof
+            .keys()
+            .copied()
+            .find(|key| *key != proof_key)
+        else {
+            break;
+        };
+        state.sp_xrp_absorb_results_by_proof.remove(&oldest_key);
+    }
+}
+
+pub fn xrp_sp_absorb_cached_replay_result(
+    state: &crate::state::State,
+    caller: Principal,
+    request: &crate::XrpSpAbsorbRequest,
+) -> Option<Result<crate::XrpSpAbsorbResult, ProtocolError>> {
+    let proof_key = (request.proof.ledger_kind, request.proof.block_index);
+    let stored = state.sp_xrp_absorb_results_by_proof.get(&proof_key)?;
+    Some(
+        validate_xrp_sp_allocations(&request.allocations, stored.result.collateral_received_drops)
+            .and_then(|allocations| {
+                let fingerprint = xrp_sp_allocation_fingerprint(caller, request, &allocations);
+                if stored_xrp_sp_absorb_matches_retry(stored, caller, request, &fingerprint) {
+                    Ok(stored.result.clone())
+                } else {
+                    Err(ProtocolError::GenericError(format!(
+                        "SP XRP absorb proof replay rejected: ({:?}, block {}) already consumed for a different request",
+                        request.proof.ledger_kind, request.proof.block_index
+                    )))
+                }
+            }),
+    )
+}
+
+pub fn stability_pool_liquidate_xrp_vault_in_state(
+    state: &mut crate::state::State,
+    caller: Principal,
+    request: crate::XrpSpAbsorbRequest,
+    now_ns: u64,
+) -> Result<crate::XrpSpAbsorbResult, ProtocolError> {
+    ensure_registered_sp(state, caller)?;
+    let proof_key = (request.proof.ledger_kind, request.proof.block_index);
+
+    if let Some(stored) = state.sp_xrp_absorb_results_by_proof.get(&proof_key) {
+        let allocations = validate_xrp_sp_allocations(
+            &request.allocations,
+            stored.result.collateral_received_drops,
+        )?;
+        let fingerprint = xrp_sp_allocation_fingerprint(caller, &request, &allocations);
+        if stored_xrp_sp_absorb_matches_retry(stored, caller, &request, &fingerprint) {
+            return Ok(stored.result.clone());
+        }
+        return Err(ProtocolError::GenericError(format!(
+            "SP XRP absorb proof replay rejected: ({:?}, block {}) already consumed for a different request",
+            request.proof.ledger_kind, request.proof.block_index
+        )));
+    }
+
+    if request.proof.ledger_kind != crate::icrc3_proof::SpProofLedger::IcusdBurn {
+        return Err(ProtocolError::GenericError(
+            "XRP SP absorb requires an icUSD burn proof".to_string(),
+        ));
+    }
+    if request.proof.vault_id_memo != request.vault_id {
+        return Err(ProtocolError::GenericError(format!(
+            "SP writedown proof vault_id_memo {} does not match call vault_id {}",
+            request.proof.vault_id_memo, request.vault_id
+        )));
+    }
+    if state.consumed_writedown_proofs.contains(&proof_key) {
+        return Err(ProtocolError::GenericError(format!(
+            "SP writedown proof replay rejected: ({:?}, block {}) already consumed",
+            request.proof.ledger_kind, request.proof.block_index
+        )));
+    }
+
+    let preflight = matching_xrp_absorb_preflight(
+        state,
+        request.vault_id,
+        request.icusd_burned_e8s,
+        caller,
+        now_ns,
+    )
+    .ok_or_else(|| {
+        ProtocolError::GenericError(
+            "XRP SP absorb requires a matching unexpired preflight".to_string(),
+        )
+    })?;
+
+    let allocations =
+        validate_xrp_sp_allocations(&request.allocations, preflight.collateral_received_drops)?;
+    let fingerprint = xrp_sp_allocation_fingerprint(caller, &request, &allocations);
+    let custody_owner = ensure_xrp_sp_absorb_preflight_vault(state, request.vault_id)?.owner;
+
+    let mut payout_claims = Vec::with_capacity(allocations.len());
+    for allocation in &allocations {
+        let claim_id = record_xrp_claim(
+            state,
+            allocation.claimant,
+            custody_owner,
+            request.vault_id,
+            allocation.drops,
+            now_ns,
+        );
+        payout_claims.push(crate::XrpSpPayoutClaim {
+            claimant: allocation.claimant,
+            claim_id,
+            payout_address: allocation.payout_address.clone(),
+            destination_tag: allocation.destination_tag,
+            drops: allocation.drops,
+        });
+    }
+
+    let mut interest_share = ICUSD::new(0);
+    if let Some(vault) = state.vault_id_to_vaults.get_mut(&request.vault_id) {
+        if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
+            let share = (Decimal::from(request.icusd_burned_e8s)
+                * Decimal::from(vault.accrued_interest.0)
+                / Decimal::from(vault.borrowed_icusd_amount.0))
+            .to_u64()
+            .unwrap_or(0);
+            interest_share = ICUSD::new(share.min(vault.accrued_interest.0));
+        }
+        let debt_applied = ICUSD::new(request.icusd_burned_e8s).min(vault.borrowed_icusd_amount);
+        let collateral_applied = preflight.total_to_seize_drops.min(vault.collateral_amount);
+        vault.borrowed_icusd_amount = vault.borrowed_icusd_amount.saturating_sub(debt_applied);
+        vault.collateral_amount = vault.collateral_amount.saturating_sub(collateral_applied);
+        vault.accrued_interest = vault.accrued_interest.saturating_sub(interest_share);
+    }
+    crate::state::record_recent_liquidation(state, request.icusd_burned_e8s, now_ns);
+    state.cleanup_if_drained(request.vault_id);
+    state.consumed_writedown_proofs.insert(proof_key);
+    state.sp_xrp_absorb_preflights.remove(&request.vault_id);
+
+    let result = crate::XrpSpAbsorbResult {
+        success: true,
+        vault_id: request.vault_id,
+        liquidated_debt_e8s: request.icusd_burned_e8s,
+        collateral_received_drops: preflight.collateral_received_drops,
+        payout_claims,
+        block_index: request.proof.block_index,
+        collateral_price_e8s: preflight.collateral_price_e8s,
+    };
+    let stored = crate::state::StoredXrpSpAbsorbResult {
+        caller,
+        vault_id: request.vault_id,
+        icusd_burned_e8s: request.icusd_burned_e8s,
+        proof_ledger: request.proof.ledger_kind,
+        proof_block_index: request.proof.block_index,
+        allocation_fingerprint: fingerprint,
+        result: result.clone(),
+        accepted_at_ns: now_ns,
+    };
+    record_sp_xrp_absorb_result_bounded(state, proof_key, stored);
+    Ok(result)
 }
 
 /// P5: true iff `vault_id` is a native-XRP-collateral vault (custody on the XRP
@@ -2170,6 +2674,46 @@ mod xrp_p4_tests {
     }
 
     #[test]
+    fn sp_xrp_claim_status_requires_registered_pool() {
+        let mut s = crate::state::State::default();
+        let sp = Principal::from_slice(&[0x5a; 16]);
+        let claimant = Principal::from_slice(&[0x11; 16]);
+        let owner = Principal::from_slice(&[0xaa; 16]);
+        s.stability_pool_canister = Some(sp);
+        s.xrp_claims.insert(7, claim(claimant, owner, 1, 2_000_000));
+
+        let err = stability_pool_xrp_claim_outstanding_in_state(
+            &s,
+            Principal::from_slice(&[0xee; 16]),
+            7,
+            claimant,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ProtocolError::GenericError(_)));
+    }
+
+    #[test]
+    fn sp_xrp_claim_status_reports_matching_claim_only() {
+        let mut s = crate::state::State::default();
+        let sp = Principal::from_slice(&[0x5a; 16]);
+        let claimant = Principal::from_slice(&[0x11; 16]);
+        let other_claimant = Principal::from_slice(&[0x22; 16]);
+        let owner = Principal::from_slice(&[0xaa; 16]);
+        s.stability_pool_canister = Some(sp);
+        s.xrp_claims.insert(7, claim(claimant, owner, 1, 2_000_000));
+
+        assert_eq!(
+            stability_pool_xrp_claim_outstanding_in_state(&s, sp, 7, claimant).unwrap(),
+            true
+        );
+        assert_eq!(
+            stability_pool_xrp_claim_outstanding_in_state(&s, sp, 8, claimant).unwrap(),
+            false
+        );
+        assert!(stability_pool_xrp_claim_outstanding_in_state(&s, sp, 7, other_claimant).is_err());
+    }
+
+    #[test]
     fn native_xrp_withdraw_and_close_policy_preserves_custody_vault() {
         assert_eq!(
             withdraw_close_completion_policy(true),
@@ -2426,7 +2970,10 @@ mod xrp_p4_tests {
     // (`replacement_rejects_when_live_sequence_advanced_past_prior_source_sequence`); the
     // sibling path did not. These tests pin the now-symmetric decision.
 
-    fn sibling_acct(sequence: u32, ledger_index: u32) -> crate::chains::xrp::xrp_rpc::XrpAccountInfo {
+    fn sibling_acct(
+        sequence: u32,
+        ledger_index: u32,
+    ) -> crate::chains::xrp::xrp_rpc::XrpAccountInfo {
         crate::chains::xrp::xrp_rpc::XrpAccountInfo {
             exists: true,
             sequence,
@@ -2923,6 +3470,7 @@ async fn borrow_from_vault_internal(
 
     // Accrue interest on this vault before borrowing so CR check uses up-to-date debt.
     let now = ic_cdk::api::time();
+    reject_active_xrp_sp_absorb_preflight(arg.vault_id, now)?;
     mutate_state(|s| s.accrue_single_vault(arg.vault_id, now));
 
     let (vault, collateral_price, config_decimals, is_native_xrp) =
@@ -3056,6 +3604,7 @@ async fn borrow_from_vault_internal(
                 collateral_amount_received: None,
                 debt_liquidated_e8s: None, // SP-101
                 stable_pulled_e6s: None,   // SP-110
+                xrp_claim_id: None,
             })
         }
         Err(mint_error) => Err(ProtocolError::TransferError(mint_error)),
@@ -3129,6 +3678,7 @@ async fn repay_to_vault_internal(
 
     // Accrue interest before repayment so the correct debt balance is used.
     let now = ic_cdk::api::time();
+    reject_active_xrp_sp_absorb_preflight(arg.vault_id, now)?;
     mutate_state(|s| s.accrue_single_vault(arg.vault_id, now));
 
     let vault = read_state(|s| s.vault_id_to_vaults.get(&arg.vault_id).cloned())
@@ -3249,6 +3799,12 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
         )));
     }
 
+    let now = ic_cdk::api::time();
+    if let Err(e) = reject_active_xrp_sp_absorb_preflight(arg.vault_id, now) {
+        guard_principal.fail();
+        return Err(e);
+    }
+
     // Depeg protection: fetch fresh stablecoin price and reject if outside $0.95–$1.05
     if let Err(e) = crate::xrc::ensure_stable_not_depegged(&arg.token_type).await {
         guard_principal.fail();
@@ -3260,7 +3816,6 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
     let amount: ICUSD = raw_amount_e8s.into();
 
     // Accrue interest before repayment so the correct debt balance is used.
-    let now = ic_cdk::api::time();
     mutate_state(|s| s.accrue_single_vault(arg.vault_id, now));
 
     let vault = match read_state(|s| s.vault_id_to_vaults.get(&arg.vault_id).cloned()) {
@@ -3405,6 +3960,12 @@ pub async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
         }
     };
     let amount: ICP = arg.amount.into();
+
+    let now = ic_cdk::api::time();
+    if let Err(e) = reject_active_xrp_sp_absorb_preflight(arg.vault_id, now) {
+        guard_principal.fail();
+        return Err(e);
+    }
 
     let (vault, config_ledger, min_deposit, is_native_xrp) =
         match read_state(|s| match s.vault_id_to_vaults.get(&arg.vault_id) {
@@ -3650,6 +4211,12 @@ pub async fn add_margin_with_deposit(vault_id: u64) -> Result<u64, ProtocolError
         }
     };
 
+    let now = ic_cdk::api::time();
+    if let Err(e) = reject_active_xrp_sp_absorb_preflight(vault_id, now) {
+        guard_principal.fail();
+        return Err(e);
+    }
+
     let (vault, config_ledger, config_fee, min_deposit, is_native_xrp) =
         match read_state(|s| match s.vault_id_to_vaults.get(&vault_id) {
             Some(v) => {
@@ -3762,6 +4329,7 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
     let _guard_principal = GuardPrincipal::new(caller, &format!("close_vault_{}", vault_id))?;
     // AR-B-003: per-vault op lock; see guard.rs::VaultLiquidationGuard.
     let _vault_op_guard = VaultLiquidationGuard::new(vault_id)?;
+    reject_active_xrp_sp_absorb_preflight(vault_id, ic_cdk::api::time())?;
 
     // Check rate limits first
     mutate_state(|s| s.check_close_vault_rate_limit(caller))?;
@@ -3932,6 +4500,7 @@ pub async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
         GuardPrincipal::new(caller, &format!("withdraw_collateral_{}", vault_id))?;
     // AR-B-003: per-vault op lock; see guard.rs::VaultLiquidationGuard.
     let _vault_op_guard = VaultLiquidationGuard::new(vault_id)?;
+    reject_active_xrp_sp_absorb_preflight(vault_id, ic_cdk::api::time())?;
 
     log!(
         INFO,
@@ -4129,6 +4698,7 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
     // `repay_to_vault` entry points. `accrue_single_vault` is a no-op when
     // the vault has no debt or when the elapsed window is zero.
     let now = ic_cdk::api::time();
+    reject_active_xrp_sp_absorb_preflight(vault_id, now)?;
     mutate_state(|s| s.accrue_single_vault(vault_id, now));
 
     // Read vault, per-collateral price + config from state
@@ -4373,6 +4943,7 @@ async fn withdraw_and_close_vault_internal(
         vault_id,
         caller
     );
+    reject_active_xrp_sp_absorb_preflight(vault_id, ic_cdk::api::time())?;
 
     // Check if the vault exists first
     let vault = read_state(|s| {
@@ -4703,6 +5274,10 @@ pub async fn liquidate_vault_partial(
                                          // BK-001/002: per-vault lock so two different callers can't race this vault
                                          // and both be paid the full pre-state collateral from the shared pool.
     let _vault_liq_guard = VaultLiquidationGuard::new(vault_id)?;
+    if let Err(e) = reject_active_xrp_sp_absorb_preflight(vault_id, ic_cdk::api::time()) {
+        guard_principal.fail();
+        return Err(e);
+    }
 
     // Wave-8b LIQ-002 band gate deactivated 2026-05-18. The per-vault CR
     // check below remains the authoritative liquidatability test. See
@@ -4860,7 +5435,7 @@ pub async fn liquidate_vault_partial(
     };
 
     // Step 3: Update protocol state (partial liquidation)
-    let interest_share = mutate_state(|s| {
+    let (interest_share, xrp_claim_id) = mutate_state(|s| {
         // Compute proportional interest share before reducing debt
         let interest_share = if let Some(vault) = s.vault_id_to_vaults.get(&vault_id) {
             if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
@@ -4957,7 +5532,7 @@ pub async fn liquidate_vault_partial(
         // Liquidator-reward payout: PendingMarginTransfer for ICRC, XrpClaim for
         // native-XRP. Capture vault.owner (custody key) BEFORE cleanup_if_drained.
         let nonce = s.next_op_nonce();
-        queue_collateral_payout(
+        let xrp_claim_id = queue_collateral_payout(
             s,
             vault_id,
             vault.owner,
@@ -4983,7 +5558,7 @@ pub async fn liquidate_vault_partial(
             "[liquidate_vault_partial] Partial liquidation completed, {} pending transfers created",
             1
         );
-        interest_share
+        (interest_share, xrp_claim_id)
     });
 
     // Route interest share via N-way split
@@ -5076,6 +5651,7 @@ pub async fn liquidate_vault_partial(
         collateral_amount_received: Some(collateral_to_liquidator.to_u64()),
         debt_liquidated_e8s: Some(max_liquidatable_debt.to_u64()), // SP-101
         stable_pulled_e6s: None, // SP-110 (icUSD path: no stable surcharge)
+        xrp_claim_id,
     })
 }
 
@@ -5090,6 +5666,10 @@ pub async fn liquidate_vault_partial_with_stable(
         GuardPrincipal::new(caller, &format!("liquidate_vault_stable_{}", vault_id))?;
     reject_if_bot_processing(vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault
     let _vault_liq_guard = VaultLiquidationGuard::new(vault_id)?; // BK-001/002 per-vault lock
+    if let Err(e) = reject_active_xrp_sp_absorb_preflight(vault_id, ic_cdk::api::time()) {
+        guard_principal.fail();
+        return Err(e);
+    }
 
     // Wave-8b LIQ-002 band gate deactivated 2026-05-18 (see
     // `liquidate_vault_partial` above for rationale).
@@ -5273,7 +5853,7 @@ pub async fn liquidate_vault_partial_with_stable(
         };
 
     // Step 3: Update protocol state (partial liquidation)
-    let interest_share = mutate_state(|s| {
+    let (interest_share, xrp_claim_id) = mutate_state(|s| {
         // Compute proportional interest share before reducing debt
         let interest_share = if let Some(vault) = s.vault_id_to_vaults.get(&vault_id) {
             if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
@@ -5363,7 +5943,7 @@ pub async fn liquidate_vault_partial_with_stable(
 
         // Create pending transfer for liquidator reward
         let nonce = s.next_op_nonce();
-        queue_collateral_payout(
+        let xrp_claim_id = queue_collateral_payout(
             s,
             vault_id,
             vault.owner,
@@ -5388,7 +5968,7 @@ pub async fn liquidate_vault_partial_with_stable(
             INFO,
             "[liquidate_vault_stable] Partial liquidation completed, pending transfer created"
         );
-        interest_share
+        (interest_share, xrp_claim_id)
     });
 
     // Route interest via N-way split (stablecoin-denominated)
@@ -5513,6 +6093,7 @@ pub async fn liquidate_vault_partial_with_stable(
         collateral_amount_received: Some(collateral_to_liquidator.to_u64()),
         debt_liquidated_e8s: Some(max_liquidatable_debt.to_u64()), // SP-101
         stable_pulled_e6s: Some(total_pull_e6s), // SP-110: base + repay-fee surcharge
+        xrp_claim_id,
     })
 }
 
@@ -6025,6 +6606,10 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
     let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_{}", vault_id))?;
     reject_if_bot_processing(vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault
     let _vault_liq_guard = VaultLiquidationGuard::new(vault_id)?; // BK-001/002 per-vault lock
+    if let Err(e) = reject_active_xrp_sp_absorb_preflight(vault_id, ic_cdk::api::time()) {
+        guard_principal.fail();
+        return Err(e);
+    }
 
     // Wave-8b LIQ-002 band gate deactivated 2026-05-18 (see
     // `liquidate_vault_partial` above for rationale).
@@ -6171,7 +6756,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
     // our pre-await read and the icUSD pull above. Detect it BEFORE any
     // irreversible state work and refund the liquidator (None branch below)
     // instead of trapping inside s.liquidate_vault()'s vault lookup.
-    let interest_share = match mutate_state(|s| {
+    let (interest_share, xrp_claim_id) = match mutate_state(|s| {
         if !s.vault_id_to_vaults.contains_key(&vault_id) {
             return None;
         }
@@ -6252,7 +6837,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
 
         // Create pending transfer for liquidator reward (minus protocol cut)
         let liquidator_nonce = s.next_op_nonce();
-        queue_collateral_payout(
+        let xrp_claim_id = queue_collateral_payout(
             s,
             vault_id,
             vault.owner,
@@ -6308,9 +6893,9 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
                 1
             }
         );
-        Some(interest_share)
+        Some((interest_share, xrp_claim_id))
     }) {
-        Some(share) => share,
+        Some(result) => result,
         None => {
             // ASYNC-002: the vault was liquidated by a concurrent op while our
             // icUSD pull was in flight. Refund the liquidator (mirrors the
@@ -6459,6 +7044,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         collateral_amount_received: Some(collateral_to_liquidator.to_u64()),
         debt_liquidated_e8s: None, // SP-101
         stable_pulled_e6s: None,   // SP-110
+        xrp_claim_id,
     })
 }
 
@@ -6653,6 +7239,10 @@ pub async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError>
 
     // Accrue interest before repayment so the correct debt balance is used.
     let now = ic_cdk::api::time();
+    if let Err(e) = reject_active_xrp_sp_absorb_preflight(arg.vault_id, now) {
+        guard_principal.fail();
+        return Err(e);
+    }
     mutate_state(|s| s.accrue_single_vault(arg.vault_id, now));
 
     let vault = match read_state(|s| s.vault_id_to_vaults.get(&arg.vault_id).cloned()) {
@@ -6745,6 +7335,10 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         GuardPrincipal::new(caller, &format!("partial_liquidate_vault_{}", arg.vault_id))?;
     reject_if_bot_processing(arg.vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault
     let _vault_liq_guard = VaultLiquidationGuard::new(arg.vault_id)?; // BK-001/002 per-vault lock
+    if let Err(e) = reject_active_xrp_sp_absorb_preflight(arg.vault_id, ic_cdk::api::time()) {
+        guard_principal.fail();
+        return Err(e);
+    }
 
     // Wave-8b LIQ-002 band gate deactivated 2026-05-18 (see
     // `liquidate_vault_partial` above for rationale).
@@ -6883,7 +7477,7 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
     };
 
     // Step 5: Update protocol state ATOMICALLY
-    let interest_share = mutate_state(|s| {
+    let (interest_share, xrp_claim_id) = mutate_state(|s| {
         // Compute proportional interest share before reducing debt
         let interest_share = if let Some(vault) = s.vault_id_to_vaults.get(&arg.vault_id) {
             if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
@@ -6970,7 +7564,7 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
 
         // Create pending transfer for liquidator reward (minus protocol cut)
         let nonce = s.next_op_nonce();
-        queue_collateral_payout(
+        let xrp_claim_id = queue_collateral_payout(
             s,
             arg.vault_id,
             vault.owner,
@@ -6995,7 +7589,7 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
             INFO,
             "[partial_liquidate_vault] Protocol state updated, pending transfer created"
         );
-        interest_share
+        (interest_share, xrp_claim_id)
     });
 
     // Route interest share via N-way split
@@ -7095,6 +7689,7 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         collateral_amount_received: Some(collateral_to_liquidator.to_u64()),
         debt_liquidated_e8s: None, // SP-101
         stable_pulled_e6s: None,   // SP-110
+        xrp_claim_id,
     })
 }
 
@@ -7208,5 +7803,534 @@ mod sp_writedown_native_xrp_guard_tests {
             !vault_is_native_xrp(999),
             "missing vault must not be flagged"
         );
+    }
+}
+
+#[cfg(test)]
+mod xrp_sp_absorb_contract_tests {
+    use super::*;
+    use crate::icrc3_proof::{SpProofLedger, SpWritedownProof};
+    use crate::state::{
+        xrp_collateral_principal, CollateralStatus, CustodyKind, State, StoredXrpSpAbsorbResult,
+        MAX_SP_XRP_ABSORB_RESULTS_BY_PROOF,
+    };
+    use crate::{XrpSpAbsorbRequest, XrpSpPayoutAllocation, MAX_XRP_SP_PAYOUT_ALLOCATIONS};
+
+    const E8: u64 = 100_000_000;
+    const VAULT_ID: u64 = 7;
+
+    fn principal(byte: u8) -> Principal {
+        Principal::from_slice(&[byte; 29])
+    }
+
+    fn sp() -> Principal {
+        principal(0x53)
+    }
+
+    fn depositor_a() -> Principal {
+        principal(0xa1)
+    }
+
+    fn depositor_b() -> Principal {
+        principal(0xb2)
+    }
+
+    fn test_state_with_xrp_vault() -> State {
+        let mut state = State::from(crate::InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: principal(0x10),
+            icp_ledger_principal: principal(0x11),
+            fee_e8s: 0,
+            developer_principal: principal(0xdd),
+            treasury_principal: None,
+            stability_pool_principal: Some(sp()),
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        });
+        state.min_icusd_amount = ICUSD::new(0);
+        state.liquidation_protocol_share = Ratio::from(Decimal::ZERO);
+
+        let icp = state.icp_collateral_type();
+        if let Some(cfg) = state.collateral_configs.get_mut(&icp) {
+            cfg.last_price = Some(10.0);
+        }
+        state.open_vault(Vault {
+            owner: principal(0x99),
+            vault_id: 1,
+            borrowed_icusd_amount: ICUSD::new(100 * E8),
+            collateral_amount: 2_000_000_000,
+            collateral_type: icp,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        });
+
+        let xrp = xrp_collateral_principal();
+        let mut xrp_cfg = crate::state::xrp_collateral_config(
+            Ratio::from(Decimal::ZERO),
+            Ratio::from(Decimal::ZERO),
+            Ratio::new(dec!(1.033333333333333333)),
+        );
+        xrp_cfg.last_price = Some(0.5);
+        xrp_cfg.status = CollateralStatus::Active;
+        xrp_cfg.custody_kind = Some(CustodyKind::NativeXrp);
+        state.collateral_configs.insert(xrp, xrp_cfg);
+        state.open_vault(Vault {
+            owner: principal(0x42),
+            vault_id: VAULT_ID,
+            borrowed_icusd_amount: ICUSD::new(100 * E8),
+            collateral_amount: 100_000_000,
+            collateral_type: xrp,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        });
+        state
+    }
+
+    fn proof(block_index: u64) -> SpWritedownProof {
+        SpWritedownProof {
+            block_index,
+            ledger_kind: SpProofLedger::IcusdBurn,
+            vault_id_memo: VAULT_ID,
+        }
+    }
+
+    fn valid_request(block_index: u64) -> XrpSpAbsorbRequest {
+        XrpSpAbsorbRequest {
+            vault_id: VAULT_ID,
+            icusd_burned_e8s: 100 * E8,
+            proof: proof(block_index),
+            allocations: vec![
+                XrpSpPayoutAllocation {
+                    claimant: depositor_a(),
+                    payout_address: "rA".to_string(),
+                    destination_tag: Some(7),
+                    drops: 60_000_000,
+                },
+                XrpSpPayoutAllocation {
+                    claimant: depositor_b(),
+                    payout_address: "rB".to_string(),
+                    destination_tag: None,
+                    drops: 40_000_000,
+                },
+            ],
+        }
+    }
+
+    fn preflight(state: &mut State, now_ns: u64) {
+        stability_pool_preflight_xrp_absorb_in_state(state, sp(), VAULT_ID, 100 * E8, now_ns)
+            .expect("preflight reservation");
+    }
+
+    fn assert_no_xrp_absorb_mutation(state: &State) {
+        assert!(state.xrp_claims.is_empty());
+        assert_eq!(state.next_xrp_claim_id, 0);
+        assert!(state.sp_xrp_absorb_results_by_proof.is_empty());
+        let vault = state.vault_id_to_vaults.get(&VAULT_ID).expect("vault");
+        assert_eq!(vault.borrowed_icusd_amount, ICUSD::new(100 * E8));
+        assert_eq!(vault.collateral_amount, 100_000_000);
+    }
+
+    #[test]
+    fn xrp_sp_preflight_rejects_non_xrp_and_stores_reservation() {
+        let mut state = test_state_with_xrp_vault();
+        let err = stability_pool_preflight_xrp_absorb_in_state(&mut state, sp(), 1, 100 * E8, 1)
+            .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("native-XRP"),
+            "unexpected error: {err:?}"
+        );
+        assert!(state.sp_xrp_absorb_preflights.is_empty());
+
+        let result =
+            stability_pool_preflight_xrp_absorb_in_state(&mut state, sp(), VAULT_ID, 100 * E8, 10)
+                .expect("xrp preflight accepted");
+        assert_eq!(result.vault_id, VAULT_ID);
+        assert_eq!(result.icusd_burn_e8s, 100 * E8);
+        assert_eq!(result.collateral_received_drops, 100_000_000);
+        assert_eq!(result.collateral_price_e8s, 50_000_000);
+        assert!(result.expires_at_ns > 10);
+
+        let stored = state.sp_xrp_absorb_preflights.get(&VAULT_ID).unwrap();
+        assert_eq!(stored.caller, sp());
+        assert_eq!(stored.vault_id, VAULT_ID);
+        assert_eq!(stored.icusd_burn_e8s, 100 * E8);
+        assert_eq!(stored.collateral_received_drops, 100_000_000);
+        assert_eq!(stored.collateral_price_e8s, 50_000_000);
+        assert_eq!(stored.expires_at_ns, result.expires_at_ns);
+    }
+
+    #[test]
+    fn xrp_sp_preflight_rejects_frozen_and_disabled_before_mutation() {
+        let mut frozen = test_state_with_xrp_vault();
+        frozen.frozen = true;
+        assert!(stability_pool_preflight_xrp_absorb_in_state(
+            &mut frozen,
+            sp(),
+            VAULT_ID,
+            100 * E8,
+            10,
+        )
+        .is_err());
+        assert!(frozen.sp_xrp_absorb_preflights.is_empty());
+
+        let mut disabled = test_state_with_xrp_vault();
+        disabled.sp_writedown_disabled = true;
+        assert!(stability_pool_preflight_xrp_absorb_in_state(
+            &mut disabled,
+            sp(),
+            VAULT_ID,
+            100 * E8,
+            10,
+        )
+        .is_err());
+        assert!(disabled.sp_xrp_absorb_preflights.is_empty());
+    }
+
+    #[test]
+    fn xrp_sp_preflight_rejects_when_vault_operation_in_flight() {
+        let mut state = test_state_with_xrp_vault();
+        let guard = crate::guard::VaultLiquidationGuard::new(VAULT_ID).expect("lock vault");
+        let err =
+            stability_pool_preflight_xrp_absorb_in_state(&mut state, sp(), VAULT_ID, 100 * E8, 10)
+                .unwrap_err();
+
+        assert!(
+            matches!(err, ProtocolError::TemporarilyUnavailable(_)),
+            "unexpected error: {err:?}"
+        );
+        assert!(state.sp_xrp_absorb_preflights.is_empty());
+        drop(guard);
+    }
+
+    #[test]
+    fn xrp_sp_active_preflight_blocks_vault_mutations_until_expiry() {
+        let mut state = test_state_with_xrp_vault();
+        let pf =
+            stability_pool_preflight_xrp_absorb_in_state(&mut state, sp(), VAULT_ID, 100 * E8, 10)
+                .expect("preflight accepted");
+
+        assert!(ensure_no_active_xrp_sp_absorb_preflight(&state, VAULT_ID, 20).is_err());
+        assert!(
+            ensure_no_active_xrp_sp_absorb_preflight(&state, VAULT_ID, pf.expires_at_ns + 1)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn xrp_sp_absorb_requires_registered_sp_and_unexpired_matching_preflight() {
+        let mut no_preflight = test_state_with_xrp_vault();
+        assert!(stability_pool_liquidate_xrp_vault_in_state(
+            &mut no_preflight,
+            sp(),
+            valid_request(44),
+            20,
+        )
+        .is_err());
+        assert_no_xrp_absorb_mutation(&no_preflight);
+
+        let mut wrong_caller = test_state_with_xrp_vault();
+        preflight(&mut wrong_caller, 10);
+        assert!(stability_pool_liquidate_xrp_vault_in_state(
+            &mut wrong_caller,
+            principal(0xee),
+            valid_request(44),
+            20,
+        )
+        .is_err());
+        assert_no_xrp_absorb_mutation(&wrong_caller);
+
+        let mut expired = test_state_with_xrp_vault();
+        let pf = stability_pool_preflight_xrp_absorb_in_state(
+            &mut expired,
+            sp(),
+            VAULT_ID,
+            100 * E8,
+            10,
+        )
+        .unwrap();
+        assert!(stability_pool_liquidate_xrp_vault_in_state(
+            &mut expired,
+            sp(),
+            valid_request(44),
+            pf.expires_at_ns + 1,
+        )
+        .is_err());
+        assert_no_xrp_absorb_mutation(&expired);
+
+        let mut mismatched = test_state_with_xrp_vault();
+        preflight(&mut mismatched, 10);
+        let mut req = valid_request(44);
+        req.icusd_burned_e8s -= 1;
+        assert!(
+            stability_pool_liquidate_xrp_vault_in_state(&mut mismatched, sp(), req, 20).is_err()
+        );
+        assert_no_xrp_absorb_mutation(&mismatched);
+    }
+
+    #[test]
+    fn xrp_sp_absorb_rejects_non_xrp_before_mutation() {
+        let mut non_xrp = test_state_with_xrp_vault();
+        non_xrp.sp_xrp_absorb_preflights.insert(
+            1,
+            crate::state::StoredXrpSpAbsorbPreflight {
+                caller: sp(),
+                vault_id: 1,
+                icusd_burn_e8s: 100 * E8,
+                total_to_seize_drops: 100_000_000,
+                collateral_received_drops: 100_000_000,
+                collateral_price_e8s: 1_000_000_000,
+                expires_at_ns: 100,
+            },
+        );
+        let mut non_xrp_req = valid_request(44);
+        non_xrp_req.vault_id = 1;
+        non_xrp_req.proof.vault_id_memo = 1;
+        assert!(
+            stability_pool_liquidate_xrp_vault_in_state(&mut non_xrp, sp(), non_xrp_req, 20)
+                .is_err()
+        );
+        assert!(non_xrp.xrp_claims.is_empty());
+    }
+
+    #[test]
+    fn xrp_sp_preflight_rejects_healthy_vault_before_burn() {
+        let mut healthy = test_state_with_xrp_vault();
+        healthy
+            .vault_id_to_vaults
+            .get_mut(&VAULT_ID)
+            .unwrap()
+            .collateral_amount = 1_000_000_000_000;
+        assert!(stability_pool_preflight_xrp_absorb_in_state(
+            &mut healthy,
+            sp(),
+            VAULT_ID,
+            100 * E8,
+            10
+        )
+        .is_err());
+        assert!(healthy.xrp_claims.is_empty());
+        assert!(healthy.sp_xrp_absorb_preflights.is_empty());
+    }
+
+    #[test]
+    fn xrp_sp_absorb_validates_allocations_before_mutation() {
+        let invalid_cases: Vec<XrpSpAbsorbRequest> = {
+            let mut sum_mismatch = valid_request(44);
+            sum_mismatch.allocations[0].drops -= 1;
+
+            let mut empty_address = valid_request(44);
+            empty_address.allocations[0].payout_address = "  ".to_string();
+
+            let mut zero_drops = valid_request(44);
+            zero_drops.allocations[0].drops = 0;
+            zero_drops.allocations[1].drops = 100_000_000;
+
+            let mut too_many = valid_request(44);
+            too_many.allocations = (0..=MAX_XRP_SP_PAYOUT_ALLOCATIONS)
+                .map(|i| XrpSpPayoutAllocation {
+                    claimant: principal((i % 200) as u8),
+                    payout_address: format!("r{i}"),
+                    destination_tag: None,
+                    drops: 1,
+                })
+                .collect();
+
+            vec![
+                XrpSpAbsorbRequest {
+                    allocations: vec![],
+                    ..valid_request(44)
+                },
+                sum_mismatch,
+                empty_address,
+                zero_drops,
+                too_many,
+            ]
+        };
+
+        for request in invalid_cases {
+            let mut state = test_state_with_xrp_vault();
+            preflight(&mut state, 10);
+            assert!(
+                stability_pool_liquidate_xrp_vault_in_state(&mut state, sp(), request, 20).is_err()
+            );
+            assert_no_xrp_absorb_mutation(&state);
+        }
+    }
+
+    #[test]
+    fn xrp_sp_absorb_uses_reserved_preflight_amount_for_write_down() {
+        let mut state = test_state_with_xrp_vault();
+        state.sp_xrp_absorb_preflights.insert(
+            VAULT_ID,
+            crate::state::StoredXrpSpAbsorbPreflight {
+                caller: sp(),
+                vault_id: VAULT_ID,
+                icusd_burn_e8s: 100 * E8,
+                total_to_seize_drops: 80_000_000,
+                collateral_received_drops: 80_000_000,
+                collateral_price_e8s: 50_000_000,
+                expires_at_ns: 100,
+            },
+        );
+        let mut request = valid_request(44);
+        request.allocations[0].drops = 48_000_000;
+        request.allocations[1].drops = 32_000_000;
+
+        let result = stability_pool_liquidate_xrp_vault_in_state(&mut state, sp(), request, 20)
+            .expect("absorb accepted");
+
+        assert_eq!(result.collateral_received_drops, 80_000_000);
+        let vault = state
+            .vault_id_to_vaults
+            .get(&VAULT_ID)
+            .expect("non-drained vault remains for excess collateral");
+        assert_eq!(vault.borrowed_icusd_amount, ICUSD::new(0));
+        assert_eq!(vault.collateral_amount, 20_000_000);
+        assert_eq!(state.xrp_claims.get(&0).unwrap().drops, 48_000_000);
+        assert_eq!(state.xrp_claims.get(&1).unwrap().drops, 32_000_000);
+    }
+
+    #[test]
+    fn xrp_sp_absorb_submit_honors_reserved_preflight_after_vault_recovers() {
+        let mut state = test_state_with_xrp_vault();
+        preflight(&mut state, 10);
+        state
+            .vault_id_to_vaults
+            .get_mut(&VAULT_ID)
+            .unwrap()
+            .collateral_amount = 1_000_000_000_000;
+
+        let result =
+            stability_pool_liquidate_xrp_vault_in_state(&mut state, sp(), valid_request(44), 20)
+                .expect("post-burn submit consumes reservation");
+
+        assert_eq!(result.collateral_received_drops, 100_000_000);
+        let vault = state
+            .vault_id_to_vaults
+            .get(&VAULT_ID)
+            .expect("recovered vault remains with excess collateral");
+        assert_eq!(vault.borrowed_icusd_amount, ICUSD::new(0));
+        assert_eq!(vault.collateral_amount, 999_900_000_000);
+        assert_eq!(state.xrp_claims.get(&0).unwrap().drops, 60_000_000);
+        assert_eq!(state.xrp_claims.get(&1).unwrap().drops, 40_000_000);
+        assert!(state.sp_xrp_absorb_preflights.get(&VAULT_ID).is_none());
+    }
+
+    #[test]
+    fn xrp_sp_absorb_writes_down_claims_and_exact_replay_returns_same_claim_ids() {
+        let mut state = test_state_with_xrp_vault();
+        preflight(&mut state, 10);
+
+        let result =
+            stability_pool_liquidate_xrp_vault_in_state(&mut state, sp(), valid_request(44), 20)
+                .expect("absorb accepted");
+        assert!(result.success);
+        assert_eq!(result.vault_id, VAULT_ID);
+        assert_eq!(result.liquidated_debt_e8s, 100 * E8);
+        assert_eq!(result.collateral_received_drops, 100_000_000);
+        assert_eq!(result.payout_claims.len(), 2);
+        assert_eq!(result.payout_claims[0].claimant, depositor_a());
+        assert_eq!(result.payout_claims[0].claim_id, 0);
+        assert_eq!(result.payout_claims[1].claimant, depositor_b());
+        assert_eq!(result.payout_claims[1].claim_id, 1);
+        assert_eq!(state.next_xrp_claim_id, 2);
+        assert!(state.vault_id_to_vaults.get(&VAULT_ID).is_none());
+        assert!(state.sp_xrp_absorb_preflights.get(&VAULT_ID).is_none());
+        assert!(state
+            .sp_xrp_absorb_results_by_proof
+            .contains_key(&(SpProofLedger::IcusdBurn, 44,)));
+        assert_eq!(state.xrp_claims.get(&0).unwrap().claimant, depositor_a());
+        assert_eq!(state.xrp_claims.get(&1).unwrap().claimant, depositor_b());
+
+        let replay =
+            stability_pool_liquidate_xrp_vault_in_state(&mut state, sp(), valid_request(44), 999)
+                .expect("exact replay returns cached result");
+        assert_eq!(replay, result);
+        assert_eq!(state.next_xrp_claim_id, 2);
+        assert_eq!(state.xrp_claims.len(), 2);
+    }
+
+    #[test]
+    fn xrp_sp_absorb_conflicting_replay_rejects_without_mutation() {
+        let mut state = test_state_with_xrp_vault();
+        preflight(&mut state, 10);
+        let result =
+            stability_pool_liquidate_xrp_vault_in_state(&mut state, sp(), valid_request(44), 20)
+                .unwrap();
+        let claims_before = state.xrp_claims.clone();
+        let next_before = state.next_xrp_claim_id;
+        let results_before = state.sp_xrp_absorb_results_by_proof.clone();
+
+        let mut conflicting = valid_request(44);
+        conflicting.allocations[0].payout_address = "rDifferent".to_string();
+        assert!(
+            stability_pool_liquidate_xrp_vault_in_state(&mut state, sp(), conflicting, 30).is_err()
+        );
+        assert_eq!(state.xrp_claims, claims_before);
+        assert_eq!(state.next_xrp_claim_id, next_before);
+        assert_eq!(state.sp_xrp_absorb_results_by_proof, results_before);
+        assert_eq!(
+            state
+                .sp_xrp_absorb_results_by_proof
+                .get(&(SpProofLedger::IcusdBurn, 44))
+                .unwrap()
+                .result,
+            result,
+        );
+    }
+
+    fn stored_result_for(block_index: u64) -> StoredXrpSpAbsorbResult {
+        StoredXrpSpAbsorbResult {
+            caller: sp(),
+            vault_id: block_index,
+            icusd_burned_e8s: 100 * E8,
+            proof_ledger: SpProofLedger::IcusdBurn,
+            proof_block_index: block_index,
+            allocation_fingerprint: vec![block_index as u8; 32],
+            result: crate::XrpSpAbsorbResult {
+                success: true,
+                vault_id: block_index,
+                liquidated_debt_e8s: 100 * E8,
+                collateral_received_drops: 100_000_000,
+                payout_claims: vec![],
+                block_index,
+                collateral_price_e8s: 50_000_000,
+            },
+            accepted_at_ns: block_index,
+        }
+    }
+
+    #[test]
+    fn xrp_sp_absorb_result_cache_keeps_just_accepted_proof() {
+        let mut state = State::default();
+        for block_index in 1..=(MAX_SP_XRP_ABSORB_RESULTS_BY_PROOF as u64) {
+            record_sp_xrp_absorb_result_bounded(
+                &mut state,
+                (SpProofLedger::IcusdBurn, block_index),
+                stored_result_for(block_index),
+            );
+        }
+
+        record_sp_xrp_absorb_result_bounded(
+            &mut state,
+            (SpProofLedger::IcusdBurn, 0),
+            stored_result_for(0),
+        );
+
+        assert_eq!(
+            state.sp_xrp_absorb_results_by_proof.len(),
+            MAX_SP_XRP_ABSORB_RESULTS_BY_PROOF,
+        );
+        assert!(
+            state
+                .sp_xrp_absorb_results_by_proof
+                .contains_key(&(SpProofLedger::IcusdBurn, 0)),
+            "the just-accepted proof must remain replayable",
+        );
+        assert!(!state
+            .sp_xrp_absorb_results_by_proof
+            .contains_key(&(SpProofLedger::IcusdBurn, 1)));
     }
 }

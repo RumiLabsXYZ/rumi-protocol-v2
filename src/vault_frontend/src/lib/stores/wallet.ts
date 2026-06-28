@@ -3,12 +3,10 @@ import { createPNP, type PNP } from '@windoge98/plug-n-play';
 import type { Principal } from '@dfinity/principal';
 import { CONFIG, CANISTER_IDS, LOCAL_CANISTER_IDS } from '../config';
 import { pnp, canisterIDLs } from '../services/pnp';
-import { ProtocolService } from '../services/protocol';
 import { TokenService } from '../services/tokenService';
 import { auth, WALLET_TYPES } from '../services/auth';
 import { RequestDeduplicator } from '../services/RequestDeduplicator';
 import { appDataStore } from './appDataStore';
-import { ApiClient } from '../services/protocol/apiClient';
 
 // Define our own wallet list for icons
 const walletsList = [
@@ -38,6 +36,17 @@ interface WalletState {
 // Helper to extract the proper Principal value.
 function getOwner(principal: any): Principal {
   return principal?.owner ? principal.owner : principal;
+}
+
+async function fetchIcpPrice(): Promise<number | null> {
+  const { ProtocolService } = await import('../services/protocol');
+  const icpPrice = await ProtocolService.getICPPrice();
+  return typeof icpPrice === 'number' ? icpPrice : null;
+}
+
+async function clearVaultCache(): Promise<void> {
+  const { ApiClient } = await import('../services/protocol/apiClient');
+  ApiClient.clearVaultCache();
 }
 
 /**
@@ -148,8 +157,7 @@ function createWalletStore() {
         TokenService.getTokenBalance(CONFIG.currentIcusdLedgerId, principal)
       ]);
       
-      const icpPrice = await ProtocolService.getICPPrice();
-      const icpPriceValue = typeof icpPrice === 'number' ? icpPrice : null;
+      const icpPriceValue = await fetchIcpPrice();
       
       return {
         balance: icpBalance,
@@ -486,7 +494,7 @@ function createWalletStore() {
         
         // CRITICAL: Clear the vault cache before connecting a new wallet
         // This ensures we don't show stale vaults from a previous wallet session
-        ApiClient.clearVaultCache();
+        await clearVaultCache();
         
         const account = await auth.connect(walletId);
         
@@ -586,7 +594,7 @@ function createWalletStore() {
 
         // CRITICAL: Clear the vault cache to prevent stale data from being shown
         // when switching between wallets (e.g., from Internet Identity to Plug)
-        ApiClient.clearVaultCache();
+        await clearVaultCache();
 
         appDataStore.setWalletState(false, null);
 

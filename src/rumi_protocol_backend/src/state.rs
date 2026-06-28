@@ -160,6 +160,7 @@ pub fn default_interest_split() -> Vec<InterestRecipient> {
 }
 pub const DUST_DEBT_THRESHOLD: u64 = 50_000; // 0.0005 icUSD — debt below this is forgiven on withdrawal
 pub const MAX_SP_CHAIN_ABSORB_RESULTS_BY_PROOF: usize = 10_000;
+pub const MAX_SP_XRP_ABSORB_RESULTS_BY_PROOF: usize = 10_000;
 
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub struct StoredChainSpAbsorbResult {
@@ -173,6 +174,18 @@ pub struct StoredChainSpAbsorbResult {
     pub custody_address: String,
     pub block_index: u64,
     pub collateral_price_e8s: u64,
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct StoredXrpSpAbsorbResult {
+    pub caller: Principal,
+    pub vault_id: u64,
+    pub icusd_burned_e8s: u64,
+    pub proof_ledger: crate::icrc3_proof::SpProofLedger,
+    pub proof_block_index: u64,
+    pub allocation_fingerprint: Vec<u8>,
+    pub result: crate::XrpSpAbsorbResult,
+    pub accepted_at_ns: u64,
 }
 
 /// Wave-8b LIQ-002: default tolerance band (in absolute CR units) above the
@@ -1490,6 +1503,16 @@ pub struct State {
     /// flips before the post-burn call returns.
     #[serde(default)]
     pub sp_chain_absorb_preflights: BTreeMap<u64, StoredChainSpAbsorbPreflight>,
+    /// Native-XRP SP pre-burn reservations keyed by vault id. The SP computes
+    /// depositor-specific XRP payout allocations from the returned preflight
+    /// amount before burning icUSD.
+    #[serde(default)]
+    pub sp_xrp_absorb_preflights: BTreeMap<u64, StoredXrpSpAbsorbPreflight>,
+    /// Idempotent result cache for native-XRP SP absorbs keyed by the consumed
+    /// proof. Allows lost-reply retry to return the exact same depositor claim ids.
+    #[serde(default)]
+    pub sp_xrp_absorb_results_by_proof:
+        BTreeMap<(crate::icrc3_proof::SpProofLedger, u64), StoredXrpSpAbsorbResult>,
 
     // ─── Wave-8e LIQ-005: bad-debt deficit account ───
     //
@@ -1789,6 +1812,18 @@ pub struct StoredChainSpAbsorbPreflight {
     pub expires_at_ns: u64,
 }
 
+#[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct StoredXrpSpAbsorbPreflight {
+    pub caller: Principal,
+    pub vault_id: u64,
+    pub icusd_burn_e8s: u64,
+    #[serde(default)]
+    pub total_to_seize_drops: u64,
+    pub collateral_received_drops: u64,
+    pub collateral_price_e8s: u64,
+    pub expires_at_ns: u64,
+}
+
 /// Serde-only fallback: provides zero/empty/None defaults for fields missing from
 /// old CBOR snapshots. Never used for actual State construction (use From<InitArg>).
 impl Default for State {
@@ -1909,6 +1944,8 @@ impl Default for State {
             consumed_writedown_proofs: BTreeSet::new(),
             sp_chain_absorb_results_by_proof: BTreeMap::new(),
             sp_chain_absorb_preflights: BTreeMap::new(),
+            sp_xrp_absorb_preflights: BTreeMap::new(),
+            sp_xrp_absorb_results_by_proof: BTreeMap::new(),
             // Wave-8e LIQ-005
             protocol_deficit_icusd: ICUSD::new(0),
             total_deficit_repaid_icusd: ICUSD::new(0),
@@ -2179,6 +2216,8 @@ impl From<InitArg> for State {
             consumed_writedown_proofs: BTreeSet::new(),
             sp_chain_absorb_results_by_proof: BTreeMap::new(),
             sp_chain_absorb_preflights: BTreeMap::new(),
+            sp_xrp_absorb_preflights: BTreeMap::new(),
+            sp_xrp_absorb_results_by_proof: BTreeMap::new(),
             // Wave-8e LIQ-005
             protocol_deficit_icusd: ICUSD::new(0),
             total_deficit_repaid_icusd: ICUSD::new(0),
@@ -7729,6 +7768,33 @@ mod tests {
             ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut modified_buf).unwrap();
             let restored: State = ciborium::de::from_reader(modified_buf.as_slice()).unwrap();
             assert!(restored.sp_chain_absorb_results_by_proof.is_empty());
+        } else {
+            panic!("expected CBOR map");
+        }
+    }
+
+    #[test]
+    fn sp_xrp_absorb_maps_decode_empty_when_missing_from_old_snapshot() {
+        let state = test_state();
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&state, &mut buf).unwrap();
+
+        let value: ciborium::Value = ciborium::de::from_reader(buf.as_slice()).unwrap();
+        if let ciborium::Value::Map(mut entries) = value {
+            entries.retain(|(k, _)| {
+                !matches!(
+                    k,
+                    ciborium::Value::Text(key)
+                        if key == "sp_xrp_absorb_preflights"
+                            || key == "sp_xrp_absorb_results_by_proof"
+                )
+            });
+
+            let mut modified_buf = Vec::new();
+            ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut modified_buf).unwrap();
+            let restored: State = ciborium::de::from_reader(modified_buf.as_slice()).unwrap();
+            assert!(restored.sp_xrp_absorb_preflights.is_empty());
+            assert!(restored.sp_xrp_absorb_results_by_proof.is_empty());
         } else {
             panic!("expected CBOR map");
         }
