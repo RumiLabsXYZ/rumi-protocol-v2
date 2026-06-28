@@ -6,6 +6,14 @@ import { get } from 'svelte/store';
 import { CANISTER_IDS, CONFIG } from '../config';
 import { isOisyWallet } from './protocol/walletOperations';
 import { getOisySignerAgent, createOisyActor } from './oisySigner';
+import {
+  ackNativeXrpPayoutSettledWithActor,
+  getMyNativeXrpPayoutsWithActor,
+  optInNativeCollateralWithTagUsingActor,
+  type NativeXrpPendingPayout,
+  type StabilityPoolNativeXrpActor,
+} from './stabilityPoolNativeXrp';
+import type { CandidOpt, XrpClaimId } from './xrpPayoutHelpers';
 
 // ──────────────────────────────────────────────────────────────
 // Types — mirrors the Candid interface
@@ -48,6 +56,8 @@ export interface UserPosition {
   // Candid `opt vec` — decodes as `[]` (absent / older canister) or `[[...]]`.
   // Unwrap with `native_payout_addresses?.[0] ?? []` before use.
   native_payout_addresses?: [] | [Array<[Principal, string]>];
+  native_payout_destination_tags?: CandidOpt<Array<[Principal, number]>>;
+  pending_native_xrp_payouts?: CandidOpt<Array<[bigint, NativeXrpPendingPayout]>>;
   deposit_timestamp: bigint;
   total_claimed_gains: Array<[Principal, bigint]>;
   total_usd_value_e8s: bigint;
@@ -232,6 +242,25 @@ class StabilityPoolService {
   async checkPoolCapacity(tokenLedger: Principal, amount: bigint): Promise<boolean> {
     const actor = await this.getQueryActor();
     return await actor.check_pool_capacity(tokenLedger, amount) as boolean;
+  }
+
+  private async getMutationActor(): Promise<StabilityPoolNativeXrpActor> {
+    const wallet = get(walletStore);
+    if (!wallet.isConnected) throw new Error('Wallet not connected');
+
+    if (isOisyWallet() && wallet.principal) {
+      const signerAgent = await getOisySignerAgent(wallet.principal);
+      return createOisyActor(
+        STABILITY_POOL_CANISTER_ID,
+        canisterIDLs.stability_pool,
+        signerAgent
+      ) as StabilityPoolNativeXrpActor;
+    }
+
+    return await walletStore.getActor(
+      STABILITY_POOL_CANISTER_ID,
+      canisterIDLs.stability_pool
+    ) as StabilityPoolNativeXrpActor;
   }
 
   // ── Mutations ──
@@ -458,6 +487,31 @@ class StabilityPoolService {
         throw new Error(this.formatError(result.Err));
       }
     }
+  }
+
+  async optInNativeCollateralWithTag(
+    collateralType: Principal,
+    payoutAddress: string,
+    destinationTag?: number
+  ): Promise<void> {
+    const actor = await this.getMutationActor();
+    await optInNativeCollateralWithTagUsingActor(
+      actor,
+      collateralType,
+      payoutAddress,
+      destinationTag,
+      (err) => this.formatError(err)
+    );
+  }
+
+  async getMyNativeXrpPayouts(): Promise<NativeXrpPendingPayout[]> {
+    const actor = await this.getMutationActor();
+    return getMyNativeXrpPayoutsWithActor(actor);
+  }
+
+  async ackNativeXrpPayoutSettled(claimId: XrpClaimId | number | bigint): Promise<void> {
+    const actor = await this.getMutationActor();
+    await ackNativeXrpPayoutSettledWithActor(actor, claimId, (err) => this.formatError(err));
   }
 
   async executeLiquidation(vaultId: bigint): Promise<any> {

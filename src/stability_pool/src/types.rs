@@ -83,6 +83,16 @@ pub struct DepositPosition {
     /// the depositor does not absorb or earn from XRP liquidations.
     #[serde(default)]
     pub native_payout_addresses: Option<BTreeMap<Principal, String>>,
+    /// Optional XRP Ledger destination tags keyed by native collateral principal.
+    /// Stored separately from `native_payout_addresses` so the original address-
+    /// only field remains wire-compatible for older clients.
+    #[serde(default)]
+    pub native_payout_destination_tags: Option<BTreeMap<Principal, u32>>,
+    /// Pending native-XRP payout reminders keyed by backend XrpClaim id. These
+    /// are UI retry/cleanup records only; backend claim custody remains
+    /// authoritative.
+    #[serde(default)]
+    pub pending_native_xrp_payouts: Option<BTreeMap<u64, NativeXrpPendingPayout>>,
 }
 
 impl DepositPosition {
@@ -97,6 +107,8 @@ impl DepositPosition {
             total_interest_earned_e8s: Some(0),
             cfx_claims: Some(BTreeMap::new()),
             native_payout_addresses: Some(BTreeMap::new()),
+            native_payout_destination_tags: Some(BTreeMap::new()),
+            pending_native_xrp_payouts: Some(BTreeMap::new()),
         }
     }
 
@@ -159,6 +171,76 @@ impl DepositPosition {
                 .as_ref()
                 .map(|m| m.values().all(|&v| v == 0))
                 .unwrap_or(true)
+            && self
+                .pending_native_xrp_payouts
+                .as_ref()
+                .map(|m| m.is_empty())
+                .unwrap_or(true)
+    }
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeXrpPendingPayout {
+    pub claim_id: u64,
+    pub collateral_type: Principal,
+    pub vault_id: u64,
+    pub drops: u64,
+    pub payout_address: String,
+    pub destination_tag: Option<u32>,
+    pub created_at_ns: u64,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeXrpPayoutAllocation {
+    pub claimant: Principal,
+    pub payout_address: String,
+    pub destination_tag: Option<u32>,
+    pub drops: u64,
+}
+
+pub type XrpSpAbsorbPreflight = rumi_protocol_backend::XrpSpAbsorbPreflight;
+pub type XrpSpPayoutAllocation = rumi_protocol_backend::XrpSpPayoutAllocation;
+pub type XrpSpAbsorbRequest = rumi_protocol_backend::XrpSpAbsorbRequest;
+pub type XrpSpPayoutClaim = rumi_protocol_backend::XrpSpPayoutClaim;
+pub type XrpSpAbsorbResult = rumi_protocol_backend::XrpSpAbsorbResult;
+
+#[derive(CandidType, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NativeXrpAbsorbIntentStatus {
+    Prepared,
+    Burned,
+    BackendAccepted,
+    LocalApplied,
+    BackendRejected,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeXrpAbsorbIntent {
+    pub vault_id: u64,
+    pub collateral_type: Principal,
+    pub icusd_ledger: Principal,
+    pub icusd_minting_account: icrc_ledger_types::icrc1::account::Account,
+    pub icusd_to_burn_e8s: u64,
+    pub stables_consumed: BTreeMap<Principal, u64>,
+    pub collateral_received_drops: u64,
+    pub collateral_price_e8s: u64,
+    pub allocations: Vec<XrpSpPayoutAllocation>,
+    pub burn_created_at_time_ns: u64,
+    pub status: NativeXrpAbsorbIntentStatus,
+    pub burn_proof: Option<rumi_protocol_backend::icrc3_proof::SpWritedownProof>,
+    pub backend_result: Option<XrpSpAbsorbResult>,
+    pub last_error: Option<String>,
+    pub created_at_ns: u64,
+    pub updated_at_ns: u64,
+}
+
+impl From<NativeXrpPayoutAllocation> for XrpSpPayoutAllocation {
+    fn from(allocation: NativeXrpPayoutAllocation) -> Self {
+        Self {
+            claimant: allocation.claimant,
+            payout_address: allocation.payout_address,
+            destination_tag: allocation.destination_tag,
+            drops: allocation.drops,
+        }
     }
 }
 
@@ -484,6 +566,7 @@ pub struct UserStabilityPosition {
     /// A required field here silently breaks position decoding whenever the
     /// frontend is deployed ahead of the canister.
     pub native_payout_addresses: Option<BTreeMap<Principal, String>>,
+    pub native_payout_destination_tags: Option<BTreeMap<Principal, u32>>,
     pub deposit_timestamp: u64,
     pub total_claimed_gains: BTreeMap<Principal, u64>,
     pub total_usd_value_e8s: u64,
@@ -539,6 +622,12 @@ pub enum StabilityPoolError {
         collateral: Principal,
     },
     InvalidPayoutAddress {
+        reason: String,
+    },
+    XrpClaimStillOutstanding {
+        claim_id: u64,
+    },
+    XrpClaimStatusCheckFailed {
         reason: String,
     },
     RefundClaimNotFound,

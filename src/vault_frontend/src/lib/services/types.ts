@@ -23,6 +23,7 @@ export interface VaultOperationResult {
   error?: string;
   blockIndex?: number;
   feePaid?: number;
+  xrpClaimId?: string;
   message?: string;
   /**
    * True when the underlying signer (Oisy) returned a false-negative `_arr`

@@ -20,7 +20,6 @@ import type {
 import { walletOperations, isOisyWallet, largeApprovalExpiry } from './walletOperations';
 import { pnp } from '../pnp';
 import { get } from 'svelte/store';
-import { vaultStore } from '$lib/stores/vaultStore';
 import { QueryOperations } from './queryOperations';
 import { permissionManager } from '../PermissionManager';
 import type {
@@ -30,7 +29,6 @@ import type {
   LiquidityStatusDTO,
   CandidVault
 } from '../types';
-import { protocolService } from '../protocol';
 import { RequestDeduplicator } from '../RequestDeduplicator';
 import { collateralStore } from '$lib/stores/collateralStore';
 import {
@@ -46,6 +44,7 @@ import {
   clearRawSnapshots,
 } from './rawSnapshotCache';
 import { TokenService } from '../tokenService';
+import { mapLiquidationSuccessWithFee } from '../xrpPayoutHelpers';
 
 
 
@@ -183,6 +182,7 @@ private static async refreshVaultData(): Promise<void> {
     ApiClient.clearVaultCache();
     // Reload the vaults from the backend
     await ApiClient.getUserVaults(true);
+    const { vaultStore } = await import('$lib/stores/vaultStore');
     await vaultStore.loadVaults(true)
     console.log('Vault data refresh complete');
   } catch (err) {
@@ -2806,6 +2806,7 @@ static async repayToVaultWithStable(
    */
   static async getPendingTransfers(): Promise<any[]> {
     // For now, just return the transfers from the vault store
+    const { vaultStore } = await import('$lib/stores/vaultStore');
     return get(vaultStore).pendingTransfers.map(transfer => ({
       id: `RUMI-${transfer.vaultId}-${Date.now()}`,
       amount: transfer.amount,
@@ -3173,7 +3174,7 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
             const result = await actor.liquidate_vault_partial({ vault_id: BigInt(vaultId), amount: icusdAmountE8s });
 
             if ('Ok' in result) {
-              return { success: true, vaultId, blockIndex: Number(result.Ok.block_index), feePaid: Number(result.Ok.fee_amount_paid) / E8S };
+              return mapLiquidationSuccessWithFee(vaultId, result.Ok);
             } else {
               return { success: false, error: ApiClient.formatProtocolError(result.Err) };
             }
@@ -3207,12 +3208,7 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
           const result = await actor.liquidate_vault_partial({ vault_id: BigInt(vaultId), amount: icusdAmountE8s });
           
           if ('Ok' in result) {
-            return {
-              success: true,
-              vaultId,
-              blockIndex: Number(result.Ok.block_index),
-              feePaid: Number(result.Ok.fee_amount_paid) / E8S
-            };
+            return mapLiquidationSuccessWithFee(vaultId, result.Ok);
           } else {
             return {
               success: false,
@@ -3316,7 +3312,7 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
             const result = await actor.liquidate_vault_partial_with_stable(vaultArgWithToken);
 
             if ('Ok' in result) {
-              return { success: true, vaultId, blockIndex: Number(result.Ok.block_index), feePaid: Number(result.Ok.fee_amount_paid) / E8S };
+              return mapLiquidationSuccessWithFee(vaultId, result.Ok);
             } else {
               return { success: false, error: ApiClient.formatProtocolError(result.Err) };
             }
@@ -3340,12 +3336,7 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
           const result = await actor.liquidate_vault_partial_with_stable(vaultArgWithToken);
 
           if ('Ok' in result) {
-            return {
-              success: true,
-              vaultId,
-              blockIndex: Number(result.Ok.block_index),
-              feePaid: Number(result.Ok.fee_amount_paid) / E8S
-            };
+            return mapLiquidationSuccessWithFee(vaultId, result.Ok);
           } else {
             return { success: false, error: ApiClient.formatProtocolError(result.Err) };
           }
@@ -3420,7 +3411,7 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
             const result = await actor.liquidate_vault(BigInt(vaultId));
 
             if ('Ok' in result) {
-              return { success: true, vaultId, blockIndex: Number(result.Ok.block_index), feePaid: Number(result.Ok.fee_amount_paid) / E8S };
+              return mapLiquidationSuccessWithFee(vaultId, result.Ok);
             } else {
               return { success: false, error: ApiClient.formatProtocolError(result.Err) };
             }
@@ -3454,12 +3445,7 @@ static async withdrawCollateralAndCloseVault(vaultId: number): Promise<VaultOper
           const result = await actor.liquidate_vault(BigInt(vaultId));
           
           if ('Ok' in result) {
-            return {
-              success: true,
-              vaultId,
-              blockIndex: Number(result.Ok.block_index),
-              feePaid: Number(result.Ok.fee_amount_paid) / E8S
-            };
+            return mapLiquidationSuccessWithFee(vaultId, result.Ok);
           } else {
             return {
               success: false,
@@ -3795,6 +3781,3 @@ export class TreasuryManagementService {
     }
   }
 }
-
-
-

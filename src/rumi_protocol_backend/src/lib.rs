@@ -1,11 +1,11 @@
-use serde::Serialize;
+use crate::state::PendingMarginTransfer;
 use icrc_ledger_types::icrc1::transfer::TransferError;
 use icrc_ledger_types::icrc2::transfer_from::TransferFromError;
-use crate::state::PendingMarginTransfer;
+use serde::Serialize;
 
 use crate::guard::GuardError;
 use crate::logs::{DEBUG, INFO};
-use crate::numeric::{Ratio, ICUSD, ICP, UsdIcp};
+use crate::numeric::{Ratio, UsdIcp, ICP, ICUSD};
 use crate::state::{mutate_state, read_state, Mode};
 use crate::vault::Vault;
 use candid::{CandidType, Deserialize, Principal};
@@ -14,7 +14,6 @@ use num_traits::ToPrimitive;
 use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-
 
 /// Maximum number of retries for a pending transfer before it is abandoned.
 /// At 5-second intervals, 60 retries = 5 minutes of attempts.
@@ -37,7 +36,7 @@ pub mod vault;
 pub mod xrc;
 
 #[cfg(any(test, feature = "test_endpoints"))]
-pub mod test_helpers; 
+pub mod test_helpers;
 
 #[cfg(test)]
 mod tests;
@@ -62,13 +61,13 @@ pub const SEC_NANOS: u64 = 1_000_000_000;
 pub const E8S: u64 = 100_000_000;
 
 pub const MIN_LIQUIDITY_AMOUNT: ICUSD = ICUSD::new(1_000_000_000);
-pub const MIN_ICP_AMOUNT: ICP = ICP::new(100_000);  // Instead of MIN_CKBTC_AMOUNT
+pub const MIN_ICP_AMOUNT: ICP = ICP::new(100_000); // Instead of MIN_CKBTC_AMOUNT
 pub const MIN_ICUSD_AMOUNT: ICUSD = ICUSD::new(10_000_000); // 0.1 icUSD minimum for all stablecoin operations
 pub const DUST_THRESHOLD: ICUSD = ICUSD::new(100); // 0.000001 icUSD - dust threshold for vault closing
 
 // Update collateral ratios per whitepaper
-pub const RECOVERY_COLLATERAL_RATIO: Ratio = Ratio::new(dec!(1.5));  // 150%
-pub const MINIMUM_COLLATERAL_RATIO: Ratio = Ratio::new(dec!(1.33));  // 133%
+pub const RECOVERY_COLLATERAL_RATIO: Ratio = Ratio::new(dec!(1.5)); // 150%
+pub const MINIMUM_COLLATERAL_RATIO: Ratio = Ratio::new(dec!(1.33)); // 133%
 /// Default protocol share of liquidator's bonus profit (3%).
 pub const DEFAULT_LIQUIDATION_PROTOCOL_SHARE: Ratio = Ratio::new(dec!(0.03));
 
@@ -286,6 +285,9 @@ pub struct SuccessWithFee {
     /// balance. `Some` only on the ckStable path; `None` elsewhere. Optional for
     /// Candid back-compat.
     pub stable_pulled_e6s: Option<u64>,
+    /// Native-XRP manual liquidation payout claim id for the liquidator reward.
+    /// `None` for non-XRP collateral and non-liquidation SuccessWithFee results.
+    pub xrp_claim_id: Option<u64>,
 }
 
 /// Result from stability pool liquidation (both standard and debt-already-burned paths).
@@ -298,6 +300,53 @@ pub struct StabilityPoolLiquidationResult {
     pub collateral_type: String,
     pub block_index: u64,
     pub fee: u64,
+    pub collateral_price_e8s: u64,
+}
+
+pub const MAX_XRP_SP_PAYOUT_ALLOCATIONS: usize = 500;
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XrpSpAbsorbPreflight {
+    pub vault_id: u64,
+    pub icusd_burn_e8s: u64,
+    pub collateral_received_drops: u64,
+    pub collateral_price_e8s: u64,
+    pub expires_at_ns: u64,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XrpSpPayoutAllocation {
+    pub claimant: Principal,
+    pub payout_address: String,
+    pub destination_tag: Option<u32>,
+    pub drops: u64,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XrpSpAbsorbRequest {
+    pub vault_id: u64,
+    pub icusd_burned_e8s: u64,
+    pub proof: crate::icrc3_proof::SpWritedownProof,
+    pub allocations: Vec<XrpSpPayoutAllocation>,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XrpSpPayoutClaim {
+    pub claimant: Principal,
+    pub claim_id: u64,
+    pub payout_address: String,
+    pub destination_tag: Option<u32>,
+    pub drops: u64,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XrpSpAbsorbResult {
+    pub success: bool,
+    pub vault_id: u64,
+    pub liquidated_debt_e8s: u64,
+    pub collateral_received_drops: u64,
+    pub payout_claims: Vec<XrpSpPayoutClaim>,
+    pub block_index: u64,
     pub collateral_price_e8s: u64,
 }
 
@@ -573,10 +622,10 @@ pub struct CollateralTotals {
     pub collateral_type: Principal,
     pub symbol: String,
     pub decimals: u8,
-    pub total_collateral: u64,      // Raw token units
-    pub total_debt: u64,            // icUSD e8s
+    pub total_collateral: u64, // Raw token units
+    pub total_debt: u64,       // icUSD e8s
     pub vault_count: u64,
-    pub price: f64,                 // Last USD price
+    pub price: f64, // Last USD price
 }
 
 /// Per-collateral data captured in each hourly protocol snapshot.
@@ -646,7 +695,9 @@ pub enum ProtocolError {
     AlreadyProcessing,
     AnonymousCallerNotAllowed,
     CallerNotOwner,
-    AmountTooLow { minimum_amount: u64 },
+    AmountTooLow {
+        minimum_amount: u64,
+    },
     GenericError(String),
     /// Wave-8b LIQ-002 band-gate rejection. **Deactivated 2026-05-18 — no
     /// live code path emits this variant.** Retained in the enum so
@@ -679,7 +730,7 @@ impl From<GuardError> for ProtocolError {
             GuardError::AlreadyProcessing => Self::AlreadyProcessing,
             GuardError::TooManyConcurrentRequests => {
                 Self::TemporarilyUnavailable("too many concurrent requests".to_string())
-            },
+            }
             GuardError::StaleOperation => {
                 Self::TemporarilyUnavailable("previous operation is being cleaned up".to_string())
             }
@@ -803,9 +854,9 @@ pub fn prune_recovered_routing_state(
     now_ns: u64,
     bot_timeout_ns: u64,
 ) {
-    state
-        .bot_pending_vaults
-        .retain(|vid, ts| unhealthy_ids.contains(vid) && now_ns.saturating_sub(*ts) < bot_timeout_ns);
+    state.bot_pending_vaults.retain(|vid, ts| {
+        unhealthy_ids.contains(vid) && now_ns.saturating_sub(*ts) < bot_timeout_ns
+    });
     state
         .sp_attempted_vaults
         .retain(|vid| unhealthy_ids.contains(vid));
@@ -855,7 +906,8 @@ pub async fn check_vaults() {
     let now = ic_cdk::api::time();
 
     let expired_claims: Vec<(u64, crate::state::BotClaim)> = read_state(|s| {
-        s.bot_claims.iter()
+        s.bot_claims
+            .iter()
             .filter(|(_, claim)| now.saturating_sub(claim.claimed_at) >= BOT_CLAIM_TIMEOUT_NS)
             .map(|(vid, claim)| (*vid, claim.clone()))
             .collect()
@@ -961,7 +1013,10 @@ pub async fn check_vaults() {
 
     let dummy_rate = read_state(|s| {
         s.last_icp_rate.unwrap_or_else(|| {
-            log!(INFO, "[check_vaults] No ICP rate available, using default rate");
+            log!(
+                INFO,
+                "[check_vaults] No ICP rate available, using default rate"
+            );
             UsdIcp::from(dec!(1.0))
         })
     });
@@ -987,7 +1042,11 @@ pub async fn check_vaults() {
     log!(
         INFO,
         "[check_vaults] {} tick: visited {} vault(s), threshold_key={}, found {} unhealthy",
-        if scan.was_full_sweep { "full-sweep" } else { "band-only" },
+        if scan.was_full_sweep {
+            "full-sweep"
+        } else {
+            "band-only"
+        },
         scan.vaults_visited,
         scan.threshold_key,
         scan.unhealthy_vaults.len(),
@@ -1004,10 +1063,8 @@ pub async fn check_vaults() {
     // liquidation). See `prune_recovered_routing_state` doc.
     let now = ic_cdk::api::time();
     let bot_timeout_ns: u64 = 300_000_000_000; // 5 min
-    let scan_unhealthy_ids: std::collections::BTreeSet<u64> = unhealthy_vaults
-        .iter()
-        .map(|v| v.vault_id)
-        .collect();
+    let scan_unhealthy_ids: std::collections::BTreeSet<u64> =
+        unhealthy_vaults.iter().map(|v| v.vault_id).collect();
     mutate_state(|s| {
         prune_recovered_routing_state(s, &scan_unhealthy_ids, now, bot_timeout_ns);
     });
@@ -1042,20 +1099,24 @@ pub async fn check_vaults() {
 
         // Build enriched notification payload
         let vault_notifications: Vec<LiquidatableVaultInfo> = read_state(|s| {
-            unhealthy_vaults.iter().map(|v| {
-                let collateral_price_usd = s.get_collateral_price_decimal(&v.collateral_type)
-                    .map(|p| UsdIcp::from(p))
-                    .unwrap_or(UsdIcp::from(rust_decimal::Decimal::ZERO));
-                let optimal_liq = s.compute_partial_liquidation_cap(v, collateral_price_usd);
-                LiquidatableVaultInfo {
-                    vault_id: v.vault_id,
-                    collateral_type: v.collateral_type,
-                    debt_amount: v.borrowed_icusd_amount.to_u64(),
-                    collateral_amount: v.collateral_amount,
-                    recommended_liquidation_amount: optimal_liq.to_u64(),
-                    collateral_price_e8s: collateral_price_usd.to_e8s(),
-                }
-            }).collect()
+            unhealthy_vaults
+                .iter()
+                .map(|v| {
+                    let collateral_price_usd = s
+                        .get_collateral_price_decimal(&v.collateral_type)
+                        .map(|p| UsdIcp::from(p))
+                        .unwrap_or(UsdIcp::from(rust_decimal::Decimal::ZERO));
+                    let optimal_liq = s.compute_partial_liquidation_cap(v, collateral_price_usd);
+                    LiquidatableVaultInfo {
+                        vault_id: v.vault_id,
+                        collateral_type: v.collateral_type,
+                        debt_amount: v.borrowed_icusd_amount.to_u64(),
+                        collateral_amount: v.collateral_amount,
+                        recommended_liquidation_amount: optimal_liq.to_u64(),
+                        collateral_price_e8s: collateral_price_usd.to_e8s(),
+                    }
+                })
+                .collect()
         });
 
         // ── Priority-ordered liquidation cascade ──
@@ -1079,10 +1140,11 @@ pub async fn check_vaults() {
         let mut for_pool: Vec<LiquidatableVaultInfo> = Vec::new();
 
         for vault_info in &vault_notifications {
-            let bot_eligible = bot_canister.is_some()
-                && bot_allowed.contains(&vault_info.collateral_type);
+            let bot_eligible =
+                bot_canister.is_some() && bot_allowed.contains(&vault_info.collateral_type);
 
-            let sp_already_tried = read_state(|s| s.sp_attempted_vaults.contains(&vault_info.vault_id));
+            let sp_already_tried =
+                read_state(|s| s.sp_attempted_vaults.contains(&vault_info.vault_id));
 
             if sp_already_tried {
                 // SP already had its shot → manual only, skip entirely
@@ -1094,9 +1156,8 @@ pub async fn check_vaults() {
                 for_pool.push(vault_info.clone());
             } else {
                 // Bot-eligible: check if we already sent it and it timed out
-                let pending_since = read_state(|s| {
-                    s.bot_pending_vaults.get(&vault_info.vault_id).copied()
-                });
+                let pending_since =
+                    read_state(|s| s.bot_pending_vaults.get(&vault_info.vault_id).copied());
                 match pending_since {
                     None => {
                         // First time seeing this vault → send to bot
@@ -1141,14 +1202,15 @@ pub async fn check_vaults() {
             if !for_bot.is_empty() {
                 let count = for_bot.len();
                 ic_cdk::spawn(async move {
-                    let result: Result<(), _> = ic_cdk::call(
-                        bot,
-                        "notify_liquidatable_vaults",
-                        (for_bot,),
-                    )
-                    .await;
+                    let result: Result<(), _> =
+                        ic_cdk::call(bot, "notify_liquidatable_vaults", (for_bot,)).await;
                     if let Err((code, msg)) = result {
-                        log!(INFO, "[check_vaults] ERROR: bot notification failed: {:?} {}", code, msg);
+                        log!(
+                            INFO,
+                            "[check_vaults] ERROR: bot notification failed: {:?} {}",
+                            code,
+                            msg
+                        );
                     }
                 });
                 log!(
@@ -1168,12 +1230,8 @@ pub async fn check_vaults() {
                 let count = for_pool.len();
                 let dispatched_ids = pool_vault_ids.clone();
                 ic_cdk::spawn(async move {
-                    let result: Result<(), _> = ic_cdk::call(
-                        pool,
-                        "notify_liquidatable_vaults",
-                        (for_pool,),
-                    )
-                    .await;
+                    let result: Result<(), _> =
+                        ic_cdk::call(pool, "notify_liquidatable_vaults", (for_pool,)).await;
                     let normalized: Result<(), (i32, String)> =
                         result.map_err(|(code, msg)| (code as i32, msg));
                     if let Err((code, msg)) = &normalized {
@@ -1217,19 +1275,20 @@ pub fn compute_collateral_ratio(vault: &Vault, _rate: UsdIcp, state: &state::Sta
     if vault.borrowed_icusd_amount == 0 {
         return Ratio::from(Decimal::MAX);
     }
-    let margin_value: ICUSD = if let Some(config) = state.get_collateral_config(&vault.collateral_type) {
-        if let Some(price) = config.last_price {
-            let price_dec = Decimal::from_f64(price).unwrap_or(Decimal::ZERO);
-            numeric::collateral_usd_value(vault.collateral_amount, price_dec, config.decimals)
+    let margin_value: ICUSD =
+        if let Some(config) = state.get_collateral_config(&vault.collateral_type) {
+            if let Some(price) = config.last_price {
+                let price_dec = Decimal::from_f64(price).unwrap_or(Decimal::ZERO);
+                numeric::collateral_usd_value(vault.collateral_amount, price_dec, config.decimals)
+            } else {
+                // No price available — return zero ratio (conservative / safe direction).
+                // Operations must independently check last_price.is_some() and error out.
+                return Ratio::from(Decimal::ZERO);
+            }
         } else {
-            // No price available — return zero ratio (conservative / safe direction).
-            // Operations must independently check last_price.is_some() and error out.
+            // No config — return zero ratio. This vault's collateral type is unknown.
             return Ratio::from(Decimal::ZERO);
-        }
-    } else {
-        // No config — return zero ratio. This vault's collateral type is unknown.
-        return Ratio::from(Decimal::ZERO);
-    };
+        };
     margin_value / vault.borrowed_icusd_amount
 }
 
@@ -1268,8 +1327,11 @@ pub(crate) async fn process_pending_transfer() {
     let pending_transfers = read_state(|s| {
         // Log for visibility
         if !s.pending_margin_transfers.is_empty() {
-            log!(INFO, "[process_pending_transfer] Found {} pending margin transfers",
-                 s.pending_margin_transfers.len());
+            log!(
+                INFO,
+                "[process_pending_transfer] Found {} pending margin transfers",
+                s.pending_margin_transfers.len()
+            );
         }
 
         s.pending_margin_transfers
@@ -1280,15 +1342,23 @@ pub(crate) async fn process_pending_transfer() {
     for (key, transfer) in pending_transfers {
         let (vault_id, _key_owner) = key;
         // Look up per-collateral config for ledger and fee; fall back to global ICP defaults
-        let (ledger, transfer_fee) = read_state(|s| {
-            match s.get_collateral_config(&transfer.collateral_type) {
-                Some(config) => (config.ledger_canister_id, ICP::from(config.ledger_fee)),
-                None => (s.icp_ledger_principal, s.icp_ledger_fee),
-            }
-        });
+        let (ledger, transfer_fee) =
+            read_state(
+                |s| match s.get_collateral_config(&transfer.collateral_type) {
+                    Some(config) => (config.ledger_canister_id, ICP::from(config.ledger_fee)),
+                    None => (s.icp_ledger_principal, s.icp_ledger_fee),
+                },
+            );
 
         if transfer.margin <= transfer_fee {
-            log!(INFO, "[transfering_margins] Skipping vault {} owner {} - margin {} <= fee {}, removing", vault_id, transfer.owner, transfer.margin, transfer_fee);
+            log!(
+                INFO,
+                "[transfering_margins] Skipping vault {} owner {} - margin {} <= fee {}, removing",
+                vault_id,
+                transfer.owner,
+                transfer.margin,
+                transfer_fee
+            );
             mutate_state(|s| drop_pending(&mut s.pending_margin_transfers, &key));
             continue;
         }
@@ -1308,7 +1378,9 @@ pub(crate) async fn process_pending_transfer() {
                     transfer.owner,
                     ledger
                 );
-                mutate_state(|s| crate::event::record_margin_transfer(s, vault_id, transfer.owner, block_index));
+                mutate_state(|s| {
+                    crate::event::record_margin_transfer(s, vault_id, transfer.owner, block_index)
+                });
             }
             Err(error) => {
                 // Improved error logging with more details
@@ -1323,22 +1395,28 @@ pub(crate) async fn process_pending_transfer() {
 
                 // If there was a transfer fee error, update the fee in collateral config
                 if let TransferError::BadFee { expected_fee } = error {
-                    log!(INFO, "[transfering_margins] Updating transfer fee to: {:?}", expected_fee);
+                    log!(
+                        INFO,
+                        "[transfering_margins] Updating transfer fee to: {:?}",
+                        expected_fee
+                    );
                     mutate_state(|s| {
                         let expected_fee_u64: u64 = expected_fee
                             .0
                             .try_into()
                             .expect("failed to convert Nat to u64");
-                        if let Some(config) = s.get_collateral_config_mut(&transfer.collateral_type) {
+                        if let Some(config) = s.get_collateral_config_mut(&transfer.collateral_type)
+                        {
                             config.ledger_fee = expected_fee_u64;
                         }
                         // Also update global icp_ledger_fee if this is the ICP collateral
                         let icp_ct = s.icp_collateral_type();
-                        let resolved_ct = if transfer.collateral_type == candid::Principal::anonymous() {
-                            icp_ct
-                        } else {
-                            transfer.collateral_type
-                        };
+                        let resolved_ct =
+                            if transfer.collateral_type == candid::Principal::anonymous() {
+                                icp_ct
+                            } else {
+                                transfer.collateral_type
+                            };
                         if resolved_ct == icp_ct {
                             s.icp_ledger_fee = ICP::from(expected_fee_u64);
                         }
@@ -1381,15 +1459,23 @@ pub(crate) async fn process_pending_transfer() {
 
     for (key, transfer) in pending_excess {
         let (vault_id, _key_owner) = key;
-        let (ledger, transfer_fee) = read_state(|s| {
-            match s.get_collateral_config(&transfer.collateral_type) {
-                Some(config) => (config.ledger_canister_id, ICP::from(config.ledger_fee)),
-                None => (s.icp_ledger_principal, s.icp_ledger_fee),
-            }
-        });
+        let (ledger, transfer_fee) =
+            read_state(
+                |s| match s.get_collateral_config(&transfer.collateral_type) {
+                    Some(config) => (config.ledger_canister_id, ICP::from(config.ledger_fee)),
+                    None => (s.icp_ledger_principal, s.icp_ledger_fee),
+                },
+            );
 
         if transfer.margin <= transfer_fee {
-            log!(INFO, "[transfering_excess] Skipping vault {} owner {} - margin {} <= fee {}, removing", vault_id, transfer.owner, transfer.margin, transfer_fee);
+            log!(
+                INFO,
+                "[transfering_excess] Skipping vault {} owner {} - margin {} <= fee {}, removing",
+                vault_id,
+                transfer.owner,
+                transfer.margin,
+                transfer_fee
+            );
             mutate_state(|s| drop_pending(&mut s.pending_excess_transfers, &key));
             continue;
         }
@@ -1421,21 +1507,27 @@ pub(crate) async fn process_pending_transfer() {
                     error
                 );
                 if let TransferError::BadFee { expected_fee } = error {
-                    log!(INFO, "[transfering_excess] Updating transfer fee to: {:?}", expected_fee);
+                    log!(
+                        INFO,
+                        "[transfering_excess] Updating transfer fee to: {:?}",
+                        expected_fee
+                    );
                     mutate_state(|s| {
                         let expected_fee_u64: u64 = expected_fee
                             .0
                             .try_into()
                             .expect("failed to convert Nat to u64");
-                        if let Some(config) = s.get_collateral_config_mut(&transfer.collateral_type) {
+                        if let Some(config) = s.get_collateral_config_mut(&transfer.collateral_type)
+                        {
                             config.ledger_fee = expected_fee_u64;
                         }
                         let icp_ct = s.icp_collateral_type();
-                        let resolved_ct = if transfer.collateral_type == candid::Principal::anonymous() {
-                            icp_ct
-                        } else {
-                            transfer.collateral_type
-                        };
+                        let resolved_ct =
+                            if transfer.collateral_type == candid::Principal::anonymous() {
+                                icp_ct
+                            } else {
+                                transfer.collateral_type
+                            };
                         if resolved_ct == icp_ct {
                             s.icp_ledger_fee = ICP::from(expected_fee_u64);
                         }
@@ -1472,15 +1564,22 @@ pub(crate) async fn process_pending_transfer() {
     });
 
     for (icusd_block_index, pending_transfer) in pending_redemptions {
-        let (ledger, transfer_fee) = read_state(|s| {
-            match s.get_collateral_config(&pending_transfer.collateral_type) {
-                Some(config) => (config.ledger_canister_id, ICP::from(config.ledger_fee)),
-                None => (s.icp_ledger_principal, s.icp_ledger_fee),
-            }
-        });
+        let (ledger, transfer_fee) =
+            read_state(
+                |s| match s.get_collateral_config(&pending_transfer.collateral_type) {
+                    Some(config) => (config.ledger_canister_id, ICP::from(config.ledger_fee)),
+                    None => (s.icp_ledger_principal, s.icp_ledger_fee),
+                },
+            );
 
         if pending_transfer.margin <= transfer_fee {
-            log!(INFO, "[transfering_redemptions] Skipping redemption {} - margin {} <= fee {}, removing", icusd_block_index, pending_transfer.margin, transfer_fee);
+            log!(
+                INFO,
+                "[transfering_redemptions] Skipping redemption {} - margin {} <= fee {}, removing",
+                icusd_block_index,
+                pending_transfer.margin,
+                transfer_fee
+            );
             mutate_state(|s| drop_pending(&mut s.pending_redemption_transfer, &icusd_block_index));
             continue;
         }
@@ -1514,21 +1613,28 @@ pub(crate) async fn process_pending_transfer() {
                     error
                 );
                 if let TransferError::BadFee { expected_fee } = error {
-                    log!(INFO, "[transfering_redemptions] Updating transfer fee to: {:?}", expected_fee);
+                    log!(
+                        INFO,
+                        "[transfering_redemptions] Updating transfer fee to: {:?}",
+                        expected_fee
+                    );
                     mutate_state(|s| {
                         let expected_fee_u64: u64 = expected_fee
                             .0
                             .try_into()
                             .expect("failed to convert Nat to u64");
-                        if let Some(config) = s.get_collateral_config_mut(&pending_transfer.collateral_type) {
+                        if let Some(config) =
+                            s.get_collateral_config_mut(&pending_transfer.collateral_type)
+                        {
                             config.ledger_fee = expected_fee_u64;
                         }
                         let icp_ct = s.icp_collateral_type();
-                        let resolved_ct = if pending_transfer.collateral_type == candid::Principal::anonymous() {
-                            icp_ct
-                        } else {
-                            pending_transfer.collateral_type
-                        };
+                        let resolved_ct =
+                            if pending_transfer.collateral_type == candid::Principal::anonymous() {
+                                icp_ct
+                            } else {
+                                pending_transfer.collateral_type
+                            };
                         if resolved_ct == icp_ct {
                             s.icp_ledger_fee = ICP::from(expected_fee_u64);
                         }
@@ -1549,7 +1655,9 @@ pub(crate) async fn process_pending_transfer() {
                              after {} retries. Owner: {}, amount: {}. Use recover_pending_transfer to retry manually.",
                             icusd_block_index, retries, pending_transfer.owner, pending_transfer.margin
                         );
-                        mutate_state(|s| drop_pending(&mut s.pending_redemption_transfer, &icusd_block_index));
+                        mutate_state(|s| {
+                            drop_pending(&mut s.pending_redemption_transfer, &icusd_block_index)
+                        });
                     }
                 }
             }
@@ -1572,18 +1680,25 @@ pub(crate) async fn process_pending_transfer() {
             crate::numeric::ICUSD::new(refund.amount_e8s),
             refund.user,
             refund.op_nonce,
-        ).await {
+        )
+        .await
+        {
             Ok(block_index) => {
                 log!(INFO,
                     "[refunding] icUSD refund settled for {} (burn block {}, refund block {}, amount {})",
                     refund.user, icusd_block_index, block_index, refund.amount_e8s
                 );
-                mutate_state(|s| { s.pending_refunds.remove(&icusd_block_index); });
+                mutate_state(|s| {
+                    s.pending_refunds.remove(&icusd_block_index);
+                });
             }
             Err(error) => {
-                log!(INFO,
+                log!(
+                    INFO,
                     "[refunding] icUSD refund failed for {} (burn block {}): {}. Will retry.",
-                    refund.user, icusd_block_index, error
+                    refund.user,
+                    icusd_block_index,
+                    error
                 );
                 if let TransferError::BadFee { expected_fee } = error {
                     // Refresh fee cache; do NOT increment retry count on BadFee.
@@ -1596,15 +1711,23 @@ pub(crate) async fn process_pending_transfer() {
                         if let Some(r) = s.pending_refunds.get_mut(&icusd_block_index) {
                             r.retry_count = r.retry_count.saturating_add(1);
                             r.retry_count
-                        } else { 0 }
+                        } else {
+                            0
+                        }
                     });
                     if retries >= MAX_PENDING_RETRIES {
-                        log!(INFO,
+                        log!(
+                            INFO,
                             "[refunding] CRITICAL: abandoning icUSD refund for {} (burn block {}) \
                              after {} retries. Amount: {}. Manual reconciliation required.",
-                            refund.user, icusd_block_index, retries, refund.amount_e8s
+                            refund.user,
+                            icusd_block_index,
+                            retries,
+                            refund.amount_e8s
                         );
-                        mutate_state(|s| { s.pending_refunds.remove(&icusd_block_index); });
+                        mutate_state(|s| {
+                            s.pending_refunds.remove(&icusd_block_index);
+                        });
                     }
                 }
             }
@@ -1619,7 +1742,10 @@ pub(crate) async fn process_pending_transfer() {
             || !s.pending_refunds.is_empty()
     }) {
         // Schedule another check in 5 seconds
-        log!(INFO, "[process_pending_transfer] Scheduling another transfer attempt in 5 seconds");
+        log!(
+            INFO,
+            "[process_pending_transfer] Scheduling another transfer attempt in 5 seconds"
+        );
         ic_cdk_timers::set_timer(std::time::Duration::from_secs(5), || {
             ic_cdk::spawn(crate::process_pending_transfer())
         });

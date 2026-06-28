@@ -12,6 +12,8 @@
   import type { PoolStatus, UserPosition, CollateralInfo } from '../../services/stabilityPoolService';
   import type { ProtocolStatusDTO } from '../../services/types';
   import { CANISTER_IDS } from '../../config';
+  import XrpPayoutRouting from './XrpPayoutRouting.svelte';
+  import { isIcrcClaimableCollateral } from '../../services/xrpPayoutHelpers';
 
   export let poolStatus: PoolStatus | null = null;
   export let userPosition: UserPosition | null = null;
@@ -30,10 +32,11 @@
   // Registries
   $: stablecoinRegistry = poolStatus?.stablecoin_registry ?? [];
   const HIDDEN_COLLATERAL = new Set(['PHASMA']);
-  const COLLATERAL_ORDER: Record<string, number> = { ICP: 0, ckBTC: 1, ckETH: 2, ckXAUT: 3, nICP: 4, BOB: 5, EXE: 6 };
+  const COLLATERAL_ORDER: Record<string, number> = { ICP: 0, XRP: 1, ckBTC: 2, ckETH: 3, ckXAUT: 4, nICP: 5, BOB: 6, EXE: 7 };
   $: collateralRegistry = (poolStatus?.collateral_registry ?? [])
     .filter(c => !HIDDEN_COLLATERAL.has(c.symbol))
     .sort((a, b) => (COLLATERAL_ORDER[a.symbol] ?? 99) - (COLLATERAL_ORDER[b.symbol] ?? 99));
+  $: icrcCollateralRegistry = collateralRegistry.filter(c => isIcrcClaimableCollateral(c.ledger_id));
   $: registries = { stablecoins: stablecoinRegistry, collateral: collateralRegistry };
 
   // Pool stats
@@ -70,7 +73,7 @@
   $: activeStables = userStables.filter(([_, amount]: [any, bigint]) => amount > 0n);
   $: totalUsdValue = userPosition ? formatStableTokenDisplay(userPosition.total_usd_value_e8s, 8) : '0.0000';
   $: gains = userPosition?.collateral_gains ?? [];
-  $: hasAnyGains = gains.some(([_, a]) => a > 0n);
+  $: hasClaimableIcrcGains = gains.some(([ledger, amount]) => amount > 0n && isIcrcClaimableCollateral(ledger));
   $: optedOut = new Set((userPosition?.opted_out_collateral ?? []).map(p => p.toText()));
 
   // Does the user hold icUSD in the pool?
@@ -225,7 +228,7 @@
         <span class="stat-label">
           Collateral Gains
           <span class="opt-out-inline" on:click|stopPropagation>
-            {#if hasAnyGains}
+            {#if hasClaimableIcrcGains}
               <button class="claim-all-inline" on:click={claimAll} disabled={claimAllLoading}>
                 {claimAllLoading ? '…' : 'Claim'}
               </button>
@@ -251,7 +254,7 @@
             {/if}
             {#if showOptOutMenu}
               <div class="opt-out-menu">
-                {#each collateralRegistry as collateral}
+                {#each icrcCollateralRegistry as collateral}
                   {@const key = collateral.ledger_id.toText()}
                   {@const isOut = optedOut.has(key)}
                   <button
@@ -293,6 +296,13 @@
         </div>
       {/if}
     </div>
+
+    <XrpPayoutRouting
+      {collateralRegistry}
+      {userPosition}
+      {isConnected}
+      on:success={(event) => dispatch('success', event.detail)}
+    />
 
     {#if error}
       <div class="error-bar">{error}</div>

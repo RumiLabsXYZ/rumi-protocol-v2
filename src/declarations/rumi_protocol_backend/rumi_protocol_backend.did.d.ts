@@ -1190,7 +1190,11 @@ export type Result_19 = { 'Ok' : ChainStabilityPoolLiquidationResult } |
   { 'Err' : ProtocolError };
 export type Result_2 = { 'Ok' : string } |
   { 'Err' : ProtocolError };
-export type Result_20 = { 'Ok' : number } |
+export type Result_20 = { 'Ok' : XrpSpAbsorbResult } |
+  { 'Err' : ProtocolError };
+export type Result_21 = { 'Ok' : XrpSpAbsorbPreflight } |
+  { 'Err' : ProtocolError };
+export type Result_22 = { 'Ok' : number } |
   { 'Err' : ProtocolError };
 export type Result_3 = { 'Ok' : SuccessWithFee } |
   { 'Err' : ProtocolError };
@@ -1241,6 +1245,7 @@ export interface SuccessWithFee {
   'fee_amount_paid' : bigint,
   'stable_pulled_e6s' : [] | [bigint],
   'collateral_amount_received' : [] | [bigint],
+  'xrp_claim_id' : [] | [bigint],
 }
 export interface SupplyAudit {
   'total_e8s' : bigint,
@@ -1364,6 +1369,41 @@ export interface XrpSettlement {
   'destination_tag' : [] | [number],
   'last_ledger_sequence' : number,
   'tx_hash' : string,
+}
+export interface XrpSpAbsorbPreflight {
+  'collateral_price_e8s' : bigint,
+  'icusd_burn_e8s' : bigint,
+  'vault_id' : bigint,
+  'collateral_received_drops' : bigint,
+  'expires_at_ns' : bigint,
+}
+export interface XrpSpAbsorbRequest {
+  'vault_id' : bigint,
+  'allocations' : Array<XrpSpPayoutAllocation>,
+  'icusd_burned_e8s' : bigint,
+  'proof' : SpWritedownProof,
+}
+export interface XrpSpAbsorbResult {
+  'collateral_price_e8s' : bigint,
+  'liquidated_debt_e8s' : bigint,
+  'block_index' : bigint,
+  'vault_id' : bigint,
+  'payout_claims' : Array<XrpSpPayoutClaim>,
+  'collateral_received_drops' : bigint,
+  'success' : boolean,
+}
+export interface XrpSpPayoutAllocation {
+  'claimant' : Principal,
+  'destination_tag' : [] | [number],
+  'payout_address' : string,
+  'drops' : bigint,
+}
+export interface XrpSpPayoutClaim {
+  'claim_id' : bigint,
+  'claimant' : Principal,
+  'destination_tag' : [] | [number],
+  'payout_address' : string,
+  'drops' : bigint,
 }
 export interface XrpVaultOpenInfo {
   'reserve_base_drops' : bigint,
@@ -1755,11 +1795,23 @@ export interface _SERVICE {
     [bigint, bigint, bigint, Principal],
     Result_18
   >,
+  'stability_pool_liquidate_xrp_vault' : ActorMethod<
+    [XrpSpAbsorbRequest],
+    Result_20
+  >,
   'stability_pool_preflight_chain_absorb' : ActorMethod<
     [bigint, bigint],
     Result
   >,
-  'submit_burn_proof' : ActorMethod<[number, string], Result_20>,
+  'stability_pool_preflight_xrp_absorb' : ActorMethod<
+    [bigint, bigint],
+    Result_21
+  >,
+  'stability_pool_xrp_claim_outstanding' : ActorMethod<
+    [bigint, Principal],
+    Result_14
+  >,
+  'submit_burn_proof' : ActorMethod<[number, string], Result_22>,
   'sweep_xrp_pending_open' : ActorMethod<[bigint], Result>,
   'unfreeze_protocol' : ActorMethod<[], Result>,
   'update_collateral_config' : ActorMethod<

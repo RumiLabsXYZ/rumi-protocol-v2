@@ -605,7 +605,7 @@ fn xrp_native_happy_path_open_deposit_borrow_repay_close_settle() {
     // ── borrow 50 icUSD (XRP price auto-pulled from XRC: $0.50) ──────────────
     // 499 XRP * $0.50 = ~$249 collateral; $50 debt -> CR ~498% (> 150%).
     let borrow_amount = 50 * E8;
-    decode_result::<rumi_protocol_backend::SuccessWithFee>(
+    let borrow_result = decode_result::<rumi_protocol_backend::SuccessWithFee>(
         update_as(
             &pic,
             backend,
@@ -620,6 +620,10 @@ fn xrp_native_happy_path_open_deposit_borrow_repay_close_settle() {
         "borrow_from_vault",
     )
     .expect("borrow ok");
+    assert_eq!(
+        borrow_result.xrp_claim_id, None,
+        "non-liquidation SuccessWithFee results must not expose an XRP claim id"
+    );
     let v = get_vault(&pic, backend, vault_id).expect("vault");
     assert_eq!(v.borrowed_icusd_amount, borrow_amount, "debt = borrowed");
     let bal = icusd_balance(&pic, icusd, user());
@@ -809,8 +813,8 @@ fn xrp_native_liquidation_is_claim_based() {
     // Native-XRP is excluded from automated SP/bot liquidation (P5), so liquidation
     // is the external, claim-based path: the liquidator repays part of the debt and
     // the seized XRP becomes an XrpClaim they later settle to an XRPL address.
-    let before = xrp_claims(&pic, backend).len();
-    decode_result::<rumi_protocol_backend::SuccessWithFee>(
+    let before_claims = xrp_claims_full(&pic, backend);
+    let liquidation_result = decode_result::<rumi_protocol_backend::SuccessWithFee>(
         update_as(
             &pic,
             backend,
@@ -825,10 +829,51 @@ fn xrp_native_liquidation_is_claim_based() {
         "liquidate_vault_partial",
     )
     .expect("claim-based partial liquidation ok");
-    let after = xrp_claims(&pic, backend);
+    let after = xrp_claims_full(&pic, backend);
     assert!(
-        after.len() > before,
-        "claim-based liquidation produced an XrpClaim (before={before}, after={after:?})"
+        after.len() > before_claims.len(),
+        "claim-based liquidation produced an XrpClaim (before={before_claims:?}, after={after:?})"
+    );
+
+    let claim_id = liquidation_result
+        .xrp_claim_id
+        .expect("native-XRP manual liquidation returns the liquidator reward claim id");
+    assert!(
+        before_claims.iter().all(|(id, _)| *id != claim_id),
+        "returned XRP claim id must be newly created during liquidation"
+    );
+    let (_, returned_claim) = after
+        .iter()
+        .find(|(id, _)| *id == claim_id)
+        .unwrap_or_else(|| panic!("returned XRP claim id {claim_id} absent from claims {after:?}"));
+    assert_eq!(
+        returned_claim.claimant,
+        liquidator(),
+        "returned claim id belongs to the liquidator reward claim"
+    );
+    assert_ne!(
+        returned_claim.claimant,
+        dev(),
+        "returned claim id must not be the protocol-fee claim"
+    );
+    assert_ne!(
+        returned_claim.claimant,
+        user(),
+        "returned claim id must not be owner-excess collateral"
+    );
+    assert_eq!(
+        returned_claim.custody_owner,
+        user(),
+        "liquidator reward claim pays from the liquidated vault custody owner"
+    );
+    assert_eq!(
+        returned_claim.custody_nonce, vault_id,
+        "liquidator reward claim pays from the liquidated vault custody nonce"
+    );
+    assert_eq!(
+        Some(returned_claim.drops),
+        liquidation_result.collateral_amount_received,
+        "returned claim id must carry the exact liquidator reward amount"
     );
 }
 
@@ -886,10 +931,15 @@ fn xrp_collateral_contract_matches_frontend_expectations() {
 /// IDs of all outstanding XRP claims (via the dev query). Returns [] if the query
 /// is absent (older builds) — the asserting tests treat that as a hard failure.
 fn xrp_claims(pic: &PocketIc, backend: Principal) -> Vec<u64> {
+    xrp_claims_full(pic, backend)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
+}
+
+fn xrp_claims_full(pic: &PocketIc, backend: Principal) -> Vec<(u64, XrpClaimView)> {
     match pic.query_call(backend, dev(), "get_xrp_claims", Encode!().unwrap()) {
-        Ok(WasmResult::Reply(b)) => Decode!(&b, Vec<(u64, XrpClaimView)>)
-            .map(|v| v.into_iter().map(|(id, _)| id).collect())
-            .unwrap_or_default(),
+        Ok(WasmResult::Reply(b)) => Decode!(&b, Vec<(u64, XrpClaimView)>).unwrap_or_default(),
         _ => Vec::new(),
     }
 }

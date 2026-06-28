@@ -37,11 +37,11 @@
   let opening = false;
   let checkingWallet = false;
   let busyVaultId: number | null = null;
-  let busyClaimId: number | null = null;
+  let busyClaimId: string | null = null;
   let lastConnected = false;
   // Per-claim destination address inputs, keyed by claim id.
-  let claimDest: Record<number, string> = {};
-  let claimTag: Record<number, string> = {};
+  let claimDest: Record<string, string> = {};
+  let claimTag: Record<string, string> = {};
 
   $: connected = $walletStore.isConnected;
 

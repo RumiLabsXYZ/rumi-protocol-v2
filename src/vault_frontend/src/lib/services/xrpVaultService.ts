@@ -28,6 +28,7 @@ import { walletStore } from '../stores/wallet';
 import { currentWalletType, WALLET_TYPES } from './auth';
 import { ApiClient } from './protocol/apiClient';
 import { callWithOisyFalseNegativeGuard, isOisyLandedSentinel } from './protocol/oisyResilience';
+import { mapOptionalXrpClaimId, xrpClaimIdToBigInt, type XrpClaimId } from './xrpPayoutHelpers';
 
 /** 1 XRP = 1,000,000 drops (XRPL native, 6 decimals). */
 export const DROPS_PER_XRP = 1_000_000;
@@ -56,16 +57,20 @@ export interface XrpPendingDepositView {
 }
 
 export interface XrpClaimView {
-  claimId: number;
+  claimId: XrpClaimId;
   /** XRP owed to the claimant, in drops. */
   drops: bigint;
   /** XRP owed, as a whole-XRP number (display). */
   xrp: number;
   createdAtMs: number;
+  /** Custody nonce used by native-XRP vault claims; matches vault id for manual recovery. */
+  custodyNonce: number;
+  vaultId: number;
   /** True once a settlement Payment has been signed + submitted (awaiting confirm). */
   inFlight: boolean;
   /** The in-flight Payment's local tx hash, if any. */
   inFlightTxHash: string | null;
+  quarantineReason: string | null;
 }
 
 export interface XrpOpResult<T> {
@@ -148,6 +153,7 @@ function readCachedPendingDeposits(owner = currentPrincipalText()): XrpPendingDe
         vaultId: p.vaultId,
         custodyAddress: p.custodyAddress,
         openedAtMs: Number.isFinite(p.openedAtMs) ? p.openedAtMs : p.updatedAtMs,
+        reserveBaseDrops: p.reserveBaseDrops ?? 0n,
       }));
   } catch {
     return [];
@@ -238,6 +244,7 @@ export class XrpVaultService {
             vaultId: Number(vaultId),
             custodyAddress: dep.custody_address,
             openedAtMs: Number(dep.opened_at_ns / 1_000_000n),
+            reserveBaseDrops: dep.reserve_base_drops,
           };
           rememberPendingDeposit(view);
           return {
@@ -255,6 +262,7 @@ export class XrpVaultService {
             vaultId: Number(result.Ok.vault_id),
             custodyAddress: result.Ok.custody_address,
             openedAtMs: Date.now(),
+            reserveBaseDrops: result.Ok.reserve_base_drops,
           });
           return {
             success: true,
@@ -317,12 +325,14 @@ export class XrpVaultService {
    * disappears from {@link getMyClaims}. Returns the (local) tx hash.
    */
   static async settleXrpClaim(
-    claimId: number,
+    claimId: XrpClaimId | number | bigint,
     destination: string,
     destinationTag?: number
   ): Promise<XrpOpResult<{ txHash: string }>> {
     return ApiClient.executeSequentialOperation(async () => {
       try {
+        const claimIdBig = xrpClaimIdToBigInt(claimId);
+        const claimIdText = claimIdBig.toString();
         if (
           destinationTag !== undefined &&
           (!Number.isInteger(destinationTag) || destinationTag < 0 || destinationTag > 0xffffffff)
@@ -332,8 +342,8 @@ export class XrpVaultService {
         const actor = await this.actor();
         const operation =
           destinationTag === undefined
-            ? () => actor.settle_xrp_claim(BigInt(claimId), destination)
-            : () => actor.settle_xrp_claim_with_tag(BigInt(claimId), destination, destinationTag);
+            ? () => actor.settle_xrp_claim(claimIdBig, destination)
+            : () => actor.settle_xrp_claim_with_tag(claimIdBig, destination, destinationTag);
         const result = await callWithOisyFalseNegativeGuard(
           operation,
           // Verifier: the first settle phase records `claim.settlement` BEFORE the
@@ -343,10 +353,10 @@ export class XrpVaultService {
           // false-negative isn't reported as a hard failure.
           async () => {
             const claims = await actor.get_my_xrp_claims();
-            const entry = claims.find(([id]) => Number(id) === claimId);
+            const entry = claims.find(([id]) => id.toString() === claimIdText);
             return !entry || entry[1].settlement.length > 0;
           },
-          destinationTag === undefined ? `settle_xrp_claim #${claimId}` : `settle_xrp_claim_with_tag #${claimId}`
+          destinationTag === undefined ? `settle_xrp_claim #${claimIdText}` : `settle_xrp_claim_with_tag #${claimIdText}`
         );
         if (isOisyLandedSentinel(result)) {
           return { success: true, oisyResilient: true, data: { txHash: '' } };
@@ -359,6 +369,13 @@ export class XrpVaultService {
         return { success: false, error: e instanceof Error ? e.message : String(e) };
       }
     });
+  }
+
+  static async hasOutstandingClaim(claimId: XrpClaimId | number | bigint): Promise<boolean> {
+    const claimIdText = xrpClaimIdToBigInt(claimId).toString();
+    const actor = await this.actor();
+    const claims = await actor.get_my_xrp_claims();
+    return claims.some(([id]) => id.toString() === claimIdText);
   }
 
   /** The caller's native-XRP vaults still awaiting their on-chain deposit. */
@@ -414,13 +431,17 @@ export class XrpVaultService {
       const claims = await actor.get_my_xrp_claims();
       return claims.map(([claimId, c]) => {
         const settlement = c.settlement.length > 0 ? c.settlement[0] : null;
+        const custodyNonce = Number(c.custody_nonce);
         return {
-          claimId: Number(claimId),
+          claimId: mapOptionalXrpClaimId([claimId]) ?? claimId.toString(),
           drops: c.drops,
           xrp: dropsToXrp(c.drops),
           createdAtMs: Number(c.created_at_ns / 1_000_000n),
+          custodyNonce,
+          vaultId: custodyNonce,
           inFlight: settlement !== null,
           inFlightTxHash: settlement ? settlement.tx_hash : null,
+          quarantineReason: c.quarantine_reason.length > 0 ? c.quarantine_reason[0] ?? null : null,
         };
       });
     } catch (e) {

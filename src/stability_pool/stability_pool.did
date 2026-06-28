@@ -66,10 +66,21 @@ type UserStabilityPosition = record {
   cfx_claims : opt vec record { principal; nat };
   opted_out_collateral : vec principal;
   native_payout_addresses : opt vec record { principal; text };
+  native_payout_destination_tags : opt vec record { principal; nat32 };
   deposit_timestamp : nat64;
   total_claimed_gains : vec record { principal; nat64 };
   total_usd_value_e8s : nat64;
   total_interest_earned_e8s : nat64;
+};
+
+type NativeXrpPendingPayout = record {
+  claim_id : nat64;
+  collateral_type : principal;
+  vault_id : nat64;
+  drops : nat64;
+  payout_address : text;
+  destination_tag : opt nat32;
+  created_at_ns : nat64;
 };
 
 // ── Liquidation types ──
@@ -254,6 +265,8 @@ type StabilityPoolError = variant {
   AlreadyOptedIn : record { collateral : principal };
   PayoutAddressRequired : record { collateral : principal };
   InvalidPayoutAddress : record { reason : text };
+  XrpClaimStillOutstanding : record { claim_id : nat64 };
+  XrpClaimStatusCheckFailed : record { reason : text };
   RefundClaimNotFound;
 };
 
@@ -377,6 +390,8 @@ service : (StabilityPoolInitArgs) -> {
   opt_out_cfx : (principal) -> (variant { Ok; Err : StabilityPoolError });
   opt_in_cfx : (principal) -> (variant { Ok; Err : StabilityPoolError });
   opt_in_native_collateral : (principal, text) -> (variant { Ok; Err : StabilityPoolError });
+  opt_in_native_collateral_with_tag : (principal, text, opt nat32) -> (variant { Ok; Err : StabilityPoolError });
+  ack_native_xrp_payout_settled : (nat64) -> (variant { Ok; Err : StabilityPoolError });
 
   // ── Liquidation ──
   notify_liquidatable_vaults : (vec LiquidatableVaultInfo) -> (vec LiquidationResult);
@@ -418,6 +433,7 @@ service : (StabilityPoolInitArgs) -> {
   get_pool_event_count : () -> (nat64) query;
   list_depositor_principals : () -> (vec principal) query;
   get_pending_refunds : (opt principal) -> (vec PendingRefund) query;
+  get_my_native_xrp_payouts : () -> (vec NativeXrpPendingPayout) query;
   get_pending_chain_absorbs : () -> (vec ChainSpAbsorbIntent) query;
   get_completed_chain_absorbs : (opt nat64) -> (vec ChainSpAbsorbCompletion) query;
   get_chain_absorb_auto_status : () -> (ChainAbsorbAutoStatus) query;
