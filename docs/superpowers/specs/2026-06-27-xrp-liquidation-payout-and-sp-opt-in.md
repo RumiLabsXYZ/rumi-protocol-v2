@@ -4,6 +4,30 @@ Status: **implemented on `codex/xrp-liquidation-payout-ui`; adversarially revise
 
 Date: 2026-06-27.
 
+## Post-review amendments (2026-06-28)
+
+Adversarial review of PR #292 confirmed two fund-safety defects on the new SP
+native-XRP absorb path. Both are fixed in `stability_pool_liquidate_xrp_vault_in_state`:
+
+- **B-1 (protocol-fee cut stranded).** The submit debits the vault the GROSS
+  `total_to_seize_drops` but only created depositor claims summing to the NET
+  `collateral_received_drops`, leaving the protocol cut with no claim. Fix: create a
+  developer-settleable `XrpClaim` for `protocol_cut = total_to_seize_drops -
+  collateral_received_drops`, mirroring the manual native-XRP paths. Conservation now
+  holds: `sum(all XrpClaims) == collateral seized`.
+- **B-2 (burned icUSD stranded on preflight expiry).** This **overrides backend
+  requirement 17's "unexpired preflight"**: the post-burn submit now honors a
+  persisted-but-expired preflight reservation, because the icUSD is already burned and
+  the reservation is the snapshot the SP committed to. Safety is preserved by the
+  single-use verified burn proof, the registered-SP caller check, and two new
+  pre-mutation conservation guards that reject (before any state change) if, since the
+  preflight, the vault's collateral fell below the reserved gross seizure OR the vault's
+  live debt fell below the reserved burn (the latter directional so pool-limited partial
+  absorbs with `borrowed > burn` are still allowed). Together these prevent the
+  expiry-tolerant submit from over-seizing collateral or over-burning icUSD if a manual
+  liquidation races the absorb during the window. Expiry still blocks NEW vault mutations
+  via `ensure_no_active_xrp_sp_absorb_preflight`.
+
 ## Goal
 
 Users must never call canister functions manually to participate in XRP

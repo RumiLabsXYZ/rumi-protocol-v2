@@ -1494,18 +1494,28 @@ pub fn stability_pool_preflight_xrp_absorb_in_state(
     Ok(preflight)
 }
 
+/// Resolve the persisted preflight reservation for a POST-BURN submit.
+///
+/// Deliberately does NOT require the reservation to be unexpired. The SP burns
+/// icUSD before this submit, so the reservation is the sizing snapshot the SP
+/// already committed to by burning. Requiring an unexpired reservation here meant a
+/// backend outage longer than the preflight TTL after the burn would permanently
+/// strand the burned icUSD with no recovery (review blocker B-2). Honoring an
+/// expired-but-present reservation is safe: the reservation persists in state until
+/// the submit consumes it, the burn proof is independently verified and single-use
+/// (`consumed_writedown_proofs`), the caller must be the registered SP, and the
+/// submit guards that the vault still holds at least the reserved gross seizure
+/// before minting any claim. Expiry still blocks NEW vault mutations via
+/// `ensure_no_active_xrp_sp_absorb_preflight`, and a fresh preflight overwrites a
+/// stale one for the same vault.
 fn matching_xrp_absorb_preflight(
     state: &crate::state::State,
     vault_id: u64,
     icusd_burned_e8s: u64,
     caller: Principal,
-    now_ns: u64,
 ) -> Option<crate::state::StoredXrpSpAbsorbPreflight> {
     let preflight = state.sp_xrp_absorb_preflights.get(&vault_id)?;
-    if preflight.caller == caller
-        && preflight.icusd_burn_e8s == icusd_burned_e8s
-        && preflight.expires_at_ns >= now_ns
-    {
+    if preflight.caller == caller && preflight.icusd_burn_e8s == icusd_burned_e8s {
         Some(preflight.clone())
     } else {
         None
@@ -1747,23 +1757,52 @@ pub fn stability_pool_liquidate_xrp_vault_in_state(
         )));
     }
 
-    let preflight = matching_xrp_absorb_preflight(
-        state,
-        request.vault_id,
-        request.icusd_burned_e8s,
-        caller,
-        now_ns,
-    )
-    .ok_or_else(|| {
-        ProtocolError::GenericError(
-            "XRP SP absorb requires a matching unexpired preflight".to_string(),
-        )
-    })?;
+    let preflight =
+        matching_xrp_absorb_preflight(state, request.vault_id, request.icusd_burned_e8s, caller)
+            .ok_or_else(|| {
+                ProtocolError::GenericError(
+                    "XRP SP absorb requires a matching preflight reservation".to_string(),
+                )
+            })?;
 
     let allocations =
         validate_xrp_sp_allocations(&request.allocations, preflight.collateral_received_drops)?;
     let fingerprint = xrp_sp_allocation_fingerprint(caller, &request, &allocations);
-    let custody_owner = ensure_xrp_sp_absorb_preflight_vault(state, request.vault_id)?.owner;
+    let (custody_owner, vault_collateral, vault_borrowed) = {
+        let vault = ensure_xrp_sp_absorb_preflight_vault(state, request.vault_id)?;
+        (
+            vault.owner,
+            vault.collateral_amount,
+            vault.borrowed_icusd_amount,
+        )
+    };
+    // Conservation guard (collateral side): the depositor allocations plus the developer
+    // protocol-fee claim below sum to the gross `total_to_seize_drops`, which is what we
+    // debit from the vault. Now that an expired reservation is honored on submit (B-2),
+    // the active-preflight lock can lapse and another path (e.g. a manual partial
+    // liquidation) could seize this vault in between. If the vault's collateral fell
+    // below the reserved gross seizure, abort BEFORE any mutation rather than minting
+    // claims that exceed the seized XRP.
+    if vault_collateral < preflight.total_to_seize_drops {
+        return Err(ProtocolError::GenericError(format!(
+            "XRP SP absorb vault {} collateral {} fell below the reserved seizure {} since preflight; aborting before mutation",
+            request.vault_id, vault_collateral, preflight.total_to_seize_drops
+        )));
+    }
+    // Conservation guard (debt side): the SP irrevocably burned `icusd_burned_e8s`
+    // before this submit. If a manual liquidation reduced the vault's debt below that
+    // burn during the same window, the silent `.min(borrowed)` cap at the writedown
+    // would clear less debt than was burned, over-burning icUSD with no offsetting debt
+    // (a direct loss to SP depositors). Abort before any mutation. The check is
+    // directional: a pool-limited PARTIAL absorb has `borrowed > burn` and is allowed,
+    // and price recovery does not change `borrowed`, so this does not regress B-2's
+    // intended post-burn finalization.
+    if vault_borrowed < ICUSD::new(request.icusd_burned_e8s) {
+        return Err(ProtocolError::GenericError(format!(
+            "XRP SP absorb vault {} live debt {:?} fell below the reserved burn {} since preflight; aborting before mutation",
+            request.vault_id, vault_borrowed, request.icusd_burned_e8s
+        )));
+    }
 
     let mut payout_claims = Vec::with_capacity(allocations.len());
     for allocation in &allocations {
@@ -1782,6 +1821,28 @@ pub fn stability_pool_liquidate_xrp_vault_in_state(
             destination_tag: allocation.destination_tag,
             drops: allocation.drops,
         });
+    }
+
+    // B-1: route the protocol's liquidation-fee cut to a developer-settleable
+    // XrpClaim, mirroring the manual native-XRP liquidation paths (see
+    // `liquidate_vault_partial`). The vault is debited the GROSS `total_to_seize_drops`
+    // below, but the depositor allocations only sum to the NET
+    // `collateral_received_drops`. Without this claim the protocol cut would be removed
+    // from the vault yet have no claim referencing it — stranded in custody and
+    // breaking `sum(claims) == collateral seized`.
+    let protocol_cut = preflight
+        .total_to_seize_drops
+        .saturating_sub(preflight.collateral_received_drops);
+    if protocol_cut > 0 {
+        let developer = state.developer_principal;
+        record_xrp_claim(
+            state,
+            developer,
+            custody_owner,
+            request.vault_id,
+            protocol_cut,
+            now_ns,
+        );
     }
 
     let mut interest_share = ICUSD::new(0);
@@ -8019,7 +8080,7 @@ mod xrp_sp_absorb_contract_tests {
     }
 
     #[test]
-    fn xrp_sp_absorb_requires_registered_sp_and_unexpired_matching_preflight() {
+    fn xrp_sp_absorb_requires_registered_sp_and_matching_preflight() {
         let mut no_preflight = test_state_with_xrp_vault();
         assert!(stability_pool_liquidate_xrp_vault_in_state(
             &mut no_preflight,
@@ -8041,23 +8102,9 @@ mod xrp_sp_absorb_contract_tests {
         .is_err());
         assert_no_xrp_absorb_mutation(&wrong_caller);
 
-        let mut expired = test_state_with_xrp_vault();
-        let pf = stability_pool_preflight_xrp_absorb_in_state(
-            &mut expired,
-            sp(),
-            VAULT_ID,
-            100 * E8,
-            10,
-        )
-        .unwrap();
-        assert!(stability_pool_liquidate_xrp_vault_in_state(
-            &mut expired,
-            sp(),
-            valid_request(44),
-            pf.expires_at_ns + 1,
-        )
-        .is_err());
-        assert_no_xrp_absorb_mutation(&expired);
+        // NOTE: an expired-but-present reservation is intentionally HONORED on the
+        // post-burn submit (see xrp_sp_absorb_submit_honors_expired_preflight_after_burn);
+        // only a wholly absent / wrong-caller / mismatched-burn reservation rejects.
 
         let mut mismatched = test_state_with_xrp_vault();
         preflight(&mut mismatched, 10);
@@ -8190,6 +8237,230 @@ mod xrp_sp_absorb_contract_tests {
         assert_eq!(vault.collateral_amount, 20_000_000);
         assert_eq!(state.xrp_claims.get(&0).unwrap().drops, 48_000_000);
         assert_eq!(state.xrp_claims.get(&1).unwrap().drops, 32_000_000);
+    }
+
+    #[test]
+    fn xrp_sp_absorb_routes_protocol_cut_to_developer_claim() {
+        // total_to_seize (gross) > collateral_received (net) => a 3M-drop protocol cut.
+        let mut state = test_state_with_xrp_vault();
+        state.sp_xrp_absorb_preflights.insert(
+            VAULT_ID,
+            crate::state::StoredXrpSpAbsorbPreflight {
+                caller: sp(),
+                vault_id: VAULT_ID,
+                icusd_burn_e8s: 100 * E8,
+                total_to_seize_drops: 100_000_000,
+                collateral_received_drops: 97_000_000,
+                collateral_price_e8s: 50_000_000,
+                expires_at_ns: 100,
+            },
+        );
+        let mut request = valid_request(44);
+        request.allocations[0].drops = 57_000_000;
+        request.allocations[1].drops = 40_000_000; // depositor sum = 97_000_000 (net)
+
+        let result = stability_pool_liquidate_xrp_vault_in_state(&mut state, sp(), request, 20)
+            .expect("absorb accepted");
+
+        // Depositor payout claims cover only the NET amount.
+        assert_eq!(result.collateral_received_drops, 97_000_000);
+        assert_eq!(result.payout_claims.len(), 2);
+        let depositor_total: u64 = result.payout_claims.iter().map(|c| c.drops).sum();
+        assert_eq!(depositor_total, 97_000_000);
+
+        // The 3M-drop protocol cut is routed to a developer-settleable claim.
+        let developer = principal(0xdd);
+        let dev_total: u64 = state
+            .xrp_claims
+            .values()
+            .filter(|c| c.claimant == developer)
+            .map(|c| c.drops)
+            .sum();
+        assert_eq!(
+            dev_total, 3_000_000,
+            "protocol cut must route to a developer claim"
+        );
+
+        // Conservation: every drop debited from the vault is covered by a claim.
+        let claimed_total: u64 = state.xrp_claims.values().map(|c| c.drops).sum();
+        assert_eq!(
+            claimed_total, 100_000_000,
+            "sum of all XrpClaims must equal the gross collateral seized"
+        );
+        assert!(state.vault_id_to_vaults.get(&VAULT_ID).is_none());
+    }
+
+    #[test]
+    fn xrp_sp_absorb_submit_honors_expired_preflight_after_burn() {
+        // The SP burns icUSD before submitting. If the backend is unreachable past the
+        // preflight TTL, the persisted reservation must still finalize the absorb
+        // rather than stranding the burned icUSD forever (review blocker B-2).
+        let mut state = test_state_with_xrp_vault();
+        let pf =
+            stability_pool_preflight_xrp_absorb_in_state(&mut state, sp(), VAULT_ID, 100 * E8, 10)
+                .expect("preflight reservation");
+
+        let result = stability_pool_liquidate_xrp_vault_in_state(
+            &mut state,
+            sp(),
+            valid_request(44),
+            pf.expires_at_ns + 1,
+        )
+        .expect("expired-but-present reservation is honored post-burn");
+
+        assert_eq!(result.collateral_received_drops, 100_000_000);
+        assert_eq!(state.xrp_claims.get(&0).unwrap().drops, 60_000_000);
+        assert_eq!(state.xrp_claims.get(&1).unwrap().drops, 40_000_000);
+        assert!(state.sp_xrp_absorb_preflights.get(&VAULT_ID).is_none());
+    }
+
+    #[test]
+    fn xrp_sp_absorb_rejects_when_vault_collateral_below_reserved_seizure() {
+        // If the vault's collateral fell below the reserved gross seizure since the
+        // preflight (now possible because an expired reservation is honored), the
+        // submit must abort BEFORE minting any claim, to preserve conservation.
+        let mut state = test_state_with_xrp_vault();
+        state.sp_xrp_absorb_preflights.insert(
+            VAULT_ID,
+            crate::state::StoredXrpSpAbsorbPreflight {
+                caller: sp(),
+                vault_id: VAULT_ID,
+                icusd_burn_e8s: 100 * E8,
+                total_to_seize_drops: 100_000_000,
+                collateral_received_drops: 100_000_000,
+                collateral_price_e8s: 50_000_000,
+                expires_at_ns: 100,
+            },
+        );
+        // Vault shrank below the reserved seizure since the preflight.
+        state
+            .vault_id_to_vaults
+            .get_mut(&VAULT_ID)
+            .unwrap()
+            .collateral_amount = 60_000_000;
+
+        assert!(
+            stability_pool_liquidate_xrp_vault_in_state(&mut state, sp(), valid_request(44), 20)
+                .is_err()
+        );
+        assert!(state.xrp_claims.is_empty());
+        assert_eq!(state.next_xrp_claim_id, 0);
+        assert!(state.sp_xrp_absorb_results_by_proof.is_empty());
+        let vault = state.vault_id_to_vaults.get(&VAULT_ID).unwrap();
+        assert_eq!(vault.collateral_amount, 60_000_000);
+        assert_eq!(vault.borrowed_icusd_amount, ICUSD::new(100 * E8));
+    }
+
+    #[test]
+    fn xrp_sp_absorb_rejects_when_vault_debt_below_reserved_burn() {
+        // Now that an expired reservation is honored on submit, a manual partial
+        // liquidation can reduce the vault's debt below the reserved burn during the
+        // window. The submit must abort BEFORE mutation rather than over-burning icUSD
+        // (the silent `.min(borrowed)` would otherwise clear less debt than was burned).
+        let mut state = test_state_with_xrp_vault();
+        state.sp_xrp_absorb_preflights.insert(
+            VAULT_ID,
+            crate::state::StoredXrpSpAbsorbPreflight {
+                caller: sp(),
+                vault_id: VAULT_ID,
+                icusd_burn_e8s: 100 * E8,
+                total_to_seize_drops: 100_000_000,
+                collateral_received_drops: 100_000_000,
+                collateral_price_e8s: 50_000_000,
+                expires_at_ns: 100,
+            },
+        );
+        // Debt shrank below the reserved burn (collateral still ample for the seizure).
+        state
+            .vault_id_to_vaults
+            .get_mut(&VAULT_ID)
+            .unwrap()
+            .borrowed_icusd_amount = ICUSD::new(50 * E8);
+
+        assert!(
+            stability_pool_liquidate_xrp_vault_in_state(&mut state, sp(), valid_request(44), 20)
+                .is_err()
+        );
+        assert!(state.xrp_claims.is_empty());
+        assert_eq!(state.next_xrp_claim_id, 0);
+        assert!(state.sp_xrp_absorb_results_by_proof.is_empty());
+        let vault = state.vault_id_to_vaults.get(&VAULT_ID).unwrap();
+        assert_eq!(vault.borrowed_icusd_amount, ICUSD::new(50 * E8));
+        assert_eq!(vault.collateral_amount, 100_000_000);
+    }
+
+    #[test]
+    fn xrp_sp_absorb_partial_burn_below_debt_is_allowed() {
+        // A pool-limited PARTIAL absorb (burn < live debt) must still succeed: the
+        // debt guard is directional (abort only when debt fell BELOW the burn), so it
+        // does not reject legitimate partial liquidations.
+        let mut state = test_state_with_xrp_vault();
+        state
+            .vault_id_to_vaults
+            .get_mut(&VAULT_ID)
+            .unwrap()
+            .collateral_amount = 1_000_000_000_000;
+        state.sp_xrp_absorb_preflights.insert(
+            VAULT_ID,
+            crate::state::StoredXrpSpAbsorbPreflight {
+                caller: sp(),
+                vault_id: VAULT_ID,
+                icusd_burn_e8s: 40 * E8, // burning less than the 100-icUSD debt
+                total_to_seize_drops: 80_000_000,
+                collateral_received_drops: 80_000_000,
+                collateral_price_e8s: 50_000_000,
+                expires_at_ns: 100,
+            },
+        );
+        let mut request = valid_request(44);
+        request.icusd_burned_e8s = 40 * E8;
+        request.allocations[0].drops = 50_000_000;
+        request.allocations[1].drops = 30_000_000; // sum = 80_000_000
+
+        let result = stability_pool_liquidate_xrp_vault_in_state(&mut state, sp(), request, 20)
+            .expect("partial absorb (burn < debt) accepted");
+        assert_eq!(result.liquidated_debt_e8s, 40 * E8);
+        let vault = state.vault_id_to_vaults.get(&VAULT_ID).unwrap();
+        assert_eq!(vault.borrowed_icusd_amount, ICUSD::new(60 * E8)); // 100 - 40
+    }
+
+    #[test]
+    fn xrp_sp_absorb_replay_does_not_remint_developer_claim() {
+        // Replaying an accepted absorb that minted a developer protocol-cut claim must
+        // return the cached result and re-mint nothing (idempotency on the dev claim).
+        let mut state = test_state_with_xrp_vault();
+        state.sp_xrp_absorb_preflights.insert(
+            VAULT_ID,
+            crate::state::StoredXrpSpAbsorbPreflight {
+                caller: sp(),
+                vault_id: VAULT_ID,
+                icusd_burn_e8s: 100 * E8,
+                total_to_seize_drops: 100_000_000,
+                collateral_received_drops: 97_000_000,
+                collateral_price_e8s: 50_000_000,
+                expires_at_ns: 100,
+            },
+        );
+        let mut req1 = valid_request(44);
+        req1.allocations[0].drops = 57_000_000;
+        req1.allocations[1].drops = 40_000_000;
+        let mut req2 = valid_request(44);
+        req2.allocations[0].drops = 57_000_000;
+        req2.allocations[1].drops = 40_000_000;
+
+        let first = stability_pool_liquidate_xrp_vault_in_state(&mut state, sp(), req1, 20)
+            .expect("absorb accepted");
+        // 2 depositor claims + 1 developer claim.
+        assert_eq!(state.xrp_claims.len(), 3);
+        assert_eq!(state.next_xrp_claim_id, 3);
+        let claims_after_first = state.xrp_claims.clone();
+
+        let replay = stability_pool_liquidate_xrp_vault_in_state(&mut state, sp(), req2, 999)
+            .expect("exact replay returns cached result");
+        assert_eq!(replay, first);
+        assert_eq!(state.xrp_claims, claims_after_first);
+        assert_eq!(state.xrp_claims.len(), 3, "replay must not re-mint the dev claim");
+        assert_eq!(state.next_xrp_claim_id, 3);
     }
 
     #[test]
