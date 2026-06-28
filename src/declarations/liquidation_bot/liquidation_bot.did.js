@@ -21,6 +21,21 @@ export const idlFactory = ({ IDL }) => {
     'effective_price_e8s' : IDL.Nat64,
   });
   const TestSwapResult = IDL.Variant({ 'Ok' : SwapResult, 'Err' : IDL.Text });
+  const CycleManagerMetric = IDL.Record({
+    'key' : IDL.Text,
+    'value' : IDL.Nat,
+    'count' : IDL.Nat64,
+    'label' : IDL.Opt(IDL.Text),
+  });
+  const CycleManagerCyclesStatus = IDL.Record({
+    'idle_burn_cycles_per_day' : IDL.Opt(IDL.Nat),
+    'stable_memory_bytes' : IDL.Opt(IDL.Nat64),
+    'low_watermark' : IDL.Nat,
+    'balance' : IDL.Nat,
+    'heap_memory_bytes' : IDL.Opt(IDL.Nat64),
+    'healthy' : IDL.Bool,
+    'freeze_threshold_secs' : IDL.Nat64,
+  });
   const BotAdminAction = IDL.Variant({
     'VaultsNotified' : IDL.Record({ 'count' : IDL.Nat64 }),
     'ConfigUpdated' : IDL.Null,
@@ -84,6 +99,12 @@ export const idlFactory = ({ IDL }) => {
         [],
       ),
     'admin_test_swap' : IDL.Func([IDL.Nat64], [TestSwapResult], []),
+    'cycle_manager_metrics' : IDL.Func(
+        [],
+        [IDL.Vec(CycleManagerMetric)],
+        ['query'],
+      ),
+    'cycles_status' : IDL.Func([], [CycleManagerCyclesStatus], ['query']),
     'get_admin_event_count' : IDL.Func([], [IDL.Nat64], ['query']),
     'get_admin_events' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],

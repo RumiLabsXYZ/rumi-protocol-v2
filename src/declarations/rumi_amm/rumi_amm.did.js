@@ -41,6 +41,21 @@ export const idlFactory = ({ IDL }) => {
     'curve' : CurveType,
     'fee_bps' : IDL.Nat16,
   });
+  const CycleManagerMetric = IDL.Record({
+    'key' : IDL.Text,
+    'value' : IDL.Nat,
+    'count' : IDL.Nat64,
+    'label' : IDL.Opt(IDL.Text),
+  });
+  const CycleManagerCyclesStatus = IDL.Record({
+    'idle_burn_cycles_per_day' : IDL.Opt(IDL.Nat),
+    'stable_memory_bytes' : IDL.Opt(IDL.Nat64),
+    'low_watermark' : IDL.Nat,
+    'balance' : IDL.Nat,
+    'heap_memory_bytes' : IDL.Opt(IDL.Nat64),
+    'healthy' : IDL.Bool,
+    'freeze_threshold_secs' : IDL.Nat64,
+  });
   const AmmAdminAction = IDL.Variant({
     'SetPoolCreationOpen' : IDL.Record({ 'open' : IDL.Bool }),
     'WithdrawProtocolFees' : IDL.Record({
@@ -297,6 +312,12 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Text, 'Err' : AmmError })],
         [],
       ),
+    'cycle_manager_metrics' : IDL.Func(
+        [],
+        [IDL.Vec(CycleManagerMetric)],
+        ['query'],
+      ),
+    'cycles_status' : IDL.Func([], [CycleManagerCyclesStatus], ['query']),
     'get_amm_admin_event_count' : IDL.Func([], [IDL.Nat64], ['query']),
     'get_amm_admin_events' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],

@@ -15,6 +15,7 @@ serde = { version = "1.0", features = ["derive"] }
 rust_decimal = "1.32"
 rust_decimal_macros = "1.32"
 ic-canister-log = "0.2"
+rumi_cycle_manager = { path = "../rumi_cycle_manager" }
 
 [features]
 default = []

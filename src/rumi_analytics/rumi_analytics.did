@@ -420,8 +420,55 @@ type VolatilityResponse = record {
   symbol : text;
   annualized_vol_pct : float64;
 };
+type CycleManagerCyclesStatus = record {
+  balance : nat;
+  low_watermark : nat;
+  healthy : bool;
+  freeze_threshold_secs : nat64;
+  stable_memory_bytes : opt nat64;
+  heap_memory_bytes : opt nat64;
+  idle_burn_cycles_per_day : opt nat;
+};
+type CycleManagerMetric = record {
+  key : text;
+  count : nat64;
+  value : nat;
+  label : opt text;
+};
+type CycleManagerTargetKind = variant { SelfReport; Controlled };
+type CycleManagerEnvironment = variant {
+  Production;
+  Staging;
+  Test;
+  Local;
+  Archived;
+};
+type CycleManagerCriticality = variant {
+  Critical;
+  Important;
+  Standard;
+  Experimental;
+};
+type CycleManagerTarget = record {
+  canister_id : principal;
+  name : text;
+  project : text;
+  environment : CycleManagerEnvironment;
+  criticality : CycleManagerCriticality;
+  kind : CycleManagerTargetKind;
+  low_threshold_cycles : nat;
+  topup_cycles : nat;
+  owner : opt text;
+  tags : vec text;
+  expected_controllers : vec principal;
+  expected_freeze_threshold_secs : opt nat64;
+  metrics_schema_version : nat32;
+};
 service : (InitArgs) -> {
   admin_backfill_add_margin_events : (nat64) -> (Result);
+  cycle_manager_metrics : () -> (vec CycleManagerMetric) query;
+  cycle_manager_targets : () -> (vec CycleManagerTarget) query;
+  cycles_status : () -> (CycleManagerCyclesStatus) query;
   debug_get_amm_event_counts : () -> (nat64, nat64) query;
   debug_get_amm_liquidity_events_raw : (nat64, nat64) -> (vec AnalyticsAmmLiquidityEvent) query;
   debug_get_swap_events_raw : (nat64, nat64) -> (vec AnalyticsSwapEvent) query;

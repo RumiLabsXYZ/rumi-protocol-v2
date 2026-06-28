@@ -107,6 +107,21 @@ export type CollateralStatus = { 'Paused' : null } |
   { 'Deprecated' : null } |
   { 'Sunset' : null } |
   { 'Frozen' : null };
+export interface CycleManagerCyclesStatus {
+  'idle_burn_cycles_per_day' : [] | [bigint],
+  'stable_memory_bytes' : [] | [bigint],
+  'low_watermark' : bigint,
+  'balance' : bigint,
+  'heap_memory_bytes' : [] | [bigint],
+  'healthy' : boolean,
+  'freeze_threshold_secs' : bigint,
+}
+export interface CycleManagerMetric {
+  'key' : string,
+  'value' : bigint,
+  'count' : bigint,
+  'label' : [] | [string],
+}
 export interface Icrc10SupportedStandard { 'url' : string, 'name' : string }
 export interface Icrc21ConsentInfo {
   'metadata' : Icrc21ConsentMessageResponseMetadata,
@@ -365,6 +380,8 @@ export interface _SERVICE {
     { 'Ok' : bigint } |
       { 'Err' : StabilityPoolError }
   >,
+  'cycle_manager_metrics' : ActorMethod<[], Array<CycleManagerMetric>>,
+  'cycles_status' : ActorMethod<[], CycleManagerCyclesStatus>,
   'deposit' : ActorMethod<
     [Principal, bigint],
     { 'Ok' : null } |

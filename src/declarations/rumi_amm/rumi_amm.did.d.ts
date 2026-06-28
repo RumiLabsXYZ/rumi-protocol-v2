@@ -184,6 +184,21 @@ export interface CreatePoolArgs {
   'fee_bps' : number,
 }
 export type CurveType = { 'ConstantProduct' : null };
+export interface CycleManagerCyclesStatus {
+  'idle_burn_cycles_per_day' : [] | [bigint],
+  'stable_memory_bytes' : [] | [bigint],
+  'low_watermark' : bigint,
+  'balance' : bigint,
+  'heap_memory_bytes' : [] | [bigint],
+  'healthy' : boolean,
+  'freeze_threshold_secs' : bigint,
+}
+export interface CycleManagerMetric {
+  'key' : string,
+  'value' : bigint,
+  'count' : bigint,
+  'label' : [] | [string],
+}
 export interface DailyRewardPoint { 'amount' : bigint, 'day_start_ns' : bigint }
 export type DeviceSpec = { 'GenericDisplay' : null } |
   {
@@ -280,6 +295,8 @@ export interface _SERVICE {
     { 'Ok' : string } |
       { 'Err' : AmmError }
   >,
+  'cycle_manager_metrics' : ActorMethod<[], Array<CycleManagerMetric>>,
+  'cycles_status' : ActorMethod<[], CycleManagerCyclesStatus>,
   'get_amm_admin_event_count' : ActorMethod<[], bigint>,
   'get_amm_admin_events' : ActorMethod<[bigint, bigint], Array<AmmAdminEvent>>,
   'get_amm_balance_series' : ActorMethod<

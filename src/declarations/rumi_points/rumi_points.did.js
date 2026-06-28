@@ -11,6 +11,21 @@ export const idlFactory = ({ IDL }) => {
     'Excluded' : IDL.Null,
   });
   const Result = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : PointsError });
+  const CycleManagerMetric = IDL.Record({
+    'key' : IDL.Text,
+    'value' : IDL.Nat,
+    'count' : IDL.Nat64,
+    'label' : IDL.Opt(IDL.Text),
+  });
+  const CycleManagerCyclesStatus = IDL.Record({
+    'idle_burn_cycles_per_day' : IDL.Opt(IDL.Nat),
+    'stable_memory_bytes' : IDL.Opt(IDL.Nat64),
+    'low_watermark' : IDL.Nat,
+    'balance' : IDL.Nat,
+    'heap_memory_bytes' : IDL.Opt(IDL.Nat64),
+    'healthy' : IDL.Bool,
+    'freeze_threshold_secs' : IDL.Nat64,
+  });
   const EpochSummary = IDL.Record({
     'epoch_index' : IDL.Nat64,
     'points_accrued_this_epoch' : IDL.Nat,
@@ -145,6 +160,12 @@ export const idlFactory = ({ IDL }) => {
   const Result_2 = IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : PointsError });
   return IDL.Service({
     'add_excluded_principal' : IDL.Func([IDL.Principal], [Result], []),
+    'cycle_manager_metrics' : IDL.Func(
+        [],
+        [IDL.Vec(CycleManagerMetric)],
+        ['query'],
+      ),
+    'cycles_status' : IDL.Func([], [CycleManagerCyclesStatus], ['query']),
     'force_epoch_tick' : IDL.Func([], [Result], []),
     'get_asset_ledgers' : IDL.Func(
         [],

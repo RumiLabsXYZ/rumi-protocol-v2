@@ -5531,6 +5531,7 @@ dependencies = [
  "ic-cdk-timers 0.10.0",
  "ic-stable-structures",
  "icrc-ledger-types 0.1.8 (git+https://github.com/Rumi-Protocol/ic?rev=fc278709)",
+ "rumi_cycle_manager",
  "serde",
  "serde_json",
 ]
@@ -7211,6 +7212,7 @@ dependencies = [
  "icrc-ledger-types 0.1.8 (git+https://github.com/Rumi-Protocol/ic?rev=fc278709)",
  "num-traits",
  "pocket-ic",
+ "rumi_cycle_manager",
  "serde",
  "serde_bytes",
  "serde_json",
@@ -7230,6 +7232,7 @@ dependencies = [
  "ic-cdk-timers 0.10.0",
  "icrc-ledger-types 0.1.8 (git+https://github.com/Rumi-Protocol/ic?rev=fc278709)",
  "pocket-ic",
+ "rumi_cycle_manager",
  "serde",
  "serde_bytes",
  "sha2",
@@ -7252,9 +7255,19 @@ dependencies = [
  "icrc-ledger-types 0.1.8 (git+https://github.com/Rumi-Protocol/ic?rev=fc278709)",
  "num-traits",
  "pocket-ic",
+ "rumi_cycle_manager",
  "serde",
  "serde_bytes",
  "serde_json",
+]
+
+[[package]]
+name = "rumi_cycle_manager"
+version = "0.1.0"
+dependencies = [
+ "candid",
+ "ic-cdk 0.12.2",
+ "serde",
 ]
 
 [[package]]
@@ -7270,6 +7283,7 @@ dependencies = [
  "ic-stable-structures",
  "icrc-ledger-types 0.1.8 (git+https://github.com/Rumi-Protocol/ic?rev=fc278709)",
  "pocket-ic",
+ "rumi_cycle_manager",
  "serde",
  "sha2",
 ]
@@ -7323,6 +7337,7 @@ dependencies = [
  "proptest",
  "rand 0.8.5",
  "ripemd",
+ "rumi_cycle_manager",
  "rust_decimal",
  "rust_decimal_macros",
  "serde",
@@ -7347,6 +7362,7 @@ dependencies = [
  "ic-cdk 0.12.2",
  "ic-stable-structures",
  "icrc-ledger-types 0.1.8 (registry+https://github.com/rust-lang/crates.io-index)",
+ "rumi_cycle_manager",
  "rust_decimal",
  "rust_decimal_macros",
  "serde",
@@ -8170,6 +8186,7 @@ dependencies = [
  "num-traits",
  "pocket-ic",
  "rumi_3pool",
+ "rumi_cycle_manager",
  "rumi_protocol_backend",
  "rust_decimal",
  "rust_decimal_macros",

@@ -101,6 +101,40 @@ fn get_points_config() -> PointsConfig {
     state::points_config()
 }
 
+#[ic_cdk::query]
+fn cycles_status() -> rumi_cycle_manager::CycleManagerCyclesStatus {
+    rumi_cycle_manager::self_cycles_status(
+        rumi_cycle_manager::DEFAULT_LOW_WATERMARK_CYCLES,
+        true,
+        rumi_cycle_manager::DEFAULT_FREEZE_THRESHOLD_SECS,
+    )
+}
+
+#[ic_cdk::query]
+fn cycle_manager_metrics() -> Vec<rumi_cycle_manager::CycleManagerMetric> {
+    let cfg = state::points_config();
+    vec![
+        rumi_cycle_manager::metric(
+            "op:registration:count",
+            cfg.registered_count,
+            cfg.registered_count,
+            Some("registered points participants"),
+        ),
+        rumi_cycle_manager::metric(
+            "op:epoch:count",
+            state::epoch_count(),
+            state::epoch_count(),
+            Some("closed epoch records"),
+        ),
+        rumi_cycle_manager::metric(
+            "op:source:count",
+            state::source_canisters().len() as u64,
+            state::source_canisters().len() as u64,
+            Some("configured points source canisters"),
+        ),
+    ]
+}
+
 // ── Updates (admin-gated) ───────────────────────────────────────────────────
 
 /// Admin-only. Phase 1 testing aid: enrolls a principal so upgrade survival can

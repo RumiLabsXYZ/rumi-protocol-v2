@@ -309,6 +309,44 @@ fn get_status() -> TreasuryStatus {
     })
 }
 
+#[query]
+#[candid_method(query)]
+fn cycles_status() -> rumi_cycle_manager::CycleManagerCyclesStatus {
+    let operational = with_state(|s| !s.get_config().is_paused);
+    rumi_cycle_manager::self_cycles_status(
+        3_000_000_000_000,
+        operational,
+        rumi_cycle_manager::DEFAULT_FREEZE_THRESHOLD_SECS,
+    )
+}
+
+#[query]
+#[candid_method(query)]
+fn cycle_manager_metrics() -> Vec<rumi_cycle_manager::CycleManagerMetric> {
+    with_state(|s| {
+        vec![
+            rumi_cycle_manager::metric(
+                "op:deposit:count",
+                s.get_deposits_count(),
+                s.get_deposits_count(),
+                Some("treasury deposit records"),
+            ),
+            rumi_cycle_manager::metric(
+                "op:event:count",
+                s.get_events_count(),
+                s.get_events_count(),
+                Some("treasury event records"),
+            ),
+            rumi_cycle_manager::metric(
+                "ledger:asset:count",
+                s.balances.len() as u64,
+                s.balances.len() as u64,
+                Some("tracked treasury assets"),
+            ),
+        ]
+    })
+}
+
 /// Get deposit history (paginated)
 #[query]
 #[candid_method(query)]

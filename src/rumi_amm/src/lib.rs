@@ -1349,6 +1349,42 @@ fn health() -> String {
     format!("Rumi AMM OK — {} pool(s)", pool_count)
 }
 
+#[query]
+fn cycles_status() -> rumi_cycle_manager::CycleManagerCyclesStatus {
+    let operational = read_state(|s| !s.maintenance_mode);
+    rumi_cycle_manager::self_cycles_status(
+        2_000_000_000_000,
+        operational,
+        rumi_cycle_manager::DEFAULT_FREEZE_THRESHOLD_SECS,
+    )
+}
+
+#[query]
+fn cycle_manager_metrics() -> Vec<rumi_cycle_manager::CycleManagerMetric> {
+    read_state(|s| {
+        vec![
+            rumi_cycle_manager::metric(
+                "op:pool:count",
+                s.pools.len() as u64,
+                s.pools.len() as u64,
+                Some("AMM pools"),
+            ),
+            rumi_cycle_manager::metric(
+                "op:swap:count",
+                s.swap_events.len() as u64,
+                s.swap_events.len() as u64,
+                Some("cumulative AMM swap events"),
+            ),
+            rumi_cycle_manager::metric(
+                "op:liquidity:count",
+                s.liquidity_events.len() as u64,
+                s.liquidity_events.len() as u64,
+                Some("cumulative AMM liquidity events"),
+            ),
+        ]
+    })
+}
+
 // ─── Swap Event History ───
 
 #[query]

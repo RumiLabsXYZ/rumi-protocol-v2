@@ -86,12 +86,30 @@ type SwapResult = record {
 
 type TestSwapResult = variant { Ok : SwapResult; Err : text };
 
+type CycleManagerCyclesStatus = record {
+  balance : nat;
+  low_watermark : nat;
+  healthy : bool;
+  freeze_threshold_secs : nat64;
+  stable_memory_bytes : opt nat64;
+  heap_memory_bytes : opt nat64;
+  idle_burn_cycles_per_day : opt nat;
+};
+type CycleManagerMetric = record {
+  key : text;
+  count : nat64;
+  value : nat;
+  label : opt text;
+};
+
 service : (BotInitArgs) -> {
   // Core
   notify_liquidatable_vaults : (vec LiquidatableVaultInfo) -> ();
   set_config : (BotConfig) -> ();
 
   // Stats
+  cycles_status : () -> (CycleManagerCyclesStatus) query;
+  cycle_manager_metrics : () -> (vec CycleManagerMetric) query;
   get_bot_stats : () -> (BotStats) query;
 
   // History

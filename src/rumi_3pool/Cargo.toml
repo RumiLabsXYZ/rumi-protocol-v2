@@ -23,6 +23,7 @@ sha2 = "0.10"
 ciborium = "0.2"
 ethnum = "1.5"
 num-traits = "0.2"
+rumi_cycle_manager = { path = "../rumi_cycle_manager" }
 
 [dev-dependencies]
 assert_matches = "1.3.0"

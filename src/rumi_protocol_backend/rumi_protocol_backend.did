@@ -944,6 +944,21 @@ type ProtocolStatus = record {
   breaker_window_debt_ceiling_e8s : nat64;
   last_icp_rate : float64;
 };
+type CycleManagerCyclesStatus = record {
+  balance : nat;
+  low_watermark : nat;
+  healthy : bool;
+  freeze_threshold_secs : nat64;
+  stable_memory_bytes : opt nat64;
+  heap_memory_bytes : opt nat64;
+  idle_burn_cycles_per_day : opt nat;
+};
+type CycleManagerMetric = record {
+  key : text;
+  count : nat64;
+  value : nat;
+  label : opt text;
+};
 type ProtocolStatusLite = record { price_e8s : nat };
 type RateCurve = record {
   method : InterpolationMethod;
@@ -1305,6 +1320,8 @@ service : (ProtocolArg) -> {
   get_protocol_config : () -> (ProtocolConfig) query;
   get_protocol_snapshots : (GetSnapshotsArg) -> (vec ProtocolSnapshot) query;
   get_protocol_status : () -> (ProtocolStatus) query;
+  cycles_status : () -> (CycleManagerCyclesStatus) query;
+  cycle_manager_metrics : () -> (vec CycleManagerMetric) query;
   get_recovery_cr_multiplier : () -> (float64) query;
   get_recovery_target_cr : () -> (float64) query;
   get_redemption_fee_ceiling : () -> (float64) query;

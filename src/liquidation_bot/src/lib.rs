@@ -192,6 +192,42 @@ fn get_bot_stats() -> state::BotStats {
 }
 
 #[query]
+fn cycles_status() -> rumi_cycle_manager::CycleManagerCyclesStatus {
+    let operational = PROCESSING.with(|p| !*p.borrow());
+    rumi_cycle_manager::self_cycles_status(
+        2_000_000_000_000,
+        operational,
+        rumi_cycle_manager::DEFAULT_FREEZE_THRESHOLD_SECS,
+    )
+}
+
+#[query]
+fn cycle_manager_metrics() -> Vec<rumi_cycle_manager::CycleManagerMetric> {
+    state::read_state(|s| {
+        vec![
+            rumi_cycle_manager::metric(
+                "op:liquidation:count",
+                s.stats.events_count,
+                s.stats.events_count,
+                Some("cumulative liquidation bot events"),
+            ),
+            rumi_cycle_manager::metric(
+                "op:pending_vaults:count",
+                s.pending_vaults.len() as u64,
+                s.pending_vaults.len() as u64,
+                Some("currently queued liquidatable vaults"),
+            ),
+            rumi_cycle_manager::metric(
+                "ledger:debt_covered:e8s",
+                s.stats.events_count,
+                s.stats.total_debt_covered_e8s,
+                Some("total debt covered by bot"),
+            ),
+        ]
+    })
+}
+
+#[query]
 fn get_admin_events(offset: u64, limit: u64) -> Vec<state::BotAdminEvent> {
     let limit = limit.min(1000);
     state::read_state(|s| {

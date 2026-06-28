@@ -58,6 +58,21 @@ export const idlFactory = ({ IDL }) => {
     'burn_block_index' : IDL.Nat64,
     'token_amount_burned' : IDL.Nat,
   });
+  const CycleManagerMetric = IDL.Record({
+    'key' : IDL.Text,
+    'value' : IDL.Nat,
+    'count' : IDL.Nat64,
+    'label' : IDL.Opt(IDL.Text),
+  });
+  const CycleManagerCyclesStatus = IDL.Record({
+    'idle_burn_cycles_per_day' : IDL.Opt(IDL.Nat),
+    'stable_memory_bytes' : IDL.Opt(IDL.Nat64),
+    'low_watermark' : IDL.Nat,
+    'balance' : IDL.Nat,
+    'heap_memory_bytes' : IDL.Opt(IDL.Nat64),
+    'healthy' : IDL.Bool,
+    'freeze_threshold_secs' : IDL.Nat64,
+  });
   const FeeCurveParams = IDL.Record({
     'max_fee_bps' : IDL.Nat16,
     'imb_saturation' : IDL.Nat64,
@@ -488,6 +503,12 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : ThreePoolError })],
         [],
       ),
+    'cycle_manager_metrics' : IDL.Func(
+        [],
+        [IDL.Vec(CycleManagerMetric)],
+        ['query'],
+      ),
+    'cycles_status' : IDL.Func([], [CycleManagerCyclesStatus], ['query']),
     'donate' : IDL.Func(
         [IDL.Nat8, IDL.Nat],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : ThreePoolError })],

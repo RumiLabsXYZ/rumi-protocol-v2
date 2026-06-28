@@ -226,6 +226,21 @@ export interface ConsentMessageSpec {
 }
 export type CustodyKind = { 'IcrcLedger' : null } |
   { 'NativeXrp' : null };
+export interface CycleManagerCyclesStatus {
+  'idle_burn_cycles_per_day' : [] | [bigint],
+  'stable_memory_bytes' : [] | [bigint],
+  'low_watermark' : bigint,
+  'balance' : bigint,
+  'heap_memory_bytes' : [] | [bigint],
+  'healthy' : boolean,
+  'freeze_threshold_secs' : bigint,
+}
+export interface CycleManagerMetric {
+  'key' : string,
+  'value' : bigint,
+  'count' : bigint,
+  'label' : [] | [string],
+}
 export type DeficitSource = { 'Liquidation' : { 'vault_id' : bigint } } |
   { 'Redemption' : { 'redeemer' : Principal } };
 export type DeviceSpec = { 'GenericDisplay' : null } |
@@ -1456,6 +1471,8 @@ export interface _SERVICE {
   'close_vault' : ActorMethod<[bigint], Result_5>,
   'coingecko_transform' : ActorMethod<[TransformArgs], HttpResponse>,
   'confirm_xrp_deposit' : ActorMethod<[bigint], Result_1>,
+  'cycle_manager_metrics' : ActorMethod<[], Array<CycleManagerMetric>>,
+  'cycles_status' : ActorMethod<[], CycleManagerCyclesStatus>,
   'delete_chain' : ActorMethod<[number], Result>,
   'disable_chain' : ActorMethod<[number], Result>,
   'enter_recovery_mode' : ActorMethod<[], Result>,

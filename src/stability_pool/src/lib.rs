@@ -339,6 +339,42 @@ pub fn get_my_native_xrp_payouts() -> Vec<NativeXrpPendingPayout> {
     read_state(|s| s.native_xrp_pending_payouts_for(&caller))
 }
 
+#[query]
+pub fn cycles_status() -> rumi_cycle_manager::CycleManagerCyclesStatus {
+    let operational = !pool_balance_mutation_blocked();
+    rumi_cycle_manager::self_cycles_status(
+        3_000_000_000_000,
+        operational,
+        rumi_cycle_manager::DEFAULT_FREEZE_THRESHOLD_SECS,
+    )
+}
+
+#[query]
+pub fn cycle_manager_metrics() -> Vec<rumi_cycle_manager::CycleManagerMetric> {
+    read_state(|s| {
+        vec![
+            rumi_cycle_manager::metric(
+                "op:depositors:count",
+                s.deposits.len() as u64,
+                s.deposits.len() as u64,
+                Some("stability pool depositor records"),
+            ),
+            rumi_cycle_manager::metric(
+                "op:liquidation:count",
+                s.total_liquidations_executed,
+                s.total_liquidations_executed,
+                Some("cumulative stability pool liquidations"),
+            ),
+            rumi_cycle_manager::metric(
+                "op:chain_absorb:count",
+                s.pending_chain_absorb_count() as u64,
+                s.pending_chain_absorb_count() as u64,
+                Some("pending native-chain absorbs"),
+            ),
+        ]
+    })
+}
+
 #[update]
 pub async fn ack_native_xrp_payout_settled(claim_id: u64) -> Result<(), StabilityPoolError> {
     let caller = ic_cdk::api::caller();
