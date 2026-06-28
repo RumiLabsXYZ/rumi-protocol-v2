@@ -17,15 +17,20 @@
     type XrpClaimId,
   } from '$lib/services/xrpPayoutHelpers';
   import {
+    deserializeManualXrpClaims,
+    groupManualXrpClaimsByVault,
     recoverManualXrpClaimsForVault,
+    removeManualXrpPendingClaim,
+    serializeManualXrpClaims,
     settleManualXrpClaim,
+    upsertManualXrpPendingClaim,
+    upsertManualXrpPendingClaims,
     type ManualXrpPendingClaim,
+    type ManualXrpPendingClaimMap,
   } from '$lib/services/manualXrpLiquidation';
 
   const ANON_PRINCIPAL = '2vxsx-fae';
   const MANUAL_XRP_PENDING_CLAIMS_PREFIX = 'rumi_manual_xrp_pending_claims:';
-
-  type StoredManualXrpPendingClaim = Omit<ManualXrpPendingClaim, 'drops'> & { drops?: string };
 
   function resolveCollateralPrincipal(vault: CandidVault): string {
     const raw: unknown = vault.collateral_type;
@@ -121,7 +126,7 @@
   let liquidationTokens: { [vaultId: number]: 'icUSD' | 'CKUSDT' | 'CKUSDC' } = {};
   let xrpPayoutAddresses: Record<number, string> = {};
   let xrpDestinationTags: Record<number, string> = {};
-  let pendingManualXrpClaims: Record<number, ManualXrpPendingClaim> = {};
+  let pendingManualXrpClaims: ManualXrpPendingClaimMap = {};
   let retryingXrpClaimId: XrpClaimId | null = null;
   let loadedPendingXrpClaimsOwner: string | null = null;
   let otherVaultsPage = 0;
@@ -174,9 +179,11 @@
     });
   })();
 
+  $: pendingManualXrpClaimsByVault = groupManualXrpClaimsByVault(pendingManualXrpClaims);
+
   $: orphanedPendingManualXrpClaims = Object.values(pendingManualXrpClaims)
     .filter((claim) => claim.vaultId !== undefined && !sortedVaults.some((vault) => vault.vault_id === claim.vaultId))
-    .sort((a, b) => Number(a.vaultId ?? 0) - Number(b.vaultId ?? 0));
+    .sort((a, b) => Number(a.vaultId ?? 0) - Number(b.vaultId ?? 0) || (a.claimId < b.claimId ? -1 : a.claimId > b.claimId ? 1 : 0));
 
   function calculateCollateralRatio(vault: CandidVault): number {
     const ctPrincipal = resolveCollateralPrincipal(vault);
@@ -300,46 +307,18 @@
     return owner ? `${MANUAL_XRP_PENDING_CLAIMS_PREFIX}${owner}` : null;
   }
 
-  function loadPersistedManualXrpClaims(owner: string): Record<number, ManualXrpPendingClaim> {
+  function loadPersistedManualXrpClaims(owner: string): ManualXrpPendingClaimMap {
     if (typeof localStorage === 'undefined') return {};
     const key = manualXrpPendingStorageKey(owner);
     if (!key) return {};
-    try {
-      const raw = localStorage.getItem(key);
-      if (!raw) return {};
-      const parsed = JSON.parse(raw) as Record<string, StoredManualXrpPendingClaim>;
-      return Object.fromEntries(
-        Object.entries(parsed).flatMap(([vaultIdText, claim]) => {
-          const vaultId = Number(vaultIdText);
-          if (!Number.isSafeInteger(vaultId) || vaultId < 0 || !claim?.claimId || !claim.payoutAddress) {
-            return [];
-          }
-          return [[vaultId, {
-            ...claim,
-            vaultId,
-            claimId: String(claim.claimId),
-            drops: claim.drops !== undefined ? BigInt(claim.drops) : undefined,
-          } satisfies ManualXrpPendingClaim]];
-        })
-      );
-    } catch {
-      return {};
-    }
+    return deserializeManualXrpClaims(localStorage.getItem(key));
   }
 
   function persistManualXrpClaims() {
     if (typeof localStorage === 'undefined') return;
     const key = manualXrpPendingStorageKey(manualXrpClaimsOwner);
     if (!key) return;
-    const rows = Object.fromEntries(
-      Object.entries(pendingManualXrpClaims).map(([vaultId, claim]) => [
-        vaultId,
-        {
-          ...claim,
-          drops: claim.drops !== undefined ? claim.drops.toString() : undefined,
-        } satisfies StoredManualXrpPendingClaim,
-      ])
-    );
+    const rows = serializeManualXrpClaims(pendingManualXrpClaims);
     if (Object.keys(rows).length === 0) {
       localStorage.removeItem(key);
       return;
@@ -347,16 +326,32 @@
     localStorage.setItem(key, JSON.stringify(rows));
   }
 
-  function addPendingManualXrpClaim(vaultId: number, pendingClaim: ManualXrpPendingClaim) {
-    pendingManualXrpClaims = { ...pendingManualXrpClaims, [vaultId]: pendingClaim };
+  function addPendingManualXrpClaim(pendingClaim: ManualXrpPendingClaim) {
+    pendingManualXrpClaims = upsertManualXrpPendingClaim(pendingManualXrpClaims, pendingClaim);
     persistManualXrpClaims();
   }
 
-  function clearPendingManualXrpClaim(vaultId: number) {
-    const next = { ...pendingManualXrpClaims };
-    delete next[vaultId];
-    pendingManualXrpClaims = next;
+  function addPendingManualXrpClaims(claims: ManualXrpPendingClaim[]) {
+    if (claims.length === 0) return;
+    pendingManualXrpClaims = upsertManualXrpPendingClaims(pendingManualXrpClaims, claims);
     persistManualXrpClaims();
+  }
+
+  function clearPendingManualXrpClaim(claimId: XrpClaimId) {
+    pendingManualXrpClaims = removeManualXrpPendingClaim(pendingManualXrpClaims, claimId);
+    persistManualXrpClaims();
+  }
+
+  // Register every recovered claim (an ambiguous failure can leave more than
+  // one) and build a pluralized "#a, #b remain outstanding" fragment for the copy.
+  function registerRecoveredXrpClaims(recovered: ManualXrpPendingClaim[]): { label: string; noun: string; verb: string } {
+    addPendingManualXrpClaims(recovered);
+    const count = recovered.length;
+    return {
+      label: recovered.map((claim) => `#${claim.claimId}`).join(', '),
+      noun: count > 1 ? 'claims' : 'claim',
+      verb: count > 1 ? 'remain' : 'remains',
+    };
   }
 
   async function recoverXrpClaimsForVault(vault: CandidVault): Promise<ManualXrpPendingClaim[]> {
@@ -378,7 +373,7 @@
     }));
   }
 
-  async function settlePendingManualXrpClaim(vaultId: number, pendingClaim: ManualXrpPendingClaim) {
+  async function settlePendingManualXrpClaim(pendingClaim: ManualXrpPendingClaim) {
     retryingXrpClaimId = pendingClaim.claimId;
     try {
       const settlement = await settleManualXrpClaim(
@@ -390,10 +385,10 @@
       liquidationSuccess = settlement.message;
       liquidationError = '';
       if (settlement.status === 'settled') {
-        clearPendingManualXrpClaim(vaultId);
+        clearPendingManualXrpClaim(pendingClaim.claimId);
         await loadLiquidatableVaults();
       } else {
-        addPendingManualXrpClaim(vaultId, settlement.pendingClaim);
+        addPendingManualXrpClaim(settlement.pendingClaim);
       }
     } finally {
       retryingXrpClaimId = null;
@@ -508,13 +503,13 @@
               payoutAddress: xrpPayout.address ?? '',
               destinationTag: xrpPayout.destinationTag,
             };
-            await settlePendingManualXrpClaim(vault.vault_id, pendingClaim);
+            await settlePendingManualXrpClaim(pendingClaim);
             liquidationAmounts[vault.vault_id] = '';
           } else {
             const recovered = await recoverXrpClaimsForVault(vault);
             if (recovered.length > 0) {
-              addPendingManualXrpClaim(vault.vault_id, recovered[0]);
-              liquidationSuccess = `Liquidation accepted for vault #${vault.vault_id}. XRP claim #${recovered[0].claimId} remains outstanding and can be settled from this screen.`;
+              const r = registerRecoveredXrpClaims(recovered);
+              liquidationSuccess = `Liquidation accepted for vault #${vault.vault_id}. XRP ${r.noun} ${r.label} ${r.verb} outstanding and can be settled from this screen.`;
               liquidationAmounts[vault.vault_id] = '';
             } else {
               liquidationSuccess = `Liquidation accepted for vault #${vault.vault_id}. XRP settlement claim is being indexed; refresh claims and retry settlement from this screen.`;
@@ -533,8 +528,8 @@
         } else if (isXrp && isAmbiguousLiquidationError(msg)) {
           const recovered = await recoverXrpClaimsForVault(vault);
           if (recovered.length > 0) {
-            addPendingManualXrpClaim(vault.vault_id, recovered[0]);
-            liquidationSuccess = `Liquidation may have landed for vault #${vault.vault_id}. XRP claim #${recovered[0].claimId} remains outstanding and can be settled from this screen.`;
+            const r = registerRecoveredXrpClaims(recovered);
+            liquidationSuccess = `Liquidation may have landed for vault #${vault.vault_id}. XRP ${r.noun} ${r.label} ${r.verb} outstanding and can be settled from this screen.`;
           } else {
             liquidationError = `${msg}. No matching XRP claim is visible yet; refresh and retry before submitting another liquidation.`;
           }
@@ -547,8 +542,8 @@
       if (isXrp && isAmbiguousLiquidationError(msg)) {
         const recovered = await recoverXrpClaimsForVault(vault);
         if (recovered.length > 0) {
-          addPendingManualXrpClaim(vault.vault_id, recovered[0]);
-          liquidationSuccess = `Liquidation may have landed for vault #${vault.vault_id}. XRP claim #${recovered[0].claimId} remains outstanding and can be settled from this screen.`;
+          const r = registerRecoveredXrpClaims(recovered);
+          liquidationSuccess = `Liquidation may have landed for vault #${vault.vault_id}. XRP ${r.noun} ${r.label} ${r.verb} outstanding and can be settled from this screen.`;
         } else {
           liquidationError = `${msg}. No matching XRP claim is visible yet; refresh and retry before submitting another liquidation.`;
         }
@@ -628,7 +623,7 @@
           </span>
           <button
             class="xrp-retry-btn"
-            on:click={() => settlePendingManualXrpClaim(Number(pendingXrpClaim.vaultId), pendingXrpClaim)}
+            on:click={() => settlePendingManualXrpClaim(pendingXrpClaim)}
             disabled={retryingXrpClaimId !== null || processingVaultId !== null}
           >
             {retryingXrpClaimId === pendingXrpClaim.claimId ? 'Settling…' : 'Retry'}
@@ -658,7 +653,7 @@
         {@const s = inputVal > 0 && !overMax ? calculateSeizure(vault, inputVal) : null}
         {@const ci = getVaultCollateralInfo(vault)}
         {@const isXrp = isNativeXrpPrincipal(ci.ctPrincipal)}
-        {@const pendingXrpClaim = pendingManualXrpClaims[vault.vault_id]}
+        {@const vaultPendingXrpClaims = pendingManualXrpClaimsByVault[vault.vault_id] ?? []}
 
         <div class="liq-card">
           <div class="card-body">
@@ -713,7 +708,7 @@
                     disabled={isProcessingThis}
                   />
                 </div>
-                {#if pendingXrpClaim}
+                {#each vaultPendingXrpClaims as pendingXrpClaim (pendingXrpClaim.claimId)}
                   <div class="xrp-pending-claim">
                     <span>
                       XRP claim #{pendingXrpClaim.claimId} remains outstanding.
@@ -721,13 +716,13 @@
                     </span>
                     <button
                       class="xrp-retry-btn"
-                      on:click={() => settlePendingManualXrpClaim(vault.vault_id, pendingXrpClaim)}
+                      on:click={() => settlePendingManualXrpClaim(pendingXrpClaim)}
                       disabled={retryingXrpClaimId !== null || isProcessingThis}
                     >
                       {retryingXrpClaimId === pendingXrpClaim.claimId ? 'Settling…' : 'Retry'}
                     </button>
                   </div>
-                {/if}
+                {/each}
               {/if}
               <div class="input-label-row">
                 <span class="input-label">Amount to liquidate</span>
