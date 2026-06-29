@@ -18,9 +18,13 @@
   let lastError = '';
   let lastPrincipal = '';
   let refreshInterval: ReturnType<typeof setInterval> | null = null;
+  let recoveryHeight = 0;
 
   $: connected = $walletStore.isConnected;
   $: principalText = $walletStore.principal?.toText?.() ?? '';
+  $: if (browser) {
+    document.documentElement.style.setProperty('--rumi-xrp-recovery-height', `${recoveryHeight}px`);
+  }
 
   async function refreshPending() {
     if (!connected) {
@@ -50,6 +54,7 @@
   onDestroy(() => {
     if (refreshInterval) clearInterval(refreshInterval);
     if (browser) window.removeEventListener(XRP_PENDING_DEPOSITS_CHANGED, refreshPending);
+    if (browser) document.documentElement.style.setProperty('--rumi-xrp-recovery-height', '0px');
   });
 
   async function confirmDeposit(vaultId: number) {
@@ -82,44 +87,54 @@
   }
 </script>
 
-{#if connected && pending.length > 0}
-  <section class="xrp-recovery" aria-label="Pending XRP deposit recovery">
-    <div class="xrp-recovery-inner">
-      <div class="xrp-recovery-copy">
-        <span class="xrp-recovery-kicker">XRP deposit awaiting confirmation</span>
-        <strong>{pending.length === 1 ? 'Finish opening your XRP vault' : `Finish ${pending.length} XRP vault deposits`}</strong>
-        <span class="xrp-recovery-note">
-          Your XRP deposit address is still linked to your wallet. Confirm it here after the XRP arrives.
-        </span>
-      </div>
+<div class="xrp-recovery-slot" bind:clientHeight={recoveryHeight}>
+  {#if connected && pending.length > 0}
+    <section class="xrp-recovery" aria-label="Pending XRP deposit recovery">
+      <div class="xrp-recovery-inner">
+        <div class="xrp-recovery-copy">
+          <span class="xrp-recovery-kicker">XRP deposit awaiting confirmation</span>
+          <strong>{pending.length === 1 ? 'Finish opening your XRP vault' : `Finish ${pending.length} XRP vault deposits`}</strong>
+          <span class="xrp-recovery-note">
+            Your XRP deposit address is still linked to your wallet. Confirm it here after the XRP arrives.
+          </span>
+        </div>
 
-      <div class="xrp-recovery-list">
-        {#each pending as p (p.vaultId)}
-          <div class="xrp-recovery-item">
-            <span class="xrp-vault-id">Vault #{p.vaultId}</span>
-            <button class="xrp-address" title={p.custodyAddress} on:click={() => copy(p.custodyAddress)}>
-              {formatAddress(p.custodyAddress, 8, 6)}
-              <span>Copy</span>
-            </button>
-            <button
-              class="xrp-confirm"
-              disabled={loading || confirmingVaultId === p.vaultId}
-              on:click={() => confirmDeposit(p.vaultId)}
-            >
-              {confirmingVaultId === p.vaultId ? 'Checking...' : "I've sent the XRP"}
-            </button>
-          </div>
-        {/each}
-      </div>
+        <div class="xrp-recovery-list">
+          {#each pending as p (p.vaultId)}
+            <div class="xrp-recovery-item">
+              <span class="xrp-vault-id">Vault #{p.vaultId}</span>
+              <button class="xrp-address" title={p.custodyAddress} on:click={() => copy(p.custodyAddress)}>
+                {formatAddress(p.custodyAddress, 8, 6)}
+                <span>Copy</span>
+              </button>
+              <button
+                class="xrp-confirm"
+                disabled={loading || confirmingVaultId === p.vaultId}
+                on:click={() => confirmDeposit(p.vaultId)}
+              >
+                {confirmingVaultId === p.vaultId ? 'Checking...' : "I've sent the XRP"}
+              </button>
+            </div>
+          {/each}
+        </div>
 
-      {#if lastError}
-        <div class="xrp-recovery-error">{lastError}</div>
-      {/if}
-    </div>
-  </section>
-{/if}
+        {#if lastError}
+          <div class="xrp-recovery-error">{lastError}</div>
+        {/if}
+      </div>
+    </section>
+  {/if}
+</div>
 
 <style>
+  .xrp-recovery-slot {
+    position: fixed;
+    top: 3.5rem;
+    left: 0;
+    right: 0;
+    z-index: 99;
+  }
+
   .xrp-recovery {
     width: 100%;
     border-bottom: 1px solid rgba(45, 212, 191, 0.18);
