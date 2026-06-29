@@ -505,7 +505,7 @@ class StabilityPoolService {
   }
 
   async getMyNativeXrpPayouts(): Promise<NativeXrpPendingPayout[]> {
-    const actor = await this.getMutationActor();
+    const actor = await this.getQueryActor();
     return getMyNativeXrpPayoutsWithActor(actor);
   }
 
