@@ -15,7 +15,6 @@
     unwrapNativePayoutDestinationTags,
     validateXrpPayoutInput,
   } from '../../services/xrpPayoutHelpers';
-  import { CANISTER_IDS } from '../../config';
 
   export let collateralRegistry: CollateralInfo[] = [];
   export let userPosition: UserPosition | null = null;
@@ -42,13 +41,11 @@
   $: nativeTagByCollateral = unwrapNativePayoutDestinationTags(userPosition);
   $: storedAddress = nativePayoutByCollateral.get(xrpCollateral?.ledger_id.toText() ?? XRP_NATIVE_PRINCIPAL_TEXT) ?? '';
   $: storedTag = nativeTagByCollateral.get(xrpCollateral?.ledger_id.toText() ?? XRP_NATIVE_PRINCIPAL_TEXT);
-  $: userHasIcusd = (userPosition?.stablecoin_balances ?? []).some(
-    ([ledger, amount]) => ledger.toText() === CANISTER_IDS.ICUSD_LEDGER && amount > 0n
-  );
+  $: userHasStablecoinDeposit = (userPosition?.stablecoin_balances ?? []).some(([, amount]) => amount > 0n);
   $: isEnabled = storedAddress !== '';
   $: hasPendingPayouts = pendingPayouts.length > 0;
   $: shouldRenderXrpRouting =
-    isConnected && userPosition && xrpCollateral && (userHasIcusd || isEnabled || loadingPayouts || hasPendingPayouts);
+    isConnected && userPosition && xrpCollateral && (userHasStablecoinDeposit || isEnabled || loadingPayouts || hasPendingPayouts);
 
   $: if (storedAddress && payoutAddress === '') {
     payoutAddress = storedAddress;
@@ -170,7 +167,7 @@
       <span class="xrp-title">XRP payouts</span>
       <span class="xrp-status" class:enabled={isEnabled}>{isEnabled ? 'Enabled' : 'Not enabled'}</span>
     </div>
-    {#if userHasIcusd || isEnabled}
+    {#if userHasStablecoinDeposit || isEnabled}
       <p class="xrp-copy">Provide an XRP payout address and optional tag to receive XRP from SP liquidations.</p>
 
       <div class="xrp-inputs">

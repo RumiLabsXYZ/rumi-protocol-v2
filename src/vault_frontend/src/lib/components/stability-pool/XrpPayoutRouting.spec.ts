@@ -5,6 +5,15 @@ import { resolve } from 'node:path';
 const componentPath = resolve(__dirname, 'XrpPayoutRouting.svelte');
 
 describe('XrpPayoutRouting pending payouts', () => {
+  it('renders the opt-in card for any SP depositor, not only icUSD depositors', () => {
+    const source = readFileSync(componentPath, 'utf8');
+
+    expect(source).toContain('userHasStablecoinDeposit = (userPosition?.stablecoin_balances ?? []).some');
+    expect(source).toContain('amount > 0n');
+    expect(source).toContain('userHasStablecoinDeposit || isEnabled || loadingPayouts || hasPendingPayouts');
+    expect(source).not.toContain('userHasIcusd || isEnabled || loadingPayouts || hasPendingPayouts');
+  });
+
   it('renders pending payout rows and settles before acknowledgement', () => {
     const source = readFileSync(componentPath, 'utf8');
 
@@ -13,7 +22,7 @@ describe('XrpPayoutRouting pending payouts', () => {
     expect(source).toContain('payout.payout_address');
     expect(source).toContain('tag {payout.destination_tag[0]}');
     expect(source).toContain('hasPendingPayouts = pendingPayouts.length > 0');
-    expect(source).toContain('userHasIcusd || isEnabled || loadingPayouts || hasPendingPayouts');
+    expect(source).toContain('userHasStablecoinDeposit || isEnabled || loadingPayouts || hasPendingPayouts');
     expect(source).toContain('const claimOutstanding = await XrpVaultService.hasOutstandingClaim(claimId)');
     expect(source).toContain('Retry once it validates to clear this reminder');
     expect(source).toContain('if (!message.includes(\'not available\'))');
