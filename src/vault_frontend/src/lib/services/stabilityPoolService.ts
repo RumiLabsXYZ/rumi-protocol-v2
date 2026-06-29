@@ -504,8 +504,12 @@ class StabilityPoolService {
     );
   }
 
-  async getMyNativeXrpPayouts(): Promise<NativeXrpPendingPayout[]> {
-    const actor = await this.getQueryActor();
+  async getMyNativeXrpPayouts(options: { allowSigner?: boolean } = {}): Promise<NativeXrpPendingPayout[]> {
+    if (isOisyWallet() && !options.allowSigner) {
+      return [];
+    }
+
+    const actor = await this.getMutationActor();
     return getMyNativeXrpPayoutsWithActor(actor);
   }
 
