@@ -37,6 +37,27 @@ icp canister install <CANISTER_NAME> \
 
 icp-cli resolves the canister name to its principal via the mapping file, uses the build output from `icp.yaml` as the wasm, runs the install (no create step), and respects `--mode upgrade`. This is much closer to dfx ergonomics than the principal-and-explicit-wasm fallback used in Task 9.
 
+### Backend upgrade descriptions are never checked in
+
+`rumi_protocol_backend` is the exception where upgrade args are not dummy bytes: `post_upgrade` records `UpgradeArg.description` into the on-chain `Event::Upgrade` log. Do not put a concrete backend changelog string in `icp.yaml`; checked-in prose goes stale and can be recorded on-chain by the next operator who uses the wrong deployment path.
+
+The checked-in `mainnet-live` backend override intentionally uses `description = null`. For every real backend upgrade, generate fresh args from the exact deployment reason:
+
+```bash
+UPGRADE_ARGS="$(./scripts/rumi-backend-upgrade-args.sh \
+  --description 'PR #NNN: concise backend change summary')"
+
+icp build rumi_protocol_backend --environment mainnet-live
+
+icp canister install rumi_protocol_backend \
+  --environment mainnet-live \
+  --identity rumi_identity \
+  --mode upgrade \
+  --args "$UPGRADE_ARGS"
+```
+
+If the upgrade intentionally changes runtime mode, add `--protocol-mode read-only`, `--protocol-mode general-availability`, or `--protocol-mode recovery` to the helper command. A production backend install or upgrade remains a hard approval boundary: prepare and verify the args/build/hash first, then stop for explicit authorization before running `icp canister install`.
+
 ### Important: `--args` is required for canisters whose post_upgrade has a parameter
 
 Discovered during Task 14 (AMM deploy). The env-level `init_args` override in `icp.yaml` is NOT applied by `icp canister install`. It only applies to `icp deploy` (the create-then-install pipeline we cannot use for existing canisters).
