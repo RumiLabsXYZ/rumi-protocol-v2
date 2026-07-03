@@ -7,6 +7,7 @@
   import type { PoolStatus, StablecoinConfig, UserPosition } from '../../services/stabilityPoolService';
   import { CANISTER_IDS } from '../../config';
   import { fetchLedgerFee, getCachedLedgerFee } from '../../services/ledgerFeeService';
+  import { TokenService } from '../../services/tokenService';
   import PointsCallout from '../points/PointsCallout.svelte';
   import { spMultiplier } from '$lib/utils/pointsRules';
   import { seasonStore, earningActive } from '$lib/stores/seasonStore';
@@ -26,6 +27,8 @@
   let error = '';
   let selectedTokenIndex = 0;
   let showDropdown = false;
+  let poolTokenBalance: bigint | null = null;
+  let poolTokenBalanceKey = '';
 
   $: isConnected = $walletStore.isConnected;
   $: activeStablecoins = poolStatus?.stablecoin_registry?.filter(s => s.is_active) ?? [];
@@ -77,11 +80,45 @@
     ? formatStableTokenDisplay(depositedBalance, selectedToken.decimals)
     : '0.0000';
 
+  function currentWithdrawGrossAvailable() {
+    return poolTokenBalance !== null && poolTokenBalance < depositedBalance
+      ? poolTokenBalance
+      : depositedBalance;
+  }
+
+  async function refreshPoolTokenBalance(token: StablecoinConfig | null) {
+    if (!token || activeTab !== 'withdraw') {
+      poolTokenBalance = null;
+      poolTokenBalanceKey = '';
+      return;
+    }
+
+    const ledgerId = token.ledger_id.toText();
+    poolTokenBalanceKey = ledgerId;
+    try {
+      const balance = await TokenService.getTokenBalance(
+        ledgerId,
+        Principal.fromText(CANISTER_IDS.STABILITY_POOL),
+        { skipCache: true },
+      );
+      if (poolTokenBalanceKey === ledgerId) {
+        poolTokenBalance = balance;
+      }
+    } catch (err) {
+      console.warn('Failed to load stability pool token balance:', err);
+      if (poolTokenBalanceKey === ledgerId) {
+        poolTokenBalance = null;
+      }
+    }
+  }
+
   function selectToken(index: number) {
     selectedTokenIndex = index;
     showDropdown = false;
     amount = '';
     error = '';
+    poolTokenBalance = null;
+    poolTokenBalanceKey = '';
   }
 
   function closeDropdown() {
@@ -108,7 +145,12 @@
     }
   }
 
-  function setMax() {
+  $: {
+    activeTab;
+    void refreshPoolTokenBalance(selectedToken);
+  }
+
+  async function setMax() {
     if (!selectedToken) return;
     if (activeTab === 'deposit') {
       // Depositing costs 2 ledger fees: one for icrc2_approve, one for icrc2_transfer_from
@@ -117,9 +159,14 @@
       amount = formatStableTokenTx(adjusted, selectedToken.decimals);
     } else {
       // Withdrawal input is the net amount the user receives; the canister
-      // debits net + ledger fee from the recorded pool position.
+      // debits net + ledger fee from the recorded pool position. Cap by the
+      // live pool ledger balance when historical state/ledger drift exists.
+      if (poolTokenBalance === null) {
+        await refreshPoolTokenBalance(selectedToken);
+      }
       const ledgerFee = getCachedLedgerFee(ledgerRefFor(selectedToken));
-      const adjusted = depositedBalance > ledgerFee ? depositedBalance - ledgerFee : 0n;
+      const grossAvailable = currentWithdrawGrossAvailable();
+      const adjusted = grossAvailable > ledgerFee ? grossAvailable - ledgerFee : 0n;
       amount = formatStableTokenTx(adjusted, selectedToken.decimals);
     }
   }
@@ -156,12 +203,15 @@
       } else {
         const ledgerFee = getCachedLedgerFee(ledgerRefFor(selectedToken));
         const grossWithdrawal = rawAmount + ledgerFee;
-        if (grossWithdrawal > depositedBalance) {
-          error = 'Exceeds deposited amount (amount + fee)';
+        if (grossWithdrawal > currentWithdrawGrossAvailable()) {
+          error = poolTokenBalance !== null && poolTokenBalance < depositedBalance
+            ? 'Exceeds available pool balance (amount + fee)'
+            : 'Exceeds deposited amount (amount + fee)';
           return;
         }
         await stabilityPoolService.withdraw(selectedToken.ledger_id, grossWithdrawal);
         dispatch('success', { action: 'withdraw' });
+        void refreshPoolTokenBalance(selectedToken);
       }
       amount = '';
     } catch (err: any) {
