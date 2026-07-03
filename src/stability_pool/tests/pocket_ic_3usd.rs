@@ -369,7 +369,136 @@ fn query_3pool_lp_balance(pic: &pocket_ic::PocketIc, pool_id: Principal, owner: 
     }
 }
 
+fn ledger_balance(pic: &pocket_ic::PocketIc, ledger: Principal, owner: Principal) -> u128 {
+    let account = Account { owner, subaccount: None };
+    let result = pic.query_call(ledger, Principal::anonymous(), "icrc1_balance_of", encode_one(account).unwrap())
+        .expect("icrc1_balance_of call failed");
+    match result {
+        WasmResult::Reply(bytes) => {
+            let balance: candid::Nat = decode_one(&bytes).expect("decode balance");
+            balance.0.try_into().expect("balance overflow")
+        }
+        WasmResult::Reject(msg) => panic!("icrc1_balance_of rejected: {}", msg),
+    }
+}
+
 // ─── Tests ───
+
+#[test]
+fn test_ckusdc_max_withdraw_drains_position_net_of_ledger_fee() {
+    let pic = PocketIcBuilder::new()
+        .with_application_subnet()
+        .build();
+    let minting_account = Principal::self_authenticating(&[101, 101, 101]);
+    let test_user = Principal::self_authenticating(&[11, 12, 13, 14]);
+    let admin = Principal::self_authenticating(&[15, 16, 17, 18]);
+    let protocol_id = Principal::self_authenticating(&[19, 20, 21, 22]);
+    let ckusdc_fee = 10_000u64; // 0.01 ckUSDC at 6 decimals
+
+    let ckusdc_ledger = pic.create_canister();
+    pic.add_cycles(ckusdc_ledger, 2_000_000_000_000);
+    let ledger_init = LedgerInitArgs {
+        minting_account: Account { owner: minting_account, subaccount: None },
+        fee_collector_account: None,
+        transfer_fee: candid::Nat::from(ckusdc_fee),
+        decimals: Some(6),
+        max_memo_length: Some(32),
+        token_name: "ckUSDC".to_string(),
+        token_symbol: "ckUSDC".to_string(),
+        metadata: vec![],
+        initial_balances: vec![(
+            Account { owner: test_user, subaccount: None },
+            candid::Nat::from(5_000_000u64),
+        )],
+        feature_flags: Some(FeatureFlags { icrc2: true }),
+        maximum_number_of_accounts: None,
+        accounts_overflow_trim_quantity: None,
+        archive_options: ArchiveOptions {
+            num_blocks_to_archive: 2000,
+            trigger_threshold: 1000,
+            controller_id: admin,
+            max_transactions_per_response: None,
+            max_message_size_bytes: None,
+            cycles_for_archive_creation: None,
+            node_max_memory_size_bytes: None,
+            more_controller_ids: None,
+        },
+    };
+    pic.install_canister(
+        ckusdc_ledger,
+        icrc1_ledger_wasm(),
+        encode_args((LedgerArg::Init(ledger_init),)).unwrap(),
+        None,
+    );
+
+    let sp_init = StabilityPoolInitArgs {
+        protocol_canister_id: protocol_id,
+        authorized_admins: vec![admin],
+    };
+    let sp_id = pic.create_canister();
+    pic.add_cycles(sp_id, 2_000_000_000_000);
+    pic.install_canister(sp_id, stability_pool_wasm(), encode_one(sp_init).unwrap(), None);
+
+    approve(&pic, ckusdc_ledger, test_user, sp_id, u128::MAX);
+    register_stablecoin(&pic, sp_id, admin, StablecoinConfig {
+        ledger_id: ckusdc_ledger,
+        symbol: "ckUSDC".to_string(),
+        decimals: 6,
+        priority: 2,
+        is_active: true,
+        // Legacy bad value: registration normalizes it, and withdraw also
+        // queries live icrc1_fee before computing the net amount.
+        transfer_fee: Some(10),
+        is_lp_token: None,
+        underlying_pool: None,
+    });
+
+    let deposit_amount = 1_010_000u64; // 1.0100 ckUSDC
+    let result = pic.update_call(
+        sp_id, test_user, "deposit",
+        encode_args((ckusdc_ledger, deposit_amount)).unwrap()
+    ).expect("deposit call failed");
+    match result {
+        WasmResult::Reply(bytes) => {
+            let r: Result<(), StabilityPoolError> = decode_one(&bytes).expect("decode deposit");
+            r.expect("deposit failed");
+        }
+        WasmResult::Reject(msg) => panic!("deposit rejected: {}", msg),
+    }
+    assert_eq!(
+        ledger_balance(&pic, ckusdc_ledger, sp_id),
+        deposit_amount as u128,
+        "pool ledger account should receive the full deposit amount",
+    );
+
+    let user_before = ledger_balance(&pic, ckusdc_ledger, test_user);
+    let result = pic.update_call(
+        sp_id, test_user, "withdraw",
+        encode_args((ckusdc_ledger, deposit_amount)).unwrap()
+    ).expect("withdraw call failed");
+    match result {
+        WasmResult::Reply(bytes) => {
+            let r: Result<(), StabilityPoolError> = decode_one(&bytes).expect("decode withdraw");
+            r.expect("withdraw failed");
+        }
+        WasmResult::Reject(msg) => panic!("withdraw rejected: {}", msg),
+    }
+
+    assert_eq!(
+        ledger_balance(&pic, ckusdc_ledger, test_user) - user_before,
+        (deposit_amount - ckusdc_fee) as u128,
+        "user should receive the deposited amount net of the ckUSDC transfer fee",
+    );
+    assert_eq!(
+        ledger_balance(&pic, ckusdc_ledger, sp_id),
+        0,
+        "max withdraw should drain the pool ledger account for this position",
+    );
+    assert!(
+        get_user_position(&pic, sp_id, test_user).is_none(),
+        "max withdraw should remove the user's empty position",
+    );
+}
 
 /// Test 1: Direct deposit of icUSD into the stability pool works
 #[test]

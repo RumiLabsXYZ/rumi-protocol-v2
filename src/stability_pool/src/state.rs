@@ -7,6 +7,31 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::logs::INFO;
 use crate::types::*;
 
+pub const ICUSD_TRANSFER_FEE_E8S: u64 = 100_000;
+pub const CK_STABLE_TRANSFER_FEE_E6: u64 = 10_000;
+pub const THREE_USD_TRANSFER_FEE: u64 = 0;
+
+pub fn known_stablecoin_transfer_fee(symbol: &str, decimals: u8) -> Option<u64> {
+    match (symbol, decimals) {
+        ("icUSD", 8) => Some(ICUSD_TRANSFER_FEE_E8S),
+        ("ckUSDT" | "ckUSDC", 6) => Some(CK_STABLE_TRANSFER_FEE_E6),
+        ("3USD", _) => Some(THREE_USD_TRANSFER_FEE),
+        _ => None,
+    }
+}
+
+fn normalize_known_stablecoin_transfer_fee(config: &mut StablecoinConfig) -> bool {
+    let Some(known_fee) = known_stablecoin_transfer_fee(&config.symbol, config.decimals) else {
+        return false;
+    };
+    let corrected_fee = config.transfer_fee.unwrap_or(0).max(known_fee);
+    if config.transfer_fee == Some(corrected_fee) {
+        return false;
+    }
+    config.transfer_fee = Some(corrected_fee);
+    true
+}
+
 /// Maximum number of liquidation records retained in memory.
 /// Older entries are dropped when this limit is exceeded.
 const MAX_LIQUIDATION_HISTORY: usize = 1_000;
@@ -213,10 +238,22 @@ impl StabilityPoolState {
     // ─── Stablecoin Registry ───
 
     pub fn register_stablecoin(&mut self, config: StablecoinConfig) {
+        let mut config = config;
+        normalize_known_stablecoin_transfer_fee(&mut config);
         self.total_stablecoin_balances
             .entry(config.ledger_id)
             .or_insert(0);
         self.stablecoin_registry.insert(config.ledger_id, config);
+    }
+
+    pub fn normalize_registered_stablecoin_transfer_fees(&mut self) -> usize {
+        let mut corrected = 0;
+        for config in self.stablecoin_registry.values_mut() {
+            if normalize_known_stablecoin_transfer_fee(config) {
+                corrected += 1;
+            }
+        }
+        corrected
     }
 
     pub fn get_stablecoin_config(&self, ledger: &Principal) -> Option<&StablecoinConfig> {
@@ -2748,7 +2785,7 @@ mod tests {
             decimals: 6,
             priority: 2,
             is_active: true,
-            transfer_fee: Some(10),
+            transfer_fee: Some(10_000),
             is_lp_token: None,
             underlying_pool: None,
         });
@@ -2758,7 +2795,7 @@ mod tests {
             decimals: 6,
             priority: 2,
             is_active: true,
-            transfer_fee: Some(10),
+            transfer_fee: Some(10_000),
             is_lp_token: None,
             underlying_pool: None,
         });
@@ -2783,6 +2820,64 @@ mod tests {
         });
 
         state
+    }
+
+    #[test]
+    fn test_known_stablecoin_fee_normalization_repairs_legacy_ckstable_values() {
+        let mut state = StabilityPoolState::default();
+
+        state.register_stablecoin(StablecoinConfig {
+            ledger_id: ckusdc_ledger(),
+            symbol: "ckUSDC".to_string(),
+            decimals: 6,
+            priority: 2,
+            is_active: true,
+            transfer_fee: Some(10),
+            is_lp_token: None,
+            underlying_pool: None,
+        });
+        state.register_stablecoin(StablecoinConfig {
+            ledger_id: ckusdt_ledger(),
+            symbol: "ckUSDT".to_string(),
+            decimals: 6,
+            priority: 2,
+            is_active: true,
+            transfer_fee: None,
+            is_lp_token: None,
+            underlying_pool: None,
+        });
+        state.register_stablecoin(StablecoinConfig {
+            ledger_id: Principal::from_slice(&[13]),
+            symbol: "3USD".to_string(),
+            decimals: 8,
+            priority: 0,
+            is_active: true,
+            transfer_fee: None,
+            is_lp_token: Some(true),
+            underlying_pool: None,
+        });
+
+        assert_eq!(
+            state
+                .stablecoin_registry
+                .get(&ckusdc_ledger())
+                .and_then(|c| c.transfer_fee),
+            Some(10_000)
+        );
+        assert_eq!(
+            state
+                .stablecoin_registry
+                .get(&ckusdt_ledger())
+                .and_then(|c| c.transfer_fee),
+            Some(10_000)
+        );
+        assert_eq!(
+            state
+                .stablecoin_registry
+                .get(&Principal::from_slice(&[13]))
+                .and_then(|c| c.transfer_fee),
+            Some(0)
+        );
     }
 
     /// Helper: directly add a deposit without ic_cdk::api::time().

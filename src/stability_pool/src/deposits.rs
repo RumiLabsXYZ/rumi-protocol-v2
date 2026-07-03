@@ -12,16 +12,16 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 
 /// Conservative fallback for a stablecoin ledger's transfer fee (native units),
-/// used when the live `icrc1_fee` query fails (IC-S-001). Erring high keeps the
-/// pool solvent (we refund slightly less) rather than risking an over-send.
-/// Mirrors rumi_3pool::transfers::DEFAULT_LEDGER_FEE.
-const DEFAULT_REFUND_LEDGER_FEE: u64 = 10_000;
+/// used when the live `icrc1_fee` query fails. Known stablecoin registry values
+/// are normalized on registration/upgrade; for unknown ledgers, erring high
+/// keeps the pool solvent rather than risking an over-send.
+const DEFAULT_LEDGER_FEE: u64 = 10_000;
 
 thread_local! {
-    /// Per-ledger transfer-fee cache for refund math, populated lazily from
+    /// Per-ledger transfer-fee cache for transfer/refund math, populated lazily from
     /// `icrc1_fee`. Heap-only (not persisted), so it is simply re-warmed after
     /// an upgrade. Mirrors rumi_3pool::transfers::LEDGER_FEES.
-    static REFUND_LEDGER_FEES: RefCell<HashMap<Principal, u64>> = RefCell::new(HashMap::new());
+    static LEDGER_FEES: RefCell<HashMap<Principal, u64>> = RefCell::new(HashMap::new());
 }
 
 fn record_deposit_credit_after_async(
@@ -65,28 +65,33 @@ fn record_deposit_as_3usd_credit_after_async(
     Ok(())
 }
 
+fn fallback_ledger_fee(ledger: Principal) -> u64 {
+    read_state(|s| {
+        let Some(config) = s.stablecoin_registry.get(&ledger) else {
+            return DEFAULT_LEDGER_FEE;
+        };
+        let configured = config.transfer_fee.unwrap_or(0);
+        let known = crate::state::known_stablecoin_transfer_fee(&config.symbol, config.decimals)
+            .unwrap_or(DEFAULT_LEDGER_FEE);
+        configured.max(known)
+    })
+}
+
 /// Fetch a stablecoin ledger's transfer fee, caching successful lookups per
-/// ledger. On query failure, falls back to the larger of the registry's
-/// configured fee and the standard ICRC-1 fee (the solvency-safe direction),
-/// without caching so the next refund re-queries.
-async fn refund_ledger_fee(ledger: Principal) -> u64 {
-    if let Some(fee) = REFUND_LEDGER_FEES.with(|c| c.borrow().get(&ledger).copied()) {
+/// ledger. On query failure, falls back to normalized registry metadata without
+/// caching so the next transfer re-queries.
+async fn ledger_transfer_fee(ledger: Principal) -> u64 {
+    if let Some(fee) = LEDGER_FEES.with(|c| c.borrow().get(&ledger).copied()) {
         return fee;
     }
     match call::<(), (candid::Nat,)>(ledger, "icrc1_fee", ()).await {
         Ok((fee_nat,)) => {
-            let fee: u64 = fee_nat.0.try_into().unwrap_or(DEFAULT_REFUND_LEDGER_FEE);
-            REFUND_LEDGER_FEES.with(|c| c.borrow_mut().insert(ledger, fee));
+            let fee: u64 = fee_nat.0.try_into().unwrap_or(DEFAULT_LEDGER_FEE);
+            LEDGER_FEES.with(|c| c.borrow_mut().insert(ledger, fee));
             fee
         }
         Err(e) => {
-            let registry_fee = read_state(|s| {
-                s.stablecoin_registry
-                    .get(&ledger)
-                    .and_then(|c| c.transfer_fee)
-                    .unwrap_or(0)
-            });
-            let fallback = registry_fee.max(DEFAULT_REFUND_LEDGER_FEE);
+            let fallback = fallback_ledger_fee(ledger);
             log!(
                 INFO,
                 "icrc1_fee query failed for {}: {:?}; using conservative fallback {}",
@@ -234,15 +239,10 @@ pub async fn withdraw(token_ledger: Principal, amount: u64) -> Result<(), Stabil
         return Err(StabilityPoolError::EmergencyPaused);
     }
 
-    // Look up the transfer fee so we can deduct it from what the user receives.
-    // The ledger charges the fee on top of the transfer amount, so without this
-    // the pool's ledger balance drifts below its recorded state on every withdrawal.
-    let ledger_fee = read_state(|s| {
-        s.stablecoin_registry
-            .get(&token_ledger)
-            .and_then(|c| c.transfer_fee)
-            .unwrap_or(0)
-    });
+    // The ledger debits `transfer_amount + fee` from the pool. Query the live
+    // fee first so a max withdrawal drains the user's recorded position without
+    // overdrawing the pool ledger account.
+    let ledger_fee = ledger_transfer_fee(token_ledger).await;
 
     if amount <= ledger_fee {
         return Err(StabilityPoolError::AmountTooLow {
@@ -832,7 +832,7 @@ pub async fn deposit_as_3usd(
 /// pending refund recoverable via `claim_pending_refund` instead of being
 /// silently stranded.
 async fn refund_user(user: Principal, token_ledger: Principal, amount: u64, reason: &str) {
-    let fee = refund_ledger_fee(token_ledger).await;
+    let fee = ledger_transfer_fee(token_ledger).await;
     if amount <= fee {
         // Nothing transferable once the ledger fee is covered; the dust stays
         // in the pool (solvency-safe, mirrors rumi_3pool::transfer_to_user).
@@ -910,7 +910,7 @@ pub async fn claim_pending_refund(refund_id: u64) -> Result<u64, StabilityPoolEr
         return Err(StabilityPoolError::Unauthorized);
     }
 
-    let fee = refund_ledger_fee(refund.token_ledger).await;
+    let fee = ledger_transfer_fee(refund.token_ledger).await;
     if refund.amount <= fee {
         // Nothing transferable once the fee is covered; drop the record and
         // leave the dust in the pool (solvency-safe).
