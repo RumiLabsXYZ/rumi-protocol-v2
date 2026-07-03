@@ -104,6 +104,78 @@ async fn ledger_transfer_fee(ledger: Principal) -> u64 {
     }
 }
 
+async fn ledger_pool_balance(ledger: Principal) -> Option<u64> {
+    let account = Account {
+        owner: ic_cdk::api::id(),
+        subaccount: None,
+    };
+    match call::<(Account,), (candid::Nat,)>(ledger, "icrc1_balance_of", (account,)).await {
+        Ok((balance_nat,)) => Some(balance_nat.0.try_into().unwrap_or(u64::MAX)),
+        Err(e) => {
+            log!(
+                INFO,
+                "icrc1_balance_of query failed for {}: {:?}; continuing without ledger shortfall reconciliation",
+                ledger,
+                e
+            );
+            None
+        }
+    }
+}
+
+fn prepare_withdrawal_after_ledger_check(
+    caller: Principal,
+    token_ledger: Principal,
+    requested_amount: u64,
+    ledger_balance: Option<u64>,
+    ledger_fee: u64,
+) -> Result<(u64, Option<String>), StabilityPoolError> {
+    mutate_state(|s| {
+        let mut withdrawal_amount = requested_amount;
+        let mut correction_msg = None;
+
+        if let Some(live_balance) = ledger_balance {
+            if live_balance < requested_amount {
+                if live_balance <= ledger_fee {
+                    return Err(StabilityPoolError::AmountTooLow {
+                        minimum_e8s: ledger_fee + 1,
+                    });
+                }
+
+                let user_balance = s
+                    .deposits
+                    .get(&caller)
+                    .and_then(|pos| pos.stablecoin_balances.get(&token_ledger).copied())
+                    .unwrap_or(0);
+                let aggregate_balance = s
+                    .total_stablecoin_balances
+                    .get(&token_ledger)
+                    .copied()
+                    .unwrap_or(0);
+
+                if requested_amount == user_balance && user_balance == aggregate_balance {
+                    let msg = s.correct_balance(caller, token_ledger, live_balance);
+                    s.push_event(
+                        caller,
+                        PoolEventType::BalanceCorrected {
+                            user: caller,
+                            token_ledger,
+                            new_amount: live_balance,
+                        },
+                    );
+                    correction_msg = Some(msg);
+                    withdrawal_amount = live_balance;
+                } else {
+                    return Err(StabilityPoolError::InsufficientPoolBalance);
+                }
+            }
+        }
+
+        s.process_withdrawal(caller, token_ledger, withdrawal_amount)?;
+        Ok((withdrawal_amount, correction_msg))
+    })
+}
+
 /// Deposit a stablecoin into the pool. User must have pre-approved the pool canister.
 pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), StabilityPoolError> {
     // SP-102: refuse balance-mutating ops while a liquidation is apportioning.
@@ -243,6 +315,7 @@ pub async fn withdraw(token_ledger: Principal, amount: u64) -> Result<(), Stabil
     // fee first so a max withdrawal drains the user's recorded position without
     // overdrawing the pool ledger account.
     let ledger_fee = ledger_transfer_fee(token_ledger).await;
+    let pool_ledger_balance = ledger_pool_balance(token_ledger).await;
 
     if amount <= ledger_fee {
         return Err(StabilityPoolError::AmountTooLow {
@@ -252,15 +325,24 @@ pub async fn withdraw(token_ledger: Principal, amount: u64) -> Result<(), Stabil
 
     // Deduct full amount from state BEFORE transfer to prevent double-spend.
     // If the transfer fails, we rollback below.
-    mutate_state(|s| s.process_withdrawal(caller, token_ledger, amount))?;
+    let (withdrawal_amount, correction_msg) = prepare_withdrawal_after_ledger_check(
+        caller,
+        token_ledger,
+        amount,
+        pool_ledger_balance,
+        ledger_fee,
+    )?;
+    if let Some(msg) = correction_msg {
+        log!(INFO, "Withdrawal reconciled ledger shortfall: {}", msg);
+    }
     let _balance_async_guard = crate::pool_guard::PoolBalanceAsyncGuard::new();
 
     // User receives amount minus fee; pool pays amount total (transfer + fee)
-    let transfer_amount = amount - ledger_fee;
+    let transfer_amount = withdrawal_amount - ledger_fee;
     log!(
         INFO,
         "Withdraw: {} (transfer {} - fee {}) from {} by {}",
-        amount,
+        withdrawal_amount,
         transfer_amount,
         ledger_fee,
         token_ledger,
@@ -294,7 +376,7 @@ pub async fn withdraw(token_ledger: Principal, amount: u64) -> Result<(), Stabil
                     caller,
                     PoolEventType::Withdraw {
                         token_ledger,
-                        amount,
+                        amount: withdrawal_amount,
                     },
                 )
             });
@@ -313,7 +395,7 @@ pub async fn withdraw(token_ledger: Principal, amount: u64) -> Result<(), Stabil
                     caller,
                     PoolEventType::Withdraw {
                         token_ledger,
-                        amount,
+                        amount: withdrawal_amount,
                     },
                 )
             });
@@ -327,7 +409,7 @@ pub async fn withdraw(token_ledger: Principal, amount: u64) -> Result<(), Stabil
             );
             // Rollback: re-credit the user's balance (clear ledger rejection,
             // tokens did NOT leave the pool).
-            mutate_state(|s| s.add_deposit(caller, token_ledger, amount));
+            mutate_state(|s| s.add_deposit(caller, token_ledger, withdrawal_amount));
             Err(StabilityPoolError::LedgerTransferFailed {
                 reason: format!("{:?}", transfer_error),
             })
@@ -346,7 +428,7 @@ pub async fn withdraw(token_ledger: Principal, amount: u64) -> Result<(), Stabil
             // double-spend in practice; lose-then-don't-retry leaves the
             // deduction restored AND the tokens transferred — a known
             // operational risk that requires manual reconciliation.
-            mutate_state(|s| s.add_deposit(caller, token_ledger, amount));
+            mutate_state(|s| s.add_deposit(caller, token_ledger, withdrawal_amount));
             Err(StabilityPoolError::InterCanisterCallFailed {
                 target: format!("{}", token_ledger),
                 method: "icrc1_transfer".to_string(),
