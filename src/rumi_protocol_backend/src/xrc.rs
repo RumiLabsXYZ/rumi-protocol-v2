@@ -123,18 +123,66 @@ pub fn should_fetch_collateral_price(
         .unwrap_or(false)
 }
 
+thread_local! {
+    /// 2026-07-03 cycle-burn optimization: the `TimerId` of the background
+    /// price-refresh timer for each collateral, so
+    /// `set_collateral_price_fetch_interval_secs` can clear + re-register a
+    /// single collateral's timer in place (mirroring the ICP / settlement /
+    /// observer timers in `main`). NOT persisted: timers never survive an
+    /// upgrade, and `setup_timers` re-registers each collateral's timer from
+    /// `State::collateral_price_fetch_interval_secs` on every start.
+    static COLLATERAL_PRICE_TIMER_IDS: std::cell::RefCell<
+        std::collections::BTreeMap<Principal, ic_cdk_timers::TimerId>,
+    > = std::cell::RefCell::new(std::collections::BTreeMap::new());
+}
+
+/// 2026-07-03: fallback background price-fetch cadence (seconds) for a
+/// collateral with no entry in `State::collateral_price_fetch_interval_secs`.
+/// Equal to the historical hardcoded 300s, so an unconfigured collateral
+/// behaves exactly as it did before per-collateral cadences existed.
+pub const DEFAULT_COLLATERAL_PRICE_FETCH_SECS: u64 = 300;
+
+/// 2026-07-03: resolve the effective background price-fetch cadence for a
+/// collateral. Returns the per-collateral override when set, else the 300s
+/// default. A stored 0 (should never happen — the setter rejects it) or any
+/// value below 60s is floored to protect against a busy-loop timer.
+pub fn collateral_price_fetch_secs(state: &State, ledger_id: &Principal) -> u64 {
+    match state
+        .collateral_price_fetch_interval_secs
+        .get(ledger_id)
+        .copied()
+    {
+        None | Some(0) => DEFAULT_COLLATERAL_PRICE_FETCH_SECS,
+        Some(secs) => secs.max(60),
+    }
+}
+
 /// Wave-9d DOS-011: registers the recurring per-collateral XRC price
 /// timer with the status-check gate baked in. Used by both
 /// `setup_timers()` (re-registering after upgrade) and
 /// `add_collateral_token` (registering for a brand-new collateral).
 ///
-/// The timer keeps firing every `FETCHING_ICP_RATE_INTERVAL`
-/// regardless of status — that's free. The gate runs synchronously
-/// INSIDE the closure (before any `ic_cdk::spawn`): if the collateral
-/// is wound down, we early-return before allocating an async task and
-/// before the (~1B cycle) XRC call.
+/// 2026-07-03: the interval is now per-collateral (resolved via
+/// `collateral_price_fetch_secs`, default 300s) rather than a fixed
+/// `FETCHING_ICP_RATE_INTERVAL`, and the timer id is tracked in
+/// `COLLATERAL_PRICE_TIMER_IDS` so a re-register (setter, or repeated
+/// `setup_timers`) clears the prior timer first and never leaks a duplicate
+/// interval timer for the same collateral.
+///
+/// The timer keeps firing on its cadence regardless of status — that's free.
+/// The gate runs synchronously INSIDE the closure (before any `ic_cdk::spawn`):
+/// if the collateral is wound down, we early-return before allocating an async
+/// task and before the (~1B cycle) XRC call.
 pub fn register_collateral_price_timer(ledger_id: Principal) {
-    ic_cdk_timers::set_timer_interval(FETCHING_ICP_RATE_INTERVAL, move || {
+    // Clear any prior timer for this collateral so a re-register never leaks a
+    // second interval timer (which would double this collateral's fetch burn).
+    COLLATERAL_PRICE_TIMER_IDS.with(|cell| {
+        if let Some(old) = cell.borrow_mut().remove(&ledger_id) {
+            ic_cdk_timers::clear_timer(old);
+        }
+    });
+    let secs = read_state(|s| collateral_price_fetch_secs(s, &ledger_id));
+    let new_id = ic_cdk_timers::set_timer_interval(Duration::from_secs(secs), move || {
         let go = read_state(|s| should_fetch_collateral_price(s, &ledger_id));
         if !go {
             log!(
@@ -145,6 +193,9 @@ pub fn register_collateral_price_timer(ledger_id: Principal) {
             return;
         }
         ic_cdk::spawn(crate::management::fetch_collateral_price(ledger_id));
+    });
+    COLLATERAL_PRICE_TIMER_IDS.with(|cell| {
+        cell.borrow_mut().insert(ledger_id, new_id);
     });
 }
 
@@ -649,5 +700,49 @@ pub async fn ensure_stable_not_depegged(
             "No {} price available. Cannot verify peg safety.",
             symbol
         ))),
+    }
+}
+
+#[cfg(test)]
+mod cycle_cadence_tests {
+    use super::{collateral_price_fetch_secs, DEFAULT_COLLATERAL_PRICE_FETCH_SECS};
+    use crate::state::State;
+    use candid::Principal;
+
+    fn ckbtc() -> Principal {
+        Principal::from_text("mxzaz-hqaaa-aaaar-qaada-cai").unwrap()
+    }
+
+    #[test]
+    fn absent_collateral_falls_back_to_default() {
+        // A collateral with no entry keeps the historical 300s cadence, so a
+        // legacy snapshot (empty map) behaves exactly as before this field.
+        let s = State::default();
+        assert_eq!(
+            collateral_price_fetch_secs(&s, &ckbtc()),
+            DEFAULT_COLLATERAL_PRICE_FETCH_SECS
+        );
+    }
+
+    #[test]
+    fn override_is_honored() {
+        let mut s = State::default();
+        s.collateral_price_fetch_interval_secs.insert(ckbtc(), 1800);
+        assert_eq!(collateral_price_fetch_secs(&s, &ckbtc()), 1800);
+    }
+
+    #[test]
+    fn zero_falls_back_and_sub_60_is_floored() {
+        let mut s = State::default();
+        // A stored 0 (the setter rejects it, but a corrupt value must not
+        // busy-loop) falls back to the default.
+        s.collateral_price_fetch_interval_secs.insert(ckbtc(), 0);
+        assert_eq!(
+            collateral_price_fetch_secs(&s, &ckbtc()),
+            DEFAULT_COLLATERAL_PRICE_FETCH_SECS
+        );
+        // Any other sub-60 value is floored to 60s.
+        s.collateral_price_fetch_interval_secs.insert(ckbtc(), 5);
+        assert_eq!(collateral_price_fetch_secs(&s, &ckbtc()), 60);
     }
 }
