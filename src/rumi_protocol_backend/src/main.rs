@@ -8738,6 +8738,96 @@ async fn set_vault_check_tick_interval_secs(secs: u64) -> Result<(), ProtocolErr
     Ok(())
 }
 
+/// 2026-07-03 cycle-burn optimization: tune the background XRC price-refresh
+/// cadence (seconds) for a SINGLE non-ICP collateral. Default (unset) is 300s.
+/// Re-registers that collateral's price timer in place; no upgrade required.
+///
+/// Trade-off: this timer is a background refresh feeding query displays and the
+/// liquidation sweep's cached-price read. User mint/withdraw/borrow always force
+/// an on-demand XRC fetch when the cache is older than
+/// `PRICE_FRESHNESS_THRESHOLD_NANOS` (60s), so RAISING this never affects
+/// user-operation pricing. It DOES mean the liquidation sweep for this
+/// collateral may act on a price up to `secs` old, so keep debt-bearing,
+/// volatile collateral tight (300-900s) and only stretch idle / low-debt
+/// collateral. The 10-minute hard oracle-staleness ceiling
+/// (`ensure_fresh_price_for`) still fail-closes user ops regardless.
+///
+/// ICP is rejected: it is driven by its own Timer A, tuned via
+/// `set_xrc_fetch_interval_secs`, not the per-collateral price timer.
+#[candid_method(update)]
+#[update]
+async fn set_collateral_price_fetch_interval_secs(
+    collateral: Principal,
+    secs: u64,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can set a collateral price fetch interval".to_string(),
+        ));
+    }
+    // Floor at 60s: a sub-minute background refresh defeats the 60s freshness
+    // cache and re-burns XRC cycles, and a 0 would busy-loop the timer.
+    if secs < 60 {
+        return Err(ProtocolError::GenericError(
+            "Collateral price fetch interval must be >= 60s".to_string(),
+        ));
+    }
+    // ICP has its own Timer A; it is excluded from the per-collateral price
+    // timers in `setup_timers`, so keying it here would have no effect (and
+    // implies the caller wants `set_xrc_fetch_interval_secs`).
+    let icp = read_state(|s| s.icp_collateral_type());
+    if collateral == icp {
+        return Err(ProtocolError::GenericError(
+            "ICP price cadence is tuned via set_xrc_fetch_interval_secs, not this endpoint"
+                .to_string(),
+        ));
+    }
+    // Require a configured collateral so we never register a dangling timer for
+    // a principal that has no price source.
+    let known = read_state(|s| s.collateral_configs.contains_key(&collateral));
+    if !known {
+        return Err(ProtocolError::GenericError(format!(
+            "Unknown collateral {}",
+            collateral
+        )));
+    }
+    mutate_state(|s| {
+        s.collateral_price_fetch_interval_secs
+            .insert(collateral, secs);
+    });
+    rumi_protocol_backend::xrc::register_collateral_price_timer(collateral);
+    log!(
+        INFO,
+        "[set_collateral_price_fetch_interval_secs] {} price fetch cadence set to {}s",
+        collateral,
+        secs
+    );
+    Ok(())
+}
+
+/// 2026-07-03: observability for the per-collateral price-fetch cadence. Returns
+/// the EFFECTIVE interval (seconds) for every configured collateral — the
+/// per-collateral override where set, else the 300s default. ICP is included for
+/// completeness but its background refresh is actually driven by Timer A
+/// (`xrc_fetch_interval_secs`), not the per-collateral timer.
+#[candid_method(query)]
+#[query]
+fn get_collateral_price_fetch_intervals() -> Vec<(Principal, u64)> {
+    read_state(|s| {
+        s.collateral_configs
+            .keys()
+            .map(|ct| {
+                (
+                    *ct,
+                    rumi_protocol_backend::xrc::collateral_price_fetch_secs(s, ct),
+                )
+            })
+            .collect()
+    })
+}
+
 /// Phase 1b Task 15: tune the Timer D (Monad outbound settlement fan-out)
 /// interval in seconds. Default 30. Re-registers in place.
 ///

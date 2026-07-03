@@ -1139,6 +1139,19 @@ pub struct State {
     /// `set_vault_check_tick_interval_secs`.
     #[serde(default = "default_vault_check_tick_interval_secs")]
     pub vault_check_tick_interval_secs: u64,
+    /// 2026-07-03 cycle-burn optimization: per-collateral cadence (seconds) for
+    /// the background XRC price-refresh timer registered by
+    /// `xrc::register_collateral_price_timer`, keyed by collateral ledger
+    /// principal. A collateral ABSENT from this map falls back to
+    /// `xrc::DEFAULT_COLLATERAL_PRICE_FETCH_SECS` (300s) — the cadence every
+    /// non-ICP collateral shipped with before this field existed — so a legacy
+    /// snapshot (empty map via serde default) preserves the exact prior
+    /// behavior. Tunable per collateral via
+    /// `set_collateral_price_fetch_interval_secs`, which re-registers that one
+    /// collateral's timer in place. ICP is NOT keyed here: it has its own
+    /// dedicated Timer A (`xrc_fetch_interval_secs`).
+    #[serde(default)]
+    pub collateral_price_fetch_interval_secs: BTreeMap<CollateralType, u64>,
     /// Phase 1b Task 15: cadence (seconds) for Timer D (the settlement
     /// fan-out, `main::run_all_settlements`, which dispatches each registered
     /// chain to its kind's `run_settlement`). Default 30. Tunable via
@@ -1842,6 +1855,7 @@ impl Default for State {
             xrc_fetch_interval_secs: default_xrc_fetch_interval_secs(),
             interest_treasury_tick_interval_secs: default_interest_treasury_tick_interval_secs(),
             vault_check_tick_interval_secs: default_vault_check_tick_interval_secs(),
+            collateral_price_fetch_interval_secs: BTreeMap::new(),
             settlement_tick_interval_secs: default_settlement_tick_interval_secs(),
             observer_tick_interval_secs: default_observer_tick_interval_secs(),
             chain_interest_tick_interval_secs: default_chain_interest_tick_interval_secs(),
@@ -2000,6 +2014,7 @@ impl From<InitArg> for State {
             xrc_fetch_interval_secs: default_xrc_fetch_interval_secs(),
             interest_treasury_tick_interval_secs: default_interest_treasury_tick_interval_secs(),
             vault_check_tick_interval_secs: default_vault_check_tick_interval_secs(),
+            collateral_price_fetch_interval_secs: BTreeMap::new(),
             settlement_tick_interval_secs: default_settlement_tick_interval_secs(),
             observer_tick_interval_secs: default_observer_tick_interval_secs(),
             chain_interest_tick_interval_secs: default_chain_interest_tick_interval_secs(),
