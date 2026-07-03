@@ -82,21 +82,12 @@ fn post_upgrade(_args: StabilityPoolInitArgs) {
         ic_cdk::trap(&format!("State validation failed after upgrade: {}", error));
     }
 
-    // Migration: fix stablecoin transfer_fee values
-    mutate_state(|s| {
-        for config in s.stablecoin_registry.values_mut() {
-            match config.symbol.as_str() {
-                "icUSD" => {
-                    config.transfer_fee = Some(100_000);
-                }
-                "3USD" => {
-                    config.transfer_fee = Some(0);
-                }
-                _ => {}
-            }
-        }
-    });
-    log!(INFO, "Migration: corrected icUSD and 3USD transfer fees");
+    let corrected_fees = mutate_state(|s| s.normalize_registered_stablecoin_transfer_fees());
+    log!(
+        INFO,
+        "Migration: normalized {} stablecoin transfer fee values",
+        corrected_fees
+    );
 
     // Defer timer setup to avoid ic0_call_new restriction during upgrade
     ic_cdk_timers::set_timer(Duration::ZERO, || {
@@ -742,13 +733,13 @@ pub fn icrc21_canister_call_consent_message(
         "deposit" => {
             match candid::decode_args::<(Principal, u64)>(&request.arg) {
                 Ok((token_ledger, amount)) => {
-                    let symbol = read_state(|s| {
+                    let (symbol, decimals) = read_state(|s| {
                         s.stablecoin_registry
                             .get(&token_ledger)
-                            .map(|c| c.symbol.clone())
-                            .unwrap_or_else(|| format!("token {}", token_ledger))
+                            .map(|c| (c.symbol.clone(), c.decimals))
+                            .unwrap_or_else(|| (format!("token {}", token_ledger), 8))
                     });
-                    let formatted = format_token_amount(amount);
+                    let formatted = format_token_amount(amount, decimals);
                     format!(
                         "## Deposit to Stability Pool\n\n\
                          You are depositing **{} {}** into the Rumi Protocol Stability Pool.\n\n\
@@ -762,17 +753,29 @@ pub fn icrc21_canister_call_consent_message(
         "withdraw" => {
             match candid::decode_args::<(Principal, u64)>(&request.arg) {
                 Ok((token_ledger, amount)) => {
-                    let symbol = read_state(|s| {
-                        s.stablecoin_registry
-                            .get(&token_ledger)
-                            .map(|c| c.symbol.clone())
-                            .unwrap_or_else(|| format!("token {}", token_ledger))
+                    let (symbol, decimals, fee) = read_state(|s| {
+                        let Some(config) = s.stablecoin_registry.get(&token_ledger) else {
+                            return (format!("token {}", token_ledger), 8, 0);
+                        };
+                        let known_fee = crate::state::known_stablecoin_transfer_fee(
+                            &config.symbol,
+                            config.decimals,
+                        )
+                        .unwrap_or(0);
+                        (
+                            config.symbol.clone(),
+                            config.decimals,
+                            config.transfer_fee.unwrap_or(0).max(known_fee),
+                        )
                     });
-                    let formatted = format_token_amount(amount);
+                    let gross_formatted = format_token_amount(amount, decimals);
+                    let net_amount = amount.saturating_sub(fee);
+                    let net_formatted = format_token_amount(net_amount, decimals);
                     format!(
                         "## Withdraw from Stability Pool\n\n\
-                         You are withdrawing **{} {}** from the Rumi Protocol Stability Pool.",
-                        formatted, symbol
+                         You are withdrawing **{} {}** from your Rumi Protocol Stability Pool position. \
+                         After the ledger transfer fee, you receive **{} {}**.",
+                        gross_formatted, symbol, net_formatted, symbol
                     )
                 }
                 Err(_) => "Withdraw stablecoins from the Rumi Protocol Stability Pool.".to_string(),
@@ -880,13 +883,13 @@ pub fn icrc21_canister_call_consent_message(
         "deposit_as_3usd" => {
             match candid::decode_args::<(Principal, u64)>(&request.arg) {
                 Ok((token_ledger, amount)) => {
-                    let symbol = read_state(|s| {
+                    let (symbol, decimals) = read_state(|s| {
                         s.stablecoin_registry
                             .get(&token_ledger)
-                            .map(|c| c.symbol.clone())
-                            .unwrap_or_else(|| format!("token {}", token_ledger))
+                            .map(|c| (c.symbol.clone(), c.decimals))
+                            .unwrap_or_else(|| (format!("token {}", token_ledger), 8))
                     });
-                    let formatted = format_token_amount(amount);
+                    let formatted = format_token_amount(amount, decimals);
                     format!(
                         "## Deposit as 3USD\n\n\
                          You are depositing **{} {}** into the Rumi Protocol Stability Pool \
@@ -935,14 +938,15 @@ pub fn icrc10_supported_standards() -> Vec<Icrc10SupportedStandard> {
     ]
 }
 
-/// Format an e8s token amount as a human-readable string.
-fn format_token_amount(amount_e8s: u64) -> String {
-    let whole = amount_e8s / 100_000_000;
-    let frac = amount_e8s % 100_000_000;
+/// Format a token amount in native units as a human-readable string.
+fn format_token_amount(amount: u64, decimals: u8) -> String {
+    let divisor = 10u64.checked_pow(decimals as u32).unwrap_or(100_000_000);
+    let whole = amount / divisor;
+    let frac = amount % divisor;
     if frac == 0 {
         format!("{}", whole)
     } else {
-        let frac_str = format!("{:08}", frac);
+        let frac_str = format!("{:0width$}", frac, width = decimals as usize);
         let trimmed = frac_str.trim_end_matches('0');
         format!("{}.{}", whole, trimmed)
     }

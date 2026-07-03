@@ -89,9 +89,8 @@
   }
 
   // Audit ICRC-005: per-ledger ICRC-1 fee is queried live (cached for the
-  // session in ledgerFeeService). `setMax` and validation read from the
-  // sync cache; `handleSubmit` does an `await fetchLedgerFee(...)` so the
-  // pre-flight check uses the freshest value before the actual approve.
+  // session in ledgerFeeService). `setMax` and submit validation read from the
+  // sync cache so the Oisy signer popup stays inside the browser click gesture.
 
   function ledgerRefFor(token: StablecoinConfig) {
     return {
@@ -117,8 +116,11 @@
       const adjusted = walletBalance > totalFees ? walletBalance - totalFees : 0n;
       amount = formatStableTokenTx(adjusted, selectedToken.decimals);
     } else {
-      // Withdrawals: pool canister pays the transfer fee, user gets full amount
-      amount = formatStableTokenTx(depositedBalance, selectedToken.decimals);
+      // Withdrawal input is the net amount the user receives; the canister
+      // debits net + ledger fee from the recorded pool position.
+      const ledgerFee = getCachedLedgerFee(ledgerRefFor(selectedToken));
+      const adjusted = depositedBalance > ledgerFee ? depositedBalance - ledgerFee : 0n;
+      amount = formatStableTokenTx(adjusted, selectedToken.decimals);
     }
   }
 
@@ -152,11 +154,13 @@
         await stabilityPoolService.deposit(selectedToken.ledger_id, rawAmount);
         dispatch('success', { action: 'deposit' });
       } else {
-        if (rawAmount > depositedBalance) {
-          error = 'Exceeds deposited amount';
+        const ledgerFee = getCachedLedgerFee(ledgerRefFor(selectedToken));
+        const grossWithdrawal = rawAmount + ledgerFee;
+        if (grossWithdrawal > depositedBalance) {
+          error = 'Exceeds deposited amount (amount + fee)';
           return;
         }
-        await stabilityPoolService.withdraw(selectedToken.ledger_id, rawAmount);
+        await stabilityPoolService.withdraw(selectedToken.ledger_id, grossWithdrawal);
         dispatch('success', { action: 'withdraw' });
       }
       amount = '';
