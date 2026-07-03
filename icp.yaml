@@ -640,7 +640,7 @@ canisters:
   # and an `icp sync` after dropping the stub succeeded.)
   #
   # BUILD/SYNC mechanics: `npm ci` installs the hoisted workspace deps from the
-  # root package-lock.json; `npm run build --workspace=<name>` runs that
+  # root package-lock.json; `npm run build --workspace <name>` runs that
   # workspace's prebuild (`@sveltejs/kit sync`) then build (`vite build`) into
   # src/<name>/dist. The recipe's build steps run in your working tree, and the
   # asset SYNC uploads from the in-repo `dir` (src/<name>/dist) - so the
@@ -658,7 +658,7 @@ canisters:
         dir: src/vault_frontend/dist
         build:
           - npm ci
-          - npm run build --workspace=vault_frontend
+          - npm run build --workspace vault_frontend
           - rm -f src/vault_frontend/dist/.DS_Store
           - rm -rf src/vault_frontend/dist/.well-known
           - cp -R src/vault_frontend/assets/.well-known src/vault_frontend/dist/.well-known
@@ -671,7 +671,7 @@ canisters:
         dir: src/rumi_homepage/dist
         build:
           - npm ci
-          - npm run build --workspace=rumi_homepage
+          - npm run build --workspace rumi_homepage
           - rm -f src/rumi_homepage/dist/.DS_Store
           - rm -rf src/rumi_homepage/dist/.well-known
           - cp -R src/rumi_homepage/assets/.well-known src/rumi_homepage/dist/.well-known
