@@ -501,8 +501,7 @@ fn test_ckusdc_max_withdraw_drains_position_net_of_ledger_fee() {
     );
 }
 
-#[test]
-fn test_ckusdc_max_withdraw_self_corrects_sole_holder_ledger_shortfall() {
+fn run_ckusdc_sole_holder_ledger_shortfall_withdraw(withdraw_recorded_amount: bool) {
     let pic = PocketIcBuilder::new()
         .with_application_subnet()
         .build();
@@ -614,13 +613,18 @@ fn test_ckusdc_max_withdraw_self_corrects_sole_holder_ledger_shortfall() {
     let live_pool_balance = ledger_balance(&pic, ckusdc_ledger, sp_id) as u64;
     assert_eq!(live_pool_balance, deposit_amount - ckusdc_fee - 1);
 
+    let requested_withdrawal = if withdraw_recorded_amount {
+        deposit_amount
+    } else {
+        live_pool_balance
+    };
     let user_before = ledger_balance(&pic, ckusdc_ledger, test_user);
     let result = pic
         .update_call(
             sp_id,
             test_user,
             "withdraw",
-            encode_args((ckusdc_ledger, deposit_amount)).unwrap(),
+            encode_args((ckusdc_ledger, requested_withdrawal)).unwrap(),
         )
         .expect("withdraw call failed");
     match result {
@@ -645,6 +649,16 @@ fn test_ckusdc_max_withdraw_self_corrects_sole_holder_ledger_shortfall() {
         get_user_position(&pic, sp_id, test_user).is_none(),
         "sole-holder shortfall correction should remove the phantom balance",
     );
+}
+
+#[test]
+fn test_ckusdc_max_withdraw_self_corrects_sole_holder_ledger_shortfall() {
+    run_ckusdc_sole_holder_ledger_shortfall_withdraw(true);
+}
+
+#[test]
+fn test_ckusdc_capped_max_withdraw_self_corrects_sole_holder_ledger_shortfall() {
+    run_ckusdc_sole_holder_ledger_shortfall_withdraw(false);
 }
 
 /// Test 1: Direct deposit of icUSD into the stability pool works

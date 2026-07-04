@@ -135,25 +135,29 @@ fn prepare_withdrawal_after_ledger_check(
         let mut correction_msg = None;
 
         if let Some(live_balance) = ledger_balance {
-            if live_balance < requested_amount {
+            let user_balance = s
+                .deposits
+                .get(&caller)
+                .and_then(|pos| pos.stablecoin_balances.get(&token_ledger).copied())
+                .unwrap_or(0);
+            let aggregate_balance = s
+                .total_stablecoin_balances
+                .get(&token_ledger)
+                .copied()
+                .unwrap_or(0);
+
+            if live_balance < aggregate_balance {
                 if live_balance <= ledger_fee {
                     return Err(StabilityPoolError::AmountTooLow {
                         minimum_e8s: ledger_fee + 1,
                     });
                 }
 
-                let user_balance = s
-                    .deposits
-                    .get(&caller)
-                    .and_then(|pos| pos.stablecoin_balances.get(&token_ledger).copied())
-                    .unwrap_or(0);
-                let aggregate_balance = s
-                    .total_stablecoin_balances
-                    .get(&token_ledger)
-                    .copied()
-                    .unwrap_or(0);
+                let sole_holder = user_balance > 0 && user_balance == aggregate_balance;
+                let drains_recorded_position = requested_amount == user_balance;
+                let drains_live_balance = requested_amount == live_balance;
 
-                if requested_amount == user_balance && user_balance == aggregate_balance {
+                if sole_holder && (drains_recorded_position || drains_live_balance) {
                     let msg = s.correct_balance(caller, token_ledger, live_balance);
                     s.push_event(
                         caller,
@@ -168,6 +172,8 @@ fn prepare_withdrawal_after_ledger_check(
                 } else {
                     return Err(StabilityPoolError::InsufficientPoolBalance);
                 }
+            } else if live_balance < requested_amount {
+                return Err(StabilityPoolError::InsufficientPoolBalance);
             }
         }
 
