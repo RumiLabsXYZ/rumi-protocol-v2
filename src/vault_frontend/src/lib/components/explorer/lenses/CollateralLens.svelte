@@ -157,6 +157,10 @@
       for (const [principal, symbol] of Object.entries(COLLATERAL_SYMBOLS)) {
         const cfg = configMap.get(principal);
         const tot = totalsMap.get(principal);
+        // A fully repaid Sunset collateral is withheld by the backend from
+        // both public collateral queries. Do not recreate a zero row from the
+        // explorer's static chart palette after that retirement point.
+        if (!cfg || !tot) continue;
         const decimals = tot?.decimals != null ? Number(tot.decimals) : 8;
         const price = priceMap.get(principal) ?? (tot?.price ? Number(tot.price) : 0);
         const totalColl = tot?.total_collateral != null ? Number(tot.total_collateral) / Math.pow(10, decimals) : 0;

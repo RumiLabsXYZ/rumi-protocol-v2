@@ -11199,6 +11199,9 @@ fn get_collateral_totals() -> Vec<CollateralTotals> {
     read_state(|s| {
         s.collateral_configs
             .iter()
+            // Keep wind-down collateral observable until its last borrower has
+            // repaid, then remove it from the explorer's collateral surface.
+            .filter(|(ct, _)| !s.is_retired_sunset_collateral(ct))
             .map(|(ct, config)| {
                 let vault_count = s
                     .collateral_to_vault_ids

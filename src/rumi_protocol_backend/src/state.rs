@@ -269,7 +269,9 @@ pub enum CollateralStatus {
     Paused,
     /// HARD STOP — nothing works except admin actions. Emergency brake.
     Frozen,
-    /// Winding down — repay and close only, no new activity
+    /// Winding down — no new vaults/borrows or collateral additions, while
+    /// repayment, withdrawal, closure, price-sensitive liquidation, and the
+    /// final debt settlement path remain available.
     Sunset,
     /// Fully wound down — read-only
     Deprecated,
@@ -318,9 +320,14 @@ impl CollateralStatus {
         )
     }
 
-    /// Whether liquidations are allowed
+    /// Whether liquidations are allowed. Sunset collateral must remain
+    /// liquidatable while its existing borrowers wind down; otherwise an
+    /// undercollateralized sunset vault could never clear its final debt.
     pub fn allows_liquidation(&self) -> bool {
-        matches!(self, CollateralStatus::Active | CollateralStatus::Paused)
+        matches!(
+            self,
+            CollateralStatus::Active | CollateralStatus::Paused | CollateralStatus::Sunset
+        )
     }
 
     /// Whether redemptions are allowed
@@ -3529,10 +3536,24 @@ impl State {
         }
     }
 
-    /// Get all supported collateral types and their statuses
+    /// Whether a wind-down collateral has fully settled and must no longer be
+    /// exposed as a public collateral option.
+    pub fn is_retired_sunset_collateral(&self, collateral_type: &CollateralType) -> bool {
+        match self.collateral_configs.get(collateral_type) {
+            Some(config) => {
+                matches!(config.status, CollateralStatus::Sunset)
+                    && self.total_debt_for_collateral(collateral_type) == ICUSD::new(0)
+            }
+            None => false,
+        }
+    }
+
+    /// Get all supported collateral types and their statuses.
+    /// A Sunset collateral remains public until its final debt is settled.
     pub fn supported_collateral_types(&self) -> Vec<(CollateralType, CollateralStatus)> {
         self.collateral_configs
             .iter()
+            .filter(|(ct, _)| !self.is_retired_sunset_collateral(ct))
             .map(|(ct, config)| (*ct, config.status))
             .collect()
     }
@@ -5217,6 +5238,40 @@ pub fn replace_state(state: State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sunset_collateral_is_public_until_its_last_debt_is_repaid() {
+        let mut state = test_state();
+        let collateral = state.icp_collateral_type();
+        state
+            .collateral_configs
+            .get_mut(&collateral)
+            .unwrap()
+            .status = CollateralStatus::Sunset;
+
+        assert!(state.is_retired_sunset_collateral(&collateral));
+        assert!(
+            !state
+                .supported_collateral_types()
+                .iter()
+                .any(|(ct, _)| *ct == collateral),
+            "a debt-free Sunset collateral must not remain a public option"
+        );
+
+        state.open_vault(audit_vault(999, collateral, 100_000_000, 100_000_000));
+        assert!(!state.is_retired_sunset_collateral(&collateral));
+        assert!(
+            state
+                .supported_collateral_types()
+                .iter()
+                .any(|(ct, status)| *ct == collateral && *status == CollateralStatus::Sunset),
+            "a Sunset collateral stays public while borrowers still have debt to settle"
+        );
+        assert!(
+            CollateralStatus::Sunset.allows_liquidation(),
+            "sunset debt must remain liquidatable until it reaches zero"
+        );
+    }
 
     #[test]
     fn test_vault_health_score() {

@@ -86,22 +86,17 @@ pub fn note_xrc_success(state: &mut State) {
 
 /// Wave-9d DOS-011: classifies whether a collateral type's periodic
 /// background XRC price refresh is still useful given its lifecycle
-/// status. Returns true for `Active` and `Paused` (both still allow
-/// price-sensitive operations such as liquidation), false for the soft-
-/// delist statuses (`Frozen`, `Sunset`, `Deprecated`) where every code
-/// path that would consume a fresh price is already blocked or read-
-/// only.
+/// status. Returns true for `Active`, `Paused`, and `Sunset`: all three can
+/// still liquidate outstanding debt and therefore require a current price.
+/// `Frozen` and `Deprecated` have no remaining price-consuming operation.
 ///
 /// Used by the per-collateral 300s timer closures registered in
-/// `setup_timers()` and `add_collateral_token` so that wound-down
-/// collateral no longer burns ~1B cycles per tick on a useless XRC
-/// call.
+/// `setup_timers()` and `add_collateral_token` so fully disabled collateral
+/// no longer burns ~1B cycles per tick on a useless XRC call.
 pub fn collateral_needs_periodic_price_refresh(status: CollateralStatus) -> bool {
     match status {
-        CollateralStatus::Active | CollateralStatus::Paused => true,
-        CollateralStatus::Frozen
-        | CollateralStatus::Sunset
-        | CollateralStatus::Deprecated => false,
+        CollateralStatus::Active | CollateralStatus::Paused | CollateralStatus::Sunset => true,
+        CollateralStatus::Frozen | CollateralStatus::Deprecated => false,
     }
 }
 
@@ -705,8 +700,11 @@ pub async fn ensure_stable_not_depegged(
 
 #[cfg(test)]
 mod cycle_cadence_tests {
-    use super::{collateral_price_fetch_secs, DEFAULT_COLLATERAL_PRICE_FETCH_SECS};
-    use crate::state::State;
+    use super::{
+        collateral_needs_periodic_price_refresh, collateral_price_fetch_secs,
+        DEFAULT_COLLATERAL_PRICE_FETCH_SECS,
+    };
+    use crate::state::{CollateralStatus, State};
     use candid::Principal;
 
     fn ckbtc() -> Principal {
@@ -744,5 +742,12 @@ mod cycle_cadence_tests {
         // Any other sub-60 value is floored to 60s.
         s.collateral_price_fetch_interval_secs.insert(ckbtc(), 5);
         assert_eq!(collateral_price_fetch_secs(&s, &ckbtc()), 60);
+    }
+
+    #[test]
+    fn sunset_collateral_keeps_its_liquidation_price_fresh() {
+        assert!(collateral_needs_periodic_price_refresh(
+            CollateralStatus::Sunset
+        ));
     }
 }

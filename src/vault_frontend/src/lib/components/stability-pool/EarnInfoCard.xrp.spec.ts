@@ -11,4 +11,10 @@ describe('EarnInfoCard native XRP wiring', () => {
     expect(source).toContain("XrpPayoutRouting.svelte");
     expect(source).toContain('<XrpPayoutRouting');
   });
+
+  it('does not present sunset BOB as a gain or liquidation preference', () => {
+    const source = readFileSync(componentPath, 'utf8');
+
+    expect(source).toContain("new Set(['PHASMA', 'BOB'])");
+  });
 });
