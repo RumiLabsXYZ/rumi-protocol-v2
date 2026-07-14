@@ -9,7 +9,7 @@
     fetchProtocolSummary, fetchTwap, fetchVolatility, fetchLiquidationSeries,
   } from '$services/explorer/analyticsService';
   import {
-    fetchCollateralConfigs, fetchCollateralTotals, fetchAllVaults,
+    fetchCollateralConfigsStrict, fetchCollateralTotalsStrict, fetchAllVaultsStrict,
   } from '$services/explorer/explorerService';
   import {
     e8sToNumber, formatCompact, bpsToPercent, COLLATERAL_SYMBOLS, COLLATERAL_COLORS,
@@ -17,6 +17,7 @@
   import { computeVaultCrPct, median } from '$utils/vaultCr';
   import { decodeRustDecimal } from '$utils/decimalUtils';
   import { COLLATERAL_DISPLAY_ORDER } from '$stores/collateralStore';
+  import { collateralQueryIssue } from '../collateralQueryState';
 
   let medianCrBps = $state(0);
   let loading = $state(true);
@@ -29,6 +30,7 @@
   let crBuckets: CrBucket[] = $state([]);
 
   let mixTotal = $state(0);
+  let collateralDataIssue = $state<string | null>(null);
 
   onMount(async () => {
     try {
@@ -38,15 +40,16 @@
       ] = await Promise.allSettled([
         fetchProtocolSummary(),
         fetchTwap(),
-        fetchCollateralConfigs(),
-        fetchCollateralTotals(),
-        fetchAllVaults(),
+        fetchCollateralConfigsStrict(),
+        fetchCollateralTotalsStrict(),
+        fetchAllVaultsStrict(),
         fetchLiquidationSeries(7),
         ...principals.map(p => fetchVolatility(Principal.fromText(p))),
       ]);
 
       const summary = summaryR.status === 'fulfilled' ? summaryR.value : null;
       medianCrBps = summary?.median_cr_bps ? Number(summary.median_cr_bps) : 0;
+      collateralDataIssue = collateralQueryIssue(configsR, totalsR, allVaultsR);
 
       const configs = configsR.status === 'fulfilled' ? configsR.value ?? [] : [];
       const totals = totalsR.status === 'fulfilled' ? totalsR.value ?? [] : [];
@@ -157,6 +160,10 @@
       for (const [principal, symbol] of Object.entries(COLLATERAL_SYMBOLS)) {
         const cfg = configMap.get(principal);
         const tot = totalsMap.get(principal);
+        // A fully repaid Sunset collateral is withheld by the backend from
+        // both public collateral queries. Do not recreate a zero row from the
+        // explorer's static chart palette after that retirement point.
+        if (!cfg || !tot) continue;
         const decimals = tot?.decimals != null ? Number(tot.decimals) : 8;
         const price = priceMap.get(principal) ?? (tot?.price ? Number(tot.price) : 0);
         const totalColl = tot?.total_collateral != null ? Number(tot.total_collateral) / Math.pow(10, decimals) : 0;
@@ -218,7 +225,13 @@
   const maxBucket = $derived(Math.max(1, ...crBuckets.map(b => b.count)));
 </script>
 
-<LensHealthStrip title="Collateral health" metrics={healthMetrics} loading={loading} />
+{#if collateralDataIssue}
+  <div class="explorer-card mb-3 border-amber-500/30 text-sm text-amber-200" role="status">
+    {collateralDataIssue} Displayed collateral data may be incomplete; retry shortly.
+  </div>
+{:else}
+  <LensHealthStrip title="Collateral health" metrics={healthMetrics} loading={loading} />
+{/if}
 
 <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
   <!-- Collateral mix -->
@@ -228,6 +241,8 @@
       <div class="flex items-center justify-center py-8">
         <div class="w-5 h-5 border-2 border-gray-600 border-t-teal-400 rounded-full animate-spin"></div>
       </div>
+    {:else if collateralDataIssue}
+      <p class="text-sm text-amber-200 py-4">Collateral mix is temporarily unavailable.</p>
     {:else if mixTotal === 0}
       <p class="text-sm text-gray-500 py-4">No collateral deposited.</p>
     {:else}
@@ -268,6 +283,8 @@
       <div class="flex items-center justify-center py-8">
         <div class="w-5 h-5 border-2 border-gray-600 border-t-teal-400 rounded-full animate-spin"></div>
       </div>
+    {:else if collateralDataIssue}
+      <p class="text-sm text-amber-200 py-4">CR distribution is temporarily unavailable.</p>
     {:else if allVaults.length === 0}
       <p class="text-sm text-gray-500 py-4">No active vaults.</p>
     {:else}
@@ -295,12 +312,24 @@
   </div>
 </div>
 
-<CollateralTable rows={collateralRows} loading={loading} />
+{#if collateralDataIssue}
+  <div class="explorer-card text-sm text-amber-200">Collateral table is temporarily unavailable.</div>
+{:else}
+  <CollateralTable rows={collateralRows} loading={loading} />
+{/if}
 
-<LiquidationRiskTable
-  vaults={atRiskVaults}
-  totalAtRisk={atRiskVaults.length}
-  loading={loading}
-/>
+{#if collateralDataIssue}
+  <div class="explorer-card text-sm text-amber-200">Liquidation risk data is temporarily unavailable.</div>
+{:else}
+  <LiquidationRiskTable
+    vaults={atRiskVaults}
+    totalAtRisk={atRiskVaults.length}
+    loading={loading}
+  />
+{/if}
 
-<LensActivityPanel scope="vault_ops" title="Vault activity" viewAllHref="/explorer/activity?type=vault_ops" />
+{#if collateralDataIssue}
+  <div class="explorer-card text-sm text-amber-200">Vault activity is temporarily unavailable.</div>
+{:else}
+  <LensActivityPanel scope="vault_ops" title="Vault activity" viewAllHref="/explorer/activity?type=vault_ops" />
+{/if}

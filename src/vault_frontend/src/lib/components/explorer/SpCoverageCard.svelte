@@ -1,11 +1,12 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { fetchCurrentSpDepositors, fetchCollateralConfigs, type CurrentSpDepositor } from '$services/explorer/explorerService';
+  import { fetchCurrentSpDepositorsStrict, fetchCollateralConfigsStrict, type CurrentSpDepositor } from '$services/explorer/explorerService';
   import { getTokenSymbol } from '$utils/explorerHelpers';
 
   let depositors: CurrentSpDepositor[] = $state([]);
   let collaterals: string[] = $state([]); // principal text
   let loading = $state(true);
+  let loadIssue: string | null = $state(null);
 
   function isOptedIn(d: CurrentSpDepositor, collType: string): boolean {
     return !d.position.opted_out_collateral.some((p) => p.toText() === collType);
@@ -27,8 +28,8 @@
   onMount(async () => {
     try {
       const [d, configs] = await Promise.all([
-        fetchCurrentSpDepositors(),
-        fetchCollateralConfigs(),
+        fetchCurrentSpDepositorsStrict(),
+        fetchCollateralConfigsStrict(),
       ]);
       depositors = d;
       // CollateralConfig uses ledger_canister_id as the collateral identifier.
@@ -37,6 +38,7 @@
         .filter((id: string) => id.length > 0);
     } catch (err) {
       console.error('[SpCoverageCard] load failed:', err);
+      loadIssue = 'Collateral coverage is temporarily unavailable.';
     } finally {
       loading = false;
     }
@@ -52,6 +54,8 @@
     <div class="flex items-center justify-center py-6">
       <div class="w-5 h-5 border-2 border-gray-600 border-t-teal-400 rounded-full animate-spin"></div>
     </div>
+  {:else if loadIssue}
+    <p class="text-sm text-amber-200 py-2" role="status">{loadIssue} Retry shortly.</p>
   {:else if rows.length === 0}
     <p class="text-sm text-gray-500 py-2">No collaterals configured.</p>
   {:else}

@@ -2,6 +2,13 @@ use candid::{CandidType, Deserialize, Nat, Principal};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
+pub const BOB_COLLATERAL_PRINCIPAL: &str = "7pail-xaaaa-aaaas-aabmq-cai";
+
+pub fn bob_collateral() -> Principal {
+    Principal::from_text(BOB_COLLATERAL_PRINCIPAL)
+        .expect("BOB collateral principal is a valid principal")
+}
+
 // ──────────────────────────────────────────────────────────────
 // Registry types (dynamic, admin-configurable)
 // ──────────────────────────────────────────────────────────────
@@ -97,10 +104,12 @@ pub struct DepositPosition {
 
 impl DepositPosition {
     pub fn new(timestamp: u64) -> Self {
+        // BOB is being sunset. Existing depositors retain their current
+        // exposure until they opt out, while every new position is default-out.
         Self {
             stablecoin_balances: BTreeMap::new(),
             collateral_gains: BTreeMap::new(),
-            opted_out_collateral: BTreeSet::new(),
+            opted_out_collateral: BTreeSet::from([bob_collateral()]),
             opted_in_chain_collateral: Some(BTreeSet::new()),
             deposit_timestamp: timestamp,
             total_claimed_gains: BTreeMap::new(),
@@ -933,6 +942,15 @@ mod icusd_value_tests {
             v, 100_00_000_000,
             "should return only the icUSD balance in e8s"
         );
+    }
+
+    #[test]
+    fn new_depositor_is_opted_out_of_sunset_bob_liquidations() {
+        let bob = bob_collateral();
+        let position = DepositPosition::new(0);
+
+        assert!(position.opted_out_collateral.contains(&bob));
+        assert!(!position.is_opted_in(&bob));
     }
 
     #[test]
