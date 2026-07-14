@@ -1,7 +1,7 @@
 //! PocketIC integration tests for rumi_analytics Phase 1.
 //!
 //! Covers four behaviours:
-//!   1. Supply cache populates after the 60s pull cycle.
+//!   1. Supply cache populates during the 300s staggered pull window.
 //!   2. Daily TVL row is written after the 86400s daily timer fires.
 //!   3. Pagination returns a continuation cursor when limit is reached.
 //!   4. Stable storage (TVL log + supply cache) survives an upgrade.
@@ -175,6 +175,15 @@ struct AnalyticsInitArgs {
     three_pool: Principal,
     stability_pool: Principal,
     amm: Principal,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct PullScheduleConfig {
+    period_secs: u64,
+    tick_secs: u64,
+    period_secs_override: Option<u64>,
+    tick_secs_override: Option<u64>,
+    schedule_layout_version: u32,
 }
 
 #[derive(CandidType, Deserialize)]
@@ -529,11 +538,44 @@ fn call_start_backfill(env: &Env, token: Principal) -> String {
     }
 }
 
-/// Advance time and tick enough for the 60s pull cycle to fire and inter-canister calls to settle.
+fn get_pull_schedule(env: &Env) -> PullScheduleConfig {
+    let result = env.pic.query_call(
+        env.analytics, env.admin, "get_pull_schedule", encode_one(()).unwrap(),
+    ).expect("get_pull_schedule query");
+    match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).unwrap(),
+        WasmResult::Reject(msg) => panic!("get_pull_schedule rejected: {msg}"),
+    }
+}
+
+fn set_pull_schedule(
+    env: &Env,
+    caller: Principal,
+    period_secs: u64,
+    tick_secs: u64,
+) -> Result<(), String> {
+    let result = env.pic.update_call(
+        env.analytics, caller, "set_pull_schedule",
+        encode_args((period_secs, tick_secs)).unwrap(),
+    ).expect("set_pull_schedule update");
+    match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).unwrap(),
+        WasmResult::Reject(msg) => panic!("set_pull_schedule rejected: {msg}"),
+    }
+}
+
+const PULL_TICK_SECS: u64 = 30;
+const PULL_WINDOW_SECS: u64 = 300;
+
+/// Walk a complete staggered pull window in timer-sized steps. Advancing the
+/// whole 300s in one jump only runs one delayed timer callback in PocketIC;
+/// stepping by 30s proves later slots (including icUSD at source index 7) run.
 fn advance_pull_cycle(env: &Env) {
-    env.pic.advance_time(std::time::Duration::from_secs(65));
-    for _ in 0..10 {
-        env.pic.tick();
+    for _ in 0..(PULL_WINDOW_SECS / PULL_TICK_SECS) {
+        env.pic.advance_time(std::time::Duration::from_secs(PULL_TICK_SECS));
+        for _ in 0..5 {
+            env.pic.tick();
+        }
     }
 }
 
@@ -543,12 +585,9 @@ fn advance_pull_cycle(env: &Env) {
 fn supply_cache_populated_after_pull_cycle() {
     let env = setup();
 
-    // Drive the 60s pull cycle. A few extra ticks let async inter-canister
-    // calls (icrc1_total_supply, get_protocol_status) settle.
-    env.pic.advance_time(std::time::Duration::from_secs(65));
-    for _ in 0..5 {
-        env.pic.tick();
-    }
+    // Walk the full staggered window; extra ticks in the helper let async
+    // inter-canister calls (icrc1_total_supply, get_protocol_status) settle.
+    advance_pull_cycle(&env);
 
     let after = http_get(&env, "/api/supply");
     assert_eq!(after.status_code, 200, "expected /api/supply to return 200");
@@ -754,6 +793,42 @@ fn collector_health_reports_cursor_positions() {
     let icusd_stats = icusd_stats.unwrap();
     assert!(icusd_stats.holder_count > 0, "should have at least 1 icUSD holder from initial mint");
     assert!(icusd_stats.total_tracked_e8s > 0, "should have tracked icUSD supply");
+}
+
+#[test]
+fn pull_schedule_setter_enforces_auth_and_keeps_runtime_live_after_rearming() {
+    let env = setup();
+    let non_admin = Principal::self_authenticating(&[91, 92, 93]);
+
+    let initial = get_pull_schedule(&env);
+    assert_eq!(initial.period_secs, 300);
+    assert_eq!(initial.tick_secs, 30);
+    assert_eq!(initial.period_secs_override, None);
+    assert_eq!(initial.tick_secs_override, None);
+    assert_eq!(initial.schedule_layout_version, 2);
+
+    assert!(set_pull_schedule(&env, non_admin, 600, 60).is_err());
+    assert!(set_pull_schedule(&env, env.admin, 299, 30).is_err());
+
+    set_pull_schedule(&env, env.admin, 600, 60).unwrap();
+    let retuned = get_pull_schedule(&env);
+    assert_eq!(retuned.period_secs, 600);
+    assert_eq!(retuned.tick_secs, 60);
+    assert_eq!(retuned.period_secs_override, Some(600));
+    assert_eq!(retuned.tick_secs_override, Some(60));
+
+    // Re-arm a second time, then prove the replacement walker still reaches
+    // the late icUSD slot across a complete default window.
+    set_pull_schedule(&env, env.admin, 300, 30).unwrap();
+    advance_pull_cycle(&env);
+    let health = get_collector_health(&env);
+    assert!(health.last_pull_cycle_ns > 0);
+    assert!(
+        health.cursors.iter()
+            .find(|cursor| cursor.name == "icusd_blocks")
+            .is_some_and(|cursor| cursor.cursor_position > 0),
+        "re-armed walker must reach the icUSD cursor at source index 7"
+    );
 }
 
 #[test]

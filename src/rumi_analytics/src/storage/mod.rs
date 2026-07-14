@@ -125,7 +125,8 @@ pub struct SlimState {
     pub admin: Principal,
     /// Source canister IDs (configurable so we can wire test fixtures).
     pub sources: SourceCanisterIds,
-    /// Cached circulating supply for /api/supply, refreshed by the 60s pull cycle.
+    /// Cached circulating supply for /api/supply, refreshed by the staggered
+    /// pull schedule (300s per source by default).
     /// `None` until the first successful refresh after canister start.
     pub circulating_supply_icusd_e8s: Option<u128>,
     pub circulating_supply_3usd_e8s: Option<u128>,

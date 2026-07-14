@@ -195,18 +195,26 @@ pub fn reseed_preserving(
     merged
 }
 
-/// Return source ids whose deadline has passed and that should fire
-/// this tick. Sources missing from `schedule` are treated as due (so a
-/// newly added source fires on its next tick instead of being silently
-/// skipped until the next reseed).
+/// Return at most `MAX_SOURCES_PER_TICK` source ids whose deadline has passed,
+/// ordered oldest-deadline-first. The hard cap applies even when timer
+/// callbacks are delayed long enough for every source to become overdue.
+/// Sources missing from `schedule` are treated as the oldest due entries (so
+/// newly added sources fire promptly instead of waiting for the next reseed).
 pub fn compute_due_sources(now_ns: u64, schedule: &HashMap<u8, u64>, sources: &[u8]) -> Vec<u8> {
-    sources
+    let mut due: Vec<(u64, usize, u8)> = sources
         .iter()
         .copied()
-        .filter(|id| match schedule.get(id) {
-            Some(deadline) => *deadline <= now_ns,
-            None => true,
+        .enumerate()
+        .filter_map(|(source_order, id)| match schedule.get(&id) {
+            Some(deadline) if *deadline <= now_ns => Some((*deadline, source_order, id)),
+            Some(_) => None,
+            None => Some((0, source_order, id)),
         })
+        .collect();
+    due.sort_unstable_by_key(|(deadline, source_order, _)| (*deadline, *source_order));
+    due.into_iter()
+        .take(MAX_SOURCES_PER_TICK as usize)
+        .map(|(_, _, id)| id)
         .collect()
 }
 

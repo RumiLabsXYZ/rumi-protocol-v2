@@ -43,7 +43,8 @@
 //!     deterministic offset per source so they spread across the window
 //!     instead of all firing at `now`.
 //!  3. **Due-source selection** — `compute_due_sources` returns ONLY
-//!     sources whose `next_pull_at_ns` is in the past.
+//!     sources whose `next_pull_at_ns` is in the past, oldest-deadline-first,
+//!     with a hard maximum of two per walker callback even after delays.
 //!  4. **Schedule advance** — `advance_schedule_for_fired` bumps each fired
 //!     source by exactly the effective window. Each source must fire
 //!     exactly once per window across many ticks.
@@ -307,17 +308,11 @@ fn dos_010_compute_due_sources_includes_only_past_deadlines() {
     let off = offset();
     let schedule = seed_initial_schedule(now, ALL_SOURCE_IDS, PERIOD);
     // Advance to just past source-index-3's offset (3 × offset into the
-    // cycle), so indices 0..=3 are due and index 4 is not.
+    // cycle), so indices 0..=3 are overdue and index 4 is not. The runtime
+    // selector returns only the two oldest overdue entries.
     let later = now + 3 * off + SEC_NANOS;
     let due = compute_due_sources(later, &schedule, ALL_SOURCE_IDS);
-    assert_eq!(
-        due.len(),
-        4,
-        "at t=now+3*offset+1s, sources at offsets 0/1/2/3*offset must all be \
-         due (got {} = {:?})",
-        due.len(),
-        due
-    );
+    assert_eq!(due, ALL_SOURCE_IDS[..2]);
     for &id in &due {
         let idx = ALL_SOURCE_IDS.iter().position(|&i| i == id).unwrap();
         assert!(
@@ -325,6 +320,80 @@ fn dos_010_compute_due_sources_includes_only_past_deadlines() {
             "source id {} (index {}) was reported due but its offset is in the future",
             id,
             idx
+        );
+    }
+}
+
+#[test]
+fn dos_010_delayed_tick_caps_four_overdue_sources_oldest_first() {
+    let now = 1_000 * SEC_NANOS;
+    let schedule = HashMap::from([
+        (SOURCE_ID_SUPPLY_CACHE, now - 10),
+        (SOURCE_ID_BACKEND_EVENTS, now - 40),
+        (SOURCE_ID_3POOL_SWAPS, now - 20),
+        (SOURCE_ID_3POOL_LIQUIDITY, now - 30),
+        (SOURCE_ID_3POOL_BLOCKS, now + 1),
+    ]);
+
+    let due = compute_due_sources(
+        now,
+        &schedule,
+        &[
+            SOURCE_ID_SUPPLY_CACHE,
+            SOURCE_ID_BACKEND_EVENTS,
+            SOURCE_ID_3POOL_SWAPS,
+            SOURCE_ID_3POOL_LIQUIDITY,
+            SOURCE_ID_3POOL_BLOCKS,
+        ],
+    );
+
+    assert_eq!(
+        due,
+        vec![SOURCE_ID_BACKEND_EVENTS, SOURCE_ID_3POOL_LIQUIDITY],
+        "a delayed walker must fire only the two oldest overdue deadlines"
+    );
+}
+
+#[test]
+fn dos_010_delayed_ticks_drain_overdue_sources_two_at_a_time_across_valid_configs() {
+    let configs = [
+        (MIN_PERIOD_SECS, MIN_TICK_SECS),
+        (MIN_PERIOD_SECS, 66),
+        (301, 66),
+        (MAX_PERIOD_SECS, MAX_TICK_SECS),
+    ];
+
+    for (period_secs, tick_secs) in configs {
+        validate_schedule_config(period_secs, tick_secs).unwrap();
+        let period_ns = period_secs * SEC_NANOS;
+        let tick_ns = tick_secs * SEC_NANOS;
+        let seeded = seed_initial_schedule(0, ALL_SOURCE_IDS, period_ns);
+        let delayed_now = period_ns;
+        let expected_order: Vec<u8> = {
+            let mut deadlines: Vec<(u64, u8)> =
+                ALL_SOURCE_IDS.iter().map(|id| (seeded[id], *id)).collect();
+            deadlines.sort_unstable();
+            deadlines.into_iter().map(|(_, id)| id).collect()
+        };
+        let mut schedule = seeded;
+        let mut now = delayed_now;
+        let mut drained = Vec::new();
+
+        for _ in 0..ALL_SOURCE_IDS.len().div_ceil(2) {
+            let due = compute_due_sources(now, &schedule, ALL_SOURCE_IDS);
+            assert!(
+                due.len() <= 2,
+                "period={period_secs}s tick={tick_secs}s returned {} overdue sources",
+                due.len()
+            );
+            drained.extend_from_slice(&due);
+            advance_schedule_for_fired(&mut schedule, now, &due, period_ns);
+            now = now.saturating_add(tick_ns);
+        }
+
+        assert_eq!(
+            drained, expected_order,
+            "period={period_secs}s tick={tick_secs}s must drain every overdue source oldest-first"
         );
     }
 }
@@ -338,15 +407,16 @@ fn dos_010_compute_due_sources_treats_missing_entry_as_due() {
     schedule.insert(SOURCE_ID_SUPPLY_CACHE, u64::MAX); // far future
     let now: u64 = 100 * SEC_NANOS;
     let due = compute_due_sources(now, &schedule, ALL_SOURCE_IDS);
-    // Only sources NOT in schedule should be due (everything except SOURCE_ID_SUPPLY_CACHE).
+    // Only sources NOT in schedule should be due (everything except
+    // SOURCE_ID_SUPPLY_CACHE), but the walker still returns a bounded batch.
     assert!(
         !due.contains(&SOURCE_ID_SUPPLY_CACHE),
         "source with future deadline must not be reported due"
     );
     assert_eq!(
-        due.len(),
-        ALL_SOURCE_IDS.len() - 1,
-        "every source except SUPPLY_CACHE has no schedule entry — all should be reported due"
+        due,
+        ALL_SOURCE_IDS[1..3],
+        "missing entries should be treated as oldest due work, capped at two"
     );
 }
 
