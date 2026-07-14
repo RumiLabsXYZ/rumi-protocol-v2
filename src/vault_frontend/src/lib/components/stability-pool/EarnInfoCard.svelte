@@ -14,6 +14,11 @@
   import { CANISTER_IDS } from '../../config';
   import XrpPayoutRouting from './XrpPayoutRouting.svelte';
   import { isIcrcClaimableCollateral } from '../../services/xrpPayoutHelpers';
+  import {
+    gainCollaterals,
+    isSunsetBobCollateral,
+    liquidationPreferenceCollaterals,
+  } from './sunsetCollateralPolicy';
 
   export let poolStatus: PoolStatus | null = null;
   export let userPosition: UserPosition | null = null;
@@ -31,14 +36,12 @@
 
   // Registries
   $: stablecoinRegistry = poolStatus?.stablecoin_registry ?? [];
-  // BOB is sunset: it remains in the on-chain registry long enough to settle
-  // outstanding vaults, but it is not a Stability Pool gain or opt-in choice.
-  const HIDDEN_COLLATERAL = new Set(['PHASMA', 'BOB']);
   const COLLATERAL_ORDER: Record<string, number> = { ICP: 0, XRP: 1, ckBTC: 2, ckETH: 3, ckXAUT: 4, nICP: 5, BOB: 6, EXE: 7 };
-  $: collateralRegistry = (poolStatus?.collateral_registry ?? [])
-    .filter(c => !HIDDEN_COLLATERAL.has(c.symbol))
+  // Sunset BOB remains visible for accrued gains. It appears in liquidation
+  // preferences only while a legacy position is still receiving it, providing
+  // a one-way opt-out without advertising fresh exposure.
+  $: collateralRegistry = gainCollaterals(poolStatus?.collateral_registry ?? [])
     .sort((a, b) => (COLLATERAL_ORDER[a.symbol] ?? 99) - (COLLATERAL_ORDER[b.symbol] ?? 99));
-  $: icrcCollateralRegistry = collateralRegistry.filter(c => isIcrcClaimableCollateral(c.ledger_id));
   $: registries = { stablecoins: stablecoinRegistry, collateral: collateralRegistry };
 
   // Pool stats
@@ -77,6 +80,10 @@
   $: gains = userPosition?.collateral_gains ?? [];
   $: hasClaimableIcrcGains = gains.some(([ledger, amount]) => amount > 0n && isIcrcClaimableCollateral(ledger));
   $: optedOut = new Set((userPosition?.opted_out_collateral ?? []).map(p => p.toText()));
+  $: icrcCollateralRegistry = liquidationPreferenceCollaterals(
+    collateralRegistry.filter(c => isIcrcClaimableCollateral(c.ledger_id)),
+    optedOut,
+  );
 
   // Does the user hold icUSD in the pool?
   $: userHasIcusd = userStables.some(([l, a]: [any, bigint]) => l.toText() === CANISTER_IDS.ICUSD_LEDGER && a > 0n);
@@ -264,7 +271,9 @@
                     on:click={() => toggleOptOut(collateral)}
                     disabled={toggleLoading[key]}
                   >
-                    <span class="opt-out-symbol">{collateral.symbol}</span>
+                    <span class="opt-out-symbol">
+                      {collateral.symbol}{isSunsetBobCollateral(collateral) ? ' (sunset)' : ''}
+                    </span>
                     {#if toggleLoading[key]}
                       <span class="mini-spinner"></span>
                     {:else}

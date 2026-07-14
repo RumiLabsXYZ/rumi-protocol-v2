@@ -3543,13 +3543,19 @@ impl State {
             Some(config) => {
                 matches!(config.status, CollateralStatus::Sunset)
                     && self.total_debt_for_collateral(collateral_type) == ICUSD::new(0)
+                    && self.total_collateral_for(collateral_type) == 0
+                    && !self
+                        .vault_id_to_vaults
+                        .values()
+                        .any(|vault| vault.collateral_type == *collateral_type)
             }
             None => false,
         }
     }
 
     /// Get all supported collateral types and their statuses.
-    /// A Sunset collateral remains public until its final debt is settled.
+    /// A Sunset collateral remains public until its final vault is closed, so
+    /// debt-free borrowers can still withdraw collateral and complete closure.
     pub fn supported_collateral_types(&self) -> Vec<(CollateralType, CollateralStatus)> {
         self.collateral_configs
             .iter()
@@ -5240,7 +5246,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sunset_collateral_is_public_until_its_last_debt_is_repaid() {
+    fn sunset_collateral_retires_only_after_its_last_vault_is_closed() {
         let mut state = test_state();
         let collateral = state.icp_collateral_type();
         state
@@ -5271,6 +5277,45 @@ mod tests {
             CollateralStatus::Sunset.allows_liquidation(),
             "sunset debt must remain liquidatable until it reaches zero"
         );
+
+        let vault = state.vault_id_to_vaults.get_mut(&999).unwrap();
+        vault.borrowed_icusd_amount = ICUSD::new(0);
+        assert!(
+            !state.is_retired_sunset_collateral(&collateral),
+            "a debt-free Sunset vault must remain public while collateral can be withdrawn"
+        );
+
+        state
+            .vault_id_to_vaults
+            .get_mut(&999)
+            .unwrap()
+            .collateral_amount = 0;
+        assert!(
+            !state.is_retired_sunset_collateral(&collateral),
+            "an empty but still-open Sunset vault must remain serviceable until close"
+        );
+
+        state.close_vault(999);
+        assert!(state.is_retired_sunset_collateral(&collateral));
+        assert!(
+            !state
+                .supported_collateral_types()
+                .iter()
+                .any(|(ct, _)| *ct == collateral),
+            "the fully closed Sunset collateral must leave public discovery"
+        );
+    }
+
+    #[test]
+    fn active_collateral_is_never_classified_as_retired() {
+        let state = test_state();
+        let collateral = state.icp_collateral_type();
+
+        assert_eq!(
+            state.collateral_configs.get(&collateral).unwrap().status,
+            CollateralStatus::Active
+        );
+        assert!(!state.is_retired_sunset_collateral(&collateral));
     }
 
     #[test]

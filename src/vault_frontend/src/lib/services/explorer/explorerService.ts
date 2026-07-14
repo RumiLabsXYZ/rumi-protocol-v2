@@ -7,6 +7,12 @@
  */
 
 import { Principal } from '@dfinity/principal';
+import {
+	fetchDiscoveredCollateralConfigs,
+	fetchLegacyCollateralConfigs,
+} from './collateralConfigQuery';
+import { fetchCompleteSpPositions, fetchLegacySpPositions } from './spDepositorQuery';
+import { fetchCompleteVaultPages } from './vaultPagination';
 import { Actor, HttpAgent } from '@dfinity/agent';
 import { publicActor } from '$services/protocol/apiClient';
 import { stabilityPoolService } from '$services/stabilityPoolService';
@@ -420,6 +426,25 @@ export async function fetchThreePoolSwapEventsCombined(maxV2: bigint = 1_000n): 
 
 // ── Collateral ───────────────────────────────────────────────────────────────
 
+export async function fetchCollateralConfigsStrict(): Promise<any[]> {
+	const key = 'collateral:configs:strict';
+	const cached = getCached<any[]>(key, TTL.COLLATERAL);
+	if (cached) return cached;
+
+	try {
+		const supported = await publicActor.get_supported_collateral_types();
+		const configs = await fetchDiscoveredCollateralConfigs(
+			supported as Array<[Principal, unknown]>,
+			(principal) => publicActor.get_collateral_config(principal)
+		);
+		return setCache(key, configs);
+	} catch (err) {
+		console.error('[explorerService] fetchCollateralConfigs failed:', err);
+		throw err;
+	}
+}
+
+/** Legacy fail-soft reader retained for explorer surfaces not migrated to explicit degradation. */
 export async function fetchCollateralConfigs(): Promise<any[]> {
 	const key = 'collateral:configs';
 	const cached = getCached<any[]>(key, TTL.COLLATERAL);
@@ -427,25 +452,32 @@ export async function fetchCollateralConfigs(): Promise<any[]> {
 
 	try {
 		const supported = await publicActor.get_supported_collateral_types();
-		const configs = await Promise.all(
-			supported.map(async ([principal, _status]: [Principal, any]) => {
-				try {
-					const cfg = await publicActor.get_collateral_config(principal);
-					// get_collateral_config returns opt ([] or [config])
-					return cfg.length > 0 ? cfg[0] : null;
-				} catch {
-					return null;
-				}
-			})
+		const configs = await fetchLegacyCollateralConfigs(
+			supported as Array<[Principal, unknown]>,
+			(principal) => publicActor.get_collateral_config(principal)
 		);
-		const result = configs.filter((c: any) => c !== null);
-		return setCache(key, result);
+		return setCache(key, configs);
 	} catch (err) {
 		console.error('[explorerService] fetchCollateralConfigs failed:', err);
 		return [];
 	}
 }
 
+export async function fetchCollateralTotalsStrict(): Promise<any[]> {
+	const key = 'collateral:totals:strict';
+	const cached = getCached<any[]>(key, TTL.COLLATERAL);
+	if (cached) return cached;
+
+	try {
+		const result = await publicActor.get_collateral_totals();
+		return setCache(key, result);
+	} catch (err) {
+		console.error('[explorerService] fetchCollateralTotals failed:', err);
+		throw err;
+	}
+}
+
+/** Legacy fail-soft reader retained for explorer surfaces not migrated to explicit degradation. */
 export async function fetchCollateralTotals(): Promise<any[]> {
 	const key = 'collateral:totals';
 	const cached = getCached<any[]>(key, TTL.COLLATERAL);
@@ -498,6 +530,25 @@ const VAULT_PAGE_SIZE = 500n;
  */
 const VAULT_PAGE_MAX_PAGES = 100;
 
+export async function fetchAllVaultsStrict(): Promise<any[]> {
+	const key = 'vaults:all:strict';
+	const cached = getCached<any[]>(key, TTL.VAULTS);
+	if (cached) return cached;
+
+	try {
+		const all = await fetchCompleteVaultPages(
+			(startId, pageSize) => publicActor.get_vaults_page(startId, pageSize),
+			VAULT_PAGE_SIZE,
+			VAULT_PAGE_MAX_PAGES
+		);
+		return setCache(key, all);
+	} catch (err) {
+		console.error('[explorerService] fetchAllVaults failed:', err);
+		throw err;
+	}
+}
+
+/** Legacy fail-soft reader retained for explorer surfaces not migrated to explicit degradation. */
 export async function fetchAllVaults(): Promise<any[]> {
 	const key = 'vaults:all';
 	const cached = getCached<any[]>(key, TTL.VAULTS);
@@ -507,10 +558,10 @@ export async function fetchAllVaults(): Promise<any[]> {
 		const all: any[] = [];
 		let startId = 0n;
 		for (let page = 0; page < VAULT_PAGE_MAX_PAGES; page += 1) {
-			const resp = await publicActor.get_vaults_page(startId, VAULT_PAGE_SIZE);
-			all.push(...resp.vaults);
-			if (resp.next_start_id.length === 0) break;
-			startId = resp.next_start_id[0];
+			const response = await publicActor.get_vaults_page(startId, VAULT_PAGE_SIZE);
+			all.push(...response.vaults);
+			if (response.next_start_id.length === 0) break;
+			startId = response.next_start_id[0];
 		}
 		return setCache(key, all);
 	} catch (err) {
@@ -1182,6 +1233,32 @@ function getStabilityPoolActor() {
  * predate the analytics tailer or were dropped while the shadow types were
  * stale.
  */
+export async function fetchCurrentSpDepositorsStrict(): Promise<CurrentSpDepositor[]> {
+	const key = 'pool:stability:current_depositors:strict';
+	const cached = getCached<CurrentSpDepositor[]>(key, TTL.POOL);
+	if (cached) return cached;
+
+	try {
+		const sp = getStabilityPoolActor();
+		const positions = await fetchCompleteSpPositions<Principal, UserStabilityPosition>(
+			() => sp.list_depositor_principals(),
+			(principal) => sp.get_user_position([principal])
+		);
+		const out: CurrentSpDepositor[] = [];
+		for (const [principal, pos] of positions) {
+			if (pos && Number(pos.total_usd_value_e8s) > 0) {
+				out.push({ principal, position: pos });
+			}
+		}
+		out.sort((a, b) => Number(b.position.total_usd_value_e8s) - Number(a.position.total_usd_value_e8s));
+		return setCache(key, out);
+	} catch (err) {
+		console.error('[explorerService] fetchCurrentSpDepositors failed:', err);
+		throw err;
+	}
+}
+
+/** Legacy fail-soft reader retained for explorer surfaces not migrated to explicit degradation. */
 export async function fetchCurrentSpDepositors(): Promise<CurrentSpDepositor[]> {
 	const key = 'pool:stability:current_depositors';
 	const cached = getCached<CurrentSpDepositor[]>(key, TTL.POOL);
@@ -1189,24 +1266,13 @@ export async function fetchCurrentSpDepositors(): Promise<CurrentSpDepositor[]> 
 
 	try {
 		const sp = getStabilityPoolActor();
-		const principals: Principal[] = await sp.list_depositor_principals();
-		const positions = await Promise.all(
-			principals.map(async (p) => {
-				try {
-					return await sp.get_user_position([p]);
-				} catch (err) {
-					console.warn('[fetchCurrentSpDepositors] get_user_position failed for', p.toText(), err);
-					return [];
-				}
-			}),
+		const positions = await fetchLegacySpPositions<Principal, UserStabilityPosition>(
+			() => sp.list_depositor_principals(),
+			(principal) => sp.get_user_position([principal])
 		);
 		const out: CurrentSpDepositor[] = [];
-		for (let i = 0; i < principals.length; i++) {
-			const maybe = positions[i];
-			const pos = Array.isArray(maybe) ? maybe[0] : maybe;
-			if (pos && Number(pos.total_usd_value_e8s) > 0) {
-				out.push({ principal: principals[i], position: pos as UserStabilityPosition });
-			}
+		for (const [principal, position] of positions) {
+			if (Number(position.total_usd_value_e8s) > 0) out.push({ principal, position });
 		}
 		out.sort((a, b) => Number(b.position.total_usd_value_e8s) - Number(a.position.total_usd_value_e8s));
 		return setCache(key, out);

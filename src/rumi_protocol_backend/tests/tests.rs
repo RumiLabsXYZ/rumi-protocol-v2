@@ -1504,11 +1504,14 @@ mod multi_collateral_tests {
         assert!(!CollateralStatus::Frozen.allows_liquidation());
         assert!(!CollateralStatus::Frozen.allows_redemption());
 
-        // Sunset: repay only (and close)
+        // Sunset: no new exposure, but existing vaults can repay, withdraw,
+        // close, and be liquidated during wind-down.
         assert!(!CollateralStatus::Sunset.allows_open());
         assert!(!CollateralStatus::Sunset.allows_borrow());
         assert!(CollateralStatus::Sunset.allows_repay());
-        assert!(!CollateralStatus::Sunset.allows_liquidation());
+        assert!(CollateralStatus::Sunset.allows_withdraw());
+        assert!(CollateralStatus::Sunset.allows_close());
+        assert!(CollateralStatus::Sunset.allows_liquidation());
         assert!(!CollateralStatus::Sunset.allows_redemption());
 
         // Deprecated: nothing

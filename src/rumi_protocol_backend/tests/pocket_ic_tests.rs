@@ -1511,8 +1511,8 @@ fn test_add_margin_to_vault() {
 //    inflating get_collateral_totals().vault_count (mainnet: 185 indexed ids
 //    vs 82 open vaults).
 #[test]
-fn test_close_vault() {
-    log("🧪 TEST STARTING: test_close_vault");
+fn test_sunset_debt_free_vault_withdraws_and_closes() {
+    log("🧪 TEST STARTING: test_sunset_debt_free_vault_withdraws_and_closes");
     
     // Set up the test environment
     log("🛠️ Setting up test environment");
@@ -1597,6 +1597,30 @@ fn test_close_vault() {
     // Step 6: Verify vault has no debt
     let vault_after_repay = get_vault(&pic, protocol_id, test_user, vault_id);
     assert_eq!(vault_after_repay.borrowed_icusd_amount, 0, "Vault should have no debt after full repayment");
+
+    // Enter wind-down only after the vault is debt-free. The borrower must
+    // still see the collateral and be able to withdraw and close it.
+    set_collateral_status_helper(&pic, protocol_id, icp_ledger_id, CollateralStatus::Sunset)
+        .expect("Failed to sunset ICP");
+    let supported_before_close: Vec<(Principal, CollateralStatus)> = match pic
+        .query_call(
+            protocol_id,
+            Principal::anonymous(),
+            "get_supported_collateral_types",
+            encode_args(()).unwrap(),
+        )
+        .expect("Failed to query supported collateral before close")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode supported collateral"),
+        WasmResult::Reject(msg) => panic!("supported collateral query rejected: {}", msg),
+    };
+    assert!(
+        supported_before_close
+            .iter()
+            .any(|(principal, status)| *principal == icp_ledger_id
+                && *status == CollateralStatus::Sunset),
+        "debt-free Sunset collateral must stay discoverable while its vault remains open",
+    );
 
     // Step 6.5: Withdraw all collateral — close_vault requires an empty vault
     log("💸 Withdrawing all collateral before close");
@@ -1716,7 +1740,26 @@ fn test_close_vault() {
         "collateral_to_vault_ids must not retain ids for closed vaults",
     );
 
-    log("🎉 TEST PASSED: test_close_vault");
+    let supported_after_close: Vec<(Principal, CollateralStatus)> = match pic
+        .query_call(
+            protocol_id,
+            Principal::anonymous(),
+            "get_supported_collateral_types",
+            encode_args(()).unwrap(),
+        )
+        .expect("Failed to query supported collateral after close")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode supported collateral"),
+        WasmResult::Reject(msg) => panic!("supported collateral query rejected: {}", msg),
+    };
+    assert!(
+        supported_after_close
+            .iter()
+            .all(|(principal, _)| *principal != icp_ledger_id),
+        "fully closed Sunset collateral must retire from discovery",
+    );
+
+    log("🎉 TEST PASSED: test_sunset_debt_free_vault_withdraws_and_closes");
 }
 
 // Test for redeeming ICP (burning ICUSD to get ICP)

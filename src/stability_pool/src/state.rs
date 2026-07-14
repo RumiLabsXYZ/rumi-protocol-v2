@@ -1032,6 +1032,14 @@ impl StabilityPoolState {
         user: &Principal,
         collateral_type: Principal,
     ) -> Result<(), StabilityPoolError> {
+        // BOB is in wind-down. Existing receiving positions may leave through
+        // `opt_out_collateral`, but neither a new nor former participant may
+        // create fresh BOB liquidation exposure.
+        if collateral_type == bob_collateral() {
+            return Err(StabilityPoolError::TokenNotActive {
+                ledger: collateral_type,
+            });
+        }
         if self.collateral_requires_payout_address(&collateral_type) {
             return Err(StabilityPoolError::PayoutAddressRequired {
                 collateral: collateral_type,
@@ -3269,6 +3277,38 @@ mod tests {
             .opt_in_collateral(&user_a(), icp_ledger())
             .unwrap_err();
         assert!(matches!(err, StabilityPoolError::AlreadyOptedIn { .. }));
+    }
+
+    #[test]
+    fn legacy_bob_participant_can_exit_but_cannot_reenter() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 10_00000000);
+        let bob = crate::types::bob_collateral();
+
+        state
+            .deposits
+            .get_mut(&user_a())
+            .unwrap()
+            .opted_out_collateral
+            .remove(&bob);
+        assert_eq!(state.effective_pool_for_collateral(&bob), 10_00000000);
+
+        state.opt_out_collateral(&user_a(), bob).unwrap();
+        assert_eq!(state.effective_pool_for_collateral(&bob), 0);
+
+        let err = state.opt_in_collateral(&user_a(), bob).unwrap_err();
+        assert!(matches!(err, StabilityPoolError::TokenNotActive { ledger } if ledger == bob));
+    }
+
+    #[test]
+    fn non_bob_collateral_opt_out_and_reentry_are_unchanged() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 10_00000000);
+
+        state.opt_out_collateral(&user_a(), icp_ledger()).unwrap();
+        state.opt_in_collateral(&user_a(), icp_ledger()).unwrap();
+
+        assert!(state.deposits[&user_a()].is_opted_in(&icp_ledger()));
     }
 
     #[test]

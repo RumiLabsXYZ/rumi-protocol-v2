@@ -493,9 +493,7 @@ fn setup_timers() {
     });
     for ledger_id in non_icp_collaterals_immediate {
         ic_cdk_timers::set_timer(std::time::Duration::ZERO, move || {
-            ic_cdk::spawn(rumi_protocol_backend::management::fetch_collateral_price(
-                ledger_id,
-            ))
+            rumi_protocol_backend::xrc::spawn_collateral_price_fetch_if_needed(ledger_id)
         });
     }
 
@@ -513,9 +511,9 @@ fn setup_timers() {
     // Price timers for all non-ICP collateral types (timers don't survive upgrades,
     // so we re-register them here for any collateral added via add_collateral_token).
     // Wave-9d DOS-011: register through `xrc::register_collateral_price_timer` so
-    // each closure gates the XRC fetch on `CollateralStatus`. Wound-down collateral
-    // (Frozen / Sunset / Deprecated) keeps the timer alive but skips the ~1B-cycle
-    // XRC call until status flips back to Active or Paused.
+    // each closure gates the XRC fetch on lifecycle state. Frozen, Deprecated, and
+    // fully retired Sunset collateral keep their timers alive but skip the ~1B-cycle
+    // XRC call; an in-progress Sunset remains priced through final vault closure.
     let non_icp_collaterals: Vec<candid::Principal> = read_state(|s| {
         let icp = s.icp_collateral_type();
         s.collateral_configs
@@ -11199,8 +11197,8 @@ fn get_collateral_totals() -> Vec<CollateralTotals> {
     read_state(|s| {
         s.collateral_configs
             .iter()
-            // Keep wind-down collateral observable until its last borrower has
-            // repaid, then remove it from the explorer's collateral surface.
+            // Keep wind-down collateral observable until its final vault is
+            // closed, then remove it from the explorer's collateral surface.
             .filter(|(ct, _)| !s.is_retired_sunset_collateral(ct))
             .map(|(ct, config)| {
                 let vault_count = s

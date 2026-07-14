@@ -15,10 +15,9 @@
 //! permanent `set_timer_interval` that fires every 300s and burns
 //! ~1B cycles per call to XRC, regardless of whether the collateral is
 //! still actively being used. CollateralStatus has 5 lifecycle states
-//! (Active / Paused / Frozen / Sunset / Deprecated), but only Active
-//! and Paused require ongoing price updates: Frozen, Sunset, and
-//! Deprecated either block all operations or are read-only winding-
-//! down states where a fresh price doesn't change anything.
+//! (Active / Paused / Frozen / Sunset / Deprecated). Active and Paused
+//! require ongoing price updates, while Sunset requires them only until
+//! its final vault is closed. Frozen and Deprecated do not consume prices.
 //!
 //! # Why the status-check approach (not the cancel-path approach)
 //!
@@ -32,31 +31,32 @@
 //!    collateral, each closure capturing the ledger principal. Adding a
 //!    one-line `read_state` gate at the top of the closure costs ~3
 //!    instructions vs. the ~1B cycles of the XRC call we skip.
-//!  * Reactivation works automatically: when status flips from Sunset
-//!    back to Active (admin call), the very next 300s tick resumes
-//!    fetching with no timer re-registration needed.
-//!  * Same outcome as cancel-path: Frozen/Sunset/Deprecated collateral
-//!    no longer burns cycles on background XRC fetches.
+//!  * Reactivation works automatically: when status flips back to Active
+//!    (admin call), the very next 300s tick resumes fetching with no timer
+//!    re-registration needed.
+//!  * Same outcome as cancel-path: Frozen, Deprecated, and fully retired
+//!    Sunset collateral no longer burn cycles on background XRC fetches.
 //!
 //! Layered fences:
 //!
 //!  1. **Pure-function fence** —
 //!     `collateral_needs_periodic_price_refresh(status)` returns true
-//!     only for Active and Paused. Paused still allows liquidations
-//!     (per `CollateralStatus::allows_liquidation`), so we still want
-//!     fresh prices.
+//!     for Active, Paused, and Sunset. The state-aware gate additionally
+//!     suppresses fully retired Sunset collateral.
 //!  2. **Status-coverage fence** — every variant of CollateralStatus
 //!     must appear in the helper's match (compile fails otherwise).
 //!  3. **Active-state-needs-price** — the helper must return true for
 //!     statuses where any price-sensitive operation can still happen.
 //!  4. **Soft-delist-skips-fetch** — the helper must return false for
-//!     Frozen, Sunset, Deprecated.
+//!     Frozen and Deprecated; the state-aware gate handles Sunset retirement.
 //!  5. **Round-trip on status flip** — flipping status flips the
 //!     helper's answer immediately (no cached / stale answer).
 
 use candid::Principal;
 
+use rumi_protocol_backend::numeric::ICUSD;
 use rumi_protocol_backend::state::{CollateralStatus, State};
+use rumi_protocol_backend::vault::Vault;
 use rumi_protocol_backend::xrc::{
     collateral_needs_periodic_price_refresh, should_fetch_collateral_price,
 };
@@ -92,6 +92,19 @@ fn set_status(state: &mut State, ct: Principal, status: CollateralStatus) {
     }
 }
 
+fn open_sunset_vault(state: &mut State, ct: Principal) {
+    state.open_vault(Vault {
+        owner: Principal::anonymous(),
+        vault_id: 1,
+        collateral_amount: 100_000_000,
+        borrowed_icusd_amount: ICUSD::new(100_000_000),
+        collateral_type: ct,
+        last_accrual_time: 0,
+        accrued_interest: ICUSD::new(0),
+        bot_processing: false,
+    });
+}
+
 // ============================================================================
 // Layer 1 — pure-function fence
 // ============================================================================
@@ -120,7 +133,7 @@ fn dos_011_paused_collateral_needs_price() {
 }
 
 // ============================================================================
-// Layer 2 — soft-delist statuses skip fetch
+// Layer 2 — lifecycle status classification
 // ============================================================================
 
 #[test]
@@ -133,11 +146,11 @@ fn dos_011_frozen_collateral_skips_price() {
 }
 
 #[test]
-fn dos_011_sunset_collateral_skips_price() {
+fn dos_011_sunset_collateral_needs_price_until_retirement() {
     assert!(
-        !collateral_needs_periodic_price_refresh(CollateralStatus::Sunset),
-        "Sunset collateral allows only repay/withdraw/close — no \
-         price-sensitive operations. Background fetches are unnecessary."
+        collateral_needs_periodic_price_refresh(CollateralStatus::Sunset),
+        "Sunset collateral remains liquidatable during wind-down and must \
+         retain fresh prices until its final vault closes."
     );
 }
 
@@ -185,12 +198,39 @@ fn dos_011_state_gate_returns_true_for_active_collateral() {
 }
 
 #[test]
-fn dos_011_state_gate_returns_false_for_sunset_collateral() {
+fn dos_011_state_gate_tracks_sunset_retirement() {
     let mut state = fresh_state();
     set_status(&mut state, icp_ledger(), CollateralStatus::Sunset);
     assert!(
         !should_fetch_collateral_price(&state, &icp_ledger()),
-        "sunset collateral must be skipped"
+        "fully retired Sunset collateral must be skipped"
+    );
+
+    open_sunset_vault(&mut state, icp_ledger());
+    assert!(
+        should_fetch_collateral_price(&state, &icp_ledger()),
+        "Sunset collateral with an open vault must keep its price fresh"
+    );
+
+    state
+        .vault_id_to_vaults
+        .get_mut(&1)
+        .unwrap()
+        .borrowed_icusd_amount = ICUSD::new(0);
+    assert!(
+        should_fetch_collateral_price(&state, &icp_ledger()),
+        "a debt-free Sunset vault remains serviceable until withdrawal and close"
+    );
+
+    state
+        .vault_id_to_vaults
+        .get_mut(&1)
+        .unwrap()
+        .collateral_amount = 0;
+    state.close_vault(1);
+    assert!(
+        !should_fetch_collateral_price(&state, &icp_ledger()),
+        "Sunset refresh must stop after the final vault closes"
     );
 }
 
@@ -246,15 +286,35 @@ fn dos_011_every_status_variant_classified() {
         }
     }
     assert_eq!(
-        needs, 2,
-        "exactly 2 statuses (Active, Paused) must need periodic price \
+        needs, 3,
+        "exactly 3 statuses (Active, Paused, Sunset) must need periodic price \
          refresh — got {} needs / {} skips",
         needs, skips
     );
     assert_eq!(
-        skips, 3,
-        "exactly 3 statuses (Frozen, Sunset, Deprecated) must skip the \
+        skips, 2,
+        "exactly 2 statuses (Frozen, Deprecated) must skip the \
          periodic refresh — got {} needs / {} skips",
         needs, skips
+    );
+}
+
+#[test]
+fn dos_011_setup_immediate_fetch_uses_the_same_lifecycle_gate() {
+    let main_source = include_str!("../src/main.rs");
+    let setup_start = main_source.find("fn setup_timers()").unwrap();
+    let cadence_start = main_source[setup_start..]
+        .find("// ── Wave-14b CDP-12")
+        .map(|offset| setup_start + offset)
+        .unwrap();
+    let immediate_setup = &main_source[setup_start..cadence_start];
+
+    assert!(
+        immediate_setup.contains("spawn_collateral_price_fetch_if_needed"),
+        "setup_timers immediate non-ICP fetch must share the retirement gate"
+    );
+    assert!(
+        !immediate_setup.contains("management::fetch_collateral_price"),
+        "setup_timers must not bypass the lifecycle gate with a direct fetch"
     );
 }

@@ -108,14 +108,28 @@ pub fn collateral_needs_periodic_price_refresh(status: CollateralStatus) -> bool
 /// canister. Returns false for unknown collateral so a stale closure
 /// (collateral removed entirely from `collateral_configs`) doesn't keep
 /// hitting XRC for a deleted ledger.
-pub fn should_fetch_collateral_price(
-    state: &crate::state::State,
-    ledger_id: &Principal,
-) -> bool {
-    state
-        .get_collateral_status(ledger_id)
-        .map(collateral_needs_periodic_price_refresh)
-        .unwrap_or(false)
+pub fn should_fetch_collateral_price(state: &crate::state::State, ledger_id: &Principal) -> bool {
+    match state.get_collateral_status(ledger_id) {
+        Some(CollateralStatus::Sunset) => !state.is_retired_sunset_collateral(ledger_id),
+        Some(status) => collateral_needs_periodic_price_refresh(status),
+        None => false,
+    }
+}
+
+/// Spawn a collateral XRC fetch only while its lifecycle still consumes a
+/// price. Both immediate post-upgrade refreshes and recurring timers use this
+/// boundary so fully retired Sunset collateral cannot bypass the cycle gate.
+pub fn spawn_collateral_price_fetch_if_needed(ledger_id: Principal) {
+    let should_fetch = read_state(|state| should_fetch_collateral_price(state, &ledger_id));
+    if should_fetch {
+        ic_cdk::spawn(crate::management::fetch_collateral_price(ledger_id));
+    } else {
+        log!(
+            TRACE_XRC,
+            "[collateral_price_fetch] skipping {} (fully retired, disabled, or removed)",
+            ledger_id
+        );
+    }
 }
 
 thread_local! {
@@ -178,16 +192,7 @@ pub fn register_collateral_price_timer(ledger_id: Principal) {
     });
     let secs = read_state(|s| collateral_price_fetch_secs(s, &ledger_id));
     let new_id = ic_cdk_timers::set_timer_interval(Duration::from_secs(secs), move || {
-        let go = read_state(|s| should_fetch_collateral_price(s, &ledger_id));
-        if !go {
-            log!(
-                TRACE_XRC,
-                "[register_collateral_price_timer] skipping fetch for {} (wound-down or removed)",
-                ledger_id
-            );
-            return;
-        }
-        ic_cdk::spawn(crate::management::fetch_collateral_price(ledger_id));
+        spawn_collateral_price_fetch_if_needed(ledger_id);
     });
     COLLATERAL_PRICE_TIMER_IDS.with(|cell| {
         cell.borrow_mut().insert(ledger_id, new_id);
@@ -702,13 +707,42 @@ pub async fn ensure_stable_not_depegged(
 mod cycle_cadence_tests {
     use super::{
         collateral_needs_periodic_price_refresh, collateral_price_fetch_secs,
-        DEFAULT_COLLATERAL_PRICE_FETCH_SECS,
+        should_fetch_collateral_price, DEFAULT_COLLATERAL_PRICE_FETCH_SECS,
     };
     use crate::state::{CollateralStatus, State};
+    use crate::vault::Vault;
+    use crate::{InitArg, ICUSD};
     use candid::Principal;
 
     fn ckbtc() -> Principal {
         Principal::from_text("mxzaz-hqaaa-aaaar-qaada-cai").unwrap()
+    }
+
+    fn configured_state() -> State {
+        State::from(InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: Principal::anonymous(),
+            icp_ledger_principal: Principal::anonymous(),
+            fee_e8s: 0,
+            developer_principal: Principal::anonymous(),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        })
+    }
+
+    fn vault(id: u64, collateral_type: Principal, collateral: u64, debt: u64) -> Vault {
+        Vault {
+            owner: Principal::anonymous(),
+            vault_id: id,
+            collateral_amount: collateral,
+            borrowed_icusd_amount: ICUSD::new(debt),
+            collateral_type,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        }
     }
 
     #[test]
@@ -745,9 +779,52 @@ mod cycle_cadence_tests {
     }
 
     #[test]
-    fn sunset_collateral_keeps_its_liquidation_price_fresh() {
+    fn sunset_price_refresh_tracks_true_retirement() {
+        let mut state = configured_state();
+        let collateral = state.icp_collateral_type();
+        state
+            .collateral_configs
+            .get_mut(&collateral)
+            .unwrap()
+            .status = CollateralStatus::Sunset;
+
+        assert!(
+            !should_fetch_collateral_price(&state, &collateral),
+            "fully retired Sunset collateral must stop burning XRC cycles"
+        );
+
+        state.open_vault(vault(999, collateral, 100_000_000, 100_000_000));
+        assert!(should_fetch_collateral_price(&state, &collateral));
+
+        let vault = state.vault_id_to_vaults.get_mut(&999).unwrap();
+        vault.borrowed_icusd_amount = ICUSD::new(0);
+        assert!(
+            should_fetch_collateral_price(&state, &collateral),
+            "debt-free Sunset vault still needs a fresh withdrawal/liquidation price"
+        );
+
+        state
+            .vault_id_to_vaults
+            .get_mut(&999)
+            .unwrap()
+            .collateral_amount = 0;
+        assert!(
+            should_fetch_collateral_price(&state, &collateral),
+            "an open Sunset vault remains in wind-down until close"
+        );
+
+        state.close_vault(999);
+        assert!(!should_fetch_collateral_price(&state, &collateral));
+    }
+
+    #[test]
+    fn active_collateral_refresh_behavior_is_unchanged() {
+        let state = configured_state();
+        let collateral = state.icp_collateral_type();
+
         assert!(collateral_needs_periodic_price_refresh(
-            CollateralStatus::Sunset
+            CollateralStatus::Active
         ));
+        assert!(should_fetch_collateral_price(&state, &collateral));
     }
 }
