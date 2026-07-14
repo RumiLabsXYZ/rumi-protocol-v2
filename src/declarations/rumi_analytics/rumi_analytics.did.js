@@ -63,6 +63,14 @@ export const idlFactory = ({ IDL }) => {
     'healthy' : IDL.Bool,
     'freeze_threshold_secs' : IDL.Nat64,
   });
+  const AmmPoolSnapshot = IDL.Record({
+    'token_a' : IDL.Principal,
+    'token_b' : IDL.Principal,
+    'reserve_a' : IDL.Nat,
+    'reserve_b' : IDL.Nat,
+    'total_lp_shares' : IDL.Nat,
+    'pool_id' : IDL.Text,
+  });
   const LiquidityAction = IDL.Variant({
     'Add' : IDL.Null,
     'Remove' : IDL.Null,
@@ -309,6 +317,13 @@ export const idlFactory = ({ IDL }) => {
     'swap_count_24h' : IDL.Nat32,
     'volume_24h_e8s' : IDL.Nat64,
   });
+  const PullScheduleConfig = IDL.Record({
+    'period_secs_override' : IDL.Opt(IDL.Nat64),
+    'tick_secs_override' : IDL.Opt(IDL.Nat64),
+    'period_secs' : IDL.Nat64,
+    'schedule_layout_version' : IDL.Nat32,
+    'tick_secs' : IDL.Nat64,
+  });
   const DailyStabilityRow = IDL.Record({
     'collateral_gains' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
     'timestamp_ns' : IDL.Nat64,
@@ -427,9 +442,11 @@ export const idlFactory = ({ IDL }) => {
     'timestamp_ns' : IDL.Nat64,
     'three_pool_reserve_2_e8s' : IDL.Opt(IDL.Nat),
     'three_pool_virtual_price_e18' : IDL.Opt(IDL.Nat),
+    'amm_rewards_e8s' : IDL.Opt(IDL.Nat),
     'total_icusd_supply_e8s' : IDL.Nat,
     'system_collateral_ratio_bps' : IDL.Nat32,
     'total_icp_collateral_e8s' : IDL.Nat,
+    'amm_tvl_usd_e8s' : IDL.Opt(IDL.Nat),
     'three_pool_reserve_1_e8s' : IDL.Opt(IDL.Nat),
     'stability_pool_deposits_e8s' : IDL.Opt(IDL.Nat64),
     'three_pool_lp_supply_e8s' : IDL.Opt(IDL.Nat),
@@ -504,6 +521,11 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'cycles_status' : IDL.Func([], [CycleManagerCyclesStatus], ['query']),
+    'debug_amm_pool_snapshot' : IDL.Func(
+        [],
+        [IDL.Vec(AmmPoolSnapshot)],
+        ['query'],
+      ),
     'debug_get_amm_event_counts' : IDL.Func(
         [],
         [IDL.Nat64, IDL.Nat64],
@@ -571,6 +593,7 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'get_protocol_summary' : IDL.Func([], [ProtocolSummary], ['query']),
+    'get_pull_schedule' : IDL.Func([], [PullScheduleConfig], ['query']),
     'get_sp_depositor_principals' : IDL.Func(
         [],
         [IDL.Vec(IDL.Principal)],
@@ -627,6 +650,7 @@ export const idlFactory = ({ IDL }) => {
     'http_request' : IDL.Func([HttpRequest], [HttpResponse], ['query']),
     'ping' : IDL.Func([], [IDL.Text], ['query']),
     'reset_error_counters' : IDL.Func([ResetErrorCountersArgs], [Result_1], []),
+    'set_pull_schedule' : IDL.Func([IDL.Nat64, IDL.Nat64], [Result_1], []),
     'start_backfill' : IDL.Func([IDL.Principal], [IDL.Text], []),
   });
 };

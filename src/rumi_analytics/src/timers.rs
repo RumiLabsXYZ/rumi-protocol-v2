@@ -2,17 +2,54 @@
 //! Phase 4 adds event tailing and ICRC-3 block tailing to the pull cycle.
 //!
 //! Wave-9d (DOS-010) replaced the 60s `pull_cycle` join-storm with a
-//! per-source schedule walked by a 5s tick. Each source still fires
-//! every 60s; offsets persist across upgrade. See
-//! `pull_schedule.rs` for the pure logic.
+//! per-source schedule walked by a fast tick. Each source fires once per
+//! window; offsets persist across upgrade. The default window widened from
+//! 60s to 300s and the walker tick from 5s to 30s (2026-07-02 cycle-burn
+//! tuning), and both are runtime-overridable via the admin `set_pull_schedule`
+//! endpoint. See `pull_schedule.rs` for the pure logic.
 
-use std::time::Duration;
 use crate::{collectors, pull_schedule, sources, state, tailing};
+use std::cell::Cell;
+use std::time::Duration;
+
+thread_local! {
+    /// Active walker-tick timer, tracked so `register_pull_tick_timer` can
+    /// clear and re-arm it when the admin retunes the tick interval. Timers
+    /// don't survive upgrade, so this is re-populated by `setup_timers`.
+    static PULL_TICK_TIMER_ID: Cell<Option<ic_cdk_timers::TimerId>> = const { Cell::new(None) };
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SetupContext {
     Init,
     PostUpgrade,
+}
+
+fn replace_interval_timer<T: Copy>(
+    slot: &Cell<Option<T>>,
+    clear_existing: impl FnOnce(T),
+    register_new: impl FnOnce() -> T,
+) {
+    if let Some(old) = slot.take() {
+        clear_existing(old);
+    }
+    slot.set(Some(register_new()));
+}
+
+/// (Re-)arm the schedule-walker timer at the currently effective tick. Clears
+/// any prior timer first so calling this repeatedly (e.g. from the admin
+/// setter) never stacks duplicate walkers. Mirrors the backend's
+/// `register_observer_timer` clear-then-arm pattern.
+pub fn register_pull_tick_timer() {
+    let tick_secs =
+        pull_schedule::effective_tick_secs(state::read_state(|s| s.pull_tick_secs_override)).max(1);
+    PULL_TICK_TIMER_ID.with(|cell| {
+        replace_interval_timer(cell, ic_cdk_timers::clear_timer, || {
+            ic_cdk_timers::set_timer_interval(Duration::from_secs(tick_secs), || {
+                ic_cdk::spawn(pull_due_sources())
+            })
+        });
+    });
 }
 
 pub fn setup_timers(ctx: SetupContext) {
@@ -21,9 +58,29 @@ pub fn setup_timers(ctx: SetupContext) {
     // PostUpgrade existing offsets are preserved, only newly added
     // sources are seeded.
     let now = ic_cdk::api::time();
+    let period_ns =
+        pull_schedule::effective_period_ns(state::read_state(|s| s.pull_period_secs_override));
     state::mutate_state(|s| {
         let existing = s.source_next_pull_ns.clone().unwrap_or_default();
-        let merged = pull_schedule::reseed_preserving(now, &existing, pull_schedule::ALL_SOURCE_IDS);
+        let mut merged = pull_schedule::reseed_preserving(
+            now,
+            &existing,
+            pull_schedule::ALL_SOURCE_IDS,
+            period_ns,
+        );
+        // One-time re-spread when the persisted layout trails the current
+        // one. Without this, deadlines seeded under the old 60s window are
+        // all stale after an upgrade that widens the window to 300s, so every
+        // source would fire together on the first tick and stay synchronized
+        // one-burst-per-window — reviving the DOS-010 join-storm. Re-spreading
+        // once restores the even stagger. Preserved thereafter (later upgrades
+        // see the current version and keep in-flight offsets, so this never
+        // starves a high-offset source on repeated upgrades).
+        if s.schedule_layout_version.unwrap_or(0) < pull_schedule::CURRENT_SCHEDULE_LAYOUT {
+            merged =
+                pull_schedule::seed_initial_schedule(now, pull_schedule::ALL_SOURCE_IDS, period_ns);
+            s.schedule_layout_version = Some(pull_schedule::CURRENT_SCHEDULE_LAYOUT);
+        }
         s.source_next_pull_ns = Some(merged);
     });
 
@@ -43,14 +100,12 @@ pub fn setup_timers(ctx: SetupContext) {
         ic_cdk::spawn(fast_snapshot());
     });
 
-    // Wave-9d DOS-010: walk the per-source schedule every
-    // PULL_CYCLE_TICK_SECS (5s). Each source still fires every 60s; the
-    // burst of 9 concurrent inter-canister calls is now spread across
-    // the window.
-    ic_cdk_timers::set_timer_interval(
-        Duration::from_secs(pull_schedule::PULL_CYCLE_TICK_SECS),
-        || ic_cdk::spawn(pull_due_sources()),
-    );
+    // Wave-9d DOS-010: walk the per-source schedule every effective tick
+    // (30s default). Each source fires once per effective window (300s
+    // default); the burst of concurrent inter-canister calls is spread
+    // across the window. Registered via the re-armable helper so the admin
+    // setter can retune the tick without a redeploy.
+    register_pull_tick_timer();
     ic_cdk_timers::set_timer_interval(Duration::from_secs(300), || {
         ic_cdk::spawn(fast_snapshot());
     });
@@ -63,9 +118,9 @@ pub fn setup_timers(ctx: SetupContext) {
 }
 
 /// Wave-9d DOS-010: walk the per-source schedule, fire any sources whose
-/// `next_pull_at_ns` is past, and bump their next deadline by
-/// `PULL_CYCLE_PERIOD_NS`. Typically fires 1 source per tick (sometimes 2
-/// when offsets cluster against the 5s tick grid).
+/// `next_pull_at_ns` is past, and bump their next deadline by the effective
+/// window. Typically fires 1 source per tick (the ~33s default offset exceeds
+/// the 30s tick, so sources rarely cluster).
 async fn pull_due_sources() {
     let now = ic_cdk::api::time();
     let due: Vec<u8> = state::read_state(|s| {
@@ -79,10 +134,13 @@ async fn pull_due_sources() {
 
     // Advance the schedule BEFORE awaiting any sources so a slow source
     // doesn't double-fire on the next tick if its deadline is still in
-    // the past when the next tick arrives.
+    // the past when the next tick arrives. The period is read live so an
+    // admin retune takes effect on the next advance.
+    let period_ns =
+        pull_schedule::effective_period_ns(state::read_state(|s| s.pull_period_secs_override));
     state::mutate_state(|s| {
         let mut schedule = s.source_next_pull_ns.clone().unwrap_or_default();
-        pull_schedule::advance_schedule_for_fired(&mut schedule, now, &due);
+        pull_schedule::advance_schedule_for_fired(&mut schedule, now, &due, period_ns);
         s.source_next_pull_ns = Some(schedule);
     });
 
@@ -173,5 +231,48 @@ async fn fast_snapshot() {
 async fn hourly_snapshot() {
     if let Err(e) = collectors::hourly::run().await {
         ic_cdk::println!("rumi_analytics: hourly snapshot failed: {}", e);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::replace_interval_timer;
+    use std::cell::Cell;
+
+    #[test]
+    fn replacing_interval_timer_clears_old_before_storing_new() {
+        let slot = Cell::new(Some(7_u8));
+        let cleared = Cell::new(None);
+        let registered = Cell::new(false);
+
+        replace_interval_timer(
+            &slot,
+            |old| {
+                assert!(
+                    !registered.get(),
+                    "old timer must clear before registration"
+                );
+                cleared.set(Some(old));
+            },
+            || {
+                registered.set(true);
+                9
+            },
+        );
+
+        assert_eq!(cleared.get(), Some(7));
+        assert!(registered.get());
+        assert_eq!(slot.get(), Some(9));
+    }
+
+    #[test]
+    fn first_interval_timer_registration_does_not_clear() {
+        let slot = Cell::new(None::<u8>);
+        let clear_count = Cell::new(0_u8);
+
+        replace_interval_timer(&slot, |_| clear_count.set(clear_count.get() + 1), || 3);
+
+        assert_eq!(clear_count.get(), 0);
+        assert_eq!(slot.get(), Some(3));
     }
 }

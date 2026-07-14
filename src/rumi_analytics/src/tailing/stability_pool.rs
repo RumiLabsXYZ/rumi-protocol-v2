@@ -16,13 +16,14 @@
 //!
 //! Each tick we fetch the latest BATCH_SIZE events from the tail of the
 //! current window and filter by event.id >= next_wanted_id. If the SP
-//! produces more than BATCH_SIZE events in 60 seconds the oldest of those
-//! would be missed, but that rate (>500 SP events/min) is unrealistic.
+//! produces more than BATCH_SIZE events between pulls the oldest of those
+//! would be missed, but that rate (>500 SP events/5 min at the default
+//! cadence) is unrealistic.
 
+use super::{update_cursor_error, update_cursor_source_count, update_cursor_success, BATCH_SIZE};
 use crate::{sources, state, storage};
 use storage::cursors;
 use storage::events::*;
-use super::{BATCH_SIZE, update_cursor_success, update_cursor_error, update_cursor_source_count};
 
 pub async fn run() {
     let sp = state::read_state(|s| s.sources.stability_pool);
@@ -55,10 +56,36 @@ pub async fn run() {
         return;
     }
 
-    // Always fetch from the tail of the current window (at most BATCH_SIZE
-    // events). If new events arrived faster than one tick can process, the
-    // oldest ones may have already been rotated out — acceptable given the
-    // 60-second tick interval and a 10k ring buffer.
+    // Probe-before-fetch: SP events (deposit/withdraw/claim) are rare, so on
+    // almost every tick there is nothing new. Fetch just the newest event
+    // (position count-1, length 1) and compare its monotonic id against the
+    // cursor. If the newest id is already ingested, skip the full BATCH_SIZE
+    // pull — which otherwise ships up to 500 events every tick even when idle.
+    let newest =
+        match sources::stability_pool::get_pool_events(sp, count.saturating_sub(1), 1).await {
+            Ok(e) => e,
+            Err(e) => {
+                ic_cdk::println!("[tail_sp] probe get_pool_events failed: {}", e);
+                state::mutate_state(|s| {
+                    s.error_counters.stability_pool += 1;
+                    update_cursor_error(s, cursors::CURSOR_ID_STABILITY_EVENTS, e);
+                });
+                return;
+            }
+        };
+    match newest.first() {
+        // New events exist (newest id not yet ingested) — fall through to the
+        // full tail fetch below.
+        Some(evt) if evt.id >= next_wanted_id => {}
+        // Newest event already ingested, or the log is momentarily empty:
+        // nothing to do this tick.
+        _ => return,
+    }
+
+    // Fetch from the tail of the current window (at most BATCH_SIZE events).
+    // If new events arrived faster than one tick can process, the oldest ones
+    // may have already been rotated out — acceptable given the tick interval
+    // and a 10k ring buffer.
     let start = count.saturating_sub(BATCH_SIZE);
     let length = count - start;
     let events = match sources::stability_pool::get_pool_events(sp, start, length).await {

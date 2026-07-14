@@ -173,6 +173,23 @@ pub struct SlimState {
     /// re-seeded on `post_upgrade`.
     #[serde(default)]
     pub source_next_pull_ns: Option<std::collections::HashMap<u8, u64>>,
+    /// Cycle-burn tuning (2026-07-02): admin override for the per-source pull
+    /// window, in seconds. `None` → use `pull_schedule::PULL_CYCLE_PERIOD_NS`
+    /// (300s). Set via `set_pull_schedule` so cadence can be retuned without a
+    /// redeploy; persisted so the choice survives upgrade.
+    #[serde(default)]
+    pub pull_period_secs_override: Option<u64>,
+    /// Admin override for the schedule-walker tick, in seconds. `None` → use
+    /// `pull_schedule::PULL_CYCLE_TICK_SECS` (30s). Persisted across upgrade.
+    #[serde(default)]
+    pub pull_tick_secs_override: Option<u64>,
+    /// Schedule-layout version of the persisted `source_next_pull_ns`. `None`
+    /// on snapshots predating the 300s window. When it trails
+    /// `pull_schedule::CURRENT_SCHEDULE_LAYOUT`, `setup_timers` re-spreads the
+    /// schedule once (so old 60s-window deadlines don't leave every source
+    /// firing in a single post-upgrade burst) and bumps it.
+    #[serde(default)]
+    pub schedule_layout_version: Option<u32>,
 }
 
 /// Snapshot of one AMM pool's composition for portfolio LP valuation.
@@ -229,6 +246,9 @@ impl Default for SlimState {
             add_margin_backfill_cursor: None,
             amm_pools: None,
             source_next_pull_ns: None,
+            pull_period_secs_override: None,
+            pull_tick_secs_override: None,
+            schedule_layout_version: None,
         }
     }
 }
@@ -482,7 +502,9 @@ pub mod daily_stability {
 
     pub fn push(row: DailyStabilityRow) {
         DAILY_STABILITY_LOG.with(|log| {
-            log.borrow_mut().append(&row).expect("append DAILY_STABILITY");
+            log.borrow_mut()
+                .append(&row)
+                .expect("append DAILY_STABILITY");
         });
     }
 
@@ -517,15 +539,114 @@ pub mod daily_stability {
     }
 }
 
+pub mod balance_tracker;
 pub mod cursors;
 pub mod events;
-pub mod balance_tracker;
-pub mod holders;
-pub mod rollups;
 pub mod fast;
+pub mod holders;
 pub mod hourly;
+pub mod rollups;
 
 /// Get a virtual memory from the shared MemoryManager. Used by submodules.
 pub(crate) fn get_memory(id: MemoryId) -> Memory {
     MEMORY_MANAGER.with(|m| m.borrow().get(id))
+}
+
+#[cfg(test)]
+mod slim_state_upgrade_tests {
+    use super::*;
+
+    /// `SlimState` as persisted BEFORE the 2026-07-02 cycle-burn tuning added
+    /// `pull_period_secs_override`, `pull_tick_secs_override`, and
+    /// `schedule_layout_version`. A live mainnet blob has exactly this shape.
+    /// The current `SlimState` must decode it without a trap (the UPG-002
+    /// state-wipe class), with the three new `opt` fields defaulting to `None`.
+    #[derive(CandidType, Serialize, Deserialize)]
+    struct SlimStateLegacy {
+        admin: Principal,
+        sources: SourceCanisterIds,
+        circulating_supply_icusd_e8s: Option<u128>,
+        circulating_supply_3usd_e8s: Option<u128>,
+        last_daily_snapshot_ns: u64,
+        error_counters: ErrorCounters,
+        cursor_last_success: Option<std::collections::HashMap<u8, u64>>,
+        cursor_last_error: Option<std::collections::HashMap<u8, String>>,
+        cursor_source_counts: Option<std::collections::HashMap<u8, u64>>,
+        backfill_active_icusd: Option<bool>,
+        backfill_active_3usd: Option<bool>,
+        last_pull_cycle_ns: Option<u64>,
+        collateral_decimals: Option<std::collections::HashMap<Principal, u8>>,
+        add_margin_backfill_cursor: Option<u64>,
+        amm_pools: Option<Vec<AmmPoolSnapshot>>,
+        source_next_pull_ns: Option<std::collections::HashMap<u8, u64>>,
+    }
+
+    #[test]
+    fn decodes_legacy_slim_state_without_new_schedule_fields() {
+        let mut counts = std::collections::HashMap::new();
+        counts.insert(1u8, 42u64);
+        let mut sched = std::collections::HashMap::new();
+        sched.insert(0u8, 1_000u64);
+
+        let legacy = SlimStateLegacy {
+            admin: Principal::from_slice(&[7]),
+            sources: SourceCanisterIds {
+                backend: Principal::from_slice(&[2]),
+                icusd_ledger: Principal::from_slice(&[3]),
+                three_pool: Principal::from_slice(&[4]),
+                stability_pool: Principal::from_slice(&[5]),
+                amm: Principal::from_slice(&[6]),
+            },
+            circulating_supply_icusd_e8s: Some(123),
+            circulating_supply_3usd_e8s: None,
+            last_daily_snapshot_ns: 999,
+            error_counters: ErrorCounters {
+                backend: 1,
+                ..Default::default()
+            },
+            cursor_last_success: Some(counts.clone()),
+            cursor_last_error: None,
+            cursor_source_counts: Some(counts),
+            backfill_active_icusd: Some(false),
+            backfill_active_3usd: None,
+            last_pull_cycle_ns: Some(555),
+            collateral_decimals: None,
+            add_margin_backfill_cursor: Some(10),
+            amm_pools: None,
+            source_next_pull_ns: Some(sched.clone()),
+        };
+
+        let bytes = Encode!(&legacy).expect("encode legacy SlimState");
+        let decoded: SlimState = Decode!(&bytes, SlimState)
+            .expect("decode legacy SlimState as current schema (no UPG-002 wipe)");
+
+        // Pre-existing fields survive verbatim.
+        assert_eq!(decoded.admin, Principal::from_slice(&[7]));
+        assert_eq!(decoded.sources.backend, Principal::from_slice(&[2]));
+        assert_eq!(decoded.circulating_supply_icusd_e8s, Some(123));
+        assert_eq!(decoded.last_daily_snapshot_ns, 999);
+        assert_eq!(decoded.error_counters.backend, 1);
+        assert_eq!(decoded.add_margin_backfill_cursor, Some(10));
+        assert_eq!(decoded.source_next_pull_ns, Some(sched));
+
+        // New fields default to None — the safe "use compiled-in defaults" state.
+        assert_eq!(decoded.pull_period_secs_override, None);
+        assert_eq!(decoded.pull_tick_secs_override, None);
+        assert_eq!(decoded.schedule_layout_version, None);
+    }
+
+    #[test]
+    fn current_slim_state_round_trips_with_new_fields_set() {
+        let mut s = SlimState::default();
+        s.pull_period_secs_override = Some(600);
+        s.pull_tick_secs_override = Some(20);
+        s.schedule_layout_version = Some(2);
+
+        let bytes = <SlimState as Storable>::to_bytes(&s);
+        let decoded = <SlimState as Storable>::from_bytes(bytes);
+
+        assert_eq!(decoded.pull_period_secs_override, Some(600));
+        assert_eq!(decoded.pull_tick_secs_override, Some(20));
+        assert_eq!(decoded.schedule_layout_version, Some(2));
+    }
 }
