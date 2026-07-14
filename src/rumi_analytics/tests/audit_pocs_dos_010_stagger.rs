@@ -21,86 +21,155 @@
 //!
 //! Wave-9d switches to a **per-source schedule**: every source has its
 //! own `next_pull_at_ns` deadline, persisted in `SlimState` (so offsets
-//! survive upgrade). A small fast tick (every `PULL_CYCLE_TICK_SECS`
-//! seconds) walks the schedule, fires only sources whose deadline has
-//! passed, and bumps their next deadline by `PULL_CYCLE_PERIOD_NS`.
-//! Initial offsets spread the 9 sources across the 60s window at
-//! `PULL_CYCLE_SOURCE_OFFSET_NS` spacing.
+//! survive upgrade). A fast tick (every `PULL_CYCLE_TICK_SECS` seconds)
+//! walks the schedule, fires only sources whose deadline has passed, and
+//! bumps their next deadline by the effective window. Initial offsets
+//! spread the 9 sources across the window at `source_offset_ns(period)`
+//! spacing.
+//!
+//! Cycle-burn tuning (2026-07-02): the default window widened from 60s to
+//! 300s and the walker tick from 5s to 30s to cut the poll rate ~5x, and
+//! both became runtime-overridable. The per-source offset is now DERIVED
+//! from the effective window (`source_offset_ns`) so the stagger stays even
+//! at any cadence. These fences pin the *default* constants and the pure
+//! scheduling invariants that hold at any window.
 //!
 //! Layered fences (mirrors the LIQ-002 / DOS-005 file structure):
 //!
-//!  1. **Constant fences** — TICK / PERIOD / OFFSET pinned at audit-spec
-//!     values. Source-id list pinned (changes need a deliberate edit).
+//!  1. **Constant fences** — TICK / PERIOD defaults pinned; offset derives
+//!     from the window. Source-id list pinned (changes need a deliberate
+//!     edit).
 //!  2. **Initial schedule** — `seed_initial_schedule` produces a
-//!     deterministic offset per source so they spread across the 60s
-//!     window instead of all firing at `now`.
+//!     deterministic offset per source so they spread across the window
+//!     instead of all firing at `now`.
 //!  3. **Due-source selection** — `compute_due_sources` returns ONLY
-//!     sources whose `next_pull_at_ns` is in the past. Out-of-band
-//!     timestamp arithmetic (saturating subtraction, clock skew) must
-//!     not include future-due sources in the firing set.
-//!  4. **Schedule advance** — `advance_schedule_for_fired` bumps each
-//!     fired source by exactly `PULL_CYCLE_PERIOD_NS`. Each source must
-//!     fire exactly once per `PULL_CYCLE_PERIOD_NS` window across many
-//!     ticks.
+//!     sources whose `next_pull_at_ns` is in the past, oldest-deadline-first,
+//!     with a hard maximum of two per walker callback even after delays.
+//!  4. **Schedule advance** — `advance_schedule_for_fired` bumps each fired
+//!     source by exactly the effective window. Each source must fire
+//!     exactly once per window across many ticks.
 //!  5. **Upgrade hygiene** — pre-Wave-9d snapshots decode with the new
 //!     `source_next_pull_ns` field populated from `serde(default)`. The
 //!     re-seed on `post_upgrade` must NOT clobber existing offsets when
 //!     the field is already populated.
 //!  6. **Late-added source** — adding a new source to `ALL_SOURCE_IDS`
-//!     after deploy (or on a fresh canister where the schedule has
-//!     drifted) must seed an offset for the new source without
-//!     disturbing the existing ones.
+//!     after deploy must seed an offset for it without disturbing the rest.
 
 use std::collections::HashMap;
 
 use rumi_analytics::pull_schedule::{
-    self, advance_schedule_for_fired, compute_due_sources, seed_initial_schedule,
-    ALL_SOURCE_IDS, PULL_CYCLE_PERIOD_NS, PULL_CYCLE_SOURCE_OFFSET_NS, PULL_CYCLE_TICK_SECS,
-    SOURCE_ID_AMM_LIQUIDITY, SOURCE_ID_AMM_SWAPS, SOURCE_ID_BACKEND_EVENTS,
-    SOURCE_ID_ICUSD_BLOCKS, SOURCE_ID_STABILITY_EVENTS, SOURCE_ID_SUPPLY_CACHE,
-    SOURCE_ID_3POOL_BLOCKS, SOURCE_ID_3POOL_LIQUIDITY, SOURCE_ID_3POOL_SWAPS,
+    self, advance_schedule_for_fired, compute_due_sources, seed_initial_schedule, source_offset_ns,
+    validate_schedule_config, ALL_SOURCE_IDS, MAX_PERIOD_SECS, MAX_TICK_SECS, MIN_PERIOD_SECS,
+    MIN_TICK_SECS, PULL_CYCLE_PERIOD_NS, PULL_CYCLE_TICK_SECS, SOURCE_ID_3POOL_BLOCKS,
+    SOURCE_ID_3POOL_LIQUIDITY, SOURCE_ID_3POOL_SWAPS, SOURCE_ID_AMM_LIQUIDITY, SOURCE_ID_AMM_SWAPS,
+    SOURCE_ID_BACKEND_EVENTS, SOURCE_ID_ICUSD_BLOCKS, SOURCE_ID_STABILITY_EVENTS,
+    SOURCE_ID_SUPPLY_CACHE,
 };
 
 const SEC_NANOS: u64 = 1_000_000_000;
+
+/// The window used throughout these tests: the compiled-in default.
+const PERIOD: u64 = PULL_CYCLE_PERIOD_NS;
+
+/// Convenience: the derived per-source offset for the default window.
+fn offset() -> u64 {
+    source_offset_ns(PERIOD)
+}
 
 // ============================================================================
 // Layer 1 — constant fences
 // ============================================================================
 
 #[test]
-fn dos_010_tick_seconds_pinned_at_5() {
+fn dos_010_tick_seconds_default_is_30() {
     assert_eq!(
-        PULL_CYCLE_TICK_SECS, 5,
-        "Wave-9d DOS-010: pull-cycle tick must be 5s. Lengthening it \
-         pushes some sources past their nominal 60s cadence; shortening \
-         it wakes the canister more often without spreading work further."
+        PULL_CYCLE_TICK_SECS, 30,
+        "DOS-010 / burn tuning: default walker tick is 30s. It is \
+         runtime-overridable, but the compiled-in default is pinned so a \
+         careless edit can't silently regress the poll rate."
     );
 }
 
 #[test]
-fn dos_010_period_pinned_at_60s() {
+fn dos_010_period_default_is_300s() {
     assert_eq!(
         PULL_CYCLE_PERIOD_NS,
-        60 * SEC_NANOS,
-        "Wave-9d DOS-010: each source must fire every 60s (matches the \
-         pre-Wave-9d cadence). Changing this changes the analytics \
-         freshness contract surfaced through `last_pull_cycle_ns`."
+        300 * SEC_NANOS,
+        "DOS-010 / burn tuning: default per-source window is 300s (widened \
+         from 60s to cut the inter-canister poll rate ~5x). Runtime- \
+         overridable via set_pull_schedule; the default is pinned here."
     );
 }
 
 #[test]
-fn dos_010_offset_spreads_sources_across_window() {
-    // 9 sources × 6s offset = 54s spread, fits cleanly inside the 60s
-    // PULL_CYCLE_PERIOD_NS window. Pre-Wave-9d behaviour collapsed all
-    // 9 source pulls into the same instant; 6s spacing puts each on its
-    // own tick when the wall clock advances in 5s steps.
+fn dos_010_runtime_period_floor_preserves_the_300s_burn_reduction() {
     assert_eq!(
-        PULL_CYCLE_SOURCE_OFFSET_NS,
-        6 * SEC_NANOS,
-        "Wave-9d DOS-010: source-offset spacing must be 6s. Wider spacing \
-         (e.g., 7s × 9 = 63s) overshoots the 60s window and leaves the \
-         last source firing on alternate cycles relative to the 5s tick grid."
+        MIN_PERIOD_SECS, 300,
+        "the runtime override must not restore or exceed the pre-tuning poll rate"
     );
+}
+
+#[test]
+fn dos_010_runtime_config_enforces_static_and_stagger_bounds() {
+    assert!(validate_schedule_config(MIN_PERIOD_SECS, MIN_TICK_SECS).is_ok());
+    assert!(validate_schedule_config(MAX_PERIOD_SECS, MAX_TICK_SECS).is_ok());
+
+    assert!(validate_schedule_config(MIN_PERIOD_SECS - 1, MIN_TICK_SECS).is_err());
+    assert!(validate_schedule_config(MAX_PERIOD_SECS + 1, MIN_TICK_SECS).is_err());
+    assert!(validate_schedule_config(MIN_PERIOD_SECS, MIN_TICK_SECS - 1).is_err());
+    assert!(validate_schedule_config(MIN_PERIOD_SECS, MAX_TICK_SECS + 1).is_err());
+
+    // Nine sources across a 300s period have ~33s spacing. A 66s walker
+    // can collect at most two adjacent slots; 67s can collect three and
+    // therefore violates the scheduler's documented 1-2 source bound.
+    assert!(validate_schedule_config(300, 66).is_ok());
+    assert!(
+        validate_schedule_config(300, 67).is_err(),
+        "a runtime override must not collapse three or more stagger slots into one tick"
+    );
+}
+
+#[test]
+fn dos_010_largest_safe_tick_fires_at_most_two_sources() {
+    let period_ns = 300 * SEC_NANOS;
+    let tick_ns = 66 * SEC_NANOS;
+    let mut now = 0;
+    let mut schedule = seed_initial_schedule(now, ALL_SOURCE_IDS, period_ns);
+    let mut max_due = 0;
+
+    for _ in 0..200 {
+        let due = compute_due_sources(now, &schedule, ALL_SOURCE_IDS);
+        max_due = max_due.max(due.len());
+        advance_schedule_for_fired(&mut schedule, now, &due, period_ns);
+        now += tick_ns;
+    }
+
+    assert!(
+        max_due <= 2,
+        "accepted minimum-period cadence fired {max_due} sources in one tick"
+    );
+}
+
+#[test]
+fn dos_010_offset_derives_from_window_and_spreads_sources() {
+    // The offset is period / N so the 9 sources fill the window. For the
+    // 300s default that is ~33.3s, and 9 × offset stays inside the window.
+    let off = offset();
+    assert_eq!(
+        off,
+        PERIOD / (ALL_SOURCE_IDS.len() as u64),
+        "source offset must be an even fraction of the window"
+    );
+    assert!(
+        (ALL_SOURCE_IDS.len() as u64) * off <= PERIOD,
+        "all sources must fit inside one window without wrapping (last slot \
+         = {} , window = {})",
+        (ALL_SOURCE_IDS.len() as u64) * off,
+        PERIOD
+    );
+    // Offset must exceed nothing in particular, but it should be positive so
+    // sources don't all collapse onto `now`.
+    assert!(off > 0, "derived offset must be positive");
 }
 
 #[test]
@@ -111,15 +180,15 @@ fn dos_010_source_ids_full_list_pinned() {
     let mut got: Vec<u8> = ALL_SOURCE_IDS.iter().copied().collect();
     got.sort();
     let expected: Vec<u8> = vec![
-        SOURCE_ID_SUPPLY_CACHE,    // 0
-        SOURCE_ID_BACKEND_EVENTS,  // 1 (matches CURSOR_ID_BACKEND_EVENTS)
-        SOURCE_ID_3POOL_SWAPS,     // 2
-        SOURCE_ID_3POOL_LIQUIDITY, // 3
-        SOURCE_ID_3POOL_BLOCKS,    // 4
-        SOURCE_ID_AMM_SWAPS,       // 5
-        SOURCE_ID_STABILITY_EVENTS,// 6
-        SOURCE_ID_ICUSD_BLOCKS,    // 7
-        SOURCE_ID_AMM_LIQUIDITY,   // 8
+        SOURCE_ID_SUPPLY_CACHE,     // 0
+        SOURCE_ID_BACKEND_EVENTS,   // 1 (matches CURSOR_ID_BACKEND_EVENTS)
+        SOURCE_ID_3POOL_SWAPS,      // 2
+        SOURCE_ID_3POOL_LIQUIDITY,  // 3
+        SOURCE_ID_3POOL_BLOCKS,     // 4
+        SOURCE_ID_AMM_SWAPS,        // 5
+        SOURCE_ID_STABILITY_EVENTS, // 6
+        SOURCE_ID_ICUSD_BLOCKS,     // 7
+        SOURCE_ID_AMM_LIQUIDITY,    // 8
     ];
     assert_eq!(got, expected, "ALL_SOURCE_IDS must list every source pull. Adding a new tailer means adding a new id here and a new branch in run_source.");
 }
@@ -139,7 +208,7 @@ fn dos_010_supply_cache_id_is_zero() {
 #[test]
 fn dos_010_seed_initial_schedule_assigns_unique_offsets() {
     let now: u64 = 1_000_000_000_000;
-    let schedule = seed_initial_schedule(now, ALL_SOURCE_IDS);
+    let schedule = seed_initial_schedule(now, ALL_SOURCE_IDS, PERIOD);
     assert_eq!(
         schedule.len(),
         ALL_SOURCE_IDS.len(),
@@ -157,18 +226,21 @@ fn dos_010_seed_initial_schedule_assigns_unique_offsets() {
 
 #[test]
 fn dos_010_seed_initial_schedule_offsets_are_evenly_spaced() {
-    // Source N gets `now + N * PULL_CYCLE_SOURCE_OFFSET_NS`.
+    // Source N gets `now + N * source_offset_ns(period)`.
     // (N is the source's index in ALL_SOURCE_IDS so the spacing stays
     // even regardless of the actual u8 ids.)
     let now: u64 = 0;
-    let schedule = seed_initial_schedule(now, ALL_SOURCE_IDS);
+    let off = offset();
+    let schedule = seed_initial_schedule(now, ALL_SOURCE_IDS, PERIOD);
     for (idx, source_id) in ALL_SOURCE_IDS.iter().enumerate() {
-        let expected = now + (idx as u64) * PULL_CYCLE_SOURCE_OFFSET_NS;
+        let expected = now + (idx as u64) * off;
         assert_eq!(
             schedule.get(source_id).copied(),
             Some(expected),
             "source id {} (index {}) must be seeded at offset {}",
-            source_id, idx, expected
+            source_id,
+            idx,
+            expected
         );
     }
 }
@@ -182,7 +254,7 @@ fn dos_010_seed_initial_schedule_preserves_existing_entries() {
     existing.insert(SOURCE_ID_BACKEND_EVENTS, 999_000_000_000);
     existing.insert(SOURCE_ID_3POOL_SWAPS, 998_000_000_000);
 
-    let merged = pull_schedule::reseed_preserving(now, &existing, ALL_SOURCE_IDS);
+    let merged = pull_schedule::reseed_preserving(now, &existing, ALL_SOURCE_IDS, PERIOD);
 
     assert_eq!(
         merged.get(&SOURCE_ID_BACKEND_EVENTS).copied(),
@@ -195,10 +267,6 @@ fn dos_010_seed_initial_schedule_preserves_existing_entries() {
         "existing deadline for 3pool_swaps must be preserved"
     );
     // New sources get fresh offsets relative to `now`.
-    let backend_idx = ALL_SOURCE_IDS
-        .iter()
-        .position(|id| *id == SOURCE_ID_BACKEND_EVENTS)
-        .unwrap();
     assert_ne!(
         merged.get(&SOURCE_ID_SUPPLY_CACHE).copied(),
         Some(999_000_000_000),
@@ -208,8 +276,7 @@ fn dos_010_seed_initial_schedule_preserves_existing_entries() {
         .iter()
         .position(|id| *id == SOURCE_ID_SUPPLY_CACHE)
         .unwrap();
-    let _ = backend_idx; // silence unused — referenced in trace if assertion fires
-    let expected_supply = now + (supply_idx as u64) * PULL_CYCLE_SOURCE_OFFSET_NS;
+    let expected_supply = now + (supply_idx as u64) * offset();
     assert_eq!(
         merged.get(&SOURCE_ID_SUPPLY_CACHE).copied(),
         Some(expected_supply),
@@ -226,7 +293,7 @@ fn dos_010_compute_due_sources_returns_empty_when_nothing_is_due() {
     // Schedule is now+offset; at exactly `now` only the source whose
     // offset == 0 (index 0 = supply cache) is due.
     let now: u64 = 100 * SEC_NANOS;
-    let schedule = seed_initial_schedule(now, ALL_SOURCE_IDS);
+    let schedule = seed_initial_schedule(now, ALL_SOURCE_IDS, PERIOD);
     let due = compute_due_sources(now, &schedule, ALL_SOURCE_IDS);
     assert_eq!(
         due,
@@ -238,23 +305,95 @@ fn dos_010_compute_due_sources_returns_empty_when_nothing_is_due() {
 #[test]
 fn dos_010_compute_due_sources_includes_only_past_deadlines() {
     let now: u64 = 100 * SEC_NANOS;
-    let schedule = seed_initial_schedule(now, ALL_SOURCE_IDS);
-    // Advance to just past source-index-3's offset (3 * 7s = 21s into the cycle).
-    let later = now + 22 * SEC_NANOS;
+    let off = offset();
+    let schedule = seed_initial_schedule(now, ALL_SOURCE_IDS, PERIOD);
+    // Advance to just past source-index-3's offset (3 × offset into the
+    // cycle), so indices 0..=3 are overdue and index 4 is not. The runtime
+    // selector returns only the two oldest overdue entries.
+    let later = now + 3 * off + SEC_NANOS;
     let due = compute_due_sources(later, &schedule, ALL_SOURCE_IDS);
-    // Sources 0..=3 (by index) should be due; their seed-time was 0/7/14/21s past now.
-    assert_eq!(
-        due.len(),
-        4,
-        "at t=now+22s, sources at offsets 0/7/14/21 must all be due (got {} = {:?})",
-        due.len(), due
-    );
+    assert_eq!(due, ALL_SOURCE_IDS[..2]);
     for &id in &due {
         let idx = ALL_SOURCE_IDS.iter().position(|&i| i == id).unwrap();
         assert!(
-            (idx as u64) * PULL_CYCLE_SOURCE_OFFSET_NS <= 22 * SEC_NANOS,
+            (idx as u64) * off <= later - now,
             "source id {} (index {}) was reported due but its offset is in the future",
-            id, idx
+            id,
+            idx
+        );
+    }
+}
+
+#[test]
+fn dos_010_delayed_tick_caps_four_overdue_sources_oldest_first() {
+    let now = 1_000 * SEC_NANOS;
+    let schedule = HashMap::from([
+        (SOURCE_ID_SUPPLY_CACHE, now - 10),
+        (SOURCE_ID_BACKEND_EVENTS, now - 40),
+        (SOURCE_ID_3POOL_SWAPS, now - 20),
+        (SOURCE_ID_3POOL_LIQUIDITY, now - 30),
+        (SOURCE_ID_3POOL_BLOCKS, now + 1),
+    ]);
+
+    let due = compute_due_sources(
+        now,
+        &schedule,
+        &[
+            SOURCE_ID_SUPPLY_CACHE,
+            SOURCE_ID_BACKEND_EVENTS,
+            SOURCE_ID_3POOL_SWAPS,
+            SOURCE_ID_3POOL_LIQUIDITY,
+            SOURCE_ID_3POOL_BLOCKS,
+        ],
+    );
+
+    assert_eq!(
+        due,
+        vec![SOURCE_ID_BACKEND_EVENTS, SOURCE_ID_3POOL_LIQUIDITY],
+        "a delayed walker must fire only the two oldest overdue deadlines"
+    );
+}
+
+#[test]
+fn dos_010_delayed_ticks_drain_overdue_sources_two_at_a_time_across_valid_configs() {
+    let configs = [
+        (MIN_PERIOD_SECS, MIN_TICK_SECS),
+        (MIN_PERIOD_SECS, 66),
+        (301, 66),
+        (MAX_PERIOD_SECS, MAX_TICK_SECS),
+    ];
+
+    for (period_secs, tick_secs) in configs {
+        validate_schedule_config(period_secs, tick_secs).unwrap();
+        let period_ns = period_secs * SEC_NANOS;
+        let tick_ns = tick_secs * SEC_NANOS;
+        let seeded = seed_initial_schedule(0, ALL_SOURCE_IDS, period_ns);
+        let delayed_now = period_ns;
+        let expected_order: Vec<u8> = {
+            let mut deadlines: Vec<(u64, u8)> =
+                ALL_SOURCE_IDS.iter().map(|id| (seeded[id], *id)).collect();
+            deadlines.sort_unstable();
+            deadlines.into_iter().map(|(_, id)| id).collect()
+        };
+        let mut schedule = seeded;
+        let mut now = delayed_now;
+        let mut drained = Vec::new();
+
+        for _ in 0..ALL_SOURCE_IDS.len().div_ceil(2) {
+            let due = compute_due_sources(now, &schedule, ALL_SOURCE_IDS);
+            assert!(
+                due.len() <= 2,
+                "period={period_secs}s tick={tick_secs}s returned {} overdue sources",
+                due.len()
+            );
+            drained.extend_from_slice(&due);
+            advance_schedule_for_fired(&mut schedule, now, &due, period_ns);
+            now = now.saturating_add(tick_ns);
+        }
+
+        assert_eq!(
+            drained, expected_order,
+            "period={period_secs}s tick={tick_secs}s must drain every overdue source oldest-first"
         );
     }
 }
@@ -268,37 +407,37 @@ fn dos_010_compute_due_sources_treats_missing_entry_as_due() {
     schedule.insert(SOURCE_ID_SUPPLY_CACHE, u64::MAX); // far future
     let now: u64 = 100 * SEC_NANOS;
     let due = compute_due_sources(now, &schedule, ALL_SOURCE_IDS);
-    // Only sources NOT in schedule should be due (everything except SOURCE_ID_SUPPLY_CACHE).
+    // Only sources NOT in schedule should be due (everything except
+    // SOURCE_ID_SUPPLY_CACHE), but the walker still returns a bounded batch.
     assert!(
         !due.contains(&SOURCE_ID_SUPPLY_CACHE),
         "source with future deadline must not be reported due"
     );
     assert_eq!(
-        due.len(),
-        ALL_SOURCE_IDS.len() - 1,
-        "every source except SUPPLY_CACHE has no schedule entry — all should be reported due"
+        due,
+        ALL_SOURCE_IDS[1..3],
+        "missing entries should be treated as oldest due work, capped at two"
     );
 }
 
 // ============================================================================
-// Layer 4 — schedule advance / per-source 60s pacing
+// Layer 4 — schedule advance / per-source window pacing
 // ============================================================================
 
 #[test]
 fn dos_010_advance_schedule_bumps_fired_sources_by_period() {
     let now: u64 = 100 * SEC_NANOS;
-    let mut schedule = seed_initial_schedule(now, ALL_SOURCE_IDS);
-    let original_supply = schedule[&SOURCE_ID_SUPPLY_CACHE];
+    let off = offset();
+    let mut schedule = seed_initial_schedule(now, ALL_SOURCE_IDS, PERIOD);
     let fired = vec![SOURCE_ID_SUPPLY_CACHE];
 
-    advance_schedule_for_fired(&mut schedule, now, &fired);
+    advance_schedule_for_fired(&mut schedule, now, &fired, PERIOD);
 
     assert_eq!(
         schedule[&SOURCE_ID_SUPPLY_CACHE],
-        now + PULL_CYCLE_PERIOD_NS,
-        "fired source must have its deadline pushed exactly PULL_CYCLE_PERIOD_NS into the future"
+        now + PERIOD,
+        "fired source must have its deadline pushed exactly one window into the future"
     );
-    let _ = original_supply; // value irrelevant; checked the new value is `now + period`
 
     // Non-fired sources must not be touched.
     for &id in ALL_SOURCE_IDS {
@@ -308,7 +447,7 @@ fn dos_010_advance_schedule_bumps_fired_sources_by_period() {
         let idx = ALL_SOURCE_IDS.iter().position(|&i| i == id).unwrap();
         assert_eq!(
             schedule[&id],
-            now + (idx as u64) * PULL_CYCLE_SOURCE_OFFSET_NS,
+            now + (idx as u64) * off,
             "non-fired source {} must keep its original deadline",
             id
         );
@@ -317,30 +456,28 @@ fn dos_010_advance_schedule_bumps_fired_sources_by_period() {
 
 #[test]
 fn dos_010_each_source_fires_exactly_once_per_window() {
-    // Walk a 60s window in 5s ticks. With 9 sources × 7s offsets,
-    // each source must fire exactly once across the window.
+    // Walk one window in TICK-second steps. Each of the 9 sources must fire
+    // exactly once across the window.
     let mut now: u64 = 0;
-    let mut schedule = seed_initial_schedule(now, ALL_SOURCE_IDS);
+    let mut schedule = seed_initial_schedule(now, ALL_SOURCE_IDS, PERIOD);
     let mut fire_counts: HashMap<u8, u32> = HashMap::new();
 
-    // Walk PULL_CYCLE_PERIOD_NS worth of ticks. PULL_CYCLE_PERIOD_NS / TICK_SECS = 60/5 = 12 ticks.
-    let n_ticks = PULL_CYCLE_PERIOD_NS / (PULL_CYCLE_TICK_SECS * SEC_NANOS);
+    // Number of ticks in one window (300 / 30 = 10 for the defaults).
+    let n_ticks = PERIOD / (PULL_CYCLE_TICK_SECS * SEC_NANOS);
     for _ in 0..n_ticks {
         let due = compute_due_sources(now, &schedule, ALL_SOURCE_IDS);
         for &id in &due {
             *fire_counts.entry(id).or_insert(0) += 1;
         }
-        advance_schedule_for_fired(&mut schedule, now, &due);
+        advance_schedule_for_fired(&mut schedule, now, &due, PERIOD);
         now += PULL_CYCLE_TICK_SECS * SEC_NANOS;
     }
 
-    // Walk one more period. Final tally should be 1 per source per
-    // window, total = 9 fires per 60s.
     for &id in ALL_SOURCE_IDS {
         let count = fire_counts.get(&id).copied().unwrap_or(0);
         assert_eq!(
             count, 1,
-            "source id {} must fire exactly once per 60s window (got {} fires across {} ticks)",
+            "source id {} must fire exactly once per window (got {} fires across {} ticks)",
             id, count, n_ticks
         );
     }
@@ -349,19 +486,19 @@ fn dos_010_each_source_fires_exactly_once_per_window() {
     assert_eq!(
         total,
         ALL_SOURCE_IDS.len() as u32,
-        "total fires across one 60s window must equal source count (got {})",
+        "total fires across one window must equal source count (got {})",
         total
     );
 }
 
 #[test]
 fn dos_010_no_sync_storm_at_any_single_tick() {
-    // Walk the schedule for many ticks; assert that at no point are
-    // more than `ceil(N_sources * tick / period) + 1` sources due
-    // simultaneously. Pre-fix all 9 fired together; post-fix at most
-    // 1-2 per tick (drift may cluster a couple together but never all 9).
+    // Walk the schedule for many ticks; assert that at no point are more
+    // than 2 sources due simultaneously. Pre-fix all 9 fired together;
+    // post-fix the derived offset (~33s) exceeds the 30s tick so at most one
+    // source is due per tick (2 tolerated for grid drift), never all 9.
     let mut now: u64 = 0;
-    let mut schedule = seed_initial_schedule(now, ALL_SOURCE_IDS);
+    let mut schedule = seed_initial_schedule(now, ALL_SOURCE_IDS, PERIOD);
     let max_per_tick_observed = {
         let mut m: usize = 0;
         for _ in 0..200 {
@@ -369,15 +506,11 @@ fn dos_010_no_sync_storm_at_any_single_tick() {
             if due.len() > m {
                 m = due.len();
             }
-            advance_schedule_for_fired(&mut schedule, now, &due);
+            advance_schedule_for_fired(&mut schedule, now, &due, PERIOD);
             now += PULL_CYCLE_TICK_SECS * SEC_NANOS;
         }
         m
     };
-    // Hard upper bound: 2 per tick (some clustering as the deadlines
-    // drift relative to the 5s tick grid). If this ever exceeds 2,
-    // either the offset shrunk or the tick grew and DOS-010's premise
-    // is undermined.
     assert!(
         max_per_tick_observed <= 2,
         "no single tick must fire more than 2 sources concurrently (got {})",
@@ -394,16 +527,16 @@ fn dos_010_reseed_after_upgrade_preserves_in_flight_offsets() {
     // Simulate: tick a few times, snapshot the schedule, "upgrade" by
     // re-seeding with the snapshot, assert the schedule is unchanged.
     let mut now: u64 = 0;
-    let mut schedule = seed_initial_schedule(now, ALL_SOURCE_IDS);
+    let mut schedule = seed_initial_schedule(now, ALL_SOURCE_IDS, PERIOD);
     for _ in 0..5 {
         let due = compute_due_sources(now, &schedule, ALL_SOURCE_IDS);
-        advance_schedule_for_fired(&mut schedule, now, &due);
+        advance_schedule_for_fired(&mut schedule, now, &due, PERIOD);
         now += PULL_CYCLE_TICK_SECS * SEC_NANOS;
     }
     let snapshot: HashMap<u8, u64> = schedule.clone();
 
     // Simulate post_upgrade: reseed with the snapshot.
-    let merged = pull_schedule::reseed_preserving(now, &snapshot, ALL_SOURCE_IDS);
+    let merged = pull_schedule::reseed_preserving(now, &snapshot, ALL_SOURCE_IDS, PERIOD);
 
     // Every entry from snapshot must survive verbatim.
     for (id, deadline) in snapshot.iter() {
@@ -427,7 +560,7 @@ fn dos_010_reseed_after_upgrade_seeds_newly_added_source() {
         snapshot.insert(id, now + 1);
     }
     let new_source_id = *ALL_SOURCE_IDS.last().unwrap();
-    let merged = pull_schedule::reseed_preserving(now, &snapshot, ALL_SOURCE_IDS);
+    let merged = pull_schedule::reseed_preserving(now, &snapshot, ALL_SOURCE_IDS, PERIOD);
     assert!(
         merged.contains_key(&new_source_id),
         "post-upgrade reseed must seed a new source not present in snapshot"

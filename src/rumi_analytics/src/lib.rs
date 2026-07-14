@@ -3,16 +3,16 @@
 
 use candid::Principal;
 
-mod state;
-mod http;
-mod storage;
 mod collectors;
-mod sources;
-mod queries;
-mod timers;
-mod tailing;
-mod types;
+mod http;
 pub mod pull_schedule;
+mod queries;
+mod sources;
+mod state;
+mod storage;
+mod tailing;
+mod timers;
+mod types;
 
 use crate::storage::{SlimState, SourceCanisterIds};
 
@@ -26,7 +26,9 @@ fn principal_from_text(text: &str) -> Principal {
     Principal::from_text(text).expect("hard-coded principal must be valid")
 }
 
-fn cycle_manager_environment(sources: &SourceCanisterIds) -> rumi_cycle_manager::CycleManagerEnvironment {
+fn cycle_manager_environment(
+    sources: &SourceCanisterIds,
+) -> rumi_cycle_manager::CycleManagerEnvironment {
     if sources.backend == principal_from_text(PRODUCTION_BACKEND) {
         rumi_cycle_manager::CycleManagerEnvironment::Production
     } else if sources.backend == principal_from_text(STAGING_BACKEND) {
@@ -47,7 +49,9 @@ fn push_target(
     tags: &[&str],
 ) {
     if canister_id == Principal::anonymous()
-        || targets.iter().any(|target| target.canister_id == canister_id)
+        || targets
+            .iter()
+            .any(|target| target.canister_id == canister_id)
     {
         return;
     }
@@ -170,6 +174,18 @@ pub struct InitArgs {
     pub amm: Principal,
 }
 
+/// Live pull-schedule cadence, for ops visibility. `*_secs` are the effective
+/// values (override if set, else the compiled-in default); `*_override` echo
+/// the persisted admin overrides (`null` = using the default).
+#[derive(candid::CandidType, candid::Deserialize)]
+pub struct PullScheduleConfig {
+    pub period_secs: u64,
+    pub tick_secs: u64,
+    pub period_secs_override: Option<u64>,
+    pub tick_secs_override: Option<u64>,
+    pub schedule_layout_version: u32,
+}
+
 #[ic_cdk_macros::init]
 fn init(args: InitArgs) {
     // UPG-006: refuse to init with non-empty stable memory. Catches accidental
@@ -247,7 +263,8 @@ fn build_cycle_manager_metrics(target_count: u64) -> Vec<rumi_cycle_manager::Cyc
         ),
         rumi_cycle_manager::metric(
             "op:source_error:rejects",
-            errors.backend
+            errors
+                .backend
                 .saturating_add(errors.icusd_ledger)
                 .saturating_add(errors.three_pool)
                 .saturating_add(errors.stability_pool)
@@ -295,7 +312,9 @@ fn get_stability_series(query: types::RangeQuery) -> types::StabilitySeriesRespo
 }
 
 #[ic_cdk_macros::query]
-fn http_request(req: ic_canisters_http_types::HttpRequest) -> ic_canisters_http_types::HttpResponse {
+fn http_request(
+    req: ic_canisters_http_types::HttpRequest,
+) -> ic_canisters_http_types::HttpResponse {
     http::http_request(req)
 }
 
@@ -375,7 +394,9 @@ fn get_top_holders(query: types::TopHoldersQuery) -> types::TopHoldersResponse {
 }
 
 #[ic_cdk_macros::query]
-fn get_top_counterparties(query: types::TopCounterpartiesQuery) -> types::TopCounterpartiesResponse {
+fn get_top_counterparties(
+    query: types::TopCounterpartiesQuery,
+) -> types::TopCounterpartiesResponse {
     queries::live::get_top_counterparties(query)
 }
 
@@ -385,7 +406,9 @@ fn get_top_sp_depositors(query: types::TopSpDepositorsQuery) -> types::TopSpDepo
 }
 
 #[ic_cdk_macros::query]
-fn get_admin_event_breakdown(query: types::AdminEventBreakdownQuery) -> types::AdminEventBreakdownResponse {
+fn get_admin_event_breakdown(
+    query: types::AdminEventBreakdownQuery,
+) -> types::AdminEventBreakdownResponse {
     queries::live::get_admin_event_breakdown(query)
 }
 
@@ -415,7 +438,9 @@ fn get_pool_routes(query: types::PoolRoutesQuery) -> types::PoolRoutesResponse {
 }
 
 #[ic_cdk_macros::query]
-fn get_address_value_series(query: types::AddressValueSeriesQuery) -> types::AddressValueSeriesResponse {
+fn get_address_value_series(
+    query: types::AddressValueSeriesQuery,
+) -> types::AddressValueSeriesResponse {
     queries::address_value::get_address_value_series(query)
 }
 
@@ -462,10 +487,7 @@ fn debug_get_amm_liquidity_events_raw(
 /// starting at `start`, up to `length` entries. Preserved from the prior
 /// deployed wasm for Candid interface compatibility.
 #[ic_cdk_macros::query]
-fn debug_get_swap_events_raw(
-    start: u64,
-    length: u64,
-) -> Vec<storage::events::AnalyticsSwapEvent> {
+fn debug_get_swap_events_raw(start: u64, length: u64) -> Vec<storage::events::AnalyticsSwapEvent> {
     let mut out = Vec::new();
     let total = storage::events::evt_swaps::len();
     let end = start.saturating_add(length).min(total);
@@ -482,18 +504,60 @@ fn get_collector_health() -> types::CollectorHealth {
     use storage::cursors;
 
     let cursor_names: &[(u8, &str, fn() -> u64)] = &[
-        (cursors::CURSOR_ID_BACKEND_EVENTS, "backend_events", cursors::backend_events::get),
-        (cursors::CURSOR_ID_3POOL_SWAPS, "3pool_swaps", cursors::three_pool_swaps::get),
-        (cursors::CURSOR_ID_3POOL_LIQUIDITY, "3pool_liquidity", cursors::three_pool_liquidity::get),
-        (cursors::CURSOR_ID_3POOL_BLOCKS, "3pool_blocks", cursors::three_pool_blocks::get),
-        (cursors::CURSOR_ID_AMM_SWAPS, "amm_swaps", cursors::amm_swaps::get),
-        (cursors::CURSOR_ID_AMM_LIQUIDITY, "amm_liquidity", cursors::amm_liquidity::get),
-        (cursors::CURSOR_ID_STABILITY_EVENTS, "stability_events", cursors::stability_events::get),
-        (cursors::CURSOR_ID_ICUSD_BLOCKS, "icusd_blocks", cursors::icusd_blocks::get),
+        (
+            cursors::CURSOR_ID_BACKEND_EVENTS,
+            "backend_events",
+            cursors::backend_events::get,
+        ),
+        (
+            cursors::CURSOR_ID_3POOL_SWAPS,
+            "3pool_swaps",
+            cursors::three_pool_swaps::get,
+        ),
+        (
+            cursors::CURSOR_ID_3POOL_LIQUIDITY,
+            "3pool_liquidity",
+            cursors::three_pool_liquidity::get,
+        ),
+        (
+            cursors::CURSOR_ID_3POOL_BLOCKS,
+            "3pool_blocks",
+            cursors::three_pool_blocks::get,
+        ),
+        (
+            cursors::CURSOR_ID_AMM_SWAPS,
+            "amm_swaps",
+            cursors::amm_swaps::get,
+        ),
+        (
+            cursors::CURSOR_ID_AMM_LIQUIDITY,
+            "amm_liquidity",
+            cursors::amm_liquidity::get,
+        ),
+        (
+            cursors::CURSOR_ID_STABILITY_EVENTS,
+            "stability_events",
+            cursors::stability_events::get,
+        ),
+        (
+            cursors::CURSOR_ID_ICUSD_BLOCKS,
+            "icusd_blocks",
+            cursors::icusd_blocks::get,
+        ),
     ];
 
-    let (last_success_map, last_error_map, source_count_map, backfill_icusd, backfill_3usd, last_pull_ns, error_counters, icusd_ledger, three_pool) =
-        state::read_state(|s| (
+    let (
+        last_success_map,
+        last_error_map,
+        source_count_map,
+        backfill_icusd,
+        backfill_3usd,
+        last_pull_ns,
+        error_counters,
+        icusd_ledger,
+        three_pool,
+    ) = state::read_state(|s| {
+        (
             s.cursor_last_success.clone().unwrap_or_default(),
             s.cursor_last_error.clone().unwrap_or_default(),
             s.cursor_source_counts.clone().unwrap_or_default(),
@@ -503,32 +567,46 @@ fn get_collector_health() -> types::CollectorHealth {
             s.error_counters.clone(),
             s.sources.icusd_ledger,
             s.sources.three_pool,
-        ));
+        )
+    });
 
-    let cursors: Vec<types::CursorStatus> = cursor_names.iter().map(|(id, name, get_fn)| {
-        types::CursorStatus {
+    let cursors: Vec<types::CursorStatus> = cursor_names
+        .iter()
+        .map(|(id, name, get_fn)| types::CursorStatus {
             name: name.to_string(),
             cursor_position: get_fn(),
             source_count: source_count_map.get(id).copied().unwrap_or(0),
             last_success_ns: last_success_map.get(id).copied().unwrap_or(0),
             last_error: last_error_map.get(id).cloned(),
-        }
-    }).collect();
+        })
+        .collect();
 
     let mut backfill_active = Vec::new();
-    if backfill_icusd { backfill_active.push(icusd_ledger); }
-    if backfill_3usd { backfill_active.push(three_pool); }
+    if backfill_icusd {
+        backfill_active.push(icusd_ledger);
+    }
+    if backfill_3usd {
+        backfill_active.push(three_pool);
+    }
 
     let balance_tracker_stats = vec![
         types::BalanceTrackerStats {
             token: icusd_ledger,
-            holder_count: storage::balance_tracker::holder_count(storage::balance_tracker::Token::IcUsd),
-            total_tracked_e8s: storage::balance_tracker::total_supply_tracked(storage::balance_tracker::Token::IcUsd),
+            holder_count: storage::balance_tracker::holder_count(
+                storage::balance_tracker::Token::IcUsd,
+            ),
+            total_tracked_e8s: storage::balance_tracker::total_supply_tracked(
+                storage::balance_tracker::Token::IcUsd,
+            ),
         },
         types::BalanceTrackerStats {
             token: three_pool,
-            holder_count: storage::balance_tracker::holder_count(storage::balance_tracker::Token::ThreeUsd),
-            total_tracked_e8s: storage::balance_tracker::total_supply_tracked(storage::balance_tracker::Token::ThreeUsd),
+            holder_count: storage::balance_tracker::holder_count(
+                storage::balance_tracker::Token::ThreeUsd,
+            ),
+            total_tracked_e8s: storage::balance_tracker::total_supply_tracked(
+                storage::balance_tracker::Token::ThreeUsd,
+            ),
         },
     ];
 
@@ -541,15 +619,23 @@ fn get_collector_health() -> types::CollectorHealth {
     }
 }
 
+fn require_admin(caller: Principal, admin: Principal) -> Result<(), String> {
+    if caller == Principal::anonymous() || caller != admin {
+        return Err(format!("unauthorized: caller {} is not admin", caller));
+    }
+    Ok(())
+}
+
 #[ic_cdk_macros::update]
 fn start_backfill(token: Principal) -> String {
     let admin = state::read_state(|s| s.admin);
     let caller = ic_cdk::caller();
-    if caller != admin {
-        return format!("unauthorized: caller {} is not admin", caller);
+    if let Err(error) = require_admin(caller, admin) {
+        return error;
     }
 
-    let (icusd_ledger, three_pool) = state::read_state(|s| (s.sources.icusd_ledger, s.sources.three_pool));
+    let (icusd_ledger, three_pool) =
+        state::read_state(|s| (s.sources.icusd_ledger, s.sources.three_pool));
 
     if token == icusd_ledger {
         state::mutate_state(|s| s.backfill_active_icusd = Some(true));
@@ -575,12 +661,12 @@ fn start_backfill(token: Principal) -> String {
 /// emits twice across calls. Caller re-invokes until the response shows
 /// `complete = true`.
 #[ic_cdk_macros::update]
-async fn admin_backfill_add_margin_events(batch_size: u64) -> Result<types::BackfillProgress, String> {
+async fn admin_backfill_add_margin_events(
+    batch_size: u64,
+) -> Result<types::BackfillProgress, String> {
     let admin = state::read_state(|s| s.admin);
     let caller = ic_cdk::caller();
-    if caller != admin {
-        return Err(format!("unauthorized: caller {} is not admin", caller));
-    }
+    require_admin(caller, admin)?;
     let backend = state::read_state(|s| s.sources.backend);
     let cursor = state::read_state(|s| s.add_margin_backfill_cursor.unwrap_or(0));
     let count = sources::backend::get_event_count(backend).await?;
@@ -600,8 +686,13 @@ async fn admin_backfill_add_margin_events(batch_size: u64) -> Result<types::Back
     for (i, event) in events.iter().enumerate() {
         let event_id = cursor + i as u64;
         if let sources::backend::BackendEvent::AddMarginToVault {
-            vault_id, margin_added, caller: actor, timestamp, ..
-        } = event {
+            vault_id,
+            margin_added,
+            caller: actor,
+            timestamp,
+            ..
+        } = event
+        {
             storage::events::evt_vaults::push(storage::events::AnalyticsVaultEvent {
                 timestamp_ns: timestamp.unwrap_or(0),
                 source_event_id: event_id,
@@ -633,19 +724,84 @@ async fn admin_backfill_add_margin_events(batch_size: u64) -> Result<types::Back
 fn reset_error_counters(args: types::ResetErrorCountersArgs) -> Result<(), String> {
     let admin = state::read_state(|s| s.admin);
     let caller = ic_cdk::caller();
-    if caller != admin {
-        return Err(format!("unauthorized: caller {} is not admin", caller));
-    }
+    require_admin(caller, admin)?;
     state::mutate_state(|s| {
         let reset_all = args.sources.is_none();
         let sources = args.sources.unwrap_or_default();
         let touch = |name: &str| reset_all || sources.iter().any(|src| src == name);
-        if touch("backend") { s.error_counters.backend = 0; }
-        if touch("stability_pool") { s.error_counters.stability_pool = 0; }
-        if touch("three_pool") { s.error_counters.three_pool = 0; }
-        if touch("icusd_ledger") { s.error_counters.icusd_ledger = 0; }
-        if touch("amm") { s.error_counters.amm = 0; }
+        if touch("backend") {
+            s.error_counters.backend = 0;
+        }
+        if touch("stability_pool") {
+            s.error_counters.stability_pool = 0;
+        }
+        if touch("three_pool") {
+            s.error_counters.three_pool = 0;
+        }
+        if touch("icusd_ledger") {
+            s.error_counters.icusd_ledger = 0;
+        }
+        if touch("amm") {
+            s.error_counters.amm = 0;
+        }
     });
+    Ok(())
+}
+
+/// Effective pull-schedule cadence (override if set, else compiled-in default).
+#[ic_cdk_macros::query]
+fn get_pull_schedule() -> PullScheduleConfig {
+    state::read_state(|s| PullScheduleConfig {
+        period_secs: pull_schedule::effective_period_ns(s.pull_period_secs_override)
+            / 1_000_000_000,
+        tick_secs: pull_schedule::effective_tick_secs(s.pull_tick_secs_override),
+        period_secs_override: s.pull_period_secs_override,
+        tick_secs_override: s.pull_tick_secs_override,
+        schedule_layout_version: s.schedule_layout_version.unwrap_or(0),
+    })
+}
+
+fn apply_pull_schedule_config(
+    state: &mut SlimState,
+    now_ns: u64,
+    period_secs: u64,
+    tick_secs: u64,
+) {
+    state.pull_period_secs_override = Some(period_secs);
+    state.pull_tick_secs_override = Some(tick_secs);
+    state.source_next_pull_ns = Some(pull_schedule::seed_initial_schedule(
+        now_ns,
+        pull_schedule::ALL_SOURCE_IDS,
+        pull_schedule::effective_period_ns(Some(period_secs)),
+    ));
+}
+
+/// Admin: retune the per-source pull window and the schedule-walker tick
+/// without a redeploy. Persisted across upgrade and applied immediately —
+/// the schedule is re-spread across the new window and the walker timer is
+/// re-armed at the new tick. `period_secs` bounds the inter-canister poll
+/// rate (the dominant cycle-burn driver), so it is floored to keep the
+/// burn-saving intent intact.
+#[ic_cdk_macros::update]
+fn set_pull_schedule(period_secs: u64, tick_secs: u64) -> Result<(), String> {
+    let admin = state::read_state(|s| s.admin);
+    let caller = ic_cdk::caller();
+    require_admin(caller, admin)?;
+    pull_schedule::validate_schedule_config(period_secs, tick_secs)?;
+    let now = ic_cdk::api::time();
+    state::mutate_state(|s| {
+        // Re-spread across the new window so the retune applies at once and
+        // evenly, not gradually as each source next fires.
+        apply_pull_schedule_config(s, now, period_secs, tick_secs);
+    });
+    // Re-arm the walker at the new tick.
+    timers::register_pull_tick_timer();
+    ic_cdk::println!(
+        "[set_pull_schedule] period={}s tick={}s (caller={})",
+        period_secs,
+        tick_secs,
+        caller
+    );
     Ok(())
 }
 
@@ -716,5 +872,41 @@ mod cycle_manager_tests {
 
         assert_eq!(metric.count, target_count);
         assert_eq!(metric.value, candid::Nat::from(target_count));
+    }
+
+    #[test]
+    fn admin_authorization_rejects_wrong_and_anonymous_callers() {
+        let admin = principal(1);
+
+        assert_eq!(require_admin(admin, admin), Ok(()));
+        assert!(require_admin(principal(2), admin).is_err());
+        assert!(
+            require_admin(Principal::anonymous(), Principal::anonymous()).is_err(),
+            "an unconfigured anonymous admin must not authorize anonymous ingress"
+        );
+    }
+
+    #[test]
+    fn applying_pull_schedule_config_persists_and_reseeds_immediately() {
+        let now_ns = 42_000_000_000;
+        let period_secs = 600;
+        let tick_secs = 60;
+        let mut slim = SlimState {
+            source_next_pull_ns: Some(std::collections::HashMap::from([(255, 1)])),
+            ..SlimState::default()
+        };
+
+        apply_pull_schedule_config(&mut slim, now_ns, period_secs, tick_secs);
+
+        assert_eq!(slim.pull_period_secs_override, Some(period_secs));
+        assert_eq!(slim.pull_tick_secs_override, Some(tick_secs));
+        assert_eq!(
+            slim.source_next_pull_ns,
+            Some(pull_schedule::seed_initial_schedule(
+                now_ns,
+                pull_schedule::ALL_SOURCE_IDS,
+                pull_schedule::effective_period_ns(Some(period_secs)),
+            ))
+        );
     }
 }

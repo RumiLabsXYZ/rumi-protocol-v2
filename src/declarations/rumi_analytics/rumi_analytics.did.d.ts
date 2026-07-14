@@ -35,6 +35,14 @@ export interface AdminEventLabelCount {
   'label' : string,
   'last_at_ns' : [] | [bigint],
 }
+export interface AmmPoolSnapshot {
+  'token_a' : Principal,
+  'token_b' : Principal,
+  'reserve_a' : bigint,
+  'reserve_b' : bigint,
+  'total_lp_shares' : bigint,
+  'pool_id' : string,
+}
 export interface AnalyticsAmmLiquidityEvent {
   'action' : LiquidityAction,
   'timestamp_ns' : bigint,
@@ -196,9 +204,11 @@ export interface DailyTvlRow {
   'timestamp_ns' : bigint,
   'three_pool_reserve_2_e8s' : [] | [bigint],
   'three_pool_virtual_price_e18' : [] | [bigint],
+  'amm_rewards_e8s' : [] | [bigint],
   'total_icusd_supply_e8s' : bigint,
   'system_collateral_ratio_bps' : number,
   'total_icp_collateral_e8s' : bigint,
+  'amm_tvl_usd_e8s' : [] | [bigint],
   'three_pool_reserve_1_e8s' : [] | [bigint],
   'stability_pool_deposits_e8s' : [] | [bigint],
   'three_pool_lp_supply_e8s' : [] | [bigint],
@@ -352,6 +362,13 @@ export interface ProtocolSummary {
   'swap_count_24h' : number,
   'volume_24h_e8s' : bigint,
 }
+export interface PullScheduleConfig {
+  'period_secs_override' : [] | [bigint],
+  'tick_secs_override' : [] | [bigint],
+  'period_secs' : bigint,
+  'schedule_layout_version' : number,
+  'tick_secs' : bigint,
+}
 export interface RangeQuery {
   'to_ts' : [] | [bigint],
   'from_ts' : [] | [bigint],
@@ -488,6 +505,7 @@ export interface _SERVICE {
   'cycle_manager_metrics' : ActorMethod<[], Array<CycleManagerMetric>>,
   'cycle_manager_targets' : ActorMethod<[], Array<CycleManagerTarget>>,
   'cycles_status' : ActorMethod<[], CycleManagerCyclesStatus>,
+  'debug_amm_pool_snapshot' : ActorMethod<[], Array<AmmPoolSnapshot>>,
   'debug_get_amm_event_counts' : ActorMethod<[], [bigint, bigint]>,
   'debug_get_amm_liquidity_events_raw' : ActorMethod<
     [bigint, bigint],
@@ -528,6 +546,7 @@ export interface _SERVICE {
   'get_pool_routes' : ActorMethod<[PoolRoutesQuery], PoolRoutesResponse>,
   'get_price_series' : ActorMethod<[RangeQuery], PriceSeriesResponse>,
   'get_protocol_summary' : ActorMethod<[], ProtocolSummary>,
+  'get_pull_schedule' : ActorMethod<[], PullScheduleConfig>,
   'get_sp_depositor_principals' : ActorMethod<[], Array<Principal>>,
   'get_stability_series' : ActorMethod<[RangeQuery], StabilitySeriesResponse>,
   'get_swap_series' : ActorMethod<[RangeQuery], SwapSeriesResponse>,
@@ -553,6 +572,7 @@ export interface _SERVICE {
   'http_request' : ActorMethod<[HttpRequest], HttpResponse>,
   'ping' : ActorMethod<[], string>,
   'reset_error_counters' : ActorMethod<[ResetErrorCountersArgs], Result_1>,
+  'set_pull_schedule' : ActorMethod<[bigint, bigint], Result_1>,
   'start_backfill' : ActorMethod<[Principal], string>,
 }
 export declare const idlFactory: IDL.InterfaceFactory;

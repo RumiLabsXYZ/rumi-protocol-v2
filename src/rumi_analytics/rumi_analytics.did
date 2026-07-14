@@ -31,6 +31,33 @@ type AdminEventLabelCount = record {
   label : text;
   last_at_ns : opt nat64;
 };
+type AmmPoolSnapshot = record {
+  token_a : principal;
+  token_b : principal;
+  reserve_a : nat;
+  reserve_b : nat;
+  total_lp_shares : nat;
+  pool_id : text;
+};
+type AnalyticsAmmLiquidityEvent = record {
+  action : LiquidityAction;
+  timestamp_ns : nat64;
+  source_event_id : nat64;
+  lp_shares : nat64;
+  caller : principal;
+  pool_id : text;
+};
+type AnalyticsSwapEvent = record {
+  fee : nat64;
+  timestamp_ns : nat64;
+  token_in : principal;
+  source : SwapSource;
+  source_event_id : nat64;
+  amount_out : nat64;
+  caller : principal;
+  amount_in : nat64;
+  token_out : principal;
+};
 type ApyQuery = record { window_days : opt nat32 };
 type ApyResponse = record {
   lp_apy_pct : opt float64;
@@ -38,27 +65,6 @@ type ApyResponse = record {
   window_days : nat32;
   sp_apy_pct : opt float64;
 };
-type AnalyticsAmmLiquidityEvent = record {
-  timestamp_ns : nat64;
-  source_event_id : nat64;
-  caller : principal;
-  pool_id : text;
-  action : LiquidityAction;
-  lp_shares : nat64;
-};
-type AnalyticsSwapEvent = record {
-  timestamp_ns : nat64;
-  source : SwapSource;
-  source_event_id : nat64;
-  caller : principal;
-  token_in : principal;
-  token_out : principal;
-  amount_in : nat64;
-  amount_out : nat64;
-  fee : nat64;
-};
-type LiquidityAction = variant { Add; Remove; RemoveOneCoin; Donate };
-type SwapSource = variant { ThreePool; Amm };
 type BackfillProgress = record {
   cursor_after : nat64;
   from : nat64;
@@ -96,6 +102,50 @@ type CursorStatus = record {
   last_success_ns : nat64;
   cursor_position : nat64;
 };
+type CycleManagerCriticality = variant {
+  Important;
+  Experimental;
+  Critical;
+  Standard;
+};
+type CycleManagerCyclesStatus = record {
+  idle_burn_cycles_per_day : opt nat;
+  stable_memory_bytes : opt nat64;
+  low_watermark : nat;
+  balance : nat;
+  heap_memory_bytes : opt nat64;
+  healthy : bool;
+  freeze_threshold_secs : nat64;
+};
+type CycleManagerEnvironment = variant {
+  Local;
+  Production;
+  Test;
+  Archived;
+  Staging;
+};
+type CycleManagerMetric = record {
+  key : text;
+  value : nat;
+  count : nat64;
+  label : opt text;
+};
+type CycleManagerTarget = record {
+  low_threshold_cycles : nat;
+  topup_cycles : nat;
+  owner : opt text;
+  kind : CycleManagerTargetKind;
+  name : text;
+  tags : vec text;
+  canister_id : principal;
+  expected_freeze_threshold_secs : opt nat64;
+  expected_controllers : vec principal;
+  criticality : CycleManagerCriticality;
+  environment : CycleManagerEnvironment;
+  metrics_schema_version : nat32;
+  project : text;
+};
+type CycleManagerTargetKind = variant { SelfReport; Controlled };
 type CycleSeriesResponse = record {
   rows : vec HourlyCycleSnapshot;
   next_from_ts : opt nat64;
@@ -153,9 +203,11 @@ type DailyTvlRow = record {
   timestamp_ns : nat64;
   three_pool_reserve_2_e8s : opt nat;
   three_pool_virtual_price_e18 : opt nat;
+  amm_rewards_e8s : opt nat;
   total_icusd_supply_e8s : nat;
   system_collateral_ratio_bps : nat32;
   total_icp_collateral_e8s : nat;
+  amm_tvl_usd_e8s : opt nat;
   three_pool_reserve_1_e8s : opt nat;
   stability_pool_deposits_e8s : opt nat64;
   three_pool_lp_supply_e8s : opt nat;
@@ -238,6 +290,7 @@ type LiquidationSeriesResponse = record {
   rows : vec DailyLiquidationRollup;
   next_from_ts : opt nat64;
 };
+type LiquidityAction = variant { Add; Remove; Donate; RemoveOneCoin };
 type OhlcCandle = record {
   low : float64;
   timestamp_ns : nat64;
@@ -289,8 +342,9 @@ type PriceSeriesResponse = record {
 type ProtocolSummary = record {
   peg : opt PegStatus;
   lp_apy_pct : opt float64;
-  amm_apy_pct : opt float64;
   timestamp_ns : nat64;
+  amm_apy_pct : opt float64;
+  median_cr_bps : nat32;
   sp_apy_pct : opt float64;
   total_debt_e8s : nat64;
   circulating_supply_icusd_e8s : opt nat;
@@ -298,9 +352,15 @@ type ProtocolSummary = record {
   total_vault_count : nat32;
   total_collateral_usd_e8s : nat64;
   system_cr_bps : nat32;
-  median_cr_bps : nat32;
   swap_count_24h : nat32;
   volume_24h_e8s : nat64;
+};
+type PullScheduleConfig = record {
+  period_secs_override : opt nat64;
+  tick_secs_override : opt nat64;
+  period_secs : nat64;
+  schedule_layout_version : nat32;
+  tick_secs : nat64;
 };
 type RangeQuery = record {
   to_ts : opt nat64;
@@ -319,6 +379,7 @@ type SwapSeriesResponse = record {
   rows : vec DailySwapRollup;
   next_from_ts : opt nat64;
 };
+type SwapSource = variant { Amm; ThreePool };
 type ThreePoolSeriesResponse = record {
   rows : vec Fast3PoolSnapshot;
   next_from_ts : opt nat64;
@@ -420,57 +481,16 @@ type VolatilityResponse = record {
   symbol : text;
   annualized_vol_pct : float64;
 };
-type CycleManagerCyclesStatus = record {
-  balance : nat;
-  low_watermark : nat;
-  healthy : bool;
-  freeze_threshold_secs : nat64;
-  stable_memory_bytes : opt nat64;
-  heap_memory_bytes : opt nat64;
-  idle_burn_cycles_per_day : opt nat;
-};
-type CycleManagerMetric = record {
-  key : text;
-  count : nat64;
-  value : nat;
-  label : opt text;
-};
-type CycleManagerTargetKind = variant { SelfReport; Controlled };
-type CycleManagerEnvironment = variant {
-  Production;
-  Staging;
-  Test;
-  Local;
-  Archived;
-};
-type CycleManagerCriticality = variant {
-  Critical;
-  Important;
-  Standard;
-  Experimental;
-};
-type CycleManagerTarget = record {
-  canister_id : principal;
-  name : text;
-  project : text;
-  environment : CycleManagerEnvironment;
-  criticality : CycleManagerCriticality;
-  kind : CycleManagerTargetKind;
-  low_threshold_cycles : nat;
-  topup_cycles : nat;
-  owner : opt text;
-  tags : vec text;
-  expected_controllers : vec principal;
-  expected_freeze_threshold_secs : opt nat64;
-  metrics_schema_version : nat32;
-};
 service : (InitArgs) -> {
   admin_backfill_add_margin_events : (nat64) -> (Result);
   cycle_manager_metrics : () -> (vec CycleManagerMetric) query;
   cycle_manager_targets : () -> (vec CycleManagerTarget) query;
   cycles_status : () -> (CycleManagerCyclesStatus) query;
+  debug_amm_pool_snapshot : () -> (vec AmmPoolSnapshot) query;
   debug_get_amm_event_counts : () -> (nat64, nat64) query;
-  debug_get_amm_liquidity_events_raw : (nat64, nat64) -> (vec AnalyticsAmmLiquidityEvent) query;
+  debug_get_amm_liquidity_events_raw : (nat64, nat64) -> (
+      vec AnalyticsAmmLiquidityEvent,
+    ) query;
   debug_get_swap_events_raw : (nat64, nat64) -> (vec AnalyticsSwapEvent) query;
   get_address_value_series : (AddressValueSeriesQuery) -> (
       AddressValueSeriesResponse,
@@ -494,6 +514,7 @@ service : (InitArgs) -> {
   get_pool_routes : (PoolRoutesQuery) -> (PoolRoutesResponse) query;
   get_price_series : (RangeQuery) -> (PriceSeriesResponse) query;
   get_protocol_summary : () -> (ProtocolSummary) query;
+  get_pull_schedule : () -> (PullScheduleConfig) query;
   get_sp_depositor_principals : () -> (vec principal) query;
   get_stability_series : (RangeQuery) -> (StabilitySeriesResponse) query;
   get_swap_series : (RangeQuery) -> (SwapSeriesResponse) query;
@@ -514,5 +535,6 @@ service : (InitArgs) -> {
   http_request : (HttpRequest) -> (HttpResponse) query;
   ping : () -> (text) query;
   reset_error_counters : (ResetErrorCountersArgs) -> (Result_1);
+  set_pull_schedule : (nat64, nat64) -> (Result_1);
   start_backfill : (principal) -> (text);
 }

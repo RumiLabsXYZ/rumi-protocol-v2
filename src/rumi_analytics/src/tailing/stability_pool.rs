@@ -16,13 +16,44 @@
 //!
 //! Each tick we fetch the latest BATCH_SIZE events from the tail of the
 //! current window and filter by event.id >= next_wanted_id. If the SP
-//! produces more than BATCH_SIZE events in 60 seconds the oldest of those
-//! would be missed, but that rate (>500 SP events/min) is unrealistic.
+//! produces more than BATCH_SIZE events between pulls the oldest of those
+//! would be missed, but that rate (>500 SP events/5 min at the default
+//! cadence) is unrealistic.
 
+use super::{update_cursor_error, update_cursor_source_count, update_cursor_success, BATCH_SIZE};
 use crate::{sources, state, storage};
 use storage::cursors;
 use storage::events::*;
-use super::{BATCH_SIZE, update_cursor_success, update_cursor_error, update_cursor_source_count};
+
+fn record_sp_error(error: String) {
+    state::mutate_state(|state| {
+        state.error_counters.stability_pool += 1;
+        update_cursor_error(state, cursors::CURSOR_ID_STABILITY_EVENTS, error);
+    });
+}
+
+fn probe_requires_tail(
+    next_wanted_id: u64,
+    newest: Option<&sources::stability_pool::PoolEvent>,
+) -> bool {
+    newest.is_some_and(|event| event.id >= next_wanted_id)
+}
+
+fn select_unseen_events<'a>(
+    next_wanted_id: u64,
+    events: &'a [sources::stability_pool::PoolEvent],
+) -> (Vec<&'a sources::stability_pool::PoolEvent>, Option<u64>) {
+    let unseen: Vec<_> = events
+        .iter()
+        .filter(|event| event.id >= next_wanted_id)
+        .collect();
+    let next_cursor = unseen
+        .iter()
+        .map(|event| event.id)
+        .max()
+        .map(|id| id.saturating_add(1));
+    (unseen, next_cursor)
+}
 
 pub async fn run() {
     let sp = state::read_state(|s| s.sources.stability_pool);
@@ -39,10 +70,7 @@ pub async fn run() {
         Ok(c) => c,
         Err(e) => {
             ic_cdk::println!("[tail_sp] get_pool_event_count failed: {}", e);
-            state::mutate_state(|s| {
-                s.error_counters.stability_pool += 1;
-                update_cursor_error(s, cursors::CURSOR_ID_STABILITY_EVENTS, e);
-            });
+            record_sp_error(e);
             return;
         }
     };
@@ -55,43 +83,49 @@ pub async fn run() {
         return;
     }
 
-    // Always fetch from the tail of the current window (at most BATCH_SIZE
-    // events). If new events arrived faster than one tick can process, the
-    // oldest ones may have already been rotated out — acceptable given the
-    // 60-second tick interval and a 10k ring buffer.
+    // Probe-before-fetch: SP events (deposit/withdraw/claim) are rare, so on
+    // almost every tick there is nothing new. Fetch just the newest event
+    // (position count-1, length 1) and compare its monotonic id against the
+    // cursor. If the newest id is already ingested, skip the full BATCH_SIZE
+    // pull — which otherwise ships up to 500 events every tick even when idle.
+    let newest =
+        match sources::stability_pool::get_pool_events(sp, count.saturating_sub(1), 1).await {
+            Ok(e) => e,
+            Err(e) => {
+                ic_cdk::println!("[tail_sp] probe get_pool_events failed: {}", e);
+                record_sp_error(e);
+                return;
+            }
+        };
+    if !probe_requires_tail(next_wanted_id, newest.first()) {
+        // Newest event already ingested, or the log is momentarily empty:
+        // nothing to do this tick.
+        return;
+    }
+
+    // Fetch from the tail of the current window (at most BATCH_SIZE events).
+    // If new events arrived faster than one tick can process, the oldest ones
+    // may have already been rotated out — acceptable given the tick interval
+    // and a 10k ring buffer.
     let start = count.saturating_sub(BATCH_SIZE);
     let length = count - start;
     let events = match sources::stability_pool::get_pool_events(sp, start, length).await {
         Ok(e) => e,
         Err(e) => {
             ic_cdk::println!("[tail_sp] get_pool_events failed: {}", e);
-            state::mutate_state(|s| {
-                s.error_counters.stability_pool += 1;
-                update_cursor_error(s, cursors::CURSOR_ID_STABILITY_EVENTS, e);
-            });
+            record_sp_error(e);
             return;
         }
     };
 
-    // highest_id_seen starts one below next_wanted_id so that after the loop
-    // `highest_id_seen + 1` equals the correct new cursor value even when
-    // processed == 0.
-    let mut highest_id_seen = next_wanted_id.saturating_sub(1);
-    let mut processed = 0u64;
-    for event in &events {
-        if event.id < next_wanted_id {
-            continue; // already ingested
-        }
+    let (unseen, next_cursor) = select_unseen_events(next_wanted_id, &events);
+    for event in unseen {
         route_sp_event(event);
-        if event.id > highest_id_seen {
-            highest_id_seen = event.id;
-        }
-        processed += 1;
     }
 
-    if processed > 0 {
-        // Save `highest_id_seen + 1` so next tick filters out already-seen ids.
-        cursors::stability_events::set(highest_id_seen + 1);
+    if let Some(next_cursor) = next_cursor {
+        // Save highest unseen id + 1 so the next tick filters out seen ids.
+        cursors::stability_events::set(next_cursor);
         state::mutate_state(|s| {
             update_cursor_success(s, cursors::CURSOR_ID_STABILITY_EVENTS, ic_cdk::api::time());
         });
@@ -155,5 +189,76 @@ fn route_sp_event(event: &sources::stability_pool::PoolEvent) {
         OperationsResumed => {}
         BalanceCorrected { .. } => {}
         CollateralGainCorrected { .. } => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candid::Principal;
+    use sources::stability_pool::{PoolEvent, PoolEventType};
+
+    fn event(id: u64) -> PoolEvent {
+        PoolEvent {
+            id,
+            timestamp: id,
+            caller: Principal::anonymous(),
+            event_type: PoolEventType::ConfigurationUpdated,
+        }
+    }
+
+    #[test]
+    fn idle_probe_skips_tail_fetch_and_new_probe_requests_it() {
+        assert!(!probe_requires_tail(11, Some(&event(10))));
+        assert!(!probe_requires_tail(11, None));
+        assert!(probe_requires_tail(11, Some(&event(11))));
+        assert!(probe_requires_tail(11, Some(&event(12))));
+    }
+
+    #[test]
+    fn ring_rotation_filters_seen_ids_and_advances_without_duplicates() {
+        let first_window: Vec<PoolEvent> = (98..=102).map(event).collect();
+        let (first_unseen, next) = select_unseen_events(101, &first_window);
+        assert_eq!(
+            first_unseen
+                .iter()
+                .map(|event| event.id)
+                .collect::<Vec<_>>(),
+            vec![101, 102]
+        );
+        assert_eq!(next, Some(103));
+
+        let rotated_window: Vec<PoolEvent> = (100..=104).map(event).collect();
+        let (second_unseen, next) = select_unseen_events(next.unwrap(), &rotated_window);
+        assert_eq!(
+            second_unseen
+                .iter()
+                .map(|event| event.id)
+                .collect::<Vec<_>>(),
+            vec![103, 104]
+        );
+        assert_eq!(next, Some(105));
+    }
+
+    #[test]
+    fn query_failure_records_error_without_advancing_cursor() {
+        state::replace_state(storage::SlimState::default());
+        let cursor_before = cursors::stability_events::get();
+
+        record_sp_error("probe failed".to_string());
+
+        let (error_count, last_error) = state::read_state(|state| {
+            (
+                state.error_counters.stability_pool,
+                state
+                    .cursor_last_error
+                    .as_ref()
+                    .and_then(|errors| errors.get(&cursors::CURSOR_ID_STABILITY_EVENTS))
+                    .cloned(),
+            )
+        });
+        assert_eq!(error_count, 1);
+        assert_eq!(last_error.as_deref(), Some("probe failed"));
+        assert_eq!(cursors::stability_events::get(), cursor_before);
     }
 }

@@ -1,6 +1,6 @@
 //! HTTP request handler. Runs in query context: never makes inter-canister
-//! calls. All values are served from cached state in SlimState which the 60s
-//! pull cycle keeps fresh.
+//! calls. All values are served from cached state in SlimState which the
+//! staggered 300s-default pull schedule keeps fresh.
 
 mod csv;
 mod metrics;

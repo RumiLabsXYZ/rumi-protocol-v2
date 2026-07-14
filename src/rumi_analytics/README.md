@@ -11,12 +11,12 @@ Candid query endpoints and an HTTP API.
 
 Four timer-driven collection cycles run concurrently:
 
-| Cycle   | Interval | What it does                                                |
-|---------|----------|-------------------------------------------------------------|
-| Pull    | 60s      | Tails events from source canisters, caches supply           |
-| Fast    | 300s     | Snapshots collateral prices and 3pool state                 |
-| Hourly  | 3600s    | Snapshots cycle balance and fee curve                       |
-| Daily   | 86400s   | Rolls up TVL, vault stats, stability, holders, swaps, fees  |
+| Cycle   | Interval     | What it does                                                |
+|---------|--------------|-------------------------------------------------------------|
+| Pull    | 300s default | Tails sources on a staggered schedule, caches supply       |
+| Fast    | 300s         | Snapshots collateral prices and 3pool state                |
+| Hourly  | 3600s        | Snapshots cycle balance and fee curve                      |
+| Daily   | 86400s       | Rolls up TVL, vault stats, stability, holders, swaps, fees |
 
 State is split between heap-side `SlimState` (small, hot-path values) and
 stable-memory `StableLog`/`StableBTreeMap` collections managed by a `MemoryManager`
@@ -31,10 +31,10 @@ cargo build --target wasm32-unknown-unknown --release -p rumi_analytics
 ## Test
 
 ```bash
-# Unit tests (40 tests, ~0s)
+# Unit tests (126 tests, ~0s)
 cargo test -p rumi_analytics --lib
 
-# Integration tests (25 tests, ~2.5 min, requires pocket-ic binary)
+# Integration tests (26 tests, one ignored, ~2 min, requires pocket-ic binary)
 POCKET_IC_BIN=./pocket-ic cargo test --test pocket_ic_analytics
 ```
 
