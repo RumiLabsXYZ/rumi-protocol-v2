@@ -98,6 +98,8 @@ export interface ProtocolStatusDTO {
   mode: any;
   totalIcpMargin: number;
   totalIcusdBorrowed: number;
+  /** Protocol-wide icUSD mint cap, human icUSD (0 when unset/unavailable). */
+  globalIcusdMintCap: number;
   lastIcpRate: number;
   lastIcpTimestamp: number;
   totalCollateralRatio: number;

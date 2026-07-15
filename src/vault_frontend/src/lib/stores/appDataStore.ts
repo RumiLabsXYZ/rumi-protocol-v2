@@ -8,12 +8,23 @@ import type { ProtocolStatusDTO, VaultDTO } from '../services/types';
  * NO component should call backend directly - everything goes through this store
  */
 
+/** Per-collateral aggregate debt + vault count, in human units, keyed by collateral principal text. */
+export interface CollateralTotalsEntry {
+  totalDebt: number;   // human icUSD borrowed against this collateral, aggregate across all its vaults
+  vaultCount: number;
+}
+
 interface AppDataState {
   // Protocol data
   protocolStatus: ProtocolStatusDTO | null;
   protocolStatusLoading: boolean;
   protocolStatusError: string | null;
   protocolStatusLastFetch: number;
+
+  // Per-collateral debt aggregates (for debt-ceiling headroom in the borrow panel)
+  collateralTotals: Record<string, CollateralTotalsEntry>;
+  collateralTotalsLoading: boolean;
+  collateralTotalsLastFetch: number;
 
   // User vaults data  
   userVaults: VaultDTO[];
@@ -39,6 +50,10 @@ const INITIAL_STATE: AppDataState = {
   protocolStatusLoading: false,
   protocolStatusError: null,
   protocolStatusLastFetch: 0,
+
+  collateralTotals: {},
+  collateralTotalsLoading: false,
+  collateralTotalsLastFetch: 0,
 
   userVaults: [],
   userVaultsLoading: false,
@@ -139,6 +154,63 @@ function createAppDataStore() {
             });
           });
       });
+    },
+
+    /**
+     * PER-COLLATERAL DEBT TOTALS - for the borrow panel's debt-ceiling headroom.
+     *
+     * Light public query (no wallet). Cached like the rest; on error we keep and
+     * return whatever is cached (possibly empty) so the borrow panel degrades to
+     * the collateral-only cap rather than breaking.
+     */
+    async fetchCollateralTotals(forceRefresh = false): Promise<Record<string, CollateralTotalsEntry>> {
+      const requestKey = 'collateral_totals';
+      const state = get(appDataStore);
+      const now = Date.now();
+
+      if (!forceRefresh &&
+          Object.keys(state.collateralTotals).length > 0 &&
+          (now - state.collateralTotalsLastFetch) < CACHE_DURATION) {
+        return state.collateralTotals;
+      }
+
+      // If a fetch is already in flight, wait for it instead of racing a second call.
+      if (state.activeRequests.has(requestKey)) {
+        return new Promise(resolve => {
+          const check = () => {
+            const s = get(appDataStore);
+            if (!s.activeRequests.has(requestKey)) resolve(s.collateralTotals);
+            else setTimeout(check, 100);
+          };
+          check();
+        });
+      }
+
+      update(s => {
+        s.activeRequests.add(requestKey);
+        return { ...s, collateralTotalsLoading: true };
+      });
+
+      try {
+        const totals = await this._fetchCollateralTotalsFromAPI();
+        update(s => {
+          s.activeRequests.delete(requestKey);
+          return {
+            ...s,
+            collateralTotals: totals,
+            collateralTotalsLoading: false,
+            collateralTotalsLastFetch: Date.now(),
+          };
+        });
+        return totals;
+      } catch (error) {
+        update(s => {
+          s.activeRequests.delete(requestKey);
+          return { ...s, collateralTotalsLoading: false };
+        });
+        console.warn('Failed to fetch collateral totals:', error);
+        return get(appDataStore).collateralTotals;
+      }
     },
 
     /**
@@ -343,6 +415,7 @@ function createAppDataStore() {
       try {
         await Promise.all([
           this.fetchProtocolStatus(true),
+          this.fetchCollateralTotals(true),
           this.fetchUserVaults(targetPrincipal, true),
           this.fetchBalances(targetPrincipal, true),
         ]);
@@ -372,6 +445,19 @@ function createAppDataStore() {
       });
 
       return QueryOperations.getProtocolStatus();
+    },
+
+    async _fetchCollateralTotalsFromAPI(): Promise<Record<string, CollateralTotalsEntry>> {
+      const { publicActor, E8S } = await import('../services/protocol/apiClient');
+      const rows = await publicActor.get_collateral_totals();
+      const map: Record<string, CollateralTotalsEntry> = {};
+      for (const row of rows) {
+        map[row.collateral_type.toText()] = {
+          totalDebt: Number(row.total_debt) / E8S,
+          vaultCount: Number(row.vault_count),
+        };
+      }
+      return map;
     },
 
     async _fetchUserVaultsFromAPI(principal: Principal): Promise<VaultDTO[]> {
@@ -408,6 +494,7 @@ export const appDataStore = createAppDataStore();
 
 // DERIVED STORES - These are reactive and update automatically
 export const protocolStatus = derived(appDataStore, $store => $store.protocolStatus);
+export const collateralTotals = derived(appDataStore, $store => $store.collateralTotals);
 export const userVaults = derived(appDataStore, $store => $store.userVaults);
 export const icpBalance = derived(appDataStore, $store => $store.icpBalance);
 export const icusdBalance = derived(appDataStore, $store => $store.icusdBalance);

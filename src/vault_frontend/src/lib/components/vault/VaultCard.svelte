@@ -17,6 +17,8 @@
   import MultiplierBadge from '../points/MultiplierBadge.svelte';
   import { seasonStore, earningActive } from '$lib/stores/seasonStore';
   import { nativeXrpKeepOpenCloseCopy } from '$lib/utils/nativeXrpBorrowFlow';
+  import { computeBorrowMax } from '$lib/utils/borrowLimits';
+  import { appDataStore, protocolStatus, collateralTotals } from '$lib/stores/appDataStore';
 
   export let vault: Vault;
   export let icpPrice: number = 0;
@@ -78,8 +80,30 @@
     ? collateralValueUsd / tickingDebt : Infinity;
   $: borrowedValueUsd = tickingDebt;
   $: riskLevel = getRiskLevel(collateralRatio);
-  // 0.5% haircut so the Max button never overshoots the backend oracle price
-  $: maxBorrowable = Math.max(0, ((collateralValueUsd / vaultMinCR) - tickingDebt) * 0.995);
+  // Borrow "Max" is the MINIMUM of three limits: this vault's collateral capacity
+  // (0.5% haircut so it never overshoots the backend oracle price), the shared
+  // per-collateral debt-ceiling headroom, and the global icUSD mint-cap headroom.
+  // The backend enforces the latter two in BorrowReservationGuard, so the panel
+  // must respect them or "Max" would offer amounts the backend rejects.
+  $: aggregateCollateralDebt = $collateralTotals[vaultCollateralType]?.totalDebt ?? 0;
+  $: borrowMax = computeBorrowMax({
+    collateralValueUsd,
+    minCr: vaultMinCR,
+    currentDebt: tickingDebt,
+    debtCeiling: (vaultCollateralInfo?.debtCeiling ?? 0) / E8S,
+    aggregateDebt: aggregateCollateralDebt,
+    globalCap: $protocolStatus?.globalIcusdMintCap ?? 0,
+    globalBorrowed: $protocolStatus?.totalIcusdBorrowed ?? 0,
+  });
+  $: maxBorrowable = borrowMax.maxBorrow;
+  // When a protocol-wide cap (not this vault's collateral) is the binding limit,
+  // explain why the Max is smaller than the collateral capacity would allow.
+  $: borrowLimitNote =
+    borrowMax.binding === 'debtCeiling' && borrowMax.ceilingHeadroom !== null
+      ? `Limited by ${collateralSymbol} debt ceiling (${formatStableDisplay(borrowMax.ceilingHeadroom)} icUSD remaining protocol-wide).`
+      : borrowMax.binding === 'globalCap' && borrowMax.globalHeadroom !== null
+        ? `Limited by the global icUSD mint cap (${formatStableDisplay(borrowMax.globalHeadroom)} icUSD remaining).`
+        : null;
 
   // Token type for repayment
   let repayTokenType: 'icUSD' | 'CKUSDT' | 'CKUSDC' = 'icUSD';
@@ -243,6 +267,11 @@
   let ckstableRepayFee = 0; // Protocol repay fee rate for ckStables (e.g., 0.01 = 1%)
   onMount(async () => {
     seasonStore.ensureLoaded();
+    // Populate the stores the borrow-cap math reads from ($protocolStatus for the
+    // global mint cap, $collateralTotals for per-collateral aggregate debt). Both
+    // are cached/deduped, so this is cheap even when the page already loaded them.
+    appDataStore.fetchProtocolStatus().catch(() => {});
+    appDataStore.fetchCollateralTotals().catch(() => {});
     // Fetch per-vault dynamic rate eagerly so collapsed card shows actual APR
     ApiClient.getVaultInterestRate(vault.vaultId).then(rate => {
       if (rate !== null) dynamicInterestRate = rate;
@@ -670,6 +699,9 @@
           : `Borrowed ${amount} icUSD`;
         toastStore.success(msg, 8000); borrowAmount = '';
         await vaultStore.refreshVault(vault.vaultId);
+        // This vault's borrow changed the collateral's aggregate debt: refresh the
+        // ceiling headroom so the Max reflects the new protocol-wide total.
+        appDataStore.fetchCollateralTotals(true).catch(() => {});
         walletStore.refreshBalance({ skipCache: true });
         dispatch('updated');
       } else { toastStore.error(result.error || 'Failed', 8000); }
@@ -715,6 +747,8 @@
         } else {
           await vaultStore.refreshVault(vault.vaultId);
         }
+        // Repaying lowers this collateral's aggregate debt: refresh ceiling headroom.
+        appDataStore.fetchCollateralTotals(true).catch(() => {});
         walletStore.refreshBalance({ skipCache: true });
         dispatch('updated');
       } else { toastStore.error(result.error || 'Failed', 8000); }
@@ -997,6 +1031,9 @@
                   placeholder="0.00" min="0.1" step="0.1" disabled={isProcessing} />
                 <span class="input-suffix">icUSD</span>
               </div>
+              {#if borrowLimitNote}
+                <p class="borrow-limit-note">{borrowLimitNote}</p>
+              {/if}
               {#if parsedBorrowAmount > 0 && vaultBorrowingFee > 0}
                 <div class="fee-breakdown">
                   <div class="fee-row"><span>Fee ({(effectiveBorrowFeeRate * 100).toFixed(2)}%)</span><span>{formatStableTx(borrowFeeAmount)} icUSD</span></div>
@@ -1297,6 +1334,10 @@
   .input-suffix {
     position: absolute; right: 0.625rem; top: 50%; transform: translateY(-50%);
     font-size: 0.75rem; color: var(--rumi-text-muted); pointer-events: none;
+  }
+  .borrow-limit-note {
+    margin: 0.375rem 0 0; font-size: 0.6875rem; line-height: 1.35;
+    color: var(--rumi-warning, #E0A82E);
   }
 
   /* ── Token selector (in-field dropdown) ── */
