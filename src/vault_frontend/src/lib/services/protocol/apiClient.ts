@@ -1,6 +1,7 @@
 import { Actor, HttpAgent } from '@dfinity/agent';
 import { Principal } from '@dfinity/principal';
 import { BigIntUtils } from '../../utils/bigintUtils';
+import { friendlyBorrowCapError } from '../../utils/borrowLimits';
 import { idlFactory as rumi_backendIDL } from '$declarations/rumi_protocol_backend/rumi_protocol_backend.did.js';
 import { idlFactory as icp_ledgerIDL } from '$declarations/icp_ledger/icp_ledger.did.js';
 import { idlFactory as icusd_ledgerIDL } from '$declarations/icusd_ledger/icusd_ledger.did.js';
@@ -355,8 +356,10 @@ private static async refreshVaultData(): Promise<void> {
       return `Service temporarily unavailable: ${error.TemporarilyUnavailable}`;
     } 
     else if ('GenericError' in error && typeof error.GenericError === 'string') {
-      return error.GenericError;
-    } 
+      // Turn the raw BorrowReservationGuard ceiling / mint-cap rejections
+      // (guard.rs) into friendly copy; fall through to the raw string otherwise.
+      return friendlyBorrowCapError(error.GenericError) ?? error.GenericError;
+    }
     else if ('TransferError' in error) {
       const te = error.TransferError;
       if ('InsufficientFunds' in te) {

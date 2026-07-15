@@ -28,6 +28,7 @@ export class QueryOperations {
         mode: canisterStatus.mode,
         totalIcpMargin: Number(canisterStatus.total_icp_margin) / E8S,
         totalIcusdBorrowed: Number(canisterStatus.total_icusd_borrowed) / E8S,
+        globalIcusdMintCap: Number((canisterStatus as any).global_icusd_mint_cap ?? 0) / E8S,
         lastIcpRate: Number(canisterStatus.last_icp_rate),
         lastIcpTimestamp: Number(canisterStatus.last_icp_timestamp),
         totalCollateralRatio: Number(canisterStatus.total_collateral_ratio),

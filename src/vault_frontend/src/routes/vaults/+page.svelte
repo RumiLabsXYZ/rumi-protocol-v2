@@ -61,6 +61,9 @@
     try {
       const protocolStatus = await appDataStore.fetchProtocolStatus();
       if (protocolStatus) icpPrice = protocolStatus.lastIcpRate;
+      // Refresh per-collateral debt totals so each card's borrow "Max" reflects
+      // the live debt-ceiling headroom.
+      appDataStore.fetchCollateralTotals(true).catch(() => {});
       await appDataStore.fetchUserVaults($principal);
     } catch (error) {
       console.error('Error loading vaults:', error);
