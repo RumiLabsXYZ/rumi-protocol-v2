@@ -49,6 +49,7 @@ function collateral(overrides: Partial<CollateralInfo>): CollateralInfo {
 }
 
 describe('healthTierFor', () => {
+  // No cautionCr/safeCr args -> defaults to ICP's own thresholds (1.5/2.0).
   it('returns "safe" for CR >= 2.0', () => {
     expect(healthTierFor(2.0)).toBe('safe');
     expect(healthTierFor(2.81)).toBe('safe');
@@ -73,6 +74,14 @@ describe('healthTierFor', () => {
 
   it('returns "unknown" for NaN', () => {
     expect(healthTierFor(NaN)).toBe('unknown');
+  });
+
+  it('honors explicit cautionCr/safeCr cutoffs instead of the ICP defaults', () => {
+    // A ckXAUT-only cutoff pair (liquidationCr 1.18 blended per the same
+    // ratios as ICP's 1.5/2.0): caution ≈1.331, safe ≈1.774.
+    expect(healthTierFor(1.47, 1.3308, 1.7744)).toBe('caution');
+    expect(healthTierFor(1.2, 1.3308, 1.7744)).toBe('danger');
+    expect(healthTierFor(1.8, 1.3308, 1.7744)).toBe('safe');
   });
 });
 
@@ -206,5 +215,68 @@ describe('aggregatePosition', () => {
     const vaults = [vault({ collateralType: CKBTC, collateralAmount: 0.1, borrowedIcusd: 0 })];
     const result = aggregatePosition(vaults, []);
     expect(result.perCollateral[0].symbol).toBe(CKBTC.slice(0, 5));
+  });
+
+  // Regression coverage for the "flat ICP threshold" bug: a position backed
+  // entirely by a lower-liquidationCr asset (e.g. XRP/ckXAUT at ~1.18) must be
+  // judged against its own blended threshold, not ICP's 1.5/2.0.
+  describe('weighted health tier for non-ICP collateral', () => {
+    it('does not flag a 147% CR ckXAUT-only position as danger', () => {
+      // liquidationCr 1.18 -> caution cutoff ≈1.331, safe cutoff ≈1.774.
+      const vaults = [vault({ collateralType: CKXAUT, collateralAmount: 1, borrowedIcusd: 1000 })];
+      const collaterals = [collateral({ principal: CKXAUT, symbol: 'ckXAUT', price: 1470, liquidationCr: 1.18, minimumCr: 1.35 })];
+      const result = aggregatePosition(vaults, collaterals);
+      expect(result.overallCr).toBeCloseTo(1.47, 2);
+      expect(result.healthTier).toBe('caution');
+    });
+
+    it('flags the same asset as danger once CR actually drops below its own liquidation buffer', () => {
+      const vaults = [vault({ collateralType: CKXAUT, collateralAmount: 1, borrowedIcusd: 1000 })];
+      const collaterals = [collateral({ principal: CKXAUT, symbol: 'ckXAUT', price: 1200, liquidationCr: 1.18, minimumCr: 1.35 })];
+      const result = aggregatePosition(vaults, collaterals);
+      expect(result.overallCr).toBeCloseTo(1.2, 2);
+      expect(result.healthTier).toBe('danger');
+    });
+
+    it('marks safe once comfortably above the asset-specific buffer', () => {
+      const vaults = [vault({ collateralType: CKXAUT, collateralAmount: 1, borrowedIcusd: 1000 })];
+      const collaterals = [collateral({ principal: CKXAUT, symbol: 'ckXAUT', price: 1800, liquidationCr: 1.18, minimumCr: 1.35 })];
+      const result = aggregatePosition(vaults, collaterals);
+      expect(result.overallCr).toBeCloseTo(1.8, 2);
+      expect(result.healthTier).toBe('safe');
+    });
+
+    it('preserves ICP-only behavior exactly (regression against the old flat breakpoints)', () => {
+      const vaults = [vault({ collateralType: ICP, collateralAmount: 100, borrowedIcusd: 500 })];
+      const collaterals = [collateral({ principal: ICP, price: 5 })]; // CR = 1.0 -> danger
+      expect(aggregatePosition(vaults, collaterals).healthTier).toBe('danger');
+
+      const cautionVaults = [vault({ collateralType: ICP, collateralAmount: 100, borrowedIcusd: 300 })];
+      const cautionCollaterals = [collateral({ principal: ICP, price: 5 })]; // CR ≈1.67 -> caution
+      expect(aggregatePosition(cautionVaults, cautionCollaterals).healthTier).toBe('caution');
+
+      const safeVaults = [vault({ collateralType: ICP, collateralAmount: 100, borrowedIcusd: 200 })];
+      const safeCollaterals = [collateral({ principal: ICP, price: 5 })]; // CR = 2.5 -> safe
+      expect(aggregatePosition(safeVaults, safeCollaterals).healthTier).toBe('safe');
+    });
+
+    it('blends thresholds by USD share for a mixed ICP + ckXAUT position', () => {
+      // 50/50 USD split (725 + 725 = 1450): weighted liquidationCr =
+      // (1.33 + 1.18)/2 = 1.255 -> caution cutoff ≈1.415, safe cutoff ≈1.887.
+      // CR = 1450/1000 = 1.45, which the OLD flat ICP breakpoints (danger
+      // below 1.5) would have wrongly called "danger".
+      const vaults = [
+        vault({ vaultId: 1, collateralType: ICP, collateralAmount: 100, borrowedIcusd: 1000 }),
+        vault({ vaultId: 2, collateralType: CKXAUT, collateralAmount: 1, borrowedIcusd: 0 }),
+      ];
+      const collaterals = [
+        collateral({ principal: ICP, symbol: 'ICP', price: 7.25 }),          // 725 USD
+        collateral({ principal: CKXAUT, symbol: 'ckXAUT', price: 725, liquidationCr: 1.18, minimumCr: 1.35 }), // 725 USD
+      ];
+      const result = aggregatePosition(vaults, collaterals);
+      expect(result.totalCollateralUsd).toBe(1450);
+      expect(result.overallCr).toBeCloseTo(1.45, 2);
+      expect(result.healthTier).toBe('caution');
+    });
   });
 });
