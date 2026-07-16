@@ -369,13 +369,6 @@ type PoolEventType = variant {
   ClaimCollateral : record { collateral_ledger : principal; amount : nat64 };
   DepositAs3USD : record { token_ledger : principal; amount_in : nat64; lp_minted : nat64 };
   InterestReceived : record { token_ledger : principal; amount : nat64 };
-  UnallocatedInterestForwardedToTreasury : record {
-    gross_amount : nat64;
-    fee : nat64;
-    net_amount : nat64;
-    transfer_block_index : nat64;
-    source_mint_blocks : vec nat64;
-  };
   OptOutCollateral : record { collateral_type : principal };
   OptInCollateral : record { collateral_type : principal };
   LiquidationNotification : record { vault_count : nat64 };

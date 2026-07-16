@@ -190,13 +190,6 @@ export const idlFactory = ({ IDL }) => {
       'ledger' : IDL.Principal,
       'symbol' : IDL.Text,
     }),
-    'UnallocatedInterestForwardedToTreasury' : IDL.Record({
-      'fee' : IDL.Nat64,
-      'source_mint_blocks' : IDL.Vec(IDL.Nat64),
-      'net_amount' : IDL.Nat64,
-      'transfer_block_index' : IDL.Nat64,
-      'gross_amount' : IDL.Nat64,
-    }),
     'OptOutCollateral' : IDL.Record({ 'collateral_type' : IDL.Principal }),
     'OptInCollateral' : IDL.Record({ 'collateral_type' : IDL.Principal }),
     'StablecoinRegistered' : IDL.Record({
