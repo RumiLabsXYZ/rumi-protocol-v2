@@ -180,7 +180,7 @@ pub async fn transfer_unallocated_interest_to_treasury(
     }
 }
 
-async fn ledger_pool_balance(ledger: Principal) -> Option<u64> {
+pub(crate) async fn ledger_pool_balance(ledger: Principal) -> Option<u64> {
     let account = Account {
         owner: ic_cdk::api::id(),
         subaccount: None,

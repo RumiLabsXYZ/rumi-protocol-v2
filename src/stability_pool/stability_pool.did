@@ -28,6 +28,15 @@ type CollateralInfo = record {
   status : CollateralStatus;
 };
 
+type LedgerReconciliationEntry = record {
+  ledger : principal;
+  symbol : text;
+  recorded_e8s : nat64;
+  live_e8s : nat64;
+  delta_e8s : int64;
+  healthy : bool;
+};
+
 type CollateralStatus = variant {
   Active;
   Paused;
@@ -466,6 +475,9 @@ service : (StabilityPoolInitArgs) -> {
   check_pool_capacity : (principal, nat64) -> (bool) query;
   check_chain_absorb_capacity : (principal, nat64) -> (bool) query;
   validate_pool_state : () -> (variant { Ok : text; Err : text }) query;
+  get_ledger_reconciliation : () -> (
+      variant { Ok : vec LedgerReconciliationEntry; Err : StabilityPoolError },
+    );
   get_suspended_tokens : () -> (vec record { principal; nat32 }) query;
   get_pool_events : (nat64, nat64) -> (vec PoolEvent) query;
   get_pool_event_count : () -> (nat64) query;

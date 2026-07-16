@@ -698,6 +698,90 @@ fn test_direct_icusd_deposit() {
     assert_eq!(status.total_deposits_e8s, deposit_amount);
 }
 
+/// Reconciliation observability: after a clean deposit, the pool's tracked
+/// aggregate matches its live ledger balance, `get_ledger_reconciliation`
+/// reports it healthy, and the endpoint is admin-gated.
+#[test]
+fn test_get_ledger_reconciliation_reports_healthy_and_is_admin_gated() {
+    let env = setup_test_env();
+    let deposit_amount: u64 = 100_00000000; // 100 icUSD
+
+    let result = env
+        .pic
+        .update_call(
+            env.sp_id,
+            env.test_user,
+            "deposit",
+            encode_args((env.icusd_ledger, deposit_amount)).unwrap(),
+        )
+        .expect("deposit call failed");
+    match result {
+        WasmResult::Reply(bytes) => decode_one::<Result<(), StabilityPoolError>>(&bytes)
+            .unwrap()
+            .expect("deposit failed"),
+        WasmResult::Reject(msg) => panic!("deposit rejected: {}", msg),
+    }
+
+    // Non-admin callers are rejected (the endpoint triggers per-token outcalls).
+    let denied = env
+        .pic
+        .update_call(
+            env.sp_id,
+            env.test_user,
+            "get_ledger_reconciliation",
+            encode_args(()).unwrap(),
+        )
+        .expect("call failed");
+    match denied {
+        WasmResult::Reply(bytes) => {
+            let r: Result<Vec<LedgerReconciliationEntry>, StabilityPoolError> =
+                decode_one(&bytes).unwrap();
+            assert!(
+                matches!(r, Err(StabilityPoolError::Unauthorized)),
+                "non-admin must be Unauthorized, got {:?}",
+                r
+            );
+        }
+        WasmResult::Reject(msg) => panic!("rejected: {}", msg),
+    }
+
+    // Admin sees a healthy, exactly-balanced report for the deposited token.
+    let ok = env
+        .pic
+        .update_call(
+            env.sp_id,
+            env.admin,
+            "get_ledger_reconciliation",
+            encode_args(()).unwrap(),
+        )
+        .expect("call failed");
+    let entries: Vec<LedgerReconciliationEntry> = match ok {
+        WasmResult::Reply(bytes) => {
+            decode_one::<Result<Vec<LedgerReconciliationEntry>, StabilityPoolError>>(&bytes)
+                .unwrap()
+                .expect("admin reconciliation ok")
+        }
+        WasmResult::Reject(msg) => panic!("rejected: {}", msg),
+    };
+    let icusd = entries
+        .iter()
+        .find(|e| e.ledger == env.icusd_ledger)
+        .expect("icUSD entry present");
+    assert_eq!(icusd.recorded_e8s, deposit_amount, "recorded == deposit");
+    assert_eq!(
+        icusd.live_e8s, deposit_amount,
+        "live ledger balance == deposit (pool paid no fee; depositor bore it)"
+    );
+    assert_eq!(icusd.delta_e8s, 0, "no drift");
+    assert!(icusd.healthy, "icUSD must reconcile healthy");
+    // Every registered token reconciles (all others at 0/0).
+    assert!(
+        entries.iter().all(|e| e.healthy),
+        "no token should show a shortfall on a clean pool: {:?}",
+        entries
+    );
+}
+
 /// Test 2: deposit_as_3usd converts icUSD into 3USD LP tokens via the 3pool
 #[test]
 fn test_deposit_as_3usd() {
