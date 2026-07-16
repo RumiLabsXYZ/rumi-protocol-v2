@@ -25,7 +25,9 @@ mod tests {
 
         let status = crate::state::with_state(|s| {
             let config = s.get_config();
-            let balances = s.balances.iter()
+            let balances = s
+                .balances
+                .iter()
                 .map(|(asset_type, balance)| (asset_type.clone(), balance.clone()))
                 .collect();
 
@@ -61,13 +63,51 @@ mod tests {
         assert_eq!(deposit_id, 1);
 
         // Check balance was updated
-        let balance = crate::state::with_state(|s|
-            s.balances.get(&AssetType::ICUSD).unwrap().clone()
-        );
+        let balance =
+            crate::state::with_state(|s| s.balances.get(&AssetType::ICUSD).unwrap().clone());
 
         assert_eq!(balance.total, 1_000_000);
         assert_eq!(balance.available, 1_000_000);
         assert_eq!(balance.reserved, 0);
+    }
+
+    #[test]
+    fn stability_pool_unallocated_interest_is_recorded_once_per_source_receipt() {
+        init_test_treasury();
+        let (deposit_id, new) = crate::state::with_state_mut(|s| {
+            s.record_sp_unallocated_interest_once_at(900, 77, &[31, 32], 1)
+                .expect("first report records")
+        });
+        assert!(new);
+        let (duplicate_id, duplicate_new) = crate::state::with_state_mut(|s| {
+            s.record_sp_unallocated_interest_once_at(900, 77, &[31, 32], 2)
+                .expect("retry is idempotent")
+        });
+        assert_eq!(duplicate_id, deposit_id);
+        assert!(!duplicate_new);
+        let balance = crate::state::with_state(|s| s.balances[&AssetType::ICUSD].clone());
+        assert_eq!(balance.total, 900);
+        assert_eq!(
+            crate::state::with_state(|s| s.get_deposits_count()),
+            1,
+            "a duplicate report must not add treasury balance or a second log"
+        );
+    }
+
+    #[test]
+    fn stability_pool_unallocated_interest_rejects_partial_replay() {
+        init_test_treasury();
+        crate::state::with_state_mut(|s| {
+            s.record_sp_unallocated_interest_once_at(900, 77, &[31, 32], 1)
+                .expect("first report records")
+        });
+        let result = crate::state::with_state_mut(|s| {
+            s.record_sp_unallocated_interest_once_at(1_000, 78, &[32, 33], 2)
+        });
+        assert!(
+            result.is_err(),
+            "partial replay cannot create a new deposit"
+        );
     }
 
     #[test]
@@ -88,16 +128,13 @@ mod tests {
         crate::state::with_state_mut(|s| s.add_deposit(deposit_record));
 
         // Now try to withdraw less than available
-        let result = crate::state::with_state_mut(|s|
-            s.withdraw(AssetType::ICP, 2_000_000)
-        );
+        let result = crate::state::with_state_mut(|s| s.withdraw(AssetType::ICP, 2_000_000));
 
         assert!(result.is_ok());
 
         // Check remaining balance
-        let balance = crate::state::with_state(|s|
-            s.balances.get(&AssetType::ICP).unwrap().clone()
-        );
+        let balance =
+            crate::state::with_state(|s| s.balances.get(&AssetType::ICP).unwrap().clone());
 
         assert_eq!(balance.total, 3_000_000);
         assert_eq!(balance.available, 3_000_000);
@@ -108,9 +145,7 @@ mod tests {
         init_test_treasury();
 
         // Try to withdraw from empty treasury
-        let result = crate::state::with_state_mut(|s|
-            s.withdraw(AssetType::CKBTC, 1_000_000)
-        );
+        let result = crate::state::with_state_mut(|s| s.withdraw(AssetType::CKBTC, 1_000_000));
 
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Insufficient balance"));
@@ -133,23 +168,17 @@ mod tests {
         crate::state::with_state_mut(|s| s.add_deposit(deposit_record));
 
         // Withdraw (simulating pre-transfer deduction)
-        crate::state::with_state_mut(|s|
-            s.withdraw(AssetType::ICUSD, 3_000_000)
-        ).unwrap();
+        crate::state::with_state_mut(|s| s.withdraw(AssetType::ICUSD, 3_000_000)).unwrap();
 
-        let balance_after_withdraw = crate::state::with_state(|s|
-            s.balances.get(&AssetType::ICUSD).unwrap().clone()
-        );
+        let balance_after_withdraw =
+            crate::state::with_state(|s| s.balances.get(&AssetType::ICUSD).unwrap().clone());
         assert_eq!(balance_after_withdraw.available, 7_000_000);
 
         // Simulate transfer failure → restore
-        crate::state::with_state_mut(|s|
-            s.restore_balance(&AssetType::ICUSD, 3_000_000)
-        );
+        crate::state::with_state_mut(|s| s.restore_balance(&AssetType::ICUSD, 3_000_000));
 
-        let balance_after_restore = crate::state::with_state(|s|
-            s.balances.get(&AssetType::ICUSD).unwrap().clone()
-        );
+        let balance_after_restore =
+            crate::state::with_state(|s| s.balances.get(&AssetType::ICUSD).unwrap().clone());
         assert_eq!(balance_after_restore.available, 10_000_000);
         assert_eq!(balance_after_restore.total, 10_000_000);
     }
@@ -235,9 +264,8 @@ mod tests {
         crate::state::with_state_mut(|s| s.withdraw(AssetType::ICP, amount)).unwrap();
         let sent = crate::withdrawal_send_amount(amount, fee).unwrap();
 
-        let balance = crate::state::with_state(|s|
-            s.balances.get(&AssetType::ICP).unwrap().clone()
-        );
+        let balance =
+            crate::state::with_state(|s| s.balances.get(&AssetType::ICP).unwrap().clone());
         let tracked_drop = 10_000_000 - balance.total;
         let onchain_drop = sent + fee;
 
@@ -263,32 +291,24 @@ mod tests {
         init_test_treasury();
 
         let t1 = 1_700_000_000_000_000_000u64;
-        let first = crate::state::with_state_mut(|s|
-            s.created_at_time_for_request(42, t1)
-        );
+        let first = crate::state::with_state_mut(|s| s.created_at_time_for_request(42, t1));
         assert_eq!(first, t1);
 
         // A retry minutes later must reuse the first attempt's timestamp so
         // the ledger's dedup window can catch a re-submitted transfer.
         let t2 = t1 + 5 * 60 * 1_000_000_000;
-        let retried = crate::state::with_state_mut(|s|
-            s.created_at_time_for_request(42, t2)
-        );
+        let retried = crate::state::with_state_mut(|s| s.created_at_time_for_request(42, t2));
         assert_eq!(retried, t1);
 
         // A different request gets its own timestamp.
-        let other = crate::state::with_state_mut(|s|
-            s.created_at_time_for_request(43, t2)
-        );
+        let other = crate::state::with_state_mut(|s| s.created_at_time_for_request(43, t2));
         assert_eq!(other, t2);
 
         // After a TooOld/CreatedInFuture rejection the entry is cleared and
         // the next attempt gets a fresh timestamp.
         crate::state::with_state_mut(|s| s.clear_request_created_at(42));
         let t3 = t2 + 1_000_000_000;
-        let fresh = crate::state::with_state_mut(|s|
-            s.created_at_time_for_request(42, t3)
-        );
+        let fresh = crate::state::with_state_mut(|s| s.created_at_time_for_request(42, t3));
         assert_eq!(fresh, t3);
     }
 
@@ -306,9 +326,7 @@ mod tests {
         // longer dedup, so the request gets a fresh timestamp and stale
         // entries are pruned.
         let later = t1 + 24 * 60 * 60 * 1_000_000_000 + 1;
-        let replaced = crate::state::with_state_mut(|s|
-            s.created_at_time_for_request(7, later)
-        );
+        let replaced = crate::state::with_state_mut(|s| s.created_at_time_for_request(7, later));
         assert_eq!(replaced, later);
 
         let pruned = crate::state::with_state(|s| s.withdrawal_created_at.get(&8));
@@ -340,7 +358,9 @@ mod tests {
 
         assert_eq!(in_memory.total, 5_000_000);
         // Find ICP in snapshot
-        let icp_snap = snapshot.entries.iter()
+        let icp_snap = snapshot
+            .entries
+            .iter()
             .find(|(a, _)| *a == AssetType::ICP)
             .map(|(_, b)| b.clone())
             .unwrap();

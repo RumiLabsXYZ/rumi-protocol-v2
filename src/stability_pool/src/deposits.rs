@@ -104,6 +104,82 @@ async fn ledger_transfer_fee(ledger: Principal) -> u64 {
     }
 }
 
+/// Result of an unallocated-interest transfer attempt. A `BadFee` is known not
+/// to have moved funds, so the durable receipt may safely update its fee and
+/// retry with the same timestamp/memo.
+pub enum UnallocatedInterestTransferResult {
+    Sent(u64),
+    BadFee(u64),
+    TooOld,
+}
+
+pub async fn unallocated_interest_transfer_fee(token_ledger: Principal) -> u64 {
+    ledger_transfer_fee(token_ledger).await
+}
+
+/// Submit one persisted unallocated-interest batch to treasury. Callers must
+/// reuse the stored fee, timestamp, and memo on every retry; ICRC-003
+/// `Duplicate` is therefore the same successful transfer.
+pub async fn transfer_unallocated_interest_to_treasury(
+    token_ledger: Principal,
+    treasury: Principal,
+    net_amount: u64,
+    fee: u64,
+    created_at_time: u64,
+    memo: Vec<u8>,
+) -> Result<UnallocatedInterestTransferResult, StabilityPoolError> {
+    let transfer_args = TransferArg {
+        from_subaccount: None,
+        to: Account {
+            owner: treasury,
+            subaccount: None,
+        },
+        amount: net_amount.into(),
+        fee: Some(fee.into()),
+        memo: Some(memo.into()),
+        created_at_time: Some(created_at_time),
+    };
+
+    let result: Result<(Result<candid::Nat, TransferError>,), _> =
+        call(token_ledger, "icrc1_transfer", (transfer_args,)).await;
+    match result {
+        Ok((Ok(block_index),)) => {
+            let block_index: u64 =
+                block_index
+                    .0
+                    .try_into()
+                    .map_err(|_| StabilityPoolError::LedgerTransferFailed {
+                        reason: "treasury transfer block index exceeds u64".to_string(),
+                    })?;
+            Ok(UnallocatedInterestTransferResult::Sent(block_index))
+        }
+        Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
+            let block_index: u64 = duplicate_of.0.try_into().map_err(|_| {
+                StabilityPoolError::LedgerTransferFailed {
+                    reason: "duplicate treasury transfer block index exceeds u64".to_string(),
+                }
+            })?;
+            Ok(UnallocatedInterestTransferResult::Sent(block_index))
+        }
+        Ok((Err(TransferError::BadFee { expected_fee }),)) => {
+            let expected_fee: u64 = expected_fee.0.try_into().map_err(|_| {
+                StabilityPoolError::LedgerTransferFailed {
+                    reason: "treasury transfer fee exceeds u64".to_string(),
+                }
+            })?;
+            Ok(UnallocatedInterestTransferResult::BadFee(expected_fee))
+        }
+        Ok((Err(TransferError::TooOld),)) => Ok(UnallocatedInterestTransferResult::TooOld),
+        Ok((Err(error),)) => Err(StabilityPoolError::LedgerTransferFailed {
+            reason: format!("unallocated interest transfer failed: {:?}", error),
+        }),
+        Err(_) => Err(StabilityPoolError::InterCanisterCallFailed {
+            target: format!("{}", token_ledger),
+            method: "icrc1_transfer".to_string(),
+        }),
+    }
+}
+
 async fn ledger_pool_balance(ledger: Principal) -> Option<u64> {
     let account = Account {
         owner: ic_cdk::api::id(),

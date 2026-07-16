@@ -1499,6 +1499,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Opt(CollateralConfig)],
         ['query'],
       ),
+    'get_collateral_price_fetch_intervals' : IDL.Func(
+        [],
+        [IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64))],
+        ['query'],
+      ),
     'get_collateral_totals' : IDL.Func(
         [],
         [IDL.Vec(CollateralTotals)],
@@ -1598,6 +1603,11 @@ export const idlFactory = ({ IDL }) => {
     'get_pending_chain_burn_aging' : IDL.Func(
         [],
         [IDL.Vec(PendingChainBurnAging)],
+        ['query'],
+      ),
+    'get_pending_stability_pool_interest_notification_count' : IDL.Func(
+        [],
+        [IDL.Nat64],
         ['query'],
       ),
     'get_price_pusher_allowed' : IDL.Func(
@@ -1900,6 +1910,11 @@ export const idlFactory = ({ IDL }) => {
       ),
     'set_collateral_min_xrc_sources' : IDL.Func(
         [IDL.Principal, IDL.Opt(IDL.Nat32)],
+        [Result],
+        [],
+      ),
+    'set_collateral_price_fetch_interval_secs' : IDL.Func(
+        [IDL.Principal, IDL.Nat64],
         [Result],
         [],
       ),

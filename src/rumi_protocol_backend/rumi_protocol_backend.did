@@ -1351,6 +1351,7 @@ service : (ProtocolArg) -> {
   get_three_pool_canister : () -> (opt principal) query;
   get_treasury_principal : () -> (opt principal) query;
   get_treasury_stats : () -> (TreasuryStats) query;
+  get_pending_stability_pool_interest_notification_count : () -> (nat64) query;
   get_vault_count : () -> (nat64) query;
   get_vault_history : (nat64) -> (vec record { nat64; Event }) query;
   get_vault_history_paged : (nat64, nat64, nat64) -> (

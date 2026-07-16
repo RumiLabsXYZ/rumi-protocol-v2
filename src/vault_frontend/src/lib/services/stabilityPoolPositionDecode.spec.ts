@@ -69,5 +69,7 @@ describe('stability pool get_user_position decode compatibility', () => {
     expect(position.total_usd_value_e8s).toBe(550_0000_0000n);
     // Missing native field must decode to None (`[]`), proving it is `opt`.
     expect(position.native_payout_addresses).toEqual([]);
+    // New APY/coverage fields must retain the same frontend-ahead compatibility.
+    expect(position.eligible_interest_collateral).toEqual([]);
   });
 });

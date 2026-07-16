@@ -98,6 +98,8 @@ type TreasuryEvent = record {
 
 service : (TreasuryInitArgs) -> {
   deposit: (DepositArgs) -> (variant { Ok : nat64; Err : text });
+  record_stability_pool_unallocated_interest: (nat64, nat64, vec nat64) -> (variant { Ok : nat64; Err : text });
+  set_stability_pool_reporter: (opt principal) -> (variant { Ok; Err : text });
   withdraw: (WithdrawArgs) -> (variant { Ok : WithdrawResult; Err : text });
   cycles_status: () -> (CycleManagerCyclesStatus) query;
   cycle_manager_metrics: () -> (vec CycleManagerMetric) query;

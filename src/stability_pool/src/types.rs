@@ -528,6 +528,29 @@ pub struct PendingRefund {
     pub created_at: u64,
 }
 
+/// A durable, batched forward of interest that could not be allocated because
+/// no icUSD depositor was eligible for its source collateral.  The transfer
+/// timestamp and memo are persisted before the first ledger call so a retry
+/// resolves as ICRC-003 `Duplicate` instead of sending treasury twice.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnallocatedInterestForwardBatch {
+    pub id: u64,
+    /// Backend icUSD mint blocks included in this transfer.  These are the
+    /// idempotency receipts supplied by the backend's v2 notification.
+    pub source_mint_blocks: Vec<u64>,
+    pub token_ledger: Principal,
+    /// None is a durable pre-configuration receipt during the rolling
+    /// upgrade; it is assigned only by an SP admin before any transfer starts.
+    pub treasury: Option<Principal>,
+    pub gross_amount: u64,
+    pub fee: Option<u64>,
+    pub transfer_created_at_ns: Option<u64>,
+    pub transfer_block_index: Option<u64>,
+    pub treasury_recorded: bool,
+    pub created_at_ns: u64,
+    pub last_error: Option<String>,
+}
+
 // ──────────────────────────────────────────────────────────────
 // Init / Config / API types
 // ──────────────────────────────────────────────────────────────
@@ -561,6 +584,12 @@ pub struct StabilityPoolStatus {
     /// icUSD deposited by users who are opted in to that collateral.
     /// Used by the frontend to compute per-collateral APR.
     pub eligible_icusd_per_collateral: Vec<(Principal, u64)>,
+    /// Per-collateral total USD-equivalent capacity (e8s), across every
+    /// accepted stablecoin held by depositors opted in to that collateral.
+    /// This is intentionally separate from the icUSD-only APY denominator.
+    /// Optional so a frontend deployed before this canister upgrade can still
+    /// decode an older response.
+    pub eligible_usd_per_collateral: Option<Vec<(Principal, u64)>>,
 }
 
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -569,6 +598,11 @@ pub struct UserStabilityPosition {
     pub collateral_gains: BTreeMap<Principal, u64>,
     pub cfx_claims: Option<BTreeMap<Principal, u128>>,
     pub opted_out_collateral: Vec<Principal>,
+    /// Exact collateral types for which this position currently earns borrower
+    /// interest. This includes native/chain default-out rules that cannot be
+    /// reconstructed from `opted_out_collateral` alone.
+    /// Optional for canister/frontend rollout compatibility.
+    pub eligible_interest_collateral: Option<Vec<Principal>>,
     /// `Option` (candid `opt`) so a frontend built with this declaration can
     /// still decode a `get_user_position` response from an older SP canister
     /// that predates native collateral (the field simply decodes to `None`).
@@ -834,6 +868,16 @@ pub enum PoolEventType {
     InterestReceived {
         token_ledger: Principal,
         amount: u64,
+    },
+    /// Interest with no eligible icUSD depositor was sent to protocol
+    /// treasury. This is deliberately separate from `InterestReceived` so it
+    /// never appears as depositor yield.
+    UnallocatedInterestForwardedToTreasury {
+        gross_amount: u64,
+        fee: u64,
+        net_amount: u64,
+        transfer_block_index: u64,
+        source_mint_blocks: Vec<u64>,
     },
     // ─── Collateral Opt-in/Opt-out ───
     OptOutCollateral {

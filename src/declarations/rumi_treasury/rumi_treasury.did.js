@@ -117,8 +117,18 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'get_status' : IDL.Func([], [TreasuryStatus], ['query']),
+    'record_stability_pool_unallocated_interest' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64, IDL.Vec(IDL.Nat64)],
+        [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : IDL.Text })],
+        [],
+      ),
     'set_paused' : IDL.Func(
         [IDL.Bool],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text })],
+        [],
+      ),
+    'set_stability_pool_reporter' : IDL.Func(
+        [IDL.Opt(IDL.Principal)],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text })],
         [],
       ),

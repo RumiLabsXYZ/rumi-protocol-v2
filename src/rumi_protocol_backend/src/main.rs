@@ -9843,6 +9843,16 @@ fn get_treasury_stats() -> TreasuryStats {
     })
 }
 
+/// Number of minted stability-pool interest payments awaiting acknowledgement
+/// from the stability pool. These entries are retried by the periodic treasury
+/// tick and are deliberately exposed so production release checks can verify
+/// that no notification was stranded during a pool upgrade.
+#[candid_method(query)]
+#[query]
+fn get_pending_stability_pool_interest_notification_count() -> u64 {
+    read_state(|s| s.pending_stability_pool_interest_notifications.len() as u64)
+}
+
 /// Get the effective recovery target CR (threshold × multiplier)
 #[candid_method(query)]
 #[query]

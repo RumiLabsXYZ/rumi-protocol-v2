@@ -16,6 +16,7 @@ use crate::state::{mutate_state, read_state};
 use crate::types::*;
 
 const CHAIN_ABSORB_AUTO_TIMER_POLL_SECONDS: u64 = 60;
+const UNALLOCATED_INTEREST_FORWARD_RETRY_SECONDS: u64 = 60;
 
 pub(crate) fn pool_balance_mutation_blocked() -> bool {
     crate::pool_guard::liquidation_in_progress() || read_state(|s| s.has_pending_pool_absorbs())
@@ -56,6 +57,7 @@ fn init(args: StabilityPoolInitArgs) {
     ic_cdk_timers::set_timer(Duration::ZERO, || {
         setup_virtual_price_timer();
         setup_chain_absorb_auto_timer();
+        setup_unallocated_interest_forward_retry_timer();
     });
 }
 
@@ -93,6 +95,7 @@ fn post_upgrade(_args: StabilityPoolInitArgs) {
     ic_cdk_timers::set_timer(Duration::ZERO, || {
         setup_virtual_price_timer();
         setup_chain_absorb_auto_timer();
+        setup_unallocated_interest_forward_retry_timer();
     });
 }
 
@@ -113,6 +116,35 @@ fn setup_chain_absorb_auto_timer() {
             ic_cdk::spawn(async {
                 if let Err(error) = crate::liquidation::run_chain_absorb_auto_tick().await {
                     log!(INFO, "chain absorb auto tick skipped: {:?}", error);
+                }
+            });
+        },
+    );
+}
+
+/// A successful backend notification only means the SP has durably received
+/// the source receipt. This timer advances/retries the receipt so concurrent
+/// notifications and temporary ledger/treasury failures cannot strand funds.
+fn setup_unallocated_interest_forward_retry_timer() {
+    ic_cdk_timers::set_timer_interval(
+        Duration::from_secs(UNALLOCATED_INTEREST_FORWARD_RETRY_SECONDS),
+        || {
+            ic_cdk::spawn(async {
+                let next = read_state(|s| {
+                    s.pending_unallocated_interest_forwards()
+                        .into_iter()
+                        .map(|batch| batch.id)
+                        .next()
+                });
+                if let Some(batch_id) = next {
+                    if let Err(error) = process_unallocated_interest_forward(batch_id).await {
+                        log!(
+                            INFO,
+                            "unallocated interest forward {} still pending: {:?}",
+                            batch_id,
+                            error
+                        );
+                    }
                 }
             });
         },
@@ -534,6 +566,165 @@ pub fn receive_interest_revenue(
     Ok(())
 }
 
+/// V2 interest notification carries the backend mint block, which supplies a
+/// durable source receipt for the no-eligible-recipient treasury route. The
+/// legacy V1 method above remains available during rollout but deliberately
+/// retains its original distribution-only behavior because it lacks that key.
+#[update]
+pub async fn receive_interest_revenue_v2(
+    token_ledger: Principal,
+    amount: u64,
+    collateral_type: Option<Principal>,
+    source_mint_block: u64,
+) -> Result<(), StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    let expected = read_state(|s| s.protocol_canister_id);
+    if caller != expected {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    ensure_pool_balance_mutation_allowed()?;
+    if read_state(|s| s.configuration.emergency_pause) {
+        return Err(StabilityPoolError::EmergencyPaused);
+    }
+    if !read_state(|s| s.stablecoin_registry.contains_key(&token_ledger)) {
+        return Err(StabilityPoolError::TokenNotAccepted {
+            ledger: token_ledger,
+        });
+    }
+
+    if read_state(|s| s.has_eligible_interest_recipient(collateral_type.as_ref())) {
+        mutate_state(|s| {
+            s.distribute_interest_revenue(token_ledger, amount, collateral_type);
+            s.push_event(
+                caller,
+                PoolEventType::InterestReceived {
+                    token_ledger,
+                    amount,
+                },
+            );
+        });
+        return Ok(());
+    }
+
+    let batch_id = mutate_state(|s| {
+        s.queue_unallocated_interest_forward(source_mint_block, token_ledger, amount)
+    })?;
+    process_unallocated_interest_forward(batch_id).await
+}
+
+async fn process_unallocated_interest_forward(batch_id: u64) -> Result<(), StabilityPoolError> {
+    let _guard = crate::pool_guard::UnallocatedInterestForwardGuard::new()?;
+    let batch = read_state(|s| s.unallocated_interest_forward_batch(batch_id))
+        .ok_or(StabilityPoolError::RefundClaimNotFound)?;
+    if batch.treasury_recorded {
+        return Ok(());
+    }
+    let Some(treasury) = batch.treasury else {
+        // The backend notification has a durable receipt, but deployment or
+        // operator configuration has not selected a destination yet.
+        return Ok(());
+    };
+
+    let batch = if batch.transfer_block_index.is_none() && batch.fee.is_none() {
+        let fee = deposits::unallocated_interest_transfer_fee(batch.token_ledger).await;
+        mutate_state(|s| s.prepare_unallocated_interest_forward(batch_id, fee))?
+    } else {
+        batch
+    };
+    let fee = batch
+        .fee
+        .ok_or_else(|| StabilityPoolError::LedgerTransferFailed {
+            reason: "unallocated interest forward missing persisted fee".to_string(),
+        })?;
+    if batch.gross_amount <= fee {
+        // This is durable fee dust. A later no-recipient mint appends to this
+        // unattempted batch and automatically carries it over the threshold.
+        return Ok(());
+    }
+    let net_amount = batch.gross_amount - fee;
+    let transfer_block_index = match batch.transfer_block_index {
+        Some(block) => block,
+        None => {
+            let created_at = batch.transfer_created_at_ns.ok_or_else(|| {
+                StabilityPoolError::LedgerTransferFailed {
+                    reason: "unallocated interest forward missing timestamp".to_string(),
+                }
+            })?;
+            let mut memo = b"RUMI-SP-INT-FWD".to_vec();
+            memo.extend_from_slice(&batch.id.to_be_bytes());
+            match deposits::transfer_unallocated_interest_to_treasury(
+                batch.token_ledger,
+                treasury,
+                net_amount,
+                fee,
+                created_at,
+                memo,
+            )
+            .await?
+            {
+                deposits::UnallocatedInterestTransferResult::Sent(block) => {
+                    mutate_state(|s| {
+                        s.mark_unallocated_interest_forward_transferred(batch_id, block)
+                    });
+                    block
+                }
+                deposits::UnallocatedInterestTransferResult::BadFee(expected_fee) => {
+                    mutate_state(|s| {
+                        s.update_unallocated_interest_forward_fee(batch_id, expected_fee)
+                    });
+                    return Err(StabilityPoolError::LedgerTransferFailed {
+                        reason: "ledger transfer fee changed; retry queued treasury forward"
+                            .to_string(),
+                    });
+                }
+                deposits::UnallocatedInterestTransferResult::TooOld => {
+                    mutate_state(|s| {
+                        s.record_unallocated_interest_forward_error(
+                            batch_id,
+                            "ICRC dedup window expired; verify the ledger transfer and confirm its block before retrying".to_string(),
+                        )
+                    });
+                    return Err(StabilityPoolError::LedgerTransferFailed {
+                        reason: "unallocated interest transfer is too old; reconciliation required"
+                            .to_string(),
+                    });
+                }
+            }
+        }
+    };
+
+    let (result,): (Result<u64, String>,) = ic_cdk::call(
+        treasury,
+        "record_stability_pool_unallocated_interest",
+        (
+            net_amount,
+            transfer_block_index,
+            batch.source_mint_blocks.clone(),
+        ),
+    )
+    .await
+    .map_err(|_| StabilityPoolError::InterCanisterCallFailed {
+        target: format!("{}", treasury),
+        method: "record_stability_pool_unallocated_interest".to_string(),
+    })?;
+    result.map_err(|reason| StabilityPoolError::LedgerTransferFailed { reason })?;
+
+    mutate_state(|s| {
+        s.mark_unallocated_interest_forward_recorded(batch_id);
+        s.push_event(
+            ic_cdk::api::id(),
+            PoolEventType::UnallocatedInterestForwardedToTreasury {
+                gross_amount: batch.gross_amount,
+                fee,
+                net_amount,
+                transfer_block_index,
+                source_mint_blocks: batch.source_mint_blocks.clone(),
+            },
+        );
+    });
+    Ok(())
+}
+
 // ─── Queries ───
 
 #[query]
@@ -612,6 +803,13 @@ pub fn list_depositor_principals() -> Vec<Principal> {
 pub fn get_pending_refunds(user: Option<Principal>) -> Vec<PendingRefund> {
     let target = user.unwrap_or_else(ic_cdk::api::caller);
     read_state(|s| s.pending_refunds_for(&target))
+}
+
+/// Durable no-recipient interest routes that still need a ledger transfer or
+/// treasury bookkeeping acknowledgement. Public for transparent operations.
+#[query]
+pub fn get_pending_unallocated_interest_forwards() -> Vec<UnallocatedInterestForwardBatch> {
+    read_state(|s| s.pending_unallocated_interest_forwards())
 }
 
 #[query]
@@ -980,6 +1178,51 @@ pub fn resume_operations() -> Result<(), StabilityPoolError> {
     });
     log!(INFO, "Operations resumed by {}", caller);
     Ok(())
+}
+
+/// Set the sole treasury destination for interest which cannot be credited to
+/// an opted-in icUSD depositor. Destination changes are rejected while any
+/// route is unsettled, so a persisted receipt can never be retargeted.
+#[update]
+pub fn set_interest_treasury(treasury: Option<Principal>) -> Result<(), StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    if !read_state(|s| s.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    mutate_state(|s| {
+        s.set_interest_treasury(treasury)?;
+        s.push_event(caller, PoolEventType::ConfigurationUpdated);
+        Ok(())
+    })
+}
+
+/// Retry an individual durable treasury forward. The original ledger transfer
+/// timestamp/memo is reused, so a retry after an ambiguous response is safe.
+#[update]
+pub async fn retry_unallocated_interest_forward(batch_id: u64) -> Result<(), StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    if !read_state(|s| s.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    process_unallocated_interest_forward(batch_id).await
+}
+
+/// Admin reconciliation after an ICRC-003 window has expired: the caller must
+/// first verify the immutable ledger transaction externally, then supplies its
+/// block so the receipt can finish treasury bookkeeping without a second send.
+#[update]
+pub async fn confirm_unallocated_interest_forward_transfer(
+    batch_id: u64,
+    transfer_block_index: u64,
+) -> Result<(), StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    if !read_state(|s| s.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    mutate_state(|s| {
+        s.mark_unallocated_interest_forward_transferred(batch_id, transfer_block_index)
+    });
+    process_unallocated_interest_forward(batch_id).await
 }
 
 /// Admin: correct a depositor's stablecoin balance to match actual ledger state.

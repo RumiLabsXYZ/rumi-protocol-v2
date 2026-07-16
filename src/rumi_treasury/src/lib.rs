@@ -1,21 +1,21 @@
-mod types;
 mod state;
+mod types;
 
 #[cfg(test)]
 mod tests;
 
 use candid::{candid_method, Principal};
-use ic_cdk::{init, post_upgrade, pre_upgrade, query, update};
+use ic_canister_log::{declare_log_buffer, log};
 use ic_cdk::api::caller;
-use ic_canister_log::{log, declare_log_buffer};
-use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
+use ic_cdk::{init, post_upgrade, pre_upgrade, query, update};
 use icrc_ledger_types::icrc1::account::Account;
+use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
 use state::{init_state, restore_state, with_state, with_state_mut};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use types::{
-    AssetType, DepositArgs, DepositRecord, TreasuryAction, TreasuryEvent,
-    TreasuryInitArgs, TreasuryStatus, WithdrawArgs, WithdrawResult
+    AssetType, DepositArgs, DepositRecord, TreasuryAction, TreasuryEvent, TreasuryInitArgs,
+    TreasuryStatus, WithdrawArgs, WithdrawResult,
 };
 
 // Declare log buffer for debugging
@@ -76,7 +76,11 @@ fn init(args: TreasuryInitArgs) {
         ic_cdk::api::stable::stable64_size() == 0,
         "refusing to init: stable memory non-empty; use upgrade mode not reinstall"
     );
-    log!(LOG, "Initializing treasury with controller: {}", args.controller);
+    log!(
+        LOG,
+        "Initializing treasury with controller: {}",
+        args.controller
+    );
     init_state(args);
 }
 
@@ -90,7 +94,10 @@ fn pre_upgrade() {
 #[post_upgrade]
 fn post_upgrade() {
     restore_state();
-    log!(LOG, "Treasury upgrade completed — state restored from stable memory");
+    log!(
+        LOG,
+        "Treasury upgrade completed — state restored from stable memory"
+    );
 }
 
 /// Reject callers that are not an IC-level controller of this canister.
@@ -118,8 +125,13 @@ async fn deposit(args: DepositArgs) -> Result<u64, String> {
         return Err("Treasury is paused and not accepting deposits".to_string());
     }
 
-    log!(LOG, "Processing deposit: {:?} {} {:?}",
-         args.deposit_type, args.amount, args.asset_type);
+    log!(
+        LOG,
+        "Processing deposit: {:?} {} {:?}",
+        args.deposit_type,
+        args.amount,
+        args.asset_type
+    );
 
     let dep_type = args.deposit_type.clone();
     let asset = args.asset_type.clone();
@@ -138,13 +150,66 @@ async fn deposit(args: DepositArgs) -> Result<u64, String> {
 
     let deposit_id = with_state_mut(|s| s.add_deposit(record));
 
-    with_state_mut(|s| s.push_event(deposit_caller, TreasuryAction::Deposit {
-        deposit_type: dep_type,
-        asset_type: asset,
-        amount,
-    }));
+    with_state_mut(|s| {
+        s.push_event(
+            deposit_caller,
+            TreasuryAction::Deposit {
+                deposit_type: dep_type,
+                asset_type: asset,
+                amount,
+            },
+        )
+    });
 
     log!(LOG, "Deposit {} recorded successfully", deposit_id);
+    Ok(deposit_id)
+}
+
+/// Configure the only canister that may report a Stability Pool's own
+/// unallocated icUSD interest. This is deliberately narrower than controller
+/// access and cannot authorize withdrawals.
+#[update]
+#[candid_method(update)]
+fn set_stability_pool_reporter(reporter: Option<Principal>) -> Result<(), String> {
+    ensure_controller()?;
+    with_state_mut(|s| s.set_stability_pool_reporter(reporter))
+}
+
+/// Record an icUSD transfer already made by the configured Stability Pool when
+/// no opted-in icUSD depositor existed. The backend mint receipts make the
+/// record exactly-once across SP retries and lost callback responses.
+#[update]
+#[candid_method(update)]
+fn record_stability_pool_unallocated_interest(
+    amount: u64,
+    transfer_block_index: u64,
+    source_mint_blocks: Vec<u64>,
+) -> Result<u64, String> {
+    let reporter = caller();
+    let config = with_state(|s| s.get_config());
+    if config.is_paused {
+        return Err("Treasury is paused and not accepting deposits".to_string());
+    }
+    if config.stability_pool_reporter != Some(reporter) {
+        return Err(
+            "Access denied: caller is not the configured stability pool reporter".to_string(),
+        );
+    }
+    let (deposit_id, newly_recorded) = with_state_mut(|s| {
+        s.record_sp_unallocated_interest_once(amount, transfer_block_index, &source_mint_blocks)
+    })?;
+    if newly_recorded {
+        with_state_mut(|s| {
+            s.push_event(
+                reporter,
+                TreasuryAction::Deposit {
+                    deposit_type: types::DepositType::InterestRevenue,
+                    asset_type: types::AssetType::ICUSD,
+                    amount,
+                },
+            )
+        });
+    }
     Ok(deposit_id)
 }
 
@@ -168,8 +233,13 @@ async fn withdraw(args: WithdrawArgs) -> Result<WithdrawResult, String> {
     ensure_controller()?;
     let caller_principal = caller();
 
-    log!(LOG, "Processing withdrawal: {} {:?} to {}",
-         args.amount, args.asset_type, args.to);
+    log!(
+        LOG,
+        "Processing withdrawal: {} {:?} to {}",
+        args.amount,
+        args.asset_type,
+        args.to
+    );
 
     // Resolve the ledger and fee BEFORE debiting, so an unconfigured ledger
     // or a dust amount can't leave the bookkeeping debited with no transfer.
@@ -182,7 +252,8 @@ async fn withdraw(args: WithdrawArgs) -> Result<WithdrawResult, String> {
             AssetType::CKUSDT => config.ckusdt_ledger,
             AssetType::CKUSDC => config.ckusdc_ledger,
         }
-    }).ok_or("Ledger not configured for this asset type")?;
+    })
+    .ok_or("Ledger not configured for this asset type")?;
 
     let fee = ledger_fee(ledger_principal).await;
     let send_amount = withdrawal_send_amount(args.amount, fee)?;
@@ -192,9 +263,8 @@ async fn withdraw(args: WithdrawArgs) -> Result<WithdrawResult, String> {
     let request_id = args.request_id.unwrap_or_else(|| {
         derive_request_id(&caller_principal, &args.asset_type, args.amount, &args.to)
     });
-    let created_at_time = with_state_mut(|s| {
-        s.created_at_time_for_request(request_id, ic_cdk::api::time())
-    });
+    let created_at_time =
+        with_state_mut(|s| s.created_at_time_for_request(request_id, ic_cdk::api::time()));
 
     let transfer_args = TransferArg {
         from_subaccount: None,
@@ -204,7 +274,9 @@ async fn withdraw(args: WithdrawArgs) -> Result<WithdrawResult, String> {
         },
         amount: send_amount.into(),
         fee: None,
-        memo: args.memo.clone()
+        memo: args
+            .memo
+            .clone()
             .map(|m| m.into_bytes().into())
             .or_else(|| Some(request_id.to_be_bytes().to_vec().into())),
         created_at_time: Some(created_at_time),
@@ -224,7 +296,10 @@ async fn withdraw(args: WithdrawArgs) -> Result<WithdrawResult, String> {
                 // A TooOld/CreatedInFuture rejection means the persisted
                 // timestamp can never be accepted; drop it so the next
                 // attempt gets a fresh one.
-                if matches!(e, TransferError::TooOld | TransferError::CreatedInFuture { .. }) {
+                if matches!(
+                    e,
+                    TransferError::TooOld | TransferError::CreatedInFuture { .. }
+                ) {
                     s.clear_request_created_at(request_id);
                 }
                 s.restore_balance(&args.asset_type, args.amount)
@@ -245,11 +320,16 @@ async fn withdraw(args: WithdrawArgs) -> Result<WithdrawResult, String> {
         }
     };
 
-    with_state_mut(|s| s.push_event(caller_principal, TreasuryAction::Withdraw {
-        asset_type: args.asset_type.clone(),
-        amount: args.amount,
-        to: args.to,
-    }));
+    with_state_mut(|s| {
+        s.push_event(
+            caller_principal,
+            TreasuryAction::Withdraw {
+                asset_type: args.asset_type.clone(),
+                amount: args.amount,
+                to: args.to,
+            },
+        )
+    });
 
     log!(LOG, "Withdrawal completed, block index: {}", block_index);
 
@@ -296,7 +376,9 @@ enum LedgerError {
 fn get_status() -> TreasuryStatus {
     with_state(|s| {
         let config = s.get_config();
-        let balances = s.balances.iter()
+        let balances = s
+            .balances
+            .iter()
             .map(|(asset_type, balance)| (asset_type.clone(), balance.clone()))
             .collect();
 
@@ -390,17 +472,16 @@ async fn call_ledger_transfer(
     ledger_principal: Principal,
     args: TransferArg,
 ) -> Result<u64, LedgerError> {
-    let outer: Result<(Result<candid::Nat, TransferError>,), _> = ic_cdk::call(
-        ledger_principal,
-        "icrc1_transfer",
-        (args,),
-    ).await;
+    let outer: Result<(Result<candid::Nat, TransferError>,), _> =
+        ic_cdk::call(ledger_principal, "icrc1_transfer", (args,)).await;
 
     match outer {
         Err((code, msg)) => Err(LedgerError::Transport(format!("{:?}: {}", code, msg))),
         Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
             let block: u64 = duplicate_of.0.try_into().unwrap_or(0);
-            Err(LedgerError::Duplicate { duplicate_of: block })
+            Err(LedgerError::Duplicate {
+                duplicate_of: block,
+            })
         }
         Ok((Err(e),)) => Err(LedgerError::Ledger(e)),
         Ok((Ok(block_index),)) => {

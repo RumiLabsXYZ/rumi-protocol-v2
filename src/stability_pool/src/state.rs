@@ -119,6 +119,19 @@ pub struct StabilityPoolState {
     /// Backend canister to receive 3USD as fallback protocol reserves.
     #[serde(default)]
     pub protocol_reserve_address: Option<Principal>,
+    /// Admin-configured treasury destination for interest minted to the pool
+    /// while no icUSD depositor is eligible. This is distinct from the 3USD
+    /// protocol reserve address above.
+    #[serde(default)]
+    pub interest_treasury: Option<Principal>,
+    /// Durable receipts for unallocated interest forwards.  A receipt is
+    /// created before any ledger await so an ambiguous response can be retried
+    /// with identical ICRC-003 fields.
+    #[serde(default)]
+    pub unallocated_interest_forward_batches:
+        Option<BTreeMap<u64, UnallocatedInterestForwardBatch>>,
+    #[serde(default)]
+    pub next_unallocated_interest_forward_batch_id: Option<u64>,
     pub is_initialized: bool,
     /// Event log for deposits, withdrawals, claims, interest.
     /// `Option` for backward-compatible upgrade (deserializes as None from old state).
@@ -166,6 +179,9 @@ impl Default for StabilityPoolState {
             token_consecutive_failures: Some(BTreeMap::new()),
             cached_virtual_prices: Some(BTreeMap::new()),
             protocol_reserve_address: None,
+            interest_treasury: None,
+            unallocated_interest_forward_batches: Some(BTreeMap::new()),
+            next_unallocated_interest_forward_batch_id: Some(0),
             is_initialized: false,
             pool_events: Some(Vec::new()),
             next_event_id: Some(0),
@@ -229,6 +245,211 @@ impl StabilityPoolState {
             .as_ref()
             .map(|v| v.len() as u64)
             .unwrap_or(0)
+    }
+
+    /// Queue a no-recipient interest mint for treasury forwarding.  Receipts
+    /// with the same ledger/destination aggregate while no transfer has been
+    /// attempted; this lets fee dust accumulate instead of becoming stranded.
+    /// A repeated backend notification returns its original batch id.
+    pub fn queue_unallocated_interest_forward(
+        &mut self,
+        source_mint_block: u64,
+        token_ledger: Principal,
+        amount: u64,
+    ) -> Result<u64, StabilityPoolError> {
+        self.queue_unallocated_interest_forward_at(
+            source_mint_block,
+            token_ledger,
+            amount,
+            ic_cdk::api::time(),
+        )
+    }
+
+    pub fn queue_unallocated_interest_forward_at(
+        &mut self,
+        source_mint_block: u64,
+        token_ledger: Principal,
+        amount: u64,
+        now: u64,
+    ) -> Result<u64, StabilityPoolError> {
+        if let Some(existing) =
+            self.unallocated_interest_forward_batches
+                .as_ref()
+                .and_then(|batches| {
+                    batches.iter().find_map(|(id, batch)| {
+                        batch
+                            .source_mint_blocks
+                            .contains(&source_mint_block)
+                            .then_some(*id)
+                    })
+                })
+        {
+            return Ok(existing);
+        }
+        let treasury = self.interest_treasury;
+        let batches = self
+            .unallocated_interest_forward_batches
+            .get_or_insert_with(BTreeMap::new);
+        if let Some((id, batch)) = batches.iter_mut().find(|(_, batch)| {
+            batch.token_ledger == token_ledger
+                && batch.treasury == treasury
+                && batch.transfer_block_index.is_none()
+                // A fee-bearing batch that has not crossed the fee threshold
+                // has made no ledger call; keep accumulating that dust.
+                && (batch.fee.is_none() || batch.gross_amount <= batch.fee.unwrap_or(0))
+                && batch.source_mint_blocks.len() < 1_000
+        }) {
+            batch.source_mint_blocks.push(source_mint_block);
+            batch.gross_amount = batch.gross_amount.saturating_add(amount);
+            return Ok(*id);
+        }
+        let id = self.next_unallocated_interest_forward_batch_id.unwrap_or(0);
+        self.next_unallocated_interest_forward_batch_id = Some(id.saturating_add(1));
+        batches.insert(
+            id,
+            UnallocatedInterestForwardBatch {
+                id,
+                source_mint_blocks: vec![source_mint_block],
+                token_ledger,
+                treasury,
+                gross_amount: amount,
+                fee: None,
+                transfer_created_at_ns: None,
+                transfer_block_index: None,
+                treasury_recorded: false,
+                created_at_ns: now,
+                last_error: None,
+            },
+        );
+        Ok(id)
+    }
+
+    pub fn unallocated_interest_forward_batch(
+        &self,
+        id: u64,
+    ) -> Option<UnallocatedInterestForwardBatch> {
+        self.unallocated_interest_forward_batches
+            .as_ref()
+            .and_then(|batches| batches.get(&id).cloned())
+    }
+
+    pub fn pending_unallocated_interest_forwards(&self) -> Vec<UnallocatedInterestForwardBatch> {
+        self.unallocated_interest_forward_batches
+            .as_ref()
+            .map(|batches| {
+                batches
+                    .values()
+                    .filter(|batch| !batch.treasury_recorded)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn prepare_unallocated_interest_forward(
+        &mut self,
+        id: u64,
+        fee: u64,
+    ) -> Result<UnallocatedInterestForwardBatch, StabilityPoolError> {
+        self.prepare_unallocated_interest_forward_at(id, fee, ic_cdk::api::time())
+    }
+
+    pub fn prepare_unallocated_interest_forward_at(
+        &mut self,
+        id: u64,
+        fee: u64,
+        now: u64,
+    ) -> Result<UnallocatedInterestForwardBatch, StabilityPoolError> {
+        let batch = self
+            .unallocated_interest_forward_batches
+            .as_mut()
+            .and_then(|batches| batches.get_mut(&id))
+            .ok_or(StabilityPoolError::RefundClaimNotFound)?;
+        if batch.transfer_block_index.is_none() && batch.fee.is_none() {
+            batch.fee = Some(fee);
+            batch.transfer_created_at_ns = Some(now);
+        }
+        Ok(batch.clone())
+    }
+
+    pub fn update_unallocated_interest_forward_fee(&mut self, id: u64, fee: u64) {
+        if let Some(batch) = self
+            .unallocated_interest_forward_batches
+            .as_mut()
+            .and_then(|batches| batches.get_mut(&id))
+        {
+            if batch.transfer_block_index.is_none() {
+                batch.fee = Some(fee);
+                batch.last_error = None;
+            }
+        }
+    }
+
+    pub fn mark_unallocated_interest_forward_transferred(&mut self, id: u64, block_index: u64) {
+        if let Some(batch) = self
+            .unallocated_interest_forward_batches
+            .as_mut()
+            .and_then(|batches| batches.get_mut(&id))
+        {
+            batch.transfer_block_index = Some(block_index);
+            batch.last_error = None;
+        }
+    }
+
+    pub fn mark_unallocated_interest_forward_recorded(&mut self, id: u64) {
+        if let Some(batch) = self
+            .unallocated_interest_forward_batches
+            .as_mut()
+            .and_then(|batches| batches.get_mut(&id))
+        {
+            batch.treasury_recorded = true;
+            batch.last_error = None;
+        }
+    }
+
+    pub fn record_unallocated_interest_forward_error(&mut self, id: u64, error: String) {
+        if let Some(batch) = self
+            .unallocated_interest_forward_batches
+            .as_mut()
+            .and_then(|batches| batches.get_mut(&id))
+        {
+            batch.last_error = Some(error);
+        }
+    }
+
+    /// Assign a treasury only to receipts that have not begun a transfer. A
+    /// destination change after a receipt is on the ledger is forbidden.
+    pub fn set_interest_treasury(
+        &mut self,
+        treasury: Option<Principal>,
+    ) -> Result<(), StabilityPoolError> {
+        let has_started = self
+            .unallocated_interest_forward_batches
+            .as_ref()
+            .map(|batches| {
+                batches.values().any(|batch| {
+                    !batch.treasury_recorded
+                        && batch.treasury.is_some()
+                        && batch.treasury != treasury
+                })
+            })
+            .unwrap_or(false);
+        if has_started {
+            return Err(StabilityPoolError::LedgerTransferFailed {
+                reason: "cannot change interest treasury while a forward is pending".to_string(),
+            });
+        }
+        self.interest_treasury = treasury;
+        if let Some(treasury) = treasury {
+            if let Some(batches) = self.unallocated_interest_forward_batches.as_mut() {
+                for batch in batches.values_mut() {
+                    if !batch.treasury_recorded && batch.transfer_block_index.is_none() {
+                        batch.treasury = Some(treasury);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn is_admin(&self, caller: &Principal) -> bool {
@@ -418,13 +639,10 @@ impl StabilityPoolState {
     /// collateral are excluded from the distribution (they should not earn
     /// interest from vaults backed by collateral they've opted out of).
     ///
-    /// If no eligible depositors hold icUSD when this is called, the function
-    /// logs a warning and returns without crediting anyone. The minted icUSD
-    /// remains in the SP canister's ICRC-1 balance, untracked by
-    /// `total_stablecoin_balances`. This is a known operator-visible edge case:
-    /// the icUSD will be picked up on the next distribution that has eligible
-    /// depositors, or will need manual reconciliation if the no-icUSD-depositors
-    /// state persists.
+    /// If no eligible depositor holds icUSD when this is called, the function
+    /// records no credit. The mint remains in the canister's ICRC-1 balance and
+    /// requires an explicit operator reconciliation policy; assigning it to a
+    /// later depositor would create an unjustified windfall.
     pub fn distribute_interest_revenue(
         &mut self,
         token_ledger: Principal,
@@ -464,15 +682,11 @@ impl StabilityPoolState {
 
         let eligible_total: u64 = holders.iter().map(|(_, b)| *b).sum();
         if eligible_total == 0 {
-            // No icUSD depositors. The minted icUSD remains in the SP canister's
-            // ICRC-1 balance, untracked in total_stablecoin_balances. Surface for
-            // operator visibility: a persistent occurrence indicates the SP has
-            // drifted away from icUSD-only and may need manual reconciliation.
             log!(
                 INFO,
-                "WARN distribute_interest_revenue: {} of token {} received but no eligible icUSD depositors; amount remains in SP canister",
+                "WARN distribute_interest_revenue: {} of token {} received but no eligible icUSD depositor exists; explicit reconciliation required",
                 amount,
-                token_ledger
+                token_ledger,
             );
             return;
         }
@@ -513,6 +727,19 @@ impl StabilityPoolState {
             .entry(token_ledger)
             .or_insert(0) += amount;
         *self.total_interest_received_e8s.get_or_insert(0) += normalize_to_e8s(amount, decimals);
+    }
+
+    /// True when at least one icUSD depositor is eligible for interest from the
+    /// supplied source collateral. This is intentionally the same predicate as
+    /// `distribute_interest_revenue`, so an unallocated payment is routed to
+    /// treasury only when no payout recipient exists at receipt time.
+    pub fn has_eligible_interest_recipient(&self, collateral_type: Option<&Principal>) -> bool {
+        self.deposits.values().any(|pos| {
+            pos.icusd_value(&self.stablecoin_registry) > 0
+                && collateral_type
+                    .map(|ct| self.position_opted_in_for(pos, ct))
+                    .unwrap_or(true)
+        })
     }
 
     pub fn process_withdrawal(
@@ -2340,15 +2567,17 @@ impl StabilityPoolState {
             emergency_paused: self.configuration.emergency_pause,
             total_interest_received_e8s: self.total_interest_received_e8s.unwrap_or(0),
             eligible_icusd_per_collateral: self.eligible_icusd_per_collateral(),
+            eligible_usd_per_collateral: Some(self.eligible_usd_per_collateral()),
         }
     }
 
-    /// For each collateral type, compute the total USD value (e8s) of deposits
-    /// held by depositors who are opted in to that collateral type.
-    /// Counts all stablecoins (icUSD, 3USD, ckUSDT, etc.) since all depositors
-    /// now earn interest proportional to their total deposit value.
+    /// For each collateral type, compute the total icUSD balance (e8s) held by
+    /// depositors who are opted in to that collateral type.
+    ///
+    /// This is the denominator for the borrowing-interest APY. Interest is
+    /// distributed only to icUSD balances; including 3USD or ck-stable
+    /// deposits here would understate the APY without changing payouts.
     fn eligible_icusd_per_collateral(&self) -> Vec<(Principal, u64)> {
-        let vps = self.virtual_prices();
         self.collateral_registry
             .keys()
             .map(|ct| {
@@ -2356,7 +2585,25 @@ impl StabilityPoolState {
                     .deposits
                     .values()
                     .filter(|pos| self.position_opted_in_for(pos, ct))
-                    .map(|pos| pos.total_usd_value(&self.stablecoin_registry, vps))
+                    .map(|pos| pos.icusd_value(&self.stablecoin_registry))
+                    .sum();
+                (*ct, eligible)
+            })
+            .collect()
+    }
+
+    /// Per-collateral liquidation capacity across every accepted stablecoin.
+    /// This must remain distinct from the icUSD-only interest denominator.
+    fn eligible_usd_per_collateral(&self) -> Vec<(Principal, u64)> {
+        let virtual_prices = self.virtual_prices();
+        self.collateral_registry
+            .keys()
+            .map(|ct| {
+                let eligible: u64 = self
+                    .deposits
+                    .values()
+                    .filter(|pos| self.position_opted_in_for(pos, ct))
+                    .map(|pos| pos.total_usd_value(&self.stablecoin_registry, &virtual_prices))
                     .sum();
                 (*ct, eligible)
             })
@@ -2369,6 +2616,13 @@ impl StabilityPoolState {
             collateral_gains: pos.collateral_gains.clone(),
             cfx_claims: pos.cfx_claims.clone(),
             opted_out_collateral: pos.opted_out_collateral.iter().cloned().collect(),
+            eligible_interest_collateral: Some(
+                self.collateral_registry
+                    .keys()
+                    .filter(|collateral| self.position_opted_in_for(pos, collateral))
+                    .copied()
+                    .collect(),
+            ),
             native_payout_addresses: Some(pos.native_payout_addresses.clone().unwrap_or_default()),
             native_payout_destination_tags: Some(
                 pos.native_payout_destination_tags
@@ -2642,6 +2896,9 @@ impl From<StabilityPoolStateV1> for StabilityPoolState {
             token_consecutive_failures: v1.token_consecutive_failures,
             cached_virtual_prices: v1.cached_virtual_prices,
             protocol_reserve_address: v1.protocol_reserve_address,
+            interest_treasury: None,
+            unallocated_interest_forward_batches: Some(BTreeMap::new()),
+            next_unallocated_interest_forward_batch_id: Some(0),
             is_initialized: v1.is_initialized,
             pool_events: v1.pool_events,
             next_event_id: v1.next_event_id,
@@ -3923,6 +4180,35 @@ mod tests {
     }
 
     #[test]
+    fn unallocated_interest_receipt_deduplicates_and_batches_fee_dust() {
+        let mut state = test_state();
+        state.interest_treasury = Some(Principal::from_slice(&[91]));
+        let first = state
+            .queue_unallocated_interest_forward_at(44, icusd_ledger(), 50, 1)
+            .expect("first receipt queues");
+        let duplicate = state
+            .queue_unallocated_interest_forward_at(44, icusd_ledger(), 50, 2)
+            .expect("duplicate receipt is idempotent");
+        assert_eq!(duplicate, first);
+
+        // Simulate a 100-unit fee: the first receipt remains durable dust.
+        let dust = state
+            .prepare_unallocated_interest_forward_at(first, 100, 3)
+            .expect("fee persists before any transfer await");
+        assert_eq!(dust.gross_amount, 50);
+        assert_eq!(dust.fee, Some(100));
+        let same_batch = state
+            .queue_unallocated_interest_forward_at(45, icusd_ledger(), 75, 4)
+            .expect("a later receipt carries dust over the fee threshold");
+        assert_eq!(same_batch, first);
+        let combined = state
+            .unallocated_interest_forward_batch(first)
+            .expect("batch remains durable");
+        assert_eq!(combined.gross_amount, 125);
+        assert_eq!(combined.source_mint_blocks, vec![44, 45]);
+    }
+
+    #[test]
     fn chain_absorb_auto_fields_decode_disabled_when_missing() {
         let mut current = StabilityPoolState::default();
         current
@@ -4882,11 +5168,48 @@ mod tests {
     }
 
     #[test]
-    fn test_distribute_interest_no_icusd_depositors() {
-        // When the pool has depositors but none hold icUSD, the function should
-        // return without crediting anyone or advancing aggregates. The icUSD
-        // amount remains in the SP canister's ICRC-1 balance (orphaned for
-        // operator visibility; see function docstring).
+    fn test_eligible_icusd_per_collateral_excludes_non_icusd_deposits() {
+        let mut state = test_state_with_3usd();
+
+        // Interest is paid only against icUSD. Mixed and non-icUSD positions
+        // must not dilute the per-collateral APY denominator.
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
+        add_deposit_direct(&mut state, user_b(), icusd_ledger(), 100_00000000);
+        add_deposit_direct(&mut state, user_b(), three_usd_ledger(), 100_00000000);
+        add_deposit_direct(&mut state, user_c(), ckusdt_ledger(), 100_000_000);
+
+        let status = state.get_pool_status();
+        let eligible_icp = status
+            .eligible_icusd_per_collateral
+            .iter()
+            .find(|(collateral, _)| *collateral == icp_ledger())
+            .map(|(_, amount)| *amount)
+            .expect("ICP collateral should be registered");
+
+        assert_eq!(
+            eligible_icp, 200_00000000,
+            "only the two 100 icUSD balances should determine the interest APY"
+        );
+
+        let liquidation_capacity_icp = status
+            .eligible_usd_per_collateral
+            .as_ref()
+            .expect("current canister must report all-token liquidation capacity")
+            .iter()
+            .find(|(collateral, _)| *collateral == icp_ledger())
+            .map(|(_, amount)| *amount)
+            .expect("ICP collateral should be registered");
+        assert_eq!(
+            liquidation_capacity_icp, 404_92000000,
+            "liquidation capacity must still include 3USD at its virtual price and ckUSDT"
+        );
+    }
+
+    #[test]
+    fn test_distribute_interest_no_icusd_depositors_requires_reconciliation() {
+        // Automatic reassignment of this mint to a later depositor would create
+        // a windfall with no defined entitlement, so it remains uncredited for
+        // explicit operator reconciliation.
         let mut state = test_state_with_3usd();
 
         // Both depositors hold only 3USD — no icUSD anywhere
@@ -4900,13 +5223,12 @@ mod tests {
             .copied()
             .unwrap_or(0);
 
-        state.distribute_interest_revenue(icusd_ledger(), 10_00000000, None);
+        state.distribute_interest_revenue(icusd_ledger(), 10_00000000, Some(icp_ledger()));
 
-        // Aggregates unchanged
+        // No depositor or aggregate is credited.
         assert_eq!(
             state.total_interest_received_e8s.unwrap_or(0),
             total_received_before,
-            "total_interest_received_e8s should not advance when no icUSD depositors"
         );
         assert_eq!(
             state
@@ -4915,7 +5237,7 @@ mod tests {
                 .copied()
                 .unwrap_or(0),
             stable_balance_before,
-            "total_stablecoin_balances[icusd] should not advance"
+            "unallocated interest is not withdrawable without reconciliation"
         );
 
         // Neither depositor's balances changed
@@ -4938,6 +5260,56 @@ mod tests {
                 "3USD balance unchanged"
             );
         }
+    }
+
+    #[test]
+    fn interest_excludes_icusd_depositor_opted_out_of_source_collateral() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
+        add_deposit_direct(&mut state, user_b(), icusd_ledger(), 100_00000000);
+        state.opt_out_collateral(&user_a(), icp_ledger()).unwrap();
+
+        state.distribute_interest_revenue(icusd_ledger(), 20_00000000, Some(icp_ledger()));
+
+        assert_eq!(
+            state.deposits[&user_a()].stablecoin_balances[&icusd_ledger()],
+            100_00000000,
+            "a depositor opted out of ICP receives none of the ICP-vault interest"
+        );
+        assert_eq!(
+            state.deposits[&user_b()].stablecoin_balances[&icusd_ledger()],
+            120_00000000,
+            "the opted-in icUSD depositor receives the full ICP-vault interest"
+        );
+    }
+
+    #[test]
+    fn user_interest_eligibility_matches_native_opt_in_policy() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
+
+        let before = state.get_user_position(&user_a()).unwrap();
+        assert!(
+            !before
+                .eligible_interest_collateral
+                .as_ref()
+                .expect("current canister reports exact eligibility")
+                .contains(&xrp_ledger()),
+            "XRP must be absent until a payout address opts the depositor in"
+        );
+
+        state
+            .opt_in_native_collateral(&user_a(), xrp_ledger(), valid_xrp_address())
+            .unwrap();
+        let after = state.get_user_position(&user_a()).unwrap();
+        assert!(
+            after
+                .eligible_interest_collateral
+                .as_ref()
+                .expect("current canister reports exact eligibility")
+                .contains(&xrp_ledger()),
+            "the UI-facing eligibility set must include XRP after native opt-in"
+        );
     }
 
     // ─── Test: Rounding dust doesn't drift aggregate totals ───
