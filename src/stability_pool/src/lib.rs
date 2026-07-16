@@ -711,16 +711,6 @@ async fn process_unallocated_interest_forward(batch_id: u64) -> Result<(), Stabi
 
     mutate_state(|s| {
         s.mark_unallocated_interest_forward_recorded(batch_id);
-        s.push_event(
-            ic_cdk::api::id(),
-            PoolEventType::UnallocatedInterestForwardedToTreasury {
-                gross_amount: batch.gross_amount,
-                fee,
-                net_amount,
-                transfer_block_index,
-                source_mint_blocks: batch.source_mint_blocks.clone(),
-            },
-        );
     });
     Ok(())
 }

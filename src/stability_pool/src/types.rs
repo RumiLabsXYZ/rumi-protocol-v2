@@ -869,16 +869,6 @@ pub enum PoolEventType {
         token_ledger: Principal,
         amount: u64,
     },
-    /// Interest with no eligible icUSD depositor was sent to protocol
-    /// treasury. This is deliberately separate from `InterestReceived` so it
-    /// never appears as depositor yield.
-    UnallocatedInterestForwardedToTreasury {
-        gross_amount: u64,
-        fee: u64,
-        net_amount: u64,
-        transfer_block_index: u64,
-        source_mint_blocks: Vec<u64>,
-    },
     // ─── Collateral Opt-in/Opt-out ───
     OptOutCollateral {
         collateral_type: Principal,

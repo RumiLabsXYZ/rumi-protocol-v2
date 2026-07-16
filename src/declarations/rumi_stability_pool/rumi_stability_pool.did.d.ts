@@ -219,15 +219,6 @@ export type PoolEventType = {
   } |
   { 'OperationsResumed' : null } |
   { 'CollateralRegistered' : { 'ledger' : Principal, 'symbol' : string } } |
-  {
-    'UnallocatedInterestForwardedToTreasury' : {
-      'fee' : bigint,
-      'source_mint_blocks' : BigUint64Array | bigint[],
-      'net_amount' : bigint,
-      'transfer_block_index' : bigint,
-      'gross_amount' : bigint,
-    }
-  } |
   { 'OptOutCollateral' : { 'collateral_type' : Principal } } |
   { 'OptInCollateral' : { 'collateral_type' : Principal } } |
   { 'StablecoinRegistered' : { 'ledger' : Principal, 'symbol' : string } } |
