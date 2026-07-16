@@ -80,7 +80,7 @@ fn fallback_ledger_fee(ledger: Principal) -> u64 {
 /// Fetch a stablecoin ledger's transfer fee, caching successful lookups per
 /// ledger. On query failure, falls back to normalized registry metadata without
 /// caching so the next transfer re-queries.
-async fn ledger_transfer_fee(ledger: Principal) -> u64 {
+pub(crate) async fn ledger_transfer_fee(ledger: Principal) -> u64 {
     if let Some(fee) = LEDGER_FEES.with(|c| c.borrow().get(&ledger).copied()) {
         return fee;
     }
