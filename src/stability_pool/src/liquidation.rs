@@ -2137,6 +2137,14 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
             continue;
         }
 
+        // The pool pays the LIVE ledger fee twice per liquidated token: once on
+        // the `icrc2_approve` below, and again when the backend's
+        // `icrc2_transfer_from` pulls the tokens (both are charged to the pool as
+        // the `from`/approver account). Use the live `icrc1_fee` rather than the
+        // (possibly stale) registry `transfer_fee` so the book decrement matches
+        // exactly what the ledger charges.
+        let ledger_fee = crate::deposits::ledger_transfer_fee(*token_ledger).await;
+
         // Approve backend to spend this token
         let approve_args = ApproveArgs {
             from_subaccount: None,
@@ -2157,14 +2165,11 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
 
         match approve_result {
             Ok((Ok(_),)) => {
-                // Deduct the approve fee from tracked balances
-                if let Some(fee) = stablecoin_configs
-                    .get(token_ledger)
-                    .and_then(|c| c.transfer_fee)
-                {
-                    if fee > 0 {
-                        mutate_state(|s| s.deduct_fee_from_pool(*token_ledger, fee));
-                    }
+                // Deduct the approve fee from tracked balances. The matching
+                // transfer_from fee is deducted only on a successful pull below
+                // (a failed backend call charges no transfer_from fee).
+                if ledger_fee > 0 {
+                    mutate_state(|s| s.deduct_fee_from_pool(*token_ledger, ledger_fee));
                 }
             }
             Ok((Err(e),)) => {
@@ -2274,6 +2279,15 @@ async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> Liqui
                     (None, _) => *amount,
                 };
                 actual_consumed.insert(*token_ledger, realized_consumed);
+                // The backend's `icrc2_transfer_from` pull charged the pool a
+                // second ledger fee (the approve fee was already deducted above).
+                // Debit it too, otherwise the tracked aggregate stays one fee
+                // above the live ledger balance per liquidation and eventually
+                // trips the withdraw guard for non-sole holders (SP live-vs-ledger
+                // drift, 2026-07-16).
+                if ledger_fee > 0 {
+                    mutate_state(|s| s.deduct_fee_from_pool(*token_ledger, ledger_fee));
+                }
                 total_collateral_gained += collateral;
                 // Bug 7: one token per vault per round — vault state changed, remaining draws are stale
                 break;

@@ -17,6 +17,11 @@ use crate::types::*;
 
 const CHAIN_ABSORB_AUTO_TIMER_POLL_SECONDS: u64 = 60;
 const UNALLOCATED_INTEREST_FORWARD_RETRY_SECONDS: u64 = 60;
+/// How often the pool reconciles its tracked aggregate against live ledger
+/// balances and logs any shortfall. Hourly: a handful of balance queries, so
+/// negligible cycle cost, while still surfacing drift long before it can trip a
+/// depositor's withdrawal.
+const LEDGER_RECONCILIATION_CHECK_SECONDS: u64 = 3600;
 
 pub(crate) fn pool_balance_mutation_blocked() -> bool {
     crate::pool_guard::liquidation_in_progress() || read_state(|s| s.has_pending_pool_absorbs())
@@ -58,6 +63,7 @@ fn init(args: StabilityPoolInitArgs) {
         setup_virtual_price_timer();
         setup_chain_absorb_auto_timer();
         setup_unallocated_interest_forward_retry_timer();
+        setup_ledger_reconciliation_timer();
     });
 }
 
@@ -96,6 +102,7 @@ fn post_upgrade(_args: StabilityPoolInitArgs) {
         setup_virtual_price_timer();
         setup_chain_absorb_auto_timer();
         setup_unallocated_interest_forward_retry_timer();
+        setup_ledger_reconciliation_timer();
     });
 }
 
@@ -837,6 +844,84 @@ pub fn validate_pool_state() -> Result<String, String> {
         s.validate_state()
             .map(|_| "Pool state is consistent".to_string())
     })
+}
+
+/// Compare each registered stablecoin's tracked aggregate against its live
+/// on-ledger balance. Read-only: queries every ledger and returns the deltas,
+/// never mutates state. Ledgers whose balance query fails are omitted (logged)
+/// rather than reported as a false shortfall.
+async fn compute_ledger_reconciliation() -> Vec<LedgerReconciliationEntry> {
+    let tokens: Vec<(Principal, String)> = read_state(|s| {
+        s.stablecoin_registry
+            .iter()
+            .map(|(ledger, config)| (*ledger, config.symbol.clone()))
+            .collect()
+    });
+
+    let mut entries = Vec::with_capacity(tokens.len());
+    for (ledger, symbol) in tokens {
+        let Some(live_e8s) = crate::deposits::ledger_pool_balance(ledger).await else {
+            continue;
+        };
+        let recorded_e8s = read_state(|s| {
+            s.total_stablecoin_balances
+                .get(&ledger)
+                .copied()
+                .unwrap_or(0)
+        });
+        entries.push(LedgerReconciliationEntry {
+            ledger,
+            symbol,
+            recorded_e8s,
+            live_e8s,
+            delta_e8s: live_e8s as i64 - recorded_e8s as i64,
+            healthy: live_e8s >= recorded_e8s,
+        });
+    }
+    entries
+}
+
+/// Admin-only, read-only ledger reconciliation. Reveals, per stablecoin, the
+/// tracked aggregate vs. the live ledger balance so a shortfall (books above
+/// ledger) can be spotted and remediated (top up the pool, or `admin_correct_balance`)
+/// before it blocks withdrawals. Admin-gated because it triggers one
+/// inter-canister balance query per token.
+#[update]
+pub async fn get_ledger_reconciliation() -> Result<Vec<LedgerReconciliationEntry>, StabilityPoolError>
+{
+    let caller = ic_cdk::api::caller();
+    if !read_state(|s| s.is_admin(&caller)) {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    Ok(compute_ledger_reconciliation().await)
+}
+
+/// Periodic self-check: reconcile tracked aggregates against live ledger
+/// balances and log any shortfall so operators are alerted proactively. Never
+/// auto-corrects — writing books down to a transient in-flight balance (e.g.
+/// mid-liquidation) would socialize a phantom loss; remediation stays a
+/// deliberate admin action.
+fn setup_ledger_reconciliation_timer() {
+    ic_cdk_timers::set_timer_interval(
+        Duration::from_secs(LEDGER_RECONCILIATION_CHECK_SECONDS),
+        || {
+            ic_cdk::spawn(async {
+                for entry in compute_ledger_reconciliation().await {
+                    if !entry.healthy {
+                        log!(
+                            INFO,
+                            "[ledger-reconciliation] SHORTFALL {} ({}): live {} < recorded {} (delta {})",
+                            entry.symbol,
+                            entry.ledger,
+                            entry.live_e8s,
+                            entry.recorded_e8s,
+                            entry.delta_e8s
+                        );
+                    }
+                }
+            });
+        },
+    );
 }
 
 // ─── Admin: Registry Management ───

@@ -36,6 +36,27 @@ pub struct StablecoinConfig {
     pub underlying_pool: Option<Principal>,
 }
 
+/// Per-stablecoin reconciliation of the pool's tracked aggregate against its
+/// live on-ledger balance. `validate_pool_state` only checks internal
+/// book-vs-book consistency and never touches the ledger, so a physical
+/// outflow that isn't mirrored in the books (a stranded refund, an
+/// under-booked liquidation fee) stays invisible until a withdrawal trips the
+/// `InsufficientPoolBalance` guard. This surfaces that drift directly.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LedgerReconciliationEntry {
+    pub ledger: Principal,
+    pub symbol: String,
+    /// `total_stablecoin_balances[ledger]` — what the books say depositors are owed.
+    pub recorded_e8s: u64,
+    /// Live `icrc1_balance_of(pool)` on that ledger.
+    pub live_e8s: u64,
+    /// `live_e8s - recorded_e8s`. Negative = shortfall (books above ledger →
+    /// withdrawals for non-sole holders will be blocked). Positive = surplus (safe).
+    pub delta_e8s: i64,
+    /// `live_e8s >= recorded_e8s`. False means a shortfall needs remediation.
+    pub healthy: bool,
+}
+
 /// Subset of backend CollateralConfig needed by the pool.
 #[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CollateralInfo {

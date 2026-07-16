@@ -5582,23 +5582,33 @@ async fn refund_3usd_to_stability_pool(
     use ic_canister_log::log;
     use rumi_protocol_backend::logs::INFO;
 
+    // Mint the dedup nonce up front so a stranded refund is enqueued under the
+    // SAME nonce it (may have) attempted the transfer with; a retry then
+    // deduplicates on the 3USD ledger instead of double-refunding.
+    let refund_nonce = mutate_state(|s| s.next_op_nonce());
+
     let fee = match rumi_protocol_backend::management::get_or_refresh_fee(three_usd_ledger).await {
         Ok(f) => f,
         Err(e) => {
+            // Couldn't determine the fee, so no transfer was attempted. Queue the
+            // gross excess (fee applied at retry time) so it heals automatically.
             log!(INFO,
-                "[stability_pool_liquidate_with_reserves] CRITICAL: refund of {} 3USD for vault {} \
-                 to SP {} aborted (could not fetch ledger fee: {}). Tokens stranded in reserves; \
-                 use admin tools to reconcile.",
+                "[stability_pool_liquidate_with_reserves] refund of {} 3USD for vault {} to SP {} \
+                 deferred (could not fetch ledger fee: {}); enqueued for durable retry.",
                 amount_e8s, vault_id, sp_caller, e
             );
+            enqueue_pending_3usd_refund(three_usd_ledger, sp_caller, amount_e8s, vault_id, refund_nonce);
             return;
         }
     };
     if amount_e8s <= fee {
+        // Sub-fee dust: a refund can never cover the ledger fee, so there is
+        // nothing recoverable to queue. This is unreachable while the 3USD fee
+        // is 0 and only ever concerns amounts of at most one fee.
         log!(
             INFO,
             "[stability_pool_liquidate_with_reserves] CRITICAL: refund of {} 3USD for vault {} \
-             to SP {} aborted (amount does not cover ledger fee {}). Tokens stranded in reserves.",
+             to SP {} aborted (amount does not cover ledger fee {}). Dust stranded in reserves.",
             amount_e8s,
             vault_id,
             sp_caller,
@@ -5607,7 +5617,6 @@ async fn refund_3usd_to_stability_pool(
         return;
     }
     let refund_amount = amount_e8s - fee;
-    let refund_nonce = mutate_state(|s| s.next_op_nonce());
     let result = rumi_protocol_backend::management::transfer_idempotent(
         three_usd_ledger,
         Some(rumi_protocol_backend::management::protocol_3usd_reserves_subaccount()),
@@ -5629,13 +5638,57 @@ async fn refund_3usd_to_stability_pool(
             );
         }
         Err(e) => {
+            // Do NOT strand: persist the refund so `process_pending_transfer`
+            // retries it (reusing `refund_nonce` for ledger dedup) until it
+            // settles or hits MAX_PENDING_RETRIES. Without this the SP's live
+            // 3USD balance stays below its tracked aggregate and its withdraw
+            // guard blocks every non-sole-holder with `InsufficientPoolBalance`.
             log!(INFO,
-                "[stability_pool_liquidate_with_reserves] CRITICAL: refund of {} 3USD for vault {} \
-                 to SP {} FAILED: {:?}. Tokens stranded in reserves; reconcile manually.",
+                "[stability_pool_liquidate_with_reserves] refund of {} 3USD for vault {} to SP {} \
+                 FAILED: {:?}; enqueued for durable retry.",
                 refund_amount, vault_id, sp_caller, e
             );
+            enqueue_pending_3usd_refund(three_usd_ledger, sp_caller, refund_amount, vault_id, refund_nonce);
         }
     }
+}
+
+/// Persist a stranded 3USD reserve refund so `process_pending_transfer` heals it.
+/// Keyed by `op_nonce`, which is reused across retries so the 3USD ledger
+/// deduplicates a previously-committed-but-reply-lost transfer.
+fn enqueue_pending_3usd_refund(
+    three_usd_ledger: Principal,
+    sp_caller: Principal,
+    amount_e8s: u64,
+    vault_id: u64,
+    op_nonce: u128,
+) {
+    mutate_state(|s| {
+        s.pending_3usd_refunds.insert(
+            op_nonce,
+            rumi_protocol_backend::state::PendingThreeUsdRefund {
+                stability_pool: sp_caller,
+                ledger: three_usd_ledger,
+                amount_e8s,
+                vault_id,
+                retry_count: 0,
+                op_nonce,
+            },
+        );
+    });
+    // Kick the durable-transfer drain loop so the refund is retried promptly
+    // (it self-reschedules every 5s while any queue is non-empty).
+    ic_cdk::spawn(rumi_protocol_backend::process_pending_transfer());
+}
+
+/// Stranded 3USD reserve refunds awaiting durable retry by
+/// `process_pending_transfer`. Non-empty means the stability pool is owed 3USD
+/// that a refund transfer failed to deliver; the queue self-heals but this
+/// surfaces the shortfall for monitoring. Empty in normal operation.
+#[query]
+#[candid_method(query)]
+fn get_pending_3usd_refunds() -> Vec<rumi_protocol_backend::state::PendingThreeUsdRefund> {
+    read_state(|s| s.pending_3usd_refunds.values().copied().collect())
 }
 
 /// Cumulative 3USD held in protocol reserves from stability pool liquidations (e8s).

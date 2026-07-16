@@ -80,7 +80,7 @@ fn fallback_ledger_fee(ledger: Principal) -> u64 {
 /// Fetch a stablecoin ledger's transfer fee, caching successful lookups per
 /// ledger. On query failure, falls back to normalized registry metadata without
 /// caching so the next transfer re-queries.
-async fn ledger_transfer_fee(ledger: Principal) -> u64 {
+pub(crate) async fn ledger_transfer_fee(ledger: Principal) -> u64 {
     if let Some(fee) = LEDGER_FEES.with(|c| c.borrow().get(&ledger).copied()) {
         return fee;
     }
@@ -180,7 +180,7 @@ pub async fn transfer_unallocated_interest_to_treasury(
     }
 }
 
-async fn ledger_pool_balance(ledger: Principal) -> Option<u64> {
+pub(crate) async fn ledger_pool_balance(ledger: Principal) -> Option<u64> {
     let account = Account {
         owner: ic_cdk::api::id(),
         subaccount: None,

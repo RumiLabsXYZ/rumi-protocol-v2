@@ -1038,6 +1038,36 @@ pub struct PendingStabilityPoolInterestNotification {
     pub source_mint_block: u64,
 }
 
+/// Durable refund record for a stranded 3USD reserve refund
+/// (`stability_pool_liquidate_with_reserves`).
+///
+/// The reserves-path liquidation pulls the FULL requested 3USD from the stability
+/// pool into the protocol's `protocol_3usd_reserves` subaccount, then refunds the
+/// proportional excess when the writedown is capped below the requested amount.
+/// Pre-fix, a failed refund transfer only emitted a CRITICAL log, stranding the
+/// excess 3USD in reserves: the SP's live ledger balance dropped below its tracked
+/// aggregate (`total_stablecoin_balances[3USD]`), and its withdraw guard then
+/// blocks every non-sole-holder with `InsufficientPoolBalance`. This queue makes
+/// the refund durable: `process_pending_transfer` retries it (reserves subaccount
+/// -> SP) until success or MAX_PENDING_RETRIES, reusing `op_nonce` so the 3USD
+/// ledger deduplicates if a retry's reply was lost. Keyed by `op_nonce`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize, Copy, candid::CandidType)]
+pub struct PendingThreeUsdRefund {
+    /// The stability pool canister the 3USD is owed back to.
+    pub stability_pool: Principal,
+    /// The 3USD ledger the refund transfers on.
+    pub ledger: Principal,
+    /// 3USD amount to refund (in e8s), already net of the ledger fee.
+    pub amount_e8s: u64,
+    /// Vault whose capped/failed liquidation stranded this refund (for tracing).
+    pub vault_id: u64,
+    #[serde(default)]
+    pub retry_count: u8,
+    /// Wave-3 ICRC dedup nonce. Minted once at first attempt, reused on every
+    /// retry so the 3USD ledger deduplicates instead of double-refunding.
+    pub op_nonce: u128,
+}
+
 thread_local! {
     static __STATE: RefCell<Option<State>> = RefCell::default();
 }
@@ -1116,6 +1146,13 @@ pub struct State {
     /// keyed by the burn icUSD block index. Empty for pre-Wave-4 snapshots.
     #[serde(default)]
     pub pending_refunds: BTreeMap<u64, PendingRefund>,
+    /// Durable retry queue for stranded 3USD reserve refunds
+    /// (`stability_pool_liquidate_with_reserves`), keyed by `op_nonce`. A failed
+    /// refund back to the stability pool would otherwise leave the SP's live 3USD
+    /// balance below its tracked aggregate and block all non-sole-holder
+    /// withdrawals. `serde(default)` keeps older snapshots decoding cleanly.
+    #[serde(default)]
+    pub pending_3usd_refunds: BTreeMap<u128, PendingThreeUsdRefund>,
     pub mode: Mode,
     /// Wave-14a CDP-01: count of consecutive XRC fetch failures. Reset
     /// to 0 on any successful fetch. When this reaches
@@ -1873,6 +1910,7 @@ impl Default for State {
             pending_excess_transfers: BTreeMap::new(),
             pending_redemption_transfer: BTreeMap::new(),
             pending_refunds: BTreeMap::new(),
+            pending_3usd_refunds: BTreeMap::new(),
             mode: Mode::default(),
             consecutive_xrc_failures: 0,
             mode_triggered_by_oracle: false,
@@ -2028,6 +2066,7 @@ impl From<InitArg> for State {
             principal_to_vault_ids: BTreeMap::new(),
             pending_redemption_transfer: BTreeMap::new(),
             pending_refunds: BTreeMap::new(),
+            pending_3usd_refunds: BTreeMap::new(),
             vault_id_to_vaults: BTreeMap::new(),
             xrc_principal: args.xrc_principal,
             icusd_ledger_principal: args.icusd_ledger_principal,
