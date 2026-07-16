@@ -1513,15 +1513,19 @@ fn amm1_earnings_pro_rata() {
     );
     let _ = one_thousand; // keep helper around for clarity
 
-    // Step 9: LP A's icUSD balance should grow by *exactly* `claimed_amount`.
-    // The AMM passes `fee: None` to `icrc1_transfer`, so the ledger charges
-    // its configured fee from the reward *subaccount* (the source); the
-    // recipient receives the full transfer amount.
+    // Step 9: LP A's icUSD balance should grow by `claimed_amount` minus
+    // exactly one ledger fee. `transfer_reward_icusd` mirrors
+    // `transfer_to_user`: it sends `claimed_amount - fee` so the reward
+    // subaccount drops by exactly `claimed_amount` (keeping Σclaimable in
+    // step with the subaccount balance) and the claimant bears the fee,
+    // same as swap/withdraw payouts. This icUSD test ledger's fee is
+    // 10_000 (see `icusd_init.transfer_fee` above).
+    let icusd_fee: u128 = 10_000;
     let lp_a_balance_after = icusd_balance_of(&env, env.lp_a, None);
     assert_eq!(
-        lp_a_balance_after, lp_a_balance_before + claimed_amount,
-        "LP A balance delta should equal claimed (ledger fee comes from \
-         reward subaccount, not the recipient)",
+        lp_a_balance_after, lp_a_balance_before + claimed_amount - icusd_fee,
+        "LP A balance delta should equal claimed minus one ledger fee \
+         (the claimant bears the fee, mirroring transfer_to_user)",
     );
 
     // Step 10: LP A's pending should be ~0.

@@ -147,6 +147,29 @@ pub async fn transfer_to_user(
 /// `crate::reward_subaccount_for` and `crate::ICUSD_LEDGER` are `pub` so we
 /// can derive the source subaccount and resolve the icUSD ledger principal
 /// without duplicating constants.
+///
+/// Mirrors `transfer_to_user`'s fee handling: `notify_reward_received`
+/// credits the FULL donated amount into `acc_reward_per_share`, so
+/// Σ(claimable across all LPs) equals exactly the reward subaccount's
+/// balance. The ICRC-1 ledger debits `sent + fee` from the source
+/// subaccount but credits the recipient only `sent`, so if we sent the
+/// full `amount` (fee: None) the subaccount would drop by `amount + fee`
+/// per claim -- one ledger fee more than was ever reserved for it. Over
+/// enough claims the subaccount balance drifts below the sum of
+/// outstanding `claimable`, and a later claim fails with
+/// InsufficientFunds even though the claimant is only owed what they're
+/// entitled to. Sending `amount - fee` instead keeps the subaccount drop
+/// exactly in step with `amount` (the claimant bears the fee, as is
+/// standard), preserving Σclaimable == subaccount balance.
+///
+/// Unlike `transfer_to_user`, an `amount <= fee` here must be a hard
+/// error rather than a silent `Ok(0)`: `claim_rewards` has already
+/// optimistically zeroed the caller's `claimable` before invoking this
+/// and treats any `Ok` as "the funds were sent". Returning `Ok(0)` would
+/// silently burn the claim instead of restoring it for retry. In
+/// practice this branch is unreachable because `claim_rewards` gates on
+/// `MIN_CLAIM_E8S` (10x the live 100_000 e8s icUSD ledger fee) before ever
+/// calling here, but it must fail closed if that invariant ever changes.
 pub async fn transfer_reward_icusd(
     pool_id: &str,
     to: Principal,
@@ -154,6 +177,14 @@ pub async fn transfer_reward_icusd(
 ) -> Result<u64, String> {
     let icusd_ledger = Principal::from_text(crate::ICUSD_LEDGER)
         .expect("invalid icUSD ledger principal");
+    let fee = ledger_fee(icusd_ledger).await;
+    if amount <= fee {
+        return Err(format!(
+            "reward amount {} does not exceed ledger fee {}; refusing to burn the claim",
+            amount, fee
+        ));
+    }
+    let send = amount - fee;
     let from_sub = crate::reward_subaccount_for(&pool_id.to_string());
     let args = TransferArg {
         from_subaccount: Some(from_sub),
@@ -161,8 +192,7 @@ pub async fn transfer_reward_icusd(
             owner: to,
             subaccount: None,
         },
-        amount: candid::Nat::from(amount),
-        // Pass None so the ledger applies its own fee from `amount` automatically.
+        amount: candid::Nat::from(send),
         fee: None,
         memo: None,
         // Set created_at_time for ledger-side deduplication; matches the

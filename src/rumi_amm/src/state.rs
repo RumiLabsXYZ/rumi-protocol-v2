@@ -21,14 +21,14 @@ pub const MAX_REWARD_EVENTS: usize = 50_000;
 pub const MAX_CLAIM_EVENTS: usize = 50_000;
 pub const MAX_PROCESSED_NONCES: usize = 1024;
 pub const REWARD_SCALE: u128 = 1_000_000_000_000; // 1e12 fixed-point for acc_reward_per_share
-/// Minimum claimable amount: 10x the icUSD ledger fee (assumed 10000 e8s = 0.0001 icUSD).
-/// Below this threshold a claim would net negative on the user.
-pub const MIN_CLAIM_E8S: u128 = 100_000;
-/// Hardcoded icUSD ledger fee used as a fallback when refetching the on-chain
-/// balance fails after a successful transfer. The primary path queries the
-/// ledger and sets `reward_balance_snapshot = on_chain` so any drift between
-/// this constant and the live ledger fee self-heals on the next interaction.
-pub const ICUSD_LEDGER_FEE_E8S: u128 = 10_000;
+/// Minimum claimable amount: 10x the live icUSD ledger fee (100_000 e8s =
+/// 0.001 icUSD), i.e. 1_000_000 e8s = 0.01 icUSD. `claim_rewards` pays out
+/// via `transfer_reward_icusd`, which sends `claimable - fee` and fails
+/// closed if `claimable <= fee`. Gating at 10x the fee guarantees any claim
+/// that passes this check has `claimable` well above the fee, so the payout
+/// nets clearly positive for the user and the fail-closed guard is never
+/// reached in practice.
+pub const MIN_CLAIM_E8S: u128 = 1_000_000;
 pub const MAX_TVL_SAMPLES: usize = 800; // ~30 months at 1/day; ~5.5 months at 4/day
 
 // ─── State ───

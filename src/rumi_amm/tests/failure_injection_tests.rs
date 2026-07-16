@@ -15,6 +15,7 @@ use candid::{decode_one, encode_args, encode_one, CandidType, Deserialize, Nat, 
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc2::approve::ApproveArgs;
 use pocket_ic::{PocketIc, PocketIcBuilder, WasmResult};
+use sha2::{Digest, Sha256};
 
 use rumi_amm::types::*;
 
@@ -1007,4 +1008,262 @@ fn ic_s_003_claim_of_dust_rejected_at_claim_time() {
     assert_eq!(get_flaky_balance(&env, env.token_a_id, env.user, None), user_a_before);
     assert!(pending_claims(&env).iter().any(|c| c.id == claim_id),
         "dust claim must remain pending for recovery if the fee ever drops");
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Regression test: reward-claim fee leak (2026-07-14 mainnet incident).
+//
+// `notify_reward_received` credits 100% of each icUSD donation into
+// `acc_reward_per_share`, so Σ(claimable across all LPs) == the full
+// donated total sitting in the pool's reward subaccount. But (pre-fix)
+// `claim_rewards` paid out via `transfer_reward_icusd` with `fee: None`
+// and the FULL `amount`. Under ICRC-1, `fee: None` debits the source
+// subaccount `amount + fee`, so every claim leaked one ledger fee that
+// was never reserved anywhere. Once the leaked fees exceed the tiny
+// MINIMUM_LIQUIDITY dust left in the subaccount, a claim fails with
+// InsufficientFunds even though the claimant is only asking for what
+// they're entitled to.
+//
+// Reproduction (the "simpler" variant from the fix brief): fund the
+// reward subaccount with EXACTLY the distributed total (no fee headroom
+// beyond the MINIMUM_LIQUIDITY placeholder's negligible dust share), then
+// have the sole real LP claim. Pre-fix this fails with InsufficientFunds;
+// post-fix it must succeed, paying the claimant net of one ledger fee and
+// leaving only dust behind.
+// ════════════════════════════════════════════════════════════════════════
+
+/// icUSD ledger canister ID the AMM hardcodes via `ICUSD_LEDGER`. Reward
+/// payouts always target this exact principal, so the test ledger for
+/// reward-flow scenarios must be installed there via `create_canister_with_id`.
+const ICUSD_LEDGER_PRINCIPAL: &str = "t6bor-paaaa-aaaap-qrd5q-cai";
+
+/// Derive the AMM's per-pool reward subaccount. Mirrors
+/// `rumi_amm::reward_subaccount_for` (sha256 of `"rumi_amm:rewards:" || pool_id`).
+fn reward_subaccount(pool_id: &str) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(b"rumi_amm:rewards:");
+    h.update(pool_id.as_bytes());
+    let digest = h.finalize();
+    let mut sub = [0u8; 32];
+    sub.copy_from_slice(&digest);
+    sub
+}
+
+/// Reward-flow flaky-ledger environment: two flaky collateral ledgers (as in
+/// `FlakyTestEnv`) plus a third flaky ledger pinned at the AMM's hardcoded
+/// `ICUSD_LEDGER` principal, used as the reward-payout ledger (its
+/// `set_fee`/`icrc1_fee` support lets us exercise fee-drift, unlike the real
+/// ICRC-1 ledger wasm whose fee is init-time only). `admin` is wired as the
+/// `protocol_backend_principal` so it can call `notify_reward_received`.
+struct RewardFlakyEnv {
+    pic: PocketIc,
+    amm_id: Principal,
+    token_a_id: Principal,
+    token_b_id: Principal,
+    icusd_ledger_id: Principal,
+    admin: Principal,
+    user: Principal,
+}
+
+fn setup_flaky_with_rewards() -> RewardFlakyEnv {
+    let pic = PocketIcBuilder::new()
+        .with_application_subnet()
+        .build();
+
+    let admin = Principal::self_authenticating(&[5, 6, 7, 8]);
+    let user = Principal::self_authenticating(&[1, 2, 3, 4]);
+
+    // Two collateral ledgers for the pool.
+    let token_a_id = deploy_flaky_ledger(&pic);
+    let token_b_id = deploy_flaky_ledger(&pic);
+
+    // icUSD reward ledger MUST be installed at the AMM's hardcoded
+    // ICUSD_LEDGER principal so the AMM's inter-canister icrc1_transfer /
+    // icrc1_balance_of / icrc1_fee calls reach this test ledger.
+    let icusd_target = Principal::from_text(ICUSD_LEDGER_PRINCIPAL)
+        .expect("invalid icUSD ledger principal");
+    let icusd_ledger_id = pic
+        .create_canister_with_id(Some(admin), None, icusd_target)
+        .expect("create icusd ledger at hardcoded id");
+    pic.add_cycles(icusd_ledger_id, 2_000_000_000_000);
+    pic.install_canister(icusd_ledger_id, flaky_ledger_wasm(), encode_one(()).unwrap(), Some(admin));
+
+    // AMM canister.
+    let amm_id = pic.create_canister_with_settings(Some(admin), None);
+    pic.add_cycles(amm_id, 2_000_000_000_000);
+    let amm_init = AmmInitArgs { admin };
+    pic.install_canister(amm_id, amm_wasm(), encode_one(amm_init).unwrap(), Some(admin));
+
+    // Mint collateral tokens to user and approve the AMM.
+    let user_account = FlakyAccount { owner: user, subaccount: None };
+    let mint_amount = Nat::from(1_000_000_00000000u128);
+    pic.update_call(token_a_id, Principal::anonymous(), "mint",
+        encode_args((user_account.clone(), mint_amount.clone())).unwrap())
+        .expect("mint token_a failed");
+    pic.update_call(token_b_id, Principal::anonymous(), "mint",
+        encode_args((user_account, mint_amount)).unwrap())
+        .expect("mint token_b failed");
+    approve_flaky(&pic, token_a_id, user, amm_id);
+    approve_flaky(&pic, token_b_id, user, amm_id);
+
+    // Wire admin as the protocol backend so it can call notify_reward_received.
+    let result = pic
+        .update_call(amm_id, admin, "set_protocol_backend_principal", encode_one(admin).unwrap())
+        .expect("set_protocol_backend_principal call failed");
+    match result {
+        WasmResult::Reply(bytes) => {
+            let res: Result<(), AmmError> = decode_one(&bytes).expect("decode failed");
+            res.expect("set_protocol_backend_principal returned Err");
+        }
+        WasmResult::Reject(msg) => panic!("set_protocol_backend_principal rejected: {}", msg),
+    }
+
+    RewardFlakyEnv { pic, amm_id, token_a_id, token_b_id, icusd_ledger_id, admin, user }
+}
+
+fn create_pool_rw(env: &RewardFlakyEnv) -> String {
+    let args = CreatePoolArgs {
+        token_a: env.token_a_id,
+        token_b: env.token_b_id,
+        fee_bps: 30,
+        curve: CurveType::ConstantProduct,
+    };
+    let result = env.pic
+        .update_call(env.amm_id, env.admin, "create_pool", encode_one(args).unwrap())
+        .expect("create_pool failed");
+    match result {
+        WasmResult::Reply(bytes) => {
+            let res: Result<String, AmmError> = decode_one(&bytes).expect("decode failed");
+            res.expect("create_pool returned Err")
+        }
+        WasmResult::Reject(msg) => panic!("create_pool rejected: {}", msg),
+    }
+}
+
+fn add_initial_liquidity_rw(env: &RewardFlakyEnv, pool_id: &str, amount: u128) {
+    let result = env.pic
+        .update_call(env.amm_id, env.user, "add_liquidity",
+            encode_args((pool_id.to_string(), amount, amount, 0u128)).unwrap())
+        .expect("add_liquidity failed");
+    match result {
+        WasmResult::Reply(bytes) => {
+            let res: Result<Nat, AmmError> = decode_one(&bytes).expect("decode failed");
+            res.expect("add_liquidity returned Err");
+        }
+        WasmResult::Reject(msg) => panic!("add_liquidity rejected: {}", msg),
+    }
+}
+
+/// Fund the AMM's per-pool reward subaccount directly via flaky_ledger's
+/// unauthenticated `mint` control endpoint (no minting-account dance needed).
+fn mint_icusd_to_reward_subaccount_rw(env: &RewardFlakyEnv, pool_id: &str, amount: u128) {
+    let sub = reward_subaccount(pool_id);
+    let account = FlakyAccount { owner: env.amm_id, subaccount: Some(sub) };
+    env.pic
+        .update_call(env.icusd_ledger_id, Principal::anonymous(), "mint",
+            encode_args((account, Nat::from(amount))).unwrap())
+        .expect("mint icusd to reward subaccount failed");
+}
+
+fn notify_reward_rw(env: &RewardFlakyEnv, pool_id: &str, amount: u128, nonce: u64) -> Result<(), AmmError> {
+    let result = env.pic
+        .update_call(env.amm_id, env.admin, "notify_reward_received",
+            encode_args((pool_id.to_string(), amount, nonce)).unwrap())
+        .expect("notify_reward_received call failed");
+    match result {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode failed"),
+        WasmResult::Reject(msg) => panic!("notify_reward_received rejected: {}", msg),
+    }
+}
+
+fn set_fee_rw(env: &RewardFlakyEnv, fee: u128) {
+    env.pic
+        .update_call(env.icusd_ledger_id, Principal::anonymous(), "set_fee", encode_one(Nat::from(fee)).unwrap())
+        .expect("set_fee failed");
+}
+
+fn icusd_balance_rw(env: &RewardFlakyEnv, owner: Principal, subaccount: Option<[u8; 32]>) -> u128 {
+    let account = FlakyAccount { owner, subaccount };
+    let result = env.pic
+        .query_call(env.icusd_ledger_id, Principal::anonymous(), "icrc1_balance_of",
+            encode_one(account).unwrap())
+        .expect("balance_of failed");
+    match result {
+        WasmResult::Reply(bytes) => {
+            let n: Nat = decode_one(&bytes).expect("decode Nat failed");
+            n.0.try_into().unwrap()
+        }
+        WasmResult::Reject(msg) => panic!("balance_of rejected: {}", msg),
+    }
+}
+
+#[test]
+fn reward_claims_succeed_after_fee_drift() {
+    let env = setup_flaky_with_rewards();
+    let pool_id = create_pool_rw(&env);
+
+    // Sole real LP: shares == liq_amount - MINIMUM_LIQUIDITY (1000 shares
+    // permanently locked to the zero-address placeholder on first deposit).
+    let liq_amount: u128 = 100_000_00000000;
+    add_initial_liquidity_rw(&env, &pool_id, liq_amount);
+
+    // Donate directly into the reward subaccount and notify. 100% of the
+    // donation lands in acc_reward_per_share (the confirmed root cause), so
+    // the reward subaccount's on-chain balance after this equals EXACTLY
+    // the donated total -- no fee headroom beyond the MINIMUM_LIQUIDITY
+    // placeholder's dust share (1000 shares out of ~1e13 total: negligible
+    // next to any real ledger fee).
+    let donation: u128 = 1_000_00000000;
+    mint_icusd_to_reward_subaccount_rw(&env, &pool_id, donation);
+    notify_reward_rw(&env, &pool_id, donation, 1).expect("notify_reward_received should succeed");
+
+    // Give the icUSD ledger its live mainnet fee of 100_000 e8s (0.001
+    // icUSD). Set AFTER notify: the balance-growth check in
+    // notify_reward_received is fee-agnostic, only claim-time payout cares.
+    let icusd_fee: u128 = 100_000;
+    set_fee_rw(&env, icusd_fee);
+
+    let user_balance_before = icusd_balance_rw(&env, env.user, None);
+
+    // The user claims their reward. Pre-fix, transfer_reward_icusd sends the
+    // FULL claimable amount with fee: None, so the ledger debits
+    // amount + fee from the reward subaccount -- more than the subaccount
+    // actually holds -- and the claim fails with InsufficientFunds even
+    // though the user is only asking for what they're entitled to.
+    let result = env.pic
+        .update_call(env.amm_id, env.user, "claim_rewards", encode_one(pool_id.clone()).unwrap())
+        .expect("claim_rewards call failed");
+    let claimed: u128 = match result {
+        WasmResult::Reply(bytes) => {
+            let res: Result<Nat, AmmError> = decode_one(&bytes).expect("decode claim_rewards failed");
+            match res {
+                Ok(n) => n.0.try_into().unwrap(),
+                Err(e) => panic!(
+                    "claim_rewards must succeed after the fee-leak fix (was: InsufficientFunds), got Err: {:?}",
+                    e
+                ),
+            }
+        }
+        WasmResult::Reject(msg) => panic!("claim_rewards rejected: {}", msg),
+    };
+    assert!(claimed > 0, "claimed amount should be > 0");
+
+    // The user receives the claimed amount net of exactly one ledger fee
+    // (mirrors transfer_to_user's contract: the claimant bears the fee).
+    let user_balance_after = icusd_balance_rw(&env, env.user, None);
+    assert_eq!(
+        user_balance_after, user_balance_before + claimed - icusd_fee,
+        "user should receive the claimed amount net of exactly one ledger fee",
+    );
+
+    // The reward subaccount must not strand more than dust (the
+    // MINIMUM_LIQUIDITY placeholder's uncollected sliver) -- nowhere near a
+    // full ledger fee's worth of stranded funds.
+    let reward_sub = reward_subaccount(&pool_id);
+    let reward_balance_after = icusd_balance_rw(&env, env.amm_id, Some(reward_sub));
+    assert!(
+        reward_balance_after < icusd_fee,
+        "reward subaccount should not strand more than dust (less than one ledger fee), got {}",
+        reward_balance_after,
+    );
 }
