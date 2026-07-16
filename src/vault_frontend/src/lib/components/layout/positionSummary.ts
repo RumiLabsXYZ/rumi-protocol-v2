@@ -1,6 +1,13 @@
 import type { VaultDTO, CollateralInfo } from '../../services/types';
 import { CANISTER_IDS } from '../../config';
 
+// ICP's own defaults (mirrors $lib/protocol's MINIMUM_CR/LIQUIDATION_CR).
+// Restated locally rather than imported so this module stays a pure,
+// dependency-light aggregation utility (protocol.ts pulls in the wallet/
+// canister-agent stack via collateralStore -> tokenService -> pnp).
+const ICP_MINIMUM_CR = 1.5;
+const ICP_LIQUIDATION_CR = 1.33;
+
 export type HealthTier = 'safe' | 'caution' | 'danger' | 'no-debt' | 'unknown';
 
 export interface AssetBreakdown {
@@ -48,20 +55,36 @@ export function findCollateralInfo(
 }
 
 /**
- * Map a collateral ratio (as a ratio, e.g. 2.81 for 281%) to a health tier.
- *   >= 2.0  -> safe
- *   1.5..2  -> caution
- *   < 1.5   -> danger
+ * Ratios implied by ICP's own thresholds (borrow threshold 1.5, liquidation
+ * 1.33, legacy flat "safe" cutoff 2.0). Applied to a blended liquidationCr so a
+ * non-ICP (or mixed-collateral) position gets a proportionally equivalent
+ * buffer instead of being judged against ICP's flat numbers.
+ */
+const CAUTION_RATIO = ICP_MINIMUM_CR / ICP_LIQUIDATION_CR; // ≈1.128
+const SAFE_RATIO = 2.0 / ICP_LIQUIDATION_CR;                // ≈1.504
+
+/**
+ * Map a collateral ratio to a health tier against caution/safe cutoffs.
+ *   >= safeCr        -> safe
+ *   cautionCr..safeCr -> caution
+ *   < cautionCr      -> danger
  * Infinity (no debt) -> 'no-debt'. NaN -> 'unknown'.
+ *
+ * cautionCr/safeCr default to ICP's own thresholds so callers that don't yet
+ * have a collateral mix (e.g. isolated unit tests) keep the old behavior.
  *
  * NOTE: This is an aggregate heuristic across all the user's vaults, not a
  * per-vault liquidation signal. Individual vault liquidation prices are
  * displayed on VaultCard.
  */
-export function healthTierFor(cr: number): HealthTier {
+export function healthTierFor(
+  cr: number,
+  cautionCr: number = ICP_MINIMUM_CR,
+  safeCr: number = 2.0,
+): HealthTier {
   if (!Number.isFinite(cr)) return cr === Infinity ? 'no-debt' : 'unknown';
-  if (cr >= 2.0) return 'safe';
-  if (cr >= 1.5) return 'caution';
+  if (cr >= safeCr) return 'safe';
+  if (cr >= cautionCr) return 'caution';
   return 'danger';
 }
 
@@ -76,6 +99,8 @@ export function healthTierFor(cr: number): HealthTier {
  *  4. Overall CR = totalCollateralUsd / totalBorrowed (Infinity if no debt).
  *  5. Emit per-collateral breakdown sorted by USD value desc, skipping
  *     any group whose nativeAmount is 0.
+ *  6. Blend each group's liquidationCr by its USD share to get a caution/safe
+ *     cutoff specific to this user's actual collateral mix (see healthTierFor).
  */
 export function aggregatePosition(
   vaults: VaultDTO[],
@@ -119,11 +144,25 @@ export function aggregatePosition(
     ? totalCollateralUsd / totalBorrowed
     : Infinity;
 
+  // Blend each held asset's own liquidationCr, weighted by its share of the
+  // user's total collateral USD, so a mixed (or non-ICP) position is judged
+  // against its own risk profile rather than ICP's.
+  const weightedLiquidationCr = totalCollateralUsd > 0
+    ? perCollateral.reduce((sum, asset) => {
+        const info = findCollateralInfo(collaterals, asset.principal);
+        const liquidationCr = info?.liquidationCr ?? ICP_LIQUIDATION_CR;
+        return sum + (asset.usdValue / totalCollateralUsd) * liquidationCr;
+      }, 0)
+    : ICP_LIQUIDATION_CR;
+
+  const cautionCr = weightedLiquidationCr * CAUTION_RATIO;
+  const safeCr = weightedLiquidationCr * SAFE_RATIO;
+
   return {
     totalCollateralUsd,
     totalBorrowed,
     overallCr,
-    healthTier: healthTierFor(overallCr),
+    healthTier: healthTierFor(overallCr, cautionCr, safeCr),
     perCollateral,
     hasAnyMissingPrice,
   };
