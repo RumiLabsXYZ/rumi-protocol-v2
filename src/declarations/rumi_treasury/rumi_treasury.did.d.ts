@@ -112,7 +112,17 @@ export interface _SERVICE {
     Array<TreasuryEvent>
   >,
   'get_status' : ActorMethod<[], TreasuryStatus>,
+  'record_stability_pool_unallocated_interest' : ActorMethod<
+    [bigint, bigint, BigUint64Array | bigint[]],
+    { 'Ok' : bigint } |
+      { 'Err' : string }
+  >,
   'set_paused' : ActorMethod<[boolean], { 'Ok' : null } | { 'Err' : string }>,
+  'set_stability_pool_reporter' : ActorMethod<
+    [[] | [Principal]],
+    { 'Ok' : null } |
+      { 'Err' : string }
+  >,
   'withdraw' : ActorMethod<
     [WithdrawArgs],
     { 'Ok' : WithdrawResult } |

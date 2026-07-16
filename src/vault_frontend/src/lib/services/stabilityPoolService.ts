@@ -47,12 +47,14 @@ export interface PoolStatus {
   collateral_registry: CollateralInfo[];
   emergency_paused: boolean;
   eligible_icusd_per_collateral: Array<[Principal, bigint]>;
+  eligible_usd_per_collateral?: CandidOpt<Array<[Principal, bigint]>>;
 }
 
 export interface UserPosition {
   stablecoin_balances: Array<[Principal, bigint]>;
   collateral_gains: Array<[Principal, bigint]>;
   opted_out_collateral: Principal[];
+  eligible_interest_collateral?: CandidOpt<Principal[]>;
   // Candid `opt vec` — decodes as `[]` (absent / older canister) or `[[...]]`.
   // Unwrap with `native_payout_addresses?.[0] ?? []` before use.
   native_payout_addresses?: [] | [Array<[Principal, string]>];

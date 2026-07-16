@@ -219,6 +219,15 @@ export type PoolEventType = {
   } |
   { 'OperationsResumed' : null } |
   { 'CollateralRegistered' : { 'ledger' : Principal, 'symbol' : string } } |
+  {
+    'UnallocatedInterestForwardedToTreasury' : {
+      'fee' : bigint,
+      'source_mint_blocks' : BigUint64Array | bigint[],
+      'net_amount' : bigint,
+      'transfer_block_index' : bigint,
+      'gross_amount' : bigint,
+    }
+  } |
   { 'OptOutCollateral' : { 'collateral_type' : Principal } } |
   { 'OptInCollateral' : { 'collateral_type' : Principal } } |
   { 'StablecoinRegistered' : { 'ledger' : Principal, 'symbol' : string } } |
@@ -315,6 +324,7 @@ export interface StabilityPoolStatus {
   'stablecoin_balances' : Array<[Principal, bigint]>,
   'total_deposits_e8s' : bigint,
   'total_interest_received_e8s' : bigint,
+  'eligible_usd_per_collateral' : [] | [Array<[Principal, bigint]>],
   'collateral_registry' : Array<CollateralInfo>,
   'emergency_paused' : boolean,
   'eligible_icusd_per_collateral' : Array<[Principal, bigint]>,
@@ -330,6 +340,19 @@ export interface StablecoinConfig {
   'is_lp_token' : [] | [boolean],
   'symbol' : string,
 }
+export interface UnallocatedInterestForwardBatch {
+  'id' : bigint,
+  'fee' : [] | [bigint],
+  'source_mint_blocks' : BigUint64Array | bigint[],
+  'last_error' : [] | [string],
+  'transfer_created_at_ns' : [] | [bigint],
+  'transfer_block_index' : [] | [bigint],
+  'treasury_recorded' : boolean,
+  'created_at_ns' : bigint,
+  'token_ledger' : Principal,
+  'gross_amount' : bigint,
+  'treasury' : [] | [Principal],
+}
 export interface UserStabilityPosition {
   'deposit_timestamp' : bigint,
   'total_interest_earned_e8s' : bigint,
@@ -337,6 +360,7 @@ export interface UserStabilityPosition {
   'stablecoin_balances' : Array<[Principal, bigint]>,
   'native_payout_destination_tags' : [] | [Array<[Principal, number]>],
   'cfx_claims' : [] | [Array<[Principal, bigint]>],
+  'eligible_interest_collateral' : [] | [Array<Principal>],
   'total_claimed_gains' : Array<[Principal, bigint]>,
   'native_payout_addresses' : [] | [Array<[Principal, string]>],
   'total_usd_value_e8s' : bigint,
@@ -380,6 +404,11 @@ export interface _SERVICE {
     { 'Ok' : bigint } |
       { 'Err' : StabilityPoolError }
   >,
+  'confirm_unallocated_interest_forward_transfer' : ActorMethod<
+    [bigint, bigint],
+    { 'Ok' : null } |
+      { 'Err' : StabilityPoolError }
+  >,
   'cycle_manager_metrics' : ActorMethod<[], Array<CycleManagerMetric>>,
   'cycles_status' : ActorMethod<[], CycleManagerCyclesStatus>,
   'deposit' : ActorMethod<
@@ -415,6 +444,10 @@ export interface _SERVICE {
   'get_my_native_xrp_payouts' : ActorMethod<[], Array<NativeXrpPendingPayout>>,
   'get_pending_chain_absorbs' : ActorMethod<[], Array<ChainSpAbsorbIntent>>,
   'get_pending_refunds' : ActorMethod<[[] | [Principal]], Array<PendingRefund>>,
+  'get_pending_unallocated_interest_forwards' : ActorMethod<
+    [],
+    Array<UnallocatedInterestForwardBatch>
+  >,
   'get_pool_event_count' : ActorMethod<[], bigint>,
   'get_pool_events' : ActorMethod<[bigint, bigint], Array<PoolEvent>>,
   'get_pool_status' : ActorMethod<[], StabilityPoolStatus>,
@@ -471,6 +504,11 @@ export interface _SERVICE {
     { 'Ok' : null } |
       { 'Err' : StabilityPoolError }
   >,
+  'receive_interest_revenue_v2' : ActorMethod<
+    [Principal, bigint, [] | [Principal], bigint],
+    { 'Ok' : null } |
+      { 'Err' : StabilityPoolError }
+  >,
   'recredit_failed_cfx_claim_payout' : ActorMethod<
     [CfxClaimPayoutRecovery],
     { 'Ok' : boolean } |
@@ -496,6 +534,11 @@ export interface _SERVICE {
     { 'Ok' : null } |
       { 'Err' : StabilityPoolError }
   >,
+  'retry_unallocated_interest_forward' : ActorMethod<
+    [bigint],
+    { 'Ok' : null } |
+      { 'Err' : StabilityPoolError }
+  >,
   'scan_chain_absorb_candidates' : ActorMethod<
     [[] | [bigint]],
     { 'Ok' : Array<ChainSpAbsorbCandidate> } |
@@ -503,6 +546,11 @@ export interface _SERVICE {
   >,
   'set_chain_absorb_auto_config' : ActorMethod<
     [ChainAbsorbAutoConfig],
+    { 'Ok' : null } |
+      { 'Err' : StabilityPoolError }
+  >,
+  'set_interest_treasury' : ActorMethod<
+    [[] | [Principal]],
     { 'Ok' : null } |
       { 'Err' : StabilityPoolError }
   >,

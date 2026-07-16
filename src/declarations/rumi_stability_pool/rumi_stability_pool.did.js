@@ -167,6 +167,19 @@ export const idlFactory = ({ IDL }) => {
     'token_ledger' : IDL.Principal,
     'reason' : IDL.Text,
   });
+  const UnallocatedInterestForwardBatch = IDL.Record({
+    'id' : IDL.Nat64,
+    'fee' : IDL.Opt(IDL.Nat64),
+    'source_mint_blocks' : IDL.Vec(IDL.Nat64),
+    'last_error' : IDL.Opt(IDL.Text),
+    'transfer_created_at_ns' : IDL.Opt(IDL.Nat64),
+    'transfer_block_index' : IDL.Opt(IDL.Nat64),
+    'treasury_recorded' : IDL.Bool,
+    'created_at_ns' : IDL.Nat64,
+    'token_ledger' : IDL.Principal,
+    'gross_amount' : IDL.Nat64,
+    'treasury' : IDL.Opt(IDL.Principal),
+  });
   const PoolEventType = IDL.Variant({
     'Withdraw' : IDL.Record({
       'amount' : IDL.Nat64,
@@ -176,6 +189,13 @@ export const idlFactory = ({ IDL }) => {
     'CollateralRegistered' : IDL.Record({
       'ledger' : IDL.Principal,
       'symbol' : IDL.Text,
+    }),
+    'UnallocatedInterestForwardedToTreasury' : IDL.Record({
+      'fee' : IDL.Nat64,
+      'source_mint_blocks' : IDL.Vec(IDL.Nat64),
+      'net_amount' : IDL.Nat64,
+      'transfer_block_index' : IDL.Nat64,
+      'gross_amount' : IDL.Nat64,
     }),
     'OptOutCollateral' : IDL.Record({ 'collateral_type' : IDL.Principal }),
     'OptInCollateral' : IDL.Record({ 'collateral_type' : IDL.Principal }),
@@ -257,6 +277,9 @@ export const idlFactory = ({ IDL }) => {
     'stablecoin_balances' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
     'total_deposits_e8s' : IDL.Nat64,
     'total_interest_received_e8s' : IDL.Nat64,
+    'eligible_usd_per_collateral' : IDL.Opt(
+      IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64))
+    ),
     'collateral_registry' : IDL.Vec(CollateralInfo),
     'emergency_paused' : IDL.Bool,
     'eligible_icusd_per_collateral' : IDL.Vec(
@@ -273,6 +296,7 @@ export const idlFactory = ({ IDL }) => {
       IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat32))
     ),
     'cfx_claims' : IDL.Opt(IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat))),
+    'eligible_interest_collateral' : IDL.Opt(IDL.Vec(IDL.Principal)),
     'total_claimed_gains' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
     'native_payout_addresses' : IDL.Opt(
       IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Text))
@@ -424,6 +448,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : StabilityPoolError })],
         [],
       ),
+    'confirm_unallocated_interest_forward_transfer' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
+        [],
+      ),
     'cycle_manager_metrics' : IDL.Func(
         [],
         [IDL.Vec(CycleManagerMetric)],
@@ -483,6 +512,11 @@ export const idlFactory = ({ IDL }) => {
     'get_pending_refunds' : IDL.Func(
         [IDL.Opt(IDL.Principal)],
         [IDL.Vec(PendingRefund)],
+        ['query'],
+      ),
+    'get_pending_unallocated_interest_forwards' : IDL.Func(
+        [],
+        [IDL.Vec(UnallocatedInterestForwardBatch)],
         ['query'],
       ),
     'get_pool_event_count' : IDL.Func([], [IDL.Nat64], ['query']),
@@ -557,6 +591,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
         [],
       ),
+    'receive_interest_revenue_v2' : IDL.Func(
+        [IDL.Principal, IDL.Nat64, IDL.Opt(IDL.Principal), IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
+        [],
+      ),
     'recredit_failed_cfx_claim_payout' : IDL.Func(
         [CfxClaimPayoutRecovery],
         [IDL.Variant({ 'Ok' : IDL.Bool, 'Err' : StabilityPoolError })],
@@ -582,6 +621,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
         [],
       ),
+    'retry_unallocated_interest_forward' : IDL.Func(
+        [IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
+        [],
+      ),
     'scan_chain_absorb_candidates' : IDL.Func(
         [IDL.Opt(IDL.Nat64)],
         [
@@ -594,6 +638,11 @@ export const idlFactory = ({ IDL }) => {
       ),
     'set_chain_absorb_auto_config' : IDL.Func(
         [ChainAbsorbAutoConfig],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
+        [],
+      ),
+    'set_interest_treasury' : IDL.Func(
+        [IDL.Opt(IDL.Principal)],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
         [],
       ),

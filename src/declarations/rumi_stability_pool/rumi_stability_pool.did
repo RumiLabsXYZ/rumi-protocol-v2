@@ -58,6 +58,7 @@ type StabilityPoolStatus = record {
   emergency_paused : bool;
   total_interest_received_e8s : nat64;
   eligible_icusd_per_collateral : vec record { principal; nat64 };
+  eligible_usd_per_collateral : opt vec record { principal; nat64 };
 };
 
 type UserStabilityPosition = record {
@@ -65,6 +66,7 @@ type UserStabilityPosition = record {
   collateral_gains : vec record { principal; nat64 };
   cfx_claims : opt vec record { principal; nat };
   opted_out_collateral : vec principal;
+  eligible_interest_collateral : opt vec principal;
   native_payout_addresses : opt vec record { principal; text };
   native_payout_destination_tags : opt vec record { principal; nat32 };
   deposit_timestamp : nat64;

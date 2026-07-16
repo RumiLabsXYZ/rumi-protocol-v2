@@ -60,14 +60,18 @@
   const totalDeposits = $derived(poolStatus ? e8sToNumber(poolStatus.total_deposits_e8s ?? 0n) : 0);
   const depositors = $derived(poolStatus ? Number(poolStatus.total_depositors ?? 0n) : 0);
   const totalLiquidations = $derived(poolStatus ? Number(poolStatus.total_liquidations_executed ?? 0n) : 0);
-  // `eligible_icusd_per_collateral` reports, FOR EACH collateral type, the
-  // share of the pool opted-in to absorb that specific collateral. With all
+  // `eligible_usd_per_collateral` reports, FOR EACH collateral type, the
+  // USD-equivalent share of the pool opted-in to absorb that specific collateral. With all
   // depositors opted in to every collateral (the default), each entry equals
   // the total pool — so summing across collaterals N-counts the same dollars
   // and inflates the headline. Take the minimum (worst-case coverage across
   // collaterals) — matches what users expect when reading the label.
   const eligibleCoverage = $derived.by(() => {
-    const rows = poolStatus?.eligible_icusd_per_collateral;
+    // Older canisters overloaded `eligible_icusd_per_collateral` with this
+    // liquidation-capacity meaning. Use it only while the new optional field is
+    // absent so the rolling upgrade remains truthful.
+    const rows = poolStatus?.eligible_usd_per_collateral?.[0]
+      ?? poolStatus?.eligible_icusd_per_collateral;
     if (!rows || rows.length === 0) return 0;
     let min = Infinity;
     for (const [, v] of rows) {

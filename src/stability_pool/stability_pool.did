@@ -74,6 +74,7 @@ type StabilityPoolStatus = record {
   emergency_paused : bool;
   total_interest_received_e8s : nat64;
   eligible_icusd_per_collateral : vec record { principal; nat64 };
+  eligible_usd_per_collateral : opt vec record { principal; nat64 };
 };
 
 type UserStabilityPosition = record {
@@ -81,6 +82,7 @@ type UserStabilityPosition = record {
   collateral_gains : vec record { principal; nat64 };
   cfx_claims : opt vec record { principal; nat };
   opted_out_collateral : vec principal;
+  eligible_interest_collateral : opt vec principal;
   native_payout_addresses : opt vec record { principal; text };
   native_payout_destination_tags : opt vec record { principal; nat32 };
   deposit_timestamp : nat64;
@@ -261,6 +263,20 @@ type PendingRefund = record {
   created_at : nat64;
 };
 
+type UnallocatedInterestForwardBatch = record {
+  id : nat64;
+  source_mint_blocks : vec nat64;
+  token_ledger : principal;
+  treasury : opt principal;
+  gross_amount : nat64;
+  fee : opt nat64;
+  transfer_created_at_ns : opt nat64;
+  transfer_block_index : opt nat64;
+  treasury_recorded : bool;
+  created_at_ns : nat64;
+  last_error : opt text;
+};
+
 // ── Error type ──
 
 type StabilityPoolError = variant {
@@ -353,6 +369,13 @@ type PoolEventType = variant {
   ClaimCollateral : record { collateral_ledger : principal; amount : nat64 };
   DepositAs3USD : record { token_ledger : principal; amount_in : nat64; lp_minted : nat64 };
   InterestReceived : record { token_ledger : principal; amount : nat64 };
+  UnallocatedInterestForwardedToTreasury : record {
+    gross_amount : nat64;
+    fee : nat64;
+    net_amount : nat64;
+    transfer_block_index : nat64;
+    source_mint_blocks : vec nat64;
+  };
   OptOutCollateral : record { collateral_type : principal };
   OptInCollateral : record { collateral_type : principal };
   LiquidationNotification : record { vault_count : nat64 };
@@ -418,6 +441,7 @@ service : (StabilityPoolInitArgs) -> {
 
   // ── Interest Revenue ──
   receive_interest_revenue : (principal, nat64, opt principal) -> (variant { Ok; Err : StabilityPoolError });
+  receive_interest_revenue_v2 : (principal, nat64, opt principal, nat64) -> (variant { Ok; Err : StabilityPoolError });
 
   // ── Admin: Registry ──
   register_stablecoin : (StablecoinConfig) -> (variant { Ok; Err : StabilityPoolError });
@@ -426,6 +450,9 @@ service : (StabilityPoolInitArgs) -> {
 
   // ── Admin: Configuration ──
   update_pool_configuration : (PoolConfiguration) -> (variant { Ok; Err : StabilityPoolError });
+  set_interest_treasury : (opt principal) -> (variant { Ok; Err : StabilityPoolError });
+  retry_unallocated_interest_forward : (nat64) -> (variant { Ok; Err : StabilityPoolError });
+  confirm_unallocated_interest_forward_transfer : (nat64, nat64) -> (variant { Ok; Err : StabilityPoolError });
   emergency_pause : () -> (variant { Ok; Err : StabilityPoolError });
   resume_operations : () -> (variant { Ok; Err : StabilityPoolError });
   admin_correct_balance : (principal, principal, nat64) -> (variant { Ok : text; Err : StabilityPoolError });
@@ -451,6 +478,7 @@ service : (StabilityPoolInitArgs) -> {
   get_pool_event_count : () -> (nat64) query;
   list_depositor_principals : () -> (vec principal) query;
   get_pending_refunds : (opt principal) -> (vec PendingRefund) query;
+  get_pending_unallocated_interest_forwards : () -> (vec UnallocatedInterestForwardBatch) query;
   get_my_native_xrp_payouts : () -> (vec NativeXrpPendingPayout) query;
   get_pending_chain_absorbs : () -> (vec ChainSpAbsorbIntent) query;
   get_completed_chain_absorbs : (opt nat64) -> (vec ChainSpAbsorbCompletion) query;

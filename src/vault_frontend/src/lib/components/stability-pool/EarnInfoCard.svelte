@@ -80,6 +80,12 @@
   $: gains = userPosition?.collateral_gains ?? [];
   $: hasClaimableIcrcGains = gains.some(([ledger, amount]) => amount > 0n && isIcrcClaimableCollateral(ledger));
   $: optedOut = new Set((userPosition?.opted_out_collateral ?? []).map(p => p.toText()));
+  // Newer canisters report the exact effective set, including native and chain
+  // collateral that is default-out until a payout destination / opt-in exists.
+  // Fall back to legacy opt-out data while a frontend is ahead of the canister.
+  $: eligibleInterestCollaterals = userPosition?.eligible_interest_collateral?.[0]
+    ? new Set(userPosition.eligible_interest_collateral[0].map(p => p.toText()))
+    : null;
   $: icrcCollateralRegistry = liquidationPreferenceCollaterals(
     collateralRegistry.filter(c => isIcrcClaimableCollateral(c.ledger_id)),
     optedOut,
@@ -97,7 +103,9 @@
 
     let totalApr = 0;
     for (const info of perC) {
-      if (optedOut.has(info.collateralType)) continue;
+      if (eligibleInterestCollaterals
+        ? !eligibleInterestCollaterals.has(info.collateralType)
+        : optedOut.has(info.collateralType)) continue;
       const eligible = eligibleMap.get(info.collateralType) ?? 0;
       if (eligible === 0 || info.totalDebtE8s === 0 || info.weightedInterestRate === 0) continue;
       totalApr += (info.weightedInterestRate * poolShare * info.totalDebtE8s) / eligible;

@@ -38,6 +38,15 @@ pub enum AssetType {
     CKUSDC,
 }
 
+/// The stable pool's Candid result is intentionally mirrored without taking a
+/// dependency on its cdylib crate. `IDLValue` accepts every typed error arm;
+/// only `Ok` acknowledges a post-mint receipt.
+#[derive(CandidType, Deserialize)]
+enum StabilityPoolInterestNotificationResult {
+    Ok,
+    Err(candid::IDLValue),
+}
+
 /// Mirrors `rumi_treasury::types::DepositArgs`.
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug)]
 pub struct DepositArgs {
@@ -95,7 +104,10 @@ pub fn plan_fee_routing_at(
         crate::event::record_deficit_repaid(state, to_repay, source, None, timestamp);
     }
     let to_remainder = crate::numeric::ICUSD::new(fee.0 - to_repay.0);
-    FeeRoutingOutcome { to_repay, to_remainder }
+    FeeRoutingOutcome {
+        to_repay,
+        to_remainder,
+    }
 }
 
 /// Production wrapper around [`plan_fee_routing_at`] that captures the
@@ -164,11 +176,7 @@ pub async fn notify_treasury_deposit(
             Ok(deposit_id)
         }
         Ok((Err(e),)) => {
-            log!(
-                INFO,
-                "[treasury] WARNING: deposit recording failed: {}",
-                e
-            );
+            log!(INFO, "[treasury] WARNING: deposit recording failed: {}", e);
             Err(e)
         }
         Err((code, msg)) => {
@@ -227,11 +235,7 @@ pub async fn mint_interest_to_treasury(interest_share: ICUSD) -> Result<(), ICUS
             Ok(())
         }
         Err(e) => {
-            log!(
-                INFO,
-                "[treasury] WARNING: interest mint failed: {:?}",
-                e
-            );
+            log!(INFO, "[treasury] WARNING: interest mint failed: {:?}", e);
             Err(interest_share)
         }
     }
@@ -275,32 +279,24 @@ pub async fn mint_interest_to_stability_pool(
                 block_index
             );
 
-            // Notify pool to distribute interest pro-rata to depositors.
-            // Fire-and-forget: failure is logged but does not block repayment.
-            let amount = interest_share.to_u64();
-            let ct: Option<Principal> = Some(collateral_type);
-            let result: Result<(candid::IDLValue,), _> = ic_cdk::call(
+            let notification = crate::state::PendingStabilityPoolInterestNotification {
                 pool_principal,
-                "receive_interest_revenue",
-                (icusd_ledger, amount, ct),
-            )
-            .await;
-            match result {
-                Ok(_) => {
-                    log!(
-                        INFO,
-                        "[treasury] Pool acknowledged interest distribution ({} icUSD, collateral {})",
-                        amount,
-                        collateral_type
-                    );
-                }
-                Err(e) => {
-                    log!(
-                        INFO,
-                        "[treasury] WARNING: pool interest notification call failed: {:?}",
-                        e
-                    );
-                }
+                token_ledger: icusd_ledger,
+                amount_e8s: interest_share.to_u64(),
+                collateral_type,
+                source_mint_block: block_index,
+            };
+            // Persist BEFORE the await. A failed call must be retried as a
+            // notification, never by minting a second copy of the interest.
+            crate::state::mutate_state(|s| {
+                s.pending_stability_pool_interest_notifications
+                    .insert(block_index, notification.clone());
+            });
+            if deliver_stability_pool_interest_notification(&notification).await {
+                crate::state::mutate_state(|s| {
+                    s.pending_stability_pool_interest_notifications
+                        .remove(&block_index);
+                });
             }
             Ok(())
         }
@@ -312,6 +308,62 @@ pub async fn mint_interest_to_stability_pool(
                 e
             );
             Err(interest_share)
+        }
+    }
+}
+
+async fn deliver_stability_pool_interest_notification(
+    notification: &crate::state::PendingStabilityPoolInterestNotification,
+) -> bool {
+    let result: Result<(StabilityPoolInterestNotificationResult,), _> = ic_cdk::call(
+        notification.pool_principal,
+        "receive_interest_revenue_v2",
+        (
+            notification.token_ledger,
+            notification.amount_e8s,
+            Some(notification.collateral_type),
+            notification.source_mint_block,
+        ),
+    )
+    .await;
+    match result {
+        Ok((StabilityPoolInterestNotificationResult::Ok,)) => true,
+        Ok((StabilityPoolInterestNotificationResult::Err(error),)) => {
+            log!(
+                INFO,
+                "[treasury] pool interest notification {} rejected: {:?}; retained for retry",
+                notification.source_mint_block,
+                error
+            );
+            false
+        }
+        Err(error) => {
+            log!(
+                INFO,
+                "[treasury] pool interest notification {} failed: {:?}; retained for retry",
+                notification.source_mint_block,
+                error
+            );
+            false
+        }
+    }
+}
+
+/// Retry post-mint notifications. The SP's v2 receipt key makes this safe if
+/// a prior call committed but its response was lost.
+pub async fn flush_pending_stability_pool_interest_notifications() {
+    let pending: Vec<crate::state::PendingStabilityPoolInterestNotification> = read_state(|s| {
+        s.pending_stability_pool_interest_notifications
+            .values()
+            .cloned()
+            .collect()
+    });
+    for notification in pending {
+        if deliver_stability_pool_interest_notification(&notification).await {
+            crate::state::mutate_state(|s| {
+                s.pending_stability_pool_interest_notifications
+                    .remove(&notification.source_mint_block);
+            });
         }
     }
 }
@@ -337,9 +389,7 @@ pub async fn distribute_interest(interest: ICUSD, collateral_type: Principal) ->
         return ICUSD::new(0);
     }
 
-    let (split, three_pool) = read_state(|s| {
-        (s.interest_split.clone(), s.three_pool_canister)
-    });
+    let (split, three_pool) = read_state(|s| (s.interest_split.clone(), s.three_pool_canister));
 
     let total_e8s = interest.to_u64();
     let mut unminted_e8s: u64 = 0;
@@ -353,9 +403,7 @@ pub async fn distribute_interest(interest: ICUSD, collateral_type: Principal) ->
 
         match &recipient.destination {
             crate::state::InterestDestination::StabilityPool => {
-                if let Err(unsent) =
-                    mint_interest_to_stability_pool(share, collateral_type).await
-                {
+                if let Err(unsent) = mint_interest_to_stability_pool(share, collateral_type).await {
                     unminted_e8s = unminted_e8s.saturating_add(unsent.to_u64());
                 }
             }
@@ -382,12 +430,19 @@ pub async fn distribute_interest(interest: ICUSD, collateral_type: Principal) ->
                     (s.amm1_canister, s.amm1_donation_nonce)
                 });
                 if let Some(amm_canister) = amm_opt {
-                    if let Err(unsent_e8s) = donate_icusd_to_amm1(amm_canister, share_e8s, nonce).await {
+                    if let Err(unsent_e8s) =
+                        donate_icusd_to_amm1(amm_canister, share_e8s, nonce).await
+                    {
                         // Persist (amount, nonce) so retry uses the same nonce.
                         crate::state::mutate_state(|s| {
                             s.pending_amm1_donations.push_back((unsent_e8s, nonce));
                         });
-                        log!(INFO, "[treasury] AMM1 donation failed; queued ({}, nonce {}) for retry", unsent_e8s, nonce);
+                        log!(
+                            INFO,
+                            "[treasury] AMM1 donation failed; queued ({}, nonce {}) for retry",
+                            unsent_e8s,
+                            nonce
+                        );
                     }
                     // Note: do NOT add to unminted_e8s. The Amm1 retry queue
                     // is independent of pending_interest_for_pools; the latter
@@ -422,9 +477,7 @@ pub async fn distribute_stablecoin_interest(
         return;
     }
 
-    let (split, three_pool) = read_state(|s| {
-        (s.interest_split.clone(), s.three_pool_canister)
-    });
+    let (split, three_pool) = read_state(|s| (s.interest_split.clone(), s.three_pool_canister));
 
     for recipient in &split {
         let share_e8s = ((interest_e8s as u128) * (recipient.bps as u128) / 10_000) as u64;
@@ -453,16 +506,28 @@ pub async fn distribute_stablecoin_interest(
                         (s.treasury_principal, ledger)
                     });
                     if let (Some(tp), Some(ledger)) = (treasury_principal, stable_ledger) {
-                        match crate::management::transfer_collateral(treasury_e6s, tp, ledger).await {
+                        match crate::management::transfer_collateral(treasury_e6s, tp, ledger).await
+                        {
                             Ok(block_index) => {
                                 log!(INFO, "[treasury] Transferred {} {:?} interest to treasury (block {})", treasury_e6s, token_type, block_index);
                                 let asset_type = match token_type {
                                     crate::StableTokenType::CKUSDT => AssetType::CKUSDT,
                                     crate::StableTokenType::CKUSDC => AssetType::CKUSDC,
                                 };
-                                let _ = notify_treasury_deposit(tp, DepositType::InterestRevenue, asset_type, treasury_e6s, block_index).await;
+                                let _ = notify_treasury_deposit(
+                                    tp,
+                                    DepositType::InterestRevenue,
+                                    asset_type,
+                                    treasury_e6s,
+                                    block_index,
+                                )
+                                .await;
                             }
-                            Err(e) => log!(INFO, "[treasury] WARNING: stablecoin interest transfer failed: {:?}", e),
+                            Err(e) => log!(
+                                INFO,
+                                "[treasury] WARNING: stablecoin interest transfer failed: {:?}",
+                                e
+                            ),
                         }
                     }
                 }
@@ -482,7 +547,9 @@ pub async fn distribute_stablecoin_interest(
                     (s.amm1_canister, s.amm1_donation_nonce)
                 });
                 if let Some(amm_canister) = amm_opt {
-                    if let Err(unsent_e8s) = donate_icusd_to_amm1(amm_canister, share_e8s, nonce).await {
+                    if let Err(unsent_e8s) =
+                        donate_icusd_to_amm1(amm_canister, share_e8s, nonce).await
+                    {
                         crate::state::mutate_state(|s| {
                             s.pending_amm1_donations.push_back((unsent_e8s, nonce));
                         });
@@ -512,10 +579,19 @@ async fn donate_to_three_pool(pool_canister: Principal, amount_e8s: u64) -> Resu
     let icusd = ICUSD::from(amount_e8s);
     match crate::management::mint_icusd(icusd, pool_canister).await {
         Ok(block_index) => {
-            log!(INFO, "[treasury] Minted {} icUSD to 3pool for donation (block {})", amount_e8s, block_index);
+            log!(
+                INFO,
+                "[treasury] Minted {} icUSD to 3pool for donation (block {})",
+                amount_e8s,
+                block_index
+            );
         }
         Err(e) => {
-            log!(INFO, "[treasury] WARNING: 3pool donation mint failed: {:?}", e);
+            log!(
+                INFO,
+                "[treasury] WARNING: 3pool donation mint failed: {:?}",
+                e
+            );
             return Err(amount_e8s);
         }
     }
@@ -526,13 +602,26 @@ async fn donate_to_three_pool(pool_canister: Principal, amount_e8s: u64) -> Resu
         ic_cdk::call(pool_canister, "receive_donation", (0u8, donate_amount)).await;
     match result {
         Ok((Ok(()),)) => {
-            log!(INFO, "[treasury] 3pool acknowledged donation of {} icUSD", amount_e8s);
+            log!(
+                INFO,
+                "[treasury] 3pool acknowledged donation of {} icUSD",
+                amount_e8s
+            );
         }
         Ok((Err(e),)) => {
-            log!(INFO, "[treasury] WARNING: 3pool receive_donation returned error: {:?}", e);
+            log!(
+                INFO,
+                "[treasury] WARNING: 3pool receive_donation returned error: {:?}",
+                e
+            );
         }
         Err((code, msg)) => {
-            log!(INFO, "[treasury] WARNING: 3pool receive_donation call failed: {:?} {}", code, msg);
+            log!(
+                INFO,
+                "[treasury] WARNING: 3pool receive_donation call failed: {:?} {}",
+                code,
+                msg
+            );
         }
     }
     Ok(())
@@ -542,13 +631,19 @@ async fn donate_to_three_pool(pool_canister: Principal, amount_e8s: u64) -> Resu
 /// We only need this for deserialization of the Result.
 #[derive(CandidType, Deserialize, Clone, Debug)]
 enum ThreePoolDonateError {
-    InsufficientOutput { expected_min: candid::Nat, actual: candid::Nat },
+    InsufficientOutput {
+        expected_min: candid::Nat,
+        actual: candid::Nat,
+    },
     InsufficientLiquidity,
     InvalidCoinIndex,
     ZeroAmount,
     PoolEmpty,
     SlippageExceeded,
-    TransferFailed { token: String, reason: String },
+    TransferFailed {
+        token: String,
+        reason: String,
+    },
     Unauthorized,
     MathOverflow,
     InvariantNotConverged,
@@ -574,7 +669,12 @@ async fn donate_icusd_to_amm1(
     let pool_id = match crate::state::read_state(|s| s.amm1_pool_id.clone()) {
         Some(p) => p,
         None => {
-            log!(INFO, "[treasury] AMM1 pool_id not configured; refusing to donate {} icUSD (nonce {})", amount_e8s, nonce);
+            log!(
+                INFO,
+                "[treasury] AMM1 pool_id not configured; refusing to donate {} icUSD (nonce {})",
+                amount_e8s,
+                nonce
+            );
             return Err(amount_e8s);
         }
     };
@@ -590,7 +690,13 @@ async fn donate_icusd_to_amm1(
 
     match mint_result {
         Ok(block_index) => {
-            log!(INFO, "[treasury] Minted {} icUSD to AMM1 reward subaccount (block {}, nonce {})", amount_e8s, block_index, nonce);
+            log!(
+                INFO,
+                "[treasury] Minted {} icUSD to AMM1 reward subaccount (block {}, nonce {})",
+                amount_e8s,
+                block_index,
+                nonce
+            );
         }
         Err(e) => {
             log!(INFO, "[treasury] WARNING: AMM1 donation mint failed: {:?}, returning {} for re-queue (nonce {})", e, amount_e8s, nonce);
@@ -603,11 +709,17 @@ async fn donate_icusd_to_amm1(
         amm_canister,
         "notify_reward_received",
         (pool_id.clone(), donate_amount_u128, nonce),
-    ).await;
+    )
+    .await;
 
     match notify_result {
         Ok((Ok(()),)) => {
-            log!(INFO, "[treasury] AMM1 acknowledged donation of {} icUSD (nonce {})", amount_e8s, nonce);
+            log!(
+                INFO,
+                "[treasury] AMM1 acknowledged donation of {} icUSD (nonce {})",
+                amount_e8s,
+                nonce
+            );
             Ok(())
         }
         Ok((Err(e),)) => {
@@ -643,11 +755,15 @@ async fn mint_icusd_to_subaccount(
     subaccount: [u8; 32],
 ) -> Result<u64, icrc_ledger_types::icrc1::transfer::TransferError> {
     use icrc_ledger_types::icrc1::account::Account;
-    let (ledger, op_nonce) = crate::state::mutate_state(|s| (s.icusd_ledger_principal, s.next_op_nonce()));
+    let (ledger, op_nonce) =
+        crate::state::mutate_state(|s| (s.icusd_ledger_principal, s.next_op_nonce()));
     crate::management::transfer_idempotent(
         ledger,
         None,
-        Account { owner: to, subaccount: Some(subaccount) },
+        Account {
+            owner: to,
+            subaccount: Some(subaccount),
+        },
         amount.to_u64() as u128,
         op_nonce,
         None,
@@ -664,20 +780,37 @@ enum AmmDonateError {
     Unauthorized,
     DuplicateNonce,
     NoLiquidity,
-    BelowMinClaim { claimable: candid::Nat, min: candid::Nat },
-    RewardLedgerTransferFailed { reason: String },
-    InsufficientOnChainBalance { expected: candid::Nat, actual: candid::Nat },
+    BelowMinClaim {
+        claimable: candid::Nat,
+        min: candid::Nat,
+    },
+    RewardLedgerTransferFailed {
+        reason: String,
+    },
+    InsufficientOnChainBalance {
+        expected: candid::Nat,
+        actual: candid::Nat,
+    },
     PoolPaused,
     InsufficientLiquidity,
     InvalidCoinIndex,
     ZeroAmount,
     PoolEmpty,
     SlippageExceeded,
-    TransferFailed { token: String, reason: String },
+    TransferFailed {
+        token: String,
+        reason: String,
+    },
     MathOverflow,
     InvariantNotConverged,
-    InsufficientOutput { expected_min: candid::Nat, actual: candid::Nat },
-    InsufficientLpShares { required: candid::Nat, available: candid::Nat },
+    InsufficientOutput {
+        expected_min: candid::Nat,
+        actual: candid::Nat,
+    },
+    InsufficientLpShares {
+        required: candid::Nat,
+        available: candid::Nat,
+    },
     MaintenanceMode,
 }
 
@@ -794,7 +927,10 @@ pub async fn send_liquidation_fee_to_treasury(
 /// overwritten.
 pub async fn flush_pending_interest() {
     let (pending, threshold) = read_state(|s| {
-        (s.pending_interest_for_pools.clone(), s.interest_flush_threshold_e8s)
+        (
+            s.pending_interest_for_pools.clone(),
+            s.interest_flush_threshold_e8s,
+        )
     });
 
     for (collateral_type, amount) in pending {
@@ -811,17 +947,12 @@ pub async fn flush_pending_interest() {
         // than the cloned `amount` if a concurrent harvest landed
         // between the clone and this mutate; we mint what is currently
         // in the bucket regardless.
-        let snapshot_e8s = crate::state::mutate_state(|s| {
-            s.take_pending_interest_for_pool(collateral_type)
-        });
+        let snapshot_e8s =
+            crate::state::mutate_state(|s| s.take_pending_interest_for_pool(collateral_type));
         if snapshot_e8s == 0 {
             continue;
         }
-        let unminted = distribute_interest(
-            ICUSD::from(snapshot_e8s),
-            collateral_type,
-        )
-        .await;
+        let unminted = distribute_interest(ICUSD::from(snapshot_e8s), collateral_type).await;
         if unminted.0 > 0 {
             crate::state::mutate_state(|s| {
                 s.restore_pending_interest_for_pool(collateral_type, unminted.to_u64());
@@ -842,9 +973,8 @@ pub async fn flush_pending_interest() {
 /// retries get re-queued at the back. This function is called from
 /// the same timer tick that calls `flush_pending_interest`.
 pub async fn flush_pending_amm1_donations() {
-    let drained: Vec<(u64, u64)> = crate::state::mutate_state(|s| {
-        s.pending_amm1_donations.drain(..).collect()
-    });
+    let drained: Vec<(u64, u64)> =
+        crate::state::mutate_state(|s| s.pending_amm1_donations.drain(..).collect());
     if drained.is_empty() {
         return;
     }
@@ -859,22 +989,40 @@ pub async fn flush_pending_amm1_donations() {
                     s.pending_amm1_donations.push_back(entry);
                 }
             });
-            log!(INFO, "[treasury] AMM1 retry queue: amm1_canister not configured; restoring {} entries", crate::state::read_state(|s| s.pending_amm1_donations.len()));
+            log!(
+                INFO,
+                "[treasury] AMM1 retry queue: amm1_canister not configured; restoring {} entries",
+                crate::state::read_state(|s| s.pending_amm1_donations.len())
+            );
             return;
         }
     };
 
-    log!(INFO, "[treasury] AMM1 retry queue: draining {} entries", drained.len());
+    log!(
+        INFO,
+        "[treasury] AMM1 retry queue: draining {} entries",
+        drained.len()
+    );
     for (amount, nonce) in drained {
         match donate_icusd_to_amm1(amm_canister, amount, nonce).await {
             Ok(()) => {
-                log!(INFO, "[treasury] AMM1 retry succeeded for ({}, nonce {})", amount, nonce);
+                log!(
+                    INFO,
+                    "[treasury] AMM1 retry succeeded for ({}, nonce {})",
+                    amount,
+                    nonce
+                );
             }
             Err(unsent) => {
                 crate::state::mutate_state(|s| {
                     s.pending_amm1_donations.push_back((unsent, nonce));
                 });
-                log!(INFO, "[treasury] AMM1 retry failed for ({}, nonce {}); re-queued", unsent, nonce);
+                log!(
+                    INFO,
+                    "[treasury] AMM1 retry failed for ({}, nonce {}); re-queued",
+                    unsent,
+                    nonce
+                );
             }
         }
     }
@@ -930,8 +1078,7 @@ pub async fn drain_pending_treasury_interest() {
 /// Transfer pending collateral fees to treasury.
 /// Called from the XRC timer tick to drain `pending_treasury_collateral`.
 pub async fn drain_pending_treasury_collateral() {
-    let pending: Vec<(u64, Principal)> =
-        read_state(|s| s.pending_treasury_collateral.clone());
+    let pending: Vec<(u64, Principal)> = read_state(|s| s.pending_treasury_collateral.clone());
     if pending.is_empty() {
         return;
     }

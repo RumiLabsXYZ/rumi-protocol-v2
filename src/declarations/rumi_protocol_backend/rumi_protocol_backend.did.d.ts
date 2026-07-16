@@ -1507,6 +1507,10 @@ export interface _SERVICE {
   'get_chains_ecdsa_key_name' : ActorMethod<[], string>,
   'get_ckstable_repay_fee' : ActorMethod<[], number>,
   'get_collateral_config' : ActorMethod<[Principal], [] | [CollateralConfig]>,
+  'get_collateral_price_fetch_intervals' : ActorMethod<
+    [],
+    Array<[Principal, bigint]>
+  >,
   'get_collateral_totals' : ActorMethod<[], Array<CollateralTotals>>,
   'get_consumed_writedown_proofs' : ActorMethod<
     [],
@@ -1569,6 +1573,10 @@ export interface _SERVICE {
   'get_pending_chain_burn_aging' : ActorMethod<
     [],
     Array<PendingChainBurnAging>
+  >,
+  'get_pending_stability_pool_interest_notification_count' : ActorMethod<
+    [],
+    bigint
   >,
   'get_price_pusher_allowed' : ActorMethod<[], Array<[number, string]>>,
   'get_price_pusher_principal' : ActorMethod<[], [] | [Principal]>,
@@ -1710,6 +1718,10 @@ export interface _SERVICE {
   'set_collateral_min_vault_debt' : ActorMethod<[Principal, bigint], Result>,
   'set_collateral_min_xrc_sources' : ActorMethod<
     [Principal, [] | [number]],
+    Result
+  >,
+  'set_collateral_price_fetch_interval_secs' : ActorMethod<
+    [Principal, bigint],
     Result
   >,
   'set_collateral_redemption_fee_ceiling' : ActorMethod<

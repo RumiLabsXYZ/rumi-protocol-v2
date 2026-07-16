@@ -1,4 +1,7 @@
-use crate::types::{AssetBalance, AssetType, BalancesSnapshot, DepositRecord, TreasuryAction, TreasuryEvent, TreasuryInitArgs};
+use crate::types::{
+    AssetBalance, AssetType, BalancesSnapshot, DepositRecord, TreasuryAction, TreasuryEvent,
+    TreasuryInitArgs,
+};
 use candid::Principal;
 use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemory};
 use ic_stable_structures::{DefaultMemoryImpl, StableBTreeMap, StableCell};
@@ -21,6 +24,8 @@ const MEM_CONFIG: u8 = 1; // StableCell<TreasuryConfig>          (ledger princip
 const MEM_BALANCES: u8 = 2; // StableCell<BalancesSnapshot>        (asset balances — survives upgrades)
 const MEM_EVENTS: u8 = 3; // StableBTreeMap<u64, TreasuryEvent>  (event log)
 const MEM_WITHDRAWAL_CREATED_AT: u8 = 4; // StableBTreeMap<u64, u64> (request_id → first-attempt created_at_time)
+const MEM_SP_UNALLOCATED_INTEREST_BLOCKS: u8 = 5; // StableBTreeMap<u64, u64> (backend mint block → deposit id)
+const MEM_SP_UNALLOCATED_INTEREST_TRANSFER_BLOCKS: u8 = 6; // StableBTreeMap<u64, u64> (icUSD transfer block → deposit id)
 
 /// Every stable memory slot this canister owns, paired with a human label.
 /// Single source of truth for the layout; iterated by the uniqueness test.
@@ -30,6 +35,14 @@ const MEMORY_LAYOUT: &[(u8, &str)] = &[
     (MEM_BALANCES, "balances"),
     (MEM_EVENTS, "events"),
     (MEM_WITHDRAWAL_CREATED_AT, "withdrawal_created_at"),
+    (
+        MEM_SP_UNALLOCATED_INTEREST_BLOCKS,
+        "sp_unallocated_interest_blocks",
+    ),
+    (
+        MEM_SP_UNALLOCATED_INTEREST_TRANSFER_BLOCKS,
+        "sp_unallocated_interest_transfer_blocks",
+    ),
 ];
 
 /// Treasury state that persists across upgrades
@@ -52,6 +65,12 @@ pub struct TreasuryState {
     /// Persisted so a retry after an upgrade still reuses the original
     /// timestamp and hits the ledger's dedup window.
     pub withdrawal_created_at: StableBTreeMap<u64, u64, Memory>,
+    /// Backend mint block → deposit ID for exactly-once Stability Pool
+    /// unallocated-interest reports.
+    pub sp_unallocated_interest_blocks: StableBTreeMap<u64, u64, Memory>,
+    /// Physical icUSD transfer block → deposit ID. Source receipts and
+    /// transfer receipts must agree before any balance is credited.
+    pub sp_unallocated_interest_transfer_blocks: StableBTreeMap<u64, u64, Memory>,
 }
 
 /// Treasury configuration stored in stable memory
@@ -69,6 +88,10 @@ pub struct TreasuryConfig {
     pub ckusdc_ledger: Option<Principal>,
     /// Whether treasury accepts new deposits
     pub is_paused: bool,
+    /// This reporter can create only deduplicated ICUSD interest records; it
+    /// receives no controller or withdrawal authority.
+    #[serde(default)]
+    pub stability_pool_reporter: Option<Principal>,
 }
 
 // Storable implementation for TreasuryConfig
@@ -158,6 +181,7 @@ impl TreasuryState {
                 ckusdt_ledger: args.ckusdt_ledger,
                 ckusdc_ledger: args.ckusdc_ledger,
                 is_paused: false,
+                stability_pool_reporter: None,
             };
 
             let balances = empty_balances();
@@ -177,6 +201,12 @@ impl TreasuryState {
                 next_event_id: 1,
                 withdrawal_created_at: StableBTreeMap::init(
                     memory_manager.get(MemoryId::new(MEM_WITHDRAWAL_CREATED_AT)),
+                ),
+                sp_unallocated_interest_blocks: StableBTreeMap::init(
+                    memory_manager.get(MemoryId::new(MEM_SP_UNALLOCATED_INTEREST_BLOCKS)),
+                ),
+                sp_unallocated_interest_transfer_blocks: StableBTreeMap::init(
+                    memory_manager.get(MemoryId::new(MEM_SP_UNALLOCATED_INTEREST_TRANSFER_BLOCKS)),
                 ),
             }
         })
@@ -209,12 +239,15 @@ impl TreasuryState {
     pub fn push_event(&mut self, caller: Principal, action: TreasuryAction) {
         let event_id = self.next_event_id;
         self.next_event_id += 1;
-        self.events.insert(event_id, TreasuryEvent {
-            id: event_id,
-            timestamp: ic_cdk::api::time(),
-            caller,
-            action,
-        });
+        self.events.insert(
+            event_id,
+            TreasuryEvent {
+                id: event_id,
+                timestamp: ic_cdk::api::time(),
+                caller,
+                action,
+            },
+        );
     }
 
     /// Get events (paginated).
@@ -254,6 +287,73 @@ impl TreasuryState {
 
         self.persist_balances();
         deposit_id
+    }
+
+    /// Record a Stability Pool treasury forward exactly once per backend mint
+    /// receipt. This method has no await, so lookup, deposit creation, and
+    /// receipt indexing are one canister-state transition.
+    pub fn record_sp_unallocated_interest_once(
+        &mut self,
+        amount: u64,
+        transfer_block_index: u64,
+        source_mint_blocks: &[u64],
+    ) -> Result<(u64, bool), String> {
+        self.record_sp_unallocated_interest_once_at(
+            amount,
+            transfer_block_index,
+            source_mint_blocks,
+            ic_cdk::api::time(),
+        )
+    }
+
+    pub fn record_sp_unallocated_interest_once_at(
+        &mut self,
+        amount: u64,
+        transfer_block_index: u64,
+        source_mint_blocks: &[u64],
+        now: u64,
+    ) -> Result<(u64, bool), String> {
+        if source_mint_blocks.is_empty() {
+            return Err("source mint blocks cannot be empty".to_string());
+        }
+        let existing: Vec<u64> = source_mint_blocks
+            .iter()
+            .filter_map(|block| self.sp_unallocated_interest_blocks.get(block))
+            .collect();
+        if !existing.is_empty() {
+            if existing.len() == source_mint_blocks.len()
+                && existing.iter().all(|id| *id == existing[0])
+            {
+                return Ok((existing[0], false));
+            }
+            return Err("one or more source mint blocks were already recorded".to_string());
+        }
+        if let Some(existing_transfer) = self
+            .sp_unallocated_interest_transfer_blocks
+            .get(&transfer_block_index)
+        {
+            return Err(format!(
+                "transfer block {} is already recorded as deposit {}",
+                transfer_block_index, existing_transfer
+            ));
+        }
+
+        let deposit_id = self.add_deposit(DepositRecord {
+            id: 0,
+            deposit_type: crate::types::DepositType::InterestRevenue,
+            asset_type: crate::types::AssetType::ICUSD,
+            amount,
+            block_index: transfer_block_index,
+            timestamp: now,
+            memo: Some("stability-pool unallocated interest".to_string()),
+        });
+        for source_mint_block in source_mint_blocks {
+            self.sp_unallocated_interest_blocks
+                .insert(*source_mint_block, deposit_id);
+        }
+        self.sp_unallocated_interest_transfer_blocks
+            .insert(transfer_block_index, deposit_id);
+        Ok((deposit_id, true))
     }
 
     /// Reserve `amount` from bookkeeping before attempting a withdrawal transfer.
@@ -338,6 +438,18 @@ impl TreasuryState {
         Ok(())
     }
 
+    pub fn set_stability_pool_reporter(
+        &mut self,
+        reporter: Option<Principal>,
+    ) -> Result<(), String> {
+        let mut config = self.config.get().clone();
+        config.stability_pool_reporter = reporter;
+        self.config
+            .set(config)
+            .map_err(|e| format!("Failed to update stability pool reporter: {:?}", e))?;
+        Ok(())
+    }
+
     // ------------------------------------------------------------------
     // Queries
     // ------------------------------------------------------------------
@@ -391,6 +503,7 @@ pub fn restore_state() {
                 ckusdt_ledger: None,
                 ckusdc_ledger: None,
                 is_paused: true,
+                stability_pool_reporter: None,
             };
             let config =
                 StableCell::init(memory_manager.get(MemoryId::new(MEM_CONFIG)), dummy_config)
@@ -399,12 +512,11 @@ pub fn restore_state() {
             // Read persisted balances.
             // On first upgrade from old code the cell won't exist yet, so the
             // default is an empty snapshot — we fall back to deposit replay.
-            let balances_cell: StableCell<BalancesSnapshot, Memory> =
-                StableCell::init(
-                    memory_manager.get(MemoryId::new(MEM_BALANCES)),
-                    BalancesSnapshot::default(),
-                )
-                .unwrap();
+            let balances_cell: StableCell<BalancesSnapshot, Memory> = StableCell::init(
+                memory_manager.get(MemoryId::new(MEM_BALANCES)),
+                BalancesSnapshot::default(),
+            )
+            .unwrap();
 
             let snapshot = balances_cell.get().clone();
             let balances = if snapshot.entries.is_empty() {
@@ -436,11 +548,23 @@ pub fn restore_state() {
             let events: StableBTreeMap<u64, TreasuryEvent, Memory> =
                 StableBTreeMap::init(memory_manager.get(MemoryId::new(MEM_EVENTS)));
             let max_event_id = events.iter().map(|(id, _)| id).last().unwrap_or(0);
-            let next_event_id = if max_event_id > 0 { max_event_id + 1 } else { 1 };
+            let next_event_id = if max_event_id > 0 {
+                max_event_id + 1
+            } else {
+                1
+            };
 
             // Re-open withdrawal created_at_time map
             let withdrawal_created_at: StableBTreeMap<u64, u64, Memory> =
                 StableBTreeMap::init(memory_manager.get(MemoryId::new(MEM_WITHDRAWAL_CREATED_AT)));
+            let sp_unallocated_interest_blocks: StableBTreeMap<u64, u64, Memory> =
+                StableBTreeMap::init(
+                    memory_manager.get(MemoryId::new(MEM_SP_UNALLOCATED_INTEREST_BLOCKS)),
+                );
+            let sp_unallocated_interest_transfer_blocks: StableBTreeMap<u64, u64, Memory> =
+                StableBTreeMap::init(
+                    memory_manager.get(MemoryId::new(MEM_SP_UNALLOCATED_INTEREST_TRANSFER_BLOCKS)),
+                );
 
             *s.borrow_mut() = Some(TreasuryState {
                 deposits,
@@ -451,6 +575,8 @@ pub fn restore_state() {
                 events,
                 next_event_id,
                 withdrawal_created_at,
+                sp_unallocated_interest_blocks,
+                sp_unallocated_interest_transfer_blocks,
             });
         });
     });

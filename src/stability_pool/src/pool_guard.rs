@@ -26,6 +26,7 @@ thread_local! {
     static LIQUIDATION_ACTIVE: RefCell<bool> = const { RefCell::new(false) };
     static BALANCE_ASYNC_IN_FLIGHT: RefCell<u32> = const { RefCell::new(0) };
     static CHAIN_ABSORB_AUTO_TICK_ACTIVE: RefCell<bool> = const { RefCell::new(false) };
+    static UNALLOCATED_INTEREST_FORWARD_ACTIVE: RefCell<bool> = const { RefCell::new(false) };
 }
 
 #[must_use]
@@ -120,6 +121,30 @@ impl Drop for ChainAbsorbAutoTickGuard {
 
 pub fn chain_absorb_auto_tick_in_flight() -> bool {
     CHAIN_ABSORB_AUTO_TICK_ACTIVE.with(|f| *f.borrow())
+}
+
+/// Serialize the persisted treasury-forward receipt across ledger and treasury
+/// awaits. Without this, two retries could both observe an unsent receipt.
+#[must_use]
+pub struct UnallocatedInterestForwardGuard;
+
+impl UnallocatedInterestForwardGuard {
+    pub fn new() -> Result<Self, StabilityPoolError> {
+        UNALLOCATED_INTEREST_FORWARD_ACTIVE.with(|f| {
+            let mut held = f.borrow_mut();
+            if *held {
+                return Err(StabilityPoolError::SystemBusy);
+            }
+            *held = true;
+            Ok(Self)
+        })
+    }
+}
+
+impl Drop for UnallocatedInterestForwardGuard {
+    fn drop(&mut self) {
+        UNALLOCATED_INTEREST_FORWARD_ACTIVE.with(|f| *f.borrow_mut() = false);
+    }
 }
 
 #[cfg(test)]

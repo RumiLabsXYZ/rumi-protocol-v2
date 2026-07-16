@@ -1026,6 +1026,18 @@ pub struct PendingRefund {
     pub op_nonce: u128,
 }
 
+/// A post-mint Stability Pool notification. The icUSD mint has already landed
+/// at the pool, so this receipt must survive a failed callback and be retried
+/// with the original mint block as the pool-side idempotency key.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct PendingStabilityPoolInterestNotification {
+    pub pool_principal: Principal,
+    pub token_ledger: Principal,
+    pub amount_e8s: u64,
+    pub collateral_type: Principal,
+    pub source_mint_block: u64,
+}
+
 thread_local! {
     static __STATE: RefCell<Option<State>> = RefCell::default();
 }
@@ -1341,6 +1353,12 @@ pub struct State {
     /// Accumulated interest per collateral type, waiting to be flushed to pools.
     /// Key = collateral_type Principal, Value = total interest in e8s.
     pub pending_interest_for_pools: BTreeMap<Principal, u64>,
+    /// Post-mint delivery receipts keyed by the icUSD mint block. Unlike
+    /// `pending_interest_for_pools`, these funds are already minted and must
+    /// never be re-minted on retry.
+    #[serde(default)]
+    pub pending_stability_pool_interest_notifications:
+        BTreeMap<u64, PendingStabilityPoolInterestNotification>,
 
     /// AMM1-specific re-queue: (amount_e8s, nonce). Distinct from
     /// `pending_interest_for_pools` (which is keyed by collateral_type
@@ -1931,6 +1949,7 @@ impl Default for State {
             weighted_avg_healthy_cr: Ratio::from(Decimal::ZERO),
             borrowing_fee_curve: None,
             pending_interest_for_pools: BTreeMap::new(),
+            pending_stability_pool_interest_notifications: BTreeMap::new(),
             pending_amm1_donations: std::collections::VecDeque::new(),
             interest_flush_threshold_e8s: default_flush_threshold(),
             pending_treasury_interest: ICUSD::new(0),
@@ -2199,6 +2218,7 @@ impl From<InitArg> for State {
 
             // Periodic interest distribution
             pending_interest_for_pools: BTreeMap::new(),
+            pending_stability_pool_interest_notifications: BTreeMap::new(),
             pending_amm1_donations: std::collections::VecDeque::new(),
             interest_flush_threshold_e8s: default_flush_threshold(),
 

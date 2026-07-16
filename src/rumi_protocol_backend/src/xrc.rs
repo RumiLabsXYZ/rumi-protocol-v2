@@ -242,9 +242,8 @@ pub async fn fetch_icp_rate() {
                 // ic-xrc-types calls this field `base_asset_num_received_rates`
                 // (the number of CEXs that actually returned a rate for the
                 // base asset — for ICP/USD that's the ICP-side aggregation).
-                let num_sources = exchange_rate_result
-                    .metadata
-                    .base_asset_num_received_rates as u32;
+                let num_sources =
+                    exchange_rate_result.metadata.base_asset_num_received_rates as u32;
                 // Wave-14a CDP-14 follow-up: resolve the per-collateral
                 // override (defaults to the global floor when unset).
                 let floor = read_state(|s| {
@@ -272,64 +271,62 @@ pub async fn fetch_icp_rate() {
                     // stays false so the CDP-01 counter treats this as a
                     // failure (sustained thin-aggregation should trip ReadOnly).
                 } else {
+                    let rate = Decimal::from_u64(exchange_rate_result.rate).unwrap()
+                        / Decimal::from_u64(10_u64.pow(exchange_rate_result.metadata.decimals))
+                            .unwrap();
+                    let ts_nanos = exchange_rate_result.timestamp * 1_000_000_000;
 
-                let rate = Decimal::from_u64(exchange_rate_result.rate).unwrap()
-                    / Decimal::from_u64(10_u64.pow(exchange_rate_result.metadata.decimals))
-                        .unwrap();
-                let ts_nanos = exchange_rate_result.timestamp * 1_000_000_000;
-
-                // Wave-5 LIQ-007 / ORACLE-009: gate every accepted price through the
-                // sanity band. Pre-Wave-5 the ReadOnly latch fired on `rate < $0.01`
-                // before any sanity check, so a single sub-$0.01 XRC blip could
-                // freeze the protocol. Now we (1) reject samples older than the
-                // stored timestamp, (2) apply the sanity band, then (3) only latch
-                // ReadOnly when a sub-$0.01 sample was actually accepted.
-                let should_update = read_state(|s| match s.last_icp_timestamp {
-                    Some(last_ts) => last_ts < ts_nanos,
-                    None => true,
-                });
-                if !should_update {
-                    log!(
+                    // Wave-5 LIQ-007 / ORACLE-009: gate every accepted price through the
+                    // sanity band. Pre-Wave-5 the ReadOnly latch fired on `rate < $0.01`
+                    // before any sanity check, so a single sub-$0.01 XRC blip could
+                    // freeze the protocol. Now we (1) reject samples older than the
+                    // stored timestamp, (2) apply the sanity band, then (3) only latch
+                    // ReadOnly when a sub-$0.01 sample was actually accepted.
+                    let should_update = read_state(|s| match s.last_icp_timestamp {
+                        Some(last_ts) => last_ts < ts_nanos,
+                        None => true,
+                    });
+                    if !should_update {
+                        log!(
                         TRACE_XRC,
                         "[FetchPrice] ICP rate {rate} skipped: timestamp {} not newer than stored",
                         exchange_rate_result.timestamp
                     );
-                } else {
-                    let icp_ct = read_state(|s| s.icp_collateral_type());
-                    let rate_f64 = rate.to_f64().unwrap_or(0.0);
-                    let accepted = mutate_state(|s| {
-                        s.check_price_sanity_band(&icp_ct, rate_f64)
-                    });
-                    if !accepted {
-                        log!(
+                    } else {
+                        let icp_ct = read_state(|s| s.icp_collateral_type());
+                        let rate_f64 = rate.to_f64().unwrap_or(0.0);
+                        let accepted =
+                            mutate_state(|s| s.check_price_sanity_band(&icp_ct, rate_f64));
+                        if !accepted {
+                            log!(
                             TRACE_XRC,
                             "[FetchPrice] rejecting outlier ICP rate {rate} (sanity band); awaiting confirmation"
                         );
-                    } else {
-                        if rate < dec!(0.01) {
-                            log!(
+                        } else {
+                            if rate < dec!(0.01) {
+                                log!(
                                 TRACE_XRC,
                                 "[FetchPrice] CONFIRMED sub-$0.01 ICP rate {rate}, switching to ReadOnly at timestamp: {}",
                                 exchange_rate_result.timestamp
                             );
+                                mutate_state(|s| {
+                                    s.mode = Mode::ReadOnly;
+                                    s.mode_triggered_by_oracle = false;
+                                });
+                            }
+                            log!(
+                                TRACE_XRC,
+                                "[FetchPrice] fetched new ICP rate: {rate} with timestamp: {}",
+                                exchange_rate_result.timestamp
+                            );
                             mutate_state(|s| {
-                            s.mode = Mode::ReadOnly;
-                            s.mode_triggered_by_oracle = false;
-                        });
+                                s.set_icp_rate(UsdIcp::from(rate), Some(ts_nanos));
+                                let icp_ct = s.icp_collateral_type();
+                                crate::event::record_price_update(icp_ct, rate, ts_nanos);
+                            });
+                            xrc_call_succeeded = true;
                         }
-                        log!(
-                            TRACE_XRC,
-                            "[FetchPrice] fetched new ICP rate: {rate} with timestamp: {}",
-                            exchange_rate_result.timestamp
-                        );
-                        mutate_state(|s| {
-                            s.set_icp_rate(UsdIcp::from(rate), Some(ts_nanos));
-                            let icp_ct = s.icp_collateral_type();
-                            crate::event::record_price_update(icp_ct, rate, ts_nanos);
-                        });
-                        xrc_call_succeeded = true;
                     }
-                }
                 } // end of Wave-14a CDP-14 source-floor `else` block
             }
             GetExchangeRateResult::Err(error) => ic_canister_log::log!(
@@ -396,6 +393,7 @@ pub async fn interest_and_treasury_tick() {
 
     // Flush accumulated interest to pools/treasury when threshold is reached.
     crate::treasury::flush_pending_interest().await;
+    crate::treasury::flush_pending_stability_pool_interest_notifications().await;
     crate::treasury::flush_pending_amm1_donations().await;
 
     // Phase 1b foreign-chain-only supply-invariant self-check. Runs on every
@@ -416,13 +414,15 @@ pub async fn interest_and_treasury_tick() {
     // also 0, so the check always passes. The invariant becomes live once
     // Phase 1b ships the first confirmed Monad mint.
     let chain_debt_e8s: u128 = read_state(|s| s.multi_chain.total_chain_vault_debt_e8s());
-    let check_outcome = read_state(|s| {
-        crate::chains::supply::check_invariant(&s.multi_chain, chain_debt_e8s)
-    });
+    let check_outcome =
+        read_state(|s| crate::chains::supply::check_invariant(&s.multi_chain, chain_debt_e8s));
     if let Err(err) = check_outcome {
         let now = ic_cdk::api::time();
         let (sum, td) = match err {
-            crate::chains::supply::SupplyInvariantError::Divergence { sum_after, total_debt } => (sum_after, total_debt),
+            crate::chains::supply::SupplyInvariantError::Divergence {
+                sum_after,
+                total_debt,
+            } => (sum_after, total_debt),
             _ => (0u128, chain_debt_e8s),
         };
         mutate_state(|s| {
@@ -437,7 +437,12 @@ pub async fn interest_and_treasury_tick() {
             total_debt_e8s: td,
             timestamp: now,
         });
-        log!(INFO, "[supply_invariant] FAILED: sum={} total_debt={}; halting and flipping to ReadOnly", sum, td);
+        log!(
+            INFO,
+            "[supply_invariant] FAILED: sum={} total_debt={}; halting and flipping to ReadOnly",
+            sum,
+            td
+        );
     }
 }
 
@@ -475,17 +480,15 @@ pub async fn ensure_fresh_price_for(
     if *collateral_type == icp_ledger {
         ensure_fresh_price().await
     } else {
-        let needs_refresh = read_state(|s| {
-            match s.get_collateral_config(collateral_type) {
-                Some(config) => match config.last_price_timestamp {
-                    None => true,
-                    Some(ts) => {
-                        let age = ic_cdk::api::time().saturating_sub(ts);
-                        age > PRICE_FRESHNESS_THRESHOLD_NANOS
-                    }
-                },
+        let needs_refresh = read_state(|s| match s.get_collateral_config(collateral_type) {
+            Some(config) => match config.last_price_timestamp {
                 None => true,
-            }
+                Some(ts) => {
+                    let age = ic_cdk::api::time().saturating_sub(ts);
+                    age > PRICE_FRESHNESS_THRESHOLD_NANOS
+                }
+            },
+            None => true,
         });
 
         if needs_refresh {
@@ -556,9 +559,7 @@ pub async fn ensure_fresh_price() -> Result<(), crate::ProtocolError> {
         fetch_icp_rate().await;
 
         // After fetch, verify we actually have a price now
-        read_state(|s| {
-            s.check_price_not_too_old()
-        })?;
+        read_state(|s| s.check_price_not_too_old())?;
     }
 
     Ok(())
@@ -610,10 +611,8 @@ pub async fn ensure_stable_not_depegged(
             Ok(call_result) => match call_result {
                 GetExchangeRateResult::Ok(exchange_rate_result) => {
                     let rate = Decimal::from_u64(exchange_rate_result.rate).unwrap()
-                        / Decimal::from_u64(
-                            10_u64.pow(exchange_rate_result.metadata.decimals),
-                        )
-                        .unwrap();
+                        / Decimal::from_u64(10_u64.pow(exchange_rate_result.metadata.decimals))
+                            .unwrap();
 
                     log!(
                         TRACE_XRC,
