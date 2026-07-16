@@ -1305,7 +1305,7 @@ fn drop_pending<K: std::cmp::Ord>(
     map.remove(key);
 }
 
-pub(crate) async fn process_pending_transfer() {
+pub async fn process_pending_transfer() {
     let _guard = match crate::guard::TimerLogicGuard::new() {
         Some(guard) => guard,
         None => {
@@ -1734,12 +1734,90 @@ pub(crate) async fn process_pending_transfer() {
         }
     }
 
+    // Durable retry queue for stranded 3USD reserve refunds
+    // (`stability_pool_liquidate_with_reserves`). Each entry is keyed by its
+    // `op_nonce`, reused on every retry so the 3USD ledger deduplicates a
+    // previously-committed-but-reply-lost transfer. Without this, a failed refund
+    // would leave the stability pool's live 3USD balance below its tracked
+    // aggregate, blocking every non-sole-holder withdrawal.
+    let pending_3usd_refunds = read_state(|s| {
+        s.pending_3usd_refunds
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .collect::<Vec<(u128, crate::state::PendingThreeUsdRefund)>>()
+    });
+
+    for (nonce_key, refund) in pending_3usd_refunds {
+        match crate::management::transfer_idempotent(
+            refund.ledger,
+            Some(crate::management::protocol_3usd_reserves_subaccount()),
+            icrc_ledger_types::icrc1::account::Account {
+                owner: refund.stability_pool,
+                subaccount: None,
+            },
+            refund.amount_e8s as u128,
+            refund.op_nonce,
+            None,
+        )
+        .await
+        {
+            Ok(block_index) => {
+                log!(INFO,
+                    "[refunding] 3USD reserve refund settled for SP {} (vault {}, refund block {}, amount {})",
+                    refund.stability_pool, refund.vault_id, block_index, refund.amount_e8s
+                );
+                mutate_state(|s| {
+                    s.pending_3usd_refunds.remove(&nonce_key);
+                });
+            }
+            Err(error) => {
+                log!(
+                    INFO,
+                    "[refunding] 3USD reserve refund failed for SP {} (vault {}): {:?}. Will retry.",
+                    refund.stability_pool,
+                    refund.vault_id,
+                    error
+                );
+                if let TransferError::BadFee { expected_fee } = error {
+                    // Refresh fee cache; do NOT increment retry count on BadFee.
+                    if let Ok(expected_fee_u64) = expected_fee.0.clone().try_into() {
+                        crate::management::set_cached_fee(refund.ledger, expected_fee_u64);
+                    }
+                } else {
+                    let retries = mutate_state(|s| {
+                        if let Some(r) = s.pending_3usd_refunds.get_mut(&nonce_key) {
+                            r.retry_count = r.retry_count.saturating_add(1);
+                            r.retry_count
+                        } else {
+                            0
+                        }
+                    });
+                    if retries >= MAX_PENDING_RETRIES {
+                        log!(
+                            INFO,
+                            "[refunding] CRITICAL: abandoning 3USD reserve refund for SP {} (vault {}) \
+                             after {} retries. Amount: {}. Manual reconciliation required.",
+                            refund.stability_pool,
+                            refund.vault_id,
+                            retries,
+                            refund.amount_e8s
+                        );
+                        mutate_state(|s| {
+                            s.pending_3usd_refunds.remove(&nonce_key);
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     // Schedule another run if needed, but with better timing
     if read_state(|s| {
         !s.pending_margin_transfers.is_empty()
             || !s.pending_excess_transfers.is_empty()
             || !s.pending_redemption_transfer.is_empty()
             || !s.pending_refunds.is_empty()
+            || !s.pending_3usd_refunds.is_empty()
     }) {
         // Schedule another check in 5 seconds
         log!(

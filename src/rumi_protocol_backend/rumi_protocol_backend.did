@@ -832,6 +832,14 @@ type PendingChainBurnAging = record {
   chain_id : nat32;
   oldest_reference_ns : opt nat64;
 };
+type PendingThreeUsdRefund = record {
+  stability_pool : principal;
+  ledger : principal;
+  amount_e8s : nat64;
+  vault_id : nat64;
+  retry_count : nat8;
+  op_nonce : nat;
+};
 type PendingLiquidationV1 = record {
   started_at_ns : nat64;
   op_id : nat64;
@@ -1321,6 +1329,7 @@ service : (ProtocolArg) -> {
   get_pending_chain_burn_aging : () -> (vec PendingChainBurnAging) query;
   get_price_pusher_allowed : () -> (vec record { nat32; text }) query;
   get_price_pusher_principal : () -> (opt principal) query;
+  get_pending_3usd_refunds : () -> (vec PendingThreeUsdRefund) query;
   get_protocol_3usd_reserves : () -> (nat64) query;
   get_protocol_config : () -> (ProtocolConfig) query;
   get_protocol_snapshots : (GetSnapshotsArg) -> (vec ProtocolSnapshot) query;

@@ -29,18 +29,20 @@
 //!      `protocol_3usd_reserves` stays at zero, and the INFO log carries
 //!      a `refunded ... after liquidation rollback` line keyed to the vault.
 //!
-//!   3. `icc_002_pic_refund_failure_logs_critical_and_strands_3usd` — the
+//!   3. `icc_002_pic_refund_failure_enqueues_durable_retry_and_heals` — the
 //!      refund-of-refund failure. Same setup as #2, but the 3USD ledger
 //!      is `flaky_ledger` with `set_fail_transfers(true)`. The pull
 //!      (`icrc2_transfer_from`) is unaffected by that knob and lands; the
 //!      writedown rejects (kill switch); the refund (`icrc1_transfer`)
-//!      fails. Asserts:
+//!      fails. Asserts the fix that replaced the old strand-and-log-CRITICAL
+//!      behavior:
 //!        * the protocol surfaces the original writedown error,
-//!        * `protocol_3usd_reserves` still stays at zero (the writedown
-//!          never reached its mutation),
-//!        * the SP did NOT get its 3USD back (the refund actually failed),
-//!        * an INFO log entry with `CRITICAL: refund of` fires so the
-//!          on-call operator sees the stranding.
+//!        * the failed refund is persisted to `pending_3usd_refunds`
+//!          (queried via `get_pending_3usd_refunds`) rather than lost,
+//!        * once the ledger recovers, `process_pending_transfer` drains the
+//!          queue, the SP is made whole, and the reserves subaccount empties.
+//!      This closes the drift where a stranded refund left the SP's live 3USD
+//!      below its tracked aggregate, blocking non-sole-holder withdrawals.
 //!
 //! # Why the kill switch is the right injection
 //!
@@ -428,6 +430,45 @@ fn get_protocol_3usd_reserves(pic: &PocketIc, protocol_id: Principal) -> u64 {
     match result {
         WasmResult::Reply(b) => decode_one(&b).expect("decode reserves"),
         WasmResult::Reject(m) => panic!("get_protocol_3usd_reserves rejected: {}", m),
+    }
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct PendingThreeUsdRefundView {
+    stability_pool: Principal,
+    ledger: Principal,
+    amount_e8s: u64,
+    vault_id: u64,
+    retry_count: u8,
+    op_nonce: Nat,
+}
+
+fn get_pending_3usd_refunds(
+    pic: &PocketIc,
+    protocol_id: Principal,
+) -> Vec<PendingThreeUsdRefundView> {
+    let result = pic
+        .query_call(
+            protocol_id,
+            Principal::anonymous(),
+            "get_pending_3usd_refunds",
+            encode_args(()).unwrap(),
+        )
+        .expect("get_pending_3usd_refunds call failed");
+    match result {
+        WasmResult::Reply(b) => decode_one(&b).expect("decode pending 3usd refunds"),
+        WasmResult::Reject(m) => panic!("get_pending_3usd_refunds rejected: {}", m),
+    }
+}
+
+/// Drive the backend's self-rescheduling `process_pending_transfer` timer by
+/// advancing PocketIC time past its 5s reschedule window and ticking.
+fn drain_pending_transfers(pic: &PocketIc) {
+    for _ in 0..6 {
+        pic.advance_time(Duration::from_secs(6));
+        for _ in 0..8 {
+            pic.tick();
+        }
     }
 }
 
@@ -898,15 +939,19 @@ fn icc_002_pic_writedown_failure_refunds_3usd_to_sp() {
     );
 }
 
-/// **Refund-of-refund failure.** Same setup as the prior test but the 3USD
-/// ledger is `flaky_ledger` with `set_fail_transfers(true)`. The pull
-/// (`icrc2_transfer_from`) is unaffected by that knob and lands; the
-/// kill-switch reject fires the Wave-4 refund arm; the refund
-/// (`icrc1_transfer`) fails. Asserts the protocol surfaces the writedown
-/// error, the SP balance does NOT come back, and the operator-visible
-/// CRITICAL log fires so the stranded tokens can be reconciled.
+/// **Refund failure is durable, not stranded.** Same setup as the prior test
+/// but the 3USD ledger is `flaky_ledger` with `set_fail_transfers(true)`. The
+/// pull (`icrc2_transfer_from`) is unaffected and lands; the kill-switch reject
+/// fires the refund arm; the refund (`icrc1_transfer`) fails.
+///
+/// Pre-fix, that failure only logged CRITICAL and left the 3USD stranded in the
+/// protocol's reserves subaccount, dropping the SP's live balance below its
+/// tracked aggregate and blocking every non-sole-holder withdrawal. This test
+/// pins the fix: the failed refund is persisted to `pending_3usd_refunds` and
+/// `process_pending_transfer` retries it. Once the ledger recovers, the queue
+/// drains, the SP is made whole, and the queue empties — no manual reconcile.
 #[test]
-fn icc_002_pic_refund_failure_logs_critical_and_strands_3usd() {
+fn icc_002_pic_refund_failure_enqueues_durable_retry_and_heals() {
     let f = setup_fixture(ThreePoolKind::Flaky);
 
     let icusd_debt: u64 = 500_000_000;
@@ -951,30 +996,72 @@ fn icc_002_pic_refund_failure_logs_critical_and_strands_3usd() {
         err
     );
 
-    let sp_balance_after = icrc1_balance_of(
+    // Immediately after the failed refund: the SP is still short (tokens are in
+    // reserves) BUT the refund is now durably queued rather than lost.
+    let sp_balance_after_fail = icrc1_balance_of(
         &f.pic,
         f.three_pool_ledger,
         account(f.sp_principal),
     );
     assert_eq!(
-        sp_balance_after,
+        sp_balance_after_fail,
         sp_balance_before - three_usd_amount as u128,
-        "SP balance MUST stay at the post-pull value: the refund failed and \
-         the tokens are stranded in the protocol's reserves subaccount; \
+        "SP balance is temporarily short after the refund failed; \
          saw before={} after={}",
-        sp_balance_before, sp_balance_after
+        sp_balance_before, sp_balance_after_fail
     );
 
-    let reserves_after = get_protocol_3usd_reserves(&f.pic, f.protocol_id);
+    let pending = get_pending_3usd_refunds(&f.pic, f.protocol_id);
     assert_eq!(
-        reserves_after, 0,
-        "the writedown rejected before the reserves counter increment, \
-         so the in-state counter stays zero even though tokens were stranded \
-         on-ledger — this divergence is what the CRITICAL log surfaces"
+        pending.len(),
+        1,
+        "the failed refund MUST be persisted to pending_3usd_refunds for retry, \
+         not stranded; saw {:?}",
+        pending
+    );
+    assert_eq!(pending[0].stability_pool, f.sp_principal);
+    assert_eq!(pending[0].ledger, f.three_pool_ledger);
+    assert_eq!(pending[0].vault_id, f.vault_id);
+    assert_eq!(
+        pending[0].amount_e8s, three_usd_amount,
+        "queued refund amount must equal the stranded excess (3USD fee is 0)"
     );
 
-    // The flaky ledger's `protocol_3usd_reserves` subaccount must hold the
-    // stranded tokens (the pull landed; the refund did not).
+    let logs = fetch_info_logs(&f.pic, f.protocol_id);
+    let vault_tag = format!("vault {}", f.vault_id);
+    assert!(
+        logs.iter().any(|m| {
+            m.contains("[stability_pool_liquidate_with_reserves] refund of")
+                && m.contains(&vault_tag)
+                && m.contains("enqueued for durable retry")
+        }),
+        "expected the enqueue-for-retry INFO log keyed to vault #{}; saw logs: {:?}",
+        f.vault_id, logs
+    );
+
+    // Now the ledger recovers. Draining the timer must settle the refund.
+    flaky_set_fail_transfers(&f.pic, f.three_pool_ledger, false);
+    drain_pending_transfers(&f.pic);
+
+    let pending_after = get_pending_3usd_refunds(&f.pic, f.protocol_id);
+    assert!(
+        pending_after.is_empty(),
+        "the durable refund queue MUST drain once the ledger recovers; saw {:?}",
+        pending_after
+    );
+
+    let sp_balance_healed = icrc1_balance_of(
+        &f.pic,
+        f.three_pool_ledger,
+        account(f.sp_principal),
+    );
+    assert_eq!(
+        sp_balance_healed, sp_balance_before,
+        "the SP MUST be made whole after the queue drains (3USD fee is 0); \
+         saw before={} healed={}",
+        sp_balance_before, sp_balance_healed
+    );
+
     let reserves_subacct_balance = icrc1_balance_of(
         &f.pic,
         f.three_pool_ledger,
@@ -984,30 +1071,18 @@ fn icc_002_pic_refund_failure_logs_critical_and_strands_3usd() {
         },
     );
     assert_eq!(
-        reserves_subacct_balance, three_usd_amount as u128,
-        "stranded 3USD MUST sit in the protocol's reserves subaccount on the \
-         3pool ledger — the refund could not move them; saw {}",
+        reserves_subacct_balance, 0,
+        "the reserves subaccount MUST be drained back to the SP after retry; saw {}",
         reserves_subacct_balance
     );
 
-    let logs = fetch_info_logs(&f.pic, f.protocol_id);
-    let vault_tag = format!("vault {}", f.vault_id);
+    let settled_log = fetch_info_logs(&f.pic, f.protocol_id);
     assert!(
-        logs.iter().any(|m| {
-            m.contains("[stability_pool_liquidate_with_reserves] CRITICAL: refund of")
-                && m.contains(&vault_tag)
-                && m.contains("FAILED")
+        settled_log.iter().any(|m| {
+            m.contains("[refunding] 3USD reserve refund settled")
+                && m.contains(&format!("vault {}", f.vault_id))
         }),
-        "expected Wave-4 CRITICAL refund-failure INFO log keyed to vault #{}; \
-         saw logs: {:?}",
-        f.vault_id, logs
-    );
-    // And no successful-refund log.
-    assert!(
-        !logs.iter().any(|m| {
-            m.contains("[stability_pool_liquidate_with_reserves] refunded")
-                && m.contains("after liquidation rollback")
-        }),
-        "refund failed — there must be no success refund log"
+        "expected a settled-refund log after the queue drained; saw logs: {:?}",
+        settled_log
     );
 }
