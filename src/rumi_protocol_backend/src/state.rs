@@ -674,6 +674,17 @@ pub struct CollateralConfig {
     /// decode cleanly to `None` (State is ciborium/serde-encoded — see storage.rs).
     #[serde(default)]
     pub custody_kind: Option<CustodyKind>,
+    /// Human-readable token symbol (e.g. "ICP", "ckXAUT"). Used to name the
+    /// actual collateral in wallet consent messages (ICRC-21) instead of
+    /// defaulting to "ICP". Fetched from the ledger's `icrc1_symbol` at
+    /// `add_collateral_token` time and backfilled for pre-existing collaterals
+    /// via the `backfill_collateral_symbols` admin endpoint. `None` (legacy
+    /// snapshot, or a symbol fetch that failed) makes consent text fall back to
+    /// a generic "collateral" label rather than a wrong "ICP". `#[serde(default)]`
+    /// is safe — State is ciborium/serde-encoded (see storage.rs), so an old
+    /// snapshot missing this field decodes cleanly to `None`.
+    #[serde(default)]
+    pub symbol: Option<String>,
 }
 
 /// How a collateral's underlying asset is custodied. `IcrcLedger` (the legacy /
@@ -767,6 +778,7 @@ pub fn xrp_collateral_config(
         redemption_tier: 3,
         min_xrc_sources: None,
         custody_kind: Some(CustodyKind::NativeXrp),
+        symbol: Some("XRP".to_string()),
     }
 }
 
@@ -935,6 +947,7 @@ impl PartialEq for CollateralConfig {
             && self.redemption_tier == other.redemption_tier
             && self.min_xrc_sources == other.min_xrc_sources
             && self.custody_kind == other.custody_kind
+            && self.symbol == other.symbol
     }
 }
 
@@ -2179,6 +2192,7 @@ impl From<InitArg> for State {
                         redemption_tier: 1,
                         min_xrc_sources: None, // inherit global floor for ICP
                         custody_kind: None,    // ICRC (ICP ledger) — legacy default
+                        symbol: Some("ICP".to_string()),
                     },
                 );
                 configs

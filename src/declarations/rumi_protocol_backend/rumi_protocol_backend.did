@@ -170,6 +170,7 @@ type CollateralConfig = record {
   display_color : opt text;
   borrowing_fee : blob;
   interest_rate_apr : blob;
+  symbol : opt text;
   liquidation_ratio : blob;
 };
 type CollateralInterestInfo = record {
@@ -1007,6 +1008,10 @@ type Result_2 = variant { Ok : text; Err : ProtocolError };
 type Result_20 = variant { Ok : XrpSpAbsorbResult; Err : ProtocolError };
 type Result_21 = variant { Ok : XrpSpAbsorbPreflight; Err : ProtocolError };
 type Result_22 = variant { Ok : nat32; Err : ProtocolError };
+type Result_23 = variant {
+  Ok : vec record { principal; text };
+  Err : ProtocolError;
+};
 type Result_3 = variant { Ok : SuccessWithFee; Err : ProtocolError };
 type Result_4 = variant { Ok : BotLiquidationResult; Err : ProtocolError };
 type Result_5 = variant { Ok : opt nat64; Err : ProtocolError };
@@ -1200,6 +1205,7 @@ type XrpVaultOpenInfo = record {
 };
 service : (ProtocolArg) -> {
   add_collateral_token : (AddCollateralArg) -> (Result);
+  backfill_collateral_symbols : () -> (Result_23);
   add_margin_to_vault : (VaultArg) -> (Result_1);
   add_margin_with_deposit : (nat64) -> (Result_1);
   admin_correct_vault_collateral : (nat64, nat64, text) -> (Result);

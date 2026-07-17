@@ -10469,6 +10469,20 @@ async fn add_collateral_token(
         }
     };
 
+    // Query icrc1_symbol from the ledger. Best-effort: a failure here must NOT
+    // fail the whole registration (decimals/fee already succeeded), so we store
+    // `None` and let the consent-message path fall back to a generic label
+    // rather than a wrong "ICP". The symbol can be backfilled later via
+    // `backfill_collateral_symbols`.
+    let symbol_opt: Option<String> =
+        match ic_cdk::call::<(), (String,)>(arg.ledger_canister_id, "icrc1_symbol", ()).await {
+            Ok((s,)) => Some(s),
+            Err((code, msg)) => {
+                log!(INFO, "[add_collateral_token] WARNING: Failed to query icrc1_symbol from {}: {:?} {} — collateral registered without a symbol (backfill later)", arg.ledger_canister_id, code, msg);
+                None
+            }
+        };
+
     use rumi_protocol_backend::state::{CollateralConfig, CollateralStatus};
 
     let config = CollateralConfig {
@@ -10508,6 +10522,7 @@ async fn add_collateral_token(
         // Native-XRP collateral (custody_kind = NativeXrp) is registered through a
         // separate path once its deposit flow is wired (spec P5); not settable here.
         custody_kind: None,
+        symbol: symbol_opt.clone(),
     };
 
     mutate_state(|s| {
@@ -10545,11 +10560,13 @@ async fn add_collateral_token(
     // we log a warning but don't fail the overall operation — the admin can
     // always call register_collateral on the SP manually.
     if let Some(sp_canister) = read_state(|s| s.stability_pool_canister) {
-        // Query the ledger symbol for the SP registry entry.
-        let symbol = match ic_cdk::call::<(), (String,)>(ledger_id, "icrc1_symbol", ()).await {
-            Ok((s,)) => s,
-            Err((code, msg)) => {
-                log!(INFO, "[add_collateral_token] WARNING: Failed to query icrc1_symbol from {}: {:?} {} — skipping SP registration", ledger_id, code, msg);
+        // Reuse the symbol fetched above for the SP registry entry. If it was
+        // unavailable, skip SP registration (same behavior as before) — the
+        // admin can register on the SP manually once the symbol resolves.
+        let symbol = match symbol_opt.clone() {
+            Some(s) => s,
+            None => {
+                log!(INFO, "[add_collateral_token] WARNING: no icrc1_symbol for {} — skipping SP registration", ledger_id);
                 return Ok(());
             }
         };
@@ -10594,6 +10611,76 @@ async fn add_collateral_token(
     }
 
     Ok(())
+}
+
+/// One-time (idempotent) admin backfill of `CollateralConfig.symbol` for
+/// collaterals registered before that field existed. Wallet consent messages
+/// (ICRC-21) name the collateral by this symbol; without it they fall back to a
+/// generic label instead of the correct token name. For each ICRC-custodied
+/// collateral whose symbol is currently `None`, queries `icrc1_symbol` from its
+/// ledger; native-XRP (synthetic ledger key, no real ledger) is set to "XRP"
+/// directly. Records an `UpdateCollateralConfig` event per fill so the change is
+/// replay-safe. Safe to call repeatedly — already-populated symbols are left
+/// untouched, and a ledger that fails to answer is skipped (fill it on a later
+/// call). Returns the (collateral_type, symbol) pairs it populated this call.
+#[candid_method(update)]
+#[update]
+async fn backfill_collateral_symbols() -> Result<Vec<(Principal, String)>, ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only developer can backfill collateral symbols".to_string(),
+        ));
+    }
+
+    // Snapshot the collaterals still missing a symbol: (principal, is_native_xrp).
+    let missing: Vec<(Principal, bool)> = read_state(|s| {
+        s.collateral_configs
+            .iter()
+            .filter(|(_, cfg)| cfg.symbol.is_none())
+            .map(|(ct, cfg)| (*ct, cfg.is_native_xrp()))
+            .collect()
+    });
+
+    let mut filled: Vec<(Principal, String)> = Vec::new();
+    for (ct, is_native_xrp) in missing {
+        // Native-XRP uses a synthetic ledger key — there is no ICRC ledger to
+        // query, so its symbol is known statically.
+        let symbol = if is_native_xrp {
+            "XRP".to_string()
+        } else {
+            match ic_cdk::call::<(), (String,)>(ct, "icrc1_symbol", ()).await {
+                Ok((s,)) => s,
+                Err((code, msg)) => {
+                    log!(INFO, "[backfill_collateral_symbols] WARNING: icrc1_symbol from {} failed: {:?} {} — leaving unset", ct, code, msg);
+                    continue;
+                }
+            }
+        };
+
+        // Re-read fresh under the mutate; only fill if still empty. Idempotent,
+        // and safe against a concurrent config edit across the await point.
+        let did_fill = mutate_state(|s| match s.collateral_configs.get(&ct) {
+            Some(cfg) if cfg.symbol.is_none() => {
+                let mut updated = cfg.clone();
+                updated.symbol = Some(symbol.clone());
+                event::record_update_collateral_config(s, ct, updated);
+                true
+            }
+            _ => false,
+        });
+        if did_fill {
+            filled.push((ct, symbol));
+        }
+    }
+
+    log!(
+        INFO,
+        "[backfill_collateral_symbols] filled {} collateral symbol(s)",
+        filled.len()
+    );
+    Ok(filled)
 }
 
 #[candid_method(update)]

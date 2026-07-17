@@ -175,6 +175,7 @@ export interface CollateralConfig {
   'display_color' : [] | [string],
   'borrowing_fee' : Uint8Array | number[],
   'interest_rate_apr' : Uint8Array | number[],
+  'symbol' : [] | [string],
   'liquidation_ratio' : Uint8Array | number[],
 }
 export interface CollateralInterestInfo {
@@ -1211,6 +1212,8 @@ export type Result_21 = { 'Ok' : XrpSpAbsorbPreflight } |
   { 'Err' : ProtocolError };
 export type Result_22 = { 'Ok' : number } |
   { 'Err' : ProtocolError };
+export type Result_23 = { 'Ok' : Array<[Principal, string]> } |
+  { 'Err' : ProtocolError };
 export type Result_3 = { 'Ok' : SuccessWithFee } |
   { 'Err' : ProtocolError };
 export type Result_4 = { 'Ok' : BotLiquidationResult } |
@@ -1442,6 +1445,7 @@ export interface _SERVICE {
   'admin_resolve_stuck_claim' : ActorMethod<[bigint, boolean], Result>,
   'admin_resolve_xrp_claim' : ActorMethod<[bigint, XrpClaimResolution], Result>,
   'admin_sweep_to_treasury' : ActorMethod<[string], Result_1>,
+  'backfill_collateral_symbols' : ActorMethod<[], Result_23>,
   'borrow_chain_vault_evm' : ActorMethod<
     [VaultIntent, Uint8Array | number[]],
     Result
