@@ -1,7 +1,7 @@
 // ICRC-21 Consent Message Support for Oisy Wallet Integration
 // This module implements the ICRC-21 standard for human-readable consent messages
 
-use candid::{CandidType, Decode, Deserialize};
+use candid::{CandidType, Decode, Deserialize, Principal};
 use crate::vault::VaultArg;
 
 /// Metadata about the consent message request
@@ -99,16 +99,68 @@ pub enum Icrc21Error {
     ConsentMessageUnavailable(ErrorInfo),
 }
 
-/// Helper to format ICP amount from e8s
-fn format_icp_amount(e8s: u64) -> String {
-    let icp = e8s as f64 / 100_000_000.0;
-    format!("{:.4} ICP", icp)
-}
-
 /// Helper to format icUSD amount from e8s
 fn format_icusd_amount(e8s: u64) -> String {
     let icusd = e8s as f64 / 100_000_000.0;
     format!("{:.2} icUSD", icusd)
+}
+
+/// Human-readable label for a collateral whose symbol is unknown (not yet
+/// backfilled, or a fetch failure). We deliberately do NOT default to "ICP" —
+/// that is the exact bug this module is fixing.
+const UNKNOWN_COLLATERAL_LABEL: &str = "collateral";
+
+/// Resolve `(symbol, decimals)` for a collateral from protocol state, so consent
+/// messages name the ACTUAL locked token instead of assuming ICP.
+///
+/// `collateral_type == None` means "the caller omitted the optional collateral
+/// type", which the vault methods treat as the default ICP collateral — so we
+/// resolve it to the ICP config. A registered collateral whose `symbol` has not
+/// been backfilled yet falls back to a generic label, never to "ICP". Decimals
+/// are always taken from the collateral's own config (they are stored for every
+/// collateral), so amounts are scaled correctly even for non-8-decimal tokens
+/// such as ckETH (18) or XRP (6).
+fn resolve_collateral_display(collateral_type: Option<Principal>) -> (String, u8) {
+    crate::state::read_state(|s| {
+        let ct = collateral_type.unwrap_or_else(|| s.icp_collateral_type());
+        match s.get_collateral_config(&ct) {
+            Some(cfg) => (
+                cfg.symbol
+                    .clone()
+                    .unwrap_or_else(|| UNKNOWN_COLLATERAL_LABEL.to_string()),
+                cfg.decimals,
+            ),
+            None => (UNKNOWN_COLLATERAL_LABEL.to_string(), 8),
+        }
+    })
+}
+
+/// Resolve `(symbol, decimals)` for the collateral backing a specific vault.
+/// Used for methods (`add_margin_to_vault`, `withdraw_collateral`, ...) whose
+/// argument carries only a `vault_id` and no collateral identity. Returns the
+/// generic fallback if the vault is unknown (e.g. Oisy probing before submit).
+fn resolve_collateral_for_vault(vault_id: u64) -> (String, u8) {
+    let ct = crate::state::read_state(|s| {
+        s.vault_id_to_vaults.get(&vault_id).map(|v| v.collateral_type)
+    });
+    match ct {
+        Some(ct) => resolve_collateral_display(Some(ct)),
+        None => (UNKNOWN_COLLATERAL_LABEL.to_string(), 8),
+    }
+}
+
+/// Format a raw token amount (in the token's smallest unit) using the token's
+/// own decimals and symbol. Trailing zeros are trimmed for readability, so e.g.
+/// 400_000 drops of XRP (6 decimals) renders "0.4 XRP" and 4_000_000_000_000_000
+/// wei of ckETH (18 decimals) renders "0.004 ckETH".
+fn format_collateral_amount(raw: u64, decimals: u8, symbol: &str) -> String {
+    let amount = raw as f64 / 10f64.powi(decimals as i32);
+    // Show up to 8 fractional digits, then trim trailing zeros (and a bare dot).
+    let mut s = format!("{:.8}", amount);
+    if s.contains('.') {
+        s = s.trim_end_matches('0').trim_end_matches('.').to_string();
+    }
+    format!("{} {}", s, symbol)
 }
 
 /// Helper to convert bytes to hex string for debugging
@@ -147,6 +199,21 @@ fn try_decode_vault_arg(arg: &[u8], _method_name: &str) -> Result<Option<VaultAr
     }
 }
 
+/// Try to decode (principal, u64) for redeem_collateral — the collateral type
+/// being redeemed for, and the icUSD amount in e8s.
+fn try_decode_principal_u64(
+    arg: &[u8],
+    _method_name: &str,
+) -> Result<Option<(Principal, u64)>, String> {
+    if arg.is_empty() || arg.len() < 6 {
+        return Ok(None);
+    }
+    match Decode!(arg, Principal, u64) {
+        Ok((ct, amount)) => Ok(Some((ct, amount))),
+        Err(_) => Ok(None),
+    }
+}
+
 /// Try to decode two u64 values from Candid bytes
 fn try_decode_u64_pair(arg: &[u8], _method_name: &str) -> Result<Option<(u64, u64)>, String> {
     if arg.is_empty() || arg.len() < 6 {
@@ -159,17 +226,41 @@ fn try_decode_u64_pair(arg: &[u8], _method_name: &str) -> Result<Option<(u64, u6
     }
 }
 
-/// Try to decode (u64, u64, opt principal) for open_vault_and_borrow
-fn try_decode_u64_u64_opt_principal(arg: &[u8], _method_name: &str) -> Result<Option<(u64, u64)>, String> {
+/// Try to decode (u64, opt principal) for open_vault — collateral amount and the
+/// optional collateral type. The collateral type is what lets us name the actual
+/// locked token instead of assuming ICP.
+fn try_decode_u64_opt_principal(
+    arg: &[u8],
+    _method_name: &str,
+) -> Result<Option<(u64, Option<Principal>)>, String> {
     if arg.is_empty() || arg.len() < 6 {
         return Ok(None);
     }
-    // We only care about the first two u64 values (collateral, borrow amount)
-    match Decode!(arg, u64, u64, Option<candid::Principal>) {
-        Ok((a, b, _)) => Ok(Some((a, b))),
-        // Fall back to just decoding two u64s (e.g. if Oisy omits optional)
+    match Decode!(arg, u64, Option<Principal>) {
+        Ok((amount, ct)) => Ok(Some((amount, ct))),
+        // Fall back to a bare u64 (e.g. an older client that omits the optional).
+        Err(_) => match Decode!(arg, u64) {
+            Ok(amount) => Ok(Some((amount, None))),
+            Err(_) => Ok(None),
+        },
+    }
+}
+
+/// Try to decode (u64, u64, opt principal) for open_vault_and_borrow —
+/// collateral amount, borrow amount, and the optional collateral type. The
+/// collateral type is preserved so the consent message names the real token.
+fn try_decode_u64_u64_opt_principal(
+    arg: &[u8],
+    _method_name: &str,
+) -> Result<Option<(u64, u64, Option<Principal>)>, String> {
+    if arg.is_empty() || arg.len() < 6 {
+        return Ok(None);
+    }
+    match Decode!(arg, u64, u64, Option<Principal>) {
+        Ok((collateral, borrow, ct)) => Ok(Some((collateral, borrow, ct))),
+        // Fall back to just decoding two u64s (e.g. if Oisy omits the optional).
         Err(_) => match Decode!(arg, u64, u64) {
-            Ok(values) => Ok(Some(values)),
+            Ok((collateral, borrow)) => Ok(Some((collateral, borrow, None))),
             Err(_) => Ok(None),
         },
     }
@@ -179,57 +270,71 @@ fn try_decode_u64_u64_opt_principal(arg: &[u8], _method_name: &str) -> Result<Op
 fn generate_consent_message(method: &str, arg: &[u8]) -> Result<String, String> {
     match method {
         "open_vault" => {
-            // Decode argument: (nat64) - ICP amount in e8s
-            match try_decode_u64(arg, "open_vault")? {
-                Some(amount) => Ok(format!(
-                    "## Create New Vault\n\n\
-                    You are creating a new vault with **{}** as collateral.\n\n\
-                    This will:\n\
-                    - Lock your ICP in the Rumi Protocol\n\
-                    - Create a new vault that you can borrow icUSD against\n\n\
-                    *Minimum collateral ratio: 150%*",
-                    format_icp_amount(amount)
-                )),
+            // Decode argument: (nat64, opt principal) — collateral amount in the
+            // token's smallest unit, plus the optional collateral type.
+            match try_decode_u64_opt_principal(arg, "open_vault")? {
+                Some((amount, collateral_type)) => {
+                    let (symbol, decimals) = resolve_collateral_display(collateral_type);
+                    Ok(format!(
+                        "## Create New Vault\n\n\
+                        You are creating a new vault with **{}** as collateral.\n\n\
+                        This will:\n\
+                        - Lock your {} in the Rumi Protocol\n\
+                        - Create a new vault that you can borrow icUSD against\n\n\
+                        *Minimum collateral ratio: 150%*",
+                        format_collateral_amount(amount, decimals, &symbol),
+                        symbol
+                    ))
+                }
                 None => Ok(
                     "## Create New Vault\n\n\
                     You are creating a new vault in the Rumi Protocol.\n\n\
                     This will:\n\
-                    - Lock your ICP as collateral\n\
+                    - Lock your chosen collateral in the Rumi Protocol\n\
                     - Create a new vault that you can borrow icUSD against\n\n\
                     *Minimum collateral ratio: 150%*".to_string()
                 ),
             }
         }
-        
+
         "open_vault_and_borrow" => {
-            // Decode argument: (nat64, nat64, opt principal) — collateral e8s, borrow e8s, collateral type
+            // Decode argument: (nat64, nat64, opt principal) — collateral amount,
+            // borrow amount in icUSD e8s, and the optional collateral type.
             match try_decode_u64_u64_opt_principal(arg, "open_vault_and_borrow")? {
-                Some((collateral, borrow)) if borrow > 0 => Ok(format!(
-                    "## Create Vault & Borrow\n\n\
-                    You are creating a new vault with **{}** as collateral \
-                    and borrowing **{}**.\n\n\
-                    This will:\n\
-                    - Lock your ICP in the Rumi Protocol\n\
-                    - Create a new vault\n\
-                    - Borrow icUSD to your wallet\n\n\
-                    *A small borrowing fee will be applied. Minimum collateral ratio: 150%*",
-                    format_icp_amount(collateral),
-                    format_icusd_amount(borrow)
-                )),
-                Some((collateral, _)) => Ok(format!(
-                    "## Create New Vault\n\n\
-                    You are creating a new vault with **{}** as collateral.\n\n\
-                    This will:\n\
-                    - Lock your ICP in the Rumi Protocol\n\
-                    - Create a new vault that you can borrow icUSD against\n\n\
-                    *Minimum collateral ratio: 150%*",
-                    format_icp_amount(collateral)
-                )),
+                Some((collateral, borrow, collateral_type)) if borrow > 0 => {
+                    let (symbol, decimals) = resolve_collateral_display(collateral_type);
+                    Ok(format!(
+                        "## Create Vault & Borrow\n\n\
+                        You are creating a new vault with **{}** as collateral \
+                        and borrowing **{}**.\n\n\
+                        This will:\n\
+                        - Lock your {} in the Rumi Protocol\n\
+                        - Create a new vault\n\
+                        - Borrow icUSD to your wallet\n\n\
+                        *A small borrowing fee will be applied. Minimum collateral ratio: 150%*",
+                        format_collateral_amount(collateral, decimals, &symbol),
+                        format_icusd_amount(borrow),
+                        symbol
+                    ))
+                }
+                Some((collateral, _, collateral_type)) => {
+                    let (symbol, decimals) = resolve_collateral_display(collateral_type);
+                    Ok(format!(
+                        "## Create New Vault\n\n\
+                        You are creating a new vault with **{}** as collateral.\n\n\
+                        This will:\n\
+                        - Lock your {} in the Rumi Protocol\n\
+                        - Create a new vault that you can borrow icUSD against\n\n\
+                        *Minimum collateral ratio: 150%*",
+                        format_collateral_amount(collateral, decimals, &symbol),
+                        symbol
+                    ))
+                }
                 None => Ok(
                     "## Create Vault & Borrow\n\n\
                     You are creating a new vault and borrowing icUSD.\n\n\
                     This will:\n\
-                    - Lock your ICP as collateral\n\
+                    - Lock your chosen collateral in the Rumi Protocol\n\
                     - Create a new vault\n\
                     - Borrow icUSD to your wallet\n\n\
                     *A small borrowing fee will be applied. Minimum collateral ratio: 150%*".to_string()
@@ -239,16 +344,19 @@ fn generate_consent_message(method: &str, arg: &[u8]) -> Result<String, String> 
 
         "add_margin_to_vault" => {
             match try_decode_vault_arg(arg, "add_margin_to_vault")? {
-                Some(vault_arg) => Ok(format!(
-                    "## Add Collateral to Vault\n\n\
-                    You are adding **{}** to vault #{}.\n\n\
-                    This will increase your collateral ratio and reduce liquidation risk.",
-                    format_icp_amount(vault_arg.amount),
-                    vault_arg.vault_id
-                )),
+                Some(vault_arg) => {
+                    let (symbol, decimals) = resolve_collateral_for_vault(vault_arg.vault_id);
+                    Ok(format!(
+                        "## Add Collateral to Vault\n\n\
+                        You are adding **{}** to vault #{}.\n\n\
+                        This will increase your collateral ratio and reduce liquidation risk.",
+                        format_collateral_amount(vault_arg.amount, decimals, &symbol),
+                        vault_arg.vault_id
+                    ))
+                }
                 None => Ok(
                     "## Add Collateral to Vault\n\n\
-                    You are adding ICP collateral to your vault.\n\n\
+                    You are adding collateral to your vault.\n\n\
                     This will increase your collateral ratio and reduce liquidation risk.".to_string()
                 ),
             }
@@ -342,13 +450,21 @@ fn generate_consent_message(method: &str, arg: &[u8]) -> Result<String, String> 
         }
         
         "withdraw_collateral" => {
+            // Argument is the VAULT ID (nat64), not an amount — this endpoint
+            // withdraws all excess collateral and computes the amount itself, so
+            // the consent message references the vault and its collateral token
+            // rather than a (nonexistent) amount.
             match try_decode_u64(arg, "withdraw_collateral")? {
-                Some(amount) => Ok(format!(
-                    "## Withdraw Collateral\n\n\
-                    You are withdrawing **{}** from your vault.\n\n\
-                    Only collateral above the minimum ratio can be withdrawn.",
-                    format_icp_amount(amount)
-                )),
+                Some(vault_id) => {
+                    let (symbol, _decimals) = resolve_collateral_for_vault(vault_id);
+                    Ok(format!(
+                        "## Withdraw Collateral\n\n\
+                        You are withdrawing excess **{}** collateral from vault #{}.\n\n\
+                        Only collateral above the minimum ratio can be withdrawn.",
+                        symbol,
+                        vault_id
+                    ))
+                }
                 None => Ok(
                     "## Withdraw Collateral\n\n\
                     You are withdrawing excess collateral from your vault.\n\n\
@@ -466,6 +582,36 @@ fn generate_consent_message(method: &str, arg: &[u8]) -> Result<String, String> 
                 This will transfer all earned ICP collateral to your wallet.".to_string())
         }
         
+        "redeem_collateral" => {
+            // Argument: (principal, nat64) — the collateral type to receive and
+            // the icUSD amount to redeem. Generic, collateral-aware redemption.
+            match try_decode_principal_u64(arg, "redeem_collateral")? {
+                Some((collateral_type, amount)) => {
+                    let (symbol, _decimals) = resolve_collateral_display(Some(collateral_type));
+                    Ok(format!(
+                        "## Redeem icUSD for {}\n\n\
+                        You are redeeming **{}** for {}.\n\n\
+                        This will:\n\
+                        - Burn your icUSD\n\
+                        - Transfer {} to your wallet at the current oracle rate\n\n\
+                        *A small redemption fee may apply.*",
+                        symbol,
+                        format_icusd_amount(amount),
+                        symbol,
+                        symbol
+                    ))
+                }
+                None => Ok(
+                    "## Redeem icUSD for Collateral\n\n\
+                    You are redeeming icUSD for collateral.\n\n\
+                    This will:\n\
+                    - Burn your icUSD\n\
+                    - Transfer collateral to your wallet at the current oracle rate\n\n\
+                    *A small redemption fee may apply.*".to_string()
+                ),
+            }
+        }
+
         "redeem_icp" => {
             match try_decode_u64(arg, "redeem_icp")? {
                 Some(amount) => Ok(format!(
@@ -688,4 +834,87 @@ pub fn icrc10_supported_standards() -> Vec<StandardRecord> {
 pub struct StandardRecord {
     pub name: String,
     pub url: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candid::Encode;
+
+    // A stand-in ledger principal for decode round-trip tests (ckBTC ledger).
+    fn sample_ct() -> Principal {
+        Principal::from_text("mxzaz-hqaaa-aaaar-qaada-cai").unwrap()
+    }
+
+    #[test]
+    fn format_collateral_amount_respects_decimals_and_symbol() {
+        // 8-decimal ICP
+        assert_eq!(format_collateral_amount(400_000, 8, "ICP"), "0.004 ICP");
+        // 6-decimal XRP (drops)
+        assert_eq!(format_collateral_amount(400_000, 6, "XRP"), "0.4 XRP");
+        // 18-decimal ckETH — the fixed /1e8 divisor would have understated this
+        // by 10 orders of magnitude and labeled it ICP.
+        assert_eq!(
+            format_collateral_amount(4_000_000_000_000_000, 18, "ckETH"),
+            "0.004 ckETH"
+        );
+        // Whole number trims the trailing dot.
+        assert_eq!(format_collateral_amount(500_000_000, 8, "ICP"), "5 ICP");
+        // Zero.
+        assert_eq!(format_collateral_amount(0, 8, "ckXAUT"), "0 ckXAUT");
+    }
+
+    #[test]
+    fn decode_open_vault_preserves_collateral_type() {
+        let ct = sample_ct();
+        let arg = Encode!(&1_000_000u64, &Some(ct)).unwrap();
+        assert_eq!(
+            try_decode_u64_opt_principal(&arg, "open_vault").unwrap(),
+            Some((1_000_000u64, Some(ct)))
+        );
+    }
+
+    #[test]
+    fn decode_open_vault_none_collateral_type() {
+        let none: Option<Principal> = None;
+        let arg = Encode!(&2_000_000u64, &none).unwrap();
+        assert_eq!(
+            try_decode_u64_opt_principal(&arg, "open_vault").unwrap(),
+            Some((2_000_000u64, None))
+        );
+    }
+
+    #[test]
+    fn decode_open_vault_and_borrow_preserves_collateral_type() {
+        let ct = sample_ct();
+        let arg = Encode!(&1_000_000u64, &500_000u64, &Some(ct)).unwrap();
+        assert_eq!(
+            try_decode_u64_u64_opt_principal(&arg, "open_vault_and_borrow").unwrap(),
+            Some((1_000_000u64, 500_000u64, Some(ct)))
+        );
+    }
+
+    #[test]
+    fn decode_redeem_collateral() {
+        let ct = sample_ct();
+        let arg = Encode!(&ct, &750_000u64).unwrap();
+        assert_eq!(
+            try_decode_principal_u64(&arg, "redeem_collateral").unwrap(),
+            Some((ct, 750_000u64))
+        );
+    }
+
+    // The generic (empty-arg) fallbacks are what Oisy renders while the user is
+    // still typing. They must never claim "ICP" for what could be any collateral
+    // — that is the exact bug this module fixes.
+    #[test]
+    fn generic_collateral_messages_never_hardcode_icp() {
+        for method in ["open_vault", "open_vault_and_borrow", "add_margin_to_vault"] {
+            let msg = generate_consent_message(method, &[]).unwrap();
+            assert!(
+                !msg.contains("ICP"),
+                "generic {method} consent message must not hardcode ICP: {msg}"
+            );
+        }
+    }
 }

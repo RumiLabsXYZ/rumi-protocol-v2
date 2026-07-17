@@ -334,6 +334,7 @@ export const idlFactory = ({ IDL }) => {
     'display_color' : IDL.Opt(IDL.Text),
     'borrowing_fee' : IDL.Vec(IDL.Nat8),
     'interest_rate_apr' : IDL.Vec(IDL.Nat8),
+    'symbol' : IDL.Opt(IDL.Text),
     'liquidation_ratio' : IDL.Vec(IDL.Nat8),
   });
   const CollateralTotals = IDL.Record({
@@ -1361,8 +1362,13 @@ export const idlFactory = ({ IDL }) => {
     'Err' : ProtocolError,
   });
   const Result_22 = IDL.Variant({ 'Ok' : IDL.Nat32, 'Err' : ProtocolError });
+  const Result_23 = IDL.Variant({
+    'Ok' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Text)),
+    'Err' : ProtocolError,
+  });
   return IDL.Service({
     'add_collateral_token' : IDL.Func([AddCollateralArg], [Result], []),
+    'backfill_collateral_symbols' : IDL.Func([], [Result_23], []),
     'add_margin_to_vault' : IDL.Func([VaultArg], [Result_1], []),
     'add_margin_with_deposit' : IDL.Func([IDL.Nat64], [Result_1], []),
     'admin_correct_vault_collateral' : IDL.Func(

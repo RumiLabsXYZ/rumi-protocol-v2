@@ -165,9 +165,9 @@
         </thead>
         <tbody>
           {#each liquidations.slice(0, 10) as l}
-            {@const symbol = getCollateralSymbol(
-              l.collateral_type?.toText?.() ?? String(l.collateral_type ?? '')
-            )}
+            {@const collateralTypeStr = l.collateral_type?.toText?.() ?? String(l.collateral_type ?? '')}
+            {@const symbol = getCollateralSymbol(collateralTypeStr)}
+            {@const collateralDecimals = getTokenDecimals(collateralTypeStr)}
             <tr class="border-b border-white/[0.03] hover:bg-white/[0.02]">
               <td class="py-2 px-2">
                 {#if l.vault_id != null}
@@ -181,7 +181,7 @@
                 {formatCompact(debtClearedFromRecord(l))} icUSD
               </td>
               <td class="py-2 px-2 text-right tabular-nums text-gray-300">
-                {formatCompact(Number(l.collateral_gained ?? l.collateral_amount ?? 0n) / 1e8)}
+                {formatCompact(Number(l.collateral_gained ?? l.collateral_amount ?? 0n) / 10 ** collateralDecimals)}
               </td>
             </tr>
           {/each}
