@@ -24,6 +24,46 @@ Use `rust-canister-engineering` automatically for Rust ICP canister work, stable
 
 Use `adversarial-verification` before claiming high-stakes work is ready, including production code, security-sensitive changes, state migrations, native-chain integrations, architecture reports, public docs, deploy prep, or anything where semantic correctness matters beyond build/test results. Run deterministic repo checks first, then the adversarial gate when the stakes justify it.
 
+## Worktree Hygiene
+
+Worktrees are a shared-host resource. Agents create them, so agents—not Rob—own
+their safe reclamation. By 2026-07-22, stale worktrees had consumed 171GB and
+left a 926GB disk with under 1GB free.
+
+At the START of every session, run the read-only inventory:
+
+```bash
+bash scripts/cleanup_worktrees.sh
+```
+
+The helper inventories every worktree registered to this repository, regardless
+of whether it lives in `/private/tmp`, `.codex/worktrees`, `.claude/worktrees`,
+or `.worktrees`. Do not hard-code a directory or use a broad filesystem sweep.
+
+If the volume has less than 15% free space, or cleanup is explicitly in scope,
+run `bash scripts/cleanup_worktrees.sh --remove-eligible`. The helper fetches
+`origin` first and removes only an eligible worktree, one path at a time. An
+eligible worktree is all of the following:
+
+- neither the primary checkout nor the checkout running the helper;
+- not Git-locked;
+- clean according to `git status --porcelain` (including untracked files);
+- has no process using files below it; and
+- has a HEAD that is an ancestor of the freshly fetched `origin/main`.
+
+Clean, old, or detached alone never make a worktree disposable. If the remote
+refresh fails, the branch is unmerged, the worktree is locked, or a process is
+using it, preserve it and report why. Never delete branch refs, and never use
+`rm -rf`: the helper uses `git worktree remove` without `--force`, then prunes
+only stale Git metadata. Report the outcome, including zero eligible removals.
+
+Do not perform destructive cleanup merely because a task is read-only. The
+read-only inventory is still required; removal needs disk pressure or an
+explicit cleanup task.
+
+Do not create a worktree for read-only work such as reviews, questions, or
+investigation. Use the main checkout. A worktree is for work that writes code.
+
 ## Rumi Agent Orchestration
 
 For rumi-protocol-v2 work, use the local persona catalog and team-agent-orchestration when it makes sense. Do not ask the user to name the agents.
