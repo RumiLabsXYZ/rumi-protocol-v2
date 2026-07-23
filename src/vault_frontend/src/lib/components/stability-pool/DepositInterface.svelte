@@ -16,6 +16,12 @@
 
   $: spMult = spMultiplier(selectedToken?.symbol);
 
+  // Interest is paid on icUSD balances only. Stating that at the moment of the
+  // deposit decision, not just on the pool badge, so nobody deposits a
+  // non-earning token expecting the advertised rate.
+  $: earnsInterest =
+    selectedToken?.ledger_id?.toText?.() === CANISTER_IDS.ICUSD_LEDGER;
+
   export let poolStatus: PoolStatus | null = null;
   export let userPosition: UserPosition | null = null;
 
@@ -261,6 +267,14 @@
       </span>
     </div>
 
+    {#if activeTab === 'deposit' && selectedToken && !earnsInterest}
+      <p class="no-interest-note">
+        {selectedToken.symbol} deposits earn <strong>no interest</strong> in the pool.
+        Only icUSD earns the interest APY. {selectedToken.symbol} takes part in
+        liquidations and earns discounted collateral.
+      </p>
+    {/if}
+
     <!-- Input with in-field token dropdown -->
     <div class="input-wrapper">
       <input
@@ -429,6 +443,18 @@
   }
 
   /* ── Balance row ── */
+  .no-interest-note {
+    margin: 0 0 0.625rem;
+    padding: 0.5rem 0.625rem;
+    border: 1px solid rgba(148, 163, 184, 0.22);
+    border-radius: 0.5rem;
+    background: rgba(148, 163, 184, 0.07);
+    font-size: 0.6875rem;
+    line-height: 1.45;
+    color: #94a3b8;
+  }
+  .no-interest-note strong { color: #cbd5e1; font-weight: 600; }
+
   .balance-row {
     display: flex;
     justify-content: space-between;

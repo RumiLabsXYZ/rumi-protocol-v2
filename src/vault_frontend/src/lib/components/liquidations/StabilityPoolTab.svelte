@@ -17,6 +17,7 @@
   import EarnInfoCard from '../stability-pool/EarnInfoCard.svelte';
   import LiquidationHistoryCard from '../stability-pool/LiquidationHistoryCard.svelte';
   import LoadingSpinner from '../common/LoadingSpinner.svelte';
+  import { liveSpApyPct } from '../../utils/liveApy';
 
   let hasCachedData = _poolStatus !== null;
   let loading = !hasCachedData;
@@ -29,26 +30,10 @@
   $: isConnected = $walletStore.isConnected;
   $: principal = $walletStore.principal;
 
-  $: poolApy = (() => {
-    if (!protocolStatus || !poolStatus) return null;
-    const poolShare = (protocolStatus.interestSplit?.find(e => e.destination === 'stability_pool')?.bps ?? 0) / 10000;
-    const perC = protocolStatus.perCollateralInterest;
-    if (!perC || perC.length === 0) return null;
-
-    const eligibleMap = new Map<string, number>(
-      (poolStatus.eligible_icusd_per_collateral ?? []).map(([p, v]: [any, bigint]) => [p.toText(), Number(v) / 1e8])
-    );
-
-    let totalApr = 0;
-    for (const info of perC) {
-      const eligible = eligibleMap.get(info.collateralType) ?? 0;
-      if (eligible === 0 || info.totalDebtE8s === 0 || info.weightedInterestRate === 0) continue;
-      totalApr += (info.weightedInterestRate * poolShare * info.totalDebtE8s) / eligible;
-    }
-    if (totalApr === 0) return null;
-    const apy = Math.pow(1 + totalApr / 365, 365) - 1;
-    return (apy * 100).toFixed(2);
-  })();
+  // Advertised rate = what a new icUSD depositor earns. Single-sourced from
+  // liveSpApyPct so the badge, the nav pill and the explorer lenses cannot drift.
+  $: poolApyPct = liveSpApyPct(protocolStatus, poolStatus);
+  $: poolApy = poolApyPct === null ? null : poolApyPct.toFixed(2);
 
   let showApyTooltip = false;
 
@@ -141,12 +126,13 @@
         <svg class="apy-arrow" width="10" height="10" viewBox="0 0 10 10" fill="none">
           <path d="M5 8V2M5 2L2 5M5 2L8 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
-        {poolApy}% APY<span class="apy-asterisk">*</span>
+        {poolApy}% icUSD Interest APY
 
         {#if showApyTooltip}
           <div class="apy-tooltip">
             <div class="apy-tooltip-caret"></div>
             <p><strong>Interest APY</strong> applies to <strong>icUSD</strong> deposits only. icUSD depositors earn a share of all borrowing interest paid by vault owners.</p>
+            <p>This is the rate a <em>new</em> depositor earns. Older positions opted in to wind-down collateral can earn more.</p>
             <div class="apy-tooltip-divider"></div>
             <p><strong>ckUSDC</strong> and <strong>ckUSDT</strong> deposits don't earn interest, but get <em>first</em> priority in liquidations — they're consumed before icUSD and 3USD, giving them earliest access to discounted collateral.</p>
             <p><strong>3USD</strong> deposits sit at the same priority as icUSD for liquidations. They don't earn interest in the pool, but 3USD LP tokens earn yield from swap fees and interest donations in the 3pool itself.</p>
@@ -154,6 +140,13 @@
         {/if}
       </div>
     </div>
+    <!-- Stated in the page, not only in the badge tooltip: hover does not exist
+         on touch devices, so a tooltip-only disclosure is invisible on mobile. -->
+    <p class="apy-scope-note">
+      Interest is paid on <strong>icUSD</strong> deposits only. <strong>3USD</strong>,
+      <strong>ckUSDC</strong> and <strong>ckUSDT</strong> deposits earn no interest here.
+      They take part in liquidations instead.
+    </p>
   {/if}
 
   {#if loading}
@@ -192,6 +185,16 @@
 <style>
   .pool-container { max-width: 820px; margin: 0 auto; }
 
+  .apy-scope-note {
+    margin: 0.5rem auto 0;
+    max-width: 34rem;
+    text-align: center;
+    font-size: 0.75rem;
+    line-height: 1.45;
+    color: #94a3b8;
+  }
+  .apy-scope-note strong { color: #cbd5e1; font-weight: 600; }
+
   .apy-row {
     display: flex;
     align-items: center;
@@ -217,13 +220,6 @@
   }
 
   .apy-arrow { color: #4ade80; flex-shrink: 0; }
-
-  .apy-asterisk {
-    font-size: 0.625rem;
-    opacity: 0.6;
-    margin-left: -0.125rem;
-    vertical-align: super;
-  }
 
   .apy-tooltip {
     position: absolute;
