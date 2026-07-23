@@ -49,20 +49,21 @@ function collateral(overrides: Partial<CollateralInfo>): CollateralInfo {
 }
 
 describe('healthTierFor', () => {
-  // No cautionCr/safeCr args -> defaults to ICP's own thresholds (1.5/2.0).
-  it('returns "safe" for CR >= 2.0', () => {
-    expect(healthTierFor(2.0)).toBe('safe');
+  // No cautionCr/safeCr args -> defaults to ICP's own borrow threshold (1.5)
+  // and its comfort line (1.5 * 1.234 = 1.851).
+  it('returns "safe" at or above the comfort line', () => {
+    expect(healthTierFor(1.851)).toBe('safe');
     expect(healthTierFor(2.81)).toBe('safe');
     expect(healthTierFor(100)).toBe('safe');
   });
 
-  it('returns "caution" for 1.5 <= CR < 2.0', () => {
+  it('returns "caution" between the borrow threshold and the comfort line', () => {
     expect(healthTierFor(1.5)).toBe('caution');
     expect(healthTierFor(1.75)).toBe('caution');
-    expect(healthTierFor(1.9999)).toBe('caution');
+    expect(healthTierFor(1.85)).toBe('caution');
   });
 
-  it('returns "danger" for CR < 1.5', () => {
+  it('returns "danger" below the borrow threshold', () => {
     expect(healthTierFor(1.49)).toBe('danger');
     expect(healthTierFor(1.0)).toBe('danger');
     expect(healthTierFor(0.5)).toBe('danger');
@@ -77,11 +78,11 @@ describe('healthTierFor', () => {
   });
 
   it('honors explicit cautionCr/safeCr cutoffs instead of the ICP defaults', () => {
-    // A ckXAUT-only cutoff pair (liquidationCr 1.18 blended per the same
-    // ratios as ICP's 1.5/2.0): caution ≈1.331, safe ≈1.774.
-    expect(healthTierFor(1.47, 1.3308, 1.7744)).toBe('caution');
-    expect(healthTierFor(1.2, 1.3308, 1.7744)).toBe('danger');
-    expect(healthTierFor(1.8, 1.3308, 1.7744)).toBe('safe');
+    // ckXAUT's real on-chain cutoffs: borrow threshold 1.18, comfort line
+    // 1.18 * 1.234 = 1.45612.
+    expect(healthTierFor(1.2, 1.18, 1.45612)).toBe('caution');
+    expect(healthTierFor(1.1, 1.18, 1.45612)).toBe('danger');
+    expect(healthTierFor(1.51, 1.18, 1.45612)).toBe('safe');
   });
 });
 
@@ -217,61 +218,90 @@ describe('aggregatePosition', () => {
     expect(result.perCollateral[0].symbol).toBe(CKBTC.slice(0, 5));
   });
 
-  // Regression coverage for the "flat ICP threshold" bug: a position backed
-  // entirely by a lower-liquidationCr asset (e.g. XRP/ckXAUT at ~1.18) must be
-  // judged against its own blended threshold, not ICP's 1.5/2.0.
+  // Regression coverage for the "flat ICP threshold" bug: a position backed by
+  // an asset with a lower borrow threshold (ckXAUT at 1.18 vs ICP's 1.5) must
+  // be judged against its own threshold, not ICP's.
+  //
+  // ckXAUT's real on-chain params (verified via get_collateral_config on
+  // nza5v-qaaaa-aaaar-qahzq-cai): borrow_threshold_ratio 1.18,
+  // liquidation_ratio 1.12. Bands: danger <1.18, caution 1.18-1.45612,
+  // safe >=1.45612.
   describe('weighted health tier for non-ICP collateral', () => {
-    it('does not flag a 147% CR ckXAUT-only position as danger', () => {
-      // liquidationCr 1.18 -> caution cutoff ≈1.331, safe cutoff ≈1.774.
-      const vaults = [vault({ collateralType: CKXAUT, collateralAmount: 1, borrowedIcusd: 1000 })];
-      const collaterals = [collateral({ principal: CKXAUT, symbol: 'ckXAUT', price: 1470, liquidationCr: 1.18, minimumCr: 1.35 })];
-      const result = aggregatePosition(vaults, collaterals);
-      expect(result.overallCr).toBeCloseTo(1.47, 2);
-      expect(result.healthTier).toBe('caution');
-    });
+    const ckxaut = (price: number) =>
+      collateral({ principal: CKXAUT, symbol: 'ckXAUT', price, minimumCr: 1.18, liquidationCr: 1.12 });
 
-    it('flags the same asset as danger once CR actually drops below its own liquidation buffer', () => {
+    it('reports a 151% CR ckXAUT-only position as safe, matching its vault card', () => {
+      // The live case that prompted this fix: judged against ICP's numbers the
+      // badge said "At risk", and against a liquidationCr-derived cutoff it
+      // said "Caution", while VaultCard already showed the same position safe.
       const vaults = [vault({ collateralType: CKXAUT, collateralAmount: 1, borrowedIcusd: 1000 })];
-      const collaterals = [collateral({ principal: CKXAUT, symbol: 'ckXAUT', price: 1200, liquidationCr: 1.18, minimumCr: 1.35 })];
-      const result = aggregatePosition(vaults, collaterals);
-      expect(result.overallCr).toBeCloseTo(1.2, 2);
-      expect(result.healthTier).toBe('danger');
-    });
-
-    it('marks safe once comfortably above the asset-specific buffer', () => {
-      const vaults = [vault({ collateralType: CKXAUT, collateralAmount: 1, borrowedIcusd: 1000 })];
-      const collaterals = [collateral({ principal: CKXAUT, symbol: 'ckXAUT', price: 1800, liquidationCr: 1.18, minimumCr: 1.35 })];
-      const result = aggregatePosition(vaults, collaterals);
-      expect(result.overallCr).toBeCloseTo(1.8, 2);
+      const result = aggregatePosition(vaults, [ckxaut(1510)]);
+      expect(result.overallCr).toBeCloseTo(1.51, 2);
       expect(result.healthTier).toBe('safe');
     });
 
-    it('preserves ICP-only behavior exactly (regression against the old flat breakpoints)', () => {
-      const vaults = [vault({ collateralType: ICP, collateralAmount: 100, borrowedIcusd: 500 })];
-      const collaterals = [collateral({ principal: ICP, price: 5 })]; // CR = 1.0 -> danger
-      expect(aggregatePosition(vaults, collaterals).healthTier).toBe('danger');
-
-      const cautionVaults = [vault({ collateralType: ICP, collateralAmount: 100, borrowedIcusd: 300 })];
-      const cautionCollaterals = [collateral({ principal: ICP, price: 5 })]; // CR ≈1.67 -> caution
-      expect(aggregatePosition(cautionVaults, cautionCollaterals).healthTier).toBe('caution');
-
-      const safeVaults = [vault({ collateralType: ICP, collateralAmount: 100, borrowedIcusd: 200 })];
-      const safeCollaterals = [collateral({ principal: ICP, price: 5 })]; // CR = 2.5 -> safe
-      expect(aggregatePosition(safeVaults, safeCollaterals).healthTier).toBe('safe');
+    it('reports caution between ckXAUT\'s borrow threshold and its comfort line', () => {
+      const vaults = [vault({ collateralType: CKXAUT, collateralAmount: 1, borrowedIcusd: 1000 })];
+      const result = aggregatePosition(vaults, [ckxaut(1300)]);
+      expect(result.overallCr).toBeCloseTo(1.3, 2);
+      expect(result.healthTier).toBe('caution');
     });
 
-    it('blends thresholds by USD share for a mixed ICP + ckXAUT position', () => {
-      // 50/50 USD split (725 + 725 = 1450): weighted liquidationCr =
-      // (1.33 + 1.18)/2 = 1.255 -> caution cutoff ≈1.415, safe cutoff ≈1.887.
-      // CR = 1450/1000 = 1.45, which the OLD flat ICP breakpoints (danger
-      // below 1.5) would have wrongly called "danger".
+    it('reports danger only once CR falls below ckXAUT\'s own borrow threshold', () => {
+      const vaults = [vault({ collateralType: CKXAUT, collateralAmount: 1, borrowedIcusd: 1000 })];
+      const result = aggregatePosition(vaults, [ckxaut(1150)]);
+      expect(result.overallCr).toBeCloseTo(1.15, 2);
+      expect(result.healthTier).toBe('danger');
+    });
+
+    it('keeps ICP-only danger/caution boundaries at ICP\'s own borrow threshold', () => {
+      const danger = [vault({ collateralType: ICP, collateralAmount: 100, borrowedIcusd: 500 })];
+      expect(aggregatePosition(danger, [collateral({ price: 5 })]).healthTier).toBe('danger'); // CR 1.0
+
+      const caution = [vault({ collateralType: ICP, collateralAmount: 100, borrowedIcusd: 300 })];
+      expect(aggregatePosition(caution, [collateral({ price: 5 })]).healthTier).toBe('caution'); // CR ≈1.67
+
+      const safe = [vault({ collateralType: ICP, collateralAmount: 100, borrowedIcusd: 200 })];
+      expect(aggregatePosition(safe, [collateral({ price: 5 })]).healthTier).toBe('safe'); // CR 2.5
+    });
+
+    it('puts ICP\'s safe line at 1.851, matching VaultCard\'s comfort line', () => {
+      // Previously a flat 2.0, which disagreed with the per-vault card's
+      // minimumCr * 1.234. 1.86 is safe under the new line, caution under old.
+      const vaults = [vault({ collateralType: ICP, collateralAmount: 186, borrowedIcusd: 100 })];
+      const result = aggregatePosition(vaults, [collateral({ price: 1 })]);
+      expect(result.overallCr).toBeCloseTo(1.86, 2);
+      expect(result.healthTier).toBe('safe');
+    });
+
+    it('blends borrow thresholds by USD share for a mixed ICP + ckXAUT position', () => {
+      // 50/50 USD split (725 + 725 = 1450): weighted minimumCr =
+      // (1.5 + 1.18)/2 = 1.34 -> danger below 1.34, safe at/above
+      // 1.34 * 1.234 = 1.65356. CR = 1450/1000 = 1.45 sits between -> caution.
       const vaults = [
         vault({ vaultId: 1, collateralType: ICP, collateralAmount: 100, borrowedIcusd: 1000 }),
         vault({ vaultId: 2, collateralType: CKXAUT, collateralAmount: 1, borrowedIcusd: 0 }),
       ];
       const collaterals = [
-        collateral({ principal: ICP, symbol: 'ICP', price: 7.25 }),          // 725 USD
-        collateral({ principal: CKXAUT, symbol: 'ckXAUT', price: 725, liquidationCr: 1.18, minimumCr: 1.35 }), // 725 USD
+        collateral({ principal: ICP, symbol: 'ICP', price: 7.25 }), // 725 USD
+        ckxaut(725),                                                // 725 USD
+      ];
+      const result = aggregatePosition(vaults, collaterals);
+      expect(result.totalCollateralUsd).toBe(1450);
+      expect(result.overallCr).toBeCloseTo(1.45, 2);
+      expect(result.healthTier).toBe('caution');
+    });
+
+    it('weights toward the dominant asset in a lopsided mix', () => {
+      // 90% ckXAUT / 10% ICP: weighted minimumCr = 0.9*1.18 + 0.1*1.5 = 1.212
+      // -> safe line 1.212 * 1.234 = 1.495608. CR 1.45 -> caution.
+      const vaults = [
+        vault({ vaultId: 1, collateralType: CKXAUT, collateralAmount: 1, borrowedIcusd: 1000 }),
+        vault({ vaultId: 2, collateralType: ICP, collateralAmount: 145, borrowedIcusd: 0 }),
+      ];
+      const collaterals = [
+        ckxaut(1305),                                              // 1305 USD (90%)
+        collateral({ principal: ICP, symbol: 'ICP', price: 1 }),   // 145 USD (10%)
       ];
       const result = aggregatePosition(vaults, collaterals);
       expect(result.totalCollateralUsd).toBe(1450);
