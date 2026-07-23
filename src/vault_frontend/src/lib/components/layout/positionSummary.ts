@@ -1,12 +1,11 @@
 import type { VaultDTO, CollateralInfo } from '../../services/types';
 import { CANISTER_IDS } from '../../config';
 
-// ICP's own defaults (mirrors $lib/protocol's MINIMUM_CR/LIQUIDATION_CR).
-// Restated locally rather than imported so this module stays a pure,
-// dependency-light aggregation utility (protocol.ts pulls in the wallet/
-// canister-agent stack via collateralStore -> tokenService -> pnp).
+// ICP's own borrow threshold (mirrors $lib/protocol's MINIMUM_CR). Restated
+// locally rather than imported so this module stays a pure, dependency-light
+// aggregation utility (protocol.ts pulls in the wallet/canister-agent stack
+// via collateralStore -> tokenService -> pnp).
 const ICP_MINIMUM_CR = 1.5;
-const ICP_LIQUIDATION_CR = 1.33;
 
 export type HealthTier = 'safe' | 'caution' | 'danger' | 'no-debt' | 'unknown';
 
@@ -55,23 +54,25 @@ export function findCollateralInfo(
 }
 
 /**
- * Ratios implied by ICP's own thresholds (borrow threshold 1.5, liquidation
- * 1.33, legacy flat "safe" cutoff 2.0). Applied to a blended liquidationCr so a
- * non-ICP (or mixed-collateral) position gets a proportionally equivalent
- * buffer instead of being judged against ICP's flat numbers.
+ * Multiplier above an asset's borrow threshold at which a position reads as
+ * comfortably healthy. Matches the per-vault convention already used by
+ * VaultCard.svelte and ManualLiquidations.svelte (`comfortCR = minCR * 1.234`)
+ * so this aggregate badge and the individual vault cards never disagree about
+ * the same position.
  */
-const CAUTION_RATIO = ICP_MINIMUM_CR / ICP_LIQUIDATION_CR; // ≈1.128
-const SAFE_RATIO = 2.0 / ICP_LIQUIDATION_CR;                // ≈1.504
+const COMFORT_MULTIPLIER = 1.234;
 
 /**
  * Map a collateral ratio to a health tier against caution/safe cutoffs.
- *   >= safeCr        -> safe
+ *   >= safeCr         -> safe
  *   cautionCr..safeCr -> caution
- *   < cautionCr      -> danger
+ *   < cautionCr       -> danger
  * Infinity (no debt) -> 'no-debt'. NaN -> 'unknown'.
  *
- * cautionCr/safeCr default to ICP's own thresholds so callers that don't yet
- * have a collateral mix (e.g. isolated unit tests) keep the old behavior.
+ * cautionCr is the borrow threshold: below it the position is in liquidation
+ * territory. safeCr is COMFORT_MULTIPLIER above that. Both default to ICP's
+ * own numbers for callers that don't have a collateral mix on hand (e.g.
+ * isolated unit tests).
  *
  * NOTE: This is an aggregate heuristic across all the user's vaults, not a
  * per-vault liquidation signal. Individual vault liquidation prices are
@@ -80,7 +81,7 @@ const SAFE_RATIO = 2.0 / ICP_LIQUIDATION_CR;                // ≈1.504
 export function healthTierFor(
   cr: number,
   cautionCr: number = ICP_MINIMUM_CR,
-  safeCr: number = 2.0,
+  safeCr: number = ICP_MINIMUM_CR * COMFORT_MULTIPLIER,
 ): HealthTier {
   if (!Number.isFinite(cr)) return cr === Infinity ? 'no-debt' : 'unknown';
   if (cr >= safeCr) return 'safe';
@@ -99,8 +100,9 @@ export function healthTierFor(
  *  4. Overall CR = totalCollateralUsd / totalBorrowed (Infinity if no debt).
  *  5. Emit per-collateral breakdown sorted by USD value desc, skipping
  *     any group whose nativeAmount is 0.
- *  6. Blend each group's liquidationCr by its USD share to get a caution/safe
- *     cutoff specific to this user's actual collateral mix (see healthTierFor).
+ *  6. Blend each group's borrow threshold (minimumCr) by its USD share to get
+ *     caution/safe cutoffs specific to this user's collateral mix (see
+ *     healthTierFor).
  */
 export function aggregatePosition(
   vaults: VaultDTO[],
@@ -144,19 +146,22 @@ export function aggregatePosition(
     ? totalCollateralUsd / totalBorrowed
     : Infinity;
 
-  // Blend each held asset's own liquidationCr, weighted by its share of the
-  // user's total collateral USD, so a mixed (or non-ICP) position is judged
-  // against its own risk profile rather than ICP's.
-  const weightedLiquidationCr = totalCollateralUsd > 0
+  // Blend each held asset's own borrow threshold (minimumCr), weighted by its
+  // share of the user's total collateral USD, so a mixed (or non-ICP) position
+  // is judged against its own risk profile rather than ICP's. Each asset
+  // publishes this threshold directly; it must NOT be inferred from
+  // liquidationCr, because the borrow-threshold-to-liquidation spread differs
+  // per asset (ICP 1.5/1.33 = 1.128, ckXAUT 1.18/1.12 = 1.054).
+  const weightedMinimumCr = totalCollateralUsd > 0
     ? perCollateral.reduce((sum, asset) => {
         const info = findCollateralInfo(collaterals, asset.principal);
-        const liquidationCr = info?.liquidationCr ?? ICP_LIQUIDATION_CR;
-        return sum + (asset.usdValue / totalCollateralUsd) * liquidationCr;
+        const minimumCr = info?.minimumCr ?? ICP_MINIMUM_CR;
+        return sum + (asset.usdValue / totalCollateralUsd) * minimumCr;
       }, 0)
-    : ICP_LIQUIDATION_CR;
+    : ICP_MINIMUM_CR;
 
-  const cautionCr = weightedLiquidationCr * CAUTION_RATIO;
-  const safeCr = weightedLiquidationCr * SAFE_RATIO;
+  const cautionCr = weightedMinimumCr;
+  const safeCr = weightedMinimumCr * COMFORT_MULTIPLIER;
 
   return {
     totalCollateralUsd,
