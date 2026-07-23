@@ -31,17 +31,52 @@ function principalText(p: any): string {
 }
 
 /**
- * Live SP APY as a percentage (e.g. 6.29 for 6.29%). Mirrors the formula
- * in the /liquidity tab. Returns null if any input is missing.
+ * BOB is in a one-way wind-down: `DepositPosition::new` opts every new position
+ * out of it, and the UI hides the re-opt-in control. Only grandfathered
+ * positions still earn from BOB-backed debt.
+ */
+const SUNSET_COLLATERAL = '7pail-xaaaa-aaaas-aabmq-cai';
+
+/**
+ * Collateral gated behind a configured native payout address. `position_opted_in_for`
+ * returns false until the depositor registers one, so a fresh position earns
+ * nothing from this debt.
+ */
+const PAYOUT_GATED_COLLATERAL = new Set(['5zjma-7dsov-wwsll-yojyc-23tbo-ruxmz-i']);
+
+/**
+ * Whether a brand-new default stability-pool position would earn interest from
+ * this collateral's debt.
+ *
+ * The advertised APY must be the rate a new depositor actually receives, so the
+ * headline is the *floor* over eligibility sets rather than the max. Summing
+ * every collateral (the previous behaviour) produced a rate reachable only by
+ * grandfathered positions: sunset BOB carried a tiny opted-in denominator, so
+ * its term dominated the headline while almost no depositor could earn it.
+ */
+export function isDefaultInterestEligible(collateralType: string): boolean {
+  return (
+    collateralType !== SUNSET_COLLATERAL &&
+    !PAYOUT_GATED_COLLATERAL.has(collateralType)
+  );
+}
+
+/**
+ * Total SP interest APR, summed over collateral types passing `eligibleFor`.
+ *
+ * Per collateral: `rate * poolShare * debt / eligible_icusd`. Interest is paid
+ * only on icUSD balances and the denominator counts only icUSD, so the ratio is
+ * a rate per icUSD deposited. It does not apply to 3USD or ck-stable deposits.
  *
  * Note: `protocolStatus.perCollateralInterest[i].totalDebtE8s` is already
  * normalized to icUSD (the upstream `QueryOperations.getProtocolStatus` divides
  * by 1e8). The eligible map here also normalizes the bigint e8s to icUSD, so
  * the ratio is in matching units.
  */
-export function liveSpApyPct(
+export function spInterestApr(
   protocolStatus: ProtocolStatusLike | null | undefined,
   poolStatus: PoolStatusLike | null | undefined,
+  eligibleFor: (collateralType: string) => boolean = isDefaultInterestEligible,
 ): number | null {
   if (!protocolStatus || !poolStatus) return null;
 
@@ -60,6 +95,7 @@ export function liveSpApyPct(
 
   let totalApr = 0;
   for (const info of perC) {
+    if (!eligibleFor(info.collateralType)) continue;
     const eligible = eligibleMap.get(info.collateralType) ?? 0;
     if (
       eligible === 0 ||
@@ -70,8 +106,24 @@ export function liveSpApyPct(
     }
     totalApr += (info.weightedInterestRate * poolShare * info.totalDebtE8s) / eligible;
   }
-  if (totalApr === 0) return null;
-  return (Math.pow(1 + totalApr / 365, 365) - 1) * 100;
+  return totalApr === 0 ? null : totalApr;
+}
+
+/** Daily-compounded APY percentage from an APR fraction. */
+export function aprToApyPct(apr: number): number {
+  return (Math.pow(1 + apr / 365, 365) - 1) * 100;
+}
+
+/**
+ * Advertised SP interest APY as a percentage (e.g. 7.39 for 7.39%): the rate a
+ * new icUSD depositor would earn. Applies to icUSD deposits only.
+ */
+export function liveSpApyPct(
+  protocolStatus: ProtocolStatusLike | null | undefined,
+  poolStatus: PoolStatusLike | null | undefined,
+): number | null {
+  const apr = spInterestApr(protocolStatus, poolStatus);
+  return apr === null ? null : aprToApyPct(apr);
 }
 
 /**

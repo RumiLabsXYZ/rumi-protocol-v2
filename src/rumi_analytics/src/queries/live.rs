@@ -362,15 +362,38 @@ pub fn compute_amm_apy(
     Some((daily / avg_tvl) * 365.0 * 100.0)
 }
 
-/// Stability pool APY: annualized interest yield.
+/// icUSD ledger. Interest is distributed to icUSD balances only, so this is the
+/// denominator for any stability-pool interest rate.
+const ICUSD_LEDGER_TEXT: &str = "t6bor-paaaa-aaaap-qrd5q-cai";
+
+/// icUSD deposits (e8s) in a stability snapshot.
+///
+/// `total_deposits_e8s` counts every accepted stablecoin, including 3USD and the
+/// ck-stables, none of which earn interest. Dividing interest by that total
+/// reports a rate no depositor receives and disagrees with the rate the app
+/// advertises. `stablecoin_balances` is already recorded per row, so the correct
+/// denominator needs no schema change.
+fn icusd_deposits_e8s(row: &storage::DailyStabilityRow) -> Option<u64> {
+    let icusd = Principal::from_text(ICUSD_LEDGER_TEXT).ok()?;
+    row.stablecoin_balances
+        .iter()
+        .find(|(ledger, _)| *ledger == icusd)
+        .map(|(_, amount)| *amount)
+}
+
+/// Stability pool APY: annualized interest yield on icUSD deposits.
 /// `total_interest_received_e8s` is cumulative, so we take the delta between
 /// the last and first snapshots in the window.
-/// APY = (interest_delta / days) / avg_deposits * 365 * 100
+/// APY = (interest_delta / days) / avg_icusd_deposits * 365 * 100
+///
+/// Returns `None` rather than falling back to the all-stablecoin total when a
+/// snapshot carries no icUSD balance: a number computed on the wrong base is
+/// worse than no number.
 pub fn compute_sp_apy(
     stability_rows: &[storage::DailyStabilityRow],
     window_days: u32,
 ) -> Option<f64> {
-    if stability_rows.len() < 2 {
+    if stability_rows.len() < 2 || window_days == 0 {
         return None;
     }
 
@@ -379,16 +402,18 @@ pub fn compute_sp_apy(
     let interest_delta = last.total_interest_received_e8s
         .saturating_sub(first.total_interest_received_e8s);
 
-    let avg_deposits: f64 = stability_rows.iter()
-        .map(|r| r.total_deposits_e8s as f64)
-        .sum::<f64>() / stability_rows.len() as f64;
+    let mut icusd_total: f64 = 0.0;
+    for row in stability_rows {
+        icusd_total += icusd_deposits_e8s(row)? as f64;
+    }
+    let avg_icusd_deposits = icusd_total / stability_rows.len() as f64;
 
-    if avg_deposits <= 0.0 {
+    if avg_icusd_deposits <= 0.0 {
         return None;
     }
 
     let daily_interest = interest_delta as f64 / window_days as f64;
-    let apy = (daily_interest / avg_deposits) * 365.0 * 100.0;
+    let apy = (daily_interest / avg_icusd_deposits) * 365.0 * 100.0;
     Some(apy)
 }
 
@@ -1296,15 +1321,37 @@ mod tests {
         }
     }
 
+    /// Pool holding icUSD only, so total deposits and the icUSD denominator agree.
     fn make_stability_row(deposits: u64, interest: u64) -> DailyStabilityRow {
+        make_stability_row_mixed(deposits, deposits, interest)
+    }
+
+    /// Pool holding `icusd` of icUSD inside `deposits` of total stablecoins. The
+    /// remainder stands in for 3USD / ck-stables, which earn no interest.
+    fn make_stability_row_mixed(
+        deposits: u64,
+        icusd: u64,
+        interest: u64,
+    ) -> DailyStabilityRow {
         DailyStabilityRow {
             timestamp_ns: 1_000_000_000,
             total_deposits_e8s: deposits,
             total_depositors: 10,
             total_liquidations_executed: 0,
             total_interest_received_e8s: interest,
-            stablecoin_balances: vec![],
+            stablecoin_balances: vec![(
+                Principal::from_text(ICUSD_LEDGER_TEXT).unwrap(),
+                icusd,
+            )],
             collateral_gains: vec![],
+        }
+    }
+
+    /// Snapshot with no icUSD entry at all (e.g. a pre-field row).
+    fn make_stability_row_no_icusd(deposits: u64, interest: u64) -> DailyStabilityRow {
+        DailyStabilityRow {
+            stablecoin_balances: vec![],
+            ..make_stability_row(deposits, interest)
         }
     }
 
@@ -1372,6 +1419,37 @@ mod tests {
     fn sp_apy_zero_deposits() {
         let rows = vec![make_stability_row(0, 50), make_stability_row(0, 100)];
         assert!(compute_sp_apy(&rows, 1).is_none());
+    }
+
+    #[test]
+    fn sp_apy_denominator_is_icusd_not_total_deposits() {
+        // 100_000 total deposits but only 25_000 icUSD: the other 75_000 stands in
+        // for 3USD / ck-stables, which earn none of the interest stream. Dividing
+        // by the total would report 18.25%; the rate icUSD depositors actually
+        // receive is 4x that.
+        let rows = vec![
+            make_stability_row_mixed(100_000, 25_000, 100),
+            make_stability_row_mixed(100_000, 25_000, 150),
+        ];
+        let v = compute_sp_apy(&rows, 1).unwrap();
+        // (50 / 25_000) * 365 * 100 = 73.0%
+        assert!((v - 73.0).abs() < 0.1, "expected ~73.0%, got {}", v);
+    }
+
+    #[test]
+    fn sp_apy_none_when_icusd_balance_missing() {
+        // Never silently fall back to the all-stablecoin denominator.
+        let rows = vec![
+            make_stability_row_no_icusd(100_000, 100),
+            make_stability_row_no_icusd(100_000, 150),
+        ];
+        assert!(compute_sp_apy(&rows, 1).is_none());
+    }
+
+    #[test]
+    fn sp_apy_zero_window_days_is_none() {
+        let rows = vec![make_stability_row(100_000, 100), make_stability_row(100_000, 150)];
+        assert!(compute_sp_apy(&rows, 0).is_none());
     }
 
     use crate::storage::events::{AnalyticsSwapEvent, SwapSource};

@@ -12,6 +12,7 @@
   import type { PoolStatus, UserPosition, CollateralInfo } from '../../services/stabilityPoolService';
   import type { ProtocolStatusDTO } from '../../services/types';
   import { CANISTER_IDS } from '../../config';
+  import { liveSpApyPct, spInterestApr, aprToApyPct } from '../../utils/liveApy';
   import XrpPayoutRouting from './XrpPayoutRouting.svelte';
   import { isIcrcClaimableCollateral } from '../../services/xrpPayoutHelpers';
   import {
@@ -49,29 +50,9 @@
   $: depositorCount = poolStatus ? Number(poolStatus.total_depositors) : 0;
   $: stablecoinBreakdown = poolStatus?.stablecoin_balances ?? [];
 
-  // Per-collateral APY building block: for each collateral type, compute
-  // interestRate_C * poolShare * debt_C / eligible_icusd_C (= APR),
-  // then convert total APR → APY via daily compounding.
-  $: eligibleMap = new Map<string, number>(
-    (poolStatus?.eligible_icusd_per_collateral ?? []).map(([p, v]: [any, bigint]) => [p.toText(), Number(v) / 1e8])
-  );
-
-  $: poolApy = (() => {
-    if (!protocolStatus || !poolStatus) return null;
-    const poolShare = (protocolStatus.interestSplit?.find(e => e.destination === 'stability_pool')?.bps ?? 0) / 10000;
-    const perC = protocolStatus.perCollateralInterest;
-    if (!perC || perC.length === 0 || poolShare === 0) return null;
-
-    let totalApr = 0;
-    for (const info of perC) {
-      const eligible = eligibleMap.get(info.collateralType) ?? 0;
-      if (eligible === 0 || info.totalDebtE8s === 0 || info.weightedInterestRate === 0) continue;
-      totalApr += (info.weightedInterestRate * poolShare * info.totalDebtE8s) / eligible;
-    }
-    if (totalApr === 0) return null;
-    const apy = Math.pow(1 + totalApr / 365, 365) - 1;
-    return (apy * 100).toFixed(2);
-  })();
+  // Advertised rate: what a new icUSD depositor earns. Single-sourced.
+  $: poolApyPct = liveSpApyPct(protocolStatus as any, poolStatus as any);
+  $: poolApy = poolApyPct === null ? null : poolApyPct.toFixed(2);
 
   // User position data
   $: userStables = userPosition?.stablecoin_balances ?? [];
@@ -91,29 +72,28 @@
     optedOut,
   );
 
-  // Does the user hold icUSD in the pool?
-  $: userHasIcusd = userStables.some(([l, a]: [any, bigint]) => l.toText() === CANISTER_IDS.ICUSD_LEDGER && a > 0n);
+  // Does the user hold icUSD in the pool? Interest is paid on icUSD only, so
+  // this balance (not `total_usd_value_e8s`) is the base the rate applies to.
+  $: userIcusdE8s = userStables
+    .filter(([l]: [any, bigint]) => l.toText() === CANISTER_IDS.ICUSD_LEDGER)
+    .reduce((sum: bigint, [, a]: [any, bigint]) => sum + a, 0n);
+  $: userHasIcusd = userIcusdE8s > 0n;
+  $: userIcusdFormatted = formatStableTokenDisplay(userIcusdE8s, 8);
 
-  // Personalized APY — only sums collateral types the user is opted in to
-  $: userApy = (() => {
-    if (!userHasIcusd || !protocolStatus || !poolStatus) return null;
-    const poolShare = (protocolStatus.interestSplit?.find(e => e.destination === 'stability_pool')?.bps ?? 0) / 10000;
-    const perC = protocolStatus.perCollateralInterest;
-    if (!perC || perC.length === 0) return null;
-
-    let totalApr = 0;
-    for (const info of perC) {
-      if (eligibleInterestCollaterals
-        ? !eligibleInterestCollaterals.has(info.collateralType)
-        : optedOut.has(info.collateralType)) continue;
-      const eligible = eligibleMap.get(info.collateralType) ?? 0;
-      if (eligible === 0 || info.totalDebtE8s === 0 || info.weightedInterestRate === 0) continue;
-      totalApr += (info.weightedInterestRate * poolShare * info.totalDebtE8s) / eligible;
-    }
-    if (totalApr === 0) return null;
-    const apy = Math.pow(1 + totalApr / 365, 365) - 1;
-    return (apy * 100).toFixed(2);
+  // Personalized APY — only sums collateral types the user is opted in to.
+  // May exceed the advertised rate for grandfathered positions still opted in
+  // to wind-down collateral; that uplift is labelled rather than hidden.
+  $: userApyPct = (() => {
+    if (!userHasIcusd) return null;
+    const apr = spInterestApr(protocolStatus as any, poolStatus as any, (ct) =>
+      eligibleInterestCollaterals ? eligibleInterestCollaterals.has(ct) : !optedOut.has(ct),
+    );
+    return apr === null ? null : aprToApyPct(apr);
   })();
+  $: userApy = userApyPct === null ? null : userApyPct.toFixed(2);
+  // Only call it an uplift when it clears display rounding.
+  $: hasUplift =
+    userApyPct !== null && poolApyPct !== null && userApyPct - poolApyPct >= 0.01;
 
   $: poolShare = (() => {
     if (!poolStatus || !userPosition || poolStatus.total_deposits_e8s === 0n) return '0.00';
@@ -206,11 +186,28 @@
   {#if isConnected && userPosition}
     <h4 class="group-heading">Your Position</h4>
     <div class="stats-stack">
-      <!-- Personalized Interest APY (top row, only if user holds icUSD) -->
+      <!-- Personalized Interest APY. The rate is paid on the icUSD balance only,
+           so the base is printed beside it; without that it reads as a rate on
+           Total Deposited, which it is not. Depositors holding no icUSD get an
+           explicit zero row rather than a hidden one. -->
       {#if userApy !== null}
-        <div class="stat-row">
+        <div class="stat-row align-top">
           <span class="stat-label">Your Interest APY</span>
-          <span class="stat-value green">{userApy}%</span>
+          <span class="stat-value-stack">
+            <span class="stat-value green">{userApy}%</span>
+            <span class="apy-base-note">on your {userIcusdFormatted} icUSD</span>
+            {#if hasUplift}
+              <span class="apy-base-note">above the {poolApy}% new-depositor rate (wind-down collateral)</span>
+            {/if}
+          </span>
+        </div>
+      {:else}
+        <div class="stat-row align-top">
+          <span class="stat-label">Your Interest APY</span>
+          <span class="stat-value-stack">
+            <span class="stat-value">0.00%</span>
+            <span class="apy-base-note">interest is paid on icUSD deposits only</span>
+          </span>
         </div>
       {/if}
 
@@ -308,10 +305,16 @@
       </div>
 
       <!-- Interest earned -->
+      <!-- `total_interest_earned_e8s` is cumulative for the life of the current
+           position (it resets if the position is fully closed) and counts the
+           borrowing-interest stream only, not liquidation gains. Say so. -->
       {#if interestEarned}
-        <div class="stat-row">
+        <div class="stat-row align-top">
           <span class="stat-label">Interest Earned</span>
-          <span class="stat-value green">${interestEarned}</span>
+          <span class="stat-value-stack">
+            <span class="stat-value green">${interestEarned}</span>
+            <span class="apy-base-note">total since you opened this position</span>
+          </span>
         </div>
       {/if}
     </div>
@@ -339,7 +342,7 @@
     </div>
     {#if poolApy !== null}
       <div class="stat-row">
-        <span class="stat-label">Interest APY</span>
+        <span class="stat-label">icUSD Interest APY</span>
         <span class="stat-value">{poolApy}%</span>
       </div>
     {/if}
@@ -449,6 +452,17 @@
     font-weight: 600;
     font-variant-numeric: tabular-nums;
     color: var(--rumi-text-primary);
+  }
+
+  /* Qualifier under a headline number: names the base a rate applies to, or the
+     period a total covers. Muted and lighter so it reads as scope, not value. */
+  .apy-base-note {
+    font-size: 0.6875rem;
+    font-weight: 400;
+    line-height: 1.35;
+    text-align: right;
+    max-width: 15rem;
+    color: #94a3b8;
   }
 
   .collateral-dot {
