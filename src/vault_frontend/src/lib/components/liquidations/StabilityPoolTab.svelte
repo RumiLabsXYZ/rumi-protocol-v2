@@ -123,16 +123,12 @@
         on:mouseover={() => { showApyTooltip = true; }}
         on:mouseleave={() => { showApyTooltip = false; }}
       >
-        <svg class="apy-arrow" width="10" height="10" viewBox="0 0 10 10" fill="none">
-          <path d="M5 8V2M5 2L2 5M5 2L8 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-        {poolApy}% icUSD Interest APY
+        {poolApy}% APY<span class="apy-asterisk">*</span>
 
         {#if showApyTooltip}
           <div class="apy-tooltip">
             <div class="apy-tooltip-caret"></div>
             <p><strong>Interest APY</strong> applies to <strong>icUSD</strong> deposits only. icUSD depositors earn a share of all borrowing interest paid by vault owners.</p>
-            <p>This is the rate a <em>new</em> depositor earns. Older positions opted in to wind-down collateral can earn more.</p>
             <div class="apy-tooltip-divider"></div>
             <p><strong>ckUSDC</strong> and <strong>ckUSDT</strong> deposits don't earn interest, but get <em>first</em> priority in liquidations — they're consumed before icUSD and 3USD, giving them earliest access to discounted collateral.</p>
             <p><strong>3USD</strong> deposits sit at the same priority as icUSD for liquidations. They don't earn interest in the pool, but 3USD LP tokens earn yield from swap fees and interest donations in the 3pool itself.</p>
@@ -140,13 +136,9 @@
         {/if}
       </div>
     </div>
-    <!-- Stated in the page, not only in the badge tooltip: hover does not exist
-         on touch devices, so a tooltip-only disclosure is invisible on mobile. -->
-    <p class="apy-scope-note">
-      Interest is paid on <strong>icUSD</strong> deposits only. <strong>3USD</strong>,
-      <strong>ckUSDC</strong> and <strong>ckUSDT</strong> deposits earn no interest here.
-      They take part in liquidations instead.
-    </p>
+    <!-- Footnote for the badge asterisk. On the page, not only in the hover
+         tooltip: hover does not exist on touch devices. -->
+    <p class="apy-scope-note">Interest is paid on icUSD deposits only.</p>
   {/if}
 
   {#if loading}
@@ -186,21 +178,24 @@
   .pool-container { max-width: 820px; margin: 0 auto; }
 
   .apy-scope-note {
-    margin: 0.5rem auto 0;
-    max-width: 34rem;
-    text-align: center;
+    margin: 0.375rem 0 1rem;
+    text-align: left;
     font-size: 0.75rem;
     line-height: 1.45;
     color: #94a3b8;
   }
-  .apy-scope-note strong { color: #cbd5e1; font-weight: 600; }
 
   .apy-row {
     display: flex;
     align-items: center;
-    margin-bottom: 1rem;
     position: relative;
     z-index: 10;
+  }
+
+  .apy-asterisk {
+    margin-left: 0.0625rem;
+    align-self: flex-start;
+    font-size: 0.7em;
   }
 
   .apy-badge {
@@ -219,7 +214,6 @@
     white-space: nowrap;
   }
 
-  .apy-arrow { color: #4ade80; flex-shrink: 0; }
 
   .apy-tooltip {
     position: absolute;

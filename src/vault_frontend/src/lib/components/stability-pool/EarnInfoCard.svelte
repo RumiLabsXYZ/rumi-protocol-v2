@@ -12,7 +12,7 @@
   import type { PoolStatus, UserPosition, CollateralInfo } from '../../services/stabilityPoolService';
   import type { ProtocolStatusDTO } from '../../services/types';
   import { CANISTER_IDS } from '../../config';
-  import { liveSpApyPct, spInterestApr, aprToApyPct } from '../../utils/liveApy';
+  import { liveSpApyPct } from '../../utils/liveApy';
   import XrpPayoutRouting from './XrpPayoutRouting.svelte';
   import { isIcrcClaimableCollateral } from '../../services/xrpPayoutHelpers';
   import {
@@ -61,39 +61,10 @@
   $: gains = userPosition?.collateral_gains ?? [];
   $: hasClaimableIcrcGains = gains.some(([ledger, amount]) => amount > 0n && isIcrcClaimableCollateral(ledger));
   $: optedOut = new Set((userPosition?.opted_out_collateral ?? []).map(p => p.toText()));
-  // Newer canisters report the exact effective set, including native and chain
-  // collateral that is default-out until a payout destination / opt-in exists.
-  // Fall back to legacy opt-out data while a frontend is ahead of the canister.
-  $: eligibleInterestCollaterals = userPosition?.eligible_interest_collateral?.[0]
-    ? new Set(userPosition.eligible_interest_collateral[0].map(p => p.toText()))
-    : null;
   $: icrcCollateralRegistry = liquidationPreferenceCollaterals(
     collateralRegistry.filter(c => isIcrcClaimableCollateral(c.ledger_id)),
     optedOut,
   );
-
-  // Does the user hold icUSD in the pool? Interest is paid on icUSD only, so
-  // this balance (not `total_usd_value_e8s`) is the base the rate applies to.
-  $: userIcusdE8s = userStables
-    .filter(([l]: [any, bigint]) => l.toText() === CANISTER_IDS.ICUSD_LEDGER)
-    .reduce((sum: bigint, [, a]: [any, bigint]) => sum + a, 0n);
-  $: userHasIcusd = userIcusdE8s > 0n;
-  $: userIcusdFormatted = formatStableTokenDisplay(userIcusdE8s, 8);
-
-  // Personalized APY — only sums collateral types the user is opted in to.
-  // May exceed the advertised rate for grandfathered positions still opted in
-  // to wind-down collateral; that uplift is labelled rather than hidden.
-  $: userApyPct = (() => {
-    if (!userHasIcusd) return null;
-    const apr = spInterestApr(protocolStatus as any, poolStatus as any, (ct) =>
-      eligibleInterestCollaterals ? eligibleInterestCollaterals.has(ct) : !optedOut.has(ct),
-    );
-    return apr === null ? null : aprToApyPct(apr);
-  })();
-  $: userApy = userApyPct === null ? null : userApyPct.toFixed(2);
-  // Only call it an uplift when it clears display rounding.
-  $: hasUplift =
-    userApyPct !== null && poolApyPct !== null && userApyPct - poolApyPct >= 0.01;
 
   $: poolShare = (() => {
     if (!poolStatus || !userPosition || poolStatus.total_deposits_e8s === 0n) return '0.00';
@@ -186,30 +157,6 @@
   {#if isConnected && userPosition}
     <h4 class="group-heading">Your Position</h4>
     <div class="stats-stack">
-      <!-- Personalized Interest APY. The rate is paid on the icUSD balance only,
-           so the base is printed beside it; without that it reads as a rate on
-           Total Deposited, which it is not. Depositors holding no icUSD get an
-           explicit zero row rather than a hidden one. -->
-      {#if userApy !== null}
-        <div class="stat-row align-top">
-          <span class="stat-label">Your Interest APY</span>
-          <span class="stat-value-stack">
-            <span class="stat-value green">{userApy}%</span>
-            <span class="apy-base-note">on your {userIcusdFormatted} icUSD</span>
-            {#if hasUplift}
-              <span class="apy-base-note">above the {poolApy}% new-depositor rate (wind-down collateral)</span>
-            {/if}
-          </span>
-        </div>
-      {:else}
-        <div class="stat-row align-top">
-          <span class="stat-label">Your Interest APY</span>
-          <span class="stat-value-stack">
-            <span class="stat-value">0.00%</span>
-            <span class="apy-base-note">interest is paid on icUSD deposits only</span>
-          </span>
-        </div>
-      {/if}
 
       <!-- Total Deposited with optional stablecoin breakdown -->
       <div class="stat-row" class:align-top={activeStables.length > 1}>
