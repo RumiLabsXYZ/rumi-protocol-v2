@@ -724,6 +724,24 @@ pub enum ProtocolError {
     EvmAuth(String),
 }
 
+/// SOL analogue of `main::XrpClaimResolution`, for a Phase 3 `main.rs`
+/// `admin_resolve_sol_claim(claim_id, resolution)` endpoint (mirrors
+/// `admin_resolve_xrp_claim`). Defined HERE rather than in `main.rs` — where
+/// `XrpClaimResolution` itself lives — because native-SOL collateral Phase 2b
+/// (docs/superpowers/specs/2026-07-24-native-sol-collateral-design.md) is
+/// scoped to `vault.rs`/`state.rs`/`chains::sol` only and does not touch
+/// `main.rs`; the vault-layer primitive this resolves into is
+/// `vault::resolve_quarantined_sol_claim_snapshot`.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub enum SolClaimResolution {
+    /// The divergent settlement DID deliver — finalize by removing the claim
+    /// (no re-pay).
+    ConfirmPaid,
+    /// It did NOT deliver — clear the quarantine + settlement so the claimant
+    /// can retry `settle_sol_claim` and be paid exactly once.
+    ReleaseForRetry,
+}
+
 impl From<GuardError> for ProtocolError {
     fn from(e: GuardError) -> Self {
         match e {

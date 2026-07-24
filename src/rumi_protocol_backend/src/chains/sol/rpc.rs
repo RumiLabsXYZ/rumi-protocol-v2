@@ -24,9 +24,10 @@ use solana_message::Hash;
 
 use crate::chains::solana::sol_rpc::{
     build_send_transaction_payload, is_valid_tx_signature, parse_account_data_base64,
-    parse_balance_lamports, parse_get_transaction, parse_nonce_account_blockhash,
-    parse_send_transaction_signature, parse_slot, text_from_request_result, ConsensusStrategy,
-    MultiRequestResult, RpcConfig, RpcSources, TxStatus,
+    parse_balance_lamports, parse_get_transaction, parse_latest_blockhash,
+    parse_nonce_account_blockhash, parse_send_transaction_signature, parse_slot,
+    text_from_request_result, ConsensusStrategy, MultiRequestResult, RpcConfig, RpcSources,
+    TxStatus,
 };
 
 /// Production SOL RPC canister principal. Duplicated (not made `pub` in
@@ -107,6 +108,25 @@ pub async fn get_rent_exempt_minimum() -> Result<u64, String> {
     let payload = r#"{"jsonrpc":"2.0","id":1,"method":"getMinimumBalanceForRentExemption","params":[0]}"#;
     let text = json_request(payload).await?;
     parse_rent_exempt_minimum(&text)
+}
+
+/// Read a fresh recent blockhash via `getLatestBlockhash` at `finalized`, at
+/// the CLUSTER implied by the CONFIGURED Schnorr key (`config::sol_cluster()`).
+/// Used only by `vault::sol_bootstrap_nonce_account`'s `None` (auto-fetch)
+/// fallback: the create+initialize nonce-account transaction needs a REAL
+/// recent blockhash, since the durable nonce does not exist yet to
+/// self-reference. Same consensus caveat as
+/// `chains::solana::sol_rpc::get_latest_blockhash`: this value changes every
+/// slot, so multi-provider `Equality` consensus chronically returns
+/// `#Inconsistent` (surfaced here as an error) on a real cluster. Retained
+/// for PocketIC / other consensus-capable environments and as the documented
+/// fallback; the production bootstrap path is an operator-supplied
+/// `blockhash_override`, not this auto-fetch.
+pub async fn get_latest_blockhash() -> Result<Hash, String> {
+    let payload = r#"{"jsonrpc":"2.0","id":1,"method":"getLatestBlockhash","params":[{"commitment":"finalized"}]}"#;
+    let text = json_request(payload).await?;
+    let blockhash = parse_latest_blockhash(&text)?;
+    Ok(Hash::new_from_array(blockhash))
 }
 
 /// Read a System nonce account's current durable nonce (a `Hash`) via

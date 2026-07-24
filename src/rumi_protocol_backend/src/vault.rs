@@ -1255,6 +1255,289 @@ pub async fn confirm_xrp_deposit(vault_id: u64) -> Result<u64, ProtocolError> {
     Ok(credited)
 }
 
+// ─── Native SOL collateral: Phase 2b deposit flow (mirrors the XRP block above) ─
+
+/// Return value for `open_sol_vault`: the reserved vault id, the Solana custody
+/// address the user funds, and the rent-exempt minimum (lamports) that address
+/// must stay above (design doc §4.1 — the reserve is never swept to zero).
+#[derive(candid::CandidType, Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct SolVaultOpenInfo {
+    pub vault_id: u64,
+    pub custody_address: String,
+    pub rent_exempt_lamports: u64,
+}
+
+fn require_sol_production_key() -> Result<(), ProtocolError> {
+    let configured_key = crate::chains::sol::config::sol_schnorr_key_name();
+    if crate::chains::sol::config::is_sol_production_key_name(&configured_key) {
+        return Ok(());
+    }
+    Err(ProtocolError::GenericError(format!(
+        "native-SOL operations require production Schnorr key key_1 (configured: {configured_key})"
+    )))
+}
+
+/// A native-SOL vault is only ever payable through a settled `SolClaim`
+/// (design doc §5), which requires the shared durable-nonce account to exist.
+/// Without it NO claim on ANY SOL vault could ever be settled, so opening a
+/// vault before the nonce account is bootstrapped would strand collateral the
+/// moment it needed to leave (withdraw, liquidation, or a future close).
+/// Pure/sync so it is unit-testable without a canister call context.
+pub(crate) fn ensure_sol_nonce_bootstrapped(nonce_account: &Option<String>) -> Result<(), ProtocolError> {
+    if nonce_account.is_none() {
+        return Err(ProtocolError::GenericError(
+            "SOL durable-nonce account is not bootstrapped yet; call sol_bootstrap_nonce_account \
+             first (otherwise no claim on this vault could ever be settled)."
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Bounds for `open_sol_vault`'s pending-deposit staging area. Mirrors XRP's
+/// identical constants (`MAX_XRP_PENDING_PER_CALLER` / `MAX_XRP_PENDING_GLOBAL`)
+/// exactly, factored into a pure function (XRP inlines the check) so it is
+/// unit-testable without a canister call context.
+const MAX_SOL_PENDING_PER_CALLER: usize = 10;
+const MAX_SOL_PENDING_GLOBAL: usize = 10_000;
+
+pub(crate) fn ensure_sol_pending_open_bounds(
+    global_pending: usize,
+    caller_pending: usize,
+) -> Result<(), ProtocolError> {
+    if global_pending >= MAX_SOL_PENDING_GLOBAL {
+        return Err(ProtocolError::GenericError(
+            "SOL deposit staging is full; please retry after pending deposits clear.".to_string(),
+        ));
+    }
+    if caller_pending >= MAX_SOL_PENDING_PER_CALLER {
+        return Err(ProtocolError::GenericError(
+            "Too many open SOL deposits; confirm or settle existing ones first.".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// P3 (native-SOL collateral, design doc §4): open a vault in the
+/// open-then-verify staging area. Derives the per-vault Solana custody address
+/// (threshold Ed25519), records a `SolPendingDeposit` under a freshly reserved
+/// vault_id (from the SAME shared counter ICP/XRP vaults use, so ids can never
+/// collide), and returns the address plus the live rent-exempt minimum for the
+/// user to fund. NO collateral is credited and NO icUSD is minted until
+/// `confirm_sol_deposit` verifies the deposit.
+pub async fn open_sol_vault() -> Result<SolVaultOpenInfo, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let guard_principal = GuardPrincipal::new(caller, "open_sol_vault")?;
+    if let Err(e) = require_sol_production_key() {
+        guard_principal.fail();
+        return Err(e);
+    }
+
+    let sol_ct = crate::state::sol_collateral_principal();
+    let cfg = read_state(|s| {
+        s.get_collateral_config(&sol_ct)
+            .map(|c| (c.status, c.is_native_sol()))
+    });
+    match cfg {
+        Some((status, true)) => {
+            if !status.allows_open() {
+                guard_principal.fail();
+                return Err(ProtocolError::GenericError(
+                    "SOL collateral is not accepting new vaults.".to_string(),
+                ));
+            }
+        }
+        Some((_, false)) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "SOL collateral is misconfigured (custody is not native-SOL).".to_string(),
+            ));
+        }
+        None => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "SOL collateral is not registered.".to_string(),
+            ));
+        }
+    }
+
+    // Without a bootstrapped durable-nonce account, no claim on this vault
+    // could ever be settled (design doc §5.1) — refuse before staging one.
+    if let Err(e) = read_state(|s| ensure_sol_nonce_bootstrapped(&s.sol_nonce_account)) {
+        guard_principal.fail();
+        return Err(e);
+    }
+
+    // Hardening (mirrors XRP): bound per-caller and global pending deposits so
+    // a caller can't spam unfunded opens.
+    let (global_pending, caller_pending) = read_state(|s| {
+        (
+            s.sol_pending_deposits.len(),
+            s.sol_pending_deposits
+                .values()
+                .filter(|d| d.owner == caller)
+                .count(),
+        )
+    });
+    if let Err(e) = ensure_sol_pending_open_bounds(global_pending, caller_pending) {
+        guard_principal.fail();
+        return Err(e);
+    }
+
+    let rent_exempt_lamports = match crate::chains::sol::rpc::get_rent_exempt_minimum().await {
+        Ok(r) => r,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "sol getMinimumBalanceForRentExemption failed: {e}"
+            )));
+        }
+    };
+
+    // Reserve a vault_id (also the threshold-derivation nonce) from the SHARED
+    // counter, so it cannot collide with an ICP or XRP vault_id.
+    let vault_id = mutate_state(|s| s.increment_vault_id());
+
+    let path = crate::chains::sol::ted25519::sol_custody_derivation_path(caller, vault_id);
+    let custody_address = match crate::chains::sol::ted25519::derive_sol_address(path).await {
+        Ok((_pubkey, addr)) => addr,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "sol custody derive failed: {e}"
+            )));
+        }
+    };
+
+    let opened_at_ns = ic_cdk::api::time();
+    mutate_state(|s| {
+        s.sol_pending_deposits.insert(
+            vault_id,
+            crate::state::SolPendingDeposit {
+                owner: caller,
+                custody_address: custody_address.clone(),
+                derivation_nonce: vault_id,
+                opened_at_ns,
+                rent_exempt_lamports,
+            },
+        );
+    });
+
+    guard_principal.complete();
+    Ok(SolVaultOpenInfo {
+        vault_id,
+        custody_address,
+        rent_exempt_lamports,
+    })
+}
+
+/// P3 (native-SOL collateral, design doc §4): verify the user's SOL deposit to
+/// the vault's custody address and credit it as collateral, creating a real
+/// `Vault` with zero debt (borrowing is the ordinary collateral-generic
+/// `borrow_from_vault`, same as XRP — there is no SOL-specific mint path).
+/// Owner-only and idempotent: the pending entry is removed on success, so a
+/// second call errors. Reads the balance at `finalized` commitment (custody
+/// accepts the extra latency for non-reversibility) and credits
+/// `balance - rent_exempt_minimum` lamports, re-fetched live rather than
+/// trusting the value quoted at `open_sol_vault` time. Returns the credited
+/// lamports.
+pub async fn confirm_sol_deposit(vault_id: u64) -> Result<u64, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let guard_principal =
+        GuardPrincipal::new(caller, &format!("confirm_sol_deposit_{}", vault_id))?;
+    if let Err(e) = require_sol_production_key() {
+        guard_principal.fail();
+        return Err(e);
+    }
+
+    let pending = match read_state(|s| s.sol_pending_deposits.get(&vault_id).cloned()) {
+        Some(p) => p,
+        None => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "No pending SOL deposit for this vault (already confirmed or unknown).".to_string(),
+            ));
+        }
+    };
+    if pending.owner != caller {
+        guard_principal.fail();
+        return Err(ProtocolError::CallerNotOwner);
+    }
+
+    let sol_ct = crate::state::sol_collateral_principal();
+    let min_deposit = read_state(|s| {
+        s.get_collateral_config(&sol_ct)
+            .map(|c| c.min_collateral_deposit)
+            .unwrap_or(0)
+    });
+
+    let balance = match crate::chains::sol::rpc::get_balance(&pending.custody_address).await {
+        Ok(b) => b,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "sol getBalance failed: {e}"
+            )));
+        }
+    };
+    let rent_exempt = match crate::chains::sol::rpc::get_rent_exempt_minimum().await {
+        Ok(r) => r,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "sol getMinimumBalanceForRentExemption failed: {e}"
+            )));
+        }
+    };
+
+    let credited = match crate::chains::sol::adapter::sol_credit_amount(balance, rent_exempt, min_deposit)
+    {
+        Ok(c) => c,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(e);
+        }
+    };
+
+    // Atomically: re-check the pending entry still exists (no concurrent confirm
+    // slipped in during the awaits), create the vault, and clear the pending entry.
+    let created = mutate_state(|s| {
+        if !s.sol_pending_deposits.contains_key(&vault_id) {
+            return false;
+        }
+        record_open_vault(
+            s,
+            Vault {
+                owner: caller,
+                borrowed_icusd_amount: 0.into(),
+                collateral_amount: credited,
+                vault_id,
+                collateral_type: sol_ct,
+                last_accrual_time: ic_cdk::api::time(),
+                accrued_interest: ICUSD::new(0),
+                bot_processing: false,
+            },
+            // No meaningful "block index" analogue exists for a getBalance read
+            // (unlike XRP's `acct.ledger_index`, which comes free with
+            // account_info); this is purely informational Event-log metadata, so
+            // 0 is used rather than spending an extra `get_slot` outcall on it.
+            0,
+        );
+        s.sol_pending_deposits.remove(&vault_id);
+        true
+    });
+
+    if !created {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(
+            "SOL deposit was already confirmed concurrently.".to_string(),
+        ));
+    }
+
+    guard_principal.complete();
+    Ok(credited)
+}
+
 /// P4: record an unsettled XRP collateral claim and return its id. The OUT-paths
 /// (withdraw / liquidation / redemption) call this instead of an ICRC transfer when
 /// the collateral is native-XRP. `custody_owner`+`custody_nonce` (the source vault's
@@ -2520,6 +2803,154 @@ pub async fn sweep_xrp_pending_open(vault_id: u64) -> Result<(), ProtocolError> 
     Ok(())
 }
 
+// ─── Native SOL collateral: Phase 2b pending-open cleanup (mirrors XRP above) ──
+
+const SOL_PENDING_CLEANUP_MIN_AGE_NS: u64 = 10 * 60 * 1_000_000_000;
+
+pub(crate) fn ensure_sol_pending_cleanup_age(
+    pending: &crate::state::SolPendingDeposit,
+    now_ns: u64,
+) -> Result<(), ProtocolError> {
+    let age_ns = now_ns.saturating_sub(pending.opened_at_ns);
+    if age_ns < SOL_PENDING_CLEANUP_MIN_AGE_NS {
+        return Err(ProtocolError::GenericError(
+            "SOL pending deposit is too new to cancel; wait for the funding window to pass."
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// SOL analogue of `remove_xrp_pending_deposit_if_unfunded_snapshot`. Solana
+/// has no separate "account exists" flag the way XRPL does (`account_info`
+/// erroring for an unfunded address) — `getBalance` simply reads 0 lamports
+/// for any address that has never received funds — so "funded" here is any
+/// `balance_lamports > 0`, including dust below the credit minimum: even dust
+/// means the pending entry must stay so the user (or a future manual sweep)
+/// can still act on it, since removing it would strand those lamports at a
+/// custody address with no pending-deposit record pointing back to it.
+pub(crate) fn remove_sol_pending_deposit_if_unfunded_snapshot(
+    s: &mut crate::state::State,
+    vault_id: u64,
+    expected: &crate::state::SolPendingDeposit,
+    balance_lamports: u64,
+) -> Result<bool, ProtocolError> {
+    if balance_lamports > 0 {
+        return Err(ProtocolError::GenericError(
+            "SOL custody account is funded; confirm the deposit instead of cancelling.".to_string(),
+        ));
+    }
+    match s.sol_pending_deposits.get(&vault_id) {
+        Some(current) if current == expected => {
+            s.sol_pending_deposits.remove(&vault_id);
+            Ok(true)
+        }
+        Some(_) | None => Ok(false),
+    }
+}
+
+/// Owner cleanup for an unfunded native-SOL open. Never removes a funded
+/// custody account; users must confirm funded deposits into real vaults.
+pub async fn cancel_sol_pending_open(vault_id: u64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let guard_principal =
+        GuardPrincipal::new(caller, &format!("cancel_sol_pending_open_{}", vault_id))?;
+
+    let pending = match read_state(|s| s.sol_pending_deposits.get(&vault_id).cloned()) {
+        Some(p) => p,
+        None => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "No pending SOL deposit for this vault.".to_string(),
+            ));
+        }
+    };
+    if pending.owner != caller {
+        guard_principal.fail();
+        return Err(ProtocolError::CallerNotOwner);
+    }
+    if let Err(e) = ensure_sol_pending_cleanup_age(&pending, ic_cdk::api::time()) {
+        guard_principal.fail();
+        return Err(e);
+    }
+
+    let balance = match crate::chains::sol::rpc::get_balance(&pending.custody_address).await {
+        Ok(b) => b,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "sol getBalance failed: {e}"
+            )));
+        }
+    };
+
+    let removed = mutate_state(|s| {
+        ensure_sol_pending_cleanup_age(&pending, ic_cdk::api::time())?;
+        remove_sol_pending_deposit_if_unfunded_snapshot(s, vault_id, &pending, balance)
+    })?;
+    if !removed {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(
+            "SOL pending deposit changed concurrently; refresh and retry.".to_string(),
+        ));
+    }
+
+    guard_principal.complete();
+    Ok(())
+}
+
+/// Developer cleanup for abandoned unfunded native-SOL opens. Deliberately
+/// unfunded-only; if SOL has reached the custody address the entry must
+/// remain confirmable by its owner.
+pub async fn sweep_sol_pending_open(vault_id: u64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    if !read_state(|s| s.developer_principal == caller) {
+        return Err(ProtocolError::GenericError(
+            "Only the developer can sweep SOL pending opens.".to_string(),
+        ));
+    }
+    let guard_principal =
+        GuardPrincipal::new(caller, &format!("sweep_sol_pending_open_{}", vault_id))?;
+
+    let pending = match read_state(|s| s.sol_pending_deposits.get(&vault_id).cloned()) {
+        Some(p) => p,
+        None => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "No pending SOL deposit for this vault.".to_string(),
+            ));
+        }
+    };
+    if let Err(e) = ensure_sol_pending_cleanup_age(&pending, ic_cdk::api::time()) {
+        guard_principal.fail();
+        return Err(e);
+    }
+
+    let balance = match crate::chains::sol::rpc::get_balance(&pending.custody_address).await {
+        Ok(b) => b,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "sol getBalance failed: {e}"
+            )));
+        }
+    };
+
+    let removed = mutate_state(|s| {
+        ensure_sol_pending_cleanup_age(&pending, ic_cdk::api::time())?;
+        remove_sol_pending_deposit_if_unfunded_snapshot(s, vault_id, &pending, balance)
+    })?;
+    if !removed {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(
+            "SOL pending deposit changed concurrently; refresh and retry.".to_string(),
+        ));
+    }
+
+    guard_principal.complete();
+    Ok(())
+}
+
 /// P4: settle an XRP claim — sign + submit a `Payment` from the source vault's
 /// custody address (re-derived from the claim) to `destination`, for
 /// `claim.drops - fee` (the claimant bears the fee). Claimant-only. One in-flight
@@ -2813,6 +3244,832 @@ pub async fn settle_xrp_claim_with_tag(
     // instead of re-paying. Return the locally computed hash.
     guard_principal.complete();
     Ok(signed.tx_hash)
+}
+
+// ─── Native SOL collateral: Phase 2b claim settlement (design doc §5) ─────────
+//
+// Structural difference from XRP that shapes everything below: XRP's
+// anti-double-pay primitive is a per-ACCOUNT Sequence number, so a claim's own
+// custody account is the entire universe a settle call needs to reason about.
+// SOL's primitive is a SINGLE PROTOCOL-WIDE durable-nonce account (design doc
+// §5.1) shared by every custody address and every claim. That has two
+// consequences threaded through this section:
+//
+//   1. "Aggregate solvency" (how much SOL a custody address must hold) is
+//      still scoped PER custody address, same as XRP — that is a property of
+//      the custody account's own balance.
+//   2. "Who else could have consumed the shared nonce" is NOT scoped to one
+//      custody address — it is scoped to the WHOLE PROTOCOL, since literally
+//      any other claim's settlement (on any vault, any custody address) reads
+//      and can consume the SAME nonce value. `reconcile_sol_other_inflight_claims`
+//      therefore scans ALL `sol_claims`, unlike XRP's per-custody-address scan.
+
+/// The four rows of design doc §5.3's idempotency table, as a pure decision
+/// over an already-fetched `TxStatus` plus a nonce-value comparison. Kept
+/// deliberately separate from any `State` access or `ic_cdk` call so it is
+/// exhaustively unit-testable — see `sol_p2b_tests` for one test per row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SolSettlementDecision {
+    /// `Confirmed`: the claim is already paid. Finalize by removing the claim
+    /// and returning the PRIOR signature — no second transfer is attempted.
+    AlreadyPaid,
+    /// `Failed`: a durable-nonce transaction that lands but whose non-advance
+    /// instruction reverts still CONSUMES the nonce (Solana always advances a
+    /// durable nonce for any included transaction, success or failure — this
+    /// is a deliberate runtime rule that prevents grief-by-designed-failure
+    /// replay). The Transfer instruction did not execute, so the custody
+    /// balance is untouched; the network fee was paid by the FEE PAYER (the
+    /// settlement wallet — design doc §5.1), not the custody account, so
+    /// (unlike XRP) nothing needs to be deducted from the claim. Clear the
+    /// settlement and allow a resign for the SAME (unreduced) lamports.
+    FailedClearForResign,
+    /// `NotFound` and the live nonce still equals the recorded `nonce_value`:
+    /// a durable-nonce transaction that executes ALWAYS advances the nonce as
+    /// its first instruction, so an UNCHANGED nonce is conclusive proof the
+    /// exact signed bytes we submitted were never included in any block —
+    /// regardless of whether that is because they are still floating around
+    /// unconfirmed or were never broadcast at all. Safe to resign: even if
+    /// the old attempt somehow lands later, only one of two transactions
+    /// sharing one nonce value can ever be included (the second is rejected
+    /// outright at inclusion time, never charged, never executed), so at most
+    /// one payment ever happens.
+    SafeToResign,
+    /// `NotFound` and the live nonce has changed: the exact nonce value the
+    /// prior transaction needed has been consumed by SOMETHING, yet our own
+    /// signature is not found on-ledger. This does NOT prove our own transfer
+    /// never landed — `getTransaction` lookups can miss a transaction whose
+    /// history has aged out of a queried RPC node's retention window, even at
+    /// `finalized` commitment — so treat it as ambiguous. The common,
+    /// explainable case is a SIBLING claim's settlement legitimately
+    /// consuming the shared nonce; `reconcile_sol_other_inflight_claims` is
+    /// checked before this is allowed to become a hard quarantine.
+    AmbiguousAdvanced,
+}
+
+pub(crate) fn sol_settlement_decision(
+    status: &crate::chains::solana::sol_rpc::TxStatus,
+    recorded_nonce_value: &str,
+    live_nonce_value: &str,
+) -> SolSettlementDecision {
+    use crate::chains::solana::sol_rpc::TxStatus;
+    match status {
+        TxStatus::Confirmed { .. } => SolSettlementDecision::AlreadyPaid,
+        TxStatus::Failed => SolSettlementDecision::FailedClearForResign,
+        TxStatus::NotFound => {
+            if live_nonce_value == recorded_nonce_value {
+                SolSettlementDecision::SafeToResign
+            } else {
+                SolSettlementDecision::AmbiguousAdvanced
+            }
+        }
+    }
+}
+
+/// How to reconcile an OTHER in-flight sibling settlement (design doc §5.2
+/// step 6 / §5.3's closing note), given the sibling's on-ledger tx status and
+/// the LIVE nonce. Pure — see `sol_p2b_tests` for exhaustive coverage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SolSiblingReconcileDecision {
+    /// Sibling settlement validated on-ledger -> finalize (remove the sibling claim).
+    Paid,
+    /// Sibling settlement validated but failed -> clear the blocker (no fee
+    /// deduction — see `SolSettlementDecision::FailedClearForResign`).
+    FailedClearForResign,
+    /// Sibling's `nonce_value` still equals the live nonce and its tx is
+    /// `NotFound`: it may still land at any moment. Signing anything new
+    /// right now would use the SAME current nonce and race it — refuse.
+    StillInFlight,
+    /// Sibling's `nonce_value` no longer matches the live nonce and its tx is
+    /// `NotFound`: the exact nonce value that transaction needed is gone, and
+    /// a durable-nonce transaction is validated against the CURRENT on-chain
+    /// nonce at inclusion time — so this specific signed transaction can
+    /// never land in any future block, regardless of who consumed the nonce.
+    /// Safe to clear its settlement so its owner can resign later.
+    DeadNonceSafeToClear,
+}
+
+pub(crate) fn sol_sibling_reconcile_decision(
+    status: &crate::chains::solana::sol_rpc::TxStatus,
+    sibling_nonce_value: &str,
+    live_nonce_value: &str,
+) -> SolSiblingReconcileDecision {
+    use crate::chains::solana::sol_rpc::TxStatus;
+    match status {
+        TxStatus::Confirmed { .. } => SolSiblingReconcileDecision::Paid,
+        TxStatus::Failed => SolSiblingReconcileDecision::FailedClearForResign,
+        TxStatus::NotFound => {
+            if sibling_nonce_value == live_nonce_value {
+                SolSiblingReconcileDecision::StillInFlight
+            } else {
+                SolSiblingReconcileDecision::DeadNonceSafeToClear
+            }
+        }
+    }
+}
+
+/// True iff a sibling's settlement explains away the CURRENT claim's own
+/// `AmbiguousAdvanced` state: the sibling used the EXACT SAME `nonce_value`
+/// the current claim's stale settlement did, and the sibling's transaction is
+/// now `Confirmed`. Since a given nonce value can be consumed by at most one
+/// transaction ever, a confirmed sibling sharing that value is positive proof
+/// the current claim's own (independently `NotFound`) transaction is not what
+/// consumed it.
+pub(crate) fn sol_sibling_explains_ambiguous_advance(
+    sibling_status: &crate::chains::solana::sol_rpc::TxStatus,
+    sibling_nonce_value: &str,
+    target_nonce_value: &str,
+) -> bool {
+    matches!(
+        sibling_status,
+        crate::chains::solana::sol_rpc::TxStatus::Confirmed { .. }
+    ) && sibling_nonce_value == target_nonce_value
+}
+
+/// Shared mutation applied once a sibling (or the current claim's own stale
+/// settlement) has been reconciled: `Paid` finalizes by removing the claim;
+/// `ClearForResign` covers BOTH the `Failed` and dead/expired-`NotFound`
+/// outcomes, which mutate `State` identically (clear `settlement`, keep the
+/// claim). Guarded on the recorded signature still matching, so a settlement
+/// that changed concurrently between the read and this mutation is a no-op
+/// rather than clobbering a newer attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SolSettlementReconciliation {
+    Paid,
+    ClearForResign,
+}
+
+pub(crate) fn reconcile_sol_settlement_snapshot(
+    s: &mut crate::state::State,
+    claim_id: u64,
+    signature: &str,
+    outcome: SolSettlementReconciliation,
+) -> bool {
+    let sig_matches = s
+        .sol_claims
+        .get(&claim_id)
+        .and_then(|claim| claim.settlement.as_ref())
+        .map(|settlement| settlement.signature == signature)
+        .unwrap_or(false);
+    if !sig_matches {
+        return false;
+    }
+    match outcome {
+        SolSettlementReconciliation::Paid => {
+            s.sol_claims.remove(&claim_id);
+        }
+        SolSettlementReconciliation::ClearForResign => {
+            if let Some(claim) = s.sol_claims.get_mut(&claim_id) {
+                claim.settlement = None;
+            }
+        }
+    }
+    true
+}
+
+/// Durably flag a SOL claim as quarantined (design doc §5.3's last row). Idempotent:
+/// keeps the first reason set. While quarantined, `settle_sol_claim` refuses to sign;
+/// a developer clears it via `resolve_quarantined_sol_claim_snapshot` after off-chain
+/// reconciliation against a Solana explorer. Returns true if the claim exists. `pub`
+/// so a Phase 3 `main.rs` admin endpoint (defense-in-depth manual quarantine) can call
+/// it directly, mirroring — and, unlike XRP's `main.rs`, actually reusing — this
+/// primitive instead of duplicating the mutation inline.
+pub fn quarantine_sol_claim_snapshot(
+    s: &mut crate::state::State,
+    claim_id: u64,
+    reason: &str,
+) -> bool {
+    if let Some(claim) = s.sol_claims.get_mut(&claim_id) {
+        if claim.quarantine_reason.is_none() {
+            claim.quarantine_reason = Some(reason.to_string());
+        }
+        true
+    } else {
+        false
+    }
+}
+
+/// Apply an admin resolution to a quarantined SOL claim after off-ledger
+/// reconciliation (mirrors `resolve_quarantined_xrp_claim_snapshot` exactly).
+/// `confirm_paid = true` means the admin verified the divergent transfer DID
+/// deliver -> remove the claim (no re-pay). `false` means it did NOT deliver ->
+/// clear the quarantine + settlement so the claimant can retry settle and be
+/// paid exactly once. Errors WITHOUT mutating if the claim is absent or not
+/// quarantined. `pub` for the Phase 3 `main.rs` endpoint
+/// (`admin_resolve_sol_claim`, taking `SolClaimResolution`).
+pub fn resolve_quarantined_sol_claim_snapshot(
+    s: &mut crate::state::State,
+    claim_id: u64,
+    confirm_paid: bool,
+) -> Result<(), ProtocolError> {
+    match s.sol_claims.get(&claim_id) {
+        Some(c) if c.quarantine_reason.is_some() => {}
+        Some(_) => {
+            return Err(ProtocolError::GenericError(format!(
+                "SOL claim #{claim_id} is not quarantined; refusing to resolve a healthy claim"
+            )))
+        }
+        None => {
+            return Err(ProtocolError::GenericError(format!(
+                "No such SOL claim #{claim_id}"
+            )))
+        }
+    }
+    if confirm_paid {
+        s.sol_claims.remove(&claim_id);
+    } else if let Some(c) = s.sol_claims.get_mut(&claim_id) {
+        c.quarantine_reason = None;
+        c.settlement = None;
+    }
+    Ok(())
+}
+
+pub(crate) fn sol_unresolved_claim_lamports_for_custody(
+    s: &crate::state::State,
+    custody_owner: Principal,
+    custody_nonce: u64,
+) -> Result<u128, ProtocolError> {
+    s.sol_claims
+        .values()
+        .filter(|claim| {
+            claim.custody_owner == custody_owner && claim.custody_nonce == custody_nonce
+        })
+        .try_fold(0u128, |total, claim| {
+            total
+                .checked_add(u128::from(claim.lamports))
+                .ok_or_else(|| {
+                    ProtocolError::GenericError(
+                        "Aggregate SOL claims exceed supported lamports range".to_string(),
+                    )
+                })
+        })
+}
+
+/// Aggregate solvency (design doc §5.2 step 5): the custody address's live
+/// balance must cover every unresolved claim against it PLUS the rent-exempt
+/// reserve (the custody account is kept permanently rent-exempt — design doc
+/// §4.1 — never swept to zero). Pure/sync.
+pub(crate) fn ensure_sol_claim_aggregate_solvency(
+    balance_lamports: u64,
+    rent_exempt_lamports: u64,
+    unresolved_claim_lamports: u128,
+) -> Result<(), ProtocolError> {
+    let required = unresolved_claim_lamports
+        .checked_add(u128::from(rent_exempt_lamports))
+        .ok_or_else(|| {
+            ProtocolError::GenericError(
+                "Aggregate SOL claims plus rent-exempt reserve exceed supported lamports range"
+                    .to_string(),
+            )
+        })?;
+    if u128::from(balance_lamports) < required {
+        return Err(ProtocolError::GenericError(format!(
+            "insufficient SOL for unresolved claims: balance {} lamports < aggregate claims {} + rent-exempt reserve {}",
+            balance_lamports, unresolved_claim_lamports, rent_exempt_lamports
+        )));
+    }
+    Ok(())
+}
+
+/// Every OTHER sol claim (any custody address — see the section doc comment
+/// for why this is protocol-wide, not per-custody like XRP) that currently
+/// has a settlement recorded. Pure/sync `State` scan, factored out for
+/// testability.
+pub(crate) fn sol_inflight_claims(
+    s: &crate::state::State,
+    current_claim_id: u64,
+) -> Vec<(u64, crate::state::SolSettlement)> {
+    s.sol_claims
+        .iter()
+        .filter_map(|(claim_id, claim)| {
+            if *claim_id == current_claim_id {
+                return None;
+            }
+            claim
+                .settlement
+                .as_ref()
+                .map(|settlement| (*claim_id, settlement.clone()))
+        })
+        .collect()
+}
+
+/// Design doc §5.2 step 6 / §5.3's closing note, adapted from sequence
+/// semantics (XRP) to durable-nonce semantics (SOL) — see the section doc
+/// comment. Scans every OTHER in-flight claim PROTOCOL-WIDE (the nonce is
+/// shared by every custody address), reconciling each against its own
+/// on-ledger tx status:
+///   - `Paid` / `FailedClearForResign` -> apply immediately (bookkeeping only).
+///   - `StillInFlight` -> stop and return `Some(other_claim_id)`: the caller
+///     must refuse to sign a fresh transaction while another might still land
+///     on the SAME current nonce.
+///   - `DeadNonceSafeToClear` -> apply immediately (bookkeeping only).
+/// Also reports whether any OTHER claim's settlement was found CONFIRMED
+/// using the exact `target_nonce_value` (when `Some`) — the disambiguator for
+/// the CALLING claim's own `AmbiguousAdvanced` case, if it has one. Pass
+/// `target_nonce_value: None` when the calling claim has no ambiguity of its
+/// own to explain (e.g. it had no prior settlement, or its own decision was
+/// not `AmbiguousAdvanced`).
+///
+/// MUST be called (and its `blocking` result checked) BEFORE quarantining the
+/// current claim, and BEFORE building any fresh transaction — see the design
+/// doc's explicit instruction that this resolves the common case first.
+async fn reconcile_sol_other_inflight_claims(
+    current_claim_id: u64,
+    live_nonce_value: &str,
+    target_nonce_value: Option<&str>,
+) -> Result<(Option<u64>, bool), ProtocolError> {
+    let in_flight = read_state(|s| sol_inflight_claims(s, current_claim_id));
+    let mut explains_target = false;
+    for (other_claim_id, settlement) in in_flight {
+        let status = crate::chains::sol::rpc::get_transaction(&settlement.signature)
+            .await
+            .map_err(|e| {
+                ProtocolError::GenericError(format!(
+                    "sol tx status for claim #{other_claim_id} failed: {e}"
+                ))
+            })?;
+        if let Some(target) = target_nonce_value {
+            if sol_sibling_explains_ambiguous_advance(&status, &settlement.nonce_value, target) {
+                explains_target = true;
+            }
+        }
+        match sol_sibling_reconcile_decision(&status, &settlement.nonce_value, live_nonce_value) {
+            SolSiblingReconcileDecision::Paid => {
+                mutate_state(|s| {
+                    reconcile_sol_settlement_snapshot(
+                        s,
+                        other_claim_id,
+                        &settlement.signature,
+                        SolSettlementReconciliation::Paid,
+                    );
+                });
+            }
+            SolSiblingReconcileDecision::FailedClearForResign => {
+                mutate_state(|s| {
+                    reconcile_sol_settlement_snapshot(
+                        s,
+                        other_claim_id,
+                        &settlement.signature,
+                        SolSettlementReconciliation::ClearForResign,
+                    );
+                });
+            }
+            SolSiblingReconcileDecision::StillInFlight => {
+                return Ok((Some(other_claim_id), explains_target));
+            }
+            SolSiblingReconcileDecision::DeadNonceSafeToClear => {
+                mutate_state(|s| {
+                    reconcile_sol_settlement_snapshot(
+                        s,
+                        other_claim_id,
+                        &settlement.signature,
+                        SolSettlementReconciliation::ClearForResign,
+                    );
+                });
+            }
+        }
+    }
+    Ok((None, explains_target))
+}
+
+/// Pure gate: refuse if `claim` is quarantined (design doc §5.3's last row).
+/// Factored out of `settle_sol_claim` purely for unit testability.
+pub(crate) fn ensure_sol_claim_not_quarantined(
+    claim_id: u64,
+    claim: &crate::state::SolClaim,
+) -> Result<(), ProtocolError> {
+    if let Some(reason) = claim.quarantine_reason.clone() {
+        return Err(ProtocolError::GenericError(format!(
+            "SOL claim #{claim_id} is quarantined ({reason}); awaiting admin reconciliation."
+        )));
+    }
+    Ok(())
+}
+
+/// P4 SOL analogue of `settle_xrp_claim` — settle a SOL claim by signing +
+/// submitting a durable-nonce transfer from the source vault's custody
+/// address (re-derived from the claim) to `destination`, for the FULL
+/// `claim.lamports` (the settlement wallet, not the claimant, bears the
+/// Solana network fee — design doc §5.1 — so unlike XRP nothing is deducted
+/// here). Claimant-only. No destination tag (design doc §5.2 — Solana has no
+/// analogue). On success the claim is removed once its settlement transaction
+/// is later confirmed by a follow-up settle call; returns the locally
+/// computed base58 transaction signature.
+pub async fn settle_sol_claim(claim_id: u64, destination: String) -> Result<String, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    require_sol_production_key()?;
+
+    let claim = match read_state(|s| s.sol_claims.get(&claim_id).cloned()) {
+        Some(c) => c,
+        None => {
+            return Err(ProtocolError::GenericError(
+                "No such SOL claim (already settled or unknown).".to_string(),
+            ))
+        }
+    };
+    if claim.claimant != caller {
+        return Err(ProtocolError::CallerNotOwner);
+    }
+
+    // A quarantined claim may already have been paid under an unexplained
+    // nonce advance. Refuse to sign anything until an admin resolves it.
+    // Factored into a pure helper (no ic_cdk / await) so it is directly unit
+    // testable even though `settle_sol_claim` itself is not (it reads
+    // `ic_cdk::api::caller()` as its first statement — see `sol_p2b_tests`'s
+    // module doc comment).
+    ensure_sol_claim_not_quarantined(claim_id, &claim)?;
+
+    // Design doc §7: the on-curve check is the real trust boundary — an
+    // off-curve destination is a PDA with no private key, and SOL sent there
+    // is destroyed irrecoverably.
+    if !crate::chains::sol::address::is_valid_sol_address(&destination) {
+        return Err(ProtocolError::GenericError(
+            "Invalid SOL destination address (must be a well-formed, on-curve base58 Solana address)."
+                .to_string(),
+        ));
+    }
+
+    let guard_principal = GuardPrincipal::new(caller, &format!("settle_sol_claim_{}", claim_id))?;
+    // Per-custody-address serialization (mirrors XRP's per-vault sequence
+    // lock): custody_nonce == the source vault id.
+    let _custody_guard = match VaultLiquidationGuard::new(claim.custody_nonce) {
+        Ok(g) => g,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(e);
+        }
+    };
+
+    let nonce_account = match read_state(|s| s.sol_nonce_account.clone()) {
+        Some(addr) => addr,
+        None => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "SOL durable-nonce account is not bootstrapped.".to_string(),
+            ));
+        }
+    };
+
+    let custody_path =
+        crate::chains::sol::ted25519::sol_custody_derivation_path(claim.custody_owner, claim.custody_nonce);
+    let settlement_path = crate::chains::sol::ted25519::sol_settlement_derivation_path();
+
+    let (custody_pk_bytes, custody_address) =
+        match crate::chains::sol::ted25519::derive_sol_address(custody_path.clone()).await {
+            Ok(v) => v,
+            Err(e) => {
+                guard_principal.fail();
+                return Err(ProtocolError::GenericError(format!(
+                    "sol custody derive failed: {e}"
+                )));
+            }
+        };
+    let (settlement_pk_bytes, _settlement_address) =
+        match crate::chains::sol::ted25519::derive_sol_address(settlement_path.clone()).await {
+            Ok(v) => v,
+            Err(e) => {
+                guard_principal.fail();
+                return Err(ProtocolError::GenericError(format!(
+                    "sol settlement derive failed: {e}"
+                )));
+            }
+        };
+
+    // Single read of the LIVE durable nonce, reused for both the idempotency /
+    // reconciliation decision below AND the transaction we may go on to sign.
+    // Re-reading it a second time immediately before signing would not add any
+    // safety: Solana's own runtime independently re-validates a durable-nonce
+    // transaction's embedded nonce against the CURRENT on-chain value at
+    // inclusion time, so a nonce that goes stale between this read and submit
+    // simply makes the submit a no-op (rejected before execution, recoverable
+    // by a normal retry) rather than a double-pay risk.
+    let live_nonce_hash = match crate::chains::sol::rpc::get_durable_nonce(&nonce_account).await {
+        Ok(h) => h,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "sol get_durable_nonce failed: {e}"
+            )));
+        }
+    };
+    let live_nonce_value = bs58::encode(live_nonce_hash.as_ref()).into_string();
+
+    // Idempotency (design doc §5.3) BEFORE signing anything new.
+    let mut needs_settlement_clear = false;
+    let mut ambiguous_target_nonce: Option<String> = None;
+    if let Some(prev) = claim.settlement.clone() {
+        let status = match crate::chains::sol::rpc::get_transaction(&prev.signature).await {
+            Ok(s) => s,
+            Err(e) => {
+                guard_principal.fail();
+                return Err(ProtocolError::GenericError(format!(
+                    "sol get_transaction failed: {e}"
+                )));
+            }
+        };
+        match sol_settlement_decision(&status, &prev.nonce_value, &live_nonce_value) {
+            SolSettlementDecision::AlreadyPaid => {
+                mutate_state(|s| {
+                    s.sol_claims.remove(&claim_id);
+                });
+                guard_principal.complete();
+                return Ok(prev.signature);
+            }
+            SolSettlementDecision::FailedClearForResign | SolSettlementDecision::SafeToResign => {
+                needs_settlement_clear = true;
+            }
+            SolSettlementDecision::AmbiguousAdvanced => {
+                needs_settlement_clear = true;
+                ambiguous_target_nonce = Some(prev.nonce_value.clone());
+            }
+        }
+    }
+
+    // Design doc §5.2 step 6, run for EVERY settle attempt (not only the
+    // ambiguous case): also blocks signing while an unrelated claim's
+    // settlement still holds the live nonce and could still land.
+    let (blocking, explains) = match reconcile_sol_other_inflight_claims(
+        claim_id,
+        &live_nonce_value,
+        ambiguous_target_nonce.as_deref(),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(e);
+        }
+    };
+    if let Some(blocking_id) = blocking {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(format!(
+            "SOL settlement for claim #{blocking_id} is already in flight on the shared durable \
+             nonce; confirm it before settling another claim."
+        )));
+    }
+    if let Some(target) = ambiguous_target_nonce.as_deref() {
+        if !explains {
+            let reason = format!(
+                "settlement diverged: durable nonce advanced from {target} to {live_nonce_value} \
+                 while the prior signature is NotFound on-ledger and no sibling settlement \
+                 explains the advance"
+            );
+            mutate_state(|s| {
+                quarantine_sol_claim_snapshot(s, claim_id, &reason);
+            });
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "SOL claim #{claim_id} quarantined ({reason}). Refusing to sign to avoid a \
+                 double-pay; manual reconciliation required."
+            )));
+        }
+    }
+    if needs_settlement_clear {
+        if let Some(prev) = claim.settlement.as_ref() {
+            mutate_state(|s| {
+                reconcile_sol_settlement_snapshot(
+                    s,
+                    claim_id,
+                    &prev.signature,
+                    SolSettlementReconciliation::ClearForResign,
+                );
+            });
+        }
+    }
+
+    // Aggregate solvency (design doc §5.2 step 5): re-read live so a
+    // concurrently-settled sibling on the SAME custody address is reflected.
+    let balance = match crate::chains::sol::rpc::get_balance(&custody_address).await {
+        Ok(b) => b,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "sol getBalance failed: {e}"
+            )));
+        }
+    };
+    let rent_exempt = match crate::chains::sol::rpc::get_rent_exempt_minimum().await {
+        Ok(r) => r,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "sol getMinimumBalanceForRentExemption failed: {e}"
+            )));
+        }
+    };
+    let unresolved_claim_lamports = match read_state(|s| {
+        sol_unresolved_claim_lamports_for_custody(s, claim.custody_owner, claim.custody_nonce)
+    }) {
+        Ok(v) => v,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(e);
+        }
+    };
+    if let Err(e) =
+        ensure_sol_claim_aggregate_solvency(balance, rent_exempt, unresolved_claim_lamports)
+    {
+        log!(
+            INFO,
+            "[settle_sol_claim] aggregate solvency rejected claim #{} from {}: {:?}",
+            claim_id,
+            custody_address,
+            e
+        );
+        guard_principal.fail();
+        return Err(e);
+    }
+
+    // Sign (2 signers: settlement key = fee payer/nonce authority, custody key
+    // = transfer source) and locally compute the signature.
+    let destination_bytes = match crate::chains::sol::address::decode_sol_address(&destination) {
+        Ok(b) => b,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "sol destination decode failed: {e}"
+            )));
+        }
+    };
+    let nonce_account_bytes = match crate::chains::sol::address::decode_sol_address(&nonce_account) {
+        Ok(b) => b,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "sol nonce account decode failed: {e}"
+            )));
+        }
+    };
+    let custody_pubkey = solana_pubkey::Pubkey::new_from_array(custody_pk_bytes);
+    let destination_pubkey = solana_pubkey::Pubkey::new_from_array(destination_bytes);
+    let nonce_pubkey = solana_pubkey::Pubkey::new_from_array(nonce_account_bytes);
+    let settlement_pubkey = solana_pubkey::Pubkey::new_from_array(settlement_pk_bytes);
+
+    let (wire_tx, signature) = match crate::chains::sol::adapter::sign_sol_payment_from(
+        custody_path,
+        &custody_pubkey,
+        &destination_pubkey,
+        claim.lamports,
+        &nonce_pubkey,
+        settlement_path,
+        &settlement_pubkey,
+        live_nonce_hash,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "sol claim sign failed: {e}"
+            )));
+        }
+    };
+
+    // Record the in-flight settlement BEFORE submitting (design doc §5.2 step
+    // 8 — load-bearing for crash safety), so a submit whose outcall errors
+    // after the network already broadcast it is reconciled on a later settle
+    // call rather than double-paid.
+    mutate_state(|s| {
+        if let Some(c) = s.sol_claims.get_mut(&claim_id) {
+            c.settlement = Some(crate::state::SolSettlement {
+                signature: signature.clone(),
+                nonce_value: live_nonce_value.clone(),
+                destination: destination.clone(),
+                submitted_at_ns: ic_cdk::api::time(),
+            });
+        }
+    });
+
+    // Single attempt — never blindly retried (a durable-nonce tx that reached
+    // a node may already have broadcast).
+    if let Err(e) = crate::chains::sol::rpc::send_transaction(&wire_tx).await {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(format!(
+            "sol claim submit failed (call settle again to confirm or retry): {e}"
+        )));
+    }
+
+    guard_principal.complete();
+    Ok(signature)
+}
+
+/// Idempotently bootstrap the native-SOL-collateral rail's durable-nonce
+/// account (design doc §5.1). Developer-gated. Derives the settlement
+/// (fee-payer / nonce-authority) and nonce addresses via THIS rail's own
+/// `chains::sol::ted25519` paths (carrying the `b"collateral"` role tag) and
+/// queries via THIS rail's own cluster-coupled `chains::sol::rpc` — NOT
+/// `chains::solana::tx::bootstrap_nonce_account`, which hardcodes the DORMANT
+/// chain-vault rail's derivation paths (`chains::solana::ted25519::
+/// settlement_derivation_path` / `nonce_derivation_path`, three elements, no
+/// role tag) and its RPC module (hardcoded `SolanaCluster::Devnet`, never
+/// following `chains::sol::config::sol_cluster()`). Reusing it as-is would
+/// derive the WRONG addresses and query the WRONG cluster the moment this
+/// rail is configured for mainnet — see the Phase 2b report for detail.
+///
+/// The PURE, cluster/key-agnostic message-building and signing primitives
+/// (`build_create_nonce_account_message`, `serialize_legacy_message`,
+/// `order_signatures_by_signer`, `assemble_wire_tx_multi`,
+/// `NONCE_ACCOUNT_RENT_LAMPORTS`) ARE reused verbatim from `chains::solana::tx`
+/// — only the derivation/RPC/key layer differs, mirroring exactly what
+/// `chains::sol::adapter::sign_sol_payment_from`'s own doc comment already
+/// does for claim settlement.
+///
+/// `blockhash_override`: the create+initialize tx needs a REAL recent
+/// blockhash (the durable nonce does not exist yet to self-reference).
+/// `getLatestBlockhash` changes every slot and is chronically `#Inconsistent`
+/// under multi-provider `Equality` consensus on a live cluster (see
+/// `chains::sol::rpc::get_latest_blockhash`'s doc comment); the production
+/// path is an operator-supplied override fetched and passed promptly in the
+/// same shell. `None` auto-fetches — reliable only in PocketIC / other
+/// consensus-capable environments.
+///
+/// No production-key gate here (deliberately, mirroring the dormant rail's
+/// own bootstrap): bootstrapping the nonce account against devnet, under the
+/// test key, before flipping to production is a legitimate operational step
+/// (design doc §12 lists key-setting BEFORE bootstrap for exactly this
+/// reason). `register_sol_collateral` (Phase 3) is where the hard
+/// production-key gate belongs.
+pub async fn sol_bootstrap_nonce_account(
+    blockhash_override: Option<solana_message::Hash>,
+) -> Result<String, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    if !read_state(|s| s.developer_principal == caller) {
+        return Err(ProtocolError::GenericError(
+            "Only the developer can bootstrap the SOL nonce account.".to_string(),
+        ));
+    }
+
+    let settlement_path = crate::chains::sol::ted25519::sol_settlement_derivation_path();
+    let (settlement_pk_bytes, _settlement_addr) =
+        crate::chains::sol::ted25519::derive_sol_address(settlement_path.clone())
+            .await
+            .map_err(|e| ProtocolError::GenericError(format!("sol settlement derive failed: {e}")))?;
+    let nonce_path = crate::chains::sol::ted25519::sol_nonce_derivation_path();
+    let (nonce_pk_bytes, nonce_addr) =
+        crate::chains::sol::ted25519::derive_sol_address(nonce_path.clone())
+            .await
+            .map_err(|e| ProtocolError::GenericError(format!("sol nonce derive failed: {e}")))?;
+
+    // Idempotency: if the nonce account already reads back Initialized, we
+    // are done — just make sure `State` reflects it (defensive: covers the
+    // case where a prior bootstrap succeeded on-chain but the state write was
+    // somehow lost, e.g. a pre-upgrade snapshot from before this field existed).
+    if crate::chains::sol::rpc::get_durable_nonce(&nonce_addr).await.is_ok() {
+        mutate_state(|s| {
+            s.sol_nonce_account = Some(nonce_addr.clone());
+        });
+        return Ok(nonce_addr);
+    }
+
+    let settlement = solana_pubkey::Pubkey::new_from_array(settlement_pk_bytes);
+    let nonce = solana_pubkey::Pubkey::new_from_array(nonce_pk_bytes);
+
+    let recent_blockhash = match blockhash_override {
+        Some(bh) => bh,
+        None => crate::chains::sol::rpc::get_latest_blockhash()
+            .await
+            .map_err(|e| ProtocolError::GenericError(format!("sol get_latest_blockhash failed: {e}")))?,
+    };
+
+    let message = crate::chains::solana::tx::build_create_nonce_account_message(
+        &settlement,
+        &nonce,
+        &settlement, // settlement is also the nonce authority
+        crate::chains::solana::tx::NONCE_ACCOUNT_RENT_LAMPORTS,
+        recent_blockhash,
+    );
+    let message_bytes = crate::chains::solana::tx::serialize_legacy_message(&message);
+
+    // Multi-sign: sign the SAME serialized bytes with each required signer's
+    // own path, then order to match account_keys[0..num_required_signatures].
+    let settlement_sig = crate::chains::sol::ted25519::sign_message(message_bytes.clone(), settlement_path)
+        .await
+        .map_err(|e| ProtocolError::GenericError(format!("sol settlement sign failed: {e}")))?;
+    let nonce_sig = crate::chains::sol::ted25519::sign_message(message_bytes.clone(), nonce_path)
+        .await
+        .map_err(|e| ProtocolError::GenericError(format!("sol nonce sign failed: {e}")))?;
+    let settlement_sig: [u8; 64] = settlement_sig.as_slice().try_into().map_err(|_| {
+        ProtocolError::GenericError("sol settlement signature is not 64 bytes".to_string())
+    })?;
+    let nonce_sig: [u8; 64] = nonce_sig
+        .as_slice()
+        .try_into()
+        .map_err(|_| ProtocolError::GenericError("sol nonce signature is not 64 bytes".to_string()))?;
+
+    let signers = [(settlement, settlement_sig), (nonce, nonce_sig)];
+    let ordered = crate::chains::solana::tx::order_signatures_by_signer(&message, &signers)
+        .map_err(ProtocolError::GenericError)?;
+    let wire = crate::chains::solana::tx::assemble_wire_tx_multi(&ordered, &message_bytes);
+
+    crate::chains::sol::rpc::send_transaction(&wire)
+        .await
+        .map_err(|e| ProtocolError::GenericError(format!("sol nonce bootstrap submit failed: {e}")))?;
+
+    mutate_state(|s| {
+        s.sol_nonce_account = Some(nonce_addr.clone());
+    });
+    Ok(nonce_addr)
 }
 
 #[cfg(test)]
@@ -9176,5 +10433,618 @@ mod sol_p2a_tests {
             ),
             other => panic!("expected a native-SOL GenericError reject, got {other:?}"),
         }
+    }
+}
+
+/// Phase 2b of the native-SOL collateral rail (docs/superpowers/specs/
+/// 2026-07-24-native-sol-collateral-design.md): the deposit staging, pending-
+/// open cleanup, and claim-settlement logic added to vault.rs.
+///
+/// Same constraint as `sol_p2a_tests` (see its module doc comment):
+/// `open_sol_vault`, `confirm_sol_deposit`, `cancel_sol_pending_open`,
+/// `sweep_sol_pending_open`, `settle_sol_claim`, and
+/// `sol_bootstrap_nonce_account` all read `ic_cdk::api::caller()` as their
+/// first statement (or make an `ic_cdk` outcall before any could-fail-cleanly
+/// check), so none of them can be driven directly via
+/// `futures::executor::block_on` outside a real canister call context. Every
+/// safety-relevant decision in this phase was therefore factored into a pure,
+/// `State`/`ic_cdk`-free helper specifically so it could be tested here —
+/// this module tests those helpers exhaustively rather than the async
+/// endpoints themselves.
+#[cfg(test)]
+mod sol_p2b_tests {
+    use super::*;
+    use crate::chains::solana::sol_rpc::TxStatus;
+    use crate::state::{SolClaim, SolPendingDeposit, SolSettlement};
+
+    fn owner() -> Principal {
+        Principal::from_slice(&[0x11; 16])
+    }
+    fn claimant() -> Principal {
+        Principal::from_slice(&[0x22; 16])
+    }
+
+    fn settlement(nonce_value: &str, signature: &str) -> SolSettlement {
+        SolSettlement {
+            signature: signature.to_string(),
+            nonce_value: nonce_value.to_string(),
+            destination: "11111111111111111111111111111111".to_string(),
+            submitted_at_ns: 1_000,
+        }
+    }
+
+    fn claim_with_settlement(settlement: Option<SolSettlement>) -> SolClaim {
+        SolClaim {
+            claimant: claimant(),
+            lamports: 5_000_000,
+            custody_owner: owner(),
+            custody_nonce: 7,
+            created_at_ns: 0,
+            settlement,
+            quarantine_reason: None,
+        }
+    }
+
+    // ─── §5.3 idempotency table: sol_settlement_decision, one test per row ──
+
+    #[test]
+    fn idempotency_row_confirmed_is_already_paid() {
+        let status = TxStatus::Confirmed { slot: 123 };
+        assert_eq!(
+            sol_settlement_decision(&status, "nonceA", "nonceB"),
+            SolSettlementDecision::AlreadyPaid,
+            "Confirmed must be AlreadyPaid regardless of nonce comparison"
+        );
+        // Also true when the nonce happens to still match.
+        assert_eq!(
+            sol_settlement_decision(&status, "nonceA", "nonceA"),
+            SolSettlementDecision::AlreadyPaid
+        );
+    }
+
+    #[test]
+    fn idempotency_row_failed_clears_for_resign_without_a_fee() {
+        let status = TxStatus::Failed;
+        assert_eq!(
+            sol_settlement_decision(&status, "nonceA", "nonceB"),
+            SolSettlementDecision::FailedClearForResign,
+            "Failed must clear for resign regardless of nonce comparison"
+        );
+    }
+
+    #[test]
+    fn idempotency_row_notfound_unchanged_nonce_is_safe_to_resign() {
+        let status = TxStatus::NotFound;
+        assert_eq!(
+            sol_settlement_decision(&status, "sameNonce", "sameNonce"),
+            SolSettlementDecision::SafeToResign
+        );
+    }
+
+    #[test]
+    fn idempotency_row_notfound_advanced_nonce_is_ambiguous() {
+        let status = TxStatus::NotFound;
+        assert_eq!(
+            sol_settlement_decision(&status, "oldNonce", "newNonce"),
+            SolSettlementDecision::AmbiguousAdvanced
+        );
+    }
+
+    // ─── Confirmed row: no second transfer is attempted ─────────────────────
+
+    /// Pins the EXACT branch `settle_sol_claim` takes on `AlreadyPaid`: the
+    /// claim is removed and the PRIOR signature is returned, with no path to
+    /// `chains::sol::adapter::sign_sol_payment_from` / `send_transaction` at
+    /// all. This is a structural assertion (by inspection of the match arm
+    /// below, mirroring exactly the code path in `settle_sol_claim`) rather
+    /// than an end-to-end call, since the endpoint itself cannot be driven
+    /// outside a canister — see the module doc comment.
+    #[test]
+    fn already_paid_decision_removes_claim_and_returns_prior_signature_no_second_transfer() {
+        let mut s = crate::state::State::default();
+        let claim_id = 1u64;
+        let prev = settlement("nonceA", "sigPRIOR");
+        s.sol_claims.insert(claim_id, claim_with_settlement(Some(prev.clone())));
+
+        let status = TxStatus::Confirmed { slot: 42 };
+        let decision = sol_settlement_decision(&status, &prev.nonce_value, "nonceB_whatever");
+        assert_eq!(decision, SolSettlementDecision::AlreadyPaid);
+
+        // Exactly what `settle_sol_claim`'s `AlreadyPaid` arm does: remove the
+        // claim, return `prev.signature`. No settlement is built, no
+        // `send_transaction` call is reachable from this arm.
+        let returned_signature = match decision {
+            SolSettlementDecision::AlreadyPaid => {
+                s.sol_claims.remove(&claim_id);
+                prev.signature.clone()
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(returned_signature, "sigPRIOR");
+        assert!(
+            !s.sol_claims.contains_key(&claim_id),
+            "claim must be finalized (removed), not left pending for a second settle"
+        );
+    }
+
+    // ─── NotFound + advanced nonce, unexplained: quarantine ─────────────────
+
+    #[test]
+    fn ambiguous_advance_without_a_sibling_explanation_quarantines_the_claim() {
+        let mut s = crate::state::State::default();
+        let claim_id = 1u64;
+        let prev = settlement("staleNonce", "sigSTALE");
+        s.sol_claims.insert(claim_id, claim_with_settlement(Some(prev.clone())));
+
+        let status = TxStatus::NotFound;
+        let decision = sol_settlement_decision(&status, &prev.nonce_value, "advancedNonce");
+        assert_eq!(decision, SolSettlementDecision::AmbiguousAdvanced);
+
+        // No OTHER claim exists at all, so `sol_sibling_explains_ambiguous_advance`
+        // can never return true for this target -- mirrors the "no sibling found"
+        // path `settle_sol_claim` takes to `quarantine_sol_claim_snapshot`.
+        let explains = s
+            .sol_claims
+            .iter()
+            .filter(|(id, _)| **id != claim_id)
+            .filter_map(|(_, c)| c.settlement.as_ref())
+            .any(|st| {
+                sol_sibling_explains_ambiguous_advance(
+                    &TxStatus::Confirmed { slot: 1 },
+                    &st.nonce_value,
+                    &prev.nonce_value,
+                )
+            });
+        assert!(!explains);
+
+        let reason = "settlement diverged: durable nonce advanced".to_string();
+        assert!(quarantine_sol_claim_snapshot(&mut s, claim_id, &reason));
+        assert_eq!(
+            s.sol_claims.get(&claim_id).unwrap().quarantine_reason,
+            Some(reason)
+        );
+    }
+
+    // ─── sol_sibling_reconcile_decision: exhaustive ──────────────────────────
+
+    #[test]
+    fn sibling_confirmed_is_paid() {
+        assert_eq!(
+            sol_sibling_reconcile_decision(&TxStatus::Confirmed { slot: 5 }, "n1", "n2"),
+            SolSiblingReconcileDecision::Paid
+        );
+    }
+
+    #[test]
+    fn sibling_failed_clears_for_resign() {
+        assert_eq!(
+            sol_sibling_reconcile_decision(&TxStatus::Failed, "n1", "n2"),
+            SolSiblingReconcileDecision::FailedClearForResign
+        );
+    }
+
+    #[test]
+    fn sibling_notfound_matching_live_nonce_is_still_in_flight() {
+        assert_eq!(
+            sol_sibling_reconcile_decision(&TxStatus::NotFound, "sameNonce", "sameNonce"),
+            SolSiblingReconcileDecision::StillInFlight
+        );
+    }
+
+    #[test]
+    fn sibling_notfound_stale_nonce_is_dead_and_safe_to_clear() {
+        assert_eq!(
+            sol_sibling_reconcile_decision(&TxStatus::NotFound, "staleNonce", "liveNonce"),
+            SolSiblingReconcileDecision::DeadNonceSafeToClear
+        );
+    }
+
+    // ─── sol_sibling_explains_ambiguous_advance ──────────────────────────────
+
+    #[test]
+    fn sibling_explains_only_when_confirmed_and_nonce_matches() {
+        assert!(sol_sibling_explains_ambiguous_advance(
+            &TxStatus::Confirmed { slot: 9 },
+            "sharedNonce",
+            "sharedNonce",
+        ));
+        assert!(
+            !sol_sibling_explains_ambiguous_advance(
+                &TxStatus::Confirmed { slot: 9 },
+                "differentNonce",
+                "sharedNonce",
+            ),
+            "must not explain a DIFFERENT nonce value even if confirmed"
+        );
+        assert!(
+            !sol_sibling_explains_ambiguous_advance(
+                &TxStatus::NotFound,
+                "sharedNonce",
+                "sharedNonce",
+            ),
+            "must not explain unless the sibling's own tx is Confirmed"
+        );
+    }
+
+    // ─── reconcile_sol_settlement_snapshot ───────────────────────────────────
+
+    #[test]
+    fn reconcile_snapshot_paid_removes_the_claim() {
+        let mut s = crate::state::State::default();
+        let sig = "sigABC";
+        s.sol_claims.insert(1, claim_with_settlement(Some(settlement("n1", sig))));
+        assert!(reconcile_sol_settlement_snapshot(
+            &mut s,
+            1,
+            sig,
+            SolSettlementReconciliation::Paid
+        ));
+        assert!(!s.sol_claims.contains_key(&1));
+    }
+
+    #[test]
+    fn reconcile_snapshot_clear_for_resign_keeps_claim_but_clears_settlement() {
+        let mut s = crate::state::State::default();
+        let sig = "sigABC";
+        s.sol_claims.insert(1, claim_with_settlement(Some(settlement("n1", sig))));
+        assert!(reconcile_sol_settlement_snapshot(
+            &mut s,
+            1,
+            sig,
+            SolSettlementReconciliation::ClearForResign
+        ));
+        let c = s.sol_claims.get(&1).unwrap();
+        assert!(c.settlement.is_none());
+    }
+
+    #[test]
+    fn reconcile_snapshot_is_a_noop_when_the_signature_no_longer_matches() {
+        // Guards against clobbering a NEWER settlement that was written
+        // concurrently between the read and this mutation.
+        let mut s = crate::state::State::default();
+        s.sol_claims.insert(1, claim_with_settlement(Some(settlement("n1", "sigNEW"))));
+        assert!(!reconcile_sol_settlement_snapshot(
+            &mut s,
+            1,
+            "sigSTALE",
+            SolSettlementReconciliation::Paid
+        ));
+        assert!(
+            s.sol_claims.contains_key(&1),
+            "must not remove the claim when the signature does not match"
+        );
+    }
+
+    #[test]
+    fn reconcile_snapshot_is_a_noop_for_a_missing_claim() {
+        let mut s = crate::state::State::default();
+        assert!(!reconcile_sol_settlement_snapshot(
+            &mut s,
+            999,
+            "sig",
+            SolSettlementReconciliation::Paid
+        ));
+    }
+
+    // ─── quarantine refuses settlement ───────────────────────────────────────
+
+    #[test]
+    fn quarantined_claim_refuses_settlement() {
+        let claim_id = 1u64;
+        let mut claim = claim_with_settlement(None);
+        claim.quarantine_reason = Some("suspected divergence".to_string());
+        let result = ensure_sol_claim_not_quarantined(claim_id, &claim);
+        match result {
+            Err(ProtocolError::GenericError(msg)) => {
+                assert!(msg.contains("quarantined"));
+                assert!(msg.contains("suspected divergence"));
+            }
+            other => panic!("expected a quarantine GenericError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn healthy_claim_is_not_blocked_by_the_quarantine_gate() {
+        let claim = claim_with_settlement(None);
+        assert!(ensure_sol_claim_not_quarantined(1, &claim).is_ok());
+    }
+
+    // ─── quarantine_sol_claim_snapshot / resolve_quarantined_sol_claim_snapshot ─
+
+    #[test]
+    fn quarantine_snapshot_is_idempotent_keeps_first_reason() {
+        let mut s = crate::state::State::default();
+        s.sol_claims.insert(1, claim_with_settlement(None));
+        assert!(quarantine_sol_claim_snapshot(&mut s, 1, "first reason"));
+        assert!(quarantine_sol_claim_snapshot(&mut s, 1, "second reason"));
+        assert_eq!(
+            s.sol_claims.get(&1).unwrap().quarantine_reason,
+            Some("first reason".to_string())
+        );
+    }
+
+    #[test]
+    fn quarantine_snapshot_returns_false_for_missing_claim() {
+        let mut s = crate::state::State::default();
+        assert!(!quarantine_sol_claim_snapshot(&mut s, 999, "reason"));
+    }
+
+    #[test]
+    fn resolve_confirm_paid_removes_the_claim() {
+        let mut s = crate::state::State::default();
+        let mut claim = claim_with_settlement(Some(settlement("n1", "sig1")));
+        claim.quarantine_reason = Some("diverged".to_string());
+        s.sol_claims.insert(1, claim);
+
+        assert!(resolve_quarantined_sol_claim_snapshot(&mut s, 1, true).is_ok());
+        assert!(!s.sol_claims.contains_key(&1));
+    }
+
+    #[test]
+    fn resolve_release_for_retry_clears_quarantine_and_settlement() {
+        let mut s = crate::state::State::default();
+        let mut claim = claim_with_settlement(Some(settlement("n1", "sig1")));
+        claim.quarantine_reason = Some("diverged".to_string());
+        s.sol_claims.insert(1, claim);
+
+        assert!(resolve_quarantined_sol_claim_snapshot(&mut s, 1, false).is_ok());
+        let c = s.sol_claims.get(&1).unwrap();
+        assert!(c.quarantine_reason.is_none());
+        assert!(c.settlement.is_none());
+    }
+
+    #[test]
+    fn resolve_rejects_a_healthy_non_quarantined_claim() {
+        let mut s = crate::state::State::default();
+        s.sol_claims.insert(1, claim_with_settlement(None));
+        assert!(resolve_quarantined_sol_claim_snapshot(&mut s, 1, true).is_err());
+        assert!(s.sol_claims.contains_key(&1), "must not mutate on rejection");
+    }
+
+    #[test]
+    fn resolve_rejects_a_missing_claim() {
+        let mut s = crate::state::State::default();
+        assert!(resolve_quarantined_sol_claim_snapshot(&mut s, 999, true).is_err());
+    }
+
+    // ─── is_valid_sol_address rejection blocks settlement (pin the gate) ────
+
+    /// `settle_sol_claim` gates on exactly `chains::sol::address::is_valid_sol_address`
+    /// before doing anything else observable (deriving keys, reading the
+    /// nonce, signing). Pin that a real off-curve PDA -- which decodes
+    /// cleanly as 32 base58 bytes but has no private key -- is rejected by
+    /// this exact predicate, so sending a claim's SOL there is refused before
+    /// any transfer could be built.
+    #[test]
+    fn off_curve_pda_destination_is_rejected_by_the_gate_settle_sol_claim_uses() {
+        use solana_pubkey::Pubkey;
+        let program_id = Pubkey::new_from_array([9u8; 32]);
+        let (pda, _bump) =
+            Pubkey::find_program_address(&[b"sol-collateral-settle-test"], &program_id);
+        let pda_address = bs58::encode(pda.as_ref()).into_string();
+
+        assert!(
+            crate::chains::sol::address::decode_sol_address(&pda_address).is_ok(),
+            "a PDA decodes fine as 32 base58 bytes"
+        );
+        assert!(
+            !crate::chains::sol::address::is_valid_sol_address(&pda_address),
+            "but must be rejected as a payable destination -- settle_sol_claim's gate"
+        );
+    }
+
+    // ─── aggregate solvency ───────────────────────────────────────────────────
+
+    #[test]
+    fn aggregate_solvency_rejects_when_balance_cannot_cover_claims_plus_reserve() {
+        let rent_exempt = 890_880u64;
+        let unresolved = 10_000_000u128;
+        // Balance covers the claims but NOT the rent-exempt reserve on top.
+        let balance = 10_000_000u64;
+        assert!(ensure_sol_claim_aggregate_solvency(balance, rent_exempt, unresolved).is_err());
+    }
+
+    #[test]
+    fn aggregate_solvency_accepts_the_exact_boundary() {
+        let rent_exempt = 890_880u64;
+        let unresolved = 10_000_000u128;
+        let balance = unresolved as u64 + rent_exempt;
+        assert!(ensure_sol_claim_aggregate_solvency(balance, rent_exempt, unresolved).is_ok());
+    }
+
+    #[test]
+    fn aggregate_solvency_rejects_one_lamport_short() {
+        let rent_exempt = 890_880u64;
+        let unresolved = 10_000_000u128;
+        let balance = unresolved as u64 + rent_exempt - 1;
+        assert!(ensure_sol_claim_aggregate_solvency(balance, rent_exempt, unresolved).is_err());
+    }
+
+    #[test]
+    fn sol_unresolved_claim_lamports_sums_only_matching_custody() {
+        let mut s = crate::state::State::default();
+        let owner_a = owner();
+        let owner_b = Principal::from_slice(&[0x33; 16]);
+        s.sol_claims.insert(1, {
+            let mut c = claim_with_settlement(None);
+            c.custody_owner = owner_a;
+            c.custody_nonce = 7;
+            c.lamports = 1_000_000;
+            c
+        });
+        s.sol_claims.insert(2, {
+            let mut c = claim_with_settlement(None);
+            c.custody_owner = owner_a;
+            c.custody_nonce = 7;
+            c.lamports = 2_000_000;
+            c
+        });
+        // Different custody (different owner) -- must NOT be summed in.
+        s.sol_claims.insert(3, {
+            let mut c = claim_with_settlement(None);
+            c.custody_owner = owner_b;
+            c.custody_nonce = 7;
+            c.lamports = 9_000_000;
+            c
+        });
+        // Different custody (same owner, different vault id) -- must NOT be summed in.
+        s.sol_claims.insert(4, {
+            let mut c = claim_with_settlement(None);
+            c.custody_owner = owner_a;
+            c.custody_nonce = 8;
+            c.lamports = 9_000_000;
+            c
+        });
+
+        let total = sol_unresolved_claim_lamports_for_custody(&s, owner_a, 7).unwrap();
+        assert_eq!(total, 3_000_000);
+    }
+
+    // ─── reconcile_sol_other_inflight_claims is protocol-wide (pin the scan) ─
+
+    /// `sol_inflight_claims` is the pure `State` scan `reconcile_sol_other_
+    /// inflight_claims` drives. Unlike XRP's per-custody-address sibling scan,
+    /// this must be scoped to the WHOLE PROTOCOL (every custody address),
+    /// since the durable nonce is a single shared account -- see the "Native
+    /// SOL collateral: Phase 2b claim settlement" section doc comment in
+    /// vault.rs for the full argument. This test pins that a sibling on a
+    /// COMPLETELY DIFFERENT custody address is still picked up.
+    #[test]
+    fn sol_inflight_claims_scans_every_custody_address_not_just_the_current_ones() {
+        let mut s = crate::state::State::default();
+        let mut other_custody_claim = claim_with_settlement(Some(settlement("n1", "sigOTHER")));
+        other_custody_claim.custody_owner = Principal::from_slice(&[0x99; 16]);
+        other_custody_claim.custody_nonce = 4242;
+        s.sol_claims.insert(2, other_custody_claim);
+        // The current claim itself (must be excluded).
+        s.sol_claims.insert(1, claim_with_settlement(Some(settlement("n2", "sigCURRENT"))));
+        // A claim with no settlement yet (must be excluded -- nothing to reconcile).
+        s.sol_claims.insert(3, claim_with_settlement(None));
+
+        let in_flight = sol_inflight_claims(&s, 1);
+        assert_eq!(in_flight.len(), 1);
+        assert_eq!(in_flight[0].0, 2);
+        assert_eq!(in_flight[0].1.signature, "sigOTHER");
+    }
+
+    // ─── open_sol_vault: nonce-bootstrap gate ─────────────────────────────────
+
+    #[test]
+    fn open_sol_vault_refuses_when_nonce_account_not_bootstrapped() {
+        assert!(ensure_sol_nonce_bootstrapped(&None).is_err());
+    }
+
+    #[test]
+    fn open_sol_vault_allows_when_nonce_account_bootstrapped() {
+        assert!(ensure_sol_nonce_bootstrapped(&Some("SomeNonceAddress111".to_string())).is_ok());
+    }
+
+    // ─── open_sol_vault: pending-open bounds ──────────────────────────────────
+
+    #[test]
+    fn pending_open_bounds_rejects_at_global_cap() {
+        assert!(ensure_sol_pending_open_bounds(MAX_SOL_PENDING_GLOBAL, 0).is_err());
+        assert!(ensure_sol_pending_open_bounds(MAX_SOL_PENDING_GLOBAL - 1, 0).is_ok());
+    }
+
+    #[test]
+    fn pending_open_bounds_rejects_at_per_caller_cap() {
+        assert!(ensure_sol_pending_open_bounds(0, MAX_SOL_PENDING_PER_CALLER).is_err());
+        assert!(ensure_sol_pending_open_bounds(0, MAX_SOL_PENDING_PER_CALLER - 1).is_ok());
+    }
+
+    // ─── confirm_sol_deposit: credit boundary (delegates to chains::sol::adapter) ─
+
+    /// `confirm_sol_deposit` credits via exactly
+    /// `chains::sol::adapter::sol_credit_amount` (already exhaustively tested
+    /// in that module — see `chains::sol::adapter::tests`). This pins that
+    /// vault.rs's confirm path relies on THAT function with the same
+    /// semantics: credited = balance - rent_exempt, floored at min_deposit.
+    #[test]
+    fn confirm_sol_deposit_credit_boundary_matches_chains_sol_adapter() {
+        let min_deposit = 20_000_000u64;
+        let rent_exempt = 890_880u64;
+        let balance = rent_exempt + min_deposit;
+        assert_eq!(
+            crate::chains::sol::adapter::sol_credit_amount(balance, rent_exempt, min_deposit)
+                .unwrap(),
+            min_deposit
+        );
+        assert!(crate::chains::sol::adapter::sol_credit_amount(
+            rent_exempt + min_deposit - 1,
+            rent_exempt,
+            min_deposit
+        )
+        .is_err());
+    }
+
+    // ─── cancel/sweep: pending-cleanup minimum-age gate ───────────────────────
+
+    fn pending(opened_at_ns: u64) -> SolPendingDeposit {
+        SolPendingDeposit {
+            owner: owner(),
+            custody_address: "SomeCustodyAddress111".to_string(),
+            derivation_nonce: 7,
+            opened_at_ns,
+            rent_exempt_lamports: 890_880,
+        }
+    }
+
+    #[test]
+    fn cleanup_age_gate_rejects_before_ten_minutes() {
+        let p = pending(0);
+        assert!(ensure_sol_pending_cleanup_age(&p, SOL_PENDING_CLEANUP_MIN_AGE_NS - 1).is_err());
+    }
+
+    #[test]
+    fn cleanup_age_gate_accepts_at_exactly_ten_minutes() {
+        let p = pending(0);
+        assert!(ensure_sol_pending_cleanup_age(&p, SOL_PENDING_CLEANUP_MIN_AGE_NS).is_ok());
+    }
+
+    #[test]
+    fn cleanup_age_gate_accepts_well_after_ten_minutes() {
+        let p = pending(0);
+        assert!(ensure_sol_pending_cleanup_age(&p, SOL_PENDING_CLEANUP_MIN_AGE_NS * 10).is_ok());
+    }
+
+    // ─── remove_sol_pending_deposit_if_unfunded_snapshot ──────────────────────
+
+    #[test]
+    fn remove_pending_refuses_when_the_custody_account_is_funded() {
+        let mut s = crate::state::State::default();
+        let p = pending(0);
+        s.sol_pending_deposits.insert(7, p.clone());
+        // Even DUST (1 lamport) counts as funded -- removing the pending entry
+        // would strand it with no record pointing back to the custody address.
+        assert!(remove_sol_pending_deposit_if_unfunded_snapshot(&mut s, 7, &p, 1).is_err());
+        assert!(s.sol_pending_deposits.contains_key(&7));
+    }
+
+    #[test]
+    fn remove_pending_succeeds_when_unfunded_and_snapshot_matches() {
+        let mut s = crate::state::State::default();
+        let p = pending(0);
+        s.sol_pending_deposits.insert(7, p.clone());
+        assert!(remove_sol_pending_deposit_if_unfunded_snapshot(&mut s, 7, &p, 0).unwrap());
+        assert!(!s.sol_pending_deposits.contains_key(&7));
+    }
+
+    #[test]
+    fn remove_pending_is_a_noop_when_the_snapshot_is_stale() {
+        let mut s = crate::state::State::default();
+        let original = pending(0);
+        let mut changed = original.clone();
+        changed.rent_exempt_lamports = 999_999; // simulate a concurrent change
+        s.sol_pending_deposits.insert(7, changed);
+        assert!(!remove_sol_pending_deposit_if_unfunded_snapshot(&mut s, 7, &original, 0).unwrap());
+        assert!(s.sol_pending_deposits.contains_key(&7));
+    }
+
+    #[test]
+    fn remove_pending_is_a_noop_when_already_removed() {
+        let mut s = crate::state::State::default();
+        let p = pending(0);
+        assert!(!remove_sol_pending_deposit_if_unfunded_snapshot(&mut s, 7, &p, 0).unwrap());
     }
 }
