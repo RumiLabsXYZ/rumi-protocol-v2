@@ -23,6 +23,9 @@
 
   const dispatch = createEventDispatcher();
 
+  /** Temporary AMM1 pause: block deposits without blocking LP exits. */
+  export let depositsPaused = false;
+
   type Tab = 'add' | 'remove';
   let activeTab: Tab = 'add';
 
@@ -75,6 +78,7 @@
   const MIN_CLAIM_E8S: bigint = 100_000n;
 
   $: isConnected = $walletStore.isConnected;
+  $: if (depositsPaused && activeTab === 'add') activeTab = 'remove';
 
   // Token references
   const threeUsdToken = AMM_TOKENS.find(t => t.is3USD)!;
@@ -395,12 +399,19 @@
 
   <!-- Tabs -->
   <div class="sub-tabs">
-    <button class="sub-tab" class:active={activeTab === 'add'} on:click={() => { activeTab = 'add'; error = ''; }}>Add</button>
+    <button
+      class="sub-tab"
+      class:active={activeTab === 'add'}
+      disabled={depositsPaused}
+      on:click={() => { activeTab = 'add'; error = ''; }}
+    >Add</button>
     <button class="sub-tab" class:active={activeTab === 'remove'} on:click={() => { activeTab = 'remove'; error = ''; }}>Remove</button>
   </div>
 
   {#if activeTab === 'add'}
-    {#if !isConnected}
+    {#if depositsPaused}
+      <p class="connect-text">New AMM1 deposits are temporarily paused.</p>
+    {:else if !isConnected}
       <p class="connect-text">Connect your wallet to add liquidity</p>
     {:else}
       <div class="input-group">

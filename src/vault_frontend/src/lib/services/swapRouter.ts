@@ -30,8 +30,24 @@ const _threeUsdIcpRegistryFull = new ProviderRegistry([
   }),
 ]);
 
+const _threeUsdIcpRegistryIcpswapOnly = new ProviderRegistry([
+  new IcpswapProvider({
+    id: 'icpswap_3usd_icp',
+    poolCanisterId: CANISTER_IDS.ICPSWAP_3USD_ICP_POOL,
+    token0LedgerId: CANISTER_IDS.THREEPOOL,
+    token1LedgerId: CANISTER_IDS.ICP_LEDGER,
+    feeBps: 30,
+  }),
+]);
+
 // Rumi-only fallback used when the ICPswap kill switch is off.
 const _threeUsdIcpRegistryRumiOnly = new ProviderRegistry([new RumiAmmProvider()]);
+
+// AMM1 is deliberately unavailable for new swaps while its liquidity is
+// paused. Keep this routing guard beside the provider registries so a hidden
+// fallback cannot send a user through AMM1 even if another UI entry point
+// supplies a 3USD route directly.
+export const AMM1_ROUTING_PAUSED = true;
 
 // Dedicated registry for the direct icUSD/ICP pool on ICPswap (Task 11).
 // Only ICPswap currently hosts this pair; if a Rumi AMM icUSD/ICP pool is
@@ -86,6 +102,10 @@ export async function initIcpswapRoutingFlag(): Promise<void> {
 }
 
 function threeUsdIcpRegistry(): ProviderRegistry {
+  if (AMM1_ROUTING_PAUSED && !_icpswapEnabled) {
+    throw new Error('No route available while AMM1 routing is paused.');
+  }
+  if (AMM1_ROUTING_PAUSED) return _threeUsdIcpRegistryIcpswapOnly;
   return _icpswapEnabled ? _threeUsdIcpRegistryFull : _threeUsdIcpRegistryRumiOnly;
 }
 
@@ -100,6 +120,8 @@ export type RouteType =
   | 'amm_swap'              // 3USD <-> ICP (direct AMM)
   | 'stable_to_icp'         // Stablecoin -> ICP (3pool deposit + AMM swap)
   | 'icp_to_stable'         // ICP -> Stablecoin (AMM swap + 3pool redeem)
+  | 'stable_to_icp_via_icusd' // Stablecoin -> icUSD (3pool) -> ICP (ICPswap)
+  | 'icp_to_stable_via_icusd' // ICP -> icUSD (ICPswap) -> Stablecoin (3pool)
   | 'icusd_icp_direct';     // icUSD <-> ICP (direct ICPswap icUSD/ICP pool)
 
 export interface SwapRoute {
@@ -196,6 +218,16 @@ async function netOfOutputLedgerFee(grossOut: bigint, to: AmmToken): Promise<big
   return grossOut > fee ? grossOut - fee : 0n;
 }
 
+function noRouteWhileAmm1Paused(): Error {
+  return new Error(
+    'No route available while AMM1 routing is paused. ICPswap routing must be enabled and the icUSD/ICP pool must be available.',
+  );
+}
+
+function threePoolFeeDisplay(feeBps: number, isRebalancing: boolean): string {
+  return `${(feeBps / 100).toFixed(2)}%${isRebalancing ? ' (rebalancing)' : ''}`;
+}
+
 /**
  * Determine the swap route and fetch a combined quote.
  */
@@ -208,14 +240,13 @@ export async function resolveRoute(
   // Case 1: Stablecoin <-> Stablecoin (3pool swap, dynamic fee)
   if (isStablecoin(from) && isStablecoin(to)) {
     const quote = await threePoolService.quoteSwap(from.threePoolIndex, to.threePoolIndex, amountIn);
-    const feePct = (quote.fee_bps / 100).toFixed(2);
     return {
       type: 'three_pool_swap',
       pathDisplay: `${from.symbol} → ${to.symbol}`,
       hops: 1,
       estimatedOutput: await netOfOutputLedgerFee(quote.amount_out, to),
       grossOutput: quote.amount_out,
-      feeDisplay: `${feePct}%${quote.is_rebalancing ? ' (rebalancing)' : ''}`,
+      feeDisplay: threePoolFeeDisplay(quote.fee_bps, quote.is_rebalancing),
     };
   }
 
@@ -266,15 +297,32 @@ export async function resolveRoute(
     };
   }
 
-  // Case 5a: icUSD <-> ICP (direct ICPswap icUSD/ICP pool vs 2-hop via 3pool).
+  // Case 5a: icUSD <-> ICP. While AMM1 is paused this pair must use its
+  // direct ICPswap pool or fail closed; it must never fall back through 3USD.
   // icUSD is a stablecoin, so this MUST sit before Case 5 to take precedence.
   // Direct wins on ties (one fewer fee, simpler execution).
   const isIcUsd = (t: AmmToken) => t.symbol === 'icUSD';
   if ((isIcUsd(from) && isICP(to)) || (isICP(from) && isIcUsd(to))) {
     console.log(`[swapRouter] Case 5a: icUSD<->ICP, _icpswapEnabled=${_icpswapEnabled}`);
-    // Option A: direct via ICPswap icUSD/ICP. Skipped entirely when the
-    // kill switch is off — there is no Rumi-hosted icUSD/ICP pool, so with
-    // ICPswap disabled the router always falls through to the 2-hop path.
+    if (AMM1_ROUTING_PAUSED) {
+      if (!_icpswapEnabled) throw noRouteWhileAmm1Paused();
+      try {
+        const directQuote = await _icUsdIcpRegistry.bestQuote(from, to, amountIn);
+        return {
+          type: 'icusd_icp_direct',
+          pathDisplay: directQuote.label,
+          hops: 1,
+          estimatedOutput: await netOfOutputLedgerFee(directQuote.amountOut, to),
+          grossOutput: directQuote.amountOut,
+          feeDisplay: directQuote.feeDisplay,
+          providerQuote: directQuote,
+        };
+      } catch {
+        throw noRouteWhileAmm1Paused();
+      }
+    }
+
+    // Option A: direct via ICPswap icUSD/ICP.
     let directQuote: ProviderQuote | null = null;
     if (_icpswapEnabled) {
       try {
@@ -334,6 +382,30 @@ export async function resolveRoute(
 
   // Case 5: Stablecoin -> ICP (two-hop: 3pool deposit + best 3USD->ICP swap)
   if (isStablecoin(from) && isICP(to)) {
+    if (AMM1_ROUTING_PAUSED) {
+      if (!_icpswapEnabled) throw noRouteWhileAmm1Paused();
+      const icUsdToken = AMM_TOKENS.find(t => t.symbol === 'icUSD');
+      if (!icUsdToken) throw new Error('icUSD token configuration is missing');
+
+      const threePoolQuote = await threePoolService.quoteSwap(from.threePoolIndex, icUsdToken.threePoolIndex, amountIn);
+      const icUsdReceived = await netOfOutputLedgerFee(threePoolQuote.amount_out, icUsdToken);
+      try {
+        const hopQuote = await _icUsdIcpRegistry.bestQuote(icUsdToken, to, icUsdReceived);
+        return {
+          type: 'stable_to_icp_via_icusd',
+          pathDisplay: `${from.symbol} → icUSD → ICP`,
+          hops: 2,
+          estimatedOutput: await netOfOutputLedgerFee(hopQuote.amountOut, to),
+          grossOutput: hopQuote.amountOut,
+          feeDisplay: `3pool ${threePoolFeeDisplay(threePoolQuote.fee_bps, threePoolQuote.is_rebalancing)} + ICPswap ${hopQuote.feeDisplay}`,
+          intermediateOutput: icUsdReceived,
+          hopProviderQuote: hopQuote,
+        };
+      } catch {
+        throw noRouteWhileAmm1Paused();
+      }
+    }
+
     const amounts = [0n, 0n, 0n];
     amounts[from.threePoolIndex] = amountIn;
     const threeUsdOut = await threePoolService.calcAddLiquidity(amounts);
@@ -356,6 +428,30 @@ export async function resolveRoute(
 
   // Case 6: ICP -> Stablecoin (two-hop: best ICP->3USD swap + 3pool redeem)
   if (isICP(from) && isStablecoin(to)) {
+    if (AMM1_ROUTING_PAUSED) {
+      if (!_icpswapEnabled) throw noRouteWhileAmm1Paused();
+      const icUsdToken = AMM_TOKENS.find(t => t.symbol === 'icUSD');
+      if (!icUsdToken) throw new Error('icUSD token configuration is missing');
+
+      try {
+        const hopQuote = await _icUsdIcpRegistry.bestQuote(from, icUsdToken, amountIn);
+        const icUsdReceived = await netOfOutputLedgerFee(hopQuote.amountOut, icUsdToken);
+        const threePoolQuote = await threePoolService.quoteSwap(icUsdToken.threePoolIndex, to.threePoolIndex, icUsdReceived);
+        return {
+          type: 'icp_to_stable_via_icusd',
+          pathDisplay: `ICP → icUSD → ${to.symbol}`,
+          hops: 2,
+          estimatedOutput: await netOfOutputLedgerFee(threePoolQuote.amount_out, to),
+          grossOutput: threePoolQuote.amount_out,
+          feeDisplay: `ICPswap ${hopQuote.feeDisplay} + 3pool ${threePoolFeeDisplay(threePoolQuote.fee_bps, threePoolQuote.is_rebalancing)}`,
+          intermediateOutput: icUsdReceived,
+          hopProviderQuote: hopQuote,
+        };
+      } catch {
+        throw noRouteWhileAmm1Paused();
+      }
+    }
+
     const threeUsdToken = AMM_TOKENS.find(t => t.is3USD)!;
     const hopQuote = await threeUsdIcpRegistry().bestQuote(from, threeUsdToken, amountIn);
 
@@ -410,6 +506,13 @@ export async function executeRoute(
       throw new Error(
         'ICPswap routing is currently disabled. Please refresh the quote and try again.',
       );
+    }
+  }
+
+  if (AMM1_ROUTING_PAUSED) {
+    const winner = route.providerQuote?.provider ?? route.hopProviderQuote?.provider;
+    if (winner === 'rumi_amm' || route.type === 'stable_to_icp' || route.type === 'icp_to_stable') {
+      throw new Error('AMM1 routing is currently paused. Please refresh the quote and try again.');
     }
   }
 
@@ -555,6 +658,58 @@ export async function executeRoute(
       const stableNetEstimate = await netOfOutputLedgerFee(stableEstimate, to);
       const stableMinOutput = stableNetEstimate * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
       return await threePoolService.removeOneCoin(threeUsdReceived, to.threePoolIndex, stableMinOutput);
+    }
+
+    case 'stable_to_icp_via_icusd': {
+      if (isOisyWallet()) {
+        return await executeStableToIcpViaIcUsdOisy(route, from, amountIn, slippageBps);
+      }
+      const hopQuote = route.hopProviderQuote;
+      const icUsdToken = AMM_TOKENS.find(t => t.symbol === 'icUSD');
+      if (!hopQuote) throw new Error('stable_to_icp_via_icusd route missing hopProviderQuote');
+      if (!icUsdToken) throw new Error('icUSD token configuration is missing');
+
+      const firstQuote = await threePoolService.quoteSwap(from.threePoolIndex, icUsdToken.threePoolIndex, amountIn);
+      const icUsdMinOutput = (await netOfOutputLedgerFee(firstQuote.amount_out, icUsdToken))
+        * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
+      const icUsdReceived = await threePoolService.swap(
+        from.threePoolIndex, icUsdToken.threePoolIndex, amountIn, icUsdMinOutput,
+      );
+
+      const provider = _icUsdIcpRegistry.get(hopQuote.provider);
+      const freshQuote = await provider.quote(icUsdToken, to, icUsdReceived);
+      const poolCanisterId = freshQuote.meta.poolCanisterId as string | undefined;
+      if (typeof poolCanisterId !== 'string') {
+        throw new Error('stable_to_icp_via_icusd: ICPswap quote missing meta.poolCanisterId');
+      }
+      await approveIcpswapPool(icUsdToken, icUsdReceived, poolCanisterId);
+      const grossMinOutput = freshQuote.amountOut * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
+      const result = await provider.swap(icUsdToken, to, icUsdReceived, grossMinOutput, freshQuote);
+      return result.amountOut;
+    }
+
+    case 'icp_to_stable_via_icusd': {
+      if (isOisyWallet()) {
+        return await executeIcpToStableViaIcUsdOisy(route, from, to, amountIn, slippageBps);
+      }
+      const hopQuote = route.hopProviderQuote;
+      const icUsdToken = AMM_TOKENS.find(t => t.symbol === 'icUSD');
+      if (!hopQuote) throw new Error('icp_to_stable_via_icusd route missing hopProviderQuote');
+      if (!icUsdToken) throw new Error('icUSD token configuration is missing');
+
+      const poolCanisterId = hopQuote.meta.poolCanisterId as string | undefined;
+      if (typeof poolCanisterId !== 'string') {
+        throw new Error('icp_to_stable_via_icusd: ICPswap quote missing meta.poolCanisterId');
+      }
+      await approveIcpswapPool(from, amountIn, poolCanisterId);
+      const provider = _icUsdIcpRegistry.get(hopQuote.provider);
+      const icUsdGrossMinOutput = hopQuote.amountOut * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
+      const hop1 = await provider.swap(from, icUsdToken, amountIn, icUsdGrossMinOutput, hopQuote);
+
+      const finalQuote = await threePoolService.quoteSwap(icUsdToken.threePoolIndex, to.threePoolIndex, hop1.amountOut);
+      const finalMinOutput = (await netOfOutputLedgerFee(finalQuote.amount_out, to))
+        * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
+      return await threePoolService.swap(icUsdToken.threePoolIndex, to.threePoolIndex, hop1.amountOut, finalMinOutput);
     }
 
     case 'icusd_icp_direct': {
@@ -1034,6 +1189,159 @@ async function executeIcpToStableOisyIcpswap(
   const r5 = await poolActor.remove_one_coin(threeUsdMinFromSwap, to.threePoolIndex, stableMinOutput);
   if ('Err' in r5) throw new Error(`3pool redeem failed: ${JSON.stringify(r5.Err)}`);
   return r5.Ok;
+}
+
+/**
+ * Stablecoin → ICP through the paused-AMM-safe bridge:
+ * stablecoin → icUSD in the 3pool, then icUSD → ICP on ICPswap.
+ *
+ * This is intentionally an explicit Oisy sequence instead of chaining the
+ * two service helpers: both steps need the same signer and the icUSD amount
+ * returned by the first swap must be the input to the ICPswap deposit.
+ */
+async function executeStableToIcpViaIcUsdOisy(
+  route: SwapRoute,
+  from: AmmToken,
+  amountIn: bigint,
+  slippageBps: number,
+): Promise<bigint> {
+  const wallet = get(walletStore);
+  if (!wallet.principal) throw new Error('Wallet not connected');
+
+  const hopQuote = route.hopProviderQuote;
+  const icUsdToken = AMM_TOKENS.find(t => t.symbol === 'icUSD');
+  if (!hopQuote) throw new Error('stable_to_icp_via_icusd Oisy route missing hopProviderQuote');
+  if (!icUsdToken) throw new Error('icUSD token configuration is missing');
+
+  const icpswapPoolId = hopQuote.meta.poolCanisterId as string | undefined;
+  const zeroForOne = hopQuote.meta.zeroForOne;
+  if (typeof icpswapPoolId !== 'string' || typeof zeroForOne !== 'boolean') {
+    throw new Error('stable_to_icp_via_icusd Oisy route has invalid ICPswap metadata');
+  }
+
+  const icUsdEstimate = route.intermediateOutput;
+  if (icUsdEstimate === undefined) {
+    throw new Error('stable_to_icp_via_icusd Oisy route missing intermediateOutput');
+  }
+  const icUsdMinOutput = icUsdEstimate * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
+  const icpGrossMinOutput = route.grossOutput * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
+  const fromFee = tokenFeeCached(from);
+  const icUsdFee = tokenFeeCached(icUsdToken);
+  const icpToken = AMM_TOKENS.find(t => t.symbol === 'ICP')!;
+  const icpFee = tokenFeeCached(icpToken);
+
+  console.log('[Oisy] Sequential stable→icUSD→ICP route (3pool + ICPswap)');
+  const signerAgent = await getOisySignerAgent(wallet.principal);
+  const fromLedger = createOisyActor(from.ledgerId, CONFIG.icusd_ledgerIDL, signerAgent);
+  const icUsdLedger = createOisyActor(icUsdToken.ledgerId, CONFIG.icusd_ledgerIDL, signerAgent);
+  const threePoolActor = createOisyActor(THREEPOOL_ID, canisterIDLs.three_pool, signerAgent);
+  const icpswapPool = createOisyActor(icpswapPoolId, canisterIDLs.icpswap_pool, signerAgent);
+
+  const r1 = await fromLedger.icrc2_approve({
+    amount: amountIn + fromFee * 2n,
+    spender: { owner: Principal.fromText(THREEPOOL_ID), subaccount: [] },
+    expires_at: [], expected_allowance: [], memo: [], fee: [],
+    from_subaccount: [], created_at_time: [],
+  });
+  if (r1 && 'Err' in r1) throw new Error(`${from.symbol} approval failed: ${JSON.stringify(r1.Err)}`);
+
+  const r2 = await threePoolActor.swap(from.threePoolIndex, icUsdToken.threePoolIndex, amountIn, icUsdMinOutput);
+  if ('Err' in r2) throw new Error(`3pool swap failed: ${JSON.stringify(r2.Err)}`);
+  const icUsdReceived = r2.Ok;
+
+  const r3 = await icUsdLedger.icrc2_approve({
+    amount: icUsdReceived + icUsdFee * 2n,
+    spender: { owner: Principal.fromText(icpswapPoolId), subaccount: [] },
+    expires_at: [], expected_allowance: [], memo: [], fee: [],
+    from_subaccount: [], created_at_time: [],
+  });
+  if (r3 && 'Err' in r3) throw new Error(`icUSD approval failed: ${JSON.stringify(r3.Err)}`);
+
+  const r4 = await icpswapPool.depositFrom({ token: icUsdToken.ledgerId, amount: icUsdReceived, fee: icUsdFee });
+  if ('err' in r4) throw new Error(`ICPswap depositFrom failed: ${JSON.stringify(r4.err)}`);
+
+  const r5 = await icpswapPool.swap({
+    amountIn: icUsdReceived.toString(),
+    zeroForOne,
+    amountOutMinimum: icpGrossMinOutput.toString(),
+  });
+  if ('err' in r5) throw new Error(`ICPswap swap failed: ${JSON.stringify(r5.err)}`);
+
+  const r6 = await icpswapPool.withdraw({ token: ICP_LEDGER_ID, amount: icpGrossMinOutput, fee: icpFee });
+  if ('err' in r6) throw new Error(`ICPswap withdraw failed: ${JSON.stringify(r6.err)}`);
+  return (r6 as { ok: bigint }).ok;
+}
+
+/**
+ * ICP → Stablecoin through the paused-AMM-safe bridge:
+ * ICP → icUSD on ICPswap, then icUSD → the target stablecoin in the 3pool.
+ */
+async function executeIcpToStableViaIcUsdOisy(
+  route: SwapRoute,
+  from: AmmToken,
+  to: AmmToken,
+  amountIn: bigint,
+  slippageBps: number,
+): Promise<bigint> {
+  const wallet = get(walletStore);
+  if (!wallet.principal) throw new Error('Wallet not connected');
+
+  const hopQuote = route.hopProviderQuote;
+  const icUsdToken = AMM_TOKENS.find(t => t.symbol === 'icUSD');
+  if (!hopQuote) throw new Error('icp_to_stable_via_icusd Oisy route missing hopProviderQuote');
+  if (!icUsdToken) throw new Error('icUSD token configuration is missing');
+
+  const icpswapPoolId = hopQuote.meta.poolCanisterId as string | undefined;
+  const zeroForOne = hopQuote.meta.zeroForOne;
+  if (typeof icpswapPoolId !== 'string' || typeof zeroForOne !== 'boolean') {
+    throw new Error('icp_to_stable_via_icusd Oisy route has invalid ICPswap metadata');
+  }
+
+  const icUsdGrossMinOutput = hopQuote.amountOut * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
+  const stableMinOutput = route.estimatedOutput * BigInt(10000 - Math.ceil(slippageBps / 2)) / 10000n;
+  const fromFee = tokenFeeCached(from);
+  const icUsdFee = tokenFeeCached(icUsdToken);
+
+  console.log('[Oisy] Sequential ICP→icUSD→stable route (ICPswap + 3pool)');
+  const signerAgent = await getOisySignerAgent(wallet.principal);
+  const fromLedger = createOisyActor(from.ledgerId, CONFIG.icusd_ledgerIDL, signerAgent);
+  const icUsdLedger = createOisyActor(icUsdToken.ledgerId, CONFIG.icusd_ledgerIDL, signerAgent);
+  const icpswapPool = createOisyActor(icpswapPoolId, canisterIDLs.icpswap_pool, signerAgent);
+  const threePoolActor = createOisyActor(THREEPOOL_ID, canisterIDLs.three_pool, signerAgent);
+
+  const r1 = await fromLedger.icrc2_approve({
+    amount: amountIn + fromFee * 2n,
+    spender: { owner: Principal.fromText(icpswapPoolId), subaccount: [] },
+    expires_at: [], expected_allowance: [], memo: [], fee: [],
+    from_subaccount: [], created_at_time: [],
+  });
+  if (r1 && 'Err' in r1) throw new Error(`${from.symbol} approval failed: ${JSON.stringify(r1.Err)}`);
+
+  const r2 = await icpswapPool.depositFrom({ token: from.ledgerId, amount: amountIn, fee: fromFee });
+  if ('err' in r2) throw new Error(`ICPswap depositFrom failed: ${JSON.stringify(r2.err)}`);
+
+  const r3 = await icpswapPool.swap({
+    amountIn: amountIn.toString(),
+    zeroForOne,
+    amountOutMinimum: icUsdGrossMinOutput.toString(),
+  });
+  if ('err' in r3) throw new Error(`ICPswap swap failed: ${JSON.stringify(r3.err)}`);
+
+  const r4 = await icpswapPool.withdraw({ token: icUsdToken.ledgerId, amount: icUsdGrossMinOutput, fee: icUsdFee });
+  if ('err' in r4) throw new Error(`ICPswap withdraw failed: ${JSON.stringify(r4.err)}`);
+  const icUsdReceived = (r4 as { ok: bigint }).ok;
+
+  const r5 = await icUsdLedger.icrc2_approve({
+    amount: icUsdReceived + icUsdFee * 2n,
+    spender: { owner: Principal.fromText(THREEPOOL_ID), subaccount: [] },
+    expires_at: [], expected_allowance: [], memo: [], fee: [],
+    from_subaccount: [], created_at_time: [],
+  });
+  if (r5 && 'Err' in r5) throw new Error(`icUSD approval failed: ${JSON.stringify(r5.Err)}`);
+
+  const r6 = await threePoolActor.swap(icUsdToken.threePoolIndex, to.threePoolIndex, icUsdReceived, stableMinOutput);
+  if ('Err' in r6) throw new Error(`3pool swap failed: ${JSON.stringify(r6.Err)}`);
+  return r6.Ok;
 }
 
 /**

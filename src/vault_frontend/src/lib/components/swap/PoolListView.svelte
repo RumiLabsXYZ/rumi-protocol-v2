@@ -7,12 +7,6 @@
     formatTokenAmount,
   } from '../../services/threePoolService';
   import { ammService, type PoolInfo } from '../../services/ammService';
-  import {
-    getAmm1Apy,
-    computeAmm1EffectiveApy,
-    AMM1_THREEUSD_VALUE_SHARE,
-    type Amm1ApyResult,
-  } from '../../services/amm1ApyService';
   import { getThreePoolApy } from '../../services/threePoolApyService';
   import { CANISTER_IDS } from '../../config';
   import type { PoolStatus } from '../../services/threePoolService';
@@ -29,16 +23,7 @@
   let threePoolApyPct: number | null = null;
   let threePoolInterestAprPct = 0;
   let threePoolSwapFeeAprPct = 0;
-  let ammApy: Amm1ApyResult | null = null;
   let showThreePoolTooltip = false;
-  let showAmmTooltip = false;
-
-  // Effective AMM1 APY = AMM1's own APY + 50% × 3pool APY (pass-through on
-  // the 3USD half of the reserve). Null until both pools' APYs resolve.
-  $: ammEffective =
-    ammApy !== null && threePoolApyPct !== null
-      ? computeAmm1EffectiveApy(ammApy, threePoolApyPct)
-      : null;
 
   $: isConnected = $walletStore.isConnected;
 
@@ -75,9 +60,6 @@
 
       // APY queries fire in parallel; never block the cards on them
       loadThreePoolApy().catch(e => console.warn('3pool APY failed:', e));
-      if (ammPool) {
-        loadAmmApy().catch(e => console.warn('AMM1 APY failed:', e));
-      }
     } catch (e) {
       console.error('Failed to load pool data:', e);
     } finally {
@@ -90,10 +72,6 @@
     threePoolInterestAprPct = r.interest_apr_pct;
     threePoolSwapFeeAprPct = r.swap_fee_apr_pct;
     threePoolApyPct = r.total_apy_pct;
-  }
-
-  async function loadAmmApy() {
-    ammApy = await getAmm1Apy();
   }
 
   function threePoolTvl(): string {
@@ -181,7 +159,14 @@
     </button>
 
     {#if ammPool}
-      <button class="pool-card" on:click={() => selectPool('amm')}>
+      <button
+        class="pool-card pool-card-paused"
+        disabled={!isConnected || userAmmLp === 0n}
+        aria-label={userAmmLp > 0n
+          ? 'Manage your paused 3USD / ICP liquidity position'
+          : '3USD / ICP liquidity is temporarily paused'}
+        on:click={() => selectPool('amm')}
+      >
         <div class="pool-header">
           <div class="pool-pair">
             <div class="pool-dots">
@@ -190,37 +175,7 @@
             </div>
             <span class="pool-name">3USD / ICP</span>
           </div>
-          <!-- svelte-ignore a11y-mouse-events-have-key-events -->
-          <div
-            class="apy-badge"
-            on:mouseover|stopPropagation={() => { showAmmTooltip = true; }}
-            on:mouseleave={() => { showAmmTooltip = false; }}
-          >
-            {#if ammApy === null || ammEffective === null}
-              <span class="apy-loading">… APY</span>
-            {:else}
-              <svg class="apy-arrow" width="9" height="9" viewBox="0 0 10 10" fill="none">
-                <path d="M5 8V2M5 2L2 5M5 2L8 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-              {ammEffective.total_apy_pct.toFixed(1)}% APY
-            {/if}
-
-            {#if showAmmTooltip && ammApy !== null && ammEffective !== null}
-              <div class="apy-tooltip">
-                <div class="apy-tooltip-caret"></div>
-                <p>
-                  Rewards {ammApy.reward_apy_pct.toFixed(2)}% + Swap fees {ammApy.trading_fee_apy_pct.toFixed(2)}%
-                  + 3USD yield {ammEffective.passthrough_3pool_apy_pct.toFixed(2)}%
-                  = total {ammEffective.total_apy_pct.toFixed(2)}%
-                </p>
-                <p class="apy-tooltip-foot">
-                  3USD yield is {(AMM1_THREEUSD_VALUE_SHARE * 100).toFixed(0)}% of 3pool APY
-                  ({threePoolApyPct !== null ? threePoolApyPct.toFixed(2) : '—'}%) since
-                  the pool holds ~half its value in 3USD.
-                </p>
-              </div>
-            {/if}
-          </div>
+          <span class="pool-paused-badge">Paused</span>
         </div>
         <div class="pool-stats">
           <div class="pool-stat">
@@ -238,7 +193,9 @@
             </div>
           {/if}
         </div>
-        <div class="pool-action">Add Liquidity →</div>
+        <div class="pool-action">
+          {userAmmLp > 0n ? 'Manage position →' : 'Liquidity temporarily paused'}
+        </div>
       </button>
     {:else}
       <div class="pool-card pool-card-empty">
@@ -248,10 +205,8 @@
     {/if}
 
     <p class="liquidity-explainer">
-      To capture the full combined yield, supply stablecoins (icUSD, ckUSDT, or ckUSDC)
-      to the 3pool — you receive 3USD in return. Pair that 3USD with ICP in 3USD/ICP
-      for a second layer of rewards. Both positions earn protocol interest and swap fees
-      independently.
+      Supply stablecoins (icUSD, ckUSDT, or ckUSDC) to the 3pool to receive 3USD and
+      earn the pool's protocol-interest and swap-fee yield.
     </p>
   </div>
 {/if}
@@ -301,6 +256,25 @@
     box-shadow: none;
   }
 
+  .pool-card-paused {
+    cursor: not-allowed;
+    opacity: 0.45;
+    filter: grayscale(1);
+  }
+
+  .pool-card-paused:hover {
+    border-color: var(--rumi-border);
+    box-shadow: none;
+  }
+
+  .pool-card-paused:not(:disabled) {
+    cursor: pointer;
+  }
+
+  .pool-card-paused .pool-action {
+    color: var(--rumi-text-muted);
+  }
+
   .pool-header {
     display: flex;
     align-items: center;
@@ -341,6 +315,16 @@
   .pool-empty-text {
     font-size: 0.8125rem;
     color: var(--rumi-text-muted);
+  }
+
+  .pool-paused-badge {
+    padding: 0.1875rem 0.625rem;
+    border: 1px solid var(--rumi-border);
+    border-radius: 1rem;
+    color: var(--rumi-text-muted);
+    font-size: 0.75rem;
+    font-weight: 600;
+    white-space: nowrap;
   }
 
   .pool-stats {
@@ -440,14 +424,6 @@
   }
 
   .apy-tooltip p { margin: 0; }
-
-  .apy-tooltip-foot {
-    margin-top: 0.375rem !important;
-    padding-top: 0.375rem;
-    border-top: 1px solid rgba(255, 255, 255, 0.06);
-    color: #94a3b8;
-    font-size: 0.625rem;
-  }
 
   /* ── Explainer under the cards ── */
   .liquidity-explainer {

@@ -6,42 +6,22 @@
   import PoolListView from '../../lib/components/swap/PoolListView.svelte';
   import AmmLiquidityPanel from '../../lib/components/swap/AmmLiquidityPanel.svelte';
   import LiquidityInterface from '../../lib/components/swap/LiquidityInterface.svelte';
-  import { getAmm1Apy, combinedBestLpApyPct } from '../../lib/services/amm1ApyService';
   import { getThreePoolApy } from '../../lib/services/threePoolApyService';
 
   let mode: 'swap' | 'liquidity' = 'swap';
   let liquidityView: 'list' | 'threepool' | 'amm' = 'list';
 
-  // APY state for the combined hero. Each null while loading.
+  // The 3USD/ICP AMM is temporarily paused, so the liquidity hero reflects
+  // the active 3pool opportunity only.
   let threePoolApyPct: number | null = null;
-  let ammApyPct: number | null = null;
-
-  // "Earn up to" is the best per-dollar yield available, not a weighted
-  // blend of the two pools. Capital can only be in one position at a time,
-  // and the AMM1 LP path stacks 3pool yield on its 3USD half:
-  //   amm1Effective = amm1Apy + 0.5 * threePoolApy
-  // The advertised number is whichever of the two paths wins per dollar.
-  // `combinedBestLpApyPct` is the shared source of truth (also used by the
-  // Explorer "LP APY" vital) so the two surfaces never disagree.
-  $: combinedApy =
-    threePoolApyPct !== null && ammApyPct !== null
-      ? combinedBestLpApyPct(threePoolApyPct, ammApyPct)
-      : null;
 
   onMount(() => {
-    // Fire both APY loaders in parallel; never block the page render
     loadThreePoolApy().catch(e => console.warn('3pool APY (swap hero) failed:', e));
-    loadAmmApy().catch(e => console.warn('AMM1 APY (swap hero) failed:', e));
   });
 
   async function loadThreePoolApy() {
     const r = await getThreePoolApy();
     threePoolApyPct = r.total_apy_pct;
-  }
-
-  async function loadAmmApy() {
-    const r = await getAmm1Apy();
-    ammApyPct = r.total_apy_pct;
   }
 
   function handleSuccess() {
@@ -75,9 +55,9 @@
     <h1 class="page-title">{mode === 'swap' ? 'Swap' : 'Liquidity'}</h1>
   </div>
 
-  {#if combinedApy !== null && mode === 'swap'}
+  {#if threePoolApyPct !== null && mode === 'swap'}
     <div class="earn-banner">
-      <span class="earn-label">Earn up to {combinedApy.toFixed(2)}% APY</span>
+      <span class="earn-label">Earn {threePoolApyPct.toFixed(2)}% APY in 3pool</span>
       <button on:click={switchToLiquidityTab} class="earn-cta">Provide liquidity →</button>
     </div>
   {/if}
@@ -97,7 +77,7 @@
           <LiquidityInterface on:success={handleSuccess} />
         </div>
       {:else if liquidityView === 'amm'}
-        <AmmLiquidityPanel on:success={handleSuccess} on:back={handleBack} />
+        <AmmLiquidityPanel depositsPaused on:success={handleSuccess} on:back={handleBack} />
       {/if}
     </div>
   </div>

@@ -5,7 +5,7 @@
   import {
     resolveRoute, executeRoute, preWarmOisySigner, preWarmOisyFees,
     checkIcpswapUnusedBalances, recoverIcpswapBalance, preWarmRecovery,
-    type SwapRoute, type IcpswapUnusedBalance,
+    AMM1_ROUTING_PAUSED, type SwapRoute, type IcpswapUnusedBalance,
   } from '../../services/swapRouter';
   import { fetchLedgerFee, getCachedLedgerFee } from '../../services/ledgerFeeService';
   import { CANISTER_IDS } from '../../config';
@@ -17,13 +17,17 @@
   import { TokenService } from '../../services/tokenService';
   import { get } from 'svelte/store';
 
+  // The 3USD/ICP market is temporarily paused. Keep 3USD in AMM_TOKENS for
+  // balances and liquidity-position handling, but do not offer it in swaps.
+  const SWAP_TOKENS = AMM_TOKENS.filter((token) => !AMM1_ROUTING_PAUSED || !token.is3USD);
+
   function ammTokenRef(token: AmmToken) {
     return { ledgerId: token.ledgerId, decimals: token.decimals, symbol: token.symbol };
   }
 
   const dispatch = createEventDispatcher();
 
-  let fromIdx = 0; // Index into AMM_TOKENS
+  let fromIdx = 0; // Index into SWAP_TOKENS
   let toIdx = 1;
   let amount = '';
   let loading = false;
@@ -58,8 +62,8 @@
   let beforeToBalanceSnapshot: bigint | null = null;
 
   $: isConnected = $walletStore.isConnected;
-  $: fromToken = AMM_TOKENS[fromIdx];
-  $: toToken = AMM_TOKENS[toIdx];
+  $: fromToken = SWAP_TOKENS[fromIdx];
+  $: toToken = SWAP_TOKENS[toIdx];
 
   // Wallet balance for "from" token
   $: walletBalance = (() => {
@@ -468,7 +472,7 @@
 
       {#if showFromDropdown}
         <div class="token-dropdown" on:click|stopPropagation>
-          {#each AMM_TOKENS as token, i}
+          {#each SWAP_TOKENS as token, i}
             <button class="token-option" class:token-option-active={fromIdx === i}
               on:click={() => selectFrom(i)}>
               <span class="token-dot" style="background:{token.color}"></span>
@@ -514,7 +518,7 @@
 
       {#if showToDropdown}
         <div class="token-dropdown" on:click|stopPropagation>
-          {#each AMM_TOKENS as token, i}
+          {#each SWAP_TOKENS as token, i}
             <button class="token-option" class:token-option-active={toIdx === i}
               on:click={() => selectTo(i)}>
               <span class="token-dot" style="background:{token.color}"></span>
