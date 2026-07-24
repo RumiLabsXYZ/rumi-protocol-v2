@@ -7,6 +7,8 @@ export default defineConfig({
   resolve: {
     alias: {
       '$declarations': path.resolve(__dirname, '../../declarations'),
+      '$lib': path.resolve(__dirname, 'src/lib'),
+      '$app/environment': path.resolve(__dirname, 'src/tests/mocks/app-environment.ts'),
     },
   },
   test: {
