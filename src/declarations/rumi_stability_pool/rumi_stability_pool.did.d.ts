@@ -171,6 +171,14 @@ export interface IcrcAccount {
   'owner' : Principal,
   'subaccount' : [] | [Uint8Array | number[]],
 }
+export interface LedgerReconciliationEntry {
+  'healthy' : boolean,
+  'ledger' : Principal,
+  'live_e8s' : bigint,
+  'recorded_e8s' : bigint,
+  'symbol' : string,
+  'delta_e8s' : bigint,
+}
 export interface LiquidatableVaultInfo {
   'collateral_amount' : bigint,
   'debt_amount' : bigint,
@@ -427,6 +435,11 @@ export interface _SERVICE {
   'get_completed_chain_absorbs' : ActorMethod<
     [[] | [bigint]],
     Array<ChainSpAbsorbCompletion>
+  >,
+  'get_ledger_reconciliation' : ActorMethod<
+    [],
+    { 'Ok' : Array<LedgerReconciliationEntry> } |
+      { 'Err' : StabilityPoolError }
   >,
   'get_liquidation_history' : ActorMethod<
     [[] | [bigint]],

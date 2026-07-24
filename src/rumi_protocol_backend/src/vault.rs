@@ -2317,13 +2317,14 @@ pub fn vault_is_native_sol(vault_id: u64) -> bool {
 /// per-asset error message) so it matches on `custody()` directly rather than
 /// calling this; this predicate is exercised by
 /// `sol_p2a_tests::vault_is_native_sol_and_vault_is_native_custody_are_scoped_to_sol_custody`
-/// and kept `pub(crate)` as the fail-closed building block for any future
-/// reject site that only needs the boolean (in this module or, per the
-/// native-SOL design doc §9, a later `main.rs` phase — the automated-
-/// liquidation entry points there still call `vault_is_native_xrp` directly
-/// and are unchanged in this phase, out of this file's scope).
-#[allow(dead_code)]
-pub(crate) fn vault_is_native_custody(vault_id: u64) -> bool {
+/// and kept `pub` (not `pub(crate)`) so the Phase 3 `main.rs` automated-
+/// liquidation entry points (`stability_pool_liquidate`,
+/// `stability_pool_liquidate_debt_burned`, `stability_pool_liquidate_with_reserves`,
+/// `bot_claim_liquidation` — main.rs is a SEPARATE crate from this lib target,
+/// so `pub(crate)` would not be visible there) can call it directly as the
+/// fail-closed building block for any future custody kind, instead of
+/// hardcoding `vault_is_native_xrp`.
+pub fn vault_is_native_custody(vault_id: u64) -> bool {
     read_state(|s| {
         s.vault_id_to_vaults
             .get(&vault_id)
@@ -3455,7 +3456,7 @@ pub fn quarantine_sol_claim_snapshot(
 /// clear the quarantine + settlement so the claimant can retry settle and be
 /// paid exactly once. Errors WITHOUT mutating if the claim is absent or not
 /// quarantined. `pub` for the Phase 3 `main.rs` endpoint
-/// (`admin_resolve_sol_claim`, taking `SolClaimResolution`).
+/// (`admin_resolve_sol_claim`, taking `NativeClaimResolution`).
 pub fn resolve_quarantined_sol_claim_snapshot(
     s: &mut crate::state::State,
     claim_id: u64,

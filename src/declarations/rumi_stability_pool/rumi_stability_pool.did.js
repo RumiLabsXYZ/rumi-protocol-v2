@@ -94,6 +94,14 @@ export const idlFactory = ({ IDL }) => {
     'completed_at_ns' : IDL.Nat64,
     'vault_id' : IDL.Nat64,
   });
+  const LedgerReconciliationEntry = IDL.Record({
+    'healthy' : IDL.Bool,
+    'ledger' : IDL.Principal,
+    'live_e8s' : IDL.Nat64,
+    'recorded_e8s' : IDL.Nat64,
+    'symbol' : IDL.Text,
+    'delta_e8s' : IDL.Int64,
+  });
   const PoolLiquidationRecord = IDL.Record({
     'collateral_price_e8s' : IDL.Opt(IDL.Nat64),
     'stables_consumed' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
@@ -486,6 +494,16 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Opt(IDL.Nat64)],
         [IDL.Vec(ChainSpAbsorbCompletion)],
         ['query'],
+      ),
+    'get_ledger_reconciliation' : IDL.Func(
+        [],
+        [
+          IDL.Variant({
+            'Ok' : IDL.Vec(LedgerReconciliationEntry),
+            'Err' : StabilityPoolError,
+          }),
+        ],
+        [],
       ),
     'get_liquidation_history' : IDL.Func(
         [IDL.Opt(IDL.Nat64)],

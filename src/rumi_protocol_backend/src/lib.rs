@@ -724,21 +724,30 @@ pub enum ProtocolError {
     EvmAuth(String),
 }
 
-/// SOL analogue of `main::XrpClaimResolution`, for a Phase 3 `main.rs`
-/// `admin_resolve_sol_claim(claim_id, resolution)` endpoint (mirrors
-/// `admin_resolve_xrp_claim`). Defined HERE rather than in `main.rs` — where
-/// `XrpClaimResolution` itself lives — because native-SOL collateral Phase 2b
-/// (docs/superpowers/specs/2026-07-24-native-sol-collateral-design.md) is
-/// scoped to `vault.rs`/`state.rs`/`chains::sol` only and does not touch
-/// `main.rs`; the vault-layer primitive this resolves into is
+/// Resolution action for a quarantined native-custody claim, shared by
+/// `admin_resolve_xrp_claim` and `admin_resolve_sol_claim`.
+///
+/// One type rather than a per-chain pair on purpose. The two are structurally
+/// identical (same two labels), so Candid deduplicates them in the exported
+/// `.did` regardless, and the exporter picks whichever name it sees first. That
+/// previously produced `admin_resolve_xrp_claim : (nat64, SolClaimResolution)`,
+/// which is wire-correct but actively misleading to an operator reading the
+/// public interface. A single neutral name is honest about what is actually on
+/// the wire. Renaming is not a breaking change: Candid is structural, so any
+/// existing caller passing `variant { ConfirmPaid }` is unaffected.
+///
+/// The admin first verifies OFF-ledger (against the custody account's live
+/// balance plus a chain explorer) whether the divergent payment actually
+/// delivered to the claimant, then applies one of these. The vault-layer
+/// primitives are `vault::resolve_quarantined_xrp_claim_snapshot` and
 /// `vault::resolve_quarantined_sol_claim_snapshot`.
 #[derive(CandidType, Deserialize, Clone, Debug)]
-pub enum SolClaimResolution {
-    /// The divergent settlement DID deliver — finalize by removing the claim
+pub enum NativeClaimResolution {
+    /// The divergent payment DID deliver — finalize by removing the claim
     /// (no re-pay).
     ConfirmPaid,
     /// It did NOT deliver — clear the quarantine + settlement so the claimant
-    /// can retry `settle_sol_claim` and be paid exactly once.
+    /// can retry settlement and be paid exactly once.
     ReleaseForRetry,
 }
 
