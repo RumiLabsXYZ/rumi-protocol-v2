@@ -1132,6 +1132,21 @@ impl CollateralConfig {
     pub fn is_native_sol(&self) -> bool {
         self.custody() == CustodyKind::NativeSol
     }
+
+    /// True iff this collateral is custodied by ANY non-ICRC rail (currently
+    /// `NativeXrp` or `NativeSol`). Deliberately written as `custody() !=
+    /// IcrcLedger` rather than an OR of the known native variants, so this is
+    /// FAIL-CLOSED: a future `CustodyKind` variant is automatically excluded
+    /// by every call site that reject-gates on this predicate (the ICRC
+    /// deposit/withdraw transfer paths, add-margin, automated-liquidation
+    /// exclusion, redemption-priority exclusion) without that call site
+    /// needing to be touched when the variant is added. Sites whose PAYOUT
+    /// ROUTING differs per custody kind should use an exhaustive `match
+    /// custody() { ... }` instead of this predicate, so the compiler forces a
+    /// decision for the new kind rather than silently misrouting it.
+    pub fn is_native_custody(&self) -> bool {
+        self.custody() != CustodyKind::IcrcLedger
+    }
 }
 
 fn default_redemption_tier() -> u8 {
@@ -3083,8 +3098,11 @@ impl State {
             // claims) is a focused follow-up; until it lands, exclude native-XRP
             // from redemption priority so redemption never seizes XRP collateral
             // (redeemers still redeem other collaterals; XRP simply isn't a target).
-            // Latent until P5 registers an XRP collateral.
-            if config.is_native_xrp() {
+            // Latent until P5 registers an XRP collateral. Native-SOL is excluded
+            // for the same reason (out of scope §13 of the native-SOL design doc);
+            // `is_native_custody()` (fail-closed on `custody() != IcrcLedger`) keeps
+            // this exclusion automatic for any future native-custody kind too.
+            if config.is_native_custody() {
                 continue;
             }
             // Verify price exists (needed for CR computation inside compute_collateral_ratio)
@@ -4292,9 +4310,13 @@ impl State {
                 // would strand the seized XRP (neither the SP nor the bot can settle
                 // an XrpClaim). External liquidators call liquidate_vault_partial /
                 // partial_liquidate_vault directly, where they become the claimant.
+                // Native-SOL is excluded for the identical reason (a SolClaim can only
+                // be settled by settle_sol_claim, which neither the SP nor the bot
+                // call); `is_native_custody()` keeps this exclusion automatic for any
+                // future native-custody kind too.
                 if self
                     .get_collateral_config(&vault.collateral_type)
-                    .map(|c| c.is_native_xrp())
+                    .map(|c| c.is_native_custody())
                     .unwrap_or(false)
                 {
                     continue;
@@ -7929,7 +7951,8 @@ mod tests {
         cfg.debt_ceiling = 20_000_000_000;
         cfg.status = CollateralStatus::Active;
         state.collateral_configs.insert(sol, cfg);
-        state.sol_schnorr_key_name = crate::chains::sol::config::SOL_TEST_SCHNORR_KEY_NAME.to_string();
+        state.sol_schnorr_key_name =
+            crate::chains::sol::config::SOL_TEST_SCHNORR_KEY_NAME.to_string();
 
         let migration = enforce_sol_launch_guardrails(&mut state);
         let migrated = state.collateral_configs.get(&sol).unwrap();

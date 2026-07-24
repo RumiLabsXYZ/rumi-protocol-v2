@@ -10,7 +10,7 @@ use crate::management::{
     transfer_stable_from,
 };
 use crate::numeric::{Ratio, UsdIcp, ICP, ICUSD};
-use crate::state::Mode;
+use crate::state::{CustodyKind, Mode};
 use crate::GuardError;
 use crate::PendingMarginTransfer;
 use crate::DEBUG;
@@ -817,27 +817,30 @@ pub async fn open_vault(
         collateral_type_opt.unwrap_or_else(|| read_state(|s| s.icp_collateral_type()));
 
     // Look up CollateralConfig; check status is Active
-    let (config_ledger, config_status, min_deposit, is_native_xrp) =
+    let (config_ledger, config_status, min_deposit, is_native_custody) =
         read_state(|s| match s.get_collateral_config(&collateral_type) {
             Some(config) => Ok((
                 config.ledger_canister_id,
                 config.status,
                 config.min_collateral_deposit,
-                config.is_native_xrp(),
+                config.is_native_custody(),
             )),
             None => Err(ProtocolError::GenericError(
                 "Collateral type not supported.".to_string(),
             )),
         })?;
 
-    // P2: native-XRP collateral is custodied on the XRP Ledger (chains::xrp), not
-    // pulled via an ICRC `transfer_from`. Its deposit flow (open-then-verify) is
-    // wired in P3; until then reject opens through this ICRC path so XRP collateral
-    // can never be silently mishandled as an ICRC token.
-    if is_native_xrp {
+    // P2 (extended for SOL): native custody collateral (XRP, SOL) is held on its
+    // own chain, not pulled via an ICRC `transfer_from`. Each has its own
+    // open-then-verify deposit flow (open_xrp_vault / open_sol_vault); reject
+    // opens through this ICRC path so native-custody collateral can never be
+    // silently mishandled as an ICRC token. `is_native_custody()` is fail-closed:
+    // a future custody kind is rejected here automatically.
+    if is_native_custody {
         guard_principal.fail();
         return Err(ProtocolError::GenericError(
-            "Native-XRP collateral uses the XRP deposit flow (not yet enabled).".to_string(),
+            "Native custody collateral uses its own deposit flow, not ICRC transfer_from."
+                .to_string(),
         ));
     }
 
@@ -1282,13 +1285,52 @@ pub(crate) fn record_xrp_claim(
     claim_id
 }
 
+/// SOL analogue of `record_xrp_claim`: record an unsettled native-SOL collateral
+/// claim and return its id. The OUT-paths (withdraw / liquidation) call this
+/// instead of an ICRC transfer when the collateral is native-SOL.
+/// `custody_owner`+`custody_nonce` (the source vault's owner + id) must
+/// reproduce the SAME `(owner, vault_id)` pair used at
+/// `chains::sol::ted25519::sol_custody_derivation_path` time, since
+/// `settle_sol_claim` (Phase 2b) re-derives the custody signing key from them
+/// rather than storing the address. Uses `s.next_sol_claim_id` / `s.sol_claims`
+/// — a SEPARATE id space from `record_xrp_claim`'s `next_xrp_claim_id` /
+/// `xrp_claims`, so XRP and SOL claim ids can collide numerically without
+/// colliding as claims (each is only ever looked up in its own map).
+pub(crate) fn record_sol_claim(
+    s: &mut crate::state::State,
+    claimant: Principal,
+    custody_owner: Principal,
+    custody_nonce: u64,
+    lamports: u64,
+    now_ns: u64,
+) -> u64 {
+    let claim_id = s.next_sol_claim_id;
+    s.next_sol_claim_id = s.next_sol_claim_id.wrapping_add(1);
+    s.sol_claims.insert(
+        claim_id,
+        crate::state::SolClaim {
+            claimant,
+            lamports,
+            custody_owner,
+            custody_nonce,
+            created_at_ns: now_ns,
+            settlement: None,
+            quarantine_reason: None,
+        },
+    );
+    claim_id
+}
+
 /// P4: queue a collateral payout to `recipient`. ICRC collateral -> a
-/// PendingMarginTransfer (the ICRC transfer machinery pays it). Native-XRP -> an
-/// XrpClaim instead (settled later via settle_xrp_claim from the vault's custody
-/// address); native-XRP therefore never enters the ICRC pending-transfer flow.
-/// `custody_owner` is the SOURCE vault's owner (its threshold key controls the
-/// custody address), captured while the vault is in hand — safe even when
-/// cleanup_if_drained removes the vault immediately after.
+/// PendingMarginTransfer (the ICRC transfer machinery pays it). Native custody
+/// (XRP, SOL) -> a claim instead (settled later via settle_xrp_claim /
+/// settle_sol_claim from the vault's custody address); native custody therefore
+/// never enters the ICRC pending-transfer flow. `custody_owner` is the SOURCE
+/// vault's owner (its threshold key controls the custody address), captured
+/// while the vault is in hand — safe even when cleanup_if_drained removes the
+/// vault immediately after. Exhaustive match on `custody()` (no wildcard arm):
+/// a future custody kind is a compile error here, not a silent fall-through
+/// into the ICRC pending-transfer path.
 fn queue_collateral_payout(
     s: &mut crate::state::State,
     vault_id: u64,
@@ -1299,31 +1341,100 @@ fn queue_collateral_payout(
     op_nonce: u128,
     now_ns: u64,
 ) -> Option<u64> {
-    let is_xrp = s
+    let custody = s
         .get_collateral_config(&collateral_type)
-        .map(|c| c.is_native_xrp())
-        .unwrap_or(false);
-    if is_xrp {
-        Some(record_xrp_claim(
+        .map(|c| c.custody())
+        .unwrap_or(CustodyKind::IcrcLedger);
+    match custody {
+        CustodyKind::NativeXrp => Some(record_xrp_claim(
             s,
             recipient,
             custody_owner,
             vault_id,
             margin.to_u64(),
             now_ns,
-        ))
-    } else {
-        s.pending_margin_transfers.insert(
-            (vault_id, recipient),
-            PendingMarginTransfer {
-                owner: recipient,
-                margin,
+        )),
+        CustodyKind::NativeSol => Some(record_sol_claim(
+            s,
+            recipient,
+            custody_owner,
+            vault_id,
+            margin.to_u64(),
+            now_ns,
+        )),
+        CustodyKind::IcrcLedger => {
+            s.pending_margin_transfers.insert(
+                (vault_id, recipient),
+                PendingMarginTransfer {
+                    owner: recipient,
+                    margin,
+                    collateral_type,
+                    retry_count: 0,
+                    op_nonce,
+                },
+            );
+            None
+        }
+    }
+}
+
+/// P5 (extended for SOL): route the protocol's liquidation-fee cut. ICRC
+/// collateral -> the treasury (ICRC transfer). Native custody (XRP, SOL) -> a
+/// developer-settleable claim, since the ICRC treasury transfer cannot target a
+/// synthetic native-custody ledger. Exhaustive match on `custody()`: a future
+/// custody kind is a compile error here, not a silent fall-through into the
+/// treasury ICRC path. Shared by every liquidation entry point that seizes a
+/// protocol cut (`liquidate_vault`, `liquidate_vault_partial`,
+/// `liquidate_vault_partial_with_stable`, `liquidate_vault_debt_already_burned`,
+/// `partial_liquidate_vault`) so the five previously-duplicated call sites stay
+/// byte-identical in behavior.
+///
+/// `vault_owner` / `vault_id` must be captured by the CALLER before this runs
+/// (from the pre-mutation vault snapshot), since the vault may already be
+/// drained/removed by `cleanup_if_drained` by the time this is called.
+async fn route_protocol_liquidation_fee(
+    protocol_cut: u64,
+    collateral_type: Principal,
+    vault_owner: Principal,
+    vault_id: u64,
+) {
+    if protocol_cut == 0 {
+        return;
+    }
+    let custody = read_state(|s| {
+        s.get_collateral_config(&collateral_type)
+            .map(|c| c.custody())
+            .unwrap_or(CustodyKind::IcrcLedger)
+    });
+    match custody {
+        CustodyKind::NativeXrp => {
+            // P5: native-XRP protocol fee -> a developer-settleable XrpClaim (the
+            // ICRC treasury transfer cannot target the synthetic XRP ledger).
+            // Keyed by collateral_type (not a vault lookup, since the vault may
+            // already be drained/removed by cleanup_if_drained above).
+            let dev = read_state(|s| s.developer_principal);
+            let now_ns = ic_cdk::api::time();
+            mutate_state(|s| {
+                record_xrp_claim(s, dev, vault_owner, vault_id, protocol_cut, now_ns);
+            });
+        }
+        CustodyKind::NativeSol => {
+            // SOL analogue: a developer-settleable SolClaim.
+            let dev = read_state(|s| s.developer_principal);
+            let now_ns = ic_cdk::api::time();
+            mutate_state(|s| {
+                record_sol_claim(s, dev, vault_owner, vault_id, protocol_cut, now_ns);
+            });
+        }
+        CustodyKind::IcrcLedger => {
+            let asset_type = crate::treasury::collateral_to_asset_type(&collateral_type);
+            crate::treasury::send_liquidation_fee_to_treasury(
+                protocol_cut,
                 collateral_type,
-                retry_count: 0,
-                op_nonce,
-            },
-        );
-        None
+                asset_type,
+            )
+            .await;
+        }
     }
 }
 
@@ -1537,10 +1648,7 @@ fn ensure_no_active_xrp_sp_absorb_preflight(
     Ok(())
 }
 
-fn reject_active_xrp_sp_absorb_preflight(
-    vault_id: u64,
-    now_ns: u64,
-) -> Result<(), ProtocolError> {
+fn reject_active_xrp_sp_absorb_preflight(vault_id: u64, now_ns: u64) -> Result<(), ProtocolError> {
     read_state(|s| ensure_no_active_xrp_sp_absorb_preflight(s, vault_id, now_ns))
 }
 
@@ -1900,6 +2008,44 @@ pub fn vault_is_native_xrp(vault_id: u64) -> bool {
             .get(&vault_id)
             .and_then(|v| s.get_collateral_config(&v.collateral_type))
             .map(|c| c.is_native_xrp())
+            .unwrap_or(false)
+    })
+}
+
+/// SOL analogue of `vault_is_native_xrp`: true iff `vault_id` is a native-SOL-
+/// collateral vault (custody on Solana mainnet-beta, threshold Ed25519). Such
+/// vaults are excluded from AUTOMATED liquidation for the identical reason XRP
+/// is: neither the SP nor the bot can settle a SolClaim, so native-SOL is
+/// liquidated only MANUALLY by an external liquidator, via the same entry
+/// points as native-XRP.
+pub fn vault_is_native_sol(vault_id: u64) -> bool {
+    read_state(|s| {
+        s.vault_id_to_vaults
+            .get(&vault_id)
+            .and_then(|v| s.get_collateral_config(&v.collateral_type))
+            .map(|c| c.is_native_sol())
+            .unwrap_or(false)
+    })
+}
+
+/// Fail-closed generalization of `vault_is_native_xrp` / `vault_is_native_sol`:
+/// true iff `vault_id` is custodied by ANY non-ICRC rail. The SP write-down
+/// defense-in-depth guard below needs the exact `CustodyKind` (to produce a
+/// per-asset error message) so it matches on `custody()` directly rather than
+/// calling this; this predicate is exercised by
+/// `sol_p2a_tests::vault_is_native_sol_and_vault_is_native_custody_are_scoped_to_sol_custody`
+/// and kept `pub(crate)` as the fail-closed building block for any future
+/// reject site that only needs the boolean (in this module or, per the
+/// native-SOL design doc §9, a later `main.rs` phase — the automated-
+/// liquidation entry points there still call `vault_is_native_xrp` directly
+/// and are unchanged in this phase, out of this file's scope).
+#[allow(dead_code)]
+pub(crate) fn vault_is_native_custody(vault_id: u64) -> bool {
+    read_state(|s| {
+        s.vault_id_to_vaults
+            .get(&vault_id)
+            .and_then(|v| s.get_collateral_config(&v.collateral_type))
+            .map(|c| c.is_native_custody())
             .unwrap_or(false)
     })
 }
@@ -2777,11 +2923,11 @@ mod xrp_p4_tests {
     #[test]
     fn native_xrp_withdraw_and_close_policy_preserves_custody_vault() {
         assert_eq!(
-            withdraw_close_completion_policy(true),
+            withdraw_close_completion_policy(CustodyKind::NativeXrp),
             WithdrawCloseCompletionPolicy::KeepNativeXrpVaultOpen
         );
         assert_eq!(
-            withdraw_close_completion_policy(false),
+            withdraw_close_completion_policy(CustodyKind::IcrcLedger),
             WithdrawCloseCompletionPolicy::CloseVault
         );
     }
@@ -3379,27 +3525,30 @@ pub async fn open_vault_and_borrow(
         collateral_type_opt.unwrap_or_else(|| read_state(|s| s.icp_collateral_type()));
 
     // Look up CollateralConfig; check status is Active
-    let (config_ledger, config_status, min_deposit, is_native_xrp) =
+    let (config_ledger, config_status, min_deposit, is_native_custody) =
         read_state(|s| match s.get_collateral_config(&collateral_type) {
             Some(config) => Ok((
                 config.ledger_canister_id,
                 config.status,
                 config.min_collateral_deposit,
-                config.is_native_xrp(),
+                config.is_native_custody(),
             )),
             None => Err(ProtocolError::GenericError(
                 "Collateral type not supported.".to_string(),
             )),
         })?;
 
-    // P2: native-XRP collateral is custodied on the XRP Ledger (chains::xrp), not
-    // pulled via an ICRC `transfer_from`. Its deposit flow (open-then-verify) is
-    // wired in P3; until then reject opens through this ICRC path so XRP collateral
-    // can never be silently mishandled as an ICRC token.
-    if is_native_xrp {
+    // P2 (extended for SOL): native custody collateral (XRP, SOL) is held on its
+    // own chain, not pulled via an ICRC `transfer_from`. Each has its own
+    // open-then-verify deposit flow (open_xrp_vault / open_sol_vault); reject
+    // opens through this ICRC path so native-custody collateral can never be
+    // silently mishandled as an ICRC token. `is_native_custody()` is fail-closed:
+    // a future custody kind is rejected here automatically.
+    if is_native_custody {
         guard_principal.fail();
         return Err(ProtocolError::GenericError(
-            "Native-XRP collateral uses the XRP deposit flow (not yet enabled).".to_string(),
+            "Native custody collateral uses its own deposit flow, not ICRC transfer_from."
+                .to_string(),
         ));
     }
 
@@ -4028,7 +4177,7 @@ pub async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
         return Err(e);
     }
 
-    let (vault, config_ledger, min_deposit, is_native_xrp) =
+    let (vault, config_ledger, min_deposit, is_native_custody) =
         match read_state(|s| match s.vault_id_to_vaults.get(&arg.vault_id) {
             Some(v) => {
                 let config = s
@@ -4038,7 +4187,7 @@ pub async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
                     v.clone(),
                     config.ledger_canister_id,
                     config.min_collateral_deposit,
-                    config.is_native_xrp(),
+                    config.is_native_custody(),
                 ))
             }
             None => Err("Vault not found"),
@@ -4050,13 +4199,16 @@ pub async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
             }
         };
 
-    // P2: native-XRP collateral is not custodied via ICRC; its add-collateral flow
-    // is wired with the XRP deposit path (P3). Reject so XRP collateral can never be
-    // pulled as an ICRC token. (Latent until P5 enables XRP registration.)
-    if is_native_xrp {
+    // P2 (extended for SOL): native custody collateral (XRP, SOL) is not custodied
+    // via ICRC; each has its own deposit path (open_xrp_vault / open_sol_vault),
+    // and design doc §4.2 explicitly excludes SOL from top-ups (no double-credit
+    // surface). Reject so native-custody collateral can never be pulled as an ICRC
+    // token. `is_native_custody()` is fail-closed for any future custody kind too.
+    if is_native_custody {
         guard_principal.fail();
         return Err(ProtocolError::GenericError(
-            "Native-XRP collateral uses the XRP deposit flow (not yet enabled).".to_string(),
+            "Native custody collateral uses its own deposit flow, not ICRC transfer_from."
+                .to_string(),
         ));
     }
 
@@ -4141,26 +4293,29 @@ pub async fn open_vault_with_deposit(
         collateral_type_opt.unwrap_or_else(|| read_state(|s| s.icp_collateral_type()));
 
     // Look up CollateralConfig
-    let (config_ledger, config_status, config_fee, min_deposit, is_native_xrp) =
+    let (config_ledger, config_status, config_fee, min_deposit, is_native_custody) =
         read_state(|s| match s.get_collateral_config(&collateral_type) {
             Some(config) => Ok((
                 config.ledger_canister_id,
                 config.status,
                 config.ledger_fee,
                 config.min_collateral_deposit,
-                config.is_native_xrp(),
+                config.is_native_custody(),
             )),
             None => Err(ProtocolError::GenericError(
                 "Collateral type not supported.".to_string(),
             )),
         })?;
 
-    // P2: native-XRP collateral is custodied on the XRP Ledger (chains::xrp), not
-    // swept from an ICRC deposit subaccount. Reject until the XRP deposit flow (P3).
-    if is_native_xrp {
+    // P2 (extended for SOL): native custody collateral (XRP, SOL) is held on its
+    // own chain, not swept from an ICRC deposit subaccount. Reject through this
+    // push-deposit path; `is_native_custody()` is fail-closed for any future
+    // custody kind too.
+    if is_native_custody {
         guard_principal.fail();
         return Err(ProtocolError::GenericError(
-            "Native-XRP collateral uses the XRP deposit flow (not yet enabled).".to_string(),
+            "Native custody collateral uses its own deposit flow, not ICRC transfer_from."
+                .to_string(),
         ));
     }
 
@@ -4278,7 +4433,7 @@ pub async fn add_margin_with_deposit(vault_id: u64) -> Result<u64, ProtocolError
         return Err(e);
     }
 
-    let (vault, config_ledger, config_fee, min_deposit, is_native_xrp) =
+    let (vault, config_ledger, config_fee, min_deposit, is_native_custody) =
         match read_state(|s| match s.vault_id_to_vaults.get(&vault_id) {
             Some(v) => {
                 let config = s
@@ -4289,7 +4444,7 @@ pub async fn add_margin_with_deposit(vault_id: u64) -> Result<u64, ProtocolError
                     config.ledger_canister_id,
                     config.ledger_fee,
                     config.min_collateral_deposit,
-                    config.is_native_xrp(),
+                    config.is_native_custody(),
                 ))
             }
             None => Err("Vault not found"),
@@ -4301,13 +4456,16 @@ pub async fn add_margin_with_deposit(vault_id: u64) -> Result<u64, ProtocolError
             }
         };
 
-    // P2: native-XRP collateral is not custodied via ICRC; its add-collateral flow
-    // is wired with the XRP deposit path (P3). Reject so XRP collateral can never be
-    // swept as an ICRC token. (Latent until P5 enables XRP registration.)
-    if is_native_xrp {
+    // P2 (extended for SOL): native custody collateral (XRP, SOL) is not custodied
+    // via ICRC; each has its own deposit path, and design doc §4.2 explicitly
+    // excludes SOL from top-ups. Reject so native-custody collateral can never be
+    // swept as an ICRC token. `is_native_custody()` is fail-closed for any future
+    // custody kind too.
+    if is_native_custody {
         guard_principal.fail();
         return Err(ProtocolError::GenericError(
-            "Native-XRP collateral uses the XRP deposit flow (not yet enabled).".to_string(),
+            "Native custody collateral uses its own deposit flow, not ICRC transfer_from."
+                .to_string(),
         ));
     }
 
@@ -4370,18 +4528,33 @@ pub async fn add_margin_with_deposit(vault_id: u64) -> Result<u64, ProtocolError
 enum WithdrawCloseCompletionPolicy {
     CloseVault,
     KeepNativeXrpVaultOpen,
+    /// SOL parity with `KeepNativeXrpVaultOpen`: the custody account stays
+    /// permanently rent-exempt rather than being swept to zero (design doc
+    /// §4.1), so the same "stranded reserve" reasoning that keeps a
+    /// native-XRP vault open applies here.
+    KeepNativeSolVaultOpen,
 }
 
-fn withdraw_close_completion_policy(is_native_xrp: bool) -> WithdrawCloseCompletionPolicy {
-    if is_native_xrp {
-        WithdrawCloseCompletionPolicy::KeepNativeXrpVaultOpen
-    } else {
-        WithdrawCloseCompletionPolicy::CloseVault
+/// Exhaustive match on `custody()` (no wildcard arm): a future custody kind
+/// must get an explicit policy decision here rather than silently defaulting
+/// to `CloseVault` (which would be wrong for any rail with a stranded/locked
+/// on-chain reserve, as both XRP and SOL have).
+fn withdraw_close_completion_policy(custody: CustodyKind) -> WithdrawCloseCompletionPolicy {
+    match custody {
+        CustodyKind::IcrcLedger => WithdrawCloseCompletionPolicy::CloseVault,
+        CustodyKind::NativeXrp => WithdrawCloseCompletionPolicy::KeepNativeXrpVaultOpen,
+        CustodyKind::NativeSol => WithdrawCloseCompletionPolicy::KeepNativeSolVaultOpen,
     }
 }
 
 fn native_xrp_reserve_locked_message() -> String {
     "Native-XRP vaults stay open because the XRP account reserve remains locked on XRPL."
+        .to_string()
+}
+
+/// SOL analogue of `native_xrp_reserve_locked_message`.
+fn native_sol_reserve_locked_message() -> String {
+    "Native-SOL vaults stay open because the custody account's rent-exempt reserve remains locked on Solana."
         .to_string()
 }
 
@@ -4500,23 +4673,35 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
         ));
     }
 
-    let is_native_xrp = read_state(|s| {
+    let custody = read_state(|s| {
         s.get_collateral_config(&vault.collateral_type)
-            .map(|config| config.is_native_xrp())
-            .unwrap_or(false)
+            .map(|config| config.custody())
+            .unwrap_or(CustodyKind::IcrcLedger)
     });
-    if withdraw_close_completion_policy(is_native_xrp)
-        == WithdrawCloseCompletionPolicy::KeepNativeXrpVaultOpen
-    {
-        mutate_state(|s| s.complete_close_vault_request());
-        log!(
-            INFO,
-            "[close_vault] Keeping native-XRP vault #{} open because the XRPL reserve remains locked",
-            vault_id
-        );
-        return Err(ProtocolError::GenericError(
-            native_xrp_reserve_locked_message(),
-        ));
+    match withdraw_close_completion_policy(custody) {
+        WithdrawCloseCompletionPolicy::KeepNativeXrpVaultOpen => {
+            mutate_state(|s| s.complete_close_vault_request());
+            log!(
+                INFO,
+                "[close_vault] Keeping native-XRP vault #{} open because the XRPL reserve remains locked",
+                vault_id
+            );
+            return Err(ProtocolError::GenericError(
+                native_xrp_reserve_locked_message(),
+            ));
+        }
+        WithdrawCloseCompletionPolicy::KeepNativeSolVaultOpen => {
+            mutate_state(|s| s.complete_close_vault_request());
+            log!(
+                INFO,
+                "[close_vault] Keeping native-SOL vault #{} open because the Solana rent-exempt reserve remains locked",
+                vault_id
+            );
+            return Err(ProtocolError::GenericError(
+                native_sol_reserve_locked_message(),
+            ));
+        }
+        WithdrawCloseCompletionPolicy::CloseVault => {}
     }
 
     // Simply close the vault - no transfers needed
@@ -4627,8 +4812,8 @@ pub async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
         ));
     }
 
-    // Look up per-collateral config (incl. custody kind for P4 native-XRP routing).
-    let (ledger_canister_id, ledger_fee, is_native_xrp) =
+    // Look up per-collateral config (incl. custody kind for native custody routing).
+    let (ledger_canister_id, ledger_fee, custody) =
         read_state(|s| {
             let config = s.get_collateral_config(&vault.collateral_type).ok_or(
                 ProtocolError::GenericError("Collateral type not configured".to_string()),
@@ -4636,7 +4821,7 @@ pub async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
             Ok::<_, ProtocolError>((
                 config.ledger_canister_id,
                 config.ledger_fee,
-                config.is_native_xrp(),
+                config.custody(),
             ))
         })?;
 
@@ -4658,30 +4843,57 @@ pub async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
         state.reindex_vault_cr(vault_id);
     });
 
-    // P4: native-XRP collateral leaves the vault into an XrpClaim (settled later via
-    // settle_xrp_claim, signed from the vault's custody address) instead of an ICRC
-    // transfer. Collateral is already zeroed above; the XRPL fee is taken at settle
-    // time (claimant-bears-fee), so the full amount becomes the claim.
-    if is_native_xrp {
-        let now_ns = ic_cdk::api::time();
-        let claim_id = mutate_state(|s| {
-            crate::event::record_collateral_withdrawn(s, vault_id, amount_to_transfer, 0);
-            record_xrp_claim(
-                s,
-                caller,
-                caller,
+    // P4 (extended for SOL): native custody collateral leaves the vault into a
+    // claim (settled later via settle_xrp_claim / settle_sol_claim, signed from
+    // the vault's custody address) instead of an ICRC transfer. Collateral is
+    // already zeroed above; the network fee is taken at settle time (claimant-
+    // bears-fee), so the full amount becomes the claim. Exhaustive match on
+    // `custody()`: a future custody kind is a compile error here, not a silent
+    // fall-through into the ICRC transfer below.
+    match custody {
+        CustodyKind::NativeXrp => {
+            let now_ns = ic_cdk::api::time();
+            let claim_id = mutate_state(|s| {
+                crate::event::record_collateral_withdrawn(s, vault_id, amount_to_transfer, 0);
+                record_xrp_claim(
+                    s,
+                    caller,
+                    caller,
+                    vault_id,
+                    amount_to_transfer.to_u64(),
+                    now_ns,
+                )
+            });
+            log!(
+                INFO,
+                "[withdraw_collateral] vault #{} native-XRP collateral -> XRP claim #{}",
                 vault_id,
-                amount_to_transfer.to_u64(),
-                now_ns,
-            )
-        });
-        log!(
-            INFO,
-            "[withdraw_collateral] vault #{} native-XRP collateral -> XRP claim #{}",
-            vault_id,
-            claim_id
-        );
-        return Ok(claim_id);
+                claim_id
+            );
+            return Ok(claim_id);
+        }
+        CustodyKind::NativeSol => {
+            let now_ns = ic_cdk::api::time();
+            let claim_id = mutate_state(|s| {
+                crate::event::record_collateral_withdrawn(s, vault_id, amount_to_transfer, 0);
+                record_sol_claim(
+                    s,
+                    caller,
+                    caller,
+                    vault_id,
+                    amount_to_transfer.to_u64(),
+                    now_ns,
+                )
+            });
+            log!(
+                INFO,
+                "[withdraw_collateral] vault #{} native-SOL collateral -> SOL claim #{}",
+                vault_id,
+                claim_id
+            );
+            return Ok(claim_id);
+        }
+        CustodyKind::IcrcLedger => {}
     }
 
     // Make the collateral transfer with appropriate fee deduction
@@ -4770,7 +4982,7 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
         ledger_canister_id,
         ledger_fee,
         min_deposit,
-        is_native_xrp,
+        custody,
     ) = match read_state(|s| match s.vault_id_to_vaults.get(&vault_id) {
         Some(vault) => {
             let price = s
@@ -4786,7 +4998,7 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
                 config.ledger_canister_id,
                 config.ledger_fee,
                 config.min_collateral_deposit,
-                config.is_native_xrp(),
+                config.custody(),
             ))
         }
         None => Err("Vault not found. Please check the vault ID."),
@@ -4909,29 +5121,54 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
     // Note: margin is reduced in record_partial_collateral_withdrawn (via remove_margin_from_vault)
     // after the transfer succeeds. Do NOT also subtract here — that would double-deduct.
 
-    // P4: native-XRP collateral leaves into an XrpClaim instead of an ICRC transfer.
-    // Reduce the vault collateral (same as the ICRC success path) and record the
-    // claim; the full withdraw_amount becomes the claim (XRPL fee taken at settle).
-    if is_native_xrp {
-        let now_ns = ic_cdk::api::time();
-        let claim_id = mutate_state(|s| {
-            crate::event::record_partial_collateral_withdrawn(s, vault_id, withdraw_amount, 0);
-            record_xrp_claim(
-                s,
-                caller,
-                caller,
+    // P4 (extended for SOL): native custody collateral leaves into a claim
+    // instead of an ICRC transfer. Reduce the vault collateral (same as the
+    // ICRC success path) and record the claim; the full withdraw_amount becomes
+    // the claim (network fee taken at settle). Exhaustive match on `custody()`.
+    match custody {
+        CustodyKind::NativeXrp => {
+            let now_ns = ic_cdk::api::time();
+            let claim_id = mutate_state(|s| {
+                crate::event::record_partial_collateral_withdrawn(s, vault_id, withdraw_amount, 0);
+                record_xrp_claim(
+                    s,
+                    caller,
+                    caller,
+                    vault_id,
+                    withdraw_amount.to_u64(),
+                    now_ns,
+                )
+            });
+            log!(
+                INFO,
+                "[withdraw_partial_collateral] vault #{} native-XRP collateral -> XRP claim #{}",
                 vault_id,
-                withdraw_amount.to_u64(),
-                now_ns,
-            )
-        });
-        log!(
-            INFO,
-            "[withdraw_partial_collateral] vault #{} native-XRP collateral -> XRP claim #{}",
-            vault_id,
-            claim_id
-        );
-        return Ok(claim_id);
+                claim_id
+            );
+            return Ok(claim_id);
+        }
+        CustodyKind::NativeSol => {
+            let now_ns = ic_cdk::api::time();
+            let claim_id = mutate_state(|s| {
+                crate::event::record_partial_collateral_withdrawn(s, vault_id, withdraw_amount, 0);
+                record_sol_claim(
+                    s,
+                    caller,
+                    caller,
+                    vault_id,
+                    withdraw_amount.to_u64(),
+                    now_ns,
+                )
+            });
+            log!(
+                INFO,
+                "[withdraw_partial_collateral] vault #{} native-SOL collateral -> SOL claim #{}",
+                vault_id,
+                claim_id
+            );
+            return Ok(claim_id);
+        }
+        CustodyKind::IcrcLedger => {}
     }
 
     let fee = ICP::from(ledger_fee);
@@ -5072,7 +5309,7 @@ async fn withdraw_and_close_vault_internal(
     }
 
     // Look up per-collateral config
-    let (ledger_canister_id, ledger_fee, is_native_xrp) =
+    let (ledger_canister_id, ledger_fee, custody) =
         read_state(|s| {
             let config = s.get_collateral_config(&vault.collateral_type).ok_or(
                 ProtocolError::GenericError("Collateral type not configured".to_string()),
@@ -5080,7 +5317,7 @@ async fn withdraw_and_close_vault_internal(
             Ok::<_, ProtocolError>((
                 config.ledger_canister_id,
                 config.ledger_fee,
-                config.is_native_xrp(),
+                config.custody(),
             ))
         })?;
 
@@ -5105,89 +5342,116 @@ async fn withdraw_and_close_vault_internal(
             state.reindex_vault_cr(vault_id);
         });
 
-        // P4: native-XRP collateral leaves into an XrpClaim, not an ICRC transfer.
-        if is_native_xrp {
-            let now_ns = ic_cdk::api::time();
-            let claim_id = mutate_state(|s| {
-                crate::event::record_collateral_withdrawn(s, vault_id, amount_to_transfer, 0);
-                record_xrp_claim(
-                    s,
-                    caller,
-                    caller,
-                    vault_id,
-                    amount_to_transfer.to_u64(),
-                    now_ns,
-                )
-            });
-            log!(
-                INFO,
-                "[withdraw_and_close] vault #{} native-XRP collateral -> XRP claim #{}",
-                vault_id,
-                claim_id
-            );
-            block_index = Some(claim_id);
-        } else {
-            // Make the collateral transfer with appropriate fee deduction
-            let fee = ICP::from(ledger_fee);
-            let transfer_amount = amount_to_transfer - fee;
-
-            log!(
-                INFO,
-                "[withdraw_and_close] Transferring {} (after fee deduction) to {}",
-                transfer_amount,
-                caller
-            );
-
-            match management::transfer_collateral(
-                transfer_amount.to_u64(),
-                caller,
-                ledger_canister_id,
-            )
-            .await
-            {
-                Ok(idx) => {
-                    // Record the withdrawal event
-                    mutate_state(|s| {
-                        crate::event::record_collateral_withdrawn(
-                            s,
-                            vault_id,
-                            amount_to_transfer,
-                            idx,
-                        )
-                    });
-
-                    log!(
+        // P4 (extended for SOL): native custody collateral leaves into a claim,
+        // not an ICRC transfer. Exhaustive match on `custody()`: a future custody
+        // kind is a compile error here, not a silent fall-through into the ICRC
+        // transfer path.
+        match custody {
+            CustodyKind::NativeXrp => {
+                let now_ns = ic_cdk::api::time();
+                let claim_id = mutate_state(|s| {
+                    crate::event::record_collateral_withdrawn(s, vault_id, amount_to_transfer, 0);
+                    record_xrp_claim(
+                        s,
+                        caller,
+                        caller,
+                        vault_id,
+                        amount_to_transfer.to_u64(),
+                        now_ns,
+                    )
+                });
+                log!(
                     INFO,
-                    "[withdraw_and_close] Successfully withdrew {} from vault #{}, block_index: {}",
-                    amount_to_transfer,
+                    "[withdraw_and_close] vault #{} native-XRP collateral -> XRP claim #{}",
                     vault_id,
-                    idx
+                    claim_id
+                );
+                block_index = Some(claim_id);
+            }
+            CustodyKind::NativeSol => {
+                let now_ns = ic_cdk::api::time();
+                let claim_id = mutate_state(|s| {
+                    crate::event::record_collateral_withdrawn(s, vault_id, amount_to_transfer, 0);
+                    record_sol_claim(
+                        s,
+                        caller,
+                        caller,
+                        vault_id,
+                        amount_to_transfer.to_u64(),
+                        now_ns,
+                    )
+                });
+                log!(
+                    INFO,
+                    "[withdraw_and_close] vault #{} native-SOL collateral -> SOL claim #{}",
+                    vault_id,
+                    claim_id
+                );
+                block_index = Some(claim_id);
+            }
+            CustodyKind::IcrcLedger => {
+                // Make the collateral transfer with appropriate fee deduction
+                let fee = ICP::from(ledger_fee);
+                let transfer_amount = amount_to_transfer - fee;
+
+                log!(
+                    INFO,
+                    "[withdraw_and_close] Transferring {} (after fee deduction) to {}",
+                    transfer_amount,
+                    caller
                 );
 
-                    block_index = Some(idx);
-                }
-                Err(error) => {
-                    // CRITICAL: If the transfer fails, restore the collateral and exit WITHOUT closing the vault
-                    mutate_state(|state| {
-                        if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
-                            vault.collateral_amount = amount_to_transfer.to_u64();
-                        }
-                        // Wave-8b LIQ-002: rollback restores collateral → re-key.
-                        state.reindex_vault_cr(vault_id);
-                    });
+                match management::transfer_collateral(
+                    transfer_amount.to_u64(),
+                    caller,
+                    ledger_canister_id,
+                )
+                .await
+                {
+                    Ok(idx) => {
+                        // Record the withdrawal event
+                        mutate_state(|s| {
+                            crate::event::record_collateral_withdrawn(
+                                s,
+                                vault_id,
+                                amount_to_transfer,
+                                idx,
+                            )
+                        });
 
-                    log!(
-                        DEBUG,
-                        "[withdraw_and_close] Failed to transfer {} to {}, error: {}",
-                        transfer_amount,
-                        caller,
-                        error
+                        log!(
+                        INFO,
+                        "[withdraw_and_close] Successfully withdrew {} from vault #{}, block_index: {}",
+                        amount_to_transfer,
+                        vault_id,
+                        idx
                     );
 
-                    return Err(ProtocolError::TransferError(error));
+                        block_index = Some(idx);
+                    }
+                    Err(error) => {
+                        // CRITICAL: If the transfer fails, restore the collateral and exit WITHOUT closing the vault
+                        mutate_state(|state| {
+                            if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
+                                vault.collateral_amount = amount_to_transfer.to_u64();
+                            }
+                            // Wave-8b LIQ-002: rollback restores collateral → re-key.
+                            state.reindex_vault_cr(vault_id);
+                        });
+
+                        log!(
+                            DEBUG,
+                            "[withdraw_and_close] Failed to transfer {} to {}, error: {}",
+                            transfer_amount,
+                            caller,
+                            error
+                        );
+
+                        return Err(ProtocolError::TransferError(error));
+                    }
                 }
-            }
-        } // end native-XRP `else` (the ICRC transfer path)
+            } // end IcrcLedger (the ICRC transfer path)
+        }
     } else {
         log!(
             INFO,
@@ -5196,15 +5460,24 @@ async fn withdraw_and_close_vault_internal(
         );
     };
 
-    if withdraw_close_completion_policy(is_native_xrp)
-        == WithdrawCloseCompletionPolicy::KeepNativeXrpVaultOpen
-    {
-        log!(
-            INFO,
-            "[withdraw_and_close] Keeping native-XRP vault #{} open because the XRPL reserve remains locked",
-            vault_id
-        );
-        return Ok(block_index);
+    match withdraw_close_completion_policy(custody) {
+        WithdrawCloseCompletionPolicy::KeepNativeXrpVaultOpen => {
+            log!(
+                INFO,
+                "[withdraw_and_close] Keeping native-XRP vault #{} open because the XRPL reserve remains locked",
+                vault_id
+            );
+            return Ok(block_index);
+        }
+        WithdrawCloseCompletionPolicy::KeepNativeSolVaultOpen => {
+            log!(
+                INFO,
+                "[withdraw_and_close] Keeping native-SOL vault #{} open because the Solana rent-exempt reserve remains locked",
+                vault_id
+            );
+            return Ok(block_index);
+        }
+        WithdrawCloseCompletionPolicy::CloseVault => {}
     }
 
     // Now close the vault - only if we've successfully transferred any funds
@@ -5633,35 +5906,15 @@ pub async fn liquidate_vault_partial(
         });
     }
 
-    // Send protocol's liquidation fee cut to treasury (fire-and-forget)
-    if protocol_cut > 0 {
-        if vault.collateral_type == crate::state::xrp_collateral_principal() {
-            // P5: native-XRP protocol fee -> a developer-settleable XrpClaim (the
-            // ICRC treasury transfer cannot target the synthetic XRP ledger). Keyed
-            // by collateral_type (not a vault lookup, since the vault may already be
-            // drained/removed by cleanup_if_drained above).
-            let dev = read_state(|s| s.developer_principal);
-            let now_ns = ic_cdk::api::time();
-            mutate_state(|s| {
-                record_xrp_claim(
-                    s,
-                    dev,
-                    vault.owner,
-                    vault.vault_id,
-                    protocol_cut.to_u64().unwrap_or(0),
-                    now_ns,
-                );
-            });
-        } else {
-            let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
-            crate::treasury::send_liquidation_fee_to_treasury(
-                protocol_cut,
-                vault.collateral_type,
-                asset_type,
-            )
-            .await;
-        }
-    }
+    // Send protocol's liquidation fee cut to treasury (fire-and-forget). ICRC ->
+    // treasury; native custody (XRP, SOL) -> a developer-settleable claim.
+    route_protocol_liquidation_fee(
+        protocol_cut,
+        vault.collateral_type,
+        vault.owner,
+        vault.vault_id,
+    )
+    .await;
 
     // Step 4: Process transfer (same as complete liquidation)
     match try_process_pending_transfers_immediate(vault_id).await {
@@ -6070,35 +6323,15 @@ pub async fn liquidate_vault_partial_with_stable(
         }
     }
 
-    // Send protocol's liquidation fee cut to treasury (fire-and-forget)
-    if protocol_cut > 0 {
-        if vault.collateral_type == crate::state::xrp_collateral_principal() {
-            // P5: native-XRP protocol fee -> a developer-settleable XrpClaim (the
-            // ICRC treasury transfer cannot target the synthetic XRP ledger). Keyed
-            // by collateral_type (not a vault lookup, since the vault may already be
-            // drained/removed by cleanup_if_drained above).
-            let dev = read_state(|s| s.developer_principal);
-            let now_ns = ic_cdk::api::time();
-            mutate_state(|s| {
-                record_xrp_claim(
-                    s,
-                    dev,
-                    vault.owner,
-                    vault.vault_id,
-                    protocol_cut.to_u64().unwrap_or(0),
-                    now_ns,
-                );
-            });
-        } else {
-            let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
-            crate::treasury::send_liquidation_fee_to_treasury(
-                protocol_cut,
-                vault.collateral_type,
-                asset_type,
-            )
-            .await;
-        }
-    }
+    // Send protocol's liquidation fee cut to treasury (fire-and-forget). ICRC ->
+    // treasury; native custody (XRP, SOL) -> a developer-settleable claim.
+    route_protocol_liquidation_fee(
+        protocol_cut,
+        vault.collateral_type,
+        vault.owner,
+        vault.vault_id,
+    )
+    .await;
 
     // Step 4: Process transfer
     match try_process_pending_transfers_immediate(vault_id).await {
@@ -6198,22 +6431,40 @@ pub async fn liquidate_vault_debt_already_burned(
         ));
     }
 
-    // Defense-in-depth: native-XRP collateral can NEVER be liquidated via the SP
-    // write-down path. This path proof-verifies + settles against the icUSD/3pool
-    // ledger, but the seized collateral here is XRP held on XRPL. The SP cannot
-    // settle that, so a write-down would strand the seized XRP (it never becomes
-    // an `XrpClaim`) and burn SP depositors. Native-XRP is liquidated only via the
-    // manual paths (`liquidate_vault` / `liquidate_vault_partial` /
-    // `partial_liquidate_vault` / `liquidate_vault_partial_with_stable`), which
-    // route collateral into an `XrpClaim`. The two `main.rs` entry points are the
-    // first line of defense; this in-function reject is the backstop so any future
-    // third caller (or a refactor that drops the caller-side check) cannot reach
-    // the write-down. Placed before `GuardPrincipal::new` so it returns without
-    // touching any guard/state (and before any `ic_cdk::api::time()` call).
-    if vault_is_native_xrp(vault_id) {
-        return Err(ProtocolError::GenericError(
-            "Native-XRP collateral cannot be liquidated via the SP write-down path".to_string(),
-        ));
+    // Defense-in-depth: native custody collateral (XRP, SOL) can NEVER be
+    // liquidated via the SP write-down path. This path proof-verifies + settles
+    // against the icUSD/3pool ledger, but the seized collateral here is held on a
+    // foreign chain. The SP cannot settle that, so a write-down would strand the
+    // seized collateral (it never becomes an XrpClaim / SolClaim) and burn SP
+    // depositors. Native custody is liquidated only via the manual paths
+    // (`liquidate_vault` / `liquidate_vault_partial` / `partial_liquidate_vault` /
+    // `liquidate_vault_partial_with_stable`), which route collateral into a claim.
+    // The `main.rs` entry points are the first line of defense; this in-function
+    // reject is the backstop so any future third caller (or a refactor that drops
+    // the caller-side check) cannot reach the write-down. Placed before
+    // `GuardPrincipal::new` so it returns without touching any guard/state (and
+    // before any `ic_cdk::api::time()` call). Matched on `custody()` (not the
+    // fail-closed `is_native_custody()` bool) so the per-asset message is exact
+    // for XRP (unchanged) and SOL, while `Some(IcrcLedger) | None` is the only
+    // fall-through arm — a future `CustodyKind` variant is a compile error here,
+    // not a silent pass-through into the write-down.
+    match read_state(|s| {
+        s.vault_id_to_vaults
+            .get(&vault_id)
+            .and_then(|v| s.get_collateral_config(&v.collateral_type))
+            .map(|c| c.custody())
+    }) {
+        Some(CustodyKind::NativeXrp) => {
+            return Err(ProtocolError::GenericError(
+                "Native-XRP collateral cannot be liquidated via the SP write-down path".to_string(),
+            ));
+        }
+        Some(CustodyKind::NativeSol) => {
+            return Err(ProtocolError::GenericError(
+                "Native-SOL collateral cannot be liquidated via the SP write-down path".to_string(),
+            ));
+        }
+        Some(CustodyKind::IcrcLedger) | None => {}
     }
 
     let guard_principal =
@@ -6570,35 +6821,18 @@ pub async fn liquidate_vault_debt_already_burned(
         });
     }
 
-    // Send protocol's liquidation fee cut to treasury
-    if protocol_cut > 0 {
-        if vault.collateral_type == crate::state::xrp_collateral_principal() {
-            // P5: native-XRP protocol fee -> a developer-settleable XrpClaim (the
-            // ICRC treasury transfer cannot target the synthetic XRP ledger). Keyed
-            // by collateral_type (not a vault lookup, since the vault may already be
-            // drained/removed by cleanup_if_drained above).
-            let dev = read_state(|s| s.developer_principal);
-            let now_ns = ic_cdk::api::time();
-            mutate_state(|s| {
-                record_xrp_claim(
-                    s,
-                    dev,
-                    vault.owner,
-                    vault.vault_id,
-                    protocol_cut.to_u64().unwrap_or(0),
-                    now_ns,
-                );
-            });
-        } else {
-            let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
-            crate::treasury::send_liquidation_fee_to_treasury(
-                protocol_cut,
-                vault.collateral_type,
-                asset_type,
-            )
-            .await;
-        }
-    }
+    // Send protocol's liquidation fee cut to treasury. ICRC -> treasury; native
+    // custody (XRP, SOL) -> a developer-settleable claim. In practice this native-
+    // custody arm is unreachable here (the reject above already refuses any
+    // native-custody vault), but it is kept exhaustive rather than assumed dead,
+    // so a future change to that guard cannot silently misroute the fee.
+    route_protocol_liquidation_fee(
+        protocol_cut,
+        vault.collateral_type,
+        vault.owner,
+        vault.vault_id,
+    )
+    .await;
 
     // Step 4: Process collateral transfer to stability pool
     match try_process_pending_transfers_immediate(vault_id).await {
@@ -6916,32 +7150,48 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
                 INFO,
                 "[liquidate_vault] Scheduling excess collateral return to vault owner"
             );
-            // Native-XRP excess returns to the owner as an XrpClaim; ICRC excess
-            // goes through the pending-excess transfer machinery.
-            if s.get_collateral_config(&vault.collateral_type)
-                .map(|c| c.is_native_xrp())
-                .unwrap_or(false)
-            {
-                record_xrp_claim(
-                    s,
-                    vault.owner,
-                    vault.owner,
-                    vault_id,
-                    excess_pay.to_u64(),
-                    ic_cdk::api::time(),
-                );
-            } else {
-                let excess_nonce = s.next_op_nonce();
-                s.pending_excess_transfers.insert(
-                    (vault_id, vault.owner),
-                    PendingMarginTransfer {
-                        owner: vault.owner,
-                        margin: excess_pay,
-                        collateral_type: vault.collateral_type,
-                        retry_count: 0,
-                        op_nonce: excess_nonce,
-                    },
-                );
+            // Native custody (XRP, SOL) excess returns to the owner as a claim;
+            // ICRC excess goes through the pending-excess transfer machinery.
+            // Exhaustive match on `custody()`: a future custody kind is a compile
+            // error here, not a silent fall-through into the ICRC path.
+            let excess_custody = s
+                .get_collateral_config(&vault.collateral_type)
+                .map(|c| c.custody())
+                .unwrap_or(CustodyKind::IcrcLedger);
+            match excess_custody {
+                CustodyKind::NativeXrp => {
+                    record_xrp_claim(
+                        s,
+                        vault.owner,
+                        vault.owner,
+                        vault_id,
+                        excess_pay.to_u64(),
+                        ic_cdk::api::time(),
+                    );
+                }
+                CustodyKind::NativeSol => {
+                    record_sol_claim(
+                        s,
+                        vault.owner,
+                        vault.owner,
+                        vault_id,
+                        excess_pay.to_u64(),
+                        ic_cdk::api::time(),
+                    );
+                }
+                CustodyKind::IcrcLedger => {
+                    let excess_nonce = s.next_op_nonce();
+                    s.pending_excess_transfers.insert(
+                        (vault_id, vault.owner),
+                        PendingMarginTransfer {
+                            owner: vault.owner,
+                            margin: excess_pay,
+                            collateral_type: vault.collateral_type,
+                            retry_count: 0,
+                            op_nonce: excess_nonce,
+                        },
+                    );
+                }
             }
         }
 
@@ -7016,35 +7266,15 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         });
     }
 
-    // Send protocol's liquidation fee cut to treasury (fire-and-forget)
-    if protocol_cut > 0 {
-        if vault.collateral_type == crate::state::xrp_collateral_principal() {
-            // P5: native-XRP protocol fee -> a developer-settleable XrpClaim (the
-            // ICRC treasury transfer cannot target the synthetic XRP ledger). Keyed
-            // by collateral_type (not a vault lookup, since the vault may already be
-            // drained/removed by cleanup_if_drained above).
-            let dev = read_state(|s| s.developer_principal);
-            let now_ns = ic_cdk::api::time();
-            mutate_state(|s| {
-                record_xrp_claim(
-                    s,
-                    dev,
-                    vault.owner,
-                    vault.vault_id,
-                    protocol_cut.to_u64().unwrap_or(0),
-                    now_ns,
-                );
-            });
-        } else {
-            let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
-            crate::treasury::send_liquidation_fee_to_treasury(
-                protocol_cut,
-                vault.collateral_type,
-                asset_type,
-            )
-            .await;
-        }
-    }
+    // Send protocol's liquidation fee cut to treasury (fire-and-forget). ICRC ->
+    // treasury; native custody (XRP, SOL) -> a developer-settleable claim.
+    route_protocol_liquidation_fee(
+        protocol_cut,
+        vault.collateral_type,
+        vault.owner,
+        vault.vault_id,
+    )
+    .await;
 
     // Step 5: Attempt immediate transfer processing (best effort)
     log!(
@@ -7664,35 +7894,15 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         });
     }
 
-    // Send protocol's liquidation fee cut to treasury (fire-and-forget)
-    if protocol_cut > 0 {
-        if vault.collateral_type == crate::state::xrp_collateral_principal() {
-            // P5: native-XRP protocol fee -> a developer-settleable XrpClaim (the
-            // ICRC treasury transfer cannot target the synthetic XRP ledger). Keyed
-            // by collateral_type (not a vault lookup, since the vault may already be
-            // drained/removed by cleanup_if_drained above).
-            let dev = read_state(|s| s.developer_principal);
-            let now_ns = ic_cdk::api::time();
-            mutate_state(|s| {
-                record_xrp_claim(
-                    s,
-                    dev,
-                    vault.owner,
-                    vault.vault_id,
-                    protocol_cut.to_u64().unwrap_or(0),
-                    now_ns,
-                );
-            });
-        } else {
-            let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
-            crate::treasury::send_liquidation_fee_to_treasury(
-                protocol_cut,
-                vault.collateral_type,
-                asset_type,
-            )
-            .await;
-        }
-    }
+    // Send protocol's liquidation fee cut to treasury (fire-and-forget). ICRC ->
+    // treasury; native custody (XRP, SOL) -> a developer-settleable claim.
+    route_protocol_liquidation_fee(
+        protocol_cut,
+        vault.collateral_type,
+        vault.owner,
+        vault.vault_id,
+    )
+    .await;
 
     // Step 6: Attempt immediate transfer processing
     log!(
@@ -8339,10 +8549,13 @@ mod xrp_sp_absorb_contract_tests {
             .unwrap()
             .collateral_amount = 60_000_000;
 
-        assert!(
-            stability_pool_liquidate_xrp_vault_in_state(&mut state, sp(), valid_request(44), 20)
-                .is_err()
-        );
+        assert!(stability_pool_liquidate_xrp_vault_in_state(
+            &mut state,
+            sp(),
+            valid_request(44),
+            20
+        )
+        .is_err());
         assert!(state.xrp_claims.is_empty());
         assert_eq!(state.next_xrp_claim_id, 0);
         assert!(state.sp_xrp_absorb_results_by_proof.is_empty());
@@ -8377,10 +8590,13 @@ mod xrp_sp_absorb_contract_tests {
             .unwrap()
             .borrowed_icusd_amount = ICUSD::new(50 * E8);
 
-        assert!(
-            stability_pool_liquidate_xrp_vault_in_state(&mut state, sp(), valid_request(44), 20)
-                .is_err()
-        );
+        assert!(stability_pool_liquidate_xrp_vault_in_state(
+            &mut state,
+            sp(),
+            valid_request(44),
+            20
+        )
+        .is_err());
         assert!(state.xrp_claims.is_empty());
         assert_eq!(state.next_xrp_claim_id, 0);
         assert!(state.sp_xrp_absorb_results_by_proof.is_empty());
@@ -8459,7 +8675,11 @@ mod xrp_sp_absorb_contract_tests {
             .expect("exact replay returns cached result");
         assert_eq!(replay, first);
         assert_eq!(state.xrp_claims, claims_after_first);
-        assert_eq!(state.xrp_claims.len(), 3, "replay must not re-mint the dev claim");
+        assert_eq!(
+            state.xrp_claims.len(),
+            3,
+            "replay must not re-mint the dev claim"
+        );
         assert_eq!(state.next_xrp_claim_id, 3);
     }
 
@@ -8603,5 +8823,358 @@ mod xrp_sp_absorb_contract_tests {
         assert!(!state
             .sp_xrp_absorb_results_by_proof
             .contains_key(&(SpProofLedger::IcusdBurn, 1)));
+    }
+}
+
+/// Phase 2a of the native-SOL collateral rail (docs/superpowers/specs/
+/// 2026-07-24-native-sol-collateral-design.md): custody-routing tests for the
+/// SOL wiring added to vault.rs. Mirrors `xrp_p4_tests` where a direct
+/// analogue exists.
+///
+/// NOTE on what these tests can and cannot exercise: `add_margin_to_vault` /
+/// `add_margin_with_deposit` call `ic_cdk::api::caller()` as their FIRST
+/// statement, which traps with "msg_caller_size should only be called inside
+/// canisters" outside a real canister call context (see the pre-existing
+/// `#[ignore]`d test in `state.rs` documenting the identical constraint).
+/// `liquidate_vault_debt_already_burned` is the only endpoint in this file's
+/// test suite ever driven via `futures::executor::block_on`, and only because
+/// it takes `caller` as an explicit parameter and its native-custody reject
+/// returns before any `ic_cdk` call. The tests below therefore pin the exact
+/// REJECT PREDICATE / ROUTING FUNCTION each endpoint relies on, rather than
+/// invoking the full async endpoint.
+#[cfg(test)]
+mod sol_p2a_tests {
+    use super::*;
+    use crate::state::{sol_collateral_config, sol_collateral_principal, SolClaim};
+
+    fn sol_config() -> crate::state::CollateralConfig {
+        let mut cfg = sol_collateral_config(Ratio::new(dec!(1.0)));
+        cfg.last_price = Some(150.0);
+        cfg
+    }
+
+    // ─── record_sol_claim ──────────────────────────────────────────────────
+
+    #[test]
+    fn record_sol_claim_allocates_incrementing_ids_and_stores_fields() {
+        let mut s = crate::state::State::default();
+        let owner = Principal::from_slice(&[0xaa; 16]);
+        let liq = Principal::from_slice(&[0xbb; 16]);
+        let id0 = record_sol_claim(&mut s, liq, owner, 7, 4_000_000, 100);
+        let id1 = record_sol_claim(&mut s, owner, owner, 8, 1_000_000, 200);
+        assert_eq!(id0, 0);
+        assert_eq!(id1, 1);
+        assert_eq!(s.next_sol_claim_id, 2);
+        let c0 = s.sol_claims.get(&id0).unwrap();
+        assert_eq!(c0.claimant, liq);
+        assert_eq!(c0.custody_owner, owner);
+        assert_eq!(c0.custody_nonce, 7);
+        assert_eq!(c0.lamports, 4_000_000);
+        assert_eq!(c0.created_at_ns, 100);
+        assert!(c0.settlement.is_none());
+        assert!(c0.quarantine_reason.is_none());
+    }
+
+    /// `record_sol_claim` / `record_xrp_claim` use SEPARATE id counters
+    /// (`next_sol_claim_id` / `next_xrp_claim_id`) and separate maps
+    /// (`sol_claims` / `xrp_claims`), so identical numeric ids in each space
+    /// refer to different claims rather than colliding.
+    #[test]
+    fn sol_claim_ids_do_not_collide_with_xrp_claim_ids() {
+        let mut s = crate::state::State::default();
+        let owner = Principal::from_slice(&[0xaa; 16]);
+        let liq = Principal::from_slice(&[0xbb; 16]);
+
+        let xrp_id0 = record_xrp_claim(&mut s, liq, owner, 1, 500_000, 10);
+        let sol_id0 = record_sol_claim(&mut s, liq, owner, 1, 500_000, 10);
+        // Both counters start at 0 independently.
+        assert_eq!(xrp_id0, 0);
+        assert_eq!(sol_id0, 0);
+        assert_eq!(s.next_xrp_claim_id, 1);
+        assert_eq!(s.next_sol_claim_id, 1);
+
+        // Advancing one counter must not affect the other.
+        let xrp_id1 = record_xrp_claim(&mut s, liq, owner, 2, 1, 11);
+        assert_eq!(xrp_id1, 1);
+        assert_eq!(
+            s.next_sol_claim_id, 1,
+            "SOL counter must be untouched by an XRP claim"
+        );
+
+        // The same numeric id (0) exists in BOTH maps but is a DIFFERENT claim.
+        assert!(s.xrp_claims.contains_key(&0));
+        assert!(s.sol_claims.contains_key(&0));
+        assert_eq!(s.xrp_claims.get(&0).unwrap().drops, 500_000);
+        assert_eq!(s.sol_claims.get(&0).unwrap().lamports, 500_000);
+    }
+
+    // ─── is_native_custody ─────────────────────────────────────────────────
+
+    #[test]
+    fn is_native_custody_true_for_xrp_and_sol_false_for_icrc() {
+        let mut icrc_cfg = sol_config();
+        icrc_cfg.custody_kind = None; // legacy/absent -> IcrcLedger
+        assert!(!icrc_cfg.is_native_custody());
+
+        let mut xrp_cfg = sol_config();
+        xrp_cfg.custody_kind = Some(CustodyKind::NativeXrp);
+        assert!(xrp_cfg.is_native_custody());
+
+        let sol_cfg = sol_config();
+        assert!(sol_cfg.custody_kind == Some(CustodyKind::NativeSol));
+        assert!(sol_cfg.is_native_custody());
+
+        let mut icrc_cfg2 = sol_config();
+        icrc_cfg2.custody_kind = Some(CustodyKind::IcrcLedger);
+        assert!(!icrc_cfg2.is_native_custody());
+    }
+
+    // ─── add_margin reject (predicate-level; see module doc for why) ───────
+
+    /// `add_margin_to_vault` / `add_margin_with_deposit` both reject BEFORE any
+    /// transfer with `if is_native_custody { ... }`, where `is_native_custody`
+    /// is `config.is_native_custody()` read for the vault's own collateral
+    /// type (design doc §4.2: no SOL top-ups). This pins that exact condition
+    /// for a real SOL vault inserted into `State`, i.e. the runtime value both
+    /// endpoints would compute for it.
+    #[test]
+    fn native_sol_vault_collateral_config_is_flagged_for_add_margin_reject() {
+        let mut s = crate::state::State::default();
+        let sol = sol_collateral_principal();
+        s.collateral_configs.insert(sol, sol_config());
+        let owner = Principal::from_slice(&[0x11; 16]);
+        s.open_vault(Vault {
+            owner,
+            vault_id: 1,
+            borrowed_icusd_amount: ICUSD::new(0),
+            collateral_amount: 1_000_000_000,
+            collateral_type: sol,
+            accrued_interest: ICUSD::new(0),
+            last_accrual_time: 0,
+            bot_processing: false,
+        });
+
+        let vault = s.vault_id_to_vaults.get(&1).unwrap();
+        let is_native_custody = s
+            .get_collateral_config(&vault.collateral_type)
+            .map(|c| c.is_native_custody())
+            .unwrap_or(false);
+        assert!(
+            is_native_custody,
+            "a native-SOL vault's config must read is_native_custody() == true, \
+             the exact condition add_margin_to_vault / add_margin_with_deposit reject on"
+        );
+    }
+
+    // ─── payout routing (via queue_collateral_payout, the shared routing fn) ─
+
+    /// `queue_collateral_payout` is the function `withdraw_collateral`,
+    /// `withdraw_partial_collateral`, `withdraw_and_close_vault_internal`, and
+    /// every liquidation entry point call for the liquidator-reward /
+    /// owner-excess payout. For a native-SOL collateral type it must create a
+    /// `SolClaim`, NOT an ICRC `PendingMarginTransfer`.
+    #[test]
+    fn queue_collateral_payout_creates_sol_claim_not_pending_transfer() {
+        let mut s = crate::state::State::default();
+        let sol = sol_collateral_principal();
+        s.collateral_configs.insert(sol, sol_config());
+        let owner = Principal::from_slice(&[0x11; 16]);
+        let recipient = Principal::from_slice(&[0x22; 16]);
+
+        let claim_id = queue_collateral_payout(
+            &mut s,
+            42,
+            owner,
+            recipient,
+            ICP::new(3_000_000),
+            sol,
+            1,
+            999,
+        );
+
+        assert!(claim_id.is_some(), "SOL payout must return a claim id");
+        assert!(
+            s.pending_margin_transfers.is_empty(),
+            "SOL payout must NOT create an ICRC PendingMarginTransfer"
+        );
+        let claim: &SolClaim = s.sol_claims.get(&claim_id.unwrap()).unwrap();
+        assert_eq!(claim.claimant, recipient);
+        assert_eq!(claim.custody_owner, owner);
+        assert_eq!(claim.custody_nonce, 42);
+        assert_eq!(claim.lamports, 3_000_000);
+    }
+
+    /// Sibling check: native-XRP payout routing through the SAME shared
+    /// function is unchanged by the SOL wiring (still an XrpClaim, still no
+    /// PendingMarginTransfer).
+    #[test]
+    fn queue_collateral_payout_still_creates_xrp_claim_for_native_xrp() {
+        let mut s = crate::state::State::default();
+        let xrp = crate::state::xrp_collateral_principal();
+        let mut xrp_cfg = sol_config();
+        xrp_cfg.custody_kind = Some(CustodyKind::NativeXrp);
+        s.collateral_configs.insert(xrp, xrp_cfg);
+        let owner = Principal::from_slice(&[0x33; 16]);
+        let recipient = Principal::from_slice(&[0x44; 16]);
+
+        let claim_id =
+            queue_collateral_payout(&mut s, 7, owner, recipient, ICP::new(2_000_000), xrp, 1, 5);
+
+        assert!(claim_id.is_some());
+        assert!(s.pending_margin_transfers.is_empty());
+        assert!(
+            s.sol_claims.is_empty(),
+            "must not create a SolClaim for XRP"
+        );
+        let claim = s.xrp_claims.get(&claim_id.unwrap()).unwrap();
+        assert_eq!(claim.drops, 2_000_000);
+    }
+
+    /// Sibling check: ICRC collateral through the same function still creates
+    /// a `PendingMarginTransfer`, not any kind of claim.
+    #[test]
+    fn queue_collateral_payout_creates_pending_transfer_for_icrc() {
+        let mut s = crate::state::State::default();
+        let icp = s.icp_collateral_type();
+        let owner = Principal::from_slice(&[0x55; 16]);
+        let recipient = Principal::from_slice(&[0x66; 16]);
+
+        let claim_id =
+            queue_collateral_payout(&mut s, 3, owner, recipient, ICP::new(1_000_000), icp, 1, 5);
+
+        assert!(claim_id.is_none(), "ICRC payout must not return a claim id");
+        assert!(s.sol_claims.is_empty());
+        assert!(s.xrp_claims.is_empty());
+        assert!(s.pending_margin_transfers.contains_key(&(3, recipient)));
+    }
+
+    // ─── withdraw/close completion policy parity with XRP ──────────────────
+
+    #[test]
+    fn withdraw_close_completion_policy_keeps_native_sol_vault_open() {
+        assert_eq!(
+            withdraw_close_completion_policy(CustodyKind::NativeSol),
+            WithdrawCloseCompletionPolicy::KeepNativeSolVaultOpen
+        );
+        assert_eq!(
+            withdraw_close_completion_policy(CustodyKind::NativeXrp),
+            WithdrawCloseCompletionPolicy::KeepNativeXrpVaultOpen
+        );
+        assert_eq!(
+            withdraw_close_completion_policy(CustodyKind::IcrcLedger),
+            WithdrawCloseCompletionPolicy::CloseVault
+        );
+    }
+
+    // ─── vault_is_native_sol / vault_is_native_custody ─────────────────────
+
+    #[test]
+    fn vault_is_native_sol_and_vault_is_native_custody_are_scoped_to_sol_custody() {
+        let mut s = crate::state::State::default();
+        let sol = sol_collateral_principal();
+        s.collateral_configs.insert(sol, sol_config());
+        let icp = s.icp_collateral_type();
+        if let Some(c) = s.collateral_configs.get_mut(&icp) {
+            c.last_price = Some(5.0);
+        }
+        let owner = Principal::from_slice(&[0x77; 16]);
+        s.open_vault(Vault {
+            owner,
+            vault_id: 1,
+            borrowed_icusd_amount: ICUSD::new(0),
+            collateral_amount: 1_000_000_000,
+            collateral_type: sol,
+            accrued_interest: ICUSD::new(0),
+            last_accrual_time: 0,
+            bot_processing: false,
+        });
+        s.open_vault(Vault {
+            owner,
+            vault_id: 2,
+            borrowed_icusd_amount: ICUSD::new(0),
+            collateral_amount: 1_000_000_000,
+            collateral_type: icp,
+            accrued_interest: ICUSD::new(0),
+            last_accrual_time: 0,
+            bot_processing: false,
+        });
+        crate::state::replace_state(s);
+
+        assert!(vault_is_native_sol(1), "native-SOL vault must be flagged");
+        assert!(
+            !vault_is_native_sol(2),
+            "ICRC (ICP) vault must not be flagged"
+        );
+        assert!(
+            !vault_is_native_sol(999),
+            "missing vault must not be flagged"
+        );
+
+        assert!(
+            vault_is_native_custody(1),
+            "native-SOL vault must be flagged as native custody"
+        );
+        assert!(
+            !vault_is_native_custody(2),
+            "ICRC (ICP) vault must not be flagged"
+        );
+        assert!(
+            !vault_is_native_custody(999),
+            "missing vault must not be flagged"
+        );
+    }
+
+    // ─── SP write-down defense-in-depth reject, SOL arm ────────────────────
+
+    fn dummy_proof(vault_id_memo: u64) -> crate::icrc3_proof::SpWritedownProof {
+        crate::icrc3_proof::SpWritedownProof {
+            block_index: 0,
+            ledger_kind: crate::icrc3_proof::SpProofLedger::IcusdBurn,
+            vault_id_memo,
+        }
+    }
+
+    /// SOL sibling of `sp_writedown_native_xrp_guard_tests::
+    /// sp_writedown_rejects_native_xrp_vault`, pinning the SOL arm added to
+    /// the `match ... { Some(CustodyKind::NativeXrp) => .., Some(NativeSol)
+    /// => .., Some(IcrcLedger) | None => {} }` reject in
+    /// `liquidate_vault_debt_already_burned`. Safe to `block_on` for the same
+    /// reason as the XRP test: the reject returns before any `ic_cdk` call.
+    #[test]
+    fn sp_writedown_rejects_native_sol_vault() {
+        let mut s = crate::state::State::default();
+        let sol = sol_collateral_principal();
+        s.collateral_configs.insert(sol, sol_config());
+        s.min_icusd_amount = ICUSD::new(0);
+        let owner = Principal::from_slice(&[0x88; 16]);
+        s.open_vault(Vault {
+            owner,
+            vault_id: 1,
+            borrowed_icusd_amount: ICUSD::new(1_000_000_000),
+            collateral_amount: 5_000_000,
+            collateral_type: sol,
+            accrued_interest: ICUSD::new(0),
+            last_accrual_time: 0,
+            bot_processing: false,
+        });
+        crate::state::replace_state(s);
+
+        let caller = Principal::from_slice(&[0xcc; 16]);
+        let result = futures::executor::block_on(liquidate_vault_debt_already_burned(
+            1,
+            1_000_000_000,
+            caller,
+            None,
+            dummy_proof(1),
+        ));
+        match result {
+            Err(ProtocolError::GenericError(msg)) => assert!(
+                msg.contains(
+                    "Native-SOL collateral cannot be liquidated via the SP write-down path"
+                ),
+                "expected the native-SOL reject, got: {msg}"
+            ),
+            other => panic!("expected a native-SOL GenericError reject, got {other:?}"),
+        }
     }
 }

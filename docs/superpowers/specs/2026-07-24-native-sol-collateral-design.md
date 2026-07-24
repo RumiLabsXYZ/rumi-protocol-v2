@@ -209,6 +209,14 @@ today and is added in `chains::sol::rpc`.
 
 Note this is materially cheaper than XRP's stranded 1 XRP (≈$3) per vault.
 
+Consequence, deliberate and mirroring XRP: a fully withdrawn SOL vault stays
+**open**, because the rent-exempt reserve remains locked at the custody address.
+The alternative (sweeping the account to zero on the final claim so Solana
+deallocates it, returning the full balance) would require the settlement path to
+permit `amount == balance` as a special case, adding a failure mode to the most
+custody-sensitive code in the rail to recover ≈$0.13. Not worth it at launch.
+The frontend says so explicitly, as it already does for XRP.
+
 ### 4.2 No top-ups
 
 `add_margin` / `add_margin_with_deposit` are rejected for native-SOL vaults, as
