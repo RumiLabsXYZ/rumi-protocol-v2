@@ -62,6 +62,9 @@ enum ProtocolArg {
 struct XrpVaultOpenInfo {
     vault_id: u64,
     custody_address: String,
+    /// The XRPL base reserve quoted by `server_state` at open time and stored on
+    /// the pending deposit; `confirm_xrp_deposit` credits `balance - this`.
+    reserve_base_drops: u64,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
@@ -495,6 +498,26 @@ fn register_xrp(pic: &PocketIc, backend: Principal) {
     .expect("register_xrp_collateral");
 }
 
+/// `open_xrp_vault` quotes the XRPL base reserve up front: before deriving the
+/// custody address it makes a `server_state` outcall (`fetch_reserve_base`) and
+/// stores the result on the pending deposit, so `confirm_xrp_deposit` credits
+/// against the reserve that was quoted when the address was handed out. The open
+/// must therefore be pumped like any other rippled-calling update — a plain
+/// blocking `update_call` parks on that outcall forever.
+fn open_xrp_vault(pic: &PocketIc, backend: Principal) -> WasmResult {
+    call_with_rippled(
+        pic,
+        backend,
+        user(),
+        "open_xrp_vault",
+        Encode!().unwrap(),
+        |m| match m {
+            "server_state" => rippled_server_state(RESERVE_DROPS),
+            other => panic!("unexpected rippled method in open: {other}"),
+        },
+    )
+}
+
 /// icrc2-approve the backend to pull `amount` icUSD from `owner` (for repay/liquidate).
 fn approve_icusd(
     pic: &PocketIc,
@@ -541,9 +564,9 @@ fn xrp_native_happy_path_open_deposit_borrow_repay_close_settle() {
     } = boot();
     register_xrp(&pic, backend);
 
-    // ── open_xrp_vault (derives custody address via tEd25519) ────────────────
+    // ── open_xrp_vault (quotes the base reserve, derives custody via tEd25519) ─
     // If PocketIC cannot provision key_1, this errors -> gated skip.
-    let open_reply = update_as(&pic, backend, user(), "open_xrp_vault", Encode!().unwrap());
+    let open_reply = open_xrp_vault(&pic, backend);
     let open: XrpVaultOpenInfo =
         match decode_result::<XrpVaultOpenInfo>(open_reply, "open_xrp_vault") {
             Ok(info) => info,
@@ -553,6 +576,10 @@ fn xrp_native_happy_path_open_deposit_borrow_repay_close_settle() {
             }
         };
     let vault_id = open.vault_id;
+    assert_eq!(
+        open.reserve_base_drops, RESERVE_DROPS,
+        "open quotes the server_state base reserve it will credit against"
+    );
     assert!(!open.custody_address.is_empty(), "custody address derived");
     assert!(
         open.custody_address.starts_with('r'),
@@ -657,7 +684,11 @@ fn xrp_native_happy_path_open_deposit_borrow_repay_close_settle() {
     assert_eq!(v.borrowed_icusd_amount, 0, "debt cleared after repay");
 
     // ── withdraw & close: creates an XrpClaim for the full collateral ─────────
-    decode_result::<Option<u64>>(
+    // Native-XRP deliberately does NOT remove the vault: the XRPL base reserve
+    // stays locked at the custody account, so the vault is RETAINED drained to
+    // zero collateral / zero debt instead of being closed. See
+    // `withdraw_close_completion_policy` -> KeepNativeXrpVaultOpen in vault.rs.
+    let withdraw_claim_id = decode_result::<Option<u64>>(
         update_as(
             &pic,
             backend,
@@ -667,13 +698,24 @@ fn xrp_native_happy_path_open_deposit_borrow_repay_close_settle() {
         ),
         "withdraw_and_close_vault",
     )
-    .expect("withdraw_and_close ok");
-    assert!(get_vault(&pic, backend, vault_id).is_none(), "vault closed");
+    .expect("withdraw_and_close ok")
+    .expect("native-XRP withdraw returns the created XRP claim id");
+    let v = get_vault(&pic, backend, vault_id)
+        .expect("native-XRP vault is retained (the XRPL base reserve stays locked)");
+    assert_eq!(
+        v.collateral_amount, 0,
+        "all collateral left the vault into the claim"
+    );
+    assert_eq!(v.borrowed_icusd_amount, 0, "no debt remains after withdraw");
 
     // A claim must now exist for the withdrawn collateral.
     let claims = xrp_claims(&pic, backend);
     assert_eq!(claims.len(), 1, "one XRP claim after close: {claims:?}");
     let claim_id = claims[0];
+    assert_eq!(
+        withdraw_claim_id, claim_id,
+        "withdraw_and_close returns the XRP claim id it created"
+    );
 
     // ── settle_xrp_claim is two-phase (anti double-pay) ───────────────────────
     // Call 1 derives the custody Sequence (account_info), signs the Payment, records
@@ -751,7 +793,7 @@ fn xrp_native_liquidation_is_claim_based() {
     } = boot();
     register_xrp(&pic, backend);
 
-    let open_reply = update_as(&pic, backend, user(), "open_xrp_vault", Encode!().unwrap());
+    let open_reply = open_xrp_vault(&pic, backend);
     let open: XrpVaultOpenInfo =
         match decode_result::<XrpVaultOpenInfo>(open_reply, "open_xrp_vault") {
             Ok(info) => info,

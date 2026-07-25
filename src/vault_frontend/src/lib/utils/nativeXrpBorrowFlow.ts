@@ -2,7 +2,35 @@ import type { CollateralInfo } from '$lib/services/types';
 
 export const XRP_DROPS_PER_XRP = 1_000_000;
 
+/**
+ * Pre-open estimate of the XRPL base reserve, in XRP.
+ *
+ * The AUTHORITATIVE value is whatever `open_xrp_vault` returns in
+ * `reserveBaseDrops` (the backend reads it live from rippled `server_state`), but
+ * the borrow form has to size the collateral/CR/max-borrow math BEFORE the vault
+ * is opened, when no reserve is known yet. The XRPL base reserve is a
+ * network-wide parameter currently set to 1 XRP by validator vote.
+ *
+ * If the network ever raises it, this under-deducts on the form only: the modal
+ * always shows the real reserve, and the backend independently re-checks the
+ * collateral ratio, so a stale value here fails safe (a borrow gets rejected)
+ * rather than over-crediting anyone.
+ */
+export const XRPL_BASE_RESERVE_XRP = 1;
+
+/**
+ * Collateral actually credited to the vault when the user sends `sendAmount`.
+ *
+ * The user names the amount they will SEND; the XRPL base reserve comes out of
+ * that amount to activate the custody account, and `confirm_xrp_deposit` credits
+ * the remainder (`balance - reserve_base`). Never negative.
+ */
+export function xrpCreditedCollateral(sendAmount: number, reserveAmount: number): number {
+  return Math.max(0, sendAmount - reserveAmount);
+}
+
 export interface NativeXrpDepositIntent {
+  /** What the user said they would SEND (the reserve comes OUT of this). */
   collateralAmount: number;
   icusdAmount: number;
   reserveBaseDrops: bigint | number;
@@ -11,8 +39,11 @@ export interface NativeXrpDepositIntent {
 
 export interface NativeXrpDepositCopy {
   assetName: string;
+  /** Exactly what the user asked to send — never their amount plus a surprise. */
   sendAmount: number;
   reserveAmount: number;
+  /** What actually lands as collateral: sendAmount minus the XRPL base reserve. */
+  creditedAmount: number;
   sendAmountLabel: string;
   collateralAmountLabel: string;
   reserveAmountLabel: string;
@@ -52,18 +83,24 @@ export function buildXrpPaymentUri(address: string, amount: number): string {
 export function nativeXrpDepositCopy(intent: NativeXrpDepositIntent): NativeXrpDepositCopy {
   const assetName = intent.collateralInfo?.symbol || 'XRP';
   const reserveAmount = xrpAmountFromDrops(intent.reserveBaseDrops);
-  const sendAmount = intent.collateralAmount + reserveAmount;
-  const collateralAmountLabel = formatXrpAmount(intent.collateralAmount);
+  // The user sends EXACTLY what they asked to send. The XRPL base reserve is
+  // taken out of that amount rather than added on top, so the deposit
+  // instruction never differs from the number they typed.
+  const sendAmount = intent.collateralAmount;
+  const creditedAmount = xrpCreditedCollateral(sendAmount, reserveAmount);
+  const collateralAmountLabel = formatXrpAmount(creditedAmount);
   const reserveAmountLabel = formatXrpAmount(reserveAmount);
+  const sendAmountLabel = formatXrpAmount(sendAmount);
   return {
     assetName,
     sendAmount,
     reserveAmount,
-    sendAmountLabel: formatXrpAmount(sendAmount),
+    creditedAmount,
+    sendAmountLabel,
     collateralAmountLabel,
     reserveAmountLabel,
     borrowAmountLabel: `${intent.icusdAmount.toFixed(2)} icUSD`,
-    reserveExplanation: `${collateralAmountLabel} collateral + ${reserveAmountLabel} XRPL account reserve. The reserve activates this XRP address and stays locked there; your vault stays open so you do not pay it again.`,
+    reserveExplanation: `Of the ${sendAmountLabel} you send, ${reserveAmountLabel} is the XRPL account reserve and ${collateralAmountLabel} becomes your collateral. The reserve activates this XRP address and stays locked there; your vault stays open so you do not pay it again.`,
   };
 }
 
