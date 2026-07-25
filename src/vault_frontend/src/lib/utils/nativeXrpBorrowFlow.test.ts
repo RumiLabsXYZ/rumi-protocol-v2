@@ -13,6 +13,7 @@ import {
   nativeXrpModalShouldRender,
   nativeXrpModalStatusLabel,
   nativeXrpModalTitle,
+  xrpCreditedCollateral,
 } from './nativeXrpBorrowFlow';
 import type { CollateralInfo } from '$lib/services/types';
 
@@ -49,29 +50,63 @@ describe('native XRP borrow flow helpers', () => {
       collateralInfo: xrpCollateral,
     });
 
-    expect(copy.sendAmountLabel).toBe('13.595678 XRP');
-    expect(copy.collateralAmountLabel).toBe('12.345678 XRP');
+    // The user sends EXACTLY what they typed; the reserve comes out of it.
+    expect(copy.sendAmountLabel).toBe('12.345678 XRP');
+    expect(copy.collateralAmountLabel).toBe('11.095678 XRP');
     expect(copy.reserveAmountLabel).toBe('1.25 XRP');
-    expect(copy.sendAmount).toBe(13.595678);
+    expect(copy.sendAmount).toBe(12.345678);
+    expect(copy.creditedAmount).toBeCloseTo(11.095678, 6);
     expect(copy.reserveAmount).toBe(1.25);
     expect(copy.borrowAmountLabel).toBe('4.50 icUSD');
     expect(copy.assetName).toBe('XRP');
   });
 
+  it('never asks the user to send more than the amount they entered', () => {
+    const entered = 5000;
+    const copy = nativeXrpDepositCopy({
+      collateralAmount: entered,
+      icusdAmount: 100,
+      reserveBaseDrops: 1_000_000n,
+      collateralInfo: xrpCollateral,
+    });
+
+    expect(copy.sendAmount).toBe(entered);
+    expect(copy.sendAmountLabel).toBe('5000 XRP');
+    expect(copy.creditedAmount).toBe(4999);
+    expect(buildXrpPaymentUri('rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh', copy.sendAmount)).toBe(
+      'ripple:rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh?amount=5000'
+    );
+  });
+
   it('explains the split between credited XRP collateral and the XRPL reserve', () => {
     const copy = nativeXrpDepositCopy({
-      collateralAmount: 2,
+      collateralAmount: 3,
       icusdAmount: 0.5,
       reserveBaseDrops: 1_000_000n,
       collateralInfo: xrpCollateral,
     });
 
     expect(copy.sendAmountLabel).toBe('3 XRP');
-    expect(copy.reserveExplanation).toContain('2 XRP collateral');
-    expect(copy.reserveExplanation).toContain('1 XRP XRPL account reserve');
+    expect(copy.reserveExplanation).toContain('Of the 3 XRP you send');
+    expect(copy.reserveExplanation).toContain('1 XRP is the XRPL account reserve');
+    expect(copy.reserveExplanation).toContain('2 XRP becomes your collateral');
     expect(buildXrpPaymentUri('rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh', copy.sendAmount)).toBe(
       'ripple:rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh?amount=3'
     );
+  });
+
+  it('never credits negative collateral when the send amount is at or below the reserve', () => {
+    expect(xrpCreditedCollateral(5000, 1)).toBe(4999);
+    expect(xrpCreditedCollateral(1, 1)).toBe(0);
+    expect(xrpCreditedCollateral(0.5, 1)).toBe(0);
+
+    const copy = nativeXrpDepositCopy({
+      collateralAmount: 0.5,
+      icusdAmount: 0,
+      reserveBaseDrops: 1_000_000n,
+      collateralInfo: xrpCollateral,
+    });
+    expect(copy.creditedAmount).toBe(0);
   });
 
   it('explains that native XRP reserve stays locked and the vault stays open', () => {
