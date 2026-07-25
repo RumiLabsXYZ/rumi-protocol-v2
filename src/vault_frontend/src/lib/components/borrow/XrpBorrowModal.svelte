@@ -9,6 +9,9 @@
   } from '$lib/services/xrpVaultService';
   import {
     buildXrpPaymentUri,
+    nativeXrpBorrowErrorCopy,
+    nativeXrpBorrowLaterCopy,
+    nativeXrpBorrowSeparateApprovalCopy,
     nativeXrpDepositCopy,
     nativeXrpModalOpeningCopy,
     nativeXrpModalPrimaryActionLabel,
@@ -18,6 +21,7 @@
     type NativeXrpBorrowPhase,
   } from '$lib/utils/nativeXrpBorrowFlow';
   import { formatAddress } from '$lib/utils/format';
+  import { WALLET_TYPES, currentWalletType } from '$lib/services/auth';
 
   export let collateralAmount: number;
   export let icusdAmount: number;
@@ -34,6 +38,7 @@
   let errorMessage = '';
   let copied = false;
   let started = false;
+  let confirmWasResilient = false;
 
   $: copy = nativeXrpDepositCopy({
     collateralAmount,
@@ -46,8 +51,16 @@
   $: shouldRenderModal = nativeXrpModalShouldRender(phase, hasDepositAddress);
   $: modalTitle = nativeXrpModalTitle(phase, hasDepositAddress);
   $: modalStatusLabel = nativeXrpModalStatusLabel(phase);
-  $: modalPrimaryActionLabel = nativeXrpModalPrimaryActionLabel(phase, hasDepositAddress);
+  $: modalPrimaryActionLabel = nativeXrpModalPrimaryActionLabel(phase, hasDepositAddress, copy.borrowAmountLabel);
   $: isBusy = phase === 'opening' || phase === 'confirming' || phase === 'borrowing';
+  $: awaitingBorrowApproval = phase === 'ready_to_borrow' || phase === 'borrow_failed';
+
+  // Oisy opens its signer popup only from inside a browser user-gesture. The
+  // confirm call's XRPL verification round-trip burns that gesture, so chaining
+  // the borrow onto it always trips "Signer window should not be opened outside
+  // of click handler". Wallets that sign in-page (Internet Identity) have no
+  // such constraint, so they keep the single-click flow.
+  $: borrowNeedsOwnClick = $currentWalletType === WALLET_TYPES.OISY;
 
   onMount(() => {
     void openVault();
@@ -120,27 +133,45 @@
         return;
       }
 
-      await borrowFromConfirmedVault(confirmed.oisyResilient);
+      // The collateral is credited from here on: never leave the user without a
+      // way to finish the borrow.
+      confirmWasResilient = confirmed.oisyResilient ?? false;
+      if (borrowNeedsOwnClick) {
+        phase = 'ready_to_borrow';
+        return;
+      }
+
+      await borrowFromConfirmedVault(confirmWasResilient);
     } catch (err) {
       phase = 'awaiting';
       errorMessage = err instanceof Error ? err.message : 'Deposit confirmation failed.';
     }
   }
 
-  async function borrowFromConfirmedVault(confirmResilient = false) {
+  async function borrowFromConfirmedVault(confirmResilient = confirmWasResilient) {
     if (!opened) return;
     phase = 'borrowing';
     errorMessage = '';
-    const borrowed = await protocolService.borrowFromVault(opened.vaultId, icusdAmount);
-    if (!borrowed.success) {
+    try {
+      const borrowed = await protocolService.borrowFromVault(opened.vaultId, icusdAmount);
+      if (!borrowed.success) {
+        phase = 'borrow_failed';
+        errorMessage = nativeXrpBorrowErrorCopy(borrowed.error, copy.borrowAmountLabel);
+        return;
+      }
+      dispatch('complete', {
+        vaultId: opened.vaultId,
+        oisyResilient: confirmResilient || borrowed.oisyResilient,
+      });
+    } catch (err) {
+      // The collateral is already credited, so a thrown signer error must land
+      // in the recoverable borrow_failed state, never back at 'awaiting'.
       phase = 'borrow_failed';
-      errorMessage = borrowed.error ?? 'Deposit confirmed, but borrowing failed.';
-      return;
+      errorMessage = nativeXrpBorrowErrorCopy(
+        err instanceof Error ? err.message : undefined,
+        copy.borrowAmountLabel
+      );
     }
-    dispatch('complete', {
-      vaultId: opened.vaultId,
-      oisyResilient: confirmResilient || borrowed.oisyResilient,
-    });
   }
 
   function close() {
@@ -208,27 +239,28 @@
       </div>
     {/if}
 
+    {#if awaitingBorrowApproval && opened}
+      <div class="borrow-step">
+        <p class="borrow-step-lead">{nativeXrpBorrowSeparateApprovalCopy(copy.borrowAmountLabel)}</p>
+        <p class="borrow-step-note">{nativeXrpBorrowLaterCopy(opened.vaultId)}</p>
+      </div>
+    {/if}
+
     {#if errorMessage}
       <div class="modal-error">{errorMessage}</div>
     {/if}
 
     <div class="modal-actions">
-      {#if phase === 'borrow_failed'}
-        <button class="secondary-action" type="button" on:click={() => borrowFromConfirmedVault()}>
-          Retry borrow
-        </button>
-      {:else}
-        <button class="secondary-action" type="button" disabled={isBusy} on:click={close}>
-          Cancel
-        </button>
-      {/if}
+      <button class="secondary-action" type="button" disabled={isBusy} on:click={close}>
+        {awaitingBorrowApproval ? 'Finish later' : 'Cancel'}
+      </button>
 
       {#if modalPrimaryActionLabel}
         <button
           class="primary-action"
           type="button"
-          disabled={!opened || isBusy || phase === 'borrow_failed' || phase === 'error'}
-          on:click={confirmDepositAndBorrow}
+          disabled={!opened || isBusy || phase === 'error'}
+          on:click={awaitingBorrowApproval ? () => borrowFromConfirmedVault() : confirmDepositAndBorrow}
         >
           {modalPrimaryActionLabel}
         </button>
@@ -467,6 +499,29 @@
     margin: 0;
     color: var(--rumi-text-secondary);
     font-size: 0.875rem;
+    line-height: 1.45;
+  }
+
+  .borrow-step {
+    margin-top: 1rem;
+    padding: 0.875rem;
+    border: 1px solid rgba(45, 212, 191, 0.24);
+    border-radius: 8px;
+    background: rgba(45, 212, 191, 0.08);
+  }
+
+  .borrow-step-lead {
+    margin: 0;
+    color: var(--rumi-text-primary);
+    font-size: 0.9375rem;
+    font-weight: 600;
+    line-height: 1.45;
+  }
+
+  .borrow-step-note {
+    margin: 0.5rem 0 0;
+    color: var(--rumi-text-secondary);
+    font-size: 0.8125rem;
     line-height: 1.45;
   }
 

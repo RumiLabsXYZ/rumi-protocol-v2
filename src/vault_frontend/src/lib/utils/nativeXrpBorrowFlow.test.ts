@@ -3,6 +3,9 @@ import {
   buildXrpPaymentUri,
   formatXrpAmount,
   isNativeXrpCollateral,
+  nativeXrpBorrowErrorCopy,
+  nativeXrpBorrowLaterCopy,
+  nativeXrpBorrowSeparateApprovalCopy,
   nativeXrpDepositCopy,
   nativeXrpKeepOpenCloseCopy,
   nativeXrpModalOpeningCopy,
@@ -92,5 +95,56 @@ describe('native XRP borrow flow helpers', () => {
     expect(nativeXrpModalPrimaryActionLabel('confirming', true)).toBe('Checking deposit...');
     expect(nativeXrpModalPrimaryActionLabel('borrowing', true)).toBe('Minting icUSD...');
     expect(nativeXrpModalPrimaryActionLabel('error', true)).toBeNull();
+  });
+
+  // Confirm-deposit and borrow are two canister calls, so two wallet approvals.
+  // Oisy only opens its signer from a user-gesture, and the confirm round-trip
+  // burns it, so the borrow must come from its own click.
+  it('offers the borrow as its own action once the deposit is credited', () => {
+    expect(nativeXrpModalTitle('ready_to_borrow', true)).toBe('XRP received — approve your borrow');
+    expect(nativeXrpModalStatusLabel('ready_to_borrow')).toBe('Ready to borrow');
+    expect(nativeXrpModalPrimaryActionLabel('ready_to_borrow', true, '4.50 icUSD')).toBe('Borrow 4.50 icUSD');
+    expect(nativeXrpModalShouldRender('ready_to_borrow', true)).toBe(true);
+  });
+
+  it('keeps the same borrow action available after a failed borrow so the user is never stranded', () => {
+    expect(nativeXrpModalTitle('borrow_failed', true)).toBe('XRP received — borrow not finished');
+    expect(nativeXrpModalPrimaryActionLabel('borrow_failed', true, '4.50 icUSD')).toBe('Borrow 4.50 icUSD');
+    expect(nativeXrpModalPrimaryActionLabel('ready_to_borrow', true)).toBe('Borrow icUSD');
+  });
+
+  it('never shows a borrow action before the custody address exists', () => {
+    expect(nativeXrpModalPrimaryActionLabel('ready_to_borrow', false, '4.50 icUSD')).toBeNull();
+    expect(nativeXrpModalPrimaryActionLabel('borrow_failed', false, '4.50 icUSD')).toBeNull();
+  });
+
+  it('translates the raw signer-window error into an actionable instruction', () => {
+    expect(
+      nativeXrpBorrowErrorCopy(
+        'Signer window should not be opened outside of click handler',
+        '4.50 icUSD'
+      )
+    ).toBe('Your wallet needs a fresh approval for the borrow. Tap Borrow 4.50 icUSD to open it.');
+
+    // Case-insensitive, so wording variants from the signer still map across.
+    expect(nativeXrpBorrowErrorCopy('The Signer Window is already open', '4.50 icUSD')).toContain(
+      'fresh approval'
+    );
+  });
+
+  it('passes through a genuine borrow failure instead of blaming the wallet', () => {
+    expect(nativeXrpBorrowErrorCopy('Debt ceiling reached for XRP', '4.50 icUSD')).toBe(
+      'Debt ceiling reached for XRP'
+    );
+    expect(nativeXrpBorrowErrorCopy(undefined, '4.50 icUSD')).toBe(
+      'Deposit confirmed, but borrowing failed.'
+    );
+  });
+
+  it('tells the user their collateral is safe and where to finish the borrow later', () => {
+    expect(nativeXrpBorrowSeparateApprovalCopy('4.50 icUSD')).toContain('separate wallet approval');
+    const later = nativeXrpBorrowLaterCopy(198);
+    expect(later).toContain('vault #198');
+    expect(later).toContain('Vaults page');
   });
 });
