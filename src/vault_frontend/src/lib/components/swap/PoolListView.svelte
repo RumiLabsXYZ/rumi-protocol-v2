@@ -8,6 +8,7 @@
   } from '../../services/threePoolService';
   import { ammService, type PoolInfo } from '../../services/ammService';
   import { getThreePoolApy } from '../../services/threePoolApyService';
+  import { threeUsdPriceFromPoolStatus } from '../../services/threeUsdPrice';
   import { CANISTER_IDS } from '../../config';
   import type { PoolStatus } from '../../services/threePoolService';
 
@@ -18,6 +19,8 @@
   let userThreePoolLp = 0n;
   let userAmmLp = 0n;
   let loading = true;
+  // USD price of one 3USD (3pool virtual price). 1.0 until the pool status loads.
+  let threeUsdPriceUsd = 1;
 
   // APY state for both pools (null while loading, number once resolved)
   let threePoolApyPct: number | null = null;
@@ -37,6 +40,7 @@
         ammService.getPools().catch(() => [] as PoolInfo[]),
       ]);
       threePoolStatus = tpStatus;
+      threeUsdPriceUsd = threeUsdPriceFromPoolStatus(tpStatus);
       // Find the 3USD/ICP pool specifically
       const threePoolId = CANISTER_IDS.THREEPOOL;
       const icpLedgerId = CANISTER_IDS.ICP_LEDGER;
@@ -89,7 +93,8 @@
     const threePoolId = CANISTER_IDS.THREEPOOL;
     const isTokenA3USD = ammPool.token_a.toText() === threePoolId;
     const threeUsdReserve = isTokenA3USD ? ammPool.reserve_a : ammPool.reserve_b;
-    const threeUsdValue = Number(threeUsdReserve) / 1e8;
+    // 3USD is the 3pool LP token, so value the leg at the pool virtual price, not $1.
+    const threeUsdValue = (Number(threeUsdReserve) / 1e8) * threeUsdPriceUsd;
     return '~$' + (threeUsdValue * 2).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
 
