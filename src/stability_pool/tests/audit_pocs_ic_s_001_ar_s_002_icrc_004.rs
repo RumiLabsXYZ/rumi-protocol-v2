@@ -5,7 +5,8 @@
 //!   fee below its tracked deposits per refund) and a failed refund was
 //!   DISCARDED, stranding the user's pulled tokens with no record. The fix
 //!   refunds net of the ledger fee (cached `icrc1_fee` with a conservative
-//!   fallback, mirroring rumi_3pool::transfers) and persists a pending-refund
+//!   fallback, mirroring rumi_3pool::transfers; the lookup now lives in the
+//!   shared `ledger_transfer_fee` helper) and persists a pending-refund
 //!   record recoverable via `claim_pending_refund` / `get_pending_refunds`
 //!   (mirroring rumi_3pool's pending-claims pattern).
 //!
@@ -44,19 +45,58 @@ fn fn_body<'a>(src: &'a str, header: &'a str) -> &'a str {
     &src[start..end]
 }
 
+/// Names the shared cached-fee helper has gone by. `refund_ledger_fee` was the
+/// original IC-S-001 helper; `50649a9` ("handle ckUSDC withdrawal fees")
+/// generalized it to `ledger_transfer_fee` so withdrawals and the unallocated-
+/// interest sweep share one cache. Accepting both keeps this fence from
+/// bit-rotting on a rename while still failing on pre-fix source, which looked
+/// up no fee at all.
+const LEDGER_FEE_HELPERS: [&str; 2] = ["ledger_transfer_fee", "refund_ledger_fee"];
+
+fn contains_any(body: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|n| body.contains(n))
+}
+
 #[test]
 fn ic_s_001_refund_is_net_of_ledger_fee() {
     let src = read("src/deposits.rs");
     let body = fn_body(&src, "async fn refund_user(");
     assert!(
-        body.contains("refund_ledger_fee"),
-        "refund_user must look up the ledger fee (cached icrc1_fee, conservative fallback) \
+        contains_any(body, &LEDGER_FEE_HELPERS),
+        "refund_user must look up the ledger fee via the shared cached-fee helper (one of {:?}) \
          (audit IC-S-001).",
+        LEDGER_FEE_HELPERS,
     );
     assert!(
         body.contains("amount - fee"),
         "refund_user must send the amount NET of the ledger fee, not gross with fee:None \
          (a gross refund debits amount+fee from the pool) (audit IC-S-001).",
+    );
+}
+
+/// The fee-lookup above is an indirection, so assert the helper it delegates to
+/// still does the work IC-S-001 requires: query `icrc1_fee` and, on failure,
+/// fall back to a conservative non-zero fee rather than 0. Without this, the
+/// fence could be satisfied by a helper that had been gutted to `0`.
+#[test]
+fn ic_s_001_ledger_fee_helper_queries_icrc1_fee_with_conservative_fallback() {
+    let src = read("src/deposits.rs");
+    let header = LEDGER_FEE_HELPERS
+        .iter()
+        .map(|name| format!("async fn {}(", name))
+        .find(|h| src.contains(h.as_str()))
+        .unwrap_or_else(|| panic!("no ledger-fee helper found (one of {:?})", LEDGER_FEE_HELPERS));
+    let body = fn_body(&src, &header);
+    assert!(
+        body.contains("icrc1_fee"),
+        "`{}` must query the ledger's icrc1_fee (audit IC-S-001).",
+        header,
+    );
+    assert!(
+        body.contains("fallback"),
+        "`{}` must fall back to a conservative fee when the icrc1_fee query fails, \
+         not to 0 (audit IC-S-001 / SP-104).",
+        header,
     );
 }
 

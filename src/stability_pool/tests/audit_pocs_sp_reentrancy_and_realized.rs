@@ -53,6 +53,20 @@ fn sp_102_liquidation_entries_hold_reentrancy_guard() {
     }
 }
 
+/// Idioms a balance-mutating entry may use to consult the SP-102 liquidation
+/// guard. Originally every entry called `pool_guard::liquidation_in_progress()`
+/// inline; `006342d` ("Inc8 retry-safe SP chain absorb") factored that into
+/// `pool_balance_mutation_blocked()` / `ensure_pool_balance_mutation_allowed()`,
+/// which OR the guard with the pending-chain-absorb check. Accepting any of the
+/// three keeps this fence from bit-rotting on a refactor; the companion test
+/// below asserts the indirection still reaches the guard. Pre-fix source
+/// contained none of these, so the fence still fails there.
+const GUARD_IDIOMS: [&str; 3] = [
+    "liquidation_in_progress",
+    "pool_balance_mutation_blocked",
+    "ensure_pool_balance_mutation_allowed",
+];
+
 #[test]
 fn sp_102_balance_ops_reject_during_liquidation() {
     let src = read("src/deposits.rs");
@@ -65,12 +79,34 @@ fn sp_102_balance_ops_reject_during_liquidation() {
     ] {
         let body = fn_body(&src, header);
         assert!(
-            body.contains("liquidation_in_progress"),
-            "balance-mutating entry `{}` must reject while a liquidation is apportioning \
-             (audit SP-102).",
-            header
+            GUARD_IDIOMS.iter().any(|idiom| body.contains(idiom)),
+            "balance-mutating entry `{}` must reject while a liquidation is apportioning, \
+             via one of {:?} (audit SP-102).",
+            header,
+            GUARD_IDIOMS,
         );
     }
+}
+
+/// The guard checks above may be indirections, so assert the helpers they route
+/// through still consult `pool_guard::liquidation_in_progress()` and still
+/// reject with `SystemBusy`. Without this, the fence could be satisfied by a
+/// helper that had been changed to always return false.
+#[test]
+fn sp_102_balance_mutation_helpers_route_to_the_liquidation_guard() {
+    let src = read("src/lib.rs");
+    let blocked = fn_body(&src, "fn pool_balance_mutation_blocked(");
+    assert!(
+        blocked.contains("liquidation_in_progress"),
+        "pool_balance_mutation_blocked() must consult pool_guard::liquidation_in_progress() \
+         (audit SP-102).",
+    );
+    let ensure = fn_body(&src, "fn ensure_pool_balance_mutation_allowed(");
+    assert!(
+        ensure.contains("pool_balance_mutation_blocked") && ensure.contains("SystemBusy"),
+        "ensure_pool_balance_mutation_allowed() must reject with SystemBusy when \
+         pool_balance_mutation_blocked() (audit SP-102).",
+    );
 }
 
 #[test]
