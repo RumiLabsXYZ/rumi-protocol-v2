@@ -295,9 +295,14 @@ Claimant-only. No destination tag — Solana has no analogue for native SOL
 (exchanges use unique deposit addresses), so the XRP `_with_tag` variant has no
 counterpart.
 
-1. `GuardPrincipal` keyed on `claim_id`.
+1. `GuardPrincipal` keyed on the **caller principal** (not on `claim_id`: two
+   different claimants settling two different claims both pass this guard
+   concurrently. Cross-claimant serialization is a separate mechanism, step
+   3a below).
 2. Refuse if the claim is quarantined.
 3. Validate `destination` as a well-formed, **on-curve** Solana address (§7).
+3a. **Acquire the protocol-wide `SolSettlementInflightGuard`** (security review
+    fix, 2026-07-24; see below).
 4. **Idempotency before signing** (§5.3).
 5. Aggregate solvency across all unresolved claims on the same custody address:
    `balance >= Σ(unresolved claims) + rent_exempt_minimum`.
@@ -306,7 +311,40 @@ counterpart.
 7. Read the current durable nonce; build, sign (2 signers), compute the signature
    locally via `first_signature_base58`.
 8. **Persist `SolSettlement` before submitting.**
-9. `send_transaction` — single attempt, never retried blindly.
+9. `send_transaction`, single attempt, never retried blindly.
+
+#### Protocol-wide settlement serialization (security review fix, 2026-07-24)
+
+`GuardPrincipal` (caller-keyed) and the per-custody-address lock used elsewhere
+in this rail do not, between them, serialize two DIFFERENT claimants settling
+two DIFFERENT claims. Every `SolClaim` shares ONE durable-nonce account, so a
+Stability Pool absorption fanning out into up to `MAX_SOL_SP_PAYOUT_ALLOCATIONS`
+claims (§6) previously let all of them read the same live nonce, sign, and
+submit concurrently. Solana itself only ever lands one of those transactions
+(nonce uniqueness rules out a double-pay), but the LOSING claims' retries could
+race each other too: whichever loser's retry runs first finds the winner's
+`Confirmed` settlement, uses it to clear its own ambiguity, and (correctly)
+removes the winner's now-finalized claim as part of the same reconciliation
+pass. Any OTHER loser that retries after that point no longer has that evidence
+available and gets quarantined, needing manual `admin_resolve_sol_claim`. A
+routine liquidation with many opted-in depositors could therefore strand most
+of them behind admin action from a single race window, not because of any
+fund-loss risk, but because the canister's own bookkeeping did not serialize
+to match the reality already imposed at the Solana layer (one nonce account,
+one live transaction at a time).
+
+The fix is a canister-wide, self-healing, transient (heap, not persisted)
+re-entrancy guard (`SolSettlementInflightGuard` in `guard.rs`), held across the
+whole danger zone: read the live nonce, reconcile siblings, sign, persist the
+`SolSettlement`, submit. At most one `settle_sol_claim` call may be inside that
+zone at a time, across every claim and every vault. A second concurrent caller
+is turned away immediately with a retryable error, before it ever reads the
+nonce or signs anything, rather than being allowed to race and later land in
+quarantine. It self-heals after `chains::solana::hardening::INFLIGHT_STALE_NS`
+(10 minutes) using that module's existing `inflight_should_acquire` predicate,
+so a settlement that traps mid-flight (whose `Drop` never runs, since a trap in
+a post-`await` continuation does not run destructors on the IC) cannot wedge
+the rail forever.
 
 ### 5.3 Idempotency and quarantine
 
@@ -496,11 +534,31 @@ called on mainnet:
 4. KAT vectors regenerated from `@solana/web3.js` and matching byte-for-byte.
 5. All claim-based out-paths (§5) merged and tested — the XRP ordering invariant.
 6. Security review of the settlement state machine (§5.3) specifically.
+7. **Verify `chains::sol::rpc::SOL_RPC_PRINCIPAL`** (currently the literal
+   `tghme-zyaaa-aaaar-qarca-cai`) against the live SOL RPC canister id before
+   calling `register_sol_collateral` on mainnet. The source already carries a
+   "VERIFY against the live repo before mainnet" comment on that constant;
+   this gate makes it a checked step rather than a comment someone can miss.
 
 The dormant `chains::solana` rail is configured for devnet and is not migrated by
 this change (§2). Notes on its current configuration, and what would have to
 change before it could be activated, are kept out-of-tree in
 `.claude/security-docs/` since this repository is public.
+
+**Deliberate decision: `chains::sol::rpc::sol_rpc_principal()` has no operator
+override.** The dormant `chains::solana` rail's equivalent
+(`chains::solana::sol_rpc::sol_rpc_principal()`) DOES support one
+(`State.sol_rpc_principal_override`, settable by a developer-only endpoint, so
+PocketIC / staging can point it at a mock). This rail's `chains::sol::rpc`
+deliberately does not carry the same override. Every custody-relevant read on
+this rail (balance checks, transaction status, the durable nonce itself) goes
+through that one function, so a freely-settable override would let a
+compromised developer principal repoint every custody read at a lying RPC
+canister with a single call. Without an override, doing the same requires a
+full wasm upgrade, which is subject to the pre-deploy test hook
+(`.claude/hooks/pre-deploy-test.sh`). The failure mode of a stale hardcoded id
+is fail-closed (outcalls simply error) rather than fail-open, which is the
+safer direction to fail in for a custody-relevant address.
 
 ## 13. Out of scope
 

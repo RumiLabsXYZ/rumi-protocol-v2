@@ -2,7 +2,7 @@ use crate::event::{
     record_add_margin_to_vault, record_borrow_from_vault, record_open_vault,
     record_redemption_on_vaults, record_repayed_to_vault,
 };
-use crate::guard::{GuardPrincipal, VaultLiquidationGuard};
+use crate::guard::{GuardPrincipal, SolSettlementInflightGuard, VaultLiquidationGuard};
 use crate::logs::INFO;
 use crate::management;
 use crate::management::{
@@ -4193,6 +4193,16 @@ pub(crate) fn ensure_sol_claim_not_quarantined(
 /// analogue). On success the claim is removed once its settlement transaction
 /// is later confirmed by a follow-up settle call; returns the locally
 /// computed base58 transaction signature.
+///
+/// Locking (security review fix, 2026-07-24): `GuardPrincipal` below is keyed
+/// on the CALLER principal only (it stops the SAME caller from re-entering
+/// this call for any claim, but does nothing for two DIFFERENT claimants
+/// settling two DIFFERENT claims concurrently). `VaultLiquidationGuard` is
+/// keyed on the source vault (`claim.custody_nonce`), so it likewise does not
+/// serialize claims on two DIFFERENT vaults. Cross-claimant / cross-vault
+/// serialization is handled entirely by the separate, canister-wide
+/// `SolSettlementInflightGuard` acquired further down, immediately before the
+/// live-nonce read (see its doc comment for the fan-out race it closes).
 pub async fn settle_sol_claim(claim_id: u64, destination: String) -> Result<String, ProtocolError> {
     let caller = ic_cdk::api::caller();
     require_sol_production_key()?;
@@ -4227,9 +4237,16 @@ pub async fn settle_sol_claim(claim_id: u64, destination: String) -> Result<Stri
         ));
     }
 
+    // Guards one caller at a time (per-principal), not one claim at a time:
+    // `s.principal_guards` is keyed on `caller` alone, and the operation-name
+    // string ("settle_sol_claim_{claim_id}") passed to `new` is logged but
+    // plays no part in the uniqueness key. Two different callers settling two
+    // different claims both pass this guard concurrently; see
+    // `SolSettlementInflightGuard` below for what actually serializes that.
     let guard_principal = GuardPrincipal::new(caller, &format!("settle_sol_claim_{}", claim_id))?;
     // Per-custody-address serialization (mirrors XRP's per-vault sequence
-    // lock): custody_nonce == the source vault id.
+    // lock): custody_nonce == the source vault id. Still per-vault, not
+    // protocol-wide (two claims on TWO DIFFERENT vaults both pass this too).
     let _custody_guard = match VaultLiquidationGuard::new(claim.custody_nonce) {
         Ok(g) => g,
         Err(e) => {
@@ -4270,6 +4287,28 @@ pub async fn settle_sol_claim(claim_id: u64, destination: String) -> Result<Stri
                 return Err(ProtocolError::GenericError(format!(
                     "sol settlement derive failed: {e}"
                 )));
+            }
+        };
+
+    // Protocol-wide danger-zone lock (security review fix, 2026-07-24): at
+    // most one `settle_sol_claim` call may be between here and the submit
+    // below, across EVERY claim and EVERY vault. See
+    // `SolSettlementInflightGuard`'s doc comment for the cross-claimant
+    // fan-out race this closes; briefly, every claim shares one durable-nonce
+    // account, so genuine parallelism through this section was always
+    // illusory: Solana's own runtime lands only one signed transaction per
+    // nonce value regardless. This guard just makes the canister's own
+    // bookkeeping (idempotency table, sibling reconciliation, quarantine)
+    // agree with that reality instead of racing it. A second concurrent
+    // caller is turned away here, before it reads the nonce or signs
+    // anything, with a clear retryable error rather than a spurious
+    // quarantine.
+    let _sol_settlement_inflight_guard =
+        match SolSettlementInflightGuard::new(ic_cdk::api::time()) {
+            Ok(g) => g,
+            Err(e) => {
+                guard_principal.fail();
+                return Err(e);
             }
         };
 
@@ -5479,7 +5518,7 @@ async fn borrow_from_vault_internal(
     reject_active_native_sp_absorb_preflight(arg.vault_id, now)?;
     mutate_state(|s| s.accrue_single_vault(arg.vault_id, now));
 
-    let (vault, collateral_price, config_decimals, is_native_xrp) =
+    let (vault, collateral_price, config_decimals, is_native_xrp, is_native_sol) =
         read_state(|s| match s.vault_id_to_vaults.get(&arg.vault_id) {
             Some(vault) => {
                 let price = s
@@ -5493,6 +5532,7 @@ async fn borrow_from_vault_internal(
                     price,
                     config.decimals,
                     config.is_native_xrp(),
+                    config.is_native_sol(),
                 ))
             }
             None => Err("Vault not found. Please check the vault ID."),
@@ -5512,6 +5552,19 @@ async fn borrow_from_vault_internal(
     }
     if is_native_xrp {
         require_xrp_production_key()?;
+    }
+    // SOL companion to the XRP gate above (security review fix, 2026-07-24).
+    // Redundant by design: no exploit is currently reachable through this
+    // path, because `set_sol_schnorr_key_name` already refuses to change the
+    // key once `sol_has_key_bound_state()` reports any SOL custody state
+    // exists (a registered SOL collateral config, a pending deposit, a claim,
+    // or an open SOL vault), and a vault cannot reach this function at all
+    // without a registered SOL collateral config. This gate is defense in
+    // depth against a future regression in `sol_has_key_bound_state()` (or a
+    // new code path that reaches SOL vaults before that check applies), kept
+    // deliberately minimal to match.
+    if is_native_sol {
+        require_sol_production_key()?;
     }
 
     if caller != vault.owner {
@@ -11585,6 +11638,197 @@ mod sol_p2b_tests {
         let mut s = crate::state::State::default();
         let p = pending(0);
         assert!(!remove_sol_pending_deposit_if_unfunded_snapshot(&mut s, 7, &p, 0).unwrap());
+    }
+
+    // ─── Fix-1 (security review, 2026-07-24): fan-out settlement race ────────
+    //
+    // These two tests are PURE-HELPER LEVEL, not true concurrency. `settle_sol_claim`
+    // reads `ic_cdk::api::caller()` as its first statement (this module's doc
+    // comment explains why that rules out driving it directly here), and
+    // reproducing the ACTUAL race requires two-or-more real canister update calls
+    // interleaved by the IC scheduler at specific `.await` points inside
+    // `reconcile_sol_other_inflight_claims` -- an interleaving this crate's test
+    // harness (plain `#[test]`, no controllable async executor) cannot force, and
+    // that PocketIC's synchronous `update_call` helpers in `sol_native_e2e_pic`
+    // don't attempt to force either. What follows instead exercises the exact
+    // same pure decision functions `settle_sol_claim` calls
+    // (`sol_settlement_decision`, `sol_sibling_reconcile_decision`,
+    // `sol_sibling_explains_ambiguous_advance`, `reconcile_sol_settlement_snapshot`,
+    // `quarantine_sol_claim_snapshot`) against a manually-sequenced fan-out
+    // scenario, to (a) demonstrate the exact mechanism the security review
+    // described, and (b) prove the guard's exclusivity closes it by construction.
+
+    /// Reproduces the BUG mechanism for a 3-way fan-out (one winner W, two
+    /// losers L1/L2) sharing one nonce, WITHOUT the Fix-1 guard: an
+    /// interleaving in which L2's retry runs to completion (finding W's
+    /// `Confirmed` sibling, clearing itself, and removing W as `Paid`)
+    /// BEFORE L1 gets to retry. By the time L1 retries, the evidence that
+    /// would have explained ITS OWN identical ambiguity (W's settlement) is
+    /// already gone, so it is quarantined -- exactly the "remaining N-2
+    /// losers" failure mode from the design review, reproduced here for N=2.
+    #[test]
+    fn fan_out_without_serialization_can_strand_a_later_loser_in_quarantine() {
+        let mut s = crate::state::State::default();
+        let (claim_w, claim_l1, claim_l2) = (1u64, 2u64, 3u64);
+        // All three independently read the SAME live nonce "N0" and signed
+        // against it -- the precondition the design doc's step 1-2 describes
+        // ("none has written a settlement yet, so none sees the others").
+        s.sol_claims.insert(claim_w, claim_with_settlement(Some(settlement("N0", "sigW"))));
+        s.sol_claims.insert(claim_l1, claim_with_settlement(Some(settlement("N0", "sigL1"))));
+        s.sol_claims.insert(claim_l2, claim_with_settlement(Some(settlement("N0", "sigL2"))));
+        // Only W's transaction landed; the nonce has since advanced to "N1".
+        let live = "N1";
+        let w_status = TxStatus::Confirmed { slot: 1 };
+        let loser_status = TxStatus::NotFound;
+
+        // Both losers independently compute AmbiguousAdvanced for their own
+        // stale settlement -- neither has resigned yet.
+        assert_eq!(
+            sol_settlement_decision(&loser_status, "N0", live),
+            SolSettlementDecision::AmbiguousAdvanced
+        );
+
+        // ── L2 retries FIRST (a plausible interleaving absent a protocol-wide
+        // guard) and its reconcile pass finds W confirmed with the exact
+        // nonce value ("N0") its own ambiguity needed explained. ──
+        assert!(sol_sibling_explains_ambiguous_advance(&w_status, "N0", "N0"));
+        assert_eq!(
+            sol_sibling_reconcile_decision(&w_status, "N0", live),
+            SolSiblingReconcileDecision::Paid
+        );
+        // Applying that reconciliation is exactly what `reconcile_sol_other_
+        // inflight_claims` does for a `Paid` sibling: remove it.
+        assert!(reconcile_sol_settlement_snapshot(
+            &mut s,
+            claim_w,
+            "sigW",
+            SolSettlementReconciliation::Paid,
+        ));
+        assert!(
+            !s.sol_claims.contains_key(&claim_w),
+            "the winner's claim is finalized (removed) by L2's retry"
+        );
+        // L2's own ambiguity was explained, so it is NOT quarantined: its
+        // stale settlement is cleared so it can resign.
+        assert!(reconcile_sol_settlement_snapshot(
+            &mut s,
+            claim_l2,
+            "sigL2",
+            SolSettlementReconciliation::ClearForResign,
+        ));
+        assert!(s.sol_claims.get(&claim_l2).unwrap().quarantine_reason.is_none());
+
+        // ── L1 retries SECOND, after W is already gone. Its own decision is
+        // identical to L2's a moment ago (same recorded nonce, same live
+        // nonce), but now NO remaining sibling explains it: W was removed,
+        // and L2's settlement was already cleared (not confirmed, and no
+        // longer carries nonce "N0" at all). ──
+        assert_eq!(
+            sol_settlement_decision(&loser_status, "N0", live),
+            SolSettlementDecision::AmbiguousAdvanced
+        );
+        let remaining_siblings_explain_l1 = sol_inflight_claims(&s, claim_l1)
+            .into_iter()
+            .any(|(_, settlement)| {
+                // Neither remaining claim (there are none left with a
+                // settlement at all -- L2's was just cleared) is CONFIRMED
+                // with nonce "N0".
+                sol_sibling_explains_ambiguous_advance(&w_status, &settlement.nonce_value, "N0")
+            });
+        assert!(
+            !remaining_siblings_explain_l1,
+            "the evidence that explained L2's identical ambiguity is gone by the time L1 retries"
+        );
+        let reason = "settlement diverged: durable nonce advanced from N0 to N1".to_string();
+        assert!(quarantine_sol_claim_snapshot(&mut s, claim_l1, &reason));
+        assert!(
+            s.sol_claims.get(&claim_l1).unwrap().quarantine_reason.is_some(),
+            "without serialization, L1 is spuriously quarantined despite racing identically to L2"
+        );
+    }
+
+    /// Proves the Fix-1 guard closes the race in `fan_out_without_
+    /// serialization_can_strand_a_later_loser_in_quarantine` BY CONSTRUCTION,
+    /// not just by cleaning up after it: under `SolSettlementInflightGuard`,
+    /// each claim's full read-nonce -> reconcile -> sign -> persist -> submit
+    /// sequence runs to completion before the next claim's sequence can
+    /// start (proven exclusive by `blocks_a_second_concurrent_acquire_and_
+    /// returns_the_retryable_error` in `guard.rs`). So by the time claim N
+    /// reads the live nonce, claim N-1's transaction (if it landed) has
+    /// already advanced it -- no two claims in a fan-out ever read or record
+    /// the SAME nonce value, which is the precondition the quarantine bug
+    /// above depends on. Modeled here as three sequential guarded rounds.
+    #[test]
+    fn fan_out_serialized_by_the_guard_never_shares_a_nonce_and_never_quarantines() {
+        let mut s = crate::state::State::default();
+        let (claim_1, claim_2, claim_3) = (1u64, 2u64, 3u64);
+        s.sol_claims.insert(claim_1, claim_with_settlement(None));
+        s.sol_claims.insert(claim_2, claim_with_settlement(None));
+        s.sol_claims.insert(claim_3, claim_with_settlement(None));
+
+        let mut recorded_nonces = Vec::new();
+        let mut now_ns = 1_000u64;
+        // Simulate the durable nonce advancing by one each time a settlement
+        // lands -- the guard's exclusivity is what guarantees claim K's
+        // "read the live nonce" step always happens after claim K-1's
+        // "submit" step has already committed and advanced it.
+        for (claim_id, live_nonce_for_this_round) in
+            [(claim_1, "N0"), (claim_2, "N1"), (claim_3, "N2")]
+        {
+            let guard = SolSettlementInflightGuard::new(now_ns)
+                .expect("guard must be free at the start of each serialized round");
+            // Danger zone: read nonce -> (no siblings to reconcile: this
+            // claim's own prior settlement is None, and no other claim has
+            // settled yet within this round) -> sign -> persist.
+            recorded_nonces.push(live_nonce_for_this_round.to_string());
+            mutate_state_for_test(&mut s, claim_id, live_nonce_for_this_round);
+            // Only after persisting (and, implicitly, submitting) does the
+            // guard release, exactly matching `_sol_settlement_inflight_guard`
+            // in `settle_sol_claim` being held across that whole span.
+            drop(guard);
+            now_ns += 1;
+        }
+
+        assert_eq!(recorded_nonces.len(), 3);
+        assert_ne!(recorded_nonces[0], recorded_nonces[1]);
+        assert_ne!(recorded_nonces[1], recorded_nonces[2]);
+        assert_ne!(recorded_nonces[0], recorded_nonces[2]);
+
+        for claim_id in [claim_1, claim_2, claim_3] {
+            let claim = s.sol_claims.get(&claim_id).unwrap();
+            assert!(
+                claim.quarantine_reason.is_none(),
+                "claim #{claim_id} must settle cleanly, never quarantined, once serialized"
+            );
+            assert!(claim.settlement.is_some());
+        }
+
+        // No two claims in the fan-out ever recorded the same nonce value, so
+        // `sol_settlement_decision` could never classify any of them as
+        // `AmbiguousAdvanced` against a SIBLING's landed transaction the way
+        // the unserialized test above demonstrates.
+        for (i, a) in recorded_nonces.iter().enumerate() {
+            for (j, b) in recorded_nonces.iter().enumerate() {
+                if i != j {
+                    assert_ne!(a, b, "no two serialized claims may share a nonce reading");
+                }
+            }
+        }
+    }
+
+    /// Test-only helper for `fan_out_serialized_by_the_guard_never_shares_a_
+    /// nonce_and_never_quarantines`: persists a `SolSettlement` for `claim_id`
+    /// using `nonce_value`, mirroring the "persist `SolSettlement` before
+    /// submitting" step of `settle_sol_claim` (design doc §5.2 step 8).
+    fn mutate_state_for_test(s: &mut crate::state::State, claim_id: u64, nonce_value: &str) {
+        if let Some(c) = s.sol_claims.get_mut(&claim_id) {
+            c.settlement = Some(crate::state::SolSettlement {
+                signature: format!("sig{claim_id}"),
+                nonce_value: nonce_value.to_string(),
+                destination: "11111111111111111111111111111111".to_string(),
+                submitted_at_ns: 0,
+            });
+        }
     }
 }
 
