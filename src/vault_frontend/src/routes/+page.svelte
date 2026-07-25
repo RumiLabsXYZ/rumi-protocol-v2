@@ -325,7 +325,7 @@
                 {/if}
               </div>
               {#if collateralAmount > 0 && collateralPrice > 0}
-                <p class="form-hint">≈ ${formatNumber(collateralAmount * collateralPrice)}</p>
+                <p class="form-hint">≈ ${formatNumber(collateralValue)}</p>
               {/if}
             </div>
 
