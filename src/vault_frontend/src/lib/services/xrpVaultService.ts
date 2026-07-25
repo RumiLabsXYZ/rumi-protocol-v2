@@ -85,6 +85,15 @@ interface CachedXrpPendingDeposit extends XrpPendingDepositView {
   updatedAtMs: number;
 }
 
+/**
+ * On-disk shape of {@link CachedXrpPendingDeposit}. `JSON.stringify` throws
+ * "Do not know how to serialize a BigInt", so drops are persisted as a decimal
+ * string and revived by {@link toDropsBigInt}.
+ */
+interface StoredXrpPendingDeposit extends Omit<CachedXrpPendingDeposit, 'reserveBaseDrops'> {
+  reserveBaseDrops: string;
+}
+
 interface XrpReadOptions {
   /**
    * Oisy calls route through the popup signer. Passive UI refreshes must keep
@@ -113,6 +122,27 @@ function hiddenPendingCacheKey(owner: string): string {
   return `${XRP_HIDDEN_PENDING_PREFIX}${owner}`;
 }
 
+/** Revive persisted drops (decimal string, or a legacy number) as a bigint. */
+function toDropsBigInt(value: unknown): bigint {
+  if (typeof value === 'bigint') return value;
+  if (typeof value === 'number') return Number.isFinite(value) ? BigInt(Math.trunc(value)) : 0n;
+  if (typeof value === 'string' && /^\d+$/.test(value.trim())) return BigInt(value.trim());
+  return 0n;
+}
+
+/**
+ * The pending-deposit cache is a best-effort convenience for Oisy passive reads.
+ * A failed write (quota, private mode, BigInt) must never surface as a failed
+ * vault open: the on-chain pending deposit is authoritative and re-readable.
+ */
+function persist(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value);
+  } catch (e) {
+    console.warn('xrp pending-deposit cache write failed (non-fatal):', e);
+  }
+}
+
 function readHiddenPendingIds(owner = currentPrincipalText()): Set<number> {
   if (!browser || !owner) return new Set();
   try {
@@ -128,7 +158,7 @@ function readHiddenPendingIds(owner = currentPrincipalText()): Set<number> {
 
 function writeHiddenPendingIds(ids: Set<number>, owner = currentPrincipalText()) {
   if (!browser || !owner) return;
-  localStorage.setItem(hiddenPendingCacheKey(owner), JSON.stringify([...ids].sort((a, b) => a - b)));
+  persist(hiddenPendingCacheKey(owner), JSON.stringify([...ids].sort((a, b) => a - b)));
 }
 
 function emitPendingDepositsChanged() {
@@ -140,12 +170,13 @@ function visiblePendingDeposits(pending: XrpPendingDepositView[], owner = curren
   return pending.filter((p) => !hidden.has(p.vaultId));
 }
 
-function readCachedPendingDeposits(owner = currentPrincipalText()): XrpPendingDepositView[] {
+/** Exported for tests: the localStorage round-trip must survive bigint drops. */
+export function readCachedPendingDeposits(owner = currentPrincipalText()): XrpPendingDepositView[] {
   if (!browser || !owner) return [];
   try {
     const raw = localStorage.getItem(pendingCacheKey(owner));
     if (!raw) return [];
-    const parsed = JSON.parse(raw) as CachedXrpPendingDeposit[];
+    const parsed = JSON.parse(raw) as StoredXrpPendingDeposit[];
     if (!Array.isArray(parsed)) return [];
     return parsed
       .filter((p) => Number.isFinite(p.vaultId) && typeof p.custodyAddress === 'string')
@@ -153,14 +184,15 @@ function readCachedPendingDeposits(owner = currentPrincipalText()): XrpPendingDe
         vaultId: p.vaultId,
         custodyAddress: p.custodyAddress,
         openedAtMs: Number.isFinite(p.openedAtMs) ? p.openedAtMs : p.updatedAtMs,
-        reserveBaseDrops: p.reserveBaseDrops ?? 0n,
+        reserveBaseDrops: toDropsBigInt(p.reserveBaseDrops),
       }));
   } catch {
     return [];
   }
 }
 
-function writeCachedPendingDeposits(pending: XrpPendingDepositView[], owner = currentPrincipalText()) {
+/** Exported for tests: see {@link readCachedPendingDeposits}. */
+export function writeCachedPendingDeposits(pending: XrpPendingDepositView[], owner = currentPrincipalText()) {
   if (!browser || !owner) return;
   const deduped = new Map<number, CachedXrpPendingDeposit>();
   for (const p of pending) {
@@ -169,7 +201,11 @@ function writeCachedPendingDeposits(pending: XrpPendingDepositView[], owner = cu
       updatedAtMs: Date.now(),
     });
   }
-  localStorage.setItem(pendingCacheKey(owner), JSON.stringify([...deduped.values()]));
+  const stored: StoredXrpPendingDeposit[] = [...deduped.values()].map((p) => ({
+    ...p,
+    reserveBaseDrops: toDropsBigInt(p.reserveBaseDrops).toString(),
+  }));
+  persist(pendingCacheKey(owner), JSON.stringify(stored));
 }
 
 function rememberPendingDeposit(pending: XrpPendingDepositView, owner = currentPrincipalText()) {
