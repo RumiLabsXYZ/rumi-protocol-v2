@@ -1362,6 +1362,36 @@ export const idlFactory = ({ IDL }) => {
     'Ok' : ChainStabilityPoolLiquidationResult,
     'Err' : ProtocolError,
   });
+  const SolSpPayoutAllocation = IDL.Record({
+    'claimant' : IDL.Principal,
+    'lamports' : IDL.Nat64,
+    'payout_address' : IDL.Text,
+  });
+  const SolSpAbsorbRequest = IDL.Record({
+    'vault_id' : IDL.Nat64,
+    'allocations' : IDL.Vec(SolSpPayoutAllocation),
+    'icusd_burned_e8s' : IDL.Nat64,
+    'proof' : SpWritedownProof,
+  });
+  const SolSpPayoutClaim = IDL.Record({
+    'claim_id' : IDL.Nat64,
+    'claimant' : IDL.Principal,
+    'lamports' : IDL.Nat64,
+    'payout_address' : IDL.Text,
+  });
+  const SolSpAbsorbResult = IDL.Record({
+    'collateral_received_lamports' : IDL.Nat64,
+    'collateral_price_e8s' : IDL.Nat64,
+    'liquidated_debt_e8s' : IDL.Nat64,
+    'block_index' : IDL.Nat64,
+    'vault_id' : IDL.Nat64,
+    'payout_claims' : IDL.Vec(SolSpPayoutClaim),
+    'success' : IDL.Bool,
+  });
+  const Result_22 = IDL.Variant({
+    'Ok' : SolSpAbsorbResult,
+    'Err' : ProtocolError,
+  });
   const XrpSpPayoutAllocation = IDL.Record({
     'claimant' : IDL.Principal,
     'destination_tag' : IDL.Opt(IDL.Nat32),
@@ -1390,8 +1420,19 @@ export const idlFactory = ({ IDL }) => {
     'collateral_received_drops' : IDL.Nat64,
     'success' : IDL.Bool,
   });
-  const Result_22 = IDL.Variant({
+  const Result_23 = IDL.Variant({
     'Ok' : XrpSpAbsorbResult,
+    'Err' : ProtocolError,
+  });
+  const SolSpAbsorbPreflight = IDL.Record({
+    'collateral_received_lamports' : IDL.Nat64,
+    'collateral_price_e8s' : IDL.Nat64,
+    'icusd_burn_e8s' : IDL.Nat64,
+    'vault_id' : IDL.Nat64,
+    'expires_at_ns' : IDL.Nat64,
+  });
+  const Result_24 = IDL.Variant({
+    'Ok' : SolSpAbsorbPreflight,
     'Err' : ProtocolError,
   });
   const XrpSpAbsorbPreflight = IDL.Record({
@@ -1401,11 +1442,11 @@ export const idlFactory = ({ IDL }) => {
     'collateral_received_drops' : IDL.Nat64,
     'expires_at_ns' : IDL.Nat64,
   });
-  const Result_23 = IDL.Variant({
+  const Result_25 = IDL.Variant({
     'Ok' : XrpSpAbsorbPreflight,
     'Err' : ProtocolError,
   });
-  const Result_24 = IDL.Variant({ 'Ok' : IDL.Nat32, 'Err' : ProtocolError });
+  const Result_26 = IDL.Variant({ 'Ok' : IDL.Nat32, 'Err' : ProtocolError });
   return IDL.Service({
     'add_collateral_token' : IDL.Func([AddCollateralArg], [Result], []),
     'add_margin_to_vault' : IDL.Func([VaultArg], [Result_1], []),
@@ -2177,6 +2218,11 @@ export const idlFactory = ({ IDL }) => {
         [Result_20],
         [],
       ),
+    'stability_pool_liquidate_sol_vault' : IDL.Func(
+        [SolSpAbsorbRequest],
+        [Result_22],
+        [],
+      ),
     'stability_pool_liquidate_with_reserves' : IDL.Func(
         [IDL.Nat64, IDL.Nat64, IDL.Nat64, IDL.Principal],
         [Result_20],
@@ -2184,7 +2230,7 @@ export const idlFactory = ({ IDL }) => {
       ),
     'stability_pool_liquidate_xrp_vault' : IDL.Func(
         [XrpSpAbsorbRequest],
-        [Result_22],
+        [Result_23],
         [],
       ),
     'stability_pool_preflight_chain_absorb' : IDL.Func(
@@ -2192,9 +2238,19 @@ export const idlFactory = ({ IDL }) => {
         [Result],
         [],
       ),
+    'stability_pool_preflight_sol_absorb' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [Result_24],
+        [],
+      ),
     'stability_pool_preflight_xrp_absorb' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
-        [Result_23],
+        [Result_25],
+        [],
+      ),
+    'stability_pool_sol_claim_outstanding' : IDL.Func(
+        [IDL.Nat64, IDL.Principal],
+        [Result_16],
         [],
       ),
     'stability_pool_xrp_claim_outstanding' : IDL.Func(
@@ -2202,7 +2258,7 @@ export const idlFactory = ({ IDL }) => {
         [Result_16],
         [],
       ),
-    'submit_burn_proof' : IDL.Func([IDL.Nat32, IDL.Text], [Result_24], []),
+    'submit_burn_proof' : IDL.Func([IDL.Nat32, IDL.Text], [Result_26], []),
     'sweep_sol_pending_open' : IDL.Func([IDL.Nat64], [Result], []),
     'sweep_xrp_pending_open' : IDL.Func([IDL.Nat64], [Result], []),
     'unfreeze_protocol' : IDL.Func([], [Result], []),

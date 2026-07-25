@@ -166,6 +166,7 @@ pub fn default_interest_split() -> Vec<InterestRecipient> {
 pub const DUST_DEBT_THRESHOLD: u64 = 50_000; // 0.0005 icUSD — debt below this is forgiven on withdrawal
 pub const MAX_SP_CHAIN_ABSORB_RESULTS_BY_PROOF: usize = 10_000;
 pub const MAX_SP_XRP_ABSORB_RESULTS_BY_PROOF: usize = 10_000;
+pub const MAX_SP_SOL_ABSORB_RESULTS_BY_PROOF: usize = 10_000;
 
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub struct StoredChainSpAbsorbResult {
@@ -190,6 +191,19 @@ pub struct StoredXrpSpAbsorbResult {
     pub proof_block_index: u64,
     pub allocation_fingerprint: Vec<u8>,
     pub result: crate::XrpSpAbsorbResult,
+    pub accepted_at_ns: u64,
+}
+
+/// SOL analogue of `StoredXrpSpAbsorbResult`.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct StoredSolSpAbsorbResult {
+    pub caller: Principal,
+    pub vault_id: u64,
+    pub icusd_burned_e8s: u64,
+    pub proof_ledger: crate::icrc3_proof::SpProofLedger,
+    pub proof_block_index: u64,
+    pub allocation_fingerprint: Vec<u8>,
+    pub result: crate::SolSpAbsorbResult,
     pub accepted_at_ns: u64,
 }
 
@@ -1845,6 +1859,13 @@ pub struct State {
     #[serde(default)]
     pub sp_xrp_absorb_results_by_proof:
         BTreeMap<(crate::icrc3_proof::SpProofLedger, u64), StoredXrpSpAbsorbResult>,
+    /// SOL analogue of `sp_xrp_absorb_preflights` (design doc §6).
+    #[serde(default)]
+    pub sp_sol_absorb_preflights: BTreeMap<u64, StoredSolSpAbsorbPreflight>,
+    /// SOL analogue of `sp_xrp_absorb_results_by_proof`.
+    #[serde(default)]
+    pub sp_sol_absorb_results_by_proof:
+        BTreeMap<(crate::icrc3_proof::SpProofLedger, u64), StoredSolSpAbsorbResult>,
 
     // ─── Wave-8e LIQ-005: bad-debt deficit account ───
     //
@@ -2183,6 +2204,18 @@ pub struct StoredXrpSpAbsorbPreflight {
     pub expires_at_ns: u64,
 }
 
+/// SOL analogue of `StoredXrpSpAbsorbPreflight`. Amounts are in lamports.
+#[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct StoredSolSpAbsorbPreflight {
+    pub caller: Principal,
+    pub vault_id: u64,
+    pub icusd_burn_e8s: u64,
+    pub total_to_seize_lamports: u64,
+    pub collateral_received_lamports: u64,
+    pub collateral_price_e8s: u64,
+    pub expires_at_ns: u64,
+}
+
 /// Serde-only fallback: provides zero/empty/None defaults for fields missing from
 /// old CBOR snapshots. Never used for actual State construction (use From<InitArg>).
 impl Default for State {
@@ -2309,6 +2342,8 @@ impl Default for State {
             sp_chain_absorb_preflights: BTreeMap::new(),
             sp_xrp_absorb_preflights: BTreeMap::new(),
             sp_xrp_absorb_results_by_proof: BTreeMap::new(),
+            sp_sol_absorb_preflights: BTreeMap::new(),
+            sp_sol_absorb_results_by_proof: BTreeMap::new(),
             // Wave-8e LIQ-005
             protocol_deficit_icusd: ICUSD::new(0),
             total_deficit_repaid_icusd: ICUSD::new(0),
@@ -2590,6 +2625,8 @@ impl From<InitArg> for State {
             sp_chain_absorb_preflights: BTreeMap::new(),
             sp_xrp_absorb_preflights: BTreeMap::new(),
             sp_xrp_absorb_results_by_proof: BTreeMap::new(),
+            sp_sol_absorb_preflights: BTreeMap::new(),
+            sp_sol_absorb_results_by_proof: BTreeMap::new(),
             // Wave-8e LIQ-005
             protocol_deficit_icusd: ICUSD::new(0),
             total_deficit_repaid_icusd: ICUSD::new(0),

@@ -1031,9 +1031,11 @@ type Result_21 = variant {
   Ok : ChainStabilityPoolLiquidationResult;
   Err : ProtocolError;
 };
-type Result_22 = variant { Ok : XrpSpAbsorbResult; Err : ProtocolError };
-type Result_23 = variant { Ok : XrpSpAbsorbPreflight; Err : ProtocolError };
-type Result_24 = variant { Ok : nat32; Err : ProtocolError };
+type Result_22 = variant { Ok : SolSpAbsorbResult; Err : ProtocolError };
+type Result_23 = variant { Ok : XrpSpAbsorbResult; Err : ProtocolError };
+type Result_24 = variant { Ok : SolSpAbsorbPreflight; Err : ProtocolError };
+type Result_25 = variant { Ok : XrpSpAbsorbPreflight; Err : ProtocolError };
+type Result_26 = variant { Ok : nat32; Err : ProtocolError };
 type Result_3 = variant {
   Ok : vec record { principal; text };
   Err : ProtocolError;
@@ -1066,6 +1068,39 @@ type SolSettlement = record {
   signature : text;
   nonce_value : text;
   submitted_at_ns : nat64;
+};
+type SolSpAbsorbPreflight = record {
+  collateral_received_lamports : nat64;
+  collateral_price_e8s : nat64;
+  icusd_burn_e8s : nat64;
+  vault_id : nat64;
+  expires_at_ns : nat64;
+};
+type SolSpAbsorbRequest = record {
+  vault_id : nat64;
+  allocations : vec SolSpPayoutAllocation;
+  icusd_burned_e8s : nat64;
+  proof : SpWritedownProof;
+};
+type SolSpAbsorbResult = record {
+  collateral_received_lamports : nat64;
+  collateral_price_e8s : nat64;
+  liquidated_debt_e8s : nat64;
+  block_index : nat64;
+  vault_id : nat64;
+  payout_claims : vec SolSpPayoutClaim;
+  success : bool;
+};
+type SolSpPayoutAllocation = record {
+  claimant : principal;
+  lamports : nat64;
+  payout_address : text;
+};
+type SolSpPayoutClaim = record {
+  claim_id : nat64;
+  claimant : principal;
+  lamports : nat64;
+  payout_address : text;
 };
 type SolVaultOpenInfo = record {
   custody_address : text;
@@ -1573,14 +1608,17 @@ service : (ProtocolArg) -> {
   stability_pool_liquidate_debt_burned : (nat64, nat64, SpWritedownProof) -> (
       Result_20,
     );
+  stability_pool_liquidate_sol_vault : (SolSpAbsorbRequest) -> (Result_22);
   stability_pool_liquidate_with_reserves : (nat64, nat64, nat64, principal) -> (
       Result_20,
     );
-  stability_pool_liquidate_xrp_vault : (XrpSpAbsorbRequest) -> (Result_22);
+  stability_pool_liquidate_xrp_vault : (XrpSpAbsorbRequest) -> (Result_23);
   stability_pool_preflight_chain_absorb : (nat64, nat64) -> (Result);
-  stability_pool_preflight_xrp_absorb : (nat64, nat64) -> (Result_23);
+  stability_pool_preflight_sol_absorb : (nat64, nat64) -> (Result_24);
+  stability_pool_preflight_xrp_absorb : (nat64, nat64) -> (Result_25);
+  stability_pool_sol_claim_outstanding : (nat64, principal) -> (Result_16);
   stability_pool_xrp_claim_outstanding : (nat64, principal) -> (Result_16);
-  submit_burn_proof : (nat32, text) -> (Result_24);
+  submit_burn_proof : (nat32, text) -> (Result_26);
   sweep_sol_pending_open : (nat64) -> (Result);
   sweep_xrp_pending_open : (nat64) -> (Result);
   unfreeze_protocol : () -> (Result);

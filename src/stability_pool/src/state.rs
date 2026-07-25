@@ -77,6 +77,9 @@ pub struct StabilityPoolState {
     /// not yet finalized local depositor payout reminders.
     #[serde(default)]
     pub pending_native_xrp_absorbs: Option<BTreeMap<u64, NativeXrpAbsorbIntent>>,
+    /// SOL analogue of `pending_native_xrp_absorbs`.
+    #[serde(default)]
+    pub pending_native_sol_absorbs: Option<BTreeMap<u64, NativeSolAbsorbIntent>>,
     /// Disabled-by-default automatic chain absorb scheduler configuration.
     #[serde(default)]
     pub chain_absorb_auto_config: Option<ChainAbsorbAutoConfig>,
@@ -160,6 +163,7 @@ impl Default for StabilityPoolState {
             pending_chain_absorbs: Some(BTreeMap::new()),
             completed_chain_absorbs: Some(BTreeMap::new()),
             pending_native_xrp_absorbs: Some(BTreeMap::new()),
+            pending_native_sol_absorbs: Some(BTreeMap::new()),
             chain_absorb_auto_config: Some(ChainAbsorbAutoConfig::default()),
             chain_absorb_auto_last_tick: None,
             completed_cfx_claim_payout_recoveries: Some(BTreeMap::new()),
@@ -201,9 +205,11 @@ const MAX_POOL_EVENTS: usize = 10_000;
 pub const MAX_PENDING_REFUNDS: usize = 10_000;
 pub const MAX_PENDING_CHAIN_ABSORBS: usize = 1_000;
 pub const MAX_PENDING_NATIVE_XRP_ABSORBS: usize = 1_000;
+pub const MAX_PENDING_NATIVE_SOL_ABSORBS: usize = 1_000;
 pub const MAX_COMPLETED_CHAIN_ABSORBS: usize = 10_000;
 pub const MAX_COMPLETED_CFX_CLAIM_PAYOUT_RECOVERIES: usize = 10_000;
 pub const MAX_XRP_SP_PAYOUT_ALLOCATIONS: usize = 500;
+pub const MAX_SOL_SP_PAYOUT_ALLOCATIONS: usize = 500;
 
 impl StabilityPoolState {
     pub fn initialize(&mut self, args: StabilityPoolInitArgs) {
@@ -532,17 +538,28 @@ impl StabilityPoolState {
     }
 
     /// Native/off-IC collateral cannot be paid out by an ICRC ledger transfer.
-    /// Today XRP is the only such collateral in the SP registry. It is opt-in by
-    /// stored payout address rather than opt-out by default.
+    /// XRP and native SOL are the such collateral types in the SP registry. Both
+    /// are opt-in by stored payout address rather than opt-out by default.
     pub fn collateral_requires_payout_address(&self, collateral_type: &Principal) -> bool {
-        // Gate strictly on the native-XRP synthetic principal identity. XRP is
-        // registered in the SP under `xrp_collateral_principal()`, so this is
-        // exact. A symbol heuristic ("XRP") would misclassify any future
-        // chain-registered collateral that happens to carry the XRP symbol
-        // (e.g. bridged XRP on an EVM sidechain): it would route a CFX-style
-        // sentinel opt-in through the payout-address branch and silently break
-        // that depositor's absorption. Identity-only avoids that hazard.
+        // Gate strictly on the native-XRP / native-SOL synthetic principal
+        // identity. Both are registered in the SP under their respective
+        // `*_collateral_principal()` helper, so this is exact. A symbol
+        // heuristic ("XRP"/"SOL") would misclassify any future chain-registered
+        // collateral that happens to carry one of those symbols (e.g. bridged
+        // XRP or SOL on an EVM sidechain): it would route a CFX-style sentinel
+        // opt-in through the payout-address branch and silently break that
+        // depositor's absorption. Identity-only avoids that hazard.
+        self.is_native_xrp_collateral(collateral_type) || self.is_native_sol_collateral(collateral_type)
+    }
+
+    /// True iff `collateral_type` is the native-XRP synthetic principal.
+    pub fn is_native_xrp_collateral(&self, collateral_type: &Principal) -> bool {
         *collateral_type == rumi_protocol_backend::state::xrp_collateral_principal()
+    }
+
+    /// True iff `collateral_type` is the native-SOL synthetic principal.
+    pub fn is_native_sol_collateral(&self, collateral_type: &Principal) -> bool {
+        *collateral_type == rumi_protocol_backend::state::sol_collateral_principal()
     }
 
     pub fn native_payout_address(
@@ -1010,8 +1027,21 @@ impl StabilityPoolState {
         self.pending_native_xrp_absorb_count() > 0
     }
 
+    pub fn pending_native_sol_absorb_count(&self) -> usize {
+        self.pending_native_sol_absorbs
+            .as_ref()
+            .map(|m| m.len())
+            .unwrap_or(0)
+    }
+
+    pub fn has_pending_native_sol_absorbs(&self) -> bool {
+        self.pending_native_sol_absorb_count() > 0
+    }
+
     pub fn has_pending_pool_absorbs(&self) -> bool {
-        self.has_pending_chain_absorbs() || self.has_pending_native_xrp_absorbs()
+        self.has_pending_chain_absorbs()
+            || self.has_pending_native_xrp_absorbs()
+            || self.has_pending_native_sol_absorbs()
     }
 
     pub fn pending_chain_absorb_status(&self, vault_id: u64) -> Option<ChainSpAbsorbIntentStatus> {
@@ -1093,6 +1123,44 @@ impl StabilityPoolState {
         vault_id: u64,
     ) -> Option<NativeXrpAbsorbIntent> {
         self.pending_native_xrp_absorbs
+            .as_mut()
+            .and_then(|m| m.remove(&vault_id))
+    }
+
+    pub fn pending_native_sol_absorbs(&self) -> Vec<NativeSolAbsorbIntent> {
+        self.pending_native_sol_absorbs
+            .as_ref()
+            .map(|m| m.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn get_pending_native_sol_absorb(&self, vault_id: u64) -> Option<NativeSolAbsorbIntent> {
+        self.pending_native_sol_absorbs
+            .as_ref()
+            .and_then(|m| m.get(&vault_id).cloned())
+    }
+
+    pub fn put_pending_native_sol_absorb(
+        &mut self,
+        intent: NativeSolAbsorbIntent,
+    ) -> Result<(), StabilityPoolError> {
+        let pending = self
+            .pending_native_sol_absorbs
+            .get_or_insert_with(BTreeMap::new);
+        if !pending.contains_key(&intent.vault_id)
+            && pending.len() >= MAX_PENDING_NATIVE_SOL_ABSORBS
+        {
+            return Err(StabilityPoolError::SystemBusy);
+        }
+        pending.insert(intent.vault_id, intent);
+        Ok(())
+    }
+
+    pub fn take_pending_native_sol_absorb(
+        &mut self,
+        vault_id: u64,
+    ) -> Option<NativeSolAbsorbIntent> {
+        self.pending_native_sol_absorbs
             .as_mut()
             .and_then(|m| m.remove(&vault_id))
     }
@@ -1353,9 +1421,28 @@ impl StabilityPoolState {
             return self.opt_in_collateral(user, collateral_type);
         }
 
+        let is_sol = self.is_native_sol_collateral(&collateral_type);
+        if is_sol && destination_tag.is_some() {
+            // SOL has no destination-tag analogue (design doc §5.2/§9). Reject
+            // explicitly rather than silently dropping the caller-supplied tag,
+            // which would look like success while quietly discarding input.
+            return Err(StabilityPoolError::InvalidPayoutAddress {
+                reason: "native SOL does not support a destination tag".to_string(),
+            });
+        }
+
         let address = payout_address.trim().to_string();
-        rumi_protocol_backend::chains::xrp::address::account_id_from_classic_address(&address)
-            .map_err(|reason| StabilityPoolError::InvalidPayoutAddress { reason })?;
+        if is_sol {
+            if !rumi_protocol_backend::chains::sol::address::is_valid_sol_address(&address) {
+                return Err(StabilityPoolError::InvalidPayoutAddress {
+                    reason: "invalid SOL address: must be base58-encoded and on the Ed25519 curve"
+                        .to_string(),
+                });
+            }
+        } else {
+            rumi_protocol_backend::chains::xrp::address::account_id_from_classic_address(&address)
+                .map_err(|reason| StabilityPoolError::InvalidPayoutAddress { reason })?;
+        }
 
         let position = self
             .deposits
@@ -1576,6 +1663,203 @@ impl StabilityPoolState {
         Ok(allocations)
     }
 
+    /// SOL analogue of `build_native_xrp_payout_allocations`. Mirrors it
+    /// exactly: deterministic principal-byte ordering, opt-in-only denominator,
+    /// dust routed to the first sorted depositor, `MAX_SOL_SP_PAYOUT_ALLOCATIONS`
+    /// bound. The only structural difference is `lamports` instead of `drops`
+    /// and no destination-tag field (SOL has no analogue).
+    pub fn build_native_sol_payout_allocations(
+        &self,
+        collateral_type: Principal,
+        stables_consumed: &BTreeMap<Principal, u64>,
+        collateral_received_lamports: u64,
+    ) -> Result<Vec<NativeSolPayoutAllocation>, StabilityPoolError> {
+        if !self.collateral_requires_payout_address(&collateral_type) {
+            return Err(StabilityPoolError::PayoutAddressRequired {
+                collateral: collateral_type,
+            });
+        }
+        if collateral_received_lamports == 0 {
+            return Err(StabilityPoolError::LiquidationFailed {
+                vault_id: 0,
+                reason: "native SOL allocation has zero lamports".to_string(),
+            });
+        }
+
+        let mut eligible_principals: Vec<Principal> = self
+            .deposits
+            .iter()
+            .filter(|(_, pos)| self.position_opted_in_for(pos, &collateral_type))
+            .filter(|(_, pos)| {
+                stables_consumed
+                    .keys()
+                    .any(|token| pos.stablecoin_balances.get(token).copied().unwrap_or(0) > 0)
+            })
+            .map(|(principal, _)| *principal)
+            .collect();
+        eligible_principals.sort_by(|a, b| a.as_slice().cmp(b.as_slice()));
+        if eligible_principals.is_empty() {
+            return Err(StabilityPoolError::InsufficientPoolBalance);
+        }
+
+        let mut per_token_opted_in_totals: BTreeMap<Principal, u64> = BTreeMap::new();
+        for token_ledger in stables_consumed.keys() {
+            let total: u64 = eligible_principals
+                .iter()
+                .filter_map(|principal| self.deposits.get(principal))
+                .map(|pos| {
+                    pos.stablecoin_balances
+                        .get(token_ledger)
+                        .copied()
+                        .unwrap_or(0)
+                })
+                .sum();
+            per_token_opted_in_totals.insert(*token_ledger, total);
+        }
+
+        let vps = self.virtual_prices().clone();
+        let registry_snapshot: BTreeMap<Principal, (u8, bool)> = stables_consumed
+            .keys()
+            .filter_map(|ledger| {
+                self.stablecoin_registry
+                    .get(ledger)
+                    .map(|c| (*ledger, (c.decimals, c.is_lp_token.unwrap_or(false))))
+            })
+            .collect();
+        let total_consumed_e8s: u64 = stables_consumed
+            .iter()
+            .map(|(ledger, &amount)| {
+                let (decimals, is_lp) =
+                    registry_snapshot.get(ledger).copied().unwrap_or((8, false));
+                if is_lp {
+                    vps.get(ledger)
+                        .map(|&vp| lp_to_usd_e8s(amount, vp))
+                        .unwrap_or(0)
+                } else {
+                    normalize_to_e8s(amount, decimals)
+                }
+            })
+            .sum();
+        if total_consumed_e8s == 0 {
+            return Err(StabilityPoolError::InsufficientPoolBalance);
+        }
+
+        struct Candidate {
+            allocation: NativeSolPayoutAllocation,
+            consumed_e8s: u64,
+        }
+
+        let mut candidates: Vec<Candidate> = Vec::new();
+        for principal in eligible_principals {
+            let Some(position) = self.deposits.get(&principal) else {
+                continue;
+            };
+            let payout_address = position
+                .native_payout_addresses
+                .as_ref()
+                .and_then(|addresses| addresses.get(&collateral_type))
+                .cloned()
+                .unwrap_or_default();
+            if payout_address.trim().is_empty() {
+                return Err(StabilityPoolError::PayoutAddressRequired {
+                    collateral: collateral_type,
+                });
+            }
+
+            let mut user_consumed_e8s: u64 = 0;
+            for (token_ledger, &total_consumed) in stables_consumed {
+                let total_opted_in = per_token_opted_in_totals
+                    .get(token_ledger)
+                    .copied()
+                    .unwrap_or(0);
+                if total_opted_in == 0 {
+                    continue;
+                }
+                let user_balance = position
+                    .stablecoin_balances
+                    .get(token_ledger)
+                    .copied()
+                    .unwrap_or(0);
+                if user_balance == 0 {
+                    continue;
+                }
+
+                let user_share_native =
+                    (total_consumed as u128 * user_balance as u128 / total_opted_in as u128) as u64;
+                let user_share_native = user_share_native.min(user_balance);
+                let (decimals, is_lp) = registry_snapshot
+                    .get(token_ledger)
+                    .copied()
+                    .unwrap_or((8, false));
+                let share_e8s = if is_lp {
+                    vps.get(token_ledger)
+                        .map(|&vp| lp_to_usd_e8s(user_share_native, vp))
+                        .unwrap_or(0)
+                } else {
+                    normalize_to_e8s(user_share_native, decimals)
+                };
+                user_consumed_e8s = user_consumed_e8s.saturating_add(share_e8s);
+            }
+
+            candidates.push(Candidate {
+                allocation: NativeSolPayoutAllocation {
+                    claimant: principal,
+                    payout_address,
+                    lamports: 0,
+                },
+                consumed_e8s: user_consumed_e8s,
+            });
+        }
+        if candidates.is_empty() {
+            return Err(StabilityPoolError::InsufficientPoolBalance);
+        }
+
+        let consumed_floor_total: u64 = candidates
+            .iter()
+            .map(|candidate| candidate.consumed_e8s)
+            .sum();
+        let consumed_dust = total_consumed_e8s.saturating_sub(consumed_floor_total);
+        if consumed_dust > 0 {
+            candidates[0].consumed_e8s = candidates[0].consumed_e8s.saturating_add(consumed_dust);
+        }
+
+        let mut allocations = Vec::new();
+        let mut total_allocated: u64 = 0;
+        for candidate in &candidates {
+            let lamports = (collateral_received_lamports as u128 * candidate.consumed_e8s as u128
+                / total_consumed_e8s as u128) as u64;
+            if lamports > 0 {
+                let mut allocation = candidate.allocation.clone();
+                allocation.lamports = lamports;
+                total_allocated = total_allocated.saturating_add(lamports);
+                allocations.push(allocation);
+            }
+        }
+
+        let dust = collateral_received_lamports.saturating_sub(total_allocated);
+        if dust > 0 {
+            if let Some(first) = allocations.first_mut() {
+                first.lamports = first.lamports.saturating_add(dust);
+            } else if let Some(candidate) = candidates.first() {
+                let mut allocation = candidate.allocation.clone();
+                allocation.lamports = dust;
+                allocations.push(allocation);
+            }
+        }
+
+        if allocations.len() > MAX_SOL_SP_PAYOUT_ALLOCATIONS {
+            return Err(StabilityPoolError::LiquidationFailed {
+                vault_id: 0,
+                reason: format!(
+                    "native SOL payout fanout {} exceeds max {}",
+                    allocations.len(),
+                    MAX_SOL_SP_PAYOUT_ALLOCATIONS
+                ),
+            });
+        }
+        Ok(allocations)
+    }
+
     // ─── Pending Refunds (audit IC-S-001) ───
 
     /// Record tokens the pool owes `user` after a failed `deposit_as_3usd`
@@ -1681,6 +1965,58 @@ impl StabilityPoolState {
             .deposits
             .get_mut(user)
             .and_then(|pos| pos.pending_native_xrp_payouts.as_mut())
+            .and_then(|payouts| payouts.remove(&claim_id));
+        if removed.is_none() {
+            return Err(StabilityPoolError::RefundClaimNotFound);
+        }
+        Ok(())
+    }
+
+    pub fn record_native_sol_pending_payout(
+        &mut self,
+        user: Principal,
+        payout: NativeSolPendingPayout,
+    ) -> Result<(), StabilityPoolError> {
+        let position = self
+            .deposits
+            .get_mut(&user)
+            .ok_or(StabilityPoolError::NoPositionFound)?;
+        position
+            .pending_native_sol_payouts
+            .get_or_insert_with(BTreeMap::new)
+            .insert(payout.claim_id, payout);
+        Ok(())
+    }
+
+    pub fn native_sol_pending_payouts_for(&self, user: &Principal) -> Vec<NativeSolPendingPayout> {
+        self.deposits
+            .get(user)
+            .and_then(|pos| pos.pending_native_sol_payouts.as_ref())
+            .map(|payouts| payouts.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn native_sol_pending_payout_for(
+        &self,
+        user: &Principal,
+        claim_id: u64,
+    ) -> Option<NativeSolPendingPayout> {
+        self.deposits
+            .get(user)
+            .and_then(|pos| pos.pending_native_sol_payouts.as_ref())
+            .and_then(|payouts| payouts.get(&claim_id))
+            .cloned()
+    }
+
+    pub fn ack_native_sol_payout_settled(
+        &mut self,
+        user: &Principal,
+        claim_id: u64,
+    ) -> Result<(), StabilityPoolError> {
+        let removed = self
+            .deposits
+            .get_mut(user)
+            .and_then(|pos| pos.pending_native_sol_payouts.as_mut())
             .and_then(|payouts| payouts.remove(&claim_id));
         if removed.is_none() {
             return Err(StabilityPoolError::RefundClaimNotFound);
@@ -2172,6 +2508,245 @@ impl StabilityPoolState {
         Ok(())
     }
 
+    /// SOL analogue of `process_native_xrp_absorb_success_at`. Mirrors it
+    /// exactly: same validation order, same proportional stablecoin deduction
+    /// with remainder mop-up, same pending-payout bookkeeping. The only
+    /// structural difference is `lamports` instead of `drops` and no
+    /// destination-tag field. SOL amounts are never written into
+    /// `collateral_gains` (that field is the ICRC payout path); they only ever
+    /// land in `pending_native_sol_payouts`.
+    pub fn process_native_sol_absorb_success_at(
+        &mut self,
+        vault_id: u64,
+        collateral_type: Principal,
+        stables_consumed: &BTreeMap<Principal, u64>,
+        collateral_received_lamports: u64,
+        payout_claims: &[SolSpPayoutClaim],
+        timestamp: u64,
+    ) -> Result<(), StabilityPoolError> {
+        if !self.collateral_requires_payout_address(&collateral_type) {
+            return Err(StabilityPoolError::PayoutAddressRequired {
+                collateral: collateral_type,
+            });
+        }
+        if collateral_received_lamports == 0 || payout_claims.is_empty() {
+            return Err(StabilityPoolError::LiquidationFailed {
+                vault_id,
+                reason: "native SOL absorb has no payout allocations".to_string(),
+            });
+        }
+        if payout_claims.len() > MAX_SOL_SP_PAYOUT_ALLOCATIONS {
+            return Err(StabilityPoolError::LiquidationFailed {
+                vault_id,
+                reason: format!(
+                    "native SOL payout fanout {} exceeds max {}",
+                    payout_claims.len(),
+                    MAX_SOL_SP_PAYOUT_ALLOCATIONS
+                ),
+            });
+        }
+
+        let mut payout_sum = 0u64;
+        let mut seen_claim_ids = BTreeSet::new();
+        let mut seen_claimants = BTreeSet::new();
+        for claim in payout_claims {
+            if claim.lamports == 0 || claim.payout_address.trim().is_empty() {
+                return Err(StabilityPoolError::LiquidationFailed {
+                    vault_id,
+                    reason: "native SOL payout claim has invalid amount or address".to_string(),
+                });
+            }
+            if !seen_claim_ids.insert(claim.claim_id) || !seen_claimants.insert(claim.claimant) {
+                return Err(StabilityPoolError::LiquidationFailed {
+                    vault_id,
+                    reason: "native SOL payout claims contain duplicate ids or claimants"
+                        .to_string(),
+                });
+            }
+            let opted_in = self
+                .deposits
+                .get(&claim.claimant)
+                .map(|pos| self.position_opted_in_for(pos, &collateral_type))
+                .unwrap_or(false);
+            if !opted_in {
+                return Err(StabilityPoolError::LiquidationFailed {
+                    vault_id,
+                    reason: "backend returned native SOL payout for non-opted-in depositor"
+                        .to_string(),
+                });
+            }
+            payout_sum = payout_sum.saturating_add(claim.lamports);
+        }
+        if payout_sum != collateral_received_lamports {
+            return Err(StabilityPoolError::LiquidationFailed {
+                vault_id,
+                reason: "backend native SOL payout sum does not match preflight collateral"
+                    .to_string(),
+            });
+        }
+
+        let mut opted_in_principals: Vec<Principal> = self
+            .deposits
+            .iter()
+            .filter(|(_, pos)| self.position_opted_in_for(pos, &collateral_type))
+            .filter(|(_, pos)| {
+                stables_consumed
+                    .keys()
+                    .any(|token| pos.stablecoin_balances.get(token).copied().unwrap_or(0) > 0)
+            })
+            .map(|(principal, _)| *principal)
+            .collect();
+        opted_in_principals.sort_by(|a, b| a.as_slice().cmp(b.as_slice()));
+        if opted_in_principals.is_empty() {
+            return Err(StabilityPoolError::InsufficientPoolBalance);
+        }
+
+        let mut per_token_opted_in_totals: BTreeMap<Principal, u64> = BTreeMap::new();
+        for token_ledger in stables_consumed.keys() {
+            let total: u64 = opted_in_principals
+                .iter()
+                .filter_map(|principal| self.deposits.get(principal))
+                .map(|pos| {
+                    pos.stablecoin_balances
+                        .get(token_ledger)
+                        .copied()
+                        .unwrap_or(0)
+                })
+                .sum();
+            per_token_opted_in_totals.insert(*token_ledger, total);
+        }
+
+        let vps = self.virtual_prices().clone();
+        let registry_snapshot: BTreeMap<Principal, (u8, bool)> = stables_consumed
+            .keys()
+            .filter_map(|ledger| {
+                self.stablecoin_registry
+                    .get(ledger)
+                    .map(|c| (*ledger, (c.decimals, c.is_lp_token.unwrap_or(false))))
+            })
+            .collect();
+        let total_consumed_e8s: u64 = stables_consumed
+            .iter()
+            .map(|(ledger, &amount)| {
+                let (decimals, is_lp) =
+                    registry_snapshot.get(ledger).copied().unwrap_or((8, false));
+                if is_lp {
+                    vps.get(ledger)
+                        .map(|&vp| lp_to_usd_e8s(amount, vp))
+                        .unwrap_or(0)
+                } else {
+                    normalize_to_e8s(amount, decimals)
+                }
+            })
+            .sum();
+        if total_consumed_e8s == 0 {
+            return Err(StabilityPoolError::InsufficientPoolBalance);
+        }
+
+        let mut actual_deductions_per_token: BTreeMap<Principal, u64> = BTreeMap::new();
+        for principal in &opted_in_principals {
+            if let Some(position) = self.deposits.get_mut(principal) {
+                for (token_ledger, &total_consumed) in stables_consumed {
+                    let total_opted_in = per_token_opted_in_totals
+                        .get(token_ledger)
+                        .copied()
+                        .unwrap_or(0);
+                    if total_opted_in == 0 {
+                        continue;
+                    }
+                    let user_balance = position
+                        .stablecoin_balances
+                        .get(token_ledger)
+                        .copied()
+                        .unwrap_or(0);
+                    if user_balance == 0 {
+                        continue;
+                    }
+
+                    let user_share_native = (total_consumed as u128 * user_balance as u128
+                        / total_opted_in as u128)
+                        as u64;
+                    let user_share_native = user_share_native.min(user_balance);
+                    if let Some(balance) = position.stablecoin_balances.get_mut(token_ledger) {
+                        *balance = balance.saturating_sub(user_share_native);
+                    }
+                    *actual_deductions_per_token
+                        .entry(*token_ledger)
+                        .or_insert(0) += user_share_native;
+                }
+            }
+        }
+
+        for (token_ledger, &total_consumed) in stables_consumed {
+            let actual_deducted = actual_deductions_per_token
+                .get(token_ledger)
+                .copied()
+                .unwrap_or(0);
+            let mut remaining = total_consumed.saturating_sub(actual_deducted);
+            if remaining == 0 {
+                continue;
+            }
+
+            for principal in &opted_in_principals {
+                if remaining == 0 {
+                    break;
+                }
+                let Some(position) = self.deposits.get_mut(principal) else {
+                    continue;
+                };
+                let Some(balance) = position.stablecoin_balances.get_mut(token_ledger) else {
+                    continue;
+                };
+                if *balance == 0 {
+                    continue;
+                }
+                let extra = remaining.min(*balance);
+                *balance = balance.saturating_sub(extra);
+                *actual_deductions_per_token
+                    .entry(*token_ledger)
+                    .or_insert(0) += extra;
+                remaining -= extra;
+            }
+
+            if remaining > 0 {
+                return Err(StabilityPoolError::LiquidationFailed {
+                    vault_id,
+                    reason: "native SOL absorb could not deduct full burned stablecoin amount"
+                        .to_string(),
+                });
+            }
+        }
+
+        for (token_ledger, actual_deducted) in &actual_deductions_per_token {
+            if let Some(total) = self.total_stablecoin_balances.get_mut(token_ledger) {
+                *total = total.saturating_sub(*actual_deducted);
+            }
+        }
+
+        for claim in payout_claims {
+            self.record_native_sol_pending_payout(
+                claim.claimant,
+                NativeSolPendingPayout {
+                    claim_id: claim.claim_id,
+                    collateral_type,
+                    vault_id,
+                    lamports: claim.lamports,
+                    payout_address: claim.payout_address.clone(),
+                    created_at_ns: timestamp,
+                },
+            )?;
+        }
+
+        self.total_liquidations_executed += 1;
+        self.deposits.retain(|_, pos| !pos.is_empty());
+        debug_assert!(
+            self.validate_state().is_ok(),
+            "stability pool aggregate/per-depositor invariant violated after \
+             process_native_sol_absorb_success_at"
+        );
+        Ok(())
+    }
+
     /// Core liquidation gain processing logic with explicit timestamp (testable without IC runtime).
     pub fn process_liquidation_gains_at(
         &mut self,
@@ -2186,7 +2761,7 @@ impl StabilityPoolState {
             log!(
                 INFO,
                 "Rejecting generic liquidation gain processing for native collateral {} on vault {}; \
-                 native XRP requires backend XrpClaim-backed pending payout records",
+                 native XRP/SOL require backend claim-backed pending payout records",
                 collateral_type,
                 vault_id
             );
@@ -2882,6 +3457,7 @@ impl From<StabilityPoolStateV1> for StabilityPoolState {
             pending_chain_absorbs: Some(BTreeMap::new()),
             completed_chain_absorbs: Some(BTreeMap::new()),
             pending_native_xrp_absorbs: Some(BTreeMap::new()),
+            pending_native_sol_absorbs: Some(BTreeMap::new()),
             chain_absorb_auto_config: Some(ChainAbsorbAutoConfig::default()),
             chain_absorb_auto_last_tick: None,
             completed_cfx_claim_payout_recoveries: Some(BTreeMap::new()),
@@ -3024,6 +3600,27 @@ mod tests {
     fn valid_xrp_address() -> String {
         "rUn84CUYbNjRoTQ6mSW7BVJPSVJNLb1QLo".to_string()
     }
+    fn sol_ledger() -> Principal {
+        rumi_protocol_backend::state::sol_collateral_principal()
+    }
+    /// A real Ed25519 public key, base58-encoded. By construction it is on the
+    /// curve (a clamped-scalar times the base point), matching how
+    /// rumi_protocol_backend's `chains::sol::address` tests derive one.
+    fn valid_sol_address() -> String {
+        use ed25519_dalek::SigningKey;
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let pk = sk.verifying_key();
+        bs58::encode(pk.to_bytes()).into_string()
+    }
+    /// A real off-curve PDA, derived via `Pubkey::find_program_address` (the
+    /// same mechanism the backend's SPL ATA derivation uses), rather than a
+    /// hardcoded guess.
+    fn off_curve_sol_pda_address() -> String {
+        use solana_pubkey::Pubkey;
+        let program_id = Pubkey::new_from_array([9u8; 32]);
+        let (pda, _bump) = Pubkey::find_program_address(&[b"stability-pool-test"], &program_id);
+        bs58::encode(pda.as_ref()).into_string()
+    }
 
     /// Build a test state with:
     /// - icUSD (8 decimals, priority 1)
@@ -3081,6 +3678,12 @@ mod tests {
             ledger_id: xrp_ledger(),
             symbol: "XRP".to_string(),
             decimals: 6,
+            status: CollateralStatus::Active,
+        });
+        state.register_collateral(CollateralInfo {
+            ledger_id: sol_ledger(),
+            symbol: "SOL".to_string(),
+            decimals: 9,
             status: CollateralStatus::Active,
         });
 
@@ -3848,6 +4451,345 @@ mod tests {
             None,
         );
         assert_eq!(state.effective_pool_for_collateral(&xrp_ledger()), 0);
+    }
+
+    #[test]
+    fn sol_opt_in_rejects_malformed_address() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 10_00000000);
+
+        let err = state
+            .opt_in_native_collateral(&user_a(), sol_ledger(), "not-a-sol-address".to_string())
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            StabilityPoolError::InvalidPayoutAddress { .. }
+        ));
+        assert_eq!(state.native_payout_address(&user_a(), &sol_ledger()), None);
+        assert_eq!(state.effective_pool_for_collateral(&sol_ledger()), 0);
+    }
+
+    #[test]
+    fn sol_opt_in_rejects_off_curve_pda_address() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 10_00000000);
+
+        let pda = off_curve_sol_pda_address();
+        // Sanity: this decodes fine as 32 bytes of base58 (unlike the malformed
+        // case above); it must still be rejected because it is off-curve.
+        assert!(
+            rumi_protocol_backend::chains::sol::address::decode_sol_address(&pda).is_ok(),
+            "PDA must decode cleanly as 32 base58 bytes to exercise the on-curve check"
+        );
+
+        let err = state
+            .opt_in_native_collateral(&user_a(), sol_ledger(), pda)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            StabilityPoolError::InvalidPayoutAddress { .. }
+        ));
+        assert_eq!(state.native_payout_address(&user_a(), &sol_ledger()), None);
+        assert_eq!(state.effective_pool_for_collateral(&sol_ledger()), 0);
+    }
+
+    #[test]
+    fn sol_opt_in_accepts_valid_on_curve_address() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 10_00000000);
+
+        state
+            .opt_in_native_collateral(&user_a(), sol_ledger(), valid_sol_address())
+            .unwrap();
+
+        assert_eq!(
+            state.native_payout_address(&user_a(), &sol_ledger()),
+            Some(valid_sol_address())
+        );
+        assert_eq!(
+            state.effective_pool_for_collateral(&sol_ledger()),
+            10_00000000
+        );
+    }
+
+    #[test]
+    fn sol_opt_in_with_tag_is_rejected() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 10_00000000);
+
+        let err = state
+            .opt_in_native_collateral_with_tag(
+                &user_a(),
+                sol_ledger(),
+                valid_sol_address(),
+                Some(7),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, StabilityPoolError::InvalidPayoutAddress { .. }),
+            "SOL has no destination-tag analogue; a caller-supplied tag must be rejected, \
+             not silently dropped"
+        );
+        assert_eq!(
+            state.native_payout_address(&user_a(), &sol_ledger()),
+            None,
+            "a rejected opt-in must not partially apply the address either"
+        );
+    }
+
+    #[test]
+    fn sol_opt_out_clears_payout_address() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 10_00000000);
+
+        state
+            .opt_in_native_collateral(&user_a(), sol_ledger(), valid_sol_address())
+            .unwrap();
+        state.opt_out_collateral(&user_a(), sol_ledger()).unwrap();
+
+        assert_eq!(state.native_payout_address(&user_a(), &sol_ledger()), None);
+        assert_eq!(state.effective_pool_for_collateral(&sol_ledger()), 0);
+    }
+
+    #[test]
+    fn sol_sp_absorb_does_not_credit_icrc_collateral_gains() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
+        state
+            .opt_in_native_collateral(&user_a(), sol_ledger(), valid_sol_address())
+            .unwrap();
+
+        let mut consumed = BTreeMap::new();
+        consumed.insert(icusd_ledger(), 20_00000000);
+        state.process_liquidation_gains_at(
+            144,
+            sol_ledger(),
+            &consumed,
+            5_000_000,
+            50_00000000,
+            3_000_000_000,
+        );
+
+        let pos_a = state.deposits.get(&user_a()).unwrap();
+        assert_eq!(
+            pos_a
+                .stablecoin_balances
+                .get(&icusd_ledger())
+                .copied()
+                .unwrap_or(0),
+            100_00000000,
+            "unsafe generic SOL absorption must not deduct SP balances",
+        );
+        assert_eq!(
+            pos_a
+                .collateral_gains
+                .get(&sol_ledger())
+                .copied()
+                .unwrap_or(0),
+            0,
+            "native SOL must never enter ICRC collateral_gains",
+        );
+    }
+
+    /// Pro-rata allocation: only opted-in depositors are in the denominator,
+    /// ordering is deterministic (sorted by principal bytes ascending), dust
+    /// goes to the first sorted depositor, and — the conservation property —
+    /// the sum of allocated lamports exactly equals the collateral received
+    /// (no lamports lost or created by rounding).
+    #[test]
+    fn sol_allocation_conserves_lamports_orders_deterministically_and_excludes_opted_out() {
+        let mut state = test_state();
+        // Deliberately inserted out of principal-byte order.
+        add_deposit_direct(&mut state, user_b(), icusd_ledger(), 30_00000000);
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 70_00000000);
+        add_deposit_direct(&mut state, user_c(), icusd_ledger(), 1_000_00000000);
+        state
+            .opt_in_native_collateral(&user_b(), sol_ledger(), valid_sol_address())
+            .unwrap();
+        state
+            .opt_in_native_collateral(&user_a(), sol_ledger(), valid_sol_address())
+            .unwrap();
+        // user_c is NOT opted in and must be excluded from the denominator
+        // entirely, despite holding far more icUSD than a and b combined.
+
+        let mut consumed = BTreeMap::new();
+        consumed.insert(icusd_ledger(), 100_00000000); // only a + b's stake
+        let collateral_received_lamports: u64 = 7; // deliberately not evenly divisible
+
+        let allocations = state
+            .build_native_sol_payout_allocations(sol_ledger(), &consumed, collateral_received_lamports)
+            .unwrap();
+
+        assert_eq!(
+            allocations.len(),
+            2,
+            "only the two opted-in depositors may appear"
+        );
+        assert!(
+            allocations.iter().all(|a| a.claimant == user_a() || a.claimant == user_b()),
+            "opted-out user_c must never receive an allocation"
+        );
+        // Deterministic ordering: principals sorted ascending by byte representation.
+        let mut sorted_claimants: Vec<Principal> = allocations.iter().map(|a| a.claimant).collect();
+        let mut expected_order = sorted_claimants.clone();
+        expected_order.sort_by(|x, y| x.as_slice().cmp(y.as_slice()));
+        assert_eq!(
+            sorted_claimants, expected_order,
+            "allocation order must be deterministic (principal bytes ascending)"
+        );
+        assert_eq!(
+            allocations[0].claimant,
+            user_a(),
+            "user_a() sorts first by principal bytes and must be the dust recipient"
+        );
+        // user_a: floor(70e8 * 7 / 100e8) = 4, user_b: floor(30e8 * 7 / 100e8) = 2;
+        // total_allocated = 6, dust = 1, added to the first sorted entry (user_a).
+        assert_eq!(
+            allocations[0].lamports, 5,
+            "dust (1 lamport) must be added to the first sorted depositor's share"
+        );
+        assert_eq!(allocations[1].claimant, user_b());
+        assert_eq!(allocations[1].lamports, 2);
+        sorted_claimants.dedup();
+        assert_eq!(sorted_claimants.len(), 2, "no duplicate claimants");
+
+        // Conservation property: sum of allocated lamports == lamports received,
+        // exactly, with no loss or fabrication from rounding.
+        let total_allocated: u64 = allocations.iter().map(|a| a.lamports).sum();
+        assert_eq!(
+            total_allocated, collateral_received_lamports,
+            "conservation: sum of allocated lamports must exactly equal collateral received"
+        );
+    }
+
+    #[test]
+    fn sol_allocation_builder_rejects_over_500_native_sol_payouts_before_burn() {
+        let mut state = test_state();
+        for i in 0..501u16 {
+            let principal = Principal::from_slice(&i.to_be_bytes());
+            add_deposit_direct(&mut state, principal, icusd_ledger(), 1_00000000);
+            state
+                .opt_in_native_collateral(&principal, sol_ledger(), valid_sol_address())
+                .unwrap();
+        }
+        let before_total = state
+            .total_stablecoin_balances
+            .get(&icusd_ledger())
+            .copied();
+        let mut consumed = BTreeMap::new();
+        consumed.insert(icusd_ledger(), 501_00000000);
+
+        let err = state
+            .build_native_sol_payout_allocations(sol_ledger(), &consumed, 501)
+            .unwrap_err();
+
+        assert!(matches!(err, StabilityPoolError::LiquidationFailed { .. }));
+        assert_eq!(
+            state
+                .total_stablecoin_balances
+                .get(&icusd_ledger())
+                .copied(),
+            before_total,
+            "allocation fanout rejection must happen before any burn/accounting mutation",
+        );
+    }
+
+    #[test]
+    fn native_sol_absorb_deducts_full_burned_amount_when_shares_round_down() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_b(), icusd_ledger(), 1);
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 1);
+        state
+            .opt_in_native_collateral(&user_b(), sol_ledger(), valid_sol_address())
+            .unwrap();
+        state
+            .opt_in_native_collateral(&user_a(), sol_ledger(), valid_sol_address())
+            .unwrap();
+        let mut consumed = BTreeMap::new();
+        consumed.insert(icusd_ledger(), 1);
+        let payout_claims = vec![SolSpPayoutClaim {
+            claimant: user_a(),
+            claim_id: 77,
+            payout_address: valid_sol_address(),
+            lamports: 1,
+        }];
+
+        state
+            .process_native_sol_absorb_success_at(
+                42,
+                sol_ledger(),
+                &consumed,
+                1,
+                &payout_claims,
+                123,
+            )
+            .unwrap();
+
+        assert_eq!(
+            state
+                .deposits
+                .get(&user_a())
+                .and_then(|pos| pos.stablecoin_balances.get(&icusd_ledger()).copied()),
+            Some(0),
+        );
+        assert_eq!(
+            state
+                .deposits
+                .get(&user_b())
+                .and_then(|pos| pos.stablecoin_balances.get(&icusd_ledger()).copied()),
+            Some(1),
+        );
+        assert_eq!(
+            state
+                .total_stablecoin_balances
+                .get(&icusd_ledger())
+                .copied(),
+            Some(1),
+            "aggregate SP balance must drop by the full burned icUSD amount",
+        );
+        assert_eq!(state.native_sol_pending_payouts_for(&user_a()).len(), 1);
+    }
+
+    #[test]
+    fn pending_native_sol_payout_storage_and_ack_are_caller_scoped() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 10_00000000);
+        add_deposit_direct(&mut state, user_b(), icusd_ledger(), 10_00000000);
+        let payout = NativeSolPendingPayout {
+            claim_id: 42,
+            collateral_type: sol_ledger(),
+            vault_id: 144,
+            lamports: 123_456,
+            payout_address: valid_sol_address(),
+            created_at_ns: 999,
+        };
+
+        state
+            .record_native_sol_pending_payout(user_a(), payout.clone())
+            .unwrap();
+
+        assert_eq!(
+            state.native_sol_pending_payouts_for(&user_a()),
+            vec![payout.clone()],
+        );
+        assert_eq!(
+            state.native_sol_pending_payout_for(&user_a(), 42),
+            Some(payout.clone()),
+        );
+        assert_eq!(state.native_sol_pending_payout_for(&user_b(), 42), None);
+        assert!(state.native_sol_pending_payouts_for(&user_b()).is_empty());
+        assert!(matches!(
+            state.ack_native_sol_payout_settled(&user_b(), 42),
+            Err(StabilityPoolError::RefundClaimNotFound)
+        ));
+        assert_eq!(
+            state.native_sol_pending_payouts_for(&user_a()).len(),
+            1,
+            "wrong caller must not remove another user's pending SOL payout",
+        );
+
+        state.ack_native_sol_payout_settled(&user_a(), 42).unwrap();
+        assert!(state.native_sol_pending_payouts_for(&user_a()).is_empty());
     }
 
     #[test]

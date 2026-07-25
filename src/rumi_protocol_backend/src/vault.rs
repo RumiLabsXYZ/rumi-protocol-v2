@@ -1935,6 +1935,22 @@ fn reject_active_xrp_sp_absorb_preflight(vault_id: u64, now_ns: u64) -> Result<(
     read_state(|s| ensure_no_active_xrp_sp_absorb_preflight(s, vault_id, now_ns))
 }
 
+/// Combined native-custody guard called from every vault-mutation entry point
+/// that previously called `reject_active_xrp_sp_absorb_preflight` alone.
+/// Additive only: XRP vaults see byte-identical behavior (the XRP check runs
+/// first, unchanged); SOL vaults now get the same proactive protection XRP
+/// already had, so a SOL vault's collateral/debt cannot be mutated out from
+/// under a live SP preflight reservation between preflight and submit (the
+/// same reservation-collision hazard the XRP TTL guard was built to prevent).
+fn reject_active_native_sp_absorb_preflight(
+    vault_id: u64,
+    now_ns: u64,
+) -> Result<(), ProtocolError> {
+    reject_active_xrp_sp_absorb_preflight(vault_id, now_ns)?;
+    reject_active_sol_sp_absorb_preflight(vault_id, now_ns)?;
+    Ok(())
+}
+
 fn ensure_xrp_sp_absorb_preflight_vault(
     state: &crate::state::State,
     vault_id: u64,
@@ -2277,6 +2293,528 @@ pub fn stability_pool_liquidate_xrp_vault_in_state(
         accepted_at_ns: now_ns,
     };
     record_sp_xrp_absorb_result_bounded(state, proof_key, stored);
+    Ok(result)
+}
+
+// ─── SOL analogue of the XRP SP-absorb block above (design doc §6) ───
+//
+// Mirrors `xrp_sp_absorb_sizing` / `stability_pool_preflight_xrp_absorb_in_state` /
+// `stability_pool_liquidate_xrp_vault_in_state` exactly, including the B-1
+// (protocol-fee-cut claim) and B-2 (post-burn collateral/debt conservation
+// guards) fixes. The only structural differences: amounts are in lamports
+// instead of drops, and there is no destination-tag field/hashing (Solana has
+// no analogue — design doc §5.2/§9).
+
+pub const SOL_SP_ABSORB_PREFLIGHT_TTL_NS: u64 = 15 * 60 * 1_000_000_000;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SolSpAbsorbSizing {
+    preflight: crate::SolSpAbsorbPreflight,
+    total_to_seize_lamports: u64,
+}
+
+pub fn stability_pool_sol_claim_outstanding_in_state(
+    state: &crate::state::State,
+    caller: Principal,
+    claim_id: u64,
+    claimant: Principal,
+) -> Result<bool, ProtocolError> {
+    ensure_registered_sp(state, caller)?;
+    match state.sol_claims.get(&claim_id) {
+        Some(claim) if claim.claimant == claimant => Ok(true),
+        Some(_) => Err(ProtocolError::GenericError(format!(
+            "SOL claim #{claim_id} belongs to a different claimant"
+        ))),
+        None => Ok(false),
+    }
+}
+
+fn sol_sp_absorb_sizing(
+    state: &crate::state::State,
+    vault_id: u64,
+    expected_icusd_burn_e8s: u64,
+) -> Result<SolSpAbsorbSizing, ProtocolError> {
+    if expected_icusd_burn_e8s == 0 {
+        return Err(ProtocolError::GenericError(
+            "SOL SP absorb burn amount must be non-zero".to_string(),
+        ));
+    }
+    let vault = state
+        .vault_id_to_vaults
+        .get(&vault_id)
+        .ok_or_else(|| ProtocolError::GenericError(format!("Vault #{vault_id} not found")))?;
+    let cfg = state
+        .get_collateral_config(&vault.collateral_type)
+        .ok_or_else(|| {
+            ProtocolError::GenericError(format!("No collateral config for vault #{vault_id}"))
+        })?;
+    if !cfg.is_native_sol() {
+        return Err(ProtocolError::GenericError(
+            "SOL SP absorb requires a native-SOL vault".to_string(),
+        ));
+    }
+    if !cfg.status.allows_liquidation() {
+        return Err(ProtocolError::GenericError(
+            "Liquidation is not allowed for this collateral type.".to_string(),
+        ));
+    }
+    if vault.borrowed_icusd_amount.to_u64() != expected_icusd_burn_e8s {
+        return Err(ProtocolError::GenericError(format!(
+            "SOL SP absorb burn {} does not match live debt {} for vault {}",
+            expected_icusd_burn_e8s,
+            vault.borrowed_icusd_amount.to_u64(),
+            vault_id
+        )));
+    }
+    let price = state
+        .get_collateral_price_decimal(&vault.collateral_type)
+        .ok_or_else(|| {
+            ProtocolError::GenericError(
+                "No price available for collateral. Price feed may be down.".to_string(),
+            )
+        })?;
+    let price_usd = UsdIcp::from(price);
+    let cr = compute_collateral_ratio(vault, price_usd, state);
+    let min_liq = state.get_min_liquidation_ratio_for(&vault.collateral_type);
+    if cr >= min_liq {
+        return Err(ProtocolError::GenericError(format!(
+            "native-SOL vault {vault_id} is no longer liquidatable"
+        )));
+    }
+
+    let liquidation_amount = ICUSD::new(expected_icusd_burn_e8s);
+    let collateral_raw =
+        crate::numeric::icusd_to_collateral_amount(liquidation_amount, price, cfg.decimals);
+    let collateral_with_bonus =
+        ICP::from(collateral_raw) * state.get_liquidation_bonus_for(&vault.collateral_type);
+    let total_to_seize = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
+    let total_to_seize_lamports = total_to_seize.to_u64();
+    let bonus_portion = total_to_seize_lamports.saturating_sub(collateral_raw);
+    let protocol_cut = (Decimal::from(bonus_portion) * state.get_liquidation_protocol_share().0)
+        .to_u64()
+        .unwrap_or(0)
+        .min(total_to_seize_lamports);
+    let collateral_received_lamports = total_to_seize_lamports.saturating_sub(protocol_cut);
+    if collateral_received_lamports == 0 {
+        return Err(ProtocolError::GenericError(
+            "SOL SP absorb would receive zero collateral".to_string(),
+        ));
+    }
+
+    Ok(SolSpAbsorbSizing {
+        preflight: crate::SolSpAbsorbPreflight {
+            vault_id,
+            icusd_burn_e8s: expected_icusd_burn_e8s,
+            collateral_received_lamports,
+            collateral_price_e8s: price_usd.to_e8s(),
+            expires_at_ns: 0,
+        },
+        total_to_seize_lamports,
+    })
+}
+
+pub fn stability_pool_preflight_sol_absorb_in_state(
+    state: &mut crate::state::State,
+    caller: Principal,
+    vault_id: u64,
+    expected_icusd_burn_e8s: u64,
+    now_ns: u64,
+) -> Result<crate::SolSpAbsorbPreflight, ProtocolError> {
+    ensure_registered_sp(state, caller)?;
+    if state.frozen {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "Protocol is frozen. All operations are suspended pending admin review.".to_string(),
+        ));
+    }
+    if state.liquidation_frozen {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "Liquidations are currently frozen by admin.".to_string(),
+        ));
+    }
+    if state.sp_writedown_disabled {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "SP writedown path is disabled by admin".to_string(),
+        ));
+    }
+    if crate::guard::is_vault_liquidating(vault_id) {
+        return Err(ProtocolError::TemporarilyUnavailable(format!(
+            "Vault #{vault_id} has another operation in flight; retry shortly"
+        )));
+    }
+
+    let sizing = sol_sp_absorb_sizing(state, vault_id, expected_icusd_burn_e8s)?;
+    let mut preflight = sizing.preflight;
+    preflight.expires_at_ns = now_ns.saturating_add(SOL_SP_ABSORB_PREFLIGHT_TTL_NS);
+    state.sp_sol_absorb_preflights.insert(
+        vault_id,
+        crate::state::StoredSolSpAbsorbPreflight {
+            caller,
+            vault_id,
+            icusd_burn_e8s: expected_icusd_burn_e8s,
+            total_to_seize_lamports: sizing.total_to_seize_lamports,
+            collateral_received_lamports: preflight.collateral_received_lamports,
+            collateral_price_e8s: preflight.collateral_price_e8s,
+            expires_at_ns: preflight.expires_at_ns,
+        },
+    );
+    Ok(preflight)
+}
+
+/// Resolve the persisted preflight reservation for a POST-BURN submit. See
+/// `matching_xrp_absorb_preflight`'s doc comment for the full B-2 rationale
+/// (honoring an expired-but-present reservation is safe here for the same
+/// reasons: single-use burn proof, registered-SP-only caller, and the
+/// post-burn collateral/debt conservation guards below).
+fn matching_sol_absorb_preflight(
+    state: &crate::state::State,
+    vault_id: u64,
+    icusd_burned_e8s: u64,
+    caller: Principal,
+) -> Option<crate::state::StoredSolSpAbsorbPreflight> {
+    let preflight = state.sp_sol_absorb_preflights.get(&vault_id)?;
+    if preflight.caller == caller && preflight.icusd_burn_e8s == icusd_burned_e8s {
+        Some(preflight.clone())
+    } else {
+        None
+    }
+}
+
+fn ensure_no_active_sol_sp_absorb_preflight(
+    state: &crate::state::State,
+    vault_id: u64,
+    now_ns: u64,
+) -> Result<(), ProtocolError> {
+    if let Some(preflight) = state.sp_sol_absorb_preflights.get(&vault_id) {
+        if preflight.expires_at_ns >= now_ns {
+            return Err(ProtocolError::TemporarilyUnavailable(format!(
+                "Vault #{vault_id} has a pending native-SOL stability-pool liquidation reservation; retry after it expires or completes"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn reject_active_sol_sp_absorb_preflight(vault_id: u64, now_ns: u64) -> Result<(), ProtocolError> {
+    read_state(|s| ensure_no_active_sol_sp_absorb_preflight(s, vault_id, now_ns))
+}
+
+fn ensure_sol_sp_absorb_preflight_vault(
+    state: &crate::state::State,
+    vault_id: u64,
+) -> Result<&Vault, ProtocolError> {
+    let vault = state
+        .vault_id_to_vaults
+        .get(&vault_id)
+        .ok_or_else(|| ProtocolError::GenericError(format!("Vault #{vault_id} not found")))?;
+    let cfg = state
+        .get_collateral_config(&vault.collateral_type)
+        .ok_or_else(|| {
+            ProtocolError::GenericError(format!("No collateral config for vault #{vault_id}"))
+        })?;
+    if !cfg.is_native_sol() {
+        return Err(ProtocolError::GenericError(
+            "SOL SP absorb requires a native-SOL vault".to_string(),
+        ));
+    }
+    Ok(vault)
+}
+
+fn canonical_sol_allocations(
+    allocations: &[crate::SolSpPayoutAllocation],
+) -> Vec<crate::SolSpPayoutAllocation> {
+    let mut sorted = allocations.to_vec();
+    sorted.sort_by(|a, b| {
+        a.claimant
+            .as_slice()
+            .cmp(b.claimant.as_slice())
+            .then_with(|| a.payout_address.cmp(&b.payout_address))
+            .then_with(|| a.lamports.cmp(&b.lamports))
+    });
+    sorted
+}
+
+fn validate_sol_sp_allocations(
+    allocations: &[crate::SolSpPayoutAllocation],
+    expected_lamports: u64,
+) -> Result<Vec<crate::SolSpPayoutAllocation>, ProtocolError> {
+    if allocations.is_empty() {
+        return Err(ProtocolError::GenericError(
+            "SOL SP absorb requires at least one payout allocation".to_string(),
+        ));
+    }
+    if allocations.len() > crate::MAX_SOL_SP_PAYOUT_ALLOCATIONS {
+        return Err(ProtocolError::GenericError(format!(
+            "SOL SP absorb supports at most {} payout allocations",
+            crate::MAX_SOL_SP_PAYOUT_ALLOCATIONS
+        )));
+    }
+    let mut sum: u128 = 0;
+    for allocation in allocations {
+        if allocation.payout_address.trim().is_empty() {
+            return Err(ProtocolError::GenericError(
+                "SOL SP absorb payout address is required".to_string(),
+            ));
+        }
+        if allocation.lamports == 0 {
+            return Err(ProtocolError::GenericError(
+                "SOL SP absorb payout allocation lamports must be non-zero".to_string(),
+            ));
+        }
+        sum = sum.saturating_add(u128::from(allocation.lamports));
+    }
+    if sum != u128::from(expected_lamports) {
+        return Err(ProtocolError::GenericError(format!(
+            "SOL SP absorb allocation sum {} does not match collateral received {}",
+            sum, expected_lamports
+        )));
+    }
+    Ok(canonical_sol_allocations(allocations))
+}
+
+fn sol_sp_allocation_fingerprint(
+    caller: Principal,
+    request: &crate::SolSpAbsorbRequest,
+    allocations: &[crate::SolSpPayoutAllocation],
+) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hash_len_prefixed(&mut hasher, caller.as_slice());
+    hasher.update(request.vault_id.to_be_bytes());
+    hasher.update(request.icusd_burned_e8s.to_be_bytes());
+    let proof_kind = match request.proof.ledger_kind {
+        crate::icrc3_proof::SpProofLedger::IcusdBurn => 0u8,
+        crate::icrc3_proof::SpProofLedger::ThreePoolTransfer => 1u8,
+    };
+    hasher.update([proof_kind]);
+    hasher.update(request.proof.block_index.to_be_bytes());
+    hasher.update(request.proof.vault_id_memo.to_be_bytes());
+    hasher.update((allocations.len() as u64).to_be_bytes());
+    for allocation in allocations {
+        hash_len_prefixed(&mut hasher, allocation.claimant.as_slice());
+        hash_len_prefixed(&mut hasher, allocation.payout_address.as_bytes());
+        hasher.update(allocation.lamports.to_be_bytes());
+    }
+    hasher.finalize().to_vec()
+}
+
+fn stored_sol_sp_absorb_matches_retry(
+    stored: &crate::state::StoredSolSpAbsorbResult,
+    caller: Principal,
+    request: &crate::SolSpAbsorbRequest,
+    allocation_fingerprint: &[u8],
+) -> bool {
+    stored.caller == caller
+        && stored.vault_id == request.vault_id
+        && stored.icusd_burned_e8s == request.icusd_burned_e8s
+        && stored.proof_ledger == request.proof.ledger_kind
+        && stored.proof_block_index == request.proof.block_index
+        && stored.allocation_fingerprint == allocation_fingerprint
+}
+
+pub fn record_sp_sol_absorb_result_bounded(
+    state: &mut crate::state::State,
+    proof_key: (crate::icrc3_proof::SpProofLedger, u64),
+    stored: crate::state::StoredSolSpAbsorbResult,
+) {
+    state
+        .sp_sol_absorb_results_by_proof
+        .insert(proof_key, stored);
+    while state.sp_sol_absorb_results_by_proof.len()
+        > crate::state::MAX_SP_SOL_ABSORB_RESULTS_BY_PROOF
+    {
+        let Some(oldest_key) = state
+            .sp_sol_absorb_results_by_proof
+            .keys()
+            .copied()
+            .find(|key| *key != proof_key)
+        else {
+            break;
+        };
+        state.sp_sol_absorb_results_by_proof.remove(&oldest_key);
+    }
+}
+
+pub fn sol_sp_absorb_cached_replay_result(
+    state: &crate::state::State,
+    caller: Principal,
+    request: &crate::SolSpAbsorbRequest,
+) -> Option<Result<crate::SolSpAbsorbResult, ProtocolError>> {
+    let proof_key = (request.proof.ledger_kind, request.proof.block_index);
+    let stored = state.sp_sol_absorb_results_by_proof.get(&proof_key)?;
+    Some(
+        validate_sol_sp_allocations(&request.allocations, stored.result.collateral_received_lamports)
+            .and_then(|allocations| {
+                let fingerprint = sol_sp_allocation_fingerprint(caller, request, &allocations);
+                if stored_sol_sp_absorb_matches_retry(stored, caller, request, &fingerprint) {
+                    Ok(stored.result.clone())
+                } else {
+                    Err(ProtocolError::GenericError(format!(
+                        "SP SOL absorb proof replay rejected: ({:?}, block {}) already consumed for a different request",
+                        request.proof.ledger_kind, request.proof.block_index
+                    )))
+                }
+            }),
+    )
+}
+
+pub fn stability_pool_liquidate_sol_vault_in_state(
+    state: &mut crate::state::State,
+    caller: Principal,
+    request: crate::SolSpAbsorbRequest,
+    now_ns: u64,
+) -> Result<crate::SolSpAbsorbResult, ProtocolError> {
+    ensure_registered_sp(state, caller)?;
+    let proof_key = (request.proof.ledger_kind, request.proof.block_index);
+
+    if let Some(stored) = state.sp_sol_absorb_results_by_proof.get(&proof_key) {
+        let allocations = validate_sol_sp_allocations(
+            &request.allocations,
+            stored.result.collateral_received_lamports,
+        )?;
+        let fingerprint = sol_sp_allocation_fingerprint(caller, &request, &allocations);
+        if stored_sol_sp_absorb_matches_retry(stored, caller, &request, &fingerprint) {
+            return Ok(stored.result.clone());
+        }
+        return Err(ProtocolError::GenericError(format!(
+            "SP SOL absorb proof replay rejected: ({:?}, block {}) already consumed for a different request",
+            request.proof.ledger_kind, request.proof.block_index
+        )));
+    }
+
+    if request.proof.ledger_kind != crate::icrc3_proof::SpProofLedger::IcusdBurn {
+        return Err(ProtocolError::GenericError(
+            "SOL SP absorb requires an icUSD burn proof".to_string(),
+        ));
+    }
+    if request.proof.vault_id_memo != request.vault_id {
+        return Err(ProtocolError::GenericError(format!(
+            "SP writedown proof vault_id_memo {} does not match call vault_id {}",
+            request.proof.vault_id_memo, request.vault_id
+        )));
+    }
+    if state.consumed_writedown_proofs.contains(&proof_key) {
+        return Err(ProtocolError::GenericError(format!(
+            "SP writedown proof replay rejected: ({:?}, block {}) already consumed",
+            request.proof.ledger_kind, request.proof.block_index
+        )));
+    }
+
+    let preflight =
+        matching_sol_absorb_preflight(state, request.vault_id, request.icusd_burned_e8s, caller)
+            .ok_or_else(|| {
+                ProtocolError::GenericError(
+                    "SOL SP absorb requires a matching preflight reservation".to_string(),
+                )
+            })?;
+
+    let allocations = validate_sol_sp_allocations(
+        &request.allocations,
+        preflight.collateral_received_lamports,
+    )?;
+    let fingerprint = sol_sp_allocation_fingerprint(caller, &request, &allocations);
+    let (custody_owner, vault_collateral, vault_borrowed) = {
+        let vault = ensure_sol_sp_absorb_preflight_vault(state, request.vault_id)?;
+        (
+            vault.owner,
+            vault.collateral_amount,
+            vault.borrowed_icusd_amount,
+        )
+    };
+    // Conservation guards mirror `stability_pool_liquidate_xrp_vault_in_state`'s
+    // B-2 fix exactly (collateral side then debt side) — see that function's
+    // comments for the full rationale.
+    if vault_collateral < preflight.total_to_seize_lamports {
+        return Err(ProtocolError::GenericError(format!(
+            "SOL SP absorb vault {} collateral {} fell below the reserved seizure {} since preflight; aborting before mutation",
+            request.vault_id, vault_collateral, preflight.total_to_seize_lamports
+        )));
+    }
+    if vault_borrowed < ICUSD::new(request.icusd_burned_e8s) {
+        return Err(ProtocolError::GenericError(format!(
+            "SOL SP absorb vault {} live debt {:?} fell below the reserved burn {} since preflight; aborting before mutation",
+            request.vault_id, vault_borrowed, request.icusd_burned_e8s
+        )));
+    }
+
+    let mut payout_claims = Vec::with_capacity(allocations.len());
+    for allocation in &allocations {
+        let claim_id = record_sol_claim(
+            state,
+            allocation.claimant,
+            custody_owner,
+            request.vault_id,
+            allocation.lamports,
+            now_ns,
+        );
+        payout_claims.push(crate::SolSpPayoutClaim {
+            claimant: allocation.claimant,
+            claim_id,
+            payout_address: allocation.payout_address.clone(),
+            lamports: allocation.lamports,
+        });
+    }
+
+    // B-1 (SOL analogue): route the protocol's liquidation-fee cut to a
+    // developer-settleable SolClaim, mirroring the XRP fix. The vault is
+    // debited the GROSS `total_to_seize_lamports` below, but the depositor
+    // allocations only sum to the NET `collateral_received_lamports`. Without
+    // this claim the protocol cut would be removed from the vault yet have no
+    // claim referencing it.
+    let protocol_cut = preflight
+        .total_to_seize_lamports
+        .saturating_sub(preflight.collateral_received_lamports);
+    if protocol_cut > 0 {
+        let developer = state.developer_principal;
+        record_sol_claim(
+            state,
+            developer,
+            custody_owner,
+            request.vault_id,
+            protocol_cut,
+            now_ns,
+        );
+    }
+
+    let mut interest_share = ICUSD::new(0);
+    if let Some(vault) = state.vault_id_to_vaults.get_mut(&request.vault_id) {
+        if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
+            let share = (Decimal::from(request.icusd_burned_e8s)
+                * Decimal::from(vault.accrued_interest.0)
+                / Decimal::from(vault.borrowed_icusd_amount.0))
+            .to_u64()
+            .unwrap_or(0);
+            interest_share = ICUSD::new(share.min(vault.accrued_interest.0));
+        }
+        let debt_applied = ICUSD::new(request.icusd_burned_e8s).min(vault.borrowed_icusd_amount);
+        let collateral_applied = preflight.total_to_seize_lamports.min(vault.collateral_amount);
+        vault.borrowed_icusd_amount = vault.borrowed_icusd_amount.saturating_sub(debt_applied);
+        vault.collateral_amount = vault.collateral_amount.saturating_sub(collateral_applied);
+        vault.accrued_interest = vault.accrued_interest.saturating_sub(interest_share);
+    }
+    crate::state::record_recent_liquidation(state, request.icusd_burned_e8s, now_ns);
+    state.cleanup_if_drained(request.vault_id);
+    state.consumed_writedown_proofs.insert(proof_key);
+    state.sp_sol_absorb_preflights.remove(&request.vault_id);
+
+    let result = crate::SolSpAbsorbResult {
+        success: true,
+        vault_id: request.vault_id,
+        liquidated_debt_e8s: request.icusd_burned_e8s,
+        collateral_received_lamports: preflight.collateral_received_lamports,
+        payout_claims,
+        block_index: request.proof.block_index,
+        collateral_price_e8s: preflight.collateral_price_e8s,
+    };
+    let stored = crate::state::StoredSolSpAbsorbResult {
+        caller,
+        vault_id: request.vault_id,
+        icusd_burned_e8s: request.icusd_burned_e8s,
+        proof_ledger: request.proof.ledger_kind,
+        proof_block_index: request.proof.block_index,
+        allocation_fingerprint: fingerprint,
+        result: result.clone(),
+        accepted_at_ns: now_ns,
+    };
+    record_sp_sol_absorb_result_bounded(state, proof_key, stored);
     Ok(result)
 }
 
@@ -4938,7 +5476,7 @@ async fn borrow_from_vault_internal(
 
     // Accrue interest on this vault before borrowing so CR check uses up-to-date debt.
     let now = ic_cdk::api::time();
-    reject_active_xrp_sp_absorb_preflight(arg.vault_id, now)?;
+    reject_active_native_sp_absorb_preflight(arg.vault_id, now)?;
     mutate_state(|s| s.accrue_single_vault(arg.vault_id, now));
 
     let (vault, collateral_price, config_decimals, is_native_xrp) =
@@ -5146,7 +5684,7 @@ async fn repay_to_vault_internal(
 
     // Accrue interest before repayment so the correct debt balance is used.
     let now = ic_cdk::api::time();
-    reject_active_xrp_sp_absorb_preflight(arg.vault_id, now)?;
+    reject_active_native_sp_absorb_preflight(arg.vault_id, now)?;
     mutate_state(|s| s.accrue_single_vault(arg.vault_id, now));
 
     let vault = read_state(|s| s.vault_id_to_vaults.get(&arg.vault_id).cloned())
@@ -5268,7 +5806,7 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
     }
 
     let now = ic_cdk::api::time();
-    if let Err(e) = reject_active_xrp_sp_absorb_preflight(arg.vault_id, now) {
+    if let Err(e) = reject_active_native_sp_absorb_preflight(arg.vault_id, now) {
         guard_principal.fail();
         return Err(e);
     }
@@ -5430,7 +5968,7 @@ pub async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
     let amount: ICP = arg.amount.into();
 
     let now = ic_cdk::api::time();
-    if let Err(e) = reject_active_xrp_sp_absorb_preflight(arg.vault_id, now) {
+    if let Err(e) = reject_active_native_sp_absorb_preflight(arg.vault_id, now) {
         guard_principal.fail();
         return Err(e);
     }
@@ -5686,7 +6224,7 @@ pub async fn add_margin_with_deposit(vault_id: u64) -> Result<u64, ProtocolError
     };
 
     let now = ic_cdk::api::time();
-    if let Err(e) = reject_active_xrp_sp_absorb_preflight(vault_id, now) {
+    if let Err(e) = reject_active_native_sp_absorb_preflight(vault_id, now) {
         guard_principal.fail();
         return Err(e);
     }
@@ -5821,7 +6359,7 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
     let _guard_principal = GuardPrincipal::new(caller, &format!("close_vault_{}", vault_id))?;
     // AR-B-003: per-vault op lock; see guard.rs::VaultLiquidationGuard.
     let _vault_op_guard = VaultLiquidationGuard::new(vault_id)?;
-    reject_active_xrp_sp_absorb_preflight(vault_id, ic_cdk::api::time())?;
+    reject_active_native_sp_absorb_preflight(vault_id, ic_cdk::api::time())?;
 
     // Check rate limits first
     mutate_state(|s| s.check_close_vault_rate_limit(caller))?;
@@ -6004,7 +6542,7 @@ pub async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
         GuardPrincipal::new(caller, &format!("withdraw_collateral_{}", vault_id))?;
     // AR-B-003: per-vault op lock; see guard.rs::VaultLiquidationGuard.
     let _vault_op_guard = VaultLiquidationGuard::new(vault_id)?;
-    reject_active_xrp_sp_absorb_preflight(vault_id, ic_cdk::api::time())?;
+    reject_active_native_sp_absorb_preflight(vault_id, ic_cdk::api::time())?;
 
     log!(
         INFO,
@@ -6229,7 +6767,7 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
     // `repay_to_vault` entry points. `accrue_single_vault` is a no-op when
     // the vault has no debt or when the elapsed window is zero.
     let now = ic_cdk::api::time();
-    reject_active_xrp_sp_absorb_preflight(vault_id, now)?;
+    reject_active_native_sp_absorb_preflight(vault_id, now)?;
     mutate_state(|s| s.accrue_single_vault(vault_id, now));
 
     // Read vault, per-collateral price + config from state
@@ -6499,7 +7037,7 @@ async fn withdraw_and_close_vault_internal(
         vault_id,
         caller
     );
-    reject_active_xrp_sp_absorb_preflight(vault_id, ic_cdk::api::time())?;
+    reject_active_native_sp_absorb_preflight(vault_id, ic_cdk::api::time())?;
 
     // Check if the vault exists first
     let vault = read_state(|s| {
@@ -6866,7 +7404,7 @@ pub async fn liquidate_vault_partial(
                                          // BK-001/002: per-vault lock so two different callers can't race this vault
                                          // and both be paid the full pre-state collateral from the shared pool.
     let _vault_liq_guard = VaultLiquidationGuard::new(vault_id)?;
-    if let Err(e) = reject_active_xrp_sp_absorb_preflight(vault_id, ic_cdk::api::time()) {
+    if let Err(e) = reject_active_native_sp_absorb_preflight(vault_id, ic_cdk::api::time()) {
         guard_principal.fail();
         return Err(e);
     }
@@ -7238,7 +7776,7 @@ pub async fn liquidate_vault_partial_with_stable(
         GuardPrincipal::new(caller, &format!("liquidate_vault_stable_{}", vault_id))?;
     reject_if_bot_processing(vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault
     let _vault_liq_guard = VaultLiquidationGuard::new(vault_id)?; // BK-001/002 per-vault lock
-    if let Err(e) = reject_active_xrp_sp_absorb_preflight(vault_id, ic_cdk::api::time()) {
+    if let Err(e) = reject_active_native_sp_absorb_preflight(vault_id, ic_cdk::api::time()) {
         guard_principal.fail();
         return Err(e);
     }
@@ -8159,7 +8697,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
     let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_{}", vault_id))?;
     reject_if_bot_processing(vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault
     let _vault_liq_guard = VaultLiquidationGuard::new(vault_id)?; // BK-001/002 per-vault lock
-    if let Err(e) = reject_active_xrp_sp_absorb_preflight(vault_id, ic_cdk::api::time()) {
+    if let Err(e) = reject_active_native_sp_absorb_preflight(vault_id, ic_cdk::api::time()) {
         guard_principal.fail();
         return Err(e);
     }
@@ -8788,7 +9326,7 @@ pub async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError>
 
     // Accrue interest before repayment so the correct debt balance is used.
     let now = ic_cdk::api::time();
-    if let Err(e) = reject_active_xrp_sp_absorb_preflight(arg.vault_id, now) {
+    if let Err(e) = reject_active_native_sp_absorb_preflight(arg.vault_id, now) {
         guard_principal.fail();
         return Err(e);
     }
@@ -8884,7 +9422,7 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         GuardPrincipal::new(caller, &format!("partial_liquidate_vault_{}", arg.vault_id))?;
     reject_if_bot_processing(arg.vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault
     let _vault_liq_guard = VaultLiquidationGuard::new(arg.vault_id)?; // BK-001/002 per-vault lock
-    if let Err(e) = reject_active_xrp_sp_absorb_preflight(arg.vault_id, ic_cdk::api::time()) {
+    if let Err(e) = reject_active_native_sp_absorb_preflight(arg.vault_id, ic_cdk::api::time()) {
         guard_principal.fail();
         return Err(e);
     }
@@ -11047,5 +11585,347 @@ mod sol_p2b_tests {
         let mut s = crate::state::State::default();
         let p = pending(0);
         assert!(!remove_sol_pending_deposit_if_unfunded_snapshot(&mut s, 7, &p, 0).unwrap());
+    }
+}
+
+/// Phase 4 of the native-SOL collateral rail (docs/superpowers/specs/
+/// 2026-07-24-native-sol-collateral-design.md §6): contract tests for the
+/// SP absorb entry path (`stability_pool_preflight_sol_absorb_in_state` /
+/// `stability_pool_liquidate_sol_vault_in_state`), mirroring
+/// `xrp_sp_absorb_contract_tests` where a direct analogue exists. Amounts are
+/// lamports instead of drops; there is no destination-tag field.
+#[cfg(test)]
+mod sol_sp_absorb_contract_tests {
+    use super::*;
+    use crate::icrc3_proof::{SpProofLedger, SpWritedownProof};
+    use crate::state::{
+        sol_collateral_config, sol_collateral_principal, CollateralStatus, CustodyKind, State,
+        StoredSolSpAbsorbResult, MAX_SP_SOL_ABSORB_RESULTS_BY_PROOF,
+    };
+    use crate::{SolSpAbsorbRequest, SolSpPayoutAllocation, MAX_SOL_SP_PAYOUT_ALLOCATIONS};
+
+    const E8: u64 = 100_000_000;
+    const VAULT_ID: u64 = 7;
+
+    fn principal(byte: u8) -> Principal {
+        Principal::from_slice(&[byte; 29])
+    }
+
+    fn sp() -> Principal {
+        principal(0x53)
+    }
+
+    fn depositor_a() -> Principal {
+        principal(0xa1)
+    }
+
+    fn depositor_b() -> Principal {
+        principal(0xb2)
+    }
+
+    /// 220 SOL of collateral against 100 icUSD debt at $0.5/SOL: CR = 1.10,
+    /// below the fixed `sol_collateral_config` liquidation_ratio (1.20), so
+    /// the vault is liquidatable, and ample enough that the seizure
+    /// (215 SOL at the fixed 1.075 bonus) is never capped by the vault's own
+    /// balance.
+    fn test_state_with_sol_vault() -> State {
+        let mut state = State::from(crate::InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: principal(0x10),
+            icp_ledger_principal: principal(0x11),
+            fee_e8s: 0,
+            developer_principal: principal(0xdd),
+            treasury_principal: None,
+            stability_pool_principal: Some(sp()),
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        });
+        state.min_icusd_amount = ICUSD::new(0);
+        state.liquidation_protocol_share = Ratio::from(Decimal::ZERO);
+
+        let icp = state.icp_collateral_type();
+        if let Some(cfg) = state.collateral_configs.get_mut(&icp) {
+            cfg.last_price = Some(10.0);
+        }
+        state.open_vault(Vault {
+            owner: principal(0x99),
+            vault_id: 1,
+            borrowed_icusd_amount: ICUSD::new(100 * E8),
+            collateral_amount: 2_000_000_000,
+            collateral_type: icp,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        });
+
+        let sol = sol_collateral_principal();
+        let mut sol_cfg = sol_collateral_config(Ratio::new(dec!(1.0)));
+        sol_cfg.last_price = Some(0.5);
+        sol_cfg.status = CollateralStatus::Active;
+        sol_cfg.custody_kind = Some(CustodyKind::NativeSol);
+        state.collateral_configs.insert(sol, sol_cfg);
+        // 0.1 SOL of collateral against 100 icUSD debt: badly undercollateralized
+        // (deliberately, mirroring the XRP fixture's own ratio), so the
+        // bonus-adjusted seizure demand (215 SOL-equivalent lamports) is capped
+        // at exactly the vault's full collateral_amount (100_000_000 lamports)
+        // — a full "vault wiped out" liquidation, same shape as the XRP fixture.
+        state.open_vault(Vault {
+            owner: principal(0x42),
+            vault_id: VAULT_ID,
+            borrowed_icusd_amount: ICUSD::new(100 * E8),
+            collateral_amount: 100_000_000,
+            collateral_type: sol,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        });
+        state
+    }
+
+    fn proof(block_index: u64) -> SpWritedownProof {
+        SpWritedownProof {
+            block_index,
+            ledger_kind: SpProofLedger::IcusdBurn,
+            vault_id_memo: VAULT_ID,
+        }
+    }
+
+    /// Sums to 100_000_000 lamports, matching the real sizing this fixture
+    /// computes with `liquidation_protocol_share = 0` (see `preflight` below):
+    /// the seizure demand is capped at the vault's full collateral_amount, so
+    /// collateral_received_lamports == total_to_seize_lamports == 100_000_000.
+    fn valid_request(block_index: u64) -> SolSpAbsorbRequest {
+        SolSpAbsorbRequest {
+            vault_id: VAULT_ID,
+            icusd_burned_e8s: 100 * E8,
+            proof: proof(block_index),
+            allocations: vec![
+                SolSpPayoutAllocation {
+                    claimant: depositor_a(),
+                    payout_address: "AaaSolAddrA".to_string(),
+                    lamports: 60_000_000,
+                },
+                SolSpPayoutAllocation {
+                    claimant: depositor_b(),
+                    payout_address: "BbbSolAddrB".to_string(),
+                    lamports: 40_000_000,
+                },
+            ],
+        }
+    }
+
+    fn preflight(state: &mut State, now_ns: u64) {
+        stability_pool_preflight_sol_absorb_in_state(state, sp(), VAULT_ID, 100 * E8, now_ns)
+            .expect("preflight reservation");
+    }
+
+    #[test]
+    fn sol_sp_absorb_routes_protocol_cut_to_developer_claim() {
+        // total_to_seize (gross) > collateral_received (net) => a 3M-lamport
+        // protocol cut. Preflight is hand-inserted so this test is independent
+        // of the fixture's own sizing math (mirrors the XRP contract test).
+        let mut state = test_state_with_sol_vault();
+        state.sp_sol_absorb_preflights.insert(
+            VAULT_ID,
+            crate::state::StoredSolSpAbsorbPreflight {
+                caller: sp(),
+                vault_id: VAULT_ID,
+                icusd_burn_e8s: 100 * E8,
+                total_to_seize_lamports: 100_000_000,
+                collateral_received_lamports: 97_000_000,
+                collateral_price_e8s: 50_000_000,
+                expires_at_ns: 100,
+            },
+        );
+        let mut request = valid_request(44);
+        request.allocations[0].lamports = 57_000_000;
+        request.allocations[1].lamports = 40_000_000; // depositor sum = 97_000_000 (net)
+
+        let result = stability_pool_liquidate_sol_vault_in_state(&mut state, sp(), request, 20)
+            .expect("absorb accepted");
+
+        // Depositor payout claims cover only the NET amount.
+        assert_eq!(result.collateral_received_lamports, 97_000_000);
+        assert_eq!(result.payout_claims.len(), 2);
+        let depositor_total: u64 = result.payout_claims.iter().map(|c| c.lamports).sum();
+        assert_eq!(depositor_total, 97_000_000);
+
+        // The 3M-lamport protocol cut is routed to a developer-settleable claim.
+        let developer = principal(0xdd);
+        let dev_total: u64 = state
+            .sol_claims
+            .values()
+            .filter(|c| c.claimant == developer)
+            .map(|c| c.lamports)
+            .sum();
+        assert_eq!(
+            dev_total, 3_000_000,
+            "protocol cut must route to a developer claim"
+        );
+
+        // One SolClaim per allocation (2) plus the protocol-fee claim (1) = 3.
+        assert_eq!(
+            state.sol_claims.len(),
+            3,
+            "expected one SolClaim per allocation plus the protocol-fee claim"
+        );
+
+        // Conservation: every lamport debited from the vault is covered by a claim.
+        let claimed_total: u64 = state.sol_claims.values().map(|c| c.lamports).sum();
+        assert_eq!(
+            claimed_total, 100_000_000,
+            "sum of all SolClaims must equal the gross collateral seized (total_to_seize_lamports)"
+        );
+        assert!(state.vault_id_to_vaults.get(&VAULT_ID).is_none());
+    }
+
+    #[test]
+    fn sol_sp_absorb_writes_down_claims_and_exact_replay_returns_same_claim_ids() {
+        let mut state = test_state_with_sol_vault();
+        preflight(&mut state, 10);
+
+        let result =
+            stability_pool_liquidate_sol_vault_in_state(&mut state, sp(), valid_request(44), 20)
+                .expect("absorb accepted");
+        assert!(result.success);
+        assert_eq!(result.vault_id, VAULT_ID);
+        assert_eq!(result.liquidated_debt_e8s, 100 * E8);
+        assert_eq!(result.collateral_received_lamports, 100_000_000);
+        assert_eq!(result.payout_claims.len(), 2);
+        assert_eq!(result.payout_claims[0].claimant, depositor_a());
+        assert_eq!(result.payout_claims[0].claim_id, 0);
+        assert_eq!(result.payout_claims[1].claimant, depositor_b());
+        assert_eq!(result.payout_claims[1].claim_id, 1);
+        assert_eq!(state.next_sol_claim_id, 2);
+        assert!(state.vault_id_to_vaults.get(&VAULT_ID).is_none());
+        assert!(state.sp_sol_absorb_preflights.get(&VAULT_ID).is_none());
+        assert!(state
+            .sp_sol_absorb_results_by_proof
+            .contains_key(&(SpProofLedger::IcusdBurn, 44,)));
+        assert_eq!(state.sol_claims.get(&0).unwrap().claimant, depositor_a());
+        assert_eq!(state.sol_claims.get(&1).unwrap().claimant, depositor_b());
+
+        // Replay with an IDENTICAL fingerprint must return the same cached
+        // result and claim ids, minting nothing new.
+        let replay =
+            stability_pool_liquidate_sol_vault_in_state(&mut state, sp(), valid_request(44), 999)
+                .expect("exact replay returns cached result");
+        assert_eq!(replay, result);
+        assert_eq!(
+            replay.payout_claims[0].claim_id, 0,
+            "replay must return the SAME claim ids, not mint new ones"
+        );
+        assert_eq!(replay.payout_claims[1].claim_id, 1);
+        assert_eq!(state.next_sol_claim_id, 2, "replay must not mint new claims");
+        assert_eq!(state.sol_claims.len(), 2);
+    }
+
+    #[test]
+    fn sol_sp_absorb_conflicting_replay_rejects_without_mutation() {
+        let mut state = test_state_with_sol_vault();
+        preflight(&mut state, 10);
+        let result =
+            stability_pool_liquidate_sol_vault_in_state(&mut state, sp(), valid_request(44), 20)
+                .unwrap();
+        let claims_before = state.sol_claims.clone();
+        let next_before = state.next_sol_claim_id;
+        let results_before = state.sp_sol_absorb_results_by_proof.clone();
+
+        // Same proof key (block 44), but a DIFFERENT allocation fingerprint
+        // (payout address changed) — must be rejected and must mutate nothing.
+        let mut conflicting = valid_request(44);
+        conflicting.allocations[0].payout_address = "DifferentSolAddr".to_string();
+        assert!(
+            stability_pool_liquidate_sol_vault_in_state(&mut state, sp(), conflicting, 30).is_err()
+        );
+        assert_eq!(state.sol_claims, claims_before);
+        assert_eq!(state.next_sol_claim_id, next_before);
+        assert_eq!(state.sp_sol_absorb_results_by_proof, results_before);
+        assert_eq!(
+            state
+                .sp_sol_absorb_results_by_proof
+                .get(&(SpProofLedger::IcusdBurn, 44))
+                .unwrap()
+                .result,
+            result,
+        );
+    }
+
+    fn stored_result_for(block_index: u64) -> StoredSolSpAbsorbResult {
+        StoredSolSpAbsorbResult {
+            caller: sp(),
+            vault_id: block_index,
+            icusd_burned_e8s: 100 * E8,
+            proof_ledger: SpProofLedger::IcusdBurn,
+            proof_block_index: block_index,
+            allocation_fingerprint: vec![block_index as u8; 32],
+            result: crate::SolSpAbsorbResult {
+                success: true,
+                vault_id: block_index,
+                liquidated_debt_e8s: 100 * E8,
+                collateral_received_lamports: 100_000_000,
+                payout_claims: vec![],
+                block_index,
+                collateral_price_e8s: 50_000_000,
+            },
+            accepted_at_ns: block_index,
+        }
+    }
+
+    #[test]
+    fn sol_sp_absorb_result_cache_keeps_just_accepted_proof() {
+        let mut state = State::default();
+        for block_index in 1..=(MAX_SP_SOL_ABSORB_RESULTS_BY_PROOF as u64) {
+            record_sp_sol_absorb_result_bounded(
+                &mut state,
+                (SpProofLedger::IcusdBurn, block_index),
+                stored_result_for(block_index),
+            );
+        }
+
+        record_sp_sol_absorb_result_bounded(
+            &mut state,
+            (SpProofLedger::IcusdBurn, 0),
+            stored_result_for(0),
+        );
+
+        assert_eq!(
+            state.sp_sol_absorb_results_by_proof.len(),
+            MAX_SP_SOL_ABSORB_RESULTS_BY_PROOF,
+        );
+        assert!(
+            state
+                .sp_sol_absorb_results_by_proof
+                .contains_key(&(SpProofLedger::IcusdBurn, 0)),
+            "the just-accepted proof must remain replayable",
+        );
+        assert!(!state
+            .sp_sol_absorb_results_by_proof
+            .contains_key(&(SpProofLedger::IcusdBurn, 1)));
+    }
+
+    #[test]
+    fn sol_sp_absorb_allocation_fanout_over_max_is_rejected_before_burn() {
+        let mut state = test_state_with_sol_vault();
+        preflight(&mut state, 10);
+        let mut request = valid_request(44);
+        // Blow the fanout cap while keeping the lamport sum correct: replace
+        // the two allocations with MAX+1 tiny ones summing to the reserved
+        // collateral_received_lamports (100_000_000).
+        let n = MAX_SOL_SP_PAYOUT_ALLOCATIONS + 1;
+        let share = 100_000_000u64 / (n as u64);
+        let remainder = 100_000_000u64 - share * (n as u64);
+        request.allocations = (0..n)
+            .map(|i| SolSpPayoutAllocation {
+                claimant: Principal::from_slice(&(i as u32).to_be_bytes()),
+                payout_address: format!("addr{i}"),
+                lamports: share + if i == 0 { remainder } else { 0 },
+            })
+            .collect();
+
+        assert!(stability_pool_liquidate_sol_vault_in_state(&mut state, sp(), request, 20).is_err());
+        assert!(state.sol_claims.is_empty());
+        assert_eq!(state.next_sol_claim_id, 0);
+        assert!(state.sp_sol_absorb_results_by_proof.is_empty());
     }
 }

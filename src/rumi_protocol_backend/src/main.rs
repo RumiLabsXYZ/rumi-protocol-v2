@@ -22,7 +22,8 @@ use rumi_protocol_backend::{
     ProtocolArg, ProtocolError, ProtocolSnapshot, ProtocolStatus, ReserveBalance,
     NativeClaimResolution, ReserveRedemptionResult, StabilityPoolLiquidationResult, StableTokenType,
     SuccessWithFee, SupplyAudit, SupplyAuditEntry, VaultArgWithToken, VaultHistoryPagedResponse,
-    VaultsPageResponse, XrpSpAbsorbPreflight, XrpSpAbsorbRequest, XrpSpAbsorbResult,
+    VaultsPageResponse, SolSpAbsorbPreflight, SolSpAbsorbRequest, SolSpAbsorbResult,
+    XrpSpAbsorbPreflight, XrpSpAbsorbRequest, XrpSpAbsorbResult,
     MAX_EVENTS_BY_PRINCIPAL_LEGACY, MAX_EVENTS_BY_PRINCIPAL_OUTPUT, MAX_EVENTS_BY_PRINCIPAL_SCAN,
     MAX_VAULTS_LEGACY_PAGE, MAX_VAULTS_PAGE_LIMIT, MAX_VAULT_HISTORY,
     PROTOCOL_STATUS_SNAPSHOT_TTL_NANOS, TREASURY_STATS_SNAPSHOT_TTL_NANOS,
@@ -5370,6 +5371,88 @@ fn stability_pool_xrp_claim_outstanding(
     let caller = ic_cdk::api::caller();
     read_state(|s| {
         rumi_protocol_backend::vault::stability_pool_xrp_claim_outstanding_in_state(
+            s, caller, claim_id, claimant,
+        )
+    })
+}
+
+#[update]
+#[candid_method(update)]
+fn stability_pool_preflight_sol_absorb(
+    vault_id: u64,
+    expected_icusd_burn_e8s: u64,
+) -> Result<SolSpAbsorbPreflight, ProtocolError> {
+    if ic_cdk::caller() == Principal::anonymous() {
+        return Err(ProtocolError::AnonymousCallerNotAllowed);
+    }
+    let caller = ic_cdk::api::caller();
+    let now = ic_cdk::api::time();
+    mutate_state(|s| {
+        rumi_protocol_backend::vault::stability_pool_preflight_sol_absorb_in_state(
+            s,
+            caller,
+            vault_id,
+            expected_icusd_burn_e8s,
+            now,
+        )
+    })
+}
+
+#[update]
+#[candid_method(update)]
+async fn stability_pool_liquidate_sol_vault(
+    request: SolSpAbsorbRequest,
+) -> Result<SolSpAbsorbResult, ProtocolError> {
+    if ic_cdk::caller() == Principal::anonymous() {
+        return Err(ProtocolError::AnonymousCallerNotAllowed);
+    }
+    let caller = ic_cdk::api::caller();
+    let is_stability_pool =
+        read_state(|s| s.stability_pool_canister.map_or(false, |sp| sp == caller));
+    if !is_stability_pool {
+        return Err(ProtocolError::GenericError(
+            "Caller is not the registered stability pool canister".to_string(),
+        ));
+    }
+
+    if let Some(replay) = read_state(|s| {
+        rumi_protocol_backend::vault::sol_sp_absorb_cached_replay_result(s, caller, &request)
+    }) {
+        return replay;
+    }
+
+    verify_sp_icusd_burn_proof(
+        request.vault_id,
+        request.icusd_burned_e8s,
+        caller,
+        &request.proof,
+    )
+    .await?;
+
+    let now = ic_cdk::api::time();
+    mutate_state(|s| {
+        rumi_protocol_backend::vault::stability_pool_liquidate_sol_vault_in_state(
+            s, caller, request, now,
+        )
+    })
+}
+
+/// Called by the Stability Pool before it clears a native-SOL payout reminder.
+/// Returns true only while the backend still has an outstanding claim for that
+/// exact depositor; false means the claim is absent and the SP reminder may be
+/// removed.
+#[update]
+#[candid_method(update)]
+fn stability_pool_sol_claim_outstanding(
+    claim_id: u64,
+    claimant: Principal,
+) -> Result<bool, ProtocolError> {
+    if ic_cdk::caller() == Principal::anonymous() {
+        return Err(ProtocolError::AnonymousCallerNotAllowed);
+    }
+    let caller = ic_cdk::api::caller();
+    read_state(|s| {
+        rumi_protocol_backend::vault::stability_pool_sol_claim_outstanding_in_state(
             s, caller, claim_id, claimant,
         )
     })

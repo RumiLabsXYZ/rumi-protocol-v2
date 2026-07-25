@@ -1221,11 +1221,15 @@ export type Result_20 = { 'Ok' : StabilityPoolLiquidationResult } |
   { 'Err' : ProtocolError };
 export type Result_21 = { 'Ok' : ChainStabilityPoolLiquidationResult } |
   { 'Err' : ProtocolError };
-export type Result_22 = { 'Ok' : XrpSpAbsorbResult } |
+export type Result_22 = { 'Ok' : SolSpAbsorbResult } |
   { 'Err' : ProtocolError };
-export type Result_23 = { 'Ok' : XrpSpAbsorbPreflight } |
+export type Result_23 = { 'Ok' : XrpSpAbsorbResult } |
   { 'Err' : ProtocolError };
-export type Result_24 = { 'Ok' : number } |
+export type Result_24 = { 'Ok' : SolSpAbsorbPreflight } |
+  { 'Err' : ProtocolError };
+export type Result_25 = { 'Ok' : XrpSpAbsorbPreflight } |
+  { 'Err' : ProtocolError };
+export type Result_26 = { 'Ok' : number } |
   { 'Err' : ProtocolError };
 export type Result_3 = { 'Ok' : Array<[Principal, string]> } |
   { 'Err' : ProtocolError };
@@ -1266,6 +1270,39 @@ export interface SolSettlement {
   'signature' : string,
   'nonce_value' : string,
   'submitted_at_ns' : bigint,
+}
+export interface SolSpAbsorbPreflight {
+  'collateral_received_lamports' : bigint,
+  'collateral_price_e8s' : bigint,
+  'icusd_burn_e8s' : bigint,
+  'vault_id' : bigint,
+  'expires_at_ns' : bigint,
+}
+export interface SolSpAbsorbRequest {
+  'vault_id' : bigint,
+  'allocations' : Array<SolSpPayoutAllocation>,
+  'icusd_burned_e8s' : bigint,
+  'proof' : SpWritedownProof,
+}
+export interface SolSpAbsorbResult {
+  'collateral_received_lamports' : bigint,
+  'collateral_price_e8s' : bigint,
+  'liquidated_debt_e8s' : bigint,
+  'block_index' : bigint,
+  'vault_id' : bigint,
+  'payout_claims' : Array<SolSpPayoutClaim>,
+  'success' : boolean,
+}
+export interface SolSpPayoutAllocation {
+  'claimant' : Principal,
+  'lamports' : bigint,
+  'payout_address' : string,
+}
+export interface SolSpPayoutClaim {
+  'claim_id' : bigint,
+  'claimant' : Principal,
+  'lamports' : bigint,
+  'payout_address' : string,
 }
 export interface SolVaultOpenInfo {
   'custody_address' : string,
@@ -1893,27 +1930,39 @@ export interface _SERVICE {
     [bigint, bigint, SpWritedownProof],
     Result_20
   >,
+  'stability_pool_liquidate_sol_vault' : ActorMethod<
+    [SolSpAbsorbRequest],
+    Result_22
+  >,
   'stability_pool_liquidate_with_reserves' : ActorMethod<
     [bigint, bigint, bigint, Principal],
     Result_20
   >,
   'stability_pool_liquidate_xrp_vault' : ActorMethod<
     [XrpSpAbsorbRequest],
-    Result_22
+    Result_23
   >,
   'stability_pool_preflight_chain_absorb' : ActorMethod<
     [bigint, bigint],
     Result
   >,
+  'stability_pool_preflight_sol_absorb' : ActorMethod<
+    [bigint, bigint],
+    Result_24
+  >,
   'stability_pool_preflight_xrp_absorb' : ActorMethod<
     [bigint, bigint],
-    Result_23
+    Result_25
+  >,
+  'stability_pool_sol_claim_outstanding' : ActorMethod<
+    [bigint, Principal],
+    Result_16
   >,
   'stability_pool_xrp_claim_outstanding' : ActorMethod<
     [bigint, Principal],
     Result_16
   >,
-  'submit_burn_proof' : ActorMethod<[number, string], Result_24>,
+  'submit_burn_proof' : ActorMethod<[number, string], Result_26>,
   'sweep_sol_pending_open' : ActorMethod<[bigint], Result>,
   'sweep_xrp_pending_open' : ActorMethod<[bigint], Result>,
   'unfreeze_protocol' : ActorMethod<[], Result>,

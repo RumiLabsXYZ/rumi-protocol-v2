@@ -350,6 +350,56 @@ pub struct XrpSpAbsorbResult {
     pub collateral_price_e8s: u64,
 }
 
+/// SOL analogue of `MAX_XRP_SP_PAYOUT_ALLOCATIONS` (design doc §6).
+pub const MAX_SOL_SP_PAYOUT_ALLOCATIONS: usize = 500;
+
+/// SOL analogue of `XrpSpAbsorbPreflight`. Amounts are in lamports (SOL's
+/// native unit), matching `state::SolClaim::lamports`.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SolSpAbsorbPreflight {
+    pub vault_id: u64,
+    pub icusd_burn_e8s: u64,
+    pub collateral_received_lamports: u64,
+    pub collateral_price_e8s: u64,
+    pub expires_at_ns: u64,
+}
+
+/// SOL analogue of `XrpSpPayoutAllocation`. No `destination_tag` field: Solana
+/// has no destination-tag analogue (design doc §5.2/§9).
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SolSpPayoutAllocation {
+    pub claimant: Principal,
+    pub payout_address: String,
+    pub lamports: u64,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SolSpAbsorbRequest {
+    pub vault_id: u64,
+    pub icusd_burned_e8s: u64,
+    pub proof: crate::icrc3_proof::SpWritedownProof,
+    pub allocations: Vec<SolSpPayoutAllocation>,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SolSpPayoutClaim {
+    pub claimant: Principal,
+    pub claim_id: u64,
+    pub payout_address: String,
+    pub lamports: u64,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SolSpAbsorbResult {
+    pub success: bool,
+    pub vault_id: u64,
+    pub liquidated_debt_e8s: u64,
+    pub collateral_received_lamports: u64,
+    pub payout_claims: Vec<SolSpPayoutClaim>,
+    pub block_index: u64,
+    pub collateral_price_e8s: u64,
+}
+
 /// Coarse classification of an `Event` for the explorer's type facet.
 /// Each variant maps to one or more concrete `Event` cases via
 /// `Event::type_filter()`. Adding a new `Event` variant requires extending

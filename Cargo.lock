@@ -8171,9 +8171,11 @@ version = "0.1.0"
 dependencies = [
  "assert_matches",
  "async-trait",
+ "bs58",
  "candid",
  "candid_parser",
  "ciborium",
+ "ed25519-dalek",
  "futures",
  "ic-canister-log 0.2.0 (git+https://github.com/Rumi-Protocol/ic?rev=fc278709)",
  "ic-cdk 0.12.2",
@@ -8193,6 +8195,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "sha2",
+ "solana-pubkey",
 ]
 
 [[package]]

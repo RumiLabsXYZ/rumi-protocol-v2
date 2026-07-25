@@ -439,6 +439,46 @@ async fn ensure_backend_xrp_claim_absent(
     }
 }
 
+#[query]
+pub fn get_my_native_sol_payouts() -> Vec<NativeSolPendingPayout> {
+    let caller = ic_cdk::api::caller();
+    read_state(|s| s.native_sol_pending_payouts_for(&caller))
+}
+
+#[update]
+pub async fn ack_native_sol_payout_settled(claim_id: u64) -> Result<(), StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    let protocol_canister_id = read_state(|s| {
+        s.native_sol_pending_payout_for(&caller, claim_id)
+            .map(|_| s.protocol_canister_id)
+    })
+    .ok_or(StabilityPoolError::RefundClaimNotFound)?;
+
+    ensure_backend_sol_claim_absent(protocol_canister_id, claim_id, caller).await?;
+    mutate_state(|s| s.ack_native_sol_payout_settled(&caller, claim_id))
+}
+
+async fn ensure_backend_sol_claim_absent(
+    protocol_canister_id: Principal,
+    claim_id: u64,
+    claimant: Principal,
+) -> Result<(), StabilityPoolError> {
+    let method = "stability_pool_sol_claim_outstanding";
+    let response: Result<(Result<bool, rumi_protocol_backend::ProtocolError>,), _> =
+        ic_cdk::call(protocol_canister_id, method, (claim_id, claimant)).await;
+
+    match response {
+        Ok((Ok(false),)) => Ok(()),
+        Ok((Ok(true),)) => Err(StabilityPoolError::SolClaimStillOutstanding { claim_id }),
+        Ok((Err(err),)) => Err(StabilityPoolError::SolClaimStatusCheckFailed {
+            reason: format!("{err:?}"),
+        }),
+        Err((code, message)) => Err(StabilityPoolError::SolClaimStatusCheckFailed {
+            reason: format!("{method} rejected by {protocol_canister_id}: {code:?}: {message}"),
+        }),
+    }
+}
+
 // ─── Liquidation (Push + Fallback) ───
 
 /// Called by the backend to push liquidatable vault notifications.
@@ -1114,7 +1154,7 @@ pub fn icrc21_canister_call_consent_message(
                     format!(
                         "## Opt In to Native Collateral\n\n\
                          You are opting in to receive **{}** from future liquidations. \
-                         Payouts will be sent to XRP Ledger address `{}`.",
+                         Payouts will be sent to the address you provided: `{}`.",
                         symbol, payout_address
                     )
                 }
@@ -1138,7 +1178,7 @@ pub fn icrc21_canister_call_consent_message(
                     format!(
                         "## Opt In to Native Collateral\n\n\
                          You are opting in to receive **{}** from future liquidations. \
-                         Payouts will be sent to XRP Ledger address `{}`{}.",
+                         Payouts will be sent to the address you provided: `{}`{}.",
                         symbol, payout_address, tag_text
                     )
                 }
@@ -1151,6 +1191,11 @@ pub fn icrc21_canister_call_consent_message(
         "ack_native_xrp_payout_settled" => {
             "## Clear Settled XRP Payout\n\n\
              You are clearing a settled native XRP payout reminder from the Stability Pool."
+                .to_string()
+        }
+        "ack_native_sol_payout_settled" => {
+            "## Clear Settled SOL Payout\n\n\
+             You are clearing a settled native SOL payout reminder from the Stability Pool."
                 .to_string()
         }
         "deposit_as_3usd" => {
