@@ -8,8 +8,8 @@ use ic_canister_log::{declare_log_buffer, log};
 
 use rumi_points::snapshot_seed::RevealedSeed;
 use rumi_points::types::{
-    EpochStatus, EpochSummary, IngestStatus, InitArgs, LeaderboardEntry, PointsConfig, PointsError,
-    PrincipalState, PublicEpochStatus, RegistrationInfo, SourceStatus,
+    EpochStatus, EpochSummary, IngestStatus, InitArgs, LeaderboardEntry, PointEntryPage,
+    PointsConfig, PointsError, PrincipalState, PublicEpochStatus, RegistrationInfo, SourceStatus,
 };
 use rumi_points::{epoch, poll, state};
 
@@ -74,6 +74,28 @@ fn get_leaderboard(offset: u32, limit: u32) -> Vec<LeaderboardEntry> {
 #[ic_cdk::query]
 fn get_epoch_history(offset: u32, limit: u32) -> Vec<EpochSummary> {
     state::epoch_history(offset as u64, limit as u64)
+}
+
+/// Number of rows in the append-only audit ledger, i.e. the upper bound for the
+/// `offset` accepted by the two readers below.
+#[ic_cdk::query]
+fn get_point_ledger_len() -> u64 {
+    state::point_ledger_len()
+}
+
+/// A page of the raw audit ledger. Together with `get_principal_point_entries`
+/// this is what makes `total_points` auditable: it decomposes every principal's
+/// total into per-source, per-epoch deltas.
+#[ic_cdk::query]
+fn get_point_entries(offset: u64, limit: u32) -> PointEntryPage {
+    state::point_entries(offset, limit)
+}
+
+/// The audit ledger filtered to one principal. Page until `reached_end` is true
+/// (an empty page mid-scan only means the per-call scan budget ran out).
+#[ic_cdk::query]
+fn get_principal_point_entries(principal: Principal, offset: u64, limit: u32) -> PointEntryPage {
+    state::principal_point_entries(principal, offset, limit)
 }
 
 #[ic_cdk::query]

@@ -52,7 +52,8 @@ use crate::accrual::{self, SnapshotWeights};
 use crate::snapshot_seed::{RevealedSeed, SnapshotSeedSingleton};
 use crate::types::{
     AssetType, DepositKey, DepositRecord, EpochStatus, EpochSummary, InitArgs, LeaderboardEntry,
-    OpenEpoch, PointEntry, PointSource, PointsConfig, PointsError, PrincipalState, PublicEpochStatus,
+    OpenEpoch, PointEntry, PointEntryPage, PointSource, PointsConfig, PointsError, PrincipalState,
+    PublicEpochStatus,
     PublicOpenEpoch, QualifyingAction, RegistrationInfo, RepaymentEvent, Venue,
 };
 
@@ -779,6 +780,54 @@ pub fn append_point_entry(entry: PointEntry) {
 
 pub fn point_ledger_len() -> u64 {
     POINT_LEDGER.with(|l| l.borrow().len())
+}
+
+/// Row cap per audit-ledger page, same reasoning as `MAX_LEADERBOARD_LIMIT`
+/// (PTS-001): an unbounded request must not be able to blow the query budget.
+pub const MAX_LEDGER_LIMIT: u32 = 1_000;
+/// Rows examined per call, independent of how many MATCH. A principal-filtered
+/// scan over a long ledger would otherwise be unbounded work for a caller who
+/// asked for one row; the page returns early and the cursor resumes the scan.
+pub const MAX_LEDGER_SCAN: u64 = 20_000;
+
+/// Bounded forward read of the append-only audit ledger, oldest row first.
+/// This is the ONLY way to decompose a principal's `total_points` by source and
+/// epoch: `PrincipalState` carries the running total and the current deposit
+/// composition, but not the per-source history that produced them.
+pub fn point_entries(offset: u64, limit: u32) -> PointEntryPage {
+    read_ledger_page(offset, limit, |_| true)
+}
+
+/// The same ledger filtered to one principal. See `MAX_LEDGER_SCAN` for why an
+/// empty page does not mean "no more rows" (check `reached_end` instead).
+pub fn principal_point_entries(principal: Principal, offset: u64, limit: u32) -> PointEntryPage {
+    read_ledger_page(offset, limit, |e| e.principal == principal)
+}
+
+fn read_ledger_page(
+    offset: u64,
+    limit: u32,
+    keep: impl Fn(&PointEntry) -> bool,
+) -> PointEntryPage {
+    let limit = limit.min(MAX_LEDGER_LIMIT) as usize;
+    POINT_LEDGER.with(|l| {
+        let log = l.borrow();
+        let len = log.len();
+        let mut entries = Vec::new();
+        let mut i = offset.min(len);
+        let mut scanned = 0u64;
+        while i < len && entries.len() < limit && scanned < MAX_LEDGER_SCAN {
+            if let Some(row) = log.get(i) {
+                let entry = row.into_current();
+                if keep(&entry) {
+                    entries.push(entry);
+                }
+            }
+            i += 1;
+            scanned += 1;
+        }
+        PointEntryPage { entries, next_offset: i, reached_end: i >= len }
+    })
 }
 
 #[allow(dead_code)] // wired by the Phase 5 epoch driver
@@ -1677,6 +1726,72 @@ mod tests {
         assert_eq!(page.len(), 1);
         assert_eq!(page[0].principal, tp(3));
         assert_eq!(page[0].rank, 2);
+    }
+
+    // ── Audit-ledger readers ──
+
+    fn mk_entry(p: Principal, epoch: u64, delta: u128, source: PointSource) -> PointEntry {
+        PointEntry {
+            principal: p,
+            epoch_index: epoch,
+            points_delta: delta,
+            source,
+            recorded_at_ns: 1_000 + epoch,
+        }
+    }
+
+    #[test]
+    fn point_entries_page_forward_and_report_end() {
+        let base = point_ledger_len();
+        for i in 0..5u64 {
+            append_point_entry(mk_entry(tp(50), i, 10 * i as u128, PointSource::IcUsdDebt));
+        }
+        let page = point_entries(base, 2);
+        assert_eq!(page.entries.len(), 2);
+        assert_eq!(page.entries[0].epoch_index, 0);
+        assert_eq!(page.entries[1].epoch_index, 1);
+        assert_eq!(page.next_offset, base + 2);
+        assert!(!page.reached_end, "more rows remain");
+
+        // Resume from the returned cursor, not from a count of returned rows.
+        let rest = point_entries(page.next_offset, 100);
+        assert_eq!(rest.entries.len(), 3);
+        assert_eq!(rest.entries[0].epoch_index, 2);
+        assert!(rest.reached_end);
+    }
+
+    #[test]
+    fn principal_point_entries_filters_and_advances_past_non_matching_rows() {
+        let base = point_ledger_len();
+        let mine = tp(51);
+        let other = tp(52);
+        // Interleave so the filter must skip rows: other, mine, other, mine.
+        append_point_entry(mk_entry(other, 0, 1, PointSource::IcUsdDebt));
+        append_point_entry(mk_entry(mine, 0, 7, PointSource::AmmLp));
+        append_point_entry(mk_entry(other, 1, 2, PointSource::IcUsdDebt));
+        append_point_entry(mk_entry(mine, 1, 9, PointSource::ThreeUsdStabilityPool));
+
+        let page = principal_point_entries(mine, base, 100);
+        assert_eq!(page.entries.len(), 2, "only this principal's rows");
+        assert_eq!(page.entries[0].points_delta, 7);
+        assert_eq!(page.entries[0].source, PointSource::AmmLp);
+        assert_eq!(page.entries[1].points_delta, 9);
+        assert!(page.reached_end);
+        // The cursor is a ledger INDEX, so it advanced past the skipped rows too.
+        assert_eq!(page.next_offset, point_ledger_len());
+    }
+
+    #[test]
+    fn ledger_readers_clamp_limit_and_tolerate_out_of_range_offset() {
+        let len = point_ledger_len();
+        // A limit above the cap must not over-return.
+        let page = point_entries(0, u32::MAX);
+        assert!(page.entries.len() as u32 <= MAX_LEDGER_LIMIT);
+        // An offset past the end yields an empty, terminal page rather than a panic.
+        let past = point_entries(len + 1_000, 10);
+        assert!(past.entries.is_empty());
+        assert!(past.reached_end);
+        assert_eq!(past.next_offset, len);
     }
 
     #[test]

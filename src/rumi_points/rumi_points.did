@@ -60,6 +60,29 @@ type OpenEpoch = record {
   close_points_accrued : nat;
   epoch_end_ns : nat64;
 };
+type PointSource = variant {
+  Registration;
+  IcUsdDebt;
+  IcUsd3Pool;
+  CkStable3PoolUnmatched;
+  CkStable3PoolMatched;
+  VaultRepayment;
+  IcUsdStabilityPool;
+  ThreeUsdStabilityPool;
+  AmmLp;
+};
+type PointEntry = record {
+  "principal" : principal;
+  epoch_index : nat64;
+  points_delta : nat;
+  source : PointSource;
+  recorded_at_ns : nat64;
+};
+type PointEntryPage = record {
+  entries : vec PointEntry;
+  next_offset : nat64;
+  reached_end : bool;
+};
 type PointsConfig = record {
   admin : principal;
   registered_count : nat64;
@@ -152,7 +175,10 @@ service : (opt InitArgs) -> {
   get_ingest_status : () -> (IngestStatus) query;
   get_leaderboard : (nat32, nat32) -> (vec LeaderboardEntry) query;
   get_pending_commit : () -> (blob) query;
+  get_point_entries : (nat64, nat32) -> (PointEntryPage) query;
+  get_point_ledger_len : () -> (nat64) query;
   get_points_config : () -> (PointsConfig) query;
+  get_principal_point_entries : (principal, nat64, nat32) -> (PointEntryPage) query;
   get_principal_state : (principal) -> (opt PrincipalState) query;
   get_registration_info : (principal) -> (opt RegistrationInfo) query;
   get_revealed_seed : (nat64) -> (opt RevealedSeed) query;

@@ -92,6 +92,29 @@ export const idlFactory = ({ IDL }) => {
     'rank' : IDL.Nat32,
     'estimated_share_bps' : IDL.Nat32,
   });
+  const PointSource = IDL.Variant({
+    'CkStable3PoolMatched' : IDL.Null,
+    'Registration' : IDL.Null,
+    'CkStable3PoolUnmatched' : IDL.Null,
+    'VaultRepayment' : IDL.Null,
+    'IcUsd3Pool' : IDL.Null,
+    'AmmLp' : IDL.Null,
+    'IcUsdStabilityPool' : IDL.Null,
+    'IcUsdDebt' : IDL.Null,
+    'ThreeUsdStabilityPool' : IDL.Null,
+  });
+  const PointEntry = IDL.Record({
+    'principal' : IDL.Principal,
+    'epoch_index' : IDL.Nat64,
+    'source' : PointSource,
+    'recorded_at_ns' : IDL.Nat64,
+    'points_delta' : IDL.Nat,
+  });
+  const PointEntryPage = IDL.Record({
+    'reached_end' : IDL.Bool,
+    'entries' : IDL.Vec(PointEntry),
+    'next_offset' : IDL.Nat64,
+  });
   const PointsConfig = IDL.Record({
     'admin' : IDL.Principal,
     'registered_count' : IDL.Nat64,
@@ -191,7 +214,18 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'get_pending_commit' : IDL.Func([], [IDL.Vec(IDL.Nat8)], ['query']),
+    'get_point_entries' : IDL.Func(
+        [IDL.Nat64, IDL.Nat32],
+        [PointEntryPage],
+        ['query'],
+      ),
+    'get_point_ledger_len' : IDL.Func([], [IDL.Nat64], ['query']),
     'get_points_config' : IDL.Func([], [PointsConfig], ['query']),
+    'get_principal_point_entries' : IDL.Func(
+        [IDL.Principal, IDL.Nat64, IDL.Nat32],
+        [PointEntryPage],
+        ['query'],
+      ),
     'get_principal_state' : IDL.Func(
         [IDL.Principal],
         [IDL.Opt(PrincipalState)],

@@ -477,6 +477,95 @@ mod tests {
         assert_eq!(recorded_3pool(&p, AssetType::CkUsdc), Some(300_000_000)); // $3 left
     }
 
+    // KNOWN BUG (found 2026-07-25 against live mainnet state), not yet fixed.
+    //
+    // The 3pool emits `RemoveOneCoin` with `amounts` populated for ONLY the coin
+    // withdrawn, even though the LP burned was backed by all three legs. The
+    // normalizer (`source_types::three_pool::normalize`) maps it to the same
+    // `ThreePoolRemove { amounts }` as a proportional `RemoveLiquidity` and drops
+    // the event's `lp_amount`, so `apply_3pool` skips every zero leg and only the
+    // withdrawn coin is debited. The untouched legs stay recorded forever, and
+    // because they are the ck-stables they sit in the 10x matched-multiplier
+    // bucket (`accrual::snapshot_weights`).
+    //
+    // Live evidence: replaying all 82 mainnet 3pool events for principal
+    // `zegjz-...-tae` through this code reproduces its exact on-chain record
+    // (ckUSDT 111_710_000_000, ckUSDC 105_528_942_200, icUSD entry deleted) while
+    // the true in-season net is icUSD -$1,575.15 / ckUSDT +$380.90 / ckUSDC +$363.20.
+    //
+    // Ignored so the suite stays green; run with `cargo test -- --ignored`.
+    // Un-ignore as part of the fix (debit all legs pro-rata from `lp_amount`).
+    #[test]
+    #[ignore = "documents an unfixed bug: RemoveOneCoin under-debits the untouched legs"]
+    fn remove_one_coin_should_debit_every_leg_not_just_the_withdrawn_one() {
+        init();
+        let p = tp(44);
+        // Balanced add: $100 of each leg.
+        apply_ingested_event(&ev(
+            SourceId::ThreePool,
+            0,
+            Some(p),
+            in_season_ts(),
+            IngestKind::ThreePoolAdd { amounts: [100_000_000, 100_000_000, 100_000_000] },
+        ));
+        // RemoveOneCoin taking $300 out as icUSD. This burns the ENTIRE LP
+        // position, so all three recorded legs must go to zero.
+        apply_ingested_event(&ev(
+            SourceId::ThreePool,
+            1,
+            Some(p),
+            in_season_ts(),
+            IngestKind::ThreePoolRemove { amounts: [300_000_000, 0, 0] },
+        ));
+        assert_eq!(recorded_3pool(&p, AssetType::IcUsd), None, "icUSD leg drained");
+        // These two are what actually break: the LP backing them is gone, but
+        // the recorded value survives and keeps earning at 10x.
+        assert_eq!(
+            recorded_3pool(&p, AssetType::CkUsdt),
+            None,
+            "ckUSDT leg must be debited: its LP backing was burned"
+        );
+        assert_eq!(
+            recorded_3pool(&p, AssetType::CkUsdc),
+            None,
+            "ckUSDC leg must be debited: its LP backing was burned"
+        );
+    }
+
+    // Second half of the same defect: a position opened BEFORE the season is never
+    // recorded, but an in-season withdrawal of it hits the `else if let Some(rec)`
+    // arm in `state::update_3pool_recorded` with no entry present and is silently
+    // dropped. Live events 54 and 55 discarded $1,257 of real withdrawals this way.
+    #[test]
+    #[ignore = "documents an unfixed bug: in-season removes against pre-season positions are dropped"]
+    fn in_season_remove_against_unrecorded_position_is_not_silently_dropped() {
+        init();
+        let p = tp(45);
+        // Register in-season so the principal exists, then withdraw a position
+        // that was established pre-season (hence never recorded).
+        apply_ingested_event(&ev(
+            SourceId::ThreePool,
+            0,
+            Some(p),
+            in_season_ts(),
+            IngestKind::ThreePoolAdd { amounts: [0, 0, 1_000_000] }, // $1 ckUSDC
+        ));
+        apply_ingested_event(&ev(
+            SourceId::ThreePool,
+            1,
+            Some(p),
+            in_season_ts(),
+            IngestKind::ThreePoolRemove { amounts: [0, 500_000_000, 0] }, // $500 ckUSDT out
+        ));
+        // The withdrawal must be carried as a debt against the position rather
+        // than vanishing, otherwise later adds accumulate from an inflated floor.
+        assert_eq!(
+            recorded_3pool(&p, AssetType::CkUsdc),
+            None,
+            "a $500 withdrawal must not leave a $1 recorded position standing"
+        );
+    }
+
     #[test]
     fn vault_repay_with_ckusdc_opens_a_window() {
         init();
