@@ -10,6 +10,7 @@
     fetchCollateralConfigs,
   } from '$services/explorer/explorerService';
   import { CANISTER_IDS } from '$lib/config';
+  import { getThreeUsdPrice } from '$services/threeUsdPrice';
   import { getTokenDecimals } from '$utils/explorerHelpers';
   import type {
     AddressValuePoint,
@@ -116,9 +117,10 @@
     // unchanged than to show nothing.
     try {
       const principalObjLive = Principal.fromText(target);
-      const [pools, prices] = await Promise.all([
+      const [pools, prices, threeUsdPriceUsd] = await Promise.all([
         fetchAmmPools().catch(() => []),
         fetchCollateralPrices().catch(() => new Map<string, number>()),
+        getThreeUsdPrice(),
       ]);
       let liveTotalUsd = 0;
       await Promise.all(
@@ -133,9 +135,11 @@
           const tokenB = pool.token_b?.toText?.() ?? String(pool.token_b ?? '');
           const decA = getTokenDecimals(tokenA);
           const decB = getTokenDecimals(tokenB);
-          // 3USD pinned to $1 (matches analytics' price_amm_lp_state).
-          const priceA = prices.get(tokenA) ?? (tokenA === CANISTER_IDS.THREEPOOL ? 1 : 0);
-          const priceB = prices.get(tokenB) ?? (tokenB === CANISTER_IDS.THREEPOOL ? 1 : 0);
+          // 3USD is the 3pool LP token: value it at the pool virtual price. The
+          // analytics series pins it to $1, which is exactly what this live
+          // correction factor exists to rescale.
+          const priceA = prices.get(tokenA) ?? (tokenA === CANISTER_IDS.THREEPOOL ? threeUsdPriceUsd : 0);
+          const priceB = prices.get(tokenB) ?? (tokenB === CANISTER_IDS.THREEPOOL ? threeUsdPriceUsd : 0);
           const shareRatio = Number(balance) / Number(totalShares);
           const valueA = (Number(BigInt(pool.reserve_a ?? 0)) / 10 ** decA) * shareRatio * priceA;
           const valueB = (Number(BigInt(pool.reserve_b ?? 0)) / 10 ** decB) * shareRatio * priceB;

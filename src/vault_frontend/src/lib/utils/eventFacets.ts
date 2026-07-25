@@ -16,6 +16,7 @@
 
 import { Principal } from '@dfinity/principal';
 import { CANISTER_IDS } from '$lib/config';
+import { peekThreeUsdPrice } from '$services/threeUsdPrice';
 import {
   KNOWN_TOKENS,
   resolveTokenAlias,
@@ -346,6 +347,18 @@ function icpAmountToUsd(amount: any, icpPrice: number | undefined): number | nul
   return (n / 1e8) * icpPrice;
 }
 
+/**
+ * USD value of a 3USD (3pool LP) amount. Prefers an explicit price from the
+ * caller's price map, otherwise the cached 3pool virtual price. Never $1.
+ */
+function threeUsdAmountToUsd(
+  amount: any,
+  priceMap: Map<string, number> | undefined,
+): number {
+  const price = priceMap?.get(CANISTER_IDS.THREEPOOL) ?? peekThreeUsdPrice();
+  return toUsdFromStablecoin(amount, 8) * price;
+}
+
 function collateralAmountToUsd(
   amount: any,
   collateralPrincipal: string | null | undefined,
@@ -439,9 +452,9 @@ function computeSizeUsd(
     const tokenIn = principalText(de.event?.token_in);
     const tokenOut = principalText(de.event?.token_out);
     const threePool = CANISTER_IDS.THREEPOOL;
-    // 3USD LP ≈ $1; use it if present
-    if (tokenIn === threePool) return toUsdFromStablecoin(de.event.amount_in, 8);
-    if (tokenOut === threePool) return toUsdFromStablecoin(de.event.amount_out, 8);
+    // 3USD LP leg, valued at the 3pool virtual price; use it if present
+    if (tokenIn === threePool) return threeUsdAmountToUsd(de.event.amount_in, priceMap);
+    if (tokenOut === threePool) return threeUsdAmountToUsd(de.event.amount_out, priceMap);
     // ICP leg — use ICP price if we have one
     if (tokenIn === CANISTER_IDS.ICP_LEDGER) return icpAmountToUsd(de.event.amount_in, icpPrice);
     if (tokenOut === CANISTER_IDS.ICP_LEDGER) return icpAmountToUsd(de.event.amount_out, icpPrice);
@@ -455,12 +468,12 @@ function computeSizeUsd(
   }
 
   if (de.source === 'amm_liquidity') {
-    // Value the LP shares via the 3USD-LP side when possible (~$1/unit).
+    // Value the LP shares via the 3USD-LP side when possible, at virtual price.
     const tokenA = principalText(de.event?.token_a);
     const tokenB = principalText(de.event?.token_b);
     const threePool = CANISTER_IDS.THREEPOOL;
-    if (tokenA === threePool) return toUsdFromStablecoin(de.event.amount_a, 8);
-    if (tokenB === threePool) return toUsdFromStablecoin(de.event.amount_b, 8);
+    if (tokenA === threePool) return threeUsdAmountToUsd(de.event.amount_a, priceMap);
+    if (tokenB === threePool) return threeUsdAmountToUsd(de.event.amount_b, priceMap);
     if (tokenA === CANISTER_IDS.ICP_LEDGER) return icpAmountToUsd(de.event.amount_a, icpPrice);
     if (tokenB === CANISTER_IDS.ICP_LEDGER) return icpAmountToUsd(de.event.amount_b, icpPrice);
     return null;

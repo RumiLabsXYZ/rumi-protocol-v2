@@ -197,8 +197,15 @@
       const poolId = String(pool.pool_id ?? '');
       const decA = getTokenDecimals(tokenA);
       const decB = getTokenDecimals(tokenB);
-      const priceA = priceMap.get(tokenA) ?? (tokenA === CANISTER_IDS.ICUSD_LEDGER ? 1 : 0);
-      const priceB = priceMap.get(tokenB) ?? (tokenB === CANISTER_IDS.ICUSD_LEDGER ? 1 : 0);
+      // 3USD is the 3pool LP token, valued at the pool virtual price rather than $1 or $0.
+      const threeUsdVp = threePoolState?.virtual_price
+        ? Number(threePoolState.virtual_price) / 1e18
+        : 1;
+      const legPrice = (token: string) =>
+        priceMap.get(token) ??
+        (token === CANISTER_IDS.ICUSD_LEDGER ? 1 : token === CANISTER_IDS.THREEPOOL ? threeUsdVp : 0);
+      const priceA = legPrice(tokenA);
+      const priceB = legPrice(tokenB);
       const tvl =
         (Number(BigInt(pool.reserve_a ?? 0)) / 10 ** decA) * priceA +
         (Number(BigInt(pool.reserve_b ?? 0)) / 10 ** decB) * priceB;
