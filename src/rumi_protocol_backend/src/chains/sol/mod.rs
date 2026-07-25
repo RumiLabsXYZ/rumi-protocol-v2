@@ -33,5 +33,8 @@ pub mod config;
 pub mod rpc;
 pub mod ted25519;
 
+#[cfg(test)]
+mod tests_kat;
+
 pub use address::{decode_sol_address, is_valid_sol_address};
 pub use config::{SOL_CHAIN_ID, SOL_NATIVE_DECIMALS};

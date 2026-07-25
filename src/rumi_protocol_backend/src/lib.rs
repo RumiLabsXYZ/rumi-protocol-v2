@@ -285,8 +285,18 @@ pub struct SuccessWithFee {
     /// balance. `Some` only on the ckStable path; `None` elsewhere. Optional for
     /// Candid back-compat.
     pub stable_pulled_e6s: Option<u64>,
-    /// Native-XRP manual liquidation payout claim id for the liquidator reward.
-    /// `None` for non-XRP collateral and non-liquidation SuccessWithFee results.
+    /// Manual-liquidation payout claim id for the liquidator reward on ANY
+    /// native-custody collateral, not just XRP: `queue_collateral_payout`
+    /// returns a claim id for both `CustodyKind::NativeXrp` (an `XrpClaim`) and
+    /// `CustodyKind::NativeSol` (a `SolClaim`), and both land here. `None` for
+    /// ICRC-ledger collateral and for non-liquidation `SuccessWithFee` results.
+    ///
+    /// The field keeps its `xrp_claim_id` name deliberately. Candid identifies
+    /// record fields by a hash of the name, so renaming it to something neutral
+    /// would be a wire-breaking change for existing clients, unlike the purely
+    /// structural type renames elsewhere in this crate. Callers must read the
+    /// claim id from here for SOL too, and disambiguate by the vault's
+    /// collateral type rather than by the field name.
     pub xrp_claim_id: Option<u64>,
 }
 

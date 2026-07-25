@@ -1,0 +1,47 @@
+import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+const componentPath = resolve(__dirname, 'SolPayoutRouting.svelte');
+
+describe('SolPayoutRouting pending payouts', () => {
+  it('renders the opt-in card for any SP depositor, not only icUSD depositors', () => {
+    const source = readFileSync(componentPath, 'utf8');
+
+    expect(source).toContain('userHasStablecoinDeposit = (userPosition?.stablecoin_balances ?? []).some');
+    expect(source).toContain('amount > 0n');
+    expect(source).toContain('userHasStablecoinDeposit || isEnabled || loadingPayouts || hasPendingPayouts');
+  });
+
+  it('renders pending payout rows and settles before acknowledgement, with no destination-tag input anywhere', () => {
+    const source = readFileSync(componentPath, 'utf8');
+
+    expect(source).toContain('pendingPayouts = await stabilityPoolService.getMyNativeSolPayouts()');
+    expect(source).toContain('Claim #{claimId}');
+    expect(source).toContain('payout.payout_address');
+    expect(source).toContain('hasPendingPayouts = pendingPayouts.length > 0');
+    expect(source).toContain('userHasStablecoinDeposit || isEnabled || loadingPayouts || hasPendingPayouts');
+    expect(source).toContain('const claimOutstanding = await SolVaultService.hasOutstandingClaim(claimId)');
+    expect(source).toContain('Retry once it confirms to clear this reminder');
+    expect(source).toContain('if (!message.includes(\'not available\'))');
+    expect(source).not.toContain('destinationTag');
+    expect(source).not.toContain('tag');
+
+    const settleCall = source.indexOf('SolVaultService.settleSolClaim');
+    const outstandingCheck = source.indexOf('SolVaultService.hasOutstandingClaim');
+    const ackCall = source.indexOf('stabilityPoolService.ackNativeSolPayoutSettled');
+    expect(settleCall).toBeGreaterThan(-1);
+    expect(outstandingCheck).toBeGreaterThan(settleCall);
+    expect(ackCall).toBeGreaterThan(outstandingCheck);
+
+    const loadPendingPayouts = source.slice(
+      source.indexOf('async function loadPendingPayouts()'),
+      source.indexOf('$: if (!isConnected)')
+    );
+    const catchBlock = loadPendingPayouts.slice(
+      loadPendingPayouts.indexOf('} catch (err: unknown) {'),
+      loadPendingPayouts.indexOf('} finally {')
+    );
+    expect(catchBlock).not.toContain('pendingPayouts = []');
+  });
+});

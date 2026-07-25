@@ -79,18 +79,22 @@ function createCollateralStore() {
           const ledgerId = config.ledger_canister_id.toText();
 
           // How the collateral is custodied. Absent (legacy) => IcrcLedger.
-          // NativeXrp is held off-chain on the XRP Ledger: its `ledger_canister_id`
-          // is a SYNTHETIC key, not a real canister, so it has no icrc1_symbol.
+          // NativeXrp/NativeSol are held off-chain (XRPL / Solana): their
+          // `ledger_canister_id` is a SYNTHETIC key, not a real canister, so
+          // neither has an icrc1_symbol to query.
           const ck = config.custody_kind?.[0];
-          const custodyKind: 'IcrcLedger' | 'NativeXrp' =
-            ck && 'NativeXrp' in ck ? 'NativeXrp' : 'IcrcLedger';
+          const custodyKind: 'IcrcLedger' | 'NativeXrp' | 'NativeSol' =
+            ck && 'NativeXrp' in ck ? 'NativeXrp' : ck && 'NativeSol' in ck ? 'NativeSol' : 'IcrcLedger';
           const isNativeXrp = custodyKind === 'NativeXrp';
+          const isNativeSol = custodyKind === 'NativeSol';
 
-          // Symbol: native-XRP is fixed (no ledger to query); everything else reads
-          // icrc1_symbol off its ledger.
+          // Symbol: native-XRP/native-SOL are fixed (no ledger to query); everything
+          // else reads icrc1_symbol off its ledger.
           let symbol = principalText.substring(0, 5).toUpperCase();
           if (isNativeXrp) {
             symbol = 'XRP';
+          } else if (isNativeSol) {
+            symbol = 'SOL';
           } else {
             try {
               const ledgerActor = await TokenService.createAnonymousActor(ledgerId, ICRC1_IDL);
@@ -100,10 +104,10 @@ function createCollateralStore() {
             }
           }
 
-          // Read display_color from backend config; fall back to an XRP-ish blue for
-          // native-XRP, neutral gray otherwise.
+          // Read display_color from backend config; fall back to an asset-ish
+          // color for native rails (XRP blue, Solana purple), neutral gray otherwise.
           const displayColor = config.display_color?.[0];
-          const color = displayColor ?? (isNativeXrp ? '#4A90D9' : '#94A3B8');
+          const color = displayColor ?? (isNativeXrp ? '#4A90D9' : isNativeSol ? '#9945FF' : '#94A3B8');
 
           // Decode blob fields using Rust Decimal decoder
           const liquidationCr = decodeRustDecimal(config.liquidation_ratio);
@@ -216,7 +220,7 @@ export const collateralStore = createCollateralStore();
  * Tokens not in this list appear at the end, sorted alphabetically.
  */
 export const COLLATERAL_DISPLAY_ORDER: string[] = [
-  'ICP', 'XRP', 'ckBTC', 'ckETH', 'ckXAUT', 'nICP', 'BOB', 'EXE',
+  'ICP', 'XRP', 'SOL', 'ckBTC', 'ckETH', 'ckXAUT', 'nICP', 'BOB', 'EXE',
 ];
 
 /**
