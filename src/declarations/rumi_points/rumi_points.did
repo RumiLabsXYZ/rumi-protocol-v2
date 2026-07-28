@@ -138,6 +138,7 @@ type RepaymentEvent = record {
 type Result = variant { Ok; Err : PointsError };
 type Result_1 = variant { Ok; Err : text };
 type Result_2 = variant { Ok : nat64; Err : PointsError };
+type Result_3 = variant { Ok : nat64; Err : text };
 type RevealedSeed = record {
   revealed_at_ns : nat64;
   epoch_index : nat64;
@@ -164,6 +165,7 @@ type CycleManagerMetric = record {
 };
 service : (opt InitArgs) -> {
   add_excluded_principal : (principal) -> (Result);
+  admin_rebuild_3pool_recorded : () -> (Result_3);
   cycle_manager_metrics : () -> (vec CycleManagerMetric) query;
   cycles_status : () -> (CycleManagerCyclesStatus) query;
   force_epoch_tick : () -> (Result);

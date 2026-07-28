@@ -161,6 +161,8 @@ export type Result_1 = { 'Ok' : null } |
   { 'Err' : string };
 export type Result_2 = { 'Ok' : bigint } |
   { 'Err' : PointsError };
+export type Result_3 = { 'Ok' : bigint } |
+  { 'Err' : string };
 export interface RevealedSeed {
   'revealed_at_ns' : bigint,
   'epoch_index' : bigint,
@@ -179,6 +181,7 @@ export type Venue = { 'Amm' : null } |
   { 'StabilityPool' : null };
 export interface _SERVICE {
   'add_excluded_principal' : ActorMethod<[Principal], Result>,
+  'admin_rebuild_3pool_recorded' : ActorMethod<[], Result_3>,
   'cycle_manager_metrics' : ActorMethod<[], Array<CycleManagerMetric>>,
   'cycles_status' : ActorMethod<[], CycleManagerCyclesStatus>,
   'force_epoch_tick' : ActorMethod<[], Result>,

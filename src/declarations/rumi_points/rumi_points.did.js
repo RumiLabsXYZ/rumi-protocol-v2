@@ -11,6 +11,7 @@ export const idlFactory = ({ IDL }) => {
     'Excluded' : IDL.Null,
   });
   const Result = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : PointsError });
+  const Result_3 = IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : IDL.Text });
   const CycleManagerMetric = IDL.Record({
     'key' : IDL.Text,
     'value' : IDL.Nat,
@@ -183,6 +184,7 @@ export const idlFactory = ({ IDL }) => {
   const Result_2 = IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : PointsError });
   return IDL.Service({
     'add_excluded_principal' : IDL.Func([IDL.Principal], [Result], []),
+    'admin_rebuild_3pool_recorded' : IDL.Func([], [Result_3], []),
     'cycle_manager_metrics' : IDL.Func(
         [],
         [IDL.Vec(CycleManagerMetric)],

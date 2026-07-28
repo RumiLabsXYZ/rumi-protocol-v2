@@ -11,7 +11,9 @@ use rumi_points::types::{
     EpochStatus, EpochSummary, IngestStatus, InitArgs, LeaderboardEntry, PointEntryPage,
     PointsConfig, PointsError, PrincipalState, PublicEpochStatus, RegistrationInfo, SourceStatus,
 };
-use rumi_points::{epoch, poll, state};
+use rumi_points::events::SourceId;
+use rumi_points::source_types::three_pool;
+use rumi_points::{epoch, events, poll, state};
 
 // Canister debug-log buffer (retrievable in later phases; for now feeds the
 // replica debug log on lifecycle events).
@@ -199,6 +201,54 @@ async fn trigger_poll() -> Result<u64, PointsError> {
         return Err(PointsError::Unauthorized);
     }
     Ok(poll::poll_all().await as u64)
+}
+
+/// Admin-only repair: refetch the already-ingested 3pool liquidity history (ids
+/// below the current cursor) and rebuild every principal's recorded 3pool
+/// composition through the fixed pro-rata debit semantics. The pre-fix per-leg
+/// debit left `RemoveOneCoin`'s untouched legs recorded forever (2026-07-25 live
+/// bug), so records written by the old code stay inflated until this runs. Only
+/// position records change; registration, repayment windows and already-accrued
+/// points are untouched. Holds the poll guard across the whole fetch+rebuild so
+/// a concurrent poll can neither interleave nor advance the cursor mid-repair;
+/// events at/after the starting cursor are excluded and left for the poller.
+#[ic_cdk::update]
+async fn admin_rebuild_3pool_recorded() -> Result<u64, String> {
+    if !state::is_admin(ic_cdk::caller()) {
+        return Err("unauthorized".to_string());
+    }
+    let _guard = state::PollGuard::new()
+        .ok_or_else(|| "a poll is in flight; retry shortly".to_string())?;
+    let canister = state::get_source_canister(SourceId::ThreePool.tag())
+        .ok_or_else(|| "3pool source canister not configured".to_string())?;
+    let cursor = state::get_cursor(SourceId::ThreePool.tag());
+    let mut all: Vec<events::IngestedEvent> = Vec::new();
+    let mut start = 0u64;
+    // True bound is cursor/500 pages; the loop cap is a runaway backstop. A
+    // fetch failure aborts BEFORE any state is touched (the rebuild only runs
+    // once every page landed).
+    for _ in 0..200 {
+        if start >= cursor {
+            break;
+        }
+        let res: Result<(three_pool::ForwardLiquidityEventsV2,), _> =
+            ic_cdk::call(canister, "get_liquidity_events_v2_forward", (start, 500u64)).await;
+        let resp = match res {
+            Ok((r,)) => r,
+            Err((code, msg)) => {
+                return Err(format!("3pool fetch at {} failed: {:?} {}", start, code, msg))
+            }
+        };
+        let (page, next_start, reached_end) = three_pool::normalize_forward(resp);
+        all.extend(page.into_iter().filter(|e| e.event_id < cursor));
+        if reached_end || next_start <= start {
+            break;
+        }
+        start = next_start;
+    }
+    let applied = events::rebuild_3pool_recorded(&all) as u64;
+    log!(INFO, "admin_rebuild_3pool_recorded: replayed {} events (cursor {})", applied, cursor);
+    Ok(applied)
 }
 
 /// Admin: turn the periodic poll timer on/off (Phase 2b). Off by default. Enable

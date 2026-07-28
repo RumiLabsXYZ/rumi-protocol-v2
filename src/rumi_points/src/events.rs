@@ -162,18 +162,76 @@ pub fn apply_ingested_event(ev: &IngestedEvent) {
 /// Update the recorded 3pool composition from an add/remove. `amounts` ordering is
 /// `[icUSD, ckUSDT, ckUSDC]` (3pool wire order), in native decimals; normalized to
 /// `usd_e8s` here so the snapshot accrual reads a common scale.
+///
+/// Adds credit each deposited leg. Removes debit the TOTAL withdrawn value
+/// pro-rata across the whole recorded composition instead of per-leg: a
+/// `RemoveOneCoin` populates only the coin paid out, but the LP it burned was
+/// backed by every leg, so a per-leg debit would leave the untouched ck-stable
+/// legs recorded forever in the 10x matched bucket (live bug, 2026-07-25).
 fn apply_3pool(caller: Principal, amounts: &[u128; 3], add: bool, now_ns: u64) {
     let legs = [
         (AssetType::IcUsd, amounts[0]),
         (AssetType::CkUsdt, amounts[1]),
         (AssetType::CkUsdc, amounts[2]),
     ];
-    for (asset, native) in legs {
-        if native > 0 {
-            let usd = valuation::value_stable_usd_e8s(asset, native);
-            state::update_3pool_recorded(caller, asset, usd, add, now_ns);
+    if add {
+        for (asset, native) in legs {
+            if native > 0 {
+                let usd = valuation::value_stable_usd_e8s(asset, native);
+                state::credit_3pool_recorded(caller, asset, usd, now_ns);
+            }
+        }
+    } else {
+        let total_usd = legs.iter().fold(0u128, |acc, (asset, native)| {
+            acc.saturating_add(valuation::value_stable_usd_e8s(*asset, *native))
+        });
+        if total_usd > 0 {
+            state::debit_3pool_recorded(caller, total_usd, now_ns);
         }
     }
+}
+
+/// Replay 3pool position tracking from a full event history, through the FIXED
+/// debit semantics (`admin_rebuild_3pool_recorded` repair path). Clears every
+/// recorded ThreePool leg first, then re-applies each add/remove exactly as the
+/// original ingest would have gated it: in-season, non-excluded, and only from
+/// the principal's registration onward (`timestamp_ns >= registered_at_ns`
+/// reproduces "was registered at the time" without re-running registration --
+/// the registering event itself carries `timestamp_ns == registered_at_ns`).
+/// Registration, repayment windows and already-accrued points are untouched:
+/// this repairs the recorded composition that feeds FUTURE snapshots, it does
+/// not rewrite accrual history. Returns the number of events re-applied.
+pub fn rebuild_3pool_recorded(events: &[IngestedEvent]) -> usize {
+    state::clear_all_3pool_recorded();
+    let mut applied = 0;
+    for ev in events {
+        let caller = match ev.caller {
+            Some(c) => c,
+            None => continue,
+        };
+        if !state::in_season(ev.timestamp_ns) || state::is_excluded(&caller) {
+            continue;
+        }
+        let registered_at = match state::get_principal_state(&caller) {
+            Some(ps) => ps.registered_at_ns,
+            None => continue, // never registered: the original ingest dropped it too
+        };
+        if ev.timestamp_ns < registered_at {
+            continue;
+        }
+        match &ev.kind {
+            IngestKind::ThreePoolAdd { amounts } => {
+                apply_3pool(caller, amounts, true, ev.timestamp_ns);
+                applied += 1;
+            }
+            IngestKind::ThreePoolRemove { amounts } => {
+                apply_3pool(caller, amounts, false, ev.timestamp_ns);
+                applied += 1;
+            }
+            _ => {}
+        }
+    }
+    applied
 }
 
 /// Open a 90-day window for a qualifying ckUSDC/ckUSDT repayment (spec Section 6).
@@ -477,36 +535,24 @@ mod tests {
         assert_eq!(recorded_3pool(&p, AssetType::CkUsdc), Some(300_000_000)); // $3 left
     }
 
-    // KNOWN BUG (found 2026-07-25 against live mainnet state), not yet fixed.
-    //
-    // The 3pool emits `RemoveOneCoin` with `amounts` populated for ONLY the coin
-    // withdrawn, even though the LP burned was backed by all three legs. The
-    // normalizer (`source_types::three_pool::normalize`) maps it to the same
-    // `ThreePoolRemove { amounts }` as a proportional `RemoveLiquidity` and drops
-    // the event's `lp_amount`, so `apply_3pool` skips every zero leg and only the
-    // withdrawn coin is debited. The untouched legs stay recorded forever, and
-    // because they are the ck-stables they sit in the 10x matched-multiplier
-    // bucket (`accrual::snapshot_weights`).
-    //
-    // Live evidence: replaying all 82 mainnet 3pool events for principal
-    // `zegjz-...-tae` through this code reproduces its exact on-chain record
-    // (ckUSDT 111_710_000_000, ckUSDC 105_528_942_200, icUSD entry deleted) while
-    // the true in-season net is icUSD -$1,575.15 / ckUSDT +$380.90 / ckUSDC +$363.20.
-    //
-    // Ignored so the suite stays green; run with `cargo test -- --ignored`.
-    // Un-ignore as part of the fix (debit all legs pro-rata from `lp_amount`).
+    // Regression test for the 2026-07-25 live bug: the 3pool emits
+    // `RemoveOneCoin` with `amounts` populated for ONLY the coin withdrawn, even
+    // though the LP burned was backed by all three legs. The old per-leg debit
+    // left the untouched ck-stable legs recorded forever in the 10x matched
+    // bucket (replaying all 82 mainnet events reproduced principal
+    // `zegjz-...-tae`'s exact inflated record). Removes now debit the total
+    // withdrawn value pro-rata across the whole recorded composition.
     #[test]
-    #[ignore = "documents an unfixed bug: RemoveOneCoin under-debits the untouched legs"]
     fn remove_one_coin_should_debit_every_leg_not_just_the_withdrawn_one() {
         init();
         let p = tp(44);
-        // Balanced add: $100 of each leg.
+        // Balanced add: $100 of each leg (icUSD 8-dec, ck-stables 6-dec).
         apply_ingested_event(&ev(
             SourceId::ThreePool,
             0,
             Some(p),
             in_season_ts(),
-            IngestKind::ThreePoolAdd { amounts: [100_000_000, 100_000_000, 100_000_000] },
+            IngestKind::ThreePoolAdd { amounts: [10_000_000_000, 100_000_000, 100_000_000] },
         ));
         // RemoveOneCoin taking $300 out as icUSD. This burns the ENTIRE LP
         // position, so all three recorded legs must go to zero.
@@ -515,7 +561,7 @@ mod tests {
             1,
             Some(p),
             in_season_ts(),
-            IngestKind::ThreePoolRemove { amounts: [300_000_000, 0, 0] },
+            IngestKind::ThreePoolRemove { amounts: [30_000_000_000, 0, 0] },
         ));
         assert_eq!(recorded_3pool(&p, AssetType::IcUsd), None, "icUSD leg drained");
         // These two are what actually break: the LP backing them is gone, but
@@ -532,12 +578,12 @@ mod tests {
         );
     }
 
-    // Second half of the same defect: a position opened BEFORE the season is never
-    // recorded, but an in-season withdrawal of it hits the `else if let Some(rec)`
-    // arm in `state::update_3pool_recorded` with no entry present and is silently
-    // dropped. Live events 54 and 55 discarded $1,257 of real withdrawals this way.
+    // Second half of the same defect: a position opened BEFORE the season was
+    // never recorded, so an in-season withdrawal of it found no entry to debit
+    // and was silently dropped (live events 54/55 discarded $1,257 of real
+    // withdrawals this way). The pro-rata total debit drains whatever IS
+    // recorded instead, so no phantom floor survives an exit.
     #[test]
-    #[ignore = "documents an unfixed bug: in-season removes against pre-season positions are dropped"]
     fn in_season_remove_against_unrecorded_position_is_not_silently_dropped() {
         init();
         let p = tp(45);
@@ -557,13 +603,86 @@ mod tests {
             in_season_ts(),
             IngestKind::ThreePoolRemove { amounts: [0, 500_000_000, 0] }, // $500 ckUSDT out
         ));
-        // The withdrawal must be carried as a debt against the position rather
-        // than vanishing, otherwise later adds accumulate from an inflated floor.
+        // The withdrawal drains whatever IS recorded rather than vanishing,
+        // otherwise later adds would accumulate from an inflated floor.
         assert_eq!(
             recorded_3pool(&p, AssetType::CkUsdc),
             None,
             "a $500 withdrawal must not leave a $1 recorded position standing"
         );
+    }
+
+    #[test]
+    fn partial_remove_one_coin_debits_all_legs_pro_rata() {
+        init();
+        let p = tp(46);
+        // $100 icUSD + $200 ckUSDT + $100 ckUSDC recorded ($400 total).
+        apply_ingested_event(&ev(
+            SourceId::ThreePool,
+            0,
+            Some(p),
+            in_season_ts(),
+            IngestKind::ThreePoolAdd { amounts: [10_000_000_000, 200_000_000, 100_000_000] },
+        ));
+        // RemoveOneCoin paying out $100 of icUSD = 25% of the position, so every
+        // leg scales down by 25%, preserving the composition mix.
+        apply_ingested_event(&ev(
+            SourceId::ThreePool,
+            1,
+            Some(p),
+            in_season_ts(),
+            IngestKind::ThreePoolRemove { amounts: [10_000_000_000, 0, 0] },
+        ));
+        assert_eq!(recorded_3pool(&p, AssetType::IcUsd), Some(7_500_000_000)); // $75
+        assert_eq!(recorded_3pool(&p, AssetType::CkUsdt), Some(15_000_000_000)); // $150
+        assert_eq!(recorded_3pool(&p, AssetType::CkUsdc), Some(7_500_000_000)); // $75
+    }
+
+    #[test]
+    fn rebuild_3pool_recorded_repairs_old_code_damage_and_skips_pre_registration() {
+        init();
+        let p = tp(47);
+        let history = vec![
+            // Pre-registration remove: the original ingest dropped it (the
+            // principal did not exist yet) and the rebuild must too, even though
+            // the principal IS registered at replay time.
+            ev(
+                SourceId::ThreePool,
+                0,
+                Some(p),
+                in_season_ts(),
+                IngestKind::ThreePoolRemove { amounts: [0, 100_000_000, 0] },
+            ),
+            // Registration + $100/$100/$100 position.
+            ev(
+                SourceId::ThreePool,
+                1,
+                Some(p),
+                in_season_ts() + 10,
+                IngestKind::ThreePoolAdd { amounts: [10_000_000_000, 100_000_000, 100_000_000] },
+            ),
+            // RemoveOneCoin $150 icUSD out = half the position.
+            ev(
+                SourceId::ThreePool,
+                2,
+                Some(p),
+                in_season_ts() + 20,
+                IngestKind::ThreePoolRemove { amounts: [15_000_000_000, 0, 0] },
+            ),
+        ];
+        // Register at event 1's timestamp (as the original ingest did), then
+        // simulate the OLD per-leg debit's damage: icUSD drained to nothing,
+        // ck-stable legs still recorded at full value.
+        let _ = state::register(p, in_season_ts() + 10, QualifyingAction::Deposit3Pool);
+        state::credit_3pool_recorded(p, AssetType::CkUsdt, 10_000_000_000, 1);
+        state::credit_3pool_recorded(p, AssetType::CkUsdc, 10_000_000_000, 1);
+
+        let applied = rebuild_3pool_recorded(&history);
+        assert_eq!(applied, 2, "the pre-registration remove is skipped");
+        // Correct composition: every leg at half its deposited value.
+        assert_eq!(recorded_3pool(&p, AssetType::IcUsd), Some(5_000_000_000));
+        assert_eq!(recorded_3pool(&p, AssetType::CkUsdt), Some(5_000_000_000));
+        assert_eq!(recorded_3pool(&p, AssetType::CkUsdc), Some(5_000_000_000));
     }
 
     #[test]

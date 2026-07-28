@@ -1190,14 +1190,12 @@ pub fn set_epoch_driver_interval(caller: Principal, secs: u64) -> Result<(), Poi
 /// 90-day repayment window length (spec Section 6).
 pub const REPAYMENT_WINDOW_NS: u64 = 90 * crate::NANOS_PER_DAY;
 
-/// Add to (or subtract from) a principal's recorded 3pool deposit for one asset
-/// (the event-tracked composition deciding the 1x/3x/5x split). Subtraction
-/// saturates at 0 and drops the record when it reaches 0. No-op if unregistered.
-pub fn update_3pool_recorded(
+/// Credit a principal's recorded 3pool deposit for one asset (the event-tracked
+/// composition deciding the 1x/3x/10x split). No-op if unregistered.
+pub fn credit_3pool_recorded(
     principal: Principal,
     asset: AssetType,
     amount_usd_e8s: u128,
-    add: bool,
     now_ns: u64,
 ) {
     let mut ps = match get_principal_state(&principal) {
@@ -1205,24 +1203,79 @@ pub fn update_3pool_recorded(
         None => return,
     };
     let key = DepositKey { venue: Venue::ThreePool, asset };
-    if add {
-        let rec = ps.active_deposits.entry(key).or_insert_with(|| DepositRecord {
-            asset,
-            venue: Venue::ThreePool,
-            recorded_value_usd: 0,
-            deposited_at: now_ns,
-            last_verified_at: now_ns,
-        });
-        rec.recorded_value_usd = rec.recorded_value_usd.saturating_add(amount_usd_e8s);
-        rec.last_verified_at = now_ns;
-    } else if let Some(rec) = ps.active_deposits.get_mut(&key) {
-        rec.recorded_value_usd = rec.recorded_value_usd.saturating_sub(amount_usd_e8s);
-        rec.last_verified_at = now_ns;
-        if rec.recorded_value_usd == 0 {
-            ps.active_deposits.remove(&key);
+    let rec = ps.active_deposits.entry(key).or_insert_with(|| DepositRecord {
+        asset,
+        venue: Venue::ThreePool,
+        recorded_value_usd: 0,
+        deposited_at: now_ns,
+        last_verified_at: now_ns,
+    });
+    rec.recorded_value_usd = rec.recorded_value_usd.saturating_add(amount_usd_e8s);
+    rec.last_verified_at = now_ns;
+    put_principal_state(ps);
+}
+
+/// Debit `total_usd_e8s` from a principal's recorded 3pool composition, spread
+/// pro-rata across the recorded legs. A withdrawal burns LP backed by the WHOLE
+/// position, not just the coin paid out, so a per-leg debit is wrong for
+/// `RemoveOneCoin` (it would leave the untouched legs recorded forever, in the
+/// 10x matched bucket). Debiting the total pro-rata also makes an
+/// over-withdrawal (e.g. against a pre-season position that was never credited)
+/// drain whatever IS recorded instead of leaving a phantom floor.
+/// Saturates at 0, drops drained legs. No-op if unregistered or nothing recorded.
+pub fn debit_3pool_recorded(principal: Principal, total_usd_e8s: u128, now_ns: u64) {
+    let mut ps = match get_principal_state(&principal) {
+        Some(p) => p,
+        None => return,
+    };
+    let keys: Vec<DepositKey> = ps
+        .active_deposits
+        .keys()
+        .filter(|k| k.venue == Venue::ThreePool)
+        .copied()
+        .collect();
+    let recorded_total: u128 = keys
+        .iter()
+        .filter_map(|k| ps.active_deposits.get(k))
+        .fold(0u128, |acc, r| acc.saturating_add(r.recorded_value_usd));
+    if recorded_total == 0 {
+        return;
+    }
+    for key in keys {
+        if let Some(rec) = ps.active_deposits.get_mut(&key) {
+            // Floor division under-debits by at most (legs - 1) e8s of dust per
+            // withdrawal; the >= drain case below clears exact exits regardless.
+            let cut = if total_usd_e8s >= recorded_total {
+                rec.recorded_value_usd
+            } else {
+                rec.recorded_value_usd.saturating_mul(total_usd_e8s) / recorded_total
+            };
+            rec.recorded_value_usd = rec.recorded_value_usd.saturating_sub(cut);
+            rec.last_verified_at = now_ns;
+            if rec.recorded_value_usd == 0 {
+                ps.active_deposits.remove(&key);
+            }
         }
     }
     put_principal_state(ps);
+}
+
+/// Remove every principal's recorded ThreePool deposits, so a rebuild can
+/// replay them from the source event log through the fixed debit semantics.
+/// Registration, repayment windows and accrued points are untouched.
+pub fn clear_all_3pool_recorded() {
+    let all: Vec<Principal> = PRINCIPALS.with(|m| m.borrow().iter().map(|(k, _)| k.0).collect());
+    for p in all {
+        let mut ps = match get_principal_state(&p) {
+            Some(ps) => ps,
+            None => continue,
+        };
+        let before = ps.active_deposits.len();
+        ps.active_deposits.retain(|k, _| k.venue != Venue::ThreePool);
+        if ps.active_deposits.len() != before {
+            put_principal_state(ps);
+        }
+    }
 }
 
 /// Record a qualifying ckUSDC/ckUSDT vault repayment, opening a 90-day points
@@ -2111,30 +2164,54 @@ mod tests {
     }
 
     #[test]
-    fn update_3pool_recorded_adds_subtracts_and_drops_at_zero() {
+    fn credit_and_debit_3pool_recorded_round_trip_and_drop_at_zero() {
         init_default(tp(99));
         let p = tp(30);
         register(p, 1, QualifyingAction::Deposit3Pool).unwrap();
         let key = key_3pool(AssetType::CkUsdc);
 
-        update_3pool_recorded(p, AssetType::CkUsdc, 100, true, 5);
+        credit_3pool_recorded(p, AssetType::CkUsdc, 100, 5);
         assert_eq!(get_principal_state(&p).unwrap().active_deposits[&key].recorded_value_usd, 100);
 
-        update_3pool_recorded(p, AssetType::CkUsdc, 50, true, 6);
+        credit_3pool_recorded(p, AssetType::CkUsdc, 50, 6);
         assert_eq!(get_principal_state(&p).unwrap().active_deposits[&key].recorded_value_usd, 150);
 
-        update_3pool_recorded(p, AssetType::CkUsdc, 60, false, 7);
+        debit_3pool_recorded(p, 60, 7);
         assert_eq!(get_principal_state(&p).unwrap().active_deposits[&key].recorded_value_usd, 90);
 
-        // Subtracting past zero drops the record entirely.
-        update_3pool_recorded(p, AssetType::CkUsdc, 1_000, false, 8);
+        // Debiting past zero drops the record entirely.
+        debit_3pool_recorded(p, 1_000, 8);
         assert!(get_principal_state(&p).unwrap().active_deposits.get(&key).is_none());
     }
 
     #[test]
-    fn update_3pool_recorded_is_noop_when_unregistered() {
+    fn debit_3pool_recorded_spreads_pro_rata_and_drains_exact_exits() {
         init_default(tp(99));
-        update_3pool_recorded(tp(31), AssetType::IcUsd, 100, true, 5);
+        let p = tp(32);
+        register(p, 1, QualifyingAction::Deposit3Pool).unwrap();
+        credit_3pool_recorded(p, AssetType::IcUsd, 100, 1);
+        credit_3pool_recorded(p, AssetType::CkUsdt, 200, 1);
+        credit_3pool_recorded(p, AssetType::CkUsdc, 100, 1);
+
+        // 25% out -> every leg scales by 25%, preserving the mix.
+        debit_3pool_recorded(p, 100, 2);
+        let deposits = get_principal_state(&p).unwrap().active_deposits;
+        assert_eq!(deposits[&key_3pool(AssetType::IcUsd)].recorded_value_usd, 75);
+        assert_eq!(deposits[&key_3pool(AssetType::CkUsdt)].recorded_value_usd, 150);
+        assert_eq!(deposits[&key_3pool(AssetType::CkUsdc)].recorded_value_usd, 75);
+
+        // A withdrawal of exactly the remaining total clears every leg, floor
+        // division notwithstanding.
+        debit_3pool_recorded(p, 300, 3);
+        assert!(get_principal_state(&p).unwrap().active_deposits.is_empty());
+    }
+
+    #[test]
+    fn credit_and_debit_3pool_recorded_are_noops_when_unregistered() {
+        init_default(tp(99));
+        credit_3pool_recorded(tp(31), AssetType::IcUsd, 100, 5);
+        assert!(get_principal_state(&tp(31)).is_none());
+        debit_3pool_recorded(tp(31), 100, 5);
         assert!(get_principal_state(&tp(31)).is_none());
     }
 
@@ -2382,8 +2459,8 @@ mod tests {
         init_default(tp(99));
         let p = tp(80);
         register(p, 1, QualifyingAction::Deposit3Pool).unwrap();
-        update_3pool_recorded(p, AssetType::IcUsd, 10, true, 1);
-        update_3pool_recorded(p, AssetType::CkUsdc, 20, true, 1);
+        credit_3pool_recorded(p, AssetType::IcUsd, 10, 1);
+        credit_3pool_recorded(p, AssetType::CkUsdc, 20, 1);
         assert_eq!(recorded_3pool_composition(&p), (10, 20, 0));
         assert_eq!(recorded_3pool_composition(&tp(123)), (0, 0, 0));
     }
