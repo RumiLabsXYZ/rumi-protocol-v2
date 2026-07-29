@@ -14,7 +14,6 @@
   let status = $state<PublicEpochStatus | null>(null);
   let config = $state<PointsConfig | null>(null);
   let rank = $state<number | null>(null);
-  let shareBps = $state<number | null>(null);
 
   async function loadSeason() {
     try {
@@ -42,21 +41,19 @@
     const p = $principal;
     if ($isConnected && p) {
       myPointsStore.load(p);
-      // Best-effort rank + estimated share from the top slice (no get_my_rank endpoint).
+      // Best-effort rank from the top slice (no get_my_rank endpoint). Share of
+      // pool is deliberately NOT surfaced to users; see PointsSummary.
       getLeaderboard(0, 1000)
         .then((rows) => {
           const me = rows.find((e) => e.principal.toText() === p.toText());
           rank = me ? me.rank : null;
-          shareBps = me ? me.estimated_share_bps : null;
         })
         .catch(() => {
           rank = null;
-          shareBps = null;
         });
     } else {
       myPointsStore.reset();
       rank = null;
-      shareBps = null;
     }
   });
 
@@ -104,7 +101,7 @@
       This address is excluded from the airdrop (protocol-owned).
     </div>
   {:else if body === 'enrolled' && $myPointsStore.state}
-    <PointsSummary state={$myPointsStore.state} {rank} {shareBps} />
+    <PointsSummary state={$myPointsStore.state} {rank} />
     <EarnCta heading="Earn more" />
   {:else}
     <div class="rounded-xl bg-gray-800/30 border border-gray-700/50 p-4 text-sm text-gray-300">
