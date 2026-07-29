@@ -16,7 +16,7 @@
    */
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
-  import { POINTS_ENABLED } from '$lib/config';
+  import { POINTS_ENABLED, ADMIN_VIEW_PRINCIPALS } from '$lib/config';
   import { principal, isConnected } from '$lib/stores/wallet';
   import {
     getPointsConfig,
@@ -264,8 +264,13 @@
 
   // ── derived ───────────────────────────────────────────────────────────────
   const adminText = $derived(config ? config.admin.toText() : null);
+  const connectedText = $derived($isConnected && $principal !== null ? $principal.toText() : null);
+  // The on-chain admin is the CLI deploy identity, which no browser wallet can
+  // present — so the operator's app-wallet principals come from the
+  // ADMIN_VIEW_PRINCIPALS allowlist in config.ts. UI wall only (see header).
   const isAdmin = $derived(
-    $isConnected && $principal !== null && adminText !== null && $principal.toText() === adminText
+    connectedText !== null &&
+      (connectedText === adminText || ADMIN_VIEW_PRINCIPALS.includes(connectedText))
   );
   const openEpoch = $derived(status?.open_epoch?.[0] ?? null);
   const totalPoints = $derived(board.reduce((s, e) => s + e.total_points, 0n));
@@ -330,14 +335,25 @@
   {:else if !isAdmin}
     <div class="rounded-xl bg-gray-800/30 border border-gray-700/50 p-8 text-center flex flex-col gap-2">
       <span class="text-sm text-gray-200 font-medium">Admin wallet required</span>
-      <span class="text-xs text-gray-400">
-        {#if !$isConnected}
-          Connect the points-canister admin wallet to open this console.
-        {:else}
-          The connected wallet is not the points-canister admin
-          ({adminText ? truncatePrincipal(adminText) : '…'}).
-        {/if}
-      </span>
+      {#if !connectedText}
+        <span class="text-xs text-gray-400">
+          Connect an allowlisted admin wallet to open this console.
+        </span>
+      {:else}
+        <span class="text-xs text-gray-400">
+          The connected wallet is not on the admin allowlist. To grant it access,
+          add this principal to ADMIN_VIEW_PRINCIPALS in config.ts and redeploy:
+        </span>
+        <span class="inline-flex items-center justify-center gap-2 mt-1">
+          <span class="font-mono text-[11px] text-gray-300 break-all">{connectedText}</span>
+          <button
+            class="text-gray-500 hover:text-teal-400 text-xs shrink-0"
+            title="Copy principal"
+            aria-label="Copy principal"
+            onclick={() => copyAddress(connectedText!)}
+          >⧉</button>
+        </span>
+      {/if}
     </div>
   {:else}
     <!-- ── Engine strip ─────────────────────────────────────────────────── -->

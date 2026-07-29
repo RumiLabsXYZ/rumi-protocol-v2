@@ -39,6 +39,23 @@ export const CANISTER_IDS = {
  *  is configured above. Flip on by filling RUMI_POINTS at deploy time. */
 export const POINTS_ENABLED: boolean = CANISTER_IDS.RUMI_POINTS !== "";
 
+/**
+ * Wallet principals allowed into the /points/admin console, IN ADDITION to the
+ * on-chain PointsConfig.admin. Needed because the canister admin is the CLI
+ * deploy identity (rumi_identity), which no browser wallet can present: Oisy
+ * and Internet Identity connect with their own principals. Add the operator's
+ * app-wallet principal(s) here — the wall on /points/admin shows the connected
+ * principal with a copy button, paste it into this list and redeploy.
+ *
+ * UI wall only, NOT access control: every panel on that page reads public
+ * canister queries that anyone can make directly.
+ */
+export const ADMIN_VIEW_PRINCIPALS: string[] = [
+  // rumi_identity (CLI deploy identity; listed for completeness — a browser
+  // wallet will never present this principal):
+  "fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae",
+];
+
 // Canister IDs for local development
 export const LOCAL_CANISTER_IDS = {
   PROTOCOL: "tfesu-vyaaa-aaaap-qrd7a-cai",
