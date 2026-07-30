@@ -2,7 +2,39 @@ import type { CollateralInfo } from '$lib/services/types';
 
 export const SOL_LAMPORTS_PER_SOL = 1_000_000_000;
 
+/**
+ * Pre-open estimate of the Solana rent-exempt minimum, in SOL.
+ *
+ * The AUTHORITATIVE value is whatever `open_sol_vault` returns in
+ * `rentExemptLamports` (the backend reads it live from `getMinimumBalanceForRentExemption`),
+ * but the borrow form has to size the collateral/CR/max-borrow math BEFORE the
+ * vault is opened, when no reserve is known yet. 890,880 lamports is the
+ * standard rent-exempt minimum for a 0-byte-data system account and has been
+ * stable for the lifetime of the network.
+ *
+ * If the network ever raises it, this under-deducts on the form only: the
+ * modal always shows the real reserve, and the backend independently
+ * re-checks the collateral ratio, so a stale value here fails safe (a borrow
+ * gets rejected) rather than over-crediting anyone. Mirrors
+ * `XRPL_BASE_RESERVE_XRP` in `nativeXrpBorrowFlow.ts` exactly.
+ */
+export const SOL_RENT_EXEMPT_ESTIMATE_LAMPORTS = 890_880;
+export const SOL_RENT_EXEMPT_ESTIMATE_SOL = SOL_RENT_EXEMPT_ESTIMATE_LAMPORTS / SOL_LAMPORTS_PER_SOL;
+
+/**
+ * Collateral actually credited to the vault when the user sends `sendAmount`.
+ *
+ * The user names the amount they will SEND; the Solana rent-exempt minimum
+ * comes out of that amount to activate the custody account, and
+ * `confirm_sol_deposit` credits the remainder (`balance - rent_exempt`).
+ * Never negative. Mirrors `xrpCreditedCollateral` exactly.
+ */
+export function solCreditedCollateral(sendAmount: number, reserveAmount: number): number {
+  return Math.max(0, sendAmount - reserveAmount);
+}
+
 export interface NativeSolDepositIntent {
+  /** What the user said they would SEND (the reserve comes OUT of this). */
   collateralAmount: number;
   icusdAmount: number;
   rentExemptLamports: bigint | number;
@@ -11,8 +43,11 @@ export interface NativeSolDepositIntent {
 
 export interface NativeSolDepositCopy {
   assetName: string;
+  /** Exactly what the user asked to send (never their amount plus a surprise). */
   sendAmount: number;
   reserveAmount: number;
+  /** What actually lands as collateral: sendAmount minus the rent-exempt reserve. */
+  creditedAmount: number;
   sendAmountLabel: string;
   collateralAmountLabel: string;
   reserveAmountLabel: string;
@@ -58,18 +93,24 @@ export function buildSolPaymentUri(address: string, amount: number): string {
 export function nativeSolDepositCopy(intent: NativeSolDepositIntent): NativeSolDepositCopy {
   const assetName = intent.collateralInfo?.symbol || 'SOL';
   const reserveAmount = solAmountFromLamports(intent.rentExemptLamports);
-  const sendAmount = intent.collateralAmount + reserveAmount;
-  const collateralAmountLabel = formatSolAmount(intent.collateralAmount);
+  // The user sends EXACTLY what they asked to send. The Solana rent-exempt
+  // reserve is taken out of that amount rather than added on top, so the
+  // deposit instruction never differs from the number they typed.
+  const sendAmount = intent.collateralAmount;
+  const creditedAmount = solCreditedCollateral(sendAmount, reserveAmount);
+  const collateralAmountLabel = formatSolAmount(creditedAmount);
   const reserveAmountLabel = formatSolAmount(reserveAmount);
+  const sendAmountLabel = formatSolAmount(sendAmount);
   return {
     assetName,
     sendAmount,
     reserveAmount,
-    sendAmountLabel: formatSolAmount(sendAmount),
+    creditedAmount,
+    sendAmountLabel,
     collateralAmountLabel,
     reserveAmountLabel,
     borrowAmountLabel: `${intent.icusdAmount.toFixed(2)} icUSD`,
-    reserveExplanation: `${collateralAmountLabel} collateral + ${reserveAmountLabel} rent-exempt reserve. The reserve keeps this Solana address alive and stays locked there; your vault stays open so you do not pay it again.`,
+    reserveExplanation: `Of the ${sendAmountLabel} you send, ${reserveAmountLabel} is the Solana rent-exempt reserve and ${collateralAmountLabel} becomes your collateral. The reserve keeps this Solana address alive and stays locked there; your vault stays open so you do not pay it again.`,
   };
 }
 

@@ -6,6 +6,7 @@ import { pnp, canisterIDLs } from '../services/pnp';
 import { TokenService } from '../services/tokenService';
 import { auth, WALLET_TYPES } from '../services/auth';
 import { RequestDeduplicator } from '../services/RequestDeduplicator';
+import { getThreeUsdPrice } from '../services/threeUsdPrice';
 import { appDataStore } from './appDataStore';
 
 // Define our own wallet list for icons
@@ -206,6 +207,9 @@ function createWalletStore() {
         console.warn('Failed to fetch stablecoin balances:', e);
       }
 
+      // 3USD is the 3pool LP token: its USD value is the pool virtual price, not $1.
+      const threeUsdPriceValue = await getThreeUsdPrice();
+
       const formatStable6 = (raw: bigint) => {
         const value = Number(raw) / 1_000_000;
         return (Math.floor(value * 1_000_000) / 1_000_000).toFixed(6);
@@ -246,7 +250,7 @@ function createWalletStore() {
           THREEUSD: {
             raw: threeUsdBalance,
             formatted: TokenService.formatBalance(threeUsdBalance),
-            usdValue: Number(TokenService.formatBalance(threeUsdBalance))
+            usdValue: Number(TokenService.formatBalance(threeUsdBalance)) * threeUsdPriceValue
           },
           ...collateralBalances
         },
@@ -416,6 +420,8 @@ function createWalletStore() {
             TokenService.getTokenBalance(CONFIG.threePoolCanisterId, principal).catch(() => 0n),
           ]);
           const icpPriceValue = protocolStatus?.lastIcpRate || 0;
+          // 3USD is the 3pool LP token: its USD value is the pool virtual price, not $1.
+          const threeUsdPriceValue = await getThreeUsdPrice();
           const formatStable6 = (raw: bigint) => {
         const value = Number(raw) / 1_000_000;
         return (Math.floor(value * 1_000_000) / 1_000_000).toFixed(6);
@@ -467,7 +473,7 @@ function createWalletStore() {
               THREEUSD: {
                 raw: threeUsdBalance,
                 formatted: TokenService.formatBalance(threeUsdBalance),
-                usdValue: Number(TokenService.formatBalance(threeUsdBalance))
+                usdValue: Number(TokenService.formatBalance(threeUsdBalance)) * threeUsdPriceValue
               },
               ...collateralBalances
             },
@@ -513,6 +519,8 @@ function createWalletStore() {
           TokenService.getTokenBalance(CONFIG.threePoolCanisterId, ownerPrincipal).catch(() => 0n),
         ]);
         const icpPriceValue = protocolStatus?.lastIcpRate || 0;
+        // 3USD is the 3pool LP token: its USD value is the pool virtual price, not $1.
+        const threeUsdPriceValue = await getThreeUsdPrice();
         const formatStable6 = (raw: bigint) => {
         const value = Number(raw) / 1_000_000;
         return (Math.floor(value * 1_000_000) / 1_000_000).toFixed(6);
@@ -555,7 +563,7 @@ function createWalletStore() {
             THREEUSD: {
               raw: threeUsdBalance,
               formatted: TokenService.formatBalance(threeUsdBalance),
-              usdValue: Number(TokenService.formatBalance(threeUsdBalance))
+              usdValue: Number(TokenService.formatBalance(threeUsdBalance)) * threeUsdPriceValue
             },
             ...collateralBalances
           },

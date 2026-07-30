@@ -13,6 +13,7 @@ import {
   nativeSolModalShouldRender,
   nativeSolModalStatusLabel,
   nativeSolModalTitle,
+  solCreditedCollateral,
 } from './nativeSolBorrowFlow';
 import type { CollateralInfo } from '$lib/services/types';
 
@@ -50,25 +51,58 @@ describe('native SOL borrow flow helpers', () => {
       collateralInfo: solCollateral,
     });
 
-    expect(copy.collateralAmountLabel).toBe('12.345 SOL');
+    // The user sends EXACTLY what they typed; the reserve comes out of it.
+    expect(copy.sendAmountLabel).toBe('12.345 SOL');
+    expect(copy.collateralAmountLabel).toBe('12.34410912 SOL');
     expect(copy.reserveAmountLabel).toBe('0.00089088 SOL');
-    expect(copy.sendAmount).toBeCloseTo(12.34589088, 9);
+    expect(copy.sendAmount).toBe(12.345);
+    expect(copy.creditedAmount).toBeCloseTo(12.34410912, 8);
     expect(copy.borrowAmountLabel).toBe('4.50 icUSD');
     expect(copy.assetName).toBe('SOL');
   });
 
+  it('never asks the user to send more than the amount they entered', () => {
+    const entered = 5000;
+    const copy = nativeSolDepositCopy({
+      collateralAmount: entered,
+      icusdAmount: 100,
+      rentExemptLamports: 1_000_000_000n,
+      collateralInfo: solCollateral,
+    });
+
+    expect(copy.sendAmount).toBe(entered);
+    expect(copy.sendAmountLabel).toBe('5000 SOL');
+    expect(copy.creditedAmount).toBe(4999);
+    expect(buildSolPaymentUri('address', copy.sendAmount)).toBe('solana:address?amount=5000');
+  });
+
   it('explains the split between credited SOL collateral and the rent-exempt reserve', () => {
     const copy = nativeSolDepositCopy({
-      collateralAmount: 2,
+      collateralAmount: 3,
       icusdAmount: 0.5,
       rentExemptLamports: 1_000_000_000n,
       collateralInfo: solCollateral,
     });
 
     expect(copy.sendAmountLabel).toBe('3 SOL');
-    expect(copy.reserveExplanation).toContain('2 SOL collateral');
-    expect(copy.reserveExplanation).toContain('1 SOL rent-exempt reserve');
+    expect(copy.reserveExplanation).toContain('Of the 3 SOL you send');
+    expect(copy.reserveExplanation).toContain('1 SOL is the Solana rent-exempt reserve');
+    expect(copy.reserveExplanation).toContain('2 SOL becomes your collateral');
     expect(buildSolPaymentUri('address', copy.sendAmount)).toBe('solana:address?amount=3');
+  });
+
+  it('never credits negative collateral when the send amount is at or below the reserve', () => {
+    expect(solCreditedCollateral(5000, 1)).toBe(4999);
+    expect(solCreditedCollateral(1, 1)).toBe(0);
+    expect(solCreditedCollateral(0.5, 1)).toBe(0);
+
+    const copy = nativeSolDepositCopy({
+      collateralAmount: 0.5,
+      icusdAmount: 0,
+      rentExemptLamports: 1_000_000_000n,
+      collateralInfo: solCollateral,
+    });
+    expect(copy.creditedAmount).toBe(0);
   });
 
   it('explains that the SOL rent-exempt reserve stays locked and the vault stays open', () => {

@@ -2,7 +2,35 @@ import type { CollateralInfo } from '$lib/services/types';
 
 export const XRP_DROPS_PER_XRP = 1_000_000;
 
+/**
+ * Pre-open estimate of the XRPL base reserve, in XRP.
+ *
+ * The AUTHORITATIVE value is whatever `open_xrp_vault` returns in
+ * `reserveBaseDrops` (the backend reads it live from rippled `server_state`), but
+ * the borrow form has to size the collateral/CR/max-borrow math BEFORE the vault
+ * is opened, when no reserve is known yet. The XRPL base reserve is a
+ * network-wide parameter currently set to 1 XRP by validator vote.
+ *
+ * If the network ever raises it, this under-deducts on the form only: the modal
+ * always shows the real reserve, and the backend independently re-checks the
+ * collateral ratio, so a stale value here fails safe (a borrow gets rejected)
+ * rather than over-crediting anyone.
+ */
+export const XRPL_BASE_RESERVE_XRP = 1;
+
+/**
+ * Collateral actually credited to the vault when the user sends `sendAmount`.
+ *
+ * The user names the amount they will SEND; the XRPL base reserve comes out of
+ * that amount to activate the custody account, and `confirm_xrp_deposit` credits
+ * the remainder (`balance - reserve_base`). Never negative.
+ */
+export function xrpCreditedCollateral(sendAmount: number, reserveAmount: number): number {
+  return Math.max(0, sendAmount - reserveAmount);
+}
+
 export interface NativeXrpDepositIntent {
+  /** What the user said they would SEND (the reserve comes OUT of this). */
   collateralAmount: number;
   icusdAmount: number;
   reserveBaseDrops: bigint | number;
@@ -11,8 +39,11 @@ export interface NativeXrpDepositIntent {
 
 export interface NativeXrpDepositCopy {
   assetName: string;
+  /** Exactly what the user asked to send — never their amount plus a surprise. */
   sendAmount: number;
   reserveAmount: number;
+  /** What actually lands as collateral: sendAmount minus the XRPL base reserve. */
+  creditedAmount: number;
   sendAmountLabel: string;
   collateralAmountLabel: string;
   reserveAmountLabel: string;
@@ -24,6 +55,7 @@ export type NativeXrpBorrowPhase =
   | 'opening'
   | 'awaiting'
   | 'confirming'
+  | 'ready_to_borrow'
   | 'borrowing'
   | 'borrow_failed'
   | 'error';
@@ -51,18 +83,24 @@ export function buildXrpPaymentUri(address: string, amount: number): string {
 export function nativeXrpDepositCopy(intent: NativeXrpDepositIntent): NativeXrpDepositCopy {
   const assetName = intent.collateralInfo?.symbol || 'XRP';
   const reserveAmount = xrpAmountFromDrops(intent.reserveBaseDrops);
-  const sendAmount = intent.collateralAmount + reserveAmount;
-  const collateralAmountLabel = formatXrpAmount(intent.collateralAmount);
+  // The user sends EXACTLY what they asked to send. The XRPL base reserve is
+  // taken out of that amount rather than added on top, so the deposit
+  // instruction never differs from the number they typed.
+  const sendAmount = intent.collateralAmount;
+  const creditedAmount = xrpCreditedCollateral(sendAmount, reserveAmount);
+  const collateralAmountLabel = formatXrpAmount(creditedAmount);
   const reserveAmountLabel = formatXrpAmount(reserveAmount);
+  const sendAmountLabel = formatXrpAmount(sendAmount);
   return {
     assetName,
     sendAmount,
     reserveAmount,
-    sendAmountLabel: formatXrpAmount(sendAmount),
+    creditedAmount,
+    sendAmountLabel,
     collateralAmountLabel,
     reserveAmountLabel,
     borrowAmountLabel: `${intent.icusdAmount.toFixed(2)} icUSD`,
-    reserveExplanation: `${collateralAmountLabel} collateral + ${reserveAmountLabel} XRPL account reserve. The reserve activates this XRP address and stays locked there; your vault stays open so you do not pay it again.`,
+    reserveExplanation: `Of the ${sendAmountLabel} you send, ${reserveAmountLabel} is the XRPL account reserve and ${collateralAmountLabel} becomes your collateral. The reserve activates this XRP address and stays locked there; your vault stays open so you do not pay it again.`,
   };
 }
 
@@ -73,7 +111,16 @@ export function nativeXrpModalTitle(phase: NativeXrpBorrowPhase, hasDepositAddre
   if (phase === 'opening' || !hasDepositAddress) {
     return 'Approve in OISY to generate your XRP address';
   }
-  return 'Send XRP to open your vault';
+  switch (phase) {
+    case 'ready_to_borrow':
+      return 'XRP received — approve your borrow';
+    case 'borrowing':
+      return 'Minting your icUSD';
+    case 'borrow_failed':
+      return 'XRP received — borrow not finished';
+    default:
+      return 'Send XRP to open your vault';
+  }
 }
 
 export function nativeXrpModalStatusLabel(phase: NativeXrpBorrowPhase): string {
@@ -84,6 +131,8 @@ export function nativeXrpModalStatusLabel(phase: NativeXrpBorrowPhase): string {
       return 'Awaiting deposit';
     case 'confirming':
       return 'Checking XRPL';
+    case 'ready_to_borrow':
+      return 'Ready to borrow';
     case 'borrowing':
       return 'Minting icUSD';
     case 'borrow_failed':
@@ -106,7 +155,8 @@ export function nativeXrpModalShouldRender(
 
 export function nativeXrpModalPrimaryActionLabel(
   phase: NativeXrpBorrowPhase,
-  hasDepositAddress: boolean
+  hasDepositAddress: boolean,
+  borrowAmountLabel?: string
 ): string | null {
   if (!hasDepositAddress) return null;
 
@@ -115,11 +165,52 @@ export function nativeXrpModalPrimaryActionLabel(
       return "I've sent the XRP";
     case 'confirming':
       return 'Checking deposit...';
+    // The borrow is a SECOND wallet approval and must come from its own click —
+    // see nativeXrpBorrowSeparateApprovalCopy(). Both the ready and failed
+    // states offer the same action so a user is never stranded mid-flow.
+    case 'ready_to_borrow':
+    case 'borrow_failed':
+      return borrowAmountLabel ? `Borrow ${borrowAmountLabel}` : 'Borrow icUSD';
     case 'borrowing':
       return 'Minting icUSD...';
     default:
       return null;
   }
+}
+
+/**
+ * Why the borrow needs its own click.
+ *
+ * Confirming the deposit and borrowing are two separate canister calls, so they
+ * are two separate wallet approvals. Oisy will only open its signer popup from
+ * inside a browser user-gesture, and the confirm call's XRPL verification
+ * round-trip burns that gesture window — so an auto-borrow chained onto the
+ * confirm always dies with "Signer window should not be opened outside of click
+ * handler". ICRC-112 batching would have allowed one approval for both calls,
+ * but no wallet ever adopted it (see services/pnp.ts). The honest fix is to ask
+ * for a second, deliberate click.
+ */
+export function nativeXrpBorrowSeparateApprovalCopy(borrowAmountLabel: string): string {
+  return `Your XRP is in the vault. Borrowing ${borrowAmountLabel} is a separate wallet approval, so approve it to finish.`;
+}
+
+/** Reassurance that closing now is safe, and where to pick the borrow back up. */
+export function nativeXrpBorrowLaterCopy(vaultId: number): string {
+  return `Nothing is at risk if you stop here — your XRP is already collateral in vault #${vaultId}. You can borrow against it any time from the Vaults page.`;
+}
+
+const SIGNER_GESTURE_HINT = 'signer window';
+
+/**
+ * Turn a raw wallet/signer error into copy a user can act on. The signer-window
+ * error in particular is meaningless to a user and, in this flow, always means
+ * "the borrow needs its own click" rather than a real failure.
+ */
+export function nativeXrpBorrowErrorCopy(rawError: string | undefined, borrowAmountLabel: string): string {
+  if (rawError && rawError.toLowerCase().includes(SIGNER_GESTURE_HINT)) {
+    return `Your wallet needs a fresh approval for the borrow. Tap Borrow ${borrowAmountLabel} to open it.`;
+  }
+  return rawError ?? 'Deposit confirmed, but borrowing failed.';
 }
 
 export function nativeXrpKeepOpenCloseCopy(): string {

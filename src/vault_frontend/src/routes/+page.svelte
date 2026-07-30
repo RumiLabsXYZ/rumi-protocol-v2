@@ -16,8 +16,16 @@
   import { seasonStore, earningActive } from '$lib/stores/seasonStore';
   import XrpBorrowModal from '$lib/components/borrow/XrpBorrowModal.svelte';
   import SolBorrowModal from '$lib/components/borrow/SolBorrowModal.svelte';
-  import { isNativeXrpCollateral } from '$lib/utils/nativeXrpBorrowFlow';
-  import { isNativeSolCollateral } from '$lib/utils/nativeSolBorrowFlow';
+  import {
+    isNativeXrpCollateral,
+    xrpCreditedCollateral,
+    XRPL_BASE_RESERVE_XRP,
+  } from '$lib/utils/nativeXrpBorrowFlow';
+  import {
+    isNativeSolCollateral,
+    solCreditedCollateral,
+    SOL_RENT_EXEMPT_ESTIMATE_SOL,
+  } from '$lib/utils/nativeSolBorrowFlow';
   import type { CollateralInfo } from '$lib/services/types';
 
   let collateralAmount = 1;
@@ -68,7 +76,24 @@
   $: icpPrice = $protocolStatus?.lastIcpRate || 0;
   $: collateralPrice = selectedCollateralInfo?.price
     || (selectedCollateralPrincipal === CANISTER_IDS.ICP_LEDGER ? icpPrice : 0);
-  $: collateralValue = collateralAmount * collateralPrice;
+  // ── Credited collateral (single source of truth for ALL risk math) ──────────
+  // For native XRP and native SOL the user names the amount they will SEND, and
+  // the chain's account-activation reserve (XRPL base reserve / Solana
+  // rent-exempt minimum) is deducted from it rather than added on top, so what
+  // actually backs the loan is send-amount minus the reserve. Every ratio,
+  // price and limit below must use this, NOT the typed amount, sizing a max
+  // borrow against the typed amount would let the user request more than the
+  // credited collateral supports and the backend would reject the borrow after
+  // their XRP/SOL had already landed. Every other collateral credits the full
+  // amount, so this is a no-op for them.
+  $: xrpReserveEstimate = isNativeXrpSelected ? XRPL_BASE_RESERVE_XRP : 0;
+  $: solReserveEstimate = isNativeSolSelected ? SOL_RENT_EXEMPT_ESTIMATE_SOL : 0;
+  $: creditedCollateralAmount = isNativeXrpSelected
+    ? xrpCreditedCollateral(collateralAmount, xrpReserveEstimate)
+    : isNativeSolSelected
+    ? solCreditedCollateral(collateralAmount, solReserveEstimate)
+    : collateralAmount;
+  $: collateralValue = creditedCollateralAmount * collateralPrice;
 
   let isPriceLoading = true;
   let priceRefreshInterval: ReturnType<typeof setInterval>;
@@ -78,8 +103,8 @@
   $: icpAmount = collateralAmount;
 
   $: projectedMintCr = (() => {
-    if (icusdAmount <= 0 || collateralAmount <= 0 || collateralPrice <= 0) return Infinity;
-    const collateralVal = collateralAmount * collateralPrice;
+    if (icusdAmount <= 0 || creditedCollateralAmount <= 0 || collateralPrice <= 0) return Infinity;
+    const collateralVal = creditedCollateralAmount * collateralPrice;
     return collateralVal / icusdAmount;
   })();
   $: mintFeeMultiplier = borrowingFeeCurve.length > 0
@@ -100,8 +125,8 @@
   $: projectedMintRate = rateCurve
     ? computeProjectedRate(rateCurve.baseRate, rateCurve.markers, projectedMintCr, mintRecoveryMultiplier)
     : (selectedCollateralInfo?.interestRateApr ?? 0);
-  $: calculatedCollateralRatio = collateralAmount > 0 && icusdAmount >= 0.001
-    ? ((collateralAmount * collateralPrice) / icusdAmount) * 100 : collateralAmount > 0 ? Infinity : 0;
+  $: calculatedCollateralRatio = creditedCollateralAmount > 0 && icusdAmount >= 0.001
+    ? ((creditedCollateralAmount * collateralPrice) / icusdAmount) * 100 : creditedCollateralAmount > 0 ? Infinity : 0;
   $: formattedCollateralRatio = calculatedCollateralRatio === Infinity
     ? '∞' : calculatedCollateralRatio > 1000000 ? '>1,000,000' : formatNumber(calculatedCollateralRatio);
   $: isValidCollateralRatio = calculatedCollateralRatio >= selectedMinCR * 100;
@@ -110,16 +135,16 @@
     : calculatedCollateralRatio < selectedMinCR * 1.234 * 100 ? 'caution' : 'safe';
 
   // Liquidation price
-  $: liquidationPrice = collateralAmount > 0 && icusdAmount > 0
-    ? (icusdAmount * selectedLiqCR) / collateralAmount : 0;
+  $: liquidationPrice = creditedCollateralAmount > 0 && icusdAmount > 0
+    ? (icusdAmount * selectedLiqCR) / creditedCollateralAmount : 0;
   $: liqPriceRatio = collateralPrice > 0 && liquidationPrice > 0 ? liquidationPrice / collateralPrice : 0;
   $: liqPriceSeverity = liqPriceRatio > 0.75 ? 'danger' : liqPriceRatio > 0.5 ? 'caution' : 'safe';
   $: safetyDelta = collateralPrice > 0 && liquidationPrice > 0
     ? ((collateralPrice - liquidationPrice) / collateralPrice) * 100 : 0;
 
   // Max borrow — 0.5% haircut so Max never overshoots the backend oracle price
-  $: maxBorrow = collateralAmount > 0 && collateralPrice > 0
-    ? Math.floor(((collateralAmount * collateralPrice) / selectedMinCR) * 0.995 * 100) / 100 : 0;
+  $: maxBorrow = creditedCollateralAmount > 0 && collateralPrice > 0
+    ? Math.floor(((creditedCollateralAmount * collateralPrice) / selectedMinCR) * 0.995 * 100) / 100 : 0;
 
   // Max collateral from wallet balance (minus token ledger fee from metadata)
   $: maxCollateral = (() => {
@@ -219,6 +244,17 @@
     if (nativeBorrowFlowActive) return;
     if (!$isConnected) { errorMessage = 'Please connect your wallet first'; return; }
     if (collateralAmount <= 0) { errorMessage = 'Please enter a valid collateral amount'; return; }
+    // Native XRP: the reserve comes OUT of the sent amount, so anything at or
+    // below the reserve credits zero collateral and the backend rejects it.
+    if (isNativeXrpSelected && creditedCollateralAmount <= 0) {
+      errorMessage = `Send more than ${xrpReserveEstimate} XRP — that much is the XRPL account reserve, which is deducted from your deposit.`;
+      return;
+    }
+    // Native SOL: same policy, the rent-exempt reserve comes OUT of the sent amount.
+    if (isNativeSolSelected && creditedCollateralAmount <= 0) {
+      errorMessage = `Send more than ${solReserveEstimate} SOL — that much is the Solana rent-exempt reserve, which is deducted from your deposit.`;
+      return;
+    }
     if (icusdAmount <= 0) { errorMessage = 'Please enter a valid icUSD amount to borrow'; return; }
     if (!isValidCollateralRatio) { errorMessage = `Collateral ratio must be at least ${(selectedMinCR * 100).toFixed(0)}%`; return; }
     if (isNativeXrpSelected && selectedCollateralInfo) {
@@ -335,7 +371,7 @@
                 {/if}
               </div>
               {#if collateralAmount > 0 && collateralPrice > 0}
-                <p class="form-hint">≈ ${formatNumber(collateralAmount * collateralPrice)}</p>
+                <p class="form-hint">≈ ${formatNumber(collateralValue)}</p>
               {/if}
             </div>
 
