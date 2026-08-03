@@ -17,7 +17,7 @@
   import { isIcrcClaimableCollateral } from '../../services/xrpPayoutHelpers';
   import {
     gainCollaterals,
-    isSunsetBobCollateral,
+    isSunsetCollateral,
     liquidationPreferenceCollaterals,
   } from './sunsetCollateralPolicy';
 
@@ -224,7 +224,7 @@
                     disabled={toggleLoading[key]}
                   >
                     <span class="opt-out-symbol">
-                      {collateral.symbol}{isSunsetBobCollateral(collateral) ? ' (sunset)' : ''}
+                      {collateral.symbol}{isSunsetCollateral(collateral) ? ' (sunset)' : ''}
                     </span>
                     {#if toggleLoading[key]}
                       <span class="mini-spinner"></span>
