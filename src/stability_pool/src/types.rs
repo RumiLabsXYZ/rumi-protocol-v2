@@ -3,10 +3,24 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const BOB_COLLATERAL_PRINCIPAL: &str = "7pail-xaaaa-aaaas-aabmq-cai";
+pub const EXE_COLLATERAL_PRINCIPAL: &str = "rh2pm-ryaaa-aaaan-qeniq-cai";
 
 pub fn bob_collateral() -> Principal {
     Principal::from_text(BOB_COLLATERAL_PRINCIPAL)
         .expect("BOB collateral principal is a valid principal")
+}
+
+pub fn exe_collateral() -> Principal {
+    Principal::from_text(EXE_COLLATERAL_PRINCIPAL)
+        .expect("EXE collateral principal is a valid principal")
+}
+
+/// Collateral types in one-way wind-down: existing positions may exit via
+/// `opt_out_collateral`, but neither a new nor a former participant may
+/// create fresh liquidation exposure to them. Add to this set (not the call
+/// sites) when another collateral is sunset.
+pub fn sunset_collaterals() -> BTreeSet<Principal> {
+    BTreeSet::from([bob_collateral(), exe_collateral()])
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -125,12 +139,13 @@ pub struct DepositPosition {
 
 impl DepositPosition {
     pub fn new(timestamp: u64) -> Self {
-        // BOB is being sunset. Existing depositors retain their current
-        // exposure until they opt out, while every new position is default-out.
+        // Sunset collaterals (BOB, EXE, ...). Existing depositors retain their
+        // current exposure until they opt out, while every new position is
+        // default-out of each one.
         Self {
             stablecoin_balances: BTreeMap::new(),
             collateral_gains: BTreeMap::new(),
-            opted_out_collateral: BTreeSet::from([bob_collateral()]),
+            opted_out_collateral: sunset_collaterals(),
             opted_in_chain_collateral: Some(BTreeSet::new()),
             deposit_timestamp: timestamp,
             total_claimed_gains: BTreeMap::new(),
@@ -1006,6 +1021,15 @@ mod icusd_value_tests {
 
         assert!(position.opted_out_collateral.contains(&bob));
         assert!(!position.is_opted_in(&bob));
+    }
+
+    #[test]
+    fn new_depositor_is_opted_out_of_sunset_exe_liquidations() {
+        let exe = exe_collateral();
+        let position = DepositPosition::new(0);
+
+        assert!(position.opted_out_collateral.contains(&exe));
+        assert!(!position.is_opted_in(&exe));
     }
 
     #[test]
