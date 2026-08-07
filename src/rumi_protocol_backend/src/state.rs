@@ -141,6 +141,11 @@ fn default_chains_ecdsa_key_name() -> String {
 fn default_xrp_schnorr_key_name() -> String {
     crate::chains::xrp::config::XRP_TEST_SCHNORR_KEY_NAME.to_string()
 }
+/// Default Schnorr key name for the native-SOL-collateral rail (mirrors
+/// `default_xrp_schnorr_key_name`).
+fn default_sol_schnorr_key_name() -> String {
+    crate::chains::sol::config::SOL_TEST_SCHNORR_KEY_NAME.to_string()
+}
 
 pub fn default_interest_split() -> Vec<InterestRecipient> {
     vec![
@@ -161,6 +166,7 @@ pub fn default_interest_split() -> Vec<InterestRecipient> {
 pub const DUST_DEBT_THRESHOLD: u64 = 50_000; // 0.0005 icUSD — debt below this is forgiven on withdrawal
 pub const MAX_SP_CHAIN_ABSORB_RESULTS_BY_PROOF: usize = 10_000;
 pub const MAX_SP_XRP_ABSORB_RESULTS_BY_PROOF: usize = 10_000;
+pub const MAX_SP_SOL_ABSORB_RESULTS_BY_PROOF: usize = 10_000;
 
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub struct StoredChainSpAbsorbResult {
@@ -185,6 +191,19 @@ pub struct StoredXrpSpAbsorbResult {
     pub proof_block_index: u64,
     pub allocation_fingerprint: Vec<u8>,
     pub result: crate::XrpSpAbsorbResult,
+    pub accepted_at_ns: u64,
+}
+
+/// SOL analogue of `StoredXrpSpAbsorbResult`.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct StoredSolSpAbsorbResult {
+    pub caller: Principal,
+    pub vault_id: u64,
+    pub icusd_burned_e8s: u64,
+    pub proof_ledger: crate::icrc3_proof::SpProofLedger,
+    pub proof_block_index: u64,
+    pub allocation_fingerprint: Vec<u8>,
+    pub result: crate::SolSpAbsorbResult,
     pub accepted_at_ns: u64,
 }
 
@@ -694,6 +713,13 @@ pub struct CollateralConfig {
 pub enum CustodyKind {
     IcrcLedger,
     NativeXrp,
+    /// Native SOL (Solana mainnet-beta) held at per-vault threshold-Ed25519
+    /// addresses via `chains::sol`. See `CollateralConfig::is_native_sol`.
+    /// New variant, additive-only: existing `match`/`==` call sites on
+    /// `CustodyKind` are untouched in this phase (they compare against
+    /// specific variants, not exhaustively `match` the enum), so adding this
+    /// does not change any existing collateral's behavior.
+    NativeSol,
 }
 
 /// P3: a native-XRP vault awaiting its on-chain deposit. Created by
@@ -839,6 +865,208 @@ pub fn validate_xrp_launch_config_update(
     Ok(())
 }
 
+// ─── Native SOL collateral (mirrors the native-XRP block above) ─────────────
+
+/// Native-SOL-collateral vault awaiting its on-chain deposit (mirrors
+/// `XrpPendingDeposit`). Created by `open_sol_vault` (no collateral credited,
+/// no icUSD minted) and removed by `confirm_sol_deposit` once the deposit to
+/// `custody_address` is verified and a real `Vault` is created.
+/// `derivation_nonce` (= the reserved vault_id) plus the owner pin the
+/// threshold-Ed25519 custody path (`chains::sol::ted25519::sol_custody_derivation_path`),
+/// so the address is reproducible.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct SolPendingDeposit {
+    pub owner: Principal,
+    pub custody_address: String,
+    pub derivation_nonce: u64,
+    pub opened_at_ns: u64,
+    /// Rent-exempt minimum (lamports) fetched live from
+    /// `getMinimumBalanceForRentExemption(0)` when the deposit address was
+    /// prepared (design doc §4.1). `#[serde(default)]` (defaulting to 0) is
+    /// safe for any pre-existing snapshot that predates this field — State is
+    /// ciborium/serde-encoded (see storage.rs).
+    #[serde(default)]
+    pub rent_exempt_lamports: u64,
+}
+
+/// Synthetic `collateral_type` / `CollateralConfig` map key for native SOL.
+/// SOL has no IC ledger, so this reserved principal is only an opaque key (15
+/// bytes — not a valid 10-byte canister id, so it cannot collide with a real
+/// canister). Mirrors `xrp_collateral_principal`.
+pub fn sol_collateral_principal() -> Principal {
+    Principal::from_slice(b"rumi-sol-native")
+}
+
+/// The `CollateralConfig` for native-SOL collateral (design doc §3).
+/// Parameters are identical to ckETH's live mainnet values (which are in turn
+/// identical to XRP's): 135% borrow threshold / 120% liquidation / 7.5%
+/// liquidation bonus / 2,500 icUSD launch debt ceiling.
+///
+/// Unlike `xrp_collateral_config`, this does NOT accept ICP's live
+/// `borrowing_fee` / `interest_rate_apr` as parameters — those are HARDCODED
+/// to ckETH's values (0.002 / 0.015) instead. XRP's "copy ICP's live values at
+/// registration time" pattern produces silent drift the moment ICP's fee
+/// changes afterward (the two configs are never kept in sync post-registration);
+/// SOL pins to a fixed, independently-chosen reference (ckETH) rather than
+/// repeating that footgun.
+///
+/// `custody_kind = NativeSol`; `ledger_canister_id` is the synthetic key; 9
+/// decimals (lamports); `ledger_fee` = 0 (the Solana network fee is paid by
+/// the settlement wallet at settle time, not deducted here). Recovery CR =
+/// borrow_threshold × `recovery_cr_multiplier`. `redemption_tier` is
+/// irrelevant (native-SOL is excluded from redemption priority at launch).
+pub fn sol_collateral_config(recovery_cr_multiplier: Ratio) -> CollateralConfig {
+    let borrow_threshold = Ratio::new(dec!(1.35));
+    CollateralConfig {
+        ledger_canister_id: sol_collateral_principal(),
+        decimals: 9,
+        liquidation_ratio: Ratio::new(dec!(1.20)),
+        borrow_threshold_ratio: borrow_threshold,
+        liquidation_bonus: Ratio::new(dec!(1.075)),
+        // Hardcoded to ckETH's live mainnet values — see the fn doc comment.
+        borrowing_fee: Ratio::new(dec!(0.002)),
+        interest_rate_apr: Ratio::new(dec!(0.015)),
+        // 2,500 icUSD e8s. Launch value (matches XRP's launch default rather
+        // than ckETH's 10,000 — a brand-new custody rail earns its ceiling).
+        // Raise the live config via set_collateral_debt_ceiling(sol, ...).
+        debt_ceiling: 250_000_000_000,
+        min_vault_debt: ICUSD::new(10_000_000), // 0.1 icUSD (matches XRP)
+        ledger_fee: 0,
+        price_source: PriceSource::Xrc {
+            base_asset: "SOL".to_string(),
+            base_asset_class: XrcAssetClass::Cryptocurrency,
+            quote_asset: "USD".to_string(),
+            quote_asset_class: XrcAssetClass::FiatCurrency,
+        },
+        status: CollateralStatus::Active,
+        last_price: None,
+        last_price_timestamp: None,
+        redemption_fee_floor: Ratio::new(dec!(0.005)),
+        redemption_fee_ceiling: Ratio::new(dec!(0.05)),
+        current_base_rate: Ratio::new(dec!(0)),
+        last_redemption_time: 0,
+        recovery_target_cr: borrow_threshold * recovery_cr_multiplier,
+        min_collateral_deposit: 20_000_000, // 0.02 SOL (lamports), ~= ckETH's 0.001 ETH in USD terms
+        recovery_borrowing_fee: None,
+        recovery_interest_rate_apr: None,
+        display_color: Some("#9945FF".to_string()), // Solana brand purple; not design-doc-specified, adjustable live
+        healthy_cr: None,
+        rate_curve: None, // inherit the global interest-rate curve
+        redemption_tier: 3,
+        min_xrc_sources: None, // SOL has deep XRC coverage; inherit the global floor
+        custody_kind: Some(CustodyKind::NativeSol),
+        symbol: Some("SOL".to_string()),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SolLaunchGuardrailMigration {
+    pub previous_status: Option<CollateralStatus>,
+}
+
+/// Converges already-registered native-SOL collateral onto the launch
+/// guardrail: native-SOL cannot be left Active while signed off with a
+/// non-production Schnorr key (mirrors `enforce_xrp_launch_guardrails`, the
+/// audit's F-01 fix applied to this rail). Idempotent so upgrades, replay
+/// recovery, and tests can call it freely. The debt ceiling is NOT clamped
+/// here — SOL uses a normal `debt_ceiling` like every other collateral.
+pub fn enforce_sol_launch_guardrails(state: &mut State) -> SolLaunchGuardrailMigration {
+    let mut migration = SolLaunchGuardrailMigration::default();
+    let sol_ct = sol_collateral_principal();
+    let Some(config) = state.collateral_configs.get_mut(&sol_ct) else {
+        return migration;
+    };
+
+    if !crate::chains::sol::config::is_sol_production_key_name(&state.sol_schnorr_key_name)
+        && !matches!(
+            config.status,
+            CollateralStatus::Frozen | CollateralStatus::Deprecated
+        )
+    {
+        migration.previous_status = Some(config.status);
+        config.status = CollateralStatus::Frozen;
+    }
+
+    migration
+}
+
+pub fn validate_sol_launch_config_update(
+    collateral_type: Principal,
+    config: &CollateralConfig,
+    configured_key: &str,
+) -> Result<(), ProtocolError> {
+    if collateral_type != sol_collateral_principal() {
+        return Ok(());
+    }
+    if !config.is_native_sol() {
+        return Err(ProtocolError::GenericError(
+            "SOL collateral config must keep custody_kind = NativeSol".to_string(),
+        ));
+    }
+    if !matches!(
+        config.status,
+        CollateralStatus::Frozen | CollateralStatus::Deprecated
+    ) && !crate::chains::sol::config::is_sol_production_key_name(configured_key)
+    {
+        return Err(ProtocolError::GenericError(format!(
+            "SOL collateral cannot be activated without production Schnorr key {} (configured: {})",
+            crate::chains::sol::config::SOL_PRODUCTION_SCHNORR_KEY_NAME,
+            configured_key
+        )));
+    }
+    Ok(())
+}
+
+/// SOL analogue of `XrpClaim`: an unsettled claim on native-SOL collateral
+/// that left a vault (owner withdrawal, liquidation payout, or SP payout),
+/// settled later via `settle_sol_claim` (a threshold-signed durable-nonce
+/// transfer from the vault's custody address — design doc §5). Recorded
+/// instead of an ICRC transfer because SOL is custodied on Solana. Unlike
+/// XRP, there is no destination-tag variant (Solana has no analogue: unlike
+/// exchanges that share one deposit address gated by a tag, Solana exchanges
+/// use unique per-user deposit addresses).
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct SolClaim {
+    pub claimant: Principal,
+    pub lamports: u64,
+    pub custody_owner: Principal,
+    pub custody_nonce: u64,
+    pub created_at_ns: u64,
+    /// Idempotency (design doc §5.3): set once a settlement transfer has been
+    /// signed + submitted for this claim. On a retry, `settle_sol_claim`
+    /// reconciles this against `get_transaction` + the live nonce BEFORE
+    /// signing a new one. `None` = nothing submitted yet.
+    #[serde(default)]
+    pub settlement: Option<SolSettlement>,
+    /// Set with a human-readable reason when the settle path detects an
+    /// AMBIGUOUS outcome: the recorded settlement's tx is `NotFound` but the
+    /// shared durable nonce has advanced past the recorded value (design doc
+    /// §5.3, last row) — i.e. some transaction consumed the nonce and the
+    /// signed transfer may or may not have been it. While `Some`,
+    /// `settle_sol_claim` refuses to sign; a developer resolves it via
+    /// `admin_resolve_sol_claim` after off-chain reconciliation against a
+    /// Solana explorer. `None` = healthy.
+    #[serde(default)]
+    pub quarantine_reason: Option<String>,
+}
+
+/// The durable-nonce settlement transfer already signed + submitted for a
+/// `SolClaim` (mirrors `XrpSettlement`). `signature` is the LOCALLY computed
+/// (never a single RPC provider's reported) base58 transaction signature —
+/// see `chains::sol::adapter::sign_sol_payment_from`. `nonce_value` is the
+/// base58 durable-nonce blockhash this settlement consumed, which is what
+/// makes the idempotency table in design doc §5.3 exact: a durable nonce is
+/// single-use, so recording the exact value it consumed lets a retry tell
+/// "definitely never landed" (nonce unchanged) apart from "something consumed
+/// it" (nonce advanced) without needing XRP's Sequence-number inference.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct SolSettlement {
+    pub signature: String,
+    pub nonce_value: String,
+    pub destination: String,
+    pub submitted_at_ns: u64,
+}
+
 /// P4: an unsettled claim on native-XRP collateral that left a vault. The XRP sits
 /// at the custody address derived from `(custody_owner, custody_nonce)` (the vault's
 /// owner + id, which the protocol controls via threshold Ed25519); `settle_xrp_claim`
@@ -910,6 +1138,28 @@ impl CollateralConfig {
     /// ICRC deposit/withdraw/liquidation transfer paths do NOT apply to it.
     pub fn is_native_xrp(&self) -> bool {
         self.custody() == CustodyKind::NativeXrp
+    }
+
+    /// True iff this collateral is custodied natively on Solana (mainnet-beta),
+    /// so the ICRC deposit/withdraw/liquidation transfer paths do NOT apply to
+    /// it. Mirrors `is_native_xrp`.
+    pub fn is_native_sol(&self) -> bool {
+        self.custody() == CustodyKind::NativeSol
+    }
+
+    /// True iff this collateral is custodied by ANY non-ICRC rail (currently
+    /// `NativeXrp` or `NativeSol`). Deliberately written as `custody() !=
+    /// IcrcLedger` rather than an OR of the known native variants, so this is
+    /// FAIL-CLOSED: a future `CustodyKind` variant is automatically excluded
+    /// by every call site that reject-gates on this predicate (the ICRC
+    /// deposit/withdraw transfer paths, add-margin, automated-liquidation
+    /// exclusion, redemption-priority exclusion) without that call site
+    /// needing to be touched when the variant is added. Sites whose PAYOUT
+    /// ROUTING differs per custody kind should use an exhaustive `match
+    /// custody() { ... }` instead of this predicate, so the compiler forces a
+    /// decision for the new kind rather than silently misrouting it.
+    pub fn is_native_custody(&self) -> bool {
+        self.custody() != CustodyKind::IcrcLedger
     }
 }
 
@@ -1263,6 +1513,14 @@ pub struct State {
     /// XRP custody address.
     #[serde(default = "default_xrp_schnorr_key_name")]
     pub xrp_schnorr_key_name: String,
+    /// Threshold Schnorr Ed25519 key name for the native-SOL-collateral rail
+    /// (mirrors `xrp_schnorr_key_name`). Also drives which SOL RPC cluster is
+    /// queried — see `chains::sol::config::sol_cluster`. Must be set to
+    /// `key_1` on a fresh production canister before registering SOL
+    /// collateral; changing it later would re-derive every SOL custody
+    /// address.
+    #[serde(default = "default_sol_schnorr_key_name")]
+    pub sol_schnorr_key_name: String,
     pub fee: Ratio,
     pub developer_principal: Principal,
     /// Optional narrowly-scoped principal (audit F-01) that may ONLY call
@@ -1601,6 +1859,13 @@ pub struct State {
     #[serde(default)]
     pub sp_xrp_absorb_results_by_proof:
         BTreeMap<(crate::icrc3_proof::SpProofLedger, u64), StoredXrpSpAbsorbResult>,
+    /// SOL analogue of `sp_xrp_absorb_preflights` (design doc §6).
+    #[serde(default)]
+    pub sp_sol_absorb_preflights: BTreeMap<u64, StoredSolSpAbsorbPreflight>,
+    /// SOL analogue of `sp_xrp_absorb_results_by_proof`.
+    #[serde(default)]
+    pub sp_sol_absorb_results_by_proof:
+        BTreeMap<(crate::icrc3_proof::SpProofLedger, u64), StoredSolSpAbsorbResult>,
 
     // ─── Wave-8e LIQ-005: bad-debt deficit account ───
     //
@@ -1810,6 +2075,33 @@ pub struct State {
     /// snapshot that lacks this key decodes with the field defaulting to 0.
     #[serde(default)]
     pub chain_vault_id_counter: u64,
+
+    /// Native-SOL-collateral open-then-verify staging (keyed by vault_id),
+    /// mirrors `xrp_pending_deposits`. A vault opened for SOL collateral sits
+    /// here until the user's SOL deposit to the derived custody address is
+    /// verified, then a normal `Vault` is created and the entry removed.
+    /// Empty on every pre-this-phase snapshot via `#[serde(default)]` (State
+    /// is ciborium/serde-encoded — see storage.rs).
+    #[serde(default)]
+    pub sol_pending_deposits: BTreeMap<u64, SolPendingDeposit>,
+
+    /// Native-SOL collateral that has left a vault and is owed to a claimant,
+    /// settled later via `settle_sol_claim` (mirrors `xrp_claims`). Empty on
+    /// every pre-this-phase snapshot via serde-default.
+    #[serde(default)]
+    pub sol_claims: BTreeMap<u64, SolClaim>,
+    /// Monotonic id allocator for `sol_claims`. serde-default 0 on
+    /// pre-this-phase snapshots.
+    #[serde(default)]
+    pub next_sol_claim_id: u64,
+
+    /// The bootstrapped native-SOL-collateral durable-nonce account's base58
+    /// address (design doc §5.1), recorded once `sol_bootstrap_nonce_account`
+    /// succeeds so every settlement can re-derive it without re-deriving the
+    /// Schnorr pubkey on every call. `None` until bootstrapped.
+    /// `#[serde(default)]` so a pre-this-phase snapshot decodes to `None`.
+    #[serde(default)]
+    pub sol_nonce_account: Option<String>,
 }
 
 fn default_check_vaults_alert_band_bps() -> u64 {
@@ -1912,6 +2204,18 @@ pub struct StoredXrpSpAbsorbPreflight {
     pub expires_at_ns: u64,
 }
 
+/// SOL analogue of `StoredXrpSpAbsorbPreflight`. Amounts are in lamports.
+#[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct StoredSolSpAbsorbPreflight {
+    pub caller: Principal,
+    pub vault_id: u64,
+    pub icusd_burn_e8s: u64,
+    pub total_to_seize_lamports: u64,
+    pub collateral_received_lamports: u64,
+    pub collateral_price_e8s: u64,
+    pub expires_at_ns: u64,
+}
+
 /// Serde-only fallback: provides zero/empty/None defaults for fields missing from
 /// old CBOR snapshots. Never used for actual State construction (use From<InitArg>).
 impl Default for State {
@@ -1938,6 +2242,7 @@ impl Default for State {
             chain_interest_min_realize_e8s: default_chain_interest_min_realize_e8s(),
             chains_ecdsa_key_name: default_chains_ecdsa_key_name(),
             xrp_schnorr_key_name: default_xrp_schnorr_key_name(),
+            sol_schnorr_key_name: default_sol_schnorr_key_name(),
             fee: Ratio::from(Decimal::ZERO),
             developer_principal: Principal::anonymous(),
             price_pusher_principal: None,
@@ -2037,6 +2342,8 @@ impl Default for State {
             sp_chain_absorb_preflights: BTreeMap::new(),
             sp_xrp_absorb_preflights: BTreeMap::new(),
             sp_xrp_absorb_results_by_proof: BTreeMap::new(),
+            sp_sol_absorb_preflights: BTreeMap::new(),
+            sp_sol_absorb_results_by_proof: BTreeMap::new(),
             // Wave-8e LIQ-005
             protocol_deficit_icusd: ICUSD::new(0),
             total_deficit_repaid_icusd: ICUSD::new(0),
@@ -2062,6 +2369,10 @@ impl Default for State {
             sol_rpc_principal_override: None,
             solana_workers_enabled: false,
             chain_vault_id_counter: 0,
+            sol_pending_deposits: BTreeMap::new(),
+            sol_claims: BTreeMap::new(),
+            next_sol_claim_id: 0,
+            sol_nonce_account: None,
         }
     }
 }
@@ -2099,6 +2410,7 @@ impl From<InitArg> for State {
             chain_interest_min_realize_e8s: default_chain_interest_min_realize_e8s(),
             chains_ecdsa_key_name: default_chains_ecdsa_key_name(),
             xrp_schnorr_key_name: default_xrp_schnorr_key_name(),
+            sol_schnorr_key_name: default_sol_schnorr_key_name(),
             total_collateral_ratio: Ratio::from(Decimal::MAX),
             last_icp_timestamp: None,
             last_icp_rate: None,
@@ -2313,6 +2625,8 @@ impl From<InitArg> for State {
             sp_chain_absorb_preflights: BTreeMap::new(),
             sp_xrp_absorb_preflights: BTreeMap::new(),
             sp_xrp_absorb_results_by_proof: BTreeMap::new(),
+            sp_sol_absorb_preflights: BTreeMap::new(),
+            sp_sol_absorb_results_by_proof: BTreeMap::new(),
             // Wave-8e LIQ-005
             protocol_deficit_icusd: ICUSD::new(0),
             total_deficit_repaid_icusd: ICUSD::new(0),
@@ -2338,6 +2652,10 @@ impl From<InitArg> for State {
             sol_rpc_principal_override: None,
             solana_workers_enabled: false,
             chain_vault_id_counter: 0,
+            sol_pending_deposits: BTreeMap::new(),
+            sol_claims: BTreeMap::new(),
+            next_sol_claim_id: 0,
+            sol_nonce_account: None,
         }
     }
 }
@@ -2817,8 +3135,11 @@ impl State {
             // claims) is a focused follow-up; until it lands, exclude native-XRP
             // from redemption priority so redemption never seizes XRP collateral
             // (redeemers still redeem other collaterals; XRP simply isn't a target).
-            // Latent until P5 registers an XRP collateral.
-            if config.is_native_xrp() {
+            // Latent until P5 registers an XRP collateral. Native-SOL is excluded
+            // for the same reason (out of scope §13 of the native-SOL design doc);
+            // `is_native_custody()` (fail-closed on `custody() != IcrcLedger`) keeps
+            // this exclusion automatic for any future native-custody kind too.
+            if config.is_native_custody() {
                 continue;
             }
             // Verify price exists (needed for CR computation inside compute_collateral_ratio)
@@ -4026,9 +4347,13 @@ impl State {
                 // would strand the seized XRP (neither the SP nor the bot can settle
                 // an XrpClaim). External liquidators call liquidate_vault_partial /
                 // partial_liquidate_vault directly, where they become the claimant.
+                // Native-SOL is excluded for the identical reason (a SolClaim can only
+                // be settled by settle_sol_claim, which neither the SP nor the bot
+                // call); `is_native_custody()` keeps this exclusion automatic for any
+                // future native-custody kind too.
                 if self
                     .get_collateral_config(&vault.collateral_type)
-                    .map(|c| c.is_native_xrp())
+                    .map(|c| c.is_native_custody())
                     .unwrap_or(false)
                 {
                     continue;
@@ -7523,6 +7848,233 @@ mod tests {
         let restored: State =
             ciborium::de::from_reader(modified.as_slice()).expect("old snapshot must decode");
         assert!(restored.xrp_pending_deposits.is_empty());
+    }
+
+    #[test]
+    fn sol_schnorr_key_name_defaults_on_old_snapshot() {
+        // A pre-this-phase ciborium snapshot lacks `sol_schnorr_key_name`. Removing
+        // the key and re-decoding must succeed, defaulting to the test key.
+        let st = test_state();
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&st, &mut buf).unwrap();
+        let value: ciborium::Value = ciborium::de::from_reader(buf.as_slice()).unwrap();
+        let entries = match value {
+            ciborium::Value::Map(mut e) => {
+                e.retain(
+                    |(k, _)| !matches!(k, ciborium::Value::Text(s) if s == "sol_schnorr_key_name"),
+                );
+                e
+            }
+            other => panic!("expected a CBOR map, got {other:?}"),
+        };
+        let mut modified = Vec::new();
+        ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut modified).unwrap();
+        let restored: State =
+            ciborium::de::from_reader(modified.as_slice()).expect("old snapshot must decode");
+        assert_eq!(
+            restored.sol_schnorr_key_name,
+            crate::chains::sol::config::SOL_TEST_SCHNORR_KEY_NAME
+        );
+    }
+
+    #[test]
+    fn sol_pending_deposits_defaults_empty_on_old_snapshot() {
+        // A pre-this-phase ciborium snapshot lacks `sol_pending_deposits`. Removing
+        // the key and re-decoding must succeed with an empty map (serde default).
+        let st = test_state();
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&st, &mut buf).unwrap();
+        let value: ciborium::Value = ciborium::de::from_reader(buf.as_slice()).unwrap();
+        let entries = match value {
+            ciborium::Value::Map(mut e) => {
+                e.retain(
+                    |(k, _)| !matches!(k, ciborium::Value::Text(s) if s == "sol_pending_deposits"),
+                );
+                e
+            }
+            other => panic!("expected a CBOR map, got {other:?}"),
+        };
+        let mut modified = Vec::new();
+        ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut modified).unwrap();
+        let restored: State =
+            ciborium::de::from_reader(modified.as_slice()).expect("old snapshot must decode");
+        assert!(restored.sol_pending_deposits.is_empty());
+    }
+
+    #[test]
+    fn sol_claims_default_empty_on_old_snapshot() {
+        // A pre-this-phase ciborium snapshot lacks sol_claims / next_sol_claim_id.
+        // Removing the keys and re-decoding must succeed (serde default), not error.
+        let st = test_state();
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&st, &mut buf).unwrap();
+        let value: ciborium::Value = ciborium::de::from_reader(buf.as_slice()).unwrap();
+        let entries = match value {
+            ciborium::Value::Map(mut e) => {
+                e.retain(|(k, _)| {
+                    !matches!(k, ciborium::Value::Text(s) if s == "sol_claims" || s == "next_sol_claim_id")
+                });
+                e
+            }
+            other => panic!("expected a CBOR map, got {other:?}"),
+        };
+        let mut modified = Vec::new();
+        ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut modified).unwrap();
+        let restored: State =
+            ciborium::de::from_reader(modified.as_slice()).expect("old snapshot must decode");
+        assert!(restored.sol_claims.is_empty());
+        assert_eq!(restored.next_sol_claim_id, 0);
+    }
+
+    #[test]
+    fn sol_nonce_account_defaults_none_on_old_snapshot() {
+        // A pre-this-phase ciborium snapshot lacks `sol_nonce_account`. Removing the
+        // key and re-decoding must succeed, defaulting to `None`.
+        let st = test_state();
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&st, &mut buf).unwrap();
+        let value: ciborium::Value = ciborium::de::from_reader(buf.as_slice()).unwrap();
+        let entries = match value {
+            ciborium::Value::Map(mut e) => {
+                e.retain(
+                    |(k, _)| !matches!(k, ciborium::Value::Text(s) if s == "sol_nonce_account"),
+                );
+                e
+            }
+            other => panic!("expected a CBOR map, got {other:?}"),
+        };
+        let mut modified = Vec::new();
+        ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut modified).unwrap();
+        let restored: State =
+            ciborium::de::from_reader(modified.as_slice()).expect("old snapshot must decode");
+        assert_eq!(restored.sol_nonce_account, None);
+    }
+
+    #[test]
+    fn sol_collateral_config_has_expected_params() {
+        let cfg = sol_collateral_config(Ratio::new(dec!(1.033333333333333333)));
+        assert!(cfg.is_native_sol());
+        assert_eq!(cfg.custody(), CustodyKind::NativeSol);
+        assert_eq!(cfg.ledger_canister_id, sol_collateral_principal());
+        assert_eq!(cfg.decimals, 9);
+        assert_eq!(cfg.liquidation_ratio, Ratio::new(dec!(1.20)));
+        assert_eq!(cfg.borrow_threshold_ratio, Ratio::new(dec!(1.35)));
+        assert_eq!(cfg.liquidation_bonus, Ratio::new(dec!(1.075)));
+        assert_eq!(cfg.borrowing_fee, Ratio::new(dec!(0.002)));
+        assert_eq!(cfg.interest_rate_apr, Ratio::new(dec!(0.015)));
+        assert_eq!(cfg.debt_ceiling, 250_000_000_000);
+        assert_eq!(cfg.min_collateral_deposit, 20_000_000);
+        assert_eq!(cfg.ledger_fee, 0);
+        assert_eq!(cfg.redemption_tier, 3);
+        assert_eq!(cfg.symbol, Some("SOL".to_string()));
+        match cfg.price_source {
+            PriceSource::Xrc {
+                ref base_asset,
+                ref quote_asset,
+                ..
+            } => {
+                assert_eq!(base_asset, "SOL");
+                assert_eq!(quote_asset, "USD");
+            }
+            other => panic!("expected XRC price source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sol_launch_guardrails_freeze_non_production_key_without_clamping_ceiling() {
+        let mut state = test_state();
+        let sol = sol_collateral_principal();
+        let mut cfg = sol_collateral_config(Ratio::new(dec!(1.033333333333333333)));
+        cfg.debt_ceiling = 20_000_000_000;
+        cfg.status = CollateralStatus::Active;
+        state.collateral_configs.insert(sol, cfg);
+        state.sol_schnorr_key_name =
+            crate::chains::sol::config::SOL_TEST_SCHNORR_KEY_NAME.to_string();
+
+        let migration = enforce_sol_launch_guardrails(&mut state);
+        let migrated = state.collateral_configs.get(&sol).unwrap();
+
+        assert_eq!(migration.previous_status, Some(CollateralStatus::Active));
+        assert_eq!(migrated.status, CollateralStatus::Frozen);
+        assert_eq!(migrated.debt_ceiling, 20_000_000_000);
+    }
+
+    #[test]
+    fn sol_launch_guardrails_leave_production_key_alone() {
+        let mut state = test_state();
+        let sol = sol_collateral_principal();
+        let mut cfg = sol_collateral_config(Ratio::new(dec!(1.033333333333333333)));
+        cfg.status = CollateralStatus::Active;
+        state.collateral_configs.insert(sol, cfg);
+        state.sol_schnorr_key_name =
+            crate::chains::sol::config::SOL_PRODUCTION_SCHNORR_KEY_NAME.to_string();
+
+        let migration = enforce_sol_launch_guardrails(&mut state);
+        let migrated = state.collateral_configs.get(&sol).unwrap();
+
+        assert_eq!(migration.previous_status, None);
+        assert_eq!(migrated.status, CollateralStatus::Active);
+    }
+
+    #[test]
+    fn sol_launch_config_update_rejects_non_native_sol_custody() {
+        let sol = sol_collateral_principal();
+        let mut cfg = sol_collateral_config(Ratio::new(dec!(1.033333333333333333)));
+        cfg.custody_kind = None; // would silently fall back to IcrcLedger
+        assert!(validate_sol_launch_config_update(
+            sol,
+            &cfg,
+            crate::chains::sol::config::SOL_PRODUCTION_SCHNORR_KEY_NAME
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn sol_launch_config_update_rejects_activation_without_production_key() {
+        let sol = sol_collateral_principal();
+        let mut cfg = sol_collateral_config(Ratio::new(dec!(1.033333333333333333)));
+        cfg.status = CollateralStatus::Active;
+        assert!(validate_sol_launch_config_update(
+            sol,
+            &cfg,
+            crate::chains::sol::config::SOL_TEST_SCHNORR_KEY_NAME
+        )
+        .is_err());
+        cfg.status = CollateralStatus::Frozen;
+        assert!(validate_sol_launch_config_update(
+            sol,
+            &cfg,
+            crate::chains::sol::config::SOL_TEST_SCHNORR_KEY_NAME
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn sol_claim_and_settlement_round_trip_through_cbor() {
+        let claim = SolClaim {
+            claimant: Principal::from_slice(&[1; 5]),
+            lamports: 5_000_000,
+            custody_owner: Principal::from_slice(&[2; 5]),
+            custody_nonce: 7,
+            created_at_ns: 123,
+            settlement: Some(SolSettlement {
+                signature: "sig".to_string(),
+                nonce_value: "nonce".to_string(),
+                destination: "dest".to_string(),
+                submitted_at_ns: 456,
+            }),
+            quarantine_reason: None,
+        };
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&claim, &mut buf).unwrap();
+        let restored: SolClaim = ciborium::de::from_reader(buf.as_slice()).unwrap();
+        assert_eq!(restored, claim);
+    }
+
+    #[test]
+    fn custody_kind_native_sol_is_distinct_from_native_xrp_and_icrc() {
+        assert_ne!(CustodyKind::NativeSol, CustodyKind::NativeXrp);
+        assert_ne!(CustodyKind::NativeSol, CustodyKind::IcrcLedger);
     }
 
     #[test]

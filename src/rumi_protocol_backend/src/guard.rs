@@ -489,3 +489,178 @@ impl Drop for FetchXrcGuard {
         });
     }
 }
+
+thread_local! {
+    /// Protocol-wide SOL settlement danger-zone marker (security review fix,
+    /// 2026-07-24). Stores the acquisition timestamp, or `None` when free.
+    ///
+    /// Every `SolClaim`, regardless of which vault or claimant it belongs to,
+    /// settles against ONE shared durable-nonce account (design doc §5.1).
+    /// Concretely that means genuine parallelism between two DIFFERENT
+    /// claimants settling two DIFFERENT claims was always illusory: Solana
+    /// itself only ever lands one of their signed transactions, because a
+    /// durable nonce is single-use. Before this guard, nothing in the
+    /// canister's OWN bookkeeping reflected that fact: `GuardPrincipal` is
+    /// keyed on the CALLER principal and `VaultLiquidationGuard` is keyed on
+    /// the source vault (`custody_nonce`), so two different claimants racing
+    /// settlement on two different vaults pass BOTH locks and both proceed
+    /// concurrently. Every one of them then reads the same live nonce,
+    /// reconciles (finding no sibling settlement yet, since none has written
+    /// one), signs, and submits. Solana lands exactly one (that part stays
+    /// safe, nonce uniqueness rules out a double-pay). But every loser's retry
+    /// lands on `AmbiguousAdvanced`; only the FIRST loser to retry still finds
+    /// the winner's `Confirmed` sibling and clears itself cleanly, because
+    /// `reconcile_sol_other_inflight_claims`'s `Paid` handling then REMOVES
+    /// the winning claim (so the evidence that would have explained the
+    /// REMAINING losers' ambiguity is gone by the time they retry), and they
+    /// are quarantined pending `admin_resolve_sol_claim`. A single routine
+    /// Stability Pool absorption can fan out to `MAX_SOL_SP_PAYOUT_ALLOCATIONS`
+    /// claimants, so this race can strand most of a whole liquidation's
+    /// depositors behind manual admin action.
+    ///
+    /// `SolSettlementInflightGuard` closes that gap by serializing the whole
+    /// danger zone (read the live nonce, reconcile siblings, sign, persist the
+    /// `SolSettlement`, submit) protocol-wide: at most one `settle_sol_claim`
+    /// call may be inside it at a time, across every claim and every vault. A
+    /// second concurrent caller is turned away with a clear, retryable
+    /// `TemporarilyUnavailable` before it ever reads the nonce or signs
+    /// anything (never a quarantine, never a signature). The justification is
+    /// simply that the canister's bookkeeping should agree with the reality
+    /// already imposed by the Solana layer, rather than race it.
+    ///
+    /// Transient/heap, not persisted state: in-flight settlement attempts
+    /// never span a canister upgrade. Self-healing, mirroring
+    /// `chains::solana::settlement::SOLANA_SETTLEMENT_INFLIGHT`: a trap in a
+    /// post-`await` continuation does not run `Drop` on the IC, so without a
+    /// staleness check a crashed settlement would wedge the rail forever.
+    /// `chains::solana::hardening::inflight_should_acquire` (reused verbatim,
+    /// not reimplemented) reclaims an entry older than
+    /// `chains::solana::hardening::INFLIGHT_STALE_NS` (10 minutes).
+    static SOL_SETTLEMENT_INFLIGHT: std::cell::RefCell<Option<u64>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// RAII guard for the protocol-wide SOL settlement danger zone. See
+/// `SOL_SETTLEMENT_INFLIGHT`'s doc comment for the cross-claimant fan-out race
+/// this closes. `Drop` unconditionally clears the marker, so it releases on
+/// EVERY exit path out of `settle_sol_claim` (including every early `return`
+/// on an error branch), without the caller needing to remember to release it
+/// manually (unlike `GuardPrincipal`, which requires an explicit `.fail()` /
+/// `.complete()` call on each exit path).
+#[must_use]
+pub struct SolSettlementInflightGuard(());
+
+impl SolSettlementInflightGuard {
+    /// Acquire the guard. `now_ns` is passed in by the caller (rather than
+    /// this function calling `ic_cdk::api::time()` itself) so the acquire
+    /// decision stays a pure, deterministic function of its inputs and is
+    /// directly unit-testable, including the staleness self-heal, without a
+    /// canister call context.
+    ///
+    /// Returns `TemporarilyUnavailable` if another `settle_sol_claim` call is
+    /// already inside the danger zone and its entry is not yet stale.
+    pub fn new(now_ns: u64) -> Result<Self, crate::ProtocolError> {
+        SOL_SETTLEMENT_INFLIGHT.with(|g| {
+            let mut slot = g.borrow_mut();
+            if crate::chains::solana::hardening::inflight_should_acquire(
+                *slot,
+                now_ns,
+                crate::chains::solana::hardening::INFLIGHT_STALE_NS,
+            ) {
+                *slot = Some(now_ns);
+                Ok(Self(()))
+            } else {
+                Err(crate::ProtocolError::TemporarilyUnavailable(
+                    "another SOL settlement is in flight, try again shortly".to_string(),
+                ))
+            }
+        })
+    }
+
+    /// Test-only introspection: whether the marker is currently held. Lets
+    /// tests assert the guard's post-drop state without depending on
+    /// `settle_sol_claim` itself, which cannot be driven outside a canister
+    /// call context (see `sol_p2b_tests`'s module doc comment).
+    #[cfg(test)]
+    pub(crate) fn is_held_for_test() -> bool {
+        SOL_SETTLEMENT_INFLIGHT.with(|g| g.borrow().is_some())
+    }
+}
+
+impl Drop for SolSettlementInflightGuard {
+    fn drop(&mut self) {
+        SOL_SETTLEMENT_INFLIGHT.with(|g| {
+            *g.borrow_mut() = None;
+        });
+    }
+}
+
+#[cfg(test)]
+mod sol_settlement_inflight_guard_tests {
+    use super::*;
+
+    /// Fix-1 fence: a second concurrent settlement attempt must be refused
+    /// with the retryable error, never silently allowed to sign alongside the
+    /// first. Mirrors `vault_liquidation_guard_is_exclusive_per_vault` but for
+    /// the canister-wide (not per-vault) SOL settlement lock.
+    #[test]
+    fn blocks_a_second_concurrent_acquire_and_returns_the_retryable_error() {
+        // Guarantee a clean slate: other tests in this binary share the same
+        // thread_local (single-threaded test binary, but order is undefined).
+        SOL_SETTLEMENT_INFLIGHT.with(|g| *g.borrow_mut() = None);
+
+        let g1 = SolSettlementInflightGuard::new(1_000).expect("first acquire is free");
+        assert!(SolSettlementInflightGuard::is_held_for_test());
+
+        let second = SolSettlementInflightGuard::new(1_001);
+        match second {
+            Err(crate::ProtocolError::TemporarilyUnavailable(msg)) => {
+                assert!(
+                    msg.contains("in flight"),
+                    "error message should be clearly retryable, got: {msg}"
+                );
+            }
+            Err(other) => panic!("expected TemporarilyUnavailable, got {other:?}"),
+            Ok(_) => panic!("a second concurrent settlement must NOT be allowed to acquire"),
+        }
+
+        drop(g1);
+        assert!(
+            !SolSettlementInflightGuard::is_held_for_test(),
+            "dropping the first guard must release the marker"
+        );
+        let _g2 = SolSettlementInflightGuard::new(1_002).expect("free again after release");
+    }
+
+    /// Fix-1 fence: a crashed/trapped settlement (whose `Drop` never ran)
+    /// must not wedge the rail forever. Once the held entry is older than
+    /// `INFLIGHT_STALE_NS`, a fresh attempt reclaims it instead of being
+    /// refused, exactly mirroring `chains::solana::hardening`'s self-heal.
+    #[test]
+    fn self_heals_after_the_staleness_window_so_a_crashed_settlement_cannot_wedge_the_rail() {
+        SOL_SETTLEMENT_INFLIGHT.with(|g| *g.borrow_mut() = None);
+
+        let acquired_at = 5_000_000_000_000u64;
+        let g1 = SolSettlementInflightGuard::new(acquired_at).expect("first acquire is free");
+        // Simulate the holder having trapped in a post-await continuation:
+        // its `Drop` never runs, so leak the guard rather than dropping it.
+        std::mem::forget(g1);
+        assert!(SolSettlementInflightGuard::is_held_for_test());
+
+        // Still fresh (just under the threshold): a new attempt is refused.
+        let still_fresh = acquired_at + crate::chains::solana::hardening::INFLIGHT_STALE_NS - 1;
+        assert!(
+            SolSettlementInflightGuard::new(still_fresh).is_err(),
+            "an entry younger than the staleness window must still block"
+        );
+
+        // Past the threshold: the previous (trapped) holder's entry is
+        // reclaimed, self-healing the would-be-permanent block.
+        let now_stale = acquired_at + crate::chains::solana::hardening::INFLIGHT_STALE_NS;
+        let g2 = SolSettlementInflightGuard::new(now_stale)
+            .expect("a stale entry must self-heal, not wedge the rail forever");
+        drop(g2);
+        // Clean up for other tests sharing this thread_local.
+        SOL_SETTLEMENT_INFLIGHT.with(|g| *g.borrow_mut() = None);
+    }
+}

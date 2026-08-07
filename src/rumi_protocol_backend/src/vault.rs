@@ -2,7 +2,7 @@ use crate::event::{
     record_add_margin_to_vault, record_borrow_from_vault, record_open_vault,
     record_redemption_on_vaults, record_repayed_to_vault,
 };
-use crate::guard::{GuardPrincipal, VaultLiquidationGuard};
+use crate::guard::{GuardPrincipal, SolSettlementInflightGuard, VaultLiquidationGuard};
 use crate::logs::INFO;
 use crate::management;
 use crate::management::{
@@ -10,7 +10,7 @@ use crate::management::{
     transfer_stable_from,
 };
 use crate::numeric::{Ratio, UsdIcp, ICP, ICUSD};
-use crate::state::Mode;
+use crate::state::{CustodyKind, Mode};
 use crate::GuardError;
 use crate::PendingMarginTransfer;
 use crate::DEBUG;
@@ -817,27 +817,30 @@ pub async fn open_vault(
         collateral_type_opt.unwrap_or_else(|| read_state(|s| s.icp_collateral_type()));
 
     // Look up CollateralConfig; check status is Active
-    let (config_ledger, config_status, min_deposit, is_native_xrp) =
+    let (config_ledger, config_status, min_deposit, is_native_custody) =
         read_state(|s| match s.get_collateral_config(&collateral_type) {
             Some(config) => Ok((
                 config.ledger_canister_id,
                 config.status,
                 config.min_collateral_deposit,
-                config.is_native_xrp(),
+                config.is_native_custody(),
             )),
             None => Err(ProtocolError::GenericError(
                 "Collateral type not supported.".to_string(),
             )),
         })?;
 
-    // P2: native-XRP collateral is custodied on the XRP Ledger (chains::xrp), not
-    // pulled via an ICRC `transfer_from`. Its deposit flow (open-then-verify) is
-    // wired in P3; until then reject opens through this ICRC path so XRP collateral
-    // can never be silently mishandled as an ICRC token.
-    if is_native_xrp {
+    // P2 (extended for SOL): native custody collateral (XRP, SOL) is held on its
+    // own chain, not pulled via an ICRC `transfer_from`. Each has its own
+    // open-then-verify deposit flow (open_xrp_vault / open_sol_vault); reject
+    // opens through this ICRC path so native-custody collateral can never be
+    // silently mishandled as an ICRC token. `is_native_custody()` is fail-closed:
+    // a future custody kind is rejected here automatically.
+    if is_native_custody {
         guard_principal.fail();
         return Err(ProtocolError::GenericError(
-            "Native-XRP collateral uses the XRP deposit flow (not yet enabled).".to_string(),
+            "Native custody collateral uses its own deposit flow, not ICRC transfer_from."
+                .to_string(),
         ));
     }
 
@@ -1252,6 +1255,289 @@ pub async fn confirm_xrp_deposit(vault_id: u64) -> Result<u64, ProtocolError> {
     Ok(credited)
 }
 
+// ─── Native SOL collateral: Phase 2b deposit flow (mirrors the XRP block above) ─
+
+/// Return value for `open_sol_vault`: the reserved vault id, the Solana custody
+/// address the user funds, and the rent-exempt minimum (lamports) that address
+/// must stay above (design doc §4.1 — the reserve is never swept to zero).
+#[derive(candid::CandidType, Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct SolVaultOpenInfo {
+    pub vault_id: u64,
+    pub custody_address: String,
+    pub rent_exempt_lamports: u64,
+}
+
+fn require_sol_production_key() -> Result<(), ProtocolError> {
+    let configured_key = crate::chains::sol::config::sol_schnorr_key_name();
+    if crate::chains::sol::config::is_sol_production_key_name(&configured_key) {
+        return Ok(());
+    }
+    Err(ProtocolError::GenericError(format!(
+        "native-SOL operations require production Schnorr key key_1 (configured: {configured_key})"
+    )))
+}
+
+/// A native-SOL vault is only ever payable through a settled `SolClaim`
+/// (design doc §5), which requires the shared durable-nonce account to exist.
+/// Without it NO claim on ANY SOL vault could ever be settled, so opening a
+/// vault before the nonce account is bootstrapped would strand collateral the
+/// moment it needed to leave (withdraw, liquidation, or a future close).
+/// Pure/sync so it is unit-testable without a canister call context.
+pub(crate) fn ensure_sol_nonce_bootstrapped(nonce_account: &Option<String>) -> Result<(), ProtocolError> {
+    if nonce_account.is_none() {
+        return Err(ProtocolError::GenericError(
+            "SOL durable-nonce account is not bootstrapped yet; call sol_bootstrap_nonce_account \
+             first (otherwise no claim on this vault could ever be settled)."
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Bounds for `open_sol_vault`'s pending-deposit staging area. Mirrors XRP's
+/// identical constants (`MAX_XRP_PENDING_PER_CALLER` / `MAX_XRP_PENDING_GLOBAL`)
+/// exactly, factored into a pure function (XRP inlines the check) so it is
+/// unit-testable without a canister call context.
+const MAX_SOL_PENDING_PER_CALLER: usize = 10;
+const MAX_SOL_PENDING_GLOBAL: usize = 10_000;
+
+pub(crate) fn ensure_sol_pending_open_bounds(
+    global_pending: usize,
+    caller_pending: usize,
+) -> Result<(), ProtocolError> {
+    if global_pending >= MAX_SOL_PENDING_GLOBAL {
+        return Err(ProtocolError::GenericError(
+            "SOL deposit staging is full; please retry after pending deposits clear.".to_string(),
+        ));
+    }
+    if caller_pending >= MAX_SOL_PENDING_PER_CALLER {
+        return Err(ProtocolError::GenericError(
+            "Too many open SOL deposits; confirm or settle existing ones first.".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// P3 (native-SOL collateral, design doc §4): open a vault in the
+/// open-then-verify staging area. Derives the per-vault Solana custody address
+/// (threshold Ed25519), records a `SolPendingDeposit` under a freshly reserved
+/// vault_id (from the SAME shared counter ICP/XRP vaults use, so ids can never
+/// collide), and returns the address plus the live rent-exempt minimum for the
+/// user to fund. NO collateral is credited and NO icUSD is minted until
+/// `confirm_sol_deposit` verifies the deposit.
+pub async fn open_sol_vault() -> Result<SolVaultOpenInfo, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let guard_principal = GuardPrincipal::new(caller, "open_sol_vault")?;
+    if let Err(e) = require_sol_production_key() {
+        guard_principal.fail();
+        return Err(e);
+    }
+
+    let sol_ct = crate::state::sol_collateral_principal();
+    let cfg = read_state(|s| {
+        s.get_collateral_config(&sol_ct)
+            .map(|c| (c.status, c.is_native_sol()))
+    });
+    match cfg {
+        Some((status, true)) => {
+            if !status.allows_open() {
+                guard_principal.fail();
+                return Err(ProtocolError::GenericError(
+                    "SOL collateral is not accepting new vaults.".to_string(),
+                ));
+            }
+        }
+        Some((_, false)) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "SOL collateral is misconfigured (custody is not native-SOL).".to_string(),
+            ));
+        }
+        None => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "SOL collateral is not registered.".to_string(),
+            ));
+        }
+    }
+
+    // Without a bootstrapped durable-nonce account, no claim on this vault
+    // could ever be settled (design doc §5.1) — refuse before staging one.
+    if let Err(e) = read_state(|s| ensure_sol_nonce_bootstrapped(&s.sol_nonce_account)) {
+        guard_principal.fail();
+        return Err(e);
+    }
+
+    // Hardening (mirrors XRP): bound per-caller and global pending deposits so
+    // a caller can't spam unfunded opens.
+    let (global_pending, caller_pending) = read_state(|s| {
+        (
+            s.sol_pending_deposits.len(),
+            s.sol_pending_deposits
+                .values()
+                .filter(|d| d.owner == caller)
+                .count(),
+        )
+    });
+    if let Err(e) = ensure_sol_pending_open_bounds(global_pending, caller_pending) {
+        guard_principal.fail();
+        return Err(e);
+    }
+
+    let rent_exempt_lamports = match crate::chains::sol::rpc::get_rent_exempt_minimum().await {
+        Ok(r) => r,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "sol getMinimumBalanceForRentExemption failed: {e}"
+            )));
+        }
+    };
+
+    // Reserve a vault_id (also the threshold-derivation nonce) from the SHARED
+    // counter, so it cannot collide with an ICP or XRP vault_id.
+    let vault_id = mutate_state(|s| s.increment_vault_id());
+
+    let path = crate::chains::sol::ted25519::sol_custody_derivation_path(caller, vault_id);
+    let custody_address = match crate::chains::sol::ted25519::derive_sol_address(path).await {
+        Ok((_pubkey, addr)) => addr,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "sol custody derive failed: {e}"
+            )));
+        }
+    };
+
+    let opened_at_ns = ic_cdk::api::time();
+    mutate_state(|s| {
+        s.sol_pending_deposits.insert(
+            vault_id,
+            crate::state::SolPendingDeposit {
+                owner: caller,
+                custody_address: custody_address.clone(),
+                derivation_nonce: vault_id,
+                opened_at_ns,
+                rent_exempt_lamports,
+            },
+        );
+    });
+
+    guard_principal.complete();
+    Ok(SolVaultOpenInfo {
+        vault_id,
+        custody_address,
+        rent_exempt_lamports,
+    })
+}
+
+/// P3 (native-SOL collateral, design doc §4): verify the user's SOL deposit to
+/// the vault's custody address and credit it as collateral, creating a real
+/// `Vault` with zero debt (borrowing is the ordinary collateral-generic
+/// `borrow_from_vault`, same as XRP — there is no SOL-specific mint path).
+/// Owner-only and idempotent: the pending entry is removed on success, so a
+/// second call errors. Reads the balance at `finalized` commitment (custody
+/// accepts the extra latency for non-reversibility) and credits
+/// `balance - rent_exempt_minimum` lamports, re-fetched live rather than
+/// trusting the value quoted at `open_sol_vault` time. Returns the credited
+/// lamports.
+pub async fn confirm_sol_deposit(vault_id: u64) -> Result<u64, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let guard_principal =
+        GuardPrincipal::new(caller, &format!("confirm_sol_deposit_{}", vault_id))?;
+    if let Err(e) = require_sol_production_key() {
+        guard_principal.fail();
+        return Err(e);
+    }
+
+    let pending = match read_state(|s| s.sol_pending_deposits.get(&vault_id).cloned()) {
+        Some(p) => p,
+        None => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "No pending SOL deposit for this vault (already confirmed or unknown).".to_string(),
+            ));
+        }
+    };
+    if pending.owner != caller {
+        guard_principal.fail();
+        return Err(ProtocolError::CallerNotOwner);
+    }
+
+    let sol_ct = crate::state::sol_collateral_principal();
+    let min_deposit = read_state(|s| {
+        s.get_collateral_config(&sol_ct)
+            .map(|c| c.min_collateral_deposit)
+            .unwrap_or(0)
+    });
+
+    let balance = match crate::chains::sol::rpc::get_balance(&pending.custody_address).await {
+        Ok(b) => b,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "sol getBalance failed: {e}"
+            )));
+        }
+    };
+    let rent_exempt = match crate::chains::sol::rpc::get_rent_exempt_minimum().await {
+        Ok(r) => r,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "sol getMinimumBalanceForRentExemption failed: {e}"
+            )));
+        }
+    };
+
+    let credited = match crate::chains::sol::adapter::sol_credit_amount(balance, rent_exempt, min_deposit)
+    {
+        Ok(c) => c,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(e);
+        }
+    };
+
+    // Atomically: re-check the pending entry still exists (no concurrent confirm
+    // slipped in during the awaits), create the vault, and clear the pending entry.
+    let created = mutate_state(|s| {
+        if !s.sol_pending_deposits.contains_key(&vault_id) {
+            return false;
+        }
+        record_open_vault(
+            s,
+            Vault {
+                owner: caller,
+                borrowed_icusd_amount: 0.into(),
+                collateral_amount: credited,
+                vault_id,
+                collateral_type: sol_ct,
+                last_accrual_time: ic_cdk::api::time(),
+                accrued_interest: ICUSD::new(0),
+                bot_processing: false,
+            },
+            // No meaningful "block index" analogue exists for a getBalance read
+            // (unlike XRP's `acct.ledger_index`, which comes free with
+            // account_info); this is purely informational Event-log metadata, so
+            // 0 is used rather than spending an extra `get_slot` outcall on it.
+            0,
+        );
+        s.sol_pending_deposits.remove(&vault_id);
+        true
+    });
+
+    if !created {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(
+            "SOL deposit was already confirmed concurrently.".to_string(),
+        ));
+    }
+
+    guard_principal.complete();
+    Ok(credited)
+}
+
 /// P4: record an unsettled XRP collateral claim and return its id. The OUT-paths
 /// (withdraw / liquidation / redemption) call this instead of an ICRC transfer when
 /// the collateral is native-XRP. `custody_owner`+`custody_nonce` (the source vault's
@@ -1282,13 +1568,52 @@ pub(crate) fn record_xrp_claim(
     claim_id
 }
 
+/// SOL analogue of `record_xrp_claim`: record an unsettled native-SOL collateral
+/// claim and return its id. The OUT-paths (withdraw / liquidation) call this
+/// instead of an ICRC transfer when the collateral is native-SOL.
+/// `custody_owner`+`custody_nonce` (the source vault's owner + id) must
+/// reproduce the SAME `(owner, vault_id)` pair used at
+/// `chains::sol::ted25519::sol_custody_derivation_path` time, since
+/// `settle_sol_claim` (Phase 2b) re-derives the custody signing key from them
+/// rather than storing the address. Uses `s.next_sol_claim_id` / `s.sol_claims`
+/// — a SEPARATE id space from `record_xrp_claim`'s `next_xrp_claim_id` /
+/// `xrp_claims`, so XRP and SOL claim ids can collide numerically without
+/// colliding as claims (each is only ever looked up in its own map).
+pub(crate) fn record_sol_claim(
+    s: &mut crate::state::State,
+    claimant: Principal,
+    custody_owner: Principal,
+    custody_nonce: u64,
+    lamports: u64,
+    now_ns: u64,
+) -> u64 {
+    let claim_id = s.next_sol_claim_id;
+    s.next_sol_claim_id = s.next_sol_claim_id.wrapping_add(1);
+    s.sol_claims.insert(
+        claim_id,
+        crate::state::SolClaim {
+            claimant,
+            lamports,
+            custody_owner,
+            custody_nonce,
+            created_at_ns: now_ns,
+            settlement: None,
+            quarantine_reason: None,
+        },
+    );
+    claim_id
+}
+
 /// P4: queue a collateral payout to `recipient`. ICRC collateral -> a
-/// PendingMarginTransfer (the ICRC transfer machinery pays it). Native-XRP -> an
-/// XrpClaim instead (settled later via settle_xrp_claim from the vault's custody
-/// address); native-XRP therefore never enters the ICRC pending-transfer flow.
-/// `custody_owner` is the SOURCE vault's owner (its threshold key controls the
-/// custody address), captured while the vault is in hand — safe even when
-/// cleanup_if_drained removes the vault immediately after.
+/// PendingMarginTransfer (the ICRC transfer machinery pays it). Native custody
+/// (XRP, SOL) -> a claim instead (settled later via settle_xrp_claim /
+/// settle_sol_claim from the vault's custody address); native custody therefore
+/// never enters the ICRC pending-transfer flow. `custody_owner` is the SOURCE
+/// vault's owner (its threshold key controls the custody address), captured
+/// while the vault is in hand — safe even when cleanup_if_drained removes the
+/// vault immediately after. Exhaustive match on `custody()` (no wildcard arm):
+/// a future custody kind is a compile error here, not a silent fall-through
+/// into the ICRC pending-transfer path.
 fn queue_collateral_payout(
     s: &mut crate::state::State,
     vault_id: u64,
@@ -1299,31 +1624,100 @@ fn queue_collateral_payout(
     op_nonce: u128,
     now_ns: u64,
 ) -> Option<u64> {
-    let is_xrp = s
+    let custody = s
         .get_collateral_config(&collateral_type)
-        .map(|c| c.is_native_xrp())
-        .unwrap_or(false);
-    if is_xrp {
-        Some(record_xrp_claim(
+        .map(|c| c.custody())
+        .unwrap_or(CustodyKind::IcrcLedger);
+    match custody {
+        CustodyKind::NativeXrp => Some(record_xrp_claim(
             s,
             recipient,
             custody_owner,
             vault_id,
             margin.to_u64(),
             now_ns,
-        ))
-    } else {
-        s.pending_margin_transfers.insert(
-            (vault_id, recipient),
-            PendingMarginTransfer {
-                owner: recipient,
-                margin,
+        )),
+        CustodyKind::NativeSol => Some(record_sol_claim(
+            s,
+            recipient,
+            custody_owner,
+            vault_id,
+            margin.to_u64(),
+            now_ns,
+        )),
+        CustodyKind::IcrcLedger => {
+            s.pending_margin_transfers.insert(
+                (vault_id, recipient),
+                PendingMarginTransfer {
+                    owner: recipient,
+                    margin,
+                    collateral_type,
+                    retry_count: 0,
+                    op_nonce,
+                },
+            );
+            None
+        }
+    }
+}
+
+/// P5 (extended for SOL): route the protocol's liquidation-fee cut. ICRC
+/// collateral -> the treasury (ICRC transfer). Native custody (XRP, SOL) -> a
+/// developer-settleable claim, since the ICRC treasury transfer cannot target a
+/// synthetic native-custody ledger. Exhaustive match on `custody()`: a future
+/// custody kind is a compile error here, not a silent fall-through into the
+/// treasury ICRC path. Shared by every liquidation entry point that seizes a
+/// protocol cut (`liquidate_vault`, `liquidate_vault_partial`,
+/// `liquidate_vault_partial_with_stable`, `liquidate_vault_debt_already_burned`,
+/// `partial_liquidate_vault`) so the five previously-duplicated call sites stay
+/// byte-identical in behavior.
+///
+/// `vault_owner` / `vault_id` must be captured by the CALLER before this runs
+/// (from the pre-mutation vault snapshot), since the vault may already be
+/// drained/removed by `cleanup_if_drained` by the time this is called.
+async fn route_protocol_liquidation_fee(
+    protocol_cut: u64,
+    collateral_type: Principal,
+    vault_owner: Principal,
+    vault_id: u64,
+) {
+    if protocol_cut == 0 {
+        return;
+    }
+    let custody = read_state(|s| {
+        s.get_collateral_config(&collateral_type)
+            .map(|c| c.custody())
+            .unwrap_or(CustodyKind::IcrcLedger)
+    });
+    match custody {
+        CustodyKind::NativeXrp => {
+            // P5: native-XRP protocol fee -> a developer-settleable XrpClaim (the
+            // ICRC treasury transfer cannot target the synthetic XRP ledger).
+            // Keyed by collateral_type (not a vault lookup, since the vault may
+            // already be drained/removed by cleanup_if_drained above).
+            let dev = read_state(|s| s.developer_principal);
+            let now_ns = ic_cdk::api::time();
+            mutate_state(|s| {
+                record_xrp_claim(s, dev, vault_owner, vault_id, protocol_cut, now_ns);
+            });
+        }
+        CustodyKind::NativeSol => {
+            // SOL analogue: a developer-settleable SolClaim.
+            let dev = read_state(|s| s.developer_principal);
+            let now_ns = ic_cdk::api::time();
+            mutate_state(|s| {
+                record_sol_claim(s, dev, vault_owner, vault_id, protocol_cut, now_ns);
+            });
+        }
+        CustodyKind::IcrcLedger => {
+            let asset_type = crate::treasury::collateral_to_asset_type(&collateral_type);
+            crate::treasury::send_liquidation_fee_to_treasury(
+                protocol_cut,
                 collateral_type,
-                retry_count: 0,
-                op_nonce,
-            },
-        );
-        None
+                asset_type,
+            )
+            .await;
+        }
     }
 }
 
@@ -1537,11 +1931,24 @@ fn ensure_no_active_xrp_sp_absorb_preflight(
     Ok(())
 }
 
-fn reject_active_xrp_sp_absorb_preflight(
+fn reject_active_xrp_sp_absorb_preflight(vault_id: u64, now_ns: u64) -> Result<(), ProtocolError> {
+    read_state(|s| ensure_no_active_xrp_sp_absorb_preflight(s, vault_id, now_ns))
+}
+
+/// Combined native-custody guard called from every vault-mutation entry point
+/// that previously called `reject_active_xrp_sp_absorb_preflight` alone.
+/// Additive only: XRP vaults see byte-identical behavior (the XRP check runs
+/// first, unchanged); SOL vaults now get the same proactive protection XRP
+/// already had, so a SOL vault's collateral/debt cannot be mutated out from
+/// under a live SP preflight reservation between preflight and submit (the
+/// same reservation-collision hazard the XRP TTL guard was built to prevent).
+fn reject_active_native_sp_absorb_preflight(
     vault_id: u64,
     now_ns: u64,
 ) -> Result<(), ProtocolError> {
-    read_state(|s| ensure_no_active_xrp_sp_absorb_preflight(s, vault_id, now_ns))
+    reject_active_xrp_sp_absorb_preflight(vault_id, now_ns)?;
+    reject_active_sol_sp_absorb_preflight(vault_id, now_ns)?;
+    Ok(())
 }
 
 fn ensure_xrp_sp_absorb_preflight_vault(
@@ -1889,6 +2296,528 @@ pub fn stability_pool_liquidate_xrp_vault_in_state(
     Ok(result)
 }
 
+// ─── SOL analogue of the XRP SP-absorb block above (design doc §6) ───
+//
+// Mirrors `xrp_sp_absorb_sizing` / `stability_pool_preflight_xrp_absorb_in_state` /
+// `stability_pool_liquidate_xrp_vault_in_state` exactly, including the B-1
+// (protocol-fee-cut claim) and B-2 (post-burn collateral/debt conservation
+// guards) fixes. The only structural differences: amounts are in lamports
+// instead of drops, and there is no destination-tag field/hashing (Solana has
+// no analogue — design doc §5.2/§9).
+
+pub const SOL_SP_ABSORB_PREFLIGHT_TTL_NS: u64 = 15 * 60 * 1_000_000_000;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SolSpAbsorbSizing {
+    preflight: crate::SolSpAbsorbPreflight,
+    total_to_seize_lamports: u64,
+}
+
+pub fn stability_pool_sol_claim_outstanding_in_state(
+    state: &crate::state::State,
+    caller: Principal,
+    claim_id: u64,
+    claimant: Principal,
+) -> Result<bool, ProtocolError> {
+    ensure_registered_sp(state, caller)?;
+    match state.sol_claims.get(&claim_id) {
+        Some(claim) if claim.claimant == claimant => Ok(true),
+        Some(_) => Err(ProtocolError::GenericError(format!(
+            "SOL claim #{claim_id} belongs to a different claimant"
+        ))),
+        None => Ok(false),
+    }
+}
+
+fn sol_sp_absorb_sizing(
+    state: &crate::state::State,
+    vault_id: u64,
+    expected_icusd_burn_e8s: u64,
+) -> Result<SolSpAbsorbSizing, ProtocolError> {
+    if expected_icusd_burn_e8s == 0 {
+        return Err(ProtocolError::GenericError(
+            "SOL SP absorb burn amount must be non-zero".to_string(),
+        ));
+    }
+    let vault = state
+        .vault_id_to_vaults
+        .get(&vault_id)
+        .ok_or_else(|| ProtocolError::GenericError(format!("Vault #{vault_id} not found")))?;
+    let cfg = state
+        .get_collateral_config(&vault.collateral_type)
+        .ok_or_else(|| {
+            ProtocolError::GenericError(format!("No collateral config for vault #{vault_id}"))
+        })?;
+    if !cfg.is_native_sol() {
+        return Err(ProtocolError::GenericError(
+            "SOL SP absorb requires a native-SOL vault".to_string(),
+        ));
+    }
+    if !cfg.status.allows_liquidation() {
+        return Err(ProtocolError::GenericError(
+            "Liquidation is not allowed for this collateral type.".to_string(),
+        ));
+    }
+    if vault.borrowed_icusd_amount.to_u64() != expected_icusd_burn_e8s {
+        return Err(ProtocolError::GenericError(format!(
+            "SOL SP absorb burn {} does not match live debt {} for vault {}",
+            expected_icusd_burn_e8s,
+            vault.borrowed_icusd_amount.to_u64(),
+            vault_id
+        )));
+    }
+    let price = state
+        .get_collateral_price_decimal(&vault.collateral_type)
+        .ok_or_else(|| {
+            ProtocolError::GenericError(
+                "No price available for collateral. Price feed may be down.".to_string(),
+            )
+        })?;
+    let price_usd = UsdIcp::from(price);
+    let cr = compute_collateral_ratio(vault, price_usd, state);
+    let min_liq = state.get_min_liquidation_ratio_for(&vault.collateral_type);
+    if cr >= min_liq {
+        return Err(ProtocolError::GenericError(format!(
+            "native-SOL vault {vault_id} is no longer liquidatable"
+        )));
+    }
+
+    let liquidation_amount = ICUSD::new(expected_icusd_burn_e8s);
+    let collateral_raw =
+        crate::numeric::icusd_to_collateral_amount(liquidation_amount, price, cfg.decimals);
+    let collateral_with_bonus =
+        ICP::from(collateral_raw) * state.get_liquidation_bonus_for(&vault.collateral_type);
+    let total_to_seize = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
+    let total_to_seize_lamports = total_to_seize.to_u64();
+    let bonus_portion = total_to_seize_lamports.saturating_sub(collateral_raw);
+    let protocol_cut = (Decimal::from(bonus_portion) * state.get_liquidation_protocol_share().0)
+        .to_u64()
+        .unwrap_or(0)
+        .min(total_to_seize_lamports);
+    let collateral_received_lamports = total_to_seize_lamports.saturating_sub(protocol_cut);
+    if collateral_received_lamports == 0 {
+        return Err(ProtocolError::GenericError(
+            "SOL SP absorb would receive zero collateral".to_string(),
+        ));
+    }
+
+    Ok(SolSpAbsorbSizing {
+        preflight: crate::SolSpAbsorbPreflight {
+            vault_id,
+            icusd_burn_e8s: expected_icusd_burn_e8s,
+            collateral_received_lamports,
+            collateral_price_e8s: price_usd.to_e8s(),
+            expires_at_ns: 0,
+        },
+        total_to_seize_lamports,
+    })
+}
+
+pub fn stability_pool_preflight_sol_absorb_in_state(
+    state: &mut crate::state::State,
+    caller: Principal,
+    vault_id: u64,
+    expected_icusd_burn_e8s: u64,
+    now_ns: u64,
+) -> Result<crate::SolSpAbsorbPreflight, ProtocolError> {
+    ensure_registered_sp(state, caller)?;
+    if state.frozen {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "Protocol is frozen. All operations are suspended pending admin review.".to_string(),
+        ));
+    }
+    if state.liquidation_frozen {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "Liquidations are currently frozen by admin.".to_string(),
+        ));
+    }
+    if state.sp_writedown_disabled {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "SP writedown path is disabled by admin".to_string(),
+        ));
+    }
+    if crate::guard::is_vault_liquidating(vault_id) {
+        return Err(ProtocolError::TemporarilyUnavailable(format!(
+            "Vault #{vault_id} has another operation in flight; retry shortly"
+        )));
+    }
+
+    let sizing = sol_sp_absorb_sizing(state, vault_id, expected_icusd_burn_e8s)?;
+    let mut preflight = sizing.preflight;
+    preflight.expires_at_ns = now_ns.saturating_add(SOL_SP_ABSORB_PREFLIGHT_TTL_NS);
+    state.sp_sol_absorb_preflights.insert(
+        vault_id,
+        crate::state::StoredSolSpAbsorbPreflight {
+            caller,
+            vault_id,
+            icusd_burn_e8s: expected_icusd_burn_e8s,
+            total_to_seize_lamports: sizing.total_to_seize_lamports,
+            collateral_received_lamports: preflight.collateral_received_lamports,
+            collateral_price_e8s: preflight.collateral_price_e8s,
+            expires_at_ns: preflight.expires_at_ns,
+        },
+    );
+    Ok(preflight)
+}
+
+/// Resolve the persisted preflight reservation for a POST-BURN submit. See
+/// `matching_xrp_absorb_preflight`'s doc comment for the full B-2 rationale
+/// (honoring an expired-but-present reservation is safe here for the same
+/// reasons: single-use burn proof, registered-SP-only caller, and the
+/// post-burn collateral/debt conservation guards below).
+fn matching_sol_absorb_preflight(
+    state: &crate::state::State,
+    vault_id: u64,
+    icusd_burned_e8s: u64,
+    caller: Principal,
+) -> Option<crate::state::StoredSolSpAbsorbPreflight> {
+    let preflight = state.sp_sol_absorb_preflights.get(&vault_id)?;
+    if preflight.caller == caller && preflight.icusd_burn_e8s == icusd_burned_e8s {
+        Some(preflight.clone())
+    } else {
+        None
+    }
+}
+
+fn ensure_no_active_sol_sp_absorb_preflight(
+    state: &crate::state::State,
+    vault_id: u64,
+    now_ns: u64,
+) -> Result<(), ProtocolError> {
+    if let Some(preflight) = state.sp_sol_absorb_preflights.get(&vault_id) {
+        if preflight.expires_at_ns >= now_ns {
+            return Err(ProtocolError::TemporarilyUnavailable(format!(
+                "Vault #{vault_id} has a pending native-SOL stability-pool liquidation reservation; retry after it expires or completes"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn reject_active_sol_sp_absorb_preflight(vault_id: u64, now_ns: u64) -> Result<(), ProtocolError> {
+    read_state(|s| ensure_no_active_sol_sp_absorb_preflight(s, vault_id, now_ns))
+}
+
+fn ensure_sol_sp_absorb_preflight_vault(
+    state: &crate::state::State,
+    vault_id: u64,
+) -> Result<&Vault, ProtocolError> {
+    let vault = state
+        .vault_id_to_vaults
+        .get(&vault_id)
+        .ok_or_else(|| ProtocolError::GenericError(format!("Vault #{vault_id} not found")))?;
+    let cfg = state
+        .get_collateral_config(&vault.collateral_type)
+        .ok_or_else(|| {
+            ProtocolError::GenericError(format!("No collateral config for vault #{vault_id}"))
+        })?;
+    if !cfg.is_native_sol() {
+        return Err(ProtocolError::GenericError(
+            "SOL SP absorb requires a native-SOL vault".to_string(),
+        ));
+    }
+    Ok(vault)
+}
+
+fn canonical_sol_allocations(
+    allocations: &[crate::SolSpPayoutAllocation],
+) -> Vec<crate::SolSpPayoutAllocation> {
+    let mut sorted = allocations.to_vec();
+    sorted.sort_by(|a, b| {
+        a.claimant
+            .as_slice()
+            .cmp(b.claimant.as_slice())
+            .then_with(|| a.payout_address.cmp(&b.payout_address))
+            .then_with(|| a.lamports.cmp(&b.lamports))
+    });
+    sorted
+}
+
+fn validate_sol_sp_allocations(
+    allocations: &[crate::SolSpPayoutAllocation],
+    expected_lamports: u64,
+) -> Result<Vec<crate::SolSpPayoutAllocation>, ProtocolError> {
+    if allocations.is_empty() {
+        return Err(ProtocolError::GenericError(
+            "SOL SP absorb requires at least one payout allocation".to_string(),
+        ));
+    }
+    if allocations.len() > crate::MAX_SOL_SP_PAYOUT_ALLOCATIONS {
+        return Err(ProtocolError::GenericError(format!(
+            "SOL SP absorb supports at most {} payout allocations",
+            crate::MAX_SOL_SP_PAYOUT_ALLOCATIONS
+        )));
+    }
+    let mut sum: u128 = 0;
+    for allocation in allocations {
+        if allocation.payout_address.trim().is_empty() {
+            return Err(ProtocolError::GenericError(
+                "SOL SP absorb payout address is required".to_string(),
+            ));
+        }
+        if allocation.lamports == 0 {
+            return Err(ProtocolError::GenericError(
+                "SOL SP absorb payout allocation lamports must be non-zero".to_string(),
+            ));
+        }
+        sum = sum.saturating_add(u128::from(allocation.lamports));
+    }
+    if sum != u128::from(expected_lamports) {
+        return Err(ProtocolError::GenericError(format!(
+            "SOL SP absorb allocation sum {} does not match collateral received {}",
+            sum, expected_lamports
+        )));
+    }
+    Ok(canonical_sol_allocations(allocations))
+}
+
+fn sol_sp_allocation_fingerprint(
+    caller: Principal,
+    request: &crate::SolSpAbsorbRequest,
+    allocations: &[crate::SolSpPayoutAllocation],
+) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hash_len_prefixed(&mut hasher, caller.as_slice());
+    hasher.update(request.vault_id.to_be_bytes());
+    hasher.update(request.icusd_burned_e8s.to_be_bytes());
+    let proof_kind = match request.proof.ledger_kind {
+        crate::icrc3_proof::SpProofLedger::IcusdBurn => 0u8,
+        crate::icrc3_proof::SpProofLedger::ThreePoolTransfer => 1u8,
+    };
+    hasher.update([proof_kind]);
+    hasher.update(request.proof.block_index.to_be_bytes());
+    hasher.update(request.proof.vault_id_memo.to_be_bytes());
+    hasher.update((allocations.len() as u64).to_be_bytes());
+    for allocation in allocations {
+        hash_len_prefixed(&mut hasher, allocation.claimant.as_slice());
+        hash_len_prefixed(&mut hasher, allocation.payout_address.as_bytes());
+        hasher.update(allocation.lamports.to_be_bytes());
+    }
+    hasher.finalize().to_vec()
+}
+
+fn stored_sol_sp_absorb_matches_retry(
+    stored: &crate::state::StoredSolSpAbsorbResult,
+    caller: Principal,
+    request: &crate::SolSpAbsorbRequest,
+    allocation_fingerprint: &[u8],
+) -> bool {
+    stored.caller == caller
+        && stored.vault_id == request.vault_id
+        && stored.icusd_burned_e8s == request.icusd_burned_e8s
+        && stored.proof_ledger == request.proof.ledger_kind
+        && stored.proof_block_index == request.proof.block_index
+        && stored.allocation_fingerprint == allocation_fingerprint
+}
+
+pub fn record_sp_sol_absorb_result_bounded(
+    state: &mut crate::state::State,
+    proof_key: (crate::icrc3_proof::SpProofLedger, u64),
+    stored: crate::state::StoredSolSpAbsorbResult,
+) {
+    state
+        .sp_sol_absorb_results_by_proof
+        .insert(proof_key, stored);
+    while state.sp_sol_absorb_results_by_proof.len()
+        > crate::state::MAX_SP_SOL_ABSORB_RESULTS_BY_PROOF
+    {
+        let Some(oldest_key) = state
+            .sp_sol_absorb_results_by_proof
+            .keys()
+            .copied()
+            .find(|key| *key != proof_key)
+        else {
+            break;
+        };
+        state.sp_sol_absorb_results_by_proof.remove(&oldest_key);
+    }
+}
+
+pub fn sol_sp_absorb_cached_replay_result(
+    state: &crate::state::State,
+    caller: Principal,
+    request: &crate::SolSpAbsorbRequest,
+) -> Option<Result<crate::SolSpAbsorbResult, ProtocolError>> {
+    let proof_key = (request.proof.ledger_kind, request.proof.block_index);
+    let stored = state.sp_sol_absorb_results_by_proof.get(&proof_key)?;
+    Some(
+        validate_sol_sp_allocations(&request.allocations, stored.result.collateral_received_lamports)
+            .and_then(|allocations| {
+                let fingerprint = sol_sp_allocation_fingerprint(caller, request, &allocations);
+                if stored_sol_sp_absorb_matches_retry(stored, caller, request, &fingerprint) {
+                    Ok(stored.result.clone())
+                } else {
+                    Err(ProtocolError::GenericError(format!(
+                        "SP SOL absorb proof replay rejected: ({:?}, block {}) already consumed for a different request",
+                        request.proof.ledger_kind, request.proof.block_index
+                    )))
+                }
+            }),
+    )
+}
+
+pub fn stability_pool_liquidate_sol_vault_in_state(
+    state: &mut crate::state::State,
+    caller: Principal,
+    request: crate::SolSpAbsorbRequest,
+    now_ns: u64,
+) -> Result<crate::SolSpAbsorbResult, ProtocolError> {
+    ensure_registered_sp(state, caller)?;
+    let proof_key = (request.proof.ledger_kind, request.proof.block_index);
+
+    if let Some(stored) = state.sp_sol_absorb_results_by_proof.get(&proof_key) {
+        let allocations = validate_sol_sp_allocations(
+            &request.allocations,
+            stored.result.collateral_received_lamports,
+        )?;
+        let fingerprint = sol_sp_allocation_fingerprint(caller, &request, &allocations);
+        if stored_sol_sp_absorb_matches_retry(stored, caller, &request, &fingerprint) {
+            return Ok(stored.result.clone());
+        }
+        return Err(ProtocolError::GenericError(format!(
+            "SP SOL absorb proof replay rejected: ({:?}, block {}) already consumed for a different request",
+            request.proof.ledger_kind, request.proof.block_index
+        )));
+    }
+
+    if request.proof.ledger_kind != crate::icrc3_proof::SpProofLedger::IcusdBurn {
+        return Err(ProtocolError::GenericError(
+            "SOL SP absorb requires an icUSD burn proof".to_string(),
+        ));
+    }
+    if request.proof.vault_id_memo != request.vault_id {
+        return Err(ProtocolError::GenericError(format!(
+            "SP writedown proof vault_id_memo {} does not match call vault_id {}",
+            request.proof.vault_id_memo, request.vault_id
+        )));
+    }
+    if state.consumed_writedown_proofs.contains(&proof_key) {
+        return Err(ProtocolError::GenericError(format!(
+            "SP writedown proof replay rejected: ({:?}, block {}) already consumed",
+            request.proof.ledger_kind, request.proof.block_index
+        )));
+    }
+
+    let preflight =
+        matching_sol_absorb_preflight(state, request.vault_id, request.icusd_burned_e8s, caller)
+            .ok_or_else(|| {
+                ProtocolError::GenericError(
+                    "SOL SP absorb requires a matching preflight reservation".to_string(),
+                )
+            })?;
+
+    let allocations = validate_sol_sp_allocations(
+        &request.allocations,
+        preflight.collateral_received_lamports,
+    )?;
+    let fingerprint = sol_sp_allocation_fingerprint(caller, &request, &allocations);
+    let (custody_owner, vault_collateral, vault_borrowed) = {
+        let vault = ensure_sol_sp_absorb_preflight_vault(state, request.vault_id)?;
+        (
+            vault.owner,
+            vault.collateral_amount,
+            vault.borrowed_icusd_amount,
+        )
+    };
+    // Conservation guards mirror `stability_pool_liquidate_xrp_vault_in_state`'s
+    // B-2 fix exactly (collateral side then debt side) — see that function's
+    // comments for the full rationale.
+    if vault_collateral < preflight.total_to_seize_lamports {
+        return Err(ProtocolError::GenericError(format!(
+            "SOL SP absorb vault {} collateral {} fell below the reserved seizure {} since preflight; aborting before mutation",
+            request.vault_id, vault_collateral, preflight.total_to_seize_lamports
+        )));
+    }
+    if vault_borrowed < ICUSD::new(request.icusd_burned_e8s) {
+        return Err(ProtocolError::GenericError(format!(
+            "SOL SP absorb vault {} live debt {:?} fell below the reserved burn {} since preflight; aborting before mutation",
+            request.vault_id, vault_borrowed, request.icusd_burned_e8s
+        )));
+    }
+
+    let mut payout_claims = Vec::with_capacity(allocations.len());
+    for allocation in &allocations {
+        let claim_id = record_sol_claim(
+            state,
+            allocation.claimant,
+            custody_owner,
+            request.vault_id,
+            allocation.lamports,
+            now_ns,
+        );
+        payout_claims.push(crate::SolSpPayoutClaim {
+            claimant: allocation.claimant,
+            claim_id,
+            payout_address: allocation.payout_address.clone(),
+            lamports: allocation.lamports,
+        });
+    }
+
+    // B-1 (SOL analogue): route the protocol's liquidation-fee cut to a
+    // developer-settleable SolClaim, mirroring the XRP fix. The vault is
+    // debited the GROSS `total_to_seize_lamports` below, but the depositor
+    // allocations only sum to the NET `collateral_received_lamports`. Without
+    // this claim the protocol cut would be removed from the vault yet have no
+    // claim referencing it.
+    let protocol_cut = preflight
+        .total_to_seize_lamports
+        .saturating_sub(preflight.collateral_received_lamports);
+    if protocol_cut > 0 {
+        let developer = state.developer_principal;
+        record_sol_claim(
+            state,
+            developer,
+            custody_owner,
+            request.vault_id,
+            protocol_cut,
+            now_ns,
+        );
+    }
+
+    let mut interest_share = ICUSD::new(0);
+    if let Some(vault) = state.vault_id_to_vaults.get_mut(&request.vault_id) {
+        if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
+            let share = (Decimal::from(request.icusd_burned_e8s)
+                * Decimal::from(vault.accrued_interest.0)
+                / Decimal::from(vault.borrowed_icusd_amount.0))
+            .to_u64()
+            .unwrap_or(0);
+            interest_share = ICUSD::new(share.min(vault.accrued_interest.0));
+        }
+        let debt_applied = ICUSD::new(request.icusd_burned_e8s).min(vault.borrowed_icusd_amount);
+        let collateral_applied = preflight.total_to_seize_lamports.min(vault.collateral_amount);
+        vault.borrowed_icusd_amount = vault.borrowed_icusd_amount.saturating_sub(debt_applied);
+        vault.collateral_amount = vault.collateral_amount.saturating_sub(collateral_applied);
+        vault.accrued_interest = vault.accrued_interest.saturating_sub(interest_share);
+    }
+    crate::state::record_recent_liquidation(state, request.icusd_burned_e8s, now_ns);
+    state.cleanup_if_drained(request.vault_id);
+    state.consumed_writedown_proofs.insert(proof_key);
+    state.sp_sol_absorb_preflights.remove(&request.vault_id);
+
+    let result = crate::SolSpAbsorbResult {
+        success: true,
+        vault_id: request.vault_id,
+        liquidated_debt_e8s: request.icusd_burned_e8s,
+        collateral_received_lamports: preflight.collateral_received_lamports,
+        payout_claims,
+        block_index: request.proof.block_index,
+        collateral_price_e8s: preflight.collateral_price_e8s,
+    };
+    let stored = crate::state::StoredSolSpAbsorbResult {
+        caller,
+        vault_id: request.vault_id,
+        icusd_burned_e8s: request.icusd_burned_e8s,
+        proof_ledger: request.proof.ledger_kind,
+        proof_block_index: request.proof.block_index,
+        allocation_fingerprint: fingerprint,
+        result: result.clone(),
+        accepted_at_ns: now_ns,
+    };
+    record_sp_sol_absorb_result_bounded(state, proof_key, stored);
+    Ok(result)
+}
+
 /// P5: true iff `vault_id` is a native-XRP-collateral vault (custody on the XRP
 /// Ledger). Such vaults are excluded from AUTOMATED liquidation (the unhealthy-vault
 /// scan + the stability-pool / bot entry points): the SP and bot cannot settle an
@@ -1900,6 +2829,45 @@ pub fn vault_is_native_xrp(vault_id: u64) -> bool {
             .get(&vault_id)
             .and_then(|v| s.get_collateral_config(&v.collateral_type))
             .map(|c| c.is_native_xrp())
+            .unwrap_or(false)
+    })
+}
+
+/// SOL analogue of `vault_is_native_xrp`: true iff `vault_id` is a native-SOL-
+/// collateral vault (custody on Solana mainnet-beta, threshold Ed25519). Such
+/// vaults are excluded from AUTOMATED liquidation for the identical reason XRP
+/// is: neither the SP nor the bot can settle a SolClaim, so native-SOL is
+/// liquidated only MANUALLY by an external liquidator, via the same entry
+/// points as native-XRP.
+pub fn vault_is_native_sol(vault_id: u64) -> bool {
+    read_state(|s| {
+        s.vault_id_to_vaults
+            .get(&vault_id)
+            .and_then(|v| s.get_collateral_config(&v.collateral_type))
+            .map(|c| c.is_native_sol())
+            .unwrap_or(false)
+    })
+}
+
+/// Fail-closed generalization of `vault_is_native_xrp` / `vault_is_native_sol`:
+/// true iff `vault_id` is custodied by ANY non-ICRC rail. The SP write-down
+/// defense-in-depth guard below needs the exact `CustodyKind` (to produce a
+/// per-asset error message) so it matches on `custody()` directly rather than
+/// calling this; this predicate is exercised by
+/// `sol_p2a_tests::vault_is_native_sol_and_vault_is_native_custody_are_scoped_to_sol_custody`
+/// and kept `pub` (not `pub(crate)`) so the Phase 3 `main.rs` automated-
+/// liquidation entry points (`stability_pool_liquidate`,
+/// `stability_pool_liquidate_debt_burned`, `stability_pool_liquidate_with_reserves`,
+/// `bot_claim_liquidation` — main.rs is a SEPARATE crate from this lib target,
+/// so `pub(crate)` would not be visible there) can call it directly as the
+/// fail-closed building block for any future custody kind, instead of
+/// hardcoding `vault_is_native_xrp`.
+pub fn vault_is_native_custody(vault_id: u64) -> bool {
+    read_state(|s| {
+        s.vault_id_to_vaults
+            .get(&vault_id)
+            .and_then(|v| s.get_collateral_config(&v.collateral_type))
+            .map(|c| c.is_native_custody())
             .unwrap_or(false)
     })
 }
@@ -2374,6 +3342,154 @@ pub async fn sweep_xrp_pending_open(vault_id: u64) -> Result<(), ProtocolError> 
     Ok(())
 }
 
+// ─── Native SOL collateral: Phase 2b pending-open cleanup (mirrors XRP above) ──
+
+const SOL_PENDING_CLEANUP_MIN_AGE_NS: u64 = 10 * 60 * 1_000_000_000;
+
+pub(crate) fn ensure_sol_pending_cleanup_age(
+    pending: &crate::state::SolPendingDeposit,
+    now_ns: u64,
+) -> Result<(), ProtocolError> {
+    let age_ns = now_ns.saturating_sub(pending.opened_at_ns);
+    if age_ns < SOL_PENDING_CLEANUP_MIN_AGE_NS {
+        return Err(ProtocolError::GenericError(
+            "SOL pending deposit is too new to cancel; wait for the funding window to pass."
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// SOL analogue of `remove_xrp_pending_deposit_if_unfunded_snapshot`. Solana
+/// has no separate "account exists" flag the way XRPL does (`account_info`
+/// erroring for an unfunded address) — `getBalance` simply reads 0 lamports
+/// for any address that has never received funds — so "funded" here is any
+/// `balance_lamports > 0`, including dust below the credit minimum: even dust
+/// means the pending entry must stay so the user (or a future manual sweep)
+/// can still act on it, since removing it would strand those lamports at a
+/// custody address with no pending-deposit record pointing back to it.
+pub(crate) fn remove_sol_pending_deposit_if_unfunded_snapshot(
+    s: &mut crate::state::State,
+    vault_id: u64,
+    expected: &crate::state::SolPendingDeposit,
+    balance_lamports: u64,
+) -> Result<bool, ProtocolError> {
+    if balance_lamports > 0 {
+        return Err(ProtocolError::GenericError(
+            "SOL custody account is funded; confirm the deposit instead of cancelling.".to_string(),
+        ));
+    }
+    match s.sol_pending_deposits.get(&vault_id) {
+        Some(current) if current == expected => {
+            s.sol_pending_deposits.remove(&vault_id);
+            Ok(true)
+        }
+        Some(_) | None => Ok(false),
+    }
+}
+
+/// Owner cleanup for an unfunded native-SOL open. Never removes a funded
+/// custody account; users must confirm funded deposits into real vaults.
+pub async fn cancel_sol_pending_open(vault_id: u64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    let guard_principal =
+        GuardPrincipal::new(caller, &format!("cancel_sol_pending_open_{}", vault_id))?;
+
+    let pending = match read_state(|s| s.sol_pending_deposits.get(&vault_id).cloned()) {
+        Some(p) => p,
+        None => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "No pending SOL deposit for this vault.".to_string(),
+            ));
+        }
+    };
+    if pending.owner != caller {
+        guard_principal.fail();
+        return Err(ProtocolError::CallerNotOwner);
+    }
+    if let Err(e) = ensure_sol_pending_cleanup_age(&pending, ic_cdk::api::time()) {
+        guard_principal.fail();
+        return Err(e);
+    }
+
+    let balance = match crate::chains::sol::rpc::get_balance(&pending.custody_address).await {
+        Ok(b) => b,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "sol getBalance failed: {e}"
+            )));
+        }
+    };
+
+    let removed = mutate_state(|s| {
+        ensure_sol_pending_cleanup_age(&pending, ic_cdk::api::time())?;
+        remove_sol_pending_deposit_if_unfunded_snapshot(s, vault_id, &pending, balance)
+    })?;
+    if !removed {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(
+            "SOL pending deposit changed concurrently; refresh and retry.".to_string(),
+        ));
+    }
+
+    guard_principal.complete();
+    Ok(())
+}
+
+/// Developer cleanup for abandoned unfunded native-SOL opens. Deliberately
+/// unfunded-only; if SOL has reached the custody address the entry must
+/// remain confirmable by its owner.
+pub async fn sweep_sol_pending_open(vault_id: u64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    if !read_state(|s| s.developer_principal == caller) {
+        return Err(ProtocolError::GenericError(
+            "Only the developer can sweep SOL pending opens.".to_string(),
+        ));
+    }
+    let guard_principal =
+        GuardPrincipal::new(caller, &format!("sweep_sol_pending_open_{}", vault_id))?;
+
+    let pending = match read_state(|s| s.sol_pending_deposits.get(&vault_id).cloned()) {
+        Some(p) => p,
+        None => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "No pending SOL deposit for this vault.".to_string(),
+            ));
+        }
+    };
+    if let Err(e) = ensure_sol_pending_cleanup_age(&pending, ic_cdk::api::time()) {
+        guard_principal.fail();
+        return Err(e);
+    }
+
+    let balance = match crate::chains::sol::rpc::get_balance(&pending.custody_address).await {
+        Ok(b) => b,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "sol getBalance failed: {e}"
+            )));
+        }
+    };
+
+    let removed = mutate_state(|s| {
+        ensure_sol_pending_cleanup_age(&pending, ic_cdk::api::time())?;
+        remove_sol_pending_deposit_if_unfunded_snapshot(s, vault_id, &pending, balance)
+    })?;
+    if !removed {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(
+            "SOL pending deposit changed concurrently; refresh and retry.".to_string(),
+        ));
+    }
+
+    guard_principal.complete();
+    Ok(())
+}
+
 /// P4: settle an XRP claim — sign + submit a `Payment` from the source vault's
 /// custody address (re-derived from the claim) to `destination`, for
 /// `claim.drops - fee` (the claimant bears the fee). Claimant-only. One in-flight
@@ -2669,6 +3785,871 @@ pub async fn settle_xrp_claim_with_tag(
     Ok(signed.tx_hash)
 }
 
+// ─── Native SOL collateral: Phase 2b claim settlement (design doc §5) ─────────
+//
+// Structural difference from XRP that shapes everything below: XRP's
+// anti-double-pay primitive is a per-ACCOUNT Sequence number, so a claim's own
+// custody account is the entire universe a settle call needs to reason about.
+// SOL's primitive is a SINGLE PROTOCOL-WIDE durable-nonce account (design doc
+// §5.1) shared by every custody address and every claim. That has two
+// consequences threaded through this section:
+//
+//   1. "Aggregate solvency" (how much SOL a custody address must hold) is
+//      still scoped PER custody address, same as XRP — that is a property of
+//      the custody account's own balance.
+//   2. "Who else could have consumed the shared nonce" is NOT scoped to one
+//      custody address — it is scoped to the WHOLE PROTOCOL, since literally
+//      any other claim's settlement (on any vault, any custody address) reads
+//      and can consume the SAME nonce value. `reconcile_sol_other_inflight_claims`
+//      therefore scans ALL `sol_claims`, unlike XRP's per-custody-address scan.
+
+/// The four rows of design doc §5.3's idempotency table, as a pure decision
+/// over an already-fetched `TxStatus` plus a nonce-value comparison. Kept
+/// deliberately separate from any `State` access or `ic_cdk` call so it is
+/// exhaustively unit-testable — see `sol_p2b_tests` for one test per row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SolSettlementDecision {
+    /// `Confirmed`: the claim is already paid. Finalize by removing the claim
+    /// and returning the PRIOR signature — no second transfer is attempted.
+    AlreadyPaid,
+    /// `Failed`: a durable-nonce transaction that lands but whose non-advance
+    /// instruction reverts still CONSUMES the nonce (Solana always advances a
+    /// durable nonce for any included transaction, success or failure — this
+    /// is a deliberate runtime rule that prevents grief-by-designed-failure
+    /// replay). The Transfer instruction did not execute, so the custody
+    /// balance is untouched; the network fee was paid by the FEE PAYER (the
+    /// settlement wallet — design doc §5.1), not the custody account, so
+    /// (unlike XRP) nothing needs to be deducted from the claim. Clear the
+    /// settlement and allow a resign for the SAME (unreduced) lamports.
+    FailedClearForResign,
+    /// `NotFound` and the live nonce still equals the recorded `nonce_value`:
+    /// a durable-nonce transaction that executes ALWAYS advances the nonce as
+    /// its first instruction, so an UNCHANGED nonce is conclusive proof the
+    /// exact signed bytes we submitted were never included in any block —
+    /// regardless of whether that is because they are still floating around
+    /// unconfirmed or were never broadcast at all. Safe to resign: even if
+    /// the old attempt somehow lands later, only one of two transactions
+    /// sharing one nonce value can ever be included (the second is rejected
+    /// outright at inclusion time, never charged, never executed), so at most
+    /// one payment ever happens.
+    SafeToResign,
+    /// `NotFound` and the live nonce has changed: the exact nonce value the
+    /// prior transaction needed has been consumed by SOMETHING, yet our own
+    /// signature is not found on-ledger. This does NOT prove our own transfer
+    /// never landed — `getTransaction` lookups can miss a transaction whose
+    /// history has aged out of a queried RPC node's retention window, even at
+    /// `finalized` commitment — so treat it as ambiguous. The common,
+    /// explainable case is a SIBLING claim's settlement legitimately
+    /// consuming the shared nonce; `reconcile_sol_other_inflight_claims` is
+    /// checked before this is allowed to become a hard quarantine.
+    AmbiguousAdvanced,
+}
+
+pub(crate) fn sol_settlement_decision(
+    status: &crate::chains::solana::sol_rpc::TxStatus,
+    recorded_nonce_value: &str,
+    live_nonce_value: &str,
+) -> SolSettlementDecision {
+    use crate::chains::solana::sol_rpc::TxStatus;
+    match status {
+        TxStatus::Confirmed { .. } => SolSettlementDecision::AlreadyPaid,
+        TxStatus::Failed => SolSettlementDecision::FailedClearForResign,
+        TxStatus::NotFound => {
+            if live_nonce_value == recorded_nonce_value {
+                SolSettlementDecision::SafeToResign
+            } else {
+                SolSettlementDecision::AmbiguousAdvanced
+            }
+        }
+    }
+}
+
+/// How to reconcile an OTHER in-flight sibling settlement (design doc §5.2
+/// step 6 / §5.3's closing note), given the sibling's on-ledger tx status and
+/// the LIVE nonce. Pure — see `sol_p2b_tests` for exhaustive coverage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SolSiblingReconcileDecision {
+    /// Sibling settlement validated on-ledger -> finalize (remove the sibling claim).
+    Paid,
+    /// Sibling settlement validated but failed -> clear the blocker (no fee
+    /// deduction — see `SolSettlementDecision::FailedClearForResign`).
+    FailedClearForResign,
+    /// Sibling's `nonce_value` still equals the live nonce and its tx is
+    /// `NotFound`: it may still land at any moment. Signing anything new
+    /// right now would use the SAME current nonce and race it — refuse.
+    StillInFlight,
+    /// Sibling's `nonce_value` no longer matches the live nonce and its tx is
+    /// `NotFound`: the exact nonce value that transaction needed is gone, and
+    /// a durable-nonce transaction is validated against the CURRENT on-chain
+    /// nonce at inclusion time — so this specific signed transaction can
+    /// never land in any future block, regardless of who consumed the nonce.
+    /// Safe to clear its settlement so its owner can resign later.
+    DeadNonceSafeToClear,
+}
+
+pub(crate) fn sol_sibling_reconcile_decision(
+    status: &crate::chains::solana::sol_rpc::TxStatus,
+    sibling_nonce_value: &str,
+    live_nonce_value: &str,
+) -> SolSiblingReconcileDecision {
+    use crate::chains::solana::sol_rpc::TxStatus;
+    match status {
+        TxStatus::Confirmed { .. } => SolSiblingReconcileDecision::Paid,
+        TxStatus::Failed => SolSiblingReconcileDecision::FailedClearForResign,
+        TxStatus::NotFound => {
+            if sibling_nonce_value == live_nonce_value {
+                SolSiblingReconcileDecision::StillInFlight
+            } else {
+                SolSiblingReconcileDecision::DeadNonceSafeToClear
+            }
+        }
+    }
+}
+
+/// True iff a sibling's settlement explains away the CURRENT claim's own
+/// `AmbiguousAdvanced` state: the sibling used the EXACT SAME `nonce_value`
+/// the current claim's stale settlement did, and the sibling's transaction is
+/// now `Confirmed`. Since a given nonce value can be consumed by at most one
+/// transaction ever, a confirmed sibling sharing that value is positive proof
+/// the current claim's own (independently `NotFound`) transaction is not what
+/// consumed it.
+pub(crate) fn sol_sibling_explains_ambiguous_advance(
+    sibling_status: &crate::chains::solana::sol_rpc::TxStatus,
+    sibling_nonce_value: &str,
+    target_nonce_value: &str,
+) -> bool {
+    matches!(
+        sibling_status,
+        crate::chains::solana::sol_rpc::TxStatus::Confirmed { .. }
+    ) && sibling_nonce_value == target_nonce_value
+}
+
+/// Shared mutation applied once a sibling (or the current claim's own stale
+/// settlement) has been reconciled: `Paid` finalizes by removing the claim;
+/// `ClearForResign` covers BOTH the `Failed` and dead/expired-`NotFound`
+/// outcomes, which mutate `State` identically (clear `settlement`, keep the
+/// claim). Guarded on the recorded signature still matching, so a settlement
+/// that changed concurrently between the read and this mutation is a no-op
+/// rather than clobbering a newer attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SolSettlementReconciliation {
+    Paid,
+    ClearForResign,
+}
+
+pub(crate) fn reconcile_sol_settlement_snapshot(
+    s: &mut crate::state::State,
+    claim_id: u64,
+    signature: &str,
+    outcome: SolSettlementReconciliation,
+) -> bool {
+    let sig_matches = s
+        .sol_claims
+        .get(&claim_id)
+        .and_then(|claim| claim.settlement.as_ref())
+        .map(|settlement| settlement.signature == signature)
+        .unwrap_or(false);
+    if !sig_matches {
+        return false;
+    }
+    match outcome {
+        SolSettlementReconciliation::Paid => {
+            s.sol_claims.remove(&claim_id);
+        }
+        SolSettlementReconciliation::ClearForResign => {
+            if let Some(claim) = s.sol_claims.get_mut(&claim_id) {
+                claim.settlement = None;
+            }
+        }
+    }
+    true
+}
+
+/// Durably flag a SOL claim as quarantined (design doc §5.3's last row). Idempotent:
+/// keeps the first reason set. While quarantined, `settle_sol_claim` refuses to sign;
+/// a developer clears it via `resolve_quarantined_sol_claim_snapshot` after off-chain
+/// reconciliation against a Solana explorer. Returns true if the claim exists. `pub`
+/// so a Phase 3 `main.rs` admin endpoint (defense-in-depth manual quarantine) can call
+/// it directly, mirroring — and, unlike XRP's `main.rs`, actually reusing — this
+/// primitive instead of duplicating the mutation inline.
+pub fn quarantine_sol_claim_snapshot(
+    s: &mut crate::state::State,
+    claim_id: u64,
+    reason: &str,
+) -> bool {
+    if let Some(claim) = s.sol_claims.get_mut(&claim_id) {
+        if claim.quarantine_reason.is_none() {
+            claim.quarantine_reason = Some(reason.to_string());
+        }
+        true
+    } else {
+        false
+    }
+}
+
+/// Apply an admin resolution to a quarantined SOL claim after off-ledger
+/// reconciliation (mirrors `resolve_quarantined_xrp_claim_snapshot` exactly).
+/// `confirm_paid = true` means the admin verified the divergent transfer DID
+/// deliver -> remove the claim (no re-pay). `false` means it did NOT deliver ->
+/// clear the quarantine + settlement so the claimant can retry settle and be
+/// paid exactly once. Errors WITHOUT mutating if the claim is absent or not
+/// quarantined. `pub` for the Phase 3 `main.rs` endpoint
+/// (`admin_resolve_sol_claim`, taking `NativeClaimResolution`).
+pub fn resolve_quarantined_sol_claim_snapshot(
+    s: &mut crate::state::State,
+    claim_id: u64,
+    confirm_paid: bool,
+) -> Result<(), ProtocolError> {
+    match s.sol_claims.get(&claim_id) {
+        Some(c) if c.quarantine_reason.is_some() => {}
+        Some(_) => {
+            return Err(ProtocolError::GenericError(format!(
+                "SOL claim #{claim_id} is not quarantined; refusing to resolve a healthy claim"
+            )))
+        }
+        None => {
+            return Err(ProtocolError::GenericError(format!(
+                "No such SOL claim #{claim_id}"
+            )))
+        }
+    }
+    if confirm_paid {
+        s.sol_claims.remove(&claim_id);
+    } else if let Some(c) = s.sol_claims.get_mut(&claim_id) {
+        c.quarantine_reason = None;
+        c.settlement = None;
+    }
+    Ok(())
+}
+
+pub(crate) fn sol_unresolved_claim_lamports_for_custody(
+    s: &crate::state::State,
+    custody_owner: Principal,
+    custody_nonce: u64,
+) -> Result<u128, ProtocolError> {
+    s.sol_claims
+        .values()
+        .filter(|claim| {
+            claim.custody_owner == custody_owner && claim.custody_nonce == custody_nonce
+        })
+        .try_fold(0u128, |total, claim| {
+            total
+                .checked_add(u128::from(claim.lamports))
+                .ok_or_else(|| {
+                    ProtocolError::GenericError(
+                        "Aggregate SOL claims exceed supported lamports range".to_string(),
+                    )
+                })
+        })
+}
+
+/// Aggregate solvency (design doc §5.2 step 5): the custody address's live
+/// balance must cover every unresolved claim against it PLUS the rent-exempt
+/// reserve (the custody account is kept permanently rent-exempt — design doc
+/// §4.1 — never swept to zero). Pure/sync.
+pub(crate) fn ensure_sol_claim_aggregate_solvency(
+    balance_lamports: u64,
+    rent_exempt_lamports: u64,
+    unresolved_claim_lamports: u128,
+) -> Result<(), ProtocolError> {
+    let required = unresolved_claim_lamports
+        .checked_add(u128::from(rent_exempt_lamports))
+        .ok_or_else(|| {
+            ProtocolError::GenericError(
+                "Aggregate SOL claims plus rent-exempt reserve exceed supported lamports range"
+                    .to_string(),
+            )
+        })?;
+    if u128::from(balance_lamports) < required {
+        return Err(ProtocolError::GenericError(format!(
+            "insufficient SOL for unresolved claims: balance {} lamports < aggregate claims {} + rent-exempt reserve {}",
+            balance_lamports, unresolved_claim_lamports, rent_exempt_lamports
+        )));
+    }
+    Ok(())
+}
+
+/// Every OTHER sol claim (any custody address — see the section doc comment
+/// for why this is protocol-wide, not per-custody like XRP) that currently
+/// has a settlement recorded. Pure/sync `State` scan, factored out for
+/// testability.
+pub(crate) fn sol_inflight_claims(
+    s: &crate::state::State,
+    current_claim_id: u64,
+) -> Vec<(u64, crate::state::SolSettlement)> {
+    s.sol_claims
+        .iter()
+        .filter_map(|(claim_id, claim)| {
+            if *claim_id == current_claim_id {
+                return None;
+            }
+            claim
+                .settlement
+                .as_ref()
+                .map(|settlement| (*claim_id, settlement.clone()))
+        })
+        .collect()
+}
+
+/// Design doc §5.2 step 6 / §5.3's closing note, adapted from sequence
+/// semantics (XRP) to durable-nonce semantics (SOL) — see the section doc
+/// comment. Scans every OTHER in-flight claim PROTOCOL-WIDE (the nonce is
+/// shared by every custody address), reconciling each against its own
+/// on-ledger tx status:
+///   - `Paid` / `FailedClearForResign` -> apply immediately (bookkeeping only).
+///   - `StillInFlight` -> stop and return `Some(other_claim_id)`: the caller
+///     must refuse to sign a fresh transaction while another might still land
+///     on the SAME current nonce.
+///   - `DeadNonceSafeToClear` -> apply immediately (bookkeeping only).
+/// Also reports whether any OTHER claim's settlement was found CONFIRMED
+/// using the exact `target_nonce_value` (when `Some`) — the disambiguator for
+/// the CALLING claim's own `AmbiguousAdvanced` case, if it has one. Pass
+/// `target_nonce_value: None` when the calling claim has no ambiguity of its
+/// own to explain (e.g. it had no prior settlement, or its own decision was
+/// not `AmbiguousAdvanced`).
+///
+/// MUST be called (and its `blocking` result checked) BEFORE quarantining the
+/// current claim, and BEFORE building any fresh transaction — see the design
+/// doc's explicit instruction that this resolves the common case first.
+async fn reconcile_sol_other_inflight_claims(
+    current_claim_id: u64,
+    live_nonce_value: &str,
+    target_nonce_value: Option<&str>,
+) -> Result<(Option<u64>, bool), ProtocolError> {
+    let in_flight = read_state(|s| sol_inflight_claims(s, current_claim_id));
+    let mut explains_target = false;
+    for (other_claim_id, settlement) in in_flight {
+        let status = crate::chains::sol::rpc::get_transaction(&settlement.signature)
+            .await
+            .map_err(|e| {
+                ProtocolError::GenericError(format!(
+                    "sol tx status for claim #{other_claim_id} failed: {e}"
+                ))
+            })?;
+        if let Some(target) = target_nonce_value {
+            if sol_sibling_explains_ambiguous_advance(&status, &settlement.nonce_value, target) {
+                explains_target = true;
+            }
+        }
+        match sol_sibling_reconcile_decision(&status, &settlement.nonce_value, live_nonce_value) {
+            SolSiblingReconcileDecision::Paid => {
+                mutate_state(|s| {
+                    reconcile_sol_settlement_snapshot(
+                        s,
+                        other_claim_id,
+                        &settlement.signature,
+                        SolSettlementReconciliation::Paid,
+                    );
+                });
+            }
+            SolSiblingReconcileDecision::FailedClearForResign => {
+                mutate_state(|s| {
+                    reconcile_sol_settlement_snapshot(
+                        s,
+                        other_claim_id,
+                        &settlement.signature,
+                        SolSettlementReconciliation::ClearForResign,
+                    );
+                });
+            }
+            SolSiblingReconcileDecision::StillInFlight => {
+                return Ok((Some(other_claim_id), explains_target));
+            }
+            SolSiblingReconcileDecision::DeadNonceSafeToClear => {
+                mutate_state(|s| {
+                    reconcile_sol_settlement_snapshot(
+                        s,
+                        other_claim_id,
+                        &settlement.signature,
+                        SolSettlementReconciliation::ClearForResign,
+                    );
+                });
+            }
+        }
+    }
+    Ok((None, explains_target))
+}
+
+/// Pure gate: refuse if `claim` is quarantined (design doc §5.3's last row).
+/// Factored out of `settle_sol_claim` purely for unit testability.
+pub(crate) fn ensure_sol_claim_not_quarantined(
+    claim_id: u64,
+    claim: &crate::state::SolClaim,
+) -> Result<(), ProtocolError> {
+    if let Some(reason) = claim.quarantine_reason.clone() {
+        return Err(ProtocolError::GenericError(format!(
+            "SOL claim #{claim_id} is quarantined ({reason}); awaiting admin reconciliation."
+        )));
+    }
+    Ok(())
+}
+
+/// P4 SOL analogue of `settle_xrp_claim` — settle a SOL claim by signing +
+/// submitting a durable-nonce transfer from the source vault's custody
+/// address (re-derived from the claim) to `destination`, for the FULL
+/// `claim.lamports` (the settlement wallet, not the claimant, bears the
+/// Solana network fee — design doc §5.1 — so unlike XRP nothing is deducted
+/// here). Claimant-only. No destination tag (design doc §5.2 — Solana has no
+/// analogue). On success the claim is removed once its settlement transaction
+/// is later confirmed by a follow-up settle call; returns the locally
+/// computed base58 transaction signature.
+///
+/// Locking (security review fix, 2026-07-24): `GuardPrincipal` below is keyed
+/// on the CALLER principal only (it stops the SAME caller from re-entering
+/// this call for any claim, but does nothing for two DIFFERENT claimants
+/// settling two DIFFERENT claims concurrently). `VaultLiquidationGuard` is
+/// keyed on the source vault (`claim.custody_nonce`), so it likewise does not
+/// serialize claims on two DIFFERENT vaults. Cross-claimant / cross-vault
+/// serialization is handled entirely by the separate, canister-wide
+/// `SolSettlementInflightGuard` acquired further down, immediately before the
+/// live-nonce read (see its doc comment for the fan-out race it closes).
+pub async fn settle_sol_claim(claim_id: u64, destination: String) -> Result<String, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    require_sol_production_key()?;
+
+    let claim = match read_state(|s| s.sol_claims.get(&claim_id).cloned()) {
+        Some(c) => c,
+        None => {
+            return Err(ProtocolError::GenericError(
+                "No such SOL claim (already settled or unknown).".to_string(),
+            ))
+        }
+    };
+    if claim.claimant != caller {
+        return Err(ProtocolError::CallerNotOwner);
+    }
+
+    // A quarantined claim may already have been paid under an unexplained
+    // nonce advance. Refuse to sign anything until an admin resolves it.
+    // Factored into a pure helper (no ic_cdk / await) so it is directly unit
+    // testable even though `settle_sol_claim` itself is not (it reads
+    // `ic_cdk::api::caller()` as its first statement — see `sol_p2b_tests`'s
+    // module doc comment).
+    ensure_sol_claim_not_quarantined(claim_id, &claim)?;
+
+    // Design doc §7: the on-curve check is the real trust boundary — an
+    // off-curve destination is a PDA with no private key, and SOL sent there
+    // is destroyed irrecoverably.
+    if !crate::chains::sol::address::is_valid_sol_address(&destination) {
+        return Err(ProtocolError::GenericError(
+            "Invalid SOL destination address (must be a well-formed, on-curve base58 Solana address)."
+                .to_string(),
+        ));
+    }
+
+    // Guards one caller at a time (per-principal), not one claim at a time:
+    // `s.principal_guards` is keyed on `caller` alone, and the operation-name
+    // string ("settle_sol_claim_{claim_id}") passed to `new` is logged but
+    // plays no part in the uniqueness key. Two different callers settling two
+    // different claims both pass this guard concurrently; see
+    // `SolSettlementInflightGuard` below for what actually serializes that.
+    let guard_principal = GuardPrincipal::new(caller, &format!("settle_sol_claim_{}", claim_id))?;
+    // Per-custody-address serialization (mirrors XRP's per-vault sequence
+    // lock): custody_nonce == the source vault id. Still per-vault, not
+    // protocol-wide (two claims on TWO DIFFERENT vaults both pass this too).
+    let _custody_guard = match VaultLiquidationGuard::new(claim.custody_nonce) {
+        Ok(g) => g,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(e);
+        }
+    };
+
+    let nonce_account = match read_state(|s| s.sol_nonce_account.clone()) {
+        Some(addr) => addr,
+        None => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "SOL durable-nonce account is not bootstrapped.".to_string(),
+            ));
+        }
+    };
+
+    let custody_path =
+        crate::chains::sol::ted25519::sol_custody_derivation_path(claim.custody_owner, claim.custody_nonce);
+    let settlement_path = crate::chains::sol::ted25519::sol_settlement_derivation_path();
+
+    let (custody_pk_bytes, custody_address) =
+        match crate::chains::sol::ted25519::derive_sol_address(custody_path.clone()).await {
+            Ok(v) => v,
+            Err(e) => {
+                guard_principal.fail();
+                return Err(ProtocolError::GenericError(format!(
+                    "sol custody derive failed: {e}"
+                )));
+            }
+        };
+    let (settlement_pk_bytes, _settlement_address) =
+        match crate::chains::sol::ted25519::derive_sol_address(settlement_path.clone()).await {
+            Ok(v) => v,
+            Err(e) => {
+                guard_principal.fail();
+                return Err(ProtocolError::GenericError(format!(
+                    "sol settlement derive failed: {e}"
+                )));
+            }
+        };
+
+    // Protocol-wide danger-zone lock (security review fix, 2026-07-24): at
+    // most one `settle_sol_claim` call may be between here and the submit
+    // below, across EVERY claim and EVERY vault. See
+    // `SolSettlementInflightGuard`'s doc comment for the cross-claimant
+    // fan-out race this closes; briefly, every claim shares one durable-nonce
+    // account, so genuine parallelism through this section was always
+    // illusory: Solana's own runtime lands only one signed transaction per
+    // nonce value regardless. This guard just makes the canister's own
+    // bookkeeping (idempotency table, sibling reconciliation, quarantine)
+    // agree with that reality instead of racing it. A second concurrent
+    // caller is turned away here, before it reads the nonce or signs
+    // anything, with a clear retryable error rather than a spurious
+    // quarantine.
+    let _sol_settlement_inflight_guard =
+        match SolSettlementInflightGuard::new(ic_cdk::api::time()) {
+            Ok(g) => g,
+            Err(e) => {
+                guard_principal.fail();
+                return Err(e);
+            }
+        };
+
+    // Single read of the LIVE durable nonce, reused for both the idempotency /
+    // reconciliation decision below AND the transaction we may go on to sign.
+    // Re-reading it a second time immediately before signing would not add any
+    // safety: Solana's own runtime independently re-validates a durable-nonce
+    // transaction's embedded nonce against the CURRENT on-chain value at
+    // inclusion time, so a nonce that goes stale between this read and submit
+    // simply makes the submit a no-op (rejected before execution, recoverable
+    // by a normal retry) rather than a double-pay risk.
+    let live_nonce_hash = match crate::chains::sol::rpc::get_durable_nonce(&nonce_account).await {
+        Ok(h) => h,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "sol get_durable_nonce failed: {e}"
+            )));
+        }
+    };
+    let live_nonce_value = bs58::encode(live_nonce_hash.as_ref()).into_string();
+
+    // Idempotency (design doc §5.3) BEFORE signing anything new.
+    let mut needs_settlement_clear = false;
+    let mut ambiguous_target_nonce: Option<String> = None;
+    if let Some(prev) = claim.settlement.clone() {
+        let status = match crate::chains::sol::rpc::get_transaction(&prev.signature).await {
+            Ok(s) => s,
+            Err(e) => {
+                guard_principal.fail();
+                return Err(ProtocolError::GenericError(format!(
+                    "sol get_transaction failed: {e}"
+                )));
+            }
+        };
+        match sol_settlement_decision(&status, &prev.nonce_value, &live_nonce_value) {
+            SolSettlementDecision::AlreadyPaid => {
+                mutate_state(|s| {
+                    s.sol_claims.remove(&claim_id);
+                });
+                guard_principal.complete();
+                return Ok(prev.signature);
+            }
+            SolSettlementDecision::FailedClearForResign | SolSettlementDecision::SafeToResign => {
+                needs_settlement_clear = true;
+            }
+            SolSettlementDecision::AmbiguousAdvanced => {
+                needs_settlement_clear = true;
+                ambiguous_target_nonce = Some(prev.nonce_value.clone());
+            }
+        }
+    }
+
+    // Design doc §5.2 step 6, run for EVERY settle attempt (not only the
+    // ambiguous case): also blocks signing while an unrelated claim's
+    // settlement still holds the live nonce and could still land.
+    let (blocking, explains) = match reconcile_sol_other_inflight_claims(
+        claim_id,
+        &live_nonce_value,
+        ambiguous_target_nonce.as_deref(),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(e);
+        }
+    };
+    if let Some(blocking_id) = blocking {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(format!(
+            "SOL settlement for claim #{blocking_id} is already in flight on the shared durable \
+             nonce; confirm it before settling another claim."
+        )));
+    }
+    if let Some(target) = ambiguous_target_nonce.as_deref() {
+        if !explains {
+            let reason = format!(
+                "settlement diverged: durable nonce advanced from {target} to {live_nonce_value} \
+                 while the prior signature is NotFound on-ledger and no sibling settlement \
+                 explains the advance"
+            );
+            mutate_state(|s| {
+                quarantine_sol_claim_snapshot(s, claim_id, &reason);
+            });
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "SOL claim #{claim_id} quarantined ({reason}). Refusing to sign to avoid a \
+                 double-pay; manual reconciliation required."
+            )));
+        }
+    }
+    if needs_settlement_clear {
+        if let Some(prev) = claim.settlement.as_ref() {
+            mutate_state(|s| {
+                reconcile_sol_settlement_snapshot(
+                    s,
+                    claim_id,
+                    &prev.signature,
+                    SolSettlementReconciliation::ClearForResign,
+                );
+            });
+        }
+    }
+
+    // Aggregate solvency (design doc §5.2 step 5): re-read live so a
+    // concurrently-settled sibling on the SAME custody address is reflected.
+    let balance = match crate::chains::sol::rpc::get_balance(&custody_address).await {
+        Ok(b) => b,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "sol getBalance failed: {e}"
+            )));
+        }
+    };
+    let rent_exempt = match crate::chains::sol::rpc::get_rent_exempt_minimum().await {
+        Ok(r) => r,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "sol getMinimumBalanceForRentExemption failed: {e}"
+            )));
+        }
+    };
+    let unresolved_claim_lamports = match read_state(|s| {
+        sol_unresolved_claim_lamports_for_custody(s, claim.custody_owner, claim.custody_nonce)
+    }) {
+        Ok(v) => v,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(e);
+        }
+    };
+    if let Err(e) =
+        ensure_sol_claim_aggregate_solvency(balance, rent_exempt, unresolved_claim_lamports)
+    {
+        log!(
+            INFO,
+            "[settle_sol_claim] aggregate solvency rejected claim #{} from {}: {:?}",
+            claim_id,
+            custody_address,
+            e
+        );
+        guard_principal.fail();
+        return Err(e);
+    }
+
+    // Sign (2 signers: settlement key = fee payer/nonce authority, custody key
+    // = transfer source) and locally compute the signature.
+    let destination_bytes = match crate::chains::sol::address::decode_sol_address(&destination) {
+        Ok(b) => b,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "sol destination decode failed: {e}"
+            )));
+        }
+    };
+    let nonce_account_bytes = match crate::chains::sol::address::decode_sol_address(&nonce_account) {
+        Ok(b) => b,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "sol nonce account decode failed: {e}"
+            )));
+        }
+    };
+    let custody_pubkey = solana_pubkey::Pubkey::new_from_array(custody_pk_bytes);
+    let destination_pubkey = solana_pubkey::Pubkey::new_from_array(destination_bytes);
+    let nonce_pubkey = solana_pubkey::Pubkey::new_from_array(nonce_account_bytes);
+    let settlement_pubkey = solana_pubkey::Pubkey::new_from_array(settlement_pk_bytes);
+
+    let (wire_tx, signature) = match crate::chains::sol::adapter::sign_sol_payment_from(
+        custody_path,
+        &custody_pubkey,
+        &destination_pubkey,
+        claim.lamports,
+        &nonce_pubkey,
+        settlement_path,
+        &settlement_pubkey,
+        live_nonce_hash,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(format!(
+                "sol claim sign failed: {e}"
+            )));
+        }
+    };
+
+    // Record the in-flight settlement BEFORE submitting (design doc §5.2 step
+    // 8 — load-bearing for crash safety), so a submit whose outcall errors
+    // after the network already broadcast it is reconciled on a later settle
+    // call rather than double-paid.
+    mutate_state(|s| {
+        if let Some(c) = s.sol_claims.get_mut(&claim_id) {
+            c.settlement = Some(crate::state::SolSettlement {
+                signature: signature.clone(),
+                nonce_value: live_nonce_value.clone(),
+                destination: destination.clone(),
+                submitted_at_ns: ic_cdk::api::time(),
+            });
+        }
+    });
+
+    // Single attempt — never blindly retried (a durable-nonce tx that reached
+    // a node may already have broadcast).
+    if let Err(e) = crate::chains::sol::rpc::send_transaction(&wire_tx).await {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(format!(
+            "sol claim submit failed (call settle again to confirm or retry): {e}"
+        )));
+    }
+
+    guard_principal.complete();
+    Ok(signature)
+}
+
+/// Idempotently bootstrap the native-SOL-collateral rail's durable-nonce
+/// account (design doc §5.1). Developer-gated. Derives the settlement
+/// (fee-payer / nonce-authority) and nonce addresses via THIS rail's own
+/// `chains::sol::ted25519` paths (carrying the `b"collateral"` role tag) and
+/// queries via THIS rail's own cluster-coupled `chains::sol::rpc` — NOT
+/// `chains::solana::tx::bootstrap_nonce_account`, which hardcodes the DORMANT
+/// chain-vault rail's derivation paths (`chains::solana::ted25519::
+/// settlement_derivation_path` / `nonce_derivation_path`, three elements, no
+/// role tag) and its RPC module (hardcoded `SolanaCluster::Devnet`, never
+/// following `chains::sol::config::sol_cluster()`). Reusing it as-is would
+/// derive the WRONG addresses and query the WRONG cluster the moment this
+/// rail is configured for mainnet — see the Phase 2b report for detail.
+///
+/// The PURE, cluster/key-agnostic message-building and signing primitives
+/// (`build_create_nonce_account_message`, `serialize_legacy_message`,
+/// `order_signatures_by_signer`, `assemble_wire_tx_multi`,
+/// `NONCE_ACCOUNT_RENT_LAMPORTS`) ARE reused verbatim from `chains::solana::tx`
+/// — only the derivation/RPC/key layer differs, mirroring exactly what
+/// `chains::sol::adapter::sign_sol_payment_from`'s own doc comment already
+/// does for claim settlement.
+///
+/// `blockhash_override`: the create+initialize tx needs a REAL recent
+/// blockhash (the durable nonce does not exist yet to self-reference).
+/// `getLatestBlockhash` changes every slot and is chronically `#Inconsistent`
+/// under multi-provider `Equality` consensus on a live cluster (see
+/// `chains::sol::rpc::get_latest_blockhash`'s doc comment); the production
+/// path is an operator-supplied override fetched and passed promptly in the
+/// same shell. `None` auto-fetches — reliable only in PocketIC / other
+/// consensus-capable environments.
+///
+/// No production-key gate here (deliberately, mirroring the dormant rail's
+/// own bootstrap): bootstrapping the nonce account against devnet, under the
+/// test key, before flipping to production is a legitimate operational step
+/// (design doc §12 lists key-setting BEFORE bootstrap for exactly this
+/// reason). `register_sol_collateral` (Phase 3) is where the hard
+/// production-key gate belongs.
+pub async fn sol_bootstrap_nonce_account(
+    blockhash_override: Option<solana_message::Hash>,
+) -> Result<String, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    if !read_state(|s| s.developer_principal == caller) {
+        return Err(ProtocolError::GenericError(
+            "Only the developer can bootstrap the SOL nonce account.".to_string(),
+        ));
+    }
+
+    let settlement_path = crate::chains::sol::ted25519::sol_settlement_derivation_path();
+    let (settlement_pk_bytes, _settlement_addr) =
+        crate::chains::sol::ted25519::derive_sol_address(settlement_path.clone())
+            .await
+            .map_err(|e| ProtocolError::GenericError(format!("sol settlement derive failed: {e}")))?;
+    let nonce_path = crate::chains::sol::ted25519::sol_nonce_derivation_path();
+    let (nonce_pk_bytes, nonce_addr) =
+        crate::chains::sol::ted25519::derive_sol_address(nonce_path.clone())
+            .await
+            .map_err(|e| ProtocolError::GenericError(format!("sol nonce derive failed: {e}")))?;
+
+    // Idempotency: if the nonce account already reads back Initialized, we
+    // are done — just make sure `State` reflects it (defensive: covers the
+    // case where a prior bootstrap succeeded on-chain but the state write was
+    // somehow lost, e.g. a pre-upgrade snapshot from before this field existed).
+    if crate::chains::sol::rpc::get_durable_nonce(&nonce_addr).await.is_ok() {
+        mutate_state(|s| {
+            s.sol_nonce_account = Some(nonce_addr.clone());
+        });
+        return Ok(nonce_addr);
+    }
+
+    let settlement = solana_pubkey::Pubkey::new_from_array(settlement_pk_bytes);
+    let nonce = solana_pubkey::Pubkey::new_from_array(nonce_pk_bytes);
+
+    let recent_blockhash = match blockhash_override {
+        Some(bh) => bh,
+        None => crate::chains::sol::rpc::get_latest_blockhash()
+            .await
+            .map_err(|e| ProtocolError::GenericError(format!("sol get_latest_blockhash failed: {e}")))?,
+    };
+
+    let message = crate::chains::solana::tx::build_create_nonce_account_message(
+        &settlement,
+        &nonce,
+        &settlement, // settlement is also the nonce authority
+        crate::chains::solana::tx::NONCE_ACCOUNT_RENT_LAMPORTS,
+        recent_blockhash,
+    );
+    let message_bytes = crate::chains::solana::tx::serialize_legacy_message(&message);
+
+    // Multi-sign: sign the SAME serialized bytes with each required signer's
+    // own path, then order to match account_keys[0..num_required_signatures].
+    let settlement_sig = crate::chains::sol::ted25519::sign_message(message_bytes.clone(), settlement_path)
+        .await
+        .map_err(|e| ProtocolError::GenericError(format!("sol settlement sign failed: {e}")))?;
+    let nonce_sig = crate::chains::sol::ted25519::sign_message(message_bytes.clone(), nonce_path)
+        .await
+        .map_err(|e| ProtocolError::GenericError(format!("sol nonce sign failed: {e}")))?;
+    let settlement_sig: [u8; 64] = settlement_sig.as_slice().try_into().map_err(|_| {
+        ProtocolError::GenericError("sol settlement signature is not 64 bytes".to_string())
+    })?;
+    let nonce_sig: [u8; 64] = nonce_sig
+        .as_slice()
+        .try_into()
+        .map_err(|_| ProtocolError::GenericError("sol nonce signature is not 64 bytes".to_string()))?;
+
+    let signers = [(settlement, settlement_sig), (nonce, nonce_sig)];
+    let ordered = crate::chains::solana::tx::order_signatures_by_signer(&message, &signers)
+        .map_err(ProtocolError::GenericError)?;
+    let wire = crate::chains::solana::tx::assemble_wire_tx_multi(&ordered, &message_bytes);
+
+    crate::chains::sol::rpc::send_transaction(&wire)
+        .await
+        .map_err(|e| ProtocolError::GenericError(format!("sol nonce bootstrap submit failed: {e}")))?;
+
+    mutate_state(|s| {
+        s.sol_nonce_account = Some(nonce_addr.clone());
+    });
+    Ok(nonce_addr)
+}
+
 #[cfg(test)]
 mod xrp_p4_tests {
     use super::*;
@@ -2777,11 +4758,11 @@ mod xrp_p4_tests {
     #[test]
     fn native_xrp_withdraw_and_close_policy_preserves_custody_vault() {
         assert_eq!(
-            withdraw_close_completion_policy(true),
+            withdraw_close_completion_policy(CustodyKind::NativeXrp),
             WithdrawCloseCompletionPolicy::KeepNativeXrpVaultOpen
         );
         assert_eq!(
-            withdraw_close_completion_policy(false),
+            withdraw_close_completion_policy(CustodyKind::IcrcLedger),
             WithdrawCloseCompletionPolicy::CloseVault
         );
     }
@@ -3379,27 +5360,30 @@ pub async fn open_vault_and_borrow(
         collateral_type_opt.unwrap_or_else(|| read_state(|s| s.icp_collateral_type()));
 
     // Look up CollateralConfig; check status is Active
-    let (config_ledger, config_status, min_deposit, is_native_xrp) =
+    let (config_ledger, config_status, min_deposit, is_native_custody) =
         read_state(|s| match s.get_collateral_config(&collateral_type) {
             Some(config) => Ok((
                 config.ledger_canister_id,
                 config.status,
                 config.min_collateral_deposit,
-                config.is_native_xrp(),
+                config.is_native_custody(),
             )),
             None => Err(ProtocolError::GenericError(
                 "Collateral type not supported.".to_string(),
             )),
         })?;
 
-    // P2: native-XRP collateral is custodied on the XRP Ledger (chains::xrp), not
-    // pulled via an ICRC `transfer_from`. Its deposit flow (open-then-verify) is
-    // wired in P3; until then reject opens through this ICRC path so XRP collateral
-    // can never be silently mishandled as an ICRC token.
-    if is_native_xrp {
+    // P2 (extended for SOL): native custody collateral (XRP, SOL) is held on its
+    // own chain, not pulled via an ICRC `transfer_from`. Each has its own
+    // open-then-verify deposit flow (open_xrp_vault / open_sol_vault); reject
+    // opens through this ICRC path so native-custody collateral can never be
+    // silently mishandled as an ICRC token. `is_native_custody()` is fail-closed:
+    // a future custody kind is rejected here automatically.
+    if is_native_custody {
         guard_principal.fail();
         return Err(ProtocolError::GenericError(
-            "Native-XRP collateral uses the XRP deposit flow (not yet enabled).".to_string(),
+            "Native custody collateral uses its own deposit flow, not ICRC transfer_from."
+                .to_string(),
         ));
     }
 
@@ -3531,10 +5515,10 @@ async fn borrow_from_vault_internal(
 
     // Accrue interest on this vault before borrowing so CR check uses up-to-date debt.
     let now = ic_cdk::api::time();
-    reject_active_xrp_sp_absorb_preflight(arg.vault_id, now)?;
+    reject_active_native_sp_absorb_preflight(arg.vault_id, now)?;
     mutate_state(|s| s.accrue_single_vault(arg.vault_id, now));
 
-    let (vault, collateral_price, config_decimals, is_native_xrp) =
+    let (vault, collateral_price, config_decimals, is_native_xrp, is_native_sol) =
         read_state(|s| match s.vault_id_to_vaults.get(&arg.vault_id) {
             Some(vault) => {
                 let price = s
@@ -3548,6 +5532,7 @@ async fn borrow_from_vault_internal(
                     price,
                     config.decimals,
                     config.is_native_xrp(),
+                    config.is_native_sol(),
                 ))
             }
             None => Err("Vault not found. Please check the vault ID."),
@@ -3567,6 +5552,19 @@ async fn borrow_from_vault_internal(
     }
     if is_native_xrp {
         require_xrp_production_key()?;
+    }
+    // SOL companion to the XRP gate above (security review fix, 2026-07-24).
+    // Redundant by design: no exploit is currently reachable through this
+    // path, because `set_sol_schnorr_key_name` already refuses to change the
+    // key once `sol_has_key_bound_state()` reports any SOL custody state
+    // exists (a registered SOL collateral config, a pending deposit, a claim,
+    // or an open SOL vault), and a vault cannot reach this function at all
+    // without a registered SOL collateral config. This gate is defense in
+    // depth against a future regression in `sol_has_key_bound_state()` (or a
+    // new code path that reaches SOL vaults before that check applies), kept
+    // deliberately minimal to match.
+    if is_native_sol {
+        require_sol_production_key()?;
     }
 
     if caller != vault.owner {
@@ -3739,7 +5737,7 @@ async fn repay_to_vault_internal(
 
     // Accrue interest before repayment so the correct debt balance is used.
     let now = ic_cdk::api::time();
-    reject_active_xrp_sp_absorb_preflight(arg.vault_id, now)?;
+    reject_active_native_sp_absorb_preflight(arg.vault_id, now)?;
     mutate_state(|s| s.accrue_single_vault(arg.vault_id, now));
 
     let vault = read_state(|s| s.vault_id_to_vaults.get(&arg.vault_id).cloned())
@@ -3861,7 +5859,7 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
     }
 
     let now = ic_cdk::api::time();
-    if let Err(e) = reject_active_xrp_sp_absorb_preflight(arg.vault_id, now) {
+    if let Err(e) = reject_active_native_sp_absorb_preflight(arg.vault_id, now) {
         guard_principal.fail();
         return Err(e);
     }
@@ -4023,12 +6021,12 @@ pub async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
     let amount: ICP = arg.amount.into();
 
     let now = ic_cdk::api::time();
-    if let Err(e) = reject_active_xrp_sp_absorb_preflight(arg.vault_id, now) {
+    if let Err(e) = reject_active_native_sp_absorb_preflight(arg.vault_id, now) {
         guard_principal.fail();
         return Err(e);
     }
 
-    let (vault, config_ledger, min_deposit, is_native_xrp) =
+    let (vault, config_ledger, min_deposit, is_native_custody) =
         match read_state(|s| match s.vault_id_to_vaults.get(&arg.vault_id) {
             Some(v) => {
                 let config = s
@@ -4038,7 +6036,7 @@ pub async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
                     v.clone(),
                     config.ledger_canister_id,
                     config.min_collateral_deposit,
-                    config.is_native_xrp(),
+                    config.is_native_custody(),
                 ))
             }
             None => Err("Vault not found"),
@@ -4050,13 +6048,16 @@ pub async fn add_margin_to_vault(arg: VaultArg) -> Result<u64, ProtocolError> {
             }
         };
 
-    // P2: native-XRP collateral is not custodied via ICRC; its add-collateral flow
-    // is wired with the XRP deposit path (P3). Reject so XRP collateral can never be
-    // pulled as an ICRC token. (Latent until P5 enables XRP registration.)
-    if is_native_xrp {
+    // P2 (extended for SOL): native custody collateral (XRP, SOL) is not custodied
+    // via ICRC; each has its own deposit path (open_xrp_vault / open_sol_vault),
+    // and design doc §4.2 explicitly excludes SOL from top-ups (no double-credit
+    // surface). Reject so native-custody collateral can never be pulled as an ICRC
+    // token. `is_native_custody()` is fail-closed for any future custody kind too.
+    if is_native_custody {
         guard_principal.fail();
         return Err(ProtocolError::GenericError(
-            "Native-XRP collateral uses the XRP deposit flow (not yet enabled).".to_string(),
+            "Native custody collateral uses its own deposit flow, not ICRC transfer_from."
+                .to_string(),
         ));
     }
 
@@ -4141,26 +6142,29 @@ pub async fn open_vault_with_deposit(
         collateral_type_opt.unwrap_or_else(|| read_state(|s| s.icp_collateral_type()));
 
     // Look up CollateralConfig
-    let (config_ledger, config_status, config_fee, min_deposit, is_native_xrp) =
+    let (config_ledger, config_status, config_fee, min_deposit, is_native_custody) =
         read_state(|s| match s.get_collateral_config(&collateral_type) {
             Some(config) => Ok((
                 config.ledger_canister_id,
                 config.status,
                 config.ledger_fee,
                 config.min_collateral_deposit,
-                config.is_native_xrp(),
+                config.is_native_custody(),
             )),
             None => Err(ProtocolError::GenericError(
                 "Collateral type not supported.".to_string(),
             )),
         })?;
 
-    // P2: native-XRP collateral is custodied on the XRP Ledger (chains::xrp), not
-    // swept from an ICRC deposit subaccount. Reject until the XRP deposit flow (P3).
-    if is_native_xrp {
+    // P2 (extended for SOL): native custody collateral (XRP, SOL) is held on its
+    // own chain, not swept from an ICRC deposit subaccount. Reject through this
+    // push-deposit path; `is_native_custody()` is fail-closed for any future
+    // custody kind too.
+    if is_native_custody {
         guard_principal.fail();
         return Err(ProtocolError::GenericError(
-            "Native-XRP collateral uses the XRP deposit flow (not yet enabled).".to_string(),
+            "Native custody collateral uses its own deposit flow, not ICRC transfer_from."
+                .to_string(),
         ));
     }
 
@@ -4273,12 +6277,12 @@ pub async fn add_margin_with_deposit(vault_id: u64) -> Result<u64, ProtocolError
     };
 
     let now = ic_cdk::api::time();
-    if let Err(e) = reject_active_xrp_sp_absorb_preflight(vault_id, now) {
+    if let Err(e) = reject_active_native_sp_absorb_preflight(vault_id, now) {
         guard_principal.fail();
         return Err(e);
     }
 
-    let (vault, config_ledger, config_fee, min_deposit, is_native_xrp) =
+    let (vault, config_ledger, config_fee, min_deposit, is_native_custody) =
         match read_state(|s| match s.vault_id_to_vaults.get(&vault_id) {
             Some(v) => {
                 let config = s
@@ -4289,7 +6293,7 @@ pub async fn add_margin_with_deposit(vault_id: u64) -> Result<u64, ProtocolError
                     config.ledger_canister_id,
                     config.ledger_fee,
                     config.min_collateral_deposit,
-                    config.is_native_xrp(),
+                    config.is_native_custody(),
                 ))
             }
             None => Err("Vault not found"),
@@ -4301,13 +6305,16 @@ pub async fn add_margin_with_deposit(vault_id: u64) -> Result<u64, ProtocolError
             }
         };
 
-    // P2: native-XRP collateral is not custodied via ICRC; its add-collateral flow
-    // is wired with the XRP deposit path (P3). Reject so XRP collateral can never be
-    // swept as an ICRC token. (Latent until P5 enables XRP registration.)
-    if is_native_xrp {
+    // P2 (extended for SOL): native custody collateral (XRP, SOL) is not custodied
+    // via ICRC; each has its own deposit path, and design doc §4.2 explicitly
+    // excludes SOL from top-ups. Reject so native-custody collateral can never be
+    // swept as an ICRC token. `is_native_custody()` is fail-closed for any future
+    // custody kind too.
+    if is_native_custody {
         guard_principal.fail();
         return Err(ProtocolError::GenericError(
-            "Native-XRP collateral uses the XRP deposit flow (not yet enabled).".to_string(),
+            "Native custody collateral uses its own deposit flow, not ICRC transfer_from."
+                .to_string(),
         ));
     }
 
@@ -4370,13 +6377,22 @@ pub async fn add_margin_with_deposit(vault_id: u64) -> Result<u64, ProtocolError
 enum WithdrawCloseCompletionPolicy {
     CloseVault,
     KeepNativeXrpVaultOpen,
+    /// SOL parity with `KeepNativeXrpVaultOpen`: the custody account stays
+    /// permanently rent-exempt rather than being swept to zero (design doc
+    /// §4.1), so the same "stranded reserve" reasoning that keeps a
+    /// native-XRP vault open applies here.
+    KeepNativeSolVaultOpen,
 }
 
-fn withdraw_close_completion_policy(is_native_xrp: bool) -> WithdrawCloseCompletionPolicy {
-    if is_native_xrp {
-        WithdrawCloseCompletionPolicy::KeepNativeXrpVaultOpen
-    } else {
-        WithdrawCloseCompletionPolicy::CloseVault
+/// Exhaustive match on `custody()` (no wildcard arm): a future custody kind
+/// must get an explicit policy decision here rather than silently defaulting
+/// to `CloseVault` (which would be wrong for any rail with a stranded/locked
+/// on-chain reserve, as both XRP and SOL have).
+fn withdraw_close_completion_policy(custody: CustodyKind) -> WithdrawCloseCompletionPolicy {
+    match custody {
+        CustodyKind::IcrcLedger => WithdrawCloseCompletionPolicy::CloseVault,
+        CustodyKind::NativeXrp => WithdrawCloseCompletionPolicy::KeepNativeXrpVaultOpen,
+        CustodyKind::NativeSol => WithdrawCloseCompletionPolicy::KeepNativeSolVaultOpen,
     }
 }
 
@@ -4385,12 +6401,18 @@ fn native_xrp_reserve_locked_message() -> String {
         .to_string()
 }
 
+/// SOL analogue of `native_xrp_reserve_locked_message`.
+fn native_sol_reserve_locked_message() -> String {
+    "Native-SOL vaults stay open because the custody account's rent-exempt reserve remains locked on Solana."
+        .to_string()
+}
+
 pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
     let caller = ic_cdk::caller();
     let _guard_principal = GuardPrincipal::new(caller, &format!("close_vault_{}", vault_id))?;
     // AR-B-003: per-vault op lock; see guard.rs::VaultLiquidationGuard.
     let _vault_op_guard = VaultLiquidationGuard::new(vault_id)?;
-    reject_active_xrp_sp_absorb_preflight(vault_id, ic_cdk::api::time())?;
+    reject_active_native_sp_absorb_preflight(vault_id, ic_cdk::api::time())?;
 
     // Check rate limits first
     mutate_state(|s| s.check_close_vault_rate_limit(caller))?;
@@ -4500,23 +6522,35 @@ pub async fn close_vault(vault_id: u64) -> Result<Option<u64>, ProtocolError> {
         ));
     }
 
-    let is_native_xrp = read_state(|s| {
+    let custody = read_state(|s| {
         s.get_collateral_config(&vault.collateral_type)
-            .map(|config| config.is_native_xrp())
-            .unwrap_or(false)
+            .map(|config| config.custody())
+            .unwrap_or(CustodyKind::IcrcLedger)
     });
-    if withdraw_close_completion_policy(is_native_xrp)
-        == WithdrawCloseCompletionPolicy::KeepNativeXrpVaultOpen
-    {
-        mutate_state(|s| s.complete_close_vault_request());
-        log!(
-            INFO,
-            "[close_vault] Keeping native-XRP vault #{} open because the XRPL reserve remains locked",
-            vault_id
-        );
-        return Err(ProtocolError::GenericError(
-            native_xrp_reserve_locked_message(),
-        ));
+    match withdraw_close_completion_policy(custody) {
+        WithdrawCloseCompletionPolicy::KeepNativeXrpVaultOpen => {
+            mutate_state(|s| s.complete_close_vault_request());
+            log!(
+                INFO,
+                "[close_vault] Keeping native-XRP vault #{} open because the XRPL reserve remains locked",
+                vault_id
+            );
+            return Err(ProtocolError::GenericError(
+                native_xrp_reserve_locked_message(),
+            ));
+        }
+        WithdrawCloseCompletionPolicy::KeepNativeSolVaultOpen => {
+            mutate_state(|s| s.complete_close_vault_request());
+            log!(
+                INFO,
+                "[close_vault] Keeping native-SOL vault #{} open because the Solana rent-exempt reserve remains locked",
+                vault_id
+            );
+            return Err(ProtocolError::GenericError(
+                native_sol_reserve_locked_message(),
+            ));
+        }
+        WithdrawCloseCompletionPolicy::CloseVault => {}
     }
 
     // Simply close the vault - no transfers needed
@@ -4561,7 +6595,7 @@ pub async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
         GuardPrincipal::new(caller, &format!("withdraw_collateral_{}", vault_id))?;
     // AR-B-003: per-vault op lock; see guard.rs::VaultLiquidationGuard.
     let _vault_op_guard = VaultLiquidationGuard::new(vault_id)?;
-    reject_active_xrp_sp_absorb_preflight(vault_id, ic_cdk::api::time())?;
+    reject_active_native_sp_absorb_preflight(vault_id, ic_cdk::api::time())?;
 
     log!(
         INFO,
@@ -4627,8 +6661,8 @@ pub async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
         ));
     }
 
-    // Look up per-collateral config (incl. custody kind for P4 native-XRP routing).
-    let (ledger_canister_id, ledger_fee, is_native_xrp) =
+    // Look up per-collateral config (incl. custody kind for native custody routing).
+    let (ledger_canister_id, ledger_fee, custody) =
         read_state(|s| {
             let config = s.get_collateral_config(&vault.collateral_type).ok_or(
                 ProtocolError::GenericError("Collateral type not configured".to_string()),
@@ -4636,7 +6670,7 @@ pub async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
             Ok::<_, ProtocolError>((
                 config.ledger_canister_id,
                 config.ledger_fee,
-                config.is_native_xrp(),
+                config.custody(),
             ))
         })?;
 
@@ -4658,30 +6692,57 @@ pub async fn withdraw_collateral(vault_id: u64) -> Result<u64, ProtocolError> {
         state.reindex_vault_cr(vault_id);
     });
 
-    // P4: native-XRP collateral leaves the vault into an XrpClaim (settled later via
-    // settle_xrp_claim, signed from the vault's custody address) instead of an ICRC
-    // transfer. Collateral is already zeroed above; the XRPL fee is taken at settle
-    // time (claimant-bears-fee), so the full amount becomes the claim.
-    if is_native_xrp {
-        let now_ns = ic_cdk::api::time();
-        let claim_id = mutate_state(|s| {
-            crate::event::record_collateral_withdrawn(s, vault_id, amount_to_transfer, 0);
-            record_xrp_claim(
-                s,
-                caller,
-                caller,
+    // P4 (extended for SOL): native custody collateral leaves the vault into a
+    // claim (settled later via settle_xrp_claim / settle_sol_claim, signed from
+    // the vault's custody address) instead of an ICRC transfer. Collateral is
+    // already zeroed above; the network fee is taken at settle time (claimant-
+    // bears-fee), so the full amount becomes the claim. Exhaustive match on
+    // `custody()`: a future custody kind is a compile error here, not a silent
+    // fall-through into the ICRC transfer below.
+    match custody {
+        CustodyKind::NativeXrp => {
+            let now_ns = ic_cdk::api::time();
+            let claim_id = mutate_state(|s| {
+                crate::event::record_collateral_withdrawn(s, vault_id, amount_to_transfer, 0);
+                record_xrp_claim(
+                    s,
+                    caller,
+                    caller,
+                    vault_id,
+                    amount_to_transfer.to_u64(),
+                    now_ns,
+                )
+            });
+            log!(
+                INFO,
+                "[withdraw_collateral] vault #{} native-XRP collateral -> XRP claim #{}",
                 vault_id,
-                amount_to_transfer.to_u64(),
-                now_ns,
-            )
-        });
-        log!(
-            INFO,
-            "[withdraw_collateral] vault #{} native-XRP collateral -> XRP claim #{}",
-            vault_id,
-            claim_id
-        );
-        return Ok(claim_id);
+                claim_id
+            );
+            return Ok(claim_id);
+        }
+        CustodyKind::NativeSol => {
+            let now_ns = ic_cdk::api::time();
+            let claim_id = mutate_state(|s| {
+                crate::event::record_collateral_withdrawn(s, vault_id, amount_to_transfer, 0);
+                record_sol_claim(
+                    s,
+                    caller,
+                    caller,
+                    vault_id,
+                    amount_to_transfer.to_u64(),
+                    now_ns,
+                )
+            });
+            log!(
+                INFO,
+                "[withdraw_collateral] vault #{} native-SOL collateral -> SOL claim #{}",
+                vault_id,
+                claim_id
+            );
+            return Ok(claim_id);
+        }
+        CustodyKind::IcrcLedger => {}
     }
 
     // Make the collateral transfer with appropriate fee deduction
@@ -4759,7 +6820,7 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
     // `repay_to_vault` entry points. `accrue_single_vault` is a no-op when
     // the vault has no debt or when the elapsed window is zero.
     let now = ic_cdk::api::time();
-    reject_active_xrp_sp_absorb_preflight(vault_id, now)?;
+    reject_active_native_sp_absorb_preflight(vault_id, now)?;
     mutate_state(|s| s.accrue_single_vault(vault_id, now));
 
     // Read vault, per-collateral price + config from state
@@ -4770,7 +6831,7 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
         ledger_canister_id,
         ledger_fee,
         min_deposit,
-        is_native_xrp,
+        custody,
     ) = match read_state(|s| match s.vault_id_to_vaults.get(&vault_id) {
         Some(vault) => {
             let price = s
@@ -4786,7 +6847,7 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
                 config.ledger_canister_id,
                 config.ledger_fee,
                 config.min_collateral_deposit,
-                config.is_native_xrp(),
+                config.custody(),
             ))
         }
         None => Err("Vault not found. Please check the vault ID."),
@@ -4909,29 +6970,54 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
     // Note: margin is reduced in record_partial_collateral_withdrawn (via remove_margin_from_vault)
     // after the transfer succeeds. Do NOT also subtract here — that would double-deduct.
 
-    // P4: native-XRP collateral leaves into an XrpClaim instead of an ICRC transfer.
-    // Reduce the vault collateral (same as the ICRC success path) and record the
-    // claim; the full withdraw_amount becomes the claim (XRPL fee taken at settle).
-    if is_native_xrp {
-        let now_ns = ic_cdk::api::time();
-        let claim_id = mutate_state(|s| {
-            crate::event::record_partial_collateral_withdrawn(s, vault_id, withdraw_amount, 0);
-            record_xrp_claim(
-                s,
-                caller,
-                caller,
+    // P4 (extended for SOL): native custody collateral leaves into a claim
+    // instead of an ICRC transfer. Reduce the vault collateral (same as the
+    // ICRC success path) and record the claim; the full withdraw_amount becomes
+    // the claim (network fee taken at settle). Exhaustive match on `custody()`.
+    match custody {
+        CustodyKind::NativeXrp => {
+            let now_ns = ic_cdk::api::time();
+            let claim_id = mutate_state(|s| {
+                crate::event::record_partial_collateral_withdrawn(s, vault_id, withdraw_amount, 0);
+                record_xrp_claim(
+                    s,
+                    caller,
+                    caller,
+                    vault_id,
+                    withdraw_amount.to_u64(),
+                    now_ns,
+                )
+            });
+            log!(
+                INFO,
+                "[withdraw_partial_collateral] vault #{} native-XRP collateral -> XRP claim #{}",
                 vault_id,
-                withdraw_amount.to_u64(),
-                now_ns,
-            )
-        });
-        log!(
-            INFO,
-            "[withdraw_partial_collateral] vault #{} native-XRP collateral -> XRP claim #{}",
-            vault_id,
-            claim_id
-        );
-        return Ok(claim_id);
+                claim_id
+            );
+            return Ok(claim_id);
+        }
+        CustodyKind::NativeSol => {
+            let now_ns = ic_cdk::api::time();
+            let claim_id = mutate_state(|s| {
+                crate::event::record_partial_collateral_withdrawn(s, vault_id, withdraw_amount, 0);
+                record_sol_claim(
+                    s,
+                    caller,
+                    caller,
+                    vault_id,
+                    withdraw_amount.to_u64(),
+                    now_ns,
+                )
+            });
+            log!(
+                INFO,
+                "[withdraw_partial_collateral] vault #{} native-SOL collateral -> SOL claim #{}",
+                vault_id,
+                claim_id
+            );
+            return Ok(claim_id);
+        }
+        CustodyKind::IcrcLedger => {}
     }
 
     let fee = ICP::from(ledger_fee);
@@ -5004,7 +7090,7 @@ async fn withdraw_and_close_vault_internal(
         vault_id,
         caller
     );
-    reject_active_xrp_sp_absorb_preflight(vault_id, ic_cdk::api::time())?;
+    reject_active_native_sp_absorb_preflight(vault_id, ic_cdk::api::time())?;
 
     // Check if the vault exists first
     let vault = read_state(|s| {
@@ -5072,7 +7158,7 @@ async fn withdraw_and_close_vault_internal(
     }
 
     // Look up per-collateral config
-    let (ledger_canister_id, ledger_fee, is_native_xrp) =
+    let (ledger_canister_id, ledger_fee, custody) =
         read_state(|s| {
             let config = s.get_collateral_config(&vault.collateral_type).ok_or(
                 ProtocolError::GenericError("Collateral type not configured".to_string()),
@@ -5080,7 +7166,7 @@ async fn withdraw_and_close_vault_internal(
             Ok::<_, ProtocolError>((
                 config.ledger_canister_id,
                 config.ledger_fee,
-                config.is_native_xrp(),
+                config.custody(),
             ))
         })?;
 
@@ -5105,89 +7191,116 @@ async fn withdraw_and_close_vault_internal(
             state.reindex_vault_cr(vault_id);
         });
 
-        // P4: native-XRP collateral leaves into an XrpClaim, not an ICRC transfer.
-        if is_native_xrp {
-            let now_ns = ic_cdk::api::time();
-            let claim_id = mutate_state(|s| {
-                crate::event::record_collateral_withdrawn(s, vault_id, amount_to_transfer, 0);
-                record_xrp_claim(
-                    s,
-                    caller,
-                    caller,
-                    vault_id,
-                    amount_to_transfer.to_u64(),
-                    now_ns,
-                )
-            });
-            log!(
-                INFO,
-                "[withdraw_and_close] vault #{} native-XRP collateral -> XRP claim #{}",
-                vault_id,
-                claim_id
-            );
-            block_index = Some(claim_id);
-        } else {
-            // Make the collateral transfer with appropriate fee deduction
-            let fee = ICP::from(ledger_fee);
-            let transfer_amount = amount_to_transfer - fee;
-
-            log!(
-                INFO,
-                "[withdraw_and_close] Transferring {} (after fee deduction) to {}",
-                transfer_amount,
-                caller
-            );
-
-            match management::transfer_collateral(
-                transfer_amount.to_u64(),
-                caller,
-                ledger_canister_id,
-            )
-            .await
-            {
-                Ok(idx) => {
-                    // Record the withdrawal event
-                    mutate_state(|s| {
-                        crate::event::record_collateral_withdrawn(
-                            s,
-                            vault_id,
-                            amount_to_transfer,
-                            idx,
-                        )
-                    });
-
-                    log!(
+        // P4 (extended for SOL): native custody collateral leaves into a claim,
+        // not an ICRC transfer. Exhaustive match on `custody()`: a future custody
+        // kind is a compile error here, not a silent fall-through into the ICRC
+        // transfer path.
+        match custody {
+            CustodyKind::NativeXrp => {
+                let now_ns = ic_cdk::api::time();
+                let claim_id = mutate_state(|s| {
+                    crate::event::record_collateral_withdrawn(s, vault_id, amount_to_transfer, 0);
+                    record_xrp_claim(
+                        s,
+                        caller,
+                        caller,
+                        vault_id,
+                        amount_to_transfer.to_u64(),
+                        now_ns,
+                    )
+                });
+                log!(
                     INFO,
-                    "[withdraw_and_close] Successfully withdrew {} from vault #{}, block_index: {}",
-                    amount_to_transfer,
+                    "[withdraw_and_close] vault #{} native-XRP collateral -> XRP claim #{}",
                     vault_id,
-                    idx
+                    claim_id
+                );
+                block_index = Some(claim_id);
+            }
+            CustodyKind::NativeSol => {
+                let now_ns = ic_cdk::api::time();
+                let claim_id = mutate_state(|s| {
+                    crate::event::record_collateral_withdrawn(s, vault_id, amount_to_transfer, 0);
+                    record_sol_claim(
+                        s,
+                        caller,
+                        caller,
+                        vault_id,
+                        amount_to_transfer.to_u64(),
+                        now_ns,
+                    )
+                });
+                log!(
+                    INFO,
+                    "[withdraw_and_close] vault #{} native-SOL collateral -> SOL claim #{}",
+                    vault_id,
+                    claim_id
+                );
+                block_index = Some(claim_id);
+            }
+            CustodyKind::IcrcLedger => {
+                // Make the collateral transfer with appropriate fee deduction
+                let fee = ICP::from(ledger_fee);
+                let transfer_amount = amount_to_transfer - fee;
+
+                log!(
+                    INFO,
+                    "[withdraw_and_close] Transferring {} (after fee deduction) to {}",
+                    transfer_amount,
+                    caller
                 );
 
-                    block_index = Some(idx);
-                }
-                Err(error) => {
-                    // CRITICAL: If the transfer fails, restore the collateral and exit WITHOUT closing the vault
-                    mutate_state(|state| {
-                        if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
-                            vault.collateral_amount = amount_to_transfer.to_u64();
-                        }
-                        // Wave-8b LIQ-002: rollback restores collateral → re-key.
-                        state.reindex_vault_cr(vault_id);
-                    });
+                match management::transfer_collateral(
+                    transfer_amount.to_u64(),
+                    caller,
+                    ledger_canister_id,
+                )
+                .await
+                {
+                    Ok(idx) => {
+                        // Record the withdrawal event
+                        mutate_state(|s| {
+                            crate::event::record_collateral_withdrawn(
+                                s,
+                                vault_id,
+                                amount_to_transfer,
+                                idx,
+                            )
+                        });
 
-                    log!(
-                        DEBUG,
-                        "[withdraw_and_close] Failed to transfer {} to {}, error: {}",
-                        transfer_amount,
-                        caller,
-                        error
+                        log!(
+                        INFO,
+                        "[withdraw_and_close] Successfully withdrew {} from vault #{}, block_index: {}",
+                        amount_to_transfer,
+                        vault_id,
+                        idx
                     );
 
-                    return Err(ProtocolError::TransferError(error));
+                        block_index = Some(idx);
+                    }
+                    Err(error) => {
+                        // CRITICAL: If the transfer fails, restore the collateral and exit WITHOUT closing the vault
+                        mutate_state(|state| {
+                            if let Some(vault) = state.vault_id_to_vaults.get_mut(&vault_id) {
+                                vault.collateral_amount = amount_to_transfer.to_u64();
+                            }
+                            // Wave-8b LIQ-002: rollback restores collateral → re-key.
+                            state.reindex_vault_cr(vault_id);
+                        });
+
+                        log!(
+                            DEBUG,
+                            "[withdraw_and_close] Failed to transfer {} to {}, error: {}",
+                            transfer_amount,
+                            caller,
+                            error
+                        );
+
+                        return Err(ProtocolError::TransferError(error));
+                    }
                 }
-            }
-        } // end native-XRP `else` (the ICRC transfer path)
+            } // end IcrcLedger (the ICRC transfer path)
+        }
     } else {
         log!(
             INFO,
@@ -5196,15 +7309,24 @@ async fn withdraw_and_close_vault_internal(
         );
     };
 
-    if withdraw_close_completion_policy(is_native_xrp)
-        == WithdrawCloseCompletionPolicy::KeepNativeXrpVaultOpen
-    {
-        log!(
-            INFO,
-            "[withdraw_and_close] Keeping native-XRP vault #{} open because the XRPL reserve remains locked",
-            vault_id
-        );
-        return Ok(block_index);
+    match withdraw_close_completion_policy(custody) {
+        WithdrawCloseCompletionPolicy::KeepNativeXrpVaultOpen => {
+            log!(
+                INFO,
+                "[withdraw_and_close] Keeping native-XRP vault #{} open because the XRPL reserve remains locked",
+                vault_id
+            );
+            return Ok(block_index);
+        }
+        WithdrawCloseCompletionPolicy::KeepNativeSolVaultOpen => {
+            log!(
+                INFO,
+                "[withdraw_and_close] Keeping native-SOL vault #{} open because the Solana rent-exempt reserve remains locked",
+                vault_id
+            );
+            return Ok(block_index);
+        }
+        WithdrawCloseCompletionPolicy::CloseVault => {}
     }
 
     // Now close the vault - only if we've successfully transferred any funds
@@ -5335,7 +7457,7 @@ pub async fn liquidate_vault_partial(
                                          // BK-001/002: per-vault lock so two different callers can't race this vault
                                          // and both be paid the full pre-state collateral from the shared pool.
     let _vault_liq_guard = VaultLiquidationGuard::new(vault_id)?;
-    if let Err(e) = reject_active_xrp_sp_absorb_preflight(vault_id, ic_cdk::api::time()) {
+    if let Err(e) = reject_active_native_sp_absorb_preflight(vault_id, ic_cdk::api::time()) {
         guard_principal.fail();
         return Err(e);
     }
@@ -5633,35 +7755,15 @@ pub async fn liquidate_vault_partial(
         });
     }
 
-    // Send protocol's liquidation fee cut to treasury (fire-and-forget)
-    if protocol_cut > 0 {
-        if vault.collateral_type == crate::state::xrp_collateral_principal() {
-            // P5: native-XRP protocol fee -> a developer-settleable XrpClaim (the
-            // ICRC treasury transfer cannot target the synthetic XRP ledger). Keyed
-            // by collateral_type (not a vault lookup, since the vault may already be
-            // drained/removed by cleanup_if_drained above).
-            let dev = read_state(|s| s.developer_principal);
-            let now_ns = ic_cdk::api::time();
-            mutate_state(|s| {
-                record_xrp_claim(
-                    s,
-                    dev,
-                    vault.owner,
-                    vault.vault_id,
-                    protocol_cut.to_u64().unwrap_or(0),
-                    now_ns,
-                );
-            });
-        } else {
-            let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
-            crate::treasury::send_liquidation_fee_to_treasury(
-                protocol_cut,
-                vault.collateral_type,
-                asset_type,
-            )
-            .await;
-        }
-    }
+    // Send protocol's liquidation fee cut to treasury (fire-and-forget). ICRC ->
+    // treasury; native custody (XRP, SOL) -> a developer-settleable claim.
+    route_protocol_liquidation_fee(
+        protocol_cut,
+        vault.collateral_type,
+        vault.owner,
+        vault.vault_id,
+    )
+    .await;
 
     // Step 4: Process transfer (same as complete liquidation)
     match try_process_pending_transfers_immediate(vault_id).await {
@@ -5727,7 +7829,7 @@ pub async fn liquidate_vault_partial_with_stable(
         GuardPrincipal::new(caller, &format!("liquidate_vault_stable_{}", vault_id))?;
     reject_if_bot_processing(vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault
     let _vault_liq_guard = VaultLiquidationGuard::new(vault_id)?; // BK-001/002 per-vault lock
-    if let Err(e) = reject_active_xrp_sp_absorb_preflight(vault_id, ic_cdk::api::time()) {
+    if let Err(e) = reject_active_native_sp_absorb_preflight(vault_id, ic_cdk::api::time()) {
         guard_principal.fail();
         return Err(e);
     }
@@ -6070,35 +8172,15 @@ pub async fn liquidate_vault_partial_with_stable(
         }
     }
 
-    // Send protocol's liquidation fee cut to treasury (fire-and-forget)
-    if protocol_cut > 0 {
-        if vault.collateral_type == crate::state::xrp_collateral_principal() {
-            // P5: native-XRP protocol fee -> a developer-settleable XrpClaim (the
-            // ICRC treasury transfer cannot target the synthetic XRP ledger). Keyed
-            // by collateral_type (not a vault lookup, since the vault may already be
-            // drained/removed by cleanup_if_drained above).
-            let dev = read_state(|s| s.developer_principal);
-            let now_ns = ic_cdk::api::time();
-            mutate_state(|s| {
-                record_xrp_claim(
-                    s,
-                    dev,
-                    vault.owner,
-                    vault.vault_id,
-                    protocol_cut.to_u64().unwrap_or(0),
-                    now_ns,
-                );
-            });
-        } else {
-            let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
-            crate::treasury::send_liquidation_fee_to_treasury(
-                protocol_cut,
-                vault.collateral_type,
-                asset_type,
-            )
-            .await;
-        }
-    }
+    // Send protocol's liquidation fee cut to treasury (fire-and-forget). ICRC ->
+    // treasury; native custody (XRP, SOL) -> a developer-settleable claim.
+    route_protocol_liquidation_fee(
+        protocol_cut,
+        vault.collateral_type,
+        vault.owner,
+        vault.vault_id,
+    )
+    .await;
 
     // Step 4: Process transfer
     match try_process_pending_transfers_immediate(vault_id).await {
@@ -6198,22 +8280,40 @@ pub async fn liquidate_vault_debt_already_burned(
         ));
     }
 
-    // Defense-in-depth: native-XRP collateral can NEVER be liquidated via the SP
-    // write-down path. This path proof-verifies + settles against the icUSD/3pool
-    // ledger, but the seized collateral here is XRP held on XRPL. The SP cannot
-    // settle that, so a write-down would strand the seized XRP (it never becomes
-    // an `XrpClaim`) and burn SP depositors. Native-XRP is liquidated only via the
-    // manual paths (`liquidate_vault` / `liquidate_vault_partial` /
-    // `partial_liquidate_vault` / `liquidate_vault_partial_with_stable`), which
-    // route collateral into an `XrpClaim`. The two `main.rs` entry points are the
-    // first line of defense; this in-function reject is the backstop so any future
-    // third caller (or a refactor that drops the caller-side check) cannot reach
-    // the write-down. Placed before `GuardPrincipal::new` so it returns without
-    // touching any guard/state (and before any `ic_cdk::api::time()` call).
-    if vault_is_native_xrp(vault_id) {
-        return Err(ProtocolError::GenericError(
-            "Native-XRP collateral cannot be liquidated via the SP write-down path".to_string(),
-        ));
+    // Defense-in-depth: native custody collateral (XRP, SOL) can NEVER be
+    // liquidated via the SP write-down path. This path proof-verifies + settles
+    // against the icUSD/3pool ledger, but the seized collateral here is held on a
+    // foreign chain. The SP cannot settle that, so a write-down would strand the
+    // seized collateral (it never becomes an XrpClaim / SolClaim) and burn SP
+    // depositors. Native custody is liquidated only via the manual paths
+    // (`liquidate_vault` / `liquidate_vault_partial` / `partial_liquidate_vault` /
+    // `liquidate_vault_partial_with_stable`), which route collateral into a claim.
+    // The `main.rs` entry points are the first line of defense; this in-function
+    // reject is the backstop so any future third caller (or a refactor that drops
+    // the caller-side check) cannot reach the write-down. Placed before
+    // `GuardPrincipal::new` so it returns without touching any guard/state (and
+    // before any `ic_cdk::api::time()` call). Matched on `custody()` (not the
+    // fail-closed `is_native_custody()` bool) so the per-asset message is exact
+    // for XRP (unchanged) and SOL, while `Some(IcrcLedger) | None` is the only
+    // fall-through arm — a future `CustodyKind` variant is a compile error here,
+    // not a silent pass-through into the write-down.
+    match read_state(|s| {
+        s.vault_id_to_vaults
+            .get(&vault_id)
+            .and_then(|v| s.get_collateral_config(&v.collateral_type))
+            .map(|c| c.custody())
+    }) {
+        Some(CustodyKind::NativeXrp) => {
+            return Err(ProtocolError::GenericError(
+                "Native-XRP collateral cannot be liquidated via the SP write-down path".to_string(),
+            ));
+        }
+        Some(CustodyKind::NativeSol) => {
+            return Err(ProtocolError::GenericError(
+                "Native-SOL collateral cannot be liquidated via the SP write-down path".to_string(),
+            ));
+        }
+        Some(CustodyKind::IcrcLedger) | None => {}
     }
 
     let guard_principal =
@@ -6570,35 +8670,18 @@ pub async fn liquidate_vault_debt_already_burned(
         });
     }
 
-    // Send protocol's liquidation fee cut to treasury
-    if protocol_cut > 0 {
-        if vault.collateral_type == crate::state::xrp_collateral_principal() {
-            // P5: native-XRP protocol fee -> a developer-settleable XrpClaim (the
-            // ICRC treasury transfer cannot target the synthetic XRP ledger). Keyed
-            // by collateral_type (not a vault lookup, since the vault may already be
-            // drained/removed by cleanup_if_drained above).
-            let dev = read_state(|s| s.developer_principal);
-            let now_ns = ic_cdk::api::time();
-            mutate_state(|s| {
-                record_xrp_claim(
-                    s,
-                    dev,
-                    vault.owner,
-                    vault.vault_id,
-                    protocol_cut.to_u64().unwrap_or(0),
-                    now_ns,
-                );
-            });
-        } else {
-            let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
-            crate::treasury::send_liquidation_fee_to_treasury(
-                protocol_cut,
-                vault.collateral_type,
-                asset_type,
-            )
-            .await;
-        }
-    }
+    // Send protocol's liquidation fee cut to treasury. ICRC -> treasury; native
+    // custody (XRP, SOL) -> a developer-settleable claim. In practice this native-
+    // custody arm is unreachable here (the reject above already refuses any
+    // native-custody vault), but it is kept exhaustive rather than assumed dead,
+    // so a future change to that guard cannot silently misroute the fee.
+    route_protocol_liquidation_fee(
+        protocol_cut,
+        vault.collateral_type,
+        vault.owner,
+        vault.vault_id,
+    )
+    .await;
 
     // Step 4: Process collateral transfer to stability pool
     match try_process_pending_transfers_immediate(vault_id).await {
@@ -6667,7 +8750,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
     let guard_principal = GuardPrincipal::new(caller, &format!("liquidate_vault_{}", vault_id))?;
     reject_if_bot_processing(vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault
     let _vault_liq_guard = VaultLiquidationGuard::new(vault_id)?; // BK-001/002 per-vault lock
-    if let Err(e) = reject_active_xrp_sp_absorb_preflight(vault_id, ic_cdk::api::time()) {
+    if let Err(e) = reject_active_native_sp_absorb_preflight(vault_id, ic_cdk::api::time()) {
         guard_principal.fail();
         return Err(e);
     }
@@ -6916,32 +8999,48 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
                 INFO,
                 "[liquidate_vault] Scheduling excess collateral return to vault owner"
             );
-            // Native-XRP excess returns to the owner as an XrpClaim; ICRC excess
-            // goes through the pending-excess transfer machinery.
-            if s.get_collateral_config(&vault.collateral_type)
-                .map(|c| c.is_native_xrp())
-                .unwrap_or(false)
-            {
-                record_xrp_claim(
-                    s,
-                    vault.owner,
-                    vault.owner,
-                    vault_id,
-                    excess_pay.to_u64(),
-                    ic_cdk::api::time(),
-                );
-            } else {
-                let excess_nonce = s.next_op_nonce();
-                s.pending_excess_transfers.insert(
-                    (vault_id, vault.owner),
-                    PendingMarginTransfer {
-                        owner: vault.owner,
-                        margin: excess_pay,
-                        collateral_type: vault.collateral_type,
-                        retry_count: 0,
-                        op_nonce: excess_nonce,
-                    },
-                );
+            // Native custody (XRP, SOL) excess returns to the owner as a claim;
+            // ICRC excess goes through the pending-excess transfer machinery.
+            // Exhaustive match on `custody()`: a future custody kind is a compile
+            // error here, not a silent fall-through into the ICRC path.
+            let excess_custody = s
+                .get_collateral_config(&vault.collateral_type)
+                .map(|c| c.custody())
+                .unwrap_or(CustodyKind::IcrcLedger);
+            match excess_custody {
+                CustodyKind::NativeXrp => {
+                    record_xrp_claim(
+                        s,
+                        vault.owner,
+                        vault.owner,
+                        vault_id,
+                        excess_pay.to_u64(),
+                        ic_cdk::api::time(),
+                    );
+                }
+                CustodyKind::NativeSol => {
+                    record_sol_claim(
+                        s,
+                        vault.owner,
+                        vault.owner,
+                        vault_id,
+                        excess_pay.to_u64(),
+                        ic_cdk::api::time(),
+                    );
+                }
+                CustodyKind::IcrcLedger => {
+                    let excess_nonce = s.next_op_nonce();
+                    s.pending_excess_transfers.insert(
+                        (vault_id, vault.owner),
+                        PendingMarginTransfer {
+                            owner: vault.owner,
+                            margin: excess_pay,
+                            collateral_type: vault.collateral_type,
+                            retry_count: 0,
+                            op_nonce: excess_nonce,
+                        },
+                    );
+                }
             }
         }
 
@@ -7016,35 +9115,15 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         });
     }
 
-    // Send protocol's liquidation fee cut to treasury (fire-and-forget)
-    if protocol_cut > 0 {
-        if vault.collateral_type == crate::state::xrp_collateral_principal() {
-            // P5: native-XRP protocol fee -> a developer-settleable XrpClaim (the
-            // ICRC treasury transfer cannot target the synthetic XRP ledger). Keyed
-            // by collateral_type (not a vault lookup, since the vault may already be
-            // drained/removed by cleanup_if_drained above).
-            let dev = read_state(|s| s.developer_principal);
-            let now_ns = ic_cdk::api::time();
-            mutate_state(|s| {
-                record_xrp_claim(
-                    s,
-                    dev,
-                    vault.owner,
-                    vault.vault_id,
-                    protocol_cut.to_u64().unwrap_or(0),
-                    now_ns,
-                );
-            });
-        } else {
-            let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
-            crate::treasury::send_liquidation_fee_to_treasury(
-                protocol_cut,
-                vault.collateral_type,
-                asset_type,
-            )
-            .await;
-        }
-    }
+    // Send protocol's liquidation fee cut to treasury (fire-and-forget). ICRC ->
+    // treasury; native custody (XRP, SOL) -> a developer-settleable claim.
+    route_protocol_liquidation_fee(
+        protocol_cut,
+        vault.collateral_type,
+        vault.owner,
+        vault.vault_id,
+    )
+    .await;
 
     // Step 5: Attempt immediate transfer processing (best effort)
     log!(
@@ -7300,7 +9379,7 @@ pub async fn partial_repay_to_vault(arg: VaultArg) -> Result<u64, ProtocolError>
 
     // Accrue interest before repayment so the correct debt balance is used.
     let now = ic_cdk::api::time();
-    if let Err(e) = reject_active_xrp_sp_absorb_preflight(arg.vault_id, now) {
+    if let Err(e) = reject_active_native_sp_absorb_preflight(arg.vault_id, now) {
         guard_principal.fail();
         return Err(e);
     }
@@ -7396,7 +9475,7 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         GuardPrincipal::new(caller, &format!("partial_liquidate_vault_{}", arg.vault_id))?;
     reject_if_bot_processing(arg.vault_id)?; // LIQ-101: don't double-seize a bot-claimed vault
     let _vault_liq_guard = VaultLiquidationGuard::new(arg.vault_id)?; // BK-001/002 per-vault lock
-    if let Err(e) = reject_active_xrp_sp_absorb_preflight(arg.vault_id, ic_cdk::api::time()) {
+    if let Err(e) = reject_active_native_sp_absorb_preflight(arg.vault_id, ic_cdk::api::time()) {
         guard_principal.fail();
         return Err(e);
     }
@@ -7664,35 +9743,15 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         });
     }
 
-    // Send protocol's liquidation fee cut to treasury (fire-and-forget)
-    if protocol_cut > 0 {
-        if vault.collateral_type == crate::state::xrp_collateral_principal() {
-            // P5: native-XRP protocol fee -> a developer-settleable XrpClaim (the
-            // ICRC treasury transfer cannot target the synthetic XRP ledger). Keyed
-            // by collateral_type (not a vault lookup, since the vault may already be
-            // drained/removed by cleanup_if_drained above).
-            let dev = read_state(|s| s.developer_principal);
-            let now_ns = ic_cdk::api::time();
-            mutate_state(|s| {
-                record_xrp_claim(
-                    s,
-                    dev,
-                    vault.owner,
-                    vault.vault_id,
-                    protocol_cut.to_u64().unwrap_or(0),
-                    now_ns,
-                );
-            });
-        } else {
-            let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
-            crate::treasury::send_liquidation_fee_to_treasury(
-                protocol_cut,
-                vault.collateral_type,
-                asset_type,
-            )
-            .await;
-        }
-    }
+    // Send protocol's liquidation fee cut to treasury (fire-and-forget). ICRC ->
+    // treasury; native custody (XRP, SOL) -> a developer-settleable claim.
+    route_protocol_liquidation_fee(
+        protocol_cut,
+        vault.collateral_type,
+        vault.owner,
+        vault.vault_id,
+    )
+    .await;
 
     // Step 6: Attempt immediate transfer processing
     log!(
@@ -8339,10 +10398,13 @@ mod xrp_sp_absorb_contract_tests {
             .unwrap()
             .collateral_amount = 60_000_000;
 
-        assert!(
-            stability_pool_liquidate_xrp_vault_in_state(&mut state, sp(), valid_request(44), 20)
-                .is_err()
-        );
+        assert!(stability_pool_liquidate_xrp_vault_in_state(
+            &mut state,
+            sp(),
+            valid_request(44),
+            20
+        )
+        .is_err());
         assert!(state.xrp_claims.is_empty());
         assert_eq!(state.next_xrp_claim_id, 0);
         assert!(state.sp_xrp_absorb_results_by_proof.is_empty());
@@ -8377,10 +10439,13 @@ mod xrp_sp_absorb_contract_tests {
             .unwrap()
             .borrowed_icusd_amount = ICUSD::new(50 * E8);
 
-        assert!(
-            stability_pool_liquidate_xrp_vault_in_state(&mut state, sp(), valid_request(44), 20)
-                .is_err()
-        );
+        assert!(stability_pool_liquidate_xrp_vault_in_state(
+            &mut state,
+            sp(),
+            valid_request(44),
+            20
+        )
+        .is_err());
         assert!(state.xrp_claims.is_empty());
         assert_eq!(state.next_xrp_claim_id, 0);
         assert!(state.sp_xrp_absorb_results_by_proof.is_empty());
@@ -8459,7 +10524,11 @@ mod xrp_sp_absorb_contract_tests {
             .expect("exact replay returns cached result");
         assert_eq!(replay, first);
         assert_eq!(state.xrp_claims, claims_after_first);
-        assert_eq!(state.xrp_claims.len(), 3, "replay must not re-mint the dev claim");
+        assert_eq!(
+            state.xrp_claims.len(),
+            3,
+            "replay must not re-mint the dev claim"
+        );
         assert_eq!(state.next_xrp_claim_id, 3);
     }
 
@@ -8603,5 +10672,1504 @@ mod xrp_sp_absorb_contract_tests {
         assert!(!state
             .sp_xrp_absorb_results_by_proof
             .contains_key(&(SpProofLedger::IcusdBurn, 1)));
+    }
+}
+
+/// Phase 2a of the native-SOL collateral rail (docs/superpowers/specs/
+/// 2026-07-24-native-sol-collateral-design.md): custody-routing tests for the
+/// SOL wiring added to vault.rs. Mirrors `xrp_p4_tests` where a direct
+/// analogue exists.
+///
+/// NOTE on what these tests can and cannot exercise: `add_margin_to_vault` /
+/// `add_margin_with_deposit` call `ic_cdk::api::caller()` as their FIRST
+/// statement, which traps with "msg_caller_size should only be called inside
+/// canisters" outside a real canister call context (see the pre-existing
+/// `#[ignore]`d test in `state.rs` documenting the identical constraint).
+/// `liquidate_vault_debt_already_burned` is the only endpoint in this file's
+/// test suite ever driven via `futures::executor::block_on`, and only because
+/// it takes `caller` as an explicit parameter and its native-custody reject
+/// returns before any `ic_cdk` call. The tests below therefore pin the exact
+/// REJECT PREDICATE / ROUTING FUNCTION each endpoint relies on, rather than
+/// invoking the full async endpoint.
+#[cfg(test)]
+mod sol_p2a_tests {
+    use super::*;
+    use crate::state::{sol_collateral_config, sol_collateral_principal, SolClaim};
+
+    fn sol_config() -> crate::state::CollateralConfig {
+        let mut cfg = sol_collateral_config(Ratio::new(dec!(1.0)));
+        cfg.last_price = Some(150.0);
+        cfg
+    }
+
+    // ─── record_sol_claim ──────────────────────────────────────────────────
+
+    #[test]
+    fn record_sol_claim_allocates_incrementing_ids_and_stores_fields() {
+        let mut s = crate::state::State::default();
+        let owner = Principal::from_slice(&[0xaa; 16]);
+        let liq = Principal::from_slice(&[0xbb; 16]);
+        let id0 = record_sol_claim(&mut s, liq, owner, 7, 4_000_000, 100);
+        let id1 = record_sol_claim(&mut s, owner, owner, 8, 1_000_000, 200);
+        assert_eq!(id0, 0);
+        assert_eq!(id1, 1);
+        assert_eq!(s.next_sol_claim_id, 2);
+        let c0 = s.sol_claims.get(&id0).unwrap();
+        assert_eq!(c0.claimant, liq);
+        assert_eq!(c0.custody_owner, owner);
+        assert_eq!(c0.custody_nonce, 7);
+        assert_eq!(c0.lamports, 4_000_000);
+        assert_eq!(c0.created_at_ns, 100);
+        assert!(c0.settlement.is_none());
+        assert!(c0.quarantine_reason.is_none());
+    }
+
+    /// `record_sol_claim` / `record_xrp_claim` use SEPARATE id counters
+    /// (`next_sol_claim_id` / `next_xrp_claim_id`) and separate maps
+    /// (`sol_claims` / `xrp_claims`), so identical numeric ids in each space
+    /// refer to different claims rather than colliding.
+    #[test]
+    fn sol_claim_ids_do_not_collide_with_xrp_claim_ids() {
+        let mut s = crate::state::State::default();
+        let owner = Principal::from_slice(&[0xaa; 16]);
+        let liq = Principal::from_slice(&[0xbb; 16]);
+
+        let xrp_id0 = record_xrp_claim(&mut s, liq, owner, 1, 500_000, 10);
+        let sol_id0 = record_sol_claim(&mut s, liq, owner, 1, 500_000, 10);
+        // Both counters start at 0 independently.
+        assert_eq!(xrp_id0, 0);
+        assert_eq!(sol_id0, 0);
+        assert_eq!(s.next_xrp_claim_id, 1);
+        assert_eq!(s.next_sol_claim_id, 1);
+
+        // Advancing one counter must not affect the other.
+        let xrp_id1 = record_xrp_claim(&mut s, liq, owner, 2, 1, 11);
+        assert_eq!(xrp_id1, 1);
+        assert_eq!(
+            s.next_sol_claim_id, 1,
+            "SOL counter must be untouched by an XRP claim"
+        );
+
+        // The same numeric id (0) exists in BOTH maps but is a DIFFERENT claim.
+        assert!(s.xrp_claims.contains_key(&0));
+        assert!(s.sol_claims.contains_key(&0));
+        assert_eq!(s.xrp_claims.get(&0).unwrap().drops, 500_000);
+        assert_eq!(s.sol_claims.get(&0).unwrap().lamports, 500_000);
+    }
+
+    // ─── is_native_custody ─────────────────────────────────────────────────
+
+    #[test]
+    fn is_native_custody_true_for_xrp_and_sol_false_for_icrc() {
+        let mut icrc_cfg = sol_config();
+        icrc_cfg.custody_kind = None; // legacy/absent -> IcrcLedger
+        assert!(!icrc_cfg.is_native_custody());
+
+        let mut xrp_cfg = sol_config();
+        xrp_cfg.custody_kind = Some(CustodyKind::NativeXrp);
+        assert!(xrp_cfg.is_native_custody());
+
+        let sol_cfg = sol_config();
+        assert!(sol_cfg.custody_kind == Some(CustodyKind::NativeSol));
+        assert!(sol_cfg.is_native_custody());
+
+        let mut icrc_cfg2 = sol_config();
+        icrc_cfg2.custody_kind = Some(CustodyKind::IcrcLedger);
+        assert!(!icrc_cfg2.is_native_custody());
+    }
+
+    // ─── add_margin reject (predicate-level; see module doc for why) ───────
+
+    /// `add_margin_to_vault` / `add_margin_with_deposit` both reject BEFORE any
+    /// transfer with `if is_native_custody { ... }`, where `is_native_custody`
+    /// is `config.is_native_custody()` read for the vault's own collateral
+    /// type (design doc §4.2: no SOL top-ups). This pins that exact condition
+    /// for a real SOL vault inserted into `State`, i.e. the runtime value both
+    /// endpoints would compute for it.
+    #[test]
+    fn native_sol_vault_collateral_config_is_flagged_for_add_margin_reject() {
+        let mut s = crate::state::State::default();
+        let sol = sol_collateral_principal();
+        s.collateral_configs.insert(sol, sol_config());
+        let owner = Principal::from_slice(&[0x11; 16]);
+        s.open_vault(Vault {
+            owner,
+            vault_id: 1,
+            borrowed_icusd_amount: ICUSD::new(0),
+            collateral_amount: 1_000_000_000,
+            collateral_type: sol,
+            accrued_interest: ICUSD::new(0),
+            last_accrual_time: 0,
+            bot_processing: false,
+        });
+
+        let vault = s.vault_id_to_vaults.get(&1).unwrap();
+        let is_native_custody = s
+            .get_collateral_config(&vault.collateral_type)
+            .map(|c| c.is_native_custody())
+            .unwrap_or(false);
+        assert!(
+            is_native_custody,
+            "a native-SOL vault's config must read is_native_custody() == true, \
+             the exact condition add_margin_to_vault / add_margin_with_deposit reject on"
+        );
+    }
+
+    // ─── payout routing (via queue_collateral_payout, the shared routing fn) ─
+
+    /// `queue_collateral_payout` is the function `withdraw_collateral`,
+    /// `withdraw_partial_collateral`, `withdraw_and_close_vault_internal`, and
+    /// every liquidation entry point call for the liquidator-reward /
+    /// owner-excess payout. For a native-SOL collateral type it must create a
+    /// `SolClaim`, NOT an ICRC `PendingMarginTransfer`.
+    #[test]
+    fn queue_collateral_payout_creates_sol_claim_not_pending_transfer() {
+        let mut s = crate::state::State::default();
+        let sol = sol_collateral_principal();
+        s.collateral_configs.insert(sol, sol_config());
+        let owner = Principal::from_slice(&[0x11; 16]);
+        let recipient = Principal::from_slice(&[0x22; 16]);
+
+        let claim_id = queue_collateral_payout(
+            &mut s,
+            42,
+            owner,
+            recipient,
+            ICP::new(3_000_000),
+            sol,
+            1,
+            999,
+        );
+
+        assert!(claim_id.is_some(), "SOL payout must return a claim id");
+        assert!(
+            s.pending_margin_transfers.is_empty(),
+            "SOL payout must NOT create an ICRC PendingMarginTransfer"
+        );
+        let claim: &SolClaim = s.sol_claims.get(&claim_id.unwrap()).unwrap();
+        assert_eq!(claim.claimant, recipient);
+        assert_eq!(claim.custody_owner, owner);
+        assert_eq!(claim.custody_nonce, 42);
+        assert_eq!(claim.lamports, 3_000_000);
+    }
+
+    /// Sibling check: native-XRP payout routing through the SAME shared
+    /// function is unchanged by the SOL wiring (still an XrpClaim, still no
+    /// PendingMarginTransfer).
+    #[test]
+    fn queue_collateral_payout_still_creates_xrp_claim_for_native_xrp() {
+        let mut s = crate::state::State::default();
+        let xrp = crate::state::xrp_collateral_principal();
+        let mut xrp_cfg = sol_config();
+        xrp_cfg.custody_kind = Some(CustodyKind::NativeXrp);
+        s.collateral_configs.insert(xrp, xrp_cfg);
+        let owner = Principal::from_slice(&[0x33; 16]);
+        let recipient = Principal::from_slice(&[0x44; 16]);
+
+        let claim_id =
+            queue_collateral_payout(&mut s, 7, owner, recipient, ICP::new(2_000_000), xrp, 1, 5);
+
+        assert!(claim_id.is_some());
+        assert!(s.pending_margin_transfers.is_empty());
+        assert!(
+            s.sol_claims.is_empty(),
+            "must not create a SolClaim for XRP"
+        );
+        let claim = s.xrp_claims.get(&claim_id.unwrap()).unwrap();
+        assert_eq!(claim.drops, 2_000_000);
+    }
+
+    /// Sibling check: ICRC collateral through the same function still creates
+    /// a `PendingMarginTransfer`, not any kind of claim.
+    #[test]
+    fn queue_collateral_payout_creates_pending_transfer_for_icrc() {
+        let mut s = crate::state::State::default();
+        let icp = s.icp_collateral_type();
+        let owner = Principal::from_slice(&[0x55; 16]);
+        let recipient = Principal::from_slice(&[0x66; 16]);
+
+        let claim_id =
+            queue_collateral_payout(&mut s, 3, owner, recipient, ICP::new(1_000_000), icp, 1, 5);
+
+        assert!(claim_id.is_none(), "ICRC payout must not return a claim id");
+        assert!(s.sol_claims.is_empty());
+        assert!(s.xrp_claims.is_empty());
+        assert!(s.pending_margin_transfers.contains_key(&(3, recipient)));
+    }
+
+    // ─── withdraw/close completion policy parity with XRP ──────────────────
+
+    #[test]
+    fn withdraw_close_completion_policy_keeps_native_sol_vault_open() {
+        assert_eq!(
+            withdraw_close_completion_policy(CustodyKind::NativeSol),
+            WithdrawCloseCompletionPolicy::KeepNativeSolVaultOpen
+        );
+        assert_eq!(
+            withdraw_close_completion_policy(CustodyKind::NativeXrp),
+            WithdrawCloseCompletionPolicy::KeepNativeXrpVaultOpen
+        );
+        assert_eq!(
+            withdraw_close_completion_policy(CustodyKind::IcrcLedger),
+            WithdrawCloseCompletionPolicy::CloseVault
+        );
+    }
+
+    // ─── vault_is_native_sol / vault_is_native_custody ─────────────────────
+
+    #[test]
+    fn vault_is_native_sol_and_vault_is_native_custody_are_scoped_to_sol_custody() {
+        let mut s = crate::state::State::default();
+        let sol = sol_collateral_principal();
+        s.collateral_configs.insert(sol, sol_config());
+        let icp = s.icp_collateral_type();
+        if let Some(c) = s.collateral_configs.get_mut(&icp) {
+            c.last_price = Some(5.0);
+        }
+        let owner = Principal::from_slice(&[0x77; 16]);
+        s.open_vault(Vault {
+            owner,
+            vault_id: 1,
+            borrowed_icusd_amount: ICUSD::new(0),
+            collateral_amount: 1_000_000_000,
+            collateral_type: sol,
+            accrued_interest: ICUSD::new(0),
+            last_accrual_time: 0,
+            bot_processing: false,
+        });
+        s.open_vault(Vault {
+            owner,
+            vault_id: 2,
+            borrowed_icusd_amount: ICUSD::new(0),
+            collateral_amount: 1_000_000_000,
+            collateral_type: icp,
+            accrued_interest: ICUSD::new(0),
+            last_accrual_time: 0,
+            bot_processing: false,
+        });
+        crate::state::replace_state(s);
+
+        assert!(vault_is_native_sol(1), "native-SOL vault must be flagged");
+        assert!(
+            !vault_is_native_sol(2),
+            "ICRC (ICP) vault must not be flagged"
+        );
+        assert!(
+            !vault_is_native_sol(999),
+            "missing vault must not be flagged"
+        );
+
+        assert!(
+            vault_is_native_custody(1),
+            "native-SOL vault must be flagged as native custody"
+        );
+        assert!(
+            !vault_is_native_custody(2),
+            "ICRC (ICP) vault must not be flagged"
+        );
+        assert!(
+            !vault_is_native_custody(999),
+            "missing vault must not be flagged"
+        );
+    }
+
+    // ─── SP write-down defense-in-depth reject, SOL arm ────────────────────
+
+    fn dummy_proof(vault_id_memo: u64) -> crate::icrc3_proof::SpWritedownProof {
+        crate::icrc3_proof::SpWritedownProof {
+            block_index: 0,
+            ledger_kind: crate::icrc3_proof::SpProofLedger::IcusdBurn,
+            vault_id_memo,
+        }
+    }
+
+    /// SOL sibling of `sp_writedown_native_xrp_guard_tests::
+    /// sp_writedown_rejects_native_xrp_vault`, pinning the SOL arm added to
+    /// the `match ... { Some(CustodyKind::NativeXrp) => .., Some(NativeSol)
+    /// => .., Some(IcrcLedger) | None => {} }` reject in
+    /// `liquidate_vault_debt_already_burned`. Safe to `block_on` for the same
+    /// reason as the XRP test: the reject returns before any `ic_cdk` call.
+    #[test]
+    fn sp_writedown_rejects_native_sol_vault() {
+        let mut s = crate::state::State::default();
+        let sol = sol_collateral_principal();
+        s.collateral_configs.insert(sol, sol_config());
+        s.min_icusd_amount = ICUSD::new(0);
+        let owner = Principal::from_slice(&[0x88; 16]);
+        s.open_vault(Vault {
+            owner,
+            vault_id: 1,
+            borrowed_icusd_amount: ICUSD::new(1_000_000_000),
+            collateral_amount: 5_000_000,
+            collateral_type: sol,
+            accrued_interest: ICUSD::new(0),
+            last_accrual_time: 0,
+            bot_processing: false,
+        });
+        crate::state::replace_state(s);
+
+        let caller = Principal::from_slice(&[0xcc; 16]);
+        let result = futures::executor::block_on(liquidate_vault_debt_already_burned(
+            1,
+            1_000_000_000,
+            caller,
+            None,
+            dummy_proof(1),
+        ));
+        match result {
+            Err(ProtocolError::GenericError(msg)) => assert!(
+                msg.contains(
+                    "Native-SOL collateral cannot be liquidated via the SP write-down path"
+                ),
+                "expected the native-SOL reject, got: {msg}"
+            ),
+            other => panic!("expected a native-SOL GenericError reject, got {other:?}"),
+        }
+    }
+}
+
+/// Phase 2b of the native-SOL collateral rail (docs/superpowers/specs/
+/// 2026-07-24-native-sol-collateral-design.md): the deposit staging, pending-
+/// open cleanup, and claim-settlement logic added to vault.rs.
+///
+/// Same constraint as `sol_p2a_tests` (see its module doc comment):
+/// `open_sol_vault`, `confirm_sol_deposit`, `cancel_sol_pending_open`,
+/// `sweep_sol_pending_open`, `settle_sol_claim`, and
+/// `sol_bootstrap_nonce_account` all read `ic_cdk::api::caller()` as their
+/// first statement (or make an `ic_cdk` outcall before any could-fail-cleanly
+/// check), so none of them can be driven directly via
+/// `futures::executor::block_on` outside a real canister call context. Every
+/// safety-relevant decision in this phase was therefore factored into a pure,
+/// `State`/`ic_cdk`-free helper specifically so it could be tested here —
+/// this module tests those helpers exhaustively rather than the async
+/// endpoints themselves.
+#[cfg(test)]
+mod sol_p2b_tests {
+    use super::*;
+    use crate::chains::solana::sol_rpc::TxStatus;
+    use crate::state::{SolClaim, SolPendingDeposit, SolSettlement};
+
+    fn owner() -> Principal {
+        Principal::from_slice(&[0x11; 16])
+    }
+    fn claimant() -> Principal {
+        Principal::from_slice(&[0x22; 16])
+    }
+
+    fn settlement(nonce_value: &str, signature: &str) -> SolSettlement {
+        SolSettlement {
+            signature: signature.to_string(),
+            nonce_value: nonce_value.to_string(),
+            destination: "11111111111111111111111111111111".to_string(),
+            submitted_at_ns: 1_000,
+        }
+    }
+
+    fn claim_with_settlement(settlement: Option<SolSettlement>) -> SolClaim {
+        SolClaim {
+            claimant: claimant(),
+            lamports: 5_000_000,
+            custody_owner: owner(),
+            custody_nonce: 7,
+            created_at_ns: 0,
+            settlement,
+            quarantine_reason: None,
+        }
+    }
+
+    // ─── §5.3 idempotency table: sol_settlement_decision, one test per row ──
+
+    #[test]
+    fn idempotency_row_confirmed_is_already_paid() {
+        let status = TxStatus::Confirmed { slot: 123 };
+        assert_eq!(
+            sol_settlement_decision(&status, "nonceA", "nonceB"),
+            SolSettlementDecision::AlreadyPaid,
+            "Confirmed must be AlreadyPaid regardless of nonce comparison"
+        );
+        // Also true when the nonce happens to still match.
+        assert_eq!(
+            sol_settlement_decision(&status, "nonceA", "nonceA"),
+            SolSettlementDecision::AlreadyPaid
+        );
+    }
+
+    #[test]
+    fn idempotency_row_failed_clears_for_resign_without_a_fee() {
+        let status = TxStatus::Failed;
+        assert_eq!(
+            sol_settlement_decision(&status, "nonceA", "nonceB"),
+            SolSettlementDecision::FailedClearForResign,
+            "Failed must clear for resign regardless of nonce comparison"
+        );
+    }
+
+    #[test]
+    fn idempotency_row_notfound_unchanged_nonce_is_safe_to_resign() {
+        let status = TxStatus::NotFound;
+        assert_eq!(
+            sol_settlement_decision(&status, "sameNonce", "sameNonce"),
+            SolSettlementDecision::SafeToResign
+        );
+    }
+
+    #[test]
+    fn idempotency_row_notfound_advanced_nonce_is_ambiguous() {
+        let status = TxStatus::NotFound;
+        assert_eq!(
+            sol_settlement_decision(&status, "oldNonce", "newNonce"),
+            SolSettlementDecision::AmbiguousAdvanced
+        );
+    }
+
+    // ─── Confirmed row: no second transfer is attempted ─────────────────────
+
+    /// Pins the EXACT branch `settle_sol_claim` takes on `AlreadyPaid`: the
+    /// claim is removed and the PRIOR signature is returned, with no path to
+    /// `chains::sol::adapter::sign_sol_payment_from` / `send_transaction` at
+    /// all. This is a structural assertion (by inspection of the match arm
+    /// below, mirroring exactly the code path in `settle_sol_claim`) rather
+    /// than an end-to-end call, since the endpoint itself cannot be driven
+    /// outside a canister — see the module doc comment.
+    #[test]
+    fn already_paid_decision_removes_claim_and_returns_prior_signature_no_second_transfer() {
+        let mut s = crate::state::State::default();
+        let claim_id = 1u64;
+        let prev = settlement("nonceA", "sigPRIOR");
+        s.sol_claims.insert(claim_id, claim_with_settlement(Some(prev.clone())));
+
+        let status = TxStatus::Confirmed { slot: 42 };
+        let decision = sol_settlement_decision(&status, &prev.nonce_value, "nonceB_whatever");
+        assert_eq!(decision, SolSettlementDecision::AlreadyPaid);
+
+        // Exactly what `settle_sol_claim`'s `AlreadyPaid` arm does: remove the
+        // claim, return `prev.signature`. No settlement is built, no
+        // `send_transaction` call is reachable from this arm.
+        let returned_signature = match decision {
+            SolSettlementDecision::AlreadyPaid => {
+                s.sol_claims.remove(&claim_id);
+                prev.signature.clone()
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(returned_signature, "sigPRIOR");
+        assert!(
+            !s.sol_claims.contains_key(&claim_id),
+            "claim must be finalized (removed), not left pending for a second settle"
+        );
+    }
+
+    // ─── NotFound + advanced nonce, unexplained: quarantine ─────────────────
+
+    #[test]
+    fn ambiguous_advance_without_a_sibling_explanation_quarantines_the_claim() {
+        let mut s = crate::state::State::default();
+        let claim_id = 1u64;
+        let prev = settlement("staleNonce", "sigSTALE");
+        s.sol_claims.insert(claim_id, claim_with_settlement(Some(prev.clone())));
+
+        let status = TxStatus::NotFound;
+        let decision = sol_settlement_decision(&status, &prev.nonce_value, "advancedNonce");
+        assert_eq!(decision, SolSettlementDecision::AmbiguousAdvanced);
+
+        // No OTHER claim exists at all, so `sol_sibling_explains_ambiguous_advance`
+        // can never return true for this target -- mirrors the "no sibling found"
+        // path `settle_sol_claim` takes to `quarantine_sol_claim_snapshot`.
+        let explains = s
+            .sol_claims
+            .iter()
+            .filter(|(id, _)| **id != claim_id)
+            .filter_map(|(_, c)| c.settlement.as_ref())
+            .any(|st| {
+                sol_sibling_explains_ambiguous_advance(
+                    &TxStatus::Confirmed { slot: 1 },
+                    &st.nonce_value,
+                    &prev.nonce_value,
+                )
+            });
+        assert!(!explains);
+
+        let reason = "settlement diverged: durable nonce advanced".to_string();
+        assert!(quarantine_sol_claim_snapshot(&mut s, claim_id, &reason));
+        assert_eq!(
+            s.sol_claims.get(&claim_id).unwrap().quarantine_reason,
+            Some(reason)
+        );
+    }
+
+    // ─── sol_sibling_reconcile_decision: exhaustive ──────────────────────────
+
+    #[test]
+    fn sibling_confirmed_is_paid() {
+        assert_eq!(
+            sol_sibling_reconcile_decision(&TxStatus::Confirmed { slot: 5 }, "n1", "n2"),
+            SolSiblingReconcileDecision::Paid
+        );
+    }
+
+    #[test]
+    fn sibling_failed_clears_for_resign() {
+        assert_eq!(
+            sol_sibling_reconcile_decision(&TxStatus::Failed, "n1", "n2"),
+            SolSiblingReconcileDecision::FailedClearForResign
+        );
+    }
+
+    #[test]
+    fn sibling_notfound_matching_live_nonce_is_still_in_flight() {
+        assert_eq!(
+            sol_sibling_reconcile_decision(&TxStatus::NotFound, "sameNonce", "sameNonce"),
+            SolSiblingReconcileDecision::StillInFlight
+        );
+    }
+
+    #[test]
+    fn sibling_notfound_stale_nonce_is_dead_and_safe_to_clear() {
+        assert_eq!(
+            sol_sibling_reconcile_decision(&TxStatus::NotFound, "staleNonce", "liveNonce"),
+            SolSiblingReconcileDecision::DeadNonceSafeToClear
+        );
+    }
+
+    // ─── sol_sibling_explains_ambiguous_advance ──────────────────────────────
+
+    #[test]
+    fn sibling_explains_only_when_confirmed_and_nonce_matches() {
+        assert!(sol_sibling_explains_ambiguous_advance(
+            &TxStatus::Confirmed { slot: 9 },
+            "sharedNonce",
+            "sharedNonce",
+        ));
+        assert!(
+            !sol_sibling_explains_ambiguous_advance(
+                &TxStatus::Confirmed { slot: 9 },
+                "differentNonce",
+                "sharedNonce",
+            ),
+            "must not explain a DIFFERENT nonce value even if confirmed"
+        );
+        assert!(
+            !sol_sibling_explains_ambiguous_advance(
+                &TxStatus::NotFound,
+                "sharedNonce",
+                "sharedNonce",
+            ),
+            "must not explain unless the sibling's own tx is Confirmed"
+        );
+    }
+
+    // ─── reconcile_sol_settlement_snapshot ───────────────────────────────────
+
+    #[test]
+    fn reconcile_snapshot_paid_removes_the_claim() {
+        let mut s = crate::state::State::default();
+        let sig = "sigABC";
+        s.sol_claims.insert(1, claim_with_settlement(Some(settlement("n1", sig))));
+        assert!(reconcile_sol_settlement_snapshot(
+            &mut s,
+            1,
+            sig,
+            SolSettlementReconciliation::Paid
+        ));
+        assert!(!s.sol_claims.contains_key(&1));
+    }
+
+    #[test]
+    fn reconcile_snapshot_clear_for_resign_keeps_claim_but_clears_settlement() {
+        let mut s = crate::state::State::default();
+        let sig = "sigABC";
+        s.sol_claims.insert(1, claim_with_settlement(Some(settlement("n1", sig))));
+        assert!(reconcile_sol_settlement_snapshot(
+            &mut s,
+            1,
+            sig,
+            SolSettlementReconciliation::ClearForResign
+        ));
+        let c = s.sol_claims.get(&1).unwrap();
+        assert!(c.settlement.is_none());
+    }
+
+    #[test]
+    fn reconcile_snapshot_is_a_noop_when_the_signature_no_longer_matches() {
+        // Guards against clobbering a NEWER settlement that was written
+        // concurrently between the read and this mutation.
+        let mut s = crate::state::State::default();
+        s.sol_claims.insert(1, claim_with_settlement(Some(settlement("n1", "sigNEW"))));
+        assert!(!reconcile_sol_settlement_snapshot(
+            &mut s,
+            1,
+            "sigSTALE",
+            SolSettlementReconciliation::Paid
+        ));
+        assert!(
+            s.sol_claims.contains_key(&1),
+            "must not remove the claim when the signature does not match"
+        );
+    }
+
+    #[test]
+    fn reconcile_snapshot_is_a_noop_for_a_missing_claim() {
+        let mut s = crate::state::State::default();
+        assert!(!reconcile_sol_settlement_snapshot(
+            &mut s,
+            999,
+            "sig",
+            SolSettlementReconciliation::Paid
+        ));
+    }
+
+    // ─── quarantine refuses settlement ───────────────────────────────────────
+
+    #[test]
+    fn quarantined_claim_refuses_settlement() {
+        let claim_id = 1u64;
+        let mut claim = claim_with_settlement(None);
+        claim.quarantine_reason = Some("suspected divergence".to_string());
+        let result = ensure_sol_claim_not_quarantined(claim_id, &claim);
+        match result {
+            Err(ProtocolError::GenericError(msg)) => {
+                assert!(msg.contains("quarantined"));
+                assert!(msg.contains("suspected divergence"));
+            }
+            other => panic!("expected a quarantine GenericError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn healthy_claim_is_not_blocked_by_the_quarantine_gate() {
+        let claim = claim_with_settlement(None);
+        assert!(ensure_sol_claim_not_quarantined(1, &claim).is_ok());
+    }
+
+    // ─── quarantine_sol_claim_snapshot / resolve_quarantined_sol_claim_snapshot ─
+
+    #[test]
+    fn quarantine_snapshot_is_idempotent_keeps_first_reason() {
+        let mut s = crate::state::State::default();
+        s.sol_claims.insert(1, claim_with_settlement(None));
+        assert!(quarantine_sol_claim_snapshot(&mut s, 1, "first reason"));
+        assert!(quarantine_sol_claim_snapshot(&mut s, 1, "second reason"));
+        assert_eq!(
+            s.sol_claims.get(&1).unwrap().quarantine_reason,
+            Some("first reason".to_string())
+        );
+    }
+
+    #[test]
+    fn quarantine_snapshot_returns_false_for_missing_claim() {
+        let mut s = crate::state::State::default();
+        assert!(!quarantine_sol_claim_snapshot(&mut s, 999, "reason"));
+    }
+
+    #[test]
+    fn resolve_confirm_paid_removes_the_claim() {
+        let mut s = crate::state::State::default();
+        let mut claim = claim_with_settlement(Some(settlement("n1", "sig1")));
+        claim.quarantine_reason = Some("diverged".to_string());
+        s.sol_claims.insert(1, claim);
+
+        assert!(resolve_quarantined_sol_claim_snapshot(&mut s, 1, true).is_ok());
+        assert!(!s.sol_claims.contains_key(&1));
+    }
+
+    #[test]
+    fn resolve_release_for_retry_clears_quarantine_and_settlement() {
+        let mut s = crate::state::State::default();
+        let mut claim = claim_with_settlement(Some(settlement("n1", "sig1")));
+        claim.quarantine_reason = Some("diverged".to_string());
+        s.sol_claims.insert(1, claim);
+
+        assert!(resolve_quarantined_sol_claim_snapshot(&mut s, 1, false).is_ok());
+        let c = s.sol_claims.get(&1).unwrap();
+        assert!(c.quarantine_reason.is_none());
+        assert!(c.settlement.is_none());
+    }
+
+    #[test]
+    fn resolve_rejects_a_healthy_non_quarantined_claim() {
+        let mut s = crate::state::State::default();
+        s.sol_claims.insert(1, claim_with_settlement(None));
+        assert!(resolve_quarantined_sol_claim_snapshot(&mut s, 1, true).is_err());
+        assert!(s.sol_claims.contains_key(&1), "must not mutate on rejection");
+    }
+
+    #[test]
+    fn resolve_rejects_a_missing_claim() {
+        let mut s = crate::state::State::default();
+        assert!(resolve_quarantined_sol_claim_snapshot(&mut s, 999, true).is_err());
+    }
+
+    // ─── is_valid_sol_address rejection blocks settlement (pin the gate) ────
+
+    /// `settle_sol_claim` gates on exactly `chains::sol::address::is_valid_sol_address`
+    /// before doing anything else observable (deriving keys, reading the
+    /// nonce, signing). Pin that a real off-curve PDA -- which decodes
+    /// cleanly as 32 base58 bytes but has no private key -- is rejected by
+    /// this exact predicate, so sending a claim's SOL there is refused before
+    /// any transfer could be built.
+    #[test]
+    fn off_curve_pda_destination_is_rejected_by_the_gate_settle_sol_claim_uses() {
+        use solana_pubkey::Pubkey;
+        let program_id = Pubkey::new_from_array([9u8; 32]);
+        let (pda, _bump) =
+            Pubkey::find_program_address(&[b"sol-collateral-settle-test"], &program_id);
+        let pda_address = bs58::encode(pda.as_ref()).into_string();
+
+        assert!(
+            crate::chains::sol::address::decode_sol_address(&pda_address).is_ok(),
+            "a PDA decodes fine as 32 base58 bytes"
+        );
+        assert!(
+            !crate::chains::sol::address::is_valid_sol_address(&pda_address),
+            "but must be rejected as a payable destination -- settle_sol_claim's gate"
+        );
+    }
+
+    // ─── aggregate solvency ───────────────────────────────────────────────────
+
+    #[test]
+    fn aggregate_solvency_rejects_when_balance_cannot_cover_claims_plus_reserve() {
+        let rent_exempt = 890_880u64;
+        let unresolved = 10_000_000u128;
+        // Balance covers the claims but NOT the rent-exempt reserve on top.
+        let balance = 10_000_000u64;
+        assert!(ensure_sol_claim_aggregate_solvency(balance, rent_exempt, unresolved).is_err());
+    }
+
+    #[test]
+    fn aggregate_solvency_accepts_the_exact_boundary() {
+        let rent_exempt = 890_880u64;
+        let unresolved = 10_000_000u128;
+        let balance = unresolved as u64 + rent_exempt;
+        assert!(ensure_sol_claim_aggregate_solvency(balance, rent_exempt, unresolved).is_ok());
+    }
+
+    #[test]
+    fn aggregate_solvency_rejects_one_lamport_short() {
+        let rent_exempt = 890_880u64;
+        let unresolved = 10_000_000u128;
+        let balance = unresolved as u64 + rent_exempt - 1;
+        assert!(ensure_sol_claim_aggregate_solvency(balance, rent_exempt, unresolved).is_err());
+    }
+
+    #[test]
+    fn sol_unresolved_claim_lamports_sums_only_matching_custody() {
+        let mut s = crate::state::State::default();
+        let owner_a = owner();
+        let owner_b = Principal::from_slice(&[0x33; 16]);
+        s.sol_claims.insert(1, {
+            let mut c = claim_with_settlement(None);
+            c.custody_owner = owner_a;
+            c.custody_nonce = 7;
+            c.lamports = 1_000_000;
+            c
+        });
+        s.sol_claims.insert(2, {
+            let mut c = claim_with_settlement(None);
+            c.custody_owner = owner_a;
+            c.custody_nonce = 7;
+            c.lamports = 2_000_000;
+            c
+        });
+        // Different custody (different owner) -- must NOT be summed in.
+        s.sol_claims.insert(3, {
+            let mut c = claim_with_settlement(None);
+            c.custody_owner = owner_b;
+            c.custody_nonce = 7;
+            c.lamports = 9_000_000;
+            c
+        });
+        // Different custody (same owner, different vault id) -- must NOT be summed in.
+        s.sol_claims.insert(4, {
+            let mut c = claim_with_settlement(None);
+            c.custody_owner = owner_a;
+            c.custody_nonce = 8;
+            c.lamports = 9_000_000;
+            c
+        });
+
+        let total = sol_unresolved_claim_lamports_for_custody(&s, owner_a, 7).unwrap();
+        assert_eq!(total, 3_000_000);
+    }
+
+    // ─── reconcile_sol_other_inflight_claims is protocol-wide (pin the scan) ─
+
+    /// `sol_inflight_claims` is the pure `State` scan `reconcile_sol_other_
+    /// inflight_claims` drives. Unlike XRP's per-custody-address sibling scan,
+    /// this must be scoped to the WHOLE PROTOCOL (every custody address),
+    /// since the durable nonce is a single shared account -- see the "Native
+    /// SOL collateral: Phase 2b claim settlement" section doc comment in
+    /// vault.rs for the full argument. This test pins that a sibling on a
+    /// COMPLETELY DIFFERENT custody address is still picked up.
+    #[test]
+    fn sol_inflight_claims_scans_every_custody_address_not_just_the_current_ones() {
+        let mut s = crate::state::State::default();
+        let mut other_custody_claim = claim_with_settlement(Some(settlement("n1", "sigOTHER")));
+        other_custody_claim.custody_owner = Principal::from_slice(&[0x99; 16]);
+        other_custody_claim.custody_nonce = 4242;
+        s.sol_claims.insert(2, other_custody_claim);
+        // The current claim itself (must be excluded).
+        s.sol_claims.insert(1, claim_with_settlement(Some(settlement("n2", "sigCURRENT"))));
+        // A claim with no settlement yet (must be excluded -- nothing to reconcile).
+        s.sol_claims.insert(3, claim_with_settlement(None));
+
+        let in_flight = sol_inflight_claims(&s, 1);
+        assert_eq!(in_flight.len(), 1);
+        assert_eq!(in_flight[0].0, 2);
+        assert_eq!(in_flight[0].1.signature, "sigOTHER");
+    }
+
+    // ─── open_sol_vault: nonce-bootstrap gate ─────────────────────────────────
+
+    #[test]
+    fn open_sol_vault_refuses_when_nonce_account_not_bootstrapped() {
+        assert!(ensure_sol_nonce_bootstrapped(&None).is_err());
+    }
+
+    #[test]
+    fn open_sol_vault_allows_when_nonce_account_bootstrapped() {
+        assert!(ensure_sol_nonce_bootstrapped(&Some("SomeNonceAddress111".to_string())).is_ok());
+    }
+
+    // ─── open_sol_vault: pending-open bounds ──────────────────────────────────
+
+    #[test]
+    fn pending_open_bounds_rejects_at_global_cap() {
+        assert!(ensure_sol_pending_open_bounds(MAX_SOL_PENDING_GLOBAL, 0).is_err());
+        assert!(ensure_sol_pending_open_bounds(MAX_SOL_PENDING_GLOBAL - 1, 0).is_ok());
+    }
+
+    #[test]
+    fn pending_open_bounds_rejects_at_per_caller_cap() {
+        assert!(ensure_sol_pending_open_bounds(0, MAX_SOL_PENDING_PER_CALLER).is_err());
+        assert!(ensure_sol_pending_open_bounds(0, MAX_SOL_PENDING_PER_CALLER - 1).is_ok());
+    }
+
+    // ─── confirm_sol_deposit: credit boundary (delegates to chains::sol::adapter) ─
+
+    /// `confirm_sol_deposit` credits via exactly
+    /// `chains::sol::adapter::sol_credit_amount` (already exhaustively tested
+    /// in that module — see `chains::sol::adapter::tests`). This pins that
+    /// vault.rs's confirm path relies on THAT function with the same
+    /// semantics: credited = balance - rent_exempt, floored at min_deposit.
+    #[test]
+    fn confirm_sol_deposit_credit_boundary_matches_chains_sol_adapter() {
+        let min_deposit = 20_000_000u64;
+        let rent_exempt = 890_880u64;
+        let balance = rent_exempt + min_deposit;
+        assert_eq!(
+            crate::chains::sol::adapter::sol_credit_amount(balance, rent_exempt, min_deposit)
+                .unwrap(),
+            min_deposit
+        );
+        assert!(crate::chains::sol::adapter::sol_credit_amount(
+            rent_exempt + min_deposit - 1,
+            rent_exempt,
+            min_deposit
+        )
+        .is_err());
+    }
+
+    // ─── cancel/sweep: pending-cleanup minimum-age gate ───────────────────────
+
+    fn pending(opened_at_ns: u64) -> SolPendingDeposit {
+        SolPendingDeposit {
+            owner: owner(),
+            custody_address: "SomeCustodyAddress111".to_string(),
+            derivation_nonce: 7,
+            opened_at_ns,
+            rent_exempt_lamports: 890_880,
+        }
+    }
+
+    #[test]
+    fn cleanup_age_gate_rejects_before_ten_minutes() {
+        let p = pending(0);
+        assert!(ensure_sol_pending_cleanup_age(&p, SOL_PENDING_CLEANUP_MIN_AGE_NS - 1).is_err());
+    }
+
+    #[test]
+    fn cleanup_age_gate_accepts_at_exactly_ten_minutes() {
+        let p = pending(0);
+        assert!(ensure_sol_pending_cleanup_age(&p, SOL_PENDING_CLEANUP_MIN_AGE_NS).is_ok());
+    }
+
+    #[test]
+    fn cleanup_age_gate_accepts_well_after_ten_minutes() {
+        let p = pending(0);
+        assert!(ensure_sol_pending_cleanup_age(&p, SOL_PENDING_CLEANUP_MIN_AGE_NS * 10).is_ok());
+    }
+
+    // ─── remove_sol_pending_deposit_if_unfunded_snapshot ──────────────────────
+
+    #[test]
+    fn remove_pending_refuses_when_the_custody_account_is_funded() {
+        let mut s = crate::state::State::default();
+        let p = pending(0);
+        s.sol_pending_deposits.insert(7, p.clone());
+        // Even DUST (1 lamport) counts as funded -- removing the pending entry
+        // would strand it with no record pointing back to the custody address.
+        assert!(remove_sol_pending_deposit_if_unfunded_snapshot(&mut s, 7, &p, 1).is_err());
+        assert!(s.sol_pending_deposits.contains_key(&7));
+    }
+
+    #[test]
+    fn remove_pending_succeeds_when_unfunded_and_snapshot_matches() {
+        let mut s = crate::state::State::default();
+        let p = pending(0);
+        s.sol_pending_deposits.insert(7, p.clone());
+        assert!(remove_sol_pending_deposit_if_unfunded_snapshot(&mut s, 7, &p, 0).unwrap());
+        assert!(!s.sol_pending_deposits.contains_key(&7));
+    }
+
+    #[test]
+    fn remove_pending_is_a_noop_when_the_snapshot_is_stale() {
+        let mut s = crate::state::State::default();
+        let original = pending(0);
+        let mut changed = original.clone();
+        changed.rent_exempt_lamports = 999_999; // simulate a concurrent change
+        s.sol_pending_deposits.insert(7, changed);
+        assert!(!remove_sol_pending_deposit_if_unfunded_snapshot(&mut s, 7, &original, 0).unwrap());
+        assert!(s.sol_pending_deposits.contains_key(&7));
+    }
+
+    #[test]
+    fn remove_pending_is_a_noop_when_already_removed() {
+        let mut s = crate::state::State::default();
+        let p = pending(0);
+        assert!(!remove_sol_pending_deposit_if_unfunded_snapshot(&mut s, 7, &p, 0).unwrap());
+    }
+
+    // ─── Fix-1 (security review, 2026-07-24): fan-out settlement race ────────
+    //
+    // These two tests are PURE-HELPER LEVEL, not true concurrency. `settle_sol_claim`
+    // reads `ic_cdk::api::caller()` as its first statement (this module's doc
+    // comment explains why that rules out driving it directly here), and
+    // reproducing the ACTUAL race requires two-or-more real canister update calls
+    // interleaved by the IC scheduler at specific `.await` points inside
+    // `reconcile_sol_other_inflight_claims` -- an interleaving this crate's test
+    // harness (plain `#[test]`, no controllable async executor) cannot force, and
+    // that PocketIC's synchronous `update_call` helpers in `sol_native_e2e_pic`
+    // don't attempt to force either. What follows instead exercises the exact
+    // same pure decision functions `settle_sol_claim` calls
+    // (`sol_settlement_decision`, `sol_sibling_reconcile_decision`,
+    // `sol_sibling_explains_ambiguous_advance`, `reconcile_sol_settlement_snapshot`,
+    // `quarantine_sol_claim_snapshot`) against a manually-sequenced fan-out
+    // scenario, to (a) demonstrate the exact mechanism the security review
+    // described, and (b) prove the guard's exclusivity closes it by construction.
+
+    /// Reproduces the BUG mechanism for a 3-way fan-out (one winner W, two
+    /// losers L1/L2) sharing one nonce, WITHOUT the Fix-1 guard: an
+    /// interleaving in which L2's retry runs to completion (finding W's
+    /// `Confirmed` sibling, clearing itself, and removing W as `Paid`)
+    /// BEFORE L1 gets to retry. By the time L1 retries, the evidence that
+    /// would have explained ITS OWN identical ambiguity (W's settlement) is
+    /// already gone, so it is quarantined -- exactly the "remaining N-2
+    /// losers" failure mode from the design review, reproduced here for N=2.
+    #[test]
+    fn fan_out_without_serialization_can_strand_a_later_loser_in_quarantine() {
+        let mut s = crate::state::State::default();
+        let (claim_w, claim_l1, claim_l2) = (1u64, 2u64, 3u64);
+        // All three independently read the SAME live nonce "N0" and signed
+        // against it -- the precondition the design doc's step 1-2 describes
+        // ("none has written a settlement yet, so none sees the others").
+        s.sol_claims.insert(claim_w, claim_with_settlement(Some(settlement("N0", "sigW"))));
+        s.sol_claims.insert(claim_l1, claim_with_settlement(Some(settlement("N0", "sigL1"))));
+        s.sol_claims.insert(claim_l2, claim_with_settlement(Some(settlement("N0", "sigL2"))));
+        // Only W's transaction landed; the nonce has since advanced to "N1".
+        let live = "N1";
+        let w_status = TxStatus::Confirmed { slot: 1 };
+        let loser_status = TxStatus::NotFound;
+
+        // Both losers independently compute AmbiguousAdvanced for their own
+        // stale settlement -- neither has resigned yet.
+        assert_eq!(
+            sol_settlement_decision(&loser_status, "N0", live),
+            SolSettlementDecision::AmbiguousAdvanced
+        );
+
+        // ── L2 retries FIRST (a plausible interleaving absent a protocol-wide
+        // guard) and its reconcile pass finds W confirmed with the exact
+        // nonce value ("N0") its own ambiguity needed explained. ──
+        assert!(sol_sibling_explains_ambiguous_advance(&w_status, "N0", "N0"));
+        assert_eq!(
+            sol_sibling_reconcile_decision(&w_status, "N0", live),
+            SolSiblingReconcileDecision::Paid
+        );
+        // Applying that reconciliation is exactly what `reconcile_sol_other_
+        // inflight_claims` does for a `Paid` sibling: remove it.
+        assert!(reconcile_sol_settlement_snapshot(
+            &mut s,
+            claim_w,
+            "sigW",
+            SolSettlementReconciliation::Paid,
+        ));
+        assert!(
+            !s.sol_claims.contains_key(&claim_w),
+            "the winner's claim is finalized (removed) by L2's retry"
+        );
+        // L2's own ambiguity was explained, so it is NOT quarantined: its
+        // stale settlement is cleared so it can resign.
+        assert!(reconcile_sol_settlement_snapshot(
+            &mut s,
+            claim_l2,
+            "sigL2",
+            SolSettlementReconciliation::ClearForResign,
+        ));
+        assert!(s.sol_claims.get(&claim_l2).unwrap().quarantine_reason.is_none());
+
+        // ── L1 retries SECOND, after W is already gone. Its own decision is
+        // identical to L2's a moment ago (same recorded nonce, same live
+        // nonce), but now NO remaining sibling explains it: W was removed,
+        // and L2's settlement was already cleared (not confirmed, and no
+        // longer carries nonce "N0" at all). ──
+        assert_eq!(
+            sol_settlement_decision(&loser_status, "N0", live),
+            SolSettlementDecision::AmbiguousAdvanced
+        );
+        let remaining_siblings_explain_l1 = sol_inflight_claims(&s, claim_l1)
+            .into_iter()
+            .any(|(_, settlement)| {
+                // Neither remaining claim (there are none left with a
+                // settlement at all -- L2's was just cleared) is CONFIRMED
+                // with nonce "N0".
+                sol_sibling_explains_ambiguous_advance(&w_status, &settlement.nonce_value, "N0")
+            });
+        assert!(
+            !remaining_siblings_explain_l1,
+            "the evidence that explained L2's identical ambiguity is gone by the time L1 retries"
+        );
+        let reason = "settlement diverged: durable nonce advanced from N0 to N1".to_string();
+        assert!(quarantine_sol_claim_snapshot(&mut s, claim_l1, &reason));
+        assert!(
+            s.sol_claims.get(&claim_l1).unwrap().quarantine_reason.is_some(),
+            "without serialization, L1 is spuriously quarantined despite racing identically to L2"
+        );
+    }
+
+    /// Proves the Fix-1 guard closes the race in `fan_out_without_
+    /// serialization_can_strand_a_later_loser_in_quarantine` BY CONSTRUCTION,
+    /// not just by cleaning up after it: under `SolSettlementInflightGuard`,
+    /// each claim's full read-nonce -> reconcile -> sign -> persist -> submit
+    /// sequence runs to completion before the next claim's sequence can
+    /// start (proven exclusive by `blocks_a_second_concurrent_acquire_and_
+    /// returns_the_retryable_error` in `guard.rs`). So by the time claim N
+    /// reads the live nonce, claim N-1's transaction (if it landed) has
+    /// already advanced it -- no two claims in a fan-out ever read or record
+    /// the SAME nonce value, which is the precondition the quarantine bug
+    /// above depends on. Modeled here as three sequential guarded rounds.
+    #[test]
+    fn fan_out_serialized_by_the_guard_never_shares_a_nonce_and_never_quarantines() {
+        let mut s = crate::state::State::default();
+        let (claim_1, claim_2, claim_3) = (1u64, 2u64, 3u64);
+        s.sol_claims.insert(claim_1, claim_with_settlement(None));
+        s.sol_claims.insert(claim_2, claim_with_settlement(None));
+        s.sol_claims.insert(claim_3, claim_with_settlement(None));
+
+        let mut recorded_nonces = Vec::new();
+        let mut now_ns = 1_000u64;
+        // Simulate the durable nonce advancing by one each time a settlement
+        // lands -- the guard's exclusivity is what guarantees claim K's
+        // "read the live nonce" step always happens after claim K-1's
+        // "submit" step has already committed and advanced it.
+        for (claim_id, live_nonce_for_this_round) in
+            [(claim_1, "N0"), (claim_2, "N1"), (claim_3, "N2")]
+        {
+            let guard = SolSettlementInflightGuard::new(now_ns)
+                .expect("guard must be free at the start of each serialized round");
+            // Danger zone: read nonce -> (no siblings to reconcile: this
+            // claim's own prior settlement is None, and no other claim has
+            // settled yet within this round) -> sign -> persist.
+            recorded_nonces.push(live_nonce_for_this_round.to_string());
+            mutate_state_for_test(&mut s, claim_id, live_nonce_for_this_round);
+            // Only after persisting (and, implicitly, submitting) does the
+            // guard release, exactly matching `_sol_settlement_inflight_guard`
+            // in `settle_sol_claim` being held across that whole span.
+            drop(guard);
+            now_ns += 1;
+        }
+
+        assert_eq!(recorded_nonces.len(), 3);
+        assert_ne!(recorded_nonces[0], recorded_nonces[1]);
+        assert_ne!(recorded_nonces[1], recorded_nonces[2]);
+        assert_ne!(recorded_nonces[0], recorded_nonces[2]);
+
+        for claim_id in [claim_1, claim_2, claim_3] {
+            let claim = s.sol_claims.get(&claim_id).unwrap();
+            assert!(
+                claim.quarantine_reason.is_none(),
+                "claim #{claim_id} must settle cleanly, never quarantined, once serialized"
+            );
+            assert!(claim.settlement.is_some());
+        }
+
+        // No two claims in the fan-out ever recorded the same nonce value, so
+        // `sol_settlement_decision` could never classify any of them as
+        // `AmbiguousAdvanced` against a SIBLING's landed transaction the way
+        // the unserialized test above demonstrates.
+        for (i, a) in recorded_nonces.iter().enumerate() {
+            for (j, b) in recorded_nonces.iter().enumerate() {
+                if i != j {
+                    assert_ne!(a, b, "no two serialized claims may share a nonce reading");
+                }
+            }
+        }
+    }
+
+    /// Test-only helper for `fan_out_serialized_by_the_guard_never_shares_a_
+    /// nonce_and_never_quarantines`: persists a `SolSettlement` for `claim_id`
+    /// using `nonce_value`, mirroring the "persist `SolSettlement` before
+    /// submitting" step of `settle_sol_claim` (design doc §5.2 step 8).
+    fn mutate_state_for_test(s: &mut crate::state::State, claim_id: u64, nonce_value: &str) {
+        if let Some(c) = s.sol_claims.get_mut(&claim_id) {
+            c.settlement = Some(crate::state::SolSettlement {
+                signature: format!("sig{claim_id}"),
+                nonce_value: nonce_value.to_string(),
+                destination: "11111111111111111111111111111111".to_string(),
+                submitted_at_ns: 0,
+            });
+        }
+    }
+}
+
+/// Phase 4 of the native-SOL collateral rail (docs/superpowers/specs/
+/// 2026-07-24-native-sol-collateral-design.md §6): contract tests for the
+/// SP absorb entry path (`stability_pool_preflight_sol_absorb_in_state` /
+/// `stability_pool_liquidate_sol_vault_in_state`), mirroring
+/// `xrp_sp_absorb_contract_tests` where a direct analogue exists. Amounts are
+/// lamports instead of drops; there is no destination-tag field.
+#[cfg(test)]
+mod sol_sp_absorb_contract_tests {
+    use super::*;
+    use crate::icrc3_proof::{SpProofLedger, SpWritedownProof};
+    use crate::state::{
+        sol_collateral_config, sol_collateral_principal, CollateralStatus, CustodyKind, State,
+        StoredSolSpAbsorbResult, MAX_SP_SOL_ABSORB_RESULTS_BY_PROOF,
+    };
+    use crate::{SolSpAbsorbRequest, SolSpPayoutAllocation, MAX_SOL_SP_PAYOUT_ALLOCATIONS};
+
+    const E8: u64 = 100_000_000;
+    const VAULT_ID: u64 = 7;
+
+    fn principal(byte: u8) -> Principal {
+        Principal::from_slice(&[byte; 29])
+    }
+
+    fn sp() -> Principal {
+        principal(0x53)
+    }
+
+    fn depositor_a() -> Principal {
+        principal(0xa1)
+    }
+
+    fn depositor_b() -> Principal {
+        principal(0xb2)
+    }
+
+    /// 220 SOL of collateral against 100 icUSD debt at $0.5/SOL: CR = 1.10,
+    /// below the fixed `sol_collateral_config` liquidation_ratio (1.20), so
+    /// the vault is liquidatable, and ample enough that the seizure
+    /// (215 SOL at the fixed 1.075 bonus) is never capped by the vault's own
+    /// balance.
+    fn test_state_with_sol_vault() -> State {
+        let mut state = State::from(crate::InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: principal(0x10),
+            icp_ledger_principal: principal(0x11),
+            fee_e8s: 0,
+            developer_principal: principal(0xdd),
+            treasury_principal: None,
+            stability_pool_principal: Some(sp()),
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        });
+        state.min_icusd_amount = ICUSD::new(0);
+        state.liquidation_protocol_share = Ratio::from(Decimal::ZERO);
+
+        let icp = state.icp_collateral_type();
+        if let Some(cfg) = state.collateral_configs.get_mut(&icp) {
+            cfg.last_price = Some(10.0);
+        }
+        state.open_vault(Vault {
+            owner: principal(0x99),
+            vault_id: 1,
+            borrowed_icusd_amount: ICUSD::new(100 * E8),
+            collateral_amount: 2_000_000_000,
+            collateral_type: icp,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        });
+
+        let sol = sol_collateral_principal();
+        let mut sol_cfg = sol_collateral_config(Ratio::new(dec!(1.0)));
+        sol_cfg.last_price = Some(0.5);
+        sol_cfg.status = CollateralStatus::Active;
+        sol_cfg.custody_kind = Some(CustodyKind::NativeSol);
+        state.collateral_configs.insert(sol, sol_cfg);
+        // 0.1 SOL of collateral against 100 icUSD debt: badly undercollateralized
+        // (deliberately, mirroring the XRP fixture's own ratio), so the
+        // bonus-adjusted seizure demand (215 SOL-equivalent lamports) is capped
+        // at exactly the vault's full collateral_amount (100_000_000 lamports)
+        // — a full "vault wiped out" liquidation, same shape as the XRP fixture.
+        state.open_vault(Vault {
+            owner: principal(0x42),
+            vault_id: VAULT_ID,
+            borrowed_icusd_amount: ICUSD::new(100 * E8),
+            collateral_amount: 100_000_000,
+            collateral_type: sol,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        });
+        state
+    }
+
+    fn proof(block_index: u64) -> SpWritedownProof {
+        SpWritedownProof {
+            block_index,
+            ledger_kind: SpProofLedger::IcusdBurn,
+            vault_id_memo: VAULT_ID,
+        }
+    }
+
+    /// Sums to 100_000_000 lamports, matching the real sizing this fixture
+    /// computes with `liquidation_protocol_share = 0` (see `preflight` below):
+    /// the seizure demand is capped at the vault's full collateral_amount, so
+    /// collateral_received_lamports == total_to_seize_lamports == 100_000_000.
+    fn valid_request(block_index: u64) -> SolSpAbsorbRequest {
+        SolSpAbsorbRequest {
+            vault_id: VAULT_ID,
+            icusd_burned_e8s: 100 * E8,
+            proof: proof(block_index),
+            allocations: vec![
+                SolSpPayoutAllocation {
+                    claimant: depositor_a(),
+                    payout_address: "AaaSolAddrA".to_string(),
+                    lamports: 60_000_000,
+                },
+                SolSpPayoutAllocation {
+                    claimant: depositor_b(),
+                    payout_address: "BbbSolAddrB".to_string(),
+                    lamports: 40_000_000,
+                },
+            ],
+        }
+    }
+
+    fn preflight(state: &mut State, now_ns: u64) {
+        stability_pool_preflight_sol_absorb_in_state(state, sp(), VAULT_ID, 100 * E8, now_ns)
+            .expect("preflight reservation");
+    }
+
+    #[test]
+    fn sol_sp_absorb_routes_protocol_cut_to_developer_claim() {
+        // total_to_seize (gross) > collateral_received (net) => a 3M-lamport
+        // protocol cut. Preflight is hand-inserted so this test is independent
+        // of the fixture's own sizing math (mirrors the XRP contract test).
+        let mut state = test_state_with_sol_vault();
+        state.sp_sol_absorb_preflights.insert(
+            VAULT_ID,
+            crate::state::StoredSolSpAbsorbPreflight {
+                caller: sp(),
+                vault_id: VAULT_ID,
+                icusd_burn_e8s: 100 * E8,
+                total_to_seize_lamports: 100_000_000,
+                collateral_received_lamports: 97_000_000,
+                collateral_price_e8s: 50_000_000,
+                expires_at_ns: 100,
+            },
+        );
+        let mut request = valid_request(44);
+        request.allocations[0].lamports = 57_000_000;
+        request.allocations[1].lamports = 40_000_000; // depositor sum = 97_000_000 (net)
+
+        let result = stability_pool_liquidate_sol_vault_in_state(&mut state, sp(), request, 20)
+            .expect("absorb accepted");
+
+        // Depositor payout claims cover only the NET amount.
+        assert_eq!(result.collateral_received_lamports, 97_000_000);
+        assert_eq!(result.payout_claims.len(), 2);
+        let depositor_total: u64 = result.payout_claims.iter().map(|c| c.lamports).sum();
+        assert_eq!(depositor_total, 97_000_000);
+
+        // The 3M-lamport protocol cut is routed to a developer-settleable claim.
+        let developer = principal(0xdd);
+        let dev_total: u64 = state
+            .sol_claims
+            .values()
+            .filter(|c| c.claimant == developer)
+            .map(|c| c.lamports)
+            .sum();
+        assert_eq!(
+            dev_total, 3_000_000,
+            "protocol cut must route to a developer claim"
+        );
+
+        // One SolClaim per allocation (2) plus the protocol-fee claim (1) = 3.
+        assert_eq!(
+            state.sol_claims.len(),
+            3,
+            "expected one SolClaim per allocation plus the protocol-fee claim"
+        );
+
+        // Conservation: every lamport debited from the vault is covered by a claim.
+        let claimed_total: u64 = state.sol_claims.values().map(|c| c.lamports).sum();
+        assert_eq!(
+            claimed_total, 100_000_000,
+            "sum of all SolClaims must equal the gross collateral seized (total_to_seize_lamports)"
+        );
+        assert!(state.vault_id_to_vaults.get(&VAULT_ID).is_none());
+    }
+
+    #[test]
+    fn sol_sp_absorb_writes_down_claims_and_exact_replay_returns_same_claim_ids() {
+        let mut state = test_state_with_sol_vault();
+        preflight(&mut state, 10);
+
+        let result =
+            stability_pool_liquidate_sol_vault_in_state(&mut state, sp(), valid_request(44), 20)
+                .expect("absorb accepted");
+        assert!(result.success);
+        assert_eq!(result.vault_id, VAULT_ID);
+        assert_eq!(result.liquidated_debt_e8s, 100 * E8);
+        assert_eq!(result.collateral_received_lamports, 100_000_000);
+        assert_eq!(result.payout_claims.len(), 2);
+        assert_eq!(result.payout_claims[0].claimant, depositor_a());
+        assert_eq!(result.payout_claims[0].claim_id, 0);
+        assert_eq!(result.payout_claims[1].claimant, depositor_b());
+        assert_eq!(result.payout_claims[1].claim_id, 1);
+        assert_eq!(state.next_sol_claim_id, 2);
+        assert!(state.vault_id_to_vaults.get(&VAULT_ID).is_none());
+        assert!(state.sp_sol_absorb_preflights.get(&VAULT_ID).is_none());
+        assert!(state
+            .sp_sol_absorb_results_by_proof
+            .contains_key(&(SpProofLedger::IcusdBurn, 44,)));
+        assert_eq!(state.sol_claims.get(&0).unwrap().claimant, depositor_a());
+        assert_eq!(state.sol_claims.get(&1).unwrap().claimant, depositor_b());
+
+        // Replay with an IDENTICAL fingerprint must return the same cached
+        // result and claim ids, minting nothing new.
+        let replay =
+            stability_pool_liquidate_sol_vault_in_state(&mut state, sp(), valid_request(44), 999)
+                .expect("exact replay returns cached result");
+        assert_eq!(replay, result);
+        assert_eq!(
+            replay.payout_claims[0].claim_id, 0,
+            "replay must return the SAME claim ids, not mint new ones"
+        );
+        assert_eq!(replay.payout_claims[1].claim_id, 1);
+        assert_eq!(state.next_sol_claim_id, 2, "replay must not mint new claims");
+        assert_eq!(state.sol_claims.len(), 2);
+    }
+
+    #[test]
+    fn sol_sp_absorb_conflicting_replay_rejects_without_mutation() {
+        let mut state = test_state_with_sol_vault();
+        preflight(&mut state, 10);
+        let result =
+            stability_pool_liquidate_sol_vault_in_state(&mut state, sp(), valid_request(44), 20)
+                .unwrap();
+        let claims_before = state.sol_claims.clone();
+        let next_before = state.next_sol_claim_id;
+        let results_before = state.sp_sol_absorb_results_by_proof.clone();
+
+        // Same proof key (block 44), but a DIFFERENT allocation fingerprint
+        // (payout address changed) — must be rejected and must mutate nothing.
+        let mut conflicting = valid_request(44);
+        conflicting.allocations[0].payout_address = "DifferentSolAddr".to_string();
+        assert!(
+            stability_pool_liquidate_sol_vault_in_state(&mut state, sp(), conflicting, 30).is_err()
+        );
+        assert_eq!(state.sol_claims, claims_before);
+        assert_eq!(state.next_sol_claim_id, next_before);
+        assert_eq!(state.sp_sol_absorb_results_by_proof, results_before);
+        assert_eq!(
+            state
+                .sp_sol_absorb_results_by_proof
+                .get(&(SpProofLedger::IcusdBurn, 44))
+                .unwrap()
+                .result,
+            result,
+        );
+    }
+
+    fn stored_result_for(block_index: u64) -> StoredSolSpAbsorbResult {
+        StoredSolSpAbsorbResult {
+            caller: sp(),
+            vault_id: block_index,
+            icusd_burned_e8s: 100 * E8,
+            proof_ledger: SpProofLedger::IcusdBurn,
+            proof_block_index: block_index,
+            allocation_fingerprint: vec![block_index as u8; 32],
+            result: crate::SolSpAbsorbResult {
+                success: true,
+                vault_id: block_index,
+                liquidated_debt_e8s: 100 * E8,
+                collateral_received_lamports: 100_000_000,
+                payout_claims: vec![],
+                block_index,
+                collateral_price_e8s: 50_000_000,
+            },
+            accepted_at_ns: block_index,
+        }
+    }
+
+    #[test]
+    fn sol_sp_absorb_result_cache_keeps_just_accepted_proof() {
+        let mut state = State::default();
+        for block_index in 1..=(MAX_SP_SOL_ABSORB_RESULTS_BY_PROOF as u64) {
+            record_sp_sol_absorb_result_bounded(
+                &mut state,
+                (SpProofLedger::IcusdBurn, block_index),
+                stored_result_for(block_index),
+            );
+        }
+
+        record_sp_sol_absorb_result_bounded(
+            &mut state,
+            (SpProofLedger::IcusdBurn, 0),
+            stored_result_for(0),
+        );
+
+        assert_eq!(
+            state.sp_sol_absorb_results_by_proof.len(),
+            MAX_SP_SOL_ABSORB_RESULTS_BY_PROOF,
+        );
+        assert!(
+            state
+                .sp_sol_absorb_results_by_proof
+                .contains_key(&(SpProofLedger::IcusdBurn, 0)),
+            "the just-accepted proof must remain replayable",
+        );
+        assert!(!state
+            .sp_sol_absorb_results_by_proof
+            .contains_key(&(SpProofLedger::IcusdBurn, 1)));
+    }
+
+    #[test]
+    fn sol_sp_absorb_allocation_fanout_over_max_is_rejected_before_burn() {
+        let mut state = test_state_with_sol_vault();
+        preflight(&mut state, 10);
+        let mut request = valid_request(44);
+        // Blow the fanout cap while keeping the lamport sum correct: replace
+        // the two allocations with MAX+1 tiny ones summing to the reserved
+        // collateral_received_lamports (100_000_000).
+        let n = MAX_SOL_SP_PAYOUT_ALLOCATIONS + 1;
+        let share = 100_000_000u64 / (n as u64);
+        let remainder = 100_000_000u64 - share * (n as u64);
+        request.allocations = (0..n)
+            .map(|i| SolSpPayoutAllocation {
+                claimant: Principal::from_slice(&(i as u32).to_be_bytes()),
+                payout_address: format!("addr{i}"),
+                lamports: share + if i == 0 { remainder } else { 0 },
+            })
+            .collect();
+
+        assert!(stability_pool_liquidate_sol_vault_in_state(&mut state, sp(), request, 20).is_err());
+        assert!(state.sol_claims.is_empty());
+        assert_eq!(state.next_sol_claim_id, 0);
+        assert!(state.sp_sol_absorb_results_by_proof.is_empty());
     }
 }

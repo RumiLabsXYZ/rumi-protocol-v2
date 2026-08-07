@@ -44,6 +44,7 @@ pub mod supply;
 pub mod vault;
 pub mod evm;
 pub mod monad;
+pub mod sol;
 pub mod solana;
 pub mod xrp;
 

@@ -183,6 +183,18 @@ struct Script {
     /// multi-provider consensus on real clusters, so the consensus-demanding
     /// auto-fetch chronically fails. Defaults false (the happy-path mock agrees).
     latest_blockhash_inconsistent: bool,
+    /// Network-wide rent-exempt minimum (lamports) returned by
+    /// `getMinimumBalanceForRentExemption`, used by the native-SOL-collateral
+    /// rail (`chains::sol::rpc::get_rent_exempt_minimum`; absent from the
+    /// dormant M1/M2 rail this mock originally served). Defaults to the real
+    /// mainnet value for a 0-byte account (890,880 lamports) so the happy path
+    /// works out of the box.
+    rent_exempt_lamports: u64,
+    /// Count of `sendTransaction` calls served so far. Lets a test assert that
+    /// an idempotent `settle_sol_claim` retry (design doc §5.3's `AlreadyPaid`
+    /// row) submits NO second transfer, distinguishing it from a legitimate
+    /// re-sign (`SafeToResign`), which DOES increment this.
+    send_transaction_count: u64,
 }
 
 impl Default for Script {
@@ -209,6 +221,8 @@ impl Default for Script {
                     .to_string(),
             latest_blockhash_b58: "11111111111111111111111111111111".to_string(),
             latest_blockhash_inconsistent: false,
+            rent_exempt_lamports: 890_880,
+            send_transaction_count: 0,
         }
     }
 }
@@ -325,9 +339,21 @@ fn jsonRequest(_sources: RpcSources, _config: Option<RpcConfig>, payload: String
             }
             "sendTransaction" => {
                 // params = [b64tx, {encoding, skipPreflight}]. result = signature.
+                // Note: the count increment lives in the outer `SCRIPT.with` below
+                // (this closure only holds an immutable borrow); see there.
                 format!(
                     r#"{{"jsonrpc":"2.0","id":{},"result":{:?}}}"#,
                     id, script.send_signature
+                )
+            }
+            "getMinimumBalanceForRentExemption" => {
+                // params = [dataLen]. result is a BARE u64 (not nested under
+                // result.value), same shape as getSlot. Used by the
+                // native-SOL-collateral rail (chains::sol::rpc), absent from
+                // the dormant M1/M2 rail this mock originally served.
+                format!(
+                    r#"{{"jsonrpc":"2.0","id":{},"result":{}}}"#,
+                    id, script.rent_exempt_lamports
                 )
             }
             "getTransaction" => {
@@ -362,6 +388,12 @@ fn jsonRequest(_sources: RpcSources, _config: Option<RpcConfig>, payload: String
             }
         }
     });
+
+    if method == "sendTransaction" {
+        SCRIPT.with(|s| {
+            s.borrow_mut().send_transaction_count += 1;
+        });
+    }
 
     MultiRequestResult::Consistent(RequestResult::Ok(response_json))
 }
@@ -445,4 +477,24 @@ fn set_latest_blockhash_inconsistent(v: bool) {
     SCRIPT.with(|s| {
         s.borrow_mut().latest_blockhash_inconsistent = v;
     });
+}
+
+/// Set the network-wide rent-exempt minimum (lamports) returned by
+/// `getMinimumBalanceForRentExemption`. Used by the native-SOL-collateral
+/// rail's `open_sol_vault` / `confirm_sol_deposit` / `settle_sol_claim`.
+#[ic_cdk_macros::update]
+fn set_rent_exempt_lamports(lamports: u64) {
+    SCRIPT.with(|s| {
+        s.borrow_mut().rent_exempt_lamports = lamports;
+    });
+}
+
+/// Count of `sendTransaction` calls served so far. Lets a test assert that an
+/// idempotent `settle_sol_claim` retry (the `AlreadyPaid` row of the design
+/// doc's §5.3 table) submits NO second transfer, distinguishing it from a
+/// legitimate re-sign (`SafeToResign`), which DOES call `sendTransaction`
+/// again.
+#[ic_cdk_macros::query]
+fn get_send_transaction_count() -> u64 {
+    SCRIPT.with(|s| s.borrow().send_transaction_count)
 }

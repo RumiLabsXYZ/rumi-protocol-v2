@@ -1,0 +1,14 @@
+<svg width="32" height="32" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="SOL">
+  <defs>
+    <linearGradient id="sol-gradient" x1="2" y1="6" x2="30" y2="26" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#9945FF" />
+      <stop offset="1" stop-color="#14F195" />
+    </linearGradient>
+  </defs>
+  <circle cx="16" cy="16" r="16" fill="#0B0B14" />
+  <g fill="url(#sol-gradient)">
+    <path d="M8.6 20.7a1.1 1.1 0 0 1 .78-.32h14.02a.55.55 0 0 1 .39.94l-2.77 2.77a1.1 1.1 0 0 1-.78.32H6.22a.55.55 0 0 1-.39-.94Z" />
+    <path d="M8.6 8.32A1.1 1.1 0 0 1 9.38 8h14.02a.55.55 0 0 1 .39.94l-2.77 2.77a1.1 1.1 0 0 1-.78.32H6.22a.55.55 0 0 1-.39-.94Z" />
+    <path d="M23.4 14.47a1.1 1.1 0 0 0-.78-.32H8.6a.55.55 0 0 0-.39.94l2.77 2.77c.21.2.49.32.78.32h14.02a.55.55 0 0 0 .39-.94Z" />
+  </g>
+</svg>

@@ -1,5 +1,6 @@
 import type { Principal } from '@dfinity/principal';
 import type { VaultOperationResult } from './types';
+import { isNativeSolPrincipal } from './solPayoutHelpers';
 
 const E8S = 100_000_000;
 const MAX_XRP_DESTINATION_TAG = 0xffffffff;
@@ -32,8 +33,11 @@ export function isNativeXrpPrincipal(value: PrincipalLike): boolean {
   return principalText(value) === XRP_NATIVE_PRINCIPAL_TEXT;
 }
 
+// Generalized beyond its name on purpose: both native rails (XRP, SOL) settle
+// exclusively through claims, never through a plain ICRC transfer, so anything
+// that isn't ICRC-claimable must be excluded here, not just XRP.
 export function isIcrcClaimableCollateral(value: PrincipalLike): boolean {
-  return !isNativeXrpPrincipal(value);
+  return !isNativeXrpPrincipal(value) && !isNativeSolPrincipal(value);
 }
 
 export function validateXrpPayoutInput(addressInput: string, destinationTagInput?: string): XrpPayoutValidation {

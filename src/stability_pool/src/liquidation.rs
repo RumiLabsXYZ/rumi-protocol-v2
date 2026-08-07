@@ -241,6 +241,9 @@ fn ensure_no_other_pending_pool_absorb_for_chain(
     if state.has_pending_native_xrp_absorbs() {
         return Err(StabilityPoolError::SystemBusy);
     }
+    if state.has_pending_native_sol_absorbs() {
+        return Err(StabilityPoolError::SystemBusy);
+    }
     Ok(())
 }
 
@@ -251,8 +254,29 @@ fn ensure_no_other_pending_pool_absorb_for_native_xrp(
     if state.has_pending_chain_absorbs() {
         return Err(StabilityPoolError::SystemBusy);
     }
+    if state.has_pending_native_sol_absorbs() {
+        return Err(StabilityPoolError::SystemBusy);
+    }
     if state.has_pending_native_xrp_absorbs()
         && state.get_pending_native_xrp_absorb(vault_id).is_none()
+    {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    Ok(())
+}
+
+fn ensure_no_other_pending_pool_absorb_for_native_sol(
+    state: &StabilityPoolState,
+    vault_id: u64,
+) -> Result<(), StabilityPoolError> {
+    if state.has_pending_chain_absorbs() {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    if state.has_pending_native_xrp_absorbs() {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    if state.has_pending_native_sol_absorbs()
+        && state.get_pending_native_sol_absorb(vault_id).is_none()
     {
         return Err(StabilityPoolError::SystemBusy);
     }
@@ -937,6 +961,681 @@ pub(crate) async fn execute_native_xrp_absorb_with_io(
         Err(error) => return liquidation_failure(vault_info, error),
     };
     match mutate_state(|s| apply_native_xrp_absorb_success_in_state_at(s, &accepted, io.now_ns())) {
+        Ok(result) => result,
+        Err(error) => liquidation_failure(vault_info, error),
+    }
+}
+
+// ─── SOL analogue of the native-XRP absorb block above ───
+//
+// Mirrors it exactly: same crash-safe two-phase (burn-then-submit) intent
+// journal, same retry/replay semantics. Structural differences only:
+// `lamports` instead of `drops`, no destination-tag field, and the backend
+// method names are the `_sol_` counterparts.
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NativeSolAbsorbPlan {
+    pub vault_id: u64,
+    pub collateral_type: Principal,
+    pub icusd_ledger: Principal,
+    pub icusd_minting_account: Account,
+    pub icusd_to_burn_e8s: u64,
+    pub stables_consumed: BTreeMap<Principal, u64>,
+    pub collateral_received_lamports: u64,
+    pub collateral_price_e8s: u64,
+    pub allocations: Vec<SolSpPayoutAllocation>,
+}
+
+fn native_sol_intent_matches_plan(
+    intent: &NativeSolAbsorbIntent,
+    plan: &NativeSolAbsorbPlan,
+) -> bool {
+    intent.vault_id == plan.vault_id
+        && intent.collateral_type == plan.collateral_type
+        && intent.icusd_ledger == plan.icusd_ledger
+        && intent.icusd_minting_account == plan.icusd_minting_account
+        && intent.icusd_to_burn_e8s == plan.icusd_to_burn_e8s
+        && intent.stables_consumed == plan.stables_consumed
+        && intent.collateral_received_lamports == plan.collateral_received_lamports
+        && intent.collateral_price_e8s == plan.collateral_price_e8s
+        && intent.allocations == plan.allocations
+}
+
+fn native_sol_request_from_intent(
+    intent: &NativeSolAbsorbIntent,
+    proof: rumi_protocol_backend::icrc3_proof::SpWritedownProof,
+) -> SolSpAbsorbRequest {
+    SolSpAbsorbRequest {
+        vault_id: intent.vault_id,
+        icusd_burned_e8s: intent.icusd_to_burn_e8s,
+        proof,
+        allocations: intent.allocations.clone(),
+    }
+}
+
+pub(crate) fn prepare_or_reuse_native_sol_absorb_intent_in_state(
+    state: &mut StabilityPoolState,
+    plan: &NativeSolAbsorbPlan,
+    now_ns: u64,
+) -> Result<NativeSolAbsorbIntent, StabilityPoolError> {
+    if let Some(existing) = state.get_pending_native_sol_absorb(plan.vault_id) {
+        if native_sol_intent_matches_plan(&existing, plan) {
+            return Ok(existing);
+        }
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id: plan.vault_id,
+            reason: "pending native SOL absorb intent conflicts with current preflight".to_string(),
+        });
+    }
+
+    let intent = NativeSolAbsorbIntent {
+        vault_id: plan.vault_id,
+        collateral_type: plan.collateral_type,
+        icusd_ledger: plan.icusd_ledger,
+        icusd_minting_account: plan.icusd_minting_account,
+        icusd_to_burn_e8s: plan.icusd_to_burn_e8s,
+        stables_consumed: plan.stables_consumed.clone(),
+        collateral_received_lamports: plan.collateral_received_lamports,
+        collateral_price_e8s: plan.collateral_price_e8s,
+        allocations: plan.allocations.clone(),
+        burn_created_at_time_ns: now_ns,
+        status: NativeSolAbsorbIntentStatus::Prepared,
+        burn_proof: None,
+        backend_result: None,
+        last_error: None,
+        created_at_ns: now_ns,
+        updated_at_ns: now_ns,
+    };
+    state.put_pending_native_sol_absorb(intent.clone())?;
+    Ok(intent)
+}
+
+pub(crate) fn mark_native_sol_absorb_burned_in_state(
+    state: &mut StabilityPoolState,
+    vault_id: u64,
+    proof: rumi_protocol_backend::icrc3_proof::SpWritedownProof,
+    now_ns: u64,
+) -> Result<NativeSolAbsorbIntent, StabilityPoolError> {
+    let mut intent = state
+        .get_pending_native_sol_absorb(vault_id)
+        .ok_or_else(|| StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "missing pending native SOL absorb intent".to_string(),
+        })?;
+    if let Some(existing) = &intent.burn_proof {
+        if existing != &proof {
+            return Err(StabilityPoolError::LiquidationFailed {
+                vault_id,
+                reason: "pending native SOL absorb burn proof conflicts with retry proof"
+                    .to_string(),
+            });
+        }
+    }
+    intent.burn_proof = Some(proof);
+    intent.status = NativeSolAbsorbIntentStatus::Burned;
+    intent.last_error = None;
+    intent.updated_at_ns = now_ns;
+    state.put_pending_native_sol_absorb(intent.clone())?;
+    Ok(intent)
+}
+
+pub(crate) fn mark_native_sol_absorb_backend_result_in_state(
+    state: &mut StabilityPoolState,
+    vault_id: u64,
+    result: SolSpAbsorbResult,
+    now_ns: u64,
+) -> Result<NativeSolAbsorbIntent, StabilityPoolError> {
+    let mut intent = state
+        .get_pending_native_sol_absorb(vault_id)
+        .ok_or_else(|| StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "missing pending native SOL absorb intent".to_string(),
+        })?;
+    if let Some(existing) = &intent.backend_result {
+        if existing != &result {
+            return Err(StabilityPoolError::LiquidationFailed {
+                vault_id,
+                reason: "pending native SOL absorb backend result conflicts with retry result"
+                    .to_string(),
+            });
+        }
+    }
+    intent.backend_result = Some(result);
+    intent.status = NativeSolAbsorbIntentStatus::BackendAccepted;
+    intent.last_error = None;
+    intent.updated_at_ns = now_ns;
+    state.put_pending_native_sol_absorb(intent.clone())?;
+    Ok(intent)
+}
+
+pub(crate) fn mark_native_sol_absorb_error_in_state(
+    state: &mut StabilityPoolState,
+    vault_id: u64,
+    status: NativeSolAbsorbIntentStatus,
+    reason: String,
+    now_ns: u64,
+) {
+    if let Some(mut intent) = state.get_pending_native_sol_absorb(vault_id) {
+        intent.status = status;
+        intent.last_error = Some(reason);
+        intent.updated_at_ns = now_ns;
+        let _ = state.put_pending_native_sol_absorb(intent);
+    }
+}
+
+pub(crate) fn clear_unburned_native_sol_absorb_intent_in_state(
+    state: &mut StabilityPoolState,
+    vault_id: u64,
+) -> bool {
+    let Some(intent) = state.get_pending_native_sol_absorb(vault_id) else {
+        return false;
+    };
+    if intent.status == NativeSolAbsorbIntentStatus::Prepared
+        && intent.burn_proof.is_none()
+        && intent.backend_result.is_none()
+    {
+        state.take_pending_native_sol_absorb(vault_id);
+        return true;
+    }
+    false
+}
+
+pub(crate) fn apply_native_sol_absorb_success_in_state_at(
+    state: &mut StabilityPoolState,
+    intent: &NativeSolAbsorbIntent,
+    now_ns: u64,
+) -> Result<LiquidationResult, StabilityPoolError> {
+    let backend_result =
+        intent
+            .backend_result
+            .clone()
+            .ok_or_else(|| StabilityPoolError::LiquidationFailed {
+                vault_id: intent.vault_id,
+                reason: "missing accepted native SOL backend result".to_string(),
+            })?;
+    validate_sol_absorb_backend_result(
+        intent.vault_id,
+        intent.icusd_to_burn_e8s,
+        intent.collateral_received_lamports,
+        &intent.allocations,
+        &backend_result,
+    )?;
+    state.process_native_sol_absorb_success_at(
+        intent.vault_id,
+        intent.collateral_type,
+        &intent.stables_consumed,
+        intent.collateral_received_lamports,
+        &backend_result.payout_claims,
+        now_ns,
+    )?;
+    state.take_pending_native_sol_absorb(intent.vault_id);
+
+    Ok(LiquidationResult {
+        vault_id: intent.vault_id,
+        stables_consumed: intent.stables_consumed.clone(),
+        collateral_gained: intent.collateral_received_lamports,
+        collateral_type: intent.collateral_type,
+        success: true,
+        error_message: None,
+    })
+}
+
+#[async_trait::async_trait(?Send)]
+pub(crate) trait NativeSolAbsorbIo {
+    fn now_ns(&self) -> u64;
+
+    async fn fetch_icusd_minting_account(
+        &mut self,
+        icusd_ledger: Principal,
+    ) -> Result<Account, StabilityPoolError>;
+
+    async fn preflight_sol_absorb(
+        &mut self,
+        protocol_id: Principal,
+        vault_id: u64,
+        expected_icusd_burn_e8s: u64,
+    ) -> Result<SolSpAbsorbPreflight, StabilityPoolError>;
+
+    async fn burn_icusd(
+        &mut self,
+        icusd_ledger: Principal,
+        minting_account: Account,
+        amount_e8s: u64,
+        vault_id: u64,
+        created_at_time: u64,
+    ) -> Result<rumi_protocol_backend::icrc3_proof::SpWritedownProof, StabilityPoolError>;
+
+    async fn submit_sol_absorb(
+        &mut self,
+        protocol_id: Principal,
+        request: SolSpAbsorbRequest,
+    ) -> Result<SolSpAbsorbResult, StabilityPoolError>;
+}
+
+struct CdkNativeSolAbsorbIo;
+
+#[async_trait::async_trait(?Send)]
+impl NativeSolAbsorbIo for CdkNativeSolAbsorbIo {
+    fn now_ns(&self) -> u64 {
+        ic_cdk::api::time()
+    }
+
+    async fn fetch_icusd_minting_account(
+        &mut self,
+        icusd_ledger: Principal,
+    ) -> Result<Account, StabilityPoolError> {
+        fetch_icusd_minting_account(icusd_ledger).await
+    }
+
+    async fn preflight_sol_absorb(
+        &mut self,
+        protocol_id: Principal,
+        vault_id: u64,
+        expected_icusd_burn_e8s: u64,
+    ) -> Result<SolSpAbsorbPreflight, StabilityPoolError> {
+        let preflight_result: Result<
+            (Result<SolSpAbsorbPreflight, rumi_protocol_backend::ProtocolError>,),
+            _,
+        > = call(
+            protocol_id,
+            "stability_pool_preflight_sol_absorb",
+            (vault_id, expected_icusd_burn_e8s),
+        )
+        .await;
+
+        match preflight_result {
+            Ok((Ok(preflight),)) => Ok(preflight),
+            Ok((Err(error),)) => Err(StabilityPoolError::LiquidationFailed {
+                vault_id,
+                reason: format!("backend rejected native SOL preflight: {:?}", error),
+            }),
+            Err(_) => Err(StabilityPoolError::InterCanisterCallFailed {
+                target: format!("{}", protocol_id),
+                method: "stability_pool_preflight_sol_absorb".to_string(),
+            }),
+        }
+    }
+
+    async fn burn_icusd(
+        &mut self,
+        icusd_ledger: Principal,
+        minting_account: Account,
+        amount_e8s: u64,
+        vault_id: u64,
+        created_at_time: u64,
+    ) -> Result<rumi_protocol_backend::icrc3_proof::SpWritedownProof, StabilityPoolError> {
+        burn_icusd_for_chain_writedown_with_account(
+            icusd_ledger,
+            minting_account,
+            amount_e8s,
+            vault_id,
+            created_at_time,
+        )
+        .await
+    }
+
+    async fn submit_sol_absorb(
+        &mut self,
+        protocol_id: Principal,
+        request: SolSpAbsorbRequest,
+    ) -> Result<SolSpAbsorbResult, StabilityPoolError> {
+        let vault_id = request.vault_id;
+        let backend_result: Result<
+            (Result<SolSpAbsorbResult, rumi_protocol_backend::ProtocolError>,),
+            _,
+        > = call(
+            protocol_id,
+            "stability_pool_liquidate_sol_vault",
+            (request,),
+        )
+        .await;
+
+        match backend_result {
+            Ok((Ok(result),)) => Ok(result),
+            Ok((Err(error),)) => Err(StabilityPoolError::LiquidationFailed {
+                vault_id,
+                reason: format!("backend rejected native SOL absorb after burn: {:?}", error),
+            }),
+            Err(_) => Err(StabilityPoolError::InterCanisterCallFailed {
+                target: format!("{}", protocol_id),
+                method: "stability_pool_liquidate_sol_vault".to_string(),
+            }),
+        }
+    }
+}
+
+fn sol_claims_match_allocations(
+    allocations: &[SolSpPayoutAllocation],
+    claims: &[SolSpPayoutClaim],
+) -> bool {
+    allocations.len() == claims.len()
+        && allocations
+            .iter()
+            .zip(claims.iter())
+            .all(|(allocation, claim)| {
+                allocation.claimant == claim.claimant
+                    && allocation.payout_address == claim.payout_address
+                    && allocation.lamports == claim.lamports
+            })
+}
+
+fn validate_sol_absorb_backend_result(
+    vault_id: u64,
+    icusd_burned_e8s: u64,
+    collateral_received_lamports: u64,
+    allocations: &[SolSpPayoutAllocation],
+    result: &SolSpAbsorbResult,
+) -> Result<(), StabilityPoolError> {
+    if !result.success {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "backend reported unsuccessful native SOL absorb".to_string(),
+        });
+    }
+    if result.vault_id != vault_id {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "backend native SOL result does not match requested vault".to_string(),
+        });
+    }
+    if result.liquidated_debt_e8s != icusd_burned_e8s {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "backend native SOL liquidated debt does not match SP burn".to_string(),
+        });
+    }
+    if result.collateral_received_lamports != collateral_received_lamports {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "backend native SOL collateral does not match preflight".to_string(),
+        });
+    }
+    if !sol_claims_match_allocations(allocations, &result.payout_claims) {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "backend native SOL payout claims do not match requested allocations"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+async fn submit_native_sol_absorb_to_backend(
+    protocol_id: Principal,
+    intent: &NativeSolAbsorbIntent,
+    io: &mut dyn NativeSolAbsorbIo,
+) -> Result<NativeSolAbsorbIntent, StabilityPoolError> {
+    let proof = intent
+        .burn_proof
+        .clone()
+        .ok_or_else(|| StabilityPoolError::LiquidationFailed {
+            vault_id: intent.vault_id,
+            reason: "missing native SOL burn proof for backend submit".to_string(),
+        })?;
+    let request = native_sol_request_from_intent(intent, proof);
+    match io.submit_sol_absorb(protocol_id, request).await {
+        Ok(result) => {
+            if let Err(error) = validate_sol_absorb_backend_result(
+                intent.vault_id,
+                intent.icusd_to_burn_e8s,
+                intent.collateral_received_lamports,
+                &intent.allocations,
+                &result,
+            ) {
+                let reason = format!("{:?}", error);
+                mutate_state(|s| {
+                    mark_native_sol_absorb_error_in_state(
+                        s,
+                        intent.vault_id,
+                        NativeSolAbsorbIntentStatus::BackendRejected,
+                        reason,
+                        io.now_ns(),
+                    );
+                });
+                return Err(error);
+            }
+            mutate_state(|s| {
+                mark_native_sol_absorb_backend_result_in_state(
+                    s,
+                    intent.vault_id,
+                    result,
+                    io.now_ns(),
+                )
+            })
+        }
+        Err(error) => {
+            let status = match &error {
+                StabilityPoolError::LiquidationFailed { .. } => {
+                    NativeSolAbsorbIntentStatus::BackendRejected
+                }
+                _ => NativeSolAbsorbIntentStatus::Burned,
+            };
+            let reason = format!("{:?}", error);
+            mutate_state(|s| {
+                mark_native_sol_absorb_error_in_state(
+                    s,
+                    intent.vault_id,
+                    status,
+                    reason,
+                    io.now_ns(),
+                );
+            });
+            Err(error)
+        }
+    }
+}
+
+pub(crate) async fn execute_native_sol_absorb_with_io(
+    vault_info: &LiquidatableVaultInfo,
+    io: &mut dyn NativeSolAbsorbIo,
+) -> LiquidationResult {
+    if let Err(error) =
+        read_state(|s| ensure_no_other_pending_pool_absorb_for_native_sol(s, vault_info.vault_id))
+    {
+        return liquidation_failure(vault_info, error);
+    }
+
+    if let Some(intent) = read_state(|s| s.get_pending_native_sol_absorb(vault_info.vault_id)) {
+        if intent.backend_result.is_some() {
+            return match mutate_state(|s| {
+                apply_native_sol_absorb_success_in_state_at(s, &intent, io.now_ns())
+            }) {
+                Ok(result) => result,
+                Err(error) => liquidation_failure(vault_info, error),
+            };
+        }
+        if intent.burn_proof.is_some() {
+            let protocol_id = read_state(|s| s.protocol_canister_id);
+            let accepted = match submit_native_sol_absorb_to_backend(protocol_id, &intent, io).await
+            {
+                Ok(intent) => intent,
+                Err(error) => return liquidation_failure(vault_info, error),
+            };
+            return match mutate_state(|s| {
+                apply_native_sol_absorb_success_in_state_at(s, &accepted, io.now_ns())
+            }) {
+                Ok(result) => result,
+                Err(error) => liquidation_failure(vault_info, error),
+            };
+        }
+    }
+
+    let current = match read_state(|s| {
+        if !s.collateral_requires_payout_address(&vault_info.collateral_type) {
+            return Err(StabilityPoolError::PayoutAddressRequired {
+                collateral: vault_info.collateral_type,
+            });
+        }
+        if let Some(intent) = s.get_pending_native_sol_absorb(vault_info.vault_id) {
+            return Ok((
+                s.protocol_canister_id,
+                intent.icusd_ledger,
+                Some(intent.icusd_minting_account),
+                intent.icusd_to_burn_e8s,
+                intent.stables_consumed,
+            ));
+        }
+        let draw_amount = if vault_info.recommended_liquidation_amount > 0 {
+            vault_info.recommended_liquidation_amount
+        } else {
+            vault_info.debt_amount
+        };
+        let icusd_ledger = s
+            .icusd_ledger()
+            .ok_or(StabilityPoolError::TokenNotAccepted {
+                ledger: Principal::anonymous(),
+            })?;
+        let icusd_to_burn_e8s =
+            draw_amount.min(s.effective_icusd_pool_for_collateral(&vault_info.collateral_type));
+        if icusd_to_burn_e8s == 0 {
+            return Err(StabilityPoolError::InsufficientPoolBalance);
+        }
+        let mut stables_consumed = BTreeMap::new();
+        stables_consumed.insert(icusd_ledger, icusd_to_burn_e8s);
+        Ok((
+            s.protocol_canister_id,
+            icusd_ledger,
+            None,
+            icusd_to_burn_e8s,
+            stables_consumed,
+        ))
+    }) {
+        Ok(current) => current,
+        Err(error) => return liquidation_failure(vault_info, error),
+    };
+    let (protocol_id, icusd_ledger, existing_minting_account, icusd_to_burn_e8s, stables_consumed) =
+        current;
+
+    let preflight = match io
+        .preflight_sol_absorb(protocol_id, vault_info.vault_id, icusd_to_burn_e8s)
+        .await
+    {
+        Ok(preflight) => preflight,
+        Err(error) => {
+            mutate_state(|s| {
+                clear_unburned_native_sol_absorb_intent_in_state(s, vault_info.vault_id);
+            });
+            return liquidation_failure(vault_info, error);
+        }
+    };
+    if preflight.vault_id != vault_info.vault_id || preflight.icusd_burn_e8s != icusd_to_burn_e8s {
+        mutate_state(|s| {
+            clear_unburned_native_sol_absorb_intent_in_state(s, vault_info.vault_id);
+        });
+        return liquidation_failure(
+            vault_info,
+            StabilityPoolError::LiquidationFailed {
+                vault_id: vault_info.vault_id,
+                reason: "native SOL preflight does not match requested burn".to_string(),
+            },
+        );
+    }
+
+    let allocations = match read_state(|s| {
+        s.build_native_sol_payout_allocations(
+            vault_info.collateral_type,
+            &stables_consumed,
+            preflight.collateral_received_lamports,
+        )
+    }) {
+        Ok(allocations) if !allocations.is_empty() => allocations
+            .into_iter()
+            .map(SolSpPayoutAllocation::from)
+            .collect::<Vec<_>>(),
+        Ok(_) => {
+            mutate_state(|s| {
+                clear_unburned_native_sol_absorb_intent_in_state(s, vault_info.vault_id);
+            });
+            return liquidation_failure(
+                vault_info,
+                StabilityPoolError::LiquidationFailed {
+                    vault_id: vault_info.vault_id,
+                    reason: "native SOL absorb produced no payout allocations".to_string(),
+                },
+            );
+        }
+        Err(error) => {
+            mutate_state(|s| {
+                clear_unburned_native_sol_absorb_intent_in_state(s, vault_info.vault_id);
+            });
+            return liquidation_failure(vault_info, error);
+        }
+    };
+
+    let minting_account = if let Some(account) = existing_minting_account {
+        account
+    } else {
+        match io.fetch_icusd_minting_account(icusd_ledger).await {
+            Ok(account) => account,
+            Err(error) => {
+                mutate_state(|s| {
+                    clear_unburned_native_sol_absorb_intent_in_state(s, vault_info.vault_id);
+                });
+                return liquidation_failure(vault_info, error);
+            }
+        }
+    };
+
+    let plan = NativeSolAbsorbPlan {
+        vault_id: vault_info.vault_id,
+        collateral_type: vault_info.collateral_type,
+        icusd_ledger,
+        icusd_minting_account: minting_account,
+        icusd_to_burn_e8s,
+        stables_consumed,
+        collateral_received_lamports: preflight.collateral_received_lamports,
+        collateral_price_e8s: preflight.collateral_price_e8s,
+        allocations,
+    };
+    let now = io.now_ns();
+    let mut intent =
+        match mutate_state(|s| prepare_or_reuse_native_sol_absorb_intent_in_state(s, &plan, now)) {
+            Ok(intent) => intent,
+            Err(error) => return liquidation_failure(vault_info, error),
+        };
+
+    let proof = if let Some(proof) = intent.burn_proof.clone() {
+        proof
+    } else {
+        match io
+            .burn_icusd(
+                intent.icusd_ledger,
+                intent.icusd_minting_account,
+                intent.icusd_to_burn_e8s,
+                intent.vault_id,
+                intent.burn_created_at_time_ns,
+            )
+            .await
+        {
+            Ok(proof) => {
+                intent = match mutate_state(|s| {
+                    mark_native_sol_absorb_burned_in_state(
+                        s,
+                        vault_info.vault_id,
+                        proof.clone(),
+                        io.now_ns(),
+                    )
+                }) {
+                    Ok(intent) => intent,
+                    Err(error) => return liquidation_failure(vault_info, error),
+                };
+                proof
+            }
+            Err(error) => {
+                mutate_state(|s| {
+                    clear_unburned_native_sol_absorb_intent_in_state(s, vault_info.vault_id);
+                });
+                return liquidation_failure(vault_info, error);
+            }
+        }
+    };
+    intent.burn_proof = Some(proof);
+
+    let accepted = match submit_native_sol_absorb_to_backend(protocol_id, &intent, io).await {
+        Ok(intent) => intent,
+        Err(error) => return liquidation_failure(vault_info, error),
+    };
+    match mutate_state(|s| apply_native_sol_absorb_success_in_state_at(s, &accepted, io.now_ns())) {
         Ok(result) => result,
         Err(error) => liquidation_failure(vault_info, error),
     }
@@ -2060,6 +2759,9 @@ pub async fn claim_cfx(
 /// No circuit breaker / suspension mechanism — if a token fails, we skip it and try the
 /// next one. If they all fail, the liquidation simply doesn't happen this round.
 async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> LiquidationResult {
+    if read_state(|s| s.is_native_sol_collateral(&vault_info.collateral_type)) {
+        return execute_native_sol_absorb_with_io(vault_info, &mut CdkNativeSolAbsorbIo).await;
+    }
     if read_state(|s| s.collateral_requires_payout_address(&vault_info.collateral_type)) {
         return execute_native_xrp_absorb_with_io(vault_info, &mut CdkNativeXrpAbsorbIo).await;
     }

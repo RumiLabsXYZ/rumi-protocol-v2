@@ -285,8 +285,18 @@ pub struct SuccessWithFee {
     /// balance. `Some` only on the ckStable path; `None` elsewhere. Optional for
     /// Candid back-compat.
     pub stable_pulled_e6s: Option<u64>,
-    /// Native-XRP manual liquidation payout claim id for the liquidator reward.
-    /// `None` for non-XRP collateral and non-liquidation SuccessWithFee results.
+    /// Manual-liquidation payout claim id for the liquidator reward on ANY
+    /// native-custody collateral, not just XRP: `queue_collateral_payout`
+    /// returns a claim id for both `CustodyKind::NativeXrp` (an `XrpClaim`) and
+    /// `CustodyKind::NativeSol` (a `SolClaim`), and both land here. `None` for
+    /// ICRC-ledger collateral and for non-liquidation `SuccessWithFee` results.
+    ///
+    /// The field keeps its `xrp_claim_id` name deliberately. Candid identifies
+    /// record fields by a hash of the name, so renaming it to something neutral
+    /// would be a wire-breaking change for existing clients, unlike the purely
+    /// structural type renames elsewhere in this crate. Callers must read the
+    /// claim id from here for SOL too, and disambiguate by the vault's
+    /// collateral type rather than by the field name.
     pub xrp_claim_id: Option<u64>,
 }
 
@@ -346,6 +356,56 @@ pub struct XrpSpAbsorbResult {
     pub liquidated_debt_e8s: u64,
     pub collateral_received_drops: u64,
     pub payout_claims: Vec<XrpSpPayoutClaim>,
+    pub block_index: u64,
+    pub collateral_price_e8s: u64,
+}
+
+/// SOL analogue of `MAX_XRP_SP_PAYOUT_ALLOCATIONS` (design doc §6).
+pub const MAX_SOL_SP_PAYOUT_ALLOCATIONS: usize = 500;
+
+/// SOL analogue of `XrpSpAbsorbPreflight`. Amounts are in lamports (SOL's
+/// native unit), matching `state::SolClaim::lamports`.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SolSpAbsorbPreflight {
+    pub vault_id: u64,
+    pub icusd_burn_e8s: u64,
+    pub collateral_received_lamports: u64,
+    pub collateral_price_e8s: u64,
+    pub expires_at_ns: u64,
+}
+
+/// SOL analogue of `XrpSpPayoutAllocation`. No `destination_tag` field: Solana
+/// has no destination-tag analogue (design doc §5.2/§9).
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SolSpPayoutAllocation {
+    pub claimant: Principal,
+    pub payout_address: String,
+    pub lamports: u64,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SolSpAbsorbRequest {
+    pub vault_id: u64,
+    pub icusd_burned_e8s: u64,
+    pub proof: crate::icrc3_proof::SpWritedownProof,
+    pub allocations: Vec<SolSpPayoutAllocation>,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SolSpPayoutClaim {
+    pub claimant: Principal,
+    pub claim_id: u64,
+    pub payout_address: String,
+    pub lamports: u64,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SolSpAbsorbResult {
+    pub success: bool,
+    pub vault_id: u64,
+    pub liquidated_debt_e8s: u64,
+    pub collateral_received_lamports: u64,
+    pub payout_claims: Vec<SolSpPayoutClaim>,
     pub block_index: u64,
     pub collateral_price_e8s: u64,
 }
@@ -722,6 +782,33 @@ pub enum ProtocolError {
     /// rejection). Wraps a developer-facing message. Appended AFTER `ChainAdmin`
     /// so historical on-chain events keep decoding (append-only Candid surface).
     EvmAuth(String),
+}
+
+/// Resolution action for a quarantined native-custody claim, shared by
+/// `admin_resolve_xrp_claim` and `admin_resolve_sol_claim`.
+///
+/// One type rather than a per-chain pair on purpose. The two are structurally
+/// identical (same two labels), so Candid deduplicates them in the exported
+/// `.did` regardless, and the exporter picks whichever name it sees first. That
+/// previously produced `admin_resolve_xrp_claim : (nat64, SolClaimResolution)`,
+/// which is wire-correct but actively misleading to an operator reading the
+/// public interface. A single neutral name is honest about what is actually on
+/// the wire. Renaming is not a breaking change: Candid is structural, so any
+/// existing caller passing `variant { ConfirmPaid }` is unaffected.
+///
+/// The admin first verifies OFF-ledger (against the custody account's live
+/// balance plus a chain explorer) whether the divergent payment actually
+/// delivered to the claimant, then applies one of these. The vault-layer
+/// primitives are `vault::resolve_quarantined_xrp_claim_snapshot` and
+/// `vault::resolve_quarantined_sol_claim_snapshot`.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub enum NativeClaimResolution {
+    /// The divergent payment DID deliver — finalize by removing the claim
+    /// (no re-pay).
+    ConfirmPaid,
+    /// It did NOT deliver — clear the quarantine + settlement so the claimant
+    /// can retry settlement and be paid exactly once.
+    ReleaseForRetry,
 }
 
 impl From<GuardError> for ProtocolError {

@@ -172,16 +172,18 @@
 
 <style>
   /* The top bar is position:fixed; height 3.5rem; z-index 100. The pending
-     XRP recovery banner, when present, owns the first row below the header; the
-     strip sits below that dynamic height. Its height is bound reactively to the
-     --rumi-strip-height CSS variable, and .main-content's padding-top
-     compensates via calc() (see +layout.svelte). */
+     XRP and SOL recovery banners, when present, stack in that order below the
+     header (XRP first, SOL below it, see SolPendingDepositBanner.svelte); the
+     strip sits below BOTH dynamic heights, summed. Its own height is bound
+     reactively to the --rumi-strip-height CSS variable, and .main-content's
+     padding-top compensates via calc() (see +layout.svelte); that calc() must
+     also sum both recovery-height vars, not just one. */
   .strip-outer {
     position: fixed;
-    top: calc(3.5rem + var(--rumi-xrp-recovery-height, 0px));
+    top: calc(3.5rem + var(--rumi-xrp-recovery-height, 0px) + var(--rumi-sol-recovery-height, 0px));
     left: 0;
     right: 0;
-    z-index: 98;  /* below top-bar and pending XRP recovery, above page content */
+    z-index: 98;  /* below top-bar and pending recovery banners, above page content */
     overflow-x: hidden;  /* belt-and-suspenders against mobile overflow */
   }
   /* Only draw border/background when something is actually rendered.

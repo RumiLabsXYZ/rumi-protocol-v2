@@ -20,9 +20,10 @@ use rumi_protocol_backend::{
     EventsByPrincipalPagedResponse, Fees, ForwardFilteredEventsResponse, GetEventsArg,
     GetEventsFilteredResponse, GetSnapshotsArg, InterestSplitArg, PerCollateralRateCurve,
     ProtocolArg, ProtocolError, ProtocolSnapshot, ProtocolStatus, ReserveBalance,
-    ReserveRedemptionResult, StabilityPoolLiquidationResult, StableTokenType, SuccessWithFee,
-    SupplyAudit, SupplyAuditEntry, VaultArgWithToken, VaultHistoryPagedResponse,
-    VaultsPageResponse, XrpSpAbsorbPreflight, XrpSpAbsorbRequest, XrpSpAbsorbResult,
+    NativeClaimResolution, ReserveRedemptionResult, StabilityPoolLiquidationResult, StableTokenType,
+    SuccessWithFee, SupplyAudit, SupplyAuditEntry, VaultArgWithToken, VaultHistoryPagedResponse,
+    VaultsPageResponse, SolSpAbsorbPreflight, SolSpAbsorbRequest, SolSpAbsorbResult,
+    XrpSpAbsorbPreflight, XrpSpAbsorbRequest, XrpSpAbsorbResult,
     MAX_EVENTS_BY_PRINCIPAL_LEGACY, MAX_EVENTS_BY_PRINCIPAL_OUTPUT, MAX_EVENTS_BY_PRINCIPAL_SCAN,
     MAX_VAULTS_LEGACY_PAGE, MAX_VAULTS_PAGE_LIMIT, MAX_VAULT_HISTORY,
     PROTOCOL_STATUS_SNAPSHOT_TTL_NANOS, TREASURY_STATS_SNAPSHOT_TTL_NANOS,
@@ -728,6 +729,15 @@ fn post_upgrade(arg: ProtocolArg) {
         log!(
             INFO,
             "[upgrade]: froze XRP collateral status from {:?} because the configured Schnorr key is not production",
+            previous
+        );
+    }
+    let sol_guardrail_migration =
+        rumi_protocol_backend::state::enforce_sol_launch_guardrails(&mut state);
+    if let Some(previous) = sol_guardrail_migration.previous_status {
+        log!(
+            INFO,
+            "[upgrade]: froze SOL collateral status from {:?} because the configured Schnorr key is not production",
             previous
         );
     }
@@ -4822,6 +4832,38 @@ async fn liquidate_vault_partial_with_stable(
     )
 }
 
+/// Fail-closed reject message for the automated-liquidation entry points below
+/// (`stability_pool_liquidate`, `stability_pool_liquidate_debt_burned`,
+/// `stability_pool_liquidate_with_reserves`, `bot_claim_liquidation`). Native
+/// custody (XRP, SOL, and any future non-ICRC rail) cannot be liquidated
+/// automatically: neither the SP nor the bot can settle an XrpClaim/SolClaim,
+/// so seizing collateral here would strand it and burn SP depositors. Gates on
+/// the fail-closed `vault::vault_is_native_custody` (not `vault_is_native_xrp`)
+/// so a future custody kind is excluded automatically without touching these
+/// call sites again; separately resolves the exact kind for an accurate
+/// message via an exhaustive match, mirroring the match on `custody()` in
+/// vault.rs's own SP write-down defense-in-depth backstop.
+fn native_custody_liquidation_reject_message(vault_id: u64) -> Option<String> {
+    if !rumi_protocol_backend::vault::vault_is_native_custody(vault_id) {
+        return None;
+    }
+    let kind_label = read_state(|s| {
+        s.vault_id_to_vaults
+            .get(&vault_id)
+            .and_then(|v| s.get_collateral_config(&v.collateral_type))
+            .map(|c| c.custody())
+    })
+    .map(|custody| match custody {
+        rumi_protocol_backend::state::CustodyKind::NativeXrp => "Native-XRP",
+        rumi_protocol_backend::state::CustodyKind::NativeSol => "Native-SOL",
+        rumi_protocol_backend::state::CustodyKind::IcrcLedger => "Native custody",
+    })
+    .unwrap_or("Native custody");
+    Some(format!(
+        "{kind_label} collateral is liquidated manually (claim-based), not via the stability pool or bot"
+    ))
+}
+
 // Stability Pool Integration - allows stability pool to execute liquidations
 #[update]
 #[candid_method(update)]
@@ -4833,13 +4875,10 @@ async fn stability_pool_liquidate(
     validate_liquidation_not_frozen()?;
     validate_price_for_liquidation()?;
     validate_freshness_for_vault(vault_id).await?;
-    // P5: native-XRP collateral is liquidated MANUALLY (claim-based) only; automated
-    // stability-pool / bot liquidation cannot settle an XrpClaim (would strand the
-    // seized XRP and burn SP depositors), so reject native-XRP here.
-    if rumi_protocol_backend::vault::vault_is_native_xrp(vault_id) {
-        return Err(ProtocolError::GenericError(
-            "Native-XRP collateral is liquidated manually (claim-based), not via the stability pool or bot".to_string(),
-        ));
+    // Native custody (XRP, SOL, and any future non-ICRC rail) is liquidated
+    // MANUALLY (claim-based) only; see `native_custody_liquidation_reject_message`.
+    if let Some(msg) = native_custody_liquidation_reject_message(vault_id) {
+        return Err(ProtocolError::GenericError(msg));
     }
     let caller = ic_cdk::api::caller();
 
@@ -4942,13 +4981,10 @@ async fn stability_pool_liquidate_debt_burned(
     validate_liquidation_not_frozen()?;
     validate_price_for_liquidation()?;
     validate_freshness_for_vault(vault_id).await?;
-    // P5: native-XRP collateral is liquidated MANUALLY (claim-based) only; automated
-    // stability-pool / bot liquidation cannot settle an XrpClaim (would strand the
-    // seized XRP and burn SP depositors), so reject native-XRP here.
-    if rumi_protocol_backend::vault::vault_is_native_xrp(vault_id) {
-        return Err(ProtocolError::GenericError(
-            "Native-XRP collateral is liquidated manually (claim-based), not via the stability pool or bot".to_string(),
-        ));
+    // Native custody (XRP, SOL, and any future non-ICRC rail) is liquidated
+    // MANUALLY (claim-based) only; see `native_custody_liquidation_reject_message`.
+    if let Some(msg) = native_custody_liquidation_reject_message(vault_id) {
+        return Err(ProtocolError::GenericError(msg));
     }
     let caller = ic_cdk::api::caller();
 
@@ -5340,6 +5376,88 @@ fn stability_pool_xrp_claim_outstanding(
     })
 }
 
+#[update]
+#[candid_method(update)]
+fn stability_pool_preflight_sol_absorb(
+    vault_id: u64,
+    expected_icusd_burn_e8s: u64,
+) -> Result<SolSpAbsorbPreflight, ProtocolError> {
+    if ic_cdk::caller() == Principal::anonymous() {
+        return Err(ProtocolError::AnonymousCallerNotAllowed);
+    }
+    let caller = ic_cdk::api::caller();
+    let now = ic_cdk::api::time();
+    mutate_state(|s| {
+        rumi_protocol_backend::vault::stability_pool_preflight_sol_absorb_in_state(
+            s,
+            caller,
+            vault_id,
+            expected_icusd_burn_e8s,
+            now,
+        )
+    })
+}
+
+#[update]
+#[candid_method(update)]
+async fn stability_pool_liquidate_sol_vault(
+    request: SolSpAbsorbRequest,
+) -> Result<SolSpAbsorbResult, ProtocolError> {
+    if ic_cdk::caller() == Principal::anonymous() {
+        return Err(ProtocolError::AnonymousCallerNotAllowed);
+    }
+    let caller = ic_cdk::api::caller();
+    let is_stability_pool =
+        read_state(|s| s.stability_pool_canister.map_or(false, |sp| sp == caller));
+    if !is_stability_pool {
+        return Err(ProtocolError::GenericError(
+            "Caller is not the registered stability pool canister".to_string(),
+        ));
+    }
+
+    if let Some(replay) = read_state(|s| {
+        rumi_protocol_backend::vault::sol_sp_absorb_cached_replay_result(s, caller, &request)
+    }) {
+        return replay;
+    }
+
+    verify_sp_icusd_burn_proof(
+        request.vault_id,
+        request.icusd_burned_e8s,
+        caller,
+        &request.proof,
+    )
+    .await?;
+
+    let now = ic_cdk::api::time();
+    mutate_state(|s| {
+        rumi_protocol_backend::vault::stability_pool_liquidate_sol_vault_in_state(
+            s, caller, request, now,
+        )
+    })
+}
+
+/// Called by the Stability Pool before it clears a native-SOL payout reminder.
+/// Returns true only while the backend still has an outstanding claim for that
+/// exact depositor; false means the claim is absent and the SP reminder may be
+/// removed.
+#[update]
+#[candid_method(update)]
+fn stability_pool_sol_claim_outstanding(
+    claim_id: u64,
+    claimant: Principal,
+) -> Result<bool, ProtocolError> {
+    if ic_cdk::caller() == Principal::anonymous() {
+        return Err(ProtocolError::AnonymousCallerNotAllowed);
+    }
+    let caller = ic_cdk::api::caller();
+    read_state(|s| {
+        rumi_protocol_backend::vault::stability_pool_sol_claim_outstanding_in_state(
+            s, caller, claim_id, claimant,
+        )
+    })
+}
+
 /// Called by the stability pool to enqueue a native CFX payout from a reserved
 /// chain-liquidation claim. The SP owns depositor apportionment; the backend owns
 /// custody, idempotency, and the settlement queue.
@@ -5431,13 +5549,10 @@ async fn stability_pool_liquidate_with_reserves(
     validate_liquidation_not_frozen()?;
     validate_price_for_liquidation()?;
     validate_freshness_for_vault(vault_id).await?;
-    // P5: native-XRP collateral is liquidated MANUALLY (claim-based) only; automated
-    // stability-pool / bot liquidation cannot settle an XrpClaim (would strand the
-    // seized XRP and burn SP depositors), so reject native-XRP here.
-    if rumi_protocol_backend::vault::vault_is_native_xrp(vault_id) {
-        return Err(ProtocolError::GenericError(
-            "Native-XRP collateral is liquidated manually (claim-based), not via the stability pool or bot".to_string(),
-        ));
+    // Native custody (XRP, SOL, and any future non-ICRC rail) is liquidated
+    // MANUALLY (claim-based) only; see `native_custody_liquidation_reject_message`.
+    if let Some(msg) = native_custody_liquidation_reject_message(vault_id) {
+        return Err(ProtocolError::GenericError(msg));
     }
     let caller = ic_cdk::api::caller();
 
@@ -6161,18 +6276,6 @@ fn get_xrp_claims() -> Vec<(u64, rumi_protocol_backend::state::XrpClaim)> {
     })
 }
 
-/// F-03 resolution action for a quarantined native-XRP claim. The admin first verifies
-/// OFF-ledger (custody `account_info` balance/Sequence + an XRPL explorer) whether the
-/// divergent Payment actually delivered to the claimant, then applies one of these.
-#[derive(CandidType, Deserialize, Clone, Debug)]
-pub enum XrpClaimResolution {
-    /// The divergent Payment DID deliver — finalize by removing the claim (no re-pay).
-    ConfirmPaid,
-    /// The Payment did NOT deliver — clear the quarantine + settlement so the claimant
-    /// can retry `settle_xrp_claim` and be paid exactly once.
-    ReleaseForRetry,
-}
-
 /// F-03 observability: native-XRP claims currently quarantined (a settlement divergence
 /// is suspected — resolve via `admin_resolve_xrp_claim`). Developer-gated read.
 #[candid_method(query)]
@@ -6226,12 +6329,12 @@ fn admin_quarantine_xrp_claim(claim_id: u64, reason: String) -> Result<(), Proto
 
 /// F-03: resolve a quarantined native-XRP claim after off-ledger reconciliation.
 /// Developer-gated. Errors if the claim is absent or not quarantined, so a resolve can
-/// never silently drop a healthy, still-settle-able claim. See `XrpClaimResolution`.
+/// never silently drop a healthy, still-settle-able claim. See `NativeClaimResolution`.
 #[candid_method(update)]
 #[update]
 fn admin_resolve_xrp_claim(
     claim_id: u64,
-    resolution: XrpClaimResolution,
+    resolution: NativeClaimResolution,
 ) -> Result<(), ProtocolError> {
     let caller = ic_cdk::caller();
     if read_state(|s| s.developer_principal != caller) {
@@ -6239,7 +6342,7 @@ fn admin_resolve_xrp_claim(
             "Only the developer can resolve XRP claims".to_string(),
         ));
     }
-    let confirm_paid = matches!(resolution, XrpClaimResolution::ConfirmPaid);
+    let confirm_paid = matches!(resolution, NativeClaimResolution::ConfirmPaid);
     mutate_state(|s| {
         rumi_protocol_backend::vault::resolve_quarantined_xrp_claim_snapshot(
             s,
@@ -6282,6 +6385,483 @@ fn get_my_xrp_claims() -> Vec<(u64, rumi_protocol_backend::state::XrpClaim)> {
     let caller = ic_cdk::caller();
     read_state(|s| {
         s.xrp_claims
+            .iter()
+            .filter(|(_, c)| c.claimant == caller)
+            .map(|(id, c)| (*id, c.clone()))
+            .collect()
+    })
+}
+
+// ─── Native SOL rail (Phase 3 CDP integration, chains::sol) — mirrors the
+// native-XRP block above one-for-one, MINUS the destination-tag variant
+// (Solana has no analogue — design doc §5.2/§9) and minus RPC transform
+// queries (SOL RPC goes through the SOL RPC canister as inter-canister
+// calls, which does its own multi-provider consensus; XRP needs raw HTTPS
+// outcall transforms only because it talks to rippled directly — §9). ────
+
+/// Developer-only guard for the SOL observability endpoints below. Mirrors
+/// `xrp_require_developer` exactly.
+fn sol_require_developer() -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal == caller) {
+        Ok(())
+    } else {
+        Err(ProtocolError::GenericError(
+            "Only the developer may call the SOL observability endpoints".to_string(),
+        ))
+    }
+}
+
+fn validate_sol_schnorr_key_change(name: &str, has_sol_state: bool) -> Result<(), ProtocolError> {
+    if name != rumi_protocol_backend::chains::sol::config::SOL_TEST_SCHNORR_KEY_NAME
+        && name != rumi_protocol_backend::chains::sol::config::SOL_PRODUCTION_SCHNORR_KEY_NAME
+    {
+        return Err(ProtocolError::GenericError(format!(
+            "unsupported SOL Schnorr key name '{name}' (expected test_key_1 or key_1)"
+        )));
+    }
+    if has_sol_state {
+        return Err(ProtocolError::GenericError(
+            "cannot change the SOL Schnorr key after SOL collateral state exists".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn sol_has_key_bound_state() -> bool {
+    let sol_ct = rumi_protocol_backend::state::sol_collateral_principal();
+    read_state(|s| {
+        s.collateral_configs.contains_key(&sol_ct)
+            || !s.sol_pending_deposits.is_empty()
+            || !s.sol_claims.is_empty()
+            || s.vault_id_to_vaults
+                .values()
+                .any(|vault| vault.collateral_type == sol_ct)
+    })
+}
+
+/// Developer-only. Refuses to change the SOL Schnorr key once any SOL custody
+/// state exists (design doc §2) — changing the key silently re-points every
+/// derived custody address, which would orphan any pending deposit, open
+/// vault, or unsettled claim.
+#[candid_method(update)]
+#[update]
+fn set_sol_schnorr_key_name(name: String) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if !read_state(|s| s.developer_principal == caller) {
+        return Err(ProtocolError::GenericError(
+            "Only developer can set SOL Schnorr key".to_string(),
+        ));
+    }
+    validate_sol_schnorr_key_change(&name, sol_has_key_bound_state())?;
+    mutate_state(|s| s.sol_schnorr_key_name = name.clone());
+    log!(
+        INFO,
+        "[set_sol_schnorr_key_name] SOL Schnorr key set to {}",
+        name
+    );
+    Ok(())
+}
+
+#[candid_method(query)]
+#[query]
+fn get_sol_schnorr_key_name() -> String {
+    rumi_protocol_backend::chains::sol::config::sol_schnorr_key_name()
+}
+
+/// Developer-gated observability (no funds touched): derive the protocol's SOL
+/// settlement (fee-payer / nonce-authority) address via threshold Ed25519.
+#[update]
+async fn sol_settlement_address() -> Result<String, ProtocolError> {
+    sol_require_developer()?;
+    let path = rumi_protocol_backend::chains::sol::ted25519::sol_settlement_derivation_path();
+    rumi_protocol_backend::chains::sol::ted25519::derive_sol_address(path)
+        .await
+        .map(|(_pubkey, addr)| addr)
+        .map_err(|e| ProtocolError::GenericError(format!("sol settlement derive failed: {e}")))
+}
+
+/// Developer-gated observability: derive the per-vault SOL custody address for
+/// `(user, nonce)` via threshold Ed25519 — the address a SOL vault would
+/// publish for deposits. No state is written (derivation is idempotent).
+#[update]
+async fn sol_custody_address(user: Principal, nonce: u64) -> Result<String, ProtocolError> {
+    sol_require_developer()?;
+    let path = rumi_protocol_backend::chains::sol::ted25519::sol_custody_derivation_path(user, nonce);
+    rumi_protocol_backend::chains::sol::ted25519::derive_sol_address(path)
+        .await
+        .map(|(_pubkey, addr)| addr)
+        .map_err(|e| ProtocolError::GenericError(format!("sol custody derive failed: {e}")))
+}
+
+/// Developer-gated observability: read a SOL account's balance in lamports via
+/// the SOL RPC canister. Returns 0 for an unfunded/non-existent account.
+#[update]
+async fn sol_balance(address: String) -> Result<u64, ProtocolError> {
+    sol_require_developer()?;
+    rumi_protocol_backend::chains::sol::rpc::get_balance(&address)
+        .await
+        .map_err(|e| ProtocolError::GenericError(format!("sol getBalance failed: {e}")))
+}
+
+/// P3 (native-SOL collateral): open a vault in open-then-verify staging and
+/// return its Solana custody address to fund, plus the live rent-exempt
+/// minimum (design doc §4.1). No collateral credited, no icUSD minted.
+#[update]
+async fn open_sol_vault() -> Result<rumi_protocol_backend::vault::SolVaultOpenInfo, ProtocolError> {
+    validate_call().await?;
+    check_postcondition(rumi_protocol_backend::vault::open_sol_vault().await)
+}
+
+/// P3 (native-SOL collateral): verify the deposit to a vault's custody address
+/// and credit it as collateral (creating the Vault with zero debt). Owner-only,
+/// idempotent. Borrow icUSD afterwards via the normal `borrow_from_vault`.
+#[update]
+async fn confirm_sol_deposit(vault_id: u64) -> Result<u64, ProtocolError> {
+    validate_call().await?;
+    check_postcondition(rumi_protocol_backend::vault::confirm_sol_deposit(vault_id).await)
+}
+
+/// P4 (native-SOL collateral): settle a SOL claim by signing + submitting a
+/// durable-nonce transfer from the source vault's custody address to
+/// `destination` (the settlement wallet, not the claimant, bears the Solana
+/// network fee — design doc §5.1). Claimant-only. No destination-tag variant:
+/// Solana has no analogue (design doc §5.2). Returns the locally computed
+/// base58 transaction signature.
+#[update]
+async fn settle_sol_claim(claim_id: u64, destination: String) -> Result<String, ProtocolError> {
+    validate_call().await?;
+    check_postcondition(rumi_protocol_backend::vault::settle_sol_claim(claim_id, destination).await)
+}
+
+/// Owner cleanup for an abandoned native-SOL open. The vault layer verifies
+/// live Solana state and removes the pending entry only if it is unfunded.
+#[update]
+async fn cancel_sol_pending_open(vault_id: u64) -> Result<(), ProtocolError> {
+    validate_call().await?;
+    check_postcondition(rumi_protocol_backend::vault::cancel_sol_pending_open(vault_id).await)
+}
+
+/// Developer cleanup for abandoned native-SOL opens. Also unfunded-only;
+/// funded custody addresses remain confirmable by their owners.
+#[update]
+async fn sweep_sol_pending_open(vault_id: u64) -> Result<(), ProtocolError> {
+    validate_call().await?;
+    check_postcondition(rumi_protocol_backend::vault::sweep_sol_pending_open(vault_id).await)
+}
+
+/// Developer-gated: decode a base58 `blockhash_override` string into a
+/// `solana_message::Hash`. Factored out of `sol_bootstrap_nonce_account` so
+/// the decode itself (a common CLI-typo failure point) is unit-testable
+/// without a canister call context.
+fn decode_sol_blockhash_override(raw: &str) -> Result<solana_message::Hash, ProtocolError> {
+    let bytes = bs58::decode(raw).into_vec().map_err(|e| {
+        ProtocolError::GenericError(format!("blockhash_override is not valid base58: {e}"))
+    })?;
+    let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+        ProtocolError::GenericError(format!(
+            "blockhash_override must decode to exactly 32 bytes (got {})",
+            bytes.len()
+        ))
+    })?;
+    Ok(solana_message::Hash::new_from_array(arr))
+}
+
+/// Developer-gated: bootstrap the shared durable-nonce account backing every
+/// SOL claim settlement (design doc §5.1). `blockhash_override`, if supplied,
+/// is a recent blockhash (base58) the operator fetched just before calling —
+/// `getLatestBlockhash` is chronically `#Inconsistent` under multi-provider
+/// consensus on a live cluster, so auto-fetch (`None`) is reliable only in
+/// PocketIC / other consensus-capable test environments. The developer gate
+/// and the actual bootstrap logic live in `vault::sol_bootstrap_nonce_account`;
+/// this wrapper only decodes the CLI-supplied override.
+#[update]
+async fn sol_bootstrap_nonce_account(
+    blockhash_override: Option<String>,
+) -> Result<String, ProtocolError> {
+    let decoded = match blockhash_override {
+        Some(raw) => Some(decode_sol_blockhash_override(&raw)?),
+        None => None,
+    };
+    check_postcondition(rumi_protocol_backend::vault::sol_bootstrap_nonce_account(decoded).await)
+}
+
+/// Pure precondition check for `register_sol_collateral` (design doc §3):
+/// refuse double-registration; refuse without the production Schnorr key
+/// (changing the key re-points every derived custody address, so this must be
+/// pinned BEFORE the rail can accept borrowing); refuse unless the
+/// durable-nonce account is bootstrapped (design doc §5.1) — registering
+/// without it would let a vault borrow icUSD against collateral that could
+/// never leave via any claim. Order: already-registered short-circuits first
+/// (cheap idempotency check, independent of key/nonce state), then key, then
+/// nonce.
+fn validate_register_sol_collateral_preconditions(
+    already_registered: bool,
+    configured_key: &str,
+    nonce_bootstrapped: bool,
+) -> Result<(), ProtocolError> {
+    if already_registered {
+        return Err(ProtocolError::GenericError(
+            "SOL collateral already registered".to_string(),
+        ));
+    }
+    if !rumi_protocol_backend::chains::sol::config::is_sol_production_key_name(configured_key) {
+        let required = rumi_protocol_backend::chains::sol::config::SOL_PRODUCTION_SCHNORR_KEY_NAME;
+        return Err(ProtocolError::GenericError(format!(
+            "SOL collateral registration requires production Schnorr key {required} (configured: {configured_key})"
+        )));
+    }
+    if !nonce_bootstrapped {
+        return Err(ProtocolError::GenericError(
+            "SOL durable-nonce account is not bootstrapped yet; call sol_bootstrap_nonce_account \
+             first (otherwise a SOL vault could borrow icUSD against collateral that could never \
+             be paid out)."
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// P5 (native-SOL collateral, design doc §3): register SOL as a collateral
+/// (developer-gated). SOL has no IC ledger, so decimals (9 / lamports) and fee
+/// (0) are NOT queried; custody_kind = NativeSol routes deposits/payouts
+/// through the chains::sol rail + the SolClaim model. Params: 135% borrow /
+/// 120% liquidation / 7.5% bonus / 2,500 icUSD debt ceiling; borrowing-fee +
+/// interest are HARDCODED to ckETH's values (0.002 / 0.015), not copied from
+/// ICP's live config (see `state::sol_collateral_config`'s doc comment for
+/// why — unlike XRP, this does not silently drift if ICP's fee changes
+/// later). Calling this is the deliberate act that ACTIVATES the native-SOL
+/// rail — do NOT call on mainnet before the security audit AND the
+/// durable-nonce account is bootstrapped on mainnet-beta.
+#[update]
+async fn register_sol_collateral() -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if !read_state(|s| s.developer_principal == caller) {
+        return Err(ProtocolError::GenericError(
+            "Only the developer can register SOL collateral".to_string(),
+        ));
+    }
+    let sol_ct = rumi_protocol_backend::state::sol_collateral_principal();
+    let (already_registered, configured_key, nonce_bootstrapped, recovery_mult) = read_state(|s| {
+        (
+            s.collateral_configs.contains_key(&sol_ct),
+            s.sol_schnorr_key_name.clone(),
+            s.sol_nonce_account.is_some(),
+            s.recovery_cr_multiplier,
+        )
+    });
+    validate_register_sol_collateral_preconditions(
+        already_registered,
+        &configured_key,
+        nonce_bootstrapped,
+    )?;
+
+    let config = rumi_protocol_backend::state::sol_collateral_config(recovery_mult);
+
+    mutate_state(|s| {
+        event::record_add_collateral_type(s, sol_ct, config);
+    });
+    // Price-fetch timer for SOL (XRC base_asset "SOL"), like any non-ICP collateral.
+    rumi_protocol_backend::xrc::register_collateral_price_timer(sol_ct);
+    log!(
+        INFO,
+        "[register_sol_collateral] Registered native-SOL collateral {} (135/120/7.5%, 2,500 icUSD ceiling)",
+        sol_ct
+    );
+
+    // Best-effort: register the new collateral on the stability pool so it can
+    // accept liquidation proceeds in this token, mirroring `add_collateral_token`'s
+    // SP registration (the XRP/ICRC paths). If the SP call fails we log a
+    // warning but don't fail the overall registration — the admin can always
+    // call register_collateral on the SP manually.
+    if let Some(sp_canister) = read_state(|s| s.stability_pool_canister) {
+        #[derive(candid::CandidType)]
+        struct SpCollateralInfo {
+            ledger_id: Principal,
+            symbol: String,
+            decimals: u8,
+            status: SpCollateralStatus,
+        }
+        #[derive(candid::CandidType)]
+        enum SpCollateralStatus {
+            Active,
+        }
+
+        let info = SpCollateralInfo {
+            ledger_id: sol_ct,
+            symbol: "SOL".to_string(),
+            decimals: 9,
+            status: SpCollateralStatus::Active,
+        };
+
+        match ic_cdk::call::<(SpCollateralInfo,), ()>(sp_canister, "register_collateral", (info,))
+            .await
+        {
+            Ok(()) => {
+                log!(
+                    INFO,
+                    "[register_sol_collateral] Registered SOL ({}) on stability pool {}",
+                    sol_ct,
+                    sp_canister
+                );
+            }
+            Err((code, msg)) => {
+                log!(INFO, "[register_sol_collateral] WARNING: Failed to register SOL on SP: {:?} {} — register manually", code, msg);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// P5 observability: all native-SOL vaults still awaiting their on-chain
+/// deposit (created by `open_sol_vault`, removed by `confirm_sol_deposit`).
+/// Developer-gated read (returns empty for non-developers). Mirrors
+/// `get_xrp_pending_deposits`.
+#[candid_method(query)]
+#[query]
+fn get_sol_pending_deposits() -> Vec<(u64, rumi_protocol_backend::state::SolPendingDeposit)> {
+    let caller = ic_cdk::caller();
+    read_state(|s| {
+        if s.developer_principal != caller {
+            return Vec::new();
+        }
+        s.sol_pending_deposits
+            .iter()
+            .map(|(id, d)| (*id, d.clone()))
+            .collect()
+    })
+}
+
+/// P5 observability: all outstanding native-SOL claims (SOL owed out of a
+/// custody address). Developer-gated read (empty for non-developers). Mirrors
+/// `get_xrp_claims`.
+#[candid_method(query)]
+#[query]
+fn get_sol_claims() -> Vec<(u64, rumi_protocol_backend::state::SolClaim)> {
+    let caller = ic_cdk::caller();
+    read_state(|s| {
+        if s.developer_principal != caller {
+            return Vec::new();
+        }
+        s.sol_claims
+            .iter()
+            .map(|(id, c)| (*id, c.clone()))
+            .collect()
+    })
+}
+
+/// Design doc §5.3 observability: native-SOL claims currently quarantined (a
+/// settlement divergence is suspected — resolve via `admin_resolve_sol_claim`).
+/// Developer-gated read (empty for non-developers). Mirrors
+/// `get_xrp_quarantined_claims`.
+#[candid_method(query)]
+#[query]
+fn get_sol_quarantined_claims() -> Vec<(u64, rumi_protocol_backend::state::SolClaim)> {
+    let caller = ic_cdk::caller();
+    read_state(|s| {
+        if s.developer_principal != caller {
+            return Vec::new();
+        }
+        s.sol_claims
+            .iter()
+            .filter(|(_, c)| c.quarantine_reason.is_some())
+            .map(|(id, c)| (*id, c.clone()))
+            .collect()
+    })
+}
+
+/// Defense-in-depth: manually quarantine a native-SOL claim (e.g. ops suspects
+/// a divergence the automatic nonce guard has not yet hit). Developer-gated,
+/// idempotent. Mirrors `admin_quarantine_xrp_claim`, but delegates the actual
+/// mutation to `vault::quarantine_sol_claim_snapshot` (unlike XRP's inline
+/// mutation) since that primitive already exists in the vault layer.
+#[candid_method(update)]
+#[update]
+fn admin_quarantine_sol_claim(claim_id: u64, reason: String) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::GenericError(
+            "Only the developer can quarantine SOL claims".to_string(),
+        ));
+    }
+    let reason = if reason.trim().is_empty() {
+        "manually quarantined by admin".to_string()
+    } else {
+        reason
+    };
+    let found = mutate_state(|s| {
+        rumi_protocol_backend::vault::quarantine_sol_claim_snapshot(s, claim_id, &reason)
+    });
+    if !found {
+        return Err(ProtocolError::GenericError(format!(
+            "No such SOL claim #{claim_id}"
+        )));
+    }
+    log!(
+        INFO,
+        "[admin_quarantine_sol_claim] claim #{} quarantined",
+        claim_id
+    );
+    Ok(())
+}
+
+/// Design doc §5.3: resolve a quarantined native-SOL claim after off-ledger
+/// reconciliation (against a Solana explorer). Developer-gated. Errors if the
+/// claim is absent or not quarantined, so a resolve can never silently drop a
+/// healthy, still-settle-able claim. Mirrors `admin_resolve_xrp_claim`,
+/// delegating to `vault::resolve_quarantined_sol_claim_snapshot`.
+#[candid_method(update)]
+#[update]
+fn admin_resolve_sol_claim(
+    claim_id: u64,
+    resolution: NativeClaimResolution,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if read_state(|s| s.developer_principal != caller) {
+        return Err(ProtocolError::GenericError(
+            "Only the developer can resolve SOL claims".to_string(),
+        ));
+    }
+    let confirm_paid = matches!(resolution, NativeClaimResolution::ConfirmPaid);
+    mutate_state(|s| {
+        rumi_protocol_backend::vault::resolve_quarantined_sol_claim_snapshot(
+            s, claim_id, confirm_paid,
+        )
+    })?;
+    log!(
+        INFO,
+        "[admin_resolve_sol_claim] claim #{} resolved {:?}",
+        claim_id,
+        resolution
+    );
+    Ok(())
+}
+
+/// P5 (frontend): the caller's OWN native-SOL pending deposits (those whose
+/// vault the caller opened). Self-scoped, unlike `get_sol_pending_deposits`
+/// (developer-gated, all users). Mirrors `get_my_xrp_pending_deposits`.
+#[candid_method(query)]
+#[query]
+fn get_my_sol_pending_deposits() -> Vec<(u64, rumi_protocol_backend::state::SolPendingDeposit)> {
+    let caller = ic_cdk::caller();
+    read_state(|s| {
+        s.sol_pending_deposits
+            .iter()
+            .filter(|(_, d)| d.owner == caller)
+            .map(|(id, d)| (*id, d.clone()))
+            .collect()
+    })
+}
+
+/// P5 (frontend): the caller's OWN outstanding native-SOL claims (those the
+/// caller is the `claimant` of). Self-scoped. Mirrors `get_my_xrp_claims`.
+#[candid_method(query)]
+#[query]
+fn get_my_sol_claims() -> Vec<(u64, rumi_protocol_backend::state::SolClaim)> {
+    let caller = ic_cdk::caller();
+    read_state(|s| {
+        s.sol_claims
             .iter()
             .filter(|(_, c)| c.claimant == caller)
             .map(|(id, c)| (*id, c.clone()))
@@ -6801,13 +7381,10 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
     // allowlist is ICP-only, live the moment a non-ICP collateral is added.
     validate_liquidation_not_frozen()?;
     validate_freshness_for_vault(vault_id).await?;
-    // P5: native-XRP collateral is liquidated MANUALLY (claim-based) only; automated
-    // stability-pool / bot liquidation cannot settle an XrpClaim (would strand the
-    // seized XRP and burn SP depositors), so reject native-XRP here.
-    if rumi_protocol_backend::vault::vault_is_native_xrp(vault_id) {
-        return Err(ProtocolError::GenericError(
-            "Native-XRP collateral is liquidated manually (claim-based), not via the stability pool or bot".to_string(),
-        ));
+    // Native custody (XRP, SOL, and any future non-ICRC rail) is liquidated
+    // MANUALLY (claim-based) only; see `native_custody_liquidation_reject_message`.
+    if let Some(msg) = native_custody_liquidation_reject_message(vault_id) {
+        return Err(ProtocolError::GenericError(msg));
     }
     let caller = ic_cdk::api::caller();
 
@@ -11790,6 +12367,135 @@ mod chain_vault_param_tests {
         assert!(validate_xrp_schnorr_key_change("test_key_1", false).is_ok());
         assert!(validate_xrp_schnorr_key_change("bogus_key", false).is_err());
         assert!(validate_xrp_schnorr_key_change("key_1", true).is_err());
+    }
+}
+
+// Phase 3 native-SOL `main.rs` endpoint wiring: pure/sync precondition helpers
+// only (the endpoints themselves read `ic_cdk::api::caller()` as their first
+// statement, so they are not directly unit-testable — see each fn's doc
+// comment for which vault.rs primitive it delegates to instead).
+#[cfg(test)]
+mod sol_p3_tests {
+    use super::{
+        decode_sol_blockhash_override, native_custody_liquidation_reject_message,
+        validate_register_sol_collateral_preconditions, validate_sol_schnorr_key_change,
+    };
+    use rumi_protocol_backend::state::{
+        replace_state, sol_collateral_principal, xrp_collateral_principal, CustodyKind, State,
+    };
+    use rumi_protocol_backend::vault::Vault;
+
+    #[test]
+    fn sol_schnorr_key_change_rules() {
+        // Mirrors `xrp_schnorr_key_change_rules` exactly (design doc §2): both
+        // supported key names are accepted with no SOL state bound, an unknown
+        // name is always rejected, and ANY supported name is rejected once SOL
+        // state exists (custody-safety: changing the key re-points every
+        // derived address).
+        assert!(validate_sol_schnorr_key_change("key_1", false).is_ok());
+        assert!(validate_sol_schnorr_key_change("test_key_1", false).is_ok());
+        assert!(validate_sol_schnorr_key_change("bogus_key", false).is_err());
+        assert!(validate_sol_schnorr_key_change("key_1", true).is_err());
+        assert!(validate_sol_schnorr_key_change("test_key_1", true).is_err());
+    }
+
+    #[test]
+    fn register_sol_collateral_preconditions_order() {
+        // Already-registered short-circuits regardless of key/nonce state.
+        assert!(validate_register_sol_collateral_preconditions(true, "key_1", true).is_err());
+        // Not yet registered, but the configured key is not production.
+        assert!(
+            validate_register_sol_collateral_preconditions(false, "test_key_1", true).is_err()
+        );
+        // Not yet registered, production key configured, but the durable-nonce
+        // account has not been bootstrapped (design doc §3's ordering
+        // invariant: registering here would let a vault borrow icUSD against
+        // collateral that could never be paid out).
+        assert!(validate_register_sol_collateral_preconditions(false, "key_1", false).is_err());
+        // Every precondition satisfied.
+        assert!(validate_register_sol_collateral_preconditions(false, "key_1", true).is_ok());
+    }
+
+    #[test]
+    fn sol_blockhash_override_decode_rejects_bad_input() {
+        // Not valid base58 at all.
+        assert!(decode_sol_blockhash_override("not-valid-base58!!!").is_err());
+        // Valid base58 but the wrong byte length (a Solana pubkey/hash is
+        // always exactly 32 bytes; a short input must not silently zero-pad).
+        assert!(decode_sol_blockhash_override("11111111111111111111111111111111111111111").is_err());
+        // A real base58-encoded 32-byte all-zero value round-trips.
+        let zero_hash_b58 = bs58::encode([0u8; 32]).into_string();
+        assert!(decode_sol_blockhash_override(&zero_hash_b58).is_ok());
+    }
+
+    /// Mirrors `vault::sp_writedown_native_xrp_guard_tests::install_two_collateral_state`:
+    /// a base ICP-collateralized state, then a native-custody config cloned
+    /// from ICP's (so it starts from a realistic, fully-populated
+    /// `CollateralConfig` rather than hand-building one field by field).
+    fn install_native_vault(
+        vault_id: u64,
+        collateral_type: candid::Principal,
+        kind: CustodyKind,
+    ) -> State {
+        let mut s = State::from(rumi_protocol_backend::InitArg {
+            xrc_principal: candid::Principal::anonymous(),
+            icusd_ledger_principal: candid::Principal::anonymous(),
+            icp_ledger_principal: candid::Principal::anonymous(),
+            fee_e8s: 0,
+            developer_principal: candid::Principal::anonymous(),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        });
+        let icp = s.icp_collateral_type();
+        let mut cfg = s.collateral_configs.get(&icp).unwrap().clone();
+        cfg.ledger_canister_id = collateral_type;
+        cfg.custody_kind = Some(kind);
+        s.collateral_configs.insert(collateral_type, cfg);
+        s.vault_id_to_vaults.insert(
+            vault_id,
+            Vault {
+                owner: candid::Principal::anonymous(),
+                borrowed_icusd_amount: 0.into(),
+                collateral_amount: 5_000_000,
+                vault_id,
+                collateral_type,
+                last_accrual_time: 0,
+                accrued_interest: 0.into(),
+                bot_processing: false,
+            },
+        );
+        s
+    }
+
+    #[test]
+    fn native_custody_liquidation_reject_message_names_the_actual_kind() {
+        let sol_ct = sol_collateral_principal();
+        let mut sol_state = install_native_vault(1, sol_ct, CustodyKind::NativeSol);
+
+        let xrp_ct = xrp_collateral_principal();
+        let xrp_only = install_native_vault(2, xrp_ct, CustodyKind::NativeXrp);
+        // Merge the XRP vault + config into the same state so both kinds are
+        // present at once (each vault_id resolves independently).
+        sol_state
+            .collateral_configs
+            .insert(xrp_ct, xrp_only.collateral_configs.get(&xrp_ct).unwrap().clone());
+        sol_state
+            .vault_id_to_vaults
+            .insert(2, xrp_only.vault_id_to_vaults.get(&2).unwrap().clone());
+        replace_state(sol_state);
+
+        let sol_msg = native_custody_liquidation_reject_message(1).expect("SOL vault must reject");
+        assert!(sol_msg.contains("Native-SOL"), "message was: {sol_msg}");
+
+        let xrp_msg = native_custody_liquidation_reject_message(2).expect("XRP vault must reject");
+        assert!(xrp_msg.contains("Native-XRP"), "message was: {xrp_msg}");
+
+        // A vault_id with no config at all must NOT be flagged native custody —
+        // this is the fail-closed boolean's positive control, not just its
+        // negative one.
+        assert!(native_custody_liquidation_reject_message(999).is_none());
     }
 }
 

@@ -171,6 +171,14 @@ export interface IcrcAccount {
   'owner' : Principal,
   'subaccount' : [] | [Uint8Array | number[]],
 }
+export interface LedgerReconciliationEntry {
+  'healthy' : boolean,
+  'ledger' : Principal,
+  'live_e8s' : bigint,
+  'recorded_e8s' : bigint,
+  'symbol' : string,
+  'delta_e8s' : bigint,
+}
 export interface LiquidatableVaultInfo {
   'collateral_amount' : bigint,
   'debt_amount' : bigint,
@@ -184,6 +192,14 @@ export interface LiquidationResult {
   'collateral_gained' : bigint,
   'success' : boolean,
   'collateral_type' : Principal,
+}
+export interface NativeSolPendingPayout {
+  'claim_id' : bigint,
+  'lamports' : bigint,
+  'vault_id' : bigint,
+  'created_at_ns' : bigint,
+  'collateral_type' : Principal,
+  'payout_address' : string,
 }
 export interface NativeXrpPendingPayout {
   'claim_id' : bigint,
@@ -296,11 +312,13 @@ export type StabilityPoolError = {
   { 'AmountTooLow' : { 'minimum_e8s' : bigint } } |
   { 'Unauthorized' : null } |
   { 'InterCanisterCallFailed' : { 'method' : string, 'target' : string } } |
+  { 'SolClaimStatusCheckFailed' : { 'reason' : string } } |
   { 'PayoutAddressRequired' : { 'collateral' : Principal } } |
   { 'XrpClaimStillOutstanding' : { 'claim_id' : bigint } } |
   { 'LiquidationFailed' : { 'vault_id' : bigint, 'reason' : string } } |
   { 'XrpClaimStatusCheckFailed' : { 'reason' : string } } |
   { 'SystemBusy' : null } |
+  { 'SolClaimStillOutstanding' : { 'claim_id' : bigint } } |
   { 'AlreadyOptedIn' : { 'collateral' : Principal } } |
   { 'TokenNotAccepted' : { 'ledger' : Principal } } |
   { 'InsufficientPoolBalance' : null };
@@ -358,6 +376,11 @@ export interface UserStabilityPosition {
   'opted_out_collateral' : Array<Principal>,
 }
 export interface _SERVICE {
+  'ack_native_sol_payout_settled' : ActorMethod<
+    [bigint],
+    { 'Ok' : null } |
+      { 'Err' : StabilityPoolError }
+  >,
   'ack_native_xrp_payout_settled' : ActorMethod<
     [bigint],
     { 'Ok' : null } |
@@ -428,10 +451,16 @@ export interface _SERVICE {
     [[] | [bigint]],
     Array<ChainSpAbsorbCompletion>
   >,
+  'get_ledger_reconciliation' : ActorMethod<
+    [],
+    { 'Ok' : Array<LedgerReconciliationEntry> } |
+      { 'Err' : StabilityPoolError }
+  >,
   'get_liquidation_history' : ActorMethod<
     [[] | [bigint]],
     Array<PoolLiquidationRecord>
   >,
+  'get_my_native_sol_payouts' : ActorMethod<[], Array<NativeSolPendingPayout>>,
   'get_my_native_xrp_payouts' : ActorMethod<[], Array<NativeXrpPendingPayout>>,
   'get_pending_chain_absorbs' : ActorMethod<[], Array<ChainSpAbsorbIntent>>,
   'get_pending_refunds' : ActorMethod<[[] | [Principal]], Array<PendingRefund>>,

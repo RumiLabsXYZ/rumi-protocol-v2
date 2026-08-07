@@ -15,7 +15,10 @@ describe('XrpPendingDepositBanner layout contract', () => {
     expect(banner).toContain("document.documentElement.style.setProperty('--rumi-xrp-recovery-height'");
     expect(banner).toContain('class="xrp-recovery-slot" bind:clientHeight={recoveryHeight}');
     expect(banner).toContain('top: 3.5rem');
-    expect(strip).toContain('top: calc(3.5rem + var(--rumi-xrp-recovery-height, 0px))');
-    expect(layout).toContain('var(--rumi-xrp-recovery-height, 0px) + var(--rumi-strip-height, 0px)');
+    // The strip and the layout padding must SUM the XRP and SOL recovery-height
+    // vars (both banners can be visible at once), not just account for XRP.
+    // See SolPendingDepositBanner.spec.ts for the dedicated summation contract test.
+    expect(strip).toContain('top: calc(3.5rem + var(--rumi-xrp-recovery-height, 0px) + var(--rumi-sol-recovery-height, 0px))');
+    expect(layout).toContain('var(--rumi-xrp-recovery-height, 0px) + var(--rumi-sol-recovery-height, 0px) + var(--rumi-strip-height, 0px)');
   });
 });
