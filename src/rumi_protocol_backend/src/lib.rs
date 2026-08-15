@@ -1128,20 +1128,19 @@ pub async fn check_vaults() {
         // for the unconditional `prune_recovered_routing_state` call;
         // re-used here for the cascade decisions.
 
-        let (bot_allowed, bot_canister, pool_canister) = read_state(|s| {
-            (
-                s.bot_allowed_collateral_types.clone(),
-                s.liquidation_bot_principal,
-                s.stability_pool_canister,
-            )
+        let (bot_canister, pool_canister) = read_state(|s| {
+            (s.liquidation_bot_principal, s.stability_pool_canister)
         });
 
         let mut for_bot: Vec<LiquidatableVaultInfo> = Vec::new();
         let mut for_pool: Vec<LiquidatableVaultInfo> = Vec::new();
 
         for vault_info in &vault_notifications {
-            let bot_eligible =
-                bot_canister.is_some() && bot_allowed.contains(&vault_info.collateral_type);
+            // `vault_routable_to_bot` enforces both the operator allowlist and
+            // the custody fence (native-XRP is claim-based and must never go
+            // to the bot; it falls through to the SP's absorb path).
+            let bot_eligible = bot_canister.is_some()
+                && read_state(|s| s.vault_routable_to_bot(&vault_info.collateral_type));
 
             let sp_already_tried =
                 read_state(|s| s.sp_attempted_vaults.contains(&vault_info.vault_id));

@@ -3997,6 +3997,21 @@ impl State {
     /// buckets, including those skipped due to `bot_processing` — that
     /// read still costs cycles, so the counter reflects actual cost
     /// paid (useful for production telemetry and the DOS-005 fence).
+    /// Whether the liquidation bot may be offered vaults of this collateral
+    /// type. Requires the operator allowlist AND a custody kind the bot can
+    /// actually settle: native-XRP collateral is claim-based (XRPL side), so
+    /// the bot is refused regardless of `bot_allowed_collateral_types` and the
+    /// cascade falls through to the stability pool's native-XRP absorb path.
+    pub fn vault_routable_to_bot(&self, collateral_type: &Principal) -> bool {
+        if !self.bot_allowed_collateral_types.contains(collateral_type) {
+            return false;
+        }
+        !self
+            .get_collateral_config(collateral_type)
+            .map(|c| c.is_native_xrp())
+            .unwrap_or(false)
+    }
+
     pub fn scan_unhealthy_vaults(&self, rate: UsdIcp, do_full_sweep: bool) -> UnhealthyVaultScan {
         let threshold_key = self.check_vaults_alert_threshold_key();
         let upper_bound = if do_full_sweep {
@@ -4019,18 +4034,6 @@ impl State {
                 };
                 visited += 1;
                 if vault.bot_processing {
-                    continue;
-                }
-                // P5: native-XRP vaults are NOT auto-liquidated. XRP liquidation is
-                // manual/external (claim-based) only — automated SP/bot dispatch
-                // would strand the seized XRP (neither the SP nor the bot can settle
-                // an XrpClaim). External liquidators call liquidate_vault_partial /
-                // partial_liquidate_vault directly, where they become the claimant.
-                if self
-                    .get_collateral_config(&vault.collateral_type)
-                    .map(|c| c.is_native_xrp())
-                    .unwrap_or(false)
-                {
                     continue;
                 }
                 if compute_collateral_ratio(vault, rate, self)
@@ -7617,11 +7620,13 @@ mod tests {
     }
 
     #[test]
-    fn scan_unhealthy_vaults_excludes_native_xrp() {
-        // P5: native-XRP vaults must NOT appear in the automated liquidation scan
-        // (they're liquidated manually). An ICP vault at the same underwater CR still
-        // appears. Pins the is_native_xrp() skip in scan_unhealthy_vaults so a future
-        // CR-index / banding refactor can't silently route XRP into SP/bot dispatch.
+    fn scan_unhealthy_vaults_includes_native_xrp() {
+        // Native-XRP vaults MUST appear in the automated liquidation scan so
+        // check_vaults dispatches them to the stability pool (which settles
+        // them via the native-XRP absorb path shipped 2026-06-27). The former
+        // P5 exclusion predated SP absorption and left XRP vaults liquidatable
+        // only by manual trigger. Bot routing is still fenced separately via
+        // vault_routable_to_bot.
         let mut s = test_state();
         let icp = s.icp_ledger_principal;
         let xrp = xrp_collateral_principal();
@@ -7666,8 +7671,35 @@ mod tests {
             "ICP vault should be flagged unhealthy: {ids:?}"
         );
         assert!(
-            !ids.contains(&2),
-            "native-XRP vault must be excluded from the automated scan: {ids:?}"
+            ids.contains(&2),
+            "native-XRP vault must be included in the automated scan: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn native_xrp_never_routable_to_bot() {
+        // The liquidation bot cannot settle native-XRP collateral (it has no
+        // XRPL settlement path), so even if an operator adds the XRP synthetic
+        // principal to `bot_allowed_collateral_types`, routing must refuse the
+        // bot and let the cascade fall through to the stability pool.
+        let mut s = test_state();
+        let icp = s.icp_ledger_principal;
+        let xrp = xrp_collateral_principal();
+        let mut xrp_cfg = s.collateral_configs.get(&icp).unwrap().clone();
+        xrp_cfg.ledger_canister_id = xrp;
+        xrp_cfg.custody_kind = Some(CustodyKind::NativeXrp);
+        s.collateral_configs.insert(xrp, xrp_cfg);
+
+        s.bot_allowed_collateral_types.insert(icp);
+        s.bot_allowed_collateral_types.insert(xrp);
+
+        assert!(
+            s.vault_routable_to_bot(&icp),
+            "ICP in the allowed set must stay bot-routable"
+        );
+        assert!(
+            !s.vault_routable_to_bot(&xrp),
+            "native-XRP must never be bot-routable, even when allowed by config"
         );
     }
 

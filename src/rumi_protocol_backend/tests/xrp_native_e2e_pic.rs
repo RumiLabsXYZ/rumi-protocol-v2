@@ -852,9 +852,10 @@ fn xrp_native_liquidation_is_claim_based() {
     mint_icusd(&pic, icusd, backend, liquidator(), 40 * E8);
     approve_icusd(&pic, icusd, liquidator(), backend, 40 * E8);
 
-    // Native-XRP is excluded from automated SP/bot liquidation (P5), so liquidation
-    // is the external, claim-based path: the liquidator repays part of the debt and
-    // the seized XRP becomes an XrpClaim they later settle to an XRPL address.
+    // Native-XRP vaults now also flow through the automated cascade to the
+    // stability pool, but the external, claim-based path exercised here remains
+    // supported: the liquidator repays part of the debt and the seized XRP
+    // becomes an XrpClaim they later settle to an XRPL address.
     let before_claims = xrp_claims_full(&pic, backend);
     let liquidation_result = decode_result::<rumi_protocol_backend::SuccessWithFee>(
         update_as(
