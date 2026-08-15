@@ -409,6 +409,24 @@ pub(crate) fn mark_native_xrp_absorb_error_in_state(
     }
 }
 
+/// Abandon a native-XRP absorb attempt that reserved a backend preflight but
+/// has NOT burned any icUSD: drop the local intent and hand the reservation
+/// back. Every call site is positioned strictly before the burn (or on a burn
+/// that returned an error, which the local clear already treats as unburned),
+/// so releasing can never strand an in-flight burn.
+async fn abandon_unburned_native_xrp_absorb(
+    io: &mut dyn NativeXrpAbsorbIo,
+    protocol_id: Principal,
+    vault_id: u64,
+    icusd_burn_e8s: u64,
+) {
+    mutate_state(|s| {
+        clear_unburned_native_xrp_absorb_intent_in_state(s, vault_id);
+    });
+    io.release_xrp_absorb_preflight(protocol_id, vault_id, icusd_burn_e8s)
+        .await;
+}
+
 pub(crate) fn clear_unburned_native_xrp_absorb_intent_in_state(
     state: &mut StabilityPoolState,
     vault_id: u64,
@@ -496,6 +514,16 @@ pub(crate) trait NativeXrpAbsorbIo {
         protocol_id: Principal,
         request: XrpSpAbsorbRequest,
     ) -> Result<XrpSpAbsorbResult, StabilityPoolError>;
+
+    /// Hand an unburned reservation back to the backend. Best-effort: the
+    /// caller is already on a failure path, and the reservation expires on its
+    /// own, so a failed release is logged rather than propagated.
+    async fn release_xrp_absorb_preflight(
+        &mut self,
+        protocol_id: Principal,
+        vault_id: u64,
+        icusd_burn_e8s: u64,
+    );
 }
 
 struct CdkNativeXrpAbsorbIo;
@@ -586,6 +614,36 @@ impl NativeXrpAbsorbIo for CdkNativeXrpAbsorbIo {
                 target: format!("{}", protocol_id),
                 method: "stability_pool_liquidate_xrp_vault".to_string(),
             }),
+        }
+    }
+
+    async fn release_xrp_absorb_preflight(
+        &mut self,
+        protocol_id: Principal,
+        vault_id: u64,
+        icusd_burn_e8s: u64,
+    ) {
+        let released: Result<(Result<bool, rumi_protocol_backend::ProtocolError>,), _> = call(
+            protocol_id,
+            "stability_pool_release_xrp_absorb_preflight",
+            (vault_id, icusd_burn_e8s),
+        )
+        .await;
+        match released {
+            Ok((Ok(_),)) => {}
+            Ok((Err(error),)) => log!(
+                INFO,
+                "native XRP preflight release rejected for vault {}: {:?}; reservation will expire on its own",
+                vault_id,
+                error
+            ),
+            Err((code, msg)) => log!(
+                INFO,
+                "native XRP preflight release call failed for vault {}: {:?} {}; reservation will expire on its own",
+                vault_id,
+                code,
+                msg
+            ),
         }
     }
 }
@@ -820,9 +878,13 @@ pub(crate) async fn execute_native_xrp_absorb_with_io(
         }
     };
     if preflight.vault_id != vault_info.vault_id || preflight.icusd_burn_e8s != icusd_to_burn_e8s {
-        mutate_state(|s| {
-            clear_unburned_native_xrp_absorb_intent_in_state(s, vault_info.vault_id);
-        });
+        abandon_unburned_native_xrp_absorb(
+            io,
+            protocol_id,
+            vault_info.vault_id,
+            icusd_to_burn_e8s,
+        )
+        .await;
         return liquidation_failure(
             vault_info,
             StabilityPoolError::LiquidationFailed {
@@ -844,9 +906,13 @@ pub(crate) async fn execute_native_xrp_absorb_with_io(
             .map(XrpSpPayoutAllocation::from)
             .collect::<Vec<_>>(),
         Ok(_) => {
-            mutate_state(|s| {
-                clear_unburned_native_xrp_absorb_intent_in_state(s, vault_info.vault_id);
-            });
+            abandon_unburned_native_xrp_absorb(
+                io,
+                protocol_id,
+                vault_info.vault_id,
+                icusd_to_burn_e8s,
+            )
+            .await;
             return liquidation_failure(
                 vault_info,
                 StabilityPoolError::LiquidationFailed {
@@ -856,9 +922,13 @@ pub(crate) async fn execute_native_xrp_absorb_with_io(
             );
         }
         Err(error) => {
-            mutate_state(|s| {
-                clear_unburned_native_xrp_absorb_intent_in_state(s, vault_info.vault_id);
-            });
+            abandon_unburned_native_xrp_absorb(
+                io,
+                protocol_id,
+                vault_info.vault_id,
+                icusd_to_burn_e8s,
+            )
+            .await;
             return liquidation_failure(vault_info, error);
         }
     };
@@ -869,9 +939,13 @@ pub(crate) async fn execute_native_xrp_absorb_with_io(
         match io.fetch_icusd_minting_account(icusd_ledger).await {
             Ok(account) => account,
             Err(error) => {
-                mutate_state(|s| {
-                    clear_unburned_native_xrp_absorb_intent_in_state(s, vault_info.vault_id);
-                });
+                abandon_unburned_native_xrp_absorb(
+                    io,
+                    protocol_id,
+                    vault_info.vault_id,
+                    icusd_to_burn_e8s,
+                )
+                .await;
                 return liquidation_failure(vault_info, error);
             }
         }
@@ -923,9 +997,16 @@ pub(crate) async fn execute_native_xrp_absorb_with_io(
                 proof
             }
             Err(error) => {
-                mutate_state(|s| {
-                    clear_unburned_native_xrp_absorb_intent_in_state(s, vault_info.vault_id);
-                });
+                // The burn call returned an error, which the local clear
+                // already treats as "no icUSD left the pool"; release the
+                // reservation on the same assumption.
+                abandon_unburned_native_xrp_absorb(
+                    io,
+                    protocol_id,
+                    vault_info.vault_id,
+                    icusd_to_burn_e8s,
+                )
+                .await;
                 return liquidation_failure(vault_info, error);
             }
         }
@@ -2742,6 +2823,16 @@ mod tests {
                 .unwrap_or_else(|| build_icusd_burn_proof(44, vault_id)))
         }
 
+        async fn release_xrp_absorb_preflight(
+            &mut self,
+            _protocol_id: Principal,
+            vault_id: u64,
+            icusd_burn_e8s: u64,
+        ) {
+            self.events
+                .push(format!("release:{vault_id}:{icusd_burn_e8s}"));
+        }
+
         async fn submit_xrp_absorb(
             &mut self,
             _protocol_id: Principal,
@@ -3270,7 +3361,13 @@ mod tests {
         ));
 
         assert!(!result.success);
-        assert_eq!(io.events, vec!["preflight:145:1000000000"]);
+        // Giving up after reserving but before burning must hand the backend
+        // reservation back, or the vault stays blocked for every liquidation
+        // path (including manual) until the 15-minute TTL expires.
+        assert_eq!(
+            io.events,
+            vec!["preflight:145:1000000000", "release:145:1000000000"]
+        );
         assert_eq!(
             read_state(|s| s
                 .deposits
@@ -3308,7 +3405,13 @@ mod tests {
         ));
 
         assert!(!result.success);
-        assert_eq!(io.events, vec!["preflight:146:50100000000"]);
+        // Same contract as the empty-allocation abort: reserved, gave up
+        // before burning, so the reservation goes back rather than blocking
+        // the vault for the full TTL.
+        assert_eq!(
+            io.events,
+            vec!["preflight:146:50100000000", "release:146:50100000000"]
+        );
         assert_eq!(
             read_state(|s| s.total_stablecoin_balances.get(&icusd_ledger()).copied()),
             Some(501_00000000),

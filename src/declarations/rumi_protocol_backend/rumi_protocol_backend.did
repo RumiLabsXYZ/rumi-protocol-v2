@@ -1498,6 +1498,7 @@ service : (ProtocolArg) -> {
   stability_pool_liquidate_xrp_vault : (XrpSpAbsorbRequest) -> (Result_20);
   stability_pool_preflight_chain_absorb : (nat64, nat64) -> (Result);
   stability_pool_preflight_xrp_absorb : (nat64, nat64) -> (Result_21);
+  stability_pool_release_xrp_absorb_preflight : (nat64, nat64) -> (Result_14);
   stability_pool_xrp_claim_outstanding : (nat64, principal) -> (Result_14);
   submit_burn_proof : (nat32, text) -> (Result_22);
   sweep_xrp_pending_open : (nat64) -> (Result);

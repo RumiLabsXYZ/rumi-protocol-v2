@@ -1494,6 +1494,49 @@ pub fn stability_pool_preflight_xrp_absorb_in_state(
     Ok(preflight)
 }
 
+/// Hand back an unburned native-XRP absorb reservation.
+///
+/// A reservation blocks every vault-mutating entry point for `vault_id`
+/// (including the manual liquidation paths) until it is consumed by a
+/// successful absorb or expires after `XRP_SP_ABSORB_PREFLIGHT_TTL_NS`. When
+/// the SP reserves and then gives up BEFORE burning any icUSD -- e.g. the
+/// payout allocation build finds no opted-in depositor holding icUSD, or the
+/// fan-out exceeds the allocation cap -- that window would otherwise leave an
+/// underwater vault unliquidatable by any path for a full 15 minutes.
+///
+/// Only the registered SP may release, and only under the exact
+/// `icusd_burn_e8s` it reserved: the reservation is the sizing snapshot a
+/// post-burn submit resolves against, so dropping the wrong one would strand
+/// an in-flight burn. A successful absorb removes the reservation itself, so
+/// releasing a completed absorb is a no-op rather than an error.
+///
+/// Returns whether a reservation was actually cleared, so a retried cleanup
+/// after a lost reply is idempotent rather than a failure.
+pub fn stability_pool_release_xrp_absorb_preflight_in_state(
+    state: &mut crate::state::State,
+    caller: Principal,
+    vault_id: u64,
+    icusd_burn_e8s: u64,
+) -> Result<bool, ProtocolError> {
+    ensure_registered_sp(state, caller)?;
+    let Some(preflight) = state.sp_xrp_absorb_preflights.get(&vault_id) else {
+        return Ok(false);
+    };
+    if preflight.caller != caller {
+        return Err(ProtocolError::GenericError(format!(
+            "Vault #{vault_id} reservation belongs to another caller"
+        )));
+    }
+    if preflight.icusd_burn_e8s != icusd_burn_e8s {
+        return Err(ProtocolError::GenericError(format!(
+            "XRP SP absorb release {} does not match the reserved burn {} for vault {}",
+            icusd_burn_e8s, preflight.icusd_burn_e8s, vault_id
+        )));
+    }
+    state.sp_xrp_absorb_preflights.remove(&vault_id);
+    Ok(true)
+}
+
 /// Resolve the persisted preflight reservation for a POST-BURN submit.
 ///
 /// Deliberately does NOT require the reservation to be unexpired. The SP burns
@@ -7994,6 +8037,72 @@ mod xrp_sp_absorb_contract_tests {
         let vault = state.vault_id_to_vaults.get(&VAULT_ID).expect("vault");
         assert_eq!(vault.borrowed_icusd_amount, ICUSD::new(100 * E8));
         assert_eq!(vault.collateral_amount, 100_000_000);
+    }
+
+    #[test]
+    fn releasing_unburned_preflight_unblocks_vault_operations() {
+        // A preflight reservation blocks every vault-mutating entry point,
+        // including the manual liquidation paths. If the SP gives up AFTER
+        // reserving but BEFORE burning (e.g. no opted-in depositor holds
+        // icUSD), it must be able to hand the reservation back instead of
+        // leaving the vault unliquidatable by any path until the 15-minute
+        // TTL expires.
+        let mut state = test_state_with_xrp_vault();
+        stability_pool_preflight_xrp_absorb_in_state(&mut state, sp(), VAULT_ID, 100 * E8, 10)
+            .expect("preflight reservation");
+        assert!(
+            ensure_no_active_xrp_sp_absorb_preflight(&state, VAULT_ID, 20).is_err(),
+            "an active reservation must block vault operations"
+        );
+
+        let released =
+            stability_pool_release_xrp_absorb_preflight_in_state(&mut state, sp(), VAULT_ID, 100 * E8)
+                .expect("registered SP may release its own unburned reservation");
+        assert!(released, "release must report that a reservation was cleared");
+        assert!(state.sp_xrp_absorb_preflights.is_empty());
+        assert!(
+            ensure_no_active_xrp_sp_absorb_preflight(&state, VAULT_ID, 20).is_ok(),
+            "releasing the reservation must unblock vault operations immediately"
+        );
+
+        // Idempotent: a retried release after the reservation is gone is not an
+        // error (the SP may retry its cleanup after a lost reply).
+        let again = stability_pool_release_xrp_absorb_preflight_in_state(
+            &mut state,
+            sp(),
+            VAULT_ID,
+            100 * E8,
+        )
+        .expect("release is idempotent");
+        assert!(!again, "second release must report nothing was cleared");
+    }
+
+    #[test]
+    fn preflight_release_rejects_non_sp_and_mismatched_reservations() {
+        // The reservation is the SP's sizing snapshot for a burn it is about to
+        // perform. Releasing someone else's reservation, or releasing under a
+        // different burn amount than was reserved, would let a stale or hostile
+        // caller drop a reservation the SP still intends to consume -- which
+        // would strand an in-flight burn. Both are refused, and the
+        // reservation survives.
+        let mut state = test_state_with_xrp_vault();
+        stability_pool_preflight_xrp_absorb_in_state(&mut state, sp(), VAULT_ID, 100 * E8, 10)
+            .expect("preflight reservation");
+
+        let not_sp = principal(0x77);
+        stability_pool_release_xrp_absorb_preflight_in_state(&mut state, not_sp, VAULT_ID, 100 * E8)
+            .expect_err("only the registered stability pool may release a reservation");
+        assert!(
+            state.sp_xrp_absorb_preflights.contains_key(&VAULT_ID),
+            "a rejected release must not clear the reservation"
+        );
+
+        stability_pool_release_xrp_absorb_preflight_in_state(&mut state, sp(), VAULT_ID, 50 * E8)
+            .expect_err("release must match the reserved burn amount");
+        assert!(
+            state.sp_xrp_absorb_preflights.contains_key(&VAULT_ID),
+            "an amount-mismatched release must not clear the reservation"
+        );
     }
 
     #[test]

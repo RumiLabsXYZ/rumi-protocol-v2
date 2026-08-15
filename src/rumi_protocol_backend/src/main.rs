@@ -5288,6 +5288,26 @@ fn stability_pool_preflight_xrp_absorb(
 
 #[update]
 #[candid_method(update)]
+fn stability_pool_release_xrp_absorb_preflight(
+    vault_id: u64,
+    icusd_burn_e8s: u64,
+) -> Result<bool, ProtocolError> {
+    if ic_cdk::caller() == Principal::anonymous() {
+        return Err(ProtocolError::AnonymousCallerNotAllowed);
+    }
+    let caller = ic_cdk::api::caller();
+    mutate_state(|s| {
+        rumi_protocol_backend::vault::stability_pool_release_xrp_absorb_preflight_in_state(
+            s,
+            caller,
+            vault_id,
+            icusd_burn_e8s,
+        )
+    })
+}
+
+#[update]
+#[candid_method(update)]
 async fn stability_pool_liquidate_xrp_vault(
     request: XrpSpAbsorbRequest,
 ) -> Result<XrpSpAbsorbResult, ProtocolError> {
