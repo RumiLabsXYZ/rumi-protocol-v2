@@ -1106,7 +1106,7 @@ pub async fn check_vaults() {
                         .get_collateral_price_decimal(&v.collateral_type)
                         .map(|p| UsdIcp::from(p))
                         .unwrap_or(UsdIcp::from(rust_decimal::Decimal::ZERO));
-                    let optimal_liq = s.compute_partial_liquidation_cap(v, collateral_price_usd);
+                    let optimal_liq = s.recommended_liquidation_amount_for(v, collateral_price_usd);
                     LiquidatableVaultInfo {
                         vault_id: v.vault_id,
                         collateral_type: v.collateral_type,

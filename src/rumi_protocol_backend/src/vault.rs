@@ -1889,11 +1889,14 @@ pub fn stability_pool_liquidate_xrp_vault_in_state(
     Ok(result)
 }
 
-/// P5: true iff `vault_id` is a native-XRP-collateral vault (custody on the XRP
-/// Ledger). Such vaults are excluded from AUTOMATED liquidation (the unhealthy-vault
-/// scan + the stability-pool / bot entry points): the SP and bot cannot settle an
-/// XrpClaim, so native-XRP is liquidated only MANUALLY by an external liquidator who
-/// provides an XRP address (via liquidate_vault_partial / partial_liquidate_vault).
+/// True iff `vault_id` is a native-XRP-collateral vault (custody on the XRP
+/// Ledger). Such vaults are settled through claim-based paths only: the
+/// stability pool absorbs them via the dedicated native-XRP absorb flow
+/// (`stability_pool_preflight_xrp_absorb` + `stability_pool_liquidate_xrp_vault`,
+/// which mint `XrpClaim`s for opted-in depositors), and external liquidators use
+/// `liquidate_vault_partial` / `partial_liquidate_vault`. This predicate guards
+/// the entry points that CANNOT settle an XrpClaim — the bot, and the generic
+/// ICRC/3USD stability-pool write-down paths.
 pub fn vault_is_native_xrp(vault_id: u64) -> bool {
     read_state(|s| {
         s.vault_id_to_vaults
@@ -7991,6 +7994,63 @@ mod xrp_sp_absorb_contract_tests {
         let vault = state.vault_id_to_vaults.get(&VAULT_ID).expect("vault");
         assert_eq!(vault.borrowed_icusd_amount, ICUSD::new(100 * E8));
         assert_eq!(vault.collateral_amount, 100_000_000);
+    }
+
+    #[test]
+    fn automated_dispatch_amount_is_accepted_by_xrp_preflight() {
+        // End-to-end pin across the two halves of automated XRP absorption:
+        // the amount `check_vaults` puts in `recommended_liquidation_amount`
+        // must be an amount `stability_pool_preflight_xrp_absorb_in_state`
+        // actually accepts. Regression for the sizing mismatch where the
+        // dispatch sent the generic partial cap while the absorb path requires
+        // the full live debt, so every automated absorb failed at preflight.
+        //
+        // The vault is at an ORDINARY breach (CR 130%: under the 133%
+        // liquidation floor, above the 112% bonus). The deep-breach fixture
+        // used elsewhere hides this bug, because the partial cap saturates to
+        // the full debt once a vault is far enough underwater.
+        let mut state = test_state_with_xrp_vault();
+        let xrp = xrp_collateral_principal();
+        if let Some(cfg) = state.collateral_configs.get_mut(&xrp) {
+            cfg.last_price = Some(1.30);
+        }
+        let vault = state.vault_id_to_vaults.get(&VAULT_ID).expect("vault").clone();
+        let dummy = UsdIcp::from(Decimal::ZERO);
+
+        // The generic cap is a strict partial here — the pre-fix dispatch value.
+        let generic_cap = state.compute_partial_liquidation_cap(&vault, dummy);
+        assert!(
+            generic_cap < vault.borrowed_icusd_amount,
+            "premise: ordinary breach must yield a partial cap, got {generic_cap:?}"
+        );
+        let err = stability_pool_preflight_xrp_absorb_in_state(
+            &mut state,
+            sp(),
+            VAULT_ID,
+            generic_cap.to_u64(),
+            10,
+        )
+        .expect_err("partial burn must be rejected by the full-debt-only absorb path");
+        assert!(
+            format!("{err:?}").contains("does not match live debt"),
+            "unexpected error: {err:?}"
+        );
+        assert!(
+            state.sp_xrp_absorb_preflights.is_empty(),
+            "a rejected preflight must not leave a reservation behind"
+        );
+
+        // What the dispatch actually sends now is accepted.
+        let dispatched = state.recommended_liquidation_amount_for(&vault, dummy);
+        let preflight = stability_pool_preflight_xrp_absorb_in_state(
+            &mut state,
+            sp(),
+            VAULT_ID,
+            dispatched.to_u64(),
+            20,
+        )
+        .expect("automated dispatch amount must be accepted by the preflight");
+        assert_eq!(preflight.icusd_burn_e8s, vault.borrowed_icusd_amount.to_u64());
     }
 
     #[test]

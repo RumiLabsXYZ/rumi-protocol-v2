@@ -4833,9 +4833,12 @@ async fn stability_pool_liquidate(
     validate_liquidation_not_frozen()?;
     validate_price_for_liquidation()?;
     validate_freshness_for_vault(vault_id).await?;
-    // P5: native-XRP collateral is liquidated MANUALLY (claim-based) only; automated
-    // stability-pool / bot liquidation cannot settle an XrpClaim (would strand the
-    // seized XRP and burn SP depositors), so reject native-XRP here.
+    // Native-XRP collateral is claim-based. THIS path cannot settle an XrpClaim
+    // (it would strand the seized XRP and burn SP depositors), so reject
+    // native-XRP here. Native-XRP absorption goes through the dedicated flow
+    // (stability_pool_preflight_xrp_absorb + stability_pool_liquidate_xrp_vault),
+    // and external liquidators through liquidate_vault_partial /
+    // partial_liquidate_vault.
     if rumi_protocol_backend::vault::vault_is_native_xrp(vault_id) {
         return Err(ProtocolError::GenericError(
             "Native-XRP collateral is liquidated manually (claim-based), not via the stability pool or bot".to_string(),
@@ -4942,9 +4945,12 @@ async fn stability_pool_liquidate_debt_burned(
     validate_liquidation_not_frozen()?;
     validate_price_for_liquidation()?;
     validate_freshness_for_vault(vault_id).await?;
-    // P5: native-XRP collateral is liquidated MANUALLY (claim-based) only; automated
-    // stability-pool / bot liquidation cannot settle an XrpClaim (would strand the
-    // seized XRP and burn SP depositors), so reject native-XRP here.
+    // Native-XRP collateral is claim-based. THIS path cannot settle an XrpClaim
+    // (it would strand the seized XRP and burn SP depositors), so reject
+    // native-XRP here. Native-XRP absorption goes through the dedicated flow
+    // (stability_pool_preflight_xrp_absorb + stability_pool_liquidate_xrp_vault),
+    // and external liquidators through liquidate_vault_partial /
+    // partial_liquidate_vault.
     if rumi_protocol_backend::vault::vault_is_native_xrp(vault_id) {
         return Err(ProtocolError::GenericError(
             "Native-XRP collateral is liquidated manually (claim-based), not via the stability pool or bot".to_string(),
@@ -5431,9 +5437,12 @@ async fn stability_pool_liquidate_with_reserves(
     validate_liquidation_not_frozen()?;
     validate_price_for_liquidation()?;
     validate_freshness_for_vault(vault_id).await?;
-    // P5: native-XRP collateral is liquidated MANUALLY (claim-based) only; automated
-    // stability-pool / bot liquidation cannot settle an XrpClaim (would strand the
-    // seized XRP and burn SP depositors), so reject native-XRP here.
+    // Native-XRP collateral is claim-based. THIS path cannot settle an XrpClaim
+    // (it would strand the seized XRP and burn SP depositors), so reject
+    // native-XRP here. Native-XRP absorption goes through the dedicated flow
+    // (stability_pool_preflight_xrp_absorb + stability_pool_liquidate_xrp_vault),
+    // and external liquidators through liquidate_vault_partial /
+    // partial_liquidate_vault.
     if rumi_protocol_backend::vault::vault_is_native_xrp(vault_id) {
         return Err(ProtocolError::GenericError(
             "Native-XRP collateral is liquidated manually (claim-based), not via the stability pool or bot".to_string(),
@@ -6801,9 +6810,12 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
     // allowlist is ICP-only, live the moment a non-ICP collateral is added.
     validate_liquidation_not_frozen()?;
     validate_freshness_for_vault(vault_id).await?;
-    // P5: native-XRP collateral is liquidated MANUALLY (claim-based) only; automated
-    // stability-pool / bot liquidation cannot settle an XrpClaim (would strand the
-    // seized XRP and burn SP depositors), so reject native-XRP here.
+    // Native-XRP collateral is claim-based. THIS path cannot settle an XrpClaim
+    // (it would strand the seized XRP and burn SP depositors), so reject
+    // native-XRP here. Native-XRP absorption goes through the dedicated flow
+    // (stability_pool_preflight_xrp_absorb + stability_pool_liquidate_xrp_vault),
+    // and external liquidators through liquidate_vault_partial /
+    // partial_liquidate_vault.
     if rumi_protocol_backend::vault::vault_is_native_xrp(vault_id) {
         return Err(ProtocolError::GenericError(
             "Native-XRP collateral is liquidated manually (claim-based), not via the stability pool or bot".to_string(),
