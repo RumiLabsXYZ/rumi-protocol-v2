@@ -215,13 +215,20 @@ impl StabilityPoolState {
 
     /// Append a pool event. Trims oldest events if over capacity.
     pub fn push_event(&mut self, caller: Principal, event_type: PoolEventType) {
+        self.push_event_at(caller, event_type, ic_cdk::api::time());
+    }
+
+    /// `push_event` with an explicit timestamp, for the pure state functions
+    /// that already thread a `now_ns` through so they stay testable off-canister
+    /// (`ic_cdk::api::time()` is unavailable outside the IC runtime).
+    pub fn push_event_at(&mut self, caller: Principal, event_type: PoolEventType, now_ns: u64) {
         let id = self.next_event_id.unwrap_or(0);
         self.next_event_id = Some(id + 1);
 
         let events = self.pool_events.get_or_insert_with(Vec::new);
         events.push(PoolEvent {
             id,
-            timestamp: ic_cdk::api::time(),
+            timestamp: now_ns,
             caller,
             event_type,
         });
@@ -1939,6 +1946,25 @@ impl StabilityPoolState {
         );
     }
 
+    /// Append an audit record for a completed liquidation and advance
+    /// `total_liquidations_executed`.
+    ///
+    /// Every path that absorbs a vault must go through this, so the counter and
+    /// `liquidation_history` can never disagree. They previously did: the
+    /// native-XRP and chain-collateral paths bumped the counter inline but
+    /// never pushed a record, so a real absorb advanced the count while leaving
+    /// the Earn page's history list unchanged.
+    fn record_liquidation_in_history(&mut self, record: PoolLiquidationRecord) {
+        self.liquidation_history.push(record);
+        self.total_liquidations_executed += 1;
+
+        // Cap history to prevent unbounded memory growth
+        if self.liquidation_history.len() > MAX_LIQUIDATION_HISTORY {
+            let excess = self.liquidation_history.len() - MAX_LIQUIDATION_HISTORY;
+            self.liquidation_history.drain(..excess);
+        }
+    }
+
     pub fn process_native_xrp_absorb_success_at(
         &mut self,
         vault_id: u64,
@@ -2162,7 +2188,20 @@ impl StabilityPoolState {
             )?;
         }
 
-        self.total_liquidations_executed += 1;
+        // `collateral_gained` is the seized amount in drops (XRP is 6-decimal);
+        // consumers must format it with the collateral's own decimals.
+        // `collateral_price_e8s` is None: the pool never sees an XRP price on
+        // this path (the backend does the sizing), and the field is optional
+        // precisely so records can omit it.
+        self.record_liquidation_in_history(PoolLiquidationRecord {
+            vault_id,
+            timestamp,
+            stables_consumed: stables_consumed.clone(),
+            collateral_gained: collateral_received_drops,
+            collateral_type,
+            depositors_count: payout_claims.len() as u64,
+            collateral_price_e8s: None,
+        });
         self.deposits.retain(|_, pos| !pos.is_empty());
         debug_assert!(
             self.validate_state().is_ok(),
@@ -2339,7 +2378,7 @@ impl StabilityPoolState {
         }
 
         // Phase 5: Record in history
-        let record = PoolLiquidationRecord {
+        self.record_liquidation_in_history(PoolLiquidationRecord {
             vault_id,
             timestamp,
             stables_consumed: stables_consumed.clone(),
@@ -2347,15 +2386,7 @@ impl StabilityPoolState {
             collateral_type,
             depositors_count: opted_in_principals.len() as u64,
             collateral_price_e8s: Some(collateral_price_e8s),
-        };
-        self.liquidation_history.push(record);
-        self.total_liquidations_executed += 1;
-
-        // Cap history to prevent unbounded memory growth
-        if self.liquidation_history.len() > MAX_LIQUIDATION_HISTORY {
-            let excess = self.liquidation_history.len() - MAX_LIQUIDATION_HISTORY;
-            self.liquidation_history.drain(..excess);
-        }
+        });
 
         // Phase 6: Clean up empty positions
         self.deposits.retain(|_, pos| !pos.is_empty());
@@ -4036,6 +4067,116 @@ mod tests {
             "aggregate SP balance must drop by the full burned icUSD amount",
         );
         assert_eq!(state.native_xrp_pending_payouts_for(&user_a()).len(), 1);
+    }
+
+    #[test]
+    #[ignore = "KNOWN GAP: PoolLiquidationRecord.collateral_gained is u64, which cannot hold \
+                18-decimal wei (u64 max is only ~18.4 CFX). Fixing this needs a record-shape \
+                decision (widen the field, or normalize to e8s and teach every consumer that \
+                chain rows mean something different) — see the test body."]
+    fn chain_absorb_appends_a_liquidation_history_record() {
+        // Same defect the native-XRP path had: `process_chain_liquidation_gains_at`
+        // advances `total_liquidations_executed` without pushing a
+        // `PoolLiquidationRecord`, so a chain absorb inflates the count while
+        // leaving the Earn page's history list unchanged.
+        //
+        // Deliberately NOT fixed alongside XRP, because it cannot be fixed
+        // honestly with the current record shape. Chain claims are `u128` wei
+        // (`DepositPosition::cfx_claims`) while `collateral_gained` is `u64`:
+        // 2^64-1 wei is ~18.4 CFX, so any realistic absorb saturates. Writing a
+        // saturated value would put a silently wrong number in the UI, which is
+        // worse than the current absence. Normalizing to e8s would make the same
+        // field mean different things per collateral — exactly the kind of
+        // implicit contract that produced this class of bug.
+        //
+        // Low urgency: chain liquidation is disabled-by-default and staging-only.
+        // Un-ignore this once the record shape is settled.
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 1_00000000);
+        state.opt_in_cfx(&user_a(), cfx_sentinel()).unwrap();
+        let mut stables_consumed = BTreeMap::new();
+        stables_consumed.insert(icusd_ledger(), 1_00000000);
+
+        let history_before = state.liquidation_history.len();
+        state.process_chain_liquidation_gains_at(
+            99,
+            cfx_sentinel(),
+            &stables_consumed,
+            20_000 * 1_000_000_000_000_000_000u128,
+            5_000_000,
+            123,
+        );
+
+        assert_eq!(
+            state.liquidation_history.len(),
+            history_before + 1,
+            "chain absorb must append a history record, in lockstep with the counter"
+        );
+        let record = state.liquidation_history.last().expect("history record");
+        assert_eq!(record.vault_id, 99);
+        assert_eq!(record.collateral_type, cfx_sentinel());
+    }
+
+    #[test]
+    fn native_xrp_absorb_appends_a_liquidation_history_record() {
+        // The XRP absorb path bumps `total_liquidations_executed` but used to
+        // skip `liquidation_history` entirely (only the generic ICRC path wrote
+        // records). Live consequence: the Earn page's Liquidation History
+        // showed no row for a real XRP absorb while the counter climbed, so the
+        // count and the list disagreed. The record must be written by the same
+        // call that bumps the counter.
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_000_000);
+        state
+            .opt_in_native_collateral_with_tag(&user_a(), xrp_ledger(), valid_xrp_address(), None)
+            .unwrap();
+        let mut consumed = BTreeMap::new();
+        consumed.insert(icusd_ledger(), 60_000_000);
+        let payout_claims = vec![XrpSpPayoutClaim {
+            claimant: user_a(),
+            claim_id: 9,
+            payout_address: valid_xrp_address(),
+            destination_tag: None,
+            drops: 1_796_552,
+        }];
+
+        let history_before = state.liquidation_history.len();
+        let counter_before = state.total_liquidations_executed;
+
+        state
+            .process_native_xrp_absorb_success_at(
+                195,
+                xrp_ledger(),
+                &consumed,
+                1_796_552,
+                &payout_claims,
+                4_242,
+            )
+            .unwrap();
+
+        assert_eq!(
+            state.total_liquidations_executed,
+            counter_before + 1,
+            "counter must still advance"
+        );
+        assert_eq!(
+            state.liquidation_history.len(),
+            history_before + 1,
+            "history must advance in lockstep with the counter"
+        );
+        let record = state.liquidation_history.last().expect("history record");
+        assert_eq!(record.vault_id, 195);
+        assert_eq!(record.collateral_type, xrp_ledger());
+        assert_eq!(
+            record.collateral_gained, 1_796_552,
+            "collateral_gained is the seized drops"
+        );
+        assert_eq!(record.stables_consumed, consumed);
+        assert_eq!(
+            record.depositors_count, 1,
+            "depositors_count is the number of payout claimants"
+        );
+        assert_eq!(record.timestamp, 4_242);
     }
 
     #[test]
