@@ -158,3 +158,35 @@ export function buildManualXrpSettlementSuccessCopy(claimId: XrpClaimId, txHash?
   const suffix = txHash ? ` Tx hash: ${txHash}.` : '';
   return `Liquidation accepted and XRP claim #${claimId} created. XRP settlement submitted.${suffix}`;
 }
+
+/**
+ * Amount to show on the Stability Pool "Collateral Gains" line for a collateral.
+ *
+ * ICRC collateral accrues into the pool's `collateral_gains` map, so the gains
+ * value is the whole story. Native XRP never does: an absorb pays depositors
+ * through XRPL claims instead, so its `collateral_gains` entry is permanently
+ * zero. Rendering that raw zero told a depositor who was owed real XRP that
+ * they had received nothing, so for native XRP we show the pending payout
+ * total (in drops) instead.
+ *
+ * Returns the amount plus whether it came from the claim rail, so callers can
+ * label it rather than passing it off as an ordinary claimable balance.
+ */
+export function collateralGainDisplayAmount(
+  collateralPrincipal: PrincipalLike,
+  icrcGainAmount: bigint,
+  pendingXrpDrops: bigint,
+): { amount: bigint; viaXrpClaims: boolean } {
+  if (isNativeXrpPrincipal(collateralPrincipal)) {
+    return { amount: pendingXrpDrops, viaXrpClaims: true };
+  }
+  return { amount: icrcGainAmount, viaXrpClaims: false };
+}
+
+/** Total drops still owed across pending native-XRP payouts. */
+export function sumPendingXrpDrops(
+  payouts: ReadonlyArray<{ drops: bigint | number }> | null | undefined,
+): bigint {
+  if (!payouts?.length) return 0n;
+  return payouts.reduce<bigint>((total, p) => total + BigInt(p.drops ?? 0), 0n);
+}

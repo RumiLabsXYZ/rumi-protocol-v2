@@ -11,6 +11,7 @@
   import {
     XRP_NATIVE_PRINCIPAL_TEXT,
     isNativeXrpPrincipal,
+    sumPendingXrpDrops,
     unwrapNativePayoutAddresses,
     unwrapNativePayoutDestinationTags,
     validateXrpPayoutInput,
@@ -20,7 +21,10 @@
   export let userPosition: UserPosition | null = null;
   export let isConnected = false;
 
-  const dispatch = createEventDispatcher<{ success: { action: string } }>();
+  const dispatch = createEventDispatcher<{
+    success: { action: string };
+    pendingDropsChange: bigint;
+  }>();
 
   let payoutAddress = '';
   let destinationTag = '';
@@ -44,6 +48,11 @@
   $: userHasStablecoinDeposit = (userPosition?.stablecoin_balances ?? []).some(([, amount]) => amount > 0n);
   $: isEnabled = storedAddress !== '';
   $: hasPendingPayouts = pendingPayouts.length > 0;
+  // Publish the outstanding drops so the Collateral Gains row can show what a
+  // depositor is actually owed in XRP. That row reads `collateral_gains`, which
+  // is structurally always 0 for native XRP (payouts are XRPL claims, not pool
+  // balances), so without this it reports "nothing" to someone owed real XRP.
+  $: dispatch('pendingDropsChange', sumPendingXrpDrops(pendingPayouts));
   $: shouldRenderXrpRouting =
     isConnected && userPosition && xrpCollateral && (userHasStablecoinDeposit || isEnabled || loadingPayouts || hasPendingPayouts);
 

@@ -474,6 +474,24 @@ pub(crate) fn apply_native_xrp_absorb_success_in_state_at(
     )?;
     state.take_pending_native_xrp_absorb(intent.vault_id);
 
+    // Emit the same audit event the generic ICRC path emits. Without it the
+    // only Explorer trace of an absorb is `LiquidationNotification`, which
+    // carries a bare vault count and cannot distinguish a completed absorb
+    // from one that failed. `collateral_gained` is in drops (6-decimal), so
+    // consumers must format it with the collateral's own decimals.
+    let stables_consumed_e8s: u64 = intent.stables_consumed.values().sum();
+    state.push_event_at(
+        state.protocol_canister_id,
+        PoolEventType::LiquidationExecuted {
+            vault_id: intent.vault_id,
+            stables_consumed_e8s,
+            collateral_gained: intent.collateral_received_drops,
+            collateral_type: intent.collateral_type,
+            success: true,
+        },
+        now_ns,
+    );
+
     Ok(LiquidationResult {
         vault_id: intent.vault_id,
         stables_consumed: intent.stables_consumed.clone(),
@@ -3020,6 +3038,53 @@ mod tests {
             read_state(|s| s.native_xrp_pending_payouts_for(&user_b())).is_empty(),
             "non-opted-in depositor must not receive pending native XRP payouts",
         );
+
+        // The absorb must leave a substantive audit event. Without this the
+        // only trace in the Explorer is `LiquidationNotification`, which
+        // carries a bare vault COUNT — no vault id, no amounts, no outcome —
+        // so a real absorb was indistinguishable from one that did nothing.
+        // `LiquidationExecuted` already exists and is already rendered richly
+        // by the frontend, so emitting it needs no interface change.
+        let executed = read_state(|s| {
+            s.pool_events
+                .as_ref()
+                .map(|events| {
+                    events
+                        .iter()
+                        .filter_map(|e| match &e.event_type {
+                            PoolEventType::LiquidationExecuted {
+                                vault_id,
+                                stables_consumed_e8s,
+                                collateral_gained,
+                                collateral_type,
+                                success,
+                            } => Some((
+                                *vault_id,
+                                *stables_consumed_e8s,
+                                *collateral_gained,
+                                *collateral_type,
+                                *success,
+                            )),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        });
+        assert_eq!(
+            executed.len(),
+            1,
+            "a successful native-XRP absorb must emit exactly one LiquidationExecuted event"
+        );
+        let (vault_id, stables_e8s, drops, collateral, success) = executed[0];
+        assert_eq!(vault_id, 144);
+        assert_eq!(collateral, xrp_ledger());
+        assert_eq!(drops, 12_000_000, "collateral_gained is the seized drops");
+        assert_eq!(
+            stables_e8s, 60_00000000,
+            "stables_consumed_e8s is the full icUSD burn this fixture absorbs"
+        );
+        assert!(success);
     }
 
     #[test]
