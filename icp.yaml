@@ -653,7 +653,7 @@ canisters:
   # shared root node_modules in parallel (and upgrade every Rust canister).
   - name: vault_frontend
     recipe:
-      type: "@dfinity/asset-canister@v2.1.0"
+      type: "@dfinity/asset-canister@v2.3.0"
       configuration:
         dir: src/vault_frontend/dist
         build:
@@ -666,7 +666,7 @@ canisters:
 
   - name: rumi_homepage
     recipe:
-      type: "@dfinity/asset-canister@v2.1.0"
+      type: "@dfinity/asset-canister@v2.3.0"
       configuration:
         dir: src/rumi_homepage/dist
         build:
@@ -686,7 +686,7 @@ canisters:
   # frontend. Deploy individually: `icp deploy conflux_espace_frontend -e mainnet-staging`.
   - name: conflux_espace_frontend
     recipe:
-      type: "@dfinity/asset-canister@v2.1.0"
+      type: "@dfinity/asset-canister@v2.3.0"
       configuration:
         dir: src/conflux_espace_frontend/dist
         build:
