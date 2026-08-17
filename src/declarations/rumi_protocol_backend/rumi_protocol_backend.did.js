@@ -2103,6 +2103,11 @@ export const idlFactory = ({ IDL }) => {
         [Result_14],
         [],
       ),
+    'stability_pool_settle_xrp_claim' : IDL.Func(
+        [IDL.Nat64, IDL.Principal, IDL.Text, IDL.Opt(IDL.Nat32)],
+        [Result_2],
+        [],
+      ),
     'stability_pool_xrp_claim_outstanding' : IDL.Func(
         [IDL.Nat64, IDL.Principal],
         [Result_14],

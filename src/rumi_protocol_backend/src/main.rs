@@ -6081,6 +6081,38 @@ async fn settle_xrp_claim_with_tag(
     )
 }
 
+/// SP auto-settlement sweep: settle a depositor's XRP payout claim to the
+/// XRPL address they registered when opting into XRP absorption. Caller must
+/// be the registered stability pool; the claim must belong to `claimant`;
+/// quarantined claims are refused. Delegates to the same settlement machinery
+/// as the claimant-facing endpoints (per-custody sequence lock +
+/// confirm-before-sign idempotency), so an SP sweep racing a manual settle
+/// click cannot double-pay.
+#[update]
+async fn stability_pool_settle_xrp_claim(
+    claim_id: u64,
+    claimant: Principal,
+    destination: String,
+    destination_tag: Option<u32>,
+) -> Result<String, ProtocolError> {
+    validate_call().await?;
+    let caller = ic_cdk::caller();
+    read_state(|s| {
+        rumi_protocol_backend::vault::validate_sp_settle_xrp_claim_in_state(
+            s, caller, claim_id, claimant,
+        )
+    })?;
+    check_postcondition(
+        rumi_protocol_backend::vault::settle_xrp_claim_as(
+            claimant,
+            claim_id,
+            destination,
+            destination_tag,
+        )
+        .await,
+    )
+}
+
 /// XRP-006: owner cleanup for an abandoned native-XRP open. The vault layer
 /// verifies live XRPL state and removes the pending entry only if it is unfunded.
 #[update]

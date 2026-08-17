@@ -7,11 +7,15 @@ const EXE_COLLATERAL_PRINCIPAL = 'rh2pm-ryaaa-aaaan-qeniq-cai';
 const SUNSET_COLLATERAL_PRINCIPALS = new Set([BOB_COLLATERAL_PRINCIPAL, EXE_COLLATERAL_PRINCIPAL]);
 const HIDDEN_GAIN_SYMBOLS = new Set(['PHASMA']);
 
+// Sunset wind-down policy is principal-bound here. Do not advertise re-entry
+// if the independently managed SP registry still carries its historical
+// Active status during activation.
+export function isSunsetCollateralPrincipal(principalText: string): boolean {
+	return SUNSET_COLLATERAL_PRINCIPALS.has(principalText);
+}
+
 export function isSunsetCollateral(collateral: CollateralInfo): boolean {
-	// Sunset wind-down policy is principal-bound here. Do not advertise
-	// re-entry if the independently managed SP registry still carries its
-	// historical Active status during activation.
-	return SUNSET_COLLATERAL_PRINCIPALS.has(collateral.ledger_id.toText());
+	return isSunsetCollateralPrincipal(collateral.ledger_id.toText());
 }
 
 export function gainCollaterals(collaterals: CollateralInfo[]): CollateralInfo[] {
