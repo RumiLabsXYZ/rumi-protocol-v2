@@ -1363,6 +1363,37 @@ pub fn stability_pool_xrp_claim_outstanding_in_state(
     }
 }
 
+/// Pure validation for `stability_pool_settle_xrp_claim` (the SP-driven
+/// auto-settlement sweep): the caller must be the registered stability pool,
+/// the claim must exist and belong to the claimant the SP is settling for, and
+/// quarantined claims are refused (F-03 — possibly already paid under a
+/// divergent hash; only admin_resolve_xrp_claim may touch them).
+///
+/// The "No such XRP claim" wording matches the claimant path so the SP sweep's
+/// outstanding-check semantics stay consistent: missing == settled-or-unknown.
+pub fn validate_sp_settle_xrp_claim_in_state(
+    state: &crate::state::State,
+    caller: Principal,
+    claim_id: u64,
+    claimant: Principal,
+) -> Result<(), ProtocolError> {
+    ensure_registered_sp(state, caller)?;
+    let claim = state.xrp_claims.get(&claim_id).ok_or_else(|| {
+        ProtocolError::GenericError("No such XRP claim (already settled or unknown).".to_string())
+    })?;
+    if claim.claimant != claimant {
+        return Err(ProtocolError::GenericError(format!(
+            "XRP claim #{claim_id} belongs to a different claimant"
+        )));
+    }
+    if let Some(reason) = &claim.quarantine_reason {
+        return Err(ProtocolError::GenericError(format!(
+            "XRP claim #{claim_id} is quarantined ({reason}); awaiting admin reconciliation."
+        )));
+    }
+    Ok(())
+}
+
 fn xrp_sp_absorb_sizing(
     state: &crate::state::State,
     vault_id: u64,
@@ -2434,7 +2465,22 @@ pub async fn settle_xrp_claim_with_tag(
     destination: String,
     destination_tag: Option<u32>,
 ) -> Result<String, ProtocolError> {
-    let caller = ic_cdk::api::caller();
+    settle_xrp_claim_as(ic_cdk::api::caller(), claim_id, destination, destination_tag).await
+}
+
+/// Settlement body with an explicit acting claimant. The claimant entry points
+/// pass `ic_cdk::caller()`; `stability_pool_settle_xrp_claim` passes the
+/// depositor the SP is settling for (after `validate_sp_settle_xrp_claim_in_state`
+/// has established the caller is the registered SP and the claimant matches).
+/// The per-claim guard is keyed by the acting claimant either way, so an SP
+/// sweep and the depositor clicking settle serialize on the same custody lock
+/// and the confirm-before-sign idempotency check below.
+pub async fn settle_xrp_claim_as(
+    caller: Principal,
+    claim_id: u64,
+    destination: String,
+    destination_tag: Option<u32>,
+) -> Result<String, ProtocolError> {
     require_xrp_production_key()?;
     let mut claim = match read_state(|s| s.xrp_claims.get(&claim_id).cloned()) {
         Some(c) => c,
@@ -8102,6 +8148,56 @@ mod xrp_sp_absorb_contract_tests {
         assert!(
             state.sp_xrp_absorb_preflights.contains_key(&VAULT_ID),
             "an amount-mismatched release must not clear the reservation"
+        );
+    }
+
+    #[test]
+    fn sp_settle_on_behalf_validation_gates() {
+        // `stability_pool_settle_xrp_claim` lets the SP settle a depositor's
+        // payout claim to the address the depositor registered. The pure
+        // validation must enforce: caller is the registered SP, the claim
+        // exists, the claimant matches the SP's record, and quarantined claims
+        // are never auto-settled (F-03: they may already be paid under a
+        // divergent hash and need admin reconciliation).
+        let mut state = test_state_with_xrp_vault();
+        let depositor = principal(0x77);
+        state.xrp_claims.insert(
+            9,
+            crate::state::XrpClaim {
+                claimant: depositor,
+                drops: 11_529,
+                custody_owner: principal(0x99),
+                custody_nonce: VAULT_ID,
+                created_at_ns: 1,
+                settlement: None,
+                quarantine_reason: None,
+            },
+        );
+
+        assert!(
+            validate_sp_settle_xrp_claim_in_state(&state, sp(), 9, depositor).is_ok(),
+            "registered SP with matching claimant must pass"
+        );
+        assert!(
+            validate_sp_settle_xrp_claim_in_state(&state, principal(0x66), 9, depositor).is_err(),
+            "non-SP caller must be rejected"
+        );
+        assert!(
+            validate_sp_settle_xrp_claim_in_state(&state, sp(), 9, principal(0x66)).is_err(),
+            "claimant mismatch must be rejected"
+        );
+        let missing = validate_sp_settle_xrp_claim_in_state(&state, sp(), 10, depositor);
+        assert!(
+            format!("{missing:?}").contains("No such XRP claim"),
+            "missing claim must use the settled-or-unknown wording the sweep keys off: {missing:?}"
+        );
+
+        state.xrp_claims.get_mut(&9).unwrap().quarantine_reason =
+            Some("diverged".to_string());
+        let quarantined = validate_sp_settle_xrp_claim_in_state(&state, sp(), 9, depositor);
+        assert!(
+            format!("{quarantined:?}").contains("quarantined"),
+            "quarantined claim must be refused: {quarantined:?}"
         );
     }
 

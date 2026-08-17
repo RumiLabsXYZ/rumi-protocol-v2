@@ -1178,6 +1178,117 @@ fn xrp_vault_is_absorbed_by_stability_pool_via_automated_dispatch() {
             .unwrap_or(true),
         "automated SP absorb must clear the vault's debt, got {vault_after:?}"
     );
+
+    // ── Phase 2: the auto-settlement sweep pays the depositor, no clicks ─────
+    // The depositor's claim must exist backend-side, mirrored by an SP-side
+    // pending-payout reminder carrying the registered address.
+    let (dep_claim_id, dep_claim) = xrp_claims_full(&pic, backend)
+        .into_iter()
+        .find(|(id, c)| !claims_before.contains(id) && c.claimant == depositor())
+        .expect("depositor payout claim exists after the absorb");
+    let payouts_before = sp_pending_payouts(&pic, sp_id, depositor());
+    assert_eq!(
+        payouts_before.len(),
+        1,
+        "SP records exactly one pending payout for the depositor: {payouts_before:?}"
+    );
+    assert_eq!(payouts_before[0].claim_id, dep_claim_id);
+
+    // Advance through sweep windows (600s cadence), servicing the rippled
+    // outcalls the backend settlement makes. Three windows are the expected
+    // minimum: submit -> confirm-validated (claim removed) -> outstanding=false
+    // (SP acks its reminder). Extra windows are harmless.
+    for _ in 0..8 {
+        pic.advance_time(std::time::Duration::from_secs(600));
+        for _ in 0..25 {
+            pic.tick();
+            for req in pic.get_canister_http() {
+                let m = rippled_method_of(&req.body);
+                let body = match m.as_str() {
+                    "account_info" => rippled_account_info(deposit_drops, 5, 300),
+                    "server_state" => rippled_server_state(RESERVE_DROPS),
+                    "submit" => rippled_submit_ok(),
+                    "tx" => rippled_tx_validated(
+                        &rippled_tx_hash_of(&req.body),
+                        dep_claim.drops,
+                        301,
+                    ),
+                    other => panic!("unexpected rippled method in sweep: {other}"),
+                }
+                .to_string()
+                .into_bytes();
+                pic.mock_canister_http_response(MockCanisterHttpResponse {
+                    subnet_id: req.subnet_id,
+                    request_id: req.request_id,
+                    response: CanisterHttpResponse::CanisterHttpReply(CanisterHttpReply {
+                        status: 200,
+                        headers: vec![],
+                        body,
+                    }),
+                    additional_responses: vec![],
+                });
+            }
+        }
+        if !xrp_claims(&pic, backend).contains(&dep_claim_id)
+            && sp_pending_payouts(&pic, sp_id, depositor()).is_empty()
+        {
+            break;
+        }
+    }
+
+    assert!(
+        !xrp_claims(&pic, backend).contains(&dep_claim_id),
+        "sweep must settle and remove the depositor's claim without any manual call"
+    );
+    assert!(
+        sp_pending_payouts(&pic, sp_id, depositor()).is_empty(),
+        "sweep must ack the SP-side reminder once the settlement validates"
+    );
+}
+
+/// rippled `tx` requests carry the hash being queried; echo it back so the
+/// timer-driven settlement (whose hash the test never sees) validates.
+fn rippled_tx_hash_of(body: &[u8]) -> String {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.get("params")?
+                .get(0)?
+                .get("transaction")?
+                .as_str()
+                .map(String::from)
+        })
+        .unwrap_or_default()
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct NativeXrpPendingPayoutView {
+    claim_id: u64,
+    #[allow(dead_code)]
+    drops: u64,
+    #[allow(dead_code)]
+    payout_address: String,
+}
+
+fn sp_pending_payouts(
+    pic: &PocketIc,
+    sp: Principal,
+    user: Principal,
+) -> Vec<NativeXrpPendingPayoutView> {
+    match pic
+        .query_call(
+            sp,
+            user,
+            "get_my_native_xrp_payouts",
+            Encode!().expect("encode empty args"),
+        )
+        .expect("query get_my_native_xrp_payouts")
+    {
+        WasmResult::Reply(bytes) => {
+            Decode!(&bytes, Vec<NativeXrpPendingPayoutView>).expect("decode pending payouts")
+        }
+        WasmResult::Reject(m) => panic!("get_my_native_xrp_payouts rejected: {m}"),
+    }
 }
 
 fn stability_pool_wasm() -> Vec<u8> {

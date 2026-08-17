@@ -16,6 +16,12 @@ use crate::state::{mutate_state, read_state};
 use crate::types::*;
 
 const CHAIN_ABSORB_AUTO_TIMER_POLL_SECONDS: u64 = 60;
+/// Native-XRP payout settlement sweep cadence. Each settlement is a tEd25519
+/// signature + XRPL submit outcall on the backend, so the sweep is deliberately
+/// slow and bounded: at 2 claims per 10-minute tick a normal absorb fan-out
+/// clears within the hour, and cycle cost stays negligible.
+const NATIVE_XRP_SETTLE_SWEEP_POLL_SECONDS: u64 = 600;
+const NATIVE_XRP_SETTLE_SWEEP_MAX_PER_TICK: usize = 2;
 const UNALLOCATED_INTEREST_FORWARD_RETRY_SECONDS: u64 = 60;
 /// How often the pool reconciles its tracked aggregate against live ledger
 /// balances and logs any shortfall. Hourly: a handful of balance queries, so
@@ -62,6 +68,7 @@ fn init(args: StabilityPoolInitArgs) {
     ic_cdk_timers::set_timer(Duration::ZERO, || {
         setup_virtual_price_timer();
         setup_chain_absorb_auto_timer();
+        setup_native_xrp_settle_sweep_timer();
         setup_unallocated_interest_forward_retry_timer();
         setup_ledger_reconciliation_timer();
     });
@@ -101,6 +108,7 @@ fn post_upgrade(_args: StabilityPoolInitArgs) {
     ic_cdk_timers::set_timer(Duration::ZERO, || {
         setup_virtual_price_timer();
         setup_chain_absorb_auto_timer();
+        setup_native_xrp_settle_sweep_timer();
         setup_unallocated_interest_forward_retry_timer();
         setup_ledger_reconciliation_timer();
     });
@@ -114,6 +122,43 @@ fn setup_virtual_price_timer() {
     ic_cdk_timers::set_timer_interval(Duration::from_secs(300), || {
         ic_cdk::spawn(fetch_virtual_prices());
     });
+}
+
+/// Auto-settle pending native-XRP payouts to depositors' registered XRPL
+/// addresses. Depositors opted in with an address; without this sweep a
+/// liquidation's proceeds sat as claims until each depositor manually clicked
+/// settle (most never knew they had one — vault 195, 2026-08-15). The cursor
+/// rotates so a failing claim cannot starve the rest; `emergency_pause` stops
+/// the sweep with the rest of the pool.
+fn setup_native_xrp_settle_sweep_timer() {
+    thread_local! {
+        static SWEEP_CURSOR: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    }
+    ic_cdk_timers::set_timer_interval(
+        Duration::from_secs(NATIVE_XRP_SETTLE_SWEEP_POLL_SECONDS),
+        || {
+            ic_cdk::spawn(async {
+                let cursor = SWEEP_CURSOR.with(|c| c.get());
+                let summary = crate::liquidation::run_native_xrp_settle_sweep_with_io(
+                    &mut crate::liquidation::CdkNativeXrpSettleSweepIo,
+                    cursor,
+                    NATIVE_XRP_SETTLE_SWEEP_MAX_PER_TICK,
+                )
+                .await;
+                if summary.examined > 0 {
+                    log!(
+                        INFO,
+                        "[xrp-settle-sweep] examined {} acked {} submitted {} failed {}",
+                        summary.examined,
+                        summary.acked,
+                        summary.submitted,
+                        summary.failed
+                    );
+                    SWEEP_CURSOR.with(|c| c.set(summary.last_claim_id));
+                }
+            });
+        },
+    );
 }
 
 fn setup_chain_absorb_auto_timer() {
