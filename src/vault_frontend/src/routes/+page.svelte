@@ -10,6 +10,7 @@
   import { protocolService } from '$lib/services/protocol';
   import { MINIMUM_CR, LIQUIDATION_CR } from '$lib/protocol';
   import { collateralStore, activeCollateralTypes } from '$lib/stores/collateralStore';
+  import { newVaultCollateralTypes, isHiddenForNewVaults } from '$lib/utils/newVaultCollateralPolicy';
   import { CANISTER_IDS } from '$lib/config';
   import ProtocolStats from '$lib/components/dashboard/ProtocolStats.svelte';
   import MultiplierBadge from '$lib/components/points/MultiplierBadge.svelte';
@@ -39,9 +40,12 @@
   let selectedCollateralPrincipal: string = CANISTER_IDS.ICP_LEDGER;
   let showCollateralDropdown = false;
 
-  // Populate collateral token list from store, with ICP fallback
-  $: collateralTokens = $activeCollateralTypes.length > 0
-    ? $activeCollateralTypes.map(ct => ({
+  // Populate collateral token list from store, with ICP fallback.
+  // Collaterals hidden by newVaultCollateralTypes() are display-gated on this
+  // page only; they remain active for existing vaults and everywhere else.
+  $: newVaultCollaterals = newVaultCollateralTypes($activeCollateralTypes);
+  $: collateralTokens = newVaultCollaterals.length > 0
+    ? newVaultCollaterals.map(ct => ({
         id: ct.principal,
         label: ct.symbol,
         color: ct.color,
@@ -179,6 +183,8 @@
   })();
 
   function selectCollateral(principalText: string) {
+    // Defensive: hidden collaterals are not offered for new vaults.
+    if (isHiddenForNewVaults(principalText)) return;
     selectedCollateralPrincipal = principalText;
     showCollateralDropdown = false;
   }
