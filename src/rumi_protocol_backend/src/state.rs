@@ -2887,10 +2887,14 @@ impl State {
             self.last_icp_timestamp = Some(ts);
         }
         let icp = self.icp_collateral_type();
-        if let Some(config) = self.collateral_configs.get_mut(&icp) {
-            config.last_price = Some(rate.to_f64());
+        if self.collateral_configs.contains_key(&icp) {
+            // Re-keys ICP vaults so a price move alone cannot hide a
+            // liquidatable vault from band-only check_vaults ticks.
+            self.on_collateral_price_change(&icp, rate.to_f64());
             if let Some(ts) = timestamp_nanos {
-                config.last_price_timestamp = Some(ts);
+                if let Some(config) = self.collateral_configs.get_mut(&icp) {
+                    config.last_price_timestamp = Some(ts);
+                }
             }
         }
     }
@@ -3791,6 +3795,46 @@ impl State {
     /// vaults move proportionally with price, preserving relative ordering.
     /// Re-keying every vault on every 5-minute price tick would burn O(N)
     /// cycles for zero ordering benefit.
+    /// Apply a new cached price for `collateral_type` and re-key that
+    /// collateral's vaults in `vault_cr_index`.
+    ///
+    /// The CR key encodes the vault's CR at its last mutation, so a pure price
+    /// move silently invalidates it: the vault's true CR crosses the
+    /// liquidation floor while its stored key still says "healthy", and
+    /// band-only `check_vaults` ticks skip it until the hourly full sweep.
+    /// That is up to an hour of unliquidated bad debt on any collateral.
+    ///
+    /// The original design deliberately kept price updates out of the index on
+    /// the grounds that all vaults of a type move proportionally, so relative
+    /// ORDERING is preserved. That is true, and irrelevant to the band gate,
+    /// which compares each key against an ABSOLUTE threshold. Ordering is not
+    /// the property the gate needs; accuracy is.
+    ///
+    /// Cost is bounded by the vault count of ONE collateral (tens today), not
+    /// the whole book, and only on a real price change — negligible beside the
+    /// XRC outcall that delivered the price.
+    pub fn on_collateral_price_change(&mut self, collateral_type: &CollateralType, price: f64) {
+        let unchanged = self
+            .collateral_configs
+            .get(collateral_type)
+            .map(|c| c.last_price == Some(price))
+            .unwrap_or(false);
+        if let Some(config) = self.collateral_configs.get_mut(collateral_type) {
+            config.last_price = Some(price);
+        }
+        if unchanged {
+            return;
+        }
+        let vault_ids: Vec<u64> = self
+            .collateral_to_vault_ids
+            .get(collateral_type)
+            .map(|ids| ids.iter().copied().collect())
+            .unwrap_or_default();
+        for vault_id in vault_ids {
+            self.reindex_vault_cr(vault_id);
+        }
+    }
+
     pub fn reindex_vault_cr(&mut self, vault_id: u64) {
         // Drop any prior entry first so a re-key from one bucket to another
         // never leaves a stale duplicate.
@@ -7692,6 +7736,52 @@ mod tests {
         assert!(
             ids.contains(&2),
             "native-XRP vault must be included in the automated scan: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn band_scan_finds_vault_that_only_a_price_move_pushed_underwater() {
+        // A vault's `vault_cr_index` key is written from the collateral price
+        // cached AT THE TIME OF THE LAST VAULT MUTATION. A pure price move
+        // changes the vault's true CR but not its stored key, so a
+        // stale-above-threshold key makes band-only `check_vaults` ticks skip a
+        // genuinely liquidatable vault. Only the hourly full sweep (or an
+        // upgrade, which rebuilds the index) catches it -- an hour of extra bad
+        // debt exposure on EVERY collateral, not just XRP.
+        //
+        // Observed live: pre-upgrade ticks logged "visited 61, found 0" while
+        // vault 195 was liquidatable; the post-upgrade tick (fresh index) found
+        // it immediately.
+        let mut s = test_state();
+        let icp = s.icp_ledger_principal;
+        if let Some(c) = s.collateral_configs.get_mut(&icp) {
+            c.last_price = Some(10.0);
+        }
+        // Healthy at $10: $200 collateral against $100 debt => CR 200%.
+        s.open_vault(crate::vault::Vault {
+            owner: Principal::anonymous(),
+            vault_id: 1,
+            borrowed_icusd_amount: ICUSD::new(100 * 100_000_000),
+            collateral_amount: 20 * 100_000_000,
+            collateral_type: icp,
+            accrued_interest: ICUSD::new(0),
+            last_accrual_time: 0,
+            bot_processing: false,
+        });
+
+        // Price halves. Nothing mutates the vault -- only the cached price.
+        // True CR is now 100%, far below any liquidation floor.
+        s.on_collateral_price_change(&icp, 5.0);
+
+        let dummy = crate::numeric::UsdIcp::from(rust_decimal::Decimal::ZERO);
+        let band = s.scan_unhealthy_vaults(dummy, false);
+        let ids: Vec<u64> = band.unhealthy_vaults.iter().map(|v| v.vault_id).collect();
+        assert!(
+            ids.contains(&1),
+            "band-only tick must see a vault that a price move pushed underwater \
+             (visited {}, threshold_key {}): {ids:?}",
+            band.vaults_visited,
+            band.threshold_key
         );
     }
 
