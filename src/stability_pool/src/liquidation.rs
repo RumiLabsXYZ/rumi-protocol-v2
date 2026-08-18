@@ -578,8 +578,24 @@ pub(crate) struct NativeXrpSettleSweepSummary {
     pub acked: usize,
     pub submitted: usize,
     pub failed: usize,
+    /// Submits that XRPL rejected with `tefPAST_SEQ`. The Payment is almost
+    /// certainly ON-LEDGER: IC https-outcalls fan out to every replica, all
+    /// POST the same signed blob, and the nodes that lose the race report
+    /// "sequence already used" against our own applied transaction. The claim
+    /// keeps its recorded settlement, so the next tick confirms it.
+    pub pending_confirmation: usize,
     /// Cursor for the next tick: the last claim id this tick examined.
     pub last_claim_id: Option<u64>,
+}
+
+/// True when a settle error is XRPL's `tefPAST_SEQ`, which for this rail means
+/// "already applied" rather than "did not send" (see
+/// `NativeXrpSettleSweepSummary::pending_confirmation`).
+fn is_past_sequence_submit(error: &StabilityPoolError) -> bool {
+    matches!(
+        error,
+        StabilityPoolError::LiquidationFailed { reason, .. } if reason.contains("tefPAST_SEQ")
+    )
 }
 
 /// One bounded tick of the native-XRP payout settlement sweep.
@@ -660,6 +676,15 @@ pub(crate) async fn run_native_xrp_settle_sweep_with_io(
                     tx_hash
                 );
                 summary.submitted += 1;
+            }
+            Err(error) if is_past_sequence_submit(&error) => {
+                log!(
+                    INFO,
+                    "[xrp-settle-sweep] claim {} already submitted (tefPAST_SEQ); \
+                     awaiting confirmation on a later tick",
+                    payout.claim_id
+                );
+                summary.pending_confirmation += 1;
             }
             Err(error) => {
                 log!(
@@ -4691,6 +4716,7 @@ mod tests {
         outstanding: std::collections::BTreeMap<u64, bool>,
         outstanding_errors: std::collections::BTreeSet<u64>,
         settle_errors: std::collections::BTreeSet<u64>,
+        settle_error_messages: std::collections::BTreeMap<u64, String>,
         settle_calls: Vec<(u64, Principal, String, Option<u32>)>,
         outstanding_calls: Vec<(u64, Principal)>,
     }
@@ -4723,6 +4749,12 @@ mod tests {
         ) -> Result<String, StabilityPoolError> {
             self.settle_calls
                 .push((claim_id, claimant, destination, destination_tag));
+            if let Some(message) = self.settle_error_messages.get(&claim_id) {
+                return Err(StabilityPoolError::LiquidationFailed {
+                    vault_id: claim_id,
+                    reason: format!("backend rejected settle-on-behalf: {message}"),
+                });
+            }
             if self.settle_errors.contains(&claim_id) {
                 return Err(StabilityPoolError::InterCanisterCallFailed {
                     target: "Protocol".to_string(),
@@ -4838,6 +4870,44 @@ mod tests {
 
         assert_eq!(summary.examined, 0);
         assert!(io.settle_calls.is_empty() && io.outstanding_calls.is_empty());
+    }
+
+    #[test]
+    fn settle_sweep_counts_past_seq_submit_as_pending_confirmation() {
+        // XRPL `submit` over IC https-outcalls is fan-out: every replica POSTs
+        // the SAME signed blob, the first arrival applies, and the losers get
+        // tefPAST_SEQ ("sequence already used" -- by our own tx). Consensus can
+        // land on the losers' answer, so a SUCCESSFUL payment surfaces as a
+        // submit error. Observed live 2026-08-17: all four vault-195 payouts
+        // logged tefPAST_SEQ and all four were tesSUCCESS on-ledger.
+        //
+        // Counting these as `failed` makes a healthy sweep read like an
+        // incident. They are pending-confirmation: the claim keeps its recorded
+        // settlement and the next tick confirms it.
+        let state = sweep_state_with_payouts(vec![(user_a(), payout(3, 11_529, 100))]);
+        replace_state(state);
+        let mut io = FakeSettleSweepIo::default();
+        io.settle_error_messages.insert(
+            3,
+            "xrp claim submit failed (call settle again to confirm or retry): \
+             submit rejected: tefPAST_SEQ"
+                .to_string(),
+        );
+
+        let summary = futures::executor::block_on(run_native_xrp_settle_sweep_with_io(
+            &mut io, None, 2,
+        ));
+
+        assert_eq!(summary.failed, 0, "a landed-but-noisy submit is not a failure");
+        assert_eq!(
+            summary.pending_confirmation, 1,
+            "tefPAST_SEQ submits must be counted as awaiting confirmation"
+        );
+        assert_eq!(
+            read_state(|s| s.native_xrp_pending_payouts_for(&user_a()).len()),
+            1,
+            "the reminder stays until a later tick confirms the settlement"
+        );
     }
 
     #[test]
