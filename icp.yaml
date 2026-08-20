@@ -734,6 +734,7 @@ environments:
       - rumi_amm
       - rumi_analytics
       - rumi_protocol_backend
+      - rumi_points
       - vault_frontend
       - rumi_homepage
     init_args:
