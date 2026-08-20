@@ -940,6 +940,10 @@ export const idlFactory = ({ IDL }) => {
     'reached_end' : IDL.Bool,
     'events' : IDL.Vec(IDL.Tuple(IDL.Nat64, Event)),
   });
+  const EvmRpcPrincipalInfo = IDL.Record({
+    'effective' : IDL.Principal,
+    'overridden' : IDL.Bool,
+  });
   const Fees = IDL.Record({
     'redemption_fee' : IDL.Float64,
     'borrowing_fee' : IDL.Float64,
@@ -1565,6 +1569,7 @@ export const idlFactory = ({ IDL }) => {
         [ForwardFilteredEventsResponse],
         ['query'],
       ),
+    'get_evm_rpc_principal' : IDL.Func([], [EvmRpcPrincipalInfo], ['query']),
     'get_fees' : IDL.Func([IDL.Nat64], [Fees], ['query']),
     'get_fees_for_collateral' : IDL.Func(
         [IDL.Principal, IDL.Nat64],
