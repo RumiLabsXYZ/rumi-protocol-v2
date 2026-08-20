@@ -1,34 +1,33 @@
-//! ⚠️ EXPERIMENTAL — NOT WIRED UP FOR PRODUCTION. LEAVE ALONE / REVISIT LATER. ⚠️
+//! STATUS (2026-08-20): the Conflux (CFX/eSpace) chains-liquidation rail is
+//! code-complete and dormant, not experimental scaffolding. Increments 0-13
+//! (PRs #261-#286, June 2026) built the full engine: EIP-712 vault auth,
+//! observer/settlement workers, the liquidation bot path, and the SP
+//! escalation. It is dormant purely because prod carries no per-chain config
+//! row; registering a chain and setting its liquidation config IS the public
+//! launch (the `_evm` vault endpoints are EIP-712-signature-authed, not
+//! dev-gated, so there is no separate "flip a switch" step).
 //!
-//! The entire `chains/` tree (Monad + Solana cross-chain CDP) is experimental
-//! and intentionally dormant: the observer/settlement timers are OFF by default,
-//! every cross-chain write endpoint is developer-gated, and the chains run on
-//! testnet/devnet only. It is NOT part of the production ICP-native protocol.
+//! Go-live checklist for the first prod chain (Conflux, chain id 1030):
+//!  1. `set_chains_ecdsa_key_name("key_1")` BEFORE the first prod chain vault
+//!     opens (the key locks in at first vault use). Prod currently carries
+//!     "test_key_1" (verified 2026-08-20).
+//!  2. Register chain 1030 with MAINNET-shaped args
+//!     (`conflux_mainnet_register_arg`): finality_depth 400,
+//!     min_quorum_providers 2, operator-vetted RPC URLs.
+//!  3. Deploy IcUSD.sol on eSpace mainnet, then `set_chain_contract`.
+//!  4. Set a liquidation config row (real Swappi router, fee/divergence/
+//!     deadline). This ALSO activates the XRC-sourced CFX price timer for
+//!     the chain (see `xrc::chains_needing_price_feed`); an unconfigured
+//!     chain makes zero XRC calls.
+//!  5. Verify `get_evm_rpc_principal` reports the official EVM-RPC canister
+//!     (no override left pointing at a mock).
+//!  6. Fund nothing: the reserve address is a sink; the custody address pays
+//!     gas from deposited collateral.
 //!
-//! The 2026-06-05 security audit (`audit-reports/2026-06-05-d67e100/`) added the
-//! M-04..M-09 quorum / finality / recovery remediations here (endpoint dedup,
-//! `min_quorum_providers` fail-closed floor, quorumed finality probe, finality-
-//! aware deposit cursor, on-chain re-verify in resolve/recover). That work
-//! compiles and the backend lib tests pass, BUT it has NOT been exhaustively
-//! reviewed, the candid `.did` sync for the new surface is unverified, and the
-//! sub-agent that wrote it was stopped before finishing additional tests.
-//!
-//! DO NOT enable any cross-chain feature (timers, real providers, mainnet) or
-//! treat this code as production-ready without a deliberate, careful human
-//! review pass first. It is preserved here on purpose — parked, not abandoned.
-//!
-//! Multi-chain scaffolding (Phase 1a).
-//!
-//! This module tree carries the chain-agnostic abstractions used by every
-//! foreign-chain integration: the `ChainAdapter` trait (adapter.rs), the
-//! per-chain configuration record (config.rs), the per-chain settlement
-//! queue (settlement_queue.rs), and the supply-invariant accounting helpers
-//! (supply.rs).
-//!
-//! Phase 1a registers no real chain. The trait has no production impls,
-//! the settlement queues are never drained, and `chain_supplies` stays
-//! empty after install. Phase 1b (Monad) will add the first real adapter
-//! and the first non-zero entries.
+//! Monad and Solana remain genuinely experimental: testnet/devnet only,
+//! observer/settlement timers off by default (Solana also gated behind
+//! `solana_workers_enabled`), and their write paths are still developer-
+//! gated pending the same kind of review pass Conflux already had.
 
 pub mod adapter;
 pub mod admin;
