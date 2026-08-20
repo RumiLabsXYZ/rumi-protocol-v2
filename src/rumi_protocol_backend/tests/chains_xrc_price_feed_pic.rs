@@ -293,17 +293,14 @@ fn no_chain_configured_price_stays_unset_and_canister_stays_healthy() {
     );
 }
 
-/// Scenario 2: the happy path. A registered + (disabled-but-staged)
-/// configured chain gets a real price written by the 300s timer.
-#[test]
-fn registered_and_configured_chain_gets_price_via_timer() {
-    // The mock XRC canister and the backend must live on the SAME PocketIc
-    // instance (inter-canister calls only work within one PocketIc world),
-    // so this scenario cannot reuse `boot_with_xrc` (which creates its own).
+/// Boot a backend wired to a mock XRC canister on the SAME PocketIc instance
+/// (inter-canister calls only work within one PocketIc world, so these
+/// scenarios cannot reuse `boot_with_xrc`, which creates its own).
+fn boot_with_mock_xrc(cfx_rate_e8s: u64) -> (PocketIc, Principal, Principal) {
     let pic = PocketIc::new();
     let xrc_id = pic.create_canister();
     pic.add_cycles(xrc_id, 1_000_000_000_000);
-    pic.install_canister(xrc_id, xrc_wasm(), prepare_mock_xrc_with_cfx_rate(1_234_000_000), None);
+    pic.install_canister(xrc_id, xrc_wasm(), prepare_mock_xrc_with_cfx_rate(cfx_rate_e8s), None);
 
     let cid = pic.create_canister();
     pic.add_cycles(cid, 100_000_000_000_000);
@@ -322,6 +319,43 @@ fn registered_and_configured_chain_gets_price_via_timer() {
     for _ in 0..5 {
         pic.tick();
     }
+    (pic, cid, xrc_id)
+}
+
+/// Move the mock XRC canister's CFX/USD rate (its `set_exchange_rate` update).
+fn set_mock_cfx_rate(pic: &PocketIc, xrc_id: Principal, rate_e8s: u64) {
+    let args = encode_args(("CFX".to_string(), "USD".to_string(), rate_e8s)).expect("encode");
+    pic.update_call(xrc_id, Principal::anonymous(), "set_exchange_rate", args)
+        .expect("set_exchange_rate call");
+}
+
+fn update_dev_unit(pic: &PocketIc, cid: Principal, method: &str, args: Vec<u8>) {
+    let reply = pic
+        .update_call(cid, developer(), method, args)
+        .unwrap_or_else(|e| panic!("{method} call: {e:?}"));
+    match reply {
+        WasmResult::Reply(b) => {
+            Decode!(&b, Result<(), ProtocolError>)
+                .unwrap_or_else(|e| panic!("decode {method}: {e}"))
+                .unwrap_or_else(|e| panic!("{method} must succeed: {e:?}"));
+        }
+        WasmResult::Reject(msg) => panic!("{method} rejected: {msg}"),
+    }
+}
+
+fn pic_now_ns(pic: &PocketIc) -> u64 {
+    pic.get_time()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("pic time after epoch")
+        .as_nanos() as u64
+}
+
+/// Scenario 2: the happy path. A registered + (disabled-but-staged)
+/// configured chain gets a real price written by the 300s timer, stamped with
+/// the SOURCE timestamp of the sample.
+#[test]
+fn registered_and_configured_chain_gets_price_via_timer() {
+    let (pic, cid, _xrc_id) = boot_with_mock_xrc(1_234_000_000);
 
     register_chain(&pic, cid);
     stage_disabled_liquidation_config(&pic, cid);
@@ -339,4 +373,170 @@ fn registered_and_configured_chain_gets_price_via_timer() {
     );
     assert_eq!(info.price_e8, 1_234_000_000, "price must match the mock XRC CFX/USD rate");
     assert!(info.set_at_ns > 0, "set timestamp must be stamped");
+
+    // SOURCE time, not arrival time. `ExchangeRate.timestamp` is expressed in
+    // whole SECONDS, so a stamp derived from it is always an exact multiple of
+    // 1e9 ns; `ic_cdk::api::time()` at the moment the reply is processed is not
+    // (see `arrival_time_is_not_second_aligned_so_the_check_above_discriminates`
+    // below, which pins that the two are actually distinguishable here).
+    assert_eq!(
+        info.set_at_ns % 1_000_000_000,
+        0,
+        "the writer must stamp ExchangeRate.timestamp (whole seconds), not the arrival time"
+    );
+    assert!(
+        info.set_at_ns <= pic_now_ns(&pic),
+        "a source timestamp can never be in the future relative to the canister's clock"
+    );
+}
+
+/// Guard for the assertion above: prove that the backend's own wall clock at
+/// the time it processes a manual write is NOT second-aligned, so
+/// "set_at_ns is a whole second" genuinely discriminates source time from
+/// arrival time rather than passing vacuously.
+#[test]
+fn arrival_time_is_not_second_aligned_so_the_check_above_discriminates() {
+    let (pic, cid, _xrc_id) = boot_with_mock_xrc(1_234_000_000);
+    register_chain(&pic, cid);
+    // No liquidation config row: the pair is NOT XRC-managed, so a manual write
+    // is allowed and stamps `ic_cdk::api::time()` (arrival time).
+    update_dev_unit(
+        &pic,
+        cid,
+        "set_manual_collateral_price",
+        encode_args((CFX_MAINNET, "CFX".to_string(), 15_000_000u64)).unwrap(),
+    );
+    let info = get_manual_price(&pic, cid).expect("manual price written");
+    assert_ne!(
+        info.set_at_ns % 1_000_000_000,
+        0,
+        "arrival-time stamps carry sub-second nanoseconds; if this ever became \
+         second-aligned the source-vs-arrival assertion in the timer test would \
+         stop discriminating and must be replaced"
+    );
+}
+
+/// The accepted LIQ-007 band applies to the AUTOMATIC writer too, and a
+/// rejected sample writes NOTHING -- not the price, and critically not the
+/// freshness timestamp. A rejection that still refreshed `set_at_ns` would keep
+/// a frozen price looking fresh forever, which is the exact opposite of
+/// fail-closed.
+#[test]
+fn an_out_of_band_sample_is_rejected_and_never_refreshes_freshness() {
+    let (pic, cid, xrc_id) = boot_with_mock_xrc(15_000_000); // $0.15 CFX
+    register_chain(&pic, cid);
+    stage_disabled_liquidation_config(&pic, cid);
+    advance_past_several_timer_firings(&pic);
+
+    let baseline = get_manual_price(&pic, cid).expect("baseline price from the timer");
+    assert_eq!(baseline.price_e8, 15_000_000, "baseline is the mock's rate");
+
+    // A 10x spike: far outside [0.7, 1/0.7] of the baseline.
+    set_mock_cfx_rate(&pic, xrc_id, 150_000_000);
+    advance_past_several_timer_firings(&pic);
+
+    let after = get_manual_price(&pic, cid).expect("price still present after the spike");
+    assert_eq!(
+        after.price_e8, baseline.price_e8,
+        "an out-of-band sample must not be written"
+    );
+    assert_eq!(
+        after.set_at_ns, baseline.set_at_ns,
+        "a REJECTED sample must not refresh the freshness timestamp"
+    );
+
+    // And it never auto-confirms: unlike the collateral path there is no
+    // consecutive-confirmation escalation, so repeating the spike across many
+    // more timer firings changes nothing.
+    advance_past_several_timer_firings(&pic);
+    advance_past_several_timer_firings(&pic);
+    let still = get_manual_price(&pic, cid).expect("price still present");
+    assert_eq!(still, after, "a sustained out-of-band move stays fail-closed");
+}
+
+/// The documented recovery from that fail-closed state: disable the chain
+/// (which unmanages the pair and stops the timer for it), rebaseline manually,
+/// verify, enable. Only then does the automatic feed resume.
+#[test]
+fn disable_rebaseline_enable_restores_the_automatic_feed() {
+    let (pic, cid, xrc_id) = boot_with_mock_xrc(15_000_000);
+    register_chain(&pic, cid);
+    stage_disabled_liquidation_config(&pic, cid);
+    advance_past_several_timer_firings(&pic);
+    let baseline = get_manual_price(&pic, cid).expect("baseline price from the timer");
+
+    // The market really did move 10x; the feed is now stuck fail-closed.
+    set_mock_cfx_rate(&pic, xrc_id, 150_000_000);
+    advance_past_several_timer_firings(&pic);
+    assert_eq!(
+        get_manual_price(&pic, cid).expect("price").price_e8,
+        baseline.price_e8,
+        "precondition: the feed is stuck on the old baseline"
+    );
+
+    // 1. Disable: the pair becomes unmanaged, so manual pricing reopens.
+    update_dev_unit(&pic, cid, "disable_chain", encode_one(CFX_MAINNET).unwrap());
+    // 2. Rebaseline to the value the operator has verified out of band.
+    update_dev_unit(
+        &pic,
+        cid,
+        "set_manual_collateral_price",
+        encode_args((CFX_MAINNET, "CFX".to_string(), 150_000_000u64)).unwrap(),
+    );
+    let rebaselined = get_manual_price(&pic, cid).expect("rebaselined price");
+    assert_eq!(rebaselined.price_e8, 150_000_000, "3. verify the rebaseline");
+    // 4. Enable: XRC is authoritative again.
+    update_dev_unit(&pic, cid, "enable_chain", encode_one(CFX_MAINNET).unwrap());
+
+    advance_past_several_timer_firings(&pic);
+    let resumed = get_manual_price(&pic, cid).expect("price after recovery");
+    assert_eq!(
+        resumed.price_e8, 150_000_000,
+        "the automatic feed resumes on the rebaselined price"
+    );
+    assert!(
+        resumed.set_at_ns > rebaselined.set_at_ns,
+        "the timer is writing again (source stamp advanced past the manual one): \
+         resumed={} rebaselined={}",
+        resumed.set_at_ns,
+        rebaselined.set_at_ns
+    );
+    assert_eq!(
+        resumed.set_at_ns % 1_000_000_000,
+        0,
+        "and it is stamping source seconds again"
+    );
+}
+
+/// A chain the operator has disabled must get NO automatic price writes at all:
+/// `chains_needing_price_feed` drops it from the work set before any XRC call,
+/// which is both the cycle guard and the reason manual control is safe while
+/// disabled.
+#[test]
+fn a_disabled_chain_gets_no_automatic_price_writes() {
+    let (pic, cid, xrc_id) = boot_with_mock_xrc(15_000_000);
+    register_chain(&pic, cid);
+    stage_disabled_liquidation_config(&pic, cid);
+    advance_past_several_timer_firings(&pic);
+    assert!(get_manual_price(&pic, cid).is_some(), "precondition: feed is live");
+
+    update_dev_unit(&pic, cid, "disable_chain", encode_one(CFX_MAINNET).unwrap());
+    update_dev_unit(
+        &pic,
+        cid,
+        "set_manual_collateral_price",
+        encode_args((CFX_MAINNET, "CFX".to_string(), 15_500_000u64)).unwrap(),
+    );
+    let manual = get_manual_price(&pic, cid).expect("manual price");
+
+    // The mock now serves a different (in-band) rate. If the timer were still
+    // fetching this pair it would overwrite the operator's value.
+    set_mock_cfx_rate(&pic, xrc_id, 16_000_000);
+    advance_past_several_timer_firings(&pic);
+
+    assert_eq!(
+        get_manual_price(&pic, cid).expect("price"),
+        manual,
+        "the timer must not touch a disabled chain's pair, in-band or not"
+    );
 }

@@ -119,6 +119,56 @@ pub fn disable_chain_in_state(
     Ok(())
 }
 
+/// Reverse `disable_chain_in_state`: flip `ChainStatus::Disabled` back to
+/// `ChainStatus::Registered`, restoring risk-increasing operations (open /
+/// borrow) and XRC price authority for the chain's native pair.
+///
+/// This is the recovery half of the emergency risk stop. Before it existed,
+/// `disable_chain` was effectively terminal for a live chain: `register_chain`
+/// refuses an already-present `chain_id`, and `delete_chain` refuses a chain
+/// with any supply or any vault, so a chain with even one open vault could
+/// never come back. An operator facing a transient incident (a bad price
+/// source, a suspect RPC set) therefore had to choose between leaving the risk
+/// gate open and permanently freezing new opens for that chain.
+///
+/// Deliberately minimal:
+/// - It adds NO persisted field. `ChainStatus` already carries both states;
+///   this only writes the value `register_chain_in_state` writes at creation.
+/// - It touches ONLY `status`. Every other per-chain map (supply, vaults,
+///   settlement queue, contracts, observer cursor, bad-debt counters, manual
+///   prices and their timestamps) is left exactly as `disable_chain_in_state`
+///   left it, because `disable_chain_in_state` never touched them either. A
+///   disable/enable round trip is therefore state-preserving by construction.
+/// - It refuses an unknown chain (`ChainNotRegistered`) and an
+///   already-`Registered` chain (`InvalidConfig`), so it can never be used to
+///   create a chain, and a redundant call is a visible no-op error rather than
+///   a silent success that an operator could mistake for a real recovery.
+///
+/// Note what enable does NOT restore: the chain's freshness prerequisites.
+/// Re-enabling only reopens the gate; an open still has to satisfy the price
+/// presence/staleness checks in `open_chain_vault_in_state` against whatever
+/// price state exists at that moment. That is the point of the documented
+/// recovery order (disable, rebaseline manually, verify, enable).
+pub fn enable_chain_in_state(
+    state: &mut MultiChainState,
+    chain_id: ChainId,
+) -> Result<(), ChainAdminError> {
+    let cfg = state
+        .chain_configs
+        .get_mut(&chain_id)
+        .ok_or(ChainAdminError::ChainNotRegistered(chain_id))?;
+    match cfg.status {
+        ChainStatus::Registered => Err(ChainAdminError::InvalidConfig(format!(
+            "chain {} is already Registered (enable_chain only reverses a Disabled chain)",
+            chain_id.0
+        ))),
+        ChainStatus::Disabled => {
+            cfg.status = ChainStatus::Registered;
+            Ok(())
+        }
+    }
+}
+
 /// Remove a chain entirely. Only permitted when the chain carries ZERO supply
 /// and NO chain_vaults reference it (so deletion cannot orphan debt/collateral).
 ///

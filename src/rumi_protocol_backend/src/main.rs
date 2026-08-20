@@ -1327,6 +1327,62 @@ fn disable_chain(
     }
 }
 
+/// Reverse `disable_chain`: flip a `Disabled` chain back to `Registered`.
+///
+/// `disable_chain` is the post-launch emergency risk stop (it blocks new opens
+/// and borrows and hands the chain's native pair back to manual pricing). This
+/// is its recovery half, and it is what makes that stop REVERSIBLE: without it
+/// a disabled chain with any open vault could never be re-enabled, because
+/// `register_chain` refuses a present `chain_id` and `delete_chain` refuses a
+/// chain with any supply or vault.
+///
+/// Developer-gated, like every other chain-admin mutation. Adds no persisted
+/// field and preserves all per-chain state (see `enable_chain_in_state`).
+/// Records the existing durable `Event::ChainConfigUpdated` -- this IS a chain
+/// config change (the `status` field), and reusing the shipped variant avoids
+/// adding an event shape that every historical log reader would have to learn.
+/// The explicit `Disabled -> Registered` transition is written to the INFO log
+/// so an operator reading the log can tell this apart from an ordinary
+/// `set_chain_config` edit.
+///
+/// Re-enabling reopens the gate; it does NOT vouch for the chain's price
+/// freshness. An open after enable still has to pass the price
+/// presence/staleness checks, which is why the documented recovery order is
+/// disable, rebaseline the price manually, verify it, and only then enable.
+#[candid_method(update)]
+#[update]
+fn enable_chain(
+    chain_id: rumi_protocol_backend::chains::config::ChainId,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let result = mutate_state(|s| {
+        rumi_protocol_backend::chains::admin::enable_chain_in_state(&mut s.multi_chain, chain_id)
+    });
+    match result {
+        Ok(()) => {
+            let now = ic_cdk::api::time();
+            rumi_protocol_backend::storage::record_event(
+                &rumi_protocol_backend::event::Event::ChainConfigUpdated {
+                    chain_id,
+                    timestamp: now,
+                },
+            );
+            log!(
+                INFO,
+                "[enable_chain] chain_id={:?} status Disabled -> Registered (risk operations and \
+                 XRC price authority restored)",
+                chain_id
+            );
+            Ok(())
+        }
+        Err(e) => Err(ProtocolError::ChainAdmin(format!("{:?}", e))),
+    }
+}
+
 #[candid_method(update)]
 #[update]
 fn set_chain_config(
@@ -1682,8 +1738,36 @@ async fn open_chain_vault_evm(
 ) -> Result<u64, ProtocolError> {
     use rumi_protocol_backend::chains::evm::eip712::IntentAction;
     let v = verify_intent_ctx(&intent, &signature, IntentAction::Open)?;
-    // Pre-await atomic: consume nonce, enforce per-owner cap, reserve vault id.
+    // Pre-await atomic: reject a disabled chain, consume nonce, enforce
+    // per-owner cap, reserve vault id.
     let vault_id = mutate_state(|s| {
+        // Cheap fail-fast on the ALREADY-disabled case, BEFORE the nonce is
+        // consumed. The authoritative gate is still the post-`.await` check in
+        // `open_chain_vault_in_state` (kept exactly as it is: it is the one
+        // that catches a `disable_chain` landing mid-derive, which no pre-await
+        // check can see). But that check runs after the nonce is already spent,
+        // so without this pre-check every open attempted against a chain an
+        // operator disabled hours ago would burn the caller's nonce and force a
+        // re-sign at `nonce + 1` to recover -- a needless penalty for a user who
+        // could not have known the chain was closed. The two checks read the
+        // SAME `chain_is_registered` predicate, and the error text is built from
+        // the same `OpenVaultError::ChainDisabled` value the post-await path
+        // formats, so the caller sees one identical rejection either way.
+        //
+        // Deliberately scoped to PRESENT-but-Disabled, not to
+        // `!chain_is_registered`: a chain absent from `chain_configs` entirely
+        // must keep reaching the post-await `UnknownChain` rejection it returns
+        // today, so this pre-check changes the outcome of exactly one case (a
+        // known, disabled chain) and nothing else.
+        let chain_present = s.multi_chain.chain_configs.contains_key(&v.chain);
+        if chain_present && !s.multi_chain.chain_is_registered(v.chain) {
+            return Err(ProtocolError::EvmAuth(format!(
+                "{:?}",
+                rumi_protocol_backend::chains::vault::OpenVaultError::ChainDisabled {
+                    chain: v.chain
+                }
+            )));
+        }
         s.multi_chain
             .consume_evm_nonce(&v.synthetic, intent.nonce)
             .map_err(|expected| {
@@ -2827,6 +2911,10 @@ pub struct ManualPriceInfo {
 /// narrowly-scoped price-pusher principal (audit F-01) so the always-online CFX
 /// price monitor can refresh without holding the full developer key. Stamps the
 /// write time so `get_manual_collateral_price` can expose freshness.
+///
+/// Refuses outright, for EVERY caller, while the pair is XRC-managed (see the
+/// one-price-writer gate in the body): manual pricing is available only while
+/// the chain is disabled.
 #[candid_method(update)]
 #[update]
 fn set_manual_collateral_price(
@@ -2840,39 +2928,42 @@ fn set_manual_collateral_price(
             "not authorized to set price".into(),
         ));
     }
-    // Security review follow-up (F2): a registered chain carrying a
-    // chain_liquidation_configs row is "XRC-managed" (xrc::chain_is_xrc_managed).
-    // The XRC timer is the SOLE writer of its native-symbol price for the
-    // authorized price-pusher: without this check, a pusher push here would
-    // race the timer last-writer-wins on the exact same
-    // MultiChainState::set_manual_price cell, with no ordering guarantee
-    // between them.
+    // ONE PRICE WRITER. A registered chain carrying a chain_liquidation_configs
+    // row is "XRC-managed" (xrc::chain_is_xrc_managed); combined with the
+    // chain's native symbol that is exactly the pair the automatic XRC timer
+    // writes (xrc::pair_is_xrc_managed). While a pair is XRC-managed the timer
+    // is its SOLE writer, and this endpoint rejects EVERY caller -- the
+    // narrowly-scoped price pusher AND the developer.
     //
-    // Scoped to the PUSHER, not the developer: the developer is the same
-    // trusted operator who stages/removes chain_liquidation_configs rows in
-    // the first place (a single actor cannot race itself), and needs manual
-    // override for legitimate operational cases the automatic feed cannot
-    // cover: dry-run / staging price control before the feed is trusted, and
-    // simulating a specific price for liquidation-bot verification. Blocking
-    // the developer too was tried during implementation and broke exactly
-    // that pattern in the existing conflux_liquidation_swap_pic and
-    // conflux_liquidation_detection_pic PocketIC suites, which manually drive
-    // the chain price up and down (including AFTER staging a liquidation
-    // config row) to exercise underwater/stale-price detection deterministically,
-    // with no XRC mock wired into those suites at all. Narrowing to the
-    // pusher closes the actual race (an unattended, narrowly-scoped automated
-    // caller) while preserving the trusted operator's manual control.
-    if caller != read_state(|s| s.developer_principal)
-        && read_state(|s| rumi_protocol_backend::xrc::pair_is_xrc_managed(s, chain, &symbol))
-    {
+    // The developer used to be exempt on the reasoning that a single trusted
+    // operator cannot race itself. That is wrong about the failure this gate
+    // exists to prevent. The race is not operator-vs-operator, it is
+    // WRITER-vs-WRITER on one `MultiChainState::set_manual_price` cell: the
+    // timer fires from its own message, on its own schedule, with no ordering
+    // relationship to an operator's ingress call. A manual write can land
+    // between a timer fetch and its write and be silently overwritten seconds
+    // later, or overwrite a fresher automatic sample -- and with the
+    // source-time monotonicity rule below, a manual write also re-baselines the
+    // timestamp and price the timer's next sample is judged against. Two
+    // writers on one cell is the defect, regardless of who holds the second
+    // key.
+    //
+    // The developer keeps full manual control; it is now sequenced rather than
+    // concurrent. `disable_chain` makes the pair unmanaged (it flips
+    // `chain_is_registered` false, which also stops the timer fetching for the
+    // pair), the developer rebaselines and verifies the price manually, and
+    // `enable_chain` hands authority back to XRC. That order is the documented
+    // recovery procedure, and it is what the deterministic liquidation PocketIC
+    // fixtures now follow when they need to move a price after staging a
+    // liquidation config row.
+    if read_state(|s| rumi_protocol_backend::xrc::pair_is_xrc_managed(s, chain, &symbol)) {
         return Err(ProtocolError::ChainAdmin(format!(
             "chain {} symbol {} is XRC-managed (registered + a liquidation config row is \
-             present): the automatic XRC price timer is authoritative for this pair for the \
-             price-pusher, to avoid a last-writer-wins race. The developer principal may still \
-             override manually. To resume pusher access, disable_chain (which also stops the \
-             XRC timer for this pair) or remove the chain's liquidation config row (no \
-             standalone \"unset\" endpoint exists today; removing the row requires delete_chain,\
-             which needs zero supply and zero vaults for the chain, then a fresh register_chain).",
+             present): the automatic XRC price timer is the SOLE writer of this pair, for \
+             every caller including the developer, so there is never a last-writer-wins race \
+             on it. To take manual control, disable_chain (which also stops the XRC timer for \
+             this pair), set the price, verify it, then enable_chain to hand authority back to \
+             XRC.",
             chain.0, symbol
         )));
     }

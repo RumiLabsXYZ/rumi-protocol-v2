@@ -1462,6 +1462,7 @@ export const idlFactory = ({ IDL }) => {
     'cycles_status' : IDL.Func([], [CycleManagerCyclesStatus], ['query']),
     'delete_chain' : IDL.Func([IDL.Nat32], [Result], []),
     'disable_chain' : IDL.Func([IDL.Nat32], [Result], []),
+    'enable_chain' : IDL.Func([IDL.Nat32], [Result], []),
     'enter_recovery_mode' : IDL.Func([], [Result], []),
     'exit_recovery_mode' : IDL.Func([], [Result], []),
     'freeze_protocol' : IDL.Func([], [Result], []),

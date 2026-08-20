@@ -1,23 +1,26 @@
-//! PocketIC integration test for the F2 XRC-managed pricing invariant
+//! PocketIC integration test for the ONE-PRICE-WRITER invariant
 //! (`xrc::pair_is_xrc_managed`, read by `set_manual_collateral_price`,
 //! main.rs).
 //!
 //! Once a chain is registered AND carries a `chain_liquidation_configs` row,
-//! the XRC price timer is the SOLE writer of its native-symbol price FOR THE
-//! PRICE-PUSHER: a pusher write there is rejected, closing the last-writer-
-//! wins race between an unattended automated pusher and the timer. The
-//! developer principal is exempt (a single trusted operator, who also stages
-//! and removes the config rows in the first place, cannot race itself; the
-//! exemption also keeps existing manual price-drop test patterns in
-//! conflux_liquidation_swap_pic / conflux_liquidation_detection_pic working
-//! without needing an XRC mock).
+//! the XRC price timer is the SOLE writer of its native-symbol price, and
+//! `set_manual_collateral_price` rejects EVERY caller for that pair -- the
+//! narrowly-scoped price pusher AND the developer. Two writers on one cell is
+//! the defect the gate exists to prevent, and which of them holds the second
+//! key does not change that: the timer fires from its own message on its own
+//! schedule, so a manual write has no ordering relationship to it.
+//!
+//! Manual control is not removed, it is SEQUENCED: `disable_chain` unmanages
+//! the pair, the operator rebaselines and verifies, `enable_chain` hands
+//! authority back to XRC. These tests walk that whole loop.
 //!
 //! Scenarios:
-//!   1. `pusher_rejected_developer_accepted_for_xrc_managed_pair`
-//!   2. `pusher_accepted_again_after_disable_chain` (the documented stop
-//!      procedure: disable_chain makes the chain no longer XRC-managed)
+//!   1. `every_caller_is_rejected_for_an_xrc_managed_pair` (pusher AND
+//!      developer)
+//!   2. `disable_rebaseline_enable_is_the_manual_control_loop`
 //!   3. `pusher_unaffected_for_a_pair_with_no_liquidation_config_row`
 //!      (sanity: the gate is scoped to XRC-managed pairs only)
+//!   4. `the_gate_is_scoped_to_the_chains_native_symbol`
 
 use candid::{encode_args, encode_one, CandidType, Decode, Deserialize, Principal};
 use pocket_ic::{PocketIc, WasmResult};
@@ -205,12 +208,22 @@ fn grant_pusher(pic: &PocketIc, cid: Principal) {
 }
 
 fn set_price(pic: &PocketIc, cid: Principal, sender: Principal, price_e8: u64) -> Result<(), ProtocolError> {
+    set_price_for(pic, cid, sender, "CFX", price_e8)
+}
+
+fn set_price_for(
+    pic: &PocketIc,
+    cid: Principal,
+    sender: Principal,
+    symbol: &str,
+    price_e8: u64,
+) -> Result<(), ProtocolError> {
     update_as(
         pic,
         cid,
         sender,
         "set_manual_collateral_price",
-        encode_args((CFX_MAINNET, "CFX".to_string(), price_e8)).unwrap(),
+        encode_args((CFX_MAINNET, symbol.to_string(), price_e8)).unwrap(),
     )
 }
 
@@ -220,37 +233,83 @@ fn disable_chain(pic: &PocketIc, cid: Principal) {
     r.expect("disable_chain must succeed");
 }
 
-#[test]
-fn pusher_rejected_developer_accepted_for_xrc_managed_pair() {
-    let (pic, cid) = boot();
-    register_chain(&pic, cid);
-    grant_pusher(&pic, cid);
-    stage_liquidation_config(&pic, cid);
+fn enable_chain(pic: &PocketIc, cid: Principal) {
+    let r: Result<(), ProtocolError> =
+        update_as(pic, cid, developer(), "enable_chain", encode_one(CFX_MAINNET).unwrap());
+    r.expect("enable_chain must succeed");
+}
 
-    let err = set_price(&pic, cid, pusher(), 5_000_000).expect_err("pusher must be rejected");
+fn assert_xrc_managed_rejection(err: ProtocolError, who: &str) {
     match err {
         ProtocolError::ChainAdmin(msg) => {
-            assert!(msg.contains("XRC-managed"), "msg={msg}");
+            assert!(
+                msg.contains("XRC-managed"),
+                "{who}: expected the XRC-managed rejection, got: {msg}"
+            );
+            assert!(
+                msg.contains("enable_chain"),
+                "{who}: the rejection must name the recovery path, got: {msg}"
+            );
         }
-        other => panic!("expected ChainAdmin, got {other:?}"),
+        other => panic!("{who}: expected ChainAdmin, got {other:?}"),
     }
-
-    set_price(&pic, cid, developer(), 5_000_000).expect("developer override must still succeed");
 }
 
 #[test]
-fn pusher_accepted_again_after_disable_chain() {
+fn every_caller_is_rejected_for_an_xrc_managed_pair() {
     let (pic, cid) = boot();
     register_chain(&pic, cid);
     grant_pusher(&pic, cid);
     stage_liquidation_config(&pic, cid);
 
-    set_price(&pic, cid, pusher(), 1).expect_err("pusher rejected while XRC-managed");
+    assert_xrc_managed_rejection(
+        set_price(&pic, cid, pusher(), 5_000_000).expect_err("pusher must be rejected"),
+        "pusher",
+    );
+    assert_xrc_managed_rejection(
+        set_price(&pic, cid, developer(), 5_000_000).expect_err(
+            "the developer must be rejected too: two writers on one cell is the defect",
+        ),
+        "developer",
+    );
+}
 
+#[test]
+fn disable_rebaseline_enable_is_the_manual_control_loop() {
+    let (pic, cid) = boot();
+    register_chain(&pic, cid);
+    grant_pusher(&pic, cid);
+    stage_liquidation_config(&pic, cid);
+
+    set_price(&pic, cid, developer(), 1).expect_err("developer rejected while XRC-managed");
+
+    // 1. Disable unmanages the pair (it also stops the XRC timer fetching it).
     disable_chain(&pic, cid);
+    set_price(&pic, cid, developer(), 5_000_000)
+        .expect("the developer rebaselines manually while the chain is Disabled");
+    set_price(&pic, cid, pusher(), 5_100_000)
+        .expect("the emergency pusher fallback is available while Disabled too");
 
-    set_price(&pic, cid, pusher(), 5_000_000)
-        .expect("pusher must be able to set price again after disable_chain (documented stop procedure)");
+    // 2. Enable hands authority back to XRC, and both manual writers are shut
+    //    out again -- so the loop cannot be left half-open by accident.
+    enable_chain(&pic, cid);
+    assert_xrc_managed_rejection(
+        set_price(&pic, cid, developer(), 6_000_000)
+            .expect_err("developer locked out again after enable_chain"),
+        "developer after enable",
+    );
+    assert_xrc_managed_rejection(
+        set_price(&pic, cid, pusher(), 6_000_000)
+            .expect_err("pusher locked out again after enable_chain"),
+        "pusher after enable",
+    );
+
+    // 3. And the loop is repeatable: this is a reversible control, not a
+    //    one-shot escape hatch.
+    disable_chain(&pic, cid);
+    set_price(&pic, cid, developer(), 7_000_000).expect("second manual window");
+    enable_chain(&pic, cid);
+    set_price(&pic, cid, developer(), 8_000_000).expect_err("locked out again");
 }
 
 #[test]
@@ -262,4 +321,21 @@ fn pusher_unaffected_for_a_pair_with_no_liquidation_config_row() {
 
     set_price(&pic, cid, pusher(), 5_000_000)
         .expect("pusher retains normal access when the pair is not XRC-managed");
+    set_price(&pic, cid, developer(), 5_000_000)
+        .expect("developer retains normal access when the pair is not XRC-managed");
+}
+
+#[test]
+fn the_gate_is_scoped_to_the_chains_native_symbol() {
+    // `pair_is_xrc_managed` is native-symbol scoped: the timer only ever writes
+    // (chain, native symbol), so claiming any OTHER symbol on the same chain
+    // would block manual pricing the timer never contends for.
+    let (pic, cid) = boot();
+    register_chain(&pic, cid);
+    stage_liquidation_config(&pic, cid);
+
+    set_price_for(&pic, cid, developer(), "CFX", 5_000_000)
+        .expect_err("the native symbol is XRC-managed");
+    set_price_for(&pic, cid, developer(), "WCFX", 5_000_000)
+        .expect("a non-native symbol on the same chain is untouched by the gate");
 }

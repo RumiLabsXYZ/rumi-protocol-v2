@@ -757,6 +757,141 @@ fn borrow_rejects_when_chain_disabled() {
     assert_eq!(s.settlement_queues[&CHAIN].pending_len(), 0);
 }
 
+/// The recovery half: `enable_chain` restores the two risk-increasing
+/// operations `disable_chain` blocked, and nothing else has to be re-done for
+/// them to work again. Both gates read the same `chain_is_registered`
+/// predicate, so one enable reopens both.
+#[test]
+fn open_and_borrow_are_restored_after_enable_chain() {
+    use crate::chains::admin::{disable_chain_in_state, enable_chain_in_state};
+
+    let mut s = setup(PRICE_150_USD_E8);
+    insert_open_vault(&mut s, Principal::anonymous(), 7, 1_000 * ONE_SOL, 100_00000000);
+
+    disable_chain_in_state(&mut s, CHAIN).expect("disable");
+    assert_eq!(
+        open_chain_vault_in_state(
+            &mut s,
+            CHAIN,
+            Principal::anonymous(),
+            "custody".into(),
+            100 * ONE_SOL,
+            100_00000000,
+            "good-address".into(),
+            only_good,
+            "SOL",
+            13_000,
+            0,
+            None,
+            12345,
+            8,
+        ),
+        Err(OpenVaultError::ChainDisabled { chain: CHAIN }),
+        "precondition: open is blocked while Disabled"
+    );
+
+    enable_chain_in_state(&mut s, CHAIN).expect("enable");
+
+    let opened = open_chain_vault_in_state(
+        &mut s,
+        CHAIN,
+        Principal::anonymous(),
+        "custody".into(),
+        100 * ONE_SOL,
+        100_00000000,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        0,
+        None,
+        12345,
+        8,
+    );
+    assert!(opened.is_ok(), "open must work again after enable: {opened:?}");
+
+    let borrowed = borrow_chain_vault_in_state(
+        &mut s,
+        7,
+        50_00000000,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        0,
+        None,
+        1,
+    );
+    assert!(
+        borrowed.is_ok(),
+        "borrow must work again after enable: {borrowed:?}"
+    );
+}
+
+/// Enable alone reopens the GATE, it does not vouch for the price. A chain
+/// re-enabled while its staleness-gated price has aged out still refuses new
+/// opens -- which is exactly why the documented recovery order is disable,
+/// rebaseline the price, VERIFY it, then enable.
+#[test]
+fn enable_chain_does_not_bypass_the_price_freshness_prerequisite() {
+    use crate::chains::admin::{disable_chain_in_state, enable_chain_in_state};
+
+    let mut s = setup(PRICE_150_USD_E8);
+    // A liquidation config row with a 30-minute ceiling turns on the staleness
+    // gate for the open path.
+    enable_price_age_gate(&mut s, 1_800_000_000_000);
+    s.manual_price_set_at_ns
+        .insert((CHAIN, "SOL".into()), 1_000_000_000);
+
+    disable_chain_in_state(&mut s, CHAIN).expect("disable");
+    enable_chain_in_state(&mut s, CHAIN).expect("enable");
+
+    // now_ns is far past the price's age ceiling.
+    let res = open_chain_vault_in_state(
+        &mut s,
+        CHAIN,
+        Principal::anonymous(),
+        "custody".into(),
+        100 * ONE_SOL,
+        100_00000000,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        0,
+        None,
+        9_000_000_000_000,
+        8,
+    );
+    assert_eq!(
+        res,
+        Err(OpenVaultError::StalePrice),
+        "a re-enabled chain must still fail closed on a stale price"
+    );
+
+    // Rebaseline the price (what the operator does while Disabled) and the
+    // same open now succeeds.
+    s.manual_price_set_at_ns
+        .insert((CHAIN, "SOL".into()), 9_000_000_000_000);
+    let res = open_chain_vault_in_state(
+        &mut s,
+        CHAIN,
+        Principal::anonymous(),
+        "custody".into(),
+        100 * ONE_SOL,
+        100_00000000,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        0,
+        None,
+        9_000_000_000_000,
+        8,
+    );
+    assert!(res.is_ok(), "fresh price + enabled chain must open: {res:?}");
+}
+
 // ─── Increment 0: min-debt floor + per-chain debt ceiling ─────────────────────
 
 #[test]

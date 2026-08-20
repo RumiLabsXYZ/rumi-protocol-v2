@@ -1491,6 +1491,7 @@ export interface _SERVICE {
   'cycles_status' : ActorMethod<[], CycleManagerCyclesStatus>,
   'delete_chain' : ActorMethod<[number], Result>,
   'disable_chain' : ActorMethod<[number], Result>,
+  'enable_chain' : ActorMethod<[number], Result>,
   'enter_recovery_mode' : ActorMethod<[], Result>,
   'exit_recovery_mode' : ActorMethod<[], Result>,
   'freeze_protocol' : ActorMethod<[], Result>,

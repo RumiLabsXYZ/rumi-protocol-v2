@@ -380,6 +380,41 @@ fn script_factory_pair_sanity(pic: &PocketIc, mock: Principal, pair: &str) {
 /// An ENABLED Conflux liquidation config with valid wiring. slippage 250 bps
 /// (< the 1200-bps penalty cushion), restore target 155%, depth cap $2k,
 /// staleness ceiling 30 min.
+/// Take manual control of an XRC-managed pair the way an operator has to:
+/// `disable_chain` (which unmanages the pair and stops the XRC timer for it),
+/// write the price, verify it read back, then `enable_chain` to hand authority
+/// back to XRC. Every step is asserted, so a regression in any one of them
+/// fails here rather than silently leaving the chain disabled.
+fn rebaseline_price_via_disable_enable(
+    pic: &PocketIc,
+    backend: Principal,
+    price_e8: u64,
+    step: &str,
+) {
+    decode_result(
+        update_dev(pic, backend, "disable_chain", Encode!(&ChainId(CONFLUX_CHAIN_ID)).unwrap()),
+        "disable_chain",
+    )
+    .unwrap_or_else(|e| panic!("disable_chain ({step}): {e:?}"));
+
+    decode_result(
+        update_dev(
+            pic,
+            backend,
+            "set_manual_collateral_price",
+            Encode!(&ChainId(CONFLUX_CHAIN_ID), &"CFX".to_string(), &price_e8).unwrap(),
+        ),
+        "set_manual_collateral_price",
+    )
+    .unwrap_or_else(|e| panic!("set_manual_collateral_price ({step}): {e:?}"));
+
+    decode_result(
+        update_dev(pic, backend, "enable_chain", Encode!(&ChainId(CONFLUX_CHAIN_ID)).unwrap()),
+        "enable_chain",
+    )
+    .unwrap_or_else(|e| panic!("enable_chain ({step}): {e:?}"));
+}
+
 fn enabled_liq_config() -> ChainLiquidationConfigV1 {
     ChainLiquidationConfigV1 {
         dex: DexKind::UniswapV2,
@@ -761,16 +796,18 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
 
     // Refresh the price (re-stamp set_at_ns to "now") so the second vault can OPEN
     // at a healthy CR, then later go underwater while its price ages out.
-    decode_result(
-        update_dev(
-            &pic,
-            backend,
-            "set_manual_collateral_price",
-            Encode!(&ChainId(CONFLUX_CHAIN_ID), &"CFX".to_string(), &15_000_000u64).unwrap(),
-        ),
-        "set_manual_collateral_price (refresh for vault 2 open)",
-    )
-    .expect("set_manual_collateral_price refresh");
+    //
+    // The chain is XRC-managed from here on (registered + the liquidation config
+    // row staged above), so the automatic XRC timer is the SOLE writer of
+    // (1030, "CFX") and set_manual_collateral_price refuses EVERY caller,
+    // including the developer. Taking manual control is the documented operator
+    // loop -- disable_chain, rebaseline, enable_chain -- and that is what this
+    // fixture does, rather than weakening the invariant to keep the test
+    // convenient. The round trip is state-preserving (enable only flips
+    // ChainStatus back), so the vault, supply and config all survive it; the
+    // re-enable also has to land BEFORE the vault-2 open below, since a Disabled
+    // chain blocks new opens.
+    rebaseline_price_via_disable_enable(&pic, backend, 15_000_000, "refresh for vault 2 open");
 
     update_any(&pic, mock, "set_next_send_hash", Encode!(&"0xcfxmint2".to_string()).unwrap());
     let v2_collateral = 1_400u128 * E18;
@@ -827,17 +864,9 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
 
     // Drop the price so vault2 is underwater, then AGE the price past
     // max_price_age_ns (30 min) WITHOUT re-stamping it. set_manual stamps the
-    // wall-clock at write time, so advancing time alone makes it stale.
-    decode_result(
-        update_dev(
-            &pic,
-            backend,
-            "set_manual_collateral_price",
-            Encode!(&ChainId(CONFLUX_CHAIN_ID), &"CFX".to_string(), &8_000_000u64).unwrap(),
-        ),
-        "set_manual_collateral_price (drop for vault2)",
-    )
-    .expect("set_manual_collateral_price drop2");
+    // wall-clock at write time, so advancing time alone makes it stale. Same
+    // disable -> rebaseline -> enable loop as above (the pair is XRC-managed).
+    rebaseline_price_via_disable_enable(&pic, backend, 8_000_000, "drop for vault2");
 
     // Confirm vault2 IS liquidatable on a FRESH price (sanity: the only thing that
     // will keep it un-marked below is staleness, not a healthy CR).

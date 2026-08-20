@@ -1263,6 +1263,7 @@ service : (ProtocolArg) -> {
   cycles_status : () -> (CycleManagerCyclesStatus) query;
   delete_chain : (nat32) -> (Result);
   disable_chain : (nat32) -> (Result);
+  enable_chain : (nat32) -> (Result);
   enter_recovery_mode : () -> (Result);
   exit_recovery_mode : () -> (Result);
   freeze_protocol : () -> (Result);

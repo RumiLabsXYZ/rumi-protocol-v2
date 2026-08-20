@@ -25,7 +25,11 @@
 //!     This check runs in the SYNCHRONOUS post-`.await` half of the open
 //!     call (after the tECDSA custody-address derive resolves), so a
 //!     `disable_chain` landing while that derive is in flight is still
-//!     caught on resume. `borrow_chain_vault_evm` (fully synchronous, no
+//!     caught on resume -- that post-await check is the authoritative one.
+//!     `open_chain_vault_evm` ALSO reads the predicate pre-`.await`, before
+//!     it consumes the caller's nonce, purely so an open against a chain
+//!     that was ALREADY disabled does not burn a nonce the caller then has
+//!     to re-sign past. `borrow_chain_vault_evm` (fully synchronous, no
 //!     `.await`) reads the same predicate. Withdraw/close/repay do NOT read
 //!     it -- exit paths keep working on a Disabled chain by design.
 //!  3. A native-asset price must be present (`manual_prices`); it is only
@@ -34,35 +38,59 @@
 //!     independent of that row's `enabled` flag, which gates the
 //!     liquidation-swap WORKER only, never the open/borrow price check.
 //!
-//! ── XRC-managed pricing invariant (`xrc::chain_is_xrc_managed`) ────────────
+//! ── ONE PRICE WRITER (`xrc::pair_is_xrc_managed`) ──────────────────────────
 //! A chain that is `Registered` AND carries a `chain_liquidation_configs` row
-//! (regardless of `enabled`) is "XRC-managed": the XRC price timer is the
-//! SOLE writer of that chain's native-symbol price, and
-//! `set_manual_collateral_price` REJECTS a write to that pair for every
-//! caller, including the authorized price-pusher, to avoid a last-writer-wins
-//! race between the two. The (superseded) off-chain CFX price monitor is a
-//! decommissioned/emergency-only fallback now: it can only push a price again
-//! after `disable_chain` (see below) makes the pair manual again.
+//! (regardless of `enabled`) is "XRC-managed". While it is, the automatic XRC
+//! price timer is AUTHORITATIVE and the SOLE writer of that chain's
+//! native-symbol price: `set_manual_collateral_price` REJECTS a write to that
+//! pair for EVERY caller -- the narrowly-scoped price pusher AND the
+//! developer. The race this closes is writer-vs-writer on one
+//! `MultiChainState::set_manual_price` cell, not operator-vs-operator: the
+//! timer fires from its own message on its own schedule, with no ordering
+//! relationship to an ingress call, so a manual write can be silently
+//! overwritten seconds later or can overwrite a fresher automatic sample.
+//! The (superseded) off-chain CFX price monitor is a decommissioned,
+//! emergency-only fallback now.
+//!
+//! The automatic writer is itself constrained (`xrc::chains_price_sample_is_acceptable`):
+//! it stamps the sample's SOURCE timestamp rather than arrival time, requires
+//! each candidate to be strictly newer at the source than the stored sample,
+//! and holds it inside the accepted audit LIQ-007 `PRICE_SANITY_BAND_RATIO`
+//! band relative to the last accepted price. A rejected sample writes NOTHING
+//! (not even the freshness timestamp), and there is deliberately no
+//! consecutive-confirmation escalation, so a sustained out-of-band move stays
+//! FAIL-CLOSED until an operator intervenes.
 //!
 //! CYCLE COST NOTE: staging a `chain_liquidation_configs` row starts the XRC
 //! meter immediately (~1B cycles/call at 300s = roughly 288B cycles/day per
 //! symbol), the moment the row is INSERTED -- not when `enabled` is later
 //! flipped true. Budget for that at staging time, not at liquidation go-live.
 //!
-//! ── `disable_chain`: the post-launch emergency risk stop ───────────────────
-//! Flips `ChainStatus` to `Disabled`. Effects: blocks new opens/borrows (item
-//! 2 above); makes the chain no longer XRC-managed, which ALSO stops the
-//! price timer fetching for it (`xrc::chains_needing_price_feed` reads the
-//! same `chain_is_registered` predicate) and re-opens manual pricing for that
-//! pair. Does NOT affect withdraw/close/repay, and does NOT stop the
-//! observer/settlement workers or liquidation processing for already-open
-//! vaults (those are unaffected by `ChainStatus`).
-//! RECOVERY: there is currently NO `Disabled` -> `Registered` transition.
-//! `register_chain` refuses an already-present `chain_id`
-//! (`ChainAlreadyRegistered`), and the only path back is `delete_chain`
-//! (requires ZERO supply and ZERO chain_vaults for that chain) followed by a
-//! fresh `register_chain`. Treat `disable_chain` as effectively terminal for
-//! a live chain until every vault has exited.
+//! ── `disable_chain` / `enable_chain`: the REVERSIBLE emergency stop ────────
+//! `disable_chain` flips `ChainStatus` to `Disabled`. Effects: blocks new
+//! opens/borrows (item 2 above); makes the chain no longer XRC-managed, which
+//! ALSO stops the price timer fetching for it
+//! (`xrc::chains_needing_price_feed` reads the same `chain_is_registered`
+//! predicate) and re-opens manual pricing for that pair. It does NOT affect
+//! withdraw/close/repay, and does NOT stop the observer/settlement workers or
+//! liquidation processing for already-open vaults (those are unaffected by
+//! `ChainStatus`).
+//!
+//! `enable_chain` is its recovery half: developer-gated, flips ONLY
+//! `Disabled -> Registered`, refuses an unknown chain and an already-
+//! `Registered` one, adds no persisted field, and preserves every per-chain
+//! state entry (vaults, supply, contract binding, observer cursor, prices and
+//! their timestamps, liquidation config). Before it existed, `disable_chain`
+//! was effectively TERMINAL for a live chain: `register_chain` refuses a
+//! present `chain_id` and `delete_chain` refuses any chain with supply or
+//! vaults, so a chain with one open vault could never come back.
+//!
+//! MANUAL REBASELINE IS ONLY AVAILABLE WHILE DISABLED. The whole operator
+//! loop is: `disable_chain` (risk + XRC stop), `set_manual_collateral_price`
+//! (rebaseline), read it back and VERIFY, `enable_chain` (XRC resumes).
+//! Enable reopens the GATE only; it does not vouch for price freshness, so an
+//! open after enable still has to satisfy the price presence/staleness checks
+//! -- which is exactly why the verify step is part of the loop.
 //!
 //! ── Go-live checklist for the first prod chain (Conflux, chain id 1030) ────
 //!  1. `set_chains_ecdsa_key_name("key_1")` BEFORE the first prod chain
@@ -72,23 +100,28 @@
 //!     pre-upgrade key report could have been stale.
 //!  2. AFTER that read-back, re-derive and verify the settlement and reserve
 //!     addresses (`get_chain_settlement_address`, `get_chain_reserve_address`)
-//!     BEFORE any immutable on-chain contract deployment bakes an address in.
+//!     and confirm `get_evm_rpc_principal` reports the official EVM-RPC
+//!     canister (no override left pointing at a mock) -- ALL of it BEFORE any
+//!     immutable on-chain contract deployment bakes an address in.
 //!  3. Register chain 1030 with MAINNET-shaped args
 //!     (`conflux_mainnet_register_arg`): finality_depth 400,
 //!     min_quorum_providers 2, operator-vetted RPC URLs.
-//!  4. Deploy IcUSD.sol on eSpace mainnet, then `set_chain_contract` -- this
-//!     is the actual "make public" step (see the public-open gate above).
-//!  5. Stage a liquidation config row (real Swappi router, fee/divergence/
-//!     deadline; `enabled` can start false). This activates the XRC price
-//!     timer for the chain AND claims the pair from manual pricing (see the
-//!     XRC-managed invariant above); budget cycles from this moment.
-//!  6. Verify `get_evm_rpc_principal` reports the official EVM-RPC canister
-//!     (no override left pointing at a mock).
+//!  4. Set the native price and seed the observer cursor while the chain is
+//!     still unbound (and therefore not publicly openable).
+//!  5. Deploy IcUSD.sol on eSpace mainnet, then `set_chain_contract` -- this
+//!     is the actual "make public" step (see the public-open gate above), and
+//!     it stays the initial public-open gate regardless of price or
+//!     liquidation state.
+//!  6. Stage a liquidation config row (real Swappi router, fee/divergence/
+//!     deadline; `enabled` starts false). This hands pricing to the automatic
+//!     XRC feed AND claims the pair from manual pricing (see ONE PRICE WRITER
+//!     above); budget cycles from this moment.
 //!  7. Fund nothing: the reserve address is a sink; the custody address pays
 //!     gas from deposited collateral.
-//!  8. Flip the liquidation config's `enabled` to true only after its own
-//!     on-chain validation (`set_chain_liquidation_config` re-derives the
-//!     factory pair on enable).
+//!  8. Liquidation is a SEPARATE switch: flip the liquidation config's
+//!     `enabled` to true only after its own on-chain validation
+//!     (`set_chain_liquidation_config` re-derives the factory pair on
+//!     enable). Staging the row (step 6) does not enable liquidation.
 //!
 //! Monad and Solana remain genuinely experimental: testnet/devnet only,
 //! observer/settlement timers off by default (Solana also gated behind
