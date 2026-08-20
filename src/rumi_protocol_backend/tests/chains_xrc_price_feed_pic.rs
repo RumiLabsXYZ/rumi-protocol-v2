@@ -19,7 +19,7 @@
 //!      chain 1030 (Conflux mainnet; native_symbol "CFX" per
 //!      `chains::evm::evm_chain_config`) and stages a liquidation config row
 //!      (kept `enabled: false` so the test doesn't need a working EVM RPC /
-//!      DEX factory mock — the price feed counts a disabled-but-staged row,
+//!      DEX factory mock; the price feed counts a disabled-but-staged row,
 //!      see `chains_needing_price_feed`'s doc comment). With a mock XRC
 //!      canister serving CFX/USD, advances past the 300s cadence and asserts
 //!      `get_manual_collateral_price(1030, "CFX")` picks up the fetched
@@ -271,7 +271,7 @@ fn advance_past_several_timer_firings(pic: &PocketIc) {
 /// Scenario 1: no chain configured at all. `xrc_principal` points at the
 /// management canister, so IF `fetch_chains_prices` ever wrongly attempted a
 /// call it would hit an unknown-method reject on "aaaaa-aa" (caught and
-/// logged by the best-effort error handling, not a canister trap) — the
+/// logged by the best-effort error handling, not a canister trap); the
 /// stronger, structural guarantee is `chains_needing_price_feed` returning
 /// empty before any `await`, proven directly at the unit level. This test's
 /// job is the PocketIC-level companion: prove the timer firing repeatedly

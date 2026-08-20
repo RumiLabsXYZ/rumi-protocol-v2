@@ -70,7 +70,7 @@ pub struct EvmChainConfig {
 ///
 /// Note: the tECDSA key name is NOT part of this struct. It used to carry a
 /// dead `ecdsa_key_name` field hardcoding `"test_key_1"` per chain, but that
-/// value was never read at runtime — the real key selection is
+/// value was never read at runtime; the real key selection is
 /// `State::chains_ecdsa_key_name` (state.rs), settable via
 /// `set_chains_ecdsa_key_name` and read by `tecdsa.rs`/`tx.rs`. Removed to
 /// avoid a second, misleading source of truth for the signing key.

@@ -589,7 +589,7 @@ fn setup_timers() {
     // De-scaffold pass (2026-08-20): XRC-sourced chains price feed. The
     // gate inside `fetch_chains_prices` (chains registered AND carrying a
     // liquidation config row) makes this a no-op, zero-XRC-call timer on
-    // any canister with no chain configured — safe to register everywhere.
+    // any canister with no chain configured, so it is safe to register everywhere.
     register_chains_price_timer();
 }
 
@@ -9046,8 +9046,8 @@ fn set_chains_ecdsa_key_name(name: String) -> Result<(), ProtocolError> {
     validate_ecdsa_key_change(&name, has_vaults)?;
     mutate_state(|s| s.chains_ecdsa_key_name = name.clone());
     // De-scaffold pass (2026-08-20): a successful key change invalidates the
-    // settlement/interest-treasury/reserve address caches (chains/evm/tecdsa.rs)
-    // — they are keyed only by ChainId, not by the key name, so a warm entry
+    // settlement/interest-treasury/reserve address caches (chains/evm/tecdsa.rs).
+    // They are keyed only by ChainId, not by the key name, so a warm entry
     // would otherwise keep returning an address derived from the OLD key.
     // Only reached on the success path: `validate_ecdsa_key_change` above
     // already rejected a bad name or a change with live chain vaults, so a

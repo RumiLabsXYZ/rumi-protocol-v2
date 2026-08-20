@@ -709,7 +709,7 @@ pub async fn ensure_stable_not_depegged(
 // Rather than reinvent price fetching, this reuses the existing XRC
 // `PriceSource::Xrc` pattern (`management.rs`) and the source-floor gate
 // (`xrc_metadata_meets_source_floor` above), writing accepted prices through
-// `MultiChainState::set_manual_price` — the SAME internal path
+// `MultiChainState::set_manual_price`, the SAME internal path
 // `set_manual_collateral_price` (main.rs) uses, so the existing fail-closed
 // staleness gate (`chains::liquidation::fresh_chain_price_e8`) needs no
 // changes at all.
@@ -765,8 +765,8 @@ const CHAINS_XRC_MARGIN_SEC: u64 = 60;
 ///
 /// CYCLE-NEUTRALITY: the gate is read synchronously, before any `await` or
 /// XRC call. An empty work set (today's prod state) returns immediately
-/// having made zero XRC calls — see `chains_needing_price_feed` and its
-/// `empty_on_default_state_zero_xrc_calls_on_prod_today` test above.
+/// having made zero XRC calls (see `chains_needing_price_feed` and its
+/// `empty_on_default_state_zero_xrc_calls_on_prod_today` test above).
 pub async fn fetch_chains_prices() {
     let work = read_state(chains_needing_price_feed);
     if work.is_empty() {
