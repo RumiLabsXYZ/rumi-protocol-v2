@@ -18,6 +18,9 @@ import type {
   PointsConfig,
   PrincipalState,
   LeaderboardEntry,
+  EpochSummary,
+  IngestStatus,
+  PointEntry,
 } from '$declarations/rumi_points/rumi_points.did';
 
 const TTL = {
@@ -25,6 +28,7 @@ const TTL = {
   CONFIG: 60_000,
   PRINCIPAL: 15_000,
   LEADERBOARD: 30_000,
+  ADMIN: 30_000,
 } as const;
 
 interface CacheEntry<T> {
@@ -135,4 +139,74 @@ export async function getLeaderboard(offset: number, limit: number): Promise<Lea
   const c = getCached<LeaderboardEntry[]>(key, TTL.LEADERBOARD);
   if (c.hit) return c.value;
   return setCache(key, await withRetry(() => getActor().get_leaderboard(offset, limit)));
+}
+
+// ── Admin participant view (all still public queries; the admin page gates on
+//    the connected principal matching PointsConfig.admin, purely as a UI wall) ──
+
+export async function getEpochHistory(offset: number, limit: number): Promise<EpochSummary[]> {
+  const key = `points:epochs:${offset}:${limit}`;
+  const c = getCached<EpochSummary[]>(key, TTL.ADMIN);
+  if (c.hit) return c.value;
+  return setCache(key, await withRetry(() => getActor().get_epoch_history(offset, limit)));
+}
+
+export async function getIngestStatus(): Promise<IngestStatus> {
+  const key = 'points:ingest';
+  const c = getCached<IngestStatus>(key, TTL.ADMIN);
+  if (c.hit) return c.value;
+  return setCache(key, await withRetry(() => getActor().get_ingest_status()));
+}
+
+export async function getExcludedPrincipals(): Promise<Principal[]> {
+  const key = 'points:excluded';
+  const c = getCached<Principal[]>(key, TTL.CONFIG);
+  if (c.hit) return c.value;
+  return setCache(key, await withRetry(() => getActor().get_excluded_principals()));
+}
+
+/** Audit-ledger row count; null when the deployed canister predates the reader. */
+export async function getPointLedgerLen(): Promise<bigint | null> {
+  const key = 'points:ledgerlen';
+  const c = getCached<bigint | null>(key, TTL.ADMIN);
+  if (c.hit) return c.value;
+  try {
+    return setCache<bigint | null>(key, await getActor().get_point_ledger_len());
+  } catch (e) {
+    if (String(e).includes('no query method') || String(e).includes('IC0536')) {
+      return setCache<bigint | null>(key, null);
+    }
+    throw e;
+  }
+}
+
+/**
+ * Every audit-ledger row for one principal, paged until `reached_end` (an empty
+ * page mid-scan only means the per-call scan budget ran out, so the loop keys
+ * on the cursor, not on entry count). Returns null when the deployed canister
+ * predates the ledger readers, so the UI can say "pending upgrade" instead of
+ * surfacing a method-not-found as a load failure. NOT retried on that error.
+ */
+export async function getPrincipalPointEntries(p: Principal): Promise<PointEntry[] | null> {
+  const key = `points:ledger:${p.toText()}`;
+  const c = getCached<PointEntry[] | null>(key, TTL.ADMIN);
+  if (c.hit) return c.value;
+  const actor = getActor();
+  const entries: PointEntry[] = [];
+  let offset = 0n;
+  try {
+    // Bounded: MAX_LEDGER_SCAN (20k) rows examined per call; 200 pages = 4M rows.
+    for (let i = 0; i < 200; i++) {
+      const page = await withRetry(() => actor.get_principal_point_entries(p, offset, 1000));
+      entries.push(...page.entries);
+      if (page.reached_end || page.next_offset === offset) break;
+      offset = page.next_offset;
+    }
+  } catch (e) {
+    if (String(e).includes('no query method') || String(e).includes('IC0536')) {
+      return setCache<PointEntry[] | null>(key, null);
+    }
+    throw e;
+  }
+  return setCache<PointEntry[] | null>(key, entries);
 }

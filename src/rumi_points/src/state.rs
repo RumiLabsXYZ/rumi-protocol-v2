@@ -52,7 +52,8 @@ use crate::accrual::{self, SnapshotWeights};
 use crate::snapshot_seed::{RevealedSeed, SnapshotSeedSingleton};
 use crate::types::{
     AssetType, DepositKey, DepositRecord, EpochStatus, EpochSummary, InitArgs, LeaderboardEntry,
-    OpenEpoch, PointEntry, PointSource, PointsConfig, PointsError, PrincipalState, PublicEpochStatus,
+    OpenEpoch, PointEntry, PointEntryPage, PointSource, PointsConfig, PointsError, PrincipalState,
+    PublicEpochStatus,
     PublicOpenEpoch, QualifyingAction, RegistrationInfo, RepaymentEvent, Venue,
 };
 
@@ -781,6 +782,54 @@ pub fn point_ledger_len() -> u64 {
     POINT_LEDGER.with(|l| l.borrow().len())
 }
 
+/// Row cap per audit-ledger page, same reasoning as `MAX_LEADERBOARD_LIMIT`
+/// (PTS-001): an unbounded request must not be able to blow the query budget.
+pub const MAX_LEDGER_LIMIT: u32 = 1_000;
+/// Rows examined per call, independent of how many MATCH. A principal-filtered
+/// scan over a long ledger would otherwise be unbounded work for a caller who
+/// asked for one row; the page returns early and the cursor resumes the scan.
+pub const MAX_LEDGER_SCAN: u64 = 20_000;
+
+/// Bounded forward read of the append-only audit ledger, oldest row first.
+/// This is the ONLY way to decompose a principal's `total_points` by source and
+/// epoch: `PrincipalState` carries the running total and the current deposit
+/// composition, but not the per-source history that produced them.
+pub fn point_entries(offset: u64, limit: u32) -> PointEntryPage {
+    read_ledger_page(offset, limit, |_| true)
+}
+
+/// The same ledger filtered to one principal. See `MAX_LEDGER_SCAN` for why an
+/// empty page does not mean "no more rows" (check `reached_end` instead).
+pub fn principal_point_entries(principal: Principal, offset: u64, limit: u32) -> PointEntryPage {
+    read_ledger_page(offset, limit, |e| e.principal == principal)
+}
+
+fn read_ledger_page(
+    offset: u64,
+    limit: u32,
+    keep: impl Fn(&PointEntry) -> bool,
+) -> PointEntryPage {
+    let limit = limit.min(MAX_LEDGER_LIMIT) as usize;
+    POINT_LEDGER.with(|l| {
+        let log = l.borrow();
+        let len = log.len();
+        let mut entries = Vec::new();
+        let mut i = offset.min(len);
+        let mut scanned = 0u64;
+        while i < len && entries.len() < limit && scanned < MAX_LEDGER_SCAN {
+            if let Some(row) = log.get(i) {
+                let entry = row.into_current();
+                if keep(&entry) {
+                    entries.push(entry);
+                }
+            }
+            i += 1;
+            scanned += 1;
+        }
+        PointEntryPage { entries, next_offset: i, reached_end: i >= len }
+    })
+}
+
 #[allow(dead_code)] // wired by the Phase 5 epoch driver
 pub fn append_epoch_summary(summary: EpochSummary) {
     EPOCH_SUMMARIES.with(|l| {
@@ -1141,14 +1190,12 @@ pub fn set_epoch_driver_interval(caller: Principal, secs: u64) -> Result<(), Poi
 /// 90-day repayment window length (spec Section 6).
 pub const REPAYMENT_WINDOW_NS: u64 = 90 * crate::NANOS_PER_DAY;
 
-/// Add to (or subtract from) a principal's recorded 3pool deposit for one asset
-/// (the event-tracked composition deciding the 1x/3x/5x split). Subtraction
-/// saturates at 0 and drops the record when it reaches 0. No-op if unregistered.
-pub fn update_3pool_recorded(
+/// Credit a principal's recorded 3pool deposit for one asset (the event-tracked
+/// composition deciding the 1x/3x/10x split). No-op if unregistered.
+pub fn credit_3pool_recorded(
     principal: Principal,
     asset: AssetType,
     amount_usd_e8s: u128,
-    add: bool,
     now_ns: u64,
 ) {
     let mut ps = match get_principal_state(&principal) {
@@ -1156,24 +1203,79 @@ pub fn update_3pool_recorded(
         None => return,
     };
     let key = DepositKey { venue: Venue::ThreePool, asset };
-    if add {
-        let rec = ps.active_deposits.entry(key).or_insert_with(|| DepositRecord {
-            asset,
-            venue: Venue::ThreePool,
-            recorded_value_usd: 0,
-            deposited_at: now_ns,
-            last_verified_at: now_ns,
-        });
-        rec.recorded_value_usd = rec.recorded_value_usd.saturating_add(amount_usd_e8s);
-        rec.last_verified_at = now_ns;
-    } else if let Some(rec) = ps.active_deposits.get_mut(&key) {
-        rec.recorded_value_usd = rec.recorded_value_usd.saturating_sub(amount_usd_e8s);
-        rec.last_verified_at = now_ns;
-        if rec.recorded_value_usd == 0 {
-            ps.active_deposits.remove(&key);
+    let rec = ps.active_deposits.entry(key).or_insert_with(|| DepositRecord {
+        asset,
+        venue: Venue::ThreePool,
+        recorded_value_usd: 0,
+        deposited_at: now_ns,
+        last_verified_at: now_ns,
+    });
+    rec.recorded_value_usd = rec.recorded_value_usd.saturating_add(amount_usd_e8s);
+    rec.last_verified_at = now_ns;
+    put_principal_state(ps);
+}
+
+/// Debit `total_usd_e8s` from a principal's recorded 3pool composition, spread
+/// pro-rata across the recorded legs. A withdrawal burns LP backed by the WHOLE
+/// position, not just the coin paid out, so a per-leg debit is wrong for
+/// `RemoveOneCoin` (it would leave the untouched legs recorded forever, in the
+/// 10x matched bucket). Debiting the total pro-rata also makes an
+/// over-withdrawal (e.g. against a pre-season position that was never credited)
+/// drain whatever IS recorded instead of leaving a phantom floor.
+/// Saturates at 0, drops drained legs. No-op if unregistered or nothing recorded.
+pub fn debit_3pool_recorded(principal: Principal, total_usd_e8s: u128, now_ns: u64) {
+    let mut ps = match get_principal_state(&principal) {
+        Some(p) => p,
+        None => return,
+    };
+    let keys: Vec<DepositKey> = ps
+        .active_deposits
+        .keys()
+        .filter(|k| k.venue == Venue::ThreePool)
+        .copied()
+        .collect();
+    let recorded_total: u128 = keys
+        .iter()
+        .filter_map(|k| ps.active_deposits.get(k))
+        .fold(0u128, |acc, r| acc.saturating_add(r.recorded_value_usd));
+    if recorded_total == 0 {
+        return;
+    }
+    for key in keys {
+        if let Some(rec) = ps.active_deposits.get_mut(&key) {
+            // Floor division under-debits by at most (legs - 1) e8s of dust per
+            // withdrawal; the >= drain case below clears exact exits regardless.
+            let cut = if total_usd_e8s >= recorded_total {
+                rec.recorded_value_usd
+            } else {
+                rec.recorded_value_usd.saturating_mul(total_usd_e8s) / recorded_total
+            };
+            rec.recorded_value_usd = rec.recorded_value_usd.saturating_sub(cut);
+            rec.last_verified_at = now_ns;
+            if rec.recorded_value_usd == 0 {
+                ps.active_deposits.remove(&key);
+            }
         }
     }
     put_principal_state(ps);
+}
+
+/// Remove every principal's recorded ThreePool deposits, so a rebuild can
+/// replay them from the source event log through the fixed debit semantics.
+/// Registration, repayment windows and accrued points are untouched.
+pub fn clear_all_3pool_recorded() {
+    let all: Vec<Principal> = PRINCIPALS.with(|m| m.borrow().iter().map(|(k, _)| k.0).collect());
+    for p in all {
+        let mut ps = match get_principal_state(&p) {
+            Some(ps) => ps,
+            None => continue,
+        };
+        let before = ps.active_deposits.len();
+        ps.active_deposits.retain(|k, _| k.venue != Venue::ThreePool);
+        if ps.active_deposits.len() != before {
+            put_principal_state(ps);
+        }
+    }
 }
 
 /// Record a qualifying ckUSDC/ckUSDT vault repayment, opening a 90-day points
@@ -1679,6 +1781,72 @@ mod tests {
         assert_eq!(page[0].rank, 2);
     }
 
+    // ── Audit-ledger readers ──
+
+    fn mk_entry(p: Principal, epoch: u64, delta: u128, source: PointSource) -> PointEntry {
+        PointEntry {
+            principal: p,
+            epoch_index: epoch,
+            points_delta: delta,
+            source,
+            recorded_at_ns: 1_000 + epoch,
+        }
+    }
+
+    #[test]
+    fn point_entries_page_forward_and_report_end() {
+        let base = point_ledger_len();
+        for i in 0..5u64 {
+            append_point_entry(mk_entry(tp(50), i, 10 * i as u128, PointSource::IcUsdDebt));
+        }
+        let page = point_entries(base, 2);
+        assert_eq!(page.entries.len(), 2);
+        assert_eq!(page.entries[0].epoch_index, 0);
+        assert_eq!(page.entries[1].epoch_index, 1);
+        assert_eq!(page.next_offset, base + 2);
+        assert!(!page.reached_end, "more rows remain");
+
+        // Resume from the returned cursor, not from a count of returned rows.
+        let rest = point_entries(page.next_offset, 100);
+        assert_eq!(rest.entries.len(), 3);
+        assert_eq!(rest.entries[0].epoch_index, 2);
+        assert!(rest.reached_end);
+    }
+
+    #[test]
+    fn principal_point_entries_filters_and_advances_past_non_matching_rows() {
+        let base = point_ledger_len();
+        let mine = tp(51);
+        let other = tp(52);
+        // Interleave so the filter must skip rows: other, mine, other, mine.
+        append_point_entry(mk_entry(other, 0, 1, PointSource::IcUsdDebt));
+        append_point_entry(mk_entry(mine, 0, 7, PointSource::AmmLp));
+        append_point_entry(mk_entry(other, 1, 2, PointSource::IcUsdDebt));
+        append_point_entry(mk_entry(mine, 1, 9, PointSource::ThreeUsdStabilityPool));
+
+        let page = principal_point_entries(mine, base, 100);
+        assert_eq!(page.entries.len(), 2, "only this principal's rows");
+        assert_eq!(page.entries[0].points_delta, 7);
+        assert_eq!(page.entries[0].source, PointSource::AmmLp);
+        assert_eq!(page.entries[1].points_delta, 9);
+        assert!(page.reached_end);
+        // The cursor is a ledger INDEX, so it advanced past the skipped rows too.
+        assert_eq!(page.next_offset, point_ledger_len());
+    }
+
+    #[test]
+    fn ledger_readers_clamp_limit_and_tolerate_out_of_range_offset() {
+        let len = point_ledger_len();
+        // A limit above the cap must not over-return.
+        let page = point_entries(0, u32::MAX);
+        assert!(page.entries.len() as u32 <= MAX_LEDGER_LIMIT);
+        // An offset past the end yields an empty, terminal page rather than a panic.
+        let past = point_entries(len + 1_000, 10);
+        assert!(past.entries.is_empty());
+        assert!(past.reached_end);
+        assert_eq!(past.next_offset, len);
+    }
+
     #[test]
     fn principal_state_versioned_roundtrip_through_stable_map() {
         // Exercises the ciborium round-trip of the full record, including the
@@ -1996,30 +2164,54 @@ mod tests {
     }
 
     #[test]
-    fn update_3pool_recorded_adds_subtracts_and_drops_at_zero() {
+    fn credit_and_debit_3pool_recorded_round_trip_and_drop_at_zero() {
         init_default(tp(99));
         let p = tp(30);
         register(p, 1, QualifyingAction::Deposit3Pool).unwrap();
         let key = key_3pool(AssetType::CkUsdc);
 
-        update_3pool_recorded(p, AssetType::CkUsdc, 100, true, 5);
+        credit_3pool_recorded(p, AssetType::CkUsdc, 100, 5);
         assert_eq!(get_principal_state(&p).unwrap().active_deposits[&key].recorded_value_usd, 100);
 
-        update_3pool_recorded(p, AssetType::CkUsdc, 50, true, 6);
+        credit_3pool_recorded(p, AssetType::CkUsdc, 50, 6);
         assert_eq!(get_principal_state(&p).unwrap().active_deposits[&key].recorded_value_usd, 150);
 
-        update_3pool_recorded(p, AssetType::CkUsdc, 60, false, 7);
+        debit_3pool_recorded(p, 60, 7);
         assert_eq!(get_principal_state(&p).unwrap().active_deposits[&key].recorded_value_usd, 90);
 
-        // Subtracting past zero drops the record entirely.
-        update_3pool_recorded(p, AssetType::CkUsdc, 1_000, false, 8);
+        // Debiting past zero drops the record entirely.
+        debit_3pool_recorded(p, 1_000, 8);
         assert!(get_principal_state(&p).unwrap().active_deposits.get(&key).is_none());
     }
 
     #[test]
-    fn update_3pool_recorded_is_noop_when_unregistered() {
+    fn debit_3pool_recorded_spreads_pro_rata_and_drains_exact_exits() {
         init_default(tp(99));
-        update_3pool_recorded(tp(31), AssetType::IcUsd, 100, true, 5);
+        let p = tp(32);
+        register(p, 1, QualifyingAction::Deposit3Pool).unwrap();
+        credit_3pool_recorded(p, AssetType::IcUsd, 100, 1);
+        credit_3pool_recorded(p, AssetType::CkUsdt, 200, 1);
+        credit_3pool_recorded(p, AssetType::CkUsdc, 100, 1);
+
+        // 25% out -> every leg scales by 25%, preserving the mix.
+        debit_3pool_recorded(p, 100, 2);
+        let deposits = get_principal_state(&p).unwrap().active_deposits;
+        assert_eq!(deposits[&key_3pool(AssetType::IcUsd)].recorded_value_usd, 75);
+        assert_eq!(deposits[&key_3pool(AssetType::CkUsdt)].recorded_value_usd, 150);
+        assert_eq!(deposits[&key_3pool(AssetType::CkUsdc)].recorded_value_usd, 75);
+
+        // A withdrawal of exactly the remaining total clears every leg, floor
+        // division notwithstanding.
+        debit_3pool_recorded(p, 300, 3);
+        assert!(get_principal_state(&p).unwrap().active_deposits.is_empty());
+    }
+
+    #[test]
+    fn credit_and_debit_3pool_recorded_are_noops_when_unregistered() {
+        init_default(tp(99));
+        credit_3pool_recorded(tp(31), AssetType::IcUsd, 100, 5);
+        assert!(get_principal_state(&tp(31)).is_none());
+        debit_3pool_recorded(tp(31), 100, 5);
         assert!(get_principal_state(&tp(31)).is_none());
     }
 
@@ -2267,8 +2459,8 @@ mod tests {
         init_default(tp(99));
         let p = tp(80);
         register(p, 1, QualifyingAction::Deposit3Pool).unwrap();
-        update_3pool_recorded(p, AssetType::IcUsd, 10, true, 1);
-        update_3pool_recorded(p, AssetType::CkUsdc, 20, true, 1);
+        credit_3pool_recorded(p, AssetType::IcUsd, 10, 1);
+        credit_3pool_recorded(p, AssetType::CkUsdc, 20, 1);
         assert_eq!(recorded_3pool_composition(&p), (10, 20, 0));
         assert_eq!(recorded_3pool_composition(&tp(123)), (0, 0, 0));
     }

@@ -83,6 +83,27 @@ export interface OpenEpoch {
   'close_points_accrued' : bigint,
   'epoch_end_ns' : bigint,
 }
+export interface PointEntry {
+  'principal' : Principal,
+  'epoch_index' : bigint,
+  'source' : PointSource,
+  'recorded_at_ns' : bigint,
+  'points_delta' : bigint,
+}
+export interface PointEntryPage {
+  'reached_end' : boolean,
+  'entries' : Array<PointEntry>,
+  'next_offset' : bigint,
+}
+export type PointSource = { 'CkStable3PoolMatched' : null } |
+  { 'Registration' : null } |
+  { 'CkStable3PoolUnmatched' : null } |
+  { 'VaultRepayment' : null } |
+  { 'IcUsd3Pool' : null } |
+  { 'AmmLp' : null } |
+  { 'IcUsdStabilityPool' : null } |
+  { 'IcUsdDebt' : null } |
+  { 'ThreeUsdStabilityPool' : null };
 export interface PointsConfig {
   'admin' : Principal,
   'registered_count' : bigint,
@@ -140,6 +161,8 @@ export type Result_1 = { 'Ok' : null } |
   { 'Err' : string };
 export type Result_2 = { 'Ok' : bigint } |
   { 'Err' : PointsError };
+export type Result_3 = { 'Ok' : bigint } |
+  { 'Err' : string };
 export interface RevealedSeed {
   'revealed_at_ns' : bigint,
   'epoch_index' : bigint,
@@ -158,6 +181,7 @@ export type Venue = { 'Amm' : null } |
   { 'StabilityPool' : null };
 export interface _SERVICE {
   'add_excluded_principal' : ActorMethod<[Principal], Result>,
+  'admin_rebuild_3pool_recorded' : ActorMethod<[], Result_3>,
   'cycle_manager_metrics' : ActorMethod<[], Array<CycleManagerMetric>>,
   'cycles_status' : ActorMethod<[], CycleManagerCyclesStatus>,
   'force_epoch_tick' : ActorMethod<[], Result>,
@@ -169,7 +193,13 @@ export interface _SERVICE {
   'get_ingest_status' : ActorMethod<[], IngestStatus>,
   'get_leaderboard' : ActorMethod<[number, number], Array<LeaderboardEntry>>,
   'get_pending_commit' : ActorMethod<[], Uint8Array | number[]>,
+  'get_point_entries' : ActorMethod<[bigint, number], PointEntryPage>,
+  'get_point_ledger_len' : ActorMethod<[], bigint>,
   'get_points_config' : ActorMethod<[], PointsConfig>,
+  'get_principal_point_entries' : ActorMethod<
+    [Principal, bigint, number],
+    PointEntryPage
+  >,
   'get_principal_state' : ActorMethod<[Principal], [] | [PrincipalState]>,
   'get_registration_info' : ActorMethod<[Principal], [] | [RegistrationInfo]>,
   'get_revealed_seed' : ActorMethod<[bigint], [] | [RevealedSeed]>,

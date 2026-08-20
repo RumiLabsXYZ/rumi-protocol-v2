@@ -5,15 +5,14 @@
     AssetType,
   } from '$declarations/rumi_points/rumi_points.did';
   import { formatPoints, qualifyingActionLabel } from '$lib/utils/points';
-  import { depositMultiplierLabel, formatSharePct, type EarnVenue } from '$lib/utils/pointsRules';
+  import { depositMultiplierLabel, type EarnVenue } from '$lib/utils/pointsRules';
   import MultiplierBadge from './MultiplierBadge.svelte';
 
   interface Props {
     state: PrincipalState;
     rank: number | null;
-    shareBps?: number | null;
   }
-  let { state, rank, shareBps = null }: Props = $props();
+  let { state, rank }: Props = $props();
 
   function venueKey(v: Venue): EarnVenue {
     if ('Vault' in v) return 'vault';
@@ -59,7 +58,12 @@
 </script>
 
 <div class="flex flex-col gap-4">
-  <div class="grid grid-cols-3 gap-3">
+  <!-- No "Est. share" tile. A live share-of-pool percentage tells every user how
+       concentrated the season currently is, promises a payout proportion that
+       nothing has committed to, and swings wildly while the season is young.
+       Points + rank convey standing without any of that. The operator console
+       (/points/admin) still shows share, where it is useful and not public. -->
+  <div class="grid grid-cols-2 gap-3">
     <div class="rounded-xl bg-gray-800/30 border border-gray-700/50 p-4">
       <p class="text-xs text-gray-400 uppercase tracking-wider">Your points</p>
       <p class="text-2xl font-semibold text-gray-100 mt-1 tabular-nums">{formatPoints(state.total_points)}</p>
@@ -69,11 +73,6 @@
       <p class="text-xs text-gray-400 uppercase tracking-wider">Rank</p>
       <p class="text-2xl font-semibold text-gray-100 mt-1 tabular-nums">{rank !== null ? `#${rank}` : '—'}</p>
       <p class="text-xs text-gray-500">{rank !== null ? 'on the leaderboard' : 'outside the top ranks'}</p>
-    </div>
-    <div class="rounded-xl bg-gray-800/30 border border-gray-700/50 p-4">
-      <p class="text-xs text-gray-400 uppercase tracking-wider">Est. share</p>
-      <p class="text-2xl font-semibold text-emerald-300 mt-1 tabular-nums">{shareBps !== null ? formatSharePct(shareBps) : '—'}</p>
-      <p class="text-xs text-gray-500">of the Season 1 pool</p>
     </div>
   </div>
 
