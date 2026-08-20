@@ -142,8 +142,9 @@ pub fn fresh_chain_price_e8(
 
 /// Bot->SP escalation predicate (spec §10, finding #10). A vault escalates when
 /// its bot LiquidationSwap op is terminally failed OR the bot has held it past
-/// `bot_timeout_ns`. The SP consumer (Increment 4) ANDs this with a cleared/
-/// resolvable marker; here it is the pure timing core (tested now, wired in Inc 4).
+/// `bot_timeout_ns`. The SP consumer (`stability_pool_liquidate_chain_vault`,
+/// Increment 4, landed) ANDs this with a cleared/resolvable marker; here it is
+/// the pure timing core.
 pub fn should_escalate_to_sp(
     bot_pending_since_ns: u64,
     now_ns: u64,

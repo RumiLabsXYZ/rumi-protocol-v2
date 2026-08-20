@@ -10,20 +10,27 @@
 //! derivation path, so the match proved `RESERVE_ADDR_CACHE` (keyed only by
 //! `ChainId`) was serving a stale, pre-rotation address.
 //!
-//! Scenarios:
-//!   1. `key_rotation_changes_reserve_and_interest_treasury_addresses`: warm
-//!      both caches under the default key, rotate to `key_1` (no chain
-//!      vaults exist, so the orphan guard allows it), and assert BOTH
-//!      addresses actually change.
-//!   2. `rejected_rotation_does_not_clear_the_cache`: warm the cache, then
-//!      attempt a rotation `set_chains_ecdsa_key_name` rejects (an
-//!      unsupported key name) and assert the cached address is unchanged.
-//!      This proves `clear_address_caches()` is reached ONLY on the success
-//!      path. The other rejection path (`has_chain_vaults`) shares the exact
-//!      same code order (`validate_ecdsa_key_change(...)?` before any
-//!      mutation), which the pure `ecdsa_key_change_rules` unit test in
-//!      main.rs already proves rejects when vaults exist, so both rejection
-//!      routes are covered between the two test layers.
+//! Scenario: `key_rotation_changes_reserve_and_interest_treasury_addresses`
+//! warms both caches under the default key, rotates to `key_1` (no chain
+//! vaults exist, so the orphan guard allows it), and asserts BOTH addresses
+//! actually change.
+//!
+//! A prior version of this file also carried
+//! `rejected_rotation_does_not_clear_the_cache`, asserting the reserve
+//! address is unchanged after a REJECTED rotation attempt. That assertion is
+//! vacuous: a rejected rotation never changes `chains_ecdsa_key_name`, so
+//! re-derivation returns the identical address REGARDLESS of whether the
+//! cache was cleared -- the test could not fail even on unpatched code.
+//! Removed per a conventions review finding; the real "only the success path
+//! clears/bumps anything" guarantee is code-order (`validate_ecdsa_key_change`
+//! returns via `?` before `clear_address_caches`/`bump_ecdsa_key_generation`
+//! ever run), which the pure `ecdsa_key_change_rules` unit test in main.rs
+//! already exercises (asserting `validate_ecdsa_key_change` itself rejects a
+//! bad name or a change with live vaults). The deterministic regression that
+//! actually matters here -- a derive racing a rotation across the async
+//! boundary -- is covered by `chains::evm::tecdsa::ecdsa_key_generation_guard_tests`
+//! (tecdsa.rs), which drives the exact interleaving directly rather than
+//! relying on PocketIC's non-deterministic scheduling to hit it.
 
 use candid::{encode_args, encode_one, CandidType, Decode, Deserialize, Principal};
 use pocket_ic::{PocketIc, PocketIcBuilder, WasmResult};
@@ -154,23 +161,5 @@ fn key_rotation_changes_reserve_and_interest_treasury_addresses() {
     assert_ne!(
         treasury_before, treasury_after,
         "interest-treasury address must change after an ECDSA key rotation (stale-cache regression)"
-    );
-}
-
-#[test]
-fn rejected_rotation_does_not_clear_the_cache() {
-    let (pic, cid) = boot();
-
-    let reserve_before = get_reserve_address(&pic, cid).expect("derive reserve address");
-
-    // An unsupported key name is rejected by `validate_ecdsa_key_change`
-    // BEFORE any state mutation or cache clear.
-    let err = set_key(&pic, cid, "bogus_key").expect_err("unsupported key name must be rejected");
-    assert!(matches!(err, ProtocolError::ChainAdmin(_)));
-
-    let reserve_after = get_reserve_address(&pic, cid).expect("derive reserve address again");
-    assert_eq!(
-        reserve_before, reserve_after,
-        "a rejected key-name change must not clear the address cache"
     );
 }

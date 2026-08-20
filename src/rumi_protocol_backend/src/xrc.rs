@@ -720,30 +720,61 @@ pub async fn ensure_stable_not_depegged(
 // an operator-set liquidation config row (`chain_liquidation_configs`). On
 // today's prod state neither condition holds for any chain, so
 // `chains_needing_price_feed` returns empty and `fetch_chains_prices` (below)
-// returns before making a single XRC call. `chains_needing_price_feed_is_empty_test`
+// returns before making a single XRC call.
+// `chains_price_feed_tests::empty_on_default_state_zero_xrc_calls_on_prod_today`
 // pins this directly; every other XRC-call site in this file already proves
 // its own gate is a synchronous, pre-spawn check (see
 // `should_fetch_collateral_price` above) and `fetch_chains_prices` follows
 // the identical shape: read the gate, and only THEN loop.
-use crate::chains::config::{ChainId, ChainStatus};
+use crate::chains::config::ChainId;
+
+/// Security review follow-up (F2): whether `chain` is currently
+/// "XRC-managed" -- registered (`MultiChainState::chain_is_registered`, the
+/// single shared status predicate F10 also reads) AND carrying a
+/// `chain_liquidation_configs` row (regardless of that row's `enabled` flag:
+/// staging a config while disabled should still keep the price warm so
+/// flipping `enabled` later doesn't start on a stale/missing price, AND
+/// still claims the pair so a manual pusher cannot race it).
+///
+/// When true, the XRC timer is the SOLE writer of `(chain, native_symbol)`'s
+/// manual price: `set_manual_collateral_price` (main.rs) rejects a write for
+/// an XRC-managed pair, for every caller including the authorized
+/// price-pusher, rather than racing last-writer-wins against the timer. The
+/// stop procedure (hand the pair back to manual pricing) is either removing
+/// the `chain_liquidation_configs` row, or `disable_chain` (which flips
+/// `chain_is_registered` to false) -- both already make this predicate
+/// false, so no separate kill switch is needed.
+pub fn chain_is_xrc_managed(state: &State, chain: ChainId) -> bool {
+    state.multi_chain.chain_is_registered(chain)
+        && state.multi_chain.chain_liquidation_configs.contains_key(&chain)
+}
+
+/// The exact-pair form `set_manual_collateral_price` (main.rs) reads: true
+/// iff `chain` is XRC-managed AND `symbol` is that chain's native symbol (the
+/// only pair the timer ever actually writes -- a manual push to the SAME
+/// chain under a DIFFERENT symbol string does not race the timer at all,
+/// since `MultiChainState::manual_prices` is keyed by the full
+/// `(ChainId, String)` tuple).
+pub fn pair_is_xrc_managed(state: &State, chain: ChainId, symbol: &str) -> bool {
+    chain_is_xrc_managed(state, chain)
+        && crate::chains::evm::evm_chain_config(chain)
+            .map(|c| c.native_symbol == symbol)
+            .unwrap_or(false)
+}
 
 /// Pure gate: which `(ChainId, native_symbol)` pairs currently need a price.
-/// A chain qualifies only when it is `Registered` in `multi_chain.chain_configs`
-/// AND carries a `chain_liquidation_configs` row (regardless of that row's
-/// `enabled` flag: staging a config while disabled should still keep the
-/// price warm so flipping `enabled` later doesn't start on a stale/missing
-/// price). The symbol comes from the compile-time `evm_chain_config` (the
-/// same table `chains/evm/mod.rs` uses for `native_symbol`); a chain with no
-/// EVM config (e.g. a future non-EVM chain, or an unknown id) is skipped
-/// rather than guessed at.
+/// A chain qualifies exactly when `chain_is_xrc_managed` is true. The symbol
+/// comes from the compile-time `evm_chain_config` (the same table
+/// `chains/evm/mod.rs` uses for `native_symbol`); a chain with no EVM config
+/// (e.g. a future non-EVM chain, or an unknown id) is skipped rather than
+/// guessed at.
 pub fn chains_needing_price_feed(state: &State) -> Vec<(ChainId, String)> {
     state
         .multi_chain
         .chain_configs
-        .iter()
-        .filter(|(_, cfg)| matches!(cfg.status, ChainStatus::Registered))
-        .filter(|(id, _)| state.multi_chain.chain_liquidation_configs.contains_key(id))
-        .filter_map(|(id, _)| {
+        .keys()
+        .filter(|id| chain_is_xrc_managed(state, **id))
+        .filter_map(|id| {
             crate::chains::evm::evm_chain_config(*id).map(|c| (*id, c.native_symbol.to_string()))
         })
         .collect()
@@ -777,10 +808,38 @@ pub async fn fetch_chains_prices() {
     }
 }
 
+/// Bound accepted for the XRC response's `metadata.decimals` field. XRC
+/// itself always reports 8; this is generous headroom, not a tight
+/// assumption about XRC's actual behavior. `decimals` is UNTRUSTED input (it
+/// comes from the XRC canister's response), and `10^19` already exceeds
+/// `u64::MAX`, so any value above this bound is rejected by
+/// `xrc_rate_to_price_e8` before it can overflow anything.
+const MAX_ACCEPTED_XRC_DECIMALS: u32 = 18;
+
+/// Convert an XRC `(rate, decimals)` pair to a USD e8 price, entirely in
+/// checked integer arithmetic (no `f64` anywhere in this conversion).
+/// `price_e8 = rate * 10^8 / 10^decimals`, computed in `u128` (comfortably
+/// wide enough that `u64::MAX * 10^8` cannot overflow it) and narrowed back
+/// to `u64` only at the end. Returns `None` (reject, caller logs and skips)
+/// when: `decimals` exceeds `MAX_ACCEPTED_XRC_DECIMALS`; `rate` is zero; any
+/// intermediate `checked_*` step fails; or the final value does not fit
+/// `u64` (a huge `rate` at a small `decimals`, e.g. `decimals == 0`).
+fn xrc_rate_to_price_e8(rate: u64, decimals: u32) -> Option<u64> {
+    if decimals > MAX_ACCEPTED_XRC_DECIMALS || rate == 0 {
+        return None;
+    }
+    let scale_numerator: u128 = 10u128.checked_pow(8)?;
+    let scale_denominator: u128 = 10u128.checked_pow(decimals)?;
+    let price_e8_u128 = (rate as u128)
+        .checked_mul(scale_numerator)?
+        .checked_div(scale_denominator)?;
+    u64::try_from(price_e8_u128).ok().filter(|&p| p > 0)
+}
+
 /// Fetch + apply a single chain's price. Best-effort, mirroring
 /// `fetch_collateral_price`: any failure (call error, XRC error, thin
-/// source count, non-finite/non-positive rate) logs and returns WITHOUT
-/// writing anything. The existing fail-closed staleness gate
+/// source count, an out-of-bounds/overflowing rate-decimals pair) logs and
+/// returns WITHOUT writing anything. The existing fail-closed staleness gate
 /// (`chains::liquidation::fresh_chain_price_e8`) is what actually protects
 /// liquidations from a stale or missing price; this function never needs to
 /// touch it. No retries beyond the next timer tick.
@@ -827,16 +886,23 @@ async fn fetch_one_chain_price(chain: ChainId, symbol: String) {
                 return;
             }
 
-            let decimals = rust_decimal::Decimal::from_u64(10_u64.pow(rate_result.metadata.decimals));
-            let rate_dec = rust_decimal::Decimal::from_u64(rate_result.rate);
-            let rate_f64 = match (rate_dec, decimals) {
-                (Some(r), Some(d)) if !d.is_zero() => (r / d).to_f64(),
-                _ => None,
-            };
-            let Some(rate_f64) = rate_f64 else {
+            // Security review follow-up (F9): `rate_result.metadata.decimals` is
+            // UNTRUSTED input (it comes straight off the XRC canister's
+            // response, not our own state). The old code computed
+            // `10_u64.pow(decimals)` directly, which overflows u64 for any
+            // decimals >= 20 (10^20 > u64::MAX): a trap in a debug/
+            // overflow-checked build, or silent wraparound (a nonsense
+            // divisor feeding a garbage price) in a release build.
+            // `xrc_rate_to_price_e8` below replaces that with bounded,
+            // checked-arithmetic-only integer math (no f64 anywhere in this
+            // conversion): out-of-range or overflowing input is rejected
+            // (log-and-skip, nothing written), the same fail-closed posture
+            // as every other rejection branch in this function.
+            let Some(price_e8) = xrc_rate_to_price_e8(rate_result.rate, rate_result.metadata.decimals)
+            else {
                 log!(
                     TRACE_XRC,
-                    "[fetch_chains_prices] {:?}/{} rate {} (decimals {}) failed to decode",
+                    "[fetch_chains_prices] {:?}/{} rejecting rate {} (decimals {}): out of bounds or would overflow",
                     chain,
                     symbol,
                     rate_result.rate,
@@ -844,29 +910,6 @@ async fn fetch_one_chain_price(chain: ChainId, symbol: String) {
                 );
                 return;
             };
-            if !rate_f64.is_finite() || rate_f64 <= 0.0 {
-                log!(
-                    TRACE_XRC,
-                    "[fetch_chains_prices] {:?}/{} rejecting non-finite/non-positive rate {}",
-                    chain,
-                    symbol,
-                    rate_f64
-                );
-                return;
-            }
-
-            let price_e8_f64 = (rate_f64 * 100_000_000.0).round();
-            if !price_e8_f64.is_finite() || price_e8_f64 < 1.0 || price_e8_f64 > u64::MAX as f64 {
-                log!(
-                    TRACE_XRC,
-                    "[fetch_chains_prices] {:?}/{} price_e8 {} out of representable range",
-                    chain,
-                    symbol,
-                    price_e8_f64
-                );
-                return;
-            }
-            let price_e8 = price_e8_f64 as u64;
 
             let now = ic_cdk::api::time();
             mutate_state(|s| {
@@ -901,6 +944,70 @@ async fn fetch_one_chain_price(chain: ChainId, symbol: String) {
                 msg
             );
         }
+    }
+}
+
+/// Security review follow-up (F9): `xrc_rate_to_price_e8` is the checked,
+/// overflow-proof replacement for the raw `10_u64.pow(decimals)` conversion
+/// that previously trusted the XRC response's `decimals` field directly.
+#[cfg(test)]
+mod xrc_rate_to_price_e8_tests {
+    use super::xrc_rate_to_price_e8;
+
+    #[test]
+    fn decimals_18_computes_the_expected_price() {
+        // rate = 1_000_000_000_000_000_000 (1.0 at 18 decimals) -> $1.00 at e8.
+        assert_eq!(xrc_rate_to_price_e8(1_000_000_000_000_000_000, 18), Some(100_000_000));
+        // A plausible CFX/USD-style rate: $0.15 at 18 decimals.
+        assert_eq!(xrc_rate_to_price_e8(150_000_000_000_000_000, 18), Some(15_000_000));
+    }
+
+    #[test]
+    fn the_common_xrc_case_decimals_8_is_unaffected() {
+        // XRC itself always reports decimals=8; rate is already e8-scaled.
+        assert_eq!(xrc_rate_to_price_e8(123_456_789, 8), Some(123_456_789));
+    }
+
+    #[test]
+    fn decimals_above_18_is_rejected() {
+        assert_eq!(xrc_rate_to_price_e8(1, 19), None);
+        assert_eq!(xrc_rate_to_price_e8(1, 20), None);
+        assert_eq!(xrc_rate_to_price_e8(1, u32::MAX), None, "must reject, not overflow, an absurd decimals value");
+    }
+
+    #[test]
+    fn zero_rate_is_rejected() {
+        assert_eq!(xrc_rate_to_price_e8(0, 8), None);
+    }
+
+    #[test]
+    fn a_huge_rate_at_small_decimals_that_would_overflow_u64_is_rejected() {
+        // decimals=0 is IN the accepted 0..=18 range, but u64::MAX * 10^8 does
+        // not fit back into a u64 -- this must be caught by the final
+        // `u64::try_from` narrowing, not silently wrapped or trapped.
+        assert_eq!(xrc_rate_to_price_e8(u64::MAX, 0), None);
+        assert_eq!(xrc_rate_to_price_e8(u64::MAX, 1), None);
+    }
+
+    #[test]
+    fn max_rate_at_max_accepted_decimals_computes_exactly_with_no_overflow() {
+        // The widest legal input: rate = u64::MAX, decimals = 18 (the bound
+        // itself). price_e8 = u64::MAX * 10^8 / 10^18 = u64::MAX / 10^10
+        // (floor division), which comfortably fits u64 -- proves the u128
+        // intermediate (u64::MAX * 10^8 ~= 1.84e27, far inside u128's
+        // ~3.4e38 ceiling) never overflows, and the result is exact.
+        let expected: u128 = (u64::MAX as u128) / 10_000_000_000u128;
+        assert_eq!(
+            xrc_rate_to_price_e8(u64::MAX, 18),
+            Some(u64::try_from(expected).unwrap())
+        );
+        assert_eq!(xrc_rate_to_price_e8(u64::MAX, 18), Some(1_844_674_407));
+    }
+
+    #[test]
+    fn decimals_zero_means_rate_is_already_whole_units() {
+        // $5 whole-unit rate at decimals=0 -> $5.00 at e8.
+        assert_eq!(xrc_rate_to_price_e8(5, 0), Some(500_000_000));
     }
 }
 
