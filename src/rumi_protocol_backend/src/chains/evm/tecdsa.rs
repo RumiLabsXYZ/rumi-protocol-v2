@@ -180,3 +180,77 @@ pub async fn cached_reserve_address(chain: ChainId) -> Result<(Vec<Vec<u8>>, Str
     });
     Ok((path, addr))
 }
+
+// ─── De-scaffold pass (2026-08-20): stale-cache fix for ECDSA key rotation ───
+//
+// BUG (found live on prod tfesu during this PR's own verification pass): all
+// three caches above are keyed ONLY by `ChainId`, with no dependency on
+// `State::chains_ecdsa_key_name`. `set_chains_ecdsa_key_name` changes which
+// threshold key `key_id()` reads, but a warm cache entry short-circuits
+// `derive_evm_address` entirely, so `cached_reserve_address` (and settlement/
+// interest-treasury) kept returning the OLD key's address after a rotation.
+// Confirmed on mainnet: `get_chain_reserve_address(1030)` under `test_key_1`
+// then under `key_1` (after `set_chains_ecdsa_key_name("key_1")`) returned the
+// IDENTICAL address, which is impossible for two independent root keys.
+//
+// The custody path (`custody_derivation_path`) is NOT cached (each call
+// re-derives), so per-vault deposit addresses were never affected; this bug is
+// scoped to the three per-chain caches here.
+pub fn clear_address_caches() {
+    SETTLEMENT_ADDR_CACHE.with(|c| c.borrow_mut().clear());
+    INTEREST_TREASURY_ADDR_CACHE.with(|c| c.borrow_mut().clear());
+    RESERVE_ADDR_CACHE.with(|c| c.borrow_mut().clear());
+}
+
+#[cfg(test)]
+mod address_cache_invalidation_tests {
+    // A descendant module of `tecdsa` (declared inline, not in a sibling
+    // `tests_*.rs` file) so it can reach the private thread_locals directly
+    // without adding test-only public accessors to production code.
+    use super::{
+        clear_address_caches, ChainId, INTEREST_TREASURY_ADDR_CACHE, RESERVE_ADDR_CACHE,
+        SETTLEMENT_ADDR_CACHE,
+    };
+
+    fn warm_all_caches(chain: ChainId) {
+        SETTLEMENT_ADDR_CACHE.with(|c| c.borrow_mut().insert(chain, "0xsettlement".to_string()));
+        INTEREST_TREASURY_ADDR_CACHE.with(|c| c.borrow_mut().insert(chain, "0xtreasury".to_string()));
+        RESERVE_ADDR_CACHE.with(|c| c.borrow_mut().insert(chain, "0xreserve".to_string()));
+    }
+
+    fn all_caches_empty() -> bool {
+        SETTLEMENT_ADDR_CACHE.with(|c| c.borrow().is_empty())
+            && INTEREST_TREASURY_ADDR_CACHE.with(|c| c.borrow().is_empty())
+            && RESERVE_ADDR_CACHE.with(|c| c.borrow().is_empty())
+    }
+
+    #[test]
+    fn clear_address_caches_empties_all_three_caches() {
+        let chain = ChainId(1030);
+        warm_all_caches(chain);
+        assert!(!all_caches_empty(), "precondition: caches must be warm before clearing");
+
+        clear_address_caches();
+
+        assert!(
+            all_caches_empty(),
+            "settlement/interest-treasury/reserve caches must all be empty after a key rotation"
+        );
+    }
+
+    #[test]
+    fn clear_address_caches_is_a_noop_on_already_empty_caches() {
+        // Calling clear before anything was ever cached (e.g. a fresh canister,
+        // or a second rotation before any address lookup) must not panic.
+        clear_address_caches();
+        assert!(all_caches_empty());
+    }
+
+    #[test]
+    fn clear_address_caches_clears_every_registered_chain_not_just_one() {
+        warm_all_caches(ChainId(71));
+        warm_all_caches(ChainId(1030));
+        clear_address_caches();
+        assert!(all_caches_empty(), "clear must drop entries for every chain, not just the last-warmed one");
+    }
+}

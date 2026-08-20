@@ -9045,9 +9045,17 @@ fn set_chains_ecdsa_key_name(name: String) -> Result<(), ProtocolError> {
     let has_vaults = read_state(|s| !s.multi_chain.chain_vaults.is_empty());
     validate_ecdsa_key_change(&name, has_vaults)?;
     mutate_state(|s| s.chains_ecdsa_key_name = name.clone());
+    // De-scaffold pass (2026-08-20): a successful key change invalidates the
+    // settlement/interest-treasury/reserve address caches (chains/evm/tecdsa.rs)
+    // — they are keyed only by ChainId, not by the key name, so a warm entry
+    // would otherwise keep returning an address derived from the OLD key.
+    // Only reached on the success path: `validate_ecdsa_key_change` above
+    // already rejected a bad name or a change with live chain vaults, so a
+    // rejected call never clears anything.
+    rumi_protocol_backend::chains::evm::tecdsa::clear_address_caches();
     log!(
         INFO,
-        "[set_chains_ecdsa_key_name] chains EVM tECDSA key set to {}",
+        "[set_chains_ecdsa_key_name] chains EVM tECDSA key set to {}; address caches cleared",
         name
     );
     Ok(())
