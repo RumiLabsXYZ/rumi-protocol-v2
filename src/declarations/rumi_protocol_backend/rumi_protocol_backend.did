@@ -170,8 +170,8 @@ type CollateralConfig = record {
   display_color : opt text;
   borrowing_fee : blob;
   interest_rate_apr : blob;
-  symbol : opt text;
   liquidation_ratio : blob;
+  symbol : opt text;
 };
 type CollateralInterestInfo = record {
   total_debt_e8s : nat64;
@@ -217,6 +217,21 @@ type ConsentMessageSpec = record {
   device_spec : opt DeviceSpec;
 };
 type CustodyKind = variant { IcrcLedger; NativeXrp };
+type CycleManagerCyclesStatus = record {
+  idle_burn_cycles_per_day : opt nat;
+  stable_memory_bytes : opt nat64;
+  low_watermark : nat;
+  balance : nat;
+  heap_memory_bytes : opt nat64;
+  healthy : bool;
+  freeze_threshold_secs : nat64;
+};
+type CycleManagerMetric = record {
+  key : text;
+  value : nat;
+  count : nat64;
+  label : opt text;
+};
 type DeficitSource = variant {
   Liquidation : record { vault_id : nat64 };
   Redemption : record { redeemer : principal };
@@ -818,6 +833,14 @@ type PendingChainBurnAging = record {
   chain_id : nat32;
   oldest_reference_ns : opt nat64;
 };
+type PendingThreeUsdRefund = record {
+  stability_pool : principal;
+  ledger : principal;
+  amount_e8s : nat64;
+  vault_id : nat64;
+  retry_count : nat8;
+  op_nonce : nat;
+};
 type PendingLiquidationV1 = record {
   started_at_ns : nat64;
   op_id : nat64;
@@ -1235,6 +1258,8 @@ service : (ProtocolArg) -> {
   close_vault : (nat64) -> (Result_5);
   coingecko_transform : (TransformArgs) -> (HttpResponse) query;
   confirm_xrp_deposit : (nat64) -> (Result_1);
+  cycle_manager_metrics : () -> (vec CycleManagerMetric) query;
+  cycles_status : () -> (CycleManagerCyclesStatus) query;
   delete_chain : (nat32) -> (Result);
   disable_chain : (nat32) -> (Result);
   enter_recovery_mode : () -> (Result);
@@ -1264,6 +1289,9 @@ service : (ProtocolArg) -> {
   get_chains_ecdsa_key_name : () -> (text) query;
   get_ckstable_repay_fee : () -> (float64) query;
   get_collateral_config : (principal) -> (opt CollateralConfig) query;
+  get_collateral_price_fetch_intervals : () -> (
+      vec record { principal; nat64 },
+    ) query;
   get_collateral_totals : () -> (vec CollateralTotals) query;
   get_consumed_writedown_proofs : () -> (
       vec record { SpProofLedger; nat64 },
@@ -1307,6 +1335,7 @@ service : (ProtocolArg) -> {
   get_pending_chain_burn_aging : () -> (vec PendingChainBurnAging) query;
   get_price_pusher_allowed : () -> (vec record { nat32; text }) query;
   get_price_pusher_principal : () -> (opt principal) query;
+  get_pending_3usd_refunds : () -> (vec PendingThreeUsdRefund) query;
   get_protocol_3usd_reserves : () -> (nat64) query;
   get_protocol_config : () -> (ProtocolConfig) query;
   get_protocol_snapshots : (GetSnapshotsArg) -> (vec ProtocolSnapshot) query;
@@ -1337,6 +1366,7 @@ service : (ProtocolArg) -> {
   get_three_pool_canister : () -> (opt principal) query;
   get_treasury_principal : () -> (opt principal) query;
   get_treasury_stats : () -> (TreasuryStats) query;
+  get_pending_stability_pool_interest_notification_count : () -> (nat64) query;
   get_vault_count : () -> (nat64) query;
   get_vault_history : (nat64) -> (vec record { nat64; Event }) query;
   get_vault_history_paged : (nat64, nat64, nat64) -> (
@@ -1414,6 +1444,7 @@ service : (ProtocolArg) -> {
   set_collateral_min_deposit : (principal, nat64) -> (Result);
   set_collateral_min_vault_debt : (principal, nat64) -> (Result);
   set_collateral_min_xrc_sources : (principal, opt nat32) -> (Result);
+  set_collateral_price_fetch_interval_secs : (principal, nat64) -> (Result);
   set_collateral_redemption_fee_ceiling : (principal, float64) -> (Result);
   set_collateral_redemption_fee_floor : (principal, float64) -> (Result);
   set_collateral_status : (principal, CollateralStatus) -> (Result);

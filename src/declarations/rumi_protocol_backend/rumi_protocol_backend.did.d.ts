@@ -916,10 +916,6 @@ export interface EventsByPrincipalPagedResponse {
   'events' : Array<[bigint, Event]>,
   'total_events' : bigint,
 }
-export interface EvmRpcPrincipalInfo {
-  'effective' : Principal,
-  'overridden' : boolean,
-}
 export type FeeSource = { 'BorrowingFee' : null } |
   { 'RedemptionFee' : null };
 export interface Fees { 'redemption_fee' : number, 'borrowing_fee' : number }
@@ -1556,7 +1552,6 @@ export interface _SERVICE {
     [bigint, bigint, [] | [Array<EventTypeFilter>]],
     ForwardFilteredEventsResponse
   >,
-  'get_evm_rpc_principal' : ActorMethod<[], EvmRpcPrincipalInfo>,
   'get_fees' : ActorMethod<[bigint], Fees>,
   'get_fees_for_collateral' : ActorMethod<[Principal, bigint], Fees>,
   'get_global_icusd_mint_cap' : ActorMethod<[], bigint>,
