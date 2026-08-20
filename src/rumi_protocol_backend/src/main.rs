@@ -226,6 +226,10 @@ thread_local! {
     // Task 12: foreign-chain interest harvest. Same transient lifecycle.
     static CHAIN_INTEREST_TIMER_ID: std::cell::Cell<Option<ic_cdk_timers::TimerId>> =
         const { std::cell::Cell::new(None) };
+    // De-scaffold pass (2026-08-20): XRC-sourced chains price feed. Same
+    // transient (not-persisted) lifecycle as every other timer here.
+    static CHAINS_PRICE_TIMER_ID: std::cell::Cell<Option<ic_cdk_timers::TimerId>> =
+        const { std::cell::Cell::new(None) };
 }
 
 fn register_xrc_fetch_timer() {
@@ -474,6 +478,27 @@ fn register_observer_timer() {
     });
 }
 
+/// De-scaffold pass (2026-08-20): register the XRC-sourced chains price
+/// timer. 300s cadence, matching the rest of the protocol's XRC polling
+/// (`xrc::FETCHING_ICP_RATE_INTERVAL`, `xrc::DEFAULT_COLLATERAL_PRICE_FETCH_SECS`).
+/// No settable interval: unlike the ICP/collateral price timers this one has
+/// no operator-facing tuning knob (yet) since it's gated to zero cost until a
+/// chain is actually configured; a fixed cadence keeps this PR from touching
+/// `State`'s persisted shape at all. Clears + re-registers in place, same as
+/// every other timer here, so a repeated `setup_timers()` call (upgrade)
+/// never leaks a duplicate interval timer.
+fn register_chains_price_timer() {
+    CHAINS_PRICE_TIMER_ID.with(|cell| {
+        if let Some(old) = cell.get() {
+            ic_cdk_timers::clear_timer(old);
+        }
+        let new_id = ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(300), || {
+            ic_cdk::spawn(rumi_protocol_backend::xrc::fetch_chains_prices())
+        });
+        cell.set(Some(new_id));
+    });
+}
+
 fn setup_timers() {
     // ── Immediate price fetch (fire on the very next execution round) ───────
     // Prices are ephemeral and not stored as events, so after an upgrade
@@ -561,6 +586,11 @@ fn setup_timers() {
     // `set_chain_interest_tick_interval_secs`. No-op when no EVM chain is
     // registered, so it is safe to register on staging before any chain exists.
     register_chain_interest_timer();
+    // De-scaffold pass (2026-08-20): XRC-sourced chains price feed. The
+    // gate inside `fetch_chains_prices` (chains registered AND carrying a
+    // liquidation config row) makes this a no-op, zero-XRC-call timer on
+    // any canister with no chain configured — safe to register everywhere.
+    register_chains_price_timer();
 }
 
 /// M2 anti-spam backstop: hourly GC of stale `AwaitingDeposit` chain vaults
