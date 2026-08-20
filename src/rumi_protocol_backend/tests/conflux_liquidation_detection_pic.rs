@@ -664,15 +664,18 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
     let _ = update_dev(&pic, backend, "set_settlement_tick_interval_secs", Encode!(&31_536_000u64).unwrap());
 
     // ── Drop the price to $0.08 => CR ~112% < 133% (liquidatable) ────────────
-    // Security review follow-up (F2): reordered to run BEFORE
-    // set_chain_liquidation_config below (harmless either way for the
-    // developer caller this suite uses: once a chain_liquidation_configs row
-    // is present for a registered chain, the chain is XRC-managed and
-    // set_manual_collateral_price rejects a PUSHER write for that (chain,
-    // symbol) pair, to avoid racing the automatic XRC price timer; the
-    // developer keeps a manual override). These two setup calls are
-    // otherwise independent, so reordering them reaches the identical end
-    // state.
+    // Security review follow-up (F2): this MUST run BEFORE
+    // set_chain_liquidation_config below, and the order is load-bearing, not
+    // cosmetic. Once a chain_liquidation_configs row is present for a
+    // registered chain, that (chain, symbol) pair is XRC-managed and the
+    // automatic XRC price timer is its SOLE writer: set_manual_collateral_price
+    // then rejects EVERY caller, the narrowly-scoped price pusher and the
+    // developer alike. There is no developer exemption. So the price is set
+    // here, while the chain is not yet XRC-managed, and the config row is
+    // staged after. To move a price AFTER staging the row, the fixture has to
+    // use the operator recovery loop instead: disable_chain (which unmanages
+    // the pair and stops the timer for it), rebaseline, then enable_chain, as
+    // `rebaseline_price_via_disable_enable` above does.
     script_factory_pair_sanity(&pic, mock, VALID_EVM_ADDR);
     decode_result(
         update_dev(
