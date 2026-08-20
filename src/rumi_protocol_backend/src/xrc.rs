@@ -6,7 +6,7 @@ use crate::Decimal;
 use crate::Mode;
 use candid::Principal;
 use ic_canister_log::log;
-use ic_xrc_types::GetExchangeRateResult;
+use ic_xrc_types::{Asset, AssetClass, GetExchangeRateRequest, GetExchangeRateResult};
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use rust_decimal_macros::dec;
 use std::time::Duration;
@@ -702,6 +702,508 @@ pub async fn ensure_stable_not_depegged(
     }
 }
 
+// ─── De-scaffold pass (2026-08-20): XRC-sourced chains-rail price feed ───────
+//
+// The chains-liquidation rail (chains/mod.rs) needs a live collateral price
+// for each configured chain, the same way every ICP-native collateral does.
+// Rather than reinvent price fetching, this reuses the existing XRC
+// `PriceSource::Xrc` pattern (`management.rs`) and the source-floor gate
+// (`xrc_metadata_meets_source_floor` above), writing accepted prices through
+// `MultiChainState::set_manual_price`, the SAME internal path
+// `set_manual_collateral_price` (main.rs) uses, so the existing fail-closed
+// staleness gate (`chains::liquidation::fresh_chain_price_e8`) needs no
+// changes at all.
+//
+// CYCLE-NEUTRALITY (the whole point of this section): the work set is
+// derived from state, not from a fixed chain list. A chain only enters the
+// set when it is BOTH (a) registered (`ChainStatus::Registered`) AND (b) has
+// an operator-set liquidation config row (`chain_liquidation_configs`). On
+// today's prod state neither condition holds for any chain, so
+// `chains_needing_price_feed` returns empty and `fetch_chains_prices` (below)
+// returns before making a single XRC call.
+// `chains_price_feed_tests::empty_on_default_state_zero_xrc_calls_on_prod_today`
+// pins this directly; every other XRC-call site in this file already proves
+// its own gate is a synchronous, pre-spawn check (see
+// `should_fetch_collateral_price` above) and `fetch_chains_prices` follows
+// the identical shape: read the gate, and only THEN loop.
+use crate::chains::config::ChainId;
+
+/// Security review follow-up (F2): whether `chain` is currently
+/// "XRC-managed": registered (`MultiChainState::chain_is_registered`, the
+/// single shared status predicate F10 also reads) AND carrying a
+/// `chain_liquidation_configs` row (regardless of that row's `enabled` flag:
+/// staging a config while disabled should still keep the price warm so
+/// flipping `enabled` later doesn't start on a stale/missing price, AND
+/// still claims the pair so no manual writer can race it).
+///
+/// When true, the XRC timer is AUTHORITATIVE and the SOLE writer of
+/// `(chain, native_symbol)`'s manual price: `set_manual_collateral_price`
+/// (main.rs) rejects a write for an XRC-managed pair from EVERY caller, the
+/// narrowly-scoped price pusher and the developer alike. The race being
+/// closed is writer-vs-writer on one `set_manual_price` cell, not
+/// operator-vs-operator, so exempting the trusted operator would not have
+/// closed it: the timer fires from its own message on its own schedule with
+/// no ordering relationship to an ingress call.
+///
+/// Manual control is sequenced rather than removed. Stop procedure:
+/// `disable_chain` (flips `chain_is_registered` to false, which already makes
+/// this predicate false), rebaseline, verify, then `enable_chain` to hand
+/// authority back. There is currently no standalone endpoint to remove just a
+/// `chain_liquidation_configs` row; the only alternative is `delete_chain`
+/// (requires zero supply and zero vaults for the chain) followed by a fresh
+/// `register_chain`.
+pub fn chain_is_xrc_managed(state: &State, chain: ChainId) -> bool {
+    state.multi_chain.chain_is_registered(chain)
+        && state.multi_chain.chain_liquidation_configs.contains_key(&chain)
+}
+
+/// The exact-pair form `set_manual_collateral_price` (main.rs) reads: true
+/// iff `chain` is XRC-managed AND `symbol` is that chain's native symbol,
+/// the only pair the timer ever actually writes. A manual push to the SAME
+/// chain under a DIFFERENT symbol string does not race the timer at all,
+/// since `MultiChainState::manual_prices` is keyed by the full
+/// `(ChainId, String)` tuple.
+pub fn pair_is_xrc_managed(state: &State, chain: ChainId, symbol: &str) -> bool {
+    chain_is_xrc_managed(state, chain)
+        && crate::chains::evm::evm_chain_config(chain)
+            .map(|c| c.native_symbol == symbol)
+            .unwrap_or(false)
+}
+
+/// Pure gate: which `(ChainId, native_symbol)` pairs currently need a price.
+/// A chain qualifies exactly when `chain_is_xrc_managed` is true. The symbol
+/// comes from the compile-time `evm_chain_config` (the same table
+/// `chains/evm/mod.rs` uses for `native_symbol`); a chain with no EVM config
+/// (e.g. a future non-EVM chain, or an unknown id) is skipped rather than
+/// guessed at.
+pub fn chains_needing_price_feed(state: &State) -> Vec<(ChainId, String)> {
+    state
+        .multi_chain
+        .chain_configs
+        .keys()
+        .filter(|id| chain_is_xrc_managed(state, **id))
+        .filter_map(|id| {
+            crate::chains::evm::evm_chain_config(*id).map(|c| (*id, c.native_symbol.to_string()))
+        })
+        .collect()
+}
+
+/// Verdict of the chains price-writer admission gate
+/// (`chains_price_sample_is_acceptable`). Every non-`Accept*` variant means
+/// NOTHING is written: neither the price nor its timestamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChainsPriceVerdict {
+    /// The pair has no stored price yet: this sample establishes the baseline.
+    AcceptFirstSample,
+    /// Strictly newer at the source AND within the sanity band: accept.
+    Accept,
+    /// The candidate is unusable on its face (zero price).
+    RejectInvalid,
+    /// The candidate's SOURCE timestamp is not strictly greater than the stored
+    /// one: a repeat or a delayed/out-of-order result.
+    RejectNotNewer,
+    /// The candidate is outside `PRICE_SANITY_BAND_RATIO` of the stored price.
+    RejectOutOfBand,
+}
+
+impl ChainsPriceVerdict {
+    pub fn accepted(self) -> bool {
+        matches!(self, Self::AcceptFirstSample | Self::Accept)
+    }
+}
+
+/// Accepted audit LIQ-007 (price-outlier band) + source-time monotonicity for
+/// the AUTOMATIC chains XRC writer.
+///
+/// The automatic writer targets exactly the cells the manual endpoint targets
+/// (`manual_prices` + `manual_price_set_at_ns`), so without this gate it would
+/// have been the one price path in the canister that could move a collateral
+/// price arbitrarily far in one sample. LIQ-007 was accepted for the collateral
+/// XRC path precisely to stop that; a new writer must not be the way around it.
+///
+/// Two independent rules, both read from the existing pair of maps, so this adds
+/// NO persisted field:
+///
+///  1. SOURCE-TIME MONOTONICITY. `stored.1` holds the SOURCE timestamp of the
+///     last accepted sample (the writer stamps `ExchangeRate.timestamp`, not
+///     `now`), so a candidate must be strictly newer at the source. This is
+///     what stops a delayed result from looking fresh: IC calls can resolve out
+///     of order, and stamping arrival time would let a rate observed at T-10min
+///     land after one observed at T-1min and reset the staleness clock as if it
+///     were current. Freshness downstream (`gated_chain_price_e8`) then measures
+///     the age of the OBSERVATION, which is the quantity liquidation safety
+///     actually cares about, rather than the age of our copy of it.
+///  2. PRICE SANITY BAND. The candidate must sit within
+///     `PRICE_SANITY_BAND_RATIO` of the last accepted price, applied with the
+///     exact `PRICE_SANITY_BAND_NUM/PRICE_SANITY_BAND_DEN` rational in checked
+///     `u128` cross-multiplication (no floating point, no rounding slack):
+///     `cand/stored >= NUM/DEN` and `cand/stored <= DEN/NUM`.
+///
+/// Deliberately STRICTER than `State::check_price_sanity_band`: there is no
+/// `PRICE_OUTLIER_CONFIRM_COUNT` escalation here, so a sustained out-of-band
+/// move is NOT eventually auto-accepted. It stays rejected, the stored price
+/// ages out, and `gated_chain_price_e8` fails closed for the chain. Recovery is
+/// the deliberate operator sequence: `disable_chain` (which unmanages the pair),
+/// `set_manual_collateral_price` to rebaseline, verify the new price, then
+/// `enable_chain`. That is the correct trade for a rail whose price feeds
+/// liquidations: a genuine 40% move is rare and an operator should look at it;
+/// a fabricated one must never auto-confirm itself.
+///
+/// The first sample for a pair is accepted unconditionally (nothing to compare
+/// against), matching LIQ-007's "no stored price => accept" opening case. A
+/// stored price of zero (not reachable today: the manual endpoint rejects zero
+/// and `xrc_rate_to_price_e8` only yields non-zero) is treated as no usable
+/// baseline for the BAND, exactly as LIQ-007 treats it, while the monotonicity
+/// rule still applies.
+pub fn chains_price_sample_is_acceptable(
+    stored: Option<(u64, u64)>,
+    candidate_price_e8: u64,
+    candidate_source_ts_ns: u64,
+) -> ChainsPriceVerdict {
+    if candidate_price_e8 == 0 {
+        return ChainsPriceVerdict::RejectInvalid;
+    }
+    let Some((stored_price_e8, stored_source_ts_ns)) = stored else {
+        return ChainsPriceVerdict::AcceptFirstSample;
+    };
+    if candidate_source_ts_ns <= stored_source_ts_ns {
+        return ChainsPriceVerdict::RejectNotNewer;
+    }
+    if stored_price_e8 == 0 {
+        return ChainsPriceVerdict::Accept;
+    }
+    if price_is_within_sanity_band(stored_price_e8, candidate_price_e8) {
+        ChainsPriceVerdict::Accept
+    } else {
+        ChainsPriceVerdict::RejectOutOfBand
+    }
+}
+
+/// `PRICE_SANITY_BAND_RATIO <= candidate/stored <= 1/PRICE_SANITY_BAND_RATIO`,
+/// evaluated exactly in `u128` via cross-multiplication so no e8 price is ever
+/// converted to `f64`. Both operands are `u64`, so `u64 * 10` cannot overflow
+/// `u128` and the `checked_mul`s below can only fail if the constants are
+/// changed to something absurd, in which case the sample is REJECTED, the
+/// fail-closed direction.
+fn price_is_within_sanity_band(stored_price_e8: u64, candidate_price_e8: u64) -> bool {
+    use crate::state::{PRICE_SANITY_BAND_DEN, PRICE_SANITY_BAND_NUM};
+    let stored = stored_price_e8 as u128;
+    let candidate = candidate_price_e8 as u128;
+    // Lower edge: candidate/stored >= NUM/DEN  <=>  candidate*DEN >= stored*NUM
+    let Some(lower_lhs) = candidate.checked_mul(PRICE_SANITY_BAND_DEN) else {
+        return false;
+    };
+    let Some(lower_rhs) = stored.checked_mul(PRICE_SANITY_BAND_NUM) else {
+        return false;
+    };
+    // Upper edge: candidate/stored <= DEN/NUM  <=>  candidate*NUM <= stored*DEN
+    let Some(upper_lhs) = candidate.checked_mul(PRICE_SANITY_BAND_NUM) else {
+        return false;
+    };
+    let Some(upper_rhs) = stored.checked_mul(PRICE_SANITY_BAND_DEN) else {
+        return false;
+    };
+    lower_lhs >= lower_rhs && upper_lhs <= upper_rhs
+}
+
+/// Convert an XRC `ExchangeRate.timestamp` (SECONDS) to nanoseconds, in checked
+/// arithmetic. A value large enough to overflow `u64` nanoseconds (roughly year
+/// 2554 and beyond) is rejected rather than wrapped into a small number, which
+/// would otherwise read as an ancient timestamp and pass the monotonicity rule
+/// backwards.
+fn xrc_timestamp_secs_to_ns(timestamp_secs: u64) -> Option<u64> {
+    timestamp_secs.checked_mul(crate::SEC_NANOS)
+}
+
+/// XRC cycles cost per `get_exchange_rate` call. Matches the collateral-price
+/// path (`management.rs::fetch_collateral_price`'s `XRC_CALL_COST_CYCLES`).
+const CHAINS_XRC_CALL_COST_CYCLES: u64 = 1_000_000_000;
+
+/// Margin (seconds) subtracted from `now` when asking XRC for a rate, so the
+/// request doesn't land in the future relative to the CEX aggregation window.
+/// Matches `management.rs`'s `XRC_MARGIN_SEC`.
+const CHAINS_XRC_MARGIN_SEC: u64 = 60;
+
+/// Fetch a fresh USD price for every `(chain, symbol)` currently returned by
+/// `chains_needing_price_feed` and write accepted ones through
+/// `MultiChainState::set_manual_price` (the same internal path
+/// `set_manual_collateral_price` uses).
+///
+/// CYCLE-NEUTRALITY: the gate is read synchronously, before any `await` or
+/// XRC call. An empty work set (today's prod state) returns immediately
+/// having made zero XRC calls (see `chains_needing_price_feed` and its
+/// `empty_on_default_state_zero_xrc_calls_on_prod_today` test above).
+pub async fn fetch_chains_prices() {
+    let work = read_state(chains_needing_price_feed);
+    if work.is_empty() {
+        return;
+    }
+    for (chain, symbol) in work {
+        fetch_one_chain_price(chain, symbol).await;
+    }
+}
+
+/// Bound accepted for the XRC response's `metadata.decimals` field. XRC
+/// itself always reports 8; this is generous headroom, not a tight
+/// assumption about XRC's actual behavior. `decimals` is UNTRUSTED input (it
+/// comes from the XRC canister's response), and `10^19` already exceeds
+/// `u64::MAX`, so any value above this bound is rejected by
+/// `xrc_rate_to_price_e8` before it can overflow anything.
+const MAX_ACCEPTED_XRC_DECIMALS: u32 = 18;
+
+/// Convert an XRC `(rate, decimals)` pair to a USD e8 price, entirely in
+/// checked integer arithmetic (no `f64` anywhere in this conversion).
+/// `price_e8 = rate * 10^8 / 10^decimals`, computed in `u128` (comfortably
+/// wide enough that `u64::MAX * 10^8` cannot overflow it) and narrowed back
+/// to `u64` only at the end. Returns `None` (reject, caller logs and skips)
+/// when: `decimals` exceeds `MAX_ACCEPTED_XRC_DECIMALS`; `rate` is zero; any
+/// intermediate `checked_*` step fails; or the final value does not fit
+/// `u64` (a huge `rate` at a small `decimals`, e.g. `decimals == 0`).
+fn xrc_rate_to_price_e8(rate: u64, decimals: u32) -> Option<u64> {
+    if decimals > MAX_ACCEPTED_XRC_DECIMALS || rate == 0 {
+        return None;
+    }
+    let scale_numerator: u128 = 10u128.checked_pow(8)?;
+    let scale_denominator: u128 = 10u128.checked_pow(decimals)?;
+    let price_e8_u128 = (rate as u128)
+        .checked_mul(scale_numerator)?
+        .checked_div(scale_denominator)?;
+    u64::try_from(price_e8_u128).ok().filter(|&p| p > 0)
+}
+
+/// Fetch + apply a single chain's price. Best-effort, mirroring
+/// `fetch_collateral_price`: any failure (call error, XRC error, thin
+/// source count, an out-of-bounds/overflowing rate-decimals pair, an
+/// unrepresentable source timestamp) logs and returns WITHOUT writing
+/// anything. The existing fail-closed staleness gate
+/// (`chains::liquidation::fresh_chain_price_e8`) is what actually protects
+/// liquidations from a stale or missing price; this function never needs to
+/// touch it. No retries beyond the next timer tick.
+///
+/// A sample that survives all of the above still has to clear
+/// `chains_price_sample_is_acceptable` (source-time monotonicity + the accepted
+/// LIQ-007 sanity band) and a re-check that the pair is STILL XRC-managed, both
+/// inside the same `mutate_state` closure as the write itself. Everything the
+/// decision reads and everything it writes is therefore one atomic step, with no
+/// `.await` in between.
+async fn fetch_one_chain_price(chain: ChainId, symbol: String) {
+    let xrc_principal = read_state(|s| s.xrc_principal);
+    let timestamp_sec = ic_cdk::api::time() / crate::SEC_NANOS - CHAINS_XRC_MARGIN_SEC;
+    let args = GetExchangeRateRequest {
+        base_asset: Asset {
+            symbol: symbol.clone(),
+            class: AssetClass::Cryptocurrency,
+        },
+        quote_asset: Asset {
+            symbol: "USD".to_string(),
+            class: AssetClass::FiatCurrency,
+        },
+        timestamp: Some(timestamp_sec),
+    };
+
+    let res: Result<(GetExchangeRateResult,), _> = ic_cdk::api::call::call_with_payment(
+        xrc_principal,
+        "get_exchange_rate",
+        (args,),
+        CHAINS_XRC_CALL_COST_CYCLES,
+    )
+    .await;
+
+    match res {
+        Ok((GetExchangeRateResult::Ok(rate_result),)) => {
+            // Wave-14a CDP-14-style source-floor gate, applied identically
+            // to the collateral XRC path: a thin aggregation is cheaper to
+            // manipulate than one drawn from multiple venues.
+            let num_sources = rate_result.metadata.base_asset_num_received_rates as u32;
+            let floor = read_state(|s| s.min_xrc_sources_used);
+            if !xrc_metadata_meets_source_floor(num_sources, floor) {
+                log!(
+                    TRACE_XRC,
+                    "[fetch_chains_prices] rejecting {:?}/{} rate {}: only {} XRC sources (floor {})",
+                    chain,
+                    symbol,
+                    rate_result.rate,
+                    num_sources,
+                    floor
+                );
+                return;
+            }
+
+            // Security review follow-up (F9): `rate_result.metadata.decimals` is
+            // UNTRUSTED input (it comes straight off the XRC canister's
+            // response, not our own state). The old code computed
+            // `10_u64.pow(decimals)` directly, which overflows u64 for any
+            // decimals >= 20 (10^20 > u64::MAX): a trap in a debug/
+            // overflow-checked build, or silent wraparound (a nonsense
+            // divisor feeding a garbage price) in a release build.
+            // `xrc_rate_to_price_e8` below replaces that with bounded,
+            // checked-arithmetic-only integer math (no f64 anywhere in this
+            // conversion): out-of-range or overflowing input is rejected
+            // (log-and-skip, nothing written), the same fail-closed posture
+            // as every other rejection branch in this function.
+            let Some(price_e8) = xrc_rate_to_price_e8(rate_result.rate, rate_result.metadata.decimals)
+            else {
+                log!(
+                    TRACE_XRC,
+                    "[fetch_chains_prices] {:?}/{} rejecting rate {} (decimals {}): out of bounds or would overflow",
+                    chain,
+                    symbol,
+                    rate_result.rate,
+                    rate_result.metadata.decimals
+                );
+                return;
+            };
+
+            // SOURCE time, not arrival time. `ExchangeRate.timestamp` is the
+            // instant the rate describes; stamping that (rather than
+            // `ic_cdk::api::time()`) is what keeps a delayed or out-of-order
+            // result from resetting the downstream staleness clock as if it
+            // were current, and is the value the monotonicity rule compares.
+            let Some(sample_ts_ns) = xrc_timestamp_secs_to_ns(rate_result.timestamp) else {
+                log!(
+                    TRACE_XRC,
+                    "[fetch_chains_prices] {:?}/{} rejecting sample: source timestamp {} s does not fit u64 ns",
+                    chain,
+                    symbol,
+                    rate_result.timestamp
+                );
+                return;
+            };
+
+            // The synchronous write, and every check it depends on, happen in
+            // ONE `mutate_state` closure. The XRC call above is an `.await`, so
+            // the pair could have been unmanaged mid-flight (`disable_chain`, or
+            // a `delete_chain` that purged the price maps). Re-reading
+            // `pair_is_xrc_managed` here, against the state we are about to
+            // write, is what stops this fetch from landing an orphan or stale
+            // value on a pair the operator has already taken manual control of
+            // which would silently overwrite an emergency rebaseline. The
+            // pre-`await` gate in `fetch_chains_prices` is a cycle guard, not a
+            // write guard; this is the write guard.
+            let outcome = mutate_state(|s| {
+                if !pair_is_xrc_managed(s, chain, &symbol) {
+                    return None;
+                }
+                let stored = s.multi_chain.get_manual_price(chain, &symbol);
+                let verdict = chains_price_sample_is_acceptable(stored, price_e8, sample_ts_ns);
+                if verdict.accepted() {
+                    // Rejection deliberately writes NOTHING: leaving
+                    // `manual_price_set_at_ns` untouched is what lets the stored
+                    // price age out and `gated_chain_price_e8` fail closed. A
+                    // rejected sample that still refreshed the timestamp would
+                    // keep a frozen price looking fresh forever.
+                    s.multi_chain
+                        .set_manual_price(chain, symbol.clone(), price_e8, sample_ts_ns);
+                }
+                Some((verdict, stored))
+            });
+
+            match outcome {
+                None => log!(
+                    TRACE_XRC,
+                    "[fetch_chains_prices] {:?}/{} discarding price_e8={}: pair became unmanaged during the XRC call",
+                    chain,
+                    symbol,
+                    price_e8
+                ),
+                Some((verdict, stored)) => log!(
+                    TRACE_XRC,
+                    "[fetch_chains_prices] {:?}/{} price_e8={} source_ts_ns={} verdict={:?} stored={:?}",
+                    chain,
+                    symbol,
+                    price_e8,
+                    sample_ts_ns,
+                    verdict,
+                    stored
+                ),
+            }
+        }
+        Ok((GetExchangeRateResult::Err(error),)) => {
+            log!(
+                TRACE_XRC,
+                "[fetch_chains_prices] XRC error for {:?}/{}: {:?}",
+                chain,
+                symbol,
+                error
+            );
+        }
+        Err((code, msg)) => {
+            log!(
+                TRACE_XRC,
+                "[fetch_chains_prices] call error for {:?}/{}: {:?} {}",
+                chain,
+                symbol,
+                code,
+                msg
+            );
+        }
+    }
+}
+
+/// Security review follow-up (F9): `xrc_rate_to_price_e8` is the checked,
+/// overflow-proof replacement for the raw `10_u64.pow(decimals)` conversion
+/// that previously trusted the XRC response's `decimals` field directly.
+#[cfg(test)]
+mod xrc_rate_to_price_e8_tests {
+    use super::xrc_rate_to_price_e8;
+
+    #[test]
+    fn decimals_18_computes_the_expected_price() {
+        // rate = 1_000_000_000_000_000_000 (1.0 at 18 decimals) -> $1.00 at e8.
+        assert_eq!(xrc_rate_to_price_e8(1_000_000_000_000_000_000, 18), Some(100_000_000));
+        // A plausible CFX/USD-style rate: $0.15 at 18 decimals.
+        assert_eq!(xrc_rate_to_price_e8(150_000_000_000_000_000, 18), Some(15_000_000));
+    }
+
+    #[test]
+    fn the_common_xrc_case_decimals_8_is_unaffected() {
+        // XRC itself always reports decimals=8; rate is already e8-scaled.
+        assert_eq!(xrc_rate_to_price_e8(123_456_789, 8), Some(123_456_789));
+    }
+
+    #[test]
+    fn decimals_above_18_is_rejected() {
+        assert_eq!(xrc_rate_to_price_e8(1, 19), None);
+        assert_eq!(xrc_rate_to_price_e8(1, 20), None);
+        assert_eq!(xrc_rate_to_price_e8(1, u32::MAX), None, "must reject, not overflow, an absurd decimals value");
+    }
+
+    #[test]
+    fn zero_rate_is_rejected() {
+        assert_eq!(xrc_rate_to_price_e8(0, 8), None);
+    }
+
+    #[test]
+    fn a_huge_rate_at_small_decimals_that_would_overflow_u64_is_rejected() {
+        // decimals=0 is IN the accepted 0..=18 range, but u64::MAX * 10^8 does
+        // not fit back into a u64. This must be caught by the final
+        // `u64::try_from` narrowing, not silently wrapped or trapped.
+        assert_eq!(xrc_rate_to_price_e8(u64::MAX, 0), None);
+        assert_eq!(xrc_rate_to_price_e8(u64::MAX, 1), None);
+    }
+
+    #[test]
+    fn max_rate_at_max_accepted_decimals_computes_exactly_with_no_overflow() {
+        // The widest legal input: rate = u64::MAX, decimals = 18 (the bound
+        // itself). price_e8 = u64::MAX * 10^8 / 10^18 = u64::MAX / 10^10
+        // (floor division), which comfortably fits u64, proving the u128
+        // intermediate (u64::MAX * 10^8 ~= 1.84e27, far inside u128's
+        // ~3.4e38 ceiling) never overflows, and the result is exact.
+        let expected: u128 = (u64::MAX as u128) / 10_000_000_000u128;
+        assert_eq!(
+            xrc_rate_to_price_e8(u64::MAX, 18),
+            Some(u64::try_from(expected).unwrap())
+        );
+        assert_eq!(xrc_rate_to_price_e8(u64::MAX, 18), Some(1_844_674_407));
+    }
+
+    #[test]
+    fn decimals_zero_means_rate_is_already_whole_units() {
+        // $5 whole-unit rate at decimals=0 -> $5.00 at e8.
+        assert_eq!(xrc_rate_to_price_e8(5, 0), Some(500_000_000));
+    }
+}
+
 #[cfg(test)]
 mod cycle_cadence_tests {
     use super::{
@@ -825,5 +1327,462 @@ mod cycle_cadence_tests {
             CollateralStatus::Active
         ));
         assert!(should_fetch_collateral_price(&state, &collateral));
+    }
+}
+
+#[cfg(test)]
+mod chains_price_feed_tests {
+    use super::chains_needing_price_feed;
+    use crate::chains::config::{ChainConfigV3, ChainId, ChainStatus, GasStrategy};
+    use crate::chains::liquidation_config::{ChainLiquidationConfigV1, DexKind};
+    use crate::state::State;
+
+    const CFX_TESTNET: ChainId = ChainId(71);
+    const CFX_MAINNET: ChainId = ChainId(1030);
+    // Not present in `evm_chain_config` (chains/evm/mod.rs): used to prove an
+    // unknown/non-EVM chain id is skipped rather than guessed at.
+    const UNKNOWN_CHAIN: ChainId = ChainId(999);
+
+    fn registered_chain_config(id: ChainId) -> ChainConfigV3 {
+        ChainConfigV3 {
+            chain_id: id,
+            display_name: "test chain".to_string(),
+            rpc_endpoints: vec!["https://example.invalid".to_string()],
+            finality_depth: 400,
+            gas_strategy: GasStrategy::EvmEip1559 {
+                max_priority_fee_gwei: 1,
+                max_fee_gwei_ceiling: 100,
+            },
+            chain_native_decimals: 18,
+            registered_at_ns: 0,
+            status: ChainStatus::Registered,
+            burn_watch_poll_enabled: false,
+            min_quorum_providers: None,
+        }
+    }
+
+    // `enabled: false` on purpose: a staged-but-disabled config row must
+    // still count for the price feed (see `chains_needing_price_feed` doc).
+    fn liquidation_config_row(enabled: bool) -> ChainLiquidationConfigV1 {
+        ChainLiquidationConfigV1 {
+            dex: DexKind::UniswapV2,
+            router: String::new(),
+            factory: String::new(),
+            pair: String::new(),
+            collateral_token: String::new(),
+            settle_stable_token: String::new(),
+            slippage_cap_bps: 250,
+            restore_target_cr_e4: 15_500,
+            enabled,
+            max_swap_value_e8s: 0,
+            max_price_age_ns: 0,
+            max_dex_oracle_divergence_bps: 0,
+            fee_bps: 0,
+            settle_stable_decimals: 0,
+            deadline_secs: 0,
+        }
+    }
+
+    #[test]
+    fn empty_on_default_state_zero_xrc_calls_on_prod_today() {
+        // The cycle-neutrality guarantee: on today's prod state (no chain
+        // registered, no liquidation config row), the work set MUST be
+        // empty. `fetch_chains_prices` reads exactly this gate before
+        // making any XRC call, so this test pins the "no configured chains
+        // => no XRC calls" requirement at the pure-function level.
+        let state = State::default();
+        assert!(chains_needing_price_feed(&state).is_empty());
+    }
+
+    #[test]
+    fn registered_chain_without_liquidation_config_row_is_excluded() {
+        let mut state = State::default();
+        state
+            .multi_chain
+            .chain_configs
+            .insert(CFX_MAINNET, registered_chain_config(CFX_MAINNET));
+        // No `chain_liquidation_configs` row inserted.
+        assert!(
+            chains_needing_price_feed(&state).is_empty(),
+            "a registered chain with no liquidation config row must not burn XRC cycles"
+        );
+    }
+
+    #[test]
+    fn liquidation_config_row_without_registration_is_excluded() {
+        let mut state = State::default();
+        state
+            .multi_chain
+            .chain_liquidation_configs
+            .insert(CFX_MAINNET, liquidation_config_row(true));
+        // No `chain_configs` entry inserted at all (never registered).
+        assert!(chains_needing_price_feed(&state).is_empty());
+    }
+
+    #[test]
+    fn disabled_chain_status_is_excluded_even_with_config_row() {
+        let mut state = State::default();
+        let mut cfg = registered_chain_config(CFX_MAINNET);
+        cfg.status = ChainStatus::Disabled;
+        state.multi_chain.chain_configs.insert(CFX_MAINNET, cfg);
+        state
+            .multi_chain
+            .chain_liquidation_configs
+            .insert(CFX_MAINNET, liquidation_config_row(true));
+        assert!(chains_needing_price_feed(&state).is_empty());
+    }
+
+    #[test]
+    fn registered_plus_configured_chain_is_included_with_its_native_symbol() {
+        let mut state = State::default();
+        state
+            .multi_chain
+            .chain_configs
+            .insert(CFX_MAINNET, registered_chain_config(CFX_MAINNET));
+        state
+            .multi_chain
+            .chain_liquidation_configs
+            .insert(CFX_MAINNET, liquidation_config_row(true));
+        assert_eq!(
+            chains_needing_price_feed(&state),
+            vec![(CFX_MAINNET, "CFX".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_disabled_but_staged_liquidation_config_row_still_counts() {
+        // enabled=false: an operator staging the DEX wiring before flipping
+        // the kill switch should still keep the price warm.
+        let mut state = State::default();
+        state
+            .multi_chain
+            .chain_configs
+            .insert(CFX_MAINNET, registered_chain_config(CFX_MAINNET));
+        state
+            .multi_chain
+            .chain_liquidation_configs
+            .insert(CFX_MAINNET, liquidation_config_row(false));
+        assert_eq!(
+            chains_needing_price_feed(&state),
+            vec![(CFX_MAINNET, "CFX".to_string())]
+        );
+    }
+
+    #[test]
+    fn chain_unknown_to_evm_chain_config_is_excluded() {
+        let mut state = State::default();
+        state
+            .multi_chain
+            .chain_configs
+            .insert(UNKNOWN_CHAIN, registered_chain_config(UNKNOWN_CHAIN));
+        state
+            .multi_chain
+            .chain_liquidation_configs
+            .insert(UNKNOWN_CHAIN, liquidation_config_row(true));
+        assert!(
+            chains_needing_price_feed(&state).is_empty(),
+            "a chain with no compile-time EVM config must not be guessed at"
+        );
+    }
+
+    #[test]
+    fn multiple_registered_configured_chains_are_all_included() {
+        let mut state = State::default();
+        for id in [CFX_TESTNET, CFX_MAINNET] {
+            state
+                .multi_chain
+                .chain_configs
+                .insert(id, registered_chain_config(id));
+            state
+                .multi_chain
+                .chain_liquidation_configs
+                .insert(id, liquidation_config_row(true));
+        }
+        let mut work = chains_needing_price_feed(&state);
+        work.sort();
+        assert_eq!(
+            work,
+            vec![
+                (CFX_TESTNET, "CFX".to_string()),
+                (CFX_MAINNET, "CFX".to_string()),
+            ]
+        );
+    }
+
+    // ── The automatic writer's admission gate ────────────────────────────────
+    // Accepted audit LIQ-007 (price-outlier band) + source-time monotonicity,
+    // applied to the ONE cell pair the automatic writer shares with the manual
+    // endpoint. Pure: no PocketIC, no state, no clock.
+
+    use super::{
+        chains_price_sample_is_acceptable, pair_is_xrc_managed, xrc_timestamp_secs_to_ns,
+        ChainsPriceVerdict,
+    };
+
+    /// $0.15 CFX at e8, the price every fixture in this repo uses.
+    const BASELINE_E8: u64 = 15_000_000;
+    const T1: u64 = 1_700_000_000_000_000_000;
+    const T2: u64 = T1 + 300 * 1_000_000_000;
+
+    #[test]
+    fn the_first_sample_for_a_pair_is_accepted_unconditionally() {
+        // Nothing to compare against: neither rule can be evaluated, so the
+        // sample establishes the baseline (LIQ-007's own opening case).
+        assert_eq!(
+            chains_price_sample_is_acceptable(None, BASELINE_E8, T1),
+            ChainsPriceVerdict::AcceptFirstSample
+        );
+        // Even a wild first value is a baseline, not an outlier.
+        assert_eq!(
+            chains_price_sample_is_acceptable(None, 1, 0),
+            ChainsPriceVerdict::AcceptFirstSample
+        );
+    }
+
+    #[test]
+    fn a_zero_price_is_never_written() {
+        assert_eq!(
+            chains_price_sample_is_acceptable(None, 0, T1),
+            ChainsPriceVerdict::RejectInvalid
+        );
+        assert_eq!(
+            chains_price_sample_is_acceptable(Some((BASELINE_E8, T1)), 0, T2),
+            ChainsPriceVerdict::RejectInvalid
+        );
+    }
+
+    #[test]
+    fn an_equal_or_older_source_timestamp_is_rejected() {
+        let stored = Some((BASELINE_E8, T1));
+        // Equal: a repeat of the sample we already hold. XRC buckets rates by
+        // second, so a second fetch inside the same bucket returns the SAME
+        // timestamp; re-writing it would refresh the staleness clock on an
+        // observation that has not advanced.
+        assert_eq!(
+            chains_price_sample_is_acceptable(stored, BASELINE_E8, T1),
+            ChainsPriceVerdict::RejectNotNewer
+        );
+        // Older: a delayed / out-of-order result. This is the case that must
+        // never be allowed to look fresh.
+        assert_eq!(
+            chains_price_sample_is_acceptable(stored, BASELINE_E8, T1 - 1),
+            ChainsPriceVerdict::RejectNotNewer
+        );
+        // The timestamp rule is checked BEFORE the band, so a stale sample is
+        // rejected as stale even when its price is perfectly in band.
+        assert_eq!(
+            chains_price_sample_is_acceptable(stored, BASELINE_E8 + 1, T1),
+            ChainsPriceVerdict::RejectNotNewer
+        );
+    }
+
+    #[test]
+    fn a_strictly_newer_in_band_sample_is_accepted() {
+        let stored = Some((BASELINE_E8, T1));
+        // Unchanged price, one nanosecond newer at the source.
+        assert_eq!(
+            chains_price_sample_is_acceptable(stored, BASELINE_E8, T1 + 1),
+            ChainsPriceVerdict::Accept
+        );
+        // A 20% drop and a 30% rise both sit inside [0.7, 1/0.7].
+        assert_eq!(
+            chains_price_sample_is_acceptable(stored, 12_000_000, T2),
+            ChainsPriceVerdict::Accept
+        );
+        assert_eq!(
+            chains_price_sample_is_acceptable(stored, 19_500_000, T2),
+            ChainsPriceVerdict::Accept
+        );
+    }
+
+    #[test]
+    fn the_band_edges_are_exact_with_no_floating_point_slack() {
+        let stored = Some((BASELINE_E8, T1));
+        // Lower edge: 0.7 * 15_000_000 == 10_500_000 exactly. ON the edge is IN
+        // band (the collateral gate uses `>=`); one unit below is OUT.
+        assert_eq!(
+            chains_price_sample_is_acceptable(stored, 10_500_000, T2),
+            ChainsPriceVerdict::Accept
+        );
+        assert_eq!(
+            chains_price_sample_is_acceptable(stored, 10_499_999, T2),
+            ChainsPriceVerdict::RejectOutOfBand
+        );
+        // Upper edge: 15_000_000 / 0.7 == 21_428_571.43..., so the largest
+        // accepted integer is 21_428_571 (7 * 21_428_571 <= 10 * 15_000_000)
+        // and 21_428_572 is out.
+        assert_eq!(
+            chains_price_sample_is_acceptable(stored, 21_428_571, T2),
+            ChainsPriceVerdict::Accept
+        );
+        assert_eq!(
+            chains_price_sample_is_acceptable(stored, 21_428_572, T2),
+            ChainsPriceVerdict::RejectOutOfBand
+        );
+    }
+
+    #[test]
+    fn a_high_outlier_is_rejected_and_stays_rejected() {
+        let stored = Some((BASELINE_E8, T1));
+        // A 10x spike.
+        assert_eq!(
+            chains_price_sample_is_acceptable(stored, 150_000_000, T2),
+            ChainsPriceVerdict::RejectOutOfBand
+        );
+        // FAIL-CLOSED, not eventually-consistent: unlike the collateral path,
+        // there is no PRICE_OUTLIER_CONFIRM_COUNT escalation here, so repeating
+        // the SAME out-of-band value at ever-newer timestamps never confirms
+        // it. Recovery is disable -> manual rebaseline -> verify -> enable.
+        for tick in 1..=10u64 {
+            assert_eq!(
+                chains_price_sample_is_acceptable(
+                    stored,
+                    150_000_000,
+                    T2 + tick * 300 * 1_000_000_000
+                ),
+                ChainsPriceVerdict::RejectOutOfBand,
+                "a sustained out-of-band move must never auto-confirm (tick {tick})"
+            );
+        }
+    }
+
+    #[test]
+    fn a_low_outlier_is_rejected() {
+        let stored = Some((BASELINE_E8, T1));
+        // A 90% crash: exactly the shape that would mass-liquidate the chain's
+        // vaults if it were written.
+        assert_eq!(
+            chains_price_sample_is_acceptable(stored, 1_500_000, T2),
+            ChainsPriceVerdict::RejectOutOfBand
+        );
+        // And the degenerate 1-unit price.
+        assert_eq!(
+            chains_price_sample_is_acceptable(stored, 1, T2),
+            ChainsPriceVerdict::RejectOutOfBand
+        );
+    }
+
+    #[test]
+    fn a_pre_existing_price_with_no_recorded_timestamp_still_gets_the_band() {
+        // `get_manual_price` reports set_at_ns = 0 for a price written before
+        // the V5 timestamp map existed. Any real sample is newer than 0, so the
+        // monotonicity rule passes and the BAND is what governs, so the pair
+        // self-heals onto source time without a free pass through LIQ-007.
+        let stored = Some((BASELINE_E8, 0));
+        assert_eq!(
+            chains_price_sample_is_acceptable(stored, 14_000_000, T1),
+            ChainsPriceVerdict::Accept
+        );
+        assert_eq!(
+            chains_price_sample_is_acceptable(stored, 150_000_000, T1),
+            ChainsPriceVerdict::RejectOutOfBand
+        );
+    }
+
+    #[test]
+    fn a_stored_zero_price_has_no_usable_baseline_for_the_band() {
+        // Not reachable today (the manual endpoint rejects 0 and
+        // `xrc_rate_to_price_e8` only yields non-zero), but mirror LIQ-007's
+        // "stored <= 0 => accept" rather than dividing by it. The monotonicity
+        // rule still applies.
+        assert_eq!(
+            chains_price_sample_is_acceptable(Some((0, T1)), BASELINE_E8, T2),
+            ChainsPriceVerdict::Accept
+        );
+        assert_eq!(
+            chains_price_sample_is_acceptable(Some((0, T1)), BASELINE_E8, T1),
+            ChainsPriceVerdict::RejectNotNewer
+        );
+    }
+
+    #[test]
+    fn source_timestamp_seconds_convert_to_ns_or_are_rejected() {
+        assert_eq!(xrc_timestamp_secs_to_ns(0), Some(0));
+        assert_eq!(
+            xrc_timestamp_secs_to_ns(1_700_000_000),
+            Some(1_700_000_000_000_000_000)
+        );
+        // Beyond ~year 2554 the ns value does not fit u64. It must be REJECTED,
+        // never wrapped: a wrapped value reads as an ancient timestamp and would
+        // fail the monotonicity rule in the wrong direction forever after.
+        assert_eq!(xrc_timestamp_secs_to_ns(u64::MAX), None);
+        assert_eq!(xrc_timestamp_secs_to_ns(20_000_000_000), None);
+    }
+
+    #[test]
+    fn the_mid_await_recheck_sees_a_pair_unmanaged_by_disable_chain() {
+        // The writer re-reads `pair_is_xrc_managed` inside the same
+        // `mutate_state` closure as the write. This pins the predicate that
+        // re-check depends on: a `disable_chain` landing during the XRC await
+        // flips it false, so the in-flight sample is discarded rather than
+        // overwriting an operator's emergency rebaseline.
+        let mut state = State::default();
+        state
+            .multi_chain
+            .chain_configs
+            .insert(CFX_MAINNET, registered_chain_config(CFX_MAINNET));
+        state
+            .multi_chain
+            .chain_liquidation_configs
+            .insert(CFX_MAINNET, liquidation_config_row(true));
+        assert!(
+            pair_is_xrc_managed(&state, CFX_MAINNET, "CFX"),
+            "precondition: the pair is XRC-managed when the fetch starts"
+        );
+
+        // disable_chain lands mid-await.
+        state
+            .multi_chain
+            .chain_configs
+            .get_mut(&CFX_MAINNET)
+            .expect("config")
+            .status = ChainStatus::Disabled;
+        assert!(
+            !pair_is_xrc_managed(&state, CFX_MAINNET, "CFX"),
+            "a disabled chain must unmanage the pair, so the in-flight write is discarded"
+        );
+
+        // enable_chain hands authority back to XRC.
+        crate::chains::admin::enable_chain_in_state(&mut state.multi_chain, CFX_MAINNET)
+            .expect("enable_chain_in_state");
+        assert!(
+            pair_is_xrc_managed(&state, CFX_MAINNET, "CFX"),
+            "re-enabling restores XRC authority for the pair"
+        );
+    }
+
+    #[test]
+    fn delete_chain_purging_the_price_maps_also_unmanages_the_pair() {
+        // The other way a pair can stop being managed mid-await.
+        let mut state = State::default();
+        state
+            .multi_chain
+            .chain_configs
+            .insert(CFX_MAINNET, registered_chain_config(CFX_MAINNET));
+        state
+            .multi_chain
+            .chain_liquidation_configs
+            .insert(CFX_MAINNET, liquidation_config_row(true));
+        state.multi_chain.chain_configs.remove(&CFX_MAINNET);
+        assert!(!pair_is_xrc_managed(&state, CFX_MAINNET, "CFX"));
+    }
+
+    #[test]
+    fn a_non_native_symbol_on_a_managed_chain_is_not_managed() {
+        // `pair_is_xrc_managed` is native-symbol scoped: the timer only ever
+        // writes (chain, native symbol), so no other symbol on the same chain
+        // is claimed from manual pricing.
+        let mut state = State::default();
+        state
+            .multi_chain
+            .chain_configs
+            .insert(CFX_MAINNET, registered_chain_config(CFX_MAINNET));
+        state
+            .multi_chain
+            .chain_liquidation_configs
+            .insert(CFX_MAINNET, liquidation_config_row(true));
+        assert!(pair_is_xrc_managed(&state, CFX_MAINNET, "CFX"));
+        assert!(!pair_is_xrc_managed(&state, CFX_MAINNET, "WCFX"));
+        assert!(!pair_is_xrc_managed(&state, CFX_MAINNET, "cfx"));
     }
 }

@@ -1,34 +1,160 @@
-//! ⚠️ EXPERIMENTAL — NOT WIRED UP FOR PRODUCTION. LEAVE ALONE / REVISIT LATER. ⚠️
+//! STATUS (2026-08-20): the Conflux (CFX/eSpace) chains-liquidation rail is
+//! code-complete and dormant, not experimental scaffolding. Increments 0-13
+//! (PRs #261-#286, June 2026) built the full engine: EIP-712 vault auth,
+//! observer/settlement workers, the liquidation bot path, and the SP
+//! escalation (`stability_pool_liquidate_chain_vault`). It is dormant purely
+//! because prod carries no per-chain config row.
 //!
-//! The entire `chains/` tree (Monad + Solana cross-chain CDP) is experimental
-//! and intentionally dormant: the observer/settlement timers are OFF by default,
-//! every cross-chain write endpoint is developer-gated, and the chains run on
-//! testnet/devnet only. It is NOT part of the production ICP-native protocol.
+//! DEPLOY NOTE: this PR also fixes a live stale-cache bug in the
+//! settlement/interest-treasury/reserve address derivation
+//! (chains/evm/tecdsa.rs). Do NOT trust any chain address read from prod
+//! before this upgrade lands: a pre-rotation cache entry may still be warm.
 //!
-//! The 2026-06-05 security audit (`audit-reports/2026-06-05-d67e100/`) added the
-//! M-04..M-09 quorum / finality / recovery remediations here (endpoint dedup,
-//! `min_quorum_providers` fail-closed floor, quorumed finality probe, finality-
-//! aware deposit cursor, on-chain re-verify in resolve/recover). That work
-//! compiles and the backend lib tests pass, BUT it has NOT been exhaustively
-//! reviewed, the candid `.did` sync for the new surface is unverified, and the
-//! sub-agent that wrote it was stopped before finishing additional tests.
+//! ── The actual public-open gate (verified by reading `verify_intent_ctx` +
+//! `open_chain_vault_in_state` end to end, not assumed) ──────────────────────
+//! `open_chain_vault_evm`'s checks run in this order:
+//!  1. `verify_intent_ctx` (main.rs) resolves the chain's bound
+//!     `chain_contracts` entry BEFORE it ever verifies the EIP-712 signature
+//!     (the contract address is the domain separator). An unbound chain
+//!     rejects with "no contract set", on ANY signature, regardless of
+//!     registration or price state. This is why binding the IcUSD contract
+//!     (`set_chain_contract`) is the step that actually makes a chain
+//!     publicly open, not registration.
+//!  2. `open_chain_vault_in_state` (chains/vault.rs) then requires
+//!     `MultiChainState::chain_is_registered` (`ChainStatus::Registered`).
+//!     This check runs in the SYNCHRONOUS post-`.await` half of the open
+//!     call (after the tECDSA custody-address derive resolves), so a
+//!     `disable_chain` landing while that derive is in flight is still
+//!     caught on resume; that post-await check is the authoritative one.
+//!     `open_chain_vault_evm` ALSO reads the predicate pre-`.await`, before
+//!     it consumes the caller's nonce, purely so an open against a chain
+//!     that was ALREADY disabled does not burn a nonce the caller then has
+//!     to re-sign past. `borrow_chain_vault_evm` (fully synchronous, no
+//!     `.await`) reads the same predicate. Withdraw/close/repay do NOT read
+//!     it and their pure state helpers still ACCEPT the call on a Disabled
+//!     chain, but see the `disable_chain` section below: accepting the call
+//!     is not the same as completing it, since the worker that would
+//!     actually broadcast the resulting withdrawal is also gated off.
+//!  3. A native-asset price must be present (`manual_prices`); it is only
+//!     STALENESS-CHECKED once a `chain_liquidation_configs` row exists with
+//!     `max_price_age_ns > 0` (`gated_chain_price_e8`, chains/vault.rs),
+//!     independent of that row's `enabled` flag, which gates the
+//!     liquidation-swap WORKER only, never the open/borrow price check.
 //!
-//! DO NOT enable any cross-chain feature (timers, real providers, mainnet) or
-//! treat this code as production-ready without a deliberate, careful human
-//! review pass first. It is preserved here on purpose — parked, not abandoned.
+//! ── ONE PRICE WRITER (`xrc::pair_is_xrc_managed`) ──────────────────────────
+//! A chain that is `Registered` AND carries a `chain_liquidation_configs` row
+//! (regardless of `enabled`) is "XRC-managed". While it is, the automatic XRC
+//! price timer is AUTHORITATIVE and the SOLE writer of that chain's
+//! native-symbol price: `set_manual_collateral_price` REJECTS a write to that
+//! pair for EVERY caller, the narrowly-scoped price pusher and the
+//! developer alike. The race this closes is writer-vs-writer on one
+//! `MultiChainState::set_manual_price` cell, not operator-vs-operator: the
+//! timer fires from its own message on its own schedule, with no ordering
+//! relationship to an ingress call, so a manual write can be silently
+//! overwritten seconds later or can overwrite a fresher automatic sample.
+//! The (superseded) off-chain CFX price monitor is a decommissioned,
+//! emergency-only fallback now.
 //!
-//! Multi-chain scaffolding (Phase 1a).
+//! The automatic writer is itself constrained (`xrc::chains_price_sample_is_acceptable`):
+//! it stamps the sample's SOURCE timestamp rather than arrival time, requires
+//! each candidate to be strictly newer at the source than the stored sample,
+//! and holds it inside the accepted audit LIQ-007 `PRICE_SANITY_BAND_RATIO`
+//! band relative to the last accepted price. A rejected sample writes NOTHING
+//! (not even the freshness timestamp), and there is deliberately no
+//! consecutive-confirmation escalation, so a sustained out-of-band move stays
+//! FAIL-CLOSED until an operator intervenes.
 //!
-//! This module tree carries the chain-agnostic abstractions used by every
-//! foreign-chain integration: the `ChainAdapter` trait (adapter.rs), the
-//! per-chain configuration record (config.rs), the per-chain settlement
-//! queue (settlement_queue.rs), and the supply-invariant accounting helpers
-//! (supply.rs).
+//! CYCLE COST NOTE: staging a `chain_liquidation_configs` row starts the XRC
+//! meter immediately (~1B cycles/call at 300s = roughly 288B cycles/day per
+//! symbol), the moment the row is INSERTED, not when `enabled` is later
+//! flipped true. Budget for that at staging time, not at liquidation go-live.
 //!
-//! Phase 1a registers no real chain. The trait has no production impls,
-//! the settlement queues are never drained, and `chain_supplies` stays
-//! empty after install. Phase 1b (Monad) will add the first real adapter
-//! and the first non-zero entries.
+//! ── `disable_chain` / `enable_chain`: a REVERSIBLE HARD FREEZE ────────────
+//! Flips `ChainStatus` to `Disabled`. Verified effects, reading every gate
+//! that reads `ChainStatus`/`chain_is_registered`, not assumed:
+//!  - Blocks new opens/borrows (item 2 above) and the XRC price timer
+//!    (`chains_needing_price_feed` reads the same predicate), which also
+//!    re-opens manual pricing for that pair (see the XRC-managed invariant).
+//!  - ALSO stops the observer and settlement workers for that chain:
+//!    `run_all_observers`/`run_all_settlements` (main.rs) and their legacy
+//!    per-chain equivalents `observer_tick`/`settlement_tick`
+//!    (deposit_watch.rs, settlement.rs) all filter their chain list to
+//!    `ChainStatus::Registered`. A Disabled chain gets NO deposit
+//!    verification, NO liquidation detection (that runs inside the
+//!    observer), and NO settlement-queue draining (mints, withdrawals,
+//!    liquidation swaps) at all.
+//!  - Composite consequence for an ALREADY-OPEN vault: `withdraw_collateral_in_state`/
+//!    `close_chain_vault_in_state` do not read `ChainStatus` and still
+//!    ACCEPT the call, enqueueing a settlement op, but with the settlement
+//!    worker gated off that op is never broadcast: the vault sticks
+//!    mid-exit (e.g. `Closing`) indefinitely. The one flow that genuinely
+//!    completes on a Disabled chain is repay via `submit_burn_proof`
+//!    (chains/evm/burn_proof.rs), which reads only the bound contract and
+//!    finality depth, no `ChainStatus` check at all.
+//!  - RECOVERY (`enable_chain`, added by this PR): the freeze is REVERSIBLE.
+//!    `enable_chain` is developer-gated, flips ONLY `Disabled -> Registered`,
+//!    refuses an unknown chain and an already-`Registered` one, adds no
+//!    persisted field, and preserves every per-chain state entry (vaults,
+//!    supply, contract binding, observer cursor, prices and their timestamps,
+//!    liquidation config). Re-enabling puts the chain back in
+//!    `registered_chains_and_solana_flag`'s list, so the observer and
+//!    settlement workers resume and any exit enqueued while Disabled drains
+//!    normally instead of stranding. Before it existed there was no
+//!    `Disabled -> Registered` transition at all: `UpdateChainConfigArg` has
+//!    no status field, `register_chain` refuses an already-present `chain_id`
+//!    (`ChainAlreadyRegistered`), and `delete_chain` refuses while the chain
+//!    carries any vault or nonzero supply, so a pending exit could neither
+//!    complete (worker gated off) nor be cleared (`delete_chain` blocked by
+//!    the very vault it would need to remove).
+//!  - It is still a FREEZE while it lasts, not a graceful wind-down: exits
+//!    enqueued on a Disabled chain sit until `enable_chain` runs. Keep the
+//!    window short and deliberate. Whether workers should keep draining exits
+//!    on a Disabled chain is a separate open design question; this file
+//!    states current behavior, not a recommendation.
+//!
+//! MANUAL REBASELINE IS ONLY AVAILABLE WHILE DISABLED. The whole operator
+//! loop is: `disable_chain` (risk stop, XRC stop, worker freeze),
+//! `set_manual_collateral_price` (rebaseline), read it back and VERIFY,
+//! `enable_chain` (XRC and the workers resume). Enable reopens the GATE only;
+//! it does not vouch for price freshness, so an open after enable still has to
+//! satisfy the price presence/staleness checks, which is exactly why the
+//! verify step is part of the loop.
+//!
+//! ── Go-live checklist for the first prod chain (Conflux, chain id 1030) ────
+//!  1. `set_chains_ecdsa_key_name("key_1")` BEFORE the first prod chain
+//!     vault opens (the key locks in at first vault use). VERIFY via a
+//!     POST-UPGRADE read-back of `get_chains_ecdsa_key_name`. Do not assume
+//!     a value from before this upgrade; the address-cache bug above means a
+//!     pre-upgrade key report could have been stale.
+//!  2. AFTER that read-back, re-derive and verify the settlement and reserve
+//!     addresses (`get_chain_settlement_address`, `get_chain_reserve_address`)
+//!     and confirm `get_evm_rpc_principal` reports the official EVM-RPC
+//!     canister (no override left pointing at a mock), ALL of it BEFORE any
+//!     immutable on-chain contract deployment bakes an address in.
+//!  3. Register chain 1030 with MAINNET-shaped args
+//!     (`conflux_mainnet_register_arg`): finality_depth 400,
+//!     min_quorum_providers 2, operator-vetted RPC URLs.
+//!  4. Set the native price and seed the observer cursor while the chain is
+//!     still unbound (and therefore not publicly openable).
+//!  5. Deploy IcUSD.sol on eSpace mainnet, then `set_chain_contract`. This
+//!     is the actual "make public" step (see the public-open gate above), and
+//!     it stays the initial public-open gate regardless of price or
+//!     liquidation state.
+//!  6. Stage a liquidation config row (real Swappi router, fee/divergence/
+//!     deadline; `enabled` starts false). This hands pricing to the automatic
+//!     XRC feed AND claims the pair from manual pricing (see ONE PRICE WRITER
+//!     above); budget cycles from this moment.
+//!  7. Fund nothing: the reserve address is a sink; the custody address pays
+//!     gas from deposited collateral.
+//!  8. Liquidation is a SEPARATE switch: flip the liquidation config's
+//!     `enabled` to true only after its own on-chain validation
+//!     (`set_chain_liquidation_config` re-derives the factory pair on
+//!     enable). Staging the row (step 6) does not enable liquidation.
+//!
+//! Monad and Solana remain genuinely experimental: testnet/devnet only,
+//! observer/settlement timers off by default (Solana also gated behind
+//! `solana_workers_enabled`), and their write paths are still developer-
+//! gated pending the same kind of review pass Conflux already had.
 
 pub mod adapter;
 pub mod admin;

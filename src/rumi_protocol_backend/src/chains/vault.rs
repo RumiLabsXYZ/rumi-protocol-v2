@@ -187,6 +187,13 @@ pub enum OpenVaultError {
     /// The chain's bad-debt circuit is tripped; new debt or pending mint creation
     /// is blocked until the developer clears the circuit.
     ChainBadDebtCircuitTripped { chain: ChainId },
+    /// De-scaffold pass (2026-08-20, security review F10): the chain IS
+    /// registered but its `ChainStatus` is `Disabled` (the operator's
+    /// post-launch emergency risk stop). Distinct from `UnknownChain` (never
+    /// registered at all) so an operator can tell the two apart. Withdraw/
+    /// close/repay are UNAFFECTED by this: only risk-increasing operations
+    /// (open, borrow) read `MultiChainState::chain_is_registered`.
+    ChainDisabled { chain: ChainId },
 }
 
 /// Reasons `withdraw_collateral_in_state` / `close_chain_vault_in_state` can
@@ -452,9 +459,28 @@ pub fn open_chain_vault_in_state(
     now_ns: u64,
     vault_id: u64,
 ) -> Result<(), OpenVaultError> {
-    // Reject an unregistered chain before reading anything else.
+    // Reject an unregistered OR disabled chain before reading anything else.
+    // Security review (F10): this used to be a bare `contains_key`, which
+    // does NOT distinguish a Disabled chain from a Registered one. A chain
+    // an operator had disabled (post-launch emergency risk stop) kept
+    // accepting new self-serve opens, because `disable_chain` only flips
+    // `ChainStatus`, it never removes the `chain_configs` entry.
+    // `chain_is_registered` (the shared predicate F2 also reads) is the fix.
+    // This is the ONLY enforcement point for this gate: this pure state
+    // helper is called from all three open entrypoints (`open_chain_vault`,
+    // `open_chain_vault_evm`, `open_solana_vault`), each from its own
+    // post-`.await` mutate_state block (after the tECDSA/Ed25519
+    // custody-address derive resolves), so a `disable_chain` that lands
+    // WHILE that derive is in flight is still caught on any of the three: the
+    // suspended open resumes into THIS check against fresh, current state.
+    // (This also means the Solana entrypoint gets the same disabled-chain
+    // rejection as the two EVM ones, a side effect of the shared pure
+    // helper rather than a Solana-specific design choice.)
     if !state.chain_configs.contains_key(&chain) {
         return Err(OpenVaultError::UnknownChain);
+    }
+    if !state.chain_is_registered(chain) {
+        return Err(OpenVaultError::ChainDisabled { chain });
     }
     if state.chain_bad_debt_circuit_tripped(chain) {
         return Err(OpenVaultError::ChainBadDebtCircuitTripped { chain });
@@ -1119,6 +1145,13 @@ pub enum BorrowError {
     ChainBadDebtCircuitTripped {
         chain: ChainId,
     },
+    /// De-scaffold pass (2026-08-20, security review F10): the vault's
+    /// collateral chain is `Disabled` (the operator's post-launch emergency
+    /// risk stop). Borrowing more debt is risk-increasing, so it is blocked
+    /// exactly like `open`; withdraw/close/repay are unaffected.
+    ChainDisabled {
+        chain: ChainId,
+    },
 }
 
 /// Borrow additional icUSD against an existing `Open` vault — a SECOND on-chain
@@ -1188,6 +1221,14 @@ pub fn borrow_chain_vault_in_state(
             v.debt_e8s.saturating_add(additional_e8s),
         )
     };
+    // Security review (F10): borrowing more debt is risk-increasing, same as
+    // opening a new vault, so gate it on the chain being `ChainStatus::Registered`
+    // (the shared predicate F2 also reads). `borrow_chain_vault_evm` has no
+    // `.await` at all (fully synchronous), so there is no async gap to worry
+    // about here the way `open_chain_vault_evm` has.
+    if !state.chain_is_registered(chain) {
+        return Err(BorrowError::ChainDisabled { chain });
+    }
     let price_e8 =
         gated_chain_price_e8(state, chain, price_symbol, now_ns).map_err(map_borrow_price_error)?;
     let native_decimals = state

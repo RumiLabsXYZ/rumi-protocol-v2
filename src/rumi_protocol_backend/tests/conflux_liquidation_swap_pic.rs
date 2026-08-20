@@ -1057,18 +1057,19 @@ fn conflux_liquidation_swap_executes_and_credits_reserve() {
     // 3d. The hash the swap broadcast returns (so the confirm can match it).
     update_any(&pic, mock, "set_next_send_hash", Encode!(&"0xcfxswap1".to_string()).unwrap());
 
-    // ── Step 4: enable the liquidation config + drop the price to $0.08 ──────
+    // ── Step 4: drop the price to $0.08, THEN enable the liquidation config ──
+    // Security review follow-up (F2): the order below is load-bearing, not
+    // cosmetic. Once a chain_liquidation_configs row is present for a
+    // registered chain, that (chain, native symbol) pair is XRC-managed and
+    // the automatic XRC price timer is its SOLE writer: set_manual_collateral_price
+    // then rejects EVERY caller, the narrowly-scoped price pusher and the
+    // developer principal this suite uses alike. There is no developer
+    // exemption. So the price is dropped FIRST, while the chain is not yet
+    // XRC-managed, and the liquidation config row is staged after. Moving a
+    // price AFTER staging the row requires the operator recovery loop instead:
+    // disable_chain (which unmanages the pair and stops the timer for it),
+    // rebaseline, then enable_chain.
     script_factory_pair_sanity(&pic, mock, DEX_PAIR);
-    decode_result(
-        update_dev(
-            &pic,
-            backend,
-            "set_chain_liquidation_config",
-            Encode!(&ChainId(CONFLUX_CHAIN_ID), &enabled_liq_config()).unwrap(),
-        ),
-        "set_chain_liquidation_config",
-    )
-    .expect("set_chain_liquidation_config Ok");
 
     // $0.08 / CFX => 1400 * 0.08 = $112 vs 100 debt => CR ~112% < 133%.
     decode_result(
@@ -1081,6 +1082,17 @@ fn conflux_liquidation_swap_executes_and_credits_reserve() {
         "set_manual_collateral_price (drop)",
     )
     .expect("set_manual_collateral_price (drop)");
+
+    decode_result(
+        update_dev(
+            &pic,
+            backend,
+            "set_chain_liquidation_config",
+            Encode!(&ChainId(CONFLUX_CHAIN_ID), &enabled_liq_config()).unwrap(),
+        ),
+        "set_chain_liquidation_config",
+    )
+    .expect("set_chain_liquidation_config Ok");
 
     // ── Step 5: observer tick marks the vault (Bot tier; collateral reserved) +
     // the settlement worker SUBMITS the swap (DEX reads + JIT min-out + oracle
@@ -1351,6 +1363,22 @@ fn conflux_liquidation_bot_failure_sp_absorb_claims_cfx() {
     assert_supply(&pic, backend, 100 * E8, "after mint");
 
     script_factory_pair_sanity(&pic, mock, DEX_PAIR);
+    // Security review follow-up (F2): drop the price BEFORE staging the
+    // liquidation config row. The order is load-bearing: staging the row makes
+    // the pair XRC-managed, after which set_manual_collateral_price rejects
+    // every caller including the developer principal this suite uses. See the
+    // fuller comment earlier in this file, at the first
+    // set_chain_liquidation_config call.
+    decode_result(
+        update_dev(
+            &pic,
+            backend,
+            "set_manual_collateral_price",
+            Encode!(&ChainId(CONFLUX_CHAIN_ID), &"CFX".to_string(), &8_000_000u64).unwrap(),
+        ),
+        "set_manual_collateral_price (drop)",
+    )
+    .expect("set_manual_collateral_price (drop)");
     decode_result(
         update_dev(
             &pic,
@@ -1380,16 +1408,6 @@ fn conflux_liquidation_bot_failure_sp_absorb_claims_cfx() {
         "set_eth_call_response",
         Encode!(&GET_RESERVES_SELECTOR.to_string(), &zero_reserves_blob).unwrap(),
     );
-    decode_result(
-        update_dev(
-            &pic,
-            backend,
-            "set_manual_collateral_price",
-            Encode!(&ChainId(CONFLUX_CHAIN_ID), &"CFX".to_string(), &8_000_000u64).unwrap(),
-        ),
-        "set_manual_collateral_price (drop)",
-    )
-    .expect("set_manual_collateral_price (drop)");
 
     advance_and_tick(&pic, 3);
     let v = get_vault(&pic, backend, vault_id).expect("vault after failed bot swap");

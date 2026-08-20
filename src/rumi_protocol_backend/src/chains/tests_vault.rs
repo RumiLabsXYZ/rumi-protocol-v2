@@ -56,6 +56,16 @@ fn setup(price_e8: u64) -> MultiChainState {
 }
 
 fn enable_price_age_gate(s: &mut MultiChainState, max_price_age_ns: u64) {
+    enable_price_age_gate_with_enabled(s, max_price_age_ns, false);
+}
+
+/// De-scaffold pass (2026-08-20): parameterized variant so a test can compare
+/// `enabled: true` vs `enabled: false` under otherwise-identical config, to
+/// pin that the OPEN path's price gate (`gated_chain_price_e8`) reads only
+/// `max_price_age_ns`, never `enabled`. That kill switch only ever gates the
+/// liquidation-swap worker, not the public open path, despite what the field
+/// name suggests.
+fn enable_price_age_gate_with_enabled(s: &mut MultiChainState, max_price_age_ns: u64, enabled: bool) {
     use super::liquidation_config::{ChainLiquidationConfigV1, DexKind};
     s.chain_liquidation_configs.insert(
         CHAIN,
@@ -68,7 +78,7 @@ fn enable_price_age_gate(s: &mut MultiChainState, max_price_age_ns: u64) {
             settle_stable_token: String::new(),
             slippage_cap_bps: 0,
             restore_target_cr_e4: 13_000,
-            enabled: false,
+            enabled,
             max_swap_value_e8s: 0,
             max_price_age_ns,
             max_dex_oracle_divergence_bps: 0,
@@ -196,6 +206,48 @@ fn open_rejects_stale_price_when_age_gate_configured() {
     assert!(s.chain_vaults.is_empty(), "no mutation on stale price");
 }
 
+/// De-scaffold pass (2026-08-20): explicit pin that the public OPEN path does
+/// NOT consult `ChainLiquidationConfigV1.enabled` at all. Runs the identical
+/// stale-price scenario twice, once with `enabled: true` and once
+/// `enabled: false`, and asserts BOTH reject identically. `enabled` is the
+/// per-chain kill switch for the liquidation-swap WORKER only (see
+/// `chains/liquidation_config.rs`'s doc comment on the field); it has no
+/// effect on `open_chain_vault_evm`/`open_chain_vault_in_state`, which read
+/// only `max_price_age_ns` off the same config row (`gated_chain_price_e8`).
+#[test]
+fn open_path_ignores_liquidation_config_enabled_flag() {
+    fn try_open_with_enabled(enabled: bool) -> Result<(), OpenVaultError> {
+        let mut s = setup(PRICE_150_USD_E8);
+        s.manual_price_set_at_ns
+            .insert((CHAIN, "SOL".into()), 1_000);
+        enable_price_age_gate_with_enabled(&mut s, 100, enabled);
+        open_chain_vault_in_state(
+            &mut s,
+            CHAIN,
+            Principal::anonymous(),
+            "custody".into(),
+            100 * ONE_SOL,
+            100_00000000,
+            "good-address".into(),
+            only_good,
+            "SOL",
+            13_000,
+            0,
+            None,
+            1_101, // now_ns: 1_101 - 1_000 = 101 > max_price_age_ns of 100 -> stale
+            7,
+        )
+    }
+
+    let with_enabled_true = try_open_with_enabled(true);
+    let with_enabled_false = try_open_with_enabled(false);
+    assert_eq!(with_enabled_true, Err(OpenVaultError::StalePrice));
+    assert_eq!(
+        with_enabled_true, with_enabled_false,
+        "open path must behave identically regardless of the liquidation config's enabled flag"
+    );
+}
+
 #[test]
 fn open_rejects_when_chain_bad_debt_circuit_tripped() {
     let mut s = setup(PRICE_150_USD_E8);
@@ -227,6 +279,109 @@ fn open_rejects_when_chain_bad_debt_circuit_tripped() {
         "no mutation while circuit is tripped"
     );
     assert_eq!(s.settlement_queues[&CHAIN].pending_len(), 0);
+}
+
+/// Security review (F10): a Disabled chain must reject a new self-serve open.
+/// Pre-fix, `open_chain_vault_in_state` only checked `contains_key`, which a
+/// Disabled chain still satisfies (`disable_chain` flips `ChainStatus`, it
+/// never removes the `chain_configs` entry), so a chain the operator had
+/// disabled kept accepting new opens.
+#[test]
+fn open_rejects_when_chain_disabled() {
+    use super::config::ChainStatus;
+    let mut s = setup(PRICE_150_USD_E8);
+    s.chain_configs.get_mut(&CHAIN).unwrap().status = ChainStatus::Disabled;
+
+    let res = open_chain_vault_in_state(
+        &mut s,
+        CHAIN,
+        Principal::anonymous(),
+        "custody".into(),
+        100 * ONE_SOL,
+        100_00000000,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        0,
+        None,
+        12345,
+        7,
+    );
+
+    assert_eq!(res, Err(OpenVaultError::ChainDisabled { chain: CHAIN }));
+    assert!(s.chain_vaults.is_empty(), "no mutation on a disabled chain");
+}
+
+/// Security review (F10): the async-gap regression. `open_chain_vault_in_state`
+/// is called from all three open entrypoints (`open_chain_vault`,
+/// `open_chain_vault_evm`, `open_solana_vault`), each from its own
+/// SYNCHRONOUS post-`.await` mutate_state block (after its custody derive
+/// resolves), so a `disable_chain` that lands WHILE that derive is
+/// suspended is caught automatically on any of them: the state this test constructs (chain
+/// Registered when the derive "started", then flipped to Disabled before the
+/// "resumed" synchronous insertion below runs) is exactly what the resumed
+/// call sees. Driven directly against the pure helper, the same style as
+/// F8's interleaving regression.
+#[test]
+fn open_rejects_when_chain_disabled_mid_flight_after_simulated_await() {
+    use super::config::ChainStatus;
+    // The async custody derive "started" against a Registered chain...
+    let mut s = setup(PRICE_150_USD_E8);
+    // ...but while it was suspended, disable_chain landed...
+    s.chain_configs.get_mut(&CHAIN).unwrap().status = ChainStatus::Disabled;
+    // ...and now the derive "resumes", reaching this synchronous call with
+    // CURRENT (Disabled) state.
+    let res = open_chain_vault_in_state(
+        &mut s,
+        CHAIN,
+        Principal::anonymous(),
+        "custody-derived-mid-flight".into(),
+        100 * ONE_SOL,
+        100_00000000,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        0,
+        None,
+        12345,
+        7,
+    );
+    assert_eq!(res, Err(OpenVaultError::ChainDisabled { chain: CHAIN }));
+    assert!(s.chain_vaults.is_empty());
+}
+
+/// Security review (F10): withdraw/close/repay are EXIT paths and must keep
+/// working on a Disabled chain; only risk-increasing operations (open,
+/// borrow) are gated. This proves `withdraw_collateral_in_state` does not
+/// regress: open a vault while Registered, THEN disable the chain, THEN
+/// withdraw must still succeed.
+#[test]
+fn withdraw_still_works_after_chain_disabled() {
+    use super::config::ChainStatus;
+    use super::vault::withdraw_collateral_in_state;
+    let mut s = setup(PRICE_150_USD_E8);
+    // 1_000 SOL collateral vs 100 icUSD debt: way over-collateralized, so a
+    // small withdraw stays well above the min CR.
+    insert_open_vault(&mut s, Principal::anonymous(), 7, 1_000 * ONE_SOL, 100_00000000);
+
+    s.chain_configs.get_mut(&CHAIN).unwrap().status = ChainStatus::Disabled;
+
+    let res = withdraw_collateral_in_state(
+        &mut s,
+        7,
+        ONE_SOL,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        12346,
+    );
+    assert!(
+        res.is_ok(),
+        "withdraw must still succeed on a Disabled chain (exit paths are unaffected): {res:?}"
+    );
 }
 
 #[test]
@@ -573,6 +728,169 @@ fn borrow_rejects_when_chain_bad_debt_circuit_tripped() {
     );
     assert_eq!(s.chain_vaults.get(&7).unwrap().pending_mint_e8s, 0);
     assert_eq!(s.settlement_queues[&CHAIN].pending_len(), 0);
+}
+
+/// Security review (F10): additional debt is risk-increasing, so it is
+/// blocked on a Disabled chain exactly like open (pre-fix, `borrow_chain_vault_in_state`
+/// never checked chain status at all).
+#[test]
+fn borrow_rejects_when_chain_disabled() {
+    use super::config::ChainStatus;
+    let mut s = setup(PRICE_150_USD_E8);
+    insert_open_vault(&mut s, Principal::anonymous(), 7, 100 * ONE_SOL, 100_00000000);
+    s.chain_configs.get_mut(&CHAIN).unwrap().status = ChainStatus::Disabled;
+
+    let res = borrow_chain_vault_in_state(
+        &mut s,
+        7,
+        50_00000000,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        0,
+        None,
+        1,
+    );
+
+    assert_eq!(res, Err(BorrowError::ChainDisabled { chain: CHAIN }));
+    assert_eq!(s.chain_vaults.get(&7).unwrap().pending_mint_e8s, 0, "no mutation on a disabled chain");
+    assert_eq!(s.settlement_queues[&CHAIN].pending_len(), 0);
+}
+
+/// The recovery half: `enable_chain` restores the two risk-increasing
+/// operations `disable_chain` blocked, and nothing else has to be re-done for
+/// them to work again. Both gates read the same `chain_is_registered`
+/// predicate, so one enable reopens both.
+#[test]
+fn open_and_borrow_are_restored_after_enable_chain() {
+    use crate::chains::admin::{disable_chain_in_state, enable_chain_in_state};
+
+    let mut s = setup(PRICE_150_USD_E8);
+    insert_open_vault(&mut s, Principal::anonymous(), 7, 1_000 * ONE_SOL, 100_00000000);
+
+    disable_chain_in_state(&mut s, CHAIN).expect("disable");
+    assert_eq!(
+        open_chain_vault_in_state(
+            &mut s,
+            CHAIN,
+            Principal::anonymous(),
+            "custody".into(),
+            100 * ONE_SOL,
+            100_00000000,
+            "good-address".into(),
+            only_good,
+            "SOL",
+            13_000,
+            0,
+            None,
+            12345,
+            8,
+        ),
+        Err(OpenVaultError::ChainDisabled { chain: CHAIN }),
+        "precondition: open is blocked while Disabled"
+    );
+
+    enable_chain_in_state(&mut s, CHAIN).expect("enable");
+
+    let opened = open_chain_vault_in_state(
+        &mut s,
+        CHAIN,
+        Principal::anonymous(),
+        "custody".into(),
+        100 * ONE_SOL,
+        100_00000000,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        0,
+        None,
+        12345,
+        8,
+    );
+    assert!(opened.is_ok(), "open must work again after enable: {opened:?}");
+
+    let borrowed = borrow_chain_vault_in_state(
+        &mut s,
+        7,
+        50_00000000,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        0,
+        None,
+        1,
+    );
+    assert!(
+        borrowed.is_ok(),
+        "borrow must work again after enable: {borrowed:?}"
+    );
+}
+
+/// Enable alone reopens the GATE, it does not vouch for the price. A chain
+/// re-enabled while its staleness-gated price has aged out still refuses new
+/// opens, which is exactly why the documented recovery order is disable,
+/// rebaseline the price, VERIFY it, then enable.
+#[test]
+fn enable_chain_does_not_bypass_the_price_freshness_prerequisite() {
+    use crate::chains::admin::{disable_chain_in_state, enable_chain_in_state};
+
+    let mut s = setup(PRICE_150_USD_E8);
+    // A liquidation config row with a 30-minute ceiling turns on the staleness
+    // gate for the open path.
+    enable_price_age_gate(&mut s, 1_800_000_000_000);
+    s.manual_price_set_at_ns
+        .insert((CHAIN, "SOL".into()), 1_000_000_000);
+
+    disable_chain_in_state(&mut s, CHAIN).expect("disable");
+    enable_chain_in_state(&mut s, CHAIN).expect("enable");
+
+    // now_ns is far past the price's age ceiling.
+    let res = open_chain_vault_in_state(
+        &mut s,
+        CHAIN,
+        Principal::anonymous(),
+        "custody".into(),
+        100 * ONE_SOL,
+        100_00000000,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        0,
+        None,
+        9_000_000_000_000,
+        8,
+    );
+    assert_eq!(
+        res,
+        Err(OpenVaultError::StalePrice),
+        "a re-enabled chain must still fail closed on a stale price"
+    );
+
+    // Rebaseline the price (what the operator does while Disabled) and the
+    // same open now succeeds.
+    s.manual_price_set_at_ns
+        .insert((CHAIN, "SOL".into()), 9_000_000_000_000);
+    let res = open_chain_vault_in_state(
+        &mut s,
+        CHAIN,
+        Principal::anonymous(),
+        "custody".into(),
+        100 * ONE_SOL,
+        100_00000000,
+        "good-address".into(),
+        only_good,
+        "SOL",
+        13_000,
+        0,
+        None,
+        9_000_000_000_000,
+        8,
+    );
+    assert!(res.is_ok(), "fresh price + enabled chain must open: {res:?}");
 }
 
 // ─── Increment 0: min-debt floor + per-chain debt ceiling ─────────────────────

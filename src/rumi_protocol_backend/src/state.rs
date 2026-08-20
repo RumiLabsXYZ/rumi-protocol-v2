@@ -250,6 +250,18 @@ pub const DEFAULT_RMR_CEILING_CR: Ratio = Ratio::new(dec!(1.5)); // CR below whi
 /// by moving onto `CollateralConfig`.
 pub const PRICE_SANITY_BAND_RATIO: f64 = 0.7;
 
+/// The SAME band as `PRICE_SANITY_BAND_RATIO`, expressed as an exact rational
+/// `PRICE_SANITY_BAND_NUM / PRICE_SANITY_BAND_DEN` so a caller working in
+/// integer e8 prices can apply it with checked `u128` cross-multiplication and
+/// no floating point at all. `chains_price_sample_is_acceptable` (xrc.rs) uses
+/// this form for the automatic chains XRC writer, where both the stored and the
+/// candidate price are exact `u64` e8 integers and a rounding difference would
+/// be a silent, unreviewable divergence from the collateral path's semantics.
+/// `band_rational_matches_the_f64_constant` (below) pins the two representations
+/// together so they cannot drift apart.
+pub const PRICE_SANITY_BAND_NUM: u128 = 7;
+pub const PRICE_SANITY_BAND_DEN: u128 = 10;
+
 /// Wave-5 LIQ-007 / ORACLE-009: number of consecutive in-band confirmations a
 /// queued outlier candidate needs before it is accepted as the new stored
 /// price. With background fetches every 300 s, N=3 means a sustained move
@@ -5383,6 +5395,19 @@ pub fn replace_state(state: State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn band_rational_matches_the_f64_constant() {
+        // The integer band used by the chains XRC writer
+        // (`xrc::chains_price_sample_is_acceptable`) and the f64 band used by
+        // `check_price_sanity_band` MUST describe the same band. If someone
+        // retunes one, this fails until they retune the other.
+        assert_eq!(
+            PRICE_SANITY_BAND_NUM as f64 / PRICE_SANITY_BAND_DEN as f64,
+            PRICE_SANITY_BAND_RATIO
+        );
+        assert!(PRICE_SANITY_BAND_NUM > 0 && PRICE_SANITY_BAND_DEN > PRICE_SANITY_BAND_NUM);
+    }
 
     #[test]
     fn sunset_collateral_retires_only_after_its_last_vault_is_closed() {

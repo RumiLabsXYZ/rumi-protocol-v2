@@ -676,17 +676,25 @@ pub fn decode_mint_log(
 
 // ─── Internal helpers ────────────────────────────────────────────────────────
 
+/// The production EVM RPC canister on the IC app subnet (candid:service
+/// `7hfb6-caaaa-aaaar-qadga-cai`, per the module doc comment at the top of
+/// this file).
+pub const DEFAULT_EVM_RPC_PRINCIPAL_TEXT: &str = "7hfb6-caaaa-aaaar-qadga-cai";
+
+/// Parses `DEFAULT_EVM_RPC_PRINCIPAL_TEXT`. Split out from `evm_rpc_principal`
+/// so `get_evm_rpc_principal` (main.rs) can report the default independently
+/// of whether an override is currently set.
+pub fn default_evm_rpc_principal() -> Principal {
+    Principal::from_text(DEFAULT_EVM_RPC_PRINCIPAL_TEXT).expect("static EVM RPC principal is valid")
+}
+
 /// Returns the EVM RPC canister principal.
 ///
 /// Uses the developer-gated `evm_rpc_principal_override` from State when set
 /// (enables PocketIC and staging to point at a mock canister).  Falls back to
 /// the production canister on the IC app subnet.
-fn evm_rpc_principal() -> Principal {
-    read_state(|s| s.evm_rpc_override())
-        .unwrap_or_else(|| {
-            Principal::from_text("7hfb6-caaaa-aaaar-qadga-cai")
-                .expect("static EVM RPC principal is valid")
-        })
+pub fn evm_rpc_principal() -> Principal {
+    read_state(|s| s.evm_rpc_override()).unwrap_or_else(default_evm_rpc_principal)
 }
 
 /// Issue ONE JSON-RPC `request` to a single endpoint. Returns the inner response

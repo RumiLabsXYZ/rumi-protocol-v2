@@ -226,6 +226,10 @@ thread_local! {
     // Task 12: foreign-chain interest harvest. Same transient lifecycle.
     static CHAIN_INTEREST_TIMER_ID: std::cell::Cell<Option<ic_cdk_timers::TimerId>> =
         const { std::cell::Cell::new(None) };
+    // De-scaffold pass (2026-08-20): XRC-sourced chains price feed. Same
+    // transient (not-persisted) lifecycle as every other timer here.
+    static CHAINS_PRICE_TIMER_ID: std::cell::Cell<Option<ic_cdk_timers::TimerId>> =
+        const { std::cell::Cell::new(None) };
 }
 
 fn register_xrc_fetch_timer() {
@@ -474,6 +478,27 @@ fn register_observer_timer() {
     });
 }
 
+/// De-scaffold pass (2026-08-20): register the XRC-sourced chains price
+/// timer. 300s cadence, matching the rest of the protocol's XRC polling
+/// (`xrc::FETCHING_ICP_RATE_INTERVAL`, `xrc::DEFAULT_COLLATERAL_PRICE_FETCH_SECS`).
+/// No settable interval: unlike the ICP/collateral price timers this one has
+/// no operator-facing tuning knob (yet) since it's gated to zero cost until a
+/// chain is actually configured; a fixed cadence keeps this PR from touching
+/// `State`'s persisted shape at all. Clears + re-registers in place, same as
+/// every other timer here, so a repeated `setup_timers()` call (upgrade)
+/// never leaks a duplicate interval timer.
+fn register_chains_price_timer() {
+    CHAINS_PRICE_TIMER_ID.with(|cell| {
+        if let Some(old) = cell.get() {
+            ic_cdk_timers::clear_timer(old);
+        }
+        let new_id = ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(300), || {
+            ic_cdk::spawn(rumi_protocol_backend::xrc::fetch_chains_prices())
+        });
+        cell.set(Some(new_id));
+    });
+}
+
 fn setup_timers() {
     // ── Immediate price fetch (fire on the very next execution round) ───────
     // Prices are ephemeral and not stored as events, so after an upgrade
@@ -561,6 +586,11 @@ fn setup_timers() {
     // `set_chain_interest_tick_interval_secs`. No-op when no EVM chain is
     // registered, so it is safe to register on staging before any chain exists.
     register_chain_interest_timer();
+    // De-scaffold pass (2026-08-20): XRC-sourced chains price feed. The
+    // gate inside `fetch_chains_prices` (chains registered AND carrying a
+    // liquidation config row) makes this a no-op, zero-XRC-call timer on
+    // any canister with no chain configured, so it is safe to register everywhere.
+    register_chains_price_timer();
 }
 
 /// M2 anti-spam backstop: hourly GC of stale `AwaitingDeposit` chain vaults
@@ -1297,6 +1327,65 @@ fn disable_chain(
     }
 }
 
+/// Reverse `disable_chain`: flip a `Disabled` chain back to `Registered`.
+///
+/// `disable_chain` is the post-launch emergency stop: it blocks new opens and
+/// borrows, hands the chain's native pair back to manual pricing, AND drops the
+/// chain from the observer/settlement worker fan-outs, so exits enqueued while
+/// it is Disabled are accepted but not broadcast. This is its recovery half,
+/// and it is what makes that stop REVERSIBLE: without it a disabled chain with
+/// any open vault could never be re-enabled (`register_chain` refuses a present
+/// `chain_id`, `delete_chain` refuses a chain with any supply or vault), so a
+/// queued exit would strand permanently. Re-enabling restores the workers and
+/// those queued exits drain.
+///
+/// Developer-gated, like every other chain-admin mutation. Adds no persisted
+/// field and preserves all per-chain state (see `enable_chain_in_state`).
+/// Records the existing durable `Event::ChainConfigUpdated`, since this IS a chain
+/// config change (the `status` field), and reusing the shipped variant avoids
+/// adding an event shape that every historical log reader would have to learn.
+/// The explicit `Disabled -> Registered` transition is written to the INFO log
+/// so an operator reading the log can tell this apart from an ordinary
+/// `set_chain_config` edit.
+///
+/// Re-enabling reopens the gate; it does NOT vouch for the chain's price
+/// freshness. An open after enable still has to pass the price
+/// presence/staleness checks, which is why the documented recovery order is
+/// disable, rebaseline the price manually, verify it, and only then enable.
+#[candid_method(update)]
+#[update]
+fn enable_chain(
+    chain_id: rumi_protocol_backend::chains::config::ChainId,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let result = mutate_state(|s| {
+        rumi_protocol_backend::chains::admin::enable_chain_in_state(&mut s.multi_chain, chain_id)
+    });
+    match result {
+        Ok(()) => {
+            let now = ic_cdk::api::time();
+            rumi_protocol_backend::storage::record_event(
+                &rumi_protocol_backend::event::Event::ChainConfigUpdated {
+                    chain_id,
+                    timestamp: now,
+                },
+            );
+            log!(
+                INFO,
+                "[enable_chain] chain_id={:?} status Disabled -> Registered (risk operations and \
+                 XRC price authority restored)",
+                chain_id
+            );
+            Ok(())
+        }
+        Err(e) => Err(ProtocolError::ChainAdmin(format!("{:?}", e))),
+    }
+}
+
 #[candid_method(update)]
 #[update]
 fn set_chain_config(
@@ -1571,6 +1660,7 @@ fn close_chain_vault(vault_id: u64, dest_address: String) -> Result<(), Protocol
 // operator/test use; these are the self-serve variants.
 
 /// Verified, authenticated intent context shared by all four `_evm` methods.
+#[derive(Debug)]
 struct VerifiedIntent {
     chain: rumi_protocol_backend::chains::config::ChainId,
     /// Lowercase `0x` recovered signer; the authoritative EVM owner.
@@ -1651,8 +1741,36 @@ async fn open_chain_vault_evm(
 ) -> Result<u64, ProtocolError> {
     use rumi_protocol_backend::chains::evm::eip712::IntentAction;
     let v = verify_intent_ctx(&intent, &signature, IntentAction::Open)?;
-    // Pre-await atomic: consume nonce, enforce per-owner cap, reserve vault id.
+    // Pre-await atomic: reject a disabled chain, consume nonce, enforce
+    // per-owner cap, reserve vault id.
     let vault_id = mutate_state(|s| {
+        // Cheap fail-fast on the ALREADY-disabled case, BEFORE the nonce is
+        // consumed. The authoritative gate is still the post-`.await` check in
+        // `open_chain_vault_in_state` (kept exactly as it is: it is the one
+        // that catches a `disable_chain` landing mid-derive, which no pre-await
+        // check can see). But that check runs after the nonce is already spent,
+        // so without this pre-check every open attempted against a chain an
+        // operator disabled hours ago would burn the caller's nonce and force a
+        // re-sign at `nonce + 1` to recover, a needless penalty for a user who
+        // could not have known the chain was closed. The two checks read the
+        // SAME `chain_is_registered` predicate, and the error text is built from
+        // the same `OpenVaultError::ChainDisabled` value the post-await path
+        // formats, so the caller sees one identical rejection either way.
+        //
+        // Deliberately scoped to PRESENT-but-Disabled, not to
+        // `!chain_is_registered`: a chain absent from `chain_configs` entirely
+        // must keep reaching the post-await `UnknownChain` rejection it returns
+        // today, so this pre-check changes the outcome of exactly one case (a
+        // known, disabled chain) and nothing else.
+        let chain_present = s.multi_chain.chain_configs.contains_key(&v.chain);
+        if chain_present && !s.multi_chain.chain_is_registered(v.chain) {
+            return Err(ProtocolError::EvmAuth(format!(
+                "{:?}",
+                rumi_protocol_backend::chains::vault::OpenVaultError::ChainDisabled {
+                    chain: v.chain
+                }
+            )));
+        }
         s.multi_chain
             .consume_evm_nonce(&v.synthetic, intent.nonce)
             .map_err(|expected| {
@@ -2464,8 +2582,9 @@ fn clear_chain_bad_debt_circuit(
 
 /// A chain vault currently liquidatable on `chain` (CR below the liquidation
 /// threshold), with its interest-aware CR + sizing surfaced for an operator/SP.
-/// The discovery channel for the eventual SP fallback (finding #30; SP-specific
-/// bot-failed filtering lands in Increment 4).
+/// The discovery channel for the SP fallback (finding #30; SP-specific
+/// bot-failed filtering landed in Increment 4,
+/// `stability_pool_liquidate_chain_vault`).
 #[derive(CandidType, Deserialize, Debug, Clone)]
 pub struct ChainLiquidatableVault {
     pub vault_id: u64,
@@ -2795,6 +2914,10 @@ pub struct ManualPriceInfo {
 /// narrowly-scoped price-pusher principal (audit F-01) so the always-online CFX
 /// price monitor can refresh without holding the full developer key. Stamps the
 /// write time so `get_manual_collateral_price` can expose freshness.
+///
+/// Refuses outright, for EVERY caller, while the pair is XRC-managed (see the
+/// one-price-writer gate in the body): manual pricing is available only while
+/// the chain is disabled.
 #[candid_method(update)]
 #[update]
 fn set_manual_collateral_price(
@@ -2807,6 +2930,45 @@ fn set_manual_collateral_price(
         return Err(ProtocolError::ChainAdmin(
             "not authorized to set price".into(),
         ));
+    }
+    // ONE PRICE WRITER. A registered chain carrying a chain_liquidation_configs
+    // row is "XRC-managed" (xrc::chain_is_xrc_managed); combined with the
+    // chain's native symbol that is exactly the pair the automatic XRC timer
+    // writes (xrc::pair_is_xrc_managed). While a pair is XRC-managed the timer
+    // is its SOLE writer, and this endpoint rejects EVERY caller: the
+    // narrowly-scoped price pusher and the developer alike.
+    //
+    // The developer used to be exempt on the reasoning that a single trusted
+    // operator cannot race itself. That is wrong about the failure this gate
+    // exists to prevent. The race is not operator-vs-operator, it is
+    // WRITER-vs-WRITER on one `MultiChainState::set_manual_price` cell: the
+    // timer fires from its own message, on its own schedule, with no ordering
+    // relationship to an operator's ingress call. A manual write can land
+    // between a timer fetch and its write and be silently overwritten seconds
+    // later, or overwrite a fresher automatic sample, and with the
+    // source-time monotonicity rule below, a manual write also re-baselines the
+    // timestamp and price the timer's next sample is judged against. Two
+    // writers on one cell is the defect, regardless of who holds the second
+    // key.
+    //
+    // The developer keeps full manual control; it is now sequenced rather than
+    // concurrent. `disable_chain` makes the pair unmanaged (it flips
+    // `chain_is_registered` false, which also stops the timer fetching for the
+    // pair), the developer rebaselines and verifies the price manually, and
+    // `enable_chain` hands authority back to XRC. That order is the documented
+    // recovery procedure, and it is what the deterministic liquidation PocketIC
+    // fixtures now follow when they need to move a price after staging a
+    // liquidation config row.
+    if read_state(|s| rumi_protocol_backend::xrc::pair_is_xrc_managed(s, chain, &symbol)) {
+        return Err(ProtocolError::ChainAdmin(format!(
+            "chain {} symbol {} is XRC-managed (registered + a liquidation config row is \
+             present): the automatic XRC price timer is the SOLE writer of this pair, for \
+             every caller including the developer, so there is never a last-writer-wins race \
+             on it. To take manual control, disable_chain (which also stops the XRC timer for \
+             this pair), set the price, verify it, then enable_chain to hand authority back to \
+             XRC.",
+            chain.0, symbol
+        )));
     }
     // Reject a zero price. A 0 price drives `collateral_ratio_e4` to 0, which
     // fails-closed (every open/withdraw with debt rejects with BelowMinCr), so
@@ -2922,6 +3084,29 @@ fn set_evm_rpc_principal(principal: candid::Principal) -> Result<(), ProtocolErr
     Ok(())
 }
 
+/// The effective EVM RPC canister principal plus whether it's a
+/// developer-set override (as opposed to the built-in production default).
+#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EvmRpcPrincipalInfo {
+    pub effective: candid::Principal,
+    pub overridden: bool,
+}
+
+/// De-scaffold pass (2026-08-20, additive candid): reports the EVM RPC
+/// canister principal chains calls actually route through right now. Lets an
+/// operator verify, before registering a chain for real (see the go-live
+/// checklist at the top of chains/mod.rs, item 5), that no stale
+/// `set_evm_rpc_principal` override is left pointing production traffic at a
+/// PocketIC/staging mock.
+#[candid_method(query)]
+#[query]
+fn get_evm_rpc_principal() -> EvmRpcPrincipalInfo {
+    EvmRpcPrincipalInfo {
+        effective: rumi_protocol_backend::chains::evm::evm_rpc::evm_rpc_principal(),
+        overridden: read_state(|s| s.evm_rpc_override().is_some()),
+    }
+}
+
 /// Clear the global supply-invariant halt (set by the Timer-B self-check on
 /// drift). Use only AFTER manually confirming `total_supply_all_chains_e8s`
 /// matches `total_chain_vault_debt_e8s`. Developer-gated.
@@ -2958,29 +3143,6 @@ fn clear_invariant_halt() -> Result<(), ProtocolError> {
         );
     }
     result
-}
-
-const MAX_RECONCILIATION_PROOF_BYTES: usize = 512;
-
-fn normalize_reconciliation_proof(proof: &str) -> Result<String, ProtocolError> {
-    let trimmed = proof.trim();
-    if trimmed.is_empty() {
-        return Err(ProtocolError::ChainAdmin("proof text required".into()));
-    }
-    if trimmed.as_bytes().len() > MAX_RECONCILIATION_PROOF_BYTES {
-        return Err(ProtocolError::ChainAdmin(format!(
-            "proof text too long: {} bytes > {}",
-            trimmed.as_bytes().len(),
-            MAX_RECONCILIATION_PROOF_BYTES
-        )));
-    }
-    Ok(trimmed.to_string())
-}
-
-fn map_backing_settlement_error(
-    e: rumi_protocol_backend::chains::supply::BackingSettlementError,
-) -> ProtocolError {
-    ProtocolError::ChainAdmin(format!("{e:?}"))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3285,83 +3447,40 @@ fn get_pending_chain_burn_aging(
     read_state(|s| s.multi_chain.pending_chain_burn_aging(now_ns))
 }
 
-/// Developer-gated manual reconciliation for the SP path: called after the
-/// operator verifies the matching foreign-chain icUSD burn for an amount already
-/// booked in `pending_chain_burn_e8s`.
+/// DISABLED (2026-08-20, de-scaffold pass). This was the unverified, freeform-
+/// proof-string reconciliation path for the SP pending-burn accounting: any
+/// caller passing the developer gate could book an arbitrary `amount_e8s` with
+/// nothing but a human-typed `proof` string, no receipt verification at all.
+/// The receipt-verified replacement, `settle_pending_chain_burn_with_proof`,
+/// actually fetches and validates the on-chain burn receipt before settling.
+/// The candid signature is kept EXACTLY as-is (a breaking removal would ripple
+/// into any live caller still pointed at the old method); the body now just
+/// refuses, unconditionally, before touching state or the caller's identity.
 #[candid_method(update)]
 #[update]
 fn settle_pending_chain_burn(
-    chain: rumi_protocol_backend::chains::config::ChainId,
-    amount_e8s: u128,
-    proof: String,
+    _chain: rumi_protocol_backend::chains::config::ChainId,
+    _amount_e8s: u128,
+    _proof: String,
 ) -> Result<(), ProtocolError> {
-    let caller = ic_cdk::caller();
-    if read_state(|s| s.developer_principal != caller) {
-        return Err(ProtocolError::ChainAdmin("not developer".into()));
-    }
-    let proof = normalize_reconciliation_proof(&proof)?;
-    mutate_state(|s| {
-        rumi_protocol_backend::chains::supply::settle_pending_chain_burn(
-            &mut s.multi_chain,
-            chain,
-            amount_e8s,
-        )
-    })
-    .map_err(map_backing_settlement_error)?;
-    let timestamp = ic_cdk::api::time();
-    rumi_protocol_backend::storage::record_event(&Event::ChainPendingBurnSettled {
-        chain_id: chain,
-        amount_e8s,
-        proof: proof.clone(),
-        timestamp,
-    });
-    log!(
-        INFO,
-        "[settle_pending_chain_burn] chain={:?} amount_e8s={} proof={}",
-        chain,
-        amount_e8s,
-        proof
-    );
-    Ok(())
+    Err(ProtocolError::ChainAdmin(
+        "disabled: use settle_pending_chain_burn_with_proof (receipt-verified)".into(),
+    ))
 }
 
-/// Developer-gated manual reconciliation for Tier-1 reserve retirement: called
-/// after the operator verifies the reserve-backed foreign icUSD was burned.
+/// DISABLED (2026-08-20, de-scaffold pass). Same rationale as
+/// `settle_pending_chain_burn` above, for Tier-1 reserve retirement: the
+/// receipt-verified replacement is `settle_reserve_burn_with_proof`.
 #[candid_method(update)]
 #[update]
 fn settle_reserve_burn(
-    chain: rumi_protocol_backend::chains::config::ChainId,
-    amount_e8s: u128,
-    proof: String,
+    _chain: rumi_protocol_backend::chains::config::ChainId,
+    _amount_e8s: u128,
+    _proof: String,
 ) -> Result<(), ProtocolError> {
-    let caller = ic_cdk::caller();
-    if read_state(|s| s.developer_principal != caller) {
-        return Err(ProtocolError::ChainAdmin("not developer".into()));
-    }
-    let proof = normalize_reconciliation_proof(&proof)?;
-    mutate_state(|s| {
-        rumi_protocol_backend::chains::supply::settle_reserve_burn(
-            &mut s.multi_chain,
-            chain,
-            amount_e8s,
-        )
-    })
-    .map_err(map_backing_settlement_error)?;
-    let timestamp = ic_cdk::api::time();
-    rumi_protocol_backend::storage::record_event(&Event::ChainReserveBurnSettled {
-        chain_id: chain,
-        amount_e8s,
-        proof: proof.clone(),
-        timestamp,
-    });
-    log!(
-        INFO,
-        "[settle_reserve_burn] chain={:?} amount_e8s={} proof={}",
-        chain,
-        amount_e8s,
-        proof
-    );
-    Ok(())
+    Err(ProtocolError::ChainAdmin(
+        "disabled: use settle_reserve_burn_with_proof (receipt-verified)".into(),
+    ))
 }
 
 /// Clear a chain's reorg circuit breaker. Resets BOTH `reorg_halted` AND the
@@ -9087,9 +9206,29 @@ fn set_chains_ecdsa_key_name(name: String) -> Result<(), ProtocolError> {
     let has_vaults = read_state(|s| !s.multi_chain.chain_vaults.is_empty());
     validate_ecdsa_key_change(&name, has_vaults)?;
     mutate_state(|s| s.chains_ecdsa_key_name = name.clone());
+    // De-scaffold pass (2026-08-20): a successful key change invalidates the
+    // settlement/interest-treasury/reserve address caches (chains/evm/tecdsa.rs).
+    // They are keyed only by ChainId, not by the key name, so a warm entry
+    // would otherwise keep returning an address derived from the OLD key.
+    // Only reached on the success path: `validate_ecdsa_key_change` above
+    // already rejected a bad name or a change with live chain vaults, so a
+    // rejected call never clears anything.
+    //
+    // Security review follow-up (F8): clearing the caches here is defense in
+    // depth, not the actual invariant. An async derive that started under
+    // the OLD key and is still in flight (suspended at its management-canister
+    // await) when this runs would otherwise resume and write a stale address
+    // into the cache THIS CALL just cleared. `bump_ecdsa_key_generation()`
+    // closes that gap: every `cached_*` fn in tecdsa.rs captures the
+    // generation before it starts deriving and discards its result (rather
+    // than caching or returning it) if the generation moved on while it was
+    // suspended. See tecdsa.rs's "Key-generation guard" section for the full
+    // interleaving walkthrough.
+    rumi_protocol_backend::chains::evm::tecdsa::clear_address_caches();
+    rumi_protocol_backend::chains::evm::tecdsa::bump_ecdsa_key_generation();
     log!(
         INFO,
-        "[set_chains_ecdsa_key_name] chains EVM tECDSA key set to {}",
+        "[set_chains_ecdsa_key_name] chains EVM tECDSA key set to {}; address caches cleared",
         name
     );
     Ok(())
@@ -11886,6 +12025,96 @@ mod chain_vault_param_tests {
     }
 }
 
+/// De-scaffold banner correction (2026-08-20): pins the ACTUAL public-open gate
+/// for `open_chain_vault_evm`, verified by reading `verify_intent_ctx` end to
+/// end rather than assumed. `verify_intent_ctx` resolves the bound
+/// `chain_contracts` entry BEFORE it ever calls `eip712::verify_intent` (the
+/// contract address is the EIP-712 domain separator, so it has to be resolved
+/// first), so an unbound chain rejects with "no contract set" on ANY
+/// signature, valid or garbage, and regardless of chain registration or price
+/// state. This is why `chains/mod.rs`'s go-live checklist calls binding the
+/// IcUSD contract (`set_chain_contract`) the actual "make public" step: unlike
+/// `disable_chain` (which does NOT remove the `chain_configs` entry, so it does
+/// NOT block `open_chain_vault_in_state`'s `contains_key` check for a
+/// previously-registered chain), withholding `set_chain_contract` is a gate
+/// `open_chain_vault_evm` cannot get past at all.
+#[cfg(test)]
+mod evm_open_public_gate_tests {
+    use super::{replace_state, verify_intent_ctx, State};
+    use rumi_protocol_backend::chains::config::{ChainConfigV3, ChainId, ChainStatus, GasStrategy};
+    use rumi_protocol_backend::chains::evm::eip712::{IntentAction, VaultIntent};
+
+    const CFX_MAINNET: ChainId = ChainId(1030);
+
+    fn registered_chain_config() -> ChainConfigV3 {
+        ChainConfigV3 {
+            chain_id: CFX_MAINNET,
+            display_name: "Conflux mainnet".to_string(),
+            rpc_endpoints: vec!["https://evm.confluxrpc.com".to_string()],
+            finality_depth: 400,
+            gas_strategy: GasStrategy::EvmEip1559 {
+                max_priority_fee_gwei: 1,
+                max_fee_gwei_ceiling: 100,
+            },
+            chain_native_decimals: 18,
+            registered_at_ns: 0,
+            status: ChainStatus::Registered,
+            burn_watch_poll_enabled: false,
+            min_quorum_providers: None,
+        }
+    }
+
+    fn dummy_open_intent() -> VaultIntent {
+        VaultIntent {
+            action: IntentAction::Open.as_u8(),
+            chain_id: CFX_MAINNET.0 as u64,
+            owner: "0x000000000000000000000000000000000000c0de".to_string(),
+            vault_id: 0,
+            collateral_wei: 1_000_000_000_000_000_000,
+            debt_e8s: 100_000_000,
+            recipient: "0x000000000000000000000000000000000000c0de".to_string(),
+            nonce: 0,
+            deadline_secs: u64::MAX,
+        }
+    }
+
+    /// The core pin: chain registered + a fresh manual price present, but NO
+    /// `set_chain_contract` binding, still rejects with the contract-specific
+    /// error. It does so WITHOUT needing a validly-signed intent (garbage
+    /// signature bytes), because the contract lookup happens strictly before
+    /// signature verification.
+    #[test]
+    fn open_rejects_when_no_contract_bound_even_with_registered_chain_and_fresh_price() {
+        let mut state = State::default();
+        state
+            .multi_chain
+            .chain_configs
+            .insert(CFX_MAINNET, registered_chain_config());
+        // A price IS present (loose "any price" gate, no liquidation config row
+        // yet to enforce freshness), proving price presence alone is not the
+        // gate either.
+        state
+            .multi_chain
+            .set_manual_price(CFX_MAINNET, "CFX".to_string(), 8_000_000, 1_000);
+        replace_state(state);
+
+        let err = verify_intent_ctx(&dummy_open_intent(), b"not-a-real-signature", IntentAction::Open)
+            .expect_err("must reject with no chain_contracts entry");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("no contract set"),
+            "expected the contract-binding rejection, got: {msg}"
+        );
+    }
+
+    // A second test proving that binding the contract clears this specific
+    // gate (and only fails downstream on signature verification) would need
+    // `ic_cdk::api::time()`, which traps outside a real canister. That
+    // half of the ordering claim is left to the PocketIC suites (e.g.
+    // `conflux_espace_happy_path_pic`, which opens a vault end to end against
+    // a bound contract with a real signature).
+}
+
 #[cfg(test)]
 mod chain_sp_absorb_entry_tests {
     use super::{
@@ -12364,29 +12593,91 @@ mod inc12_liquidation_config_tests {
     }
 }
 
+/// De-scaffold pass (2026-08-20): the legacy freeform-proof-string
+/// reconciliation endpoints (`settle_pending_chain_burn`, `settle_reserve_burn`)
+/// are hard-disabled in favor of the receipt-verified `_with_proof` variants.
+/// These are plain unit tests (no PocketIC / caller identity needed) because
+/// the disabled bodies no longer read `ic_cdk::caller()` at all: they refuse
+/// unconditionally, for every caller, before touching state. A PocketIC-level
+/// test proving the SAME refusal through the real candid boundary as the
+/// developer principal lives in
+/// `tests/chains_legacy_reconciliation_disabled_pic.rs`.
 #[cfg(test)]
-mod inc5_reconciliation_tests {
-    use super::normalize_reconciliation_proof;
+mod legacy_reconciliation_hard_disabled_tests {
+    use super::{settle_pending_chain_burn, settle_reserve_burn, ProtocolError};
+    use rumi_protocol_backend::chains::config::ChainId;
 
     #[test]
-    fn reconciliation_proof_accepts_trimmed_nonempty_text() {
-        assert_eq!(
-            normalize_reconciliation_proof("  cfx burn tx 0xabc:7  ").expect("valid proof"),
-            "cfx burn tx 0xabc:7"
-        );
+    fn settle_pending_chain_burn_always_refuses() {
+        let err = settle_pending_chain_burn(ChainId(1030), 100, "any proof".to_string())
+            .expect_err("legacy endpoint must refuse");
+        match err {
+            ProtocolError::ChainAdmin(msg) => {
+                assert!(msg.contains("disabled"), "msg={msg}");
+                assert!(
+                    msg.contains("settle_pending_chain_burn_with_proof"),
+                    "msg should point at the replacement: msg={msg}"
+                );
+            }
+            other => panic!("expected ChainAdmin, got {other:?}"),
+        }
     }
 
     #[test]
-    fn reconciliation_proof_rejects_empty_text() {
-        let err = normalize_reconciliation_proof("   ").unwrap_err();
-        assert!(format!("{err:?}").contains("proof text required"));
+    fn settle_reserve_burn_always_refuses() {
+        let err = settle_reserve_burn(ChainId(1030), 100, "any proof".to_string())
+            .expect_err("legacy endpoint must refuse");
+        match err {
+            ProtocolError::ChainAdmin(msg) => {
+                assert!(msg.contains("disabled"), "msg={msg}");
+                assert!(
+                    msg.contains("settle_reserve_burn_with_proof"),
+                    "msg should point at the replacement: msg={msg}"
+                );
+            }
+            other => panic!("expected ChainAdmin, got {other:?}"),
+        }
     }
 
     #[test]
-    fn reconciliation_proof_rejects_text_over_512_bytes() {
-        let proof = "x".repeat(513);
-        let err = normalize_reconciliation_proof(&proof).unwrap_err();
-        assert!(format!("{err:?}").contains("proof text too long"));
+    fn settle_pending_chain_burn_refuses_regardless_of_amount_or_proof_shape() {
+        // Zero amount, empty proof, huge amount, garbage proof: every input
+        // hits the same unconditional refusal (there is no longer any
+        // validation branch to exercise).
+        assert!(settle_pending_chain_burn(ChainId(71), 0, String::new()).is_err());
+        assert!(settle_pending_chain_burn(ChainId(71), u128::MAX, "x".repeat(9999)).is_err());
+    }
+
+    #[test]
+    fn settle_reserve_burn_refuses_regardless_of_amount_or_proof_shape() {
+        assert!(settle_reserve_burn(ChainId(71), 0, String::new()).is_err());
+        assert!(settle_reserve_burn(ChainId(71), u128::MAX, "x".repeat(9999)).is_err());
+    }
+}
+
+/// De-scaffold pass (2026-08-20): the additive `get_evm_rpc_principal` query.
+#[cfg(test)]
+mod get_evm_rpc_principal_tests {
+    use super::{get_evm_rpc_principal, replace_state, State};
+    use rumi_protocol_backend::chains::evm::evm_rpc::default_evm_rpc_principal;
+
+    #[test]
+    fn reports_default_when_no_override_set() {
+        replace_state(State::default());
+        let info = get_evm_rpc_principal();
+        assert_eq!(info.effective, default_evm_rpc_principal());
+        assert!(!info.overridden);
+    }
+
+    #[test]
+    fn reports_override_and_flags_it() {
+        use candid::Principal;
+        replace_state(State::default());
+        let mock = Principal::from_slice(&[9; 29]);
+        super::mutate_state(|s| s.evm_rpc_principal_override = Some(mock));
+        let info = get_evm_rpc_principal();
+        assert_eq!(info.effective, mock);
+        assert!(info.overridden);
     }
 }
 

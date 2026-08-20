@@ -1888,8 +1888,9 @@ async fn submit_op(chain: ChainId, op_id: u64, op: crate::chains::settlement_que
 /// mark the op `Failed`, restore the reserved collateral under a marker-CAS,
 /// clear the `pending_liquidation` marker, and mark the vault `sp_attempted` so
 /// detection does NOT re-route it to the bot (no retry loop). The Tier-2 SP
-/// consumer of `sp_attempted_chain_vaults` lands in Increment 4; until then the
-/// vault falls to Tier-3 manual. Emits the existing `ChainSettlementFailed` (no
+/// consumer of `sp_attempted_chain_vaults` is `stability_pool_liquidate_chain_vault`
+/// (main.rs), landed in Increment 4; a vault it does not (or cannot) absorb
+/// falls to Tier-3 manual. Emits the existing `ChainSettlementFailed` (no
 /// new Event variant). Used by both the submit do-not-swap branches and the
 /// confirm revert/timeout branches. Idempotent via the op_id marker-CAS.
 fn escalate_failed_swap(chain: ChainId, op_id: u64, vault_id: u64, reason: String) {
@@ -1918,7 +1919,8 @@ fn escalate_failed_swap(chain: ChainId, op_id: u64, vault_id: u64, reason: Strin
             }
         }
         s.multi_chain.bot_pending_chain_vaults.remove(&vault_id);
-        // The bot gave up; do not re-route to the bot. (Inc 4 SP consumes this.)
+        // The bot gave up; do not re-route to the bot. Tier-2 SP
+        // (stability_pool_liquidate_chain_vault, Increment 4) consumes this marker.
         s.multi_chain.sp_attempted_chain_vaults.insert(vault_id);
     });
     crate::storage::record_event(&crate::event::Event::ChainSettlementFailed {

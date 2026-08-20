@@ -170,8 +170,8 @@ type CollateralConfig = record {
   display_color : opt text;
   borrowing_fee : blob;
   interest_rate_apr : blob;
-  liquidation_ratio : blob;
   symbol : opt text;
+  liquidation_ratio : blob;
 };
 type CollateralInterestInfo = record {
   total_debt_e8s : nat64;
@@ -747,6 +747,7 @@ type EventsByPrincipalPagedResponse = record {
   events : vec record { nat64; Event };
   total_events : nat64;
 };
+type EvmRpcPrincipalInfo = record { effective : principal; overridden : bool };
 type FeeSource = variant { BorrowingFee; RedemptionFee };
 type Fees = record { redemption_fee : float64; borrowing_fee : float64 };
 type ForwardFilteredEventsResponse = record {
@@ -833,20 +834,20 @@ type PendingChainBurnAging = record {
   chain_id : nat32;
   oldest_reference_ns : opt nat64;
 };
-type PendingThreeUsdRefund = record {
-  stability_pool : principal;
-  ledger : principal;
-  amount_e8s : nat64;
-  vault_id : nat64;
-  retry_count : nat8;
-  op_nonce : nat;
-};
 type PendingLiquidationV1 = record {
   started_at_ns : nat64;
   op_id : nat64;
   tier : LiquidationTier;
   debt_to_clear_e8s : nat;
   collateral_reserved_native : nat;
+};
+type PendingThreeUsdRefund = record {
+  retry_count : nat8;
+  vault_id : nat64;
+  amount_e8s : nat64;
+  ledger : principal;
+  op_nonce : nat;
+  stability_pool : principal;
 };
 type PerCollateralRateCurve = record {
   markers : vec record { float64; float64 };
@@ -1008,40 +1009,40 @@ type ReserveSettlementProofArg = record {
 };
 type Result = variant { Ok; Err : ProtocolError };
 type Result_1 = variant { Ok : nat64; Err : ProtocolError };
-type Result_10 = variant { Ok : ChainVaultV1; Err : ProtocolError };
-type Result_11 = variant { Ok : OpenVaultSuccess; Err : ProtocolError };
-type Result_12 = variant { Ok : XrpVaultOpenInfo; Err : ProtocolError };
-type Result_13 = variant {
+type Result_10 = variant { Ok : ConsentInfo; Err : Icrc21Error };
+type Result_11 = variant { Ok : ChainVaultV1; Err : ProtocolError };
+type Result_12 = variant { Ok : OpenVaultSuccess; Err : ProtocolError };
+type Result_13 = variant { Ok : XrpVaultOpenInfo; Err : ProtocolError };
+type Result_14 = variant {
   Ok : ChainSupplyReconciliation;
   Err : ProtocolError;
 };
-type Result_14 = variant { Ok : bool; Err : ProtocolError };
-type Result_15 = variant { Ok : ReserveRedemptionResult; Err : ProtocolError };
-type Result_16 = variant { Ok : RepayAndCloseSuccess; Err : ProtocolError };
-type Result_17 = variant { Ok : blob; Err : ProtocolError };
-type Result_18 = variant {
+type Result_15 = variant { Ok : bool; Err : ProtocolError };
+type Result_16 = variant { Ok : ReserveRedemptionResult; Err : ProtocolError };
+type Result_17 = variant { Ok : RepayAndCloseSuccess; Err : ProtocolError };
+type Result_18 = variant { Ok : blob; Err : ProtocolError };
+type Result_19 = variant {
   Ok : StabilityPoolLiquidationResult;
   Err : ProtocolError;
 };
-type Result_19 = variant {
+type Result_2 = variant { Ok : text; Err : ProtocolError };
+type Result_20 = variant {
   Ok : ChainStabilityPoolLiquidationResult;
   Err : ProtocolError;
 };
-type Result_2 = variant { Ok : text; Err : ProtocolError };
-type Result_20 = variant { Ok : XrpSpAbsorbResult; Err : ProtocolError };
-type Result_21 = variant { Ok : XrpSpAbsorbPreflight; Err : ProtocolError };
-type Result_22 = variant { Ok : nat32; Err : ProtocolError };
-type Result_23 = variant {
+type Result_21 = variant { Ok : XrpSpAbsorbResult; Err : ProtocolError };
+type Result_22 = variant { Ok : XrpSpAbsorbPreflight; Err : ProtocolError };
+type Result_23 = variant { Ok : nat32; Err : ProtocolError };
+type Result_3 = variant {
   Ok : vec record { principal; text };
   Err : ProtocolError;
 };
-type Result_3 = variant { Ok : SuccessWithFee; Err : ProtocolError };
-type Result_4 = variant { Ok : BotLiquidationResult; Err : ProtocolError };
-type Result_5 = variant { Ok : opt nat64; Err : ProtocolError };
-type Result_6 = variant { Ok : ChainReserveReport; Err : ProtocolError };
-type Result_7 = variant { Ok : nat8; Err : ProtocolError };
-type Result_8 = variant { Ok : float64; Err : ProtocolError };
-type Result_9 = variant { Ok : ConsentInfo; Err : Icrc21Error };
+type Result_4 = variant { Ok : SuccessWithFee; Err : ProtocolError };
+type Result_5 = variant { Ok : BotLiquidationResult; Err : ProtocolError };
+type Result_6 = variant { Ok : opt nat64; Err : ProtocolError };
+type Result_7 = variant { Ok : ChainReserveReport; Err : ProtocolError };
+type Result_8 = variant { Ok : nat8; Err : ProtocolError };
+type Result_9 = variant { Ok : float64; Err : ProtocolError };
 type SettlementProofIds = record { pending : vec text; reserve : vec text };
 type SpProofLedger = variant { IcusdBurn; ThreePoolTransfer };
 type SpWritedownProof = record {
@@ -1228,7 +1229,6 @@ type XrpVaultOpenInfo = record {
 };
 service : (ProtocolArg) -> {
   add_collateral_token : (AddCollateralArg) -> (Result);
-  backfill_collateral_symbols : () -> (Result_23);
   add_margin_to_vault : (VaultArg) -> (Result_1);
   add_margin_with_deposit : (nat64) -> (Result_1);
   admin_correct_vault_collateral : (nat64, nat64, text) -> (Result);
@@ -1238,10 +1238,11 @@ service : (ProtocolArg) -> {
   admin_resolve_stuck_claim : (nat64, bool) -> (Result);
   admin_resolve_xrp_claim : (nat64, XrpClaimResolution) -> (Result);
   admin_sweep_to_treasury : (text) -> (Result_1);
+  backfill_collateral_symbols : () -> (Result_3);
   borrow_chain_vault_evm : (VaultIntent, blob) -> (Result);
-  borrow_from_vault : (VaultArg) -> (Result_3);
+  borrow_from_vault : (VaultArg) -> (Result_4);
   bot_cancel_liquidation : (nat64) -> (Result);
-  bot_claim_liquidation : (nat64) -> (Result_4);
+  bot_claim_liquidation : (nat64) -> (Result_5);
   bot_confirm_liquidation : (nat64) -> (Result);
   cancel_xrp_pending_open : (nat64) -> (Result);
   chain_has_active_settlement_op : (nat32) -> (bool) query;
@@ -1255,13 +1256,14 @@ service : (ProtocolArg) -> {
   close_chain_vault : (nat64, text) -> (Result);
   close_chain_vault_evm : (VaultIntent, blob) -> (Result);
   close_solana_vault : (nat64, text) -> (Result);
-  close_vault : (nat64) -> (Result_5);
+  close_vault : (nat64) -> (Result_6);
   coingecko_transform : (TransformArgs) -> (HttpResponse) query;
   confirm_xrp_deposit : (nat64) -> (Result_1);
   cycle_manager_metrics : () -> (vec CycleManagerMetric) query;
   cycles_status : () -> (CycleManagerCyclesStatus) query;
   delete_chain : (nat32) -> (Result);
   disable_chain : (nat32) -> (Result);
+  enable_chain : (nat32) -> (Result);
   enter_recovery_mode : () -> (Result);
   exit_recovery_mode : () -> (Result);
   freeze_protocol : () -> (Result);
@@ -1283,7 +1285,7 @@ service : (ProtocolArg) -> {
       opt ChainLiquidationConfigV1,
     ) query;
   get_chain_reserve_address : (nat32) -> (Result_2);
-  get_chain_reserves : (nat32) -> (Result_6);
+  get_chain_reserves : (nat32) -> (Result_7);
   get_chain_settlement_address : (nat32) -> (Result_2);
   get_chain_vault : (nat64) -> (opt ChainVaultV1) query;
   get_chains_ecdsa_key_name : () -> (text) query;
@@ -1309,6 +1311,7 @@ service : (ProtocolArg) -> {
   get_events_forward_filtered : (nat64, nat64, opt vec EventTypeFilter) -> (
       ForwardFilteredEventsResponse,
     ) query;
+  get_evm_rpc_principal : () -> (EvmRpcPrincipalInfo) query;
   get_fees : (nat64) -> (Fees) query;
   get_fees_for_collateral : (principal, nat64) -> (Fees) query;
   get_global_icusd_mint_cap : () -> (nat64) query;
@@ -1331,11 +1334,12 @@ service : (ProtocolArg) -> {
   get_my_xrp_pending_deposits : () -> (
       vec record { nat64; XrpPendingDeposit },
     ) query;
+  get_pending_3usd_refunds : () -> (vec PendingThreeUsdRefund) query;
   get_pending_amm1_donations_count : () -> (nat64) query;
   get_pending_chain_burn_aging : () -> (vec PendingChainBurnAging) query;
+  get_pending_stability_pool_interest_notification_count : () -> (nat64) query;
   get_price_pusher_allowed : () -> (vec record { nat32; text }) query;
   get_price_pusher_principal : () -> (opt principal) query;
-  get_pending_3usd_refunds : () -> (vec PendingThreeUsdRefund) query;
   get_protocol_3usd_reserves : () -> (nat64) query;
   get_protocol_config : () -> (ProtocolConfig) query;
   get_protocol_snapshots : (GetSnapshotsArg) -> (vec ProtocolSnapshot) query;
@@ -1345,7 +1349,7 @@ service : (ProtocolArg) -> {
   get_redemption_fee_ceiling : () -> (float64) query;
   get_redemption_fee_floor : () -> (float64) query;
   get_redemption_rate : () -> (float64) query;
-  get_redemption_tier : (principal) -> (Result_7) query;
+  get_redemption_tier : (principal) -> (Result_8) query;
   get_reserve_balances : () -> (vec ReserveBalance) query;
   get_reserve_redemption_fee : () -> (float64) query;
   get_reserve_redemptions_enabled : () -> (bool) query;
@@ -1366,13 +1370,12 @@ service : (ProtocolArg) -> {
   get_three_pool_canister : () -> (opt principal) query;
   get_treasury_principal : () -> (opt principal) query;
   get_treasury_stats : () -> (TreasuryStats) query;
-  get_pending_stability_pool_interest_notification_count : () -> (nat64) query;
   get_vault_count : () -> (nat64) query;
   get_vault_history : (nat64) -> (vec record { nat64; Event }) query;
   get_vault_history_paged : (nat64, nat64, nat64) -> (
       GetEventsFilteredResponse,
     ) query;
-  get_vault_interest_rate : (nat64) -> (Result_8) query;
+  get_vault_interest_rate : (nat64) -> (Result_9) query;
   get_vaults : (opt principal) -> (vec CandidVault) query;
   get_vaults_page : (nat64, nat64) -> (VaultsPageResponse) query;
   get_xrp_claims : () -> (vec record { nat64; XrpClaim }) query;
@@ -1384,32 +1387,32 @@ service : (ProtocolArg) -> {
   harvest_chain_interest : (nat32) -> (Result_1);
   http_request : (HttpRequest) -> (HttpResponse_1) query;
   icrc10_supported_standards : () -> (vec StandardRecord) query;
-  icrc21_canister_call_consent_message : (ConsentMessageRequest) -> (Result_9);
+  icrc21_canister_call_consent_message : (ConsentMessageRequest) -> (Result_10);
   icrc28_trusted_origins : () -> (Icrc28TrustedOriginsResponse) query;
   liquidate_chain_vault : (nat64) -> (Result_1);
-  liquidate_vault : (nat64) -> (Result_3);
-  liquidate_vault_partial : (VaultArg) -> (Result_3);
-  liquidate_vault_partial_with_stable : (VaultArgWithToken) -> (Result_3);
+  liquidate_vault : (nat64) -> (Result_4);
+  liquidate_vault_partial : (VaultArg) -> (Result_4);
+  liquidate_vault_partial_with_stable : (VaultArgWithToken) -> (Result_4);
   list_chain_vaults : (nat32) -> (vec ChainVaultV1) query;
   open_chain_vault : (nat32, nat, nat, text) -> (Result_1);
   open_chain_vault_evm : (VaultIntent, blob) -> (Result_1);
-  open_solana_vault : (nat, nat, text) -> (Result_10);
-  open_vault : (nat64, opt principal) -> (Result_11);
-  open_vault_and_borrow : (nat64, nat64, opt principal) -> (Result_11);
-  open_vault_with_deposit : (nat64, opt principal) -> (Result_11);
-  open_xrp_vault : () -> (Result_12);
-  partial_liquidate_vault : (VaultArg) -> (Result_3);
+  open_solana_vault : (nat, nat, text) -> (Result_11);
+  open_vault : (nat64, opt principal) -> (Result_12);
+  open_vault_and_borrow : (nat64, nat64, opt principal) -> (Result_12);
+  open_vault_with_deposit : (nat64, opt principal) -> (Result_12);
+  open_xrp_vault : () -> (Result_13);
+  partial_liquidate_vault : (VaultArg) -> (Result_4);
   partial_repay_to_vault : (VaultArg) -> (Result_1);
   provide_liquidity : (nat64) -> (Result_1);
-  reconcile_chain_supply : (nat32) -> (Result_13);
-  recover_pending_transfer : (nat64) -> (Result_14);
+  reconcile_chain_supply : (nat32) -> (Result_14);
+  recover_pending_transfer : (nat64) -> (Result_15);
   recover_stuck_chain_vault : (nat32, nat64) -> (Result);
-  redeem_collateral : (principal, nat64) -> (Result_3);
-  redeem_icp : (nat64) -> (Result_3);
-  redeem_reserves : (nat64, opt principal) -> (Result_15);
+  redeem_collateral : (principal, nat64) -> (Result_4);
+  redeem_icp : (nat64) -> (Result_4);
+  redeem_reserves : (nat64, opt principal) -> (Result_16);
   register_chain : (RegisterChainArg) -> (Result);
   register_xrp_collateral : () -> (Result);
-  repay_and_close_vault : (VaultArg) -> (Result_16);
+  repay_and_close_vault : (VaultArg) -> (Result_17);
   repay_to_vault : (VaultArg) -> (Result_1);
   repay_to_vault_with_stable : (VaultArgWithToken) -> (Result_1);
   reset_bot_budget : (nat64) -> (Result);
@@ -1515,30 +1518,30 @@ service : (ProtocolArg) -> {
   solana_get_balance : (text) -> (Result_1);
   solana_get_mint_supply : () -> (Result_1);
   solana_settlement_address : () -> (Result_2);
-  solana_sign_test_transfer : (text, nat64) -> (Result_17);
-  stability_pool_liquidate : (nat64, nat64) -> (Result_18);
+  solana_sign_test_transfer : (text, nat64) -> (Result_18);
+  stability_pool_liquidate : (nat64, nat64) -> (Result_19);
   stability_pool_liquidate_chain_vault : (nat64, nat64, SpWritedownProof) -> (
-      Result_19,
+      Result_20,
     );
   stability_pool_liquidate_debt_burned : (nat64, nat64, SpWritedownProof) -> (
-      Result_18,
+      Result_19,
     );
   stability_pool_liquidate_with_reserves : (nat64, nat64, nat64, principal) -> (
-      Result_18,
+      Result_19,
     );
-  stability_pool_liquidate_xrp_vault : (XrpSpAbsorbRequest) -> (Result_20);
+  stability_pool_liquidate_xrp_vault : (XrpSpAbsorbRequest) -> (Result_21);
   stability_pool_preflight_chain_absorb : (nat64, nat64) -> (Result);
-  stability_pool_preflight_xrp_absorb : (nat64, nat64) -> (Result_21);
-  stability_pool_release_xrp_absorb_preflight : (nat64, nat64) -> (Result_14);
+  stability_pool_preflight_xrp_absorb : (nat64, nat64) -> (Result_22);
+  stability_pool_release_xrp_absorb_preflight : (nat64, nat64) -> (Result_15);
   stability_pool_settle_xrp_claim : (nat64, principal, text, opt nat32) -> (
       Result_2,
     );
-  stability_pool_xrp_claim_outstanding : (nat64, principal) -> (Result_14);
-  submit_burn_proof : (nat32, text) -> (Result_22);
+  stability_pool_xrp_claim_outstanding : (nat64, principal) -> (Result_15);
+  submit_burn_proof : (nat32, text) -> (Result_23);
   sweep_xrp_pending_open : (nat64) -> (Result);
   unfreeze_protocol : () -> (Result);
   update_collateral_config : (principal, CollateralConfig) -> (Result);
-  withdraw_and_close_vault : (nat64) -> (Result_5);
+  withdraw_and_close_vault : (nat64) -> (Result_6);
   withdraw_chain_collateral : (nat64, nat, text) -> (Result);
   withdraw_chain_collateral_evm : (VaultIntent, blob) -> (Result);
   withdraw_collateral : (nat64) -> (Result_1);
