@@ -2,27 +2,93 @@
 //! code-complete and dormant, not experimental scaffolding. Increments 0-13
 //! (PRs #261-#286, June 2026) built the full engine: EIP-712 vault auth,
 //! observer/settlement workers, the liquidation bot path, and the SP
-//! escalation. It is dormant purely because prod carries no per-chain config
-//! row; registering a chain and setting its liquidation config IS the public
-//! launch (the `_evm` vault endpoints are EIP-712-signature-authed, not
-//! dev-gated, so there is no separate "flip a switch" step).
+//! escalation (`stability_pool_liquidate_chain_vault`). It is dormant purely
+//! because prod carries no per-chain config row.
 //!
-//! Go-live checklist for the first prod chain (Conflux, chain id 1030):
-//!  1. `set_chains_ecdsa_key_name("key_1")` BEFORE the first prod chain vault
-//!     opens (the key locks in at first vault use). Prod currently carries
-//!     "test_key_1" (verified 2026-08-20).
-//!  2. Register chain 1030 with MAINNET-shaped args
+//! DEPLOY NOTE: this PR also fixes a live stale-cache bug in the
+//! settlement/interest-treasury/reserve address derivation
+//! (chains/evm/tecdsa.rs). Do NOT trust any chain address read from prod
+//! before this upgrade lands -- a pre-rotation cache entry may still be warm.
+//!
+//! ── The actual public-open gate (verified by reading `verify_intent_ctx` +
+//! `open_chain_vault_in_state` end to end, not assumed) ──────────────────────
+//! `open_chain_vault_evm`'s checks run in this order:
+//!  1. `verify_intent_ctx` (main.rs) resolves the chain's bound
+//!     `chain_contracts` entry BEFORE it ever verifies the EIP-712 signature
+//!     (the contract address is the domain separator). An unbound chain
+//!     rejects with "no contract set", on ANY signature, regardless of
+//!     registration or price state. This is why binding the IcUSD contract
+//!     (`set_chain_contract`) is the step that actually makes a chain
+//!     publicly open, not registration.
+//!  2. `open_chain_vault_in_state` (chains/vault.rs) then requires
+//!     `MultiChainState::chain_is_registered` (`ChainStatus::Registered`).
+//!     This check runs in the SYNCHRONOUS post-`.await` half of the open
+//!     call (after the tECDSA custody-address derive resolves), so a
+//!     `disable_chain` landing while that derive is in flight is still
+//!     caught on resume. `borrow_chain_vault_evm` (fully synchronous, no
+//!     `.await`) reads the same predicate. Withdraw/close/repay do NOT read
+//!     it -- exit paths keep working on a Disabled chain by design.
+//!  3. A native-asset price must be present (`manual_prices`); it is only
+//!     STALENESS-CHECKED once a `chain_liquidation_configs` row exists with
+//!     `max_price_age_ns > 0` (`gated_chain_price_e8`, chains/vault.rs) --
+//!     independent of that row's `enabled` flag, which gates the
+//!     liquidation-swap WORKER only, never the open/borrow price check.
+//!
+//! ── XRC-managed pricing invariant (`xrc::chain_is_xrc_managed`) ────────────
+//! A chain that is `Registered` AND carries a `chain_liquidation_configs` row
+//! (regardless of `enabled`) is "XRC-managed": the XRC price timer is the
+//! SOLE writer of that chain's native-symbol price, and
+//! `set_manual_collateral_price` REJECTS a write to that pair for every
+//! caller, including the authorized price-pusher, to avoid a last-writer-wins
+//! race between the two. The (superseded) off-chain CFX price monitor is a
+//! decommissioned/emergency-only fallback now: it can only push a price again
+//! after `disable_chain` (see below) makes the pair manual again.
+//!
+//! CYCLE COST NOTE: staging a `chain_liquidation_configs` row starts the XRC
+//! meter immediately (~1B cycles/call at 300s = roughly 288B cycles/day per
+//! symbol), the moment the row is INSERTED -- not when `enabled` is later
+//! flipped true. Budget for that at staging time, not at liquidation go-live.
+//!
+//! ── `disable_chain`: the post-launch emergency risk stop ───────────────────
+//! Flips `ChainStatus` to `Disabled`. Effects: blocks new opens/borrows (item
+//! 2 above); makes the chain no longer XRC-managed, which ALSO stops the
+//! price timer fetching for it (`xrc::chains_needing_price_feed` reads the
+//! same `chain_is_registered` predicate) and re-opens manual pricing for that
+//! pair. Does NOT affect withdraw/close/repay, and does NOT stop the
+//! observer/settlement workers or liquidation processing for already-open
+//! vaults (those are unaffected by `ChainStatus`).
+//! RECOVERY: there is currently NO `Disabled` -> `Registered` transition.
+//! `register_chain` refuses an already-present `chain_id`
+//! (`ChainAlreadyRegistered`), and the only path back is `delete_chain`
+//! (requires ZERO supply and ZERO chain_vaults for that chain) followed by a
+//! fresh `register_chain`. Treat `disable_chain` as effectively terminal for
+//! a live chain until every vault has exited.
+//!
+//! ── Go-live checklist for the first prod chain (Conflux, chain id 1030) ────
+//!  1. `set_chains_ecdsa_key_name("key_1")` BEFORE the first prod chain
+//!     vault opens (the key locks in at first vault use). VERIFY via a
+//!     POST-UPGRADE read-back of `get_chains_ecdsa_key_name` -- do not assume
+//!     a value from before this upgrade; the address-cache bug above means a
+//!     pre-upgrade key report could have been stale.
+//!  2. AFTER that read-back, re-derive and verify the settlement and reserve
+//!     addresses (`get_chain_settlement_address`, `get_chain_reserve_address`)
+//!     BEFORE any immutable on-chain contract deployment bakes an address in.
+//!  3. Register chain 1030 with MAINNET-shaped args
 //!     (`conflux_mainnet_register_arg`): finality_depth 400,
 //!     min_quorum_providers 2, operator-vetted RPC URLs.
-//!  3. Deploy IcUSD.sol on eSpace mainnet, then `set_chain_contract`.
-//!  4. Set a liquidation config row (real Swappi router, fee/divergence/
-//!     deadline). This ALSO activates the XRC-sourced CFX price timer for
-//!     the chain (see `xrc::chains_needing_price_feed`); an unconfigured
-//!     chain makes zero XRC calls.
-//!  5. Verify `get_evm_rpc_principal` reports the official EVM-RPC canister
+//!  4. Deploy IcUSD.sol on eSpace mainnet, then `set_chain_contract` -- this
+//!     is the actual "make public" step (see the public-open gate above).
+//!  5. Stage a liquidation config row (real Swappi router, fee/divergence/
+//!     deadline; `enabled` can start false). This activates the XRC price
+//!     timer for the chain AND claims the pair from manual pricing (see the
+//!     XRC-managed invariant above); budget cycles from this moment.
+//!  6. Verify `get_evm_rpc_principal` reports the official EVM-RPC canister
 //!     (no override left pointing at a mock).
-//!  6. Fund nothing: the reserve address is a sink; the custody address pays
+//!  7. Fund nothing: the reserve address is a sink; the custody address pays
 //!     gas from deposited collateral.
+//!  8. Flip the liquidation config's `enabled` to true only after its own
+//!     on-chain validation (`set_chain_liquidation_config` re-derives the
+//!     factory pair on enable).
 //!
 //! Monad and Solana remain genuinely experimental: testnet/devnet only,
 //! observer/settlement timers off by default (Solana also gated behind
