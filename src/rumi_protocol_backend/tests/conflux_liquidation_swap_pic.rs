@@ -1060,12 +1060,14 @@ fn conflux_liquidation_swap_executes_and_credits_reserve() {
     // ── Step 4: drop the price to $0.08, THEN enable the liquidation config ──
     // Security review follow-up (F2): once a chain_liquidation_configs row is
     // present for a registered chain, the XRC price timer is authoritative
-    // for that (chain, native symbol) pair and set_manual_collateral_price
-    // rejects a manual write to avoid racing it. The two setup calls below
+    // for that (chain, native symbol) pair for the price-pusher, and
+    // set_manual_collateral_price rejects a PUSHER write to avoid racing it
+    // (the developer principal, used by this suite, keeps a manual
+    // override). Harmless either way here, but the two setup calls below
     // are otherwise independent (neither reads the other's effect), so
-    // dropping the price FIRST -- while the chain is not yet XRC-managed --
+    // dropping the price FIRST, while the chain is not yet XRC-managed,
     // then staging the config reaches the exact same end state (price $0.08,
-    // liquidation config enabled) without ever writing to an XRC-managed pair.
+    // liquidation config enabled).
     script_factory_pair_sanity(&pic, mock, DEX_PAIR);
 
     // $0.08 / CFX => 1400 * 0.08 = $112 vs 100 debt => CR ~112% < 133%.
@@ -1361,9 +1363,9 @@ fn conflux_liquidation_bot_failure_sp_absorb_claims_cfx() {
 
     script_factory_pair_sanity(&pic, mock, DEX_PAIR);
     // Security review follow-up (F2): drop the price BEFORE staging the
-    // liquidation config row, since a manual write is rejected once the chain
-    // is XRC-managed (see the identical reordering + comment earlier in this
-    // file, at the first set_chain_liquidation_config call).
+    // liquidation config row (harmless either way for the developer caller
+    // this suite uses; see the identical reordering + comment earlier in
+    // this file, at the first set_chain_liquidation_config call).
     decode_result(
         update_dev(
             &pic,

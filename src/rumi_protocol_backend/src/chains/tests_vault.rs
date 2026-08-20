@@ -62,9 +62,9 @@ fn enable_price_age_gate(s: &mut MultiChainState, max_price_age_ns: u64) {
 /// De-scaffold pass (2026-08-20): parameterized variant so a test can compare
 /// `enabled: true` vs `enabled: false` under otherwise-identical config, to
 /// pin that the OPEN path's price gate (`gated_chain_price_e8`) reads only
-/// `max_price_age_ns`, never `enabled` -- the kill switch that field name
-/// suggests only ever gates the liquidation-swap worker, not the public open
-/// path.
+/// `max_price_age_ns`, never `enabled`. That kill switch only ever gates the
+/// liquidation-swap worker, not the public open path, despite what the field
+/// name suggests.
 fn enable_price_age_gate_with_enabled(s: &mut MultiChainState, max_price_age_ns: u64, enabled: bool) {
     use super::liquidation_config::{ChainLiquidationConfigV1, DexKind};
     s.chain_liquidation_configs.insert(
@@ -284,7 +284,7 @@ fn open_rejects_when_chain_bad_debt_circuit_tripped() {
 /// Security review (F10): a Disabled chain must reject a new self-serve open.
 /// Pre-fix, `open_chain_vault_in_state` only checked `contains_key`, which a
 /// Disabled chain still satisfies (`disable_chain` flips `ChainStatus`, it
-/// never removes the `chain_configs` entry) -- so a chain the operator had
+/// never removes the `chain_configs` entry), so a chain the operator had
 /// disabled kept accepting new opens.
 #[test]
 fn open_rejects_when_chain_disabled() {
@@ -314,10 +314,11 @@ fn open_rejects_when_chain_disabled() {
 }
 
 /// Security review (F10): the async-gap regression. `open_chain_vault_in_state`
-/// is called exactly once in `open_chain_vault_evm`/`open_chain_vault`, from
-/// the SYNCHRONOUS post-`.await` mutate_state block (after the tECDSA custody
-/// derive resolves) -- so a `disable_chain` that lands WHILE that derive is
-/// suspended is caught automatically: the state this test constructs (chain
+/// is called from all three open entrypoints (`open_chain_vault`,
+/// `open_chain_vault_evm`, `open_solana_vault`), each from its own
+/// SYNCHRONOUS post-`.await` mutate_state block (after its custody derive
+/// resolves), so a `disable_chain` that lands WHILE that derive is
+/// suspended is caught automatically on any of them: the state this test constructs (chain
 /// Registered when the derive "started", then flipped to Disabled before the
 /// "resumed" synchronous insertion below runs) is exactly what the resumed
 /// call sees. Driven directly against the pure helper, the same style as
@@ -352,7 +353,7 @@ fn open_rejects_when_chain_disabled_mid_flight_after_simulated_await() {
 }
 
 /// Security review (F10): withdraw/close/repay are EXIT paths and must keep
-/// working on a Disabled chain -- only risk-increasing operations (open,
+/// working on a Disabled chain; only risk-increasing operations (open,
 /// borrow) are gated. This proves `withdraw_collateral_in_state` does not
 /// regress: open a vault while Registered, THEN disable the chain, THEN
 /// withdraw must still succeed.

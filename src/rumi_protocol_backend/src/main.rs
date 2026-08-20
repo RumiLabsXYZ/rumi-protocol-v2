@@ -9092,7 +9092,7 @@ fn set_chains_ecdsa_key_name(name: String) -> Result<(), ProtocolError> {
     // rejected call never clears anything.
     //
     // Security review follow-up (F8): clearing the caches here is defense in
-    // depth, not the actual invariant -- an async derive that started under
+    // depth, not the actual invariant. An async derive that started under
     // the OLD key and is still in flight (suspended at its management-canister
     // await) when this runs would otherwise resume and write a stale address
     // into the cache THIS CALL just cleared. `bump_ecdsa_key_generation()`
@@ -11907,7 +11907,7 @@ mod chain_vault_param_tests {
 /// end rather than assumed. `verify_intent_ctx` resolves the bound
 /// `chain_contracts` entry BEFORE it ever calls `eip712::verify_intent` (the
 /// contract address is the EIP-712 domain separator, so it has to be resolved
-/// first) -- so an unbound chain rejects with "no contract set" on ANY
+/// first), so an unbound chain rejects with "no contract set" on ANY
 /// signature, valid or garbage, and regardless of chain registration or price
 /// state. This is why `chains/mod.rs`'s go-live checklist calls binding the
 /// IcUSD contract (`set_chain_contract`) the actual "make public" step: unlike
@@ -11957,7 +11957,7 @@ mod evm_open_public_gate_tests {
 
     /// The core pin: chain registered + a fresh manual price present, but NO
     /// `set_chain_contract` binding, still rejects with the contract-specific
-    /// error -- and does so WITHOUT needing a validly-signed intent (garbage
+    /// error. It does so WITHOUT needing a validly-signed intent (garbage
     /// signature bytes), because the contract lookup happens strictly before
     /// signature verification.
     #[test]
@@ -11968,7 +11968,7 @@ mod evm_open_public_gate_tests {
             .chain_configs
             .insert(CFX_MAINNET, registered_chain_config());
         // A price IS present (loose "any price" gate, no liquidation config row
-        // yet to enforce freshness) -- proves price presence alone is not the
+        // yet to enforce freshness), proving price presence alone is not the
         // gate either.
         state
             .multi_chain
@@ -11986,7 +11986,7 @@ mod evm_open_public_gate_tests {
 
     // A second test proving that binding the contract clears this specific
     // gate (and only fails downstream on signature verification) would need
-    // `ic_cdk::api::time()`, which traps outside a real canister -- so that
+    // `ic_cdk::api::time()`, which traps outside a real canister. That
     // half of the ordering claim is left to the PocketIC suites (e.g.
     // `conflux_espace_happy_path_pic`, which opens a vault end to end against
     // a bound contract with a real signature).

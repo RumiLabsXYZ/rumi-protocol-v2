@@ -729,7 +729,7 @@ pub async fn ensure_stable_not_depegged(
 use crate::chains::config::ChainId;
 
 /// Security review follow-up (F2): whether `chain` is currently
-/// "XRC-managed" -- registered (`MultiChainState::chain_is_registered`, the
+/// "XRC-managed": registered (`MultiChainState::chain_is_registered`, the
 /// single shared status predicate F10 also reads) AND carrying a
 /// `chain_liquidation_configs` row (regardless of that row's `enabled` flag:
 /// staging a config while disabled should still keep the price warm so
@@ -737,24 +737,28 @@ use crate::chains::config::ChainId;
 /// still claims the pair so a manual pusher cannot race it).
 ///
 /// When true, the XRC timer is the SOLE writer of `(chain, native_symbol)`'s
-/// manual price: `set_manual_collateral_price` (main.rs) rejects a write for
-/// an XRC-managed pair, for every caller including the authorized
-/// price-pusher, rather than racing last-writer-wins against the timer. The
-/// stop procedure (hand the pair back to manual pricing) is either removing
-/// the `chain_liquidation_configs` row, or `disable_chain` (which flips
-/// `chain_is_registered` to false) -- both already make this predicate
-/// false, so no separate kill switch is needed.
+/// manual price for the authorized price-pusher: `set_manual_collateral_price`
+/// (main.rs) rejects a pusher write for an XRC-managed pair, rather than
+/// racing last-writer-wins against the timer. The developer principal
+/// retains a manual override (a single trusted operator cannot race itself,
+/// and needs override for dry-run/staging price control and deterministic
+/// liquidation-bot testing). Stop procedure (hand the pair back to the
+/// pusher too): `disable_chain` (flips `chain_is_registered` to false,
+/// which already makes this predicate false). There is currently no
+/// standalone endpoint to remove just a `chain_liquidation_configs` row;
+/// the only alternative is `delete_chain` (requires zero supply and zero
+/// vaults for the chain) followed by a fresh `register_chain`.
 pub fn chain_is_xrc_managed(state: &State, chain: ChainId) -> bool {
     state.multi_chain.chain_is_registered(chain)
         && state.multi_chain.chain_liquidation_configs.contains_key(&chain)
 }
 
 /// The exact-pair form `set_manual_collateral_price` (main.rs) reads: true
-/// iff `chain` is XRC-managed AND `symbol` is that chain's native symbol (the
-/// only pair the timer ever actually writes -- a manual push to the SAME
+/// iff `chain` is XRC-managed AND `symbol` is that chain's native symbol,
+/// the only pair the timer ever actually writes. A manual push to the SAME
 /// chain under a DIFFERENT symbol string does not race the timer at all,
 /// since `MultiChainState::manual_prices` is keyed by the full
-/// `(ChainId, String)` tuple).
+/// `(ChainId, String)` tuple.
 pub fn pair_is_xrc_managed(state: &State, chain: ChainId, symbol: &str) -> bool {
     chain_is_xrc_managed(state, chain)
         && crate::chains::evm::evm_chain_config(chain)
@@ -983,7 +987,7 @@ mod xrc_rate_to_price_e8_tests {
     #[test]
     fn a_huge_rate_at_small_decimals_that_would_overflow_u64_is_rejected() {
         // decimals=0 is IN the accepted 0..=18 range, but u64::MAX * 10^8 does
-        // not fit back into a u64 -- this must be caught by the final
+        // not fit back into a u64. This must be caught by the final
         // `u64::try_from` narrowing, not silently wrapped or trapped.
         assert_eq!(xrc_rate_to_price_e8(u64::MAX, 0), None);
         assert_eq!(xrc_rate_to_price_e8(u64::MAX, 1), None);
@@ -993,7 +997,7 @@ mod xrc_rate_to_price_e8_tests {
     fn max_rate_at_max_accepted_decimals_computes_exactly_with_no_overflow() {
         // The widest legal input: rate = u64::MAX, decimals = 18 (the bound
         // itself). price_e8 = u64::MAX * 10^8 / 10^18 = u64::MAX / 10^10
-        // (floor division), which comfortably fits u64 -- proves the u128
+        // (floor division), which comfortably fits u64, proving the u128
         // intermediate (u64::MAX * 10^8 ~= 1.84e27, far inside u128's
         // ~3.4e38 ceiling) never overflows, and the result is exact.
         let expected: u128 = (u64::MAX as u128) / 10_000_000_000u128;

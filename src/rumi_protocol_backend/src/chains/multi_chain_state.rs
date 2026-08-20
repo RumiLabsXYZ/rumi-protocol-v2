@@ -638,9 +638,12 @@ pub struct MultiChainStateV6 {
 impl MultiChainStateV6 {
     /// De-scaffold pass (2026-08-20, security review F2/F10): whether `chain`
     /// is currently `ChainStatus::Registered` (present in `chain_configs` AND
-    /// not `Disabled`). The single source of truth EVERY gate that cares
-    /// about a chain's registration status should read, rather than
-    /// re-deriving its own `contains_key`/status match:
+    /// not `Disabled`). The single source of truth every vault-risk gate
+    /// (open/borrow, and the XRC-managed pricing predicate) reads, rather
+    /// than re-deriving its own `contains_key`/status match. Pre-existing
+    /// call sites like `main.rs::registered_chains_and_solana_flag` (the
+    /// observer/settlement fan-out) still inline their own equivalent
+    /// filter and were not migrated by this pass.
     ///
     ///  - `chains::vault::open_chain_vault_in_state` /
     ///    `borrow_chain_vault_in_state` (F10): risk-INCREASING operations
