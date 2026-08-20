@@ -125,6 +125,22 @@ pub fn disable_chain_in_state(
 /// Purges the chain from EVERY per-chain map (a stale entry left in any of them
 /// would be a silent state leak). All-or-nothing: every rejection path returns
 /// before the first mutation, so a refused delete leaves the chain fully intact.
+///
+/// Security review follow-up (M3, 2026-08-20): the purge list previously
+/// omitted `chain_liquidation_configs`. A stale row (router/factory/pair
+/// addresses, `enabled` flag) silently re-attached the moment the chain id
+/// was `register_chain`'d again, since the row lives independently of
+/// `chain_configs`. If that stale row carried `enabled: true`, the bot
+/// liquidation-swap path re-armed with OLD DEX wiring against a chain that
+/// looks freshly registered, before any operator has re-validated it. Now
+/// purged here. `chain_debt_configs` and `reserve_usdc_native` are
+/// deliberately NOT purged by this fix; see the security review report for
+/// why (in short: `chain_debt_configs` is a risk-limit override with no
+/// funds-safety exposure, left for a future hygiene pass, while
+/// `reserve_usdc_native` tracks a REAL physical USDC balance the reserve
+/// address may still hold post-delete, e.g. from a bot swap whose proceeds
+/// were never manually bridged out; purging that entry would make the
+/// canister forget accounting for still-recoverable funds).
 pub fn delete_chain_in_state(
     state: &mut MultiChainState,
     chain_id: ChainId,
@@ -161,6 +177,9 @@ pub fn delete_chain_in_state(
     state.chain_bad_debt_e8s.remove(&chain_id);
     state.chain_bad_debt_circuit_threshold_e8s.remove(&chain_id);
     state.chain_bad_debt_circuit_tripped_at_ns.remove(&chain_id);
+    // M3: without this, a stale row (router/factory/pair, `enabled`) silently
+    // re-attaches on the next register_chain for this id.
+    state.chain_liquidation_configs.remove(&chain_id);
     // manual_prices + its paired freshness map are keyed by (ChainId, String) —
     // drop ALL entries for this chain from BOTH, or the timestamp map leaks.
     state.manual_prices.retain(|(c, _), _| *c != chain_id);

@@ -29,6 +29,99 @@ fn arg() -> RegisterChainArg {
     }
 }
 
+/// M3 (security review, 2026-08-20): a minimal liquidation config row for the
+/// "populate every map" delete_chain test. Values are irrelevant; only
+/// presence/absence in `chain_liquidation_configs` is being asserted.
+fn m3_liq_config() -> super::liquidation_config::ChainLiquidationConfigV1 {
+    use super::liquidation_config::{ChainLiquidationConfigV1, DexKind};
+    ChainLiquidationConfigV1 {
+        dex: DexKind::UniswapV2,
+        router: "0x1111111111111111111111111111111111111111".into(),
+        factory: "0x2222222222222222222222222222222222222222".into(),
+        pair: "0x3333333333333333333333333333333333333333".into(),
+        collateral_token: "0x4444444444444444444444444444444444444444".into(),
+        settle_stable_token: "0x5555555555555555555555555555555555555555".into(),
+        slippage_cap_bps: 250,
+        restore_target_cr_e4: 15_500,
+        enabled: true,
+        max_swap_value_e8s: 2_000 * 100_000_000,
+        max_price_age_ns: 1_800_000_000_000,
+        max_dex_oracle_divergence_bps: 500,
+        fee_bps: 25,
+        settle_stable_decimals: 18,
+        deadline_secs: 180,
+    }
+}
+
+/// A real EVM chain id (Conflux mainnet, per `chains::evm::evm_chain_config`)
+/// so `xrc::pair_is_xrc_managed`, which resolves the native symbol from that
+/// compile-time table, actually recognizes it. `config_arg_999`'s
+/// `ChainId(999)` is deliberately NOT a known EVM chain for its own tests.
+fn config_arg_cfx_mainnet() -> RegisterChainArg {
+    RegisterChainArg {
+        chain_id: ChainId(1030),
+        display_name: "Conflux mainnet".into(),
+        rpc_endpoints: vec!["https://evm.confluxrpc.com".into()],
+        finality_depth: 400,
+        gas_strategy: GasStrategy::EvmEip1559 {
+            max_priority_fee_gwei: 1,
+            max_fee_gwei_ceiling: 100,
+        },
+        chain_native_decimals: 18,
+        min_quorum_providers: Some(2),
+    }
+}
+
+/// M3 (security review, 2026-08-20): the purge regression the security
+/// reviewer asked for. Stages a liquidation config row (making the chain
+/// XRC-managed), deletes the chain, re-registers the SAME chain id, and
+/// asserts the stale row did NOT silently re-attach: `chain_is_xrc_managed`
+/// is false again, so a pusher (or, pre-fix, a bot-swap path re-armed with
+/// stale DEX wiring) would find the "fresh" chain unmanaged rather than
+/// inheriting the old config.
+#[test]
+fn delete_chain_purges_liquidation_config_no_silent_reattach_on_reregister() {
+    let mut s = MultiChainState::default();
+    let cfx = ChainId(1030);
+    register_chain_in_state(&mut s, config_arg_cfx_mainnet(), 0).expect("register");
+    s.chain_liquidation_configs.insert(cfx, m3_liq_config());
+    assert!(
+        crate::xrc::chain_is_xrc_managed(&wrap(&s), cfx),
+        "precondition: chain must be XRC-managed before delete"
+    );
+
+    delete_chain_in_state(&mut s, cfx).expect("delete");
+    assert!(
+        !s.chain_liquidation_configs.contains_key(&cfx),
+        "chain_liquidation_configs row must not survive delete_chain"
+    );
+
+    register_chain_in_state(&mut s, config_arg_cfx_mainnet(), 1).expect("re-register");
+    assert!(
+        !s.chain_liquidation_configs.contains_key(&cfx),
+        "re-registering must not resurrect the deleted config row"
+    );
+    assert!(
+        !crate::xrc::chain_is_xrc_managed(&wrap(&s), cfx),
+        "the re-registered chain must NOT be XRC-managed (no stale config row re-attached); \
+         pre-fix, a stale enabled:true row would have re-armed the bot swap path with old DEX \
+         wiring the moment this id was re-registered"
+    );
+    assert!(
+        !crate::xrc::pair_is_xrc_managed(&wrap(&s), cfx, "CFX"),
+        "manual price control (pusher included) must be available again for the fresh chain"
+    );
+}
+
+/// Wraps a `MultiChainState` in the outer `State` shape `xrc::chain_is_xrc_managed`
+/// / `pair_is_xrc_managed` read, without pulling in a full `State::default()`
+/// construction path irrelevant to this test.
+fn wrap(multi_chain: &MultiChainState) -> crate::state::State {
+    let mut state = crate::state::State::default();
+    state.multi_chain = multi_chain.clone();
+    state
+}
+
 fn config_arg_999() -> RegisterChainArg {
     RegisterChainArg {
         chain_id: ChainId(999),
@@ -209,6 +302,10 @@ fn delete_chain_removes_zero_supply_chain() {
     s.chain_bad_debt_e8s.insert(c, 77);
     s.chain_bad_debt_circuit_threshold_e8s.insert(c, 100);
     s.chain_bad_debt_circuit_tripped_at_ns.insert(c, 456);
+    // M3 (security review, 2026-08-20): chain_liquidation_configs was missing
+    // from the purge list; add it to this "populate every map" test so a
+    // future regression here fails loudly instead of silently.
+    s.chain_liquidation_configs.insert(c, m3_liq_config());
     // An unrelated chain's manual_prices entry must SURVIVE the delete.
     s.manual_prices
         .insert((ChainId(7), "MON".to_string()), 3_0000_0000);
@@ -254,6 +351,10 @@ fn delete_chain_removes_zero_supply_chain() {
     assert!(
         !s.chain_bad_debt_circuit_tripped_at_ns.contains_key(&c),
         "chain_bad_debt_circuit_tripped_at_ns retained"
+    );
+    assert!(
+        !s.chain_liquidation_configs.contains_key(&c),
+        "chain_liquidation_configs retained (M3 regression)"
     );
     assert!(
         !s.manual_prices.contains_key(&(c, "MON".to_string())),
