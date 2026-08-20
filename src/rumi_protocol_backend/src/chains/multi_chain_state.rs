@@ -30,7 +30,7 @@
 //! incident (MEMORY.md: `project_amm_state_wipe_2026_05_18.md`).
 
 use super::collateral_config::ChainDebtConfigV1;
-use super::config::{ChainConfigV1, ChainConfigV2, ChainConfigV3, ChainId};
+use super::config::{ChainConfigV1, ChainConfigV2, ChainConfigV3, ChainId, ChainStatus};
 use super::liquidation_config::ChainLiquidationConfigV1;
 use super::monad::chain_vault::ChainVaultV1;
 use super::settlement_queue::{SettlementOpKind, SettlementOpStatus, SettlementQueueV1};
@@ -553,13 +553,16 @@ pub struct MultiChainStateV6 {
     /// remains outstanding. RHS term-3 of the unified supply invariant. Later
     /// manual reconciliation can consume this term together with a
     /// `chain_supplies` decrement after the protocol acquires and retires the
-    /// foreign representation. Empty until Increment 4.
+    /// foreign representation. Populated by `stability_pool_liquidate_chain_vault`
+    /// (Increment 4, landed); empty on a chain that has never had an SP absorb.
     #[serde(default)]
     pub pending_chain_burn_e8s: BTreeMap<ChainId, u128>,
     /// Chains analog of the ICP `sp_attempted_vaults`: vaults whose bot
     /// liquidation failed and were escalated to the SP exactly once (the
-    /// no-retry guard; once present, never re-attempted by the SP). Empty until
-    /// Increment 4. Rides V6 because it is in the persisted root, but it is
+    /// no-retry guard; once present, never re-attempted by the SP). Written by
+    /// `escalate_failed_swap` (chains/evm/settlement.rs) and consumed by
+    /// `stability_pool_liquidate_chain_vault` (Increment 4, landed). Rides V6
+    /// because it is in the persisted root, but it is
     /// transient routing state (reset on resolution); surviving an upgrade is
     /// harmless (worst case a vault waits one extra tick for manual).
     #[serde(default)]
@@ -586,9 +589,10 @@ pub struct MultiChainStateV6 {
     /// Vault_id -> first-bot-routed wall-clock ns. Set when
     /// `begin_liquidation_in_state` routes a vault to the bot tier; the durable
     /// timestamp the bot->SP escalation predicate reads (spec §10, finding #10).
-    /// Pruned when a vault recovers/resolves. The SP consumer lands in Increment
-    /// 4; the timestamp history must start now. Added directly to V6 (pre-deploy,
-    /// same rationale as the maps above); `#[serde(default)]` is mandatory.
+    /// Pruned when a vault recovers/resolves. The SP consumer
+    /// (`stability_pool_liquidate_chain_vault`, Increment 4) landed reading this
+    /// history. Added directly to V6 (pre-deploy, same rationale as the maps
+    /// above); `#[serde(default)]` is mandatory.
     #[serde(default)]
     pub bot_pending_chain_vaults: BTreeMap<u64, u64>,
     /// Per-chain realized bad debt (e8s): when a bot swap's realized USDC valued
@@ -632,6 +636,28 @@ pub struct MultiChainStateV6 {
 }
 
 impl MultiChainStateV6 {
+    /// De-scaffold pass (2026-08-20, security review F2/F10): whether `chain`
+    /// is currently `ChainStatus::Registered` (present in `chain_configs` AND
+    /// not `Disabled`). The single source of truth EVERY gate that cares
+    /// about a chain's registration status should read, rather than
+    /// re-deriving its own `contains_key`/status match:
+    ///
+    ///  - `chains::vault::open_chain_vault_in_state` /
+    ///    `borrow_chain_vault_in_state` (F10): risk-INCREASING operations
+    ///    require this to be true. `Disabled` is the operator's post-launch
+    ///    emergency risk stop; it deliberately does NOT block exit paths
+    ///    (withdraw/close/repay), which read vault state directly and never
+    ///    call this.
+    ///  - `xrc::chain_is_xrc_managed` (F2): composes this with
+    ///    `chain_liquidation_configs` presence to decide whether the XRC
+    ///    price timer owns a (chain, symbol) pair.
+    pub fn chain_is_registered(&self, chain: ChainId) -> bool {
+        matches!(
+            self.chain_configs.get(&chain).map(|c| c.status),
+            Some(ChainStatus::Registered)
+        )
+    }
+
     pub fn total_supply_all_chains_e8s(&self) -> u128 {
         self.chain_supplies.values().copied().sum()
     }
@@ -654,7 +680,8 @@ impl MultiChainStateV6 {
 
     /// RHS term-3 of the unified supply invariant (spec 3.3, 5.2): total icUSD the
     /// SP burned IC-side but whose matching eSpace burn is not yet confirmed,
-    /// summed across chains. 0 until Increment 4 wires the SP path.
+    /// summed across chains. Populated once `stability_pool_liquidate_chain_vault`
+    /// (Increment 4, landed) absorbs a vault; 0 on a chain that never has.
     pub fn total_pending_chain_burn_e8s(&self) -> u128 {
         self.pending_chain_burn_e8s.values().copied().sum()
     }

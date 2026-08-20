@@ -628,20 +628,14 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
     // timer keeps firing.
     let _ = update_dev(&pic, backend, "set_settlement_tick_interval_secs", Encode!(&31_536_000u64).unwrap());
 
-    // ── Enable the liquidation config (master switch on) ─────────────────────
-    script_factory_pair_sanity(&pic, mock, VALID_EVM_ADDR);
-    decode_result(
-        update_dev(
-            &pic,
-            backend,
-            "set_chain_liquidation_config",
-            Encode!(&ChainId(CONFLUX_CHAIN_ID), &enabled_liq_config()).unwrap(),
-        ),
-        "set_chain_liquidation_config",
-    )
-    .expect("set_chain_liquidation_config Ok");
-
     // ── Drop the price to $0.08 => CR ~112% < 133% (liquidatable) ────────────
+    // Security review follow-up (F2): must run BEFORE set_chain_liquidation_config
+    // below -- once a chain_liquidation_configs row is present for a
+    // registered chain, the chain is XRC-managed and set_manual_collateral_price
+    // rejects a manual write for that (chain, symbol) pair (to avoid racing
+    // the automatic XRC price timer). These two setup calls are otherwise
+    // independent, so reordering them reaches the identical end state.
+    script_factory_pair_sanity(&pic, mock, VALID_EVM_ADDR);
     decode_result(
         update_dev(
             &pic,
@@ -652,6 +646,18 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
         "set_manual_collateral_price",
     )
     .expect("set_manual_collateral_price (drop)");
+
+    // ── Enable the liquidation config (master switch on) ─────────────────────
+    decode_result(
+        update_dev(
+            &pic,
+            backend,
+            "set_chain_liquidation_config",
+            Encode!(&ChainId(CONFLUX_CHAIN_ID), &enabled_liq_config()).unwrap(),
+        ),
+        "set_chain_liquidation_config",
+    )
+    .expect("set_chain_liquidation_config Ok");
 
     // ── Pre-tick: the discovery query computes CR LIVE and lists the vault ────
     let liq_before = get_liquidatable(&pic, backend);

@@ -1572,6 +1572,7 @@ fn close_chain_vault(vault_id: u64, dest_address: String) -> Result<(), Protocol
 // operator/test use; these are the self-serve variants.
 
 /// Verified, authenticated intent context shared by all four `_evm` methods.
+#[derive(Debug)]
 struct VerifiedIntent {
     chain: rumi_protocol_backend::chains::config::ChainId,
     /// Lowercase `0x` recovered signer; the authoritative EVM owner.
@@ -2465,8 +2466,9 @@ fn clear_chain_bad_debt_circuit(
 
 /// A chain vault currently liquidatable on `chain` (CR below the liquidation
 /// threshold), with its interest-aware CR + sizing surfaced for an operator/SP.
-/// The discovery channel for the eventual SP fallback (finding #30; SP-specific
-/// bot-failed filtering lands in Increment 4).
+/// The discovery channel for the SP fallback (finding #30; SP-specific
+/// bot-failed filtering landed in Increment 4,
+/// `stability_pool_liquidate_chain_vault`).
 #[derive(CandidType, Deserialize, Debug, Clone)]
 pub struct ChainLiquidatableVault {
     pub vault_id: u64,
@@ -2808,6 +2810,42 @@ fn set_manual_collateral_price(
         return Err(ProtocolError::ChainAdmin(
             "not authorized to set price".into(),
         ));
+    }
+    // Security review follow-up (F2): a registered chain carrying a
+    // chain_liquidation_configs row is "XRC-managed" (xrc::chain_is_xrc_managed).
+    // The XRC timer is the SOLE writer of its native-symbol price for the
+    // authorized price-pusher: without this check, a pusher push here would
+    // race the timer last-writer-wins on the exact same
+    // MultiChainState::set_manual_price cell, with no ordering guarantee
+    // between them.
+    //
+    // Scoped to the PUSHER, not the developer: the developer is the same
+    // trusted operator who stages/removes chain_liquidation_configs rows in
+    // the first place (a single actor cannot race itself), and needs manual
+    // override for legitimate operational cases the automatic feed cannot
+    // cover: dry-run / staging price control before the feed is trusted, and
+    // simulating a specific price for liquidation-bot verification. Blocking
+    // the developer too was tried during implementation and broke exactly
+    // that pattern in the existing conflux_liquidation_swap_pic and
+    // conflux_liquidation_detection_pic PocketIC suites, which manually drive
+    // the chain price up and down (including AFTER staging a liquidation
+    // config row) to exercise underwater/stale-price detection deterministically,
+    // with no XRC mock wired into those suites at all. Narrowing to the
+    // pusher closes the actual race (an unattended, narrowly-scoped automated
+    // caller) while preserving the trusted operator's manual control.
+    if caller != read_state(|s| s.developer_principal)
+        && read_state(|s| rumi_protocol_backend::xrc::pair_is_xrc_managed(s, chain, &symbol))
+    {
+        return Err(ProtocolError::ChainAdmin(format!(
+            "chain {} symbol {} is XRC-managed (registered + a liquidation config row is \
+             present): the automatic XRC price timer is authoritative for this pair for the \
+             price-pusher, to avoid a last-writer-wins race. The developer principal may still \
+             override manually. To resume pusher access, disable_chain (which also stops the \
+             XRC timer for this pair) or remove the chain's liquidation config row (no \
+             standalone \"unset\" endpoint exists today; removing the row requires delete_chain,\
+             which needs zero supply and zero vaults for the chain, then a fresh register_chain).",
+            chain.0, symbol
+        )));
     }
     // Reject a zero price. A 0 price drives `collateral_ratio_e4` to 0, which
     // fails-closed (every open/withdraw with debt rejects with BelowMinCr), so
@@ -9052,7 +9090,19 @@ fn set_chains_ecdsa_key_name(name: String) -> Result<(), ProtocolError> {
     // Only reached on the success path: `validate_ecdsa_key_change` above
     // already rejected a bad name or a change with live chain vaults, so a
     // rejected call never clears anything.
+    //
+    // Security review follow-up (F8): clearing the caches here is defense in
+    // depth, not the actual invariant -- an async derive that started under
+    // the OLD key and is still in flight (suspended at its management-canister
+    // await) when this runs would otherwise resume and write a stale address
+    // into the cache THIS CALL just cleared. `bump_ecdsa_key_generation()`
+    // closes that gap: every `cached_*` fn in tecdsa.rs captures the
+    // generation before it starts deriving and discards its result (rather
+    // than caching or returning it) if the generation moved on while it was
+    // suspended. See tecdsa.rs's "Key-generation guard" section for the full
+    // interleaving walkthrough.
     rumi_protocol_backend::chains::evm::tecdsa::clear_address_caches();
+    rumi_protocol_backend::chains::evm::tecdsa::bump_ecdsa_key_generation();
     log!(
         INFO,
         "[set_chains_ecdsa_key_name] chains EVM tECDSA key set to {}; address caches cleared",
@@ -11850,6 +11900,96 @@ mod chain_vault_param_tests {
         assert!(validate_xrp_schnorr_key_change("bogus_key", false).is_err());
         assert!(validate_xrp_schnorr_key_change("key_1", true).is_err());
     }
+}
+
+/// De-scaffold banner correction (2026-08-20): pins the ACTUAL public-open gate
+/// for `open_chain_vault_evm`, verified by reading `verify_intent_ctx` end to
+/// end rather than assumed. `verify_intent_ctx` resolves the bound
+/// `chain_contracts` entry BEFORE it ever calls `eip712::verify_intent` (the
+/// contract address is the EIP-712 domain separator, so it has to be resolved
+/// first) -- so an unbound chain rejects with "no contract set" on ANY
+/// signature, valid or garbage, and regardless of chain registration or price
+/// state. This is why `chains/mod.rs`'s go-live checklist calls binding the
+/// IcUSD contract (`set_chain_contract`) the actual "make public" step: unlike
+/// `disable_chain` (which does NOT remove the `chain_configs` entry, so it does
+/// NOT block `open_chain_vault_in_state`'s `contains_key` check for a
+/// previously-registered chain), withholding `set_chain_contract` is a gate
+/// `open_chain_vault_evm` cannot get past at all.
+#[cfg(test)]
+mod evm_open_public_gate_tests {
+    use super::{replace_state, verify_intent_ctx, State};
+    use rumi_protocol_backend::chains::config::{ChainConfigV3, ChainId, ChainStatus, GasStrategy};
+    use rumi_protocol_backend::chains::evm::eip712::{IntentAction, VaultIntent};
+
+    const CFX_MAINNET: ChainId = ChainId(1030);
+
+    fn registered_chain_config() -> ChainConfigV3 {
+        ChainConfigV3 {
+            chain_id: CFX_MAINNET,
+            display_name: "Conflux mainnet".to_string(),
+            rpc_endpoints: vec!["https://evm.confluxrpc.com".to_string()],
+            finality_depth: 400,
+            gas_strategy: GasStrategy::EvmEip1559 {
+                max_priority_fee_gwei: 1,
+                max_fee_gwei_ceiling: 100,
+            },
+            chain_native_decimals: 18,
+            registered_at_ns: 0,
+            status: ChainStatus::Registered,
+            burn_watch_poll_enabled: false,
+            min_quorum_providers: None,
+        }
+    }
+
+    fn dummy_open_intent() -> VaultIntent {
+        VaultIntent {
+            action: IntentAction::Open.as_u8(),
+            chain_id: CFX_MAINNET.0 as u64,
+            owner: "0x000000000000000000000000000000000000c0de".to_string(),
+            vault_id: 0,
+            collateral_wei: 1_000_000_000_000_000_000,
+            debt_e8s: 100_000_000,
+            recipient: "0x000000000000000000000000000000000000c0de".to_string(),
+            nonce: 0,
+            deadline_secs: u64::MAX,
+        }
+    }
+
+    /// The core pin: chain registered + a fresh manual price present, but NO
+    /// `set_chain_contract` binding, still rejects with the contract-specific
+    /// error -- and does so WITHOUT needing a validly-signed intent (garbage
+    /// signature bytes), because the contract lookup happens strictly before
+    /// signature verification.
+    #[test]
+    fn open_rejects_when_no_contract_bound_even_with_registered_chain_and_fresh_price() {
+        let mut state = State::default();
+        state
+            .multi_chain
+            .chain_configs
+            .insert(CFX_MAINNET, registered_chain_config());
+        // A price IS present (loose "any price" gate, no liquidation config row
+        // yet to enforce freshness) -- proves price presence alone is not the
+        // gate either.
+        state
+            .multi_chain
+            .set_manual_price(CFX_MAINNET, "CFX".to_string(), 8_000_000, 1_000);
+        replace_state(state);
+
+        let err = verify_intent_ctx(&dummy_open_intent(), b"not-a-real-signature", IntentAction::Open)
+            .expect_err("must reject with no chain_contracts entry");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("no contract set"),
+            "expected the contract-binding rejection, got: {msg}"
+        );
+    }
+
+    // A second test proving that binding the contract clears this specific
+    // gate (and only fails downstream on signature verification) would need
+    // `ic_cdk::api::time()`, which traps outside a real canister -- so that
+    // half of the ordering claim is left to the PocketIC suites (e.g.
+    // `conflux_espace_happy_path_pic`, which opens a vault end to end against
+    // a bound contract with a real signature).
 }
 
 #[cfg(test)]
