@@ -1365,7 +1365,17 @@ fn set_chain_config(
 /// dev-gated chain-vault op. Errors if `chain` is not a known EVM chain or has
 /// no collateral config. For Monad (10143) this returns ("MON", 13_000) and for
 /// Conflux (71) ("CFX", 13_300), so the EVM endpoints are chain-agnostic.
-fn evm_vault_params(
+///
+/// Takes the already-borrowed `&State` rather than re-entering `read_state`
+/// itself, so it is safe to call from inside a `mutate_state`/`read_state`
+/// closure (mirrors `settlement_proof_ids_from_state`). A `mutate_state` call
+/// already holds the `STATE` RefCell's mutable borrow for its whole closure;
+/// calling back into `read_state` from within that closure panics with
+/// "already mutably borrowed" (`chain_debt_configs` used to be looked up via a
+/// nested `read_state` here, which is exactly that trap - see
+/// `withdraw_chain_collateral` / `close_chain_vault` below).
+fn evm_vault_params_from_state(
+    state: &State,
     chain: rumi_protocol_backend::chains::config::ChainId,
 ) -> Result<(&'static str, u64, u128, Option<u128>), ProtocolError> {
     let symbol = rumi_protocol_backend::chains::evm::evm_chain_config(chain)
@@ -1377,7 +1387,11 @@ fn evm_vault_params(
         .ok_or_else(|| {
             ProtocolError::ChainAdmin(format!("no collateral config for chain {}", chain.0))
         })?;
-    let debt_cfg = read_state(|s| s.multi_chain.chain_debt_configs.get(&chain).copied())
+    let debt_cfg = state
+        .multi_chain
+        .chain_debt_configs
+        .get(&chain)
+        .copied()
         .unwrap_or_else(|| {
             rumi_protocol_backend::chains::collateral_config::ChainDebtConfigV1::from_collateral_config(cfg)
         });
@@ -1387,6 +1401,15 @@ fn evm_vault_params(
         debt_cfg.min_vault_debt_e8s,
         debt_cfg.debt_ceiling_e8s,
     ))
+}
+
+/// Convenience wrapper for call sites that are NOT already inside a
+/// `mutate_state`/`read_state` closure. Do not call this from within one - use
+/// `evm_vault_params_from_state(s, chain)` with the closure's own `s` instead.
+fn evm_vault_params(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> Result<(&'static str, u64, u128, Option<u128>), ProtocolError> {
+    read_state(|s| evm_vault_params_from_state(s, chain))
 }
 
 /// Phase 1b Task 12: open a foreign-chain EVM (Monad or Conflux) vault, OPEN-THEN-VERIFY.
@@ -1503,7 +1526,11 @@ fn withdraw_chain_collateral(
             ));
         }
         let chain = vault.collateral_chain;
-        let (symbol, min_cr, _, _) = evm_vault_params(chain)?;
+        // Use the already-borrowed `s` here, NOT `evm_vault_params(chain)` - that
+        // convenience wrapper re-enters `read_state`, which panics ("already
+        // mutably borrowed") since we are already inside this `mutate_state`
+        // closure's mutable borrow of `STATE`.
+        let (symbol, min_cr, _, _) = evm_vault_params_from_state(s, chain)?;
         rumi_protocol_backend::chains::vault::withdraw_collateral_in_state(
             &mut s.multi_chain,
             vault_id,
@@ -1550,7 +1577,9 @@ fn close_chain_vault(vault_id: u64, dest_address: String) -> Result<(), Protocol
             ));
         }
         let chain = vault.collateral_chain;
-        let (symbol, min_cr, _, _) = evm_vault_params(chain)?;
+        // Same nested-borrow trap as `withdraw_chain_collateral` above: use the
+        // closure's own `s` instead of the `read_state`-wrapping convenience fn.
+        let (symbol, min_cr, _, _) = evm_vault_params_from_state(s, chain)?;
         rumi_protocol_backend::chains::vault::close_chain_vault_in_state(
             &mut s.multi_chain,
             vault_id,

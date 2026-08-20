@@ -633,6 +633,219 @@ fn conflux_espace_happy_path_supply_invariant() {
     eprintln!("[conflux happy-path] FULL happy path PASSED: supply invariant held 0 -> 100e8 -> 60e8 -> 0 across open/deposit/mint/burn/withdraw/close on chain 71 (finality_depth=100, getlogs_max_range=1000, min_quorum_providers=1)");
 }
 
+/// Regression test for the `close_chain_vault` nested-RefCell-borrow bug: the
+/// dev-gated endpoint's `mutate_state(|s| { ... evm_vault_params(chain) ... })`
+/// closure used to call `evm_vault_params`, which itself re-entered
+/// `read_state` to resolve `chain_debt_configs` - a nested borrow of the same
+/// `STATE` RefCell that panics with "already mutably borrowed". The sibling
+/// `withdraw_chain_collateral` had the identical bug (covered by the full
+/// happy-path test above, which exercises the same code shape via that
+/// endpoint); this test exercises `close_chain_vault` directly so both
+/// dev-gated call sites that were patched in `main.rs` have a regression test.
+///
+/// Repeats the register/open/deposit/mint steps from the happy-path test (same
+/// helpers, same shapes), then burns the FULL debt in one shot (no need for the
+/// two-step partial burn) and calls `close_chain_vault` instead of
+/// `withdraw_chain_collateral`. Before the fix this update call traps inside
+/// `mutate_state` and `update_dev` panics on the resulting `UserError`; after
+/// the fix it returns `Ok(())` and the vault settles to `Closed`.
+#[test]
+fn conflux_close_chain_vault_after_full_repay() {
+    let (pic, backend, mock) = boot();
+
+    decode_result(
+        update_dev(&pic, backend, "set_evm_rpc_principal", Encode!(&mock).unwrap()),
+        "set_evm_rpc_principal",
+    )
+    .expect("set_evm_rpc_principal");
+    update_any(&pic, mock, "set_getlogs_max_range", Encode!(&1000u64).unwrap());
+    update_any(&pic, mock, "set_espace_receipt_fields", Encode!(&true).unwrap());
+
+    let reg = RegisterChainArg {
+        chain_id: ChainId(CONFLUX_CHAIN_ID),
+        display_name: "ConfluxESpaceTestnet".to_string(),
+        rpc_endpoints: vec!["https://evmtestnet.confluxrpc.com".to_string()],
+        finality_depth: CONFLUX_FINALITY_DEPTH as u32,
+        gas_strategy: GasStrategy::EvmEip1559 {
+            max_priority_fee_gwei: 1,
+            max_fee_gwei_ceiling: 100,
+        },
+        chain_native_decimals: 18,
+        min_quorum_providers: Some(1),
+    };
+    decode_result(
+        update_dev(&pic, backend, "register_chain", Encode!(&reg).unwrap()),
+        "register_chain",
+    )
+    .expect("register_chain");
+    decode_result(
+        update_dev(
+            &pic,
+            backend,
+            "set_chain_contract",
+            Encode!(&ChainId(CONFLUX_CHAIN_ID), &"0x00000000000000000000000000000000cf1c0de5".to_string())
+                .unwrap(),
+        ),
+        "set_chain_contract",
+    )
+    .expect("set_chain_contract");
+    decode_result(
+        update_dev(
+            &pic,
+            backend,
+            "set_manual_collateral_price",
+            Encode!(&ChainId(CONFLUX_CHAIN_ID), &"CFX".to_string(), &15_000_000u64).unwrap(),
+        ),
+        "set_manual_collateral_price",
+    )
+    .expect("set_manual_collateral_price");
+
+    let seed: u64 = 1_000_000;
+    decode_result(
+        update_dev(
+            &pic,
+            backend,
+            "set_last_observed_block",
+            Encode!(&ChainId(CONFLUX_CHAIN_ID), &seed).unwrap(),
+        ),
+        "set_last_observed_block",
+    )
+    .expect("set_last_observed_block");
+    decode_result(
+        update_dev(
+            &pic,
+            backend,
+            "set_burn_watch_poll_enabled",
+            Encode!(&ChainId(CONFLUX_CHAIN_ID), &true).unwrap(),
+        ),
+        "set_burn_watch_poll_enabled",
+    )
+    .expect("set_burn_watch_poll_enabled");
+
+    let cursor1 = seed + SCAN_WINDOW;
+    let head1 = cursor1 + CONFLUX_FINALITY_DEPTH + 24;
+    update_any(&pic, mock, "set_blocks", Encode!(&head1, &head1).unwrap());
+    update_any(&pic, mock, "set_next_send_hash", Encode!(&"0xcfxmint2".to_string()).unwrap());
+
+    let settlement_addr = match update_dev(
+        &pic,
+        backend,
+        "get_chain_settlement_address",
+        Encode!(&ChainId(CONFLUX_CHAIN_ID)).unwrap(),
+    ) {
+        WasmResult::Reply(b) => match Decode!(&b, Result<String, ProtocolError>) {
+            Ok(Ok(addr)) => Some(addr),
+            _ => None,
+        },
+        WasmResult::Reject(_) => None,
+    };
+    let settlement_addr = match settlement_addr {
+        Some(addr) => addr,
+        None => {
+            eprintln!("[conflux close_chain_vault] ECDSA UNAVAILABLE; skipping (covered by the happy-path gated subset)");
+            return;
+        }
+    };
+    update_any(
+        &pic,
+        mock,
+        "set_balance",
+        Encode!(&settlement_addr, &candid::Nat::from(1_000_000u128 * E18)).unwrap(),
+    );
+
+    let collateral_e18 = 1_400u128 * E18;
+    let debt_e8s = 100u128 * E8;
+    let recipient = "0x000000000000000000000000000000000000c0de".to_string();
+    let vault_id: u64 = match update_dev(
+        &pic,
+        backend,
+        "open_chain_vault",
+        Encode!(
+            &ChainId(CONFLUX_CHAIN_ID),
+            &candid::Nat::from(collateral_e18),
+            &candid::Nat::from(debt_e8s),
+            &recipient
+        )
+        .unwrap(),
+    ) {
+        WasmResult::Reply(b) => Decode!(&b, Result<u64, ProtocolError>)
+            .expect("decode open_chain_vault")
+            .expect("open_chain_vault Ok"),
+        WasmResult::Reject(msg) => panic!("open_chain_vault rejected: {msg}"),
+    };
+    let v = get_vault(&pic, backend, vault_id).expect("vault exists after open");
+    let custody = v.custody_address.clone();
+
+    update_any(
+        &pic,
+        mock,
+        "set_balance",
+        Encode!(&custody, &candid::Nat::from(collateral_e18)).unwrap(),
+    );
+    advance_and_tick(&pic, 2); // deposit verified => MintPending
+
+    advance_and_tick(&pic, 1); // mint submit (Queued -> Inflight)
+    update_any(
+        &pic,
+        mock,
+        "set_receipt",
+        Encode!(&"0xcfxmint2".to_string(), &true, &cursor1).unwrap(),
+    );
+    push_mint_log(&pic, mock, vault_id, &recipient, debt_e8s, "0xcfxmint2", cursor1);
+    advance_and_tick(&pic, 4); // mint confirm => Open, debt 100e8
+
+    let v = get_vault(&pic, backend, vault_id).expect("vault after mint confirm");
+    assert_eq!(v.status, ChainVaultStatus::Open, "mint confirmed => Open");
+    assert_eq!(v.debt_e8s, candid::Nat::from(debt_e8s), "mint confirmed => debt 100e8");
+
+    // Burn the FULL debt in one shot so the vault is debt-free before close.
+    let cursor2 = cursor1 + SCAN_WINDOW;
+    let head2 = cursor2 + CONFLUX_FINALITY_DEPTH + 24;
+    update_any(&pic, mock, "set_blocks", Encode!(&head2, &head2).unwrap());
+    let burn_block = cursor1 + 500;
+    push_burn_log(&pic, mock, vault_id, &recipient, debt_e8s, "0xcfxburnfull", burn_block);
+    advance_and_tick(&pic, 3);
+
+    let v = get_vault(&pic, backend, vault_id).expect("vault after full burn");
+    assert_eq!(v.debt_e8s, candid::Nat::from(0u32), "after full burn => debt 0");
+    assert_eq!(v.status, ChainVaultStatus::Open, "debt-free vault stays Open until close");
+
+    // ── THE regression: this call used to trap with "RefCell already mutably
+    // borrowed" inside `mutate_state` before the `evm_vault_params_from_state`
+    // fix. `update_dev` panics on a canister trap (via `UserError`), so a green
+    // `.expect("close_chain_vault")` here IS the regression assertion.
+    update_any(&pic, mock, "set_next_send_hash", Encode!(&"0xcfxclose1".to_string()).unwrap());
+    let dest = "0x000000000000000000000000000000000000dead".to_string();
+    decode_result(
+        update_dev(
+            &pic,
+            backend,
+            "close_chain_vault",
+            Encode!(&vault_id, &dest).unwrap(),
+        ),
+        "close_chain_vault",
+    )
+    .expect("close_chain_vault");
+
+    let v = get_vault(&pic, backend, vault_id).expect("vault after close enqueue");
+    assert_eq!(v.status, ChainVaultStatus::Closing, "close on debt-free vault => Closing");
+
+    advance_and_tick(&pic, 1);
+    update_any(
+        &pic,
+        mock,
+        "set_receipt",
+        Encode!(&"0xcfxclose1".to_string(), &true, &cursor2).unwrap(),
+    );
+    advance_and_tick(&pic, 4);
+
+    let v = get_vault(&pic, backend, vault_id).expect("vault after close confirm");
+    assert_eq!(v.status, ChainVaultStatus::Closed, "close confirmed => Closed");
+    assert_supply(&pic, backend, 0, "final (Closed via close_chain_vault)");
+
+    eprintln!("[conflux close_chain_vault] PASSED: close_chain_vault on a debt-free vault no longer traps on the nested STATE borrow; vault settled Open -> Closing -> Closed");
+}
+
 // ─── helpers that build mock-control args ────────────────────────────────────
 
 fn get_vault(pic: &PocketIc, backend: Principal, vault_id: u64) -> Option<ChainVaultV1> {
