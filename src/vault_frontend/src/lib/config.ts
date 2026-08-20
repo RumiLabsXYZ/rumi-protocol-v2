@@ -54,6 +54,8 @@ export const ADMIN_VIEW_PRINCIPALS: string[] = [
   // rumi_identity (CLI deploy identity; listed for completeness — a browser
   // wallet will never present this principal):
   "fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae",
+  // Rob's app-wallet principal (zegjz):
+  "zegjz-jpi6k-qkand-c2bgf-qw6za-xk4si-nz3gx-qzzia-fk6fg-snepb-tae",
 ];
 
 // Canister IDs for local development
