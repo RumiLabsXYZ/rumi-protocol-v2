@@ -115,6 +115,10 @@ export const idlFactory = ({ IDL }) => {
     'ReleaseForRetry' : IDL.Null,
     'ConfirmPaid' : IDL.Null,
   });
+  const Result_23 = IDL.Variant({
+    'Ok' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Text)),
+    'Err' : ProtocolError,
+  });
   const VaultIntent = IDL.Record({
     'action' : IDL.Nat8,
     'owner' : IDL.Text,
@@ -936,6 +940,10 @@ export const idlFactory = ({ IDL }) => {
     'reached_end' : IDL.Bool,
     'events' : IDL.Vec(IDL.Tuple(IDL.Nat64, Event)),
   });
+  const EvmRpcPrincipalInfo = IDL.Record({
+    'effective' : IDL.Principal,
+    'overridden' : IDL.Bool,
+  });
   const Fees = IDL.Record({
     'redemption_fee' : IDL.Float64,
     'borrowing_fee' : IDL.Float64,
@@ -982,6 +990,14 @@ export const idlFactory = ({ IDL }) => {
     'custody_address' : IDL.Text,
     'opened_at_ns' : IDL.Nat64,
     'derivation_nonce' : IDL.Nat64,
+  });
+  const PendingThreeUsdRefund = IDL.Record({
+    'retry_count' : IDL.Nat8,
+    'vault_id' : IDL.Nat64,
+    'amount_e8s' : IDL.Nat64,
+    'ledger' : IDL.Principal,
+    'op_nonce' : IDL.Nat,
+    'stability_pool' : IDL.Principal,
   });
   const PendingChainBurnAging = IDL.Record({
     'pending_chain_burn_e8s' : IDL.Nat,
@@ -1362,13 +1378,8 @@ export const idlFactory = ({ IDL }) => {
     'Err' : ProtocolError,
   });
   const Result_22 = IDL.Variant({ 'Ok' : IDL.Nat32, 'Err' : ProtocolError });
-  const Result_23 = IDL.Variant({
-    'Ok' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Text)),
-    'Err' : ProtocolError,
-  });
   return IDL.Service({
     'add_collateral_token' : IDL.Func([AddCollateralArg], [Result], []),
-    'backfill_collateral_symbols' : IDL.Func([], [Result_23], []),
     'add_margin_to_vault' : IDL.Func([VaultArg], [Result_1], []),
     'add_margin_with_deposit' : IDL.Func([IDL.Nat64], [Result_1], []),
     'admin_correct_vault_collateral' : IDL.Func(
@@ -1398,6 +1409,7 @@ export const idlFactory = ({ IDL }) => {
         [],
       ),
     'admin_sweep_to_treasury' : IDL.Func([IDL.Text], [Result_1], []),
+    'backfill_collateral_symbols' : IDL.Func([], [Result_23], []),
     'borrow_chain_vault_evm' : IDL.Func(
         [VaultIntent, IDL.Vec(IDL.Nat8)],
         [Result],
@@ -1557,6 +1569,7 @@ export const idlFactory = ({ IDL }) => {
         [ForwardFilteredEventsResponse],
         ['query'],
       ),
+    'get_evm_rpc_principal' : IDL.Func([], [EvmRpcPrincipalInfo], ['query']),
     'get_fees' : IDL.Func([IDL.Nat64], [Fees], ['query']),
     'get_fees_for_collateral' : IDL.Func(
         [IDL.Principal, IDL.Nat64],
@@ -1603,6 +1616,11 @@ export const idlFactory = ({ IDL }) => {
     'get_my_xrp_pending_deposits' : IDL.Func(
         [],
         [IDL.Vec(IDL.Tuple(IDL.Nat64, XrpPendingDeposit))],
+        ['query'],
+      ),
+    'get_pending_3usd_refunds' : IDL.Func(
+        [],
+        [IDL.Vec(PendingThreeUsdRefund)],
         ['query'],
       ),
     'get_pending_amm1_donations_count' : IDL.Func([], [IDL.Nat64], ['query']),

@@ -916,6 +916,10 @@ export interface EventsByPrincipalPagedResponse {
   'events' : Array<[bigint, Event]>,
   'total_events' : bigint,
 }
+export interface EvmRpcPrincipalInfo {
+  'effective' : Principal,
+  'overridden' : boolean,
+}
 export type FeeSource = { 'BorrowingFee' : null } |
   { 'RedemptionFee' : null };
 export interface Fees { 'redemption_fee' : number, 'borrowing_fee' : number }
@@ -1017,6 +1021,14 @@ export interface PendingLiquidationV1 {
   'tier' : LiquidationTier,
   'debt_to_clear_e8s' : bigint,
   'collateral_reserved_native' : bigint,
+}
+export interface PendingThreeUsdRefund {
+  'retry_count' : number,
+  'vault_id' : bigint,
+  'amount_e8s' : bigint,
+  'ledger' : Principal,
+  'op_nonce' : bigint,
+  'stability_pool' : Principal,
 }
 export interface PerCollateralRateCurve {
   'markers' : Array<[number, number]>,
@@ -1544,6 +1556,7 @@ export interface _SERVICE {
     [bigint, bigint, [] | [Array<EventTypeFilter>]],
     ForwardFilteredEventsResponse
   >,
+  'get_evm_rpc_principal' : ActorMethod<[], EvmRpcPrincipalInfo>,
   'get_fees' : ActorMethod<[bigint], Fees>,
   'get_fees_for_collateral' : ActorMethod<[Principal, bigint], Fees>,
   'get_global_icusd_mint_cap' : ActorMethod<[], bigint>,
@@ -1573,6 +1586,7 @@ export interface _SERVICE {
     [],
     Array<[bigint, XrpPendingDeposit]>
   >,
+  'get_pending_3usd_refunds' : ActorMethod<[], Array<PendingThreeUsdRefund>>,
   'get_pending_amm1_donations_count' : ActorMethod<[], bigint>,
   'get_pending_chain_burn_aging' : ActorMethod<
     [],

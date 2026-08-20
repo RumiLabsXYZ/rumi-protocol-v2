@@ -747,6 +747,7 @@ type EventsByPrincipalPagedResponse = record {
   events : vec record { nat64; Event };
   total_events : nat64;
 };
+type EvmRpcPrincipalInfo = record { effective : principal; overridden : bool };
 type FeeSource = variant { BorrowingFee; RedemptionFee };
 type Fees = record { redemption_fee : float64; borrowing_fee : float64 };
 type ForwardFilteredEventsResponse = record {
@@ -1309,6 +1310,7 @@ service : (ProtocolArg) -> {
   get_events_forward_filtered : (nat64, nat64, opt vec EventTypeFilter) -> (
       ForwardFilteredEventsResponse,
     ) query;
+  get_evm_rpc_principal : () -> (EvmRpcPrincipalInfo) query;
   get_fees : (nat64) -> (Fees) query;
   get_fees_for_collateral : (principal, nat64) -> (Fees) query;
   get_global_icusd_mint_cap : () -> (nat64) query;

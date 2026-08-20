@@ -2893,6 +2893,29 @@ fn set_evm_rpc_principal(principal: candid::Principal) -> Result<(), ProtocolErr
     Ok(())
 }
 
+/// The effective EVM RPC canister principal plus whether it's a
+/// developer-set override (as opposed to the built-in production default).
+#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EvmRpcPrincipalInfo {
+    pub effective: candid::Principal,
+    pub overridden: bool,
+}
+
+/// De-scaffold pass (2026-08-20, additive candid): reports the EVM RPC
+/// canister principal chains calls actually route through right now. Lets an
+/// operator verify, before registering a chain for real (see the go-live
+/// checklist at the top of chains/mod.rs, item 5), that no stale
+/// `set_evm_rpc_principal` override is left pointing production traffic at a
+/// PocketIC/staging mock.
+#[candid_method(query)]
+#[query]
+fn get_evm_rpc_principal() -> EvmRpcPrincipalInfo {
+    EvmRpcPrincipalInfo {
+        effective: rumi_protocol_backend::chains::evm::evm_rpc::evm_rpc_principal(),
+        overridden: read_state(|s| s.evm_rpc_override().is_some()),
+    }
+}
+
 /// Clear the global supply-invariant halt (set by the Timer-B self-check on
 /// drift). Use only AFTER manually confirming `total_supply_all_chains_e8s`
 /// matches `total_chain_vault_debt_e8s`. Developer-gated.
@@ -2929,29 +2952,6 @@ fn clear_invariant_halt() -> Result<(), ProtocolError> {
         );
     }
     result
-}
-
-const MAX_RECONCILIATION_PROOF_BYTES: usize = 512;
-
-fn normalize_reconciliation_proof(proof: &str) -> Result<String, ProtocolError> {
-    let trimmed = proof.trim();
-    if trimmed.is_empty() {
-        return Err(ProtocolError::ChainAdmin("proof text required".into()));
-    }
-    if trimmed.as_bytes().len() > MAX_RECONCILIATION_PROOF_BYTES {
-        return Err(ProtocolError::ChainAdmin(format!(
-            "proof text too long: {} bytes > {}",
-            trimmed.as_bytes().len(),
-            MAX_RECONCILIATION_PROOF_BYTES
-        )));
-    }
-    Ok(trimmed.to_string())
-}
-
-fn map_backing_settlement_error(
-    e: rumi_protocol_backend::chains::supply::BackingSettlementError,
-) -> ProtocolError {
-    ProtocolError::ChainAdmin(format!("{e:?}"))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3256,83 +3256,40 @@ fn get_pending_chain_burn_aging(
     read_state(|s| s.multi_chain.pending_chain_burn_aging(now_ns))
 }
 
-/// Developer-gated manual reconciliation for the SP path: called after the
-/// operator verifies the matching foreign-chain icUSD burn for an amount already
-/// booked in `pending_chain_burn_e8s`.
+/// DISABLED (2026-08-20, de-scaffold pass). This was the unverified, freeform-
+/// proof-string reconciliation path for the SP pending-burn accounting: any
+/// caller passing the developer gate could book an arbitrary `amount_e8s` with
+/// nothing but a human-typed `proof` string, no receipt verification at all.
+/// The receipt-verified replacement, `settle_pending_chain_burn_with_proof`,
+/// actually fetches and validates the on-chain burn receipt before settling.
+/// The candid signature is kept EXACTLY as-is (a breaking removal would ripple
+/// into any live caller still pointed at the old method); the body now just
+/// refuses, unconditionally, before touching state or the caller's identity.
 #[candid_method(update)]
 #[update]
 fn settle_pending_chain_burn(
-    chain: rumi_protocol_backend::chains::config::ChainId,
-    amount_e8s: u128,
-    proof: String,
+    _chain: rumi_protocol_backend::chains::config::ChainId,
+    _amount_e8s: u128,
+    _proof: String,
 ) -> Result<(), ProtocolError> {
-    let caller = ic_cdk::caller();
-    if read_state(|s| s.developer_principal != caller) {
-        return Err(ProtocolError::ChainAdmin("not developer".into()));
-    }
-    let proof = normalize_reconciliation_proof(&proof)?;
-    mutate_state(|s| {
-        rumi_protocol_backend::chains::supply::settle_pending_chain_burn(
-            &mut s.multi_chain,
-            chain,
-            amount_e8s,
-        )
-    })
-    .map_err(map_backing_settlement_error)?;
-    let timestamp = ic_cdk::api::time();
-    rumi_protocol_backend::storage::record_event(&Event::ChainPendingBurnSettled {
-        chain_id: chain,
-        amount_e8s,
-        proof: proof.clone(),
-        timestamp,
-    });
-    log!(
-        INFO,
-        "[settle_pending_chain_burn] chain={:?} amount_e8s={} proof={}",
-        chain,
-        amount_e8s,
-        proof
-    );
-    Ok(())
+    Err(ProtocolError::ChainAdmin(
+        "disabled: use settle_pending_chain_burn_with_proof (receipt-verified)".into(),
+    ))
 }
 
-/// Developer-gated manual reconciliation for Tier-1 reserve retirement: called
-/// after the operator verifies the reserve-backed foreign icUSD was burned.
+/// DISABLED (2026-08-20, de-scaffold pass). Same rationale as
+/// `settle_pending_chain_burn` above, for Tier-1 reserve retirement: the
+/// receipt-verified replacement is `settle_reserve_burn_with_proof`.
 #[candid_method(update)]
 #[update]
 fn settle_reserve_burn(
-    chain: rumi_protocol_backend::chains::config::ChainId,
-    amount_e8s: u128,
-    proof: String,
+    _chain: rumi_protocol_backend::chains::config::ChainId,
+    _amount_e8s: u128,
+    _proof: String,
 ) -> Result<(), ProtocolError> {
-    let caller = ic_cdk::caller();
-    if read_state(|s| s.developer_principal != caller) {
-        return Err(ProtocolError::ChainAdmin("not developer".into()));
-    }
-    let proof = normalize_reconciliation_proof(&proof)?;
-    mutate_state(|s| {
-        rumi_protocol_backend::chains::supply::settle_reserve_burn(
-            &mut s.multi_chain,
-            chain,
-            amount_e8s,
-        )
-    })
-    .map_err(map_backing_settlement_error)?;
-    let timestamp = ic_cdk::api::time();
-    rumi_protocol_backend::storage::record_event(&Event::ChainReserveBurnSettled {
-        chain_id: chain,
-        amount_e8s,
-        proof: proof.clone(),
-        timestamp,
-    });
-    log!(
-        INFO,
-        "[settle_reserve_burn] chain={:?} amount_e8s={} proof={}",
-        chain,
-        amount_e8s,
-        proof
-    );
-    Ok(())
+    Err(ProtocolError::ChainAdmin(
+        "disabled: use settle_reserve_burn_with_proof (receipt-verified)".into(),
+    ))
 }
 
 /// Clear a chain's reorg circuit breaker. Resets BOTH `reorg_halted` AND the
@@ -12335,29 +12292,91 @@ mod inc12_liquidation_config_tests {
     }
 }
 
+/// De-scaffold pass (2026-08-20): the legacy freeform-proof-string
+/// reconciliation endpoints (`settle_pending_chain_burn`, `settle_reserve_burn`)
+/// are hard-disabled in favor of the receipt-verified `_with_proof` variants.
+/// These are plain unit tests (no PocketIC / caller identity needed) because
+/// the disabled bodies no longer read `ic_cdk::caller()` at all: they refuse
+/// unconditionally, for every caller, before touching state. A PocketIC-level
+/// test proving the SAME refusal through the real candid boundary as the
+/// developer principal lives in
+/// `tests/chains_legacy_reconciliation_disabled_pic.rs`.
 #[cfg(test)]
-mod inc5_reconciliation_tests {
-    use super::normalize_reconciliation_proof;
+mod legacy_reconciliation_hard_disabled_tests {
+    use super::{settle_pending_chain_burn, settle_reserve_burn, ProtocolError};
+    use rumi_protocol_backend::chains::config::ChainId;
 
     #[test]
-    fn reconciliation_proof_accepts_trimmed_nonempty_text() {
-        assert_eq!(
-            normalize_reconciliation_proof("  cfx burn tx 0xabc:7  ").expect("valid proof"),
-            "cfx burn tx 0xabc:7"
-        );
+    fn settle_pending_chain_burn_always_refuses() {
+        let err = settle_pending_chain_burn(ChainId(1030), 100, "any proof".to_string())
+            .expect_err("legacy endpoint must refuse");
+        match err {
+            ProtocolError::ChainAdmin(msg) => {
+                assert!(msg.contains("disabled"), "msg={msg}");
+                assert!(
+                    msg.contains("settle_pending_chain_burn_with_proof"),
+                    "msg should point at the replacement: msg={msg}"
+                );
+            }
+            other => panic!("expected ChainAdmin, got {other:?}"),
+        }
     }
 
     #[test]
-    fn reconciliation_proof_rejects_empty_text() {
-        let err = normalize_reconciliation_proof("   ").unwrap_err();
-        assert!(format!("{err:?}").contains("proof text required"));
+    fn settle_reserve_burn_always_refuses() {
+        let err = settle_reserve_burn(ChainId(1030), 100, "any proof".to_string())
+            .expect_err("legacy endpoint must refuse");
+        match err {
+            ProtocolError::ChainAdmin(msg) => {
+                assert!(msg.contains("disabled"), "msg={msg}");
+                assert!(
+                    msg.contains("settle_reserve_burn_with_proof"),
+                    "msg should point at the replacement: msg={msg}"
+                );
+            }
+            other => panic!("expected ChainAdmin, got {other:?}"),
+        }
     }
 
     #[test]
-    fn reconciliation_proof_rejects_text_over_512_bytes() {
-        let proof = "x".repeat(513);
-        let err = normalize_reconciliation_proof(&proof).unwrap_err();
-        assert!(format!("{err:?}").contains("proof text too long"));
+    fn settle_pending_chain_burn_refuses_regardless_of_amount_or_proof_shape() {
+        // Zero amount, empty proof, huge amount, garbage proof: every input
+        // hits the same unconditional refusal (there is no longer any
+        // validation branch to exercise).
+        assert!(settle_pending_chain_burn(ChainId(71), 0, String::new()).is_err());
+        assert!(settle_pending_chain_burn(ChainId(71), u128::MAX, "x".repeat(9999)).is_err());
+    }
+
+    #[test]
+    fn settle_reserve_burn_refuses_regardless_of_amount_or_proof_shape() {
+        assert!(settle_reserve_burn(ChainId(71), 0, String::new()).is_err());
+        assert!(settle_reserve_burn(ChainId(71), u128::MAX, "x".repeat(9999)).is_err());
+    }
+}
+
+/// De-scaffold pass (2026-08-20): the additive `get_evm_rpc_principal` query.
+#[cfg(test)]
+mod get_evm_rpc_principal_tests {
+    use super::{get_evm_rpc_principal, replace_state, State};
+    use rumi_protocol_backend::chains::evm::evm_rpc::default_evm_rpc_principal;
+
+    #[test]
+    fn reports_default_when_no_override_set() {
+        replace_state(State::default());
+        let info = get_evm_rpc_principal();
+        assert_eq!(info.effective, default_evm_rpc_principal());
+        assert!(!info.overridden);
+    }
+
+    #[test]
+    fn reports_override_and_flags_it() {
+        use candid::Principal;
+        replace_state(State::default());
+        let mock = Principal::from_slice(&[9; 29]);
+        super::mutate_state(|s| s.evm_rpc_principal_override = Some(mock));
+        let info = get_evm_rpc_principal();
+        assert_eq!(info.effective, mock);
+        assert!(info.overridden);
     }
 }
 
