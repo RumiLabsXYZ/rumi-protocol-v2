@@ -2,14 +2,16 @@
 //! `disable_chain` emergency risk stop.
 //!
 //! `disable_chain` blocks risk-increasing operations (new opens, additional
-//! borrows) and hands the chain's native pair back to manual pricing. Before
-//! `enable_chain` existed it was effectively TERMINAL for a live chain:
-//! `register_chain` refuses a present `chain_id` and `delete_chain` refuses a
-//! chain with any supply or any vault, so a chain with even one open vault
-//! could never come back. An operator facing a transient incident therefore
-//! had to choose between leaving the risk gate open and freezing the chain
-//! forever. This suite proves the transition is real, gated, state-preserving
-//! and repeatable, through the actual Candid boundary.
+//! borrows), hands the chain's native pair back to manual pricing, AND drops
+//! the chain from the observer/settlement worker fan-outs, so an exit enqueued
+//! while it is Disabled is accepted but never broadcast. Before `enable_chain`
+//! existed that was TERMINAL for a live chain: `register_chain` refuses a
+//! present `chain_id` and `delete_chain` refuses a chain with any supply or any
+//! vault, so a queued exit could neither complete nor be cleared. An operator
+//! facing a transient incident therefore had to choose between leaving the risk
+//! gate open and freezing the chain forever. This suite proves the transition
+//! is real, gated, state-preserving and repeatable, through the actual Candid
+//! boundary.
 //!
 //! Scenarios:
 //!   1. `enable_chain_is_developer_gated`

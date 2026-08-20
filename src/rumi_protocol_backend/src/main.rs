@@ -1329,16 +1329,19 @@ fn disable_chain(
 
 /// Reverse `disable_chain`: flip a `Disabled` chain back to `Registered`.
 ///
-/// `disable_chain` is the post-launch emergency risk stop (it blocks new opens
-/// and borrows and hands the chain's native pair back to manual pricing). This
-/// is its recovery half, and it is what makes that stop REVERSIBLE: without it
-/// a disabled chain with any open vault could never be re-enabled, because
-/// `register_chain` refuses a present `chain_id` and `delete_chain` refuses a
-/// chain with any supply or vault.
+/// `disable_chain` is the post-launch emergency stop: it blocks new opens and
+/// borrows, hands the chain's native pair back to manual pricing, AND drops the
+/// chain from the observer/settlement worker fan-outs, so exits enqueued while
+/// it is Disabled are accepted but not broadcast. This is its recovery half,
+/// and it is what makes that stop REVERSIBLE: without it a disabled chain with
+/// any open vault could never be re-enabled (`register_chain` refuses a present
+/// `chain_id`, `delete_chain` refuses a chain with any supply or vault), so a
+/// queued exit would strand permanently. Re-enabling restores the workers and
+/// those queued exits drain.
 ///
 /// Developer-gated, like every other chain-admin mutation. Adds no persisted
 /// field and preserves all per-chain state (see `enable_chain_in_state`).
-/// Records the existing durable `Event::ChainConfigUpdated` -- this IS a chain
+/// Records the existing durable `Event::ChainConfigUpdated`, since this IS a chain
 /// config change (the `status` field), and reusing the shipped variant avoids
 /// adding an event shape that every historical log reader would have to learn.
 /// The explicit `Disabled -> Registered` transition is written to the INFO log
@@ -1748,7 +1751,7 @@ async fn open_chain_vault_evm(
         // check can see). But that check runs after the nonce is already spent,
         // so without this pre-check every open attempted against a chain an
         // operator disabled hours ago would burn the caller's nonce and force a
-        // re-sign at `nonce + 1` to recover -- a needless penalty for a user who
+        // re-sign at `nonce + 1` to recover, a needless penalty for a user who
         // could not have known the chain was closed. The two checks read the
         // SAME `chain_is_registered` predicate, and the error text is built from
         // the same `OpenVaultError::ChainDisabled` value the post-await path
@@ -2932,8 +2935,8 @@ fn set_manual_collateral_price(
     // row is "XRC-managed" (xrc::chain_is_xrc_managed); combined with the
     // chain's native symbol that is exactly the pair the automatic XRC timer
     // writes (xrc::pair_is_xrc_managed). While a pair is XRC-managed the timer
-    // is its SOLE writer, and this endpoint rejects EVERY caller -- the
-    // narrowly-scoped price pusher AND the developer.
+    // is its SOLE writer, and this endpoint rejects EVERY caller: the
+    // narrowly-scoped price pusher and the developer alike.
     //
     // The developer used to be exempt on the reasoning that a single trusted
     // operator cannot race itself. That is wrong about the failure this gate
@@ -2942,7 +2945,7 @@ fn set_manual_collateral_price(
     // timer fires from its own message, on its own schedule, with no ordering
     // relationship to an operator's ingress call. A manual write can land
     // between a timer fetch and its write and be silently overwritten seconds
-    // later, or overwrite a fresher automatic sample -- and with the
+    // later, or overwrite a fresher automatic sample, and with the
     // source-time monotonicity rule below, a manual write also re-baselines the
     // timestamp and price the timer's next sample is judged against. Two
     // writers on one cell is the defect, regardless of who holds the second
@@ -9212,7 +9215,7 @@ fn set_chains_ecdsa_key_name(name: String) -> Result<(), ProtocolError> {
     // rejected call never clears anything.
     //
     // Security review follow-up (F8): clearing the caches here is defense in
-    // depth, not the actual invariant -- an async derive that started under
+    // depth, not the actual invariant. An async derive that started under
     // the OLD key and is still in flight (suspended at its management-canister
     // await) when this runs would otherwise resume and write a stale address
     // into the cache THIS CALL just cleared. `bump_ecdsa_key_generation()`
@@ -12027,7 +12030,7 @@ mod chain_vault_param_tests {
 /// end rather than assumed. `verify_intent_ctx` resolves the bound
 /// `chain_contracts` entry BEFORE it ever calls `eip712::verify_intent` (the
 /// contract address is the EIP-712 domain separator, so it has to be resolved
-/// first) -- so an unbound chain rejects with "no contract set" on ANY
+/// first), so an unbound chain rejects with "no contract set" on ANY
 /// signature, valid or garbage, and regardless of chain registration or price
 /// state. This is why `chains/mod.rs`'s go-live checklist calls binding the
 /// IcUSD contract (`set_chain_contract`) the actual "make public" step: unlike
@@ -12077,7 +12080,7 @@ mod evm_open_public_gate_tests {
 
     /// The core pin: chain registered + a fresh manual price present, but NO
     /// `set_chain_contract` binding, still rejects with the contract-specific
-    /// error -- and does so WITHOUT needing a validly-signed intent (garbage
+    /// error. It does so WITHOUT needing a validly-signed intent (garbage
     /// signature bytes), because the contract lookup happens strictly before
     /// signature verification.
     #[test]
@@ -12088,7 +12091,7 @@ mod evm_open_public_gate_tests {
             .chain_configs
             .insert(CFX_MAINNET, registered_chain_config());
         // A price IS present (loose "any price" gate, no liquidation config row
-        // yet to enforce freshness) -- proves price presence alone is not the
+        // yet to enforce freshness), proving price presence alone is not the
         // gate either.
         state
             .multi_chain
@@ -12106,7 +12109,7 @@ mod evm_open_public_gate_tests {
 
     // A second test proving that binding the contract clears this specific
     // gate (and only fails downstream on signature verification) would need
-    // `ic_cdk::api::time()`, which traps outside a real canister -- so that
+    // `ic_cdk::api::time()`, which traps outside a real canister. That
     // half of the ordering claim is left to the PocketIC suites (e.g.
     // `conflux_espace_happy_path_pic`, which opens a vault end to end against
     // a bound contract with a real signature).

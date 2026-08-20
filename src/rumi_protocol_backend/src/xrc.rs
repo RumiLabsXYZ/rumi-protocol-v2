@@ -729,32 +729,40 @@ pub async fn ensure_stable_not_depegged(
 use crate::chains::config::ChainId;
 
 /// Security review follow-up (F2): whether `chain` is currently
-/// "XRC-managed" -- registered (`MultiChainState::chain_is_registered`, the
+/// "XRC-managed": registered (`MultiChainState::chain_is_registered`, the
 /// single shared status predicate F10 also reads) AND carrying a
 /// `chain_liquidation_configs` row (regardless of that row's `enabled` flag:
 /// staging a config while disabled should still keep the price warm so
 /// flipping `enabled` later doesn't start on a stale/missing price, AND
-/// still claims the pair so a manual pusher cannot race it).
+/// still claims the pair so no manual writer can race it).
 ///
-/// When true, the XRC timer is the SOLE writer of `(chain, native_symbol)`'s
-/// manual price: `set_manual_collateral_price` (main.rs) rejects a write for
-/// an XRC-managed pair, for every caller including the authorized
-/// price-pusher, rather than racing last-writer-wins against the timer. The
-/// stop procedure (hand the pair back to manual pricing) is either removing
-/// the `chain_liquidation_configs` row, or `disable_chain` (which flips
-/// `chain_is_registered` to false) -- both already make this predicate
-/// false, so no separate kill switch is needed.
+/// When true, the XRC timer is AUTHORITATIVE and the SOLE writer of
+/// `(chain, native_symbol)`'s manual price: `set_manual_collateral_price`
+/// (main.rs) rejects a write for an XRC-managed pair from EVERY caller, the
+/// narrowly-scoped price pusher and the developer alike. The race being
+/// closed is writer-vs-writer on one `set_manual_price` cell, not
+/// operator-vs-operator, so exempting the trusted operator would not have
+/// closed it: the timer fires from its own message on its own schedule with
+/// no ordering relationship to an ingress call.
+///
+/// Manual control is sequenced rather than removed. Stop procedure:
+/// `disable_chain` (flips `chain_is_registered` to false, which already makes
+/// this predicate false), rebaseline, verify, then `enable_chain` to hand
+/// authority back. There is currently no standalone endpoint to remove just a
+/// `chain_liquidation_configs` row; the only alternative is `delete_chain`
+/// (requires zero supply and zero vaults for the chain) followed by a fresh
+/// `register_chain`.
 pub fn chain_is_xrc_managed(state: &State, chain: ChainId) -> bool {
     state.multi_chain.chain_is_registered(chain)
         && state.multi_chain.chain_liquidation_configs.contains_key(&chain)
 }
 
 /// The exact-pair form `set_manual_collateral_price` (main.rs) reads: true
-/// iff `chain` is XRC-managed AND `symbol` is that chain's native symbol (the
-/// only pair the timer ever actually writes -- a manual push to the SAME
+/// iff `chain` is XRC-managed AND `symbol` is that chain's native symbol,
+/// the only pair the timer ever actually writes. A manual push to the SAME
 /// chain under a DIFFERENT symbol string does not race the timer at all,
 /// since `MultiChainState::manual_prices` is keyed by the full
-/// `(ChainId, String)` tuple).
+/// `(ChainId, String)` tuple.
 pub fn pair_is_xrc_managed(state: &State, chain: ChainId, symbol: &str) -> bool {
     chain_is_xrc_managed(state, chain)
         && crate::chains::evm::evm_chain_config(chain)
@@ -813,7 +821,7 @@ impl ChainsPriceVerdict {
 /// price arbitrarily far in one sample. LIQ-007 was accepted for the collateral
 /// XRC path precisely to stop that; a new writer must not be the way around it.
 ///
-/// Two independent rules, both read from the existing pair of maps -- this adds
+/// Two independent rules, both read from the existing pair of maps, so this adds
 /// NO persisted field:
 ///
 ///  1. SOURCE-TIME MONOTONICITY. `stored.1` holds the SOURCE timestamp of the
@@ -875,7 +883,7 @@ pub fn chains_price_sample_is_acceptable(
 /// evaluated exactly in `u128` via cross-multiplication so no e8 price is ever
 /// converted to `f64`. Both operands are `u64`, so `u64 * 10` cannot overflow
 /// `u128` and the `checked_mul`s below can only fail if the constants are
-/// changed to something absurd -- in which case the sample is REJECTED, the
+/// changed to something absurd, in which case the sample is REJECTED, the
 /// fail-closed direction.
 fn price_is_within_sanity_band(stored_price_e8: u64, candidate_price_e8: u64) -> bool {
     use crate::state::{PRICE_SANITY_BAND_DEN, PRICE_SANITY_BAND_NUM};
@@ -1069,7 +1077,7 @@ async fn fetch_one_chain_price(chain: ChainId, symbol: String) {
             // `pair_is_xrc_managed` here, against the state we are about to
             // write, is what stops this fetch from landing an orphan or stale
             // value on a pair the operator has already taken manual control of
-            // -- which would silently overwrite an emergency rebaseline. The
+            // which would silently overwrite an emergency rebaseline. The
             // pre-`await` gate in `fetch_chains_prices` is a cycle guard, not a
             // write guard; this is the write guard.
             let outcome = mutate_state(|s| {
@@ -1168,7 +1176,7 @@ mod xrc_rate_to_price_e8_tests {
     #[test]
     fn a_huge_rate_at_small_decimals_that_would_overflow_u64_is_rejected() {
         // decimals=0 is IN the accepted 0..=18 range, but u64::MAX * 10^8 does
-        // not fit back into a u64 -- this must be caught by the final
+        // not fit back into a u64. This must be caught by the final
         // `u64::try_from` narrowing, not silently wrapped or trapped.
         assert_eq!(xrc_rate_to_price_e8(u64::MAX, 0), None);
         assert_eq!(xrc_rate_to_price_e8(u64::MAX, 1), None);
@@ -1178,7 +1186,7 @@ mod xrc_rate_to_price_e8_tests {
     fn max_rate_at_max_accepted_decimals_computes_exactly_with_no_overflow() {
         // The widest legal input: rate = u64::MAX, decimals = 18 (the bound
         // itself). price_e8 = u64::MAX * 10^8 / 10^18 = u64::MAX / 10^10
-        // (floor division), which comfortably fits u64 -- proves the u128
+        // (floor division), which comfortably fits u64, proving the u128
         // intermediate (u64::MAX * 10^8 ~= 1.84e27, far inside u128's
         // ~3.4e38 ceiling) never overflows, and the result is exact.
         let expected: u128 = (u64::MAX as u128) / 10_000_000_000u128;
@@ -1658,7 +1666,7 @@ mod chains_price_feed_tests {
     fn a_pre_existing_price_with_no_recorded_timestamp_still_gets_the_band() {
         // `get_manual_price` reports set_at_ns = 0 for a price written before
         // the V5 timestamp map existed. Any real sample is newer than 0, so the
-        // monotonicity rule passes and the BAND is what governs -- the pair
+        // monotonicity rule passes and the BAND is what governs, so the pair
         // self-heals onto source time without a free pass through LIQ-007.
         let stored = Some((BASELINE_E8, 0));
         assert_eq!(

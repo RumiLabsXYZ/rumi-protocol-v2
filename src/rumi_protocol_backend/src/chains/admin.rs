@@ -123,13 +123,17 @@ pub fn disable_chain_in_state(
 /// `ChainStatus::Registered`, restoring risk-increasing operations (open /
 /// borrow) and XRC price authority for the chain's native pair.
 ///
-/// This is the recovery half of the emergency risk stop. Before it existed,
-/// `disable_chain` was effectively terminal for a live chain: `register_chain`
-/// refuses an already-present `chain_id`, and `delete_chain` refuses a chain
-/// with any supply or any vault, so a chain with even one open vault could
-/// never come back. An operator facing a transient incident (a bad price
-/// source, a suspect RPC set) therefore had to choose between leaving the risk
-/// gate open and permanently freezing new opens for that chain.
+/// This is the recovery half of the emergency stop, and `disable_chain` is a
+/// harder stop than its name suggests: a Disabled chain is also dropped from
+/// the observer and settlement worker fan-outs (`registered_chains_and_solana_flag`
+/// in main.rs filters to `ChainStatus::Registered`), so an exit enqueued while
+/// it is Disabled is accepted but never broadcast. Before this transition
+/// existed that was unrecoverable: `register_chain` refuses an already-present
+/// `chain_id`, and `delete_chain` refuses a chain with any supply or any vault,
+/// so a pending exit could neither complete (worker gated off) nor be cleared
+/// (`delete_chain` blocked by the very vault it would need to remove).
+/// Re-enabling puts the chain back in the workers' list, so those queued exits
+/// drain normally.
 ///
 /// Deliberately minimal:
 /// - It adds NO persisted field. `ChainStatus` already carries both states;
@@ -175,6 +179,22 @@ pub fn enable_chain_in_state(
 /// Purges the chain from EVERY per-chain map (a stale entry left in any of them
 /// would be a silent state leak). All-or-nothing: every rejection path returns
 /// before the first mutation, so a refused delete leaves the chain fully intact.
+///
+/// Security review follow-up (M3, 2026-08-20): the purge list previously
+/// omitted `chain_liquidation_configs`. A stale row (router/factory/pair
+/// addresses, `enabled` flag) silently re-attached the moment the chain id
+/// was `register_chain`'d again, since the row lives independently of
+/// `chain_configs`. If that stale row carried `enabled: true`, the bot
+/// liquidation-swap path re-armed with OLD DEX wiring against a chain that
+/// looks freshly registered, before any operator has re-validated it. Now
+/// purged here. `chain_debt_configs` and `reserve_usdc_native` are
+/// deliberately NOT purged by this fix; see the security review report for
+/// why (in short: `chain_debt_configs` is a risk-limit override with no
+/// funds-safety exposure, left for a future hygiene pass, while
+/// `reserve_usdc_native` tracks a REAL physical USDC balance the reserve
+/// address may still hold post-delete, e.g. from a bot swap whose proceeds
+/// were never manually bridged out; purging that entry would make the
+/// canister forget accounting for still-recoverable funds).
 pub fn delete_chain_in_state(
     state: &mut MultiChainState,
     chain_id: ChainId,
@@ -211,6 +231,9 @@ pub fn delete_chain_in_state(
     state.chain_bad_debt_e8s.remove(&chain_id);
     state.chain_bad_debt_circuit_threshold_e8s.remove(&chain_id);
     state.chain_bad_debt_circuit_tripped_at_ns.remove(&chain_id);
+    // M3: without this, a stale row (router/factory/pair, `enabled`) silently
+    // re-attaches on the next register_chain for this id.
+    state.chain_liquidation_configs.remove(&chain_id);
     // manual_prices + its paired freshness map are keyed by (ChainId, String) —
     // drop ALL entries for this chain from BOTH, or the timestamp map leaks.
     state.manual_prices.retain(|(c, _), _| *c != chain_id);

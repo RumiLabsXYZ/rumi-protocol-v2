@@ -20,15 +20,15 @@
 //! address is unchanged after a REJECTED rotation attempt. That assertion is
 //! vacuous: a rejected rotation never changes `chains_ecdsa_key_name`, so
 //! re-derivation returns the identical address REGARDLESS of whether the
-//! cache was cleared -- the test could not fail even on unpatched code.
+//! cache was cleared: the test could not fail even on unpatched code.
 //! Removed per a conventions review finding; the real "only the success path
 //! clears/bumps anything" guarantee is code-order (`validate_ecdsa_key_change`
 //! returns via `?` before `clear_address_caches`/`bump_ecdsa_key_generation`
 //! ever run), which the pure `ecdsa_key_change_rules` unit test in main.rs
 //! already exercises (asserting `validate_ecdsa_key_change` itself rejects a
 //! bad name or a change with live vaults). The deterministic regression that
-//! actually matters here -- a derive racing a rotation across the async
-//! boundary -- is covered by `chains::evm::tecdsa::ecdsa_key_generation_guard_tests`
+//! actually matters here, a derive racing a rotation across the async
+//! boundary, is covered by `chains::evm::tecdsa::ecdsa_key_generation_guard_tests`
 //! (tecdsa.rs), which drives the exact interleaving directly rather than
 //! relying on PocketIC's non-deterministic scheduling to hit it.
 

@@ -191,7 +191,7 @@ pub enum OpenVaultError {
     /// registered but its `ChainStatus` is `Disabled` (the operator's
     /// post-launch emergency risk stop). Distinct from `UnknownChain` (never
     /// registered at all) so an operator can tell the two apart. Withdraw/
-    /// close/repay are UNAFFECTED by this -- only risk-increasing operations
+    /// close/repay are UNAFFECTED by this: only risk-increasing operations
     /// (open, borrow) read `MultiChainState::chain_is_registered`.
     ChainDisabled { chain: ChainId },
 }
@@ -461,17 +461,21 @@ pub fn open_chain_vault_in_state(
 ) -> Result<(), OpenVaultError> {
     // Reject an unregistered OR disabled chain before reading anything else.
     // Security review (F10): this used to be a bare `contains_key`, which
-    // does NOT distinguish a Disabled chain from a Registered one -- a chain
+    // does NOT distinguish a Disabled chain from a Registered one. A chain
     // an operator had disabled (post-launch emergency risk stop) kept
     // accepting new self-serve opens, because `disable_chain` only flips
     // `ChainStatus`, it never removes the `chain_configs` entry.
     // `chain_is_registered` (the shared predicate F2 also reads) is the fix.
-    // This is the ONLY enforcement point for this gate (this pure state
-    // helper is called exactly once, from the post-`.await` mutate_state
-    // block in `open_chain_vault_evm`/`open_chain_vault`), so a
-    // `disable_chain` that lands WHILE an async custody-address derive is in
-    // flight is still caught: the suspended open resumes into THIS check
-    // against fresh, current state.
+    // This is the ONLY enforcement point for this gate: this pure state
+    // helper is called from all three open entrypoints (`open_chain_vault`,
+    // `open_chain_vault_evm`, `open_solana_vault`), each from its own
+    // post-`.await` mutate_state block (after the tECDSA/Ed25519
+    // custody-address derive resolves), so a `disable_chain` that lands
+    // WHILE that derive is in flight is still caught on any of the three: the
+    // suspended open resumes into THIS check against fresh, current state.
+    // (This also means the Solana entrypoint gets the same disabled-chain
+    // rejection as the two EVM ones, a side effect of the shared pure
+    // helper rather than a Solana-specific design choice.)
     if !state.chain_configs.contains_key(&chain) {
         return Err(OpenVaultError::UnknownChain);
     }
@@ -1218,7 +1222,7 @@ pub fn borrow_chain_vault_in_state(
         )
     };
     // Security review (F10): borrowing more debt is risk-increasing, same as
-    // opening a new vault -- gate it on the chain being `ChainStatus::Registered`
+    // opening a new vault, so gate it on the chain being `ChainStatus::Registered`
     // (the shared predicate F2 also reads). `borrow_chain_vault_evm` has no
     // `.await` at all (fully synchronous), so there is no async gap to worry
     // about here the way `open_chain_vault_evm` has.

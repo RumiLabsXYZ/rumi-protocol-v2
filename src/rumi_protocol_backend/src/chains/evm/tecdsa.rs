@@ -216,7 +216,7 @@ pub fn clear_address_caches() {
 //      completion: it mutates `chains_ecdsa_key_name` AND calls
 //      `clear_address_caches()`.
 //   3. The suspended derive resumes. It still completes with the address
-//      derived under the OLD key (`test_key_1`) -- and, pre-fix,
+//      derived under the OLD key (`test_key_1`), and, pre-fix,
 //      unconditionally wrote that stale address into the cache the rotation
 //      had JUST cleared, re-poisoning it.
 //
@@ -230,7 +230,7 @@ pub fn clear_address_caches() {
 // than leaving it to expire lazily on next read), but the generation guard
 // is the actual invariant.
 thread_local! {
-    /// Heap-only (thread_local), NOT persisted -- a canister upgrade resets
+    /// Heap-only (thread_local), NOT persisted: a canister upgrade resets
     /// this to 0. That is harmless: the three address caches are heap too and
     /// reset to EMPTY at the exact same moment (a fresh Wasm instance has no
     /// thread_local state at all), so generation 0 post-upgrade always pairs
@@ -255,13 +255,13 @@ pub fn bump_ecdsa_key_generation() {
 /// interest-treasury, reserve): apply a freshly-derived address IF the
 /// generation captured before the derive started still matches the CURRENT
 /// generation; otherwise a key rotation raced the derive, and the stale
-/// result is rejected -- `Err`, not cached, not returned -- so the caller
+/// result is rejected (`Err`, not cached, not returned), so the caller
 /// re-derives on its next call instead of trusting an address signed by a
 /// key the canister no longer uses.
 ///
 /// Deliberately a plain sync function (no `.await` inside): this is what lets
 /// a test drive the exact interleaving deterministically without spinning up
-/// an async runtime or a mock management canister -- capture a generation,
+/// an async runtime or a mock management canister: capture a generation,
 /// bump it (simulating a rotation landing mid-derive), then call this with
 /// the stale captured value and assert the result is rejected and the cache
 /// stays empty.
@@ -349,7 +349,7 @@ mod ecdsa_key_generation_guard_tests {
     };
 
     /// THE regression: a derive that started before a rotation, and resolves
-    /// after it, must have its result discarded -- not cached, not returned.
+    /// after it, must have its result discarded, not cached, not returned.
     #[test]
     fn stale_generation_result_is_discarded_and_never_cached() {
         let chain = ChainId(1030);

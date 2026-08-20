@@ -2,7 +2,7 @@
 //! chains price feed (`xrc::fetch_chains_prices`, registered as a 300s timer
 //! in `setup_timers`).
 //!
-//! Two scenarios:
+//! Scenarios:
 //!
 //!   1. `no_chain_configured_price_stays_unset_and_canister_stays_healthy`:
 //!      boots with NO chain registered and `xrc_principal` pointed at the
@@ -23,7 +23,21 @@
 //!      see `chains_needing_price_feed`'s doc comment). With a mock XRC
 //!      canister serving CFX/USD, advances past the 300s cadence and asserts
 //!      `get_manual_collateral_price(1030, "CFX")` picks up the fetched
-//!      price with a fresh, non-zero `set_at_ns`.
+//!      price, stamped with the sample's SOURCE timestamp.
+//!
+//!   3. `arrival_time_is_not_second_aligned_so_the_check_above_discriminates`:
+//!      the guard that keeps scenario 2's source-vs-arrival assertion honest.
+//!
+//!   4. `an_out_of_band_sample_is_rejected_and_never_refreshes_freshness`:
+//!      the accepted LIQ-007 band applied to the automatic writer, including
+//!      that a rejection writes neither the price nor the timestamp, and that
+//!      a sustained out-of-band move never auto-confirms.
+//!
+//!   5. `disable_rebaseline_enable_restores_the_automatic_feed`: the
+//!      documented recovery from that fail-closed state.
+//!
+//!   6. `a_disabled_chain_gets_no_automatic_price_writes`: why manual control
+//!      is safe while the chain is disabled.
 
 use candid::{encode_args, encode_one, CandidType, Decode, Deserialize, Principal};
 use pocket_ic::{PocketIc, WasmResult};
@@ -417,7 +431,7 @@ fn arrival_time_is_not_second_aligned_so_the_check_above_discriminates() {
 }
 
 /// The accepted LIQ-007 band applies to the AUTOMATIC writer too, and a
-/// rejected sample writes NOTHING -- not the price, and critically not the
+/// rejected sample writes NOTHING: not the price, and critically not the
 /// freshness timestamp. A rejection that still refreshed `set_at_ns` would keep
 /// a frozen price looking fresh forever, which is the exact opposite of
 /// fail-closed.

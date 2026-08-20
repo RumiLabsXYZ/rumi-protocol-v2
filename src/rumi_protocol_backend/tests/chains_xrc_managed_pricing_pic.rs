@@ -4,8 +4,8 @@
 //!
 //! Once a chain is registered AND carries a `chain_liquidation_configs` row,
 //! the XRC price timer is the SOLE writer of its native-symbol price, and
-//! `set_manual_collateral_price` rejects EVERY caller for that pair -- the
-//! narrowly-scoped price pusher AND the developer. Two writers on one cell is
+//! `set_manual_collateral_price` rejects EVERY caller for that pair: the
+//! narrowly-scoped price pusher and the developer alike. Two writers on one cell is
 //! the defect the gate exists to prevent, and which of them holds the second
 //! key does not change that: the timer fires from its own message on its own
 //! schedule, so a manual write has no ordering relationship to it.
@@ -291,7 +291,7 @@ fn disable_rebaseline_enable_is_the_manual_control_loop() {
         .expect("the emergency pusher fallback is available while Disabled too");
 
     // 2. Enable hands authority back to XRC, and both manual writers are shut
-    //    out again -- so the loop cannot be left half-open by accident.
+    //    out again, so the loop cannot be left half-open by accident.
     enable_chain(&pic, cid);
     assert_xrc_managed_rejection(
         set_price(&pic, cid, developer(), 6_000_000)
