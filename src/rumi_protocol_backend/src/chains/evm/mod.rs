@@ -59,7 +59,6 @@ use crate::chains::config::ChainId;
 #[derive(Clone, Copy, Debug)]
 pub struct EvmChainConfig {
     pub chain_id: ChainId,
-    pub ecdsa_key_name: &'static str,
     /// Max toBlock - fromBlock span for a single eth_getLogs query (NOT the per-tick scan window). Monad provider caps at 100; Conflux eSpace at 1000.
     pub getlogs_max_range: u64,
     pub native_decimals: u8,
@@ -68,25 +67,29 @@ pub struct EvmChainConfig {
 
 /// Look up the compile-time EVM config for a chain id. `None` for non-EVM or
 /// unknown chains.
+///
+/// Note: the tECDSA key name is NOT part of this struct. It used to carry a
+/// dead `ecdsa_key_name` field hardcoding `"test_key_1"` per chain, but that
+/// value was never read at runtime — the real key selection is
+/// `State::chains_ecdsa_key_name` (state.rs), settable via
+/// `set_chains_ecdsa_key_name` and read by `tecdsa.rs`/`tx.rs`. Removed to
+/// avoid a second, misleading source of truth for the signing key.
 pub fn evm_chain_config(chain: ChainId) -> Option<EvmChainConfig> {
     match chain.0 {
         10143 => Some(EvmChainConfig {
             chain_id: ChainId(10143),
-            ecdsa_key_name: "test_key_1",
             getlogs_max_range: 100,
             native_decimals: 18,
             native_symbol: "MON",
         }),
         71 => Some(EvmChainConfig {
             chain_id: ChainId(71),
-            ecdsa_key_name: "test_key_1",
             getlogs_max_range: 1000,
             native_decimals: 18,
             native_symbol: "CFX",
         }),
         1030 => Some(EvmChainConfig {
             chain_id: ChainId(1030),
-            ecdsa_key_name: "test_key_1",
             getlogs_max_range: 1000,
             native_decimals: 18,
             native_symbol: "CFX",
@@ -105,7 +108,6 @@ mod tests {
         let c = evm_chain_config(ChainId(10143)).expect("monad known");
         assert_eq!(c.getlogs_max_range, 100);
         assert_eq!(c.native_symbol, "MON");
-        assert_eq!(c.ecdsa_key_name, "test_key_1");
     }
 
     #[test]
@@ -122,7 +124,6 @@ mod tests {
         assert_eq!(c.getlogs_max_range, 1000);
         assert_eq!(c.native_symbol, "CFX");
         assert_eq!(c.native_decimals, 18);
-        assert_eq!(c.ecdsa_key_name, "test_key_1");
     }
 
     #[test]
