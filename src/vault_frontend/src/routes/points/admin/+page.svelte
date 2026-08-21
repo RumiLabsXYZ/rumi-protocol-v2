@@ -30,6 +30,7 @@
     getPointLedgerLen,
     invalidatePointsCache,
   } from '$lib/services/pointsService';
+  import { SOURCE_META as SHARED_SOURCE_META } from '$lib/utils/pointsBreakdown';
   import { formatPoints, qualifyingActionLabel } from '$lib/utils/points';
   import { truncatePrincipal, copyToClipboard } from '$lib/utils/principalHelpers';
   import { toastStore } from '$lib/stores/toast';
@@ -164,18 +165,16 @@
     return Object.keys(v)[0] ?? '?';
   }
 
-  /** Source labels with the multiplier accrual applies (accrual::snapshot_weights). */
-  const SOURCE_META: Record<string, { label: string; mult: string }> = {
-    Registration: { label: 'Registration marker', mult: '—' },
-    IcUsdDebt: { label: 'icUSD vault debt', mult: '1×' },
-    IcUsd3Pool: { label: 'icUSD in 3pool', mult: '1×' },
-    CkStable3PoolMatched: { label: 'ck-stable 3pool (matched)', mult: '10×' },
-    CkStable3PoolUnmatched: { label: 'ck-stable 3pool (unmatched)', mult: '3×' },
-    IcUsdStabilityPool: { label: 'icUSD in stability pool', mult: '1×' },
-    ThreeUsdStabilityPool: { label: '3USD in stability pool', mult: '2×' },
-    AmmLp: { label: 'AMM LP', mult: '2×' },
-    VaultRepayment: { label: 'ck-stable vault repayment', mult: '5×' },
-  };
+  /** Source labels + multipliers from the shared table (utils/pointsBreakdown),
+   *  so the operator console and the user page can never disagree. The matched
+   *  pair shows the user-facing 5×-on-matched-dollars framing (2*min at 5×),
+   *  not the per-min-side 10×. */
+  const SOURCE_META: Record<string, { label: string; mult: string }> = Object.fromEntries(
+    Object.entries(SHARED_SOURCE_META).map(([k, m]) => [
+      k,
+      { label: m.label, mult: m.multiplier > 0 ? `${m.multiplier}×` : '—' },
+    ]),
+  );
   const SOURCE_TAGS: Record<number, string> = {
     0: 'rumi_protocol_backend',
     1: 'rumi_3pool',

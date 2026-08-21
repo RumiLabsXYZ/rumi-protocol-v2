@@ -1,3 +1,7 @@
+<script lang="ts">
+  import { AMM1_LIQUIDITY_PAUSED } from '$lib/config';
+</script>
+
 <svelte:head><title>Points &amp; Airdrop | Rumi Docs</title></svelte:head>
 
 <article class="doc-page">
@@ -28,12 +32,13 @@
           <tr><td>ckUSDC and ckUSDT deposited together (matched pair)</td><td class="mult">5x</td></tr>
           <tr><td>icUSD in the stability pool</td><td class="mult">1x</td></tr>
           <tr><td>3USD in the stability pool</td><td class="mult">2x</td></tr>
-          <tr><td>3USD/ICP liquidity in the Rumi AMM</td><td class="mult">2x</td></tr>
+          <tr><td>3USD/ICP liquidity in the Rumi AMM{#if AMM1_LIQUIDITY_PAUSED} <span class="soon">paused</span>{/if}</td><td class="mult">2x</td></tr>
           <tr><td>Repay a vault with ckUSDC or ckUSDT <span class="soon">coming soon</span></td><td class="mult">5x</td></tr>
         </tbody>
       </table>
     </div>
     <p>Multipliers stack <strong>across activities</strong>: borrowing against a vault, depositing in the 3pool, and depositing in the stability pool all earn independently at the same time. They do not stack within a single activity.</p>
+    {#if AMM1_LIQUIDITY_PAUSED}<p>New deposits to the 3USD/ICP AMM are currently paused. Liquidity already in the pool keeps earning 2x until it is withdrawn.</p>{/if}
     <p>For the matched-pair rate, the matched portion is twice the smaller of your ckUSDC and ckUSDT deposits at 5x; whatever is left over on the larger side earns the unmatched 3x rate. Adding a token-sized amount of one coin does not flip your whole position to 5x.</p>
     <p>The <strong>5x repayment boost</strong> rewards repaying vault debt with ckUSDC or ckUSDT: the repaid amount earns for a 90-day window (capped at season end). It is not live yet and will be enabled in an upcoming backend release.</p>
   </section>
@@ -56,7 +61,7 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Leaderboard &amp; Transparency</h2>
-    <p>The <a href="/points/leaderboard" class="doc-link">leaderboard</a> shows ranked principals and their points. Your own dashboard on the <a href="/points" class="doc-link">Airdrop</a> page shows your total, rank, enrollment date, and which venues you are currently earning from. All accrual state lives in the points canister and can be queried directly by anyone.</p>
+    <p>The <a href="/points/leaderboard" class="doc-link">leaderboard</a> shows ranked principals and their points. Your own dashboard on the <a href="/points" class="doc-link">Airdrop</a> page shows your total, rank, and enrollment date, what is earning for you right now, and a breakdown of how you earned — per activity and per epoch. All accrual state lives in the points canister and can be queried directly by anyone.</p>
   </section>
 </article>
 
