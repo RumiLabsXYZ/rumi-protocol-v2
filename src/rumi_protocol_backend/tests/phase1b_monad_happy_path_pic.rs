@@ -390,9 +390,10 @@ fn phase1b_monad_happy_path_supply_invariant() {
 
     // ── Seed the burn-watch cursor (Gate-3 activation) ───────────────────────
     // After A2a, the observer reads chain head by probing the SPECIFIC block
-    // `last_observed + MAX_BLOCK_SCAN_WINDOW` (=1024) via the typed
-    // eth_getBlockByNumber, so the cursor advances by exactly 1024 blocks per tick
-    // whenever `last_observed + 1024 <= finalized`. The cursor must be seeded
+    // `last_observed + MAX_BLOCK_SCAN_WINDOW` (=1024) via the consensus-safe
+    // block-existence probe (`eth_getBlockTransactionCountByNumber`, as of
+    // fix/evm-rpc-block-probe-cycles), so the cursor advances by exactly 1024
+    // blocks per tick whenever `last_observed + 1024 <= finalized`. The cursor must be seeded
     // (non-zero) for burn-watch to run at all. Seed it to a tip well above 1024 so
     // the small legacy block numbers (100/101/102) no longer apply. This runs in
     // BOTH the full and gated subsets (it only writes the map; harmless when

@@ -6,19 +6,41 @@
 //! incompatible with this project's ic-cdk 0.12 pin).  JSON-RPC responses are
 //! parsed with `serde_json` (already a workspace dep).
 //!
-//! Exception — finalized-height reads (`fetch_block_numbers`): these go through
-//! the TYPED `eth_getBlockByNumber(Number(N))` method (candid types mirrored
-//! below), NOT `request`.  A volatile chain-head read (`eth_blockNumber`, or any
-//! `latest`/`finalized` tag) differs across the EVM RPC canister's subnet
-//! replicas on a fast-finality chain like Monad → IC HTTPS-outcall consensus
-//! never agrees → the call fails every tick.  Probing a SPECIFIC, already-final
-//! block number is byte-identical across replicas, so it reaches consensus.
+//! Exception (finalized-height reads, `fetch_block_numbers` /
+//! `eth_get_block_number_at`): these still probe a SPECIFIC, already-final
+//! block number rather than a volatile tag (a volatile read, `eth_blockNumber`
+//! or any `latest`/`finalized` tag, differs across the EVM RPC canister's
+//! subnet replicas on a fast-finality chain, so IC HTTPS-outcall consensus
+//! never agrees and the call fails every tick). A fixed block number is
+//! byte-identical across replicas, so it reaches consensus.
 //!
-//! Cycle cost: `EVM_RPC_CALL_CYCLES` (2_000_000_000) per request.  This is
-//! intentionally generous — the actual HTTPS-outcall cost depends on response
-//! size and subnet node count but is typically in the hundreds-of-millions
-//! range.  The constant is marked tunable; a developer-gated setter can be
-//! added once we have production measurements.
+//! That probe is issued as a RAW `eth_getBlockTransactionCountByNumber`
+//! request through `call_evm_rpc` (the same per-provider raw-request quorum
+//! every other read in this file uses), NOT the TYPED
+//! `eth_getBlockByNumber` candid method (mirrored below, still kept for wire
+//! fidelity but currently unused). Incident 2026-08-21: the typed method's
+//! OWN internal 2-of-3 threshold consensus has a materially higher cost model
+//! than a raw scalar read. A live cost query for the exact 3 configured
+//! Conflux providers at the probe's target block, 2-of-3 threshold,
+//! `responseSizeEstimate=null`, measured 3,714,459,200 cycles, well above the
+//! `EVM_RPC_CALL_CYCLES` (2B) attached to the typed call; that gap is enough
+//! to establish underfunding as the cause. The live canary's own `Inconsistent`
+//! response collapsed the per-provider results without exposing their
+//! individual `RpcError` variants, so this cost-query comparison, not a
+//! directly-observed `TooFewCycles` on every provider, is the evidence.
+//! `eth_getBlockTransactionCountByNumber` answers the same "does block N
+//! exist" question with a tiny scalar (a tx count, e.g. `"0x0"` for an empty
+//! block, `null` for a block not yet produced, both confirmed live against
+//! all 3 Conflux providers) at the existing per-provider `EVM_RPC_CALL_CYCLES`
+//! cost, so it reuses the already-audited `call_evm_rpc` quorum instead of
+//! needing its own cycles budget.
+//!
+//! Cycle cost: `EVM_RPC_CALL_CYCLES` (2_000_000_000) per PROVIDER per raw
+//! `request` call.  This is intentionally generous (the actual HTTPS-outcall
+//! cost depends on response size and subnet node count but is typically in
+//! the hundreds-of-millions range for the small scalar/JSON responses every
+//! call in this file reads).  The constant is marked tunable; a
+//! developer-gated setter can be added once we have production measurements.
 //!
 //! Provider fallback: `call_evm_rpc` iterates over the chain's configured
 //! `rpc_endpoints` in order and returns the first `Ok` response; on all-fail
@@ -789,45 +811,128 @@ fn endpoints_and_floor(chain: ChainId) -> (Vec<String>, u32) {
 /// READS ONLY. `eth_sendRawTransaction` is a write and uses
 /// `call_evm_rpc_broadcast` (first-Ok: a broadcast lands if ANY provider accepts
 /// it; requiring agreement would wrongly drop a tx that only some providers saw).
+///
+/// This is a thin wrapper over `call_evm_rpc_detailed` that collapses the
+/// structured `QuorumError` into one diagnostic string, for callers that only
+/// need pass/fail. `eth_get_block_number_at` calls `call_evm_rpc_detailed`
+/// directly so it can react differently to "no provider responded at all"
+/// (an infrastructure failure) versus "the providers that DID respond
+/// disagreed".
 async fn call_evm_rpc(chain: ChainId, json_payload: &str) -> Result<String, String> {
+    call_evm_rpc_detailed(chain, json_payload)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Structured failure from `call_evm_rpc_detailed`. Distinguishes a
+/// configuration problem and an infrastructure failure (every configured
+/// provider errored, e.g. every provider returned `TooFewCycles`, so there is
+/// nothing to tally at all) from a genuine disagreement (at least one
+/// provider responded, but distinct-provider agreement never reached the
+/// required floor/majority). Both fail closed identically (never credit /
+/// never advance), but an operator investigating a stalled cursor needs to
+/// know which one happened: an infrastructure failure is actionable
+/// (fix cycles, fix a provider), a disagreement may just mean "try next tick".
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum QuorumError {
+    /// No endpoints configured, or fewer distinct endpoints than the chain's
+    /// quorum floor. Caught before any network call is made.
+    Configuration(String),
+    /// Every configured provider's `request` call errored (network failure,
+    /// `TooFewCycles`, or any other per-provider error). No response was
+    /// available to tally.
+    AllProvidersFailed(String),
+    /// At least one provider responded, but distinct-provider agreement never
+    /// reached the chain's required floor/majority.
+    Disagreement(String),
+}
+
+impl std::fmt::Display for QuorumError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            QuorumError::Configuration(d)
+            | QuorumError::AllProvidersFailed(d)
+            | QuorumError::Disagreement(d) => write!(f, "{}", d),
+        }
+    }
+}
+
+/// Same multi-provider quorum read as `call_evm_rpc`, but returns the
+/// STRUCTURED `QuorumError` (see its doc comment) instead of a flat string.
+async fn call_evm_rpc_detailed(chain: ChainId, json_payload: &str) -> Result<String, QuorumError> {
     let (endpoints, floor) = endpoints_and_floor(chain);
     if endpoints.is_empty() {
-        return Err(format!("no RPC endpoints configured for chain {:?}", chain));
+        return Err(QuorumError::Configuration(format!(
+            "no RPC endpoints configured for chain {:?}",
+            chain
+        )));
     }
     // M-05 (QUORUM-2): fail closed below the distinct-provider floor. With fewer
     // than `floor` distinct providers there is no way to reach the required
     // cross-provider agreement, so a financial read must never be credited.
     if (endpoints.len() as u32) < floor {
-        return Err(format!(
+        return Err(QuorumError::Configuration(format!(
             "RPC quorum floor not met for chain {:?}: {} distinct provider(s) configured, need >= {} (configure more endpoints; financial reads fail closed below the floor)",
             chain, endpoints.len(), floor
-        ));
+        )));
     }
     let canister = evm_rpc_principal();
 
+    // Collect EVERY provider's outcome (not just the last error), so a
+    // disagreement or all-fail diagnosis can name every provider by URL.
+    let mut outcomes: Vec<(String, Result<String, String>)> = Vec::new();
+    for url in &endpoints {
+        let outcome = single_call(canister, url, json_payload).await;
+        if let Err(ref e) = outcome {
+            log!(DEBUG, "[evm_rpc] provider read error via {}: {}", url, e);
+        }
+        outcomes.push((url.clone(), outcome));
+    }
+    tally_provider_outcomes(chain, &outcomes, floor)
+}
+
+/// Pure multi-provider quorum tally (audit M-04/M-05/M-06 lineage), split out
+/// from the async network loop above so the decision logic can be exercised
+/// with synthetic provider outcomes in unit tests, independent of any live
+/// inter-canister call. `outcomes` is `(provider_url, single_call result)` for
+/// every distinct configured endpoint, in the same order `call_evm_rpc_detailed`
+/// queried them; `floor` is the chain's minimum quorum-provider floor.
+fn tally_provider_outcomes(
+    chain: ChainId,
+    outcomes: &[(String, Result<String, String>)],
+    floor: u32,
+) -> Result<String, QuorumError> {
+    let total = outcomes.len();
+
     // Collect every Ok response PAIRED with its provider URL, so the tally counts
     // DISTINCT providers (M-04), not list slots or raw response multiplicity.
-    let mut oks: Vec<(String, String)> = Vec::new(); // (url, response_text)
-    let mut last_err = String::new();
-    for url in &endpoints {
-        match single_call(canister, url, json_payload).await {
-            Ok(text) => oks.push((url.clone(), text)),
-            Err(e) => {
-                log!(DEBUG, "[evm_rpc] provider read error via {}: {}", url, e);
-                last_err = e;
-            }
-        }
-    }
+    let oks: Vec<(&str, &str)> = outcomes
+        .iter()
+        .filter_map(|(url, r)| r.as_ref().ok().map(|text| (url.as_str(), text.as_str())))
+        .collect();
+    let errs: Vec<(&str, &str)> = outcomes
+        .iter()
+        .filter_map(|(url, r)| r.as_ref().err().map(|e| (url.as_str(), e.as_str())))
+        .collect();
+
     if oks.is_empty() {
-        return Err(format!("all {} providers failed; last: {}", endpoints.len(), last_err));
+        let detail = errs
+            .iter()
+            .map(|(url, e)| format!("{} -> {}", url, e))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(QuorumError::AllProvidersFailed(format!(
+            "infrastructure failure: all {} configured provider(s) for chain {:?} errored (nothing to tally, this is not a genuine on-chain disagreement): {}",
+            total, chain, detail
+        )));
     }
 
     // Group by semantic consensus key; for each key count the number of DISTINCT
     // provider URLs that returned it (endpoints are deduped, so each URL appears
     // at most once in `oks`, but we count distinctly to be explicit and robust).
-    let keyed: Vec<(String, serde_json::Value)> = oks
+    let keyed: Vec<(&str, serde_json::Value)> = oks
         .iter()
-        .map(|(url, text)| (url.clone(), response_consensus_key(text)))
+        .map(|(url, text)| (*url, response_consensus_key(text)))
         .collect();
     let mut best_idx = 0usize;
     let mut best_count = 0usize;
@@ -835,7 +940,7 @@ async fn call_evm_rpc(chain: ChainId, json_payload: &str) -> Result<String, Stri
         let mut providers_for_key = std::collections::BTreeSet::new();
         for (url, key) in &keyed {
             if *key == keyed[i].1 {
-                providers_for_key.insert(url.clone());
+                providers_for_key.insert(*url);
             }
         }
         let count = providers_for_key.len();
@@ -848,16 +953,42 @@ async fn call_evm_rpc(chain: ChainId, json_payload: &str) -> Result<String, Stri
     // Required distinct agreement: at least the floor AND a strict majority of the
     // DISTINCT configured providers (the floor is the audit's primary guard; the
     // majority preserves the original FLAG-1 protection for larger provider sets).
-    let majority = endpoints.len() / 2 + 1;
+    let majority = total / 2 + 1;
     let needed = (floor as usize).max(majority);
     if best_count >= needed {
         // Return the winning provider's response text (the consensus value).
-        Ok(oks[best_idx].1.clone())
+        Ok(oks[best_idx].1.to_string())
     } else {
-        Err(format!(
-            "RPC quorum not reached for chain {:?}: best distinct-provider agreement {}/{} (need {})",
-            chain, best_count, endpoints.len(), needed
-        ))
+        // Genuine disagreement: show WHAT the providers that did respond
+        // disagreed about, grouped by distinct value, plus any provider that
+        // errored outright (it did not vote either way).
+        let mut groups: Vec<(serde_json::Value, Vec<&str>)> = Vec::new();
+        for (url, key) in &keyed {
+            match groups.iter_mut().find(|(k, _)| k == key) {
+                Some(g) => g.1.push(*url),
+                None => groups.push((key.clone(), vec![*url])),
+            }
+        }
+        let groups_detail = groups
+            .iter()
+            .map(|(key, urls)| format!("{} from [{}]", key, urls.join(", ")))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let errs_detail = if errs.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; provider errors: {}",
+                errs.iter()
+                    .map(|(url, e)| format!("{} -> {}", url, e))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        Err(QuorumError::Disagreement(format!(
+            "RPC quorum not reached for chain {:?}: best distinct-provider agreement {}/{} (need {}); response groups: {}{}",
+            chain, best_count, total, needed, groups_detail, errs_detail
+        )))
     }
 }
 
@@ -897,142 +1028,168 @@ fn next_rpc_id() -> u64 {
 
 // ─── Public async interface ──────────────────────────────────────────────────
 
-/// Consensus-safe probe: does finalized block `n` exist? Routes through the
-/// TYPED eth_getBlockByNumber(Number(n)) (a specific number is byte-identical
+/// Consensus-safe probe: does finalized block `n` exist? Issues a RAW
+/// `eth_getBlockTransactionCountByNumber(0x{n})` request through
+/// `call_evm_rpc_detailed`, i.e. the SAME per-provider raw-request quorum
+/// every other read in this file uses (a specific number is byte-identical
 /// across IC replicas, unlike a volatile block tag). Returns Ok(Some(number))
-/// if present, Ok(None) if not yet reached (benign — caught up / future block),
-/// Err only on a genuine infra failure (call error / Inconsistent).
+/// if present, Ok(None) ONLY for the benign "not yet produced" case (an
+/// explicit `result: null`) or a quorum disagreement among providers that DID
+/// respond. Every other outcome is Err: every provider erroring outright, a
+/// quorum-agreed JSON-RPC error, a missing `result` key, a `result` that is
+/// not a valid Ethereum hex quantity, a malformed response carrying both
+/// `result` and `error`, or an unparseable body. See `parse_block_probe_response`
+/// for the exact decision tree.
 ///
-/// A one-off Ok(None) is expected when the chain hasn't produced that block yet.
-/// A PERSISTENT stream of Ok(None) in the INFO log (with an rpc_err in the
-/// message) indicates a real provider or consensus problem and means the
-/// burn-watch cursor is stalled — it will not advance until the probe starts
-/// returning Ok(Some(...)). Investigate the RPC endpoint and the EVM RPC
-/// canister's cycle balance if you see this repeating.
+/// Why a tx-count read instead of the TYPED `eth_getBlockByNumber` candid
+/// method (still mirrored below for wire fidelity, but no longer called from
+/// here): incident 2026-08-21 found the typed method's own internal 2-of-3
+/// threshold consensus costs materially more than `EVM_RPC_CALL_CYCLES`. A
+/// live cost query for the exact 3 configured providers measured 3,714,459,200
+/// cycles against the 2B attached, establishing underfunding as the cause; the
+/// live canary's `Inconsistent` response collapsed the per-provider results
+/// without exposing their individual `RpcError` variants, so this is a
+/// cost-comparison finding, not a directly-observed `TooFewCycles` on every
+/// provider. A raw scalar read answers the same existence question at the
+/// SAME per-provider cost every other call in this file already pays, with no
+/// per-call cycles budget of its own to get wrong. `"0x0"` (a valid tx count
+/// for an empty block) and JSON `null` (a block not yet produced) are both
+/// confirmed live against all 3 Conflux providers.
+///
+/// A one-off Ok(None) is expected when the chain hasn't produced that block
+/// yet. A PERSISTENT stream of Ok(None) in the INFO log indicates a real
+/// provider or consensus problem and means the burn-watch cursor is stalled;
+/// it will not advance until the probe starts returning Ok(Some(...)).
+/// Investigate the RPC endpoints and the EVM RPC canister's cycle balance if
+/// you see this repeating, and check whether the log line says "quorum
+/// disagreement" (providers responded but disagreed) versus an `Err` return
+/// (every provider failed outright, see `QuorumError::AllProvidersFailed`).
 async fn eth_get_block_number_at(chain: ChainId, n: u64) -> Result<Option<u64>, String> {
-    // M-06 (QUORUM-3): route the finality/block-existence probe through the SAME
-    // multi-provider quorum the balance/supply reads use, instead of trusting a
-    // single `endpoints.first()`. Pass ALL distinct configured providers and ask
-    // the EVM-RPC canister for `Threshold` consensus at our floor; below the
-    // floor we fail closed (same as `call_evm_rpc`).
-    let (endpoints, floor) = endpoints_and_floor(chain);
-    if endpoints.is_empty() {
-        return Err(format!("no RPC endpoints configured for chain {:?}", chain));
-    }
-    if (endpoints.len() as u32) < floor {
-        return Err(format!(
-            "RPC quorum floor not met for chain {:?}: {} distinct provider(s) configured, need >= {} (block probe fails closed below the floor)",
-            chain, endpoints.len(), floor
-        ));
-    }
+    let payload = format!(
+        r#"{{"jsonrpc":"2.0","method":"eth_getBlockTransactionCountByNumber","params":["0x{:x}"],"id":{}}}"#,
+        n,
+        next_rpc_id()
+    );
+    let quorum_result = call_evm_rpc_detailed(chain, &payload).await;
+    block_probe_outcome(chain, n, quorum_result)
+}
 
-    let services: Vec<RpcApi> = endpoints
-        .iter()
-        .map(|url| RpcApi {
-            url: url.clone(),
-            headers: None,
-        })
-        .collect();
-    let total_providers = services.len() as u8;
-    let rpc_services = RpcServices::Custom {
-        chain_id: chain.0 as u64,
-        services,
-    };
-    // Ask the canister to enforce a Threshold of `floor`-of-`total` providers.
-    // The canister returns `Consistent` only when at least `min` providers agree;
-    // otherwise `Inconsistent`, which we tally ourselves as a defense-in-depth.
-    let rpc_config = Some(RpcConfig {
-        response_size_estimate: None,
-        response_consensus: Some(ConsensusStrategy::Threshold {
-            total: Some(total_providers),
-            min: floor.min(u8::MAX as u32) as u8,
-        }),
-    });
-
-    let canister = evm_rpc_principal();
-    let result: Result<(MultiGetBlockByNumberResult,), _> =
-        ic_cdk::api::call::call_with_payment128(
-            canister,
-            "eth_getBlockByNumber",
-            (
-                rpc_services,
-                rpc_config,
-                BlockTag::Number(candid::Nat::from(n)),
-            ),
-            EVM_RPC_CALL_CYCLES,
-        )
-        .await;
-
-    match result {
-        Ok((MultiGetBlockByNumberResult::Consistent(GetBlockByNumberResult::Ok(block)),)) => {
-            // candid::Nat → u64; overflow is a hard error (a block number that
-            // exceeds u64 is impossible in practice and would corrupt the cursor).
-            let num: u64 = u64::try_from(block.number.0.clone())
-                .map_err(|_| format!("block number {} overflows u64", block.number))?;
-            Ok(Some(num))
+/// Pure decision logic for `eth_get_block_number_at`, split out from the
+/// async network call so the full branch matrix (quorum success,
+/// infrastructure failure, disagreement, malformed payload, benign
+/// not-yet-produced) can be unit tested with synthetic `QuorumError` /
+/// response-text fixtures, without any PocketIC instance or live network
+/// call.
+fn block_probe_outcome(
+    chain: ChainId,
+    n: u64,
+    quorum_result: Result<String, QuorumError>,
+) -> Result<Option<u64>, String> {
+    match quorum_result {
+        Ok(text) => parse_block_probe_response(chain, n, &text),
+        // Configuration and all-providers-failed are both genuine
+        // infrastructure problems (nothing to tally, or nothing configured):
+        // propagate as Err so the caller (`is_block_final` / `fetch_block_numbers`)
+        // logs it distinctly and retries next tick. Fail-closed either way; the
+        // cursor is never advanced on this path.
+        Err(QuorumError::Configuration(detail)) | Err(QuorumError::AllProvidersFailed(detail)) => {
+            Err(format!(
+                "eth_getBlockTransactionCountByNumber(0x{:x}) chain={:?}: {}",
+                n, chain, detail
+            ))
         }
-        Ok((MultiGetBlockByNumberResult::Consistent(GetBlockByNumberResult::Err(rpc_err)),)) => {
-            // Block-not-found is the common benign case (chain hasn't reached
-            // block n yet). HOWEVER a rate-limit, TooFewCycles, or IcError also
-            // maps here — all collapse to Ok(None) so the cursor does not advance.
-            // A single occurrence is harmless; a PERSISTENT stream means a real
-            // provider / consensus problem and the cursor is stalled. See the
-            // helper's doc comment for the monitoring note.
+        // Providers that DID respond disagree. Fail-closed (Ok(None)): a block
+        // whose existence we cannot agree on must never advance the finalized
+        // cursor. This is the "genuine disagreement" case, distinct from an
+        // infrastructure failure, logged here rather than propagated as Err
+        // since a one-off disagreement is not by itself actionable.
+        Err(QuorumError::Disagreement(detail)) => {
             log!(
                 INFO,
-                "[evm_rpc] eth_getBlockByNumber(Number({})) chain={:?} returned no block ({:?}); treating as not-yet-final (cursor will not advance this tick)",
-                n,
-                chain,
-                rpc_err
+                "[evm_rpc] eth_getBlockTransactionCountByNumber(0x{:x}) chain={:?} quorum disagreement: {}; treating as not-yet-final (cursor will not advance this tick)",
+                n, chain, detail
             );
             Ok(None)
         }
-        Ok((MultiGetBlockByNumberResult::Inconsistent(per_provider),)) => {
-            // Providers disagreed below the canister's threshold. Tally the
-            // per-provider results ourselves by DISTINCT block number: only if at
-            // least `floor` distinct providers report the SAME block number do we
-            // treat the block as confirmed-existing. Otherwise we cannot confirm
-            // it this tick (return Ok(None) → the cursor does NOT advance, which
-            // is the fail-closed behavior — a block we cannot agree exists must
-            // never advance the finalized cursor).
-            use std::collections::BTreeMap;
-            let mut votes: BTreeMap<u64, std::collections::BTreeSet<String>> = BTreeMap::new();
-            let mut undecodable = 0usize;
-            for (svc, res) in &per_provider {
-                if let GetBlockByNumberResult::Ok(block) = res {
-                    match u64::try_from(block.number.0.clone()) {
-                        Ok(num) => {
-                            // Key the voter by a stable provider identity. Custom
-                            // providers carry their URL; built-in arms (which we
-                            // never send) fall back to a debug label so they still
-                            // count as one distinct voter rather than trapping.
-                            let voter = match svc {
-                                RpcService::Custom(api) => api.url.clone(),
-                                other => format!("{:?}", other),
-                            };
-                            votes.entry(num).or_default().insert(voter);
-                        }
-                        Err(_) => undecodable += 1,
-                    }
-                }
-            }
-            let best = votes.iter().max_by_key(|(_, set)| set.len());
-            match best {
-                Some((num, set)) if (set.len() as u32) >= floor => Ok(Some(*num)),
-                _ => {
-                    log!(
-                        INFO,
-                        "[evm_rpc] eth_getBlockByNumber(Number({})) chain={:?} Inconsistent: no block number reached {} distinct-provider agreement ({} undecodable); cursor will not advance this tick",
-                        n, chain, floor, undecodable
-                    );
-                    Ok(None)
-                }
-            }
+    }
+}
+
+/// Parse the quorum-agreed JSON-RPC response text for the block-existence
+/// probe.
+///
+/// A well-formed JSON-RPC response carries EXACTLY ONE of `result`/`error`.
+/// `result` present as a valid hex quantity string (even `"0x0"`, a valid tx
+/// count for an empty block) means block `n` exists; `result: null` is the
+/// documented not-yet-produced signal (benign, confirmed live against all 3
+/// Conflux providers). A quorum-agreed `error`, a missing `result` key
+/// entirely (distinct from an explicit `null`), a `result` that is not a
+/// valid Ethereum hex quantity, a response carrying BOTH `result` and
+/// `error`, or an unparseable body are all genuine problems: every one of
+/// them returns `Err` so the caller surfaces it loudly (and, via
+/// `block_probe_outcome`, never advances the cursor) rather than silently
+/// collapsing into the benign not-yet-produced case.
+fn parse_block_probe_response(chain: ChainId, n: u64, text: &str) -> Result<Option<u64>, String> {
+    let val: serde_json::Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(format!(
+                "eth_getBlockTransactionCountByNumber(0x{:x}) chain={:?}: malformed JSON-RPC response: {} (raw={:?})",
+                n, chain, e, text
+            ))
         }
-        Err((code, msg)) => Err(format!(
-            "eth_getBlockByNumber call error ({:?}): {}",
-            code, msg
+    };
+
+    // `.get(...)` (unlike `val["..."]`) distinguishes a MISSING key from an
+    // explicit `null` value; a bare `.is_null()` check on the indexed value
+    // cannot tell those apart, since serde_json's `Index` returns `Value::Null`
+    // for both a missing key and a key whose value literally is `null`.
+    let result_field = val.get("result");
+    let error_field = val.get("error").filter(|e| !e.is_null());
+
+    if error_field.is_some() && result_field.is_some_and(|r| !r.is_null()) {
+        // Malformed: a well-formed response never carries both. Fail closed
+        // loudly rather than guessing which field to trust.
+        return Err(format!(
+            "eth_getBlockTransactionCountByNumber(0x{:x}) chain={:?}: malformed JSON-RPC response carries BOTH result and error: {:?}",
+            n, chain, text
+        ));
+    }
+
+    if let Some(err) = error_field {
+        // A JSON-RPC-level error that nonetheless reached quorum (enough
+        // providers agreed on the SAME error) is a genuine RPC problem, not
+        // the benign not-yet-produced case (which this method signals with
+        // `result: null`, per the live Conflux probe evidence). Fail closed
+        // AND actionable: return Err so the caller propagates it distinctly
+        // rather than silently collapsing it into "not yet produced".
+        return Err(format!(
+            "eth_getBlockTransactionCountByNumber(0x{:x}) chain={:?}: providers agreed on a JSON-RPC error: {}",
+            n, chain, err
+        ));
+    }
+
+    match result_field {
+        None => Err(format!(
+            "eth_getBlockTransactionCountByNumber(0x{:x}) chain={:?}: malformed JSON-RPC response missing both result and error: {:?}",
+            n, chain, text
         )),
+        Some(v) if v.is_null() => Ok(None), // benign: chain has not produced this block yet
+        Some(v) => match v.as_str() {
+            Some(count_hex) => match parse_hex_quantity(count_hex) {
+                // A valid Ethereum hex quantity (the tx count) confirms
+                // block `n` exists; the count's actual value is irrelevant
+                // to existence, only its validity as a quantity matters.
+                Ok(_) => Ok(Some(n)),
+                Err(e) => Err(format!(
+                    "eth_getBlockTransactionCountByNumber(0x{:x}) chain={:?}: result is not a valid hex quantity: {} (raw={:?})",
+                    n, chain, e, text
+                )),
+            },
+            None => Err(format!(
+                "eth_getBlockTransactionCountByNumber(0x{:x}) chain={:?}: unexpected result shape (not a string): {:?}",
+                n, chain, text
+            )),
+        },
     }
 }
 
@@ -1043,9 +1200,8 @@ async fn eth_get_block_number_at(chain: ChainId, n: u64) -> Result<Option<u64>, 
 /// on a fast-finality chain like Monad those differ across the EVM RPC
 /// canister's subnet replicas, so the IC HTTPS-outcall consensus never agrees
 /// and the call fails every tick. Instead we probe a SPECIFIC block number
-/// `last_observed + MAX_BLOCK_SCAN_WINDOW` via the typed
-/// `eth_getBlockByNumber(Number(N))` (a fixed, already-final number is
-/// byte-identical across replicas):
+/// `last_observed + MAX_BLOCK_SCAN_WINDOW` via `eth_get_block_number_at` (a
+/// fixed, already-final number is byte-identical across replicas):
 ///   - if that block exists & is final → advance the window up to it
 ///   - if not (chain hasn't reached it yet) → return the current cursor (no
 ///     new blocks this tick)
@@ -1557,5 +1713,303 @@ mod tests {
         assert_eq!(super::getlogs_max_range_for(crate::chains::config::ChainId(71)), 1000);
         // unknown chain falls back to the conservative Monad cap
         assert_eq!(super::getlogs_max_range_for(crate::chains::config::ChainId(999)), 100);
+    }
+
+    // ─── Block-existence probe regression tests (fix/evm-rpc-block-probe-cycles) ─
+    //
+    // Live incident 2026-08-21: all 3 configured Conflux providers were past the
+    // probe target and, queried directly, returned the identical block hash;
+    // the backend nevertheless logged "Inconsistent: no block number reached 2
+    // distinct-provider agreement" from the TYPED `eth_getBlockByNumber` call.
+    // A live cost query for that exact 2-of-3 threshold read measured
+    // 3,714,459,200 cycles against the `EVM_RPC_CALL_CYCLES` (2B) attached,
+    // establishing underfunding as the cause; the canary's `Inconsistent`
+    // response collapsed the per-provider results without exposing their
+    // individual `RpcError` variants, so this is a cost-comparison finding,
+    // not a directly-observed `TooFewCycles` on every provider. The fix
+    // replaces that typed call with a raw `eth_getBlockTransactionCountByNumber`
+    // request routed through the already-audited `call_evm_rpc_detailed`
+    // quorum. These tests exercise the full decision tree
+    // (`tally_provider_outcomes` -> `block_probe_outcome` ->
+    // `parse_block_probe_response`) with synthetic provider fixtures,
+    // mirroring the ACTUAL Conflux mainnet quorum floor
+    // (`CONFLUX_MAINNET_MIN_QUORUM_PROVIDERS` = 2 of 3 configured providers,
+    // per `chains::evm::conflux::config`).
+
+    use super::{
+        block_probe_outcome, tally_provider_outcomes, ProviderError, QuorumError, RpcError,
+        TooFewCyclesRecord,
+    };
+    use crate::chains::config::ChainId;
+
+    const CHAIN: ChainId = ChainId(1030); // Conflux eSpace mainnet chain id
+    const FLOOR: u32 = 2; // CONFLUX_MAINNET_MIN_QUORUM_PROVIDERS
+
+    fn providers() -> [String; 3] {
+        [
+            "https://evm.confluxrpc.com".to_string(),
+            "https://conflux-espace.blockpi.network/v1/rpc/public".to_string(),
+            "https://conflux-espace-public.unifra.io".to_string(),
+        ]
+    }
+
+    fn result_json(id: u64, result: &str) -> String {
+        format!(r#"{{"jsonrpc":"2.0","id":{},"result":{}}}"#, id, result)
+    }
+
+    fn too_few_cycles_err(url: &str, expected: u64, received: u64) -> String {
+        // Mirrors EXACTLY what `single_call` produces for a `TooFewCycles`
+        // provider error, so this fixture is a regression check on that format
+        // too: `format!("RPC error from {}: {:?}", url, rpc_err)`.
+        let rpc_err = RpcError::ProviderError(ProviderError::TooFewCycles(TooFewCyclesRecord {
+            expected: candid::Nat::from(expected),
+            received: candid::Nat::from(received),
+        }));
+        format!("RPC error from {}: {:?}", url, rpc_err)
+    }
+
+    // (a) quorum of "0x0" (and a nonzero count) at N => Some(N): block exists.
+    #[test]
+    fn quorum_of_zero_tx_count_confirms_block_exists() {
+        let urls = providers();
+        let outcomes: Vec<(String, Result<String, String>)> = urls
+            .iter()
+            .map(|u| (u.clone(), Ok(result_json(1, r#""0x0""#))))
+            .collect();
+        let tally = tally_provider_outcomes(CHAIN, &outcomes, FLOOR);
+        assert!(tally.is_ok(), "expected quorum success, got {:?}", tally);
+        let outcome = block_probe_outcome(CHAIN, 154_850_928, tally);
+        assert_eq!(outcome, Ok(Some(154_850_928)));
+    }
+
+    #[test]
+    fn quorum_of_nonzero_tx_count_confirms_block_exists() {
+        let urls = providers();
+        let outcomes: Vec<(String, Result<String, String>)> = urls
+            .iter()
+            .map(|u| (u.clone(), Ok(result_json(1, r#""0x5""#))))
+            .collect();
+        let tally = tally_provider_outcomes(CHAIN, &outcomes, FLOOR);
+        let outcome = block_probe_outcome(CHAIN, 42, tally);
+        assert_eq!(outcome, Ok(Some(42)));
+    }
+
+    // (b) quorum of null => None (future/nonexistent block), benign, fail-closed,
+    // cursor unchanged (the caller never advances `last_observed` on Ok(None)).
+    #[test]
+    fn quorum_of_null_is_benign_not_found() {
+        let urls = providers();
+        let outcomes: Vec<(String, Result<String, String>)> = urls
+            .iter()
+            .map(|u| (u.clone(), Ok(result_json(1, "null"))))
+            .collect();
+        let tally = tally_provider_outcomes(CHAIN, &outcomes, FLOOR);
+        assert!(tally.is_ok(), "expected quorum success on agreed null, got {:?}", tally);
+        let outcome = block_probe_outcome(CHAIN, 999_999_999, tally);
+        assert_eq!(outcome, Ok(None));
+    }
+
+    // (c) malformed response or JSON-RPC error => fail closed with an
+    // ACTIONABLE Err naming the provider outcome; cursor unchanged (Err,
+    // never Ok(Some(_))). A quorum-agreed JSON-RPC error is a genuine RPC
+    // problem, not the benign not-yet-produced case (which is signaled
+    // ONLY by an explicit `result: null`), so it must not collapse into
+    // Ok(None).
+    #[test]
+    fn malformed_response_fails_closed_with_actionable_error() {
+        let err = super::parse_block_probe_response(CHAIN, 7, "not json at all");
+        assert!(err.is_err());
+        let msg = err.unwrap_err();
+        assert!(msg.contains("malformed JSON-RPC response"), "{}", msg);
+        assert!(msg.contains("chain="), "{}", msg);
+    }
+
+    #[test]
+    fn quorum_agreed_json_rpc_error_is_an_actionable_err_not_benign() {
+        let urls = providers();
+        let outcomes: Vec<(String, Result<String, String>)> = urls
+            .iter()
+            .map(|u| {
+                (
+                    u.clone(),
+                    Ok(r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"header not found"}}"#.to_string()),
+                )
+            })
+            .collect();
+        let tally = tally_provider_outcomes(CHAIN, &outcomes, FLOOR);
+        assert!(tally.is_ok(), "providers agreeing on the SAME error still reaches quorum: {:?}", tally);
+        let outcome = block_probe_outcome(CHAIN, 7, tally);
+        // Fail-closed AND actionable: an agreed JSON-RPC error is NOT the
+        // benign not-yet-produced case (that is `result: null` only) and must
+        // not be silently swallowed into Ok(None).
+        assert!(outcome.is_err(), "{:?}", outcome);
+        let msg = outcome.unwrap_err();
+        assert!(msg.contains("providers agreed on a JSON-RPC error"), "{}", msg);
+        assert!(msg.contains("header not found"), "{}", msg);
+    }
+
+    // Missing `result` key entirely (distinct from an explicit `null`) is
+    // malformed, not benign: serde_json's `Index` operator collapses "missing
+    // key" and "key present with value null" to the same `Value::Null`, so
+    // `parse_block_probe_response` must use `.get(...)` rather than indexing
+    // to tell them apart. This is a direct regression test for that bug class.
+    #[test]
+    fn missing_result_key_is_an_error_not_benign_null() {
+        let missing = super::parse_block_probe_response(
+            CHAIN,
+            7,
+            r#"{"jsonrpc":"2.0","id":1}"#,
+        );
+        assert!(missing.is_err(), "{:?}", missing);
+        assert!(missing.unwrap_err().contains("missing both result and error"));
+
+        // Contrast: an EXPLICIT null result is still the benign case.
+        let explicit_null =
+            super::parse_block_probe_response(CHAIN, 7, r#"{"jsonrpc":"2.0","id":1,"result":null}"#);
+        assert_eq!(explicit_null, Ok(None));
+    }
+
+    // A response is malformed if it carries BOTH result and error.
+    #[test]
+    fn result_and_error_both_present_is_malformed() {
+        let both = super::parse_block_probe_response(
+            CHAIN,
+            7,
+            r#"{"jsonrpc":"2.0","id":1,"result":"0x0","error":{"code":-32000,"message":"weird"}}"#,
+        );
+        assert!(both.is_err(), "{:?}", both);
+        assert!(both.unwrap_err().contains("BOTH result and error"));
+    }
+
+    // `result` must be a valid Ethereum hex quantity (per `parse_hex_quantity`)
+    // to prove block `n` exists; any string is not sufficient.
+    #[test]
+    fn non_hex_or_malformed_quantity_result_is_rejected() {
+        for bad in ["not-hex", "", "0x", "0xzz", "12345", "0X"] {
+            let out = super::parse_block_probe_response(
+                CHAIN,
+                7,
+                &format!(r#"{{"jsonrpc":"2.0","id":1,"result":{:?}}}"#, bad),
+            );
+            assert!(out.is_err(), "expected Err for result={:?}, got {:?}", bad, out);
+            assert!(
+                out.unwrap_err().contains("not a valid hex quantity"),
+                "wrong error for result={:?}",
+                bad
+            );
+        }
+    }
+
+    // A leading-zero-padded hex quantity ("0x00") is a VALID quantity per
+    // `parse_hex_quantity` (it tolerates leading zeros, only rejecting a
+    // missing prefix or non-hex/empty digits) and so still confirms existence,
+    // staying consistent with every other caller of `parse_hex_quantity` in
+    // this file.
+    #[test]
+    fn leading_zero_padded_quantity_is_accepted() {
+        let out = super::parse_block_probe_response(CHAIN, 7, r#"{"jsonrpc":"2.0","id":1,"result":"0x00"}"#);
+        assert_eq!(out, Ok(Some(7)));
+    }
+
+    // A non-string result shape (e.g. a JSON number, not a JSON-RPC-legal hex
+    // string) is also rejected.
+    #[test]
+    fn non_string_result_shape_is_rejected() {
+        let out = super::parse_block_probe_response(CHAIN, 7, r#"{"jsonrpc":"2.0","id":1,"result":0}"#);
+        assert!(out.is_err(), "{:?}", out);
+        assert!(out.unwrap_err().contains("not a string"));
+    }
+
+    // (d) partial provider failure: two matching successes + one provider error
+    // => 2-of-3 quorum satisfied (Conflux's actual mainnet floor), N accepted.
+    #[test]
+    fn two_of_three_quorum_accepted_despite_one_provider_error() {
+        let urls = providers();
+        let outcomes: Vec<(String, Result<String, String>)> = vec![
+            (urls[0].clone(), Ok(result_json(1, r#""0x0""#))),
+            (urls[1].clone(), Ok(result_json(1, r#""0x0""#))),
+            (urls[2].clone(), Err(format!("call error to {} (SysTransient): timeout", urls[2]))),
+        ];
+        let tally = tally_provider_outcomes(CHAIN, &outcomes, FLOOR);
+        assert!(tally.is_ok(), "expected 2-of-3 quorum success, got {:?}", tally);
+        let outcome = block_probe_outcome(CHAIN, 154_850_928, tally);
+        assert_eq!(outcome, Ok(Some(154_850_928)));
+    }
+
+    // (e) all providers TooFewCycles (or otherwise errored) => infrastructure
+    // failure diagnosis with per-provider summaries, INCLUDING the TooFewCycles
+    // expected/received cycle counts; cursor unchanged (propagated as Err).
+    #[test]
+    fn all_providers_too_few_cycles_is_an_infra_failure_with_per_provider_detail() {
+        let urls = providers();
+        let make_outcomes = || -> Vec<(String, Result<String, String>)> {
+            urls.iter()
+                .map(|u| (u.clone(), Err(too_few_cycles_err(u, 3_714_459_200, 2_000_000_000))))
+                .collect()
+        };
+
+        let tally = tally_provider_outcomes(CHAIN, &make_outcomes(), FLOOR);
+        let quorum_err = tally.expect_err("all-providers-failed must be Err");
+        assert!(matches!(quorum_err, QuorumError::AllProvidersFailed(_)));
+        let detail = quorum_err.to_string();
+        // Actionable: names the failure class...
+        assert!(detail.contains("infrastructure failure"), "{}", detail);
+        // ...every provider by URL...
+        for url in &urls {
+            assert!(detail.contains(url.as_str()), "missing {} in: {}", url, detail);
+        }
+        // ...and the exact TooFewCycles expected/received cycle counts.
+        assert!(detail.contains("TooFewCycles"), "{}", detail);
+        assert!(detail.contains("3714459200") || detail.contains("3_714_459_200"), "{}", detail);
+        assert!(detail.contains("2000000000") || detail.contains("2_000_000_000"), "{}", detail);
+
+        // The probe propagates this as Err (not Ok(None)) so the caller's
+        // "fetch_block_numbers failed; will retry" log fires distinctly from
+        // the benign not-yet-produced case. Fail-closed either way.
+        let outcome = block_probe_outcome(
+            CHAIN,
+            154_850_928,
+            tally_provider_outcomes(CHAIN, &make_outcomes(), FLOOR),
+        );
+        assert!(outcome.is_err(), "{:?}", outcome);
+        let msg = outcome.unwrap_err();
+        assert!(msg.contains("infrastructure failure"), "{}", msg);
+        assert!(msg.contains("TooFewCycles"), "{}", msg);
+    }
+
+    // All-providers-plain-errored (not TooFewCycles specifically) is the SAME
+    // infra-failure class, still fail-closed.
+    #[test]
+    fn all_providers_errored_generically_is_an_infra_failure() {
+        let urls = providers();
+        let outcomes: Vec<(String, Result<String, String>)> = urls
+            .iter()
+            .map(|u| (u.clone(), Err(format!("call error to {} (SysFatal): canister trapped", u))))
+            .collect();
+        let tally = tally_provider_outcomes(CHAIN, &outcomes, FLOOR);
+        let quorum_err = tally.expect_err("all-providers-failed must be Err");
+        assert!(matches!(quorum_err, QuorumError::AllProvidersFailed(_)));
+        assert!(quorum_err.to_string().contains("infrastructure failure"));
+    }
+
+    // Configuration failure (below the quorum floor) is distinct from a
+    // provider-side infrastructure failure, and also fails closed.
+    #[test]
+    fn below_floor_is_a_configuration_error_not_all_providers_failed() {
+        let outcomes: Vec<(String, Result<String, String>)> =
+            vec![("https://only-one.example".to_string(), Ok(result_json(1, r#""0x0""#)))];
+        // Only 1 distinct outcome collected but the chain's floor is 2: this
+        // exact gate lives in `call_evm_rpc_detailed` (checked before any
+        // network call), so `tally_provider_outcomes` itself is never reached
+        // with fewer outcomes than endpoints in production. This test instead
+        // confirms `QuorumError::Configuration` is a distinct variant from
+        // `AllProvidersFailed`, since `eth_get_block_number_at` maps both to an
+        // `Err` but an operator reading the log needs the right one.
+        let cfg_err = QuorumError::Configuration("no RPC endpoints configured".to_string());
+        let all_failed_err = QuorumError::AllProvidersFailed("all 3 providers errored".to_string());
+        assert_ne!(cfg_err, all_failed_err);
+        // Sanity: the fixture above still reaches quorum on its own (1-of-1),
+        // demonstrating `tally_provider_outcomes` doesn't itself re-check floor.
+        assert!(tally_provider_outcomes(CHAIN, &outcomes, 1).is_ok());
     }
 }
