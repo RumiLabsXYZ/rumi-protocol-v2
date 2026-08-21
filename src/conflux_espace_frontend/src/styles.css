@@ -39,6 +39,19 @@ header.top { display: flex; align-items: center; justify-content: space-between;
   border: 1px solid var(--border); color: var(--muted); background: var(--panel);
 }
 .badge.testnet { color: var(--warn); border-color: #3a2f17; background: #1c160a; }
+.badge.mainnet { color: #fff; border-color: #ff5d6c; background: #8f1422; font-weight: 800; }
+
+.production-warning {
+  margin-bottom: 18px; padding: 18px; border: 3px solid var(--danger);
+  border-radius: 14px; background: #351017; color: #fff;
+  box-shadow: 0 0 0 4px rgba(255, 93, 108, .12);
+}
+.production-warning strong { font-size: 18px; letter-spacing: .06em; }
+.production-warning p { margin: 8px 0 12px; line-height: 1.5; font-size: 14px; }
+.production-warning .ack { color: #fff; display: flex; align-items: center; gap: 9px; font-weight: 700; }
+.production-warning .ack input { width: auto; accent-color: var(--danger); }
+.canary-steps ol { margin: 12px 0 0; padding-left: 22px; color: var(--muted); font-size: 13px; line-height: 1.75; }
+.canary-steps b { color: var(--text); }
 
 .card {
   background: var(--panel); border: 1px solid var(--border);
@@ -101,7 +114,23 @@ button.sm { padding: 7px 11px; font-size: 12px; }
 .wicon { width: 24px; height: 24px; border-radius: 6px; flex: none; object-fit: contain; }
 
 .copy { cursor: pointer; color: var(--accent-2); }
+.custody-row { gap: 16px; align-items: center; }
+.custody-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; }
+.custody-actions a { overflow-wrap: anywhere; text-align: right; }
+.injected-only { margin-top: 14px !important; color: #ffb4bc !important; font-weight: 700; }
+.tx-list { display: flex; flex-direction: column; gap: 9px; }
+.tx-list h2 { margin-bottom: 5px; }
 .muted { color: var(--muted); }
 .divider { height: 1px; background: var(--border); margin: 16px 0; }
 a { color: var(--accent-2); }
 .foot { text-align: center; color: var(--muted); font-size: 12px; margin-top: 28px; line-height: 1.6; }
+
+@media (max-width: 600px) {
+  .wrap { padding: 20px 12px 56px; }
+  header.top { align-items: flex-start; flex-direction: column; }
+  .card { padding: 17px; }
+  .kv { gap: 12px; }
+  .custody-row { align-items: flex-start; flex-direction: column; }
+  .custody-actions { align-items: flex-start; flex-direction: column; width: 100%; }
+  .custody-actions a { text-align: left; }
+}

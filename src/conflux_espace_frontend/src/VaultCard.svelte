@@ -1,10 +1,15 @@
 <script lang="ts">
+  import { CANARY_DEBT_E8S } from "./config";
+  import type { CanaryPhase } from "./canaryState";
   import { statusName, type ChainVault } from "./backend";
-  import { fmtCfx, fmtIcusd, toE8s, toWei } from "./evm";
+  import { addressUrl, fmtCfx, fmtIcusd, toE8s, toWei } from "./evm";
 
-  let { vault, busy, onAction }: {
+  let { vault, busy, productionCanary, isCanaryVault, canaryPhase, onAction }: {
     vault: ChainVault;
     busy: string | null;
+    productionCanary: boolean;
+    isCanaryVault: boolean;
+    canaryPhase: CanaryPhase | null;
     onAction: (kind: string, vault: ChainVault, amount?: bigint) => void;
   } = $props();
 
@@ -29,51 +34,94 @@
   {#if vault.pending_mint_e8s > 0n}
     <div class="kv"><span class="k">Pending mint</span><span class="v">{fmtIcusd(vault.pending_mint_e8s)} icUSD</span></div>
   {/if}
-  <div class="kv"><span class="k">Custody</span>
-    <span class="v mono copy" role="button" tabindex="0" onclick={copy} onkeydown={copy} title="copy">{custody.slice(0, 14)}…{custody.slice(-6)}</span>
+  <div class="kv custody-row"><span class="k">Custody</span>
+    <span class="v custody-actions">
+      <a class="mono" href={addressUrl(custody)} target="_blank" rel="noreferrer">{productionCanary ? custody : `${custody.slice(0, 14)}…${custody.slice(-6)}`} ↗</a>
+      <button class="ghost sm" onclick={copy} title="Copy custody address">Copy</button>
+    </span>
   </div>
 
-  {#if status === "AwaitingDeposit"}
+  {#if productionCanary && !isCanaryVault}
+    <div class="notice err" style="margin-top:14px">Read-only: this vault is not bound to this browser's persisted canary lifecycle.</div>
+  {:else if status === "AwaitingDeposit"}
     <div class="notice info" style="margin-top:14px">
-      Send <b>{fmtCfx(vault.collateral_amount_e18)} CFX</b> to the custody address, then it mints automatically.
+      Verify the custody address above, then send <b>{fmtCfx(vault.collateral_amount_e18)} CFX</b>. The mint begins only after the deposit is observed.
     </div>
-    <div class="row" style="margin-top:12px">
-      <button class="primary" disabled={!!busy} onclick={() => onAction("deposit", vault)}>
-        Send {fmtCfx(vault.collateral_amount_e18)} CFX
-      </button>
-      <span class="muted" style="font-size:12px">(or send manually from any wallet)</span>
-    </div>
+    {#if productionCanary && (canaryPhase === "deposit-authorizing" || canaryPhase === "deposit-submitted" || canaryPhase === "deposit-replaced")}
+      <div class="notice info"><span class="spin"></span>Deposit authorization/submission is locked — waiting for wallet receipt or backend observation. Do not repeat it.</div>
+    {:else}
+      {#if productionCanary && canaryPhase === "deposit-failed"}
+        <div class="notice err">The prior deposit reverted or was cancelled. Verify its explorer entry before retrying.</div>
+      {/if}
+      <div class="row" style="margin-top:12px">
+        <button class="primary" disabled={!!busy} onclick={() => onAction("deposit", vault)}>
+          {canaryPhase === "deposit-failed" ? "Retry" : "Confirm"} {fmtCfx(vault.collateral_amount_e18)} CFX deposit
+        </button>
+        {#if !productionCanary}<span class="muted" style="font-size:12px">(or send manually from any wallet)</span>{/if}
+      </div>
+    {/if}
   {:else if status === "MintPending"}
-    <div class="notice info" style="margin-top:14px"><span class="spin"></span>Deposit detected — minting at finality (eSpace ~ a few min).</div>
+    <div class="notice info" style="margin-top:14px"><span class="spin"></span>Deposit detected — waiting for finality and mint.</div>
   {:else if status === "Open"}
     <div class="divider"></div>
-    <div class="field">
-      <label for="borrow-{vault.vault_id}">Borrow more icUSD</label>
-      <div class="row">
-        <input id="borrow-{vault.vault_id}" type="number" min="0" step="0.1" bind:value={borrowAmt} style="flex:1" />
-        <button disabled={!!busy || toE8s(borrowAmt) === 0n} onclick={() => onAction("borrow", vault, toE8s(borrowAmt))}>Borrow</button>
+    {#if productionCanary}
+      {#if vault.debt_e8s > 0n}
+        {#if canaryPhase === "burn-authorizing" || canaryPhase === "burn-submitted" || canaryPhase === "burn-replaced"}
+          <div class="notice info"><span class="spin"></span>Exact burn authorization/submission is locked — waiting for wallet receipt or backend observation. Do not repeat it.</div>
+        {:else if vault.debt_e8s !== CANARY_DEBT_E8S || vault.pending_mint_e8s !== 0n || vault.pending_interest_mint_e8s !== 0n}
+          <div class="notice err">Fail-closed: burn requires exactly 0.10 icUSD current debt and no pending mint or interest.</div>
+        {:else if canaryPhase === "mint-observed" || canaryPhase === "burn-failed"}
+          <div class="notice info">Mint observed. Confirm the one exact <b>0.10 icUSD</b> burn below. No other amount is available in this build.</div>
+          {#if canaryPhase === "burn-failed"}<div class="notice err">The prior burn reverted or was cancelled. Verify its explorer entry before retrying.</div>{/if}
+          <div class="row" style="margin-top:12px">
+            <button disabled={!!busy} onclick={() => onAction("repay", vault, CANARY_DEBT_E8S)}>{canaryPhase === "burn-failed" ? "Retry" : "Confirm"} exact 0.10 icUSD burn</button>
+          </div>
+        {:else}
+          <div class="notice err">Fail-closed: persisted lifecycle state does not permit a burn.</div>
+        {/if}
+      {:else}
+        {#if canaryPhase === "close-authorizing" || canaryPhase === "close-submitted"}
+          <div class="notice info"><span class="spin"></span>Close authorization/submission is locked — waiting for backend observation. Do not repeat it.</div>
+        {:else if canaryPhase === "burn-observed"}
+          <div class="notice ok">Zero debt observed. The vault is ready to close.</div>
+          <div class="row" style="margin-top:12px">
+            <button class="danger" disabled={!!busy} onclick={() => onAction("close", vault)}>Sign & close vault</button>
+          </div>
+        {:else}
+          <div class="notice err">Fail-closed: persisted lifecycle state does not permit close.</div>
+        {/if}
+      {/if}
+    {:else}
+      <div class="field">
+        <label for="borrow-{vault.vault_id}">Borrow more icUSD</label>
+        <div class="row">
+          <input id="borrow-{vault.vault_id}" type="number" min="0" step="0.1" bind:value={borrowAmt} style="flex:1" />
+          <button disabled={!!busy || toE8s(borrowAmt) === 0n} onclick={() => onAction("borrow", vault, toE8s(borrowAmt))}>Borrow</button>
+        </div>
       </div>
-    </div>
-    <div class="field">
-      <label for="repay-{vault.vault_id}">Repay icUSD (on-chain burn)</label>
-      <div class="row">
-        <input id="repay-{vault.vault_id}" type="number" min="0" step="0.1" placeholder={fmtIcusd(vault.debt_e8s)} bind:value={repayAmt} style="flex:1" />
-        <button disabled={!!busy || vault.debt_e8s === 0n || (repayAmt !== "" && toE8s(repayAmt) === 0n)}
-          onclick={() => onAction("repay", vault, repayAmt ? toE8s(repayAmt) : vault.debt_e8s)}>Repay</button>
+      <div class="field">
+        <label for="repay-{vault.vault_id}">Repay icUSD (on-chain burn)</label>
+        <div class="row">
+          <input id="repay-{vault.vault_id}" type="number" min="0" step="0.1" placeholder={fmtIcusd(vault.debt_e8s)} bind:value={repayAmt} style="flex:1" />
+          <button disabled={!!busy || vault.debt_e8s === 0n || (repayAmt !== "" && toE8s(repayAmt) === 0n)}
+            onclick={() => onAction("repay", vault, repayAmt ? toE8s(repayAmt) : vault.debt_e8s)}>Repay</button>
+        </div>
       </div>
-    </div>
-    <div class="field">
-      <label for="withdraw-{vault.vault_id}">Withdraw CFX collateral</label>
-      <div class="row">
-        <input id="withdraw-{vault.vault_id}" type="number" min="0" step="0.1" bind:value={withdrawAmt} style="flex:1" />
-        <button disabled={!!busy || toWei(withdrawAmt) === 0n}
-          onclick={() => onAction("withdraw", vault, toWei(withdrawAmt))}>Withdraw</button>
+      <div class="field">
+        <label for="withdraw-{vault.vault_id}">Withdraw CFX collateral</label>
+        <div class="row">
+          <input id="withdraw-{vault.vault_id}" type="number" min="0" step="0.1" bind:value={withdrawAmt} style="flex:1" />
+          <button disabled={!!busy || toWei(withdrawAmt) === 0n}
+            onclick={() => onAction("withdraw", vault, toWei(withdrawAmt))}>Withdraw</button>
+        </div>
       </div>
-    </div>
-    <div class="row">
-      <button class="danger" disabled={!!busy || vault.debt_e8s !== 0n}
-        onclick={() => onAction("close", vault)}>Close vault (repay first)</button>
-    </div>
+      <div class="row">
+        <button class="danger" disabled={!!busy || vault.debt_e8s !== 0n}
+          onclick={() => onAction("close", vault)}>Close vault (repay first)</button>
+      </div>
+    {/if}
+  {:else if status === "Closing"}
+    <div class="notice info" style="margin-top:14px"><span class="spin"></span>Close submitted — waiting for collateral return and Closed status.</div>
   {:else}
     <div class="notice info" style="margin-top:14px">Vault is {status.toLowerCase()}.</div>
   {/if}

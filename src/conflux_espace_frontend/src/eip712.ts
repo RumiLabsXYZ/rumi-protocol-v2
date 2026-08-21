@@ -35,24 +35,26 @@ export const VAULT_INTENT_TYPES = {
 } as const;
 
 // `EIP712_DOMAIN` is the single source of truth for name/version/chainId/
-// verifyingContract; only the parity test overrides verifyingContract.
-function domainFor(verifyingContract: `0x${string}`): TypedDataDomain {
-  return { ...EIP712_DOMAIN, verifyingContract };
+// verifyingContract; only the parity test overrides chainId/contract to replay
+// the backend's immutable chain-71 golden vector in either build mode.
+function domainFor(verifyingContract: `0x${string}`, chainId: number): TypedDataDomain {
+  return { ...EIP712_DOMAIN, chainId, verifyingContract };
 }
 
 /** The full typed-data object viem signs/hashes. `verifyingContract` defaults to
  *  the live IcUSD; the parity test overrides it to reproduce the backend vector. */
 export function typedData(
   i: VaultIntentInput,
-  verifyingContract: `0x${string}` = EIP712_DOMAIN.verifyingContract
+  verifyingContract: `0x${string}` = EIP712_DOMAIN.verifyingContract,
+  chainId: number = CHAIN_ID
 ) {
   return {
-    domain: domainFor(verifyingContract),
+    domain: domainFor(verifyingContract, chainId),
     types: VAULT_INTENT_TYPES,
     primaryType: "VaultIntent" as const,
     message: {
       action: i.action,
-      chainId: BigInt(CHAIN_ID),
+      chainId: BigInt(chainId),
       owner: i.owner,
       vaultId: i.vaultId,
       collateralWei: i.collateralWei,
@@ -67,9 +69,10 @@ export function typedData(
 /** keccak256(0x1901 ‖ domainSep ‖ structHash) — the digest the backend recovers. */
 export function intentDigest(
   i: VaultIntentInput,
-  verifyingContract?: `0x${string}`
+  verifyingContract?: `0x${string}`,
+  chainId?: number
 ): `0x${string}` {
-  return hashTypedData(typedData(i, verifyingContract));
+  return hashTypedData(typedData(i, verifyingContract, chainId));
 }
 
 type TypedDataSigner = { signTypedData: (args: any) => Promise<`0x${string}`> };
