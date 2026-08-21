@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { privateKeyToAccount } from "viem/accounts";
-import { recoverTypedDataAddress } from "viem";
+import { bytesToHex, recoverTypedDataAddress } from "viem";
 import { intentDigest, typedData, signIntent, type VaultIntentInput } from "./eip712";
-import { ACTION } from "./config";
+import { ACTION, CHAIN_ID, ICUSD_CONTRACT } from "./config";
 
 // The SAME golden vector the backend pins in chains/evm/tests_eip712.rs:
 //   - signer = scalar=1 key → address 0x7e5f…95bdf
@@ -27,12 +27,12 @@ const goldenIntent: VaultIntentInput = {
 
 describe("EIP-712 frontend ↔ backend parity", () => {
   it("hashTypedData equals the backend's golden digest", () => {
-    expect(intentDigest(goldenIntent, GOLDEN_CONTRACT as `0x${string}`)).toBe(GOLDEN_DIGEST);
+    expect(intentDigest(goldenIntent, GOLDEN_CONTRACT as `0x${string}`, 71)).toBe(GOLDEN_DIGEST);
   });
 
   it("the backend's golden signature recovers to the owner against our typed-data", async () => {
     const recovered = await recoverTypedDataAddress({
-      ...typedData(goldenIntent, GOLDEN_CONTRACT as `0x${string}`),
+      ...typedData(goldenIntent, GOLDEN_CONTRACT as `0x${string}`, 71),
       signature: GOLDEN_SIG as `0x${string}`,
     });
     expect(recovered.toLowerCase()).toBe(GOLDEN_OWNER);
@@ -46,8 +46,20 @@ describe("EIP-712 frontend ↔ backend parity", () => {
     expect(sig.length).toBe(65); // r‖s‖v
     const recovered = await recoverTypedDataAddress({
       ...typedData(goldenIntent), // live IcUSD domain
-      signature: ("0x" + Buffer.from(sig).toString("hex")) as `0x${string}`,
+      signature: bytesToHex(sig),
     });
     expect(recovered.toLowerCase()).toBe(GOLDEN_OWNER);
+  });
+
+  it("binds the active chain, contract, owner, and recipient into the typed data", () => {
+    const data = typedData(goldenIntent);
+    expect(data.domain).toMatchObject({
+      name: "Rumi icUSD CDP",
+      version: "1",
+      chainId: CHAIN_ID,
+      verifyingContract: ICUSD_CONTRACT,
+    });
+    expect(data.message.chainId).toBe(BigInt(CHAIN_ID));
+    expect(data.message.recipient).toBe(data.message.owner);
   });
 });

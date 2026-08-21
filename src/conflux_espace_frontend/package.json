@@ -3,12 +3,16 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Standalone MetaMask + viem UI for the Rumi M2 EVM-native self-serve CDP rail on Conflux eSpace testnet (chain 71). Testnet/staging-only.",
+  "description": "Standalone injected-wallet UI for the Rumi EVM-native CDP rail. Defaults to Conflux eSpace testnet; includes an explicit local production-canary build.",
   "scripts": {
     "dev": "vite",
+    "dev:production-canary": "VITE_DEPLOYMENT_MODE=production-canary vite",
     "build": "vite build",
+    "build:testnet": "VITE_DEPLOYMENT_MODE=testnet vite build",
+    "build:production-canary": "VITE_DEPLOYMENT_MODE=production-canary vite build",
     "preview": "vite preview",
     "test": "vitest run",
+    "test:production-canary": "VITE_DEPLOYMENT_MODE=production-canary vitest run",
     "check": "svelte-check --tsconfig ./tsconfig.json"
   },
   "devDependencies": {
