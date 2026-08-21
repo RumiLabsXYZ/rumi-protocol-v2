@@ -193,6 +193,15 @@ describe('buildLivePositions — mirrors accrual.rs snapshot_weights', () => {
     expect(live.rows.find((r) => r.key === 'IcUsd3Pool')!.valueUsd).toBeCloseTo(100);
   });
 
+  it('a failed virtual-price read makes verification unknown, never a false alarm', () => {
+    const live = buildLivePositions(
+      inputs({ wallet3usd: 1000, virtualPrice: null, recorded3pool: { icusd: 100, ckusdc: 0, ckusdt: 0 } }),
+    );
+    expect(live.threePool!.verificationUnknown).toBe(true);
+    expect(live.threePool!.underVerified).toBe(false);
+    expect(live.rows.find((r) => r.key === 'IcUsd3Pool')!.valueUsd).toBeCloseTo(100);
+  });
+
   it('a failed source read is reported unavailable, not shown as zero', () => {
     const live = buildLivePositions(inputs({ vaultDebtUsd: null, spIcusd: 500 }));
     expect(live.unavailable).toContain('vault debt');
@@ -206,6 +215,21 @@ describe('buildLivePositions — mirrors accrual.rs snapshot_weights', () => {
     );
     // 100*1 + 50*1 + 25*2 = 200 per day → 1400 per week.
     expect(live.weeklyEstimateUsdDays).toBeCloseTo(1400);
+  });
+});
+
+describe('forward compatibility', () => {
+  it('an unknown PointSource variant renders with fallback meta instead of crashing', () => {
+    const s = summarizeLedger(
+      [entry('SomeFutureSource', 3, 100n), entry('IcUsdDebt', 3, 50n)],
+      3,
+    );
+    const row = s.sources.find((r) => (r.key as string) === 'SomeFutureSource')!;
+    expect(row).toBeDefined();
+    expect(row.meta.label).toBe('SomeFutureSource');
+    expect(row.meta.short).toBe('SomeFutureSource');
+    expect(row.meta.multiplier).toBe(0);
+    expect(s.total).toBe(150n);
   });
 });
 

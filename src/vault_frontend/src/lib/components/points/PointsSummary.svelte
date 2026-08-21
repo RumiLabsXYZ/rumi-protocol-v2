@@ -12,19 +12,19 @@
    * disagree (a new deposit earns nothing until an epoch closes) — the copy
    * explains that instead of hiding it.
    */
-  import type { PrincipalState, PublicEpochStatus } from '$declarations/rumi_points/rumi_points.did';
+  import type { PointsConfig, PrincipalState, PublicEpochStatus } from '$declarations/rumi_points/rumi_points.did';
   import type { MyPointsDetail } from '$lib/stores/pointsStore';
-  import { formatPoints, qualifyingActionLabel } from '$lib/utils/points';
+  import { formatPoints, qualifyingActionLabel, seasonState } from '$lib/utils/points';
   import {
     summarizeLedger,
     epochRangeByIndex,
     epochDateRange,
-    SOURCE_META,
+    sourceMeta,
     type LedgerSummary,
     type PointSourceKey,
   } from '$lib/utils/pointsBreakdown';
 
-  const srcShort = (k: PointSourceKey): string => SOURCE_META[k].short;
+  const srcShort = (k: PointSourceKey): string => sourceMeta(k).short;
   import MultiplierBadge from './MultiplierBadge.svelte';
 
   interface Props {
@@ -32,10 +32,17 @@
     rank: number | null;
     detail: MyPointsDetail;
     status: PublicEpochStatus | null;
+    config: PointsConfig | null;
   }
   // `state` stays the public prop name; bind it as `pState` locally so the
   // `$state` rune isn't shadowed by a binding named `state`.
-  let { state: pState, rank, detail, status }: Props = $props();
+  let { state: pState, rank, detail, status, config }: Props = $props();
+
+  // After season end the engine credits nothing, ever — the live panel must
+  // say so instead of claiming positions are still earning.
+  const seasonEnded = $derived(
+    seasonState(status, config, BigInt(Date.now()) * 1_000_000n) === 'ended',
+  );
 
   const usd = (n: number): string =>
     `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -112,12 +119,17 @@
   <div class="rounded-xl bg-gray-800/30 border border-gray-700/50 p-4">
     <div class="flex items-baseline justify-between gap-3 mb-3">
       <p class="text-sm font-medium text-gray-200">Earning now</p>
-      {#if live && live.rows.length > 0}
+      {#if !seasonEnded && live && live.rows.length > 0}
         <p class="text-xs text-gray-500">up to ≈{pts(live.weeklyEstimateUsdDays)} pts/week</p>
       {/if}
     </div>
 
-    {#if detail.loading}
+    {#if seasonEnded}
+      <p class="text-sm text-gray-400">
+        Season 1 has ended — positions no longer accrue points. Your earned total above is final;
+        allocation and claiming details will be announced.
+      </p>
+    {:else if detail.loading}
       <p class="text-sm text-gray-400">Checking your current positions…</p>
     {:else if !live}
       <p class="text-sm text-gray-400">Couldn't check your current positions. Retry from the top of the page.</p>

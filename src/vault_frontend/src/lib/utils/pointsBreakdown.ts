@@ -95,6 +95,17 @@ export function sourceKey(s: PointSource): PointSourceKey {
   return Object.keys(s)[0] as PointSourceKey;
 }
 
+/**
+ * Meta for a source key, surviving a canister-side variant this build does not
+ * know yet (regenerated declarations + a new PointSource must never crash the
+ * page — render the raw key at 0x instead).
+ */
+export function sourceMeta(key: PointSourceKey): SourceMeta {
+  return (
+    SOURCE_META[key] ?? { label: key, short: key, venue: 'vault', multiplier: 0, href: '/points' }
+  );
+}
+
 // ── History: ledger decomposition ───────────────────────────────────────────
 
 export interface SourceHistoryRow {
@@ -166,7 +177,7 @@ export function summarizeLedger(
   const sources: SourceHistoryRow[] = [...bySource.entries()]
     .map(([key, s]) => ({
       key,
-      meta: SOURCE_META[key],
+      meta: sourceMeta(key),
       points: s.points,
       sharePct: total > 0n ? Number((s.points * 1000n) / total) / 10 : 0,
       firstEpoch: s.first,
@@ -213,9 +224,12 @@ export interface LiveInputs {
   ammShareIcp: number | null;
   /** Recorded 3pool composition (points canister `active_deposits`), dollars. */
   recorded3pool: { icusd: number; ckusdc: number; ckusdt: number };
-  /** ICP/USD oracle rate and the 3pool virtual price (1.0-scaled). */
+  /** ICP/USD oracle rate and the 3pool virtual price (1.0-scaled).
+   *  A null virtual price means the read failed — verification is then
+   *  UNKNOWN, never a false "not counting" alarm (the engine aborts its whole
+   *  capture in that case; the mirror degrades per-venue instead). */
   icpUsd: number | null;
-  virtualPrice: number;
+  virtualPrice: number | null;
 }
 
 export interface LivePositionRow {
@@ -288,11 +302,14 @@ export function buildLivePositions(inp: LiveInputs): LivePositions {
   let threePool: ThreePoolVerification | null = null;
   if (recordedUsd > 0) {
     const verificationUnknown =
-      inp.wallet3usd === null || inp.sp3usd === null || ammUnavailable;
+      inp.wallet3usd === null ||
+      inp.sp3usd === null ||
+      ammUnavailable ||
+      inp.virtualPrice === null;
     const held3usd = verificationUnknown
       ? 0
       : inp.wallet3usd! + inp.sp3usd! + inp.ammShare3usd!;
-    const verifiedUsd = held3usd * inp.virtualPrice;
+    const verifiedUsd = verificationUnknown ? 0 : held3usd * inp.virtualPrice!;
     // Unknown verification: show the recorded position uncapped with a note,
     // never a false "not counting" alarm.
     const cap = verificationUnknown ? recordedUsd : verifiedUsd * VERIFICATION_TOLERANCE;

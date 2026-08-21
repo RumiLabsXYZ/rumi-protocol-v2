@@ -23,7 +23,7 @@ import { CANISTER_IDS, CONFIG } from '$lib/config';
 import { stabilityPoolService } from './stabilityPoolService';
 import { threePoolService } from './threePoolService';
 import { ammService, type PoolInfo } from './ammService';
-import { getThreeUsdPrice } from './threeUsdPrice';
+import { threeUsdPriceFromPoolStatus } from './threeUsdPrice';
 import type { LiveInputs } from '$lib/utils/pointsBreakdown';
 
 const E8S = 100_000_000;
@@ -100,6 +100,18 @@ async function fetchAmmShares(p: Principal): Promise<{ threeUsd: number; icp: nu
   return { threeUsd: (Number(r3usd) / E8S) * share, icp: (Number(rIcp) / E8S) * share };
 }
 
+/** The 3pool virtual price, read like the engine's fetch_virtual_price
+ *  (get_pool_status). Throws on failure so verification degrades to UNKNOWN
+ *  rather than valuing held 3USD at a stale/par price and firing a false
+ *  under-verification warning. Also refreshes the shared 3USD price store. */
+async function fetchVirtualPrice(): Promise<number> {
+  const status = await threePoolService.getPoolStatus();
+  threeUsdPriceFromPoolStatus(status);
+  const vp = Number(status.virtual_price) / 1e18;
+  if (!Number.isFinite(vp) || vp <= 0) throw new Error(`bad virtual price ${status.virtual_price}`);
+  return vp;
+}
+
 async function fetchIcpUsd(): Promise<number> {
   const status = await backendActor().get_protocol_status();
   const rate = Number(status.last_icp_rate);
@@ -127,7 +139,7 @@ export async function fetchLiveInputs(
     threePoolService.getLpBalance(p).then((b) => Number(b) / E8S),
     fetchAmmShares(p),
     fetchIcpUsd(),
-    getThreeUsdPrice(), // never rejects; falls back to the last known price
+    fetchVirtualPrice(),
   ]);
 
   const spVal = settled(sp, 'stability pool');
@@ -141,6 +153,6 @@ export async function fetchLiveInputs(
     ammShareIcp: ammVal ? ammVal.icp : null,
     recorded3pool: recorded3poolFromState(state),
     icpUsd: settled(icpUsd, 'ICP price'),
-    virtualPrice: virtualPrice.status === 'fulfilled' ? virtualPrice.value : 1,
+    virtualPrice: settled(virtualPrice, '3USD virtual price'),
   };
 }

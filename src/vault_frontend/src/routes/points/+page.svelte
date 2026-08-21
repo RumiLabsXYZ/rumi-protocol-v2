@@ -7,7 +7,7 @@
   import { isConnected, principal } from '$lib/stores/wallet';
   import { myPointsStore } from '$lib/stores/pointsStore';
   import { getEpochStatus, getPointsConfig, getLeaderboard } from '$lib/services/pointsService';
-  import { bodyState } from '$lib/utils/points';
+  import { bodyState, seasonState } from '$lib/utils/points';
   import { truncatePrincipal } from '$lib/utils/principalHelpers';
   import type { PublicEpochStatus, PointsConfig } from '$declarations/rumi_points/rumi_points.did';
   import type { EarnVenue } from '$lib/utils/pointsRules';
@@ -18,6 +18,9 @@
   let status = $state<PublicEpochStatus | null>(null);
   let config = $state<PointsConfig | null>(null);
   let rank = $state<number | null>(null);
+  // Guards the async rank fetch: a stale response for a previous principal
+  // must not land on the current view (same pattern as pointsStore's seq).
+  let rankSeq = 0;
 
   /**
    * Read-only support view: /points?view=<principal> renders that principal's
@@ -66,15 +69,18 @@
       myPointsStore.load(p);
       // Best-effort rank from the top slice (no get_my_rank endpoint). Share of
       // pool is deliberately NOT surfaced to users; see PointsSummary.
+      const mySeq = ++rankSeq;
       getLeaderboard(0, 1000)
         .then((rows) => {
+          if (mySeq !== rankSeq) return;
           const me = rows.find((e) => e.principal.toText() === p.toText());
           rank = me ? me.rank : null;
         })
         .catch(() => {
-          rank = null;
+          if (mySeq === rankSeq) rank = null;
         });
     } else {
+      rankSeq++;
       myPointsStore.reset();
       rank = null;
     }
@@ -93,6 +99,11 @@
       excluded: $myPointsStore.excluded,
       state: $myPointsStore.state,
     }),
+  );
+
+  /** After season end, stop pitching actions that no longer earn anything. */
+  const seasonEnded = $derived(
+    seasonState(status, config, BigInt(Date.now()) * 1_000_000n) === 'ended',
   );
 
   /** Venues with a live earning position — marked "active" in Earn more. */
@@ -132,7 +143,7 @@
     <div class="rounded-xl bg-gray-800/30 border border-gray-700/50 p-4 text-sm text-gray-300">
       Connect your wallet to see your points. Points accrue automatically when you use the protocol.
     </div>
-    <EarnCta />
+    {#if !seasonEnded}<EarnCta />{/if}
   {:else if body === 'excluded'}
     <div class="rounded-xl bg-gray-800/30 border border-gray-700/50 p-4 text-sm text-gray-300">
       This address is excluded from the airdrop (protocol-owned).
@@ -143,12 +154,15 @@
       {rank}
       detail={$myPointsStore.detail}
       {status}
+      {config}
     />
-    <EarnCta heading="Earn more" {activeVenues} />
+    {#if !seasonEnded}<EarnCta heading="Earn more" {activeVenues} />{/if}
   {:else}
     <div class="rounded-xl bg-gray-800/30 border border-gray-700/50 p-4 text-sm text-gray-300">
-      You're not earning points yet. Take a qualifying action to enroll automatically.
+      {viewOverride
+        ? "This wallet isn't earning points yet — it has taken no qualifying action."
+        : "You're not earning points yet. Take a qualifying action to enroll automatically."}
     </div>
-    <EarnCta />
+    {#if !seasonEnded}<EarnCta />{/if}
   {/if}
 </div>
