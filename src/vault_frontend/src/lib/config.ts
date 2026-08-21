@@ -40,6 +40,16 @@ export const CANISTER_IDS = {
 export const POINTS_ENABLED: boolean = CANISTER_IDS.RUMI_POINTS !== "";
 
 /**
+ * AMM1 (3USD/ICP) liquidity deposits are paused (2026-07-23): the pool card is
+ * greyed out and new deposits are blocked (withdrawals stay open). One flag so
+ * every surface that gates or advertises AMM1 liquidity agrees: the swap
+ * page's deposit tab, the points "ways to earn" lists, and /docs/points.
+ * Distinct from swapRouter's AMM1_ROUTING_PAUSED (swap routing), which flips
+ * independently.
+ */
+export const AMM1_LIQUIDITY_PAUSED = true;
+
+/**
  * Wallet principals allowed into the /points/admin console, IN ADDITION to the
  * on-chain PointsConfig.admin. Needed because the canister admin is the CLI
  * deploy identity (rumi_identity), which no browser wallet can present: Oisy
