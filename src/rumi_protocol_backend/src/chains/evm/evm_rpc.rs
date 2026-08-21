@@ -397,6 +397,46 @@ pub fn parse_hex_quantity(s: &str) -> Result<u128, String> {
         .map_err(|e| format!("invalid hex quantity {:?}: {}", s, e))
 }
 
+/// Strictly validates an Ethereum JSON-RPC QUANTITY per the wire spec: a
+/// lowercase `"0x"` prefix, at least one hex digit, and MINIMAL encoding --
+/// the value zero is written as EXACTLY `"0x0"`, and any nonzero value's
+/// first hex digit must be nonzero (no leading-zero padding). Digits must
+/// themselves be lowercase (`0`-`9`, `a`-`f`); an uppercase hex digit is
+/// rejected as non-canonical (the QUANTITY spec calls for lowercase hex, so
+/// this is a deliberate strictness choice, not merely a style preference).
+///
+/// DEDICATED to the block-existence probe (B2 hardening, review round 2):
+/// unlike the shared [`parse_hex_quantity`] above, which every OTHER decode
+/// path in this file depends on (e.g. `getReserves`/`eth_call` ABI words,
+/// which are naturally zero-padded on-chain and MUST keep being accepted),
+/// this validator exists so the probe's tx-count existence proof does not
+/// inherit that permissiveness. `parse_hex_quantity` itself is left
+/// unchanged.
+fn parse_strict_eth_quantity(s: &str) -> Result<u128, String> {
+    let hex = s
+        .strip_prefix("0x")
+        .ok_or_else(|| format!("not a lowercase 0x-prefixed QUANTITY: {:?}", s))?;
+    if hex.is_empty() {
+        return Err(format!("QUANTITY has no hex digits: {:?}", s));
+    }
+    if !hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return Err(format!(
+            "QUANTITY has non-canonical (non-lowercase-hex, or non-hex) digits: {:?}",
+            s
+        ));
+    }
+    if hex == "0" {
+        return Ok(0);
+    }
+    if hex.starts_with('0') {
+        return Err(format!(
+            "QUANTITY is not minimally encoded (leading-zero padding on a nonzero value): {:?}",
+            s
+        ));
+    }
+    u128::from_str_radix(hex, 16).map_err(|e| format!("QUANTITY overflow or invalid: {:?}: {}", s, e))
+}
+
 /// Decode an `eth_call` result word (a 0x-prefixed 32-byte ABI uint) into a
 /// `u128`. Rejects an empty `"0x"` (a revert/empty return, which must NOT be
 /// read as 0, or the supply gate would wrongly believe supply dropped to zero)
@@ -740,24 +780,41 @@ async fn single_call(canister: Principal, url: &str, json_payload: &str) -> Resu
     }
 }
 
-/// The consensus key of a JSON-RPC response: its semantic `result` value, or its
-/// `error` value if there is no result. `serde_json::Value` equality is
-/// whitespace- and key-order-independent, so two providers that returned the
-/// same logical result agree even when their JSON formatting (or the volatile
-/// `id` field) differs. An unparseable / shape-less response groups only with
-/// itself, so it can never be mistaken for agreement.
-fn response_consensus_key(text: &str) -> serde_json::Value {
-    match serde_json::from_str::<serde_json::Value>(text) {
-        Ok(v) => {
-            if let Some(r) = v.get("result") {
-                r.clone()
-            } else if let Some(e) = v.get("error") {
-                serde_json::json!({ "__error": e })
-            } else {
-                serde_json::json!({ "__raw": text })
-            }
-        }
-        Err(_) => serde_json::json!({ "__raw": text }),
+/// The consensus key of a SHAPE-VALID JSON-RPC response, or `None` if the
+/// response is malformed and must NOT be allowed to vote in the quorum tally
+/// (B1 hardening, review round 2).
+///
+/// A well-formed JSON-RPC response carries EXACTLY ONE of the "result" /
+/// "error" keys. `.get(...)` is used (never the indexing operator) so a key
+/// that is PRESENT with an explicit `null` value still counts as present,
+/// distinct from the key being absent entirely -- so `{"result":"0x0"}` and
+/// `{"result":"0x0","error":null}` are NOT equivalent: the latter carries a
+/// present (if null) `error` key alongside `result` and is malformed.
+///
+/// A response carrying BOTH keys (even when either or both values are
+/// `null`, e.g. `{"result":"0x0","error":null}` or
+/// `{"result":null,"error":null}`) or NEITHER key is malformed and returns
+/// `None`. This was the exact false-quorum vector found in review round 2:
+/// the prior implementation checked `result` first and returned its value
+/// unconditionally whenever the key was present, so a malformed response
+/// carrying a spoofed `result` alongside a real `error` silently voted
+/// alongside a genuine same-valued result from another provider. Mapping a
+/// malformed response to `None` (excluded from the tally, i.e. "not a vote"
+/// -- see `tally_provider_outcomes`) rather than to a synthetic key also
+/// means two malformed responses never form a quorum with EACH OTHER either.
+///
+/// For a shape-valid response, `serde_json::Value` equality is whitespace-
+/// and key-order-independent, so two providers that returned the same
+/// logical result agree even when their JSON formatting (or the volatile
+/// `id` field) differs.
+fn response_consensus_key(text: &str) -> Option<serde_json::Value> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    match (v.get("result"), v.get("error")) {
+        (Some(r), None) => Some(r.clone()),
+        (None, Some(e)) => Some(serde_json::json!({ "__error": e })),
+        // Both present (even if either/both are null) or neither present:
+        // malformed, never a vote.
+        _ => None,
     }
 }
 
@@ -927,13 +984,57 @@ fn tally_provider_outcomes(
         )));
     }
 
+    // Shape-validate every Ok response BEFORE it is allowed to vote (B1
+    // hardening, review round 2). `response_consensus_key` returns `None` for
+    // a malformed response (both result/error present, or neither present, or
+    // unparseable): that response is excluded from `keyed` entirely rather
+    // than being grouped under a synthetic key, so it can never form a false
+    // quorum with a genuine result/error response, and two malformed
+    // responses never vote for EACH OTHER either.
+    let mut keyed: Vec<(&str, serde_json::Value)> = Vec::new();
+    let mut malformed: Vec<(&str, &str)> = Vec::new();
+    for (url, text) in &oks {
+        match response_consensus_key(text) {
+            Some(key) => keyed.push((*url, key)),
+            None => malformed.push((*url, *text)),
+        }
+    }
+    let malformed_detail = if malformed.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; malformed responses excluded from tally (shape-invalid, not a vote): {}",
+            malformed
+                .iter()
+                .map(|(url, text)| format!("{} -> {:?}", url, text))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+
+    if keyed.is_empty() {
+        // Every Ok response that came back was shape-malformed: functionally
+        // the same as no usable response being available to tally (nothing
+        // to agree on), so this fails the same way `AllProvidersFailed` does,
+        // carrying both the outright call errors and the malformed responses
+        // in the diagnostic.
+        let errs_detail = errs
+            .iter()
+            .map(|(url, e)| format!("{} -> {}", url, e))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(QuorumError::AllProvidersFailed(format!(
+            "infrastructure failure: all {} configured provider(s) for chain {:?} produced no votable response (nothing to tally, this is not a genuine on-chain disagreement){}{}",
+            total,
+            chain,
+            if errs_detail.is_empty() { String::new() } else { format!("; provider errors: {}", errs_detail) },
+            malformed_detail,
+        )));
+    }
+
     // Group by semantic consensus key; for each key count the number of DISTINCT
     // provider URLs that returned it (endpoints are deduped, so each URL appears
-    // at most once in `oks`, but we count distinctly to be explicit and robust).
-    let keyed: Vec<(&str, serde_json::Value)> = oks
-        .iter()
-        .map(|(url, text)| (*url, response_consensus_key(text)))
-        .collect();
+    // at most once in `keyed`, but we count distinctly to be explicit and robust).
     let mut best_idx = 0usize;
     let mut best_count = 0usize;
     for i in 0..keyed.len() {
@@ -953,15 +1054,26 @@ fn tally_provider_outcomes(
     // Required distinct agreement: at least the floor AND a strict majority of the
     // DISTINCT configured providers (the floor is the audit's primary guard; the
     // majority preserves the original FLAG-1 protection for larger provider sets).
+    // `total` (not `keyed.len()`) is used so a malformed or errored provider still
+    // counts against the majority denominator -- it just cannot supply a vote.
     let majority = total / 2 + 1;
     let needed = (floor as usize).max(majority);
     if best_count >= needed {
-        // Return the winning provider's response text (the consensus value).
-        Ok(oks[best_idx].1.to_string())
+        // Return the winning provider's ORIGINAL response text (looked up by
+        // URL, since `keyed` may be a strict subset of `oks` once malformed
+        // responses are excluded).
+        let winning_url = keyed[best_idx].0;
+        let winning_text = oks
+            .iter()
+            .find(|(url, _)| *url == winning_url)
+            .map(|(_, text)| *text)
+            .expect("winning url must be present in oks: keyed is built only from oks entries");
+        Ok(winning_text.to_string())
     } else {
         // Genuine disagreement: show WHAT the providers that did respond
         // disagreed about, grouped by distinct value, plus any provider that
-        // errored outright (it did not vote either way).
+        // errored outright (it did not vote either way) or was excluded as
+        // malformed.
         let mut groups: Vec<(serde_json::Value, Vec<&str>)> = Vec::new();
         for (url, key) in &keyed {
             match groups.iter_mut().find(|(k, _)| k == key) {
@@ -986,8 +1098,8 @@ fn tally_provider_outcomes(
             )
         };
         Err(QuorumError::Disagreement(format!(
-            "RPC quorum not reached for chain {:?}: best distinct-provider agreement {}/{} (need {}); response groups: {}{}",
-            chain, best_count, total, needed, groups_detail, errs_detail
+            "RPC quorum not reached for chain {:?}: best distinct-provider agreement {}/{} (need {}); response groups: {}{}{}",
+            chain, best_count, total, needed, groups_detail, errs_detail, malformed_detail
         )))
     }
 }
@@ -1175,10 +1287,13 @@ fn parse_block_probe_response(chain: ChainId, n: u64, text: &str) -> Result<Opti
         )),
         Some(v) if v.is_null() => Ok(None), // benign: chain has not produced this block yet
         Some(v) => match v.as_str() {
-            Some(count_hex) => match parse_hex_quantity(count_hex) {
-                // A valid Ethereum hex quantity (the tx count) confirms
+            Some(count_hex) => match parse_strict_eth_quantity(count_hex) {
+                // A STRICTLY valid Ethereum QUANTITY (the tx count) confirms
                 // block `n` exists; the count's actual value is irrelevant
-                // to existence, only its validity as a quantity matters.
+                // to existence, only its validity as a canonical quantity
+                // matters. Uses the dedicated `parse_strict_eth_quantity`
+                // (B2 hardening, review round 2), not the permissive shared
+                // `parse_hex_quantity` other callers in this file rely on.
                 Ok(_) => Ok(Some(n)),
                 Err(e) => Err(format!(
                     "eth_getBlockTransactionCountByNumber(0x{:x}) chain={:?}: result is not a valid hex quantity: {} (raw={:?})",
@@ -1900,15 +2015,74 @@ mod tests {
         }
     }
 
-    // A leading-zero-padded hex quantity ("0x00") is a VALID quantity per
-    // `parse_hex_quantity` (it tolerates leading zeros, only rejecting a
-    // missing prefix or non-hex/empty digits) and so still confirms existence,
-    // staying consistent with every other caller of `parse_hex_quantity` in
-    // this file.
+    // A leading-zero-padded hex quantity ("0x00") is REJECTED by the probe's
+    // dedicated strict QUANTITY validator (B2 hardening, review round 2).
+    // The Ethereum JSON-RPC QUANTITY encoding requires MINIMAL encoding:
+    // zero is written as exactly "0x0"; any other value must not carry a
+    // leading zero digit. This replaces the prior (incorrect) expectation
+    // that "0x00" confirmed block existence -- that reused the permissive
+    // shared `parse_hex_quantity`, which deliberately tolerates leading-zero
+    // padding for its OTHER callers in this file (naturally zero-padded ABI
+    // words from `getReserves`/`eth_call`), a permissiveness this
+    // existence proof must not inherit.
     #[test]
-    fn leading_zero_padded_quantity_is_accepted() {
-        let out = super::parse_block_probe_response(CHAIN, 7, r#"{"jsonrpc":"2.0","id":1,"result":"0x00"}"#);
-        assert_eq!(out, Ok(Some(7)));
+    fn leading_zero_padded_quantity_is_rejected_as_non_canonical() {
+        let out = super::parse_block_probe_response(
+            CHAIN,
+            7,
+            r#"{"jsonrpc":"2.0","id":1,"result":"0x00"}"#,
+        );
+        assert!(out.is_err(), "{:?}", out);
+        assert!(out.unwrap_err().contains("not a valid hex quantity"));
+    }
+
+    // Positive/negative matrix for the dedicated strict QUANTITY validator
+    // itself (B2 hardening, review round 2). Accepts: "0x0" and any
+    // lowercase, minimally-encoded, nonzero hex quantity. Rejects:
+    // leading-zero padding (including on zero itself, e.g. "0x00"),
+    // uppercase "0X" prefixes, uppercase hex digits, a bare "0x" with no
+    // digits, an empty string, non-hex characters, and surrounding
+    // whitespace.
+    #[test]
+    fn strict_eth_quantity_accepts_canonical_lowercase_minimal_quantities() {
+        for (input, expected) in [
+            ("0x0", 0u128),
+            ("0x1", 1u128),
+            ("0xa", 10u128),
+            ("0x93ad670", 0x93ad670u128),
+        ] {
+            assert_eq!(
+                super::parse_strict_eth_quantity(input),
+                Ok(expected),
+                "expected {:?} to be accepted as {}",
+                input,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn strict_eth_quantity_rejects_non_canonical_or_malformed_input() {
+        for bad in [
+            "0x00",    // leading-zero padding on zero
+            "0x01",    // leading-zero padding on a nonzero value
+            "0X1",     // uppercase prefix
+            "0X0",     // uppercase prefix, zero
+            "0x",      // no hex digits after the prefix
+            "",        // empty
+            "not-hex", // no prefix at all
+            "0xzz",    // non-hex digits
+            "0xA",     // uppercase hex digit (non-canonical per spec)
+            " 0x1",    // leading whitespace
+            "0x1 ",    // trailing whitespace
+            "12345",   // numeric-looking string missing the 0x prefix
+        ] {
+            assert!(
+                super::parse_strict_eth_quantity(bad).is_err(),
+                "expected {:?} to be rejected",
+                bad
+            );
+        }
     }
 
     // A non-string result shape (e.g. a JSON number, not a JSON-RPC-legal hex
@@ -2011,5 +2185,108 @@ mod tests {
         // Sanity: the fixture above still reaches quorum on its own (1-of-1),
         // demonstrating `tally_provider_outcomes` doesn't itself re-check floor.
         assert!(tally_provider_outcomes(CHAIN, &outcomes, 1).is_ok());
+    }
+
+    // ─── B1 regression tests (review round 2): shape validation before ────────
+    // consensus keying, so a malformed response can never vote.
+    //
+    // The attack: provider A returns a genuine `{"result":"0x0"}`; provider B
+    // returns a MALFORMED `{"result":"0x0","error":{...}}` (both keys
+    // present); provider C errors outright at the call level. The prior
+    // `response_consensus_key` checked `v.get("result")` first and returned
+    // whenever it was present, ignoring a simultaneous `error` key -- so B's
+    // malformed response keyed identically to A's genuine one and a 2-of-3
+    // tally (Conflux's actual mainnet floor) could be reached on a response
+    // that was never actually valid, advancing the burn-watch cursor on an
+    // unconfirmed block. The fix shape-validates every response before it can
+    // vote: a response carrying BOTH keys (even with a null value) or
+    // NEITHER key is excluded entirely, not merely re-keyed.
+
+    // (a) mixed valid + malformed + call-error: only A is votable, which
+    // alone never reaches the 2-of-3 floor, so this must fail closed as a
+    // genuine Disagreement (a votable response existed, it just didn't reach
+    // quorum) -- never as an accidental Ok, and never silently treated as an
+    // AllProvidersFailed infrastructure failure (a usable response DID come
+    // back, from A). Downstream the cursor does not advance: `block_probe_outcome`
+    // maps a `Disagreement` to `Ok(None)`, the same "not final yet, no new
+    // blocks this tick" signal `fetch_block_numbers` uses to leave
+    // `last_observed` untouched.
+    #[test]
+    fn mixed_valid_and_malformed_result_error_response_does_not_form_false_quorum() {
+        let urls = providers();
+        let outcomes: Vec<(String, Result<String, String>)> = vec![
+            (urls[0].clone(), Ok(result_json(1, r#""0x0""#))),
+            (
+                urls[1].clone(),
+                Ok(r#"{"jsonrpc":"2.0","id":1,"result":"0x0","error":{"code":-32000,"message":"weird"}}"#
+                    .to_string()),
+            ),
+            (urls[2].clone(), Err(format!("call error to {} (SysTransient): timeout", urls[2]))),
+        ];
+        let tally = tally_provider_outcomes(CHAIN, &outcomes, FLOOR);
+        match &tally {
+            Err(QuorumError::Disagreement(detail)) => {
+                assert!(detail.contains("malformed"), "{}", detail);
+                assert!(detail.contains(urls[1].as_str()), "{}", detail);
+            }
+            other => panic!("expected Disagreement (a votable response existed but didn't reach quorum), got {:?}", other),
+        }
+        // Cursor does not advance: Ok(None), never Ok(Some(_)).
+        let outcome = block_probe_outcome(CHAIN, 154_850_928, tally);
+        assert_eq!(outcome, Ok(None));
+    }
+
+    // (b) `{"result":"0x0","error":null}`: the `error` key is PRESENT (even
+    // though its value is `null`), so this must be treated as malformed --
+    // the same as any other both-keys-present response -- not as a valid
+    // "0x0" result.
+    #[test]
+    fn result_with_present_but_null_error_key_is_malformed() {
+        let key = super::response_consensus_key(
+            r#"{"jsonrpc":"2.0","id":1,"result":"0x0","error":null}"#,
+        );
+        assert_eq!(
+            key, None,
+            "a response with both result and error keys present must not vote, even when error is null"
+        );
+    }
+
+    // (c) `{"result":null,"error":null}`: both keys present (both null) is
+    // malformed, not a valid null ("not yet produced") result -- the benign
+    // null case is signaled ONLY by `result` being present with `error`
+    // absent entirely.
+    #[test]
+    fn both_result_and_error_null_is_malformed_not_a_valid_null_result() {
+        let key =
+            super::response_consensus_key(r#"{"jsonrpc":"2.0","id":1,"result":null,"error":null}"#);
+        assert_eq!(
+            key, None,
+            "both keys present, even both null, is malformed, not a valid null result"
+        );
+    }
+
+    // (d) two valid "0x0" + one malformed: the valid pair alone still reaches
+    // the 2-of-3 floor, proving a malformed response is excluded from the
+    // tally, not fatal to it.
+    #[test]
+    fn two_valid_plus_one_malformed_still_reaches_quorum_on_the_valid_pair() {
+        let urls = providers();
+        let outcomes: Vec<(String, Result<String, String>)> = vec![
+            (urls[0].clone(), Ok(result_json(1, r#""0x0""#))),
+            (urls[1].clone(), Ok(result_json(1, r#""0x0""#))),
+            (
+                urls[2].clone(),
+                Ok(r#"{"jsonrpc":"2.0","id":1,"result":"0x0","error":{"code":-32000,"message":"weird"}}"#
+                    .to_string()),
+            ),
+        ];
+        let tally = tally_provider_outcomes(CHAIN, &outcomes, FLOOR);
+        assert!(
+            tally.is_ok(),
+            "expected the valid A/B pair to reach 2-of-3 quorum despite C being malformed: {:?}",
+            tally
+        );
+        let outcome = block_probe_outcome(CHAIN, 154_850_928, tally);
+        assert_eq!(outcome, Ok(Some(154_850_928)));
     }
 }
