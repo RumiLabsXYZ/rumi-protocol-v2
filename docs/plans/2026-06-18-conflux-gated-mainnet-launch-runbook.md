@@ -1,165 +1,384 @@
-# Conflux gated eSpace-mainnet soft-launch — operator runbook
+# Conflux eSpace mainnet public-launch runbook
 
-Status: DRAFT for Rob. Local doc (docs/ gitignored). Anchor: `main`@`39a07cd` (PR #251 rail + #252 interest).
-Posture: the 2026-06-18 chains-rail audit said **GO for a gated soft-launch with conditions** (`audit-reports/2026-06-18-39a07cd/`).
-Goal: real CFX on **eSpace mainnet (chain 1030)**, tightly capped + dev-gated, manual risk management.
+Status: **production canary complete; public launch not active**
 
----
+Last reconciled: 2026-08-22
 
-## ⚠️ Read first — three hard truths that shape every step
+Production backend: `tfesu-vyaaa-aaaap-qrd7a-cai`
 
-1. **Liquidation on the chains rail EXISTS now** (Increments 0-13; the engine, the bot path and the SP escalation all landed after this runbook was first written). It is nonetheless a SEPARATE switch from everything else here: the `chain_liquidation_configs` row's `enabled` flag gates only the liquidation-swap worker. Staging the row (with `enabled = false`) is what starts the XRC price feed and claims the pair; flipping `enabled` is what turns liquidation on. Do not conflate them. Also note that the M2 self-serve `_evm` endpoints are signature-authenticated, NOT developer-gated: **binding the IcUSD contract is what makes the chain publicly openable** (see step 4), so "keep it gated" means "do not bind the contract yet", not "do not call `open_chain_vault`".
+Network: Conflux eSpace mainnet, chain `1030`
 
-2. **The debt ceiling IS code-enforced.** `debt_ceiling_e8s` is no longer inert config: it is threaded into both risk-increasing paths. `open_chain_vault_in_state` and `borrow_chain_vault_in_state` (`src/rumi_protocol_backend/src/chains/vault.rs`) each add the requested amount to `total_chain_debt_including_pending_e8s(state, chain)` and reject with `DebtCeilingExceeded` if the result would breach the cap. That total counts pending/in-flight mints as well as confirmed debt, and the check runs inside one synchronous `mutate_state` with no `.await`, so concurrent opens cannot collectively slip past it. Chain 1030 is configured at **500 icUSD** (`chains/collateral_config.rs`, carried into the runtime `ChainDebtConfigV1` row and adjustable later via `set_chain_debt_config`). That number is deliberately small: it is depth-bound to what the eSpace DEX can absorb per liquidation swap. So the cap is a genuine guardrail rather than operator discipline, but keep the discipline too, and treat raising it as an explicit decision rather than a routine config tweak.
+This runbook records the remaining public-launch gates. It deliberately treats
+source, merge, deployment, configuration, enablement, and public availability
+as different proof states. Passing one state never proves the next one.
 
-3. **The ECDSA key is now a runtime setter (PR #254 — was hardcoded `test_key_1`).** `set_chains_ecdsa_key_name("key_1")` flips the EVM rail to the production threshold key — **no code change/rebuild**. BUT switching re-derives every custody/settlement/interest-treasury address, so it is **rejected once any chain vault exists**: set `key_1` on a FRESH canister BEFORE registering any chain, then deploy IcUSD.sol pointed at the new `key_1`-derived minter. kvg63 staging keeps `test_key_1`. See Decision 0.
+## Current production truth
 
----
+| Item | Current proof state |
+|---|---|
+| Backend | Production canister selected and running; threshold ECDSA key read back as `key_1` |
+| Required trust anchors | Official EVM-RPC canister `7hfb6-caaaa-aaaar-qadga-cai` and chains threshold-ECDSA key `key_1`; the new consolidated status read-back still requires production deployment and verification |
+| Canister EVM authority | Settlement/admin/minter address `0x00142f7ee842b171d539ec6053eaf88dd9a1adda` |
+| IcUSD | Deployed at `0x8DdB0a13B26ed28912e4B8cCa99Bc3E8c66Df7Ff` in block `154846297`; deploy transaction `0x2513af548bf95a79cbb262338c08128d3cc96568feb2c5cce1d06f521f6a4383` |
+| Binding | Production backend is bound to that IcUSD contract |
+| Real-funds proof | Vault `#1` completed open, 5 CFX deposit, 0.10 icUSD mint, exact burn, and close; vault debt/collateral and IcUSD supply reconciled to zero |
+| Chain status | Chain `1030` is **Disabled**. Timer entry checks keep its observer and settlement worker from starting new work; post-await checks also prevent a deposit transition or settlement broadcast after Disable |
+| Public-readiness release | The status/gating implementation exists on the working branch; review/source-ready, merge, production deployment, and live API verification remain separate proof states |
+| Public frontend | Public-mode source and fail-closed local verification commands exist, but no public asset canister or checked-in ICP deployment recipe currently exists. The existing `icp.yaml` frontend entry is not a production-public recipe |
+| Public availability | **Not public.** Asset-canister provisioning, canonical-origin/manifest review, frontend deployment, and live verification remain undone; liquidation configuration/route/depth has not been verified live for public use; and the chain is disabled |
 
-## Decision 0 (REQUIRED — your call): which ECDSA key
-PR #254 made this a **runtime setter** — no code change either way.
-| | `test_key_1` (default) | `key_1` (production) |
-|---|---|---|
-| How | nothing (default) | `set_chains_ecdsa_key_name("key_1")` on a fresh canister, before any chain is registered |
-| Addresses | testnet-proven | all custody/settlement/treasury addresses derive from `key_1` → deploy IcUSD.sol pointed at the new minter |
-| Risk for real CFX | a real threshold key but designated "test" (weaker operational guarantees) | production-grade |
+The completed canary proves one bounded lifecycle against the production
+backend and contract. It does not prove public operational readiness, sustained
+provider diversity, liquidation depth, frontend deployment, or activation.
 
-**Recommendation: use `key_1` for anything holding real CFX you'd be sad to lose** (the setter makes it cheap now). `test_key_1` only for a throwaway dust-only smoke test. Either way the key MUST be set before the first vault (the setter refuses once vaults exist — orphan guard).
+## Proof-state vocabulary
 
-## Decision 1 (your call): which canister
-- **kvg63 staging** (already runs the rail + interest, `test_key_1`): fastest. Adding chain 1030 here puts real eSpace-mainnet CFX on the staging canister. Fine for a tiny dev-only soft-launch; keep it small.
-- **Production `tfesu`** (`key_1`): mixes the chains rail's real-CFX custody into the live ICP-CDP canister. Bigger blast radius; only after Decision 0 = `key_1` + a fresh audit pass of the combined surface. **Not recommended for the soft-launch.**
-- **New production-keyed canister** for the chains rail: cleanest separation for scale; more setup.
+- **Source-ready:** the required code and docs exist on a reviewed branch and
+  deterministic/adversarial gates pass.
+- **Merged:** the reviewed commit is present on the deployment branch.
+- **Deployed:** the expected WASM or frontend asset hash is installed on the
+  intended production canister.
+- **Configured:** live production read-back matches the reviewed RPC, debt,
+  price, contract, and liquidation configuration.
+- **Enabled:** chain `1030` is `Registered`, so its workers and public write
+  path may run.
+- **Public:** the production frontend is deployed, monitoring is green, and
+  enablement has been independently verified after the final approval.
 
-**Recommendation:** kvg63 for the initial gated launch; a dedicated production-keyed canister when you go to `key_1`/scale.
+Use these exact terms in handoffs. In particular, do not call a merged change
+"live" and do not call the completed private canary "public."
 
----
+## RPC agreement: what code proves and what an operator must prove
 
-## Pre-launch checklist (audit's go-with-conditions)
-- [ ] Decision 0 (key) + Decision 1 (canister) made.
-- [ ] **≥2 independent mainnet RPC providers** secured (NOWNodes / BlockPi / Validation Cloud) — NOT all Confura (audit F-04). Register with `min_quorum_providers ≥ 2`.
-- [ ] Pricing model understood and the recovery loop rehearsed (see §"Pricing model" below): automatic XRC is authoritative once the liquidation config row is staged; `disable_chain` is the reversible emergency stop; manual rebaseline is available only while Disabled; `enable_chain` resumes.
-- [ ] Tiny initial cap agreed (e.g. ≤ a few hundred USD of debt total) and a written discipline that you (the only opener) won't exceed it.
-- [ ] Monitoring dashboard live: `reconcile_chain_supply(1030)` gap = 0, `invariant_halted`/`reorg_halted` false, hot-wallet balance, `processed_burn_keys` size (audit F-02).
-- [ ] Deployer key funded with real CFX for the IcUSD.sol deploy gas (~1.65M gas; eSpace meters high).
-- [ ] (Optional, cheap) the F-05 defense-in-depth one-liner coordinated with the M2 session.
+The runtime deduplicates configured endpoint URLs and refuses financial reads
+when there are fewer distinct URLs than the configured floor. For a read with
+`N` distinct URLs, the accepted value needs agreement from:
 
----
-
-## Operator sequence (templates — fill the placeholders; use `--identity rumi_identity`)
-
-**0. (If Decision 0 = `key_1`) set the production key FIRST**, on the fresh canister, before any chain is registered (it refuses once a vault exists — and every address below derives from it):
-```
-icp canister call <CANISTER> set_chains_ecdsa_key_name '("key_1")' -e <ENV> --identity rumi_identity
-icp canister call <CANISTER> get_chains_ecdsa_key_name '()' -e <ENV>   # verify -> "key_1"
-```
-
-**1. POST-UPGRADE read-back of the key, the RPC principal and every derived address, BEFORE the immutable token deployment.** IcUSD.sol bakes the minter address in permanently, so this read-back is not a formality: a pre-upgrade address report can be STALE (the per-chain address caches in `chains/evm/tecdsa.rs` were keyed only by `ChainId` and were not invalidated on a key flip). Run all of these on the upgraded canister, in this order, and use ONLY these values downstream:
-```
-icp canister call <CANISTER> get_chains_ecdsa_key_name '()' -e <ENV>                       # -> "key_1"
-icp canister call <CANISTER> get_evm_rpc_principal '()' -e <ENV>                           # -> the official EVM-RPC canister, no mock override
-icp canister call <CANISTER> get_chain_settlement_address '(1030 : nat32)' -e <ENV> --identity rumi_identity
-icp canister call <CANISTER> get_chain_reserve_address '(1030 : nat32)' -e <ENV> --identity rumi_identity
-icp canister call <CANISTER> get_chain_interest_treasury_address '(1030 : nat32)' -e <ENV> --identity rumi_identity
-```
-The settlement address is what IcUSD.sol's MINTER_ROLE must be (per-chain, key-dependent; derived from `settlement_derivation_path(1030)`). The reserve address is a SINK and needs no funding. If any value disagrees with a pre-upgrade note, the post-upgrade read is the truth.
-
-**2. Deploy IcUSD.sol to eSpace MAINNET** (Foundry; mirrors the testnet deploy, see `foundry/DEPLOY.md`):
-```
-cd foundry
-export CANISTER_SETTLEMENT_ADDR=0x<minter from step 1>
-export DEPLOYER_PK=<funded eSpace-mainnet deployer key>
-forge script script/DeployIcUSD.s.sol \
-  --rpc-url https://evm.confluxrpc.com \
-  --broadcast --gas-estimate-multiplier 400      # eSpace meters ~1.65M gas vs forge's ~1.16M estimate (testnet gotcha)
-# -> IcUSD deployed at 0x<icusd_mainnet>; admin == minter == the canister settlement addr
+```text
+max(configured_floor, floor(N / 2) + 1)
 ```
 
-**3. Register chain 1030** (mainnet params; independent RPCs; deeper finality):
-```
-icp canister call <CANISTER> register_chain '(record {
-  chain_id = 1030 : nat32;
-  display_name = "ConfluxESpaceMainnet";
-  rpc_endpoints = vec { "https://<provider1>"; "https://<provider2>"; "https://<provider3>" };
-  finality_depth = 400 : nat32;          # mainnet PoW reorg depth (security-review param; testnet used 100)
-  gas_strategy = variant { EvmEip1559 = record { max_priority_fee_gwei = 1 : nat64; max_fee_gwei_ceiling = 200 : nat64 } };
-  chain_native_decimals = 18 : nat8;
-  min_quorum_providers = opt (2 : nat32);   # >=2 INDEPENDENT providers (audit F-04)
-})' -e <ENV> --identity rumi_identity
-```
+This is implemented by `endpoints_and_floor` and `tally_provider_outcomes` in
+`src/rumi_protocol_backend/src/chains/evm/evm_rpc.rs:857` and
+`src/rumi_protocol_backend/src/chains/evm/evm_rpc.rs:993`; the default floor
+and override semantics are in
+`src/rumi_protocol_backend/src/chains/config.rs:146` and
+`src/rumi_protocol_backend/src/chains/config.rs:150`. The Conflux mainnet helper
+currently sets a floor of `2` in
+`src/rumi_protocol_backend/src/chains/evm/conflux/config.rs:23`. Therefore three
+distinct configured URLs require matching responses from two; four URLs
+require three; five URLs require three. The earlier blanket three-provider
+floor was inaccurate and is retired.
 
-**4. Seed the price, seed the cursor, then bind the contract, in that order.**
+URL deduplication and response agreement cannot prove provider independence.
+Before activation, a human operator must verify that the configured endpoints
+are controlled by at least two genuinely independent provider operators,
+including operator and upstream/control-plane ownership. Multiple domains
+backed by one operator do not satisfy this gate. Record the
+provider-to-operator mapping in
+the activation evidence without committing credentials or paid endpoint URLs.
+The bounded public gate separately requires at least two distinct endpoint URLs
+and an effective agreement requirement of at least two.
 
-Binding the IcUSD contract (`set_chain_contract`) is the step that actually makes the chain PUBLICLY OPEN: `verify_intent_ctx` resolves the bound contract as the EIP-712 domain separator BEFORE it verifies any signature, so an unbound chain rejects every self-serve open regardless of registration or price. Do the price and cursor first so nothing is publicly openable against an unpriced chain.
+## Authoritative public risk gate
 
-```
-icp canister call <CANISTER> set_manual_collateral_price '(1030 : nat32, "CFX", <price_e8> : nat64)' -e <ENV> --identity rumi_identity   # e.g. $0.15 -> 15_000_000
-icp canister call <CANISTER> set_last_observed_block '(1030 : nat32, <current_eSpace_head - 1024> : nat64)' -e <ENV> --identity rumi_identity  # snappy burn detection
-icp canister call <CANISTER> set_chain_contract '(1030 : nat32, "0x<icusd_mainnet>")' -e <ENV> --identity rumi_identity                  # <- the public-open gate
-```
+The frontend status display is not the authority for admitting debt. The
+backend's bounded `conflux_mainnet_public_risk_blockers` predicate is enforced
+inside both risk-increasing endpoints:
 
-**4b. Stage the liquidation config row: this is what hands pricing to the automatic XRC feed.** The moment a `chain_liquidation_configs` row exists for a Registered chain, that chain's native pair is XRC-managed: the 300s XRC timer becomes its SOLE writer and `set_manual_collateral_price` refuses every caller, developer included. Staging the row also starts the XRC meter immediately (~1B cycles per call at 300s, roughly 288B cycles/day per symbol); budget from this moment, not from liquidation go-live. The row's `enabled` flag is a SEPARATE switch that gates only the liquidation-swap worker; leave it `false` here.
-```
-icp canister call <CANISTER> set_chain_liquidation_config '(1030 : nat32, record { ...; enabled = false })' -e <ENV> --identity rumi_identity
-icp canister call <CANISTER> get_manual_collateral_price '(1030 : nat32, "CFX")' -e <ENV>   # after one timer tick: XRC is writing
-```
-Flip `enabled` to true only after its own on-chain validation (`set_chain_liquidation_config` re-derives the factory pair on enable).
+- `open_chain_vault_evm` checks it before spending the nonce and again after
+  the threshold-ECDSA await, immediately before vault insertion; and
+- `borrow_chain_vault_evm` checks it atomically with the borrow mutation and
+  nonce increment;
+- the bounded deposit observer rechecks Registered plus the same public gate
+  after each custody-balance await, before changing `AwaitingDeposit` to
+  `MintPending` or enqueueing a mint; and
+- settlement rechecks Registered immediately before signing and again after
+  signing, immediately before broadcast. A signature completed after Disable is
+  discarded rather than broadcast.
 
-**5. Turn the timers on** (currently floored to ~1yr/off on staging):
-```
-icp canister call <CANISTER> set_observer_tick_interval_secs '(60 : nat64)' -e <ENV> --identity rumi_identity
-icp canister call <CANISTER> set_settlement_tick_interval_secs '(60 : nat64)' -e <ENV> --identity rumi_identity
-# Interest: leave the harvest timer OFF; realize manually via harvest_chain_interest(1030) when desired,
-# OR set_chain_interest_tick_interval_secs to a long cadence. Watch cycle burn (outcall freq x reservation).
-```
+The projection returned by `get_chain_public_launch_status(1030)` is the public
+view of that same predicate. A frontend bug or stale UI cannot bypass the
+backend Open/Borrow refusal.
 
-**6. Smoke test (you-only, tiny):** open one small vault → deposit a few CFX → confirm mint → burn → withdraw → Closed, asserting `reconcile_chain_supply(1030)` gap = 0 at each step (same flow proven on testnet). THEN open the (still small) real positions.
+## Remaining gates before public activation
 
-**7. Cycles:** top kvg63/the launch canister well above the freeze threshold — outcalls fail (and silently halt the observer) before freezing. `icp cycles mint ... && icp canister top-up ...`.
+All items are required unless explicitly marked optional.
 
----
+1. **Merge and deploy the public-readiness release.**
+   - Reviewed source is merged.
+   - A fresh backend WASM is built from the merged commit.
+   - Production upgrade completes with the expected module hash.
+   - `get_chain_public_launch_status(1030)` and
+     `get_expected_evm_nonce(1030, owner)` are callable and match the deployed
+     Candid interface.
 
-## Pricing model (supersedes the original audit F-01 manual-oracle plan)
+2. **Verify independent RPC configuration.**
+   - The status API reports a distinct-endpoint count of at least two, an
+     effective agreement requirement of at least two, and a sufficient
+     configuration under the threshold formula above. It does not expose the
+     endpoint URLs.
+   - The human provider-independence review is recorded separately.
+   - No endpoint credentials appear in a commit, terminal transcript, or
+     launch report.
 
-**The automatic XRC feed is authoritative while the chain is Registered AND carries a liquidation config row.** The 300s `xrc::fetch_chains_prices` timer is the ONLY writer of `(1030, "CFX")` in that state, and `set_manual_collateral_price` refuses every caller for that pair: the narrowly-scoped price pusher and the developer alike. Two writers on one cell is the defect the gate prevents; which of them holds the second key does not change that, because the timer fires from its own message on its own schedule with no ordering relationship to an operator's call. The superseded off-chain CFX monitor is an emergency-only fallback now.
+3. **Verify the fixed production shape while the chain remains Disabled.**
+   - `effective_evm_rpc_principal` is exactly
+     `7hfb6-caaaa-aaaar-qadga-cai` and
+     `evm_rpc_principal_matches_expected` is true. This is the official
+     EVM-RPC canister trust anchor; endpoint URL diversity is a separate gate.
+   - `chains_ecdsa_key_name` is exactly `key_1` and
+     `chains_ecdsa_key_matches_expected` is true. A derived address or an older
+     standalone read-back is supporting evidence, not a substitute for the
+     consolidated live status verdict.
+   - Bound IcUSD is exactly
+     `0x8DdB0a13B26ed28912e4B8cCa99Bc3E8c66Df7Ff`, and
+     `icusd_contract_matches_expected` is true.
+   - `finality_depth` is exactly `400`.
+   - `burn_cursor` is greater than zero and has been seeded from a reviewed
+     mainnet block.
+   - `collateral_config_matches_expected` and
+     `debt_config_matches_expected` are both true; present ratio/debt fields are
+     supporting evidence, not substitutes for those exact-shape verdicts.
 
-What the automatic writer will and will not accept:
-- It stamps the sample's **source** timestamp (`ExchangeRate.timestamp`), not arrival time, so a delayed result can never look fresh and the downstream staleness gate measures the age of the observation.
-- A candidate must be **strictly newer at the source** than the stored sample, and **within the accepted LIQ-007 sanity band** of the last accepted price (0.7x to ~1.43x). A rejected sample writes NOTHING: not the price, and not the freshness timestamp.
-- There is **no auto-confirmation escalation** here. A sustained out-of-band move stays rejected, the stored price ages out, and liquidation fails closed until an operator intervenes. That is deliberate: a genuine 40% move is rare and deserves a human; a fabricated one must never confirm itself.
+4. **Stage and validate liquidation while the chain remains Disabled.**
+   - The chain-1030 liquidation row uses the reviewed WCFX/USDC route:
+     - router `0x62b0873055bf896dd869e172119871ac24aea305`;
+     - factory `0xe2a6f7c0ce4d5d300f97aa7e125455f5cd3342f5`;
+     - pair `0x0736b3384531cda2f545f5449e84c6c6bcd6f01b`;
+     - WCFX `0x14b2d3bc65e74dae1030eafd8ac30c533c976a9b`; and
+     - USDC `0x6963efed0ab40f6c3d7bda44a05dcf1437c44372`.
 
-**`disable_chain` is the reversible emergency risk/XRC stop, and it is a HARD FREEZE while it lasts.** Verified from source, not assumed: it blocks new opens and additional borrows, it unmanages the native pair (the timer stops fetching it and manual pricing reopens), and it ALSO removes the chain from the observer and settlement worker fan-outs (`registered_chains_and_solana_flag` filters to `ChainStatus::Registered`). So a Disabled chain gets no deposit verification, no liquidation detection and no settlement-queue draining. `withdraw_chain_collateral` / `close_chain_vault` still ACCEPT the call and enqueue a settlement op, but with the worker gated off that op is not broadcast until the chain is re-enabled; the only flow that completes unaided on a Disabled chain is repay via `submit_burn_proof`. **Keep the disabled window short and deliberate, and expect pending exits to sit until you re-enable.**
+     Swappi's [official contract registry](https://docs.swappi.io/swappi/about-swappi/swappi-contract-addresses)
+     identifies the router and factory, and its
+     [official pool/address list](https://docs.swappi.io/swappi/quick-reference/liquidity-pools-token-addresses)
+     identifies the WCFX-USDC pair and token route. Record the source snapshot
+     time in the activation evidence.
+   - Stage the exact reviewed row below. This update is developer-gated and is
+     valid while the chain is Disabled; because `enabled = true`, the setter
+     also verifies the factory-derived pair before committing:
 
-**Manual rebaseline is available only while Disabled**, and `enable_chain` resumes both automatic XRC authority and the workers (so any exit enqueued during the freeze then drains normally). The full recovery loop, which is also what the PocketIC fixtures exercise:
-```
-icp canister call <CANISTER> disable_chain '(1030 : nat32)' -e <ENV> --identity rumi_identity
-icp canister call <CANISTER> set_manual_collateral_price '(1030 : nat32, "CFX", <verified_price_e8> : nat64)' -e <ENV> --identity rumi_identity
-icp canister call <CANISTER> get_manual_collateral_price '(1030 : nat32, "CFX")' -e <ENV>     # VERIFY before re-enabling
-icp canister call <CANISTER> enable_chain '(1030 : nat32)' -e <ENV> --identity rumi_identity
-```
-`enable_chain` is developer-gated, flips only `Disabled -> Registered`, refuses an unknown or already-Registered chain, and preserves every per-chain state entry (vaults, supply, contract binding, cursor, prices and their timestamps, liquidation config). It reopens the GATE only: an open after enable still has to satisfy the price presence/staleness prerequisites, which is why the verify step above is part of the loop and not optional.
+     ```bash
+     icp canister call tfesu-vyaaa-aaaap-qrd7a-cai \
+       set_chain_liquidation_config \
+       '(1030 : nat32, record {
+         dex = variant { UniswapV2 };
+         router = "0x62b0873055bf896dd869e172119871ac24aea305";
+         factory = "0xe2a6f7c0ce4d5d300f97aa7e125455f5cd3342f5";
+         pair = "0x0736b3384531cda2f545f5449e84c6c6bcd6f01b";
+         collateral_token = "0x14b2d3bc65e74dae1030eafd8ac30c533c976a9b";
+         settle_stable_token = "0x6963efed0ab40f6c3d7bda44a05dcf1437c44372";
+         slippage_cap_bps = 250 : nat16;
+         restore_target_cr_e4 = 15_500 : nat64;
+         enabled = true;
+         max_swap_value_e8s = 200_000_000_000 : nat;
+         max_price_age_ns = 1_800_000_000_000 : nat64;
+         max_dex_oracle_divergence_bps = 500 : nat32;
+         fee_bps = 25 : nat16;
+         settle_stable_decimals = 18 : nat8;
+         deadline_secs = 180 : nat64;
+       })' -n ic --identity rumi_identity
+     ```
 
-Still worth an off-chain watcher, for what the canister cannot see:
-- Recompute every chain-1030 vault's true CR at the live market price and **alert** on a warning band, so you can act before a vault goes underwater.
-- Alert when the on-chain price stops advancing (a fail-closed feed is safe but it is also a frozen one, and it needs the recovery loop above).
+     The exact values are the reviewed slippage, divergence, price-age, fee,
+     deadline, decimals, recovery-target, and maximum-swap values.
+     `liquidation_config_matches_expected` must be true, and
+     `liquidation_config_digest` must be present and byte-for-byte equal to
+     `expected_liquidation_config_digest`.
+   - The factory-derived pair matches the configured pair.
+   - The actual Swappi route is exercised or quoted against current mainnet
+     liquidity, and the configured maximum swap is demonstrably inside the
+     accepted depth/slippage envelope.
+   - Set the row's `enabled` field to true while chain `1030` itself is still
+     Disabled. The row is then activation-ready without admitting Open/Borrow
+     or starting a new observer/settlement tick.
+   - Source or mock-router tests alone do not satisfy this live-liquidity gate.
+   - Refresh the cached settlement gas balance after the reviewed RPC and route
+     configuration is staged, while the chain is still Disabled. This is a
+     developer-only production update; it reads the chain balance and updates
+     only the cached balance and timestamp:
 
----
+     ```bash
+     icp canister call tfesu-vyaaa-aaaap-qrd7a-cai \
+       refresh_chain_hot_wallet_balance '(1030 : nat32)' \
+       -n ic --identity rumi_identity
+     ```
 
-## Live monitoring + manual risk playbook
-- **Invariant:** `reconcile_chain_supply(1030)` gap must stay 0; `get_supply_audit` total == Σ vault debt. Alert on any drift, on `invariant_halted`, on `reorg_halted` (clear via `clear_reorg_halt` after verifying), on hot-wallet low.
-- **F-02:** watch `processed_burn_keys` size; a prolonged reorg/halt grows it. Restart-from-snapshot is the escape hatch.
-- **Risk (no liquidation):** keep LTV conservative; you are the only opener, so keep every vault well over-collateralized and be ready to repay/close it yourself. This is the substitute for liquidation.
+     Record an unambiguous `Ok` response, then promptly read status. Do not treat
+     a nonzero balance alone as current evidence. Require
+     `hot_wallet_ready = opt true`, a nonzero
+     `hot_wallet_balance_refreshed_at_ns`, a present
+     `hot_wallet_balance_age_ns` no greater than
+     `hot_wallet_balance_max_age_ns`, and
+     `hot_wallet_balance_is_fresh = true`. The monitor itself remains anonymous
+     and query-only; it never performs this refresh.
 
----
+5. **Deploy and verify the public frontend.**
+   - First provision a dedicated public asset canister. No public Conflux asset
+     canister or environment is currently checked into `icp.yaml`, and no
+     checked-in ICP recipe consumes the production-public bundle or its asset
+     policy. Do not treat the existing staging/default
+     `conflux_espace_frontend` entry as a public deployment recipe.
+   - After provisioning, review and pin the exact canonical certified origin as
+     `https://<non-reserved-canister-principal>.icp0.io`. Review the final ICP
+     provisioning/deployment manifest separately, including its consumption of
+     `.ic-assets.production-public.json` and the raw-access-off policy. Canister
+     provisioning, canonical-origin approval, manifest approval, artifact
+     construction, and deployment are separate proof states.
+   - Until those prerequisites exist, only the README's local/ephemeral public
+     verification commands are valid:
 
-## Go / no-go gate for the gated launch
-GO when: Decisions 0/1 made · post-upgrade key/RPC/address read-back done (step 1) · ≥2 independent RPCs · the XRC feed observed writing a fresh price and the disable/rebaseline/enable loop rehearsed · tiny cap + discipline · invariant dashboard live · smoke test green · cycles topped. The audit does NOT otherwise block it.
+     ```bash
+     cd src/conflux_espace_frontend
+     npm run test:production-public
+     npm run build:production-public
+     npm run dev:production-public
+     npm run verify:production-public:deploy-build
+     ```
 
-## Before lifting the caps to a PUBLIC launch (the remaining gates)
-1. ~~**Liquidation** built~~ DONE (Increments 0-13). Remaining: flip the liquidation config's `enabled` after its on-chain validation, and confirm the swap path against real Swappi depth.
-2. **Production `key_1`** (Decision 0) on a dedicated canister.
-3. ~~**Automated/timestamped oracle** (audit F-01)~~ DONE. The XRC feed is on-chain, source-timestamped, monotonic and LIQ-007-banded; `set_manual_collateral_price` is locked out while a pair is XRC-managed. See §"Pricing model".
-4. **≥3 independent RPC providers** + `min_quorum ≥ 3` (audit F-04).
-5. **`processed_burn_keys` eviction** (audit F-02) + the F-05 confirm-status guard.
-6. **Debt-ceiling enforcement** in the open path (currently unused) before user-opened (M2) vaults.
-7. **M2 self-serve UX** (other session) + a fresh audit of the combined surface.
+     These commands cannot deploy. The build verifiers write only to temporary
+     directories and remove their output; the local Vite server is fixed to
+     `127.0.0.1:5174`; and the deployment-shape verifier uses a denylisted test
+     Principal. Do not claim that they produce a deployable artifact or that
+     `npm run build:production-public:deploy` is authorized before exact
+     provisioning/origin/manifest review.
+   - It targets production backend `tfesu-vyaaa-aaaap-qrd7a-cai`, chain `1030`,
+     and the bound IcUSD contract above.
+   - It shows live debt limits and launch blockers from the status API.
+   - It fails closed when `public_open_ready` is false.
+   - Mainnet uses an injected wallet only; every signature or transaction
+     remains an explicit user action, and nonce ambiguity never triggers an
+     automatic second signature.
+
+6. **Complete the bounded vault inventory.**
+   - Use `list_chain_vaults_page(1030, cursor, scan_limit)` and continue with
+     each `next_start_after` until `done = true`.
+   - Record every page and its `scanned_count`. The cursor advances over the
+     global vault map, so an empty chain-1030 page is not terminal unless
+     `done = true`.
+   - Do not use legacy `list_chain_vaults` as proof of a complete inventory; it
+     is compatibility-only and capped at 500 returned matches.
+
+7. **Make the read-only monitor green.**
+
+   While staging with the chain disabled:
+
+   ```bash
+   scripts/check-conflux-public-launch.sh --expect-disabled
+   ```
+
+   After the final enable action:
+
+   ```bash
+   scripts/check-conflux-public-launch.sh --expect-public-active
+   ```
+
+   The monitor must fail closed on unavailable/malformed queries, unexpected
+   chain status, wrong official EVM-RPC principal, wrong threshold-ECDSA key,
+   wrong IcUSD binding, collateral/debt/liquidation shape mismatch, absent or
+   unequal liquidation digest, fewer than two distinct endpoint URLs,
+   agreement below two, finality other than 400, an unseeded burn cursor,
+   stale/missing price, any breaker/halt, insufficient cycles,
+   unknown/low/stale hot-wallet evidence, or an inconsistent operator supply
+   audit. Public-active mode additionally requires the backend's consolidated
+   `public_open_ready` verdict to be true.
+
+   `get_chain_public_launch_status` deliberately contains no vault-map,
+   settlement-queue, or burn-key scans. The monitor calls `get_supply_audit`
+   separately and labels it an **operator internal supply audit**; it verifies
+   the reported total equals the per-chain sum and that chain 1030 agrees with
+   the bounded status. This is not a live EVM `totalSupply()` outcall. Retain a
+   separate, recent on-chain supply reconciliation result in the activation
+   evidence.
+
+   Disabled status is a refusal/freeze boundary, not by itself proof that the
+   system is already quiet. The deposit observer is bounded to at most 500
+   global-map examinations and 25 balance polls per tick, and its post-await
+   Registered/risk-gate check prevents a late deposit RPC from enqueueing a mint
+   after Disable. Settlement rechecks Disable before signing and before
+   broadcast, but a transaction broadcast before Disable can still settle on
+   chain. The current `chain_has_active_settlement_op` query scans the queue and
+   therefore is not the bounded complete-queue proof required for a launch
+   assertion. Do not invent a “no active/queued work” claim from it. Use the
+   complete paged vault inventory, submitted-transaction receipts, and explicit
+   reconciliation of any known work; add a bounded settlement-inventory API
+   before making complete queue emptiness a mandatory proof.
+
+8. **Obtain fresh explicit activation approval.**
+   - Present the merged commit, deployed module hash, frontend target/hash,
+     redacted provider-independence evidence, liquidation route/depth evidence,
+     and green disabled-stage monitor output.
+   - Approval is for the exact activation action only. Deployment,
+     configuration, enablement, and future cap changes are separate authority.
+
+9. **Enable once, then reconcile without an ambiguous retry.**
+   - Perform the approved chain-1030 enable action exactly once.
+   - If the update result is ambiguous, do not retry. Reconcile live status and
+     events first.
+   - Require the public-active monitor to pass before announcing public
+     availability.
+
+A dedicated chains canister may still be useful for future isolation, but it is
+optional architecture work. Production `tfesu-vyaaa-aaaap-qrd7a-cai` has
+already been selected for this launch, so a dedicated canister is not a public
+activation gate.
+
+## Stop conditions and recovery posture
+
+Stop and keep (or return) chain `1030` to Disabled if any of the following is
+observed:
+
+- status API unavailable or malformed;
+- effective EVM-RPC principal differs from `7hfb6-caaaa-aaaar-qadga-cai`, or
+  the chains threshold-ECDSA key differs from `key_1`;
+- bound IcUSD differs from the exact production contract;
+- RPC endpoint/agreement configuration insufficient or provider independence
+  no longer defensible;
+- finality depth differs from 400, the burn cursor is zero, or the reviewed
+  collateral/debt shape verdicts are false;
+- missing or stale CFX price;
+- invariant, reorg, bad-debt, or protocol freeze breaker;
+- malformed or inconsistent operator internal supply audit;
+- low/unknown canister cycles or low/unknown/stale settlement hot-wallet
+  evidence;
+- liquidation configuration missing, disabled, mismatched, digest-mismatched,
+  or no longer inside measured Swappi depth;
+- unexpected deployed module/frontend hash; or
+- ambiguous fund-affecting or activation result that has not been reconciled.
+
+Disabling prevents new observer/settlement ticks, and post-await checks prevent
+late custody reads or threshold signatures from crossing the state/broadcast
+boundary. It does not cancel a transaction that was already broadcast, prove
+that every queue is empty, or erase queued work; unresolved work remains paused
+until re-enabled and already-broadcast work must be reconciled on chain. Do not
+treat Disable as a harmless UI switch or as instant proof of quiescence. Take a
+production snapshot before a backend upgrade and retain the previously approved
+snapshot-restoration contingency for a critical post-upgrade failure.
+Restoration itself remains an operator-controlled production action.
+
+## Evidence packet for the launch record
+
+Capture, redact, and retain:
+
+- merged commit and green CI checks;
+- backend WASM hash and production module-hash read-back;
+- public frontend asset hash and public URL;
+- `get_chain_public_launch_status(1030)` output immediately before and after
+  enablement;
+- exact effective EVM-RPC principal plus its match verdict, and exact
+  threshold-ECDSA key name plus its match verdict;
+- the successful `refresh_chain_hot_wallet_balance(1030)` response plus the
+  subsequent refreshed-at/age/max-age/freshness status fields;
+- equal actual and expected liquidation-configuration digests;
+- `cycles_status()` output;
+- complete `list_chain_vaults_page` inventory through `done = true`;
+- `get_supply_audit()` operator internal audit output;
+- recent on-chain IcUSD supply reconciliation output, separately from the
+  operator internal supply audit;
+- provider-to-operator independence mapping (no credentials);
+- Swappi factory/pair/route and live depth/slippage evidence;
+- disabled-stage and public-active monitor outputs;
+- exact activation approval; and
+- the single enable result plus event/status reconciliation.
+
+Only after that packet is complete may the state be reported as **public**.
