@@ -1265,8 +1265,9 @@ pub struct State {
     /// staging/testnet) or `key_1` (production). Read by the EVM `key_id()` at
     /// derive/sign time, so a fresh production canister uses the production
     /// threshold key with no rebuild. Settable via `set_chains_ecdsa_key_name`
-    /// ONLY while no chain vault exists — changing it re-derives every per-vault
-    /// custody address, which would orphan already-deposited collateral.
+    /// ONLY while the EVM rail is truly fresh — any staged configuration,
+    /// binding, derived address/proof, settlement state, or vault makes the key
+    /// immutable because changing it would orphan key-bound addresses.
     #[serde(default = "default_chains_ecdsa_key_name")]
     pub chains_ecdsa_key_name: String,
     /// Threshold Schnorr Ed25519 key name for the native-XRP rail. Like the EVM
@@ -7861,8 +7862,7 @@ mod tests {
         // Guard the premise: the generic cap really is a partial here, so this
         // test would be vacuous if it ever stopped being one.
         assert!(
-            s.compute_partial_liquidation_cap(&xrp_vault, dummy)
-                < xrp_vault.borrowed_icusd_amount,
+            s.compute_partial_liquidation_cap(&xrp_vault, dummy) < xrp_vault.borrowed_icusd_amount,
             "premise: generic cap must be partial for this XRP vault"
         );
 

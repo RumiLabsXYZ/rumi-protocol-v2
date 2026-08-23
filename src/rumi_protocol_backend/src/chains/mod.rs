@@ -10,36 +10,20 @@
 //! (chains/evm/tecdsa.rs). Do NOT trust any chain address read from prod
 //! before this upgrade lands: a pre-rotation cache entry may still be warm.
 //!
-//! ── The actual public-open gate (verified by reading `verify_intent_ctx` +
-//! `open_chain_vault_in_state` end to end, not assumed) ──────────────────────
-//! `open_chain_vault_evm`'s checks run in this order:
-//!  1. `verify_intent_ctx` (main.rs) resolves the chain's bound
-//!     `chain_contracts` entry BEFORE it ever verifies the EIP-712 signature
-//!     (the contract address is the domain separator). An unbound chain
-//!     rejects with "no contract set", on ANY signature, regardless of
-//!     registration or price state. This is why binding the IcUSD contract
-//!     (`set_chain_contract`) is the step that actually makes a chain
-//!     publicly open, not registration.
-//!  2. `open_chain_vault_in_state` (chains/vault.rs) then requires
-//!     `MultiChainState::chain_is_registered` (`ChainStatus::Registered`).
-//!     This check runs in the SYNCHRONOUS post-`.await` half of the open
-//!     call (after the tECDSA custody-address derive resolves), so a
-//!     `disable_chain` landing while that derive is in flight is still
-//!     caught on resume; that post-await check is the authoritative one.
-//!     `open_chain_vault_evm` ALSO reads the predicate pre-`.await`, before
-//!     it consumes the caller's nonce, purely so an open against a chain
-//!     that was ALREADY disabled does not burn a nonce the caller then has
-//!     to re-sign past. `borrow_chain_vault_evm` (fully synchronous, no
-//!     `.await`) reads the same predicate. Withdraw/close/repay do NOT read
-//!     it and their pure state helpers still ACCEPT the call on a Disabled
-//!     chain, but see the `disable_chain` section below: accepting the call
-//!     is not the same as completing it, since the worker that would
-//!     actually broadcast the resulting withdrawal is also gated off.
-//!  3. A native-asset price must be present (`manual_prices`); it is only
-//!     STALENESS-CHECKED once a `chain_liquidation_configs` row exists with
-//!     `max_price_age_ns > 0` (`gated_chain_price_e8`, chains/vault.rs),
-//!     independent of that row's `enabled` flag, which gates the
-//!     liquidation-swap WORKER only, never the open/borrow price check.
+//! ── Authoritative Conflux-mainnet public risk gate ─────────────────────────
+//! `open_chain_vault_evm`, `borrow_chain_vault_evm`, debt-bearing signed
+//! withdrawals, deposit verification, and chain-1030 Mint/InterestMint submit
+//! all reuse the same bounded
+//! predicate that backs `get_chain_public_launch_status`. For chain 1030 it
+//! fails closed unless the reviewed IcUSD contract, exact finality, adequate
+//! RPC agreement, enabled liquidation, fresh price, clear breakers, seeded
+//! burn cursor and fresh proven hot-wallet gas balance are all present. It also
+//! pins the 0.10/500 icUSD debt limits and the exact reviewed Swappi route/risk
+//! row. Open checks
+//! before nonce consumption and again after its tECDSA await before insertion;
+//! Borrow and debt-bearing withdrawal check inside their synchronous state
+//! mutations. Debt-free withdrawal/Close/repay remain risk-reducing paths.
+//! Other chains retain their existing gates.
 //!
 //! ── ONE PRICE WRITER (`xrc::pair_is_xrc_managed`) ──────────────────────────
 //! A chain that is `Registered` AND carries a `chain_liquidation_configs` row
@@ -79,15 +63,17 @@
 //!    `run_all_observers`/`run_all_settlements` (main.rs) and their legacy
 //!    per-chain equivalents `observer_tick`/`settlement_tick`
 //!    (deposit_watch.rs, settlement.rs) all filter their chain list to
-//!    `ChainStatus::Registered`. A Disabled chain gets NO deposit
+//!    `ChainStatus::Registered`. Each worker also rechecks current status after
+//!    RPC awaits before a deposit transition or immediately before signing and
+//!    broadcast, so an already-suspended continuation cannot escape a Disable.
+//!    A Disabled chain gets NO deposit
 //!    verification, NO liquidation detection (that runs inside the
 //!    observer), and NO settlement-queue draining (mints, withdrawals,
 //!    liquidation swaps) at all.
-//!  - Composite consequence for an ALREADY-OPEN vault: `withdraw_collateral_in_state`/
-//!    `close_chain_vault_in_state` do not read `ChainStatus` and still
-//!    ACCEPT the call, enqueueing a settlement op, but with the settlement
-//!    worker gated off that op is never broadcast: the vault sticks
-//!    mid-exit (e.g. `Closing`) indefinitely. The one flow that genuinely
+//!  - Composite consequence for an ALREADY-OPEN vault: debt-bearing public
+//!    withdrawal is refused by the risk gate. Debt-free signed withdrawal/Close
+//!    (and policy-neutral admin helpers) can still enqueue an exit, but with the
+//!    settlement worker frozen that op is not broadcast until re-enable. The one flow that genuinely
 //!    completes on a Disabled chain is repay via `submit_burn_proof`
 //!    (chains/evm/burn_proof.rs), which reads only the bound contract and
 //!    finality depth, no `ChainStatus` check at all.
@@ -136,10 +122,9 @@
 //!     min_quorum_providers 2, operator-vetted RPC URLs.
 //!  4. Set the native price and seed the observer cursor while the chain is
 //!     still unbound (and therefore not publicly openable).
-//!  5. Deploy IcUSD.sol on eSpace mainnet, then `set_chain_contract`. This
-//!     is the actual "make public" step (see the public-open gate above), and
-//!     it stays the initial public-open gate regardless of price or
-//!     liquidation state.
+//!  5. Deploy IcUSD.sol on eSpace mainnet, then `set_chain_contract`. Binding
+//!     is necessary but not sufficient: public Open/Borrow stays closed until
+//!     every condition in the authoritative risk gate above is clear.
 //!  6. Stage a liquidation config row (real Swappi router, fee/divergence/
 //!     deadline; `enabled` starts false). This hands pricing to the automatic
 //!     XRC feed AND claims the pair from manual pricing (see ONE PRICE WRITER
@@ -160,17 +145,17 @@ pub mod adapter;
 pub mod admin;
 pub mod collateral_config;
 pub mod config;
+pub mod evm;
 pub mod interest;
 pub mod liquidation;
 pub mod liquidation_config;
+pub mod monad;
 pub mod multi_chain_state;
 pub mod recovery;
 pub mod settlement_queue;
+pub mod solana;
 pub mod supply;
 pub mod vault;
-pub mod evm;
-pub mod monad;
-pub mod solana;
 pub mod xrp;
 
 pub use adapter::ChainAdapter;
@@ -178,7 +163,7 @@ pub use config::{ChainConfig, ChainId, ChainStatus};
 pub use liquidation_config::{ChainLiquidationConfigV1, DexKind, LiquidationConfigError};
 pub use multi_chain_state::{
     MultiChainState, MultiChainStateV1, MultiChainStateV2, MultiChainStateV3, MultiChainStateV4,
-    MultiChainStateV5, MultiChainStateV6,
+    MultiChainStateV5, MultiChainStateV6, MultiChainStateV7,
 };
 pub use settlement_queue::{SettlementOp, SettlementQueueV1};
 pub use supply::{apply_supply_delta, SupplyDelta, SupplyInvariantError};

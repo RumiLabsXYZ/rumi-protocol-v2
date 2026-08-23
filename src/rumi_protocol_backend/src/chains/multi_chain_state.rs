@@ -635,258 +635,348 @@ pub struct MultiChainStateV6 {
     pub chain_bad_debt_circuit_tripped_at_ns: BTreeMap<ChainId, u64>,
 }
 
-impl MultiChainStateV6 {
-    /// De-scaffold pass (2026-08-20, security review F2/F10): whether `chain`
-    /// is currently `ChainStatus::Registered` (present in `chain_configs` AND
-    /// not `Disabled`). The single source of truth every vault-risk gate
-    /// (open/borrow, and the XRC-managed pricing predicate) reads, rather
-    /// than re-deriving its own `contains_key`/status match. Pre-existing
-    /// call sites like `main.rs::registered_chains_and_solana_flag` (the
-    /// observer/settlement fan-out) still inline their own equivalent
-    /// filter and were not migrated by this pass.
-    ///
-    ///  - `chains::vault::open_chain_vault_in_state` /
-    ///    `borrow_chain_vault_in_state` (F10): risk-INCREASING operations
-    ///    require this to be true. `Disabled` is the operator's post-launch
-    ///    emergency risk stop; it deliberately does NOT block exit paths
-    ///    (withdraw/close/repay), which read vault state directly and never
-    ///    call this.
-    ///  - `xrc::chain_is_xrc_managed` (F2): composes this with
-    ///    `chain_liquidation_configs` presence to decide whether the XRC
-    ///    price timer owns a (chain, symbol) pair.
-    pub fn chain_is_registered(&self, chain: ChainId) -> bool {
-        matches!(
-            self.chain_configs.get(&chain).map(|c| c.status),
-            Some(ChainStatus::Registered)
-        )
-    }
-
-    pub fn total_supply_all_chains_e8s(&self) -> u128 {
-        self.chain_supplies.values().copied().sum()
-    }
-
-    /// Sum of confirmed debt across all foreign-chain vaults (e8s). RHS term-1 of
-    /// the unified supply invariant (spec 5.2). NOTE: counts only REALIZED
-    /// `debt_e8s`, so `pending_interest_mint_e8s` (accrued-but-unconfirmed
-    /// interest) is deliberately excluded — it mints new supply only on confirm
-    /// and is not yet in `chain_supplies` (finding #1).
-    pub fn total_chain_vault_debt_e8s(&self) -> u128 {
-        self.chain_vaults.values().map(|v| v.debt_e8s).sum()
-    }
-
-    /// RHS term-2 of the unified supply invariant (spec 3.3, 5.2): total icUSD
-    /// whose backing shifted CFX->USDC reserve (bot/PSM path), summed across
-    /// chains. 0 until Increment 2 wires the bot liquidation path.
-    pub fn total_reserve_backing_e8s(&self) -> u128 {
-        self.reserve_backing_e8s.values().copied().sum()
-    }
-
-    /// RHS term-3 of the unified supply invariant (spec 3.3, 5.2): total icUSD the
-    /// SP burned IC-side but whose matching eSpace burn is not yet confirmed,
-    /// summed across chains. Populated once `stability_pool_liquidate_chain_vault`
-    /// (Increment 4, landed) absorbs a vault; 0 on a chain that never has.
-    pub fn total_pending_chain_burn_e8s(&self) -> u128 {
-        self.pending_chain_burn_e8s.values().copied().sum()
-    }
-
-    pub fn pending_chain_burn_aging(&self, now_ns: u64) -> Vec<PendingChainBurnAging> {
-        self.pending_chain_burn_e8s
-            .iter()
-            .filter_map(|(&chain_id, &pending_chain_burn_e8s)| {
-                if pending_chain_burn_e8s == 0 {
-                    return None;
-                }
-                let mut proof_count = 0u64;
-                let mut oldest_reference_ns: Option<u64> = None;
-                for record in self
-                    .settled_pending_burn_proofs
-                    .values()
-                    .filter(|record| record.chain_id == chain_id)
-                {
-                    proof_count = proof_count.saturating_add(1);
-                    oldest_reference_ns = Some(match oldest_reference_ns {
-                        Some(oldest) => oldest.min(record.recorded_at_ns),
-                        None => record.recorded_at_ns,
-                    });
-                }
-                let age_ns = oldest_reference_ns.map(|oldest| now_ns.saturating_sub(oldest));
-                Some(PendingChainBurnAging {
-                    chain_id,
-                    pending_chain_burn_e8s,
-                    oldest_reference_ns,
-                    age_ns,
-                    proof_count,
-                })
-            })
-            .collect()
-    }
-
-    pub fn chain_bad_debt_circuit_tripped(&self, chain: ChainId) -> bool {
-        self.chain_bad_debt_circuit_tripped_at_ns
-            .contains_key(&chain)
-    }
-
-    pub fn set_chain_bad_debt_circuit_threshold(
-        &mut self,
-        chain: ChainId,
-        threshold_e8s: Option<u128>,
-        now_ns: u64,
-    ) -> Result<(), String> {
-        match threshold_e8s {
-            Some(0) => Err("threshold must be > 0; use null/None to disable".to_string()),
-            Some(threshold) => {
-                self.chain_bad_debt_circuit_threshold_e8s
-                    .insert(chain, threshold);
-                let debt = self.chain_bad_debt_e8s.get(&chain).copied().unwrap_or(0);
-                if debt >= threshold {
-                    self.chain_bad_debt_circuit_tripped_at_ns
-                        .entry(chain)
-                        .or_insert(now_ns);
-                }
-                Ok(())
+macro_rules! impl_multi_chain_state_common {
+    ($state:ty) => {
+        impl $state {
+            /// De-scaffold pass (2026-08-20, security review F2/F10): whether `chain`
+            /// is currently `ChainStatus::Registered` (present in `chain_configs` AND
+            /// not `Disabled`). The single source of truth every vault-risk gate
+            /// (open/borrow, and the XRC-managed pricing predicate) reads, rather
+            /// than re-deriving its own `contains_key`/status match. Pre-existing
+            /// call sites like `main.rs::registered_chains_and_solana_flag` (the
+            /// observer/settlement fan-out) still inline their own equivalent
+            /// filter and were not migrated by this pass.
+            ///
+            ///  - `chains::vault::open_chain_vault_in_state` /
+            ///    `borrow_chain_vault_in_state` (F10): risk-INCREASING operations
+            ///    require this to be true. `Disabled` is the operator's post-launch
+            ///    emergency risk stop; it deliberately does NOT block exit paths
+            ///    (withdraw/close/repay), which read vault state directly and never
+            ///    call this.
+            ///  - `xrc::chain_is_xrc_managed` (F2): composes this with
+            ///    `chain_liquidation_configs` presence to decide whether the XRC
+            ///    price timer owns a (chain, symbol) pair.
+            pub fn chain_is_registered(&self, chain: ChainId) -> bool {
+                matches!(
+                    self.chain_configs.get(&chain).map(|c| c.status),
+                    Some(ChainStatus::Registered)
+                )
             }
-            None => {
-                self.chain_bad_debt_circuit_threshold_e8s.remove(&chain);
-                self.chain_bad_debt_circuit_tripped_at_ns.remove(&chain);
-                Ok(())
+
+            pub fn total_supply_all_chains_e8s(&self) -> u128 {
+                self.chain_supplies.values().copied().sum()
             }
-        }
-    }
 
-    pub fn clear_chain_bad_debt_circuit(&mut self, chain: ChainId) -> bool {
-        self.chain_bad_debt_circuit_tripped_at_ns
-            .remove(&chain)
-            .is_some()
-    }
+            /// Sum of confirmed debt across all foreign-chain vaults (e8s). RHS term-1 of
+            /// the unified supply invariant (spec 5.2). NOTE: counts only REALIZED
+            /// `debt_e8s`, so `pending_interest_mint_e8s` (accrued-but-unconfirmed
+            /// interest) is deliberately excluded — it mints new supply only on confirm
+            /// and is not yet in `chain_supplies` (finding #1).
+            pub fn total_chain_vault_debt_e8s(&self) -> u128 {
+                self.chain_vaults.values().map(|v| v.debt_e8s).sum()
+            }
 
-    /// Add realized bad debt and latch the per-chain circuit exactly once if the
-    /// post-add cumulative debt meets the configured threshold. Returns true only
-    /// on the transition from untripped -> tripped.
-    pub fn record_chain_bad_debt_and_maybe_trip(
-        &mut self,
-        chain: ChainId,
-        amount_e8s: u128,
-        now_ns: u64,
-    ) -> bool {
-        if amount_e8s == 0 {
-            return false;
-        }
-        let total = self
-            .chain_bad_debt_e8s
-            .entry(chain)
-            .and_modify(|v| *v = v.saturating_add(amount_e8s))
-            .or_insert(amount_e8s);
-        let Some(threshold) = self
-            .chain_bad_debt_circuit_threshold_e8s
-            .get(&chain)
-            .copied()
-        else {
-            return false;
-        };
-        if *total < threshold || self.chain_bad_debt_circuit_tripped(chain) {
-            return false;
-        }
-        self.chain_bad_debt_circuit_tripped_at_ns
-            .insert(chain, now_ns);
-        true
-    }
+            /// RHS term-2 of the unified supply invariant (spec 3.3, 5.2): total icUSD
+            /// whose backing shifted CFX->USDC reserve (bot/PSM path), summed across
+            /// chains. 0 until Increment 2 wires the bot liquidation path.
+            pub fn total_reserve_backing_e8s(&self) -> u128 {
+                self.reserve_backing_e8s.values().copied().sum()
+            }
 
-    /// True when a queued settlement op would increase protocol risk while the
-    /// chain's bad-debt circuit is tripped. Reconciliation and exposure-reducing
-    /// ops intentionally remain allowed.
-    pub fn bad_debt_circuit_blocks_settlement_op(
-        &self,
-        chain: ChainId,
-        kind: &SettlementOpKind,
-    ) -> bool {
-        if !self.chain_bad_debt_circuit_tripped(chain) {
-            return false;
-        }
-        match kind {
-            SettlementOpKind::Mint { .. } | SettlementOpKind::InterestMint { .. } => true,
-            SettlementOpKind::NativeWithdrawal { vault_id, .. } => self
-                .chain_vaults
-                .get(vault_id)
-                .map(|v| v.debt_e8s > 0)
-                .unwrap_or(true),
-            SettlementOpKind::Burn { .. }
-            | SettlementOpKind::LiquidationSwap { .. }
-            | SettlementOpKind::ChainCollateralPayout { .. } => false,
-        }
-    }
+            /// RHS term-3 of the unified supply invariant (spec 3.3, 5.2): total icUSD the
+            /// SP burned IC-side but whose matching eSpace burn is not yet confirmed,
+            /// summed across chains. Populated once `stability_pool_liquidate_chain_vault`
+            /// (Increment 4, landed) absorbs a vault; 0 on a chain that never has.
+            pub fn total_pending_chain_burn_e8s(&self) -> u128 {
+                self.pending_chain_burn_e8s.values().copied().sum()
+            }
 
-    /// True when a mint-like settlement op can still explain an on-chain supply
-    /// increase. Inflight mints always count because they may already have
-    /// landed. Queued mints count only when the bad-debt circuit would permit
-    /// submission; a circuit-blocked queued mint must not suppress burn catch-up.
-    pub fn has_supply_increasing_settlement_op(&self, chain: ChainId) -> bool {
-        self.settlement_queues
-            .get(&chain)
-            .map(|q| {
-                q.pending.values().any(|op| {
-                    matches!(
-                        op.kind,
-                        SettlementOpKind::Mint { .. } | SettlementOpKind::InterestMint { .. }
-                    ) && match op.status {
-                        SettlementOpStatus::Inflight { .. } => true,
-                        SettlementOpStatus::Queued => {
-                            !self.bad_debt_circuit_blocks_settlement_op(chain, &op.kind)
+            pub fn pending_chain_burn_aging(&self, now_ns: u64) -> Vec<PendingChainBurnAging> {
+                self.pending_chain_burn_e8s
+                    .iter()
+                    .filter_map(|(&chain_id, &pending_chain_burn_e8s)| {
+                        if pending_chain_burn_e8s == 0 {
+                            return None;
                         }
-                        SettlementOpStatus::Succeeded { .. }
-                        | SettlementOpStatus::Failed { .. } => false,
+                        let mut proof_count = 0u64;
+                        let mut oldest_reference_ns: Option<u64> = None;
+                        for record in self
+                            .settled_pending_burn_proofs
+                            .values()
+                            .filter(|record| record.chain_id == chain_id)
+                        {
+                            proof_count = proof_count.saturating_add(1);
+                            oldest_reference_ns = Some(match oldest_reference_ns {
+                                Some(oldest) => oldest.min(record.recorded_at_ns),
+                                None => record.recorded_at_ns,
+                            });
+                        }
+                        let age_ns =
+                            oldest_reference_ns.map(|oldest| now_ns.saturating_sub(oldest));
+                        Some(PendingChainBurnAging {
+                            chain_id,
+                            pending_chain_burn_e8s,
+                            oldest_reference_ns,
+                            age_ns,
+                            proof_count,
+                        })
+                    })
+                    .collect()
+            }
+
+            pub fn chain_bad_debt_circuit_tripped(&self, chain: ChainId) -> bool {
+                self.chain_bad_debt_circuit_tripped_at_ns
+                    .contains_key(&chain)
+            }
+
+            pub fn set_chain_bad_debt_circuit_threshold(
+                &mut self,
+                chain: ChainId,
+                threshold_e8s: Option<u128>,
+                now_ns: u64,
+            ) -> Result<(), String> {
+                match threshold_e8s {
+                    Some(0) => Err("threshold must be > 0; use null/None to disable".to_string()),
+                    Some(threshold) => {
+                        self.chain_bad_debt_circuit_threshold_e8s
+                            .insert(chain, threshold);
+                        let debt = self.chain_bad_debt_e8s.get(&chain).copied().unwrap_or(0);
+                        if debt >= threshold {
+                            self.chain_bad_debt_circuit_tripped_at_ns
+                                .entry(chain)
+                                .or_insert(now_ns);
+                        }
+                        Ok(())
                     }
-                })
-            })
-            .unwrap_or(false)
-    }
+                    None => {
+                        self.chain_bad_debt_circuit_threshold_e8s.remove(&chain);
+                        self.chain_bad_debt_circuit_tripped_at_ns.remove(&chain);
+                        Ok(())
+                    }
+                }
+            }
 
-    /// M2: the expected next EIP-712 nonce for a synthetic owner (0 if unseen).
-    pub fn expected_evm_nonce(&self, owner: &Principal) -> u64 {
-        self.evm_owner_nonces.get(owner).copied().unwrap_or(0)
-    }
+            pub fn clear_chain_bad_debt_circuit(&mut self, chain: ChainId) -> bool {
+                self.chain_bad_debt_circuit_tripped_at_ns
+                    .remove(&chain)
+                    .is_some()
+            }
 
-    /// M2: consume `nonce` for `owner`. Succeeds and bumps the counter iff
-    /// `nonce == expected`; else returns the expected value as `Err` (no mutation).
-    pub fn consume_evm_nonce(&mut self, owner: &Principal, nonce: u64) -> Result<(), u64> {
-        let expected = self.expected_evm_nonce(owner);
-        if nonce != expected {
-            return Err(expected);
+            /// Add realized bad debt and latch the per-chain circuit exactly once if the
+            /// post-add cumulative debt meets the configured threshold. Returns true only
+            /// on the transition from untripped -> tripped.
+            pub fn record_chain_bad_debt_and_maybe_trip(
+                &mut self,
+                chain: ChainId,
+                amount_e8s: u128,
+                now_ns: u64,
+            ) -> bool {
+                if amount_e8s == 0 {
+                    return false;
+                }
+                let total = self
+                    .chain_bad_debt_e8s
+                    .entry(chain)
+                    .and_modify(|v| *v = v.saturating_add(amount_e8s))
+                    .or_insert(amount_e8s);
+                let Some(threshold) = self
+                    .chain_bad_debt_circuit_threshold_e8s
+                    .get(&chain)
+                    .copied()
+                else {
+                    return false;
+                };
+                if *total < threshold || self.chain_bad_debt_circuit_tripped(chain) {
+                    return false;
+                }
+                self.chain_bad_debt_circuit_tripped_at_ns
+                    .insert(chain, now_ns);
+                true
+            }
+
+            /// True when a queued settlement op would increase protocol risk while the
+            /// chain's bad-debt circuit is tripped. Reconciliation and exposure-reducing
+            /// ops intentionally remain allowed.
+            pub fn bad_debt_circuit_blocks_settlement_op(
+                &self,
+                chain: ChainId,
+                kind: &SettlementOpKind,
+            ) -> bool {
+                if !self.chain_bad_debt_circuit_tripped(chain) {
+                    return false;
+                }
+                match kind {
+                    SettlementOpKind::Mint { .. } | SettlementOpKind::InterestMint { .. } => true,
+                    SettlementOpKind::NativeWithdrawal { vault_id, .. } => self
+                        .chain_vaults
+                        .get(vault_id)
+                        .map(|v| v.debt_e8s > 0)
+                        .unwrap_or(true),
+                    SettlementOpKind::Burn { .. }
+                    | SettlementOpKind::LiquidationSwap { .. }
+                    | SettlementOpKind::ChainCollateralPayout { .. } => false,
+                }
+            }
+
+            /// True when a mint-like settlement op can still explain an on-chain supply
+            /// increase. Inflight mints always count because they may already have
+            /// landed. Queued mints count only when the bad-debt circuit would permit
+            /// submission; a circuit-blocked queued mint must not suppress burn catch-up.
+            pub fn has_supply_increasing_settlement_op(&self, chain: ChainId) -> bool {
+                self.settlement_queues
+                    .get(&chain)
+                    .map(|q| {
+                        q.pending.values().any(|op| {
+                            matches!(
+                                op.kind,
+                                SettlementOpKind::Mint { .. }
+                                    | SettlementOpKind::InterestMint { .. }
+                            ) && match op.status {
+                                SettlementOpStatus::Inflight { .. } => true,
+                                SettlementOpStatus::Queued => {
+                                    !self.bad_debt_circuit_blocks_settlement_op(chain, &op.kind)
+                                }
+                                SettlementOpStatus::Succeeded { .. }
+                                | SettlementOpStatus::Failed { .. } => false,
+                            }
+                        })
+                    })
+                    .unwrap_or(false)
+            }
+
+            /// M2: the expected next EIP-712 nonce for a synthetic owner (0 if unseen).
+            pub fn expected_evm_nonce(&self, owner: &Principal) -> u64 {
+                self.evm_owner_nonces.get(owner).copied().unwrap_or(0)
+            }
+
+            /// M2: consume `nonce` for `owner`. Succeeds and bumps the counter iff
+            /// `nonce == expected`; else returns the expected value as `Err` (no mutation).
+            pub fn consume_evm_nonce(&mut self, owner: &Principal, nonce: u64) -> Result<(), u64> {
+                let expected = self.expected_evm_nonce(owner);
+                if nonce != expected {
+                    return Err(expected);
+                }
+                self.evm_owner_nonces
+                    .insert(*owner, expected.saturating_add(1));
+                Ok(())
+            }
+
+            /// M2 anti-spam: count NON-terminal vaults (everything but `Closed`) owned by
+            /// `owner` — the per-owner open cap.
+            pub fn count_owner_active_vaults(&self, owner: &Principal) -> usize {
+                use crate::chains::vault::ChainVaultStatus;
+                self.chain_vaults
+                    .values()
+                    .filter(|v| &v.owner == owner && v.status != ChainVaultStatus::Closed)
+                    .count()
+            }
+
+            /// Write a manual collateral price for `(chain, symbol)` and stamp the
+            /// wall-clock time of the write. Both maps are updated together so the
+            /// getter can never see a price without its freshness timestamp.
+            pub fn set_manual_price(
+                &mut self,
+                chain: ChainId,
+                symbol: String,
+                price_e8: u64,
+                now_ns: u64,
+            ) {
+                self.manual_prices.insert((chain, symbol.clone()), price_e8);
+                self.manual_price_set_at_ns.insert((chain, symbol), now_ns);
+            }
+
+            /// Read the manual collateral price for `(chain, symbol)` as
+            /// `(price_e8, set_at_ns)`. Returns `None` if no price is set. `set_at_ns` is
+            /// `0` for a price set before the V5 upgrade (timestamp not yet recorded).
+            pub fn get_manual_price(&self, chain: ChainId, symbol: &str) -> Option<(u64, u64)> {
+                let key = (chain, symbol.to_string());
+                let price = *self.manual_prices.get(&key)?;
+                let set_at = self.manual_price_set_at_ns.get(&key).copied().unwrap_or(0);
+                Some((price, set_at))
+            }
         }
-        self.evm_owner_nonces
-            .insert(*owner, expected.saturating_add(1));
-        Ok(())
-    }
-
-    /// M2 anti-spam: count NON-terminal vaults (everything but `Closed`) owned by
-    /// `owner` — the per-owner open cap.
-    pub fn count_owner_active_vaults(&self, owner: &Principal) -> usize {
-        use crate::chains::vault::ChainVaultStatus;
-        self.chain_vaults
-            .values()
-            .filter(|v| &v.owner == owner && v.status != ChainVaultStatus::Closed)
-            .count()
-    }
-
-    /// Write a manual collateral price for `(chain, symbol)` and stamp the
-    /// wall-clock time of the write. Both maps are updated together so the
-    /// getter can never see a price without its freshness timestamp.
-    pub fn set_manual_price(&mut self, chain: ChainId, symbol: String, price_e8: u64, now_ns: u64) {
-        self.manual_prices.insert((chain, symbol.clone()), price_e8);
-        self.manual_price_set_at_ns.insert((chain, symbol), now_ns);
-    }
-
-    /// Read the manual collateral price for `(chain, symbol)` as
-    /// `(price_e8, set_at_ns)`. Returns `None` if no price is set. `set_at_ns` is
-    /// `0` for a price set before the V5 upgrade (timestamp not yet recorded).
-    pub fn get_manual_price(&self, chain: ChainId, symbol: &str) -> Option<(u64, u64)> {
-        let key = (chain, symbol.to_string());
-        let price = *self.manual_prices.get(&key)?;
-        let set_at = self.manual_price_set_at_ns.get(&key).copied().unwrap_or(0);
-        Some((price, set_at))
-    }
+    };
 }
 
-pub type MultiChainState = MultiChainStateV6;
+impl_multi_chain_state_common!(MultiChainStateV6);
+
+/// Additive V7 stable-state root.
+///
+/// V6 remains byte-for-byte intact above. Every V6 field is repeated verbatim
+/// by name/type, and the two new maps use `serde(default)`, so ciborium decodes
+/// an old V6 root directly into V7 without a manual post-upgrade migration or
+/// an unbounded vault scan.
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, Default)]
+pub struct MultiChainStateV7 {
+    pub chain_configs: BTreeMap<ChainId, ChainConfigV3>,
+    pub chain_supplies: BTreeMap<ChainId, u128>,
+    pub settlement_queues: BTreeMap<ChainId, SettlementQueueV1>,
+    pub invariant_halted: bool,
+    #[serde(default)]
+    pub chain_vaults: BTreeMap<u64, ChainVaultV1>,
+    #[serde(default)]
+    pub chain_contracts: BTreeMap<ChainId, String>,
+    #[serde(default)]
+    pub manual_prices: BTreeMap<(ChainId, String), u64>,
+    #[serde(default)]
+    pub last_observed_block: BTreeMap<ChainId, u64>,
+    #[serde(default)]
+    pub hot_wallet_balance_e18: BTreeMap<ChainId, u128>,
+    #[serde(default)]
+    pub reorg_halted: BTreeMap<ChainId, bool>,
+    #[serde(default)]
+    pub reorg_suspect_streak: BTreeMap<ChainId, u32>,
+    #[serde(default)]
+    pub processed_burn_keys: BTreeMap<u64, BTreeSet<String>>,
+    #[serde(default)]
+    pub evm_owner_nonces: BTreeMap<Principal, u64>,
+    #[serde(default)]
+    pub manual_price_set_at_ns: BTreeMap<(ChainId, String), u64>,
+    #[serde(default)]
+    pub reserve_backing_e8s: BTreeMap<ChainId, u128>,
+    #[serde(default)]
+    pub reserve_usdc_native: BTreeMap<ChainId, u128>,
+    #[serde(default)]
+    pub pending_chain_burn_e8s: BTreeMap<ChainId, u128>,
+    #[serde(default)]
+    pub sp_attempted_chain_vaults: BTreeSet<u64>,
+    #[serde(default)]
+    pub chain_liquidation_claims: BTreeMap<u64, ChainLiqClaimV1>,
+    #[serde(default)]
+    pub chain_liquidation_configs: BTreeMap<ChainId, ChainLiquidationConfigV1>,
+    #[serde(default)]
+    pub chain_debt_configs: BTreeMap<ChainId, ChainDebtConfigV1>,
+    #[serde(default)]
+    pub bot_pending_chain_vaults: BTreeMap<u64, u64>,
+    #[serde(default)]
+    pub chain_bad_debt_e8s: BTreeMap<ChainId, u128>,
+    #[serde(default)]
+    pub settled_pending_burn_proofs: BTreeMap<String, SettlementProofRecord>,
+    #[serde(default)]
+    pub settled_reserve_burn_proofs: BTreeMap<String, SettlementProofRecord>,
+    #[serde(default)]
+    pub settled_settlement_burn_logs: BTreeSet<String>,
+    #[serde(default)]
+    pub settled_reserve_transfer_e8s: BTreeMap<String, u128>,
+    #[serde(default)]
+    pub chain_bad_debt_circuit_threshold_e8s: BTreeMap<ChainId, u128>,
+    #[serde(default)]
+    pub chain_bad_debt_circuit_tripped_at_ns: BTreeMap<ChainId, u64>,
+    /// Last global vault id examined by the bounded AwaitingDeposit observer for
+    /// each chain. Zero/absent means begin at the first global vault. The cursor
+    /// advances before RPC awaits and wraps only after reaching the map end.
+    #[serde(default)]
+    pub awaiting_deposit_cursor: BTreeMap<ChainId, u64>,
+    /// Wall-clock ns of the last successful settlement hot-wallet balance
+    /// refresh. An older snapshot has no timestamp and therefore fails the
+    /// public Conflux risk gate closed until a successful refresh.
+    #[serde(default)]
+    pub hot_wallet_balance_refreshed_at_ns: BTreeMap<ChainId, u64>,
+}
+
+impl_multi_chain_state_common!(MultiChainStateV7);
+
+pub type MultiChainState = MultiChainStateV7;
 
 #[cfg(test)]
 mod manual_price_tests {

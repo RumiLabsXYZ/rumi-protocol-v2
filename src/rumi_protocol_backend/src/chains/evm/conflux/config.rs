@@ -53,7 +53,8 @@ pub fn conflux_testnet_register_arg() -> RegisterChainArg {
         },
         chain_native_decimals: CFX_NATIVE_DECIMALS,
         // RELAXED to 1: all configured endpoints are Confura (one operator).
-        // Mainnet needs >= 3 independent providers (raise via set_chain_config).
+        // Mainnet readiness requires >=2 distinct endpoints and enforces an
+        // effective agreement of max(configured floor, strict majority).
         min_quorum_providers: Some(1),
     }
 }

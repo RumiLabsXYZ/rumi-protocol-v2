@@ -90,6 +90,30 @@ enum GasStrategy {
     NotApplicable,
 }
 
+#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+enum DexKind {
+    UniswapV2,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
+struct ChainLiquidationConfigV1 {
+    dex: DexKind,
+    router: String,
+    factory: String,
+    pair: String,
+    collateral_token: String,
+    settle_stable_token: String,
+    slippage_cap_bps: u16,
+    restore_target_cr_e4: u64,
+    enabled: bool,
+    max_swap_value_e8s: candid::Nat,
+    max_price_age_ns: u64,
+    max_dex_oracle_divergence_bps: u32,
+    fee_bps: u16,
+    settle_stable_decimals: u8,
+    deadline_secs: u64,
+}
+
 /// Mirror of the backend `RegisterChainArg`, INCLUDING `min_quorum_providers`
 /// (the field Conflux relies on: `Some(1)` lets a single mock provider satisfy
 /// the read quorum). `opt nat32` on the wire.
@@ -141,12 +165,45 @@ struct SupplyAuditWire {
     per_chain: Vec<SupplyAuditEntryWire>,
 }
 
+/// Narrow Candid projection of the consolidated launch query. Candid records
+/// support width subtyping, so the integration test decodes only the fields
+/// whose public boundary it needs to prove.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct ChainPublicLaunchStatusWire {
+    configured: bool,
+    registered: bool,
+    rpc_endpoint_count: u32,
+    rpc_effective_agreement_requirement: u32,
+    rpc_configuration_sufficient: bool,
+    bound_icusd_contract: Option<String>,
+    icusd_contract_matches_expected: bool,
+    effective_evm_rpc_principal: Principal,
+    evm_rpc_principal_matches_expected: bool,
+    chains_ecdsa_key_name: String,
+    chains_ecdsa_key_matches_expected: bool,
+    finality_depth: Option<u32>,
+    burn_cursor: u64,
+    min_cr_e4: Option<u64>,
+    liquidation_threshold_e4: Option<u64>,
+    liquidation_configured: bool,
+    public_open_ready: bool,
+    blocking_reasons: Vec<String>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct ChainHotWalletBalanceRefreshWire {
+    chain_id: ChainId,
+    balance_e18: candid::Nat,
+    refreshed_at_ns: u64,
+}
+
 /// Minimal mirror of `ProtocolError`: these chain endpoints only ever return the
 /// `ChainAdmin(text)` variant on the happy path. Any other variant fails the
 /// Candid decode loudly (the correct signal that something unexpected happened).
 #[derive(CandidType, Deserialize, Clone, Debug)]
 enum ProtocolError {
     ChainAdmin(String),
+    TemporarilyUnavailable(String),
     /// M2 self-serve rejection (bad nonce, wrong signer, etc.). The `_evm`
     /// methods return this; mirrored so the rejection-path asserts decode.
     EvmAuth(String),
@@ -166,6 +223,9 @@ fn mock_wasm() -> Vec<u8> {
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const CONFLUX_CHAIN_ID: u32 = 71;
+const CONFLUX_MAINNET_CHAIN_ID: u32 = 1030;
+const CONFLUX_MAINNET_FINALITY_DEPTH: u64 = 400;
+const OFFICIAL_EVM_RPC_PRINCIPAL: &str = "7hfb6-caaaa-aaaar-qadga-cai";
 const E18: u128 = 1_000_000_000_000_000_000;
 const E8: u128 = 100_000_000;
 /// keccak256("Mint(uint256,address,uint256)"), must match evm_rpc.rs.
@@ -174,6 +234,7 @@ const MINT_EVENT_TOPIC0: &str =
 /// keccak256("Burn(uint256,address,uint256)"), must match evm_rpc.rs.
 const BURN_EVENT_TOPIC0: &str =
     "0xe1b6e34006e9871307436c226f232f9c5e7690c1d2c4f4adda4f607a75a9beca";
+const GET_PAIR_SELECTOR: &str = "0xe6a43905";
 
 /// Conflux register arg's `finality_depth` (mirrors conflux_testnet_register_arg()).
 const CONFLUX_FINALITY_DEPTH: u64 = 100;
@@ -215,6 +276,69 @@ fn update_any(pic: &PocketIc, cid: Principal, method: &str, args: Vec<u8>) -> Wa
         .unwrap_or_else(|e| panic!("update {} failed: {}", method, e))
 }
 
+fn expected_evm_nonce(pic: &PocketIc, backend: Principal, chain: ChainId, owner: &str) -> u64 {
+    let reply = pic
+        .query_call(
+            backend,
+            Principal::anonymous(),
+            "get_expected_evm_nonce",
+            Encode!(&chain, &owner.to_string()).unwrap(),
+        )
+        .expect("get_expected_evm_nonce query");
+    match reply {
+        WasmResult::Reply(bytes) => Decode!(&bytes, Result<u64, ProtocolError>)
+            .expect("decode expected nonce")
+            .expect("expected nonce Ok"),
+        WasmResult::Reject(message) => panic!("get_expected_evm_nonce rejected: {message}"),
+    }
+}
+
+fn public_launch_status(
+    pic: &PocketIc,
+    backend: Principal,
+    chain: ChainId,
+) -> ChainPublicLaunchStatusWire {
+    let reply = pic
+        .query_call(
+            backend,
+            Principal::anonymous(),
+            "get_chain_public_launch_status",
+            Encode!(&chain).unwrap(),
+        )
+        .expect("get_chain_public_launch_status query");
+    match reply {
+        WasmResult::Reply(bytes) => {
+            Decode!(&bytes, ChainPublicLaunchStatusWire).expect("decode public launch status")
+        }
+        WasmResult::Reject(message) => {
+            panic!("get_chain_public_launch_status rejected: {message}")
+        }
+    }
+}
+
+fn liquidation_config(
+    pic: &PocketIc,
+    backend: Principal,
+    chain: ChainId,
+) -> Option<ChainLiquidationConfigV1> {
+    let reply = pic
+        .query_call(
+            backend,
+            Principal::anonymous(),
+            "get_chain_liquidation_config",
+            Encode!(&chain).unwrap(),
+        )
+        .expect("get_chain_liquidation_config query");
+    match reply {
+        WasmResult::Reply(bytes) => {
+            Decode!(&bytes, Option<ChainLiquidationConfigV1>).expect("decode liquidation config")
+        }
+        WasmResult::Reject(message) => {
+            panic!("get_chain_liquidation_config rejected: {message}")
+        }
+    }
+}
+
 fn decode_result(reply: WasmResult, method: &str) -> Result<(), ProtocolError> {
     match reply {
         WasmResult::Reply(b) => Decode!(&b, Result<(), ProtocolError>)
@@ -233,7 +357,13 @@ fn boot() -> (PocketIc, Principal, Principal) {
 
     let backend_id = pic.create_canister();
     pic.add_cycles(backend_id, 100_000_000_000_000);
-    let mock_id = pic.create_canister();
+    let mock_id = pic
+        .create_canister_with_id(
+            None,
+            None,
+            Principal::from_text(OFFICIAL_EVM_RPC_PRINCIPAL).expect("official EVM RPC principal"),
+        )
+        .expect("create source-matched mock at official EVM RPC principal");
     pic.add_cycles(mock_id, 100_000_000_000_000);
 
     let mgmt = Principal::from_text("aaaaa-aa").expect("mgmt principal");
@@ -254,15 +384,30 @@ fn boot() -> (PocketIc, Principal, Principal) {
         encode_args((init,)).expect("encode init"),
         None,
     );
-    pic.install_canister(mock_id, mock_wasm(), Encode!().expect("encode mock init"), None);
+    pic.install_canister(
+        mock_id,
+        mock_wasm(),
+        Encode!().expect("encode mock init"),
+        None,
+    );
 
     for _ in 0..5 {
         pic.tick();
     }
 
     // Pin observer + settlement cadence to 30s (code default is 300s).
-    let _ = update_dev(&pic, backend_id, "set_observer_tick_interval_secs", Encode!(&30u64).unwrap());
-    let _ = update_dev(&pic, backend_id, "set_settlement_tick_interval_secs", Encode!(&30u64).unwrap());
+    let _ = update_dev(
+        &pic,
+        backend_id,
+        "set_observer_tick_interval_secs",
+        Encode!(&30u64).unwrap(),
+    );
+    let _ = update_dev(
+        &pic,
+        backend_id,
+        "set_settlement_tick_interval_secs",
+        Encode!(&30u64).unwrap(),
+    );
 
     (pic, backend_id, mock_id)
 }
@@ -301,9 +446,16 @@ fn assert_supply(pic: &PocketIc, cid: Principal, expected_e8s: u128, step: &str)
         .per_chain
         .iter()
         .fold(candid::Nat::from(0u32), |acc, e| acc + e.supply_e8s.clone());
-    assert_eq!(audit.total_e8s, sum, "[{step}] audit total != sum(per_chain)");
+    assert_eq!(
+        audit.total_e8s, sum,
+        "[{step}] audit total != sum(per_chain)"
+    );
 
-    if let Some(conflux) = audit.per_chain.iter().find(|e| e.chain_id == CONFLUX_CHAIN_ID) {
+    if let Some(conflux) = audit
+        .per_chain
+        .iter()
+        .find(|e| e.chain_id == CONFLUX_CHAIN_ID)
+    {
         assert_eq!(
             conflux.supply_e8s,
             candid::Nat::from(expected_e8s),
@@ -319,7 +471,10 @@ fn word_u128(v: u128) -> String {
 }
 
 fn word_addr(addr: &str) -> String {
-    let raw = addr.strip_prefix("0x").or_else(|| addr.strip_prefix("0X")).unwrap_or(addr);
+    let raw = addr
+        .strip_prefix("0x")
+        .or_else(|| addr.strip_prefix("0X"))
+        .unwrap_or(addr);
     format!("0x{:0>64}", raw.to_lowercase())
 }
 
@@ -331,7 +486,12 @@ fn conflux_espace_happy_path_supply_invariant() {
 
     // ── Step 1: point the backend's EVM wrapper at the mock ──────────────────
     decode_result(
-        update_dev(&pic, backend, "set_evm_rpc_principal", Encode!(&mock).unwrap()),
+        update_dev(
+            &pic,
+            backend,
+            "set_evm_rpc_principal",
+            Encode!(&mock).unwrap(),
+        ),
         "set_evm_rpc_principal",
     )
     .expect("set_evm_rpc_principal");
@@ -339,8 +499,18 @@ fn conflux_espace_happy_path_supply_invariant() {
     // Conflux's backend getlogs_max_range is 1000; raise the mock's cap to match
     // so a 1000-block burn-watch chunk is NOT rejected. Also enable the eSpace
     // extra receipt fields so the receipt parser tolerance is exercised.
-    update_any(&pic, mock, "set_getlogs_max_range", Encode!(&1000u64).unwrap());
-    update_any(&pic, mock, "set_espace_receipt_fields", Encode!(&true).unwrap());
+    update_any(
+        &pic,
+        mock,
+        "set_getlogs_max_range",
+        Encode!(&1000u64).unwrap(),
+    );
+    update_any(
+        &pic,
+        mock,
+        "set_espace_receipt_fields",
+        Encode!(&true).unwrap(),
+    );
 
     // ── Step 2: register Conflux + contract + manual CFX price ───────────────
     // Use the SAME shape conflux_testnet_register_arg() produces: chain 71,
@@ -369,8 +539,11 @@ fn conflux_espace_happy_path_supply_invariant() {
             &pic,
             backend,
             "set_chain_contract",
-            Encode!(&ChainId(CONFLUX_CHAIN_ID), &"0x00000000000000000000000000000000cf1c0de5".to_string())
-                .unwrap(),
+            Encode!(
+                &ChainId(CONFLUX_CHAIN_ID),
+                &"0x00000000000000000000000000000000cf1c0de5".to_string()
+            )
+            .unwrap(),
         ),
         "set_chain_contract",
     )
@@ -382,7 +555,12 @@ fn conflux_espace_happy_path_supply_invariant() {
             &pic,
             backend,
             "set_manual_collateral_price",
-            Encode!(&ChainId(CONFLUX_CHAIN_ID), &"CFX".to_string(), &15_000_000u64).unwrap(),
+            Encode!(
+                &ChainId(CONFLUX_CHAIN_ID),
+                &"CFX".to_string(),
+                &15_000_000u64
+            )
+            .unwrap(),
         ),
         "set_manual_collateral_price",
     )
@@ -428,7 +606,12 @@ fn conflux_espace_happy_path_supply_invariant() {
     let cursor1 = seed + SCAN_WINDOW; // 1_001_024
     let head1 = cursor1 + CONFLUX_FINALITY_DEPTH + 24; // 1_001_148 (margin)
     update_any(&pic, mock, "set_blocks", Encode!(&head1, &head1).unwrap());
-    update_any(&pic, mock, "set_next_send_hash", Encode!(&"0xcfxmint1".to_string()).unwrap());
+    update_any(
+        &pic,
+        mock,
+        "set_next_send_hash",
+        Encode!(&"0xcfxmint1".to_string()).unwrap(),
+    );
 
     // ── ECDSA probe: decide full vs gated ────────────────────────────────────
     let settlement_addr = match update_dev(
@@ -501,15 +684,26 @@ fn conflux_espace_happy_path_supply_invariant() {
     };
 
     let v = get_vault(&pic, backend, vault_id).expect("vault exists after open");
-    assert_eq!(v.status, ChainVaultStatus::AwaitingDeposit, "open => AwaitingDeposit");
-    assert_eq!(v.debt_e8s, candid::Nat::from(0u32), "open => no confirmed debt");
+    assert_eq!(
+        v.status,
+        ChainVaultStatus::AwaitingDeposit,
+        "open => AwaitingDeposit"
+    );
+    assert_eq!(
+        v.debt_e8s,
+        candid::Nat::from(0u32),
+        "open => no confirmed debt"
+    );
     assert_eq!(
         v.pending_mint_e8s,
         candid::Nat::from(debt_e8s),
         "open => pending_mint carries intended mint"
     );
     let custody = v.custody_address.clone();
-    assert!(custody.starts_with("0x"), "custody address is 0x hex: {custody}");
+    assert!(
+        custody.starts_with("0x"),
+        "custody address is 0x hex: {custody}"
+    );
     assert_supply(&pic, backend, 0, "after open (AwaitingDeposit)");
 
     // ── Step 5: deposit lands; observer flips to MintPending + enqueues mint ─
@@ -546,7 +740,15 @@ fn conflux_espace_happy_path_supply_invariant() {
         "set_receipt",
         Encode!(&"0xcfxmint1".to_string(), &true, &cursor1).unwrap(),
     );
-    push_mint_log(&pic, mock, vault_id, &recipient, debt_e8s, "0xcfxmint1", cursor1);
+    push_mint_log(
+        &pic,
+        mock,
+        vault_id,
+        &recipient,
+        debt_e8s,
+        "0xcfxmint1",
+        cursor1,
+    );
 
     advance_and_tick(&pic, 4); // confirm (receipt mined + final, Mint log read)
 
@@ -557,7 +759,11 @@ fn conflux_espace_happy_path_supply_invariant() {
         candid::Nat::from(debt_e8s),
         "mint confirmed => debt = 100e8"
     );
-    assert_eq!(v.pending_mint_e8s, candid::Nat::from(0u32), "pending mint cleared on confirm");
+    assert_eq!(
+        v.pending_mint_e8s,
+        candid::Nat::from(0u32),
+        "pending mint cleared on confirm"
+    );
     // THE invariant flips from 0 to 100e8 exactly here.
     assert_supply(&pic, backend, 100 * E8, "after mint confirm (Open)");
 
@@ -571,12 +777,28 @@ fn conflux_espace_happy_path_supply_invariant() {
     let head2 = cursor2 + CONFLUX_FINALITY_DEPTH + 24;
     update_any(&pic, mock, "set_blocks", Encode!(&head2, &head2).unwrap());
     let burn1_block = cursor1 + 500; // within (cursor1, cursor2]
-    push_burn_log(&pic, mock, vault_id, &recipient, 40 * E8, "0xcfxburn1", burn1_block);
+    push_burn_log(
+        &pic,
+        mock,
+        vault_id,
+        &recipient,
+        40 * E8,
+        "0xcfxburn1",
+        burn1_block,
+    );
     advance_and_tick(&pic, 3);
 
     let v = get_vault(&pic, backend, vault_id).expect("vault after burn 40");
-    assert_eq!(v.debt_e8s, candid::Nat::from(60 * E8), "after burn40 => debt 60e8");
-    assert_eq!(v.status, ChainVaultStatus::Open, "partial burn keeps vault Open");
+    assert_eq!(
+        v.debt_e8s,
+        candid::Nat::from(60 * E8),
+        "after burn40 => debt 60e8"
+    );
+    assert_eq!(
+        v.status,
+        ChainVaultStatus::Open,
+        "partial burn keeps vault Open"
+    );
     assert_supply(&pic, backend, 60 * E8, "after burn 40e8");
 
     // ── Step 8: burn the remaining 60e8; debt + supply go to 0 ───────────────
@@ -584,15 +806,32 @@ fn conflux_espace_happy_path_supply_invariant() {
     let head3 = cursor3 + CONFLUX_FINALITY_DEPTH + 24;
     update_any(&pic, mock, "set_blocks", Encode!(&head3, &head3).unwrap());
     let burn2_block = cursor2 + 700; // within (cursor2, cursor3]
-    push_burn_log(&pic, mock, vault_id, &recipient, 60 * E8, "0xcfxburn2", burn2_block);
+    push_burn_log(
+        &pic,
+        mock,
+        vault_id,
+        &recipient,
+        60 * E8,
+        "0xcfxburn2",
+        burn2_block,
+    );
     advance_and_tick(&pic, 3);
 
     let v = get_vault(&pic, backend, vault_id).expect("vault after burn 60");
-    assert_eq!(v.debt_e8s, candid::Nat::from(0u32), "after burn60 => debt 0");
+    assert_eq!(
+        v.debt_e8s,
+        candid::Nat::from(0u32),
+        "after burn60 => debt 0"
+    );
     assert_supply(&pic, backend, 0, "after burn remaining 60e8");
 
     // ── Step 9: withdraw all collateral; vault Closing -> Closed ─────────────
-    update_any(&pic, mock, "set_next_send_hash", Encode!(&"0xcfxwd1".to_string()).unwrap());
+    update_any(
+        &pic,
+        mock,
+        "set_next_send_hash",
+        Encode!(&"0xcfxwd1".to_string()).unwrap(),
+    );
     let dest = "0x000000000000000000000000000000000000dead".to_string();
     decode_result(
         update_dev(
@@ -607,7 +846,11 @@ fn conflux_espace_happy_path_supply_invariant() {
 
     // Immediately after enqueue (before settlement confirms) the vault is Closing.
     let v = get_vault(&pic, backend, vault_id).expect("vault after withdraw enqueue");
-    assert_eq!(v.status, ChainVaultStatus::Closing, "withdraw all => Closing");
+    assert_eq!(
+        v.status,
+        ChainVaultStatus::Closing,
+        "withdraw all => Closing"
+    );
     assert_supply(&pic, backend, 0, "after withdraw enqueue (Closing)");
 
     // Settlement submits 0xcfxwd1 (auto-mined at head3, above the cursor); like
@@ -623,12 +866,20 @@ fn conflux_espace_happy_path_supply_invariant() {
     advance_and_tick(&pic, 4); // confirm
 
     let v = get_vault(&pic, backend, vault_id).expect("vault after withdraw confirm");
-    assert_eq!(v.status, ChainVaultStatus::Closed, "withdraw confirmed => Closed");
+    assert_eq!(
+        v.status,
+        ChainVaultStatus::Closed,
+        "withdraw confirmed => Closed"
+    );
 
     // ── Step 10: final invariant (supply 0, audit total 0) ───────────────────
     assert_supply(&pic, backend, 0, "final (Closed)");
     let audit: SupplyAuditWire = query_unit(&pic, backend, "get_supply_audit");
-    assert_eq!(audit.total_e8s, candid::Nat::from(0u32), "final audit total 0");
+    assert_eq!(
+        audit.total_e8s,
+        candid::Nat::from(0u32),
+        "final audit total 0"
+    );
 
     eprintln!("[conflux happy-path] FULL happy path PASSED: supply invariant held 0 -> 100e8 -> 60e8 -> 0 across open/deposit/mint/burn/withdraw/close on chain 71 (finality_depth=100, getlogs_max_range=1000, min_quorum_providers=1)");
 }
@@ -654,12 +905,27 @@ fn conflux_close_chain_vault_after_full_repay() {
     let (pic, backend, mock) = boot();
 
     decode_result(
-        update_dev(&pic, backend, "set_evm_rpc_principal", Encode!(&mock).unwrap()),
+        update_dev(
+            &pic,
+            backend,
+            "set_evm_rpc_principal",
+            Encode!(&mock).unwrap(),
+        ),
         "set_evm_rpc_principal",
     )
     .expect("set_evm_rpc_principal");
-    update_any(&pic, mock, "set_getlogs_max_range", Encode!(&1000u64).unwrap());
-    update_any(&pic, mock, "set_espace_receipt_fields", Encode!(&true).unwrap());
+    update_any(
+        &pic,
+        mock,
+        "set_getlogs_max_range",
+        Encode!(&1000u64).unwrap(),
+    );
+    update_any(
+        &pic,
+        mock,
+        "set_espace_receipt_fields",
+        Encode!(&true).unwrap(),
+    );
 
     let reg = RegisterChainArg {
         chain_id: ChainId(CONFLUX_CHAIN_ID),
@@ -683,8 +949,11 @@ fn conflux_close_chain_vault_after_full_repay() {
             &pic,
             backend,
             "set_chain_contract",
-            Encode!(&ChainId(CONFLUX_CHAIN_ID), &"0x00000000000000000000000000000000cf1c0de5".to_string())
-                .unwrap(),
+            Encode!(
+                &ChainId(CONFLUX_CHAIN_ID),
+                &"0x00000000000000000000000000000000cf1c0de5".to_string()
+            )
+            .unwrap(),
         ),
         "set_chain_contract",
     )
@@ -694,7 +963,12 @@ fn conflux_close_chain_vault_after_full_repay() {
             &pic,
             backend,
             "set_manual_collateral_price",
-            Encode!(&ChainId(CONFLUX_CHAIN_ID), &"CFX".to_string(), &15_000_000u64).unwrap(),
+            Encode!(
+                &ChainId(CONFLUX_CHAIN_ID),
+                &"CFX".to_string(),
+                &15_000_000u64
+            )
+            .unwrap(),
         ),
         "set_manual_collateral_price",
     )
@@ -725,7 +999,12 @@ fn conflux_close_chain_vault_after_full_repay() {
     let cursor1 = seed + SCAN_WINDOW;
     let head1 = cursor1 + CONFLUX_FINALITY_DEPTH + 24;
     update_any(&pic, mock, "set_blocks", Encode!(&head1, &head1).unwrap());
-    update_any(&pic, mock, "set_next_send_hash", Encode!(&"0xcfxmint2".to_string()).unwrap());
+    update_any(
+        &pic,
+        mock,
+        "set_next_send_hash",
+        Encode!(&"0xcfxmint2".to_string()).unwrap(),
+    );
 
     let settlement_addr = match update_dev(
         &pic,
@@ -791,30 +1070,63 @@ fn conflux_close_chain_vault_after_full_repay() {
         "set_receipt",
         Encode!(&"0xcfxmint2".to_string(), &true, &cursor1).unwrap(),
     );
-    push_mint_log(&pic, mock, vault_id, &recipient, debt_e8s, "0xcfxmint2", cursor1);
+    push_mint_log(
+        &pic,
+        mock,
+        vault_id,
+        &recipient,
+        debt_e8s,
+        "0xcfxmint2",
+        cursor1,
+    );
     advance_and_tick(&pic, 4); // mint confirm => Open, debt 100e8
 
     let v = get_vault(&pic, backend, vault_id).expect("vault after mint confirm");
     assert_eq!(v.status, ChainVaultStatus::Open, "mint confirmed => Open");
-    assert_eq!(v.debt_e8s, candid::Nat::from(debt_e8s), "mint confirmed => debt 100e8");
+    assert_eq!(
+        v.debt_e8s,
+        candid::Nat::from(debt_e8s),
+        "mint confirmed => debt 100e8"
+    );
 
     // Burn the FULL debt in one shot so the vault is debt-free before close.
     let cursor2 = cursor1 + SCAN_WINDOW;
     let head2 = cursor2 + CONFLUX_FINALITY_DEPTH + 24;
     update_any(&pic, mock, "set_blocks", Encode!(&head2, &head2).unwrap());
     let burn_block = cursor1 + 500;
-    push_burn_log(&pic, mock, vault_id, &recipient, debt_e8s, "0xcfxburnfull", burn_block);
+    push_burn_log(
+        &pic,
+        mock,
+        vault_id,
+        &recipient,
+        debt_e8s,
+        "0xcfxburnfull",
+        burn_block,
+    );
     advance_and_tick(&pic, 3);
 
     let v = get_vault(&pic, backend, vault_id).expect("vault after full burn");
-    assert_eq!(v.debt_e8s, candid::Nat::from(0u32), "after full burn => debt 0");
-    assert_eq!(v.status, ChainVaultStatus::Open, "debt-free vault stays Open until close");
+    assert_eq!(
+        v.debt_e8s,
+        candid::Nat::from(0u32),
+        "after full burn => debt 0"
+    );
+    assert_eq!(
+        v.status,
+        ChainVaultStatus::Open,
+        "debt-free vault stays Open until close"
+    );
 
     // ── THE regression: this call used to trap with "RefCell already mutably
     // borrowed" inside `mutate_state` before the `evm_vault_params_from_state`
     // fix. `update_dev` panics on a canister trap (via `UserError`), so a green
     // `.expect("close_chain_vault")` here IS the regression assertion.
-    update_any(&pic, mock, "set_next_send_hash", Encode!(&"0xcfxclose1".to_string()).unwrap());
+    update_any(
+        &pic,
+        mock,
+        "set_next_send_hash",
+        Encode!(&"0xcfxclose1".to_string()).unwrap(),
+    );
     let dest = "0x000000000000000000000000000000000000dead".to_string();
     decode_result(
         update_dev(
@@ -828,7 +1140,11 @@ fn conflux_close_chain_vault_after_full_repay() {
     .expect("close_chain_vault");
 
     let v = get_vault(&pic, backend, vault_id).expect("vault after close enqueue");
-    assert_eq!(v.status, ChainVaultStatus::Closing, "close on debt-free vault => Closing");
+    assert_eq!(
+        v.status,
+        ChainVaultStatus::Closing,
+        "close on debt-free vault => Closing"
+    );
 
     advance_and_tick(&pic, 1);
     update_any(
@@ -840,7 +1156,11 @@ fn conflux_close_chain_vault_after_full_repay() {
     advance_and_tick(&pic, 4);
 
     let v = get_vault(&pic, backend, vault_id).expect("vault after close confirm");
-    assert_eq!(v.status, ChainVaultStatus::Closed, "close confirmed => Closed");
+    assert_eq!(
+        v.status,
+        ChainVaultStatus::Closed,
+        "close confirmed => Closed"
+    );
     assert_supply(&pic, backend, 0, "final (Closed via close_chain_vault)");
 
     eprintln!("[conflux close_chain_vault] PASSED: close_chain_vault on a debt-free vault no longer traps on the nested STATE borrow; vault settled Open -> Closing -> Closed");
@@ -858,9 +1178,7 @@ fn get_vault(pic: &PocketIc, backend: Principal, vault_id: u64) -> Option<ChainV
         )
         .expect("get_chain_vault query");
     match reply {
-        WasmResult::Reply(b) => {
-            Decode!(&b, Option<ChainVaultV1>).expect("decode get_chain_vault")
-        }
+        WasmResult::Reply(b) => Decode!(&b, Option<ChainVaultV1>).expect("decode get_chain_vault"),
         WasmResult::Reject(msg) => panic!("get_chain_vault rejected: {msg}"),
     }
 }
@@ -927,6 +1245,7 @@ use rumi_protocol_backend::chains::evm::eip712::{
 };
 
 const EVM_CONTRACT: &str = "0x00000000000000000000000000000000cf1c0de5";
+const MAINNET_ICUSD_CONTRACT: &str = "0x8DdB0a13B26ed28912e4B8cCa99Bc3E8c66Df7Ff";
 
 /// The fixed scalar=1 secp256k1 signer + its canonical EVM address.
 fn evm_signer() -> (k256::ecdsa::SigningKey, String) {
@@ -934,7 +1253,10 @@ fn evm_signer() -> (k256::ecdsa::SigningKey, String) {
     let mut b = [0u8; 32];
     b[31] = 1;
     let sk = SigningKey::from_bytes(&b.into()).unwrap();
-    let pk = VerifyingKey::from(&sk).to_encoded_point(false).as_bytes().to_vec();
+    let pk = VerifyingKey::from(&sk)
+        .to_encoded_point(false)
+        .as_bytes()
+        .to_vec();
     let addr = rumi_protocol_backend::chains::evm::tecdsa::evm_address_from_pubkey(&pk).unwrap();
     (sk, addr)
 }
@@ -947,9 +1269,29 @@ fn make_intent(
     debt_e8s: u128,
     nonce: u64,
 ) -> VaultIntent {
+    make_intent_for(
+        CONFLUX_CHAIN_ID,
+        action,
+        owner,
+        vault_id,
+        collateral_wei,
+        debt_e8s,
+        nonce,
+    )
+}
+
+fn make_intent_for(
+    chain_id: u32,
+    action: IntentAction,
+    owner: &str,
+    vault_id: u64,
+    collateral_wei: u128,
+    debt_e8s: u128,
+    nonce: u64,
+) -> VaultIntent {
     VaultIntent {
         action: action.as_u8(),
-        chain_id: CONFLUX_CHAIN_ID as u64,
+        chain_id: chain_id as u64,
         owner: owner.to_string(),
         vault_id,
         collateral_wei,
@@ -962,9 +1304,13 @@ fn make_intent(
 
 /// Sign an intent for `EVM_CONTRACT` with the fixed key → 65-byte r||s||v sig.
 fn sign(sk: &k256::ecdsa::SigningKey, intent: &VaultIntent) -> Vec<u8> {
+    sign_for(sk, intent, EVM_CONTRACT)
+}
+
+fn sign_for(sk: &k256::ecdsa::SigningKey, intent: &VaultIntent, contract: &str) -> Vec<u8> {
     use k256::ecdsa::{RecoveryId, Signature};
     let digest = intent_digest(
-        &domain_separator(intent.chain_id, EVM_CONTRACT).unwrap(),
+        &domain_separator(intent.chain_id, contract).unwrap(),
         &intent_struct_hash(intent).unwrap(),
     );
     let (sig, rid): (Signature, RecoveryId) = sk.sign_prehash_recoverable(&digest).unwrap();
@@ -976,64 +1322,303 @@ fn sign(sk: &k256::ecdsa::SigningKey, intent: &VaultIntent) -> Vec<u8> {
 /// dev-gated register + config for Conflux (steps shared with the happy path).
 fn configure_conflux(pic: &PocketIc, backend: Principal, mock: Principal, seed: u64) {
     decode_result(
-        update_dev(pic, backend, "set_evm_rpc_principal", Encode!(&mock).unwrap()),
+        update_dev(
+            pic,
+            backend,
+            "set_evm_rpc_principal",
+            Encode!(&mock).unwrap(),
+        ),
         "set_evm_rpc_principal",
     )
     .expect("set_evm_rpc_principal");
-    update_any(pic, mock, "set_getlogs_max_range", Encode!(&1000u64).unwrap());
-    update_any(pic, mock, "set_espace_receipt_fields", Encode!(&true).unwrap());
+    update_any(
+        pic,
+        mock,
+        "set_getlogs_max_range",
+        Encode!(&1000u64).unwrap(),
+    );
+    update_any(
+        pic,
+        mock,
+        "set_espace_receipt_fields",
+        Encode!(&true).unwrap(),
+    );
     let reg = RegisterChainArg {
         chain_id: ChainId(CONFLUX_CHAIN_ID),
         display_name: "ConfluxESpaceTestnet".to_string(),
         rpc_endpoints: vec!["https://evmtestnet.confluxrpc.com".to_string()],
         finality_depth: CONFLUX_FINALITY_DEPTH as u32,
-        gas_strategy: GasStrategy::EvmEip1559 { max_priority_fee_gwei: 1, max_fee_gwei_ceiling: 100 },
+        gas_strategy: GasStrategy::EvmEip1559 {
+            max_priority_fee_gwei: 1,
+            max_fee_gwei_ceiling: 100,
+        },
         chain_native_decimals: 18,
         min_quorum_providers: Some(1),
     };
-    decode_result(update_dev(pic, backend, "register_chain", Encode!(&reg).unwrap()), "register_chain")
-        .expect("register_chain");
     decode_result(
-        update_dev(pic, backend, "set_chain_contract", Encode!(&ChainId(CONFLUX_CHAIN_ID), &EVM_CONTRACT.to_string()).unwrap()),
+        update_dev(pic, backend, "register_chain", Encode!(&reg).unwrap()),
+        "register_chain",
+    )
+    .expect("register_chain");
+    decode_result(
+        update_dev(
+            pic,
+            backend,
+            "set_chain_contract",
+            Encode!(&ChainId(CONFLUX_CHAIN_ID), &EVM_CONTRACT.to_string()).unwrap(),
+        ),
         "set_chain_contract",
     )
     .expect("set_chain_contract");
     decode_result(
-        update_dev(pic, backend, "set_manual_collateral_price", Encode!(&ChainId(CONFLUX_CHAIN_ID), &"CFX".to_string(), &15_000_000u64).unwrap()),
+        update_dev(
+            pic,
+            backend,
+            "set_manual_collateral_price",
+            Encode!(
+                &ChainId(CONFLUX_CHAIN_ID),
+                &"CFX".to_string(),
+                &15_000_000u64
+            )
+            .unwrap(),
+        ),
         "set_manual_collateral_price",
     )
     .expect("set_manual_collateral_price");
     decode_result(
-        update_dev(pic, backend, "set_last_observed_block", Encode!(&ChainId(CONFLUX_CHAIN_ID), &seed).unwrap()),
+        update_dev(
+            pic,
+            backend,
+            "set_last_observed_block",
+            Encode!(&ChainId(CONFLUX_CHAIN_ID), &seed).unwrap(),
+        ),
         "set_last_observed_block",
     )
     .expect("set_last_observed_block");
     decode_result(
-        update_dev(pic, backend, "set_burn_watch_poll_enabled", Encode!(&ChainId(CONFLUX_CHAIN_ID), &true).unwrap()),
+        update_dev(
+            pic,
+            backend,
+            "set_burn_watch_poll_enabled",
+            Encode!(&ChainId(CONFLUX_CHAIN_ID), &true).unwrap(),
+        ),
         "set_burn_watch_poll_enabled",
     )
     .expect("set_burn_watch_poll_enabled");
 }
 
+fn mainnet_liquidation_config() -> ChainLiquidationConfigV1 {
+    ChainLiquidationConfigV1 {
+        dex: DexKind::UniswapV2,
+        router: "0x62b0873055bf896dd869e172119871ac24aea305".into(),
+        factory: "0xe2a6f7c0ce4d5d300f97aa7e125455f5cd3342f5".into(),
+        pair: "0x0736b3384531cda2f545f5449e84c6c6bcd6f01b".into(),
+        collateral_token: "0x14b2d3bc65e74dae1030eafd8ac30c533c976a9b".into(),
+        settle_stable_token: "0x6963efed0ab40f6c3d7bda44a05dcf1437c44372".into(),
+        slippage_cap_bps: 250,
+        restore_target_cr_e4: 15_500,
+        enabled: true,
+        max_swap_value_e8s: candid::Nat::from(2_000u128 * E8),
+        max_price_age_ns: 1_800_000_000_000,
+        max_dex_oracle_divergence_bps: 500,
+        fee_bps: 25,
+        settle_stable_decimals: 18,
+        deadline_secs: 180,
+    }
+}
+
+fn configure_conflux_mainnet_closed(
+    pic: &PocketIc,
+    backend: Principal,
+    mock: Principal,
+    seed: u64,
+) {
+    decode_result(
+        update_dev(
+            pic,
+            backend,
+            "set_chains_ecdsa_key_name",
+            Encode!(&"key_1".to_string()).unwrap(),
+        ),
+        "set_chains_ecdsa_key_name",
+    )
+    .expect("select production key before EVM setup");
+    decode_result(
+        update_dev(
+            pic,
+            backend,
+            "set_evm_rpc_principal",
+            Encode!(&mock).unwrap(),
+        ),
+        "set_evm_rpc_principal",
+    )
+    .expect("set_evm_rpc_principal");
+    update_any(
+        pic,
+        mock,
+        "set_getlogs_max_range",
+        Encode!(&1000u64).unwrap(),
+    );
+    update_any(
+        pic,
+        mock,
+        "set_espace_receipt_fields",
+        Encode!(&true).unwrap(),
+    );
+
+    let reg = RegisterChainArg {
+        chain_id: ChainId(CONFLUX_MAINNET_CHAIN_ID),
+        display_name: "ConfluxESpaceMainnet".into(),
+        rpc_endpoints: vec![
+            "https://provider-a.invalid".into(),
+            "https://provider-b.invalid".into(),
+        ],
+        finality_depth: CONFLUX_MAINNET_FINALITY_DEPTH as u32,
+        gas_strategy: GasStrategy::EvmEip1559 {
+            max_priority_fee_gwei: 1,
+            max_fee_gwei_ceiling: 200,
+        },
+        chain_native_decimals: 18,
+        min_quorum_providers: Some(2),
+    };
+    decode_result(
+        update_dev(pic, backend, "register_chain", Encode!(&reg).unwrap()),
+        "register_chain",
+    )
+    .expect("register mainnet");
+    decode_result(
+        update_dev(
+            pic,
+            backend,
+            "set_chain_contract",
+            Encode!(
+                &ChainId(CONFLUX_MAINNET_CHAIN_ID),
+                &MAINNET_ICUSD_CONTRACT.to_string()
+            )
+            .unwrap(),
+        ),
+        "set_chain_contract",
+    )
+    .expect("bind reviewed mainnet IcUSD");
+    decode_result(
+        update_dev(
+            pic,
+            backend,
+            "set_manual_collateral_price",
+            Encode!(
+                &ChainId(CONFLUX_MAINNET_CHAIN_ID),
+                &"CFX".to_string(),
+                &15_000_000u64
+            )
+            .unwrap(),
+        ),
+        "set_manual_collateral_price",
+    )
+    .expect("set fresh CFX price");
+    decode_result(
+        update_dev(
+            pic,
+            backend,
+            "set_last_observed_block",
+            Encode!(&ChainId(CONFLUX_MAINNET_CHAIN_ID), &seed).unwrap(),
+        ),
+        "set_last_observed_block",
+    )
+    .expect("seed burn cursor");
+    decode_result(
+        update_dev(
+            pic,
+            backend,
+            "set_chain_bad_debt_circuit_threshold",
+            Encode!(&ChainId(CONFLUX_MAINNET_CHAIN_ID), &Some(10_000_000u128)).unwrap(),
+        ),
+        "set_chain_bad_debt_circuit_threshold",
+    )
+    .expect("configure bad-debt circuit");
+    decode_result(
+        update_dev(
+            pic,
+            backend,
+            "disable_chain",
+            Encode!(&ChainId(CONFLUX_MAINNET_CHAIN_ID)).unwrap(),
+        ),
+        "disable_chain",
+    )
+    .expect("close chain before liquidation staging");
+
+    let head = seed + SCAN_WINDOW + CONFLUX_MAINNET_FINALITY_DEPTH + 24;
+    update_any(pic, mock, "set_blocks", Encode!(&head, &head).unwrap());
+    update_any(
+        pic,
+        mock,
+        "set_eth_call_response",
+        Encode!(
+            &GET_PAIR_SELECTOR.to_string(),
+            &word_addr("0x0736b3384531cda2f545f5449e84c6c6bcd6f01b")
+        )
+        .unwrap(),
+    );
+    decode_result(
+        update_dev(
+            pic,
+            backend,
+            "set_chain_liquidation_config",
+            Encode!(
+                &ChainId(CONFLUX_MAINNET_CHAIN_ID),
+                &mainnet_liquidation_config()
+            )
+            .unwrap(),
+        ),
+        "set_chain_liquidation_config",
+    )
+    .expect("factory-validated liquidation config stages while Disabled");
+}
+
 /// Submit a signed intent as the ANONYMOUS caller; decode `Result<u64, _>`.
-fn open_evm(pic: &PocketIc, backend: Principal, intent: &VaultIntent, sig: &[u8]) -> Result<u64, ProtocolError> {
+fn open_evm(
+    pic: &PocketIc,
+    backend: Principal,
+    intent: &VaultIntent,
+    sig: &[u8],
+) -> Result<u64, ProtocolError> {
     match pic
-        .update_call(backend, Principal::anonymous(), "open_chain_vault_evm", Encode!(intent, &sig.to_vec()).unwrap())
+        .update_call(
+            backend,
+            Principal::anonymous(),
+            "open_chain_vault_evm",
+            Encode!(intent, &sig.to_vec()).unwrap(),
+        )
         .expect("open_chain_vault_evm call")
     {
         WasmResult::Reply(b) => Decode!(&b, Result<u64, ProtocolError>).expect("decode open_evm"),
-        WasmResult::Reject(msg) => panic!("open_chain_vault_evm rejected at transport (inspect_message?): {msg}"),
+        WasmResult::Reject(msg) => {
+            panic!("open_chain_vault_evm rejected at transport (inspect_message?): {msg}")
+        }
     }
 }
 
 /// Submit a signed borrow/withdraw/close intent as ANONYMOUS; decode `Result<(), _>`.
-fn unit_evm(pic: &PocketIc, backend: Principal, method: &str, intent: &VaultIntent, sig: &[u8]) -> Result<(), ProtocolError> {
+fn unit_evm(
+    pic: &PocketIc,
+    backend: Principal,
+    method: &str,
+    intent: &VaultIntent,
+    sig: &[u8],
+) -> Result<(), ProtocolError> {
     match pic
-        .update_call(backend, Principal::anonymous(), method, Encode!(intent, &sig.to_vec()).unwrap())
+        .update_call(
+            backend,
+            Principal::anonymous(),
+            method,
+            Encode!(intent, &sig.to_vec()).unwrap(),
+        )
         .unwrap_or_else(|e| panic!("{method} call failed: {e}"))
     {
-        WasmResult::Reply(b) => Decode!(&b, Result<(), ProtocolError>).unwrap_or_else(|e| panic!("decode {method}: {e}")),
-        WasmResult::Reject(msg) => panic!("{method} rejected at transport (inspect_message?): {msg}"),
+        WasmResult::Reply(b) => Decode!(&b, Result<(), ProtocolError>)
+            .unwrap_or_else(|e| panic!("decode {method}: {e}")),
+        WasmResult::Reject(msg) => {
+            panic!("{method} rejected at transport (inspect_message?): {msg}")
+        }
     }
 }
 
@@ -1045,6 +1630,28 @@ fn conflux_evm_self_serve_full_flow_and_rejections() {
     assert_supply(&pic, backend, 0, "after config");
 
     let (sk, owner) = evm_signer();
+    let launch = public_launch_status(&pic, backend, ChainId(CONFLUX_CHAIN_ID));
+    assert!(launch.configured);
+    assert!(launch.registered);
+    assert_eq!(launch.rpc_endpoint_count, 1);
+    assert_eq!(launch.rpc_effective_agreement_requirement, 1);
+    assert!(launch.rpc_configuration_sufficient);
+    assert_eq!(launch.bound_icusd_contract.as_deref(), Some(EVM_CONTRACT));
+    assert_eq!(launch.min_cr_e4, Some(15_000));
+    assert_eq!(launch.liquidation_threshold_e4, Some(13_300));
+    assert!(!launch.liquidation_configured);
+    assert!(!launch.public_open_ready);
+    assert_eq!(launch.finality_depth, Some(CONFLUX_FINALITY_DEPTH as u32));
+    assert_eq!(launch.burn_cursor, seed);
+    assert!(!launch.icusd_contract_matches_expected);
+    assert_eq!(
+        launch.blocking_reasons,
+        vec!["not_conflux_mainnet_public_chain"]
+    );
+    assert_eq!(
+        expected_evm_nonce(&pic, backend, ChainId(CONFLUX_CHAIN_ID), &owner),
+        0
+    );
     let synthetic = synthetic_owner(
         rumi_protocol_backend::chains::config::ChainId(CONFLUX_CHAIN_ID),
         &owner,
@@ -1055,10 +1662,20 @@ fn conflux_evm_self_serve_full_flow_and_rejections() {
     let cursor1 = seed + SCAN_WINDOW;
     let head1 = cursor1 + CONFLUX_FINALITY_DEPTH + 24;
     update_any(&pic, mock, "set_blocks", Encode!(&head1, &head1).unwrap());
-    update_any(&pic, mock, "set_next_send_hash", Encode!(&"0xevmmint1".to_string()).unwrap());
+    update_any(
+        &pic,
+        mock,
+        "set_next_send_hash",
+        Encode!(&"0xevmmint1".to_string()).unwrap(),
+    );
 
     // ECDSA probe — gated subset if PocketIC can't provision test_key_1.
-    let settlement_addr = match update_dev(&pic, backend, "get_chain_settlement_address", Encode!(&ChainId(CONFLUX_CHAIN_ID)).unwrap()) {
+    let settlement_addr = match update_dev(
+        &pic,
+        backend,
+        "get_chain_settlement_address",
+        Encode!(&ChainId(CONFLUX_CHAIN_ID)).unwrap(),
+    ) {
         WasmResult::Reply(b) => match Decode!(&b, Result<String, ProtocolError>) {
             Ok(Ok(addr)) => Some(addr),
             _ => None,
@@ -1068,17 +1685,27 @@ fn conflux_evm_self_serve_full_flow_and_rejections() {
     let settlement_addr = match settlement_addr {
         Some(a) => a,
         None => {
-            eprintln!("[evm self-serve] ECDSA unavailable; running gated subset (config + invariant 0)");
+            eprintln!(
+                "[evm self-serve] ECDSA unavailable; running gated subset (config + invariant 0)"
+            );
             // Even gated, a signed open must FAIL only at the derive (not auth):
             // verify the signature path is reached (returns an EvmAuth derive err).
             let intent = make_intent(IntentAction::Open, &owner, 0, 1_400 * E18, 100 * E8, 0);
             let sig = sign(&sk, &intent);
-            assert!(matches!(open_evm(&pic, backend, &intent, &sig), Err(ProtocolError::EvmAuth(_))));
+            assert!(matches!(
+                open_evm(&pic, backend, &intent, &sig),
+                Err(ProtocolError::EvmAuth(_))
+            ));
             assert_supply(&pic, backend, 0, "gated final");
             return;
         }
     };
-    update_any(&pic, mock, "set_balance", Encode!(&settlement_addr, &candid::Nat::from(1_000_000u128 * E18)).unwrap());
+    update_any(
+        &pic,
+        mock,
+        "set_balance",
+        Encode!(&settlement_addr, &candid::Nat::from(1_000_000u128 * E18)).unwrap(),
+    );
 
     // ── OPEN (anonymous, EIP-712 signed, nonce 0) ────────────────────────────
     // $240 backing: after the +50 icUSD borrow below (debt 150), CR = 240/150 =
@@ -1088,68 +1715,172 @@ fn conflux_evm_self_serve_full_flow_and_rejections() {
     let open_intent = make_intent(IntentAction::Open, &owner, 0, collateral, 100 * E8, 0);
     let open_sig = sign(&sk, &open_intent);
     let vault_id = open_evm(&pic, backend, &open_intent, &open_sig).expect("open_evm Ok");
+    assert_eq!(
+        expected_evm_nonce(&pic, backend, ChainId(CONFLUX_CHAIN_ID), &owner),
+        1
+    );
     let v = get_vault(&pic, backend, vault_id).expect("vault after open");
     assert_eq!(v.owner, synthetic, "vault owned by the synthetic principal");
-    assert_eq!(v.owner_evm.as_deref(), Some(owner.to_lowercase().as_str()), "owner_evm stamped");
+    assert_eq!(
+        v.owner_evm.as_deref(),
+        Some(owner.to_lowercase().as_str()),
+        "owner_evm stamped"
+    );
     assert_eq!(v.status, ChainVaultStatus::AwaitingDeposit);
-    assert_eq!(v.mint_recipient, owner.to_lowercase(), "mint recipient == owner");
+    assert_eq!(
+        v.mint_recipient,
+        owner.to_lowercase(),
+        "mint recipient == owner"
+    );
     let custody = v.custody_address.clone();
     assert_supply(&pic, backend, 0, "after open_evm");
 
     // ── deposit -> MintPending -> mint confirm (Open, supply 100e8) ──────────
-    update_any(&pic, mock, "set_balance", Encode!(&custody, &candid::Nat::from(collateral)).unwrap());
+    update_any(
+        &pic,
+        mock,
+        "set_balance",
+        Encode!(&custody, &candid::Nat::from(collateral)).unwrap(),
+    );
     advance_and_tick(&pic, 2);
-    assert_eq!(get_vault(&pic, backend, vault_id).unwrap().status, ChainVaultStatus::MintPending);
+    assert_eq!(
+        get_vault(&pic, backend, vault_id).unwrap().status,
+        ChainVaultStatus::MintPending
+    );
     advance_and_tick(&pic, 1); // submit
-    update_any(&pic, mock, "set_receipt", Encode!(&"0xevmmint1".to_string(), &true, &cursor1).unwrap());
-    push_mint_log(&pic, mock, vault_id, &owner, 100 * E8, "0xevmmint1", cursor1);
+    update_any(
+        &pic,
+        mock,
+        "set_receipt",
+        Encode!(&"0xevmmint1".to_string(), &true, &cursor1).unwrap(),
+    );
+    push_mint_log(
+        &pic,
+        mock,
+        vault_id,
+        &owner,
+        100 * E8,
+        "0xevmmint1",
+        cursor1,
+    );
     advance_and_tick(&pic, 4); // confirm
-    assert_eq!(get_vault(&pic, backend, vault_id).unwrap().status, ChainVaultStatus::Open);
+    assert_eq!(
+        get_vault(&pic, backend, vault_id).unwrap().status,
+        ChainVaultStatus::Open
+    );
     assert_supply(&pic, backend, 100 * E8, "after mint confirm");
 
     // ── BORROW (anonymous, nonce 1, +50e8) -> mint2 confirm (supply 150e8) ───
-    update_any(&pic, mock, "set_next_send_hash", Encode!(&"0xevmmint2".to_string()).unwrap());
+    update_any(
+        &pic,
+        mock,
+        "set_next_send_hash",
+        Encode!(&"0xevmmint2".to_string()).unwrap(),
+    );
     let borrow_intent = make_intent(IntentAction::Borrow, &owner, vault_id, 0, 50 * E8, 1);
     let borrow_sig = sign(&sk, &borrow_intent);
-    unit_evm(&pic, backend, "borrow_chain_vault_evm", &borrow_intent, &borrow_sig).expect("borrow_evm Ok");
+    unit_evm(
+        &pic,
+        backend,
+        "borrow_chain_vault_evm",
+        &borrow_intent,
+        &borrow_sig,
+    )
+    .expect("borrow_evm Ok");
+    assert_eq!(
+        expected_evm_nonce(&pic, backend, ChainId(CONFLUX_CHAIN_ID), &owner),
+        2
+    );
     advance_and_tick(&pic, 1); // submit mint2
-    // The settlement finality gate is `receipt_block <= observer cursor`; after
-    // mint1 the cursor sits at cursor1, so the borrow mint receipt+log must land
-    // at cursor1 too. This also puts a SECOND Mint log for this vault at cursor1,
-    // exercising the per-op confirm's exact-tx-hash match (the M2 change that lets
-    // a vault be minted to more than once).
-    update_any(&pic, mock, "set_receipt", Encode!(&"0xevmmint2".to_string(), &true, &cursor1).unwrap());
+                               // The settlement finality gate is `receipt_block <= observer cursor`; after
+                               // mint1 the cursor sits at cursor1, so the borrow mint receipt+log must land
+                               // at cursor1 too. This also puts a SECOND Mint log for this vault at cursor1,
+                               // exercising the per-op confirm's exact-tx-hash match (the M2 change that lets
+                               // a vault be minted to more than once).
+    update_any(
+        &pic,
+        mock,
+        "set_receipt",
+        Encode!(&"0xevmmint2".to_string(), &true, &cursor1).unwrap(),
+    );
     push_mint_log(&pic, mock, vault_id, &owner, 50 * E8, "0xevmmint2", cursor1);
     advance_and_tick(&pic, 4); // confirm mint2
     let v = get_vault(&pic, backend, vault_id).unwrap();
-    assert_eq!(v.debt_e8s, candid::Nat::from(150 * E8), "borrow confirmed => debt 150e8");
+    assert_eq!(
+        v.debt_e8s,
+        candid::Nat::from(150 * E8),
+        "borrow confirmed => debt 150e8"
+    );
     assert_supply(&pic, backend, 150 * E8, "after borrow mint confirm");
 
     // ── REPAY (burn full 150e8 on chain) -> debt 0, supply 0 ─────────────────
     let cursor2 = cursor1 + SCAN_WINDOW;
     let head2 = cursor2 + CONFLUX_FINALITY_DEPTH + 24;
     update_any(&pic, mock, "set_blocks", Encode!(&head2, &head2).unwrap());
-    push_burn_log(&pic, mock, vault_id, &owner, 150 * E8, "0xevmburn1", cursor1 + 500);
+    push_burn_log(
+        &pic,
+        mock,
+        vault_id,
+        &owner,
+        150 * E8,
+        "0xevmburn1",
+        cursor1 + 500,
+    );
     advance_and_tick(&pic, 3);
-    assert_eq!(get_vault(&pic, backend, vault_id).unwrap().debt_e8s, candid::Nat::from(0u32), "repaid => debt 0");
+    assert_eq!(
+        get_vault(&pic, backend, vault_id).unwrap().debt_e8s,
+        candid::Nat::from(0u32),
+        "repaid => debt 0"
+    );
     assert_supply(&pic, backend, 0, "after repay");
 
     // ── CLOSE (anonymous, nonce 2) -> Closing -> Closed ──────────────────────
-    update_any(&pic, mock, "set_next_send_hash", Encode!(&"0xevmwd1".to_string()).unwrap());
+    update_any(
+        &pic,
+        mock,
+        "set_next_send_hash",
+        Encode!(&"0xevmwd1".to_string()).unwrap(),
+    );
     let close_intent = make_intent(IntentAction::Close, &owner, vault_id, 0, 0, 2);
     let close_sig = sign(&sk, &close_intent);
-    unit_evm(&pic, backend, "close_chain_vault_evm", &close_intent, &close_sig).expect("close_evm Ok");
-    assert_eq!(get_vault(&pic, backend, vault_id).unwrap().status, ChainVaultStatus::Closing, "close => Closing");
+    unit_evm(
+        &pic,
+        backend,
+        "close_chain_vault_evm",
+        &close_intent,
+        &close_sig,
+    )
+    .expect("close_evm Ok");
+    assert_eq!(
+        expected_evm_nonce(&pic, backend, ChainId(CONFLUX_CHAIN_ID), &owner),
+        3
+    );
+    assert_eq!(
+        get_vault(&pic, backend, vault_id).unwrap().status,
+        ChainVaultStatus::Closing,
+        "close => Closing"
+    );
     advance_and_tick(&pic, 1); // submit withdrawal
-    update_any(&pic, mock, "set_receipt", Encode!(&"0xevmwd1".to_string(), &true, &cursor2).unwrap());
+    update_any(
+        &pic,
+        mock,
+        "set_receipt",
+        Encode!(&"0xevmwd1".to_string(), &true, &cursor2).unwrap(),
+    );
     advance_and_tick(&pic, 4); // confirm
-    assert_eq!(get_vault(&pic, backend, vault_id).unwrap().status, ChainVaultStatus::Closed, "close confirmed => Closed");
+    assert_eq!(
+        get_vault(&pic, backend, vault_id).unwrap().status,
+        ChainVaultStatus::Closed,
+        "close confirmed => Closed"
+    );
     assert_supply(&pic, backend, 0, "final (Closed)");
 
     // ── REJECTIONS ───────────────────────────────────────────────────────────
     // 1. Replay the original OPEN intent (nonce 0, already consumed) → bad nonce.
     match open_evm(&pic, backend, &open_intent, &open_sig) {
-        Err(ProtocolError::EvmAuth(m)) => assert!(m.contains("nonce"), "expected nonce error, got {m}"),
+        Err(ProtocolError::EvmAuth(m)) => {
+            assert!(m.contains("nonce"), "expected nonce error, got {m}")
+        }
         other => panic!("replayed open should fail with EvmAuth(nonce), got {other:?}"),
     }
     // 2. Wrong signer: a fresh OPEN intent (nonce 3) with a corrupted signature.
@@ -1162,6 +1893,398 @@ fn conflux_evm_self_serve_full_flow_and_rejections() {
     }
 
     eprintln!("[evm self-serve] FULL PASS: anonymous EIP-712 open/borrow/repay/close + replay/wrong-signer rejection on chain 71");
+}
+
+#[test]
+fn conflux_mainnet_public_risk_gate_is_authoritative_and_race_safe() {
+    let (pic, backend, mock) = boot();
+    let chain = ChainId(CONFLUX_MAINNET_CHAIN_ID);
+    let seed = 2_000_000u64;
+    let cursor1 = seed + SCAN_WINDOW;
+    configure_conflux_mainnet_closed(&pic, backend, mock, seed);
+
+    let staged = liquidation_config(&pic, backend, chain).expect("staged liquidation config");
+    assert!(
+        staged.enabled,
+        "enabled config may be staged while Disabled"
+    );
+    let wrong_rpc = Principal::from_slice(&[9; 29]);
+    match decode_result(
+        update_dev(
+            &pic,
+            backend,
+            "set_evm_rpc_principal",
+            Encode!(&wrong_rpc).unwrap(),
+        ),
+        "set_evm_rpc_principal after staging",
+    )
+    .expect_err("Disabled staged chain must make the RPC trust anchor immutable")
+    {
+        ProtocolError::ChainAdmin(message) => {
+            assert!(message.contains("any EVM rail setup"), "message={message}")
+        }
+        other => panic!("expected ChainAdmin immutability error, got {other:?}"),
+    }
+
+    let (sk, owner) = evm_signer();
+    let open0 = make_intent_for(
+        CONFLUX_MAINNET_CHAIN_ID,
+        IntentAction::Open,
+        &owner,
+        0,
+        1_600 * E18,
+        100 * E8,
+        0,
+    );
+    let open0_sig = sign_for(&sk, &open0, MAINNET_ICUSD_CONTRACT);
+    match open_evm(&pic, backend, &open0, &open0_sig)
+        .expect_err("Disabled chain must reject direct public Open")
+    {
+        ProtocolError::EvmAuth(message) => {
+            assert!(message.contains("chain_disabled"), "message={message}")
+        }
+        other => panic!("expected EvmAuth(chain_disabled), got {other:?}"),
+    }
+    assert_eq!(expected_evm_nonce(&pic, backend, chain, &owner), 0);
+
+    decode_result(
+        update_dev(&pic, backend, "enable_chain", Encode!(&chain).unwrap()),
+        "enable_chain",
+    )
+    .expect("enable after closed staging");
+    let status = public_launch_status(&pic, backend, chain);
+    assert_eq!(
+        status.finality_depth,
+        Some(CONFLUX_MAINNET_FINALITY_DEPTH as u32)
+    );
+    assert_eq!(status.burn_cursor, seed);
+    assert!(status.icusd_contract_matches_expected);
+    assert_eq!(
+        status.effective_evm_rpc_principal,
+        Principal::from_text(OFFICIAL_EVM_RPC_PRINCIPAL).unwrap()
+    );
+    assert!(status.evm_rpc_principal_matches_expected);
+    assert_eq!(status.chains_ecdsa_key_name, "key_1");
+    assert!(status.chains_ecdsa_key_matches_expected);
+    assert_eq!(
+        status.blocking_reasons,
+        vec![
+            "hot_wallet_balance_unknown",
+            "hot_wallet_balance_timestamp_unknown"
+        ]
+    );
+    match open_evm(&pic, backend, &open0, &open0_sig)
+        .expect_err("unknown hot-wallet balance must fail closed")
+    {
+        ProtocolError::TemporarilyUnavailable(message) => assert!(
+            message.contains("hot_wallet_balance_unknown"),
+            "message={message}"
+        ),
+        other => panic!("expected temporary hot-wallet refusal, got {other:?}"),
+    }
+    assert_eq!(expected_evm_nonce(&pic, backend, chain, &owner), 0);
+
+    let settlement_addr = match update_dev(
+        &pic,
+        backend,
+        "get_chain_settlement_address",
+        Encode!(&chain).unwrap(),
+    ) {
+        WasmResult::Reply(bytes) => Decode!(&bytes, Result<String, ProtocolError>)
+            .expect("decode settlement address")
+            .expect("source-matched PocketIC must provide tECDSA"),
+        WasmResult::Reject(message) => panic!("settlement address rejected: {message}"),
+    };
+    update_any(
+        &pic,
+        mock,
+        "set_balance",
+        Encode!(&settlement_addr, &candid::Nat::from(1_000_000u128 * E18)).unwrap(),
+    );
+
+    // The operator can prove gas solvency while the chain is still closed;
+    // this bounded refresh does not depend on an already-active settlement op.
+    decode_result(
+        update_dev(&pic, backend, "disable_chain", Encode!(&chain).unwrap()),
+        "disable_chain before hot-wallet preflight",
+    )
+    .expect("disable before hot-wallet preflight");
+    let refresh = match update_dev(
+        &pic,
+        backend,
+        "refresh_chain_hot_wallet_balance",
+        Encode!(&chain).unwrap(),
+    ) {
+        WasmResult::Reply(bytes) => {
+            Decode!(&bytes, Result<ChainHotWalletBalanceRefreshWire, ProtocolError>)
+                .expect("decode hot-wallet refresh")
+                .expect("refresh hot wallet while Disabled")
+        }
+        WasmResult::Reject(message) => panic!("hot-wallet refresh rejected: {message}"),
+    };
+    assert_eq!(refresh.chain_id, chain);
+    assert_eq!(refresh.balance_e18, candid::Nat::from(1_000_000u128 * E18));
+    assert!(refresh.refreshed_at_ns > 0);
+    assert_eq!(
+        public_launch_status(&pic, backend, chain).blocking_reasons,
+        vec!["chain_disabled"],
+        "preflight should clear gas blockers without opening the chain"
+    );
+    decode_result(
+        update_dev(&pic, backend, "enable_chain", Encode!(&chain).unwrap()),
+        "enable_chain after hot-wallet preflight",
+    )
+    .expect("enable after hot-wallet preflight");
+    let ready = public_launch_status(&pic, backend, chain);
+    assert!(
+        ready.public_open_ready,
+        "blockers={:?}",
+        ready.blocking_reasons
+    );
+
+    // The same nonce-0 Open that failed both closed gates now succeeds only
+    // after the shared backend predicate reports ready.
+    let public_vault_id =
+        open_evm(&pic, backend, &open0, &open0_sig).expect("ready Conflux mainnet public Open");
+    assert_eq!(expected_evm_nonce(&pic, backend, chain, &owner), 1);
+
+    update_any(
+        &pic,
+        mock,
+        "set_next_send_hash",
+        Encode!(&"0xpublicmint".to_string()).unwrap(),
+    );
+    let public_vault = get_vault(&pic, backend, public_vault_id).expect("public vault");
+    update_any(
+        &pic,
+        mock,
+        "set_balance",
+        Encode!(
+            &public_vault.custody_address,
+            &candid::Nat::from(1_600u128 * E18)
+        )
+        .unwrap(),
+    );
+    decode_result(
+        update_dev(&pic, backend, "disable_chain", Encode!(&chain).unwrap()),
+        "disable_chain after public deposit",
+    )
+    .expect("disable after public deposit");
+    advance_and_tick(&pic, 2);
+    assert_eq!(
+        get_vault(&pic, backend, public_vault_id)
+            .expect("public vault while observer disabled")
+            .status,
+        ChainVaultStatus::AwaitingDeposit,
+        "Disable must prevent a suspended observer continuation from moving AwaitingDeposit"
+    );
+    decode_result(
+        update_dev(&pic, backend, "enable_chain", Encode!(&chain).unwrap()),
+        "re-enable observer after degradation proof",
+    )
+    .expect("re-enable observer after degradation proof");
+    advance_and_tick(&pic, 2);
+    update_any(
+        &pic,
+        mock,
+        "set_receipt",
+        Encode!(&"0xpublicmint".to_string(), &true, &cursor1).unwrap(),
+    );
+    push_mint_log(
+        &pic,
+        mock,
+        public_vault_id,
+        &owner,
+        100 * E8,
+        "0xpublicmint",
+        cursor1,
+    );
+    advance_and_tick(&pic, 4);
+    assert_eq!(
+        get_vault(&pic, backend, public_vault_id)
+            .expect("public vault after mint")
+            .status,
+        ChainVaultStatus::Open
+    );
+
+    // A debt-bearing partial withdrawal is also risk-increasing. Disable must
+    // reject it before the shared owner nonce or collateral can change.
+    let withdraw = make_intent_for(
+        CONFLUX_MAINNET_CHAIN_ID,
+        IntentAction::WithdrawCollateral,
+        &owner,
+        public_vault_id,
+        E18,
+        0,
+        1,
+    );
+    let withdraw_sig = sign_for(&sk, &withdraw, MAINNET_ICUSD_CONTRACT);
+    let before_withdraw = get_vault(&pic, backend, public_vault_id).expect("vault before withdraw");
+    decode_result(
+        update_dev(&pic, backend, "disable_chain", Encode!(&chain).unwrap()),
+        "disable_chain before debt-bearing withdraw refusal",
+    )
+    .expect("disable before debt-bearing withdraw refusal");
+    match unit_evm(
+        &pic,
+        backend,
+        "withdraw_chain_collateral_evm",
+        &withdraw,
+        &withdraw_sig,
+    )
+    .expect_err("debt-bearing withdrawal must reject while Disabled")
+    {
+        ProtocolError::EvmAuth(message) => {
+            assert!(message.contains("chain_disabled"), "message={message}")
+        }
+        other => panic!("expected EvmAuth(chain_disabled), got {other:?}"),
+    }
+    let after_withdraw = get_vault(&pic, backend, public_vault_id).expect("vault after refusal");
+    assert_eq!(
+        after_withdraw.collateral_amount_e18,
+        before_withdraw.collateral_amount_e18
+    );
+    assert_eq!(expected_evm_nonce(&pic, backend, chain, &owner), 1);
+
+    let borrow = make_intent_for(
+        CONFLUX_MAINNET_CHAIN_ID,
+        IntentAction::Borrow,
+        &owner,
+        public_vault_id,
+        0,
+        10 * E8,
+        1,
+    );
+    let borrow_sig = sign_for(&sk, &borrow, MAINNET_ICUSD_CONTRACT);
+    match unit_evm(
+        &pic,
+        backend,
+        "borrow_chain_vault_evm",
+        &borrow,
+        &borrow_sig,
+    )
+    .expect_err("Borrow must reject while Disabled")
+    {
+        ProtocolError::EvmAuth(message) => {
+            assert!(message.contains("chain_disabled"), "message={message}")
+        }
+        other => panic!("expected EvmAuth(chain_disabled), got {other:?}"),
+    }
+    assert_eq!(expected_evm_nonce(&pic, backend, chain, &owner), 1);
+    assert_eq!(
+        get_vault(&pic, backend, public_vault_id)
+            .expect("public vault after refused Borrow")
+            .pending_mint_e8s,
+        candid::Nat::from(0u32),
+        "refused Borrow must not mutate pending debt"
+    );
+    decode_result(
+        update_dev(&pic, backend, "enable_chain", Encode!(&chain).unwrap()),
+        "enable_chain",
+    )
+    .expect("re-enable for Borrow pass");
+    unit_evm(
+        &pic,
+        backend,
+        "borrow_chain_vault_evm",
+        &borrow,
+        &borrow_sig,
+    )
+    .expect("ready mainnet Borrow");
+    assert_eq!(expected_evm_nonce(&pic, backend, chain, &owner), 2);
+    assert_eq!(
+        get_vault(&pic, backend, public_vault_id)
+            .expect("public vault after queued Borrow")
+            .pending_mint_e8s,
+        candid::Nat::from(10u128 * E8),
+        "Borrow must enqueue its mint before returning"
+    );
+    decode_result(
+        update_dev(&pic, backend, "disable_chain", Encode!(&chain).unwrap()),
+        "disable_chain after Borrow enqueue",
+    )
+    .expect("disable after Borrow enqueue");
+    advance_and_tick(&pic, 2);
+    assert_eq!(
+        get_vault(&pic, backend, public_vault_id)
+            .expect("public vault while Borrow mint disabled")
+            .pending_mint_e8s,
+        candid::Nat::from(10u128 * E8),
+        "queued Borrow mint must not sign, broadcast, or confirm while Disabled"
+    );
+    let active = match pic
+        .query_call(
+            backend,
+            Principal::anonymous(),
+            "chain_has_active_settlement_op",
+            Encode!(&chain).unwrap(),
+        )
+        .expect("chain_has_active_settlement_op query")
+    {
+        WasmResult::Reply(bytes) => Decode!(&bytes, bool).expect("decode active settlement"),
+        WasmResult::Reject(message) => panic!("active settlement query rejected: {message}"),
+    };
+    assert!(
+        active,
+        "Disabled queue entry must remain pending for a later retry"
+    );
+    decode_result(
+        update_dev(&pic, backend, "enable_chain", Encode!(&chain).unwrap()),
+        "re-enable after queued Borrow proof",
+    )
+    .expect("re-enable after queued Borrow proof");
+
+    // Deterministic post-await race: observe nonce spend while no new vault is
+    // inserted, advance wall time beyond the configured price-freshness limit
+    // without executing a message, then require the resumed Open to reject at
+    // the second authoritative check.
+    let raced_open = make_intent_for(
+        CONFLUX_MAINNET_CHAIN_ID,
+        IntentAction::Open,
+        &owner,
+        0,
+        1_600 * E18,
+        100 * E8,
+        2,
+    );
+    let raced_sig = sign_for(&sk, &raced_open, MAINNET_ICUSD_CONTRACT);
+    let message_id = pic
+        .submit_call(
+            backend,
+            Principal::anonymous(),
+            "open_chain_vault_evm",
+            Encode!(&raced_open, &raced_sig).unwrap(),
+        )
+        .expect("submit raced Open");
+    pic.tick();
+    assert_eq!(
+        expected_evm_nonce(&pic, backend, chain, &owner),
+        3,
+        "pre-await gate must spend the nonce before custody derivation"
+    );
+    assert!(
+        get_vault(&pic, backend, public_vault_id + 1).is_none(),
+        "raced Open must still be suspended before insertion"
+    );
+    pic.advance_time(Duration::from_secs(1_801));
+    let raced_result = pic.await_call(message_id).expect("await raced Open");
+    match raced_result {
+        WasmResult::Reply(bytes) => match Decode!(&bytes, Result<u64, ProtocolError>)
+            .expect("decode raced Open")
+            .expect_err("post-await gate must reject raced Open")
+        {
+            ProtocolError::TemporarilyUnavailable(message) => assert!(
+                message.contains("collateral_price_stale"),
+                "message={message}"
+            ),
+            other => panic!("expected temporary stale-price rejection, got {other:?}"),
+        },
+        WasmResult::Reject(message) => panic!("raced Open transport reject: {message}"),
+    }
+    assert!(
+        get_vault(&pic, backend, public_vault_id + 1).is_none(),
+        "post-await failure must not insert the reserved vault id"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1207,7 +2330,10 @@ fn solana_admin_endpoints_refuse_evm_owned_vault() {
         candid::Nat::from(0u128),
         "debt-free immediately after open (Design B: no confirmed debt pre-mint)"
     );
-    assert!(before.owner_evm.is_some(), "vault must be EVM-owned for this test");
+    assert!(
+        before.owner_evm.is_some(),
+        "vault must be EVM-owned for this test"
+    );
 
     // `withdraw_solana_collateral` must refuse, with ZERO state change.
     let withdraw_result = decode_result(
@@ -1226,17 +2352,28 @@ fn solana_admin_endpoints_refuse_evm_owned_vault() {
     );
     match withdraw_result {
         Err(ProtocolError::ChainAdmin(m)) => {
-            assert!(m.contains("EVM-owned"), "expected an EVM-owned refusal, got {m}")
+            assert!(
+                m.contains("EVM-owned"),
+                "expected an EVM-owned refusal, got {m}"
+            )
         }
-        other => panic!("withdraw_solana_collateral on an EVM-owned vault should refuse, got {other:?}"),
+        other => {
+            panic!("withdraw_solana_collateral on an EVM-owned vault should refuse, got {other:?}")
+        }
     }
     let after_withdraw = get_vault(&pic, backend, vault_id).expect("vault still present");
-    assert_eq!(after_withdraw.status, before.status, "withdraw refusal: status unchanged");
+    assert_eq!(
+        after_withdraw.status, before.status,
+        "withdraw refusal: status unchanged"
+    );
     assert_eq!(
         after_withdraw.collateral_amount_e18, before.collateral_amount_e18,
         "withdraw refusal: collateral unchanged"
     );
-    assert_eq!(after_withdraw.debt_e8s, before.debt_e8s, "withdraw refusal: debt unchanged");
+    assert_eq!(
+        after_withdraw.debt_e8s, before.debt_e8s,
+        "withdraw refusal: debt unchanged"
+    );
     assert_eq!(
         after_withdraw.custody_address, before.custody_address,
         "withdraw refusal: custody unchanged"
@@ -1254,17 +2391,26 @@ fn solana_admin_endpoints_refuse_evm_owned_vault() {
     );
     match close_result {
         Err(ProtocolError::ChainAdmin(m)) => {
-            assert!(m.contains("EVM-owned"), "expected an EVM-owned refusal, got {m}")
+            assert!(
+                m.contains("EVM-owned"),
+                "expected an EVM-owned refusal, got {m}"
+            )
         }
         other => panic!("close_solana_vault on an EVM-owned vault should refuse, got {other:?}"),
     }
     let after_close = get_vault(&pic, backend, vault_id).expect("vault still present");
-    assert_eq!(after_close.status, before.status, "close refusal: status unchanged");
+    assert_eq!(
+        after_close.status, before.status,
+        "close refusal: status unchanged"
+    );
     assert_eq!(
         after_close.collateral_amount_e18, before.collateral_amount_e18,
         "close refusal: collateral unchanged"
     );
-    assert_eq!(after_close.debt_e8s, before.debt_e8s, "close refusal: debt unchanged");
+    assert_eq!(
+        after_close.debt_e8s, before.debt_e8s,
+        "close refusal: debt unchanged"
+    );
 
     println!(
         "[solana admin parity] details: withdraw_solana_collateral + close_solana_vault both refuse an EVM-owned vault, zero state change"

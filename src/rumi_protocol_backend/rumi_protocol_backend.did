@@ -54,6 +54,11 @@ type ChainDebtConfigV1 = record {
   debt_ceiling_e8s : opt nat;
   min_vault_debt_e8s : nat;
 };
+type ChainHotWalletBalanceRefresh = record {
+  refreshed_at_ns : nat64;
+  chain_id : nat32;
+  balance_e18 : nat;
+};
 type ChainLiquidatableVault = record {
   sized_repay_e8s : nat;
   cr_e4 : nat64;
@@ -83,6 +88,60 @@ type ChainLiquidationConfigV1 = record {
   settle_stable_token : text;
   deadline_secs : nat64;
 };
+type ChainPublicLaunchStatus = record {
+  status : opt ChainStatus;
+  chains_ecdsa_key_matches_expected : bool;
+  liquidation_configured : bool;
+  expected_liquidation_config_digest : text;
+  chain_supply_e8s : nat;
+  hot_wallet_balance_e18 : opt nat;
+  liquidation_config_matches_expected : bool;
+  hot_wallet_min_balance_e18 : nat;
+  icusd_contract_matches_expected : bool;
+  rpc_endpoint_count : nat32;
+  rpc_min_quorum_providers : nat32;
+  rpc_effective_agreement_requirement : nat32;
+  bad_debt_threshold_e8s : opt nat;
+  finality_depth : opt nat32;
+  native_symbol : opt text;
+  public_open_ready : bool;
+  max_price_age_ns : opt nat64;
+  liquidation_config_digest : opt text;
+  bad_debt_e8s : nat;
+  collateral_price_age_ns : opt nat64;
+  effective_debt_config : opt ChainDebtConfigV1;
+  hot_wallet_balance_is_fresh : bool;
+  burn_cursor : nat64;
+  debt_config_matches_expected : bool;
+  hot_wallet_ready : opt bool;
+  min_cr_e4 : opt nat64;
+  chains_ecdsa_key_name : text;
+  liquidation_enabled : bool;
+  hot_wallet_balance_refreshed_at_ns : opt nat64;
+  bound_icusd_contract : opt text;
+  chain_id : nat32;
+  collateral_config_matches_expected : bool;
+  configured : bool;
+  chain_reserve_backing_e8s : nat;
+  invariant_halted : bool;
+  protocol_mode : Mode;
+  reorg_halted : bool;
+  blocking_reasons : vec text;
+  bad_debt_circuit_tripped : bool;
+  rpc_configuration_sufficient : bool;
+  liquidation_threshold_e4 : opt nat64;
+  collateral_price_e8 : opt nat64;
+  hot_wallet_balance_max_age_ns : nat64;
+  evm_rpc_principal_matches_expected : bool;
+  collateral_price_is_fresh : bool;
+  bad_debt_tripped_at_ns : opt nat64;
+  collateral_price_set_at_ns : opt nat64;
+  effective_evm_rpc_principal : principal;
+  chain_pending_burn_e8s : nat;
+  hot_wallet_balance_age_ns : opt nat64;
+  protocol_frozen : bool;
+  registered : bool;
+};
 type ChainReserveReport = record {
   recorded_supply_e8s : nat;
   onchain_usdc_balance_native : opt nat;
@@ -107,6 +166,7 @@ type ChainStabilityPoolLiquidationResult = record {
   chain_id : nat32;
   success : bool;
 };
+type ChainStatus = variant { Disabled; Registered };
 type ChainSupplyReconciliation = record {
   recorded_supply_e8s : nat;
   pending_chain_burn_e8s : nat;
@@ -118,6 +178,12 @@ type ChainSupplyReconciliation = record {
   in_flight_mint_e8s : nat;
   chain_id : nat32;
   onchain_total_supply_e8s : nat;
+};
+type ChainVaultPage = record {
+  done : bool;
+  vaults : vec ChainVaultV1;
+  scanned_count : nat16;
+  next_start_after : opt nat64;
 };
 type ChainVaultStatus = variant {
   MintPending;
@@ -1019,20 +1085,24 @@ type Result_14 = variant {
 };
 type Result_15 = variant { Ok : bool; Err : ProtocolError };
 type Result_16 = variant { Ok : ReserveRedemptionResult; Err : ProtocolError };
-type Result_17 = variant { Ok : RepayAndCloseSuccess; Err : ProtocolError };
-type Result_18 = variant { Ok : blob; Err : ProtocolError };
-type Result_19 = variant {
+type Result_17 = variant {
+  Ok : ChainHotWalletBalanceRefresh;
+  Err : ProtocolError;
+};
+type Result_18 = variant { Ok : RepayAndCloseSuccess; Err : ProtocolError };
+type Result_19 = variant { Ok : blob; Err : ProtocolError };
+type Result_2 = variant { Ok : text; Err : ProtocolError };
+type Result_20 = variant {
   Ok : StabilityPoolLiquidationResult;
   Err : ProtocolError;
 };
-type Result_2 = variant { Ok : text; Err : ProtocolError };
-type Result_20 = variant {
+type Result_21 = variant {
   Ok : ChainStabilityPoolLiquidationResult;
   Err : ProtocolError;
 };
-type Result_21 = variant { Ok : XrpSpAbsorbResult; Err : ProtocolError };
-type Result_22 = variant { Ok : XrpSpAbsorbPreflight; Err : ProtocolError };
-type Result_23 = variant { Ok : nat32; Err : ProtocolError };
+type Result_22 = variant { Ok : XrpSpAbsorbResult; Err : ProtocolError };
+type Result_23 = variant { Ok : XrpSpAbsorbPreflight; Err : ProtocolError };
+type Result_24 = variant { Ok : nat32; Err : ProtocolError };
 type Result_3 = variant {
   Ok : vec record { principal; text };
   Err : ProtocolError;
@@ -1284,6 +1354,7 @@ service : (ProtocolArg) -> {
   get_chain_liquidation_config : (nat32) -> (
       opt ChainLiquidationConfigV1,
     ) query;
+  get_chain_public_launch_status : (nat32) -> (ChainPublicLaunchStatus) query;
   get_chain_reserve_address : (nat32) -> (Result_2);
   get_chain_reserves : (nat32) -> (Result_7);
   get_chain_settlement_address : (nat32) -> (Result_2);
@@ -1312,6 +1383,7 @@ service : (ProtocolArg) -> {
       ForwardFilteredEventsResponse,
     ) query;
   get_evm_rpc_principal : () -> (EvmRpcPrincipalInfo) query;
+  get_expected_evm_nonce : (nat32, text) -> (Result_1) query;
   get_fees : (nat64) -> (Fees) query;
   get_fees_for_collateral : (principal, nat64) -> (Fees) query;
   get_global_icusd_mint_cap : () -> (nat64) query;
@@ -1394,6 +1466,7 @@ service : (ProtocolArg) -> {
   liquidate_vault_partial : (VaultArg) -> (Result_4);
   liquidate_vault_partial_with_stable : (VaultArgWithToken) -> (Result_4);
   list_chain_vaults : (nat32) -> (vec ChainVaultV1) query;
+  list_chain_vaults_page : (nat32, opt nat64, nat16) -> (ChainVaultPage) query;
   open_chain_vault : (nat32, nat, nat, text) -> (Result_1);
   open_chain_vault_evm : (VaultIntent, blob) -> (Result_1);
   open_solana_vault : (nat, nat, text) -> (Result_11);
@@ -1410,9 +1483,10 @@ service : (ProtocolArg) -> {
   redeem_collateral : (principal, nat64) -> (Result_4);
   redeem_icp : (nat64) -> (Result_4);
   redeem_reserves : (nat64, opt principal) -> (Result_16);
+  refresh_chain_hot_wallet_balance : (nat32) -> (Result_17);
   register_chain : (RegisterChainArg) -> (Result);
   register_xrp_collateral : () -> (Result);
-  repay_and_close_vault : (VaultArg) -> (Result_17);
+  repay_and_close_vault : (VaultArg) -> (Result_18);
   repay_to_vault : (VaultArg) -> (Result_1);
   repay_to_vault_with_stable : (VaultArgWithToken) -> (Result_1);
   reset_bot_budget : (nat64) -> (Result);
@@ -1518,26 +1592,26 @@ service : (ProtocolArg) -> {
   solana_get_balance : (text) -> (Result_1);
   solana_get_mint_supply : () -> (Result_1);
   solana_settlement_address : () -> (Result_2);
-  solana_sign_test_transfer : (text, nat64) -> (Result_18);
-  stability_pool_liquidate : (nat64, nat64) -> (Result_19);
+  solana_sign_test_transfer : (text, nat64) -> (Result_19);
+  stability_pool_liquidate : (nat64, nat64) -> (Result_20);
   stability_pool_liquidate_chain_vault : (nat64, nat64, SpWritedownProof) -> (
-      Result_20,
+      Result_21,
     );
   stability_pool_liquidate_debt_burned : (nat64, nat64, SpWritedownProof) -> (
-      Result_19,
+      Result_20,
     );
   stability_pool_liquidate_with_reserves : (nat64, nat64, nat64, principal) -> (
-      Result_19,
+      Result_20,
     );
-  stability_pool_liquidate_xrp_vault : (XrpSpAbsorbRequest) -> (Result_21);
+  stability_pool_liquidate_xrp_vault : (XrpSpAbsorbRequest) -> (Result_22);
   stability_pool_preflight_chain_absorb : (nat64, nat64) -> (Result);
-  stability_pool_preflight_xrp_absorb : (nat64, nat64) -> (Result_22);
+  stability_pool_preflight_xrp_absorb : (nat64, nat64) -> (Result_23);
   stability_pool_release_xrp_absorb_preflight : (nat64, nat64) -> (Result_15);
   stability_pool_settle_xrp_claim : (nat64, principal, text, opt nat32) -> (
       Result_2,
     );
   stability_pool_xrp_claim_outstanding : (nat64, principal) -> (Result_15);
-  submit_burn_proof : (nat32, text) -> (Result_23);
+  submit_burn_proof : (nat32, text) -> (Result_24);
   sweep_xrp_pending_open : (nat64) -> (Result);
   unfreeze_protocol : () -> (Result);
   update_collateral_config : (principal, CollateralConfig) -> (Result);

@@ -1,7 +1,7 @@
 use super::settlement::{
     claim_liquidation_swap_submit_in_state, confirm_interest_mint_in_state, confirm_mint_in_state,
-    exact_native_transfer_is_funded, fundable_withdrawal_value, select_next_op,
-    select_next_op_with_submit_filter, ClaimLiquidationSwapSubmitError, OpAction,
+    exact_native_transfer_is_funded, fundable_withdrawal_value, requires_public_mint_gate,
+    select_next_op, select_next_op_with_submit_filter, ClaimLiquidationSwapSubmitError, OpAction,
 };
 use crate::chains::config::ChainId;
 use crate::chains::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
@@ -29,6 +29,29 @@ fn vault_pending(s: &mut MultiChainState, vault_id: u64, pending: u128) {
             pending_liquidation: None,
         },
     );
+}
+
+#[test]
+fn public_mint_gate_covers_open_borrow_and_interest_mints_only() {
+    assert!(requires_public_mint_gate(&SettlementOpKind::Mint {
+        recipient: "0xr".into(),
+        amount_e8s: 1,
+        vault_id: 1,
+    }));
+    assert!(requires_public_mint_gate(&SettlementOpKind::InterestMint {
+        vault_id: 1,
+        mint_id: 2,
+        amount_e8s: 1,
+        accrual_through_ns: 3,
+        recipient: "0xr".into(),
+    }));
+    assert!(!requires_public_mint_gate(
+        &SettlementOpKind::NativeWithdrawal {
+            recipient: "0xr".into(),
+            amount_e18: 1,
+            vault_id: 1,
+        }
+    ));
 }
 
 #[test]

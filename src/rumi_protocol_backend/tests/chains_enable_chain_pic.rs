@@ -148,7 +148,7 @@ enum ProtocolError {
 }
 
 const CFX_MAINNET: ChainId = ChainId(1030);
-const EVM_CONTRACT: &str = "0x00000000000000000000000000000000cf1c0de5";
+const EVM_CONTRACT: &str = "0x8DdB0a13B26ed28912e4B8cCa99Bc3E8c66Df7Ff";
 const E18: u128 = 1_000_000_000_000_000_000;
 const E8: u128 = 100_000_000;
 
@@ -181,7 +181,12 @@ fn boot() -> (PocketIc, Principal) {
         ckusdt_ledger_principal: None,
         ckusdc_ledger_principal: None,
     });
-    pic.install_canister(cid, backend_wasm(), encode_args((init,)).expect("encode init"), None);
+    pic.install_canister(
+        cid,
+        backend_wasm(),
+        encode_args((init,)).expect("encode init"),
+        None,
+    );
     for _ in 0..5 {
         pic.tick();
     }
@@ -199,9 +204,8 @@ fn call_unit(
         .update_call(cid, sender, method, args)
         .unwrap_or_else(|e| panic!("{method} call: {e:?}"));
     match reply {
-        WasmResult::Reply(b) => {
-            Decode!(&b, Result<(), ProtocolError>).unwrap_or_else(|e| panic!("decode {method}: {e}"))
-        }
+        WasmResult::Reply(b) => Decode!(&b, Result<(), ProtocolError>)
+            .unwrap_or_else(|e| panic!("decode {method}: {e}")),
         WasmResult::Reject(msg) => panic!("{method} rejected at transport: {msg}"),
     }
 }
@@ -212,7 +216,13 @@ fn dev_unit(pic: &PocketIc, cid: Principal, method: &str, args: Vec<u8>) {
 }
 
 fn enable_chain(pic: &PocketIc, cid: Principal, sender: Principal) -> Result<(), ProtocolError> {
-    call_unit(pic, cid, sender, "enable_chain", encode_one(CFX_MAINNET).unwrap())
+    call_unit(
+        pic,
+        cid,
+        sender,
+        "enable_chain",
+        encode_one(CFX_MAINNET).unwrap(),
+    )
 }
 
 fn disable_chain(pic: &PocketIc, cid: Principal) {
@@ -223,7 +233,10 @@ fn register_chain(pic: &PocketIc, cid: Principal) {
     let arg = RegisterChainArg {
         chain_id: CFX_MAINNET,
         display_name: "Conflux mainnet".to_string(),
-        rpc_endpoints: vec!["https://evm.confluxrpc.com".to_string()],
+        rpc_endpoints: vec![
+            "https://evm.confluxrpc.com".to_string(),
+            "https://evm.confluxrpc.org".to_string(),
+        ],
         finality_depth: 400,
         gas_strategy: GasStrategy::EvmEip1559 {
             max_priority_fee_gwei: 1,
@@ -247,7 +260,12 @@ fn set_price(pic: &PocketIc, cid: Principal, price_e8: u64) {
 fn get_price(pic: &PocketIc, cid: Principal) -> Option<ManualPriceInfo> {
     let args = encode_args((CFX_MAINNET, "CFX".to_string())).unwrap();
     match pic
-        .query_call(cid, Principal::anonymous(), "get_manual_collateral_price", args)
+        .query_call(
+            cid,
+            Principal::anonymous(),
+            "get_manual_collateral_price",
+            args,
+        )
         .expect("get_manual_collateral_price")
     {
         WasmResult::Reply(b) => Decode!(&b, Option<ManualPriceInfo>).expect("decode price"),
@@ -294,7 +312,10 @@ fn evm_signer() -> (k256::ecdsa::SigningKey, String) {
     let mut b = [0u8; 32];
     b[31] = 1;
     let sk = SigningKey::from_bytes(&b.into()).unwrap();
-    let pk = VerifyingKey::from(&sk).to_encoded_point(false).as_bytes().to_vec();
+    let pk = VerifyingKey::from(&sk)
+        .to_encoded_point(false)
+        .as_bytes()
+        .to_vec();
     let addr = rumi_protocol_backend::chains::evm::tecdsa::evm_address_from_pubkey(&pk).unwrap();
     (sk, addr)
 }
@@ -347,9 +368,9 @@ fn open_evm(
     }
 }
 
-/// Full launch-shaped setup: registered, contract bound (the actual public-open
-/// gate), and a fresh native price. No liquidation config row, so the pair
-/// stays manually priceable and this suite needs no XRC mock.
+/// Partial launch setup used by the enable/disable tests. It deliberately omits
+/// liquidation, breaker, cursor, and hot-wallet readiness, so the authoritative
+/// public-risk predicate stays closed even while Registered.
 fn configure_launch_ready(pic: &PocketIc, cid: Principal) {
     register_chain(pic, cid);
     dev_unit(
@@ -486,8 +507,8 @@ fn a_signed_open_against_a_disabled_chain_does_not_consume_the_nonce() {
     let sig = sign(&sk, &intent);
     match open_evm(&pic, cid, &intent, &sig).expect_err("a disabled chain must refuse an open") {
         ProtocolError::EvmAuth(msg) => assert!(
-            msg.contains("ChainDisabled"),
-            "expected the ChainDisabled rejection, got: {msg}"
+            msg.contains("chain_disabled"),
+            "expected the authoritative chain_disabled rejection, got: {msg}"
         ),
         other => panic!("expected EvmAuth(ChainDisabled), got {other:?}"),
     }
@@ -506,10 +527,9 @@ fn a_signed_open_against_a_disabled_chain_does_not_consume_the_nonce() {
                 "the refused open must NOT have spent the caller's nonce, got: {msg}"
             );
             assert!(
-                msg.contains("derive"),
-                "the only acceptable remaining failure here is the tECDSA derive, got: {msg}"
+                msg.contains("public risk gate blocked"),
+                "the partial setup must remain fail-closed after enable, got: {msg}"
             );
-            eprintln!("[enable_chain] ECDSA unavailable; nonce-preservation proven by the absence of a nonce error");
         }
         other => panic!("unexpected open result: {other:?}"),
     }
@@ -527,8 +547,8 @@ fn risk_operations_are_restored_only_after_enable() {
     let before_sig = sign(&sk, &before);
     if let Err(ProtocolError::EvmAuth(msg)) = open_evm(&pic, cid, &before, &before_sig) {
         assert!(
-            !msg.contains("ChainDisabled"),
-            "a Registered chain must not raise ChainDisabled, got: {msg}"
+            !msg.contains("chain_disabled"),
+            "a Registered chain must not raise chain_disabled, got: {msg}"
         );
     }
 
@@ -542,8 +562,8 @@ fn risk_operations_are_restored_only_after_enable() {
             .expect_err("a disabled chain refuses every open, at any nonce")
         {
             ProtocolError::EvmAuth(msg) => assert!(
-                msg.contains("ChainDisabled"),
-                "nonce {nonce}: expected ChainDisabled, got {msg}"
+                msg.contains("chain_disabled"),
+                "nonce {nonce}: expected chain_disabled, got {msg}"
             ),
             other => panic!("nonce {nonce}: expected EvmAuth, got {other:?}"),
         }
@@ -553,13 +573,16 @@ fn risk_operations_are_restored_only_after_enable() {
     // has to hold: this chain has no liquidation config row, so no staleness
     // ceiling applies and the price set at configuration time is still valid.
     enable_chain(&pic, cid, developer()).expect("enable");
-    assert!(get_price(&pic, cid).is_some(), "the price prerequisite is in place");
+    assert!(
+        get_price(&pic, cid).is_some(),
+        "the price prerequisite is in place"
+    );
 
     let after = open_intent(&owner, 1_600 * E18, 100 * E8, 0);
     let after_sig = sign(&sk, &after);
     if let Err(ProtocolError::EvmAuth(msg)) = open_evm(&pic, cid, &after, &after_sig) {
         assert!(
-            !msg.contains("ChainDisabled"),
+            !msg.contains("chain_disabled"),
             "the status gate must be reopened after enable, got: {msg}"
         );
     }
@@ -569,7 +592,7 @@ fn risk_operations_are_restored_only_after_enable() {
     let again = open_intent(&owner, 1_600 * E18, 100 * E8, 1);
     let again_sig = sign(&sk, &again);
     match open_evm(&pic, cid, &again, &again_sig).expect_err("disabled again") {
-        ProtocolError::EvmAuth(msg) => assert!(msg.contains("ChainDisabled"), "msg={msg}"),
-        other => panic!("expected EvmAuth(ChainDisabled), got {other:?}"),
+        ProtocolError::EvmAuth(msg) => assert!(msg.contains("chain_disabled"), "msg={msg}"),
+        other => panic!("expected EvmAuth(chain_disabled), got {other:?}"),
     }
 }
