@@ -31,6 +31,9 @@ pub const CONFLUX_MAINNET_EXPECTED_EVM_RPC_PRINCIPAL_TEXT: &str = "7hfb6-caaaa-a
 pub const CONFLUX_MAINNET_EXPECTED_ECDSA_KEY_NAME: &str = "key_1";
 pub const CONFLUX_MAINNET_PUBLIC_MIN_DEBT_E8S: u128 = 10_000_000;
 pub const CONFLUX_MAINNET_PUBLIC_DEBT_CEILING_E8S: u128 = 50_000_000_000;
+/// Reviewed chain-1030 launch threshold: trip the circuit once cumulative
+/// realized bad debt reaches one minimum-size vault debt (0.10 icUSD).
+pub const CONFLUX_MAINNET_BAD_DEBT_CIRCUIT_THRESHOLD_E8S: u128 = 10_000_000;
 
 // Reviewed Swappi V2 WCFX/USDC route. Router/factory are from Swappi's public
 // contract registry; the pair is the factory's on-chain getPair(WCFX, USDC)
@@ -331,15 +334,17 @@ pub fn conflux_mainnet_public_risk_blockers(
     {
         blockers.push("reorg_halted");
     }
-    if state
+    match state
         .multi_chain
         .chain_bad_debt_circuit_threshold_e8s
         .get(&chain)
         .copied()
-        .unwrap_or(0)
-        == 0
     {
-        blockers.push("bad_debt_circuit_not_configured");
+        None | Some(0) => blockers.push("bad_debt_circuit_not_configured"),
+        Some(threshold) if threshold != CONFLUX_MAINNET_BAD_DEBT_CIRCUIT_THRESHOLD_E8S => {
+            blockers.push("bad_debt_circuit_threshold_mismatch")
+        }
+        Some(_) => {}
     }
     if state.multi_chain.chain_bad_debt_circuit_tripped(chain) {
         blockers.push("bad_debt_circuit_tripped");
@@ -406,6 +411,7 @@ pub fn gate_error(blockers: &[&str]) -> ProtocolError {
                 | "liquidation_disabled"
                 | "liquidation_config_mismatch"
                 | "bad_debt_circuit_not_configured"
+                | "bad_debt_circuit_threshold_mismatch"
         )
     });
     if configuration_failure {

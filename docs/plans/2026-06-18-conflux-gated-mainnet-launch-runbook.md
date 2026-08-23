@@ -140,6 +140,22 @@ All items are required unless explicitly marked optional.
    - `collateral_config_matches_expected` and
      `debt_config_matches_expected` are both true; present ratio/debt fields are
      supporting evidence, not substitutes for those exact-shape verdicts.
+   - Stage the bad-debt circuit at exactly `10_000_000` e8s (`0.10 icUSD`, one
+     minimum-size vault debt) while chain `1030` remains Disabled. Missing,
+     zero, lower, or higher values fail the authoritative public-readiness
+     gate. Use the developer-gated setter and retain its unambiguous `Ok`
+     response:
+
+     ```bash
+     icp canister call tfesu-vyaaa-aaaap-qrd7a-cai \
+       set_chain_bad_debt_circuit_threshold \
+       '(1030 : nat32, opt (10_000_000 : nat))' \
+       -n ic --identity rumi_identity
+     ```
+
+     Then require `bad_debt_threshold_e8s = opt (10_000_000 : nat)` in the
+     consolidated status response and exact-value PASS from the read-only
+     monitor. Mere presence of a nonzero threshold is not sufficient.
 
 4. **Stage and validate liquidation while the chain remains Disabled.**
    - The chain-1030 liquidation row uses the reviewed WCFX/USDC route:
@@ -337,7 +353,8 @@ observed:
 - finality depth differs from 400, the burn cursor is zero, or the reviewed
   collateral/debt shape verdicts are false;
 - missing or stale CFX price;
-- invariant, reorg, bad-debt, or protocol freeze breaker;
+- invariant, reorg, bad-debt, or protocol freeze breaker, including any
+  chain-1030 bad-debt threshold other than exactly `10_000_000` e8s;
 - malformed or inconsistent operator internal supply audit;
 - low/unknown canister cycles or low/unknown/stale settlement hot-wallet
   evidence;

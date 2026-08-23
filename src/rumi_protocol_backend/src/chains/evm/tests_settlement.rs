@@ -1,13 +1,19 @@
 use super::settlement::{
     claim_liquidation_swap_submit_in_state, confirm_interest_mint_in_state, confirm_mint_in_state,
-    exact_native_transfer_is_funded, fundable_withdrawal_value, requires_public_mint_gate,
-    select_next_op, select_next_op_with_submit_filter, ClaimLiquidationSwapSubmitError, OpAction,
+    ensure_liquidation_swap_submit_still_allowed_in_state, exact_native_transfer_is_funded,
+    fundable_withdrawal_value, requires_public_mint_gate, select_next_op,
+    select_next_op_with_submit_filter, ClaimLiquidationSwapSubmitError,
+    LiquidationSwapSubmitSnapshot, OpAction,
 };
-use crate::chains::config::ChainId;
+use crate::chains::config::{ChainConfigV3, ChainId, ChainStatus, GasStrategy};
+use crate::chains::liquidation_config::{ChainLiquidationConfigV1, DexKind};
 use crate::chains::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
 use crate::chains::multi_chain_state::MultiChainState;
 use crate::chains::settlement_queue::{SettlementOp, SettlementOpKind, SettlementOpStatus};
+use crate::state::State;
 use candid::Principal;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 
 fn vault_pending(s: &mut MultiChainState, vault_id: u64, pending: u128) {
     s.chain_vaults.insert(
@@ -32,7 +38,7 @@ fn vault_pending(s: &mut MultiChainState, vault_id: u64, pending: u128) {
 }
 
 #[test]
-fn public_mint_gate_covers_open_borrow_and_interest_mints_only() {
+fn public_mint_gate_does_not_block_exposure_reducing_liquidation_swaps() {
     assert!(requires_public_mint_gate(&SettlementOpKind::Mint {
         recipient: "0xr".into(),
         amount_e8s: 1,
@@ -45,6 +51,22 @@ fn public_mint_gate_covers_open_borrow_and_interest_mints_only() {
         accrual_through_ns: 3,
         recipient: "0xr".into(),
     }));
+    assert!(!requires_public_mint_gate(
+        &SettlementOpKind::LiquidationSwap {
+            vault_id: 1,
+            collateral_in_native: 100,
+            min_usdc_out_native: 0,
+            debt_to_clear_e8s: 50,
+            router: "0x1111111111111111111111111111111111111111".into(),
+            pair: "0x3333333333333333333333333333333333333333".into(),
+            path: vec![
+                "0x4444444444444444444444444444444444444444".into(),
+                "0x5555555555555555555555555555555555555555".into(),
+            ],
+            reserve_recipient: "0x5555555555555555555555555555555555555555".into(),
+            deadline_secs: 180,
+        }
+    ));
     assert!(!requires_public_mint_gate(
         &SettlementOpKind::NativeWithdrawal {
             recipient: "0xr".into(),
@@ -144,35 +166,78 @@ fn select_next_op_filter_skips_blocked_queued_without_starving_later_allowed_ops
     }
 }
 
-fn queued_liquidation_swap(s: &mut MultiChainState, vault_id: u64) -> u64 {
-    s.settlement_queues
+fn liquidation_config() -> ChainLiquidationConfigV1 {
+    ChainLiquidationConfigV1 {
+        dex: DexKind::UniswapV2,
+        router: "0x1111111111111111111111111111111111111111".into(),
+        factory: "0x2222222222222222222222222222222222222222".into(),
+        pair: "0x3333333333333333333333333333333333333333".into(),
+        collateral_token: "0x4444444444444444444444444444444444444444".into(),
+        settle_stable_token: "0x5555555555555555555555555555555555555555".into(),
+        slippage_cap_bps: 250,
+        restore_target_cr_e4: 15_500,
+        enabled: true,
+        max_swap_value_e8s: 1,
+        max_price_age_ns: 1_000,
+        max_dex_oracle_divergence_bps: 500,
+        fee_bps: 25,
+        settle_stable_decimals: 18,
+        deadline_secs: 180,
+    }
+}
+
+fn liquidation_kind(vault_id: u64) -> SettlementOpKind {
+    let config = liquidation_config();
+    SettlementOpKind::LiquidationSwap {
+        vault_id,
+        collateral_in_native: 100,
+        min_usdc_out_native: 0,
+        debt_to_clear_e8s: 50,
+        router: config.router,
+        pair: config.pair,
+        path: vec![config.collateral_token, config.settle_stable_token.clone()],
+        reserve_recipient: config.settle_stable_token,
+        deadline_secs: config.deadline_secs,
+    }
+}
+
+fn queued_liquidation_swap(s: &mut State, vault_id: u64) -> u64 {
+    s.multi_chain
+        .chain_configs
+        .entry(ChainId(71))
+        .or_insert(ChainConfigV3 {
+            chain_id: ChainId(71),
+            display_name: "Test EVM".into(),
+            rpc_endpoints: vec![],
+            finality_depth: 1,
+            gas_strategy: GasStrategy::NotApplicable,
+            chain_native_decimals: 18,
+            registered_at_ns: 0,
+            status: ChainStatus::Registered,
+            burn_watch_poll_enabled: false,
+            min_quorum_providers: None,
+        });
+    s.multi_chain
+        .chain_liquidation_configs
+        .insert(ChainId(71), liquidation_config());
+    s.multi_chain
+        .set_manual_price(ChainId(71), "CFX".into(), 8_000_000, 1);
+    s.multi_chain
+        .settlement_queues
         .entry(ChainId(71))
         .or_default()
         .enqueue(SettlementOp::new(
-            SettlementOpKind::LiquidationSwap {
-                vault_id,
-                collateral_in_native: 100,
-                min_usdc_out_native: 0,
-                debt_to_clear_e8s: 50,
-                router: "0x1111111111111111111111111111111111111111".into(),
-                pair: "0x3333333333333333333333333333333333333333".into(),
-                path: vec![
-                    "0x4444444444444444444444444444444444444444".into(),
-                    "0x5555555555555555555555555555555555555555".into(),
-                ],
-                reserve_recipient: "0x5555555555555555555555555555555555555555".into(),
-                deadline_secs: 180,
-            },
+            liquidation_kind(vault_id),
             format!("liq-{vault_id}"),
             0,
         ))
         .expect("enqueue swap")
 }
 
-fn marked_bot_liquidation(s: &mut MultiChainState, vault_id: u64, op_id: u64) {
+fn marked_bot_liquidation(s: &mut State, vault_id: u64, op_id: u64) {
     use crate::chains::vault::{LiquidationTier, PendingLiquidationV1};
 
-    s.chain_vaults.insert(
+    s.multi_chain.chain_vaults.insert(
         vault_id,
         ChainVaultV1 {
             vault_id,
@@ -197,19 +262,63 @@ fn marked_bot_liquidation(s: &mut MultiChainState, vault_id: u64, op_id: u64) {
             }),
         },
     );
-    s.bot_pending_chain_vaults.insert(vault_id, 0);
+    s.multi_chain.bot_pending_chain_vaults.insert(vault_id, 0);
+}
+
+fn liquidation_snapshot() -> LiquidationSwapSubmitSnapshot {
+    LiquidationSwapSubmitSnapshot {
+        config: liquidation_config(),
+        price_e8: 8_000_000,
+        price_set_at_ns: 1,
+    }
+}
+
+fn assert_liquidation_submit_unclaimed(s: &State, op_id: u64) {
+    let op = s
+        .multi_chain
+        .settlement_queues
+        .get(&ChainId(71))
+        .unwrap()
+        .pending
+        .get(&op_id)
+        .unwrap();
+    assert!(matches!(op.status, SettlementOpStatus::Queued));
+    assert!(op.last_tx_hash.is_none());
+    assert!(op.submit_nonce.is_none());
+    assert_eq!(
+        s.multi_chain.chain_vaults[&7]
+            .pending_liquidation
+            .as_ref()
+            .unwrap()
+            .op_id,
+        op_id,
+        "a rejected submit must leave the liquidation marker untouched"
+    );
 }
 
 #[test]
 fn claim_liquidation_swap_submit_marks_queued_op_inflight_before_broadcast() {
-    let mut s = MultiChainState::default();
+    let mut s = State::default();
     let op_id = queued_liquidation_swap(&mut s, 7);
     marked_bot_liquidation(&mut s, 7, op_id);
+    let kind = liquidation_kind(7);
+    let snapshot = liquidation_snapshot();
 
-    claim_liquidation_swap_submit_in_state(&mut s, ChainId(71), op_id, 7, 42, "0xabc".into(), 9)
-        .expect("claim submit");
+    claim_liquidation_swap_submit_in_state(
+        &mut s,
+        ChainId(71),
+        op_id,
+        7,
+        42,
+        "0xabc".into(),
+        9,
+        &kind,
+        &snapshot,
+    )
+    .expect("claim submit");
 
     let op = s
+        .multi_chain
         .settlement_queues
         .get(&ChainId(71))
         .unwrap()
@@ -229,8 +338,10 @@ fn claim_liquidation_swap_submit_marks_queued_op_inflight_before_broadcast() {
 
 #[test]
 fn claim_liquidation_swap_submit_rejects_if_observer_already_cleared_marker() {
-    let mut s = MultiChainState::default();
+    let mut s = State::default();
     let op_id = queued_liquidation_swap(&mut s, 7);
+    let kind = liquidation_kind(7);
+    let snapshot = liquidation_snapshot();
 
     let err = claim_liquidation_swap_submit_in_state(
         &mut s,
@@ -240,11 +351,14 @@ fn claim_liquidation_swap_submit_rejects_if_observer_already_cleared_marker() {
         42,
         "0xabc".into(),
         9,
+        &kind,
+        &snapshot,
     )
     .unwrap_err();
 
     assert_eq!(err, ClaimLiquidationSwapSubmitError::MissingMarker);
     let op = s
+        .multi_chain
         .settlement_queues
         .get(&ChainId(71))
         .unwrap()
@@ -257,11 +371,261 @@ fn claim_liquidation_swap_submit_rejects_if_observer_already_cleared_marker() {
 }
 
 #[test]
-fn claim_liquidation_swap_submit_rejects_live_inflight_op() {
-    let mut s = MultiChainState::default();
+fn claim_liquidation_swap_submit_rejects_disable_race_without_claiming_op() {
+    let mut s = State::default();
     let op_id = queued_liquidation_swap(&mut s, 7);
     marked_bot_liquidation(&mut s, 7, op_id);
-    s.settlement_queues
+    let kind = liquidation_kind(7);
+    let snapshot = liquidation_snapshot();
+    s.multi_chain
+        .chain_configs
+        .get_mut(&ChainId(71))
+        .unwrap()
+        .status = ChainStatus::Disabled;
+
+    let err = claim_liquidation_swap_submit_in_state(
+        &mut s,
+        ChainId(71),
+        op_id,
+        7,
+        42,
+        "0xabc".into(),
+        9,
+        &kind,
+        &snapshot,
+    )
+    .unwrap_err();
+
+    assert_eq!(err, ClaimLiquidationSwapSubmitError::ChainNotRegistered);
+    assert_liquidation_submit_unclaimed(&s, op_id);
+}
+
+#[test]
+fn claim_liquidation_swap_submit_rejects_config_disable_and_price_change_races() {
+    for change in ["config-disabled", "price-changed"] {
+        let mut s = State::default();
+        let op_id = queued_liquidation_swap(&mut s, 7);
+        marked_bot_liquidation(&mut s, 7, op_id);
+        let kind = liquidation_kind(7);
+        let snapshot = liquidation_snapshot();
+        if change == "config-disabled" {
+            s.multi_chain
+                .chain_liquidation_configs
+                .get_mut(&ChainId(71))
+                .unwrap()
+                .enabled = false;
+        } else {
+            s.multi_chain
+                .set_manual_price(ChainId(71), "CFX".into(), 8_100_000, 2);
+        }
+
+        let err = claim_liquidation_swap_submit_in_state(
+            &mut s,
+            ChainId(71),
+            op_id,
+            7,
+            42,
+            "0xabc".into(),
+            9,
+            &kind,
+            &snapshot,
+        )
+        .unwrap_err();
+
+        assert_eq!(err, ClaimLiquidationSwapSubmitError::SubmitNotAllowed);
+        assert_liquidation_submit_unclaimed(&s, op_id);
+    }
+}
+
+#[test]
+fn liquidation_submit_gate_allows_bad_debt_trip_but_blocks_runtime_halts() {
+    let mut s = State::default();
+    queued_liquidation_swap(&mut s, 7);
+    let kind = liquidation_kind(7);
+    let snapshot = liquidation_snapshot();
+    s.multi_chain
+        .chain_bad_debt_circuit_tripped_at_ns
+        .insert(ChainId(71), 10);
+
+    ensure_liquidation_swap_submit_still_allowed_in_state(&s, ChainId(71), &kind, &snapshot, 42)
+        .expect("a bad-debt trip must not block an exposure-reducing swap");
+
+    for halt in [
+        "global-freeze",
+        "liquidation-freeze",
+        "read-only",
+        "invariant-halt",
+        "reorg-halt",
+        "stale-price",
+    ] {
+        let mut halted = State::default();
+        queued_liquidation_swap(&mut halted, 7);
+        let now_ns = match halt {
+            "global-freeze" => {
+                halted.frozen = true;
+                42
+            }
+            "liquidation-freeze" => {
+                halted.liquidation_frozen = true;
+                42
+            }
+            "read-only" => {
+                halted.mode = crate::Mode::ReadOnly;
+                42
+            }
+            "invariant-halt" => {
+                halted.multi_chain.invariant_halted = true;
+                42
+            }
+            "reorg-halt" => {
+                halted.multi_chain.reorg_halted.insert(ChainId(71), true);
+                42
+            }
+            "stale-price" => 1_002,
+            _ => unreachable!(),
+        };
+        assert!(
+            ensure_liquidation_swap_submit_still_allowed_in_state(
+                &halted,
+                ChainId(71),
+                &kind,
+                &snapshot,
+                now_ns,
+            )
+            .is_err(),
+            "{halt} must stop a new liquidation signature/broadcast"
+        );
+    }
+}
+
+#[test]
+fn liquidation_submit_gate_preserves_legacy_non_conflux_deadline_behavior() {
+    let mut s = State::default();
+    queued_liquidation_swap(&mut s, 7);
+    s.multi_chain
+        .chain_liquidation_configs
+        .get_mut(&ChainId(71))
+        .unwrap()
+        .deadline_secs = 300;
+    let kind = liquidation_kind(7); // The real generic enqueuer still writes 180.
+    let snapshot = LiquidationSwapSubmitSnapshot {
+        config: s.multi_chain.chain_liquidation_configs[&ChainId(71)].clone(),
+        price_e8: 8_000_000,
+        price_set_at_ns: 1,
+    };
+
+    ensure_liquidation_swap_submit_still_allowed_in_state(&s, ChainId(71), &kind, &snapshot, 42)
+        .expect("the Conflux deadline pin must not regress generic EVM liquidation liveness");
+}
+
+#[test]
+fn conflux_liquidation_submit_gate_pins_trust_without_inheriting_public_open_blockers() {
+    let chain = ChainId(1030);
+    let mut s = State::default();
+    s.chains_ecdsa_key_name = "key_1".into();
+    s.mode = crate::Mode::GeneralAvailability;
+    s.multi_chain.chain_configs.insert(
+        chain,
+        ChainConfigV3 {
+            chain_id: chain,
+            display_name: "ConfluxESpaceMainnet".into(),
+            rpc_endpoints: vec![
+                "https://provider-a.invalid".into(),
+                "https://provider-b.invalid".into(),
+                "https://provider-c.invalid".into(),
+            ],
+            finality_depth: 400,
+            gas_strategy: GasStrategy::EvmEip1559 {
+                max_priority_fee_gwei: 1,
+                max_fee_gwei_ceiling: 200,
+            },
+            chain_native_decimals: 18,
+            registered_at_ns: 1,
+            status: ChainStatus::Registered,
+            burn_watch_poll_enabled: false,
+            min_quorum_providers: Some(2),
+        },
+    );
+    let config = super::public_readiness::expected_liquidation_config();
+    s.multi_chain
+        .chain_liquidation_configs
+        .insert(chain, config.clone());
+    s.multi_chain
+        .set_manual_price(chain, "CFX".into(), 8_000_000, 1);
+    s.multi_chain
+        .chain_bad_debt_circuit_tripped_at_ns
+        .insert(chain, 10);
+    let kind = SettlementOpKind::LiquidationSwap {
+        vault_id: 7,
+        collateral_in_native: 100,
+        min_usdc_out_native: 0,
+        debt_to_clear_e8s: 50,
+        router: config.router.clone(),
+        pair: config.pair.clone(),
+        path: vec![
+            config.collateral_token.clone(),
+            config.settle_stable_token.clone(),
+        ],
+        reserve_recipient: config.settle_stable_token.clone(),
+        deadline_secs: config.deadline_secs,
+    };
+    let snapshot = LiquidationSwapSubmitSnapshot {
+        config,
+        price_e8: 8_000_000,
+        price_set_at_ns: 1,
+    };
+
+    ensure_liquidation_swap_submit_still_allowed_in_state(&s, chain, &kind, &snapshot, 42)
+        .expect("bad-debt and unrelated public-open blockers must not stop liquidation");
+
+    s.chains_ecdsa_key_name = "test_key_1".into();
+    assert!(
+        ensure_liquidation_swap_submit_still_allowed_in_state(&s, chain, &kind, &snapshot, 42)
+            .unwrap_err()
+            .contains("chains_ecdsa_key_mismatch"),
+        "the chain-1030 signing trust anchor must remain fail-closed"
+    );
+}
+
+#[test]
+fn guarded_broadcast_stops_before_second_provider_when_gate_degrades_after_await() {
+    let allowed = Rc::new(Cell::new(true));
+    let attempts = Rc::new(RefCell::new(Vec::new()));
+    let guard_allowed = Rc::clone(&allowed);
+    let call_allowed = Rc::clone(&allowed);
+    let call_attempts = Rc::clone(&attempts);
+
+    let result = futures::executor::block_on(super::evm_rpc::guarded_first_ok(
+        vec!["provider-a", "provider-b"],
+        move |_| {
+            if guard_allowed.get() {
+                Ok(())
+            } else {
+                Err("chain disabled".into())
+            }
+        },
+        move |provider| {
+            call_attempts.borrow_mut().push(provider);
+            // Model the state change that becomes visible when provider A's
+            // failed await resumes. Provider B must never be invoked.
+            call_allowed.set(false);
+            async move { Err::<String, String>("provider failed".into()) }
+        },
+    ));
+
+    assert!(result.unwrap_err().contains("broadcast stopped"));
+    assert_eq!(attempts.borrow().as_slice(), &["provider-a"]);
+}
+
+#[test]
+fn claim_liquidation_swap_submit_rejects_live_inflight_op() {
+    let mut s = State::default();
+    let op_id = queued_liquidation_swap(&mut s, 7);
+    marked_bot_liquidation(&mut s, 7, op_id);
+    let kind = liquidation_kind(7);
+    let snapshot = liquidation_snapshot();
+    s.multi_chain
+        .settlement_queues
         .get_mut(&ChainId(71))
         .unwrap()
         .pending
@@ -277,6 +641,8 @@ fn claim_liquidation_swap_submit_rejects_live_inflight_op() {
         42,
         "0xabc".into(),
         9,
+        &kind,
+        &snapshot,
     )
     .unwrap_err();
 

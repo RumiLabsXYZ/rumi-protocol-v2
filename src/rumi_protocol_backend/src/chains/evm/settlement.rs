@@ -38,6 +38,7 @@ use candid::{CandidType, Deserialize, Principal};
 use ic_canister_log::log;
 
 use crate::chains::config::{ChainId, ChainStatus};
+use crate::chains::liquidation_config::ChainLiquidationConfigV1;
 use crate::chains::monad::chain_vault::ChainVaultStatus;
 use crate::chains::multi_chain_state::MultiChainState;
 use crate::chains::settlement_queue::{
@@ -1065,6 +1066,141 @@ pub(crate) fn requires_public_mint_gate(kind: &SettlementOpKind) -> bool {
     )
 }
 
+/// The exact liquidation policy inputs used to compute a swap transaction.
+/// A config or price update while RPC/signing awaits are in flight invalidates
+/// the plan; the worker retries from Queued with a fresh snapshot.
+#[derive(Clone, Debug)]
+pub(crate) struct LiquidationSwapSubmitSnapshot {
+    pub(crate) config: ChainLiquidationConfigV1,
+    pub(crate) price_e8: u64,
+    pub(crate) price_set_at_ns: u64,
+}
+
+/// Liquidation-specific post-await gate. Unlike the mint public-open gate this
+/// intentionally does not consult the bad-debt latch, debt limits, burn cursor,
+/// or settlement hot-wallet proof: a custody-funded swap reduces exposure and
+/// remains actionable when those mint-only controls trip.
+pub(crate) fn ensure_liquidation_swap_submit_still_allowed_in_state(
+    state: &crate::state::State,
+    chain: ChainId,
+    kind: &SettlementOpKind,
+    snapshot: &LiquidationSwapSubmitSnapshot,
+    now_ns: u64,
+) -> Result<(), String> {
+    ensure_chain_still_registered_in_state(state, chain)?;
+    if state.frozen {
+        return Err("protocol globally frozen".into());
+    }
+    if state.liquidation_frozen {
+        return Err("liquidations frozen".into());
+    }
+    if state.mode == Mode::ReadOnly {
+        return Err("protocol entered read-only mode while liquidation was in flight".into());
+    }
+    if state.multi_chain.invariant_halted {
+        return Err("supply invariant halted".into());
+    }
+    if state
+        .multi_chain
+        .reorg_halted
+        .get(&chain)
+        .copied()
+        .unwrap_or(false)
+    {
+        return Err("chain reorg halt active".into());
+    }
+
+    let config = state
+        .multi_chain
+        .chain_liquidation_configs
+        .get(&chain)
+        .ok_or_else(|| "liquidation config removed".to_string())?;
+    if !config.enabled {
+        return Err("liquidation config disabled".into());
+    }
+    config
+        .validate()
+        .map_err(|error| format!("liquidation config invalid: {error:?}"))?;
+    if config != &snapshot.config {
+        return Err("liquidation config changed while swap was in flight".into());
+    }
+    if chain == ChainId(1030) {
+        let relevant_blockers: Vec<&str> =
+            public_readiness::conflux_mainnet_public_risk_blockers(state, chain, now_ns)
+                .into_iter()
+                .filter(|blocker| {
+                    matches!(
+                        *blocker,
+                        "conflux_mainnet_config_mismatch"
+                            | "evm_rpc_principal_mismatch"
+                            | "chains_ecdsa_key_mismatch"
+                            | "rpc_endpoint_configuration_too_large"
+                            | "rpc_distinct_endpoints_insufficient"
+                            | "rpc_agreement_below_two"
+                            | "rpc_agreement_unsatisfiable"
+                            | "finality_depth_mismatch"
+                            | "liquidation_config_missing"
+                            | "liquidation_disabled"
+                            | "liquidation_config_mismatch"
+                    )
+                })
+                .collect();
+        if !relevant_blockers.is_empty() {
+            return Err(format!(
+                "Conflux liquidation trust gate blocked: {}",
+                relevant_blockers.join(",")
+            ));
+        }
+    }
+
+    let (router, pair, path, reserve_recipient, deadline_secs) = match kind {
+        SettlementOpKind::LiquidationSwap {
+            router,
+            pair,
+            path,
+            reserve_recipient,
+            deadline_secs,
+            ..
+        } => (router, pair, path, reserve_recipient, deadline_secs),
+        _ => return Err("settlement op is not a liquidation swap".into()),
+    };
+    if !router.eq_ignore_ascii_case(&config.router)
+        || !pair.eq_ignore_ascii_case(&config.pair)
+        || path.len() != 2
+        || !path[0].eq_ignore_ascii_case(&config.collateral_token)
+        || !path[1].eq_ignore_ascii_case(&config.settle_stable_token)
+        || !reserve_recipient.eq_ignore_ascii_case(&config.settle_stable_token)
+        // The generic enqueuer historically writes 180 for every EVM chain
+        // even though non-Conflux configs accept other non-zero deadlines.
+        // Keep the exact reviewed deadline pin for the production Conflux
+        // rail without turning that pre-existing generic mismatch into a new
+        // liveness regression for other chains.
+        || (chain == ChainId(1030) && *deadline_secs != config.deadline_secs)
+    {
+        return Err("queued liquidation swap no longer matches current config wiring".into());
+    }
+
+    let symbol = crate::chains::evm::evm_chain_config(chain)
+        .map(|config| config.native_symbol)
+        .ok_or_else(|| "unsupported EVM liquidation chain".to_string())?;
+    let live_price = state
+        .multi_chain
+        .get_manual_price(chain, symbol)
+        .ok_or_else(|| "liquidation price removed".to_string())?;
+    if live_price != (snapshot.price_e8, snapshot.price_set_at_ns) {
+        return Err("liquidation price changed while swap was in flight".into());
+    }
+    crate::chains::liquidation::fresh_chain_price_e8(
+        &state.multi_chain,
+        chain,
+        symbol,
+        now_ns,
+        config.max_price_age_ns,
+    )
+    .map_err(|error| format!("liquidation price unavailable: {error:?}"))?;
+    Ok(())
+}
+
 fn ensure_chain_still_registered_in_state(
     state: &crate::state::State,
     chain: ChainId,
@@ -1354,6 +1490,8 @@ pub(crate) fn fundable_swap_value(
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ClaimLiquidationSwapSubmitError {
+    ChainNotRegistered,
+    SubmitNotAllowed,
     MissingOp,
     WrongOpKind,
     NotQueued,
@@ -1378,14 +1516,27 @@ pub(crate) enum RecordChainPayoutReplacementError {
 /// Without this CAS, an observer timeout tick can clear the marker while the
 /// settlement worker is suspended across RPC awaits with a stale cloned op.
 pub(crate) fn claim_liquidation_swap_submit_in_state(
-    state: &mut MultiChainState,
+    state: &mut crate::state::State,
     chain: ChainId,
     op_id: u64,
     vault_id: u64,
     now_ns: u64,
     tx_hash: String,
     nonce: u64,
+    kind: &SettlementOpKind,
+    snapshot: &LiquidationSwapSubmitSnapshot,
 ) -> Result<(), ClaimLiquidationSwapSubmitError> {
+    // This is the final synchronous state boundary before broadcast. Recheck
+    // here as well as around signing so a stale cloned op can never be claimed
+    // after an operator Disable raced the preceding RPC/signing awaits.
+    if !state.multi_chain.chain_is_registered(chain) {
+        return Err(ClaimLiquidationSwapSubmitError::ChainNotRegistered);
+    }
+    ensure_liquidation_swap_submit_still_allowed_in_state(state, chain, kind, snapshot, now_ns)
+        .map_err(|_| ClaimLiquidationSwapSubmitError::SubmitNotAllowed)?;
+
+    let state = &mut state.multi_chain;
+
     let marker_owned = state
         .chain_vaults
         .get(&vault_id)
@@ -2071,28 +2222,44 @@ async fn submit_liquidation_swap(
         let price =
             liq::fresh_chain_price_e8(&s.multi_chain, chain, symbol, now, cfg.max_price_age_ns)
                 .ok()?;
+        let (_, price_set_at_ns) = s.multi_chain.get_manual_price(chain, symbol)?;
         Some((
+            cfg.clone(),
             cfg.fee_bps,
             cfg.slippage_cap_bps,
             cfg.max_dex_oracle_divergence_bps,
             cfg.settle_stable_decimals,
             native_decimals,
             price,
+            price_set_at_ns,
         ))
     });
-    let (fee_bps, slippage_bps, divergence_bps, settle_decimals, native_decimals, price_e8) =
-        match snap {
-            Some(t) => t,
-            None => {
-                escalate_failed_swap(
-                    chain,
-                    op_id,
-                    vault_id,
-                    "swap config/price unavailable".into(),
-                );
-                return;
-            }
-        };
+    let (
+        liquidation_config,
+        fee_bps,
+        slippage_bps,
+        divergence_bps,
+        settle_decimals,
+        native_decimals,
+        price_e8,
+        price_set_at_ns,
+    ) = match snap {
+        Some(t) => t,
+        None => {
+            escalate_failed_swap(
+                chain,
+                op_id,
+                vault_id,
+                "swap config/price unavailable".into(),
+            );
+            return;
+        }
+    };
+    let submit_snapshot = LiquidationSwapSubmitSnapshot {
+        config: liquidation_config,
+        price_e8,
+        price_set_at_ns,
+    };
 
     // Custody signer (holds the CFX) + the derived reserve `to`.
     let (path, signer_addr) = match resolve_op_signer(chain, &op.kind).await {
@@ -2253,6 +2420,28 @@ async fn submit_liquidation_swap(
             return;
         }
     };
+    // Every signer/DEX/RPC step above may await. Re-read the liquidation-specific
+    // runtime gates and require the exact config/price snapshot used by this plan
+    // immediately before asking threshold ECDSA to sign.
+    if let Err(reason) = read_state(|state| {
+        ensure_liquidation_swap_submit_still_allowed_in_state(
+            state,
+            chain,
+            &op.kind,
+            &submit_snapshot,
+            ic_cdk::api::time(),
+        )
+    }) {
+        log!(
+            INFO,
+            "[settlement chain={:?}] swap op {} blocked before signing: {}; will retry",
+            chain,
+            op_id,
+            reason
+        );
+        return;
+    }
+
     let raw = match tx::sign_eip1559(&fields, path, &signer_addr).await {
         Ok(h) => h,
         Err(e) => {
@@ -2266,6 +2455,27 @@ async fn submit_liquidation_swap(
             return;
         }
     };
+    // Signing is also an await. If Disable or any liquidation readiness
+    // degradation raced the signature, discard the signed bytes before the
+    // submit claim and broadcast.
+    if let Err(reason) = read_state(|state| {
+        ensure_liquidation_swap_submit_still_allowed_in_state(
+            state,
+            chain,
+            &op.kind,
+            &submit_snapshot,
+            ic_cdk::api::time(),
+        )
+    }) {
+        log!(
+            INFO,
+            "[settlement chain={:?}] swap op {} blocked before broadcast: {}; signed bytes discarded",
+            chain,
+            op_id,
+            reason
+        );
+        return;
+    }
     let local_tx_hash = match tx::raw_tx_hash(&raw) {
         Ok(h) => h,
         Err(e) => {
@@ -2281,13 +2491,15 @@ async fn submit_liquidation_swap(
     };
     let claim = mutate_state(|s| {
         claim_liquidation_swap_submit_in_state(
-            &mut s.multi_chain,
+            s,
             chain,
             op_id,
             vault_id,
             ic_cdk::api::time(),
             local_tx_hash.clone(),
             nonce,
+            &op.kind,
+            &submit_snapshot,
         )
     });
     if let Err(e) = claim {
@@ -2301,7 +2513,19 @@ async fn submit_liquidation_swap(
         return;
     }
 
-    let tx_hash = match evm_rpc::send_raw_transaction(chain, &raw).await {
+    let tx_hash = match evm_rpc::send_raw_transaction_guarded(chain, &raw, |_| {
+        read_state(|state| {
+            ensure_liquidation_swap_submit_still_allowed_in_state(
+                state,
+                chain,
+                &op.kind,
+                &submit_snapshot,
+                ic_cdk::api::time(),
+            )
+        })
+    })
+    .await
+    {
         Ok(h) => h,
         Err(e) => {
             log!(INFO, "[settlement chain={:?}] swap op {}: broadcast failed after submit claim ({}); receipt timeout path will resolve", chain, op_id, e);
