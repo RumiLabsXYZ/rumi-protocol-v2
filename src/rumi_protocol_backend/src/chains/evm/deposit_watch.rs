@@ -1001,6 +1001,31 @@ pub async fn run_observer(chain: ChainId) {
 /// vaults make a tick outliving MAX_BLOCK_SCAN_WINDOW blocks unreachable in
 /// practice). Revisit for deeper finality / higher vault counts where a self-heal
 /// reclaim could race the prune.
+///
+/// F-02 (2026-06-18 audit) analysis: the ONLY sound discharge condition for a
+/// dedup key is "the cursor has advanced past its block" (`from_block` in
+/// `run_observer` is always `last_observed_block + 1`, so a block at or below
+/// the cursor can never be re-scanned again). A pure RPC/probe stall (the
+/// #338 TooFewCycles shape) means `run_observer` returns before this function
+/// is ever called — zero growth, proven bounded by
+/// `tests_deposit_watch::deferred_liquidation_stall_bounds_processed_burn_keys_across_rescans`
+/// for the DeferredLiquidation head-of-line variant of a stalled cursor. A
+/// `reorg_halted` stall is different: this function is the ONLY pruning site
+/// this module owns, and it is only reachable from `run_observer`, which never
+/// runs the burn-watch path while halted — so it cannot bound keys inserted by
+/// the independent `submit_burn_proof` notify path
+/// (`chains/evm/burn_proof.rs::apply_receipt_burns_to_state`). See
+/// `tests_deposit_watch::keys_ahead_of_cursor_are_retained_across_repeated_stalled_prune_calls`,
+/// which proves this function correctly refuses to evict those keys (the safe
+/// behavior) rather than unsafely bounding them. The notify path's own
+/// residual — that it was not gated on `reorg_halted` — is NOW CLOSED by
+/// `burn_proof.rs`: `apply_receipt_burns_to_state` re-checks `reorg_halted` as
+/// its first statement, inside the same `mutate_state` closure with no
+/// `.await` between the check and the mutation, so nothing is inserted into
+/// `processed_burn_keys` (or otherwise mutated) while halted; a cheap
+/// pre-await check in `verify_and_apply_burn_proof` additionally fails fast
+/// before spending outcall cycles, but the authoritative guard is the
+/// re-check inside `apply_receipt_burns_to_state`.
 pub(crate) fn advance_cursor_and_prune(state: &mut MultiChainState, chain: ChainId, finalized: u64) {
     state.last_observed_block.insert(chain, finalized);
     let stale: Vec<u64> = state

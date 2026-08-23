@@ -28,13 +28,32 @@ use ic_canister_log::log;
 /// committed with their keys recorded (no `.await` in this synchronous loop, so
 /// apply+record commit in one message slice) — a retry re-skips them and
 /// re-attempts the halting burn. This matches the audited poll-path C-1 semantics.
+///
+/// F-02 residual (2026-06-18 audit): this is the ONLY place that mutates state
+/// or inserts into `processed_burn_keys` on the notify path, so the
+/// `reorg_halted` guard MUST live here, as the very first check, rather than
+/// only in the caller. `run_observer` (deposit_watch.rs) already refuses to
+/// scan while `reorg_halted[chain]` is set; this mirrors that check for the
+/// independent `submit_burn_proof` path, which was not gated on it. Refusing
+/// here means: this function is always called synchronously inside a single
+/// `mutate_state` closure (see `verify_and_apply_burn_proof` below), so
+/// checking `reorg_halted` as the first statement is equivalent to checking it
+/// "immediately before the mutation, with no `.await` in between" (there is
+/// no `.await` anywhere in this function).
 pub fn apply_receipt_burns_to_state(
     state: &mut MultiChainState,
-    _chain: ChainId,
+    chain: ChainId,
     contract: &str,
     tx_hash: &str,
     receipt: &TxReceiptWithLogs,
-) -> Result<Vec<BurnLog>, String> {
+) -> Result<Vec<BurnLog>, ApplyBurnsError> {
+    if state.reorg_halted.get(&chain).copied().unwrap_or(false) {
+        // Refuse outright: no key inserted, no debt/supply mutation. Retryable
+        // once an operator clears the halt (`clear_reorg_halt`); nothing was
+        // consumed, so the identical proof can be resubmitted and will apply
+        // exactly once via the existing `processed_burn_keys` dedup.
+        return Err(ApplyBurnsError::ReorgHalted);
+    }
     let mut applied: Vec<BurnLog> = Vec::new();
     for (address, topics, data, log_index) in &receipt.logs {
         if !address.eq_ignore_ascii_case(contract) {
@@ -82,7 +101,10 @@ pub fn apply_receipt_burns_to_state(
                     .insert(key);
             }
             Err(crate::chains::monad::deposit_watch::BurnApplyError::SupplyInvariant(e)) => {
-                return Err(format!("halt-class supply invariant: {:?}", e));
+                return Err(ApplyBurnsError::Halt(format!(
+                    "halt-class supply invariant: {:?}",
+                    e
+                )));
             }
             Err(crate::chains::monad::deposit_watch::BurnApplyError::DeferredLiquidation) => {
                 // Vault mid-liquidation (findings #11/#19): skip without recording
@@ -99,14 +121,33 @@ pub fn apply_receipt_burns_to_state(
     Ok(applied)
 }
 
+/// Error from the synchronous apply step. Kept distinct from `BurnProofError`
+/// so the sync core (`apply_receipt_burns_to_state`) has no dependency on the
+/// async wrapper's error shape; `verify_and_apply_burn_proof` maps it 1:1.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ApplyBurnsError {
+    /// Chain is currently `reorg_halted`. Nothing was mutated or recorded.
+    /// Retryable: resubmit the identical proof after `clear_reorg_halt`.
+    ReorgHalted,
+    /// Halt-class invariant failure (e.g. supply invariant violation). Burns
+    /// applied earlier in this same receipt, before the failing log, stay
+    /// committed (see the doc comment on `apply_receipt_burns_to_state`).
+    Halt(String),
+}
+
 #[derive(Debug)]
 pub enum BurnProofError {
     NoContract,
-    Pending,      // receipt not yet mined
-    Reverted,     // status != 0x1
-    NotFinal,     // mined but not buried under finality_depth
+    Pending,  // receipt not yet mined
+    Reverted, // status != 0x1
+    NotFinal, // mined but not buried under finality_depth
     Rpc(String),
     Halt(String), // halt-class invariant failure
+    /// Chain is currently `reorg_halted` (Task 11 circuit breaker). Distinct
+    /// from `Halt`: this is NOT terminal/corrupt data, it is a temporary
+    /// operator-controlled gate. Nothing was consumed or recorded, so the
+    /// caller should retry the identical proof after `clear_reorg_halt`.
+    ReorgHalted,
 }
 
 /// Fetch the receipt for `tx_hash`, verify success + finality, and apply any Burn
@@ -136,6 +177,16 @@ pub async fn verify_and_apply_burn_proof(
     })
     .unwrap_or(1);
 
+    // Cheap fail-fast BEFORE any RPC await: a chain already `reorg_halted`
+    // before we spend outcall cycles has no chance of applying anyway (the
+    // check inside `apply_receipt_burns_to_state` below would refuse it after
+    // paying for the receipt fetch + finality probe). This is purely a cost
+    // optimization; the authoritative guard is the re-check after the awaits,
+    // immediately below.
+    if read_state(|s| s.multi_chain.reorg_halted.get(&chain).copied().unwrap_or(false)) {
+        return Err(BurnProofError::ReorgHalted);
+    }
+
     let receipt = match get_transaction_receipt_with_logs(chain, &tx)
         .await
         .map_err(BurnProofError::Rpc)?
@@ -154,10 +205,17 @@ pub async fn verify_and_apply_burn_proof(
     }
 
     // Apply synchronously (no `.await` inside), capturing the burns newly applied.
+    // `apply_receipt_burns_to_state` re-checks `reorg_halted` as its first
+    // statement, inside this same closure with no `.await` between the check
+    // and the mutation, so a halt raised during the awaits above (receipt
+    // fetch / finality probe) cannot race a burn through.
     let applied: Vec<BurnLog> = mutate_state(|s| {
         apply_receipt_burns_to_state(&mut s.multi_chain, chain, &contract, &tx, &receipt)
     })
-    .map_err(BurnProofError::Halt)?;
+    .map_err(|e| match e {
+        ApplyBurnsError::ReorgHalted => BurnProofError::ReorgHalted,
+        ApplyBurnsError::Halt(msg) => BurnProofError::Halt(msg),
+    })?;
 
     // Emit one ChainBurnObserved event per applied burn, mirroring the poll path
     // (deposit_watch.rs line 686). record_event is its own call, done outside the

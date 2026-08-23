@@ -1163,3 +1163,111 @@ fn conflux_evm_self_serve_full_flow_and_rejections() {
 
     eprintln!("[evm self-serve] FULL PASS: anonymous EIP-712 open/borrow/repay/close + replay/wrong-signer rejection on chain 71");
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// Security fix regression (Finding 2, M2 security close-out): Solana admin
+// parity. `withdraw_solana_collateral` / `close_solana_vault` must refuse an
+// EVM-owned vault exactly like `withdraw_chain_collateral` / `close_chain_vault`
+// already do (M2 review finding E). Before the fix, a debt-free EVM-owned
+// vault (the CR check is skipped when `debt_e8s == 0`) had no `owner_evm`
+// guard on the Solana admin path, so the operator could move a self-serve
+// user's collateral through the wrong (unsigned, dev-gated) rail.
+// ════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn solana_admin_endpoints_refuse_evm_owned_vault() {
+    let (pic, backend, mock) = boot();
+    configure_conflux(&pic, backend, mock, 1_000_000);
+
+    let (sk, owner) = evm_signer();
+
+    // This is a security regression test: it must never silently pass. Unlike
+    // `conflux_evm_self_serve_full_flow_and_rejections`, which has a legitimate
+    // ECDSA-unavailable fallback (a reduced-but-real assertion on the derive
+    // failure itself), there is no such fallback here that still proves the
+    // `owner_evm` guard. `boot()` always provisions an II subnet (test_key_1),
+    // so the ECDSA derive below is expected to succeed; if it does not,
+    // `open_evm(...).expect(...)` panics and the test hard-fails instead of
+    // skipping, because a security guard that can go unexercised is a bug.
+    //
+    // Open a vault via the self-serve EVM path. Design B: `debt_e8s` stays 0
+    // (no confirmed debt) until the on-chain deposit is verified and the mint
+    // confirms, so this vault is debt-free immediately after `open_evm`
+    // returns, exactly the condition where the CR check inside
+    // `withdraw_collateral_in_state`/`close_chain_vault_in_state` is skipped
+    // and only the new `owner_evm` guard stands between the Solana admin path
+    // and this vault's collateral.
+    let open_intent = make_intent(IntentAction::Open, &owner, 0, 1_600u128 * E18, 100 * E8, 0);
+    let open_sig = sign(&sk, &open_intent);
+    let vault_id = open_evm(&pic, backend, &open_intent, &open_sig).expect("open_evm Ok");
+    let before = get_vault(&pic, backend, vault_id).expect("vault after open");
+    assert_eq!(before.status, ChainVaultStatus::AwaitingDeposit);
+    assert_eq!(
+        before.debt_e8s,
+        candid::Nat::from(0u128),
+        "debt-free immediately after open (Design B: no confirmed debt pre-mint)"
+    );
+    assert!(before.owner_evm.is_some(), "vault must be EVM-owned for this test");
+
+    // `withdraw_solana_collateral` must refuse, with ZERO state change.
+    let withdraw_result = decode_result(
+        update_dev(
+            &pic,
+            backend,
+            "withdraw_solana_collateral",
+            Encode!(
+                &vault_id,
+                &candid::Nat::from(1u128),
+                &"11111111111111111111111111111111".to_string()
+            )
+            .unwrap(),
+        ),
+        "withdraw_solana_collateral",
+    );
+    match withdraw_result {
+        Err(ProtocolError::ChainAdmin(m)) => {
+            assert!(m.contains("EVM-owned"), "expected an EVM-owned refusal, got {m}")
+        }
+        other => panic!("withdraw_solana_collateral on an EVM-owned vault should refuse, got {other:?}"),
+    }
+    let after_withdraw = get_vault(&pic, backend, vault_id).expect("vault still present");
+    assert_eq!(after_withdraw.status, before.status, "withdraw refusal: status unchanged");
+    assert_eq!(
+        after_withdraw.collateral_amount_e18, before.collateral_amount_e18,
+        "withdraw refusal: collateral unchanged"
+    );
+    assert_eq!(after_withdraw.debt_e8s, before.debt_e8s, "withdraw refusal: debt unchanged");
+    assert_eq!(
+        after_withdraw.custody_address, before.custody_address,
+        "withdraw refusal: custody unchanged"
+    );
+
+    // `close_solana_vault` must ALSO refuse, with ZERO state change.
+    let close_result = decode_result(
+        update_dev(
+            &pic,
+            backend,
+            "close_solana_vault",
+            Encode!(&vault_id, &"11111111111111111111111111111111".to_string()).unwrap(),
+        ),
+        "close_solana_vault",
+    );
+    match close_result {
+        Err(ProtocolError::ChainAdmin(m)) => {
+            assert!(m.contains("EVM-owned"), "expected an EVM-owned refusal, got {m}")
+        }
+        other => panic!("close_solana_vault on an EVM-owned vault should refuse, got {other:?}"),
+    }
+    let after_close = get_vault(&pic, backend, vault_id).expect("vault still present");
+    assert_eq!(after_close.status, before.status, "close refusal: status unchanged");
+    assert_eq!(
+        after_close.collateral_amount_e18, before.collateral_amount_e18,
+        "close refusal: collateral unchanged"
+    );
+    assert_eq!(after_close.debt_e8s, before.debt_e8s, "close refusal: debt unchanged");
+
+    println!(
+        "[solana admin parity] details: withdraw_solana_collateral + close_solana_vault both refuse an EVM-owned vault, zero state change"
+    );
+    println!("[solana admin parity] PASS");
+}

@@ -2062,6 +2062,23 @@ fn withdraw_solana_collateral(
     }
     let now = ic_cdk::api::time();
     mutate_state(|s| {
+        let vault = s
+            .multi_chain
+            .chain_vaults
+            .get(&vault_id)
+            .ok_or_else(|| ProtocolError::ChainAdmin("unknown vault".into()))?;
+        // Parity with `withdraw_chain_collateral` (M2 review finding E): an
+        // EVM-owned (self-serve) vault may ONLY be driven by its EVM signer via
+        // the signed `_evm` methods; the operator must not be able to move a
+        // user's collateral. A debt-free EVM-owned vault would otherwise slip
+        // past this Solana admin path unrefused, since the CR check below is
+        // skipped for debt-free vaults and the price-symbol mismatch is only an
+        // incidental defense, not an intended gate.
+        if vault.owner_evm.is_some() {
+            return Err(ProtocolError::ChainAdmin(
+                "vault is EVM-owned; use the signed _evm endpoint".into(),
+            ));
+        }
         rumi_protocol_backend::chains::vault::withdraw_collateral_in_state(
             &mut s.multi_chain,
             vault_id,
@@ -2072,8 +2089,8 @@ fn withdraw_solana_collateral(
             config::SOLANA_MIN_CR_E4,
             now,
         )
+        .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
     })
-    .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
 }
 
 /// Close a debt-free Solana chain vault (mirrors `close_chain_vault`).
@@ -2094,6 +2111,22 @@ fn close_solana_vault(vault_id: u64, dest_address: String) -> Result<(), Protoco
     }
     let now = ic_cdk::api::time();
     mutate_state(|s| {
+        let vault = s
+            .multi_chain
+            .chain_vaults
+            .get(&vault_id)
+            .ok_or_else(|| ProtocolError::ChainAdmin("unknown vault".into()))?;
+        // Parity with `close_chain_vault` (M2 review finding E): an EVM-owned
+        // (self-serve) vault may ONLY be driven by its EVM signer via the signed
+        // `_evm` methods. `close` requires `debt_e8s == 0`, so the CR check
+        // inside `close_chain_vault_in_state` is a no-op here too; without this
+        // refusal a debt-free EVM-owned vault's collateral could be moved by the
+        // operator through this Solana admin path.
+        if vault.owner_evm.is_some() {
+            return Err(ProtocolError::ChainAdmin(
+                "vault is EVM-owned; use the signed _evm endpoint".into(),
+            ));
+        }
         rumi_protocol_backend::chains::vault::close_chain_vault_in_state(
             &mut s.multi_chain,
             vault_id,
@@ -2103,8 +2136,8 @@ fn close_solana_vault(vault_id: u64, dest_address: String) -> Result<(), Protoco
             config::SOLANA_MIN_CR_E4,
             now,
         )
+        .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
     })
-    .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
 }
 
 // Phase 1b Task 14: query + admin surface for the foreign-chain working set.
@@ -3615,6 +3648,12 @@ async fn submit_burn_proof(
             "burn-proof RPC error; retry: {}",
             e
         ))),
+        // The chain is temporarily reorg-halted (operator circuit breaker).
+        // Nothing was consumed or recorded, so the identical proof is
+        // processable once the halt is cleared. Retryable, not terminal.
+        Err(BurnProofError::ReorgHalted) => Err(ProtocolError::TemporarilyUnavailable(
+            "chain is reorg-halted; retry after the halt clears".into(),
+        )),
         // Terminal: reverted tx, unknown chain/contract, or a halt-class
         // supply-invariant failure. None of these is fixed by retrying.
         Err(e) => Err(ProtocolError::ChainAdmin(format!(
