@@ -11,6 +11,7 @@ SELF_TEST="0"
 EXPECTED_ICUSD_CONTRACT="0x8DdB0a13B26ed28912e4B8cCa99Bc3E8c66Df7Ff"
 EXPECTED_EVM_RPC_PRINCIPAL="7hfb6-caaaa-aaaar-qadga-cai"
 EXPECTED_ECDSA_KEY_NAME="key_1"
+EXPECTED_BAD_DEBT_THRESHOLD_E8S="10000000"
 # Principal + network calls need no project configuration. Running them outside
 # the checkout with an isolated CLI home avoids both a stale project-pinned
 # package and any dependency on the operator's configured signing identities.
@@ -54,59 +55,140 @@ done
 [[ "$CHAIN_ID" =~ ^[0-9]+$ ]] || { printf 'ERROR: --chain must be an unsigned integer\n' >&2; exit 2; }
 [[ "$MIN_CYCLES" =~ ^[0-9]+$ ]] || { printf 'ERROR: --min-cycles must be an unsigned integer\n' >&2; exit 2; }
 
-if [[ "$SELF_TEST" == "0" ]]; then
-  for dependency in icp jq python3; do
-    command -v "$dependency" >/dev/null 2>&1 || {
-      printf 'ERROR: required command not found: %s\n' "$dependency" >&2
-      exit 2
-    }
-  done
+for dependency in jq python3; do
+  command -v "$dependency" >/dev/null 2>&1 || {
+    printf 'ERROR: required command not found: %s\n' "$dependency" >&2
+    exit 2
+  }
+done
 
-  ICP_HOME_DIR="$(mktemp -d "$ICP_CALL_DIR/rumi-conflux-monitor.XXXXXX")"
-  trap 'rm -r -- "$ICP_HOME_DIR"' EXIT
+ICP_HOME_DIR="$(mktemp -d "$ICP_CALL_DIR/rumi-conflux-monitor.XXXXXX")"
+trap 'rm -r -- "$ICP_HOME_DIR"' EXIT
 
-  if ! STATUS_JSON="$(
+# Keep icp-cli's stdout protocol channel separate from warnings on stderr.
+# Every capture file lives inside the isolated temporary CLI home and is
+# removed by the EXIT trap.
+capture_in_call_dir() {
+  local stdout_file="$1"
+  local stderr_file="$2"
+  shift 2
+  (
     cd "$ICP_CALL_DIR"
+    "$@"
+  ) >"$stdout_file" 2>"$stderr_file"
+}
+
+print_query_failure() {
+  local label="$1"
+  local stdout_file="$2"
+  local stderr_file="$3"
+  printf 'FAIL %s unavailable' "$label" >&2
+  if [[ -s "$stderr_file" ]]; then
+    printf '\n  stderr: %s' "$(<"$stderr_file")" >&2
+  fi
+  if [[ -s "$stdout_file" ]]; then
+    printf '\n  stdout: %s' "$(<"$stdout_file")" >&2
+  fi
+  printf '\n' >&2
+}
+
+print_malformed_json_failure() {
+  local label="$1"
+  local stdout_file="$2"
+  local stderr_file="$3"
+  printf 'FAIL %s returned malformed icp-cli JSON' "$label" >&2
+  if [[ -s "$stderr_file" ]]; then
+    printf '\n  stderr: %s' "$(<"$stderr_file")" >&2
+  fi
+  if [[ -s "$stdout_file" ]]; then
+    printf '\n  stdout: %s' "$(<"$stdout_file")" >&2
+  fi
+  printf '\n' >&2
+}
+
+if [[ "$SELF_TEST" == "0" ]]; then
+  command -v icp >/dev/null 2>&1 || {
+    printf 'ERROR: required command not found: icp\n' >&2
+    exit 2
+  }
+
+  STATUS_STDOUT="$ICP_HOME_DIR/status.stdout"
+  STATUS_STDERR="$ICP_HOME_DIR/status.stderr"
+  if ! capture_in_call_dir "$STATUS_STDOUT" "$STATUS_STDERR" \
     env ICP_HOME="$ICP_HOME_DIR" DO_NOT_TRACK=1 \
       icp canister call "$BACKEND" get_chain_public_launch_status \
-        "($CHAIN_ID : nat32)" -n "$NETWORK" --identity anonymous --query --json 2>&1
-  )"; then
-    printf 'FAIL status query unavailable: %s\n' "$STATUS_JSON" >&2
+        "($CHAIN_ID : nat32)" -n "$NETWORK" --identity anonymous --query --json; then
+    print_query_failure "status query" "$STATUS_STDOUT" "$STATUS_STDERR"
     exit 1
   fi
+  STATUS_JSON="$(<"$STATUS_STDOUT")"
   if ! STATUS_CANDID="$(printf '%s' "$STATUS_JSON" | jq -er '.response_candid | strings')"; then
-    printf 'FAIL status query returned malformed icp-cli JSON\n' >&2
+    print_malformed_json_failure "status query" "$STATUS_STDOUT" "$STATUS_STDERR"
     exit 1
   fi
 
-  if ! CYCLES_JSON="$(
-    cd "$ICP_CALL_DIR"
+  CYCLES_STDOUT="$ICP_HOME_DIR/cycles.stdout"
+  CYCLES_STDERR="$ICP_HOME_DIR/cycles.stderr"
+  if ! capture_in_call_dir "$CYCLES_STDOUT" "$CYCLES_STDERR" \
     env ICP_HOME="$ICP_HOME_DIR" DO_NOT_TRACK=1 \
       icp canister call "$BACKEND" cycles_status '()' \
-        -n "$NETWORK" --identity anonymous --query --json 2>&1
-  )"; then
-    printf 'FAIL cycles query unavailable: %s\n' "$CYCLES_JSON" >&2
+        -n "$NETWORK" --identity anonymous --query --json; then
+    print_query_failure "cycles query" "$CYCLES_STDOUT" "$CYCLES_STDERR"
     exit 1
   fi
+  CYCLES_JSON="$(<"$CYCLES_STDOUT")"
   if ! CYCLES_CANDID="$(printf '%s' "$CYCLES_JSON" | jq -er '.response_candid | strings')"; then
-    printf 'FAIL cycles query returned malformed icp-cli JSON\n' >&2
+    print_malformed_json_failure "cycles query" "$CYCLES_STDOUT" "$CYCLES_STDERR"
     exit 1
   fi
 
-  if ! SUPPLY_AUDIT_JSON="$(
-    cd "$ICP_CALL_DIR"
+  SUPPLY_AUDIT_STDOUT="$ICP_HOME_DIR/supply-audit.stdout"
+  SUPPLY_AUDIT_STDERR="$ICP_HOME_DIR/supply-audit.stderr"
+  if ! capture_in_call_dir "$SUPPLY_AUDIT_STDOUT" "$SUPPLY_AUDIT_STDERR" \
     env ICP_HOME="$ICP_HOME_DIR" DO_NOT_TRACK=1 \
       icp canister call "$BACKEND" get_supply_audit '()' \
-        -n "$NETWORK" --identity anonymous --query --json 2>&1
-  )"; then
-    printf 'FAIL operator supply audit query unavailable: %s\n' "$SUPPLY_AUDIT_JSON" >&2
+        -n "$NETWORK" --identity anonymous --query --json; then
+    print_query_failure "operator supply audit query" "$SUPPLY_AUDIT_STDOUT" "$SUPPLY_AUDIT_STDERR"
     exit 1
   fi
+  SUPPLY_AUDIT_JSON="$(<"$SUPPLY_AUDIT_STDOUT")"
   if ! SUPPLY_AUDIT_CANDID="$(printf '%s' "$SUPPLY_AUDIT_JSON" | jq -er '.response_candid | strings')"; then
-    printf 'FAIL operator supply audit returned malformed icp-cli JSON\n' >&2
+    print_malformed_json_failure "operator supply audit" "$SUPPLY_AUDIT_STDOUT" "$SUPPLY_AUDIT_STDERR"
     exit 1
   fi
 else
+  STUB_STDOUT="$ICP_HOME_DIR/stub.stdout"
+  STUB_STDERR="$ICP_HOME_DIR/stub.stderr"
+  capture_in_call_dir "$STUB_STDOUT" "$STUB_STDERR" bash -c \
+    'printf '\''{"response_candid":"(record { ok = true })"}'\''; printf '\''warning: harmless icp-cli notice\n'\'' >&2'
+  [[ "$(jq -er '.response_candid | strings' "$STUB_STDOUT")" == "(record { ok = true })" ]] || {
+    printf 'FAIL self-test: valid JSON stdout did not parse\n' >&2
+    exit 1
+  }
+  [[ "$(<"$STUB_STDERR")" == "warning: harmless icp-cli notice" ]] || {
+    printf 'FAIL self-test: stderr warning was not captured separately\n' >&2
+    exit 1
+  }
+  printf 'partial stdout diagnostic' >"$STUB_STDOUT"
+  printf 'stderr failure diagnostic' >"$STUB_STDERR"
+  STUB_FAILURE_DIAGNOSTICS="$(print_query_failure "stub query" "$STUB_STDOUT" "$STUB_STDERR" 2>&1)"
+  [[ "$STUB_FAILURE_DIAGNOSTICS" == *"stderr: stderr failure diagnostic"* ]] || {
+    printf 'FAIL self-test: failure diagnostics dropped stderr\n' >&2
+    exit 1
+  }
+  [[ "$STUB_FAILURE_DIAGNOSTICS" == *"stdout: partial stdout diagnostic"* ]] || {
+    printf 'FAIL self-test: failure diagnostics dropped stdout\n' >&2
+    exit 1
+  }
+  STUB_MALFORMED_DIAGNOSTICS="$(print_malformed_json_failure "stub query" "$STUB_STDOUT" "$STUB_STDERR" 2>&1)"
+  [[ "$STUB_MALFORMED_DIAGNOSTICS" == *"stderr: stderr failure diagnostic"* ]] || {
+    printf 'FAIL self-test: malformed-JSON diagnostics dropped stderr\n' >&2
+    exit 1
+  }
+  [[ "$STUB_MALFORMED_DIAGNOSTICS" == *"stdout: partial stdout diagnostic"* ]] || {
+    printf 'FAIL self-test: malformed-JSON diagnostics dropped stdout\n' >&2
+    exit 1
+  }
   STATUS_CANDID=""
   CYCLES_CANDID=""
   SUPPLY_AUDIT_CANDID=""
@@ -114,12 +196,15 @@ fi
 
 export EXPECTATION CHAIN_ID MIN_CYCLES SELF_TEST EXPECTED_ICUSD_CONTRACT
 export EXPECTED_EVM_RPC_PRINCIPAL EXPECTED_ECDSA_KEY_NAME
+export EXPECTED_BAD_DEBT_THRESHOLD_E8S
 export STATUS_CANDID CYCLES_CANDID SUPPLY_AUDIT_CANDID
 
 python3 - <<'PY'
 import os
 import re
 import sys
+
+EXPECTED_BAD_DEBT_THRESHOLD_E8S = int(os.environ["EXPECTED_BAD_DEBT_THRESHOLD_E8S"])
 
 
 def launch_status(**overrides):
@@ -163,7 +248,7 @@ def launch_status(**overrides):
         "invariant_halted": "false",
         "reorg_halted": "false",
         "bad_debt_e8s": "0 : nat",
-        "bad_debt_threshold_e8s": "opt (100_000_000 : nat)",
+        "bad_debt_threshold_e8s": "opt (10_000_000 : nat)",
         "bad_debt_circuit_tripped": "false",
         "bad_debt_tripped_at_ns": "null",
         "burn_cursor": "154_846_297 : nat64",
@@ -424,7 +509,13 @@ def validate(
         require(not boolean(status, "invariant_halted"), "supply invariant is halted")
         require(not boolean(status, "reorg_halted"), "chain reorg breaker is halted")
         require(not boolean(status, "bad_debt_circuit_tripped"), "bad-debt circuit is tripped")
-        require(present_optional(status, "bad_debt_threshold_e8s"), "bad-debt circuit threshold is missing")
+        bad_debt_threshold = optional_integer(status, "bad_debt_threshold_e8s")
+        metrics.update(bad_debt_threshold_e8s=bad_debt_threshold)
+        require(
+            bad_debt_threshold == EXPECTED_BAD_DEBT_THRESHOLD_E8S,
+            "bad-debt circuit threshold is "
+            f"{bad_debt_threshold}, expected {EXPECTED_BAD_DEBT_THRESHOLD_E8S}",
+        )
         burn_cursor = integer(status, "burn_cursor")
         require(burn_cursor > 0, "burn cursor is unseeded")
         chain_supply = integer(status, "chain_supply_e8s")
@@ -555,6 +646,9 @@ def self_test():
         (launch_status(effective_evm_rpc_principal='principal "aaaaa-aa"', evm_rpc_principal_matches_expected="false", blocking_reasons='vec { "chain_disabled"; "evm_rpc_principal_mismatch" }'), good_cycles, good_audit, "disabled", "wrong EVM-RPC principal"),
         (launch_status(chains_ecdsa_key_name='"test_key_1"', chains_ecdsa_key_matches_expected="false", blocking_reasons='vec { "chain_disabled"; "chains_ecdsa_key_mismatch" }'), good_cycles, good_audit, "disabled", "wrong ECDSA key"),
         (launch_status(bad_debt_threshold_e8s="null"), good_cycles, good_audit, "disabled", "missing bad-debt threshold"),
+        (launch_status(bad_debt_threshold_e8s="opt (0 : nat)"), good_cycles, good_audit, "disabled", "zero bad-debt threshold"),
+        (launch_status(bad_debt_threshold_e8s="opt (9_999_999 : nat)"), good_cycles, good_audit, "disabled", "low bad-debt threshold"),
+        (launch_status(bad_debt_threshold_e8s="opt (10_000_001 : nat)"), good_cycles, good_audit, "disabled", "high bad-debt threshold"),
         (launch_status(bound_icusd_contract='opt "0x0000000000000000000000000000000000000000"', icusd_contract_matches_expected="false", blocking_reasons='vec { "chain_disabled"; "icusd_contract_mismatch" }'), good_cycles, good_audit, "disabled", "wrong contract"),
         (launch_status(finality_depth="opt (399 : nat32)"), good_cycles, good_audit, "disabled", "wrong finality"),
         (launch_status(burn_cursor="0 : nat64"), good_cycles, good_audit, "disabled", "unseeded cursor"),

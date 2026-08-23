@@ -2685,7 +2685,7 @@ mod chain_public_launch_status_tests {
     use rumi_protocol_backend::chains::evm::hardening::HOT_WALLET_MIN_E18;
     use rumi_protocol_backend::chains::evm::public_readiness::{
         collateral_config_matches_expected, expected_liquidation_config,
-        HOT_WALLET_BALANCE_MAX_AGE_NS,
+        CONFLUX_MAINNET_BAD_DEBT_CIRCUIT_THRESHOLD_E8S, HOT_WALLET_BALANCE_MAX_AGE_NS,
     };
     use rumi_protocol_backend::chains::liquidation_config::ChainLiquidationConfigV1;
     use rumi_protocol_backend::chains::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
@@ -2734,7 +2734,7 @@ mod chain_public_launch_status_tests {
         state
             .multi_chain
             .chain_bad_debt_circuit_threshold_e8s
-            .insert(CFX, 10_000_000);
+            .insert(CFX, CONFLUX_MAINNET_BAD_DEBT_CIRCUIT_THRESHOLD_E8S);
         state
             .multi_chain
             .hot_wallet_balance_e18
@@ -2800,6 +2800,10 @@ mod chain_public_launch_status_tests {
         );
         assert!(status.hot_wallet_balance_is_fresh);
         assert_eq!(status.hot_wallet_balance_age_ns, Some(500));
+        assert_eq!(
+            status.bad_debt_threshold_e8s,
+            Some(CONFLUX_MAINNET_BAD_DEBT_CIRCUIT_THRESHOLD_E8S)
+        );
     }
 
     #[test]
@@ -2859,7 +2863,7 @@ mod chain_public_launch_status_tests {
     }
 
     #[test]
-    fn readiness_requires_proven_gas_and_an_enabled_bad_debt_breaker() {
+    fn readiness_requires_proven_gas_and_the_exact_bad_debt_breaker_threshold() {
         let mut state = ready_state();
         state.multi_chain.hot_wallet_balance_e18.remove(&CFX);
         state
@@ -2878,6 +2882,31 @@ mod chain_public_launch_status_tests {
             .insert(CFX, 0);
         let status = chain_public_launch_status_in_state(&state, CFX, 1_500);
         assert_blocked(&status, "bad_debt_circuit_not_configured");
+
+        for threshold in [
+            CONFLUX_MAINNET_BAD_DEBT_CIRCUIT_THRESHOLD_E8S - 1,
+            CONFLUX_MAINNET_BAD_DEBT_CIRCUIT_THRESHOLD_E8S + 1,
+        ] {
+            state
+                .multi_chain
+                .chain_bad_debt_circuit_threshold_e8s
+                .insert(CFX, threshold);
+            let status = chain_public_launch_status_in_state(&state, CFX, 1_500);
+            assert_blocked(&status, "bad_debt_circuit_threshold_mismatch");
+            let error = enforce_conflux_mainnet_public_risk_gate(&state, CFX, 1_500)
+                .expect_err("mismatched bad-debt threshold must fail the gate");
+            assert!(matches!(error, ProtocolError::EvmAuth(_)));
+        }
+
+        state
+            .multi_chain
+            .chain_bad_debt_circuit_threshold_e8s
+            .insert(CFX, CONFLUX_MAINNET_BAD_DEBT_CIRCUIT_THRESHOLD_E8S);
+        let status = chain_public_launch_status_in_state(&state, CFX, 1_500);
+        assert!(!status
+            .blocking_reasons
+            .iter()
+            .any(|reason| reason.starts_with("bad_debt_circuit_")));
     }
 
     #[test]

@@ -1149,10 +1149,43 @@ fn tally_provider_outcomes(
     }
 }
 
+/// Run a first-success provider fan-out while consulting a synchronous gate
+/// before every attempt. The gate is re-run after each failed provider await,
+/// so an operator stop cannot be bypassed by a later provider retry.
+pub(crate) async fn guarded_first_ok<T, G, C, F>(
+    items: Vec<T>,
+    mut before_attempt: G,
+    mut call: C,
+) -> Result<String, String>
+where
+    G: FnMut(usize) -> Result<(), String>,
+    C: FnMut(T) -> F,
+    F: std::future::Future<Output = Result<String, String>>,
+{
+    let mut last_err = String::new();
+    for (attempt, item) in items.into_iter().enumerate() {
+        before_attempt(attempt)
+            .map_err(|error| format!("broadcast stopped before provider attempt: {error}"))?;
+        match call(item).await {
+            Ok(text) => return Ok(text),
+            Err(error) => last_err = error,
+        }
+    }
+    Err(last_err)
+}
+
 /// Broadcast a raw JSON-RPC WRITE (`eth_sendRawTransaction`). Returns the first
 /// provider's Ok — a broadcast propagates if ANY provider accepts it, so quorum
-/// is the wrong model for a write. On all-fail returns the last error.
-async fn call_evm_rpc_broadcast(chain: ChainId, json_payload: &str) -> Result<String, String> {
+/// is the wrong model for a write. On all-fail returns the last error. A caller
+/// may provide a post-await gate that is checked before every provider attempt.
+async fn call_evm_rpc_broadcast_guarded<G>(
+    chain: ChainId,
+    json_payload: &str,
+    before_attempt: G,
+) -> Result<String, String>
+where
+    G: FnMut(usize) -> Result<(), String>,
+{
     let endpoints: Vec<String> = read_state(|s| {
         s.multi_chain
             .chain_configs
@@ -1164,14 +1197,12 @@ async fn call_evm_rpc_broadcast(chain: ChainId, json_payload: &str) -> Result<St
         return Err(format!("no RPC endpoints configured for chain {:?}", chain));
     }
     let canister = evm_rpc_principal();
-    let mut last_err = String::new();
-    for url in &endpoints {
-        match single_call(canister, url, json_payload).await {
-            Ok(text) => return Ok(text),
-            Err(e) => last_err = e,
-        }
-    }
-    Err(last_err)
+    let payload = json_payload.to_string();
+    guarded_first_ok(endpoints, before_attempt, move |url| {
+        let payload = payload.clone();
+        async move { single_call(canister, &url, &payload).await }
+    })
+    .await
 }
 
 // ─── JSON-RPC request ID counter ─────────────────────────────────────────────
@@ -1827,13 +1858,26 @@ pub async fn get_transaction_receipt_with_logs(
 /// Broadcasts a signed raw transaction.  Returns the transaction hash on
 /// success.
 pub async fn send_raw_transaction(chain: ChainId, raw_tx_hex: &str) -> Result<String, String> {
+    send_raw_transaction_guarded(chain, raw_tx_hex, |_| Ok(())).await
+}
+
+/// Guarded variant used by liquidation swaps. The synchronous gate is checked
+/// before the first provider and again after every failed provider await.
+pub async fn send_raw_transaction_guarded<G>(
+    chain: ChainId,
+    raw_tx_hex: &str,
+    before_attempt: G,
+) -> Result<String, String>
+where
+    G: FnMut(usize) -> Result<(), String>,
+{
     let payload = format!(
         r#"{{"jsonrpc":"2.0","method":"eth_sendRawTransaction","params":[{:?}],"id":{}}}"#,
         raw_tx_hex,
         next_rpc_id()
     );
-    // A broadcast is a write: first-Ok, not quorum (see call_evm_rpc_broadcast).
-    let text = call_evm_rpc_broadcast(chain, &payload).await?;
+    // A broadcast is a write: first-Ok, not quorum (see call_evm_rpc_broadcast_guarded).
+    let text = call_evm_rpc_broadcast_guarded(chain, &payload, before_attempt).await?;
     let val: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("eth_sendRawTransaction parse: {}", e))?;
 
