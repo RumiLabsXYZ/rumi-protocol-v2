@@ -1,9 +1,11 @@
 import { defineChain, parseEther } from "viem";
+import { resolvePublicCanonicalOrigin } from "./origin";
 
-export type DeploymentMode = "testnet" | "production-canary";
+export type DeploymentMode = "testnet" | "production-canary" | "production-public";
 
 export type DeploymentConfig = {
   mode: DeploymentMode;
+  mainnet: boolean;
   productionCanary: boolean;
   backendCanisterId: string;
   chainId: number;
@@ -11,10 +13,12 @@ export type DeploymentConfig = {
   rpcUrl: string;
   explorerUrl: string;
   icusdContract: `0x${string}`;
+  receiptConfirmations: number;
 };
 
 const TESTNET_CONFIG: DeploymentConfig = {
   mode: "testnet",
+  mainnet: false,
   productionCanary: false,
   backendCanisterId: "kvg63-wiaaa-aaaao-bbabq-cai",
   chainId: 71,
@@ -22,6 +26,7 @@ const TESTNET_CONFIG: DeploymentConfig = {
   rpcUrl: "https://evmtestnet.confluxrpc.com",
   explorerUrl: "https://evmtestnet.confluxscan.org",
   icusdContract: "0xBD02222D388BC43095A4758C3e977d5dF8f68f7a",
+  receiptConfirmations: 1,
 };
 
 export const CANARY_CHAIN_ID = 1030;
@@ -29,6 +34,7 @@ export const CANARY_ICUSD_CONTRACT = "0x8DdB0a13B26ed28912e4B8cCa99Bc3E8c66Df7Ff
 
 const PRODUCTION_CANARY_CONFIG: DeploymentConfig = {
   mode: "production-canary",
+  mainnet: true,
   productionCanary: true,
   backendCanisterId: "tfesu-vyaaa-aaaap-qrd7a-cai",
   chainId: CANARY_CHAIN_ID,
@@ -36,17 +42,45 @@ const PRODUCTION_CANARY_CONFIG: DeploymentConfig = {
   rpcUrl: "https://evm.confluxrpc.com",
   explorerUrl: "https://evm.confluxscan.io",
   icusdContract: CANARY_ICUSD_CONTRACT,
+  receiptConfirmations: 400,
+};
+
+const PRODUCTION_PUBLIC_CONFIG: DeploymentConfig = {
+  mode: "production-public",
+  mainnet: true,
+  productionCanary: false,
+  backendCanisterId: "tfesu-vyaaa-aaaap-qrd7a-cai",
+  chainId: CANARY_CHAIN_ID,
+  chainName: "Conflux eSpace Mainnet",
+  rpcUrl: "https://evm.confluxrpc.com",
+  explorerUrl: "https://evm.confluxscan.io",
+  icusdContract: CANARY_ICUSD_CONTRACT,
+  receiptConfirmations: 400,
 };
 
 /** Resolve a build target. Empty/undefined deliberately preserves the existing testnet default. */
 export function resolveDeploymentConfig(mode?: string): DeploymentConfig {
   if (!mode || mode === "testnet") return TESTNET_CONFIG;
   if (mode === "production-canary") return PRODUCTION_CANARY_CONFIG;
+  if (mode === "production-public") return PRODUCTION_PUBLIC_CONFIG;
   throw new Error(`Unsupported VITE_DEPLOYMENT_MODE: ${mode}`);
 }
 
 export const DEPLOYMENT = resolveDeploymentConfig(import.meta.env.VITE_DEPLOYMENT_MODE);
+export const IS_MAINNET = DEPLOYMENT.mainnet;
 export const IS_PRODUCTION_CANARY = DEPLOYMENT.productionCanary;
+export const IS_PRODUCTION_PUBLIC = DEPLOYMENT.mode === "production-public";
+export const PUBLIC_CANONICAL_ORIGIN = resolvePublicCanonicalOrigin(
+  DEPLOYMENT.mode,
+  import.meta.env.VITE_PUBLIC_CANONICAL_ORIGIN,
+  import.meta.env.VITE_PUBLIC_ORIGIN_CONTEXT,
+);
+
+/** A single click may prompt at most once on mainnet. Testnet retains one
+ * convenience retry for local/staging nonce races. */
+export function signatureAttemptLimit(mainnet: boolean): 1 | 2 {
+  return mainnet ? 1 : 2;
+}
 
 export const BACKEND_CANISTER_ID = DEPLOYMENT.backendCanisterId;
 /** IC HTTP gateway. Anonymous agent — the EVM signature is the only auth. */
@@ -55,6 +89,17 @@ export const CHAIN_ID = DEPLOYMENT.chainId;
 export const ESPACE_RPC = DEPLOYMENT.rpcUrl;
 export const ESPACE_EXPLORER = DEPLOYMENT.explorerUrl;
 export const ICUSD_CONTRACT = DEPLOYMENT.icusdContract;
+export const RECEIPT_CONFIRMATIONS = DEPLOYMENT.receiptConfirmations;
+
+/** Mirrors viem's confirmation count: the inclusion block counts as one. */
+export function receiptHasRequiredConfirmations(
+  receiptBlock: bigint,
+  headBlock: bigint,
+  requiredConfirmations: number,
+): boolean {
+  if (!Number.isSafeInteger(requiredConfirmations) || requiredConfirmations < 1 || headBlock < receiptBlock) return false;
+  return headBlock - receiptBlock + 1n >= BigInt(requiredConfirmations);
+}
 
 /** EIP-712 domain — MUST match the backend's `chains/evm/eip712.rs` exactly. */
 export const EIP712_DOMAIN = {
@@ -94,8 +139,17 @@ export const SUGGESTED_COLLATERAL_BUFFER = 1.02;
  * SUGGESTED_COLLATERAL_BUFFER. Returns 0n for non-positive inputs.
  */
 export function suggestedCollateralWei(debtIcusd: number, cfxPriceUsd: number): bigint {
+  return suggestedCollateralWeiAtRatio(debtIcusd, cfxPriceUsd, MIN_CR);
+}
+
+export function suggestedCollateralWeiAtRatio(
+  debtIcusd: number,
+  cfxPriceUsd: number,
+  minimumCollateralRatio: number,
+): bigint {
   if (!(debtIcusd > 0) || !(cfxPriceUsd > 0)) return 0n;
-  const cfxNeeded = (debtIcusd * MIN_CR / cfxPriceUsd) * SUGGESTED_COLLATERAL_BUFFER;
+  if (!(minimumCollateralRatio > 0)) return 0n;
+  const cfxNeeded = (debtIcusd * minimumCollateralRatio / cfxPriceUsd) * SUGGESTED_COLLATERAL_BUFFER;
   return parseEther(cfxNeeded.toFixed(6));
 }
 
@@ -115,7 +169,7 @@ export const confluxESpaceChain = defineChain({
   nativeCurrency: { name: "Conflux", symbol: "CFX", decimals: CFX_DECIMALS },
   rpcUrls: { default: { http: [ESPACE_RPC] } },
   blockExplorers: { default: { name: "ConfluxScan", url: ESPACE_EXPLORER } },
-  testnet: !IS_PRODUCTION_CANARY,
+  testnet: !IS_MAINNET,
 });
 
 // Compatibility alias for any external testnet-only imports.

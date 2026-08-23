@@ -3,16 +3,22 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Standalone injected-wallet UI for the Rumi EVM-native CDP rail. Defaults to Conflux eSpace testnet; includes an explicit local production-canary build.",
+  "description": "Standalone injected-wallet UI for the Rumi EVM-native CDP rail with isolated testnet, production-canary, and production-public builds.",
   "scripts": {
     "dev": "vite",
     "dev:production-canary": "VITE_DEPLOYMENT_MODE=production-canary vite",
+    "dev:production-public": "VITE_DEPLOYMENT_MODE=production-public VITE_PUBLIC_ORIGIN_CONTEXT=local-verification VITE_PUBLIC_CANONICAL_ORIGIN=http://127.0.0.1:5174 vite --host 127.0.0.1 --port 5174 --strictPort",
     "build": "vite build",
     "build:testnet": "VITE_DEPLOYMENT_MODE=testnet vite build",
     "build:production-canary": "VITE_DEPLOYMENT_MODE=production-canary vite build",
+    "build:production-public": "node scripts/verify-production-public-build.mjs local",
+    "verify:production-public:deploy-build": "node scripts/verify-production-public-build.mjs deployment",
+    "build:production-public:deploy": "VITE_DEPLOYMENT_MODE=production-public VITE_PUBLIC_ORIGIN_CONTEXT=deployment vite build --outDir dist-production-public && npm run check:production-public-bundle",
+    "check:production-public-bundle": "node scripts/assert-production-public-bundle.mjs",
     "preview": "vite preview",
     "test": "vitest run",
     "test:production-canary": "VITE_DEPLOYMENT_MODE=production-canary vitest run",
+    "test:production-public": "VITE_DEPLOYMENT_MODE=production-public VITE_PUBLIC_ORIGIN_CONTEXT=local-verification VITE_PUBLIC_CANONICAL_ORIGIN=http://127.0.0.1:5174 vitest run",
     "check": "svelte-check --tsconfig ./tsconfig.json"
   },
   "devDependencies": {

@@ -4,7 +4,9 @@ import {
   CANARY_DEBT_E8S,
   MIN_CR,
   openTermsFor,
+  receiptHasRequiredConfirmations,
   resolveDeploymentConfig,
+  signatureAttemptLimit,
   suggestedCollateralWei,
 } from "./config";
 
@@ -13,12 +15,14 @@ describe("deployment config", () => {
     const config = resolveDeploymentConfig();
     expect(config).toMatchObject({
       mode: "testnet",
+      mainnet: false,
       productionCanary: false,
       chainId: 71,
       backendCanisterId: "kvg63-wiaaa-aaaao-bbabq-cai",
       rpcUrl: "https://evmtestnet.confluxrpc.com",
       explorerUrl: "https://evmtestnet.confluxscan.org",
       icusdContract: "0xBD02222D388BC43095A4758C3e977d5dF8f68f7a",
+      receiptConfirmations: 1,
     });
   });
 
@@ -26,16 +30,46 @@ describe("deployment config", () => {
     const config = resolveDeploymentConfig("production-canary");
     expect(config).toMatchObject({
       productionCanary: true,
+      mainnet: true,
       chainId: 1030,
       backendCanisterId: "tfesu-vyaaa-aaaap-qrd7a-cai",
       rpcUrl: "https://evm.confluxrpc.com",
       explorerUrl: "https://evm.confluxscan.io",
       icusdContract: "0x8DdB0a13B26ed28912e4B8cCa99Bc3E8c66Df7Ff",
+      receiptConfirmations: 400,
+    });
+  });
+
+  it("pins a distinct production-public mode to the production backend, chain, and contract", () => {
+    const config = resolveDeploymentConfig("production-public");
+    expect(config).toMatchObject({
+      mode: "production-public",
+      mainnet: true,
+      productionCanary: false,
+      chainId: 1030,
+      backendCanisterId: "tfesu-vyaaa-aaaap-qrd7a-cai",
+      rpcUrl: "https://evm.confluxrpc.com",
+      explorerUrl: "https://evm.confluxscan.io",
+      icusdContract: "0x8DdB0a13B26ed28912e4B8cCa99Bc3E8c66Df7Ff",
+      receiptConfirmations: 400,
     });
   });
 
   it("refuses an unknown deployment mode", () => {
     expect(() => resolveDeploymentConfig("production")).toThrow("Unsupported VITE_DEPLOYMENT_MODE");
+  });
+
+  it("allows one wallet prompt per mainnet click and keeps the testnet retry", () => {
+    expect(signatureAttemptLimit(true)).toBe(1);
+    expect(signatureAttemptLimit(false)).toBe(2);
+  });
+
+  it("keeps production receipt locks through 399 confirmations and resolves at 400", () => {
+    const receiptBlock = 100n;
+    expect(receiptHasRequiredConfirmations(receiptBlock, 498n, 400)).toBe(false);
+    expect(receiptHasRequiredConfirmations(receiptBlock, 499n, 400)).toBe(true);
+    expect(receiptHasRequiredConfirmations(receiptBlock, 99n, 400)).toBe(false);
+    expect(receiptHasRequiredConfirmations(receiptBlock, 100n, 1)).toBe(true);
   });
 
   it("hard-locks production open terms and leaves testnet terms configurable", () => {
