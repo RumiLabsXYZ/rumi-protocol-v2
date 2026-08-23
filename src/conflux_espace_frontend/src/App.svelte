@@ -12,6 +12,7 @@
     MIN_CR,
     MIN_DEBT_E8S,
     openTermsFor,
+    suggestedCollateralWei,
   } from "./config";
   import { backend, errText, statusName, type ChainVault } from "./backend";
   import {
@@ -46,7 +47,6 @@
     hasLegacyInjected,
     icusdBalance,
     isExplicitWalletRejection,
-    parseEther,
     refreshInjectedWallets,
     sendDeposit,
     subscribeWallets,
@@ -133,9 +133,7 @@
   const requestedCfxWei = $derived.by(() => {
     const d = parseFloat(debtInput) || 0;
     const p = parseFloat(cfxPrice) || 0;
-    if (d <= 0 || p <= 0) return 0n;
-    const cfxNeeded = (d * MIN_CR / p) * 1.02; // +2% buffer over the floor
-    return parseEther(cfxNeeded.toFixed(6));
+    return suggestedCollateralWei(d, p);
   });
   const openTerms = $derived(openTermsFor(DEPLOYMENT, requestedCfxWei, requestedDebtE8s));
 

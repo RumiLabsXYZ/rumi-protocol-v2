@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   CANARY_COLLATERAL_WEI,
   CANARY_DEBT_E8S,
+  MIN_CR,
   openTermsFor,
   resolveDeploymentConfig,
+  suggestedCollateralWei,
 } from "./config";
 
 describe("deployment config", () => {
@@ -43,5 +45,42 @@ describe("deployment config", () => {
       debtE8s: CANARY_DEBT_E8S,
     });
     expect(openTermsFor(resolveDeploymentConfig("testnet"), 99n, 88n)).toEqual(requested);
+  });
+});
+
+describe("suggestedCollateralWei", () => {
+  // Recomputes the collateral ratio (collateral USD / debt USD) implied by a
+  // suggestedCollateralWei() result — the same ratio the backend's open/borrow
+  // gate checks against min_cr_e4 in chains/collateral_config.rs.
+  function impliedCr(debtIcusd: number, cfxPriceUsd: number): number {
+    const wei = suggestedCollateralWei(debtIcusd, cfxPriceUsd);
+    const collateralCfx = Number(wei) / 1e18;
+    return (collateralCfx * cfxPriceUsd) / debtIcusd;
+  }
+
+  it("mirrors the backend's 150% open/borrow gate (min_cr_e4 = 15_000)", () => {
+    expect(MIN_CR).toBe(1.5);
+  });
+
+  it("clears MIN_CR for the canary's fixed 5 CFX / 0.10 icUSD debt shape", () => {
+    expect(impliedCr(0.1, 0.15)).toBeGreaterThanOrEqual(MIN_CR);
+  });
+
+  it("clears MIN_CR for representative generic testnet debt/price shapes", () => {
+    // Default testnet form values (debtInput "0.2", cfxPrice "0.15").
+    expect(impliedCr(0.2, 0.15)).toBeGreaterThanOrEqual(MIN_CR);
+    // Larger debt at a higher price.
+    expect(impliedCr(5, 0.42)).toBeGreaterThanOrEqual(MIN_CR);
+    // Large debt at a low price.
+    expect(impliedCr(1000, 0.08)).toBeGreaterThanOrEqual(MIN_CR);
+    // Small debt at a high price.
+    expect(impliedCr(0.15, 3.5)).toBeGreaterThanOrEqual(MIN_CR);
+  });
+
+  it("returns 0 for non-positive debt or price", () => {
+    expect(suggestedCollateralWei(0, 0.15)).toBe(0n);
+    expect(suggestedCollateralWei(1, 0)).toBe(0n);
+    expect(suggestedCollateralWei(-1, 0.15)).toBe(0n);
+    expect(suggestedCollateralWei(1, -0.15)).toBe(0n);
   });
 });

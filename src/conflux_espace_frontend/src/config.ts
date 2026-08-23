@@ -1,4 +1,4 @@
-import { defineChain } from "viem";
+import { defineChain, parseEther } from "viem";
 
 export type DeploymentMode = "testnet" | "production-canary";
 
@@ -66,12 +66,38 @@ export const EIP712_DOMAIN = {
 
 // ── CDP params (mirror the backend's chain collateral config) ────────────────
 
-/** Minimum collateral ratio (1.33 = 133%). */
-export const MIN_CR = 1.33;
+/**
+ * Minimum collateral ratio (1.50 = 150%). Mirrors the backend's open/borrow
+ * gate `min_cr_e4` (15_000) in `src/rumi_protocol_backend/src/chains/collateral_config.rs`
+ * for Conflux (chain 71 and 1030). This is NOT the liquidation threshold
+ * (`liquidation_threshold_e4`, 133%) — it is the higher bar the backend
+ * enforces when a vault is opened or borrowed against. Must move in lockstep
+ * with `min_cr_e4`; a mismatch under-collateralizes the suggested amount and
+ * the backend rejects the Open intent after the EVM nonce is already spent,
+ * forcing a re-sign.
+ */
+export const MIN_CR = 1.5;
 /** Minimum vault debt: 0.1 icUSD (e8s). */
 export const MIN_DEBT_E8S = 10_000_000n;
 export const ICUSD_DECIMALS = 8;
 export const CFX_DECIMALS = 18;
+
+/** Safety buffer applied above MIN_CR when suggesting collateral, to absorb
+ * price/rounding drift between the UX hint and the backend's authoritative
+ * check. Matches the buffer already used by the pre-existing suggestion
+ * formula (kept as-is, not a new product behavior). */
+export const SUGGESTED_COLLATERAL_BUFFER = 1.02;
+
+/**
+ * Suggested CFX collateral (in wei) for a requested icUSD debt at a given
+ * CFX/USD price, sized to clear the backend's MIN_CR floor plus
+ * SUGGESTED_COLLATERAL_BUFFER. Returns 0n for non-positive inputs.
+ */
+export function suggestedCollateralWei(debtIcusd: number, cfxPriceUsd: number): bigint {
+  if (!(debtIcusd > 0) || !(cfxPriceUsd > 0)) return 0n;
+  const cfxNeeded = (debtIcusd * MIN_CR / cfxPriceUsd) * SUGGESTED_COLLATERAL_BUFFER;
+  return parseEther(cfxNeeded.toFixed(6));
+}
 
 /** Immutable production-canary envelope. These values are sent in the Open intent. */
 export const CANARY_COLLATERAL_WEI = 5n * 10n ** 18n;
