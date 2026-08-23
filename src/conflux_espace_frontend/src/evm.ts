@@ -12,10 +12,10 @@ import {
   formatEther,
   formatUnits,
   type Address,
+  type Account,
   type Hex,
   type WalletClient,
 } from "viem";
-import { privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
 import {
   CHAIN_ID,
   ESPACE_EXPLORER,
@@ -23,7 +23,8 @@ import {
   ICUSD_ABI,
   ICUSD_CONTRACT,
   ICUSD_DECIMALS,
-  IS_PRODUCTION_CANARY,
+  IS_MAINNET,
+  RECEIPT_CONFIRMATIONS,
   DEPLOYMENT,
   confluxESpaceChain,
 } from "./config";
@@ -38,7 +39,7 @@ export interface Wallet {
   kind: "injected" | "devkey";
   walletName: string;
   client: WalletClient;
-  account: Address | PrivateKeyAccount;
+  account: Address | Account;
 }
 
 // ── EIP-6963 multi-injected-provider discovery ──────────────────────────────
@@ -125,14 +126,13 @@ export async function connectLegacyInjected(): Promise<Wallet> {
   return { address, kind: "injected", walletName: name, client, account: address };
 }
 
-export function connectDevKey(pk: string): Wallet {
-  if (IS_PRODUCTION_CANARY) {
-    throw new Error("Private-key entry is disabled in production-canary builds. Use an injected wallet.");
-  }
-  const hex = (pk.startsWith("0x") ? pk : `0x${pk}`) as Hex;
-  const account = privateKeyToAccount(hex);
-  const client = createWalletClient({ account, chain: confluxESpaceChain, transport: http(ESPACE_RPC) });
-  return { address: account.address, kind: "devkey", walletName: "Dev key", client, account };
+export async function walletChainId(w: Wallet): Promise<number> {
+  return w.client.getChainId();
+}
+
+export async function walletStillControlsAddress(w: Wallet): Promise<boolean> {
+  const addresses = await w.client.getAddresses();
+  return addresses.some((address) => address.toLowerCase() === w.address.toLowerCase());
 }
 
 async function ensureChain(client: WalletClient, eth: any) {
@@ -204,14 +204,15 @@ export type TransactionFinality = {
   replacementReason: "repriced" | "replaced" | "cancelled" | null;
 };
 
-/** Wait for one wallet-submitted transaction. Repriced transactions retain the
- * action; semantic replacement/cancellation fails closed and requires retry. */
+/** Wait for one wallet-submitted transaction through the deployment's reviewed
+ * finality depth. A semantic replacement stays ambiguous; a finalized revert
+ * or cancellation proves non-execution but never triggers an automatic retry. */
 export async function waitForTransactionFinality(hash: Hex): Promise<TransactionFinality> {
   let finalHash = hash;
   let replacementReason: TransactionFinality["replacementReason"] = null;
   const receipt = await publicClient.waitForTransactionReceipt({
     hash,
-    confirmations: 1,
+    confirmations: RECEIPT_CONFIRMATIONS,
     onReplaced: ({ reason, transactionReceipt }) => {
       replacementReason = reason;
       finalHash = transactionReceipt.transactionHash;

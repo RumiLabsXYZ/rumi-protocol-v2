@@ -65,7 +65,11 @@ fn enable_price_age_gate(s: &mut MultiChainState, max_price_age_ns: u64) {
 /// `max_price_age_ns`, never `enabled`. That kill switch only ever gates the
 /// liquidation-swap worker, not the public open path, despite what the field
 /// name suggests.
-fn enable_price_age_gate_with_enabled(s: &mut MultiChainState, max_price_age_ns: u64, enabled: bool) {
+fn enable_price_age_gate_with_enabled(
+    s: &mut MultiChainState,
+    max_price_age_ns: u64,
+    enabled: bool,
+) {
     use super::liquidation_config::{ChainLiquidationConfigV1, DexKind};
     s.chain_liquidation_configs.insert(
         CHAIN,
@@ -352,19 +356,26 @@ fn open_rejects_when_chain_disabled_mid_flight_after_simulated_await() {
     assert!(s.chain_vaults.is_empty());
 }
 
-/// Security review (F10): withdraw/close/repay are EXIT paths and must keep
-/// working on a Disabled chain; only risk-increasing operations (open,
-/// borrow) are gated. This proves `withdraw_collateral_in_state` does not
-/// regress: open a vault while Registered, THEN disable the chain, THEN
-/// withdraw must still succeed.
+/// The chain-agnostic mutation helper intentionally does not know the public
+/// chain-1030 launch predicate. A caller can use it for operator/test rails,
+/// while `withdraw_chain_collateral_evm` must classify debt-bearing collateral
+/// reduction as risk-increasing and enforce readiness before calling it. This
+/// test documents only the lower helper boundary; it is not evidence that the
+/// signed public endpoint permits a debt-bearing withdrawal while Disabled.
 #[test]
-fn withdraw_still_works_after_chain_disabled() {
+fn lower_withdraw_helper_does_not_own_chain_status_policy() {
     use super::config::ChainStatus;
     use super::vault::withdraw_collateral_in_state;
     let mut s = setup(PRICE_150_USD_E8);
     // 1_000 SOL collateral vs 100 icUSD debt: way over-collateralized, so a
     // small withdraw stays well above the min CR.
-    insert_open_vault(&mut s, Principal::anonymous(), 7, 1_000 * ONE_SOL, 100_00000000);
+    insert_open_vault(
+        &mut s,
+        Principal::anonymous(),
+        7,
+        1_000 * ONE_SOL,
+        100_00000000,
+    );
 
     s.chain_configs.get_mut(&CHAIN).unwrap().status = ChainStatus::Disabled;
 
@@ -380,7 +391,7 @@ fn withdraw_still_works_after_chain_disabled() {
     );
     assert!(
         res.is_ok(),
-        "withdraw must still succeed on a Disabled chain (exit paths are unaffected): {res:?}"
+        "lower helper should remain policy-neutral; public ingress owns the risk gate: {res:?}"
     );
 }
 
@@ -737,7 +748,13 @@ fn borrow_rejects_when_chain_bad_debt_circuit_tripped() {
 fn borrow_rejects_when_chain_disabled() {
     use super::config::ChainStatus;
     let mut s = setup(PRICE_150_USD_E8);
-    insert_open_vault(&mut s, Principal::anonymous(), 7, 100 * ONE_SOL, 100_00000000);
+    insert_open_vault(
+        &mut s,
+        Principal::anonymous(),
+        7,
+        100 * ONE_SOL,
+        100_00000000,
+    );
     s.chain_configs.get_mut(&CHAIN).unwrap().status = ChainStatus::Disabled;
 
     let res = borrow_chain_vault_in_state(
@@ -754,7 +771,11 @@ fn borrow_rejects_when_chain_disabled() {
     );
 
     assert_eq!(res, Err(BorrowError::ChainDisabled { chain: CHAIN }));
-    assert_eq!(s.chain_vaults.get(&7).unwrap().pending_mint_e8s, 0, "no mutation on a disabled chain");
+    assert_eq!(
+        s.chain_vaults.get(&7).unwrap().pending_mint_e8s,
+        0,
+        "no mutation on a disabled chain"
+    );
     assert_eq!(s.settlement_queues[&CHAIN].pending_len(), 0);
 }
 
@@ -767,7 +788,13 @@ fn open_and_borrow_are_restored_after_enable_chain() {
     use crate::chains::admin::{disable_chain_in_state, enable_chain_in_state};
 
     let mut s = setup(PRICE_150_USD_E8);
-    insert_open_vault(&mut s, Principal::anonymous(), 7, 1_000 * ONE_SOL, 100_00000000);
+    insert_open_vault(
+        &mut s,
+        Principal::anonymous(),
+        7,
+        1_000 * ONE_SOL,
+        100_00000000,
+    );
 
     disable_chain_in_state(&mut s, CHAIN).expect("disable");
     assert_eq!(
@@ -809,7 +836,10 @@ fn open_and_borrow_are_restored_after_enable_chain() {
         12345,
         8,
     );
-    assert!(opened.is_ok(), "open must work again after enable: {opened:?}");
+    assert!(
+        opened.is_ok(),
+        "open must work again after enable: {opened:?}"
+    );
 
     let borrowed = borrow_chain_vault_in_state(
         &mut s,
@@ -890,7 +920,10 @@ fn enable_chain_does_not_bypass_the_price_freshness_prerequisite() {
         9_000_000_000_000,
         8,
     );
-    assert!(res.is_ok(), "fresh price + enabled chain must open: {res:?}");
+    assert!(
+        res.is_ok(),
+        "fresh price + enabled chain must open: {res:?}"
+    );
 }
 
 // ─── Increment 0: min-debt floor + per-chain debt ceiling ─────────────────────

@@ -7,6 +7,7 @@ pub mod deposit_watch;
 pub mod eip712;
 pub mod evm_rpc;
 pub mod hardening;
+pub mod public_readiness;
 pub mod settlement;
 pub mod settlement_proof;
 pub mod tecdsa;

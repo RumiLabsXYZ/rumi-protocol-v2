@@ -1,36 +1,8 @@
-//! PocketIC integration test for the stale ECDSA-derived address cache fix
-//! (chains/evm/tecdsa.rs `clear_address_caches`, wired into
-//! `set_chains_ecdsa_key_name` in main.rs).
-//!
-//! Live prod repro this test reproduces and then proves fixed:
-//! `get_chain_reserve_address(1030)` called under `chains_ecdsa_key_name`
-//! "test_key_1", then again after `set_chains_ecdsa_key_name("key_1")`,
-//! returned the IDENTICAL address on unpatched code. Two independent
-//! threshold root keys can never derive the same address for the same
-//! derivation path, so the match proved `RESERVE_ADDR_CACHE` (keyed only by
-//! `ChainId`) was serving a stale, pre-rotation address.
-//!
-//! Scenario: `key_rotation_changes_reserve_and_interest_treasury_addresses`
-//! warms both caches under the default key, rotates to `key_1` (no chain
-//! vaults exist, so the orphan guard allows it), and asserts BOTH addresses
-//! actually change.
-//!
-//! A prior version of this file also carried
-//! `rejected_rotation_does_not_clear_the_cache`, asserting the reserve
-//! address is unchanged after a REJECTED rotation attempt. That assertion is
-//! vacuous: a rejected rotation never changes `chains_ecdsa_key_name`, so
-//! re-derivation returns the identical address REGARDLESS of whether the
-//! cache was cleared: the test could not fail even on unpatched code.
-//! Removed per a conventions review finding; the real "only the success path
-//! clears/bumps anything" guarantee is code-order (`validate_ecdsa_key_change`
-//! returns via `?` before `clear_address_caches`/`bump_ecdsa_key_generation`
-//! ever run), which the pure `ecdsa_key_change_rules` unit test in main.rs
-//! already exercises (asserting `validate_ecdsa_key_change` itself rejects a
-//! bad name or a change with live vaults). The deterministic regression that
-//! actually matters here, a derive racing a rotation across the async
-//! boundary, is covered by `chains::evm::tecdsa::ecdsa_key_generation_guard_tests`
-//! (tecdsa.rs), which drives the exact interleaving directly rather than
-//! relying on PocketIC's non-deterministic scheduling to hit it.
+//! PocketIC boundary proof for the install-time-only EVM threshold-key rule.
+//! The production key may be selected on a truly fresh rail, but any derived
+//! known-EVM address or even a Disabled/staged chain makes the key immutable.
+//! This prevents existing config/proofs from silently referring to addresses
+//! under a different threshold root.
 
 use candid::{encode_args, encode_one, CandidType, Decode, Deserialize, Principal};
 use pocket_ic::{PocketIc, PocketIcBuilder, WasmResult};
@@ -55,6 +27,25 @@ enum ProtocolArg {
 
 #[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 struct ChainId(u32);
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+enum GasStrategy {
+    EvmEip1559 {
+        max_priority_fee_gwei: u64,
+        max_fee_gwei_ceiling: u64,
+    },
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct RegisterChainArg {
+    chain_id: ChainId,
+    display_name: String,
+    rpc_endpoints: Vec<String>,
+    finality_depth: u32,
+    gas_strategy: GasStrategy,
+    chain_native_decimals: u8,
+    min_quorum_providers: Option<u32>,
+}
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
 enum ProtocolError {
@@ -84,7 +75,10 @@ fn developer() -> Principal {
 /// (`ecdsa_public_key`) needs a subnet pairing that supports it, mirrored
 /// from the existing `conflux_espace_happy_path_pic.rs` boot helper.
 fn boot() -> (PocketIc, Principal) {
-    let pic = PocketIcBuilder::new().with_ii_subnet().with_application_subnet().build();
+    let pic = PocketIcBuilder::new()
+        .with_ii_subnet()
+        .with_application_subnet()
+        .build();
 
     let cid = pic.create_canister();
     pic.add_cycles(cid, 100_000_000_000_000);
@@ -101,7 +95,12 @@ fn boot() -> (PocketIc, Principal) {
         ckusdt_ledger_principal: None,
         ckusdc_ledger_principal: None,
     });
-    pic.install_canister(cid, backend_wasm(), encode_args((init,)).expect("encode init"), None);
+    pic.install_canister(
+        cid,
+        backend_wasm(),
+        encode_args((init,)).expect("encode init"),
+        None,
+    );
     for _ in 0..5 {
         pic.tick();
     }
@@ -116,13 +115,20 @@ where
         .update_call(cid, developer(), method, arg_bytes)
         .unwrap_or_else(|e| panic!("{} call: {:?}", method, e));
     match reply {
-        WasmResult::Reply(b) => Decode!(&b, T).unwrap_or_else(|e| panic!("decode {}: {}", method, e)),
+        WasmResult::Reply(b) => {
+            Decode!(&b, T).unwrap_or_else(|e| panic!("decode {}: {}", method, e))
+        }
         WasmResult::Reject(msg) => panic!("{} rejected: {}", method, msg),
     }
 }
 
 fn get_reserve_address(pic: &PocketIc, cid: Principal) -> Result<String, ProtocolError> {
-    update_dev(pic, cid, "get_chain_reserve_address", encode_args((CFX_MAINNET,)).unwrap())
+    update_dev(
+        pic,
+        cid,
+        "get_chain_reserve_address",
+        encode_args((CFX_MAINNET,)).unwrap(),
+    )
 }
 
 fn get_interest_treasury_address(pic: &PocketIc, cid: Principal) -> Result<String, ProtocolError> {
@@ -135,31 +141,86 @@ fn get_interest_treasury_address(pic: &PocketIc, cid: Principal) -> Result<Strin
 }
 
 fn set_key(pic: &PocketIc, cid: Principal, name: &str) -> Result<(), ProtocolError> {
-    update_dev(pic, cid, "set_chains_ecdsa_key_name", encode_one(name.to_string()).unwrap())
+    update_dev(
+        pic,
+        cid,
+        "set_chains_ecdsa_key_name",
+        encode_one(name.to_string()).unwrap(),
+    )
+}
+
+fn get_key(pic: &PocketIc, cid: Principal) -> String {
+    let reply = pic
+        .query_call(
+            cid,
+            Principal::anonymous(),
+            "get_chains_ecdsa_key_name",
+            encode_args(()).unwrap(),
+        )
+        .expect("get key query");
+    match reply {
+        WasmResult::Reply(bytes) => Decode!(&bytes, String).expect("decode key"),
+        WasmResult::Reject(message) => panic!("get key rejected: {message}"),
+    }
+}
+
+fn stage_disabled_mainnet(pic: &PocketIc, cid: Principal) {
+    let arg = RegisterChainArg {
+        chain_id: CFX_MAINNET,
+        display_name: "Conflux mainnet staged".into(),
+        rpc_endpoints: vec!["https://a.invalid".into(), "https://b.invalid".into()],
+        finality_depth: 400,
+        gas_strategy: GasStrategy::EvmEip1559 {
+            max_priority_fee_gwei: 1,
+            max_fee_gwei_ceiling: 200,
+        },
+        chain_native_decimals: 18,
+        min_quorum_providers: Some(2),
+    };
+    update_dev::<Result<(), ProtocolError>>(
+        pic,
+        cid,
+        "register_chain",
+        encode_args((arg,)).unwrap(),
+    )
+    .expect("register staged chain");
+    update_dev::<Result<(), ProtocolError>>(
+        pic,
+        cid,
+        "disable_chain",
+        encode_args((CFX_MAINNET,)).unwrap(),
+    )
+    .expect("disable staged chain");
 }
 
 #[test]
-fn key_rotation_changes_reserve_and_interest_treasury_addresses() {
+fn fresh_key_selection_succeeds_before_any_evm_setup() {
     let (pic, cid) = boot();
+    set_key(&pic, cid, "key_1").expect("fresh rail may select production key");
+    assert_eq!(get_key(&pic, cid), "key_1");
+    get_reserve_address(&pic, cid).expect("derive reserve under selected key");
+    get_interest_treasury_address(&pic, cid).expect("derive treasury under selected key");
+}
 
-    // Warm both caches under the canister's default key ("test_key_1").
-    let reserve_before = get_reserve_address(&pic, cid).expect("derive reserve address");
-    let treasury_before =
-        get_interest_treasury_address(&pic, cid).expect("derive interest-treasury address");
-
-    // No chain vaults exist, so the orphan guard allows this rotation.
-    set_key(&pic, cid, "key_1").expect("key rotation must succeed with no chain vaults");
-
-    let reserve_after = get_reserve_address(&pic, cid).expect("derive reserve address again");
-    let treasury_after =
-        get_interest_treasury_address(&pic, cid).expect("derive interest-treasury address again");
-
-    assert_ne!(
-        reserve_before, reserve_after,
-        "reserve address must change after an ECDSA key rotation (stale-cache regression)"
+#[test]
+fn derived_address_makes_key_immutable_without_a_vault() {
+    let (pic, cid) = boot();
+    let reserve_before = get_reserve_address(&pic, cid).expect("derive reserve under default key");
+    let error =
+        set_key(&pic, cid, "key_1").expect_err("cached known-EVM address must block rotation");
+    assert!(format!("{error:?}").contains("any EVM rail setup"));
+    assert_eq!(get_key(&pic, cid), "test_key_1");
+    assert_eq!(
+        get_reserve_address(&pic, cid).expect("cached reserve remains available"),
+        reserve_before
     );
-    assert_ne!(
-        treasury_before, treasury_after,
-        "interest-treasury address must change after an ECDSA key rotation (stale-cache regression)"
-    );
+}
+
+#[test]
+fn disabled_staged_chain_without_vaults_rejects_key_change() {
+    let (pic, cid) = boot();
+    stage_disabled_mainnet(&pic, cid);
+    let error = set_key(&pic, cid, "key_1").expect_err("staged chain must block rotation");
+    assert!(format!("{error:?}").contains("any EVM rail setup"));
+    assert_eq!(get_key(&pic, cid), "test_key_1");
 }

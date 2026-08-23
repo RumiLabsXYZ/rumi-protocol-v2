@@ -48,7 +48,10 @@ pub fn evm_address_from_pubkey(pubkey: &[u8]) -> Result<String, String> {
     let uncompressed = pk.to_encoded_point(false); // 0x04 || X(32) || Y(32)
     let bytes = uncompressed.as_bytes();
     if bytes.len() != 65 {
-        return Err(format!("expected 65-byte uncompressed pubkey, got {}", bytes.len()));
+        return Err(format!(
+            "expected 65-byte uncompressed pubkey, got {}",
+            bytes.len()
+        ));
     }
     let hash = Keccak256::digest(&bytes[1..]); // drop the 0x04 prefix
     let addr = &hash[12..]; // last 20 bytes
@@ -71,13 +74,17 @@ pub fn is_valid_evm_address(s: &str) -> bool {
 /// Async: fetch the derived public key from the management canister and return
 /// both the raw pubkey and the EVM address. Used by deposit-address queries and
 /// by the settlement worker to learn its minter address.
-pub async fn derive_evm_address(derivation_path: Vec<Vec<u8>>) -> Result<(Vec<u8>, String), String> {
+pub async fn derive_evm_address(
+    derivation_path: Vec<Vec<u8>>,
+) -> Result<(Vec<u8>, String), String> {
     let arg = EcdsaPublicKeyArgument {
         canister_id: None,
         derivation_path,
         key_id: key_id(),
     };
-    let (res,) = ecdsa_public_key(arg).await.map_err(|(code, msg)| format!("{code:?}: {msg}"))?;
+    let (res,) = ecdsa_public_key(arg)
+        .await
+        .map_err(|(code, msg)| format!("{code:?}: {msg}"))?;
     let addr = evm_address_from_pubkey(&res.public_key)?;
     Ok((res.public_key, addr))
 }
@@ -123,7 +130,10 @@ pub async fn cached_settlement_address(chain: ChainId) -> Result<(Vec<Vec<u8>>, 
 /// canister-controlled (it can later be swept via the same custody-withdrawal
 /// machinery).
 pub fn interest_treasury_derivation_path(chain: ChainId) -> Vec<Vec<u8>> {
-    vec![chain.0.to_le_bytes().to_vec(), b"interest-treasury".to_vec()]
+    vec![
+        chain.0.to_le_bytes().to_vec(),
+        b"interest-treasury".to_vec(),
+    ]
 }
 
 thread_local! {
@@ -157,7 +167,10 @@ pub async fn cached_interest_treasury_address(
 /// their USDC output here; the bridge sweeps FROM it (out of scope). The vault's
 /// OWN custody key signs the swap (it holds the CFX); this is only the `to:`.
 pub fn reserve_derivation_path(chain: ChainId) -> Vec<Vec<u8>> {
-    vec![chain.0.to_le_bytes().to_vec(), b"liquidation-reserve".to_vec()]
+    vec![
+        chain.0.to_le_bytes().to_vec(),
+        b"liquidation-reserve".to_vec(),
+    ]
 }
 
 thread_local! {
@@ -200,6 +213,28 @@ pub fn clear_address_caches() {
     SETTLEMENT_ADDR_CACHE.with(|c| c.borrow_mut().clear());
     INTEREST_TREASURY_ADDR_CACHE.with(|c| c.borrow_mut().clear());
     RESERVE_ADDR_CACHE.with(|c| c.borrow_mut().clear());
+}
+
+/// True when any deterministic address cache contains a chain supported by
+/// the EVM rail. The key-name setter uses this as part of its fresh-rail guard:
+/// a derived address is already bound to the current threshold key even if no
+/// vault has been opened yet.
+pub fn has_cached_address_for_known_evm_chain() -> bool {
+    let has_known = |cache: &std::cell::RefCell<std::collections::BTreeMap<ChainId, String>>| {
+        cache
+            .borrow()
+            .keys()
+            .any(|chain| super::evm_chain_config(*chain).is_some())
+    };
+    SETTLEMENT_ADDR_CACHE.with(has_known)
+        || INTEREST_TREASURY_ADDR_CACHE.with(has_known)
+        || RESERVE_ADDR_CACHE.with(has_known)
+}
+
+/// Synchronous identity check used after an async balance read. A hot-wallet
+/// proof may commit only while this exact settlement address is still cached.
+pub fn cached_settlement_address_if_present(chain: ChainId) -> Option<String> {
+    SETTLEMENT_ADDR_CACHE.with(|cache| cache.borrow().get(&chain).cloned())
 }
 
 // ─── Key-generation guard (2026-08-20, structural fix; security review) ─────
@@ -287,13 +322,14 @@ mod address_cache_invalidation_tests {
     // `tests_*.rs` file) so it can reach the private thread_locals directly
     // without adding test-only public accessors to production code.
     use super::{
-        clear_address_caches, ChainId, INTEREST_TREASURY_ADDR_CACHE, RESERVE_ADDR_CACHE,
-        SETTLEMENT_ADDR_CACHE,
+        clear_address_caches, has_cached_address_for_known_evm_chain, ChainId,
+        INTEREST_TREASURY_ADDR_CACHE, RESERVE_ADDR_CACHE, SETTLEMENT_ADDR_CACHE,
     };
 
     fn warm_all_caches(chain: ChainId) {
         SETTLEMENT_ADDR_CACHE.with(|c| c.borrow_mut().insert(chain, "0xsettlement".to_string()));
-        INTEREST_TREASURY_ADDR_CACHE.with(|c| c.borrow_mut().insert(chain, "0xtreasury".to_string()));
+        INTEREST_TREASURY_ADDR_CACHE
+            .with(|c| c.borrow_mut().insert(chain, "0xtreasury".to_string()));
         RESERVE_ADDR_CACHE.with(|c| c.borrow_mut().insert(chain, "0xreserve".to_string()));
     }
 
@@ -307,7 +343,10 @@ mod address_cache_invalidation_tests {
     fn clear_address_caches_empties_all_three_caches() {
         let chain = ChainId(1030);
         warm_all_caches(chain);
-        assert!(!all_caches_empty(), "precondition: caches must be warm before clearing");
+        assert!(
+            !all_caches_empty(),
+            "precondition: caches must be warm before clearing"
+        );
 
         clear_address_caches();
 
@@ -330,7 +369,29 @@ mod address_cache_invalidation_tests {
         warm_all_caches(ChainId(71));
         warm_all_caches(ChainId(1030));
         clear_address_caches();
-        assert!(all_caches_empty(), "clear must drop entries for every chain, not just the last-warmed one");
+        assert!(
+            all_caches_empty(),
+            "clear must drop entries for every chain, not just the last-warmed one"
+        );
+    }
+
+    #[test]
+    fn known_evm_cache_is_key_bound_but_unknown_orphan_is_not_setup() {
+        clear_address_caches();
+        SETTLEMENT_ADDR_CACHE.with(|cache| {
+            cache
+                .borrow_mut()
+                .insert(ChainId(999_999), "0xorphan".to_string());
+        });
+        assert!(!has_cached_address_for_known_evm_chain());
+        SETTLEMENT_ADDR_CACHE.with(|cache| {
+            cache
+                .borrow_mut()
+                .insert(ChainId(1030), "0xkeybound".to_string());
+        });
+        assert!(has_cached_address_for_known_evm_chain());
+        clear_address_caches();
+        assert!(!has_cached_address_for_known_evm_chain());
     }
 }
 
@@ -361,14 +422,22 @@ mod ecdsa_key_generation_guard_tests {
         bump_ecdsa_key_generation();
         // The derive "resumes" and tries to commit its OLD-key-derived result.
         let result = RESERVE_ADDR_CACHE.with(|c| {
-            commit_if_generation_current(c, chain, "0xstale-pre-rotation-address".to_string(), captured)
+            commit_if_generation_current(
+                c,
+                chain,
+                "0xstale-pre-rotation-address".to_string(),
+                captured,
+            )
         });
         assert!(
             result.is_err(),
             "a result whose captured generation no longer matches current must be rejected"
         );
         let cached = RESERVE_ADDR_CACHE.with(|c| c.borrow().get(&chain).cloned());
-        assert_eq!(cached, None, "the stale address must never be written to the cache");
+        assert_eq!(
+            cached, None,
+            "the stale address must never be written to the cache"
+        );
     }
 
     /// Mirror case: no rotation happens between capture and commit -> the

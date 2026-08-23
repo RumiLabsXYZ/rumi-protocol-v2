@@ -10,6 +10,7 @@ export type CanaryPhase =
   | "opened"
   | "deposit-authorizing"
   | "deposit-submitted"
+  | "deposit-observed"
   | "deposit-replaced"
   | "deposit-failed"
   | "mint-observed"
@@ -25,6 +26,7 @@ export type CanaryPhase =
 export type CanaryTransaction = {
   kind: "deposit" | "burn";
   hash: `0x${string}`;
+  receiptSucceeded: boolean;
 };
 
 export type CanaryRecord = {
@@ -50,7 +52,7 @@ export type CanaryVaultSnapshot = {
 };
 
 const PHASES = new Set<CanaryPhase>([
-  "open-authorizing", "opened", "deposit-authorizing", "deposit-submitted", "deposit-replaced", "deposit-failed", "mint-observed",
+  "open-authorizing", "opened", "deposit-authorizing", "deposit-submitted", "deposit-observed", "deposit-replaced", "deposit-failed", "mint-observed",
   "burn-authorizing", "burn-submitted", "burn-replaced", "burn-failed", "burn-observed", "close-authorizing", "close-submitted", "complete",
 ]);
 const HASH = /^0x[0-9a-fA-F]{64}$/;
@@ -100,8 +102,20 @@ export function parseCanaryRecord(raw: string | null, owner: string): CanaryReco
         value.contract !== CANARY_ICUSD_CONTRACT.toLowerCase() || !/^\d+$/.test(value.vaultId) ||
         !PHASES.has(value.phase) || !Array.isArray(value.transactions)) return null;
     if (value.transactions.some((tx) =>
-      (tx.kind !== "deposit" && tx.kind !== "burn") || typeof tx.hash !== "string" || !HASH.test(tx.hash))) return null;
-    return value;
+      (tx.kind !== "deposit" && tx.kind !== "burn") || typeof tx.hash !== "string" || !HASH.test(tx.hash) ||
+      (typeof tx.receiptSucceeded !== "undefined" && typeof tx.receiptSucceeded !== "boolean"))) return null;
+    // Version-1 records created before receipt evidence existed migrate
+    // fail-closed: a missing bit means the receipt has not been proven.
+    const transactions = value.transactions.map((tx) => ({ ...tx, receiptSucceeded: tx.receiptSucceeded === true }));
+    const burnReceiptSucceeded = transactions.find((tx) => tx.kind === "burn")?.receiptSucceeded === true;
+    const phase = value.phase === "burn-observed" && !burnReceiptSucceeded
+      ? (transactions.some((tx) => tx.kind === "burn") ? "burn-submitted" : "burn-authorizing")
+      : value.phase;
+    return {
+      ...value,
+      phase,
+      transactions,
+    };
   } catch {
     return null;
   }
@@ -113,7 +127,7 @@ export function recordTransaction(
   kind: "deposit" | "burn",
   hash: `0x${string}`
 ): CanaryRecord {
-  return { ...record, phase, transactions: [{ kind, hash }, ...record.transactions] };
+  return { ...record, phase, transactions: [{ kind, hash, receiptSucceeded: false }, ...record.transactions] };
 }
 
 export function replaceLatestTransactionHash(
@@ -123,7 +137,20 @@ export function replaceLatestTransactionHash(
 ): CanaryRecord {
   const transactions = [...record.transactions];
   const index = transactions.findIndex((tx) => tx.kind === kind);
-  if (index >= 0) transactions[index] = { kind, hash };
+  if (index >= 0) transactions[index] = { kind, hash, receiptSucceeded: false };
+  return { ...record, transactions };
+}
+
+/** Persist exact successful-receipt evidence for the currently tracked hash. */
+export function markTransactionReceiptSucceeded(
+  record: CanaryRecord,
+  kind: "deposit" | "burn",
+  hash: `0x${string}`,
+): CanaryRecord {
+  const transactions = [...record.transactions];
+  const index = transactions.findIndex((tx) => tx.kind === kind);
+  if (index < 0 || transactions[index]!.hash.toLowerCase() !== hash.toLowerCase()) return record;
+  transactions[index] = { ...transactions[index]!, receiptSucceeded: true };
   return { ...record, transactions };
 }
 
@@ -166,13 +193,27 @@ export function manualRecoveryTarget(record: CanaryRecord): {
 }
 
 export function reconcileCanaryPhase(record: CanaryRecord, vault: CanaryVaultSnapshot): CanaryRecord {
-  if (vault.status === "Closed") return { ...record, phase: "complete" };
+  if (vault.status === "Closed" && (record.phase === "close-submitted" || record.phase === "complete")) {
+    return { ...record, phase: "complete" };
+  }
+  const burnReceiptSucceeded = record.transactions.find((tx) => tx.kind === "burn")?.receiptSucceeded === true;
   if (vault.status === "Open" && vault.debtE8s === 0n &&
-      (record.phase === "burn-authorizing" || record.phase === "burn-submitted" || record.phase === "burn-replaced" || record.phase === "burn-failed" || record.phase === "burn-observed" || record.phase === "close-submitted")) {
-    return record.phase === "close-submitted" ? record : { ...record, phase: "burn-observed" };
+      vault.pendingMintE8s === 0n && vault.pendingInterestMintE8s === 0n) {
+    if (record.phase === "close-submitted") return record;
+    if ((record.phase === "burn-submitted" || record.phase === "burn-observed") && burnReceiptSucceeded) {
+      return { ...record, phase: "burn-observed" };
+    }
+  }
+  const depositReceiptSucceeded = record.transactions.find((tx) => tx.kind === "deposit")?.receiptSucceeded === true;
+  if (vault.status === "MintPending" && vault.debtE8s === 0n &&
+      vault.pendingMintE8s === CANARY_DEBT_E8S && vault.pendingInterestMintE8s === 0n &&
+      record.phase === "deposit-submitted" && depositReceiptSucceeded) {
+    return { ...record, phase: "deposit-observed" };
   }
   if (vault.status === "Open" && vault.debtE8s === CANARY_DEBT_E8S &&
-      ["opened", "deposit-authorizing", "deposit-submitted", "deposit-replaced", "deposit-failed", "mint-observed"].includes(record.phase)) {
+      vault.pendingMintE8s === 0n && vault.pendingInterestMintE8s === 0n &&
+      (record.phase === "mint-observed" || record.phase === "deposit-observed" ||
+        (record.phase === "deposit-submitted" && depositReceiptSucceeded))) {
     return { ...record, phase: "mint-observed" };
   }
   return record;
@@ -191,7 +232,10 @@ export function validateCanaryAction(
     return "Canary vault must be chain 1030 with exactly 5 CFX declared collateral.";
   }
   if (action === "deposit") {
-    if (vault.status !== "AwaitingDeposit") return "Deposit is only available while awaiting the first deposit.";
+    if (vault.status !== "AwaitingDeposit" || vault.debtE8s !== 0n ||
+        vault.pendingMintE8s !== CANARY_DEBT_E8S || vault.pendingInterestMintE8s !== 0n) {
+      return "Deposit requires AwaitingDeposit with zero debt, exactly 0.10 icUSD pending mint, and zero pending interest.";
+    }
     if (record.phase !== "opened" && record.phase !== "deposit-failed") return "The deposit is already submitted or observed.";
   } else if (action === "burn") {
     if (vault.status !== "Open" || vault.debtE8s !== CANARY_DEBT_E8S || vault.pendingMintE8s !== 0n || vault.pendingInterestMintE8s !== 0n) {
@@ -202,7 +246,10 @@ export function validateCanaryAction(
     if (vault.status !== "Open" || vault.debtE8s !== 0n || vault.pendingMintE8s !== 0n || vault.pendingInterestMintE8s !== 0n) {
       return "Close is allowed only after zero debt and zero pending mint or interest are observed.";
     }
-    if (record.phase !== "burn-observed") return "Close is already submitted or the burn is not yet observed.";
+    const burnReceiptSucceeded = record.transactions.find((tx) => tx.kind === "burn")?.receiptSucceeded === true;
+    if (record.phase !== "burn-observed" || !burnReceiptSucceeded) {
+      return "Close remains locked until the exact burn has a successful final receipt and zero debt is observed.";
+    }
   }
   return null;
 }
