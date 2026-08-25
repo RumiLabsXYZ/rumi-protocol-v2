@@ -1,8 +1,16 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
+import {
+  PUBLIC_MANIFEST_FILE,
+  PUBLIC_POLICY_OUTPUT,
+  VERIFICATION_CANISTER,
+  canonicalOriginForCanister,
+  computeAssetInventory,
+  createPublicManifest,
+} from "./production-public-recipe.mjs";
 
 const verificationMode = process.argv[2];
 if (verificationMode !== "local" && verificationMode !== "deployment") {
@@ -27,16 +35,40 @@ function run(args, env = process.env) {
 
 try {
   const deploymentVerification = verificationMode === "deployment";
+  const canonicalOrigin = deploymentVerification
+    ? canonicalOriginForCanister(VERIFICATION_CANISTER, "deployment-verification")
+    : "http://127.0.0.1:5174";
   await run([viteBin, "build", "--outDir", outputDir, "--emptyOutDir"], {
     ...process.env,
     VITE_DEPLOYMENT_MODE: "production-public",
     VITE_PUBLIC_ORIGIN_CONTEXT: deploymentVerification ? "deployment-verification" : "local-verification",
     VITE_PUBLIC_VERIFICATION_OUTPUT_DIR: deploymentVerification ? outputDir : "",
-    VITE_PUBLIC_CANONICAL_ORIGIN: deploymentVerification
-      ? "https://rrkah-fqaaa-aaaaa-aaaaq-cai.icp0.io"
-      : "http://127.0.0.1:5174",
+    VITE_PUBLIC_CANONICAL_ORIGIN: canonicalOrigin,
   });
-  await run([scanner, outputDir]);
+  if (deploymentVerification) {
+    await copyFile(
+      fileURLToPath(new URL("../.ic-assets.production-public.json", import.meta.url)),
+      join(outputDir, PUBLIC_POLICY_OUTPUT),
+    );
+    const assetInventory = await computeAssetInventory(outputDir);
+    await writeFile(
+      join(outputDir, PUBLIC_MANIFEST_FILE),
+      `${JSON.stringify(createPublicManifest({
+        canisterId: VERIFICATION_CANISTER,
+        canonicalOrigin,
+        assetInventory,
+        context: "deployment-verification",
+      }), null, 2)}\n`,
+      "utf8",
+    );
+  }
+  await run([
+    scanner,
+    outputDir,
+    "--context", deploymentVerification ? "deployment-verification" : "local-verification",
+    ...(deploymentVerification ? ["--expected-canister", VERIFICATION_CANISTER] : []),
+    "--expected-origin", canonicalOrigin,
+  ]);
   console.log(`production-public ${verificationMode} build verified in an ephemeral directory`);
 } finally {
   await rm(outputDir, { recursive: true, force: true });

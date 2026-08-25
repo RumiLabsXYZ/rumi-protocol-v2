@@ -4,23 +4,21 @@
   import { statusName, type ChainVault } from "./backend";
   import { addressUrl, fmtCfx, fmtIcusd, toE8s, toWei } from "./evm";
 
-  let { vault, busy, productionCanary, productionPublic, riskWritesEnabled, riskWriteDisabledReason, recoveryWritesEnabled, recoveryWriteDisabledReason, isCanaryVault, canaryPhase, onAction }: {
+  let { vault, busy, riskWritesEnabled, riskWriteDisabledReason, recoveryWritesEnabled, recoveryWriteDisabledReason, isGuidedVault, guidedPhase, onAction }: {
     vault: ChainVault;
     busy: string | null;
-    productionCanary: boolean;
-    productionPublic: boolean;
     riskWritesEnabled: boolean;
     riskWriteDisabledReason: string | null;
     recoveryWritesEnabled: boolean;
     recoveryWriteDisabledReason: string | null;
-    isCanaryVault: boolean;
-    canaryPhase: CanaryPhase | null;
+    isGuidedVault: boolean;
+    guidedPhase: CanaryPhase | null;
     onAction: (kind: string, vault: ChainVault, amount?: bigint) => void;
   } = $props();
 
   const status = $derived(statusName(vault.status));
   const custody = $derived(vault.custody_address);
-  const mainnet = $derived(productionCanary || productionPublic);
+  const mainnet = $derived(__RUMI_PRODUCTION_CANARY_BUILD__ || __RUMI_PRODUCTION_PUBLIC_BUILD__);
 
   let borrowAmt = $state("0.1");
   let repayAmt = $state("");
@@ -47,25 +45,25 @@
     </span>
   </div>
 
-  {#if productionCanary && !isCanaryVault}
+  {#if __RUMI_PRODUCTION_CANARY_BUILD__ && !isGuidedVault}
     <div class="notice err" style="margin-top:14px">Read-only: this vault is not bound to this browser's persisted canary lifecycle.</div>
   {:else if status === "AwaitingDeposit"}
     <div class="notice info" style="margin-top:14px">
       Verify the custody address above, then send <b>{fmtCfx(vault.collateral_amount_e18)} CFX</b>. The mint begins only after the deposit is observed.
     </div>
-    {#if productionCanary && (canaryPhase === "deposit-authorizing" || canaryPhase === "deposit-submitted" || canaryPhase === "deposit-observed" || canaryPhase === "deposit-replaced")}
+    {#if __RUMI_PRODUCTION_CANARY_BUILD__ && (guidedPhase === "deposit-authorizing" || guidedPhase === "deposit-submitted" || guidedPhase === "deposit-observed" || guidedPhase === "deposit-replaced")}
       <div class="notice info"><span class="spin"></span>Deposit authorization/submission is locked — waiting for wallet receipt or backend observation. Do not repeat it.</div>
     {:else}
-      {#if productionCanary && canaryPhase === "deposit-failed"}
+      {#if __RUMI_PRODUCTION_CANARY_BUILD__ && guidedPhase === "deposit-failed"}
         <div class="notice err">The prior deposit reverted or was cancelled. Verify its explorer entry before retrying.</div>
       {/if}
       <div class="row" style="margin-top:12px">
         <button class="primary" disabled={!!busy || !riskWritesEnabled} onclick={() => onAction("deposit", vault)}>
-          {canaryPhase === "deposit-failed" ? "Retry" : "Confirm"} {fmtCfx(vault.collateral_amount_e18)} CFX deposit
+          {__RUMI_PRODUCTION_CANARY_BUILD__ && guidedPhase === "deposit-failed" ? "Retry" : "Confirm"} {fmtCfx(vault.collateral_amount_e18)} CFX deposit
         </button>
         {#if !mainnet}<span class="muted" style="font-size:12px">(or send manually from any wallet)</span>{/if}
       </div>
-      {#if productionPublic && !riskWritesEnabled && riskWriteDisabledReason}
+      {#if __RUMI_PRODUCTION_PUBLIC_BUILD__ && !riskWritesEnabled && riskWriteDisabledReason}
         <div class="notice err">Deposit paused: {riskWriteDisabledReason}</div>
       {/if}
     {/if}
@@ -73,25 +71,25 @@
     <div class="notice info" style="margin-top:14px"><span class="spin"></span>Deposit detected — waiting for finality and mint.</div>
   {:else if status === "Open"}
     <div class="divider"></div>
-    {#if productionCanary}
+    {#if __RUMI_PRODUCTION_CANARY_BUILD__}
       {#if vault.debt_e8s > 0n}
-        {#if canaryPhase === "burn-authorizing" || canaryPhase === "burn-submitted" || canaryPhase === "burn-replaced"}
+        {#if guidedPhase === "burn-authorizing" || guidedPhase === "burn-submitted" || guidedPhase === "burn-replaced"}
           <div class="notice info"><span class="spin"></span>Exact burn authorization/submission is locked — waiting for wallet receipt or backend observation. Do not repeat it.</div>
         {:else if vault.debt_e8s !== CANARY_DEBT_E8S || vault.pending_mint_e8s !== 0n || vault.pending_interest_mint_e8s !== 0n}
           <div class="notice err">Fail-closed: burn requires exactly 0.10 icUSD current debt and no pending mint or interest.</div>
-        {:else if canaryPhase === "mint-observed" || canaryPhase === "burn-failed"}
+        {:else if guidedPhase === "mint-observed" || guidedPhase === "burn-failed"}
           <div class="notice info">Mint observed. Confirm the one exact <b>0.10 icUSD</b> burn below. No other amount is available in this build.</div>
-          {#if canaryPhase === "burn-failed"}<div class="notice err">The prior burn reverted or was cancelled. Verify its explorer entry before retrying.</div>{/if}
+          {#if guidedPhase === "burn-failed"}<div class="notice err">The prior burn reverted or was cancelled. Verify its explorer entry before retrying.</div>{/if}
           <div class="row" style="margin-top:12px">
-            <button disabled={!!busy} onclick={() => onAction("repay", vault, CANARY_DEBT_E8S)}>{canaryPhase === "burn-failed" ? "Retry" : "Confirm"} exact 0.10 icUSD burn</button>
+            <button disabled={!!busy} onclick={() => onAction("repay", vault, CANARY_DEBT_E8S)}>{guidedPhase === "burn-failed" ? "Retry" : "Confirm"} exact 0.10 icUSD burn</button>
           </div>
         {:else}
           <div class="notice err">Fail-closed: persisted lifecycle state does not permit a burn.</div>
         {/if}
       {:else}
-        {#if canaryPhase === "close-authorizing" || canaryPhase === "close-submitted"}
+        {#if guidedPhase === "close-authorizing" || guidedPhase === "close-submitted"}
           <div class="notice info"><span class="spin"></span>Close authorization/submission is locked — waiting for backend observation. Do not repeat it.</div>
-        {:else if canaryPhase === "burn-observed"}
+        {:else if guidedPhase === "burn-observed"}
           <div class="notice ok">Zero debt observed. The vault is ready to close.</div>
           <div class="row" style="margin-top:12px">
             <button class="danger" disabled={!!busy} onclick={() => onAction("close", vault)}>Sign & close vault</button>
@@ -129,10 +127,10 @@
           onclick={() => onAction("close", vault)}>Close vault (repay first)</button>
       </div>
     {/if}
-    {#if productionPublic && !riskWritesEnabled && riskWriteDisabledReason}
+    {#if __RUMI_PRODUCTION_PUBLIC_BUILD__ && !riskWritesEnabled && riskWriteDisabledReason}
       <div class="notice err">Open, deposit, borrow, and withdraw are paused: {riskWriteDisabledReason}</div>
     {/if}
-    {#if productionPublic && !recoveryWritesEnabled && recoveryWriteDisabledReason}
+    {#if __RUMI_PRODUCTION_PUBLIC_BUILD__ && !recoveryWritesEnabled && recoveryWriteDisabledReason}
       <div class="notice err">Repay and debt-free close are unavailable: {recoveryWriteDisabledReason}</div>
     {/if}
   {:else if status === "Closing"}

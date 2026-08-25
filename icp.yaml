@@ -694,6 +694,25 @@ canisters:
           - cp src/conflux_espace_frontend/.ic-assets.json src/conflux_espace_frontend/dist/.ic-assets.json
           - rm -f src/conflux_espace_frontend/dist/.DS_Store
 
+  # Dedicated Conflux eSpace production-public frontend. This is intentionally
+  # a different canister and output directory from the chain-71 staging UI.
+  # The build wrapper refuses to emit dist-production-public until icp-cli has
+  # recorded exactly one canister ID in
+  # `.icp/data/mappings/conflux-production-public.ids.json`. It derives the
+  # only accepted origin as `https://<that-id>.icp0.io`, builds in
+  # production-public mode, installs `.ic-assets.production-public.json` under
+  # the asset canister's canonical `.ic-assets.json` name, and verifies the
+  # bundle plus deterministic deployment manifest. This forces an honest
+  # two-phase flow: separately approved create first; reviewed build/install/
+  # sync later. Never use the implicit `ic` environment for this canister.
+  - name: conflux_public_frontend
+    recipe:
+      type: "@dfinity/asset-canister@v2.3.0"
+      configuration:
+        dir: src/conflux_espace_frontend/dist-production-public
+        build:
+          - bash -c 'cd src/conflux_espace_frontend && npm ci && npm run build:production-public:deploy'
+
 networks:
   - name: local
     mode: managed
@@ -714,8 +733,10 @@ environments:
   # (so an `ic` environment appears in `icp project show` even though it is
   # not declared here). The auto-created `ic` env contains every canister
   # without an explicit env restriction, which is harmless because production
-  # deploys explicitly target `mainnet-live` (or `mainnet-staging` in Phase 1).
-  # Do not deploy with `--environment ic`; always pass `mainnet-live`.
+  # deploys explicitly target `mainnet-live`, `mainnet-staging`, or the
+  # one-canister `conflux-production-public` environment. Do not deploy with
+  # `--environment ic`; the public frontend build additionally requires the
+  # exact `ICP_ENVIRONMENT=conflux-production-public` process environment.
 
   # The production environment Rumi has been running on since launch.
   # All mainnet deploys target this environment with `--identity rumi_identity`.
@@ -900,6 +921,15 @@ environments:
             description = null
           }
         })
+
+  # Dedicated production-public asset environment. This one-canister boundary
+  # prevents frontend provisioning/build/install/sync from selecting the
+  # backend or either existing frontend. Source-only setup deliberately has no
+  # checked-in mapping until the canister-ID allocation is separately approved.
+  - name: conflux-production-public
+    network: ic
+    canisters:
+      - conflux_public_frontend
 
   # Phase 1a staging environment on mainnet. New canister (kvg63-wiaaa-aaaao-bbabq-cai)
   # provisioned 2026-05-28, funded with 2 ICP (~3.4T cycles), controller = rumi_identity.

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import gitignore from "../.gitignore?raw";
 import packageJson from "../package.json";
 import verifier from "../scripts/verify-production-public-build.mjs?raw";
+import deployBuilder from "../scripts/build-provisioned-production-public.mjs?raw";
 import evmSource from "./evm.ts?raw";
 import icpManifest from "../../../icp.yaml?raw";
 
@@ -12,11 +13,14 @@ describe("frontend artifact policy", () => {
     expect(ignore).toContain("dist-production-public/");
   });
 
-  it("keeps deterministic verification ephemeral and the deploy origin external", () => {
+  it("keeps deterministic verification ephemeral and derives deploy origin only from the mapping", () => {
     const deploy = packageJson.scripts["build:production-public:deploy"];
-    expect(deploy).toContain("VITE_PUBLIC_ORIGIN_CONTEXT=deployment");
+    expect(deploy).toBe("node scripts/build-provisioned-production-public.mjs");
     expect(deploy).not.toContain("VITE_PUBLIC_CANONICAL_ORIGIN=");
     expect(deploy).not.toContain("local-verification");
+    expect(deployBuilder).toContain("PUBLIC_MAPPING_FILE");
+    expect(deployBuilder).toContain("provisioningFromMappingText");
+    expect(deployBuilder).toContain("VITE_PUBLIC_CANONICAL_ORIGIN: provisioned.canonicalOrigin");
     expect(verifier).toContain("mkdtemp");
     expect(verifier).toContain("deployment-verification");
     expect(verifier).toContain("VITE_PUBLIC_VERIFICATION_OUTPUT_DIR");
@@ -28,8 +32,13 @@ describe("frontend artifact policy", () => {
     expect(evmSource).not.toMatch(/confirmations:\s*1\b/);
   });
 
-  it("keeps the unprovisioned public frontend completely outside the ICP project manifest", () => {
-    expect(icpManifest).not.toContain("conflux_espace_public_frontend");
-    expect(icpManifest).not.toContain("conflux-public-build-only");
+  it("pins a separate production-public recipe without replacing staging", () => {
+    expect(icpManifest).toContain("- name: conflux_public_frontend");
+    expect(icpManifest).toContain("- name: conflux-production-public");
+    expect(icpManifest).toContain("dir: src/conflux_espace_frontend/dist-production-public");
+    expect(icpManifest).toContain("npm run build:production-public:deploy");
+    expect(icpManifest).toContain("- name: conflux_espace_frontend");
+    expect(icpManifest).toContain("dir: src/conflux_espace_frontend/dist");
+    expect(icpManifest).toContain("npm ci && npm run build");
   });
 });

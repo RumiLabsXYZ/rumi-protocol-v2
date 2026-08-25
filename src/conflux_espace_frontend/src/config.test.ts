@@ -16,7 +16,7 @@ describe("deployment config", () => {
     expect(config).toMatchObject({
       mode: "testnet",
       mainnet: false,
-      productionCanary: false,
+      guidedLifecycle: false,
       chainId: 71,
       backendCanisterId: "kvg63-wiaaa-aaaao-bbabq-cai",
       rpcUrl: "https://evmtestnet.confluxrpc.com",
@@ -29,7 +29,7 @@ describe("deployment config", () => {
   it("pins every production-canary target", () => {
     const config = resolveDeploymentConfig("production-canary");
     expect(config).toMatchObject({
-      productionCanary: true,
+      guidedLifecycle: true,
       mainnet: true,
       chainId: 1030,
       backendCanisterId: "tfesu-vyaaa-aaaap-qrd7a-cai",
@@ -45,7 +45,7 @@ describe("deployment config", () => {
     expect(config).toMatchObject({
       mode: "production-public",
       mainnet: true,
-      productionCanary: false,
+      guidedLifecycle: false,
       chainId: 1030,
       backendCanisterId: "tfesu-vyaaa-aaaap-qrd7a-cai",
       rpcUrl: "https://evm.confluxrpc.com",

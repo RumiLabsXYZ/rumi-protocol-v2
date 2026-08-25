@@ -38,7 +38,9 @@ header.top { display: flex; align-items: center; justify-content: space-between;
   font-size: 11px; padding: 4px 9px; border-radius: 999px;
   border: 1px solid var(--border); color: var(--muted); background: var(--panel);
 }
+/* production-public-prune:start testnet-badge-style */
 .badge.testnet { color: var(--warn); border-color: #3a2f17; background: #1c160a; }
+/* production-public-prune:end testnet-badge-style */
 .badge.mainnet { color: #fff; border-color: #ff5d6c; background: #8f1422; font-weight: 800; }
 
 .production-warning {
@@ -50,8 +52,10 @@ header.top { display: flex; align-items: center; justify-content: space-between;
 .production-warning p { margin: 8px 0 12px; line-height: 1.5; font-size: 14px; }
 .production-warning .ack { color: #fff; display: flex; align-items: center; gap: 9px; font-weight: 700; }
 .production-warning .ack input { width: auto; accent-color: var(--danger); }
+/* production-public-prune:start canary-step-style */
 .canary-steps ol { margin: 12px 0 0; padding-left: 22px; color: var(--muted); font-size: 13px; line-height: 1.75; }
 .canary-steps b { color: var(--text); }
+/* production-public-prune:end canary-step-style */
 
 .card {
   background: var(--panel); border: 1px solid var(--border);
