@@ -32,6 +32,10 @@
 //! build it runs a GATED subset (which still proves the new config fields decode +
 //! the reserve/settlement address endpoints signal ECDSA-unavailable) and returns
 //! early. The swap is NEVER faked.
+//!
+//! The non-skippable SP fallback release proof sets
+//! `RUMI_CONFLUX_SP_RELEASE_GATE=1` and filters to
+//! `conflux_liquidation_bot_failure_sp_absorb_claims_cfx`.
 
 use candid::{decode_one, encode_args, encode_one, CandidType, Decode, Deserialize, Encode, Nat, Principal};
 use pocket_ic::{PocketIc, PocketIcBuilder, WasmResult};
@@ -440,6 +444,11 @@ fn read_workspace_wasm(name: &str) -> Vec<u8> {
             return bytes;
         }
     }
+    if sp_release_gate_enabled() {
+        panic!(
+            "[sp-release-gate] missing required Wasm artifact {name}; build the backend, mock RPC, and Stability Pool Wasms before running the gate"
+        );
+    }
     panic!("missing wasm artifact {name} in worktree target/, worktree src/target/, or main checkout target/");
 }
 
@@ -448,6 +457,10 @@ fn read_workspace_wasm(name: &str) -> Vec<u8> {
 const CONFLUX_CHAIN_ID: u32 = 71;
 const E18: u128 = 1_000_000_000_000_000_000;
 const E8: u128 = 100_000_000;
+/// Set to `1` for the non-skippable Stability Pool release proof. In that mode,
+/// missing Wasm artifacts or unavailable PocketIC threshold ECDSA are hard
+/// failures instead of an accepted developer-machine gated subset.
+const SP_RELEASE_GATE_ENV: &str = "RUMI_CONFLUX_SP_RELEASE_GATE";
 /// keccak256("Mint(uint256,address,uint256)"), must match evm_rpc.rs.
 const MINT_EVENT_TOPIC0: &str =
     "0x4e3883c75cc9c752bb1db2e406a822e4a75067ae77ad9a0a4d179f2709b9e1f6";
@@ -476,6 +489,17 @@ const DEX_PAIR: &str = "0x3333333333333333333333333333333333333333";
 const WCFX: &str = "0x14b2d3bc65e74dae1030eafd8ac30c533c976a9b";
 /// USDC (the settle stable token + path[1]); 18-dec on eSpace.
 const USDC: &str = "0x6963efed0ab40f6c3d7bda44a05dcf1437c44372";
+
+fn sp_release_gate_enabled() -> bool {
+    match std::env::var(SP_RELEASE_GATE_ENV) {
+        Err(std::env::VarError::NotPresent) => false,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("{SP_RELEASE_GATE_ENV} must be valid UTF-8 and exactly `1`");
+        }
+        Ok(value) if value == "1" => true,
+        Ok(value) => panic!("{SP_RELEASE_GATE_ENV} must be exactly `1`, got {value:?}"),
+    }
+}
 
 // ─── PocketIC call helpers ───────────────────────────────────────────────────
 
@@ -1194,6 +1218,12 @@ fn conflux_liquidation_swap_executes_and_credits_reserve() {
 
 #[test]
 fn conflux_liquidation_bot_failure_sp_absorb_claims_cfx() {
+    let release_gate = sp_release_gate_enabled();
+    if release_gate {
+        eprintln!(
+            "[sp-release-gate] REQUIRED mode: missing artifacts or threshold ECDSA will fail this test"
+        );
+    }
     let (pic, backend, mock, sp, icusd_ledger, user) = boot_with_sp();
 
     decode_result(
@@ -1295,6 +1325,11 @@ fn conflux_liquidation_bot_failure_sp_absorb_claims_cfx() {
     let settlement_addr = match settlement_addr {
         Some(addr) => addr,
         None => {
+            if release_gate {
+                panic!(
+                    "[sp-release-gate] threshold ECDSA unavailable; the complete Stability Pool fallback lifecycle was not executed"
+                );
+            }
             let sentinel = register_sp_cfx(&pic, sp);
             assert_ne!(sentinel, Principal::anonymous(), "gated: CFX sentinel registers");
             register_sp_icusd(&pic, sp, icusd_ledger);
@@ -1585,6 +1620,11 @@ fn conflux_liquidation_bot_failure_sp_absorb_claims_cfx() {
     );
 
     eprintln!("[sp-fallback] FULL path PASSED: bot swap failed closed into sp_attempted, SP burned 100e8 icUSD, backend moved debt -> pending_chain_burn (foreign supply unchanged), credited 1400 CFX to the opted-in depositor, claim_cfx enqueued and confirmed the ChainCollateralPayout.");
+    if release_gate {
+        eprintln!(
+            "[sp-release-gate] PASS: bot failure, zero coverage, no implicit consent, explicit opt-in, mock-ledger burn, backend absorb, CFX claim payout, and idempotent replay all completed"
+        );
+    }
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
