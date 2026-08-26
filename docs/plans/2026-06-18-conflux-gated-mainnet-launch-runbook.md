@@ -499,21 +499,41 @@ All items are required unless explicitly marked optional.
      `127.0.0.1:5174`; and the deployment-shape verifier uses a denylisted test
      Principal. Do not claim that they produce a deployable artifact.
    - Canister creation and 2T-cycle funding require an explicit irreversible
-     approval. The exact phase-1 action is:
+     approval. The approved payer is `robvector` (Principal
+     `ft3ml-xex6k-ppiwj-ie6tc-zwkgb-ybm2x-eat4a-5p2jg-auzl3-latf4-aae`), whose
+     read-only cycles-ledger balance was `5_005_940_070_754` cycles at the
+     preflight. Refresh that balance immediately before approval and require at
+     least `2_000_100_000_000` cycles: 2T for the creation plus the current
+     100M cycles-ledger update fee. The exact phase-1 action is:
 
      ```bash
      env ICP_ENVIRONMENT=conflux-production-public \
        /usr/local/bin/icp canister create conflux_public_frontend \
        -e conflux-production-public \
-       --identity rumi_identity \
+       --identity robvector \
+       --controller fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae \
        --cycles 2t
      ```
 
-     Stop after creation. Require exactly one entry named
+     `robvector` is the payer only and must not be a controller. The explicit
+     sole controller is `rumi_identity` at
+     `fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae`.
+     No subnet is pinned; for an empty environment, icp-cli randomly selects an
+     available application subnet. The created canister pays the subnet creation
+     charge from the attached 2T: currently 500B on a 13-node application subnet or
+     approximately 1.308T on a 34-node subnet, leaving approximately 1.5T to
+     0.692T before subsequent usage.
+   - If creation returns an ambiguous result, do not retry. Reconcile the
+     cycles-ledger result, command output, and mapping first so a successful
+     remote create cannot be duplicated after a local mapping-write failure.
+     Stop after an unambiguous creation. Require exactly one entry named
      `conflux_public_frontend` in
      `.icp/data/mappings/conflux-production-public.ids.json`; verify Running,
-     controller, cycles, and the empty/uninstalled state. Commit the mapping so
-     the allocated authority is not lost. Creation is not deployment.
+     the exact sole controller above, the selected application subnet, actual
+     cycles, and the empty/uninstalled state. Verify `robvector` is not a
+     controller. Commit the mapping so the allocated authority is not lost.
+     Creation is not deployment: this phase performs no frontend build, seal,
+     Wasm install, asset sync, or deploy.
    - Derive and separately approve the sole canonical certified origin as
      `https://<mapped-non-reserved-canister-principal>.icp0.io`. The guarded
      build accepts no caller-supplied origin and rejects management, anonymous,
