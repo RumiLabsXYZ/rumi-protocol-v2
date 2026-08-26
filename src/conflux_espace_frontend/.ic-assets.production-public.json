@@ -7,6 +7,7 @@
             "Content-Security-Policy": "default-src 'self';script-src 'self' 'wasm-unsafe-eval';worker-src 'self' blob:;connect-src 'self' blob: https://icp0.io https://*.icp0.io https://icp-api.io https://ic0.app https://*.ic0.app https://evm.confluxrpc.com;img-src 'self' data:;style-src 'self' 'unsafe-inline';style-src-elem 'self' 'unsafe-inline';font-src 'self';object-src 'none';base-uri 'self';frame-ancestors 'self';form-action 'self';upgrade-insecure-requests;",
             "Permissions-Policy": "clipboard-write=(self)"
         },
-        "allow_raw_access": false
+        "allow_raw_access": false,
+        "enable_aliasing": true
     }
 ]

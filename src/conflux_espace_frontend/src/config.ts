@@ -1,12 +1,11 @@
 import { defineChain, parseEther } from "viem";
-import { resolvePublicCanonicalOrigin } from "./origin";
 
 export type DeploymentMode = "testnet" | "production-canary" | "production-public";
 
 export type DeploymentConfig = {
   mode: DeploymentMode;
   mainnet: boolean;
-  productionCanary: boolean;
+  guidedLifecycle: boolean;
   backendCanisterId: string;
   chainId: number;
   chainName: string;
@@ -19,7 +18,7 @@ export type DeploymentConfig = {
 const TESTNET_CONFIG: DeploymentConfig = {
   mode: "testnet",
   mainnet: false,
-  productionCanary: false,
+  guidedLifecycle: false,
   backendCanisterId: "kvg63-wiaaa-aaaao-bbabq-cai",
   chainId: 71,
   chainName: "Conflux eSpace Testnet",
@@ -35,7 +34,7 @@ export const CANARY_ICUSD_CONTRACT = "0x8DdB0a13B26ed28912e4B8cCa99Bc3E8c66Df7Ff
 const PRODUCTION_CANARY_CONFIG: DeploymentConfig = {
   mode: "production-canary",
   mainnet: true,
-  productionCanary: true,
+  guidedLifecycle: true,
   backendCanisterId: "tfesu-vyaaa-aaaap-qrd7a-cai",
   chainId: CANARY_CHAIN_ID,
   chainName: "Conflux eSpace Mainnet",
@@ -48,7 +47,9 @@ const PRODUCTION_CANARY_CONFIG: DeploymentConfig = {
 const PRODUCTION_PUBLIC_CONFIG: DeploymentConfig = {
   mode: "production-public",
   mainnet: true,
-  productionCanary: false,
+  /* production-public-prune:start public-guided-flag */
+  guidedLifecycle: false,
+  /* production-public-prune:end public-guided-flag */
   backendCanisterId: "tfesu-vyaaa-aaaap-qrd7a-cai",
   chainId: CANARY_CHAIN_ID,
   chainName: "Conflux eSpace Mainnet",
@@ -68,13 +69,15 @@ export function resolveDeploymentConfig(mode?: string): DeploymentConfig {
 
 export const DEPLOYMENT = resolveDeploymentConfig(import.meta.env.VITE_DEPLOYMENT_MODE);
 export const IS_MAINNET = DEPLOYMENT.mainnet;
-export const IS_PRODUCTION_CANARY = DEPLOYMENT.productionCanary;
+export const IS_PRODUCTION_CANARY = DEPLOYMENT.guidedLifecycle;
 export const IS_PRODUCTION_PUBLIC = DEPLOYMENT.mode === "production-public";
-export const PUBLIC_CANONICAL_ORIGIN = resolvePublicCanonicalOrigin(
-  DEPLOYMENT.mode,
-  import.meta.env.VITE_PUBLIC_CANONICAL_ORIGIN,
-  import.meta.env.VITE_PUBLIC_ORIGIN_CONTEXT,
-);
+// vite.config.ts validates the exact production-public origin before either a
+// dev server or build starts. Embed only the already-validated value here so
+// deployment-verification sentinels and origin-policy machinery cannot leak
+// into the production bundle.
+export const PUBLIC_CANONICAL_ORIGIN = IS_PRODUCTION_PUBLIC
+  ? (import.meta.env.VITE_PUBLIC_CANONICAL_ORIGIN || null)
+  : null;
 
 /** A single click may prompt at most once on mainnet. Testnet retains one
  * convenience retry for local/staging nonce races. */
@@ -153,15 +156,17 @@ export function suggestedCollateralWeiAtRatio(
   return parseEther(cfxNeeded.toFixed(6));
 }
 
+/* production-public-prune:start guided-open-terms */
 /** Immutable production-canary envelope. These values are sent in the Open intent. */
 export const CANARY_COLLATERAL_WEI = 5n * 10n ** 18n;
 export const CANARY_DEBT_E8S = 10_000_000n; // exactly 0.10 icUSD
 
 export function openTermsFor(config: DeploymentConfig, requestedCollateral: bigint, requestedDebt: bigint) {
-  return config.productionCanary
+  return config.guidedLifecycle
     ? { collateralWei: CANARY_COLLATERAL_WEI, debtE8s: CANARY_DEBT_E8S }
     : { collateralWei: requestedCollateral, debtE8s: requestedDebt };
 }
+/* production-public-prune:end guided-open-terms */
 
 export const confluxESpaceChain = defineChain({
   id: CHAIN_ID,
@@ -169,7 +174,9 @@ export const confluxESpaceChain = defineChain({
   nativeCurrency: { name: "Conflux", symbol: "CFX", decimals: CFX_DECIMALS },
   rpcUrls: { default: { http: [ESPACE_RPC] } },
   blockExplorers: { default: { name: "ConfluxScan", url: ESPACE_EXPLORER } },
+  /* production-public-prune:start testnet-chain-flag */
   testnet: !IS_MAINNET,
+  /* production-public-prune:end testnet-chain-flag */
 });
 
 // Compatibility alias for any external testnet-only imports.

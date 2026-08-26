@@ -9,8 +9,6 @@
     ESPACE_EXPLORER,
     ICUSD_CONTRACT,
     IS_MAINNET,
-    IS_PRODUCTION_CANARY,
-    IS_PRODUCTION_PUBLIC,
     MIN_CR,
     MIN_DEBT_E8S,
     PUBLIC_CANONICAL_ORIGIN,
@@ -122,7 +120,7 @@
   // Mirror durable state across same-wallet tabs. Web Locks still serialize
   // every production action; this listener keeps the visible state current.
   $effect(() => {
-    if (!IS_PRODUCTION_CANARY || !wallet || typeof window === "undefined") return;
+    if (!__RUMI_PRODUCTION_CANARY_BUILD__ || !wallet || typeof window === "undefined") return;
     const owner = wallet.address;
     const key = canaryStorageKey(owner);
     const onStorage = (event: StorageEvent) => {
@@ -135,7 +133,7 @@
   });
 
   $effect(() => {
-    if (!IS_PRODUCTION_PUBLIC || !wallet || typeof window === "undefined") return;
+    if (!__RUMI_PRODUCTION_PUBLIC_BUILD__ || !wallet || typeof window === "undefined") return;
     const owner = wallet.address;
     const key = mainnetStorageKey(owner);
     const onStorage = (event: StorageEvent) => {
@@ -163,21 +161,23 @@
     const s = statusName(v.status);
     return s === "AwaitingDeposit" || s === "MintPending" || s === "Closing";
   }));
-  const productionLifecycleUsed = $derived(IS_PRODUCTION_CANARY && hasUsedProductionLifecycle(canary, owned.length));
-  const canaryPolling = $derived(canary !== null &&
+  /* production-public-prune:start derived-canary */
+  const productionLifecycleUsed = $derived(__RUMI_PRODUCTION_CANARY_BUILD__ && hasUsedProductionLifecycle(canary, owned.length));
+  const canaryPolling = $derived(__RUMI_PRODUCTION_CANARY_BUILD__ && canary !== null &&
     (canary.phase === "open-authorizing" || canary.phase === "deposit-authorizing" ||
       canary.phase === "deposit-submitted" || canary.phase === "deposit-observed" || canary.phase === "burn-authorizing" ||
       canary.phase === "deposit-replaced" || canary.phase === "burn-submitted" ||
       canary.phase === "burn-replaced" || canary.phase === "close-authorizing" || canary.phase === "close-submitted"));
-  const unresolvedAuthorization = $derived(canary !== null &&
+  const unresolvedAuthorization = $derived(__RUMI_PRODUCTION_CANARY_BUILD__ && canary !== null &&
     (canary.phase === "open-authorizing" || canary.phase === "deposit-authorizing" ||
       canary.phase === "deposit-replaced" || canary.phase === "burn-authorizing" ||
       canary.phase === "burn-replaced" || canary.phase === "close-authorizing"));
-  const transactions = $derived((canary?.transactions ?? []).map((tx) => ({
+  const transactions = $derived((__RUMI_PRODUCTION_CANARY_BUILD__ ? (canary?.transactions ?? []) : []).map((tx) => ({
     label: tx.kind === "deposit" ? "CFX deposit" : "icUSD burn",
     hash: tx.hash,
     url: txUrl(tx.hash),
   })));
+  /* production-public-prune:end derived-canary */
 
   const liveMinCr = $derived(publicStatus ? ratioE4(publicStatus.min_cr_e4) : null);
   const liveLiquidationCr = $derived(publicStatus ? ratioE4(publicStatus.liquidation_threshold_e4) : null);
@@ -186,11 +186,11 @@
     !!publicStatus.liquidation_config_digest[0] &&
     !!publicStatus.expected_liquidation_config_digest &&
     publicStatus.liquidation_config_digest[0] === publicStatus.expected_liquidation_config_digest);
-  const publicOriginBlocker = $derived(IS_PRODUCTION_PUBLIC
+  const publicOriginBlocker = $derived(__RUMI_PRODUCTION_PUBLIC_BUILD__
     ? publicOriginRefusal(PUBLIC_CANONICAL_ORIGIN, typeof window === "undefined" ? "" : window.location.origin)
     : null);
   function publicActionBlocker(requiresPublicReadiness: boolean): string | null {
-    if (!IS_PRODUCTION_PUBLIC) return null;
+    if (!__RUMI_PRODUCTION_PUBLIC_BUILD__) return null;
     if (publicOriginBlocker) return publicOriginBlocker;
     const backendRefusal = publicActionRefusal(publicStatus, requiresPublicReadiness);
     if (backendRefusal) return backendRefusal;
@@ -201,18 +201,18 @@
     if (mainnetLock) return "A previous production action is still resolving. Refresh and do not repeat it.";
     return null;
   }
-  const publicBackendLaunchRefusal = $derived(IS_PRODUCTION_PUBLIC ? publicWriteRefusal(publicStatus) : null);
+  const publicBackendLaunchRefusal = $derived(__RUMI_PRODUCTION_PUBLIC_BUILD__ ? publicWriteRefusal(publicStatus) : null);
   const publicLaunchRefusal = $derived(publicOriginBlocker ?? publicBackendLaunchRefusal);
-  const publicLaunchReady = $derived(IS_PRODUCTION_PUBLIC && publicLaunchRefusal === null);
+  const publicLaunchReady = $derived(__RUMI_PRODUCTION_PUBLIC_BUILD__ && publicLaunchRefusal === null);
   const publicRiskWriteBlocker = $derived.by(() => publicActionBlocker(true));
   const publicRecoveryWriteBlocker = $derived.by(() => publicActionBlocker(false));
-  const publicRiskWritesEnabled = $derived(!IS_PRODUCTION_PUBLIC || publicRiskWriteBlocker === null);
-  const publicRecoveryWritesEnabled = $derived(!IS_PRODUCTION_PUBLIC || publicRecoveryWriteBlocker === null);
+  const publicRiskWritesEnabled = $derived(!__RUMI_PRODUCTION_PUBLIC_BUILD__ || publicRiskWriteBlocker === null);
+  const publicRecoveryWritesEnabled = $derived(!__RUMI_PRODUCTION_PUBLIC_BUILD__ || publicRecoveryWriteBlocker === null);
 
   const requestedDebtE8s = $derived(toE8s(debtInput));
   const requestedCfxWei = $derived.by(() => {
     const d = parseFloat(debtInput) || 0;
-    if (IS_PRODUCTION_PUBLIC) {
+    if (__RUMI_PRODUCTION_PUBLIC_BUILD__) {
       return suggestedCollateralWeiAtRatio(d, liveCfxPrice ?? 0, liveMinCr ?? 0);
     }
     return suggestedCollateralWei(d, parseFloat(cfxPrice) || 0);
@@ -281,7 +281,7 @@
   }
 
   function loadMainnetLock(owner: `0x${string}`) {
-    if (!IS_PRODUCTION_PUBLIC || typeof localStorage === "undefined") return;
+    if (!__RUMI_PRODUCTION_PUBLIC_BUILD__ || typeof localStorage === "undefined") return;
     mainnetLock = parseMainnetActionLock(localStorage.getItem(mainnetStorageKey(owner)), owner);
   }
 
@@ -301,7 +301,7 @@
   }
 
   function beginMainnetLock(kind: MainnetActionKind, vault?: ChainVault, amount = 0n, openCollateralWei = 0n): MainnetActionLock | null {
-    if (!IS_PRODUCTION_PUBLIC) return null;
+    if (!__RUMI_PRODUCTION_PUBLIC_BUILD__) return null;
     if (!wallet || mainnetLock) throw new Error("A previous production action is still resolving. Do not repeat it.");
     if (!canPersistMainnet()) throw new Error("Production mainnet requires browser storage so action locks survive reloads.");
     mainnetLock = newMainnetActionLock({
@@ -324,16 +324,17 @@
   }
 
   function restoreExplicitlyRejectedMainnet(lock: MainnetActionLock | null) {
-    if (!lock || !IS_PRODUCTION_PUBLIC) return;
+    if (!lock || !__RUMI_PRODUCTION_PUBLIC_BUILD__) return;
     clearMainnetLock();
   }
 
   function recordMainnetNonce(nonce: bigint) {
-    if (!IS_PRODUCTION_PUBLIC || !mainnetLock) return;
+    if (!__RUMI_PRODUCTION_PUBLIC_BUILD__ || !mainnetLock) return;
     mainnetLock = withMainnetNonce(mainnetLock, nonce);
     if (!persistMainnetLock()) throw new Error("Could not persist the signed intent nonce. Do not repeat the action.");
   }
 
+  /* production-public-prune:start canary-storage */
   function canPersistCanary(): boolean {
     if (!wallet || typeof localStorage === "undefined") return false;
     try {
@@ -361,7 +362,7 @@
   }
 
   function loadCanary(owner: `0x${string}`) {
-    if (!IS_PRODUCTION_CANARY || typeof localStorage === "undefined") return;
+    if (!__RUMI_PRODUCTION_CANARY_BUILD__ || typeof localStorage === "undefined") return;
     canary = parseCanaryRecord(localStorage.getItem(canaryStorageKey(owner)), owner);
   }
 
@@ -406,23 +407,25 @@
       return false;
     }
   }
+  /* production-public-prune:end canary-storage */
 
   async function withCanaryExclusivity(run: () => Promise<void>) {
     if (!IS_MAINNET) return run();
     if (!wallet || typeof navigator === "undefined" || !navigator.locks) {
       throw new Error("Production mainnet requires browser cross-tab locks; use a current injected-wallet browser.");
     }
-    const key = IS_PRODUCTION_CANARY ? canaryStorageKey(wallet.address) : mainnetStorageKey(wallet.address);
+    const key = __RUMI_PRODUCTION_CANARY_BUILD__ ? canaryStorageKey(wallet.address) : mainnetStorageKey(wallet.address);
     await navigator.locks.request(`${key}:action`, async () => {
       // Another tab may have advanced the durable state while this tab waited.
-      if (IS_PRODUCTION_CANARY) loadCanary(wallet!.address);
-      if (IS_PRODUCTION_PUBLIC) loadMainnetLock(wallet!.address);
+      if (__RUMI_PRODUCTION_CANARY_BUILD__) loadCanary(wallet!.address);
+      if (__RUMI_PRODUCTION_PUBLIC_BUILD__) loadMainnetLock(wallet!.address);
       await run();
     });
   }
 
+  /* production-public-prune:start canary-reconciliation */
   function reconcileCanary(nextVaults: ChainVault[]) {
-    if (!canary) return;
+    if (!__RUMI_PRODUCTION_CANARY_BUILD__ || !canary) return;
     if (canary.phase === "open-authorizing" && canary.vaultId === "0") {
       const candidates = nextVaults.filter((v) => isRecoverableOpenCandidate(canary!, snapshot(v)));
       if (candidates.length !== 1) return;
@@ -485,9 +488,10 @@
       receiptWatching = null;
     }
   }
+  /* production-public-prune:end canary-reconciliation */
 
   async function refreshPublicStatus(): Promise<ChainPublicLaunchStatus | null> {
-    if (!IS_PRODUCTION_PUBLIC) return null;
+    if (!__RUMI_PRODUCTION_PUBLIC_BUILD__) return null;
     try {
       const status = await (await backend()).get_chain_public_launch_status(CHAIN_ID);
       publicStatus = status;
@@ -519,7 +523,7 @@
   }
 
   async function assertPublicWriteReady(kind: MainnetActionKind) {
-    if (!IS_PRODUCTION_PUBLIC) return;
+    if (!__RUMI_PRODUCTION_PUBLIC_BUILD__) return;
     const originRefusal = publicOriginRefusal(
       PUBLIC_CANONICAL_ORIGIN,
       typeof window === "undefined" ? "" : window.location.origin,
@@ -536,7 +540,7 @@
   }
 
   async function reconcileMainnetLock(nextVaults: ChainVault[]) {
-    if (!IS_PRODUCTION_PUBLIC || !mainnetLock || !wallet) return;
+    if (!__RUMI_PRODUCTION_PUBLIC_BUILD__ || !mainnetLock || !wallet) return;
     const observed = mainnetActionObserved(mainnetLock, nextVaults.map(mainnetSnapshot));
     let exactNonceSuccess = false;
     let nonceAdvancedPastLock = false;
@@ -563,7 +567,7 @@
   }
 
   async function observeMainnetTransaction() {
-    if (!IS_PRODUCTION_PUBLIC || !mainnetLock?.txHash ||
+    if (!__RUMI_PRODUCTION_PUBLIC_BUILD__ || !mainnetLock?.txHash ||
         mainnetReceiptAttempts.has(mainnetLock.txHash) || receiptWatching === mainnetLock.txHash) return;
     const original = mainnetLock;
     const originalHash = original.txHash!;
@@ -607,14 +611,14 @@
   async function refresh() {
     if (!wallet) return;
     try {
-      if (IS_PRODUCTION_PUBLIC) await refreshPublicStatus();
+      if (__RUMI_PRODUCTION_PUBLIC_BUILD__) await refreshPublicStatus();
       const be = await backend();
       const nextVaults = await completeInventory(be);
       vaults = nextVaults;
       cfx = await cfxBalance(wallet.address);
       icusd = await icusdBalance(wallet.address);
-      if (IS_PRODUCTION_CANARY) productionInventoryVerified = true;
-      reconcileCanary(nextVaults);
+      if (__RUMI_PRODUCTION_CANARY_BUILD__) productionInventoryVerified = true;
+      if (__RUMI_PRODUCTION_CANARY_BUILD__) reconcileCanary(nextVaults);
       await reconcileMainnetLock(nextVaults);
       if (mainnetLock?.txHash) void observeMainnetTransaction();
     } catch (e: any) { err = `Refresh failed: ${e?.message ?? e}`; }
@@ -632,7 +636,7 @@
   }
 
   function canConnect(): boolean {
-    return (!IS_MAINNET || productionAcknowledged) && (!IS_PRODUCTION_PUBLIC || publicOriginBlocker === null);
+    return (!IS_MAINNET || productionAcknowledged) && (!__RUMI_PRODUCTION_PUBLIC_BUILD__ || publicOriginBlocker === null);
   }
 
   async function connectWith(detail: EIP6963ProviderDetail) {
@@ -641,7 +645,7 @@
     busy = `Connecting ${detail.info.name}…`;
     try {
       wallet = await connectInjected(detail);
-      loadCanary(wallet.address);
+      if (__RUMI_PRODUCTION_CANARY_BUILD__) loadCanary(wallet.address);
       loadMainnetLock(wallet.address);
       walletChainValid = (await walletChainId(wallet)) === CHAIN_ID;
       walletAddressValid = await walletStillControlsAddress(wallet);
@@ -656,7 +660,7 @@
     busy = "Connecting…";
     try {
       wallet = await connectLegacyInjected();
-      loadCanary(wallet.address);
+      if (__RUMI_PRODUCTION_CANARY_BUILD__) loadCanary(wallet.address);
       loadMainnetLock(wallet.address);
       walletChainValid = (await walletChainId(wallet)) === CHAIN_ID;
       walletAddressValid = await walletStillControlsAddress(wallet);
@@ -728,23 +732,23 @@
     reset();
     await assertPublicWriteReady("open");
     if (productionLifecycleUsed) {
-      err = "This production-canary build is permanently limited to one lifecycle for this wallet.";
+      err = "This restricted build is permanently limited to one lifecycle for this wallet.";
       return;
     }
-    if (IS_PRODUCTION_CANARY && !productionInventoryVerified) {
+    if (__RUMI_PRODUCTION_CANARY_BUILD__ && !productionInventoryVerified) {
       err = "Production vault inventory must refresh successfully before Open is available.";
       return;
     }
-    if (IS_PRODUCTION_CANARY && !canPersistCanary()) {
+    if (__RUMI_PRODUCTION_CANARY_BUILD__ && !canPersistCanary()) {
       err = "Production canary requires browser storage so action locks survive reloads.";
       return;
     }
-    const minimumDebt = IS_PRODUCTION_PUBLIC
+    const minimumDebt = __RUMI_PRODUCTION_PUBLIC_BUILD__
       ? (publicStatus?.effective_debt_config[0]?.min_vault_debt_e8s ?? 0n)
       : MIN_DEBT_E8S;
     if (openTerms.debtE8s < minimumDebt) { err = `Minimum debt is ${fmtIcusd(minimumDebt)} icUSD`; return; }
     if (openTerms.collateralWei <= 0n) { err = "Enter a debt and CFX price"; return; }
-    if (IS_PRODUCTION_CANARY &&
+    if (__RUMI_PRODUCTION_CANARY_BUILD__ &&
         (openTerms.collateralWei !== CANARY_COLLATERAL_WEI || openTerms.debtE8s !== CANARY_DEBT_E8S)) {
       err = "Production canary terms are not the exact 5 CFX / 0.10 icUSD envelope.";
       return;
@@ -752,7 +756,7 @@
     let openLock: CanaryRecord | null = null;
     let publicOpenLock: MainnetActionLock | null = null;
     try {
-      if (IS_PRODUCTION_CANARY) {
+      if (__RUMI_PRODUCTION_CANARY_BUILD__) {
         busy = "Verifying the one-lifecycle inventory…";
         const currentVaults = await completeInventory(await backend());
         vaults = currentVaults;
@@ -768,7 +772,7 @@
           throw new Error("Could not persist the Open safety lock. No signature was requested.");
         }
       }
-      if (IS_PRODUCTION_PUBLIC) {
+      if (__RUMI_PRODUCTION_PUBLIC_BUILD__) {
         busy = "Refreshing complete vault inventory…";
         vaults = await completeInventory(await backend());
         await assertPublicWriteReady("open");
@@ -778,13 +782,13 @@
       const res = await submit(ACTION.Open, 0n, openTerms.collateralWei, openTerms.debtE8s,
         (be, i, sig) => be.open_chain_vault_evm(i, sig), recordMainnetNonce);
       if ("Ok" in res) {
-        if (IS_PRODUCTION_PUBLIC && mainnetLock) {
+        if (__RUMI_PRODUCTION_PUBLIC_BUILD__ && mainnetLock) {
           mainnetLock = withMainnetVaultId(mainnetLock, BigInt(res.Ok as bigint));
           mainnetLock = markMainnetSubmitted(mainnetLock);
           if (!persistMainnetLock()) throw new Error("Vault opened, but its exact id could not be persisted. Do not sign Open again.");
           publicOpenLock = null;
         }
-        if (IS_PRODUCTION_CANARY) {
+        if (__RUMI_PRODUCTION_CANARY_BUILD__) {
           canary = newCanaryRecord(wallet!.address, BigInt(res.Ok as bigint));
           if (!persistCanary()) {
             // The already-persisted Open lock stays terminal on reload.
@@ -797,13 +801,13 @@
       }
       else {
         if (openLock && !clearOpenLock(openLock)) return;
-        if (publicOpenLock || (IS_PRODUCTION_PUBLIC && mainnetLock)) clearMainnetLock();
+        if (publicOpenLock || (__RUMI_PRODUCTION_PUBLIC_BUILD__ && mainnetLock)) clearMainnetLock();
         err = errText(res.Err);
       }
     } catch (e: any) {
       const explicitRejection = isExplicitWalletRejection(e);
       const rejectionLockCleared = openLock && explicitRejection ? clearOpenLock(openLock) : true;
-      if (IS_PRODUCTION_PUBLIC && mainnetLock) {
+      if (__RUMI_PRODUCTION_PUBLIC_BUILD__ && mainnetLock) {
         if (explicitRejection) restoreExplicitlyRejectedMainnet(publicOpenLock ?? mainnetLock);
         else {
           mainnetLock = markMainnetAmbiguous(mainnetLock);
@@ -930,8 +934,8 @@
           hash = await sendFreshDepositAfterPreflight(
             async () => {
               if (IS_MAINNET) {
-                busy = IS_PRODUCTION_PUBLIC ? "Refreshing complete inventory and exact vault state…" : "Refreshing exact vault state…";
-                if (IS_PRODUCTION_PUBLIC) {
+                busy = __RUMI_PRODUCTION_PUBLIC_BUILD__ ? "Refreshing complete inventory and exact vault state…" : "Refreshing exact vault state…";
+                if (__RUMI_PRODUCTION_PUBLIC_BUILD__) {
                   vaults = await completeInventory(await backend());
                   await assertPublicWriteReady(gateKind);
                 }
@@ -941,10 +945,10 @@
             (fresh) => variantName(fresh.status),
             (fresh) => {
               current = fresh;
-              if (IS_PRODUCTION_PUBLIC && fresh.owner_evm[0]?.toLowerCase() !== w.address.toLowerCase()) {
+              if (__RUMI_PRODUCTION_PUBLIC_BUILD__ && fresh.owner_evm[0]?.toLowerCase() !== w.address.toLowerCase()) {
                 throw new Error("The freshly loaded vault is not owned by the connected wallet.");
               }
-              if (IS_PRODUCTION_CANARY) {
+              if (__RUMI_PRODUCTION_CANARY_BUILD__) {
                 const refusal = validateCanaryAction(canary, snapshot(fresh), "deposit");
                 if (refusal) throw new Error(`Refusing deposit: ${refusal}`);
               }
@@ -952,18 +956,18 @@
             },
             (fresh) => {
               publicLock = beginMainnetLock("deposit", fresh, fresh.pending_mint_e8s);
-              previous = IS_PRODUCTION_CANARY ? persistActionLock("deposit-authorizing") : null;
+              previous = __RUMI_PRODUCTION_CANARY_BUILD__ ? persistActionLock("deposit-authorizing") : null;
             },
             (fresh) => sendDeposit(w, fresh.custody_address as `0x${string}`, fresh.collateral_amount_e18),
           );
         } catch (e) {
-          if (IS_PRODUCTION_CANARY && previous && isExplicitWalletRejection(e)) {
+          if (__RUMI_PRODUCTION_CANARY_BUILD__ && previous && isExplicitWalletRejection(e)) {
             restoreCanaryLock(previous, "deposit-authorizing");
           }
-          if (IS_PRODUCTION_CANARY && previous && !isExplicitWalletRejection(e)) {
+          if (__RUMI_PRODUCTION_CANARY_BUILD__ && previous && !isExplicitWalletRejection(e)) {
             throw new Error("Deposit provider result is ambiguous. The pre-transaction lock remains; do not repeat the 5 CFX transfer. Refresh and wait for backend observation.");
           }
-          if (IS_PRODUCTION_PUBLIC && publicLock) {
+          if (__RUMI_PRODUCTION_PUBLIC_BUILD__ && publicLock) {
             if (isExplicitWalletRejection(e)) restoreExplicitlyRejectedMainnet(publicLock);
             else {
               mainnetLock = markMainnetAmbiguous(mainnetLock!);
@@ -973,54 +977,54 @@
           }
           throw e;
         }
-        if (IS_PRODUCTION_CANARY && canary) {
+        if (__RUMI_PRODUCTION_CANARY_BUILD__ && canary) {
           canary = recordTransaction(canary, "deposit-submitted", "deposit", hash);
           persistCanary();
           void observePendingTransaction();
         }
-        if (IS_PRODUCTION_PUBLIC && mainnetLock) {
+        if (__RUMI_PRODUCTION_PUBLIC_BUILD__ && mainnetLock) {
           mainnetLock = withMainnetTransaction(mainnetLock, hash);
           persistMainnetLock();
           void observeMainnetTransaction();
         }
         ok = "Deposit submitted — waiting for the observer to report the vault Open.";
       } else {
-        if (IS_PRODUCTION_PUBLIC) {
+        if (__RUMI_PRODUCTION_PUBLIC_BUILD__) {
           busy = "Refreshing complete inventory and exact vault state…";
           vaults = await completeInventory(await backend());
           await assertPublicWriteReady(gateKind);
         }
         if (IS_MAINNET) {
-          if (!IS_PRODUCTION_PUBLIC) busy = "Refreshing exact vault state…";
+          if (!__RUMI_PRODUCTION_PUBLIC_BUILD__) busy = "Refreshing exact vault state…";
           current = await latestVault(vault.vault_id);
-          if (IS_PRODUCTION_PUBLIC && current.owner_evm[0]?.toLowerCase() !== w.address.toLowerCase()) {
+          if (__RUMI_PRODUCTION_PUBLIC_BUILD__ && current.owner_evm[0]?.toLowerCase() !== w.address.toLowerCase()) {
             throw new Error("The freshly loaded vault is not owned by the connected wallet.");
           }
         }
       }
       if (kind === "repay") {
-        const amt = IS_PRODUCTION_CANARY ? CANARY_DEBT_E8S : (amountE8s ?? current.debt_e8s);
+        const amt = __RUMI_PRODUCTION_CANARY_BUILD__ ? CANARY_DEBT_E8S : (amountE8s ?? current.debt_e8s);
         if (amt <= 0n || amt > current.debt_e8s) throw new Error("Repay must be greater than zero and no more than the freshly observed vault debt.");
-        if (IS_PRODUCTION_CANARY) {
+        if (__RUMI_PRODUCTION_CANARY_BUILD__) {
           const refusal = validateCanaryAction(canary, snapshot(current), "burn");
           if (refusal || amt !== CANARY_DEBT_E8S) {
             throw new Error(`Refusing burn: ${refusal ?? "amount must be exactly 0.10 icUSD."}`);
           }
         }
         const publicLock = beginMainnetLock("burn", current, amt);
-        const previous = IS_PRODUCTION_CANARY ? persistActionLock("burn-authorizing") : null;
+        const previous = __RUMI_PRODUCTION_CANARY_BUILD__ ? persistActionLock("burn-authorizing") : null;
         busy = `Confirm the ${fmtIcusd(amt)} icUSD burn in your wallet…`;
         let hash: `0x${string}`;
         try {
           hash = await burnIcusd(w, amt, current.vault_id);
         } catch (e) {
-          if (IS_PRODUCTION_CANARY && previous && isExplicitWalletRejection(e)) {
+          if (__RUMI_PRODUCTION_CANARY_BUILD__ && previous && isExplicitWalletRejection(e)) {
             restoreCanaryLock(previous, "burn-authorizing");
           }
-          if (IS_PRODUCTION_CANARY && !isExplicitWalletRejection(e)) {
+          if (__RUMI_PRODUCTION_CANARY_BUILD__ && !isExplicitWalletRejection(e)) {
             throw new Error("Burn provider result is ambiguous. The pre-transaction lock remains; do not repeat the 0.10 icUSD burn. Refresh and wait for backend observation.");
           }
-          if (IS_PRODUCTION_PUBLIC && publicLock) {
+          if (__RUMI_PRODUCTION_PUBLIC_BUILD__ && publicLock) {
             if (isExplicitWalletRejection(e)) restoreExplicitlyRejectedMainnet(publicLock);
             else {
               mainnetLock = markMainnetAmbiguous(mainnetLock!);
@@ -1030,19 +1034,19 @@
           }
           throw e;
         }
-        if (IS_PRODUCTION_CANARY && canary) {
+        if (__RUMI_PRODUCTION_CANARY_BUILD__ && canary) {
           canary = recordTransaction(canary, "burn-submitted", "burn", hash);
           persistCanary();
           void observePendingTransaction();
         }
-        if (IS_PRODUCTION_PUBLIC && mainnetLock) {
+        if (__RUMI_PRODUCTION_PUBLIC_BUILD__ && mainnetLock) {
           mainnetLock = withMainnetTransaction(mainnetLock, hash);
           persistMainnetLock();
           void observeMainnetTransaction();
         }
         ok = `Burn submitted — waiting for the observer to report zero debt.`;
       } else if (kind === "borrow") {
-        if (IS_PRODUCTION_CANARY) throw new Error("Borrow-more is disabled in production-canary mode.");
+        if (__RUMI_PRODUCTION_CANARY_BUILD__) throw new Error("Borrow-more is disabled in production-canary mode.");
         const borrowAmount = amountE8s ?? 0n;
         if (borrowAmount <= 0n) throw new Error("Borrow amount must be greater than zero.");
         const publicLock = beginMainnetLock("borrow", current, amountE8s ?? 0n);
@@ -1051,7 +1055,7 @@
           const res = await submit(ACTION.Borrow, current.vault_id, 0n, amountE8s ?? 0n,
             (be, i, sig) => be.borrow_chain_vault_evm(i, sig), recordMainnetNonce);
           if ("Ok" in res) {
-            if (IS_PRODUCTION_PUBLIC && mainnetLock) { mainnetLock = markMainnetSubmitted(mainnetLock); persistMainnetLock(); }
+            if (__RUMI_PRODUCTION_PUBLIC_BUILD__ && mainnetLock) { mainnetLock = markMainnetSubmitted(mainnetLock); persistMainnetLock(); }
             ok = "Borrow signed — the mint will land shortly.";
           } else {
             if (publicLock) clearMainnetLock();
@@ -1063,7 +1067,7 @@
           throw e;
         }
       } else if (kind === "withdraw") {
-        if (IS_PRODUCTION_CANARY) throw new Error("Partial withdrawal is disabled in production-canary mode.");
+        if (__RUMI_PRODUCTION_CANARY_BUILD__) throw new Error("Partial withdrawal is disabled in production-canary mode.");
         if ((amountE8s ?? 0n) <= 0n || (amountE8s ?? 0n) > current.collateral_amount_e18) {
           throw new Error("Withdrawal must be greater than zero and no more than the freshly observed collateral.");
         }
@@ -1073,7 +1077,7 @@
           const res = await submit(ACTION.WithdrawCollateral, current.vault_id, amountE8s ?? 0n, 0n,
             (be, i, sig) => be.withdraw_chain_collateral_evm(i, sig), recordMainnetNonce);
           if ("Ok" in res) {
-            if (IS_PRODUCTION_PUBLIC && mainnetLock) { mainnetLock = markMainnetSubmitted(mainnetLock); persistMainnetLock(); }
+            if (__RUMI_PRODUCTION_PUBLIC_BUILD__ && mainnetLock) { mainnetLock = markMainnetSubmitted(mainnetLock); persistMainnetLock(); }
             ok = "Withdraw signed.";
           } else {
             if (publicLock) clearMainnetLock();
@@ -1085,38 +1089,38 @@
           throw e;
         }
       } else if (kind === "close") {
-        if (IS_PRODUCTION_CANARY) {
+        if (__RUMI_PRODUCTION_CANARY_BUILD__) {
           const refusal = validateCanaryAction(canary, snapshot(current), "close");
           if (refusal) throw new Error(`Refusing close: ${refusal}`);
         } else if (current.debt_e8s !== 0n) {
           throw new Error("Refusing close until the observer reports zero debt.");
         }
         const publicLock = beginMainnetLock("close", current);
-        const previous = IS_PRODUCTION_CANARY ? persistActionLock("close-authorizing") : null;
+        const previous = __RUMI_PRODUCTION_CANARY_BUILD__ ? persistActionLock("close-authorizing") : null;
         busy = "Sign the Close intent…";
         let res: { Ok?: unknown; Err?: any };
         try {
           res = await submit(ACTION.Close, current.vault_id, 0n, 0n,
             (be, i, sig) => be.close_chain_vault_evm(i, sig), recordMainnetNonce);
         } catch (e) {
-          if (IS_PRODUCTION_CANARY && previous && isExplicitWalletRejection(e)) {
+          if (__RUMI_PRODUCTION_CANARY_BUILD__ && previous && isExplicitWalletRejection(e)) {
             restoreCanaryLock(previous, "close-authorizing");
           }
-          if (IS_PRODUCTION_CANARY && !isExplicitWalletRejection(e)) {
+          if (__RUMI_PRODUCTION_CANARY_BUILD__ && !isExplicitWalletRejection(e)) {
             throw new Error("Close result is ambiguous. The pre-signature lock remains; do not submit another Close. Refresh and wait for backend observation.");
           }
-          if (IS_PRODUCTION_PUBLIC && publicLock) {
+          if (__RUMI_PRODUCTION_PUBLIC_BUILD__ && publicLock) {
             if (isExplicitWalletRejection(e)) restoreExplicitlyRejectedMainnet(publicLock);
             else if (mainnetLock) { mainnetLock = markMainnetAmbiguous(mainnetLock); persistMainnetLock(); }
           }
           throw e;
         }
         if ("Ok" in res) {
-          if (IS_PRODUCTION_CANARY) setCanaryPhase("close-submitted");
-          if (IS_PRODUCTION_PUBLIC && mainnetLock) { mainnetLock = markMainnetSubmitted(mainnetLock); persistMainnetLock(); }
+          if (__RUMI_PRODUCTION_CANARY_BUILD__) setCanaryPhase("close-submitted");
+          if (__RUMI_PRODUCTION_PUBLIC_BUILD__ && mainnetLock) { mainnetLock = markMainnetSubmitted(mainnetLock); persistMainnetLock(); }
           ok = "Close submitted — waiting for the backend to report Closed.";
         } else {
-          if (IS_PRODUCTION_CANARY && previous) restoreCanaryLock(previous, "close-authorizing");
+          if (__RUMI_PRODUCTION_CANARY_BUILD__ && previous) restoreCanaryLock(previous, "close-authorizing");
           if (publicLock) clearMainnetLock();
           err = errText(res.Err);
         }
@@ -1141,18 +1145,18 @@
 
   $effect(() => {
     receiptRetryGeneration;
-    if (wallet && canary && pendingTransaction(canary)) void observePendingTransaction();
+    if (__RUMI_PRODUCTION_CANARY_BUILD__ && wallet && canary && pendingTransaction(canary)) void observePendingTransaction();
   });
 
   $effect(() => {
-    if (!IS_PRODUCTION_PUBLIC) return;
+    if (!__RUMI_PRODUCTION_PUBLIC_BUILD__) return;
     void refreshPublicStatus();
     const id = setInterval(refreshPublicStatus, 10_000);
     return () => clearInterval(id);
   });
 
   $effect(() => {
-    if (!wallet || !IS_PRODUCTION_PUBLIC || !mainnetLock) return;
+    if (!wallet || !__RUMI_PRODUCTION_PUBLIC_BUILD__ || !mainnetLock) return;
     if (mainnetLock.txHash) void observeMainnetTransaction();
     const id = setInterval(refresh, 8_000);
     return () => clearInterval(id);
@@ -1168,12 +1172,16 @@
         <div class="sub">Self-serve CDP · sign with your EVM wallet</div>
       </div>
     </div>
-    <span class="badge" class:testnet={!IS_MAINNET} class:mainnet={IS_MAINNET}>
-      {IS_MAINNET ? `PRODUCTION · chain ${CHAIN_ID}` : "eSpace testnet · chain 71 · staging"}
-    </span>
+    {#if __RUMI_PRODUCTION_PUBLIC_BUILD__}
+      <span class="badge mainnet">PRODUCTION · chain {CHAIN_ID}</span>
+    {:else}
+      <span class="badge" class:testnet={!IS_MAINNET} class:mainnet={IS_MAINNET}>
+        {IS_MAINNET ? `PRODUCTION · chain ${CHAIN_ID}` : "eSpace testnet · chain 71 · staging"}
+      </span>
+    {/if}
   </header>
 
-  {#if IS_PRODUCTION_CANARY}
+  {#if __RUMI_PRODUCTION_CANARY_BUILD__}
     <section class="production-warning" aria-label="Production warning">
       <strong>REAL FUNDS · PRODUCTION CANARY</strong>
       <p>This private build targets Conflux eSpace mainnet and the production Rumi backend. It is locked to one lifecycle: declare 5 CFX, mint 0.10 icUSD, burn exactly 0.10 icUSD, then close. Every signature and transaction requires your wallet confirmation.</p>
@@ -1191,7 +1199,7 @@
         <li>Sign Close; wait until the vault reports <b>Closed</b>.</li>
       </ol>
     </section>
-  {:else if IS_PRODUCTION_PUBLIC}
+  {:else if __RUMI_PRODUCTION_PUBLIC_BUILD__}
     <section class="production-warning" aria-label="Production warning">
       <strong>REAL FUNDS · CONFLUX MAINNET</strong>
       <p>This public build uses the production Rumi backend and production icUSD contract. Every signature and transaction requires a separate click and wallet confirmation. Live backend readiness can pause all new writes at any time.</p>
@@ -1207,7 +1215,7 @@
     </section>
   {/if}
 
-  {#if IS_PRODUCTION_PUBLIC}
+  {#if __RUMI_PRODUCTION_PUBLIC_BUILD__}
     <section class="card launch-status" aria-label="Public launch status">
       <div class="row spread">
         <h2>Live production status</h2>
@@ -1320,20 +1328,20 @@
 
     <div class="card">
       <h2>Open a vault</h2>
-      {#if IS_PRODUCTION_CANARY}
+      {#if __RUMI_PRODUCTION_CANARY_BUILD__}
         <p class="hint">The signed Open intent is compile-time locked. Owner and recipient are both your connected wallet.</p>
         <div class="kv"><span class="k">Declared collateral</span><span class="v">5 CFX</span></div>
         <div class="kv"><span class="k">Debt / mint</span><span class="v">0.10 icUSD</span></div>
         <div class="kv"><span class="k">Recipient</span><span class="v">Same as owner</span></div>
       {:else}
-        <p class="hint">Enter the icUSD you want to mint. Required CFX uses the {IS_PRODUCTION_PUBLIC ? (liveMinCr === null ? "live unavailable" : `${Math.round(liveMinCr * 100)}% live`) : `${Math.round(MIN_CR * 100)}%`} min-CR
+        <p class="hint">Enter the icUSD you want to mint. Required CFX uses the {__RUMI_PRODUCTION_PUBLIC_BUILD__ ? (liveMinCr === null ? "live unavailable" : `${Math.round(liveMinCr * 100)}% live`) : `${Math.round(MIN_CR * 100)}%`} min-CR
           floor (+2% buffer) — the real CR check runs on the canister.</p>
         <div class="row">
           <div class="field" style="flex:1">
             <label for="debt">icUSD debt</label>
             <input id="debt" type="number" min="0.1" step="0.1" bind:value={debtInput} />
           </div>
-          {#if IS_PRODUCTION_PUBLIC}
+          {#if __RUMI_PRODUCTION_PUBLIC_BUILD__}
             <div class="field" style="flex:1">
               <span class="field-label">Live CFX price</span>
               <div class="readonly-field">{liveCfxPrice === null ? "Unavailable" : `$${liveCfxPrice.toLocaleString(undefined, { maximumFractionDigits: 8 })}`}</div>
@@ -1348,14 +1356,14 @@
         <div class="kv"><span class="k">Required CFX (≈)</span><span class="v">{fmtCfx(openTerms.collateralWei)}</span></div>
       {/if}
       <div class="row" style="margin-top:14px">
-        <button class="primary" onclick={doOpen} disabled={!!busy || !publicRiskWritesEnabled || productionLifecycleUsed || (IS_PRODUCTION_CANARY && !productionInventoryVerified)}>Sign & open</button>
+        <button class="primary" onclick={doOpen} disabled={!!busy || !publicRiskWritesEnabled || productionLifecycleUsed || (__RUMI_PRODUCTION_CANARY_BUILD__ && !productionInventoryVerified)}>Sign & open</button>
       </div>
-      {#if IS_PRODUCTION_CANARY && canary}
+      {#if __RUMI_PRODUCTION_CANARY_BUILD__ && canary}
         <div class="notice info">Persisted lifecycle: <b>{canary.phase}</b>. Submitted actions remain locked across reloads until receipt/backend resolution.</div>
-      {:else if IS_PRODUCTION_CANARY && owned.length > 0}
+      {:else if __RUMI_PRODUCTION_CANARY_BUILD__ && owned.length > 0}
         <div class="notice err">This wallet already has a chain-1030 vault, but it was not opened by this browser's persisted canary record. Actions are read-only and a second lifecycle is disabled.</div>
       {/if}
-      {#if IS_PRODUCTION_CANARY && unresolvedAuthorization}
+      {#if __RUMI_PRODUCTION_CANARY_BUILD__ && unresolvedAuthorization}
         <div class="notice err">
           The action result is ambiguous. It stays locked because repeating it could move funds twice.
           First refresh and inspect the linked replacement transaction or wallet activity. Clear this lock only after confirming the intended transfer, burn, or signature did not occur.
@@ -1363,10 +1371,10 @@
           <button class="danger" disabled={!!busy || !recoveryAcknowledged} onclick={clearUnresolvedAuthorization}>Clear unresolved authorization lock</button>
         </div>
       {/if}
-      {#if IS_PRODUCTION_PUBLIC && publicRiskWriteBlocker}
+      {#if __RUMI_PRODUCTION_PUBLIC_BUILD__ && publicRiskWriteBlocker}
         <div class="notice err">Risk-increasing writes are unavailable: {publicRiskWriteBlocker}</div>
       {/if}
-      {#if IS_PRODUCTION_PUBLIC && mainnetLock}
+      {#if __RUMI_PRODUCTION_PUBLIC_BUILD__ && mainnetLock}
         <div class="notice info">
           Persisted production action: <b>{mainnetLock.kind}</b> ({mainnetLock.phase}). It remains locked across reloads until a receipt or fresh backend state resolves it.
           {#if mainnetLock.txHash}<br /><a href={txUrl(mainnetLock.txHash)} target="_blank" rel="noreferrer">View submitted transaction ↗</a>{/if}
@@ -1385,14 +1393,12 @@
       <VaultCard
         vault={v}
         busy={busy}
-        productionCanary={IS_PRODUCTION_CANARY}
-        productionPublic={IS_PRODUCTION_PUBLIC}
         riskWritesEnabled={publicRiskWritesEnabled}
         riskWriteDisabledReason={publicRiskWriteBlocker}
         recoveryWritesEnabled={publicRecoveryWritesEnabled}
         recoveryWriteDisabledReason={publicRecoveryWriteBlocker}
-        isCanaryVault={canary?.vaultId === v.vault_id.toString()}
-        canaryPhase={canary?.vaultId === v.vault_id.toString() ? canary.phase : null}
+        isGuidedVault={__RUMI_PRODUCTION_CANARY_BUILD__ && canary?.vaultId === v.vault_id.toString()}
+        guidedPhase={__RUMI_PRODUCTION_CANARY_BUILD__ && canary?.vaultId === v.vault_id.toString() ? canary.phase : null}
         {onAction}
       />
     {/each}
@@ -1402,7 +1408,7 @@
   {/if}
 
   {#if busy}<div class="notice info"><span class="spin"></span>{busy}</div>{/if}
-  {#if canaryPolling || receiptWatching || (IS_PRODUCTION_PUBLIC && mainnetLock)}<div class="notice info"><span class="spin"></span>Read-only receipt/status polling is active; no wallet action will happen automatically.</div>{/if}
+  {#if canaryPolling || receiptWatching || (__RUMI_PRODUCTION_PUBLIC_BUILD__ && mainnetLock)}<div class="notice info"><span class="spin"></span>Read-only receipt/status polling is active; no wallet action will happen automatically.</div>{/if}
   {#if err}<div class="notice err">{err}</div>{/if}
   {#if ok}<div class="notice ok">{ok}</div>{/if}
 
@@ -1418,9 +1424,9 @@
   <div class="foot">
     Backend <span class="mono">{BACKEND_CANISTER_ID}</span> ·
     <a href={addressUrl(ICUSD_CONTRACT)} target="_blank" rel="noreferrer">IcUSD <span class="mono">{ICUSD_CONTRACT.slice(0, 10)}…</span> ↗</a><br />
-    {#if IS_PRODUCTION_CANARY}
+    {#if __RUMI_PRODUCTION_CANARY_BUILD__}
       <strong>Production canary · chain {CHAIN_ID}</strong> · <a href={ESPACE_EXPLORER} target="_blank" rel="noreferrer">ConfluxScan ↗</a>
-    {:else if IS_PRODUCTION_PUBLIC}
+    {:else if __RUMI_PRODUCTION_PUBLIC_BUILD__}
       <strong>Production public · chain {CHAIN_ID}</strong> · <a href={ESPACE_EXPLORER} target="_blank" rel="noreferrer">ConfluxScan ↗</a>
     {:else}
       Testnet only. The chains rail is experimental — not on production.

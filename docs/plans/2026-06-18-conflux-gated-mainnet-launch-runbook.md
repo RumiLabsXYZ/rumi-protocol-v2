@@ -2,7 +2,7 @@
 
 Status: **production canary complete; public launch not active**
 
-Last reconciled: 2026-08-22
+Last reconciled: 2026-08-24
 
 Production backend: `tfesu-vyaaa-aaaap-qrd7a-cai`
 
@@ -24,8 +24,8 @@ as different proof states. Passing one state never proves the next one.
 | Real-funds proof | Vault `#1` completed open, 5 CFX deposit, 0.10 icUSD mint, exact burn, and close; vault debt/collateral and IcUSD supply reconciled to zero |
 | Chain status | Chain `1030` is **Disabled**. Timer entry checks keep its observer and settlement worker from starting new work; post-await checks also prevent a deposit transition or settlement broadcast after Disable |
 | Public-readiness release | The status/gating implementation exists on the working branch; review/source-ready, merge, production deployment, and live API verification remain separate proof states |
-| Public frontend | Public-mode source and fail-closed local verification commands exist, but no public asset canister or checked-in ICP deployment recipe currently exists. The existing `icp.yaml` frontend entry is not a production-public recipe |
-| Public availability | **Not public.** Asset-canister provisioning, canonical-origin/manifest review, frontend deployment, and live verification remain undone; liquidation configuration/route/depth has not been verified live for public use; and the chain is disabled |
+| Public frontend | Source-only dedicated `conflux_public_frontend` / `conflux-production-public` recipe exists. No production-public mapping, canister allocation, deploy artifact, install, or asset sync exists yet. The chain-71 staging recipe remains separate |
+| Public availability | **Not public.** Asset-canister provisioning, exact mapping/canonical-origin review, deploy-manifest review, artifact construction, installation/sync, and live verification remain undone; liquidation configuration/route/depth has not been verified live for public use; and the chain is disabled |
 
 The completed canary proves one bounded lifecycle against the production
 backend and contract. It does not prove public operational readiness, sustained
@@ -230,19 +230,13 @@ All items are required unless explicitly marked optional.
      and query-only; it never performs this refresh.
 
 5. **Deploy and verify the public frontend.**
-   - First provision a dedicated public asset canister. No public Conflux asset
-     canister or environment is currently checked into `icp.yaml`, and no
-     checked-in ICP recipe consumes the production-public bundle or its asset
-     policy. Do not treat the existing staging/default
-     `conflux_espace_frontend` entry as a public deployment recipe.
-   - After provisioning, review and pin the exact canonical certified origin as
-     `https://<non-reserved-canister-principal>.icp0.io`. Review the final ICP
-     provisioning/deployment manifest separately, including its consumption of
-     `.ic-assets.production-public.json` and the raw-access-off policy. Canister
-     provisioning, canonical-origin approval, manifest approval, artifact
-     construction, and deployment are separate proof states.
-   - Until those prerequisites exist, only the README's local/ephemeral public
-     verification commands are valid:
+   - The checked-in source-only recipe is `conflux_public_frontend` in the
+     one-canister `conflux-production-public` environment. It deliberately does
+     not include a canister-ID mapping or deployable artifact. Do not substitute
+     the existing `conflux_espace_frontend` / `mainnet-staging` rail, and never
+     use the implicit `ic` environment.
+   - Until a dedicated canister is provisioned, only the README's
+     local/ephemeral verification commands are valid:
 
      ```bash
      cd src/conflux_espace_frontend
@@ -250,14 +244,87 @@ All items are required unless explicitly marked optional.
      npm run build:production-public
      npm run dev:production-public
      npm run verify:production-public:deploy-build
+     npm run verify:production-public:recipe
      ```
 
      These commands cannot deploy. The build verifiers write only to temporary
      directories and remove their output; the local Vite server is fixed to
      `127.0.0.1:5174`; and the deployment-shape verifier uses a denylisted test
-     Principal. Do not claim that they produce a deployable artifact or that
-     `npm run build:production-public:deploy` is authorized before exact
-     provisioning/origin/manifest review.
+     Principal. Do not claim that they produce a deployable artifact.
+   - Canister creation and 2T-cycle funding require an explicit irreversible
+     approval. The exact phase-1 action is:
+
+     ```bash
+     env ICP_ENVIRONMENT=conflux-production-public \
+       /usr/local/bin/icp canister create conflux_public_frontend \
+       -e conflux-production-public \
+       --identity rumi_identity \
+       --cycles 2t
+     ```
+
+     Stop after creation. Require exactly one entry named
+     `conflux_public_frontend` in
+     `.icp/data/mappings/conflux-production-public.ids.json`; verify Running,
+     controller, cycles, and the empty/uninstalled state. Commit the mapping so
+     the allocated authority is not lost. Creation is not deployment.
+   - Derive and separately approve the sole canonical certified origin as
+     `https://<mapped-non-reserved-canister-principal>.icp0.io`. The guarded
+     build accepts no caller-supplied origin and rejects management, anonymous,
+     non-canister, raw, `ic0.app`, custom-domain, IP, port, path, query,
+     fragment, extra mapping keys, and its deterministic verification
+     Principal.
+   - After mapping/origin approval, build without installing or syncing:
+
+     ```bash
+     env ICP_ENVIRONMENT=conflux-production-public \
+       /usr/local/bin/icp build conflux_public_frontend \
+       -e conflux-production-public
+     ```
+
+     The recipe runs the `production-public` Vite mode and emits only
+     `src/conflux_espace_frontend/dist-production-public`. It copies
+     `.ic-assets.production-public.json` to the canonical `.ic-assets.json`
+     filename, requires `allow_raw_access: false` on every rule, enables the
+     SPA catch-all, and writes the deterministic
+     `rumi-conflux-production-public.json` manifest. The scanner requires the
+     exact canonical origin, production backend/IcUSD/RPC/chain/finality pins
+     and rejects dev-signer, production-canary, chain-71, testnet backend/RPC/
+     contract, and verification-Principal material.
+   - Seal the reviewed artifact without contacting the IC:
+
+     ```bash
+     cd src/conflux_espace_frontend
+     env ICP_ENVIRONMENT=conflux-production-public \
+       npm run seal:production-public-release
+     ```
+
+     Review the exact origin, mapping, ICP recipe, asset policy, deployment
+     manifest, exact `icp.yaml` digest, sorted complete asset hashes, built asset-canister Wasm hash,
+     and the printed release-seal sha256. Commit the mapping and deterministic
+     `.icp/data/reviews/conflux-production-public.release.json`. This
+     is the artifact-construction proof state, not deployment.
+   - Installation and asset sync require a separate explicit production
+     approval. Use the already reviewed build output; do not invoke a pipeline
+     that rebuilds between review and execution:
+
+     ```bash
+     cd src/conflux_espace_frontend
+     env ICP_ENVIRONMENT=conflux-production-public \
+       npm run install:reviewed-production-public -- \
+       --mode install \
+       --approved-release-sha256 <exact-approved-release-seal-sha256>
+     ```
+
+     The first install uses `--mode install`; subsequent upgrades use
+     `--mode upgrade`, never reinstall. The wrapper targets the sealed
+     Principal directly for install, supplies the sealed Wasm path, rechecks
+     the exact ICP recipe/target/manifest/assets/Wasm before install and again before sync, and
+     never attempts sync after an install failure or any intervening drift.
+     Verify the exact module hash,
+     controllers, cycles, listed assets, canonical manifest and JS hashes,
+     successful certified-origin root and SPA-fallback responses, and refusal
+     from `https://<principal>.raw.icp0.io`. Do not report the frontend
+     deployed if install succeeded but sync or any read-back failed.
    - It targets production backend `tfesu-vyaaa-aaaap-qrd7a-cai`, chain `1030`,
      and the bound IcUSD contract above.
    - It shows live debt limits and launch blockers from the status API.
