@@ -108,7 +108,17 @@ All items are required unless explicitly marked optional.
 1. **Merge and deploy the public-readiness release.**
    - Reviewed source is merged.
    - A fresh backend WASM is built from the merged commit.
-   - Production upgrade completes with the expected module hash.
+   - For the frozen gzip backend artifact, run
+     `scripts/verify-rumi-backend-upgrade-artifact.sh` before the upgrade. Its
+     uploaded gzip SHA-256 is
+     `14d65746d2d801347ecdb24dc54611b12cb3cca8765f5bf80f929751f1eda287`;
+     this is the exact value required from `canister_status.module_hash` both
+     while stopped after install and after restart. The locally decompressed
+     Wasm content SHA-256 is
+     `44d13c58f20d53dda91030f2c6c038e9db976b5e83cd2cb019b56219b744654e`;
+     retain it as semantic-content/build-reproducibility evidence only and
+     never use it as the live `module_hash` expectation. Pass the read-back to
+     the verifier with `--live-module-hash <exact-status-hash>`.
    - `get_chain_public_launch_status(1030)` and
      `get_expected_evm_nonce(1030, owner)` are callable and match the deployed
      Candid interface.
@@ -451,12 +461,35 @@ production snapshot before a backend upgrade and retain the previously approved
 snapshot-restoration contingency for a critical post-upgrade failure.
 Restoration itself remains an operator-controlled production action.
 
+### 2026-08-26 rolled-back backend upgrade attempt
+
+The exact frozen gzip artifact above was installed while the backend was
+stopped. The stopped-canister read-back returned `module_hash =
+14d65746d2d801347ecdb24dc54611b12cb3cca8765f5bf80f929751f1eda287`, but
+the execution approval incorrectly expected the decompressed content hash
+`44d13c58f20d53dda91030f2c6c038e9db976b5e83cd2cb019b56219b744654e`.
+The mismatch therefore triggered the approved conservative rollback before
+the new module was ever started. Snapshot
+`00000000000000040000000001f088fe0101` was restored, the old module
+`a8dffdb9e4fbb41de9f7f23a38d1e2b4e4aeb172a823004462e18ff22540e2e3`
+was verified, and the backend was restarted on that old module.
+
+Do not reuse that snapshot for another attempt: production resumed after it
+was taken. A retry requires fresh explicit approval, a fresh preflight, and a
+new snapshot. Its stopped pre-start and running post-start module-hash gates
+must both require the uploaded gzip SHA-256
+`14d65746d2d801347ecdb24dc54611b12cb3cca8765f5bf80f929751f1eda287`;
+a read-back of
+`44d13c58f20d53dda91030f2c6c038e9db976b5e83cd2cb019b56219b744654e`
+is not success.
+
 ## Evidence packet for the launch record
 
 Capture, redact, and retain:
 
 - merged commit and green CI checks;
-- backend WASM hash and production module-hash read-back;
+- uploaded gzip artifact SHA-256, decompressed Wasm content SHA-256, and the
+  production `module_hash` read-back matching the uploaded gzip SHA-256;
 - public frontend asset hash and public URL;
 - `get_chain_public_launch_status(1030)` output immediately before and after
   enablement;

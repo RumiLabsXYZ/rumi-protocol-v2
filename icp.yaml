@@ -530,8 +530,11 @@ canisters:
   # WASM SIZE: the raw cargo release wasm is ~6.7 MB, well over the 2 MiB
   # ingress limit (2_097_152 bytes). `ic-wasm shrink` alone may not be enough.
   # Following the rumi_analytics pattern we go straight to the explicit
-  # `build: steps:` form with shrink + gzip -9, which the IC strips server-side
-  # at install time.
+  # `build: steps:` form with shrink + gzip -9. For an installed gzip artifact,
+  # `canister_status.module_hash` is the SHA-256 of the uploaded gzip bytes,
+  # not the SHA-256 of the locally decompressed Wasm. Record both identities:
+  # the gzip hash is the live pre-start/post-start gate, while the decompressed
+  # hash is semantic-content/build-reproducibility evidence only.
   #
   # Build pipeline:
   #   1. `cargo build --release --target wasm32-unknown-unknown --package rumi_protocol_backend`
