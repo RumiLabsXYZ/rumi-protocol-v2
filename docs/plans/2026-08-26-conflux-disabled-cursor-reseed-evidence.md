@@ -5,6 +5,9 @@ Status: **sanitized approval evidence; no execution authority**
 Observation window: `2026-08-26T09:48:57Z` through
 `2026-08-26T10:16:25Z`
 
+Replacement-target observation window: `2026-08-26T14:20:00Z` through
+`2026-08-26T14:25:50Z`
+
 Production backend: `tfesu-vyaaa-aaaap-qrd7a-cai`
 
 Chain: Conflux eSpace mainnet `1030`
@@ -103,15 +106,29 @@ behavior, not evidence that the official EVM-RPC canister changed the result.
 
 ## Fixed recovery blocks
 
-The three paths independently returned the same results at the reviewed recent
-target:
+The first approved target (`T = 155_237_900`) expired before execution. The
+immediate pre-call gate still found identical headers from Confura, BlockPI,
+and Unifra, but BlockPI and Unifra both returned explicit
+`-32016 state is not ready` errors for factory `getPair` at the old `T` and
+`C` and for IcUSD `totalSupply()` at the old `T`. Confura was the only
+successful state provider, below the required floor of two. The operator
+therefore stopped before call one. No `set_last_observed_block`, liquidation
+setter, supply reconciliation, retry, reversal, endpoint/quorum change, or
+other live mutation occurred. The old target and approval are void.
+
+The replacement is a new fixed target, not a dynamic or rolling value. At
+selection, the three reported heads were `155_252_211` (Confura),
+`155_252_209` (BlockPI), and `155_252_211` (Unifra). The slowest provider was
+already 1,285 blocks beyond `P`. All three paths independently returned the
+same replacement results:
 
 ```text
-T = 155_237_900 (0x940be0c)
-T header hash = 0xe107566329fbc0526e7105d3cb788daff8588b950abcd9546603c6884c72e78d
+T = 155_249_500 (0x940eb5c)
+T header hash = 0xfdb455b5e2e8fb8fc20d58709f98d94a082232bd105d83786afda7205ea9f2ef
 factory getPair(WCFX, USDC) at T = 0x0736b3384531cda2f545f5449e84c6c6bcd6f01b
 IcUSD totalSupply() at T = 0
-F = T + 400 = 155_238_300 (0x940bf9c), header present
+F = T + 400 = 155_249_900 (0x940ecec)
+F header hash = 0x47307952a58607bcd5cf6af9078bf10abc842b8a926d57ed7bda632da29b8086
 ```
 
 The cursor setter stores `T`, but the subsequent liquidation setter calls
@@ -119,8 +136,11 @@ The cursor setter stores `T`, but the subsequent liquidation setter calls
 blocks are also frozen:
 
 ```text
-C = T + 1_024 = 155_238_924
-P = C + 400 = 155_239_324
+C = T + 1_024 = 155_250_524 (0x940ef5c)
+C header hash = 0xfa50433742b5f87654563cb3d8edc3c22d35900ae4a0ff0b05cfb6e8ceafd1fd
+P = C + 400 = 155_250_924 (0x940f0ec)
+P header hash = 0xff2f7eba0c362295a051f682a39bbeb6054fb126d2d017d0e65c3d662a547592
+factory getPair(WCFX, USDC) at C = 0x0736b3384531cda2f545f5449e84c6c6bcd6f01b
 ```
 
 Before approval and again immediately before execution, require at least two
@@ -131,9 +151,11 @@ return `C` for the liquidation setter's pinned read. Supply reconciliation
 still reads exactly at stored cursor `T`; `fetch_block_numbers` does not mutate
 the cursor.
 
-No observation in this file claims that `C` or `P` had already been produced
-during the earlier `T`/`F` probe. Their required preflight is deliberately an
-expiry condition, not reconstructed evidence.
+The replacement observation directly proved that `F`, `C`, and `P` already
+existed and that all three providers returned their identical canonical
+headers. It also directly proved the canonical pair at both `T` and `C` and
+zero IcUSD supply at `T` from all three providers. These observations do not
+waive the same fixed-matrix expiry check immediately before each approved call.
 
 ## Provenance and limits
 
