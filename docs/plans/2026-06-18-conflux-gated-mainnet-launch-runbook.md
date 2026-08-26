@@ -395,11 +395,22 @@ All items are required unless explicitly marked optional.
      configuration, enablement, and future cap changes are separate authority.
 
 9. **Enable once, then reconcile without an ambiguous retry.**
-   - Perform the approved chain-1030 enable action exactly once.
-   - If the update result is ambiguous, do not retry. Reconcile live status and
-     events first.
-   - Require the public-active monitor to pass before announcing public
-     availability.
+   - Perform the separately approved chain-1030 enable action exactly once:
+
+     ```bash
+     /usr/local/bin/icp canister call tfesu-vyaaa-aaaap-qrd7a-cai \
+       enable_chain '(1030 : nat32)' \
+       -n ic --identity rumi_identity
+     ```
+
+   - Require an unambiguous `Ok` response. If the update result is ambiguous,
+     do not retry; reconcile live status and events first.
+   - Then require the public-active monitor to pass before announcing public
+     availability:
+
+     ```bash
+     scripts/check-conflux-public-launch.sh --expect-public-active
+     ```
 
 A dedicated chains canister may still be useful for future isolation, but it is
 optional architecture work. Production `tfesu-vyaaa-aaaap-qrd7a-cai` has
