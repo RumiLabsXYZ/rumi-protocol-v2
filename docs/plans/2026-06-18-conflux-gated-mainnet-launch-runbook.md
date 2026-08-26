@@ -264,12 +264,23 @@ All items are required unless explicitly marked optional.
    - all three provider paths subsequently agreed on recent state. No endpoint
      credential, API key, paid URL, header, or secret is part of this artifact.
 
+   The first approved recovery target (`T = 155_237_900`) expired before call
+   one and was never used. Its immediate execution gate still found matching
+   headers from all three providers, but BlockPI and Unifra both returned
+   explicit `-32016 state is not ready` errors for the required pair/supply
+   state reads at `T` and the required pair read at `C`; only Confura succeeded.
+   That was below the required two-provider floor, so execution stopped before
+   `set_last_observed_block`. No cursor, liquidation row, reconciliation state,
+   chain status, endpoint, quorum, price, hot-wallet cache, frontend, Stability
+   Pool, or funds mutation occurred. The old target and its approval are void.
+
    The exact reviewed recovery target is:
 
    ```text
-   T = 155_237_900
-   F = T + 400 = 155_238_300
-   T header hash = 0xe107566329fbc0526e7105d3cb788daff8588b950abcd9546603c6884c72e78d
+   T = 155_249_500
+   F = T + 400 = 155_249_900
+   T header hash = 0xfdb455b5e2e8fb8fc20d58709f98d94a082232bd105d83786afda7205ea9f2ef
+   F header hash = 0x47307952a58607bcd5cf6af9078bf10abc842b8a926d57ed7bda632da29b8086
    factory getPair(WCFX, USDC) at T = 0x0736b3384531cda2f545f5449e84c6c6bcd6f01b
    IcUSD totalSupply() at T = 0
    ```
@@ -284,8 +295,10 @@ All items are required unless explicitly marked optional.
    that branch as well:
 
    ```text
-   C = T + 1_024 = 155_238_924
-   P = C + 400 = 155_239_324
+   C = T + 1_024 = 155_250_524
+   P = C + 400 = 155_250_924
+   C header hash = 0xfa50433742b5f87654563cb3d8edc3c22d35900ae4a0ff0b05cfb6e8ceafd1fd
+   P header hash = 0xff2f7eba0c362295a051f682a39bbeb6054fb126d2d017d0e65c3d662a547592
    ```
 
    Before approval and again immediately before execution, require `P` already
@@ -360,7 +373,7 @@ All items are required unless explicitly marked optional.
    ```bash
    /usr/local/bin/icp canister call tfesu-vyaaa-aaaap-qrd7a-cai \
      set_last_observed_block \
-     '(1030 : nat32, 155_237_900 : nat64)' \
+     '(1030 : nat32, 155_249_500 : nat64)' \
      -n ic --identity rumi_identity
    ```
 
@@ -372,7 +385,7 @@ All items are required unless explicitly marked optional.
      -n ic --identity rumi_identity --query
    ```
 
-   The only accepted readback is `(155_237_900 : nat64)`. If the update result
+   The only accepted readback is `(155_249_500 : nat64)`. If the update result
    is ambiguous, query first: that exact value means the call landed and must
    not be repeated; any other value means stop and reconcile without a blind
    retry. A wrong landed value is mechanically reversible to the exact
@@ -386,7 +399,7 @@ All items are required unless explicitly marked optional.
 
    1. Re-run the immutable provider/block matrix and every unchanged safety
       invariant, including `C`/`P` existence/agreement and the canonical pair at
-      `C`. For this second-call phase, require cursor exactly `155_237_900`,
+      `C`. For this second-call phase, require cursor exactly `155_249_500`,
       chain still Disabled, and the liquidation row/digest still absent. Then
       call the exact enabled liquidation setter already printed in this Step 4
       once. Require unambiguous `Ok`; on ambiguity, query the row and digest
@@ -396,7 +409,7 @@ All items are required unless explicitly marked optional.
       `d7ff0d667b867f4cb3fbccabd57c05911d17eee6888a5df58e81daf8954f4f1d`.
    2. Re-run the immutable provider/block matrix and every unchanged safety
       invariant, including status, supply, inventory, and known-work checks.
-      For this third-call phase, require cursor exactly `155_237_900`, chain
+      For this third-call phase, require cursor exactly `155_249_500`, chain
       still Disabled, and the exact liquidation row plus digest above present.
       Then call once:
 
@@ -406,7 +419,7 @@ All items are required unless explicitly marked optional.
         -n ic --identity rumi_identity
       ```
 
-      Require finalized block `155_237_900`, on-chain supply zero, recorded
+      Require finalized block `155_249_500`, on-chain supply zero, recorded
       supply zero, in-flight mint zero, gap zero, and
       `unbacked_excess = false`.
    3. Repeat the complete bounded vault inventory, internal supply audit,
