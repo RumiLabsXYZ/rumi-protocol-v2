@@ -219,6 +219,206 @@ All items are required unless explicitly marked optional.
      Disabled. The row is then activation-ready without admitting Open/Borrow
      or starting a new observer/settlement tick.
    - Source or mock-router tests alone do not satisfy this live-liquidity gate.
+
+   #### 2026-08-26 bounded Disabled-cursor reseed approval artifact
+
+   This subsection and the credential-free observation record at
+   `docs/plans/2026-08-26-conflux-disabled-cursor-reseed-evidence.md` are the
+   complete readable approval artifact for one bounded production recovery.
+   They authorize no action by themselves. The requested approval covers
+   exactly three update calls, in order: (1) one cursor reseed, (2) one exact
+   enabled liquidation-config setter, and (3) one non-state-mutating supply
+   reconciliation outcall. Every readback and expiry gate between them is
+   mandatory. Chain `1030` must remain Disabled throughout. No retry, reversal,
+   or other update is included.
+
+   The bad-debt threshold was staged successfully with an unambiguous `Ok` and
+   read back as exactly `10_000_000` e8s, with bad debt zero and the circuit
+   untripped. The exact liquidation setter above was then called twice. Both
+   calls returned an explicit
+   `factory pair sanity getPair failed: eth_call RPC error` with JSON-RPC code
+   `-32016` and message `state is not ready`; both failures were reconciled as
+   no-mutation outcomes (`get_chain_liquidation_config(1030) = null`, no digest,
+   chain still Disabled). A subsequent single `reconcile_chain_supply(1030)`
+   outcall failed explicitly with the same `-32016` while reading
+   `totalSupply()`. It returned no reconciliation report and changed no stable
+   state. No further setter or reconciliation retry is permitted before the
+   cursor recovery below.
+
+   The causal evidence is a stale burn cursor plus historical-state retention,
+   not a wrong chain, contract, route, EVM-RPC trust anchor, or a transient
+   chain failure:
+
+   - the exact pre-recovery cursor is `154_966_240`;
+   - Disabled chains are omitted from observer dispatch, so this cursor stopped
+     advancing while the chain remained closed;
+   - liquidation validation derived block `154_967_264` from that cursor and
+     proved finality by reading block `154_967_664`; supply reconciliation read
+     exactly at cursor `154_966_240`;
+   - all three configured provider paths returned chain ID `1030` and matching
+     historical block headers. Confura returned the canonical pair and zero
+     IcUSD supply at those old blocks, while BlockPI and Unifra independently
+     returned the same `-32016` for historical `eth_call` state. Their two
+     matching errors correctly met the configured two-of-three fail-closed
+     agreement requirement; and
+   - all three provider paths subsequently agreed on recent state. No endpoint
+     credential, API key, paid URL, header, or secret is part of this artifact.
+
+   The exact reviewed recovery target is:
+
+   ```text
+   T = 155_237_900
+   F = T + 400 = 155_238_300
+   T header hash = 0xe107566329fbc0526e7105d3cb788daff8588b950abcd9546603c6884c72e78d
+   factory getPair(WCFX, USDC) at T = 0x0736b3384531cda2f545f5449e84c6c6bcd6f01b
+   IcUSD totalSupply() at T = 0
+   ```
+
+   Confura, BlockPI, and Unifra independently returned the identical target
+   header, canonical pair, and zero supply. All three also returned the header
+   for `F`, proving `T` was buried by the configured `400`-block finality depth
+   when this artifact was prepared.
+
+   The cursor setter stores `T`, but the liquidation setter then derives a
+   different pinned factory-read block when its finality probe succeeds. Freeze
+   that branch as well:
+
+   ```text
+   C = T + 1_024 = 155_238_924
+   P = C + 400 = 155_239_324
+   ```
+
+   Before approval and again immediately before execution, require `P` already
+   exists with matching headers from at least two configured independent
+   providers, require the same agreement for `C`, and require factory
+   `getPair(WCFX, USDC)` at `C` to return the canonical pair above. This removes
+   the timing-dependent branch: with `P` present, `fetch_block_numbers` returns
+   `C`, so the liquidation setter validates at `C`. Supply reconciliation still
+   reads exactly at stored cursor `T`; the fetch does not persist `C`.
+
+   This evidence is time-sensitive. Immediately before execution, revalidate
+   `T`, `F`, `C`, `P`, chain ID `1030`, the exact `T` header hash, canonical pair
+   at both `T` and `C`, and zero IcUSD supply at `T` against the configured
+   provider paths. This approval expires without execution if fewer than two
+   configured independent providers agree, if `P` does not yet exist, if any
+   required block/state read is unavailable, or if any immutable evidence or
+   unchanged safety invariant below has drifted. The cursor and liquidation row
+   may change only through the three authorized calls and are not drift when
+   they exactly match the next phase-specific state gate. Before each call,
+   re-run the immutable provider/block matrix and every unchanged safety
+   invariant, then apply that call's phase-specific gate. Do not replace `T`,
+   `C`, or `P` under this approval; different blocks require a new readable
+   artifact and approval.
+
+   `set_last_observed_block` is developer-gated but otherwise accepts any
+   `nat64`: it does not validate chain status, finality, monotonicity, vaults,
+   supply, or settlement work. Its source contract also states that events
+   before the seed are not scanned. Therefore every item below is required
+   immediately before the first (cursor-reseed) call. Items other than the
+   phase-specific cursor/row state are also rerun before calls two and three:
+
+   1. Production backend is Running live module
+      `14d65746d2d801347ecdb24dc54611b12cb3cca8765f5bf80f929751f1eda287`,
+      has at least `5_000_000_000_000` cycles, and has exactly these controllers:
+      `cpbhu-5iaaa-aaaad-aalta-cai`,
+      `mi66c-zqlu4-4kxd6-2gtp7-szg5v-6a62a-geoty-fahu5-4trje-xyfby-wqe`, and
+      `fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae`.
+      Effective EVM-RPC principal is exactly
+      `7hfb6-caaaa-aaaar-qadga-cai` with `overridden = false`; threshold-ECDSA
+      key is exactly `key_1`; bound IcUSD is exactly
+      `0x8DdB0a13B26ed28912e4B8cCa99Bc3E8c66Df7Ff`; protocol mode is
+      GeneralAvailability and not frozen; invariant halt, chain reorg halt, and
+      bad-debt circuit are false; bad debt is zero; and the bad-debt threshold
+      is exactly `10_000_000` e8s.
+   2. Chain `1030` is still Disabled and its cursor is exactly
+      `154_966_240`; the liquidation row and digest are still absent. Any other
+      first-call state expires this approval.
+   3. The complete bounded `list_chain_vaults_page` traversal reaches
+      `done = true` and contains only Vault `#1`, `Closed`, with zero debt,
+      collateral, and pending mint.
+   4. Internal chain supply, global supply, reserve backing, pending burn, bad
+      debt, and in-flight mint are all zero. IcUSD `totalSupply()` is zero at
+      both the old cursor and `T` on the archive-capable path, and zero at `T`
+      from at least two configured independent providers.
+   5. The canary deposit, mint, burn, close/withdrawal, and every submitted
+      transaction receipt are fully reconciled. There is no known queued,
+      in-flight, signed-but-unbroadcast, broadcast-but-unconfirmed, or otherwise
+      unresolved chain-1030 settlement work. The current
+      `chain_has_active_settlement_op = false` query is supporting evidence only,
+      not a complete queue-inventory proof.
+   6. The canister remains the intended IcUSD admin/minter, with no unexpected
+      role grant or revocation evidence.
+   7. The current redacted operator configuration still maps the exact three
+      credential-free public paths recorded in the dated evidence file to
+      Confura, BlockPI, and Unifra, and the provider-independence review remains
+      valid. The `T`/`F` and mandatory `C`/`P` provider agreement revalidation
+      immediately above passes without endpoint or quorum changes.
+
+   If and only if every precondition passes and the exact action receives
+   explicit approval, call once:
+
+   ```bash
+   /usr/local/bin/icp canister call tfesu-vyaaa-aaaap-qrd7a-cai \
+     set_last_observed_block \
+     '(1030 : nat32, 155_237_900 : nat64)' \
+     -n ic --identity rumi_identity
+   ```
+
+   Require an unambiguous `Ok`, then read back before any other update:
+
+   ```bash
+   /usr/local/bin/icp canister call tfesu-vyaaa-aaaap-qrd7a-cai \
+     get_last_observed_block '(1030 : nat32)' \
+     -n ic --identity rumi_identity --query
+   ```
+
+   The only accepted readback is `(155_237_900 : nat64)`. If the update result
+   is ambiguous, query first: that exact value means the call landed and must
+   not be repeated; any other value means stop and reconcile without a blind
+   retry. A wrong landed value is mechanically reversible to the exact
+   pre-cursor only while the chain remains Disabled and before any subsequent
+   mutation, observer work, or settlement action. Such a reversal requires its
+   own approval and does not undo skipped history. Once any subsequent work has
+   occurred, never rewind the cursor.
+
+   After the exact target readback, and only while all approval evidence remains
+   current, perform the other two calls covered by this same bounded approval:
+
+   1. Re-run the immutable provider/block matrix and every unchanged safety
+      invariant, including `C`/`P` existence/agreement and the canonical pair at
+      `C`. For this second-call phase, require cursor exactly `155_237_900`,
+      chain still Disabled, and the liquidation row/digest still absent. Then
+      call the exact enabled liquidation setter already printed in this Step 4
+      once. Require unambiguous `Ok`; on ambiguity, query the row and digest
+      before considering any further action. Exact matching row plus the
+      expected digest means it landed and must not be repeated; any other result
+      means stop. Require digest
+      `d7ff0d667b867f4cb3fbccabd57c05911d17eee6888a5df58e81daf8954f4f1d`.
+   2. Re-run the immutable provider/block matrix and every unchanged safety
+      invariant, including status, supply, inventory, and known-work checks.
+      For this third-call phase, require cursor exactly `155_237_900`, chain
+      still Disabled, and the exact liquidation row plus digest above present.
+      Then call once:
+
+      ```bash
+      /usr/local/bin/icp canister call tfesu-vyaaa-aaaap-qrd7a-cai \
+        reconcile_chain_supply '(1030 : nat32)' \
+        -n ic --identity rumi_identity
+      ```
+
+      Require finalized block `155_237_900`, on-chain supply zero, recorded
+      supply zero, in-flight mint zero, gap zero, and
+      `unbacked_excess = false`.
+   3. Repeat the complete bounded vault inventory, internal supply audit,
+      consolidated launch status, provider/route readbacks, and Disabled monitor.
+      Chain `1030` must remain Disabled.
+
+   Do not change RPC endpoints, quorum floor, trust anchors, contract binding,
+   price, hot-wallet cache, frontend, Stability Pool, funds, or chain status as
+   part of this recovery. Runtime source changes and broader archive-provider or
+   checked-reseed work are optional resilience follow-up, not prerequisites for
+   this exact bounded approval.
+
    - Rebaseline the CFX/USD price while chain `1030` remains Disabled, after the
      liquidation row is staged and before the final freshness/monitor checks.
      The price is an execution-time market value and **cannot be frozen in
