@@ -219,25 +219,62 @@ All items are required unless explicitly marked optional.
      Disabled. The row is then activation-ready without admitting Open/Borrow
      or starting a new observer/settlement tick.
    - Source or mock-router tests alone do not satisfy this live-liquidity gate.
-   - Refresh the cached settlement gas balance after the reviewed RPC and route
-     configuration is staged, while the chain is still Disabled. This is a
-     developer-only production update; it reads the chain balance and updates
-     only the cached balance and timestamp:
+   - Rebaseline the CFX/USD price while chain `1030` remains Disabled, after the
+     liquidation row is staged and before the final freshness/monitor checks.
+     The price is an execution-time market value and **cannot be frozen in
+     source**. Fetch the existing monitor's three default sources — CoinGecko
+     `conflux-token/USD`, Kraken `CFXUSD`, and OKX `CFX-USDT` — and retain each
+     raw response plus its request/response timestamp (and the source timestamp
+     when the response supplies one). Apply the monitor's existing defaults
+     exactly: discard non-finite/non-positive quotes, require at least two valid
+     sources, reject quotes more than 5% from the provisional median, require at
+     least two survivors with spread no greater than 3%, then recompute the
+     survivor median. Convert that USD median to e8 with
+     `PRICE_E8 = round(median_usd * 100_000_000)`, matching `usdToE8`; if the
+     aggregate refuses, do not write a price. Replace the literal `PRICE_E8`
+     token in the command below with that positive unsigned integer.
+
+     Before writing, query the current value and record its `set_at_ns` as
+     `PRE_WRITE_SET_AT_NS` (`0` if the getter returns `null`). This timestamp is
+     the proof that a same-rounded-price write actually landed:
 
      ```bash
      icp canister call tfesu-vyaaa-aaaap-qrd7a-cai \
-       refresh_chain_hot_wallet_balance '(1030 : nat32)' \
+       get_manual_collateral_price '(1030 : nat32, "CFX")' \
+       -n ic --identity anonymous --query
+     ```
+
+     ```bash
+     icp canister call tfesu-vyaaa-aaaap-qrd7a-cai \
+       set_manual_collateral_price \
+       '(1030 : nat32, "CFX", PRICE_E8 : nat64)' \
        -n ic --identity rumi_identity
      ```
 
-     Record an unambiguous `Ok` response, then promptly read status. Do not treat
-     a nonzero balance alone as current evidence. Require
-     `hot_wallet_ready = opt true`, a nonzero
-     `hot_wallet_balance_refreshed_at_ns`, a present
-     `hot_wallet_balance_age_ns` no greater than
-     `hot_wallet_balance_max_age_ns`, and
-     `hot_wallet_balance_is_fresh = true`. The monitor itself remains anonymous
-     and query-only; it never performs this refresh.
+     Require an unambiguous `Ok`, then immediately query both the exact price
+     readback and the consolidated launch status:
+
+     ```bash
+     icp canister call tfesu-vyaaa-aaaap-qrd7a-cai \
+       get_manual_collateral_price '(1030 : nat32, "CFX")' \
+       -n ic --identity anonymous --query
+
+     icp canister call tfesu-vyaaa-aaaap-qrd7a-cai \
+       get_chain_public_launch_status '(1030 : nat32)' \
+       -n ic --identity anonymous --query
+     ```
+
+     Require the getter's `price_e8` to equal `PRICE_E8`, its `set_at_ns` to be
+     strictly greater than `PRE_WRITE_SET_AT_NS`, the consolidated
+     price/timestamp to match that readback, `collateral_price_is_fresh = true`,
+     and price age no greater than the configured `1_800_000_000_000ns`
+     (30-minute) limit. If the update result is ambiguous, do not blindly retry:
+     query those readbacks first; treat the write as landed only when both the
+     exact value and strictly advanced timestamp match, and otherwise stop and
+     reconcile before collecting a new three-source aggregate and considering
+     another write. The evidence expires after 30 minutes, so a prolonged
+     disabled-stage pause requires a new aggregate, write, and readback before
+     monitoring or activation.
 
 5. **Deploy and verify the public frontend.**
    - The checked-in source-only recipe is `conflux_public_frontend` in the
@@ -352,13 +389,54 @@ All items are required unless explicitly marked optional.
    - Do not use legacy `list_chain_vaults` as proof of a complete inventory; it
      is compatibility-only and capped at 500 returned matches.
 
-7. **Make the read-only monitor green.**
+7. **Refresh final expiring evidence and make the read-only monitor green.**
+
+   After the frontend and bounded vault inventory are complete, refresh the
+   cached settlement gas balance while the chain remains Disabled. Keep this as
+   the final state-changing staging call before the disabled monitor because its
+   evidence expires after five minutes. This is a developer-only production
+   update; it reads the chain balance and updates only the cached balance and
+   timestamp.
+
+   First query launch status and record the current
+   `hot_wallet_balance_refreshed_at_ns` as `PRE_REFRESHED_AT_NS` (`0` if absent):
+
+   ```bash
+   icp canister call tfesu-vyaaa-aaaap-qrd7a-cai \
+     get_chain_public_launch_status '(1030 : nat32)' \
+     -n ic --identity anonymous --query
+   ```
+
+   Then perform the refresh exactly once:
+
+   ```bash
+   icp canister call tfesu-vyaaa-aaaap-qrd7a-cai \
+     refresh_chain_hot_wallet_balance '(1030 : nat32)' \
+     -n ic --identity rumi_identity
+   ```
+
+   Record an unambiguous `Ok` response, then promptly read status again. Require
+   `hot_wallet_ready = opt true`,
+   `hot_wallet_balance_refreshed_at_ns > PRE_REFRESHED_AT_NS`, a present
+   `hot_wallet_balance_age_ns` no greater than
+   `hot_wallet_balance_max_age_ns`, and `hot_wallet_balance_is_fresh = true`.
+   Do not treat a nonzero balance alone as current evidence. If the update result
+   is ambiguous, do not blindly retry: query status first and treat the refresh
+   as landed only when its timestamp strictly advanced and its balance is both
+   sufficient and fresh; otherwise stop and reconcile. The monitor itself
+   remains anonymous and query-only; it never performs this refresh.
 
    While staging with the chain disabled:
 
    ```bash
    scripts/check-conflux-public-launch.sh --expect-disabled
    ```
+
+   If the five-minute hot-wallet proof expires before activation, do not enable.
+   Repeat the pre-read, refresh, post-read, and disabled monitor; an older green
+   monitor output is not current evidence. Likewise, if the 30-minute price proof
+   expires, collect a new three-source aggregate, write and verify it first, then
+   refresh the hot wallet last and rerun the disabled monitor.
 
    After the final enable action:
 

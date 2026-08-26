@@ -48,10 +48,12 @@
 //! consecutive-confirmation escalation, so a sustained out-of-band move stays
 //! FAIL-CLOSED until an operator intervenes.
 //!
-//! CYCLE COST NOTE: staging a `chain_liquidation_configs` row starts the XRC
-//! meter immediately (~1B cycles/call at 300s = roughly 288B cycles/day per
-//! symbol), the moment the row is INSERTED, not when `enabled` is later
-//! flipped true. Budget for that at staging time, not at liquidation go-live.
+//! CYCLE COST NOTE: inserting a `chain_liquidation_configs` row while the chain
+//! is Disabled does NOT start the XRC meter; the work-set predicate requires
+//! `Registered` AND a row. While Disabled, the operator must manually rebaseline
+//! and verify the price. Enabling then starts the meter (~1B cycles/call at 300s
+//! = roughly 288B cycles/day per symbol) regardless of the row's `enabled` kill
+//! switch, so budget from chain enablement rather than row insertion.
 //!
 //! ── `disable_chain` / `enable_chain`: a REVERSIBLE HARD FREEZE ────────────
 //! Flips `ChainStatus` to `Disabled`. Verified effects, reading every gate

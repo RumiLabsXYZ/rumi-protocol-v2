@@ -731,10 +731,11 @@ use crate::chains::config::ChainId;
 /// Security review follow-up (F2): whether `chain` is currently
 /// "XRC-managed": registered (`MultiChainState::chain_is_registered`, the
 /// single shared status predicate F10 also reads) AND carrying a
-/// `chain_liquidation_configs` row (regardless of that row's `enabled` flag:
-/// staging a config while disabled should still keep the price warm so
-/// flipping `enabled` later doesn't start on a stale/missing price, AND
-/// still claims the pair so no manual writer can race it).
+/// `chain_liquidation_configs` row, regardless of that row's `enabled` flag.
+/// A Disabled chain does NOT satisfy this predicate: staging its row neither
+/// starts the timer nor claims the pair, so the operator must manually
+/// rebaseline and verify the price before enabling. Once the chain is
+/// Registered, the row makes XRC the sole writer even when `enabled` is false.
 ///
 /// When true, the XRC timer is AUTHORITATIVE and the SOLE writer of
 /// `(chain, native_symbol)`'s manual price: `set_manual_collateral_price`
@@ -1450,9 +1451,9 @@ mod chains_price_feed_tests {
     }
 
     #[test]
-    fn a_disabled_but_staged_liquidation_config_row_still_counts() {
-        // enabled=false: an operator staging the DEX wiring before flipping
-        // the kill switch should still keep the price warm.
+    fn a_registered_chain_with_a_disabled_liquidation_row_is_still_managed() {
+        // The chain remains Registered; only the row's `enabled` kill switch is
+        // false, so the row still claims the pair for the sole XRC writer.
         let mut state = State::default();
         state
             .multi_chain
