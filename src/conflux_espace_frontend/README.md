@@ -95,22 +95,41 @@ npm run verify:production-public:recipe
 It validates positive and negative recipe/origin/policy/manifest fixtures and
 performs a deployment-shaped build only in a temporary directory.
 
-After a separate approval to create a mainnet canister and spend exactly 2T
-cycles, phase 1 is only:
+After a separate approval to create a mainnet canister and fund it with exactly
+2T cycles, phase 1 is only the command below. `robvector` (Principal
+`ft3ml-xex6k-ppiwj-ie6tc-zwkgb-ybm2x-eat4a-5p2jg-auzl3-latf4-aae`) is the
+payer; its read-only preflight balance was `5_005_940_070_754` cycles. Refresh
+that balance immediately before approval and require at least
+`2_000_100_000_000` cycles, covering the 2T amount and current 100M
+cycles-ledger update fee.
 
 ```sh
 cd ../..
 env ICP_ENVIRONMENT=conflux-production-public \
   /usr/local/bin/icp canister create conflux_public_frontend \
   -e conflux-production-public \
-  --identity rumi_identity \
+  --identity robvector \
+  --controller fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae \
   --cycles 2t
 ```
 
-Stop after creation. Confirm the ID mapping, controller, cycles, and exact
-`https://<new-principal>.icp0.io` origin; commit and separately review that
-mapping/origin before artifact construction. Creation does not install Wasm or
-publish assets.
+`robvector` is only the payer and must not be a controller. The explicit sole
+controller is `rumi_identity` at
+`fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae`. No subnet is
+pinned, so icp-cli randomly selects an available application subnet. The
+canister pays the creation charge from the attached 2T: currently 500B on a
+13-node subnet or
+approximately 1.308T on a 34-node subnet, leaving approximately 1.5T to 0.692T
+before later usage.
+
+If creation is ambiguous, do not retry. Reconcile the cycles-ledger result,
+command output, and mapping first. After an unambiguous result, stop and require
+exactly one mapped `conflux_public_frontend`; verify Running, the selected
+application subnet, actual cycles, empty/uninstalled state, `rumi_identity` as
+the sole controller, and `robvector` absent from controllers. Commit and
+separately review the mapping and exact `https://<new-principal>.icp0.io` origin
+before artifact construction. Creation performs no frontend build, release
+seal, Wasm install, asset sync, or deploy.
 
 Only after canonical-origin and manifest approval, construct the real artifact:
 
