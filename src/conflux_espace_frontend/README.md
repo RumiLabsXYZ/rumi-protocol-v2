@@ -75,8 +75,10 @@ recipe uploads only `dist-production-public/`; its build wrapper copies
 `.ic-assets.json` name, where every rule has `allow_raw_access: false` and the
 catch-all enables SPA aliasing.
 
-The canister-ID/origin bootstrap is deliberately two phase. Source control does
-not contain a fake mapping or deployable public bundle before allocation.
+The canister-ID/origin bootstrap is deliberately two phase. Source control did
+not contain a fake mapping or deployable public bundle before allocation; it now
+contains only the reviewed allocation mapping for
+`a52ri-naaaa-aaaas-qgy4a-cai`.
 `npm run build:production-public:deploy` deletes any stale output and fails
 unless `.icp/data/mappings/conflux-production-public.ids.json` contains exactly
 the one dedicated canister. It derives the only accepted origin as
@@ -123,13 +125,14 @@ approximately 1.308T on a 34-node subnet, leaving approximately 1.5T to 0.692T
 before later usage.
 
 If creation is ambiguous, do not retry. Reconcile the cycles-ledger result,
-command output, and mapping first. After an unambiguous result, stop and require
-exactly one mapped `conflux_public_frontend`; verify Running, the selected
-application subnet, actual cycles, empty/uninstalled state, `rumi_identity` as
-the sole controller, and `robvector` absent from controllers. Commit and
-separately review the mapping and exact `https://<new-principal>.icp0.io` origin
-before artifact construction. Creation performs no frontend build, release
-seal, Wasm install, asset sync, or deploy.
+command output, and mapping first. Allocation completed unambiguously on
+2026-08-27 as `a52ri-naaaa-aaaas-qgy4a-cai`, Running and uninstalled on the
+13-node application subnet
+`4utr6-xo2fz-v7fsb-t3wsg-k7sfl-cj2ba-ghdnd-kcrfo-xavdb-ebean-mqe`, with
+`rumi_identity` as sole controller and `robvector` absent from controllers. The
+reviewed canonical origin is `https://a52ri-naaaa-aaaas-qgy4a-cai.icp0.io`.
+Creation performed no frontend build, release seal, Wasm install, asset sync,
+or deploy.
 
 Only after mapping and canonical-origin approval, construct the real artifact:
 
@@ -208,7 +211,7 @@ an automatic retry. Read-only vault and launch status remain available while
 risk-increasing writes are paused.
 
 The checked-in source is a provisioning/deployment path, not a deployed
-frontend. Until the exact mapping/origin and manifest are reviewed, the only
-valid public checks remain the ephemeral commands above. Chain 1030, backend
-configuration, canister creation, asset installation/sync, and public
-activation are separate approval and proof states.
+frontend. The allocation mapping and canonical origin are reviewed; the deploy
+manifest, artifact, installation/sync, and live verification remain separate
+approval and proof states. Chain 1030, backend configuration, asset
+installation/sync, and public activation are also separate proof states.

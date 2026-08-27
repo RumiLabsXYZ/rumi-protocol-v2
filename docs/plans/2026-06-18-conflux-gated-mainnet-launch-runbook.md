@@ -24,8 +24,8 @@ as different proof states. Passing one state never proves the next one.
 | Real-funds proof | Vault `#1` completed open, 5 CFX deposit, 0.10 icUSD mint, exact burn, and close; vault debt/collateral and IcUSD supply reconciled to zero |
 | Chain status | Chain `1030` is **Disabled**. Timer entry checks keep its observer and settlement worker from starting new work; post-await checks also prevent a deposit transition or settlement broadcast after Disable |
 | Public-readiness release | The status/gating implementation exists on the working branch; review/source-ready, merge, production deployment, and live API verification remain separate proof states |
-| Public frontend | Source-only dedicated `conflux_public_frontend` / `conflux-production-public` recipe exists. No production-public mapping, canister allocation, deploy artifact, install, or asset sync exists yet. The chain-71 staging recipe remains separate |
-| Public availability | **Not public.** Asset-canister provisioning, exact mapping/canonical-origin review, deploy-manifest review, artifact construction, installation/sync, and live verification remain undone; liquidation configuration/route/depth has not been verified live for public use; and the chain is disabled |
+| Public frontend | Dedicated `conflux_public_frontend` canister `a52ri-naaaa-aaaas-qgy4a-cai` is allocated in `conflux-production-public`, Running and uninstalled with `rumi_identity` as sole controller. Its checked-in mapping derives canonical origin `https://a52ri-naaaa-aaaas-qgy4a-cai.icp0.io`. No deploy artifact, install, or asset sync exists yet. The chain-71 staging recipe remains separate |
+| Public availability | **Not public.** Deploy-manifest review, artifact construction, installation/sync, and live verification remain undone; liquidation configuration/route/depth has not been verified live for public use; and the chain is disabled |
 
 The completed canary proves one bounded lifecycle against the production
 backend and contract. It does not prove public operational readiness, sustained
@@ -620,13 +620,14 @@ All items are required unless explicitly marked optional.
      monitoring or activation.
 
 5. **Deploy and verify the public frontend.**
-   - The checked-in source-only recipe is `conflux_public_frontend` in the
-     one-canister `conflux-production-public` environment. It deliberately does
-     not include a canister-ID mapping or deployable artifact. Do not substitute
+   - The checked-in recipe is `conflux_public_frontend` in the one-canister
+     `conflux-production-public` environment. Its allocation mapping contains
+     only `a52ri-naaaa-aaaas-qgy4a-cai`; it deliberately does not include a
+     deployable artifact. Do not substitute
      the existing `conflux_espace_frontend` / `mainnet-staging` rail, and never
      use the implicit `ic` environment.
-   - Until a dedicated canister is provisioned, only the README's
-     local/ephemeral verification commands are valid:
+   - Before the dedicated canister was provisioned, only the README's following
+     local/ephemeral verification commands were valid:
 
      ```bash
      cd src/conflux_espace_frontend
@@ -674,11 +675,15 @@ All items are required unless explicitly marked optional.
      `.icp/data/mappings/conflux-production-public.ids.json`; verify Running,
      the exact sole controller above, the selected application subnet, actual
      cycles, and the empty/uninstalled state. Verify `robvector` is not a
-     controller. Commit the mapping so the allocated authority is not lost.
+     controller. Allocation completed unambiguously on 2026-08-27 as
+     `a52ri-naaaa-aaaas-qgy4a-cai` on the 13-node application subnet
+     `4utr6-xo2fz-v7fsb-t3wsg-k7sfl-cj2ba-ghdnd-kcrfo-xavdb-ebean-mqe`, Running
+     and uninstalled with `rumi_identity` as sole controller. Commit the mapping
+     so the allocated authority is not lost.
      Creation is not deployment: this phase performs no frontend build, seal,
      Wasm install, asset sync, or deploy.
-   - Derive and separately approve the sole canonical certified origin as
-     `https://<mapped-non-reserved-canister-principal>.icp0.io`. The guarded
+   - The separately reviewed sole canonical certified origin is
+     `https://a52ri-naaaa-aaaas-qgy4a-cai.icp0.io`. The guarded
      build accepts no caller-supplied origin and rejects management, anonymous,
      non-canister, raw, `ic0.app`, custom-domain, IP, port, path, query,
      fragment, extra mapping keys, and its deterministic verification
