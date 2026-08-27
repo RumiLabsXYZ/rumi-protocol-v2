@@ -562,6 +562,93 @@ All items are required unless explicitly marked optional.
    quorum, status, price, hot-wallet, frontend, Stability Pool, funds, build,
    install, deploy, or activation action is in this procedure.
 
+   #### 2026-08-27 landed-cursor continuation after the consumed one-shot stop
+
+   The first actual `conflux-disabled-recovery-v1` invocation is terminal and
+   consumed. It dispatched only `set_last_observed_block(1030, 155_341_230)`,
+   received explicit `Ok`, and then stopped because its immediate ordinary
+   query readback briefly returned the old cursor. Later ordinary and
+   replicated readbacks both returned `155_341_230`; the synchronous setter
+   source and exact evidence establish that call one landed. Its journal is
+   `stopped`, phase `phase1`, `update_count = 1`. The liquidation setter and
+   reconciliation were never dispatched. Preserve the prior execution
+   directory immutably. Never rerun, resume, reverse, resend, delete its
+   journal, or invent another target under that consumed approval.
+
+   The readable evidence and continuation contract are in
+   `docs/plans/2026-08-27-conflux-disabled-continuation-evidence.md`. The
+   general runner's critical cursor and liquidation row/digest post-update
+   checks now use replicated ingress, not `--query`. The distinct source-only
+   continuation is `scripts/conflux-disabled-recovery-continuation.py`, with
+   literal one-use id `conflux-disabled-recovery-continuation-v1`.
+
+   That continuation pins the landed cursor `T = 155_341_230`, its original
+   `H/F/C/P` and canonical header hashes, the consumed manifest/transcript/
+   journal/update hashes, and the exact current module, commit, tools,
+   identity, controllers, endpoint digest, configuration anchors, Disabled
+   state, zero financial state, complete Closed-vault inventory, and no-work
+   evidence. It rechecks fresh all-three heads and historical fixed-matrix
+   availability at selection, then the endpoint binding, at-least-two exact
+   provider matrix, complete backend gates, and replicated phase state before
+   each remaining update. Historical expiry or any drift is a stop; it never
+   selects another target or writes the cursor.
+
+   Only these two calls are permitted, once each and in order: the exact
+   enabled liquidation row with digest
+   `d7ff0d667b867f4cb3fbccabd57c05911d17eee6888a5df58e81daf8954f4f1d`,
+   then `reconcile_chain_supply(1030)` at stored cursor `155_341_230`. Critical
+   cursor, row/digest, supply, and Disabled-status confirmation uses replicated
+   ingress. Any ambiguous update permanently stops even if a later readback
+   matches; there is no retry, resume, resend, reversal, bypass, second host,
+   or copied-state exception. The chain remains Disabled.
+
+   Default dry-run omits `--execute` and `--execution-id`. After merge and a
+   clean passing dry-run, a new explicit approval must bind the exact merge,
+   corrected base-runner SHA-256, continuation-runner SHA-256, runbook SHA-256,
+   evidence SHA-256, deployed module, host, and literal continuation id before
+   execute mode. That future approval does not include a cursor call, endpoint
+   change, price write, hot-wallet action, backend upgrade, frontend or
+   Stability Pool action, cycles/funds movement, wallet signature, or public
+   activation.
+
+   The approved host binding is the SHA-256 commitment produced by the runner
+   from this Mac's `IOPlatformUUID` under domain
+   `rumi.conflux-recovery-host.v1`; the raw UUID is never logged or sealed.
+   The runner pins `/usr/sbin/ioreg`, compares the computed commitment to
+   `--approved-host-sha256`, and records only that commitment. This blocks a
+   copied invocation on different hardware. It remains client-side rather than
+   a canister CAS, so a deliberately substituted state root on the same host is
+   still an explicit residual and is forbidden by the approval.
+
+   Exact default dry-run template after merge:
+
+   ```bash
+   python3 scripts/conflux-disabled-recovery-continuation.py \
+     --approved-commit APPROVED_MERGE_SHA \
+     --approved-script-sha256 APPROVED_CONTINUATION_SCRIPT_SHA256 \
+     --approved-base-script-sha256 APPROVED_BASE_SCRIPT_SHA256 \
+     --approved-runbook-sha256 APPROVED_RUNBOOK_SHA256 \
+     --approved-evidence-sha256 APPROVED_CONTINUATION_EVIDENCE_SHA256 \
+     --approved-module-sha256 APPROVED_DEPLOYED_MODULE_SHA256 \
+     --approved-host-sha256 APPROVED_HOST_SHA256
+   ```
+
+   Exact execute template, usable only after that dry-run passes and a fresh
+   two-call continuation approval is received:
+
+   ```bash
+   python3 scripts/conflux-disabled-recovery-continuation.py \
+     --execute \
+     --execution-id conflux-disabled-recovery-continuation-v1 \
+     --approved-commit APPROVED_MERGE_SHA \
+     --approved-script-sha256 APPROVED_CONTINUATION_SCRIPT_SHA256 \
+     --approved-base-script-sha256 APPROVED_BASE_SCRIPT_SHA256 \
+     --approved-runbook-sha256 APPROVED_RUNBOOK_SHA256 \
+     --approved-evidence-sha256 APPROVED_CONTINUATION_EVIDENCE_SHA256 \
+     --approved-module-sha256 APPROVED_DEPLOYED_MODULE_SHA256 \
+     --approved-host-sha256 APPROVED_HOST_SHA256
+   ```
+
    - Rebaseline the CFX/USD price while chain `1030` remains Disabled, after the
      liquidation row is staged and before the final freshness/monitor checks.
      The price is an execution-time market value and **cannot be frozen in

@@ -1060,6 +1060,14 @@ def self_test() -> None:
     assert "--query" not in replicated_argv
     assert replicated_argv.count("get_chain_rpc_endpoint_set_digest") == 1
     assert replicated_argv[-1] == "--json"
+    for method in (
+        "get_last_observed_block",
+        "get_chain_liquidation_config",
+        "get_chain_public_launch_status",
+    ):
+        critical_argv = replicated_read_argv(method, "(1030 : nat32)")
+        assert "--query" not in critical_argv
+        assert critical_argv.count(method) == 1
     digest_candid = f'''(variant {{ Ok = record {{
       digest_sha256 = "{RPC_ENDPOINT_SET_DIGEST_V1}";
       effective_min_quorum_providers = 2 : nat32;
@@ -1402,7 +1410,7 @@ def main() -> int:
         return 0
 
     candid, ambiguous = update_once(run, "set_last_observed_block", args_hex["set_last_observed_block"])
-    cursor = query(run, "phase1-cursor-readback", "get_last_observed_block", "(1030 : nat32)")
+    cursor = replicated_read(run, "phase1-cursor-readback", "get_last_observed_block", "(1030 : nat32)")
     landed = parse_single_nat64(cursor, "phase1 cursor readback") == target.t
     if not landed:
         run.write_journal("stopped", phase="phase1", reason="cursor readback mismatch")
@@ -1420,8 +1428,8 @@ def main() -> int:
     backend_gate(run, "phase2", target, bindings["module"])
     run.log("phase2 fixed-matrix/backend/zero/quiescence gates=PASS")
     candid, ambiguous = update_once(run, "set_chain_liquidation_config", args_hex["set_chain_liquidation_config"])
-    row = query(run, "phase2-row-readback", "get_chain_liquidation_config", "(1030 : nat32)")
-    launch = query(run, "phase2-launch-readback", "get_chain_public_launch_status", "(1030 : nat32)")
+    row = replicated_read(run, "phase2-row-readback", "get_chain_liquidation_config", "(1030 : nat32)")
+    launch = replicated_read(run, "phase2-launch-readback", "get_chain_public_launch_status", "(1030 : nat32)")
     landed = exact_liquidation_row(row) and re.search(rf'liquidation_config_digest\s*=\s*opt "{LIQ_DIGEST}"\s*;', " ".join(launch.split())) is not None
     if not landed:
         run.write_journal("stopped", phase="phase2", reason="row/digest readback mismatch")
