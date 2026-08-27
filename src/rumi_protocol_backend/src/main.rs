@@ -1272,6 +1272,39 @@ fn get_supply_audit() -> SupplyAudit {
     })
 }
 
+/// Developer-gated, read-only commitment to one chain's live stored RPC
+/// endpoint set and effective quorum. The response intentionally contains no
+/// endpoint URL text: configured URLs may embed provider credentials. Recovery
+/// tooling compares this digest/count/quorum to an independently sealed local
+/// provider set before dispatching any chain-admin mutation. For that security
+/// boundary the method must be invoked through replicated execution (an update
+/// request to this read-only query method), not as an uncertified fast query.
+#[candid_method(query)]
+#[query]
+fn get_chain_rpc_endpoint_set_digest(
+    chain_id: rumi_protocol_backend::chains::config::ChainId,
+) -> Result<
+    rumi_protocol_backend::chains::config::ChainRpcEndpointSetDigestV1,
+    rumi_protocol_backend::chains::config::ChainRpcEndpointDigestError,
+> {
+    use rumi_protocol_backend::chains::config::{
+        chain_rpc_endpoint_set_digest, ChainRpcEndpointDigestError,
+    };
+
+    let caller = ic_cdk::caller();
+    read_state(|s| {
+        if s.developer_principal != caller {
+            return Err(ChainRpcEndpointDigestError::Unauthorized);
+        }
+        let config = s
+            .multi_chain
+            .chain_configs
+            .get(&chain_id)
+            .ok_or(ChainRpcEndpointDigestError::ChainNotRegistered(chain_id))?;
+        Ok(chain_rpc_endpoint_set_digest(config))
+    })
+}
+
 // Phase 1a: developer-gated chain-registry admin endpoints.
 
 #[candid_method(update)]
@@ -13907,6 +13940,28 @@ fn check_candid_interface_compatibility() {
             (line.contains("rpc_") || line.contains("endpoint")) && line.contains("text")
         }),
         "anonymous ChainPublicLaunchStatus must not expose any RPC/endpoint text field"
+    );
+
+    let endpoint_digest_start = new_interface
+        .find("type ChainRpcEndpointSetDigestV1 = record {")
+        .expect("ChainRpcEndpointSetDigestV1 must be present in exported Candid");
+    let endpoint_digest_tail = &new_interface[endpoint_digest_start..];
+    let endpoint_digest_end = endpoint_digest_tail
+        .find("};")
+        .expect("ChainRpcEndpointSetDigestV1 record must terminate");
+    let endpoint_digest_candid = &endpoint_digest_tail[..endpoint_digest_end];
+    assert!(
+        !endpoint_digest_candid.contains("rpc_endpoints")
+            && !endpoint_digest_candid.contains("url"),
+        "RPC endpoint digest projection must never expose configured URL text"
+    );
+    let endpoint_digest_method = new_interface
+        .lines()
+        .find(|line| line.contains("get_chain_rpc_endpoint_set_digest :"))
+        .expect("RPC endpoint digest method must be present");
+    assert!(
+        endpoint_digest_method.trim_end().ends_with("query;"),
+        "RPC endpoint digest surface must remain a read-only query"
     );
     for forbidden_scan_field in [
         "current_debt_e8s",
