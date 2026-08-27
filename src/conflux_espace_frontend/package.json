@@ -37,6 +37,6 @@
     "@dfinity/agent": "^2.3.0",
     "@dfinity/candid": "^2.3.0",
     "@dfinity/principal": "^2.3.0",
-    "viem": "^2.22.0"
+    "viem": "^2.56.0"
   }
 }
