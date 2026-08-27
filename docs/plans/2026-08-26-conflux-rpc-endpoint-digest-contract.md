@@ -2,13 +2,13 @@
 
 This is the narrow binding contract between the production backend and a
 future Disabled-chain recovery runner. It adds evidence, not authority: this
-document and the query below do not authorize an upgrade, recovery call,
+document and the method below do not authorize an upgrade, recovery call,
 endpoint change, deployment, activation, or movement of funds.
 
-## Backend query
+## Backend method
 
-`get_chain_rpc_endpoint_set_digest(chain_id)` is a developer-gated, read-only
-query method. It returns either:
+`get_chain_rpc_endpoint_set_digest(chain_id)` is a developer-gated,
+side-effect-free replicated update method. It returns either:
 
 - `Unauthorized` when the caller is not the configured developer principal;
 - `ChainNotRegistered(chain_id)` when no live stored config exists; or
@@ -48,24 +48,24 @@ Before every permitted recovery mutation, the runner must:
 1. start from its sealed, reviewed local endpoint list and expected chain ID
    and effective quorum;
 2. calculate this exact V1 digest locally without printing endpoint URLs;
-3. call the query as the fixed production developer identity;
-4. send it through replicated execution: with `icp canister call`, use the
-   default update request and **omit `--query`**; reject any runner mode or
-   transcript that used the uncertified fast-query path;
+3. call the update method as the fixed production developer identity;
+4. with `icp canister call`, use the default update request and **omit
+   `--query`**; reject any runner mode or transcript that used the uncertified
+   fast-query path;
 5. require `Ok`, exact chain ID, exact distinct count, exact effective quorum,
    and constant-time-equivalent exact digest equality; and
 6. stop before dispatch on `Unauthorized`, `ChainNotRegistered`, decode error,
    malformed digest, or any mismatch.
 
 The sanitized execution transcript may record the method name, chain ID,
-count, quorum, digest, query result, source/runner commit hashes, and timestamp.
+count, quorum, digest, method result, source/runner commit hashes, and timestamp.
 It must not record raw endpoint URLs. The runner must not accept caller-supplied
 URL or quorum overrides in execute mode.
 
-When obtained through replicated execution, the binding proves that the
-runner's reviewed set matched the replicated canister state used for that
-response. An ordinary `--query` response does not provide this proof and must
-never authorize a recovery mutation. The binding does **not** prove provider
+The replicated update response proves that the runner's reviewed set matched
+the replicated canister state used for that response. The method is not
+exported on the ordinary query path, and a runner must treat any apparent
+`--query` response as invalid. The binding does **not** prove provider
 ownership independence, provider liveness, historical-state availability,
 response agreement, or the absence of a response-to-update race. Those remain
 separate recovery gates. A backend upgrade that exposes this method must be

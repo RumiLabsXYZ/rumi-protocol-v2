@@ -22,8 +22,25 @@ fn outsider() -> Principal {
 }
 
 fn backend_wasm() -> Vec<u8> {
-    include_bytes!("../../../target/wasm32-unknown-unknown/release/rumi_protocol_backend.wasm")
-        .to_vec()
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let path = std::env::var_os("RUMI_PROTOCOL_BACKEND_WASM")
+        .map(std::path::PathBuf::from)
+        .map(|candidate| {
+            if candidate.is_absolute() {
+                candidate
+            } else {
+                workspace_root.join(candidate)
+            }
+        })
+        .unwrap_or_else(|| {
+            workspace_root.join("target/wasm32-unknown-unknown/release/rumi_protocol_backend.wasm")
+        });
+    std::fs::read(&path).unwrap_or_else(|error| {
+        panic!(
+            "read freshly built release backend Wasm at {}: {error}",
+            path.display()
+        )
+    })
 }
 
 fn boot() -> (PocketIc, Principal) {
@@ -74,9 +91,7 @@ fn register_chain(pic: &PocketIc, cid: Principal) {
     }
 }
 
-/// Production recovery must use replicated execution: `icp canister call`
-/// defaults to an update request even when the target method is declared as a
-/// read-only query. PocketIC's update path proves that compatibility here.
+/// Production recovery must use this side-effect-free replicated update export.
 fn replicated_digest(
     pic: &PocketIc,
     cid: Principal,
@@ -104,7 +119,37 @@ fn replicated_digest(
 }
 
 #[test]
-fn digest_query_is_developer_gated_and_has_a_missing_chain_error() {
+fn digest_method_is_exported_only_for_replicated_update_execution() {
+    let (pic, cid) = boot();
+
+    let query_attempt = pic.query_call(
+        cid,
+        developer(),
+        "get_chain_rpc_endpoint_set_digest",
+        encode_one(CFX).unwrap(),
+    );
+    match query_attempt {
+        Err(error) => {
+            let message = format!("{error:?}");
+            assert!(
+                message.contains("CanisterMethodNotFound")
+                    && message.contains("no query method 'get_chain_rpc_endpoint_set_digest'"),
+                "unexpected rejection for query-only regression guard: {message}"
+            );
+        }
+        Ok(WasmResult::Reject(message)) => assert!(
+            message.contains("CanisterMethodNotFound")
+                || message.contains("no query method 'get_chain_rpc_endpoint_set_digest'"),
+            "unexpected canister rejection for query-only regression guard: {message}"
+        ),
+        Ok(WasmResult::Reply(_)) => {
+            panic!("digest must not be exported on the uncertified query path")
+        }
+    }
+}
+
+#[test]
+fn digest_update_is_developer_gated_and_has_a_missing_chain_error() {
     let (pic, cid) = boot();
     register_chain(&pic, cid);
 
@@ -126,7 +171,7 @@ fn successful_digest_projects_count_and_quorum_without_raw_url_leakage() {
     register_chain(&pic, cid);
 
     let (wire, result) = replicated_digest(&pic, cid, developer(), CFX);
-    let digest = result.expect("registered developer query must succeed");
+    let digest = result.expect("registered developer update must succeed");
     assert_eq!(digest.chain_id, CFX);
     assert_eq!(digest.endpoint_count, 2, "stored duplicates are collapsed");
     assert_eq!(digest.effective_min_quorum_providers, 2);
