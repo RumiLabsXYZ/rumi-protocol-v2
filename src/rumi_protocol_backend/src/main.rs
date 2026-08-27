@@ -1272,15 +1272,15 @@ fn get_supply_audit() -> SupplyAudit {
     })
 }
 
-/// Developer-gated, read-only commitment to one chain's live stored RPC
-/// endpoint set and effective quorum. The response intentionally contains no
-/// endpoint URL text: configured URLs may embed provider credentials. Recovery
-/// tooling compares this digest/count/quorum to an independently sealed local
-/// provider set before dispatching any chain-admin mutation. For that security
-/// boundary the method must be invoked through replicated execution (an update
-/// request to this read-only query method), not as an uncertified fast query.
-#[candid_method(query)]
-#[query]
+/// Developer-gated, side-effect-free replicated update method committing to one
+/// chain's live stored RPC endpoint set and effective quorum. The response
+/// intentionally contains no endpoint URL text: configured URLs may embed
+/// provider credentials. Recovery tooling compares this digest/count/quorum to
+/// an independently sealed local provider set before dispatching any chain-admin
+/// mutation. This is deliberately an update export so the response is produced
+/// by replicated execution rather than an uncertified fast query.
+#[candid_method(update)]
+#[update]
 fn get_chain_rpc_endpoint_set_digest(
     chain_id: rumi_protocol_backend::chains::config::ChainId,
 ) -> Result<
@@ -13960,8 +13960,9 @@ fn check_candid_interface_compatibility() {
         .find(|line| line.contains("get_chain_rpc_endpoint_set_digest :"))
         .expect("RPC endpoint digest method must be present");
     assert!(
-        endpoint_digest_method.trim_end().ends_with("query;"),
-        "RPC endpoint digest surface must remain a read-only query"
+        endpoint_digest_method.trim_end().ends_with(");")
+            && !endpoint_digest_method.contains(" query;"),
+        "RPC endpoint digest surface must remain a replicated update method"
     );
     for forbidden_scan_field in [
         "current_debt_e8s",

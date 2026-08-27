@@ -542,7 +542,7 @@ canisters:
   #   3. embed candid:service metadata so query tools and dashboards see the
   #      candid interface without a sidecar file
   #   4. `ic-wasm <out> -o <out> shrink --keep-name-section`
-  #   5. `gzip -9 -f <out>` (best compression)
+  #   5. `gzip -9 -n -f <out>` (best compression, no filename/timestamp header)
   #
   # The init_args block below pins the Upgrade variant with `mode = null` so
   # `icp canister install --mode upgrade` cannot accidentally change the
@@ -563,7 +563,7 @@ canisters:
             - cp target/wasm32-unknown-unknown/release/rumi_protocol_backend.wasm "$ICP_WASM_OUTPUT_PATH"
             - ic-wasm "$ICP_WASM_OUTPUT_PATH" -o "$ICP_WASM_OUTPUT_PATH" metadata candid:service -f src/rumi_protocol_backend/rumi_protocol_backend.did -v public
             - ic-wasm "$ICP_WASM_OUTPUT_PATH" -o "$ICP_WASM_OUTPUT_PATH" shrink --keep-name-section
-            - gzip -9 -f "$ICP_WASM_OUTPUT_PATH"
+            - gzip -9 -n -f "$ICP_WASM_OUTPUT_PATH"
             - mv "${ICP_WASM_OUTPUT_PATH}.gz" "$ICP_WASM_OUTPUT_PATH"
     init_args: |
       (variant {

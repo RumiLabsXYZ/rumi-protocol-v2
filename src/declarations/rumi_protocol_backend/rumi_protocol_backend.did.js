@@ -1597,11 +1597,7 @@ export const idlFactory = ({ IDL }) => {
       ),
     'get_chain_reserve_address' : IDL.Func([IDL.Nat32], [Result_2], []),
     'get_chain_reserves' : IDL.Func([IDL.Nat32], [Result_7], []),
-    'get_chain_rpc_endpoint_set_digest' : IDL.Func(
-        [IDL.Nat32],
-        [Result_8],
-        ['query'],
-      ),
+    'get_chain_rpc_endpoint_set_digest' : IDL.Func([IDL.Nat32], [Result_8], []),
     'get_chain_settlement_address' : IDL.Func([IDL.Nat32], [Result_2], []),
     'get_chain_vault' : IDL.Func(
         [IDL.Nat64],
