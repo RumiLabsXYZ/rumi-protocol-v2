@@ -364,7 +364,7 @@ def replicated_read_argv(method: str, args: str) -> list[str]:
 
 def parse_endpoint_digest_result(candid: str, label: str) -> dict[str, Any]:
     compact = " ".join(candid.split())
-    outer = re.fullmatch(r"\(variant \{ Ok = record \{ (.*) \} \}\)", compact)
+    outer = re.fullmatch(r"\(\s*variant \{ Ok = record \{ (.*) \} \}\s*,?\s*\)", compact)
     if not outer:
         raise Stop(f"{label} did not return an anchored Ok endpoint-digest record")
     pieces = [piece.strip() for piece in outer.group(1).split(";") if piece.strip()]
@@ -1041,11 +1041,27 @@ def self_test() -> None:
         "effective_min_quorum_providers": 2,
         "digest_sha256": RPC_ENDPOINT_SET_DIGEST_V1,
     }
+    icp_1_3_singleton_tuple = "(\n  " + digest_candid[1:-1] + ",\n)"
+    assert parse_endpoint_digest_result(icp_1_3_singleton_tuple, "icp 1.3 singleton fixture") == {
+        "chain_id": CHAIN_ID,
+        "endpoint_count": 3,
+        "effective_min_quorum_providers": 2,
+        "digest_sha256": RPC_ENDPOINT_SET_DIGEST_V1,
+    }
     for malformed in (
         "(variant { Err = variant { Unauthorized } })",
         digest_candid.replace("c57a", "C57a"),
         digest_candid.replace("chain_id = 1_030 : nat32;", "chain_id = 1_030 : nat32; extra = 1 : nat32;"),
         digest_candid.replace("endpoint_count = 3", "endpoint_count = nope"),
+        digest_candid[:-1] + ", 0 : nat32)",
+        digest_candid.replace(
+            "chain_id = 1_030 : nat32;",
+            "endpoint_count = 3 : nat32;",
+        ),
+        digest_candid.replace(
+            "chain_id = 1_030 : nat32;",
+            'endpoint_url = "https://credential.example";',
+        ),
     ):
         must_stop(
             lambda malformed=malformed: parse_endpoint_digest_result(malformed, "malformed digest fixture"),
