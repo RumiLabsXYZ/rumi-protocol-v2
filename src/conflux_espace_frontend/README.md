@@ -131,7 +131,7 @@ separately review the mapping and exact `https://<new-principal>.icp0.io` origin
 before artifact construction. Creation performs no frontend build, release
 seal, Wasm install, asset sync, or deploy.
 
-Only after canonical-origin and manifest approval, construct the real artifact:
+Only after mapping and canonical-origin approval, construct the real artifact:
 
 ```sh
 env ICP_ENVIRONMENT=conflux-production-public \
