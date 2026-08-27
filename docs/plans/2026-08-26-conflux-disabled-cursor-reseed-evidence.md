@@ -157,6 +157,76 @@ headers. It also directly proved the canonical pair at both `T` and `C` and
 zero IcUSD supply at `T` from all three providers. These observations do not
 waive the same fixed-matrix expiry check immediately before each approved call.
 
+## Replacement expiry and durable successor
+
+The replacement fixed target also expired before call one. Its immediate
+execution gate still found identical `T/F/C/P` headers from all three
+providers. Confura returned the canonical pair at `T/C` and zero IcUSD supply
+at `T`; BlockPI and Unifra each returned explicit JSON-RPC `-32016 state is not
+ready` for all three required historical state reads. One successful state
+provider was below the required floor of two, so the operator stopped. The live
+cursor remained `154_966_240`, the liquidation row/digest remained absent,
+supply/reserve/pending burn/bad debt remained zero, Vault `#1` remained
+Closed/zero, and no update or retry occurred. Both fixed approvals are void.
+
+The durable successor is the reviewed source procedure
+`scripts/conflux-disabled-recovery.py`. It chooses one recent target at
+execution time from all three configured heads, freezes `H/T/F/C/P` and exact
+Candid argument bytes, and then performs fresh fixed-matrix and full backend
+gates immediately before each permitted call. This is procedure-bound delegated
+authority, not literal pre-approval of dynamically selected bytes. Its safety
+contract is recorded in the canonical runbook: all-three selection, bounded
+head age/skew and cursor jump, at least two exact positive state providers per
+phase, a clean commit/file-hash binding, a one-use no-resume journal, a literal
+three-method allowlist, private raw response evidence, and permanent stop for
+an ambiguous reconciliation.
+
+The first final review of that source-only runner correctly stopped approval:
+the live backend exposed only endpoint count/quorum, so hashes of the runner's
+local provider constants could not prove that those were the backend's mutable
+stored endpoints. PR #351, merged as
+`e0d4fec056bf0e0a20b0fdd7aff3b2bf7b5686fd`, adds the narrow developer-gated
+`get_chain_rpc_endpoint_set_digest(1030)` contract. Under canonical V1, the
+exact distinct UTF-8 Confura/BlockPI/Unifra set with chain `1030` and effective
+quorum `2` commits to:
+
+```text
+c57af2bf81cf047aeeb94ecd463f612263abbcc3de93f1ec143488f32c951f31
+```
+
+The runner invokes that read-only method through replicated ingress execution
+before provider selection and again before every permitted update phase. It
+requires anchored `Ok`, exact chain/count/quorum, lowercase 64-hex shape, and
+constant-time-equivalent equality to the reviewed digest. Ordinary `--query`,
+`Unauthorized`, missing-method, malformed, or drifted results stop before any
+update. The live digest response never exposes endpoint URLs; the sanitized
+transcript records only the reviewed count/quorum/digest, and execute mode
+never accepts endpoint overrides.
+
+This makes the procedure **source-ready but not live-ready**. The production
+backend still needs a separately approved upgrade to the exact reviewed
+digest-bearing Wasm artifact. The operator must bind that deployed module hash
+with `--approved-module-sha256`; the current pre-digest production module
+`14d65746d2d801347ecdb24dc54611b12cb3cca8765f5bf80f929751f1eda287`
+is explicitly rejected. No live dry-run or recovery call was made while
+preparing this successor.
+
+The other final-review findings are also fail-closed in source: every
+successful provider field is validated before missing/error fields can make
+that provider unavailable, so a mixed conflict plus unavailable result cannot
+be masked by two other successes; and every phase requires both
+`collateral_config_matches_expected` and `debt_config_matches_expected` to be
+true. Deterministic fixtures cover those negative cases plus endpoint-digest
+parsing/drift, selection arithmetic, phase transitions, update ambiguity, and
+the exact reconciliation report.
+
+The operator journal is a host-local safety control, not a global backend CAS.
+Complete queue absence also remains partly evidence-bound: the complete vault,
+supply, active-operation, settlement-proof, pending-burn, canary, and receipt
+inventory is required, but the backend does not expose a single exhaustive
+global queue query. These residuals are disclosed rather than converted into
+claims the source cannot prove.
+
 ## Provenance and limits
 
 The root-cause source paths are:

@@ -432,6 +432,136 @@ All items are required unless explicitly marked optional.
    checked-reseed work are optional resilience follow-up, not prerequisites for
    this exact bounded approval.
 
+   #### Durable one-shot successor after both fixed targets expired
+
+   The two fixed-target approvals above are historical evidence only. The first
+   (`T = 155_237_900`) and replacement (`T = 155_249_500`) each expired before
+   call one when BlockPI and Unifra stopped serving the required historical
+   state. In both cases the operator stopped at the immediate provider gate and
+   made **zero** cursor, liquidation, reconciliation, or other live mutations.
+   Do not execute either fixed packet.
+
+   The source-only successor is
+   `scripts/conflux-disabled-recovery.py`. Its authority model is explicit:
+   approval delegates one execution of the reviewed deterministic procedure;
+   it does **not** pre-approve literal per-run call bytes. The script freezes
+   those bytes and a canonical manifest at execution time. If governance
+   requires literal-byte approval instead, run the default dry-run, approve its
+   sealed manifest separately, and do not use the procedure-bound `--execute`
+   authority described here. The procedure is **source-ready, not live-ready**
+   until production is separately upgraded to the reviewed digest-bearing
+   backend artifact, that exact deployed module hash is supplied through
+   `--approved-module-sha256`, and the replicated endpoint-digest readback
+   below passes. The old production module
+   `14d65746d2d801347ecdb24dc54611b12cb3cca8765f5bf80f929751f1eda287`
+   cannot satisfy this contract. Building, stopping, snapshotting, installing,
+   starting, or restoring the backend is outside this recovery procedure and
+   requires separate approval.
+
+   Dry-run/preflight is the default. Before selection, and again before each of
+   the three update phases, the runner calls
+   `get_chain_rpc_endpoint_set_digest(1030)` as `rumi_identity` through
+   replicated ingress execution (`icp canister call` with **no** `--query`
+   flag). It strictly requires `Ok`, chain `1030`, endpoint count `3`, effective
+   quorum `2`, and the canonical V1 digest
+   `c57af2bf81cf047aeeb94ecd463f612263abbcc3de93f1ec143488f32c951f31`.
+   That digest is calculated from the exact UTF-8 Confura/BlockPI/Unifra URLs
+   under the merged V1 contract; URLs are never accepted as execute-mode
+   overrides or printed in the sanitized transcript. Each successful readback
+   and raw-response hash is sealed into the manifest/journal evidence. Any
+   `Unauthorized`, missing method, malformed response, ordinary-query path,
+   endpoint/count/quorum drift, or digest mismatch stops before dispatch.
+
+   Selection then makes one no-retry head batch and four bounded no-retry
+   matrix batches (no batch exceeds four entries) to each exact configured
+   public path (Confura, BlockPI, and Unifra),
+   requires all three chain IDs to equal `1030`, all three head timestamps to
+   be no more than 300 seconds old, the whole sample to finish within 60
+   seconds, and head skew to be at most 128 blocks. It then freezes:
+
+   ```text
+   H = min(Confura head, BlockPI head, Unifra head)
+   T = H - 2_048
+   F = T + 400
+   C = T + 1_024
+   P = C + 400 = H - 624
+   ```
+
+   Arithmetic is checked for underflow and ordering. `T` must be strictly above
+   the exact starting cursor `154_966_240` and no more than `1_000_000` blocks
+   above it. At selection, all three providers must return identical canonical
+   headers at `H/T/F/C/P`, the pinned WCFX/USDC pair at both `T` and `C`, zero
+   IcUSD `totalSupply()` at `T`, and true admin/minter role readbacks for the
+   canister settlement address. Confura must additionally return zero supply at
+   the old cursor. These values, provider attribution, timestamps, raw-response
+   hashes, exact canister/network/identity/module/controller anchors, the clean
+   approved Git commit/tree, the three approved file hashes, the pinned
+   Python/`icp`/`didc`/`git`/`curl` binary fingerprints and tool versions, and the exact
+   `didc`-serialized Candid argument bytes enter one mode-0600 sealed manifest.
+
+   Before **each** update phase, the script makes a new no-retry fixed-matrix
+   request to each provider and repeats the entire live Disabled/zero-state
+   gate: exact approved digest-bearing module/controllers/cycles floor, chain
+   status and cursor for that phase, true
+   `collateral_config_matches_expected` and `debt_config_matches_expected`, all
+   other anchor/config projections, complete one-page Vault `#1` Closed/zero
+   inventory, zero internal/global/on-chain supply, reserve, pending burn, bad
+   debt and pending mint, exact threshold/untripped breakers, and empty active
+   settlement/proof/burn inventories. At least two configured independent
+   providers must return the complete exact positive matrix. An unavailable
+   third provider is recorded. Every successful field is checked against the
+   frozen expectation before that provider can be classified unavailable: any
+   observed successful conflict invalidates the run even when a different
+   field from that provider is missing/error and the other two providers
+   agree. The canary/every-receipt and broader no-unresolved-work proof remains
+   bound to the approved evidence plus these live supporting queries because
+   the backend exposes no complete global queue-inventory query.
+
+   Only these three methods and their frozen argument bytes are dispatchable,
+   once each and in this order: `set_last_observed_block(1030, T)`, the exact
+   enabled liquidation row printed above, and
+   `reconcile_chain_supply(1030)`. The script journals `dispatching` with an
+   atomic `fsync` before every call, caps the run at three updates, never retries,
+   never reverses, never automatically resumes, and leaves chain `1030`
+   Disabled. Ambiguous call one may be classified landed only by cursor `T`;
+   ambiguous call two only by the complete exact row plus digest
+   `d7ff0d667b867f4cb3fbccabd57c05911d17eee6888a5df58e81daf8954f4f1d`.
+   An ambiguous reconciliation has no durable landed marker and permanently
+   stops that execution unresolved even if all zero-state readbacks remain safe.
+
+   Both dry-run and execution require a clean checkout whose `HEAD` exactly
+   equals the approved merge commit plus the three approved file SHA-256 values
+   and exact deployed module hash. Run the post-upgrade read-only preflight by
+   omitting `--execute` and `--execution-id` from the command below. Execute
+   only with separate procedure authority and the literal one-use ID:
+
+   ```bash
+   python3 scripts/conflux-disabled-recovery.py \
+     --execute \
+     --execution-id conflux-disabled-recovery-v1 \
+     --approved-commit APPROVED_MERGE_SHA \
+     --approved-script-sha256 APPROVED_SCRIPT_SHA256 \
+     --approved-runbook-sha256 APPROVED_RUNBOOK_SHA256 \
+     --approved-evidence-sha256 APPROVED_EVIDENCE_SHA256 \
+     --approved-module-sha256 APPROVED_DEPLOYED_DIGEST_MODULE_SHA256
+   ```
+
+   The same module argument is mandatory in default dry-run mode. Before the
+   separately approved backend upgrade, default dry-run is expected to stop
+   fail-closed because the digest method/module binding is not live. Do not
+   weaken that expected failure into a source-readiness pass, and do not run a
+   live dry-run until the upgrade owner authorizes post-deployment verification.
+
+   The one-use journal lives under the operator's local state directory. A
+   pre-existing execution directory makes every rerun fail. This prevents
+   resend on the same host/state directory; it is not a global CAS across
+   copied checkouts or different hosts. The production canister has no recovery
+   nonce, so cross-host exact-once remains an explicit residual. Raw responses
+   remain private mode `0600`; the sanitized transcript contains only
+   allowlisted values, hashes, timestamps, phases, and verdicts. No endpoint,
+   quorum, status, price, hot-wallet, frontend, Stability Pool, funds, build,
+   install, deploy, or activation action is in this procedure.
+
    - Rebaseline the CFX/USD price while chain `1030` remains Disabled, after the
      liquidation row is staged and before the final freshness/monitor checks.
      The price is an execution-time market value and **cannot be frozen in
