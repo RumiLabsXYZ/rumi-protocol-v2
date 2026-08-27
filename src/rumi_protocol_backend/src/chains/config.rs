@@ -9,8 +9,11 @@
 
 use candid::{CandidType, Deserialize};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
-#[derive(CandidType, Deserialize, Serialize, Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(
+    CandidType, Deserialize, Serialize, Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash,
+)]
 pub struct ChainId(pub u32);
 
 #[derive(CandidType, Deserialize, Serialize, Clone, Copy, Debug, Eq, PartialEq)]
@@ -149,6 +152,78 @@ pub fn effective_min_quorum_providers(cfg: &ChainConfigV3) -> u32 {
     cfg.min_quorum_providers
         .map(|n| n.max(1))
         .unwrap_or(DEFAULT_MIN_QUORUM_PROVIDERS)
+}
+
+/// Developer-only projection of the exact stored RPC provider set used by a
+/// chain. Endpoint URLs are deliberately absent: operator-supplied URLs may
+/// contain API credentials, while the digest is sufficient for a recovery
+/// client to compare its sealed provider set to a point-in-time response. A
+/// security-critical client must obtain that response through replicated
+/// execution (or separate certification), not an ordinary uncertified query.
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, Eq, PartialEq)]
+pub struct ChainRpcEndpointSetDigestV1 {
+    pub chain_id: ChainId,
+    pub endpoint_count: u32,
+    pub effective_min_quorum_providers: u32,
+    /// Lowercase, unprefixed, 64-character SHA-256 hex.
+    pub digest_sha256: String,
+}
+
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, Eq, PartialEq)]
+pub enum ChainRpcEndpointDigestError {
+    Unauthorized,
+    ChainNotRegistered(ChainId),
+}
+
+/// Domain for the canonical binary format. Changing any byte is a wire-format
+/// version bump and requires a new result type/method contract.
+const RPC_ENDPOINT_SET_DIGEST_DOMAIN_V1: &[u8] = b"rumi.chain-rpc-endpoint-set-digest.v1";
+
+fn hash_len_prefixed(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_be_bytes());
+    hasher.update(bytes);
+}
+
+/// Hash the exact, de-duplicated endpoint set and the quorum semantics that
+/// govern it. URL identity is exact UTF-8 byte identity (no case, slash, or
+/// query normalization), matching chain registration/update de-duplication.
+///
+/// Canonical preimage, in order:
+/// 1. u64-be length + domain bytes;
+/// 2. chain id as u32-be;
+/// 3. effective minimum quorum as u32-be;
+/// 4. unique endpoint count as u32-be;
+/// 5. each unique endpoint sorted by exact UTF-8 bytes, encoded as u64-be
+///    length + bytes.
+///
+/// The returned count is infallibly representable as u32 in Wasm32 because a
+/// live vector cannot hold more than u32::MAX elements in the canister address
+/// space.
+pub fn chain_rpc_endpoint_set_digest(cfg: &ChainConfigV3) -> ChainRpcEndpointSetDigestV1 {
+    let sorted_unique = cfg
+        .rpc_endpoints
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    let endpoint_count = u32::try_from(sorted_unique.len())
+        .expect("a Wasm32 Vec cannot contain more than u32::MAX endpoints");
+    let effective_min_quorum_providers = effective_min_quorum_providers(cfg);
+
+    let mut hasher = Sha256::new();
+    hash_len_prefixed(&mut hasher, RPC_ENDPOINT_SET_DIGEST_DOMAIN_V1);
+    hasher.update(cfg.chain_id.0.to_be_bytes());
+    hasher.update(effective_min_quorum_providers.to_be_bytes());
+    hasher.update(endpoint_count.to_be_bytes());
+    for endpoint in sorted_unique {
+        hash_len_prefixed(&mut hasher, endpoint.as_bytes());
+    }
+
+    ChainRpcEndpointSetDigestV1 {
+        chain_id: cfg.chain_id,
+        endpoint_count,
+        effective_min_quorum_providers,
+        digest_sha256: hex::encode(hasher.finalize()),
+    }
 }
 
 /// Caller-supplied registration payload. Distinct from the persisted
