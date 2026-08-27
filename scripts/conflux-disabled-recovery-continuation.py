@@ -21,6 +21,10 @@ from pathlib import Path
 from typing import Any
 
 
+# Importing the reviewed base must not create an untracked __pycache__ before
+# the clean-tree approval binding runs.
+sys.dont_write_bytecode = True
+
 REPO = Path(__file__).resolve().parents[1]
 BASE_SCRIPT = "scripts/conflux-disabled-recovery.py"
 SCRIPT = "scripts/conflux-disabled-recovery-continuation.py"
