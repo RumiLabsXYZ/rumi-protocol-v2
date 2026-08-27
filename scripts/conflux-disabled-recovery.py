@@ -307,7 +307,7 @@ def parse_candid_response(raw: bytes, label: str) -> str:
 
 def strict_ok(candid: str) -> bool:
     compact = " ".join(candid.split())
-    return bool(re.fullmatch(r"\(variant \{ Ok(?: = null)? \}\)", compact))
+    return bool(re.fullmatch(r"\(\s*variant \{ Ok(?: = null)? \}\s*,?\s*\)", compact))
 
 
 def named_nat(text: str, name: str) -> int:
@@ -978,8 +978,10 @@ def build_manifest(bindings: dict[str, str], tool_fingerprints: dict[str, Any], 
 
 def require_reconciliation(candid: str, target: Target) -> None:
     compact = " ".join(candid.split())
-    if not re.fullmatch(r"\(variant \{ Ok = record \{ .* \} \}\)", compact):
+    match = re.fullmatch(r"\(\s*variant \{ Ok = record \{ ([^{}]*) \} \}\s*,?\s*\)", compact)
+    if not match:
         raise Stop("reconcile_chain_supply did not return anchored Ok(record)")
+    body = match.group(1)
     expected = {
         "chain_id": CHAIN_ID,
         "finalized_block": target.t,
@@ -990,12 +992,41 @@ def require_reconciliation(candid: str, target: Target) -> None:
         "pending_chain_burn_e8s": 0,
         "reserve_usdc_native": 0,
     }
+    expected_names = set(expected) | {"unbacked_excess", "gap_e8s"}
+    stripped_body = body.strip()
+    if not stripped_body.endswith(";"):
+        raise Stop("reconcile_chain_supply returned a malformed record body")
+    field_pieces = stripped_body[:-1].split(";")
+    if len(field_pieces) != len(expected_names) or any(not piece.strip() for piece in field_pieces):
+        raise Stop("reconcile_chain_supply returned a malformed field count")
+    field_values: dict[str, str] = {}
+    for piece in field_pieces:
+        field_match = re.fullmatch(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(\S(?:.*\S)?)\s*", piece)
+        if not field_match:
+            raise Stop("reconcile_chain_supply returned a malformed field assignment")
+        name, value = field_match.groups()
+        if name in field_values:
+            raise Stop("reconcile_chain_supply returned duplicate fields")
+        field_values[name] = value
+    if set(field_values) != expected_names:
+        raise Stop("reconcile_chain_supply returned duplicate, missing, or unexpected fields")
+    expected_types = {
+        "chain_id": "nat32",
+        "finalized_block": "nat64",
+        "onchain_total_supply_e8s": "nat",
+        "recorded_supply_e8s": "nat",
+        "in_flight_mint_e8s": "nat",
+        "reserve_backing_e8s": "nat",
+        "pending_chain_burn_e8s": "nat",
+        "reserve_usdc_native": "nat",
+    }
     for name, value in expected.items():
-        if named_nat(compact, name) != value:
+        value_match = re.fullmatch(rf"([0-9_]+)\s*:\s*{expected_types[name]}", field_values[name])
+        if not value_match or int(value_match.group(1).replace("_", "")) != value:
             raise Stop(f"reconciliation field {name} != {value}")
-    if named_bool(compact, "unbacked_excess"):
+    if not re.fullmatch(r"false", field_values["unbacked_excess"]):
         raise Stop("reconciliation reported unbacked_excess")
-    if not re.search(r"\bgap_e8s\s*=\s*(?:\+)?0(?:\s*:\s*int)?\s*;", compact):
+    if not re.fullmatch(r"(?:\+)?0\s*:\s*int", field_values["gap_e8s"]):
         raise Stop("reconciliation gap is nonzero/malformed")
 
 
@@ -1093,8 +1124,11 @@ def self_test() -> None:
         else:
             raise AssertionError(f"bad selection unexpectedly passed: {bad}")
     assert strict_ok("(variant { Ok })")
+    assert strict_ok("(\n  variant { Ok },\n)")
+    assert strict_ok("(variant { Ok = null },)")
     assert not strict_ok("(variant { Err = \"bad\" })")
     assert not strict_ok("(record { Ok = true })")
+    assert not strict_ok("(variant { Ok }, 0 : nat32)")
     try:
         parse_single_nat64("(malformed)", "fixture cursor")
     except Stop:
@@ -1185,10 +1219,81 @@ def self_test() -> None:
       unbacked_excess = false; gap_e8s = 0 : int;
     }} }})'''
     require_reconciliation(reconciliation_fixture, target)
+    reconciliation_icp_1_3_singleton_tuple = "(\n  " + reconciliation_fixture[1:-1] + ",\n)"
+    require_reconciliation(reconciliation_icp_1_3_singleton_tuple, target)
     must_stop(
         lambda: require_reconciliation(reconciliation_fixture.replace("gap_e8s = 0", "gap_e8s = 1"), target),
         "nonzero reconciliation gap unexpectedly passed",
     )
+    must_stop(
+        lambda: require_reconciliation(reconciliation_fixture[:-1] + ", 0 : nat32)", target),
+        "second reconciliation tuple item unexpectedly passed",
+    )
+    must_stop(
+        lambda: require_reconciliation(
+            reconciliation_fixture[:-1] + ', variant { Ok = record { junk = 1 : nat; } })', target,
+        ),
+        "record-shaped second reconciliation tuple item unexpectedly passed",
+    )
+    must_stop(
+        lambda: require_reconciliation(
+            reconciliation_fixture.replace(
+                "chain_id = 1_030 : nat32;",
+                "chain_id = 1_030 : nat32; chain_id = 1_030 : nat32;",
+            ),
+            target,
+        ),
+        "duplicate reconciliation field unexpectedly passed",
+    )
+    must_stop(
+        lambda: require_reconciliation(
+            reconciliation_fixture.replace(
+                "chain_id = 1_030 : nat32;",
+                "chain_id = 1_030 : nat32; unexpected = 0 : nat;",
+            ),
+            target,
+        ),
+        "unexpected reconciliation field unexpectedly passed",
+    )
+    must_stop(
+        lambda: require_reconciliation(
+            reconciliation_fixture.replace(
+                "chain_id = 1_030 : nat32;",
+                "chain_id = 1_030 : nat32; 42 = 0 : nat;",
+            ),
+            target,
+        ),
+        "numeric reconciliation field label unexpectedly passed",
+    )
+    must_stop(
+        lambda: require_reconciliation(
+            reconciliation_fixture.replace(
+                "chain_id = 1_030 : nat32;",
+                "chain_id = 1_030 : nat32; junk;",
+            ),
+            target,
+        ),
+        "malformed reconciliation field piece unexpectedly passed",
+    )
+    for malformed_type in (
+        reconciliation_fixture.replace("chain_id = 1_030 : nat32", "chain_id = 1_030 : nat64"),
+        reconciliation_fixture.replace("chain_id = 1_030 : nat32", "chain_id = 1_030"),
+        reconciliation_fixture.replace(
+            f"finalized_block = {target.t} : nat64", f"finalized_block = {target.t} : nat32",
+        ),
+        reconciliation_fixture.replace(
+            f"finalized_block = {target.t} : nat64", f"finalized_block = {target.t}",
+        ),
+        reconciliation_fixture.replace("onchain_total_supply_e8s = 0 : nat", "onchain_total_supply_e8s = 0 : nat64"),
+        reconciliation_fixture.replace("onchain_total_supply_e8s = 0 : nat", "onchain_total_supply_e8s = 0"),
+        reconciliation_fixture.replace("unbacked_excess = false", "unbacked_excess = false : bool"),
+        reconciliation_fixture.replace("gap_e8s = 0 : int", "gap_e8s = 0 : nat"),
+        reconciliation_fixture.replace("gap_e8s = 0 : int", "gap_e8s = 0"),
+    ):
+        must_stop(
+            lambda malformed_type=malformed_type: require_reconciliation(malformed_type, target),
+            "wrong or missing reconciliation field type unexpectedly passed",
+        )
     must_stop(
         lambda: require_reconciliation(reconciliation_fixture + " trailing", target),
         "trailing reconciliation data unexpectedly passed",
