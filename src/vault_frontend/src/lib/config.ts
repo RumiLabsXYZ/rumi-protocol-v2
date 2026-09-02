@@ -30,6 +30,12 @@ export const CANISTER_IDS = {
   // ICPswap pools (external DEX for routing)
   ICPSWAP_3USD_ICP_POOL: "mu2zw-6iaaa-aaaar-qb56q-cai",
   ICPSWAP_ICUSD_ICP_POOL: "nqxwe-hiaaa-aaaar-qb5yq-cai",
+  // ICPswap direct stablecoin <-> stablecoin pools (alternative venues to the
+  // Rumi 3pool for icUSD/ckUSDT/ckUSDC swaps). token0/token1 and fee tier
+  // per pool metadata() are documented beside their use in swapRouter.ts.
+  ICPSWAP_CKUSDT_ICUSD_POOL: "jogrm-gqaaa-aaaar-qcg2a-cai",
+  ICPSWAP_ICUSD_CKUSDC_POOL: "eb25l-dyaaa-aaaar-qb4lq-cai",
+  ICPSWAP_CKUSDT_CKUSDC_POOL: "heq6n-fyaaa-aaaag-qkcpq-cai",
   // Rumi Points (airdrop accrual engine). Live on mainnet 2026-06-09; setting
   // this id flips POINTS_ENABLED true so the /points section renders.
   RUMI_POINTS: "bfnu3-6aaaa-aaaab-qhanq-cai",
@@ -147,6 +153,18 @@ export const CONFIG = {
 
   get icpswapIcUsdIcpPoolId() {
     return CANISTER_IDS.ICPSWAP_ICUSD_ICP_POOL;
+  },
+
+  get icpswapCkusdtIcusdPoolId() {
+    return CANISTER_IDS.ICPSWAP_CKUSDT_ICUSD_POOL;
+  },
+
+  get icpswapIcusdCkusdcPoolId() {
+    return CANISTER_IDS.ICPSWAP_ICUSD_CKUSDC_POOL;
+  },
+
+  get icpswapCkusdtCkusdcPoolId() {
+    return CANISTER_IDS.ICPSWAP_CKUSDT_CKUSDC_POOL;
   },
 
   getStableLedgerId(tokenType: 'CKUSDT' | 'CKUSDC'): string {

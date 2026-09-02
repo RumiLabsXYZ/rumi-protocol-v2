@@ -31,6 +31,29 @@ const mocks = vi.hoisted(() => ({
     quote: vi.fn(),
     swap: vi.fn(),
   },
+  // Case 1 stablecoin <-> stablecoin ICPswap direct pools. Default supports()
+  // to false so ProviderRegistry.bestQuote doesn't call an un-configured
+  // mock's quote() (which would return undefined, not a Promise, and blow up
+  // Promise.allSettled). Tests flip supports() to true for the pool under
+  // test and set its quote() return value explicitly.
+  stableCkusdtIcusdMock: {
+    id: 'icpswap_ckusdt_icusd' as const,
+    supports: vi.fn(() => false),
+    quote: vi.fn(),
+    swap: vi.fn(),
+  },
+  stableIcusdCkusdcMock: {
+    id: 'icpswap_icusd_ckusdc' as const,
+    supports: vi.fn(() => false),
+    quote: vi.fn(),
+    swap: vi.fn(),
+  },
+  stableCkusdtCkusdcMock: {
+    id: 'icpswap_ckusdt_ckusdc' as const,
+    supports: vi.fn(() => false),
+    quote: vi.fn(),
+    swap: vi.fn(),
+  },
   threePoolMock: {
     quoteSwap: vi.fn(),
     calcAddLiquidity: vi.fn(),
@@ -42,16 +65,26 @@ const mocks = vi.hoisted(() => ({
   isOisyWalletMock: vi.fn(() => false),
 }));
 
-const { rumiAmmMock, icpswapMock, icpswapIcUsdMock, threePoolMock, isOisyWalletMock } = mocks;
+const {
+  rumiAmmMock, icpswapMock, icpswapIcUsdMock,
+  stableCkusdtIcusdMock, stableIcusdCkusdcMock, stableCkusdtCkusdcMock,
+  threePoolMock, isOisyWalletMock,
+} = mocks;
 
 vi.mock('./providers/rumiAmmProvider', () => ({
   RumiAmmProvider: vi.fn(() => mocks.rumiAmmMock),
 }));
 
 vi.mock('./providers/icpswapProvider', () => ({
-  IcpswapProvider: vi.fn((config: { id: string }) => (
-    config.id === 'icpswap_icusd_icp' ? mocks.icpswapIcUsdMock : mocks.icpswapMock
-  )),
+  IcpswapProvider: vi.fn((config: { id: string }) => {
+    switch (config.id) {
+      case 'icpswap_icusd_icp': return mocks.icpswapIcUsdMock;
+      case 'icpswap_ckusdt_icusd': return mocks.stableCkusdtIcusdMock;
+      case 'icpswap_icusd_ckusdc': return mocks.stableIcusdCkusdcMock;
+      case 'icpswap_ckusdt_ckusdc': return mocks.stableCkusdtCkusdcMock;
+      default: return mocks.icpswapMock;
+    }
+  }),
 }));
 
 // Audit ICRC-005 (frontend half): the Oisy batched executor now pulls fees
@@ -129,7 +162,7 @@ vi.mock('../stores/wallet', () => ({
   },
 }));
 
-import { resolveRoute, executeRoute, setIcpswapRoutingEnabled, type SwapRoute } from './swapRouter';
+import { resolveRoute, executeRoute, setIcpswapRoutingEnabled, dustThreshold, type SwapRoute } from './swapRouter';
 
 // ──────────────────────────────────────────────────────────────
 // Test fixtures
@@ -224,6 +257,31 @@ function icpswapIcUsdQuote(amountOut: bigint, overrides: Partial<ProviderQuote> 
   };
 }
 
+const STABLE_ICPSWAP_POOL_IDS = {
+  icpswap_ckusdt_icusd: 'jogrm-gqaaa-aaaar-qcg2a-cai',
+  icpswap_icusd_ckusdc: 'eb25l-dyaaa-aaaar-qb4lq-cai',
+  icpswap_ckusdt_ckusdc: 'heq6n-fyaaa-aaaag-qkcpq-cai',
+} as const;
+
+/** Quote fixture for one of the three Case-1 stablecoin <-> stablecoin
+ *  ICPswap direct pools. Real pool canister IDs so executeRoute's
+ *  Principal.fromText(meta.poolCanisterId) doesn't choke. */
+function stableIcpswapQuote(
+  provider: keyof typeof STABLE_ICPSWAP_POOL_IDS,
+  amountOut: bigint,
+  overrides: Partial<ProviderQuote> = {},
+): ProviderQuote {
+  return {
+    provider,
+    label: `${provider} label`,
+    amountOut,
+    feeDisplay: '0.30%',
+    priceImpactBps: 0,
+    meta: { poolCanisterId: STABLE_ICPSWAP_POOL_IDS[provider], zeroForOne: true },
+    ...overrides,
+  };
+}
+
 describe('swapRouter — provider registry integration', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -231,9 +289,201 @@ describe('swapRouter — provider registry integration', () => {
     rumiAmmMock.supports.mockReturnValue(true);
     icpswapMock.supports.mockReturnValue(true);
     icpswapIcUsdMock.supports.mockReturnValue(true);
+    // Case 1 stable<->stable pools default to unsupported; each test opts
+    // the specific pool it's exercising back in (see the mock declaration
+    // above for why).
+    stableCkusdtIcusdMock.supports.mockReturnValue(false);
+    stableIcusdCkusdcMock.supports.mockReturnValue(false);
+    stableCkusdtCkusdcMock.supports.mockReturnValue(false);
     // Most tests exercise routes where ICPswap is a valid option; the
     // kill-switch-off behaviour is covered in its own describe block.
     setIcpswapRoutingEnabled(true);
+    // clearAllMocks() clears call history but not a mock's implementation,
+    // so a test that flips this to true would otherwise leak it into every
+    // test that runs afterward. Re-assert the non-Oisy default explicitly,
+    // same as the supports() resets above.
+    isOisyWalletMock.mockReturnValue(false);
+  });
+
+  // ──────────────────────────────────────────────────────────────
+  // Case 1: stablecoin <-> stablecoin. The 3pool quote is always fetched;
+  // ICPswap's direct stable pools (ckUSDT/icUSD, icUSD/ckUSDC, ckUSDT/ckUSDC)
+  // compete for the same pair and must strictly beat the 3pool to win.
+  // Exercised on the ckUSDT <-> ckUSDC pair (icpswap_ckusdt_ckusdc pool).
+  // ──────────────────────────────────────────────────────────────
+
+  describe('Case 1 (stablecoin <-> stablecoin, 3pool vs ICPswap)', () => {
+    it('routes to icpswap_stable_direct when ICPswap strictly beats the 3pool', async () => {
+      threePoolMock.quoteSwap.mockResolvedValue({ amount_out: 900n, fee_bps: 30, is_rebalancing: false });
+      stableCkusdtCkusdcMock.supports.mockReturnValue(true);
+      stableCkusdtCkusdcMock.quote.mockResolvedValue(stableIcpswapQuote('icpswap_ckusdt_ckusdc', 950n));
+
+      const route = await resolveRoute(ckUsdt, ckUsdc, 1_000n);
+
+      expect(route.type).toBe('icpswap_stable_direct');
+      expect(route.providerQuote?.provider).toBe('icpswap_ckusdt_ckusdc');
+      expect(route.grossOutput).toBe(950n);
+      // FE-003: NET of the 10n mocked output ledger fee
+      expect(route.estimatedOutput).toBe(940n);
+    });
+
+    it('routes to three_pool_swap when the 3pool quote beats ICPswap', async () => {
+      threePoolMock.quoteSwap.mockResolvedValue({ amount_out: 950n, fee_bps: 30, is_rebalancing: false });
+      stableCkusdtCkusdcMock.supports.mockReturnValue(true);
+      stableCkusdtCkusdcMock.quote.mockResolvedValue(stableIcpswapQuote('icpswap_ckusdt_ckusdc', 900n));
+
+      const route = await resolveRoute(ckUsdt, ckUsdc, 1_000n);
+
+      expect(route.type).toBe('three_pool_swap');
+      expect(route.grossOutput).toBe(950n);
+      expect(route.providerQuote).toBeUndefined();
+    });
+
+    it('routes to three_pool_swap on an exact tie (3pool wins ties)', async () => {
+      threePoolMock.quoteSwap.mockResolvedValue({ amount_out: 900n, fee_bps: 30, is_rebalancing: false });
+      stableCkusdtCkusdcMock.supports.mockReturnValue(true);
+      stableCkusdtCkusdcMock.quote.mockResolvedValue(stableIcpswapQuote('icpswap_ckusdt_ckusdc', 900n));
+
+      const route = await resolveRoute(ckUsdt, ckUsdc, 1_000n);
+
+      expect(route.type).toBe('three_pool_swap');
+      expect(route.grossOutput).toBe(900n);
+    });
+
+    it('never quotes ICPswap and always returns three_pool_swap when the kill switch is off', async () => {
+      setIcpswapRoutingEnabled(false);
+      threePoolMock.quoteSwap.mockResolvedValue({ amount_out: 900n, fee_bps: 30, is_rebalancing: false });
+      stableCkusdtCkusdcMock.supports.mockReturnValue(true);
+      // Even though this would beat the 3pool, it must never be consulted.
+      stableCkusdtCkusdcMock.quote.mockResolvedValue(stableIcpswapQuote('icpswap_ckusdt_ckusdc', 999_999n));
+
+      const route = await resolveRoute(ckUsdt, ckUsdc, 1_000n);
+
+      expect(route.type).toBe('three_pool_swap');
+      expect(route.grossOutput).toBe(900n);
+      expect(stableCkusdtCkusdcMock.quote).not.toHaveBeenCalled();
+    });
+
+    it('falls back to three_pool_swap when the ICPswap registry throws', async () => {
+      threePoolMock.quoteSwap.mockResolvedValue({ amount_out: 900n, fee_bps: 30, is_rebalancing: false });
+      stableCkusdtCkusdcMock.supports.mockReturnValue(true);
+      stableCkusdtCkusdcMock.quote.mockRejectedValue(new Error('pool offline'));
+
+      const route = await resolveRoute(ckUsdt, ckUsdc, 1_000n);
+
+      expect(route.type).toBe('three_pool_swap');
+      expect(route.grossOutput).toBe(900n);
+    });
+
+    // The 3pool genuinely errors here (calc_swap_output can throw
+    // InsufficientLiquidity, and the pool can be paused). The 3pool quote
+    // and the ICPswap quote must be independent: a 3pool failure must not
+    // take the ICPswap fallback down with it.
+    it('falls back to icpswap_stable_direct when the 3pool quote rejects but ICPswap succeeds', async () => {
+      threePoolMock.quoteSwap.mockRejectedValue(new Error('InsufficientLiquidity'));
+      stableCkusdtCkusdcMock.supports.mockReturnValue(true);
+      stableCkusdtCkusdcMock.quote.mockResolvedValue(stableIcpswapQuote('icpswap_ckusdt_ckusdc', 950n));
+
+      const route = await resolveRoute(ckUsdt, ckUsdc, 1_000n);
+
+      expect(route.type).toBe('icpswap_stable_direct');
+      expect(route.providerQuote?.provider).toBe('icpswap_ckusdt_ckusdc');
+      expect(route.grossOutput).toBe(950n);
+    });
+
+    it('throws when both the 3pool and ICPswap quotes fail', async () => {
+      threePoolMock.quoteSwap.mockRejectedValue(new Error('InsufficientLiquidity'));
+      stableCkusdtCkusdcMock.supports.mockReturnValue(true);
+      stableCkusdtCkusdcMock.quote.mockRejectedValue(new Error('pool offline'));
+
+      // The thrown error is the 3pool's (the primary, first-party venue),
+      // not the ICPswap one.
+      await expect(resolveRoute(ckUsdt, ckUsdc, 1_000n)).rejects.toThrow(/InsufficientLiquidity/);
+    });
+  });
+
+  describe('executeRoute (icpswap_stable_direct)', () => {
+    it('approves the pool then calls the winning provider.swap with a GROSS min-out bound', async () => {
+      const winningQuote = stableIcpswapQuote('icpswap_ckusdt_ckusdc', 950n);
+      const route: SwapRoute = {
+        type: 'icpswap_stable_direct',
+        pathDisplay: 'x',
+        hops: 1,
+        estimatedOutput: 940n,
+        grossOutput: 950n,
+        feeDisplay: '0.30%',
+        providerQuote: winningQuote,
+      };
+      stableCkusdtCkusdcMock.swap.mockResolvedValue({ amountOut: 948n });
+
+      const out = await executeRoute(route, ckUsdt, ckUsdc, 1_000n, 50);
+
+      expect(stableCkusdtCkusdcMock.swap).toHaveBeenCalledWith(
+        ckUsdt, ckUsdc, 1_000n, 950n * 9_950n / 10_000n, winningQuote,
+      );
+      expect(out).toBe(948n);
+    });
+
+    it('throws the refresh-the-quote error when the kill switch flips off between quote and execute', async () => {
+      const route: SwapRoute = {
+        type: 'icpswap_stable_direct',
+        pathDisplay: 'x',
+        hops: 1,
+        estimatedOutput: 940n,
+        grossOutput: 950n,
+        feeDisplay: '0.30%',
+        providerQuote: stableIcpswapQuote('icpswap_ckusdt_ckusdc', 950n),
+      };
+      setIcpswapRoutingEnabled(false);
+
+      await expect(executeRoute(route, ckUsdt, ckUsdc, 1_000n, 50))
+        .rejects.toThrow(/ICPswap routing is currently disabled/i);
+      expect(stableCkusdtCkusdcMock.swap).not.toHaveBeenCalled();
+    });
+
+    it('dispatches through the sequential Oisy executor instead of provider.swap when Oisy is the wallet', async () => {
+      isOisyWalletMock.mockReturnValue(true);
+
+      // Same v5 sequential-Oisy pattern as the amm_swap dispatch test below:
+      // approve the from-ledger, then depositFrom -> swap -> withdraw on the
+      // pool actor directly (no batch/execute concept).
+      const fakeSignerAgent = {};
+      const fakeFromLedger = {
+        icrc2_approve: vi.fn().mockResolvedValue({ Ok: 1n }),
+      };
+      const fakePool = {
+        depositFrom: vi.fn().mockResolvedValue({ ok: 0n }),
+        swap: vi.fn().mockResolvedValue({ ok: 0n }),
+        withdraw: vi.fn().mockResolvedValue({ ok: 948n }),
+      };
+      const oisySigner = await import('./oisySigner');
+      vi.mocked(oisySigner.getOisySignerAgent).mockResolvedValue(fakeSignerAgent as any);
+      vi.mocked(oisySigner.createOisyActor).mockImplementation(((canisterId: string) => {
+        // Pool ID from stableIpcswapQuote('icpswap_ckusdt_ckusdc', ...) fixture
+        if (canisterId === STABLE_ICPSWAP_POOL_IDS.icpswap_ckusdt_ckusdc) return fakePool;
+        return fakeFromLedger;
+      }) as any);
+
+      const route: SwapRoute = {
+        type: 'icpswap_stable_direct',
+        pathDisplay: 'x',
+        hops: 1,
+        estimatedOutput: 940n,
+        grossOutput: 950n,
+        feeDisplay: '0.30%',
+        providerQuote: stableIcpswapQuote('icpswap_ckusdt_ckusdc', 950n),
+      };
+
+      const out = await executeRoute(route, ckUsdt, ckUsdc, 1_000n, 50);
+
+      // Provider.swap path was bypassed
+      expect(stableCkusdtCkusdcMock.swap).not.toHaveBeenCalled();
+      expect(fakeFromLedger.icrc2_approve).toHaveBeenCalledTimes(1);
+      expect(fakePool.depositFrom).toHaveBeenCalledTimes(1);
+      expect(fakePool.swap).toHaveBeenCalledTimes(1);
+      expect(fakePool.withdraw).toHaveBeenCalledTimes(1);
+      expect(out).toBe(948n);
+    });
   });
 
   // ──────────────────────────────────────────────────────────────
@@ -514,10 +764,18 @@ describe('swapRouter — provider registry integration', () => {
       const fakeFromLedger = {
         icrc2_approve: vi.fn().mockResolvedValue({ Ok: 1n }),
       };
+      // r3.ok (the ICPswap swap step's actual output) is deliberately NOT
+      // equal to minOut, so this test can tell apart withdrawing the real
+      // swap output (fixed, correct) from withdrawing the slippage floor
+      // (the old fund-stranding bug). minOut here is
+      // grossOutput(1_500n) * 9_950n / 10_000n = 1_492n (BigInt truncation);
+      // 1_497n is comfortably different from that and still below
+      // grossOutput, representing a swap that landed with some positive
+      // slippage above the floor.
       const fakePool = {
         depositFrom: vi.fn().mockResolvedValue({ ok: 0n }),
-        swap: vi.fn().mockResolvedValue({ ok: 0n }),
-        withdraw: vi.fn().mockResolvedValue({ ok: 1_499n }),
+        swap: vi.fn().mockResolvedValue({ ok: 1_497n }),
+        withdraw: vi.fn().mockResolvedValue({ ok: 1_495n }),
       };
       const oisySigner = await import('./oisySigner');
       vi.mocked(oisySigner.getOisySignerAgent).mockResolvedValue(fakeSignerAgent as any);
@@ -546,9 +804,14 @@ describe('swapRouter — provider registry integration', () => {
       expect(fakeFromLedger.icrc2_approve).toHaveBeenCalledTimes(1);
       expect(fakePool.depositFrom).toHaveBeenCalledTimes(1);
       expect(fakePool.swap).toHaveBeenCalledTimes(1);
-      expect(fakePool.withdraw).toHaveBeenCalledTimes(1);
+      // Withdraws the actual swap output (r3.ok = 1_497n), NOT the slippage
+      // floor minOut (1_492n). If the withdraw amount were reverted back to
+      // minOut, this would assert 1_497n but receive 1_492n and fail.
+      expect(fakePool.withdraw).toHaveBeenCalledWith(
+        expect.objectContaining({ amount: 1_497n }),
+      );
       // Returns the `ok` value from the final withdraw call
-      expect(out).toBe(1_499n);
+      expect(out).toBe(1_495n);
     });
 
   });
@@ -619,5 +882,43 @@ describe('swapRouter — provider registry integration', () => {
         .rejects.toThrow(/no route available while AMM1 routing is paused/i);
       expect(rumiAmmMock.quote).not.toHaveBeenCalled();
     });
+  });
+});
+
+// ──────────────────────────────────────────────────────────────
+// dustThreshold: the decimals-aware raw-unit cutoff used throughout the
+// ICPswap unused-balance recovery flow (checkIcpswapUnusedBalances,
+// preWarmRecovery, recoverIcpswapBalance). checkIcpswapUnusedBalances itself
+// dynamically imports '@dfinity/agent' and builds a live Actor, which none
+// of the mocks above stand in for -- mocking that module just to exercise
+// this arithmetic would be disproportionate to the bug being covered here.
+// The bug is entirely in this helper's math (a flat e8s constant compared
+// against 6-decimal balances), so it is tested directly and exported for
+// that purpose.
+// ──────────────────────────────────────────────────────────────
+
+describe('dustThreshold', () => {
+  it('returns the pre-existing flat 100_000n threshold at 8 decimals (icUSD/3USD/ICP)', () => {
+    expect(dustThreshold(8)).toBe(100_000n);
+  });
+
+  it('returns 1_000n at 6 decimals (ckUSDT/ckUSDC), not the flat 100_000n constant', () => {
+    // The bug this fixes: a stranded balance of, say, 50_000n raw units of a
+    // 6-decimal token is 0.05 tokens, comfortably above the intended 0.001
+    // token cutoff, but the old flat 100_000n constant would have hidden it.
+    const threshold = dustThreshold(6);
+    expect(threshold).toBe(1_000n);
+    expect(threshold).not.toBe(100_000n);
+
+    const strandedBalance = 50_000n; // 0.05 ckUSDT
+    expect(strandedBalance > threshold).toBe(true); // now surfaced
+    expect(strandedBalance > 100_000n).toBe(false); // old constant hid it
+  });
+
+  it('guards against nonsensical decimals instead of throwing on a negative exponent', () => {
+    expect(() => dustThreshold(-1)).not.toThrow();
+    expect(() => dustThreshold(0)).not.toThrow();
+    expect(() => dustThreshold(NaN)).not.toThrow();
+    expect(() => dustThreshold(1.5)).not.toThrow();
   });
 });
