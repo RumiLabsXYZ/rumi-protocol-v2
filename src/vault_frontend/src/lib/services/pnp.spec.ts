@@ -2,8 +2,8 @@ import { describe, it, expect } from 'vitest';
 import { getAllDelegationTargets } from './pnp';
 import { CANISTER_IDS, CONFIG } from '../config';
 
-// getAllDelegationTargets() feeds both the scoped Internet Identity
-// delegation `targets` and the Plug `whitelist` in initializePNP(). A
+// getAllDelegationTargets() feeds the scoped PNP delegation `targets` and
+// the Plug `whitelist` in initializePNP(). A
 // canister missing from this list cannot be called by a delegation-based
 // wallet, so every swap venue (including the ICPswap pools) must appear
 // here.
@@ -13,6 +13,8 @@ describe('getAllDelegationTargets', () => {
     expect(targets).toContain(CONFIG.currentCanisterId);
     expect(targets).toContain(CONFIG.currentIcpLedgerId);
     expect(targets).toContain(CONFIG.currentIcusdLedgerId);
+    expect(targets).toContain(CANISTER_IDS.CKUSDT_LEDGER);
+    expect(targets).toContain(CANISTER_IDS.CKUSDC_LEDGER);
     expect(targets).toContain(CANISTER_IDS.STABILITY_POOL);
     expect(targets).toContain(CANISTER_IDS.THREEPOOL);
     expect(targets).toContain(CANISTER_IDS.RUMI_AMM);

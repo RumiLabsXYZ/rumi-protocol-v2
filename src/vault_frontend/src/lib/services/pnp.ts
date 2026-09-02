@@ -45,6 +45,8 @@ export const getAllDelegationTargets = (): string[] => {
     CONFIG.currentCanisterId,              // Protocol canister
     CONFIG.currentIcpLedgerId,             // ICP Ledger
     CONFIG.currentIcusdLedgerId,           // icUSD Ledger
+    CANISTER_IDS.CKUSDT_LEDGER,            // ckUSDT Ledger
+    CANISTER_IDS.CKUSDC_LEDGER,            // ckUSDC Ledger
     CANISTER_IDS.STABILITY_POOL,           // Stability Pool canister
     CANISTER_IDS.THREEPOOL,                // 3pool (StableSwap)
     CANISTER_IDS.RUMI_AMM,                 // AMM pool
