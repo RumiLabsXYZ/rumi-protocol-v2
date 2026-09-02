@@ -30,7 +30,7 @@ export function icrc1FeeSync(ledgerId: string): bigint {
 }
 
 export interface IcpswapProviderConfig {
-  id: Extract<ProviderId, 'icpswap_3usd_icp' | 'icpswap_icusd_icp'>;
+  id: Extract<ProviderId, `icpswap_${string}`>;
   /** ICPswap pool canister ID. */
   poolCanisterId: string;
   /** Ledger IDs as declared in the pool metadata (token0, token1). */
@@ -38,6 +38,15 @@ export interface IcpswapProviderConfig {
   token1LedgerId: string;
   /** Fee tier in basis points (3, 30, or 100). */
   feeBps: number;
+  /**
+   * ICRC standard ICPswap has registered for token0/token1, per the pool's
+   * `metadata()` query. Defaults to 'ICRC2' when omitted, which is correct
+   * for every pool configured before this field existed (3USD/ICP and
+   * icUSD/ICP are ICRC2 on both legs). Only set this when metadata() reports
+   * 'ICRC1' for a side -- see the comment in supports() for why it matters.
+   */
+  token0Standard?: 'ICRC1' | 'ICRC2';
+  token1Standard?: 'ICRC1' | 'ICRC2';
 }
 
 export class IcpswapProvider implements SwapProvider {
@@ -55,7 +64,26 @@ export class IcpswapProvider implements SwapProvider {
     const isPair = (a: string, b: string) =>
       (a === token0LedgerId && b === token1LedgerId) ||
       (a === token1LedgerId && b === token0LedgerId);
-    return isPair(tokenIn.ledgerId, tokenOut.ledgerId);
+    if (!isPair(tokenIn.ledgerId, tokenOut.ledgerId)) return false;
+
+    // ICPswap standard gate. swap() calls pool.depositFrom(...) to pull
+    // tokenIn, which ICPswap services with the token adapter registered for
+    // that token in the pool's metadata(). An ICRC1-registered token has no
+    // transferFrom on ICPswap's adapter, so depositFrom fails whenever an
+    // ICRC1 token is used as the INPUT side. This check is direction-
+    // sensitive ON PURPOSE: it only ever rejects tokenIn, never tokenOut,
+    // because withdraw() pays tokenOut out via a plain icrc1_transfer, which
+    // works fine for an ICRC1 token. DO NOT "simplify" this into a symmetric
+    // pair-level check -- that would also block the direction that actually
+    // works. Concretely: on the ckUSDT/icUSD pool (icUSD registered ICRC1),
+    // this lets ckUSDT -> icUSD through but rejects icUSD -> ckUSDT, which
+    // then falls back to the 3pool in swapRouter's Case 1.
+    const standardOf = (ledgerId: string): 'ICRC1' | 'ICRC2' =>
+      ledgerId === token0LedgerId
+        ? (this.config.token0Standard ?? 'ICRC2')
+        : (this.config.token1Standard ?? 'ICRC2');
+
+    return standardOf(tokenIn.ledgerId) === 'ICRC2';
   }
 
   async quote(tokenIn: AmmToken, tokenOut: AmmToken, amountIn: bigint): Promise<ProviderQuote> {

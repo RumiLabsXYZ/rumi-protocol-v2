@@ -176,6 +176,9 @@
       case 'rumi_amm': return 'Rumi AMM';
       case 'icpswap_3usd_icp': return 'ICPswap 3USD/ICP';
       case 'icpswap_icusd_icp': return 'ICPswap icUSD/ICP';
+      case 'icpswap_ckusdt_icusd': return 'ICPswap ckUSDT/icUSD';
+      case 'icpswap_icusd_ckusdc': return 'ICPswap icUSD/ckUSDC';
+      case 'icpswap_ckusdt_ckusdc': return 'ICPswap ckUSDT/ckUSDC';
       default: return id;
     }
   }
