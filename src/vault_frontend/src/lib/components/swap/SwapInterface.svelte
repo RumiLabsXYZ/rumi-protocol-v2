@@ -15,6 +15,7 @@
     isOisyArrFalseNegative,
   } from '../../services/protocol/oisyResilience';
   import { TokenService } from '../../services/tokenService';
+  import { routeVenueLabel } from './routePresentation';
   import { get } from 'svelte/store';
 
   // The 3USD/ICP market is temporarily paused. Keep 3USD in AMM_TOKENS for
@@ -166,22 +167,7 @@
     return 'none';
   })();
 
-  // Selected AMM provider (single-hop direct routes or the AMM leg of two-hop routes)
-  $: selectedProvider = currentRoute?.providerQuote?.provider
-    ?? currentRoute?.hopProviderQuote?.provider
-    ?? null;
-
-  function providerLabel(id: string): string {
-    switch (id) {
-      case 'rumi_amm': return 'Rumi AMM';
-      case 'icpswap_3usd_icp': return 'ICPswap 3USD/ICP';
-      case 'icpswap_icusd_icp': return 'ICPswap icUSD/ICP';
-      case 'icpswap_ckusdt_icusd': return 'ICPswap ckUSDT/icUSD';
-      case 'icpswap_icusd_ckusdc': return 'ICPswap icUSD/ckUSDC';
-      case 'icpswap_ckusdt_ckusdc': return 'ICPswap ckUSDT/ckUSDC';
-      default: return id;
-    }
-  }
+  $: routeVenue = currentRoute ? routeVenueLabel(currentRoute) : null;
 
   // Debounced quote
   $: if (amount && parseFloat(amount) > 0) {
@@ -552,20 +538,12 @@
               class:impact-favorable={parseFloat(priceImpact) < 0}>{priceImpact}%</span>
           </div>
         {/if}
-        {#if currentRoute && (currentRoute.hops > 1 || selectedProvider !== null)}
+        {#if currentRoute && routeVenue}
           <div class="info-row">
             <span class="info-label">Route</span>
             <span class="route-cell">
               <span class="info-value route-path">{currentRoute.pathDisplay}</span>
-              {#if selectedProvider !== null}
-                <span class="provider-pill">
-                  {#if currentRoute.hopProviderQuote}
-                    via {providerLabel(selectedProvider)}
-                  {:else}
-                    {providerLabel(selectedProvider)}
-                  {/if}
-                </span>
-              {/if}
+              <span class="provider-pill">{routeVenue}</span>
             </span>
           </div>
         {/if}
