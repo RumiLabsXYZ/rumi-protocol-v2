@@ -2472,4 +2472,106 @@ mod tests {
         let outcome = block_probe_outcome(CHAIN, 154_850_928, tally);
         assert_eq!(outcome, Ok(Some(154_850_928)));
     }
+
+    // (e) all three provider responses are shape-malformed (not merely
+    // disagreeing): zero votable responses came back, so this must collapse
+    // to the SAME infrastructure-failure diagnosis as `AllProvidersFailed`
+    // (nothing to tally), never `Disagreement` (there was nothing valid to
+    // disagree about) and never `Ok`.
+    #[test]
+    fn all_malformed_responses_is_an_infra_failure_not_disagreement() {
+        let urls = providers();
+        let malformed =
+            r#"{"jsonrpc":"2.0","id":1,"result":"0x0","error":{"code":-32000,"message":"weird"}}"#;
+        let outcomes: Vec<(String, Result<String, String>)> = urls
+            .iter()
+            .map(|u| (u.clone(), Ok(malformed.to_string())))
+            .collect();
+        let tally = tally_provider_outcomes(CHAIN, &outcomes, FLOOR);
+        let quorum_err = tally.expect_err("all-malformed must be Err");
+        assert!(
+            matches!(quorum_err, QuorumError::AllProvidersFailed(_)),
+            "expected AllProvidersFailed, got {:?}",
+            quorum_err
+        );
+        assert!(
+            quorum_err.to_string().contains("malformed"),
+            "{}",
+            quorum_err
+        );
+    }
+
+    // (f) one valid response plus two malformed: a single votable response
+    // exists but alone it can never reach the 2-of-3 floor, so this fails
+    // closed as a genuine `Disagreement` (a usable response DID come back),
+    // not `AllProvidersFailed` and not `Ok`.
+    #[test]
+    fn one_valid_plus_two_malformed_fails_closed_as_disagreement() {
+        let urls = providers();
+        let malformed =
+            r#"{"jsonrpc":"2.0","id":1,"result":"0x0","error":{"code":-32000,"message":"weird"}}"#;
+        let outcomes: Vec<(String, Result<String, String>)> = vec![
+            (urls[0].clone(), Ok(result_json(1, r#""0x0""#))),
+            (urls[1].clone(), Ok(malformed.to_string())),
+            (urls[2].clone(), Ok(malformed.to_string())),
+        ];
+        let tally = tally_provider_outcomes(CHAIN, &outcomes, FLOOR);
+        assert!(
+            matches!(tally, Err(QuorumError::Disagreement(_))),
+            "expected Disagreement, got {:?}",
+            tally
+        );
+    }
+
+    // (g) one valid response plus two outright provider call errors: the same
+    // "a votable response existed but did not reach quorum" shape as (f),
+    // via a different failure mode on the other two providers.
+    #[test]
+    fn one_valid_plus_two_call_errors_fails_closed_as_disagreement() {
+        let urls = providers();
+        let outcomes: Vec<(String, Result<String, String>)> = vec![
+            (urls[0].clone(), Ok(result_json(1, r#""0x0""#))),
+            (
+                urls[1].clone(),
+                Err(format!("call error to {} (SysTransient): timeout", urls[1])),
+            ),
+            (
+                urls[2].clone(),
+                Err(format!("call error to {} (SysTransient): timeout", urls[2])),
+            ),
+        ];
+        let tally = tally_provider_outcomes(CHAIN, &outcomes, FLOOR);
+        assert!(
+            matches!(tally, Err(QuorumError::Disagreement(_))),
+            "expected Disagreement, got {:?}",
+            tally
+        );
+    }
+
+    // (h) two DISTINCT valid votes ("0x0" from A, "0x5" from B) plus a
+    // malformed "0x0" from C: C's malformed response must not be allowed to
+    // tip a false quorum onto A's "0x0" value. A and B remain a genuine
+    // 1-vs-1 disagreement between distinct valid values.
+    #[test]
+    fn malformed_response_cannot_tip_a_false_quorum_between_disagreeing_valid_votes() {
+        let urls = providers();
+        let malformed_zero =
+            r#"{"jsonrpc":"2.0","id":1,"result":"0x0","error":{"code":-32000,"message":"weird"}}"#;
+        let outcomes: Vec<(String, Result<String, String>)> = vec![
+            (urls[0].clone(), Ok(result_json(1, r#""0x0""#))),
+            (urls[1].clone(), Ok(result_json(1, r#""0x5""#))),
+            (urls[2].clone(), Ok(malformed_zero.to_string())),
+        ];
+        let tally = tally_provider_outcomes(CHAIN, &outcomes, FLOOR);
+        match &tally {
+            Err(QuorumError::Disagreement(detail)) => {
+                assert!(detail.contains("malformed"), "{}", detail);
+                assert!(detail.contains(urls[2].as_str()), "{}", detail);
+            }
+            other => panic!(
+                "expected Disagreement (malformed cannot manufacture a false quorum), got {:?}",
+                other
+            ),
+        }
+    }
 }
