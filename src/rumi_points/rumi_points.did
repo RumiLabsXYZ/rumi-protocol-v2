@@ -194,6 +194,7 @@ service : (opt InitArgs) -> {
   set_excluded_principals : (vec principal) -> (Result);
   set_poll_enabled : (bool) -> (Result);
   set_poll_interval_secs : (nat64) -> (Result);
+  set_season_end_ns : (nat64) -> (Result_1);
   set_source_canister : (nat8, principal) -> (Result);
   start_season : (blob) -> (Result_1);
   trigger_poll : () -> (Result_2);

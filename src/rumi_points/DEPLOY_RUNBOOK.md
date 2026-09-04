@@ -74,9 +74,13 @@ forward endpoints, and `rumi_points` installs alongside.
   9-canister protocol-owned seed; passing a vec overrides it entirely.
 - **Source/asset config is mainnet-seeded automatically** at init (no override
   needed on mainnet; `set_source_canister`/`set_asset_ledger` are for local/test).
-- **Default season window:** `2026-06-01 00:00 UTC → 2026-08-31 23:59 UTC` (91 days).
-  Already started; fine (poll backfills from cursor 0). Confirm or override via
-  `season_start_ns`/`season_end_ns`.
+- **Default season window:** `2026-06-01 00:00 UTC → 2026-08-31 23:59 UTC` (91 days),
+  the value baked into `InitArgs::default()` for fresh installs. Confirm or override
+  at install time via `season_start_ns`/`season_end_ns`. On mainnet, Season 1 was
+  extended post-launch to `2026-10-31 23:59 UTC` via the admin-only
+  `set_season_end_ns(new_end_ns)` update call (added 2026-09-03; does not touch this
+  compiled-in default, and does not retroactively extend epochs/repayment windows
+  already closed/recorded against the old bound).
 
 ```
 InitArgs = record {

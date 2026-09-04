@@ -322,6 +322,15 @@ fn set_epoch_driver_interval_secs(secs: u64) -> Result<(), PointsError> {
     Ok(())
 }
 
+/// Admin: move the season end (nanoseconds since epoch), e.g. to extend Season 1.
+/// Forward-looking only: already-closed epochs and already-recorded repayment
+/// windows keep the cap that was in effect when they were computed. Rejects a
+/// new end at or before the season start.
+#[ic_cdk::update]
+fn set_season_end_ns(new_end_ns: u64) -> Result<(), String> {
+    state::set_season_end_ns(ic_cdk::caller(), new_end_ns)
+}
+
 /// Admin: advance the epoch state machine one step now (ops recovery / E2E),
 /// independent of the enabled flag.
 #[ic_cdk::update]
