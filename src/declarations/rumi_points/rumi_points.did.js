@@ -257,6 +257,7 @@ export const idlFactory = ({ IDL }) => {
       ),
     'set_poll_enabled' : IDL.Func([IDL.Bool], [Result], []),
     'set_poll_interval_secs' : IDL.Func([IDL.Nat64], [Result], []),
+    'set_season_end_ns' : IDL.Func([IDL.Nat64], [Result_1], []),
     'set_source_canister' : IDL.Func([IDL.Nat8, IDL.Principal], [Result], []),
     'start_season' : IDL.Func([IDL.Vec(IDL.Nat8)], [Result_1], []),
     'trigger_poll' : IDL.Func([], [Result_2], []),

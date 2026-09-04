@@ -15,7 +15,7 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">Season 1 Window</h2>
-    <p>Season 1 runs from <strong>June 1, 2026</strong> to <strong>August 31, 2026</strong> (UTC). You are enrolled automatically the first time you take a qualifying action: minting icUSD from a vault, repaying a vault, depositing into the 3pool, depositing into the stability pool, or providing AMM liquidity. Activity before your enrollment does not earn points retroactively, and no further points accrue after the season closes.</p>
+    <p>Season 1 runs from <strong>June 1, 2026</strong> to <strong>October 31, 2026</strong> (UTC). You are enrolled automatically the first time you take a qualifying action: minting icUSD from a vault, repaying a vault, depositing into the 3pool, depositing into the stability pool, or providing AMM liquidity. Activity before your enrollment does not earn points retroactively, and no further points accrue after the season closes.</p>
   </section>
 
   <section class="doc-section">

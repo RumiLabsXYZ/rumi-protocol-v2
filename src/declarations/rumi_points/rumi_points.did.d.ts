@@ -213,6 +213,7 @@ export interface _SERVICE {
   'set_excluded_principals' : ActorMethod<[Array<Principal>], Result>,
   'set_poll_enabled' : ActorMethod<[boolean], Result>,
   'set_poll_interval_secs' : ActorMethod<[bigint], Result>,
+  'set_season_end_ns' : ActorMethod<[bigint], Result_1>,
   'set_source_canister' : ActorMethod<[number, Principal], Result>,
   'start_season' : ActorMethod<[Uint8Array | number[]], Result_1>,
   'trigger_poll' : ActorMethod<[], Result_2>,

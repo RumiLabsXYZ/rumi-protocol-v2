@@ -1315,6 +1315,28 @@ pub fn season_bounds() -> (u64, u64) {
     with_state(|s| (s.season_start_ns, s.season_end_ns))
 }
 
+/// Admin: move the season end (e.g. extending Season 1). Forward-looking only —
+/// epochs already closed and repayment windows already recorded had their caps
+/// evaluated against the season end in effect at the time and are not
+/// retroactively extended; this only changes the bound `epoch_bounds`/
+/// `record_repayment` read for anything computed AFTER the call. A `String`
+/// error (like `start_season`/`admin_rebuild_3pool_recorded`) rather than
+/// `PointsError`, so a one-off validation case doesn't add a variant to the
+/// `Result` shared by a dozen other methods and flag them all as a candid
+/// breaking change on upgrade.
+pub fn set_season_end_ns(caller: Principal, new_end_ns: u64) -> Result<(), String> {
+    if !is_admin(caller) {
+        return Err("unauthorized".to_string());
+    }
+    with_state_mut(|s| {
+        if new_end_ns <= s.season_start_ns {
+            return Err("new_end_ns must be after season_start_ns".to_string());
+        }
+        s.season_end_ns = new_end_ns;
+        Ok(())
+    })
+}
+
 /// Aggregate result of an epoch close, used to build the `EpochSummary`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CloseStats {
@@ -1692,6 +1714,43 @@ mod tests {
         assert!(is_excluded(&tp(2)));
         // The protocol-owned seed was replaced, so the backend is no longer in.
         assert!(!is_excluded(&backend_principal()));
+    }
+
+    #[test]
+    fn admin_can_extend_season_end_but_non_admin_cannot() {
+        let admin = tp(99);
+        init_default(admin);
+        let (start, original_end) = season_bounds();
+        let new_end = original_end + 60 * crate::NANOS_PER_DAY;
+
+        assert_eq!(set_season_end_ns(admin, new_end), Ok(()));
+        assert_eq!(season_bounds(), (start, new_end));
+
+        let intruder = tp(8);
+        assert_eq!(
+            set_season_end_ns(intruder, new_end + 1),
+            Err("unauthorized".to_string())
+        );
+        // Rejected write left the window unchanged.
+        assert_eq!(season_bounds(), (start, new_end));
+    }
+
+    #[test]
+    fn set_season_end_ns_rejects_end_at_or_before_start() {
+        let admin = tp(99);
+        init_default(admin);
+        let (start, original_end) = season_bounds();
+
+        assert_eq!(
+            set_season_end_ns(admin, start),
+            Err("new_end_ns must be after season_start_ns".to_string())
+        );
+        assert_eq!(
+            set_season_end_ns(admin, start - 1),
+            Err("new_end_ns must be after season_start_ns".to_string())
+        );
+        // Rejected writes left the window unchanged.
+        assert_eq!(season_bounds(), (start, original_end));
     }
 
     #[test]
