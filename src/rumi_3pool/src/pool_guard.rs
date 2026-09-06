@@ -27,6 +27,11 @@ impl PoolGuard {
     /// Acquire the canister-wide pool lock. Returns `Err(PoolLocked)` if
     /// another mutating operation is already in flight.
     pub fn new() -> Result<Self, ThreePoolError> {
+        // Receipt attempts retain this fence across a callback trap/upgrade.
+        // Ordinary unpause cannot authorize reserve movement while unresolved.
+        if crate::receipts::fenced() {
+            return Err(ThreePoolError::PoolLocked);
+        }
         POOL_LOCK.with(|lock| {
             let mut held = lock.borrow_mut();
             if *held {

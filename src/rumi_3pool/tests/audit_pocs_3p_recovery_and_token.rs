@@ -41,7 +41,7 @@ fn fn_body<'a>(src: &'a str, header: &'a str) -> &'a str {
 fn p3_recovery_value_moving_paths_record_pending_claim() {
     let src = read("src/lib.rs");
     for header in [
-        "pub async fn swap(",
+        "async fn swap_inner(",
         "pub async fn add_liquidity(",
         "pub async fn remove_liquidity(",
         "pub async fn remove_one_coin(",
