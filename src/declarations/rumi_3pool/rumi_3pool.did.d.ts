@@ -297,6 +297,58 @@ export interface SwapEventV2 {
   'amount_in' : bigint,
   'token_out' : number,
 }
+export type SwapReceiptClientResultV1 = { 'Ok' : null } |
+  { 'Err' : SwapReceiptErrorV1 };
+export type SwapReceiptErrorV1 = { 'CapacityExceeded' : null } |
+  { 'IntentConflict' : null } |
+  { 'Unauthorized' : null } |
+  { 'InvalidRequest' : null } |
+  { 'InvalidIntentId' : null };
+export type SwapReceiptResultV1 = { 'Ok' : SwapReceiptV1 } |
+  { 'Err' : SwapReceiptErrorV1 };
+export type SwapReceiptStatusV1 = { 'InputSubmitted' : null } |
+  { 'Failed' : null } |
+  { 'OutputSubmitted' : null } |
+  { 'Refunded' : null } |
+  { 'Prepared' : null } |
+  { 'Unresolved' : null } |
+  { 'RefundSubmitted' : null } |
+  { 'Completed' : null };
+export interface SwapReceiptV1 {
+  'status' : SwapReceiptStatusV1,
+  'output' : [] | [SwapTransferV1],
+  'gross_output' : [] | [bigint],
+  'owner' : Principal,
+  'request' : SwapRequestV1,
+  'error' : [] | [string],
+  'version' : number,
+  'input' : [] | [SwapTransferV1],
+  'pool_fee' : [] | [bigint],
+  'refund' : [] | [SwapTransferV1],
+}
+export interface SwapRequestV1 {
+  'i' : number,
+  'j' : number,
+  'dx' : bigint,
+  'min_dy' : bigint,
+  'intent_id' : Uint8Array | number[],
+}
+export type SwapTransferStatusV1 = { 'SkippedDust' : null } |
+  { 'Confirmed' : null } |
+  { 'Rejected' : null } |
+  { 'Unresolved' : null } |
+  { 'Submitted' : null };
+export interface SwapTransferV1 {
+  'to' : Account,
+  'fee' : bigint,
+  'status' : SwapTransferStatusV1,
+  'block_index' : [] | [bigint],
+  'from' : Account,
+  'memo' : Uint8Array | number[],
+  'ledger' : Principal,
+  'created_at_time' : bigint,
+  'amount' : bigint,
+}
 export type ThreePoolAdminAction = { 'SetAdminFee' : { 'fee_bps' : bigint } } |
   { 'RampA' : { 'future_a_time' : bigint, 'future_a' : bigint } } |
   { 'StopRampA' : { 'frozen_a' : bigint } } |
@@ -523,6 +575,10 @@ export interface _SERVICE {
   >,
   'get_swap_events_v2' : ActorMethod<[bigint, bigint], Array<SwapEventV2>>,
   'get_swap_fees_over_window' : ActorMethod<[number], bigint>,
+  'get_swap_receipt_v1' : ActorMethod<
+    [Uint8Array | number[]],
+    [] | [SwapReceiptV1]
+  >,
   'get_top_lps' : ActorMethod<[bigint], Array<[Principal, bigint, number]>>,
   'get_top_swappers' : ActorMethod<
     [StatsWindow, bigint],
@@ -571,6 +627,7 @@ export interface _SERVICE {
   'icrc3_get_blocks' : ActorMethod<[Array<GetBlocksArgs>], GetBlocksResult>,
   'icrc3_get_tip_certificate' : ActorMethod<[], [] | [Icrc3DataCertificate]>,
   'icrc3_supported_block_types' : ActorMethod<[], Array<SupportedBlockType>>,
+  'is_swap_receipt_client_v1' : ActorMethod<[Principal], boolean>,
   'quote_optimal_rebalance' : ActorMethod<
     [number, number],
     { 'Ok' : OptimalRebalanceQuote } |
@@ -621,6 +678,10 @@ export interface _SERVICE {
     { 'Ok' : null } |
       { 'Err' : ThreePoolError }
   >,
+  'set_swap_receipt_client_v1' : ActorMethod<
+    [Principal, boolean],
+    SwapReceiptClientResultV1
+  >,
   'simulate_swap_path' : ActorMethod<
     [Array<[number, number, bigint]>],
     { 'Ok' : Array<QuoteSwapResult> } |
@@ -632,6 +693,7 @@ export interface _SERVICE {
     { 'Ok' : bigint } |
       { 'Err' : ThreePoolError }
   >,
+  'swap_with_receipt_v1' : ActorMethod<[SwapRequestV1], SwapReceiptResultV1>,
   'withdraw_admin_fees' : ActorMethod<
     [],
     { 'Ok' : Array<bigint> } |

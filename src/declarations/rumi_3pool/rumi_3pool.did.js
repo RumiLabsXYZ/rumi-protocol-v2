@@ -255,6 +255,57 @@ export const idlFactory = ({ IDL }) => {
     'amount_in' : IDL.Nat,
     'token_out' : IDL.Nat8,
   });
+  const SwapReceiptStatusV1 = IDL.Variant({
+    'InputSubmitted' : IDL.Null,
+    'Failed' : IDL.Null,
+    'OutputSubmitted' : IDL.Null,
+    'Refunded' : IDL.Null,
+    'Prepared' : IDL.Null,
+    'Unresolved' : IDL.Null,
+    'RefundSubmitted' : IDL.Null,
+    'Completed' : IDL.Null,
+  });
+  const Account = IDL.Record({
+    'owner' : IDL.Principal,
+    'subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+  });
+  const SwapTransferStatusV1 = IDL.Variant({
+    'SkippedDust' : IDL.Null,
+    'Confirmed' : IDL.Null,
+    'Rejected' : IDL.Null,
+    'Unresolved' : IDL.Null,
+    'Submitted' : IDL.Null,
+  });
+  const SwapTransferV1 = IDL.Record({
+    'to' : Account,
+    'fee' : IDL.Nat,
+    'status' : SwapTransferStatusV1,
+    'block_index' : IDL.Opt(IDL.Nat),
+    'from' : Account,
+    'memo' : IDL.Vec(IDL.Nat8),
+    'ledger' : IDL.Principal,
+    'created_at_time' : IDL.Nat64,
+    'amount' : IDL.Nat,
+  });
+  const SwapRequestV1 = IDL.Record({
+    'i' : IDL.Nat8,
+    'j' : IDL.Nat8,
+    'dx' : IDL.Nat,
+    'min_dy' : IDL.Nat,
+    'intent_id' : IDL.Vec(IDL.Nat8),
+  });
+  const SwapReceiptV1 = IDL.Record({
+    'status' : SwapReceiptStatusV1,
+    'output' : IDL.Opt(SwapTransferV1),
+    'gross_output' : IDL.Opt(IDL.Nat),
+    'owner' : IDL.Principal,
+    'request' : SwapRequestV1,
+    'error' : IDL.Opt(IDL.Text),
+    'version' : IDL.Nat16,
+    'input' : IDL.Opt(SwapTransferV1),
+    'pool_fee' : IDL.Opt(IDL.Nat),
+    'refund' : IDL.Opt(SwapTransferV1),
+  });
   const VirtualPricePoint = IDL.Record({
     'virtual_price' : IDL.Nat,
     'timestamp' : IDL.Nat64,
@@ -269,10 +320,6 @@ export const idlFactory = ({ IDL }) => {
     'lp_total_supply' : IDL.Nat,
   });
   const StandardRecord = IDL.Record({ 'url' : IDL.Text, 'name' : IDL.Text });
-  const Account = IDL.Record({
-    'owner' : IDL.Principal,
-    'subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
-  });
   const MetadataValue = IDL.Variant({
     'Int' : IDL.Int,
     'Nat' : IDL.Nat,
@@ -462,6 +509,21 @@ export const idlFactory = ({ IDL }) => {
     'token_out' : IDL.Nat8,
     'fee_native' : IDL.Nat,
   });
+  const SwapReceiptErrorV1 = IDL.Variant({
+    'CapacityExceeded' : IDL.Null,
+    'IntentConflict' : IDL.Null,
+    'Unauthorized' : IDL.Null,
+    'InvalidRequest' : IDL.Null,
+    'InvalidIntentId' : IDL.Null,
+  });
+  const SwapReceiptClientResultV1 = IDL.Variant({
+    'Ok' : IDL.Null,
+    'Err' : SwapReceiptErrorV1,
+  });
+  const SwapReceiptResultV1 = IDL.Variant({
+    'Ok' : SwapReceiptV1,
+    'Err' : SwapReceiptErrorV1,
+  });
   return IDL.Service({
     'add_authorized_burn_caller' : IDL.Func(
         [IDL.Principal],
@@ -613,6 +675,11 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'get_swap_fees_over_window' : IDL.Func([IDL.Nat32], [IDL.Nat], ['query']),
+    'get_swap_receipt_v1' : IDL.Func(
+        [IDL.Vec(IDL.Nat8)],
+        [IDL.Opt(SwapReceiptV1)],
+        ['query'],
+      ),
     'get_top_lps' : IDL.Func(
         [IDL.Nat64],
         [IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat, IDL.Nat32))],
@@ -707,6 +774,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Vec(SupportedBlockType)],
         ['query'],
       ),
+    'is_swap_receipt_client_v1' : IDL.Func(
+        [IDL.Principal],
+        [IDL.Bool],
+        ['query'],
+      ),
     'quote_optimal_rebalance' : IDL.Func(
         [IDL.Nat8, IDL.Nat8],
         [IDL.Variant({ 'Ok' : OptimalRebalanceQuote, 'Err' : ThreePoolError })],
@@ -757,6 +829,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : ThreePoolError })],
         [],
       ),
+    'set_swap_receipt_client_v1' : IDL.Func(
+        [IDL.Principal, IDL.Bool],
+        [SwapReceiptClientResultV1],
+        [],
+      ),
     'simulate_swap_path' : IDL.Func(
         [IDL.Vec(IDL.Tuple(IDL.Nat8, IDL.Nat8, IDL.Nat))],
         [
@@ -775,6 +852,11 @@ export const idlFactory = ({ IDL }) => {
     'swap' : IDL.Func(
         [IDL.Nat8, IDL.Nat8, IDL.Nat, IDL.Nat],
         [IDL.Variant({ 'Ok' : IDL.Nat, 'Err' : ThreePoolError })],
+        [],
+      ),
+    'swap_with_receipt_v1' : IDL.Func(
+        [SwapRequestV1],
+        [SwapReceiptResultV1],
         [],
       ),
     'withdraw_admin_fees' : IDL.Func(

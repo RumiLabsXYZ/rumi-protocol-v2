@@ -10,6 +10,8 @@ pub mod math;
 pub mod swap;
 pub mod liquidity;
 pub mod transfers;
+pub mod receipts;
+use receipts::{SwapReceiptErrorV1, SwapReceiptStatusV1, SwapReceiptV1, SwapRequestV1};
 pub mod admin;
 pub mod pool_guard;
 pub mod icrc21;
@@ -355,6 +357,7 @@ fn record_pending_claim(
 /// inserted if the transfer fails. Audit 2026-06-05 (3P-01/02/03).
 #[update]
 pub async fn claim_pending(claim_id: u64) -> Result<(), ThreePoolError> {
+    let _pool_guard = pool_guard::PoolGuard::new()?;
     let caller = ic_cdk::api::caller();
 
     // Remove first (atomic) to prevent double-claim across the await.
@@ -416,6 +419,64 @@ pub fn get_pending_claim_count() -> u64 {
 
 #[update]
 pub async fn swap(i: u8, j: u8, dx: u128, min_dy: u128) -> Result<u128, ThreePoolError> {
+    swap_inner(i, j, dx, min_dy, None).await
+}
+
+#[query]
+pub fn get_swap_receipt_v1(intent_id: Vec<u8>) -> Option<SwapReceiptV1> {
+    receipts::get(ic_cdk::api::caller(), &intent_id)
+}
+
+/// Operator capability only; newly upgraded canisters enable no receipt clients.
+#[update]
+pub fn set_swap_receipt_client_v1(
+    client: Principal,
+    enabled: bool,
+) -> Result<(), SwapReceiptErrorV1> {
+    if ic_cdk::api::caller() != read_state(|s| s.config.admin) {
+        return Err(SwapReceiptErrorV1::Unauthorized);
+    }
+    receipts::set_client(client, enabled)
+}
+#[query]
+pub fn is_swap_receipt_client_v1(client: Principal) -> bool {
+    receipts::client_enabled(client)
+}
+
+#[update]
+pub async fn swap_with_receipt_v1(
+    request: SwapRequestV1,
+) -> Result<SwapReceiptV1, SwapReceiptErrorV1> {
+    if !receipts::client_enabled(ic_cdk::api::caller()) {
+        return Err(SwapReceiptErrorV1::Unauthorized);
+    }
+    let (mut receipt, fresh) = receipts::reserve(ic_cdk::api::caller(), request.clone())?;
+    if !fresh {
+        return Ok(receipt);
+    }
+    if let Err(error) = swap_inner(
+        request.i,
+        request.j,
+        request.dx,
+        request.min_dy,
+        Some(&mut receipt),
+    )
+    .await
+    {
+        if receipt.status == SwapReceiptStatusV1::Prepared {
+            receipts::fail(&mut receipt, format!("{error:?}"), false);
+        }
+    }
+    Ok(receipt)
+}
+
+async fn swap_inner(
+    i: u8,
+    j: u8,
+    dx: u128,
+    min_dy: u128,
+    mut receipt: Option<&mut SwapReceiptV1>,
+) -> Result<u128, ThreePoolError> {
     // 1. Check not paused
     if read_state(|s| s.is_paused) {
         return Err(ThreePoolError::PoolPaused);
@@ -455,8 +516,16 @@ pub async fn swap(i: u8, j: u8, dx: u128, min_dy: u128) -> Result<u128, ThreePoo
         });
 
     // 5. Calculate swap output using the dynamic fee curve
-    let outcome =
-        calc_swap_output(i_idx, j_idx, dx, &balances, &precision_muls, amp, &fee_curve, admin_fee_bps)?;
+    let outcome = calc_swap_output(
+        i_idx,
+        j_idx,
+        dx,
+        &balances,
+        &precision_muls,
+        amp,
+        &fee_curve,
+        admin_fee_bps,
+    )?;
     let output = outcome.output_native;
     let fee = outcome.fee_native;
 
@@ -469,7 +538,10 @@ pub async fn swap(i: u8, j: u8, dx: u128, min_dy: u128) -> Result<u128, ThreePoo
     // debits balances, silently consuming the input for nothing. Reject before
     // pulling the input so no value moves.
     if net_output == 0 {
-        return Err(ThreePoolError::InsufficientOutput { expected_min: 1, actual: 0 });
+        return Err(ThreePoolError::InsufficientOutput {
+            expected_min: 1,
+            actual: 0,
+        });
     }
     if net_output < min_dy {
         return Err(ThreePoolError::SlippageExceeded);
@@ -479,24 +551,90 @@ pub async fn swap(i: u8, j: u8, dx: u128, min_dy: u128) -> Result<u128, ThreePoo
     let caller = ic_cdk::api::caller();
     let token_i_symbol = read_state(|s| s.config.tokens[i_idx].symbol.clone());
 
-    transfer_from_user(token_i_ledger, caller, dx)
-        .await
-        .map_err(|reason| ThreePoolError::TransferFailed {
-            token: token_i_symbol.clone(),
-            reason,
-        })?;
+    if let Some(r) = receipt.as_deref_mut() {
+        let input_fee = crate::transfers::ledger_fee(token_i_ledger).await;
+        let output_fee = crate::transfers::ledger_fee(token_j_ledger).await;
+        r.pool_fee = Some(fee);
+        r.gross_output = Some(output);
+        receipts::set_fence(true);
+        let input =
+            receipts::transfer_intent(r, 0, token_i_ledger, caller, ic_cdk::id(), dx, input_fee);
+        if let Err((ambiguous, reason)) = receipts::run_leg(r, 0, input).await {
+            receipts::fail(r, reason.clone(), ambiguous);
+            if !ambiguous {
+                receipts::set_fence(false);
+            }
+            return Err(ThreePoolError::TransferFailed {
+                token: token_i_symbol,
+                reason,
+            });
+        }
+        let payout = receipts::transfer_intent(
+            r,
+            1,
+            token_j_ledger,
+            ic_cdk::id(),
+            caller,
+            output - output_fee,
+            output_fee,
+        );
+        if let Err((ambiguous, reason)) = receipts::run_leg(r, 1, payout).await {
+            if ambiguous {
+                receipts::fail(r, reason.clone(), true);
+            } else if dx > input_fee {
+                let refund = receipts::transfer_intent(
+                    r,
+                    2,
+                    token_i_ledger,
+                    ic_cdk::id(),
+                    caller,
+                    dx - input_fee,
+                    input_fee,
+                );
+                match receipts::run_leg(r, 2, refund).await {
+                    Ok(()) => {
+                        r.status = SwapReceiptStatusV1::Refunded;
+                        r.error = Some(reason.chars().take(512).collect());
+                        receipts::save(r);
+                        receipts::set_fence(false);
+                    }
+                    Err((_, refund_reason)) => receipts::fail(
+                        r,
+                        format!("output: {reason}; refund: {refund_reason}"),
+                        true,
+                    ),
+                }
+            } else {
+                receipts::fail(
+                    r,
+                    format!("output: {reason}; input too small to refund after fee"),
+                    true,
+                );
+            }
+            return Err(ThreePoolError::TransferFailed {
+                token: token_j_symbol,
+                reason,
+            });
+        }
+    } else {
+        transfer_from_user(token_i_ledger, caller, dx)
+            .await
+            .map_err(|reason| ThreePoolError::TransferFailed {
+                token: token_i_symbol.clone(),
+                reason,
+            })?;
 
-    // 8. Transfer output token from pool to user.
-    //
-    // The input was just pulled into the pool's account, but `s.balances` is
-    // NOT credited until step 8 below (after both transfers succeed). So if the
-    // output transfer fails here, the pulled input would be stranded in the pool
-    // with no accounting and no recourse for the user. Refund the input; if the
-    // refund itself fails, record a pending claim so the user can recover it via
-    // `claim_pending`. Audit 2026-06-05 (3P-01): mirrors rumi_amm's swap path.
-    if let Err(reason) = transfer_to_user(token_j_ledger, caller, output).await {
-        if let Err(refund_err) = transfer_to_user(token_i_ledger, caller, dx).await {
-            record_pending_claim(
+        // 8. Transfer output token from pool to user.
+        //
+        // The input was just pulled into the pool's account, but `s.balances` is
+        // NOT credited until step 8 below (after both transfers succeed). So if the
+        // output transfer fails here, the pulled input would be stranded in the pool
+        // with no accounting and no recourse for the user. Refund the input; if the
+        // refund itself fails, record a pending claim so the user can recover it via
+        // `claim_pending`. Audit 2026-06-05 (3P-01): mirrors rumi_amm's swap path.
+        if let Err(reason) = transfer_to_user(token_j_ledger, caller, output).await {
+            if let Err(refund_err) = transfer_to_user(token_i_ledger, caller, dx).await {
+                record_pending_claim(
                 caller,
                 i,
                 token_i_ledger,
@@ -506,11 +644,12 @@ pub async fn swap(i: u8, j: u8, dx: u128, min_dy: u128) -> Result<u128, ThreePoo
                     "swap output transfer failed ({reason}), then input refund failed ({refund_err})"
                 ),
             );
+            }
+            return Err(ThreePoolError::TransferFailed {
+                token: token_j_symbol,
+                reason,
+            });
         }
-        return Err(ThreePoolError::TransferFailed {
-            token: token_j_symbol,
-            reason,
-        });
     }
 
     // 8. Update state
@@ -555,8 +694,22 @@ pub async fn swap(i: u8, j: u8, dx: u128, min_dy: u128) -> Result<u128, ThreePoo
         });
     });
 
-    log!(INFO, "Swap: {} of token {} -> {} of token {} (fee: {}, admin_fee: {})",
-        dx, i, output, j, fee, admin_fee_share);
+    if let Some(r) = receipt {
+        r.status = SwapReceiptStatusV1::Completed;
+        receipts::save(r);
+        receipts::set_fence(false);
+    }
+
+    log!(
+        INFO,
+        "Swap: {} of token {} -> {} of token {} (fee: {}, admin_fee: {})",
+        dx,
+        i,
+        output,
+        j,
+        fee,
+        admin_fee_share
+    );
 
     Ok(output)
 }

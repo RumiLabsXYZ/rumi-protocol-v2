@@ -23,6 +23,22 @@ type PoolStatus = record {
   tokens : vec TokenConfig;
 };
 
+type CycleManagerCyclesStatus = record {
+  balance : nat;
+  low_watermark : nat;
+  healthy : bool;
+  freeze_threshold_secs : nat64;
+  stable_memory_bytes : opt nat64;
+  heap_memory_bytes : opt nat64;
+  idle_burn_cycles_per_day : opt nat;
+};
+type CycleManagerMetric = record {
+  key : text;
+  count : nat64;
+  value : nat;
+  label : opt text;
+};
+
 type VirtualPriceSnapshot = record {
   timestamp_secs : nat64;
   virtual_price : nat;
@@ -484,7 +500,71 @@ type PoolHealth = record {
   arb_opportunity_score : nat8;
 };
 
+type SwapReceiptClientResultV1 = variant { Ok; Err : SwapReceiptErrorV1 };
+type SwapReceiptResultV1 = variant { Ok : SwapReceiptV1; Err : SwapReceiptErrorV1 };
+type SwapReceiptErrorV1 = variant {
+  CapacityExceeded;
+  IntentConflict;
+  Unauthorized;
+  InvalidRequest;
+  InvalidIntentId;
+};
+type SwapReceiptStatusV1 = variant {
+  InputSubmitted;
+  Failed;
+  OutputSubmitted;
+  Refunded;
+  Prepared;
+  Unresolved;
+  RefundSubmitted;
+  Completed;
+};
+type SwapReceiptV1 = record {
+  status : SwapReceiptStatusV1;
+  output : opt SwapTransferV1;
+  gross_output : opt nat;
+  owner : principal;
+  request : SwapRequestV1;
+  error : opt text;
+  version : nat16;
+  input : opt SwapTransferV1;
+  pool_fee : opt nat;
+  refund : opt SwapTransferV1;
+};
+type SwapRequestV1 = record {
+  i : nat8;
+  j : nat8;
+  dx : nat;
+  min_dy : nat;
+  intent_id : blob;
+};
+type SwapTransferStatusV1 = variant {
+  SkippedDust;
+  Confirmed;
+  Rejected;
+  Unresolved;
+  Submitted;
+};
+type SwapTransferV1 = record {
+  to : Account;
+  fee : nat;
+  status : SwapTransferStatusV1;
+  block_index : opt nat;
+  from : Account;
+  memo : blob;
+  ledger : principal;
+  created_at_time : nat64;
+  amount : nat;
+};
+
 service : (ThreePoolInitArgs) -> {
+  get_swap_receipt_v1 : (blob) -> (opt SwapReceiptV1) query;
+  is_swap_receipt_client_v1 : (principal) -> (bool) query;
+  set_swap_receipt_client_v1 : (principal, bool) -> (SwapReceiptClientResultV1);
+  swap_with_receipt_v1 : (SwapRequestV1) -> (SwapReceiptResultV1);
+
+  cycles_status : () -> (CycleManagerCyclesStatus) query;
+  cycle_manager_metrics : () -> (vec CycleManagerMetric) query;
   health : () -> (text) query;
   swap : (nat8, nat8, nat, nat) -> (variant { Ok : nat; Err : ThreePoolError });
   add_liquidity : (vec nat, nat) -> (variant { Ok : nat; Err : ThreePoolError });
