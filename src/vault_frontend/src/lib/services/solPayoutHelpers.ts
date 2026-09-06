@@ -155,3 +155,11 @@ export function buildManualSolSettlementSuccessCopy(claimId: SolClaimId, signatu
   const suffix = signature ? ` Signature: ${signature}.` : '';
   return `Liquidation accepted and SOL claim #${claimId} created. SOL settlement submitted.${suffix}`;
 }
+
+/** Total lamports still owed across pending native-SOL payouts (mirrors `sumPendingXrpDrops`). */
+export function sumPendingSolLamports(
+  payouts: ReadonlyArray<{ lamports: bigint | number }> | null | undefined,
+): bigint {
+  if (!payouts?.length) return 0n;
+  return payouts.reduce<bigint>((total, p) => total + BigInt(p.lamports ?? 0), 0n);
+}

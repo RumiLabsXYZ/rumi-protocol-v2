@@ -39,6 +39,8 @@
   // XRP never appears in `gains` (it pays out via XRPL claims), so this is the
   // only source for a truthful XRP figure on the Collateral Gains row.
   let pendingXrpDrops = 0n;
+  // Same idea for native SOL, published by SolPayoutRouting.
+  let pendingSolLamports = 0n;
 
   // Registries
   $: stablecoinRegistry = poolStatus?.stablecoin_registry ?? [];
@@ -250,6 +252,7 @@
               key,
               gainEntry ? gainEntry[1] : 0n,
               pendingXrpDrops,
+              pendingSolLamports,
             )}
             <span class="gain-line" class:gain-dim={display.amount === 0n}>
               <span class="collateral-dot" style="background:{getCollateralColor(col)}"></span>
@@ -260,6 +263,10 @@
                      part of "Claim". Say so rather than letting it read as an
                      ordinary claimable gain sitting in the pool. -->
                 <span class="gain-note">via XRP payout</span>
+              {/if}
+              {#if display.viaSolClaims && display.amount > 0n}
+                <!-- Same reasoning as the XRP note above, for SOL claims. -->
+                <span class="gain-note">via SOL payout</span>
               {/if}
             </span>
           {/each}
@@ -292,6 +299,7 @@
       {collateralRegistry}
       {userPosition}
       {isConnected}
+      on:pendingLamportsChange={(event) => { pendingSolLamports = event.detail; }}
       on:success={(event) => dispatch('success', event.detail)}
     />
 

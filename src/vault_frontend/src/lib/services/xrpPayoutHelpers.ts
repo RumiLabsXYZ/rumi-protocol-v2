@@ -167,24 +167,29 @@ export function buildManualXrpSettlementSuccessCopy(claimId: XrpClaimId, txHash?
  * Amount to show on the Stability Pool "Collateral Gains" line for a collateral.
  *
  * ICRC collateral accrues into the pool's `collateral_gains` map, so the gains
- * value is the whole story. Native XRP never does: an absorb pays depositors
- * through XRPL claims instead, so its `collateral_gains` entry is permanently
- * zero. Rendering that raw zero told a depositor who was owed real XRP that
- * they had received nothing, so for native XRP we show the pending payout
- * total (in drops) instead.
+ * value is the whole story. Neither native rail (XRP, SOL) ever does: an
+ * absorb pays depositors through a chain-specific claim instead, so their
+ * `collateral_gains` entries are permanently zero. Rendering that raw zero
+ * told a depositor who was owed real XRP or SOL that they had received
+ * nothing, so for a native rail we show its pending payout total instead
+ * (drops for XRP, lamports for SOL).
  *
- * Returns the amount plus whether it came from the claim rail, so callers can
- * label it rather than passing it off as an ordinary claimable balance.
+ * Returns the amount plus which claim rail (if any) it came from, so callers
+ * can label it rather than passing it off as an ordinary claimable balance.
  */
 export function collateralGainDisplayAmount(
   collateralPrincipal: PrincipalLike,
   icrcGainAmount: bigint,
   pendingXrpDrops: bigint,
-): { amount: bigint; viaXrpClaims: boolean } {
+  pendingSolLamports: bigint = 0n,
+): { amount: bigint; viaXrpClaims: boolean; viaSolClaims: boolean } {
   if (isNativeXrpPrincipal(collateralPrincipal)) {
-    return { amount: pendingXrpDrops, viaXrpClaims: true };
+    return { amount: pendingXrpDrops, viaXrpClaims: true, viaSolClaims: false };
   }
-  return { amount: icrcGainAmount, viaXrpClaims: false };
+  if (isNativeSolPrincipal(collateralPrincipal)) {
+    return { amount: pendingSolLamports, viaXrpClaims: false, viaSolClaims: true };
+  }
+  return { amount: icrcGainAmount, viaXrpClaims: false, viaSolClaims: false };
 }
 
 /** Total drops still owed across pending native-XRP payouts. */

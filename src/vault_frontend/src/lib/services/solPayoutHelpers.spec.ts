@@ -9,6 +9,7 @@ import {
   isNativeSolPrincipal,
   isPlausibleSolAddress,
   mapOptionalSolClaimId,
+  sumPendingSolLamports,
   validateSolPayoutInput,
 } from './solPayoutHelpers';
 
@@ -138,5 +139,46 @@ describe('SOL address validation is threaded through all three entry points', ()
       'utf8'
     );
     expect(source).toContain("validateSolPayoutInput(solPayoutAddresses[vault.vault_id] ?? '')");
+  });
+});
+
+describe('sumPendingSolLamports', () => {
+  it('totals lamports across payouts', () => {
+    expect(sumPendingSolLamports([{ lamports: 2_500_000_000n }, { lamports: 500_000_000n }])).toBe(
+      3_000_000_000n
+    );
+  });
+
+  it('accepts number lamports without losing precision on the bigint total', () => {
+    expect(sumPendingSolLamports([{ lamports: 5_092 }, { lamports: 3_760 }])).toBe(8_852n);
+  });
+
+  it('is zero for empty, null, and undefined', () => {
+    expect(sumPendingSolLamports([])).toBe(0n);
+    expect(sumPendingSolLamports(null)).toBe(0n);
+    expect(sumPendingSolLamports(undefined)).toBe(0n);
+  });
+});
+
+describe('SolPayoutRouting publishes pending lamports for the Collateral Gains row', () => {
+  // Mirrors XrpPayoutRouting.svelte's `pendingDropsChange` (see
+  // xrpPayoutHelpers.collateralGains.spec.ts): the Earn page's Collateral
+  // Gains row cannot show a truthful SOL figure unless this component
+  // publishes what it already loaded into `pendingPayouts`.
+  it('dispatches pendingLamportsChange from sumPendingSolLamports(pendingPayouts)', () => {
+    const source = readFileSync(
+      resolve(__dirname, '../components/stability-pool/SolPayoutRouting.svelte'),
+      'utf8'
+    );
+    expect(source).toContain("dispatch('pendingLamportsChange', sumPendingSolLamports(pendingPayouts))");
+  });
+
+  it('EarnInfoCard.svelte listens and feeds it into collateralGainDisplayAmount', () => {
+    const source = readFileSync(
+      resolve(__dirname, '../components/stability-pool/EarnInfoCard.svelte'),
+      'utf8'
+    );
+    expect(source).toContain('on:pendingLamportsChange={(event) => { pendingSolLamports = event.detail; }}');
+    expect(source).toContain('pendingSolLamports');
   });
 });

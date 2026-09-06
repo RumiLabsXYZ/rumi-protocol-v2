@@ -12,6 +12,7 @@
   import {
     SOL_NATIVE_PRINCIPAL_TEXT,
     isNativeSolPrincipal,
+    sumPendingSolLamports,
     validateSolPayoutInput,
   } from '../../services/solPayoutHelpers';
 
@@ -19,7 +20,10 @@
   export let userPosition: UserPosition | null = null;
   export let isConnected = false;
 
-  const dispatch = createEventDispatcher<{ success: { action: string } }>();
+  const dispatch = createEventDispatcher<{
+    success: { action: string };
+    pendingLamportsChange: bigint;
+  }>();
 
   let payoutAddress = '';
   let saving = false;
@@ -40,6 +44,12 @@
   $: userHasStablecoinDeposit = (userPosition?.stablecoin_balances ?? []).some(([, amount]) => amount > 0n);
   $: isEnabled = storedAddress !== '';
   $: hasPendingPayouts = pendingPayouts.length > 0;
+  // Publish the outstanding lamports so the Collateral Gains row can show what
+  // a depositor is actually owed in SOL. That row reads `collateral_gains`,
+  // which is structurally always 0 for native SOL (payouts are claims, not
+  // pool balances), so without this it reports "nothing" to someone owed real
+  // SOL (mirrors XrpPayoutRouting.svelte's `pendingDropsChange`).
+  $: dispatch('pendingLamportsChange', sumPendingSolLamports(pendingPayouts));
   $: shouldRenderSolRouting =
     isConnected && userPosition && solCollateral && (userHasStablecoinDeposit || isEnabled || loadingPayouts || hasPendingPayouts);
 
