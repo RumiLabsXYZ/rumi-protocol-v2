@@ -2794,7 +2794,23 @@ impl StabilityPoolState {
             )?;
         }
 
-        self.total_liquidations_executed += 1;
+        // `collateral_gained` is the seized amount in lamports (SOL is
+        // 9-decimal); consumers must format it with the collateral's own
+        // decimals. `collateral_price_e8s` is None: the pool never sees a SOL
+        // price on this path (the backend does the sizing), and the field is
+        // optional precisely so records can omit it. Mirrors the native-XRP
+        // fix: every path that absorbs a vault must go through
+        // `record_liquidation_in_history` so the counter and
+        // `liquidation_history` can never disagree.
+        self.record_liquidation_in_history(PoolLiquidationRecord {
+            vault_id,
+            timestamp,
+            stables_consumed: stables_consumed.clone(),
+            collateral_gained: collateral_received_lamports,
+            collateral_type,
+            depositors_count: payout_claims.len() as u64,
+            collateral_price_e8s: None,
+        });
         self.deposits.retain(|_, pos| !pos.is_empty());
         debug_assert!(
             self.validate_state().is_ok(),
@@ -5130,6 +5146,66 @@ mod tests {
         assert_eq!(
             record.collateral_gained, 1_796_552,
             "collateral_gained is the seized drops"
+        );
+        assert_eq!(record.stables_consumed, consumed);
+        assert_eq!(
+            record.depositors_count, 1,
+            "depositors_count is the number of payout claimants"
+        );
+        assert_eq!(record.timestamp, 4_242);
+    }
+
+    #[test]
+    fn native_sol_absorb_appends_a_liquidation_history_record() {
+        // SOL parity with `native_xrp_absorb_appends_a_liquidation_history_record`:
+        // the SOL absorb path bumped `total_liquidations_executed` but skipped
+        // `liquidation_history` entirely, so a real SOL absorb would inflate
+        // the counter while leaving the Earn page's history list unchanged.
+        // The record must be written by the same call that bumps the counter.
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_000_000);
+        state
+            .opt_in_native_collateral_with_tag(&user_a(), sol_ledger(), valid_sol_address(), None)
+            .unwrap();
+        let mut consumed = BTreeMap::new();
+        consumed.insert(icusd_ledger(), 60_000_000);
+        let payout_claims = vec![SolSpPayoutClaim {
+            claimant: user_a(),
+            claim_id: 9,
+            payout_address: valid_sol_address(),
+            lamports: 1_796_552,
+        }];
+
+        let history_before = state.liquidation_history.len();
+        let counter_before = state.total_liquidations_executed;
+
+        state
+            .process_native_sol_absorb_success_at(
+                195,
+                sol_ledger(),
+                &consumed,
+                1_796_552,
+                &payout_claims,
+                4_242,
+            )
+            .unwrap();
+
+        assert_eq!(
+            state.total_liquidations_executed,
+            counter_before + 1,
+            "counter must still advance"
+        );
+        assert_eq!(
+            state.liquidation_history.len(),
+            history_before + 1,
+            "history must advance in lockstep with the counter"
+        );
+        let record = state.liquidation_history.last().expect("history record");
+        assert_eq!(record.vault_id, 195);
+        assert_eq!(record.collateral_type, sol_ledger());
+        assert_eq!(
+            record.collateral_gained, 1_796_552,
+            "collateral_gained is the seized lamports"
         );
         assert_eq!(record.stables_consumed, consumed);
         assert_eq!(

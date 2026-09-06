@@ -1435,6 +1435,25 @@ pub(crate) fn mark_native_sol_absorb_error_in_state(
     }
 }
 
+/// SOL analogue of `abandon_unburned_native_xrp_absorb`. Abandon a native-SOL
+/// absorb attempt that reserved a backend preflight but has NOT burned any
+/// icUSD: drop the local intent and hand the reservation back. Every call site
+/// is positioned strictly before the burn (or on a burn that returned an
+/// error, which the local clear already treats as unburned), so releasing can
+/// never strand an in-flight burn.
+async fn abandon_unburned_native_sol_absorb(
+    io: &mut dyn NativeSolAbsorbIo,
+    protocol_id: Principal,
+    vault_id: u64,
+    icusd_burn_e8s: u64,
+) {
+    mutate_state(|s| {
+        clear_unburned_native_sol_absorb_intent_in_state(s, vault_id);
+    });
+    io.release_sol_absorb_preflight(protocol_id, vault_id, icusd_burn_e8s)
+        .await;
+}
+
 pub(crate) fn clear_unburned_native_sol_absorb_intent_in_state(
     state: &mut StabilityPoolState,
     vault_id: u64,
@@ -1482,6 +1501,25 @@ pub(crate) fn apply_native_sol_absorb_success_in_state_at(
     )?;
     state.take_pending_native_sol_absorb(intent.vault_id);
 
+    // Emit the same audit event the generic ICRC and native-XRP paths emit.
+    // Without it the only Explorer trace of an absorb is
+    // `LiquidationNotification`, which carries a bare vault count and cannot
+    // distinguish a completed absorb from one that failed. `collateral_gained`
+    // is in lamports (9-decimal), so consumers must format it with the
+    // collateral's own decimals.
+    let stables_consumed_e8s: u64 = intent.stables_consumed.values().sum();
+    state.push_event_at(
+        state.protocol_canister_id,
+        PoolEventType::LiquidationExecuted {
+            vault_id: intent.vault_id,
+            stables_consumed_e8s,
+            collateral_gained: intent.collateral_received_lamports,
+            collateral_type: intent.collateral_type,
+            success: true,
+        },
+        now_ns,
+    );
+
     Ok(LiquidationResult {
         vault_id: intent.vault_id,
         stables_consumed: intent.stables_consumed.clone(),
@@ -1522,6 +1560,16 @@ pub(crate) trait NativeSolAbsorbIo {
         protocol_id: Principal,
         request: SolSpAbsorbRequest,
     ) -> Result<SolSpAbsorbResult, StabilityPoolError>;
+
+    /// Hand an unburned reservation back to the backend. Best-effort: the
+    /// caller is already on a failure path, and the reservation expires on its
+    /// own, so a failed release is logged rather than propagated.
+    async fn release_sol_absorb_preflight(
+        &mut self,
+        protocol_id: Principal,
+        vault_id: u64,
+        icusd_burn_e8s: u64,
+    );
 }
 
 struct CdkNativeSolAbsorbIo;
@@ -1612,6 +1660,36 @@ impl NativeSolAbsorbIo for CdkNativeSolAbsorbIo {
                 target: format!("{}", protocol_id),
                 method: "stability_pool_liquidate_sol_vault".to_string(),
             }),
+        }
+    }
+
+    async fn release_sol_absorb_preflight(
+        &mut self,
+        protocol_id: Principal,
+        vault_id: u64,
+        icusd_burn_e8s: u64,
+    ) {
+        let released: Result<(Result<bool, rumi_protocol_backend::ProtocolError>,), _> = call(
+            protocol_id,
+            "stability_pool_release_sol_absorb_preflight",
+            (vault_id, icusd_burn_e8s),
+        )
+        .await;
+        match released {
+            Ok((Ok(_),)) => {}
+            Ok((Err(error),)) => log!(
+                INFO,
+                "native SOL preflight release rejected for vault {}: {:?}; reservation will expire on its own",
+                vault_id,
+                error
+            ),
+            Err((code, msg)) => log!(
+                INFO,
+                "native SOL preflight release call failed for vault {}: {:?} {}; reservation will expire on its own",
+                vault_id,
+                code,
+                msg
+            ),
         }
     }
 }
@@ -1831,9 +1909,13 @@ pub(crate) async fn execute_native_sol_absorb_with_io(
         }
     };
     if preflight.vault_id != vault_info.vault_id || preflight.icusd_burn_e8s != icusd_to_burn_e8s {
-        mutate_state(|s| {
-            clear_unburned_native_sol_absorb_intent_in_state(s, vault_info.vault_id);
-        });
+        abandon_unburned_native_sol_absorb(
+            io,
+            protocol_id,
+            vault_info.vault_id,
+            icusd_to_burn_e8s,
+        )
+        .await;
         return liquidation_failure(
             vault_info,
             StabilityPoolError::LiquidationFailed {
@@ -1855,9 +1937,13 @@ pub(crate) async fn execute_native_sol_absorb_with_io(
             .map(SolSpPayoutAllocation::from)
             .collect::<Vec<_>>(),
         Ok(_) => {
-            mutate_state(|s| {
-                clear_unburned_native_sol_absorb_intent_in_state(s, vault_info.vault_id);
-            });
+            abandon_unburned_native_sol_absorb(
+                io,
+                protocol_id,
+                vault_info.vault_id,
+                icusd_to_burn_e8s,
+            )
+            .await;
             return liquidation_failure(
                 vault_info,
                 StabilityPoolError::LiquidationFailed {
@@ -1867,9 +1953,13 @@ pub(crate) async fn execute_native_sol_absorb_with_io(
             );
         }
         Err(error) => {
-            mutate_state(|s| {
-                clear_unburned_native_sol_absorb_intent_in_state(s, vault_info.vault_id);
-            });
+            abandon_unburned_native_sol_absorb(
+                io,
+                protocol_id,
+                vault_info.vault_id,
+                icusd_to_burn_e8s,
+            )
+            .await;
             return liquidation_failure(vault_info, error);
         }
     };
@@ -1880,9 +1970,13 @@ pub(crate) async fn execute_native_sol_absorb_with_io(
         match io.fetch_icusd_minting_account(icusd_ledger).await {
             Ok(account) => account,
             Err(error) => {
-                mutate_state(|s| {
-                    clear_unburned_native_sol_absorb_intent_in_state(s, vault_info.vault_id);
-                });
+                abandon_unburned_native_sol_absorb(
+                    io,
+                    protocol_id,
+                    vault_info.vault_id,
+                    icusd_to_burn_e8s,
+                )
+                .await;
                 return liquidation_failure(vault_info, error);
             }
         }
@@ -1934,9 +2028,16 @@ pub(crate) async fn execute_native_sol_absorb_with_io(
                 proof
             }
             Err(error) => {
-                mutate_state(|s| {
-                    clear_unburned_native_sol_absorb_intent_in_state(s, vault_info.vault_id);
-                });
+                // The burn call returned an error, which the local clear
+                // already treats as "no icUSD left the pool"; release the
+                // reservation on the same assumption.
+                abandon_unburned_native_sol_absorb(
+                    io,
+                    protocol_id,
+                    vault_info.vault_id,
+                    icusd_to_burn_e8s,
+                )
+                .await;
                 return liquidation_failure(vault_info, error);
             }
         }
@@ -3602,6 +3703,20 @@ mod tests {
         "rUn84CUYbNjRoTQ6mSW7BVJPSVJNLb1QLo".to_string()
     }
 
+    fn sol_ledger() -> Principal {
+        rumi_protocol_backend::state::sol_collateral_principal()
+    }
+
+    /// A real Ed25519 public key, base58-encoded, so it passes the backend's
+    /// on-curve validation the same way `state.rs`'s own `valid_sol_address`
+    /// helper does.
+    fn valid_sol_address() -> String {
+        use ed25519_dalek::SigningKey;
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let pk = sk.verifying_key();
+        bs58::encode(pk.to_bytes()).into_string()
+    }
+
     fn user_a() -> Principal {
         Principal::from_slice(&[1])
     }
@@ -3636,6 +3751,12 @@ mod tests {
             ledger_id: xrp_ledger(),
             symbol: "XRP".to_string(),
             decimals: 6,
+            status: CollateralStatus::Active,
+        });
+        state.register_collateral(CollateralInfo {
+            ledger_id: sol_ledger(),
+            symbol: "SOL".to_string(),
+            decimals: 9,
             status: CollateralStatus::Active,
         });
         state
@@ -4381,6 +4502,199 @@ mod tests {
 
         let result = futures::executor::block_on(execute_native_xrp_absorb_with_io(
             &xrp_vault(146, 501_00000000),
+            &mut io,
+        ));
+
+        assert!(!result.success);
+        // Same contract as the empty-allocation abort: reserved, gave up
+        // before burning, so the reservation goes back rather than blocking
+        // the vault for the full TTL.
+        assert_eq!(
+            io.events,
+            vec!["preflight:146:50100000000", "release:146:50100000000"]
+        );
+        assert_eq!(
+            read_state(|s| s.total_stablecoin_balances.get(&icusd_ledger()).copied()),
+            Some(501_00000000),
+            "over-500 fanout rejection must not burn or mutate pool balances",
+        );
+    }
+
+    /// SOL analogue of `FakeNativeXrpAbsorbIo`.
+    #[derive(Default)]
+    struct FakeNativeSolAbsorbIo {
+        preflight: Option<SolSpAbsorbPreflight>,
+        submit_result: Option<SolSpAbsorbResult>,
+        minting_account: Option<Account>,
+        burn_proof: Option<rumi_protocol_backend::icrc3_proof::SpWritedownProof>,
+        events: Vec<String>,
+        submitted_requests: Vec<SolSpAbsorbRequest>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl NativeSolAbsorbIo for FakeNativeSolAbsorbIo {
+        fn now_ns(&self) -> u64 {
+            123_456_789
+        }
+
+        async fn fetch_icusd_minting_account(
+            &mut self,
+            _icusd_ledger: Principal,
+        ) -> Result<Account, StabilityPoolError> {
+            self.events.push("minting_account".to_string());
+            Ok(self.minting_account.clone().unwrap_or_else(minting_account))
+        }
+
+        async fn preflight_sol_absorb(
+            &mut self,
+            _protocol_id: Principal,
+            vault_id: u64,
+            expected_icusd_burn_e8s: u64,
+        ) -> Result<SolSpAbsorbPreflight, StabilityPoolError> {
+            self.events
+                .push(format!("preflight:{vault_id}:{expected_icusd_burn_e8s}"));
+            self.preflight
+                .clone()
+                .ok_or_else(|| StabilityPoolError::LiquidationFailed {
+                    vault_id,
+                    reason: "test preflight missing".to_string(),
+                })
+        }
+
+        async fn burn_icusd(
+            &mut self,
+            _icusd_ledger: Principal,
+            _minting_account: Account,
+            amount_e8s: u64,
+            vault_id: u64,
+            created_at_time: u64,
+        ) -> Result<rumi_protocol_backend::icrc3_proof::SpWritedownProof, StabilityPoolError>
+        {
+            self.events
+                .push(format!("burn:{vault_id}:{amount_e8s}:{created_at_time}"));
+            Ok(self
+                .burn_proof
+                .clone()
+                .unwrap_or_else(|| build_icusd_burn_proof(44, vault_id)))
+        }
+
+        async fn release_sol_absorb_preflight(
+            &mut self,
+            _protocol_id: Principal,
+            vault_id: u64,
+            icusd_burn_e8s: u64,
+        ) {
+            self.events
+                .push(format!("release:{vault_id}:{icusd_burn_e8s}"));
+        }
+
+        async fn submit_sol_absorb(
+            &mut self,
+            _protocol_id: Principal,
+            request: SolSpAbsorbRequest,
+        ) -> Result<SolSpAbsorbResult, StabilityPoolError> {
+            self.events.push(format!(
+                "submit:{}:{}:{}",
+                request.vault_id,
+                request.icusd_burned_e8s,
+                request.allocations.len()
+            ));
+            self.submitted_requests.push(request);
+            self.submit_result
+                .clone()
+                .ok_or_else(|| StabilityPoolError::LiquidationFailed {
+                    vault_id: 0,
+                    reason: "test submit result missing".to_string(),
+                })
+        }
+    }
+
+    fn sol_vault(vault_id: u64, debt_amount: u64) -> LiquidatableVaultInfo {
+        LiquidatableVaultInfo {
+            vault_id,
+            collateral_type: sol_ledger(),
+            debt_amount,
+            collateral_amount: 5_000_000_000,
+            recommended_liquidation_amount: 0,
+            collateral_price_e8s: 50_00000000,
+        }
+    }
+
+    fn sol_preflight(
+        vault_id: u64,
+        icusd_burn_e8s: u64,
+        collateral_received_lamports: u64,
+    ) -> SolSpAbsorbPreflight {
+        SolSpAbsorbPreflight {
+            vault_id,
+            icusd_burn_e8s,
+            collateral_received_lamports,
+            collateral_price_e8s: 50_00000000,
+            expires_at_ns: 999,
+        }
+    }
+
+    #[test]
+    fn sol_absorb_aborts_before_burn_when_preflight_yields_no_allocations() {
+        // SOL parity with `xrp_absorb_aborts_before_burn_when_preflight_yields_no_allocations`:
+        // giving up after reserving but before burning must hand the backend
+        // reservation back, or the vault stays blocked for every liquidation
+        // path (including manual) until the 15-minute TTL expires.
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 10_00000000);
+        state
+            .opt_in_native_collateral_with_tag(&user_a(), sol_ledger(), valid_sol_address(), None)
+            .unwrap();
+        replace_state(state);
+        let mut io = FakeNativeSolAbsorbIo {
+            preflight: Some(sol_preflight(145, 10_00000000, 0)),
+            ..Default::default()
+        };
+
+        let result = futures::executor::block_on(execute_native_sol_absorb_with_io(
+            &sol_vault(145, 10_00000000),
+            &mut io,
+        ));
+
+        assert!(!result.success);
+        assert_eq!(
+            io.events,
+            vec!["preflight:145:1000000000", "release:145:1000000000"]
+        );
+        assert_eq!(
+            read_state(|s| s
+                .deposits
+                .get(&user_a())
+                .and_then(|pos| pos.stablecoin_balances.get(&icusd_ledger()).copied())),
+            Some(10_00000000),
+            "empty allocation rejection must not burn or mutate pool balances",
+        );
+    }
+
+    #[test]
+    fn sol_absorb_aborts_before_burn_when_allocation_fanout_exceeds_500() {
+        // SOL parity with `xrp_absorb_aborts_before_burn_when_allocation_fanout_exceeds_500`.
+        let mut state = test_state();
+        for i in 0..501u16 {
+            let principal = Principal::from_slice(&i.to_be_bytes());
+            add_deposit_direct(&mut state, principal, icusd_ledger(), 1_00000000);
+            state
+                .opt_in_native_collateral_with_tag(
+                    &principal,
+                    sol_ledger(),
+                    valid_sol_address(),
+                    None,
+                )
+                .unwrap();
+        }
+        replace_state(state);
+        let mut io = FakeNativeSolAbsorbIo {
+            preflight: Some(sol_preflight(146, 501_00000000, 501)),
+            ..Default::default()
+        };
+
+        let result = futures::executor::block_on(execute_native_sol_absorb_with_io(
+            &sol_vault(146, 501_00000000),
             &mut io,
         ));
 
