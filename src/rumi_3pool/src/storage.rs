@@ -12,7 +12,7 @@
 //     first time on the new wasm (one-shot drain from the legacy blob) or
 //     subsequent times (load `SlimState` from its cell).
 //
-// Memory ID layout (20 IDs used; 255 available):
+// Memory ID layout (25 IDs used; 255 available):
 //
 //   0       SlimState cell              — bounded residual heap
 //   1       lp_balances                 — BTreeMap<Principal, u128>
@@ -29,6 +29,9 @@
 //                                         to blocks log; entry i == hash of block i)
 //   20      pending_claims              — BTreeMap<u64, ThreePoolPendingClaim>
 //   21      next_claim_id cell          — monotonic u64 claim id counter
+//   22      swap_receipts_v1            — never-evicted caller-scoped attempts
+//   23      swap_receipt_fence          — durable reserve mutation fence
+//   24      swap_receipt_clients        — bounded admin-managed capability set
 //
 // Migration semantics: the first `post_upgrade` after the Phase A deploy runs
 // a one-shot drain (see `storage::migration`). All subsequent upgrades just
@@ -78,6 +81,9 @@ const MEM_BLOCK_HASHES_INDEX: MemoryId = MemoryId::new(18);
 const MEM_BLOCK_HASHES_DATA: MemoryId = MemoryId::new(19);
 const MEM_PENDING_CLAIMS: MemoryId = MemoryId::new(20);
 const MEM_NEXT_CLAIM_ID: MemoryId = MemoryId::new(21);
+const MEM_SWAP_RECEIPTS_V1: MemoryId = MemoryId::new(22);
+const MEM_SWAP_RECEIPT_FENCE: MemoryId = MemoryId::new(23);
+const MEM_SWAP_RECEIPT_CLIENTS: MemoryId = MemoryId::new(24);
 
 // ─── SlimState ───────────────────────────────────────────────────────────────
 //
@@ -304,6 +310,7 @@ impl_storable_candid_unbounded!(VirtualPriceSnapshot);
 impl_storable_candid_unbounded!(Icrc3Block);
 impl_storable_candid_unbounded!(LpAllowance);
 impl_storable_candid_unbounded!(ThreePoolPendingClaim);
+impl_storable_candid_unbounded!(crate::receipts::SwapReceiptV1);
 
 // ─── MemoryManager + stable structures (thread-local) ────────────────────────
 //
@@ -315,6 +322,14 @@ impl_storable_candid_unbounded!(ThreePoolPendingClaim);
 thread_local! {
     static MM: RefCell<MemoryManager<DefaultMemoryImpl>> =
         RefCell::new(MemoryManager::init(DefaultMemoryImpl::default()));
+
+    pub(crate) static SWAP_RECEIPT_CLIENTS: RefCell<StableBTreeMap<StorablePrincipal, Unit, Memory>> =
+        RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_SWAP_RECEIPT_CLIENTS))));
+    pub(crate) static SWAP_RECEIPTS: RefCell<StableBTreeMap<Vec<u8>, crate::receipts::SwapReceiptV1, Memory>> =
+        RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_SWAP_RECEIPTS_V1))));
+    pub(crate) static SWAP_RECEIPT_FENCE: RefCell<StableCell<u8, Memory>> = RefCell::new(
+        StableCell::init(MM.with(|m| m.borrow().get(MEM_SWAP_RECEIPT_FENCE)), 0)
+            .expect("init swap receipt fence"));
 
     pub(crate) static SLIM_STATE: RefCell<StableCell<SlimState, Memory>> = RefCell::new(
         StableCell::init(MM.with(|m| m.borrow().get(MEM_SLIM_STATE)), SlimState::default())

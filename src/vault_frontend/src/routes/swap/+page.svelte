@@ -7,6 +7,7 @@
   import AmmLiquidityPanel from '../../lib/components/swap/AmmLiquidityPanel.svelte';
   import LiquidityInterface from '../../lib/components/swap/LiquidityInterface.svelte';
   import { getThreePoolApy } from '../../lib/services/threePoolApyService';
+  import { AMM1_LIQUIDITY_PAUSED } from '../../lib/config';
 
   let mode: 'swap' | 'liquidity' = 'swap';
   let liquidityView: 'list' | 'threepool' | 'amm' = 'list';
@@ -77,7 +78,7 @@
           <LiquidityInterface on:success={handleSuccess} />
         </div>
       {:else if liquidityView === 'amm'}
-        <AmmLiquidityPanel depositsPaused on:success={handleSuccess} on:back={handleBack} />
+        <AmmLiquidityPanel depositsPaused={AMM1_LIQUIDITY_PAUSED} on:success={handleSuccess} on:back={handleBack} />
       {/if}
     </div>
   </div>

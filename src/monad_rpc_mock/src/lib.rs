@@ -27,6 +27,10 @@
 //! Supported JSON-RPC methods (and the response shape each wrapper fn parses):
 //!   - eth_blockNumber              -> {"result":"0x<latest>"}
 //!   - eth_getBlockByNumber         -> {"result":{"number":"0x<finalized>"}}
+//!   - eth_getBlockTransactionCountByNumber -> {"result":"0x0"} if
+//!                                     n <= finalized_block, else {"result":null}
+//!                                     (the block-existence probe, see
+//!                                     `eth_get_block_number_at` in the backend)
 //!   - eth_getBalance               -> {"result":"0x<balance_wei>"}
 //!   - eth_getTransactionCount      -> {"result":"0x<nonce>"}
 //!   - eth_gasPrice                 -> {"result":"0x<gas_price_wei>"}  (fetch_fees)
@@ -454,6 +458,30 @@ fn request(_service: RpcService, json_payload: String, _max_response_bytes: u64)
                     id,
                     hex_u64(script.finalized_block)
                 )
+            }
+            "eth_getBlockTransactionCountByNumber" => {
+                // params = ["0x<n>"]. This is the consensus-safe block-existence
+                // probe (`eth_get_block_number_at` in the backend): a block
+                // `n <= finalized_block` exists (return its tx count, defaulting
+                // to "0x0" for an empty block, mirroring the live Conflux
+                // evidence); a block beyond that has not been produced yet
+                // (return `result: null`, also confirmed live). Same
+                // `finalized_block` threshold the typed `eth_getBlockByNumber`
+                // mock below used, so scripted tests behave identically after
+                // the backend switched from the typed call to this raw one.
+                let n = params
+                    .get(0)
+                    .and_then(|v| v.as_str())
+                    .and_then(parse_hex_u64)
+                    .unwrap_or(u64::MAX);
+                if n <= script.finalized_block {
+                    // "0x0" mirrors the live Conflux evidence (an empty block
+                    // is a valid existence answer); no test currently needs a
+                    // nonzero scripted count.
+                    format!(r#"{{"jsonrpc":"2.0","id":{},"result":"0x0"}}"#, id)
+                } else {
+                    format!(r#"{{"jsonrpc":"2.0","id":{},"result":null}}"#, id)
+                }
             }
             "eth_getBalance" => {
                 // params = [addr, "latest"].

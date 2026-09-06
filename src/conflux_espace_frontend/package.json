@@ -3,12 +3,25 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Standalone MetaMask + viem UI for the Rumi M2 EVM-native self-serve CDP rail on Conflux eSpace testnet (chain 71). Testnet/staging-only.",
+  "description": "Standalone injected-wallet UI for the Rumi EVM-native CDP rail with isolated testnet, production-canary, and production-public builds.",
   "scripts": {
     "dev": "vite",
+    "dev:production-canary": "VITE_DEPLOYMENT_MODE=production-canary vite",
+    "dev:production-public": "VITE_DEPLOYMENT_MODE=production-public VITE_PUBLIC_ORIGIN_CONTEXT=local-verification VITE_PUBLIC_CANONICAL_ORIGIN=http://127.0.0.1:5174 vite --host 127.0.0.1 --port 5174 --strictPort",
     "build": "vite build",
+    "build:testnet": "VITE_DEPLOYMENT_MODE=testnet vite build",
+    "build:production-canary": "VITE_DEPLOYMENT_MODE=production-canary vite build",
+    "build:production-public": "node scripts/verify-production-public-build.mjs local",
+    "verify:production-public:deploy-build": "node scripts/verify-production-public-build.mjs deployment",
+    "build:production-public:deploy": "node scripts/build-provisioned-production-public.mjs",
+    "check:production-public-bundle": "node scripts/check-provisioned-production-public-bundle.mjs",
+    "seal:production-public-release": "node scripts/seal-production-public-release.mjs",
+    "install:reviewed-production-public": "node scripts/install-reviewed-production-public.mjs",
+    "verify:production-public:recipe": "node scripts/test-production-public-recipe.mjs && node scripts/verify-production-public-recipe.mjs",
     "preview": "vite preview",
     "test": "vitest run",
+    "test:production-canary": "VITE_DEPLOYMENT_MODE=production-canary vitest run",
+    "test:production-public": "VITE_DEPLOYMENT_MODE=production-public VITE_PUBLIC_ORIGIN_CONTEXT=local-verification VITE_PUBLIC_CANONICAL_ORIGIN=http://127.0.0.1:5174 vitest run",
     "check": "svelte-check --tsconfig ./tsconfig.json"
   },
   "devDependencies": {
@@ -24,6 +37,6 @@
     "@dfinity/agent": "^2.3.0",
     "@dfinity/candid": "^2.3.0",
     "@dfinity/principal": "^2.3.0",
-    "viem": "^2.22.0"
+    "viem": "^2.56.0"
   }
 }

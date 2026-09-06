@@ -32,6 +32,10 @@
 //! build it runs a GATED subset (which still proves the new config fields decode +
 //! the reserve/settlement address endpoints signal ECDSA-unavailable) and returns
 //! early. The swap is NEVER faked.
+//!
+//! The non-skippable SP fallback release proof sets
+//! `RUMI_CONFLUX_SP_RELEASE_GATE=1` and filters to
+//! `conflux_liquidation_bot_failure_sp_absorb_claims_cfx`.
 
 use candid::{decode_one, encode_args, encode_one, CandidType, Decode, Deserialize, Encode, Nat, Principal};
 use pocket_ic::{PocketIc, PocketIcBuilder, WasmResult};
@@ -440,6 +444,11 @@ fn read_workspace_wasm(name: &str) -> Vec<u8> {
             return bytes;
         }
     }
+    if sp_release_gate_enabled() {
+        panic!(
+            "[sp-release-gate] missing required Wasm artifact {name}; build the backend, mock RPC, and Stability Pool Wasms before running the gate"
+        );
+    }
     panic!("missing wasm artifact {name} in worktree target/, worktree src/target/, or main checkout target/");
 }
 
@@ -448,6 +457,10 @@ fn read_workspace_wasm(name: &str) -> Vec<u8> {
 const CONFLUX_CHAIN_ID: u32 = 71;
 const E18: u128 = 1_000_000_000_000_000_000;
 const E8: u128 = 100_000_000;
+/// Set to `1` for the non-skippable Stability Pool release proof. In that mode,
+/// missing Wasm artifacts or unavailable PocketIC threshold ECDSA are hard
+/// failures instead of an accepted developer-machine gated subset.
+const SP_RELEASE_GATE_ENV: &str = "RUMI_CONFLUX_SP_RELEASE_GATE";
 /// keccak256("Mint(uint256,address,uint256)"), must match evm_rpc.rs.
 const MINT_EVENT_TOPIC0: &str =
     "0x4e3883c75cc9c752bb1db2e406a822e4a75067ae77ad9a0a4d179f2709b9e1f6";
@@ -476,6 +489,17 @@ const DEX_PAIR: &str = "0x3333333333333333333333333333333333333333";
 const WCFX: &str = "0x14b2d3bc65e74dae1030eafd8ac30c533c976a9b";
 /// USDC (the settle stable token + path[1]); 18-dec on eSpace.
 const USDC: &str = "0x6963efed0ab40f6c3d7bda44a05dcf1437c44372";
+
+fn sp_release_gate_enabled() -> bool {
+    match std::env::var(SP_RELEASE_GATE_ENV) {
+        Err(std::env::VarError::NotPresent) => false,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("{SP_RELEASE_GATE_ENV} must be valid UTF-8 and exactly `1`");
+        }
+        Ok(value) if value == "1" => true,
+        Ok(value) => panic!("{SP_RELEASE_GATE_ENV} must be exactly `1`, got {value:?}"),
+    }
+}
 
 // ─── PocketIC call helpers ───────────────────────────────────────────────────
 
@@ -1057,18 +1081,19 @@ fn conflux_liquidation_swap_executes_and_credits_reserve() {
     // 3d. The hash the swap broadcast returns (so the confirm can match it).
     update_any(&pic, mock, "set_next_send_hash", Encode!(&"0xcfxswap1".to_string()).unwrap());
 
-    // ── Step 4: enable the liquidation config + drop the price to $0.08 ──────
+    // ── Step 4: drop the price to $0.08, THEN enable the liquidation config ──
+    // Security review follow-up (F2): the order below is load-bearing, not
+    // cosmetic. Once a chain_liquidation_configs row is present for a
+    // registered chain, that (chain, native symbol) pair is XRC-managed and
+    // the automatic XRC price timer is its SOLE writer: set_manual_collateral_price
+    // then rejects EVERY caller, the narrowly-scoped price pusher and the
+    // developer principal this suite uses alike. There is no developer
+    // exemption. So the price is dropped FIRST, while the chain is not yet
+    // XRC-managed, and the liquidation config row is staged after. Moving a
+    // price AFTER staging the row requires the operator recovery loop instead:
+    // disable_chain (which unmanages the pair and stops the timer for it),
+    // rebaseline, then enable_chain.
     script_factory_pair_sanity(&pic, mock, DEX_PAIR);
-    decode_result(
-        update_dev(
-            &pic,
-            backend,
-            "set_chain_liquidation_config",
-            Encode!(&ChainId(CONFLUX_CHAIN_ID), &enabled_liq_config()).unwrap(),
-        ),
-        "set_chain_liquidation_config",
-    )
-    .expect("set_chain_liquidation_config Ok");
 
     // $0.08 / CFX => 1400 * 0.08 = $112 vs 100 debt => CR ~112% < 133%.
     decode_result(
@@ -1081,6 +1106,17 @@ fn conflux_liquidation_swap_executes_and_credits_reserve() {
         "set_manual_collateral_price (drop)",
     )
     .expect("set_manual_collateral_price (drop)");
+
+    decode_result(
+        update_dev(
+            &pic,
+            backend,
+            "set_chain_liquidation_config",
+            Encode!(&ChainId(CONFLUX_CHAIN_ID), &enabled_liq_config()).unwrap(),
+        ),
+        "set_chain_liquidation_config",
+    )
+    .expect("set_chain_liquidation_config Ok");
 
     // ── Step 5: observer tick marks the vault (Bot tier; collateral reserved) +
     // the settlement worker SUBMITS the swap (DEX reads + JIT min-out + oracle
@@ -1182,6 +1218,12 @@ fn conflux_liquidation_swap_executes_and_credits_reserve() {
 
 #[test]
 fn conflux_liquidation_bot_failure_sp_absorb_claims_cfx() {
+    let release_gate = sp_release_gate_enabled();
+    if release_gate {
+        eprintln!(
+            "[sp-release-gate] REQUIRED mode: missing artifacts or threshold ECDSA will fail this test"
+        );
+    }
     let (pic, backend, mock, sp, icusd_ledger, user) = boot_with_sp();
 
     decode_result(
@@ -1283,6 +1325,11 @@ fn conflux_liquidation_bot_failure_sp_absorb_claims_cfx() {
     let settlement_addr = match settlement_addr {
         Some(addr) => addr,
         None => {
+            if release_gate {
+                panic!(
+                    "[sp-release-gate] threshold ECDSA unavailable; the complete Stability Pool fallback lifecycle was not executed"
+                );
+            }
             let sentinel = register_sp_cfx(&pic, sp);
             assert_ne!(sentinel, Principal::anonymous(), "gated: CFX sentinel registers");
             register_sp_icusd(&pic, sp, icusd_ledger);
@@ -1351,6 +1398,22 @@ fn conflux_liquidation_bot_failure_sp_absorb_claims_cfx() {
     assert_supply(&pic, backend, 100 * E8, "after mint");
 
     script_factory_pair_sanity(&pic, mock, DEX_PAIR);
+    // Security review follow-up (F2): drop the price BEFORE staging the
+    // liquidation config row. The order is load-bearing: staging the row makes
+    // the pair XRC-managed, after which set_manual_collateral_price rejects
+    // every caller including the developer principal this suite uses. See the
+    // fuller comment earlier in this file, at the first
+    // set_chain_liquidation_config call.
+    decode_result(
+        update_dev(
+            &pic,
+            backend,
+            "set_manual_collateral_price",
+            Encode!(&ChainId(CONFLUX_CHAIN_ID), &"CFX".to_string(), &8_000_000u64).unwrap(),
+        ),
+        "set_manual_collateral_price (drop)",
+    )
+    .expect("set_manual_collateral_price (drop)");
     decode_result(
         update_dev(
             &pic,
@@ -1380,16 +1443,6 @@ fn conflux_liquidation_bot_failure_sp_absorb_claims_cfx() {
         "set_eth_call_response",
         Encode!(&GET_RESERVES_SELECTOR.to_string(), &zero_reserves_blob).unwrap(),
     );
-    decode_result(
-        update_dev(
-            &pic,
-            backend,
-            "set_manual_collateral_price",
-            Encode!(&ChainId(CONFLUX_CHAIN_ID), &"CFX".to_string(), &8_000_000u64).unwrap(),
-        ),
-        "set_manual_collateral_price (drop)",
-    )
-    .expect("set_manual_collateral_price (drop)");
 
     advance_and_tick(&pic, 3);
     let v = get_vault(&pic, backend, vault_id).expect("vault after failed bot swap");
@@ -1567,6 +1620,11 @@ fn conflux_liquidation_bot_failure_sp_absorb_claims_cfx() {
     );
 
     eprintln!("[sp-fallback] FULL path PASSED: bot swap failed closed into sp_attempted, SP burned 100e8 icUSD, backend moved debt -> pending_chain_burn (foreign supply unchanged), credited 1400 CFX to the opted-in depositor, claim_cfx enqueued and confirmed the ChainCollateralPayout.");
+    if release_gate {
+        eprintln!(
+            "[sp-release-gate] PASS: bot failure, zero coverage, no implicit consent, explicit opt-in, mock-ledger burn, backend absorb, CFX claim payout, and idempotent replay all completed"
+        );
+    }
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────

@@ -445,3 +445,41 @@ fn transfer_log_decodes_to_and_amount() {
     bad[0] = format!("0x{}", "0".repeat(64));
     assert!(TransferLog::from_raw(&bad, &data).is_err());
 }
+
+// ─── De-scaffold pass (2026-08-20): get_evm_rpc_principal backing helpers ────
+//
+// The candid query `get_evm_rpc_principal` (main.rs) reports the effective
+// EVM-RPC canister principal plus whether it's an override, so an operator
+// can confirm (chains/mod.rs go-live checklist item 5) that no stale mock
+// override is left pointing production chain calls at a test canister.
+#[cfg(test)]
+mod evm_rpc_principal_resolution {
+    use crate::chains::evm::evm_rpc::{
+        default_evm_rpc_principal, evm_rpc_principal, DEFAULT_EVM_RPC_PRINCIPAL_TEXT,
+    };
+    use crate::state::{mutate_state, replace_state, State};
+    use candid::Principal;
+
+    #[test]
+    fn default_matches_the_known_production_canister_text() {
+        assert_eq!(
+            default_evm_rpc_principal(),
+            Principal::from_text(DEFAULT_EVM_RPC_PRINCIPAL_TEXT).unwrap()
+        );
+        assert_eq!(DEFAULT_EVM_RPC_PRINCIPAL_TEXT, "7hfb6-caaaa-aaaar-qadga-cai");
+    }
+
+    #[test]
+    fn falls_back_to_default_when_no_override_set() {
+        replace_state(State::default());
+        assert_eq!(evm_rpc_principal(), default_evm_rpc_principal());
+    }
+
+    #[test]
+    fn honors_the_developer_gated_override_when_set() {
+        replace_state(State::default());
+        let mock = Principal::from_slice(&[42; 29]);
+        mutate_state(|s| s.evm_rpc_principal_override = Some(mock));
+        assert_eq!(evm_rpc_principal(), mock);
+    }
+}

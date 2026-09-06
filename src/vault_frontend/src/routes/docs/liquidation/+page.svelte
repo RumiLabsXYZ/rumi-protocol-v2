@@ -76,6 +76,7 @@
     <p>Liquidators can also repay only a portion of a vault's debt. The maximum amount is capped at the amount needed to restore the vault's collateral ratio to the <a href="/docs/parameters" class="doc-link">Recovery Target CR</a> for that collateral type. The formula is the same as in Recovery mode:</p>
     <p class="doc-formula">max repay = (target CR &times; debt &minus; collateral value) &divide; (target CR &minus; liquidation penalty)</p>
     <p>If the requested amount is less than this cap, the liquidator pays their chosen amount. The liquidator receives collateral proportional to the debt they repay, plus the <a href="/docs/parameters" class="doc-link">liquidation penalty</a> for that collateral type. Partial liquidations leave the vault open with reduced debt and reduced collateral.</p>
+    <p class="doc-note"><strong>Native XRP is an exception.</strong> When the Stability Pool absorbs an XRP vault it always repays the <em>full</em> debt, not a partial amount, because the seized XRP is paid out as XRP Ledger claims computed against the whole position. A liquidatable XRP vault therefore gives up debt &times; (1 + penalty) worth of XRP in one step, which can be most of its collateral. External liquidators calling partial liquidation directly are unaffected and may still repay a portion.</p>
   </section>
 
   <section class="doc-section">

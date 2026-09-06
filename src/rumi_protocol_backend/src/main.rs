@@ -3,6 +3,14 @@ use candid::{CandidType, Deserialize};
 use ic_canister_log::log;
 use ic_canisters_http_types::{HttpRequest, HttpResponse, HttpResponseBuilder};
 use ic_cdk_macros::{init, post_upgrade, pre_upgrade, query, update};
+use rumi_protocol_backend::chains::evm::public_readiness::{
+    bounded_distinct_rpc_endpoint_count, collateral_config_matches_expected,
+    conflux_mainnet_public_risk_blockers, debt_config_matches_expected, effective_debt_config,
+    enforce_conflux_mainnet_public_risk_gate, expected_evm_rpc_principal,
+    expected_liquidation_config_digest, hot_wallet_balance_is_fresh, liquidation_config_digest,
+    liquidation_config_matches_expected, CONFLUX_MAINNET_EXPECTED_ECDSA_KEY_NAME,
+    CONFLUX_MAINNET_PUBLIC_ICUSD_CONTRACT, HOT_WALLET_BALANCE_MAX_AGE_NS,
+};
 use rumi_protocol_backend::event;
 use rumi_protocol_backend::logs::DEBUG;
 use rumi_protocol_backend::management;
@@ -226,6 +234,10 @@ thread_local! {
         const { std::cell::Cell::new(None) };
     // Task 12: foreign-chain interest harvest. Same transient lifecycle.
     static CHAIN_INTEREST_TIMER_ID: std::cell::Cell<Option<ic_cdk_timers::TimerId>> =
+        const { std::cell::Cell::new(None) };
+    // De-scaffold pass (2026-08-20): XRC-sourced chains price feed. Same
+    // transient (not-persisted) lifecycle as every other timer here.
+    static CHAINS_PRICE_TIMER_ID: std::cell::Cell<Option<ic_cdk_timers::TimerId>> =
         const { std::cell::Cell::new(None) };
 }
 
@@ -475,6 +487,27 @@ fn register_observer_timer() {
     });
 }
 
+/// De-scaffold pass (2026-08-20): register the XRC-sourced chains price
+/// timer. 300s cadence, matching the rest of the protocol's XRC polling
+/// (`xrc::FETCHING_ICP_RATE_INTERVAL`, `xrc::DEFAULT_COLLATERAL_PRICE_FETCH_SECS`).
+/// No settable interval: unlike the ICP/collateral price timers this one has
+/// no operator-facing tuning knob (yet) since it's gated to zero cost until a
+/// chain is actually configured; a fixed cadence keeps this PR from touching
+/// `State`'s persisted shape at all. Clears + re-registers in place, same as
+/// every other timer here, so a repeated `setup_timers()` call (upgrade)
+/// never leaks a duplicate interval timer.
+fn register_chains_price_timer() {
+    CHAINS_PRICE_TIMER_ID.with(|cell| {
+        if let Some(old) = cell.get() {
+            ic_cdk_timers::clear_timer(old);
+        }
+        let new_id = ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(300), || {
+            ic_cdk::spawn(rumi_protocol_backend::xrc::fetch_chains_prices())
+        });
+        cell.set(Some(new_id));
+    });
+}
+
 fn setup_timers() {
     // ── Immediate price fetch (fire on the very next execution round) ───────
     // Prices are ephemeral and not stored as events, so after an upgrade
@@ -562,6 +595,11 @@ fn setup_timers() {
     // `set_chain_interest_tick_interval_secs`. No-op when no EVM chain is
     // registered, so it is safe to register on staging before any chain exists.
     register_chain_interest_timer();
+    // De-scaffold pass (2026-08-20): XRC-sourced chains price feed. The
+    // gate inside `fetch_chains_prices` (chains registered AND carrying a
+    // liquidation config row) makes this a no-op, zero-XRC-call timer on
+    // any canister with no chain configured, so it is safe to register everywhere.
+    register_chains_price_timer();
 }
 
 /// M2 anti-spam backstop: hourly GC of stale `AwaitingDeposit` chain vaults
@@ -1244,6 +1282,39 @@ fn get_supply_audit() -> SupplyAudit {
     })
 }
 
+/// Developer-gated, side-effect-free replicated update method committing to one
+/// chain's live stored RPC endpoint set and effective quorum. The response
+/// intentionally contains no endpoint URL text: configured URLs may embed
+/// provider credentials. Recovery tooling compares this digest/count/quorum to
+/// an independently sealed local provider set before dispatching any chain-admin
+/// mutation. This is deliberately an update export so the response is produced
+/// by replicated execution rather than an uncertified fast query.
+#[candid_method(update)]
+#[update]
+fn get_chain_rpc_endpoint_set_digest(
+    chain_id: rumi_protocol_backend::chains::config::ChainId,
+) -> Result<
+    rumi_protocol_backend::chains::config::ChainRpcEndpointSetDigestV1,
+    rumi_protocol_backend::chains::config::ChainRpcEndpointDigestError,
+> {
+    use rumi_protocol_backend::chains::config::{
+        chain_rpc_endpoint_set_digest, ChainRpcEndpointDigestError,
+    };
+
+    let caller = ic_cdk::caller();
+    read_state(|s| {
+        if s.developer_principal != caller {
+            return Err(ChainRpcEndpointDigestError::Unauthorized);
+        }
+        let config = s
+            .multi_chain
+            .chain_configs
+            .get(&chain_id)
+            .ok_or(ChainRpcEndpointDigestError::ChainNotRegistered(chain_id))?;
+        Ok(chain_rpc_endpoint_set_digest(config))
+    })
+}
+
 // Phase 1a: developer-gated chain-registry admin endpoints.
 
 #[candid_method(update)]
@@ -1307,6 +1378,65 @@ fn disable_chain(
     }
 }
 
+/// Reverse `disable_chain`: flip a `Disabled` chain back to `Registered`.
+///
+/// `disable_chain` is the post-launch emergency stop: it blocks new opens and
+/// borrows, hands the chain's native pair back to manual pricing, AND drops the
+/// chain from the observer/settlement worker fan-outs, so exits enqueued while
+/// it is Disabled are accepted but not broadcast. This is its recovery half,
+/// and it is what makes that stop REVERSIBLE: without it a disabled chain with
+/// any open vault could never be re-enabled (`register_chain` refuses a present
+/// `chain_id`, `delete_chain` refuses a chain with any supply or vault), so a
+/// queued exit would strand permanently. Re-enabling restores the workers and
+/// those queued exits drain.
+///
+/// Developer-gated, like every other chain-admin mutation. Adds no persisted
+/// field and preserves all per-chain state (see `enable_chain_in_state`).
+/// Records the existing durable `Event::ChainConfigUpdated`, since this IS a chain
+/// config change (the `status` field), and reusing the shipped variant avoids
+/// adding an event shape that every historical log reader would have to learn.
+/// The explicit `Disabled -> Registered` transition is written to the INFO log
+/// so an operator reading the log can tell this apart from an ordinary
+/// `set_chain_config` edit.
+///
+/// Re-enabling reopens the gate; it does NOT vouch for the chain's price
+/// freshness. An open after enable still has to pass the price
+/// presence/staleness checks, which is why the documented recovery order is
+/// disable, rebaseline the price manually, verify it, and only then enable.
+#[candid_method(update)]
+#[update]
+fn enable_chain(
+    chain_id: rumi_protocol_backend::chains::config::ChainId,
+) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::ChainAdmin("not developer".into()));
+    }
+    let result = mutate_state(|s| {
+        rumi_protocol_backend::chains::admin::enable_chain_in_state(&mut s.multi_chain, chain_id)
+    });
+    match result {
+        Ok(()) => {
+            let now = ic_cdk::api::time();
+            rumi_protocol_backend::storage::record_event(
+                &rumi_protocol_backend::event::Event::ChainConfigUpdated {
+                    chain_id,
+                    timestamp: now,
+                },
+            );
+            log!(
+                INFO,
+                "[enable_chain] chain_id={:?} status Disabled -> Registered (risk operations and \
+                 XRC price authority restored)",
+                chain_id
+            );
+            Ok(())
+        }
+        Err(e) => Err(ProtocolError::ChainAdmin(format!("{:?}", e))),
+    }
+}
+
 #[candid_method(update)]
 #[update]
 fn set_chain_config(
@@ -1345,7 +1475,17 @@ fn set_chain_config(
 /// dev-gated chain-vault op. Errors if `chain` is not a known EVM chain or has
 /// no collateral config. For Monad (10143) this returns ("MON", 13_000) and for
 /// Conflux (71) ("CFX", 13_300), so the EVM endpoints are chain-agnostic.
-fn evm_vault_params(
+///
+/// Takes the already-borrowed `&State` rather than re-entering `read_state`
+/// itself, so it is safe to call from inside a `mutate_state`/`read_state`
+/// closure (mirrors `settlement_proof_ids_from_state`). A `mutate_state` call
+/// already holds the `STATE` RefCell's mutable borrow for its whole closure;
+/// calling back into `read_state` from within that closure panics with
+/// "already mutably borrowed" (`chain_debt_configs` used to be looked up via a
+/// nested `read_state` here, which is exactly that trap - see
+/// `withdraw_chain_collateral` / `close_chain_vault` below).
+fn evm_vault_params_from_state(
+    state: &State,
     chain: rumi_protocol_backend::chains::config::ChainId,
 ) -> Result<(&'static str, u64, u128, Option<u128>), ProtocolError> {
     let symbol = rumi_protocol_backend::chains::evm::evm_chain_config(chain)
@@ -1357,7 +1497,11 @@ fn evm_vault_params(
         .ok_or_else(|| {
             ProtocolError::ChainAdmin(format!("no collateral config for chain {}", chain.0))
         })?;
-    let debt_cfg = read_state(|s| s.multi_chain.chain_debt_configs.get(&chain).copied())
+    let debt_cfg = state
+        .multi_chain
+        .chain_debt_configs
+        .get(&chain)
+        .copied()
         .unwrap_or_else(|| {
             rumi_protocol_backend::chains::collateral_config::ChainDebtConfigV1::from_collateral_config(cfg)
         });
@@ -1367,6 +1511,15 @@ fn evm_vault_params(
         debt_cfg.min_vault_debt_e8s,
         debt_cfg.debt_ceiling_e8s,
     ))
+}
+
+/// Convenience wrapper for call sites that are NOT already inside a
+/// `mutate_state`/`read_state` closure. Do not call this from within one - use
+/// `evm_vault_params_from_state(s, chain)` with the closure's own `s` instead.
+fn evm_vault_params(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> Result<(&'static str, u64, u128, Option<u128>), ProtocolError> {
+    read_state(|s| evm_vault_params_from_state(s, chain))
 }
 
 /// Phase 1b Task 12: open a foreign-chain EVM (Monad or Conflux) vault, OPEN-THEN-VERIFY.
@@ -1483,7 +1636,11 @@ fn withdraw_chain_collateral(
             ));
         }
         let chain = vault.collateral_chain;
-        let (symbol, min_cr, _, _) = evm_vault_params(chain)?;
+        // Use the already-borrowed `s` here, NOT `evm_vault_params(chain)` - that
+        // convenience wrapper re-enters `read_state`, which panics ("already
+        // mutably borrowed") since we are already inside this `mutate_state`
+        // closure's mutable borrow of `STATE`.
+        let (symbol, min_cr, _, _) = evm_vault_params_from_state(s, chain)?;
         rumi_protocol_backend::chains::vault::withdraw_collateral_in_state(
             &mut s.multi_chain,
             vault_id,
@@ -1530,7 +1687,9 @@ fn close_chain_vault(vault_id: u64, dest_address: String) -> Result<(), Protocol
             ));
         }
         let chain = vault.collateral_chain;
-        let (symbol, min_cr, _, _) = evm_vault_params(chain)?;
+        // Same nested-borrow trap as `withdraw_chain_collateral` above: use the
+        // closure's own `s` instead of the `read_state`-wrapping convenience fn.
+        let (symbol, min_cr, _, _) = evm_vault_params_from_state(s, chain)?;
         rumi_protocol_backend::chains::vault::close_chain_vault_in_state(
             &mut s.multi_chain,
             vault_id,
@@ -1552,6 +1711,7 @@ fn close_chain_vault(vault_id: u64, dest_address: String) -> Result<(), Protocol
 // operator/test use; these are the self-serve variants.
 
 /// Verified, authenticated intent context shared by all four `_evm` methods.
+#[derive(Debug)]
 struct VerifiedIntent {
     chain: rumi_protocol_backend::chains::config::ChainId,
     /// Lowercase `0x` recovered signer; the authoritative EVM owner.
@@ -1632,8 +1792,11 @@ async fn open_chain_vault_evm(
 ) -> Result<u64, ProtocolError> {
     use rumi_protocol_backend::chains::evm::eip712::IntentAction;
     let v = verify_intent_ctx(&intent, &signature, IntentAction::Open)?;
-    // Pre-await atomic: consume nonce, enforce per-owner cap, reserve vault id.
+    let pre_await_now_ns = ic_cdk::api::time();
+    // Pre-await atomic: enforce the authoritative mainnet public gate before
+    // consuming the nonce, then enforce the owner cap and reserve a vault id.
     let vault_id = mutate_state(|s| {
+        enforce_conflux_mainnet_public_risk_gate(s, v.chain, pre_await_now_ns)?;
         s.multi_chain
             .consume_evm_nonce(&v.synthetic, intent.nonce)
             .map_err(|expected| {
@@ -1662,6 +1825,10 @@ async fn open_chain_vault_evm(
     let now = ic_cdk::api::time();
     let owner_evm = v.owner_evm.clone();
     mutate_state(|s| {
+        // IC messages can interleave while the tECDSA derivation is awaited.
+        // Re-run the exact same authoritative predicate in the insertion
+        // message so a disable/breaker/config change cannot race the pre-check.
+        enforce_conflux_mainnet_public_risk_gate(s, v.chain, now)?;
         // Re-check the per-owner cap on the AUTHORITATIVE map before inserting
         // (M2 review finding C). The pre-await check can be raced: several opens
         // for the same owner (distinct nonces) all pass their pre-await count
@@ -1712,6 +1879,10 @@ fn borrow_chain_vault_evm(
     let v = verify_intent_ctx(&intent, &signature, IntentAction::Borrow)?;
     let now = ic_cdk::api::time();
     mutate_state(|s| {
+        // Borrow is synchronous, so gate + vault mutation + nonce bump remain
+        // atomic in this one state borrow. No failure can partially spend the
+        // nonce or create pending debt.
+        enforce_conflux_mainnet_public_risk_gate(s, v.chain, now)?;
         if !evm_owns_vault(s, intent.vault_id, &v) {
             return Err(ProtocolError::EvmAuth("not the vault owner".into()));
         }
@@ -1742,6 +1913,23 @@ fn borrow_chain_vault_evm(
     })
 }
 
+fn enforce_evm_withdraw_public_risk_gate(
+    state: &State,
+    vault_id: u64,
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    now_ns: u64,
+) -> Result<(), ProtocolError> {
+    match state
+        .multi_chain
+        .chain_vaults
+        .get(&vault_id)
+        .map(|vault| vault.debt_e8s)
+    {
+        Some(0) => Ok(()),
+        Some(_) | None => enforce_conflux_mainnet_public_risk_gate(state, chain, now_ns),
+    }
+}
+
 /// EVM-signed `WithdrawCollateral` (synchronous; spend-on-success). The released
 /// collateral goes to `owner_evm` (recipient forced == owner).
 #[candid_method(update)]
@@ -1757,6 +1945,12 @@ fn withdraw_chain_collateral_evm(
         if !evm_owns_vault(s, intent.vault_id, &v) {
             return Err(ProtocolError::EvmAuth("not the vault owner".into()));
         }
+        // A debt-bearing partial withdrawal reduces backing while debt remains,
+        // so it is a public risk increase just like Open/Borrow. Keep this check
+        // inside the same synchronous state mutation and before nonce spend or
+        // queue mutation. Debt-free exits remain available while readiness is
+        // degraded or the chain is Disabled.
+        enforce_evm_withdraw_public_risk_gate(s, intent.vault_id, v.chain, now)?;
         let expected = s.multi_chain.expected_evm_nonce(&v.synthetic);
         if intent.nonce != expected {
             return Err(ProtocolError::EvmAuth(format!(
@@ -1925,6 +2119,23 @@ fn withdraw_solana_collateral(
     }
     let now = ic_cdk::api::time();
     mutate_state(|s| {
+        let vault = s
+            .multi_chain
+            .chain_vaults
+            .get(&vault_id)
+            .ok_or_else(|| ProtocolError::ChainAdmin("unknown vault".into()))?;
+        // Parity with `withdraw_chain_collateral` (M2 review finding E): an
+        // EVM-owned (self-serve) vault may ONLY be driven by its EVM signer via
+        // the signed `_evm` methods; the operator must not be able to move a
+        // user's collateral. A debt-free EVM-owned vault would otherwise slip
+        // past this Solana admin path unrefused, since the CR check below is
+        // skipped for debt-free vaults and the price-symbol mismatch is only an
+        // incidental defense, not an intended gate.
+        if vault.owner_evm.is_some() {
+            return Err(ProtocolError::ChainAdmin(
+                "vault is EVM-owned; use the signed _evm endpoint".into(),
+            ));
+        }
         rumi_protocol_backend::chains::vault::withdraw_collateral_in_state(
             &mut s.multi_chain,
             vault_id,
@@ -1935,8 +2146,8 @@ fn withdraw_solana_collateral(
             config::SOLANA_MIN_CR_E4,
             now,
         )
+        .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
     })
-    .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
 }
 
 /// Close a debt-free Solana chain vault (mirrors `close_chain_vault`).
@@ -1957,6 +2168,22 @@ fn close_solana_vault(vault_id: u64, dest_address: String) -> Result<(), Protoco
     }
     let now = ic_cdk::api::time();
     mutate_state(|s| {
+        let vault = s
+            .multi_chain
+            .chain_vaults
+            .get(&vault_id)
+            .ok_or_else(|| ProtocolError::ChainAdmin("unknown vault".into()))?;
+        // Parity with `close_chain_vault` (M2 review finding E): an EVM-owned
+        // (self-serve) vault may ONLY be driven by its EVM signer via the signed
+        // `_evm` methods. `close` requires `debt_e8s == 0`, so the CR check
+        // inside `close_chain_vault_in_state` is a no-op here too; without this
+        // refusal a debt-free EVM-owned vault's collateral could be moved by the
+        // operator through this Solana admin path.
+        if vault.owner_evm.is_some() {
+            return Err(ProtocolError::ChainAdmin(
+                "vault is EVM-owned; use the signed _evm endpoint".into(),
+            ));
+        }
         rumi_protocol_backend::chains::vault::close_chain_vault_in_state(
             &mut s.multi_chain,
             vault_id,
@@ -1966,8 +2193,8 @@ fn close_solana_vault(vault_id: u64, dest_address: String) -> Result<(), Protoco
             config::SOLANA_MIN_CR_E4,
             now,
         )
+        .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
     })
-    .map_err(|e| ProtocolError::ChainAdmin(format!("{e:?}")))
 }
 
 // Phase 1b Task 14: query + admin surface for the foreign-chain working set.
@@ -2011,10 +2238,86 @@ fn get_chain_vault(
     read_state(|s| s.multi_chain.chain_vaults.get(&vault_id).cloned())
 }
 
+const MAX_CHAIN_VAULT_PAGE_SCAN: u16 = 500;
+
+#[derive(candid::CandidType, serde::Deserialize, Clone, Debug)]
+pub struct ChainVaultPage {
+    pub vaults: Vec<rumi_protocol_backend::chains::monad::chain_vault::ChainVaultV1>,
+    /// Global vault id of the last map entry examined. Pass this value back as
+    /// `start_after_global_vault_id` to continue. `None` on the terminal page.
+    pub next_start_after: Option<u64>,
+    pub done: bool,
+    /// Number of GLOBAL map entries examined, including non-matching chains.
+    /// Always in `1..=min(scan_limit, 500)` unless the cursor is already terminal.
+    pub scanned_count: u16,
+}
+
+fn list_chain_vaults_page_in_state(
+    state: &State,
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    start_after_global_vault_id: Option<u64>,
+    scan_limit: u16,
+) -> ChainVaultPage {
+    use std::ops::Bound::{Excluded, Unbounded};
+
+    let effective_limit = scan_limit.clamp(1, MAX_CHAIN_VAULT_PAGE_SCAN) as usize;
+    let global_last_vault_id = state
+        .multi_chain
+        .chain_vaults
+        .last_key_value()
+        .map(|(vault_id, _)| *vault_id);
+    let mut vaults = Vec::new();
+    let mut scanned_count = 0u16;
+    let mut last_scanned = None;
+
+    let range_start = start_after_global_vault_id
+        .map(Excluded)
+        .unwrap_or(Unbounded);
+    for (vault_id, vault) in state
+        .multi_chain
+        .chain_vaults
+        .range((range_start, Unbounded))
+        .take(effective_limit)
+    {
+        scanned_count = scanned_count.saturating_add(1);
+        last_scanned = Some(*vault_id);
+        if vault.collateral_chain == chain {
+            vaults.push(vault.clone());
+        }
+    }
+
+    let done = match (last_scanned, global_last_vault_id) {
+        (None, _) => true,
+        (Some(last_scanned), Some(global_last)) => last_scanned >= global_last,
+        (Some(_), None) => true,
+    };
+    ChainVaultPage {
+        vaults,
+        next_start_after: if done { None } else { last_scanned },
+        done,
+        scanned_count,
+    }
+}
+
+/// Bounded global-cursor page over foreign-chain vaults. Each call examines at
+/// most 500 GLOBAL vault-map entries; sparse chains still make monotonic cursor
+/// progress and are never silently truncated at the first 500 global rows.
+#[candid_method(query)]
+#[query]
+fn list_chain_vaults_page(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    start_after_global_vault_id: Option<u64>,
+    scan_limit: u16,
+) -> ChainVaultPage {
+    read_state(|state| {
+        list_chain_vaults_page_in_state(state, chain, start_after_global_vault_id, scan_limit)
+    })
+}
+
 /// List the foreign-chain vaults whose `collateral_chain == chain`, CLAMPED to
 /// at most 500 entries. The clamp follows the Wave-9a DOS-pagination convention:
-/// an unbounded query over a growing map is a cycle-DoS vector. A caller needing
-/// the full set past 500 must page via a future cursor endpoint. Public query.
+/// an unbounded query over a growing map is a cycle-DoS vector. Compatibility
+/// only: new callers must use `list_chain_vaults_page`. Public query.
 #[candid_method(query)]
 #[query]
 fn list_chain_vaults(
@@ -2048,6 +2351,1010 @@ fn chain_has_active_settlement_op(chain: rumi_protocol_backend::chains::config::
             .map(|q| q.has_active_op())
             .unwrap_or(false)
     })
+}
+
+/// Public, derived-only readiness projection for a foreign EVM chain.
+///
+/// This deliberately exposes only the configured endpoint count, never the raw
+/// URLs (which may contain provider credentials), and makes no claim that the
+/// configured endpoints are operated independently. Every field is a fixed-size
+/// scalar or one bounded map lookup; the query never scans vaults, burn keys, or
+/// settlement queues.
+#[derive(candid::CandidType, serde::Deserialize, Clone, Debug)]
+pub struct ChainPublicLaunchStatus {
+    pub chain_id: rumi_protocol_backend::chains::config::ChainId,
+    pub configured: bool,
+    pub status: Option<rumi_protocol_backend::chains::config::ChainStatus>,
+    pub registered: bool,
+    pub native_symbol: Option<String>,
+    pub bound_icusd_contract: Option<String>,
+    pub icusd_contract_matches_expected: bool,
+    pub effective_evm_rpc_principal: candid::Principal,
+    pub evm_rpc_principal_matches_expected: bool,
+    pub chains_ecdsa_key_name: String,
+    pub chains_ecdsa_key_matches_expected: bool,
+    pub rpc_endpoint_count: u32,
+    pub rpc_min_quorum_providers: u32,
+    pub rpc_effective_agreement_requirement: u32,
+    pub rpc_configuration_sufficient: bool,
+    pub finality_depth: Option<u32>,
+    pub min_cr_e4: Option<u64>,
+    pub liquidation_threshold_e4: Option<u64>,
+    pub collateral_config_matches_expected: bool,
+    pub effective_debt_config:
+        Option<rumi_protocol_backend::chains::collateral_config::ChainDebtConfigV1>,
+    pub debt_config_matches_expected: bool,
+    pub chain_supply_e8s: u128,
+    pub chain_reserve_backing_e8s: u128,
+    pub chain_pending_burn_e8s: u128,
+    pub liquidation_configured: bool,
+    pub liquidation_enabled: bool,
+    pub liquidation_config_matches_expected: bool,
+    pub liquidation_config_digest: Option<String>,
+    pub expected_liquidation_config_digest: String,
+    pub max_price_age_ns: Option<u64>,
+    pub collateral_price_e8: Option<u64>,
+    pub collateral_price_set_at_ns: Option<u64>,
+    pub collateral_price_age_ns: Option<u64>,
+    pub collateral_price_is_fresh: bool,
+    pub protocol_mode: Mode,
+    pub protocol_frozen: bool,
+    pub invariant_halted: bool,
+    pub reorg_halted: bool,
+    pub bad_debt_e8s: u128,
+    pub bad_debt_threshold_e8s: Option<u128>,
+    pub bad_debt_circuit_tripped: bool,
+    pub bad_debt_tripped_at_ns: Option<u64>,
+    pub burn_cursor: u64,
+    pub hot_wallet_balance_e18: Option<u128>,
+    pub hot_wallet_min_balance_e18: u128,
+    pub hot_wallet_ready: Option<bool>,
+    pub hot_wallet_balance_refreshed_at_ns: Option<u64>,
+    pub hot_wallet_balance_age_ns: Option<u64>,
+    pub hot_wallet_balance_max_age_ns: u64,
+    pub hot_wallet_balance_is_fresh: bool,
+    pub public_open_ready: bool,
+    /// Stable, machine-readable reason codes. Empty iff `public_open_ready`.
+    pub blocking_reasons: Vec<String>,
+}
+
+fn chain_public_launch_status_in_state(
+    state: &State,
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    now_ns: u64,
+) -> ChainPublicLaunchStatus {
+    use rumi_protocol_backend::chains::config::{
+        effective_min_quorum_providers, ChainStatus, DEFAULT_MIN_QUORUM_PROVIDERS,
+    };
+
+    let config = state.multi_chain.chain_configs.get(&chain);
+    let (rpc_endpoint_count, rpc_endpoint_configuration_bounded) =
+        bounded_distinct_rpc_endpoint_count(config);
+    let rpc_min_quorum_providers = config
+        .map(effective_min_quorum_providers)
+        .unwrap_or(DEFAULT_MIN_QUORUM_PROVIDERS);
+    let rpc_strict_majority = rpc_endpoint_count / 2 + 1;
+    let rpc_effective_agreement_requirement = rpc_min_quorum_providers.max(rpc_strict_majority);
+    let rpc_configuration_sufficient = rpc_endpoint_configuration_bounded
+        && rpc_endpoint_count >= rpc_effective_agreement_requirement;
+
+    let evm_config = rumi_protocol_backend::chains::evm::evm_chain_config(chain);
+    let native_symbol = evm_config.map(|cfg| cfg.native_symbol.to_string());
+    let collateral_config =
+        rumi_protocol_backend::chains::collateral_config::chain_collateral_config(chain);
+    let min_cr_e4 = collateral_config.map(|config| config.min_cr_e4);
+    let liquidation_threshold_e4 = collateral_config.map(|config| config.liquidation_threshold_e4);
+    let collateral_config_matches_expected = collateral_config
+        .map(collateral_config_matches_expected)
+        .unwrap_or(false);
+    let effective_debt_config = effective_debt_config(state, chain);
+    let debt_config_matches_expected = debt_config_matches_expected(state, chain);
+
+    let liquidation_config = state.multi_chain.chain_liquidation_configs.get(&chain);
+    let liquidation_config_matches_expected = liquidation_config
+        .map(liquidation_config_matches_expected)
+        .unwrap_or(false);
+    let liquidation_config_digest = liquidation_config.map(liquidation_config_digest);
+    let max_price_age_ns = liquidation_config.map(|cfg| cfg.max_price_age_ns);
+    let price = native_symbol
+        .as_deref()
+        .and_then(|symbol| state.multi_chain.get_manual_price(chain, symbol));
+    let collateral_price_e8 = price.map(|(value, _)| value);
+    let collateral_price_set_at_ns = price.map(|(_, set_at)| set_at);
+    let collateral_price_age_ns = collateral_price_set_at_ns
+        .filter(|set_at| *set_at > 0)
+        .map(|set_at| now_ns.saturating_sub(set_at));
+    let collateral_price_is_fresh = matches!(
+        (collateral_price_e8, collateral_price_set_at_ns, max_price_age_ns),
+        (Some(price), Some(set_at), Some(max_age))
+            if price > 0
+                && set_at > 0
+                && max_age > 0
+                && now_ns.saturating_sub(set_at) <= max_age
+    );
+    let chain_supply_e8s = state
+        .multi_chain
+        .chain_supplies
+        .get(&chain)
+        .copied()
+        .unwrap_or(0);
+    let chain_reserve_backing_e8s = state
+        .multi_chain
+        .reserve_backing_e8s
+        .get(&chain)
+        .copied()
+        .unwrap_or(0);
+    let chain_pending_burn_e8s = state
+        .multi_chain
+        .pending_chain_burn_e8s
+        .get(&chain)
+        .copied()
+        .unwrap_or(0);
+    let bad_debt_e8s = state
+        .multi_chain
+        .chain_bad_debt_e8s
+        .get(&chain)
+        .copied()
+        .unwrap_or(0);
+    let bad_debt_threshold_e8s = state
+        .multi_chain
+        .chain_bad_debt_circuit_threshold_e8s
+        .get(&chain)
+        .copied();
+    let bad_debt_circuit_tripped = state.multi_chain.chain_bad_debt_circuit_tripped(chain);
+    let hot_wallet_balance_e18 = state
+        .multi_chain
+        .hot_wallet_balance_e18
+        .get(&chain)
+        .copied();
+    let hot_wallet_ready =
+        hot_wallet_balance_e18.map(rumi_protocol_backend::chains::evm::hardening::hot_wallet_ok);
+    let hot_wallet_balance_refreshed_at_ns = state
+        .multi_chain
+        .hot_wallet_balance_refreshed_at_ns
+        .get(&chain)
+        .copied();
+    let hot_wallet_balance_age_ns = hot_wallet_balance_refreshed_at_ns
+        .filter(|timestamp| *timestamp > 0)
+        .map(|timestamp| now_ns.saturating_sub(timestamp));
+    let hot_wallet_balance_is_fresh = hot_wallet_balance_is_fresh(state, chain, now_ns);
+
+    let configured = config.is_some();
+    let registered = matches!(config.map(|cfg| cfg.status), Some(ChainStatus::Registered));
+    let liquidation_configured = liquidation_config.is_some();
+    let liquidation_enabled = liquidation_config.map(|cfg| cfg.enabled).unwrap_or(false);
+    let invariant_halted = state.multi_chain.invariant_halted;
+    let reorg_halted = state
+        .multi_chain
+        .reorg_halted
+        .get(&chain)
+        .copied()
+        .unwrap_or(false);
+    let burn_cursor = state
+        .multi_chain
+        .last_observed_block
+        .get(&chain)
+        .copied()
+        .unwrap_or(0);
+    let bound_icusd_contract = state.multi_chain.chain_contracts.get(&chain).cloned();
+    let icusd_contract_matches_expected = bound_icusd_contract
+        .as_deref()
+        .map(|contract| contract.eq_ignore_ascii_case(CONFLUX_MAINNET_PUBLIC_ICUSD_CONTRACT))
+        .unwrap_or(false);
+    let effective_evm_rpc_principal =
+        rumi_protocol_backend::chains::evm::evm_rpc::evm_rpc_principal_in_state(state);
+    let evm_rpc_principal_matches_expected =
+        effective_evm_rpc_principal == expected_evm_rpc_principal();
+    let chains_ecdsa_key_name = state.chains_ecdsa_key_name.clone();
+    let chains_ecdsa_key_matches_expected =
+        chains_ecdsa_key_name == CONFLUX_MAINNET_EXPECTED_ECDSA_KEY_NAME;
+    let blocking_reasons: Vec<String> = conflux_mainnet_public_risk_blockers(state, chain, now_ns)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+
+    ChainPublicLaunchStatus {
+        chain_id: chain,
+        configured,
+        status: config.map(|cfg| cfg.status),
+        registered,
+        native_symbol,
+        bound_icusd_contract,
+        icusd_contract_matches_expected,
+        effective_evm_rpc_principal,
+        evm_rpc_principal_matches_expected,
+        chains_ecdsa_key_name,
+        chains_ecdsa_key_matches_expected,
+        rpc_endpoint_count,
+        rpc_min_quorum_providers,
+        rpc_effective_agreement_requirement,
+        rpc_configuration_sufficient,
+        finality_depth: config.map(|config| config.finality_depth),
+        min_cr_e4,
+        liquidation_threshold_e4,
+        collateral_config_matches_expected,
+        effective_debt_config,
+        debt_config_matches_expected,
+        chain_supply_e8s,
+        chain_reserve_backing_e8s,
+        chain_pending_burn_e8s,
+        liquidation_configured,
+        liquidation_enabled,
+        liquidation_config_matches_expected,
+        liquidation_config_digest,
+        expected_liquidation_config_digest: expected_liquidation_config_digest(),
+        max_price_age_ns,
+        collateral_price_e8,
+        collateral_price_set_at_ns,
+        collateral_price_age_ns,
+        collateral_price_is_fresh,
+        protocol_mode: state.mode,
+        protocol_frozen: state.frozen,
+        invariant_halted,
+        reorg_halted,
+        bad_debt_e8s,
+        bad_debt_threshold_e8s,
+        bad_debt_circuit_tripped,
+        bad_debt_tripped_at_ns: state
+            .multi_chain
+            .chain_bad_debt_circuit_tripped_at_ns
+            .get(&chain)
+            .copied(),
+        burn_cursor,
+        hot_wallet_balance_e18,
+        hot_wallet_min_balance_e18:
+            rumi_protocol_backend::chains::evm::hardening::HOT_WALLET_MIN_E18,
+        hot_wallet_ready,
+        hot_wallet_balance_refreshed_at_ns,
+        hot_wallet_balance_age_ns,
+        hot_wallet_balance_max_age_ns: HOT_WALLET_BALANCE_MAX_AGE_NS,
+        hot_wallet_balance_is_fresh,
+        public_open_ready: blocking_reasons.is_empty(),
+        blocking_reasons,
+    }
+}
+
+/// Consolidated, anonymous-safe public launch/readiness status. This is a
+/// synchronous projection over current canister state and performs no outcalls.
+#[candid_method(query)]
+#[query]
+fn get_chain_public_launch_status(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> ChainPublicLaunchStatus {
+    let now_ns = ic_cdk::api::time();
+    read_state(|state| chain_public_launch_status_in_state(state, chain, now_ns))
+}
+
+/// Result of a bounded developer-triggered settlement gas-balance refresh.
+#[derive(candid::CandidType, serde::Deserialize, Clone, Debug)]
+pub struct ChainHotWalletBalanceRefresh {
+    pub chain_id: rumi_protocol_backend::chains::config::ChainId,
+    pub balance_e18: u128,
+    pub refreshed_at_ns: u64,
+}
+
+/// Refresh the cached settlement hot-wallet balance without requiring an
+/// active settlement op. This is deliberately allowed while a known EVM chain
+/// is Disabled so launch preflight can prove gas solvency before the separately
+/// authorized enable. Only a successful RPC read updates balance+timestamp.
+#[candid_method(update)]
+#[update]
+async fn refresh_chain_hot_wallet_balance(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+) -> Result<ChainHotWalletBalanceRefresh, ProtocolError> {
+    let caller = ic_cdk::caller();
+    let allowed = read_state(|state| {
+        state.developer_principal == caller
+            && state.multi_chain.chain_configs.contains_key(&chain)
+            && rumi_protocol_backend::chains::evm::evm_chain_config(chain).is_some()
+    });
+    if !allowed {
+        return Err(ProtocolError::ChainAdmin(
+            "not developer or unknown EVM chain".into(),
+        ));
+    }
+    let balance_e18 =
+        rumi_protocol_backend::chains::evm::deposit_watch::refresh_hot_wallet_balance(chain)
+            .await
+            .map_err(|error| {
+                ProtocolError::TemporarilyUnavailable(format!("hot-wallet refresh failed: {error}"))
+            })?;
+    let refreshed_at_ns = read_state(|state| {
+        state
+            .multi_chain
+            .hot_wallet_balance_refreshed_at_ns
+            .get(&chain)
+            .copied()
+            .unwrap_or(0)
+    });
+    Ok(ChainHotWalletBalanceRefresh {
+        chain_id: chain,
+        balance_e18,
+        refreshed_at_ns,
+    })
+}
+
+fn expected_evm_nonce_in_state(
+    state: &State,
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    owner: &str,
+) -> Result<u64, ProtocolError> {
+    if rumi_protocol_backend::chains::evm::evm_chain_config(chain).is_none() {
+        return Err(ProtocolError::EvmAuth(format!(
+            "chain {} is not a supported EVM chain",
+            chain.0
+        )));
+    }
+    // Reject before hex decoding so an anonymous caller cannot trigger a second
+    // allocation and linear hex parse over an arbitrarily long decoded text
+    // value. The canonical parser accepts either 40 hex chars or the same value
+    // with a 0x prefix.
+    if !matches!(owner.len(), 40 | 42) {
+        return Err(ProtocolError::EvmAuth(
+            "invalid EVM owner address: expected 20-byte hex address".into(),
+        ));
+    }
+    let synthetic = rumi_protocol_backend::chains::evm::eip712::synthetic_owner(chain, owner)
+        .map_err(|error| ProtocolError::EvmAuth(format!("invalid EVM owner address: {error}")))?;
+    Ok(state.multi_chain.expected_evm_nonce(&synthetic))
+}
+
+/// Return the exact next EIP-712 typed-intent nonce for `(chain, owner)`.
+/// Read-only and anonymous-safe: the nonce is public replay-protection state,
+/// while malformed addresses and non-EVM chains fail explicitly.
+#[candid_method(query)]
+#[query]
+fn get_expected_evm_nonce(
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    owner: String,
+) -> Result<u64, ProtocolError> {
+    read_state(|state| expected_evm_nonce_in_state(state, chain, &owner))
+}
+
+#[cfg(test)]
+mod chain_public_launch_status_tests {
+    use super::{
+        chain_public_launch_status_in_state, conflux_mainnet_public_risk_blockers,
+        enforce_conflux_mainnet_public_risk_gate, enforce_evm_withdraw_public_risk_gate,
+        expected_evm_nonce_in_state, ChainPublicLaunchStatus, Mode, ProtocolError, State,
+    };
+    use candid::Principal;
+    use rumi_protocol_backend::chains::collateral_config::{
+        chain_collateral_config, ChainDebtConfigV1,
+    };
+    use rumi_protocol_backend::chains::config::{ChainConfigV3, ChainId, ChainStatus, GasStrategy};
+    use rumi_protocol_backend::chains::evm::eip712::synthetic_owner;
+    use rumi_protocol_backend::chains::evm::evm_rpc::default_evm_rpc_principal;
+    use rumi_protocol_backend::chains::evm::hardening::HOT_WALLET_MIN_E18;
+    use rumi_protocol_backend::chains::evm::public_readiness::{
+        collateral_config_matches_expected, expected_liquidation_config,
+        CONFLUX_MAINNET_BAD_DEBT_CIRCUIT_THRESHOLD_E8S, HOT_WALLET_BALANCE_MAX_AGE_NS,
+    };
+    use rumi_protocol_backend::chains::liquidation_config::ChainLiquidationConfigV1;
+    use rumi_protocol_backend::chains::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
+
+    const CFX: ChainId = ChainId(1030);
+    const OWNER: &str = "0x7f3c739b61ba95c43f22a0c50714ca9d6af05d0f";
+
+    fn ready_state() -> State {
+        let mut state = State::default();
+        state.chains_ecdsa_key_name = "key_1".into();
+        state.mode = Mode::GeneralAvailability;
+        state.multi_chain.chain_configs.insert(
+            CFX,
+            ChainConfigV3 {
+                chain_id: CFX,
+                display_name: "ConfluxESpaceMainnet".into(),
+                rpc_endpoints: vec![
+                    "https://provider-a.invalid".into(),
+                    "https://provider-b.invalid".into(),
+                    "https://provider-c.invalid".into(),
+                ],
+                finality_depth: 400,
+                gas_strategy: GasStrategy::EvmEip1559 {
+                    max_priority_fee_gwei: 1,
+                    max_fee_gwei_ceiling: 200,
+                },
+                chain_native_decimals: 18,
+                registered_at_ns: 1,
+                status: ChainStatus::Registered,
+                burn_watch_poll_enabled: false,
+                min_quorum_providers: Some(2),
+            },
+        );
+        state.multi_chain.chain_supplies.insert(CFX, 0);
+        state
+            .multi_chain
+            .chain_contracts
+            .insert(CFX, "0x8ddb0a13b26ed28912e4b8cca99bc3e8c66df7ff".into());
+        state
+            .multi_chain
+            .chain_liquidation_configs
+            .insert(CFX, expected_liquidation_config());
+        state
+            .multi_chain
+            .set_manual_price(CFX, "CFX".into(), 8_000_000, 1_000);
+        state
+            .multi_chain
+            .chain_bad_debt_circuit_threshold_e8s
+            .insert(CFX, CONFLUX_MAINNET_BAD_DEBT_CIRCUIT_THRESHOLD_E8S);
+        state
+            .multi_chain
+            .hot_wallet_balance_e18
+            .insert(CFX, HOT_WALLET_MIN_E18);
+        state
+            .multi_chain
+            .hot_wallet_balance_refreshed_at_ns
+            .insert(CFX, 1_000);
+        state.multi_chain.last_observed_block.insert(CFX, 1);
+        state
+    }
+
+    fn assert_blocked(status: &ChainPublicLaunchStatus, reason: &str) {
+        assert!(!status.public_open_ready);
+        assert!(
+            status
+                .blocking_reasons
+                .iter()
+                .any(|actual| actual == reason),
+            "missing {reason:?} in {:?}",
+            status.blocking_reasons
+        );
+    }
+
+    fn assert_reason(state: &State, now_ns: u64, reason: &str) {
+        let blockers = conflux_mainnet_public_risk_blockers(state, CFX, now_ns);
+        assert!(
+            blockers.contains(&reason),
+            "missing {reason:?} in {blockers:?}"
+        );
+    }
+
+    #[test]
+    fn readiness_is_true_only_for_complete_fresh_clear_configuration() {
+        let status = chain_public_launch_status_in_state(&ready_state(), CFX, 1_500);
+        assert!(status.public_open_ready, "{:?}", status.blocking_reasons);
+        assert!(status.blocking_reasons.is_empty());
+        assert_eq!(status.rpc_endpoint_count, 3);
+        assert_eq!(status.rpc_min_quorum_providers, 2);
+        assert_eq!(status.rpc_effective_agreement_requirement, 2);
+        assert!(status.rpc_configuration_sufficient);
+        assert_eq!(status.min_cr_e4, Some(15_000));
+        assert_eq!(status.liquidation_threshold_e4, Some(13_300));
+        assert_eq!(status.collateral_price_age_ns, Some(500));
+        assert!(status.collateral_price_is_fresh);
+        assert_eq!(status.hot_wallet_ready, Some(true));
+        assert_eq!(status.finality_depth, Some(400));
+        assert_eq!(status.burn_cursor, 1);
+        assert!(status.icusd_contract_matches_expected);
+        assert_eq!(
+            status.effective_evm_rpc_principal,
+            default_evm_rpc_principal()
+        );
+        assert!(status.evm_rpc_principal_matches_expected);
+        assert_eq!(status.chains_ecdsa_key_name, "key_1");
+        assert!(status.chains_ecdsa_key_matches_expected);
+        assert!(status.debt_config_matches_expected);
+        assert!(status.collateral_config_matches_expected);
+        assert!(status.liquidation_config_matches_expected);
+        assert_eq!(
+            status.liquidation_config_digest.as_deref(),
+            Some(status.expected_liquidation_config_digest.as_str())
+        );
+        assert!(status.hot_wallet_balance_is_fresh);
+        assert_eq!(status.hot_wallet_balance_age_ns, Some(500));
+        assert_eq!(
+            status.bad_debt_threshold_e8s,
+            Some(CONFLUX_MAINNET_BAD_DEBT_CIRCUIT_THRESHOLD_E8S)
+        );
+    }
+
+    #[test]
+    fn readiness_fails_closed_for_unknown_chain() {
+        let status = chain_public_launch_status_in_state(&State::default(), ChainId(999), 1_500);
+        assert_eq!(
+            status.blocking_reasons,
+            vec!["not_conflux_mainnet_public_chain"]
+        );
+        assert_eq!(status.min_cr_e4, None);
+        assert_eq!(status.liquidation_threshold_e4, None);
+    }
+
+    #[test]
+    fn readiness_reports_each_runtime_safety_failure() {
+        let mut state = ready_state();
+        state.evm_rpc_principal_override = Some(Principal::from_slice(&[9; 29]));
+        assert_reason(&state, 1_500, "evm_rpc_principal_mismatch");
+        let status = chain_public_launch_status_in_state(&state, CFX, 1_500);
+        assert!(!status.evm_rpc_principal_matches_expected);
+
+        let mut state = ready_state();
+        state.chains_ecdsa_key_name = "test_key_1".into();
+        assert_reason(&state, 1_500, "chains_ecdsa_key_mismatch");
+        let status = chain_public_launch_status_in_state(&state, CFX, 1_500);
+        assert!(!status.chains_ecdsa_key_matches_expected);
+
+        let mut state = ready_state();
+        state
+            .multi_chain
+            .chain_configs
+            .get_mut(&CFX)
+            .unwrap()
+            .status = ChainStatus::Disabled;
+        state.multi_chain.reorg_halted.insert(CFX, true);
+        state.multi_chain.invariant_halted = true;
+        state
+            .multi_chain
+            .chain_bad_debt_circuit_tripped_at_ns
+            .insert(CFX, 1_250);
+        state.multi_chain.hot_wallet_balance_e18.insert(CFX, 1);
+        state
+            .multi_chain
+            .set_manual_price(CFX, "CFX".into(), 8_000_000, 1);
+
+        let status = chain_public_launch_status_in_state(&state, CFX, 1_800_000_001_001);
+        for reason in [
+            "chain_disabled",
+            "collateral_price_stale",
+            "supply_invariant_halted",
+            "reorg_halted",
+            "bad_debt_circuit_tripped",
+            "hot_wallet_balance_low",
+        ] {
+            assert_blocked(&status, reason);
+        }
+    }
+
+    #[test]
+    fn readiness_requires_proven_gas_and_the_exact_bad_debt_breaker_threshold() {
+        let mut state = ready_state();
+        state.multi_chain.hot_wallet_balance_e18.remove(&CFX);
+        state
+            .multi_chain
+            .chain_bad_debt_circuit_threshold_e8s
+            .remove(&CFX);
+        let status = chain_public_launch_status_in_state(&state, CFX, 1_500);
+        assert_blocked(&status, "hot_wallet_balance_unknown");
+        assert_blocked(&status, "bad_debt_circuit_not_configured");
+
+        // Setter validation rejects zero, but a status projection must remain
+        // fail-closed even against corrupt or hand-restored state.
+        state
+            .multi_chain
+            .chain_bad_debt_circuit_threshold_e8s
+            .insert(CFX, 0);
+        let status = chain_public_launch_status_in_state(&state, CFX, 1_500);
+        assert_blocked(&status, "bad_debt_circuit_not_configured");
+
+        for threshold in [
+            CONFLUX_MAINNET_BAD_DEBT_CIRCUIT_THRESHOLD_E8S - 1,
+            CONFLUX_MAINNET_BAD_DEBT_CIRCUIT_THRESHOLD_E8S + 1,
+        ] {
+            state
+                .multi_chain
+                .chain_bad_debt_circuit_threshold_e8s
+                .insert(CFX, threshold);
+            let status = chain_public_launch_status_in_state(&state, CFX, 1_500);
+            assert_blocked(&status, "bad_debt_circuit_threshold_mismatch");
+            let error = enforce_conflux_mainnet_public_risk_gate(&state, CFX, 1_500)
+                .expect_err("mismatched bad-debt threshold must fail the gate");
+            assert!(matches!(error, ProtocolError::EvmAuth(_)));
+        }
+
+        state
+            .multi_chain
+            .chain_bad_debt_circuit_threshold_e8s
+            .insert(CFX, CONFLUX_MAINNET_BAD_DEBT_CIRCUIT_THRESHOLD_E8S);
+        let status = chain_public_launch_status_in_state(&state, CFX, 1_500);
+        assert!(!status
+            .blocking_reasons
+            .iter()
+            .any(|reason| reason.starts_with("bad_debt_circuit_")));
+    }
+
+    #[test]
+    fn readiness_requires_fresh_hot_wallet_proof() {
+        let mut state = ready_state();
+        // The fresh key-change path clears both maps. Readiness must not retain
+        // a false-green result until the current key/address is refreshed.
+        state.multi_chain.hot_wallet_balance_e18.remove(&CFX);
+        state
+            .multi_chain
+            .hot_wallet_balance_refreshed_at_ns
+            .remove(&CFX);
+        assert_reason(&state, 1_500, "hot_wallet_balance_unknown");
+        assert_reason(&state, 1_500, "hot_wallet_balance_timestamp_unknown");
+
+        state
+            .multi_chain
+            .hot_wallet_balance_e18
+            .insert(CFX, HOT_WALLET_MIN_E18);
+        state
+            .multi_chain
+            .hot_wallet_balance_refreshed_at_ns
+            .insert(CFX, 1);
+        assert_reason(
+            &state,
+            HOT_WALLET_BALANCE_MAX_AGE_NS + 2,
+            "hot_wallet_balance_stale",
+        );
+    }
+
+    #[test]
+    fn effective_rpc_agreement_is_floor_or_strict_majority_whichever_is_larger() {
+        let mut state = ready_state();
+        state
+            .multi_chain
+            .chain_configs
+            .get_mut(&CFX)
+            .unwrap()
+            .rpc_endpoints
+            .push("https://provider-d.invalid".into());
+        let status = chain_public_launch_status_in_state(&state, CFX, 1_500);
+        assert_eq!(status.rpc_endpoint_count, 4);
+        assert_eq!(status.rpc_min_quorum_providers, 2);
+        assert_eq!(status.rpc_effective_agreement_requirement, 3);
+        assert!(status.rpc_configuration_sufficient);
+    }
+
+    #[test]
+    fn authoritative_gate_covers_every_configuration_failure_without_scans() {
+        let mut state = ready_state();
+        state
+            .multi_chain
+            .chain_configs
+            .get_mut(&CFX)
+            .unwrap()
+            .status = ChainStatus::Disabled;
+        assert_reason(&state, 1_500, "chain_disabled");
+
+        let mut state = ready_state();
+        state
+            .multi_chain
+            .chain_configs
+            .get_mut(&CFX)
+            .unwrap()
+            .chain_native_decimals = 17;
+        assert_reason(&state, 1_500, "conflux_mainnet_config_mismatch");
+
+        let mut state = ready_state();
+        state.multi_chain.chain_contracts.remove(&CFX);
+        assert_reason(&state, 1_500, "icusd_contract_not_bound");
+        state
+            .multi_chain
+            .chain_contracts
+            .insert(CFX, "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into());
+        assert_reason(&state, 1_500, "icusd_contract_mismatch");
+
+        let mut state = ready_state();
+        state
+            .multi_chain
+            .chain_configs
+            .get_mut(&CFX)
+            .unwrap()
+            .rpc_endpoints = vec!["https://same.invalid".into(), "https://same.invalid".into()];
+        assert_reason(&state, 1_500, "rpc_distinct_endpoints_insufficient");
+
+        let mut state = ready_state();
+        let config = state.multi_chain.chain_configs.get_mut(&CFX).unwrap();
+        config.rpc_endpoints.truncate(2);
+        config.min_quorum_providers = Some(3);
+        assert_reason(&state, 1_500, "rpc_agreement_unsatisfiable");
+
+        let mut state = ready_state();
+        state
+            .multi_chain
+            .chain_configs
+            .get_mut(&CFX)
+            .unwrap()
+            .rpc_endpoints = (0..17)
+            .map(|index| format!("https://provider-{index}.invalid"))
+            .collect();
+        assert_reason(&state, 1_500, "rpc_endpoint_configuration_too_large");
+
+        let mut state = ready_state();
+        state
+            .multi_chain
+            .chain_configs
+            .get_mut(&CFX)
+            .unwrap()
+            .finality_depth = 399;
+        assert_reason(&state, 1_500, "finality_depth_mismatch");
+
+        let mut state = ready_state();
+        state.multi_chain.chain_debt_configs.insert(
+            CFX,
+            ChainDebtConfigV1 {
+                min_vault_debt_e8s: 9_999_999,
+                debt_ceiling_e8s: Some(50_000_000_000),
+            },
+        );
+        assert_reason(&state, 1_500, "debt_config_mismatch");
+        state.multi_chain.chain_debt_configs.insert(
+            CFX,
+            ChainDebtConfigV1 {
+                min_vault_debt_e8s: 10_000_000,
+                debt_ceiling_e8s: None,
+            },
+        );
+        assert_reason(&state, 1_500, "debt_config_mismatch");
+
+        let mut state = ready_state();
+        state.multi_chain.chain_liquidation_configs.remove(&CFX);
+        assert_reason(&state, 1_500, "liquidation_config_missing");
+        let mut state = ready_state();
+        state
+            .multi_chain
+            .chain_liquidation_configs
+            .get_mut(&CFX)
+            .unwrap()
+            .enabled = false;
+        assert_reason(&state, 1_500, "liquidation_disabled");
+
+        let route_mutations: [fn(&mut ChainLiquidationConfigV1); 6] = [
+            |cfg| cfg.router = "0x0000000000000000000000000000000000000001".into(),
+            |cfg| cfg.factory = "0x0000000000000000000000000000000000000002".into(),
+            |cfg| cfg.pair = "0x0000000000000000000000000000000000000003".into(),
+            |cfg| cfg.collateral_token = "0x0000000000000000000000000000000000000004".into(),
+            |cfg| cfg.settle_stable_token = "0x0000000000000000000000000000000000000005".into(),
+            |cfg| cfg.max_price_age_ns = 1,
+        ];
+        for mutate in route_mutations {
+            let mut state = ready_state();
+            mutate(
+                state
+                    .multi_chain
+                    .chain_liquidation_configs
+                    .get_mut(&CFX)
+                    .unwrap(),
+            );
+            assert_reason(&state, 1_500, "liquidation_config_mismatch");
+        }
+
+        let mut collateral = chain_collateral_config(CFX).unwrap();
+        assert!(collateral_config_matches_expected(collateral));
+        collateral.liquidation_penalty_bps = 1_199;
+        assert!(!collateral_config_matches_expected(collateral));
+
+        let error = enforce_conflux_mainnet_public_risk_gate(&state, CFX, 1_500)
+            .expect_err("disabled liquidation must fail the authoritative gate");
+        assert!(matches!(error, ProtocolError::EvmAuth(_)));
+    }
+
+    #[test]
+    fn authoritative_gate_covers_every_runtime_failure_and_classifies_it_temporary() {
+        let mut state = ready_state();
+        state.multi_chain.manual_prices.remove(&(CFX, "CFX".into()));
+        assert_reason(&state, 1_500, "collateral_price_missing");
+
+        let mut state = ready_state();
+        state
+            .multi_chain
+            .set_manual_price(CFX, "CFX".into(), 0, 1_000);
+        assert_reason(&state, 1_500, "collateral_price_zero");
+
+        let mut state = ready_state();
+        state
+            .multi_chain
+            .set_manual_price(CFX, "CFX".into(), 8_000_000, 0);
+        assert_reason(&state, 1_500, "collateral_price_timestamp_missing");
+
+        let mut state = ready_state();
+        state
+            .multi_chain
+            .chain_liquidation_configs
+            .get_mut(&CFX)
+            .unwrap()
+            .max_price_age_ns = 0;
+        assert_reason(&state, 1_500, "price_freshness_limit_missing");
+
+        let mut state = ready_state();
+        assert_reason(&state, 1_800_000_001_001, "collateral_price_stale");
+        state.mode = Mode::Recovery;
+        assert_reason(&state, 1_500, "protocol_mode_not_general_availability");
+        state.mode = Mode::GeneralAvailability;
+        state.frozen = true;
+        assert_reason(&state, 1_500, "protocol_frozen");
+        state.frozen = false;
+        state.multi_chain.invariant_halted = true;
+        assert_reason(&state, 1_500, "supply_invariant_halted");
+        state.multi_chain.invariant_halted = false;
+        state.multi_chain.reorg_halted.insert(CFX, true);
+        assert_reason(&state, 1_500, "reorg_halted");
+
+        let mut state = ready_state();
+        state
+            .multi_chain
+            .chain_bad_debt_circuit_threshold_e8s
+            .remove(&CFX);
+        assert_reason(&state, 1_500, "bad_debt_circuit_not_configured");
+
+        let mut state = ready_state();
+        state
+            .multi_chain
+            .chain_bad_debt_circuit_tripped_at_ns
+            .insert(CFX, 1);
+        assert_reason(&state, 1_500, "bad_debt_circuit_tripped");
+
+        let mut state = ready_state();
+        state.multi_chain.last_observed_block.remove(&CFX);
+        assert_reason(&state, 1_500, "burn_cursor_unseeded");
+
+        let mut state = ready_state();
+        state.multi_chain.hot_wallet_balance_e18.remove(&CFX);
+        assert_reason(&state, 1_500, "hot_wallet_balance_unknown");
+
+        let mut state = ready_state();
+        state.multi_chain.hot_wallet_balance_e18.insert(CFX, 1);
+        assert_reason(&state, 1_500, "hot_wallet_balance_low");
+        let error = enforce_conflux_mainnet_public_risk_gate(&state, CFX, 1_500)
+            .expect_err("runtime gas failure must fail the authoritative gate");
+        assert!(matches!(error, ProtocolError::TemporarilyUnavailable(_)));
+    }
+
+    #[test]
+    fn authoritative_conflux_gate_does_not_apply_to_other_chains() {
+        assert!(
+            enforce_conflux_mainnet_public_risk_gate(&State::default(), ChainId(71), 0).is_ok()
+        );
+        assert!(
+            enforce_conflux_mainnet_public_risk_gate(&State::default(), ChainId(10_143), 0).is_ok()
+        );
+    }
+
+    #[test]
+    fn signed_withdraw_gate_blocks_debt_bearing_risk_but_preserves_debt_free_exit() {
+        let mut state = ready_state();
+        state
+            .multi_chain
+            .chain_configs
+            .get_mut(&CFX)
+            .unwrap()
+            .status = ChainStatus::Disabled;
+        state.multi_chain.chain_vaults.insert(
+            7,
+            ChainVaultV1 {
+                vault_id: 7,
+                owner: Principal::anonymous(),
+                collateral_chain: CFX,
+                custody_address: "0x0000000000000000000000000000000000000007".into(),
+                collateral_amount_native: 5_000_000_000_000_000_000,
+                debt_e8s: 10_000_000,
+                mint_recipient: OWNER.into(),
+                pending_mint_e8s: 0,
+                status: ChainVaultStatus::Open,
+                opened_at_ns: 1,
+                owner_evm: Some(OWNER.into()),
+                last_interest_accrual_ns: 1,
+                pending_interest_mint_e8s: 0,
+                pending_liquidation: None,
+            },
+        );
+        let error = enforce_evm_withdraw_public_risk_gate(&state, 7, CFX, 1_500)
+            .expect_err("debt-bearing withdrawal must honor Disabled");
+        assert!(matches!(error, ProtocolError::EvmAuth(_)));
+
+        state.multi_chain.chain_vaults.get_mut(&7).unwrap().debt_e8s = 0;
+        assert!(enforce_evm_withdraw_public_risk_gate(&state, 7, CFX, 1_500).is_ok());
+    }
+
+    #[test]
+    fn expected_nonce_is_exact_per_chain_owner_and_rejects_malformed_inputs() {
+        let mut state = ready_state();
+        let owner = synthetic_owner(CFX, OWNER).unwrap();
+        state.multi_chain.evm_owner_nonces.insert(owner, 7);
+
+        assert_eq!(expected_evm_nonce_in_state(&state, CFX, OWNER).unwrap(), 7);
+        assert!(expected_evm_nonce_in_state(&state, CFX, "not-an-address").is_err());
+        assert!(expected_evm_nonce_in_state(&state, CFX, &"a".repeat(1_000_000)).is_err());
+        assert!(expected_evm_nonce_in_state(&state, ChainId(999), OWNER).is_err());
+    }
+}
+
+#[cfg(test)]
+mod chain_vault_page_tests {
+    use super::{list_chain_vaults_page_in_state, State, MAX_CHAIN_VAULT_PAGE_SCAN};
+    use candid::Principal;
+    use rumi_protocol_backend::chains::config::ChainId;
+    use rumi_protocol_backend::chains::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
+    use std::collections::BTreeSet;
+
+    const TARGET: ChainId = ChainId(1030);
+    const OTHER: ChainId = ChainId(71);
+
+    fn vault(vault_id: u64, chain: ChainId) -> ChainVaultV1 {
+        ChainVaultV1 {
+            vault_id,
+            owner: Principal::anonymous(),
+            collateral_chain: chain,
+            custody_address: format!("0x{vault_id:040x}"),
+            collateral_amount_native: 5_000_000_000_000_000_000,
+            debt_e8s: 0,
+            mint_recipient: "0x1111111111111111111111111111111111111111".into(),
+            pending_mint_e8s: 10_000_000,
+            status: ChainVaultStatus::AwaitingDeposit,
+            opened_at_ns: vault_id,
+            owner_evm: None,
+            last_interest_accrual_ns: 0,
+            pending_interest_mint_e8s: 0,
+            pending_liquidation: None,
+        }
+    }
+
+    fn populated_state(count: u64) -> State {
+        let mut state = State::default();
+        for vault_id in 1..=count {
+            let chain = if vault_id % 7 == 0 { TARGET } else { OTHER };
+            state
+                .multi_chain
+                .chain_vaults
+                .insert(vault_id, vault(vault_id, chain));
+        }
+        state
+    }
+
+    #[test]
+    fn cursor_pages_reach_matches_beyond_500_without_duplicates_or_gaps() {
+        let state = populated_state(1_205);
+        let expected: Vec<u64> = state
+            .multi_chain
+            .chain_vaults
+            .values()
+            .filter(|vault| vault.collateral_chain == TARGET)
+            .map(|vault| vault.vault_id)
+            .collect();
+        assert!(expected.iter().any(|vault_id| *vault_id > 500));
+
+        let mut cursor = None;
+        let mut actual = Vec::new();
+        let mut prior_cursor = None;
+        loop {
+            let page = list_chain_vaults_page_in_state(&state, TARGET, cursor, 137);
+            assert!(page.scanned_count <= 137);
+            actual.extend(page.vaults.into_iter().map(|vault| vault.vault_id));
+            if page.done {
+                assert_eq!(page.next_start_after, None);
+                break;
+            }
+            let next = page.next_start_after.expect("non-terminal page cursor");
+            if let Some(previous) = prior_cursor {
+                assert!(next > previous, "cursor must advance monotonically");
+            }
+            prior_cursor = Some(next);
+            cursor = Some(next);
+        }
+
+        assert_eq!(actual, expected);
+        assert_eq!(
+            actual.iter().copied().collect::<BTreeSet<_>>().len(),
+            actual.len()
+        );
+    }
+
+    #[test]
+    fn cursor_page_clamps_work_and_reports_terminal_cursor() {
+        let state = populated_state(700);
+        let first = list_chain_vaults_page_in_state(&state, TARGET, None, u16::MAX);
+        assert_eq!(first.scanned_count, MAX_CHAIN_VAULT_PAGE_SCAN);
+        assert_eq!(first.next_start_after, Some(500));
+        assert!(!first.done);
+        assert!(first
+            .vaults
+            .iter()
+            .all(|vault| vault.collateral_chain == TARGET));
+
+        let terminal = list_chain_vaults_page_in_state(&state, TARGET, Some(700), 500);
+        assert_eq!(terminal.scanned_count, 0);
+        assert!(terminal.vaults.is_empty());
+        assert!(terminal.done);
+        assert_eq!(terminal.next_start_after, None);
+
+        // A zero caller limit still makes exactly one row of progress, avoiding
+        // a cursor that can never advance.
+        let one = list_chain_vaults_page_in_state(&state, TARGET, None, 0);
+        assert_eq!(one.scanned_count, 1);
+        assert_eq!(one.next_start_after, Some(1));
+    }
 }
 
 /// Record the deployed `IcUSD.sol` (or equivalent) contract address for a chain.
@@ -2097,6 +3404,14 @@ fn validate_chain_liquidation_config_inputs(
     chain: rumi_protocol_backend::chains::config::ChainId,
     config: &rumi_protocol_backend::chains::liquidation_config::ChainLiquidationConfigV1,
 ) -> Result<(), ProtocolError> {
+    read_state(|state| validate_chain_liquidation_config_inputs_in_state(state, chain, config))
+}
+
+fn validate_chain_liquidation_config_inputs_in_state(
+    state: &State,
+    chain: rumi_protocol_backend::chains::config::ChainId,
+    config: &rumi_protocol_backend::chains::liquidation_config::ChainLiquidationConfigV1,
+) -> Result<(), ProtocolError> {
     config
         .validate()
         .map_err(|e| ProtocolError::ChainAdmin(format!("invalid liquidation config: {e:?}")))?;
@@ -2106,21 +3421,16 @@ fn validate_chain_liquidation_config_inputs(
             chain.0
         )));
     }
-    let chain_status = read_state(|s| s.multi_chain.chain_configs.get(&chain).map(|c| c.status));
-    match chain_status {
-        Some(rumi_protocol_backend::chains::config::ChainStatus::Registered) => {}
-        Some(status) => {
-            return Err(ProtocolError::ChainAdmin(format!(
-                "chain {} is not registered: {:?}",
-                chain.0, status
-            )));
-        }
-        None => {
-            return Err(ProtocolError::ChainAdmin(format!(
-                "unknown chain {}",
-                chain.0
-            )));
-        }
+    let chain_status = state
+        .multi_chain
+        .chain_configs
+        .get(&chain)
+        .map(|c| c.status);
+    if chain_status.is_none() {
+        return Err(ProtocolError::ChainAdmin(format!(
+            "unknown chain {}",
+            chain.0
+        )));
     }
     // Finding #16: the penalty cushion MUST exceed the slippage + oracle-divergence
     // budget, or a swap can structurally deliver less stable than the debt it
@@ -2190,9 +3500,11 @@ fn validate_liquidation_factory_pair_match(
 
 /// Set (or replace) the per-chain liquidation config (spec 8, Tier B): the DEX
 /// wiring + risk knobs the bot path will read. Developer-gated. The config is
-/// validated (chain registered, EVM addresses well-formed, penalty cushion safe)
-/// before persisting; enabling also checks the UniswapV2 factory-derived pair
-/// matches the pinned pair. A rejected config mutates nothing.
+/// validated (known EVM chain in Registered or Disabled state, EVM addresses
+/// well-formed, penalty cushion safe) before persisting; enabling also checks
+/// the UniswapV2 factory-derived pair matches the pinned pair. This permits
+/// closed staging without opening a public risk window. A rejected config
+/// mutates nothing.
 #[candid_method(update)]
 #[update]
 async fn set_chain_liquidation_config(
@@ -2445,8 +3757,9 @@ fn clear_chain_bad_debt_circuit(
 
 /// A chain vault currently liquidatable on `chain` (CR below the liquidation
 /// threshold), with its interest-aware CR + sizing surfaced for an operator/SP.
-/// The discovery channel for the eventual SP fallback (finding #30; SP-specific
-/// bot-failed filtering lands in Increment 4).
+/// The discovery channel for the SP fallback (finding #30; SP-specific
+/// bot-failed filtering landed in Increment 4,
+/// `stability_pool_liquidate_chain_vault`).
 #[derive(CandidType, Deserialize, Debug, Clone)]
 pub struct ChainLiquidatableVault {
     pub vault_id: u64,
@@ -2776,6 +4089,10 @@ pub struct ManualPriceInfo {
 /// narrowly-scoped price-pusher principal (audit F-01) so the always-online CFX
 /// price monitor can refresh without holding the full developer key. Stamps the
 /// write time so `get_manual_collateral_price` can expose freshness.
+///
+/// Refuses outright, for EVERY caller, while the pair is XRC-managed (see the
+/// one-price-writer gate in the body): manual pricing is available only while
+/// the chain is disabled.
 #[candid_method(update)]
 #[update]
 fn set_manual_collateral_price(
@@ -2788,6 +4105,45 @@ fn set_manual_collateral_price(
         return Err(ProtocolError::ChainAdmin(
             "not authorized to set price".into(),
         ));
+    }
+    // ONE PRICE WRITER. A registered chain carrying a chain_liquidation_configs
+    // row is "XRC-managed" (xrc::chain_is_xrc_managed); combined with the
+    // chain's native symbol that is exactly the pair the automatic XRC timer
+    // writes (xrc::pair_is_xrc_managed). While a pair is XRC-managed the timer
+    // is its SOLE writer, and this endpoint rejects EVERY caller: the
+    // narrowly-scoped price pusher and the developer alike.
+    //
+    // The developer used to be exempt on the reasoning that a single trusted
+    // operator cannot race itself. That is wrong about the failure this gate
+    // exists to prevent. The race is not operator-vs-operator, it is
+    // WRITER-vs-WRITER on one `MultiChainState::set_manual_price` cell: the
+    // timer fires from its own message, on its own schedule, with no ordering
+    // relationship to an operator's ingress call. A manual write can land
+    // between a timer fetch and its write and be silently overwritten seconds
+    // later, or overwrite a fresher automatic sample, and with the
+    // source-time monotonicity rule below, a manual write also re-baselines the
+    // timestamp and price the timer's next sample is judged against. Two
+    // writers on one cell is the defect, regardless of who holds the second
+    // key.
+    //
+    // The developer keeps full manual control; it is now sequenced rather than
+    // concurrent. `disable_chain` makes the pair unmanaged (it flips
+    // `chain_is_registered` false, which also stops the timer fetching for the
+    // pair), the developer rebaselines and verifies the price manually, and
+    // `enable_chain` hands authority back to XRC. That order is the documented
+    // recovery procedure, and it is what the deterministic liquidation PocketIC
+    // fixtures now follow when they need to move a price after staging a
+    // liquidation config row.
+    if read_state(|s| rumi_protocol_backend::xrc::pair_is_xrc_managed(s, chain, &symbol)) {
+        return Err(ProtocolError::ChainAdmin(format!(
+            "chain {} symbol {} is XRC-managed (registered + a liquidation config row is \
+             present): the automatic XRC price timer is the SOLE writer of this pair, for \
+             every caller including the developer, so there is never a last-writer-wins race \
+             on it. To take manual control, disable_chain (which also stops the XRC timer for \
+             this pair), set the price, verify it, then enable_chain to hand authority back to \
+             XRC.",
+            chain.0, symbol
+        )));
     }
     // Reject a zero price. A 0 price drives `collateral_ratio_e4` to 0, which
     // fails-closed (every open/withdraw with debt rejects with BelowMinCr), so
@@ -2886,9 +4242,32 @@ fn get_price_pusher_allowed() -> Vec<(u32, String)> {
     read_state(|s| s.price_pusher_allowed.iter().cloned().collect())
 }
 
-/// Override the EVM RPC canister principal the Monad wrapper talks to. This is
-/// the PocketIC/staging override read via `State::evm_rpc_override()`; on
-/// mainnet it points at the production EVM RPC canister. Developer-gated.
+fn apply_fresh_evm_rpc_principal_change_in_state(
+    state: &mut State,
+    principal: candid::Principal,
+) -> Result<bool, ProtocolError> {
+    let effective = rumi_protocol_backend::chains::evm::evm_rpc::evm_rpc_principal_in_state(state);
+    if principal == effective {
+        return Ok(false);
+    }
+    if evm_key_rail_has_setup(state) {
+        return Err(ProtocolError::ChainAdmin(
+            "cannot change the EVM RPC canister after any EVM rail setup or RPC/key-bound state exists; set it on a truly fresh rail before registration, binding, proofs, settlement, or vault creation".into(),
+        ));
+    }
+    state.evm_rpc_principal_override = Some(principal);
+    // A successful fresh trust-anchor selection invalidates every cached gas
+    // solvency proof. Unknown-chain/orphan entries are cleared defensively too.
+    state.multi_chain.hot_wallet_balance_e18.clear();
+    state.multi_chain.hot_wallet_balance_refreshed_at_ns.clear();
+    Ok(true)
+}
+
+/// Override the EVM RPC canister principal the shared EVM wrapper talks to.
+/// This PocketIC/local-test escape hatch is developer-gated and may select a
+/// non-default principal only while the EVM rail is truly fresh. Once any EVM
+/// setup or trust-bound state exists, only an idempotent same-principal call is
+/// accepted; production chain 1030 separately requires the official default.
 #[candid_method(update)]
 #[update]
 fn set_evm_rpc_principal(principal: candid::Principal) -> Result<(), ProtocolError> {
@@ -2896,11 +4275,35 @@ fn set_evm_rpc_principal(principal: candid::Principal) -> Result<(), ProtocolErr
     if read_state(|s| s.developer_principal != caller) {
         return Err(ProtocolError::ChainAdmin("not developer".into()));
     }
-    mutate_state(|s| {
-        s.evm_rpc_principal_override = Some(principal);
-    });
+    let changed = mutate_state(|s| apply_fresh_evm_rpc_principal_change_in_state(s, principal))?;
+    if !changed {
+        return Ok(());
+    }
     log!(INFO, "[set_evm_rpc_principal] principal={}", principal);
     Ok(())
+}
+
+/// The effective EVM RPC canister principal plus whether it's a
+/// developer-set override (as opposed to the built-in production default).
+#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EvmRpcPrincipalInfo {
+    pub effective: candid::Principal,
+    pub overridden: bool,
+}
+
+/// De-scaffold pass (2026-08-20, additive candid): reports the EVM RPC
+/// canister principal chains calls actually route through right now. Lets an
+/// operator verify, before registering a chain for real (see the go-live
+/// checklist at the top of chains/mod.rs, item 5), that no stale
+/// `set_evm_rpc_principal` override is left pointing production traffic at a
+/// PocketIC/staging mock.
+#[candid_method(query)]
+#[query]
+fn get_evm_rpc_principal() -> EvmRpcPrincipalInfo {
+    EvmRpcPrincipalInfo {
+        effective: rumi_protocol_backend::chains::evm::evm_rpc::evm_rpc_principal(),
+        overridden: read_state(|s| s.evm_rpc_override().is_some()),
+    }
 }
 
 /// Clear the global supply-invariant halt (set by the Timer-B self-check on
@@ -2939,29 +4342,6 @@ fn clear_invariant_halt() -> Result<(), ProtocolError> {
         );
     }
     result
-}
-
-const MAX_RECONCILIATION_PROOF_BYTES: usize = 512;
-
-fn normalize_reconciliation_proof(proof: &str) -> Result<String, ProtocolError> {
-    let trimmed = proof.trim();
-    if trimmed.is_empty() {
-        return Err(ProtocolError::ChainAdmin("proof text required".into()));
-    }
-    if trimmed.as_bytes().len() > MAX_RECONCILIATION_PROOF_BYTES {
-        return Err(ProtocolError::ChainAdmin(format!(
-            "proof text too long: {} bytes > {}",
-            trimmed.as_bytes().len(),
-            MAX_RECONCILIATION_PROOF_BYTES
-        )));
-    }
-    Ok(trimmed.to_string())
-}
-
-fn map_backing_settlement_error(
-    e: rumi_protocol_backend::chains::supply::BackingSettlementError,
-) -> ProtocolError {
-    ProtocolError::ChainAdmin(format!("{e:?}"))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3266,83 +4646,40 @@ fn get_pending_chain_burn_aging(
     read_state(|s| s.multi_chain.pending_chain_burn_aging(now_ns))
 }
 
-/// Developer-gated manual reconciliation for the SP path: called after the
-/// operator verifies the matching foreign-chain icUSD burn for an amount already
-/// booked in `pending_chain_burn_e8s`.
+/// DISABLED (2026-08-20, de-scaffold pass). This was the unverified, freeform-
+/// proof-string reconciliation path for the SP pending-burn accounting: any
+/// caller passing the developer gate could book an arbitrary `amount_e8s` with
+/// nothing but a human-typed `proof` string, no receipt verification at all.
+/// The receipt-verified replacement, `settle_pending_chain_burn_with_proof`,
+/// actually fetches and validates the on-chain burn receipt before settling.
+/// The candid signature is kept EXACTLY as-is (a breaking removal would ripple
+/// into any live caller still pointed at the old method); the body now just
+/// refuses, unconditionally, before touching state or the caller's identity.
 #[candid_method(update)]
 #[update]
 fn settle_pending_chain_burn(
-    chain: rumi_protocol_backend::chains::config::ChainId,
-    amount_e8s: u128,
-    proof: String,
+    _chain: rumi_protocol_backend::chains::config::ChainId,
+    _amount_e8s: u128,
+    _proof: String,
 ) -> Result<(), ProtocolError> {
-    let caller = ic_cdk::caller();
-    if read_state(|s| s.developer_principal != caller) {
-        return Err(ProtocolError::ChainAdmin("not developer".into()));
-    }
-    let proof = normalize_reconciliation_proof(&proof)?;
-    mutate_state(|s| {
-        rumi_protocol_backend::chains::supply::settle_pending_chain_burn(
-            &mut s.multi_chain,
-            chain,
-            amount_e8s,
-        )
-    })
-    .map_err(map_backing_settlement_error)?;
-    let timestamp = ic_cdk::api::time();
-    rumi_protocol_backend::storage::record_event(&Event::ChainPendingBurnSettled {
-        chain_id: chain,
-        amount_e8s,
-        proof: proof.clone(),
-        timestamp,
-    });
-    log!(
-        INFO,
-        "[settle_pending_chain_burn] chain={:?} amount_e8s={} proof={}",
-        chain,
-        amount_e8s,
-        proof
-    );
-    Ok(())
+    Err(ProtocolError::ChainAdmin(
+        "disabled: use settle_pending_chain_burn_with_proof (receipt-verified)".into(),
+    ))
 }
 
-/// Developer-gated manual reconciliation for Tier-1 reserve retirement: called
-/// after the operator verifies the reserve-backed foreign icUSD was burned.
+/// DISABLED (2026-08-20, de-scaffold pass). Same rationale as
+/// `settle_pending_chain_burn` above, for Tier-1 reserve retirement: the
+/// receipt-verified replacement is `settle_reserve_burn_with_proof`.
 #[candid_method(update)]
 #[update]
 fn settle_reserve_burn(
-    chain: rumi_protocol_backend::chains::config::ChainId,
-    amount_e8s: u128,
-    proof: String,
+    _chain: rumi_protocol_backend::chains::config::ChainId,
+    _amount_e8s: u128,
+    _proof: String,
 ) -> Result<(), ProtocolError> {
-    let caller = ic_cdk::caller();
-    if read_state(|s| s.developer_principal != caller) {
-        return Err(ProtocolError::ChainAdmin("not developer".into()));
-    }
-    let proof = normalize_reconciliation_proof(&proof)?;
-    mutate_state(|s| {
-        rumi_protocol_backend::chains::supply::settle_reserve_burn(
-            &mut s.multi_chain,
-            chain,
-            amount_e8s,
-        )
-    })
-    .map_err(map_backing_settlement_error)?;
-    let timestamp = ic_cdk::api::time();
-    rumi_protocol_backend::storage::record_event(&Event::ChainReserveBurnSettled {
-        chain_id: chain,
-        amount_e8s,
-        proof: proof.clone(),
-        timestamp,
-    });
-    log!(
-        INFO,
-        "[settle_reserve_burn] chain={:?} amount_e8s={} proof={}",
-        chain,
-        amount_e8s,
-        proof
-    );
-    Ok(())
+    Err(ProtocolError::ChainAdmin(
+        "disabled: use settle_reserve_burn_with_proof (receipt-verified)".into(),
+    ))
 }
 
 /// Clear a chain's reorg circuit breaker. Resets BOTH `reorg_halted` AND the
@@ -3477,6 +4814,12 @@ async fn submit_burn_proof(
             "burn-proof RPC error; retry: {}",
             e
         ))),
+        // The chain is temporarily reorg-halted (operator circuit breaker).
+        // Nothing was consumed or recorded, so the identical proof is
+        // processable once the halt is cleared. Retryable, not terminal.
+        Err(BurnProofError::ReorgHalted) => Err(ProtocolError::TemporarilyUnavailable(
+            "chain is reorg-halted; retry after the halt clears".into(),
+        )),
         // Terminal: reverted tx, unknown chain/contract, or a halt-class
         // supply-invariant failure. None of these is fixed by retrying.
         Err(e) => Err(ProtocolError::ChainAdmin(format!(
@@ -4877,6 +6220,10 @@ async fn stability_pool_liquidate(
     validate_freshness_for_vault(vault_id).await?;
     // Native custody (XRP, SOL, and any future non-ICRC rail) is liquidated
     // MANUALLY (claim-based) only; see `native_custody_liquidation_reject_message`.
+    // Native-XRP absorption goes through the dedicated flow
+    // (stability_pool_preflight_xrp_absorb + stability_pool_liquidate_xrp_vault),
+    // and external liquidators through liquidate_vault_partial /
+    // partial_liquidate_vault.
     if let Some(msg) = native_custody_liquidation_reject_message(vault_id) {
         return Err(ProtocolError::GenericError(msg));
     }
@@ -4983,6 +6330,10 @@ async fn stability_pool_liquidate_debt_burned(
     validate_freshness_for_vault(vault_id).await?;
     // Native custody (XRP, SOL, and any future non-ICRC rail) is liquidated
     // MANUALLY (claim-based) only; see `native_custody_liquidation_reject_message`.
+    // Native-XRP absorption goes through the dedicated flow
+    // (stability_pool_preflight_xrp_absorb + stability_pool_liquidate_xrp_vault),
+    // and external liquidators through liquidate_vault_partial /
+    // partial_liquidate_vault.
     if let Some(msg) = native_custody_liquidation_reject_message(vault_id) {
         return Err(ProtocolError::GenericError(msg));
     }
@@ -5318,6 +6669,26 @@ fn stability_pool_preflight_xrp_absorb(
 
 #[update]
 #[candid_method(update)]
+fn stability_pool_release_xrp_absorb_preflight(
+    vault_id: u64,
+    icusd_burn_e8s: u64,
+) -> Result<bool, ProtocolError> {
+    if ic_cdk::caller() == Principal::anonymous() {
+        return Err(ProtocolError::AnonymousCallerNotAllowed);
+    }
+    let caller = ic_cdk::api::caller();
+    mutate_state(|s| {
+        rumi_protocol_backend::vault::stability_pool_release_xrp_absorb_preflight_in_state(
+            s,
+            caller,
+            vault_id,
+            icusd_burn_e8s,
+        )
+    })
+}
+
+#[update]
+#[candid_method(update)]
 async fn stability_pool_liquidate_xrp_vault(
     request: XrpSpAbsorbRequest,
 ) -> Result<XrpSpAbsorbResult, ProtocolError> {
@@ -5551,6 +6922,10 @@ async fn stability_pool_liquidate_with_reserves(
     validate_freshness_for_vault(vault_id).await?;
     // Native custody (XRP, SOL, and any future non-ICRC rail) is liquidated
     // MANUALLY (claim-based) only; see `native_custody_liquidation_reject_message`.
+    // Native-XRP absorption goes through the dedicated flow
+    // (stability_pool_preflight_xrp_absorb + stability_pool_liquidate_xrp_vault),
+    // and external liquidators through liquidate_vault_partial /
+    // partial_liquidate_vault.
     if let Some(msg) = native_custody_liquidation_reject_message(vault_id) {
         return Err(ProtocolError::GenericError(msg));
     }
@@ -5702,20 +7077,27 @@ async fn refund_3usd_to_stability_pool(
     // deduplicates on the 3USD ledger instead of double-refunding.
     let refund_nonce = mutate_state(|s| s.next_op_nonce());
 
-    let fee = match rumi_protocol_backend::management::get_or_refresh_fee(three_usd_ledger).await {
-        Ok(f) => f,
-        Err(e) => {
-            // Couldn't determine the fee, so no transfer was attempted. Queue the
-            // gross excess (fee applied at retry time) so it heals automatically.
-            log!(INFO,
+    let fee =
+        match rumi_protocol_backend::management::get_or_refresh_fee(three_usd_ledger).await {
+            Ok(f) => f,
+            Err(e) => {
+                // Couldn't determine the fee, so no transfer was attempted. Queue the
+                // gross excess (fee applied at retry time) so it heals automatically.
+                log!(INFO,
                 "[stability_pool_liquidate_with_reserves] refund of {} 3USD for vault {} to SP {} \
                  deferred (could not fetch ledger fee: {}); enqueued for durable retry.",
                 amount_e8s, vault_id, sp_caller, e
             );
-            enqueue_pending_3usd_refund(three_usd_ledger, sp_caller, amount_e8s, vault_id, refund_nonce);
-            return;
-        }
-    };
+                enqueue_pending_3usd_refund(
+                    three_usd_ledger,
+                    sp_caller,
+                    amount_e8s,
+                    vault_id,
+                    refund_nonce,
+                );
+                return;
+            }
+        };
     if amount_e8s <= fee {
         // Sub-fee dust: a refund can never cover the ledger fee, so there is
         // nothing recoverable to queue. This is unreachable while the 3USD fee
@@ -5758,12 +7140,22 @@ async fn refund_3usd_to_stability_pool(
             // settles or hits MAX_PENDING_RETRIES. Without this the SP's live
             // 3USD balance stays below its tracked aggregate and its withdraw
             // guard blocks every non-sole-holder with `InsufficientPoolBalance`.
-            log!(INFO,
+            log!(
+                INFO,
                 "[stability_pool_liquidate_with_reserves] refund of {} 3USD for vault {} to SP {} \
                  FAILED: {:?}; enqueued for durable retry.",
-                refund_amount, vault_id, sp_caller, e
+                refund_amount,
+                vault_id,
+                sp_caller,
+                e
             );
-            enqueue_pending_3usd_refund(three_usd_ledger, sp_caller, refund_amount, vault_id, refund_nonce);
+            enqueue_pending_3usd_refund(
+                three_usd_ledger,
+                sp_caller,
+                refund_amount,
+                vault_id,
+                refund_nonce,
+            );
         }
     }
 }
@@ -6162,6 +7554,38 @@ async fn settle_xrp_claim_with_tag(
             claim_id,
             destination,
             Some(destination_tag),
+        )
+        .await,
+    )
+}
+
+/// SP auto-settlement sweep: settle a depositor's XRP payout claim to the
+/// XRPL address they registered when opting into XRP absorption. Caller must
+/// be the registered stability pool; the claim must belong to `claimant`;
+/// quarantined claims are refused. Delegates to the same settlement machinery
+/// as the claimant-facing endpoints (per-custody sequence lock +
+/// confirm-before-sign idempotency), so an SP sweep racing a manual settle
+/// click cannot double-pay.
+#[update]
+async fn stability_pool_settle_xrp_claim(
+    claim_id: u64,
+    claimant: Principal,
+    destination: String,
+    destination_tag: Option<u32>,
+) -> Result<String, ProtocolError> {
+    validate_call().await?;
+    let caller = ic_cdk::caller();
+    read_state(|s| {
+        rumi_protocol_backend::vault::validate_sp_settle_xrp_claim_in_state(
+            s, caller, claim_id, claimant,
+        )
+    })?;
+    check_postcondition(
+        rumi_protocol_backend::vault::settle_xrp_claim_as(
+            claimant,
+            claim_id,
+            destination,
+            destination_tag,
         )
         .await,
     )
@@ -7383,6 +8807,10 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
     validate_freshness_for_vault(vault_id).await?;
     // Native custody (XRP, SOL, and any future non-ICRC rail) is liquidated
     // MANUALLY (claim-based) only; see `native_custody_liquidation_reject_message`.
+    // Native-XRP absorption goes through the dedicated flow
+    // (stability_pool_preflight_xrp_absorb + stability_pool_liquidate_xrp_vault),
+    // and external liquidators through liquidate_vault_partial /
+    // partial_liquidate_vault.
     if let Some(msg) = native_custody_liquidation_reject_message(vault_id) {
         return Err(ProtocolError::GenericError(msg));
     }
@@ -9538,28 +10966,115 @@ async fn set_chain_interest_min_realize_e8s(e8s: u128) -> Result<(), ProtocolErr
     Ok(())
 }
 
-/// Pure validation for `set_chains_ecdsa_key_name`: the name must be a supported
-/// IC threshold key (`test_key_1` or `key_1`), and the key may change ONLY while
-/// no chain vault exists — switching the key re-derives every per-vault custody
-/// address, which would orphan already-deposited collateral.
-fn validate_ecdsa_key_change(name: &str, has_chain_vaults: bool) -> Result<(), ProtocolError> {
+/// Whether stable state already contains any known-EVM setup or key-bound
+/// artifact. Key rotation is an install-time operation, not a live rail
+/// operation: even a Disabled/staged chain has contract and address assumptions
+/// tied to the current threshold key.
+fn evm_key_rail_has_setup(state: &State) -> bool {
+    let known_evm = |chain| rumi_protocol_backend::chains::evm::evm_chain_config(chain).is_some();
+    let mc = &state.multi_chain;
+    mc.chain_configs.keys().copied().any(known_evm)
+        || mc.chain_supplies.keys().copied().any(known_evm)
+        || mc.settlement_queues.keys().copied().any(known_evm)
+        || mc
+            .chain_vaults
+            .values()
+            .any(|vault| vault.owner_evm.is_some() || known_evm(vault.collateral_chain))
+        || mc.chain_contracts.keys().copied().any(known_evm)
+        || mc.manual_prices.keys().any(|(chain, _)| known_evm(*chain))
+        || mc.last_observed_block.keys().copied().any(known_evm)
+        || mc.hot_wallet_balance_e18.keys().copied().any(known_evm)
+        || mc.reorg_halted.keys().copied().any(known_evm)
+        || mc.reorg_suspect_streak.keys().copied().any(known_evm)
+        || !mc.evm_owner_nonces.is_empty()
+        || mc
+            .manual_price_set_at_ns
+            .keys()
+            .any(|(chain, _)| known_evm(*chain))
+        || mc.reserve_backing_e8s.keys().copied().any(known_evm)
+        || mc.reserve_usdc_native.keys().copied().any(known_evm)
+        || mc.pending_chain_burn_e8s.keys().copied().any(known_evm)
+        || mc
+            .chain_liquidation_claims
+            .values()
+            .any(|claim| known_evm(claim.chain))
+        || mc.chain_liquidation_configs.keys().copied().any(known_evm)
+        || mc.chain_debt_configs.keys().copied().any(known_evm)
+        || mc.chain_bad_debt_e8s.keys().copied().any(known_evm)
+        || mc
+            .settled_pending_burn_proofs
+            .values()
+            .any(|proof| known_evm(proof.chain_id))
+        || mc
+            .settled_reserve_burn_proofs
+            .values()
+            .any(|proof| known_evm(proof.chain_id))
+        || mc
+            .chain_bad_debt_circuit_threshold_e8s
+            .keys()
+            .copied()
+            .any(known_evm)
+        || mc
+            .chain_bad_debt_circuit_tripped_at_ns
+            .keys()
+            .copied()
+            .any(known_evm)
+        || mc.awaiting_deposit_cursor.keys().copied().any(known_evm)
+        || mc
+            .hot_wallet_balance_refreshed_at_ns
+            .keys()
+            .copied()
+            .any(known_evm)
+        || state.evm_rpc_principal_override.is_some()
+}
+
+fn validate_ecdsa_key_change(
+    name: &str,
+    current_name: &str,
+    rail_has_setup: bool,
+) -> Result<bool, ProtocolError> {
     if name != "test_key_1" && name != "key_1" {
         return Err(ProtocolError::ChainAdmin(format!(
             "unsupported ecdsa key name '{name}' (expected test_key_1 or key_1)"
         )));
     }
-    if has_chain_vaults {
+    if name == current_name {
+        return Ok(false);
+    }
+    if rail_has_setup {
         return Err(ProtocolError::ChainAdmin(
-            "cannot change the chains ECDSA key while chain vaults exist (it re-derives + orphans every per-vault custody address)".to_string(),
+            "cannot change the chains ECDSA key after any EVM rail setup or key-bound state exists; set it on a truly fresh rail before registration, binding, derivation, proofs, settlement, or vault creation".to_string(),
         ));
     }
-    Ok(())
+    Ok(true)
+}
+
+fn apply_fresh_ecdsa_key_change_in_state(
+    state: &mut State,
+    name: &str,
+    has_known_cached_address: bool,
+) -> Result<bool, ProtocolError> {
+    let changed = validate_ecdsa_key_change(
+        name,
+        &state.chains_ecdsa_key_name,
+        evm_key_rail_has_setup(state) || has_known_cached_address,
+    )?;
+    if !changed {
+        return Ok(false);
+    }
+    state.chains_ecdsa_key_name = name.to_string();
+    // Unknown-chain/orphan cache proofs are not authoritative setup, but clear
+    // every entry defensively on the only allowed fresh change.
+    state.multi_chain.hot_wallet_balance_e18.clear();
+    state.multi_chain.hot_wallet_balance_refreshed_at_ns.clear();
+    Ok(true)
 }
 
 /// Set the production tECDSA key name for the EVM chains rail (developer-gated).
 /// Intended for a FRESH production canister: set `key_1` BEFORE registering any
 /// chain, so all custody/settlement/treasury addresses derive from the
-/// production threshold key. Rejected once any chain vault exists (orphan guard).
+/// production threshold key. Rejected once any EVM setup or key-bound state
+/// exists, even if a staged chain is still Disabled and has no vaults.
 /// kvg63 staging keeps the default `test_key_1`.
 #[candid_method(update)]
 #[update]
@@ -9568,12 +11083,37 @@ fn set_chains_ecdsa_key_name(name: String) -> Result<(), ProtocolError> {
     if read_state(|s| s.developer_principal != caller) {
         return Err(ProtocolError::ChainAdmin("not developer".into()));
     }
-    let has_vaults = read_state(|s| !s.multi_chain.chain_vaults.is_empty());
-    validate_ecdsa_key_change(&name, has_vaults)?;
-    mutate_state(|s| s.chains_ecdsa_key_name = name.clone());
+    let has_known_cached_address =
+        rumi_protocol_backend::chains::evm::tecdsa::has_cached_address_for_known_evm_chain();
+    let changed = mutate_state(|state| {
+        apply_fresh_ecdsa_key_change_in_state(state, &name, has_known_cached_address)
+    })?;
+    if !changed {
+        return Ok(());
+    }
+    // De-scaffold pass (2026-08-20): a successful key change invalidates the
+    // settlement/interest-treasury/reserve address caches (chains/evm/tecdsa.rs).
+    // They are keyed only by ChainId, not by the key name, so a warm entry
+    // would otherwise keep returning an address derived from the OLD key.
+    // Only reached on the success path: the fresh-rail guard above already
+    // rejected a bad name or any known-EVM setup/key-bound state, so a
+    // rejected call never clears anything.
+    //
+    // Security review follow-up (F8): clearing the caches here is defense in
+    // depth, not the actual invariant. An async derive that started under
+    // the OLD key and is still in flight (suspended at its management-canister
+    // await) when this runs would otherwise resume and write a stale address
+    // into the cache THIS CALL just cleared. `bump_ecdsa_key_generation()`
+    // closes that gap: every `cached_*` fn in tecdsa.rs captures the
+    // generation before it starts deriving and discards its result (rather
+    // than caching or returning it) if the generation moved on while it was
+    // suspended. See tecdsa.rs's "Key-generation guard" section for the full
+    // interleaving walkthrough.
+    rumi_protocol_backend::chains::evm::tecdsa::clear_address_caches();
+    rumi_protocol_backend::chains::evm::tecdsa::bump_ecdsa_key_generation();
     log!(
         INFO,
-        "[set_chains_ecdsa_key_name] chains EVM tECDSA key set to {}",
+        "[set_chains_ecdsa_key_name] fresh EVM rail tECDSA key set to {}; address caches and hot-wallet proofs cleared",
         name
     );
     Ok(())
@@ -11051,14 +12591,19 @@ async fn add_collateral_token(
     // `None` and let the consent-message path fall back to a generic label
     // rather than a wrong "ICP". The symbol can be backfilled later via
     // `backfill_collateral_symbols`.
-    let symbol_opt: Option<String> =
-        match ic_cdk::call::<(), (String,)>(arg.ledger_canister_id, "icrc1_symbol", ()).await {
-            Ok((s,)) => Some(s),
-            Err((code, msg)) => {
-                log!(INFO, "[add_collateral_token] WARNING: Failed to query icrc1_symbol from {}: {:?} {} — collateral registered without a symbol (backfill later)", arg.ledger_canister_id, code, msg);
-                None
-            }
-        };
+    let symbol_opt: Option<String> = match ic_cdk::call::<(), (String,)>(
+        arg.ledger_canister_id,
+        "icrc1_symbol",
+        (),
+    )
+    .await
+    {
+        Ok((s,)) => Some(s),
+        Err((code, msg)) => {
+            log!(INFO, "[add_collateral_token] WARNING: Failed to query icrc1_symbol from {}: {:?} {} — collateral registered without a symbol (backfill later)", arg.ledger_canister_id, code, msg);
+            None
+        }
+    };
 
     use rumi_protocol_backend::state::{CollateralConfig, CollateralStatus};
 
@@ -12349,15 +13894,106 @@ mod chain_vault_param_tests {
 
     #[test]
     fn ecdsa_key_change_rules() {
-        use super::validate_ecdsa_key_change;
-        // Both supported key names are accepted when no vault exists.
-        assert!(validate_ecdsa_key_change("key_1", false).is_ok());
-        assert!(validate_ecdsa_key_change("test_key_1", false).is_ok());
+        use super::{apply_fresh_ecdsa_key_change_in_state, State};
+        use rumi_protocol_backend::chains::config::{
+            ChainConfigV3, ChainId, ChainStatus, GasStrategy,
+        };
+
+        // A truly fresh rail may select the production key once.
+        let mut fresh = State::default();
+        assert_eq!(fresh.chains_ecdsa_key_name, "test_key_1");
+        assert!(
+            apply_fresh_ecdsa_key_change_in_state(&mut fresh, "key_1", false)
+                .expect("fresh key change")
+        );
+        assert_eq!(fresh.chains_ecdsa_key_name, "key_1");
+        // Idempotently setting the already-selected key is not a rotation.
+        assert!(
+            !apply_fresh_ecdsa_key_change_in_state(&mut fresh, "key_1", false)
+                .expect("same-key no-op")
+        );
+
         // An unknown key name is rejected (typo/foot-gun guard).
-        assert!(validate_ecdsa_key_change("bogus_key", false).is_err());
-        // Changing the key while chain vaults exist is blocked (would re-derive +
-        // orphan every custody address).
-        assert!(validate_ecdsa_key_change("key_1", true).is_err());
+        assert!(apply_fresh_ecdsa_key_change_in_state(&mut fresh, "bogus_key", false).is_err());
+
+        // A Disabled/staged known EVM chain with zero vaults is already setup.
+        // Rotation must reject without changing the key or staged row.
+        let mut staged = State::default();
+        let chain = ChainId(1030);
+        staged.multi_chain.chain_configs.insert(
+            chain,
+            ChainConfigV3 {
+                chain_id: chain,
+                display_name: "Conflux mainnet staged".into(),
+                rpc_endpoints: vec!["https://a.invalid".into(), "https://b.invalid".into()],
+                finality_depth: 400,
+                gas_strategy: GasStrategy::EvmEip1559 {
+                    max_priority_fee_gwei: 1,
+                    max_fee_gwei_ceiling: 200,
+                },
+                chain_native_decimals: 18,
+                registered_at_ns: 1,
+                status: ChainStatus::Disabled,
+                burn_watch_poll_enabled: false,
+                min_quorum_providers: Some(2),
+            },
+        );
+        let before_len = staged.multi_chain.chain_configs.len();
+        let error = apply_fresh_ecdsa_key_change_in_state(&mut staged, "key_1", false)
+            .expect_err("staged chain must make key immutable");
+        assert!(format!("{error:?}").contains("any EVM rail setup"));
+        assert_eq!(staged.chains_ecdsa_key_name, "test_key_1");
+        assert_eq!(staged.multi_chain.chain_configs.len(), before_len);
+        let unchanged = staged
+            .multi_chain
+            .chain_configs
+            .get(&chain)
+            .expect("staged row preserved");
+        assert_eq!(unchanged.status, ChainStatus::Disabled);
+        assert_eq!(unchanged.finality_depth, 400);
+        assert_eq!(unchanged.rpc_endpoints.len(), 2);
+
+        // Unknown-chain orphan proofs do not pretend the known EVM rail is
+        // configured, but the only allowed fresh change clears them anyway.
+        let mut orphaned = State::default();
+        let orphan_chain = ChainId(999_999);
+        orphaned
+            .multi_chain
+            .hot_wallet_balance_e18
+            .insert(orphan_chain, 123);
+        orphaned
+            .multi_chain
+            .hot_wallet_balance_refreshed_at_ns
+            .insert(orphan_chain, 456);
+        assert!(
+            apply_fresh_ecdsa_key_change_in_state(&mut orphaned, "key_1", false)
+                .expect("fresh change clears orphan proof")
+        );
+        assert!(orphaned.multi_chain.hot_wallet_balance_e18.is_empty());
+        assert!(orphaned
+            .multi_chain
+            .hot_wallet_balance_refreshed_at_ns
+            .is_empty());
+
+        // Global multi-chain cursors/dedup state can belong to Solana/XRP and
+        // are not themselves bound to the EVM threshold key. They must not
+        // prevent an otherwise-fresh EVM rail from selecting its initial key.
+        let mut native_only = State::default();
+        native_only.chain_vault_id_counter = 17;
+        native_only
+            .multi_chain
+            .processed_burn_keys
+            .entry(42)
+            .or_default()
+            .insert("native-chain-proof".into());
+        native_only
+            .multi_chain
+            .settled_settlement_burn_logs
+            .insert("native-chain-burn".into());
+        assert!(
+            apply_fresh_ecdsa_key_change_in_state(&mut native_only, "key_1", false)
+                .expect("unrelated native-chain state is not EVM setup")
+        );
     }
 
     #[test]
@@ -12497,6 +14133,95 @@ mod sol_p3_tests {
         // negative one.
         assert!(native_custody_liquidation_reject_message(999).is_none());
     }
+}
+
+/// Pins the EIP-712 domain-binding prerequisite for `open_chain_vault_evm`.
+/// `verify_intent_ctx` resolves the bound
+/// `chain_contracts` entry BEFORE it ever calls `eip712::verify_intent` (the
+/// contract address is the EIP-712 domain separator, so it has to be resolved
+/// first), so an unbound chain rejects with "no contract set" on ANY
+/// signature. Passing this prerequisite is not sufficient for Conflux mainnet:
+/// the authoritative bounded public-risk predicate is enforced before nonce
+/// consumption and again after the custody-derivation await.
+#[cfg(test)]
+mod evm_open_public_gate_tests {
+    use super::{replace_state, verify_intent_ctx, State};
+    use rumi_protocol_backend::chains::config::{ChainConfigV3, ChainId, ChainStatus, GasStrategy};
+    use rumi_protocol_backend::chains::evm::eip712::{IntentAction, VaultIntent};
+
+    const CFX_MAINNET: ChainId = ChainId(1030);
+
+    fn registered_chain_config() -> ChainConfigV3 {
+        ChainConfigV3 {
+            chain_id: CFX_MAINNET,
+            display_name: "Conflux mainnet".to_string(),
+            rpc_endpoints: vec!["https://evm.confluxrpc.com".to_string()],
+            finality_depth: 400,
+            gas_strategy: GasStrategy::EvmEip1559 {
+                max_priority_fee_gwei: 1,
+                max_fee_gwei_ceiling: 100,
+            },
+            chain_native_decimals: 18,
+            registered_at_ns: 0,
+            status: ChainStatus::Registered,
+            burn_watch_poll_enabled: false,
+            min_quorum_providers: None,
+        }
+    }
+
+    fn dummy_open_intent() -> VaultIntent {
+        VaultIntent {
+            action: IntentAction::Open.as_u8(),
+            chain_id: CFX_MAINNET.0 as u64,
+            owner: "0x000000000000000000000000000000000000c0de".to_string(),
+            vault_id: 0,
+            collateral_wei: 1_000_000_000_000_000_000,
+            debt_e8s: 100_000_000,
+            recipient: "0x000000000000000000000000000000000000c0de".to_string(),
+            nonce: 0,
+            deadline_secs: u64::MAX,
+        }
+    }
+
+    /// The core pin: chain registered + a fresh manual price present, but NO
+    /// `set_chain_contract` binding, still rejects with the contract-specific
+    /// error. It does so WITHOUT needing a validly-signed intent (garbage
+    /// signature bytes), because the contract lookup happens strictly before
+    /// signature verification.
+    #[test]
+    fn open_rejects_when_no_contract_bound_even_with_registered_chain_and_fresh_price() {
+        let mut state = State::default();
+        state
+            .multi_chain
+            .chain_configs
+            .insert(CFX_MAINNET, registered_chain_config());
+        // A price IS present (loose "any price" gate, no liquidation config row
+        // yet to enforce freshness), proving price presence alone is not the
+        // gate either.
+        state
+            .multi_chain
+            .set_manual_price(CFX_MAINNET, "CFX".to_string(), 8_000_000, 1_000);
+        replace_state(state);
+
+        let err = verify_intent_ctx(
+            &dummy_open_intent(),
+            b"not-a-real-signature",
+            IntentAction::Open,
+        )
+        .expect_err("must reject with no chain_contracts entry");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("no contract set"),
+            "expected the contract-binding rejection, got: {msg}"
+        );
+    }
+
+    // A second test proving that binding the contract clears this specific
+    // gate (and only fails downstream on signature verification) would need
+    // `ic_cdk::api::time()`, which traps outside a real canister. That
+    // half of the ordering claim is left to the PocketIC suites (e.g.
+    // `conflux_espace_happy_path_pic`, which opens a vault end to end against
+    // a bound contract with a real signature).
 }
 
 #[cfg(test)]
@@ -12903,6 +14628,70 @@ fn check_candid_interface_compatibility() {
 
     let new_interface = __export_service();
 
+    // The anonymous launch projection may report the defensively-distinct
+    // endpoint COUNT, but must never expose configured URLs: operator-supplied
+    // RPC URLs may carry API keys or query credentials. Keep this structural
+    // assertion next to the source-generated Candid contract so a future DTO
+    // edit cannot accidentally make those URLs public.
+    let launch_status_start = new_interface
+        .find("type ChainPublicLaunchStatus = record {")
+        .expect("ChainPublicLaunchStatus must be present in exported Candid");
+    let launch_status_tail = &new_interface[launch_status_start..];
+    let launch_status_end = launch_status_tail
+        .find("};")
+        .expect("ChainPublicLaunchStatus record must terminate");
+    let launch_status_candid = &launch_status_tail[..launch_status_end];
+    assert!(
+        !launch_status_candid.contains("rpc_endpoints"),
+        "anonymous ChainPublicLaunchStatus must not expose configured RPC URLs"
+    );
+    assert!(
+        !launch_status_candid.lines().any(|line| {
+            (line.contains("rpc_") || line.contains("endpoint")) && line.contains("text")
+        }),
+        "anonymous ChainPublicLaunchStatus must not expose any RPC/endpoint text field"
+    );
+
+    let endpoint_digest_start = new_interface
+        .find("type ChainRpcEndpointSetDigestV1 = record {")
+        .expect("ChainRpcEndpointSetDigestV1 must be present in exported Candid");
+    let endpoint_digest_tail = &new_interface[endpoint_digest_start..];
+    let endpoint_digest_end = endpoint_digest_tail
+        .find("};")
+        .expect("ChainRpcEndpointSetDigestV1 record must terminate");
+    let endpoint_digest_candid = &endpoint_digest_tail[..endpoint_digest_end];
+    assert!(
+        !endpoint_digest_candid.contains("rpc_endpoints")
+            && !endpoint_digest_candid.contains("url"),
+        "RPC endpoint digest projection must never expose configured URL text"
+    );
+    let endpoint_digest_method = new_interface
+        .lines()
+        .find(|line| line.contains("get_chain_rpc_endpoint_set_digest :"))
+        .expect("RPC endpoint digest method must be present");
+    assert!(
+        endpoint_digest_method.trim_end().ends_with(");")
+            && !endpoint_digest_method.contains(" query;"),
+        "RPC endpoint digest surface must remain a replicated update method"
+    );
+    for forbidden_scan_field in [
+        "current_debt_e8s",
+        "current_debt_including_pending_e8s",
+        "global_internal_",
+        "global_processed_burn_key_count",
+        "active_settlement_op",
+    ] {
+        assert!(
+            !launch_status_candid.contains(forbidden_scan_field),
+            "ChainPublicLaunchStatus must stay fixed-work; found scan-backed field {forbidden_scan_field}"
+        );
+    }
+    assert!(
+        new_interface.contains("list_chain_vaults_page :")
+            && new_interface.contains("opt nat64, nat16"),
+        "bounded chain-vault cursor page must be present in public Candid"
+    );
+
     // Allow regenerating the .did from the live source: `RUMI_REGEN_DID=1
     // cargo test ... check_candid_interface_compatibility`. Skips the equality
     // assertion and writes the canonical interface back to the file instead.
@@ -12924,7 +14713,11 @@ fn check_candid_interface_compatibility() {
 
 #[cfg(test)]
 mod inc12_liquidation_config_tests {
-    use super::validate_liquidation_factory_pair_match;
+    use super::{
+        validate_chain_liquidation_config_inputs_in_state, validate_liquidation_factory_pair_match,
+        State,
+    };
+    use rumi_protocol_backend::chains::config::{ChainConfigV3, ChainId, ChainStatus, GasStrategy};
     use rumi_protocol_backend::chains::liquidation_config::{ChainLiquidationConfigV1, DexKind};
 
     fn cfg() -> ChainLiquidationConfigV1 {
@@ -12945,6 +14738,33 @@ mod inc12_liquidation_config_tests {
             settle_stable_decimals: 18,
             deadline_secs: 180,
         }
+    }
+
+    fn state_with_status(status: ChainStatus) -> State {
+        let mut state = State::default();
+        let chain = ChainId(1030);
+        state.multi_chain.chain_configs.insert(
+            chain,
+            ChainConfigV3 {
+                chain_id: chain,
+                display_name: "ConfluxESpaceMainnet".into(),
+                rpc_endpoints: vec![
+                    "https://provider-a.invalid".into(),
+                    "https://provider-b.invalid".into(),
+                ],
+                finality_depth: 400,
+                gas_strategy: GasStrategy::EvmEip1559 {
+                    max_priority_fee_gwei: 1,
+                    max_fee_gwei_ceiling: 200,
+                },
+                chain_native_decimals: 18,
+                registered_at_ns: 1,
+                status,
+                burn_watch_poll_enabled: true,
+                min_quorum_providers: Some(2),
+            },
+        );
+        state
     }
 
     #[test]
@@ -12975,31 +14795,206 @@ mod inc12_liquidation_config_tests {
         .expect_err("zero factory pair rejects");
         assert!(format!("{err:?}").contains("invalid factory pair"));
     }
-}
-
-#[cfg(test)]
-mod inc5_reconciliation_tests {
-    use super::normalize_reconciliation_proof;
 
     #[test]
-    fn reconciliation_proof_accepts_trimmed_nonempty_text() {
-        assert_eq!(
-            normalize_reconciliation_proof("  cfx burn tx 0xabc:7  ").expect("valid proof"),
-            "cfx burn tx 0xabc:7"
+    fn enabled_liquidation_config_can_be_staged_while_chain_is_disabled() {
+        let state = state_with_status(ChainStatus::Disabled);
+        assert!(
+            validate_chain_liquidation_config_inputs_in_state(&state, ChainId(1030), &cfg())
+                .is_ok()
         );
     }
 
     #[test]
-    fn reconciliation_proof_rejects_empty_text() {
-        let err = normalize_reconciliation_proof("   ").unwrap_err();
-        assert!(format!("{err:?}").contains("proof text required"));
+    fn liquidation_config_rejects_unknown_chain_without_mutation() {
+        let state = State::default();
+        let before = state.multi_chain.chain_liquidation_configs.clone();
+        let error =
+            validate_chain_liquidation_config_inputs_in_state(&state, ChainId(1030), &cfg())
+                .expect_err("known compile-time chain without a registered row is unknown");
+        assert!(format!("{error:?}").contains("unknown chain 1030"));
+        assert_eq!(state.multi_chain.chain_liquidation_configs, before);
     }
 
     #[test]
-    fn reconciliation_proof_rejects_text_over_512_bytes() {
-        let proof = "x".repeat(513);
-        let err = normalize_reconciliation_proof(&proof).unwrap_err();
-        assert!(format!("{err:?}").contains("proof text too long"));
+    fn liquidation_config_rejects_invalid_penalty_budget_without_mutation() {
+        let state = state_with_status(ChainStatus::Disabled);
+        let before = state.multi_chain.chain_liquidation_configs.clone();
+        let mut invalid = cfg();
+        invalid.slippage_cap_bps = 1_000;
+        invalid.max_dex_oracle_divergence_bps = 500;
+        let error =
+            validate_chain_liquidation_config_inputs_in_state(&state, ChainId(1030), &invalid)
+                .expect_err("penalty budget must be strictly below configured penalty");
+        assert!(format!("{error:?}").contains("penalty cushion"));
+        assert_eq!(state.multi_chain.chain_liquidation_configs, before);
+    }
+}
+
+/// De-scaffold pass (2026-08-20): the legacy freeform-proof-string
+/// reconciliation endpoints (`settle_pending_chain_burn`, `settle_reserve_burn`)
+/// are hard-disabled in favor of the receipt-verified `_with_proof` variants.
+/// These are plain unit tests (no PocketIC / caller identity needed) because
+/// the disabled bodies no longer read `ic_cdk::caller()` at all: they refuse
+/// unconditionally, for every caller, before touching state. A PocketIC-level
+/// test proving the SAME refusal through the real candid boundary as the
+/// developer principal lives in
+/// `tests/chains_legacy_reconciliation_disabled_pic.rs`.
+#[cfg(test)]
+mod legacy_reconciliation_hard_disabled_tests {
+    use super::{settle_pending_chain_burn, settle_reserve_burn, ProtocolError};
+    use rumi_protocol_backend::chains::config::ChainId;
+
+    #[test]
+    fn settle_pending_chain_burn_always_refuses() {
+        let err = settle_pending_chain_burn(ChainId(1030), 100, "any proof".to_string())
+            .expect_err("legacy endpoint must refuse");
+        match err {
+            ProtocolError::ChainAdmin(msg) => {
+                assert!(msg.contains("disabled"), "msg={msg}");
+                assert!(
+                    msg.contains("settle_pending_chain_burn_with_proof"),
+                    "msg should point at the replacement: msg={msg}"
+                );
+            }
+            other => panic!("expected ChainAdmin, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn settle_reserve_burn_always_refuses() {
+        let err = settle_reserve_burn(ChainId(1030), 100, "any proof".to_string())
+            .expect_err("legacy endpoint must refuse");
+        match err {
+            ProtocolError::ChainAdmin(msg) => {
+                assert!(msg.contains("disabled"), "msg={msg}");
+                assert!(
+                    msg.contains("settle_reserve_burn_with_proof"),
+                    "msg should point at the replacement: msg={msg}"
+                );
+            }
+            other => panic!("expected ChainAdmin, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn settle_pending_chain_burn_refuses_regardless_of_amount_or_proof_shape() {
+        // Zero amount, empty proof, huge amount, garbage proof: every input
+        // hits the same unconditional refusal (there is no longer any
+        // validation branch to exercise).
+        assert!(settle_pending_chain_burn(ChainId(71), 0, String::new()).is_err());
+        assert!(settle_pending_chain_burn(ChainId(71), u128::MAX, "x".repeat(9999)).is_err());
+    }
+
+    #[test]
+    fn settle_reserve_burn_refuses_regardless_of_amount_or_proof_shape() {
+        assert!(settle_reserve_burn(ChainId(71), 0, String::new()).is_err());
+        assert!(settle_reserve_burn(ChainId(71), u128::MAX, "x".repeat(9999)).is_err());
+    }
+}
+
+/// De-scaffold pass (2026-08-20): the additive `get_evm_rpc_principal` query.
+#[cfg(test)]
+mod get_evm_rpc_principal_tests {
+    use super::{get_evm_rpc_principal, replace_state, State};
+    use rumi_protocol_backend::chains::evm::evm_rpc::default_evm_rpc_principal;
+
+    #[test]
+    fn reports_default_when_no_override_set() {
+        replace_state(State::default());
+        let info = get_evm_rpc_principal();
+        assert_eq!(info.effective, default_evm_rpc_principal());
+        assert!(!info.overridden);
+    }
+
+    #[test]
+    fn reports_override_and_flags_it() {
+        use candid::Principal;
+        replace_state(State::default());
+        let mock = Principal::from_slice(&[9; 29]);
+        super::mutate_state(|s| s.evm_rpc_principal_override = Some(mock));
+        let info = get_evm_rpc_principal();
+        assert_eq!(info.effective, mock);
+        assert!(info.overridden);
+    }
+}
+
+#[cfg(test)]
+mod set_evm_rpc_principal_tests {
+    use super::apply_fresh_evm_rpc_principal_change_in_state;
+    use candid::Principal;
+    use rumi_protocol_backend::chains::config::{ChainConfigV3, ChainId, ChainStatus, GasStrategy};
+    use rumi_protocol_backend::chains::evm::evm_rpc::default_evm_rpc_principal;
+    use rumi_protocol_backend::state::State;
+
+    #[test]
+    fn fresh_override_is_one_time_idempotent_and_clears_orphan_proofs() {
+        let mut state = State::default();
+        let mock = Principal::from_slice(&[9; 29]);
+        let orphan = ChainId(999_999);
+        state.multi_chain.hot_wallet_balance_e18.insert(orphan, 123);
+        state
+            .multi_chain
+            .hot_wallet_balance_refreshed_at_ns
+            .insert(orphan, 456);
+
+        assert!(
+            apply_fresh_evm_rpc_principal_change_in_state(&mut state, mock)
+                .expect("fresh override")
+        );
+        assert_eq!(state.evm_rpc_principal_override, Some(mock));
+        assert!(state.multi_chain.hot_wallet_balance_e18.is_empty());
+        assert!(state
+            .multi_chain
+            .hot_wallet_balance_refreshed_at_ns
+            .is_empty());
+        assert!(
+            !apply_fresh_evm_rpc_principal_change_in_state(&mut state, mock)
+                .expect("same-principal no-op")
+        );
+        assert!(apply_fresh_evm_rpc_principal_change_in_state(
+            &mut state,
+            default_evm_rpc_principal()
+        )
+        .is_err());
+        assert_eq!(state.evm_rpc_principal_override, Some(mock));
+    }
+
+    #[test]
+    fn disabled_staged_evm_chain_rejects_override_without_mutation() {
+        let mut state = State::default();
+        let chain = ChainId(1030);
+        state.multi_chain.chain_configs.insert(
+            chain,
+            ChainConfigV3 {
+                chain_id: chain,
+                display_name: "Conflux mainnet staged".into(),
+                rpc_endpoints: vec!["https://a.invalid".into(), "https://b.invalid".into()],
+                finality_depth: 400,
+                gas_strategy: GasStrategy::EvmEip1559 {
+                    max_priority_fee_gwei: 1,
+                    max_fee_gwei_ceiling: 200,
+                },
+                chain_native_decimals: 18,
+                registered_at_ns: 1,
+                status: ChainStatus::Disabled,
+                burn_watch_poll_enabled: false,
+                min_quorum_providers: Some(2),
+            },
+        );
+        let mock = Principal::from_slice(&[9; 29]);
+        let error = apply_fresh_evm_rpc_principal_change_in_state(&mut state, mock)
+            .expect_err("staged EVM config makes RPC principal immutable");
+        assert!(format!("{error:?}").contains("any EVM rail setup"));
+        assert_eq!(state.evm_rpc_principal_override, None);
+        assert_eq!(
+            rumi_protocol_backend::chains::evm::evm_rpc::evm_rpc_principal_in_state(&state),
+            default_evm_rpc_principal()
+        );
+        assert_eq!(
+            state.multi_chain.chain_configs.get(&chain).unwrap().status,
+            ChainStatus::Disabled
+        );
     }
 }
 

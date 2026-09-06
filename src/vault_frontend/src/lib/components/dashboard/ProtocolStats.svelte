@@ -4,6 +4,7 @@
   import { protocolService } from '$lib/services/protocol';
   import { publicActor } from '$lib/services/protocol/apiClient';
   import { collateralStore, COLLATERAL_DISPLAY_ORDER } from '$lib/stores/collateralStore';
+  import { isSunsetCollateralPrincipal } from '$lib/components/stability-pool/sunsetCollateralPolicy';
   import { get } from 'svelte/store';
   import { TokenService } from '$lib/services/tokenService';
   import { CANISTER_IDS } from '$lib/config';
@@ -38,8 +39,8 @@
   let rmrCeilingCr = 1.5;
   let currentRedemptionFee = 0;
 
-  // Per-collateral totals: { symbol, amount (human-readable), color, price }[]
-  let collateralTotals: { symbol: string; amount: number; color: string; price: number }[] = [];
+  // Per-collateral totals: { symbol, amount (human-readable), color, price, isSunset }[]
+  let collateralTotals: { symbol: string; amount: number; color: string; price: number; isSunset: boolean }[] = [];
 
   const protocolPrincipal = Principal.fromText(CANISTER_IDS.PROTOCOL);
 
@@ -108,6 +109,7 @@
             amount: Number(t.total_collateral) / Math.pow(10, decimals),
             color: info?.color ?? '#94A3B8',
             price: Number(t.price || 0),
+            isSunset: isSunsetCollateralPrincipal(info?.ledgerCanisterId ?? ct),
           };
         })
         .filter((t: any) => t.amount > 0)
@@ -212,7 +214,10 @@
       <span class="stat-value-stack">
         {#if collateralTotals.length > 0}
           {#each collateralTotals as ct}
-            <span><span class="collateral-dot" style="background:{ct.color}"></span> {formatTokenBalance(ct.amount)} {ct.symbol}</span>
+            <span
+              class:sunset={ct.isSunset}
+              title={ct.isSunset ? `${ct.symbol} is being sunset (winding down, no new vaults)` : undefined}
+            ><span class="collateral-dot" style="background:{ct.color}"></span> {formatTokenBalance(ct.amount)} {ct.symbol}</span>
           {/each}
         {:else}
           <span>{formatNumber(status?.totalIcpMargin || 0)} ICP</span>
@@ -345,6 +350,10 @@
     height: 0.375rem;
     border-radius: 9999px;
     vertical-align: middle;
+  }
+  .stat-value-stack .sunset {
+    opacity: 0.45;
+    font-weight: 500;
   }
   .mode-badge {
     display: inline-block;

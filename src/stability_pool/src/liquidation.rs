@@ -433,6 +433,24 @@ pub(crate) fn mark_native_xrp_absorb_error_in_state(
     }
 }
 
+/// Abandon a native-XRP absorb attempt that reserved a backend preflight but
+/// has NOT burned any icUSD: drop the local intent and hand the reservation
+/// back. Every call site is positioned strictly before the burn (or on a burn
+/// that returned an error, which the local clear already treats as unburned),
+/// so releasing can never strand an in-flight burn.
+async fn abandon_unburned_native_xrp_absorb(
+    io: &mut dyn NativeXrpAbsorbIo,
+    protocol_id: Principal,
+    vault_id: u64,
+    icusd_burn_e8s: u64,
+) {
+    mutate_state(|s| {
+        clear_unburned_native_xrp_absorb_intent_in_state(s, vault_id);
+    });
+    io.release_xrp_absorb_preflight(protocol_id, vault_id, icusd_burn_e8s)
+        .await;
+}
+
 pub(crate) fn clear_unburned_native_xrp_absorb_intent_in_state(
     state: &mut StabilityPoolState,
     vault_id: u64,
@@ -480,6 +498,24 @@ pub(crate) fn apply_native_xrp_absorb_success_in_state_at(
     )?;
     state.take_pending_native_xrp_absorb(intent.vault_id);
 
+    // Emit the same audit event the generic ICRC path emits. Without it the
+    // only Explorer trace of an absorb is `LiquidationNotification`, which
+    // carries a bare vault count and cannot distinguish a completed absorb
+    // from one that failed. `collateral_gained` is in drops (6-decimal), so
+    // consumers must format it with the collateral's own decimals.
+    let stables_consumed_e8s: u64 = intent.stables_consumed.values().sum();
+    state.push_event_at(
+        state.protocol_canister_id,
+        PoolEventType::LiquidationExecuted {
+            vault_id: intent.vault_id,
+            stables_consumed_e8s,
+            collateral_gained: intent.collateral_received_drops,
+            collateral_type: intent.collateral_type,
+            success: true,
+        },
+        now_ns,
+    );
+
     Ok(LiquidationResult {
         vault_id: intent.vault_id,
         stables_consumed: intent.stables_consumed.clone(),
@@ -520,6 +556,229 @@ pub(crate) trait NativeXrpAbsorbIo {
         protocol_id: Principal,
         request: XrpSpAbsorbRequest,
     ) -> Result<XrpSpAbsorbResult, StabilityPoolError>;
+
+    /// Hand an unburned reservation back to the backend. Best-effort: the
+    /// caller is already on a failure path, and the reservation expires on its
+    /// own, so a failed release is logged rather than propagated.
+    async fn release_xrp_absorb_preflight(
+        &mut self,
+        protocol_id: Principal,
+        vault_id: u64,
+        icusd_burn_e8s: u64,
+    );
+}
+
+/// IO seam for the native-XRP auto-settlement sweep, so the tick logic is
+/// unit-testable off-canister (mirrors `NativeXrpAbsorbIo`).
+#[async_trait::async_trait(?Send)]
+pub(crate) trait NativeXrpSettleSweepIo {
+    /// Backend `stability_pool_xrp_claim_outstanding`: does the claim still
+    /// exist for this claimant? `false` means settled+validated (or resolved
+    /// by an admin), so the SP-side reminder can be dropped.
+    async fn claim_outstanding(
+        &mut self,
+        protocol: Principal,
+        claim_id: u64,
+        claimant: Principal,
+    ) -> Result<bool, StabilityPoolError>;
+
+    /// Backend `stability_pool_settle_xrp_claim`: sign + submit the XRPL
+    /// Payment for the claim to the depositor's registered address. Repeat
+    /// calls are safe: the backend confirms a previously-submitted Payment
+    /// before ever signing a new one.
+    async fn settle_on_behalf(
+        &mut self,
+        protocol: Principal,
+        claim_id: u64,
+        claimant: Principal,
+        destination: String,
+        destination_tag: Option<u32>,
+    ) -> Result<String, StabilityPoolError>;
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct NativeXrpSettleSweepSummary {
+    pub examined: usize,
+    pub acked: usize,
+    pub submitted: usize,
+    pub failed: usize,
+    /// Submits that XRPL rejected with `tefPAST_SEQ`. The Payment is almost
+    /// certainly ON-LEDGER: IC https-outcalls fan out to every replica, all
+    /// POST the same signed blob, and the nodes that lose the race report
+    /// "sequence already used" against our own applied transaction. The claim
+    /// keeps its recorded settlement, so the next tick confirms it.
+    pub pending_confirmation: usize,
+    /// Cursor for the next tick: the last claim id this tick examined.
+    pub last_claim_id: Option<u64>,
+}
+
+/// True when a settle error is XRPL's `tefPAST_SEQ`, which for this rail means
+/// "already applied" rather than "did not send" (see
+/// `NativeXrpSettleSweepSummary::pending_confirmation`).
+fn is_past_sequence_submit(error: &StabilityPoolError) -> bool {
+    matches!(
+        error,
+        StabilityPoolError::LiquidationFailed { reason, .. } if reason.contains("tefPAST_SEQ")
+    )
+}
+
+/// One bounded tick of the native-XRP payout settlement sweep.
+///
+/// Depositors opted into XRP absorption by registering an XRPL address; the
+/// product promise is that liquidation proceeds REACH that address, not that a
+/// claim waits for a manual click. This walks pending payouts in claim-id
+/// order, starting after `start_after_claim_id` and wrapping, so one
+/// perpetually-failing claim (bad address, quarantined backend claim) cannot
+/// starve the rest.
+///
+/// Per payout: if the backend no longer knows the claim it was settled and
+/// validated, so the local reminder is dropped; otherwise settlement is
+/// (re)submitted with the stored address. Records are never removed on the
+/// submit path — a later tick observes the validated settlement and acks.
+pub(crate) async fn run_native_xrp_settle_sweep_with_io(
+    io: &mut dyn NativeXrpSettleSweepIo,
+    start_after_claim_id: Option<u64>,
+    max_per_tick: usize,
+) -> NativeXrpSettleSweepSummary {
+    let mut summary = NativeXrpSettleSweepSummary::default();
+    if read_state(|s| s.configuration.emergency_pause) {
+        return summary;
+    }
+    let (protocol, all) = read_state(|s| (s.protocol_canister_id, s.all_native_xrp_pending_payouts()));
+    if all.is_empty() {
+        return summary;
+    }
+
+    // Rotate: entries strictly after the cursor first, then wrap.
+    let split = match start_after_claim_id {
+        Some(cursor) => all.partition_point(|(_, p)| p.claim_id <= cursor),
+        None => 0,
+    };
+    let ordered = all[split..].iter().chain(all[..split].iter());
+
+    for (user, payout) in ordered.take(max_per_tick) {
+        summary.examined += 1;
+        summary.last_claim_id = Some(payout.claim_id);
+
+        let outstanding = match io.claim_outstanding(protocol, payout.claim_id, *user).await {
+            Ok(v) => v,
+            Err(error) => {
+                log!(
+                    INFO,
+                    "[xrp-settle-sweep] outstanding check failed for claim {}: {:?}",
+                    payout.claim_id,
+                    error
+                );
+                summary.failed += 1;
+                continue;
+            }
+        };
+
+        if !outstanding {
+            // Settled and validated (by a prior sweep tick or a manual click).
+            let _ = mutate_state(|s| s.ack_native_xrp_payout_settled(user, payout.claim_id));
+            summary.acked += 1;
+            continue;
+        }
+
+        match io
+            .settle_on_behalf(
+                protocol,
+                payout.claim_id,
+                *user,
+                payout.payout_address.clone(),
+                payout.destination_tag,
+            )
+            .await
+        {
+            Ok(tx_hash) => {
+                log!(
+                    INFO,
+                    "[xrp-settle-sweep] submitted settlement for claim {} ({} drops) tx {}",
+                    payout.claim_id,
+                    payout.drops,
+                    tx_hash
+                );
+                summary.submitted += 1;
+            }
+            Err(error) if is_past_sequence_submit(&error) => {
+                log!(
+                    INFO,
+                    "[xrp-settle-sweep] claim {} already submitted (tefPAST_SEQ); \
+                     awaiting confirmation on a later tick",
+                    payout.claim_id
+                );
+                summary.pending_confirmation += 1;
+            }
+            Err(error) => {
+                log!(
+                    INFO,
+                    "[xrp-settle-sweep] settlement failed for claim {}: {:?}",
+                    payout.claim_id,
+                    error
+                );
+                summary.failed += 1;
+            }
+        }
+    }
+    summary
+}
+
+pub(crate) struct CdkNativeXrpSettleSweepIo;
+
+#[async_trait::async_trait(?Send)]
+impl NativeXrpSettleSweepIo for CdkNativeXrpSettleSweepIo {
+    async fn claim_outstanding(
+        &mut self,
+        protocol: Principal,
+        claim_id: u64,
+        claimant: Principal,
+    ) -> Result<bool, StabilityPoolError> {
+        let result: Result<(Result<bool, rumi_protocol_backend::ProtocolError>,), _> = call(
+            protocol,
+            "stability_pool_xrp_claim_outstanding",
+            (claim_id, claimant),
+        )
+        .await;
+        match result {
+            Ok((Ok(outstanding),)) => Ok(outstanding),
+            Ok((Err(error),)) => Err(StabilityPoolError::LiquidationFailed {
+                vault_id: claim_id,
+                reason: format!("backend rejected claim-outstanding check: {:?}", error),
+            }),
+            Err(_) => Err(StabilityPoolError::InterCanisterCallFailed {
+                target: format!("{}", protocol),
+                method: "stability_pool_xrp_claim_outstanding".to_string(),
+            }),
+        }
+    }
+
+    async fn settle_on_behalf(
+        &mut self,
+        protocol: Principal,
+        claim_id: u64,
+        claimant: Principal,
+        destination: String,
+        destination_tag: Option<u32>,
+    ) -> Result<String, StabilityPoolError> {
+        let result: Result<(Result<String, rumi_protocol_backend::ProtocolError>,), _> = call(
+            protocol,
+            "stability_pool_settle_xrp_claim",
+            (claim_id, claimant, destination, destination_tag),
+        )
+        .await;
+        match result {
+            Ok((Ok(tx_hash),)) => Ok(tx_hash),
+            Ok((Err(error),)) => Err(StabilityPoolError::LiquidationFailed {
+                vault_id: claim_id,
+                reason: format!("backend rejected settle-on-behalf: {:?}", error),
+            }),
+            Err(_) => Err(StabilityPoolError::InterCanisterCallFailed {
+                target: format!("{}", protocol),
+                method: "stability_pool_settle_xrp_claim".to_string(),
+            }),
+        }
+    }
 }
 
 struct CdkNativeXrpAbsorbIo;
@@ -610,6 +869,36 @@ impl NativeXrpAbsorbIo for CdkNativeXrpAbsorbIo {
                 target: format!("{}", protocol_id),
                 method: "stability_pool_liquidate_xrp_vault".to_string(),
             }),
+        }
+    }
+
+    async fn release_xrp_absorb_preflight(
+        &mut self,
+        protocol_id: Principal,
+        vault_id: u64,
+        icusd_burn_e8s: u64,
+    ) {
+        let released: Result<(Result<bool, rumi_protocol_backend::ProtocolError>,), _> = call(
+            protocol_id,
+            "stability_pool_release_xrp_absorb_preflight",
+            (vault_id, icusd_burn_e8s),
+        )
+        .await;
+        match released {
+            Ok((Ok(_),)) => {}
+            Ok((Err(error),)) => log!(
+                INFO,
+                "native XRP preflight release rejected for vault {}: {:?}; reservation will expire on its own",
+                vault_id,
+                error
+            ),
+            Err((code, msg)) => log!(
+                INFO,
+                "native XRP preflight release call failed for vault {}: {:?} {}; reservation will expire on its own",
+                vault_id,
+                code,
+                msg
+            ),
         }
     }
 }
@@ -844,9 +1133,13 @@ pub(crate) async fn execute_native_xrp_absorb_with_io(
         }
     };
     if preflight.vault_id != vault_info.vault_id || preflight.icusd_burn_e8s != icusd_to_burn_e8s {
-        mutate_state(|s| {
-            clear_unburned_native_xrp_absorb_intent_in_state(s, vault_info.vault_id);
-        });
+        abandon_unburned_native_xrp_absorb(
+            io,
+            protocol_id,
+            vault_info.vault_id,
+            icusd_to_burn_e8s,
+        )
+        .await;
         return liquidation_failure(
             vault_info,
             StabilityPoolError::LiquidationFailed {
@@ -868,9 +1161,13 @@ pub(crate) async fn execute_native_xrp_absorb_with_io(
             .map(XrpSpPayoutAllocation::from)
             .collect::<Vec<_>>(),
         Ok(_) => {
-            mutate_state(|s| {
-                clear_unburned_native_xrp_absorb_intent_in_state(s, vault_info.vault_id);
-            });
+            abandon_unburned_native_xrp_absorb(
+                io,
+                protocol_id,
+                vault_info.vault_id,
+                icusd_to_burn_e8s,
+            )
+            .await;
             return liquidation_failure(
                 vault_info,
                 StabilityPoolError::LiquidationFailed {
@@ -880,9 +1177,13 @@ pub(crate) async fn execute_native_xrp_absorb_with_io(
             );
         }
         Err(error) => {
-            mutate_state(|s| {
-                clear_unburned_native_xrp_absorb_intent_in_state(s, vault_info.vault_id);
-            });
+            abandon_unburned_native_xrp_absorb(
+                io,
+                protocol_id,
+                vault_info.vault_id,
+                icusd_to_burn_e8s,
+            )
+            .await;
             return liquidation_failure(vault_info, error);
         }
     };
@@ -893,9 +1194,13 @@ pub(crate) async fn execute_native_xrp_absorb_with_io(
         match io.fetch_icusd_minting_account(icusd_ledger).await {
             Ok(account) => account,
             Err(error) => {
-                mutate_state(|s| {
-                    clear_unburned_native_xrp_absorb_intent_in_state(s, vault_info.vault_id);
-                });
+                abandon_unburned_native_xrp_absorb(
+                    io,
+                    protocol_id,
+                    vault_info.vault_id,
+                    icusd_to_burn_e8s,
+                )
+                .await;
                 return liquidation_failure(vault_info, error);
             }
         }
@@ -947,9 +1252,16 @@ pub(crate) async fn execute_native_xrp_absorb_with_io(
                 proof
             }
             Err(error) => {
-                mutate_state(|s| {
-                    clear_unburned_native_xrp_absorb_intent_in_state(s, vault_info.vault_id);
-                });
+                // The burn call returned an error, which the local clear
+                // already treats as "no icUSD left the pool"; release the
+                // reservation on the same assumption.
+                abandon_unburned_native_xrp_absorb(
+                    io,
+                    protocol_id,
+                    vault_info.vault_id,
+                    icusd_to_burn_e8s,
+                )
+                .await;
                 return liquidation_failure(vault_info, error);
             }
         }
@@ -3444,6 +3756,16 @@ mod tests {
                 .unwrap_or_else(|| build_icusd_burn_proof(44, vault_id)))
         }
 
+        async fn release_xrp_absorb_preflight(
+            &mut self,
+            _protocol_id: Principal,
+            vault_id: u64,
+            icusd_burn_e8s: u64,
+        ) {
+            self.events
+                .push(format!("release:{vault_id}:{icusd_burn_e8s}"));
+        }
+
         async fn submit_xrp_absorb(
             &mut self,
             _protocol_id: Principal,
@@ -3631,6 +3953,53 @@ mod tests {
             read_state(|s| s.native_xrp_pending_payouts_for(&user_b())).is_empty(),
             "non-opted-in depositor must not receive pending native XRP payouts",
         );
+
+        // The absorb must leave a substantive audit event. Without this the
+        // only trace in the Explorer is `LiquidationNotification`, which
+        // carries a bare vault COUNT — no vault id, no amounts, no outcome —
+        // so a real absorb was indistinguishable from one that did nothing.
+        // `LiquidationExecuted` already exists and is already rendered richly
+        // by the frontend, so emitting it needs no interface change.
+        let executed = read_state(|s| {
+            s.pool_events
+                .as_ref()
+                .map(|events| {
+                    events
+                        .iter()
+                        .filter_map(|e| match &e.event_type {
+                            PoolEventType::LiquidationExecuted {
+                                vault_id,
+                                stables_consumed_e8s,
+                                collateral_gained,
+                                collateral_type,
+                                success,
+                            } => Some((
+                                *vault_id,
+                                *stables_consumed_e8s,
+                                *collateral_gained,
+                                *collateral_type,
+                                *success,
+                            )),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        });
+        assert_eq!(
+            executed.len(),
+            1,
+            "a successful native-XRP absorb must emit exactly one LiquidationExecuted event"
+        );
+        let (vault_id, stables_e8s, drops, collateral, success) = executed[0];
+        assert_eq!(vault_id, 144);
+        assert_eq!(collateral, xrp_ledger());
+        assert_eq!(drops, 12_000_000, "collateral_gained is the seized drops");
+        assert_eq!(
+            stables_e8s, 60_00000000,
+            "stables_consumed_e8s is the full icUSD burn this fixture absorbs"
+        );
+        assert!(success);
     }
 
     #[test]
@@ -3972,7 +4341,13 @@ mod tests {
         ));
 
         assert!(!result.success);
-        assert_eq!(io.events, vec!["preflight:145:1000000000"]);
+        // Giving up after reserving but before burning must hand the backend
+        // reservation back, or the vault stays blocked for every liquidation
+        // path (including manual) until the 15-minute TTL expires.
+        assert_eq!(
+            io.events,
+            vec!["preflight:145:1000000000", "release:145:1000000000"]
+        );
         assert_eq!(
             read_state(|s| s
                 .deposits
@@ -4010,7 +4385,13 @@ mod tests {
         ));
 
         assert!(!result.success);
-        assert_eq!(io.events, vec!["preflight:146:50100000000"]);
+        // Same contract as the empty-allocation abort: reserved, gave up
+        // before burning, so the reservation goes back rather than blocking
+        // the vault for the full TTL.
+        assert_eq!(
+            io.events,
+            vec!["preflight:146:50100000000", "release:146:50100000000"]
+        );
         assert_eq!(
             read_state(|s| s.total_stablecoin_balances.get(&icusd_ledger()).copied()),
             Some(501_00000000),
@@ -5016,5 +5397,248 @@ mod tests {
 
         assert!(is_duplicate_chain_claim_error(&duplicate));
         assert!(!is_duplicate_chain_claim_error(&ordinary));
+    }
+
+    // ─── Native-XRP auto-settlement sweep ───
+
+    fn payout(claim_id: u64, drops: u64, created_at_ns: u64) -> NativeXrpPendingPayout {
+        NativeXrpPendingPayout {
+            claim_id,
+            collateral_type: xrp_ledger(),
+            vault_id: 195,
+            drops,
+            payout_address: valid_xrp_address(),
+            destination_tag: Some(7),
+            created_at_ns,
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeSettleSweepIo {
+        outstanding: std::collections::BTreeMap<u64, bool>,
+        outstanding_errors: std::collections::BTreeSet<u64>,
+        settle_errors: std::collections::BTreeSet<u64>,
+        settle_error_messages: std::collections::BTreeMap<u64, String>,
+        settle_calls: Vec<(u64, Principal, String, Option<u32>)>,
+        outstanding_calls: Vec<(u64, Principal)>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl NativeXrpSettleSweepIo for FakeSettleSweepIo {
+        async fn claim_outstanding(
+            &mut self,
+            _protocol: Principal,
+            claim_id: u64,
+            claimant: Principal,
+        ) -> Result<bool, StabilityPoolError> {
+            self.outstanding_calls.push((claim_id, claimant));
+            if self.outstanding_errors.contains(&claim_id) {
+                return Err(StabilityPoolError::InterCanisterCallFailed {
+                    target: "Protocol".to_string(),
+                    method: "stability_pool_xrp_claim_outstanding".to_string(),
+                });
+            }
+            Ok(*self.outstanding.get(&claim_id).unwrap_or(&true))
+        }
+
+        async fn settle_on_behalf(
+            &mut self,
+            _protocol: Principal,
+            claim_id: u64,
+            claimant: Principal,
+            destination: String,
+            destination_tag: Option<u32>,
+        ) -> Result<String, StabilityPoolError> {
+            self.settle_calls
+                .push((claim_id, claimant, destination, destination_tag));
+            if let Some(message) = self.settle_error_messages.get(&claim_id) {
+                return Err(StabilityPoolError::LiquidationFailed {
+                    vault_id: claim_id,
+                    reason: format!("backend rejected settle-on-behalf: {message}"),
+                });
+            }
+            if self.settle_errors.contains(&claim_id) {
+                return Err(StabilityPoolError::InterCanisterCallFailed {
+                    target: "Protocol".to_string(),
+                    method: "stability_pool_settle_xrp_claim".to_string(),
+                });
+            }
+            Ok(format!("TXHASH{claim_id}"))
+        }
+    }
+
+    fn sweep_state_with_payouts(payouts: Vec<(Principal, NativeXrpPendingPayout)>) -> StabilityPoolState {
+        let mut state = test_state();
+        for (user, p) in payouts {
+            add_deposit_direct(&mut state, user, icusd_ledger(), 1_00000000);
+            state.record_native_xrp_pending_payout(user, p).unwrap();
+        }
+        state
+    }
+
+    #[test]
+    fn settle_sweep_settles_outstanding_claim_with_stored_address_and_tag() {
+        // The sweep must hand the backend exactly what the depositor registered
+        // (address + destination tag) for the oldest pending payout, and must
+        // NOT remove the local record yet: the claim is only removed after a
+        // later tick observes the settlement validated (claim no longer
+        // outstanding) — that mirrors the manual settle flow's two phases.
+        let state = sweep_state_with_payouts(vec![(user_a(), payout(3, 11_529, 100))]);
+        replace_state(state);
+        let mut io = FakeSettleSweepIo::default();
+
+        let summary = futures::executor::block_on(run_native_xrp_settle_sweep_with_io(
+            &mut io, None, 2,
+        ));
+
+        assert_eq!(summary.examined, 1);
+        assert_eq!(summary.submitted, 1);
+        assert_eq!(summary.acked, 0);
+        assert_eq!(
+            io.settle_calls,
+            vec![(3, user_a(), valid_xrp_address(), Some(7))]
+        );
+        assert_eq!(
+            read_state(|s| s.native_xrp_pending_payouts_for(&user_a()).len()),
+            1,
+            "record stays until a later tick confirms the claim is gone"
+        );
+    }
+
+    #[test]
+    fn settle_sweep_acks_payout_whose_claim_is_gone() {
+        // A claim that the backend no longer knows (settled + validated, by the
+        // sweep or by the user clicking settle) must have its SP-side reminder
+        // removed, and must not be re-settled.
+        let state = sweep_state_with_payouts(vec![(user_a(), payout(3, 11_529, 100))]);
+        replace_state(state);
+        let mut io = FakeSettleSweepIo::default();
+        io.outstanding.insert(3, false);
+
+        let summary = futures::executor::block_on(run_native_xrp_settle_sweep_with_io(
+            &mut io, None, 2,
+        ));
+
+        assert_eq!(summary.acked, 1);
+        assert!(io.settle_calls.is_empty());
+        assert!(read_state(|s| s.native_xrp_pending_payouts_for(&user_a()).is_empty()));
+    }
+
+    #[test]
+    fn settle_sweep_is_bounded_and_rotates_across_ticks() {
+        // Bounded work per tick, and the cursor must rotate so one
+        // perpetually-failing claim cannot head-of-line block the others.
+        let state = sweep_state_with_payouts(vec![
+            (user_a(), payout(1, 10, 100)),
+            (user_a(), payout(2, 20, 110)),
+            (user_b(), payout(5, 50, 120)),
+        ]);
+        replace_state(state);
+        let mut io = FakeSettleSweepIo::default();
+
+        let first = futures::executor::block_on(run_native_xrp_settle_sweep_with_io(
+            &mut io, None, 2,
+        ));
+        assert_eq!(first.examined, 2);
+        assert_eq!(first.last_claim_id, Some(2));
+        assert_eq!(
+            io.settle_calls.iter().map(|c| c.0).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+
+        let second = futures::executor::block_on(run_native_xrp_settle_sweep_with_io(
+            &mut io,
+            first.last_claim_id,
+            2,
+        ));
+        assert_eq!(
+            io.settle_calls.iter().map(|c| c.0).collect::<Vec<_>>(),
+            vec![1, 2, 5, 1],
+            "second tick continues after the cursor and wraps around"
+        );
+        assert_eq!(second.last_claim_id, Some(1));
+    }
+
+    #[test]
+    fn settle_sweep_skips_entirely_when_emergency_paused() {
+        let mut state = sweep_state_with_payouts(vec![(user_a(), payout(3, 11_529, 100))]);
+        state.configuration.emergency_pause = true;
+        replace_state(state);
+        let mut io = FakeSettleSweepIo::default();
+
+        let summary = futures::executor::block_on(run_native_xrp_settle_sweep_with_io(
+            &mut io, None, 2,
+        ));
+
+        assert_eq!(summary.examined, 0);
+        assert!(io.settle_calls.is_empty() && io.outstanding_calls.is_empty());
+    }
+
+    #[test]
+    fn settle_sweep_counts_past_seq_submit_as_pending_confirmation() {
+        // XRPL `submit` over IC https-outcalls is fan-out: every replica POSTs
+        // the SAME signed blob, the first arrival applies, and the losers get
+        // tefPAST_SEQ ("sequence already used" -- by our own tx). Consensus can
+        // land on the losers' answer, so a SUCCESSFUL payment surfaces as a
+        // submit error. Observed live 2026-08-17: all four vault-195 payouts
+        // logged tefPAST_SEQ and all four were tesSUCCESS on-ledger.
+        //
+        // Counting these as `failed` makes a healthy sweep read like an
+        // incident. They are pending-confirmation: the claim keeps its recorded
+        // settlement and the next tick confirms it.
+        let state = sweep_state_with_payouts(vec![(user_a(), payout(3, 11_529, 100))]);
+        replace_state(state);
+        let mut io = FakeSettleSweepIo::default();
+        io.settle_error_messages.insert(
+            3,
+            "xrp claim submit failed (call settle again to confirm or retry): \
+             submit rejected: tefPAST_SEQ"
+                .to_string(),
+        );
+
+        let summary = futures::executor::block_on(run_native_xrp_settle_sweep_with_io(
+            &mut io, None, 2,
+        ));
+
+        assert_eq!(summary.failed, 0, "a landed-but-noisy submit is not a failure");
+        assert_eq!(
+            summary.pending_confirmation, 1,
+            "tefPAST_SEQ submits must be counted as awaiting confirmation"
+        );
+        assert_eq!(
+            read_state(|s| s.native_xrp_pending_payouts_for(&user_a()).len()),
+            1,
+            "the reminder stays until a later tick confirms the settlement"
+        );
+    }
+
+    #[test]
+    fn settle_sweep_tolerates_errors_and_continues() {
+        // An outstanding-check error or settle error on one claim must not
+        // abort the tick or drop the record; the next claims still process.
+        let state = sweep_state_with_payouts(vec![
+            (user_a(), payout(1, 10, 100)),
+            (user_b(), payout(2, 20, 110)),
+            (user_b(), payout(4, 40, 120)),
+        ]);
+        replace_state(state);
+        let mut io = FakeSettleSweepIo::default();
+        io.outstanding_errors.insert(1);
+        io.settle_errors.insert(2);
+
+        let summary = futures::executor::block_on(run_native_xrp_settle_sweep_with_io(
+            &mut io, None, 3,
+        ));
+
+        assert_eq!(summary.examined, 3);
+        assert_eq!(summary.failed, 2);
+        assert_eq!(summary.submitted, 1);
+        assert_eq!(io.settle_calls.iter().map(|c| c.0).collect::<Vec<_>>(), vec![2, 4]);
+        assert_eq!(
+            read_state(|s| s.native_xrp_pending_payouts_for(&user_a()).len())
+                + read_state(|s| s.native_xrp_pending_payouts_for(&user_b()).len()),
+            3,
+            "no record may be dropped on errors"
+        );
     }
 }

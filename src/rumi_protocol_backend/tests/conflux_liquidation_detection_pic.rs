@@ -300,15 +300,30 @@ fn boot() -> (PocketIc, Principal, Principal) {
         encode_args((init,)).expect("encode init"),
         None,
     );
-    pic.install_canister(mock_id, mock_wasm(), Encode!().expect("encode mock init"), None);
+    pic.install_canister(
+        mock_id,
+        mock_wasm(),
+        Encode!().expect("encode mock init"),
+        None,
+    );
 
     for _ in 0..5 {
         pic.tick();
     }
 
     // Pin observer + settlement cadence to 30s (code default is 300s).
-    let _ = update_dev(&pic, backend_id, "set_observer_tick_interval_secs", Encode!(&30u64).unwrap());
-    let _ = update_dev(&pic, backend_id, "set_settlement_tick_interval_secs", Encode!(&30u64).unwrap());
+    let _ = update_dev(
+        &pic,
+        backend_id,
+        "set_observer_tick_interval_secs",
+        Encode!(&30u64).unwrap(),
+    );
+    let _ = update_dev(
+        &pic,
+        backend_id,
+        "set_settlement_tick_interval_secs",
+        Encode!(&30u64).unwrap(),
+    );
 
     (pic, backend_id, mock_id)
 }
@@ -344,9 +359,16 @@ fn assert_supply(pic: &PocketIc, cid: Principal, expected_e8s: u128, step: &str)
         .per_chain
         .iter()
         .fold(candid::Nat::from(0u32), |acc, e| acc + e.supply_e8s.clone());
-    assert_eq!(audit.total_e8s, sum, "[{step}] audit total != sum(per_chain)");
+    assert_eq!(
+        audit.total_e8s, sum,
+        "[{step}] audit total != sum(per_chain)"
+    );
 
-    if let Some(conflux) = audit.per_chain.iter().find(|e| e.chain_id == CONFLUX_CHAIN_ID) {
+    if let Some(conflux) = audit
+        .per_chain
+        .iter()
+        .find(|e| e.chain_id == CONFLUX_CHAIN_ID)
+    {
         assert_eq!(
             conflux.supply_e8s,
             candid::Nat::from(expected_e8s),
@@ -362,7 +384,10 @@ fn word_u128(v: u128) -> String {
 }
 
 fn word_addr(addr: &str) -> String {
-    let raw = addr.strip_prefix("0x").or_else(|| addr.strip_prefix("0X")).unwrap_or(addr);
+    let raw = addr
+        .strip_prefix("0x")
+        .or_else(|| addr.strip_prefix("0X"))
+        .unwrap_or(addr);
     format!("0x{:0>64}", raw.to_lowercase())
 }
 
@@ -380,6 +405,51 @@ fn script_factory_pair_sanity(pic: &PocketIc, mock: Principal, pair: &str) {
 /// An ENABLED Conflux liquidation config with valid wiring. slippage 250 bps
 /// (< the 1200-bps penalty cushion), restore target 155%, depth cap $2k,
 /// staleness ceiling 30 min.
+/// Take manual control of an XRC-managed pair the way an operator has to:
+/// `disable_chain` (which unmanages the pair and stops the XRC timer for it),
+/// write the price, verify it read back, then `enable_chain` to hand authority
+/// back to XRC. Every step is asserted, so a regression in any one of them
+/// fails here rather than silently leaving the chain disabled.
+fn rebaseline_price_via_disable_enable(
+    pic: &PocketIc,
+    backend: Principal,
+    price_e8: u64,
+    step: &str,
+) {
+    decode_result(
+        update_dev(
+            pic,
+            backend,
+            "disable_chain",
+            Encode!(&ChainId(CONFLUX_CHAIN_ID)).unwrap(),
+        ),
+        "disable_chain",
+    )
+    .unwrap_or_else(|e| panic!("disable_chain ({step}): {e:?}"));
+
+    decode_result(
+        update_dev(
+            pic,
+            backend,
+            "set_manual_collateral_price",
+            Encode!(&ChainId(CONFLUX_CHAIN_ID), &"CFX".to_string(), &price_e8).unwrap(),
+        ),
+        "set_manual_collateral_price",
+    )
+    .unwrap_or_else(|e| panic!("set_manual_collateral_price ({step}): {e:?}"));
+
+    decode_result(
+        update_dev(
+            pic,
+            backend,
+            "enable_chain",
+            Encode!(&ChainId(CONFLUX_CHAIN_ID)).unwrap(),
+        ),
+        "enable_chain",
+    )
+    .unwrap_or_else(|e| panic!("enable_chain ({step}): {e:?}"));
+}
+
 fn enabled_liq_config() -> ChainLiquidationConfigV1 {
     ChainLiquidationConfigV1 {
         dex: DexKind::UniswapV2,
@@ -408,12 +478,27 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
 
     // ── Step 1: point the backend's EVM wrapper at the mock + Conflux quirks ──
     decode_result(
-        update_dev(&pic, backend, "set_evm_rpc_principal", Encode!(&mock).unwrap()),
+        update_dev(
+            &pic,
+            backend,
+            "set_evm_rpc_principal",
+            Encode!(&mock).unwrap(),
+        ),
         "set_evm_rpc_principal",
     )
     .expect("set_evm_rpc_principal");
-    update_any(&pic, mock, "set_getlogs_max_range", Encode!(&1000u64).unwrap());
-    update_any(&pic, mock, "set_espace_receipt_fields", Encode!(&true).unwrap());
+    update_any(
+        &pic,
+        mock,
+        "set_getlogs_max_range",
+        Encode!(&1000u64).unwrap(),
+    );
+    update_any(
+        &pic,
+        mock,
+        "set_espace_receipt_fields",
+        Encode!(&true).unwrap(),
+    );
 
     // ── Step 2: register Conflux + contract + manual CFX price ($0.15) ───────
     let reg = RegisterChainArg {
@@ -439,8 +524,11 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
             &pic,
             backend,
             "set_chain_contract",
-            Encode!(&ChainId(CONFLUX_CHAIN_ID), &"0x00000000000000000000000000000000cf1c0de5".to_string())
-                .unwrap(),
+            Encode!(
+                &ChainId(CONFLUX_CHAIN_ID),
+                &"0x00000000000000000000000000000000cf1c0de5".to_string()
+            )
+            .unwrap(),
         ),
         "set_chain_contract",
     )
@@ -452,7 +540,12 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
             &pic,
             backend,
             "set_manual_collateral_price",
-            Encode!(&ChainId(CONFLUX_CHAIN_ID), &"CFX".to_string(), &15_000_000u64).unwrap(),
+            Encode!(
+                &ChainId(CONFLUX_CHAIN_ID),
+                &"CFX".to_string(),
+                &15_000_000u64
+            )
+            .unwrap(),
         ),
         "set_manual_collateral_price",
     )
@@ -487,7 +580,12 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
     let cursor1 = seed + SCAN_WINDOW;
     let head1 = cursor1 + CONFLUX_FINALITY_DEPTH + 24;
     update_any(&pic, mock, "set_blocks", Encode!(&head1, &head1).unwrap());
-    update_any(&pic, mock, "set_next_send_hash", Encode!(&"0xcfxmint1".to_string()).unwrap());
+    update_any(
+        &pic,
+        mock,
+        "set_next_send_hash",
+        Encode!(&"0xcfxmint1".to_string()).unwrap(),
+    );
 
     // ── ECDSA probe: decide full vs gated ────────────────────────────────────
     let settlement_addr = match update_dev(
@@ -526,12 +624,32 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
                 update_dev(
                     &pic,
                     backend,
+                    "disable_chain",
+                    Encode!(&ChainId(CONFLUX_CHAIN_ID)).unwrap(),
+                ),
+                "disable_chain",
+            )
+            .expect("gated: disable before closed liquidation staging");
+            decode_result(
+                update_dev(
+                    &pic,
+                    backend,
                     "set_chain_liquidation_config",
                     Encode!(&ChainId(CONFLUX_CHAIN_ID), &enabled_liq_config()).unwrap(),
                 ),
                 "set_chain_liquidation_config",
             )
-            .expect("gated: set_chain_liquidation_config (proves new fields decode)");
+            .expect("gated: enabled liquidation config stages while Disabled");
+            decode_result(
+                update_dev(
+                    &pic,
+                    backend,
+                    "enable_chain",
+                    Encode!(&ChainId(CONFLUX_CHAIN_ID)).unwrap(),
+                ),
+                "enable_chain",
+            )
+            .expect("gated: reopen after verified closed staging");
 
             let cfg = get_liq_config(&pic, backend).expect("gated: config round-trips");
             assert_eq!(
@@ -539,11 +657,17 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
                 candid::Nat::from(2_000u128 * E8),
                 "gated: max_swap_value_e8s round-trips"
             );
-            assert_eq!(cfg.max_price_age_ns, 1_800_000_000_000, "gated: max_price_age_ns round-trips");
+            assert_eq!(
+                cfg.max_price_age_ns, 1_800_000_000_000,
+                "gated: max_price_age_ns round-trips"
+            );
             assert!(cfg.enabled, "gated: enabled round-trips");
 
             let liq = get_liquidatable(&pic, backend);
-            assert!(liq.is_empty(), "gated: no Open vaults yet => empty liquidatable list");
+            assert!(
+                liq.is_empty(),
+                "gated: no Open vaults yet => empty liquidatable list"
+            );
 
             assert_supply(&pic, backend, 0, "gated: ECDSA unavailable, invariant at 0");
             eprintln!("[liquidation-detection] ECDSA unavailable; ran gated subset");
@@ -586,7 +710,11 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
     };
 
     let v = get_vault(&pic, backend, vault_id).expect("vault exists after open");
-    assert_eq!(v.status, ChainVaultStatus::AwaitingDeposit, "open => AwaitingDeposit");
+    assert_eq!(
+        v.status,
+        ChainVaultStatus::AwaitingDeposit,
+        "open => AwaitingDeposit"
+    );
     let custody = v.custody_address.clone();
     assert_supply(&pic, backend, 0, "after open (AwaitingDeposit)");
 
@@ -611,13 +739,28 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
         "set_receipt",
         Encode!(&"0xcfxmint1".to_string(), &true, &cursor1).unwrap(),
     );
-    push_mint_log(&pic, mock, vault_id, &recipient, debt_e8s, "0xcfxmint1", cursor1);
+    push_mint_log(
+        &pic,
+        mock,
+        vault_id,
+        &recipient,
+        debt_e8s,
+        "0xcfxmint1",
+        cursor1,
+    );
     advance_and_tick(&pic, 4); // confirm (receipt mined + final, Mint log read)
 
     let v = get_vault(&pic, backend, vault_id).expect("vault after mint confirm");
     assert_eq!(v.status, ChainVaultStatus::Open, "mint confirmed => Open");
-    assert_eq!(v.debt_e8s, candid::Nat::from(debt_e8s), "mint confirmed => debt 100e8");
-    assert!(v.pending_liquidation.is_none(), "healthy vault has no liquidation marker");
+    assert_eq!(
+        v.debt_e8s,
+        candid::Nat::from(debt_e8s),
+        "mint confirmed => debt 100e8"
+    );
+    assert!(
+        v.pending_liquidation.is_none(),
+        "healthy vault has no liquidation marker"
+    );
     assert_supply(&pic, backend, 100 * E8, "after mint");
 
     // Inc 3: the LiquidationSwap op is now ACTIONABLE (the settlement worker would
@@ -626,10 +769,56 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
     // the mint confirmed) — the swap op stays Queued and the `pending_liquidation`
     // marker persists for the detection assertions below. The observer (detection)
     // timer keeps firing.
-    let _ = update_dev(&pic, backend, "set_settlement_tick_interval_secs", Encode!(&31_536_000u64).unwrap());
+    let _ = update_dev(
+        &pic,
+        backend,
+        "set_settlement_tick_interval_secs",
+        Encode!(&31_536_000u64).unwrap(),
+    );
 
-    // ── Enable the liquidation config (master switch on) ─────────────────────
+    // ── Drop the price to $0.08 => CR ~112% < 133% (liquidatable) ────────────
+    // Security review follow-up (F2): this MUST run BEFORE
+    // set_chain_liquidation_config below, and the order is load-bearing, not
+    // cosmetic. Once a chain_liquidation_configs row is present for a
+    // registered chain, that (chain, symbol) pair is XRC-managed and the
+    // automatic XRC price timer is its SOLE writer: set_manual_collateral_price
+    // then rejects EVERY caller, the narrowly-scoped price pusher and the
+    // developer alike. There is no developer exemption. So the price is set
+    // here, while the chain is not yet XRC-managed, and the config row is
+    // staged after. To move a price AFTER staging the row, the fixture has to
+    // use the operator recovery loop instead: disable_chain (which unmanages
+    // the pair and stops the timer for it), rebaseline, then enable_chain, as
+    // `rebaseline_price_via_disable_enable` above does.
     script_factory_pair_sanity(&pic, mock, VALID_EVM_ADDR);
+    decode_result(
+        update_dev(
+            &pic,
+            backend,
+            "set_manual_collateral_price",
+            Encode!(
+                &ChainId(CONFLUX_CHAIN_ID),
+                &"CFX".to_string(),
+                &8_000_000u64
+            )
+            .unwrap(),
+        ),
+        "set_manual_collateral_price",
+    )
+    .expect("set_manual_collateral_price (drop)");
+
+    // ── Stage enabled liquidation wiring while the chain is closed ──────────
+    // Factory getPair validation still runs while Disabled. Re-enabling is a
+    // distinct step after the validated row is observable.
+    decode_result(
+        update_dev(
+            &pic,
+            backend,
+            "disable_chain",
+            Encode!(&ChainId(CONFLUX_CHAIN_ID)).unwrap(),
+        ),
+        "disable_chain",
+    )
+    .expect("disable before closed liquidation staging");
     decode_result(
         update_dev(
             &pic,
@@ -639,19 +828,23 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
         ),
         "set_chain_liquidation_config",
     )
-    .expect("set_chain_liquidation_config Ok");
-
-    // ── Drop the price to $0.08 => CR ~112% < 133% (liquidatable) ────────────
+    .expect("enabled liquidation config stages while Disabled");
+    assert!(
+        get_liq_config(&pic, backend)
+            .expect("staged config query")
+            .enabled,
+        "enabled row must be observable before the chain reopens"
+    );
     decode_result(
         update_dev(
             &pic,
             backend,
-            "set_manual_collateral_price",
-            Encode!(&ChainId(CONFLUX_CHAIN_ID), &"CFX".to_string(), &8_000_000u64).unwrap(),
+            "enable_chain",
+            Encode!(&ChainId(CONFLUX_CHAIN_ID)).unwrap(),
         ),
-        "set_manual_collateral_price",
+        "enable_chain",
     )
-    .expect("set_manual_collateral_price (drop)");
+    .expect("reopen after verified closed staging");
 
     // ── Pre-tick: the discovery query computes CR LIVE and lists the vault ────
     let liq_before = get_liquidatable(&pic, backend);
@@ -669,7 +862,10 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
         row.liquidation_threshold_e4, CONFLUX_LIQ_THRESHOLD_E4,
         "row carries the chain-71 threshold"
     );
-    assert!(row.sized_repay_e8s > candid::Nat::from(0u32), "pre-mark: a non-zero repay is sized");
+    assert!(
+        row.sized_repay_e8s > candid::Nat::from(0u32),
+        "pre-mark: a non-zero repay is sized"
+    );
 
     // ── Tick the observer; detection sets the marker (Bot tier) ──────────────
     advance_and_tick(&pic, 3);
@@ -702,10 +898,19 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
         "debt UNCHANGED at trigger (Design B)"
     );
     // Vault stays Open throughout (marker, not a status variant).
-    assert_eq!(v.status, ChainVaultStatus::Open, "vault stays Open under the marker");
+    assert_eq!(
+        v.status,
+        ChainVaultStatus::Open,
+        "vault stays Open under the marker"
+    );
 
     // ── Supply UNCHANGED: Design B sets no burn / reserve shift in Inc 2 ──────
-    assert_supply(&pic, backend, 100 * E8, "after detection (supply unchanged)");
+    assert_supply(
+        &pic,
+        backend,
+        100 * E8,
+        "after detection (supply unchanged)",
+    );
 
     // ── The discovery query now EXCLUDES the vault (it is marked) ─────────────
     let liq_after = get_liquidatable(&pic, backend);
@@ -736,7 +941,9 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
                     m.contains("developer"),
                     "anonymous liquidate must be rejected as non-developer, got: {m}"
                 ),
-                other => panic!("anonymous liquidate_chain_vault should be rejected, got Ok {other:?}"),
+                other => {
+                    panic!("anonymous liquidate_chain_vault should be rejected, got Ok {other:?}")
+                }
             }
         }
     }
@@ -751,22 +958,34 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
     // to mint. Vault 1's Queued swap will now submit + escalate (no DEX reads in
     // this detection-only test -> getReserves read fails -> Failed, not Inflight),
     // which is harmless here (vault 1's assertions already ran).
-    let _ = update_dev(&pic, backend, "set_settlement_tick_interval_secs", Encode!(&30u64).unwrap());
+    let _ = update_dev(
+        &pic,
+        backend,
+        "set_settlement_tick_interval_secs",
+        Encode!(&30u64).unwrap(),
+    );
 
     // Refresh the price (re-stamp set_at_ns to "now") so the second vault can OPEN
     // at a healthy CR, then later go underwater while its price ages out.
-    decode_result(
-        update_dev(
-            &pic,
-            backend,
-            "set_manual_collateral_price",
-            Encode!(&ChainId(CONFLUX_CHAIN_ID), &"CFX".to_string(), &15_000_000u64).unwrap(),
-        ),
-        "set_manual_collateral_price (refresh for vault 2 open)",
-    )
-    .expect("set_manual_collateral_price refresh");
+    //
+    // The chain is XRC-managed from here on (registered + the liquidation config
+    // row staged above), so the automatic XRC timer is the SOLE writer of
+    // (1030, "CFX") and set_manual_collateral_price refuses EVERY caller,
+    // including the developer. Taking manual control is the documented operator
+    // loop (disable_chain, rebaseline, enable_chain), and that is what this
+    // fixture does, rather than weakening the invariant to keep the test
+    // convenient. The round trip is state-preserving (enable only flips
+    // ChainStatus back), so the vault, supply and config all survive it; the
+    // re-enable also has to land BEFORE the vault-2 open below, since a Disabled
+    // chain blocks new opens.
+    rebaseline_price_via_disable_enable(&pic, backend, 15_000_000, "refresh for vault 2 open");
 
-    update_any(&pic, mock, "set_next_send_hash", Encode!(&"0xcfxmint2".to_string()).unwrap());
+    update_any(
+        &pic,
+        mock,
+        "set_next_send_hash",
+        Encode!(&"0xcfxmint2".to_string()).unwrap(),
+    );
     let v2_collateral = 1_400u128 * E18;
     let v2_debt = 100u128 * E8;
     let v2_recipient = "0x000000000000000000000000000000000000c0d2".to_string();
@@ -805,7 +1024,15 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
         "set_receipt",
         Encode!(&"0xcfxmint2".to_string(), &true, &cursor1).unwrap(),
     );
-    push_mint_log(&pic, mock, vault2_id, &v2_recipient, v2_debt, "0xcfxmint2", cursor1);
+    push_mint_log(
+        &pic,
+        mock,
+        vault2_id,
+        &v2_recipient,
+        v2_debt,
+        "0xcfxmint2",
+        cursor1,
+    );
     advance_and_tick(&pic, 4); // confirm
     assert_eq!(
         get_vault(&pic, backend, vault2_id).unwrap().status,
@@ -813,7 +1040,10 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
         "vault2 minted to Open"
     );
     assert!(
-        get_vault(&pic, backend, vault2_id).unwrap().pending_liquidation.is_none(),
+        get_vault(&pic, backend, vault2_id)
+            .unwrap()
+            .pending_liquidation
+            .is_none(),
         "vault2 unmarked after mint"
     );
     // supply is now 200e8 (two 100e8 vaults).
@@ -821,17 +1051,9 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
 
     // Drop the price so vault2 is underwater, then AGE the price past
     // max_price_age_ns (30 min) WITHOUT re-stamping it. set_manual stamps the
-    // wall-clock at write time, so advancing time alone makes it stale.
-    decode_result(
-        update_dev(
-            &pic,
-            backend,
-            "set_manual_collateral_price",
-            Encode!(&ChainId(CONFLUX_CHAIN_ID), &"CFX".to_string(), &8_000_000u64).unwrap(),
-        ),
-        "set_manual_collateral_price (drop for vault2)",
-    )
-    .expect("set_manual_collateral_price drop2");
+    // wall-clock at write time, so advancing time alone makes it stale. Same
+    // disable -> rebaseline -> enable loop as above (the pair is XRC-managed).
+    rebaseline_price_via_disable_enable(&pic, backend, 8_000_000, "drop for vault2");
 
     // Confirm vault2 IS liquidatable on a FRESH price (sanity: the only thing that
     // will keep it un-marked below is staleness, not a healthy CR).
@@ -858,7 +1080,10 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
     // Tick the observer: detection must DEFER on the stale price (no new marker).
     advance_and_tick(&pic, 3);
     assert!(
-        get_vault(&pic, backend, vault2_id).unwrap().pending_liquidation.is_none(),
+        get_vault(&pic, backend, vault2_id)
+            .unwrap()
+            .pending_liquidation
+            .is_none(),
         "stale price => detection deferred; vault2 NOT marked"
     );
     // Inc 3: once settlement was re-enabled (for vault 2's mint), vault 1's Queued
@@ -867,12 +1092,20 @@ fn conflux_liquidation_detection_marks_and_endpoints() {
     // Detection does NOT re-mark it (sp_attempted exclusion, finding #10). The full
     // swap-success path is the conflux_liquidation_swap_pic suite.
     assert!(
-        get_vault(&pic, backend, vault_id).unwrap().pending_liquidation.is_none(),
+        get_vault(&pic, backend, vault_id)
+            .unwrap()
+            .pending_liquidation
+            .is_none(),
         "vault 1 escalated (no DEX reads) and is not re-marked"
     );
     // Supply is UNCHANGED throughout: escalation restores collateral, never touches
     // debt/supply; detection never moves supply.
-    assert_supply(&pic, backend, 200 * E8, "after stale-price tick (supply unchanged)");
+    assert_supply(
+        &pic,
+        backend,
+        200 * E8,
+        "after stale-price tick (supply unchanged)",
+    );
 
     eprintln!("[liquidation-detection] FULL detection path PASSED: enabled-config-gated observer scan marked an underwater vault (Bot tier, collateral reserved, debt+supply unchanged), the discovery query lists pre-mark / excludes post-mark, the dev gate rejects an anonymous trigger, and a stale price defers detection (no marker, empty query) on chain 71.");
 }
@@ -904,9 +1137,8 @@ fn get_liq_config(pic: &PocketIc, backend: Principal) -> Option<ChainLiquidation
         )
         .expect("get_chain_liquidation_config query");
     match reply {
-        WasmResult::Reply(b) => {
-            Decode!(&b, Option<ChainLiquidationConfigV1>).expect("decode get_chain_liquidation_config")
-        }
+        WasmResult::Reply(b) => Decode!(&b, Option<ChainLiquidationConfigV1>)
+            .expect("decode get_chain_liquidation_config"),
         WasmResult::Reject(msg) => panic!("get_chain_liquidation_config rejected: {msg}"),
     }
 }

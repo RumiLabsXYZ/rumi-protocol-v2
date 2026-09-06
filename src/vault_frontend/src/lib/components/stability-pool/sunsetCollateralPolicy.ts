@@ -1,13 +1,21 @@
 import type { CollateralInfo } from '../../services/stabilityPoolService';
 
 const BOB_COLLATERAL_PRINCIPAL = '7pail-xaaaa-aaaas-aabmq-cai';
+const EXE_COLLATERAL_PRINCIPAL = 'rh2pm-ryaaa-aaaan-qeniq-cai';
+// Sunset collaterals in one-way wind-down. Add to this set (not the call
+// sites) when another collateral is sunset.
+const SUNSET_COLLATERAL_PRINCIPALS = new Set([BOB_COLLATERAL_PRINCIPAL, EXE_COLLATERAL_PRINCIPAL]);
 const HIDDEN_GAIN_SYMBOLS = new Set(['PHASMA']);
 
-export function isSunsetBobCollateral(collateral: CollateralInfo): boolean {
-	// BOB's one-way wind-down policy is principal-bound in the canister. Do
-	// not advertise re-entry if the independently managed SP registry still
-	// carries its historical Active status during activation.
-	return collateral.ledger_id.toText() === BOB_COLLATERAL_PRINCIPAL;
+// Sunset wind-down policy is principal-bound here. Do not advertise re-entry
+// if the independently managed SP registry still carries its historical
+// Active status during activation.
+export function isSunsetCollateralPrincipal(principalText: string): boolean {
+	return SUNSET_COLLATERAL_PRINCIPALS.has(principalText);
+}
+
+export function isSunsetCollateral(collateral: CollateralInfo): boolean {
+	return isSunsetCollateralPrincipal(collateral.ledger_id.toText());
 }
 
 export function gainCollaterals(collaterals: CollateralInfo[]): CollateralInfo[] {
@@ -20,6 +28,6 @@ export function liquidationPreferenceCollaterals(
 ): CollateralInfo[] {
 	return gainCollaterals(collaterals).filter(
 		(collateral) =>
-			!isSunsetBobCollateral(collateral) || !optedOut.has(collateral.ledger_id.toText())
+			!isSunsetCollateral(collateral) || !optedOut.has(collateral.ledger_id.toText())
 	);
 }

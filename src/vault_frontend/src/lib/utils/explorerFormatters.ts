@@ -451,8 +451,12 @@ export function formatStabilityPoolEvent(evt: any): FormattedEvent {
     typeName = 'Liquidation Notification';
     summary = `Liquidation notification: ${data.vault_count} vaults`;
   } else if (key === 'LiquidationExecuted') {
-    const sym = getTokenSymbol(data.collateral_type?.toText?.() ?? '');
-    const collAmt = formatE8s(data.collateral_gained, 8);
+    const collPrincipal = data.collateral_type?.toText?.() ?? '';
+    const sym = getTokenSymbol(collPrincipal);
+    // `collateral_gained` is in the collateral's OWN native units, not e8s:
+    // native XRP is 6-decimal drops, so a hardcoded 8 renders it 100x small.
+    // `stables_consumed_e8s` really is e8s (icUSD), so it stays at 8.
+    const collAmt = formatE8s(data.collateral_gained, getTokenDecimals(collPrincipal));
     const stables = formatE8s(data.stables_consumed_e8s, 8);
     typeName = data.success ? 'Liquidation Executed' : 'Liquidation Failed';
     summary = data.success

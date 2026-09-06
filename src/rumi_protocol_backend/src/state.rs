@@ -269,6 +269,18 @@ pub const DEFAULT_RMR_CEILING_CR: Ratio = Ratio::new(dec!(1.5)); // CR below whi
 /// by moving onto `CollateralConfig`.
 pub const PRICE_SANITY_BAND_RATIO: f64 = 0.7;
 
+/// The SAME band as `PRICE_SANITY_BAND_RATIO`, expressed as an exact rational
+/// `PRICE_SANITY_BAND_NUM / PRICE_SANITY_BAND_DEN` so a caller working in
+/// integer e8 prices can apply it with checked `u128` cross-multiplication and
+/// no floating point at all. `chains_price_sample_is_acceptable` (xrc.rs) uses
+/// this form for the automatic chains XRC writer, where both the stored and the
+/// candidate price are exact `u64` e8 integers and a rounding difference would
+/// be a silent, unreviewable divergence from the collateral path's semantics.
+/// `band_rational_matches_the_f64_constant` (below) pins the two representations
+/// together so they cannot drift apart.
+pub const PRICE_SANITY_BAND_NUM: u128 = 7;
+pub const PRICE_SANITY_BAND_DEN: u128 = 10;
+
 /// Wave-5 LIQ-007 / ORACLE-009: number of consecutive in-band confirmations a
 /// queued outlier candidate needs before it is accepted as the new stored
 /// price. With background fetches every 300 s, N=3 means a sustained move
@@ -1152,9 +1164,12 @@ impl CollateralConfig {
     /// IcrcLedger` rather than an OR of the known native variants, so this is
     /// FAIL-CLOSED: a future `CustodyKind` variant is automatically excluded
     /// by every call site that reject-gates on this predicate (the ICRC
-    /// deposit/withdraw transfer paths, add-margin, automated-liquidation
-    /// exclusion, redemption-priority exclusion) without that call site
-    /// needing to be touched when the variant is added. Sites whose PAYOUT
+    /// deposit/withdraw transfer paths, add-margin, redemption-priority
+    /// exclusion) without that call site needing to be touched when the
+    /// variant is added. `scan_unhealthy_vaults`'s automated-liquidation
+    /// exclusion combines this with `!is_native_xrp()` instead, since XRP
+    /// (unlike SOL) has an automated stability-pool absorb path and must stay
+    /// IN that scan (see the SOL-PARITY-TODO note there). Sites whose PAYOUT
     /// ROUTING differs per custody kind should use an exhaustive `match
     /// custody() { ... }` instead of this predicate, so the compiler forces a
     /// decision for the new kind rather than silently misrouting it.
@@ -1503,8 +1518,9 @@ pub struct State {
     /// staging/testnet) or `key_1` (production). Read by the EVM `key_id()` at
     /// derive/sign time, so a fresh production canister uses the production
     /// threshold key with no rebuild. Settable via `set_chains_ecdsa_key_name`
-    /// ONLY while no chain vault exists — changing it re-derives every per-vault
-    /// custody address, which would orphan already-deposited collateral.
+    /// ONLY while the EVM rail is truly fresh — any staged configuration,
+    /// binding, derived address/proof, settlement state, or vault makes the key
+    /// immutable because changing it would orphan key-bound addresses.
     #[serde(default = "default_chains_ecdsa_key_name")]
     pub chains_ecdsa_key_name: String,
     /// Threshold Schnorr Ed25519 key name for the native-XRP rail. Like the EVM
@@ -3208,10 +3224,14 @@ impl State {
             self.last_icp_timestamp = Some(ts);
         }
         let icp = self.icp_collateral_type();
-        if let Some(config) = self.collateral_configs.get_mut(&icp) {
-            config.last_price = Some(rate.to_f64());
+        if self.collateral_configs.contains_key(&icp) {
+            // Re-keys ICP vaults so a price move alone cannot hide a
+            // liquidatable vault from band-only check_vaults ticks.
+            self.on_collateral_price_change(&icp, rate.to_f64());
             if let Some(ts) = timestamp_nanos {
-                config.last_price_timestamp = Some(ts);
+                if let Some(config) = self.collateral_configs.get_mut(&icp) {
+                    config.last_price_timestamp = Some(ts);
+                }
             }
         }
     }
@@ -4112,6 +4132,46 @@ impl State {
     /// vaults move proportionally with price, preserving relative ordering.
     /// Re-keying every vault on every 5-minute price tick would burn O(N)
     /// cycles for zero ordering benefit.
+    /// Apply a new cached price for `collateral_type` and re-key that
+    /// collateral's vaults in `vault_cr_index`.
+    ///
+    /// The CR key encodes the vault's CR at its last mutation, so a pure price
+    /// move silently invalidates it: the vault's true CR crosses the
+    /// liquidation floor while its stored key still says "healthy", and
+    /// band-only `check_vaults` ticks skip it until the hourly full sweep.
+    /// That is up to an hour of unliquidated bad debt on any collateral.
+    ///
+    /// The original design deliberately kept price updates out of the index on
+    /// the grounds that all vaults of a type move proportionally, so relative
+    /// ORDERING is preserved. That is true, and irrelevant to the band gate,
+    /// which compares each key against an ABSOLUTE threshold. Ordering is not
+    /// the property the gate needs; accuracy is.
+    ///
+    /// Cost is bounded by the vault count of ONE collateral (tens today), not
+    /// the whole book, and only on a real price change — negligible beside the
+    /// XRC outcall that delivered the price.
+    pub fn on_collateral_price_change(&mut self, collateral_type: &CollateralType, price: f64) {
+        let unchanged = self
+            .collateral_configs
+            .get(collateral_type)
+            .map(|c| c.last_price == Some(price))
+            .unwrap_or(false);
+        if let Some(config) = self.collateral_configs.get_mut(collateral_type) {
+            config.last_price = Some(price);
+        }
+        if unchanged {
+            return;
+        }
+        let vault_ids: Vec<u64> = self
+            .collateral_to_vault_ids
+            .get(collateral_type)
+            .map(|ids| ids.iter().copied().collect())
+            .unwrap_or_default();
+        for vault_id in vault_ids {
+            self.reindex_vault_cr(vault_id);
+        }
+    }
+
     pub fn reindex_vault_cr(&mut self, vault_id: u64) {
         // Drop any prior entry first so a re-key from one bucket to another
         // never leaves a stale duplicate.
@@ -4318,6 +4378,40 @@ impl State {
     /// buckets, including those skipped due to `bot_processing` — that
     /// read still costs cycles, so the counter reflects actual cost
     /// paid (useful for production telemetry and the DOS-005 fence).
+    /// Amount a liquidation dispatch should ask an absorber to repay.
+    ///
+    /// Native-XRP is full-liquidation-only: `xrp_sp_absorb_sizing` rejects any
+    /// requested burn that isn't exactly the vault's live debt (the seizure and
+    /// the resulting `XrpClaim` are computed against the whole debt). Handing
+    /// the SP the generic partial cap makes every automated absorb fail at
+    /// preflight, so native-XRP dispatches the full debt. All other collateral
+    /// keeps the partial cap, which restores the vault to its borrow threshold.
+    pub fn recommended_liquidation_amount_for(&self, vault: &Vault, price: UsdIcp) -> ICUSD {
+        if self
+            .get_collateral_config(&vault.collateral_type)
+            .map(|c| c.is_native_xrp())
+            .unwrap_or(false)
+        {
+            return vault.borrowed_icusd_amount;
+        }
+        self.compute_partial_liquidation_cap(vault, price)
+    }
+
+    /// Whether the liquidation bot may be offered vaults of this collateral
+    /// type. Requires the operator allowlist AND a custody kind the bot can
+    /// actually settle: native-XRP collateral is claim-based (XRPL side), so
+    /// the bot is refused regardless of `bot_allowed_collateral_types` and the
+    /// cascade falls through to the stability pool's native-XRP absorb path.
+    pub fn vault_routable_to_bot(&self, collateral_type: &Principal) -> bool {
+        if !self.bot_allowed_collateral_types.contains(collateral_type) {
+            return false;
+        }
+        !self
+            .get_collateral_config(collateral_type)
+            .map(|c| c.is_native_xrp())
+            .unwrap_or(false)
+    }
+
     pub fn scan_unhealthy_vaults(&self, rate: UsdIcp, do_full_sweep: bool) -> UnhealthyVaultScan {
         let threshold_key = self.check_vaults_alert_threshold_key();
         let upper_bound = if do_full_sweep {
@@ -4342,18 +4436,22 @@ impl State {
                 if vault.bot_processing {
                     continue;
                 }
-                // P5: native-XRP vaults are NOT auto-liquidated. XRP liquidation is
-                // manual/external (claim-based) only — automated SP/bot dispatch
-                // would strand the seized XRP (neither the SP nor the bot can settle
-                // an XrpClaim). External liquidators call liquidate_vault_partial /
-                // partial_liquidate_vault directly, where they become the claimant.
-                // Native-SOL is excluded for the identical reason (a SolClaim can only
-                // be settled by settle_sol_claim, which neither the SP nor the bot
-                // call); `is_native_custody()` keeps this exclusion automatic for any
-                // future native-custody kind too.
+                // P5 (2026-08-14): native-XRP vaults are no longer excluded here.
+                // XRP liquidation is auto-dispatched to the stability pool via its
+                // native-XRP absorb path (see check_vaults), so XRP vaults must
+                // appear in this scan for that dispatch to trigger.
+                //
+                // Native-SOL has no such absorb path yet (a SolClaim can only be
+                // settled by settle_sol_claim, which neither the SP nor the bot
+                // call), so it stays excluded (claim-based, manual liquidation
+                // only via liquidate_vault_partial / partial_liquidate_vault)
+                // until SOL gets absorption parity with XRP.
+                // SOL-PARITY-TODO: once native-SOL has an SP (or bot) absorb path
+                // mirroring XRP's, drop this exclusion so SOL vaults enter the
+                // automated scan too.
                 if self
                     .get_collateral_config(&vault.collateral_type)
-                    .map(|c| c.is_native_custody())
+                    .map(|c| c.is_native_custody() && !c.is_native_xrp())
                     .unwrap_or(false)
                 {
                     continue;
@@ -5642,6 +5740,19 @@ pub fn replace_state(state: State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn band_rational_matches_the_f64_constant() {
+        // The integer band used by the chains XRC writer
+        // (`xrc::chains_price_sample_is_acceptable`) and the f64 band used by
+        // `check_price_sanity_band` MUST describe the same band. If someone
+        // retunes one, this fails until they retune the other.
+        assert_eq!(
+            PRICE_SANITY_BAND_NUM as f64 / PRICE_SANITY_BAND_DEN as f64,
+            PRICE_SANITY_BAND_RATIO
+        );
+        assert!(PRICE_SANITY_BAND_NUM > 0 && PRICE_SANITY_BAND_DEN > PRICE_SANITY_BAND_NUM);
+    }
 
     #[test]
     fn sunset_collateral_retires_only_after_its_last_vault_is_closed() {
@@ -8169,11 +8280,13 @@ mod tests {
     }
 
     #[test]
-    fn scan_unhealthy_vaults_excludes_native_xrp() {
-        // P5: native-XRP vaults must NOT appear in the automated liquidation scan
-        // (they're liquidated manually). An ICP vault at the same underwater CR still
-        // appears. Pins the is_native_xrp() skip in scan_unhealthy_vaults so a future
-        // CR-index / banding refactor can't silently route XRP into SP/bot dispatch.
+    fn scan_unhealthy_vaults_includes_native_xrp() {
+        // Native-XRP vaults MUST appear in the automated liquidation scan so
+        // check_vaults dispatches them to the stability pool (which settles
+        // them via the native-XRP absorb path shipped 2026-06-27). The former
+        // P5 exclusion predated SP absorption and left XRP vaults liquidatable
+        // only by manual trigger. Bot routing is still fenced separately via
+        // vault_routable_to_bot.
         let mut s = test_state();
         let icp = s.icp_ledger_principal;
         let xrp = xrp_collateral_principal();
@@ -8218,8 +8331,148 @@ mod tests {
             "ICP vault should be flagged unhealthy: {ids:?}"
         );
         assert!(
-            !ids.contains(&2),
-            "native-XRP vault must be excluded from the automated scan: {ids:?}"
+            ids.contains(&2),
+            "native-XRP vault must be included in the automated scan: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn band_scan_finds_vault_that_only_a_price_move_pushed_underwater() {
+        // A vault's `vault_cr_index` key is written from the collateral price
+        // cached AT THE TIME OF THE LAST VAULT MUTATION. A pure price move
+        // changes the vault's true CR but not its stored key, so a
+        // stale-above-threshold key makes band-only `check_vaults` ticks skip a
+        // genuinely liquidatable vault. Only the hourly full sweep (or an
+        // upgrade, which rebuilds the index) catches it -- an hour of extra bad
+        // debt exposure on EVERY collateral, not just XRP.
+        //
+        // Observed live: pre-upgrade ticks logged "visited 61, found 0" while
+        // vault 195 was liquidatable; the post-upgrade tick (fresh index) found
+        // it immediately.
+        let mut s = test_state();
+        let icp = s.icp_ledger_principal;
+        if let Some(c) = s.collateral_configs.get_mut(&icp) {
+            c.last_price = Some(10.0);
+        }
+        // Healthy at $10: $200 collateral against $100 debt => CR 200%.
+        s.open_vault(crate::vault::Vault {
+            owner: Principal::anonymous(),
+            vault_id: 1,
+            borrowed_icusd_amount: ICUSD::new(100 * 100_000_000),
+            collateral_amount: 20 * 100_000_000,
+            collateral_type: icp,
+            accrued_interest: ICUSD::new(0),
+            last_accrual_time: 0,
+            bot_processing: false,
+        });
+
+        // Price halves. Nothing mutates the vault -- only the cached price.
+        // True CR is now 100%, far below any liquidation floor.
+        s.on_collateral_price_change(&icp, 5.0);
+
+        let dummy = crate::numeric::UsdIcp::from(rust_decimal::Decimal::ZERO);
+        let band = s.scan_unhealthy_vaults(dummy, false);
+        let ids: Vec<u64> = band.unhealthy_vaults.iter().map(|v| v.vault_id).collect();
+        assert!(
+            ids.contains(&1),
+            "band-only tick must see a vault that a price move pushed underwater \
+             (visited {}, threshold_key {}): {ids:?}",
+            band.vaults_visited,
+            band.threshold_key
+        );
+    }
+
+    #[test]
+    fn dispatch_sizing_requests_full_debt_for_native_xrp() {
+        // The native-XRP SP absorb path is full-liquidation-only: the backend's
+        // `xrp_sp_absorb_sizing` rejects any `expected_icusd_burn_e8s` that is
+        // not exactly equal to the vault's live debt. `check_vaults` must
+        // therefore dispatch the FULL debt for native-XRP, not the generic
+        // partial-liquidation cap (which returns a partial for an ordinary
+        // breach and would make every automated absorb fail at preflight).
+        // Non-XRP collateral keeps the partial cap.
+        let mut s = test_state();
+        let icp = s.icp_ledger_principal;
+        let xrp = xrp_collateral_principal();
+        if let Some(c) = s.collateral_configs.get_mut(&icp) {
+            c.last_price = Some(5.0);
+        }
+        let mut xrp_cfg = xrp_collateral_config(
+            Ratio::new(dec!(0.005)),
+            Ratio::new(dec!(0.0)),
+            Ratio::new(dec!(1.0333)),
+        );
+        // $1.30 of XRP against $1.00 of debt => CR 130%, under the 133%
+        // liquidation floor but well above the 112% bonus: the ordinary
+        // breach, where the partial cap is strictly less than full debt.
+        xrp_cfg.last_price = Some(1.30);
+        s.collateral_configs.insert(xrp, xrp_cfg);
+
+        let xrp_vault = crate::vault::Vault {
+            owner: Principal::anonymous(),
+            vault_id: 2,
+            borrowed_icusd_amount: ICUSD::new(100_000_000),
+            collateral_amount: 1_000_000, // 6 decimals => 1.0 XRP
+            collateral_type: xrp,
+            accrued_interest: ICUSD::new(0),
+            last_accrual_time: 0,
+            bot_processing: false,
+        };
+        let icp_vault = crate::vault::Vault {
+            owner: Principal::anonymous(),
+            vault_id: 1,
+            borrowed_icusd_amount: ICUSD::new(10_000_000_000),
+            collateral_amount: 2_600_000_000,
+            collateral_type: icp,
+            accrued_interest: ICUSD::new(0),
+            last_accrual_time: 0,
+            bot_processing: false,
+        };
+        let dummy = crate::numeric::UsdIcp::from(rust_decimal::Decimal::ZERO);
+
+        // Guard the premise: the generic cap really is a partial here, so this
+        // test would be vacuous if it ever stopped being one.
+        assert!(
+            s.compute_partial_liquidation_cap(&xrp_vault, dummy) < xrp_vault.borrowed_icusd_amount,
+            "premise: generic cap must be partial for this XRP vault"
+        );
+
+        assert_eq!(
+            s.recommended_liquidation_amount_for(&xrp_vault, dummy),
+            xrp_vault.borrowed_icusd_amount,
+            "native-XRP dispatch must request the full live debt"
+        );
+        assert_eq!(
+            s.recommended_liquidation_amount_for(&icp_vault, dummy),
+            s.compute_partial_liquidation_cap(&icp_vault, dummy),
+            "non-XRP collateral must keep the generic partial cap"
+        );
+    }
+
+    #[test]
+    fn native_xrp_never_routable_to_bot() {
+        // The liquidation bot cannot settle native-XRP collateral (it has no
+        // XRPL settlement path), so even if an operator adds the XRP synthetic
+        // principal to `bot_allowed_collateral_types`, routing must refuse the
+        // bot and let the cascade fall through to the stability pool.
+        let mut s = test_state();
+        let icp = s.icp_ledger_principal;
+        let xrp = xrp_collateral_principal();
+        let mut xrp_cfg = s.collateral_configs.get(&icp).unwrap().clone();
+        xrp_cfg.ledger_canister_id = xrp;
+        xrp_cfg.custody_kind = Some(CustodyKind::NativeXrp);
+        s.collateral_configs.insert(xrp, xrp_cfg);
+
+        s.bot_allowed_collateral_types.insert(icp);
+        s.bot_allowed_collateral_types.insert(xrp);
+
+        assert!(
+            s.vault_routable_to_bot(&icp),
+            "ICP in the allowed set must stay bot-routable"
+        );
+        assert!(
+            !s.vault_routable_to_bot(&xrp),
+            "native-XRP must never be bot-routable, even when allowed by config"
         );
     }
 

@@ -252,3 +252,149 @@ fn verify_intent_rejects_chain_id_above_u32() {
         Err(VerifyError::Recover(_))
     ));
 }
+
+// ─── secp256k1 high-s malleability ─────────────────────────────────────────────
+
+/// secp256k1 group order `n`, big-endian. Used to construct the classic ECDSA
+/// signature-malleability companion `(r, n - s, flipped v)` of a valid
+/// signature `(r, s, v)`.
+const SECP256K1_ORDER: [u8; 32] = [
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xfe, 0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b, 0xbf, 0xd2, 0x5e, 0x8c, 0xd0, 0x36,
+    0x41, 0x41,
+];
+
+/// `n - s`, exact for any `0 < s < n` (true of any `s` a real ECDSA signature
+/// carries), via plain big-endian subtraction with borrow (no modular
+/// wraparound needed since `s < n` always holds here).
+fn negate_s_mod_n(s: [u8; 32]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    let mut borrow: i16 = 0;
+    for i in (0..32).rev() {
+        let mut diff = SECP256K1_ORDER[i] as i16 - s[i] as i16 - borrow;
+        if diff < 0 {
+            diff += 256;
+            borrow = 1;
+        } else {
+            borrow = 0;
+        }
+        out[i] = diff as u8;
+    }
+    out
+}
+
+/// Finding 3 (secp256k1 high-s malleability) regression, from the M2 security
+/// close-out.
+///
+/// The audit question was whether `recover_evm_address` (`eip712.rs`) accepts
+/// the classic ECDSA malleability companion `(r, n - s, flipped v)` of a valid
+/// signature `(r, s, v)`, and if so whether `(synthetic_owner, nonce)`
+/// consumption alone is what neutralizes a malleated resubmit. EMPIRICALLY,
+/// it is narrower than that: `recover_evm_address` calls `k256`'s
+/// `VerifyingKey::recover_from_prehash`, whose LAST step re-verifies the
+/// recovered key against the input signature via `AffinePoint::verify_prehashed`
+/// (k256 0.13.4, `src/ecdsa.rs`, the `VerifyPrimitive` impl), and THAT
+/// function unconditionally rejects any signature whose `s` is high
+/// (`if sig.s().is_high() { return Err(..) }`) before doing any curve math.
+/// So a genuinely malleated `(r, n-s, flipped v)` signature is rejected by
+/// `recover_evm_address` OUTRIGHT (asserted in part 1); it never reaches
+/// `verify_intent`'s signer check, let alone nonce consumption. This is a
+/// STRONGER guarantee than the nonce-binding fallback the audit question
+/// assumed. It also means the earlier (accurate) half of the finding, that
+/// `Signature::from_scalars` itself performs no high-S check, is true but
+/// not exploitable end-to-end, because the check lives one call further in,
+/// in the recovery path's internal consistency re-verify.
+///
+/// Part 2 independently pins the OTHER layer the finding asked about: exact
+/// signature replay (not malleation) is separately blocked by
+/// `MultiChainState::consume_evm_nonce`, so even if some future dependency
+/// bump ever relaxed k256's high-S rejection, a resubmitted intent (malleated
+/// or byte-identical) still cannot authorize a second state transition once
+/// its nonce is spent.
+///
+/// Both properties hold with `eip712.rs` and `multi_chain_state.rs`
+/// UNCHANGED; this test is the deliverable.
+#[test]
+fn high_s_malleated_signature_is_rejected_and_nonce_replay_is_independently_blocked() {
+    use k256::ecdsa::{RecoveryId, Signature, SigningKey};
+
+    let mut b = [0u8; 32];
+    b[31] = 1;
+    let sk = SigningKey::from_bytes(&b.into()).unwrap();
+
+    let intent = golden_intent(); // nonce = 0
+    let digest = intent_digest(
+        &domain_separator(intent.chain_id, GOLDEN_CONTRACT).unwrap(),
+        &intent_struct_hash(&intent).unwrap(),
+    );
+    let (sig, rid): (Signature, RecoveryId) = sk.sign_prehash_recoverable(&digest).unwrap();
+    let sig_bytes = sig.to_bytes();
+    let r: [u8; 32] = sig_bytes[0..32].try_into().unwrap();
+    let s: [u8; 32] = sig_bytes[32..64].try_into().unwrap();
+    let v = 27 + u8::from(rid);
+
+    let mut original_sig65 = Vec::with_capacity(65);
+    original_sig65.extend_from_slice(&r);
+    original_sig65.extend_from_slice(&s);
+    original_sig65.push(v);
+
+    // The malleated companion: same r, s -> n - s, v flipped between 27/28.
+    // `sk.sign_prehash_recoverable` always yields a LOW-S signature (k256
+    // normalizes on signing), so this negation genuinely produces a HIGH-S
+    // signature, the case under test.
+    let malleated_s = negate_s_mod_n(s);
+    assert_ne!(malleated_s, s, "sanity: negation actually changed s");
+    let malleated_v = if v == 27 { 28 } else { 27 };
+    let mut malleated_sig65 = Vec::with_capacity(65);
+    malleated_sig65.extend_from_slice(&r);
+    malleated_sig65.extend_from_slice(&malleated_s);
+    malleated_sig65.push(malleated_v);
+
+    // 1. The original (low-S) signature recovers the real owner; the
+    //    malleated (high-S) companion is REJECTED outright by
+    //    `recover_evm_address`, for EITHER choice of recovery byte (rules out
+    //    "wrong parity" as the cause and confirms it is the high-S rejection).
+    let owner_original = recover_evm_address(&digest, &original_sig65).unwrap();
+    assert_eq!(owner_original, GOLDEN_OWNER);
+    assert!(
+        recover_evm_address(&digest, &malleated_sig65).is_err(),
+        "a high-S malleated signature must be rejected outright, not merely neutralized downstream"
+    );
+    for try_v in [27u8, 28u8] {
+        let mut trial = Vec::with_capacity(65);
+        trial.extend_from_slice(&r);
+        trial.extend_from_slice(&malleated_s);
+        trial.push(try_v);
+        assert!(
+            recover_evm_address(&digest, &trial).is_err(),
+            "high-S rejection holds regardless of the recovery byte (v={try_v})"
+        );
+    }
+    // `verify_intent` (which calls `recover_evm_address` internally) rejects
+    // the malleated form too, for the same reason: it never gets past the
+    // ecrecover step to reach the signer-match check.
+    assert!(matches!(
+        verify_intent(&intent, &malleated_sig65, IntentAction::Open, GOLDEN_CONTRACT, 1000),
+        Err(VerifyError::Recover(_))
+    ));
+
+    // 2. Independent layer: exact-signature nonce replay is ALSO blocked, so
+    //    the resubmit is neutralized twice over even if a future dependency
+    //    change ever relaxed part 1's high-S rejection. Consuming a nonce
+    //    twice (same owner, same nonce) is rejected regardless of which
+    //    signature carried the first submission.
+    let (_owner, synthetic) =
+        verify_intent(&intent, &original_sig65, IntentAction::Open, GOLDEN_CONTRACT, 1000)
+            .expect("original signature verifies");
+    let mut state = crate::chains::multi_chain_state::MultiChainState::default();
+    state
+        .consume_evm_nonce(&synthetic, intent.nonce)
+        .expect("first submission (nonce 0) consumes cleanly");
+    let resubmit = state.consume_evm_nonce(&synthetic, intent.nonce);
+    assert_eq!(
+        resubmit,
+        Err(1),
+        "a nonce-0 resubmit after nonce 0 is already spent must be rejected (expected next = 1), \
+         producing no second authorized state transition"
+    );
+}

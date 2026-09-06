@@ -582,9 +582,13 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
         }
 
         mutate_state(|s| {
-            if let Some(config) = s.collateral_configs.get_mut(&collateral_type) {
-                config.last_price = Some(final_rate_f64);
-                config.last_price_timestamp = Some(ts_nanos);
+            if s.collateral_configs.contains_key(&collateral_type) {
+                // Re-keys this collateral's vaults so band-only check_vaults
+                // ticks see vaults that the price move alone pushed underwater.
+                s.on_collateral_price_change(&collateral_type, final_rate_f64);
+                if let Some(config) = s.collateral_configs.get_mut(&collateral_type) {
+                    config.last_price_timestamp = Some(ts_nanos);
+                }
                 crate::event::record_price_update(collateral_type, final_rate, ts_nanos);
             }
         });
@@ -625,9 +629,11 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
                     return;
                 }
                 mutate_state(|s| {
-                    if let Some(config) = s.collateral_configs.get_mut(&collateral_type) {
-                        config.last_price = Some(price);
-                        config.last_price_timestamp = Some(ts_nanos);
+                    if s.collateral_configs.contains_key(&collateral_type) {
+                        s.on_collateral_price_change(&collateral_type, price);
+                        if let Some(config) = s.collateral_configs.get_mut(&collateral_type) {
+                            config.last_price_timestamp = Some(ts_nanos);
+                        }
                         if let Some(price_dec) = rust_decimal::Decimal::from_f64(price) {
                             crate::event::record_price_update(collateral_type, price_dec, ts_nanos);
                         }
@@ -791,9 +797,11 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
     }
 
     mutate_state(|s| {
-        if let Some(config) = s.collateral_configs.get_mut(&collateral_type) {
-            config.last_price = Some(final_rate_f64);
-            config.last_price_timestamp = Some(ts_nanos);
+        if s.collateral_configs.contains_key(&collateral_type) {
+            s.on_collateral_price_change(&collateral_type, final_rate_f64);
+            if let Some(config) = s.collateral_configs.get_mut(&collateral_type) {
+                config.last_price_timestamp = Some(ts_nanos);
+            }
             crate::event::record_price_update(collateral_type, final_rate, ts_nanos);
         }
     });

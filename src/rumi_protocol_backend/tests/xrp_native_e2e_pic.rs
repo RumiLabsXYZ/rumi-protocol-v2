@@ -852,9 +852,10 @@ fn xrp_native_liquidation_is_claim_based() {
     mint_icusd(&pic, icusd, backend, liquidator(), 40 * E8);
     approve_icusd(&pic, icusd, liquidator(), backend, 40 * E8);
 
-    // Native-XRP is excluded from automated SP/bot liquidation (P5), so liquidation
-    // is the external, claim-based path: the liquidator repays part of the debt and
-    // the seized XRP becomes an XrpClaim they later settle to an XRPL address.
+    // Native-XRP vaults now also flow through the automated cascade to the
+    // stability pool, but the external, claim-based path exercised here remains
+    // supported: the liquidator repays part of the debt and the seized XRP
+    // becomes an XrpClaim they later settle to an XRPL address.
     let before_claims = xrp_claims_full(&pic, backend);
     let liquidation_result = decode_result::<rumi_protocol_backend::SuccessWithFee>(
         update_as(
@@ -972,6 +973,354 @@ fn xrp_collateral_contract_matches_frontend_expectations() {
 
 /// IDs of all outstanding XRP claims (via the dev query). Returns [] if the query
 /// is absent (older builds) — the asserting tests treat that as a hard failure.
+/// Automated push path: `check_vaults` -> stability pool -> backend absorb, with
+/// a REAL stability-pool canister wired in.
+///
+/// This is the flow the manual-liquidation tests above never touch (they boot
+/// with `stability_pool_principal: None`), and its absence is what let a sizing
+/// mismatch ship: `check_vaults` dispatched the generic partial-liquidation cap
+/// while the native-XRP absorb path only accepts the full live debt, so every
+/// automated absorb failed at preflight.
+///
+/// The vault here sits at an ORDINARY breach (CR ~130%: under the 133%
+/// liquidation floor, above the 112% bonus). That distinction is the whole
+/// point -- a deep breach makes the partial cap saturate to the full debt and
+/// hides the bug.
+#[test]
+fn xrp_vault_is_absorbed_by_stability_pool_via_automated_dispatch() {
+    let Env {
+        pic,
+        backend,
+        icusd,
+        xrc,
+    } = boot();
+    register_xrp(&pic, backend);
+
+    // ── Wire a real stability pool to the backend ────────────────────────────
+    let sp_id = pic.create_canister();
+    pic.add_cycles(sp_id, 2_000_000_000_000);
+    pic.install_canister(
+        sp_id,
+        stability_pool_wasm(),
+        encode_one(StabilityPoolInitArgs {
+            protocol_canister_id: backend,
+            authorized_admins: vec![sp_admin()],
+        })
+        .expect("encode sp init"),
+        None,
+    );
+    decode_result::<()>(
+        update_as(
+            &pic,
+            backend,
+            dev(),
+            "set_stability_pool_principal",
+            Encode!(&sp_id).unwrap(),
+        ),
+        "set_stability_pool_principal",
+    )
+    .expect("set_stability_pool_principal");
+    decode_result::<()>(
+        update_as(
+            &pic,
+            sp_id,
+            sp_admin(),
+            "register_stablecoin",
+            Encode!(&SpStablecoinConfig {
+                ledger_id: icusd,
+                symbol: "icUSD".to_string(),
+                decimals: 8,
+                priority: 1,
+                is_active: true,
+                transfer_fee: Some(10_000),
+                is_lp_token: None,
+                underlying_pool: None,
+            })
+            .unwrap(),
+        ),
+        "register_stablecoin",
+    )
+    .expect("register icUSD in the pool");
+
+    // ── Fund the pool and opt the depositor into XRP payouts ─────────────────
+    // Only depositors holding icUSD AND carrying an XRPL payout address count
+    // toward XRP coverage, so both steps are load-bearing.
+    let sp_deposit_amount = 100 * E8;
+    mint_icusd(&pic, icusd, backend, depositor(), sp_deposit_amount + 10 * E8);
+    approve_icusd(&pic, icusd, depositor(), sp_id, sp_deposit_amount + E8);
+    decode_result::<()>(
+        update_as(
+            &pic,
+            sp_id,
+            depositor(),
+            "deposit",
+            Encode!(&icusd, &sp_deposit_amount).unwrap(),
+        ),
+        "deposit",
+    )
+    .expect("pool deposit");
+    decode_result::<()>(
+        update_as(
+            &pic,
+            sp_id,
+            depositor(),
+            "opt_in_native_collateral_with_tag",
+            Encode!(
+                &xrp_collateral_principal(),
+                // Must be a real base58check XRPL classic address: the pool
+                // validates it via chains::xrp::address at opt-in time.
+                &"rUn84CUYbNjRoTQ6mSW7BVJPSVJNLb1QLo".to_string(),
+                &Option::<u32>::None
+            )
+            .unwrap(),
+        ),
+        "opt_in_native_collateral_with_tag",
+    )
+    .expect("depositor opts into XRP payouts");
+
+    // ── An XRP vault at an ordinary breach ───────────────────────────────────
+    let open_reply = open_xrp_vault(&pic, backend);
+    let open: XrpVaultOpenInfo =
+        match decode_result::<XrpVaultOpenInfo>(open_reply, "open_xrp_vault") {
+            Ok(info) => info,
+            Err(_) => {
+                eprintln!("[gated] tEd25519 unavailable; skipping XRP SP auto-absorb e2e");
+                return;
+            }
+        };
+    let vault_id = open.vault_id;
+    let deposit_drops = 200 * XRP;
+    decode_result::<u64>(
+        call_with_rippled(
+            &pic,
+            backend,
+            user(),
+            "confirm_xrp_deposit",
+            Encode!(&vault_id).unwrap(),
+            |m| match m {
+                "account_info" => rippled_account_info(deposit_drops, 1, 100),
+                "server_state" => rippled_server_state(RESERVE_DROPS),
+                other => panic!("unexpected rippled method: {other}"),
+            },
+        ),
+        "confirm_xrp_deposit",
+    )
+    .expect("confirm ok");
+
+    let borrow_amount = 60 * E8;
+    decode_result::<rumi_protocol_backend::SuccessWithFee>(
+        update_as(
+            &pic,
+            backend,
+            user(),
+            "borrow_from_vault",
+            Encode!(&VaultArg {
+                vault_id,
+                amount: borrow_amount
+            })
+            .unwrap(),
+        ),
+        "borrow_from_vault",
+    )
+    .expect("borrow ok");
+
+    // ~199 XRP at $0.392 => ~$78 against ~$60 debt => CR ~130%: liquidatable,
+    // but NOT deeply enough for the partial cap to saturate to the full debt.
+    // 0.392/0.50 = 0.784 stays inside the price-sanity band, so the crash is
+    // accepted on a single re-fetch rather than queued as an outlier.
+    crash_xrp_price(&pic, xrc, 392 * E8 / 1000);
+
+    // Make every tick a full sweep. A vault's CR-index key is only refreshed on
+    // vault mutations, so after a price crash it is stale-above-threshold and
+    // band-only ticks skip it -- on mainnet the hourly full sweep is the safety
+    // belt that catches exactly this. Forcing it here keeps the test about the
+    // absorb, not about how many simulated hours elapse.
+    decode_result::<()>(
+        update_as(
+            &pic,
+            backend,
+            dev(),
+            "set_check_vaults_full_sweep_every_n_ticks",
+            Encode!(&1u64).unwrap(),
+        ),
+        "set_check_vaults_full_sweep_every_n_ticks",
+    )
+    .expect("force full sweeps");
+
+    let claims_before = xrp_claims(&pic, backend);
+    let vault_before = get_vault(&pic, backend, vault_id).expect("vault exists before absorb");
+    assert!(
+        vault_before.borrowed_icusd_amount > 0,
+        "vault must carry debt before the absorb"
+    );
+
+    // ── Let the 5-minute check_vaults timer fire and drive the cascade ───────
+    // No manual liquidation call anywhere: everything past this point is the
+    // automated path doing its own work.
+    for _ in 0..6 {
+        pic.advance_time(std::time::Duration::from_secs(300));
+        for _ in 0..25 {
+            pic.tick();
+        }
+    }
+
+    let vault_after = get_vault(&pic, backend, vault_id);
+    let claims_after = xrp_claims(&pic, backend);
+    assert!(
+        claims_after.len() > claims_before.len(),
+        "automated SP absorb must mint an XrpClaim for the opted-in depositor \
+         (before={claims_before:?}, after={claims_after:?})"
+    );
+    assert!(
+        vault_after
+            .as_ref()
+            .map(|v| v.borrowed_icusd_amount == 0)
+            .unwrap_or(true),
+        "automated SP absorb must clear the vault's debt, got {vault_after:?}"
+    );
+
+    // ── Phase 2: the auto-settlement sweep pays the depositor, no clicks ─────
+    // The depositor's claim must exist backend-side, mirrored by an SP-side
+    // pending-payout reminder carrying the registered address.
+    let (dep_claim_id, dep_claim) = xrp_claims_full(&pic, backend)
+        .into_iter()
+        .find(|(id, c)| !claims_before.contains(id) && c.claimant == depositor())
+        .expect("depositor payout claim exists after the absorb");
+    let payouts_before = sp_pending_payouts(&pic, sp_id, depositor());
+    assert_eq!(
+        payouts_before.len(),
+        1,
+        "SP records exactly one pending payout for the depositor: {payouts_before:?}"
+    );
+    assert_eq!(payouts_before[0].claim_id, dep_claim_id);
+
+    // Advance through sweep windows (600s cadence), servicing the rippled
+    // outcalls the backend settlement makes. Three windows are the expected
+    // minimum: submit -> confirm-validated (claim removed) -> outstanding=false
+    // (SP acks its reminder). Extra windows are harmless.
+    for _ in 0..8 {
+        pic.advance_time(std::time::Duration::from_secs(600));
+        for _ in 0..25 {
+            pic.tick();
+            for req in pic.get_canister_http() {
+                let m = rippled_method_of(&req.body);
+                let body = match m.as_str() {
+                    "account_info" => rippled_account_info(deposit_drops, 5, 300),
+                    "server_state" => rippled_server_state(RESERVE_DROPS),
+                    "submit" => rippled_submit_ok(),
+                    "tx" => rippled_tx_validated(
+                        &rippled_tx_hash_of(&req.body),
+                        dep_claim.drops,
+                        301,
+                    ),
+                    other => panic!("unexpected rippled method in sweep: {other}"),
+                }
+                .to_string()
+                .into_bytes();
+                pic.mock_canister_http_response(MockCanisterHttpResponse {
+                    subnet_id: req.subnet_id,
+                    request_id: req.request_id,
+                    response: CanisterHttpResponse::CanisterHttpReply(CanisterHttpReply {
+                        status: 200,
+                        headers: vec![],
+                        body,
+                    }),
+                    additional_responses: vec![],
+                });
+            }
+        }
+        if !xrp_claims(&pic, backend).contains(&dep_claim_id)
+            && sp_pending_payouts(&pic, sp_id, depositor()).is_empty()
+        {
+            break;
+        }
+    }
+
+    assert!(
+        !xrp_claims(&pic, backend).contains(&dep_claim_id),
+        "sweep must settle and remove the depositor's claim without any manual call"
+    );
+    assert!(
+        sp_pending_payouts(&pic, sp_id, depositor()).is_empty(),
+        "sweep must ack the SP-side reminder once the settlement validates"
+    );
+}
+
+/// rippled `tx` requests carry the hash being queried; echo it back so the
+/// timer-driven settlement (whose hash the test never sees) validates.
+fn rippled_tx_hash_of(body: &[u8]) -> String {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.get("params")?
+                .get(0)?
+                .get("transaction")?
+                .as_str()
+                .map(String::from)
+        })
+        .unwrap_or_default()
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct NativeXrpPendingPayoutView {
+    claim_id: u64,
+    #[allow(dead_code)]
+    drops: u64,
+    #[allow(dead_code)]
+    payout_address: String,
+}
+
+fn sp_pending_payouts(
+    pic: &PocketIc,
+    sp: Principal,
+    user: Principal,
+) -> Vec<NativeXrpPendingPayoutView> {
+    match pic
+        .query_call(
+            sp,
+            user,
+            "get_my_native_xrp_payouts",
+            Encode!().expect("encode empty args"),
+        )
+        .expect("query get_my_native_xrp_payouts")
+    {
+        WasmResult::Reply(bytes) => {
+            Decode!(&bytes, Vec<NativeXrpPendingPayoutView>).expect("decode pending payouts")
+        }
+        WasmResult::Reject(m) => panic!("get_my_native_xrp_payouts rejected: {m}"),
+    }
+}
+
+fn stability_pool_wasm() -> Vec<u8> {
+    include_bytes!("../../../target/wasm32-unknown-unknown/release/stability_pool.wasm").to_vec()
+}
+
+fn sp_admin() -> Principal {
+    Principal::from_slice(&[0x5a, 0xd0, 0x01])
+}
+
+fn depositor() -> Principal {
+    Principal::from_slice(&[0xde, 0x90, 0x01])
+}
+
+#[derive(CandidType)]
+struct StabilityPoolInitArgs {
+    protocol_canister_id: Principal,
+    authorized_admins: Vec<Principal>,
+}
+
+#[derive(CandidType)]
+struct SpStablecoinConfig {
+    ledger_id: Principal,
+    symbol: String,
+    decimals: u8,
+    priority: u8,
+    is_active: bool,
+    transfer_fee: Option<u64>,
+    is_lp_token: Option<bool>,
+    underlying_pool: Option<Principal>,
+}
+
 fn xrp_claims(pic: &PocketIc, backend: Principal) -> Vec<u64> {
     xrp_claims_full(pic, backend)
         .into_iter()

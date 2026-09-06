@@ -5,10 +5,19 @@
 //! any `latest`/`finalized` BLOCK TAG) differs across the EVM RPC canister's
 //! subnet replicas on a fast-finality chain like Monad → IC HTTPS-outcall
 //! consensus never agrees → the call fails EVERY tick. The fix (Task A2a) reads
-//! finalized height by probing a SPECIFIC, already-final block NUMBER via the
-//! typed `eth_getBlockByNumber(Number(N))` (byte-identical across replicas), and
-//! (Task A2b) decouples deposit-watch from the block-height path so a block-read
-//! failure degrades the observer to deposit-only instead of aborting the tick.
+//! finalized height by probing a SPECIFIC, already-final block NUMBER
+//! (byte-identical across replicas), and (Task A2b) decouples deposit-watch
+//! from the block-height path so a block-read failure degrades the observer to
+//! deposit-only instead of aborting the tick.
+//!
+//! As of `fix/evm-rpc-block-probe-cycles` (2026-08-21) that probe is a RAW
+//! `eth_getBlockTransactionCountByNumber` request issued through `request`
+//! (the same per-provider quorum path every other read in the wrapper uses),
+//! not the TYPED `eth_getBlockByNumber` candid method this test originally
+//! exercised (a live cost mismatch made the typed method's own internal
+//! 2-of-3 consensus attach too few cycles; see `chains/evm/evm_rpc.rs`). The
+//! method NAME changed but the regression this test guards is unchanged: the
+//! probe must never be the volatile `eth_blockNumber` read.
 //!
 //! To prove the backend never falls back to the volatile read, the mock is armed
 //! with `fail_always("eth_blockNumber", ...)`: EVERY `request` call whose
@@ -18,15 +27,16 @@
 //! (one-shot consumed) then succeed on tick 2+ and advance the cursor anyway,
 //! causing a false PASS. With `fail_always`, every tick that calls
 //! `eth_blockNumber` via `request` fails permanently, so the cursor can only
-//! advance via the TYPED `eth_getBlockByNumber` probe. The test passing proves
-//! the backend ONLY uses the consensus-safe typed probe. Reverting to the
-//! volatile read re-breaks this test reliably across all ticks.
+//! advance via the `eth_getBlockTransactionCountByNumber` probe, a DIFFERENT
+//! JSON-RPC method name and therefore unaffected by this arming. The test
+//! passing proves the backend ONLY uses that consensus-safe probe. Reverting
+//! to the volatile read re-breaks this test reliably across all ticks.
 //!
 //! Two subsets (same auto-upgrade pattern as the happy-path test):
 //!   - ECDSA available: open a vault, fund custody, tick → assert the vault
 //!     reaches `MintPending` (deposit-watch ran despite `eth_blockNumber` being
-//!     "broken") AND the burn-watch cursor advanced to seed+1024 via the typed
-//!     probe.
+//!     "broken") AND the burn-watch cursor advanced to seed+1024 via the
+//!     consensus-safe block-existence probe.
 //!   - ECDSA unavailable: assert the burn-watch cursor advances to seed+1024 anyway
 //!     (the cursor advance needs no signing) and the supply invariant holds at 0.
 
@@ -130,7 +140,8 @@ const MONAD_CHAIN_ID: u32 = 10143;
 const E18: u128 = 1_000_000_000_000_000_000;
 const E8: u128 = 100_000_000;
 /// The cursor is seeded here; finalized = SEED + 1024 (MAX_BLOCK_SCAN_WINDOW), so
-/// one observer tick advances the cursor to SEED_PLUS_WINDOW via the typed probe.
+/// one observer tick advances the cursor to SEED_PLUS_WINDOW via the
+/// consensus-safe block-existence probe.
 const SEED_BLOCK: u64 = 2_000_000;
 const SEED_PLUS_WINDOW: u64 = 2_001_024;
 
@@ -330,9 +341,10 @@ fn phase1b_observer_consensus_safe_cursor_advances() {
     // (arming already consumed) and advance the cursor anyway — the test would
     // pass even on the broken implementation. With `fail_always`, EVERY tick
     // that calls `eth_blockNumber` via `request` fails, so the cursor can NEVER
-    // advance on the broken path. The test ONLY passes when the backend uses the
-    // TYPED `eth_getBlockByNumber` method, which bypasses `request` entirely and
-    // is unaffected by this arming.
+    // advance on the broken path. The test ONLY passes when the backend probes
+    // the block-existence via `eth_getBlockTransactionCountByNumber`, a raw
+    // `request` call with a DIFFERENT JSON-RPC method name, so it is
+    // unaffected by this arming.
     update_any(
         &pic,
         mock,
@@ -437,24 +449,26 @@ fn phase1b_observer_consensus_safe_cursor_advances() {
             "deposit-watch ran despite broken eth_blockNumber => MintPending"
         );
 
-        // The burn-watch cursor advanced via the consensus-safe TYPED probe (not
-        // the volatile eth_blockNumber, which is armed to fail).
+        // The burn-watch cursor advanced via the consensus-safe
+        // eth_getBlockTransactionCountByNumber probe (not the volatile
+        // eth_blockNumber, which is armed to fail).
         assert_eq!(
             cursor(&pic, backend),
             SEED_PLUS_WINDOW,
-            "cursor advanced to SEED+1024 via consensus-safe typed probe"
+            "cursor advanced to SEED+1024 via the consensus-safe block-existence probe"
         );
     } else {
         eprintln!("[phase1b consensus-safe] ECDSA UNAVAILABLE; running GATED subset (cursor advance only — needs no signing)");
 
-        // No vault, no signing — the burn-watch cursor advance is purely the typed
-        // block probe + an (empty) getLogs scan. Tick and assert it advanced.
+        // No vault, no signing: the burn-watch cursor advance is purely the
+        // block-existence probe + an (empty) getLogs scan. Tick and assert it
+        // advanced.
         advance_and_tick(&pic, 3);
 
         assert_eq!(
             cursor(&pic, backend),
             SEED_PLUS_WINDOW,
-            "cursor advanced to SEED+1024 via consensus-safe typed probe (no signing needed)"
+            "cursor advanced to SEED+1024 via the consensus-safe block-existence probe (no signing needed)"
         );
 
         // Supply invariant holds at 0 (nothing minted).

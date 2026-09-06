@@ -15,10 +15,10 @@
   import { liveSpApyPct } from '../../utils/liveApy';
   import XrpPayoutRouting from './XrpPayoutRouting.svelte';
   import SolPayoutRouting from './SolPayoutRouting.svelte';
-  import { isIcrcClaimableCollateral } from '../../services/xrpPayoutHelpers';
+  import { collateralGainDisplayAmount, isIcrcClaimableCollateral } from '../../services/xrpPayoutHelpers';
   import {
     gainCollaterals,
-    isSunsetBobCollateral,
+    isSunsetCollateral,
     liquidationPreferenceCollaterals,
   } from './sunsetCollateralPolicy';
 
@@ -35,6 +35,10 @@
   let error = '';
   let showOptOutMenu = false;
   let showOptOutTooltip = false;
+  // Outstanding native-XRP payout drops, published by XrpPayoutRouting. Native
+  // XRP never appears in `gains` (it pays out via XRPL claims), so this is the
+  // only source for a truthful XRP figure on the Collateral Gains row.
+  let pendingXrpDrops = 0n;
 
   // Registries
   $: stablecoinRegistry = poolStatus?.stablecoin_registry ?? [];
@@ -225,7 +229,7 @@
                     disabled={toggleLoading[key]}
                   >
                     <span class="opt-out-symbol">
-                      {collateral.symbol}{isSunsetBobCollateral(collateral) ? ' (sunset)' : ''}
+                      {collateral.symbol}{isSunsetCollateral(collateral) ? ' (sunset)' : ''}
                     </span>
                     {#if toggleLoading[key]}
                       <span class="mini-spinner"></span>
@@ -242,11 +246,21 @@
           {#each collateralRegistry as col}
             {@const key = col.ledger_id.toText()}
             {@const gainEntry = gains.find(([l]) => l.toText() === key)}
-            {@const gainAmount = gainEntry ? gainEntry[1] : 0n}
-            <span class="gain-line" class:gain-dim={gainAmount === 0n}>
+            {@const display = collateralGainDisplayAmount(
+              key,
+              gainEntry ? gainEntry[1] : 0n,
+              pendingXrpDrops,
+            )}
+            <span class="gain-line" class:gain-dim={display.amount === 0n}>
               <span class="collateral-dot" style="background:{getCollateralColor(col)}"></span>
               <span class="gain-ticker">{col.symbol}</span>
-              <span class="gain-value">{formatTokenAmount(gainAmount, col.decimals)}</span>
+              <span class="gain-value">{formatTokenAmount(display.amount, col.decimals)}</span>
+              {#if display.viaXrpClaims && display.amount > 0n}
+                <!-- Paid out as an XRPL claim, not a pool balance, so it is not
+                     part of "Claim". Say so rather than letting it read as an
+                     ordinary claimable gain sitting in the pool. -->
+                <span class="gain-note">via XRP payout</span>
+              {/if}
             </span>
           {/each}
         </span>
@@ -271,6 +285,7 @@
       {collateralRegistry}
       {userPosition}
       {isConnected}
+      on:pendingDropsChange={(event) => { pendingXrpDrops = event.detail; }}
       on:success={(event) => dispatch('success', event.detail)}
     />
     <SolPayoutRouting
@@ -446,6 +461,14 @@
 
   .gain-value {
     margin-left: auto;
+  }
+
+  /* Marks a gain paid via XRPL claim rather than a claimable pool balance. */
+  .gain-note {
+    margin-left: 0.4rem;
+    font-size: 0.65rem;
+    opacity: 0.65;
+    white-space: nowrap;
   }
 
   /* ── Stablecoin breakdown under Total Deposited ── */
