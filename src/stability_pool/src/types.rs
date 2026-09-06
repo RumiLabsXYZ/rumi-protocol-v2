@@ -135,6 +135,11 @@ pub struct DepositPosition {
     /// authoritative.
     #[serde(default)]
     pub pending_native_xrp_payouts: Option<BTreeMap<u64, NativeXrpPendingPayout>>,
+    /// SOL analogue of `pending_native_xrp_payouts`, keyed by backend SolClaim
+    /// id. Same UI retry/cleanup semantics; backend claim custody remains
+    /// authoritative.
+    #[serde(default)]
+    pub pending_native_sol_payouts: Option<BTreeMap<u64, NativeSolPendingPayout>>,
 }
 
 impl DepositPosition {
@@ -154,6 +159,7 @@ impl DepositPosition {
             native_payout_addresses: Some(BTreeMap::new()),
             native_payout_destination_tags: Some(BTreeMap::new()),
             pending_native_xrp_payouts: Some(BTreeMap::new()),
+            pending_native_sol_payouts: Some(BTreeMap::new()),
         }
     }
 
@@ -221,6 +227,11 @@ impl DepositPosition {
                 .as_ref()
                 .map(|m| m.is_empty())
                 .unwrap_or(true)
+            && self
+                .pending_native_sol_payouts
+                .as_ref()
+                .map(|m| m.is_empty())
+                .unwrap_or(true)
     }
 }
 
@@ -285,6 +296,74 @@ impl From<NativeXrpPayoutAllocation> for XrpSpPayoutAllocation {
             payout_address: allocation.payout_address,
             destination_tag: allocation.destination_tag,
             drops: allocation.drops,
+        }
+    }
+}
+
+// ─── SOL analogues of the XRP native-payout types above ───
+//
+// Structurally identical except: amounts are `lamports` instead of `drops`,
+// and there is no `destination_tag` field (Solana has no destination-tag
+// analogue; see design doc §5.2/§9).
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeSolPendingPayout {
+    pub claim_id: u64,
+    pub collateral_type: Principal,
+    pub vault_id: u64,
+    pub lamports: u64,
+    pub payout_address: String,
+    pub created_at_ns: u64,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeSolPayoutAllocation {
+    pub claimant: Principal,
+    pub payout_address: String,
+    pub lamports: u64,
+}
+
+pub type SolSpAbsorbPreflight = rumi_protocol_backend::SolSpAbsorbPreflight;
+pub type SolSpPayoutAllocation = rumi_protocol_backend::SolSpPayoutAllocation;
+pub type SolSpAbsorbRequest = rumi_protocol_backend::SolSpAbsorbRequest;
+pub type SolSpPayoutClaim = rumi_protocol_backend::SolSpPayoutClaim;
+pub type SolSpAbsorbResult = rumi_protocol_backend::SolSpAbsorbResult;
+
+#[derive(CandidType, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NativeSolAbsorbIntentStatus {
+    Prepared,
+    Burned,
+    BackendAccepted,
+    LocalApplied,
+    BackendRejected,
+}
+
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeSolAbsorbIntent {
+    pub vault_id: u64,
+    pub collateral_type: Principal,
+    pub icusd_ledger: Principal,
+    pub icusd_minting_account: icrc_ledger_types::icrc1::account::Account,
+    pub icusd_to_burn_e8s: u64,
+    pub stables_consumed: BTreeMap<Principal, u64>,
+    pub collateral_received_lamports: u64,
+    pub collateral_price_e8s: u64,
+    pub allocations: Vec<SolSpPayoutAllocation>,
+    pub burn_created_at_time_ns: u64,
+    pub status: NativeSolAbsorbIntentStatus,
+    pub burn_proof: Option<rumi_protocol_backend::icrc3_proof::SpWritedownProof>,
+    pub backend_result: Option<SolSpAbsorbResult>,
+    pub last_error: Option<String>,
+    pub created_at_ns: u64,
+    pub updated_at_ns: u64,
+}
+
+impl From<NativeSolPayoutAllocation> for SolSpPayoutAllocation {
+    fn from(allocation: NativeSolPayoutAllocation) -> Self {
+        Self {
+            claimant: allocation.claimant,
+            payout_address: allocation.payout_address,
+            lamports: allocation.lamports,
         }
     }
 }
@@ -707,6 +786,12 @@ pub enum StabilityPoolError {
         claim_id: u64,
     },
     XrpClaimStatusCheckFailed {
+        reason: String,
+    },
+    SolClaimStillOutstanding {
+        claim_id: u64,
+    },
+    SolClaimStatusCheckFailed {
         reason: String,
     },
     RefundClaimNotFound,

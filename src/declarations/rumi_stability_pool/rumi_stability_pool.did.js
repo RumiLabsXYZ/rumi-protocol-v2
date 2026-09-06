@@ -23,6 +23,7 @@ export const idlFactory = ({ IDL }) => {
       'method' : IDL.Text,
       'target' : IDL.Text,
     }),
+    'SolClaimStatusCheckFailed' : IDL.Record({ 'reason' : IDL.Text }),
     'PayoutAddressRequired' : IDL.Record({ 'collateral' : IDL.Principal }),
     'XrpClaimStillOutstanding' : IDL.Record({ 'claim_id' : IDL.Nat64 }),
     'LiquidationFailed' : IDL.Record({
@@ -31,6 +32,7 @@ export const idlFactory = ({ IDL }) => {
     }),
     'XrpClaimStatusCheckFailed' : IDL.Record({ 'reason' : IDL.Text }),
     'SystemBusy' : IDL.Null,
+    'SolClaimStillOutstanding' : IDL.Record({ 'claim_id' : IDL.Nat64 }),
     'AlreadyOptedIn' : IDL.Record({ 'collateral' : IDL.Principal }),
     'TokenNotAccepted' : IDL.Record({ 'ledger' : IDL.Principal }),
     'InsufficientPoolBalance' : IDL.Null,
@@ -94,6 +96,14 @@ export const idlFactory = ({ IDL }) => {
     'completed_at_ns' : IDL.Nat64,
     'vault_id' : IDL.Nat64,
   });
+  const LedgerReconciliationEntry = IDL.Record({
+    'healthy' : IDL.Bool,
+    'ledger' : IDL.Principal,
+    'live_e8s' : IDL.Nat64,
+    'recorded_e8s' : IDL.Nat64,
+    'symbol' : IDL.Text,
+    'delta_e8s' : IDL.Int64,
+  });
   const PoolLiquidationRecord = IDL.Record({
     'collateral_price_e8s' : IDL.Opt(IDL.Nat64),
     'stables_consumed' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
@@ -102,6 +112,14 @@ export const idlFactory = ({ IDL }) => {
     'collateral_gained' : IDL.Nat64,
     'timestamp' : IDL.Nat64,
     'collateral_type' : IDL.Principal,
+  });
+  const NativeSolPendingPayout = IDL.Record({
+    'claim_id' : IDL.Nat64,
+    'lamports' : IDL.Nat64,
+    'vault_id' : IDL.Nat64,
+    'created_at_ns' : IDL.Nat64,
+    'collateral_type' : IDL.Principal,
+    'payout_address' : IDL.Text,
   });
   const NativeXrpPendingPayout = IDL.Record({
     'claim_id' : IDL.Nat64,
@@ -391,6 +409,11 @@ export const idlFactory = ({ IDL }) => {
     'max_liquidations_per_batch' : IDL.Nat64,
   });
   return IDL.Service({
+    'ack_native_sol_payout_settled' : IDL.Func(
+        [IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
+        [],
+      ),
     'ack_native_xrp_payout_settled' : IDL.Func(
         [IDL.Nat64],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
@@ -487,9 +510,24 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Vec(ChainSpAbsorbCompletion)],
         ['query'],
       ),
+    'get_ledger_reconciliation' : IDL.Func(
+        [],
+        [
+          IDL.Variant({
+            'Ok' : IDL.Vec(LedgerReconciliationEntry),
+            'Err' : StabilityPoolError,
+          }),
+        ],
+        [],
+      ),
     'get_liquidation_history' : IDL.Func(
         [IDL.Opt(IDL.Nat64)],
         [IDL.Vec(PoolLiquidationRecord)],
+        ['query'],
+      ),
+    'get_my_native_sol_payouts' : IDL.Func(
+        [],
+        [IDL.Vec(NativeSolPendingPayout)],
         ['query'],
       ),
     'get_my_native_xrp_payouts' : IDL.Func(

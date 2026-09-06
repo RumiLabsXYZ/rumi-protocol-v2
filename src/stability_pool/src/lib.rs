@@ -22,6 +22,11 @@ const CHAIN_ABSORB_AUTO_TIMER_POLL_SECONDS: u64 = 60;
 /// clears within the hour, and cycle cost stays negligible.
 const NATIVE_XRP_SETTLE_SWEEP_POLL_SECONDS: u64 = 600;
 const NATIVE_XRP_SETTLE_SWEEP_MAX_PER_TICK: usize = 2;
+/// Native-SOL payout settlement sweep cadence, mirroring the native-XRP sweep
+/// (same reasoning: each settlement is a tEd25519 signature + Solana submit
+/// outcall on the backend, so this stays deliberately slow and bounded).
+const NATIVE_SOL_SETTLE_SWEEP_POLL_SECONDS: u64 = 600;
+const NATIVE_SOL_SETTLE_SWEEP_MAX_PER_TICK: usize = 2;
 const UNALLOCATED_INTEREST_FORWARD_RETRY_SECONDS: u64 = 60;
 /// How often the pool reconciles its tracked aggregate against live ledger
 /// balances and logs any shortfall. Hourly: a handful of balance queries, so
@@ -69,6 +74,7 @@ fn init(args: StabilityPoolInitArgs) {
         setup_virtual_price_timer();
         setup_chain_absorb_auto_timer();
         setup_native_xrp_settle_sweep_timer();
+        setup_native_sol_settle_sweep_timer();
         setup_unallocated_interest_forward_retry_timer();
         setup_ledger_reconciliation_timer();
     });
@@ -109,6 +115,7 @@ fn post_upgrade(_args: StabilityPoolInitArgs) {
         setup_virtual_price_timer();
         setup_chain_absorb_auto_timer();
         setup_native_xrp_settle_sweep_timer();
+        setup_native_sol_settle_sweep_timer();
         setup_unallocated_interest_forward_retry_timer();
         setup_ledger_reconciliation_timer();
     });
@@ -154,6 +161,42 @@ fn setup_native_xrp_settle_sweep_timer() {
                         summary.acked,
                         summary.submitted,
                         summary.pending_confirmation,
+                        summary.failed
+                    );
+                    SWEEP_CURSOR.with(|c| c.set(summary.last_claim_id));
+                }
+            });
+        },
+    );
+}
+
+/// Auto-settle pending native-SOL payouts to depositors' registered Solana
+/// addresses. Mirrors `setup_native_xrp_settle_sweep_timer` exactly (own
+/// cursor, own timer, same cadence/bound); see that function's doc comment
+/// for the product reasoning. `run_native_sol_settle_sweep_with_io`'s own doc
+/// comment covers why this rail has no `pending_confirmation` counter to log.
+fn setup_native_sol_settle_sweep_timer() {
+    thread_local! {
+        static SWEEP_CURSOR: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    }
+    ic_cdk_timers::set_timer_interval(
+        Duration::from_secs(NATIVE_SOL_SETTLE_SWEEP_POLL_SECONDS),
+        || {
+            ic_cdk::spawn(async {
+                let cursor = SWEEP_CURSOR.with(|c| c.get());
+                let summary = crate::liquidation::run_native_sol_settle_sweep_with_io(
+                    &mut crate::liquidation::CdkNativeSolSettleSweepIo,
+                    cursor,
+                    NATIVE_SOL_SETTLE_SWEEP_MAX_PER_TICK,
+                )
+                .await;
+                if summary.examined > 0 {
+                    log!(
+                        INFO,
+                        "[sol-settle-sweep] examined {} acked {} submitted {} failed {}",
+                        summary.examined,
+                        summary.acked,
+                        summary.submitted,
                         summary.failed
                     );
                     SWEEP_CURSOR.with(|c| c.set(summary.last_claim_id));
@@ -481,6 +524,46 @@ async fn ensure_backend_xrp_claim_absent(
             reason: format!("{err:?}"),
         }),
         Err((code, message)) => Err(StabilityPoolError::XrpClaimStatusCheckFailed {
+            reason: format!("{method} rejected by {protocol_canister_id}: {code:?}: {message}"),
+        }),
+    }
+}
+
+#[query]
+pub fn get_my_native_sol_payouts() -> Vec<NativeSolPendingPayout> {
+    let caller = ic_cdk::api::caller();
+    read_state(|s| s.native_sol_pending_payouts_for(&caller))
+}
+
+#[update]
+pub async fn ack_native_sol_payout_settled(claim_id: u64) -> Result<(), StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    let protocol_canister_id = read_state(|s| {
+        s.native_sol_pending_payout_for(&caller, claim_id)
+            .map(|_| s.protocol_canister_id)
+    })
+    .ok_or(StabilityPoolError::RefundClaimNotFound)?;
+
+    ensure_backend_sol_claim_absent(protocol_canister_id, claim_id, caller).await?;
+    mutate_state(|s| s.ack_native_sol_payout_settled(&caller, claim_id))
+}
+
+async fn ensure_backend_sol_claim_absent(
+    protocol_canister_id: Principal,
+    claim_id: u64,
+    claimant: Principal,
+) -> Result<(), StabilityPoolError> {
+    let method = "stability_pool_sol_claim_outstanding";
+    let response: Result<(Result<bool, rumi_protocol_backend::ProtocolError>,), _> =
+        ic_cdk::call(protocol_canister_id, method, (claim_id, claimant)).await;
+
+    match response {
+        Ok((Ok(false),)) => Ok(()),
+        Ok((Ok(true),)) => Err(StabilityPoolError::SolClaimStillOutstanding { claim_id }),
+        Ok((Err(err),)) => Err(StabilityPoolError::SolClaimStatusCheckFailed {
+            reason: format!("{err:?}"),
+        }),
+        Err((code, message)) => Err(StabilityPoolError::SolClaimStatusCheckFailed {
             reason: format!("{method} rejected by {protocol_canister_id}: {code:?}: {message}"),
         }),
     }
@@ -1161,7 +1244,7 @@ pub fn icrc21_canister_call_consent_message(
                     format!(
                         "## Opt In to Native Collateral\n\n\
                          You are opting in to receive **{}** from future liquidations. \
-                         Payouts will be sent to XRP Ledger address `{}`.",
+                         Payouts will be sent to the address you provided: `{}`.",
                         symbol, payout_address
                     )
                 }
@@ -1185,7 +1268,7 @@ pub fn icrc21_canister_call_consent_message(
                     format!(
                         "## Opt In to Native Collateral\n\n\
                          You are opting in to receive **{}** from future liquidations. \
-                         Payouts will be sent to XRP Ledger address `{}`{}.",
+                         Payouts will be sent to the address you provided: `{}`{}.",
                         symbol, payout_address, tag_text
                     )
                 }
@@ -1198,6 +1281,11 @@ pub fn icrc21_canister_call_consent_message(
         "ack_native_xrp_payout_settled" => {
             "## Clear Settled XRP Payout\n\n\
              You are clearing a settled native XRP payout reminder from the Stability Pool."
+                .to_string()
+        }
+        "ack_native_sol_payout_settled" => {
+            "## Clear Settled SOL Payout\n\n\
+             You are clearing a settled native SOL payout reminder from the Stability Pool."
                 .to_string()
         }
         "deposit_as_3usd" => {

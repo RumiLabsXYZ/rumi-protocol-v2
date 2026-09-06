@@ -241,6 +241,9 @@ fn ensure_no_other_pending_pool_absorb_for_chain(
     if state.has_pending_native_xrp_absorbs() {
         return Err(StabilityPoolError::SystemBusy);
     }
+    if state.has_pending_native_sol_absorbs() {
+        return Err(StabilityPoolError::SystemBusy);
+    }
     Ok(())
 }
 
@@ -251,8 +254,29 @@ fn ensure_no_other_pending_pool_absorb_for_native_xrp(
     if state.has_pending_chain_absorbs() {
         return Err(StabilityPoolError::SystemBusy);
     }
+    if state.has_pending_native_sol_absorbs() {
+        return Err(StabilityPoolError::SystemBusy);
+    }
     if state.has_pending_native_xrp_absorbs()
         && state.get_pending_native_xrp_absorb(vault_id).is_none()
+    {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    Ok(())
+}
+
+fn ensure_no_other_pending_pool_absorb_for_native_sol(
+    state: &StabilityPoolState,
+    vault_id: u64,
+) -> Result<(), StabilityPoolError> {
+    if state.has_pending_chain_absorbs() {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    if state.has_pending_native_xrp_absorbs() {
+        return Err(StabilityPoolError::SystemBusy);
+    }
+    if state.has_pending_native_sol_absorbs()
+        && state.get_pending_native_sol_absorb(vault_id).is_none()
     {
         return Err(StabilityPoolError::SystemBusy);
     }
@@ -611,6 +635,29 @@ fn is_past_sequence_submit(error: &StabilityPoolError) -> bool {
 /// validated, so the local reminder is dropped; otherwise settlement is
 /// (re)submitted with the stored address. Records are never removed on the
 /// submit path — a later tick observes the validated settlement and acks.
+/// Order a bounded sweep's candidate list starting strictly AFTER
+/// `start_after_claim_id` and wrapping around, so one perpetually-failing
+/// claim (bad address, quarantined) cannot starve the rest of the queue.
+///
+/// Shared by the native-XRP and native-SOL settlement sweeps
+/// (`run_native_xrp_settle_sweep_with_io` / `run_native_sol_settle_sweep_with_io`),
+/// since this bookkeeping is custody-generic and identical between the two
+/// rails (only the per-item settlement logic differs: destination tag,
+/// submit-error classification), so it is factored out rather than
+/// duplicated. `all` must already be sorted ascending by claim id (both
+/// callers' `all_native_*_pending_payouts` accessors guarantee this).
+fn rotate_pending_payouts<T>(
+    all: &[T],
+    start_after_claim_id: Option<u64>,
+    claim_id_of: impl Fn(&T) -> u64,
+) -> impl Iterator<Item = &T> {
+    let split = match start_after_claim_id {
+        Some(cursor) => all.partition_point(|p| claim_id_of(p) <= cursor),
+        None => 0,
+    };
+    all[split..].iter().chain(all[..split].iter())
+}
+
 pub(crate) async fn run_native_xrp_settle_sweep_with_io(
     io: &mut dyn NativeXrpSettleSweepIo,
     start_after_claim_id: Option<u64>,
@@ -625,12 +672,7 @@ pub(crate) async fn run_native_xrp_settle_sweep_with_io(
         return summary;
     }
 
-    // Rotate: entries strictly after the cursor first, then wrap.
-    let split = match start_after_claim_id {
-        Some(cursor) => all.partition_point(|(_, p)| p.claim_id <= cursor),
-        None => 0,
-    };
-    let ordered = all[split..].iter().chain(all[..split].iter());
+    let ordered = rotate_pending_payouts(&all, start_after_claim_id, |(_, p)| p.claim_id);
 
     for (user, payout) in ordered.take(max_per_tick) {
         summary.examined += 1;
@@ -752,6 +794,206 @@ impl NativeXrpSettleSweepIo for CdkNativeXrpSettleSweepIo {
             Err(_) => Err(StabilityPoolError::InterCanisterCallFailed {
                 target: format!("{}", protocol),
                 method: "stability_pool_settle_xrp_claim".to_string(),
+            }),
+        }
+    }
+}
+
+/// IO seam for the native-SOL auto-settlement sweep (mirrors
+/// `NativeXrpSettleSweepIo`), so the tick logic is unit-testable off-canister.
+/// No destination-tag parameter on `settle_on_behalf`: Solana has no analogue
+/// (design doc §5.2).
+#[async_trait::async_trait(?Send)]
+pub(crate) trait NativeSolSettleSweepIo {
+    /// Backend `stability_pool_sol_claim_outstanding`: does the claim still
+    /// exist for this claimant? `false` means settled+validated (or resolved
+    /// by an admin), so the SP-side reminder can be dropped.
+    async fn claim_outstanding(
+        &mut self,
+        protocol: Principal,
+        claim_id: u64,
+        claimant: Principal,
+    ) -> Result<bool, StabilityPoolError>;
+
+    /// Backend `stability_pool_settle_sol_claim`: sign + submit the
+    /// durable-nonce SOL transfer for the claim to the depositor's registered
+    /// address. Repeat calls are safe: the backend confirms a
+    /// previously-submitted transfer (via `getTransaction` + the live nonce)
+    /// before ever signing a new one.
+    async fn settle_on_behalf(
+        &mut self,
+        protocol: Principal,
+        claim_id: u64,
+        claimant: Principal,
+        destination: String,
+    ) -> Result<String, StabilityPoolError>;
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct NativeSolSettleSweepSummary {
+    pub examined: usize,
+    pub acked: usize,
+    pub submitted: usize,
+    pub failed: usize,
+    /// Cursor for the next tick: the last claim id this tick examined.
+    pub last_claim_id: Option<u64>,
+}
+
+// Deliberately no `pending_confirmation` counter here, unlike
+// `NativeXrpSettleSweepSummary`. XRP's `is_past_sequence_submit` recognizes
+// `tefPAST_SEQ` specifically because rippled's synchronous `submit` returns
+// that exact, stable engine-result string when a signed Payment reusing an
+// already-applied Sequence number lands: every https-outcall replica polls
+// the SAME node, so the losers of that race report "sequence already used"
+// against our OWN transaction. There is no analogous stable signal on this
+// rail: `chains::sol::rpc::send_transaction` submits through the SOL RPC
+// canister's `jsonRequest` under `Equality` consensus across MULTIPLE
+// providers (not multiple replicas polling one node), and the module's own
+// doc comment already flags that this consensus mode is chronically
+// `#Inconsistent` for anything that can legitimately differ between
+// providers, and "was this already processed" is exactly such a thing. A provider that has
+// already seen the durable-nonce transaction land would reject a resubmit
+// (as already-processed or, once the nonce has advanced, as an invalid
+// nonce), while a lagging provider could still accept it; under `Equality`
+// that disagreement surfaces as a generic aggregation failure with no stable
+// substring to match, not a clean per-provider error code the way rippled's
+// engine result is. Inventing a string to grep for here would be guessing.
+//
+// Correctness does not depend on classifying this tick's submit error,
+// though: `settle_sol_claim_as` records `claim.settlement` BEFORE ever
+// calling `send_transaction` (crash-safety, see its own doc comment), so
+// regardless of why THIS submit attempt returned an error, the very next
+// sweep tick's `settle_on_behalf` call re-runs the FULL idempotency check
+// (`sol_settlement_decision` against `getTransaction` + the live durable
+// nonce) before signing anything new, and converges to `AlreadyPaid` if the
+// transaction actually landed. Counting the error as `failed` here is a
+// telemetry nuance only; the claim record is never dropped on a failure
+// either way, so every submit error (landed-but-noisy or genuinely failed)
+// self-heals on a later tick without this sweep needing to tell them apart.
+
+/// One bounded tick of the native-SOL payout settlement sweep. Mirrors
+/// `run_native_xrp_settle_sweep_with_io`; see its doc comment for the
+/// rotation/pause/error-tolerance design shared by both rails.
+pub(crate) async fn run_native_sol_settle_sweep_with_io(
+    io: &mut dyn NativeSolSettleSweepIo,
+    start_after_claim_id: Option<u64>,
+    max_per_tick: usize,
+) -> NativeSolSettleSweepSummary {
+    let mut summary = NativeSolSettleSweepSummary::default();
+    if read_state(|s| s.configuration.emergency_pause) {
+        return summary;
+    }
+    let (protocol, all) = read_state(|s| (s.protocol_canister_id, s.all_native_sol_pending_payouts()));
+    if all.is_empty() {
+        return summary;
+    }
+
+    let ordered = rotate_pending_payouts(&all, start_after_claim_id, |(_, p)| p.claim_id);
+
+    for (user, payout) in ordered.take(max_per_tick) {
+        summary.examined += 1;
+        summary.last_claim_id = Some(payout.claim_id);
+
+        let outstanding = match io.claim_outstanding(protocol, payout.claim_id, *user).await {
+            Ok(v) => v,
+            Err(error) => {
+                log!(
+                    INFO,
+                    "[sol-settle-sweep] outstanding check failed for claim {}: {:?}",
+                    payout.claim_id,
+                    error
+                );
+                summary.failed += 1;
+                continue;
+            }
+        };
+
+        if !outstanding {
+            // Settled and validated (by a prior sweep tick or a manual click).
+            let _ = mutate_state(|s| s.ack_native_sol_payout_settled(user, payout.claim_id));
+            summary.acked += 1;
+            continue;
+        }
+
+        match io
+            .settle_on_behalf(protocol, payout.claim_id, *user, payout.payout_address.clone())
+            .await
+        {
+            Ok(signature) => {
+                log!(
+                    INFO,
+                    "[sol-settle-sweep] submitted settlement for claim {} ({} lamports) tx {}",
+                    payout.claim_id,
+                    payout.lamports,
+                    signature
+                );
+                summary.submitted += 1;
+            }
+            Err(error) => {
+                log!(
+                    INFO,
+                    "[sol-settle-sweep] settlement failed for claim {}: {:?}",
+                    payout.claim_id,
+                    error
+                );
+                summary.failed += 1;
+            }
+        }
+    }
+    summary
+}
+
+pub(crate) struct CdkNativeSolSettleSweepIo;
+
+#[async_trait::async_trait(?Send)]
+impl NativeSolSettleSweepIo for CdkNativeSolSettleSweepIo {
+    async fn claim_outstanding(
+        &mut self,
+        protocol: Principal,
+        claim_id: u64,
+        claimant: Principal,
+    ) -> Result<bool, StabilityPoolError> {
+        let result: Result<(Result<bool, rumi_protocol_backend::ProtocolError>,), _> = call(
+            protocol,
+            "stability_pool_sol_claim_outstanding",
+            (claim_id, claimant),
+        )
+        .await;
+        match result {
+            Ok((Ok(outstanding),)) => Ok(outstanding),
+            Ok((Err(error),)) => Err(StabilityPoolError::LiquidationFailed {
+                vault_id: claim_id,
+                reason: format!("backend rejected claim-outstanding check: {:?}", error),
+            }),
+            Err(_) => Err(StabilityPoolError::InterCanisterCallFailed {
+                target: format!("{}", protocol),
+                method: "stability_pool_sol_claim_outstanding".to_string(),
+            }),
+        }
+    }
+
+    async fn settle_on_behalf(
+        &mut self,
+        protocol: Principal,
+        claim_id: u64,
+        claimant: Principal,
+        destination: String,
+    ) -> Result<String, StabilityPoolError> {
+        let result: Result<(Result<String, rumi_protocol_backend::ProtocolError>,), _> = call(
+            protocol,
+            "stability_pool_settle_sol_claim",
+            (claim_id, claimant, destination),
+        )
+        .await;
+        match result {
+            Ok((Ok(signature),)) => Ok(signature),
+            Ok((Err(error),)) => Err(StabilityPoolError::LiquidationFailed {
+                vault_id: claim_id,
+                reason: format!("backend rejected settle-on-behalf: {:?}", error),
+            }),
+            Err(_) => Err(StabilityPoolError::InterCanisterCallFailed {
+                target: format!("{}", protocol),
+                method: "stability_pool_settle_sol_claim".to_string(),
             }),
         }
     }
@@ -1102,9 +1344,22 @@ pub(crate) async fn execute_native_xrp_absorb_with_io(
     {
         Ok(preflight) => preflight,
         Err(error) => {
-            mutate_state(|s| {
-                clear_unburned_native_xrp_absorb_intent_in_state(s, vault_info.vault_id);
-            });
+            // The preflight call itself failed, which cannot distinguish
+            // "the backend never saw the request" from "the backend executed
+            // it but the reply was dropped" (a normal IC failure mode). Hand
+            // the possible reservation back the same way every other
+            // pre-burn failure branch does, so a dropped reply cannot leak a
+            // live backend reservation that fences this vault for up to
+            // SOL_SP_ABSORB_PREFLIGHT_TTL_NS (release is idempotent and
+            // best-effort: it never overwrites `error`, the original
+            // preflight failure returned to the caller).
+            abandon_unburned_native_xrp_absorb(
+                io,
+                protocol_id,
+                vault_info.vault_id,
+                icusd_to_burn_e8s,
+            )
+            .await;
             return liquidation_failure(vault_info, error);
         }
     };
@@ -1249,6 +1504,796 @@ pub(crate) async fn execute_native_xrp_absorb_with_io(
         Err(error) => return liquidation_failure(vault_info, error),
     };
     match mutate_state(|s| apply_native_xrp_absorb_success_in_state_at(s, &accepted, io.now_ns())) {
+        Ok(result) => result,
+        Err(error) => liquidation_failure(vault_info, error),
+    }
+}
+
+// ─── SOL analogue of the native-XRP absorb block above ───
+//
+// Mirrors it exactly: same crash-safe two-phase (burn-then-submit) intent
+// journal, same retry/replay semantics. Structural differences only:
+// `lamports` instead of `drops`, no destination-tag field, and the backend
+// method names are the `_sol_` counterparts.
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NativeSolAbsorbPlan {
+    pub vault_id: u64,
+    pub collateral_type: Principal,
+    pub icusd_ledger: Principal,
+    pub icusd_minting_account: Account,
+    pub icusd_to_burn_e8s: u64,
+    pub stables_consumed: BTreeMap<Principal, u64>,
+    pub collateral_received_lamports: u64,
+    pub collateral_price_e8s: u64,
+    pub allocations: Vec<SolSpPayoutAllocation>,
+}
+
+fn native_sol_intent_matches_plan(
+    intent: &NativeSolAbsorbIntent,
+    plan: &NativeSolAbsorbPlan,
+) -> bool {
+    intent.vault_id == plan.vault_id
+        && intent.collateral_type == plan.collateral_type
+        && intent.icusd_ledger == plan.icusd_ledger
+        && intent.icusd_minting_account == plan.icusd_minting_account
+        && intent.icusd_to_burn_e8s == plan.icusd_to_burn_e8s
+        && intent.stables_consumed == plan.stables_consumed
+        && intent.collateral_received_lamports == plan.collateral_received_lamports
+        && intent.collateral_price_e8s == plan.collateral_price_e8s
+        && intent.allocations == plan.allocations
+}
+
+fn native_sol_request_from_intent(
+    intent: &NativeSolAbsorbIntent,
+    proof: rumi_protocol_backend::icrc3_proof::SpWritedownProof,
+) -> SolSpAbsorbRequest {
+    SolSpAbsorbRequest {
+        vault_id: intent.vault_id,
+        icusd_burned_e8s: intent.icusd_to_burn_e8s,
+        proof,
+        allocations: intent.allocations.clone(),
+    }
+}
+
+pub(crate) fn prepare_or_reuse_native_sol_absorb_intent_in_state(
+    state: &mut StabilityPoolState,
+    plan: &NativeSolAbsorbPlan,
+    now_ns: u64,
+) -> Result<NativeSolAbsorbIntent, StabilityPoolError> {
+    if let Some(existing) = state.get_pending_native_sol_absorb(plan.vault_id) {
+        if native_sol_intent_matches_plan(&existing, plan) {
+            return Ok(existing);
+        }
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id: plan.vault_id,
+            reason: "pending native SOL absorb intent conflicts with current preflight".to_string(),
+        });
+    }
+
+    let intent = NativeSolAbsorbIntent {
+        vault_id: plan.vault_id,
+        collateral_type: plan.collateral_type,
+        icusd_ledger: plan.icusd_ledger,
+        icusd_minting_account: plan.icusd_minting_account,
+        icusd_to_burn_e8s: plan.icusd_to_burn_e8s,
+        stables_consumed: plan.stables_consumed.clone(),
+        collateral_received_lamports: plan.collateral_received_lamports,
+        collateral_price_e8s: plan.collateral_price_e8s,
+        allocations: plan.allocations.clone(),
+        burn_created_at_time_ns: now_ns,
+        status: NativeSolAbsorbIntentStatus::Prepared,
+        burn_proof: None,
+        backend_result: None,
+        last_error: None,
+        created_at_ns: now_ns,
+        updated_at_ns: now_ns,
+    };
+    state.put_pending_native_sol_absorb(intent.clone())?;
+    Ok(intent)
+}
+
+pub(crate) fn mark_native_sol_absorb_burned_in_state(
+    state: &mut StabilityPoolState,
+    vault_id: u64,
+    proof: rumi_protocol_backend::icrc3_proof::SpWritedownProof,
+    now_ns: u64,
+) -> Result<NativeSolAbsorbIntent, StabilityPoolError> {
+    let mut intent = state
+        .get_pending_native_sol_absorb(vault_id)
+        .ok_or_else(|| StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "missing pending native SOL absorb intent".to_string(),
+        })?;
+    if let Some(existing) = &intent.burn_proof {
+        if existing != &proof {
+            return Err(StabilityPoolError::LiquidationFailed {
+                vault_id,
+                reason: "pending native SOL absorb burn proof conflicts with retry proof"
+                    .to_string(),
+            });
+        }
+    }
+    intent.burn_proof = Some(proof);
+    intent.status = NativeSolAbsorbIntentStatus::Burned;
+    intent.last_error = None;
+    intent.updated_at_ns = now_ns;
+    state.put_pending_native_sol_absorb(intent.clone())?;
+    Ok(intent)
+}
+
+pub(crate) fn mark_native_sol_absorb_backend_result_in_state(
+    state: &mut StabilityPoolState,
+    vault_id: u64,
+    result: SolSpAbsorbResult,
+    now_ns: u64,
+) -> Result<NativeSolAbsorbIntent, StabilityPoolError> {
+    let mut intent = state
+        .get_pending_native_sol_absorb(vault_id)
+        .ok_or_else(|| StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "missing pending native SOL absorb intent".to_string(),
+        })?;
+    if let Some(existing) = &intent.backend_result {
+        if existing != &result {
+            return Err(StabilityPoolError::LiquidationFailed {
+                vault_id,
+                reason: "pending native SOL absorb backend result conflicts with retry result"
+                    .to_string(),
+            });
+        }
+    }
+    intent.backend_result = Some(result);
+    intent.status = NativeSolAbsorbIntentStatus::BackendAccepted;
+    intent.last_error = None;
+    intent.updated_at_ns = now_ns;
+    state.put_pending_native_sol_absorb(intent.clone())?;
+    Ok(intent)
+}
+
+pub(crate) fn mark_native_sol_absorb_error_in_state(
+    state: &mut StabilityPoolState,
+    vault_id: u64,
+    status: NativeSolAbsorbIntentStatus,
+    reason: String,
+    now_ns: u64,
+) {
+    if let Some(mut intent) = state.get_pending_native_sol_absorb(vault_id) {
+        intent.status = status;
+        intent.last_error = Some(reason);
+        intent.updated_at_ns = now_ns;
+        let _ = state.put_pending_native_sol_absorb(intent);
+    }
+}
+
+/// SOL analogue of `abandon_unburned_native_xrp_absorb`. Abandon a native-SOL
+/// absorb attempt that reserved a backend preflight but has NOT burned any
+/// icUSD: drop the local intent and hand the reservation back. Every call site
+/// is positioned strictly before the burn (or on a burn that returned an
+/// error, which the local clear already treats as unburned), so releasing can
+/// never strand an in-flight burn.
+async fn abandon_unburned_native_sol_absorb(
+    io: &mut dyn NativeSolAbsorbIo,
+    protocol_id: Principal,
+    vault_id: u64,
+    icusd_burn_e8s: u64,
+) {
+    mutate_state(|s| {
+        clear_unburned_native_sol_absorb_intent_in_state(s, vault_id);
+    });
+    io.release_sol_absorb_preflight(protocol_id, vault_id, icusd_burn_e8s)
+        .await;
+}
+
+pub(crate) fn clear_unburned_native_sol_absorb_intent_in_state(
+    state: &mut StabilityPoolState,
+    vault_id: u64,
+) -> bool {
+    let Some(intent) = state.get_pending_native_sol_absorb(vault_id) else {
+        return false;
+    };
+    if intent.status == NativeSolAbsorbIntentStatus::Prepared
+        && intent.burn_proof.is_none()
+        && intent.backend_result.is_none()
+    {
+        state.take_pending_native_sol_absorb(vault_id);
+        return true;
+    }
+    false
+}
+
+pub(crate) fn apply_native_sol_absorb_success_in_state_at(
+    state: &mut StabilityPoolState,
+    intent: &NativeSolAbsorbIntent,
+    now_ns: u64,
+) -> Result<LiquidationResult, StabilityPoolError> {
+    let backend_result =
+        intent
+            .backend_result
+            .clone()
+            .ok_or_else(|| StabilityPoolError::LiquidationFailed {
+                vault_id: intent.vault_id,
+                reason: "missing accepted native SOL backend result".to_string(),
+            })?;
+    validate_sol_absorb_backend_result(
+        intent.vault_id,
+        intent.icusd_to_burn_e8s,
+        intent.collateral_received_lamports,
+        &intent.allocations,
+        &backend_result,
+    )?;
+    state.process_native_sol_absorb_success_at(
+        intent.vault_id,
+        intent.collateral_type,
+        &intent.stables_consumed,
+        intent.collateral_received_lamports,
+        &backend_result.payout_claims,
+        now_ns,
+    )?;
+    state.take_pending_native_sol_absorb(intent.vault_id);
+
+    // Emit the same audit event the generic ICRC and native-XRP paths emit.
+    // Without it the only Explorer trace of an absorb is
+    // `LiquidationNotification`, which carries a bare vault count and cannot
+    // distinguish a completed absorb from one that failed. `collateral_gained`
+    // is in lamports (9-decimal), so consumers must format it with the
+    // collateral's own decimals.
+    let stables_consumed_e8s: u64 = intent.stables_consumed.values().sum();
+    state.push_event_at(
+        state.protocol_canister_id,
+        PoolEventType::LiquidationExecuted {
+            vault_id: intent.vault_id,
+            stables_consumed_e8s,
+            collateral_gained: intent.collateral_received_lamports,
+            collateral_type: intent.collateral_type,
+            success: true,
+        },
+        now_ns,
+    );
+
+    Ok(LiquidationResult {
+        vault_id: intent.vault_id,
+        stables_consumed: intent.stables_consumed.clone(),
+        collateral_gained: intent.collateral_received_lamports,
+        collateral_type: intent.collateral_type,
+        success: true,
+        error_message: None,
+    })
+}
+
+#[async_trait::async_trait(?Send)]
+pub(crate) trait NativeSolAbsorbIo {
+    fn now_ns(&self) -> u64;
+
+    async fn fetch_icusd_minting_account(
+        &mut self,
+        icusd_ledger: Principal,
+    ) -> Result<Account, StabilityPoolError>;
+
+    async fn preflight_sol_absorb(
+        &mut self,
+        protocol_id: Principal,
+        vault_id: u64,
+        expected_icusd_burn_e8s: u64,
+    ) -> Result<SolSpAbsorbPreflight, StabilityPoolError>;
+
+    async fn burn_icusd(
+        &mut self,
+        icusd_ledger: Principal,
+        minting_account: Account,
+        amount_e8s: u64,
+        vault_id: u64,
+        created_at_time: u64,
+    ) -> Result<rumi_protocol_backend::icrc3_proof::SpWritedownProof, StabilityPoolError>;
+
+    async fn submit_sol_absorb(
+        &mut self,
+        protocol_id: Principal,
+        request: SolSpAbsorbRequest,
+    ) -> Result<SolSpAbsorbResult, StabilityPoolError>;
+
+    /// Hand an unburned reservation back to the backend. Best-effort: the
+    /// caller is already on a failure path, and the reservation expires on its
+    /// own, so a failed release is logged rather than propagated.
+    async fn release_sol_absorb_preflight(
+        &mut self,
+        protocol_id: Principal,
+        vault_id: u64,
+        icusd_burn_e8s: u64,
+    );
+}
+
+struct CdkNativeSolAbsorbIo;
+
+#[async_trait::async_trait(?Send)]
+impl NativeSolAbsorbIo for CdkNativeSolAbsorbIo {
+    fn now_ns(&self) -> u64 {
+        ic_cdk::api::time()
+    }
+
+    async fn fetch_icusd_minting_account(
+        &mut self,
+        icusd_ledger: Principal,
+    ) -> Result<Account, StabilityPoolError> {
+        fetch_icusd_minting_account(icusd_ledger).await
+    }
+
+    async fn preflight_sol_absorb(
+        &mut self,
+        protocol_id: Principal,
+        vault_id: u64,
+        expected_icusd_burn_e8s: u64,
+    ) -> Result<SolSpAbsorbPreflight, StabilityPoolError> {
+        let preflight_result: Result<
+            (Result<SolSpAbsorbPreflight, rumi_protocol_backend::ProtocolError>,),
+            _,
+        > = call(
+            protocol_id,
+            "stability_pool_preflight_sol_absorb",
+            (vault_id, expected_icusd_burn_e8s),
+        )
+        .await;
+
+        match preflight_result {
+            Ok((Ok(preflight),)) => Ok(preflight),
+            Ok((Err(error),)) => Err(StabilityPoolError::LiquidationFailed {
+                vault_id,
+                reason: format!("backend rejected native SOL preflight: {:?}", error),
+            }),
+            Err(_) => Err(StabilityPoolError::InterCanisterCallFailed {
+                target: format!("{}", protocol_id),
+                method: "stability_pool_preflight_sol_absorb".to_string(),
+            }),
+        }
+    }
+
+    async fn burn_icusd(
+        &mut self,
+        icusd_ledger: Principal,
+        minting_account: Account,
+        amount_e8s: u64,
+        vault_id: u64,
+        created_at_time: u64,
+    ) -> Result<rumi_protocol_backend::icrc3_proof::SpWritedownProof, StabilityPoolError> {
+        burn_icusd_for_chain_writedown_with_account(
+            icusd_ledger,
+            minting_account,
+            amount_e8s,
+            vault_id,
+            created_at_time,
+        )
+        .await
+    }
+
+    async fn submit_sol_absorb(
+        &mut self,
+        protocol_id: Principal,
+        request: SolSpAbsorbRequest,
+    ) -> Result<SolSpAbsorbResult, StabilityPoolError> {
+        let vault_id = request.vault_id;
+        let backend_result: Result<
+            (Result<SolSpAbsorbResult, rumi_protocol_backend::ProtocolError>,),
+            _,
+        > = call(
+            protocol_id,
+            "stability_pool_liquidate_sol_vault",
+            (request,),
+        )
+        .await;
+
+        match backend_result {
+            Ok((Ok(result),)) => Ok(result),
+            Ok((Err(error),)) => Err(StabilityPoolError::LiquidationFailed {
+                vault_id,
+                reason: format!("backend rejected native SOL absorb after burn: {:?}", error),
+            }),
+            Err(_) => Err(StabilityPoolError::InterCanisterCallFailed {
+                target: format!("{}", protocol_id),
+                method: "stability_pool_liquidate_sol_vault".to_string(),
+            }),
+        }
+    }
+
+    async fn release_sol_absorb_preflight(
+        &mut self,
+        protocol_id: Principal,
+        vault_id: u64,
+        icusd_burn_e8s: u64,
+    ) {
+        let released: Result<(Result<bool, rumi_protocol_backend::ProtocolError>,), _> = call(
+            protocol_id,
+            "stability_pool_release_sol_absorb_preflight",
+            (vault_id, icusd_burn_e8s),
+        )
+        .await;
+        match released {
+            Ok((Ok(_),)) => {}
+            Ok((Err(error),)) => log!(
+                INFO,
+                "native SOL preflight release rejected for vault {}: {:?}; reservation will expire on its own",
+                vault_id,
+                error
+            ),
+            Err((code, msg)) => log!(
+                INFO,
+                "native SOL preflight release call failed for vault {}: {:?} {}; reservation will expire on its own",
+                vault_id,
+                code,
+                msg
+            ),
+        }
+    }
+}
+
+fn sol_claims_match_allocations(
+    allocations: &[SolSpPayoutAllocation],
+    claims: &[SolSpPayoutClaim],
+) -> bool {
+    allocations.len() == claims.len()
+        && allocations
+            .iter()
+            .zip(claims.iter())
+            .all(|(allocation, claim)| {
+                allocation.claimant == claim.claimant
+                    && allocation.payout_address == claim.payout_address
+                    && allocation.lamports == claim.lamports
+            })
+}
+
+fn validate_sol_absorb_backend_result(
+    vault_id: u64,
+    icusd_burned_e8s: u64,
+    collateral_received_lamports: u64,
+    allocations: &[SolSpPayoutAllocation],
+    result: &SolSpAbsorbResult,
+) -> Result<(), StabilityPoolError> {
+    if !result.success {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "backend reported unsuccessful native SOL absorb".to_string(),
+        });
+    }
+    if result.vault_id != vault_id {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "backend native SOL result does not match requested vault".to_string(),
+        });
+    }
+    if result.liquidated_debt_e8s != icusd_burned_e8s {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "backend native SOL liquidated debt does not match SP burn".to_string(),
+        });
+    }
+    if result.collateral_received_lamports != collateral_received_lamports {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "backend native SOL collateral does not match preflight".to_string(),
+        });
+    }
+    if !sol_claims_match_allocations(allocations, &result.payout_claims) {
+        return Err(StabilityPoolError::LiquidationFailed {
+            vault_id,
+            reason: "backend native SOL payout claims do not match requested allocations"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+async fn submit_native_sol_absorb_to_backend(
+    protocol_id: Principal,
+    intent: &NativeSolAbsorbIntent,
+    io: &mut dyn NativeSolAbsorbIo,
+) -> Result<NativeSolAbsorbIntent, StabilityPoolError> {
+    let proof = intent
+        .burn_proof
+        .clone()
+        .ok_or_else(|| StabilityPoolError::LiquidationFailed {
+            vault_id: intent.vault_id,
+            reason: "missing native SOL burn proof for backend submit".to_string(),
+        })?;
+    let request = native_sol_request_from_intent(intent, proof);
+    match io.submit_sol_absorb(protocol_id, request).await {
+        Ok(result) => {
+            if let Err(error) = validate_sol_absorb_backend_result(
+                intent.vault_id,
+                intent.icusd_to_burn_e8s,
+                intent.collateral_received_lamports,
+                &intent.allocations,
+                &result,
+            ) {
+                let reason = format!("{:?}", error);
+                mutate_state(|s| {
+                    mark_native_sol_absorb_error_in_state(
+                        s,
+                        intent.vault_id,
+                        NativeSolAbsorbIntentStatus::BackendRejected,
+                        reason,
+                        io.now_ns(),
+                    );
+                });
+                return Err(error);
+            }
+            mutate_state(|s| {
+                mark_native_sol_absorb_backend_result_in_state(
+                    s,
+                    intent.vault_id,
+                    result,
+                    io.now_ns(),
+                )
+            })
+        }
+        Err(error) => {
+            let status = match &error {
+                StabilityPoolError::LiquidationFailed { .. } => {
+                    NativeSolAbsorbIntentStatus::BackendRejected
+                }
+                _ => NativeSolAbsorbIntentStatus::Burned,
+            };
+            let reason = format!("{:?}", error);
+            mutate_state(|s| {
+                mark_native_sol_absorb_error_in_state(
+                    s,
+                    intent.vault_id,
+                    status,
+                    reason,
+                    io.now_ns(),
+                );
+            });
+            Err(error)
+        }
+    }
+}
+
+pub(crate) async fn execute_native_sol_absorb_with_io(
+    vault_info: &LiquidatableVaultInfo,
+    io: &mut dyn NativeSolAbsorbIo,
+) -> LiquidationResult {
+    if let Err(error) =
+        read_state(|s| ensure_no_other_pending_pool_absorb_for_native_sol(s, vault_info.vault_id))
+    {
+        return liquidation_failure(vault_info, error);
+    }
+
+    if let Some(intent) = read_state(|s| s.get_pending_native_sol_absorb(vault_info.vault_id)) {
+        if intent.backend_result.is_some() {
+            return match mutate_state(|s| {
+                apply_native_sol_absorb_success_in_state_at(s, &intent, io.now_ns())
+            }) {
+                Ok(result) => result,
+                Err(error) => liquidation_failure(vault_info, error),
+            };
+        }
+        if intent.burn_proof.is_some() {
+            let protocol_id = read_state(|s| s.protocol_canister_id);
+            let accepted = match submit_native_sol_absorb_to_backend(protocol_id, &intent, io).await
+            {
+                Ok(intent) => intent,
+                Err(error) => return liquidation_failure(vault_info, error),
+            };
+            return match mutate_state(|s| {
+                apply_native_sol_absorb_success_in_state_at(s, &accepted, io.now_ns())
+            }) {
+                Ok(result) => result,
+                Err(error) => liquidation_failure(vault_info, error),
+            };
+        }
+    }
+
+    let current = match read_state(|s| {
+        if !s.collateral_requires_payout_address(&vault_info.collateral_type) {
+            return Err(StabilityPoolError::PayoutAddressRequired {
+                collateral: vault_info.collateral_type,
+            });
+        }
+        if let Some(intent) = s.get_pending_native_sol_absorb(vault_info.vault_id) {
+            return Ok((
+                s.protocol_canister_id,
+                intent.icusd_ledger,
+                Some(intent.icusd_minting_account),
+                intent.icusd_to_burn_e8s,
+                intent.stables_consumed,
+            ));
+        }
+        let draw_amount = if vault_info.recommended_liquidation_amount > 0 {
+            vault_info.recommended_liquidation_amount
+        } else {
+            vault_info.debt_amount
+        };
+        let icusd_ledger = s
+            .icusd_ledger()
+            .ok_or(StabilityPoolError::TokenNotAccepted {
+                ledger: Principal::anonymous(),
+            })?;
+        let icusd_to_burn_e8s =
+            draw_amount.min(s.effective_icusd_pool_for_collateral(&vault_info.collateral_type));
+        if icusd_to_burn_e8s == 0 {
+            return Err(StabilityPoolError::InsufficientPoolBalance);
+        }
+        let mut stables_consumed = BTreeMap::new();
+        stables_consumed.insert(icusd_ledger, icusd_to_burn_e8s);
+        Ok((
+            s.protocol_canister_id,
+            icusd_ledger,
+            None,
+            icusd_to_burn_e8s,
+            stables_consumed,
+        ))
+    }) {
+        Ok(current) => current,
+        Err(error) => return liquidation_failure(vault_info, error),
+    };
+    let (protocol_id, icusd_ledger, existing_minting_account, icusd_to_burn_e8s, stables_consumed) =
+        current;
+
+    let preflight = match io
+        .preflight_sol_absorb(protocol_id, vault_info.vault_id, icusd_to_burn_e8s)
+        .await
+    {
+        Ok(preflight) => preflight,
+        Err(error) => {
+            // Same gap as the native-XRP twin: the preflight call itself
+            // failed, which cannot distinguish "the backend never saw the
+            // request" from "the backend executed it but the reply was
+            // dropped" (a normal IC failure mode). Hand the possible
+            // reservation back the same way every other pre-burn failure
+            // branch does, so a dropped reply cannot leak a live backend
+            // reservation that fences this vault for up to
+            // SOL_SP_ABSORB_PREFLIGHT_TTL_NS (release is idempotent and
+            // best-effort: it never overwrites `error`, the original
+            // preflight failure returned to the caller).
+            abandon_unburned_native_sol_absorb(
+                io,
+                protocol_id,
+                vault_info.vault_id,
+                icusd_to_burn_e8s,
+            )
+            .await;
+            return liquidation_failure(vault_info, error);
+        }
+    };
+    if preflight.vault_id != vault_info.vault_id || preflight.icusd_burn_e8s != icusd_to_burn_e8s {
+        abandon_unburned_native_sol_absorb(
+            io,
+            protocol_id,
+            vault_info.vault_id,
+            icusd_to_burn_e8s,
+        )
+        .await;
+        return liquidation_failure(
+            vault_info,
+            StabilityPoolError::LiquidationFailed {
+                vault_id: vault_info.vault_id,
+                reason: "native SOL preflight does not match requested burn".to_string(),
+            },
+        );
+    }
+
+    let allocations = match read_state(|s| {
+        s.build_native_sol_payout_allocations(
+            vault_info.collateral_type,
+            &stables_consumed,
+            preflight.collateral_received_lamports,
+        )
+    }) {
+        Ok(allocations) if !allocations.is_empty() => allocations
+            .into_iter()
+            .map(SolSpPayoutAllocation::from)
+            .collect::<Vec<_>>(),
+        Ok(_) => {
+            abandon_unburned_native_sol_absorb(
+                io,
+                protocol_id,
+                vault_info.vault_id,
+                icusd_to_burn_e8s,
+            )
+            .await;
+            return liquidation_failure(
+                vault_info,
+                StabilityPoolError::LiquidationFailed {
+                    vault_id: vault_info.vault_id,
+                    reason: "native SOL absorb produced no payout allocations".to_string(),
+                },
+            );
+        }
+        Err(error) => {
+            abandon_unburned_native_sol_absorb(
+                io,
+                protocol_id,
+                vault_info.vault_id,
+                icusd_to_burn_e8s,
+            )
+            .await;
+            return liquidation_failure(vault_info, error);
+        }
+    };
+
+    let minting_account = if let Some(account) = existing_minting_account {
+        account
+    } else {
+        match io.fetch_icusd_minting_account(icusd_ledger).await {
+            Ok(account) => account,
+            Err(error) => {
+                abandon_unburned_native_sol_absorb(
+                    io,
+                    protocol_id,
+                    vault_info.vault_id,
+                    icusd_to_burn_e8s,
+                )
+                .await;
+                return liquidation_failure(vault_info, error);
+            }
+        }
+    };
+
+    let plan = NativeSolAbsorbPlan {
+        vault_id: vault_info.vault_id,
+        collateral_type: vault_info.collateral_type,
+        icusd_ledger,
+        icusd_minting_account: minting_account,
+        icusd_to_burn_e8s,
+        stables_consumed,
+        collateral_received_lamports: preflight.collateral_received_lamports,
+        collateral_price_e8s: preflight.collateral_price_e8s,
+        allocations,
+    };
+    let now = io.now_ns();
+    let mut intent =
+        match mutate_state(|s| prepare_or_reuse_native_sol_absorb_intent_in_state(s, &plan, now)) {
+            Ok(intent) => intent,
+            Err(error) => return liquidation_failure(vault_info, error),
+        };
+
+    let proof = if let Some(proof) = intent.burn_proof.clone() {
+        proof
+    } else {
+        match io
+            .burn_icusd(
+                intent.icusd_ledger,
+                intent.icusd_minting_account,
+                intent.icusd_to_burn_e8s,
+                intent.vault_id,
+                intent.burn_created_at_time_ns,
+            )
+            .await
+        {
+            Ok(proof) => {
+                intent = match mutate_state(|s| {
+                    mark_native_sol_absorb_burned_in_state(
+                        s,
+                        vault_info.vault_id,
+                        proof.clone(),
+                        io.now_ns(),
+                    )
+                }) {
+                    Ok(intent) => intent,
+                    Err(error) => return liquidation_failure(vault_info, error),
+                };
+                proof
+            }
+            Err(error) => {
+                // The burn call returned an error, which the local clear
+                // already treats as "no icUSD left the pool"; release the
+                // reservation on the same assumption.
+                abandon_unburned_native_sol_absorb(
+                    io,
+                    protocol_id,
+                    vault_info.vault_id,
+                    icusd_to_burn_e8s,
+                )
+                .await;
+                return liquidation_failure(vault_info, error);
+            }
+        }
+    };
+    intent.burn_proof = Some(proof);
+
+    let accepted = match submit_native_sol_absorb_to_backend(protocol_id, &intent, io).await {
+        Ok(intent) => intent,
+        Err(error) => return liquidation_failure(vault_info, error),
+    };
+    match mutate_state(|s| apply_native_sol_absorb_success_in_state_at(s, &accepted, io.now_ns())) {
         Ok(result) => result,
         Err(error) => liquidation_failure(vault_info, error),
     }
@@ -2372,6 +3417,9 @@ pub async fn claim_cfx(
 /// No circuit breaker / suspension mechanism — if a token fails, we skip it and try the
 /// next one. If they all fail, the liquidation simply doesn't happen this round.
 async fn execute_single_liquidation(vault_info: &LiquidatableVaultInfo) -> LiquidationResult {
+    if read_state(|s| s.is_native_sol_collateral(&vault_info.collateral_type)) {
+        return execute_native_sol_absorb_with_io(vault_info, &mut CdkNativeSolAbsorbIo).await;
+    }
     if read_state(|s| s.collateral_requires_payout_address(&vault_info.collateral_type)) {
         return execute_native_xrp_absorb_with_io(vault_info, &mut CdkNativeXrpAbsorbIo).await;
     }
@@ -2900,6 +3948,20 @@ mod tests {
         "rUn84CUYbNjRoTQ6mSW7BVJPSVJNLb1QLo".to_string()
     }
 
+    fn sol_ledger() -> Principal {
+        rumi_protocol_backend::state::sol_collateral_principal()
+    }
+
+    /// A real Ed25519 public key, base58-encoded, so it passes the backend's
+    /// on-curve validation the same way `state.rs`'s own `valid_sol_address`
+    /// helper does.
+    fn valid_sol_address() -> String {
+        use ed25519_dalek::SigningKey;
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let pk = sk.verifying_key();
+        bs58::encode(pk.to_bytes()).into_string()
+    }
+
     fn user_a() -> Principal {
         Principal::from_slice(&[1])
     }
@@ -2934,6 +3996,12 @@ mod tests {
             ledger_id: xrp_ledger(),
             symbol: "XRP".to_string(),
             decimals: 6,
+            status: CollateralStatus::Active,
+        });
+        state.register_collateral(CollateralInfo {
+            ledger_id: sol_ledger(),
+            symbol: "SOL".to_string(),
+            decimals: 9,
             status: CollateralStatus::Active,
         });
         state
@@ -3000,6 +4068,10 @@ mod tests {
     #[derive(Default)]
     struct FakeNativeXrpAbsorbIo {
         preflight: Option<XrpSpAbsorbPreflight>,
+        // When set, `preflight_xrp_absorb` fails with `InterCanisterCallFailed`
+        // instead of returning `preflight`, simulating the preflight call
+        // itself failing (a dropped reply, not a backend rejection).
+        fail_preflight_call: bool,
         submit_result: Option<XrpSpAbsorbResult>,
         minting_account: Option<Account>,
         burn_proof: Option<rumi_protocol_backend::icrc3_proof::SpWritedownProof>,
@@ -3023,12 +4095,18 @@ mod tests {
 
         async fn preflight_xrp_absorb(
             &mut self,
-            _protocol_id: Principal,
+            protocol_id: Principal,
             vault_id: u64,
             expected_icusd_burn_e8s: u64,
         ) -> Result<XrpSpAbsorbPreflight, StabilityPoolError> {
             self.events
                 .push(format!("preflight:{vault_id}:{expected_icusd_burn_e8s}"));
+            if self.fail_preflight_call {
+                return Err(StabilityPoolError::InterCanisterCallFailed {
+                    target: format!("{}", protocol_id),
+                    method: "stability_pool_preflight_xrp_absorb".to_string(),
+                });
+            }
             self.preflight
                 .clone()
                 .ok_or_else(|| StabilityPoolError::LiquidationFailed {
@@ -3694,6 +4772,305 @@ mod tests {
             read_state(|s| s.total_stablecoin_balances.get(&icusd_ledger()).copied()),
             Some(501_00000000),
             "over-500 fanout rejection must not burn or mutate pool balances",
+        );
+    }
+
+    #[test]
+    fn xrp_absorb_releases_reservation_when_preflight_call_itself_fails() {
+        // The preflight call failing (not being rejected by the backend) is
+        // indistinguishable from "the backend executed it but the reply was
+        // dropped", a normal IC failure mode. A dropped reply must not leak
+        // the backend-side reservation: the release call must still fire, and
+        // the original preflight error (not some release-related error) must
+        // still be what the caller sees.
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 10_00000000);
+        state
+            .opt_in_native_collateral_with_tag(&user_a(), xrp_ledger(), valid_xrp_address(), None)
+            .unwrap();
+        replace_state(state);
+        let mut io = FakeNativeXrpAbsorbIo {
+            fail_preflight_call: true,
+            ..Default::default()
+        };
+
+        let result = futures::executor::block_on(execute_native_xrp_absorb_with_io(
+            &xrp_vault(147, 10_00000000),
+            &mut io,
+        ));
+
+        assert!(!result.success);
+        assert_eq!(
+            io.events,
+            vec!["preflight:147:1000000000", "release:147:1000000000"],
+            "a failed preflight call must still release the (possibly nonexistent) reservation",
+        );
+        assert!(
+            result
+                .error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("InterCanisterCallFailed"),
+            "the original preflight failure must reach the caller, not a release-related error: {:?}",
+            result.error_message,
+        );
+        assert_eq!(
+            read_state(|s| s
+                .deposits
+                .get(&user_a())
+                .and_then(|pos| pos.stablecoin_balances.get(&icusd_ledger()).copied())),
+            Some(10_00000000),
+            "a failed preflight call must not burn or mutate pool balances",
+        );
+    }
+
+    /// SOL analogue of `FakeNativeXrpAbsorbIo`.
+    #[derive(Default)]
+    struct FakeNativeSolAbsorbIo {
+        preflight: Option<SolSpAbsorbPreflight>,
+        // When set, `preflight_sol_absorb` fails with `InterCanisterCallFailed`
+        // instead of returning `preflight`, simulating the preflight call
+        // itself failing (a dropped reply, not a backend rejection).
+        fail_preflight_call: bool,
+        submit_result: Option<SolSpAbsorbResult>,
+        minting_account: Option<Account>,
+        burn_proof: Option<rumi_protocol_backend::icrc3_proof::SpWritedownProof>,
+        events: Vec<String>,
+        submitted_requests: Vec<SolSpAbsorbRequest>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl NativeSolAbsorbIo for FakeNativeSolAbsorbIo {
+        fn now_ns(&self) -> u64 {
+            123_456_789
+        }
+
+        async fn fetch_icusd_minting_account(
+            &mut self,
+            _icusd_ledger: Principal,
+        ) -> Result<Account, StabilityPoolError> {
+            self.events.push("minting_account".to_string());
+            Ok(self.minting_account.clone().unwrap_or_else(minting_account))
+        }
+
+        async fn preflight_sol_absorb(
+            &mut self,
+            protocol_id: Principal,
+            vault_id: u64,
+            expected_icusd_burn_e8s: u64,
+        ) -> Result<SolSpAbsorbPreflight, StabilityPoolError> {
+            self.events
+                .push(format!("preflight:{vault_id}:{expected_icusd_burn_e8s}"));
+            if self.fail_preflight_call {
+                return Err(StabilityPoolError::InterCanisterCallFailed {
+                    target: format!("{}", protocol_id),
+                    method: "stability_pool_preflight_sol_absorb".to_string(),
+                });
+            }
+            self.preflight
+                .clone()
+                .ok_or_else(|| StabilityPoolError::LiquidationFailed {
+                    vault_id,
+                    reason: "test preflight missing".to_string(),
+                })
+        }
+
+        async fn burn_icusd(
+            &mut self,
+            _icusd_ledger: Principal,
+            _minting_account: Account,
+            amount_e8s: u64,
+            vault_id: u64,
+            created_at_time: u64,
+        ) -> Result<rumi_protocol_backend::icrc3_proof::SpWritedownProof, StabilityPoolError>
+        {
+            self.events
+                .push(format!("burn:{vault_id}:{amount_e8s}:{created_at_time}"));
+            Ok(self
+                .burn_proof
+                .clone()
+                .unwrap_or_else(|| build_icusd_burn_proof(44, vault_id)))
+        }
+
+        async fn release_sol_absorb_preflight(
+            &mut self,
+            _protocol_id: Principal,
+            vault_id: u64,
+            icusd_burn_e8s: u64,
+        ) {
+            self.events
+                .push(format!("release:{vault_id}:{icusd_burn_e8s}"));
+        }
+
+        async fn submit_sol_absorb(
+            &mut self,
+            _protocol_id: Principal,
+            request: SolSpAbsorbRequest,
+        ) -> Result<SolSpAbsorbResult, StabilityPoolError> {
+            self.events.push(format!(
+                "submit:{}:{}:{}",
+                request.vault_id,
+                request.icusd_burned_e8s,
+                request.allocations.len()
+            ));
+            self.submitted_requests.push(request);
+            self.submit_result
+                .clone()
+                .ok_or_else(|| StabilityPoolError::LiquidationFailed {
+                    vault_id: 0,
+                    reason: "test submit result missing".to_string(),
+                })
+        }
+    }
+
+    fn sol_vault(vault_id: u64, debt_amount: u64) -> LiquidatableVaultInfo {
+        LiquidatableVaultInfo {
+            vault_id,
+            collateral_type: sol_ledger(),
+            debt_amount,
+            collateral_amount: 5_000_000_000,
+            recommended_liquidation_amount: 0,
+            collateral_price_e8s: 50_00000000,
+        }
+    }
+
+    fn sol_preflight(
+        vault_id: u64,
+        icusd_burn_e8s: u64,
+        collateral_received_lamports: u64,
+    ) -> SolSpAbsorbPreflight {
+        SolSpAbsorbPreflight {
+            vault_id,
+            icusd_burn_e8s,
+            collateral_received_lamports,
+            collateral_price_e8s: 50_00000000,
+            expires_at_ns: 999,
+        }
+    }
+
+    #[test]
+    fn sol_absorb_aborts_before_burn_when_preflight_yields_no_allocations() {
+        // SOL parity with `xrp_absorb_aborts_before_burn_when_preflight_yields_no_allocations`:
+        // giving up after reserving but before burning must hand the backend
+        // reservation back, or the vault stays blocked for every liquidation
+        // path (including manual) until the 15-minute TTL expires.
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 10_00000000);
+        state
+            .opt_in_native_collateral_with_tag(&user_a(), sol_ledger(), valid_sol_address(), None)
+            .unwrap();
+        replace_state(state);
+        let mut io = FakeNativeSolAbsorbIo {
+            preflight: Some(sol_preflight(145, 10_00000000, 0)),
+            ..Default::default()
+        };
+
+        let result = futures::executor::block_on(execute_native_sol_absorb_with_io(
+            &sol_vault(145, 10_00000000),
+            &mut io,
+        ));
+
+        assert!(!result.success);
+        assert_eq!(
+            io.events,
+            vec!["preflight:145:1000000000", "release:145:1000000000"]
+        );
+        assert_eq!(
+            read_state(|s| s
+                .deposits
+                .get(&user_a())
+                .and_then(|pos| pos.stablecoin_balances.get(&icusd_ledger()).copied())),
+            Some(10_00000000),
+            "empty allocation rejection must not burn or mutate pool balances",
+        );
+    }
+
+    #[test]
+    fn sol_absorb_aborts_before_burn_when_allocation_fanout_exceeds_500() {
+        // SOL parity with `xrp_absorb_aborts_before_burn_when_allocation_fanout_exceeds_500`.
+        let mut state = test_state();
+        for i in 0..501u16 {
+            let principal = Principal::from_slice(&i.to_be_bytes());
+            add_deposit_direct(&mut state, principal, icusd_ledger(), 1_00000000);
+            state
+                .opt_in_native_collateral_with_tag(
+                    &principal,
+                    sol_ledger(),
+                    valid_sol_address(),
+                    None,
+                )
+                .unwrap();
+        }
+        replace_state(state);
+        let mut io = FakeNativeSolAbsorbIo {
+            preflight: Some(sol_preflight(146, 501_00000000, 501)),
+            ..Default::default()
+        };
+
+        let result = futures::executor::block_on(execute_native_sol_absorb_with_io(
+            &sol_vault(146, 501_00000000),
+            &mut io,
+        ));
+
+        assert!(!result.success);
+        // Same contract as the empty-allocation abort: reserved, gave up
+        // before burning, so the reservation goes back rather than blocking
+        // the vault for the full TTL.
+        assert_eq!(
+            io.events,
+            vec!["preflight:146:50100000000", "release:146:50100000000"]
+        );
+        assert_eq!(
+            read_state(|s| s.total_stablecoin_balances.get(&icusd_ledger()).copied()),
+            Some(501_00000000),
+            "over-500 fanout rejection must not burn or mutate pool balances",
+        );
+    }
+
+    #[test]
+    fn sol_absorb_releases_reservation_when_preflight_call_itself_fails() {
+        // SOL parity with `xrp_absorb_releases_reservation_when_preflight_call_itself_fails`:
+        // the preflight call failing must still release the backend-side
+        // reservation, and the original preflight error must still be what
+        // reaches the caller.
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 10_00000000);
+        state
+            .opt_in_native_collateral_with_tag(&user_a(), sol_ledger(), valid_sol_address(), None)
+            .unwrap();
+        replace_state(state);
+        let mut io = FakeNativeSolAbsorbIo {
+            fail_preflight_call: true,
+            ..Default::default()
+        };
+
+        let result = futures::executor::block_on(execute_native_sol_absorb_with_io(
+            &sol_vault(147, 10_00000000),
+            &mut io,
+        ));
+
+        assert!(!result.success);
+        assert_eq!(
+            io.events,
+            vec!["preflight:147:1000000000", "release:147:1000000000"],
+            "a failed preflight call must still release the (possibly nonexistent) reservation",
+        );
+        assert!(
+            result
+                .error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("InterCanisterCallFailed"),
+            "the original preflight failure must reach the caller, not a release-related error: {:?}",
+            result.error_message,
+        );
+        assert_eq!(
+            read_state(|s| s
+                .deposits
+                .get(&user_a())
+                .and_then(|pos| pos.stablecoin_balances.get(&icusd_ledger()).copied())),
+            Some(10_00000000),
+            "a failed preflight call must not burn or mutate pool balances",
         );
     }
 
@@ -4935,6 +6312,187 @@ mod tests {
         assert_eq!(
             read_state(|s| s.native_xrp_pending_payouts_for(&user_a()).len())
                 + read_state(|s| s.native_xrp_pending_payouts_for(&user_b()).len()),
+            3,
+            "no record may be dropped on errors"
+        );
+    }
+
+    // ─── Native-SOL auto-settlement sweep ───
+
+    fn sol_payout(claim_id: u64, lamports: u64, created_at_ns: u64) -> NativeSolPendingPayout {
+        NativeSolPendingPayout {
+            claim_id,
+            collateral_type: sol_ledger(),
+            vault_id: 195,
+            lamports,
+            payout_address: valid_sol_address(),
+            created_at_ns,
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeSolSettleSweepIo {
+        outstanding: std::collections::BTreeMap<u64, bool>,
+        outstanding_errors: std::collections::BTreeSet<u64>,
+        settle_errors: std::collections::BTreeSet<u64>,
+        settle_calls: Vec<(u64, Principal, String)>,
+        outstanding_calls: Vec<(u64, Principal)>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl NativeSolSettleSweepIo for FakeSolSettleSweepIo {
+        async fn claim_outstanding(
+            &mut self,
+            _protocol: Principal,
+            claim_id: u64,
+            claimant: Principal,
+        ) -> Result<bool, StabilityPoolError> {
+            self.outstanding_calls.push((claim_id, claimant));
+            if self.outstanding_errors.contains(&claim_id) {
+                return Err(StabilityPoolError::InterCanisterCallFailed {
+                    target: "Protocol".to_string(),
+                    method: "stability_pool_sol_claim_outstanding".to_string(),
+                });
+            }
+            Ok(*self.outstanding.get(&claim_id).unwrap_or(&true))
+        }
+
+        async fn settle_on_behalf(
+            &mut self,
+            _protocol: Principal,
+            claim_id: u64,
+            claimant: Principal,
+            destination: String,
+        ) -> Result<String, StabilityPoolError> {
+            self.settle_calls.push((claim_id, claimant, destination));
+            if self.settle_errors.contains(&claim_id) {
+                return Err(StabilityPoolError::InterCanisterCallFailed {
+                    target: "Protocol".to_string(),
+                    method: "stability_pool_settle_sol_claim".to_string(),
+                });
+            }
+            Ok(format!("SOLSIG{claim_id}"))
+        }
+    }
+
+    fn sol_sweep_state_with_payouts(
+        payouts: Vec<(Principal, NativeSolPendingPayout)>,
+    ) -> StabilityPoolState {
+        let mut state = test_state();
+        for (user, p) in payouts {
+            add_deposit_direct(&mut state, user, icusd_ledger(), 1_00000000);
+            state.record_native_sol_pending_payout(user, p).unwrap();
+        }
+        state
+    }
+
+    #[test]
+    fn sol_settle_sweep_settles_outstanding_claim_with_stored_address() {
+        // Mirrors `settle_sweep_settles_outstanding_claim_with_stored_address_and_tag`,
+        // minus the destination tag (Solana has no analogue). The record must
+        // NOT be removed yet: only a later tick's outstanding-check==false
+        // acks it, matching the manual settle flow's two phases.
+        let state = sol_sweep_state_with_payouts(vec![(user_a(), sol_payout(3, 11_529, 100))]);
+        replace_state(state);
+        let mut io = FakeSolSettleSweepIo::default();
+
+        let summary =
+            futures::executor::block_on(run_native_sol_settle_sweep_with_io(&mut io, None, 2));
+
+        assert_eq!(summary.examined, 1);
+        assert_eq!(summary.submitted, 1);
+        assert_eq!(summary.acked, 0);
+        assert_eq!(io.settle_calls, vec![(3, user_a(), valid_sol_address())]);
+        assert_eq!(
+            read_state(|s| s.native_sol_pending_payouts_for(&user_a()).len()),
+            1,
+            "record stays until a later tick confirms the claim is gone"
+        );
+    }
+
+    #[test]
+    fn sol_settle_sweep_acks_payout_whose_claim_is_gone() {
+        let state = sol_sweep_state_with_payouts(vec![(user_a(), sol_payout(3, 11_529, 100))]);
+        replace_state(state);
+        let mut io = FakeSolSettleSweepIo::default();
+        io.outstanding.insert(3, false);
+
+        let summary =
+            futures::executor::block_on(run_native_sol_settle_sweep_with_io(&mut io, None, 2));
+
+        assert_eq!(summary.acked, 1);
+        assert!(io.settle_calls.is_empty());
+        assert!(read_state(|s| s.native_sol_pending_payouts_for(&user_a()).is_empty()));
+    }
+
+    #[test]
+    fn sol_settle_sweep_is_bounded_and_rotates_across_ticks() {
+        let state = sol_sweep_state_with_payouts(vec![
+            (user_a(), sol_payout(1, 10, 100)),
+            (user_a(), sol_payout(2, 20, 110)),
+            (user_b(), sol_payout(5, 50, 120)),
+        ]);
+        replace_state(state);
+        let mut io = FakeSolSettleSweepIo::default();
+
+        let first =
+            futures::executor::block_on(run_native_sol_settle_sweep_with_io(&mut io, None, 2));
+        assert_eq!(first.examined, 2);
+        assert_eq!(first.last_claim_id, Some(2));
+        assert_eq!(
+            io.settle_calls.iter().map(|c| c.0).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+
+        let second = futures::executor::block_on(run_native_sol_settle_sweep_with_io(
+            &mut io,
+            first.last_claim_id,
+            2,
+        ));
+        assert_eq!(
+            io.settle_calls.iter().map(|c| c.0).collect::<Vec<_>>(),
+            vec![1, 2, 5, 1],
+            "second tick continues after the cursor and wraps around"
+        );
+        assert_eq!(second.last_claim_id, Some(1));
+    }
+
+    #[test]
+    fn sol_settle_sweep_skips_entirely_when_emergency_paused() {
+        let mut state = sol_sweep_state_with_payouts(vec![(user_a(), sol_payout(3, 11_529, 100))]);
+        state.configuration.emergency_pause = true;
+        replace_state(state);
+        let mut io = FakeSolSettleSweepIo::default();
+
+        let summary =
+            futures::executor::block_on(run_native_sol_settle_sweep_with_io(&mut io, None, 2));
+
+        assert_eq!(summary.examined, 0);
+        assert!(io.settle_calls.is_empty() && io.outstanding_calls.is_empty());
+    }
+
+    #[test]
+    fn sol_settle_sweep_tolerates_errors_and_continues() {
+        let state = sol_sweep_state_with_payouts(vec![
+            (user_a(), sol_payout(1, 10, 100)),
+            (user_b(), sol_payout(2, 20, 110)),
+            (user_b(), sol_payout(4, 40, 120)),
+        ]);
+        replace_state(state);
+        let mut io = FakeSolSettleSweepIo::default();
+        io.outstanding_errors.insert(1);
+        io.settle_errors.insert(2);
+
+        let summary =
+            futures::executor::block_on(run_native_sol_settle_sweep_with_io(&mut io, None, 3));
+
+        assert_eq!(summary.examined, 3);
+        assert_eq!(summary.failed, 2);
+        assert_eq!(summary.submitted, 1);
+        assert_eq!(io.settle_calls.iter().map(|c| c.0).collect::<Vec<_>>(), vec![2, 4]);
+        assert_eq!(
+            read_state(|s| s.native_sol_pending_payouts_for(&user_a()).len())
+                + read_state(|s| s.native_sol_pending_payouts_for(&user_b()).len()),
             3,
             "no record may be dropped on errors"
         );

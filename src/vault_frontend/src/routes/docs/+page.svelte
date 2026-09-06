@@ -6,6 +6,11 @@
       description: "What you need to know before depositing collateral and minting icUSD."
     },
     {
+      title: "Native XRP & SOL Collateral",
+      href: "/docs/native-collateral",
+      description: "How off-chain custody works for XRP and SOL: per-vault addresses, the reserve, and claim-based settlement."
+    },
+    {
       title: "Liquidation Mechanics",
       href: "/docs/liquidation",
       description: "How liquidations work, when they trigger, and what happens to your collateral."

@@ -34,3 +34,11 @@ assert_matches = "1.3.0"
 ic-state-machine-tests = { git = "https://github.com/Rumi-Protocol/ic", rev = "fc278709" }
 pocket-ic = "6.0.0"
 rumi_3pool = { path = "../rumi_3pool" }
+# Host-side SOL test address derivation (on-curve address + off-curve PDA via
+# `Pubkey::find_program_address`), mirroring rumi_protocol_backend's
+# chains/sol/address.rs tests. Both already resolve in the workspace lock
+# transitively via the rumi_protocol_backend dependency, so this does not
+# shift resolution. Dev-only, so it does not affect the wasm artifact.
+solana-pubkey = { version = "4", default-features = false, features = ["curve25519"] }
+ed25519-dalek = "2.1.1"
+bs58 = "0.5"

@@ -110,6 +110,15 @@ type NativeXrpPendingPayout = record {
   created_at_ns : nat64;
 };
 
+type NativeSolPendingPayout = record {
+  claim_id : nat64;
+  collateral_type : principal;
+  vault_id : nat64;
+  lamports : nat64;
+  payout_address : text;
+  created_at_ns : nat64;
+};
+
 // ── Liquidation types ──
 
 type LiquidatableVaultInfo = record {
@@ -308,6 +317,8 @@ type StabilityPoolError = variant {
   InvalidPayoutAddress : record { reason : text };
   XrpClaimStillOutstanding : record { claim_id : nat64 };
   XrpClaimStatusCheckFailed : record { reason : text };
+  SolClaimStillOutstanding : record { claim_id : nat64 };
+  SolClaimStatusCheckFailed : record { reason : text };
   RefundClaimNotFound;
 };
 
@@ -433,6 +444,7 @@ service : (StabilityPoolInitArgs) -> {
   opt_in_native_collateral : (principal, text) -> (variant { Ok; Err : StabilityPoolError });
   opt_in_native_collateral_with_tag : (principal, text, opt nat32) -> (variant { Ok; Err : StabilityPoolError });
   ack_native_xrp_payout_settled : (nat64) -> (variant { Ok; Err : StabilityPoolError });
+  ack_native_sol_payout_settled : (nat64) -> (variant { Ok; Err : StabilityPoolError });
 
   // ── Liquidation ──
   notify_liquidatable_vaults : (vec LiquidatableVaultInfo) -> (vec LiquidationResult);
@@ -485,6 +497,7 @@ service : (StabilityPoolInitArgs) -> {
   get_pending_refunds : (opt principal) -> (vec PendingRefund) query;
   get_pending_unallocated_interest_forwards : () -> (vec UnallocatedInterestForwardBatch) query;
   get_my_native_xrp_payouts : () -> (vec NativeXrpPendingPayout) query;
+  get_my_native_sol_payouts : () -> (vec NativeSolPendingPayout) query;
   get_pending_chain_absorbs : () -> (vec ChainSpAbsorbIntent) query;
   get_completed_chain_absorbs : (opt nat64) -> (vec ChainSpAbsorbCompletion) query;
   get_chain_absorb_auto_status : () -> (ChainAbsorbAutoStatus) query;

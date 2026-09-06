@@ -28,9 +28,28 @@
     type ManualXrpPendingClaim,
     type ManualXrpPendingClaimMap,
   } from '$lib/services/manualXrpLiquidation';
+  import { SolVaultService } from '$lib/services/solVaultService';
+  import {
+    isNativeSolPrincipal,
+    validateSolPayoutInput,
+    type SolClaimId,
+  } from '$lib/services/solPayoutHelpers';
+  import {
+    deserializeManualSolClaims,
+    groupManualSolClaimsByVault,
+    recoverManualSolClaimsForVault,
+    removeManualSolPendingClaim,
+    serializeManualSolClaims,
+    settleManualSolClaim,
+    upsertManualSolPendingClaim,
+    upsertManualSolPendingClaims,
+    type ManualSolPendingClaim,
+    type ManualSolPendingClaimMap,
+  } from '$lib/services/manualSolLiquidation';
 
   const ANON_PRINCIPAL = '2vxsx-fae';
   const MANUAL_XRP_PENDING_CLAIMS_PREFIX = 'rumi_manual_xrp_pending_claims:';
+  const MANUAL_SOL_PENDING_CLAIMS_PREFIX = 'rumi_manual_sol_pending_claims:';
 
   function resolveCollateralPrincipal(vault: CandidVault): string {
     const raw: unknown = vault.collateral_type;
@@ -129,6 +148,10 @@
   let pendingManualXrpClaims: ManualXrpPendingClaimMap = {};
   let retryingXrpClaimId: XrpClaimId | null = null;
   let loadedPendingXrpClaimsOwner: string | null = null;
+  let solPayoutAddresses: Record<number, string> = {};
+  let pendingManualSolClaims: ManualSolPendingClaimMap = {};
+  let retryingSolClaimId: SolClaimId | null = null;
+  let loadedPendingSolClaimsOwner: string | null = null;
   let otherVaultsPage = 0;
   let otherVaultsPageSize = 25;
 
@@ -143,6 +166,12 @@
   $: if (manualXrpClaimsOwner !== loadedPendingXrpClaimsOwner) {
     loadedPendingXrpClaimsOwner = manualXrpClaimsOwner;
     pendingManualXrpClaims = manualXrpClaimsOwner ? loadPersistedManualXrpClaims(manualXrpClaimsOwner) : {};
+  }
+
+  $: manualSolClaimsOwner = $wallet.principal?.toText() ?? null;
+  $: if (manualSolClaimsOwner !== loadedPendingSolClaimsOwner) {
+    loadedPendingSolClaimsOwner = manualSolClaimsOwner;
+    pendingManualSolClaims = manualSolClaimsOwner ? loadPersistedManualSolClaims(manualSolClaimsOwner) : {};
   }
 
   $: walletIcusd = $wallet.tokenBalances?.ICUSD
@@ -185,6 +214,12 @@
     .filter((claim) => claim.vaultId !== undefined && !sortedVaults.some((vault) => vault.vault_id === claim.vaultId))
     .sort((a, b) => Number(a.vaultId ?? 0) - Number(b.vaultId ?? 0) || (a.claimId < b.claimId ? -1 : a.claimId > b.claimId ? 1 : 0));
 
+  $: pendingManualSolClaimsByVault = groupManualSolClaimsByVault(pendingManualSolClaims);
+
+  $: orphanedPendingManualSolClaims = Object.values(pendingManualSolClaims)
+    .filter((claim) => claim.vaultId !== undefined && !sortedVaults.some((vault) => vault.vault_id === claim.vaultId))
+    .sort((a, b) => Number(a.vaultId ?? 0) - Number(b.vaultId ?? 0) || (a.claimId < b.claimId ? -1 : a.claimId > b.claimId ? 1 : 0));
+
   function calculateCollateralRatio(vault: CandidVault): number {
     const ctPrincipal = resolveCollateralPrincipal(vault);
     const ctInfo = collateralStore.getCollateralInfo(ctPrincipal);
@@ -224,6 +259,11 @@
   function isNativeXrpVault(vault: CandidVault): boolean {
     const ci = getVaultCollateralInfo(vault);
     return isNativeXrpPrincipal(ci.ctPrincipal);
+  }
+
+  function isNativeSolVault(vault: CandidVault): boolean {
+    const ci = getVaultCollateralInfo(vault);
+    return isNativeSolPrincipal(ci.ctPrincipal);
   }
 
   function getMaxLiquidation(vault: CandidVault): number {
@@ -342,6 +382,45 @@
     persistManualXrpClaims();
   }
 
+  function manualSolPendingStorageKey(owner: string | null): string | null {
+    return owner ? `${MANUAL_SOL_PENDING_CLAIMS_PREFIX}${owner}` : null;
+  }
+
+  function loadPersistedManualSolClaims(owner: string): ManualSolPendingClaimMap {
+    if (typeof localStorage === 'undefined') return {};
+    const key = manualSolPendingStorageKey(owner);
+    if (!key) return {};
+    return deserializeManualSolClaims(localStorage.getItem(key));
+  }
+
+  function persistManualSolClaims() {
+    if (typeof localStorage === 'undefined') return;
+    const key = manualSolPendingStorageKey(manualSolClaimsOwner);
+    if (!key) return;
+    const rows = serializeManualSolClaims(pendingManualSolClaims);
+    if (Object.keys(rows).length === 0) {
+      localStorage.removeItem(key);
+      return;
+    }
+    localStorage.setItem(key, JSON.stringify(rows));
+  }
+
+  function addPendingManualSolClaim(pendingClaim: ManualSolPendingClaim) {
+    pendingManualSolClaims = upsertManualSolPendingClaim(pendingManualSolClaims, pendingClaim);
+    persistManualSolClaims();
+  }
+
+  function addPendingManualSolClaims(claims: ManualSolPendingClaim[]) {
+    if (claims.length === 0) return;
+    pendingManualSolClaims = upsertManualSolPendingClaims(pendingManualSolClaims, claims);
+    persistManualSolClaims();
+  }
+
+  function clearPendingManualSolClaim(claimId: SolClaimId) {
+    pendingManualSolClaims = removeManualSolPendingClaim(pendingManualSolClaims, claimId);
+    persistManualSolClaims();
+  }
+
   // Register every recovered claim (an ambiguous failure can leave more than
   // one) and build a pluralized "#a, #b remain outstanding" fragment for the copy.
   function registerRecoveredXrpClaims(recovered: ManualXrpPendingClaim[]): { label: string; noun: string; verb: string } {
@@ -392,6 +471,55 @@
       }
     } finally {
       retryingXrpClaimId = null;
+    }
+  }
+
+  // Register every recovered claim (the ambiguous-failure fallback, see
+  // recoverSolClaimsForVault) and build a pluralized "#a, #b remain
+  // outstanding" fragment for the copy.
+  function registerRecoveredSolClaims(recovered: ManualSolPendingClaim[]): { label: string; noun: string; verb: string } {
+    addPendingManualSolClaims(recovered);
+    const count = recovered.length;
+    return {
+      label: recovered.map((claim) => `#${claim.claimId}`).join(', '),
+      noun: count > 1 ? 'claims' : 'claim',
+      verb: count > 1 ? 'remain' : 'remains',
+    };
+  }
+
+  async function recoverSolClaimsForVault(vault: CandidVault): Promise<ManualSolPendingClaim[]> {
+    const validation = validateSolPayoutInput(solPayoutAddresses[vault.vault_id] ?? '');
+    if (!validation.ok) return [];
+
+    const claims = await recoverManualSolClaimsForVault(vault.vault_id, () =>
+      SolVaultService.getMyClaims({ allowSigner: true })
+    );
+    return claims.map((claim) => ({
+      claimId: String(claim.claimId),
+      vaultId: vault.vault_id,
+      payoutAddress: validation.address ?? '',
+      lamports: claim.lamports,
+    }));
+  }
+
+  async function settlePendingManualSolClaim(pendingClaim: ManualSolPendingClaim) {
+    retryingSolClaimId = pendingClaim.claimId;
+    try {
+      const settlement = await settleManualSolClaim(
+        pendingClaim,
+        (claimId, payoutAddress) => SolVaultService.settleSolClaim(claimId, payoutAddress),
+        (claimId) => SolVaultService.hasOutstandingClaim(claimId)
+      );
+      liquidationSuccess = settlement.message;
+      liquidationError = '';
+      if (settlement.status === 'settled') {
+        clearPendingManualSolClaim(pendingClaim.claimId);
+        await loadLiquidatableVaults();
+      } else {
+        addPendingManualSolClaim(settlement.pendingClaim);
+      }
+    } finally {
+      retryingSolClaimId = null;
     }
   }
 
@@ -447,11 +575,19 @@
     if (inputAmount <= 0) { liquidationError = "Enter an amount"; return; }
     if (isOverMax(vault)) { liquidationError = "Amount exceeds maximum"; return; }
     const isXrp = isNativeXrpVault(vault);
+    const isSol = isNativeSolVault(vault);
     const xrpPayout = isXrp
       ? validateXrpPayoutInput(xrpPayoutAddresses[vault.vault_id] ?? '', xrpDestinationTags[vault.vault_id] ?? '')
       : null;
     if (xrpPayout && !xrpPayout.ok) {
       liquidationError = xrpPayout.error ?? 'Enter XRP payout details';
+      return;
+    }
+    const solPayout = isSol
+      ? validateSolPayoutInput(solPayoutAddresses[vault.vault_id] ?? '')
+      : null;
+    if (solPayout && !solPayout.ok) {
+      liquidationError = solPayout.error ?? 'Enter SOL payout details';
       return;
     }
 
@@ -516,6 +652,29 @@
             }
             await loadLiquidatableVaults();
           }
+        } else if (isSol && solPayout?.ok) {
+          // result.xrpClaimId is the shared native-custody claim-id field (see
+          // solPayoutHelpers.ts); for a native-SOL vault it carries the SOL
+          // claim id, same as XRP's fast path above.
+          if (result.xrpClaimId) {
+            const pendingClaim: ManualSolPendingClaim = {
+              claimId: result.xrpClaimId,
+              vaultId: vault.vault_id,
+              payoutAddress: solPayout.address ?? '',
+            };
+            await settlePendingManualSolClaim(pendingClaim);
+            liquidationAmounts[vault.vault_id] = '';
+          } else {
+            const recovered = await recoverSolClaimsForVault(vault);
+            if (recovered.length > 0) {
+              const r = registerRecoveredSolClaims(recovered);
+              liquidationSuccess = `Liquidation accepted for vault #${vault.vault_id}. SOL ${r.noun} ${r.label} ${r.verb} outstanding and can be settled from this screen.`;
+              liquidationAmounts[vault.vault_id] = '';
+            } else {
+              liquidationSuccess = `Liquidation accepted for vault #${vault.vault_id}. SOL settlement claim is being indexed; refresh claims and retry settlement from this screen.`;
+            }
+            await loadLiquidatableVaults();
+          }
         } else {
           liquidationSuccess = `Liquidated vault #${vault.vault_id}. Paid ${formatStableTx(inputAmount)} ${token}, received ${formatNumber(seizure.collateralSeized, 4)} ${seizure.symbol}.`;
           liquidationAmounts[vault.vault_id] = '';
@@ -533,6 +692,14 @@
           } else {
             liquidationError = `${msg}. No matching XRP claim is visible yet; refresh and retry before submitting another liquidation.`;
           }
+        } else if (isSol && isAmbiguousLiquidationError(msg)) {
+          const recovered = await recoverSolClaimsForVault(vault);
+          if (recovered.length > 0) {
+            const r = registerRecoveredSolClaims(recovered);
+            liquidationSuccess = `Liquidation may have landed for vault #${vault.vault_id}. SOL ${r.noun} ${r.label} ${r.verb} outstanding and can be settled from this screen.`;
+          } else {
+            liquidationError = `${msg}. No matching SOL claim is visible yet; refresh and retry before submitting another liquidation.`;
+          }
         } else {
           liquidationError = msg;
         }
@@ -546,6 +713,14 @@
           liquidationSuccess = `Liquidation may have landed for vault #${vault.vault_id}. XRP ${r.noun} ${r.label} ${r.verb} outstanding and can be settled from this screen.`;
         } else {
           liquidationError = `${msg}. No matching XRP claim is visible yet; refresh and retry before submitting another liquidation.`;
+        }
+      } else if (isSol && isAmbiguousLiquidationError(msg)) {
+        const recovered = await recoverSolClaimsForVault(vault);
+        if (recovered.length > 0) {
+          const r = registerRecoveredSolClaims(recovered);
+          liquidationSuccess = `Liquidation may have landed for vault #${vault.vault_id}. SOL ${r.noun} ${r.label} ${r.verb} outstanding and can be settled from this screen.`;
+        } else {
+          liquidationError = `${msg}. No matching SOL claim is visible yet; refresh and retry before submitting another liquidation.`;
         }
       } else {
         liquidationError = msg.includes('underflow') ? "Vault state changed. Try again." : msg;
@@ -633,6 +808,28 @@
     </div>
   {/if}
 
+  {#if orphanedPendingManualSolClaims.length > 0}
+    <div class="xrp-orphaned-pending">
+      {#each orphanedPendingManualSolClaims as pendingSolClaim (pendingSolClaim.claimId)}
+        <div class="xrp-pending-claim">
+          <span>
+            SOL claim #{pendingSolClaim.claimId} remains outstanding.
+            <span class="xrp-pending-dest">
+              Vault #{pendingSolClaim.vaultId} · settle to {pendingSolClaim.payoutAddress}
+            </span>
+          </span>
+          <button
+            class="xrp-retry-btn"
+            on:click={() => settlePendingManualSolClaim(pendingSolClaim)}
+            disabled={retryingSolClaimId !== null || processingVaultId !== null}
+          >
+            {retryingSolClaimId === pendingSolClaim.claimId ? 'Settling…' : 'Retry'}
+          </button>
+        </div>
+      {/each}
+    </div>
+  {/if}
+
   {#if isLoading && liquidatableVaults.length === 0}
     <div class="loading-state"><div class="spinner"></div></div>
   {:else if sortedVaults.length === 0}
@@ -653,7 +850,9 @@
         {@const s = inputVal > 0 && !overMax ? calculateSeizure(vault, inputVal) : null}
         {@const ci = getVaultCollateralInfo(vault)}
         {@const isXrp = isNativeXrpPrincipal(ci.ctPrincipal)}
+        {@const isSol = isNativeSolPrincipal(ci.ctPrincipal)}
         {@const vaultPendingXrpClaims = pendingManualXrpClaimsByVault[vault.vault_id] ?? []}
+        {@const vaultPendingSolClaims = pendingManualSolClaimsByVault[vault.vault_id] ?? []}
 
         <div class="liq-card">
           <div class="card-body">
@@ -676,11 +875,11 @@
 
             <div class="card-center">
               {#if s}
-                <span class="outcome-label">{isXrp ? 'XRP claim' : 'You receive'}</span>
+                <span class="outcome-label">{isXrp ? 'XRP claim' : isSol ? 'SOL claim' : 'You receive'}</span>
                 <span class="outcome-line">
                   {formatNumber(s.collateralSeized, 4)} {s.symbol}
                   <span class="outcome-usd">${formatNumber(s.usdValue, 2)}</span>
-                  {#if isXrp}
+                  {#if isXrp || isSol}
                     <span class="outcome-note">settles after claim submission</span>
                   {/if}
                 </span>
@@ -724,6 +923,34 @@
                   </div>
                 {/each}
               {/if}
+              {#if isSol}
+                <div class="xrp-payout-fields">
+                  <label class="xrp-field-label" for={`sol-address-${vault.vault_id}`}>SOL payout address</label>
+                  <input
+                    id={`sol-address-${vault.vault_id}`}
+                    class="xrp-payout-input"
+                    type="text"
+                    placeholder="Solana address"
+                    bind:value={solPayoutAddresses[vault.vault_id]}
+                    disabled={isProcessingThis}
+                  />
+                </div>
+                {#each vaultPendingSolClaims as pendingSolClaim (pendingSolClaim.claimId)}
+                  <div class="xrp-pending-claim">
+                    <span>
+                      SOL claim #{pendingSolClaim.claimId} remains outstanding.
+                      <span class="xrp-pending-dest">Settle to {pendingSolClaim.payoutAddress}</span>
+                    </span>
+                    <button
+                      class="xrp-retry-btn"
+                      on:click={() => settlePendingManualSolClaim(pendingSolClaim)}
+                      disabled={retryingSolClaimId !== null || isProcessingThis}
+                    >
+                      {retryingSolClaimId === pendingSolClaim.claimId ? 'Settling…' : 'Retry'}
+                    </button>
+                  </div>
+                {/each}
+              {/if}
               <div class="input-label-row">
                 <span class="input-label">Amount to liquidate</span>
                 {#if maxLiq > 0}
@@ -751,7 +978,7 @@
                 </div>
                 <button class="btn-primary btn-sm btn-liquidate"
                   on:click={() => handleLiquidate(vault)}
-                  disabled={!isConnected || processingVaultId !== null || inputVal <= 0 || (isXrp && !(xrpPayoutAddresses[vault.vault_id] ?? '').trim())}>
+                  disabled={!isConnected || processingVaultId !== null || inputVal <= 0 || (isXrp && !(xrpPayoutAddresses[vault.vault_id] ?? '').trim()) || (isSol && !(solPayoutAddresses[vault.vault_id] ?? '').trim())}>
                   {#if isProcessingThis}
                     {isApprovingAllowance ? 'Approving…' : 'Liquidating…'}
                   {:else}
