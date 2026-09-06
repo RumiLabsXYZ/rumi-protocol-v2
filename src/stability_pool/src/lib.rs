@@ -148,10 +148,12 @@ fn setup_native_xrp_settle_sweep_timer() {
                 if summary.examined > 0 {
                     log!(
                         INFO,
-                        "[xrp-settle-sweep] examined {} acked {} submitted {} failed {}",
+                        "[xrp-settle-sweep] examined {} acked {} submitted {} \
+                         pending-confirm {} failed {}",
                         summary.examined,
                         summary.acked,
                         summary.submitted,
+                        summary.pending_confirmation,
                         summary.failed
                     );
                     SWEEP_CURSOR.with(|c| c.set(summary.last_claim_id));
