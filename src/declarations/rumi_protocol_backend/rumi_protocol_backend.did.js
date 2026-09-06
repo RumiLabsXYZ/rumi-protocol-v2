@@ -2358,6 +2358,11 @@ export const idlFactory = ({ IDL }) => {
         [Result_27],
         [],
       ),
+    'stability_pool_release_sol_absorb_preflight' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [Result_17],
+        [],
+      ),
     'stability_pool_release_xrp_absorb_preflight' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
         [Result_17],

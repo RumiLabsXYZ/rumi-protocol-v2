@@ -2534,6 +2534,36 @@ pub fn stability_pool_preflight_sol_absorb_in_state(
     Ok(preflight)
 }
 
+/// SOL analogue of `stability_pool_release_xrp_absorb_preflight_in_state`.
+/// Mirrors it exactly (same only-the-registered-SP, only-the-exact-reserved-
+/// amount, idempotent-on-retry contract); see that function's doc comment for
+/// the full rationale. Hands back an unburned native-SOL absorb reservation
+/// that blocked every vault-mutating entry point for `vault_id`.
+pub fn stability_pool_release_sol_absorb_preflight_in_state(
+    state: &mut crate::state::State,
+    caller: Principal,
+    vault_id: u64,
+    icusd_burn_e8s: u64,
+) -> Result<bool, ProtocolError> {
+    ensure_registered_sp(state, caller)?;
+    let Some(preflight) = state.sp_sol_absorb_preflights.get(&vault_id) else {
+        return Ok(false);
+    };
+    if preflight.caller != caller {
+        return Err(ProtocolError::GenericError(format!(
+            "Vault #{vault_id} reservation belongs to another caller"
+        )));
+    }
+    if preflight.icusd_burn_e8s != icusd_burn_e8s {
+        return Err(ProtocolError::GenericError(format!(
+            "SOL SP absorb release {} does not match the reserved burn {} for vault {}",
+            icusd_burn_e8s, preflight.icusd_burn_e8s, vault_id
+        )));
+    }
+    state.sp_sol_absorb_preflights.remove(&vault_id);
+    Ok(true)
+}
+
 /// Resolve the persisted preflight reservation for a POST-BURN submit. See
 /// `matching_xrp_absorb_preflight`'s doc comment for the full B-2 rationale
 /// (honoring an expired-but-present reservation is safe here for the same
@@ -12436,5 +12466,127 @@ mod sol_sp_absorb_contract_tests {
         assert!(state.sol_claims.is_empty());
         assert_eq!(state.next_sol_claim_id, 0);
         assert!(state.sp_sol_absorb_results_by_proof.is_empty());
+    }
+
+    #[test]
+    fn releasing_unburned_sol_preflight_unblocks_vault_operations() {
+        // SOL parity with `releasing_unburned_preflight_unblocks_vault_operations`
+        // (XRP): a preflight reservation blocks every vault-mutating entry
+        // point, including the manual liquidation paths. If the SP gives up
+        // AFTER reserving but BEFORE burning, it must be able to hand the
+        // reservation back instead of leaving the vault unliquidatable by any
+        // path until the 15-minute TTL expires.
+        let mut state = test_state_with_sol_vault();
+        preflight(&mut state, 10);
+        assert!(
+            ensure_no_active_sol_sp_absorb_preflight(&state, VAULT_ID, 20).is_err(),
+            "an active reservation must block vault operations"
+        );
+
+        let released =
+            stability_pool_release_sol_absorb_preflight_in_state(&mut state, sp(), VAULT_ID, 100 * E8)
+                .expect("registered SP may release its own unburned reservation");
+        assert!(released, "release must report that a reservation was cleared");
+        assert!(state.sp_sol_absorb_preflights.is_empty());
+        assert!(
+            ensure_no_active_sol_sp_absorb_preflight(&state, VAULT_ID, 20).is_ok(),
+            "releasing the reservation must unblock vault operations immediately"
+        );
+
+        // Idempotent: a retried release after the reservation is gone is not an
+        // error (the SP may retry its cleanup after a lost reply).
+        let again = stability_pool_release_sol_absorb_preflight_in_state(
+            &mut state,
+            sp(),
+            VAULT_ID,
+            100 * E8,
+        )
+        .expect("release is idempotent");
+        assert!(!again, "second release must report nothing was cleared");
+    }
+
+    #[test]
+    fn sol_preflight_release_rejects_non_sp_and_mismatched_reservations() {
+        // SOL parity with `preflight_release_rejects_non_sp_and_mismatched_reservations`
+        // (XRP): releasing someone else's reservation, or releasing under a
+        // different burn amount than was reserved, would let a stale or
+        // hostile caller drop a reservation the SP still intends to consume.
+        // Both are refused, and the reservation survives.
+        let mut state = test_state_with_sol_vault();
+        preflight(&mut state, 10);
+
+        let not_sp = principal(0x77);
+        stability_pool_release_sol_absorb_preflight_in_state(&mut state, not_sp, VAULT_ID, 100 * E8)
+            .expect_err("only the registered stability pool may release a reservation");
+        assert!(
+            state.sp_sol_absorb_preflights.contains_key(&VAULT_ID),
+            "a rejected release must not clear the reservation"
+        );
+
+        stability_pool_release_sol_absorb_preflight_in_state(&mut state, sp(), VAULT_ID, 50 * E8)
+            .expect_err("release must match the reserved burn amount");
+        assert!(
+            state.sp_sol_absorb_preflights.contains_key(&VAULT_ID),
+            "an amount-mismatched release must not clear the reservation"
+        );
+    }
+
+    #[test]
+    fn automated_dispatch_amount_is_accepted_by_sol_preflight() {
+        // SOL parity with `automated_dispatch_amount_is_accepted_by_xrp_preflight`:
+        // the amount `check_vaults` puts in `recommended_liquidation_amount`
+        // must be an amount `stability_pool_preflight_sol_absorb_in_state`
+        // actually accepts.
+        //
+        // The vault is at an ORDINARY breach (CR 115%: under the 120%
+        // liquidation floor, above the 107.5% bonus). `test_state_with_sol_vault`'s
+        // own fixture is a DEEP breach (0.1 SOL against 100 icUSD debt), which
+        // hides this bug because the partial cap saturates to the full debt
+        // once a vault is far enough underwater; bumping the price here (with
+        // collateral_amount unchanged) moves it into the ordinary-breach band
+        // instead.
+        let mut state = test_state_with_sol_vault();
+        let sol = sol_collateral_principal();
+        if let Some(cfg) = state.collateral_configs.get_mut(&sol) {
+            // 0.1 SOL at $1150/SOL => $115 against $100 debt => CR 115%.
+            cfg.last_price = Some(1150.0);
+        }
+        let vault = state.vault_id_to_vaults.get(&VAULT_ID).expect("vault").clone();
+        let dummy = UsdIcp::from(Decimal::ZERO);
+
+        // The generic cap is a strict partial here — the pre-fix dispatch value.
+        let generic_cap = state.compute_partial_liquidation_cap(&vault, dummy);
+        assert!(
+            generic_cap < vault.borrowed_icusd_amount,
+            "premise: ordinary breach must yield a partial cap, got {generic_cap:?}"
+        );
+        let err = stability_pool_preflight_sol_absorb_in_state(
+            &mut state,
+            sp(),
+            VAULT_ID,
+            generic_cap.to_u64(),
+            10,
+        )
+        .expect_err("partial burn must be rejected by the full-debt-only absorb path");
+        assert!(
+            format!("{err:?}").contains("does not match live debt"),
+            "unexpected error: {err:?}"
+        );
+        assert!(
+            state.sp_sol_absorb_preflights.is_empty(),
+            "a rejected preflight must not leave a reservation behind"
+        );
+
+        // What the dispatch actually sends now is accepted.
+        let dispatched = state.recommended_liquidation_amount_for(&vault, dummy);
+        let preflight = stability_pool_preflight_sol_absorb_in_state(
+            &mut state,
+            sp(),
+            VAULT_ID,
+            dispatched.to_u64(),
+            20,
+        )
+        .expect("automated dispatch amount must be accepted by the preflight");
+        assert_eq!(preflight.icusd_burn_e8s, vault.borrowed_icusd_amount.to_u64());
     }
 }

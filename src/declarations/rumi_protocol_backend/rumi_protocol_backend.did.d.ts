@@ -2050,6 +2050,10 @@ export interface _SERVICE {
     [bigint, bigint],
     Result_27
   >,
+  'stability_pool_release_sol_absorb_preflight' : ActorMethod<
+    [bigint, bigint],
+    Result_17
+  >,
   'stability_pool_release_xrp_absorb_preflight' : ActorMethod<
     [bigint, bigint],
     Result_17
