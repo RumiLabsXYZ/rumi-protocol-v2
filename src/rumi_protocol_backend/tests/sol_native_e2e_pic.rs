@@ -25,8 +25,13 @@
 //!
 //! Liquidation path: open -> confirm deposit -> borrow -> SOL price crashes ->
 //! an external liquidator (claim-based) absorbs the vault, producing a
-//! `SolClaim` for the seized SOL (native-SOL is excluded from automated
-//! SP/bot liquidation, same as XRP, so liquidation is manual/claim-based only).
+//! `SolClaim` for the seized SOL. This external path remains supported
+//! alongside the automated one below; the bot is still fenced away from
+//! native-SOL (it has no Solana settlement path), same as native-XRP.
+//!
+//! Automated dispatch: mirrors the native-XRP parity fix -- `check_vaults` now
+//! auto-routes native-SOL vaults to the stability pool's native-SOL absorb
+//! path too, with no manual liquidation call anywhere.
 //!
 //! Idempotency: the two highest-value tests in this phase, exercising the
 //! §5.3 decision table through the REAL canister (not the pure
@@ -867,9 +872,10 @@ fn sol_native_liquidation_is_claim_based() {
     mint_icusd(&pic, icusd, backend, liquidator(), 200 * E8);
     approve_icusd(&pic, icusd, liquidator(), backend, 200 * E8);
 
-    // Native-SOL is excluded from automated SP/bot liquidation, so this is the
-    // external, claim-based path: the liquidator repays part of the debt and the
-    // seized SOL becomes a SolClaim they later settle to a Solana address.
+    // Native-SOL vaults now also flow through the automated cascade to the
+    // stability pool, but the external, claim-based path exercised here remains
+    // supported: the liquidator repays part of the debt and the seized SOL
+    // becomes a SolClaim they later settle to a Solana address.
     let before_claims = sol_claims(&pic, backend);
     let liquidation_result = decode_result::<rumi_protocol_backend::SuccessWithFee>(
         update_as(
@@ -1176,6 +1182,247 @@ fn register_sol_collateral_refuses_without_bootstrapped_nonce() {
         supported.iter().all(|(p, _)| *p != sol_collateral_principal()),
         "SOL must NOT appear in supported collateral types after a refused registration"
     );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Automated push path: `check_vaults` -> stability pool -> backend absorb, with
+// a REAL stability-pool canister wired in. Mirrors
+// `xrp_vault_is_absorbed_by_stability_pool_via_automated_dispatch` in
+// `xrp_native_e2e_pic.rs` -- the SOL parity fix for the XRP wave that shipped
+// 2026-08-14/15 (auto-dispatch, full-debt sizing, unburned-reservation
+// release).
+//
+// The vault here sits at an ORDINARY breach (CR ~114%: under the 120%
+// liquidation floor, above the 107.5% bonus). A deep breach would make the
+// generic partial-liquidation cap saturate to the full debt and hide a sizing
+// mismatch between the dispatch and the full-debt-only SOL absorb path (the
+// exact bug class `be436d19` fixed for XRP).
+// ═══════════════════════════════════════════════════════════════════════════════
+#[test]
+fn sol_vault_is_absorbed_by_stability_pool_via_automated_dispatch() {
+    let Env {
+        pic,
+        backend,
+        icusd,
+        xrc,
+        sol_rpc_mock,
+    } = boot();
+
+    if !set_prod_key_and_bootstrap_nonce(&pic, backend) {
+        return; // gated: tEd25519 unavailable in this PocketIC build
+    }
+    register_sol(&pic, backend);
+
+    // ── Wire a real stability pool to the backend ────────────────────────────
+    let sp_id = pic.create_canister();
+    pic.add_cycles(sp_id, 2_000_000_000_000);
+    pic.install_canister(
+        sp_id,
+        stability_pool_wasm(),
+        encode_one(StabilityPoolInitArgs {
+            protocol_canister_id: backend,
+            authorized_admins: vec![sp_admin()],
+        })
+        .expect("encode sp init"),
+        None,
+    );
+    decode_result::<()>(
+        update_as(
+            &pic,
+            backend,
+            dev(),
+            "set_stability_pool_principal",
+            Encode!(&sp_id).unwrap(),
+        ),
+        "set_stability_pool_principal",
+    )
+    .expect("set_stability_pool_principal");
+    decode_result::<()>(
+        update_as(
+            &pic,
+            sp_id,
+            sp_admin(),
+            "register_stablecoin",
+            Encode!(&SpStablecoinConfig {
+                ledger_id: icusd,
+                symbol: "icUSD".to_string(),
+                decimals: 8,
+                priority: 1,
+                is_active: true,
+                transfer_fee: Some(10_000),
+                is_lp_token: None,
+                underlying_pool: None,
+            })
+            .unwrap(),
+        ),
+        "register_stablecoin",
+    )
+    .expect("register icUSD in the pool");
+
+    // ── Fund the pool and opt the depositor into SOL payouts ─────────────────
+    // Only depositors holding icUSD AND carrying a Solana payout address count
+    // toward SOL coverage, so both steps are load-bearing.
+    let sp_deposit_amount = 300 * E8;
+    mint_icusd(&pic, icusd, backend, depositor(), sp_deposit_amount + 10 * E8);
+    approve_icusd(&pic, icusd, depositor(), sp_id, sp_deposit_amount + E8);
+    decode_result::<()>(
+        update_as(
+            &pic,
+            sp_id,
+            depositor(),
+            "deposit",
+            Encode!(&icusd, &sp_deposit_amount).unwrap(),
+        ),
+        "deposit",
+    )
+    .expect("pool deposit");
+    let sol_payout_address = ed25519_dalek_address(&[7u8; 32]);
+    decode_result::<()>(
+        update_as(
+            &pic,
+            sp_id,
+            depositor(),
+            "opt_in_native_collateral_with_tag",
+            Encode!(
+                &sol_collateral_principal(),
+                &sol_payout_address,
+                &Option::<u32>::None
+            )
+            .unwrap(),
+        ),
+        "opt_in_native_collateral_with_tag",
+    )
+    .expect("depositor opts into SOL payouts");
+
+    // ── A SOL vault at an ordinary breach ─────────────────────────────────────
+    let open: SolVaultOpenInfo = decode_result::<SolVaultOpenInfo>(
+        update_as(&pic, backend, user(), "open_sol_vault", Encode!().unwrap()),
+        "open_sol_vault",
+    )
+    .expect("open_sol_vault ok");
+    let vault_id = open.vault_id;
+
+    let deposit_lamports = 2 * SOL;
+    update_as(
+        &pic,
+        sol_rpc_mock,
+        Principal::anonymous(),
+        "set_balance",
+        Encode!(&open.custody_address, &deposit_lamports).unwrap(),
+    );
+    decode_result::<u64>(
+        update_as(
+            &pic,
+            backend,
+            user(),
+            "confirm_sol_deposit",
+            Encode!(&vault_id).unwrap(),
+        ),
+        "confirm_sol_deposit",
+    )
+    .expect("confirm ok");
+
+    // Borrow at $150 (the boot() rate): ~1.999 SOL * $150 ≈ $299.9; borrow $190
+    // -> CR ~157.8%, comfortably above the 135% borrow threshold.
+    let borrow_amount = 190 * E8;
+    decode_result::<rumi_protocol_backend::SuccessWithFee>(
+        update_as(
+            &pic,
+            backend,
+            user(),
+            "borrow_from_vault",
+            Encode!(&VaultArg {
+                vault_id,
+                amount: borrow_amount
+            })
+            .unwrap(),
+        ),
+        "borrow_from_vault",
+    )
+    .expect("borrow ok");
+
+    // Crash SOL/USD from $150 to $108 (ratio 0.72, known to stay inside the
+    // 0.70 price-sanity band -- see `sol_native_liquidation_is_claim_based`):
+    // ~1.999 SOL * $108 ≈ $215.9 vs $190 debt -> CR ~113.6%, an ORDINARY breach
+    // (under the 120% liquidation floor, above the 107.5% bonus).
+    crash_sol_price(&pic, xrc, 108 * E8);
+
+    // Make every tick a full sweep. A vault's CR-index key is only refreshed on
+    // vault mutation, so after a price crash it is stale-above-threshold and
+    // band-only ticks skip it.
+    decode_result::<()>(
+        update_as(
+            &pic,
+            backend,
+            dev(),
+            "set_check_vaults_full_sweep_every_n_ticks",
+            Encode!(&1u64).unwrap(),
+        ),
+        "set_check_vaults_full_sweep_every_n_ticks",
+    )
+    .expect("force full sweeps");
+
+    let claims_before = sol_claims(&pic, backend);
+    let vault_before = get_vault(&pic, backend, vault_id).expect("vault exists before absorb");
+    assert!(
+        vault_before.borrowed_icusd_amount > 0,
+        "vault must carry debt before the absorb"
+    );
+
+    // ── Let the 5-minute check_vaults timer fire and drive the cascade ───────
+    // No manual liquidation call anywhere: everything past this point is the
+    // automated path doing its own work.
+    for _ in 0..6 {
+        pic.advance_time(std::time::Duration::from_secs(300));
+        for _ in 0..25 {
+            pic.tick();
+        }
+    }
+
+    let vault_after = get_vault(&pic, backend, vault_id);
+    let claims_after = sol_claims(&pic, backend);
+    assert!(
+        claims_after.len() > claims_before.len(),
+        "automated SP absorb must mint a SolClaim for the opted-in depositor \
+         (before={claims_before:?}, after={claims_after:?})"
+    );
+    assert!(
+        vault_after
+            .as_ref()
+            .map(|v| v.borrowed_icusd_amount == 0)
+            .unwrap_or(true),
+        "automated SP absorb must clear the vault's debt, got {vault_after:?}"
+    );
+}
+
+fn stability_pool_wasm() -> Vec<u8> {
+    include_bytes!("../../../target/wasm32-unknown-unknown/release/stability_pool.wasm").to_vec()
+}
+
+fn sp_admin() -> Principal {
+    Principal::from_slice(&[0x5a, 0xd0, 0x01])
+}
+
+fn depositor() -> Principal {
+    Principal::from_slice(&[0xde, 0x90, 0x01])
+}
+
+#[derive(CandidType)]
+struct StabilityPoolInitArgs {
+    protocol_canister_id: Principal,
+    authorized_admins: Vec<Principal>,
+}
+
+#[derive(CandidType)]
+struct SpStablecoinConfig {
+    ledger_id: Principal,
+    symbol: String,
+    decimals: u8,
+    priority: u8,
+    is_active: bool,
+    transfer_fee: Option<u64>,
+    is_lp_token: Option<bool>,
+    underlying_pool: Option<Principal>,
 }
 
 // ─── Small local helpers ──────────────────────────────────────────────────────
