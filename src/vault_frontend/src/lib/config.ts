@@ -30,6 +30,12 @@ export const CANISTER_IDS = {
   // ICPswap pools (external DEX for routing)
   ICPSWAP_3USD_ICP_POOL: "mu2zw-6iaaa-aaaar-qb56q-cai",
   ICPSWAP_ICUSD_ICP_POOL: "nqxwe-hiaaa-aaaar-qb5yq-cai",
+  // ICPswap direct stablecoin <-> stablecoin pools (alternative venues to the
+  // Rumi 3pool for icUSD/ckUSDT/ckUSDC swaps). token0/token1 and fee tier
+  // per pool metadata() are documented beside their use in swapRouter.ts.
+  ICPSWAP_CKUSDT_ICUSD_POOL: "jogrm-gqaaa-aaaar-qcg2a-cai",
+  ICPSWAP_ICUSD_CKUSDC_POOL: "eb25l-dyaaa-aaaar-qb4lq-cai",
+  ICPSWAP_CKUSDT_CKUSDC_POOL: "heq6n-fyaaa-aaaag-qkcpq-cai",
   // Rumi Points (airdrop accrual engine). Live on mainnet 2026-06-09; setting
   // this id flips POINTS_ENABLED true so the /points section renders.
   RUMI_POINTS: "bfnu3-6aaaa-aaaab-qhanq-cai",
@@ -38,6 +44,35 @@ export const CANISTER_IDS = {
 /** The /points airdrop section is shown only once the rumi_points canister id
  *  is configured above. Flip on by filling RUMI_POINTS at deploy time. */
 export const POINTS_ENABLED: boolean = CANISTER_IDS.RUMI_POINTS !== "";
+
+/**
+ * AMM1 (3USD/ICP) liquidity deposits are paused (2026-07-23): the pool card is
+ * greyed out and new deposits are blocked (withdrawals stay open). One flag so
+ * every surface that gates or advertises AMM1 liquidity agrees: the swap
+ * page's deposit tab, the points "ways to earn" lists, and /docs/points.
+ * Distinct from swapRouter's AMM1_ROUTING_PAUSED (swap routing), which flips
+ * independently.
+ */
+export const AMM1_LIQUIDITY_PAUSED = true;
+
+/**
+ * Wallet principals allowed into the /points/admin console, IN ADDITION to the
+ * on-chain PointsConfig.admin. Needed because the canister admin is the CLI
+ * deploy identity (rumi_identity), which no browser wallet can present: Oisy
+ * and Internet Identity connect with their own principals. Add the operator's
+ * app-wallet principal(s) here — the wall on /points/admin shows the connected
+ * principal with a copy button, paste it into this list and redeploy.
+ *
+ * UI wall only, NOT access control: every panel on that page reads public
+ * canister queries that anyone can make directly.
+ */
+export const ADMIN_VIEW_PRINCIPALS: string[] = [
+  // rumi_identity (CLI deploy identity; listed for completeness — a browser
+  // wallet will never present this principal):
+  "fd7h3-mgmok-dmojz-awmxl-k7eqn-37mcv-jjkxp-parnt-ehngl-l2z3m-kae",
+  // Rob's app-wallet principal (zegjz):
+  "zegjz-jpi6k-qkand-c2bgf-qw6za-xk4si-nz3gx-qzzia-fk6fg-snepb-tae",
+];
 
 // Canister IDs for local development
 export const LOCAL_CANISTER_IDS = {
@@ -118,6 +153,18 @@ export const CONFIG = {
 
   get icpswapIcUsdIcpPoolId() {
     return CANISTER_IDS.ICPSWAP_ICUSD_ICP_POOL;
+  },
+
+  get icpswapCkusdtIcusdPoolId() {
+    return CANISTER_IDS.ICPSWAP_CKUSDT_ICUSD_POOL;
+  },
+
+  get icpswapIcusdCkusdcPoolId() {
+    return CANISTER_IDS.ICPSWAP_ICUSD_CKUSDC_POOL;
+  },
+
+  get icpswapCkusdtCkusdcPoolId() {
+    return CANISTER_IDS.ICPSWAP_CKUSDT_CKUSDC_POOL;
   },
 
   getStableLedgerId(tokenType: 'CKUSDT' | 'CKUSDC'): string {

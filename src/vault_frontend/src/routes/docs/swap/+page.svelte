@@ -30,9 +30,9 @@
 
   <section class="doc-section">
     <h2 class="doc-heading">What the Swap Page Does</h2>
-    <p>The <a href="/swap" class="doc-link">Swap</a> page is a router over Rumi's own liquidity. Depending on the pair you pick, it routes through the <a href="/docs/three-pool" class="doc-link">3pool</a> (stablecoins), Rumi's pair AMM (3USD/ICP), or both in sequence.</p>
+    <p>The <a href="/swap" class="doc-link">Swap</a> page is a router that compares venues and sends each trade wherever it gets you the most. It quotes Rumi's own liquidity (the <a href="/docs/three-pool" class="doc-link">3pool</a> for stablecoins, Rumi's pair AMM for 3USD/ICP) alongside external ICPswap pools for the same pairs, then routes through whichever wins, or through two of them in sequence when that is the only path.</p>
     <ul class="doc-list">
-      <li><strong>Stablecoin ↔ stablecoin</strong> (icUSD, ckUSDT, ckUSDC): single swap through the 3pool.</li>
+      <li><strong>Stablecoin ↔ stablecoin</strong> (icUSD, ckUSDT, ckUSDC): a single swap, through the 3pool or through a direct ICPswap pool for the same pair, whichever quotes better. The 3pool wins ties. When the 3pool is imbalanced its dynamic fee can make the ICPswap route materially cheaper, so the venue you get may differ between trades.</li>
       <li><strong>Stablecoin → 3USD</strong>: a one-sided 3pool deposit (mints 3USD).</li>
       <li><strong>3USD → stablecoin</strong>: a single-token 3pool withdrawal (burns 3USD).</li>
       <li><strong>3USD ↔ ICP</strong>: a single swap through Rumi's pair AMM.</li>

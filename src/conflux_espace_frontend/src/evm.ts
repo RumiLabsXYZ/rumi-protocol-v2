@@ -1,6 +1,6 @@
-// viem integration: EIP-6963 injected wallets (Rabby, MetaMask, ...) or an
-// in-browser dev-key signer (the path the staging round-trip used), the CFX
-// deposit, the IcUSD.burn repay, and reads.
+// viem integration: injected wallets in every mode, plus a testnet-only dev-key
+// signer. Every write is initiated by an explicit user click and confirmed by
+// the connected wallet.
 
 import {
   createPublicClient,
@@ -12,10 +12,10 @@ import {
   formatEther,
   formatUnits,
   type Address,
+  type Account,
   type Hex,
   type WalletClient,
 } from "viem";
-import { privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
 import {
   CHAIN_ID,
   ESPACE_EXPLORER,
@@ -23,11 +23,14 @@ import {
   ICUSD_ABI,
   ICUSD_CONTRACT,
   ICUSD_DECIMALS,
-  confluxESpaceTestnet,
+  IS_MAINNET,
+  RECEIPT_CONFIRMATIONS,
+  DEPLOYMENT,
+  confluxESpaceChain,
 } from "./config";
 
 export const publicClient = createPublicClient({
-  chain: confluxESpaceTestnet,
+  chain: confluxESpaceChain,
   transport: http(ESPACE_RPC),
 });
 
@@ -36,7 +39,7 @@ export interface Wallet {
   kind: "injected" | "devkey";
   walletName: string;
   client: WalletClient;
-  account: Address | PrivateKeyAccount;
+  account: Address | Account;
 }
 
 // ── EIP-6963 multi-injected-provider discovery ──────────────────────────────
@@ -101,7 +104,7 @@ export function subscribeWallets(cb: (wallets: EIP6963ProviderDetail[]) => void)
 /** Connect to the specific EIP-6963 wallet the user picked. */
 export async function connectInjected(detail: EIP6963ProviderDetail): Promise<Wallet> {
   const eth = detail.provider;
-  const client = createWalletClient({ chain: confluxESpaceTestnet, transport: custom(eth) });
+  const client = createWalletClient({ chain: confluxESpaceChain, transport: custom(eth) });
   const [address] = await client.requestAddresses();
   await ensureChain(client, eth);
   return { address, kind: "injected", walletName: detail.info.name, client, account: address };
@@ -116,18 +119,20 @@ export function hasLegacyInjected(): boolean {
 export async function connectLegacyInjected(): Promise<Wallet> {
   const eth = (window as any).ethereum;
   if (!eth) throw new Error("No EVM wallet found. Install Rabby (or another EVM wallet), then reload.");
-  const client = createWalletClient({ chain: confluxESpaceTestnet, transport: custom(eth) });
+  const client = createWalletClient({ chain: confluxESpaceChain, transport: custom(eth) });
   const [address] = await client.requestAddresses();
   await ensureChain(client, eth);
   const name = eth.isRabby ? "Rabby" : eth.isMetaMask ? "MetaMask" : "Injected wallet";
   return { address, kind: "injected", walletName: name, client, account: address };
 }
 
-export function connectDevKey(pk: string): Wallet {
-  const hex = (pk.startsWith("0x") ? pk : `0x${pk}`) as Hex;
-  const account = privateKeyToAccount(hex);
-  const client = createWalletClient({ account, chain: confluxESpaceTestnet, transport: http(ESPACE_RPC) });
-  return { address: account.address, kind: "devkey", walletName: "Dev key", client, account };
+export async function walletChainId(w: Wallet): Promise<number> {
+  return w.client.getChainId();
+}
+
+export async function walletStillControlsAddress(w: Wallet): Promise<boolean> {
+  const addresses = await w.client.getAddresses();
+  return addresses.some((address) => address.toLowerCase() === w.address.toLowerCase());
 }
 
 async function ensureChain(client: WalletClient, eth: any) {
@@ -139,8 +144,8 @@ async function ensureChain(client: WalletClient, eth: any) {
         method: "wallet_addEthereumChain",
         params: [
           {
-            chainId: "0x47", // 71
-            chainName: "Conflux eSpace Testnet",
+            chainId: `0x${CHAIN_ID.toString(16)}`,
+            chainName: DEPLOYMENT.chainName,
             nativeCurrency: { name: "Conflux", symbol: "CFX", decimals: 18 },
             rpcUrls: [ESPACE_RPC],
             blockExplorerUrls: [ESPACE_EXPLORER],
@@ -153,7 +158,7 @@ async function ensureChain(client: WalletClient, eth: any) {
   }
 }
 
-const txArgs = (w: Wallet) => ({ account: w.account as any, chain: confluxESpaceTestnet });
+const txArgs = (w: Wallet) => ({ account: w.account as any, chain: confluxESpaceChain });
 
 export async function sendDeposit(w: Wallet, custody: Address, amountWei: bigint): Promise<Hex> {
   return w.client.sendTransaction({ ...txArgs(w), to: custody, value: amountWei });
@@ -169,6 +174,17 @@ export async function burnIcusd(w: Wallet, amountE8s: bigint, vaultId: bigint): 
   });
 }
 
+/** EIP-1193 code 4001 is the only write failure that proves no transaction was
+ * authorized. Every other provider error is ambiguous and must remain locked. */
+export function isExplicitWalletRejection(error: unknown): boolean {
+  let current: any = error;
+  for (let depth = 0; current && depth < 8; depth++) {
+    if (current.code === 4001 || current.name === "UserRejectedRequestError") return true;
+    current = current.cause;
+  }
+  return false;
+}
+
 export async function icusdBalance(addr: Address): Promise<bigint> {
   return (await publicClient.readContract({
     address: ICUSD_CONTRACT,
@@ -180,6 +196,33 @@ export async function icusdBalance(addr: Address): Promise<bigint> {
 
 export async function cfxBalance(addr: Address): Promise<bigint> {
   return publicClient.getBalance({ address: addr });
+}
+
+export type TransactionFinality = {
+  hash: Hex;
+  ok: boolean;
+  replacementReason: "repriced" | "replaced" | "cancelled" | null;
+};
+
+/** Wait for one wallet-submitted transaction through the deployment's reviewed
+ * finality depth. A semantic replacement stays ambiguous; a finalized revert
+ * or cancellation proves non-execution but never triggers an automatic retry. */
+export async function waitForTransactionFinality(hash: Hex): Promise<TransactionFinality> {
+  let finalHash = hash;
+  let replacementReason: TransactionFinality["replacementReason"] = null;
+  const receipt = await publicClient.waitForTransactionReceipt({
+    hash,
+    confirmations: RECEIPT_CONFIRMATIONS,
+    onReplaced: ({ reason, transactionReceipt }) => {
+      replacementReason = reason;
+      finalHash = transactionReceipt.transactionHash;
+    },
+  });
+  return {
+    hash: finalHash,
+    ok: receipt.status === "success" && (replacementReason === null || replacementReason === "repriced"),
+    replacementReason,
+  };
 }
 
 // Decimal-string -> base units via integer parsing (no float precision loss).
@@ -198,4 +241,5 @@ export function toWei(s: string): bigint {
 export const fmtCfx = (wei: bigint) => Number(formatEther(wei)).toLocaleString(undefined, { maximumFractionDigits: 4 });
 export const fmtIcusd = (e8s: bigint) => Number(formatUnits(e8s, ICUSD_DECIMALS)).toLocaleString(undefined, { maximumFractionDigits: 4 });
 export const txUrl = (hash: string) => `${ESPACE_EXPLORER}/tx/${hash}`;
+export const addressUrl = (address: string) => `${ESPACE_EXPLORER}/address/${address}`;
 export { parseEther };

@@ -250,6 +250,18 @@ pub const DEFAULT_RMR_CEILING_CR: Ratio = Ratio::new(dec!(1.5)); // CR below whi
 /// by moving onto `CollateralConfig`.
 pub const PRICE_SANITY_BAND_RATIO: f64 = 0.7;
 
+/// The SAME band as `PRICE_SANITY_BAND_RATIO`, expressed as an exact rational
+/// `PRICE_SANITY_BAND_NUM / PRICE_SANITY_BAND_DEN` so a caller working in
+/// integer e8 prices can apply it with checked `u128` cross-multiplication and
+/// no floating point at all. `chains_price_sample_is_acceptable` (xrc.rs) uses
+/// this form for the automatic chains XRC writer, where both the stored and the
+/// candidate price are exact `u64` e8 integers and a rounding difference would
+/// be a silent, unreviewable divergence from the collateral path's semantics.
+/// `band_rational_matches_the_f64_constant` (below) pins the two representations
+/// together so they cannot drift apart.
+pub const PRICE_SANITY_BAND_NUM: u128 = 7;
+pub const PRICE_SANITY_BAND_DEN: u128 = 10;
+
 /// Wave-5 LIQ-007 / ORACLE-009: number of consecutive in-band confirmations a
 /// queued outlier candidate needs before it is accepted as the new stored
 /// price. With background fetches every 300 s, N=3 means a sustained move
@@ -1253,8 +1265,9 @@ pub struct State {
     /// staging/testnet) or `key_1` (production). Read by the EVM `key_id()` at
     /// derive/sign time, so a fresh production canister uses the production
     /// threshold key with no rebuild. Settable via `set_chains_ecdsa_key_name`
-    /// ONLY while no chain vault exists — changing it re-derives every per-vault
-    /// custody address, which would orphan already-deposited collateral.
+    /// ONLY while the EVM rail is truly fresh — any staged configuration,
+    /// binding, derived address/proof, settlement state, or vault makes the key
+    /// immutable because changing it would orphan key-bound addresses.
     #[serde(default = "default_chains_ecdsa_key_name")]
     pub chains_ecdsa_key_name: String,
     /// Threshold Schnorr Ed25519 key name for the native-XRP rail. Like the EVM
@@ -2887,10 +2900,14 @@ impl State {
             self.last_icp_timestamp = Some(ts);
         }
         let icp = self.icp_collateral_type();
-        if let Some(config) = self.collateral_configs.get_mut(&icp) {
-            config.last_price = Some(rate.to_f64());
+        if self.collateral_configs.contains_key(&icp) {
+            // Re-keys ICP vaults so a price move alone cannot hide a
+            // liquidatable vault from band-only check_vaults ticks.
+            self.on_collateral_price_change(&icp, rate.to_f64());
             if let Some(ts) = timestamp_nanos {
-                config.last_price_timestamp = Some(ts);
+                if let Some(config) = self.collateral_configs.get_mut(&icp) {
+                    config.last_price_timestamp = Some(ts);
+                }
             }
         }
     }
@@ -3791,6 +3808,46 @@ impl State {
     /// vaults move proportionally with price, preserving relative ordering.
     /// Re-keying every vault on every 5-minute price tick would burn O(N)
     /// cycles for zero ordering benefit.
+    /// Apply a new cached price for `collateral_type` and re-key that
+    /// collateral's vaults in `vault_cr_index`.
+    ///
+    /// The CR key encodes the vault's CR at its last mutation, so a pure price
+    /// move silently invalidates it: the vault's true CR crosses the
+    /// liquidation floor while its stored key still says "healthy", and
+    /// band-only `check_vaults` ticks skip it until the hourly full sweep.
+    /// That is up to an hour of unliquidated bad debt on any collateral.
+    ///
+    /// The original design deliberately kept price updates out of the index on
+    /// the grounds that all vaults of a type move proportionally, so relative
+    /// ORDERING is preserved. That is true, and irrelevant to the band gate,
+    /// which compares each key against an ABSOLUTE threshold. Ordering is not
+    /// the property the gate needs; accuracy is.
+    ///
+    /// Cost is bounded by the vault count of ONE collateral (tens today), not
+    /// the whole book, and only on a real price change — negligible beside the
+    /// XRC outcall that delivered the price.
+    pub fn on_collateral_price_change(&mut self, collateral_type: &CollateralType, price: f64) {
+        let unchanged = self
+            .collateral_configs
+            .get(collateral_type)
+            .map(|c| c.last_price == Some(price))
+            .unwrap_or(false);
+        if let Some(config) = self.collateral_configs.get_mut(collateral_type) {
+            config.last_price = Some(price);
+        }
+        if unchanged {
+            return;
+        }
+        let vault_ids: Vec<u64> = self
+            .collateral_to_vault_ids
+            .get(collateral_type)
+            .map(|ids| ids.iter().copied().collect())
+            .unwrap_or_default();
+        for vault_id in vault_ids {
+            self.reindex_vault_cr(vault_id);
+        }
+    }
+
     pub fn reindex_vault_cr(&mut self, vault_id: u64) {
         // Drop any prior entry first so a re-key from one bucket to another
         // never leaves a stale duplicate.
@@ -5339,6 +5396,19 @@ pub fn replace_state(state: State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn band_rational_matches_the_f64_constant() {
+        // The integer band used by the chains XRC writer
+        // (`xrc::chains_price_sample_is_acceptable`) and the f64 band used by
+        // `check_price_sanity_band` MUST describe the same band. If someone
+        // retunes one, this fails until they retune the other.
+        assert_eq!(
+            PRICE_SANITY_BAND_NUM as f64 / PRICE_SANITY_BAND_DEN as f64,
+            PRICE_SANITY_BAND_RATIO
+        );
+        assert!(PRICE_SANITY_BAND_NUM > 0 && PRICE_SANITY_BAND_DEN > PRICE_SANITY_BAND_NUM);
+    }
 
     #[test]
     fn sunset_collateral_retires_only_after_its_last_vault_is_closed() {
@@ -7696,6 +7766,52 @@ mod tests {
     }
 
     #[test]
+    fn band_scan_finds_vault_that_only_a_price_move_pushed_underwater() {
+        // A vault's `vault_cr_index` key is written from the collateral price
+        // cached AT THE TIME OF THE LAST VAULT MUTATION. A pure price move
+        // changes the vault's true CR but not its stored key, so a
+        // stale-above-threshold key makes band-only `check_vaults` ticks skip a
+        // genuinely liquidatable vault. Only the hourly full sweep (or an
+        // upgrade, which rebuilds the index) catches it -- an hour of extra bad
+        // debt exposure on EVERY collateral, not just XRP.
+        //
+        // Observed live: pre-upgrade ticks logged "visited 61, found 0" while
+        // vault 195 was liquidatable; the post-upgrade tick (fresh index) found
+        // it immediately.
+        let mut s = test_state();
+        let icp = s.icp_ledger_principal;
+        if let Some(c) = s.collateral_configs.get_mut(&icp) {
+            c.last_price = Some(10.0);
+        }
+        // Healthy at $10: $200 collateral against $100 debt => CR 200%.
+        s.open_vault(crate::vault::Vault {
+            owner: Principal::anonymous(),
+            vault_id: 1,
+            borrowed_icusd_amount: ICUSD::new(100 * 100_000_000),
+            collateral_amount: 20 * 100_000_000,
+            collateral_type: icp,
+            accrued_interest: ICUSD::new(0),
+            last_accrual_time: 0,
+            bot_processing: false,
+        });
+
+        // Price halves. Nothing mutates the vault -- only the cached price.
+        // True CR is now 100%, far below any liquidation floor.
+        s.on_collateral_price_change(&icp, 5.0);
+
+        let dummy = crate::numeric::UsdIcp::from(rust_decimal::Decimal::ZERO);
+        let band = s.scan_unhealthy_vaults(dummy, false);
+        let ids: Vec<u64> = band.unhealthy_vaults.iter().map(|v| v.vault_id).collect();
+        assert!(
+            ids.contains(&1),
+            "band-only tick must see a vault that a price move pushed underwater \
+             (visited {}, threshold_key {}): {ids:?}",
+            band.vaults_visited,
+            band.threshold_key
+        );
+    }
+
+    #[test]
     fn dispatch_sizing_requests_full_debt_for_native_xrp() {
         // The native-XRP SP absorb path is full-liquidation-only: the backend's
         // `xrp_sp_absorb_sizing` rejects any `expected_icusd_burn_e8s` that is
@@ -7746,8 +7862,7 @@ mod tests {
         // Guard the premise: the generic cap really is a partial here, so this
         // test would be vacuous if it ever stopped being one.
         assert!(
-            s.compute_partial_liquidation_cap(&xrp_vault, dummy)
-                < xrp_vault.borrowed_icusd_amount,
+            s.compute_partial_liquidation_cap(&xrp_vault, dummy) < xrp_vault.borrowed_icusd_amount,
             "premise: generic cap must be partial for this XRP vault"
         );
 

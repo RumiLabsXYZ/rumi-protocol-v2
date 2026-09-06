@@ -1,0 +1,15 @@
+{
+  "schema": "rumi-conflux-production-public-release/v1",
+  "environment": "conflux-production-public",
+  "canisterName": "conflux_public_frontend",
+  "assetCanister": "a52ri-naaaa-aaaas-qgy4a-cai",
+  "canonicalOrigin": "https://a52ri-naaaa-aaaas-qgy4a-cai.icp0.io",
+  "icpYamlSha256": "2c71cc1c096b268d208cfcbe1ec0e5dc6733dddbc3a46a95b5d9b9e10c12bf00",
+  "mappingFile": ".icp/data/mappings/conflux-production-public.ids.json",
+  "mappingSha256": "bf3e44cef52610e113784d53c46474cc9038177fad553e4fc2a95e6d7c7ce049",
+  "manifestFile": "src/conflux_espace_frontend/dist-production-public/rumi-conflux-production-public.json",
+  "manifestSha256": "4322809c6d67d71400c6db5895ce47497d26951741aafea6f747c00f0a584a4d",
+  "assetInventorySha256": "7ddc6956ba17e6a291b9d146610620b4141538ac7a97c90f9b3d0a8773814489",
+  "wasmArtifact": ".icp/cache/artifacts/conflux_public_frontend",
+  "wasmSha256": "04e565b3425fe7510ee16b02adcfe3f01abc9a2725c82a21cb08969241debd62"
+}

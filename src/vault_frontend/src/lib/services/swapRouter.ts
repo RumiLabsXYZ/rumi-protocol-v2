@@ -62,6 +62,44 @@ const _icUsdIcpRegistry = new ProviderRegistry([
   }),
 ]);
 
+// Registry for direct ICPswap stablecoin <-> stablecoin pools. These are
+// alternative venues to the Rumi 3pool for Case 1 (icUSD/ckUSDT/ckUSDC
+// swaps): the 3pool quote is always fetched, and if ICPswap strictly beats
+// it, the router sends the user there instead. One registry covers all
+// three pairs -- bestQuote() already filters candidates via supports(), so
+// a single registry is correct and simpler than one per pair.
+const _stableIcpswapRegistry = new ProviderRegistry([
+  new IcpswapProvider({
+    id: 'icpswap_ckusdt_icusd',
+    poolCanisterId: CANISTER_IDS.ICPSWAP_CKUSDT_ICUSD_POOL,
+    token0LedgerId: CANISTER_IDS.CKUSDT_LEDGER,
+    token1LedgerId: CANISTER_IDS.ICUSD_LEDGER,
+    feeBps: 30,
+    // icUSD (token1) is registered ICRC1 on this pool; ckUSDT (token0) is
+    // ICRC2. Omitting token0Standard defaults it to ICRC2, which is correct.
+    // Net effect (see IcpswapProvider.supports): this pool serves
+    // ckUSDT -> icUSD but not icUSD -> ckUSDT (falls back to the 3pool).
+    token1Standard: 'ICRC1',
+  }),
+  new IcpswapProvider({
+    id: 'icpswap_icusd_ckusdc',
+    poolCanisterId: CANISTER_IDS.ICPSWAP_ICUSD_CKUSDC_POOL,
+    token0LedgerId: CANISTER_IDS.ICUSD_LEDGER,
+    token1LedgerId: CANISTER_IDS.CKUSDC_LEDGER,
+    feeBps: 30,
+    // Both legs are ICRC2 on this pool (unlike the ckUSDT/icUSD pool above,
+    // icUSD is registered ICRC2 here) -- no standard override needed.
+  }),
+  new IcpswapProvider({
+    id: 'icpswap_ckusdt_ckusdc',
+    poolCanisterId: CANISTER_IDS.ICPSWAP_CKUSDT_CKUSDC_POOL,
+    token0LedgerId: CANISTER_IDS.CKUSDT_LEDGER,
+    token1LedgerId: CANISTER_IDS.CKUSDC_LEDGER,
+    feeBps: 30,
+    // Both legs are ICRC2 -- no standard override needed.
+  }),
+]);
+
 // ──────────────────────────────────────────────────────────────
 // ICPswap routing kill switch
 //
@@ -115,6 +153,7 @@ function threeUsdIcpRegistry(): ProviderRegistry {
 
 export type RouteType =
   | 'three_pool_swap'       // Stablecoin <-> Stablecoin (direct 3pool)
+  | 'icpswap_stable_direct' // Stablecoin <-> Stablecoin (direct ICPswap pool, beats 3pool)
   | 'three_pool_deposit'    // Stablecoin -> 3USD (mint via 3pool)
   | 'three_pool_redeem'     // 3USD -> Stablecoin (redeem via 3pool)
   | 'amm_swap'              // 3USD <-> ICP (direct AMM)
@@ -237,16 +276,68 @@ export async function resolveRoute(
   amountIn: bigint,
 ): Promise<SwapRoute> {
 
-  // Case 1: Stablecoin <-> Stablecoin (3pool swap, dynamic fee)
+  // Case 1: Stablecoin <-> Stablecoin. The 3pool and ICPswap's direct pools
+  // (see _stableIcpswapRegistry) are genuinely independent venues here: both
+  // are quoted concurrently via Promise.allSettled, and either one alone can
+  // carry the route if the other is down, paused, or too thin for this pair
+  // (the 3pool's calc_swap_output can throw InsufficientLiquidity, and the
+  // pool itself can be paused, so it must not be allowed to take the
+  // ICPswap fallback down with it). Running the two independent canister
+  // queries in parallel also cuts quote latency versus quoting them serially.
   if (isStablecoin(from) && isStablecoin(to)) {
-    const quote = await threePoolService.quoteSwap(from.threePoolIndex, to.threePoolIndex, amountIn);
+    const [threePoolResult, icpswapResult] = await Promise.allSettled([
+      threePoolService.quoteSwap(from.threePoolIndex, to.threePoolIndex, amountIn),
+      _icpswapEnabled ? _stableIcpswapRegistry.bestQuote(from, to, amountIn) : Promise.resolve(null),
+    ]);
+
+    const threePoolQuote = threePoolResult.status === 'fulfilled' ? threePoolResult.value : null;
+    const icpswapQuote = icpswapResult.status === 'fulfilled' ? icpswapResult.value : null;
+
+    if (icpswapResult.status === 'rejected') {
+      // No ICPswap pool supports this direction (see the ICRC1 gate in
+      // IcpswapProvider.supports), or every supporting pool is offline /
+      // too thin. Not fatal on its own -- log it so the failure stays
+      // visible instead of being silently lost, consistent with how
+      // ProviderRegistry.quoteAll logs its own per-provider failures.
+      console.warn('[swapRouter] ICPswap stable quote failed:', icpswapResult.reason);
+    }
+
+    if (!threePoolQuote && !icpswapQuote) {
+      // Both venues failed. Surface the 3pool's error: it is the primary,
+      // first-party venue and its message is the more actionable one (the
+      // ICPswap failure was already logged above).
+      throw threePoolResult.status === 'rejected'
+        ? threePoolResult.reason
+        : new Error(`No route found for ${from.symbol} → ${to.symbol}`);
+    }
+
+    // Compare GROSS outputs when both quotes succeeded. Both paths pull one
+    // input-ledger fee via transfer_from/depositFrom on the way in and pay
+    // one output-ledger fee on the way out, so gross-vs-gross is an
+    // apples-to-apples comparison; netOfOutputLedgerFee is applied below to
+    // whichever side wins. The 3pool wins ties: it is first-party and one
+    // less external dependency, so ICPswap must strictly beat it to be
+    // selected. If only one venue produced a quote, that venue carries the
+    // route alone.
+    if (icpswapQuote && (!threePoolQuote || icpswapQuote.amountOut > threePoolQuote.amount_out)) {
+      return {
+        type: 'icpswap_stable_direct',
+        pathDisplay: icpswapQuote.label,
+        hops: 1,
+        estimatedOutput: await netOfOutputLedgerFee(icpswapQuote.amountOut, to),
+        grossOutput: icpswapQuote.amountOut,
+        feeDisplay: icpswapQuote.feeDisplay,
+        providerQuote: icpswapQuote,
+      };
+    }
+
     return {
       type: 'three_pool_swap',
       pathDisplay: `${from.symbol} → ${to.symbol}`,
       hops: 1,
-      estimatedOutput: await netOfOutputLedgerFee(quote.amount_out, to),
-      grossOutput: quote.amount_out,
-      feeDisplay: threePoolFeeDisplay(quote.fee_bps, quote.is_rebalancing),
+      estimatedOutput: await netOfOutputLedgerFee(threePoolQuote!.amount_out, to),
+      grossOutput: threePoolQuote!.amount_out,
+      feeDisplay: threePoolFeeDisplay(threePoolQuote!.fee_bps, threePoolQuote!.is_rebalancing),
     };
   }
 
@@ -502,7 +593,11 @@ export async function executeRoute(
   // of silently sending the user down a disabled path.
   if (!_icpswapEnabled) {
     const winner = route.providerQuote?.provider ?? route.hopProviderQuote?.provider;
-    if ((winner && isIcpswapProvider(winner)) || route.type === 'icusd_icp_direct') {
+    if (
+      (winner && isIcpswapProvider(winner)) ||
+      route.type === 'icusd_icp_direct' ||
+      route.type === 'icpswap_stable_direct'
+    ) {
       throw new Error(
         'ICPswap routing is currently disabled. Please refresh the quote and try again.',
       );
@@ -736,6 +831,31 @@ export async function executeRoute(
       return result.amountOut;
     }
 
+    case 'icpswap_stable_direct': {
+      const q = route.providerQuote;
+      if (!q) throw new Error('icpswap_stable_direct route missing providerQuote');
+
+      if (isOisyWallet()) {
+        return await executeIcpswapDirectOisy(route, from, to, amountIn, slippageBps);
+      }
+
+      // Non-Oisy: pre-approve input token to the ICPswap pool, then call
+      // provider.swap (the provider does depositFrom -> swap -> withdraw
+      // internally). ICPswap checks amountOutMinimum against the GROSS
+      // in-pool output.
+      const poolCanisterId = q.meta.poolCanisterId as string | undefined;
+      if (typeof poolCanisterId !== 'string') {
+        throw new Error('icpswap_stable_direct route has invalid meta.poolCanisterId');
+      }
+
+      await approveIcpswapPool(from, amountIn, poolCanisterId);
+
+      const provider = _stableIcpswapRegistry.get(q.provider);
+      const grossMinOut = q.amountOut * BigInt(10000 - slippageBps) / 10000n;
+      const result = await provider.swap(from, to, amountIn, grossMinOut, q);
+      return result.amountOut;
+    }
+
     default:
       throw new Error(`Unknown route type: ${route.type}`);
   }
@@ -743,9 +863,13 @@ export async function executeRoute(
 
 /** True when the provider id points at any ICPswap pool. Used by non-Oisy
  *  branches to decide whether an explicit ICRC-2 approval is required before
- *  dispatching to provider.swap(). */
+ *  dispatching to provider.swap(). Every ICPswap provider id carries the
+ *  `icpswap_` prefix (see ProviderId in types.ts) -- match on that instead of
+ *  an enumerated list so a newly added ICPswap pool id is covered
+ *  automatically instead of silently skipping its approval + kill-switch
+ *  guard. */
 function isIcpswapProvider(providerId: string): boolean {
-  return providerId === 'icpswap_3usd_icp' || providerId === 'icpswap_icusd_icp';
+  return providerId.startsWith('icpswap_');
 }
 
 /**
@@ -1381,8 +1505,9 @@ async function executeIcpswapDirectOisy(
     throw new Error('ICPswap direct route has invalid meta.zeroForOne (expected boolean)');
   }
 
-  // ICPswap checks amountOutMinimum against the GROSS in-pool output (and the
-  // pre-committed withdraw below reuses the same figure), so bound from gross.
+  // ICPswap checks amountOutMinimum against the GROSS in-pool output, so
+  // bound from gross. The withdraw below uses the actual swap output
+  // (r3.ok), not this floor -- see step 4.
   const minOut = route.grossOutput * BigInt(10000 - slippageBps) / 10000n;
 
   // Read live ICRC-1 fees from cache. preWarmOisyFees() warmed them during quote.
@@ -1420,10 +1545,14 @@ async function executeIcpswapDirectOisy(
   });
   if ('err' in r3) throw new Error(`ICPswap swap failed: ${JSON.stringify(r3.err)}`);
 
-  // Step 4: ICPswap withdraw
+  // Step 4: ICPswap withdraw. Withdraw the actual swap output (r3.ok), NOT
+  // the slippage floor minOut -- withdrawing minOut would strand any
+  // positive slippage (the amount the pool paid above the floor) as an
+  // unused balance on the pool's internal subaccount instead of returning
+  // it to the caller.
   const r4 = await icpswapPool.withdraw({
     token: to.ledgerId,
-    amount: minOut,
+    amount: r3.ok,
     fee: toFee,
   });
   if ('err' in r4) throw new Error(`ICPswap withdraw failed: ${JSON.stringify(r4.err)}`);
@@ -1446,8 +1575,24 @@ export interface IcpswapUnusedBalance {
   token1: { canisterId: string; symbol: string; amount: bigint; decimals: number };
 }
 
-/** Minimum e8s to bother showing (ignore dust < 0.001 tokens). */
-const DUST_THRESHOLD = 100_000n;
+/**
+ * Minimum raw-unit balance to bother showing or recovering (ignore dust
+ * below 0.001 tokens). This used to be a flat e8s constant, which was
+ * correct while every ICPswap pool held only 8-decimal tokens (100_000n raw
+ * units == 0.001 tokens at 8 decimals), but the ckUSDT/ckUSDC stable pools
+ * use 6 decimals, where the same flat constant means 0.1 tokens, 100x too
+ * coarse. That gap hides genuinely recoverable stranded balances from the
+ * self-service recovery UI. Compute the raw-unit equivalent of 0.001 tokens
+ * for the token's own decimals instead of hardcoding it.
+ */
+export function dustThreshold(decimals: number): bigint {
+  // 0.001 tokens == 10^(decimals - 3) raw units. Guard against a
+  // nonsensical decimals value (negative, fractional, or too small to
+  // express 0.001 tokens as a whole raw unit) by clamping the exponent at 0
+  // instead of computing 10n ** a negative BigInt, which throws.
+  const exponent = Number.isInteger(decimals) ? Math.max(decimals - 3, 0) : 0;
+  return 10n ** BigInt(exponent);
+}
 
 const ICPSWAP_POOLS = [
   {
@@ -1461,6 +1606,24 @@ const ICPSWAP_POOLS = [
     label: 'ICPswap 3USD/ICP',
     token0: { canisterId: CANISTER_IDS.THREEPOOL, symbol: '3USD', decimals: 8 },
     token1: { canisterId: CANISTER_IDS.ICP_LEDGER, symbol: 'ICP', decimals: 8 },
+  },
+  {
+    poolId: CANISTER_IDS.ICPSWAP_CKUSDT_ICUSD_POOL,
+    label: 'ICPswap ckUSDT/icUSD',
+    token0: { canisterId: CANISTER_IDS.CKUSDT_LEDGER, symbol: 'ckUSDT', decimals: 6 },
+    token1: { canisterId: CONFIG.currentIcusdLedgerId, symbol: 'icUSD', decimals: 8 },
+  },
+  {
+    poolId: CANISTER_IDS.ICPSWAP_ICUSD_CKUSDC_POOL,
+    label: 'ICPswap icUSD/ckUSDC',
+    token0: { canisterId: CONFIG.currentIcusdLedgerId, symbol: 'icUSD', decimals: 8 },
+    token1: { canisterId: CANISTER_IDS.CKUSDC_LEDGER, symbol: 'ckUSDC', decimals: 6 },
+  },
+  {
+    poolId: CANISTER_IDS.ICPSWAP_CKUSDT_CKUSDC_POOL,
+    label: 'ICPswap ckUSDT/ckUSDC',
+    token0: { canisterId: CANISTER_IDS.CKUSDT_LEDGER, symbol: 'ckUSDT', decimals: 6 },
+    token1: { canisterId: CANISTER_IDS.CKUSDC_LEDGER, symbol: 'ckUSDC', decimals: 6 },
   },
 ];
 
@@ -1506,7 +1669,7 @@ export async function checkIcpswapUnusedBalances(
       const resp = await actor.getUserUnusedBalance(principal);
       if ('ok' in resp) {
         const { balance0, balance1 } = resp.ok;
-        if (balance0 > DUST_THRESHOLD || balance1 > DUST_THRESHOLD) {
+        if (balance0 > dustThreshold(pool.token0.decimals) || balance1 > dustThreshold(pool.token1.decimals)) {
           results.push({
             poolId: pool.poolId,
             poolLabel: pool.label,
@@ -1541,8 +1704,8 @@ export async function preWarmRecovery(balances: IcpswapUnusedBalance[]): Promise
   // Pre-warm ledger fees for all tokens in all pools
   const ledgerIds = new Set<string>();
   for (const b of balances) {
-    if (b.token0.amount > DUST_THRESHOLD) ledgerIds.add(b.token0.canisterId);
-    if (b.token1.amount > DUST_THRESHOLD) ledgerIds.add(b.token1.canisterId);
+    if (b.token0.amount > dustThreshold(b.token0.decimals)) ledgerIds.add(b.token0.canisterId);
+    if (b.token1.amount > dustThreshold(b.token1.decimals)) ledgerIds.add(b.token1.canisterId);
   }
   await Promise.all(
     [...ledgerIds].map(id =>
@@ -1574,16 +1737,16 @@ export async function recoverIcpswapBalance(
     const signerAgent = await getOisySignerAgent(wallet.principal);
 
     // Synchronous fee reads from cache (pre-warmed, with hardcoded fallback)
-    const fee0 = balance.token0.amount > DUST_THRESHOLD
+    const fee0 = balance.token0.amount > dustThreshold(balance.token0.decimals)
       ? getCachedLedgerFee({ ledgerId: balance.token0.canisterId, decimals: balance.token0.decimals, symbol: balance.token0.symbol })
       : 0n;
-    const fee1 = balance.token1.amount > DUST_THRESHOLD
+    const fee1 = balance.token1.amount > dustThreshold(balance.token1.decimals)
       ? getCachedLedgerFee({ ledgerId: balance.token1.canisterId, decimals: balance.token1.decimals, symbol: balance.token1.symbol })
       : 0n;
     const poolActor = createOisyActor(balance.poolId, canisterIDLs.icpswap_pool, signerAgent);
 
-    const willRecoverToken0 = balance.token0.amount > DUST_THRESHOLD;
-    const willRecoverToken1 = balance.token1.amount > DUST_THRESHOLD;
+    const willRecoverToken0 = balance.token0.amount > dustThreshold(balance.token0.decimals);
+    const willRecoverToken1 = balance.token1.amount > dustThreshold(balance.token1.decimals);
 
     if (willRecoverToken0 || willRecoverToken1) {
       try {
@@ -1636,10 +1799,10 @@ export async function recoverIcpswapBalance(
     }
   } else {
     // Non-Oisy path: sequential withdrawals
-    const fee0 = balance.token0.amount > DUST_THRESHOLD
+    const fee0 = balance.token0.amount > dustThreshold(balance.token0.decimals)
       ? await fetchLedgerFee({ ledgerId: balance.token0.canisterId } as any).catch(() => 10_000n)
       : 0n;
-    const fee1 = balance.token1.amount > DUST_THRESHOLD
+    const fee1 = balance.token1.amount > dustThreshold(balance.token1.decimals)
       ? await fetchLedgerFee({ ledgerId: balance.token1.canisterId } as any).catch(() => 10_000n)
       : 0n;
 
@@ -1647,7 +1810,7 @@ export async function recoverIcpswapBalance(
       balance.poolId, canisterIDLs.icpswap_pool,
     ) as any;
 
-    if (balance.token0.amount > DUST_THRESHOLD) {
+    if (balance.token0.amount > dustThreshold(balance.token0.decimals)) {
       const r = await poolActor.withdraw({
         token: balance.token0.canisterId,
         amount: balance.token0.amount,
@@ -1656,7 +1819,7 @@ export async function recoverIcpswapBalance(
       if (r && 'ok' in r) token0Recovered = r.ok;
       else if (r && 'err' in r) throw new Error(`Withdraw ${balance.token0.symbol} failed: ${JSON.stringify(r.err)}`);
     }
-    if (balance.token1.amount > DUST_THRESHOLD) {
+    if (balance.token1.amount > dustThreshold(balance.token1.decimals)) {
       const r = await poolActor.withdraw({
         token: balance.token1.canisterId,
         amount: balance.token1.amount,

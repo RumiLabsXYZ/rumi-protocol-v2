@@ -1,7 +1,8 @@
 use super::config::ChainId;
 use super::multi_chain_state::{
     ChainLiqClaimV1, MultiChainState, MultiChainStateV1, MultiChainStateV2, MultiChainStateV3,
-    MultiChainStateV4, MultiChainStateV5, MultiChainStateV6, SettlementProofRecord,
+    MultiChainStateV4, MultiChainStateV5, MultiChainStateV6, MultiChainStateV7,
+    SettlementProofRecord,
 };
 use super::supply::migrate_multi_chain_state;
 
@@ -134,10 +135,52 @@ fn migration_preserves_v1_fields_and_defaults_new_ones() {
 }
 
 #[test]
-fn active_alias_points_at_v6() {
-    fn _check(x: MultiChainState) -> MultiChainStateV6 {
+fn active_alias_points_at_v7() {
+    fn _check(x: MultiChainState) -> MultiChainStateV7 {
         x
     }
+}
+
+#[test]
+fn v6_cbor_snapshot_decodes_into_v7_with_fail_closed_refresh_defaults() {
+    let chain = ChainId(1030);
+    let mut v6 = MultiChainStateV6::default();
+    v6.chain_supplies.insert(chain, 42);
+    v6.hot_wallet_balance_e18.insert(chain, 123);
+    v6.last_observed_block.insert(chain, 777);
+
+    let mut buf = Vec::new();
+    ciborium::ser::into_writer(&v6, &mut buf).expect("encode V6");
+    let decoded: MultiChainStateV7 =
+        ciborium::de::from_reader(buf.as_slice()).expect("V6 snapshot MUST decode into V7");
+
+    assert_eq!(decoded.chain_supplies.get(&chain), Some(&42));
+    assert_eq!(decoded.hot_wallet_balance_e18.get(&chain), Some(&123));
+    assert_eq!(decoded.last_observed_block.get(&chain), Some(&777));
+    assert!(decoded.awaiting_deposit_cursor.is_empty());
+    assert!(decoded.hot_wallet_balance_refreshed_at_ns.is_empty());
+}
+
+#[test]
+fn v7_cbor_roundtrip_preserves_observer_cursor_and_refresh_timestamp() {
+    let chain = ChainId(1030);
+    let mut v7 = MultiChainStateV7::default();
+    v7.chain_supplies.insert(chain, 42);
+    v7.awaiting_deposit_cursor.insert(chain, 501);
+    v7.hot_wallet_balance_e18.insert(chain, 123);
+    v7.hot_wallet_balance_refreshed_at_ns.insert(chain, 9_999);
+
+    let mut buf = Vec::new();
+    ciborium::ser::into_writer(&v7, &mut buf).expect("encode V7");
+    let decoded: MultiChainStateV7 =
+        ciborium::de::from_reader(buf.as_slice()).expect("V7 roundtrip decode");
+
+    assert_eq!(decoded.chain_supplies.get(&chain), Some(&42));
+    assert_eq!(decoded.awaiting_deposit_cursor.get(&chain), Some(&501));
+    assert_eq!(
+        decoded.hot_wallet_balance_refreshed_at_ns.get(&chain),
+        Some(&9_999)
+    );
 }
 
 #[test]

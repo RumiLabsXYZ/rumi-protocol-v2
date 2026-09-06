@@ -5,8 +5,8 @@
  * explorer, stability pool, redemptions). This is a display-only gate so the
  * protocol keeps servicing them while no new vaults are opened against them.
  *
- * To revert: remove the principal from this set (empty the set to show
- * everything again). No call sites need to change.
+ * To revert: remove the principal from this set (an empty set shows everything
+ * again). No call sites need to change.
  */
 const HIDDEN_NEW_VAULT_COLLATERAL_PRINCIPALS = new Set([
 	'buwm7-7yaaa-aaaar-qagva-cai' // nICP (WaterNeuron Staked ICP)

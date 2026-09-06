@@ -167,6 +167,20 @@ pub struct PointEntry {
     pub recorded_at_ns: u64,
 }
 
+/// A bounded page of audit-ledger rows plus the cursor to resume from.
+/// `next_offset` is a ledger INDEX, not a count of returned rows, so a filtered
+/// page that scanned past many non-matching rows still resumes in the right place
+/// (a principal-filtered page can return 0 entries and still have advanced).
+#[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct PointEntryPage {
+    pub entries: Vec<PointEntry>,
+    pub next_offset: u64,
+    /// True once the scan reached the end of the ledger. A caller paging a
+    /// filtered view must keep going until this is true, NOT until `entries` is
+    /// empty (an empty page mid-scan just means the scan budget ran out).
+    pub reached_end: bool,
+}
+
 /// Per-epoch rollup written once when an epoch closes (`StableLog<EpochSummary>`).
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct EpochSummary {

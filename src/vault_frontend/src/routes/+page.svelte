@@ -42,7 +42,7 @@
 
   // Populate collateral token list from store, with ICP fallback.
   // Collaterals hidden by newVaultCollateralTypes() are display-gated on this
-  // page only; they remain active for existing vaults and everywhere else.
+  // page only; they stay active for existing vaults and everywhere else.
   $: newVaultCollaterals = newVaultCollateralTypes($activeCollateralTypes);
   $: collateralTokens = newVaultCollaterals.length > 0
     ? newVaultCollaterals.map(ct => ({
@@ -183,7 +183,7 @@
   })();
 
   function selectCollateral(principalText: string) {
-    // Defensive: hidden collaterals are not offered for new vaults.
+    // Defensive: hidden collaterals are never offered for new vaults.
     if (isHiddenForNewVaults(principalText)) return;
     selectedCollateralPrincipal = principalText;
     showCollateralDropdown = false;

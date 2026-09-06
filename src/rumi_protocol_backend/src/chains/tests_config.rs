@@ -1,7 +1,8 @@
 //! ChainConfig encode/decode + version-alias invariants.
 
 use super::config::{
-    ChainConfig, ChainConfigV1, ChainConfigV2, ChainConfigV3, ChainId, ChainStatus, GasStrategy,
+    chain_rpc_endpoint_set_digest, ChainConfig, ChainConfigV1, ChainConfigV2, ChainConfigV3,
+    ChainId, ChainStatus, GasStrategy,
 };
 use candid::{Decode, Encode};
 
@@ -48,7 +49,9 @@ fn chain_config_alias_matches_v3() {
     // Phase 1d rebound `ChainConfig` from V2 to V3 (added the M-05
     // `min_quorum_providers` quorum-provider floor override). `ChainConfig` is
     // the active version pointer; the next field add bumps it to V4.
-    fn _check(_x: ChainConfig) -> ChainConfigV3 { _x }
+    fn _check(_x: ChainConfig) -> ChainConfigV3 {
+        _x
+    }
 }
 
 #[test]
@@ -88,7 +91,10 @@ fn v1_cbor_sub_map_decodes_into_v2_defaulting_the_poll_flag() {
     // Every V1 field preserved verbatim:
     assert_eq!(v2.chain_id, ChainId(10143));
     assert_eq!(v2.display_name, "MonadTestnet");
-    assert_eq!(v2.rpc_endpoints, vec!["https://rpc.testnet.example".to_string()]);
+    assert_eq!(
+        v2.rpc_endpoints,
+        vec!["https://rpc.testnet.example".to_string()]
+    );
     assert_eq!(v2.finality_depth, 3);
     assert_eq!(v2.chain_native_decimals, 18);
     assert_eq!(v2.registered_at_ns, 1_700_000_000_000_000_000);
@@ -166,4 +172,121 @@ fn v2_cbor_sub_map_decodes_into_v3_defaulting_the_quorum_floor() {
     assert!(v3.burn_watch_poll_enabled);
     // The new quorum-floor override defaults to None (=> DEFAULT_MIN_QUORUM_PROVIDERS).
     assert_eq!(v3.min_quorum_providers, None);
+}
+
+fn digest_config(endpoints: &[&str], quorum: Option<u32>) -> ChainConfigV3 {
+    ChainConfigV3 {
+        chain_id: ChainId(1030),
+        display_name: "Conflux eSpace mainnet".into(),
+        rpc_endpoints: endpoints.iter().map(|s| (*s).to_string()).collect(),
+        finality_depth: 400,
+        gas_strategy: GasStrategy::EvmEip1559 {
+            max_priority_fee_gwei: 1,
+            max_fee_gwei_ceiling: 100,
+        },
+        chain_native_decimals: 18,
+        registered_at_ns: 1,
+        status: ChainStatus::Disabled,
+        burn_watch_poll_enabled: false,
+        min_quorum_providers: quorum,
+    }
+}
+
+#[test]
+fn rpc_endpoint_digest_is_order_independent_and_exactly_deduplicated() {
+    let a = digest_config(
+        &[
+            "https://rpc-a.example/v1",
+            "https://rpc-b.example/v1",
+            "https://rpc-a.example/v1",
+        ],
+        Some(2),
+    );
+    let b = digest_config(
+        &["https://rpc-b.example/v1", "https://rpc-a.example/v1"],
+        Some(2),
+    );
+
+    let a_digest = chain_rpc_endpoint_set_digest(&a);
+    let b_digest = chain_rpc_endpoint_set_digest(&b);
+    assert_eq!(a_digest, b_digest);
+    assert_eq!(a_digest.endpoint_count, 2);
+    assert_eq!(a_digest.effective_min_quorum_providers, 2);
+    assert_eq!(a_digest.digest_sha256.len(), 64);
+    assert!(
+        a_digest
+            .digest_sha256
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+        "digest must be lowercase hex"
+    );
+}
+
+#[test]
+fn rpc_endpoint_digest_changes_on_endpoint_or_effective_quorum_drift() {
+    let baseline = chain_rpc_endpoint_set_digest(&digest_config(
+        &["https://rpc-a.example/v1", "https://rpc-b.example/v1"],
+        Some(2),
+    ));
+    let endpoint_drift = chain_rpc_endpoint_set_digest(&digest_config(
+        &["https://rpc-a.example/v1", "https://rpc-c.example/v1"],
+        Some(2),
+    ));
+    let quorum_drift = chain_rpc_endpoint_set_digest(&digest_config(
+        &["https://rpc-a.example/v1", "https://rpc-b.example/v1"],
+        Some(3),
+    ));
+    let mut chain_drift_config = digest_config(
+        &["https://rpc-a.example/v1", "https://rpc-b.example/v1"],
+        Some(2),
+    );
+    chain_drift_config.chain_id = ChainId(71);
+    let chain_drift = chain_rpc_endpoint_set_digest(&chain_drift_config);
+
+    assert_ne!(baseline.digest_sha256, endpoint_drift.digest_sha256);
+    assert_ne!(baseline.digest_sha256, quorum_drift.digest_sha256);
+    assert_ne!(baseline.digest_sha256, chain_drift.digest_sha256);
+}
+
+#[test]
+fn rpc_endpoint_digest_commits_to_effective_not_storage_shaped_quorum() {
+    let endpoints = ["https://rpc-a.example/v1", "https://rpc-b.example/v1"];
+    let inherited_default = chain_rpc_endpoint_set_digest(&digest_config(&endpoints, None));
+    let explicit_default = chain_rpc_endpoint_set_digest(&digest_config(&endpoints, Some(3)));
+
+    assert_eq!(inherited_default, explicit_default);
+    assert_eq!(inherited_default.effective_min_quorum_providers, 3);
+}
+
+#[test]
+fn rpc_endpoint_digest_uses_exact_url_bytes_and_ignores_uncommitted_fields() {
+    let baseline = digest_config(&["https://rpc-a.example/v1"], Some(2));
+    let slash_drift = digest_config(&["https://rpc-a.example/v1/"], Some(2));
+    let mut unrelated = baseline.clone();
+    unrelated.display_name = "renamed".into();
+    unrelated.finality_depth = 999;
+    unrelated.status = ChainStatus::Registered;
+
+    assert_ne!(
+        chain_rpc_endpoint_set_digest(&baseline).digest_sha256,
+        chain_rpc_endpoint_set_digest(&slash_drift).digest_sha256,
+        "URL canonicalization is exact-string, matching stored de-duplication"
+    );
+    assert_eq!(
+        chain_rpc_endpoint_set_digest(&baseline).digest_sha256,
+        chain_rpc_endpoint_set_digest(&unrelated).digest_sha256,
+        "the V1 digest commits only chain id, effective quorum, and endpoint set"
+    );
+}
+
+#[test]
+fn rpc_endpoint_digest_has_a_fixed_canonical_vector() {
+    let digest = chain_rpc_endpoint_set_digest(&digest_config(
+        &["https://rpc-b.example/v1", "https://rpc-a.example/v1"],
+        Some(2),
+    ));
+    assert_eq!(
+        digest.digest_sha256, "0d7895c55182ac2f0d69823100cd5b69af36922136eb3a1988416aea59399528",
+        "changing this requires a documented digest-contract version bump"
+    );
 }

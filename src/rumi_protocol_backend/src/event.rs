@@ -860,11 +860,11 @@ pub enum Event {
         block_number: u64,
         timestamp: u64,
     },
-    // ── Chains-liquidation engine (Increment 1: defined, NOT yet emitted) ──
-    // Forward-looking variants for the liquidation cascade. Additive to the
-    // append-only event candid surface; emitted starting Increment 2 (bot path)
-    // / Increment 4 (SP path). Defined now so the V6 bump + the event surface land
-    // together and a single deploy covers the engine.
+    // ── Chains-liquidation engine (Increments 1-4, landed and emitted) ──
+    // Variants for the liquidation cascade. Additive to the append-only
+    // event candid surface; defined in Increment 1 alongside the V6 bump so
+    // a single deploy covered the engine, then emitted starting Increment 2
+    // (bot path) and Increment 4 (SP path), both of which have since landed.
     /// Increment 2+: a bot (PSM) partial liquidation confirmed — `debt_cleared_e8s`
     /// of the vault's debt was retired into reserve (no icUSD burn) and
     /// `collateral_seized_native` was sold. Pairs with `ChainReserveCredited`.

@@ -23,7 +23,10 @@ export interface ProviderSwapResult {
 export type ProviderId =
   | 'rumi_amm'
   | 'icpswap_3usd_icp'
-  | 'icpswap_icusd_icp';
+  | 'icpswap_icusd_icp'
+  | 'icpswap_ckusdt_icusd'
+  | 'icpswap_icusd_ckusdc'
+  | 'icpswap_ckusdt_ckusdc';
 
 export interface SwapProvider {
   readonly id: ProviderId;

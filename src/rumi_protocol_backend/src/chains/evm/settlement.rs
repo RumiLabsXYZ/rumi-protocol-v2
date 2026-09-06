@@ -38,6 +38,7 @@ use candid::{CandidType, Deserialize, Principal};
 use ic_canister_log::log;
 
 use crate::chains::config::{ChainId, ChainStatus};
+use crate::chains::liquidation_config::ChainLiquidationConfigV1;
 use crate::chains::monad::chain_vault::ChainVaultStatus;
 use crate::chains::multi_chain_state::MultiChainState;
 use crate::chains::settlement_queue::{
@@ -48,7 +49,7 @@ use crate::logs::INFO;
 use crate::state::{mutate_state, read_state};
 use crate::Mode;
 
-use super::{evm_rpc, hardening, tecdsa, tx};
+use super::{evm_rpc, hardening, public_readiness, tecdsa, tx};
 
 // ─── Pure helpers ─────────────────────────────────────────────────────────────
 
@@ -197,6 +198,10 @@ async fn recredit_and_fail_chain_collateral_payout(
     .await
     {
         log!(INFO, "[settlement chain={:?}] claim payout op {} cannot be failed yet because stability pool recredit failed: {}", chain, op_id, error);
+        return false;
+    }
+
+    if ensure_chain_still_registered(chain).is_err() {
         return false;
     }
 
@@ -991,6 +996,7 @@ pub async fn run_settlement(chain: ChainId) {
     let should_skip = read_state(|s| {
         s.mode == Mode::ReadOnly
             || s.multi_chain.invariant_halted
+            || !s.multi_chain.chain_is_registered(chain)
             || s.multi_chain
                 .reorg_halted
                 .get(&chain)
@@ -1032,6 +1038,182 @@ pub async fn run_settlement(chain: ChainId) {
             q.prune_terminal();
         }
     });
+}
+
+/// Recheck mutable operator/runtime gates after async RPC/signing boundaries.
+/// Disable applies to every outbound op. The stronger public gate applies to
+/// chain-1030 supply-increasing mints (including Borrow's queued Mint and
+/// periodic InterestMint) immediately before both signing and broadcasting.
+fn ensure_submit_still_allowed(
+    chain: ChainId,
+    kind: &SettlementOpKind,
+    now_ns: u64,
+) -> Result<(), String> {
+    read_state(|state| {
+        ensure_chain_still_registered_in_state(state, chain)?;
+        if requires_public_mint_gate(kind) {
+            public_readiness::enforce_conflux_mainnet_public_risk_gate(state, chain, now_ns)
+                .map_err(|error| format!("{error:?}"))?;
+        }
+        Ok(())
+    })
+}
+
+pub(crate) fn requires_public_mint_gate(kind: &SettlementOpKind) -> bool {
+    matches!(
+        kind,
+        SettlementOpKind::Mint { .. } | SettlementOpKind::InterestMint { .. }
+    )
+}
+
+/// The exact liquidation policy inputs used to compute a swap transaction.
+/// A config or price update while RPC/signing awaits are in flight invalidates
+/// the plan; the worker retries from Queued with a fresh snapshot.
+#[derive(Clone, Debug)]
+pub(crate) struct LiquidationSwapSubmitSnapshot {
+    pub(crate) config: ChainLiquidationConfigV1,
+    pub(crate) price_e8: u64,
+    pub(crate) price_set_at_ns: u64,
+}
+
+/// Liquidation-specific post-await gate. Unlike the mint public-open gate this
+/// intentionally does not consult the bad-debt latch, debt limits, burn cursor,
+/// or settlement hot-wallet proof: a custody-funded swap reduces exposure and
+/// remains actionable when those mint-only controls trip.
+pub(crate) fn ensure_liquidation_swap_submit_still_allowed_in_state(
+    state: &crate::state::State,
+    chain: ChainId,
+    kind: &SettlementOpKind,
+    snapshot: &LiquidationSwapSubmitSnapshot,
+    now_ns: u64,
+) -> Result<(), String> {
+    ensure_chain_still_registered_in_state(state, chain)?;
+    if state.frozen {
+        return Err("protocol globally frozen".into());
+    }
+    if state.liquidation_frozen {
+        return Err("liquidations frozen".into());
+    }
+    if state.mode == Mode::ReadOnly {
+        return Err("protocol entered read-only mode while liquidation was in flight".into());
+    }
+    if state.multi_chain.invariant_halted {
+        return Err("supply invariant halted".into());
+    }
+    if state
+        .multi_chain
+        .reorg_halted
+        .get(&chain)
+        .copied()
+        .unwrap_or(false)
+    {
+        return Err("chain reorg halt active".into());
+    }
+
+    let config = state
+        .multi_chain
+        .chain_liquidation_configs
+        .get(&chain)
+        .ok_or_else(|| "liquidation config removed".to_string())?;
+    if !config.enabled {
+        return Err("liquidation config disabled".into());
+    }
+    config
+        .validate()
+        .map_err(|error| format!("liquidation config invalid: {error:?}"))?;
+    if config != &snapshot.config {
+        return Err("liquidation config changed while swap was in flight".into());
+    }
+    if chain == ChainId(1030) {
+        let relevant_blockers: Vec<&str> =
+            public_readiness::conflux_mainnet_public_risk_blockers(state, chain, now_ns)
+                .into_iter()
+                .filter(|blocker| {
+                    matches!(
+                        *blocker,
+                        "conflux_mainnet_config_mismatch"
+                            | "evm_rpc_principal_mismatch"
+                            | "chains_ecdsa_key_mismatch"
+                            | "rpc_endpoint_configuration_too_large"
+                            | "rpc_distinct_endpoints_insufficient"
+                            | "rpc_agreement_below_two"
+                            | "rpc_agreement_unsatisfiable"
+                            | "finality_depth_mismatch"
+                            | "liquidation_config_missing"
+                            | "liquidation_disabled"
+                            | "liquidation_config_mismatch"
+                    )
+                })
+                .collect();
+        if !relevant_blockers.is_empty() {
+            return Err(format!(
+                "Conflux liquidation trust gate blocked: {}",
+                relevant_blockers.join(",")
+            ));
+        }
+    }
+
+    let (router, pair, path, reserve_recipient, deadline_secs) = match kind {
+        SettlementOpKind::LiquidationSwap {
+            router,
+            pair,
+            path,
+            reserve_recipient,
+            deadline_secs,
+            ..
+        } => (router, pair, path, reserve_recipient, deadline_secs),
+        _ => return Err("settlement op is not a liquidation swap".into()),
+    };
+    if !router.eq_ignore_ascii_case(&config.router)
+        || !pair.eq_ignore_ascii_case(&config.pair)
+        || path.len() != 2
+        || !path[0].eq_ignore_ascii_case(&config.collateral_token)
+        || !path[1].eq_ignore_ascii_case(&config.settle_stable_token)
+        || !reserve_recipient.eq_ignore_ascii_case(&config.settle_stable_token)
+        // The generic enqueuer historically writes 180 for every EVM chain
+        // even though non-Conflux configs accept other non-zero deadlines.
+        // Keep the exact reviewed deadline pin for the production Conflux
+        // rail without turning that pre-existing generic mismatch into a new
+        // liveness regression for other chains.
+        || (chain == ChainId(1030) && *deadline_secs != config.deadline_secs)
+    {
+        return Err("queued liquidation swap no longer matches current config wiring".into());
+    }
+
+    let symbol = crate::chains::evm::evm_chain_config(chain)
+        .map(|config| config.native_symbol)
+        .ok_or_else(|| "unsupported EVM liquidation chain".to_string())?;
+    let live_price = state
+        .multi_chain
+        .get_manual_price(chain, symbol)
+        .ok_or_else(|| "liquidation price removed".to_string())?;
+    if live_price != (snapshot.price_e8, snapshot.price_set_at_ns) {
+        return Err("liquidation price changed while swap was in flight".into());
+    }
+    crate::chains::liquidation::fresh_chain_price_e8(
+        &state.multi_chain,
+        chain,
+        symbol,
+        now_ns,
+        config.max_price_age_ns,
+    )
+    .map_err(|error| format!("liquidation price unavailable: {error:?}"))?;
+    Ok(())
+}
+
+fn ensure_chain_still_registered_in_state(
+    state: &crate::state::State,
+    chain: ChainId,
+) -> Result<(), String> {
+    if state.multi_chain.chain_is_registered(chain) {
+        Ok(())
+    } else {
+        Err("chain disabled while settlement RPC was in flight".to_string())
+    }
+}
+
+fn ensure_chain_still_registered(chain: ChainId) -> Result<(), String> {
+    read_state(|state| ensure_chain_still_registered_in_state(state, chain))
 }
 
 /// What kind of settlement tx a `TxPlan` carries, so the submit path can emit
@@ -1308,6 +1490,8 @@ pub(crate) fn fundable_swap_value(
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ClaimLiquidationSwapSubmitError {
+    ChainNotRegistered,
+    SubmitNotAllowed,
     MissingOp,
     WrongOpKind,
     NotQueued,
@@ -1332,14 +1516,27 @@ pub(crate) enum RecordChainPayoutReplacementError {
 /// Without this CAS, an observer timeout tick can clear the marker while the
 /// settlement worker is suspended across RPC awaits with a stale cloned op.
 pub(crate) fn claim_liquidation_swap_submit_in_state(
-    state: &mut MultiChainState,
+    state: &mut crate::state::State,
     chain: ChainId,
     op_id: u64,
     vault_id: u64,
     now_ns: u64,
     tx_hash: String,
     nonce: u64,
+    kind: &SettlementOpKind,
+    snapshot: &LiquidationSwapSubmitSnapshot,
 ) -> Result<(), ClaimLiquidationSwapSubmitError> {
+    // This is the final synchronous state boundary before broadcast. Recheck
+    // here as well as around signing so a stale cloned op can never be claimed
+    // after an operator Disable raced the preceding RPC/signing awaits.
+    if !state.multi_chain.chain_is_registered(chain) {
+        return Err(ClaimLiquidationSwapSubmitError::ChainNotRegistered);
+    }
+    ensure_liquidation_swap_submit_still_allowed_in_state(state, chain, kind, snapshot, now_ns)
+        .map_err(|_| ClaimLiquidationSwapSubmitError::SubmitNotAllowed)?;
+
+    let state = &mut state.multi_chain;
+
     let marker_owned = state
         .chain_vaults
         .get(&vault_id)
@@ -1551,10 +1748,10 @@ async fn submit_op(chain: ChainId, op_id: u64, op: crate::chains::settlement_que
 
     // GAS GATE (Task 11): MINTS ONLY. A mint is paid by the per-chain settlement
     // hot wallet, so refuse a new mint when the cached settlement balance is
-    // below the hot-wallet floor. FAIL OPEN when the cache is unset (`None`): an
-    // unpopulated cache (fresh chain / observer hasn't run yet) must NEVER block
-    // a legitimate mint. The observer refreshes the cache each tick
-    // (deposit_watch::refresh_hot_wallet_balance). Native WITHDRAWALS are signed
+    // below the hot-wallet floor. Ordinary EVM chains retain the legacy
+    // fail-open behavior when the cache is unset (`None`). Chain 1030 does not:
+    // its authoritative predicate above requires a known, adequate, fresh,
+    // current-key proof before signing. Native WITHDRAWALS are signed
     // by the vault's own custody address (which holds the collateral) and net
     // their gas out of the transfer, so the settlement-wallet floor is irrelevant
     // to them — never gate a withdrawal on it.
@@ -1724,6 +1921,20 @@ async fn submit_op(chain: ChainId, op_id: u64, op: crate::chains::settlement_que
         kind,
     } = plan;
 
+    // Every step above may await. Re-read ChainStatus and, for chain-1030
+    // mint-like ops, the full authoritative risk predicate immediately before
+    // asking threshold ECDSA to sign.
+    if let Err(reason) = ensure_submit_still_allowed(chain, &op.kind, ic_cdk::api::time()) {
+        log!(
+            INFO,
+            "[settlement chain={:?}] op {} blocked before signing: {}; will retry",
+            chain,
+            op_id,
+            reason
+        );
+        return;
+    }
+
     // 6. Sign with the resolved signer (settlement for mints, custody for withdrawals).
     let raw_hex = match tx::sign_eip1559(&fields, path, &signer_addr).await {
         Ok(h) => h,
@@ -1738,6 +1949,19 @@ async fn submit_op(chain: ChainId, op_id: u64, op: crate::chains::settlement_que
             return;
         }
     };
+    // Signing itself is an await. A Disable or readiness degradation while the
+    // management-canister signature was in flight must prevent both the payout
+    // submit claim and broadcast; signed bytes are simply discarded.
+    if let Err(reason) = ensure_submit_still_allowed(chain, &op.kind, ic_cdk::api::time()) {
+        log!(
+            INFO,
+            "[settlement chain={:?}] op {} blocked before broadcast: {}; signed bytes discarded",
+            chain,
+            op_id,
+            reason
+        );
+        return;
+    }
     let chain_payout_local_tx_hash = if kind == TxPlanKind::ChainCollateralPayout {
         match tx::raw_tx_hash(&raw_hex) {
             Ok(h) => Some(h),
@@ -1888,8 +2112,9 @@ async fn submit_op(chain: ChainId, op_id: u64, op: crate::chains::settlement_que
 /// mark the op `Failed`, restore the reserved collateral under a marker-CAS,
 /// clear the `pending_liquidation` marker, and mark the vault `sp_attempted` so
 /// detection does NOT re-route it to the bot (no retry loop). The Tier-2 SP
-/// consumer of `sp_attempted_chain_vaults` lands in Increment 4; until then the
-/// vault falls to Tier-3 manual. Emits the existing `ChainSettlementFailed` (no
+/// consumer of `sp_attempted_chain_vaults` is `stability_pool_liquidate_chain_vault`
+/// (main.rs), landed in Increment 4; a vault it does not (or cannot) absorb
+/// falls to Tier-3 manual. Emits the existing `ChainSettlementFailed` (no
 /// new Event variant). Used by both the submit do-not-swap branches and the
 /// confirm revert/timeout branches. Idempotent via the op_id marker-CAS.
 fn escalate_failed_swap(chain: ChainId, op_id: u64, vault_id: u64, reason: String) {
@@ -1918,7 +2143,8 @@ fn escalate_failed_swap(chain: ChainId, op_id: u64, vault_id: u64, reason: Strin
             }
         }
         s.multi_chain.bot_pending_chain_vaults.remove(&vault_id);
-        // The bot gave up; do not re-route to the bot. (Inc 4 SP consumes this.)
+        // The bot gave up; do not re-route to the bot. Tier-2 SP
+        // (stability_pool_liquidate_chain_vault, Increment 4) consumes this marker.
         s.multi_chain.sp_attempted_chain_vaults.insert(vault_id);
     });
     crate::storage::record_event(&crate::event::Event::ChainSettlementFailed {
@@ -1996,28 +2222,44 @@ async fn submit_liquidation_swap(
         let price =
             liq::fresh_chain_price_e8(&s.multi_chain, chain, symbol, now, cfg.max_price_age_ns)
                 .ok()?;
+        let (_, price_set_at_ns) = s.multi_chain.get_manual_price(chain, symbol)?;
         Some((
+            cfg.clone(),
             cfg.fee_bps,
             cfg.slippage_cap_bps,
             cfg.max_dex_oracle_divergence_bps,
             cfg.settle_stable_decimals,
             native_decimals,
             price,
+            price_set_at_ns,
         ))
     });
-    let (fee_bps, slippage_bps, divergence_bps, settle_decimals, native_decimals, price_e8) =
-        match snap {
-            Some(t) => t,
-            None => {
-                escalate_failed_swap(
-                    chain,
-                    op_id,
-                    vault_id,
-                    "swap config/price unavailable".into(),
-                );
-                return;
-            }
-        };
+    let (
+        liquidation_config,
+        fee_bps,
+        slippage_bps,
+        divergence_bps,
+        settle_decimals,
+        native_decimals,
+        price_e8,
+        price_set_at_ns,
+    ) = match snap {
+        Some(t) => t,
+        None => {
+            escalate_failed_swap(
+                chain,
+                op_id,
+                vault_id,
+                "swap config/price unavailable".into(),
+            );
+            return;
+        }
+    };
+    let submit_snapshot = LiquidationSwapSubmitSnapshot {
+        config: liquidation_config,
+        price_e8,
+        price_set_at_ns,
+    };
 
     // Custody signer (holds the CFX) + the derived reserve `to`.
     let (path, signer_addr) = match resolve_op_signer(chain, &op.kind).await {
@@ -2178,6 +2420,28 @@ async fn submit_liquidation_swap(
             return;
         }
     };
+    // Every signer/DEX/RPC step above may await. Re-read the liquidation-specific
+    // runtime gates and require the exact config/price snapshot used by this plan
+    // immediately before asking threshold ECDSA to sign.
+    if let Err(reason) = read_state(|state| {
+        ensure_liquidation_swap_submit_still_allowed_in_state(
+            state,
+            chain,
+            &op.kind,
+            &submit_snapshot,
+            ic_cdk::api::time(),
+        )
+    }) {
+        log!(
+            INFO,
+            "[settlement chain={:?}] swap op {} blocked before signing: {}; will retry",
+            chain,
+            op_id,
+            reason
+        );
+        return;
+    }
+
     let raw = match tx::sign_eip1559(&fields, path, &signer_addr).await {
         Ok(h) => h,
         Err(e) => {
@@ -2191,6 +2455,27 @@ async fn submit_liquidation_swap(
             return;
         }
     };
+    // Signing is also an await. If Disable or any liquidation readiness
+    // degradation raced the signature, discard the signed bytes before the
+    // submit claim and broadcast.
+    if let Err(reason) = read_state(|state| {
+        ensure_liquidation_swap_submit_still_allowed_in_state(
+            state,
+            chain,
+            &op.kind,
+            &submit_snapshot,
+            ic_cdk::api::time(),
+        )
+    }) {
+        log!(
+            INFO,
+            "[settlement chain={:?}] swap op {} blocked before broadcast: {}; signed bytes discarded",
+            chain,
+            op_id,
+            reason
+        );
+        return;
+    }
     let local_tx_hash = match tx::raw_tx_hash(&raw) {
         Ok(h) => h,
         Err(e) => {
@@ -2206,13 +2491,15 @@ async fn submit_liquidation_swap(
     };
     let claim = mutate_state(|s| {
         claim_liquidation_swap_submit_in_state(
-            &mut s.multi_chain,
+            s,
             chain,
             op_id,
             vault_id,
             ic_cdk::api::time(),
             local_tx_hash.clone(),
             nonce,
+            &op.kind,
+            &submit_snapshot,
         )
     });
     if let Err(e) = claim {
@@ -2226,7 +2513,19 @@ async fn submit_liquidation_swap(
         return;
     }
 
-    let tx_hash = match evm_rpc::send_raw_transaction(chain, &raw).await {
+    let tx_hash = match evm_rpc::send_raw_transaction_guarded(chain, &raw, |_| {
+        read_state(|state| {
+            ensure_liquidation_swap_submit_still_allowed_in_state(
+                state,
+                chain,
+                &op.kind,
+                &submit_snapshot,
+                ic_cdk::api::time(),
+            )
+        })
+    })
+    .await
+    {
         Ok(h) => h,
         Err(e) => {
             log!(INFO, "[settlement chain={:?}] swap op {}: broadcast failed after submit claim ({}); receipt timeout path will resolve", chain, op_id, e);
@@ -2277,6 +2576,9 @@ async fn confirm_op(chain: ChainId, op_id: u64, op: crate::chains::settlement_qu
                 receipt_errors.push((candidate.clone(), e));
             }
         }
+    }
+    if ensure_chain_still_registered(chain).is_err() {
+        return;
     }
     if mined_receipt.is_none() && !receipt_errors.is_empty() {
         let (candidate, err) = &receipt_errors[0];
@@ -2542,6 +2844,9 @@ async fn confirm_op(chain: ChainId, op_id: u64, op: crate::chains::settlement_qu
             return;
         }
     };
+    if ensure_chain_still_registered(chain).is_err() {
+        return;
+    }
     if block_number > finalized {
         // Mined but not yet final — leave Inflight, retry next tick.
         return;
@@ -2577,6 +2882,9 @@ async fn confirm_op(chain: ChainId, op_id: u64, op: crate::chains::settlement_qu
                     return;
                 }
             };
+            if ensure_chain_still_registered(chain).is_err() {
+                return;
+            }
 
             // Find THIS op's Mint log by EXACT tx-hash match (case-insensitive).
             //
@@ -2731,6 +3039,9 @@ async fn confirm_op(chain: ChainId, op_id: u64, op: crate::chains::settlement_qu
                     return;
                 }
             };
+            if ensure_chain_still_registered(chain).is_err() {
+                return;
+            }
 
             let mut matched: Option<(u128, String)> = None;
             for (topics, data, log_tx, log_block, _log_index) in &logs {
@@ -2884,6 +3195,9 @@ async fn confirm_op(chain: ChainId, op_id: u64, op: crate::chains::settlement_qu
                     return;
                 }
             };
+            if ensure_chain_still_registered(chain).is_err() {
+                return;
+            }
             let settle_decimals = read_state(|s| {
                 s.multi_chain
                     .chain_liquidation_configs
@@ -2907,6 +3221,9 @@ async fn confirm_op(chain: ChainId, op_id: u64, op: crate::chains::settlement_qu
                     return;
                 }
             };
+            if ensure_chain_still_registered(chain).is_err() {
+                return;
+            }
             let mut realized: Option<u128> = None;
             for (topics, data, _log_tx, _log_block, _log_index) in &logs {
                 if let Ok(t) = evm_rpc::TransferLog::from_raw(topics, data) {
@@ -3118,6 +3435,12 @@ async fn resubmit_if_stuck(
         }
     };
 
+    // Every fee/balance/nonce read above may await. Disable, and the stronger
+    // chain-1030 mint predicate, must be re-read before replacement signing.
+    if ensure_submit_still_allowed(chain, &op.kind, ic_cdk::api::time()).is_err() {
+        return;
+    }
+
     // Re-sign on the stored nonce with the resolved signer.
     let raw_hex = match tx::sign_eip1559(&plan.fields, path, &signer_addr).await {
         Ok(h) => h,
@@ -3126,6 +3449,9 @@ async fn resubmit_if_stuck(
             return;
         }
     };
+    if ensure_submit_still_allowed(chain, &op.kind, ic_cdk::api::time()).is_err() {
+        return;
+    }
     let chain_payout_replacement_hash = if matches!(
         op.kind,
         SettlementOpKind::ChainCollateralPayout { .. }

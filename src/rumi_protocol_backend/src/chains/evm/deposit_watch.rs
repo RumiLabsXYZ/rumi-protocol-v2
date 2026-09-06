@@ -49,9 +49,65 @@ use crate::logs::INFO;
 use crate::state::{mutate_state, read_state};
 use crate::Mode;
 
-use crate::chains::monad::chain_vault::{verify_deposit_and_enqueue_mint_in_state, ChainVaultStatus};
-use super::evm_rpc::{decode_burn_log, erc20_total_supply_at, fetch_block_numbers, get_balance, get_logs, BURN_EVENT_TOPIC0};
-use super::{hardening, tecdsa};
+use super::evm_rpc::{
+    decode_burn_log, erc20_total_supply_at, fetch_block_numbers, get_balance, get_logs,
+    BURN_EVENT_TOPIC0,
+};
+use super::{hardening, public_readiness, tecdsa};
+use crate::chains::monad::chain_vault::{
+    verify_deposit_and_enqueue_mint_in_state, ChainVaultStatus,
+};
+
+/// Per-tick bounds for the global-map AwaitingDeposit walk. The scan bound
+/// limits CPU even when a chain's vaults are sparse; the poll bound limits EVM
+/// RPC outcalls. The stable per-chain cursor makes successive ticks fair.
+pub(crate) const MAX_AWAITING_DEPOSIT_GLOBAL_SCAN_PER_TICK: usize = 500;
+pub(crate) const MAX_AWAITING_DEPOSIT_POLLS_PER_TICK: usize = 25;
+
+pub(crate) fn take_awaiting_deposit_page(
+    state: &mut MultiChainState,
+    chain: ChainId,
+) -> Vec<(u64, String, u128)> {
+    use std::ops::Bound::{Excluded, Unbounded};
+
+    let cursor = state
+        .awaiting_deposit_cursor
+        .get(&chain)
+        .copied()
+        .unwrap_or(0);
+    let mut examined = 0usize;
+    let mut last_examined = None;
+    let mut reached_end = true;
+    let mut page = Vec::with_capacity(MAX_AWAITING_DEPOSIT_POLLS_PER_TICK);
+
+    for (&vault_id, vault) in state.chain_vaults.range((Excluded(cursor), Unbounded)) {
+        if examined == MAX_AWAITING_DEPOSIT_GLOBAL_SCAN_PER_TICK
+            || page.len() == MAX_AWAITING_DEPOSIT_POLLS_PER_TICK
+        {
+            reached_end = false;
+            break;
+        }
+        examined += 1;
+        last_examined = Some(vault_id);
+        if vault.collateral_chain == chain && vault.status == ChainVaultStatus::AwaitingDeposit {
+            page.push((
+                vault_id,
+                vault.custody_address.clone(),
+                vault.collateral_amount_native,
+            ));
+        }
+    }
+
+    if reached_end {
+        // Wrap only after proving the end of the global map was reached. A vault
+        // skipped because an earlier RPC failed becomes reachable again on the
+        // next cycle; no hot prefix can monopolize every tick.
+        state.awaiting_deposit_cursor.remove(&chain);
+    } else if let Some(last) = last_examined {
+        state.awaiting_deposit_cursor.insert(chain, last);
+    }
+    page
+}
 
 // ─── Pure helpers ─────────────────────────────────────────────────────────────
 
@@ -234,8 +290,13 @@ pub fn apply_burn_to_state(
     // entirely (chain_supplies unchanged on Err). A failure here is HALT-CLASS
     // (underflow / divergence / already-halted) → SupplyInvariant: the caller
     // must NOT advance the cursor.
-    apply_supply_delta(state, chain, SupplyDelta::Decrease(burn.amount_e8s), post_burn_total)
-        .map_err(BurnApplyError::SupplyInvariant)?;
+    apply_supply_delta(
+        state,
+        chain,
+        SupplyDelta::Decrease(burn.amount_e8s),
+        post_burn_total,
+    )
+    .map_err(BurnApplyError::SupplyInvariant)?;
 
     // Step 4: only reached when supply delta succeeded — decrement vault debt.
     // No-mutation-on-rejection guarantee is intact: every `return Err`/`?`
@@ -383,7 +444,12 @@ pub async fn run_observer(chain: ChainId) {
     let should_skip = read_state(|s| {
         s.mode == Mode::ReadOnly
             || s.multi_chain.invariant_halted
-            || s.multi_chain.reorg_halted.get(&chain).copied().unwrap_or(false)
+            || !s.multi_chain.chain_is_registered(chain)
+            || s.multi_chain
+                .reorg_halted
+                .get(&chain)
+                .copied()
+                .unwrap_or(false)
     });
     if should_skip {
         return;
@@ -394,7 +460,11 @@ pub async fn run_observer(chain: ChainId) {
     let contract = match contract {
         Some(c) => c,
         None => {
-            log!(INFO, "[observer chain={:?}] no contract address configured; skipping", chain);
+            log!(
+                INFO,
+                "[observer chain={:?}] no contract address configured; skipping",
+                chain
+            );
             return;
         }
     };
@@ -406,22 +476,25 @@ pub async fn run_observer(chain: ChainId) {
     // Task-14 query surface can report it. Tolerant of errors: a failed derive or
     // balance read logs and continues — it must NOT abort the observer.
     //
-    // CYCLE GATE: the cached balance ONLY feeds the submit-path gas gate, so we
-    // refresh it only when this chain has a non-terminal settlement op (a mint /
-    // withdraw about to submit or confirm). On idle ticks (nothing queued) this
-    // saves one `eth_getBalance` outcall per tick (~764M cycles each, measured).
-    // An unpopulated cache is treated as fail-open by `hot_wallet_ok`, so skipping
-    // the refresh never blocks a future submit; the first tick that sees a queued
-    // op refreshes before the worker needs it.
-    let has_settlement_work = read_state(|s| {
-        s.multi_chain
+    // CYCLE GATE: for ordinary EVM chains, refresh only when a non-terminal op
+    // needs the submit gas gate. Chain 1030 is stricter: public risk admission
+    // fails closed on a missing/stale proof, so refresh it on an idle observer
+    // tick whenever its bounded cache age expires. The developer-triggered
+    // preflight endpoint provides the same proof while the chain is Disabled.
+    let should_refresh_hot_wallet = read_state(|s| {
+        let has_settlement_work = s
+            .multi_chain
             .settlement_queues
             .get(&chain)
             .map(|q| q.has_active_op())
-            .unwrap_or(false)
+            .unwrap_or(false);
+        let public_preflight_needs_refresh = chain
+            == crate::chains::evm::conflux::config::CONFLUX_MAINNET_CHAIN_ID
+            && !public_readiness::hot_wallet_balance_is_fresh(s, chain, ic_cdk::api::time());
+        has_settlement_work || public_preflight_needs_refresh
     });
-    if has_settlement_work {
-        refresh_hot_wallet_balance(chain).await;
+    if should_refresh_hot_wallet {
+        let _ = refresh_hot_wallet_balance(chain).await;
     }
 
     // Read the burn-watch cursor BEFORE running deposit-watch. The deposit-watch
@@ -429,7 +502,11 @@ pub async fn run_observer(chain: ChainId) {
     // the cursor; it only needs `last_observed` for the cosmetic
     // `DepositObserved.block_number` (a balance poll has no single tx/block).
     let last_observed = read_state(|s| {
-        s.multi_chain.last_observed_block.get(&chain).copied().unwrap_or(0)
+        s.multi_chain
+            .last_observed_block
+            .get(&chain)
+            .copied()
+            .unwrap_or(0)
     });
 
     // ── Deposit watch (open-then-verify, Task 12) — RUNS EVERY TICK ──────────
@@ -447,17 +524,7 @@ pub async fn run_observer(chain: ChainId) {
     // loop). Borrow discipline: snapshot the small per-vault tuples under one
     // `read_state` BEFORE the await loop; never hold a state borrow across
     // `get_balance(...).await`.
-    let now = ic_cdk::api::time();
-    let awaiting: Vec<(u64, String, u128)> = read_state(|s| {
-        s.multi_chain
-            .chain_vaults
-            .values()
-            .filter(|v| {
-                v.collateral_chain == chain && v.status == ChainVaultStatus::AwaitingDeposit
-            })
-            .map(|v| (v.vault_id, v.custody_address.clone(), v.collateral_amount_native))
-            .collect()
-    });
+    let awaiting = mutate_state(|s| take_awaiting_deposit_page(&mut s.multi_chain, chain));
 
     for (vault_id, custody_address, declared_e18) in awaiting {
         let balance = match get_balance(chain, &custody_address).await {
@@ -479,8 +546,20 @@ pub async fn run_observer(chain: ChainId) {
             continue;
         }
 
-        let transitioned = mutate_state(|s| {
-            verify_deposit_and_enqueue_mint_in_state(&mut s.multi_chain, vault_id, balance, now)
+        let transition_now = ic_cdk::api::time();
+        let transitioned: Result<bool, String> = mutate_state(|s| {
+            if !s.multi_chain.chain_is_registered(chain) {
+                return Err("chain disabled while deposit balance RPC was in flight".into());
+            }
+            public_readiness::enforce_conflux_mainnet_public_risk_gate(s, chain, transition_now)
+                .map_err(|error| format!("{error:?}"))?;
+            verify_deposit_and_enqueue_mint_in_state(
+                &mut s.multi_chain,
+                vault_id,
+                balance,
+                transition_now,
+            )
+            .map_err(|error| format!("{error:?}"))
         });
 
         match transitioned {
@@ -496,7 +575,7 @@ pub async fn run_observer(chain: ChainId) {
                     // since deposit-watch does not read a fresh block height.
                     tx_hash: String::new(),
                     block_number: last_observed,
-                    timestamp: now,
+                    timestamp: transition_now,
                 });
                 log!(
                     INFO,
@@ -527,11 +606,14 @@ pub async fn run_observer(chain: ChainId) {
     // dedup (finding #37). Routing keys off the marker, never op presence (finding #5).
     {
         let now_ns = ic_cdk::api::time();
-        let liq_threshold_e4 =
-            crate::chains::collateral_config::chain_collateral_config(chain).map(|c| c.liquidation_threshold_e4);
+        let liq_threshold_e4 = crate::chains::collateral_config::chain_collateral_config(chain)
+            .map(|c| c.liquidation_threshold_e4);
         let symbol = crate::chains::evm::evm_chain_config(chain).map(|c| c.native_symbol);
         let enabled = read_state(|s| {
-            s.multi_chain.chain_liquidation_configs.get(&chain).map_or(false, |c| c.enabled)
+            s.multi_chain
+                .chain_liquidation_configs
+                .get(&chain)
+                .map_or(false, |c| c.enabled)
         });
         if let (true, Some(threshold), Some(symbol)) = (enabled, liq_threshold_e4, symbol) {
             let escalated = mutate_state(|s| {
@@ -569,8 +651,14 @@ pub async fn run_observer(chain: ChainId) {
                     .get(&chain)
                     .map(|c| c.max_price_age_ns)
                     .unwrap_or(0);
-                crate::chains::liquidation::fresh_chain_price_e8(&s.multi_chain, chain, symbol, now_ns, max_age)
-                    .is_ok()
+                crate::chains::liquidation::fresh_chain_price_e8(
+                    &s.multi_chain,
+                    chain,
+                    symbol,
+                    now_ns,
+                    max_age,
+                )
+                .is_ok()
             });
             if !price_ok {
                 crate::storage::record_event(&crate::event::Event::ChainLiquidationDeferred {
@@ -591,7 +679,12 @@ pub async fn run_observer(chain: ChainId) {
                     )
                 });
                 if routed > 0 {
-                    log!(INFO, "[observer chain={:?}] liquidation detection routed {} vault(s)", chain, routed);
+                    log!(
+                        INFO,
+                        "[observer chain={:?}] liquidation detection routed {} vault(s)",
+                        chain,
+                        routed
+                    );
                 }
             }
         }
@@ -659,12 +752,19 @@ pub async fn run_observer(chain: ChainId) {
     // revisit for deeper-finality chains (Phase 1c) or if the probe is extended
     // to verify block hashes.
     let finality_depth = read_state(|s| {
-        s.multi_chain.chain_configs.get(&chain).map(|c| c.finality_depth)
+        s.multi_chain
+            .chain_configs
+            .get(&chain)
+            .map(|c| c.finality_depth)
     })
     .unwrap_or(1);
     let suspected = hardening::is_reorg(last_observed, finalized, finality_depth);
     let streak = read_state(|s| {
-        s.multi_chain.reorg_suspect_streak.get(&chain).copied().unwrap_or(0)
+        s.multi_chain
+            .reorg_suspect_streak
+            .get(&chain)
+            .copied()
+            .unwrap_or(0)
     });
     let (new_streak, should_halt) = hardening::on_reorg_tick(streak, suspected);
     mutate_state(|s| {
@@ -756,7 +856,11 @@ pub async fn run_observer(chain: ChainId) {
     });
     if !poll_enabled {
         let recorded_supply = read_state(|s| {
-            s.multi_chain.chain_supplies.get(&chain).copied().unwrap_or(0)
+            s.multi_chain
+                .chain_supplies
+                .get(&chain)
+                .copied()
+                .unwrap_or(0)
         });
         let has_inflight_mint =
             read_state(|s| s.multi_chain.has_supply_increasing_settlement_op(chain));
@@ -787,7 +891,8 @@ pub async fn run_observer(chain: ChainId) {
                             chain, onchain_supply, recorded_supply, onchain_supply.saturating_sub(recorded_supply)
                         );
                     }
-                    let scan = backstop_should_scan(onchain_supply, recorded_supply, has_inflight_mint);
+                    let scan =
+                        backstop_should_scan(onchain_supply, recorded_supply, has_inflight_mint);
                     if scan {
                         log!(
                             INFO,
@@ -816,13 +921,19 @@ pub async fn run_observer(chain: ChainId) {
 
     let from_block = last_observed + 1;
 
-    let raw_burn_logs = match get_logs(chain, &contract, BURN_EVENT_TOPIC0, from_block, finalized).await {
-        Ok(logs) => logs,
-        Err(e) => {
-            log!(INFO, "[observer chain={:?}] get_logs(burn) failed: {}; will retry on next tick", chain, e);
-            return;
-        }
-    };
+    let raw_burn_logs =
+        match get_logs(chain, &contract, BURN_EVENT_TOPIC0, from_block, finalized).await {
+            Ok(logs) => logs,
+            Err(e) => {
+                log!(
+                    INFO,
+                    "[observer chain={:?}] get_logs(burn) failed: {}; will retry on next tick",
+                    chain,
+                    e
+                );
+                return;
+            }
+        };
 
     // ── Per-burn handling: dedup + skip-poison-and-continue (C-1) ────────────
     //
@@ -892,9 +1003,8 @@ pub async fn run_observer(chain: ChainId) {
         let current_total: u128 = read_state(|s| s.multi_chain.total_chain_vault_debt_e8s());
 
         let burn_clone = burn.clone();
-        let result = mutate_state(|s| {
-            apply_burn_to_state(&mut s.multi_chain, &burn_clone, current_total)
-        });
+        let result =
+            mutate_state(|s| apply_burn_to_state(&mut s.multi_chain, &burn_clone, current_total));
 
         match result {
             Ok(()) => {
@@ -923,7 +1033,11 @@ pub async fn run_observer(chain: ChainId) {
                 log!(
                     INFO,
                     "[observer chain={:?}] burn applied: vault={} amount_e8s={} block={} tx={}",
-                    chain, burn.vault_id, burn.amount_e8s, burn.block_number, burn.tx_hash
+                    chain,
+                    burn.vault_id,
+                    burn.amount_e8s,
+                    burn.block_number,
+                    burn.tx_hash
                 );
             }
             Err(BurnApplyError::InvalidBurn(msg)) => {
@@ -1001,7 +1115,36 @@ pub async fn run_observer(chain: ChainId) {
 /// vaults make a tick outliving MAX_BLOCK_SCAN_WINDOW blocks unreachable in
 /// practice). Revisit for deeper finality / higher vault counts where a self-heal
 /// reclaim could race the prune.
-pub(crate) fn advance_cursor_and_prune(state: &mut MultiChainState, chain: ChainId, finalized: u64) {
+///
+/// F-02 (2026-06-18 audit) analysis: the ONLY sound discharge condition for a
+/// dedup key is "the cursor has advanced past its block" (`from_block` in
+/// `run_observer` is always `last_observed_block + 1`, so a block at or below
+/// the cursor can never be re-scanned again). A pure RPC/probe stall (the
+/// #338 TooFewCycles shape) means `run_observer` returns before this function
+/// is ever called — zero growth, proven bounded by
+/// `tests_deposit_watch::deferred_liquidation_stall_bounds_processed_burn_keys_across_rescans`
+/// for the DeferredLiquidation head-of-line variant of a stalled cursor. A
+/// `reorg_halted` stall is different: this function is the ONLY pruning site
+/// this module owns, and it is only reachable from `run_observer`, which never
+/// runs the burn-watch path while halted — so it cannot bound keys inserted by
+/// the independent `submit_burn_proof` notify path
+/// (`chains/evm/burn_proof.rs::apply_receipt_burns_to_state`). See
+/// `tests_deposit_watch::keys_ahead_of_cursor_are_retained_across_repeated_stalled_prune_calls`,
+/// which proves this function correctly refuses to evict those keys (the safe
+/// behavior) rather than unsafely bounding them. The notify path's own
+/// residual — that it was not gated on `reorg_halted` — is NOW CLOSED by
+/// `burn_proof.rs`: `apply_receipt_burns_to_state` re-checks `reorg_halted` as
+/// its first statement, inside the same `mutate_state` closure with no
+/// `.await` between the check and the mutation, so nothing is inserted into
+/// `processed_burn_keys` (or otherwise mutated) while halted; a cheap
+/// pre-await check in `verify_and_apply_burn_proof` additionally fails fast
+/// before spending outcall cycles, but the authoritative guard is the
+/// re-check inside `apply_receipt_burns_to_state`.
+pub(crate) fn advance_cursor_and_prune(
+    state: &mut MultiChainState,
+    chain: ChainId,
+    finalized: u64,
+) {
     state.last_observed_block.insert(chain, finalized);
     let stale: Vec<u64> = state
         .processed_burn_keys
@@ -1018,11 +1161,16 @@ pub(crate) fn advance_cursor_and_prune(state: &mut MultiChainState, chain: Chain
 /// Derives the settlement (minter) address via `settlement_derivation_path` +
 /// `derive_evm_address`, reads its native balance via `get_balance`, and caches
 /// it in `hot_wallet_balance_e18`. Used by the submit-path gas gate and the
-/// Task-14 query surface. Errors are logged and swallowed — a failed refresh
-/// leaves the previous cached value in place (or, on a fresh chain, leaves the
-/// cache unpopulated, which the gas gate treats as fail-open). Borrow
+/// Task-14 query surface. Errors are logged and returned (the observer caller
+/// deliberately tolerates them) — a failed refresh leaves the previous cached
+/// value in place (or, on a fresh chain, leaves the cache unpopulated).
+/// Ordinary EVM chains retain the legacy submit-time
+/// fail-open behavior for an absent cache; chain 1030's authoritative public
+/// risk gate separately fails closed until a current-key proof exists. Borrow
 /// discipline: no `read_state`/`mutate_state` borrow is held across an `.await`.
-async fn refresh_hot_wallet_balance(chain: ChainId) {
+pub async fn refresh_hot_wallet_balance(chain: ChainId) -> Result<u128, String> {
+    let captured_generation = tecdsa::current_ecdsa_key_generation();
+    let captured_key_name = read_state(|state| state.chains_ecdsa_key_name.clone());
     // Resolve the settlement address via the per-chain cache (Task 11 M1) — the
     // address is deterministic, so we avoid a tECDSA derive on every observer
     // tick. We only need the address here (not the path).
@@ -1030,14 +1178,32 @@ async fn refresh_hot_wallet_balance(chain: ChainId) {
         Ok((_path, addr)) => addr,
         Err(e) => {
             log!(INFO, "[observer chain={:?}] hot-wallet cached_settlement_address failed: {}; skipping balance refresh", chain, e);
-            return;
+            return Err(e);
         }
     };
+    // Capture the exact trust anchor immediately before the RPC outcall. A
+    // fresh-rail override racing this await must not let the old provider's
+    // response become a current gas-solvency proof.
+    let captured_evm_rpc_principal = super::evm_rpc::evm_rpc_principal();
     match get_balance(chain, &addr).await {
         Ok(bal) => {
-            mutate_state(|s| {
-                s.multi_chain.hot_wallet_balance_e18.insert(chain, bal);
-            });
+            let refreshed_at_ns = ic_cdk::api::time();
+            let current_generation = tecdsa::current_ecdsa_key_generation();
+            let current_cached_address = tecdsa::cached_settlement_address_if_present(chain);
+            mutate_state(|state| {
+                commit_hot_wallet_refresh_if_current(
+                    state,
+                    chain,
+                    &captured_key_name,
+                    captured_generation,
+                    &addr,
+                    captured_evm_rpc_principal,
+                    current_generation,
+                    current_cached_address.as_deref(),
+                    bal,
+                    refreshed_at_ns,
+                )
+            })?;
             if !hardening::hot_wallet_ok(bal) {
                 log!(
                     INFO,
@@ -1045,10 +1211,270 @@ async fn refresh_hot_wallet_balance(chain: ChainId) {
                     chain, bal, hardening::HOT_WALLET_MIN_E18, addr
                 );
             }
+            Ok(bal)
         }
         Err(e) => {
-            log!(INFO, "[observer chain={:?}] hot-wallet get_balance failed: {}; keeping cached value", chain, e);
+            log!(
+                INFO,
+                "[observer chain={:?}] hot-wallet get_balance failed: {}; keeping cached value",
+                chain,
+                e
+            );
+            Err(e)
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn commit_hot_wallet_refresh_if_current(
+    state: &mut crate::state::State,
+    chain: ChainId,
+    captured_key_name: &str,
+    captured_generation: u64,
+    captured_address: &str,
+    captured_evm_rpc_principal: candid::Principal,
+    current_generation: u64,
+    current_cached_address: Option<&str>,
+    balance_e18: u128,
+    refreshed_at_ns: u64,
+) -> Result<(), String> {
+    if state.chains_ecdsa_key_name != captured_key_name
+        || current_generation != captured_generation
+        || current_cached_address != Some(captured_address)
+        || super::evm_rpc::evm_rpc_principal_in_state(state) != captured_evm_rpc_principal
+    {
+        return Err(format!(
+            "ecdsa key generation/name/settlement address or EVM RPC principal changed while refreshing chain {}; discarding stale hot-wallet proof",
+            chain.0
+        ));
+    }
+    state
+        .multi_chain
+        .hot_wallet_balance_e18
+        .insert(chain, balance_e18);
+    state
+        .multi_chain
+        .hot_wallet_balance_refreshed_at_ns
+        .insert(chain, refreshed_at_ns);
+    Ok(())
+}
+
+#[cfg(test)]
+mod awaiting_deposit_page_tests {
+    use super::{
+        take_awaiting_deposit_page, MAX_AWAITING_DEPOSIT_GLOBAL_SCAN_PER_TICK,
+        MAX_AWAITING_DEPOSIT_POLLS_PER_TICK,
+    };
+    use crate::chains::config::ChainId;
+    use crate::chains::monad::chain_vault::{ChainVaultStatus, ChainVaultV1};
+    use crate::chains::multi_chain_state::MultiChainState;
+    use candid::Principal;
+    use std::collections::BTreeSet;
+
+    const TARGET: ChainId = ChainId(1030);
+    const OTHER: ChainId = ChainId(71);
+
+    fn vault(vault_id: u64, chain: ChainId, status: ChainVaultStatus) -> ChainVaultV1 {
+        ChainVaultV1 {
+            vault_id,
+            owner: Principal::anonymous(),
+            collateral_chain: chain,
+            custody_address: format!("0x{vault_id:040x}"),
+            collateral_amount_native: vault_id as u128,
+            debt_e8s: 0,
+            mint_recipient: "0x0000000000000000000000000000000000000001".into(),
+            pending_mint_e8s: 1,
+            status,
+            opened_at_ns: 0,
+            owner_evm: None,
+            last_interest_accrual_ns: 0,
+            pending_interest_mint_e8s: 0,
+            pending_liquidation: None,
+        }
+    }
+
+    #[test]
+    fn bounded_cursor_eventually_reaches_more_than_five_hundred_without_duplicates() {
+        let mut state = MultiChainState::default();
+        for id in 1..=625 {
+            state
+                .chain_vaults
+                .insert(id, vault(id, TARGET, ChainVaultStatus::AwaitingDeposit));
+        }
+
+        let mut seen = BTreeSet::new();
+        let mut ticks = 0;
+        loop {
+            let page = take_awaiting_deposit_page(&mut state, TARGET);
+            assert!(page.len() <= MAX_AWAITING_DEPOSIT_POLLS_PER_TICK);
+            for (id, _, _) in page {
+                assert!(seen.insert(id), "duplicate vault {id} before cursor wrap");
+            }
+            ticks += 1;
+            if !state.awaiting_deposit_cursor.contains_key(&TARGET) {
+                break;
+            }
+            assert!(ticks < 100, "cursor failed to terminate one full pass");
+        }
+        assert_eq!(seen.len(), 625);
+        assert_eq!(seen.first(), Some(&1));
+        assert_eq!(seen.last(), Some(&625));
+    }
+
+    #[test]
+    fn scan_bound_is_global_and_sparse_target_is_reached_fairly() {
+        let mut state = MultiChainState::default();
+        for id in 1..=600 {
+            let chain = if id == 600 { TARGET } else { OTHER };
+            state
+                .chain_vaults
+                .insert(id, vault(id, chain, ChainVaultStatus::AwaitingDeposit));
+        }
+
+        assert!(take_awaiting_deposit_page(&mut state, TARGET).is_empty());
+        assert_eq!(
+            state.awaiting_deposit_cursor.get(&TARGET),
+            Some(&(MAX_AWAITING_DEPOSIT_GLOBAL_SCAN_PER_TICK as u64))
+        );
+        let second = take_awaiting_deposit_page(&mut state, TARGET);
+        assert_eq!(
+            second.iter().map(|entry| entry.0).collect::<Vec<_>>(),
+            vec![600]
+        );
+        assert!(!state.awaiting_deposit_cursor.contains_key(&TARGET));
+    }
+
+    #[test]
+    fn filters_chain_and_non_awaiting_statuses() {
+        let mut state = MultiChainState::default();
+        state
+            .chain_vaults
+            .insert(1, vault(1, OTHER, ChainVaultStatus::AwaitingDeposit));
+        state
+            .chain_vaults
+            .insert(2, vault(2, TARGET, ChainVaultStatus::Open));
+        state
+            .chain_vaults
+            .insert(3, vault(3, TARGET, ChainVaultStatus::AwaitingDeposit));
+        let page = take_awaiting_deposit_page(&mut state, TARGET);
+        assert_eq!(
+            page.iter().map(|entry| entry.0).collect::<Vec<_>>(),
+            vec![3]
+        );
+    }
+}
+
+#[cfg(test)]
+mod hot_wallet_refresh_generation_tests {
+    use super::commit_hot_wallet_refresh_if_current;
+    use crate::chains::config::ChainId;
+    use crate::chains::evm::evm_rpc::default_evm_rpc_principal;
+    use crate::state::State;
+
+    #[test]
+    fn old_generation_refresh_cannot_overwrite_current_proof() {
+        let chain = ChainId(1030);
+        let mut state = State::default();
+        state.multi_chain.hot_wallet_balance_e18.insert(chain, 777);
+        state
+            .multi_chain
+            .hot_wallet_balance_refreshed_at_ns
+            .insert(chain, 888);
+        let error = commit_hot_wallet_refresh_if_current(
+            &mut state,
+            chain,
+            "test_key_1",
+            4,
+            "0xold",
+            default_evm_rpc_principal(),
+            5,
+            Some("0xnew"),
+            1_000,
+            2_000,
+        )
+        .expect_err("old-generation result must be discarded");
+        assert!(error.contains("discarding stale hot-wallet proof"));
+        assert_eq!(
+            state.multi_chain.hot_wallet_balance_e18.get(&chain),
+            Some(&777)
+        );
+        assert_eq!(
+            state
+                .multi_chain
+                .hot_wallet_balance_refreshed_at_ns
+                .get(&chain),
+            Some(&888)
+        );
+    }
+
+    #[test]
+    fn matching_key_generation_and_address_commits_proof() {
+        let chain = ChainId(1030);
+        let mut state = State::default();
+        commit_hot_wallet_refresh_if_current(
+            &mut state,
+            chain,
+            "test_key_1",
+            4,
+            "0xcurrent",
+            default_evm_rpc_principal(),
+            4,
+            Some("0xcurrent"),
+            1_000,
+            2_000,
+        )
+        .expect("current-key result commits");
+        assert_eq!(
+            state.multi_chain.hot_wallet_balance_e18.get(&chain),
+            Some(&1_000)
+        );
+        assert_eq!(
+            state
+                .multi_chain
+                .hot_wallet_balance_refreshed_at_ns
+                .get(&chain),
+            Some(&2_000)
+        );
+    }
+
+    #[test]
+    fn old_rpc_principal_refresh_cannot_overwrite_current_proof() {
+        let chain = ChainId(1030);
+        let old_rpc = candid::Principal::from_slice(&[8; 29]);
+        let new_rpc = candid::Principal::from_slice(&[9; 29]);
+        let mut state = State::default();
+        state.evm_rpc_principal_override = Some(new_rpc);
+        state.multi_chain.hot_wallet_balance_e18.insert(chain, 777);
+        state
+            .multi_chain
+            .hot_wallet_balance_refreshed_at_ns
+            .insert(chain, 888);
+
+        let error = commit_hot_wallet_refresh_if_current(
+            &mut state,
+            chain,
+            "test_key_1",
+            4,
+            "0xcurrent",
+            old_rpc,
+            4,
+            Some("0xcurrent"),
+            1_000,
+            2_000,
+        )
+        .expect_err("old-provider result must be discarded");
+        assert!(error.contains("EVM RPC principal changed"));
+        assert_eq!(
+            state.multi_chain.hot_wallet_balance_e18.get(&chain),
+            Some(&777)
+        );
+        assert_eq!(
+            state
+                .multi_chain
+                .hot_wallet_balance_refreshed_at_ns
+                .get(&chain),
+            Some(&888)
+        );
     }
 }
 
@@ -1094,7 +1520,12 @@ mod liq_defer_tests {
     }
 
     fn burn(amount_e8s: u128) -> BurnLog {
-        BurnLog { vault_id: 7, amount_e8s, tx_hash: "0xburn".into(), block_number: 1 }
+        BurnLog {
+            vault_id: 7,
+            amount_e8s,
+            tx_hash: "0xburn".into(),
+            block_number: 1,
+        }
     }
 
     #[test]
@@ -1103,9 +1534,20 @@ mod liq_defer_tests {
         s.chain_supplies.insert(CFX, 100);
         s.chain_vaults.insert(7, vault(true));
         let res = apply_burn_to_state(&mut s, &burn(50), 100);
-        assert!(matches!(res, Err(BurnApplyError::DeferredLiquidation)), "burn deferred, not applied");
-        assert_eq!(s.chain_vaults.get(&7).unwrap().debt_e8s, 100, "debt unchanged");
-        assert_eq!(*s.chain_supplies.get(&CFX).unwrap(), 100, "supply unchanged");
+        assert!(
+            matches!(res, Err(BurnApplyError::DeferredLiquidation)),
+            "burn deferred, not applied"
+        );
+        assert_eq!(
+            s.chain_vaults.get(&7).unwrap().debt_e8s,
+            100,
+            "debt unchanged"
+        );
+        assert_eq!(
+            *s.chain_supplies.get(&CFX).unwrap(),
+            100,
+            "supply unchanged"
+        );
     }
 
     #[test]
@@ -1117,9 +1559,20 @@ mod liq_defer_tests {
 
         let res = apply_burn_to_state(&mut s, &burn(50), 100);
 
-        assert!(matches!(res, Err(BurnApplyError::DeferredLiquidation)), "burn deferred, not applied");
-        assert_eq!(s.chain_vaults.get(&7).unwrap().debt_e8s, 100, "debt unchanged");
-        assert_eq!(*s.chain_supplies.get(&CFX).unwrap(), 100, "supply unchanged");
+        assert!(
+            matches!(res, Err(BurnApplyError::DeferredLiquidation)),
+            "burn deferred, not applied"
+        );
+        assert_eq!(
+            s.chain_vaults.get(&7).unwrap().debt_e8s,
+            100,
+            "debt unchanged"
+        );
+        assert_eq!(
+            *s.chain_supplies.get(&CFX).unwrap(),
+            100,
+            "supply unchanged"
+        );
     }
 
     #[test]

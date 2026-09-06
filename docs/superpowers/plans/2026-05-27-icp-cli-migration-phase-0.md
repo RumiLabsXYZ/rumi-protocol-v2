@@ -1324,14 +1324,20 @@ Add a comment in icp.yaml referencing this requirement.
 
 ```bash
 icp build rumi_protocol_backend
-ICP_HASH=$(sha256sum target/wasm32-unknown-unknown/release/rumi_protocol_backend.wasm | awk '{print $1}')
-PROD_HASH=$(dfx canister info rumi_protocol_backend --network ic | grep -i "Module hash" | awk '{print $NF}' | tr -d '0x')
-echo "icp-cli: $ICP_HASH"
-echo "Prod:    $PROD_HASH"
-[ "$ICP_HASH" = "$PROD_HASH" ] && echo "OK to no-op upgrade" || echo "STOP: hashes differ"
+ARTIFACT=.icp/cache/artifacts/rumi_protocol_backend
+UPLOAD_HASH=$(shasum -a 256 "$ARTIFACT" | awk '{print $1}')
+CONTENT_HASH=$(gzip -dc "$ARTIFACT" | shasum -a 256 | awk '{print $1}')
+PROD_HASH=$(dfx canister info rumi_protocol_backend --network ic | grep -i "Module hash" | awk '{print $NF}' | tr '[:upper:]' '[:lower:]' | sed 's/^0x//')
+echo "Uploaded gzip:       $UPLOAD_HASH"
+echo "Decompressed content: $CONTENT_HASH (reproducibility evidence only)"
+echo "Production status:    $PROD_HASH"
+[ "$UPLOAD_HASH" = "$PROD_HASH" ] && echo "OK to no-op upgrade" || echo "STOP: hashes differ"
 ```
 
-**Decision gate:** If hashes differ, STOP. This is the highest-stakes canister. Investigate before deploying.
+**Decision gate:** If the uploaded gzip hash and production module hash differ,
+STOP. For a gzip artifact, the live module hash is the uploaded gzip SHA-256;
+never compare the decompressed content hash to canister status. This is the
+highest-stakes canister. Investigate before deploying.
 
 - [ ] **Step 4: Deploy via icp-cli with the description**
 

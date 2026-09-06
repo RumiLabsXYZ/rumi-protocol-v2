@@ -122,7 +122,13 @@ export function depositMultiplierLabel(venue: EarnVenue, assetSymbol: string): s
   return '1×'; // vault
 }
 
-/** Format LeaderboardEntry.estimated_share_bps (bps of the Season 1 pool) as a %. */
+/**
+ * Format LeaderboardEntry.estimated_share_bps (bps of the Season 1 pool) as a %.
+ *
+ * NOT used on any user-facing surface: share-of-pool is deliberately kept off
+ * the /points page (it exposes how concentrated the season is and implies a
+ * payout proportion nothing has committed to). Kept for operator tooling.
+ */
 export function formatSharePct(bps: number): string {
   if (!Number.isFinite(bps) || bps <= 0) return '—';
   return `${(bps / 100).toFixed(2)}%`;

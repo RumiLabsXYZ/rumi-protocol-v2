@@ -57,6 +57,10 @@ const icp: AmmToken = {
   symbol: 'ICP', ledgerId: 'ryjl3-tyaaa-aaaaa-aaaba-cai',
   decimals: 8, threePoolIndex: -1, is3USD: false,
 } as AmmToken;
+const ckUsdt: AmmToken = {
+  symbol: 'ckUSDT', ledgerId: 'cngnf-vqaaa-aaaar-qag4q-cai',
+  decimals: 6, threePoolIndex: 1, is3USD: false,
+} as AmmToken;
 
 describe('IcpswapProvider (quote)', () => {
   beforeEach(() => {
@@ -109,6 +113,63 @@ describe('IcpswapProvider (quote)', () => {
       zeroForOne: true,
       amountOutMinimum: '0',
     });
+  });
+});
+
+describe('IcpswapProvider.supports (token standard gating)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('rejects tokenIn when its registered standard is ICRC1, but allows the reverse direction', () => {
+    // Mirrors real pool jogrm-gqaaa-aaaar-qcg2a-cai: ckUSDT (token0) is
+    // ICRC2, icUSD (token1) is registered ICRC1. swap() pulls tokenIn via
+    // pool.depositFrom, which ICPswap services with the adapter for tokenIn's
+    // registered standard -- the ICRC1 adapter has no transferFrom, so icUSD
+    // can never be the INPUT side of this pool. tokenOut is unaffected
+    // because withdraw() pays out via a plain icrc1_transfer.
+    const provider = new IcpswapProvider({
+      id: 'icpswap_ckusdt_icusd',
+      poolCanisterId: 'jogrm-gqaaa-aaaar-qcg2a-cai',
+      token0LedgerId: 'cngnf-vqaaa-aaaar-qag4q-cai', // ckUSDT
+      token1LedgerId: 't6bor-paaaa-aaaap-qrd5q-cai', // icUSD
+      feeBps: 30,
+      token1Standard: 'ICRC1',
+    });
+
+    // ckUSDT -> icUSD: tokenIn (ckUSDT) is ICRC2 (default) -> supported.
+    expect(provider.supports(ckUsdt, icUsd)).toBe(true);
+    // icUSD -> ckUSDT: tokenIn (icUSD) is ICRC1 -> rejected.
+    expect(provider.supports(icUsd, ckUsdt)).toBe(false);
+  });
+
+  it('supports both directions when neither leg overrides the ICRC2 default', () => {
+    const provider = new IcpswapProvider({
+      id: 'icpswap_icusd_ckusdc',
+      poolCanisterId: 'eb25l-dyaaa-aaaar-qb4lq-cai',
+      token0LedgerId: 't6bor-paaaa-aaaap-qrd5q-cai', // icUSD
+      token1LedgerId: 'xevnm-gaaaa-aaaar-qafnq-cai', // ckUSDC
+      feeBps: 30,
+    });
+    const ckUsdc: AmmToken = {
+      symbol: 'ckUSDC', ledgerId: 'xevnm-gaaaa-aaaar-qafnq-cai',
+      decimals: 6, threePoolIndex: 2, is3USD: false,
+    } as AmmToken;
+
+    expect(provider.supports(icUsd, ckUsdc)).toBe(true);
+    expect(provider.supports(ckUsdc, icUsd)).toBe(true);
+  });
+
+  it('still rejects an unrelated pair regardless of standard config', () => {
+    const provider = new IcpswapProvider({
+      id: 'icpswap_ckusdt_icusd',
+      poolCanisterId: 'jogrm-gqaaa-aaaar-qcg2a-cai',
+      token0LedgerId: 'cngnf-vqaaa-aaaar-qag4q-cai',
+      token1LedgerId: 't6bor-paaaa-aaaap-qrd5q-cai',
+      feeBps: 30,
+      token1Standard: 'ICRC1',
+    });
+    expect(provider.supports(icUsd, icp)).toBe(false);
   });
 });
 
