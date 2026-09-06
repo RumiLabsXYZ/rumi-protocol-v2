@@ -1167,9 +1167,10 @@ impl CollateralConfig {
     /// deposit/withdraw transfer paths, add-margin, redemption-priority
     /// exclusion) without that call site needing to be touched when the
     /// variant is added. `scan_unhealthy_vaults`'s automated-liquidation
-    /// exclusion combines this with `!is_native_xrp()` instead, since XRP
-    /// (unlike SOL) has an automated stability-pool absorb path and must stay
-    /// IN that scan (see the SOL-PARITY-TODO note there). Sites whose PAYOUT
+    /// exclusion combines this with `!is_native_xrp() && !is_native_sol()`
+    /// instead, since both XRP and SOL have an automated stability-pool absorb
+    /// path and must stay IN that scan; a future non-ICRC rail without one
+    /// stays excluded until it earns the same treatment. Sites whose PAYOUT
     /// ROUTING differs per custody kind should use an exhaustive `match
     /// custody() { ... }` instead of this predicate, so the compiler forces a
     /// decision for the new kind rather than silently misrouting it.
@@ -4380,16 +4381,19 @@ impl State {
     /// paid (useful for production telemetry and the DOS-005 fence).
     /// Amount a liquidation dispatch should ask an absorber to repay.
     ///
-    /// Native-XRP is full-liquidation-only: `xrp_sp_absorb_sizing` rejects any
-    /// requested burn that isn't exactly the vault's live debt (the seizure and
-    /// the resulting `XrpClaim` are computed against the whole debt). Handing
-    /// the SP the generic partial cap makes every automated absorb fail at
-    /// preflight, so native-XRP dispatches the full debt. All other collateral
-    /// keeps the partial cap, which restores the vault to its borrow threshold.
+    /// Every native-custody rail (native-XRP, native-SOL) is full-liquidation-only:
+    /// `xrp_sp_absorb_sizing` / `sol_sp_absorb_sizing` reject any requested burn
+    /// that isn't exactly the vault's live debt (the seizure and the resulting
+    /// XrpClaim/SolClaim are computed against the whole debt). Handing the SP the
+    /// generic partial cap makes every automated absorb fail at preflight, so
+    /// native custody dispatches the full debt. Generalized on `is_native_custody`
+    /// (not an OR of the known variants) so a future non-ICRC rail is covered
+    /// automatically; all ICRC-ledger collateral keeps the partial cap, which
+    /// restores the vault to its borrow threshold.
     pub fn recommended_liquidation_amount_for(&self, vault: &Vault, price: UsdIcp) -> ICUSD {
         if self
             .get_collateral_config(&vault.collateral_type)
-            .map(|c| c.is_native_xrp())
+            .map(|c| c.is_native_custody())
             .unwrap_or(false)
         {
             return vault.borrowed_icusd_amount;
@@ -4399,16 +4403,19 @@ impl State {
 
     /// Whether the liquidation bot may be offered vaults of this collateral
     /// type. Requires the operator allowlist AND a custody kind the bot can
-    /// actually settle: native-XRP collateral is claim-based (XRPL side), so
-    /// the bot is refused regardless of `bot_allowed_collateral_types` and the
-    /// cascade falls through to the stability pool's native-XRP absorb path.
+    /// actually settle: native custody (XRP, SOL) is claim-based (settled on the
+    /// XRPL / Solana side), so the bot is refused regardless of
+    /// `bot_allowed_collateral_types` and the cascade falls through to the
+    /// stability pool's native absorb path. Gated on the fail-closed
+    /// `is_native_custody` (not an OR of the known variants) so a future
+    /// non-ICRC rail is excluded automatically without touching this call site.
     pub fn vault_routable_to_bot(&self, collateral_type: &Principal) -> bool {
         if !self.bot_allowed_collateral_types.contains(collateral_type) {
             return false;
         }
         !self
             .get_collateral_config(collateral_type)
-            .map(|c| c.is_native_xrp())
+            .map(|c| c.is_native_custody())
             .unwrap_or(false)
     }
 
@@ -4436,22 +4443,23 @@ impl State {
                 if vault.bot_processing {
                     continue;
                 }
-                // P5 (2026-08-14): native-XRP vaults are no longer excluded here.
-                // XRP liquidation is auto-dispatched to the stability pool via its
-                // native-XRP absorb path (see check_vaults), so XRP vaults must
-                // appear in this scan for that dispatch to trigger.
+                // P5 (2026-08-14) / SOL parity (2026-09-06): native-XRP and
+                // native-SOL vaults are no longer excluded here. Both are
+                // auto-dispatched to the stability pool via their respective
+                // native absorb paths (see check_vaults, which now sizes the
+                // dispatch as the full debt for either via
+                // `recommended_liquidation_amount_for`), so vaults of either
+                // custody kind must appear in this scan for that dispatch to
+                // trigger. `vault_routable_to_bot` fences both away from the
+                // bot separately, since neither can settle a claim there.
                 //
-                // Native-SOL has no such absorb path yet (a SolClaim can only be
-                // settled by settle_sol_claim, which neither the SP nor the bot
-                // call), so it stays excluded (claim-based, manual liquidation
-                // only via liquidate_vault_partial / partial_liquidate_vault)
-                // until SOL gets absorption parity with XRP.
-                // SOL-PARITY-TODO: once native-SOL has an SP (or bot) absorb path
-                // mirroring XRP's, drop this exclusion so SOL vaults enter the
-                // automated scan too.
+                // Written as `is_native_custody() && !is_native_xrp() &&
+                // !is_native_sol()` (not an inverted allowlist) so a future
+                // non-ICRC rail without an absorb path is excluded by default
+                // until it earns the same parity treatment.
                 if self
                     .get_collateral_config(&vault.collateral_type)
-                    .map(|c| c.is_native_custody() && !c.is_native_xrp())
+                    .map(|c| c.is_native_custody() && !c.is_native_xrp() && !c.is_native_sol())
                     .unwrap_or(false)
                 {
                     continue;
@@ -8337,6 +8345,59 @@ mod tests {
     }
 
     #[test]
+    fn scan_unhealthy_vaults_includes_native_sol() {
+        // SOL parity with the native-XRP fix above: native-SOL vaults must also
+        // appear in the automated liquidation scan so check_vaults dispatches
+        // them to the stability pool's native-SOL absorb path. Bot routing is
+        // still fenced separately via vault_routable_to_bot.
+        let mut s = test_state();
+        let icp = s.icp_ledger_principal;
+        let sol = sol_collateral_principal();
+        if let Some(c) = s.collateral_configs.get_mut(&icp) {
+            c.last_price = Some(5.0);
+        }
+        let mut sol_cfg = sol_collateral_config(Ratio::new(dec!(1.0)));
+        sol_cfg.last_price = Some(0.5);
+        s.collateral_configs.insert(sol, sol_cfg);
+
+        // Both vaults deeply underwater (CR ~0.05, far below the min liquidation ratio).
+        s.open_vault(crate::vault::Vault {
+            owner: Principal::anonymous(),
+            vault_id: 1,
+            borrowed_icusd_amount: ICUSD::new(10_000_000_000),
+            collateral_amount: 100_000_000,
+            collateral_type: icp,
+            accrued_interest: ICUSD::new(0),
+            last_accrual_time: 0,
+            bot_processing: false,
+        });
+        s.open_vault(crate::vault::Vault {
+            owner: Principal::anonymous(),
+            vault_id: 2,
+            borrowed_icusd_amount: ICUSD::new(10_000_000_000),
+            collateral_amount: 1_000_000_000,
+            collateral_type: sol,
+            accrued_interest: ICUSD::new(0),
+            last_accrual_time: 0,
+            bot_processing: false,
+        });
+
+        let scan = s.scan_unhealthy_vaults(
+            crate::numeric::UsdIcp::from(rust_decimal::Decimal::ZERO),
+            true,
+        );
+        let ids: Vec<u64> = scan.unhealthy_vaults.iter().map(|v| v.vault_id).collect();
+        assert!(
+            ids.contains(&1),
+            "ICP vault should be flagged unhealthy: {ids:?}"
+        );
+        assert!(
+            ids.contains(&2),
+            "native-SOL vault must be included in the automated scan: {ids:?}"
+        );
+    }
+
+    #[test]
     fn band_scan_finds_vault_that_only_a_price_move_pushed_underwater() {
         // A vault's `vault_cr_index` key is written from the collateral price
         // cached AT THE TIME OF THE LAST VAULT MUTATION. A pure price move
@@ -8450,6 +8511,65 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_sizing_requests_full_debt_for_native_sol() {
+        // SOL parity with the native-XRP test above: `sol_sp_absorb_sizing` is
+        // also full-liquidation-only, so `check_vaults` must dispatch the full
+        // debt for native-SOL, not the generic partial cap.
+        let mut s = test_state();
+        let icp = s.icp_ledger_principal;
+        let sol = sol_collateral_principal();
+        if let Some(c) = s.collateral_configs.get_mut(&icp) {
+            c.last_price = Some(5.0);
+        }
+        let mut sol_cfg = sol_collateral_config(Ratio::new(dec!(1.0)));
+        // $1.15 of SOL against $1.00 of debt => CR 115%, under the 120%
+        // liquidation floor but above the 107.5% bonus: the ordinary breach,
+        // where the partial cap is strictly less than full debt.
+        sol_cfg.last_price = Some(1.15);
+        s.collateral_configs.insert(sol, sol_cfg);
+
+        let sol_vault = crate::vault::Vault {
+            owner: Principal::anonymous(),
+            vault_id: 2,
+            borrowed_icusd_amount: ICUSD::new(100_000_000),
+            collateral_amount: 1_000_000_000, // 9 decimals => 1.0 SOL
+            collateral_type: sol,
+            accrued_interest: ICUSD::new(0),
+            last_accrual_time: 0,
+            bot_processing: false,
+        };
+        let icp_vault = crate::vault::Vault {
+            owner: Principal::anonymous(),
+            vault_id: 1,
+            borrowed_icusd_amount: ICUSD::new(10_000_000_000),
+            collateral_amount: 2_600_000_000,
+            collateral_type: icp,
+            accrued_interest: ICUSD::new(0),
+            last_accrual_time: 0,
+            bot_processing: false,
+        };
+        let dummy = crate::numeric::UsdIcp::from(rust_decimal::Decimal::ZERO);
+
+        // Guard the premise: the generic cap really is a partial here, so this
+        // test would be vacuous if it ever stopped being one.
+        assert!(
+            s.compute_partial_liquidation_cap(&sol_vault, dummy) < sol_vault.borrowed_icusd_amount,
+            "premise: generic cap must be partial for this SOL vault"
+        );
+
+        assert_eq!(
+            s.recommended_liquidation_amount_for(&sol_vault, dummy),
+            sol_vault.borrowed_icusd_amount,
+            "native-SOL dispatch must request the full live debt"
+        );
+        assert_eq!(
+            s.recommended_liquidation_amount_for(&icp_vault, dummy),
+            s.compute_partial_liquidation_cap(&icp_vault, dummy),
+            "non-SOL collateral must keep the generic partial cap"
+        );
+    }
+
+    #[test]
     fn native_xrp_never_routable_to_bot() {
         // The liquidation bot cannot settle native-XRP collateral (it has no
         // XRPL settlement path), so even if an operator adds the XRP synthetic
@@ -8473,6 +8593,31 @@ mod tests {
         assert!(
             !s.vault_routable_to_bot(&xrp),
             "native-XRP must never be bot-routable, even when allowed by config"
+        );
+    }
+
+    #[test]
+    fn native_sol_never_routable_to_bot() {
+        // SOL parity with the native-XRP test above: the bot has no Solana
+        // settlement path either, so routing must refuse it even if an
+        // operator adds the SOL synthetic principal to
+        // `bot_allowed_collateral_types`.
+        let mut s = test_state();
+        let icp = s.icp_ledger_principal;
+        let sol = sol_collateral_principal();
+        s.collateral_configs
+            .insert(sol, sol_collateral_config(Ratio::new(dec!(1.0))));
+
+        s.bot_allowed_collateral_types.insert(icp);
+        s.bot_allowed_collateral_types.insert(sol);
+
+        assert!(
+            s.vault_routable_to_bot(&icp),
+            "ICP in the allowed set must stay bot-routable"
+        );
+        assert!(
+            !s.vault_routable_to_bot(&sol),
+            "native-SOL must never be bot-routable, even when allowed by config"
         );
     }
 
