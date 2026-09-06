@@ -2013,6 +2013,24 @@ impl StabilityPoolState {
         Ok(())
     }
 
+    /// Every user's pending native-SOL payouts, ordered by claim id (claim ids
+    /// are allocated monotonically, so this is also oldest-first). Drives the
+    /// auto-settlement sweep (mirrors `all_native_xrp_pending_payouts`).
+    pub fn all_native_sol_pending_payouts(&self) -> Vec<(Principal, NativeSolPendingPayout)> {
+        let mut all: Vec<(Principal, NativeSolPendingPayout)> = self
+            .deposits
+            .iter()
+            .flat_map(|(user, pos)| {
+                pos.pending_native_sol_payouts
+                    .iter()
+                    .flat_map(|payouts| payouts.values())
+                    .map(|p| (*user, p.clone()))
+            })
+            .collect();
+        all.sort_by_key(|(_, p)| p.claim_id);
+        all
+    }
+
     pub fn native_sol_pending_payouts_for(&self, user: &Principal) -> Vec<NativeSolPendingPayout> {
         self.deposits
             .get(user)

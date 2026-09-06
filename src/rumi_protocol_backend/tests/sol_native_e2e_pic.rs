@@ -1371,11 +1371,22 @@ fn sol_vault_is_absorbed_by_stability_pool_via_automated_dispatch() {
 
     // ── Let the 5-minute check_vaults timer fire and drive the cascade ───────
     // No manual liquidation call anywhere: everything past this point is the
-    // automated path doing its own work.
+    // automated path doing its own work. Break as soon as the absorb lands
+    // (debt cleared): unlike XRP's rippled mock, `sol_rpc_mock` confirms a
+    // settlement immediately (its `tx_confirmed` script defaults to true), so
+    // if this loop ran its full 1800s span the 10-minute settle-sweep timer
+    // (also armed from t=0) would submit AND confirm the depositor's claim
+    // before Phase 2 below ever gets to observe the pre-sweep state.
     for _ in 0..6 {
         pic.advance_time(std::time::Duration::from_secs(300));
         for _ in 0..25 {
             pic.tick();
+        }
+        if get_vault(&pic, backend, vault_id)
+            .map(|v| v.borrowed_icusd_amount == 0)
+            .unwrap_or(true)
+        {
+            break;
         }
     }
 
@@ -1393,6 +1404,86 @@ fn sol_vault_is_absorbed_by_stability_pool_via_automated_dispatch() {
             .unwrap_or(true),
         "automated SP absorb must clear the vault's debt, got {vault_after:?}"
     );
+
+    // ── Phase 2: the auto-settlement sweep pays the depositor, no clicks ─────
+    // Mirrors the native-XRP parity fix (`xrp_native_e2e_pic.rs`'s own Phase 2).
+    // The depositor's claim must exist backend-side, mirrored by an SP-side
+    // pending-payout reminder carrying the registered address.
+    let before_ids: std::collections::BTreeSet<u64> =
+        claims_before.iter().map(|(id, _)| *id).collect();
+    let dep_claim_id = claims_after
+        .iter()
+        .find(|(id, c)| !before_ids.contains(id) && c.claimant == depositor())
+        .map(|(id, _)| *id)
+        .expect("depositor payout claim exists after the absorb");
+    let payouts_before = sp_pending_sol_payouts(&pic, sp_id, depositor());
+    assert_eq!(
+        payouts_before.len(),
+        1,
+        "SP records exactly one pending payout for the depositor: {payouts_before:?}"
+    );
+    assert_eq!(payouts_before[0].claim_id, dep_claim_id);
+
+    // Advance through sweep windows (600s cadence). Unlike XRP's rippled mock
+    // (raw HTTPS outcalls that need per-request response injection),
+    // `sol_rpc_mock` is an ordinary installed canister the backend reaches by
+    // inter-canister call, so plain `pic.tick()` drives it with no manual
+    // scripting. Its default script (`tx_confirmed: true`) means: sweep tick 1
+    // submits (records `claim.settlement`, does not yet remove the claim),
+    // sweep tick 2 confirms (`getTransaction` reports Confirmed ->
+    // `AlreadyPaid` -> claim removed), sweep tick 3 finds the claim gone and
+    // acks the SP-side reminder. Three 600s windows are the expected minimum;
+    // extra windows are harmless.
+    for _ in 0..8 {
+        pic.advance_time(std::time::Duration::from_secs(600));
+        for _ in 0..25 {
+            pic.tick();
+        }
+        if !sol_claims(&pic, backend).iter().any(|(id, _)| *id == dep_claim_id)
+            && sp_pending_sol_payouts(&pic, sp_id, depositor()).is_empty()
+        {
+            break;
+        }
+    }
+
+    assert!(
+        !sol_claims(&pic, backend).iter().any(|(id, _)| *id == dep_claim_id),
+        "sweep must settle and remove the depositor's claim without any manual call"
+    );
+    assert!(
+        sp_pending_sol_payouts(&pic, sp_id, depositor()).is_empty(),
+        "sweep must ack the SP-side reminder once the settlement validates"
+    );
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+struct NativeSolPendingPayoutView {
+    claim_id: u64,
+    #[allow(dead_code)]
+    lamports: u64,
+    #[allow(dead_code)]
+    payout_address: String,
+}
+
+fn sp_pending_sol_payouts(
+    pic: &PocketIc,
+    sp: Principal,
+    user: Principal,
+) -> Vec<NativeSolPendingPayoutView> {
+    match pic
+        .query_call(
+            sp,
+            user,
+            "get_my_native_sol_payouts",
+            Encode!().expect("encode empty args"),
+        )
+        .expect("query get_my_native_sol_payouts")
+    {
+        WasmResult::Reply(bytes) => {
+            Decode!(&bytes, Vec<NativeSolPendingPayoutView>).expect("decode pending payouts")
+        }
+        WasmResult::Reject(m) => panic!("get_my_native_sol_payouts rejected: {m}"),
+    }
 }
 
 fn stability_pool_wasm() -> Vec<u8> {

@@ -635,6 +635,29 @@ fn is_past_sequence_submit(error: &StabilityPoolError) -> bool {
 /// validated, so the local reminder is dropped; otherwise settlement is
 /// (re)submitted with the stored address. Records are never removed on the
 /// submit path — a later tick observes the validated settlement and acks.
+/// Order a bounded sweep's candidate list starting strictly AFTER
+/// `start_after_claim_id` and wrapping around, so one perpetually-failing
+/// claim (bad address, quarantined) cannot starve the rest of the queue.
+///
+/// Shared by the native-XRP and native-SOL settlement sweeps
+/// (`run_native_xrp_settle_sweep_with_io` / `run_native_sol_settle_sweep_with_io`),
+/// since this bookkeeping is custody-generic and identical between the two
+/// rails (only the per-item settlement logic differs: destination tag,
+/// submit-error classification), so it is factored out rather than
+/// duplicated. `all` must already be sorted ascending by claim id (both
+/// callers' `all_native_*_pending_payouts` accessors guarantee this).
+fn rotate_pending_payouts<T>(
+    all: &[T],
+    start_after_claim_id: Option<u64>,
+    claim_id_of: impl Fn(&T) -> u64,
+) -> impl Iterator<Item = &T> {
+    let split = match start_after_claim_id {
+        Some(cursor) => all.partition_point(|p| claim_id_of(p) <= cursor),
+        None => 0,
+    };
+    all[split..].iter().chain(all[..split].iter())
+}
+
 pub(crate) async fn run_native_xrp_settle_sweep_with_io(
     io: &mut dyn NativeXrpSettleSweepIo,
     start_after_claim_id: Option<u64>,
@@ -649,12 +672,7 @@ pub(crate) async fn run_native_xrp_settle_sweep_with_io(
         return summary;
     }
 
-    // Rotate: entries strictly after the cursor first, then wrap.
-    let split = match start_after_claim_id {
-        Some(cursor) => all.partition_point(|(_, p)| p.claim_id <= cursor),
-        None => 0,
-    };
-    let ordered = all[split..].iter().chain(all[..split].iter());
+    let ordered = rotate_pending_payouts(&all, start_after_claim_id, |(_, p)| p.claim_id);
 
     for (user, payout) in ordered.take(max_per_tick) {
         summary.examined += 1;
@@ -776,6 +794,206 @@ impl NativeXrpSettleSweepIo for CdkNativeXrpSettleSweepIo {
             Err(_) => Err(StabilityPoolError::InterCanisterCallFailed {
                 target: format!("{}", protocol),
                 method: "stability_pool_settle_xrp_claim".to_string(),
+            }),
+        }
+    }
+}
+
+/// IO seam for the native-SOL auto-settlement sweep (mirrors
+/// `NativeXrpSettleSweepIo`), so the tick logic is unit-testable off-canister.
+/// No destination-tag parameter on `settle_on_behalf`: Solana has no analogue
+/// (design doc §5.2).
+#[async_trait::async_trait(?Send)]
+pub(crate) trait NativeSolSettleSweepIo {
+    /// Backend `stability_pool_sol_claim_outstanding`: does the claim still
+    /// exist for this claimant? `false` means settled+validated (or resolved
+    /// by an admin), so the SP-side reminder can be dropped.
+    async fn claim_outstanding(
+        &mut self,
+        protocol: Principal,
+        claim_id: u64,
+        claimant: Principal,
+    ) -> Result<bool, StabilityPoolError>;
+
+    /// Backend `stability_pool_settle_sol_claim`: sign + submit the
+    /// durable-nonce SOL transfer for the claim to the depositor's registered
+    /// address. Repeat calls are safe: the backend confirms a
+    /// previously-submitted transfer (via `getTransaction` + the live nonce)
+    /// before ever signing a new one.
+    async fn settle_on_behalf(
+        &mut self,
+        protocol: Principal,
+        claim_id: u64,
+        claimant: Principal,
+        destination: String,
+    ) -> Result<String, StabilityPoolError>;
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct NativeSolSettleSweepSummary {
+    pub examined: usize,
+    pub acked: usize,
+    pub submitted: usize,
+    pub failed: usize,
+    /// Cursor for the next tick: the last claim id this tick examined.
+    pub last_claim_id: Option<u64>,
+}
+
+// Deliberately no `pending_confirmation` counter here, unlike
+// `NativeXrpSettleSweepSummary`. XRP's `is_past_sequence_submit` recognizes
+// `tefPAST_SEQ` specifically because rippled's synchronous `submit` returns
+// that exact, stable engine-result string when a signed Payment reusing an
+// already-applied Sequence number lands: every https-outcall replica polls
+// the SAME node, so the losers of that race report "sequence already used"
+// against our OWN transaction. There is no analogous stable signal on this
+// rail: `chains::sol::rpc::send_transaction` submits through the SOL RPC
+// canister's `jsonRequest` under `Equality` consensus across MULTIPLE
+// providers (not multiple replicas polling one node), and the module's own
+// doc comment already flags that this consensus mode is chronically
+// `#Inconsistent` for anything that can legitimately differ between
+// providers, and "was this already processed" is exactly such a thing. A provider that has
+// already seen the durable-nonce transaction land would reject a resubmit
+// (as already-processed or, once the nonce has advanced, as an invalid
+// nonce), while a lagging provider could still accept it; under `Equality`
+// that disagreement surfaces as a generic aggregation failure with no stable
+// substring to match, not a clean per-provider error code the way rippled's
+// engine result is. Inventing a string to grep for here would be guessing.
+//
+// Correctness does not depend on classifying this tick's submit error,
+// though: `settle_sol_claim_as` records `claim.settlement` BEFORE ever
+// calling `send_transaction` (crash-safety, see its own doc comment), so
+// regardless of why THIS submit attempt returned an error, the very next
+// sweep tick's `settle_on_behalf` call re-runs the FULL idempotency check
+// (`sol_settlement_decision` against `getTransaction` + the live durable
+// nonce) before signing anything new, and converges to `AlreadyPaid` if the
+// transaction actually landed. Counting the error as `failed` here is a
+// telemetry nuance only; the claim record is never dropped on a failure
+// either way, so every submit error (landed-but-noisy or genuinely failed)
+// self-heals on a later tick without this sweep needing to tell them apart.
+
+/// One bounded tick of the native-SOL payout settlement sweep. Mirrors
+/// `run_native_xrp_settle_sweep_with_io`; see its doc comment for the
+/// rotation/pause/error-tolerance design shared by both rails.
+pub(crate) async fn run_native_sol_settle_sweep_with_io(
+    io: &mut dyn NativeSolSettleSweepIo,
+    start_after_claim_id: Option<u64>,
+    max_per_tick: usize,
+) -> NativeSolSettleSweepSummary {
+    let mut summary = NativeSolSettleSweepSummary::default();
+    if read_state(|s| s.configuration.emergency_pause) {
+        return summary;
+    }
+    let (protocol, all) = read_state(|s| (s.protocol_canister_id, s.all_native_sol_pending_payouts()));
+    if all.is_empty() {
+        return summary;
+    }
+
+    let ordered = rotate_pending_payouts(&all, start_after_claim_id, |(_, p)| p.claim_id);
+
+    for (user, payout) in ordered.take(max_per_tick) {
+        summary.examined += 1;
+        summary.last_claim_id = Some(payout.claim_id);
+
+        let outstanding = match io.claim_outstanding(protocol, payout.claim_id, *user).await {
+            Ok(v) => v,
+            Err(error) => {
+                log!(
+                    INFO,
+                    "[sol-settle-sweep] outstanding check failed for claim {}: {:?}",
+                    payout.claim_id,
+                    error
+                );
+                summary.failed += 1;
+                continue;
+            }
+        };
+
+        if !outstanding {
+            // Settled and validated (by a prior sweep tick or a manual click).
+            let _ = mutate_state(|s| s.ack_native_sol_payout_settled(user, payout.claim_id));
+            summary.acked += 1;
+            continue;
+        }
+
+        match io
+            .settle_on_behalf(protocol, payout.claim_id, *user, payout.payout_address.clone())
+            .await
+        {
+            Ok(signature) => {
+                log!(
+                    INFO,
+                    "[sol-settle-sweep] submitted settlement for claim {} ({} lamports) tx {}",
+                    payout.claim_id,
+                    payout.lamports,
+                    signature
+                );
+                summary.submitted += 1;
+            }
+            Err(error) => {
+                log!(
+                    INFO,
+                    "[sol-settle-sweep] settlement failed for claim {}: {:?}",
+                    payout.claim_id,
+                    error
+                );
+                summary.failed += 1;
+            }
+        }
+    }
+    summary
+}
+
+pub(crate) struct CdkNativeSolSettleSweepIo;
+
+#[async_trait::async_trait(?Send)]
+impl NativeSolSettleSweepIo for CdkNativeSolSettleSweepIo {
+    async fn claim_outstanding(
+        &mut self,
+        protocol: Principal,
+        claim_id: u64,
+        claimant: Principal,
+    ) -> Result<bool, StabilityPoolError> {
+        let result: Result<(Result<bool, rumi_protocol_backend::ProtocolError>,), _> = call(
+            protocol,
+            "stability_pool_sol_claim_outstanding",
+            (claim_id, claimant),
+        )
+        .await;
+        match result {
+            Ok((Ok(outstanding),)) => Ok(outstanding),
+            Ok((Err(error),)) => Err(StabilityPoolError::LiquidationFailed {
+                vault_id: claim_id,
+                reason: format!("backend rejected claim-outstanding check: {:?}", error),
+            }),
+            Err(_) => Err(StabilityPoolError::InterCanisterCallFailed {
+                target: format!("{}", protocol),
+                method: "stability_pool_sol_claim_outstanding".to_string(),
+            }),
+        }
+    }
+
+    async fn settle_on_behalf(
+        &mut self,
+        protocol: Principal,
+        claim_id: u64,
+        claimant: Principal,
+        destination: String,
+    ) -> Result<String, StabilityPoolError> {
+        let result: Result<(Result<String, rumi_protocol_backend::ProtocolError>,), _> = call(
+            protocol,
+            "stability_pool_settle_sol_claim",
+            (claim_id, claimant, destination),
+        )
+        .await;
+        match result {
+            Ok((Ok(signature),)) => Ok(signature),
+            Ok((Err(error),)) => Err(StabilityPoolError::LiquidationFailed {
+                vault_id: claim_id,
+                reason: format!("backend rejected settle-on-behalf: {:?}", error),
+            }),
+            Err(_) => Err(StabilityPoolError::InterCanisterCallFailed {
+                target: format!("{}", protocol),
+                method: "stability_pool_settle_sol_claim".to_string(),
             }),
         }
     }
@@ -5951,6 +6169,187 @@ mod tests {
         assert_eq!(
             read_state(|s| s.native_xrp_pending_payouts_for(&user_a()).len())
                 + read_state(|s| s.native_xrp_pending_payouts_for(&user_b()).len()),
+            3,
+            "no record may be dropped on errors"
+        );
+    }
+
+    // ─── Native-SOL auto-settlement sweep ───
+
+    fn sol_payout(claim_id: u64, lamports: u64, created_at_ns: u64) -> NativeSolPendingPayout {
+        NativeSolPendingPayout {
+            claim_id,
+            collateral_type: sol_ledger(),
+            vault_id: 195,
+            lamports,
+            payout_address: valid_sol_address(),
+            created_at_ns,
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeSolSettleSweepIo {
+        outstanding: std::collections::BTreeMap<u64, bool>,
+        outstanding_errors: std::collections::BTreeSet<u64>,
+        settle_errors: std::collections::BTreeSet<u64>,
+        settle_calls: Vec<(u64, Principal, String)>,
+        outstanding_calls: Vec<(u64, Principal)>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl NativeSolSettleSweepIo for FakeSolSettleSweepIo {
+        async fn claim_outstanding(
+            &mut self,
+            _protocol: Principal,
+            claim_id: u64,
+            claimant: Principal,
+        ) -> Result<bool, StabilityPoolError> {
+            self.outstanding_calls.push((claim_id, claimant));
+            if self.outstanding_errors.contains(&claim_id) {
+                return Err(StabilityPoolError::InterCanisterCallFailed {
+                    target: "Protocol".to_string(),
+                    method: "stability_pool_sol_claim_outstanding".to_string(),
+                });
+            }
+            Ok(*self.outstanding.get(&claim_id).unwrap_or(&true))
+        }
+
+        async fn settle_on_behalf(
+            &mut self,
+            _protocol: Principal,
+            claim_id: u64,
+            claimant: Principal,
+            destination: String,
+        ) -> Result<String, StabilityPoolError> {
+            self.settle_calls.push((claim_id, claimant, destination));
+            if self.settle_errors.contains(&claim_id) {
+                return Err(StabilityPoolError::InterCanisterCallFailed {
+                    target: "Protocol".to_string(),
+                    method: "stability_pool_settle_sol_claim".to_string(),
+                });
+            }
+            Ok(format!("SOLSIG{claim_id}"))
+        }
+    }
+
+    fn sol_sweep_state_with_payouts(
+        payouts: Vec<(Principal, NativeSolPendingPayout)>,
+    ) -> StabilityPoolState {
+        let mut state = test_state();
+        for (user, p) in payouts {
+            add_deposit_direct(&mut state, user, icusd_ledger(), 1_00000000);
+            state.record_native_sol_pending_payout(user, p).unwrap();
+        }
+        state
+    }
+
+    #[test]
+    fn sol_settle_sweep_settles_outstanding_claim_with_stored_address() {
+        // Mirrors `settle_sweep_settles_outstanding_claim_with_stored_address_and_tag`,
+        // minus the destination tag (Solana has no analogue). The record must
+        // NOT be removed yet: only a later tick's outstanding-check==false
+        // acks it, matching the manual settle flow's two phases.
+        let state = sol_sweep_state_with_payouts(vec![(user_a(), sol_payout(3, 11_529, 100))]);
+        replace_state(state);
+        let mut io = FakeSolSettleSweepIo::default();
+
+        let summary =
+            futures::executor::block_on(run_native_sol_settle_sweep_with_io(&mut io, None, 2));
+
+        assert_eq!(summary.examined, 1);
+        assert_eq!(summary.submitted, 1);
+        assert_eq!(summary.acked, 0);
+        assert_eq!(io.settle_calls, vec![(3, user_a(), valid_sol_address())]);
+        assert_eq!(
+            read_state(|s| s.native_sol_pending_payouts_for(&user_a()).len()),
+            1,
+            "record stays until a later tick confirms the claim is gone"
+        );
+    }
+
+    #[test]
+    fn sol_settle_sweep_acks_payout_whose_claim_is_gone() {
+        let state = sol_sweep_state_with_payouts(vec![(user_a(), sol_payout(3, 11_529, 100))]);
+        replace_state(state);
+        let mut io = FakeSolSettleSweepIo::default();
+        io.outstanding.insert(3, false);
+
+        let summary =
+            futures::executor::block_on(run_native_sol_settle_sweep_with_io(&mut io, None, 2));
+
+        assert_eq!(summary.acked, 1);
+        assert!(io.settle_calls.is_empty());
+        assert!(read_state(|s| s.native_sol_pending_payouts_for(&user_a()).is_empty()));
+    }
+
+    #[test]
+    fn sol_settle_sweep_is_bounded_and_rotates_across_ticks() {
+        let state = sol_sweep_state_with_payouts(vec![
+            (user_a(), sol_payout(1, 10, 100)),
+            (user_a(), sol_payout(2, 20, 110)),
+            (user_b(), sol_payout(5, 50, 120)),
+        ]);
+        replace_state(state);
+        let mut io = FakeSolSettleSweepIo::default();
+
+        let first =
+            futures::executor::block_on(run_native_sol_settle_sweep_with_io(&mut io, None, 2));
+        assert_eq!(first.examined, 2);
+        assert_eq!(first.last_claim_id, Some(2));
+        assert_eq!(
+            io.settle_calls.iter().map(|c| c.0).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+
+        let second = futures::executor::block_on(run_native_sol_settle_sweep_with_io(
+            &mut io,
+            first.last_claim_id,
+            2,
+        ));
+        assert_eq!(
+            io.settle_calls.iter().map(|c| c.0).collect::<Vec<_>>(),
+            vec![1, 2, 5, 1],
+            "second tick continues after the cursor and wraps around"
+        );
+        assert_eq!(second.last_claim_id, Some(1));
+    }
+
+    #[test]
+    fn sol_settle_sweep_skips_entirely_when_emergency_paused() {
+        let mut state = sol_sweep_state_with_payouts(vec![(user_a(), sol_payout(3, 11_529, 100))]);
+        state.configuration.emergency_pause = true;
+        replace_state(state);
+        let mut io = FakeSolSettleSweepIo::default();
+
+        let summary =
+            futures::executor::block_on(run_native_sol_settle_sweep_with_io(&mut io, None, 2));
+
+        assert_eq!(summary.examined, 0);
+        assert!(io.settle_calls.is_empty() && io.outstanding_calls.is_empty());
+    }
+
+    #[test]
+    fn sol_settle_sweep_tolerates_errors_and_continues() {
+        let state = sol_sweep_state_with_payouts(vec![
+            (user_a(), sol_payout(1, 10, 100)),
+            (user_b(), sol_payout(2, 20, 110)),
+            (user_b(), sol_payout(4, 40, 120)),
+        ]);
+        replace_state(state);
+        let mut io = FakeSolSettleSweepIo::default();
+        io.outstanding_errors.insert(1);
+        io.settle_errors.insert(2);
+
+        let summary =
+            futures::executor::block_on(run_native_sol_settle_sweep_with_io(&mut io, None, 3));
+
+        assert_eq!(summary.examined, 3);
+        assert_eq!(summary.failed, 2);
+        assert_eq!(summary.submitted, 1);
+        assert_eq!(io.settle_calls.iter().map(|c| c.0).collect::<Vec<_>>(), vec![2, 4]);
+        assert_eq!(
+            read_state(|s| s.native_sol_pending_payouts_for(&user_a()).len())
+                + read_state(|s| s.native_sol_pending_payouts_for(&user_b()).len()),
             3,
             "no record may be dropped on errors"
         );

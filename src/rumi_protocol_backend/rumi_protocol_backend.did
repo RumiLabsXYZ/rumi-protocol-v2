@@ -1710,6 +1710,7 @@ service : (ProtocolArg) -> {
   stability_pool_preflight_xrp_absorb : (nat64, nat64) -> (Result_27);
   stability_pool_release_sol_absorb_preflight : (nat64, nat64) -> (Result_17);
   stability_pool_release_xrp_absorb_preflight : (nat64, nat64) -> (Result_17);
+  stability_pool_settle_sol_claim : (nat64, principal, text) -> (Result_2);
   stability_pool_settle_xrp_claim : (nat64, principal, text, opt nat32) -> (
       Result_2,
     );

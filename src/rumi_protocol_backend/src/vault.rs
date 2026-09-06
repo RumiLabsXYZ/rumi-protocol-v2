@@ -2403,6 +2403,39 @@ pub fn stability_pool_sol_claim_outstanding_in_state(
     }
 }
 
+/// Pure validation for `stability_pool_settle_sol_claim` (the SP-driven
+/// auto-settlement sweep, mirroring `validate_sp_settle_xrp_claim_in_state`):
+/// the caller must be the registered stability pool, the claim must exist and
+/// belong to the claimant the SP is settling for, and quarantined claims are
+/// refused (a quarantined `SolClaim` may already be paid under an unexplained
+/// durable-nonce advance; only `admin_resolve_sol_claim` may touch it).
+///
+/// The "No such SOL claim" wording matches the claimant path (`settle_sol_claim`)
+/// so the SP sweep's outstanding-check semantics stay consistent: missing ==
+/// settled-or-unknown.
+pub fn validate_sp_settle_sol_claim_in_state(
+    state: &crate::state::State,
+    caller: Principal,
+    claim_id: u64,
+    claimant: Principal,
+) -> Result<(), ProtocolError> {
+    ensure_registered_sp(state, caller)?;
+    let claim = state.sol_claims.get(&claim_id).ok_or_else(|| {
+        ProtocolError::GenericError("No such SOL claim (already settled or unknown).".to_string())
+    })?;
+    if claim.claimant != claimant {
+        return Err(ProtocolError::GenericError(format!(
+            "SOL claim #{claim_id} belongs to a different claimant"
+        )));
+    }
+    if let Some(reason) = &claim.quarantine_reason {
+        return Err(ProtocolError::GenericError(format!(
+            "SOL claim #{claim_id} is quarantined ({reason}); awaiting admin reconciliation."
+        )));
+    }
+    Ok(())
+}
+
 fn sol_sp_absorb_sizing(
     state: &crate::state::State,
     vault_id: u64,
@@ -4326,7 +4359,23 @@ pub(crate) fn ensure_sol_claim_not_quarantined(
 /// `SolSettlementInflightGuard` acquired further down, immediately before the
 /// live-nonce read (see its doc comment for the fan-out race it closes).
 pub async fn settle_sol_claim(claim_id: u64, destination: String) -> Result<String, ProtocolError> {
-    let caller = ic_cdk::api::caller();
+    settle_sol_claim_as(ic_cdk::api::caller(), claim_id, destination).await
+}
+
+/// Settlement body with an explicit acting claimant (mirrors
+/// `settle_xrp_claim_as`). The claimant entry point (`settle_sol_claim`) passes
+/// `ic_cdk::caller()`; `stability_pool_settle_sol_claim` passes the depositor
+/// the SP is settling for (after `validate_sp_settle_sol_claim_in_state` has
+/// established the caller is the registered SP and the claimant matches). The
+/// per-caller guard, the per-custody-address lock, and the canister-wide
+/// `SolSettlementInflightGuard` below are all keyed independently of WHICH
+/// entry point reached them, so an SP sweep and the depositor clicking settle
+/// serialize on the same durable-nonce idempotency machinery either way.
+pub async fn settle_sol_claim_as(
+    caller: Principal,
+    claim_id: u64,
+    destination: String,
+) -> Result<String, ProtocolError> {
     require_sol_production_key()?;
 
     let claim = match read_state(|s| s.sol_claims.get(&claim_id).cloned()) {
@@ -12588,5 +12637,56 @@ mod sol_sp_absorb_contract_tests {
         )
         .expect("automated dispatch amount must be accepted by the preflight");
         assert_eq!(preflight.icusd_burn_e8s, vault.borrowed_icusd_amount.to_u64());
+    }
+
+    #[test]
+    fn sp_settle_on_behalf_validation_gates_sol() {
+        // SOL analogue of `sp_settle_on_behalf_validation_gates`:
+        // `stability_pool_settle_sol_claim` lets the SP settle a depositor's
+        // payout claim to the address the depositor registered. The pure
+        // validation must enforce: caller is the registered SP, the claim
+        // exists, the claimant matches the SP's record, and quarantined claims
+        // are never auto-settled (a quarantined `SolClaim` may already be paid
+        // under an unexplained durable-nonce advance and needs admin
+        // reconciliation).
+        let mut state = test_state_with_sol_vault();
+        let depositor = principal(0x77);
+        state.sol_claims.insert(
+            9,
+            crate::state::SolClaim {
+                claimant: depositor,
+                lamports: 11_529,
+                custody_owner: principal(0x99),
+                custody_nonce: VAULT_ID,
+                created_at_ns: 1,
+                settlement: None,
+                quarantine_reason: None,
+            },
+        );
+
+        assert!(
+            validate_sp_settle_sol_claim_in_state(&state, sp(), 9, depositor).is_ok(),
+            "registered SP with matching claimant must pass"
+        );
+        assert!(
+            validate_sp_settle_sol_claim_in_state(&state, principal(0x66), 9, depositor).is_err(),
+            "non-SP caller must be rejected"
+        );
+        assert!(
+            validate_sp_settle_sol_claim_in_state(&state, sp(), 9, principal(0x66)).is_err(),
+            "claimant mismatch must be rejected"
+        );
+        let missing = validate_sp_settle_sol_claim_in_state(&state, sp(), 10, depositor);
+        assert!(
+            format!("{missing:?}").contains("No such SOL claim"),
+            "missing claim must use the settled-or-unknown wording the sweep keys off: {missing:?}"
+        );
+
+        state.sol_claims.get_mut(&9).unwrap().quarantine_reason = Some("diverged".to_string());
+        let quarantined = validate_sp_settle_sol_claim_in_state(&state, sp(), 9, depositor);
+        assert!(
+            format!("{quarantined:?}").contains("quarantined"),
+            "quarantined claim must be refused: {quarantined:?}"
+        );
     }
 }

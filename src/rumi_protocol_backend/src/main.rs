@@ -7978,6 +7978,32 @@ async fn settle_sol_claim(claim_id: u64, destination: String) -> Result<String, 
     check_postcondition(rumi_protocol_backend::vault::settle_sol_claim(claim_id, destination).await)
 }
 
+/// SP auto-settlement sweep: settle a depositor's SOL payout claim to the
+/// Solana address they registered when opting into SOL absorption. Mirrors
+/// `stability_pool_settle_xrp_claim`, minus the destination tag (Solana has no
+/// analogue). Caller must be the registered stability pool; the claim must
+/// belong to `claimant`; quarantined claims are refused. Delegates to the same
+/// settlement machinery as the claimant-facing endpoint (per-custody-address
+/// lock + confirm-before-sign idempotency against the shared durable nonce),
+/// so an SP sweep racing a manual settle click cannot double-pay.
+#[update]
+async fn stability_pool_settle_sol_claim(
+    claim_id: u64,
+    claimant: Principal,
+    destination: String,
+) -> Result<String, ProtocolError> {
+    validate_call().await?;
+    let caller = ic_cdk::caller();
+    read_state(|s| {
+        rumi_protocol_backend::vault::validate_sp_settle_sol_claim_in_state(
+            s, caller, claim_id, claimant,
+        )
+    })?;
+    check_postcondition(
+        rumi_protocol_backend::vault::settle_sol_claim_as(claimant, claim_id, destination).await,
+    )
+}
+
 /// Owner cleanup for an abandoned native-SOL open. The vault layer verifies
 /// live Solana state and removes the pending entry only if it is unfunded.
 #[update]

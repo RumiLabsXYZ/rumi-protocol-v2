@@ -2058,6 +2058,10 @@ export interface _SERVICE {
     [bigint, bigint],
     Result_17
   >,
+  'stability_pool_settle_sol_claim' : ActorMethod<
+    [bigint, Principal, string],
+    Result_2
+  >,
   'stability_pool_settle_xrp_claim' : ActorMethod<
     [bigint, Principal, string, [] | [number]],
     Result_2
