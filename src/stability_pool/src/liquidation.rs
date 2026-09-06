@@ -1344,9 +1344,22 @@ pub(crate) async fn execute_native_xrp_absorb_with_io(
     {
         Ok(preflight) => preflight,
         Err(error) => {
-            mutate_state(|s| {
-                clear_unburned_native_xrp_absorb_intent_in_state(s, vault_info.vault_id);
-            });
+            // The preflight call itself failed, which cannot distinguish
+            // "the backend never saw the request" from "the backend executed
+            // it but the reply was dropped" (a normal IC failure mode). Hand
+            // the possible reservation back the same way every other
+            // pre-burn failure branch does, so a dropped reply cannot leak a
+            // live backend reservation that fences this vault for up to
+            // SOL_SP_ABSORB_PREFLIGHT_TTL_NS (release is idempotent and
+            // best-effort: it never overwrites `error`, the original
+            // preflight failure returned to the caller).
+            abandon_unburned_native_xrp_absorb(
+                io,
+                protocol_id,
+                vault_info.vault_id,
+                icusd_to_burn_e8s,
+            )
+            .await;
             return liquidation_failure(vault_info, error);
         }
     };
@@ -2120,9 +2133,23 @@ pub(crate) async fn execute_native_sol_absorb_with_io(
     {
         Ok(preflight) => preflight,
         Err(error) => {
-            mutate_state(|s| {
-                clear_unburned_native_sol_absorb_intent_in_state(s, vault_info.vault_id);
-            });
+            // Same gap as the native-XRP twin: the preflight call itself
+            // failed, which cannot distinguish "the backend never saw the
+            // request" from "the backend executed it but the reply was
+            // dropped" (a normal IC failure mode). Hand the possible
+            // reservation back the same way every other pre-burn failure
+            // branch does, so a dropped reply cannot leak a live backend
+            // reservation that fences this vault for up to
+            // SOL_SP_ABSORB_PREFLIGHT_TTL_NS (release is idempotent and
+            // best-effort: it never overwrites `error`, the original
+            // preflight failure returned to the caller).
+            abandon_unburned_native_sol_absorb(
+                io,
+                protocol_id,
+                vault_info.vault_id,
+                icusd_to_burn_e8s,
+            )
+            .await;
             return liquidation_failure(vault_info, error);
         }
     };
@@ -4041,6 +4068,10 @@ mod tests {
     #[derive(Default)]
     struct FakeNativeXrpAbsorbIo {
         preflight: Option<XrpSpAbsorbPreflight>,
+        // When set, `preflight_xrp_absorb` fails with `InterCanisterCallFailed`
+        // instead of returning `preflight`, simulating the preflight call
+        // itself failing (a dropped reply, not a backend rejection).
+        fail_preflight_call: bool,
         submit_result: Option<XrpSpAbsorbResult>,
         minting_account: Option<Account>,
         burn_proof: Option<rumi_protocol_backend::icrc3_proof::SpWritedownProof>,
@@ -4064,12 +4095,18 @@ mod tests {
 
         async fn preflight_xrp_absorb(
             &mut self,
-            _protocol_id: Principal,
+            protocol_id: Principal,
             vault_id: u64,
             expected_icusd_burn_e8s: u64,
         ) -> Result<XrpSpAbsorbPreflight, StabilityPoolError> {
             self.events
                 .push(format!("preflight:{vault_id}:{expected_icusd_burn_e8s}"));
+            if self.fail_preflight_call {
+                return Err(StabilityPoolError::InterCanisterCallFailed {
+                    target: format!("{}", protocol_id),
+                    method: "stability_pool_preflight_xrp_absorb".to_string(),
+                });
+            }
             self.preflight
                 .clone()
                 .ok_or_else(|| StabilityPoolError::LiquidationFailed {
@@ -4738,10 +4775,63 @@ mod tests {
         );
     }
 
+    #[test]
+    fn xrp_absorb_releases_reservation_when_preflight_call_itself_fails() {
+        // The preflight call failing (not being rejected by the backend) is
+        // indistinguishable from "the backend executed it but the reply was
+        // dropped", a normal IC failure mode. A dropped reply must not leak
+        // the backend-side reservation: the release call must still fire, and
+        // the original preflight error (not some release-related error) must
+        // still be what the caller sees.
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 10_00000000);
+        state
+            .opt_in_native_collateral_with_tag(&user_a(), xrp_ledger(), valid_xrp_address(), None)
+            .unwrap();
+        replace_state(state);
+        let mut io = FakeNativeXrpAbsorbIo {
+            fail_preflight_call: true,
+            ..Default::default()
+        };
+
+        let result = futures::executor::block_on(execute_native_xrp_absorb_with_io(
+            &xrp_vault(147, 10_00000000),
+            &mut io,
+        ));
+
+        assert!(!result.success);
+        assert_eq!(
+            io.events,
+            vec!["preflight:147:1000000000", "release:147:1000000000"],
+            "a failed preflight call must still release the (possibly nonexistent) reservation",
+        );
+        assert!(
+            result
+                .error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("InterCanisterCallFailed"),
+            "the original preflight failure must reach the caller, not a release-related error: {:?}",
+            result.error_message,
+        );
+        assert_eq!(
+            read_state(|s| s
+                .deposits
+                .get(&user_a())
+                .and_then(|pos| pos.stablecoin_balances.get(&icusd_ledger()).copied())),
+            Some(10_00000000),
+            "a failed preflight call must not burn or mutate pool balances",
+        );
+    }
+
     /// SOL analogue of `FakeNativeXrpAbsorbIo`.
     #[derive(Default)]
     struct FakeNativeSolAbsorbIo {
         preflight: Option<SolSpAbsorbPreflight>,
+        // When set, `preflight_sol_absorb` fails with `InterCanisterCallFailed`
+        // instead of returning `preflight`, simulating the preflight call
+        // itself failing (a dropped reply, not a backend rejection).
+        fail_preflight_call: bool,
         submit_result: Option<SolSpAbsorbResult>,
         minting_account: Option<Account>,
         burn_proof: Option<rumi_protocol_backend::icrc3_proof::SpWritedownProof>,
@@ -4765,12 +4855,18 @@ mod tests {
 
         async fn preflight_sol_absorb(
             &mut self,
-            _protocol_id: Principal,
+            protocol_id: Principal,
             vault_id: u64,
             expected_icusd_burn_e8s: u64,
         ) -> Result<SolSpAbsorbPreflight, StabilityPoolError> {
             self.events
                 .push(format!("preflight:{vault_id}:{expected_icusd_burn_e8s}"));
+            if self.fail_preflight_call {
+                return Err(StabilityPoolError::InterCanisterCallFailed {
+                    target: format!("{}", protocol_id),
+                    method: "stability_pool_preflight_sol_absorb".to_string(),
+                });
+            }
             self.preflight
                 .clone()
                 .ok_or_else(|| StabilityPoolError::LiquidationFailed {
@@ -4928,6 +5024,53 @@ mod tests {
             read_state(|s| s.total_stablecoin_balances.get(&icusd_ledger()).copied()),
             Some(501_00000000),
             "over-500 fanout rejection must not burn or mutate pool balances",
+        );
+    }
+
+    #[test]
+    fn sol_absorb_releases_reservation_when_preflight_call_itself_fails() {
+        // SOL parity with `xrp_absorb_releases_reservation_when_preflight_call_itself_fails`:
+        // the preflight call failing must still release the backend-side
+        // reservation, and the original preflight error must still be what
+        // reaches the caller.
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 10_00000000);
+        state
+            .opt_in_native_collateral_with_tag(&user_a(), sol_ledger(), valid_sol_address(), None)
+            .unwrap();
+        replace_state(state);
+        let mut io = FakeNativeSolAbsorbIo {
+            fail_preflight_call: true,
+            ..Default::default()
+        };
+
+        let result = futures::executor::block_on(execute_native_sol_absorb_with_io(
+            &sol_vault(147, 10_00000000),
+            &mut io,
+        ));
+
+        assert!(!result.success);
+        assert_eq!(
+            io.events,
+            vec!["preflight:147:1000000000", "release:147:1000000000"],
+            "a failed preflight call must still release the (possibly nonexistent) reservation",
+        );
+        assert!(
+            result
+                .error_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("InterCanisterCallFailed"),
+            "the original preflight failure must reach the caller, not a release-related error: {:?}",
+            result.error_message,
+        );
+        assert_eq!(
+            read_state(|s| s
+                .deposits
+                .get(&user_a())
+                .and_then(|pos| pos.stablecoin_balances.get(&icusd_ledger()).copied())),
+            Some(10_00000000),
+            "a failed preflight call must not burn or mutate pool balances",
         );
     }
 
