@@ -2379,7 +2379,7 @@ fn test_add_collateral_token() {
 #[test]
 fn test_register_ckdoge_collateral_uses_xrp_risk_params() {
     log("🧪 TEST STARTING: test_register_ckdoge_collateral_uses_xrp_risk_params");
-    let (pic, protocol_id, icp_ledger_id, _icusd_ledger_id) = setup_protocol();
+    let (pic, protocol_id, _icp_ledger_id, _icusd_ledger_id) = setup_protocol();
     let non_developer = Principal::self_authenticating(&[1, 2, 3, 4]);
     let developer = Principal::self_authenticating(&[5, 6, 7, 8]);
 
@@ -2433,6 +2433,108 @@ fn test_register_ckdoge_collateral_uses_xrp_risk_params() {
         WasmResult::Reject(msg) => panic!("set Stability Pool principal rejected: {msg}"),
     }
 
+    // Register XRP, then deliberately move its risk configuration away from
+    // the source defaults. ckDOGE must copy the values in live state at the
+    // moment of registration, not stale constants or ICP's current values.
+    let set_xrp_key = pic
+        .update_call(
+            protocol_id,
+            developer,
+            "set_xrp_schnorr_key_name",
+            encode_args(("key_1".to_string(),)).expect("encode XRP key name"),
+        )
+        .expect("set_xrp_schnorr_key_name call failed");
+    match set_xrp_key {
+        WasmResult::Reply(bytes) => decode_one::<Result<(), ProtocolError>>(&bytes)
+            .expect("decode set_xrp_schnorr_key_name response")
+            .expect("set_xrp_schnorr_key_name should succeed"),
+        WasmResult::Reject(msg) => panic!("set_xrp_schnorr_key_name rejected: {msg}"),
+    }
+    let register_xrp = pic
+        .update_call(
+            protocol_id,
+            developer,
+            "register_xrp_collateral",
+            encode_args(()).expect("encode XRP registration args"),
+        )
+        .expect("register_xrp_collateral call failed");
+    match register_xrp {
+        WasmResult::Reply(bytes) => decode_one::<Result<(), ProtocolError>>(&bytes)
+            .expect("decode register_xrp_collateral response")
+            .expect("register_xrp_collateral should succeed"),
+        WasmResult::Reject(msg) => panic!("register_xrp_collateral rejected: {msg}"),
+    }
+    let xrp_collateral_type = rumi_protocol_backend::state::xrp_collateral_principal();
+    let xrp_config_result = pic
+        .query_call(
+            protocol_id,
+            Principal::anonymous(),
+            "get_collateral_config",
+            encode_args((xrp_collateral_type,)).expect("encode XRP config query"),
+        )
+        .expect("get_collateral_config XRP call failed");
+    let mut xrp_config = match xrp_config_result {
+        WasmResult::Reply(bytes) => decode_one::<Option<CollateralConfig>>(&bytes)
+            .expect("decode XRP config")
+            .expect("XRP config should exist"),
+        WasmResult::Reject(msg) => panic!("get_collateral_config XRP rejected: {msg}"),
+    };
+    xrp_config.liquidation_ratio = rumi_protocol_backend::numeric::Ratio::new(dec!(1.20));
+    xrp_config.borrow_threshold_ratio = rumi_protocol_backend::numeric::Ratio::new(dec!(1.35));
+    xrp_config.liquidation_bonus = rumi_protocol_backend::numeric::Ratio::new(dec!(1.075));
+    xrp_config.borrowing_fee = rumi_protocol_backend::numeric::Ratio::new(dec!(0.002));
+    xrp_config.interest_rate_apr = rumi_protocol_backend::numeric::Ratio::new(dec!(0.0175));
+    xrp_config.debt_ceiling = 500_000_000_000;
+    xrp_config.recovery_target_cr = rumi_protocol_backend::numeric::Ratio::new(dec!(1.42));
+    xrp_config.recovery_borrowing_fee =
+        Some(rumi_protocol_backend::numeric::Ratio::new(dec!(0.004)));
+    xrp_config.recovery_interest_rate_apr =
+        Some(rumi_protocol_backend::numeric::Ratio::new(dec!(0.025)));
+    xrp_config.healthy_cr = Some(rumi_protocol_backend::numeric::Ratio::new(dec!(1.80)));
+    xrp_config.rate_curve = Some(rumi_protocol_backend::state::RateCurve {
+        markers: vec![
+            rumi_protocol_backend::state::RateMarker {
+                cr_level: rumi_protocol_backend::numeric::Ratio::new(dec!(1.35)),
+                multiplier: rumi_protocol_backend::numeric::Ratio::new(dec!(4)),
+            },
+            rumi_protocol_backend::state::RateMarker {
+                cr_level: rumi_protocol_backend::numeric::Ratio::new(dec!(2.00)),
+                multiplier: rumi_protocol_backend::numeric::Ratio::new(dec!(1)),
+            },
+        ],
+        method: rumi_protocol_backend::state::InterpolationMethod::Linear,
+    });
+    xrp_config.min_xrc_sources = Some(2);
+    let update_xrp = pic
+        .update_call(
+            protocol_id,
+            developer,
+            "update_collateral_config",
+            encode_args((xrp_collateral_type, xrp_config.clone()))
+                .expect("encode XRP config update"),
+        )
+        .expect("update_collateral_config XRP call failed");
+    match update_xrp {
+        WasmResult::Reply(bytes) => decode_one::<Result<(), ProtocolError>>(&bytes)
+            .expect("decode update_collateral_config XRP response")
+            .expect("update_collateral_config XRP should succeed"),
+        WasmResult::Reject(msg) => panic!("update_collateral_config XRP rejected: {msg}"),
+    }
+    let xrp_config_result = pic
+        .query_call(
+            protocol_id,
+            Principal::anonymous(),
+            "get_collateral_config",
+            encode_args((xrp_collateral_type,)).expect("encode updated XRP config query"),
+        )
+        .expect("get_collateral_config updated XRP call failed");
+    let xrp_config = match xrp_config_result {
+        WasmResult::Reply(bytes) => decode_one::<Option<CollateralConfig>>(&bytes)
+            .expect("decode updated XRP config")
+            .expect("updated XRP config should exist"),
+        WasmResult::Reject(msg) => panic!("get_collateral_config updated XRP rejected: {msg}"),
+    };
+
     let ckdoge_ledger_id = deploy_ckdoge_ledger(&pic, protocol_id);
 
     let result = pic
@@ -2466,36 +2568,27 @@ fn test_register_ckdoge_collateral_uses_xrp_risk_params() {
             .expect("ckDOGE config should exist"),
         WasmResult::Reject(msg) => panic!("get_collateral_config rejected: {msg}"),
     };
-    let icp_config_result = pic
-        .query_call(
-            protocol_id,
-            Principal::anonymous(),
-            "get_collateral_config",
-            encode_args((icp_ledger_id,)).expect("encode ICP config query"),
-        )
-        .expect("get_collateral_config ICP call failed");
-    let icp_config = match icp_config_result {
-        WasmResult::Reply(bytes) => decode_one::<Option<CollateralConfig>>(&bytes)
-            .expect("decode ICP config")
-            .expect("ICP config should exist"),
-        WasmResult::Reject(msg) => panic!("get_collateral_config ICP rejected: {msg}"),
-    };
-
     assert_eq!(config.ledger_canister_id, ckdoge_ledger_id);
     assert_eq!(config.custody(), rumi_protocol_backend::state::CustodyKind::IcrcLedger);
     assert_eq!(config.decimals, 8);
     assert_eq!(config.ledger_fee, 1_000_000);
-    assert_eq!(config.liquidation_ratio.to_f64(), 1.33);
-    assert_eq!(config.borrow_threshold_ratio.to_f64(), 1.50);
-    assert_eq!(config.liquidation_bonus.to_f64(), 1.12);
-    assert_eq!(config.borrowing_fee, icp_config.borrowing_fee);
-    assert_eq!(config.interest_rate_apr, icp_config.interest_rate_apr);
-    assert_eq!(config.debt_ceiling, 250_000_000_000);
-    assert_eq!(config.min_vault_debt.0, 10_000_000);
+    assert_eq!(config.liquidation_ratio, xrp_config.liquidation_ratio);
+    assert_eq!(config.borrow_threshold_ratio, xrp_config.borrow_threshold_ratio);
+    assert_eq!(config.liquidation_bonus, xrp_config.liquidation_bonus);
+    assert_eq!(config.borrowing_fee, xrp_config.borrowing_fee);
+    assert_eq!(config.interest_rate_apr, xrp_config.interest_rate_apr);
+    assert_eq!(config.debt_ceiling, xrp_config.debt_ceiling);
+    assert_eq!(config.min_vault_debt, xrp_config.min_vault_debt);
     assert_eq!(config.min_collateral_deposit, 100_000_000);
-    assert_eq!(config.redemption_fee_floor, rumi_protocol_backend::numeric::Ratio::new(dec!(0.005)));
-    assert_eq!(config.redemption_fee_ceiling, rumi_protocol_backend::numeric::Ratio::new(dec!(0.05)));
-    assert_eq!(config.redemption_tier, 3);
+    assert_eq!(config.redemption_fee_floor, xrp_config.redemption_fee_floor);
+    assert_eq!(config.redemption_fee_ceiling, xrp_config.redemption_fee_ceiling);
+    assert_eq!(config.redemption_tier, xrp_config.redemption_tier);
+    assert_eq!(config.recovery_target_cr, xrp_config.recovery_target_cr);
+    assert_eq!(config.recovery_borrowing_fee, xrp_config.recovery_borrowing_fee);
+    assert_eq!(config.recovery_interest_rate_apr, xrp_config.recovery_interest_rate_apr);
+    assert_eq!(config.healthy_cr, xrp_config.healthy_cr);
+    assert_eq!(config.rate_curve, xrp_config.rate_curve);
+    assert_eq!(config.min_xrc_sources, xrp_config.min_xrc_sources);
     assert_eq!(config.symbol.as_deref(), Some("ckDOGE"));
     assert_eq!(config.display_color.as_deref(), Some("#C2A633"));
     match config.price_source {
