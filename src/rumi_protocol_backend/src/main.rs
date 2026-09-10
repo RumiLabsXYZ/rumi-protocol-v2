@@ -11967,6 +11967,12 @@ struct IcrcCollateralRiskParameters {
     interest_rate_apr: Ratio,
     redemption_fee_floor: Ratio,
     redemption_fee_ceiling: Ratio,
+    recovery_target_cr: Ratio,
+    recovery_borrowing_fee: Option<Ratio>,
+    recovery_interest_rate_apr: Option<Ratio>,
+    healthy_cr: Option<Ratio>,
+    rate_curve: Option<rumi_protocol_backend::state::RateCurve>,
+    min_xrc_sources: Option<u32>,
 }
 
 #[candid_method(update)]
@@ -12051,17 +12057,25 @@ async fn register_icrc_collateral_token(
 
     use rumi_protocol_backend::state::{CollateralConfig, CollateralStatus};
 
-    let risk_parameters = exact_risk_parameters.unwrap_or_else(|| IcrcCollateralRiskParameters {
-        liquidation_ratio: Ratio::from_f64(arg.liquidation_ratio),
-        borrow_threshold_ratio: Ratio::from_f64(arg.borrow_threshold_ratio),
-        liquidation_bonus: Ratio::from_f64(arg.liquidation_bonus),
-        borrowing_fee: Ratio::from_f64(arg.borrowing_fee),
-        interest_rate_apr: Ratio::from_f64(arg.interest_rate_apr),
-        redemption_fee_floor: Ratio::from_f64(arg.redemption_fee_floor.unwrap_or(0.005)),
-        redemption_fee_ceiling: Ratio::from_f64(arg.redemption_fee_ceiling.unwrap_or(0.05)),
+    let risk_parameters = exact_risk_parameters.unwrap_or_else(|| {
+        let borrow_threshold_ratio = Ratio::from_f64(arg.borrow_threshold_ratio);
+        IcrcCollateralRiskParameters {
+            liquidation_ratio: Ratio::from_f64(arg.liquidation_ratio),
+            borrow_threshold_ratio,
+            liquidation_bonus: Ratio::from_f64(arg.liquidation_bonus),
+            borrowing_fee: Ratio::from_f64(arg.borrowing_fee),
+            interest_rate_apr: Ratio::from_f64(arg.interest_rate_apr),
+            redemption_fee_floor: Ratio::from_f64(arg.redemption_fee_floor.unwrap_or(0.005)),
+            redemption_fee_ceiling: Ratio::from_f64(arg.redemption_fee_ceiling.unwrap_or(0.05)),
+            recovery_target_cr: borrow_threshold_ratio
+                * read_state(|s| s.recovery_cr_multiplier),
+            recovery_borrowing_fee: None,
+            recovery_interest_rate_apr: None,
+            healthy_cr: None,
+            rate_curve: None,
+            min_xrc_sources: None,
+        }
     });
-    let recovery_target_cr =
-        risk_parameters.borrow_threshold_ratio * read_state(|s| s.recovery_cr_multiplier);
 
     let config = CollateralConfig {
         ledger_canister_id: arg.ledger_canister_id,
@@ -12082,19 +12096,20 @@ async fn register_icrc_collateral_token(
         redemption_fee_ceiling: risk_parameters.redemption_fee_ceiling,
         current_base_rate: Ratio::from_f64(0.0),
         last_redemption_time: 0,
-        // Computed from borrow_threshold_ratio × recovery_cr_multiplier; not user-supplied.
-        recovery_target_cr,
+        // Curated presets may copy an explicitly governed target; generic
+        // registrations derive it from borrow threshold × recovery multiplier.
+        recovery_target_cr: risk_parameters.recovery_target_cr,
         min_collateral_deposit: arg.min_collateral_deposit,
-        recovery_borrowing_fee: None,
-        recovery_interest_rate_apr: None,
+        recovery_borrowing_fee: risk_parameters.recovery_borrowing_fee,
+        recovery_interest_rate_apr: risk_parameters.recovery_interest_rate_apr,
         display_color: arg.display_color,
-        healthy_cr: None,
-        rate_curve: None,
+        healthy_cr: risk_parameters.healthy_cr,
+        rate_curve: risk_parameters.rate_curve,
         redemption_tier: arg.redemption_tier.unwrap_or(1).clamp(1, 3),
         // New collateral types start by inheriting the global XRC source-count
         // floor. Operator can override later via `set_collateral_min_xrc_sources`
         // if the asset has genuinely thin CEX coverage on XRC.
-        min_xrc_sources: None,
+        min_xrc_sources: risk_parameters.min_xrc_sources,
         // P2: collaterals registered via this admin path are ICRC-custodied.
         // Native-XRP collateral (custody_kind = NativeXrp) is registered through a
         // separate path once its deposit flow is wired (spec P5); not settable here.
@@ -12221,18 +12236,18 @@ async fn register_ckdoge_collateral() -> Result<(), ProtocolError> {
         ));
     }
 
-    // Keep the same borrowing-fee and base APR as XRP, which inherits these
-    // values from the current ICP collateral configuration. The global borrowing
-    // curve and the inherited rate curve continue to govern dynamic pricing.
-    let (icp_borrowing_fee, icp_interest_rate_apr) = read_state(|s| {
-        let icp_ct = s.icp_collateral_type();
-        let icp = s.get_collateral_config(&icp_ct);
-        (
-            icp.map(|c| c.borrowing_fee).unwrap_or(Ratio::from_f64(0.0)),
-            icp.map(|c| c.interest_rate_apr)
-                .unwrap_or(Ratio::from_f64(0.0)),
-        )
-    });
+    // Copy XRP's current live risk configuration rather than its source-code
+    // defaults. XRP parameters can be changed by governance after registration;
+    // this makes "same as XRP" mean the values in state at the moment ckDOGE is
+    // registered. Token-specific metadata and custody remain ckDOGE-specific.
+    let xrp_collateral_type = rumi_protocol_backend::state::xrp_collateral_principal();
+    let xrp_config = read_state(|s| s.get_collateral_config(&xrp_collateral_type).cloned())
+        .ok_or_else(|| {
+            ProtocolError::GenericError(
+                "XRP collateral must be registered before ckDOGE can copy its parameters"
+                    .to_string(),
+            )
+        })?;
     let ckdoge_ledger_canister_id = Principal::from_text("efmc5-wyaaa-aaaar-qb3wa-cai")
         .expect("ckDOGE ledger canister ID must be valid");
 
@@ -12248,28 +12263,34 @@ async fn register_ckdoge_collateral() -> Result<(), ProtocolError> {
                 quote_asset: "USD".to_string(),
                 quote_asset_class: rumi_protocol_backend::state::XrcAssetClass::FiatCurrency,
             },
-            liquidation_ratio: 1.33,
-            borrow_threshold_ratio: 1.50,
-            liquidation_bonus: 1.12,
-            borrowing_fee: icp_borrowing_fee.to_f64(),
-            debt_ceiling: 250_000_000_000,
-            min_vault_debt: 10_000_000,
-            interest_rate_apr: icp_interest_rate_apr.to_f64(),
+            liquidation_ratio: xrp_config.liquidation_ratio.to_f64(),
+            borrow_threshold_ratio: xrp_config.borrow_threshold_ratio.to_f64(),
+            liquidation_bonus: xrp_config.liquidation_bonus.to_f64(),
+            borrowing_fee: xrp_config.borrowing_fee.to_f64(),
+            debt_ceiling: xrp_config.debt_ceiling,
+            min_vault_debt: xrp_config.min_vault_debt.to_u64(),
+            interest_rate_apr: xrp_config.interest_rate_apr.to_f64(),
             // ckDOGE has 8 decimals: 100_000_000 koinu = 1 DOGE.
             min_collateral_deposit: 100_000_000,
             display_color: Some("#C2A633".to_string()),
-            redemption_fee_floor: Some(0.005),
-            redemption_fee_ceiling: Some(0.05),
-            redemption_tier: Some(3),
+            redemption_fee_floor: Some(xrp_config.redemption_fee_floor.to_f64()),
+            redemption_fee_ceiling: Some(xrp_config.redemption_fee_ceiling.to_f64()),
+            redemption_tier: Some(xrp_config.redemption_tier),
         },
         Some(IcrcCollateralRiskParameters {
-            liquidation_ratio: Ratio::new(dec!(1.33)),
-            borrow_threshold_ratio: Ratio::new(dec!(1.50)),
-            liquidation_bonus: Ratio::new(dec!(1.12)),
-            borrowing_fee: icp_borrowing_fee,
-            interest_rate_apr: icp_interest_rate_apr,
-            redemption_fee_floor: Ratio::new(dec!(0.005)),
-            redemption_fee_ceiling: Ratio::new(dec!(0.05)),
+            liquidation_ratio: xrp_config.liquidation_ratio,
+            borrow_threshold_ratio: xrp_config.borrow_threshold_ratio,
+            liquidation_bonus: xrp_config.liquidation_bonus,
+            borrowing_fee: xrp_config.borrowing_fee,
+            interest_rate_apr: xrp_config.interest_rate_apr,
+            redemption_fee_floor: xrp_config.redemption_fee_floor,
+            redemption_fee_ceiling: xrp_config.redemption_fee_ceiling,
+            recovery_target_cr: xrp_config.recovery_target_cr,
+            recovery_borrowing_fee: xrp_config.recovery_borrowing_fee,
+            recovery_interest_rate_apr: xrp_config.recovery_interest_rate_apr,
+            healthy_cr: xrp_config.healthy_cr,
+            rate_curve: xrp_config.rate_curve,
+            min_xrc_sources: xrp_config.min_xrc_sources,
         }),
     )
     .await
