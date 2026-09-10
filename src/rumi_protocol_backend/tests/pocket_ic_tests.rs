@@ -17,6 +17,7 @@ use rumi_protocol_backend::{
 use rumi_protocol_backend::event::Event;
 use rumi_protocol_backend::state::{CollateralConfig, CollateralStatus, PriceSource, XrcAssetClass};
 use ic_xrc_types::{Asset, AssetClass, GetExchangeRateRequest, ExchangeRate};
+use rust_decimal_macros::dec;
 
 //-----------------------------------------------------------------------------------
 // MOCK XRC CANISTER IMPLEMENTATION
@@ -125,6 +126,12 @@ fn protocol_wasm() -> Vec<u8> {
     wasm
 }
 
+fn stability_pool_wasm() -> Vec<u8> {
+    let wasm = include_bytes!("../../../target/wasm32-unknown-unknown/release/stability_pool.wasm").to_vec();
+    log(&format!("📦 Loaded Stability Pool WASM: {} bytes", wasm.len()));
+    wasm
+}
+
 fn xrc_wasm() -> Vec<u8> {
     let wasm = include_bytes!("../../xrc_demo/xrc/xrc.wasm").to_vec();
     log(&format!("📦 Loaded XRC WASM: {} bytes", wasm.len()));
@@ -135,6 +142,34 @@ fn xrc_wasm() -> Vec<u8> {
 #[derive(CandidType, Deserialize)]
 struct FeatureFlags {
     icrc2: bool,
+}
+
+#[derive(CandidType, Deserialize)]
+struct StabilityPoolInitArgs {
+    protocol_canister_id: Principal,
+    authorized_admins: Vec<Principal>,
+}
+
+#[derive(CandidType, Deserialize)]
+enum StabilityPoolCollateralStatusView {
+    Active,
+    Paused,
+    Frozen,
+    Sunset,
+    Deprecated,
+}
+
+#[derive(CandidType, Deserialize)]
+struct StabilityPoolCollateralInfoView {
+    ledger_id: Principal,
+    symbol: String,
+    decimals: u8,
+    status: StabilityPoolCollateralStatusView,
+}
+
+#[derive(CandidType, Deserialize)]
+struct StabilityPoolStatusView {
+    collateral_registry: Vec<StabilityPoolCollateralInfoView>,
 }
 
 #[derive(CandidType, Deserialize)]
@@ -1991,6 +2026,62 @@ fn deploy_second_ledger(pic: &PocketIc, protocol_id: Principal) -> Principal {
     cketh_ledger_id
 }
 
+/// Deploy an ICRC ledger at ckDOGE's fixed mainnet principal. This lets the
+/// registration test exercise the production ledger identity while retaining
+/// PocketIC's real ICRC metadata calls.
+fn deploy_ckdoge_ledger(pic: &PocketIc, protocol_id: Principal) -> Principal {
+    const CKDOGE_LEDGER_ID: &str = "efmc5-wyaaa-aaaar-qb3wa-cai";
+    let test_user = Principal::self_authenticating(&[1, 2, 3, 4]);
+    let developer = Principal::self_authenticating(&[5, 6, 7, 8]);
+    let ckdoge_ledger_id = Principal::from_text(CKDOGE_LEDGER_ID).expect("valid ckDOGE ledger id");
+
+    pic.create_canister_with_id(None, None, ckdoge_ledger_id)
+        .unwrap_or_else(|e| panic!("create_canister_with_id({CKDOGE_LEDGER_ID}) failed: {e}"));
+    pic.add_cycles(ckdoge_ledger_id, 2_000_000_000_000);
+
+    let init_args = InitArgs {
+        minting_account: Account {
+            owner: protocol_id,
+            subaccount: None,
+        },
+        fee_collector_account: None,
+        transfer_fee: candid::Nat::from(1_000_000u64),
+        decimals: Some(8),
+        max_memo_length: Some(32),
+        token_name: "Chain-key Dogecoin".into(),
+        token_symbol: "ckDOGE".into(),
+        metadata: vec![],
+        initial_balances: vec![(
+            Account {
+                owner: test_user,
+                subaccount: None,
+            },
+            candid::Nat::from(1_000_000_000u64),
+        )],
+        feature_flags: Some(FeatureFlags { icrc2: true }),
+        maximum_number_of_accounts: None,
+        accounts_overflow_trim_quantity: None,
+        archive_options: ArchiveOptions {
+            num_blocks_to_archive: 2000,
+            trigger_threshold: 1000,
+            controller_id: developer,
+            max_transactions_per_response: None,
+            max_message_size_bytes: None,
+            cycles_for_archive_creation: None,
+            node_max_memory_size_bytes: None,
+            more_controller_ids: None,
+        },
+    };
+
+    pic.install_canister(
+        ckdoge_ledger_id,
+        icrc1_ledger_wasm(),
+        encode_args((LedgerArg::Init(init_args),)).expect("encode ckDOGE ledger init args"),
+        None,
+    );
+    ckdoge_ledger_id
+}
+
 /// Register a new collateral token via `add_collateral_token` (developer-only).
 fn register_collateral(
     pic: &PocketIc,
@@ -2280,6 +2371,176 @@ fn test_add_collateral_token() {
     );
 
     log("🎉 TEST PASSED: test_add_collateral_token");
+}
+
+/// ckDOGE must register as ordinary ICRC collateral with XRP's risk parameters.
+/// This catches a wrong ledger identity, accidental native-custody routing, or a
+/// drift in any risk value that governs borrow or liquidation safety.
+#[test]
+fn test_register_ckdoge_collateral_uses_xrp_risk_params() {
+    log("🧪 TEST STARTING: test_register_ckdoge_collateral_uses_xrp_risk_params");
+    let (pic, protocol_id, icp_ledger_id, _icusd_ledger_id) = setup_protocol();
+    let non_developer = Principal::self_authenticating(&[1, 2, 3, 4]);
+    let developer = Principal::self_authenticating(&[5, 6, 7, 8]);
+
+    // The endpoint must reject before it tries to query the fixed external
+    // ledger, so an unprivileged caller cannot activate collateral support.
+    let unauthorized = pic
+        .update_call(
+            protocol_id,
+            non_developer,
+            "register_ckdoge_collateral",
+            encode_args(()).expect("encode unauthorized ckDOGE registration args"),
+        )
+        .expect("unauthorized register_ckdoge_collateral call failed");
+    match unauthorized {
+        WasmResult::Reply(bytes) => assert!(
+            decode_one::<Result<(), ProtocolError>>(&bytes)
+                .expect("decode unauthorized ckDOGE registration response")
+                .is_err(),
+            "non-developer must not register ckDOGE collateral"
+        ),
+        WasmResult::Reject(msg) => panic!("unauthorized ckDOGE registration rejected: {msg}"),
+    }
+
+    // Install the real Stability Pool with the protocol canister as its admin.
+    // The registration call must decode the pool's Result variant and place
+    // ckDOGE in this registry before the endpoint reports success.
+    let stability_pool_id = pic.create_canister();
+    pic.add_cycles(stability_pool_id, 2_000_000_000_000);
+    pic.install_canister(
+        stability_pool_id,
+        stability_pool_wasm(),
+        encode_args((StabilityPoolInitArgs {
+            protocol_canister_id: protocol_id,
+            authorized_admins: vec![protocol_id],
+        },))
+        .expect("encode Stability Pool init args"),
+        None,
+    );
+    let set_pool_result = pic
+        .update_call(
+            protocol_id,
+            developer,
+            "set_stability_pool_principal",
+            encode_args((stability_pool_id,)).expect("encode Stability Pool principal"),
+        )
+        .expect("set_stability_pool_principal call failed");
+    match set_pool_result {
+        WasmResult::Reply(bytes) => decode_one::<Result<(), ProtocolError>>(&bytes)
+            .expect("decode set_stability_pool_principal response")
+            .expect("set Stability Pool principal should succeed"),
+        WasmResult::Reject(msg) => panic!("set Stability Pool principal rejected: {msg}"),
+    }
+
+    let ckdoge_ledger_id = deploy_ckdoge_ledger(&pic, protocol_id);
+
+    let result = pic
+        .update_call(
+            protocol_id,
+            developer,
+            "register_ckdoge_collateral",
+            encode_args(()).expect("encode register_ckdoge_collateral args"),
+        )
+        .expect("register_ckdoge_collateral call failed");
+    match result {
+        WasmResult::Reply(bytes) => {
+            decode_one::<Result<(), ProtocolError>>(&bytes)
+                .expect("decode register_ckdoge_collateral response")
+                .expect("ckDOGE registration should succeed");
+        }
+        WasmResult::Reject(msg) => panic!("register_ckdoge_collateral rejected: {msg}"),
+    }
+
+    let config_result = pic
+        .query_call(
+            protocol_id,
+            Principal::anonymous(),
+            "get_collateral_config",
+            encode_args((ckdoge_ledger_id,)).expect("encode ckDOGE config query"),
+        )
+        .expect("get_collateral_config call failed");
+    let config = match config_result {
+        WasmResult::Reply(bytes) => decode_one::<Option<CollateralConfig>>(&bytes)
+            .expect("decode ckDOGE config")
+            .expect("ckDOGE config should exist"),
+        WasmResult::Reject(msg) => panic!("get_collateral_config rejected: {msg}"),
+    };
+    let icp_config_result = pic
+        .query_call(
+            protocol_id,
+            Principal::anonymous(),
+            "get_collateral_config",
+            encode_args((icp_ledger_id,)).expect("encode ICP config query"),
+        )
+        .expect("get_collateral_config ICP call failed");
+    let icp_config = match icp_config_result {
+        WasmResult::Reply(bytes) => decode_one::<Option<CollateralConfig>>(&bytes)
+            .expect("decode ICP config")
+            .expect("ICP config should exist"),
+        WasmResult::Reject(msg) => panic!("get_collateral_config ICP rejected: {msg}"),
+    };
+
+    assert_eq!(config.ledger_canister_id, ckdoge_ledger_id);
+    assert_eq!(config.custody(), rumi_protocol_backend::state::CustodyKind::IcrcLedger);
+    assert_eq!(config.decimals, 8);
+    assert_eq!(config.ledger_fee, 1_000_000);
+    assert_eq!(config.liquidation_ratio.to_f64(), 1.33);
+    assert_eq!(config.borrow_threshold_ratio.to_f64(), 1.50);
+    assert_eq!(config.liquidation_bonus.to_f64(), 1.12);
+    assert_eq!(config.borrowing_fee, icp_config.borrowing_fee);
+    assert_eq!(config.interest_rate_apr, icp_config.interest_rate_apr);
+    assert_eq!(config.debt_ceiling, 250_000_000_000);
+    assert_eq!(config.min_vault_debt.0, 10_000_000);
+    assert_eq!(config.min_collateral_deposit, 100_000_000);
+    assert_eq!(config.redemption_fee_floor, rumi_protocol_backend::numeric::Ratio::new(dec!(0.005)));
+    assert_eq!(config.redemption_fee_ceiling, rumi_protocol_backend::numeric::Ratio::new(dec!(0.05)));
+    assert_eq!(config.redemption_tier, 3);
+    assert_eq!(config.symbol.as_deref(), Some("ckDOGE"));
+    assert_eq!(config.display_color.as_deref(), Some("#C2A633"));
+    match config.price_source {
+        PriceSource::Xrc {
+            base_asset,
+            base_asset_class,
+            quote_asset,
+            quote_asset_class,
+            ..
+        } => {
+            assert_eq!(base_asset, "DOGE");
+            assert_eq!(base_asset_class, XrcAssetClass::Cryptocurrency);
+            assert_eq!(quote_asset, "USD");
+            assert_eq!(quote_asset_class, XrcAssetClass::FiatCurrency);
+        }
+        other => panic!("expected XRC DOGE/USD price source, got {other:?}"),
+    }
+
+    let pool_status_result = pic
+        .query_call(
+            stability_pool_id,
+            Principal::anonymous(),
+            "get_pool_status",
+            encode_args(()).expect("encode Stability Pool status query"),
+        )
+        .expect("get_pool_status call failed");
+    let pool_status = match pool_status_result {
+        WasmResult::Reply(bytes) => decode_one::<StabilityPoolStatusView>(&bytes)
+            .expect("decode Stability Pool status"),
+        WasmResult::Reject(msg) => panic!("get_pool_status rejected: {msg}"),
+    };
+    assert!(
+        pool_status.collateral_registry.iter().any(|collateral| {
+            collateral.ledger_id == ckdoge_ledger_id
+                && collateral.symbol == "ckDOGE"
+                && collateral.decimals == 8
+                && matches!(
+                    collateral.status,
+                    StabilityPoolCollateralStatusView::Active
+                )
+        }),
+        "ckDOGE must be registered with the Stability Pool"
+    );
+
+    log("🎉 TEST PASSED: test_register_ckdoge_collateral_uses_xrp_risk_params");
 }
 
 /// Open a vault backed by ckETH and verify the vault state reflects the correct
