@@ -36,6 +36,7 @@
     // Well-known collateral ledgers (not in CANISTER_IDS but commonly referenced)
     'mxzaz-hqaaa-aaaar-qaada-cai': { name: 'ckBTC Ledger', isLedger: true, symbol: 'ckBTC', category: 'ledger' },
     'ss2fx-dyaaa-aaaar-qacoq-cai': { name: 'ckETH Ledger', isLedger: true, symbol: 'ckETH', category: 'ledger' },
+    'efmc5-wyaaa-aaaar-qb3wa-cai': { name: 'ckDOGE Ledger', isLedger: true, symbol: 'ckDOGE', category: 'ledger' },
     'o7oak-6yaaa-aaaap-qhgbq-cai': { name: 'ckXAUT Ledger', isLedger: true, symbol: 'ckXAUT', category: 'ledger' },
   };
 

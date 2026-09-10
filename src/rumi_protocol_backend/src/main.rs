@@ -11955,6 +11955,20 @@ async fn clear_stuck_operations(principal_id: Option<Principal>) -> Result<u64, 
 
 // ---- Multi-collateral admin endpoints ----
 
+/// Exact fixed-point risk values for a predefined ICRC collateral. Public
+/// `AddCollateralArg` uses f64 for backwards compatibility, but first-class
+/// collateral presets must not turn a fixed-point protocol parameter into a
+/// different value through an IEEE-754 round trip.
+struct IcrcCollateralRiskParameters {
+    liquidation_ratio: Ratio,
+    borrow_threshold_ratio: Ratio,
+    liquidation_bonus: Ratio,
+    borrowing_fee: Ratio,
+    interest_rate_apr: Ratio,
+    redemption_fee_floor: Ratio,
+    redemption_fee_ceiling: Ratio,
+}
+
 #[candid_method(update)]
 #[update]
 async fn add_collateral_token(
@@ -11967,6 +11981,17 @@ async fn add_collateral_token(
             "Only developer can add collateral types".to_string(),
         ));
     }
+
+    register_icrc_collateral_token(arg, None).await
+}
+
+/// Shared ICRC registration flow. `exact_risk_parameters` is used by curated
+/// collateral presets while the public generic endpoint continues to use its
+/// backwards-compatible f64 fields.
+async fn register_icrc_collateral_token(
+    arg: rumi_protocol_backend::AddCollateralArg,
+    exact_risk_parameters: Option<IcrcCollateralRiskParameters>,
+) -> Result<(), ProtocolError> {
 
     // Check it doesn't already exist
     let already_exists = read_state(|s| s.collateral_configs.contains_key(&arg.ledger_canister_id));
@@ -12026,14 +12051,26 @@ async fn add_collateral_token(
 
     use rumi_protocol_backend::state::{CollateralConfig, CollateralStatus};
 
-    let config = CollateralConfig {
-        ledger_canister_id: arg.ledger_canister_id,
-        decimals,
+    let risk_parameters = exact_risk_parameters.unwrap_or_else(|| IcrcCollateralRiskParameters {
         liquidation_ratio: Ratio::from_f64(arg.liquidation_ratio),
         borrow_threshold_ratio: Ratio::from_f64(arg.borrow_threshold_ratio),
         liquidation_bonus: Ratio::from_f64(arg.liquidation_bonus),
         borrowing_fee: Ratio::from_f64(arg.borrowing_fee),
         interest_rate_apr: Ratio::from_f64(arg.interest_rate_apr),
+        redemption_fee_floor: Ratio::from_f64(arg.redemption_fee_floor.unwrap_or(0.005)),
+        redemption_fee_ceiling: Ratio::from_f64(arg.redemption_fee_ceiling.unwrap_or(0.05)),
+    });
+    let recovery_target_cr =
+        risk_parameters.borrow_threshold_ratio * read_state(|s| s.recovery_cr_multiplier);
+
+    let config = CollateralConfig {
+        ledger_canister_id: arg.ledger_canister_id,
+        decimals,
+        liquidation_ratio: risk_parameters.liquidation_ratio,
+        borrow_threshold_ratio: risk_parameters.borrow_threshold_ratio,
+        liquidation_bonus: risk_parameters.liquidation_bonus,
+        borrowing_fee: risk_parameters.borrowing_fee,
+        interest_rate_apr: risk_parameters.interest_rate_apr,
         debt_ceiling: arg.debt_ceiling,
         min_vault_debt: rumi_protocol_backend::numeric::ICUSD::from(arg.min_vault_debt),
         ledger_fee,
@@ -12041,13 +12078,12 @@ async fn add_collateral_token(
         status: CollateralStatus::Active,
         last_price: None,
         last_price_timestamp: None,
-        redemption_fee_floor: Ratio::from_f64(arg.redemption_fee_floor.unwrap_or(0.005)),
-        redemption_fee_ceiling: Ratio::from_f64(arg.redemption_fee_ceiling.unwrap_or(0.05)),
+        redemption_fee_floor: risk_parameters.redemption_fee_floor,
+        redemption_fee_ceiling: risk_parameters.redemption_fee_ceiling,
         current_base_rate: Ratio::from_f64(0.0),
         last_redemption_time: 0,
         // Computed from borrow_threshold_ratio × recovery_cr_multiplier; not user-supplied.
-        recovery_target_cr: Ratio::from_f64(arg.borrow_threshold_ratio)
-            * read_state(|s| s.recovery_cr_multiplier),
+        recovery_target_cr,
         min_collateral_deposit: arg.min_collateral_deposit,
         recovery_borrowing_fee: None,
         recovery_interest_rate_apr: None,
@@ -12123,6 +12159,15 @@ async fn add_collateral_token(
         enum SpCollateralStatus {
             Active,
         }
+        // Match the Stability Pool's `variant { Ok; Err : StabilityPoolError }`
+        // reply without coupling this canister to the pool crate. `IDLValue`
+        // accepts every concrete error arm while keeping a successful `Ok`
+        // distinguishable from a transport failure.
+        #[derive(candid::CandidType, Deserialize)]
+        enum SpCollateralRegistrationResult {
+            Ok,
+            Err(candid::IDLValue),
+        }
 
         let info = SpCollateralInfo {
             ledger_id: ledger_id,
@@ -12131,12 +12176,14 @@ async fn add_collateral_token(
             status: SpCollateralStatus::Active,
         };
 
-        // We ignore the SP's Result return value — if the call itself succeeds,
-        // registration worked (or the collateral already existed, which is fine).
-        match ic_cdk::call::<(SpCollateralInfo,), ()>(sp_canister, "register_collateral", (info,))
-            .await
+        match ic_cdk::call::<(SpCollateralInfo,), (SpCollateralRegistrationResult,)>(
+            sp_canister,
+            "register_collateral",
+            (info,),
+        )
+        .await
         {
-            Ok(()) => {
+            Ok((SpCollateralRegistrationResult::Ok,)) => {
                 log!(
                     INFO,
                     "[add_collateral_token] Registered {} ({}) on stability pool {}",
@@ -12145,6 +12192,9 @@ async fn add_collateral_token(
                     sp_canister
                 );
             }
+            Ok((SpCollateralRegistrationResult::Err(error),)) => {
+                log!(INFO, "[add_collateral_token] WARNING: Stability Pool rejected collateral registration for {} ({}): {:?} — register manually", symbol, ledger_id, error);
+            }
             Err((code, msg)) => {
                 log!(INFO, "[add_collateral_token] WARNING: Failed to register collateral on SP: {:?} {} — register manually", code, msg);
             }
@@ -12152,6 +12202,77 @@ async fn add_collateral_token(
     }
 
     Ok(())
+}
+
+/// Register mainnet ckDOGE as ordinary ICRC collateral with the established XRP
+/// risk envelope. Unlike native XRP, ckDOGE is held entirely on its ICRC ledger,
+/// so the generic registration path queries the ledger's live decimals, fee, and
+/// symbol and uses standard ICRC-2 custody flows.
+///
+/// This source endpoint does not itself register ckDOGE anywhere until an
+/// authorized developer calls it on an installed canister.
+#[candid_method(update)]
+#[update]
+async fn register_ckdoge_collateral() -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    if !read_state(|s| s.developer_principal == caller) {
+        return Err(ProtocolError::GenericError(
+            "Only the developer can register ckDOGE collateral".to_string(),
+        ));
+    }
+
+    // Keep the same borrowing-fee and base APR as XRP, which inherits these
+    // values from the current ICP collateral configuration. The global borrowing
+    // curve and the inherited rate curve continue to govern dynamic pricing.
+    let (icp_borrowing_fee, icp_interest_rate_apr) = read_state(|s| {
+        let icp_ct = s.icp_collateral_type();
+        let icp = s.get_collateral_config(&icp_ct);
+        (
+            icp.map(|c| c.borrowing_fee).unwrap_or(Ratio::from_f64(0.0)),
+            icp.map(|c| c.interest_rate_apr)
+                .unwrap_or(Ratio::from_f64(0.0)),
+        )
+    });
+    let ckdoge_ledger_canister_id = Principal::from_text("efmc5-wyaaa-aaaar-qb3wa-cai")
+        .expect("ckDOGE ledger canister ID must be valid");
+
+    // Reuse the generic ICRC registration path so it remains the single source
+    // of truth for ledger metadata, collateral events, price timers, and the
+    // best-effort Stability Pool registration.
+    register_icrc_collateral_token(
+        rumi_protocol_backend::AddCollateralArg {
+            ledger_canister_id: ckdoge_ledger_canister_id,
+            price_source: rumi_protocol_backend::state::PriceSource::Xrc {
+                base_asset: "DOGE".to_string(),
+                base_asset_class: rumi_protocol_backend::state::XrcAssetClass::Cryptocurrency,
+                quote_asset: "USD".to_string(),
+                quote_asset_class: rumi_protocol_backend::state::XrcAssetClass::FiatCurrency,
+            },
+            liquidation_ratio: 1.33,
+            borrow_threshold_ratio: 1.50,
+            liquidation_bonus: 1.12,
+            borrowing_fee: icp_borrowing_fee.to_f64(),
+            debt_ceiling: 250_000_000_000,
+            min_vault_debt: 10_000_000,
+            interest_rate_apr: icp_interest_rate_apr.to_f64(),
+            // ckDOGE has 8 decimals: 100_000_000 koinu = 1 DOGE.
+            min_collateral_deposit: 100_000_000,
+            display_color: Some("#C2A633".to_string()),
+            redemption_fee_floor: Some(0.005),
+            redemption_fee_ceiling: Some(0.05),
+            redemption_tier: Some(3),
+        },
+        Some(IcrcCollateralRiskParameters {
+            liquidation_ratio: Ratio::new(dec!(1.33)),
+            borrow_threshold_ratio: Ratio::new(dec!(1.50)),
+            liquidation_bonus: Ratio::new(dec!(1.12)),
+            borrowing_fee: icp_borrowing_fee,
+            interest_rate_apr: icp_interest_rate_apr,
+            redemption_fee_floor: Ratio::new(dec!(0.005)),
+            redemption_fee_ceiling: Ratio::new(dec!(0.05)),
+        }),
+    )
+    .await
 }
 
 /// One-time (idempotent) admin backfill of `CollateralConfig.symbol` for
