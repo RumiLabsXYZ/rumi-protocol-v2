@@ -2038,6 +2038,7 @@ export const idlFactory = ({ IDL }) => {
       ),
     'refresh_chain_hot_wallet_balance' : IDL.Func([IDL.Nat32], [Result_19], []),
     'register_chain' : IDL.Func([RegisterChainArg], [Result], []),
+    'register_ckdoge_collateral' : IDL.Func([], [Result], []),
     'register_sol_collateral' : IDL.Func([], [Result], []),
     'register_xrp_collateral' : IDL.Func([], [Result], []),
     'repay_and_close_vault' : IDL.Func([VaultArg], [Result_20], []),

@@ -220,7 +220,7 @@ export const collateralStore = createCollateralStore();
  * Tokens not in this list appear at the end, sorted alphabetically.
  */
 export const COLLATERAL_DISPLAY_ORDER: string[] = [
-  'ICP', 'XRP', 'SOL', 'ckBTC', 'ckETH', 'ckXAUT', 'nICP', 'BOB', 'EXE',
+  'ICP', 'XRP', 'SOL', 'ckBTC', 'ckETH', 'ckDOGE', 'ckXAUT', 'nICP', 'BOB', 'EXE',
 ];
 
 /**

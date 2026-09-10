@@ -1871,6 +1871,7 @@ export interface _SERVICE {
   'redeem_reserves' : ActorMethod<[bigint, [] | [Principal]], Result_18>,
   'refresh_chain_hot_wallet_balance' : ActorMethod<[number], Result_19>,
   'register_chain' : ActorMethod<[RegisterChainArg], Result>,
+  'register_ckdoge_collateral' : ActorMethod<[], Result>,
   'register_sol_collateral' : ActorMethod<[], Result>,
   'register_xrp_collateral' : ActorMethod<[], Result>,
   'repay_and_close_vault' : ActorMethod<[VaultArg], Result_20>,

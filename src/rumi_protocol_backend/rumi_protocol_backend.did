@@ -1578,6 +1578,7 @@ service : (ProtocolArg) -> {
   redeem_reserves : (nat64, opt principal) -> (Result_18);
   refresh_chain_hot_wallet_balance : (nat32) -> (Result_19);
   register_chain : (RegisterChainArg) -> (Result);
+  register_ckdoge_collateral : () -> (Result);
   register_sol_collateral : () -> (Result);
   register_xrp_collateral : () -> (Result);
   repay_and_close_vault : (VaultArg) -> (Result_20);

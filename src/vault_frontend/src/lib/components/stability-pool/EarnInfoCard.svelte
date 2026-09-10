@@ -44,7 +44,7 @@
 
   // Registries
   $: stablecoinRegistry = poolStatus?.stablecoin_registry ?? [];
-  const COLLATERAL_ORDER: Record<string, number> = { ICP: 0, XRP: 1, SOL: 2, ckBTC: 3, ckETH: 4, ckXAUT: 5, nICP: 6, BOB: 7, EXE: 8 };
+  const COLLATERAL_ORDER: Record<string, number> = { ICP: 0, XRP: 1, SOL: 2, ckBTC: 3, ckETH: 4, ckDOGE: 5, ckXAUT: 6, nICP: 7, BOB: 8, EXE: 9 };
   // Sunset BOB remains visible for accrued gains. It appears in liquidation
   // preferences only while a legacy position is still receiving it, providing
   // a one-way opt-out without advertising fresh exposure.
@@ -105,6 +105,7 @@
     if (sym.includes('btc')) return '#F7931A';
     if (sym.includes('xaut') || sym.includes('gold')) return '#D4A843';
     if (sym.includes('eth')) return '#627EEA';
+    if (sym.includes('doge')) return '#C2A633';
     return '#94A3B8';
   }
 
