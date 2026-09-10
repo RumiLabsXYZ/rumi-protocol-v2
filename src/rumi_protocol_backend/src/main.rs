@@ -13602,11 +13602,108 @@ async fn set_collateral_display_color(
     Ok(())
 }
 
+/// The legacy public view of collateral custody. `NativeSol` deliberately does
+/// not appear here: the deployed service contract predates that custody rail.
+#[derive(candid::CandidType, Clone, Copy, Debug, PartialEq, Eq)]
+enum LegacyCustodyKind {
+    IcrcLedger,
+    NativeXrp,
+}
+
+/// Public `get_collateral_config` view that preserves the deployed response
+/// shape while the internal state can represent newer custody rails.
+#[derive(candid::CandidType, Clone, Debug)]
+struct LegacyCollateralConfig {
+    ledger_canister_id: Principal,
+    decimals: u8,
+    liquidation_ratio: Ratio,
+    borrow_threshold_ratio: Ratio,
+    liquidation_bonus: Ratio,
+    borrowing_fee: Ratio,
+    interest_rate_apr: Ratio,
+    debt_ceiling: u64,
+    min_vault_debt: rumi_protocol_backend::numeric::ICUSD,
+    ledger_fee: u64,
+    price_source: rumi_protocol_backend::state::PriceSource,
+    status: rumi_protocol_backend::state::CollateralStatus,
+    last_price: Option<f64>,
+    last_price_timestamp: Option<u64>,
+    redemption_fee_floor: Ratio,
+    redemption_fee_ceiling: Ratio,
+    current_base_rate: Ratio,
+    last_redemption_time: u64,
+    recovery_target_cr: Ratio,
+    min_collateral_deposit: u64,
+    recovery_borrowing_fee: Option<Ratio>,
+    recovery_interest_rate_apr: Option<Ratio>,
+    display_color: Option<String>,
+    healthy_cr: Option<Ratio>,
+    rate_curve: Option<rumi_protocol_backend::state::RateCurve>,
+    redemption_tier: u8,
+    min_xrc_sources: Option<u32>,
+    custody_kind: Option<LegacyCustodyKind>,
+    symbol: Option<String>,
+}
+
+impl LegacyCollateralConfig {
+    fn is_discoverable(config: &rumi_protocol_backend::state::CollateralConfig) -> bool {
+        !matches!(
+            config.custody_kind,
+            Some(rumi_protocol_backend::state::CustodyKind::NativeSol)
+        )
+    }
+
+    fn from_internal(config: rumi_protocol_backend::state::CollateralConfig) -> Option<Self> {
+        use rumi_protocol_backend::state::CustodyKind;
+
+        if !Self::is_discoverable(&config) {
+            return None;
+        }
+
+        let custody_kind = match config.custody_kind {
+            Some(CustodyKind::IcrcLedger) => Some(LegacyCustodyKind::IcrcLedger),
+            Some(CustodyKind::NativeXrp) => Some(LegacyCustodyKind::NativeXrp),
+            Some(CustodyKind::NativeSol) => unreachable!("NativeSol is not discoverable"),
+            None => None,
+        };
+
+        Some(Self {
+            ledger_canister_id: config.ledger_canister_id,
+            decimals: config.decimals,
+            liquidation_ratio: config.liquidation_ratio,
+            borrow_threshold_ratio: config.borrow_threshold_ratio,
+            liquidation_bonus: config.liquidation_bonus,
+            borrowing_fee: config.borrowing_fee,
+            interest_rate_apr: config.interest_rate_apr,
+            debt_ceiling: config.debt_ceiling,
+            min_vault_debt: config.min_vault_debt,
+            ledger_fee: config.ledger_fee,
+            price_source: config.price_source,
+            status: config.status,
+            last_price: config.last_price,
+            last_price_timestamp: config.last_price_timestamp,
+            redemption_fee_floor: config.redemption_fee_floor,
+            redemption_fee_ceiling: config.redemption_fee_ceiling,
+            current_base_rate: config.current_base_rate,
+            last_redemption_time: config.last_redemption_time,
+            recovery_target_cr: config.recovery_target_cr,
+            min_collateral_deposit: config.min_collateral_deposit,
+            recovery_borrowing_fee: config.recovery_borrowing_fee,
+            recovery_interest_rate_apr: config.recovery_interest_rate_apr,
+            display_color: config.display_color,
+            healthy_cr: config.healthy_cr,
+            rate_curve: config.rate_curve,
+            redemption_tier: config.redemption_tier,
+            min_xrc_sources: config.min_xrc_sources,
+            custody_kind,
+            symbol: config.symbol,
+        })
+    }
+}
+
 #[candid_method(query)]
 #[query]
-fn get_collateral_config(
-    collateral_type: Principal,
-) -> Option<rumi_protocol_backend::state::CollateralConfig> {
+fn get_collateral_config(collateral_type: Principal) -> Option<LegacyCollateralConfig> {
     read_state(|s| {
         s.get_collateral_config(&collateral_type)
             .cloned()
@@ -13617,6 +13714,7 @@ fn get_collateral_config(
                     config.borrow_threshold_ratio * s.recovery_cr_multiplier;
                 config
             })
+            .and_then(LegacyCollateralConfig::from_internal)
     })
 }
 
@@ -13624,7 +13722,15 @@ fn get_collateral_config(
 #[query]
 fn get_supported_collateral_types(
 ) -> Vec<(Principal, rumi_protocol_backend::state::CollateralStatus)> {
-    read_state(|s| s.supported_collateral_types())
+    read_state(|s| {
+        s.supported_collateral_types()
+            .into_iter()
+            .filter(|(collateral_type, _)| {
+                s.get_collateral_config(collateral_type)
+                    .is_some_and(LegacyCollateralConfig::is_discoverable)
+            })
+            .collect()
+    })
 }
 
 /// Returns per-collateral aggregate totals (collateral amount, debt, vault count).
@@ -14876,6 +14982,34 @@ fn check_candid_interface_compatibility() {
         "declared candid interface in rumi_protocol_backend.did file",
         CandidSource::File(did_path.as_path()),
     );
+}
+
+#[test]
+fn legacy_collateral_config_projection_omits_native_sol_custody() {
+    use rumi_protocol_backend::state::{xrp_collateral_config, CustodyKind};
+
+    let mut config = xrp_collateral_config(
+        Ratio::from_f64(0.005),
+        Ratio::from_f64(0.05),
+        Ratio::from_f64(1.0333),
+    );
+    config.custody_kind = Some(CustodyKind::NativeSol);
+
+    assert!(LegacyCollateralConfig::from_internal(config).is_none());
+}
+
+#[test]
+fn legacy_collateral_discovery_omits_native_sol_custody() {
+    use rumi_protocol_backend::state::{xrp_collateral_config, CustodyKind};
+
+    let mut config = xrp_collateral_config(
+        Ratio::from_f64(0.005),
+        Ratio::from_f64(0.05),
+        Ratio::from_f64(1.0333),
+    );
+    config.custody_kind = Some(CustodyKind::NativeSol);
+
+    assert!(!LegacyCollateralConfig::is_discoverable(&config));
 }
 
 #[cfg(test)]

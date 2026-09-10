@@ -1066,6 +1066,39 @@ export interface InitArg {
 }
 export interface InterestSplitArg { 'bps' : bigint, 'destination' : string }
 export type InterpolationMethod = { 'Linear' : null };
+export interface LegacyCollateralConfig {
+  'last_redemption_time' : bigint,
+  'status' : CollateralStatus,
+  'decimals' : number,
+  'recovery_interest_rate_apr' : [] | [Uint8Array | number[]],
+  'redemption_fee_ceiling' : Uint8Array | number[],
+  'healthy_cr' : [] | [Uint8Array | number[]],
+  'debt_ceiling' : bigint,
+  'min_vault_debt' : bigint,
+  'rate_curve' : [] | [RateCurve],
+  'recovery_borrowing_fee' : [] | [Uint8Array | number[]],
+  'min_xrc_sources' : [] | [number],
+  'min_collateral_deposit' : bigint,
+  'last_price' : [] | [number],
+  'last_price_timestamp' : [] | [bigint],
+  'redemption_tier' : number,
+  'redemption_fee_floor' : Uint8Array | number[],
+  'borrow_threshold_ratio' : Uint8Array | number[],
+  'custody_kind' : [] | [LegacyCustodyKind],
+  'ledger_fee' : bigint,
+  'recovery_target_cr' : Uint8Array | number[],
+  'current_base_rate' : Uint8Array | number[],
+  'ledger_canister_id' : Principal,
+  'price_source' : PriceSource,
+  'liquidation_bonus' : Uint8Array | number[],
+  'display_color' : [] | [string],
+  'borrowing_fee' : Uint8Array | number[],
+  'interest_rate_apr' : Uint8Array | number[],
+  'symbol' : [] | [string],
+  'liquidation_ratio' : Uint8Array | number[],
+}
+export type LegacyCustodyKind = { 'IcrcLedger' : null } |
+  { 'NativeXrp' : null };
 export interface LineDisplayPage { 'lines' : Array<string> }
 export type LiquidationTier = { 'Bot' : null } |
   { 'StabilityPool' : null };
@@ -1684,7 +1717,10 @@ export interface _SERVICE {
   'get_chain_vault' : ActorMethod<[bigint], [] | [ChainVaultV1]>,
   'get_chains_ecdsa_key_name' : ActorMethod<[], string>,
   'get_ckstable_repay_fee' : ActorMethod<[], number>,
-  'get_collateral_config' : ActorMethod<[Principal], [] | [CollateralConfig]>,
+  'get_collateral_config' : ActorMethod<
+    [Principal],
+    [] | [LegacyCollateralConfig]
+  >,
   'get_collateral_price_fetch_intervals' : ActorMethod<
     [],
     Array<[Principal, bigint]>

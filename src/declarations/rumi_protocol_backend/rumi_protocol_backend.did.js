@@ -378,12 +378,11 @@ export const idlFactory = ({ IDL }) => {
     'method' : InterpolationMethod,
     'markers' : IDL.Vec(RateMarker),
   });
-  const CustodyKind = IDL.Variant({
+  const LegacyCustodyKind = IDL.Variant({
     'IcrcLedger' : IDL.Null,
-    'NativeSol' : IDL.Null,
     'NativeXrp' : IDL.Null,
   });
-  const CollateralConfig = IDL.Record({
+  const LegacyCollateralConfig = IDL.Record({
     'last_redemption_time' : IDL.Nat64,
     'status' : CollateralStatus,
     'decimals' : IDL.Nat8,
@@ -401,7 +400,7 @@ export const idlFactory = ({ IDL }) => {
     'redemption_tier' : IDL.Nat8,
     'redemption_fee_floor' : IDL.Vec(IDL.Nat8),
     'borrow_threshold_ratio' : IDL.Vec(IDL.Nat8),
-    'custody_kind' : IDL.Opt(CustodyKind),
+    'custody_kind' : IDL.Opt(LegacyCustodyKind),
     'ledger_fee' : IDL.Nat64,
     'recovery_target_cr' : IDL.Vec(IDL.Nat8),
     'current_base_rate' : IDL.Vec(IDL.Nat8),
@@ -485,6 +484,42 @@ export const idlFactory = ({ IDL }) => {
     'icusd_redeemed_e8s' : IDL.Nat64,
     'vault_id' : IDL.Nat64,
     'collateral_seized' : IDL.Nat64,
+  });
+  const CustodyKind = IDL.Variant({
+    'IcrcLedger' : IDL.Null,
+    'NativeSol' : IDL.Null,
+    'NativeXrp' : IDL.Null,
+  });
+  const CollateralConfig = IDL.Record({
+    'last_redemption_time' : IDL.Nat64,
+    'status' : CollateralStatus,
+    'decimals' : IDL.Nat8,
+    'recovery_interest_rate_apr' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'redemption_fee_ceiling' : IDL.Vec(IDL.Nat8),
+    'healthy_cr' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'debt_ceiling' : IDL.Nat64,
+    'min_vault_debt' : IDL.Nat64,
+    'rate_curve' : IDL.Opt(RateCurve),
+    'recovery_borrowing_fee' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'min_xrc_sources' : IDL.Opt(IDL.Nat32),
+    'min_collateral_deposit' : IDL.Nat64,
+    'last_price' : IDL.Opt(IDL.Float64),
+    'last_price_timestamp' : IDL.Opt(IDL.Nat64),
+    'redemption_tier' : IDL.Nat8,
+    'redemption_fee_floor' : IDL.Vec(IDL.Nat8),
+    'borrow_threshold_ratio' : IDL.Vec(IDL.Nat8),
+    'custody_kind' : IDL.Opt(CustodyKind),
+    'ledger_fee' : IDL.Nat64,
+    'recovery_target_cr' : IDL.Vec(IDL.Nat8),
+    'current_base_rate' : IDL.Vec(IDL.Nat8),
+    'ledger_canister_id' : IDL.Principal,
+    'price_source' : PriceSource,
+    'liquidation_bonus' : IDL.Vec(IDL.Nat8),
+    'display_color' : IDL.Opt(IDL.Text),
+    'borrowing_fee' : IDL.Vec(IDL.Nat8),
+    'interest_rate_apr' : IDL.Vec(IDL.Nat8),
+    'symbol' : IDL.Opt(IDL.Text),
+    'liquidation_ratio' : IDL.Vec(IDL.Nat8),
   });
   const FeeSource = IDL.Variant({
     'BorrowingFee' : IDL.Null,
@@ -1693,7 +1728,7 @@ export const idlFactory = ({ IDL }) => {
     'get_ckstable_repay_fee' : IDL.Func([], [IDL.Float64], ['query']),
     'get_collateral_config' : IDL.Func(
         [IDL.Principal],
-        [IDL.Opt(CollateralConfig)],
+        [IDL.Opt(LegacyCollateralConfig)],
         ['query'],
       ),
     'get_collateral_price_fetch_intervals' : IDL.Func(

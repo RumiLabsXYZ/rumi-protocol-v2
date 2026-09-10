@@ -891,6 +891,38 @@ type InitArg = record {
 };
 type InterestSplitArg = record { bps : nat64; destination : text };
 type InterpolationMethod = variant { Linear };
+type LegacyCollateralConfig = record {
+  last_redemption_time : nat64;
+  status : CollateralStatus;
+  decimals : nat8;
+  recovery_interest_rate_apr : opt blob;
+  redemption_fee_ceiling : blob;
+  healthy_cr : opt blob;
+  debt_ceiling : nat64;
+  min_vault_debt : nat64;
+  rate_curve : opt RateCurve;
+  recovery_borrowing_fee : opt blob;
+  min_xrc_sources : opt nat32;
+  min_collateral_deposit : nat64;
+  last_price : opt float64;
+  last_price_timestamp : opt nat64;
+  redemption_tier : nat8;
+  redemption_fee_floor : blob;
+  borrow_threshold_ratio : blob;
+  custody_kind : opt LegacyCustodyKind;
+  ledger_fee : nat64;
+  recovery_target_cr : blob;
+  current_base_rate : blob;
+  ledger_canister_id : principal;
+  price_source : PriceSource;
+  liquidation_bonus : blob;
+  display_color : opt text;
+  borrowing_fee : blob;
+  interest_rate_apr : blob;
+  symbol : opt text;
+  liquidation_ratio : blob;
+};
+type LegacyCustodyKind = variant { IcrcLedger; NativeXrp };
 type LineDisplayPage = record { lines : vec text };
 type LiquidationTier = variant { Bot; StabilityPool };
 type LiquidityStatus = record {
@@ -1443,7 +1475,7 @@ service : (ProtocolArg) -> {
   get_chain_vault : (nat64) -> (opt ChainVaultV1) query;
   get_chains_ecdsa_key_name : () -> (text) query;
   get_ckstable_repay_fee : () -> (float64) query;
-  get_collateral_config : (principal) -> (opt CollateralConfig) query;
+  get_collateral_config : (principal) -> (opt LegacyCollateralConfig) query;
   get_collateral_price_fetch_intervals : () -> (
       vec record { principal; nat64 },
     ) query;
