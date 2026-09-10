@@ -19,7 +19,6 @@
     EXE: '/windoge98-logo.webp',
     ckETH: '/cketh-logo.svg',
     nICP: '/nicp-logo.png',
-    SOL: '/sol-logo.svg',
   };
 
   const sizeClasses = size === 'sm'

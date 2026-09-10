@@ -17,7 +17,6 @@
   import MultiplierBadge from '../points/MultiplierBadge.svelte';
   import { seasonStore, earningActive } from '$lib/stores/seasonStore';
   import { nativeXrpKeepOpenCloseCopy } from '$lib/utils/nativeXrpBorrowFlow';
-  import { nativeSolKeepOpenCloseCopy } from '$lib/utils/nativeSolBorrowFlow';
   import { computeBorrowMax } from '$lib/utils/borrowLimits';
   import { appDataStore, protocolStatus, collateralTotals } from '$lib/stores/appDataStore';
 
@@ -30,22 +29,11 @@
   $: vaultCollateralInfo = collateralStore.getCollateralInfo(vaultCollateralType);
   $: collateralSymbol = vault.collateralSymbol || vaultCollateralInfo?.symbol || 'ICP';
   $: collateralColor = vaultCollateralInfo?.color ?? '#94A3B8';
-  // Native-XRP/native-SOL collateral live off-chain (XRP Ledger / Solana): there is
-  // no IC ledger to top up from (add-margin is backend-rejected) and withdraw/close
-  // produce a settle-able claim rather than a wallet transfer, so the deposit/
-  // withdraw UX differs from an ICRC vault. (Borrow/repay are pure icUSD and
-  // unchanged.) `isNativeCustody` covers behavior shared by both native rails;
-  // `isNativeXrp`/`isNativeSol` stay separate for asset-accurate copy.
+  // Native-XRP collateral lives off-chain on the XRP Ledger: there is no IC ledger to
+  // top up from (add-margin is backend-rejected) and withdraw/close produce a
+  // settle-able XrpClaim rather than a wallet transfer — so the deposit/withdraw UX
+  // differs from an ICRC vault. (Borrow/repay are pure icUSD and unchanged.)
   $: isNativeXrp = vaultCollateralInfo?.custodyKind === 'NativeXrp';
-  $: isNativeSol = vaultCollateralInfo?.custodyKind === 'NativeSol';
-  $: isNativeCustody = isNativeXrp || isNativeSol;
-  $: nativeKeepOpenCopy = isNativeXrp
-    ? nativeXrpKeepOpenCloseCopy()
-    : isNativeSol
-      ? nativeSolKeepOpenCloseCopy()
-      : '';
-  // "XRPL" / "Solana" for settlement-network copy ("... was created for X settlement").
-  $: nativeNetworkName = isNativeXrp ? 'XRPL' : isNativeSol ? 'Solana' : '';
   // Easter egg themes for specific tokens (user can toggle off via localStorage)
   import { writable } from 'svelte/store';
   const easterEggsEnabled = writable(
@@ -132,9 +120,9 @@
   // Per-collateral wallet balance for "Add Collateral" cap
   let nonIcpCollateralBalance = 0;
   let _lastFetchedCt = '';
-  // Skip native custody (XRP/SOL): its `ledgerCanisterId` is a synthetic principal
-  // (no ICRC ledger), so icrc1_balance_of would reject; there is no IC-side wallet balance.
-  $: if (vaultCollateralType !== CANISTER_IDS.ICP_LEDGER && !isNativeCustody && $walletStore.isConnected && $walletStore.principal) {
+  // Skip native-XRP: its `ledgerCanisterId` is a synthetic principal (no ICRC
+  // ledger), so icrc1_balance_of would reject; there is no IC-side wallet balance.
+  $: if (vaultCollateralType !== CANISTER_IDS.ICP_LEDGER && !isNativeXrp && $walletStore.isConnected && $walletStore.principal) {
     // Fetch balance for this vault's collateral token
     const ct = vaultCollateralType;
     const ledger = vaultCollateralInfo?.ledgerCanisterId || ct;
@@ -557,12 +545,12 @@
   // (DUST, MIN_ICUSD) band) can ONLY clear via repay_and_close, which bypasses
   // the floor — so we don't offer them the choice; they always close.
   $: canKeepVaultOpenOnFullRepay = fullIcusdRepayWithCollateral && maxRepayable >= MIN_ICUSD;
-  // Native custody (XRP/SOL) releases withdrawable collateral into a settlement
-  // claim, but the vault stays open because the reserve remains locked at its
-  // address. Other collateral can still honor the user's keep-open choice.
+  // Native XRP releases withdrawable collateral into a settlement claim, but the
+  // vault stays open because the XRPL reserve remains locked at its address.
+  // Other collateral can still honor the user's keep-open choice.
   $: isRepayAndClose =
       fullIcusdRepayWithCollateral
-      && (isNativeCustody || closeOnFullRepay || !canKeepVaultOpenOnFullRepay);
+      && (isNativeXrp || closeOnFullRepay || !canKeepVaultOpenOnFullRepay);
 
   function clearMessages() { /* toasts auto-dismiss */ }
 
@@ -679,17 +667,16 @@
     try {
       const result = await protocolService.withdrawPartialCollateral(vault.vaultId, amount, collateralDecimals);
       if (result.success) {
-        // Native custody (XRP/SOL) withdraw creates a settle-able claim (the
-        // collateral does NOT land in an IC wallet), so say so and don't refresh an
-        // IC-side balance that won't change.
-        const msg = isNativeCustody
-          ? `Withdrawal queued. A claim for ${amount} ${collateralSymbol} was created for ${nativeNetworkName} settlement.`
+        // Native-XRP withdraw creates a settle-able XrpClaim (the XRP does NOT land in
+        // an IC wallet) — say so and don't refresh an IC-side balance that won't change.
+        const msg = isNativeXrp
+          ? `Withdrawal queued. A claim for ${amount} XRP was created for XRPL settlement.`
           : result.oisyResilient
             ? `Withdrew ${amount} ${collateralSymbol} (wallet glitch ignored — operation confirmed on-chain).`
             : `Withdrew ${amount} ${collateralSymbol}`;
         toastStore.success(msg, 8000); withdrawAmount = '';
         await vaultStore.refreshVault(vault.vaultId);
-        if (!isNativeCustody) walletStore.refreshBalance({ skipCache: true });
+        if (!isNativeXrp) walletStore.refreshBalance({ skipCache: true });
         dispatch('updated');
       } else { toastStore.error(result.error || 'Failed', 8000); }
     } catch (err) { toastStore.error(err instanceof Error ? err.message : 'Unknown error', 8000);
@@ -744,8 +731,8 @@
       }
       if (result.success) {
         const actionLabel = isRepayAndClose
-          ? (isNativeCustody
-              ? `Repaid all debt and queued your withdrawable ${collateralSymbol} for settlement. ${nativeKeepOpenCopy}`
+          ? (isNativeXrp
+              ? `Repaid all debt and queued your withdrawable XRP for settlement. ${nativeXrpKeepOpenCloseCopy()}`
               : 'Repaid and closed vault')
           : `Repaid ${amount} ${repayTokenType === 'icUSD' ? 'icUSD' : repayTokenType}`;
         const msg = result.oisyResilient
@@ -753,9 +740,9 @@
           : actionLabel;
         toastStore.success(msg, 8000); repayAmount = '';
         await new Promise(r => setTimeout(r, 1000));
-        // For non-native-custody repay-and-close, refresh the full vault list
-        // because the vault is gone. Native-XRP/native-SOL vaults remain open.
-        if (isRepayAndClose && !isNativeCustody) {
+        // For non-XRP repay-and-close, refresh the full vault list because the
+        // vault is gone. Native-XRP vaults remain open.
+        if (isRepayAndClose && !isNativeXrp) {
           await vaultStore.refreshVaults();
         } else {
           await vaultStore.refreshVault(vault.vaultId);
@@ -782,18 +769,18 @@
     try {
       const result = await protocolService.withdrawCollateralAndCloseVault(vault.vaultId);
       if (result.success) {
-        const msg = isNativeCustody
-          ? `Withdrawable ${collateralSymbol} queued for settlement. ${nativeKeepOpenCopy}`
+        const msg = isNativeXrp
+          ? `Withdrawable XRP queued for settlement. ${nativeXrpKeepOpenCloseCopy()}`
           : result.oisyResilient
             ? 'Vault closed. Collateral returned. (Wallet glitch ignored — confirmed on-chain.)'
             : 'Vault closed. Collateral returned.';
         toastStore.success(msg, 8000);
-        if (isNativeCustody) {
+        if (isNativeXrp) {
           await vaultStore.refreshVault(vault.vaultId);
         } else {
           await vaultStore.refreshVaults();
         }
-        if (!isNativeCustody) walletStore.refreshBalance({ skipCache: true });
+        if (!isNativeXrp) walletStore.refreshBalance({ skipCache: true });
         dispatch('updated');
       } else { toastStore.error(result.error || 'Failed', 8000); }
     } catch (err) { toastStore.error(err instanceof Error ? err.message : 'Unknown error', 8000);
@@ -872,11 +859,10 @@
         <!-- Pill groups: right column -->
         <div class="pill-groups">
           <div class="pill-group pill-group-collateral">
-            {#if !isNativeCustody}
-              <!-- Native custody (XRP/SOL) has no IC-side top-up: add_margin is
-                   backend-rejected ("uses the native deposit flow"), so don't offer a
-                   Deposit that errors. New native collateral is funded via that rail's
-                   own open flow (XrpVaultPanel / SolVaultPanel). -->
+            {#if !isNativeXrp}
+              <!-- Native-XRP has no IC-side top-up: add_margin is backend-rejected
+                   ("uses the XRP deposit flow"), so don't offer a Deposit that errors.
+                   New XRP collateral is funded via the Native XRP panel's open flow. -->
               <button class="pill pill-collateral" class:pill-active-collateral={activeAction === 'add'}
                 on:click={() => selectAction('add')} disabled={isProcessing}>Deposit</button>
             {/if}
@@ -1022,7 +1008,7 @@
                   disabled={isProcessing || isWithdrawingAndClosing || !withdrawAmount || withdrawOverMax}>
                   {#if isProcessing || isWithdrawingAndClosing}
                     ...
-                  {:else if isNativeCustody && isWithdrawAndClose}
+                  {:else if isNativeXrp && isWithdrawAndClose}
                     Withdraw &amp; Keep Open
                   {:else if isWithdrawAndClose}
                     Withdraw & Close
@@ -1106,7 +1092,7 @@
                   </div>
                 {/if}
               </div>
-              {#if canKeepVaultOpenOnFullRepay && !isNativeCustody}
+              {#if canKeepVaultOpenOnFullRepay && !isNativeXrp}
                 <div class="repay-close-toggle" role="radiogroup" aria-label="After repaying full debt">
                   <button type="button" class="repay-close-option" class:repay-close-option-active={closeOnFullRepay}
                     role="radio" aria-checked={closeOnFullRepay}
@@ -1126,9 +1112,9 @@
                     Repays all debt and leaves the vault open with {collateralSymbol} deposited.
                   {/if}
                 </span>
-              {:else if isNativeCustody && fullIcusdRepayWithCollateral}
+              {:else if isNativeXrp && fullIcusdRepayWithCollateral}
                 <span class="repay-close-hint">
-                  Repays all debt, queues your withdrawable {collateralSymbol} for settlement, and keeps the vault open because the {isNativeXrp ? 'XRP account reserve' : 'SOL rent-exempt reserve'} remains locked.
+                  Repays all debt, queues your withdrawable XRP for settlement, and keeps the vault open because the XRP account reserve remains locked.
                 </span>
               {/if}
               <div class="input-submit-row">
@@ -1139,7 +1125,7 @@
                   disabled={isProcessing || !repayAmount || repayOverMax}>
                   {#if isProcessing}
                     ...
-                  {:else if isNativeCustody && isRepayAndClose}
+                  {:else if isNativeXrp && isRepayAndClose}
                     Repay &amp; Keep Open
                   {:else if isRepayAndClose}
                     Repay &amp; Close
