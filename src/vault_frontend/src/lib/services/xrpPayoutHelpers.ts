@@ -1,6 +1,5 @@
 import type { Principal } from '@dfinity/principal';
 import type { VaultOperationResult } from './types';
-import { isNativeSolPrincipal } from './solPayoutHelpers';
 
 const E8S = 100_000_000;
 const MAX_XRP_DESTINATION_TAG = 0xffffffff;
@@ -33,11 +32,8 @@ export function isNativeXrpPrincipal(value: PrincipalLike): boolean {
   return principalText(value) === XRP_NATIVE_PRINCIPAL_TEXT;
 }
 
-// Generalized beyond its name on purpose: both native rails (XRP, SOL) settle
-// exclusively through claims, never through a plain ICRC transfer, so anything
-// that isn't ICRC-claimable must be excluded here, not just XRP.
 export function isIcrcClaimableCollateral(value: PrincipalLike): boolean {
-  return !isNativeXrpPrincipal(value) && !isNativeSolPrincipal(value);
+  return !isNativeXrpPrincipal(value);
 }
 
 export function validateXrpPayoutInput(addressInput: string, destinationTagInput?: string): XrpPayoutValidation {
@@ -167,29 +163,24 @@ export function buildManualXrpSettlementSuccessCopy(claimId: XrpClaimId, txHash?
  * Amount to show on the Stability Pool "Collateral Gains" line for a collateral.
  *
  * ICRC collateral accrues into the pool's `collateral_gains` map, so the gains
- * value is the whole story. Neither native rail (XRP, SOL) ever does: an
- * absorb pays depositors through a chain-specific claim instead, so their
- * `collateral_gains` entries are permanently zero. Rendering that raw zero
- * told a depositor who was owed real XRP or SOL that they had received
- * nothing, so for a native rail we show its pending payout total instead
- * (drops for XRP, lamports for SOL).
+ * value is the whole story. Native XRP never does: an absorb pays depositors
+ * through XRPL claims instead, so its `collateral_gains` entry is permanently
+ * zero. Rendering that raw zero told a depositor who was owed real XRP that
+ * they had received nothing, so for native XRP we show the pending payout
+ * total (in drops) instead.
  *
- * Returns the amount plus which claim rail (if any) it came from, so callers
- * can label it rather than passing it off as an ordinary claimable balance.
+ * Returns the amount plus whether it came from the claim rail, so callers can
+ * label it rather than passing it off as an ordinary claimable balance.
  */
 export function collateralGainDisplayAmount(
   collateralPrincipal: PrincipalLike,
   icrcGainAmount: bigint,
   pendingXrpDrops: bigint,
-  pendingSolLamports: bigint = 0n,
-): { amount: bigint; viaXrpClaims: boolean; viaSolClaims: boolean } {
+): { amount: bigint; viaXrpClaims: boolean } {
   if (isNativeXrpPrincipal(collateralPrincipal)) {
-    return { amount: pendingXrpDrops, viaXrpClaims: true, viaSolClaims: false };
+    return { amount: pendingXrpDrops, viaXrpClaims: true };
   }
-  if (isNativeSolPrincipal(collateralPrincipal)) {
-    return { amount: pendingSolLamports, viaXrpClaims: false, viaSolClaims: true };
-  }
-  return { amount: icrcGainAmount, viaXrpClaims: false, viaSolClaims: false };
+  return { amount: icrcGainAmount, viaXrpClaims: false };
 }
 
 /** Total drops still owed across pending native-XRP payouts. */

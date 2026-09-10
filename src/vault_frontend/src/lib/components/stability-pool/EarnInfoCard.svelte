@@ -14,7 +14,6 @@
   import { CANISTER_IDS } from '../../config';
   import { liveSpApyPct } from '../../utils/liveApy';
   import XrpPayoutRouting from './XrpPayoutRouting.svelte';
-  import SolPayoutRouting from './SolPayoutRouting.svelte';
   import { collateralGainDisplayAmount, isIcrcClaimableCollateral } from '../../services/xrpPayoutHelpers';
   import {
     gainCollaterals,
@@ -39,12 +38,10 @@
   // XRP never appears in `gains` (it pays out via XRPL claims), so this is the
   // only source for a truthful XRP figure on the Collateral Gains row.
   let pendingXrpDrops = 0n;
-  // Same idea for native SOL, published by SolPayoutRouting.
-  let pendingSolLamports = 0n;
 
   // Registries
   $: stablecoinRegistry = poolStatus?.stablecoin_registry ?? [];
-  const COLLATERAL_ORDER: Record<string, number> = { ICP: 0, XRP: 1, SOL: 2, ckBTC: 3, ckETH: 4, ckDOGE: 5, ckXAUT: 6, nICP: 7, BOB: 8, EXE: 9 };
+  const COLLATERAL_ORDER: Record<string, number> = { ICP: 0, XRP: 1, ckBTC: 2, ckETH: 3, ckDOGE: 4, ckXAUT: 5, nICP: 6, BOB: 7, EXE: 8 };
   // Sunset BOB remains visible for accrued gains. It appears in liquidation
   // preferences only while a legacy position is still receiving it, providing
   // a one-way opt-out without advertising fresh exposure.
@@ -253,7 +250,6 @@
               key,
               gainEntry ? gainEntry[1] : 0n,
               pendingXrpDrops,
-              pendingSolLamports,
             )}
             <span class="gain-line" class:gain-dim={display.amount === 0n}>
               <span class="collateral-dot" style="background:{getCollateralColor(col)}"></span>
@@ -264,10 +260,6 @@
                      part of "Claim". Say so rather than letting it read as an
                      ordinary claimable gain sitting in the pool. -->
                 <span class="gain-note">via XRP payout</span>
-              {/if}
-              {#if display.viaSolClaims && display.amount > 0n}
-                <!-- Same reasoning as the XRP note above, for SOL claims. -->
-                <span class="gain-note">via SOL payout</span>
               {/if}
             </span>
           {/each}
@@ -294,13 +286,6 @@
       {userPosition}
       {isConnected}
       on:pendingDropsChange={(event) => { pendingXrpDrops = event.detail; }}
-      on:success={(event) => dispatch('success', event.detail)}
-    />
-    <SolPayoutRouting
-      {collateralRegistry}
-      {userPosition}
-      {isConnected}
-      on:pendingLamportsChange={(event) => { pendingSolLamports = event.detail; }}
       on:success={(event) => dispatch('success', event.detail)}
     />
 

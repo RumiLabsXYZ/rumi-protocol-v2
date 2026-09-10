@@ -13,15 +13,7 @@ import {
   type NativeXrpPendingPayout,
   type StabilityPoolNativeXrpActor,
 } from './stabilityPoolNativeXrp';
-import {
-  ackNativeSolPayoutSettledWithActor,
-  getMyNativeSolPayoutsWithActor,
-  optInNativeSolCollateralUsingActor,
-  type NativeSolPendingPayout,
-  type StabilityPoolNativeSolActor,
-} from './stabilityPoolNativeSol';
 import type { CandidOpt, XrpClaimId } from './xrpPayoutHelpers';
-import type { SolClaimId } from './solPayoutHelpers';
 
 // ──────────────────────────────────────────────────────────────
 // Types — mirrors the Candid interface
@@ -526,27 +518,6 @@ class StabilityPoolService {
   async ackNativeXrpPayoutSettled(claimId: XrpClaimId | number | bigint): Promise<void> {
     const actor = await this.getMutationActor();
     await ackNativeXrpPayoutSettledWithActor(actor, claimId, (err) => this.formatError(err));
-  }
-
-  // SOL opt-in is tagless only: `opt_in_native_collateral` works unchanged for SOL,
-  // there is no `_with_tag` counterpart (design spec §6).
-  async optInNativeSolCollateral(collateralType: Principal, payoutAddress: string): Promise<void> {
-    const actor = await this.getMutationActor();
-    await optInNativeSolCollateralUsingActor(actor, collateralType, payoutAddress, (err) => this.formatError(err));
-  }
-
-  async getMyNativeSolPayouts(options: { allowSigner?: boolean } = {}): Promise<NativeSolPendingPayout[]> {
-    if (isOisyWallet() && !options.allowSigner) {
-      return [];
-    }
-
-    const actor = await this.getMutationActor();
-    return getMyNativeSolPayoutsWithActor(actor);
-  }
-
-  async ackNativeSolPayoutSettled(claimId: SolClaimId | number | bigint): Promise<void> {
-    const actor = await this.getMutationActor();
-    await ackNativeSolPayoutSettledWithActor(actor, claimId, (err) => this.formatError(err));
   }
 
   async executeLiquidation(vaultId: bigint): Promise<any> {

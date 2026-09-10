@@ -155,7 +155,6 @@ pub mod monad;
 pub mod multi_chain_state;
 pub mod recovery;
 pub mod settlement_queue;
-pub mod sol;
 pub mod solana;
 pub mod supply;
 pub mod vault;
