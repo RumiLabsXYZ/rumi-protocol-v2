@@ -3,7 +3,7 @@
   import { Principal } from '@dfinity/principal';
   import { walletStore, isConnected as isConnectedStore, principal as principalStore } from '$lib/stores/wallet';
   import { CANISTER_IDS } from '$lib/config';
-  import { idlFactory as ckdogeMinterIdl } from '$lib/idls/ckdoge_minter.idl.js';
+  import { getPublicMinterActor, getWalletMinterActor } from '$lib/services/ckdogeMinterActors';
   import { ICRC1_IDL as ckdogeLedgerIdl } from '$lib/idls/ledger.idl.js';
   import {
     POLL_INTERVAL_MS,
@@ -124,10 +124,6 @@
     }
   });
 
-  async function getMinterActor(): Promise<any> {
-    return walletStore.getActor(CANISTER_IDS.CKDOGE_MINTER, ckdogeMinterIdl);
-  }
-
   async function getLedgerActor(): Promise<any> {
     return walletStore.getActor(CANISTER_IDS.CKDOGE_LEDGER, ckdogeLedgerIdl);
   }
@@ -142,7 +138,7 @@
     addressLoading = true;
     addressError = '';
     try {
-      const actor = await getMinterActor();
+      const actor = await getPublicMinterActor();
       if (!isLive()) return;
       const args = buildAccountArgs(requestPrincipal);
       const address: string = await actor.get_doge_address(args);
@@ -212,7 +208,7 @@
     pollAttempt += 1;
 
     try {
-      const actor = await getMinterActor();
+      const actor = await getPublicMinterActor();
       if (!isPollSessionLive(sessionPrincipal)) return;
 
       const args = buildAccountArgs(sessionPrincipal);
@@ -304,7 +300,7 @@
       redeemKoinuRaw === capturedRaw;
 
     try {
-      const [minterActor, ledgerActor] = await Promise.all([getMinterActor(), getLedgerActor()]);
+      const [minterActor, ledgerActor] = await Promise.all([getPublicMinterActor(), getLedgerActor()]);
       const [feeResult, ledgerFee] = await Promise.all([
         minterActor.estimate_withdrawal_fee({ amount: [parsed] }),
         ledgerActor.icrc1_fee(),
@@ -354,7 +350,7 @@
       // principal switch mid-flight must not advance to retrieve under a new client.
       if (!isLive()) return;
 
-      const minterActor = await getMinterActor();
+      const minterActor = await getWalletMinterActor();
       if (!isLive()) return;
       const retrieveArgs = buildRetrieveWithApprovalArgs(redeemAddress, requestedKoinu);
       const retrieveResult = await minterActor.retrieve_doge_with_approval(retrieveArgs);
@@ -382,7 +378,7 @@
 
     retrieveStatusLoading = true;
     try {
-      const minterActor = await getMinterActor();
+      const minterActor = await getPublicMinterActor();
       if (!isLive()) return;
       const status = await minterActor.retrieve_doge_status({ block_index: blockIndex });
       if (!isLive()) return;
