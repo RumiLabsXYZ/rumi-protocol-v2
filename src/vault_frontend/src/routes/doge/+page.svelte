@@ -549,7 +549,12 @@
               <span class="sr-only" aria-live="polite">
                 {#if addressCopied}Address copied to clipboard.{:else if addressCopyError}Could not copy the address automatically. Select and copy it manually.{/if}
               </span>
-              <span class="doge-annotation doge-annotation--purple" aria-hidden="true">such address.<br />very yours.</span>
+              <span class="doge-annotation doge-annotation--purple" aria-hidden="true">
+                <svg class="doge-annotation-arrow" viewBox="0 0 28 32" preserveAspectRatio="none" aria-hidden="true" focusable="false">
+                  <path d="M2,4 C 18,4 18,20 26,26" />
+                </svg>
+                such address.<br />very yours.
+              </span>
             </div>
 
             <div class="doge-row">
@@ -581,7 +586,12 @@
               <div class="doge-row doge-row--annotated">
                 <button class="doge-btn doge-btn--cta" on:click={beginSentDogeFlow}>I sent the DOGE</button>
                 <p class="doge-cta-helper">Starts checking for your deposit.</p>
-                <span class="doge-annotation doge-annotation--gold" aria-hidden="true">sent it?<br />tell the dog.</span>
+                <span class="doge-annotation doge-annotation--gold" aria-hidden="true">
+                  <svg class="doge-annotation-arrow" viewBox="0 0 28 32" preserveAspectRatio="none" aria-hidden="true" focusable="false">
+                    <path d="M26,4 C 10,4 10,20 2,26" />
+                  </svg>
+                  sent it?<br />tell the dog.
+                </span>
               </div>
             {/if}
           {/if}
@@ -1135,6 +1145,13 @@
     color: #d9a53c;
   }
 
+  /* Curved connector line, desktop-margin layout only (see width:1220px block
+     below). Narrow/inline layout never shows it — omitted, not just hidden,
+     since it has no sensible position once the note becomes an inline chip. */
+  .doge-annotation-arrow {
+    display: none;
+  }
+
   /* Inline fallback: directly under the target row, all viewports up to the
      wide-desktop breakpoint below, and always on narrow/mobile widths. */
   @media (max-width: 1219px) {
@@ -1174,6 +1191,31 @@
     .doge-annotation--gold {
       left: calc(100% + 28px);
       text-align: left;
+    }
+
+    .doge-annotation-arrow {
+      display: block;
+      position: absolute;
+      top: 2px;
+      width: 28px;
+      height: 32px;
+      overflow: visible;
+      pointer-events: none;
+    }
+
+    .doge-annotation--purple .doge-annotation-arrow {
+      right: -28px;
+    }
+
+    .doge-annotation--gold .doge-annotation-arrow {
+      left: -28px;
+    }
+
+    .doge-annotation-arrow path {
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1.5;
+      stroke-linecap: round;
     }
   }
 
