@@ -966,6 +966,10 @@
     background: var(--rumi-bg-surface3);
     color: var(--rumi-text-secondary);
     cursor: pointer;
+    /* Keeps this control clear of the app shell's fixed bottom mobile nav
+       (.mobile-nav, +layout.svelte) when the browser's native focus-scroll
+       (keyboard Tab) brings it into view on narrow viewports. */
+    scroll-margin-bottom: 72px;
   }
 
   .doge-copy-btn:hover {
