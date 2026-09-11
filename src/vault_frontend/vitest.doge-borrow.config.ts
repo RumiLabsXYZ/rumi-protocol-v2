@@ -2,19 +2,24 @@ import { defineConfig } from 'vitest/config';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import path from 'path';
 
+/**
+ * Test-only config for src/lib/utils/dogeBorrowPage.fixture.spec.ts.
+ *
+ * Mounting the real +page.svelte with `mount()`/`unmount()` from 'svelte'
+ * requires the client-side runtime, but Vite's default "node" resolve
+ * condition pulls in svelte/internal/server (mount() throws
+ * `lifecycle_function_unavailable` there). Adding the `browser` resolve
+ * condition — scoped to this config only — makes Vite resolve svelte's
+ * client build under jsdom, matching how a real browser bundle behaves.
+ * The main vitest.config.ts is untouched.
+ */
 export default defineConfig({
   plugins: [svelte({ hot: false })],
   resolve: {
-    // Svelte 5's mount() must resolve the client runtime under jsdom. This keeps
-    // the real /doge/borrow component fixture in the standard suite.
     conditions: ['browser'],
     alias: {
       '$declarations': path.resolve(__dirname, '../../declarations'),
       '$lib': path.resolve(__dirname, 'src/lib'),
-      // The remaining `kit.alias` entries from svelte.config.js. SvelteKit
-      // injects these during its own builds, but vitest does not go through the
-      // kit pipeline, so a spec importing a module that uses them fails to
-      // resolve. Keep in sync with svelte.config.js.
       '$services': path.resolve(__dirname, 'src/lib/services'),
       '$components': path.resolve(__dirname, 'src/lib/components'),
       '$stores': path.resolve(__dirname, 'src/lib/stores'),
@@ -25,12 +30,9 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     globals: true,
-    hookTimeout: 60000, // Increase timeout to 60 seconds for PocketIC setup
-    testTimeout: 30000, // Increase test timeout to 30 seconds
-    include: ['src/**/*.{test,spec}.{js,ts,jsx,tsx}'],
+    hookTimeout: 60000,
+    testTimeout: 30000,
+    include: ['src/lib/utils/dogeBorrowPage.fixture.spec.ts'],
     setupFiles: ['src/tests/vitest-setup.ts'],
-    coverage: {
-      reporter: ['text', 'json', 'html'],
-    },
   },
 });

@@ -110,6 +110,58 @@ async function getAnonymousActor<T>(canisterId: string, idl: any): Promise<T> {
 }
 
 /**
+ * Opaque liveness/identity pin threaded through one bound mutating action
+ * end-to-end (see assertActionBoundContextCurrent for the exact contract).
+ * Introduced to close the gap where apiClient/walletOperations re-read the
+ * live global wallet identity independently at every internal await, so a
+ * mid-flow account switch (or same-account disconnect/reconnect) could sign
+ * different sub-steps of one logical action under different identities.
+ */
+export interface ActionBoundContext {
+  /** Wallet principal (toText()) this entire action is scoped to. */
+  expectedPrincipalText: string;
+  /**
+   * Caller-supplied, synchronous, side-effect-free liveness check (e.g.
+   * session generation + intent + network match). Return false — do not
+   * throw — to signal "no longer current." Invoked before every actor
+   * acquisition, before every mutating ledger/canister call, and immediately
+   * after every internal await a bound action performs.
+   */
+  assertCurrent: () => boolean;
+}
+
+/**
+ * Thrown by assertActionBoundContextCurrent when a bound action is no longer
+ * current. Always thrown strictly before any mutating call for that
+ * checkpoint is dispatched — callers may treat it as proof nothing new was
+ * submitted for that step.
+ */
+export class StaleActionSessionError extends Error {
+  constructor(message = 'Wallet session changed during this action. Nothing further was submitted.') {
+    super(message);
+    this.name = 'StaleActionSessionError';
+  }
+}
+
+/**
+ * Re-verifies a bound action is still current. Checks the caller's own
+ * session/generation/intent/network liveness first, then re-reads the LIVE
+ * walletStore principal (never a value captured earlier) and compares it to
+ * the principal the action was pinned to. Call this at every checkpoint
+ * documented on ActionBoundContext.assertCurrent above — never just once at
+ * the top and once after the result.
+ */
+export function assertActionBoundContextCurrent(ctx: ActionBoundContext): void {
+  if (!ctx.assertCurrent()) {
+    throw new StaleActionSessionError();
+  }
+  const livePrincipalText = get(walletStore).principal?.toText() ?? null;
+  if (livePrincipalText !== ctx.expectedPrincipalText) {
+    throw new StaleActionSessionError();
+  }
+}
+
+/**
  * Streamlined wallet operations with automatic permission handling
  */
 export class walletOperations {
@@ -550,6 +602,85 @@ export class walletOperations {
       console.error('Collateral allowance check failed:', err);
       return BigInt(0);
     }
+  }
+
+  // ── Action-bound (session/identity-pinned) collateral operations ─────
+
+  /**
+   * Bound sibling of checkCollateralAllowance. Re-asserts ctx immediately
+   * before the (anonymous, query-only) allowance read — its result feeds
+   * directly into whether a subsequent approval call is skipped, so a stale
+   * session must not be allowed to make that decision.
+   */
+  static async checkCollateralAllowanceBound(
+    ctx: ActionBoundContext,
+    spenderCanisterId: string,
+    ledgerCanisterId: string
+  ): Promise<bigint> {
+    assertActionBoundContextCurrent(ctx);
+    return walletOperations.checkCollateralAllowance(spenderCanisterId, ledgerCanisterId);
+  }
+
+  /**
+   * Bound sibling of approveCollateralTransfer. Re-asserts ctx immediately
+   * before the signing actor is constructed (i.e. immediately before the
+   * icrc2_approve call is dispatched). Unlike the legacy method, this does
+   * NOT retry on a stale-actor error — a bound action fails closed instead
+   * of silently re-resolving identity mid-retry.
+   */
+  static async approveCollateralTransferBound(
+    ctx: ActionBoundContext,
+    amount: bigint,
+    spenderCanisterId: string,
+    ledgerCanisterId: string
+  ): Promise<{ success: boolean; error?: string }> {
+    assertActionBoundContextCurrent(ctx);
+
+    if (ledgerCanisterId === CONFIG.currentIcpLedgerId) {
+      const icpActor = await walletStore.getActor(CONFIG.currentIcpLedgerId, CONFIG.icp_ledgerIDL) as unknown as IcpLedgerService;
+      assertActionBoundContextCurrent(ctx);
+
+      const approvalResult = await icpActor.icrc2_approve({
+        amount,
+        spender: { owner: Principal.fromText(spenderCanisterId), subaccount: [] },
+        expires_at: [],
+        expected_allowance: [],
+        memo: [],
+        fee: [],
+        from_subaccount: [],
+        created_at_time: []
+      });
+
+      if ('Ok' in approvalResult) {
+        return { success: true };
+      }
+      return {
+        success: false,
+        error: `ICP approval failed: ${String(approvalResult.Err && typeof approvalResult.Err === 'object' ? Object.keys(approvalResult.Err)[0] : approvalResult.Err)}`
+      };
+    }
+
+    const ledgerActor = await walletStore.getActor(ledgerCanisterId, CONFIG.icusd_ledgerIDL) as IcusdLedgerService;
+    assertActionBoundContextCurrent(ctx);
+
+    const approvalResult = await ledgerActor.icrc2_approve({
+      amount,
+      spender: { owner: Principal.fromText(spenderCanisterId), subaccount: [] },
+      expires_at: [],
+      expected_allowance: [],
+      memo: [],
+      fee: [],
+      from_subaccount: [],
+      created_at_time: []
+    });
+
+    if ('Ok' in approvalResult) {
+      return { success: true };
+    }
+    return {
+      success: false,
+      error: `Collateral approval failed: ${String(approvalResult.Err && typeof approvalResult.Err === 'object' ? Object.keys(approvalResult.Err)[0] : approvalResult.Err)}`
+    };
   }
 
   /**

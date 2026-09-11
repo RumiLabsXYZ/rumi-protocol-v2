@@ -43,7 +43,7 @@ function createCollateralStore() {
      * Fetch all supported collateral types and their configs from the backend.
      * Caches for CACHE_DURATION ms unless forceRefresh is true.
      */
-    async fetchSupportedCollateral(forceRefresh = false): Promise<CollateralInfo[]> {
+    async fetchSupportedCollateral(forceRefresh = false, options?: { strict?: boolean }): Promise<CollateralInfo[]> {
       const state = get({ subscribe });
       const now = Date.now();
 
@@ -152,6 +152,11 @@ function createCollateralStore() {
         const errorMsg = err instanceof Error ? err.message : 'Failed to fetch collateral types';
         console.error('Error fetching collateral types:', err);
         update(s => ({ ...s, loading: false, error: errorMsg }));
+
+        // Strict callers (money-moving consent gates) must distinguish a fresh
+        // successful response from the normal cached fallback used by display
+        // surfaces. Preserve the legacy fallback for every existing caller.
+        if (options?.strict) throw err;
 
         // Return cached data if available
         const cached = get({ subscribe }).collaterals;
