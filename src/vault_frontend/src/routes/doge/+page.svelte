@@ -14,13 +14,14 @@
     classifyRetrieveDogeStatus,
     classifyUtxoStatus,
     computeApprovalAmount,
+    computeMintStepIndex,
     disconnectedWalletCopy,
     formatKoinuAsDoge,
     isPlausibleDogecoinAddress,
     isPollingExhausted,
     isRetryableUpdateBalanceError,
     isTerminalUtxoKind,
-    parseKoinuInput,
+    parseDogeAmountInput,
     pollProgressLabel,
     summarizeApproveError,
     summarizeMinterInfo,
@@ -32,8 +33,6 @@
     type UtxoStatusSummary,
     type RetrieveStatusSummary,
   } from '$lib/utils/dogeBorrowFlow';
-
-  const ICP_LOGO_SRC = '/icp-token-dark.svg';
 
   let isConnected = false;
   let ownerPrincipal: Principal | null = null;
@@ -47,11 +46,23 @@
     ckDogeLogoFailed = true;
   }
 
+  // ── Tab state ─────────────────────────────────────────────────────────
+  let activeTab: 'mint' | 'redeem' = 'mint';
+  function handleTabKeydown(event: KeyboardEvent) {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    event.preventDefault();
+    activeTab = activeTab === 'mint' ? 'redeem' : 'mint';
+    const nextId = activeTab === 'mint' ? 'doge-tab-mint' : 'doge-tab-redeem';
+    queueMicrotask(() => document.getElementById(nextId)?.focus());
+  }
+
   // ── Deposit / address state ──────────────────────────────────────────
   let depositAddress: string | null = null;
   let addressLoading = false;
   let addressError = '';
   let minterInfoSummary: MinterInfoSummary | null = null;
+  let minterInfoLoading = false;
+  let minterInfoError = false;
 
   // ── Confirmation polling state ───────────────────────────────────────
   let isPolling = false;
@@ -67,9 +78,32 @@
   // never to whatever wallet happens to be connected when the timer fires.
   let pollingPrincipal: Principal | null = null;
 
+  $: mintStepIndex = computeMintStepIndex({ isPolling, pollingStopped, hasMinted: !!mintedSummary });
+
+  // ── Copy-address state ───────────────────────────────────────────────
+  let addressCopied = false;
+  let addressCopyError = false;
+  let addressCopyTimer: ReturnType<typeof setTimeout> | null = null;
+  async function copyDepositAddress() {
+    if (!depositAddress) return;
+    if (addressCopyTimer !== null) clearTimeout(addressCopyTimer);
+    try {
+      await navigator.clipboard.writeText(depositAddress);
+      addressCopied = true;
+      addressCopyError = false;
+    } catch {
+      addressCopied = false;
+      addressCopyError = true;
+    }
+    addressCopyTimer = setTimeout(() => {
+      addressCopied = false;
+      addressCopyError = false;
+    }, 2000);
+  }
+
   // ── Redemption state ─────────────────────────────────────────────────
   let redeemAddress = '';
-  let redeemKoinuRaw = '';
+  let redeemDogeAmount = '';
   let redeemAddressError = '';
   let redeemAmountError = '';
   let withdrawalFeeSummary = '';
@@ -87,6 +121,8 @@
     addressLoading = false;
     addressError = '';
     minterInfoSummary = null;
+    minterInfoLoading = false;
+    minterInfoError = false;
 
     stopPolling();
     pollAttempt = 0;
@@ -97,8 +133,11 @@
     pollFatalMessage = '';
     pollingPrincipal = null;
 
+    addressCopied = false;
+    addressCopyError = false;
+
     redeemAddress = '';
-    redeemKoinuRaw = '';
+    redeemDogeAmount = '';
     redeemAddressError = '';
     redeemAmountError = '';
     withdrawalFeeSummary = '';
@@ -144,16 +183,23 @@
       const address: string = await actor.get_doge_address(args);
       if (!isLive()) return;
       depositAddress = address;
+      minterInfoLoading = true;
+      minterInfoError = false;
       try {
         const info = await actor.get_minter_info();
         if (!isLive()) return;
         minterInfoSummary = summarizeMinterInfo(info);
       } catch {
-        if (isLive()) minterInfoSummary = null;
+        if (isLive()) {
+          minterInfoSummary = null;
+          minterInfoError = true;
+        }
+      } finally {
+        if (isLive()) minterInfoLoading = false;
       }
     } catch (err) {
       if (isLive()) {
-        addressError = err instanceof Error ? `much fail: ${err.message}` : 'much fail, could not fetch your DOGE address';
+        addressError = err instanceof Error ? `Could not fetch your DOGE address: ${err.message}` : 'Could not fetch your DOGE address.';
       }
     } finally {
       if (isLive()) addressLoading = false;
@@ -199,7 +245,7 @@
   async function runUpdateBalanceCycle() {
     if (destroyed || !isPolling || !pollingPrincipal) return;
     if (!ownerPrincipal || ownerPrincipal.toText() !== pollingPrincipal.toText()) {
-      pollFatalMessage = 'wow, wallet changed mid-check — stopped watching the original address. reconnect that wallet to resume.';
+      pollFatalMessage = 'Wallet changed mid-check. Stopped watching the original address, reconnect that wallet to resume.';
       stopPolling();
       pollingStopped = true;
       return;
@@ -244,7 +290,7 @@
       }
     } catch (err) {
       if (!isPollSessionLive(sessionPrincipal)) return;
-      pollFatalMessage = err instanceof Error ? `much error checking your balance: ${err.message}` : 'much error checking your balance';
+      pollFatalMessage = err instanceof Error ? `Error checking your balance: ${err.message}` : 'Error checking your balance.';
       stopPolling();
       pollingStopped = true;
       return;
@@ -278,26 +324,26 @@
   function validateRedeemForm(): boolean {
     redeemAddressError = isPlausibleDogecoinAddress(redeemAddress)
       ? ''
-      : 'wow, such invalid Dogecoin address — double check it';
-    const parsed = parseKoinuInput(redeemKoinuRaw);
-    redeemAmountError = parsed === null ? 'much bad number — enter a positive whole number of koinu' : '';
+      : 'That does not look like a valid Dogecoin address. Double check it.';
+    const parsed = parseDogeAmountInput(redeemDogeAmount);
+    redeemAmountError = parsed === null ? 'Enter a valid ckDOGE amount (up to 8 decimal places).' : '';
     return !redeemAddressError && !redeemAmountError;
   }
 
   async function loadWithdrawalEstimate() {
-    const parsed = parseKoinuInput(redeemKoinuRaw);
+    const parsed = parseDogeAmountInput(redeemDogeAmount);
     if (parsed === null || !isConnected) {
       withdrawalFeeSummary = '';
       return;
     }
 
     const capturedPrincipalKey = principalKey(ownerPrincipal);
-    const capturedRaw = redeemKoinuRaw;
+    const capturedRaw = redeemDogeAmount;
     const isLive = () =>
       !destroyed &&
       isConnected &&
       principalKey(ownerPrincipal) === capturedPrincipalKey &&
-      redeemKoinuRaw === capturedRaw;
+      redeemDogeAmount === capturedRaw;
 
     try {
       const [minterActor, ledgerActor] = await Promise.all([getPublicMinterActor(), getLedgerActor()]);
@@ -307,9 +353,12 @@
       ]);
       if (!isLive()) return;
       const outcome = summarizeWithdrawalFeeEstimate(feeResult);
-      withdrawalFeeSummary = outcome.success
-        ? `${outcome.label} + ${formatKoinuAsDoge(BigInt(ledgerFee))} ledger fee. much wow: the icrc2_approve step itself also charges ${formatKoinuAsDoge(BigInt(ledgerFee))} ledger fee, separate from the withdrawal transfer fee above — so two ledger fees total, very charge`
-        : outcome.label;
+      if (outcome.success) {
+        const ledgerFeeStr = formatKoinuAsDoge(BigInt(ledgerFee));
+        withdrawalFeeSummary = `${outcome.label} + ${ledgerFeeStr} ledger fee. The approval step also charges ${ledgerFeeStr} ledger fee separately from the withdrawal transfer fee above, so two ledger fees total.`;
+      } else {
+        withdrawalFeeSummary = outcome.label;
+      }
     } catch {
       if (isLive()) withdrawalFeeSummary = '';
     }
@@ -330,7 +379,7 @@
     retrieveStatusSummary = null;
 
     try {
-      const requestedKoinu = parseKoinuInput(redeemKoinuRaw)!;
+      const requestedKoinu = parseDogeAmountInput(redeemDogeAmount)!;
       const ledgerActor = await getLedgerActor();
       if (!isLive()) return;
       const ledgerFee: bigint = BigInt(await ledgerActor.icrc1_fee());
@@ -341,7 +390,7 @@
       const approveResult = await ledgerActor.icrc2_approve(approveArgs);
       if (!isLive()) return;
       if ('Err' in approveResult) {
-        redeemError = `much approval fail: ${summarizeApproveError(approveResult.Err)}`;
+        redeemError = `Approval failed: ${summarizeApproveError(approveResult.Err)}`;
         return;
       }
       approveBlockIndex = BigInt(approveResult.Ok);
@@ -362,7 +411,7 @@
       burnBlockIndex = BigInt(retrieveResult.Ok.block_index);
     } catch (err) {
       if (isLive()) {
-        redeemError = err instanceof Error ? `much error, very failed redemption: ${err.message}` : 'much error, very failed redemption';
+        redeemError = err instanceof Error ? `Redemption failed: ${err.message}` : 'Redemption failed.';
       }
     } finally {
       if (isLive()) redeemBusy = false;
@@ -385,7 +434,7 @@
       retrieveStatusSummary = classifyRetrieveDogeStatus(status);
     } catch (err) {
       if (isLive()) {
-        redeemError = err instanceof Error ? `much error checking withdrawal status: ${err.message}` : 'much error checking withdrawal status';
+        redeemError = err instanceof Error ? `Error checking withdrawal status: ${err.message}` : 'Error checking withdrawal status.';
       }
     } finally {
       if (isLive()) retrieveStatusLoading = false;
@@ -395,375 +444,763 @@
   onDestroy(() => {
     destroyed = true;
     stopPolling();
+    if (addressCopyTimer !== null) clearTimeout(addressCopyTimer);
     unsubConnected();
     unsubPrincipal();
   });
 </script>
 
 <div class="doge-page">
-  <div class="doge-paw doge-paw--tl" aria-hidden="true">🐾</div>
-  <div class="doge-paw doge-paw--br" aria-hidden="true">🐾</div>
-
   <div class="doge-hero">
-    <div class="doge-coin doge-coin--hero" aria-hidden="true">Ð</div>
-    <h1>ckDOGE: much bridge, very Dogecoin</h1>
-    <p class="doge-tagline">wow, bring your DOGE onto ICP. such minting, very ckDOGE, much wow.</p>
-
-    <div class="doge-badges">
-      <div class="doge-badge">
-        {#if !ckDogeLogoFailed}
-          <img src="/ckdoge-logo.svg" alt="ckDOGE" on:error={handleCkDogeLogoError} />
-        {:else}
-          <span class="doge-coin doge-coin--small">ckÐ</span>
-        {/if}
-      </div>
-      <span class="doge-badge-arrow" aria-hidden="true">⇄</span>
-      <div class="doge-badge">
-        <img src={ICP_LOGO_SRC} alt="ICP" class="icp-sidechain-mark" />
-      </div>
+    <div class="doge-hero-logo">
+      {#if !ckDogeLogoFailed}
+        <img src="/ckdoge-logo.svg" alt="ckDOGE" on:error={handleCkDogeLogoError} />
+      {:else}
+        <span class="doge-logo-fallback" aria-hidden="true">ckÐ</span>
+      {/if}
     </div>
+    <h1>ckDOGE Bridge</h1>
+    <p class="doge-subtitle">Move DOGE onto the Internet Computer and back.</p>
   </div>
 
-  {#if !isConnected}
-    <div class="doge-panel doge-panel--connect">
-      <p>{disconnectedWalletCopy()}</p>
-      <p class="doge-subtle">Connect your ICP wallet (Plug or Oisy) using the button up top, then come back — much DOGE awaits.</p>
-    </div>
-  {:else}
-    <p class="doge-risk">{betaRiskNotice()}</p>
+  <div class="doge-tabs" role="tablist" aria-label="ckDOGE bridge direction">
+    <button
+      role="tab"
+      id="doge-tab-mint"
+      type="button"
+      aria-selected={activeTab === 'mint'}
+      aria-controls="doge-panel-mint"
+      tabindex={activeTab === 'mint' ? 0 : -1}
+      class="doge-tab"
+      class:doge-tab--active={activeTab === 'mint'}
+      on:click={() => (activeTab = 'mint')}
+      on:keydown={handleTabKeydown}
+    >
+      Mint ckDOGE
+    </button>
+    <button
+      role="tab"
+      id="doge-tab-redeem"
+      type="button"
+      aria-selected={activeTab === 'redeem'}
+      aria-controls="doge-panel-redeem"
+      tabindex={activeTab === 'redeem' ? 0 : -1}
+      class="doge-tab"
+      class:doge-tab--active={activeTab === 'redeem'}
+      on:click={() => (activeTab = 'redeem')}
+      on:keydown={handleTabKeydown}
+    >
+      Redeem DOGE
+    </button>
+  </div>
 
-    <div class="doge-grid">
-      <!-- Deposit / mint panel -->
-      <section class="doge-panel">
-        <h2>much deposit, very DOGE in</h2>
-
-        {#if !depositAddress}
-          <button class="doge-button doge-button--gold" on:click={requestDepositAddress} disabled={addressLoading}>
-            {addressLoading ? 'wow, fetching...' : 'get my ckDOGE address, such wow'}
-          </button>
+  <div class="doge-stage">
+    {#if activeTab === 'mint'}
+      <div id="doge-panel-mint" role="tabpanel" aria-labelledby="doge-tab-mint" class="doge-panel" tabindex="-1">
+        {#if !isConnected}
+          <p class="doge-connect-copy">{disconnectedWalletCopy()}</p>
         {:else}
-          <div class="doge-address-box">
-            <span class="doge-label">your DOGE deposit address, much unique:</span>
-            <code class="doge-address">{depositAddress}</code>
-            <span class="doge-label">recipient principal (that's you), wow:</span>
-            <code class="doge-address">{ownerPrincipal?.toText()}</code>
-            {#if minterInfoSummary}
-              <p class="doge-subtle">{minterInfoSummary.minConfirmationsLabel}</p>
-              <p class="doge-subtle">{minterInfoSummary.minDepositLabel}</p>
-            {/if}
+          <div class="doge-stepper">
+            <span class="doge-stepper-caption">DOGE &rarr; ckDOGE</span>
+            <div class="doge-steps" role="list">
+              <div class="doge-step" role="listitem" class:is-active={mintStepIndex === 1} class:is-done={mintStepIndex > 1}>
+                <span class="doge-step-circle">{#if mintStepIndex > 1}&check;{:else}1{/if}</span>
+                <span class="doge-step-label">Deposit</span>
+              </div>
+              <span class="doge-step-line" class:is-done={mintStepIndex > 1}></span>
+              <div class="doge-step" role="listitem" class:is-active={mintStepIndex === 2} class:is-done={mintStepIndex > 2}>
+                <span class="doge-step-circle">{#if mintStepIndex > 2}&check;{:else}2{/if}</span>
+                <span class="doge-step-label">Confirmations</span>
+              </div>
+              <span class="doge-step-line" class:is-done={mintStepIndex > 2}></span>
+              <div class="doge-step" role="listitem" class:is-active={mintStepIndex === 3}>
+                <span class="doge-step-circle">3</span>
+                <span class="doge-step-label">Minted</span>
+              </div>
+            </div>
           </div>
 
-          {#if !isPolling && !pollingStopped}
-            <button class="doge-button doge-button--gold" on:click={beginSentDogeFlow}>
-              i sent the DOGE, such wow
+          <p class="doge-risk">{betaRiskNotice()}</p>
+
+          {#if !depositAddress}
+            <h2>Get your deposit address</h2>
+            <p class="doge-panel-sub">Request a ckDOGE deposit address to continue.</p>
+            <button class="doge-btn doge-btn--primary" on:click={requestDepositAddress} disabled={addressLoading}>
+              {addressLoading ? 'Fetching address…' : 'Get deposit address'}
             </button>
+            {#if addressError}<p class="doge-error" role="alert">{addressError}</p>{/if}
+          {:else}
+            <h2>Send DOGE to your address</h2>
+            <p class="doge-panel-sub">Your ckDOGE will arrive in your connected wallet.</p>
+
+            <div class="doge-row doge-row--annotated">
+              <span class="doge-row-label" id="doge-address-label">Your DOGE deposit address</span>
+              <div class="doge-addr-field">
+                <code class="doge-addr-text" aria-labelledby="doge-address-label">{depositAddress}</code>
+                <button
+                  type="button"
+                  class="doge-copy-btn"
+                  on:click={copyDepositAddress}
+                  aria-label="Copy address"
+                >
+                  {addressCopied ? 'Copied' : 'Copy address'}
+                </button>
+              </div>
+              <span class="sr-only" aria-live="polite">
+                {#if addressCopied}Address copied to clipboard.{:else if addressCopyError}Could not copy the address automatically. Select and copy it manually.{/if}
+              </span>
+              <span class="doge-annotation doge-annotation--purple" aria-hidden="true">such address.<br />very yours.</span>
+            </div>
+
+            <div class="doge-row">
+              <span class="doge-row-label">Recipient principal</span>
+              <code class="doge-addr-text doge-addr-text--muted">{ownerPrincipal?.toText()}</code>
+            </div>
+
+            <div class="doge-row">
+              <span class="doge-row-label">Requirements</span>
+              <div class="doge-stats-row">
+                <div class="doge-stat">
+                  <span class="doge-stat-label">Minimum deposit</span>
+                  <span class="doge-stat-value">
+                    {#if minterInfoSummary}{minterInfoSummary.minDepositValue}{:else if minterInfoLoading}Loading…{:else if minterInfoError}Unavailable{:else}Loading…{/if}
+                  </span>
+                </div>
+                <div class="doge-stat">
+                  <span class="doge-stat-label">Required confirmations</span>
+                  <span class="doge-stat-value">
+                    {#if minterInfoSummary}{minterInfoSummary.minConfirmationsValue}{:else if minterInfoLoading}Loading…{:else if minterInfoError}Unavailable{:else}Loading…{/if}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <p class="doge-only-send">Only send DOGE to this address.</p>
+
+            {#if !isPolling && !pollingStopped}
+              <div class="doge-row doge-row--annotated">
+                <button class="doge-btn doge-btn--cta" on:click={beginSentDogeFlow}>I sent the DOGE</button>
+                <p class="doge-cta-helper">Starts checking for your deposit.</p>
+                <span class="doge-annotation doge-annotation--gold" aria-hidden="true">sent it?<br />tell the dog.</span>
+              </div>
+            {/if}
           {/if}
-        {/if}
 
-        {#if addressError}<p class="doge-error">{addressError}</p>{/if}
+          {#if isPolling || pollingStopped}
+            <div class="doge-poll-status" aria-live="polite">
+              <p class="doge-panel-sub">{pollProgressLabel(pollAttempt)}</p>
 
-        {#if isPolling || pollingStopped}
-          <div class="doge-poll-status" aria-live="polite">
-            <p class="doge-subtle">{pollProgressLabel(pollAttempt)}</p>
+              {#each utxoStatuses as status}
+                <p class="doge-utxo-line">{status.label}</p>
+              {/each}
 
-            {#each utxoStatuses as status}
-              <p class="doge-utxo-line">{status.label}</p>
-            {/each}
-
-            {#if lastUpdateBalanceError}
-              <p class="doge-subtle">{lastUpdateBalanceError.message}</p>
-              {#if lastUpdateBalanceError.pendingUtxos?.length}
-                {#each lastUpdateBalanceError.pendingUtxos as pending}
-                  <p class="doge-utxo-line">{pending.label}</p>
-                {/each}
+              {#if lastUpdateBalanceError}
+                <p class="doge-panel-sub">{lastUpdateBalanceError.message}</p>
+                {#if lastUpdateBalanceError.pendingUtxos?.length}
+                  {#each lastUpdateBalanceError.pendingUtxos as pending}
+                    <p class="doge-utxo-line">{pending.label}</p>
+                  {/each}
+                {/if}
               {/if}
-            {/if}
 
-            {#if mintedSummary}
-              <p class="doge-success">{mintedSummary.label} (block {mintedSummary.blockIndex?.toString()})</p>
-            {/if}
+              {#if mintedSummary}
+                <p class="doge-success">{mintedSummary.label} (block {mintedSummary.blockIndex?.toString()})</p>
+              {/if}
 
-            {#if pollFatalMessage}<p class="doge-error">{pollFatalMessage}</p>{/if}
+              {#if pollFatalMessage}<p class="doge-error" role="alert">{pollFatalMessage}</p>{/if}
 
-            {#if pollingStopped && !mintedSummary}
-              <button class="doge-button" on:click={recheckAfterTimeout}>check again, much patience</button>
-            {/if}
-          </div>
-        {/if}
-      </section>
-
-      <!-- Redemption panel -->
-      <section class="doge-panel">
-        <h2>very redeem, such DOGE out</h2>
-        <p class="doge-subtle">1 DOGE = 100,000,000 koinu. much decimals, very precise.</p>
-        {#if minterInfoSummary}
-          <p class="doge-subtle">{minterInfoSummary.minWithdrawalLabel}</p>
-        {/if}
-
-        <label class="doge-field" for="doge-redeem-address">
-          your Dogecoin address, much destination
-          <input id="doge-redeem-address" type="text" bind:value={redeemAddress} placeholder="D... much wow address" />
-        </label>
-        {#if redeemAddressError}<p class="doge-error">{redeemAddressError}</p>{/if}
-
-        <label class="doge-field" for="doge-redeem-koinu">
-          amount in koinu, much whole number pls
-          <input
-            id="doge-redeem-koinu"
-            type="text"
-            inputmode="numeric"
-            bind:value={redeemKoinuRaw}
-            on:blur={loadWithdrawalEstimate}
-            placeholder="e.g. 500000000"
-          />
-        </label>
-        {#if redeemAmountError}<p class="doge-error">{redeemAmountError}</p>{/if}
-        {#if withdrawalFeeSummary}<p class="doge-subtle">{withdrawalFeeSummary}</p>{/if}
-
-        <button class="doge-button doge-button--gold" on:click={submitRedeem} disabled={redeemBusy}>
-          {redeemBusy ? 'much processing...' : 'send it back to Dogecoin, wow'}
-        </button>
-
-        {#if redeemError}<p class="doge-error">{redeemError}</p>{/if}
-        {#if approveBlockIndex !== null}
-          <p class="doge-subtle">wow, approval block index: {approveBlockIndex.toString()}</p>
-        {/if}
-        {#if burnBlockIndex !== null}
-          <p class="doge-success">burn block index: {burnBlockIndex.toString()}, much confirmed on ICP</p>
-          <button class="doge-button" on:click={refreshRetrieveStatus} disabled={retrieveStatusLoading}>
-            {retrieveStatusLoading ? 'checking, wow...' : 'refresh withdrawal status, much refresh'}
-          </button>
-          {#if retrieveStatusSummary}
-            <p class="doge-subtle">
-              {retrieveStatusSummary.label}
-              {#if retrieveStatusSummary.txid}(txid: {retrieveStatusSummary.txid}){/if}
-            </p>
+              {#if pollingStopped && !mintedSummary}
+                <button class="doge-btn" on:click={recheckAfterTimeout}>Check again</button>
+              {/if}
+            </div>
           {/if}
         {/if}
-      </section>
-    </div>
-  {/if}
+      </div>
+    {:else}
+      <div id="doge-panel-redeem" role="tabpanel" aria-labelledby="doge-tab-redeem" class="doge-panel" tabindex="-1">
+        {#if !isConnected}
+          <p class="doge-connect-copy">{disconnectedWalletCopy()}</p>
+        {:else}
+          <h2>Send it back to Dogecoin</h2>
+          {#if minterInfoSummary}
+            <p class="doge-panel-sub">{minterInfoSummary.minWithdrawalLabel}</p>
+          {/if}
+
+          <label class="doge-field" for="doge-redeem-address">
+            Dogecoin destination address
+            <input id="doge-redeem-address" type="text" bind:value={redeemAddress} placeholder="D..." />
+          </label>
+          {#if redeemAddressError}<p class="doge-error" role="alert">{redeemAddressError}</p>{/if}
+
+          <label class="doge-field" for="doge-redeem-amount">
+            Amount (ckDOGE)
+            <input
+              id="doge-redeem-amount"
+              type="text"
+              inputmode="decimal"
+              bind:value={redeemDogeAmount}
+              on:blur={loadWithdrawalEstimate}
+              placeholder="e.g. 50"
+            />
+          </label>
+          {#if redeemAmountError}<p class="doge-error" role="alert">{redeemAmountError}</p>{/if}
+          {#if withdrawalFeeSummary}<p class="doge-panel-sub">{withdrawalFeeSummary}</p>{/if}
+
+          <button class="doge-btn doge-btn--cta" on:click={submitRedeem} disabled={redeemBusy}>
+            {redeemBusy ? 'Processing…' : 'Send it back to Dogecoin'}
+          </button>
+
+          {#if redeemError}<p class="doge-error" role="alert">{redeemError}</p>{/if}
+          {#if approveBlockIndex !== null}
+            <p class="doge-panel-sub">Approval block index: {approveBlockIndex.toString()}</p>
+          {/if}
+          {#if burnBlockIndex !== null}
+            <p class="doge-success">Burn block index: {burnBlockIndex.toString()}, confirmed on ICP.</p>
+            <button class="doge-btn" on:click={refreshRetrieveStatus} disabled={retrieveStatusLoading}>
+              {retrieveStatusLoading ? 'Checking…' : 'Refresh withdrawal status'}
+            </button>
+            {#if retrieveStatusSummary}
+              <p class="doge-panel-sub">
+                {retrieveStatusSummary.label}
+                {#if retrieveStatusSummary.txid}(txid: {retrieveStatusSummary.txid}){/if}
+              </p>
+            {/if}
+          {/if}
+        {/if}
+      </div>
+    {/if}
+  </div>
+
+  <p class="doge-footnote">Deposits mint to your connected wallet.</p>
 </div>
 
 <style>
   .doge-page {
-    font-family: 'Comic Sans MS', 'Comic Sans', cursive;
     position: relative;
-    max-width: 960px;
+    max-width: 700px;
     margin: 0 auto;
     padding: 2rem 1.5rem 3rem;
-    color: #4a3200;
-    background: radial-gradient(circle at top, #fff6d8 0%, #ffe9a8 45%, #ffd166 100%);
-    border-radius: 24px;
-    overflow: hidden;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    color: var(--rumi-text-primary);
   }
 
-  .doge-paw {
+  .sr-only {
     position: absolute;
-    font-size: 2rem;
-    opacity: 0.18;
-    pointer-events: none;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
   }
-  .doge-paw--tl { top: 12px; left: 16px; transform: rotate(-15deg); }
-  .doge-paw--br { bottom: 12px; right: 16px; transform: rotate(15deg); }
 
+  /* ── Hero ── */
   .doge-hero {
     text-align: center;
     margin-bottom: 1.5rem;
   }
 
-  .doge-hero h1 {
-    font-size: 2rem;
-    margin: 0.5rem 0;
-    color: #7a4b00;
-    text-shadow: 2px 2px 0 #fff3c4;
+  .doge-hero-logo {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0 auto 0.75rem;
   }
 
-  .doge-tagline {
-    font-size: 1.05rem;
-    color: #5c3d00;
+  .doge-hero-logo img {
+    width: 72px;
+    height: 72px;
+    display: block;
   }
 
-  .doge-coin {
+  .doge-logo-fallback {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 76px;
-    height: 76px;
+    width: 72px;
+    height: 72px;
     border-radius: 50%;
-    background: radial-gradient(circle at 35% 30%, #fff2b0, #f2c14e 55%, #c8891a 100%);
-    border: 3px solid #a5690a;
-    box-shadow: 0 4px 10px rgba(120, 80, 0, 0.35), inset 0 0 0 4px #ffe9a8;
-    font-size: 2.2rem;
-    font-weight: bold;
-    color: #7a4b00;
+    background: var(--rumi-bg-surface2);
+    border: 2px solid var(--rumi-border-hover);
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--rumi-purple-accent);
   }
 
-  .doge-coin--hero {
-    width: 100px;
-    height: 100px;
-    font-size: 3rem;
-    margin-bottom: 0.5rem;
+  .doge-hero h1 {
+    font-family: 'Circular Std', 'Inter', sans-serif;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    font-size: 2rem;
+    margin: 0.25rem 0;
+    color: var(--rumi-text-primary);
   }
 
-  .doge-coin--small {
-    width: 40px;
-    height: 40px;
-    font-size: 1.1rem;
-    border-width: 2px;
+  .doge-subtitle {
+    font-size: 1rem;
+    color: var(--rumi-text-secondary);
+    margin: 0;
   }
 
-  .doge-badges {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 1rem;
-    margin-top: 1rem;
-  }
-
-  .doge-badge {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .doge-badge img {
-    max-width: 56px;
-    max-height: 56px;
-  }
-
-  .doge-badge-arrow {
-    font-size: 1.4rem;
-    color: #a5690a;
-  }
-
-  .icp-sidechain-mark {
-    border-radius: 50%;
-    padding: 6px;
-    background: #eef1ff;
-    border: 2px dashed #7b8bd6;
-  }
-
-  .doge-risk {
-    background: #fff3c4;
-    border-left: 4px solid #d98c00;
-    padding: 0.6rem 0.9rem;
-    border-radius: 10px;
-    font-size: 0.9rem;
+  /* ── Tabs ── */
+  .doge-tabs {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.75rem;
     margin-bottom: 1.25rem;
   }
 
+  .doge-tab {
+    font-family: 'Inter', sans-serif;
+    font-size: 0.9375rem;
+    font-weight: 600;
+    padding: 0.75rem 1rem;
+    border-radius: 0.625rem;
+    border: 1px solid var(--rumi-border);
+    background: var(--rumi-bg-surface1);
+    color: var(--rumi-text-secondary);
+    cursor: pointer;
+    transition: border-color 0.15s ease, color 0.15s ease;
+  }
+
+  .doge-tab:hover {
+    border-color: var(--rumi-border-hover);
+    color: var(--rumi-text-primary);
+  }
+
+  .doge-tab:focus-visible {
+    outline: 2px solid var(--rumi-action);
+    outline-offset: 2px;
+  }
+
+  .doge-tab--active {
+    border-color: var(--rumi-action);
+    color: var(--rumi-text-primary);
+  }
+
+  /* ── Panel ── */
+  .doge-stage {
+    position: relative;
+  }
+
   .doge-panel {
-    background: #fffaf0;
-    border: 3px solid #e8b93a;
-    border-radius: 18px;
-    padding: 1.5rem;
-    margin-bottom: 1.5rem;
-    box-shadow: 0 6px 0 #e8b93a;
+    background: var(--rumi-bg-surface1);
+    border: 1px solid var(--rumi-border);
+    border-radius: 0.75rem;
+    padding: 1.75rem 1.75rem 1.5rem;
   }
 
-  .doge-panel--connect {
-    text-align: center;
-  }
-
-  .doge-grid {
-    display: grid;
-    grid-template-columns: 1fr;
-    gap: 1.5rem;
-  }
-
-  @media (min-width: 800px) {
-    .doge-grid {
-      grid-template-columns: 1fr 1fr;
-    }
+  .doge-panel:focus-visible {
+    outline: none;
   }
 
   .doge-panel h2 {
-    margin-top: 0;
-    color: #7a4b00;
+    font-family: 'Circular Std', 'Inter', sans-serif;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    font-size: 1.125rem;
+    margin: 0 0 0.375rem;
+    color: var(--rumi-text-primary);
   }
 
-  .doge-button {
-    font-family: inherit;
-    font-size: 1rem;
-    padding: 0.6rem 1.2rem;
-    border-radius: 999px;
-    border: 2px solid #a5690a;
-    background: #ffe08a;
-    color: #5c3d00;
+  .doge-panel-sub {
+    font-size: 0.8125rem;
+    color: var(--rumi-text-secondary);
+    margin: 0 0 1rem;
+  }
+
+  .doge-connect-copy {
+    font-size: 0.9375rem;
+    color: var(--rumi-text-secondary);
+    text-align: center;
+    margin: 0.5rem 0;
+  }
+
+  .doge-risk {
+    font-size: 0.8125rem;
+    color: var(--rumi-text-secondary);
+    background: var(--rumi-bg-surface2);
+    border: 1px solid var(--rumi-border);
+    border-radius: 0.5rem;
+    padding: 0.625rem 0.875rem;
+    margin: 0 0 1.25rem;
+  }
+
+  /* ── Step tracker ── */
+  .doge-stepper {
+    margin-bottom: 1.5rem;
+    padding-bottom: 1.25rem;
+    border-bottom: 1px solid var(--rumi-border);
+  }
+
+  .doge-stepper-caption {
+    display: block;
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--rumi-text-muted);
+    margin-bottom: 0.75rem;
+  }
+
+  .doge-steps {
+    display: flex;
+    align-items: flex-start;
+  }
+
+  .doge-step {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.375rem;
+    flex: none;
+    width: 5.5rem;
+  }
+
+  .doge-step-line {
+    flex: 1 1 auto;
+    height: 1px;
+    background: var(--rumi-border);
+    margin-top: 0.875rem;
+  }
+
+  .doge-step-line.is-done {
+    background: var(--rumi-action);
+  }
+
+  .doge-step-circle {
+    width: 1.75rem;
+    height: 1.75rem;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    border: 1px solid var(--rumi-border-hover);
+    color: var(--rumi-text-secondary);
+    background: var(--rumi-bg-surface2);
+  }
+
+  .doge-step.is-active .doge-step-circle {
+    border-color: var(--rumi-action);
+    color: var(--rumi-action-bright);
+  }
+
+  .doge-step.is-done .doge-step-circle {
+    background: var(--rumi-action);
+    border-color: var(--rumi-action);
+    color: var(--rumi-bg-primary);
+  }
+
+  .doge-step-label {
+    font-size: 0.75rem;
+    color: var(--rumi-text-secondary);
+  }
+
+  .doge-step.is-active .doge-step-label {
+    color: var(--rumi-text-primary);
+    font-weight: 600;
+  }
+
+  /* ── Rows / address / stats ── */
+  .doge-row {
+    position: relative;
+    margin-bottom: 1.25rem;
+  }
+
+  .doge-row-label {
+    display: block;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--rumi-text-muted);
+    margin-bottom: 0.5rem;
+  }
+
+  .doge-addr-field {
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+    background: var(--rumi-bg-surface2);
+    border: 1px solid var(--rumi-border);
+    border-radius: 0.5rem;
+    padding: 0.625rem 0.75rem;
+  }
+
+  .doge-addr-text {
+    flex: 1;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    font-size: 0.8125rem;
+    color: var(--rumi-text-primary);
+    word-break: break-all;
+    background: transparent;
+    padding: 0;
+    border: none;
+  }
+
+  .doge-addr-text--muted {
+    color: var(--rumi-text-secondary);
+    font-size: 0.75rem;
+  }
+
+  .doge-copy-btn {
+    flex: none;
+    font-family: 'Inter', sans-serif;
+    font-size: 0.8125rem;
+    font-weight: 500;
+    padding: 0.4375rem 0.75rem;
+    border-radius: 0.375rem;
+    border: 1px solid var(--rumi-border);
+    background: var(--rumi-bg-surface3);
+    color: var(--rumi-text-secondary);
     cursor: pointer;
-    margin: 0.4rem 0;
   }
-  .doge-button:hover:not(:disabled) {
-    background: #ffd166;
+
+  .doge-copy-btn:hover {
+    color: var(--rumi-teal-bright);
+    border-color: var(--rumi-border-hover);
   }
-  .doge-button:disabled {
+
+  .doge-copy-btn:focus-visible {
+    outline: 2px solid var(--rumi-action);
+    outline-offset: 2px;
+  }
+
+  .doge-stats-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+  }
+
+  .doge-stat {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .doge-stat-label {
+    font-size: 0.75rem;
+    color: var(--rumi-text-secondary);
+  }
+
+  .doge-stat-value {
+    font-size: 1.0625rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--rumi-text-primary);
+  }
+
+  .doge-only-send {
+    font-size: 0.8125rem;
+    color: var(--rumi-text-secondary);
+    margin: 0 0 1rem;
+  }
+
+  /* ── Buttons ── */
+  .doge-btn {
+    font-family: 'Inter', sans-serif;
+    font-size: 0.9375rem;
+    font-weight: 500;
+    padding: 0.625rem 1.125rem;
+    border-radius: 0.5rem;
+    border: 1px solid var(--rumi-border);
+    background: var(--rumi-bg-surface2);
+    color: var(--rumi-text-primary);
+    cursor: pointer;
+    margin: 0.25rem 0;
+  }
+
+  .doge-btn:hover:not(:disabled) {
+    border-color: var(--rumi-border-hover);
+  }
+
+  .doge-btn:focus-visible {
+    outline: 2px solid var(--rumi-action);
+    outline-offset: 2px;
+  }
+
+  .doge-btn:disabled {
     opacity: 0.6;
     cursor: not-allowed;
   }
-  .doge-button--gold {
-    background: linear-gradient(180deg, #ffe9a8, #e8b93a);
-    font-weight: bold;
+
+  .doge-btn--primary {
+    background: var(--rumi-bg-surface2);
+    border-color: var(--rumi-border-hover);
   }
 
-  .doge-address-box {
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-    background: #fff3c4;
-    border-radius: 12px;
-    padding: 0.75rem;
-    margin: 0.75rem 0;
+  .doge-btn--cta {
+    display: block;
+    width: 100%;
+    background: var(--rumi-action);
+    border-color: var(--rumi-action);
+    color: var(--rumi-bg-primary);
+    font-weight: 600;
+    padding: 0.75rem 1.125rem;
   }
 
-  .doge-address {
-    font-family: monospace;
-    word-break: break-all;
-    background: #fffaf0;
-    padding: 0.4rem;
-    border-radius: 8px;
-    border: 1px dashed #d98c00;
+  .doge-btn--cta:hover:not(:disabled) {
+    background: var(--rumi-action-bright);
+    border-color: var(--rumi-action-bright);
   }
 
-  .doge-label {
-    font-size: 0.85rem;
-    color: #7a4b00;
+  .doge-cta-helper {
+    font-size: 0.75rem;
+    color: var(--rumi-text-muted);
+    margin: 0.375rem 0 0;
   }
-  .doge-subtle {
-    font-size: 0.85rem;
-    color: #6b5300;
-  }
+
+  /* ── Status text ── */
   .doge-error {
-    color: #a4262c;
-    font-weight: bold;
-  }
-  .doge-success {
-    color: #2e7d32;
-    font-weight: bold;
-  }
-  .doge-utxo-line {
-    font-size: 0.9rem;
-    margin: 0.15rem 0;
+    color: var(--rumi-danger);
+    font-size: 0.8125rem;
+    font-weight: 500;
+    margin: 0.5rem 0;
   }
 
-  .doge-field {
-    display: flex;
-    flex-direction: column;
-    gap: 0.3rem;
-    margin-bottom: 0.75rem;
-    font-size: 0.9rem;
+  .doge-success {
+    color: var(--rumi-teal-bright);
+    font-size: 0.8125rem;
+    font-weight: 500;
+    margin: 0.5rem 0;
   }
-  .doge-field input {
-    font-family: inherit;
-    padding: 0.5rem;
-    border-radius: 10px;
-    border: 2px solid #e8b93a;
+
+  .doge-utxo-line {
+    font-size: 0.8125rem;
+    color: var(--rumi-text-secondary);
+    margin: 0.15rem 0;
   }
 
   .doge-poll-status {
     margin-top: 1rem;
-    background: #fff3c4;
-    border-radius: 12px;
-    padding: 0.75rem;
+    background: var(--rumi-bg-surface2);
+    border: 1px solid var(--rumi-border);
+    border-radius: 0.5rem;
+    padding: 0.875rem 1rem;
+  }
+
+  /* ── Redeem form ── */
+  .doge-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.375rem;
+    margin-bottom: 1rem;
+    font-size: 0.8125rem;
+    color: var(--rumi-text-secondary);
+    font-weight: 500;
+  }
+
+  .doge-field input {
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    font-size: 0.8125rem;
+    padding: 0.625rem 0.75rem;
+    border-radius: 0.5rem;
+    border: 1px solid var(--rumi-border);
+    background: var(--rumi-bg-surface2);
+    color: var(--rumi-text-primary);
+  }
+
+  .doge-field input:focus-visible {
+    outline: none;
+    border-color: var(--rumi-teal);
+  }
+
+  .doge-footnote {
+    text-align: center;
+    font-size: 0.75rem;
+    color: var(--rumi-text-muted);
+    margin-top: 1.25rem;
+  }
+
+  /* ── Margin annotations ──
+     Hand-drawn Comic Sans callouts. Purely decorative (aria-hidden), never
+     the primary voice for instructions or safety copy. Gold is a one-off
+     accent reserved for these notes, not a design-system token. */
+  .doge-annotation {
+    display: none;
+    font-family: 'Comic Sans MS', 'Comic Sans', 'Chalkboard SE', cursive;
+    font-size: 0.875rem;
+    line-height: 1.25;
+    pointer-events: none;
+  }
+
+  .doge-annotation--purple {
+    color: var(--rumi-purple-accent);
+    opacity: 0.85;
+  }
+
+  .doge-annotation--gold {
+    color: #d9a53c;
+  }
+
+  /* Inline fallback: directly under the target row, all viewports up to the
+     wide-desktop breakpoint below, and always on narrow/mobile widths. */
+  @media (max-width: 1219px) {
+    .doge-annotation {
+      display: block;
+      margin-top: 0.5rem;
+      padding: 0.375rem 0.625rem;
+      border-left: 2px solid currentColor;
+      border-radius: 0.25rem;
+      background: rgba(209, 118, 232, 0.06);
+    }
+
+    .doge-annotation--gold {
+      background: rgba(217, 165, 60, 0.08);
+    }
+  }
+
+  /* True margins on generously wide desktop viewports (1280/1440 have ample
+     room either side of the 700px panel within the app's 1200px content well). */
+  @media (min-width: 1220px) {
+    .doge-row--annotated {
+      overflow: visible;
+    }
+
+    .doge-annotation {
+      display: block;
+      position: absolute;
+      top: 0;
+      width: 148px;
+    }
+
+    .doge-annotation--purple {
+      right: calc(100% + 28px);
+      text-align: right;
+    }
+
+    .doge-annotation--gold {
+      left: calc(100% + 28px);
+      text-align: left;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .doge-tab,
+    .doge-btn,
+    .doge-copy-btn {
+      transition: none;
+    }
+  }
+
+  @media (max-width: 480px) {
+    .doge-page {
+      padding: 1.25rem 1rem 2.5rem;
+    }
+
+    .doge-stats-row {
+      grid-template-columns: 1fr;
+      gap: 0.75rem;
+    }
+
+    .doge-step {
+      width: 4.25rem;
+    }
+
+    .doge-step-label {
+      font-size: 0.6875rem;
+    }
   }
 </style>

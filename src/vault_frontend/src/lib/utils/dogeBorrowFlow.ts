@@ -1,6 +1,9 @@
 import type { Principal } from '@dfinity/principal';
 
 export const KOINU_PER_DOGE = 100_000_000;
+export const KOINU_DECIMALS = 8;
+/** nat64 upper bound — the wire type for every koinu amount field. */
+export const NAT64_MAX_KOINU = 18446744073709551615n;
 
 /** Client-side bound on the update_balance confirmation poll. Named per spec: 60s cadence, 120 attempts. */
 export const POLL_INTERVAL_MS = 60_000;
@@ -28,6 +31,24 @@ export function dogeToKoinu(amountDoge: number): bigint {
   return BigInt(Math.round(amountDoge * KOINU_PER_DOGE));
 }
 
+/**
+ * Parses a user-entered decimal DOGE amount (e.g. "50", "1.25", "0.00000001")
+ * into exact koinu using only string/BigInt arithmetic — never Number/parseFloat,
+ * since a float multiply against KOINU_PER_DOGE can misround fractional input.
+ * Rejects blank, zero, negative, scientific notation, malformed strings, more
+ * than 8 fractional digits (koinu is the smallest unit — no silent rounding),
+ * and anything above the nat64 wire bound.
+ */
+export function parseDogeAmountInput(raw: string): bigint | null {
+  const trimmed = raw.trim();
+  const match = /^(0|[1-9][0-9]*)(?:\.([0-9]{1,8}))?$/.exec(trimmed);
+  if (!match) return null;
+  const [, wholePart, fracPart = ''] = match;
+  const koinu = BigInt(wholePart + fracPart.padEnd(KOINU_DECIMALS, '0'));
+  if (koinu <= 0n || koinu > NAT64_MAX_KOINU) return null;
+  return koinu;
+}
+
 export function formatKoinuAsDoge(koinu: bigint): string {
   const rounded = koinuToDoge(koinu).toFixed(8).replace(/\.?0+$/, '');
   return `${rounded === '' ? '0' : rounded} DOGE`;
@@ -38,7 +59,7 @@ export function computeApprovalAmount(requestedKoinu: bigint, ledgerFeeKoinu: bi
 }
 
 export function formatWithdrawalFeeSummary(dogecoinFeeKoinu: bigint, minterFeeKoinu: bigint, ledgerFeeKoinu: bigint): string {
-  return `much fee math: ~${formatKoinuAsDoge(dogecoinFeeKoinu)} dogecoin network fee + ${formatKoinuAsDoge(minterFeeKoinu)} minter fee + ${formatKoinuAsDoge(ledgerFeeKoinu)} ledger fee`;
+  return `Network fee ~${formatKoinuAsDoge(dogecoinFeeKoinu)} + minter fee ${formatKoinuAsDoge(minterFeeKoinu)} + ledger fee ${formatKoinuAsDoge(ledgerFeeKoinu)}`;
 }
 
 export interface WithdrawalFeeEstimate {
@@ -59,12 +80,12 @@ export function parseWithdrawalFeeEstimate(result: Record<string, any>): Withdra
 
 export function summarizeWithdrawalFeeError(err: Record<string, any>): string {
   if ('AmountTooLow' in err) {
-    return `much smol — that amount is below the minimum this minter will estimate a fee for: ${formatKoinuAsDoge(BigInt(err.AmountTooLow.min_amount))}`;
+    return `Below the minimum amount this minter will estimate a fee for: ${formatKoinuAsDoge(BigInt(err.AmountTooLow.min_amount))}`;
   }
   if ('AmountTooHigh' in err) {
-    return 'wow, such big — that amount is too high to estimate a withdrawal fee for';
+    return 'That amount is too high to estimate a withdrawal fee for.';
   }
-  return 'very unknown error estimating the withdrawal fee';
+  return 'An unknown error occurred estimating the withdrawal fee.';
 }
 
 export type WithdrawalFeeEstimateOutcome =
@@ -78,7 +99,7 @@ export function summarizeWithdrawalFeeEstimate(result: Record<string, any>): Wit
     return {
       success: true,
       estimate,
-      label: `much fee math: ~${formatKoinuAsDoge(estimate.dogecoinFeeKoinu)} dogecoin network fee + ${formatKoinuAsDoge(estimate.minterFeeKoinu)} minter fee`,
+      label: `Network fee ~${formatKoinuAsDoge(estimate.dogecoinFeeKoinu)} + minter fee ${formatKoinuAsDoge(estimate.minterFeeKoinu)}`,
     };
   }
   return { success: false, label: summarizeWithdrawalFeeError(result.Err ?? {}) };
@@ -142,21 +163,21 @@ export function classifyUtxoStatus(status: Record<string, any>): UtxoStatusSumma
     const koinuAmount = BigInt(status.Minted.minted_amount);
     return {
       kind: 'Minted',
-      label: `wow, minted! ${formatKoinuAsDoge(koinuAmount)} landed in your wallet`,
+      label: `Minted ${formatKoinuAsDoge(koinuAmount)} into your wallet.`,
       koinuAmount,
       blockIndex: BigInt(status.Minted.block_index),
     };
   }
   if ('Checked' in status) {
-    return { kind: 'Checked', label: 'much confirmations, very legit — checked and waiting to mint' };
+    return { kind: 'Checked', label: 'Confirmed and waiting to mint.' };
   }
   if ('ValueTooSmall' in status) {
-    return { kind: 'ValueTooSmall', label: 'wow, such smol — that deposit is too tiny to mint' };
+    return { kind: 'ValueTooSmall', label: 'That deposit is too small to mint.' };
   }
   if ('Tainted' in status) {
-    return { kind: 'Tainted', label: 'much suspicion — this UTXO got flagged and will not mint' };
+    return { kind: 'Tainted', label: 'This deposit was flagged and will not mint.' };
   }
-  return { kind: 'Unknown', label: 'much mystery status, very unknown' };
+  return { kind: 'Unknown', label: 'Unrecognized deposit status.' };
 }
 
 /** ValueTooSmall, Tainted, and Minted are terminal — Checked keeps polling. */
@@ -176,7 +197,7 @@ export function summarizePendingUtxos(pending: Array<{ value: bigint | number; c
     return {
       koinuAmount,
       confirmations: p.confirmations,
-      label: `${formatKoinuAsDoge(koinuAmount)} waiting, ${p.confirmations} confirmations so far`,
+      label: `${formatKoinuAsDoge(koinuAmount)} pending, ${p.confirmations} confirmations so far`,
     };
   });
 }
@@ -200,23 +221,23 @@ export function summarizeUpdateBalanceError(err: Record<string, any>): UpdateBal
     return {
       kind: 'NoNewUtxos',
       message: current !== undefined
-        ? `such patience, wow — ${current}/${required} confirmations so far, not minted yet`
-        : `no new DOGE spotted yet — needs ${required} confirmations, very waiting`,
+        ? `${current}/${required} confirmations so far. Not minted yet.`
+        : `No deposit detected yet, needs ${required} confirmations.`,
       currentConfirmations: current,
       requiredConfirmations: required,
       pendingUtxos: pending,
     };
   }
   if ('AlreadyProcessing' in err) {
-    return { kind: 'AlreadyProcessing', message: 'much busy, already checking your balance — hold the leash' };
+    return { kind: 'AlreadyProcessing', message: 'Already checking your balance. Please wait.' };
   }
   if ('TemporarilyUnavailable' in err) {
-    return { kind: 'TemporarilyUnavailable', message: `minter says "wow, such downtime": ${err.TemporarilyUnavailable}` };
+    return { kind: 'TemporarilyUnavailable', message: `Minter is temporarily unavailable: ${err.TemporarilyUnavailable}` };
   }
   if ('GenericError' in err) {
-    return { kind: 'GenericError', message: `much error: ${err.GenericError.error_message}` };
+    return { kind: 'GenericError', message: `Error: ${err.GenericError.error_message}` };
   }
-  return { kind: 'Unknown', message: 'very unknown error, so confusing' };
+  return { kind: 'Unknown', message: 'An unknown error occurred.' };
 }
 
 /** NoNewUtxos, AlreadyProcessing, and TemporarilyUnavailable are expected while waiting — Generic/unknown errors are terminal. */
@@ -253,79 +274,83 @@ export interface RetrieveStatusSummary {
 
 export function classifyRetrieveDogeStatus(status: Record<string, any>): RetrieveStatusSummary {
   if ('Confirmed' in status) {
-    return { kind: 'Confirmed', label: 'wow, such confirmed — DOGE has landed on chain', txid: formatTxid(status.Confirmed.txid) };
+    return { kind: 'Confirmed', label: 'DOGE has landed on chain.', txid: formatTxid(status.Confirmed.txid) };
   }
   if ('Submitted' in status) {
-    return { kind: 'Submitted', label: 'much broadcast — transaction submitted to the Dogecoin network', txid: formatTxid(status.Submitted.txid) };
+    return { kind: 'Submitted', label: 'Submitted to the Dogecoin network.', txid: formatTxid(status.Submitted.txid) };
   }
   if ('Sending' in status) {
-    return { kind: 'Sending', label: 'very in-flight — minter is sending your DOGE now', txid: formatTxid(status.Sending.txid) };
+    return { kind: 'Sending', label: 'Minter is sending your DOGE now.', txid: formatTxid(status.Sending.txid) };
   }
   if ('Signing' in status) {
-    return { kind: 'Signing', label: 'much cryptography — minter is signing your withdrawal transaction' };
+    return { kind: 'Signing', label: 'Minter is signing your withdrawal transaction.' };
   }
   if ('Pending' in status) {
-    return { kind: 'Pending', label: 'much queue, very pending — minter has your request' };
+    return { kind: 'Pending', label: 'Minter has received your request.' };
   }
   if ('AmountTooLow' in status) {
-    return { kind: 'AmountTooLow', label: 'wow, such smol amount — below the minimum, try more DOGE' };
+    return { kind: 'AmountTooLow', label: 'Amount is below the minimum. Try a larger amount.' };
   }
   if ('WillReimburse' in status) {
-    return { kind: 'WillReimburse', label: 'much oof — withdrawal failed, minter will reimburse your ckDOGE balance soon' };
+    return { kind: 'WillReimburse', label: 'Withdrawal failed. Minter will reimburse your ckDOGE balance soon.' };
   }
   if ('Reimbursed' in status) {
-    return { kind: 'Reimbursed', label: 'so refund, very sorry — withdrawal failed and your DOGE balance has been reimbursed' };
+    return { kind: 'Reimbursed', label: 'Withdrawal failed and your DOGE balance has been reimbursed.' };
   }
-  return { kind: 'Unknown', label: 'much mystery, very unknown status' };
+  return { kind: 'Unknown', label: 'Unrecognized status.' };
 }
 
 export function summarizeRetrieveError(err: Record<string, any>): string {
-  if ('MalformedAddress' in err) return `wow, such bad address: ${err.MalformedAddress}`;
-  if ('AmountTooLow' in err) return `much smol — minimum withdrawal is ${formatKoinuAsDoge(BigInt(err.AmountTooLow))}`;
-  if ('InsufficientFunds' in err) return `not enough DOGE in your balance — you have ${formatKoinuAsDoge(BigInt(err.InsufficientFunds.balance))}`;
-  if ('InsufficientAllowance' in err) return `approval too smol — allowance is only ${formatKoinuAsDoge(BigInt(err.InsufficientAllowance.allowance))}`;
-  if ('TemporarilyUnavailable' in err) return `minter napping right now: ${err.TemporarilyUnavailable}`;
-  if ('AlreadyProcessing' in err) return 'much patience — a withdrawal is already processing';
-  if ('GenericError' in err) return `much error: ${err.GenericError.error_message}`;
-  return 'very unknown error, so confusing';
+  if ('MalformedAddress' in err) return `Invalid address: ${err.MalformedAddress}`;
+  if ('AmountTooLow' in err) return `Amount is below the minimum withdrawal: ${formatKoinuAsDoge(BigInt(err.AmountTooLow))}`;
+  if ('InsufficientFunds' in err) return `Not enough DOGE in your balance. You have ${formatKoinuAsDoge(BigInt(err.InsufficientFunds.balance))}`;
+  if ('InsufficientAllowance' in err) return `Approval too small. Allowance is only ${formatKoinuAsDoge(BigInt(err.InsufficientAllowance.allowance))}`;
+  if ('TemporarilyUnavailable' in err) return `Minter is temporarily unavailable: ${err.TemporarilyUnavailable}`;
+  if ('AlreadyProcessing' in err) return 'A withdrawal is already processing.';
+  if ('GenericError' in err) return `Error: ${err.GenericError.error_message}`;
+  return 'An unknown error occurred.';
 }
 
 /** ICRC-2 icrc2_approve Err variant — numeric/BigInt fields are coerced with String()/BigInt(), never JSON.stringify (which throws on BigInt). */
 export function summarizeApproveError(err: Record<string, any>): string {
   if ('BadFee' in err) {
-    return `wow, bad fee — ledger wants exactly ${formatKoinuAsDoge(BigInt(err.BadFee.expected_fee))}`;
+    return `Ledger requires an exact fee of ${formatKoinuAsDoge(BigInt(err.BadFee.expected_fee))}.`;
   }
   if ('InsufficientFunds' in err) {
-    return `not enough ckDOGE to cover that approval — you have ${formatKoinuAsDoge(BigInt(err.InsufficientFunds.balance))}`;
+    return `Not enough ckDOGE to cover that approval. You have ${formatKoinuAsDoge(BigInt(err.InsufficientFunds.balance))}`;
   }
   if ('AllowanceChanged' in err) {
-    return `much change — allowance is now ${formatKoinuAsDoge(BigInt(err.AllowanceChanged.current_allowance))}, try again`;
+    return `Allowance changed. It is now ${formatKoinuAsDoge(BigInt(err.AllowanceChanged.current_allowance))}. Try again.`;
   }
   if ('Expired' in err) {
-    return `wow, too late — approval expired (ledger time ${String(err.Expired.ledger_time)})`;
+    return `Approval expired (ledger time ${String(err.Expired.ledger_time)}).`;
   }
   if ('TooOld' in err) {
-    return 'much old — this approval request is too old, try again';
+    return 'This approval request is too old. Try again.';
   }
   if ('CreatedInFuture' in err) {
-    return `wow, time traveler — created_at_time is ahead of ledger time ${String(err.CreatedInFuture.ledger_time)}`;
+    return `Created-at time is ahead of ledger time ${String(err.CreatedInFuture.ledger_time)}.`;
   }
   if ('Duplicate' in err) {
-    return `much duplicate — already submitted as block ${String(err.Duplicate.duplicate_of)}`;
+    return `Already submitted as block ${String(err.Duplicate.duplicate_of)}.`;
   }
   if ('TemporarilyUnavailable' in err) {
-    return 'ledger napping right now, much unavailable, try again soon';
+    return 'Ledger is temporarily unavailable. Try again soon.';
   }
   if ('GenericError' in err) {
-    return `much error: ${String(err.GenericError.error_message)}`;
+    return `Error: ${String(err.GenericError.error_message)}`;
   }
-  return 'very unknown approval error, so confusing';
+  return 'An unknown approval error occurred.';
 }
 
 export interface MinterInfoSummary {
   minConfirmationsLabel: string;
   minDepositLabel: string;
   minWithdrawalLabel: string;
+  /** Plain numeric value for two-column stat layouts, no leading "min ..." label text. */
+  minDepositValue: string;
+  /** Plain numeric value for two-column stat layouts, no leading "min ..." label text. */
+  minConfirmationsValue: string;
 }
 
 /** get_minter_info's fields are all non-optional — no kyt_fee on this minter. */
@@ -334,15 +359,19 @@ export function summarizeMinterInfo(info: {
   deposit_doge_min_amount: bigint | number;
   retrieve_doge_min_amount: bigint | number;
 }): MinterInfoSummary {
+  const minDepositValue = formatKoinuAsDoge(BigInt(info.deposit_doge_min_amount));
+  const minConfirmationsValue = `${info.min_confirmations}`;
   return {
-    minConfirmationsLabel: `much confirmations needed: ${info.min_confirmations}, very patience`,
-    minDepositLabel: `min deposit: ${formatKoinuAsDoge(BigInt(info.deposit_doge_min_amount))}`,
+    minConfirmationsLabel: `min confirmations: ${info.min_confirmations}`,
+    minDepositLabel: `min deposit: ${minDepositValue}`,
     minWithdrawalLabel: `min withdrawal: ${formatKoinuAsDoge(BigInt(info.retrieve_doge_min_amount))}`,
+    minDepositValue,
+    minConfirmationsValue,
   };
 }
 
 export function pollProgressLabel(attempt: number, maxAttempts: number = POLL_MAX_ATTEMPTS): string {
-  return `such patience — check ${attempt} of ${maxAttempts}, very watching the blockchain`;
+  return `Checking, attempt ${attempt} of ${maxAttempts}.`;
 }
 
 export function isPollingExhausted(attempt: number, maxAttempts: number = POLL_MAX_ATTEMPTS): boolean {
@@ -350,9 +379,27 @@ export function isPollingExhausted(attempt: number, maxAttempts: number = POLL_M
 }
 
 export function disconnectedWalletCopy(): string {
-  return 'wow, such empty wallet. connect your ICP wallet first, much handshake needed before any DOGE magic happens.';
+  return 'Connect your wallet to get a personal ckDOGE deposit address.';
 }
 
 export function betaRiskNotice(): string {
-  return 'much beta, very new rail. ckDOGE bridging can have bugs — never send more DOGE than you can afford to have stuck. no security promises, no timing promises, just vibes and monitoring.';
+  return 'ckDOGE is in beta. Bridging can have bugs, so do not send more DOGE than you can afford to have stuck. There are no security or timing guarantees, but this rail is actively monitored.';
+}
+
+/**
+ * The compact mint tracker's active step. Deposit stays current until the user
+ * clicks "I sent the DOGE"; Confirmations stays current for the whole bounded
+ * poll, including after it pauses while still waiting (not just while isPolling
+ * is literally true); Minted only lights up once a Minted UTXO is actually observed.
+ */
+export type MintStepIndex = 1 | 2 | 3;
+
+export function computeMintStepIndex(params: {
+  isPolling: boolean;
+  pollingStopped: boolean;
+  hasMinted: boolean;
+}): MintStepIndex {
+  if (params.hasMinted) return 3;
+  if (params.isPolling || params.pollingStopped) return 2;
+  return 1;
 }

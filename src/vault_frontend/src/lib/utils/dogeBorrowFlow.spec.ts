@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { Principal } from '@dfinity/principal';
 import {
   KOINU_PER_DOGE,
+  NAT64_MAX_KOINU,
   POLL_MAX_ATTEMPTS,
   buildAccountArgs,
   buildApproveArgs,
@@ -9,6 +10,7 @@ import {
   classifyRetrieveDogeStatus,
   classifyUtxoStatus,
   computeApprovalAmount,
+  computeMintStepIndex,
   dogeToKoinu,
   formatKoinuAsDoge,
   formatWithdrawalFeeSummary,
@@ -17,6 +19,7 @@ import {
   isRetryableUpdateBalanceError,
   isTerminalUtxoKind,
   koinuToDoge,
+  parseDogeAmountInput,
   parseKoinuInput,
   parseWithdrawalFeeEstimate,
   pollProgressLabel,
@@ -71,6 +74,57 @@ describe('koinu input validation', () => {
     expect(parseKoinuInput('1.5')).toBeNull();
     expect(parseKoinuInput('abc')).toBeNull();
     expect(parseKoinuInput('01')).toBeNull();
+  });
+});
+
+describe('decimal DOGE amount input parsing (redeem form)', () => {
+  it('parses whole DOGE amounts to exact koinu', () => {
+    expect(parseDogeAmountInput('50')).toBe(5_000_000_000n);
+  });
+
+  it('parses the smallest representable unit exactly', () => {
+    expect(parseDogeAmountInput('0.00000001')).toBe(1n);
+  });
+
+  it('parses fractional DOGE amounts to exact koinu, no floating-point drift', () => {
+    expect(parseDogeAmountInput('1.25')).toBe(125_000_000n);
+  });
+
+  it('accepts the exact nat64 boundary and rejects one koinu beyond it', () => {
+    // NAT64_MAX_KOINU = 18446744073709551615n = 184467440737.09551615 DOGE.
+    expect(parseDogeAmountInput('184467440737.09551615')).toBe(NAT64_MAX_KOINU);
+    expect(parseDogeAmountInput('184467440737.09551616')).toBeNull();
+    expect(parseDogeAmountInput('184467440738')).toBeNull();
+  });
+
+  it('rejects more than 8 decimal places instead of silently rounding', () => {
+    expect(parseDogeAmountInput('1.123456789')).toBeNull();
+    expect(parseDogeAmountInput('0.000000001')).toBeNull();
+  });
+
+  it('rejects negative amounts', () => {
+    expect(parseDogeAmountInput('-5')).toBeNull();
+    expect(parseDogeAmountInput('-0.5')).toBeNull();
+  });
+
+  it('rejects scientific notation', () => {
+    expect(parseDogeAmountInput('5e10')).toBeNull();
+    expect(parseDogeAmountInput('1E-8')).toBeNull();
+  });
+
+  it('rejects malformed input', () => {
+    expect(parseDogeAmountInput('abc')).toBeNull();
+    expect(parseDogeAmountInput('1.')).toBeNull();
+    expect(parseDogeAmountInput('.5')).toBeNull();
+    expect(parseDogeAmountInput('1.2.3')).toBeNull();
+    expect(parseDogeAmountInput('01')).toBeNull();
+  });
+
+  it('rejects blank and zero amounts', () => {
+    expect(parseDogeAmountInput('')).toBeNull();
+    expect(parseDogeAmountInput('   ')).toBeNull();
+    expect(parseDogeAmountInput('0')).toBeNull();
+    expect(parseDogeAmountInput('0.00000000')).toBeNull();
   });
 });
 
@@ -271,6 +325,27 @@ describe('minter info summarization', () => {
     expect(summary.minConfirmationsLabel).toContain('6');
     expect(summary.minDepositLabel).toContain('2 DOGE');
     expect(summary.minWithdrawalLabel).toContain('1 DOGE');
+    expect(summary.minConfirmationsValue).toBe('6');
+    expect(summary.minDepositValue).toBe('2 DOGE');
+  });
+});
+
+describe('mint step tracker derivation', () => {
+  it('stays on step 1 before the user has sent anything', () => {
+    expect(computeMintStepIndex({ isPolling: false, pollingStopped: false, hasMinted: false })).toBe(1);
+  });
+
+  it('moves to step 2 while actively polling', () => {
+    expect(computeMintStepIndex({ isPolling: true, pollingStopped: false, hasMinted: false })).toBe(2);
+  });
+
+  it('stays on step 2 after the bounded poll pauses while still waiting, not step 1', () => {
+    expect(computeMintStepIndex({ isPolling: false, pollingStopped: true, hasMinted: false })).toBe(2);
+  });
+
+  it('only reaches step 3 once a mint has actually landed, never from isPolling=false alone', () => {
+    expect(computeMintStepIndex({ isPolling: false, pollingStopped: false, hasMinted: true })).toBe(3);
+    expect(computeMintStepIndex({ isPolling: true, pollingStopped: false, hasMinted: true })).toBe(3);
   });
 });
 
