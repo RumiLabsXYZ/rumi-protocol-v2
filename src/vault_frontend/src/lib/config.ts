@@ -39,6 +39,9 @@ export const CANISTER_IDS = {
   // Rumi Points (airdrop accrual engine). Live on mainnet 2026-06-09; setting
   // this id flips POINTS_ENABLED true so the /points section renders.
   RUMI_POINTS: "bfnu3-6aaaa-aaaab-qhanq-cai",
+  // ckDOGE minter and ledger on ICP mainnet
+  CKDOGE_MINTER: "eqltq-xqaaa-aaaar-qb3vq-cai",
+  CKDOGE_LEDGER: "efmc5-wyaaa-aaaar-qb3wa-cai",
 } as const;
 
 /** The /points airdrop section is shown only once the rumi_points canister id
@@ -133,6 +136,15 @@ export const CONFIG = {
 
   get ckusdcLedgerId() {
     return CANISTER_IDS.CKUSDC_LEDGER;
+  },
+
+  // ckDOGE minter and ledger IDs (mainnet only — no local equivalents)
+  get ckdogeMinterCanisterId() {
+    return CANISTER_IDS.CKDOGE_MINTER;
+  },
+
+  get ckdogeLedgerCanisterId() {
+    return CANISTER_IDS.CKDOGE_LEDGER;
   },
 
   get threePoolCanisterId() {

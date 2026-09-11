@@ -7,6 +7,8 @@ import { idlFactory as stabilityPoolIDL } from '$declarations/rumi_stability_poo
 import { idlFactory as threePoolIDL } from '$declarations/rumi_3pool/rumi_3pool.did.js';
 import { idlFactory as rumiAmmIDL } from '$declarations/rumi_amm/rumi_amm.did.js';
 import { idlFactory as icpswapPoolIDL } from '$declarations/icpswap_pool/icpswap_pool.did.js';
+import { idlFactory as ckdogeMinterIDL } from '../idls/ckdoge_minter.idl.js';
+import { idlFactory as ckdogeLedgerIDL } from '../idls/ledger.idl.js';
 import { createPNP, type PNP, ConfigBuilder, BaseSignerAdapter } from '@windoge98/plug-n-play';
 
 // Define types for supported canisters
@@ -17,7 +19,9 @@ export type CanisterType =
   | "stability_pool"
   | "three_pool"
   | "rumi_amm"
-  | "icpswap_pool";
+  | "icpswap_pool"
+  | "ckdoge_minter"
+  | "ckdoge_ledger";
 
 // Collect all canister IDLs in one place
 export const canisterIDLs = {
@@ -28,6 +32,8 @@ export const canisterIDLs = {
   three_pool: threePoolIDL,
   rumi_amm: rumiAmmIDL,
   icpswap_pool: icpswapPoolIDL,
+  ckdoge_minter: ckdogeMinterIDL,
+  ckdoge_ledger: ckdogeLedgerIDL,
 };
 
 let globalPnp: PNP | null = null;
@@ -55,6 +61,8 @@ export const getAllDelegationTargets = (): string[] => {
     CANISTER_IDS.ICPSWAP_CKUSDT_ICUSD_POOL,   // ICPswap ckUSDT/icUSD pool
     CANISTER_IDS.ICPSWAP_ICUSD_CKUSDC_POOL,   // ICPswap icUSD/ckUSDC pool
     CANISTER_IDS.ICPSWAP_CKUSDT_CKUSDC_POOL,  // ICPswap ckUSDT/ckUSDC pool
+    CANISTER_IDS.CKDOGE_MINTER,             // ckDOGE minter
+    CANISTER_IDS.CKDOGE_LEDGER,             // ckDOGE Ledger
   ].filter(Boolean); // Filter out any undefined values
 };
 
