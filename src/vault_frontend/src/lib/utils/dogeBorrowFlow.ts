@@ -351,6 +351,8 @@ export interface MinterInfoSummary {
   minDepositValue: string;
   /** Plain numeric value for two-column stat layouts, no leading "min ..." label text. */
   minConfirmationsValue: string;
+  /** Same value as minConfirmationsValue, as a number — for the confirmation meter's denominator. */
+  minConfirmationsCount: number;
 }
 
 /** get_minter_info's fields are all non-optional — no kyt_fee on this minter. */
@@ -367,6 +369,7 @@ export function summarizeMinterInfo(info: {
     minWithdrawalLabel: `min withdrawal: ${formatKoinuAsDoge(BigInt(info.retrieve_doge_min_amount))}`,
     minDepositValue,
     minConfirmationsValue,
+    minConfirmationsCount: info.min_confirmations,
   };
 }
 
@@ -402,4 +405,129 @@ export function computeMintStepIndex(params: {
   if (params.hasMinted) return 3;
   if (params.isPolling || params.pollingStopped) return 2;
   return 1;
+}
+
+/**
+ * The confirmation UI's phase. 'waiting' = not polling yet. 'confirming' = actively
+ * polling. 'stopped' = the bounded poll (POLL_MAX_ATTEMPTS) exhausted while a deposit
+ * was still pending, not an error — the user can manually recheck. 'error' = a
+ * terminal failure (bad UTXO, wallet changed mid-check, unexpected exception,
+ * or a non-retryable update_balance error). 'minted' = done.
+ */
+export type ConfirmationPhase = 'waiting' | 'confirming' | 'stopped' | 'error' | 'minted';
+
+/**
+ * A confirmation count pair sourced ONLY from real minter data (pending UTXOs, a
+ * Checked status, or the NoNewUtxos error's current/required fields) — never
+ * synthesized from pollAttempt/maxAttempts. `confirmations` is only ever set when
+ * the minter has actually reported a measured value; callers must not render a
+ * meter at 0% when this is entirely absent (unknown progress must not imply zero
+ * progress).
+ */
+export interface ConfirmationMeter {
+  confirmations: number;
+  requiredConfirmations: number;
+}
+
+export interface ConfirmationDisplay {
+  phase: ConfirmationPhase;
+  statusLabel: string;
+  /** null when the minter hasn't reported any real confirmation count yet. */
+  meter: ConfirmationMeter | null;
+  /** Sum of every pending UTXO's detected value, formatted as DOGE. null when none detected. */
+  amountDetectedLabel: string | null;
+  /** e.g. "2 UTXOs detected" — only rendered when more than one UTXO is pending. */
+  utxoCountLabel: string | null;
+  /** Only set while actively polling — there is no scheduled next check once stopped/errored. */
+  nextCheckLabel: string | null;
+}
+
+/** 0-100, clamped. Returns 0 only when the meter itself reports 0 confirmations — never as a stand-in for "unknown". */
+export function confirmationMeterPercent(meter: ConfirmationMeter): number {
+  if (meter.requiredConfirmations <= 0) return 100;
+  return Math.max(0, Math.min(100, (meter.confirmations / meter.requiredConfirmations) * 100));
+}
+
+export function computeConfirmationDisplay(params: {
+  isPolling: boolean;
+  pollingStopped: boolean;
+  pollAttempt: number;
+  maxAttempts?: number;
+  mintedSummary: UtxoStatusSummary | null;
+  pollFatalMessage: string;
+  lastUpdateBalanceError: UpdateBalanceErrorSummary | null;
+  utxoStatuses: UtxoStatusSummary[];
+  /** get_minter_info's min_confirmations — used only to fill the meter's denominator once a UTXO is Checked (already fully confirmed, waiting to mint), since that response carries no explicit confirmation counts. */
+  minConfirmationsHint?: number;
+}): ConfirmationDisplay {
+  const maxAttempts = params.maxAttempts ?? POLL_MAX_ATTEMPTS;
+
+  if (params.mintedSummary) {
+    return {
+      phase: 'minted',
+      statusLabel: 'Minted',
+      meter: null,
+      amountDetectedLabel: params.mintedSummary.koinuAmount !== undefined
+        ? formatKoinuAsDoge(params.mintedSummary.koinuAmount)
+        : null,
+      utxoCountLabel: null,
+      nextCheckLabel: null,
+    };
+  }
+
+  if (params.pollFatalMessage) {
+    return {
+      phase: 'error',
+      statusLabel: 'Stopped — needs attention',
+      meter: null,
+      amountDetectedLabel: null,
+      utxoCountLabel: null,
+      nextCheckLabel: null,
+    };
+  }
+
+  const pending = params.lastUpdateBalanceError?.pendingUtxos ?? [];
+  const checkedStatus = params.utxoStatuses.find((s) => s.kind === 'Checked');
+
+  let meter: ConfirmationMeter | null = null;
+  let amountDetectedLabel: string | null = null;
+  let utxoCountLabel: string | null = null;
+
+  if (checkedStatus && params.minConfirmationsHint !== undefined) {
+    // Checked means the minter already saw enough confirmations to act on this
+    // UTXO — update_balance's Ok/Checked response carries no confirmation count
+    // of its own, so the meter reads full against the known requirement.
+    meter = { confirmations: params.minConfirmationsHint, requiredConfirmations: params.minConfirmationsHint };
+  } else if (pending.length > 0) {
+    const minConfirmations = Math.min(...pending.map((p) => p.confirmations));
+    meter = { confirmations: minConfirmations, requiredConfirmations: params.lastUpdateBalanceError!.requiredConfirmations! };
+    const totalKoinu = pending.reduce((sum, p) => sum + p.koinuAmount, 0n);
+    amountDetectedLabel = formatKoinuAsDoge(totalKoinu);
+    utxoCountLabel = pending.length === 1 ? '1 UTXO detected' : `${pending.length} UTXOs detected`;
+  } else if (
+    params.lastUpdateBalanceError?.currentConfirmations !== undefined &&
+    params.lastUpdateBalanceError?.requiredConfirmations !== undefined
+  ) {
+    meter = {
+      confirmations: params.lastUpdateBalanceError.currentConfirmations,
+      requiredConfirmations: params.lastUpdateBalanceError.requiredConfirmations,
+    };
+  }
+
+  const phase: ConfirmationPhase = params.pollingStopped ? 'stopped' : params.isPolling ? 'confirming' : 'waiting';
+
+  const statusLabel = phase === 'stopped'
+    ? `Paused after attempt ${params.pollAttempt} of ${maxAttempts}`
+    : checkedStatus
+      ? 'Confirmed, waiting to mint'
+      : meter
+        ? `Checking, attempt ${params.pollAttempt} of ${maxAttempts}`
+        : `Watching for your deposit, attempt ${params.pollAttempt} of ${maxAttempts}`;
+
+  // The poll cadence is a fixed client-side setTimeout(POLL_INTERVAL_MS) — this is
+  // the real scheduled interval, not a guess, so it's only shown while a next
+  // check is actually scheduled (i.e. actively polling).
+  const nextCheckLabel = phase === 'confirming' ? `Next check in ~${Math.round(POLL_INTERVAL_MS / 1000)}s` : null;
+
+  return { phase, statusLabel, meter, amountDetectedLabel, utxoCountLabel, nextCheckLabel };
 }

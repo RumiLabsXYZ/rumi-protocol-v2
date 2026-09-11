@@ -37,7 +37,12 @@ const mocks = vi.hoisted(() => ({
   updateBalanceCalls: [] as Array<{ identity: any; args: any }>,
   forcedUpdateBalanceError: null as Error | null,
   fetchRootKey: vi.fn().mockResolvedValue(undefined),
-  walletGetActor: vi.fn(async () => ({ __kind: 'wallet-actor' })),
+  walletActors: {} as Record<string, any>,
+  walletGetActor: vi.fn(async (canisterId: string) => (mocks.walletActors as any)[canisterId] ?? { __kind: 'wallet-actor' }),
+  isOisyWallet: vi.fn(() => false),
+  getOisySignerAgent: vi.fn(async () => ({ __kind: 'signer-agent' })),
+  oisyActors: {} as Record<string, any>,
+  createOisyActor: vi.fn((canisterId: string) => (mocks.oisyActors as any)[canisterId]),
 }));
 
 vi.mock('@dfinity/agent', async () => {
@@ -89,17 +94,51 @@ vi.mock('../idls/ckdoge_minter.idl.js', () => ({
   idlFactory: { name: 'ckdoge_minter' },
 }));
 
+vi.mock('./protocol/walletOperations', () => ({
+  isOisyWallet: mocks.isOisyWallet,
+}));
+
+vi.mock('./oisySigner', () => ({
+  getOisySignerAgent: mocks.getOisySignerAgent,
+  createOisyActor: mocks.createOisyActor,
+}));
+
 import { Principal } from '@dfinity/principal';
 import {
   getPublicMinterActor,
   getWalletMinterActor,
   updateDogeBalanceForOwner,
+  redeemDogeWithApproval,
   _resetCkdogeMinterAnonAgent,
   _resetUpdateBalanceRequestAgent,
 } from './ckdogeMinterActors';
+import { buildApproveArgs, buildRetrieveWithApprovalArgs } from '../utils/dogeBorrowFlow';
 
 const OWNER_PRINCIPAL = Principal.fromText('rrkah-fqaaa-aaaaa-aaaaq-cai');
 const OTHER_PRINCIPAL = Principal.fromText('ryjl3-tyaaa-aaaaa-aaaba-cai');
+const LEDGER_ID = 'irorr-5aaaa-aaaak-qddsq-cai';
+const MINTER_ID = 'eqltq-xqaaa-aaaar-qb3vq-cai';
+
+function makeLedgerActor(approveResult: any = { Ok: 42n }) {
+  return { icrc2_approve: vi.fn(async () => approveResult) };
+}
+
+function makeMinterActor(retrieveResult: any = { Ok: { block_index: 7n } }) {
+  return { retrieve_doge_with_approval: vi.fn(async () => retrieveResult) };
+}
+
+function redeemParams(overrides: Partial<Parameters<typeof redeemDogeWithApproval>[0]> = {}) {
+  return {
+    ownerPrincipal: OWNER_PRINCIPAL,
+    ledgerCanisterId: LEDGER_ID,
+    minterCanisterId: MINTER_ID,
+    ledgerIdl: { name: 'ckdoge_ledger' },
+    approveArgs: buildApproveArgs(OTHER_PRINCIPAL, 500_100_000n),
+    retrieveArgs: buildRetrieveWithApprovalArgs('DBXu2kgc3xtvCUWFcxFE3r9hEYgmuaaCyD', 500_000_000n),
+    isLive: () => true,
+    ...overrides,
+  };
+}
 
 describe('ckdogeMinterActors', () => {
   beforeEach(() => {
@@ -108,6 +147,9 @@ describe('ckdogeMinterActors', () => {
     _resetUpdateBalanceRequestAgent();
     mocks.updateBalanceCalls.length = 0;
     mocks.forcedUpdateBalanceError = null;
+    mocks.walletActors = {};
+    mocks.oisyActors = {};
+    mocks.isOisyWallet.mockReturnValue(false);
   });
 
   describe('getPublicMinterActor', () => {
@@ -275,6 +317,94 @@ describe('ckdogeMinterActors', () => {
       const mod = await import('./ckdogeMinterActors');
       await mod.updateDogeBalanceForOwner(OWNER_PRINCIPAL);
       expect(mocks.fetchRootKey).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // redeemDogeWithApproval: the click-to-consent-screen routing this file's
+  // redemption-fix regression guards. Oisy must build BOTH actors from one
+  // getOisySignerAgent() call so the two sequential consent screens open in a
+  // single popup and no live query burns the gesture window before the first
+  // one; non-Oisy must keep using walletStore.getActor as before; a failed
+  // approval must halt before retrieve_doge_with_approval is ever called; and
+  // a session that goes stale mid-flight must not advance to retrieve under a
+  // wallet that's no longer connected.
+  describe('redeemDogeWithApproval', () => {
+    it('non-Oisy: builds both actors via walletStore.getActor and completes approve then retrieve', async () => {
+      mocks.isOisyWallet.mockReturnValue(false);
+      const ledgerActor = makeLedgerActor();
+      const minterActor = makeMinterActor();
+      mocks.walletActors[LEDGER_ID] = ledgerActor;
+      mocks.walletActors[MINTER_ID] = minterActor;
+
+      const outcome = await redeemDogeWithApproval(redeemParams());
+
+      expect(outcome).toEqual({ kind: 'success', approveBlockIndex: 42n, burnBlockIndex: 7n });
+      expect(mocks.getOisySignerAgent).not.toHaveBeenCalled();
+      expect(mocks.walletGetActor).toHaveBeenCalledWith(LEDGER_ID, { name: 'ckdoge_ledger' });
+      expect(mocks.walletGetActor).toHaveBeenCalledWith(MINTER_ID, { name: 'ckdoge_minter' });
+      expect(ledgerActor.icrc2_approve).toHaveBeenCalledTimes(1);
+      expect(minterActor.retrieve_doge_with_approval).toHaveBeenCalledTimes(1);
+    });
+
+    it('Oisy: builds both actors from a single signer agent and never touches walletStore.getActor', async () => {
+      mocks.isOisyWallet.mockReturnValue(true);
+      const ledgerActor = makeLedgerActor();
+      const minterActor = makeMinterActor();
+      mocks.oisyActors[LEDGER_ID] = ledgerActor;
+      mocks.oisyActors[MINTER_ID] = minterActor;
+
+      const outcome = await redeemDogeWithApproval(redeemParams());
+
+      expect(outcome).toEqual({ kind: 'success', approveBlockIndex: 42n, burnBlockIndex: 7n });
+      expect(mocks.getOisySignerAgent).toHaveBeenCalledTimes(1);
+      expect(mocks.walletGetActor).not.toHaveBeenCalled();
+      expect(ledgerActor.icrc2_approve).toHaveBeenCalledTimes(1);
+      expect(minterActor.retrieve_doge_with_approval).toHaveBeenCalledTimes(1);
+    });
+
+    it('a failed approval halts before retrieve_doge_with_approval is ever called', async () => {
+      const ledgerActor = makeLedgerActor({ Err: { BadFee: { expected_fee: 100_000n } } });
+      const minterActor = makeMinterActor();
+      mocks.walletActors[LEDGER_ID] = ledgerActor;
+      mocks.walletActors[MINTER_ID] = minterActor;
+
+      const outcome = await redeemDogeWithApproval(redeemParams());
+
+      expect(outcome.kind).toBe('approve-error');
+      if (outcome.kind === 'approve-error') {
+        expect(outcome.message).toContain('0.001 DOGE');
+      }
+      expect(minterActor.retrieve_doge_with_approval).not.toHaveBeenCalled();
+    });
+
+    it('stops before retrieve, discarding the outcome, if the session goes stale right after approve resolves', async () => {
+      const ledgerActor = makeLedgerActor();
+      const minterActor = makeMinterActor();
+      mocks.walletActors[LEDGER_ID] = ledgerActor;
+      mocks.walletActors[MINTER_ID] = minterActor;
+
+      let liveChecks = 0;
+      const outcome = await redeemDogeWithApproval(
+        redeemParams({ isLive: () => (liveChecks += 1) <= 2 }),
+      );
+
+      expect(outcome).toEqual({ kind: 'stale' });
+      expect(minterActor.retrieve_doge_with_approval).not.toHaveBeenCalled();
+    });
+
+    it('surfaces a retrieve_doge_with_approval error while still returning the completed approval block index', async () => {
+      const ledgerActor = makeLedgerActor();
+      const minterActor = makeMinterActor({ Err: { InsufficientAllowance: { allowance: 0n } } });
+      mocks.walletActors[LEDGER_ID] = ledgerActor;
+      mocks.walletActors[MINTER_ID] = minterActor;
+
+      const outcome = await redeemDogeWithApproval(redeemParams());
+
+      expect(outcome.kind).toBe('retrieve-error');
+      if (outcome.kind === 'retrieve-error') {
+        expect(outcome.approveBlockIndex).toBe(42n);
+        expect(outcome.message).toContain('0 DOGE');
+      }
     });
   });
 });

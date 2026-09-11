@@ -10,7 +10,9 @@ import {
   classifyRetrieveDogeStatus,
   classifyUtxoStatus,
   computeApprovalAmount,
+  computeConfirmationDisplay,
   computeMintStepIndex,
+  confirmationMeterPercent,
   dogeToKoinu,
   formatKoinuAsDoge,
   formatWithdrawalFeeSummary,
@@ -30,6 +32,8 @@ import {
   summarizeUpdateBalanceError,
   summarizeWithdrawalFeeError,
   summarizeWithdrawalFeeEstimate,
+  type UpdateBalanceErrorSummary,
+  type UtxoStatusSummary,
 } from './dogeBorrowFlow';
 
 const OWNER = Principal.fromText('zegjz-jpi6k-qkand-c2bgf-qw6za-xk4si-nz3gx-qzzia-fk6fg-snepb-tae');
@@ -327,6 +331,7 @@ describe('minter info summarization', () => {
     expect(summary.minWithdrawalLabel).toContain('1 DOGE');
     expect(summary.minConfirmationsValue).toBe('6');
     expect(summary.minDepositValue).toBe('2 DOGE');
+    expect(summary.minConfirmationsCount).toBe(6);
   });
 });
 
@@ -401,5 +406,123 @@ describe('polling bounds', () => {
 
   it('labels progress with the current attempt and the bound', () => {
     expect(pollProgressLabel(5)).toContain(`5 of ${POLL_MAX_ATTEMPTS}`);
+  });
+});
+
+describe('confirmationMeterPercent', () => {
+  it('computes the real fraction, never rounding a partial count up to 100', () => {
+    expect(confirmationMeterPercent({ confirmations: 25, requiredConfirmations: 60 })).toBeCloseTo((25 / 60) * 100);
+  });
+
+  it('clamps at 100 and 0', () => {
+    expect(confirmationMeterPercent({ confirmations: 90, requiredConfirmations: 60 })).toBe(100);
+    expect(confirmationMeterPercent({ confirmations: 0, requiredConfirmations: 60 })).toBe(0);
+  });
+
+  it('treats a non-positive requirement as fully satisfied rather than dividing by zero', () => {
+    expect(confirmationMeterPercent({ confirmations: 0, requiredConfirmations: 0 })).toBe(100);
+  });
+});
+
+describe('computeConfirmationDisplay — the combined status pill / meter / ticket rows', () => {
+  const baseParams = {
+    isPolling: true,
+    pollingStopped: false,
+    pollAttempt: 4,
+    mintedSummary: null,
+    pollFatalMessage: '',
+    lastUpdateBalanceError: null,
+    utxoStatuses: [] as UtxoStatusSummary[],
+  };
+
+  it('is "waiting" with no meter when nothing has been detected yet — never a synthesized 0/required meter', () => {
+    const display = computeConfirmationDisplay(baseParams);
+    expect(display.phase).toBe('confirming');
+    expect(display.meter).toBeNull();
+    expect(display.amountDetectedLabel).toBeNull();
+    expect(display.statusLabel).toContain('Watching for your deposit');
+    expect(display.statusLabel).toContain('4');
+  });
+
+  it('reads the meter and amount from real pending-UTXO data — never derived from pollAttempt', () => {
+    const lastUpdateBalanceError: UpdateBalanceErrorSummary = {
+      kind: 'NoNewUtxos',
+      message: '25/60 confirmations so far. Not minted yet.',
+      currentConfirmations: 25,
+      requiredConfirmations: 60,
+      pendingUtxos: [{ koinuAmount: 2_400_000_000n, confirmations: 25, label: '24 DOGE pending, 25 confirmations so far' }],
+    };
+    const display = computeConfirmationDisplay({ ...baseParams, pollAttempt: 4, lastUpdateBalanceError });
+
+    expect(display.meter).toEqual({ confirmations: 25, requiredConfirmations: 60 });
+    expect(display.amountDetectedLabel).toBe('24 DOGE');
+    expect(display.utxoCountLabel).toBe('1 UTXO detected');
+    expect(display.statusLabel).toContain('Checking, attempt 4');
+    // Changing pollAttempt must never move the meter — it is sourced only from the minter.
+    const differentAttempt = computeConfirmationDisplay({ ...baseParams, pollAttempt: 99, lastUpdateBalanceError });
+    expect(differentAttempt.meter).toEqual({ confirmations: 25, requiredConfirmations: 60 });
+  });
+
+  it('covers multiple pending UTXOs: sums the detected amount and meters off the least-confirmed one', () => {
+    const lastUpdateBalanceError: UpdateBalanceErrorSummary = {
+      kind: 'NoNewUtxos',
+      message: 'pending',
+      requiredConfirmations: 60,
+      pendingUtxos: [
+        { koinuAmount: 1_000_000_000n, confirmations: 10, label: 'a' },
+        { koinuAmount: 500_000_000n, confirmations: 3, label: 'b' },
+      ],
+    };
+    const display = computeConfirmationDisplay({ ...baseParams, lastUpdateBalanceError });
+
+    expect(display.meter).toEqual({ confirmations: 3, requiredConfirmations: 60 });
+    expect(display.amountDetectedLabel).toBe('15 DOGE');
+    expect(display.utxoCountLabel).toBe('2 UTXOs detected');
+  });
+
+  it('shows a full meter once a UTXO is Checked (already confirmed, waiting to mint) using the minter-info hint', () => {
+    const utxoStatuses: UtxoStatusSummary[] = [{ kind: 'Checked', label: 'Confirmed and waiting to mint.' }];
+    const display = computeConfirmationDisplay({ ...baseParams, utxoStatuses, minConfirmationsHint: 60 });
+
+    expect(display.meter).toEqual({ confirmations: 60, requiredConfirmations: 60 });
+    expect(display.statusLabel).toBe('Confirmed, waiting to mint');
+  });
+
+  it('is "minted" once a Minted UTXO is present, regardless of isPolling/pollingStopped', () => {
+    const mintedSummary: UtxoStatusSummary = {
+      kind: 'Minted',
+      label: 'Minted 24 DOGE into your wallet.',
+      koinuAmount: 2_400_000_000n,
+      blockIndex: 5n,
+    };
+    const display = computeConfirmationDisplay({ ...baseParams, isPolling: false, pollingStopped: true, mintedSummary });
+
+    expect(display.phase).toBe('minted');
+    expect(display.meter).toBeNull();
+    expect(display.amountDetectedLabel).toBe('24 DOGE');
+    expect(display.nextCheckLabel).toBeNull();
+  });
+
+  it('is "error" (not "stopped") when a fatal message is present, and suppresses the meter', () => {
+    const display = computeConfirmationDisplay({ ...baseParams, isPolling: false, pollingStopped: true, pollFatalMessage: 'boom' });
+    expect(display.phase).toBe('error');
+    expect(display.meter).toBeNull();
+  });
+
+  it('is "stopped" (not an error) when the bounded poll exhausts while still waiting', () => {
+    const display = computeConfirmationDisplay({ ...baseParams, isPolling: false, pollingStopped: true, pollAttempt: 120 });
+    expect(display.phase).toBe('stopped');
+    expect(display.statusLabel).toContain('Paused after attempt 120');
+  });
+
+  it('only includes a next-check estimate while actively confirming — never once stopped or errored', () => {
+    const confirming = computeConfirmationDisplay(baseParams);
+    expect(confirming.nextCheckLabel).toBe('Next check in ~60s');
+
+    const stopped = computeConfirmationDisplay({ ...baseParams, isPolling: false, pollingStopped: true });
+    expect(stopped.nextCheckLabel).toBeNull();
+
+    const errored = computeConfirmationDisplay({ ...baseParams, isPolling: false, pollingStopped: true, pollFatalMessage: 'boom' });
+    expect(errored.nextCheckLabel).toBeNull();
   });
 });
