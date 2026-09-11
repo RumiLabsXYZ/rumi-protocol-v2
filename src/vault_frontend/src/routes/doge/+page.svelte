@@ -3,7 +3,7 @@
   import { Principal } from '@dfinity/principal';
   import { walletStore, isConnected as isConnectedStore, principal as principalStore } from '$lib/stores/wallet';
   import { CANISTER_IDS } from '$lib/config';
-  import { getPublicMinterActor, getWalletMinterActor } from '$lib/services/ckdogeMinterActors';
+  import { getPublicMinterActor, getWalletMinterActor, updateDogeBalanceForOwner } from '$lib/services/ckdogeMinterActors';
   import { ICRC1_IDL as ckdogeLedgerIdl } from '$lib/idls/ledger.idl.js';
   import {
     POLL_INTERVAL_MS,
@@ -254,11 +254,7 @@
     pollAttempt += 1;
 
     try {
-      const actor = await getPublicMinterActor();
-      if (!isPollSessionLive(sessionPrincipal)) return;
-
-      const args = buildAccountArgs(sessionPrincipal);
-      const result = await actor.update_balance(args);
+      const result = await updateDogeBalanceForOwner(sessionPrincipal, () => isPollSessionLive(sessionPrincipal));
       if (!isPollSessionLive(sessionPrincipal)) return;
 
       if ('Ok' in result) {
