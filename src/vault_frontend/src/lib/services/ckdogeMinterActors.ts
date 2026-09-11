@@ -40,6 +40,14 @@ import type { Principal } from '@dfinity/principal';
 import { CONFIG, CANISTER_IDS } from '../config';
 import { walletStore } from '../stores/wallet';
 import { idlFactory as ckdogeMinterIdl } from '../idls/ckdoge_minter.idl.js';
+import { isOisyWallet } from './protocol/walletOperations';
+import { getOisySignerAgent, createOisyActor } from './oisySigner';
+import {
+  summarizeApproveError,
+  summarizeRetrieveError,
+  type ApproveArgs,
+  type RetrieveWithApprovalArgs,
+} from '../utils/dogeBorrowFlow';
 
 // Shared across all connected principals: safe only because every account-bound call
 // (e.g. get_doge_address) passes the connected principal explicitly as `owner` rather
@@ -137,6 +145,79 @@ export async function updateDogeBalanceForOwner(
     canisterId: CANISTER_IDS.CKDOGE_MINTER,
   });
   return actor.update_balance({ owner: [owner], subaccount: [] });
+}
+
+export type RedeemOutcome =
+  | { kind: 'stale' }
+  | { kind: 'approve-error'; message: string }
+  | { kind: 'retrieve-error'; approveBlockIndex: bigint; message: string }
+  | { kind: 'success'; approveBlockIndex: bigint; burnBlockIndex: bigint };
+
+export interface RedeemWithApprovalParams {
+  ownerPrincipal: Principal;
+  ledgerCanisterId: string;
+  minterCanisterId: string;
+  ledgerIdl: any;
+  approveArgs: ApproveArgs;
+  retrieveArgs: RetrieveWithApprovalArgs;
+  /** Re-checked after every await — a wallet switch or component teardown mid-flight stops the flow before the next call. */
+  isLive: () => boolean;
+}
+
+/**
+ * Approve then retrieve_doge_with_approval, routed by wallet type.
+ *
+ * Oisy: both actors are built from ONE getOisySignerAgent() call (cached/pre-warmed
+ * on connect, see oisySigner.ts) and used for two sequential awaits — icrc2_approve
+ * then retrieve_doge_with_approval. That is one Oisy popup with two consent screens
+ * (icrc2_approve is a Tier-1 native method; retrieve_doge_with_approval needs the
+ * minter's own ICRC-21 consent message), never two separate popups, and no live
+ * query runs between the caller's click and this function's first await — doing so
+ * would burn the browser's user-gesture window and trip Oisy's "Signer window
+ * should not be opened outside of click handler" guard. The ledger fee baked into
+ * approveArgs must already be resolved by the caller (see getCachedLedgerFee in
+ * ledgerFeeService.ts) for exactly this reason.
+ *
+ * Non-Oisy (Plug, II, etc.): both actors come from walletStore.getActor as before.
+ *
+ * A failed approval (Err from icrc2_approve) always halts before retrieve is ever
+ * called — never retries or proceeds with unapproved funds.
+ */
+export async function redeemDogeWithApproval(params: RedeemWithApprovalParams): Promise<RedeemOutcome> {
+  const { ownerPrincipal, ledgerCanisterId, minterCanisterId, ledgerIdl, approveArgs, retrieveArgs, isLive } = params;
+
+  let ledgerActor: any;
+  let minterActor: any;
+
+  if (isOisyWallet()) {
+    const signerAgent = await getOisySignerAgent(ownerPrincipal);
+    if (!isLive()) return { kind: 'stale' };
+    ledgerActor = createOisyActor(ledgerCanisterId, ledgerIdl, signerAgent);
+    minterActor = createOisyActor(minterCanisterId, ckdogeMinterIdl, signerAgent);
+  } else {
+    ledgerActor = await walletStore.getActor(ledgerCanisterId, ledgerIdl);
+    if (!isLive()) return { kind: 'stale' };
+  }
+
+  const approveResult = await ledgerActor.icrc2_approve(approveArgs);
+  if (!isLive()) return { kind: 'stale' };
+  if ('Err' in approveResult) {
+    return { kind: 'approve-error', message: summarizeApproveError(approveResult.Err) };
+  }
+  const approveBlockIndex = BigInt(approveResult.Ok);
+  if (!isLive()) return { kind: 'stale' };
+
+  if (!minterActor) {
+    minterActor = await walletStore.getActor(minterCanisterId, ckdogeMinterIdl);
+    if (!isLive()) return { kind: 'stale' };
+  }
+
+  const retrieveResult = await minterActor.retrieve_doge_with_approval(retrieveArgs);
+  if (!isLive()) return { kind: 'stale' };
+  if ('Err' in retrieveResult) {
+    return { kind: 'retrieve-error', approveBlockIndex, message: summarizeRetrieveError(retrieveResult.Err) };
+  }
+  return { kind: 'success', approveBlockIndex, burnBlockIndex: BigInt(retrieveResult.Ok.block_index) };
 }
 
 /** Test hook. Resets the cached anonymous agent between tests. */

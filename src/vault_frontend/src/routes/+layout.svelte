@@ -121,6 +121,7 @@
   <div class="footer-inner">
     <div class="footer-links">
       <a href="/redeem" class="footer-link">Redeem</a>
+      <a href="/doge" class="footer-link">ckDOGE Bridge</a>
       <a href="/liquidations" class="footer-link">Liquidate{#if hasLiquidatableVaults}<span class="liq-alert-dot"></span>{/if}</a>
       <a href="/transparency" class="footer-link">Transparency</a>
       <a href="/docs" class="footer-link">Docs</a>

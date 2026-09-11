@@ -1,11 +1,13 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import { Principal } from '@dfinity/principal';
-  import { walletStore, isConnected as isConnectedStore, principal as principalStore } from '$lib/stores/wallet';
+  import { isConnected as isConnectedStore, principal as principalStore } from '$lib/stores/wallet';
   import { CANISTER_IDS } from '$lib/config';
-  import { getPublicMinterActor, getWalletMinterActor, updateDogeBalanceForOwner } from '$lib/services/ckdogeMinterActors';
+  import { getPublicMinterActor, redeemDogeWithApproval, updateDogeBalanceForOwner } from '$lib/services/ckdogeMinterActors';
+  import { fetchLedgerFee, getCachedLedgerFee } from '$lib/services/ledgerFeeService';
   import { ICRC1_IDL as ckdogeLedgerIdl } from '$lib/idls/ledger.idl.js';
   import {
+    KOINU_DECIMALS,
     POLL_INTERVAL_MS,
     betaRiskNotice,
     buildAccountArgs,
@@ -14,7 +16,9 @@
     classifyRetrieveDogeStatus,
     classifyUtxoStatus,
     computeApprovalAmount,
+    computeConfirmationDisplay,
     computeMintStepIndex,
+    confirmationMeterPercent,
     disconnectedWalletCopy,
     formatKoinuAsDoge,
     isPlausibleDogecoinAddress,
@@ -22,10 +26,7 @@
     isRetryableUpdateBalanceError,
     isTerminalUtxoKind,
     parseDogeAmountInput,
-    pollProgressLabel,
-    summarizeApproveError,
     summarizeMinterInfo,
-    summarizeRetrieveError,
     summarizeUpdateBalanceError,
     summarizeWithdrawalFeeEstimate,
     type MinterInfoSummary,
@@ -33,6 +34,8 @@
     type UtxoStatusSummary,
     type RetrieveStatusSummary,
   } from '$lib/utils/dogeBorrowFlow';
+
+  const CKDOGE_LEDGER_FEE_REF = { ledgerId: CANISTER_IDS.CKDOGE_LEDGER, decimals: KOINU_DECIMALS, symbol: 'ckDOGE' };
 
   let isConnected = false;
   let ownerPrincipal: Principal | null = null;
@@ -79,6 +82,17 @@
   let pollingPrincipal: Principal | null = null;
 
   $: mintStepIndex = computeMintStepIndex({ isPolling, pollingStopped, hasMinted: !!mintedSummary });
+
+  $: confirmation = computeConfirmationDisplay({
+    isPolling,
+    pollingStopped,
+    pollAttempt,
+    mintedSummary,
+    pollFatalMessage,
+    lastUpdateBalanceError,
+    utxoStatuses,
+    minConfirmationsHint: minterInfoSummary?.minConfirmationsCount,
+  });
 
   // ── Copy-address state ───────────────────────────────────────────────
   let addressCopied = false;
@@ -163,11 +177,30 @@
     }
   });
 
-  async function getLedgerActor(): Promise<any> {
-    return walletStore.getActor(CANISTER_IDS.CKDOGE_LEDGER, ckdogeLedgerIdl);
+  // Auto-fetch the deposit address the moment a non-anonymous principal is
+  // connected — on initial connect, on wallet restore after reload, and again
+  // for whatever new principal a switch resolves to (resetClientState above
+  // clears depositAddress/addressError on every principal change, which is
+  // what lets this re-fire for the new wallet). Never retries on its own
+  // after a failure — addressError blocks it, and the Retry button in the
+  // template is the only way to try again. get_doge_address is a public,
+  // anonymous-actor query (see ckdogeMinterActors.ts), so this never opens a
+  // wallet prompt.
+  $: if (isConnected && ownerPrincipal && !depositAddress && !addressLoading && !addressError) {
+    requestDepositAddress();
   }
 
-  // Address is fetched ONLY on this explicit click — never on route load.
+  // Keep the redeem-tab ledger fee warm from the moment a wallet connects, via
+  // the public/anonymous ledger actor (see ledgerFeeService) — never the
+  // wallet/Oisy consent actor, which rejects icrc1_fee as an unsupported
+  // canister call. Warm-by-connect (rather than only on amount blur) means
+  // submitRedeem's click handler can read the fee synchronously from cache
+  // instead of awaiting a live query, which would burn the Oisy user-gesture
+  // window before the first consent screen opens.
+  $: if (isConnected) {
+    fetchLedgerFee(CKDOGE_LEDGER_FEE_REF).catch(() => {});
+  }
+
   async function requestDepositAddress() {
     if (!isConnected || !ownerPrincipal || addressLoading) return;
     const sessionKey = principalKey(ownerPrincipal);
@@ -342,15 +375,15 @@
       redeemDogeAmount === capturedRaw;
 
     try {
-      const [minterActor, ledgerActor] = await Promise.all([getPublicMinterActor(), getLedgerActor()]);
+      const minterActor = await getPublicMinterActor();
       const [feeResult, ledgerFee] = await Promise.all([
         minterActor.estimate_withdrawal_fee({ amount: [parsed] }),
-        ledgerActor.icrc1_fee(),
+        fetchLedgerFee(CKDOGE_LEDGER_FEE_REF),
       ]);
       if (!isLive()) return;
       const outcome = summarizeWithdrawalFeeEstimate(feeResult);
       if (outcome.success) {
-        const ledgerFeeStr = formatKoinuAsDoge(BigInt(ledgerFee));
+        const ledgerFeeStr = formatKoinuAsDoge(ledgerFee);
         withdrawalFeeSummary = `${outcome.label} + ${ledgerFeeStr} ledger fee. The approval step also charges ${ledgerFeeStr} ledger fee separately from the withdrawal transfer fee above, so two ledger fees total.`;
       } else {
         withdrawalFeeSummary = outcome.label;
@@ -360,12 +393,20 @@
     }
   }
 
+  // The ledger fee is read synchronously from the warm cache (kept warm on connect
+  // and on amount blur, both via the public/anonymous ledger actor — never a live
+  // icrc1_fee() query here, and never through the Oisy consent actor, which rejects
+  // it as an unsupported canister call). The approval amount is exactly requested +
+  // ledger fee, never more. Actor routing (Oisy signer vs standard wallet actor) and
+  // the approve-then-retrieve sequencing live in redeemDogeWithApproval so the
+  // click-to-popup gesture chain stays testable outside a component.
   async function submitRedeem() {
     if (redeemBusy) return;
     if (!validateRedeemForm()) return;
     if (!isConnected || !ownerPrincipal) return;
 
     const sessionKey = principalKey(ownerPrincipal);
+    const sessionPrincipal = ownerPrincipal;
     const isLive = () => !destroyed && principalKey(ownerPrincipal) === sessionKey;
 
     redeemBusy = true;
@@ -376,35 +417,37 @@
 
     try {
       const requestedKoinu = parseDogeAmountInput(redeemDogeAmount)!;
-      const ledgerActor = await getLedgerActor();
-      if (!isLive()) return;
-      const ledgerFee: bigint = BigInt(await ledgerActor.icrc1_fee());
-      if (!isLive()) return;
+      const ledgerFee = getCachedLedgerFee(CKDOGE_LEDGER_FEE_REF);
       const approvalAmount = computeApprovalAmount(requestedKoinu, ledgerFee);
       const approveArgs = buildApproveArgs(Principal.fromText(CANISTER_IDS.CKDOGE_MINTER), approvalAmount);
-
-      const approveResult = await ledgerActor.icrc2_approve(approveArgs);
-      if (!isLive()) return;
-      if ('Err' in approveResult) {
-        redeemError = `Approval failed: ${summarizeApproveError(approveResult.Err)}`;
-        return;
-      }
-      approveBlockIndex = BigInt(approveResult.Ok);
-
-      // Session must still belong to the wallet that just approved — otherwise a
-      // principal switch mid-flight must not advance to retrieve under a new client.
-      if (!isLive()) return;
-
-      const minterActor = await getWalletMinterActor();
-      if (!isLive()) return;
       const retrieveArgs = buildRetrieveWithApprovalArgs(redeemAddress, requestedKoinu);
-      const retrieveResult = await minterActor.retrieve_doge_with_approval(retrieveArgs);
+
+      const outcome = await redeemDogeWithApproval({
+        ownerPrincipal: sessionPrincipal,
+        ledgerCanisterId: CANISTER_IDS.CKDOGE_LEDGER,
+        minterCanisterId: CANISTER_IDS.CKDOGE_MINTER,
+        ledgerIdl: ckdogeLedgerIdl,
+        approveArgs,
+        retrieveArgs,
+        isLive,
+      });
+
       if (!isLive()) return;
-      if ('Err' in retrieveResult) {
-        redeemError = summarizeRetrieveError(retrieveResult.Err);
-        return;
+      switch (outcome.kind) {
+        case 'stale':
+          return;
+        case 'approve-error':
+          redeemError = `Approval failed: ${outcome.message}`;
+          return;
+        case 'retrieve-error':
+          approveBlockIndex = outcome.approveBlockIndex;
+          redeemError = outcome.message;
+          return;
+        case 'success':
+          approveBlockIndex = outcome.approveBlockIndex;
+          burnBlockIndex = outcome.burnBlockIndex;
+          return;
       }
-      burnBlockIndex = BigInt(retrieveResult.Ok.block_index);
     } catch (err) {
       if (isLive()) {
         redeemError = err instanceof Error ? `Redemption failed: ${err.message}` : 'Redemption failed.';
@@ -519,12 +562,13 @@
           <p class="doge-risk">{betaRiskNotice()}</p>
 
           {#if !depositAddress}
-            <h2>Get your deposit address</h2>
-            <p class="doge-panel-sub">Request a ckDOGE deposit address to continue.</p>
-            <button class="doge-btn doge-btn--primary" on:click={requestDepositAddress} disabled={addressLoading}>
-              {addressLoading ? 'Fetching address…' : 'Get deposit address'}
-            </button>
-            {#if addressError}<p class="doge-error" role="alert">{addressError}</p>{/if}
+            <h2>Your deposit address</h2>
+            {#if addressLoading}
+              <p class="doge-panel-sub" aria-live="polite">Fetching your deposit address…</p>
+            {:else if addressError}
+              <p class="doge-error" role="alert">{addressError}</p>
+              <button class="doge-btn doge-btn--primary" on:click={requestDepositAddress}>Retry</button>
+            {/if}
           {:else}
             <h2>Send DOGE to your address</h2>
             <p class="doge-panel-sub">Your ckDOGE will arrive in your connected wallet.</p>
@@ -593,27 +637,84 @@
           {/if}
 
           {#if isPolling || pollingStopped}
-            <div class="doge-poll-status" aria-live="polite">
-              <p class="doge-panel-sub">{pollProgressLabel(pollAttempt)}</p>
+            <div class="doge-poll-status doge-ticket" aria-live="polite">
+              <div class="doge-row doge-row--annotated doge-ticket-head">
+                <span
+                  class="doge-status-pill"
+                  class:doge-status-pill--confirming={confirmation.phase === 'confirming'}
+                  class:doge-status-pill--stopped={confirmation.phase === 'stopped'}
+                  class:doge-status-pill--minted={confirmation.phase === 'minted'}
+                  class:doge-status-pill--error={confirmation.phase === 'error'}
+                >
+                  <span class="doge-status-dot" aria-hidden="true"></span>
+                  {confirmation.statusLabel}
+                </span>
 
-              {#each utxoStatuses as status}
-                <p class="doge-utxo-line">{status.label}</p>
-              {/each}
-
-              {#if lastUpdateBalanceError}
-                <p class="doge-panel-sub">{lastUpdateBalanceError.message}</p>
-                {#if lastUpdateBalanceError.pendingUtxos?.length}
-                  {#each lastUpdateBalanceError.pendingUtxos as pending}
-                    <p class="doge-utxo-line">{pending.label}</p>
-                  {/each}
+                {#if confirmation.phase === 'confirming' || confirmation.phase === 'stopped'}
+                  <span class="doge-annotation doge-annotation--purple" aria-hidden="true">
+                    <svg class="doge-annotation-arrow" viewBox="0 0 28 32" preserveAspectRatio="none" aria-hidden="true" focusable="false">
+                      <path d="M2,4 C 18,4 18,20 26,26" />
+                    </svg>
+                    much patience,<br />very checking
+                  </span>
                 {/if}
+
+                {#if confirmation.meter}
+                  <div
+                    class="doge-meter-track"
+                    role="progressbar"
+                    aria-label="Deposit confirmations"
+                    aria-valuenow={confirmation.meter.confirmations}
+                    aria-valuemin={0}
+                    aria-valuemax={confirmation.meter.requiredConfirmations}
+                  >
+                    <div class="doge-meter-fill" style="width: {confirmationMeterPercent(confirmation.meter)}%"></div>
+                  </div>
+                  <p class="doge-meter-label">
+                    {confirmation.meter.confirmations} / {confirmation.meter.requiredConfirmations} confirmations
+                  </p>
+                {:else if confirmation.phase !== 'minted' && confirmation.phase !== 'error'}
+                  <p class="doge-panel-sub">No deposit detected on this address yet.</p>
+                {/if}
+              </div>
+
+              {#if confirmation.utxoCountLabel || confirmation.amountDetectedLabel || confirmation.nextCheckLabel}
+                <dl class="doge-ticket-details">
+                  {#if confirmation.utxoCountLabel}
+                    <div class="doge-ticket-row"><dt>UTXOs</dt><dd>{confirmation.utxoCountLabel}</dd></div>
+                  {/if}
+                  {#if confirmation.amountDetectedLabel}
+                    <div class="doge-ticket-row"><dt>Amount detected</dt><dd>{confirmation.amountDetectedLabel}</dd></div>
+                  {/if}
+                  {#if confirmation.nextCheckLabel}
+                    <div class="doge-ticket-row"><dt>Next check</dt><dd>{confirmation.nextCheckLabel}</dd></div>
+                  {/if}
+                </dl>
+              {/if}
+
+              {#if utxoStatuses.length}
+                <div class="doge-ticket-divider" aria-hidden="true"></div>
+                {#each utxoStatuses as status}
+                  <p class="doge-utxo-line">{status.label}</p>
+                {/each}
+              {/if}
+
+              {#if lastUpdateBalanceError?.pendingUtxos?.length}
+                <div class="doge-ticket-divider" aria-hidden="true"></div>
+                {#each lastUpdateBalanceError.pendingUtxos as pending}
+                  <p class="doge-utxo-line">{pending.label}</p>
+                {/each}
               {/if}
 
               {#if mintedSummary}
+                <div class="doge-ticket-divider" aria-hidden="true"></div>
                 <p class="doge-success">{mintedSummary.label} (block {mintedSummary.blockIndex?.toString()})</p>
               {/if}
 
-              {#if pollFatalMessage}<p class="doge-error" role="alert">{pollFatalMessage}</p>{/if}
+              {#if pollFatalMessage}
+                <div class="doge-ticket-divider" aria-hidden="true"></div>
+                <p class="doge-error" role="alert">{pollFatalMessage}</p>
+              {/if}
 
               {#if pollingStopped && !mintedSummary}
                 <button class="doge-btn" on:click={recheckAfterTimeout}>Check again</button>
@@ -1091,6 +1192,109 @@
     padding: 0.875rem 1rem;
   }
 
+  /* ── Confirmation ticket: status pill, meter, ticket-stub rows ── */
+  .doge-ticket-head {
+    margin-bottom: 0;
+  }
+
+  .doge-status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4375rem;
+    padding: 0.3125rem 0.75rem;
+    border-radius: 999px;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    background: var(--rumi-bg-surface3);
+    color: var(--rumi-text-secondary);
+    border: 1px solid var(--rumi-border);
+  }
+
+  .doge-status-dot {
+    width: 0.4375rem;
+    height: 0.4375rem;
+    border-radius: 50%;
+    background: currentColor;
+    flex: none;
+  }
+
+  .doge-status-pill--confirming {
+    color: var(--rumi-purple-accent);
+    border-color: var(--rumi-purple-accent);
+    background: rgba(209, 118, 232, 0.08);
+  }
+
+  .doge-status-pill--stopped {
+    color: #d9a53c;
+    border-color: #d9a53c;
+    background: rgba(217, 165, 60, 0.08);
+  }
+
+  .doge-status-pill--minted {
+    color: var(--rumi-teal-bright);
+    border-color: var(--rumi-teal-bright);
+    background: rgba(45, 212, 191, 0.08);
+  }
+
+  .doge-status-pill--error {
+    color: var(--rumi-danger);
+    border-color: var(--rumi-danger);
+    background: rgba(224, 82, 82, 0.08);
+  }
+
+  .doge-meter-track {
+    margin-top: 0.75rem;
+    height: 0.375rem;
+    border-radius: 999px;
+    background: var(--rumi-bg-surface3);
+    overflow: hidden;
+  }
+
+  .doge-meter-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: var(--rumi-teal-bright);
+    transition: width 0.3s ease;
+  }
+
+  .doge-meter-label {
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--rumi-text-secondary);
+    margin: 0.375rem 0 0;
+  }
+
+  .doge-ticket-details {
+    margin: 0.75rem 0 0;
+  }
+
+  .doge-ticket-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.75rem;
+    font-size: 0.8125rem;
+    padding: 0.25rem 0;
+  }
+
+  .doge-ticket-row dt {
+    color: var(--rumi-text-muted);
+  }
+
+  .doge-ticket-row dd {
+    margin: 0;
+    color: var(--rumi-text-primary);
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+  }
+
+  /* Ticket-stub perforation: a dashed rule between sections, echoing the
+     Ticket Stub reference layout. */
+  .doge-ticket-divider {
+    margin: 0.75rem 0;
+    border-top: 1px dashed var(--rumi-border-hover);
+  }
+
   /* ── Redeem form ── */
   .doge-field {
     display: flex;
@@ -1222,7 +1426,8 @@
   @media (prefers-reduced-motion: reduce) {
     .doge-tab,
     .doge-btn,
-    .doge-copy-btn {
+    .doge-copy-btn,
+    .doge-meter-fill {
       transition: none;
     }
   }
