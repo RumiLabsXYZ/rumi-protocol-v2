@@ -18,7 +18,14 @@ import type {
     ProtocolError,
     OpenVaultSuccess
   } from '$declarations/rumi_protocol_backend/rumi_protocol_backend.did.js';
-import { walletOperations, isOisyWallet, largeApprovalExpiry } from './walletOperations';
+import {
+  walletOperations,
+  isOisyWallet,
+  largeApprovalExpiry,
+  assertActionBoundContextCurrent,
+  StaleActionSessionError,
+  type ActionBoundContext,
+} from './walletOperations';
 import { pnp } from '../pnp';
 import { get } from 'svelte/store';
 import { QueryOperations } from './queryOperations';
@@ -74,6 +81,72 @@ export const publicActor = Actor.createActor<_SERVICE>(rumi_backendIDL as any, {
   agent: anonymousAgent,
   canisterId: CONFIG.currentCanisterId
 });
+
+// Re-exported so callers can import the action-bound primitives from apiClient
+// without also reaching into walletOperations directly.
+export type { ActionBoundContext };
+export { StaleActionSessionError };
+
+/**
+ * Typed provenance for a bound (identity- and session-pinned) mutating action.
+ *
+ *  - predispatch_aborted: the top-level mutating call (open_vault_and_borrow /
+ *    borrow_from_vault) was never dispatched — stale session, validation
+ *    failure, or an approval failure. This does NOT mean nothing at all was
+ *    submitted: see BoundOpenVaultAndBorrowResult.approvalMayHaveMutated.
+ *  - dispatched_ok: an actual typed Ok response was received from the backend.
+ *  - dispatched_err: an actual typed Err response was received from the
+ *    backend — the call reached the canister and was rejected there.
+ *  - ambiguous_transport: the call was dispatched but no typed backend result
+ *    was ever observed (thrown network/timeout error, lost reply, or the
+ *    Oisy `_arr` false-negative pattern). This is NEVER treated as proof of
+ *    no mutation — unlike the legacy openVaultAndBorrow/borrowFromVault, the
+ *    bound methods do not run an on-chain landed-heuristic to upgrade this to
+ *    a success, because a heuristic vault-scan match is not provably
+ *    attributable to this specific attempt (see extractPartialZeroDebtVaultId
+ *    for the one exception: a source-proven typed Err string).
+ */
+export type BoundActionOutcomeKind =
+  | 'predispatch_aborted'
+  | 'dispatched_ok'
+  | 'dispatched_err'
+  | 'ambiguous_transport';
+
+export interface BoundOpenVaultAndBorrowResult {
+  kind: BoundActionOutcomeKind;
+  /** Authoritative vault id. ONLY set on dispatched_ok from an actual typed Ok response. */
+  vaultId: number | null;
+  blockIndex: number | null;
+  /**
+   * Set only when kind === 'dispatched_err' AND the backend's GenericError text
+   * proves the vault.rs partial-failure shape ("Vault created (id=N)..." — vault
+   * created, borrow sub-step failed, vault now exists with zero debt). null in
+   * every other case, including ambiguous_transport (a thrown error never
+   * proves a vault was created).
+   */
+  partialZeroDebtVaultId: number | null;
+  errorMessage: string | null;
+  /**
+   * True if execution reached (or passed) the ICRC-2 approval dispatch before
+   * this result was produced. When true AND kind === 'predispatch_aborted',
+   * the allowance may already have been mutated on-chain even though the
+   * top-level open_vault_and_borrow call was never dispatched — callers must
+   * not tell the user "nothing was submitted" in that case.
+   */
+  approvalMayHaveMutated: boolean;
+  /** Exact raw wire amounts actually submitted, regardless of outcome. */
+  submittedCollateralRaw: bigint;
+  submittedIcusdRaw: bigint;
+}
+
+export interface BoundBorrowFromVaultResult {
+  kind: BoundActionOutcomeKind;
+  vaultId: number;
+  blockIndex: number | null;
+  feePaidRaw: bigint | null;
+  errorMessage: string | null;
+  submittedIcusdRaw: bigint;
+}
 
 /**
  * Core API client for interacting with the protocol backend
@@ -212,13 +285,46 @@ private static async refreshVaultData(): Promise<void> {
       if (USE_MOCK_DATA) {
         return publicActor; // Use anonymous actor for mock data
       }
-      
+
       try {
         return await walletStore.getActor(CONFIG.currentCanisterId, rumi_backendIDL) as _SERVICE;
       } catch (err) {
         console.error('Failed to get authenticated actor:', err);
         throw new Error('Failed to initialize protocol actor');
       }
+    }
+
+    /**
+     * Bound sibling of getAuthenticatedActor: re-asserts ctx immediately
+     * before the actor is constructed, so an actor built after an internal
+     * await can never end up bound to a different session's identity than
+     * the one the caller pinned at the start of the action.
+     */
+    private static async getBoundAuthenticatedActor(ctx: ActionBoundContext): Promise<_SERVICE> {
+      assertActionBoundContextCurrent(ctx);
+      try {
+        return await walletStore.getActor(CONFIG.currentCanisterId, rumi_backendIDL) as _SERVICE;
+      } catch (err) {
+        console.error('Failed to get authenticated (bound) actor:', err);
+        throw new Error('Failed to initialize protocol actor');
+      }
+    }
+
+    /**
+     * Extracts the vault id from a typed ProtocolError's GenericError text
+     * when it proves the vault.rs open_vault_and_borrow partial-failure shape
+     * ("Vault created (id=N)..."). This inspects the exact source-proven typed
+     * error variant returned by the backend, NOT a lowercased/normalized
+     * substring classifier — it must only ever be called on a real Err
+     * received from a typed backend response, never on a message string
+     * synthesized from a thrown/ambiguous transport error.
+     */
+    private static extractPartialZeroDebtVaultId(error: unknown): number | null {
+      if (error && typeof error === 'object' && 'GenericError' in (error as any) && typeof (error as any).GenericError === 'string') {
+        const m = /Vault created \(id=(\d+)\)/.exec((error as any).GenericError);
+        if (m) return Number(m[1]);
+      }
+      return null;
     }
 
   /**
@@ -969,6 +1075,249 @@ static async borrowFromVault(vaultId: number, icusdAmount: number): Promise<Vaul
     }
     // REMOVED: Don't manually track operations here - executeSequentialOperation does this
   }, vaultId); // Pass vaultId here to let executeSequentialOperation track it
+}
+
+/**
+ * Bound sibling of openVaultAndBorrow (see ActionBoundContext / BoundOpenVaultAndBorrowResult
+ * doc comments for the full contract). Takes RAW bigint wire amounts — no Number/float
+ * round-trip, no +0.5 bias — and re-verifies ctx immediately before every actor acquisition
+ * and mutating call, and immediately after every internal await, so an account switch (or a
+ * same-account disconnect/reconnect, i.e. a new session with the same principal text) mid-flow
+ * aborts before any further signer call rather than silently mixing identities across sub-steps.
+ *
+ * Deliberately does NOT run the legacy Oisy `_arr` false-negative on-chain landed-heuristic:
+ * a heuristic vault-scan match is not provably attributable to this specific attempt, so any
+ * thrown error after the mutating call is dispatched (including that pattern) is surfaced as
+ * 'ambiguous_transport', never upgraded to a success. Does NOT go through
+ * executeSequentialOperation — no global mutex, no before/after vault-cache refresh; the caller
+ * owns reconciliation.
+ */
+static async openVaultAndBorrowBound(
+  ctx: ActionBoundContext,
+  collateralAmountRaw: bigint,
+  icusdAmountRaw: bigint,
+  collateralTypePrincipal?: string
+): Promise<BoundOpenVaultAndBorrowResult> {
+  const ctPrincipal = collateralTypePrincipal || CANISTER_IDS.ICP_LEDGER;
+  const collateralInfo = collateralStore.getCollateralInfo(ctPrincipal);
+  const ledgerCanisterId = collateralInfo?.ledgerCanisterId ?? CONFIG.currentIcpLedgerId;
+  const symbol = collateralInfo?.symbol ?? 'ICP';
+
+  const submitted = { submittedCollateralRaw: collateralAmountRaw, submittedIcusdRaw: icusdAmountRaw };
+  const abort = (errorMessage: string, approvalMayHaveMutated: boolean): BoundOpenVaultAndBorrowResult => ({
+    kind: 'predispatch_aborted',
+    vaultId: null,
+    blockIndex: null,
+    partialZeroDebtVaultId: null,
+    errorMessage,
+    approvalMayHaveMutated,
+    ...submitted,
+  });
+
+  if (collateralAmountRaw <= 0n) {
+    return abort('Invalid collateral amount.', false);
+  }
+  if (icusdAmountRaw <= 0n) {
+    return abort('Invalid borrowing amount.', false);
+  }
+  const minDeposit = collateralInfo?.minCollateralDeposit ?? 0;
+  if (minDeposit > 0 && collateralAmountRaw < BigInt(minDeposit)) {
+    return abort(`Amount too low. Minimum required: ${minDeposit} raw units`, false);
+  }
+
+  let approvalDispatched = false;
+  let actor!: _SERVICE;
+  let collateralTypeOpt!: [] | [Principal];
+
+  try {
+    assertActionBoundContextCurrent(ctx);
+
+    collateralTypeOpt = ctPrincipal === CANISTER_IDS.ICP_LEDGER ? [] : [Principal.fromText(ctPrincipal)];
+
+    // ─── Oisy ICRC-112 batched path ───
+    const signerAgent = isOisyWallet() ? await pnp.getSignerAgent() : null;
+    assertActionBoundContextCurrent(ctx);
+
+    if (signerAgent) {
+      const oisyLedgerFee = BigInt(collateralInfo?.ledgerFee ?? 10_000);
+      const requestedAllowance = collateralAmountRaw + oisyLedgerFee * 2n;
+
+      const ledgerActor = await walletStore.getActor(ledgerCanisterId, CONFIG.icp_ledgerIDL) as any;
+      assertActionBoundContextCurrent(ctx);
+
+      approvalDispatched = true;
+      const approveResult = await ledgerActor.icrc2_approve({
+        amount: requestedAllowance,
+        spender: { owner: Principal.fromText(CONFIG.currentCanisterId), subaccount: [] },
+        expires_at: [],
+        expected_allowance: [],
+        memo: [],
+        fee: [],
+        from_subaccount: [],
+        created_at_time: []
+      });
+      assertActionBoundContextCurrent(ctx);
+
+      if (approveResult && 'Err' in approveResult) {
+        return abort(`${symbol} approval failed: ${JSON.stringify(approveResult.Err)}`, true);
+      }
+
+      actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+      assertActionBoundContextCurrent(ctx);
+    } else {
+      // ─── Standard ICRC-2 path (Plug, II, etc.) ───
+      const spenderCanisterId = CONFIG.currentCanisterId;
+      const currentAllowance = await walletOperations.checkCollateralAllowanceBound(ctx, spenderCanisterId, ledgerCanisterId);
+      assertActionBoundContextCurrent(ctx);
+
+      const ledgerFee = BigInt(collateralInfo?.ledgerFee ?? 10_000);
+      const requiredAllowance = collateralAmountRaw + ledgerFee;
+      if (currentAllowance < requiredAllowance) {
+        const requestedAllowance = collateralAmountRaw + ledgerFee * 2n;
+        approvalDispatched = true;
+        const approvalResult = await walletOperations.approveCollateralTransferBound(
+          ctx, requestedAllowance, spenderCanisterId, ledgerCanisterId
+        );
+        assertActionBoundContextCurrent(ctx);
+        if (!approvalResult.success) {
+          return abort(approvalResult.error || `Failed to approve ${symbol} transfer`, true);
+        }
+      }
+
+      actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+      assertActionBoundContextCurrent(ctx);
+    }
+  } catch (err) {
+    if (err instanceof StaleActionSessionError) {
+      return abort(err.message, approvalDispatched);
+    }
+    return abort(err instanceof Error ? err.message : 'Unknown error before dispatch', approvalDispatched);
+  }
+
+  // Final checkpoint immediately before the actual mutating call.
+  try {
+    assertActionBoundContextCurrent(ctx);
+  } catch (err) {
+    return abort(err instanceof Error ? err.message : 'Session changed before dispatch.', approvalDispatched);
+  }
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    setTimeout(() => reject(new Error('Wallet signature request timed out')), 60000);
+  });
+
+  let result: any;
+  try {
+    result = await Promise.race([
+      actor.open_vault_and_borrow(collateralAmountRaw, icusdAmountRaw, collateralTypeOpt),
+      timeoutPromise,
+    ]);
+  } catch (dispatchErr) {
+    // Dispatched but no typed backend result observed — never proof of no mutation.
+    return {
+      kind: 'ambiguous_transport',
+      vaultId: null,
+      blockIndex: null,
+      partialZeroDebtVaultId: null,
+      errorMessage: dispatchErr instanceof Error ? dispatchErr.message : 'Network error after dispatch.',
+      approvalMayHaveMutated: approvalDispatched,
+      ...submitted,
+    };
+  }
+
+  if ('Ok' in result) {
+    return {
+      kind: 'dispatched_ok',
+      vaultId: Number(result.Ok.vault_id),
+      blockIndex: Number(result.Ok.block_index),
+      partialZeroDebtVaultId: null,
+      errorMessage: null,
+      approvalMayHaveMutated: approvalDispatched,
+      ...submitted,
+    };
+  }
+
+  return {
+    kind: 'dispatched_err',
+    vaultId: null,
+    blockIndex: null,
+    partialZeroDebtVaultId: ApiClient.extractPartialZeroDebtVaultId(result.Err),
+    errorMessage: ApiClient.formatProtocolError(result.Err),
+    approvalMayHaveMutated: approvalDispatched,
+    ...submitted,
+  };
+}
+
+/**
+ * Bound sibling of borrowFromVault — the "finish borrow" leg for an already-open, zero-debt
+ * vault (the partial_zero_debt recovery path). Same raw-amount and ctx-recheck discipline as
+ * openVaultAndBorrowBound; no separate approval sub-step exists here, so a
+ * predispatch_aborted result always means nothing at all was submitted.
+ */
+static async borrowFromVaultBound(
+  ctx: ActionBoundContext,
+  vaultId: number,
+  icusdAmountRaw: bigint
+): Promise<BoundBorrowFromVaultResult> {
+  const abort = (errorMessage: string): BoundBorrowFromVaultResult => ({
+    kind: 'predispatch_aborted',
+    vaultId,
+    blockIndex: null,
+    feePaidRaw: null,
+    errorMessage,
+    submittedIcusdRaw: icusdAmountRaw,
+  });
+
+  if (icusdAmountRaw <= 0n) {
+    return abort(`Invalid borrowing amount: ${icusdAmountRaw.toString()}. Amount must be a positive integer.`);
+  }
+  if (icusdAmountRaw < BigInt(MIN_ICUSD_AMOUNT)) {
+    return abort(`Amount too low. Minimum borrowing amount: ${MIN_ICUSD_AMOUNT / E8S} icUSD`);
+  }
+
+  let actor: _SERVICE;
+  try {
+    assertActionBoundContextCurrent(ctx);
+    actor = await ApiClient.getBoundAuthenticatedActor(ctx);
+    assertActionBoundContextCurrent(ctx);
+  } catch (err) {
+    return abort(err instanceof Error ? err.message : 'Unknown error before dispatch');
+  }
+
+  const vaultArg = { vault_id: BigInt(vaultId), amount: icusdAmountRaw };
+
+  let result: any;
+  try {
+    result = await actor.borrow_from_vault(vaultArg);
+  } catch (dispatchErr) {
+    return {
+      kind: 'ambiguous_transport',
+      vaultId,
+      blockIndex: null,
+      feePaidRaw: null,
+      errorMessage: dispatchErr instanceof Error ? dispatchErr.message : 'Network error after dispatch.',
+      submittedIcusdRaw: icusdAmountRaw,
+    };
+  }
+
+  if ('Ok' in result) {
+    return {
+      kind: 'dispatched_ok',
+      vaultId,
+      blockIndex: Number(result.Ok.block_index),
+      feePaidRaw: BigInt(result.Ok.fee_amount_paid),
+      errorMessage: null,
+      submittedIcusdRaw: icusdAmountRaw,
+    };
+  }
+
+  return {
+    kind: 'dispatched_err',
+    vaultId,
+    blockIndex: null,
+    feePaidRaw: null,
+    errorMessage: ApiClient.formatProtocolError(result.Err),
+    submittedIcusdRaw: icusdAmountRaw,
+  };
 }
 
 

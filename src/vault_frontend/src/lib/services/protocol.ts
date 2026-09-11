@@ -12,7 +12,21 @@ import type {
 
 import { ApiClient} from './protocol/apiClient';
 import { QueryOperations } from './protocol/queryOperations';
-import { walletOperations } from './protocol/walletOperations';
+import { walletOperations, StaleActionSessionError } from './protocol/walletOperations';
+import type { ActionBoundContext } from './protocol/walletOperations';
+import type {
+  BoundActionOutcomeKind,
+  BoundOpenVaultAndBorrowResult,
+  BoundBorrowFromVaultResult,
+} from './protocol/apiClient';
+
+export { StaleActionSessionError };
+export type {
+  ActionBoundContext,
+  BoundActionOutcomeKind,
+  BoundOpenVaultAndBorrowResult,
+  BoundBorrowFromVaultResult,
+};
 
 
 // Constants from backend
@@ -38,9 +52,11 @@ export class ProtocolService {
   // Vault Operations - these go through ProtocolManager for proper error handling and queuing
   static openVault = ApiClient.openVault;
   static openVaultAndBorrow = ApiClient.openVaultAndBorrow;
+  static openVaultAndBorrowBound = ApiClient.openVaultAndBorrowBound;
   static getUserVaults = ApiClient.getUserVaults;
   static getVaultById = ApiClient.getVaultById;
   static borrowFromVault = ApiClient.borrowFromVault;
+  static borrowFromVaultBound = ApiClient.borrowFromVaultBound;
   static addMarginToVault = ApiClient.addMarginToVault;
   static repayToVault = ApiClient.repayToVault;
   static partialRepayToVault = ApiClient.repayToVault;
@@ -101,8 +117,10 @@ export const protocolService = {
   // Vault operations
   openVault: ProtocolService.openVault,
   openVaultAndBorrow: ProtocolService.openVaultAndBorrow,
+  openVaultAndBorrowBound: ProtocolService.openVaultAndBorrowBound,
   getUserVaults: ProtocolService.getUserVaults,
   borrowFromVault: ProtocolService.borrowFromVault,
+  borrowFromVaultBound: ProtocolService.borrowFromVaultBound,
   addMarginToVault: ProtocolService.addMarginToVault,
   repayToVault: ProtocolService.repayToVault,
   closeVault: ProtocolService.closeVault,
