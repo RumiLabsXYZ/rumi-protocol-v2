@@ -18,6 +18,7 @@
   import { seasonStore, earningActive } from '$lib/stores/seasonStore';
   import { nativeXrpKeepOpenCloseCopy } from '$lib/utils/nativeXrpBorrowFlow';
   import { computeBorrowMax } from '$lib/utils/borrowLimits';
+  import { computeSafeIcusdRepayMax } from '$lib/utils/repayLimits';
   import { appDataStore, protocolStatus, collateralTotals } from '$lib/stores/appDataStore';
 
   export let vault: Vault;
@@ -142,6 +143,7 @@
   })();
   $: activeRepayBalance = repayTokenType === 'CKUSDT' ? walletCkusdt
     : repayTokenType === 'CKUSDC' ? walletCkusdc : walletIcusd;
+  $: walletIcusdRaw = $walletStore.tokenBalances?.ICUSD?.raw ?? 0n;
   // Deduct the repay token's ledger fee: icUSD = 0.001, ckUSDT/ckUSDC = 0.01
   $: repayLedgerFee = (repayTokenType === 'CKUSDT' || repayTokenType === 'CKUSDC') ? 0.01 : 0.001;
   $: effectiveRepayBalance = Math.max(0, activeRepayBalance - repayLedgerFee);
@@ -150,7 +152,12 @@
   $: isCkStableRepay = repayTokenType === 'CKUSDT' || repayTokenType === 'CKUSDC';
   $: maxRepayBase = isCkStableRepay && ckstableRepayFee > 0
     ? effectiveRepayBalance / (1 + ckstableRepayFee)
-    : effectiveRepayBalance;
+    : Number(computeSafeIcusdRepayMax(
+        walletIcusdRaw,
+        BigInt(Math.max(0, Math.ceil(tickingDebt * E8S))),
+        100_000n,
+        BigInt(Math.max(0, Math.round(vaultCollateralInfo?.minVaultDebt ?? 10_000_000))),
+      )) / E8S;
   $: maxRepayable = Math.min(maxRepayBase, tickingDebt);
 
   // ── Withdraw max: keeps CR at minimum for this collateral ──
@@ -527,7 +534,11 @@
   // repays can be merged with close — the compound backend method takes icUSD.
   $: isMaxRepay = (() => {
     const amt = parseFloat(repayAmount);
-    return amt > 0 && maxRepayable > 0 && Math.abs(amt - maxRepayable) < 0.0001;
+    const selectedMax = amt > 0 && maxRepayable > 0 && Math.abs(amt - maxRepayable) < 0.00000001;
+    // A wallet-limited icUSD max is a safe partial repayment. Only route it
+    // through repay_and_close when the wallet can cover the full live debt.
+    const fullIcusdDebtAffordable = repayTokenType !== 'icUSD' || maxRepayable >= tickingDebt;
+    return selectedMax && fullIcusdDebtAffordable;
   })();
   // A full icUSD repay on a vault that still holds collateral can route through
   // the backend repay_and_close_vault compound method (repay full debt +
