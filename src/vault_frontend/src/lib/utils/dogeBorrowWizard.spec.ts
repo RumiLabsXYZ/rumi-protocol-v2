@@ -222,8 +222,9 @@ describe('existing-balance protection (never silently sweep pre-existing ckDOGE)
       sessionMintedKoinu: 100_000_000n,
       walletCkdogeBalanceKoinu: 5_000_000_000n, // large pre-existing balance
       useAvailableBalanceOptIn: false,
+      ledgerFeeKoinu: 0n,
     });
-    expect(result).toEqual({ koinuAmount: 100_000_000n, source: 'session_deposit' });
+    expect(result).toEqual({ koinuAmount: 100_000_000n, source: 'session_deposit', feeReservedKoinu: 0n });
   });
 
   it('never uses the wallet balance unless the user explicitly opts in', () => {
@@ -231,8 +232,9 @@ describe('existing-balance protection (never silently sweep pre-existing ckDOGE)
       sessionMintedKoinu: 0n,
       walletCkdogeBalanceKoinu: 5_000_000_000n,
       useAvailableBalanceOptIn: false,
+      ledgerFeeKoinu: 0n,
     });
-    expect(result).toEqual({ koinuAmount: 0n, source: 'none' });
+    expect(result).toEqual({ koinuAmount: 0n, source: 'none', feeReservedKoinu: 0n });
   });
 
   it('uses the wallet balance only after explicit opt-in, labeled honestly', () => {
@@ -240,8 +242,65 @@ describe('existing-balance protection (never silently sweep pre-existing ckDOGE)
       sessionMintedKoinu: 0n,
       walletCkdogeBalanceKoinu: 5_000_000_000n,
       useAvailableBalanceOptIn: true,
+      ledgerFeeKoinu: 0n,
     });
-    expect(result).toEqual({ koinuAmount: 5_000_000_000n, source: 'existing_balance_opt_in' });
+    expect(result).toEqual({ koinuAmount: 5_000_000_000n, source: 'existing_balance_opt_in', feeReservedKoinu: 0n });
+  });
+});
+
+describe('collateral fee reservation (reported bug: exact-balance deposit fails InsufficientFunds)', () => {
+  // Reproduces the production report: a wallet holding exactly 52 ckDOGE (koinu, 8 decimals)
+  // selects its full 52 ckDOGE as collateral. Submitting the full balance leaves nothing to
+  // cover the icrc2_approve fee + the icrc2_transfer_from fee, both charged from that same
+  // balance, so the backend always rejects it with TransferFromError::InsufficientFunds.
+  const FEE = 10_000n; // realistic ckDOGE ledger fee, in koinu
+  const FIFTY_TWO_DOGE_KOINU = 52n * 100_000_000n;
+
+  it('reserves 2x the ledger fee from a fresh session deposit equal to the full wallet balance', () => {
+    const result = resolveCollateralAmountForBorrow({
+      sessionMintedKoinu: FIFTY_TWO_DOGE_KOINU,
+      walletCkdogeBalanceKoinu: FIFTY_TWO_DOGE_KOINU,
+      useAvailableBalanceOptIn: false,
+      ledgerFeeKoinu: FEE,
+    });
+    expect(result).toEqual({
+      koinuAmount: FIFTY_TWO_DOGE_KOINU - FEE * 2n,
+      source: 'session_deposit',
+      feeReservedKoinu: FEE * 2n,
+    });
+    // The resolved amount plus the reserved fees must never exceed what is actually in the wallet.
+    expect(result.koinuAmount + result.feeReservedKoinu).toBeLessThanOrEqual(FIFTY_TWO_DOGE_KOINU);
+  });
+
+  it('reserves 2x the ledger fee from an opted-in existing wallet balance', () => {
+    const result = resolveCollateralAmountForBorrow({
+      sessionMintedKoinu: 0n,
+      walletCkdogeBalanceKoinu: FIFTY_TWO_DOGE_KOINU,
+      useAvailableBalanceOptIn: true,
+      ledgerFeeKoinu: FEE,
+    });
+    expect(result.koinuAmount).toBe(FIFTY_TWO_DOGE_KOINU - FEE * 2n);
+    expect(result.koinuAmount + result.feeReservedKoinu).toBeLessThanOrEqual(FIFTY_TWO_DOGE_KOINU);
+  });
+
+  it('never goes negative when the balance is dust smaller than the reserved fee', () => {
+    const result = resolveCollateralAmountForBorrow({
+      sessionMintedKoinu: FEE, // less than 2x FEE
+      walletCkdogeBalanceKoinu: FEE,
+      useAvailableBalanceOptIn: false,
+      ledgerFeeKoinu: FEE,
+    });
+    expect(result.koinuAmount).toBe(0n);
+  });
+
+  it('reserves nothing when the ledger fee is unknown/zero (defensive, matches pre-existing behavior)', () => {
+    const result = resolveCollateralAmountForBorrow({
+      sessionMintedKoinu: FIFTY_TWO_DOGE_KOINU,
+      walletCkdogeBalanceKoinu: FIFTY_TWO_DOGE_KOINU,
+      useAvailableBalanceOptIn: false,
+      ledgerFeeKoinu: 0n,
+    });
+    expect(result.koinuAmount).toBe(FIFTY_TWO_DOGE_KOINU);
   });
 });
 

@@ -255,19 +255,34 @@ export type CollateralSource = 'session_deposit' | 'existing_balance_opt_in' | '
  * Falling back to the wallet balance requires an explicit, separately
  * tracked user opt-in (e.g. after a NoNewUtxos reload where this session's
  * own receipt evidence is incomplete).
+ *
+ * Submitting collateral also costs TWO ledger fees out of that same balance: the icrc2_approve
+ * call (always dispatched fresh on Oisy; dispatched whenever the standing allowance is
+ * insufficient on every other wallet) charges one fee immediately, and the backend's
+ * icrc2_transfer_from pull charges a second fee on top of the amount it pulls. Offering the
+ * caller's entire ckDOGE balance/session-mint as the collateral amount therefore always fails
+ * with InsufficientFunds — there is never enough left over to cover either fee. Reserving 2x the
+ * live ledger fee here is the single source of truth for the safe amount, so validation, the
+ * final confirmation screen, and the actual open_vault_and_borrow submission all agree.
  */
+export const COLLATERAL_FEE_RESERVE_MULTIPLE = 2n;
+
 export function resolveCollateralAmountForBorrow(params: {
   sessionMintedKoinu: bigint;
   walletCkdogeBalanceKoinu: bigint;
   useAvailableBalanceOptIn: boolean;
-}): { koinuAmount: bigint; source: CollateralSource } {
+  ledgerFeeKoinu: bigint;
+}): { koinuAmount: bigint; source: CollateralSource; feeReservedKoinu: bigint } {
+  const feeReservedKoinu = params.ledgerFeeKoinu > 0n ? params.ledgerFeeKoinu * COLLATERAL_FEE_RESERVE_MULTIPLE : 0n;
+  const safeAmount = (raw: bigint) => (raw > feeReservedKoinu ? raw - feeReservedKoinu : 0n);
+
   if (params.sessionMintedKoinu > 0n) {
-    return { koinuAmount: params.sessionMintedKoinu, source: 'session_deposit' };
+    return { koinuAmount: safeAmount(params.sessionMintedKoinu), source: 'session_deposit', feeReservedKoinu };
   }
   if (params.useAvailableBalanceOptIn && params.walletCkdogeBalanceKoinu > 0n) {
-    return { koinuAmount: params.walletCkdogeBalanceKoinu, source: 'existing_balance_opt_in' };
+    return { koinuAmount: safeAmount(params.walletCkdogeBalanceKoinu), source: 'existing_balance_opt_in', feeReservedKoinu };
   }
-  return { koinuAmount: 0n, source: 'none' };
+  return { koinuAmount: 0n, source: 'none', feeReservedKoinu };
 }
 
 /** Used to guard async continuations after every await: only proceed if the connected principal is unchanged. */

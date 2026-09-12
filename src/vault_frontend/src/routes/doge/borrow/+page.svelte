@@ -134,6 +134,10 @@
   $: minimumCr = ckdogeInfo?.minimumCr ?? 1.35;
   $: borrowingFeeRate = ckdogeInfo?.borrowingFee ?? 0;
   $: feeCurve = $protocolStatus?.borrowingFeeCurveResolved ?? [];
+  // Live ckDOGE ledger transfer fee (raw koinu), as reported by get_supported_collaterals.
+  // Zero only while collateral config has not loaded yet — resolveCollateralAmountForBorrow
+  // treats that defensively as "reserve nothing" and recomputes reactively once it arrives.
+  $: ckdogeLedgerFeeKoinu = BigInt(Math.trunc(ckdogeInfo?.ledgerFee ?? 0));
 
   $: risk = computeDogeBorrowRisk({
     collateralAmountDoge: collateralAmount,
@@ -272,10 +276,18 @@
     sessionMintedKoinu,
     walletCkdogeBalanceKoinu,
     useAvailableBalanceOptIn,
+    ledgerFeeKoinu: ckdogeLedgerFeeKoinu,
   });
   $: resolvedCollateralDoge = koinuToDoge(collateralResolution.koinuAmount);
+  $: feeReservedDoge = koinuToDoge(collateralResolution.feeReservedKoinu);
   $: canOfferExistingBalance =
     sessionMintedKoinu === 0n && walletCkdogeBalanceKoinu > 0n && !useAvailableBalanceOptIn && pollAttempt > 0;
+  // The source balance this collateral was drawn from (session mint or opted-in wallet balance),
+  // before the ledger-fee reservation — used only to disclose the reservation transparently.
+  $: sourceBalanceKoinu = collateralResolution.source === 'existing_balance_opt_in' ? walletCkdogeBalanceKoinu : sessionMintedKoinu;
+  // True once we have a real balance to draw from but the fee reservation consumed all of it —
+  // the wallet flow must explain this instead of silently hiding the "continue" button.
+  $: collateralAllConsumedByFees = collateralResolution.koinuAmount === 0n && sourceBalanceKoinu > 0n;
 
   $: if (step === 'send' && isConnected && ownerPrincipal && !depositAddress && !addressLoading && !addressError) {
     requestDepositAddress();
@@ -1452,8 +1464,17 @@
           <p class="dbw-hint">
             Collateral ready for borrowing: {formatNumber(resolvedCollateralDoge, 8)} ckDOGE
             {#if collateralResolution.source === 'existing_balance_opt_in'}(from your existing wallet balance){/if}
+            {#if collateralResolution.feeReservedKoinu > 0n}
+              (network fee of {formatNumber(feeReservedDoge, 8)} ckDOGE reserved from your {formatNumber(koinuToDoge(sourceBalanceKoinu), 8)} ckDOGE so the transfer can go through)
+            {/if}
           </p>
           <button class="dbw-btn dbw-btn--primary dbw-btn--full" type="button" on:click={proceedToConfirm}>Continue to confirm borrow</button>
+        {:else if collateralAllConsumedByFees}
+          <p class="dbw-error" role="alert">
+            Your {formatNumber(koinuToDoge(sourceBalanceKoinu), 8)} ckDOGE is too small to cover the network fees
+            required to deposit it as collateral (about {formatNumber(feeReservedDoge, 8)} ckDOGE). Send a larger
+            amount of DOGE to use this flow.
+          </p>
         {/if}
 
         <p class="dbw-panel-sub">

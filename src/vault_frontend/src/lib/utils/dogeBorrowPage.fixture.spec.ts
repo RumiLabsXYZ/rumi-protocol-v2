@@ -598,6 +598,81 @@ describe('/doge/borrow — deposit to confirm to explicit borrow', () => {
     expect(host.textContent).toContain('Vault #42');
   });
 
+  it('reproduces the reported bug: a wallet holding exactly 52 ckDOGE submits the fee-adjusted amount instead of erroring InsufficientFunds', async () => {
+    const LEDGER_FEE_KOINU = 10_000n;
+    const FIFTY_TWO_DOGE_KOINU = 5_200_000_000n; // 52 DOGE at 8 decimals
+    const SAFE_COLLATERAL_KOINU = FIFTY_TWO_DOGE_KOINU - LEDGER_FEE_KOINU * 2n; // 51.9998 DOGE
+
+    fx.collateralState.set({
+      collaterals: [fakeCollateralInfo({ ledgerFee: Number(LEDGER_FEE_KOINU) })],
+      loading: false,
+    });
+    connectAs(PRINCIPAL_A, { ckDOGE: { raw: FIFTY_TWO_DOGE_KOINU, formatted: '52', usdValue: null } });
+    fx.getPublicMinterActor.mockResolvedValue({
+      get_doge_address: vi.fn(async () => 'DfeeBoundaryAddress000000000000001'),
+      get_minter_info: vi.fn(async () => fakeMinterInfo()),
+    });
+    fx.updateDogeBalanceForOwner.mockResolvedValue(fakeMintedUtxoResult(9n, FIFTY_TWO_DOGE_KOINU));
+
+    renderPage();
+    await settle();
+    // 52 DOGE at $0.08 is ~$4.16 of real collateral — borrow a small icUSD amount so the final
+    // collateral ratio against the ACTUAL deposit stays comfortably above the 135% minimum
+    // (the Step 1 default of 50 icUSD is sized for the hypothetical 1000 DOGE estimate, not a
+    // real 52 DOGE deposit).
+    setInputValue(q('#dbw-icusd') as HTMLInputElement, '1');
+    await settle();
+    findButtonByText('Continue with this loan')!.click();
+    await settle();
+    findButtonByText('I sent the DOGE')!.click();
+    await settle();
+
+    expect(host.textContent).toContain('Minted 52 DOGE worth of ckDOGE');
+    // The displayed "ready to borrow" amount is honest about the reserved network fee up front —
+    // never the full 52 ckDOGE the wallet holds, which would fail on submission.
+    expect(host.textContent).toContain('Collateral ready for borrowing: 51.9998 ckDOGE');
+    expect(host.textContent).toContain('network fee of 0.0002 ckDOGE reserved from your 52 ckDOGE');
+
+    findButtonByText('Continue to confirm borrow')!.click();
+    await settle();
+    expect(host.textContent).not.toContain('Insufficient');
+
+    // Step 1's hypothetical estimate (1000 DOGE / 1 icUSD) differs from the real 51.9998 ckDOGE
+    // deposit, so the live-terms refresh flags a material change; acknowledge it like a real user
+    // would before Confirm becomes available. This is orthogonal to the fee-reservation fix.
+    const ackBtn = findButtonByText('I see the updated terms, continue');
+    if (ackBtn) {
+      ackBtn.click();
+      await settle();
+    }
+
+    fx.getVaults.mockResolvedValueOnce([]).mockResolvedValueOnce([
+      fakeRawVault({ vaultId: 99, collateralAmount: SAFE_COLLATERAL_KOINU, borrowedIcusd: 100_000_000n }),
+    ]);
+    fx.openVaultAndBorrowBound.mockResolvedValue({
+      kind: 'dispatched_ok',
+      vaultId: 99,
+      blockIndex: 3,
+      partialZeroDebtVaultId: null,
+      errorMessage: null,
+      approvalMayHaveMutated: true,
+      submittedCollateralRaw: SAFE_COLLATERAL_KOINU,
+      submittedIcusdRaw: 100_000_000n,
+    });
+
+    const confirmBtn = findButtonByText('Confirm and borrow')!;
+    expect(confirmBtn.disabled).toBe(false);
+    confirmBtn.click();
+    await settle();
+
+    expect(fx.openVaultAndBorrowBound).toHaveBeenCalledTimes(1);
+    const [, submittedCollateralRaw] = fx.openVaultAndBorrowBound.mock.calls[0];
+    // Exactly balance-minus-2x-fee — never the full 52 ckDOGE balance, and never a
+    // float-rounded approximation of it.
+    expect(submittedCollateralRaw).toBe(SAFE_COLLATERAL_KOINU);
+    expect(host.textContent).toContain('Vault #99');
+  });
+
   it('never dispatches when the Web Locks API is unavailable (conservative fail-closed), and surfaces a clear message', async () => {
     connectAs(PRINCIPAL_A);
     fx.getPublicMinterActor.mockResolvedValue({
