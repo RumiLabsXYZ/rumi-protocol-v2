@@ -1177,10 +1177,24 @@
     void reconcileForPrincipal(ownerPrincipalText, captureSession());
   }
 
+  let faviconLink: HTMLLinkElement | null = null;
+  let faviconOriginalHref = '';
+  let faviconOriginalType = '';
+
   onMount(() => {
     collateralStore.fetchSupportedCollateral();
     appDataStore.fetchProtocolStatus();
     if (typeof window !== 'undefined') window.addEventListener('storage', handleStorageEvent);
+
+    if (typeof document !== 'undefined') {
+      faviconLink = document.querySelector('link[rel="icon"]');
+      if (faviconLink) {
+        faviconOriginalHref = faviconLink.getAttribute('href') ?? '';
+        faviconOriginalType = faviconLink.getAttribute('type') ?? '';
+        faviconLink.setAttribute('href', '/ckdoge-logo.svg');
+        faviconLink.setAttribute('type', 'image/svg+xml');
+      }
+    }
   });
 
   onDestroy(() => {
@@ -1190,6 +1204,14 @@
     stopPolling();
     if (addressCopyTimer !== null) clearTimeout(addressCopyTimer);
     if (typeof window !== 'undefined') window.removeEventListener('storage', handleStorageEvent);
+    if (faviconLink) {
+      faviconLink.setAttribute('href', faviconOriginalHref);
+      if (faviconOriginalType) {
+        faviconLink.setAttribute('type', faviconOriginalType);
+      } else {
+        faviconLink.removeAttribute('type');
+      }
+    }
   });
 </script>
 
