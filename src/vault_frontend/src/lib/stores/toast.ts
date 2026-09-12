@@ -22,13 +22,22 @@ function createToastStore() {
   function removeToast(id: string) {
     update(toasts => toasts.filter(t => t.id !== id));
   }
+
+  // A completed flow can make an earlier terminal error obsolete while the
+  // toast's timer is still running. Keep this deliberately exact: callers
+  // must name the error they are retiring, and unrelated errors remain
+  // visible.
+  function removeError(message: string) {
+    update(toasts => toasts.filter(t => !(t.type === 'error' && t.message === message)));
+  }
   
   return {
     subscribe,
     success: (message: string, duration?: number) => addToast(message, 'success', duration),
     error: (message: string, duration?: number) => addToast(message, 'error', duration),
     info: (message: string, duration?: number) => addToast(message, 'info', duration),
-    remove: removeToast
+    remove: removeToast,
+    removeError,
   };
 }
 
