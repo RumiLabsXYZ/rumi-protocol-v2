@@ -67,11 +67,20 @@
   } from '$lib/utils/dogeBorrowWizard';
   import { userVaults } from '$lib/stores/appDataStore';
   import VaultCard from '$lib/components/vault/VaultCard.svelte';
+  import { toastStore } from '$lib/stores/toast';
 
   const CKDOGE_PRINCIPAL = CANISTER_IDS.CKDOGE_LEDGER;
   // Storage/lock scoping: a local-dev environment must never read/write a mainnet record (or
   // vice versa) for the same principal text.
   const NETWORK_SCOPE = CONFIG.isLocal ? 'local' : 'mainnet';
+  const OBSOLETE_TOKEN_FUNDS_ERROR = 'Insufficient token funds. Your balance is too low for this amount.';
+
+  function clearObsoleteTokenFundsError() {
+    // The DOGE flow owns the authoritative success boundary. Retire only the
+    // exact terminal transfer error left over from an earlier failed attempt;
+    // other current errors and success/info toasts remain visible.
+    toastStore.removeError(OBSOLETE_TOKEN_FUNDS_ERROR);
+  }
 
   /** Feature-detects the Web Locks API without depending on a specific lib.dom typings version. */
   function getLocks(): ExclusiveLocksLike | null {
@@ -778,6 +787,7 @@
       outcome = classified;
       persistIntent();
       if (classified.kind === 'success') {
+        clearObsoleteTokenFundsError();
         step = 'done';
         void appDataStore.refreshAll(actionOwner).catch(() => {});
       } else {
@@ -816,6 +826,7 @@
         outcome = finalOutcome;
         persistIntent();
         if (finalOutcome.kind === 'success') {
+          clearObsoleteTokenFundsError();
           step = 'done';
           void appDataStore.refreshAll(actionOwner).catch(() => {});
         } else {
@@ -987,6 +998,7 @@
         intent = resolvedIntent;
         persistIntent();
         if (reclassified.kind === 'success') {
+          clearObsoleteTokenFundsError();
           step = 'done';
           void appDataStore.refreshAll(actionOwner).catch(() => {});
         }

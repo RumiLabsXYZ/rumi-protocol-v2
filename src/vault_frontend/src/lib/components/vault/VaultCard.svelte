@@ -575,8 +575,13 @@
     if (maxBorrowable > 0) borrowAmount = floorTo(maxBorrowable, 4);
   }
   function setMaxRepay() {
-    if (maxRepayable > 0) repayAmount = floorTo(maxRepayable, 4);
+    if (maxRepayable > 0) repayAmount = floorTo(maxRepayable, 8);
   }
+
+  // icUSD is an 8-decimal token. Keep the native number input's constraint at
+  // token precision so a Max value such as 1.995 remains a valid entry, while
+  // the max attribute reflects the same floored amount passed to the API.
+  $: repayInputMax = maxRepayable > 0 ? floorTo(maxRepayable, 8) : undefined;
 
   function clampInput(field: 'add' | 'withdraw' | 'borrow' | 'repay') {
     if (field === 'add') {
@@ -1059,13 +1064,13 @@
               <div class="input-header">
                 <span class="input-label">Repay Debt {#if $earningActive}<MultiplierBadge multiplier={5} comingSoon label="5× soon" />{/if}</span>
                 {#if maxRepayable > 0}
-                  <button class="max-text" on:click={setMaxRepay}>Max: {floorTo(maxRepayable, 4)}</button>
+                  <button class="max-text" on:click={setMaxRepay}>Max: {repayInputMax}</button>
                 {/if}
               </div>
               <div class="action-input-row">
                 <input type="number" class="action-input action-input-repay" bind:value={repayAmount}
                   on:blur={() => clampInput('repay')}
-                  placeholder="0.00" min="0" step="0.01" disabled={isProcessing} />
+                  placeholder="0.00" min="0" max={repayInputMax} step="0.00000001" inputmode="decimal" disabled={isProcessing} />
                 <button class="token-selector" class:token-selector-pulse={!hasChangedToken}
                   on:click={() => { showTokenDropdown = !showTokenDropdown; }}
                   disabled={isProcessing}>

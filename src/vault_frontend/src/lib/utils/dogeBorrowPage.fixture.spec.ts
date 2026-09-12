@@ -19,6 +19,7 @@ import {
 import { saveIntent as saveIntentRaw, storageKeyForPrincipal, computeDogeBorrowRisk } from './dogeBorrowWizard';
 import { koinuToDoge } from './dogeBorrowFlow';
 import { formatNumber } from './format';
+import { toastStore, type ToastData } from '../stores/toast';
 
 const TEST_NETWORK_SCOPE = 'local';
 function saveIntent(storage: Storage, record: Parameters<typeof saveIntentRaw>[1]) {
@@ -284,6 +285,17 @@ function findButtonByText(text: string): HTMLButtonElement | null {
   return (qAll('button').find((b) => b.textContent?.includes(text)) as HTMLButtonElement | undefined) ?? null;
 }
 
+function readToasts(): ToastData[] {
+  let value: ToastData[] = [];
+  const unsubscribe = toastStore.subscribe((next) => { value = next; });
+  unsubscribe();
+  return value;
+}
+
+function clearToasts() {
+  for (const toast of readToasts()) toastStore.remove(toast.id);
+}
+
 beforeEach(() => {
   host = document.createElement('div');
   document.body.appendChild(host);
@@ -331,6 +343,7 @@ beforeEach(() => {
   });
   fx.updateDogeBalanceForOwner.mockReset().mockResolvedValue({ Ok: [] });
   fx.qrToDataURL.mockReset().mockResolvedValue('data:image/png;base64,fake');
+  clearToasts();
 });
 
 afterEach(() => {
@@ -340,6 +353,7 @@ afterEach(() => {
   }
   host.remove();
   localStorage.clear();
+  clearToasts();
 });
 
 describe('/doge/borrow — disconnected calculator', () => {
@@ -587,6 +601,12 @@ describe('/doge/borrow — deposit to confirm to explicit borrow', () => {
       submittedIcusdRaw: 5_000_000_000n,
     });
 
+    // Model a stale global transfer failure from the prior attempt. The route
+    // must retire this exact error at its authoritative success boundary while
+    // preserving a concurrent, unrelated error toast.
+    const staleError = toastStore.error('Insufficient token funds. Your balance is too low for this amount.', 60_000);
+    const unrelatedError = toastStore.error('Keep this current error visible', 60_000);
+
     const confirmBtn = findButtonByText('Confirm and borrow')!;
     expect(confirmBtn.disabled).toBe(false);
     confirmBtn.click();
@@ -600,6 +620,10 @@ describe('/doge/borrow — deposit to confirm to explicit borrow', () => {
     expect(submittedIcusdRaw).toBe(5_000_000_000n);
     expect(submittedCollateralPrincipal).toBe(CKDOGE_LEDGER_TEXT);
     expect(host.textContent).toContain('Vault #42');
+
+    const remainingToastIds = readToasts().map((toast) => toast.id);
+    expect(remainingToastIds).toContain(unrelatedError);
+    expect(remainingToastIds).not.toContain(staleError);
   });
 
   it('reproduces the reported bug: a wallet holding exactly 52 ckDOGE submits the fee-adjusted amount instead of erroring InsufficientFunds', async () => {
