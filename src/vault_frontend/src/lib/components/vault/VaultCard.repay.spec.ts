@@ -15,4 +15,11 @@ describe('VaultCard repayment input contract', () => {
     expect(source).toContain('Max: {repayInputMax}');
     expect(source).toContain('min="0" max={repayInputMax} step="0.00000001"');
   });
+
+  it('keeps a wallet-limited icUSD max on the ordinary repay path', () => {
+    const source = readFileSync(componentPath, 'utf8');
+
+    expect(source).toContain('computeSafeIcusdRepayMax');
+    expect(source).toContain("const fullIcusdDebtAffordable = repayTokenType !== 'icUSD' || maxRepayable >= tickingDebt;");
+  });
 });
