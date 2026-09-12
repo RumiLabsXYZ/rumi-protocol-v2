@@ -17,6 +17,7 @@ import {
   setInputValue,
 } from '../../../tests/doge-borrow-fixtures/testData';
 import { saveIntent as saveIntentRaw, storageKeyForPrincipal, computeDogeBorrowRisk } from './dogeBorrowWizard';
+import { koinuToDoge } from './dogeBorrowFlow';
 import { formatNumber } from './format';
 
 const TEST_NETWORK_SCOPE = 'local';
@@ -526,6 +527,9 @@ describe('/doge/borrow — account switching mid-flight', () => {
 
 describe('/doge/borrow — deposit to confirm to explicit borrow', () => {
   it('only calls openVaultAndBorrowBound on the explicit Confirm and borrow click, with EXACT raw bigint amounts, after a real mocked minted receipt and refreshed final terms', async () => {
+    // ledgerFee: 0 isolates this test's purpose (exact-bigint pass-through, no float rounding)
+    // from the fee-reservation behavior, which has its own dedicated tests below.
+    fx.collateralState.set({ collaterals: [fakeCollateralInfo({ ledgerFee: 0 })], loading: false });
     connectAs(PRINCIPAL_A);
     fx.getPublicMinterActor.mockResolvedValue({
       get_doge_address: vi.fn(async () => 'DconfirmFlowAddress00000000000001'),
@@ -671,6 +675,38 @@ describe('/doge/borrow — deposit to confirm to explicit borrow', () => {
     // float-rounded approximation of it.
     expect(submittedCollateralRaw).toBe(SAFE_COLLATERAL_KOINU);
     expect(host.textContent).toContain('Vault #99');
+  });
+
+  it('reads the LIVE ckDOGE ledger fee from collateral config, not a hardcoded page constant', async () => {
+    // A distinctive fee, deliberately different from the 10_000 koinu used elsewhere in this
+    // file and from apiClient.ts's own fallback default — proves +page.svelte wires
+    // ckdogeInfo.ledgerFee through, rather than a constant that happens to match by coincidence.
+    const DISTINCTIVE_FEE_KOINU = 250_000n;
+    const FIFTY_TWO_DOGE_KOINU = 5_200_000_000n;
+    const SAFE_COLLATERAL_KOINU = FIFTY_TWO_DOGE_KOINU - DISTINCTIVE_FEE_KOINU * 2n; // 51.5 DOGE
+
+    fx.collateralState.set({
+      collaterals: [fakeCollateralInfo({ ledgerFee: Number(DISTINCTIVE_FEE_KOINU) })],
+      loading: false,
+    });
+    connectAs(PRINCIPAL_A, { ckDOGE: { raw: FIFTY_TWO_DOGE_KOINU, formatted: '52', usdValue: null } });
+    fx.getPublicMinterActor.mockResolvedValue({
+      get_doge_address: vi.fn(async () => 'DdistinctiveFeeAddress00000000001'),
+      get_minter_info: vi.fn(async () => fakeMinterInfo()),
+    });
+    fx.updateDogeBalanceForOwner.mockResolvedValue(fakeMintedUtxoResult(11n, FIFTY_TWO_DOGE_KOINU));
+
+    renderPage();
+    await settle();
+    setInputValue(q('#dbw-icusd') as HTMLInputElement, '1');
+    await settle();
+    findButtonByText('Continue with this loan')!.click();
+    await settle();
+    findButtonByText('I sent the DOGE')!.click();
+    await settle();
+
+    expect(host.textContent).toContain(`Collateral ready for borrowing: ${formatNumber(koinuToDoge(SAFE_COLLATERAL_KOINU), 8)} ckDOGE`);
+    expect(host.textContent).toContain(`network fee of ${formatNumber(koinuToDoge(DISTINCTIVE_FEE_KOINU * 2n), 8)} ckDOGE reserved`);
   });
 
   it('never dispatches when the Web Locks API is unavailable (conservative fail-closed), and surfaces a clear message', async () => {

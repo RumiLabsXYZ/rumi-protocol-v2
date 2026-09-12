@@ -302,6 +302,20 @@ describe('collateral fee reservation (reported bug: exact-balance deposit fails 
     });
     expect(result.koinuAmount).toBe(FIFTY_TWO_DOGE_KOINU);
   });
+
+  it('tracks the LIVE ledger fee, not a hardcoded constant — a distinctive fee value must change the reservation', () => {
+    // Deliberately NOT the 10_000 koinu value used elsewhere in this suite/apiClient's fallback,
+    // so a regression that hardcodes the reservation (e.g. always 20_000n) would fail this test.
+    const DISTINCTIVE_FEE = 37_111n;
+    const result = resolveCollateralAmountForBorrow({
+      sessionMintedKoinu: FIFTY_TWO_DOGE_KOINU,
+      walletCkdogeBalanceKoinu: FIFTY_TWO_DOGE_KOINU,
+      useAvailableBalanceOptIn: false,
+      ledgerFeeKoinu: DISTINCTIVE_FEE,
+    });
+    expect(result.feeReservedKoinu).toBe(DISTINCTIVE_FEE * 2n);
+    expect(result.koinuAmount).toBe(FIFTY_TWO_DOGE_KOINU - DISTINCTIVE_FEE * 2n);
+  });
 });
 
 describe('principal-switch guard (mid-await reconciliation)', () => {

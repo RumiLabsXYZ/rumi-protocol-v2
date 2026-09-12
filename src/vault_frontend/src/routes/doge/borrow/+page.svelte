@@ -134,10 +134,11 @@
   $: minimumCr = ckdogeInfo?.minimumCr ?? 1.35;
   $: borrowingFeeRate = ckdogeInfo?.borrowingFee ?? 0;
   $: feeCurve = $protocolStatus?.borrowingFeeCurveResolved ?? [];
-  // Live ckDOGE ledger transfer fee (raw koinu), as reported by get_supported_collaterals.
-  // Zero only while collateral config has not loaded yet — resolveCollateralAmountForBorrow
-  // treats that defensively as "reserve nothing" and recomputes reactively once it arrives.
-  $: ckdogeLedgerFeeKoinu = BigInt(Math.trunc(ckdogeInfo?.ledgerFee ?? 0));
+  // Live ckDOGE ledger transfer fee (raw koinu), as reported by get_supported_collaterals. Falls
+  // back to the same conservative default apiClient.ts already uses for this ledger's actual
+  // approve/transfer_from calls (never 0 — a zero fallback would fail closed into "reserve
+  // nothing", reopening the exact-balance bug this guards against while config is still loading).
+  $: ckdogeLedgerFeeKoinu = BigInt(Math.trunc(ckdogeInfo?.ledgerFee ?? 10_000));
 
   $: risk = computeDogeBorrowRisk({
     collateralAmountDoge: collateralAmount,
