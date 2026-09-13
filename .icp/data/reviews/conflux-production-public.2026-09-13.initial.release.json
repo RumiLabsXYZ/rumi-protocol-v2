@@ -8,8 +8,8 @@
   "mappingFile": ".icp/data/mappings/conflux-production-public.ids.json",
   "mappingSha256": "bf3e44cef52610e113784d53c46474cc9038177fad553e4fc2a95e6d7c7ce049",
   "manifestFile": "src/conflux_espace_frontend/dist-production-public/rumi-conflux-production-public.json",
-  "manifestSha256": "2b1334963d9e2e36c36509cbd6fe565a7dffb108f5f039e909cafdb8262675f7",
-  "assetInventorySha256": "70c92764410f822ff4f10687a6a63cdd8639e8914296f00c19d041922f731ec5",
+  "manifestSha256": "2554ba5dad0338aeb592cc0622451386680589f84b8e03848da7f1c0f6c1e096",
+  "assetInventorySha256": "0fa868ab41581848fc9803101e0ea901d0e9a9441d2b4e906f775c8ca78afb51",
   "wasmArtifact": ".icp/cache/artifacts/conflux_public_frontend",
   "wasmSha256": "04e565b3425fe7510ee16b02adcfe3f01abc9a2725c82a21cb08969241debd62"
 }
