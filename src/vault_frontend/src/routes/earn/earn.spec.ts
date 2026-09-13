@@ -2,39 +2,44 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount, unmount, flushSync, tick } from 'svelte';
 
 const fx = vi.hoisted(() => ({
-  getProtocolStatus: vi.fn(),
-  getPoolStatus: vi.fn(),
-  getThreePoolApy: vi.fn(),
+  loadThreeUsdRate: vi.fn(),
+  loadSpRate: vi.fn(),
+  replaceRoute: vi.fn(),
+  beforeNavigate: vi.fn(),
 }));
 
-vi.mock('../../lib/services/protocol', () => ({
-  ProtocolService: { getProtocolStatus: fx.getProtocolStatus },
+vi.mock('../../lib/services/earnRates', async () => {
+  const actual = await vi.importActual<typeof import('../../lib/services/earnRates')>(
+    '../../lib/services/earnRates',
+  );
+  return {
+    ...actual,
+    loadThreeUsdRate: fx.loadThreeUsdRate,
+    loadSpRate: fx.loadSpRate,
+    // `freshEarnSnapshot` is what the page actually calls; route it to the
+    // same mocked loaders so each test's rate setup still applies.
+    freshEarnSnapshot: () => ({
+      loadThreeUsdRate: fx.loadThreeUsdRate,
+      loadSpRate: fx.loadSpRate,
+    }),
+  };
+});
+
+vi.mock('../../lib/utils/earnNavigation', () => ({
+  replaceRoute: fx.replaceRoute,
 }));
 
-vi.mock('../../lib/services/stabilityPoolService', () => ({
-  stabilityPoolService: { getPoolStatus: fx.getPoolStatus },
-}));
-
-vi.mock('../../lib/services/threePoolApyService', () => ({
-  getThreePoolApy: fx.getThreePoolApy,
+vi.mock('$app/navigation', () => ({
+  beforeNavigate: fx.beforeNavigate,
+  goto: vi.fn(),
 }));
 
 import Page from './+page.svelte';
 
-// `totalDebtE8s` here is already normalized to icUSD (see liveApy.ts's
-// comment on spInterestApr); `eligible_icusd_per_collateral` values are
-// e8s. Chosen to produce a small, realistic, finite APR (~1.25%).
-const SP_PROTOCOL_STATUS = {
-  interestSplit: [{ destination: 'stability_pool', bps: 5000 }],
-  perCollateralInterest: [
-    { collateralType: 'icp', totalDebtE8s: 500, weightedInterestRate: 0.05 },
-  ],
-};
-const SP_POOL_STATUS = {
-  eligible_icusd_per_collateral: [['icp', 100_000_000_000n]],
-};
+// The rendered `EarnSubNav` reads the same mocked `earnRates` loaders as the
+// page, so it just displays whatever rates each case sets up above.
 
-async function settle(rounds = 8) {
+async function settle(rounds = 10) {
   for (let i = 0; i < rounds; i++) {
     await Promise.resolve();
     await tick();
@@ -50,98 +55,115 @@ function render() {
   flushSync();
 }
 
-function q(sel: string): HTMLElement | null {
-  return host.querySelector(sel);
+function cleanup() {
+  if (instance) {
+    unmount(instance as any);
+    instance = undefined;
+  }
 }
 
 beforeEach(() => {
   host = document.createElement('div');
   document.body.appendChild(host);
-  fx.getProtocolStatus.mockReset().mockResolvedValue(SP_PROTOCOL_STATUS);
-  fx.getPoolStatus.mockReset().mockResolvedValue(SP_POOL_STATUS);
-  fx.getThreePoolApy.mockReset().mockResolvedValue({
-    total_apy_pct: 4.5,
-    interest_apr_pct: 2,
-    swap_fee_apr_pct: 2.5,
-    pool_tvl_icusd: 1_000_000,
-    three_pool_share_bps: 5000,
-    complete: true,
-  });
+  fx.loadThreeUsdRate.mockReset();
+  fx.loadSpRate.mockReset();
+  fx.replaceRoute.mockReset();
+  fx.beforeNavigate.mockReset();
 });
 
 afterEach(() => {
-  if (instance) {
-    unmount(instance as any);
-    instance = undefined;
-  }
+  cleanup();
   host.remove();
+  vi.useRealTimers();
 });
 
-describe('Earn overview page', () => {
-  it('shows both action links immediately, before any rate resolves', () => {
+describe('Earn auto-selection page', () => {
+  it('shows the shared tab bar for both pools before either rate resolves, with neither marked selected', () => {
+    fx.loadThreeUsdRate.mockReturnValue(new Promise(() => {}));
+    fx.loadSpRate.mockReturnValue(new Promise(() => {}));
     render();
-    expect(q('a[href="/3usd"].earn-cta')?.textContent).toContain('Provide liquidity');
-    expect(q('a[href="/stability-pool"].earn-cta')?.textContent).toContain('Deposit');
+    const hrefs = Array.from(host.querySelectorAll('a')).map((a) => a.getAttribute('href'));
+    expect(hrefs).toEqual(['/3usd', '/stability-pool']);
+    expect(host.querySelector('[aria-current="page"]')).toBeFalsy();
   });
 
-  it('renders both real rates once their independent loads resolve', async () => {
+  it('redirects to 3USD when its rate is higher', async () => {
+    fx.loadThreeUsdRate.mockResolvedValue({ status: 'ready', pct: 6 });
+    fx.loadSpRate.mockResolvedValue({ status: 'ready', pct: 4 });
     render();
     await settle();
-
-    expect(host.textContent).toContain('4.50%');
-    // A real, positive SP rate given the mocked protocol/pool status above.
-    const cards = host.querySelectorAll('.earn-card');
-    const spPill = cards[1].querySelector('.rate-pill');
-    expect(spPill?.textContent).not.toContain('unavailable');
-    expect(spPill?.textContent).toMatch(/%/);
+    expect(fx.replaceRoute).toHaveBeenCalledWith('/3usd');
   });
 
-  it('shows the 3USD card as unavailable (not an invented 0.00%) when its rate is incomplete, while the SP card still loads and both CTAs stay visible', async () => {
-    fx.getThreePoolApy.mockResolvedValue({
-      total_apy_pct: 0,
-      interest_apr_pct: 0,
-      swap_fee_apr_pct: 0,
-      pool_tvl_icusd: 0,
-      three_pool_share_bps: 5000,
-      complete: false,
-    });
+  it('redirects to the stability pool when its rate is higher', async () => {
+    fx.loadThreeUsdRate.mockResolvedValue({ status: 'ready', pct: 4 });
+    fx.loadSpRate.mockResolvedValue({ status: 'ready', pct: 6 });
     render();
     await settle();
-
-    const cards = host.querySelectorAll('.earn-card');
-    expect(cards[0].querySelector('.rate-unavailable')).toBeTruthy();
-    expect(cards[0].querySelector('a.earn-cta')?.getAttribute('href')).toBe('/3usd');
-    expect(cards[1].querySelector('.rate-unavailable')).toBeFalsy();
-    expect(cards[1].querySelector('a.earn-cta')?.getAttribute('href')).toBe('/stability-pool');
+    expect(fx.replaceRoute).toHaveBeenCalledWith('/stability-pool');
   });
 
-  it('shows the SP card as unavailable when its data fetch rejects, independent of a healthy 3USD rate, with both CTAs still visible', async () => {
-    fx.getPoolStatus.mockRejectedValue(new Error('stability pool status unavailable'));
+  it('redirects to 3USD on an exact tie', async () => {
+    fx.loadThreeUsdRate.mockResolvedValue({ status: 'ready', pct: 5 });
+    fx.loadSpRate.mockResolvedValue({ status: 'ready', pct: 5 });
     render();
     await settle();
-
-    const cards = host.querySelectorAll('.earn-card');
-    expect(cards[0].querySelector('.rate-unavailable')).toBeFalsy();
-    expect(cards[0].textContent).toContain('4.50%');
-    expect(cards[1].querySelector('.rate-unavailable')).toBeTruthy();
-    expect(q('a[href="/3usd"].earn-cta')).toBeTruthy();
-    expect(q('a[href="/stability-pool"].earn-cta')).toBeTruthy();
+    expect(fx.replaceRoute).toHaveBeenCalledWith('/3usd');
   });
 
-  it('never renders a non-finite APY as a rate', async () => {
-    fx.getThreePoolApy.mockResolvedValue({
-      total_apy_pct: Infinity,
-      interest_apr_pct: 0,
-      swap_fee_apr_pct: 0,
-      pool_tvl_icusd: 1,
-      three_pool_share_bps: 5000,
-      complete: true,
-    });
+  it('redirects to whichever single rate is ready when the other is unavailable', async () => {
+    fx.loadThreeUsdRate.mockResolvedValue({ status: 'unavailable', pct: null });
+    fx.loadSpRate.mockResolvedValue({ status: 'ready', pct: 3 });
     render();
     await settle();
+    expect(fx.replaceRoute).toHaveBeenCalledWith('/stability-pool');
+  });
 
-    const cards = host.querySelectorAll('.earn-card');
-    expect(cards[0].querySelector('.rate-unavailable')).toBeTruthy();
-    expect(host.textContent).not.toContain('Infinity');
+  it('redirects to 3USD when both rates are unavailable', async () => {
+    fx.loadThreeUsdRate.mockResolvedValue({ status: 'unavailable', pct: null });
+    fx.loadSpRate.mockResolvedValue({ status: 'unavailable', pct: null });
+    render();
+    await settle();
+    expect(fx.replaceRoute).toHaveBeenCalledWith('/3usd');
+  });
+
+  it('never hangs on a stalled request: still redirects after the bounded wait using the rate that did resolve', async () => {
+    vi.useFakeTimers();
+    fx.loadThreeUsdRate.mockReturnValue(new Promise(() => {})); // never settles
+    fx.loadSpRate.mockResolvedValue({ status: 'ready', pct: 3 });
+    render();
+    await vi.advanceTimersByTimeAsync(5000);
+    await settle();
+    expect(fx.replaceRoute).toHaveBeenCalledWith('/stability-pool');
+  });
+
+  it('does not navigate if the page unmounts (manual navigation) before both rates resolve', async () => {
+    let resolveThreeUsd: (v: any) => void;
+    fx.loadThreeUsdRate.mockReturnValue(new Promise((resolve) => { resolveThreeUsd = resolve; }));
+    fx.loadSpRate.mockResolvedValue({ status: 'ready', pct: 3 });
+    render();
+    await settle(2);
+    cleanup(); // simulates the user clicking a tab link and navigating away
+    resolveThreeUsd!({ status: 'ready', pct: 9 });
+    await settle();
+    expect(fx.replaceRoute).not.toHaveBeenCalled();
+  });
+
+  it('does not navigate once a manual navigation is already underway (beforeNavigate), even while this page is still mounted', async () => {
+    let resolveThreeUsd: (v: any) => void;
+    fx.loadThreeUsdRate.mockReturnValue(new Promise((resolve) => { resolveThreeUsd = resolve; }));
+    fx.loadSpRate.mockResolvedValue({ status: 'ready', pct: 3 });
+    render();
+    await settle(2);
+
+    // Simulates the router firing `beforeNavigate` the instant the user
+    // clicks a tab link, before the old page has actually unmounted (e.g.
+    // while the destination route's bundle/data is still loading).
+    expect(fx.beforeNavigate).toHaveBeenCalledTimes(1);
+    fx.beforeNavigate.mock.calls[0][0]();
+
+    resolveThreeUsd!({ status: 'ready', pct: 9 });
+    await settle();
+    expect(fx.replaceRoute).not.toHaveBeenCalled();
   });
 });
