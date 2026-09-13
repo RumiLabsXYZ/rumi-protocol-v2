@@ -20,6 +20,7 @@ export default defineConfig({
       '$stores': path.resolve(__dirname, 'src/lib/stores'),
       '$utils': path.resolve(__dirname, 'src/lib/utils'),
       '$app/environment': path.resolve(__dirname, 'src/tests/mocks/app-environment.ts'),
+      '$app/navigation': path.resolve(__dirname, 'src/tests/mocks/app-navigation.ts'),
     },
   },
   test: {
