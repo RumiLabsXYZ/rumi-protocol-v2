@@ -1,0 +1,38 @@
+import type { Snippet } from "svelte";
+
+export type StatRow = { label: string; value: string };
+export type CompositionGroup = { label: string; value: string; details: string[] };
+export type BorrowViewProps = {
+  collateral: string;
+  debt: string;
+  onCollateral: (value: string) => void;
+  onDebt: (value: string) => void;
+  inputsDisabled: boolean;
+  collateralValue: string;
+  priceLabel: string;
+  feeLabel: string;
+  feeAmount: string;
+  interestLabel: string;
+  receivedAmount: string;
+  ratioLabel: string;
+  health: string;
+  tone: "safe" | "caution" | "danger" | "unavailable";
+  ratioPosition: number | null;
+  minPosition: number | null;
+  liquidationPosition: number | null;
+  safePosition: number | null;
+  minLabel: string;
+  liquidationLabel: string;
+  liquidationPrice: string;
+  positionNote: string;
+  protocolRows: StatRow[];
+  composition: CompositionGroup[] | null;
+  protocolNote: string;
+  connected: boolean;
+  onConnect: () => void;
+  onOpen: () => void;
+  openDisabled: boolean;
+  openLabel: string;
+  blocker: string | null;
+  actionContent?: Snippet;
+};

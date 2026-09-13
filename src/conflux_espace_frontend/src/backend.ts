@@ -31,13 +31,23 @@ export type Backend = Pick<GeneratedBackend,
   | "get_chain_public_launch_status"
   | "get_chain_vault"
   | "list_chain_vaults_page"
+  | "get_protocol_status"
+  | "get_collateral_totals"
+  | "get_collateral_config"
+  | "get_reserve_balances"
 >;
 
 let _actor: Backend | null = null;
+let _agent: Promise<HttpAgent> | null = null;
+
+export function queryAgent(): Promise<HttpAgent> {
+  _agent ??= HttpAgent.create({ host: IC_HOST }).catch((error) => { _agent = null; throw error; });
+  return _agent;
+}
 
 export async function backend(): Promise<Backend> {
   if (_actor) return _actor;
-  const agent = await HttpAgent.create({ host: IC_HOST });
+  const agent = await queryAgent();
   // Mainnet root key is hardcoded into the agent — NEVER fetchRootKey here.
   _actor = Actor.createActor<Backend>(idlFactory, {
     agent,
