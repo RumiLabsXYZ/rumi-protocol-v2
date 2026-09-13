@@ -25,7 +25,7 @@
   });
   $: addPointsHint =
     (addMultiplier.nudge ? `${addMultiplier.nudge}. ` : '') +
-    'Keep the 3USD you mint (in your wallet, the stability pool, or the AMM) to keep these points.';
+    'Keep the 3USD you receive (in your wallet, the stability pool, or the AMM) to keep these points.';
 
   function poolLedgerRef(index: number) {
     const t = POOL_TOKENS[index];
@@ -286,14 +286,14 @@
       const addResult = await threePoolService.addLiquidity(amounts, minLp, addBeforeLp);
       const oisyResilient = isOisyLandedSentinel(addResult);
       if (oisyResilient) {
-        addNotice = 'Mint confirmed on-chain. (Wallet returned an error but the operation succeeded.)';
+        addNotice = 'Deposit confirmed on-chain. (Wallet returned an error but the operation succeeded.)';
       }
       dispatch('success', { action: 'add_liquidity', oisyResilient });
       addAmounts = ['', '', ''];
       addLpEstimate = null;
       loadLpBalance();
     } catch (err: any) {
-      addError = err.message || 'Mint failed';
+      addError = err.message || 'Deposit failed';
     } finally {
       addLoading = false;
     }
@@ -332,7 +332,7 @@
 
       const oisyResilient = isOisyLandedSentinel(removeResult);
       if (oisyResilient) {
-        removeNotice = 'Redeem confirmed on-chain. (Wallet returned an error but the operation succeeded.)';
+        removeNotice = 'Withdrawal confirmed on-chain. (Wallet returned an error but the operation succeeded.)';
       }
       dispatch('success', { action: 'remove_liquidity', oisyResilient });
       removeLpAmount = '';
@@ -340,7 +340,7 @@
       removeSingleEstimate = null;
       loadLpBalance();
     } catch (err: any) {
-      removeError = err.message || 'Redeem failed';
+      removeError = err.message || 'Withdrawal failed';
     } finally {
       removeLoading = false;
     }
@@ -354,13 +354,13 @@
 <svelte:window on:click={closeDropdowns} />
 
 <div class="liquidity-panel">
-  <!-- Sub-tabs: Mint | Redeem -->
+  <!-- Sub-tabs: Deposit | Withdraw (mint/redeem underneath; see handleAdd/handleRemove) -->
   <div class="sub-tabs">
     <button class="sub-tab" class:active={activeTab === 'mint'} on:click={() => { activeTab = 'mint'; }}>
-      Mint
+      Deposit
     </button>
     <button class="sub-tab" class:active={activeTab === 'redeem'} on:click={() => { activeTab = 'redeem'; }}>
-      Redeem
+      Withdraw
     </button>
   </div>
 
@@ -372,7 +372,7 @@
           <path d="M12 8v4l2 2"/>
         </svg>
       </div>
-      <p class="gate-text">Connect your wallet to mint or redeem 3USD</p>
+      <p class="gate-text">Connect your wallet to deposit stablecoins and receive 3USD, or withdraw your pool share</p>
     </div>
   {:else if activeTab === 'mint'}
     <!-- ─── MINT 3USD ─── -->
@@ -412,11 +412,11 @@
     <!-- Inline estimate + slippage row -->
     <div class="inline-info-row">
       <span class="inline-estimate">
-        Est. 3USD:&nbsp;
+        You'll receive:&nbsp;
         {#if addQuoting}
           <span class="calculating">…</span>
         {:else if addLpEstimate !== null}
-          <span class="estimate-val">{formatLpDisplay(addLpEstimate)}</span>
+          <span class="estimate-val">{formatLpDisplay(addLpEstimate)} 3USD</span>
         {:else}
           <span class="estimate-val">—</span>
         {/if}
@@ -468,9 +468,9 @@
     >
       {#if addLoading}
         <span class="spinner"></span>
-        Minting 3USD…
+        Depositing…
       {:else}
-        Mint 3USD
+        Deposit
       {/if}
     </button>
 
@@ -510,13 +510,13 @@
       />
     </div>
 
-    <!-- Mode toggle: Redeem to all / Redeem to one -->
+    <!-- Mode toggle: Withdraw to all / Withdraw to one -->
     <div class="mode-toggle">
       <button class="mode-btn" class:active={removeMode === 'proportional'} on:click={() => setRemoveMode('proportional')}>
-        Redeem to all
+        Withdraw to all
       </button>
       <button class="mode-btn" class:active={removeMode === 'single'} on:click={() => setRemoveMode('single')}>
-        Redeem to one
+        Withdraw to one
       </button>
     </div>
 
@@ -622,9 +622,9 @@
     >
       {#if removeLoading}
         <span class="spinner"></span>
-        Redeeming 3USD…
+        Withdrawing…
       {:else}
-        Redeem 3USD
+        Withdraw
       {/if}
     </button>
 

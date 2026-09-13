@@ -22,6 +22,16 @@ export interface ThreePoolApyResult {
   swap_fee_apr_pct: number;
   pool_tvl_icusd: number;
   three_pool_share_bps: number;
+  /**
+   * True only when every required input (protocol status, an actual
+   * `three_pool` interest-split entry, the swap-fee window, and a positive
+   * pool TVL) was fetched live and the resulting APY is a finite number.
+   * Callers that must not present a fallback/default as a real rate should
+   * check this before rendering `total_apy_pct` — a partial failure still
+   * returns a numeric (often 0) result for the existing math below, but
+   * `complete: false` marks it as not a trustworthy zero.
+   */
+  complete: boolean;
 }
 
 const APY_CACHE_TTL_MS = 30_000;
@@ -37,7 +47,9 @@ let _apyCache: { value: ThreePoolApyResult; expires: number } | null = null;
  *
  * Returns 0% APY (with zero components) on any partial failure rather than
  * throwing, since the callers render UI badges that should degrade
- * gracefully.
+ * gracefully. Callers that must not show a fallback default as a real rate
+ * should check `result.complete` rather than assuming a fulfilled promise
+ * means live data (see `ThreePoolApyResult.complete`).
  */
 export async function getThreePoolApy(): Promise<ThreePoolApyResult> {
   if (_apyCache && _apyCache.expires > Date.now()) {
@@ -50,7 +62,7 @@ export async function getThreePoolApy(): Promise<ThreePoolApyResult> {
     (publicActor.get_interest_split() as Promise<
       { destination: string; bps: bigint }[]
     >).catch(() => null),
-    threePoolService.getSwapFeesOverWindow(7).catch(() => 0n),
+    threePoolService.getSwapFeesOverWindow(7).catch(() => null),
   ]);
 
   // TVL in icUSD-equivalent (normalize 6-dec stables to 8-dec via ×100).
@@ -69,7 +81,10 @@ export async function getThreePoolApy(): Promise<ThreePoolApyResult> {
   const threePoolEntry = interestSplit?.find(
     (e) => e.destination === 'three_pool',
   );
+  // Legacy fallback for the *existing* math below only — does not count as
+  // an actual split read for `complete` (see below).
   const threePoolShareBps = threePoolEntry ? Number(threePoolEntry.bps) : 5000;
+  const swapFees7dValue = swapFees7d ?? 0n;
 
   let interestAprPct = 0;
   let swapFeeAprPct = 0;
@@ -83,7 +98,7 @@ export async function getThreePoolApy(): Promise<ThreePoolApyResult> {
       interestApr +=
         (info.weightedInterestRate * share * info.totalDebtE8s) / poolTvlIcusd;
     }
-    const fees7dIcusd = Number(swapFees7d) / 1e8;
+    const fees7dIcusd = Number(swapFees7dValue) / 1e8;
     const swapFeeApr = (fees7dIcusd / poolTvlIcusd) * (365 / 7);
     interestAprPct = interestApr * 100;
     swapFeeAprPct = swapFeeApr * 100;
@@ -92,10 +107,17 @@ export async function getThreePoolApy(): Promise<ThreePoolApyResult> {
       threePoolShareBps,
       protocolStatus.perCollateralInterest,
       poolTvlIcusd,
-      swapFees7d,
+      swapFees7dValue,
     );
     totalApyPct = apy !== null ? apy * 100 : 0;
   }
+
+  const complete =
+    protocolStatus !== null &&
+    threePoolEntry !== undefined &&
+    swapFees7d !== null &&
+    poolTvlIcusd > 0 &&
+    Number.isFinite(totalApyPct);
 
   const result: ThreePoolApyResult = {
     total_apy_pct: totalApyPct,
@@ -103,6 +125,7 @@ export async function getThreePoolApy(): Promise<ThreePoolApyResult> {
     swap_fee_apr_pct: swapFeeAprPct,
     pool_tvl_icusd: poolTvlIcusd,
     three_pool_share_bps: threePoolShareBps,
+    complete,
   };
 
   _apyCache = { value: result, expires: Date.now() + APY_CACHE_TTL_MS };
