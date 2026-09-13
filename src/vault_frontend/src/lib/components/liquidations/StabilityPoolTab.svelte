@@ -19,6 +19,12 @@
   import LoadingSpinner from '../common/LoadingSpinner.svelte';
   import { liveSpApyPct } from '../../utils/liveApy';
 
+  // The Earn tab bar above `/stability-pool` already shows this same rate as
+  // a badge; suppress this component's own badge there to avoid showing the
+  // same number twice between the tabs and the deposit form. `/liquidations`
+  // (which has no such tab bar) keeps the badge by leaving this at its default.
+  export let showApyBadge = true;
+
   let hasCachedData = _poolStatus !== null;
   let loading = !hasCachedData;
   let error = '';
@@ -115,7 +121,7 @@
 </script>
 
 <div class="pool-container">
-  {#if poolApy !== null}
+  {#if poolApy !== null && showApyBadge}
     <div class="apy-row">
       <!-- svelte-ignore a11y-mouse-events-have-key-events -->
       <div

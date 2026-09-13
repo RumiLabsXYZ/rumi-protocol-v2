@@ -23,9 +23,7 @@
   let poolStatus: PoolStatus | null = _poolStatus;
   let userLpBalance: bigint = _userLpBalance ?? 0n;
   let apy: number | null = null;
-  let showApyTooltip = false;
 
-  $: apyFormatted = apy !== null ? (apy * 100).toFixed(2) : null;
   $: isConnected = $walletStore.isConnected;
   $: principal = $walletStore.principal;
 
@@ -122,29 +120,11 @@
 <div class="page-container">
   <EarnSubNav active="3usd" />
 
-  <div class="page-header">
-    <h1 class="page-title">3USD</h1>
-    {#if apyFormatted !== null}
-      <!-- svelte-ignore a11y-mouse-events-have-key-events -->
-      <div
-        class="apy-badge"
-        on:mouseover={() => { showApyTooltip = true; }}
-        on:mouseleave={() => { showApyTooltip = false; }}
-      >
-        <svg class="apy-arrow" width="10" height="10" viewBox="0 0 10 10" fill="none">
-          <path d="M5 8V2M5 2L2 5M5 2L8 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-        {apyFormatted}% APY
-
-        {#if showApyTooltip}
-          <div class="apy-tooltip">
-            <div class="apy-tooltip-caret"></div>
-            <p><strong>3USD APY</strong> is earned from <strong>borrowing interest</strong> donations plus <strong>swap fees</strong>, based on current protocol borrowing rates and pool TVL.</p>
-          </div>
-        {/if}
-      </div>
-    {/if}
-  </div>
+  <p class="pool-description">
+    3USD represents your share of the pool. Deposit icUSD, ckUSDT, or ckUSDC, in any
+    combination, and 3USD earns swap fees plus a share of the protocol's borrowing
+    interest, based on current protocol rates and pool TVL.
+  </p>
 
   {#if loading}
     <div class="loading-state">
@@ -173,7 +153,6 @@
       <!-- RIGHT: Mint/Redeem panel -->
       <div class="action-column">
         <div class="action-panel">
-          <p class="explainer">Deposit icUSD, ckUSDT, or ckUSDC, in any combination, to receive 3USD: a token representing your share of the pool.</p>
           <LiquidityInterface on:success={handleSuccess} />
         </div>
       </div>
@@ -184,91 +163,19 @@
 <style>
   .page-container { max-width: 820px; margin: 0 auto; padding-bottom: 4rem; }
 
-  /* ── Page header ── */
-  .page-header {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    margin-bottom: 1.75rem;
-    animation: fadeSlideIn 0.5s ease-out both;
-    position: relative;
-    z-index: 10;
-  }
-
   @keyframes fadeSlideIn {
     from { opacity: 0; transform: translateY(12px); }
     to { opacity: 1; transform: translateY(0); }
   }
 
-  /* ── APY badge ── */
-  .apy-badge {
-    position: relative;
-    display: inline-flex;
-    align-items: center;
-    gap: 0.3125rem;
-    padding: 0.25rem 0.75rem;
-    background: rgba(74, 222, 128, 0.1);
-    border: 1px solid rgba(74, 222, 128, 0.3);
-    border-radius: 1.25rem;
+  /* ── Pool description ── */
+  .pool-description {
+    max-width: 68ch;
+    margin: 0 0 1.5rem;
     font-size: 0.8125rem;
-    font-weight: 600;
-    color: #4ade80;
-    cursor: default;
-    white-space: nowrap;
-  }
-
-  .apy-arrow { color: #4ade80; flex-shrink: 0; }
-
-  /* ── APY tooltip ── */
-  .apy-tooltip {
-    position: absolute;
-    top: calc(100% + 0.625rem);
-    left: 50%;
-    transform: translateX(-50%);
-    z-index: 50;
-    width: 17rem;
-    padding: 0.75rem 0.875rem;
-    background: #1e293b;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 0.5rem;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
-    font-size: 0.6875rem;
-    font-weight: 400;
-    line-height: 1.5;
-    color: #94a3b8;
-    cursor: default;
-    white-space: normal;
-    word-wrap: break-word;
-    overflow-wrap: break-word;
-    animation: tooltipFade 0.15s ease-out;
-  }
-
-  @keyframes tooltipFade {
-    from { opacity: 0; transform: translateX(-50%) translateY(4px); }
-    to { opacity: 1; transform: translateX(-50%) translateY(0); }
-  }
-
-  .apy-tooltip-caret {
-    position: absolute;
-    top: -5px;
-    left: 50%;
-    transform: translateX(-50%) rotate(45deg);
-    width: 10px;
-    height: 10px;
-    background: #1e293b;
-    border-top: 1px solid rgba(255, 255, 255, 0.08);
-    border-left: 1px solid rgba(255, 255, 255, 0.08);
-  }
-
-  .apy-tooltip p { margin: 0; }
-  .apy-tooltip strong { color: #cbd5e1; font-weight: 600; }
-
-  /* ── Explainer ── */
-  .explainer {
-    font-size: 0.8125rem;
+    line-height: 1.6;
     color: var(--rumi-text-secondary);
-    margin: 0 0 1.25rem;
-    line-height: 1.5;
+    animation: fadeSlideIn 0.5s ease-out both;
   }
 
   /* ── Two-column layout ── */
@@ -339,19 +246,6 @@
     .page-container {
       padding-left: 0.5rem;
       padding-right: 0.5rem;
-    }
-
-    .page-header { flex-wrap: wrap; }
-
-    .apy-tooltip {
-      left: 0;
-      transform: none;
-      width: calc(100vw - 2rem);
-    }
-
-    .apy-tooltip-caret {
-      left: 2rem;
-      transform: rotate(45deg);
     }
   }
 </style>
