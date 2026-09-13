@@ -63,7 +63,6 @@
   import {
     addressUrl,
     burnIcusd,
-    cfxBalance,
     connectInjected,
     connectLegacyInjected,
     fmtCfx,
@@ -75,6 +74,7 @@
     refreshInjectedWallets,
     sendDeposit,
     subscribeWallets,
+    subscribeWalletProviderEvents,
     toE8s,
     txUrl,
     waitForTransactionFinality,
@@ -84,6 +84,14 @@
     type Wallet,
   } from "./evm";
   import { connectDevKey } from "./devWallet";
+  import {
+    createWalletBalanceController,
+    computeMaxCollateralWei,
+    formatWalletBalanceLabel,
+    formatWalletBalanceNote,
+    maxCollateralInputValue,
+    type WalletBalanceSnapshot,
+  } from "./walletBalance";
   import VaultCard from "./VaultCard.svelte";
   import BorrowWorkspace from "./BorrowWorkspace.svelte";
   import { amountUnits, money, positionPreview, meterPosition } from "./borrowMath";
@@ -111,8 +119,11 @@
 
   let wallet = $state<Wallet | null>(null);
   let vaults = $state<ChainVault[]>([]);
-  let cfx = $state(0n);
   let icusd = $state(0n);
+  const walletBalanceController = createWalletBalanceController();
+  let walletBalanceSnapshot = $state<WalletBalanceSnapshot | null>(null);
+  let walletBalanceLoading = $state(false);
+  let walletBalanceInvalid = $state(false);
   let productionAcknowledged = $state(false);
   let productionInventoryVerified = $state(false);
   let publicStatus = $state<ChainPublicLaunchStatus | null>(null);
@@ -138,6 +149,23 @@
   $effect(() => {
     refreshInjectedWallets();
     return subscribeWallets((list) => { injectedWallets = list; });
+  });
+
+  // Immediate invalidation on the connected wallet's own account/network/
+  // disconnect events - periodic polling alone cannot catch a switch that
+  // happens mid-read. This never replaces the tracked wallet identity or
+  // triggers a reconnect; it only clears the CFX-balance display and forces
+  // a fresh, identity-checked read for the same wallet.address.
+  $effect(() => {
+    if (!wallet) return;
+    const active = wallet;
+    return subscribeWalletProviderEvents(active, () => {
+      walletBalanceController.invalidate();
+      walletBalanceSnapshot = null;
+      walletBalanceInvalid = false;
+      walletBalanceLoading = false;
+      if (wallet === active) void refreshWalletBalance();
+    });
   });
 
   // Mirror durable state across same-wallet tabs. Web Locks still serialize
@@ -231,6 +259,20 @@
   const publicRecoveryWriteBlocker = $derived.by(() => publicActionBlocker(false));
   const publicRiskWritesEnabled = $derived(!__RUMI_PRODUCTION_PUBLIC_BUILD__ || publicRiskWriteBlocker === null);
   const publicRecoveryWritesEnabled = $derived(!__RUMI_PRODUCTION_PUBLIC_BUILD__ || publicRecoveryWriteBlocker === null);
+
+  // CFX wallet balance + Max collateral (Borrow page). Read-only; the
+  // controller re-verifies chain/address on every fetch and drops stale
+  // responses from a superseded wallet identity.
+  const maxCollateralResult = $derived(computeMaxCollateralWei(
+    walletBalanceSnapshot?.balanceWei ?? null,
+    walletBalanceSnapshot?.feePerGasWei ?? null,
+  ));
+  const walletBalanceLabelText = $derived(formatWalletBalanceLabel(walletBalanceSnapshot, walletBalanceLoading, walletBalanceInvalid, !!wallet));
+  const walletBalanceNoteText = $derived(formatWalletBalanceNote(maxCollateralResult, walletBalanceInvalid, !!wallet));
+  const maxCollateralDisabledValue = $derived(
+    !wallet || !!busy || opening || !!mainnetLock || walletBalanceInvalid ||
+    maxCollateralResult === null || maxCollateralResult.maxWei <= 0n
+  );
 
   const requestedDebtE8s = $derived(__RUMI_PRODUCTION_PUBLIC_BUILD__ ? amountUnits(debtInput, 8) ?? 0n : toE8s(debtInput));
   const requestedCfxWei = $derived.by(() => {
@@ -650,19 +692,61 @@
     }
   }
 
+  async function refreshWalletBalance() {
+    if (!wallet) {
+      walletBalanceController.invalidate();
+      walletBalanceSnapshot = null;
+      walletBalanceInvalid = false;
+      walletBalanceLoading = false;
+      return;
+    }
+    walletBalanceLoading = true;
+    const result = await walletBalanceController.fetch(wallet);
+    if (result.stale) return;
+    walletBalanceLoading = false;
+    if (result.invalid) {
+      walletBalanceSnapshot = null;
+      walletBalanceInvalid = true;
+      return;
+    }
+    walletBalanceInvalid = false;
+    walletBalanceSnapshot = result.snapshot;
+  }
+
+  function onMaxCollateral() {
+    // Defense in depth alongside the button's own disabled state: never fill
+    // Max while loading, invalid (wrong network/address), or wallet-blocked
+    // by a busy/opening/pending-production-lock state.
+    if (maxCollateralDisabledValue || walletBalanceLoading) return;
+    const value = maxCollateralInputValue(maxCollateralResult);
+    if (value) collateralInput = value;
+  }
+
   async function refresh() {
     if (!wallet) return;
     try {
       if (__RUMI_PRODUCTION_PUBLIC_BUILD__) await refreshPublicStatus();
       const be = await backend();
-      const nextVaults = await completeInventory(be);
-      vaults = nextVaults;
-      cfx = await cfxBalance(wallet.address);
+      // Inventory failure must not block the unrelated CFX/icUSD wallet-fund reads
+      // below; readiness and write-side protections still key off inventoryComplete
+      // (set inside completeInventory) and the rethrow at the end of this block.
+      let nextVaults: ChainVault[] | null = null;
+      let inventoryError: unknown = null;
+      try {
+        nextVaults = await completeInventory(be);
+        vaults = nextVaults;
+      } catch (e) {
+        inventoryError = e;
+      }
+      await refreshWalletBalance();
       icusd = await icusdBalance(wallet.address);
-      if (__RUMI_PRODUCTION_CANARY_BUILD__) productionInventoryVerified = true;
-      if (__RUMI_PRODUCTION_CANARY_BUILD__) reconcileCanary(nextVaults);
-      await reconcileMainnetLock(nextVaults);
-      if (mainnetLock?.txHash) void observeMainnetTransaction();
+      if (nextVaults) {
+        if (__RUMI_PRODUCTION_CANARY_BUILD__) productionInventoryVerified = true;
+        if (__RUMI_PRODUCTION_CANARY_BUILD__) reconcileCanary(nextVaults);
+        await reconcileMainnetLock(nextVaults);
+        if (mainnetLock?.txHash) void observeMainnetTransaction();
+      }
+      if (inventoryError) throw inventoryError;
     } catch (e: any) { err = `Refresh failed: ${e?.message ?? e}`; }
   }
 
@@ -727,6 +811,10 @@
     inventoryComplete = false;
     walletChainValid = false;
     walletAddressValid = false;
+    walletBalanceController.invalidate();
+    walletBalanceSnapshot = null;
+    walletBalanceInvalid = false;
+    walletBalanceLoading = false;
     receiptWatching = null;
     receiptAttempts.clear();
     mainnetReceiptAttempts.clear();
@@ -1354,7 +1442,7 @@
         </div>
       </div>
       <div class="kv"><span class="k">Address</span><span class="v mono">{wallet.address}</span></div>
-      <div class="kv"><span class="k">CFX</span><span class="v">{fmtCfx(cfx)}</span></div>
+      <div class="kv"><span class="k">CFX</span><span class="v">{walletBalanceLabelText}</span></div>
       <div class="kv"><span class="k">icUSD</span><span class="v">{fmtIcusd(icusd)}</span></div>
       <div class="kv"><span class="k">Signer</span><span class="v">{wallet.walletName}</span></div>
     </div>
@@ -1517,6 +1605,11 @@
         inputsDisabled={!!busy || opening || !!mainnetLock}
         collateralValue={requestedCfxWei > 0n ? (publicStatus?.collateral_price_is_fresh && liveCfxPrice !== null ? `≈ ${money(Number(requestedCfxWei) / 1e18 * liveCfxPrice)}` : "Collateral value unavailable") : "Enter a CFX amount"}
         priceLabel={liveCfxPrice === null ? "CFX price unavailable" : `CFX price: $${liveCfxPrice.toLocaleString("en-US", { maximumFractionDigits: 8 })}${publicStatus?.collateral_price_is_fresh ? "" : " · stale"}`}
+        walletBalanceLabel={walletBalanceLabelText}
+        walletBalanceLoading={walletBalanceLoading}
+        walletBalanceNote={walletBalanceNoteText}
+        maxCollateralDisabled={maxCollateralDisabledValue}
+        onMaxCollateral={onMaxCollateral}
         feeLabel="Mint deduction"
         feeAmount={publicStatus?.collateral_config_matches_expected ? "None" : "Unavailable"}
         interestLabel={quotedApr}
