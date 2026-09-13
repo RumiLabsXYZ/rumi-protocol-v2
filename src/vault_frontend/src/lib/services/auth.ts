@@ -51,7 +51,7 @@ function createAuthStore() {
     walletType: null
   });
 
-  const { subscribe, set } = store;
+  const { subscribe, set, update } = store;
 
   // Internet Identity auth client
   let authClient: AuthClient | null = null;
@@ -83,6 +83,27 @@ function createAuthStore() {
       console.error('Auth balance refresh failed:', error);
       throw error;
     }
+  };
+
+  // Best-effort balance top-up after the connected/restored auth state has
+  // already been published. Never allowed to revert a valid delegation —
+  // failures are swallowed and simply leave the placeholder balance in place.
+  // Must only apply if the connected account is still this exact principal —
+  // otherwise a delayed fetch for a prior account could clobber the balance
+  // of whatever account the user has since switched to.
+  const backfillBalance = (principal: Principal): void => {
+    refreshWalletBalance(principal)
+      .then((balance) => {
+        update((s) =>
+          s.isConnected &&
+          s.walletType === WALLET_TYPES.INTERNET_IDENTITY &&
+          s.account &&
+          s.account.owner.toString() === principal.toString()
+            ? { ...s, account: { ...s.account, balance } }
+            : s
+        );
+      })
+      .catch((e) => console.warn('II balance backfill failed:', e));
   };
 
   return {
@@ -138,11 +159,12 @@ function createAuthStore() {
 
             const principalText = principal.toString();
             const convertedPrincipal = Principal.fromText(principalText);
-            const balance = await refreshWalletBalance(convertedPrincipal);
 
+            // Publish the restored auth state immediately — do not gate a
+            // valid delegation on any fallible balance/network call.
             set({
               isConnected: true,
-              account: { owner: convertedPrincipal, balance },
+              account: { owner: convertedPrincipal, balance: 0n },
               isInitialized: true,
               walletType: WALLET_TYPES.INTERNET_IDENTITY
             });
@@ -150,6 +172,8 @@ function createAuthStore() {
             selectedWalletId.set(lastWallet);
             currentWalletType.set(WALLET_TYPES.INTERNET_IDENTITY);
             console.log('🎉 II session restored successfully');
+
+            backfillBalance(convertedPrincipal);
           } else {
             console.log('⚠️ II session expired, clearing storage');
             storage.clear();
@@ -384,24 +408,21 @@ function createAuthStore() {
               // Convert principal to the correct type by recreating it
               const principalText = principal.toString();
               const convertedPrincipal = Principal.fromText(principalText);
-
-              // Get initial balance
-              const balance = await refreshWalletBalance(convertedPrincipal);
-              console.log('II Initial balance:', balance.toString());
-
               const result = { owner: convertedPrincipal };
 
+              // Persist the authenticated session and storage markers before
+              // any fallible balance call, so a post-auth data failure can
+              // never discard a valid delegation or skip the next restore.
               set({
                 isConnected: true,
                 account: {
                   ...result,
-                  balance
+                  balance: 0n
                 },
                 isInitialized: true,
                 walletType: WALLET_TYPES.INTERNET_IDENTITY
               });
 
-              // Update storage
               selectedWalletId.set(WALLET_TYPES.INTERNET_IDENTITY);
               currentWalletType.set(WALLET_TYPES.INTERNET_IDENTITY);
               storage.set("LAST_WALLET", WALLET_TYPES.INTERNET_IDENTITY);
@@ -409,6 +430,8 @@ function createAuthStore() {
 
               console.log('🎉 Internet Identity connected successfully');
               resolve(result);
+
+              backfillBalance(convertedPrincipal);
             } catch (error) {
               console.error('Internet Identity connection error:', error);
               reject(error);
