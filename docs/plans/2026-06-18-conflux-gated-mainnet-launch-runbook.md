@@ -197,7 +197,7 @@ All items are required unless explicitly marked optional.
          slippage_cap_bps = 250 : nat16;
          restore_target_cr_e4 = 15_500 : nat64;
          enabled = true;
-         max_swap_value_e8s = 200_000_000_000 : nat;
+         max_swap_value_e8s = 180_000_000_000 : nat;
          max_price_age_ns = 1_800_000_000_000 : nat64;
          max_dex_oracle_divergence_bps = 500 : nat32;
          fee_bps = 25 : nat16;

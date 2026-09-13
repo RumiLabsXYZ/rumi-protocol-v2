@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import {
     ACTION,
     BACKEND_CANISTER_ID,
@@ -14,7 +15,6 @@
     PUBLIC_CANONICAL_ORIGIN,
     openTermsFor,
     suggestedCollateralWei,
-    suggestedCollateralWeiAtRatio,
     signatureAttemptLimit,
   } from "./config";
   import { backend, errText, statusName, type ChainPublicLaunchStatus, type ChainVault } from "./backend";
@@ -85,6 +85,29 @@
   } from "./evm";
   import { connectDevKey } from "./devWallet";
   import VaultCard from "./VaultCard.svelte";
+  import BorrowWorkspace from "./BorrowWorkspace.svelte";
+  import { amountUnits, money, positionPreview, meterPosition } from "./borrowMath";
+  import { fetchProtocolOverview, unavailableOverview } from "./protocolOverview";
+  import "./rumi.css";
+
+  let collateralInput = $state("");
+  let opening = $state(false);
+  let walletDialog = $state<HTMLDialogElement>();
+  let overview = $state(unavailableOverview());
+  let overviewRefreshing = $state(false);
+  let activePage = $state<"borrow" | "vaults">("borrow");
+
+  async function refreshOverview() {
+    if (overviewRefreshing) return;
+    overviewRefreshing = true;
+    try { overview = await fetchProtocolOverview(); }
+    finally { overviewRefreshing = false; }
+  }
+  async function refreshPage() {
+    await Promise.all([refreshOverview(), wallet ? refresh() : refreshPublicStatus()]);
+  }
+  onMount(() => { if (__RUMI_PRODUCTION_PUBLIC_BUILD__) void refreshOverview(); });
+  $effect(() => { if (wallet && walletDialog?.open) walletDialog.close(); });
 
   let wallet = $state<Wallet | null>(null);
   let vaults = $state<ChainVault[]>([]);
@@ -147,7 +170,7 @@
 
   // Testnet open form. The production-canary build ignores these inputs and
   // supplies its compile-time exact terms directly to the signed Open intent.
-  let debtInput = $state("0.2");
+  let debtInput = $state(__RUMI_PRODUCTION_PUBLIC_BUILD__ ? "" : "0.2");
   let cfxPrice = $state("0.15"); // UX hint only — the real CR check is server-side
   let showDevKey = $state(false);
   let devKey = $state("0x" + "00".repeat(31) + "01"); // scalar=1 demo key
@@ -209,15 +232,34 @@
   const publicRiskWritesEnabled = $derived(!__RUMI_PRODUCTION_PUBLIC_BUILD__ || publicRiskWriteBlocker === null);
   const publicRecoveryWritesEnabled = $derived(!__RUMI_PRODUCTION_PUBLIC_BUILD__ || publicRecoveryWriteBlocker === null);
 
-  const requestedDebtE8s = $derived(toE8s(debtInput));
+  const requestedDebtE8s = $derived(__RUMI_PRODUCTION_PUBLIC_BUILD__ ? amountUnits(debtInput, 8) ?? 0n : toE8s(debtInput));
   const requestedCfxWei = $derived.by(() => {
     const d = parseFloat(debtInput) || 0;
     if (__RUMI_PRODUCTION_PUBLIC_BUILD__) {
-      return suggestedCollateralWeiAtRatio(d, liveCfxPrice ?? 0, liveMinCr ?? 0);
+      return amountUnits(collateralInput, 18) ?? 0n;
     }
     return suggestedCollateralWei(d, parseFloat(cfxPrice) || 0);
   });
   const openTerms = $derived(openTermsFor(DEPLOYMENT, requestedCfxWei, requestedDebtE8s));
+
+  const preview = $derived(positionPreview(
+    amountUnits(collateralInput, 18), amountUnits(debtInput, 8),
+    publicStatus?.collateral_price_is_fresh ? publicStatus.collateral_price_e8[0] ?? null : null,
+    publicStatus?.min_cr_e4[0] ?? null, publicStatus?.liquidation_threshold_e4[0] ?? null,
+  ));
+  const publicInputBlocker = $derived.by(() => {
+    if (!__RUMI_PRODUCTION_PUBLIC_BUILD__) return null;
+    if (requestedCfxWei <= 0n) return "Enter a positive CFX amount, using at most 18 decimal places.";
+    if (requestedDebtE8s <= 0n) return "Enter a positive icUSD amount, using at most 8 decimal places.";
+    const minimum = publicStatus?.effective_debt_config[0]?.min_vault_debt_e8s;
+    if (minimum === undefined) return "The minimum debt is unavailable. Wait for current protocol parameters.";
+    if (requestedDebtE8s < minimum) return `Minimum borrowing amount: ${fmtIcusd(minimum)} icUSD.`;
+    if (!preview) return "A fresh CFX price and collateral parameters are required to preview this position.";
+    if (preview.belowMinimum) return `Add collateral or reduce borrowing to reach the ${(liveMinCr! * 100).toFixed(0)}% minimum ratio.`;
+    return null;
+  });
+  const quotedApr = $derived(publicStatus?.collateral_config_matches_expected ? "2.00% APR" : "Unavailable");
+  const liquidationPriceLabel = $derived(preview ? `$${preview.liquidationPrice.toLocaleString("en-US", { maximumFractionDigits: 8 })}` : "Unavailable");
 
   function reset() { err = null; ok = null; }
   const yesNo = (value: boolean) => value ? "Clear" : "Blocked";
@@ -731,6 +773,7 @@
   async function doOpenUnlocked() {
     reset();
     await assertPublicWriteReady("open");
+    if (__RUMI_PRODUCTION_PUBLIC_BUILD__ && publicInputBlocker) { err = publicInputBlocker; return; }
     if (productionLifecycleUsed) {
       err = "This restricted build is permanently limited to one lifecycle for this wallet.";
       return;
@@ -798,6 +841,7 @@
         }
         ok = `Vault #${res.Ok} opened — verify the returned custody address, then deposit.`;
         await refresh();
+        if (__RUMI_PRODUCTION_PUBLIC_BUILD__) activePage = "vaults";
       }
       else {
         if (openLock && !clearOpenLock(openLock)) return;
@@ -826,9 +870,12 @@
   }
 
   async function doOpen() {
+    if (opening) return;
+    opening = true;
     reset();
     try { await withCanaryExclusivity(doOpenUnlocked); }
     catch (e: any) { err = e?.message ?? String(e); busy = null; }
+    finally { opening = false; }
   }
 
   async function latestVault(vaultId: bigint): Promise<ChainVault> {
@@ -1163,24 +1210,7 @@
   });
 </script>
 
-<div class="wrap" class:production={IS_MAINNET}>
-  <header class="top">
-    <div class="brand">
-      <div class="logo">R</div>
-      <div>
-        <h1>icUSD on Conflux eSpace</h1>
-        <div class="sub">Self-serve CDP · sign with your EVM wallet</div>
-      </div>
-    </div>
-    {#if __RUMI_PRODUCTION_PUBLIC_BUILD__}
-      <span class="badge mainnet">PRODUCTION · chain {CHAIN_ID}</span>
-    {:else}
-      <span class="badge" class:testnet={!IS_MAINNET} class:mainnet={IS_MAINNET}>
-        {IS_MAINNET ? `PRODUCTION · chain ${CHAIN_ID}` : "eSpace testnet · chain 71 · staging"}
-      </span>
-    {/if}
-  </header>
-
+{#snippet productionNotice()}
   {#if __RUMI_PRODUCTION_CANARY_BUILD__}
     <section class="production-warning" aria-label="Production warning">
       <strong>REAL FUNDS · PRODUCTION CANARY</strong>
@@ -1214,7 +1244,8 @@
       {/if}
     </section>
   {/if}
-
+{/snippet}
+{#snippet launchDetails()}
   {#if __RUMI_PRODUCTION_PUBLIC_BUILD__}
     <section class="card launch-status" aria-label="Public launch status">
       <div class="row spread">
@@ -1270,8 +1301,8 @@
       {/if}
     </section>
   {/if}
-
-  {#if !wallet}
+{/snippet}
+{#snippet connectPanel()}
     <div class="card">
       <h2>Connect</h2>
       <p class="hint">Open a CFX-collateralized icUSD vault by signing an EIP-712 intent — no IC login.
@@ -1311,7 +1342,9 @@
         <p class="hint injected-only">Injected wallets only. This build has no private-key input.</p>
       {/if}
     </div>
-  {:else}
+{/snippet}
+{#snippet accountPanel()}
+  {#if wallet}
     <div class="card">
       <div class="row spread">
         <h2>Wallet</h2>
@@ -1325,7 +1358,40 @@
       <div class="kv"><span class="k">icUSD</span><span class="v">{fmtIcusd(icusd)}</span></div>
       <div class="kv"><span class="k">Signer</span><span class="v">{wallet.walletName}</span></div>
     </div>
-
+  {/if}
+{/snippet}
+{#snippet recoveryPanel()}
+      {#if __RUMI_PRODUCTION_CANARY_BUILD__ && canary}
+        <div class="notice info">Persisted lifecycle: <b>{canary.phase}</b>. Submitted actions remain locked across reloads until receipt/backend resolution.</div>
+      {:else if __RUMI_PRODUCTION_CANARY_BUILD__ && owned.length > 0}
+        <div class="notice err">This wallet already has a chain-1030 vault, but it was not opened by this browser's persisted canary record. Actions are read-only and a second lifecycle is disabled.</div>
+      {/if}
+      {#if __RUMI_PRODUCTION_CANARY_BUILD__ && unresolvedAuthorization}
+        <div class="notice err">
+          The action result is ambiguous. It stays locked because repeating it could move funds twice.
+          First refresh and inspect the linked replacement transaction or wallet activity. Clear this lock only after confirming the intended transfer, burn, or signature did not occur.
+          <label class="ack"><input type="checkbox" bind:checked={recoveryAcknowledged} /> I verified the intended action did not occur.</label>
+          <button class="danger" disabled={!!busy || !recoveryAcknowledged} onclick={clearUnresolvedAuthorization}>Clear unresolved authorization lock</button>
+        </div>
+      {/if}
+      {#if __RUMI_PRODUCTION_PUBLIC_BUILD__ && wallet && activePage === "vaults" && publicRiskWriteBlocker}
+        <div class="notice err">Risk-increasing writes are unavailable: {publicRiskWriteBlocker}</div>
+      {/if}
+      {#if __RUMI_PRODUCTION_PUBLIC_BUILD__ && mainnetLock}
+        <div class="notice info">
+          Persisted production action: <b>{mainnetLock.kind}</b> ({mainnetLock.phase}). It remains locked across reloads until a receipt or fresh backend state resolves it.
+          {#if mainnetLock.txHash}<br /><a href={txUrl(mainnetLock.txHash)} target="_blank" rel="noreferrer">View submitted transaction ↗</a>{/if}
+        </div>
+        {#if !mainnetLock.txHash}
+          <div class="notice err">
+            Only clear this authorization lock after checking your wallet activity and confirming that the intended action did not occur. A fresh backend nonce and vault-state check runs before clearing.
+            <label class="ack"><input type="checkbox" bind:checked={mainnetRecoveryAcknowledged} /> I verified the intended wallet action did not occur.</label>
+            <button class="danger" disabled={!!busy || !mainnetRecoveryAcknowledged} onclick={clearMainnetAuthorization}>Clear unresolved production lock</button>
+          </div>
+        {/if}
+      {/if}
+{/snippet}
+{#snippet legacyOpenPanel()}
     <div class="card">
       <h2>Open a vault</h2>
       {#if __RUMI_PRODUCTION_CANARY_BUILD__}
@@ -1358,37 +1424,10 @@
       <div class="row" style="margin-top:14px">
         <button class="primary" onclick={doOpen} disabled={!!busy || !publicRiskWritesEnabled || productionLifecycleUsed || (__RUMI_PRODUCTION_CANARY_BUILD__ && !productionInventoryVerified)}>Sign & open</button>
       </div>
-      {#if __RUMI_PRODUCTION_CANARY_BUILD__ && canary}
-        <div class="notice info">Persisted lifecycle: <b>{canary.phase}</b>. Submitted actions remain locked across reloads until receipt/backend resolution.</div>
-      {:else if __RUMI_PRODUCTION_CANARY_BUILD__ && owned.length > 0}
-        <div class="notice err">This wallet already has a chain-1030 vault, but it was not opened by this browser's persisted canary record. Actions are read-only and a second lifecycle is disabled.</div>
-      {/if}
-      {#if __RUMI_PRODUCTION_CANARY_BUILD__ && unresolvedAuthorization}
-        <div class="notice err">
-          The action result is ambiguous. It stays locked because repeating it could move funds twice.
-          First refresh and inspect the linked replacement transaction or wallet activity. Clear this lock only after confirming the intended transfer, burn, or signature did not occur.
-          <label class="ack"><input type="checkbox" bind:checked={recoveryAcknowledged} /> I verified the intended action did not occur.</label>
-          <button class="danger" disabled={!!busy || !recoveryAcknowledged} onclick={clearUnresolvedAuthorization}>Clear unresolved authorization lock</button>
-        </div>
-      {/if}
-      {#if __RUMI_PRODUCTION_PUBLIC_BUILD__ && publicRiskWriteBlocker}
-        <div class="notice err">Risk-increasing writes are unavailable: {publicRiskWriteBlocker}</div>
-      {/if}
-      {#if __RUMI_PRODUCTION_PUBLIC_BUILD__ && mainnetLock}
-        <div class="notice info">
-          Persisted production action: <b>{mainnetLock.kind}</b> ({mainnetLock.phase}). It remains locked across reloads until a receipt or fresh backend state resolves it.
-          {#if mainnetLock.txHash}<br /><a href={txUrl(mainnetLock.txHash)} target="_blank" rel="noreferrer">View submitted transaction ↗</a>{/if}
-        </div>
-        {#if !mainnetLock.txHash}
-          <div class="notice err">
-            Only clear this authorization lock after checking your wallet activity and confirming that the intended action did not occur. A fresh backend nonce and vault-state check runs before clearing.
-            <label class="ack"><input type="checkbox" bind:checked={mainnetRecoveryAcknowledged} /> I verified the intended wallet action did not occur.</label>
-            <button class="danger" disabled={!!busy || !mainnetRecoveryAcknowledged} onclick={clearMainnetAuthorization}>Clear unresolved production lock</button>
-          </div>
-        {/if}
-      {/if}
+      {@render recoveryPanel()}
     </div>
-
+{/snippet}
+{#snippet vaultPanel()}
     {#each owned as v (v.vault_id)}
       <VaultCard
         vault={v}
@@ -1405,8 +1444,8 @@
     {#if owned.length === 0}
       <div class="card"><p class="hint" style="margin:0">No vaults yet for this address. Open one above.</p></div>
     {/if}
-  {/if}
-
+{/snippet}
+{#snippet activityPanel()}
   {#if busy}<div class="notice info"><span class="spin"></span>{busy}</div>{/if}
   {#if canaryPolling || receiptWatching || (__RUMI_PRODUCTION_PUBLIC_BUILD__ && mainnetLock)}<div class="notice info"><span class="spin"></span>Read-only receipt/status polling is active; no wallet action will happen automatically.</div>{/if}
   {#if err}<div class="notice err">{err}</div>{/if}
@@ -1420,7 +1459,8 @@
       {/each}
     </div>
   {/if}
-
+{/snippet}
+{#snippet legacyFooter()}
   <div class="foot">
     Backend <span class="mono">{BACKEND_CANISTER_ID}</span> ·
     <a href={addressUrl(ICUSD_CONTRACT)} target="_blank" rel="noreferrer">IcUSD <span class="mono">{ICUSD_CONTRACT.slice(0, 10)}…</span> ↗</a><br />
@@ -1432,4 +1472,140 @@
       Testnet only. The chains rail is experimental — not on production.
     {/if}
   </div>
+{/snippet}
+
+{#if __RUMI_PRODUCTION_PUBLIC_BUILD__}
+<div class="public-app">
+  <header class="public-header">
+    <div class="public-brand">
+      <a class="rumi-lockup" href="https://rumiprotocol.com" aria-label="Rumi Protocol"><img src="/brand/rumi.svg" alt="" /><span>RUMI</span></a>
+      <span class="brand-separator">on</span>
+      <a class="conflux-lockup" href="https://confluxnetwork.org" aria-label="Conflux"><img src="/brand/conflux.svg" alt="Conflux" /></a>
+    </div>
+    <nav class="public-nav" aria-label="Main navigation">
+      <button class:active={activePage === "borrow"} aria-current={activePage === "borrow" ? "page" : undefined} onclick={() => activePage = "borrow"}>Borrow</button>
+      <button class:active={activePage === "vaults"} aria-current={activePage === "vaults" ? "page" : undefined} onclick={() => activePage = "vaults"}>My vaults{wallet && owned.length ? ` (${owned.length})` : ""}</button>
+      <a href="https://app.rumiprotocol.com/docs" target="_blank" rel="noreferrer">Docs</a>
+    </nav>
+    <span class="network-label">Conflux eSpace</span>
+    <button class="header-wallet primary" onclick={() => wallet ? activePage = "vaults" : walletDialog?.showModal()}>
+      <img src="/brand/wallet.svg" alt="" />
+      <span>{wallet ? `${wallet.address.slice(0, 6)}…${wallet.address.slice(-4)}` : "Connect wallet"}</span>
+    </button>
+  </header>
+  <main class="public-main">
+    <div class="public-page-heading">
+      <div>
+        <h1>{activePage === "borrow" ? "Borrow icUSD" : "My vaults"}</h1>
+        <p>{activePage === "borrow" ? "Use CFX as collateral on Conflux eSpace." : "Manage collateral, borrowing and repayments."}</p>
+      </div>
+      <button class="refresh" disabled={overviewRefreshing || !!busy} onclick={refreshPage}>{overviewRefreshing ? "Refreshing…" : "Refresh"}</button>
+    </div>
+    {#if publicLaunchRefusal}
+      <div class="public-state" role="status">
+        <strong>New borrowing paused</strong>
+        <span>{publicLaunchRefusal}</span>
+        <a href="#readiness" onclick={() => { const details = document.getElementById("readiness"); if (details instanceof HTMLDetailsElement) details.open = true; }}>Status details</a>
+      </div>
+    {/if}
+    {#if activePage === "borrow"}
+      <BorrowWorkspace
+        collateral={collateralInput}
+        debt={debtInput}
+        onCollateral={(value) => collateralInput = value}
+        onDebt={(value) => debtInput = value}
+        inputsDisabled={!!busy || opening || !!mainnetLock}
+        collateralValue={requestedCfxWei > 0n ? (publicStatus?.collateral_price_is_fresh && liveCfxPrice !== null ? `≈ ${money(Number(requestedCfxWei) / 1e18 * liveCfxPrice)}` : "Collateral value unavailable") : "Enter a CFX amount"}
+        priceLabel={liveCfxPrice === null ? "CFX price unavailable" : `CFX price: $${liveCfxPrice.toLocaleString("en-US", { maximumFractionDigits: 8 })}${publicStatus?.collateral_price_is_fresh ? "" : " · stale"}`}
+        feeLabel="Mint deduction"
+        feeAmount={publicStatus?.collateral_config_matches_expected ? "None" : "Unavailable"}
+        interestLabel={quotedApr}
+        receivedAmount={requestedDebtE8s <= 0n ? "Enter an amount" : publicStatus?.collateral_config_matches_expected ? `${fmtIcusd(requestedDebtE8s)} icUSD` : "Unavailable"}
+        ratioLabel={preview ? `${preview.ratioPercent.toLocaleString("en-US", { maximumFractionDigits: 2 })}%` : "—"}
+        health={preview ? (preview.tone === "safe" ? "Healthy" : preview.tone === "caution" ? "Caution" : "Below minimum") : "Not calculated"}
+        tone={preview?.tone ?? "unavailable"}
+        ratioPosition={preview?.position ?? null}
+        minPosition={liveMinCr === null ? null : meterPosition(liveMinCr * 100)}
+        liquidationPosition={liveLiquidationCr === null ? null : meterPosition(liveLiquidationCr * 100)}
+        safePosition={liveMinCr === null ? null : meterPosition(liveMinCr * 123.4)}
+        minLabel={liveMinCr === null ? "Unavailable" : `${(liveMinCr * 100).toFixed(0)}%`}
+        liquidationLabel={liveLiquidationCr === null ? "Unavailable" : `${(liveLiquidationCr * 100).toFixed(0)}%`}
+        liquidationPrice={liquidationPriceLabel}
+        positionNote={preview ? `If CFX falls to ${liquidationPriceLabel}, this position may be liquidated. Interest changes this estimate over time.` : requestedCfxWei > 0n && requestedDebtE8s > 0n ? "A fresh CFX price is required to calculate this position. Refresh to check again." : "Enter amounts to see your projected collateral ratio and liquidation price."}
+        protocolRows={overview.rows}
+        composition={overview.composition}
+        protocolNote={overview.note}
+        connected={!!wallet}
+        onConnect={() => walletDialog?.showModal()}
+        onOpen={doOpen}
+        openDisabled={!!busy || opening || !publicRiskWritesEnabled || !!publicInputBlocker}
+        openLabel={opening ? "Opening vault…" : "Sign & open vault"}
+        blocker={wallet ? publicRiskWriteBlocker ?? publicInputBlocker : null}
+      >
+        {#snippet actionContent()}
+          {#if wallet}<p class="hint">Opening signs your vault terms. You will confirm the CFX deposit separately in My vaults. Minting follows deposit confirmation.</p>{/if}
+          {@render activityPanel()}
+          {@render recoveryPanel()}
+          {#if pendingExists}<p><button class="ghost" onclick={() => activePage = "vaults"}>Continue pending vault</button></p>{/if}
+        {/snippet}
+      </BorrowWorkspace>
+    {:else}
+      {#if wallet}
+        {@render accountPanel()}
+        <div class="public-vaults">{@render vaultPanel()}</div>
+        {@render activityPanel()}
+        {@render recoveryPanel()}
+      {:else}
+        <section class="empty-vaults">
+          <h2>Connect to see your vaults</h2>
+          <p>Your Conflux positions are linked to your EVM wallet.</p>
+          <button class="primary" onclick={() => walletDialog?.showModal()}>Connect wallet</button>
+        </section>
+      {/if}
+    {/if}
+    <details id="readiness" class="public-status-details">
+      <summary>Network status and contract details</summary>
+      {@render launchDetails()}
+    </details>
+  </main>
+  <footer class="public-footer">
+    <span>Rumi Protocol · Conflux eSpace</span>
+    <span><a href={addressUrl(ICUSD_CONTRACT)} target="_blank" rel="noreferrer">icUSD contract</a> · <a href={ESPACE_EXPLORER} target="_blank" rel="noreferrer">ConfluxScan</a></span>
+  </footer>
+  <dialog class="wallet-dialog" bind:this={walletDialog} aria-labelledby="wallet-dialog-title">
+    <div class="wallet-dialog-heading"><h2 id="wallet-dialog-title">Connect wallet</h2><button aria-label="Close wallet picker" onclick={() => walletDialog?.close()}><img src="/brand/x-mark.svg" alt="" /></button></div>
+    {@render productionNotice()}
+    {#if !wallet}{@render connectPanel()}{/if}
+    {#if err}<p class="notice err" role="alert">{err}</p>{/if}
+  </dialog>
 </div>
+{:else}
+<div class="wrap" class:production={IS_MAINNET}>
+  <header class="top">
+    <div class="brand">
+      <div class="logo">R</div>
+      <div>
+        <h1>icUSD on Conflux eSpace</h1>
+        <div class="sub">Self-serve CDP · sign with your EVM wallet</div>
+      </div>
+    </div>
+    {#if __RUMI_PRODUCTION_PUBLIC_BUILD__}
+      <span class="badge mainnet">PRODUCTION · chain {CHAIN_ID}</span>
+    {:else}
+      <span class="badge" class:testnet={!IS_MAINNET} class:mainnet={IS_MAINNET}>
+        {IS_MAINNET ? `PRODUCTION · chain ${CHAIN_ID}` : "eSpace testnet · chain 71 · staging"}
+      </span>
+    {/if}
+  </header>
+  {@render productionNotice()}
+  {#if !wallet}
+    {@render connectPanel()}
+  {:else}
+    {@render accountPanel()}
+    {@render legacyOpenPanel()}
+    {@render vaultPanel()}
+  {/if}
+  {@render activityPanel()}
+  {@render legacyFooter()}
+</div>
+{/if}
