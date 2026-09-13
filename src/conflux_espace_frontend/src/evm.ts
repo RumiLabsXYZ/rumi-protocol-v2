@@ -40,6 +40,10 @@ export interface Wallet {
   walletName: string;
   client: WalletClient;
   account: Address | Account;
+  // Raw EIP-1193 provider behind an injected wallet, kept only for local
+  // accountsChanged / chainChanged / disconnect subscriptions. Undefined for
+  // the dev-key signer, which has no provider events.
+  provider?: unknown;
 }
 
 // ── EIP-6963 multi-injected-provider discovery ──────────────────────────────
@@ -107,7 +111,7 @@ export async function connectInjected(detail: EIP6963ProviderDetail): Promise<Wa
   const client = createWalletClient({ chain: confluxESpaceChain, transport: custom(eth) });
   const [address] = await client.requestAddresses();
   await ensureChain(client, eth);
-  return { address, kind: "injected", walletName: detail.info.name, client, account: address };
+  return { address, kind: "injected", walletName: detail.info.name, client, account: address, provider: eth };
 }
 
 /** True if a legacy `window.ethereum` exists (pre-EIP-6963 wallets / fallback). */
@@ -123,7 +127,7 @@ export async function connectLegacyInjected(): Promise<Wallet> {
   const [address] = await client.requestAddresses();
   await ensureChain(client, eth);
   const name = eth.isRabby ? "Rabby" : eth.isMetaMask ? "MetaMask" : "Injected wallet";
-  return { address, kind: "injected", walletName: name, client, account: address };
+  return { address, kind: "injected", walletName: name, client, account: address, provider: eth };
 }
 
 export async function walletChainId(w: Wallet): Promise<number> {
@@ -133,6 +137,25 @@ export async function walletChainId(w: Wallet): Promise<number> {
 export async function walletStillControlsAddress(w: Wallet): Promise<boolean> {
   const addresses = await w.client.getAddresses();
   return addresses.some((address) => address.toLowerCase() === w.address.toLowerCase());
+}
+
+const WALLET_PROVIDER_EVENTS = ["accountsChanged", "chainChanged", "disconnect"] as const;
+
+// Subscribes to this one wallet connection's own EIP-1193 provider events, not
+// a global window.ethereum listener, so a second injected wallet or a stale
+// subscription from a previous connection can never fire this callback. Lets
+// a caller invalidate an in-flight balance/fee read the moment the account or
+// network actually changes, instead of only on the next explicit fetch. Never
+// reconnects or changes which address is tracked. Returns a no-op unsubscribe
+// when the wallet has no event-capable provider (e.g. the dev-key signer).
+export function subscribeWalletProviderEvents(wallet: Wallet, onChange: () => void): () => void {
+  const provider = wallet.provider as any;
+  if (!provider || typeof provider.on !== "function") return () => {};
+  for (const event of WALLET_PROVIDER_EVENTS) provider.on(event, onChange);
+  return () => {
+    if (typeof provider.removeListener !== "function") return;
+    for (const event of WALLET_PROVIDER_EVENTS) provider.removeListener(event, onChange);
+  };
 }
 
 async function ensureChain(client: WalletClient, eth: any) {
@@ -198,6 +221,24 @@ export async function cfxBalance(addr: Address): Promise<bigint> {
   return publicClient.getBalance({ address: addr });
 }
 
+/** Best-effort current CFX fee-per-gas estimate (wei), for sizing the Max
+ * collateral gas reserve. Tries EIP-1559 `maxFeePerGas` first, falls back to
+ * a legacy gas price, and returns null (never 0n) when both reads fail so a
+ * failed estimate can never masquerade as a zero fee. */
+export async function estimateCfxFeePerGasWei(): Promise<bigint | null> {
+  try {
+    const fees = await publicClient.estimateFeesPerGas();
+    if (fees.maxFeePerGas) return fees.maxFeePerGas;
+  } catch {
+    // fall through to legacy gas price
+  }
+  try {
+    return await publicClient.getGasPrice();
+  } catch {
+    return null;
+  }
+}
+
 export type TransactionFinality = {
   hash: Hex;
   ok: boolean;
@@ -240,6 +281,9 @@ export function toWei(s: string): bigint {
 
 export const fmtCfx = (wei: bigint) => Number(formatEther(wei)).toLocaleString(undefined, { maximumFractionDigits: 4 });
 export const fmtIcusd = (e8s: bigint) => Number(formatUnits(e8s, ICUSD_DECIMALS)).toLocaleString(undefined, { maximumFractionDigits: 4 });
+// Exact wei -> decimal-string conversion (no float rounding), for populating
+// an amount input (e.g. Max collateral) with the full precision value.
+export const weiToInputString = (wei: bigint) => formatEther(wei);
 export const txUrl = (hash: string) => `${ESPACE_EXPLORER}/tx/${hash}`;
 export const addressUrl = (address: string) => `${ESPACE_EXPLORER}/address/${address}`;
 export { parseEther };
