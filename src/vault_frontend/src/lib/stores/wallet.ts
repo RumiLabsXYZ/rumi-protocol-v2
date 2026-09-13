@@ -270,8 +270,8 @@ function createWalletStore() {
 
   function startBalanceRefresh() {
     if (!refreshInterval) {
-      refreshBalance();
-      refreshInterval = setInterval(refreshBalance, 30000);
+      refreshBalance().catch(() => {});
+      refreshInterval = setInterval(() => { refreshBalance().catch(() => {}); }, 30000);
     }
   }
 
@@ -400,7 +400,11 @@ function createWalletStore() {
     pnp,
     getAuthenticatedActor: () => authenticatedActor,
 
-    // Initialize and sync wallet state from auth service (for auto-reconnect)
+    // Initialize and sync wallet state from auth service (for auto-reconnect).
+    // Publishes the visible connected state as soon as auth confirms a valid
+    // persisted delegation/session — it must never wait on balance, price,
+    // protocol-status, or collateral network calls, and a failure in any of
+    // those must not revert the visible wallet back to "Connect Wallet".
     async initialize() {
       try {
         await auth.initialize();
@@ -412,21 +416,6 @@ function createWalletStore() {
 
           appDataStore.setWalletState(true, principal);
 
-          const [{ icpBalance, icusdBalance }, protocolStatus, ckusdtBalance, ckusdcBalance, threeUsdBalance] = await Promise.all([
-            appDataStore.fetchBalances(principal),
-            appDataStore.fetchProtocolStatus(),
-            TokenService.getTokenBalance(CONFIG.ckusdtLedgerId, principal).catch(() => 0n),
-            TokenService.getTokenBalance(CONFIG.ckusdcLedgerId, principal).catch(() => 0n),
-            TokenService.getTokenBalance(CONFIG.threePoolCanisterId, principal).catch(() => 0n),
-          ]);
-          const icpPriceValue = protocolStatus?.lastIcpRate || 0;
-          // 3USD is the 3pool LP token: its USD value is the pool virtual price, not $1.
-          const threeUsdPriceValue = await getThreeUsdPrice();
-          const formatStable6 = (raw: bigint) => {
-        const value = Number(raw) / 1_000_000;
-        return (Math.floor(value * 1_000_000) / 1_000_000).toFixed(6);
-      };
-
           let icon = '';
           if (authState.walletType === WALLET_TYPES.INTERNET_IDENTITY) {
             icon = '/wallets/01InfinityMarkHEX.svg';
@@ -436,51 +425,17 @@ function createWalletStore() {
             icon = '/wallets/oisy.svg';
           }
 
-          // Fetch collateral token balances (ckBTC, ckXAUT, etc.)
-          let collateralBalances: Record<string, TokenBalance> = {};
-          try {
-            collateralBalances = await fetchCollateralBalances(principal, {});
-          } catch (e) {
-            console.warn('Failed to fetch collateral balances:', e);
-          }
-
           update(s => ({
             ...s,
             isConnected: true,
-            principal: principal,
-            balance: icpBalance,
-            tokenBalances: {
-              ICP: {
-                raw: icpBalance,
-                formatted: TokenService.formatBalance(icpBalance),
-                usdValue: icpPriceValue ? Number(TokenService.formatBalance(icpBalance)) * icpPriceValue : null
-              },
-              ICUSD: {
-                raw: icusdBalance,
-                formatted: TokenService.formatBalance(icusdBalance),
-                usdValue: Number(TokenService.formatBalance(icusdBalance))
-              },
-              CKUSDT: {
-                raw: ckusdtBalance,
-                formatted: formatStable6(ckusdtBalance),
-                usdValue: Number(formatStable6(ckusdtBalance))
-              },
-              CKUSDC: {
-                raw: ckusdcBalance,
-                formatted: formatStable6(ckusdcBalance),
-                usdValue: Number(formatStable6(ckusdcBalance))
-              },
-              THREEUSD: {
-                raw: threeUsdBalance,
-                formatted: TokenService.formatBalance(threeUsdBalance),
-                usdValue: Number(TokenService.formatBalance(threeUsdBalance)) * threeUsdPriceValue
-              },
-              ...collateralBalances
-            },
+            principal,
             loading: false,
-            icon: icon
+            icon
           }));
 
+          // Data population happens in the background via refreshBalance's
+          // own fallback/error handling — a failure here surfaces as an
+          // `error` on the store, not a lost connection.
           startBalanceRefresh();
           return true;
         }
@@ -492,81 +447,35 @@ function createWalletStore() {
       }
     },
 
+    // Publishes the visible connected walletStore/appDataStore state as soon
+    // as auth.connect + getOwner succeed — it must not wait on (or be
+    // reverted by) balance, price, protocol-status, or collateral network
+    // calls. Those run as best-effort background work via
+    // startBalanceRefresh()/refreshBalance(), whose own error handling keeps
+    // a failure from ever un-connecting the wallet.
     async connect(walletId: string) {
       try {
         update(s => ({ ...s, loading: true, error: null }));
-        
+
         await cleanupPendingOperations();
-        
+
         // CRITICAL: Clear the vault cache before connecting a new wallet
         // This ensures we don't show stale vaults from a previous wallet session
         await clearVaultCache();
-        
+
         const account = await auth.connect(walletId);
-        
+
         if (!account) throw new Error('No account returned from wallet');
-        
+
         const ownerPrincipal = getOwner(account);
         console.log('Connected principal:', ownerPrincipal.toText());
 
         appDataStore.setWalletState(true, ownerPrincipal);
 
-        const [{ icpBalance, icusdBalance }, protocolStatus, ckusdtBalance, ckusdcBalance, threeUsdBalance] = await Promise.all([
-          appDataStore.fetchBalances(ownerPrincipal),
-          appDataStore.fetchProtocolStatus(),
-          TokenService.getTokenBalance(CONFIG.ckusdtLedgerId, ownerPrincipal).catch(() => 0n),
-          TokenService.getTokenBalance(CONFIG.ckusdcLedgerId, ownerPrincipal).catch(() => 0n),
-          TokenService.getTokenBalance(CONFIG.threePoolCanisterId, ownerPrincipal).catch(() => 0n),
-        ]);
-        const icpPriceValue = protocolStatus?.lastIcpRate || 0;
-        // 3USD is the 3pool LP token: its USD value is the pool virtual price, not $1.
-        const threeUsdPriceValue = await getThreeUsdPrice();
-        const formatStable6 = (raw: bigint) => {
-        const value = Number(raw) / 1_000_000;
-        return (Math.floor(value * 1_000_000) / 1_000_000).toFixed(6);
-      };
-
-        // Fetch collateral token balances (ckBTC, ckXAUT, etc.)
-        let collateralBalances: Record<string, TokenBalance> = {};
-        try {
-          collateralBalances = await fetchCollateralBalances(ownerPrincipal, {});
-        } catch (e) {
-          console.warn('Failed to fetch collateral balances:', e);
-        }
-
         update(s => ({
           ...s,
           isConnected: true,
           principal: ownerPrincipal,
-          balance: icpBalance,
-          tokenBalances: {
-            ICP: {
-              raw: icpBalance,
-              formatted: TokenService.formatBalance(icpBalance),
-              usdValue: icpPriceValue !== null ? Number(TokenService.formatBalance(icpBalance)) * icpPriceValue : null
-            },
-            ICUSD: {
-              raw: icusdBalance,
-              formatted: TokenService.formatBalance(icusdBalance),
-              usdValue: Number(TokenService.formatBalance(icusdBalance))
-            },
-            CKUSDT: {
-              raw: ckusdtBalance,
-              formatted: formatStable6(ckusdtBalance),
-              usdValue: Number(formatStable6(ckusdtBalance))
-            },
-            CKUSDC: {
-              raw: ckusdcBalance,
-              formatted: formatStable6(ckusdcBalance),
-              usdValue: Number(formatStable6(ckusdcBalance))
-            },
-            THREEUSD: {
-              raw: threeUsdBalance,
-              formatted: TokenService.formatBalance(threeUsdBalance),
-              usdValue: Number(TokenService.formatBalance(threeUsdBalance)) * threeUsdPriceValue
-            },
-            ...collateralBalances
-          },
           loading: false,
           icon: walletId === WALLET_TYPES.INTERNET_IDENTITY
             ? '/wallets/01InfinityMarkHEX.svg'
@@ -574,9 +483,9 @@ function createWalletStore() {
         }));
 
         startBalanceRefresh();
-        
+
         debugWalletState();
-        
+
         return true;
       } catch (err) {
         console.error('Connection failed:', err);
