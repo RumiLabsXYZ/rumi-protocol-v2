@@ -2831,6 +2831,10 @@ mod chain_public_launch_status_tests {
             status.liquidation_config_digest.as_deref(),
             Some(status.expected_liquidation_config_digest.as_str())
         );
+        assert_eq!(
+            status.expected_liquidation_config_digest,
+            "f8e0e56193bf3f2472ca8645dfee29956644cd01a0d2c06970b348328930b29c"
+        );
         assert!(status.hot_wallet_balance_is_fresh);
         assert_eq!(status.hot_wallet_balance_age_ns, Some(500));
         assert_eq!(
@@ -3081,12 +3085,16 @@ mod chain_public_launch_status_tests {
             .enabled = false;
         assert_reason(&state, 1_500, "liquidation_disabled");
 
-        let route_mutations: [fn(&mut ChainLiquidationConfigV1); 6] = [
+        let route_mutations: [fn(&mut ChainLiquidationConfigV1); 7] = [
             |cfg| cfg.router = "0x0000000000000000000000000000000000000001".into(),
             |cfg| cfg.factory = "0x0000000000000000000000000000000000000002".into(),
             |cfg| cfg.pair = "0x0000000000000000000000000000000000000003".into(),
             |cfg| cfg.collateral_token = "0x0000000000000000000000000000000000000004".into(),
             |cfg| cfg.settle_stable_token = "0x0000000000000000000000000000000000000005".into(),
+            // The pre-launch production row used a $2,000 ceiling. A backend
+            // carrying the tightened $1,800 invariant must reject that row
+            // until the live config is updated, so the transition fails closed.
+            |cfg| cfg.max_swap_value_e8s = 200_000_000_000,
             |cfg| cfg.max_price_age_ns = 1,
         ];
         for mutate in route_mutations {

@@ -1418,7 +1418,7 @@ fn mainnet_liquidation_config() -> ChainLiquidationConfigV1 {
         slippage_cap_bps: 250,
         restore_target_cr_e4: 15_500,
         enabled: true,
-        max_swap_value_e8s: candid::Nat::from(2_000u128 * E8),
+        max_swap_value_e8s: candid::Nat::from(1_800u128 * E8),
         max_price_age_ns: 1_800_000_000_000,
         max_dex_oracle_divergence_bps: 500,
         fee_bps: 25,
