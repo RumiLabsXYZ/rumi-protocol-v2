@@ -15,6 +15,7 @@
   import LiquidityInterface from '../../lib/components/swap/LiquidityInterface.svelte';
   import PoolInfoCard from '../../lib/components/swap/PoolInfoCard.svelte';
   import LoadingSpinner from '../../lib/components/common/LoadingSpinner.svelte';
+  import EarnSubNav from '../../lib/components/layout/EarnSubNav.svelte';
 
   let hasCachedData = _poolStatus !== null;
   let loading = !hasCachedData;
@@ -119,6 +120,8 @@
 </svelte:head>
 
 <div class="page-container">
+  <EarnSubNav active="3usd" />
+
   <div class="page-header">
     <h1 class="page-title">3USD</h1>
     {#if apyFormatted !== null}
@@ -170,7 +173,7 @@
       <!-- RIGHT: Mint/Redeem panel -->
       <div class="action-column">
         <div class="action-panel">
-          <p class="explainer">Deposit any stablecoin or combination of the three to get 3USD</p>
+          <p class="explainer">Deposit icUSD, ckUSDT, or ckUSDC, in any combination, to receive 3USD: a token representing your share of the pool.</p>
           <LiquidityInterface on:success={handleSuccess} />
         </div>
       </div>

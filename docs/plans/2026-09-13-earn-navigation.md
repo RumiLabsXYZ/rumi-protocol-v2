@@ -1,6 +1,7 @@
 # Earn navigation implementation brief
 
-Status: Accepted product direction; Sonnet dispatch awaiting explicit source-sharing approval.
+Status: Product direction and first-party Anthropic source sharing approved.
+Implementation and verification are tracked on `codex/earn-navigation` and its PR.
 
 ## Accepted behavior
 
@@ -64,6 +65,7 @@ Permitted writes:
 
 - The main layout and the `earn`, `3usd`, `stability-pool`, and `swap` page components.
 - Shared Earn navigation components and 3USD liquidity form copy.
+- Additive completeness metadata in the existing frontend rate helper, preserving its financial calculations and existing numeric fallbacks.
 - Focused tests and directly related navigation documentation if needed.
 - Local worker handoff files containing scoped implementation and review evidence.
 

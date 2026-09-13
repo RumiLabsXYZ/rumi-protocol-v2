@@ -1,19 +1,24 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { goto } from '$app/navigation';
   import { walletStore } from '../../lib/stores/wallet';
   import SwapInterface from '../../lib/components/swap/SwapInterface.svelte';
   import SwapLiquidityToggle from '../../lib/components/swap/SwapLiquidityToggle.svelte';
   import PoolListView from '../../lib/components/swap/PoolListView.svelte';
   import AmmLiquidityPanel from '../../lib/components/swap/AmmLiquidityPanel.svelte';
-  import LiquidityInterface from '../../lib/components/swap/LiquidityInterface.svelte';
   import { getThreePoolApy } from '../../lib/services/threePoolApyService';
   import { AMM1_LIQUIDITY_PAUSED } from '../../lib/config';
 
   let mode: 'swap' | 'liquidity' = 'swap';
-  let liquidityView: 'list' | 'threepool' | 'amm' = 'list';
+  // '3pool' liquidity reaches the canonical /3usd deposit experience (see
+  // handlePoolSelect) rather than duplicating that form here, so this view
+  // only ever needs to render the list or the paused AMM management panel.
+  let liquidityView: 'list' | 'amm' = 'list';
 
   // The 3USD/ICP AMM is temporarily paused, so the liquidity hero reflects
-  // the active 3pool opportunity only.
+  // the active 3pool opportunity only. `threePoolApyPct` stays null (number
+  // hidden) whenever the rate can't be trusted as live, but the banner and
+  // its "Provide liquidity" entry point remain visible either way.
   let threePoolApyPct: number | null = null;
 
   onMount(() => {
@@ -22,7 +27,7 @@
 
   async function loadThreePoolApy() {
     const r = await getThreePoolApy();
-    threePoolApyPct = r.total_apy_pct;
+    threePoolApyPct = r.complete && Number.isFinite(r.total_apy_pct) ? r.total_apy_pct : null;
   }
 
   function handleSuccess() {
@@ -30,6 +35,12 @@
   }
 
   function handlePoolSelect(e: CustomEvent<{ pool: 'threepool' | 'amm' }>) {
+    if (e.detail.pool === 'threepool') {
+      // Same canonical 3USD deposit experience as the /3usd page and the
+      // Earn overview, not a duplicate form embedded in Swap.
+      goto('/3usd');
+      return;
+    }
     liquidityView = e.detail.pool;
   }
 
@@ -42,8 +53,7 @@
   }
 
   function switchToLiquidityTab() {
-    mode = 'liquidity';
-    liquidityView = 'list';
+    goto('/3usd');
   }
 </script>
 
@@ -56,9 +66,15 @@
     <h1 class="page-title">{mode === 'swap' ? 'Swap' : 'Liquidity'}</h1>
   </div>
 
-  {#if threePoolApyPct !== null && mode === 'swap'}
+  {#if mode === 'swap'}
     <div class="earn-banner">
-      <span class="earn-label">Earn {threePoolApyPct.toFixed(2)}% APY in 3pool</span>
+      <span class="earn-label">
+        {#if threePoolApyPct !== null}
+          Earn {threePoolApyPct.toFixed(2)}% APY providing stablecoin liquidity
+        {:else}
+          Earn from stablecoin liquidity
+        {/if}
+      </span>
       <button on:click={switchToLiquidityTab} class="earn-cta">Provide liquidity →</button>
     </div>
   {/if}
@@ -71,12 +87,6 @@
         <SwapInterface on:success={handleSuccess} />
       {:else if liquidityView === 'list'}
         <PoolListView on:select={handlePoolSelect} />
-      {:else if liquidityView === 'threepool'}
-        <div>
-          <button class="back-link" on:click={handleBack}>← All pools</button>
-          <p class="explainer">Deposit stablecoins to mint 3USD</p>
-          <LiquidityInterface on:success={handleSuccess} />
-        </div>
       {:else if liquidityView === 'amm'}
         <AmmLiquidityPanel depositsPaused={AMM1_LIQUIDITY_PAUSED} on:success={handleSuccess} on:back={handleBack} />
       {/if}
@@ -122,19 +132,6 @@
       0 2px 8px -2px rgba(8, 11, 22, 0.6);
   }
 
-  .back-link {
-    background: none;
-    border: none;
-    color: var(--rumi-teal);
-    font-size: 0.8125rem;
-    font-weight: 500;
-    cursor: pointer;
-    padding: 0;
-    margin-bottom: 1rem;
-  }
-
-  .back-link:hover { text-decoration: underline; }
-
   .earn-banner {
     display: flex;
     align-items: center;
@@ -171,13 +168,6 @@
 
   .earn-cta:hover {
     background-color: rgba(74, 222, 128, 0.12);
-  }
-
-  .explainer {
-    font-size: 0.8125rem;
-    color: var(--rumi-text-secondary);
-    margin: 0 0 1.25rem;
-    line-height: 1.5;
   }
 
   @media (max-width: 520px) {
