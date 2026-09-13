@@ -238,6 +238,12 @@ thread_local! {
     // transient (not-persisted) lifecycle as every other timer here.
     static CHAINS_PRICE_TIMER_ID: std::cell::Cell<Option<ic_cdk_timers::TimerId>> =
         const { std::cell::Cell::new(None) };
+    // Chain-1030-only proactive hot-wallet cache refresh. Fixed cadence (not
+    // operator-tunable), independent of `observer_tick_interval_secs`, so
+    // tuning the observer cadence can never widen the public-admission
+    // stale-cache window. Same transient (not-persisted) lifecycle.
+    static CONFLUX_HOT_WALLET_REFRESH_TIMER_ID: std::cell::Cell<Option<ic_cdk_timers::TimerId>> =
+        const { std::cell::Cell::new(None) };
 }
 
 fn register_xrc_fetch_timer() {
@@ -507,6 +513,28 @@ fn register_chains_price_timer() {
     });
 }
 
+/// Fixed 60s cadence, independent of `observer_tick_interval_secs`. See
+/// `public_readiness::CONFLUX_HOT_WALLET_PROACTIVE_REFRESH_MIN_AGE_NS` and
+/// `deposit_watch::run_conflux_hot_wallet_proactive_refresh` for the
+/// rationale: a healthy RPC must refresh chain 1030's hot-wallet cache well
+/// ahead of the unchanged `HOT_WALLET_BALANCE_MAX_AGE_NS` public-admission
+/// TTL, no matter how the (separately tunable) observer cadence is set. No
+/// operator-facing tuning knob, matching `register_chains_price_timer`: this
+/// keeps the change from touching `State`'s persisted shape.
+fn register_conflux_hot_wallet_refresh_timer() {
+    CONFLUX_HOT_WALLET_REFRESH_TIMER_ID.with(|cell| {
+        if let Some(old) = cell.get() {
+            ic_cdk_timers::clear_timer(old);
+        }
+        let new_id = ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(60), || {
+            ic_cdk::spawn(
+                rumi_protocol_backend::chains::evm::deposit_watch::run_conflux_hot_wallet_proactive_refresh(),
+            )
+        });
+        cell.set(Some(new_id));
+    });
+}
+
 fn setup_timers() {
     // ── Immediate price fetch (fire on the very next execution round) ───────
     // Prices are ephemeral and not stored as events, so after an upgrade
@@ -599,6 +627,7 @@ fn setup_timers() {
     // liquidation config row) makes this a no-op, zero-XRC-call timer on
     // any canister with no chain configured, so it is safe to register everywhere.
     register_chains_price_timer();
+    register_conflux_hot_wallet_refresh_timer();
 }
 
 /// M2 anti-spam backstop: hourly GC of stale `AwaitingDeposit` chain vaults

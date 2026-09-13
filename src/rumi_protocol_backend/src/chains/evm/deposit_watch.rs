@@ -1156,6 +1156,103 @@ pub(crate) fn advance_cursor_and_prune(
     }
 }
 
+/// A transient owner token makes stale-guard reclamation safe: a late callback
+/// may release only the lease it acquired, never a successor's lease.
+#[derive(Debug, PartialEq, Eq)]
+struct HotWalletRefreshGuard {
+    chain: ChainId,
+    token: u64,
+}
+
+#[derive(Clone, Copy)]
+struct HotWalletRefreshLease {
+    acquired_at_ns: u64,
+    token: u64,
+}
+
+const HOT_WALLET_REFRESH_IN_FLIGHT_RECLAIM_NS: u64 = 600_000_000_000;
+
+thread_local! {
+    static HOT_WALLET_REFRESH_IN_FLIGHT: std::cell::RefCell<std::collections::BTreeMap<ChainId, HotWalletRefreshLease>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+    static HOT_WALLET_REFRESH_NEXT_TOKEN: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+
+fn next_hot_wallet_refresh_token() -> u64 {
+    HOT_WALLET_REFRESH_NEXT_TOKEN.with(|next| {
+        let token = next.get().max(1);
+        next.set(token.wrapping_add(1).max(1));
+        token
+    })
+}
+
+fn try_acquire_hot_wallet_refresh(chain: ChainId, now_ns: u64) -> Option<HotWalletRefreshGuard> {
+    HOT_WALLET_REFRESH_IN_FLIGHT.with(|leases| {
+        let mut leases = leases.borrow_mut();
+        if let Some(existing) = leases.get(&chain) {
+            if now_ns.saturating_sub(existing.acquired_at_ns)
+                < HOT_WALLET_REFRESH_IN_FLIGHT_RECLAIM_NS
+            {
+                return None;
+            }
+        }
+        let token = next_hot_wallet_refresh_token();
+        leases.insert(
+            chain,
+            HotWalletRefreshLease {
+                acquired_at_ns: now_ns,
+                token,
+            },
+        );
+        Some(HotWalletRefreshGuard { chain, token })
+    })
+}
+
+fn hot_wallet_refresh_is_current(guard: &HotWalletRefreshGuard) -> bool {
+    HOT_WALLET_REFRESH_IN_FLIGHT.with(|leases| {
+        leases
+            .borrow()
+            .get(&guard.chain)
+            .map(|lease| lease.token == guard.token)
+            .unwrap_or(false)
+    })
+}
+
+fn release_hot_wallet_refresh(guard: &HotWalletRefreshGuard) {
+    HOT_WALLET_REFRESH_IN_FLIGHT.with(|leases| {
+        let mut leases = leases.borrow_mut();
+        if leases
+            .get(&guard.chain)
+            .map(|lease| lease.token == guard.token)
+            .unwrap_or(false)
+        {
+            leases.remove(&guard.chain);
+        }
+    });
+}
+
+impl Drop for HotWalletRefreshGuard {
+    fn drop(&mut self) {
+        release_hot_wallet_refresh(self);
+    }
+}
+
+/// Run the chain-1030-only proactive refresh. Disabled chains remain dependent
+/// on the developer preflight endpoint; failed refreshes leave the proof stale.
+pub async fn run_conflux_hot_wallet_proactive_refresh() {
+    let chain = crate::chains::evm::conflux::config::CONFLUX_MAINNET_CHAIN_ID;
+    let should_refresh = read_state(|state| {
+        public_readiness::conflux_hot_wallet_needs_proactive_refresh(
+            state,
+            chain,
+            ic_cdk::api::time(),
+        )
+    });
+    if should_refresh {
+        let _ = refresh_hot_wallet_balance(chain).await;
+    }
+}
+
 /// Refresh the cached settlement-address MON balance for `chain` (Task 11).
 ///
 /// Derives the settlement (minter) address via `settlement_derivation_path` +
@@ -1169,6 +1266,8 @@ pub(crate) fn advance_cursor_and_prune(
 /// risk gate separately fails closed until a current-key proof exists. Borrow
 /// discipline: no `read_state`/`mutate_state` borrow is held across an `.await`.
 pub async fn refresh_hot_wallet_balance(chain: ChainId) -> Result<u128, String> {
+    let guard = try_acquire_hot_wallet_refresh(chain, ic_cdk::api::time())
+        .ok_or_else(|| "hot-wallet refresh already in flight".to_string())?;
     let captured_generation = tecdsa::current_ecdsa_key_generation();
     let captured_key_name = read_state(|state| state.chains_ecdsa_key_name.clone());
     // Resolve the settlement address via the per-chain cache (Task 11 M1) — the
@@ -1198,6 +1297,7 @@ pub async fn refresh_hot_wallet_balance(chain: ChainId) -> Result<u128, String> 
                     captured_generation,
                     &addr,
                     captured_evm_rpc_principal,
+                    &guard,
                     current_generation,
                     current_cached_address.as_deref(),
                     bal,
@@ -1233,12 +1333,14 @@ fn commit_hot_wallet_refresh_if_current(
     captured_generation: u64,
     captured_address: &str,
     captured_evm_rpc_principal: candid::Principal,
+    guard: &HotWalletRefreshGuard,
     current_generation: u64,
     current_cached_address: Option<&str>,
     balance_e18: u128,
     refreshed_at_ns: u64,
 ) -> Result<(), String> {
-    if state.chains_ecdsa_key_name != captured_key_name
+    if !hot_wallet_refresh_is_current(guard)
+        || state.chains_ecdsa_key_name != captured_key_name
         || current_generation != captured_generation
         || current_cached_address != Some(captured_address)
         || super::evm_rpc::evm_rpc_principal_in_state(state) != captured_evm_rpc_principal
@@ -1365,6 +1467,54 @@ mod awaiting_deposit_page_tests {
 }
 
 #[cfg(test)]
+mod hot_wallet_refresh_in_flight_tests {
+    use super::{try_acquire_hot_wallet_refresh, HOT_WALLET_REFRESH_IN_FLIGHT_RECLAIM_NS};
+    use crate::chains::config::ChainId;
+
+    const CHAIN: ChainId = ChainId(1030);
+    const OTHER: ChainId = ChainId(71);
+
+    #[test]
+    fn first_acquire_succeeds() {
+        let guard = try_acquire_hot_wallet_refresh(CHAIN, 1_000).unwrap();
+        drop(guard);
+    }
+
+    #[test]
+    fn concurrent_reentry_is_blocked() {
+        let guard = try_acquire_hot_wallet_refresh(CHAIN, 1_000).unwrap();
+        assert!(try_acquire_hot_wallet_refresh(CHAIN, 1_500).is_none());
+        drop(guard);
+    }
+
+    #[test]
+    fn release_allows_reacquire() {
+        let guard = try_acquire_hot_wallet_refresh(CHAIN, 1_000).unwrap();
+        drop(guard);
+        let successor = try_acquire_hot_wallet_refresh(CHAIN, 1_500).unwrap();
+        drop(successor);
+    }
+
+    #[test]
+    fn stale_marker_is_reclaimed() {
+        let old = try_acquire_hot_wallet_refresh(CHAIN, 1_000).unwrap();
+        let later = 1_000 + HOT_WALLET_REFRESH_IN_FLIGHT_RECLAIM_NS;
+        let successor = try_acquire_hot_wallet_refresh(CHAIN, later).unwrap();
+        drop(old);
+        assert!(super::hot_wallet_refresh_is_current(&successor));
+        drop(successor);
+    }
+
+    #[test]
+    fn per_chain_isolation() {
+        let chain_guard = try_acquire_hot_wallet_refresh(CHAIN, 1_000).unwrap();
+        let other_guard = try_acquire_hot_wallet_refresh(OTHER, 1_000).unwrap();
+        drop(chain_guard);
+        drop(other_guard);
+    }
+}
+
+#[cfg(test)]
 mod hot_wallet_refresh_generation_tests {
     use super::commit_hot_wallet_refresh_if_current;
     use crate::chains::config::ChainId;
@@ -1374,6 +1524,7 @@ mod hot_wallet_refresh_generation_tests {
     #[test]
     fn old_generation_refresh_cannot_overwrite_current_proof() {
         let chain = ChainId(1030);
+        let guard = super::try_acquire_hot_wallet_refresh(chain, 1_000).unwrap();
         let mut state = State::default();
         state.multi_chain.hot_wallet_balance_e18.insert(chain, 777);
         state
@@ -1387,6 +1538,7 @@ mod hot_wallet_refresh_generation_tests {
             4,
             "0xold",
             default_evm_rpc_principal(),
+            &guard,
             5,
             Some("0xnew"),
             1_000,
@@ -1410,6 +1562,7 @@ mod hot_wallet_refresh_generation_tests {
     #[test]
     fn matching_key_generation_and_address_commits_proof() {
         let chain = ChainId(1030);
+        let guard = super::try_acquire_hot_wallet_refresh(chain, 1_000).unwrap();
         let mut state = State::default();
         commit_hot_wallet_refresh_if_current(
             &mut state,
@@ -1418,6 +1571,7 @@ mod hot_wallet_refresh_generation_tests {
             4,
             "0xcurrent",
             default_evm_rpc_principal(),
+            &guard,
             4,
             Some("0xcurrent"),
             1_000,
@@ -1440,6 +1594,7 @@ mod hot_wallet_refresh_generation_tests {
     #[test]
     fn old_rpc_principal_refresh_cannot_overwrite_current_proof() {
         let chain = ChainId(1030);
+        let guard = super::try_acquire_hot_wallet_refresh(chain, 1_000).unwrap();
         let old_rpc = candid::Principal::from_slice(&[8; 29]);
         let new_rpc = candid::Principal::from_slice(&[9; 29]);
         let mut state = State::default();
@@ -1457,6 +1612,7 @@ mod hot_wallet_refresh_generation_tests {
             4,
             "0xcurrent",
             old_rpc,
+            &guard,
             4,
             Some("0xcurrent"),
             1_000,
@@ -1475,6 +1631,49 @@ mod hot_wallet_refresh_generation_tests {
                 .get(&chain),
             Some(&888)
         );
+    }
+}
+
+#[cfg(test)]
+mod hot_wallet_refresh_reclaim_tests {
+    use super::{commit_hot_wallet_refresh_if_current, try_acquire_hot_wallet_refresh};
+    use crate::chains::config::ChainId;
+    use crate::chains::evm::evm_rpc::default_evm_rpc_principal;
+    use crate::state::State;
+
+    #[test]
+    fn reclaimed_callback_cannot_commit_or_release_successor() {
+        let chain = ChainId(1030);
+        let old = try_acquire_hot_wallet_refresh(chain, 1_000).unwrap();
+        let successor = try_acquire_hot_wallet_refresh(
+            chain,
+            1_000 + super::HOT_WALLET_REFRESH_IN_FLIGHT_RECLAIM_NS,
+        )
+        .unwrap();
+        let mut state = State::default();
+        let error = commit_hot_wallet_refresh_if_current(
+            &mut state,
+            chain,
+            "test_key_1",
+            4,
+            "0xcurrent",
+            default_evm_rpc_principal(),
+            &old,
+            4,
+            Some("0xcurrent"),
+            1_000,
+            2_000,
+        )
+        .expect_err("reclaimed callback must not freshen proof");
+        assert!(error.contains("discarding stale hot-wallet proof"));
+        drop(old);
+        assert!(super::hot_wallet_refresh_is_current(&successor));
+        drop(successor);
+        assert!(state.multi_chain.hot_wallet_balance_e18.is_empty());
+        assert!(state
+            .multi_chain
+            .hot_wallet_balance_refreshed_at_ns
+            .is_empty());
     }
 }
 

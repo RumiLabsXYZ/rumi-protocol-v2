@@ -59,6 +59,16 @@ pub const CONFLUX_MAINNET_LIQUIDATION_DEADLINE_SECS: u64 = 180;
 /// closed until a successful refresh.
 pub const HOT_WALLET_BALANCE_MAX_AGE_NS: u64 = 300_000_000_000;
 
+/// Chain-1030-only proactive refresh threshold, deliberately well under
+/// `HOT_WALLET_BALANCE_MAX_AGE_NS`. Some deployments tune
+/// `observer_tick_interval_secs` to the same 300s as the TTL, which lets the
+/// idle-tick refresh in `run_observer` fire right as the cache goes stale and
+/// repeatedly bounce public admission. A bounded, independent-cadence timer
+/// (`deposit_watch::run_conflux_hot_wallet_proactive_refresh`) uses this
+/// tighter threshold so a healthy RPC keeps the cache fresh well ahead of the
+/// unchanged public TTL.
+pub const CONFLUX_HOT_WALLET_PROACTIVE_REFRESH_MIN_AGE_NS: u64 = 180_000_000_000;
+
 /// Bound defensive URL de-duplication even if a hand-restored snapshot bypassed
 /// setter validation.
 pub const MAX_PUBLIC_READINESS_RPC_ENDPOINTS: usize = 16;
@@ -207,6 +217,55 @@ pub fn hot_wallet_balance_is_fresh(state: &State, chain: ChainId, now_ns: u64) -
         .filter(|timestamp| *timestamp > 0)
         .map(|timestamp| now_ns.saturating_sub(timestamp) <= HOT_WALLET_BALANCE_MAX_AGE_NS)
         .unwrap_or(false)
+}
+
+/// Pure decision for the chain-1030-only proactive hot-wallet refresh timer.
+/// `false` whenever a refresh would be unsafe or pointless: any chain other
+/// than 1030, read-only mode, an invariant halt, a reorg halt, or a chain
+/// that isn't `Registered` (this deliberately excludes `Disabled` — the
+/// developer preflight endpoint is the only way to prove gas solvency while
+/// a chain is disabled, matching the existing observer idle-refresh gate).
+/// Otherwise `true` when the cached proof is missing or has reached
+/// `CONFLUX_HOT_WALLET_PROACTIVE_REFRESH_MIN_AGE_NS`, which is always well
+/// short of the `HOT_WALLET_BALANCE_MAX_AGE_NS` admission TTL. A timestamp in
+/// the future (clock skew / corrupt snapshot) is treated the same as
+/// `hot_wallet_balance_is_fresh` — `saturating_sub` yields 0 age — so this
+/// never fights the readiness gate's own notion of "fresh".
+pub fn conflux_hot_wallet_needs_proactive_refresh(
+    state: &State,
+    chain: ChainId,
+    now_ns: u64,
+) -> bool {
+    if chain != CONFLUX_MAINNET_CHAIN_ID {
+        return false;
+    }
+    if state.mode == Mode::ReadOnly || state.multi_chain.invariant_halted {
+        return false;
+    }
+    if !state.multi_chain.chain_is_registered(chain) {
+        return false;
+    }
+    if state
+        .multi_chain
+        .reorg_halted
+        .get(&chain)
+        .copied()
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    match state
+        .multi_chain
+        .hot_wallet_balance_refreshed_at_ns
+        .get(&chain)
+        .copied()
+        .filter(|timestamp| *timestamp > 0)
+    {
+        None => true,
+        Some(refreshed_at) => {
+            now_ns.saturating_sub(refreshed_at) >= CONFLUX_HOT_WALLET_PROACTIVE_REFRESH_MIN_AGE_NS
+        }
+    }
 }
 
 /// Stable machine-readable blocker codes for chain 1030. Non-mainnet chains
@@ -434,5 +493,150 @@ pub fn enforce_conflux_mainnet_public_risk_gate(
         Ok(())
     } else {
         Err(gate_error(&blockers))
+    }
+}
+
+#[cfg(test)]
+mod conflux_hot_wallet_proactive_refresh_tests {
+    use super::{
+        conflux_hot_wallet_needs_proactive_refresh, CONFLUX_HOT_WALLET_PROACTIVE_REFRESH_MIN_AGE_NS,
+    };
+    use crate::chains::config::{ChainConfigV3, ChainId, ChainStatus, GasStrategy};
+    use crate::chains::evm::conflux::config::CONFLUX_MAINNET_CHAIN_ID;
+    use crate::state::{Mode, State};
+
+    const OTHER: ChainId = ChainId(71);
+    const NOW: u64 = 1_000_000_000_000;
+
+    fn registered_conflux_state() -> State {
+        let mut state = State::default();
+        state.multi_chain.chain_configs.insert(
+            CONFLUX_MAINNET_CHAIN_ID,
+            ChainConfigV3 {
+                chain_id: CONFLUX_MAINNET_CHAIN_ID,
+                display_name: "Conflux".into(),
+                rpc_endpoints: vec![],
+                finality_depth: 1,
+                gas_strategy: GasStrategy::NotApplicable,
+                chain_native_decimals: 18,
+                registered_at_ns: 0,
+                status: ChainStatus::Registered,
+                burn_watch_poll_enabled: false,
+                min_quorum_providers: None,
+            },
+        );
+        state
+    }
+
+    #[test]
+    fn missing_proof_needs_refresh() {
+        let state = registered_conflux_state();
+        assert!(conflux_hot_wallet_needs_proactive_refresh(
+            &state,
+            CONFLUX_MAINNET_CHAIN_ID,
+            NOW
+        ));
+    }
+
+    #[test]
+    fn fresh_proof_does_not_need_refresh() {
+        let mut state = registered_conflux_state();
+        state
+            .multi_chain
+            .hot_wallet_balance_refreshed_at_ns
+            .insert(CONFLUX_MAINNET_CHAIN_ID, NOW - 100_000_000_000);
+        assert!(!conflux_hot_wallet_needs_proactive_refresh(
+            &state,
+            CONFLUX_MAINNET_CHAIN_ID,
+            NOW
+        ));
+    }
+
+    #[test]
+    fn near_expiry_proof_needs_refresh() {
+        let mut state = registered_conflux_state();
+        state.multi_chain.hot_wallet_balance_refreshed_at_ns.insert(
+            CONFLUX_MAINNET_CHAIN_ID,
+            NOW - CONFLUX_HOT_WALLET_PROACTIVE_REFRESH_MIN_AGE_NS,
+        );
+        assert!(conflux_hot_wallet_needs_proactive_refresh(
+            &state,
+            CONFLUX_MAINNET_CHAIN_ID,
+            NOW
+        ));
+    }
+
+    #[test]
+    fn future_timestamp_does_not_need_refresh() {
+        let mut state = registered_conflux_state();
+        state
+            .multi_chain
+            .hot_wallet_balance_refreshed_at_ns
+            .insert(CONFLUX_MAINNET_CHAIN_ID, NOW + 1_000_000_000);
+        assert!(!conflux_hot_wallet_needs_proactive_refresh(
+            &state,
+            CONFLUX_MAINNET_CHAIN_ID,
+            NOW
+        ));
+    }
+
+    #[test]
+    fn disabled_chain_never_refreshes() {
+        let mut state = registered_conflux_state();
+        state
+            .multi_chain
+            .chain_configs
+            .get_mut(&CONFLUX_MAINNET_CHAIN_ID)
+            .unwrap()
+            .status = ChainStatus::Disabled;
+        assert!(!conflux_hot_wallet_needs_proactive_refresh(
+            &state,
+            CONFLUX_MAINNET_CHAIN_ID,
+            NOW
+        ));
+    }
+
+    #[test]
+    fn other_chain_never_refreshes() {
+        let state = registered_conflux_state();
+        assert!(!conflux_hot_wallet_needs_proactive_refresh(
+            &state, OTHER, NOW
+        ));
+    }
+
+    #[test]
+    fn reorg_halted_chain_does_not_refresh() {
+        let mut state = registered_conflux_state();
+        state
+            .multi_chain
+            .reorg_halted
+            .insert(CONFLUX_MAINNET_CHAIN_ID, true);
+        assert!(!conflux_hot_wallet_needs_proactive_refresh(
+            &state,
+            CONFLUX_MAINNET_CHAIN_ID,
+            NOW
+        ));
+    }
+
+    #[test]
+    fn read_only_mode_does_not_refresh() {
+        let mut state = registered_conflux_state();
+        state.mode = Mode::ReadOnly;
+        assert!(!conflux_hot_wallet_needs_proactive_refresh(
+            &state,
+            CONFLUX_MAINNET_CHAIN_ID,
+            NOW
+        ));
+    }
+
+    #[test]
+    fn invariant_halted_does_not_refresh() {
+        let mut state = registered_conflux_state();
+        state.multi_chain.invariant_halted = true;
+        assert!(!conflux_hot_wallet_needs_proactive_refresh(
+            &state,
+            CONFLUX_MAINNET_CHAIN_ID,
+            NOW
+        ));
     }
 }
