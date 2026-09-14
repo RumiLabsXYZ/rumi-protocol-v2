@@ -21,7 +21,7 @@
 - The stable registry is the only funding authority. Discovery and target reports cannot add a recipient or change an amount.
 - Every target starts with `enabled = false` and `auto_topup = false`. The Conflux frontend starts `Unobserved`.
 - Cycles Ledger withdrawal is the primary rail. ICP transfer plus CMC notification is fallback only after cycles funding is proven unavailable, never while its result is unknown.
-- Every external funding call is preceded by a stable reservation and exact immutable operation snapshot. Retries reuse identical arguments and `created_at_time`.
+- Every external funding call is preceded by a stable reservation and exact immutable operation snapshot. Retries reuse identical arguments and `created_at_time`; a durable refresh generation rejects a cache result sampled before any intervening reservation, attempt, settlement, or source-state write.
 - One unresolved operation is allowed per target. Manual and timer paths use the same reservation table.
 - Sentinel self-recovery is a separate hard-coded lane whose destination is always `ic_cdk::id()` and whose protected reserve cannot fund ordinary targets.
 - Production signer principals, governance threshold, timelocks, per-target policy values, and funding amounts are deployment-manifest inputs. They must be read from authoritative identities and the CycleOps export or UI, never inferred from compact badges.
@@ -166,10 +166,18 @@ Tests must cover all proxy invariants independently, exact threshold equality, a
 - Reserve balance, per-target cap, global cap, cooldown, and the one-operation slot in stable state before the first await.
 - Persist one globally monotonic `created_at_time = max(now, last + 1)` and the exact call arguments before submission.
 - Model `PlannedReserved`, `Submitted`, `Confirmed`, `Unknown`, `Complete`, `Terminal`, and `Quarantined` as explicit persisted states.
-- Retry Unknown using the byte-equivalent original arguments. Treat Duplicate as proof of original success. Keep TooOld without proof quarantined and reserved.
+- Retry Unknown using the byte-equivalent original arguments. Treat Duplicate as record evidence only, never as delivery proof, because the pinned ledger records before attempting its management-canister deposit. Quarantine both an initial Duplicate and a Duplicate after Unknown, retain reservations, and keep TooOld without proof quarantined and reserved.
 - Never fall through to ICP while the cycles result is unknown.
 - Implement self-recovery through the same idempotent withdrawal contract but separate stable state, protected reserve, cap, and hard-coded destination `ic_cdk::id()`.
 - An unresolved self-recovery operation suppresses all ordinary distribution.
+
+Quarantined Cycles operations expose a bounded core reconciliation method for a
+future signer-gated Task 6 endpoint. It accepts only explicit independently
+verified delivery-block, no-spend, or known-debit evidence; a Duplicate response
+alone is not accepted. Delivery settles the immutable amount plus fee. Ordinary
+no-spend/known-debit evidence releases or settles source and policy
+reservations conservatively. Self-recovery accepts only verified delivery and
+remains suppressed until it is confirmed recovered.
 
 **Tests and gate:**
 
@@ -223,7 +231,7 @@ Tests must cover published account and memo vectors, stale and zero rates, prove
 - Create `src/rumi_cycle_sentinel/src/sampler.rs`.
 - Create `src/rumi_cycle_sentinel/rumi_cycle_sentinel.did`.
 - Create `src/rumi_cycle_sentinel/tests/` fixtures and PocketIC suites.
-- Vendor the reviewed official Cycles Ledger Candid fixture under `src/rumi_cycle_sentinel/tests/vendor/` with source commit and SHA-256 recorded.
+- Vendor the reviewed official Cycles Ledger Candid and behavior fixtures under `src/rumi_cycle_sentinel/tests/vendor/` with source commit and SHA-256 recorded and asserted by deterministic tests.
 - Extend root `Cargo.toml`, `dfx.json`, `icp.yaml`, and `scripts/regenerate-declarations.sh`.
 - Generate `src/declarations/rumi_cycle_sentinel/**`.
 
@@ -231,7 +239,7 @@ Tests must cover published account and memo vectors, stale and zero rates, prove
 
 - Timer order is self-recovery, resume pending operations, sample, then evaluate new target funding.
 - Re-arm timers after init and upgrade. Public queries remain cached and make no inter-canister calls.
-- Add test-only mock canisters for SelfReport, blackhole status, Cycles Ledger, ICP Ledger, and CMC. Mock ledgers enforce dedup by exact arguments and timestamp and can model committed-with-lost-reply, Duplicate, TooOld, and refund.
+- Add test-only mock canisters for SelfReport, blackhole status, Cycles Ledger, ICP Ledger, and CMC. Mock ledgers enforce dedup by exact arguments and timestamp and can model committed-with-lost-reply, Duplicate-after-record-before-delivery, TooOld, and refund.
 - Add test-only state injection behind a nonproduction Cargo feature solely where needed to place an operation at every persisted state before an upgrade. Production Candid and Wasm must exclude those endpoints.
 - Verify handwritten Candid against exported Candid and regenerate JS/TS declarations deterministically.
 - Add `rumi_cycle_sentinel` to local and `mainnet-live` project configuration, but perform no deployment in this task.
@@ -244,7 +252,7 @@ cargo test -p rumi_cycle_sentinel
 cargo build -p rumi_cycle_sentinel --target wasm32-unknown-unknown --release
 ```
 
-PocketIC coverage must include every persisted outbox state across upgrade/restart, live timer/manual interleaving, target edit/removal during an operation, all 16 inventory entries disabled by default, anonymous public reads, anonymous mutation rejection, full observation-state rendering, stable bounds, Candid conformance, and a current official Cycles Ledger fee/withdraw contract fixture.
+PocketIC coverage must include every persisted outbox state across upgrade/restart, live timer/manual interleaving, target edit/removal during an operation, all 16 inventory entries disabled by default, anonymous public reads, anonymous mutation rejection, full observation-state rendering, stable bounds, Candid conformance, and a current official Cycles Ledger fee/withdraw contract fixture. Task 4's source-pinned fixture and deterministic tests are not a substitute for this Task 6 live integration gate.
 
 **Commit:** `feat(cycles): integrate Cycle Sentinel canister and tests`
 

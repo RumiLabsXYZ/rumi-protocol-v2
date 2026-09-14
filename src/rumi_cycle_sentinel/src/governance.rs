@@ -1632,6 +1632,12 @@ mod tests {
             .reserve(op_id, 10, now, 86_400, 1_000)
             .unwrap();
         state::set_global_rolling_spend(global_reservation);
+        let source_reservation = state::get_source_reserve()
+            .refresh(1_000_000, 0, now)
+            .unwrap()
+            .reserve_ordinary(op_id, 10, 0, now, 86_400)
+            .unwrap();
+        state::set_source_reserve(source_reservation);
         op_id
     }
 

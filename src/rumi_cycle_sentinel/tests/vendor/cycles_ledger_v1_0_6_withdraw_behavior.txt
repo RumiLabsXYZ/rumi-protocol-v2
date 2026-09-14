@@ -1,0 +1,18 @@
+# Source-pinned behavioral compatibility fixture.
+# Upstream: dfinity/cycles-ledger
+# Release: v1.0.6
+# Commit: 29d98de5131918649a4c1cdd47fc176dea8770ef
+# Paths: cycles-ledger/src/storage.rs (withdraw), cycles-ledger/src/lib.rs
+#         (withdraw_from_error_to_withdraw_error)
+#
+# This is a compact, reviewable fixture of the source facts that the
+# Cycles-rail adapter relies on. It is intentionally not a second ledger
+# implementation. The deterministic tests assert these pins and exercise
+# the corresponding arithmetic/classification vectors.
+record_before_management_deposit = true
+burned_amount = amount + FEE
+refund_amount = amount.saturating_sub(FEE)
+refund_when = amount > FEE
+refund_memo = PENALIZE_MEMO
+failed_withdraw_fee_block = refund_block
+duplicate_after_record_is_delivery_proof = false

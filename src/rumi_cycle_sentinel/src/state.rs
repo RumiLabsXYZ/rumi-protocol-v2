@@ -1,8 +1,8 @@
 //! Stable-storage layer for Cycle Sentinel (Task 1c).
 //!
 //! Wires the pure domain types in `types.rs` into `ic-stable-structures`
-//! storage: one `MemoryManager` partitions stable memory into 14 regions
-//! (memory IDs 0-13, see `MEMORY_LAYOUT` below), each backing exactly one
+//! storage: one `MemoryManager` partitions stable memory into 16 regions
+//! (memory IDs 0-15, see `MEMORY_LAYOUT` below), each backing exactly one
 //! `StableCell`/`StableBTreeMap`. This file owns storage + raw CRUD + count
 //! bound enforcement at the storage boundary; it does **not** own
 //! governance/funding *policy* (threshold math, proposal execution, rail
@@ -82,9 +82,10 @@ use ic_stable_structures::{
 use serde::Deserialize;
 
 use crate::types::{
-    self, Alarm, AlarmKind, FundingOperation, FundingTrigger, GlobalPolicy,
-    GlobalRollingSpendState, InitArgs, InitArgsError, PendingReservation, ProposalRecord,
-    ProposalStatus, ReservedPrincipalKind, Sample, SelfRecoveryState, TargetRecord,
+    self, Alarm, AlarmKind, FundingOperation, FundingRail, FundingTrigger, GlobalPolicy,
+    GlobalRollingSpendState, InitArgs, InitArgsError, PendingReservation, PendingSourceDebit,
+    ProposalRecord, ProposalStatus, ReservedPrincipalKind, Sample, SelfRecoveryState,
+    SourceAttemptError, SourceReserveError, SourceReserveState, TargetRecord,
     TargetReservationState, TerminalFundingSummary, ValidatedInitArgs,
 };
 
@@ -117,6 +118,8 @@ const MEM_TARGET_RESERVATIONS: MemoryId = MemoryId::new(10); // StableBTreeMap<S
 const MEM_GLOBAL_ROLLING_SPEND: MemoryId = MemoryId::new(11); // StableCell<StoredGlobalRollingSpendState> (singleton)
 const MEM_SELF_RECOVERY: MemoryId = MemoryId::new(12); // StableCell<StoredSelfRecoveryState> (singleton)
 const MEM_TERMINAL_SUMMARIES: MemoryId = MemoryId::new(13); // StableBTreeMap<u64, StoredTerminalFundingSummary>, keyed by operation_id
+const MEM_SOURCE_RESERVE: MemoryId = MemoryId::new(14); // StableCell<StoredSourceReserveState> (singleton)
+const MEM_SOURCE_REFRESH_GENERATION: MemoryId = MemoryId::new(15); // StableCell<StoredSourceRefreshGeneration> (singleton)
 
 /// Every stable memory slot this canister owns, paired with a human label.
 /// Single source of truth for the layout; iterated by `memory_ids_unique`.
@@ -135,6 +138,8 @@ const MEMORY_LAYOUT: &[(MemoryId, &str)] = &[
     (MEM_GLOBAL_ROLLING_SPEND, "global_rolling_spend"),
     (MEM_SELF_RECOVERY, "self_recovery"),
     (MEM_TERMINAL_SUMMARIES, "terminal_summaries"),
+    (MEM_SOURCE_RESERVE, "source_reserve"),
+    (MEM_SOURCE_REFRESH_GENERATION, "source_refresh_generation"),
 ];
 
 // ─────────────────────── state.rs-owned bookkeeping types ───────────────────────
@@ -489,6 +494,42 @@ impl StoredTerminalFundingSummary {
     }
 }
 
+/// Memory ID 14 (Task 4).
+#[derive(CandidType, Deserialize, Clone)]
+enum StoredSourceReserveState {
+    V1(SourceReserveState),
+}
+
+impl StoredSourceReserveState {
+    fn into_current(self) -> SourceReserveState {
+        match self {
+            Self::V1(v) => v,
+        }
+    }
+}
+
+/// Memory ID 15. A durable generation for the Cycles Ledger source/cache
+/// refresh transaction. It advances on every reservation, attempt,
+/// settlement, or source-cache write, so a balance sampled before an await
+/// cannot overwrite state that changed while the query was in flight.
+#[derive(CandidType, Deserialize, Clone, Copy, Default)]
+struct SourceRefreshGeneration {
+    value: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone)]
+enum StoredSourceRefreshGeneration {
+    V1(SourceRefreshGeneration),
+}
+
+impl StoredSourceRefreshGeneration {
+    fn value(&self) -> u64 {
+        match self {
+            Self::V1(value) => value.value,
+        }
+    }
+}
+
 /// Candid-encoded `Storable` impl. `Bound::Unbounded` per the module doc:
 /// the domain-level bound on entry content already lives in `types.rs`'s
 /// own constructors, so a hand-picked `max_size` here would only duplicate
@@ -525,6 +566,8 @@ impl_candid_storable!(StoredTargetReservationState);
 impl_candid_storable!(StoredGlobalRollingSpendState);
 impl_candid_storable!(StoredSelfRecoveryState);
 impl_candid_storable!(StoredTerminalFundingSummary);
+impl_candid_storable!(StoredSourceReserveState);
+impl_candid_storable!(StoredSourceRefreshGeneration);
 
 // ─────────────────────── Key types ───────────────────────
 
@@ -715,6 +758,21 @@ thread_local! {
 
     static TERMINAL_SUMMARIES: RefCell<StableBTreeMap<u64, StoredTerminalFundingSummary, VMem>> =
         MEMORY_MANAGER.with(|m| RefCell::new(StableBTreeMap::init(m.borrow().get(MEM_TERMINAL_SUMMARIES))));
+
+    static SOURCE_RESERVE: RefCell<StableCell<StoredSourceReserveState, VMem>> =
+        MEMORY_MANAGER.with(|m| RefCell::new(
+            StableCell::init(m.borrow().get(MEM_SOURCE_RESERVE), StoredSourceReserveState::V1(SourceReserveState::new()))
+                .expect("rumi_cycle_sentinel: failed to init source reserve cell")
+        ));
+
+    static SOURCE_REFRESH_GENERATION: RefCell<StableCell<StoredSourceRefreshGeneration, VMem>> =
+        MEMORY_MANAGER.with(|m| RefCell::new(
+            StableCell::init(
+                m.borrow().get(MEM_SOURCE_REFRESH_GENERATION),
+                StoredSourceRefreshGeneration::V1(SourceRefreshGeneration::default()),
+            )
+            .expect("rumi_cycle_sentinel: failed to init source refresh generation cell")
+        ));
 }
 
 // ─────────────────────── init / global config ───────────────────────
@@ -1669,7 +1727,13 @@ pub(crate) fn update_operation(op: FundingOperation) -> Result<(), UpdateOperati
     {
         return Err(UpdateOperationError::ImmutableSnapshotChanged);
     }
-    if !existing.state().is_valid_successor(&op.state()) {
+    let is_explicit_quarantined_reconciliation =
+        existing.is_valid_quarantined_cycles_reconciliation(&op);
+    let is_bounded_attempt_compaction = existing.is_valid_bounded_attempt_compaction_successor(&op);
+    if !existing.state().is_valid_successor(&op.state())
+        && !is_explicit_quarantined_reconciliation
+        && !is_bounded_attempt_compaction
+    {
         return Err(UpdateOperationError::InvalidTransition);
     }
     if op.updated_at_secs() < existing.updated_at_secs() {
@@ -1677,8 +1741,10 @@ pub(crate) fn update_operation(op: FundingOperation) -> Result<(), UpdateOperati
     }
     let existing_attempts = existing.attempts().as_slice();
     let incoming_attempts = op.attempts().as_slice();
-    if incoming_attempts.len() < existing_attempts.len()
-        || incoming_attempts[..existing_attempts.len()] != existing_attempts[..]
+    if !is_explicit_quarantined_reconciliation
+        && !is_bounded_attempt_compaction
+        && (incoming_attempts.len() < existing_attempts.len()
+            || incoming_attempts[..existing_attempts.len()] != existing_attempts[..])
     {
         return Err(UpdateOperationError::AttemptHistoryDiverged);
     }
@@ -1717,6 +1783,11 @@ pub(crate) enum CompactOperationError {
     /// still names `id` as its in-flight operation. Same hazard, for the
     /// self-recovery singleton lane.
     SelfRecoveryReservationStillPending,
+    /// `op.rail() == FundingRail::CyclesLedger` and `SOURCE_RESERVE` (Task
+    /// 4's shared Cycles Ledger source-account reservation, used by both
+    /// ordinary and self-recovery operations alike) still names `id` as a
+    /// pending debit. Same hazard as the other reservation checks above.
+    SourceReservationStillPending,
 }
 
 /// The self-enforcing compaction primitive for `FUNDING_OPERATIONS`
@@ -1777,6 +1848,14 @@ pub(crate) fn compact_operation(
         {
             return Err(CompactOperationError::GlobalReservationStillPending);
         }
+    }
+    if op.rail() == types::FundingRail::CyclesLedger
+        && get_source_reserve()
+            .pending()
+            .iter()
+            .any(|p| p.operation_id == id)
+    {
+        return Err(CompactOperationError::SourceReservationStillPending);
     }
     insert_terminal_summary(summary);
     FUNDING_OPERATIONS.with(|m| {
@@ -1839,6 +1918,7 @@ pub(crate) fn set_target_reservation(principal: Principal, state: TargetReservat
             StoredTargetReservationState::V1(state),
         );
     });
+    bump_source_refresh_generation();
 }
 
 pub(crate) fn get_global_rolling_spend() -> GlobalRollingSpendState {
@@ -1851,6 +1931,7 @@ pub(crate) fn set_global_rolling_spend(state: GlobalRollingSpendState) {
             .set(StoredGlobalRollingSpendState::V1(state))
             .expect("rumi_cycle_sentinel: failed to write global rolling spend cell");
     });
+    bump_source_refresh_generation();
 }
 
 pub(crate) fn get_self_recovery_state() -> SelfRecoveryState {
@@ -1863,6 +1944,7 @@ pub(crate) fn set_self_recovery_state(state: SelfRecoveryState) {
             .set(StoredSelfRecoveryState::V2(state))
             .expect("rumi_cycle_sentinel: failed to write self-recovery cell");
     });
+    bump_source_refresh_generation();
 }
 
 /// The ONLY write path for terminal summaries: takes an already-validated
@@ -1895,6 +1977,95 @@ fn evict_oldest_terminal_summary_if_over_bound() {
             map.remove(&key);
         }
     });
+}
+
+// ─────────────────────── Cycles Ledger source reserve/cache (Task 4) ───────────────────────
+
+pub(crate) fn get_source_reserve() -> SourceReserveState {
+    SOURCE_RESERVE.with(|c| c.borrow().get().clone().into_current())
+}
+
+/// Returns the durable generation captured by a source-cache refresh before
+/// its first inter-canister await. The generation is deliberately advanced
+/// by *all* reservation/attempt/settlement setters, not only the source cell:
+/// a refresh result is stale if any funding bookkeeping changed while its
+/// query was in flight.
+pub(crate) fn source_refresh_generation() -> u64 {
+    SOURCE_REFRESH_GENERATION.with(|c| c.borrow().get().value())
+}
+
+fn bump_source_refresh_generation() {
+    SOURCE_REFRESH_GENERATION.with(|c| {
+        let mut cell = c.borrow_mut();
+        let next = cell
+            .get()
+            .value()
+            .checked_add(1)
+            .expect("rumi_cycle_sentinel: source refresh generation exhausted");
+        cell.set(StoredSourceRefreshGeneration::V1(SourceRefreshGeneration {
+            value: next,
+        }))
+        .expect("rumi_cycle_sentinel: failed to write source refresh generation");
+    });
+}
+
+pub(crate) fn set_source_reserve(state: SourceReserveState) {
+    SOURCE_RESERVE.with(|c| {
+        c.borrow_mut()
+            .set(StoredSourceReserveState::V1(state))
+            .expect("rumi_cycle_sentinel: failed to write source reserve cell");
+    });
+    bump_source_refresh_generation();
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SourceRefreshCommitError {
+    /// The cache query began from an older funding-state generation. Its
+    /// balance/fee result must not overwrite reservations or a settlement
+    /// committed while the query was in flight.
+    StaleGeneration,
+    SourceReserve(SourceReserveError),
+}
+
+/// Commits a queried Cycles Ledger cache only if no funding reservation,
+/// attempt, settlement, or source-cache write occurred after the query began.
+/// The generation check and following stable writes are synchronous in one IC
+/// turn, so once the check passes there is no await boundary through which a
+/// competing refresh can interleave.
+pub(crate) fn commit_source_reserve_refresh(
+    expected_generation: u64,
+    balance_cycles: u128,
+    fee_cycles: u128,
+    as_of_secs: u64,
+) -> Result<(), SourceRefreshCommitError> {
+    if source_refresh_generation() != expected_generation {
+        return Err(SourceRefreshCommitError::StaleGeneration);
+    }
+    let current = get_source_reserve();
+    let updated = current
+        .refresh(balance_cycles, fee_cycles, as_of_secs)
+        .map_err(SourceRefreshCommitError::SourceReserve)?;
+    // The check above is sufficient in the actor's synchronous execution
+    // model, but retaining this second guard makes the linearization point
+    // explicit and defensive if the storage implementation ever changes.
+    if source_refresh_generation() != expected_generation {
+        return Err(SourceRefreshCommitError::StaleGeneration);
+    }
+    set_source_reserve(updated);
+    Ok(())
+}
+
+/// Marks a persisted source debit immediately before its external Cycles
+/// Ledger call.  Keeping this transition in the stable source-reserve cell
+/// lets refresh reject ambiguous observations while the call is in flight and
+/// prevents a later settlement from applying a known debit twice.
+pub(crate) fn mark_source_attempt(
+    operation_id: u64,
+    attempt_started_at_secs: u64,
+) -> Result<(), SourceAttemptError> {
+    let updated = get_source_reserve().mark_attempt(operation_id, attempt_started_at_secs)?;
+    set_source_reserve(updated);
+    Ok(())
 }
 
 // ─────────────────────── Whole-state validation ───────────────────────
@@ -2038,6 +2209,43 @@ pub(crate) enum StateValidationError {
     TooManyTerminalSummaries {
         count: u64,
     },
+    /// An unresolved, Cycles-Ledger-rail `FundingOperation` (ordinary or
+    /// `SelfRecovery`) has no matching `SOURCE_RESERVE` pending debit — the
+    /// Task 4 analog of `NonterminalOperationMissingTargetReservation`, for
+    /// the shared source-account reservation both lanes draw from.
+    NonterminalOperationMissingSourceReserve {
+        operation_id: u64,
+    },
+    /// `SOURCE_RESERVE`'s pending debit for this amount disagrees with the
+    /// operation's own snapshotted `amount_cycles + fee_cycles`.
+    SourceReserveAmountMismatch {
+        operation_id: u64,
+    },
+    /// `SOURCE_RESERVE` names a pending operation id with no matching
+    /// unresolved Cycles-Ledger-rail `FundingOperation` — the reverse
+    /// direction of `NonterminalOperationMissingSourceReserve`.
+    SourceReserveMissingOperation {
+        operation_id: u64,
+    },
+    /// A loaded rolling-spend ledger violates its combined settled-plus-
+    /// pending slot bound.  This is checked here as well as by the nested
+    /// decoder because migration/repair code can construct a whole state from
+    /// multiple independently decoded values.
+    RollingSpendCombinedCapacityExceeded {
+        settled_count: usize,
+        pending_count: usize,
+    },
+    /// A loaded rolling-spend ledger's amount total cannot be represented in
+    /// the checked internal domain.
+    RollingSpendAmountOverflow,
+    /// A loaded Cycles Ledger source reserve's pending debit total cannot be
+    /// represented in the checked internal domain.
+    SourceReservePendingAmountOverflow,
+    /// A loaded Cycles Ledger operation's amount plus fee overflows the
+    /// internal amount domain.
+    FundingOperationAmountPlusFeeOverflow {
+        operation_id: u64,
+    },
 }
 
 fn validate_signer_set(signers: &[Principal], threshold: u32) -> Result<(), StateValidationError> {
@@ -2062,6 +2270,36 @@ fn validate_signer_set(signers: &[Principal], threshold: u32) -> Result<(), Stat
             signer_count: signers.len() as u32,
         });
     }
+    Ok(())
+}
+
+fn validate_rolling_spend_ledger(
+    ledger: &types::RollingSpendLedger,
+) -> Result<(), StateValidationError> {
+    let combined = ledger
+        .settled()
+        .len()
+        .checked_add(ledger.pending().len())
+        .ok_or(StateValidationError::RollingSpendCombinedCapacityExceeded {
+            settled_count: ledger.settled().len(),
+            pending_count: ledger.pending().len(),
+        })?;
+    if combined > types::MAX_ROLLING_SPEND_SETTLED_ENTRIES {
+        return Err(StateValidationError::RollingSpendCombinedCapacityExceeded {
+            settled_count: ledger.settled().len(),
+            pending_count: ledger.pending().len(),
+        });
+    }
+    ledger
+        .settled()
+        .iter()
+        .try_fold(0u128, |acc, entry| acc.checked_add(entry.amount_cycles))
+        .ok_or(StateValidationError::RollingSpendAmountOverflow)?;
+    ledger
+        .pending()
+        .iter()
+        .try_fold(0u128, |acc, entry| acc.checked_add(entry.amount_cycles))
+        .ok_or(StateValidationError::RollingSpendAmountOverflow)?;
     Ok(())
 }
 
@@ -2294,6 +2532,10 @@ pub(crate) fn validate_whole_state(sentinel_id: Principal) -> Result<(), StateVa
     let reservation_by_target: std::collections::BTreeMap<Principal, TargetReservationState> =
         reservations.into_iter().collect();
 
+    for reservation in reservation_by_target.values() {
+        validate_rolling_spend_ledger(reservation.rolling_spend())?;
+    }
+
     for (target, ops) in &nonterminal_by_target {
         let op = ops[0];
         let matching_reservation = reservation_by_target
@@ -2341,11 +2583,11 @@ pub(crate) fn validate_whole_state(sentinel_id: Principal) -> Result<(), StateVa
     // `GLOBAL_ROLLING_SPEND` entry for a self-recovery operation id —
     // self-recovery has its own independent ledger, checked separately
     // below.
-    let global_pending: Vec<PendingReservation> = GLOBAL_ROLLING_SPEND
-        .with(|c| c.borrow().get().clone().into_current())
-        .rolling_spend()
-        .pending()
-        .to_vec();
+    let global_rolling_spend =
+        GLOBAL_ROLLING_SPEND.with(|c| c.borrow().get().clone().into_current());
+    validate_rolling_spend_ledger(global_rolling_spend.rolling_spend())?;
+    let global_pending: Vec<PendingReservation> =
+        global_rolling_spend.rolling_spend().pending().to_vec();
     let global_pending_by_op: std::collections::BTreeMap<u64, PendingReservation> = global_pending
         .into_iter()
         .map(|p| (p.operation_id, p))
@@ -2388,6 +2630,7 @@ pub(crate) fn validate_whole_state(sentinel_id: Principal) -> Result<(), StateVa
     // ordinary per-target/global rolling-spend stores checked above. Every
     // check below is specific to this singleton lane.
     let self_recovery = SELF_RECOVERY.with(|c| c.borrow().get().clone().into_current());
+    validate_rolling_spend_ledger(self_recovery.rolling_spend())?;
 
     // Cap consistency: a live pending reservation must never exceed the
     // CURRENTLY configured daily cap. Unlike `OperationDailyCapExceedsGlobalCap`
@@ -2454,6 +2697,70 @@ pub(crate) fn validate_whole_state(sentinel_id: Principal) -> Result<(), StateVa
                     operation_id: op.id(),
                 },
             );
+        }
+    }
+
+    // ── Bidirectional Cycles Ledger source-reserve linkage (Task 4) ──
+    //
+    // `SOURCE_RESERVE` is shared by BOTH ordinary and `SelfRecovery`-
+    // triggered operations on the Cycles Ledger rail (unlike
+    // `TARGET_RESERVATIONS`/`GLOBAL_ROLLING_SPEND`, which back ordinary
+    // targets only, and unlike `SELF_RECOVERY`, which backs its own daily
+    // cap only) — see `types::SourceReserveState`'s own doc comment. Every
+    // unresolved Cycles-rail operation, from either lane, must have exactly
+    // one matching pending debit whose amount equals that operation's own
+    // snapshotted `amount_cycles + fee_cycles`.
+    let unresolved_cycles_ops: Vec<&FundingOperation> = operations
+        .iter()
+        .filter(|op| !op.state().is_resolved() && op.rail() == FundingRail::CyclesLedger)
+        .collect();
+    let source_reserve = SOURCE_RESERVE.with(|c| c.borrow().get().clone().into_current());
+    if source_reserve.pending().len() > types::MAX_PENDING_SOURCE_DEBITS {
+        return Err(StateValidationError::SourceReservePendingAmountOverflow);
+    }
+    source_reserve
+        .pending_total_cycles()
+        .map_err(|_| StateValidationError::SourceReservePendingAmountOverflow)?;
+    let source_pending: std::collections::BTreeMap<u64, PendingSourceDebit> = source_reserve
+        .pending()
+        .iter()
+        .map(|p| (p.operation_id, *p))
+        .collect();
+    for op in &unresolved_cycles_ops {
+        let types::FundingRailArguments::Cycles(snapshot) = op.rail_arguments() else {
+            unreachable!("filtered to FundingRail::CyclesLedger above");
+        };
+        let expected_amount = snapshot
+            .amount_cycles
+            .checked_add(snapshot.fee_cycles)
+            .ok_or(
+                StateValidationError::FundingOperationAmountPlusFeeOverflow {
+                    operation_id: op.id(),
+                },
+            )?;
+        match source_pending.get(&op.id()) {
+            Some(entry) if entry.amount_plus_fee_cycles == expected_amount => {}
+            Some(_) => {
+                return Err(StateValidationError::SourceReserveAmountMismatch {
+                    operation_id: op.id(),
+                })
+            }
+            None => {
+                return Err(
+                    StateValidationError::NonterminalOperationMissingSourceReserve {
+                        operation_id: op.id(),
+                    },
+                )
+            }
+        }
+    }
+    let unresolved_cycles_op_ids: BTreeSet<u64> =
+        unresolved_cycles_ops.iter().map(|op| op.id()).collect();
+    for operation_id in source_pending.keys() {
+        if !unresolved_cycles_op_ids.contains(operation_id) {
+            return Err(StateValidationError::SourceReserveMissingOperation {
+                operation_id: *operation_id,
+            });
         }
     }
 
@@ -2736,10 +3043,10 @@ mod tests {
                 "duplicate stable MemoryId {id:?} (store {label:?}) — pick an unused slot"
             );
         }
-        assert_eq!(MEMORY_LAYOUT.len(), 14, "expected exactly 14 memory ids");
+        assert_eq!(MEMORY_LAYOUT.len(), 16, "expected exactly 16 memory ids");
     }
 
-    // ── round-trip tests, one per stable structure (14) ──
+    // ── round-trip tests, one per stable structure (16) ──
 
     #[test]
     fn global_config_round_trips() {
@@ -2879,6 +3186,17 @@ mod tests {
             .unwrap();
         set_self_recovery_state(state.clone());
         assert_eq!(get_self_recovery_state(), state);
+    }
+
+    #[test]
+    fn source_reserve_round_trips() {
+        let state = SourceReserveState::new()
+            .refresh(1_000, 1, 50)
+            .unwrap()
+            .reserve_ordinary(1, 11, 0, 50, 60)
+            .unwrap();
+        set_source_reserve(state.clone());
+        assert_eq!(get_source_reserve(), state);
     }
 
     #[test]
@@ -3907,6 +4225,31 @@ mod tests {
         assert_eq!(
             compact_operation(op.id(), summary),
             Err(CompactOperationError::GlobalReservationStillPending)
+        );
+        assert_eq!(get_operation(op.id()), Some(op));
+    }
+
+    /// Task 4: same hazard, for the shared Cycles Ledger `SOURCE_RESERVE`
+    /// lane, on an ORDINARY operation (the self-recovery variant is covered
+    /// separately below, since it exercises the `SelfRecovery` trigger).
+    #[test]
+    fn compact_operation_rejects_while_source_reservation_still_pending() {
+        let global = test_global_policy(1_000_000);
+        let target = register_test_target(1, &global);
+        let op = test_resolved_operation(1, target, &global, 10);
+        insert_operation(op.clone()).unwrap();
+        // Neither the target nor global reservation is pending, so only the
+        // source-reserve guard is under test here.
+        let source = SourceReserveState::new()
+            .refresh(1_000_000, 0, 10)
+            .unwrap()
+            .reserve_ordinary(op.id(), op.reserved_amount_cycles(), 0, 10, 86_400)
+            .unwrap();
+        set_source_reserve(source);
+        let summary = TerminalFundingSummary::from_resolved(&op, 20).unwrap();
+        assert_eq!(
+            compact_operation(op.id(), summary),
+            Err(CompactOperationError::SourceReservationStillPending)
         );
         assert_eq!(get_operation(op.id()), Some(op));
     }
@@ -5097,6 +5440,12 @@ mod tests {
             .reserve(op.id(), op.reserved_amount_cycles(), 10, 86_400, 1_000)
             .unwrap();
         set_global_rolling_spend(global_spend);
+        let source = SourceReserveState::new()
+            .refresh(1_000_000, 0, 10)
+            .unwrap()
+            .reserve_ordinary(op.id(), 10, 0, 10, 86_400)
+            .unwrap();
+        set_source_reserve(source);
 
         assert_eq!(validate_whole_state(sentinel_id), Ok(()));
     }
@@ -5423,6 +5772,13 @@ mod tests {
                 .begin(op.id(), op.reserved_amount_cycles(), 10, 86_400, 100)
                 .unwrap(),
         );
+        set_source_reserve(
+            SourceReserveState::new()
+                .refresh(1_000_000, 0, 10)
+                .unwrap()
+                .reserve_self_recovery(op.id(), op.reserved_amount_cycles(), 10, 86_400)
+                .unwrap(),
+        );
         assert_eq!(validate_whole_state(sentinel_id), Ok(()));
     }
 
@@ -5570,6 +5926,129 @@ mod tests {
             Err(StateValidationError::GlobalReservationAmountMismatch {
                 operation_id: op.id()
             })
+        );
+    }
+
+    /// Builds the target/global reservation pair `validate_whole_state`
+    /// already requires for `op`, so the source-reserve tests below isolate
+    /// their failure to the new Task 4 check alone.
+    fn set_up_matching_target_and_global_reservation(target: Principal, op: &FundingOperation) {
+        let reservation = TargetReservationState::new()
+            .reserve(op.id(), op.reserved_amount_cycles(), 10, 86_400, 1_000)
+            .unwrap();
+        set_target_reservation(target, reservation);
+        let global_spend = GlobalRollingSpendState::new()
+            .reserve(op.id(), op.reserved_amount_cycles(), 10, 86_400, 1_000)
+            .unwrap();
+        set_global_rolling_spend(global_spend);
+    }
+
+    #[test]
+    fn validate_whole_state_rejects_unresolved_cycles_operation_missing_source_reserve() {
+        let sentinel_id = test_sentinel_id();
+        let global = test_global_policy(1_000_000);
+        init_test_state(vec![test_signer(1)], 1, 1_000_000);
+        let target = test_target_principal(1);
+        insert_target(test_target_record_at(target, &global)).unwrap();
+        let op =
+            test_funding_operation(1, target, FundingTrigger::LowBalanceAutoTopup, &global, 10);
+        insert_operation(op.clone()).unwrap();
+        set_up_matching_target_and_global_reservation(target, &op);
+        // No SOURCE_RESERVE entry set up at all.
+        assert_eq!(
+            validate_whole_state(sentinel_id),
+            Err(
+                StateValidationError::NonterminalOperationMissingSourceReserve {
+                    operation_id: op.id()
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn validate_whole_state_rejects_source_reserve_amount_mismatch() {
+        let sentinel_id = test_sentinel_id();
+        let global = test_global_policy(1_000_000);
+        init_test_state(vec![test_signer(1)], 1, 1_000_000);
+        let target = test_target_principal(1);
+        insert_target(test_target_record_at(target, &global)).unwrap();
+        let op =
+            test_funding_operation(1, target, FundingTrigger::LowBalanceAutoTopup, &global, 10);
+        insert_operation(op.clone()).unwrap();
+        set_up_matching_target_and_global_reservation(target, &op);
+        // Snapshot amount is 10 + 0 fee = 10; reserve a disagreeing amount.
+        let source = SourceReserveState::new()
+            .refresh(1_000_000, 0, 10)
+            .unwrap()
+            .reserve_ordinary(op.id(), 11, 0, 10, 86_400)
+            .unwrap();
+        set_source_reserve(source);
+        assert_eq!(
+            validate_whole_state(sentinel_id),
+            Err(StateValidationError::SourceReserveAmountMismatch {
+                operation_id: op.id()
+            })
+        );
+    }
+
+    #[test]
+    fn validate_whole_state_rejects_source_reserve_missing_operation_reverse() {
+        let sentinel_id = test_sentinel_id();
+        init_test_state(vec![test_signer(1)], 1, 1_000_000);
+        // A pending source debit with no matching unresolved Cycles-rail
+        // operation at all.
+        let source = SourceReserveState::new()
+            .refresh(1_000_000, 0, 10)
+            .unwrap()
+            .reserve_ordinary(999, 5, 0, 10, 86_400)
+            .unwrap();
+        set_source_reserve(source);
+        assert_eq!(
+            validate_whole_state(sentinel_id),
+            Err(StateValidationError::SourceReserveMissingOperation { operation_id: 999 })
+        );
+    }
+
+    #[test]
+    fn validate_whole_state_accepts_self_recovery_operation_with_matching_source_reserve() {
+        let sentinel_id = test_sentinel_id();
+        let global = test_global_policy(1_000_000);
+        init_test_state(vec![test_signer(1)], 1, 1_000_000);
+        let op = test_funding_operation(1, sentinel_id, FundingTrigger::SelfRecovery, &global, 10);
+        insert_operation(op.clone()).unwrap();
+        let self_recovery = SelfRecoveryState::new()
+            .begin(op.id(), op.reserved_amount_cycles(), 10, 86_400, 1_000)
+            .unwrap();
+        set_self_recovery_state(self_recovery);
+        let source = SourceReserveState::new()
+            .refresh(1_000_000, 0, 10)
+            .unwrap()
+            .reserve_self_recovery(op.id(), 10, 10, 86_400)
+            .unwrap();
+        set_source_reserve(source);
+        assert_eq!(validate_whole_state(sentinel_id), Ok(()));
+    }
+
+    #[test]
+    fn validate_whole_state_rejects_self_recovery_operation_missing_source_reserve() {
+        let sentinel_id = test_sentinel_id();
+        let global = test_global_policy(1_000_000);
+        init_test_state(vec![test_signer(1)], 1, 1_000_000);
+        let op = test_funding_operation(1, sentinel_id, FundingTrigger::SelfRecovery, &global, 10);
+        insert_operation(op.clone()).unwrap();
+        let self_recovery = SelfRecoveryState::new()
+            .begin(op.id(), op.reserved_amount_cycles(), 10, 86_400, 1_000)
+            .unwrap();
+        set_self_recovery_state(self_recovery);
+        // No SOURCE_RESERVE entry: self-recovery also draws on the shared
+        // source reserve, not just its own daily-cap ledger.
+        assert_eq!(
+            validate_whole_state(sentinel_id),
+            Err(
+                StateValidationError::NonterminalOperationMissingSourceReserve {
+                    operation_id: op.id()
+                }
+            )
         );
     }
 
@@ -5958,6 +6437,13 @@ mod tests {
         set_self_recovery_state(
             SelfRecoveryState::new()
                 .begin(op.id(), op.reserved_amount_cycles(), 10, 86_400, 100)
+                .unwrap(),
+        );
+        set_source_reserve(
+            SourceReserveState::new()
+                .refresh(1_000_000, 0, 10)
+                .unwrap()
+                .reserve_self_recovery(op.id(), op.reserved_amount_cycles(), 10, 86_400)
                 .unwrap(),
         );
         assert_eq!(validate_whole_state(sentinel_id), Ok(()));

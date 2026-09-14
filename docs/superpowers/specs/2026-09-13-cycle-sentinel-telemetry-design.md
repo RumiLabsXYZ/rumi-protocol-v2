@@ -207,6 +207,35 @@ cycles into its runtime balance and then performs a raw `deposit_cycles` call.
 Direct Cycles Ledger withdrawal has ledger-side duplicate detection and avoids
 an ambiguous, non-idempotent raw deposit reply.
 
+### Task 4 amendment: `Duplicate` is not delivery proof
+
+The pinned Cycles Ledger source at commit
+`29d98de5131918649a4c1cdd47fc176dea8770ef` records and deduplicates a
+withdrawal before attempting the management-canister deposit. Therefore an
+`Err(Duplicate { duplicate_of })` reply proves only that an earlier request was
+recorded. It does **not** prove that the destination received the cycles, and
+it must never be treated as `Confirmed`, must never attach its duplicate block
+as delivery proof, and must never settle a reservation. The first direct
+`Duplicate` and a `Duplicate` after `Unknown` both enter `Quarantined`, retain
+their reservations, suppress self-recovery when applicable, and do not fall
+through to ICP.
+
+Quarantined Cycles operations have one bounded reconciliation path. A future
+signer-gated Task 6 adapter may call the core state machine only after
+independently verifying an authoritative delivery block, a proven no-spend
+outcome, or a known source debit. The decision must be explicit; a
+`Duplicate` value alone is not an accepted decision. Delivery requires a
+matching verified block and settles the immutable amount plus fee. No-spend or
+known-debit evidence releases/settles ordinary reservations conservatively.
+Self-recovery accepts only verified delivery and remains suppressed until that
+proof resolves the operation.
+
+The deterministic Task 4 compatibility evidence is vendored at
+`src/rumi_cycle_sentinel/tests/vendor/cycles_ledger_v1_0_6.did` and
+`cycles_ledger_v1_0_6_withdraw_behavior.txt`; the Task 6 gate remains required
+for a real ledger canister query, rejection/lost-reply trace, upgrade, and
+end-to-end settlement proof.
+
 The ICP fallback persists an exact ICP transfer into the CMC top-up subaccount,
 then calls CMC `notify_top_up` with the confirmed block index. The exchange-rate
 snapshot must be nonzero, fresh, and within per-attempt and rolling caps.
@@ -231,9 +260,10 @@ Cycles Ledger lifecycle:
 `PlannedReserved -> Submitted -> Confirmed(block) | Unknown -> Complete | Terminal | Quarantined`
 
 An unknown result retries only the exact persisted arguments while the ledger
-deduplication window remains valid. `Duplicate` identifies the original success.
-An unknown cycles operation never falls through to ICP. `TooOld` without proof
-remains quarantined and reserved.
+deduplication window remains valid. `Duplicate` is record evidence only, not
+delivery proof: it identifies a prior recorded request but is quarantined
+until an independent verified outcome exists. An unknown cycles operation never
+falls through to ICP. `TooOld` without proof remains quarantined and reserved.
 
 ICP and CMC lifecycle:
 
@@ -253,6 +283,9 @@ Signer reconciliation is fail-safe:
 - `ResolveAsSpent` conservatively settles an unknown operation as spent;
 - `AttachBlockProof(block)` succeeds only after Sentinel reads the ledger block
   and verifies it matches the immutable operation;
+- a quarantined Cycles `Duplicate` requires the same independent block or
+  explicit no-spend/known-debit evidence; the duplicate response itself is
+  never sufficient;
 - capacity is released only after authoritative proof of no-spend or refund.
 
 ## Sampling, health, and burn
@@ -360,14 +393,14 @@ Implementation is not ready until the following pass:
 - pinned proxy principal, hash, self-controller, target-controller, target state,
   and installed-module checks;
 - timer/manual concurrency and stable reservation tests;
-- lost reply, exact retry, `Duplicate`, `TooOld`, refund, and quarantine tests for
-  both funding rails;
+- lost reply, exact retry, conservative `Duplicate` quarantine, `TooOld`,
+  refund, and explicit reconciliation tests for both funding rails;
 - upgrade and restart at every outbox state;
 - target edit or removal during an in-flight operation;
 - Sentinel self-recovery destination immutability, protected reserves, low-fund
   behavior, and unknown-operation suppression;
-- official Cycles Ledger Candid and fee contract integration test in addition to
-  mocks;
+- official Cycles Ledger Candid and fee/duplicate-before-delivery contract
+  integration test in addition to mocks and the source-pinned Task 4 fixture;
 - CMC account and memo vectors;
 - all 15 current entries plus Conflux inventory coverage;
 - public anonymous reads and private mutation rejection;

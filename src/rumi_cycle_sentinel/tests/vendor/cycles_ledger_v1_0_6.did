@@ -1,0 +1,44 @@
+// Source-pinned compatibility fixture.
+// Upstream: dfinity/cycles-ledger
+// Release: v1.0.6
+// Commit: 29d98de5131918649a4c1cdd47fc176dea8770ef
+// Path: cycles-ledger/cycles-ledger.did
+
+type Account = record {
+  owner : principal;
+  subaccount : opt vec nat8;
+};
+type BlockIndex = nat;
+type RejectionCode = variant {
+  NoError;
+  CanisterError;
+  SysTransient;
+  DestinationInvalid;
+  Unknown;
+  SysFatal;
+  CanisterReject;
+};
+type WithdrawArgs = record {
+  amount : nat;
+  from_subaccount : opt vec nat8;
+  to : principal;
+  created_at_time : opt nat64;
+};
+type WithdrawError = variant {
+  GenericError : record { message : text; error_code : nat };
+  TemporarilyUnavailable;
+  FailedToWithdraw : record {
+    fee_block : opt nat;
+    rejection_code : RejectionCode;
+    rejection_reason : text;
+  };
+  Duplicate : record { duplicate_of : nat };
+  BadFee : record { expected_fee : nat };
+  InvalidReceiver : record { receiver : principal };
+  CreatedInFuture : record { ledger_time : nat64 };
+  TooOld;
+  InsufficientFunds : record { balance : nat };
+};
+withdraw : (WithdrawArgs) -> (variant { Ok : BlockIndex; Err : WithdrawError });
+icrc1_balance_of : (Account) -> (nat) query;
+icrc1_fee : () -> (nat) query;

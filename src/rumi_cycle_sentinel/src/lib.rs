@@ -4,10 +4,13 @@ use rumi_cycle_manager::{
     DEFAULT_LOW_WATERMARK_CYCLES,
 };
 
+mod cycles_ledger;
+mod funding;
 mod governance;
 mod history;
 mod observation;
 mod public_api;
+mod self_recovery;
 mod state;
 mod types;
 
@@ -16,6 +19,14 @@ mod types;
 /// itself, so this is the one place that conversion happens.
 fn now_secs() -> u64 {
     ic_cdk::api::time() / 1_000_000_000
+}
+
+/// The IC wall clock, in nanoseconds — feeds `funding`/`self_recovery`'s
+/// globally monotonic `created_at_time` allocation
+/// (`state::next_created_at_time_ns`), which needs genuine nanosecond
+/// precision rather than `now_secs() * 1_000_000_000`.
+fn now_ns() -> u64 {
+    ic_cdk::api::time()
 }
 
 #[ic_cdk::init]

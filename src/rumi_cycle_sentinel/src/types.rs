@@ -113,7 +113,7 @@ fn cycles_minting_canister_principal() -> Principal {
 }
 
 /// Mainnet ICRC Cycles Ledger canister.
-fn cycles_ledger_principal() -> Principal {
+pub fn cycles_ledger_principal() -> Principal {
     Principal::from_text("um5iw-rqaaa-aaaaq-qaaba-cai").unwrap()
 }
 
@@ -684,7 +684,22 @@ impl TargetFundingPolicy {
     /// decode time and so can only re-run this self-contained subset — the
     /// cross-policy check is a residual gap decode cannot close, documented
     /// in the Task 1b Finding G correction report.
-    fn validate_self_contained(
+    ///
+    /// `pub(crate)` (Task 4): `self_recovery.rs` also uses this to build the
+    /// placeholder `TargetFundingPolicy` a `SelfRecovery`-triggered
+    /// `FundingOperation` carries in its `funding_policy` field (see that
+    /// field's doc comment on `FundingOperation` and `state.rs`'s
+    /// "self-recovery ... placeholder only" comment). It must use this
+    /// self-contained form, not `validate`: `SelfRecoveryPolicy`'s own
+    /// `daily_cap_cycles`/`low_balance_threshold_cycles` are independent
+    /// governed values with no required relationship to the ordinary
+    /// `GlobalPolicy.global_daily_cap_cycles` ordinary targets share, so
+    /// cross-checking the placeholder against that unrelated cap would be a
+    /// category error (the same reasoning `state.rs`'s whole-state
+    /// validation already documents for why self-recovery operations are
+    /// excluded from the ordinary `OperationDailyCapExceedsGlobalCap`
+    /// check).
+    pub(crate) fn validate_self_contained(
         args: &TargetFundingPolicyArgs,
     ) -> Result<Self, TargetValidationError> {
         let low_balance_threshold_cycles =
@@ -1522,8 +1537,10 @@ impl FundingOperationState {
     /// Whether `next` is a legal successor of `self` in the rail's own
     /// lifecycle graph:
     ///
-    /// - Cycles: `PlannedReserved -> Submitted -> {Confirmed, Unknown} ->
-    ///   {Complete, Terminal, Quarantined}`.
+    /// - Cycles: `PlannedReserved -> Submitted -> {Confirmed, Unknown,
+    ///   Terminal, Quarantined} -> {Complete, Terminal, Quarantined}`, plus
+    ///   `Unknown -> Confirmed` for an exact retry that lands on a
+    ///   definitive proof.
     /// - ICP/CMC: `PlannedReserved -> LedgerSubmitted -> {TransferUnknown,
     ///   TransferConfirmed} -> NotifyPending -> {Complete, Refunded,
     ///   Terminal, Quarantined}`.
@@ -1536,6 +1553,24 @@ impl FundingOperationState {
     /// `record_attempt`. This also rejects any cross-rail transition, since
     /// `self` and `next` can only match a table entry when both are the
     /// same rail.
+    ///
+    /// Task 4 additions to the Cycles rail (design: "Extend the cycles
+    /// lifecycle to support exact retry from Unknown to Confirmed and
+    /// deterministic Submitted terminal/quarantine transitions"), each
+    /// purely additive — no existing edge was removed or narrowed:
+    /// - `Submitted -> Terminal` and `Submitted -> Quarantined`: the Cycles
+    ///   Ledger's `withdraw` reply is synchronous, so even a FIRST attempt
+    ///   can come back with a proven no-spend (`BadFee`/`InvalidReceiver`/
+    ///   `CreatedInFuture`/`InsufficientFunds`, or a known fee-only debit)
+    ///   or a `TooOld` quarantine — neither requires having passed through
+    ///   `Unknown` first.
+    /// - `Unknown -> Confirmed`: an exact retry (byte-identical persisted
+    ///   `WithdrawArgs`) can land on the ledger's own `Ok` proof of the
+    ///   ORIGINAL attempt, exactly like a first-attempt success. A
+    ///   `Duplicate` reply is deliberately excluded: the pinned ledger
+    ///   records before attempting delivery, so that reply is quarantined
+    ///   until independent delivery proof exists — see
+    ///   `funding::cycles::resolve_operation`.
     pub fn is_valid_successor(&self, next: &FundingOperationState) -> bool {
         if self.stops_automatic_retry() {
             return false;
@@ -1555,6 +1590,12 @@ impl FundingOperationState {
                 Self::Cycles(CyclesFundingState::Submitted),
                 Self::Cycles(CyclesFundingState::Unknown)
             ) | (
+                Self::Cycles(CyclesFundingState::Submitted),
+                Self::Cycles(CyclesFundingState::Terminal)
+            ) | (
+                Self::Cycles(CyclesFundingState::Submitted),
+                Self::Cycles(CyclesFundingState::Quarantined)
+            ) | (
                 Self::Cycles(CyclesFundingState::Confirmed),
                 Self::Cycles(CyclesFundingState::Complete)
             ) | (
@@ -1563,6 +1604,9 @@ impl FundingOperationState {
             ) | (
                 Self::Cycles(CyclesFundingState::Confirmed),
                 Self::Cycles(CyclesFundingState::Quarantined)
+            ) | (
+                Self::Cycles(CyclesFundingState::Unknown),
+                Self::Cycles(CyclesFundingState::Confirmed)
             ) | (
                 Self::Cycles(CyclesFundingState::Unknown),
                 Self::Cycles(CyclesFundingState::Complete)
@@ -1719,6 +1763,11 @@ pub enum FundingOperationOpenError {
     /// `remove_target`, the public API) could reason about a recipient
     /// different from the one the rail executor actually pays.
     DestinationMismatch,
+    /// A Cycles Ledger snapshot's withdrawal amount plus its fee does not fit
+    /// in the checked internal amount domain.  Such an operation must never
+    /// be opened because source-reserve linkage could otherwise disagree
+    /// about the amount that the ledger can debit.
+    CyclesAmountPlusFeeOverflow,
 }
 
 /// Every field except `state`, `attempts`, `confirmed_block_index`, and
@@ -1769,6 +1818,12 @@ impl FundingOperation {
         };
         if reserved_amount_cycles != rail_arguments.embedded_amount_cycles() {
             return Err(FundingOperationOpenError::ReservedAmountMismatch);
+        }
+        if let FundingRailArguments::Cycles(snapshot) = &rail_arguments {
+            snapshot
+                .amount_cycles
+                .checked_add(snapshot.fee_cycles)
+                .ok_or(FundingOperationOpenError::CyclesAmountPlusFeeOverflow)?;
         }
         if target != rail_arguments.embedded_destination() {
             return Err(FundingOperationOpenError::DestinationMismatch);
@@ -1872,25 +1927,361 @@ impl FundingOperation {
         })
     }
 
-    /// Records the confirmed ICP ledger block that reconciliation proved
-    /// matches this operation's immutable `IcpCmcSnapshot` arguments.
-    /// Single-assignment: fails if a block index is already recorded, so
-    /// the confirmed evidence can never be silently overwritten by a later
-    /// call. Only meaningful for the ICP rail.
+    /// Advances a successful Cycles confirmation while preserving a bounded
+    /// history slot for the following `Complete` transition.  A full
+    /// attempt vector is not allowed to strand a confirmed withdrawal: when
+    /// the history is at `MAX_FUNDING_ATTEMPTS - 1` or full, this method
+    /// deterministically removes one redundant, non-terminal retry record,
+    /// renumbers the remaining ordinals, and appends the new phase.  The
+    /// compaction never removes terminal evidence and is accepted by
+    /// `state::update_operation` only when the incoming vector is exactly
+    /// such a validated one-record replacement.
+    pub fn record_attempt_with_bounded_compaction(
+        &self,
+        new_state: FundingOperationState,
+        at_secs: u64,
+        result_class: FundingAttemptResultClass,
+    ) -> Result<Self, FundingOperationTransitionError> {
+        if at_secs < self.updated_at_secs {
+            return Err(FundingOperationTransitionError::TimestampRegression);
+        }
+        if new_state.rail() != self.rail() {
+            return Err(FundingOperationTransitionError::RailMismatch);
+        }
+        if !self.state.is_valid_successor(&new_state) {
+            return Err(FundingOperationTransitionError::InvalidSuccessor);
+        }
+
+        let attempts = if self.attempts.len() >= MAX_FUNDING_ATTEMPTS - 1 {
+            let compacted = self.compact_attempt_history()?;
+            compacted
+                .record(new_state, at_secs, result_class)
+                .map_err(|_| FundingOperationTransitionError::TooManyAttempts)?
+        } else {
+            self.attempts
+                .record(new_state, at_secs, result_class)
+                .map_err(|_| FundingOperationTransitionError::TooManyAttempts)?
+        };
+        Ok(Self {
+            state: new_state,
+            attempts,
+            updated_at_secs: at_secs,
+            ..self.clone()
+        })
+    }
+
+    /// Returns a bounded history with one redundant record removed.  The
+    /// first candidate that leaves a valid lifecycle/timestamp sequence is
+    /// selected, making compaction deterministic across upgrades and replay.
+    fn compact_attempt_history(&self) -> Result<FundingAttempts, FundingOperationTransitionError> {
+        let records = self.attempts.as_slice();
+        if records.is_empty() {
+            return Err(FundingOperationTransitionError::TooManyAttempts);
+        }
+        for remove_index in 0..records.len().saturating_sub(1) {
+            let removed = records[remove_index];
+            // Keep any terminal/resolved phase and any explicit terminal
+            // failure record as durable evidence.  The unresolved retry
+            // records are the only records eligible for bounded compaction.
+            if removed.phase.stops_automatic_retry()
+                || matches!(
+                    removed.result_class,
+                    FundingAttemptResultClass::TerminalFailure
+                )
+            {
+                continue;
+            }
+            let mut compacted = Vec::with_capacity(records.len() - 1);
+            for (index, record) in records.iter().enumerate() {
+                if index == remove_index {
+                    continue;
+                }
+                compacted.push(FundingAttemptRecord {
+                    ordinal: compacted.len() as u32 + 1,
+                    ..*record
+                });
+            }
+            if history_is_valid_for_rail(&compacted, self.rail(), self.created_at_secs) {
+                return Ok(FundingAttempts(compacted));
+            }
+        }
+        Err(FundingOperationTransitionError::TooManyAttempts)
+    }
+
+    /// Records a confirmed ledger block index this operation's exact
+    /// immutable rail arguments produced (Task 4: generalized to both
+    /// rails — originally ICP-only, back when only the ICP/CMC
+    /// reconciliation flow (`attach_block_proof`, a later task) ever learned
+    /// a block after the fact). The Cycles Ledger rail now attaches its own
+    /// block the moment `withdraw` replies `Ok` inside the SAME call that
+    /// recorded the transition into `Confirmed`, rather than through a
+    /// separate reconciliation step. A `Duplicate` block is record evidence,
+    /// not delivery proof, and is therefore never attached here — see
+    /// `funding::cycles`.
+    ///
+    /// Two invariants, replacing the old "ICP rail only" rule with a
+    /// **state-valid** rule (`state_allows_confirmed_block`, shared with
+    /// this type's `Deserialize` impl so a decoded value can never violate
+    /// it either):
+    /// - single-assignment: fails if a block index is already recorded, so
+    ///   confirmed evidence can never be silently overwritten by a later
+    ///   call;
+    /// - the CURRENT `state` must be one where a confirmed block is
+    ///   meaningful: on the Cycles rail, `Confirmed`/`Complete`/`Terminal`/
+    ///   `Quarantined`; on the ICP rail, `TransferConfirmed`/`NotifyPending`/
+    ///   `Complete`/`Refunded`/`Terminal`/`Quarantined`. A block can never be
+    ///   attached while an operation is still merely `PlannedReserved`/
+    ///   `Submitted`/`Unknown`/`LedgerSubmitted`/`TransferUnknown` — states
+    ///   that by definition have no authoritative block evidence yet.
     pub fn attach_confirmed_block(
         &self,
         block_index: u64,
     ) -> Result<Self, AttachConfirmedBlockError> {
-        if self.rail() != FundingRail::IcpCmc {
-            return Err(AttachConfirmedBlockError::WrongRail);
-        }
         if self.confirmed_block_index.is_some() {
             return Err(AttachConfirmedBlockError::AlreadySet);
+        }
+        if !state_allows_confirmed_block(&self.state) {
+            return Err(AttachConfirmedBlockError::InvalidState);
         }
         Ok(Self {
             confirmed_block_index: Some(block_index),
             ..self.clone()
         })
+    }
+
+    /// Deterministically stops automatic retry when the bounded attempt
+    /// history has no ordinary retry slot left.  Production Cycles callers
+    /// invoke this before consuming the final slot, but the replacement form
+    /// also repairs a legacy/corrupt record that already used every slot.
+    /// The operation remains `Quarantined` (therefore reserved and signer
+    /// resolvable) rather than remaining forever `Unknown` and being retried
+    /// without bound.
+    pub fn quarantine_after_attempt_limit(
+        &self,
+        at_secs: u64,
+    ) -> Result<Self, FundingOperationTransitionError> {
+        let quarantine = match self.rail() {
+            FundingRail::CyclesLedger => {
+                FundingOperationState::Cycles(CyclesFundingState::Quarantined)
+            }
+            FundingRail::IcpCmc => FundingOperationState::Icp(IcpFundingState::Quarantined),
+        };
+        if at_secs < self.updated_at_secs {
+            return Err(FundingOperationTransitionError::TimestampRegression);
+        }
+        if !self.state.is_valid_successor(&quarantine) {
+            return Err(FundingOperationTransitionError::InvalidSuccessor);
+        }
+
+        let attempts = if self.attempts.len() < MAX_FUNDING_ATTEMPTS {
+            self.attempts
+                .record(
+                    quarantine,
+                    at_secs,
+                    FundingAttemptResultClass::Indeterminate,
+                )
+                .map_err(|_| FundingOperationTransitionError::TooManyAttempts)?
+        } else {
+            // `FundingAttempts` deliberately keeps its vector private.  A
+            // full legacy history has no append slot, so replace only its
+            // final record with the explicit quarantine transition while
+            // preserving every earlier attempt and ordinal.
+            let mut records = self.attempts.0.clone();
+            let last = records
+                .last_mut()
+                .ok_or(FundingOperationTransitionError::TooManyAttempts)?;
+            last.phase = quarantine;
+            last.at_secs = at_secs;
+            last.result_class = FundingAttemptResultClass::Indeterminate;
+            FundingAttempts(records)
+        };
+
+        Ok(Self {
+            state: quarantine,
+            attempts,
+            updated_at_secs: at_secs,
+            ..self.clone()
+        })
+    }
+
+    /// Applies an explicit signer/adapter reconciliation decision to a
+    /// quarantined Cycles-Ledger operation. This is intentionally separate
+    /// from `record_attempt`: `Quarantined` stops automatic retry, but a
+    /// later Task 6 endpoint may resolve it after independently verifying a
+    /// ledger block or a no-spend/known-debit outcome. A `Duplicate` reply
+    /// alone can never call this method as delivery proof.
+    pub fn reconcile_quarantined_cycles(
+        &self,
+        new_state: CyclesFundingState,
+        confirmed_block_index: Option<u64>,
+        at_secs: u64,
+    ) -> Result<Self, FundingOperationTransitionError> {
+        if self.state != FundingOperationState::Cycles(CyclesFundingState::Quarantined) {
+            return Err(FundingOperationTransitionError::InvalidSuccessor);
+        }
+        if at_secs < self.updated_at_secs {
+            return Err(FundingOperationTransitionError::TimestampRegression);
+        }
+        let state = FundingOperationState::Cycles(new_state);
+        if !matches!(
+            new_state,
+            CyclesFundingState::Complete | CyclesFundingState::Terminal
+        ) {
+            return Err(FundingOperationTransitionError::InvalidSuccessor);
+        }
+        match new_state {
+            CyclesFundingState::Complete if confirmed_block_index.is_none() => {
+                return Err(FundingOperationTransitionError::ConfirmedBlockRequired)
+            }
+            CyclesFundingState::Terminal if confirmed_block_index.is_some() => {
+                return Err(FundingOperationTransitionError::ConfirmedBlockConflict)
+            }
+            _ => {}
+        }
+        if let Some(existing) = self.confirmed_block_index {
+            if Some(existing) != confirmed_block_index {
+                return Err(FundingOperationTransitionError::ConfirmedBlockConflict);
+            }
+        }
+        let attempts = if self.attempts.len() < MAX_FUNDING_ATTEMPTS {
+            let result_class = match new_state {
+                CyclesFundingState::Complete => FundingAttemptResultClass::Success,
+                CyclesFundingState::Terminal => FundingAttemptResultClass::TerminalFailure,
+                _ => unreachable!("validated reconciliation state above"),
+            };
+            self.attempts
+                .record(state, at_secs, result_class)
+                .map_err(|_| FundingOperationTransitionError::TooManyAttempts)?
+        } else {
+            // Preserve the bounded terminal slot when a legacy quarantined
+            // history is already full. The final quarantine record is
+            // replaced with the explicit reconciliation result rather than
+            // making the operation permanently unresolvable.
+            let mut records = self.attempts.0.clone();
+            let last = records
+                .last_mut()
+                .ok_or(FundingOperationTransitionError::TooManyAttempts)?;
+            last.phase = state;
+            last.at_secs = at_secs;
+            last.result_class = match new_state {
+                CyclesFundingState::Complete => FundingAttemptResultClass::Success,
+                CyclesFundingState::Terminal => FundingAttemptResultClass::TerminalFailure,
+                _ => unreachable!("validated reconciliation state above"),
+            };
+            FundingAttempts(records)
+        };
+        Ok(Self {
+            state,
+            attempts,
+            confirmed_block_index: confirmed_block_index.or(self.confirmed_block_index),
+            updated_at_secs: at_secs,
+            ..self.clone()
+        })
+    }
+
+    /// Storage's compare-and-update helper needs to recognize the one
+    /// additional edge that is intentionally unavailable to automatic retry:
+    /// a quarantined Cycles operation may become `Complete` or `Terminal`
+    /// only after the explicit reconciliation method above has produced it.
+    pub(crate) fn is_valid_quarantined_cycles_reconciliation(&self, next: &Self) -> bool {
+        if self.state != FundingOperationState::Cycles(CyclesFundingState::Quarantined)
+            || !matches!(
+                next.state,
+                FundingOperationState::Cycles(
+                    CyclesFundingState::Complete | CyclesFundingState::Terminal
+                )
+            )
+        {
+            return false;
+        }
+        match next.state {
+            FundingOperationState::Cycles(CyclesFundingState::Complete)
+                if next.confirmed_block_index.is_none() =>
+            {
+                return false
+            }
+            FundingOperationState::Cycles(CyclesFundingState::Terminal)
+                if next.confirmed_block_index.is_some() =>
+            {
+                return false
+            }
+            _ => {}
+        }
+        if self.confirmed_block_index != next.confirmed_block_index
+            && (self.confirmed_block_index.is_some() || next.confirmed_block_index.is_some())
+        {
+            return false;
+        }
+        let current_len = self.attempts.len();
+        let next_len = next.attempts.len();
+        if next_len == current_len {
+            current_len > 0
+                && self.attempts.as_slice()[..current_len - 1]
+                    == next.attempts.as_slice()[..current_len - 1]
+                && next.attempts.as_slice().last().map(|record| record.phase) == Some(next.state)
+        } else {
+            next_len == current_len + 1
+                && next.attempts.as_slice()[..current_len] == self.attempts.as_slice()[..]
+                && next.attempts.as_slice().last().map(|record| record.phase) == Some(next.state)
+        }
+    }
+
+    /// Validates the one-record replacement used by
+    /// `record_attempt_with_bounded_compaction`.  This is deliberately
+    /// narrow: only successful Cycles `Submitted|Unknown -> Confirmed` or
+    /// `Confirmed -> Complete` transitions may compact history, and the
+    /// replacement must be derivable by removing one eligible record from
+    /// the currently stored vector and appending the new final phase.
+    pub(crate) fn is_valid_bounded_attempt_compaction_successor(&self, next: &Self) -> bool {
+        if self.rail() != FundingRail::CyclesLedger
+            || next.rail() != FundingRail::CyclesLedger
+            || self.attempts.len() < MAX_FUNDING_ATTEMPTS - 1
+            || next.attempts.len() != self.attempts.len()
+            || self.attempts.is_empty()
+            || !self.state.is_valid_successor(&next.state)
+            || !matches!(
+                next.state,
+                FundingOperationState::Cycles(
+                    CyclesFundingState::Confirmed | CyclesFundingState::Complete
+                )
+            )
+        {
+            return false;
+        }
+        let incoming = next.attempts.as_slice();
+        let current = self.attempts.as_slice();
+        let incoming_prefix = &incoming[..incoming.len() - 1];
+        let final_record = incoming.last().expect("non-empty checked above");
+        if final_record.phase != next.state || final_record.at_secs != next.updated_at_secs {
+            return false;
+        }
+        for remove_index in 0..current.len().saturating_sub(1) {
+            let removed = current[remove_index];
+            if removed.phase.stops_automatic_retry()
+                || matches!(
+                    removed.result_class,
+                    FundingAttemptResultClass::TerminalFailure
+                )
+            {
+                continue;
+            }
+            let mut compacted = Vec::with_capacity(current.len() - 1);
+            for (index, record) in current.iter().enumerate() {
+                if index == remove_index {
+                    continue;
+                }
+                compacted.push(FundingAttemptRecord {
+                    ordinal: compacted.len() as u32 + 1,
+                    ..*record
+                });
+            }
+            if compacted.as_slice() == incoming_prefix
+                && history_is_valid_for_rail(&compacted, self.rail(), self.created_at_secs)
+            {
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -1927,7 +2318,8 @@ enum FundingOperationHistoryDecodeError {
 /// alone: `state`'s rail matches `rail_arguments`'s rail (the check
 /// `record_attempt` performs on every transition), `reserved_amount_cycles`
 /// matches `rail_arguments`'s embedded amount (the check `open` performs),
-/// `confirmed_block_index` is only ever present on the ICP rail (the check
+/// `confirmed_block_index` is only ever present once `state` is one of the
+/// states `state_allows_confirmed_block` accepts, on either rail (the check
 /// `attach_confirmed_block` performs), and — the invariant a bare derive
 /// used to miss entirely — that `state`, `attempts`, and `updated_at_secs`
 /// are mutually consistent exactly the way `open`/`record_attempt` guarantee
@@ -1981,13 +2373,26 @@ impl<'de> Deserialize<'de> for FundingOperation {
                 FundingOperationOpenError::ReservedAmountMismatch,
             ));
         }
+        if let FundingRailArguments::Cycles(snapshot) = &raw.rail_arguments {
+            if snapshot
+                .amount_cycles
+                .checked_add(snapshot.fee_cycles)
+                .is_none()
+            {
+                return Err(invariant_decode_error(
+                    FundingOperationOpenError::CyclesAmountPlusFeeOverflow,
+                ));
+            }
+        }
         if raw.target != raw.rail_arguments.embedded_destination() {
             return Err(invariant_decode_error(
                 FundingOperationOpenError::DestinationMismatch,
             ));
         }
-        if raw.confirmed_block_index.is_some() && raw.rail_arguments.rail() != FundingRail::IcpCmc {
-            return Err(invariant_decode_error(AttachConfirmedBlockError::WrongRail));
+        if raw.confirmed_block_index.is_some() && !state_allows_confirmed_block(&raw.state) {
+            return Err(invariant_decode_error(
+                AttachConfirmedBlockError::InvalidState,
+            ));
         }
 
         let initial_state = match &raw.rail_arguments {
@@ -2020,7 +2425,7 @@ impl<'de> Deserialize<'de> for FundingOperation {
             let mut previous_phase = initial_state;
             let mut previous_at_secs = raw.created_at_secs;
             for attempt in attempts {
-                if !previous_phase.is_valid_successor(&attempt.phase) {
+                if !is_valid_persisted_successor(&previous_phase, &attempt.phase) {
                     return Err(invariant_decode_error(
                         FundingOperationHistoryDecodeError::InvalidAttemptSuccessor,
                     ));
@@ -2052,6 +2457,61 @@ impl<'de> Deserialize<'de> for FundingOperation {
     }
 }
 
+/// The normal transition graph intentionally stops all automatic mutation at
+/// `Quarantined`. Stable histories may nevertheless contain the one explicit
+/// signer-reconciliation edge `Quarantined -> Complete|Terminal`; accepting
+/// that edge during decode keeps a legitimately reconciled operation
+/// reloadable without reopening automatic retry.
+fn is_valid_persisted_successor(
+    previous: &FundingOperationState,
+    next: &FundingOperationState,
+) -> bool {
+    previous.is_valid_successor(next)
+        || matches!(
+            (previous, next),
+            (
+                FundingOperationState::Cycles(CyclesFundingState::Quarantined),
+                FundingOperationState::Cycles(CyclesFundingState::Complete)
+            ) | (
+                FundingOperationState::Cycles(CyclesFundingState::Quarantined),
+                FundingOperationState::Cycles(CyclesFundingState::Terminal)
+            )
+        )
+}
+
+fn initial_funding_state(rail: FundingRail) -> FundingOperationState {
+    match rail {
+        FundingRail::CyclesLedger => {
+            FundingOperationState::Cycles(CyclesFundingState::PlannedReserved)
+        }
+        FundingRail::IcpCmc => FundingOperationState::Icp(IcpFundingState::PlannedReserved),
+    }
+}
+
+/// Checks a candidate compacted history using the same lifecycle and
+/// timestamp rules enforced when a `FundingOperation` is decoded.  This is
+/// kept separate from deserialization so state updates can validate a
+/// bounded replacement without trusting a caller's local vector.
+fn history_is_valid_for_rail(
+    records: &[FundingAttemptRecord],
+    rail: FundingRail,
+    created_at_secs: u64,
+) -> bool {
+    let mut previous_phase = initial_funding_state(rail);
+    let mut previous_at_secs = created_at_secs;
+    for record in records {
+        if record.phase.rail() != rail
+            || !is_valid_persisted_successor(&previous_phase, &record.phase)
+            || record.at_secs < previous_at_secs
+        {
+            return false;
+        }
+        previous_phase = record.phase;
+        previous_at_secs = record.at_secs;
+    }
+    true
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FundingOperationTransitionError {
     /// `at_secs` is strictly before this operation's own `updated_at_secs`,
@@ -2063,11 +2523,39 @@ pub enum FundingOperationTransitionError {
     RailMismatch,
     InvalidSuccessor,
     TooManyAttempts,
+    /// Explicit reconciliation cannot mark a Cycles operation `Complete`
+    /// without an independently verified ledger block.
+    ConfirmedBlockRequired,
+    /// Explicit reconciliation supplied a block inconsistent with the
+    /// operation's existing proof or with a terminal no-delivery outcome.
+    ConfirmedBlockConflict,
+}
+
+/// Shared by `FundingOperation::attach_confirmed_block` and this type's
+/// `Deserialize` impl (see that method's doc comment for the full rule).
+fn state_allows_confirmed_block(state: &FundingOperationState) -> bool {
+    matches!(
+        state,
+        FundingOperationState::Cycles(CyclesFundingState::Confirmed)
+            | FundingOperationState::Cycles(CyclesFundingState::Complete)
+            | FundingOperationState::Cycles(CyclesFundingState::Terminal)
+            | FundingOperationState::Cycles(CyclesFundingState::Quarantined)
+            | FundingOperationState::Icp(IcpFundingState::TransferConfirmed)
+            | FundingOperationState::Icp(IcpFundingState::NotifyPending)
+            | FundingOperationState::Icp(IcpFundingState::Complete)
+            | FundingOperationState::Icp(IcpFundingState::Refunded)
+            | FundingOperationState::Icp(IcpFundingState::Terminal)
+            | FundingOperationState::Icp(IcpFundingState::Quarantined)
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AttachConfirmedBlockError {
-    WrongRail,
+    /// The current `state` is not yet one where a confirmed block is
+    /// meaningful (see `attach_confirmed_block`'s doc comment for the exact
+    /// set) — replaces the old rail-only `WrongRail` rejection with a
+    /// state-valid rule that applies to both rails alike.
+    InvalidState,
     AlreadySet,
 }
 
@@ -2204,6 +2692,12 @@ pub enum RollingSpendReserveError {
     CapExceeded,
     DuplicateOperation,
     Bound,
+    /// Accepting this reservation would leave no guaranteed slot for it (or
+    /// an already-pending sibling) to ever settle: see `reserve`'s doc
+    /// comment for the invariant this maintains. A confirmed external spend
+    /// must never become un-settleable because the bounded settled ledger
+    /// filled up while this reservation was in flight.
+    SettlementCapacityExhausted,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2237,6 +2731,7 @@ pub struct RollingSpendLedger {
 enum RollingSpendLedgerDecodeError {
     TooManySettled,
     TooManyPending,
+    CombinedCapacityExceeded,
     DuplicatePendingOperation,
 }
 
@@ -2264,6 +2759,16 @@ impl<'de> Deserialize<'de> for RollingSpendLedger {
         if raw.pending.len() > MAX_PENDING_RESERVATIONS {
             return Err(invariant_decode_error(
                 RollingSpendLedgerDecodeError::TooManyPending,
+            ));
+        }
+        if raw
+            .settled
+            .len()
+            .checked_add(raw.pending.len())
+            .map_or(true, |count| count > MAX_ROLLING_SPEND_SETTLED_ENTRIES)
+        {
+            return Err(invariant_decode_error(
+                RollingSpendLedgerDecodeError::CombinedCapacityExceeded,
             ));
         }
         let mut seen = BTreeSet::new();
@@ -2301,15 +2806,45 @@ impl RollingSpendLedger {
         self.pending.first().map(|p| p.operation_id)
     }
 
-    pub fn pending_cycles(&self) -> u128 {
+    pub fn pending_cycles(&self) -> Result<u128, RollingSpendReserveError> {
         self.pending
             .iter()
-            .fold(0u128, |acc, p| acc.saturating_add(p.amount_cycles))
+            .try_fold(0u128, |acc, p| acc.checked_add(p.amount_cycles))
+            .ok_or(RollingSpendReserveError::Overflow)
     }
 
     /// Prunes `settled` entries at or past `window_secs` old as of
     /// `now_secs`, then reserves `amount_cycles` against `cap_cycles`
     /// counting settled-in-window plus all pending (in-flight) amounts.
+    ///
+    /// **Settlement-capacity invariant (correction pass, atomicity review
+    /// Finding 2).** This method is the ONLY place a new pending entry is
+    /// ever added, and it maintains, across every call to `reserve`/
+    /// `settle`/`release_no_spend`, the invariant `settled.len() +
+    /// pending.len() <= MAX_ROLLING_SPEND_SETTLED_ENTRIES` immediately after
+    /// each call:
+    /// - `reserve` checks `settled.len() + pending.len() <
+    ///   MAX_ROLLING_SPEND_SETTLED_ENTRIES` (i.e. `< cap`, so `+1` still
+    ///   fits) BEFORE pushing the new pending entry, using the freshly
+    ///   window-pruned `settled` — this is what actually enforces the
+    ///   invariant, not merely a static assertion of it.
+    /// - `settle` moves one pending entry to `settled` (net zero change to
+    ///   the sum) and additionally prunes `settled` to the window at its own
+    ///   (later, monotonic) `settled_at_secs`, which can only ever further
+    ///   REDUCE `settled.len()` — so if the invariant held immediately
+    ///   before a `settle` call, it provably still holds immediately after,
+    ///   and `settle`'s own bound check can never actually reject a
+    ///   genuinely-pending, genuinely-reserved entry (see that method's doc
+    ///   comment).
+    /// - `release_no_spend` only ever removes a pending entry (the sum only
+    ///   decreases), so it trivially preserves the invariant too.
+    ///
+    /// Net effect: once a reservation is accepted here, it — and every
+    /// other reservation pending at that moment — is guaranteed a settled
+    /// slot whenever it resolves, regardless of arrival order or how many
+    /// other pending entries resolve first. This is what makes a confirmed
+    /// external spend always settleable, never stranded behind the 512-slot
+    /// bound.
     pub fn reserve(
         &self,
         operation_id: u64,
@@ -2330,6 +2865,9 @@ impl RollingSpendLedger {
             .copied()
             .filter(|entry| now_secs.saturating_sub(entry.settled_at_secs) < window_secs)
             .collect();
+        if settled.len() + self.pending.len() >= MAX_ROLLING_SPEND_SETTLED_ENTRIES {
+            return Err(RollingSpendReserveError::SettlementCapacityExhausted);
+        }
         let settled_sum = settled
             .iter()
             .try_fold(0u128, |acc, e| acc.checked_add(e.amount_cycles))
@@ -2360,11 +2898,17 @@ impl RollingSpendLedger {
     /// Moves the matching pending reservation to a timestamped settled
     /// entry, then prunes any settled entry at or past `window_secs` old —
     /// the same predicate `reserve` uses. Fails if `operation_id` has no
-    /// matching pending reservation, or if more than
-    /// `MAX_ROLLING_SPEND_SETTLED_ENTRIES` entries remain inside the window
-    /// after pruning: an in-window entry is never evicted just to satisfy
-    /// the bound, since doing so would make the rolling cap undercount real
-    /// spend.
+    /// matching pending reservation.
+    ///
+    /// The `Bound` case (more than `MAX_ROLLING_SPEND_SETTLED_ENTRIES`
+    /// entries remaining after pruning) is, by construction, unreachable for
+    /// any entry that was legitimately accepted by `reserve` — see that
+    /// method's doc comment for the settlement-capacity invariant it
+    /// maintains specifically so this never happens to a confirmed spend.
+    /// The check is kept anyway as a defense-in-depth invariant guard (fails
+    /// closed with a typed error rather than silently evicting a real
+    /// in-window entry, which would make the rolling cap undercount actual
+    /// spend) in case that invariant is ever violated by a future change.
     pub fn settle(
         &self,
         operation_id: u64,
@@ -2422,6 +2966,7 @@ pub enum TargetReservationError {
     CapExceeded,
     DuplicateOperation,
     Bound,
+    SettlementCapacityExhausted,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2546,6 +3091,9 @@ impl TargetReservationState {
                     TargetReservationError::DuplicateOperation
                 }
                 RollingSpendReserveError::Bound => TargetReservationError::Bound,
+                RollingSpendReserveError::SettlementCapacityExhausted => {
+                    TargetReservationError::SettlementCapacityExhausted
+                }
             })?;
         Ok(Self {
             rolling_spend,
@@ -2798,6 +3346,7 @@ pub enum SelfRecoveryStateError {
     CapExceeded,
     DuplicateOperation,
     Bound,
+    SettlementCapacityExhausted,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2935,6 +3484,9 @@ impl SelfRecoveryState {
                     SelfRecoveryStateError::DuplicateOperation
                 }
                 RollingSpendReserveError::Bound => SelfRecoveryStateError::Bound,
+                RollingSpendReserveError::SettlementCapacityExhausted => {
+                    SelfRecoveryStateError::SettlementCapacityExhausted
+                }
             })?;
         Ok(Self {
             rolling_spend,
@@ -2978,6 +3530,404 @@ impl SelfRecoveryState {
 }
 
 impl Default for SelfRecoveryState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ─────────────────────── Cycles Ledger source reserve/cache (Task 4) ───────────────────────
+
+/// A bound on how many operations can ever have a pending Cycles Ledger
+/// source debit at once: every ordinary target has at most one in-flight
+/// operation (`MAX_TARGETS`), plus the one self-recovery lane — the same
+/// ceiling `MAX_FUNDING_OPERATIONS` already uses for the same reason.
+pub const MAX_PENDING_SOURCE_DEBITS: usize = MAX_FUNDING_OPERATIONS;
+
+/// Sentinel's cached view of its own Cycles Ledger account, refreshed only
+/// by `SourceReserveState::refresh` (the sampler/timer seam — Task 4 does
+/// not itself query the ledger from `prepare`; see that method's doc
+/// comment). Every field is populated together: there is no "balance known,
+/// fee unknown" partial state.
+#[derive(CandidType, Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CyclesLedgerCache {
+    pub balance_cycles: u128,
+    pub fee_cycles: u128,
+    pub as_of_secs: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceReserveError {
+    /// `refresh` has never been called — an unpopulated cache must never be
+    /// treated as either "zero" or "fresh enough."
+    UnknownCache,
+    /// The cache was populated, but `now_secs - cache.as_of_secs` exceeds
+    /// the caller's freshness bound.
+    StaleCache,
+    /// The cache's `as_of_secs` is strictly after `now_secs` — a
+    /// future-dated snapshot. `now_secs.saturating_sub(as_of_secs)` alone
+    /// would silently floor this to `0` and treat it as perfectly fresh, so
+    /// this is checked as its own explicit, fail-closed case rather than
+    /// folded into the staleness arithmetic (correction pass, ledger-
+    /// security review "future-dated cache" finding).
+    FutureCache,
+    Overflow,
+    /// `amount_plus_fee_cycles`, added to every other pending debit (and,
+    /// for an ordinary reservation, the protected self-recovery reserve),
+    /// would exceed the cached balance.
+    InsufficientReserve,
+    DuplicateOperation,
+    Bound,
+    /// The caller attempted to refresh while an external withdraw attempt is
+    /// in flight.  A query at that point could race the ledger's debit and
+    /// later settlement would not be able to tell whether the returned
+    /// balance already included it; fail closed rather than double-debiting or
+    /// optimistically retaining the source balance.
+    AttemptInFlight,
+    /// A cache refresh is older than the currently retained snapshot, or is
+    /// a conflicting replacement at the same timestamp.
+    OutOfOrderRefresh,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceSettleError {
+    UnknownOperation,
+    /// `known_spent_cycles` exceeds the currently cached `balance_cycles`.
+    /// This is an invariant failure, not a reason to clamp to zero: a
+    /// cached balance that cannot even cover a debit it is being told
+    /// definitely happened means the cache is already known-wrong, and
+    /// continuing to reserve against it would be optimistic bookkeeping
+    /// that could conceal a genuine over-spend past the protected reserve.
+    /// Fails closed; the next `refresh` is the only way to recover.
+    KnownSpendExceedsCachedBalance,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceAttemptError {
+    UnknownOperation,
+    TimestampRegression,
+}
+
+#[derive(CandidType, Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PendingSourceDebit {
+    pub operation_id: u64,
+    /// The withdraw amount plus the ledger fee snapshotted at reservation
+    /// time — source-side accounting counts amount-plus-fee, unlike the
+    /// target/global rolling caps, which count delivered amount only (see
+    /// `reserve_ordinary`/`reserve_self_recovery`'s doc comments).
+    pub amount_plus_fee_cycles: u128,
+    pub reserved_at_secs: u64,
+    /// Set synchronously immediately before the inter-canister withdraw is
+    /// issued.  Refreshes are rejected once this is populated, so a later
+    /// settlement always applies its known debit exactly once to the cache
+    /// snapshot that predates the attempt.
+    #[serde(default)]
+    pub attempt_started_at_secs: Option<u64>,
+}
+
+/// Stable memory ID 14. The single shared Cycles Ledger source-account
+/// reservation ledger: BOTH ordinary target withdrawals
+/// (`reserve_ordinary`) and Sentinel's own self-recovery withdrawal
+/// (`reserve_self_recovery`) reserve against this SAME store, so the two
+/// lanes can never race past each other's view of spendable source balance
+/// — even though they are governed by completely independent policy caps
+/// (`TargetFundingPolicy`/`GlobalPolicy.global_daily_cap_cycles` vs.
+/// `SelfRecoveryPolicy.daily_cap_cycles`, each enforced by its own separate
+/// rolling-spend ledger elsewhere in this file). This type owns none of
+/// that cap bookkeeping — it only answers "does the Cycles Ledger source
+/// account actually have this much cycles free right now," given the last
+/// refreshed balance/fee and every currently-outstanding debit.
+#[derive(CandidType, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct SourceReserveState {
+    cache: Option<CyclesLedgerCache>,
+    pending: Vec<PendingSourceDebit>,
+}
+
+#[derive(Debug)]
+enum SourceReserveDecodeError {
+    TooManyPending,
+    DuplicatePendingOperation,
+    PendingAmountOverflow,
+}
+
+/// Re-enforces the two invariants this type's own mutators maintain:
+/// `pending.len() <= MAX_PENDING_SOURCE_DEBITS`, and no duplicate
+/// `operation_id` among `pending` entries — the same pattern
+/// `RollingSpendLedger`'s own custom `Deserialize` impl uses for its
+/// `pending` field.
+impl<'de> Deserialize<'de> for SourceReserveState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            cache: Option<CyclesLedgerCache>,
+            pending: Vec<PendingSourceDebit>,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+        if raw.pending.len() > MAX_PENDING_SOURCE_DEBITS {
+            return Err(invariant_decode_error(
+                SourceReserveDecodeError::TooManyPending,
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        for debit in &raw.pending {
+            if !seen.insert(debit.operation_id) {
+                return Err(invariant_decode_error(
+                    SourceReserveDecodeError::DuplicatePendingOperation,
+                ));
+            }
+        }
+        if raw
+            .pending
+            .iter()
+            .try_fold(0u128, |acc, debit| {
+                acc.checked_add(debit.amount_plus_fee_cycles)
+            })
+            .is_none()
+        {
+            return Err(invariant_decode_error(
+                SourceReserveDecodeError::PendingAmountOverflow,
+            ));
+        }
+        Ok(Self {
+            cache: raw.cache,
+            pending: raw.pending,
+        })
+    }
+}
+
+impl SourceReserveState {
+    pub fn new() -> Self {
+        Self {
+            cache: None,
+            pending: Vec::new(),
+        }
+    }
+
+    pub fn cache(&self) -> Option<CyclesLedgerCache> {
+        self.cache
+    }
+
+    pub fn pending(&self) -> &[PendingSourceDebit] {
+        &self.pending
+    }
+
+    pub fn pending_operation_ids(&self) -> impl Iterator<Item = u64> + '_ {
+        self.pending.iter().map(|p| p.operation_id)
+    }
+
+    pub fn pending_total_cycles(&self) -> Result<u128, SourceReserveError> {
+        self.pending
+            .iter()
+            .try_fold(0u128, |acc, p| acc.checked_add(p.amount_plus_fee_cycles))
+            .ok_or(SourceReserveError::Overflow)
+    }
+
+    /// Replaces the cache with a freshly queried balance/fee snapshot. Never
+    /// touches `pending` — refreshing must never itself grant or revoke a
+    /// reservation. This is the ONLY way `cache` is ever populated; no
+    /// `reserve_*`/`settle` path performs a balance query itself (the
+    /// design requirement this exists to satisfy: reservation happens
+    /// before any await, against an already-cached snapshot, never by
+    /// querying the ledger from inside `prepare`).
+    pub fn refresh(
+        &self,
+        balance_cycles: u128,
+        fee_cycles: u128,
+        as_of_secs: u64,
+    ) -> Result<Self, SourceReserveError> {
+        if self
+            .pending
+            .iter()
+            .any(|debit| debit.attempt_started_at_secs.is_some())
+        {
+            return Err(SourceReserveError::AttemptInFlight);
+        }
+        if let Some(previous) = self.cache {
+            if as_of_secs < previous.as_of_secs
+                || (as_of_secs == previous.as_of_secs
+                    && (balance_cycles != previous.balance_cycles
+                        || fee_cycles != previous.fee_cycles))
+            {
+                return Err(SourceReserveError::OutOfOrderRefresh);
+            }
+            if as_of_secs == previous.as_of_secs {
+                return Ok(self.clone());
+            }
+        }
+        Ok(Self {
+            cache: Some(CyclesLedgerCache {
+                balance_cycles,
+                fee_cycles,
+                as_of_secs,
+            }),
+            pending: self.pending.clone(),
+        })
+    }
+
+    fn fresh_cache(
+        &self,
+        now_secs: u64,
+        max_age_secs: u64,
+    ) -> Result<CyclesLedgerCache, SourceReserveError> {
+        let cache = self.cache.ok_or(SourceReserveError::UnknownCache)?;
+        if cache.as_of_secs > now_secs {
+            return Err(SourceReserveError::FutureCache);
+        }
+        if now_secs.saturating_sub(cache.as_of_secs) > max_age_secs {
+            return Err(SourceReserveError::StaleCache);
+        }
+        Ok(cache)
+    }
+
+    fn reserve_common(
+        &self,
+        operation_id: u64,
+        amount_plus_fee_cycles: u128,
+        cache: CyclesLedgerCache,
+        floor_cycles: u128,
+        now_secs: u64,
+    ) -> Result<Self, SourceReserveError> {
+        if self.pending.iter().any(|p| p.operation_id == operation_id) {
+            return Err(SourceReserveError::DuplicateOperation);
+        }
+        if self.pending.len() >= MAX_PENDING_SOURCE_DEBITS {
+            return Err(SourceReserveError::Bound);
+        }
+        let committed = self
+            .pending_total_cycles()?
+            .checked_add(floor_cycles)
+            .ok_or(SourceReserveError::Overflow)?;
+        let required = committed
+            .checked_add(amount_plus_fee_cycles)
+            .ok_or(SourceReserveError::Overflow)?;
+        if required > cache.balance_cycles {
+            return Err(SourceReserveError::InsufficientReserve);
+        }
+        let mut pending = self.pending.clone();
+        pending.push(PendingSourceDebit {
+            operation_id,
+            amount_plus_fee_cycles,
+            reserved_at_secs: now_secs,
+            attempt_started_at_secs: None,
+        });
+        Ok(Self {
+            cache: Some(cache),
+            pending,
+        })
+    }
+
+    /// Reserves `amount_plus_fee_cycles` for an ORDINARY (non-self-recovery)
+    /// withdrawal. Requires a fresh cache and never lets the committed total
+    /// (every pending debit, ordinary or self-recovery, plus this new one)
+    /// push the account below `protected_reserve_cycles` — the governed
+    /// self-recovery floor ordinary spending may never touch.
+    pub fn reserve_ordinary(
+        &self,
+        operation_id: u64,
+        amount_plus_fee_cycles: u128,
+        protected_reserve_cycles: u128,
+        now_secs: u64,
+        max_age_secs: u64,
+    ) -> Result<Self, SourceReserveError> {
+        let cache = self.fresh_cache(now_secs, max_age_secs)?;
+        self.reserve_common(
+            operation_id,
+            amount_plus_fee_cycles,
+            cache,
+            protected_reserve_cycles,
+            now_secs,
+        )
+    }
+
+    /// Reserves for the self-recovery lane: identical bookkeeping, but never
+    /// preserves `protected_reserve_cycles` against itself — that reserve
+    /// exists FOR self-recovery to draw down; only ordinary spending is
+    /// forbidden from touching it.
+    pub fn reserve_self_recovery(
+        &self,
+        operation_id: u64,
+        amount_plus_fee_cycles: u128,
+        now_secs: u64,
+        max_age_secs: u64,
+    ) -> Result<Self, SourceReserveError> {
+        let cache = self.fresh_cache(now_secs, max_age_secs)?;
+        self.reserve_common(operation_id, amount_plus_fee_cycles, cache, 0, now_secs)
+    }
+
+    /// Resolves a pending debit once its outcome is known: releases the
+    /// pending hold and, if the withdrawal attempt is known to have spent
+    /// `known_spent_cycles` (which may be less than the full held amount —
+    /// e.g. a Cycles Ledger `FailedToWithdraw` with a known fee-only debit,
+    /// or exactly `0` for a proven no-spend outcome), immediately debits the
+    /// CACHE by that amount rather than waiting for the next `refresh`. This
+    /// keeps a reservation attempted before the next refresh from
+    /// re-counting cycles that are already known to be gone — the
+    /// "conservatively reflect any known fee debit" requirement — without
+    /// needing to track partial spend per pending entry: the next `refresh`
+    /// is always the eventual source of truth.
+    pub fn settle(
+        &self,
+        operation_id: u64,
+        known_spent_cycles: u128,
+    ) -> Result<Self, SourceSettleError> {
+        let index = self
+            .pending
+            .iter()
+            .position(|p| p.operation_id == operation_id)
+            .ok_or(SourceSettleError::UnknownOperation)?;
+        let mut pending = self.pending.clone();
+        pending.remove(index);
+        let cache = match self.cache {
+            None => None,
+            Some(c) => {
+                let balance_cycles = c
+                    .balance_cycles
+                    .checked_sub(known_spent_cycles)
+                    .ok_or(SourceSettleError::KnownSpendExceedsCachedBalance)?;
+                Some(CyclesLedgerCache {
+                    balance_cycles,
+                    ..c
+                })
+            }
+        };
+        Ok(Self { cache, pending })
+    }
+
+    /// Marks the source debit immediately before issuing the external
+    /// withdrawal.  This is deliberately a pure state transition; the state
+    /// caller persists the returned value before the await.  Repeated calls
+    /// for the same operation are idempotent when their timestamp does not
+    /// move backwards, which keeps retry preparation deterministic.
+    pub fn mark_attempt(
+        &self,
+        operation_id: u64,
+        attempt_started_at_secs: u64,
+    ) -> Result<Self, SourceAttemptError> {
+        let index = self
+            .pending
+            .iter()
+            .position(|debit| debit.operation_id == operation_id)
+            .ok_or(SourceAttemptError::UnknownOperation)?;
+        let existing = self.pending[index].attempt_started_at_secs;
+        if let Some(existing) = existing {
+            if attempt_started_at_secs < existing {
+                return Err(SourceAttemptError::TimestampRegression);
+            }
+            return Ok(self.clone());
+        }
+        let mut pending = self.pending.clone();
+        pending[index].attempt_started_at_secs = Some(attempt_started_at_secs);
+        Ok(Self {
+            cache: self.cache,
+            pending,
+        })
+    }
+}
+
+impl Default for SourceReserveState {
     fn default() -> Self {
         Self::new()
     }
@@ -4442,6 +5392,41 @@ mod tests {
     }
 
     #[test]
+    fn exhausted_unknown_history_preserves_the_final_slot_for_quarantine() {
+        let mut op = open_cycles_operation(1, target_principal(1), 0);
+        for i in 0..MAX_FUNDING_ATTEMPTS {
+            let phase = if i == 0 {
+                FundingOperationState::Cycles(CyclesFundingState::Submitted)
+            } else {
+                FundingOperationState::Cycles(CyclesFundingState::Unknown)
+            };
+            op = op
+                .record_attempt(phase, i as u64, FundingAttemptResultClass::Indeterminate)
+                .unwrap();
+        }
+        assert_eq!(
+            op.state(),
+            FundingOperationState::Cycles(CyclesFundingState::Unknown)
+        );
+        let quarantined = op.quarantine_after_attempt_limit(999).unwrap();
+        assert_eq!(quarantined.attempts().len(), MAX_FUNDING_ATTEMPTS);
+        assert_eq!(
+            quarantined.state(),
+            FundingOperationState::Cycles(CyclesFundingState::Quarantined)
+        );
+        assert_eq!(
+            quarantined.attempts().as_slice().last().unwrap().ordinal,
+            MAX_FUNDING_ATTEMPTS as u32
+        );
+        assert_eq!(
+            quarantined.attempts().as_slice().last().unwrap().phase,
+            FundingOperationState::Cycles(CyclesFundingState::Quarantined)
+        );
+        assert!(quarantined.state().stops_automatic_retry());
+        assert!(!quarantined.state().is_resolved());
+    }
+
+    #[test]
     fn record_attempt_rejects_cross_rail_transition() {
         let op = open_cycles_operation(1, target_principal(1), 0);
         assert_eq!(
@@ -4700,6 +5685,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn open_rejects_cycles_amount_plus_fee_overflow() {
+        let target = target_principal(1);
+        let mut snapshot = cycles_withdraw_snapshot(target);
+        snapshot.amount_cycles = u128::MAX;
+        snapshot.fee_cycles = 1;
+        assert_eq!(
+            FundingOperation::open(
+                1,
+                target,
+                1,
+                test_funding_policy(),
+                FundingTrigger::LowBalanceAutoTopup,
+                FundingRailArguments::Cycles(snapshot),
+                u128::MAX,
+                0,
+            ),
+            Err(FundingOperationOpenError::CyclesAmountPlusFeeOverflow)
+        );
+    }
+
     // ─── FundingOperation::open target/destination consistency (Finding N3) ───
 
     #[test]
@@ -4803,6 +5809,18 @@ mod tests {
             10,
             0,
         )
+        .unwrap()
+        .record_attempt(
+            FundingOperationState::Icp(IcpFundingState::LedgerSubmitted),
+            1,
+            FundingAttemptResultClass::Indeterminate,
+        )
+        .unwrap()
+        .record_attempt(
+            FundingOperationState::Icp(IcpFundingState::TransferConfirmed),
+            2,
+            FundingAttemptResultClass::Success,
+        )
         .unwrap();
         assert_eq!(op.confirmed_block_index(), None);
 
@@ -4818,12 +5836,62 @@ mod tests {
     }
 
     #[test]
-    fn attach_confirmed_block_rejects_cycles_rail() {
-        let op = open_cycles_operation(1, target_principal(1), 0);
+    fn attach_confirmed_block_rejects_state_too_early_on_either_rail() {
+        // Cycles rail: still `PlannedReserved`, no confirming reply yet.
+        let cycles_op = open_cycles_operation(1, target_principal(1), 0);
         assert_eq!(
-            op.attach_confirmed_block(1),
-            Err(AttachConfirmedBlockError::WrongRail)
+            cycles_op.attach_confirmed_block(1),
+            Err(AttachConfirmedBlockError::InvalidState)
         );
+
+        // ICP rail: still `PlannedReserved`/`LedgerSubmitted`, no confirmed
+        // transfer or `Duplicate` proof yet.
+        let target = target_principal(2);
+        let icp_op = FundingOperation::open(
+            2,
+            target,
+            1,
+            test_funding_policy(),
+            FundingTrigger::LowBalanceAutoTopup,
+            FundingRailArguments::Icp(icp_cmc_snapshot(target)),
+            10,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            icp_op.attach_confirmed_block(1),
+            Err(AttachConfirmedBlockError::InvalidState)
+        );
+        let submitted = icp_op
+            .record_attempt(
+                FundingOperationState::Icp(IcpFundingState::LedgerSubmitted),
+                1,
+                FundingAttemptResultClass::Indeterminate,
+            )
+            .unwrap();
+        assert_eq!(
+            submitted.attach_confirmed_block(1),
+            Err(AttachConfirmedBlockError::InvalidState)
+        );
+    }
+
+    #[test]
+    fn attach_confirmed_block_accepts_cycles_rail_once_confirmed() {
+        let op = open_cycles_operation(1, target_principal(1), 0)
+            .record_attempt(
+                FundingOperationState::Cycles(CyclesFundingState::Submitted),
+                1,
+                FundingAttemptResultClass::Indeterminate,
+            )
+            .unwrap()
+            .record_attempt(
+                FundingOperationState::Cycles(CyclesFundingState::Confirmed),
+                2,
+                FundingAttemptResultClass::Success,
+            )
+            .unwrap();
+        let attached = op.attach_confirmed_block(55).unwrap();
+        assert_eq!(attached.confirmed_block_index(), Some(55));
     }
 
     #[test]
@@ -4840,10 +5908,22 @@ mod tests {
             0,
         )
         .unwrap()
+        .record_attempt(
+            FundingOperationState::Icp(IcpFundingState::LedgerSubmitted),
+            1,
+            FundingAttemptResultClass::Indeterminate,
+        )
+        .unwrap()
+        .record_attempt(
+            FundingOperationState::Icp(IcpFundingState::TransferConfirmed),
+            2,
+            FundingAttemptResultClass::Success,
+        )
+        .unwrap()
         .attach_confirmed_block(7)
         .unwrap()
         .record_attempt(
-            FundingOperationState::Icp(IcpFundingState::LedgerSubmitted),
+            FundingOperationState::Icp(IcpFundingState::NotifyPending),
             10,
             FundingAttemptResultClass::Success,
         )
@@ -4976,11 +6056,14 @@ mod tests {
 
     #[test]
     fn rolling_spend_ledger_settle_never_evicts_an_in_window_entry() {
-        // Settle more than MAX_ROLLING_SPEND_SETTLED_ENTRIES entries, all
-        // within the window: the old behavior would silently drop the
-        // globally-oldest entry by count once the bound was crossed, even
-        // though every entry is still inside the 24h window. The corrected
-        // behavior must fail closed instead, and never lose a real entry.
+        // Settle MAX_ROLLING_SPEND_SETTLED_ENTRIES entries, all within the
+        // window: the old behavior would silently drop the globally-oldest
+        // entry by count once the bound was crossed, even though every
+        // entry is still inside the 24h window. The corrected behavior
+        // fails closed instead, and never loses a real entry — but now the
+        // rejection happens at RESERVE time (correction pass, atomicity
+        // review Finding 2: settlement capacity is reserved up front, so a
+        // reservation that WAS accepted can never fail to settle).
         let mut ledger = RollingSpendLedger::new();
         for i in 0..MAX_ROLLING_SPEND_SETTLED_ENTRIES as u64 {
             ledger = ledger
@@ -4991,25 +6074,59 @@ mod tests {
         }
         assert_eq!(ledger.settled().len(), MAX_ROLLING_SPEND_SETTLED_ENTRIES);
 
-        let one_more = ledger
-            .reserve(
+        // The ledger is now full: a new reservation is rejected up front,
+        // not silently accepted only to strand its later settlement.
+        assert_eq!(
+            ledger.reserve(
                 MAX_ROLLING_SPEND_SETTLED_ENTRIES as u64,
                 1,
                 MAX_ROLLING_SPEND_SETTLED_ENTRIES as u64,
                 86_400,
                 u128::MAX,
-            )
-            .unwrap();
-        assert_eq!(
-            one_more.settle(
-                MAX_ROLLING_SPEND_SETTLED_ENTRIES as u64,
-                MAX_ROLLING_SPEND_SETTLED_ENTRIES as u64,
-                86_400,
             ),
-            Err(RollingSpendSettleError::Bound)
+            Err(RollingSpendReserveError::SettlementCapacityExhausted)
         );
-        // The failed settle must not have silently dropped any prior entry.
-        assert_eq!(one_more.settled().len(), MAX_ROLLING_SPEND_SETTLED_ENTRIES);
+        // The rejection must not have dropped any prior entry either.
+        assert_eq!(ledger.settled().len(), MAX_ROLLING_SPEND_SETTLED_ENTRIES);
+    }
+
+    #[test]
+    fn rolling_spend_ledger_reserve_guarantees_settlement_slot_for_every_pending_entry() {
+        // Fill settled to one below the bound, then reserve (not yet
+        // settle) enough pending entries to exactly fill the remaining
+        // capacity. Every one of those pending reservations must be able to
+        // settle later, in any order, without hitting `Bound` — proving the
+        // reserve-time invariant actually guarantees a slot rather than
+        // merely delaying the failure.
+        let mut ledger = RollingSpendLedger::new();
+        for i in 0..(MAX_ROLLING_SPEND_SETTLED_ENTRIES as u64 - 2) {
+            ledger = ledger
+                .reserve(i, 1, i, 86_400, u128::MAX)
+                .unwrap()
+                .settle(i, i, 86_400)
+                .unwrap();
+        }
+        assert_eq!(
+            ledger.settled().len(),
+            MAX_ROLLING_SPEND_SETTLED_ENTRIES - 2
+        );
+
+        let base = MAX_ROLLING_SPEND_SETTLED_ENTRIES as u64;
+        let now = MAX_ROLLING_SPEND_SETTLED_ENTRIES as u64;
+        let ledger = ledger.reserve(base, 1, now, 86_400, u128::MAX).unwrap();
+        let ledger = ledger.reserve(base + 1, 1, now, 86_400, u128::MAX).unwrap();
+        // A third pending reservation is correctly rejected: settled(510) +
+        // pending(2) already leaves no room for a third guaranteed slot.
+        assert_eq!(
+            ledger.reserve(base + 2, 1, now, 86_400, u128::MAX),
+            Err(RollingSpendReserveError::SettlementCapacityExhausted)
+        );
+        // Both already-pending reservations settle cleanly, at monotonic
+        // later times, regardless of order.
+        let ledger = ledger.settle(base, now + 10, 86_400).unwrap();
+        let ledger = ledger.settle(base + 1, now + 20, 86_400).unwrap();
+        assert_eq!(ledger.settled().len(), MAX_ROLLING_SPEND_SETTLED_ENTRIES);
+        assert!(ledger.pending().is_empty());
     }
 
     #[test]
@@ -5135,6 +6252,9 @@ mod tests {
 
     #[test]
     fn target_reservation_settle_spend_propagates_ledger_bound_failure() {
+        // Settlement capacity is now guaranteed at RESERVE time (correction
+        // pass): once the settled ledger is full, `reserve` itself rejects
+        // rather than letting `settle_spend` strand a later confirmed spend.
         let mut state = TargetReservationState::new();
         for i in 0..MAX_ROLLING_SPEND_SETTLED_ENTRIES as u64 {
             state = state
@@ -5144,10 +6264,9 @@ mod tests {
                 .unwrap();
         }
         let next = MAX_ROLLING_SPEND_SETTLED_ENTRIES as u64;
-        let reserved = state.reserve(next, 1, next, 86_400, u128::MAX).unwrap();
         assert_eq!(
-            reserved.settle_spend(next, next, 0, 86_400),
-            Err(TargetSettleError::Bound)
+            state.reserve(next, 1, next, 86_400, u128::MAX),
+            Err(TargetReservationError::SettlementCapacityExhausted)
         );
     }
 
@@ -5158,7 +6277,7 @@ mod tests {
         let state = GlobalRollingSpendState::new();
         let state = state.reserve(1, 400, 0, 86_400, 1_000).unwrap();
         let state = state.reserve(2, 400, 1, 86_400, 1_000).unwrap();
-        assert_eq!(state.rolling_spend().pending_cycles(), 800);
+        assert_eq!(state.rolling_spend().pending_cycles(), Ok(800));
 
         // A third target's reservation would push total pending over cap.
         assert_eq!(
@@ -5166,6 +6285,44 @@ mod tests {
             Err(RollingSpendReserveError::CapExceeded)
         );
         assert!(state.reserve(3, 200, 2, 86_400, 1_000).is_ok());
+    }
+
+    /// Correction pass, atomicity review Finding 2 (global lane): a
+    /// confirmed external spend must never become un-settleable because the
+    /// SHARED global ledger's settled list is full — proven here across
+    /// multiple targets' pending reservations with monotonic later
+    /// settlement times, exactly the production scenario the review
+    /// describes (many registered targets settling against one shared
+    /// ledger).
+    #[test]
+    fn global_rolling_spend_state_reserve_guarantees_settlement_for_multiple_targets() {
+        let mut state = GlobalRollingSpendState::new();
+        for i in 0..(MAX_ROLLING_SPEND_SETTLED_ENTRIES as u64 - 2) {
+            state = state
+                .reserve(i, 1, i, 86_400, u128::MAX)
+                .unwrap()
+                .settle(i, i, 86_400)
+                .unwrap();
+        }
+        let base = MAX_ROLLING_SPEND_SETTLED_ENTRIES as u64;
+        let now = base;
+        // Two different targets' operations both reserve successfully...
+        let state = state.reserve(base, 1, now, 86_400, u128::MAX).unwrap();
+        let state = state.reserve(base + 1, 1, now, 86_400, u128::MAX).unwrap();
+        // ...but a third is correctly rejected up front rather than being
+        // accepted only to strand its eventual settlement.
+        assert_eq!(
+            state.reserve(base + 2, 1, now, 86_400, u128::MAX),
+            Err(RollingSpendReserveError::SettlementCapacityExhausted)
+        );
+        // Both accepted reservations settle cleanly at later, monotonic
+        // times, in either order.
+        let state = state.settle(base + 1, now + 5, 86_400).unwrap();
+        let state = state.settle(base, now + 10, 86_400).unwrap();
+        assert_eq!(
+            state.rolling_spend().settled().len(),
+            MAX_ROLLING_SPEND_SETTLED_ENTRIES
+        );
     }
 
     #[test]
@@ -5302,6 +6459,26 @@ mod tests {
         assert_eq!(
             state.begin(1, 101, 0, 86_400, 100),
             Err(SelfRecoveryStateError::CapExceeded)
+        );
+    }
+
+    /// Correction pass, atomicity review Finding 2 (self-recovery lane):
+    /// same guarantee as the target/global ledgers, for self-recovery's own
+    /// independent rolling-spend ledger.
+    #[test]
+    fn self_recovery_state_begin_guarantees_settlement_capacity() {
+        let mut state = SelfRecoveryState::new();
+        for i in 0..MAX_ROLLING_SPEND_SETTLED_ENTRIES as u64 {
+            state = state
+                .begin(i, 1, i, 86_400, u128::MAX)
+                .unwrap()
+                .complete(i, i, 86_400)
+                .unwrap();
+        }
+        let next = MAX_ROLLING_SPEND_SETTLED_ENTRIES as u64;
+        assert_eq!(
+            state.begin(next, 1, next, 86_400, u128::MAX),
+            Err(SelfRecoveryStateError::SettlementCapacityExhausted)
         );
     }
 
@@ -5885,6 +7062,25 @@ mod tests {
         assert_eq!(ledger.pending().len(), 1);
     }
 
+    #[test]
+    fn rolling_spend_ledger_decode_rejects_combined_settled_and_pending_capacity() {
+        let raw = RawRollingSpendLedgerForTest {
+            settled: (0..MAX_ROLLING_SPEND_SETTLED_ENTRIES)
+                .map(|i| SpendEntry {
+                    settled_at_secs: i as u64,
+                    amount_cycles: 1,
+                })
+                .collect(),
+            pending: vec![PendingReservation {
+                operation_id: 1,
+                amount_cycles: 1,
+                reserved_at_secs: 0,
+            }],
+        };
+        let bytes = Encode!(&raw).unwrap();
+        assert!(Decode!(&bytes, RollingSpendLedger).is_err());
+    }
+
     #[derive(CandidType, Serialize)]
     struct RawTargetReservationStateForTest {
         rolling_spend: RawRollingSpendLedgerForTest,
@@ -6084,12 +7280,58 @@ mod tests {
     }
 
     #[test]
-    fn funding_operation_decode_rejects_confirmed_block_on_cycles_rail() {
+    fn funding_operation_decode_rejects_cycles_amount_plus_fee_overflow() {
+        let op = open_cycles_operation(1, target_principal(1), 0);
+        let mut raw = raw_funding_operation_for_test(&op);
+        let FundingRailArguments::Cycles(mut snapshot) = raw.rail_arguments else {
+            unreachable!()
+        };
+        snapshot.amount_cycles = u128::MAX;
+        snapshot.fee_cycles = 1;
+        raw.rail_arguments = FundingRailArguments::Cycles(snapshot);
+        raw.reserved_amount_cycles = u128::MAX;
+        let bytes = Encode!(&raw).unwrap();
+        assert!(Decode!(&bytes, FundingOperation).is_err());
+    }
+
+    #[test]
+    fn funding_operation_decode_rejects_confirmed_block_before_state_allows_it() {
+        // Task 4: `confirmed_block_index` is no longer rail-restricted, but
+        // is still restricted to states where a confirmed block is
+        // meaningful — `PlannedReserved` (still on the Cycles rail here) is
+        // not one of them.
         let op = open_cycles_operation(1, target_principal(1), 0);
         let mut raw = raw_funding_operation_for_test(&op);
         raw.confirmed_block_index = Some(5);
         let bytes = Encode!(&raw).unwrap();
         assert!(Decode!(&bytes, FundingOperation).is_err());
+    }
+
+    #[test]
+    fn funding_operation_decode_accepts_confirmed_block_on_cycles_rail_once_confirmed() {
+        // Task 4: the Cycles rail may now carry `confirmed_block_index`
+        // too, once `state` is `Confirmed` (or later) with an attempt
+        // history that actually reached it.
+        let op = open_cycles_operation(1, target_principal(1), 0)
+            .record_attempt(
+                FundingOperationState::Cycles(CyclesFundingState::Submitted),
+                1,
+                FundingAttemptResultClass::Indeterminate,
+            )
+            .unwrap()
+            .record_attempt(
+                FundingOperationState::Cycles(CyclesFundingState::Confirmed),
+                2,
+                FundingAttemptResultClass::Success,
+            )
+            .unwrap()
+            .attach_confirmed_block(9)
+            .unwrap();
+        let raw = raw_funding_operation_for_test(&op);
+        let bytes = Encode!(&raw).unwrap();
+        let decoded = Decode!(&bytes, FundingOperation).unwrap();
+        assert_eq!(decoded, op);
+        assert_eq!(decoded.confirmed_block_index(), Some(9));
     }
 
     #[test]
@@ -6310,5 +7552,307 @@ mod tests {
         let bytes = Encode!(&raw).unwrap();
         let summary = Decode!(&bytes, TerminalFundingSummary).unwrap();
         assert_eq!(summary.outcome(), FundingOutcome::Refunded);
+    }
+
+    // ─── SourceReserveState (Task 4) ───
+
+    #[test]
+    fn source_reserve_unknown_cache_fails_closed() {
+        let state = SourceReserveState::new();
+        assert_eq!(
+            state.reserve_ordinary(1, 10, 0, 100, 60),
+            Err(SourceReserveError::UnknownCache)
+        );
+        assert_eq!(
+            state.reserve_self_recovery(1, 10, 100, 60),
+            Err(SourceReserveError::UnknownCache)
+        );
+    }
+
+    #[test]
+    fn source_reserve_stale_cache_fails_closed() {
+        let state = SourceReserveState::new().refresh(1_000, 1, 100).unwrap();
+        assert_eq!(
+            state.reserve_ordinary(1, 10, 0, 161, 60),
+            Err(SourceReserveError::StaleCache)
+        );
+        // Exactly at the boundary is still fresh.
+        assert!(state.reserve_ordinary(1, 10, 0, 160, 60).is_ok());
+    }
+
+    /// Correction pass, ledger-security review "future-dated cache" finding:
+    /// `now_secs.saturating_sub(as_of_secs)` alone would floor a
+    /// future-dated snapshot to `0` and treat it as perfectly fresh.
+    #[test]
+    fn source_reserve_future_dated_cache_fails_closed() {
+        let state = SourceReserveState::new().refresh(1_000, 0, 500).unwrap();
+        assert_eq!(
+            state.reserve_ordinary(1, 10, 0, 100, 60),
+            Err(SourceReserveError::FutureCache)
+        );
+        assert_eq!(
+            state.reserve_self_recovery(1, 10, 100, 60),
+            Err(SourceReserveError::FutureCache)
+        );
+        // A cache dated exactly "now" is not future-dated.
+        assert!(state.reserve_ordinary(1, 10, 0, 500, 60).is_ok());
+    }
+
+    #[test]
+    fn source_reserve_ordinary_preserves_protected_reserve() {
+        let state = SourceReserveState::new().refresh(1_000, 0, 0).unwrap();
+        // 1000 balance, 400 protected: only 600 is free for ordinary use.
+        assert!(state.reserve_ordinary(1, 600, 400, 0, 60).is_ok());
+        assert_eq!(
+            state.reserve_ordinary(1, 601, 400, 0, 60),
+            Err(SourceReserveError::InsufficientReserve)
+        );
+    }
+
+    #[test]
+    fn source_reserve_self_recovery_may_spend_into_protected_reserve() {
+        let state = SourceReserveState::new().refresh(1_000, 0, 0).unwrap();
+        // Self-recovery has no floor: the full 1000 is available to it.
+        assert!(state.reserve_self_recovery(1, 1_000, 0, 60).is_ok());
+        assert_eq!(
+            state.reserve_self_recovery(1, 1_001, 0, 60),
+            Err(SourceReserveError::InsufficientReserve)
+        );
+    }
+
+    #[test]
+    fn source_reserve_ordinary_and_self_recovery_share_the_same_pending_total() {
+        // Both lanes draw against the SAME account: an ordinary reservation
+        // must reduce what self-recovery (and vice versa) sees as free.
+        let state = SourceReserveState::new().refresh(1_000, 0, 0).unwrap();
+        let after_ordinary = state.reserve_ordinary(1, 500, 0, 0, 60).unwrap();
+        assert_eq!(after_ordinary.pending_total_cycles(), Ok(500));
+        assert!(after_ordinary.reserve_self_recovery(2, 500, 0, 60).is_ok());
+        assert_eq!(
+            after_ordinary.reserve_self_recovery(2, 501, 0, 60),
+            Err(SourceReserveError::InsufficientReserve)
+        );
+    }
+
+    #[test]
+    fn source_reserve_rejects_duplicate_operation_id() {
+        let state = SourceReserveState::new()
+            .refresh(1_000, 0, 0)
+            .unwrap()
+            .reserve_ordinary(1, 10, 0, 0, 60)
+            .unwrap();
+        assert_eq!(
+            state.reserve_ordinary(1, 10, 0, 0, 60),
+            Err(SourceReserveError::DuplicateOperation)
+        );
+    }
+
+    #[test]
+    fn source_reserve_settle_releases_pending_and_debits_known_spend() {
+        let state = SourceReserveState::new()
+            .refresh(1_000, 0, 0)
+            .unwrap()
+            .reserve_ordinary(1, 100, 0, 0, 60)
+            .unwrap();
+        let settled = state.settle(1, 30).unwrap();
+        assert!(settled.pending().is_empty());
+        // Only the known-spent 30 is debited, not the full 100 held.
+        assert_eq!(settled.cache().unwrap().balance_cycles, 970);
+    }
+
+    #[test]
+    fn source_reserve_settle_zero_known_spend_is_a_pure_no_spend_release() {
+        let state = SourceReserveState::new()
+            .refresh(1_000, 0, 0)
+            .unwrap()
+            .reserve_ordinary(1, 100, 0, 0, 60)
+            .unwrap();
+        let released = state.settle(1, 0).unwrap();
+        assert!(released.pending().is_empty());
+        assert_eq!(released.cache().unwrap().balance_cycles, 1_000);
+    }
+
+    #[test]
+    fn source_reserve_settle_unknown_operation_is_rejected() {
+        let state = SourceReserveState::new().refresh(1_000, 0, 0).unwrap();
+        assert_eq!(
+            state.settle(99, 0),
+            Err(SourceSettleError::UnknownOperation)
+        );
+    }
+
+    /// Correction pass, ledger-security review Finding 6: a known-spent
+    /// amount that exceeds the cached balance is an invariant failure, not
+    /// a reason to saturate to zero — a clamped cache would silently hide a
+    /// real over-spend past the protected reserve.
+    #[test]
+    fn source_reserve_settle_rejects_known_spend_exceeding_cached_balance() {
+        let state = SourceReserveState::new()
+            .refresh(50, 0, 0)
+            .unwrap()
+            .reserve_ordinary(1, 50, 0, 0, 60)
+            .unwrap();
+        assert_eq!(
+            state.settle(1, 100),
+            Err(SourceSettleError::KnownSpendExceedsCachedBalance)
+        );
+        // The pending entry is NOT silently released on a rejected settle —
+        // the caller must resolve the invariant violation (e.g. via a fresh
+        // `refresh`) rather than have capacity quietly disappear.
+        assert_eq!(state.pending().len(), 1);
+    }
+
+    #[test]
+    fn source_reserve_refresh_never_touches_pending() {
+        let state = SourceReserveState::new()
+            .refresh(1_000, 0, 0)
+            .unwrap()
+            .reserve_ordinary(1, 100, 0, 0, 60)
+            .unwrap();
+        let refreshed = state.refresh(2_000, 5, 500).unwrap();
+        assert_eq!(refreshed.pending(), state.pending());
+        assert_eq!(refreshed.cache().unwrap().balance_cycles, 2_000);
+    }
+
+    #[test]
+    fn source_reserve_refresh_rejects_out_of_order_or_conflicting_snapshots() {
+        let state = SourceReserveState::new().refresh(1_000, 1, 100).unwrap();
+        assert_eq!(
+            state.refresh(900, 1, 99),
+            Err(SourceReserveError::OutOfOrderRefresh)
+        );
+        assert_eq!(
+            state.refresh(1_001, 1, 100),
+            Err(SourceReserveError::OutOfOrderRefresh)
+        );
+        assert_eq!(state.refresh(1_000, 1, 100).unwrap(), state);
+        let newer = state.refresh(900, 1, 101).unwrap();
+        assert_eq!(newer.cache().unwrap().as_of_secs, 101);
+        assert_eq!(newer.cache().unwrap().balance_cycles, 900);
+    }
+
+    #[test]
+    fn source_reserve_refresh_is_blocked_after_attempt_and_settles_known_debit_once() {
+        let state = SourceReserveState::new()
+            .refresh(1_000, 0, 0)
+            .unwrap()
+            .reserve_ordinary(1, 100, 0, 0, 60)
+            .unwrap();
+        let attempted = state.mark_attempt(1, 1).unwrap();
+        assert_eq!(
+            attempted.refresh(900, 0, 2),
+            Err(SourceReserveError::AttemptInFlight)
+        );
+        // Re-marking a retry is idempotent and never moves the marker
+        // backwards.
+        assert_eq!(attempted.mark_attempt(1, 2).unwrap(), attempted);
+        let settled = attempted.settle(1, 100).unwrap();
+        assert_eq!(settled.cache().unwrap().balance_cycles, 900);
+        assert!(settled.pending().is_empty());
+        // A later authoritative refresh carries the already-debited balance;
+        // no second subtraction occurs.
+        let refreshed = settled.refresh(900, 0, 3).unwrap();
+        assert_eq!(refreshed.cache().unwrap().balance_cycles, 900);
+    }
+
+    #[test]
+    fn source_reserve_mark_attempt_rejects_unknown_operation_and_timestamp_regression() {
+        let state = SourceReserveState::new()
+            .refresh(1_000, 0, 0)
+            .unwrap()
+            .reserve_ordinary(1, 100, 0, 0, 60)
+            .unwrap()
+            .mark_attempt(1, 10)
+            .unwrap();
+        assert_eq!(
+            state.mark_attempt(2, 11),
+            Err(SourceAttemptError::UnknownOperation)
+        );
+        assert_eq!(
+            state.mark_attempt(1, 9),
+            Err(SourceAttemptError::TimestampRegression)
+        );
+    }
+
+    #[test]
+    fn source_reserve_overflow_is_checked_and_fails_closed() {
+        let state = SourceReserveState::new().refresh(u128::MAX, 0, 0).unwrap();
+        assert_eq!(
+            state.reserve_ordinary(1, u128::MAX, 1, 0, 60),
+            Err(SourceReserveError::Overflow)
+        );
+    }
+
+    #[derive(CandidType, Serialize)]
+    struct RawSourceReserveStateForTest {
+        cache: Option<CyclesLedgerCache>,
+        pending: Vec<PendingSourceDebit>,
+    }
+
+    #[test]
+    fn source_reserve_decode_rejects_duplicate_pending_operation() {
+        let raw = RawSourceReserveStateForTest {
+            cache: None,
+            pending: vec![
+                PendingSourceDebit {
+                    operation_id: 1,
+                    amount_plus_fee_cycles: 10,
+                    reserved_at_secs: 0,
+                    attempt_started_at_secs: None,
+                },
+                PendingSourceDebit {
+                    operation_id: 1,
+                    amount_plus_fee_cycles: 20,
+                    reserved_at_secs: 1,
+                    attempt_started_at_secs: None,
+                },
+            ],
+        };
+        let bytes = Encode!(&raw).unwrap();
+        assert!(Decode!(&bytes, SourceReserveState).is_err());
+    }
+
+    #[test]
+    fn source_reserve_decode_rejects_pending_amount_overflow() {
+        let raw = RawSourceReserveStateForTest {
+            cache: None,
+            pending: vec![
+                PendingSourceDebit {
+                    operation_id: 1,
+                    amount_plus_fee_cycles: u128::MAX,
+                    reserved_at_secs: 0,
+                    attempt_started_at_secs: None,
+                },
+                PendingSourceDebit {
+                    operation_id: 2,
+                    amount_plus_fee_cycles: 1,
+                    reserved_at_secs: 0,
+                    attempt_started_at_secs: None,
+                },
+            ],
+        };
+        let bytes = Encode!(&raw).unwrap();
+        assert!(Decode!(&bytes, SourceReserveState).is_err());
+    }
+
+    #[test]
+    fn source_reserve_decode_accepts_valid_round_trip() {
+        let raw = RawSourceReserveStateForTest {
+            cache: Some(CyclesLedgerCache {
+                balance_cycles: 1_000,
+                fee_cycles: 1,
+                as_of_secs: 42,
+            }),
+            pending: vec![PendingSourceDebit {
+                operation_id: 1,
+                amount_plus_fee_cycles: 10,
+                reserved_at_secs: 0,
+                attempt_started_at_secs: None,
+            }],
+        };
+        let bytes = Encode!(&raw).unwrap();
+        let state = Decode!(&bytes, SourceReserveState).unwrap();
+        assert_eq!(state.cache().unwrap().balance_cycles, 1_000);
+        assert_eq!(state.pending().len(), 1);
     }
 }
