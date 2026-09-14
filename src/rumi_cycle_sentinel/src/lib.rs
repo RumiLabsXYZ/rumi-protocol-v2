@@ -8,6 +8,7 @@ mod cycles_ledger;
 mod funding;
 mod governance;
 mod history;
+mod icp_cmc;
 mod observation;
 mod public_api;
 mod self_recovery;
@@ -38,6 +39,14 @@ fn init(args: types::InitArgs) {
 
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
+    // A source transfer marker represents only an in-message await.  Upgrade
+    // interrupts that await, so clear the ephemeral marker while preserving
+    // the durable operation, source hold, and exact retry snapshot.
+    state::reset_icp_source_attempts_on_upgrade();
+    // A notify marker represents only an in-message CMC await. Upgrade
+    // interrupts that await; clear the marker while retaining the exact
+    // transfer block so the same notify call can be retried safely.
+    state::reset_icp_notify_attempts_on_upgrade();
     if let Err(err) = state::validate_whole_state(ic_cdk::id()) {
         ic_cdk::trap(&format!(
             "rumi_cycle_sentinel: post_upgrade state validation failed: {err:?}"

@@ -1,0 +1,156 @@
+// Source-pinned official NNS Cycles Minting Canister contract.
+// Upstream: https://github.com/dfinity/ic
+// Commit: 98a0f4b60fd7dd340ad49848368e3b63a9490b42
+// Path: rs/nns/cmc/cmc.did
+//
+// This fixture is retained verbatim for the CMC methods used by Sentinel and
+// to make contract review independent of generated bindings.  The source
+// commit and SHA-256 are asserted by deterministic Task 5 tests.
+type Cycles = nat;
+type BlockIndex = nat64;
+type log_visibility = variant {
+  controllers;
+  public;
+  allowed_viewers : vec principal;
+};
+type snapshot_visibility = variant {
+  controllers;
+  public;
+  allowed_viewers : vec principal;
+};
+type environment_variable = record {
+  name: text;
+  value: text;
+};
+type CanisterSettings = record {
+  controllers: opt vec principal;
+  compute_allocation: opt nat;
+  memory_allocation: opt nat;
+  freezing_threshold: opt nat;
+  reserved_cycles_limit: opt nat;
+  log_visibility: opt log_visibility;
+  snapshot_visibility: opt snapshot_visibility;
+  log_memory_limit: opt nat;
+  wasm_memory_limit: opt nat;
+  wasm_memory_threshold: opt nat;
+  environment_variables: opt vec environment_variable;
+};
+type Subaccount = opt blob;
+type Memo = opt blob;
+
+type NotifyTopUpArg = record {
+  block_index: BlockIndex;
+  canister_id: principal;
+};
+
+type SubnetSelection = variant {
+  Subnet: record { subnet: principal };
+  Filter: SubnetFilter;
+};
+type SubnetFilter = record { subnet_type: opt text };
+type CreateCanisterArg = record {
+  settings: opt CanisterSettings;
+  subnet_type: opt text;
+  subnet_selection: opt SubnetSelection;
+};
+type NotifyCreateCanisterArg = record {
+  block_index: BlockIndex;
+  controller: principal;
+  subnet_type: opt text;
+  subnet_selection: opt SubnetSelection;
+  settings: opt CanisterSettings;
+};
+
+type CreateCanisterError = variant {
+  Refunded: record { refund_amount: nat; create_error: text };
+};
+type NotifyError = variant {
+  Refunded: record { reason: text; block_index: opt BlockIndex };
+  Processing;
+  TransactionTooOld: BlockIndex;
+  InvalidTransaction: text;
+  Other: record { error_code: nat64; error_message: text };
+};
+type NotifyTopUpResult = variant { Ok: Cycles; Err: NotifyError };
+type CreateCanisterResult = variant {
+  Ok: principal;
+  Err: CreateCanisterError;
+};
+type NotifyCreateCanisterResult = variant {
+  Ok: principal;
+  Err: NotifyError;
+};
+
+type IcpXdrConversionRate = record {
+  timestamp_seconds: nat64;
+  xdr_permyriad_per_icp: nat64;
+};
+type IcpXdrConversionRateResponse = record {
+  data: IcpXdrConversionRate;
+  hash_tree: blob;
+  certificate: blob;
+};
+type SubnetTypesToSubnetsResponse = record {
+  data: vec record { text; vec principal };
+};
+type PrincipalsAuthorizedToCreateCanistersToSubnetsResponse = record {
+  data: vec record { principal; vec principal };
+};
+type AccountIdentifier = text;
+type ExchangeRateCanister = variant {
+  Set: principal;
+  Unset;
+};
+type CyclesCanisterInitPayload = record {
+  ledger_canister_id: opt principal;
+  governance_canister_id: opt principal;
+  minting_account_id: opt AccountIdentifier;
+  last_purged_notification: opt nat64;
+  exchange_rate_canister: opt ExchangeRateCanister;
+  cycles_ledger_canister_id: opt principal;
+};
+type NotifyMintCyclesArg = record {
+  block_index: BlockIndex;
+  to_subaccount: Subaccount;
+  deposit_memo: Memo;
+};
+type NotifyMintCyclesSuccess = record {
+  block_index: nat;
+  minted: nat;
+  balance: nat;
+};
+type NotifyMintCyclesResult = variant {
+  Ok: NotifyMintCyclesSuccess;
+  Err: NotifyError;
+};
+type SetAuthorizedSubnetworkListArgs = record {
+  who: opt principal;
+  subnets: vec principal;
+};
+type UpdateSubnetTypeArgs = variant {
+  Add: text;
+  Remove: text;
+};
+type SubnetListWithType = record {
+  subnets: vec principal;
+  subnet_type: text;
+};
+type ChangeSubnetTypeAssignmentArgs = variant {
+  Add: SubnetListWithType;
+  Remove: SubnetListWithType;
+};
+
+service: (opt CyclesCanisterInitPayload) -> {
+  notify_top_up: (NotifyTopUpArg) -> (NotifyTopUpResult);
+  create_canister: (CreateCanisterArg) -> (CreateCanisterResult);
+  notify_create_canister: (NotifyCreateCanisterArg) -> (NotifyCreateCanisterResult);
+  notify_mint_cycles: (NotifyMintCyclesArg) -> (NotifyMintCyclesResult);
+  get_icp_xdr_conversion_rate: () -> (IcpXdrConversionRateResponse) query;
+  get_subnet_types_to_subnets: () -> (SubnetTypesToSubnetsResponse) query;
+  get_principals_authorized_to_create_canisters_to_subnets: () -> (PrincipalsAuthorizedToCreateCanistersToSubnetsResponse) query;
+  get_default_subnets: () -> (vec principal) query;
+  get_build_metadata: () -> (text) query;
+  set_authorized_subnetwork_list: (SetAuthorizedSubnetworkListArgs) -> ();
+  update_subnet_type: (UpdateSubnetTypeArgs) -> ();
+  change_subnet_type_assignment: (ChangeSubnetTypeAssignmentArgs) -> ();
+};

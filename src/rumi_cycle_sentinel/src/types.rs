@@ -107,6 +107,22 @@ fn icp_ledger_principal() -> Principal {
     Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap()
 }
 
+/// Mainnet ICP ledger identity used by the Sentinel's ICP/CMC funding rail.
+/// Kept behind a named accessor so the funding module cannot accidentally
+/// construct a different ledger principal at a call site.
+pub fn icp_ledger_principal_for_sentinel() -> Principal {
+    icp_ledger_principal()
+}
+
+/// ICP source-account cache freshness.  This is deliberately independent of
+/// the cycles-observation staleness policy: an ICP balance/fee snapshot gates
+/// real ledger debits and therefore has its own short bound.
+pub const ICP_SOURCE_CACHE_MAX_AGE_SECS: u64 = 600;
+
+pub fn icp_source_cache_max_age_secs() -> u64 {
+    ICP_SOURCE_CACHE_MAX_AGE_SECS
+}
+
 /// Mainnet NNS Cycles Minting Canister.
 fn cycles_minting_canister_principal() -> Principal {
     Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap()
@@ -1149,6 +1165,11 @@ pub enum AlarmKind {
     Unreachable,
     FundingQuarantined,
     SelfRecoveryUnresolved,
+    /// The CMC returned a cycle amount that differs from the immutable
+    /// amount reserved for the ICP attempt.  This is an operational alarm,
+    /// not a reason to rewrite the operation's accounting snapshot.
+    FundingUnderDelivery,
+    FundingOverDelivery,
 }
 
 #[derive(CandidType, Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -1397,6 +1418,16 @@ pub struct CyclesWithdrawSnapshot {
 /// can never be mixed into the arguments a retry must reuse unchanged.
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct IcpCmcSnapshot {
+    /// The exact principal whose `icrc1_transfer` call is represented by this
+    /// snapshot.  The canister identity is checked again at the call seam and
+    /// during whole-state validation, so a copied operation can never be
+    /// resumed by a different source account.
+    pub source_principal: Principal,
+    /// Pinned protocol endpoints are part of the immutable call contract.
+    /// They are not inferred from a later configuration read or hard-coded
+    /// afresh by a retry.
+    pub ledger_principal: Principal,
+    pub cmc_principal: Principal,
     pub source_subaccount: Option<FixedBytes32>,
     pub cmc_account_identifier: FixedBytes32,
     pub target_canister: Principal,
@@ -1626,8 +1657,20 @@ impl FundingOperationState {
                 Self::Icp(IcpFundingState::LedgerSubmitted),
                 Self::Icp(IcpFundingState::TransferConfirmed)
             ) | (
+                Self::Icp(IcpFundingState::LedgerSubmitted),
+                Self::Icp(IcpFundingState::Terminal)
+            ) | (
+                Self::Icp(IcpFundingState::LedgerSubmitted),
+                Self::Icp(IcpFundingState::Quarantined)
+            ) | (
+                Self::Icp(IcpFundingState::TransferUnknown),
+                Self::Icp(IcpFundingState::TransferConfirmed)
+            ) | (
                 Self::Icp(IcpFundingState::TransferUnknown),
                 Self::Icp(IcpFundingState::NotifyPending)
+            ) | (
+                Self::Icp(IcpFundingState::TransferUnknown),
+                Self::Icp(IcpFundingState::Quarantined)
             ) | (
                 Self::Icp(IcpFundingState::TransferConfirmed),
                 Self::Icp(IcpFundingState::NotifyPending)
@@ -1768,12 +1811,190 @@ pub enum FundingOperationOpenError {
     /// be opened because source-reserve linkage could otherwise disagree
     /// about the amount that the ledger can debit.
     CyclesAmountPlusFeeOverflow,
+    /// The ICP/CMC argument snapshot does not match the pinned ledger/CMC
+    /// contract or its checked rate/account/memo invariants.
+    IcpSnapshotInvalid(crate::icp_cmc::SnapshotValidationError),
+    /// The ICP amount's snapshotted conversion result does not cover the
+    /// requested refill plus the mandatory ten percent headroom.
+    IcpSnapshotInsufficientHeadroom,
 }
 
-/// Every field except `state`, `attempts`, `confirmed_block_index`, and
-/// `updated_at_secs` is an immutable snapshot taken when the operation is
-/// opened: `target_registry_revision` and `funding_policy` are the exact
-/// registry state at that moment, so editing or removing the target
+/// Frozen pre-Task-5 operation shape used to migrate existing stable bytes.
+/// Do not add fields here. New operation fields belong on `FundingOperation`
+/// and require a new `StoredFundingOperation` envelope variant in `state.rs`.
+#[derive(CandidType, Deserialize, Clone)]
+pub(crate) struct CyclesWithdrawSnapshotV1 {
+    pub(crate) destination: Principal,
+    pub(crate) from_subaccount: Option<FixedBytes32>,
+    pub(crate) amount_cycles: u128,
+    pub(crate) fee_cycles: u128,
+    pub(crate) created_at_time_ns: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone)]
+pub(crate) struct IcpCmcSnapshotV1 {
+    pub(crate) source_subaccount: Option<FixedBytes32>,
+    pub(crate) cmc_account_identifier: FixedBytes32,
+    pub(crate) target_canister: Principal,
+    pub(crate) amount_e8s: u64,
+    pub(crate) fee_e8s: u64,
+    pub(crate) memo: u64,
+    pub(crate) created_at_time_ns: u64,
+    pub(crate) rate_xdr_permyriad_per_icp: u64,
+    pub(crate) rate_timestamp_secs: u64,
+    pub(crate) expected_cycles: u128,
+}
+
+#[derive(CandidType, Deserialize, Clone)]
+pub(crate) enum FundingRailArgumentsV1 {
+    Cycles(CyclesWithdrawSnapshotV1),
+    Icp(IcpCmcSnapshotV1),
+}
+
+impl From<CyclesWithdrawSnapshotV1> for CyclesWithdrawSnapshot {
+    fn from(value: CyclesWithdrawSnapshotV1) -> Self {
+        Self {
+            destination: value.destination,
+            from_subaccount: value.from_subaccount,
+            amount_cycles: value.amount_cycles,
+            fee_cycles: value.fee_cycles,
+            created_at_time_ns: value.created_at_time_ns,
+        }
+    }
+}
+
+impl From<IcpCmcSnapshotV1> for IcpCmcSnapshot {
+    fn from(value: IcpCmcSnapshotV1) -> Self {
+        Self {
+            // Task 5 had not yet admitted ICP operations when this legacy
+            // envelope was frozen.  An old ICP value therefore cannot be
+            // treated as source-valid without a deployment-specific source;
+            // the anonymous value is deliberately rejected by current
+            // snapshot validation during whole-state reload.
+            source_principal: Principal::anonymous(),
+            ledger_principal: Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai")
+                .expect("pinned ICP ledger principal must decode"),
+            cmc_principal: Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai")
+                .expect("pinned CMC principal must decode"),
+            source_subaccount: value.source_subaccount,
+            cmc_account_identifier: value.cmc_account_identifier,
+            target_canister: value.target_canister,
+            amount_e8s: value.amount_e8s,
+            fee_e8s: value.fee_e8s,
+            memo: value.memo,
+            created_at_time_ns: value.created_at_time_ns,
+            rate_xdr_permyriad_per_icp: value.rate_xdr_permyriad_per_icp,
+            rate_timestamp_secs: value.rate_timestamp_secs,
+            expected_cycles: value.expected_cycles,
+        }
+    }
+}
+
+impl From<FundingRailArgumentsV1> for FundingRailArguments {
+    fn from(value: FundingRailArgumentsV1) -> Self {
+        match value {
+            FundingRailArgumentsV1::Cycles(snapshot) => Self::Cycles(snapshot.into()),
+            FundingRailArgumentsV1::Icp(snapshot) => Self::Icp(snapshot.into()),
+        }
+    }
+}
+
+#[derive(CandidType, Deserialize, Clone)]
+pub(crate) struct FundingOperationV1 {
+    pub(crate) id: u64,
+    pub(crate) target: Principal,
+    pub(crate) target_registry_revision: u64,
+    pub(crate) funding_policy: TargetFundingPolicy,
+    pub(crate) trigger: FundingTrigger,
+    pub(crate) rail_arguments: FundingRailArgumentsV1,
+    pub(crate) reserved_amount_cycles: u128,
+    pub(crate) state: FundingOperationState,
+    pub(crate) attempts: FundingAttempts,
+    pub(crate) confirmed_block_index: Option<u64>,
+    pub(crate) created_at_secs: u64,
+    pub(crate) updated_at_secs: u64,
+}
+
+impl From<FundingOperationV1> for FundingOperation {
+    fn from(value: FundingOperationV1) -> Self {
+        Self {
+            id: value.id,
+            target: value.target,
+            target_registry_revision: value.target_registry_revision,
+            funding_policy: value.funding_policy,
+            trigger: value.trigger,
+            rail_arguments: value.rail_arguments.into(),
+            reserved_amount_cycles: value.reserved_amount_cycles,
+            state: value.state,
+            attempts: value.attempts,
+            confirmed_block_index: value.confirmed_block_index,
+            actual_cycles: None,
+            refund_block_hint: None,
+            refund_block_index: None,
+            notify_attempt_started_at_secs: None,
+            created_at_secs: value.created_at_secs,
+            updated_at_secs: value.updated_at_secs,
+        }
+    }
+}
+
+/// Frozen shape of the current operation before the refund-hint and notify
+/// single-flight fields were added. Stable bytes carrying `V2` are migrated
+/// into the current shape by preserving the old verified-refund field as both
+/// the hint and verified value, while defaulting the new notify-flight marker
+/// to `None`. This keeps old authoritative refund evidence paired after the
+/// hint/verified split without inventing a new hint for any other value.
+#[derive(CandidType, Deserialize, Clone)]
+pub(crate) struct FundingOperationV2 {
+    pub(crate) id: u64,
+    pub(crate) target: Principal,
+    pub(crate) target_registry_revision: u64,
+    pub(crate) funding_policy: TargetFundingPolicy,
+    pub(crate) trigger: FundingTrigger,
+    pub(crate) rail_arguments: FundingRailArguments,
+    pub(crate) reserved_amount_cycles: u128,
+    pub(crate) state: FundingOperationState,
+    pub(crate) attempts: FundingAttempts,
+    pub(crate) confirmed_block_index: Option<u64>,
+    pub(crate) actual_cycles: Option<u128>,
+    pub(crate) refund_block_index: Option<u64>,
+    pub(crate) created_at_secs: u64,
+    pub(crate) updated_at_secs: u64,
+}
+
+impl From<FundingOperationV2> for FundingOperation {
+    fn from(value: FundingOperationV2) -> Self {
+        Self {
+            id: value.id,
+            target: value.target,
+            target_registry_revision: value.target_registry_revision,
+            funding_policy: value.funding_policy,
+            trigger: value.trigger,
+            rail_arguments: value.rail_arguments,
+            reserved_amount_cycles: value.reserved_amount_cycles,
+            state: value.state,
+            attempts: value.attempts,
+            confirmed_block_index: value.confirmed_block_index,
+            actual_cycles: value.actual_cycles,
+            // Before the hint/verified split, the single field was already
+            // treated as verified evidence. Preserve that old evidence as
+            // both values during migration so whole-state validation does
+            // not invent a new unpaired verified block.
+            refund_block_hint: value.refund_block_index,
+            refund_block_index: value.refund_block_index,
+            notify_attempt_started_at_secs: None,
+            created_at_secs: value.created_at_secs,
+            updated_at_secs: value.updated_at_secs,
+        }
+    }
+}
+
+/// Every field except `state`, `attempts`, `confirmed_block_index`,
+/// `actual_cycles`, `refund_block_hint`, `refund_block_index`,
+/// `notify_attempt_started_at_secs`, and `updated_at_secs` is an immutable
+/// snapshot taken when an operation is opened. `target_registry_revision` and
+/// `funding_policy` are the exact registry state at that moment, so editing or
+/// removing the target
 /// afterward cannot alter this operation's recipient or policy. There is no
 /// public mutator for any snapshot field — `record_attempt` advances
 /// `state`/`attempts`/`updated_at_secs` and carries every snapshot field
@@ -1791,6 +2012,26 @@ pub struct FundingOperation {
     state: FundingOperationState,
     attempts: FundingAttempts,
     confirmed_block_index: Option<u64>,
+    /// Actual cycles reported by the CMC after a successful notification.
+    /// This is evidence, not a replacement for the immutable expected amount
+    /// in `IcpCmcSnapshot`.
+    #[serde(default)]
+    actual_cycles: Option<u128>,
+    /// A CMC `Refunded(Some(block))` response is an unverified hint until the
+    /// ICP Ledger block is fetched and matched. It is immutable once recorded
+    /// and remains tied to this operation while proof is pending.
+    #[serde(default)]
+    refund_block_hint: Option<u64>,
+    /// A verified CMC refund block is distinct from the original ICP transfer
+    /// block. It can only be promoted from the exact immutable hint by the
+    /// authoritative proof path.
+    #[serde(default)]
+    refund_block_index: Option<u64>,
+    /// Ephemeral in-message marker for the CMC notify await. It is persisted
+    /// before the await, rejects a concurrent executor, and is cleared by the
+    /// normal return path or by `post_upgrade` after an interrupted await.
+    #[serde(default)]
+    notify_attempt_started_at_secs: Option<u64>,
     created_at_secs: u64,
     updated_at_secs: u64,
 }
@@ -1828,6 +2069,30 @@ impl FundingOperation {
         if target != rail_arguments.embedded_destination() {
             return Err(FundingOperationOpenError::DestinationMismatch);
         }
+        if let FundingRailArguments::Icp(snapshot) = &rail_arguments {
+            crate::icp_cmc::validate_snapshot(snapshot, Some(now_secs), None)
+                .map_err(FundingOperationOpenError::IcpSnapshotInvalid)?;
+            let minimum = crate::icp_cmc::cycles_with_headroom(funding_policy.refill_cycles())
+                .map_err(|error| {
+                    FundingOperationOpenError::IcpSnapshotInvalid(match error {
+                        crate::icp_cmc::RateError::Zero => {
+                            crate::icp_cmc::SnapshotValidationError::RateZero
+                        }
+                        crate::icp_cmc::RateError::Future => {
+                            crate::icp_cmc::SnapshotValidationError::RateFuture
+                        }
+                        crate::icp_cmc::RateError::Stale => {
+                            crate::icp_cmc::SnapshotValidationError::RateStale
+                        }
+                        crate::icp_cmc::RateError::Overflow => {
+                            crate::icp_cmc::SnapshotValidationError::RateOverflow
+                        }
+                    })
+                })?;
+            if snapshot.expected_cycles < minimum {
+                return Err(FundingOperationOpenError::IcpSnapshotInsufficientHeadroom);
+            }
+        }
         Ok(Self {
             id,
             target,
@@ -1839,6 +2104,10 @@ impl FundingOperation {
             state,
             attempts: FundingAttempts::new(),
             confirmed_block_index: None,
+            actual_cycles: None,
+            refund_block_hint: None,
+            refund_block_index: None,
+            notify_attempt_started_at_secs: None,
             created_at_secs: now_secs,
             updated_at_secs: now_secs,
         })
@@ -1888,6 +2157,22 @@ impl FundingOperation {
         self.confirmed_block_index
     }
 
+    pub fn actual_cycles(&self) -> Option<u128> {
+        self.actual_cycles
+    }
+
+    pub fn refund_block_hint(&self) -> Option<u64> {
+        self.refund_block_hint
+    }
+
+    pub fn refund_block_index(&self) -> Option<u64> {
+        self.refund_block_index
+    }
+
+    pub fn notify_attempt_started_at_secs(&self) -> Option<u64> {
+        self.notify_attempt_started_at_secs
+    }
+
     pub fn created_at_secs(&self) -> u64 {
         self.created_at_secs
     }
@@ -1927,10 +2212,12 @@ impl FundingOperation {
         })
     }
 
-    /// Advances a successful Cycles confirmation while preserving a bounded
-    /// history slot for the following `Complete` transition.  A full
-    /// attempt vector is not allowed to strand a confirmed withdrawal: when
-    /// the history is at `MAX_FUNDING_ATTEMPTS - 1` or full, this method
+    /// Advances a successful terminal phase while preserving a bounded
+    /// history slot.  Cycles uses this for `Confirmed -> Complete` (and for
+    /// the equivalent proof-backed confirmation edge). ICP uses it for the
+    /// `NotifyPending -> Complete` edge after CMC delivery is authoritative.
+    /// A full attempt vector is not allowed to strand a confirmed delivery:
+    /// when the history is at `MAX_FUNDING_ATTEMPTS - 1` or full, this method
     /// deterministically removes one redundant, non-terminal retry record,
     /// renumbers the remaining ordinals, and appends the new phase.  The
     /// compaction never removes terminal evidence and is accepted by
@@ -2047,6 +2334,135 @@ impl FundingOperation {
             confirmed_block_index: Some(block_index),
             ..self.clone()
         })
+    }
+
+    /// Persists the actual CMC-delivered cycle amount exactly once.  The
+    /// immutable expected amount remains in the ICP snapshot; an under/over
+    /// delivery is represented by an alarm, never by mutating that snapshot.
+    pub fn attach_actual_cycles(
+        &self,
+        actual_cycles: u128,
+    ) -> Result<Self, FundingOperationTransitionError> {
+        if self.rail() != FundingRail::IcpCmc
+            || self.state != FundingOperationState::Icp(IcpFundingState::Complete)
+        {
+            return Err(FundingOperationTransitionError::InvalidSuccessor);
+        }
+        if self.actual_cycles.is_some() {
+            return Err(FundingOperationTransitionError::ActualCyclesAlreadySet);
+        }
+        Ok(Self {
+            actual_cycles: Some(actual_cycles),
+            ..self.clone()
+        })
+    }
+
+    /// Persists the CMC-provided refund block as verified evidence. The
+    /// original transfer block, if any, remains immutable and independently
+    /// queryable. The block must be the exact previously persisted CMC hint;
+    /// this method is intentionally not a caller-controlled attachment seam.
+    pub fn attach_refund_block(
+        &self,
+        block_index: u64,
+    ) -> Result<Self, FundingOperationTransitionError> {
+        if self.rail() != FundingRail::IcpCmc
+            || self.state != FundingOperationState::Icp(IcpFundingState::Quarantined)
+        {
+            return Err(FundingOperationTransitionError::InvalidSuccessor);
+        }
+        if self.refund_block_hint != Some(block_index) {
+            return Err(FundingOperationTransitionError::RefundBlockHintConflict);
+        }
+        if self.refund_block_index.is_some() {
+            return Err(FundingOperationTransitionError::RefundBlockAlreadySet);
+        }
+        Ok(Self {
+            refund_block_index: Some(block_index),
+            ..self.clone()
+        })
+    }
+
+    /// Records the CMC's refund block index as an unverified immutable hint.
+    /// The hint is allowed only while notification is unresolved; no ledger
+    /// proof is inferred from the CMC response itself.
+    pub fn attach_refund_block_hint(
+        &self,
+        block_index: u64,
+    ) -> Result<Self, FundingOperationTransitionError> {
+        if self.rail() != FundingRail::IcpCmc
+            || !matches!(
+                self.state,
+                FundingOperationState::Icp(
+                    IcpFundingState::NotifyPending | IcpFundingState::Quarantined
+                )
+            )
+        {
+            return Err(FundingOperationTransitionError::InvalidSuccessor);
+        }
+        if let Some(existing) = self.refund_block_hint {
+            if existing == block_index {
+                return Ok(self.clone());
+            }
+            return Err(FundingOperationTransitionError::RefundBlockHintConflict);
+        }
+        if self.refund_block_index.is_some() {
+            return Err(FundingOperationTransitionError::RefundBlockHintConflict);
+        }
+        Ok(Self {
+            refund_block_hint: Some(block_index),
+            ..self.clone()
+        })
+    }
+
+    /// Marks the notify await immediately before the CMC call. A second
+    /// executor must reject while the first call is unresolved, even if both
+    /// would use the same immutable transfer block.
+    pub fn mark_notify_attempt(
+        &self,
+        attempt_started_at_secs: u64,
+    ) -> Result<Self, FundingOperationTransitionError> {
+        if self.rail() != FundingRail::IcpCmc
+            || self.state != FundingOperationState::Icp(IcpFundingState::NotifyPending)
+        {
+            return Err(FundingOperationTransitionError::InvalidSuccessor);
+        }
+        if self.confirmed_block_index.is_none() {
+            return Err(FundingOperationTransitionError::ConfirmedBlockRequired);
+        }
+        if attempt_started_at_secs < self.updated_at_secs {
+            return Err(FundingOperationTransitionError::TimestampRegression);
+        }
+        if self.notify_attempt_started_at_secs.is_some() {
+            return Err(FundingOperationTransitionError::NotifyAttemptInFlight);
+        }
+        Ok(Self {
+            notify_attempt_started_at_secs: Some(attempt_started_at_secs),
+            ..self.clone()
+        })
+    }
+
+    /// Clears the ephemeral notify marker after the CMC await returns. A
+    /// no-marker clear is idempotent so retry/resume plumbing can safely call
+    /// it after a definitively returned outcome.
+    pub fn clear_notify_attempt(&self) -> Result<Self, FundingOperationTransitionError> {
+        if self.notify_attempt_started_at_secs.is_none() {
+            return Ok(self.clone());
+        }
+        Ok(Self {
+            notify_attempt_started_at_secs: None,
+            ..self.clone()
+        })
+    }
+
+    /// Upgrade recovery clears only the ephemeral marker. The immutable
+    /// transfer block and CMC notify arguments remain unchanged, so the next
+    /// retry is the exact same call. This is deliberately separate from the
+    /// normal return-path clear for an interrupted await.
+    pub fn reset_notify_attempt_on_upgrade(&self) -> Self {
+        Self {
+            notify_attempt_started_at_secs: None,
+            ..self.clone()
+        }
     }
 
     /// Deterministically stops automatic retry when the bounded attempt
@@ -2226,25 +2642,296 @@ impl FundingOperation {
         }
     }
 
+    /// Applies signer/adapter reconciliation to an ICP operation that was
+    /// quarantined after an unknown transfer or CMC outcome. Delivery must
+    /// carry the independently verified original transfer block; a refund
+    /// must carry the independently verified refund block. This method is
+    /// separate from automatic `record_attempt`, so quarantine can never
+    /// implicitly re-enter the retry loop.
+    pub fn reconcile_quarantined_icp(
+        &self,
+        new_state: IcpFundingState,
+        confirmed_block_index: Option<u64>,
+        refund_block_index: Option<u64>,
+        actual_cycles: Option<u128>,
+        at_secs: u64,
+    ) -> Result<Self, FundingOperationTransitionError> {
+        if self.state != FundingOperationState::Icp(IcpFundingState::Quarantined)
+            || !matches!(
+                new_state,
+                IcpFundingState::Complete | IcpFundingState::Refunded | IcpFundingState::Terminal
+            )
+        {
+            return Err(FundingOperationTransitionError::InvalidSuccessor);
+        }
+        if at_secs < self.updated_at_secs {
+            return Err(FundingOperationTransitionError::TimestampRegression);
+        }
+        let current_block = self.confirmed_block_index;
+        let current_refund = self.refund_block_index;
+        let confirmed_block_index = confirmed_block_index.or(current_block);
+        let refund_block_index = refund_block_index.or(current_refund);
+        match new_state {
+            IcpFundingState::Complete if confirmed_block_index.is_none() => {
+                return Err(FundingOperationTransitionError::ConfirmedBlockRequired)
+            }
+            IcpFundingState::Complete
+                if actual_cycles.is_none() && self.actual_cycles.is_none() =>
+            {
+                return Err(FundingOperationTransitionError::ActualCyclesRequired)
+            }
+            IcpFundingState::Refunded | IcpFundingState::Terminal
+                if actual_cycles.is_some() || self.actual_cycles.is_some() =>
+            {
+                return Err(FundingOperationTransitionError::ActualCyclesUnexpected)
+            }
+            IcpFundingState::Refunded if refund_block_index.is_none() => {
+                return Err(FundingOperationTransitionError::RefundBlockRequired)
+            }
+            IcpFundingState::Refunded if current_refund.is_none() => {
+                return Err(FundingOperationTransitionError::RefundBlockRequired)
+            }
+            IcpFundingState::Refunded
+                if self.refund_block_hint != refund_block_index
+                    || self.refund_block_hint.is_none() =>
+            {
+                return Err(FundingOperationTransitionError::RefundBlockHintRequired)
+            }
+            IcpFundingState::Terminal if refund_block_index.is_some() => {
+                return Err(FundingOperationTransitionError::ConfirmedBlockConflict)
+            }
+            IcpFundingState::Terminal if self.refund_block_hint.is_some() => {
+                return Err(FundingOperationTransitionError::RefundBlockHintConflict)
+            }
+            IcpFundingState::Complete if self.refund_block_hint.is_some() => {
+                return Err(FundingOperationTransitionError::RefundBlockHintConflict)
+            }
+            _ => {}
+        }
+        if current_block.is_some() && current_block != confirmed_block_index {
+            return Err(FundingOperationTransitionError::ConfirmedBlockConflict);
+        }
+        if current_refund.is_some() && current_refund != refund_block_index {
+            return Err(FundingOperationTransitionError::RefundBlockConflict);
+        }
+        if self.actual_cycles.is_some()
+            && actual_cycles.is_some()
+            && self.actual_cycles != actual_cycles
+        {
+            return Err(FundingOperationTransitionError::ActualCyclesConflict);
+        }
+        let result_class = match new_state {
+            IcpFundingState::Complete => FundingAttemptResultClass::Success,
+            IcpFundingState::Refunded | IcpFundingState::Terminal => {
+                FundingAttemptResultClass::TerminalFailure
+            }
+            _ => unreachable!("validated reconciliation state above"),
+        };
+        let attempts = self
+            .append_explicit_attempt(FundingOperationState::Icp(new_state), at_secs, result_class)?
+            .attempts;
+        Ok(Self {
+            state: FundingOperationState::Icp(new_state),
+            attempts,
+            confirmed_block_index,
+            refund_block_index,
+            actual_cycles: actual_cycles.or(self.actual_cycles),
+            updated_at_secs: at_secs,
+            ..self.clone()
+        })
+    }
+
+    /// Re-enters the ICP notification phase after a signer has supplied an
+    /// independently verified original-transfer block for a quarantined
+    /// operation.  A transfer block proves only the ICP debit, never CMC
+    /// delivery, so this method deliberately ends at `NotifyPending`; the
+    /// caller must retry `notify_top_up` with the same block index.
+    ///
+    /// This is a separate explicit edge from the automatic retry graph.  It
+    /// is intentionally unavailable when a CMC refund block is already
+    /// attached: that case requires refund-proof reconciliation instead of a
+    /// second notification attempt.
+    pub fn reconcile_quarantined_icp_with_transfer_proof(
+        &self,
+        block_index: u64,
+        at_secs: u64,
+    ) -> Result<Self, FundingOperationTransitionError> {
+        if self.state != FundingOperationState::Icp(IcpFundingState::Quarantined)
+            || self.refund_block_index.is_some()
+        {
+            return Err(FundingOperationTransitionError::InvalidSuccessor);
+        }
+        if at_secs < self.updated_at_secs {
+            return Err(FundingOperationTransitionError::TimestampRegression);
+        }
+        if let Some(existing) = self.confirmed_block_index {
+            if existing != block_index {
+                return Err(FundingOperationTransitionError::ConfirmedBlockConflict);
+            }
+        }
+
+        let mut result = self.clone();
+        if result.confirmed_block_index.is_none() {
+            result = result.append_explicit_attempt(
+                FundingOperationState::Icp(IcpFundingState::TransferConfirmed),
+                at_secs,
+                FundingAttemptResultClass::Success,
+            )?;
+            result.confirmed_block_index = Some(block_index);
+        }
+        result.append_explicit_attempt(
+            FundingOperationState::Icp(IcpFundingState::NotifyPending),
+            at_secs,
+            FundingAttemptResultClass::Indeterminate,
+        )
+    }
+
+    /// Appends a phase for an explicit signer reconciliation. Automatic
+    /// `record_attempt` correctly refuses to mutate `Quarantined`; this small
+    /// helper keeps the exception narrow and still enforces timestamps and
+    /// the global bounded attempt history.
+    fn append_explicit_attempt(
+        &self,
+        phase: FundingOperationState,
+        at_secs: u64,
+        result_class: FundingAttemptResultClass,
+    ) -> Result<Self, FundingOperationTransitionError> {
+        if at_secs < self.updated_at_secs {
+            return Err(FundingOperationTransitionError::TimestampRegression);
+        }
+        let attempts = if self.attempts.len() < MAX_FUNDING_ATTEMPTS {
+            self.attempts
+                .record(phase, at_secs, result_class)
+                .map_err(|_| FundingOperationTransitionError::TooManyAttempts)?
+        } else {
+            self.compact_attempt_history()?
+                .record(phase, at_secs, result_class)
+                .map_err(|_| FundingOperationTransitionError::TooManyAttempts)?
+        };
+        Ok(Self {
+            state: phase,
+            attempts,
+            updated_at_secs: at_secs,
+            ..self.clone()
+        })
+    }
+
+    pub(crate) fn is_valid_quarantined_icp_reconciliation(&self, next: &Self) -> bool {
+        if self.state != FundingOperationState::Icp(IcpFundingState::Quarantined) {
+            return false;
+        }
+        match next.state {
+            FundingOperationState::Icp(IcpFundingState::TransferConfirmed) => {
+                let Some(block_index) = next.confirmed_block_index else {
+                    return false;
+                };
+                // A quarantined operation that already carries transfer
+                // evidence can only re-enter at NotifyPending. The
+                // TransferConfirmed successor is valid only when this is the
+                // first persisted attachment of the original block.
+                if self.confirmed_block_index.is_some() {
+                    return false;
+                }
+                let Ok(mut candidate) = self.append_explicit_attempt(
+                    FundingOperationState::Icp(IcpFundingState::TransferConfirmed),
+                    next.updated_at_secs,
+                    FundingAttemptResultClass::Success,
+                ) else {
+                    return false;
+                };
+                candidate.confirmed_block_index = Some(block_index);
+                candidate == *next
+            }
+            FundingOperationState::Icp(IcpFundingState::NotifyPending) => {
+                let Some(block_index) = next.confirmed_block_index else {
+                    return false;
+                };
+                self.reconcile_quarantined_icp_with_transfer_proof(
+                    block_index,
+                    next.updated_at_secs,
+                )
+                .map(|candidate| candidate == *next)
+                .unwrap_or(false)
+            }
+            FundingOperationState::Icp(
+                IcpFundingState::Complete | IcpFundingState::Refunded | IcpFundingState::Terminal,
+            ) => self
+                .reconcile_quarantined_icp(
+                    match next.state {
+                        FundingOperationState::Icp(state) => state,
+                        _ => unreachable!(),
+                    },
+                    next.confirmed_block_index,
+                    next.refund_block_index,
+                    next.actual_cycles,
+                    next.updated_at_secs,
+                )
+                .map(|candidate| candidate == *next)
+                .unwrap_or(false),
+            _ => false,
+        }
+    }
+
+    /// The refund proof path has one synchronous intermediate write: the
+    /// authoritative ledger block is promoted from the immutable CMC hint
+    /// while the operation remains `Quarantined`, immediately before the
+    /// explicit `Refunded` reconciliation edge. Accept only that exact
+    /// same-state promotion; callers cannot use it to alter attempts, a
+    /// transfer block, actual cycles, or the hint itself.
+    pub(crate) fn is_valid_icp_refund_proof_attachment(&self, next: &Self) -> bool {
+        self.state == FundingOperationState::Icp(IcpFundingState::Quarantined)
+            && next.state == FundingOperationState::Icp(IcpFundingState::Quarantined)
+            && self.refund_block_index.is_none()
+            && self.refund_block_hint.is_some()
+            && next.refund_block_index == self.refund_block_hint
+            && next.refund_block_hint == self.refund_block_hint
+            && next.confirmed_block_index == self.confirmed_block_index
+            && next.actual_cycles == self.actual_cycles
+            && next.notify_attempt_started_at_secs == self.notify_attempt_started_at_secs
+            && next.attempts == self.attempts
+            && next.updated_at_secs == self.updated_at_secs
+    }
+
     /// Validates the one-record replacement used by
     /// `record_attempt_with_bounded_compaction`.  This is deliberately
     /// narrow: only successful Cycles `Submitted|Unknown -> Confirmed` or
-    /// `Confirmed -> Complete` transitions may compact history, and the
-    /// replacement must be derivable by removing one eligible record from
-    /// the currently stored vector and appending the new final phase.
+    /// `Confirmed -> Complete`, and successful ICP
+    /// `LedgerSubmitted|TransferUnknown -> TransferConfirmed`,
+    /// `TransferConfirmed -> NotifyPending`, or `NotifyPending -> Complete`,
+    /// may compact history. The replacement must be derivable by removing one
+    /// eligible record from the currently stored vector and appending the new
+    /// final phase.
     pub(crate) fn is_valid_bounded_attempt_compaction_successor(&self, next: &Self) -> bool {
-        if self.rail() != FundingRail::CyclesLedger
-            || next.rail() != FundingRail::CyclesLedger
-            || self.attempts.len() < MAX_FUNDING_ATTEMPTS - 1
-            || next.attempts.len() != self.attempts.len()
-            || self.attempts.is_empty()
-            || !self.state.is_valid_successor(&next.state)
-            || !matches!(
+        let cycles_edge = self.rail() == FundingRail::CyclesLedger
+            && next.rail() == FundingRail::CyclesLedger
+            && matches!(
                 next.state,
                 FundingOperationState::Cycles(
                     CyclesFundingState::Confirmed | CyclesFundingState::Complete
                 )
-            )
+            );
+        let icp_edge = self.rail() == FundingRail::IcpCmc
+            && next.rail() == FundingRail::IcpCmc
+            && matches!(
+                (self.state, next.state),
+                (
+                    FundingOperationState::Icp(
+                        IcpFundingState::LedgerSubmitted | IcpFundingState::TransferUnknown
+                    ),
+                    FundingOperationState::Icp(IcpFundingState::TransferConfirmed)
+                ) | (
+                    FundingOperationState::Icp(IcpFundingState::TransferConfirmed),
+                    FundingOperationState::Icp(IcpFundingState::NotifyPending)
+                ) | (
+                    FundingOperationState::Icp(IcpFundingState::NotifyPending),
+                    FundingOperationState::Icp(IcpFundingState::Complete)
+                )
+            );
+        if (!cycles_edge && !icp_edge)
+            || self.attempts.len() < MAX_FUNDING_ATTEMPTS - 1
+            || next.attempts.len() != self.attempts.len()
+            || self.attempts.is_empty()
+            || !self.state.is_valid_successor(&next.state)
         {
             return false;
         }
@@ -2358,6 +3045,14 @@ impl<'de> Deserialize<'de> for FundingOperation {
             state: FundingOperationState,
             attempts: FundingAttempts,
             confirmed_block_index: Option<u64>,
+            #[serde(default)]
+            actual_cycles: Option<u128>,
+            #[serde(default)]
+            refund_block_hint: Option<u64>,
+            #[serde(default)]
+            refund_block_index: Option<u64>,
+            #[serde(default)]
+            notify_attempt_started_at_secs: Option<u64>,
             created_at_secs: u64,
             updated_at_secs: u64,
         }
@@ -2389,9 +3084,99 @@ impl<'de> Deserialize<'de> for FundingOperation {
                 FundingOperationOpenError::DestinationMismatch,
             ));
         }
+        if let FundingRailArguments::Icp(snapshot) = &raw.rail_arguments {
+            crate::icp_cmc::validate_snapshot(snapshot, Some(raw.created_at_secs), None)
+                .map_err(invariant_decode_error)?;
+            let minimum = crate::icp_cmc::cycles_with_headroom(raw.funding_policy.refill_cycles())
+                .map_err(|_| {
+                    invariant_decode_error(FundingOperationOpenError::IcpSnapshotInvalid(
+                        crate::icp_cmc::SnapshotValidationError::RateOverflow,
+                    ))
+                })?;
+            if snapshot.expected_cycles < minimum {
+                return Err(invariant_decode_error(
+                    FundingOperationOpenError::IcpSnapshotInsufficientHeadroom,
+                ));
+            }
+        }
         if raw.confirmed_block_index.is_some() && !state_allows_confirmed_block(&raw.state) {
             return Err(invariant_decode_error(
                 AttachConfirmedBlockError::InvalidState,
+            ));
+        }
+        // The mutable evidence fields are state-bound as well as
+        // single-assignment.  In particular, a decoded `Complete` value
+        // without the CMC's actual-cycles reply, or a decoded `Refunded`
+        // value without an attached refund block, would let stable-memory
+        // corruption masquerade as a settled outcome.  Quarantine may carry
+        // a refund index only while proof is being verified; no resolved
+        // state may carry the wrong evidence kind.
+        if let FundingOperationState::Icp(state) = raw.state {
+            if matches!(state, IcpFundingState::Complete) && raw.actual_cycles.is_none() {
+                return Err(invariant_decode_error(
+                    FundingOperationTransitionError::ActualCyclesRequired,
+                ));
+            }
+            if !matches!(state, IcpFundingState::Complete) && raw.actual_cycles.is_some() {
+                return Err(invariant_decode_error(
+                    FundingOperationTransitionError::ActualCyclesUnexpected,
+                ));
+            }
+            if matches!(state, IcpFundingState::Refunded) && raw.refund_block_index.is_none() {
+                return Err(invariant_decode_error(
+                    FundingOperationTransitionError::RefundBlockRequired,
+                ));
+            }
+            if raw.refund_block_index.is_some() && raw.refund_block_hint != raw.refund_block_index {
+                return Err(invariant_decode_error(
+                    FundingOperationTransitionError::RefundBlockHintConflict,
+                ));
+            }
+            if raw.refund_block_hint.is_some()
+                && !matches!(
+                    state,
+                    IcpFundingState::Quarantined | IcpFundingState::Refunded
+                )
+            {
+                return Err(invariant_decode_error(
+                    FundingOperationTransitionError::RefundBlockHintConflict,
+                ));
+            }
+            if !matches!(
+                state,
+                IcpFundingState::Quarantined | IcpFundingState::Refunded
+            ) && raw.refund_block_index.is_some()
+            {
+                return Err(invariant_decode_error(
+                    FundingOperationTransitionError::RefundBlockConflict,
+                ));
+            }
+            if raw.notify_attempt_started_at_secs.is_some()
+                && state != IcpFundingState::NotifyPending
+            {
+                return Err(invariant_decode_error(
+                    FundingOperationTransitionError::InvalidSuccessor,
+                ));
+            }
+            if raw.notify_attempt_started_at_secs.is_some() && raw.confirmed_block_index.is_none() {
+                return Err(invariant_decode_error(
+                    FundingOperationTransitionError::ConfirmedBlockRequired,
+                ));
+            }
+            if let Some(marker) = raw.notify_attempt_started_at_secs {
+                if marker < raw.updated_at_secs {
+                    return Err(invariant_decode_error(
+                        FundingOperationTransitionError::TimestampRegression,
+                    ));
+                }
+            }
+        } else if raw.refund_block_hint.is_some()
+            || raw.refund_block_index.is_some()
+            || raw.notify_attempt_started_at_secs.is_some()
+            || raw.actual_cycles.is_some()
+        {
+            return Err(invariant_decode_error(
+                FundingOperationTransitionError::RailMismatch,
             ));
         }
 
@@ -2451,6 +3236,10 @@ impl<'de> Deserialize<'de> for FundingOperation {
             state: raw.state,
             attempts: raw.attempts,
             confirmed_block_index: raw.confirmed_block_index,
+            actual_cycles: raw.actual_cycles,
+            refund_block_hint: raw.refund_block_hint,
+            refund_block_index: raw.refund_block_index,
+            notify_attempt_started_at_secs: raw.notify_attempt_started_at_secs,
             created_at_secs: raw.created_at_secs,
             updated_at_secs: raw.updated_at_secs,
         })
@@ -2475,6 +3264,21 @@ fn is_valid_persisted_successor(
             ) | (
                 FundingOperationState::Cycles(CyclesFundingState::Quarantined),
                 FundingOperationState::Cycles(CyclesFundingState::Terminal)
+            ) | (
+                FundingOperationState::Icp(IcpFundingState::Quarantined),
+                FundingOperationState::Icp(IcpFundingState::TransferConfirmed)
+            ) | (
+                FundingOperationState::Icp(IcpFundingState::Quarantined),
+                FundingOperationState::Icp(IcpFundingState::NotifyPending)
+            ) | (
+                FundingOperationState::Icp(IcpFundingState::Quarantined),
+                FundingOperationState::Icp(IcpFundingState::Complete)
+            ) | (
+                FundingOperationState::Icp(IcpFundingState::Quarantined),
+                FundingOperationState::Icp(IcpFundingState::Refunded)
+            ) | (
+                FundingOperationState::Icp(IcpFundingState::Quarantined),
+                FundingOperationState::Icp(IcpFundingState::Terminal)
             )
         )
 }
@@ -2529,6 +3333,16 @@ pub enum FundingOperationTransitionError {
     /// Explicit reconciliation supplied a block inconsistent with the
     /// operation's existing proof or with a terminal no-delivery outcome.
     ConfirmedBlockConflict,
+    ActualCyclesRequired,
+    ActualCyclesUnexpected,
+    ActualCyclesAlreadySet,
+    ActualCyclesConflict,
+    NotifyAttemptInFlight,
+    RefundBlockAlreadySet,
+    RefundBlockRequired,
+    RefundBlockHintRequired,
+    RefundBlockHintConflict,
+    RefundBlockConflict,
 }
 
 /// Shared by `FundingOperation::attach_confirmed_block` and this type's
@@ -2915,17 +3729,40 @@ impl RollingSpendLedger {
         settled_at_secs: u64,
         window_secs: u64,
     ) -> Result<Self, RollingSpendSettleError> {
+        let amount_cycles = self
+            .pending
+            .iter()
+            .find(|pending| pending.operation_id == operation_id)
+            .map(|pending| pending.amount_cycles)
+            .ok_or(RollingSpendSettleError::UnknownOperation)?;
+        self.settle_with_amount(operation_id, amount_cycles, settled_at_secs, window_secs)
+    }
+
+    /// Moves the matching pending reservation to a settled entry using the
+    /// authoritative amount actually delivered by the external rail.  The
+    /// reservation amount is only a pre-await capacity hold; it must not be
+    /// used to undercount or overcount a confirmed delivery.  In particular,
+    /// an unavoidable overdelivery may exceed the cap: the confirmed spend is
+    /// recorded exactly, alarms are raised by the caller, and later reserves
+    /// see the real settled total and fail closed until the window rolls off.
+    pub fn settle_with_amount(
+        &self,
+        operation_id: u64,
+        amount_cycles: u128,
+        settled_at_secs: u64,
+        window_secs: u64,
+    ) -> Result<Self, RollingSpendSettleError> {
         let index = self
             .pending
             .iter()
             .position(|p| p.operation_id == operation_id)
             .ok_or(RollingSpendSettleError::UnknownOperation)?;
         let mut pending = self.pending.clone();
-        let matched = pending.remove(index);
+        pending.remove(index);
         let mut settled = self.settled.clone();
         settled.push(SpendEntry {
             settled_at_secs,
-            amount_cycles: matched.amount_cycles,
+            amount_cycles,
         });
         settled.retain(|entry| settled_at_secs.saturating_sub(entry.settled_at_secs) < window_secs);
         if settled.len() > MAX_ROLLING_SPEND_SETTLED_ENTRIES {
@@ -3110,9 +3947,37 @@ impl TargetReservationState {
         cooldown_secs: u64,
         window_secs: u64,
     ) -> Result<Self, TargetSettleError> {
+        let amount_cycles = self
+            .rolling_spend
+            .pending()
+            .iter()
+            .find(|pending| pending.operation_id == operation_id)
+            .map(|pending| pending.amount_cycles)
+            .ok_or(TargetSettleError::Mismatch)?;
+        self.settle_spend_with_amount(
+            operation_id,
+            amount_cycles,
+            now_secs,
+            cooldown_secs,
+            window_secs,
+        )
+    }
+
+    /// Settles a target reservation with the authoritative delivered amount.
+    /// This deliberately does not re-run the reservation cap check: a
+    /// confirmed external delivery must never be stranded because it was
+    /// larger than the amount held before the await.
+    pub fn settle_spend_with_amount(
+        &self,
+        operation_id: u64,
+        amount_cycles: u128,
+        now_secs: u64,
+        cooldown_secs: u64,
+        window_secs: u64,
+    ) -> Result<Self, TargetSettleError> {
         let rolling_spend = self
             .rolling_spend
-            .settle(operation_id, now_secs, window_secs)
+            .settle_with_amount(operation_id, amount_cycles, now_secs, window_secs)
             .map_err(|err| match err {
                 RollingSpendSettleError::UnknownOperation => TargetSettleError::Mismatch,
                 RollingSpendSettleError::Bound => TargetSettleError::Bound,
@@ -3212,10 +4077,33 @@ impl GlobalRollingSpendState {
         now_secs: u64,
         window_secs: u64,
     ) -> Result<Self, RollingSpendSettleError> {
+        let amount_cycles = self
+            .rolling_spend
+            .pending()
+            .iter()
+            .find(|pending| pending.operation_id == operation_id)
+            .map(|pending| pending.amount_cycles)
+            .ok_or(RollingSpendSettleError::UnknownOperation)?;
+        self.settle_with_amount(operation_id, amount_cycles, now_secs, window_secs)
+    }
+
+    /// Settles global capacity using the authoritative amount delivered by
+    /// the CMC.  See `RollingSpendLedger::settle_with_amount` for why this
+    /// accepts an over-cap amount after a confirmed delivery.
+    pub fn settle_with_amount(
+        &self,
+        operation_id: u64,
+        amount_cycles: u128,
+        now_secs: u64,
+        window_secs: u64,
+    ) -> Result<Self, RollingSpendSettleError> {
         Ok(Self {
-            rolling_spend: self
-                .rolling_spend
-                .settle(operation_id, now_secs, window_secs)?,
+            rolling_spend: self.rolling_spend.settle_with_amount(
+                operation_id,
+                amount_cycles,
+                now_secs,
+                window_secs,
+            )?,
         })
     }
 
@@ -3928,6 +4816,335 @@ impl SourceReserveState {
 }
 
 impl Default for SourceReserveState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ─────────────────────── ICP Ledger source reserve/cache (Task 5) ───────────────────────
+
+/// ICP/CMC has its own source account and reserve.  It must never share the
+/// Cycles Ledger cache: a cached ICP balance is denominated in e8s and its
+/// fee/accounting rules are independent from T-cycles.  The pending bound is
+/// the same whole-state ceiling as the operation store (one ordinary
+/// operation per target, plus the future self-recovery slot).
+pub const MAX_PENDING_ICP_SOURCE_DEBITS: usize = MAX_FUNDING_OPERATIONS;
+
+#[derive(CandidType, Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IcpLedgerCache {
+    pub balance_e8s: u128,
+    pub fee_e8s: u128,
+    pub as_of_secs: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IcpSourceReserveError {
+    UnknownCache,
+    StaleCache,
+    FutureCache,
+    Overflow,
+    InsufficientReserve,
+    DuplicateOperation,
+    Bound,
+    AttemptInFlight,
+    OutOfOrderRefresh,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IcpSourceSettleError {
+    UnknownOperation,
+    KnownSpendExceedsCachedBalance,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IcpSourceAttemptError {
+    UnknownOperation,
+    TimestampRegression,
+    /// A source transfer is already in flight for this operation.  This is
+    /// intentionally not idempotent: a second executor must never issue a
+    /// second ledger transfer while the first await is unresolved.
+    AttemptInFlight,
+}
+
+#[derive(CandidType, Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PendingIcpSourceDebit {
+    pub operation_id: u64,
+    /// The exact transfer amount plus the exact ledger fee held for this
+    /// operation.  `u128` is intentional: the sum is checked before the
+    /// outbound `u64` transfer snapshot is built.
+    pub amount_plus_fee_e8s: u128,
+    pub reserved_at_secs: u64,
+    #[serde(default)]
+    pub attempt_started_at_secs: Option<u64>,
+}
+
+/// Durable ICP source-account reservation ledger.  A cache refresh never
+/// changes pending holds, and a reservation never performs a query.  The
+/// caller therefore has to refresh this state in a separate operation and
+/// consume only a fresh snapshot in the pre-await prepare path.
+#[derive(CandidType, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct IcpSourceReserveState {
+    cache: Option<IcpLedgerCache>,
+    pending: Vec<PendingIcpSourceDebit>,
+}
+
+#[derive(Debug)]
+enum IcpSourceReserveDecodeError {
+    TooManyPending,
+    DuplicatePendingOperation,
+    PendingAmountOverflow,
+}
+
+impl<'de> Deserialize<'de> for IcpSourceReserveState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            cache: Option<IcpLedgerCache>,
+            pending: Vec<PendingIcpSourceDebit>,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+        if raw.pending.len() > MAX_PENDING_ICP_SOURCE_DEBITS {
+            return Err(invariant_decode_error(
+                IcpSourceReserveDecodeError::TooManyPending,
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        for debit in &raw.pending {
+            if !seen.insert(debit.operation_id) {
+                return Err(invariant_decode_error(
+                    IcpSourceReserveDecodeError::DuplicatePendingOperation,
+                ));
+            }
+        }
+        if raw
+            .pending
+            .iter()
+            .try_fold(0u128, |acc, debit| {
+                acc.checked_add(debit.amount_plus_fee_e8s)
+            })
+            .is_none()
+        {
+            return Err(invariant_decode_error(
+                IcpSourceReserveDecodeError::PendingAmountOverflow,
+            ));
+        }
+        Ok(Self {
+            cache: raw.cache,
+            pending: raw.pending,
+        })
+    }
+}
+
+impl IcpSourceReserveState {
+    pub fn new() -> Self {
+        Self {
+            cache: None,
+            pending: Vec::new(),
+        }
+    }
+
+    pub fn cache(&self) -> Option<IcpLedgerCache> {
+        self.cache
+    }
+
+    pub fn pending(&self) -> &[PendingIcpSourceDebit] {
+        &self.pending
+    }
+
+    pub fn pending_operation_ids(&self) -> impl Iterator<Item = u64> + '_ {
+        self.pending.iter().map(|p| p.operation_id)
+    }
+
+    pub fn pending_total_e8s(&self) -> Result<u128, IcpSourceReserveError> {
+        self.pending
+            .iter()
+            .try_fold(0u128, |acc, p| acc.checked_add(p.amount_plus_fee_e8s))
+            .ok_or(IcpSourceReserveError::Overflow)
+    }
+
+    pub fn refresh(
+        &self,
+        balance_e8s: u128,
+        fee_e8s: u128,
+        as_of_secs: u64,
+    ) -> Result<Self, IcpSourceReserveError> {
+        if self
+            .pending
+            .iter()
+            .any(|debit| debit.attempt_started_at_secs.is_some())
+        {
+            return Err(IcpSourceReserveError::AttemptInFlight);
+        }
+        if let Some(previous) = self.cache {
+            if as_of_secs < previous.as_of_secs
+                || (as_of_secs == previous.as_of_secs
+                    && (balance_e8s != previous.balance_e8s || fee_e8s != previous.fee_e8s))
+            {
+                return Err(IcpSourceReserveError::OutOfOrderRefresh);
+            }
+            if as_of_secs == previous.as_of_secs {
+                return Ok(self.clone());
+            }
+        }
+        Ok(Self {
+            cache: Some(IcpLedgerCache {
+                balance_e8s,
+                fee_e8s,
+                as_of_secs,
+            }),
+            pending: self.pending.clone(),
+        })
+    }
+
+    fn fresh_cache(
+        &self,
+        now_secs: u64,
+        max_age_secs: u64,
+    ) -> Result<IcpLedgerCache, IcpSourceReserveError> {
+        let cache = self.cache.ok_or(IcpSourceReserveError::UnknownCache)?;
+        if cache.as_of_secs > now_secs {
+            return Err(IcpSourceReserveError::FutureCache);
+        }
+        if now_secs.saturating_sub(cache.as_of_secs) > max_age_secs {
+            return Err(IcpSourceReserveError::StaleCache);
+        }
+        Ok(cache)
+    }
+
+    pub fn reserve_ordinary(
+        &self,
+        operation_id: u64,
+        amount_plus_fee_e8s: u128,
+        protected_reserve_e8s: u128,
+        now_secs: u64,
+        max_age_secs: u64,
+    ) -> Result<Self, IcpSourceReserveError> {
+        let cache = self.fresh_cache(now_secs, max_age_secs)?;
+        if self.pending.iter().any(|p| p.operation_id == operation_id) {
+            return Err(IcpSourceReserveError::DuplicateOperation);
+        }
+        if self.pending.len() >= MAX_PENDING_ICP_SOURCE_DEBITS {
+            return Err(IcpSourceReserveError::Bound);
+        }
+        let required = self
+            .pending_total_e8s()?
+            .checked_add(protected_reserve_e8s)
+            .and_then(|total| total.checked_add(amount_plus_fee_e8s))
+            .ok_or(IcpSourceReserveError::Overflow)?;
+        if required > cache.balance_e8s {
+            return Err(IcpSourceReserveError::InsufficientReserve);
+        }
+        let mut pending = self.pending.clone();
+        pending.push(PendingIcpSourceDebit {
+            operation_id,
+            amount_plus_fee_e8s,
+            reserved_at_secs: now_secs,
+            attempt_started_at_secs: None,
+        });
+        Ok(Self {
+            cache: Some(cache),
+            pending,
+        })
+    }
+
+    pub fn settle(
+        &self,
+        operation_id: u64,
+        known_spent_e8s: u128,
+    ) -> Result<Self, IcpSourceSettleError> {
+        let index = self
+            .pending
+            .iter()
+            .position(|p| p.operation_id == operation_id)
+            .ok_or(IcpSourceSettleError::UnknownOperation)?;
+        let mut pending = self.pending.clone();
+        pending.remove(index);
+        let cache = match self.cache {
+            None => None,
+            Some(c) => Some(IcpLedgerCache {
+                balance_e8s: c
+                    .balance_e8s
+                    .checked_sub(known_spent_e8s)
+                    .ok_or(IcpSourceSettleError::KnownSpendExceedsCachedBalance)?,
+                ..c
+            }),
+        };
+        Ok(Self { cache, pending })
+    }
+
+    pub fn mark_attempt(
+        &self,
+        operation_id: u64,
+        attempt_started_at_secs: u64,
+    ) -> Result<Self, IcpSourceAttemptError> {
+        let index = self
+            .pending
+            .iter()
+            .position(|debit| debit.operation_id == operation_id)
+            .ok_or(IcpSourceAttemptError::UnknownOperation)?;
+        if self.pending[index].attempt_started_at_secs.is_some() {
+            return Err(IcpSourceAttemptError::AttemptInFlight);
+        }
+        let mut pending = self.pending.clone();
+        pending[index].attempt_started_at_secs = Some(attempt_started_at_secs);
+        Ok(Self {
+            cache: self.cache,
+            pending,
+        })
+    }
+
+    /// Clears the ephemeral in-message-flight marker after the source await
+    /// has returned.  The pending debit itself remains until its outcome is
+    /// reconciled.  A missing operation is an invariant failure, not a
+    /// successful no-op.
+    pub fn clear_attempt(&self, operation_id: u64) -> Result<Self, IcpSourceAttemptError> {
+        let index = self
+            .pending
+            .iter()
+            .position(|debit| debit.operation_id == operation_id)
+            .ok_or(IcpSourceAttemptError::UnknownOperation)?;
+        if self.pending[index].attempt_started_at_secs.is_none() {
+            return Ok(self.clone());
+        }
+        let mut pending = self.pending.clone();
+        pending[index].attempt_started_at_secs = None;
+        Ok(Self {
+            cache: self.cache,
+            pending,
+        })
+    }
+
+    /// Upgrade recovery clears only the ephemeral marker.  The operation and
+    /// amount hold are durable, so a post-upgrade retry uses the exact same
+    /// immutable transfer snapshot while still allowing a call that was
+    /// interrupted by the upgrade to be retried.
+    pub fn reset_attempts(&self) -> Self {
+        if self
+            .pending
+            .iter()
+            .all(|debit| debit.attempt_started_at_secs.is_none())
+        {
+            return self.clone();
+        }
+        Self {
+            cache: self.cache,
+            pending: self
+                .pending
+                .iter()
+                .map(|debit| PendingIcpSourceDebit {
+                    attempt_started_at_secs: None,
+                    ..*debit
+                })
+                .collect(),
+        }
+    }
+}
+
+impl Default for IcpSourceReserveState {
     fn default() -> Self {
         Self::new()
     }
@@ -5251,19 +6468,65 @@ mod tests {
         }
     }
 
-    fn icp_cmc_snapshot(target_canister: Principal) -> IcpCmcSnapshot {
+    fn icp_cmc_snapshot_at(target_canister: Principal, now_secs: u64) -> IcpCmcSnapshot {
+        let created_at_time_ns = if now_secs == 0 {
+            1
+        } else {
+            now_secs.checked_mul(1_000_000_000).unwrap()
+        };
         IcpCmcSnapshot {
+            source_principal: Principal::from_slice(&[9]),
+            ledger_principal: Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap(),
+            cmc_principal: Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap(),
             source_subaccount: None,
-            cmc_account_identifier: FixedBytes32::new(vec![1; 32]).unwrap(),
+            cmc_account_identifier: crate::icp_cmc::cmc_subaccount(target_canister),
             target_canister,
-            amount_e8s: 100_000_000,
-            fee_e8s: 10_000,
+            amount_e8s: 1,
+            fee_e8s: 1,
             memo: 1_347_768_404,
-            created_at_time_ns: 1_000,
-            rate_xdr_permyriad_per_icp: 10_000,
-            rate_timestamp_secs: 900,
-            expected_cycles: 10,
+            created_at_time_ns,
+            rate_xdr_permyriad_per_icp: 11,
+            rate_timestamp_secs: now_secs,
+            expected_cycles: 11,
         }
+    }
+
+    fn icp_cmc_snapshot(target_canister: Principal) -> IcpCmcSnapshot {
+        icp_cmc_snapshot_at(target_canister, 0)
+    }
+
+    fn icp_notify_pending_operation(target: Principal) -> FundingOperation {
+        FundingOperation::open(
+            1,
+            target,
+            1,
+            test_funding_policy(),
+            FundingTrigger::LowBalanceAutoTopup,
+            FundingRailArguments::Icp(icp_cmc_snapshot(target)),
+            11,
+            0,
+        )
+        .unwrap()
+        .record_attempt(
+            FundingOperationState::Icp(IcpFundingState::LedgerSubmitted),
+            1,
+            FundingAttemptResultClass::Indeterminate,
+        )
+        .unwrap()
+        .record_attempt(
+            FundingOperationState::Icp(IcpFundingState::TransferConfirmed),
+            2,
+            FundingAttemptResultClass::Success,
+        )
+        .unwrap()
+        .attach_confirmed_block(77)
+        .unwrap()
+        .record_attempt(
+            FundingOperationState::Icp(IcpFundingState::NotifyPending),
+            3,
+            FundingAttemptResultClass::Indeterminate,
+        )
+        .unwrap()
     }
 
     fn open_cycles_operation(id: u64, target: Principal, now_secs: u64) -> FundingOperation {
@@ -5536,6 +6799,142 @@ mod tests {
     }
 
     #[test]
+    fn icp_proof_recovery_and_delivery_compact_full_attempt_history() {
+        let target = target_principal(1);
+        let mut op = FundingOperation::open(
+            1,
+            target,
+            1,
+            test_funding_policy(),
+            FundingTrigger::LowBalanceAutoTopup,
+            FundingRailArguments::Icp(icp_cmc_snapshot(target)),
+            11,
+            0,
+        )
+        .unwrap()
+        .record_attempt(
+            FundingOperationState::Icp(IcpFundingState::LedgerSubmitted),
+            1,
+            FundingAttemptResultClass::Indeterminate,
+        )
+        .unwrap()
+        .record_attempt(
+            FundingOperationState::Icp(IcpFundingState::TransferUnknown),
+            2,
+            FundingAttemptResultClass::Indeterminate,
+        )
+        .unwrap();
+
+        while op.attempts().len() < MAX_FUNDING_ATTEMPTS {
+            let at_secs = op.attempts().len() as u64 + 2;
+            op = op
+                .record_attempt(
+                    FundingOperationState::Icp(IcpFundingState::TransferUnknown),
+                    at_secs,
+                    FundingAttemptResultClass::Indeterminate,
+                )
+                .unwrap();
+        }
+        let quarantined = op.quarantine_after_attempt_limit(100).unwrap();
+        assert_eq!(quarantined.attempts().len(), MAX_FUNDING_ATTEMPTS);
+        assert_eq!(
+            quarantined.state(),
+            FundingOperationState::Icp(IcpFundingState::Quarantined)
+        );
+
+        // Both proof-recovery phases must compact deterministically while
+        // retaining a full bounded history. The following CMC success must
+        // do the same, otherwise a confirmed delivery could be stranded.
+        let pending = quarantined
+            .reconcile_quarantined_icp_with_transfer_proof(77, 101)
+            .unwrap();
+        assert_eq!(pending.attempts().len(), MAX_FUNDING_ATTEMPTS);
+        assert_eq!(
+            pending.state(),
+            FundingOperationState::Icp(IcpFundingState::NotifyPending)
+        );
+        let complete = pending
+            .record_attempt_with_bounded_compaction(
+                FundingOperationState::Icp(IcpFundingState::Complete),
+                102,
+                FundingAttemptResultClass::Success,
+            )
+            .unwrap()
+            .attach_actual_cycles(200)
+            .unwrap();
+        assert_eq!(complete.attempts().len(), MAX_FUNDING_ATTEMPTS);
+        assert_eq!(complete.confirmed_block_index(), Some(77));
+        assert_eq!(complete.actual_cycles(), Some(200));
+        assert_eq!(
+            complete.state(),
+            FundingOperationState::Icp(IcpFundingState::Complete)
+        );
+    }
+
+    #[test]
+    fn icp_notify_marker_is_single_flight_and_resets_only_on_upgrade() {
+        let target = target_principal(1);
+        let pending = icp_notify_pending_operation(target);
+        let marked = pending.mark_notify_attempt(3).unwrap();
+        assert_eq!(marked.notify_attempt_started_at_secs(), Some(3));
+        assert_eq!(
+            marked.mark_notify_attempt(4),
+            Err(FundingOperationTransitionError::NotifyAttemptInFlight)
+        );
+
+        let cleared = marked.clear_notify_attempt().unwrap();
+        assert_eq!(cleared.notify_attempt_started_at_secs(), None);
+        // A retry is admitted only after the prior marker is cleared.
+        let retry = cleared.mark_notify_attempt(4).unwrap();
+        assert_eq!(retry.notify_attempt_started_at_secs(), Some(4));
+
+        let upgraded = retry.reset_notify_attempt_on_upgrade();
+        assert_eq!(upgraded.notify_attempt_started_at_secs(), None);
+        assert_eq!(upgraded.confirmed_block_index(), Some(77));
+        assert_eq!(upgraded.rail_arguments(), pending.rail_arguments());
+    }
+
+    #[test]
+    fn icp_refund_hint_requires_exact_authoritative_promotion() {
+        let target = target_principal(1);
+        let quarantined = icp_notify_pending_operation(target)
+            .record_attempt(
+                FundingOperationState::Icp(IcpFundingState::Quarantined),
+                4,
+                FundingAttemptResultClass::Indeterminate,
+            )
+            .unwrap();
+        let hinted = quarantined.attach_refund_block_hint(88).unwrap();
+        assert_eq!(hinted.refund_block_hint(), Some(88));
+        assert_eq!(hinted.refund_block_index(), None);
+        assert_eq!(
+            hinted.attach_refund_block_hint(89),
+            Err(FundingOperationTransitionError::RefundBlockHintConflict)
+        );
+        assert_eq!(
+            hinted.attach_refund_block(89),
+            Err(FundingOperationTransitionError::RefundBlockHintConflict)
+        );
+
+        // A caller-supplied block index cannot make `Refunded` terminal. The
+        // verified field must first be populated by the proof seam.
+        assert_eq!(
+            hinted.reconcile_quarantined_icp(IcpFundingState::Refunded, None, Some(88), None, 5,),
+            Err(FundingOperationTransitionError::RefundBlockRequired)
+        );
+        let verified = hinted.attach_refund_block(88).unwrap();
+        let refunded = verified
+            .reconcile_quarantined_icp(IcpFundingState::Refunded, None, None, None, 5)
+            .unwrap();
+        assert_eq!(refunded.refund_block_hint(), Some(88));
+        assert_eq!(refunded.refund_block_index(), Some(88));
+        assert_eq!(
+            refunded.state(),
+            FundingOperationState::Icp(IcpFundingState::Refunded)
+        );
+    }
+
+    #[test]
     fn terminal_funding_summary_rejects_unresolved_operation() {
         let op = open_cycles_operation(1, target_principal(1), 0);
         assert_eq!(
@@ -5613,8 +7012,8 @@ mod tests {
                 1,
                 test_funding_policy(),
                 FundingTrigger::LowBalanceAutoTopup,
-                FundingRailArguments::Icp(icp_cmc_snapshot(target)),
-                10,
+                FundingRailArguments::Icp(icp_cmc_snapshot_at(target, 800)),
+                11,
                 800,
             )
             .unwrap()
@@ -5686,6 +7085,28 @@ mod tests {
     }
 
     #[test]
+    fn open_rejects_non_default_icp_source_subaccount() {
+        let target = target_principal(1);
+        let mut snapshot = icp_cmc_snapshot(target);
+        snapshot.source_subaccount = Some(FixedBytes32::new(vec![8; 32]).unwrap());
+        assert_eq!(
+            FundingOperation::open(
+                1,
+                target,
+                1,
+                test_funding_policy(),
+                FundingTrigger::LowBalanceAutoTopup,
+                FundingRailArguments::Icp(snapshot),
+                11,
+                0,
+            ),
+            Err(FundingOperationOpenError::IcpSnapshotInvalid(
+                crate::icp_cmc::SnapshotValidationError::SourceSubaccountUnsupported
+            ))
+        );
+    }
+
+    #[test]
     fn open_rejects_cycles_amount_plus_fee_overflow() {
         let target = target_principal(1);
         let mut snapshot = cycles_withdraw_snapshot(target);
@@ -5739,7 +7160,7 @@ mod tests {
                 test_funding_policy(),
                 FundingTrigger::LowBalanceAutoTopup,
                 FundingRailArguments::Icp(icp_cmc_snapshot(different_destination)),
-                10,
+                11,
                 0,
             ),
             Err(FundingOperationOpenError::DestinationMismatch)
@@ -5806,7 +7227,7 @@ mod tests {
             test_funding_policy(),
             FundingTrigger::LowBalanceAutoTopup,
             FundingRailArguments::Icp(icp_cmc_snapshot(target)),
-            10,
+            11,
             0,
         )
         .unwrap()
@@ -5854,7 +7275,7 @@ mod tests {
             test_funding_policy(),
             FundingTrigger::LowBalanceAutoTopup,
             FundingRailArguments::Icp(icp_cmc_snapshot(target)),
-            10,
+            11,
             0,
         )
         .unwrap();
@@ -5904,7 +7325,7 @@ mod tests {
             test_funding_policy(),
             FundingTrigger::LowBalanceAutoTopup,
             FundingRailArguments::Icp(icp_cmc_snapshot(target)),
-            10,
+            11,
             0,
         )
         .unwrap()
@@ -6616,8 +8037,8 @@ mod tests {
             1,
             test_funding_policy(),
             FundingTrigger::LowBalanceAutoTopup,
-            FundingRailArguments::Icp(icp_cmc_snapshot(target)),
-            10,
+            FundingRailArguments::Icp(icp_cmc_snapshot_at(target, 800)),
+            11,
             800,
         )
         .unwrap()
@@ -6649,7 +8070,7 @@ mod tests {
         let public = PublicTopupSummary::from(&summary);
         assert_eq!(public.rail, FundingRail::IcpCmc);
         assert_eq!(public.outcome, FundingOutcome::Refunded);
-        assert_eq!(public.amount_cycles, Nat::from(10u64));
+        assert_eq!(public.amount_cycles, Nat::from(11u64));
         assert_eq!(public.resolved_at_secs, 900);
     }
 
@@ -7240,6 +8661,14 @@ mod tests {
         state: FundingOperationState,
         attempts: FundingAttempts,
         confirmed_block_index: Option<u64>,
+        #[serde(default)]
+        actual_cycles: Option<u128>,
+        #[serde(default)]
+        refund_block_hint: Option<u64>,
+        #[serde(default)]
+        refund_block_index: Option<u64>,
+        #[serde(default)]
+        notify_attempt_started_at_secs: Option<u64>,
         created_at_secs: u64,
         updated_at_secs: u64,
     }
@@ -7256,6 +8685,10 @@ mod tests {
             state: op.state(),
             attempts: op.attempts().clone(),
             confirmed_block_index: op.confirmed_block_index(),
+            actual_cycles: op.actual_cycles(),
+            refund_block_hint: op.refund_block_hint(),
+            refund_block_index: op.refund_block_index(),
+            notify_attempt_started_at_secs: op.notify_attempt_started_at_secs(),
             created_at_secs: op.created_at_secs(),
             updated_at_secs: op.updated_at_secs(),
         }
@@ -7341,6 +8774,61 @@ mod tests {
         let bytes = Encode!(&raw).unwrap();
         let decoded = Decode!(&bytes, FundingOperation).unwrap();
         assert_eq!(decoded, op);
+    }
+
+    #[test]
+    fn funding_operation_decode_rejects_non_default_icp_source_subaccount() {
+        let target = target_principal(1);
+        let op = FundingOperation::open(
+            1,
+            target,
+            1,
+            test_funding_policy(),
+            FundingTrigger::LowBalanceAutoTopup,
+            FundingRailArguments::Icp(icp_cmc_snapshot(target)),
+            11,
+            0,
+        )
+        .unwrap();
+        let mut raw = raw_funding_operation_for_test(&op);
+        let FundingRailArguments::Icp(mut snapshot) = raw.rail_arguments else {
+            unreachable!()
+        };
+        snapshot.source_subaccount = Some(FixedBytes32::new(vec![3; 32]).unwrap());
+        raw.rail_arguments = FundingRailArguments::Icp(snapshot);
+        let bytes = Encode!(&raw).unwrap();
+        assert!(Decode!(&bytes, FundingOperation).is_err());
+    }
+
+    #[test]
+    fn funding_operation_decode_preserves_icp_hint_verified_and_notify_marker() {
+        let target = target_principal(1);
+        let pending = icp_notify_pending_operation(target);
+        let marked = pending.mark_notify_attempt(3).unwrap();
+        let marked_bytes = Encode!(&raw_funding_operation_for_test(&marked)).unwrap();
+        assert_eq!(Decode!(&marked_bytes, FundingOperation).unwrap(), marked);
+
+        let quarantined = pending
+            .record_attempt(
+                FundingOperationState::Icp(IcpFundingState::Quarantined),
+                4,
+                FundingAttemptResultClass::Indeterminate,
+            )
+            .unwrap()
+            .attach_refund_block_hint(88)
+            .unwrap();
+        let hinted_bytes = Encode!(&raw_funding_operation_for_test(&quarantined)).unwrap();
+        assert_eq!(
+            Decode!(&hinted_bytes, FundingOperation).unwrap(),
+            quarantined
+        );
+
+        let verified = quarantined.attach_refund_block(88).unwrap();
+        let verified_bytes = Encode!(&raw_funding_operation_for_test(&verified)).unwrap();
+        assert_eq!(
+            Decode!(&verified_bytes, FundingOperation).unwrap(),
+            verified
+        );
     }
 
     // Finding H regression tests: `state`/`attempts`/`updated_at_secs` must
@@ -7854,5 +9342,30 @@ mod tests {
         let state = Decode!(&bytes, SourceReserveState).unwrap();
         assert_eq!(state.cache().unwrap().balance_cycles, 1_000);
         assert_eq!(state.pending().len(), 1);
+    }
+
+    #[test]
+    fn icp_source_reserve_marker_is_single_flight_and_upgrade_reset_preserves_hold() {
+        let state = IcpSourceReserveState::new()
+            .refresh(1_000, 7, 10)
+            .unwrap()
+            .reserve_ordinary(42, 100, 0, 10, 600)
+            .unwrap();
+        let marked = state.mark_attempt(42, 11).unwrap();
+        assert_eq!(marked.pending()[0].attempt_started_at_secs, Some(11));
+        assert_eq!(
+            marked.mark_attempt(42, 12),
+            Err(IcpSourceAttemptError::AttemptInFlight)
+        );
+        assert_eq!(
+            marked.refresh(900, 8, 12),
+            Err(IcpSourceReserveError::AttemptInFlight)
+        );
+
+        let reset = marked.reset_attempts();
+        assert_eq!(reset.pending()[0].attempt_started_at_secs, None);
+        assert_eq!(reset.pending()[0].amount_plus_fee_e8s, 100);
+        assert_eq!(reset.cache(), state.cache());
+        assert!(reset.mark_attempt(42, 12).is_ok());
     }
 }

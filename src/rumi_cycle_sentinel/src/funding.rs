@@ -2182,6 +2182,1062 @@ pub mod cycles {
     }
 }
 
+/// ICP/CMC fallback funding.  This module is intentionally separate from
+/// `cycles`: it has a different source cache/reservation ledger and it can
+/// only be selected by a caller that has a definitive Cycles
+/// `TerminalNoSpend` result.  An unknown, quarantined, fee-debited, or
+/// full-debit Cycles result never enters this module.
+pub mod icp {
+    use candid::Principal;
+
+    use crate::cycles_ledger::WithdrawOutcome;
+    use crate::icp_cmc::{self, BlockLookupError, NotifyOutcome, RateError, TransferOutcome};
+    use crate::state;
+    use crate::types::{
+        self, AttachConfirmedBlockError, FundingAttemptResultClass, FundingOperation,
+        FundingOperationOpenError, FundingOperationState, FundingOperationTransitionError,
+        FundingRail, FundingRailArguments, FundingTrigger, IcpCmcSnapshot, IcpFundingState,
+        IcpSourceAttemptError, IcpSourceReserveError, IcpSourceSettleError,
+        RollingSpendReleaseError, RollingSpendReserveError, RollingSpendSettleError,
+        TargetReleaseError, TargetReservationError, TargetSettleError, TerminalFundingSummary,
+        TerminalFundingSummaryError,
+    };
+
+    use super::EligibilityError;
+
+    pub(crate) const ROLLING_CAP_WINDOW_SECS: u64 = 86_400;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum FundingError {
+        Eligibility(EligibilityError),
+        NotSigner,
+        NotFound,
+        WrongRail,
+        NotResumable,
+        SentinelIdentityMismatch,
+        Rate(RateError),
+        Snapshot(icp_cmc::SnapshotValidationError),
+        CacheQuery(icp_cmc::CacheQueryError),
+        StaleCacheRefresh,
+        SourceAttempt(IcpSourceAttemptError),
+        SourceReserve(IcpSourceReserveError),
+        SourceSettle(IcpSourceSettleError),
+        TargetReserve(TargetReservationError),
+        TargetSettle(TargetSettleError),
+        TargetRelease(TargetReleaseError),
+        GlobalReserve(RollingSpendReserveError),
+        GlobalSettle(RollingSpendSettleError),
+        GlobalRelease(RollingSpendReleaseError),
+        Open(FundingOperationOpenError),
+        Insert(state::InsertOperationError),
+        Transition(FundingOperationTransitionError),
+        Update(state::UpdateOperationError),
+        MonotonicTime(state::MonotonicTimeError),
+        AttachBlock(AttachConfirmedBlockError),
+        TerminalSummary(TerminalFundingSummaryError),
+        Compact(state::CompactOperationError),
+        BlockLookup(BlockLookupError),
+        BlockProof(icp_cmc::BlockProofError),
+        Overflow,
+        Reconciliation(ReconciliationError),
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum ReconciliationError {
+        NotQuarantined,
+        NoSpendRequired,
+        KnownDebitExceedsHeld,
+        ZeroKnownDebit,
+        RefundProofRequired,
+        /// The supplied ledger block is not the exact block index returned
+        /// by the CMC and persisted as this operation's immutable hint.
+        RefundBlockHintMismatch,
+        ConfirmedBlockRequired,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum ReconciliationEvidence {
+        /// A matching transfer block proves the original ICP debit.  The
+        /// source is settled for the exact amount-plus-fee held by the
+        /// operation; no inferred CMC result is used.
+        SpentWithTransfer { block_index: u64 },
+        /// Explicit signer evidence that no debit occurred.
+        NoSpend,
+        /// A verified CMC refund block and its verified net source debit.
+        Refunded { refund_block_index: u64 },
+    }
+
+    /// The fallback is admitted only for the one Cycles result that proves no
+    /// source debit.  Keep this predicate pure and small so every timer and
+    /// manual caller can be tested against the same allow-list.
+    pub fn can_fallback_after_cycles(outcome: WithdrawOutcome) -> bool {
+        matches!(outcome, WithdrawOutcome::TerminalNoSpend)
+    }
+
+    pub async fn refresh_icp_ledger_cache(
+        now_secs: u64,
+        sentinel_id: Principal,
+    ) -> Result<(), FundingError> {
+        if ic_cdk::id() != sentinel_id {
+            return Err(FundingError::SentinelIdentityMismatch);
+        }
+        let expected_generation = state::source_refresh_generation();
+        let (balance_e8s, fee_e8s) =
+            icp_cmc::query_balance_and_fee(types::icp_ledger_principal_for_sentinel(), sentinel_id)
+                .await
+                .map_err(FundingError::CacheQuery)?;
+        state::commit_icp_source_reserve_refresh(
+            expected_generation,
+            balance_e8s,
+            fee_e8s,
+            now_secs,
+        )
+        .map_err(|err| match err {
+            state::IcpSourceRefreshCommitError::StaleGeneration => FundingError::StaleCacheRefresh,
+            state::IcpSourceRefreshCommitError::SourceReserve(source) => {
+                FundingError::SourceReserve(source)
+            }
+        })
+    }
+
+    fn prepare_ordinary_with_rate(
+        target_principal: Principal,
+        trigger: FundingTrigger,
+        now_secs: u64,
+        now_ns: u64,
+        rate: icp_cmc::IcpXdrConversionRate,
+    ) -> Result<FundingOperation, FundingError> {
+        let sentinel_id = ic_cdk::id();
+        let (record, _) = super::check_ordinary_eligibility(
+            target_principal,
+            now_secs,
+            trigger == FundingTrigger::ManualTopup,
+        )
+        .map_err(FundingError::Eligibility)?;
+        let rate = icp_cmc::validate_rate(rate, now_secs).map_err(FundingError::Rate)?;
+        let refill_cycles = record.funding_policy().refill_cycles();
+        let expected_cycles =
+            icp_cmc::cycles_with_headroom(refill_cycles).map_err(FundingError::Rate)?;
+        let amount_e8s =
+            icp_cmc::icp_amount_e8s_for_cycles(refill_cycles, rate).map_err(FundingError::Rate)?;
+        let source = state::get_icp_source_reserve();
+        let cache = source.cache().ok_or(FundingError::SourceReserve(
+            IcpSourceReserveError::UnknownCache,
+        ))?;
+        let fee_e8s = u64::try_from(cache.fee_e8s).map_err(|_| FundingError::Overflow)?;
+        let amount_plus_fee = (amount_e8s as u128)
+            .checked_add(fee_e8s as u128)
+            .ok_or(FundingError::Overflow)?;
+        let actual_expected =
+            icp_cmc::expected_cycles(amount_e8s, rate).map_err(FundingError::Rate)?;
+        if actual_expected < expected_cycles {
+            return Err(FundingError::Rate(RateError::Overflow));
+        }
+        let global_policy = state::global_config().global_policy;
+        let operation_id = state::next_operation_id();
+        let target_reservation = state::get_target_reservation(target_principal)
+            .reserve(
+                operation_id,
+                actual_expected,
+                now_secs,
+                ROLLING_CAP_WINDOW_SECS,
+                record.funding_policy().daily_cap_cycles(),
+            )
+            .map_err(FundingError::TargetReserve)?;
+        let global_reservation = state::get_global_rolling_spend()
+            .reserve(
+                operation_id,
+                actual_expected,
+                now_secs,
+                ROLLING_CAP_WINDOW_SECS,
+                global_policy.global_daily_cap_cycles(),
+            )
+            .map_err(FundingError::GlobalReserve)?;
+        let source_reservation = source
+            .reserve_ordinary(
+                operation_id,
+                amount_plus_fee,
+                global_policy.min_icp_reserve_e8s(),
+                now_secs,
+                types::icp_source_cache_max_age_secs(),
+            )
+            .map_err(FundingError::SourceReserve)?;
+        let created_at_time_ns =
+            state::next_created_at_time_ns(now_ns).map_err(FundingError::MonotonicTime)?;
+        let snapshot = IcpCmcSnapshot {
+            source_principal: sentinel_id,
+            ledger_principal: types::icp_ledger_principal_for_sentinel(),
+            cmc_principal: icp_cmc::cmc_principal(),
+            source_subaccount: None,
+            cmc_account_identifier: icp_cmc::cmc_subaccount(target_principal),
+            target_canister: target_principal,
+            amount_e8s,
+            fee_e8s,
+            memo: icp_cmc::TPUP_MEMO,
+            created_at_time_ns,
+            rate_xdr_permyriad_per_icp: rate.xdr_permyriad_per_icp,
+            rate_timestamp_secs: rate.timestamp_seconds,
+            expected_cycles: actual_expected,
+        };
+        let op = FundingOperation::open(
+            operation_id,
+            target_principal,
+            record.revision(),
+            record.funding_policy().clone(),
+            trigger,
+            FundingRailArguments::Icp(snapshot),
+            actual_expected,
+            now_secs,
+        )
+        .map_err(FundingError::Open)?;
+        let submitted = op
+            .record_attempt(
+                FundingOperationState::Icp(IcpFundingState::LedgerSubmitted),
+                now_secs,
+                FundingAttemptResultClass::Indeterminate,
+            )
+            .map_err(FundingError::Transition)?;
+        // The operation is written first, and every subsequent write uses a
+        // precomputed value.  Exact ICP args, fee, memo, rate, account, and
+        // timestamp are therefore durable before any ledger await.
+        state::insert_operation(submitted.clone()).map_err(FundingError::Insert)?;
+        state::set_target_reservation(target_principal, target_reservation);
+        state::set_global_rolling_spend(global_reservation);
+        state::set_icp_source_reserve(source_reservation);
+        Ok(submitted)
+    }
+
+    /// Test/wiring seam for callers that already have a checked fresh rate.
+    /// No network call or mutation occurs before the complete reservation and
+    /// operation value is ready.
+    pub(crate) fn prepare_with_rate(
+        target: Principal,
+        trigger: FundingTrigger,
+        now_secs: u64,
+        now_ns: u64,
+        rate: icp_cmc::IcpXdrConversionRate,
+    ) -> Result<FundingOperation, FundingError> {
+        prepare_ordinary_with_rate(target, trigger, now_secs, now_ns, rate)
+    }
+
+    pub async fn manual_top_up_at(
+        caller: Principal,
+        now_secs: u64,
+        now_ns: u64,
+        target: Principal,
+        rate: icp_cmc::IcpXdrConversionRate,
+    ) -> Result<FundingOperation, FundingError> {
+        if !state::is_signer(caller) {
+            return Err(FundingError::NotSigner);
+        }
+        let op = prepare_ordinary_with_rate(
+            target,
+            FundingTrigger::ManualTopup,
+            now_secs,
+            now_ns,
+            rate,
+        )?;
+        execute(op, now_secs, ic_cdk::id()).await
+    }
+
+    async fn execute_transfer(
+        op: FundingOperation,
+        now_secs: u64,
+        sentinel_id: Principal,
+    ) -> Result<FundingOperation, FundingError> {
+        let FundingRailArguments::Icp(snapshot) = op.rail_arguments().clone() else {
+            return Err(FundingError::WrongRail);
+        };
+        if ic_cdk::id() != sentinel_id {
+            return Err(FundingError::SentinelIdentityMismatch);
+        }
+        state::mark_icp_source_attempt(op.id(), now_secs).map_err(FundingError::SourceAttempt)?;
+        let outcome = icp_cmc::transfer(
+            types::icp_ledger_principal_for_sentinel(),
+            &snapshot,
+            sentinel_id,
+        )
+        .await;
+        // The marker protects only the in-message await.  Clear it before
+        // interpreting the reply so a later retry is admitted exactly once,
+        // while a concurrent executor that arrived before this point was
+        // rejected by `mark_attempt`.
+        state::clear_icp_source_attempt(op.id()).map_err(FundingError::SourceAttempt)?;
+        let outcome = outcome.map_err(FundingError::Snapshot)?;
+        let advanced = resolve_transfer(op, outcome, now_secs)?;
+        if matches!(
+            advanced.state(),
+            FundingOperationState::Icp(IcpFundingState::TransferConfirmed)
+        ) {
+            start_notify(advanced, now_secs).await
+        } else {
+            Ok(advanced)
+        }
+    }
+
+    pub async fn execute(
+        op: FundingOperation,
+        now_secs: u64,
+        sentinel_id: Principal,
+    ) -> Result<FundingOperation, FundingError> {
+        if op.rail() != FundingRail::IcpCmc {
+            return Err(FundingError::WrongRail);
+        }
+        match op.state() {
+            FundingOperationState::Icp(IcpFundingState::NotifyPending) => {
+                notify_existing(op, now_secs).await
+            }
+            FundingOperationState::Icp(IcpFundingState::TransferConfirmed)
+                if op.confirmed_block_index().is_some() =>
+            {
+                start_notify(op, now_secs).await
+            }
+            FundingOperationState::Icp(
+                IcpFundingState::LedgerSubmitted | IcpFundingState::TransferUnknown,
+            ) => execute_transfer(op, now_secs, sentinel_id).await,
+            _ => Err(FundingError::NotResumable),
+        }
+    }
+
+    pub async fn run_after_cycles_no_spend(
+        target: Principal,
+        trigger: FundingTrigger,
+        now_secs: u64,
+        now_ns: u64,
+        cycles_outcome: WithdrawOutcome,
+        rate: icp_cmc::IcpXdrConversionRate,
+        sentinel_id: Principal,
+    ) -> Result<FundingOperation, FundingError> {
+        if !can_fallback_after_cycles(cycles_outcome) {
+            return Err(FundingError::Reconciliation(
+                ReconciliationError::NoSpendRequired,
+            ));
+        }
+        let op = prepare_ordinary_with_rate(target, trigger, now_secs, now_ns, rate)?;
+        execute(op, now_secs, sentinel_id).await
+    }
+
+    pub async fn resume(
+        operation_id: u64,
+        now_secs: u64,
+        sentinel_id: Principal,
+    ) -> Result<FundingOperation, FundingError> {
+        let op = state::get_operation(operation_id).ok_or(FundingError::NotFound)?;
+        if op.rail() != FundingRail::IcpCmc {
+            return Err(FundingError::WrongRail);
+        }
+        if op.state().stops_automatic_retry() {
+            return Err(FundingError::NotResumable);
+        }
+        execute(op, now_secs, sentinel_id).await
+    }
+
+    fn resolve_transfer(
+        op: FundingOperation,
+        outcome: TransferOutcome,
+        now_secs: u64,
+    ) -> Result<FundingOperation, FundingError> {
+        let FundingRailArguments::Icp(_snapshot) = op.rail_arguments().clone() else {
+            return Err(FundingError::WrongRail);
+        };
+        match outcome {
+            TransferOutcome::Confirmed(block_index) => {
+                let confirmed = op
+                    .record_attempt_with_bounded_compaction(
+                        FundingOperationState::Icp(IcpFundingState::TransferConfirmed),
+                        now_secs,
+                        FundingAttemptResultClass::Success,
+                    )
+                    .map_err(FundingError::Transition)?
+                    .attach_confirmed_block(block_index)
+                    .map_err(FundingError::AttachBlock)?;
+                state::update_operation(confirmed.clone()).map_err(FundingError::Update)?;
+                Ok(confirmed)
+            }
+            TransferOutcome::Unknown => {
+                let unknown = if op.attempts().len() >= types::MAX_FUNDING_ATTEMPTS - 1 {
+                    op.quarantine_after_attempt_limit(now_secs)
+                } else {
+                    op.record_attempt(
+                        FundingOperationState::Icp(IcpFundingState::TransferUnknown),
+                        now_secs,
+                        FundingAttemptResultClass::Indeterminate,
+                    )
+                }
+                .map_err(FundingError::Transition)?;
+                state::update_operation(unknown.clone()).map_err(FundingError::Update)?;
+                if unknown.state().stops_automatic_retry() {
+                    raise_quarantine_alarm(&unknown, now_secs);
+                }
+                Ok(unknown)
+            }
+            TransferOutcome::Quarantined => {
+                let quarantined = op
+                    .record_attempt(
+                        FundingOperationState::Icp(IcpFundingState::Quarantined),
+                        now_secs,
+                        FundingAttemptResultClass::Indeterminate,
+                    )
+                    .map_err(FundingError::Transition)?;
+                state::update_operation(quarantined.clone()).map_err(FundingError::Update)?;
+                raise_quarantine_alarm(&quarantined, now_secs);
+                Ok(quarantined)
+            }
+            TransferOutcome::TerminalNoSpend => {
+                let terminal = op
+                    .record_attempt(
+                        FundingOperationState::Icp(IcpFundingState::Terminal),
+                        now_secs,
+                        FundingAttemptResultClass::TerminalFailure,
+                    )
+                    .map_err(FundingError::Transition)?;
+                let (settlement, source) = compute_settlement(&terminal, None, 0, now_secs)?;
+                let summary = TerminalFundingSummary::from_resolved(&terminal, now_secs)
+                    .map_err(FundingError::TerminalSummary)?;
+                state::update_operation(terminal.clone()).map_err(FundingError::Update)?;
+                commit_settlement(settlement, source);
+                state::compact_operation(terminal.id(), summary).map_err(FundingError::Compact)?;
+                Ok(terminal)
+            }
+        }
+    }
+
+    async fn start_notify(
+        op: FundingOperation,
+        now_secs: u64,
+    ) -> Result<FundingOperation, FundingError> {
+        let was_transfer_confirmed = matches!(
+            op.state(),
+            FundingOperationState::Icp(IcpFundingState::TransferConfirmed)
+        );
+        let pending = if was_transfer_confirmed {
+            op.record_attempt_with_bounded_compaction(
+                FundingOperationState::Icp(IcpFundingState::NotifyPending),
+                now_secs,
+                FundingAttemptResultClass::Indeterminate,
+            )
+            .map_err(FundingError::Transition)?
+        } else {
+            op
+        };
+        pending
+            .confirmed_block_index()
+            .ok_or(FundingError::Reconciliation(
+                ReconciliationError::ConfirmedBlockRequired,
+            ))?;
+        // Persist the block-backed NotifyPending state before the CMC await.
+        if was_transfer_confirmed {
+            state::update_operation(pending.clone()).map_err(FundingError::Update)?;
+        }
+        // The marker is persisted by `notify_once` immediately before the
+        // await. A concurrent timer/manual/proof-resume path therefore sees
+        // `NotifyAttemptInFlight` and cannot issue a second notify call.
+        notify_once(pending, now_secs).await
+    }
+
+    async fn notify_existing(
+        op: FundingOperation,
+        now_secs: u64,
+    ) -> Result<FundingOperation, FundingError> {
+        notify_once(op, now_secs).await
+    }
+
+    /// Marks and persists a single CMC notify attempt, performs the await,
+    /// then clears the ephemeral marker before interpreting the reply. The
+    /// immutable block index is read from the persisted operation after the
+    /// marker write, so every retry uses exactly the same `NotifyTopUpArg`.
+    async fn notify_once(
+        op: FundingOperation,
+        now_secs: u64,
+    ) -> Result<FundingOperation, FundingError> {
+        if op.rail() != FundingRail::IcpCmc {
+            return Err(FundingError::WrongRail);
+        }
+        state::mark_icp_notify_attempt(op.id(), now_secs).map_err(FundingError::Transition)?;
+        let marked = state::get_operation(op.id()).ok_or(FundingError::NotFound)?;
+        let FundingRailArguments::Icp(snapshot) = marked.rail_arguments().clone() else {
+            return Err(FundingError::WrongRail);
+        };
+        let block_index = marked
+            .confirmed_block_index()
+            .ok_or(FundingError::Reconciliation(
+                ReconciliationError::ConfirmedBlockRequired,
+            ))?;
+        let call_result = icp_cmc::notify_top_up(&snapshot, block_index).await;
+        // Always clear after a returned call result, including a typed
+        // snapshot error. If clearing itself fails, retain the marker and do
+        // not risk a second external call.
+        state::clear_icp_notify_attempt(marked.id()).map_err(FundingError::Transition)?;
+        let cleared = state::get_operation(marked.id()).ok_or(FundingError::NotFound)?;
+        let outcome = call_result.map_err(FundingError::Snapshot)?;
+        resolve_notify(cleared, outcome, now_secs)
+    }
+
+    fn resolve_notify(
+        op: FundingOperation,
+        outcome: NotifyOutcome,
+        now_secs: u64,
+    ) -> Result<FundingOperation, FundingError> {
+        let FundingRailArguments::Icp(snapshot) = op.rail_arguments().clone() else {
+            return Err(FundingError::WrongRail);
+        };
+        match outcome {
+            NotifyOutcome::Delivered { cycles } => {
+                let complete = op
+                    // A proof-recovered operation may already have a full
+                    // bounded history. Use the same deterministic
+                    // one-record compaction used by the Cycles terminal
+                    // path so confirmed CMC delivery can never be stranded
+                    // merely because proof recovery consumed the final
+                    // history slot.
+                    .record_attempt_with_bounded_compaction(
+                        FundingOperationState::Icp(IcpFundingState::Complete),
+                        now_secs,
+                        FundingAttemptResultClass::Success,
+                    )
+                    .map_err(FundingError::Transition)?
+                    .attach_actual_cycles(cycles)
+                    .map_err(FundingError::Transition)?;
+                if cycles < snapshot.expected_cycles {
+                    let _ = state::alarms::raise_at(
+                        Some(op.target()),
+                        types::AlarmKind::FundingUnderDelivery,
+                        now_secs,
+                    );
+                } else if cycles > snapshot.expected_cycles {
+                    let _ = state::alarms::raise_at(
+                        Some(op.target()),
+                        types::AlarmKind::FundingOverDelivery,
+                        now_secs,
+                    );
+                }
+                let known_spent = (snapshot.amount_e8s as u128)
+                    .checked_add(snapshot.fee_e8s as u128)
+                    .ok_or(FundingError::Overflow)?;
+                let (settlement, source) =
+                    compute_settlement(&complete, Some(cycles), known_spent, now_secs)?;
+                let summary = TerminalFundingSummary::from_resolved(&complete, now_secs)
+                    .map_err(FundingError::TerminalSummary)?;
+                state::update_operation(complete.clone()).map_err(FundingError::Update)?;
+                commit_settlement(settlement, source);
+                state::compact_operation(complete.id(), summary).map_err(FundingError::Compact)?;
+                Ok(complete)
+            }
+            NotifyOutcome::Pending | NotifyOutcome::Unknown => {
+                let next = if op.attempts().len() >= types::MAX_FUNDING_ATTEMPTS - 1 {
+                    op.quarantine_after_attempt_limit(now_secs)
+                } else {
+                    op.record_attempt(
+                        FundingOperationState::Icp(IcpFundingState::NotifyPending),
+                        now_secs,
+                        if matches!(outcome, NotifyOutcome::Pending) {
+                            FundingAttemptResultClass::RetryableFailure
+                        } else {
+                            FundingAttemptResultClass::Indeterminate
+                        },
+                    )
+                }
+                .map_err(FundingError::Transition)?;
+                state::update_operation(next.clone()).map_err(FundingError::Update)?;
+                if next.state().stops_automatic_retry() {
+                    raise_quarantine_alarm(&next, now_secs);
+                }
+                Ok(next)
+            }
+            NotifyOutcome::RefundedWithBlock(_refund_block_index) => {
+                // Persist the CMC index as an immutable, operation-bound
+                // hint. It does not establish the refund amount or even
+                // prove that the ledger block exists. Keep all holds until
+                // `attach_refund_block_proof` verifies this exact index.
+                let hinted = op
+                    .attach_refund_block_hint(_refund_block_index)
+                    .map_err(FundingError::Transition)?;
+                let quarantined = if hinted.attempts().len() >= types::MAX_FUNDING_ATTEMPTS - 1 {
+                    hinted.quarantine_after_attempt_limit(now_secs)
+                } else {
+                    hinted.record_attempt(
+                        FundingOperationState::Icp(IcpFundingState::Quarantined),
+                        now_secs,
+                        FundingAttemptResultClass::Indeterminate,
+                    )
+                }
+                .map_err(FundingError::Transition)?;
+                state::update_operation(quarantined.clone()).map_err(FundingError::Update)?;
+                raise_quarantine_alarm(&quarantined, now_secs);
+                Ok(quarantined)
+            }
+            NotifyOutcome::RefundedWithoutBlock => {
+                if op.refund_block_hint().is_some() {
+                    return Err(FundingError::Reconciliation(
+                        ReconciliationError::RefundProofRequired,
+                    ));
+                }
+                // No refund block is authoritative full debit: retain the
+                // source debit, release target/global cycle capacity, and
+                // resolve as a terminal no-delivery outcome.
+                let terminal = op
+                    .record_attempt(
+                        FundingOperationState::Icp(IcpFundingState::Terminal),
+                        now_secs,
+                        FundingAttemptResultClass::TerminalFailure,
+                    )
+                    .map_err(FundingError::Transition)?;
+                let known_spent = (snapshot.amount_e8s as u128)
+                    .checked_add(snapshot.fee_e8s as u128)
+                    .ok_or(FundingError::Overflow)?;
+                let (settlement, source) =
+                    compute_settlement(&terminal, None, known_spent, now_secs)?;
+                let summary = TerminalFundingSummary::from_resolved(&terminal, now_secs)
+                    .map_err(FundingError::TerminalSummary)?;
+                state::update_operation(terminal.clone()).map_err(FundingError::Update)?;
+                commit_settlement(settlement, source);
+                state::compact_operation(terminal.id(), summary).map_err(FundingError::Compact)?;
+                Ok(terminal)
+            }
+            NotifyOutcome::Quarantined => {
+                let quarantined = op
+                    .record_attempt(
+                        FundingOperationState::Icp(IcpFundingState::Quarantined),
+                        now_secs,
+                        FundingAttemptResultClass::Indeterminate,
+                    )
+                    .map_err(FundingError::Transition)?;
+                state::update_operation(quarantined.clone()).map_err(FundingError::Update)?;
+                raise_quarantine_alarm(&quarantined, now_secs);
+                Ok(quarantined)
+            }
+        }
+    }
+
+    enum Settlement {
+        Ordinary {
+            target: Principal,
+            target_reservation: types::TargetReservationState,
+            global_reservation: types::GlobalRollingSpendState,
+        },
+    }
+
+    fn compute_settlement(
+        op: &FundingOperation,
+        delivered_cycles: Option<u128>,
+        source_known_spent_e8s: u128,
+        now_secs: u64,
+    ) -> Result<(Settlement, types::IcpSourceReserveState), FundingError> {
+        if op.trigger() == FundingTrigger::SelfRecovery {
+            return Err(FundingError::WrongRail);
+        }
+        let target = state::get_target_reservation(op.target());
+        let target = if let Some(actual_cycles) = delivered_cycles {
+            target
+                .settle_spend_with_amount(
+                    op.id(),
+                    actual_cycles,
+                    now_secs,
+                    op.funding_policy().cooldown_secs(),
+                    ROLLING_CAP_WINDOW_SECS,
+                )
+                .map_err(FundingError::TargetSettle)?
+        } else {
+            target
+                .release_no_spend(op.id())
+                .map_err(FundingError::TargetRelease)?
+        };
+        let global = state::get_global_rolling_spend();
+        let global = if let Some(actual_cycles) = delivered_cycles {
+            global
+                .settle_with_amount(op.id(), actual_cycles, now_secs, ROLLING_CAP_WINDOW_SECS)
+                .map_err(FundingError::GlobalSettle)?
+        } else {
+            global
+                .release_no_spend(op.id())
+                .map_err(FundingError::GlobalRelease)?
+        };
+        let source = state::get_icp_source_reserve()
+            .settle(op.id(), source_known_spent_e8s)
+            .map_err(FundingError::SourceSettle)?;
+        Ok((
+            Settlement::Ordinary {
+                target: op.target(),
+                target_reservation: target,
+                global_reservation: global,
+            },
+            source,
+        ))
+    }
+
+    fn commit_settlement(settlement: Settlement, source: types::IcpSourceReserveState) {
+        match settlement {
+            Settlement::Ordinary {
+                target,
+                target_reservation,
+                global_reservation,
+            } => {
+                state::set_target_reservation(target, target_reservation);
+                state::set_global_rolling_spend(global_reservation);
+            }
+        }
+        state::set_icp_source_reserve(source);
+    }
+
+    fn raise_quarantine_alarm(op: &FundingOperation, now_secs: u64) {
+        let _ = state::alarms::raise_at(
+            Some(op.target()),
+            types::AlarmKind::FundingQuarantined,
+            now_secs,
+        );
+    }
+
+    pub(crate) fn reconcile_quarantined(
+        operation_id: u64,
+        evidence: ReconciliationEvidence,
+        now_secs: u64,
+    ) -> Result<FundingOperation, FundingError> {
+        let op = state::get_operation(operation_id).ok_or(FundingError::NotFound)?;
+        if op.rail() != FundingRail::IcpCmc {
+            return Err(FundingError::WrongRail);
+        }
+        if op.state() != FundingOperationState::Icp(IcpFundingState::Quarantined) {
+            return Err(FundingError::Reconciliation(
+                ReconciliationError::NotQuarantined,
+            ));
+        }
+        let FundingRailArguments::Icp(snapshot) = op.rail_arguments().clone() else {
+            return Err(FundingError::WrongRail);
+        };
+        let held = (snapshot.amount_e8s as u128)
+            .checked_add(snapshot.fee_e8s as u128)
+            .ok_or(FundingError::Overflow)?;
+        if op.refund_block_hint().is_some() {
+            return Err(FundingError::Reconciliation(
+                ReconciliationError::RefundProofRequired,
+            ));
+        }
+        let (state, delivered_cycles, known_spent) = match evidence {
+            ReconciliationEvidence::SpentWithTransfer { block_index } => {
+                // A verified transfer block proves only that the ICP source
+                // was debited. It is not CMC delivery proof, so this branch
+                // resolves conservatively as a full-debit terminal outcome.
+                // Callers that want to retry `notify_top_up` after transfer
+                // proof must use `attach_block_proof`, which keeps the
+                // operation in `NotifyPending` until CMC itself answers.
+                if let Some(existing) = op.confirmed_block_index() {
+                    if existing != block_index {
+                        return Err(FundingError::Reconciliation(
+                            ReconciliationError::ConfirmedBlockRequired,
+                        ));
+                    }
+                }
+                let with_transfer_proof = if op.confirmed_block_index().is_none() {
+                    op.attach_confirmed_block(block_index)
+                        .map_err(FundingError::AttachBlock)?
+                } else {
+                    op.clone()
+                };
+                (
+                    with_transfer_proof
+                        .reconcile_quarantined_icp(
+                            IcpFundingState::Terminal,
+                            None,
+                            None,
+                            None,
+                            now_secs,
+                        )
+                        .map_err(FundingError::Transition)?,
+                    None,
+                    held,
+                )
+            }
+            ReconciliationEvidence::NoSpend => (
+                op.reconcile_quarantined_icp(IcpFundingState::Terminal, None, None, None, now_secs)
+                    .map_err(FundingError::Transition)?,
+                None,
+                0,
+            ),
+            ReconciliationEvidence::Refunded { .. } => {
+                // A block index and a caller-supplied debit are not proof.
+                // Refund reconciliation must go through the ledger query and
+                // exact source/destination/amount/fee verifier below.
+                return Err(FundingError::Reconciliation(
+                    ReconciliationError::RefundProofRequired,
+                ));
+            }
+        };
+        let (settlement, source) =
+            compute_settlement(&state, delivered_cycles, known_spent, now_secs)?;
+        let summary = TerminalFundingSummary::from_resolved(&state, now_secs)
+            .map_err(FundingError::TerminalSummary)?;
+        state::update_operation(state.clone()).map_err(FundingError::Update)?;
+        commit_settlement(settlement, source);
+        state::compact_operation(state.id(), summary).map_err(FundingError::Compact)?;
+        Ok(state)
+    }
+
+    /// Conservative signer resolution: if the transfer outcome is unknown,
+    /// treat the full held amount-plus-fee as spent and release cycle-cap
+    /// reservations without claiming delivery. It is never callable for an
+    /// already resolved operation.
+    pub(crate) fn resolve_unknown_as_spent(
+        operation_id: u64,
+        now_secs: u64,
+    ) -> Result<FundingOperation, FundingError> {
+        let op = state::get_operation(operation_id).ok_or(FundingError::NotFound)?;
+        if !matches!(
+            op.state(),
+            FundingOperationState::Icp(
+                IcpFundingState::TransferUnknown
+                    | IcpFundingState::NotifyPending
+                    | IcpFundingState::Quarantined
+            )
+        ) {
+            return Err(FundingError::Reconciliation(
+                ReconciliationError::NotQuarantined,
+            ));
+        }
+        if op.notify_attempt_started_at_secs().is_some() {
+            return Err(FundingError::Transition(
+                FundingOperationTransitionError::NotifyAttemptInFlight,
+            ));
+        }
+        if op.refund_block_hint().is_some() {
+            // A CMC refund hint is an unresolved, operation-bound proof
+            // obligation. It cannot be converted into a caller-trusted full
+            // debit by the generic unknown-spend resolver.
+            return Err(FundingError::Reconciliation(
+                ReconciliationError::RefundProofRequired,
+            ));
+        }
+        let FundingRailArguments::Icp(snapshot) = op.rail_arguments().clone() else {
+            return Err(FundingError::WrongRail);
+        };
+        let held = (snapshot.amount_e8s as u128)
+            .checked_add(snapshot.fee_e8s as u128)
+            .ok_or(FundingError::Overflow)?;
+        // `TransferUnknown` and `NotifyPending` cannot jump directly to a
+        // terminal state.  Persist the explicit quarantine edge first, then
+        // use the signer-only reconciliation edge.  This keeps the durable
+        // lifecycle valid even if execution is interrupted between the two
+        // synchronous state writes.
+        let quarantined = if op.state() == FundingOperationState::Icp(IcpFundingState::Quarantined)
+        {
+            op
+        } else {
+            let next = if op.attempts().len() >= types::MAX_FUNDING_ATTEMPTS - 1 {
+                op.quarantine_after_attempt_limit(now_secs)
+            } else {
+                op.record_attempt(
+                    FundingOperationState::Icp(IcpFundingState::Quarantined),
+                    now_secs,
+                    FundingAttemptResultClass::Indeterminate,
+                )
+            }
+            .map_err(FundingError::Transition)?;
+            state::update_operation(next.clone()).map_err(FundingError::Update)?;
+            raise_quarantine_alarm(&next, now_secs);
+            next
+        };
+        let resolved = quarantined
+            .reconcile_quarantined_icp(IcpFundingState::Terminal, None, None, None, now_secs)
+            .map_err(FundingError::Transition)?;
+        let (settlement, source) = compute_settlement(&resolved, None, held, now_secs)?;
+        let summary = TerminalFundingSummary::from_resolved(&resolved, now_secs)
+            .map_err(FundingError::TerminalSummary)?;
+        state::update_operation(resolved.clone()).map_err(FundingError::Update)?;
+        commit_settlement(settlement, source);
+        state::compact_operation(resolved.id(), summary).map_err(FundingError::Compact)?;
+        Ok(resolved)
+    }
+
+    /// Reads and verifies an authoritative ledger block before handing the
+    /// proof to the core reconciler.  No match is inferred from a call
+    /// rejection, an archive descriptor, or a CMC response alone.
+    pub async fn attach_block_proof(
+        operation_id: u64,
+        block_index: u64,
+        now_secs: u64,
+        sentinel_id: Principal,
+    ) -> Result<FundingOperation, FundingError> {
+        let op = state::get_operation(operation_id).ok_or(FundingError::NotFound)?;
+        let FundingRailArguments::Icp(snapshot) = op.rail_arguments().clone() else {
+            return Err(FundingError::WrongRail);
+        };
+        if ic_cdk::id() != sentinel_id {
+            return Err(FundingError::SentinelIdentityMismatch);
+        }
+        if op.refund_block_hint().is_some() || op.refund_block_index().is_some() {
+            return Err(FundingError::Reconciliation(
+                ReconciliationError::RefundProofRequired,
+            ));
+        }
+        let block = icp_cmc::query_block(types::icp_ledger_principal_for_sentinel(), block_index)
+            .await
+            .map_err(FundingError::BlockLookup)?;
+        icp_cmc::verify_block_matches_snapshot(&block, &snapshot, sentinel_id)
+            .map_err(FundingError::BlockProof)?;
+        match op.state() {
+            FundingOperationState::Icp(
+                IcpFundingState::LedgerSubmitted | IcpFundingState::TransferUnknown,
+            ) => {
+                let confirmed = op
+                    .record_attempt_with_bounded_compaction(
+                        FundingOperationState::Icp(IcpFundingState::TransferConfirmed),
+                        now_secs,
+                        FundingAttemptResultClass::Success,
+                    )
+                    .map_err(FundingError::Transition)?
+                    .attach_confirmed_block(block_index)
+                    .map_err(FundingError::AttachBlock)?;
+                state::update_operation(confirmed.clone()).map_err(FundingError::Update)?;
+                start_notify(confirmed, now_secs).await
+            }
+            FundingOperationState::Icp(IcpFundingState::Quarantined) => {
+                let pending = op
+                    .reconcile_quarantined_icp_with_transfer_proof(block_index, now_secs)
+                    .map_err(FundingError::Transition)?;
+                state::update_operation(pending.clone()).map_err(FundingError::Update)?;
+                notify_existing(pending, now_secs).await
+            }
+            _ => Err(FundingError::Reconciliation(
+                ReconciliationError::NotQuarantined,
+            )),
+        }
+    }
+
+    /// Attaches and settles an authoritative CMC refund proof.  A CMC
+    /// `Refunded { block_index }` reply is only a hint: this method obtains the
+    /// indicated ledger block, verifies its exact refund source, destination,
+    /// amount, fee, and refund semantics against the immutable snapshot, then
+    /// derives the source net debit from that verified block.  No caller-
+    /// supplied debit amount is accepted.
+    pub async fn attach_refund_block_proof(
+        operation_id: u64,
+        block_index: u64,
+        now_secs: u64,
+        sentinel_id: Principal,
+    ) -> Result<FundingOperation, FundingError> {
+        let op = state::get_operation(operation_id).ok_or(FundingError::NotFound)?;
+        if op.rail() != FundingRail::IcpCmc {
+            return Err(FundingError::WrongRail);
+        }
+        if op.state() != FundingOperationState::Icp(IcpFundingState::Quarantined) {
+            return Err(FundingError::Reconciliation(
+                ReconciliationError::NotQuarantined,
+            ));
+        }
+        let FundingRailArguments::Icp(snapshot) = op.rail_arguments().clone() else {
+            return Err(FundingError::WrongRail);
+        };
+        let hinted_block = op.refund_block_hint().ok_or(FundingError::Reconciliation(
+            ReconciliationError::RefundProofRequired,
+        ))?;
+        if hinted_block != block_index {
+            return Err(FundingError::Reconciliation(
+                ReconciliationError::RefundBlockHintMismatch,
+            ));
+        }
+        if ic_cdk::id() != sentinel_id || snapshot.source_principal != sentinel_id {
+            return Err(FundingError::SentinelIdentityMismatch);
+        }
+        let block = icp_cmc::query_block(snapshot.ledger_principal, block_index)
+            .await
+            .map_err(FundingError::BlockLookup)?;
+        icp_cmc::verify_refund_block_matches_snapshot(&block, &snapshot)
+            .map_err(FundingError::BlockProof)?;
+        let net_debit =
+            icp_cmc::refund_net_debit_e8s(&snapshot).map_err(FundingError::BlockProof)?;
+        let attached = op
+            .attach_refund_block(block_index)
+            .map_err(FundingError::Transition)?;
+        // Persist the verified block attachment as its own immutable
+        // evidence step before deriving the terminal refund transition.
+        // This keeps the proof durable even when the bounded operation
+        // history is compacted immediately afterwards.
+        state::update_operation(attached.clone()).map_err(FundingError::Update)?;
+        let refunded = attached
+            .reconcile_quarantined_icp(IcpFundingState::Refunded, None, None, None, now_secs)
+            .map_err(FundingError::Transition)?;
+        let (settlement, source) = compute_settlement(&refunded, None, net_debit, now_secs)?;
+        let summary = TerminalFundingSummary::from_resolved(&refunded, now_secs)
+            .map_err(FundingError::TerminalSummary)?;
+        // The resolved operation containing the verified refund index is
+        // persisted before compaction, so the proof can never be discarded
+        // merely because the bounded terminal-summary store is updated.
+        state::update_operation(refunded.clone()).map_err(FundingError::Update)?;
+        commit_settlement(settlement, source);
+        state::compact_operation(refunded.id(), summary).map_err(FundingError::Compact)?;
+        Ok(refunded)
+    }
+
+    // The production adapter calls above are deliberately thin IC call
+    // wrappers, so native unit tests cannot invoke them without a replica.
+    // Keep the orchestration seams private in production while exposing only
+    // test-only forwarding helpers to the sibling reconciliation suite. The
+    // suite supplies deterministic transfer/notify adapters and still runs
+    // the real state transition, storage update, settlement, and compaction
+    // code below each adapter result.
+    #[cfg(test)]
+    pub(super) mod reconciliation_support {
+        use super::*;
+
+        pub fn resolve_transfer_for_test(
+            op: FundingOperation,
+            outcome: TransferOutcome,
+            now_secs: u64,
+        ) -> Result<FundingOperation, FundingError> {
+            resolve_transfer(op, outcome, now_secs)
+        }
+
+        pub fn resolve_notify_for_test(
+            op: FundingOperation,
+            outcome: NotifyOutcome,
+            now_secs: u64,
+        ) -> Result<FundingOperation, FundingError> {
+            resolve_notify(op, outcome, now_secs)
+        }
+
+        pub fn finalize_verified_refund_for_test(
+            op: FundingOperation,
+            block_index: u64,
+            net_debit_e8s: u128,
+            now_secs: u64,
+        ) -> Result<FundingOperation, FundingError> {
+            let attached = op
+                .attach_refund_block(block_index)
+                .map_err(FundingError::Transition)?;
+            state::update_operation(attached.clone()).map_err(FundingError::Update)?;
+            let refunded = attached
+                .reconcile_quarantined_icp(IcpFundingState::Refunded, None, None, None, now_secs)
+                .map_err(FundingError::Transition)?;
+            let (settlement, source) =
+                compute_settlement(&refunded, None, net_debit_e8s, now_secs)?;
+            let summary = TerminalFundingSummary::from_resolved(&refunded, now_secs)
+                .map_err(FundingError::TerminalSummary)?;
+            state::update_operation(refunded.clone()).map_err(FundingError::Update)?;
+            commit_settlement(settlement, source);
+            state::compact_operation(refunded.id(), summary).map_err(FundingError::Compact)?;
+            Ok(refunded)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn fallback_is_only_admitted_for_definitive_no_spend() {
+            assert!(can_fallback_after_cycles(WithdrawOutcome::TerminalNoSpend));
+            assert!(!can_fallback_after_cycles(WithdrawOutcome::Unknown));
+            assert!(!can_fallback_after_cycles(WithdrawOutcome::Quarantined));
+            assert!(!can_fallback_after_cycles(
+                WithdrawOutcome::TerminalFeeDebited { fee_block: 1 }
+            ));
+            assert!(!can_fallback_after_cycles(
+                WithdrawOutcome::TerminalFullAmountDebited
+            ));
+            assert!(!can_fallback_after_cycles(WithdrawOutcome::Duplicate(1)));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2457,5 +3513,852 @@ mod tests {
             Err(EligibilityError::Cooldown)
         );
         assert!(check_ordinary_eligibility(target, 1_000 + 500, true).is_ok());
+    }
+}
+
+/// Deterministic orchestration coverage for the ICP/CMC reconciliation lane.
+///
+/// These tests intentionally stop at the native-call boundary: the adapter
+/// below supplies scripted replies, while the real operation transitions,
+/// stable updates, reservation settlement, alarms, and terminal compaction
+/// still run.  Replica-backed calls and timer wiring belong to Task 6.
+#[cfg(test)]
+mod reconciliation {
+    use super::*;
+    use crate::icp_cmc::{self, IcpLedgerValue, NotifyError, NotifyTopUpArg, NotifyTopUpReply};
+    use crate::state;
+    use crate::types::{
+        self, FundingAttemptResultClass, FundingOperation, FundingOperationState,
+        FundingRailArguments, FundingTrigger, GlobalPolicy, GlobalPolicyArgs,
+        GovernanceTimelocksArgs, IcpCmcSnapshot, IcpFundingState, InitArgs, ObservationMode,
+        SelfRecoveryPolicyArgs, TargetArgs, TargetFundingPolicyArgs, TargetPatch,
+        TargetRegistrationContext,
+    };
+    use candid::{decode_one, encode_one, Nat, Principal};
+    use std::collections::{BTreeSet, VecDeque};
+
+    const NOW: u64 = 1_000;
+    const SOURCE_BALANCE_E8S: u128 = 100_000;
+    const AMOUNT_E8S: u64 = 1_000;
+    const FEE_E8S: u64 = 10;
+    const RATE_XDR_PERMYRIAD_PER_ICP: u64 = 2;
+    const EXPECTED_CYCLES: u128 = AMOUNT_E8S as u128 * RATE_XDR_PERMYRIAD_PER_ICP as u128;
+
+    fn sentinel_id() -> Principal {
+        Principal::from_slice(&[9, 9, 9])
+    }
+
+    fn target_id(seed: u8) -> Principal {
+        Principal::from_slice(&[seed, 1, 2, 3])
+    }
+
+    fn global_policy() -> GlobalPolicy {
+        GlobalPolicy::validate(&GlobalPolicyArgs {
+            global_daily_cap_cycles: Nat::from(1_000_000u64),
+            sample_interval_secs: 60,
+            stale_after_secs: 600,
+            min_icp_reserve_e8s: Nat::from(0u8),
+            timelocks: GovernanceTimelocksArgs {
+                target_registry_secs: 1,
+                spend_policy_secs: 1,
+                signer_change_secs: 1,
+                unpause_secs: 1,
+            },
+            self_recovery_policy: SelfRecoveryPolicyArgs {
+                protected_reserve_cycles: Nat::from(1_000u64),
+                daily_cap_cycles: Nat::from(10_000u64),
+                low_balance_threshold_cycles: Nat::from(1u64),
+                refill_cycles: Nat::from(10u64),
+            },
+        })
+        .unwrap()
+    }
+
+    fn register_target(global: &GlobalPolicy, target: Principal) {
+        let existing = BTreeSet::new();
+        let ctx = TargetRegistrationContext {
+            sentinel_id: sentinel_id(),
+            existing_target_count: 0,
+            existing_target_principals: &existing,
+            global_policy: global,
+        };
+        let args = TargetArgs {
+            principal: target,
+            display_name: "svc".to_string(),
+            project: "proj".to_string(),
+            environment: types::Environment::Production,
+            criticality: types::Criticality::Standard,
+            observation_mode: ObservationMode::SelfReport,
+            tags: vec![],
+            funding_policy: TargetFundingPolicyArgs {
+                low_balance_threshold_cycles: Nat::from(100u64),
+                refill_cycles: Nat::from(100u64),
+                daily_cap_cycles: Nat::from(10_000u64),
+                cooldown_secs: 60,
+                burn_anomaly_limit_cycles_per_day: None,
+            },
+        };
+        let record = types::TargetRecord::register(args, &ctx)
+            .unwrap()
+            .apply_patch(
+                TargetPatch {
+                    display_name: None,
+                    project: None,
+                    environment: None,
+                    criticality: None,
+                    observation_mode: None,
+                    tags: None,
+                    funding_policy: None,
+                    enabled: Some(true),
+                    auto_topup: Some(true),
+                },
+                global,
+            )
+            .unwrap();
+        state::insert_target(record).unwrap();
+    }
+
+    fn snapshot(target: Principal) -> IcpCmcSnapshot {
+        IcpCmcSnapshot {
+            source_principal: sentinel_id(),
+            ledger_principal: icp_cmc::icp_ledger_principal(),
+            cmc_principal: icp_cmc::cmc_principal(),
+            source_subaccount: None,
+            cmc_account_identifier: icp_cmc::cmc_subaccount(target),
+            target_canister: target,
+            amount_e8s: AMOUNT_E8S,
+            fee_e8s: FEE_E8S,
+            memo: icp_cmc::TPUP_MEMO,
+            created_at_time_ns: NOW * 1_000_000_000,
+            rate_xdr_permyriad_per_icp: RATE_XDR_PERMYRIAD_PER_ICP,
+            rate_timestamp_secs: NOW,
+            expected_cycles: EXPECTED_CYCLES,
+        }
+    }
+
+    /// Opens a real persisted ICP operation and installs all three matching
+    /// reservations.  The returned operation is already at
+    /// `LedgerSubmitted`, exactly at the pre-transfer await boundary.
+    fn open_submitted_operation(id: u64, target_seed: u8) -> FundingOperation {
+        let global = global_policy();
+        state::init(InitArgs {
+            signers: vec![Principal::from_slice(&[1])],
+            approval_threshold: 1,
+            global_policy: global.to_args(),
+        })
+        .unwrap();
+        let target = target_id(target_seed);
+        register_target(&global, target);
+        let policy = state::get_target(target).unwrap().funding_policy().clone();
+        let rail_snapshot = snapshot(target);
+        let opened = FundingOperation::open(
+            id,
+            target,
+            2,
+            policy.clone(),
+            FundingTrigger::ManualTopup,
+            FundingRailArguments::Icp(rail_snapshot.clone()),
+            EXPECTED_CYCLES,
+            NOW,
+        )
+        .unwrap();
+        let submitted = opened
+            .record_attempt(
+                FundingOperationState::Icp(IcpFundingState::LedgerSubmitted),
+                NOW,
+                FundingAttemptResultClass::Indeterminate,
+            )
+            .unwrap();
+        state::insert_operation(submitted.clone()).unwrap();
+
+        let target_reservation = state::get_target_reservation(target)
+            .reserve(
+                id,
+                EXPECTED_CYCLES,
+                NOW,
+                icp::ROLLING_CAP_WINDOW_SECS,
+                policy.daily_cap_cycles(),
+            )
+            .unwrap();
+        state::set_target_reservation(target, target_reservation);
+        let global_reservation = state::get_global_rolling_spend()
+            .reserve(
+                id,
+                EXPECTED_CYCLES,
+                NOW,
+                icp::ROLLING_CAP_WINDOW_SECS,
+                global.global_daily_cap_cycles(),
+            )
+            .unwrap();
+        state::set_global_rolling_spend(global_reservation);
+        let source = state::get_icp_source_reserve()
+            .refresh(SOURCE_BALANCE_E8S, FEE_E8S as u128, NOW)
+            .unwrap()
+            .reserve_ordinary(
+                id,
+                AMOUNT_E8S as u128 + FEE_E8S as u128,
+                global.min_icp_reserve_e8s(),
+                NOW,
+                types::icp_source_cache_max_age_secs(),
+            )
+            .unwrap();
+        state::set_icp_source_reserve(source);
+        submitted
+    }
+
+    fn operation_snapshot(op: &FundingOperation) -> IcpCmcSnapshot {
+        match op.rail_arguments() {
+            FundingRailArguments::Icp(value) => value.clone(),
+            FundingRailArguments::Cycles(_) => panic!("expected ICP operation"),
+        }
+    }
+
+    /// Test adapter with closures at the same shape as the two inter-canister
+    /// calls. It records exact wire arguments before classifying scripted
+    /// replies, allowing retries to compare bytes/values without a replica.
+    struct MockIcpAdapter {
+        transfer_reply: Box<dyn FnMut(&icp_cmc::TransferArg) -> icp_cmc::TransferReply>,
+        notify_reply: Box<dyn FnMut(&NotifyTopUpArg) -> NotifyTopUpReply>,
+        transfer_calls: Vec<icp_cmc::TransferArg>,
+        notify_calls: Vec<NotifyTopUpArg>,
+    }
+
+    impl MockIcpAdapter {
+        fn scripted(
+            transfer_replies: Vec<icp_cmc::TransferReply>,
+            notify_replies: Vec<NotifyTopUpReply>,
+        ) -> Self {
+            let mut transfers = VecDeque::from(transfer_replies);
+            let mut notifies = VecDeque::from(notify_replies);
+            Self {
+                transfer_reply: Box::new(move |_| {
+                    transfers
+                        .pop_front()
+                        .expect("mock transfer reply script exhausted")
+                }),
+                notify_reply: Box::new(move |_| {
+                    notifies
+                        .pop_front()
+                        .expect("mock notify reply script exhausted")
+                }),
+                transfer_calls: Vec::new(),
+                notify_calls: Vec::new(),
+            }
+        }
+
+        fn transfer(&mut self, snapshot: &IcpCmcSnapshot) -> icp_cmc::TransferOutcome {
+            let args = icp_cmc::transfer_args(snapshot, sentinel_id()).unwrap();
+            self.transfer_calls.push(args.clone());
+            icp_cmc::classify_transfer_reply((self.transfer_reply)(&args))
+        }
+
+        fn notify(
+            &mut self,
+            snapshot: &IcpCmcSnapshot,
+            block_index: u64,
+        ) -> icp_cmc::NotifyOutcome {
+            let args = NotifyTopUpArg {
+                block_index,
+                canister_id: snapshot.target_canister,
+            };
+            self.notify_calls.push(args.clone());
+            icp_cmc::classify_notify_reply((self.notify_reply)(&args))
+        }
+    }
+
+    fn transfer_attempt(
+        adapter: &mut MockIcpAdapter,
+        op: FundingOperation,
+        at_secs: u64,
+    ) -> Result<FundingOperation, icp::FundingError> {
+        state::mark_icp_source_attempt(op.id(), at_secs)
+            .map_err(icp::FundingError::SourceAttempt)?;
+        let outcome = adapter.transfer(&operation_snapshot(&op));
+        state::clear_icp_source_attempt(op.id()).map_err(icp::FundingError::SourceAttempt)?;
+        icp::reconciliation_support::resolve_transfer_for_test(op, outcome, at_secs)
+    }
+
+    fn enter_notify_pending(
+        op: FundingOperation,
+        block_index: u64,
+        at_secs: u64,
+    ) -> FundingOperation {
+        let confirmed = match op.state() {
+            FundingOperationState::Icp(IcpFundingState::TransferConfirmed) => op,
+            FundingOperationState::Icp(
+                IcpFundingState::LedgerSubmitted | IcpFundingState::TransferUnknown,
+            ) => icp::reconciliation_support::resolve_transfer_for_test(
+                op,
+                icp_cmc::TransferOutcome::Confirmed(block_index),
+                at_secs,
+            )
+            .unwrap(),
+            state => panic!("expected an ICP transfer phase, got {state:?}"),
+        };
+        let pending = confirmed
+            .record_attempt_with_bounded_compaction(
+                FundingOperationState::Icp(IcpFundingState::NotifyPending),
+                at_secs,
+                FundingAttemptResultClass::Indeterminate,
+            )
+            .unwrap();
+        state::update_operation(pending.clone()).unwrap();
+        pending
+    }
+
+    fn notify_attempt(
+        adapter: &mut MockIcpAdapter,
+        op: FundingOperation,
+        at_secs: u64,
+    ) -> Result<FundingOperation, icp::FundingError> {
+        state::mark_icp_notify_attempt(op.id(), at_secs).map_err(icp::FundingError::Transition)?;
+        let marked = state::get_operation(op.id()).unwrap();
+        let snapshot = operation_snapshot(&marked);
+        let block_index = marked.confirmed_block_index().unwrap();
+        let outcome = adapter.notify(&snapshot, block_index);
+        state::clear_icp_notify_attempt(marked.id()).map_err(icp::FundingError::Transition)?;
+        let cleared = state::get_operation(marked.id()).unwrap();
+        icp::reconciliation_support::resolve_notify_for_test(cleared, outcome, at_secs)
+    }
+
+    fn account_map(owner: Principal, subaccount: Option<Vec<u8>>) -> IcpLedgerValue {
+        let subaccount = subaccount
+            .map(IcpLedgerValue::Blob)
+            .unwrap_or_else(|| IcpLedgerValue::Array(vec![]));
+        IcpLedgerValue::Map(vec![
+            (
+                "owner".to_string(),
+                IcpLedgerValue::Blob(owner.as_slice().to_vec()),
+            ),
+            ("subaccount".to_string(), subaccount),
+        ])
+    }
+
+    fn transfer_block(snapshot: &IcpCmcSnapshot, amount: u64) -> IcpLedgerValue {
+        IcpLedgerValue::Map(vec![
+            (
+                "from".to_string(),
+                account_map(snapshot.source_principal, None),
+            ),
+            (
+                "to".to_string(),
+                account_map(
+                    snapshot.cmc_principal,
+                    Some(snapshot.cmc_account_identifier.to_vec()),
+                ),
+            ),
+            ("amount".to_string(), IcpLedgerValue::Nat(Nat::from(amount))),
+            (
+                "fee".to_string(),
+                IcpLedgerValue::Nat(Nat::from(snapshot.fee_e8s)),
+            ),
+            (
+                "memo".to_string(),
+                IcpLedgerValue::Blob(snapshot.memo.to_le_bytes().to_vec()),
+            ),
+            (
+                "created_at_time".to_string(),
+                IcpLedgerValue::Nat64(snapshot.created_at_time_ns),
+            ),
+        ])
+    }
+
+    fn refund_block(snapshot: &IcpCmcSnapshot, amount: u64) -> IcpLedgerValue {
+        IcpLedgerValue::Map(vec![
+            (
+                "from".to_string(),
+                account_map(
+                    snapshot.cmc_principal,
+                    Some(snapshot.cmc_account_identifier.to_vec()),
+                ),
+            ),
+            (
+                "to".to_string(),
+                account_map(snapshot.source_principal, None),
+            ),
+            ("amount".to_string(), IcpLedgerValue::Nat(Nat::from(amount))),
+            (
+                "fee".to_string(),
+                IcpLedgerValue::Nat(Nat::from(snapshot.fee_e8s)),
+            ),
+            ("memo".to_string(), IcpLedgerValue::Blob(vec![])),
+            ("created_at_time".to_string(), IcpLedgerValue::Nat64(0)),
+        ])
+    }
+
+    struct ArchiveAdapter<F> {
+        live: Option<IcpLedgerValue>,
+        callback: F,
+        callback_indices: Vec<u64>,
+    }
+
+    impl<F> ArchiveAdapter<F>
+    where
+        F: FnMut(u64) -> IcpLedgerValue,
+    {
+        fn lookup(&mut self, block_index: u64) -> IcpLedgerValue {
+            if let Some(live) = self.live.clone() {
+                return live;
+            }
+            self.callback_indices.push(block_index);
+            (self.callback)(block_index)
+        }
+    }
+
+    #[test]
+    fn committed_lost_reply_enters_transfer_unknown_then_retries_identical_wire_args() {
+        let op = open_submitted_operation(1, 1);
+        let mut adapter = MockIcpAdapter::scripted(
+            vec![
+                Err(icp_cmc::TransferError::TemporarilyUnavailable),
+                Ok(Nat::from(77u64)),
+            ],
+            vec![],
+        );
+        let unknown = transfer_attempt(&mut adapter, op, NOW + 1).unwrap();
+        assert_eq!(
+            unknown.state(),
+            FundingOperationState::Icp(IcpFundingState::TransferUnknown)
+        );
+        let confirmed = transfer_attempt(&mut adapter, unknown, NOW + 2).unwrap();
+        assert_eq!(confirmed.confirmed_block_index(), Some(77));
+        assert_eq!(
+            confirmed.state(),
+            FundingOperationState::Icp(IcpFundingState::TransferConfirmed)
+        );
+        assert_eq!(adapter.transfer_calls.len(), 2);
+        assert_eq!(adapter.transfer_calls[0], adapter.transfer_calls[1]);
+        assert!(state::get_icp_source_reserve().pending()[0]
+            .attempt_started_at_secs
+            .is_none());
+    }
+
+    #[test]
+    fn duplicate_original_block_confirms_without_releasing_holds() {
+        let op = open_submitted_operation(1, 1);
+        let mut duplicate_adapter = MockIcpAdapter::scripted(
+            vec![Err(icp_cmc::TransferError::Duplicate {
+                duplicate_of: Nat::from(91u64),
+            })],
+            vec![],
+        );
+        let confirmed = transfer_attempt(&mut duplicate_adapter, op, NOW + 1).unwrap();
+        assert_eq!(confirmed.confirmed_block_index(), Some(91));
+        assert_eq!(
+            confirmed.state(),
+            FundingOperationState::Icp(IcpFundingState::TransferConfirmed)
+        );
+        assert_eq!(duplicate_adapter.transfer_calls.len(), 1);
+    }
+
+    #[test]
+    fn too_old_quarantines_without_releasing_holds() {
+        let op = open_submitted_operation(2, 2);
+        let mut too_old_adapter =
+            MockIcpAdapter::scripted(vec![Err(icp_cmc::TransferError::TooOld)], vec![]);
+        let quarantined = transfer_attempt(&mut too_old_adapter, op, NOW + 1).unwrap();
+        assert_eq!(
+            quarantined.state(),
+            FundingOperationState::Icp(IcpFundingState::Quarantined)
+        );
+        assert_eq!(state::get_operation(quarantined.id()), Some(quarantined));
+        assert_eq!(
+            state::get_target_reservation(target_id(2)).in_flight_operation_id(),
+            Some(2)
+        );
+        assert_eq!(too_old_adapter.transfer_calls.len(), 1);
+    }
+
+    #[test]
+    fn archive_callback_proof_mismatch_keeps_quarantine_and_match_reenters_notify() {
+        let op = open_submitted_operation(1, 1);
+        let mut adapter =
+            MockIcpAdapter::scripted(vec![Err(icp_cmc::TransferError::TooOld)], vec![]);
+        let quarantined = transfer_attempt(&mut adapter, op, NOW + 1).unwrap();
+        let snap = operation_snapshot(&quarantined);
+        let bad = transfer_block(&snap, AMOUNT_E8S + 1);
+        let mut archive = ArchiveAdapter {
+            live: None,
+            callback: |_| bad.clone(),
+            callback_indices: Vec::new(),
+        };
+        let returned_bad = archive.lookup(77);
+        assert_eq!(
+            icp_cmc::verify_block_matches_snapshot(&returned_bad, &snap, sentinel_id()),
+            Err(icp_cmc::BlockProofError::WrongAmount)
+        );
+        assert_eq!(archive.callback_indices, vec![77]);
+        assert_eq!(
+            state::get_operation(1).unwrap().state(),
+            quarantined.state()
+        );
+
+        let good = transfer_block(&snap, AMOUNT_E8S);
+        let mut archive = ArchiveAdapter {
+            live: None,
+            callback: |_| good.clone(),
+            callback_indices: Vec::new(),
+        };
+        let returned_good = archive.lookup(77);
+        assert_eq!(
+            icp_cmc::verify_block_matches_snapshot(&returned_good, &snap, sentinel_id()),
+            Ok(())
+        );
+        assert_eq!(archive.callback_indices, vec![77]);
+        let pending = quarantined
+            .reconcile_quarantined_icp_with_transfer_proof(77, NOW + 2)
+            .unwrap();
+        state::update_operation(pending.clone()).unwrap();
+        assert_eq!(pending.confirmed_block_index(), Some(77));
+        assert_eq!(
+            pending.state(),
+            FundingOperationState::Icp(IcpFundingState::NotifyPending)
+        );
+    }
+
+    #[test]
+    fn notify_processing_and_transport_failure_retry_same_block() {
+        let op = open_submitted_operation(1, 1);
+        let pending = enter_notify_pending(op, 77, NOW + 1);
+        let mut adapter = MockIcpAdapter::scripted(
+            vec![],
+            vec![
+                Err(NotifyError::Processing),
+                Err(NotifyError::Other {
+                    error_code: 7,
+                    error_message: "transport-like failure".to_string(),
+                }),
+            ],
+        );
+        let pending = notify_attempt(&mut adapter, pending, NOW + 2).unwrap();
+        assert_eq!(
+            pending.state(),
+            FundingOperationState::Icp(IcpFundingState::NotifyPending)
+        );
+        let pending = notify_attempt(&mut adapter, pending, NOW + 3).unwrap();
+        assert_eq!(
+            pending.state(),
+            FundingOperationState::Icp(IcpFundingState::NotifyPending)
+        );
+        assert_eq!(adapter.notify_calls.len(), 2);
+        assert_eq!(adapter.notify_calls[0].block_index, 77);
+        assert_eq!(adapter.notify_calls[1].block_index, 77);
+        assert_eq!(adapter.notify_calls[0], adapter.notify_calls[1]);
+        assert!(state::get_operation(1)
+            .unwrap()
+            .notify_attempt_started_at_secs()
+            .is_none());
+    }
+
+    fn assert_notify_delivery(actual: u128, alarm: types::AlarmKind) {
+        let op = open_submitted_operation(1, 1);
+        let pending = enter_notify_pending(op, 77, NOW + 1);
+        let mut adapter = MockIcpAdapter::scripted(vec![], vec![Ok(Nat::from(actual))]);
+        let complete = notify_attempt(&mut adapter, pending, NOW + 2).unwrap();
+        assert_eq!(complete.actual_cycles(), Some(actual));
+        assert_eq!(
+            complete.state(),
+            FundingOperationState::Icp(IcpFundingState::Complete)
+        );
+        assert_eq!(adapter.notify_calls.len(), 1);
+        let target = target_id(1);
+        assert_eq!(
+            state::get_target_reservation(target)
+                .rolling_spend()
+                .settled()
+                .last()
+                .unwrap()
+                .amount_cycles,
+            actual
+        );
+        assert_eq!(
+            state::get_global_rolling_spend()
+                .rolling_spend()
+                .settled()
+                .last()
+                .unwrap()
+                .amount_cycles,
+            actual
+        );
+        assert!(state::find_open_alarm(Some(target), alarm).is_some());
+        assert_eq!(state::get_operation(1), None);
+    }
+
+    #[test]
+    fn notify_success_settles_authoritative_under_delivery_exactly() {
+        assert_notify_delivery(EXPECTED_CYCLES - 1, types::AlarmKind::FundingUnderDelivery);
+    }
+
+    #[test]
+    fn notify_success_settles_authoritative_over_delivery_exactly() {
+        assert_notify_delivery(EXPECTED_CYCLES + 1, types::AlarmKind::FundingOverDelivery);
+    }
+
+    #[test]
+    fn refunded_without_block_is_full_debit_and_releases_cycle_capacity() {
+        let op = open_submitted_operation(1, 1);
+        let pending = enter_notify_pending(op, 77, NOW + 1);
+        let mut adapter = MockIcpAdapter::scripted(
+            vec![],
+            vec![Err(NotifyError::Refunded {
+                reason: "refund block unavailable".to_string(),
+                block_index: None,
+            })],
+        );
+        let terminal = notify_attempt(&mut adapter, pending, NOW + 2).unwrap();
+        assert_eq!(
+            terminal.state(),
+            FundingOperationState::Icp(IcpFundingState::Terminal)
+        );
+        assert_eq!(terminal.actual_cycles(), None);
+        assert_eq!(state::get_operation(1), None);
+        assert!(state::get_target_reservation(target_id(1))
+            .rolling_spend()
+            .pending()
+            .is_empty());
+        assert!(state::get_global_rolling_spend()
+            .rolling_spend()
+            .pending()
+            .is_empty());
+        assert_eq!(
+            state::get_icp_source_reserve().cache().unwrap().balance_e8s,
+            SOURCE_BALANCE_E8S - AMOUNT_E8S as u128 - FEE_E8S as u128
+        );
+    }
+
+    #[test]
+    fn refunded_hint_requires_exact_proof_and_matching_refund_settles_net_debit() {
+        let op = open_submitted_operation(1, 1);
+        let pending = enter_notify_pending(op, 77, NOW + 1);
+        let mut adapter = MockIcpAdapter::scripted(
+            vec![],
+            vec![Err(NotifyError::Refunded {
+                reason: "not enough cycles".to_string(),
+                block_index: Some(88),
+            })],
+        );
+        let quarantined = notify_attempt(&mut adapter, pending, NOW + 2).unwrap();
+        assert_eq!(quarantined.refund_block_hint(), Some(88));
+        assert_eq!(quarantined.refund_block_index(), None);
+        assert_eq!(
+            quarantined.attach_refund_block(89),
+            Err(types::FundingOperationTransitionError::RefundBlockHintConflict)
+        );
+        assert_eq!(
+            icp::reconcile_quarantined(
+                quarantined.id(),
+                icp::ReconciliationEvidence::Refunded {
+                    refund_block_index: 88,
+                },
+                NOW + 3,
+            ),
+            Err(icp::FundingError::Reconciliation(
+                icp::ReconciliationError::RefundProofRequired
+            ))
+        );
+
+        let snap = operation_snapshot(&quarantined);
+        let wrong_operation_block = refund_block(&snapshot(target_id(2)), 970);
+        assert_eq!(
+            icp_cmc::verify_refund_block_matches_snapshot(&wrong_operation_block, &snap),
+            Err(icp_cmc::BlockProofError::WrongRefundSource)
+        );
+        let expected_refund = icp_cmc::expected_refund_amount_e8s(&snap).unwrap();
+        let proof = refund_block(&snap, expected_refund);
+        assert_eq!(
+            icp_cmc::verify_refund_block_matches_snapshot(&proof, &snap),
+            Ok(())
+        );
+        let net_debit = icp_cmc::refund_net_debit_e8s(&snap).unwrap();
+        assert_eq!(
+            net_debit,
+            AMOUNT_E8S as u128 + FEE_E8S as u128 - expected_refund as u128
+        );
+        let refunded = icp::reconciliation_support::finalize_verified_refund_for_test(
+            quarantined,
+            88,
+            net_debit,
+            NOW + 4,
+        )
+        .unwrap();
+        assert_eq!(
+            refunded.state(),
+            FundingOperationState::Icp(IcpFundingState::Refunded)
+        );
+        assert_eq!(refunded.refund_block_hint(), Some(88));
+        assert_eq!(refunded.refund_block_index(), Some(88));
+        assert_eq!(state::get_operation(1), None);
+        assert_eq!(
+            state::get_icp_source_reserve().cache().unwrap().balance_e8s,
+            SOURCE_BALANCE_E8S - net_debit
+        );
+    }
+
+    #[test]
+    fn manual_unknown_resolution_quarantines_then_closes_with_full_debit() {
+        let op = open_submitted_operation(1, 1);
+        let mut adapter = MockIcpAdapter::scripted(
+            vec![Err(icp_cmc::TransferError::GenericError {
+                error_code: Nat::from(1u8),
+                message: "lost reply".to_string(),
+            })],
+            vec![],
+        );
+        let unknown = transfer_attempt(&mut adapter, op, NOW + 1).unwrap();
+        let terminal = icp::resolve_unknown_as_spent(unknown.id(), NOW + 2).unwrap();
+        assert_eq!(
+            terminal.state(),
+            FundingOperationState::Icp(IcpFundingState::Terminal)
+        );
+        assert_eq!(adapter.transfer_calls.len(), 1);
+        assert_eq!(state::get_operation(1), None);
+        assert!(state::get_target_reservation(target_id(1))
+            .rolling_spend()
+            .pending()
+            .is_empty());
+        assert_eq!(
+            state::get_icp_source_reserve().cache().unwrap().balance_e8s,
+            SOURCE_BALANCE_E8S - AMOUNT_E8S as u128 - FEE_E8S as u128
+        );
+    }
+
+    #[test]
+    fn full_attempt_history_recovers_transfer_and_notify_without_stranding_delivery() {
+        let op = open_submitted_operation(1, 1);
+        let mut transfer_replies = Vec::new();
+        for _ in 0..30 {
+            transfer_replies.push(Err(icp_cmc::TransferError::TemporarilyUnavailable));
+        }
+        transfer_replies.push(Ok(Nat::from(77u64)));
+        let mut adapter =
+            MockIcpAdapter::scripted(transfer_replies, vec![Ok(Nat::from(EXPECTED_CYCLES))]);
+        let mut current = op;
+        for offset in 0..30 {
+            current = transfer_attempt(&mut adapter, current, NOW + 1 + offset).unwrap();
+        }
+        assert_eq!(current.attempts().len(), types::MAX_FUNDING_ATTEMPTS - 1);
+        assert_eq!(
+            current.state(),
+            FundingOperationState::Icp(IcpFundingState::TransferUnknown)
+        );
+        let confirmed = transfer_attempt(&mut adapter, current, NOW + 100).unwrap();
+        assert_eq!(confirmed.attempts().len(), types::MAX_FUNDING_ATTEMPTS - 1);
+        let pending = enter_notify_pending(confirmed, 77, NOW + 101);
+        assert_eq!(pending.attempts().len(), types::MAX_FUNDING_ATTEMPTS - 1);
+        let complete = notify_attempt(&mut adapter, pending, NOW + 102).unwrap();
+        assert_eq!(complete.actual_cycles(), Some(EXPECTED_CYCLES));
+        assert_eq!(complete.attempts().len(), types::MAX_FUNDING_ATTEMPTS - 1);
+        assert_eq!(state::get_operation(1), None);
+        assert_eq!(adapter.transfer_calls.len(), 31);
+        assert!(adapter
+            .transfer_calls
+            .windows(2)
+            .all(|pair| pair[0] == pair[1]));
+        assert_eq!(adapter.notify_calls.len(), 1);
+    }
+
+    #[test]
+    fn timer_manual_transfer_and_notify_races_are_single_flight() {
+        let op = open_submitted_operation(1, 1);
+        let mut adapter = MockIcpAdapter::scripted(
+            vec![Ok(Nat::from(77u64))],
+            vec![Err(NotifyError::Processing)],
+        );
+        state::mark_icp_source_attempt(op.id(), NOW + 1).unwrap();
+        assert_eq!(
+            state::mark_icp_source_attempt(op.id(), NOW + 1),
+            Err(types::IcpSourceAttemptError::AttemptInFlight)
+        );
+        let transfer_outcome = adapter.transfer(&operation_snapshot(&op));
+        assert_eq!(transfer_outcome, icp_cmc::TransferOutcome::Confirmed(77));
+        assert_eq!(adapter.transfer_calls.len(), 1);
+        state::clear_icp_source_attempt(op.id()).unwrap();
+        let pending =
+            icp::reconciliation_support::resolve_transfer_for_test(op, transfer_outcome, NOW + 1)
+                .unwrap();
+        let pending = enter_notify_pending(pending, 77, NOW + 2);
+
+        state::mark_icp_notify_attempt(pending.id(), NOW + 3).unwrap();
+        assert_eq!(
+            state::mark_icp_notify_attempt(pending.id(), NOW + 3),
+            Err(types::FundingOperationTransitionError::NotifyAttemptInFlight)
+        );
+        let notify_outcome = adapter.notify(&operation_snapshot(&pending), 77);
+        assert_eq!(notify_outcome, icp_cmc::NotifyOutcome::Pending);
+        assert_eq!(adapter.notify_calls.len(), 1);
+        state::clear_icp_notify_attempt(pending.id()).unwrap();
+    }
+
+    #[test]
+    fn target_edit_and_removal_cannot_change_an_open_snapshot() {
+        let op = open_submitted_operation(1, 1);
+        let before = operation_snapshot(&op);
+        let target = target_id(1);
+        let global = global_policy();
+        let edited = state::get_target(target)
+            .unwrap()
+            .apply_patch(
+                TargetPatch {
+                    display_name: Some("renamed".to_string()),
+                    project: None,
+                    environment: None,
+                    criticality: None,
+                    observation_mode: None,
+                    tags: None,
+                    funding_policy: None,
+                    enabled: None,
+                    auto_topup: None,
+                },
+                &global,
+            )
+            .unwrap();
+        state::insert_target(edited).unwrap();
+        assert_eq!(
+            operation_snapshot(&state::get_operation(1).unwrap()),
+            before
+        );
+        assert_eq!(
+            state::remove_target(target),
+            Err(state::RemoveTargetError::UnresolvedOperationExists)
+        );
+
+        let mut adapter = MockIcpAdapter::scripted(
+            vec![Err(icp_cmc::TransferError::TemporarilyUnavailable)],
+            vec![],
+        );
+        let unknown = transfer_attempt(&mut adapter, op, NOW + 1).unwrap();
+        let terminal = icp::resolve_unknown_as_spent(unknown.id(), NOW + 2).unwrap();
+        assert_eq!(
+            terminal.state(),
+            FundingOperationState::Icp(IcpFundingState::Terminal)
+        );
+        assert!(state::remove_target(target).unwrap().is_some());
+        assert_eq!(before.target_canister, target);
+    }
+
+    #[test]
+    fn stable_roundtrip_and_upgrade_reset_preserve_notify_snapshot_and_source_hold() {
+        let op = open_submitted_operation(1, 1);
+        let pending = enter_notify_pending(op, 77, NOW + 1);
+        state::mark_icp_notify_attempt(pending.id(), NOW + 2).unwrap();
+        state::mark_icp_source_attempt(pending.id(), NOW + 2).unwrap();
+        let marked = state::get_operation(pending.id()).unwrap();
+        let encoded = encode_one(&marked).unwrap();
+        let decoded: FundingOperation = decode_one(&encoded).unwrap();
+        assert_eq!(decoded, marked);
+        assert_eq!(decoded.notify_attempt_started_at_secs(), Some(NOW + 2));
+        assert_eq!(decoded.confirmed_block_index(), Some(77));
+
+        state::reset_icp_notify_attempts_on_upgrade();
+        state::reset_icp_source_attempts_on_upgrade();
+        let reset = state::get_operation(pending.id()).unwrap();
+        assert_eq!(reset.notify_attempt_started_at_secs(), None);
+        assert_eq!(reset.confirmed_block_index(), Some(77));
+        assert_eq!(reset.rail_arguments(), marked.rail_arguments());
+        assert_eq!(
+            state::get_icp_source_reserve().pending()[0].attempt_started_at_secs,
+            None
+        );
+        assert_eq!(state::validate_whole_state(sentinel_id()), Ok(()));
     }
 }

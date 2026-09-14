@@ -1,8 +1,8 @@
 //! Stable-storage layer for Cycle Sentinel (Task 1c).
 //!
 //! Wires the pure domain types in `types.rs` into `ic-stable-structures`
-//! storage: one `MemoryManager` partitions stable memory into 16 regions
-//! (memory IDs 0-15, see `MEMORY_LAYOUT` below), each backing exactly one
+//! storage: one `MemoryManager` partitions stable memory into 17 regions
+//! (memory IDs 0-16, see `MEMORY_LAYOUT` below), each backing exactly one
 //! `StableCell`/`StableBTreeMap`. This file owns storage + raw CRUD + count
 //! bound enforcement at the storage boundary; it does **not** own
 //! governance/funding *policy* (threshold math, proposal execution, rail
@@ -82,11 +82,12 @@ use ic_stable_structures::{
 use serde::Deserialize;
 
 use crate::types::{
-    self, Alarm, AlarmKind, FundingOperation, FundingRail, FundingTrigger, GlobalPolicy,
-    GlobalRollingSpendState, InitArgs, InitArgsError, PendingReservation, PendingSourceDebit,
-    ProposalRecord, ProposalStatus, ReservedPrincipalKind, Sample, SelfRecoveryState,
-    SourceAttemptError, SourceReserveError, SourceReserveState, TargetRecord,
-    TargetReservationState, TerminalFundingSummary, ValidatedInitArgs,
+    self, Alarm, AlarmKind, FundingOperation, FundingOperationV1, FundingOperationV2, FundingRail,
+    FundingTrigger, GlobalPolicy, GlobalRollingSpendState, IcpSourceAttemptError,
+    IcpSourceReserveError, IcpSourceReserveState, InitArgs, InitArgsError, PendingIcpSourceDebit,
+    PendingReservation, PendingSourceDebit, ProposalRecord, ProposalStatus, ReservedPrincipalKind,
+    Sample, SelfRecoveryState, SourceAttemptError, SourceReserveError, SourceReserveState,
+    TargetRecord, TargetReservationState, TerminalFundingSummary, ValidatedInitArgs,
 };
 
 type VMem = VirtualMemory<DefaultMemoryImpl>;
@@ -120,6 +121,7 @@ const MEM_SELF_RECOVERY: MemoryId = MemoryId::new(12); // StableCell<StoredSelfR
 const MEM_TERMINAL_SUMMARIES: MemoryId = MemoryId::new(13); // StableBTreeMap<u64, StoredTerminalFundingSummary>, keyed by operation_id
 const MEM_SOURCE_RESERVE: MemoryId = MemoryId::new(14); // StableCell<StoredSourceReserveState> (singleton)
 const MEM_SOURCE_REFRESH_GENERATION: MemoryId = MemoryId::new(15); // StableCell<StoredSourceRefreshGeneration> (singleton)
+const MEM_ICP_SOURCE_RESERVE: MemoryId = MemoryId::new(16); // StableCell<StoredIcpSourceReserveState> (singleton)
 
 /// Every stable memory slot this canister owns, paired with a human label.
 /// Single source of truth for the layout; iterated by `memory_ids_unique`.
@@ -140,6 +142,7 @@ const MEMORY_LAYOUT: &[(MemoryId, &str)] = &[
     (MEM_TERMINAL_SUMMARIES, "terminal_summaries"),
     (MEM_SOURCE_RESERVE, "source_reserve"),
     (MEM_SOURCE_REFRESH_GENERATION, "source_refresh_generation"),
+    (MEM_ICP_SOURCE_RESERVE, "icp_source_reserve"),
 ];
 
 // ─────────────────────── state.rs-owned bookkeeping types ───────────────────────
@@ -409,13 +412,17 @@ impl StoredAlarm {
 
 #[derive(CandidType, Deserialize, Clone)]
 enum StoredFundingOperation {
-    V1(FundingOperation),
+    V1(FundingOperationV1),
+    V2(FundingOperationV2),
+    V3(FundingOperation),
 }
 
 impl StoredFundingOperation {
     fn into_current(self) -> FundingOperation {
         match self {
-            Self::V1(v) => v,
+            Self::V1(v) => v.into(),
+            Self::V2(v) => v.into(),
+            Self::V3(v) => v,
         }
     }
 }
@@ -508,6 +515,24 @@ impl StoredSourceReserveState {
     }
 }
 
+/// Memory ID 16.  This is intentionally a separate stable cell from the
+/// Cycles Ledger source reserve: ICP e8s and T-cycles have independent
+/// balances, fees, and settlement semantics.  V1 is the first persisted
+/// shape for this new memory region; future fields must use V2 migration
+/// rather than changing it in place.
+#[derive(CandidType, Deserialize, Clone)]
+enum StoredIcpSourceReserveState {
+    V1(IcpSourceReserveState),
+}
+
+impl StoredIcpSourceReserveState {
+    fn into_current(self) -> IcpSourceReserveState {
+        match self {
+            Self::V1(v) => v,
+        }
+    }
+}
+
 /// Memory ID 15. A durable generation for the Cycles Ledger source/cache
 /// refresh transaction. It advances on every reservation, attempt,
 /// settlement, or source-cache write, so a balance sampled before an await
@@ -567,6 +592,7 @@ impl_candid_storable!(StoredGlobalRollingSpendState);
 impl_candid_storable!(StoredSelfRecoveryState);
 impl_candid_storable!(StoredTerminalFundingSummary);
 impl_candid_storable!(StoredSourceReserveState);
+impl_candid_storable!(StoredIcpSourceReserveState);
 impl_candid_storable!(StoredSourceRefreshGeneration);
 
 // ─────────────────────── Key types ───────────────────────
@@ -772,6 +798,15 @@ thread_local! {
                 StoredSourceRefreshGeneration::V1(SourceRefreshGeneration::default()),
             )
             .expect("rumi_cycle_sentinel: failed to init source refresh generation cell")
+        ));
+
+    static ICP_SOURCE_RESERVE: RefCell<StableCell<StoredIcpSourceReserveState, VMem>> =
+        MEMORY_MANAGER.with(|m| RefCell::new(
+            StableCell::init(
+                m.borrow().get(MEM_ICP_SOURCE_RESERVE),
+                StoredIcpSourceReserveState::V1(IcpSourceReserveState::new()),
+            )
+            .expect("rumi_cycle_sentinel: failed to init ICP source reserve cell")
         ));
 }
 
@@ -1605,7 +1640,7 @@ pub(crate) fn get_operation(id: u64) -> Option<FundingOperation> {
 fn raw_insert_operation(op: FundingOperation) {
     let id = op.id();
     FUNDING_OPERATIONS.with(|m| {
-        m.borrow_mut().insert(id, StoredFundingOperation::V1(op));
+        m.borrow_mut().insert(id, StoredFundingOperation::V3(op));
     });
 }
 
@@ -1729,9 +1764,14 @@ pub(crate) fn update_operation(op: FundingOperation) -> Result<(), UpdateOperati
     }
     let is_explicit_quarantined_reconciliation =
         existing.is_valid_quarantined_cycles_reconciliation(&op);
+    let is_explicit_icp_quarantined_reconciliation =
+        existing.is_valid_quarantined_icp_reconciliation(&op);
+    let is_icp_refund_proof_attachment = existing.is_valid_icp_refund_proof_attachment(&op);
     let is_bounded_attempt_compaction = existing.is_valid_bounded_attempt_compaction_successor(&op);
     if !existing.state().is_valid_successor(&op.state())
         && !is_explicit_quarantined_reconciliation
+        && !is_explicit_icp_quarantined_reconciliation
+        && !is_icp_refund_proof_attachment
         && !is_bounded_attempt_compaction
     {
         return Err(UpdateOperationError::InvalidTransition);
@@ -1742,6 +1782,8 @@ pub(crate) fn update_operation(op: FundingOperation) -> Result<(), UpdateOperati
     let existing_attempts = existing.attempts().as_slice();
     let incoming_attempts = op.attempts().as_slice();
     if !is_explicit_quarantined_reconciliation
+        && !is_explicit_icp_quarantined_reconciliation
+        && !is_icp_refund_proof_attachment
         && !is_bounded_attempt_compaction
         && (incoming_attempts.len() < existing_attempts.len()
             || incoming_attempts[..existing_attempts.len()] != existing_attempts[..])
@@ -1788,6 +1830,10 @@ pub(crate) enum CompactOperationError {
     /// ordinary and self-recovery operations alike) still names `id` as a
     /// pending debit. Same hazard as the other reservation checks above.
     SourceReservationStillPending,
+    /// `op.rail() == FundingRail::IcpCmc` and the ICP source reserve still
+    /// names `id` as a pending debit. The operation must settle/release its
+    /// ICP hold before its full record is compacted.
+    IcpSourceReservationStillPending,
 }
 
 /// The self-enforcing compaction primitive for `FUNDING_OPERATIONS`
@@ -1856,6 +1902,14 @@ pub(crate) fn compact_operation(
             .any(|p| p.operation_id == id)
     {
         return Err(CompactOperationError::SourceReservationStillPending);
+    }
+    if op.rail() == types::FundingRail::IcpCmc
+        && get_icp_source_reserve()
+            .pending()
+            .iter()
+            .any(|p| p.operation_id == id)
+    {
+        return Err(CompactOperationError::IcpSourceReservationStillPending);
     }
     insert_terminal_summary(summary);
     FUNDING_OPERATIONS.with(|m| {
@@ -2068,6 +2122,117 @@ pub(crate) fn mark_source_attempt(
     Ok(())
 }
 
+// ─────────────────────── ICP Ledger source reserve/cache (Task 5) ───────────────────────
+
+pub(crate) fn get_icp_source_reserve() -> IcpSourceReserveState {
+    ICP_SOURCE_RESERVE.with(|c| c.borrow().get().clone().into_current())
+}
+
+pub(crate) fn set_icp_source_reserve(state: IcpSourceReserveState) {
+    ICP_SOURCE_RESERVE.with(|c| {
+        c.borrow_mut()
+            .set(StoredIcpSourceReserveState::V1(state))
+            .expect("rumi_cycle_sentinel: failed to write ICP source reserve cell");
+    });
+    bump_source_refresh_generation();
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IcpSourceRefreshCommitError {
+    StaleGeneration,
+    SourceReserve(IcpSourceReserveError),
+}
+
+/// Commits an ICP Ledger balance/fee query only when no funding state changed
+/// while the query was in flight.  The shared generation is intentional: a
+/// Cycles reservation and an ICP reservation must invalidate each other's
+/// stale refresh result because both consume the same global funding state.
+pub(crate) fn commit_icp_source_reserve_refresh(
+    expected_generation: u64,
+    balance_e8s: u128,
+    fee_e8s: u128,
+    as_of_secs: u64,
+) -> Result<(), IcpSourceRefreshCommitError> {
+    if source_refresh_generation() != expected_generation {
+        return Err(IcpSourceRefreshCommitError::StaleGeneration);
+    }
+    let updated = get_icp_source_reserve()
+        .refresh(balance_e8s, fee_e8s, as_of_secs)
+        .map_err(IcpSourceRefreshCommitError::SourceReserve)?;
+    if source_refresh_generation() != expected_generation {
+        return Err(IcpSourceRefreshCommitError::StaleGeneration);
+    }
+    set_icp_source_reserve(updated);
+    Ok(())
+}
+
+pub(crate) fn mark_icp_source_attempt(
+    operation_id: u64,
+    attempt_started_at_secs: u64,
+) -> Result<(), IcpSourceAttemptError> {
+    let updated = get_icp_source_reserve().mark_attempt(operation_id, attempt_started_at_secs)?;
+    set_icp_source_reserve(updated);
+    Ok(())
+}
+
+pub(crate) fn clear_icp_source_attempt(operation_id: u64) -> Result<(), IcpSourceAttemptError> {
+    let updated = get_icp_source_reserve().clear_attempt(operation_id)?;
+    set_icp_source_reserve(updated);
+    Ok(())
+}
+
+/// Persists the ephemeral CMC notify-flight marker before the notify await.
+/// `update_operation` still enforces the immutable snapshot and lifecycle
+/// checks; only the marker field changes.
+pub(crate) fn mark_icp_notify_attempt(
+    operation_id: u64,
+    attempt_started_at_secs: u64,
+) -> Result<(), types::FundingOperationTransitionError> {
+    let op = get_operation(operation_id)
+        .ok_or(types::FundingOperationTransitionError::InvalidSuccessor)?;
+    let marked = op.mark_notify_attempt(attempt_started_at_secs)?;
+    update_operation(marked).map_err(|_| types::FundingOperationTransitionError::InvalidSuccessor)
+}
+
+/// Clears the CMC notify marker after the await has returned. Missing markers
+/// are harmless and therefore idempotent; a missing operation is rejected.
+pub(crate) fn clear_icp_notify_attempt(
+    operation_id: u64,
+) -> Result<(), types::FundingOperationTransitionError> {
+    let op = get_operation(operation_id)
+        .ok_or(types::FundingOperationTransitionError::InvalidSuccessor)?;
+    let cleared = op.clear_notify_attempt()?;
+    if cleared == op {
+        return Ok(());
+    }
+    update_operation(cleared).map_err(|_| types::FundingOperationTransitionError::InvalidSuccessor)
+}
+
+/// Clears only the ephemeral ICP transfer-flight markers after an upgrade.
+/// The durable pending debits and immutable operation snapshots remain intact,
+/// so the interrupted operation can be retried with exactly the same args.
+pub(crate) fn reset_icp_source_attempts_on_upgrade() {
+    let updated = get_icp_source_reserve().reset_attempts();
+    set_icp_source_reserve(updated);
+}
+
+/// Upgrade interrupts an in-message CMC notify await. Clear only that
+/// ephemeral marker and leave the immutable transfer block, notify arguments,
+/// and source hold intact so retry uses the same block after restart.
+pub(crate) fn reset_icp_notify_attempts_on_upgrade() {
+    let operations: Vec<FundingOperation> = FUNDING_OPERATIONS.with(|m| {
+        m.borrow()
+            .iter()
+            .map(|(_, value)| value.into_current())
+            .collect()
+    });
+    for op in operations {
+        if op.notify_attempt_started_at_secs().is_some() {
+            raw_insert_operation(op.reset_notify_attempt_on_upgrade());
+        }
+    }
+}
+
 // ─────────────────────── Whole-state validation ───────────────────────
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2136,6 +2301,9 @@ pub(crate) enum StateValidationError {
     },
     FundingOperationKeyMismatch {
         key: u64,
+        operation_id: u64,
+    },
+    IcpSnapshotInvalid {
         operation_id: u64,
     },
     TerminalSummaryKeyMismatch {
@@ -2246,6 +2414,21 @@ pub(crate) enum StateValidationError {
     FundingOperationAmountPlusFeeOverflow {
         operation_id: u64,
     },
+    /// An unresolved ICP/CMC operation has no matching ICP source reserve
+    /// debit, or its held amount disagrees with the immutable transfer
+    /// snapshot.
+    NonterminalOperationMissingIcpSourceReserve {
+        operation_id: u64,
+    },
+    IcpSourceReserveAmountMismatch {
+        operation_id: u64,
+    },
+    /// The reverse direction of the ICP source linkage: a pending source
+    /// hold names an operation that is not an unresolved ICP operation.
+    IcpSourceReserveMissingOperation {
+        operation_id: u64,
+    },
+    IcpSourceReservePendingAmountOverflow,
 }
 
 fn validate_signer_set(signers: &[Principal], threshold: u32) -> Result<(), StateValidationError> {
@@ -2433,6 +2616,74 @@ pub(crate) fn validate_whole_state(sentinel_id: Principal) -> Result<(), StateVa
         if *key != op.id() {
             return Err(StateValidationError::FundingOperationKeyMismatch {
                 key: *key,
+                operation_id: op.id(),
+            });
+        }
+        if let types::FundingRailArguments::Icp(snapshot) = op.rail_arguments() {
+            crate::icp_cmc::validate_snapshot(
+                snapshot,
+                Some(op.created_at_secs()),
+                Some(sentinel_id),
+            )
+            .map_err(|_| StateValidationError::IcpSnapshotInvalid {
+                operation_id: op.id(),
+            })?;
+            let minimum = crate::icp_cmc::cycles_with_headroom(op.funding_policy().refill_cycles())
+                .map_err(|_| StateValidationError::IcpSnapshotInvalid {
+                    operation_id: op.id(),
+                })?;
+            if snapshot.expected_cycles < minimum {
+                return Err(StateValidationError::IcpSnapshotInvalid {
+                    operation_id: op.id(),
+                });
+            }
+            let state = match op.state() {
+                types::FundingOperationState::Icp(state) => state,
+                _ => unreachable!("filtered to ICP rail above"),
+            };
+            // A CMC refund index is first stored as an operation-bound hint.
+            // It may remain unresolved only in Quarantined, and a verified
+            // index must be exactly the same value promoted from that hint.
+            if op.refund_block_index().is_some()
+                && op.refund_block_hint() != op.refund_block_index()
+            {
+                return Err(StateValidationError::IcpSnapshotInvalid {
+                    operation_id: op.id(),
+                });
+            }
+            if op.refund_block_hint().is_some()
+                && !matches!(
+                    state,
+                    types::IcpFundingState::Quarantined | types::IcpFundingState::Refunded
+                )
+            {
+                return Err(StateValidationError::IcpSnapshotInvalid {
+                    operation_id: op.id(),
+                });
+            }
+            if matches!(state, types::IcpFundingState::Refunded)
+                && op.refund_block_index().is_none()
+            {
+                return Err(StateValidationError::IcpSnapshotInvalid {
+                    operation_id: op.id(),
+                });
+            }
+            if let Some(marker) = op.notify_attempt_started_at_secs() {
+                if state != types::IcpFundingState::NotifyPending
+                    || op.confirmed_block_index().is_none()
+                    || marker < op.updated_at_secs()
+                {
+                    return Err(StateValidationError::IcpSnapshotInvalid {
+                        operation_id: op.id(),
+                    });
+                }
+            }
+        } else if op.refund_block_hint().is_some()
+            || op.refund_block_index().is_some()
+            || op.notify_attempt_started_at_secs().is_some()
+            || op.actual_cycles().is_some()
+        {
+            return Err(StateValidationError::IcpSnapshotInvalid {
                 operation_id: op.id(),
             });
         }
@@ -2764,6 +3015,64 @@ pub(crate) fn validate_whole_state(sentinel_id: Principal) -> Result<(), StateVa
         }
     }
 
+    // ── Bidirectional ICP Ledger source-reserve linkage (Task 5) ──
+    //
+    // ICP/CMC fallback operations reserve the Sentinel's ICP balance plus the
+    // exact ICRC-1 fee before `icrc1_transfer`.  The hold remains present for
+    // every unresolved state, including TransferUnknown, NotifyPending, and
+    // Quarantined.  It must be impossible to compact an operation while this
+    // reverse link still exists, or to reload an operation that lost its hold
+    // across an upgrade.
+    let unresolved_icp_ops: Vec<&FundingOperation> = operations
+        .iter()
+        .filter(|op| !op.state().is_resolved() && op.rail() == FundingRail::IcpCmc)
+        .collect();
+    let icp_source_reserve = ICP_SOURCE_RESERVE.with(|c| c.borrow().get().clone().into_current());
+    if icp_source_reserve.pending().len() > types::MAX_PENDING_ICP_SOURCE_DEBITS {
+        return Err(StateValidationError::IcpSourceReservePendingAmountOverflow);
+    }
+    icp_source_reserve
+        .pending_total_e8s()
+        .map_err(|_| StateValidationError::IcpSourceReservePendingAmountOverflow)?;
+    let icp_source_pending: std::collections::BTreeMap<u64, PendingIcpSourceDebit> =
+        icp_source_reserve
+            .pending()
+            .iter()
+            .map(|p| (p.operation_id, *p))
+            .collect();
+    for op in &unresolved_icp_ops {
+        let types::FundingRailArguments::Icp(snapshot) = op.rail_arguments() else {
+            unreachable!("filtered to FundingRail::IcpCmc above");
+        };
+        let expected_amount = (snapshot.amount_e8s as u128)
+            .checked_add(snapshot.fee_e8s as u128)
+            .ok_or(StateValidationError::IcpSourceReservePendingAmountOverflow)?;
+        match icp_source_pending.get(&op.id()) {
+            Some(entry) if entry.amount_plus_fee_e8s == expected_amount => {}
+            Some(_) => {
+                return Err(StateValidationError::IcpSourceReserveAmountMismatch {
+                    operation_id: op.id(),
+                })
+            }
+            None => {
+                return Err(
+                    StateValidationError::NonterminalOperationMissingIcpSourceReserve {
+                        operation_id: op.id(),
+                    },
+                )
+            }
+        }
+    }
+    let unresolved_icp_op_ids: BTreeSet<u64> =
+        unresolved_icp_ops.iter().map(|op| op.id()).collect();
+    for operation_id in icp_source_pending.keys() {
+        if !unresolved_icp_op_ids.contains(operation_id) {
+            return Err(StateValidationError::IcpSourceReserveMissingOperation {
+                operation_id: *operation_id,
+            });
+        }
+    }
+
     // ── Proposals ──
     let proposals: Vec<(u64, ProposalRecord)> = PROPOSALS.with(|m| {
         m.borrow()
@@ -3043,10 +3352,10 @@ mod tests {
                 "duplicate stable MemoryId {id:?} (store {label:?}) — pick an unused slot"
             );
         }
-        assert_eq!(MEMORY_LAYOUT.len(), 16, "expected exactly 16 memory ids");
+        assert_eq!(MEMORY_LAYOUT.len(), 17, "expected exactly 17 memory ids");
     }
 
-    // ── round-trip tests, one per stable structure (16) ──
+    // ── round-trip tests, one per stable structure (17) ──
 
     #[test]
     fn global_config_round_trips() {
@@ -5609,7 +5918,7 @@ mod tests {
         let wrong_key = 99u64;
         FUNDING_OPERATIONS.with(|m| {
             m.borrow_mut()
-                .insert(wrong_key, StoredFundingOperation::V1(op.clone()));
+                .insert(wrong_key, StoredFundingOperation::V3(op.clone()));
         });
         assert_eq!(
             validate_whole_state(sentinel_id),
@@ -6111,7 +6420,7 @@ mod tests {
         let op = test_resolved_operation(1, sentinel_id, &global, 10);
         FUNDING_OPERATIONS.with(|m| {
             m.borrow_mut()
-                .insert(op.id(), StoredFundingOperation::V1(op.clone()));
+                .insert(op.id(), StoredFundingOperation::V3(op.clone()));
         });
         set_self_recovery_state(
             SelfRecoveryState::new()
@@ -6141,7 +6450,7 @@ mod tests {
         let op = test_funding_operation(1, sentinel_id, FundingTrigger::ManualTopup, &global, 10);
         FUNDING_OPERATIONS.with(|m| {
             m.borrow_mut()
-                .insert(op.id(), StoredFundingOperation::V1(op.clone()));
+                .insert(op.id(), StoredFundingOperation::V3(op.clone()));
         });
         assert_eq!(
             validate_whole_state(sentinel_id),
@@ -6167,7 +6476,7 @@ mod tests {
             test_funding_operation(1, target, FundingTrigger::LowBalanceAutoTopup, &global, 10);
         FUNDING_OPERATIONS.with(|m| {
             m.borrow_mut()
-                .insert(op.id(), StoredFundingOperation::V1(op.clone()));
+                .insert(op.id(), StoredFundingOperation::V3(op.clone()));
         });
         assert_eq!(
             validate_whole_state(sentinel_id),
@@ -6191,7 +6500,7 @@ mod tests {
         let op = test_resolved_operation(1, target, &global, 10);
         FUNDING_OPERATIONS.with(|m| {
             m.borrow_mut()
-                .insert(op.id(), StoredFundingOperation::V1(op.clone()));
+                .insert(op.id(), StoredFundingOperation::V3(op.clone()));
         });
         assert_eq!(validate_whole_state(sentinel_id), Ok(()));
     }
@@ -6793,7 +7102,7 @@ mod tests {
             let op =
                 test_funding_operation(i, target, FundingTrigger::LowBalanceAutoTopup, &global, 10);
             FUNDING_OPERATIONS.with(|m| {
-                m.borrow_mut().insert(i, StoredFundingOperation::V1(op));
+                m.borrow_mut().insert(i, StoredFundingOperation::V3(op));
             });
         }
         assert_eq!(
