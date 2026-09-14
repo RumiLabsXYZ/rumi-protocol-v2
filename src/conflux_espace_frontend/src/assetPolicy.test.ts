@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import publicPolicy from "../.ic-assets.production-public.json";
+import ownershipFile from "../public/.well-known/ic-domains?raw";
 
 describe("production-public asset policy", () => {
   it("disables raw access for every production-public asset rule", () => {
@@ -11,5 +12,23 @@ describe("production-public asset policy", () => {
     expect(publicPolicy.some((rule) => rule.match === "**/*" && rule.enable_aliasing === true)).toBe(true);
     expect(JSON.stringify(publicPolicy)).toContain("https://evm.confluxrpc.com");
     expect(JSON.stringify(publicPolicy)).not.toContain("evmtestnet.confluxrpc.com");
+  });
+
+  it("publishes only the reviewed custom domain ownership file with safe text headers", () => {
+    expect(ownershipFile).toBe("conflux.rumiprotocol.com\n");
+    expect(publicPolicy).toContainEqual(expect.objectContaining({
+      match: ".well-known",
+      ignore: false,
+      allow_raw_access: false,
+    }));
+    expect(publicPolicy).toContainEqual(expect.objectContaining({
+      match: ".well-known/ic-domains",
+      allow_raw_access: false,
+      headers: expect.objectContaining({
+        "Content-Type": "text/plain; charset=utf-8",
+        "Content-Security-Policy": "default-src 'none';base-uri 'none';form-action 'none';frame-ancestors 'none'",
+        "X-Content-Type-Options": "nosniff",
+      }),
+    }));
   });
 });

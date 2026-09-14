@@ -2,26 +2,28 @@ import { describe, expect, it } from "vitest";
 import {
   DEPLOYMENT_VERIFICATION_CANONICAL_ORIGIN,
   LOCAL_PUBLIC_CANONICAL_ORIGIN,
+  REVIEWED_PUBLIC_CANONICAL_ORIGIN,
   publicOriginRefusal,
   resolvePublicCanonicalOrigin,
 } from "./origin";
 
-const REVIEWED_CANISTER_ORIGIN = "https://tfesu-vyaaa-aaaap-qrd7a-cai.icp0.io";
+const REVIEWED_CANISTER_ORIGIN = "https://a52ri-naaaa-aaaas-qgy4a-cai.icp0.io";
 
 describe("production-public canonical origin", () => {
-  it("accepts only an exact certified icp0.io origin with a canonical opaque canister Principal", () => {
-    expect(resolvePublicCanonicalOrigin("production-public", REVIEWED_CANISTER_ORIGIN, "deployment"))
-      .toBe(REVIEWED_CANISTER_ORIGIN);
+  it("accepts only the exact reviewed custom origin for deployment", () => {
+    expect(resolvePublicCanonicalOrigin("production-public", REVIEWED_PUBLIC_CANONICAL_ORIGIN, "deployment"))
+      .toBe(REVIEWED_PUBLIC_CANONICAL_ORIGIN);
     for (const origin of [
+      REVIEWED_CANISTER_ORIGIN,
       "https://rumi.example",
       "https://8.8.8.8",
       "https://localhost",
       "https://tfesu-vyaaa-aaaap-qrd7a-cai.ic0.app",
       "https://tfesu-vyaaa-aaaap-qrd7a-cai.raw.icp0.io",
-      "https://raw.tfesu-vyaaa-aaaap-qrd7a-cai.icp0.io",
-      "https://extra.tfesu-vyaaa-aaaap-qrd7a-cai.icp0.io",
-      "http://tfesu-vyaaa-aaaap-qrd7a-cai.icp0.io",
-      "https://tfesu-vyaaa-aaaap-qrd7a-cai.icp0.io:8443",
+      "https://raw.a52ri-naaaa-aaaas-qgy4a-cai.icp0.io",
+      "https://extra.a52ri-naaaa-aaaas-qgy4a-cai.icp0.io",
+      "http://conflux.rumiprotocol.com",
+      "https://conflux.rumiprotocol.com:8443",
     ]) expect(() => resolvePublicCanonicalOrigin("production-public", origin, "deployment")).toThrow("exactly");
   });
 
@@ -31,26 +33,29 @@ describe("production-public canonical origin", () => {
     for (const origin of [
       "https://not-a-principal.icp0.io",
       "https://TFESU-VYAAA-AAAAP-QRD7A-CAI.icp0.io",
-      `${REVIEWED_CANISTER_ORIGIN}/`,
-      `${REVIEWED_CANISTER_ORIGIN}/app`,
-      `${REVIEWED_CANISTER_ORIGIN}?source=alias`,
-      `${REVIEWED_CANISTER_ORIGIN}#launch`,
-      `${REVIEWED_CANISTER_ORIGIN}:443`,
+      `${REVIEWED_PUBLIC_CANONICAL_ORIGIN}/`,
+      `${REVIEWED_PUBLIC_CANONICAL_ORIGIN}/app`,
+      `${REVIEWED_PUBLIC_CANONICAL_ORIGIN}?source=alias`,
+      `${REVIEWED_PUBLIC_CANONICAL_ORIGIN}#launch`,
+      `${REVIEWED_PUBLIC_CANONICAL_ORIGIN}:443`,
+      "https://user:pass@conflux.rumiprotocol.com",
+      "https://conflux.rumiprotocol.com.evil.example",
+      "https://evil.conflux.rumiprotocol.com",
     ]) expect(() => resolvePublicCanonicalOrigin("production-public", origin, "deployment")).toThrow();
   });
 
-  it("rejects reserved, non-canister, and deterministic verification Principals", () => {
+  it("rejects reserved, non-canister, and deterministic verification origins", () => {
     expect(() => resolvePublicCanonicalOrigin("production-public", "https://aaaaa-aa.icp0.io", "deployment"))
-      .toThrow("reserved");
+      .toThrow("exactly");
     expect(() => resolvePublicCanonicalOrigin("production-public", "https://2vxsx-fae.icp0.io", "deployment"))
-      .toThrow("reserved");
+      .toThrow("exactly");
     expect(() => resolvePublicCanonicalOrigin("production-public", "https://2ibo7-dia.icp0.io", "deployment"))
       .toThrow();
     expect(() => resolvePublicCanonicalOrigin(
       "production-public",
       DEPLOYMENT_VERIFICATION_CANONICAL_ORIGIN,
       "deployment",
-    )).toThrow("denylisted");
+    )).toThrow("exactly");
   });
 
   it("rejects reviewer IPv4 and IPv6 destinations by hostname construction", () => {
@@ -82,20 +87,20 @@ describe("production-public canonical origin", () => {
     )).toBe(DEPLOYMENT_VERIFICATION_CANONICAL_ORIGIN);
     expect(() => resolvePublicCanonicalOrigin(
       "production-public",
-      REVIEWED_CANISTER_ORIGIN,
+      REVIEWED_PUBLIC_CANONICAL_ORIGIN,
       "deployment-verification",
     )).toThrow("locked");
     expect(resolvePublicCanonicalOrigin("testnet", undefined, undefined)).toBeNull();
   });
 
   it("blocks alternate certified origins before an origin-local empty lock store can enable writes", () => {
-    const canonical = REVIEWED_CANISTER_ORIGIN;
+    const canonical = REVIEWED_PUBLIC_CANONICAL_ORIGIN;
     const locksByOrigin = new Map<string, string>([[canonical, "submitted-deposit-lock"]]);
     const alternateCanister = "https://ryjl3-tyaaa-aaaaa-aaaba-cai.icp0.io";
     expect(locksByOrigin.get(alternateCanister)).toBeUndefined();
     expect(publicOriginRefusal(canonical, canonical)).toBeNull();
     expect(publicOriginRefusal(canonical, alternateCanister)).toContain("not the canonical");
-    expect(publicOriginRefusal(canonical, "https://tfesu-vyaaa-aaaap-qrd7a-cai.raw.icp0.io"))
+    expect(publicOriginRefusal(canonical, REVIEWED_CANISTER_ORIGIN))
       .toContain("not the canonical");
     expect(publicOriginRefusal(null, canonical)).toContain("no canonical origin");
   });

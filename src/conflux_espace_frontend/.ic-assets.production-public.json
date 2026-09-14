@@ -1,5 +1,10 @@
 [
     {
+        "match": ".well-known",
+        "ignore": false,
+        "allow_raw_access": false
+    },
+    {
         "match": "**/*",
         "security_policy": "standard",
         "headers": {
@@ -9,5 +14,17 @@
         },
         "allow_raw_access": false,
         "enable_aliasing": true
+    },
+    {
+        "match": ".well-known/ic-domains",
+        "security_policy": "standard",
+        "headers": {
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Content-Type": "text/plain; charset=utf-8",
+            "Content-Security-Policy": "default-src 'none';base-uri 'none';form-action 'none';frame-ancestors 'none'",
+            "Permissions-Policy": "camera=(),geolocation=(),microphone=()",
+            "X-Content-Type-Options": "nosniff"
+        },
+        "allow_raw_access": false
     }
 ]

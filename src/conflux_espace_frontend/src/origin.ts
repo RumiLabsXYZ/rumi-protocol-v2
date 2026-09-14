@@ -3,6 +3,7 @@ import { Principal } from "@dfinity/principal";
 export type PublicOriginContext = "local-verification" | "deployment-verification" | "deployment";
 
 export const LOCAL_PUBLIC_CANONICAL_ORIGIN = "http://127.0.0.1:5174";
+export const REVIEWED_PUBLIC_CANONICAL_ORIGIN = "https://conflux.rumiprotocol.com";
 export const DEPLOYMENT_VERIFICATION_CANISTER_PRINCIPAL = "rrkah-fqaaa-aaaaa-aaaaq-cai";
 export const DEPLOYMENT_VERIFICATION_CANONICAL_ORIGIN =
   `https://${DEPLOYMENT_VERIFICATION_CANISTER_PRINCIPAL}.icp0.io`;
@@ -10,11 +11,23 @@ export const DEPLOYMENT_VERIFICATION_CANONICAL_ORIGIN =
 const CERTIFIED_CANISTER_ORIGIN = /^https:\/\/([a-z0-9-]+)\.icp0\.io$/;
 
 function deploymentCanisterOrigin(value: string, context: PublicOriginContext): string {
+  if (context === "deployment" && value === REVIEWED_PUBLIC_CANONICAL_ORIGIN) {
+    return value;
+  }
+
+  if (context === "deployment-verification" && value !== DEPLOYMENT_VERIFICATION_CANONICAL_ORIGIN) {
+    throw new Error("Deployment verification is locked to its deterministic test canister Principal.");
+  }
+
   const match = CERTIFIED_CANISTER_ORIGIN.exec(value);
   if (!match) {
     throw new Error(
-      "A deployable production-public origin must be exactly https://<canister-principal>.icp0.io with no port, path, query, raw gateway, custom domain, or IP host.",
+      "A deployable production-public origin must be exactly https://conflux.rumiprotocol.com with no port, path, query, raw gateway, foreign custom domain, or IP host.",
     );
+  }
+
+  if (context === "deployment") {
+    throw new Error("Deployable production-public origin must be exactly https://conflux.rumiprotocol.com.");
   }
 
   const principalText = match[1]!;
@@ -22,17 +35,17 @@ function deploymentCanisterOrigin(value: string, context: PublicOriginContext): 
   try {
     principal = Principal.fromText(principalText);
   } catch {
-    throw new Error("The production-public icp0.io hostname must contain a valid canonical Principal.");
+    throw new Error("The deployment-verification icp0.io hostname must contain a valid canonical Principal.");
   }
   if (principal.toText() !== principalText) {
-    throw new Error("The production-public icp0.io hostname must contain a canonical lowercase Principal.");
+    throw new Error("The deployment-verification icp0.io hostname must contain a canonical lowercase Principal.");
   }
   if (principal.compareTo(Principal.managementCanister()) === "eq" || principal.isAnonymous()) {
     throw new Error("The management and anonymous Principals are reserved and cannot host the public frontend.");
   }
   const bytes = principal.toUint8Array();
   if (bytes.length < 2 || bytes[bytes.length - 1] !== 1) {
-    throw new Error("The production-public hostname must identify a non-reserved opaque canister Principal.");
+    throw new Error("The deployment-verification hostname must identify a non-reserved opaque canister Principal.");
   }
   if (context === "deployment-verification") {
     if (principalText !== DEPLOYMENT_VERIFICATION_CANISTER_PRINCIPAL) {

@@ -82,10 +82,13 @@ contains only the reviewed allocation mapping for
 `npm run build:production-public:deploy` deletes any stale output and fails
 unless `.icp/data/mappings/conflux-production-public.ids.json` contains exactly
 the one dedicated canister. It derives the only accepted origin as
-`https://<mapped-principal>.icp0.io`; callers cannot supply or override it.
-Management, anonymous, non-canister, raw, `ic0.app`, custom-domain, IP, port,
-path, query, fragment, and the deterministic verification Principal are
-rejected. Initial-launch custom-domain support remains deferred.
+`https://conflux.rumiprotocol.com` for the existing mapped canister
+`a52ri-naaaa-aaaas-qgy4a-cai`; callers cannot supply or override it. The
+ownership file `public/.well-known/ic-domains` contains exactly that domain,
+and the production asset policy explicitly publishes it as `text/plain` with
+raw access disabled and restrictive security headers. Management, anonymous,
+non-canister, raw, `ic0.app`, foreign custom-domain, IP, port, path, query,
+fragment, and the deterministic verification Principal are rejected.
 
 Run the source-only gate at any time:
 
@@ -130,7 +133,9 @@ command output, and mapping first. Allocation completed unambiguously on
 13-node application subnet
 `4utr6-xo2fz-v7fsb-t3wsg-k7sfl-cj2ba-ghdnd-kcrfo-xavdb-ebean-mqe`, with
 `rumi_identity` as sole controller and `robvector` absent from controllers. The
-reviewed canonical origin is `https://a52ri-naaaa-aaaas-qgy4a-cai.icp0.io`.
+certified gateway origin recorded at allocation time was
+`https://a52ri-naaaa-aaaas-qgy4a-cai.icp0.io`; the current reviewed canonical
+origin is `https://conflux.rumiprotocol.com`.
 Creation performed no frontend build, release seal, Wasm install, asset sync,
 or deploy.
 
@@ -184,8 +189,9 @@ the canonical origin. It deliberately does not auto-redirect: automatic
 navigation could discard user context and is unnecessary to enforce the wallet
 boundary.
 
-The explicit exact `icp0.io` canister origin is the deployment authority for
-origin-scoped durable locks. Alternate certified/raw aliases remain blocked.
+The explicit exact `https://conflux.rumiprotocol.com` custom origin is the
+deployment authority for origin-scoped durable locks. The historical
+`icp0.io` gateway URL and all alternate certified/raw aliases remain blocked.
 
 Only the mapping-derived deployment build writes `dist-production-public`;
 verification builds are ephemeral. Public mode uses the same pinned chain-1030 backend and

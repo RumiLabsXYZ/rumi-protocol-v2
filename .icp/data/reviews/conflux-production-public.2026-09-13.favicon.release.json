@@ -3,13 +3,13 @@
   "environment": "conflux-production-public",
   "canisterName": "conflux_public_frontend",
   "assetCanister": "a52ri-naaaa-aaaas-qgy4a-cai",
-  "canonicalOrigin": "https://conflux.rumiprotocol.com",
+  "canonicalOrigin": "https://a52ri-naaaa-aaaas-qgy4a-cai.icp0.io",
   "icpYamlSha256": "2c71cc1c096b268d208cfcbe1ec0e5dc6733dddbc3a46a95b5d9b9e10c12bf00",
   "mappingFile": ".icp/data/mappings/conflux-production-public.ids.json",
   "mappingSha256": "bf3e44cef52610e113784d53c46474cc9038177fad553e4fc2a95e6d7c7ce049",
   "manifestFile": "src/conflux_espace_frontend/dist-production-public/rumi-conflux-production-public.json",
-  "manifestSha256": "e38a397959d1b1427bcb3a7df9aa7b62ccc9d097f79397b0d02b0cc784abd782",
-  "assetInventorySha256": "811633e0f564ce1170c81f2e351eccbe8f4ca3ffb068e5778f6bdd4379c15b4c",
+  "manifestSha256": "9f4666f6ed24fd8e34082339660998820292c1c54008888054c16c83a2980ec0",
+  "assetInventorySha256": "df9b9fa09dd1f73b2764755accf6ae6d35b8cf7a5132302c6f2ffe5d0678e646",
   "wasmArtifact": ".icp/cache/artifacts/conflux_public_frontend",
   "wasmSha256": "04e565b3425fe7510ee16b02adcfe3f01abc9a2725c82a21cb08969241debd62"
 }
