@@ -67,8 +67,8 @@ Plan: `docs/superpowers/plans/2026-09-13-cycle-sentinel-telemetry.md`
 | CS-02 | Done | Sonnet frontend mapper | Map both telemetry surfaces | None | Accepted `/private/tmp/cycle-sentinel-frontend-map.md` |
 | CS-03 | Done | Sonnet reference mapper | Audit delegated-vault reuse and failure gaps | None | Accepted `/private/tmp/cycle-sentinel-reference-map.md` |
 | CS-10 | Done | Sonnet implementer + Sonnet/Luna reviewers + Codex | Stable domain, registry, governance, and alarms | CS-00 | 409 tests, host check, release Wasm, fmt, and diff validation passed. Initial Sonnet reviews found and corrected pre-staged unpause, cap-revalidation, and active-alarm eviction flaws. After Sonnet hit its authenticated session cap, two user-approved Luna fallback closeouts independently returned PASS. |
-| CS-11 | Ready | Unassigned | Observation, history, and public API | CS-10 | Dependency accepted; ready for bounded implementation |
-| CS-12 | Blocked | Unassigned | Both funding rails, recovery, and reconciliation | CS-10, CS-11 | Dependencies not complete |
+| CS-11 | Done | Luna fallback implementer + Luna reviewers + Codex | Observation, history, and public API | CS-10 | 433 tests, host check, release Wasm, fmt, and diff validation passed. Independent review found and corrected eviction-unsafe pagination, incomplete burn-credit coverage, public operation-ID leakage, exact-Nat overflow, and a same-second retention edge. Two final closeouts returned PASS. |
+| CS-12 | Ready | Unassigned | Both funding rails, recovery, and reconciliation | CS-10, CS-11 | Dependencies accepted; ready for bounded Cycles Ledger/self-recovery implementation |
 | CS-13 | Blocked | Unassigned | Timers, Candid, config, declarations, and PocketIC | CS-10 through CS-12 | Dependencies not complete |
 | CS-20 | Blocked | Unassigned | Public root-domain telemetry UI | CS-13 | Dependency not complete |
 | CS-21 | Blocked | Unassigned | Authenticated operator telemetry UI | CS-13 | Dependency not complete |
@@ -94,6 +94,13 @@ Plan: `docs/superpowers/plans/2026-09-13-cycle-sentinel-telemetry.md`
 - Acceptance: disabled defaults, strict init signer validation, reserved-principal and bound checks, versioned stable round trips, distinct memory IDs, signer authorization, threshold/timelock execution, current-state revalidation, exact-once proposal execution, safe signer removal, alarm deduplication/acknowledgement/resolution, focused tests, host check, and Wasm build.
 - Worktree/branch: `/Users/robertripley/.codex/worktrees/455c/rumi-protocol-v2`, `codex/cycle-sentinel-telemetry`.
 - Review evidence: Task 1 accepted after 343 tests and two fresh Sonnet closeout PASS verdicts. Task 2 accepted after 409 tests and independent governance/alarm closeouts; Sonnet found three blockers that were corrected, then its session cap required the recorded Luna fallback for the final two PASS verdicts. Reports are under `.superpowers/sdd/2026-09-13-cycle-sentinel-telemetry/`.
+
+## CS-11 details
+
+- Completed scope: verified self-report and pinned-blackhole observation, six distinct public health states, bounded hourly sample history, top-up-corrected burn accounting, anomaly pause/alarm behavior, and cached anonymous telemetry queries.
+- Safety properties: failed reads never become zero or healthy; target advisory policy cannot override the governed threshold; stale registry results are discarded after await; unknown or retention-gapped funding intervals produce indeterminate burn; public rows omit signer, proposal, ledger, reconciliation, and operation-ID internals.
+- Acceptance: 433 tests, host check, release Wasm build, scoped formatting, and diff validation passed. The initial observation review passed; the public review rejected four correctness/privacy defects, which were corrected. A fresh full closeout passed, and the specialist closeout passed after tightening the same-second eviction boundary.
+- Fallback record: Sonnet's authenticated CLI remained session-capped until 7:10 a.m.; the explicitly approved Luna fallback implemented and reviewed this bounded card. Reports are under `.superpowers/sdd/2026-09-13-cycle-sentinel-telemetry/`.
 
 ## Cycle Sentinel coordination rules
 

@@ -355,14 +355,36 @@ impl StoredProposalRecord {
 }
 
 #[derive(CandidType, Deserialize, Clone)]
+struct SampleV1 {
+    timestamp_secs: u64,
+    balance: types::AdvisoryCyclesBalance,
+    state: types::PublicTargetState,
+    burn_cycles_per_hour: Option<u128>,
+}
+
+impl From<SampleV1> for Sample {
+    fn from(value: SampleV1) -> Self {
+        Self {
+            timestamp_secs: value.timestamp_secs,
+            balance: Some(value.balance),
+            state: value.state,
+            reported_operational_healthy: None,
+            burn_cycles_per_hour: value.burn_cycles_per_hour,
+        }
+    }
+}
+
+#[derive(CandidType, Deserialize, Clone)]
 enum StoredSample {
-    V1(Sample),
+    V1(SampleV1),
+    V2(Sample),
 }
 
 impl StoredSample {
     fn into_current(self) -> Sample {
         match self {
-            Self::V1(v) => v,
+            Self::V1(v) => v.into(),
+            Self::V2(v) => v,
         }
     }
 }
@@ -757,6 +779,19 @@ pub(crate) fn get_target(principal: Principal) -> Option<TargetRecord> {
             .get(&StorablePrincipal(principal))
             .map(|v| v.into_current())
     })
+}
+
+/// Internal fail-safe pause used by anomaly detection. It is intentionally
+/// separate from the signer-gated governance pause endpoint and only changes
+/// the target's pause bit; unpausing remains governed.
+pub(crate) fn pause_target_for_anomaly(principal: Principal) -> bool {
+    let Some(target) = get_target(principal) else {
+        return false;
+    };
+    if target.paused() {
+        return false;
+    }
+    insert_target(target.pause()).is_ok()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1235,14 +1270,17 @@ pub(crate) fn record_sample(target: Principal, sample: Sample) -> Result<(), Rec
                 principal: target,
                 slot,
             },
-            StoredSample::V1(sample.clone()),
+            StoredSample::V2(sample.clone()),
         );
     });
     meta.next_slot = (meta.next_slot + 1) % MAX_SAMPLES_PER_TARGET_U32;
     meta.filled_slots = (meta.filled_slots + 1).min(MAX_SAMPLES_PER_TARGET_U32);
     meta.total_writes = total_writes;
     meta.last_attempt_at_secs = Some(sample.timestamp_secs);
-    if sample.state != types::PublicTargetState::Unreachable {
+    // A status reply can be successful while reporting an installed/stopped
+    // target, but only a genuine balance observation is a successful sample
+    // for stale-age/last-known-balance purposes.
+    if sample.balance.is_some() && sample.state != types::PublicTargetState::Unreachable {
         meta.last_success_at_secs = Some(sample.timestamp_secs);
     }
     SAMPLE_META.with(|m| {
@@ -1379,6 +1417,29 @@ pub(crate) fn sample_meta(target: Principal) -> Option<SampleMeta> {
     })
 }
 
+/// Returns the newest retained sample.  The logical cursor is important here:
+/// after a ring wrap the newest physical slot is `next_slot - 1`, not the
+/// numerically greatest slot.
+pub(crate) fn latest_sample(target: Principal) -> Option<Sample> {
+    let meta = sample_meta(target)?;
+    let sequence = meta.total_writes.checked_sub(1)?;
+    list_samples(target, Some(sequence), 1)
+        .ok()
+        .and_then(|mut rows| rows.pop().map(|(_, sample)| sample))
+}
+
+pub(crate) fn latest_successful_sample(target: Principal) -> Option<Sample> {
+    list_samples(target, None, types::MAX_SAMPLES_PER_TARGET)
+        .ok()
+        .into_iter()
+        .flatten()
+        .rev()
+        .map(|(_, sample)| sample)
+        .find(|sample| {
+            sample.balance.is_some() && sample.state != types::PublicTargetState::Unreachable
+        })
+}
+
 /// Bounded scan over `TERMINAL_SUMMARIES` (<= `MAX_TERMINAL_SUMMARIES`
 /// total) filtered to one target.
 pub(crate) fn list_terminal_summaries_for_target(
@@ -1392,6 +1453,42 @@ pub(crate) fn list_terminal_summaries_for_target(
             .filter(|summary| summary.target() == target)
             .take(limit)
             .collect()
+    })
+}
+
+/// Lists summaries by their globally monotonic operation id, strictly after
+/// `cursor`, before filtering to a target.  The operation id is an internal
+/// storage key and is used only to make public pagination stable when older
+/// summaries are evicted between calls.
+pub(crate) fn list_terminal_summaries_for_target_after(
+    target: Principal,
+    cursor: Option<u64>,
+    limit: usize,
+) -> Vec<TerminalFundingSummary> {
+    TERMINAL_SUMMARIES.with(|m| {
+        let map = m.borrow();
+        let start = match cursor {
+            Some(id) => std::ops::Bound::Excluded(id),
+            None => std::ops::Bound::Unbounded,
+        };
+        map.range((start, std::ops::Bound::Unbounded))
+            .map(|(_, v)| v.into_current())
+            .filter(|summary| summary.target() == target)
+            .take(limit)
+            .collect()
+    })
+}
+
+/// Returns the bounded summary-store coverage needed to prove whether an
+/// interval can contain an evicted confirmed credit.
+pub(crate) fn terminal_summary_coverage() -> (usize, Option<u64>) {
+    TERMINAL_SUMMARIES.with(|m| {
+        let map = m.borrow();
+        let oldest = map
+            .iter()
+            .map(|(_, value)| value.into_current().resolved_at_secs())
+            .min();
+        (map.len() as usize, oldest)
     })
 }
 
@@ -2444,11 +2541,11 @@ pub(crate) fn validate_whole_state(sentinel_id: Principal) -> Result<(), StateVa
 mod tests {
     use super::*;
     use crate::types::{
-        AdvisoryCyclesBalance, Criticality, CyclesFundingState, CyclesWithdrawSnapshot,
-        Environment, FundingAttemptResultClass, FundingOperationState, FundingRailArguments,
-        GlobalPolicyArgs, GovernanceTimelocksArgs, ObservationMode, ProposalPayload,
-        PublicTargetState, SelfRecoveryPolicyArgs, TargetArgs, TargetFundingPolicy,
-        TargetFundingPolicyArgs, TargetPatch, TargetRegistrationContext,
+        AdvisoryCyclesBalance, AlarmStatus, Criticality, CyclesFundingState,
+        CyclesWithdrawSnapshot, Environment, FundingAttemptResultClass, FundingOperationState,
+        FundingRailArguments, GlobalPolicyArgs, GovernanceTimelocksArgs, ObservationMode,
+        ProposalPayload, PublicTargetState, SelfRecoveryPolicyArgs, TargetArgs,
+        TargetFundingPolicy, TargetFundingPolicyArgs, TargetPatch, TargetRegistrationContext,
     };
     use candid::Nat;
 
@@ -2605,8 +2702,9 @@ mod tests {
     fn test_sample(secs: u64, state: PublicTargetState) -> Sample {
         Sample {
             timestamp_secs: secs,
-            balance: AdvisoryCyclesBalance::Exact(1_000_000),
+            balance: Some(AdvisoryCyclesBalance::Exact(1_000_000)),
             state,
+            reported_operational_healthy: None,
             burn_cycles_per_hour: Some(10),
         }
     }
@@ -3285,14 +3383,14 @@ mod tests {
                     principal: anonymous,
                     slot: 0,
                 },
-                StoredSample::V1(test_sample(1, PublicTargetState::Healthy)),
+                StoredSample::V2(test_sample(1, PublicTargetState::Healthy)),
             );
             map.insert(
                 SampleKey {
                     principal: colliding,
                     slot: 0,
                 },
-                StoredSample::V1(test_sample(2, PublicTargetState::Healthy)),
+                StoredSample::V2(test_sample(2, PublicTargetState::Healthy)),
             );
         });
 
@@ -3429,7 +3527,7 @@ mod tests {
                     principal: target,
                     slot: next_slot,
                 },
-                StoredSample::V1(sentinel.clone()),
+                StoredSample::V2(sentinel.clone()),
             );
         });
         let seeded_meta = SampleMeta {
@@ -4293,7 +4391,7 @@ mod tests {
             );
             stores.samples.borrow_mut().insert(
                 SampleKey { principal, slot: 0 },
-                StoredSample::V1(sample.clone()),
+                StoredSample::V2(sample.clone()),
             );
             stores
                 .proposals
@@ -4851,6 +4949,127 @@ mod tests {
         insert_operation(complete).unwrap();
         let nonterminal = list_nonterminal_operations();
         assert_eq!(nonterminal, vec![pending]);
+    }
+
+    #[test]
+    fn unresolved_ordinary_operations_include_quarantined_work() {
+        let global = test_global_policy(1_000_000);
+        let target = register_test_target(3, &global);
+        let op =
+            test_funding_operation(3, target, FundingTrigger::LowBalanceAutoTopup, &global, 10);
+        insert_operation(op.clone()).unwrap();
+        let submitted = op
+            .record_attempt(
+                FundingOperationState::Cycles(CyclesFundingState::Submitted),
+                11,
+                FundingAttemptResultClass::Success,
+            )
+            .unwrap();
+        update_operation(submitted.clone()).unwrap();
+        let confirmed = submitted
+            .record_attempt(
+                FundingOperationState::Cycles(CyclesFundingState::Confirmed),
+                12,
+                FundingAttemptResultClass::Success,
+            )
+            .unwrap();
+        update_operation(confirmed.clone()).unwrap();
+        let quarantined = confirmed
+            .record_attempt(
+                FundingOperationState::Cycles(CyclesFundingState::Quarantined),
+                13,
+                FundingAttemptResultClass::RetryableFailure,
+            )
+            .unwrap();
+        update_operation(quarantined).unwrap();
+
+        let unresolved = list_unresolved_ordinary_operations();
+        assert!(unresolved.iter().any(|candidate| candidate.id() == 3));
+        assert!(list_nonterminal_operations()
+            .iter()
+            .all(|candidate| candidate.id() != 3));
+    }
+
+    #[test]
+    fn burn_anomaly_pauses_dedupes_resolves_but_never_unpauses() {
+        let global = test_global_policy(1_000_000);
+        let target = register_test_target(4, &global);
+        init_test_state(vec![test_signer(1)], 1, 1_000_000);
+
+        crate::observation::apply_burn_anomaly(target, Some(2), Some(24), 10);
+        assert!(get_target(target).unwrap().paused());
+        let first = find_active_alarm(Some(target), AlarmKind::BurnAnomaly).unwrap();
+        assert_eq!(first.status, AlarmStatus::Open);
+
+        crate::observation::apply_burn_anomaly(target, Some(2), Some(24), 11);
+        let active = find_active_alarm(Some(target), AlarmKind::BurnAnomaly).unwrap();
+        assert_eq!(active.id, first.id);
+        assert_eq!(
+            list_alarms_after(None, types::MAX_ALARMS)
+                .iter()
+                .filter(|alarm| alarm.kind == AlarmKind::BurnAnomaly)
+                .count(),
+            1
+        );
+
+        crate::observation::apply_burn_anomaly(target, Some(1), Some(24), 12);
+        assert!(find_active_alarm(Some(target), AlarmKind::BurnAnomaly).is_none());
+        assert_eq!(get_alarm(first.id).unwrap().status, AlarmStatus::Resolved);
+        assert!(get_target(target).unwrap().paused());
+
+        // Indeterminate burn does not clear history and does not alter the
+        // governed pause state.
+        crate::observation::apply_burn_anomaly(target, None, Some(24), 13);
+        assert_eq!(get_alarm(first.id).unwrap().status, AlarmStatus::Resolved);
+        assert!(get_target(target).unwrap().paused());
+    }
+
+    #[test]
+    fn public_target_page_has_terminal_cursor_and_never_uses_epoch_fallback() {
+        let global = test_global_policy(1_000_000);
+        init_test_state(vec![test_signer(1)], 1, 1_000_000);
+        let first = register_test_target(5, &global);
+        let second = register_test_target(6, &global);
+        let third = register_test_target(7, &global);
+
+        let page = crate::public_api::list_public_targets_at(None, 2, 100).unwrap();
+        assert_eq!(page.items.len(), 2);
+        assert!(page.next_cursor.is_some());
+        assert_eq!(page.items[0].principal, first);
+        assert_eq!(page.items[1].principal, second);
+        let final_page =
+            crate::public_api::list_public_targets_at(page.next_cursor, 2, 100).unwrap();
+        assert_eq!(final_page.items.len(), 1);
+        assert_eq!(final_page.items[0].principal, third);
+        assert_eq!(final_page.next_cursor, None);
+
+        let never_sampled = crate::public_api::get_public_target_at(first, 100).unwrap();
+        assert_eq!(never_sampled.advisory_balance_cycles, None);
+        assert_eq!(never_sampled.next_sample_at_secs, None);
+    }
+
+    #[test]
+    fn public_topup_cursor_is_operation_id_stable_across_oldest_eviction() {
+        let global = test_global_policy(1_000_000);
+        init_test_state(vec![test_signer(1)], 1, 1_000_000);
+        let target = register_test_target(8, &global);
+        for id in 1..=types::MAX_TERMINAL_SUMMARIES as u64 {
+            let operation = test_resolved_operation(id, target, &global, id);
+            insert_terminal_summary(TerminalFundingSummary::from_resolved(&operation, id).unwrap());
+        }
+
+        let first = crate::public_api::list_public_topups_at(target, None, 1).unwrap();
+        assert_eq!(first.items.len(), 1);
+        assert_eq!(first.items[0].resolved_at_secs, 1);
+        let cursor = first.next_cursor.clone().expect("more retained summaries");
+
+        // The cursor is an internal operation id, so eviction of the cursor's
+        // row cannot cause a replay. The next row remains strictly after it.
+        let operation = test_resolved_operation(513, target, &global, 513);
+        insert_terminal_summary(TerminalFundingSummary::from_resolved(&operation, 513).unwrap());
+        let second = crate::public_api::list_public_topups_at(target, Some(cursor), 1).unwrap();
+        assert_eq!(second.items.len(), 1);
+        assert_eq!(second.items[0].resolved_at_secs, 2);
     }
 
     // ── whole-state validation: positive ──
@@ -5958,7 +6177,7 @@ mod tests {
                     principal: target,
                     slot: 0,
                 },
-                StoredSample::V1(test_sample(1, PublicTargetState::Healthy)),
+                StoredSample::V2(test_sample(1, PublicTargetState::Healthy)),
             );
         });
         assert_eq!(

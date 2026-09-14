@@ -5,6 +5,9 @@ use rumi_cycle_manager::{
 };
 
 mod governance;
+mod history;
+mod observation;
+mod public_api;
 mod state;
 mod types;
 
@@ -118,4 +121,50 @@ fn pause_target(principal: Principal) -> Result<(), governance::GovernanceError>
 #[ic_cdk::update]
 fn acknowledge_alarm(id: u64) -> Result<bool, governance::GovernanceError> {
     governance::acknowledge_alarm_at(ic_cdk::caller(), now_secs(), id)
+}
+
+// ─────────────────────────── Public cached telemetry ───────────────────────────
+
+#[ic_cdk::query]
+fn get_public_overview() -> types::PublicOverview {
+    public_api::get_public_overview_at(now_secs())
+}
+
+#[ic_cdk::query]
+fn list_public_targets(
+    cursor: Option<String>,
+    limit: u16,
+) -> Result<types::PublicPage<types::PublicTargetRow>, public_api::PublicQueryError> {
+    public_api::list_public_targets_at(cursor, limit, now_secs())
+}
+
+#[ic_cdk::query]
+fn get_public_target(principal: Principal) -> Option<types::PublicTargetRow> {
+    public_api::get_public_target_at(principal, now_secs())
+}
+
+#[ic_cdk::query]
+fn list_public_samples(
+    principal: Principal,
+    cursor: Option<String>,
+    limit: u16,
+) -> Result<types::PublicPage<types::Sample>, public_api::PublicQueryError> {
+    public_api::list_public_samples_at(principal, cursor, limit)
+}
+
+#[ic_cdk::query]
+fn list_public_topups(
+    principal: Principal,
+    cursor: Option<String>,
+    limit: u16,
+) -> Result<types::PublicPage<types::PublicTopupSummary>, public_api::PublicQueryError> {
+    public_api::list_public_topups_at(principal, cursor, limit)
+}
+
+#[ic_cdk::query]
+fn list_public_alarms(
+    cursor: Option<String>,
+    limit: u16,
+) -> Result<types::PublicPage<types::PublicAlarm>, public_api::PublicQueryError> {
+    public_api::list_public_alarms_at(cursor, limit)
 }

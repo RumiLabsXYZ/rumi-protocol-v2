@@ -1113,8 +1113,13 @@ impl<'de> Deserialize<'de> for TargetRecord {
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct Sample {
     pub timestamp_secs: u64,
-    pub balance: AdvisoryCyclesBalance,
+    /// No balance is recorded when an observation failed or has never
+    /// succeeded.  This is intentionally optional: zero is a valid balance,
+    /// but it is not a valid representation of "unknown".
+    pub balance: Option<AdvisoryCyclesBalance>,
     pub state: PublicTargetState,
+    /// Target-reported operational bit, retained for advisory display only.
+    pub reported_operational_healthy: Option<bool>,
     /// `None` when the interval contains an unknown funding operation and
     /// burn cannot be attributed.
     pub burn_cycles_per_hour: Option<u128>,
@@ -2991,9 +2996,11 @@ pub struct PublicOverview {
     pub unobserved_count: u64,
     pub total_observed_cycles: Nat,
     pub runtime_cycles: Nat,
-    pub cycles_ledger_available_cycles: Nat,
-    pub icp_available_e8s: Nat,
-    pub protected_self_reserve_cycles: Nat,
+    /// Reserve balances are optional because they are populated by the
+    /// funding sampler. Unknown must not be serialized as a real zero.
+    pub cycles_ledger_available_cycles: Option<Nat>,
+    pub icp_available_e8s: Option<Nat>,
+    pub protected_self_reserve_cycles: Option<Nat>,
     pub alarm_count: u64,
     pub last_sample_at_secs: Option<u64>,
     pub next_sample_at_secs: Option<u64>,
@@ -3005,7 +3012,6 @@ pub struct PublicOverview {
 /// `PublicTargetRow`'s own principal.
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct PublicTopupSummary {
-    pub operation_id: u64,
     pub rail: FundingRail,
     pub outcome: FundingOutcome,
     pub amount_cycles: Nat,
@@ -3015,7 +3021,6 @@ pub struct PublicTopupSummary {
 impl From<&TerminalFundingSummary> for PublicTopupSummary {
     fn from(summary: &TerminalFundingSummary) -> Self {
         Self {
-            operation_id: summary.operation_id,
             rail: summary.rail,
             outcome: summary.outcome,
             amount_cycles: Nat::from(summary.amount_cycles),
@@ -3067,7 +3072,10 @@ pub struct PublicTargetRow {
     pub criticality: Criticality,
     pub observation_mode: ObservationMode,
     pub state: PublicTargetState,
-    pub advisory_balance_cycles: Nat,
+    pub reported_operational_healthy: Option<bool>,
+    /// `None` means no successful observation is available.  In particular,
+    /// failed and unobserved targets must never masquerade as zero cycles.
+    pub advisory_balance_cycles: Option<Nat>,
     /// True when `advisory_balance_cycles` is a clamped `u128::MAX` display
     /// value (`AdvisoryCyclesBalance::Overflow`) rather than the target's
     /// genuine reported balance — set from
@@ -5375,7 +5383,8 @@ mod tests {
             criticality: Criticality::Standard,
             observation_mode: ObservationMode::SelfReport,
             state: PublicTargetState::Healthy,
-            advisory_balance_cycles: advisory.to_nat(),
+            reported_operational_healthy: Some(true),
+            advisory_balance_cycles: Some(advisory.to_nat()),
             advisory_balance_overflowed: advisory.is_overflow(),
             low_balance_threshold_cycles: Nat::from(1u64),
             refill_cycles: Nat::from(10u64),
@@ -5394,7 +5403,7 @@ mod tests {
         let target = target_principal(1);
         let row = public_target_row(target, RecentTopups::new(Vec::new()).unwrap());
         assert_eq!(row.principal, target);
-        assert_eq!(row.advisory_balance_cycles, Nat::from(7u64));
+        assert_eq!(row.advisory_balance_cycles, Some(Nat::from(7u64)));
         assert_eq!(row.observation_mode, ObservationMode::SelfReport);
     }
 
@@ -5412,13 +5421,12 @@ mod tests {
         assert_eq!(exact.to_nat(), overflowed.to_nat());
     }
 
-    fn topup_summary(operation_id: u64) -> PublicTopupSummary {
+    fn topup_summary(resolved_at_secs: u64) -> PublicTopupSummary {
         PublicTopupSummary {
-            operation_id,
             rail: FundingRail::CyclesLedger,
             outcome: FundingOutcome::Completed,
             amount_cycles: Nat::from(1_000u64),
-            resolved_at_secs: 500,
+            resolved_at_secs,
         }
     }
 
@@ -5462,7 +5470,6 @@ mod tests {
         .unwrap();
         let summary = TerminalFundingSummary::from_resolved(&op, 900).unwrap();
         let public = PublicTopupSummary::from(&summary);
-        assert_eq!(public.operation_id, 7);
         assert_eq!(public.rail, FundingRail::IcpCmc);
         assert_eq!(public.outcome, FundingOutcome::Refunded);
         assert_eq!(public.amount_cycles, Nat::from(10u64));
@@ -5526,9 +5533,9 @@ mod tests {
             unobserved_count: 1,
             total_observed_cycles: Nat::from(1_000_000u64),
             runtime_cycles: Nat::from(500_000u64),
-            cycles_ledger_available_cycles: Nat::from(2_000_000u64),
-            icp_available_e8s: Nat::from(100_000_000u64),
-            protected_self_reserve_cycles: Nat::from(300_000u64),
+            cycles_ledger_available_cycles: Some(Nat::from(2_000_000u64)),
+            icp_available_e8s: Some(Nat::from(100_000_000u64)),
+            protected_self_reserve_cycles: Some(Nat::from(300_000u64)),
             alarm_count: 3,
             last_sample_at_secs: Some(100),
             next_sample_at_secs: Some(400),
