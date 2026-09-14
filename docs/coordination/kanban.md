@@ -66,7 +66,7 @@ Plan: `docs/superpowers/plans/2026-09-13-cycle-sentinel-telemetry.md`
 | CS-01 | Done | Sonnet backend mapper | Map canister, state, Candid, and test integration | None | Accepted `/private/tmp/cycle-sentinel-backend-map.md` |
 | CS-02 | Done | Sonnet frontend mapper | Map both telemetry surfaces | None | Accepted `/private/tmp/cycle-sentinel-frontend-map.md` |
 | CS-03 | Done | Sonnet reference mapper | Audit delegated-vault reuse and failure gaps | None | Accepted `/private/tmp/cycle-sentinel-reference-map.md` |
-| CS-10 | Ready | Unassigned | Stable domain, registry, and governance | CS-00 | Approved plan; ready for one sequential Sonnet implementer |
+| CS-10 | In progress | Sonnet Task 1 implementer | Stable domain, registry, and governance | CS-00 | Claimed in current worktree; Task 1 file scope only |
 | CS-11 | Blocked | Unassigned | Observation, history, and public API | CS-10 | Dependency not complete |
 | CS-12 | Blocked | Unassigned | Both funding rails, recovery, and reconciliation | CS-10, CS-11 | Dependencies not complete |
 | CS-13 | Blocked | Unassigned | Timers, Candid, config, declarations, and PocketIC | CS-10 through CS-12 | Dependencies not complete |
@@ -86,6 +86,14 @@ Plan: `docs/superpowers/plans/2026-09-13-cycle-sentinel-telemetry.md`
 - Acceptance: every approved requirement maps to a task, shared files have sequential ownership, and exact source, merge, and live gates are explicit.
 - Owner/harness: Codex coordinator using three authenticated Sonnet repository mappers plus a fresh Sonnet plan reviewer.
 - Review evidence: Sonnet PASS at `/private/tmp/cycle-sentinel-plan-review.md`; coordinator separately rejected the earlier unnecessary new-proxy design, preserved distinct proposal approval/execution, and corrected board IDs.
+
+## CS-10 details
+
+- Current slice: implementation-plan Task 1 only, canister scaffold plus versioned stable domain model.
+- File ownership: `src/rumi_cycle_sentinel/Cargo.toml`, `src/rumi_cycle_sentinel/src/{lib,types,state}.rs`, root `Cargo.toml`, and `Cargo.lock` only when dependency resolution requires it.
+- Acceptance: disabled defaults, strict init signer validation, reserved-principal and bound checks, versioned stable round trips, distinct memory IDs, focused tests, host check, and Wasm build.
+- Worktree/branch: `/Users/robertripley/.codex/worktrees/455c/rumi-protocol-v2`, `codex/cycle-sentinel-telemetry`.
+- Review evidence: pending implementer report and separate Sonnet specification review.
 
 ## Cycle Sentinel coordination rules
 
