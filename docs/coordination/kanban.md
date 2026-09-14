@@ -52,7 +52,7 @@ Updated: 2026-09-13
 
 # Cycle Sentinel implementation board
 
-Last updated: 2026-09-13
+Last updated: 2026-09-14
 
 Branch: `codex/cycle-sentinel-telemetry`
 
@@ -66,8 +66,8 @@ Plan: `docs/superpowers/plans/2026-09-13-cycle-sentinel-telemetry.md`
 | CS-01 | Done | Sonnet backend mapper | Map canister, state, Candid, and test integration | None | Accepted `/private/tmp/cycle-sentinel-backend-map.md` |
 | CS-02 | Done | Sonnet frontend mapper | Map both telemetry surfaces | None | Accepted `/private/tmp/cycle-sentinel-frontend-map.md` |
 | CS-03 | Done | Sonnet reference mapper | Audit delegated-vault reuse and failure gaps | None | Accepted `/private/tmp/cycle-sentinel-reference-map.md` |
-| CS-10 | In progress | Sonnet Task 2 implementer | Stable domain, registry, and governance | CS-00 | Domain + stable state accepted after 343 tests, release Wasm build, and two fresh Sonnet closeout PASS verdicts; governance remains |
-| CS-11 | Blocked | Unassigned | Observation, history, and public API | CS-10 | Dependency not complete |
+| CS-10 | Done | Sonnet implementer + Sonnet/Luna reviewers + Codex | Stable domain, registry, governance, and alarms | CS-00 | 409 tests, host check, release Wasm, fmt, and diff validation passed. Initial Sonnet reviews found and corrected pre-staged unpause, cap-revalidation, and active-alarm eviction flaws. After Sonnet hit its authenticated session cap, two user-approved Luna fallback closeouts independently returned PASS. |
+| CS-11 | Ready | Unassigned | Observation, history, and public API | CS-10 | Dependency accepted; ready for bounded implementation |
 | CS-12 | Blocked | Unassigned | Both funding rails, recovery, and reconciliation | CS-10, CS-11 | Dependencies not complete |
 | CS-13 | Blocked | Unassigned | Timers, Candid, config, declarations, and PocketIC | CS-10 through CS-12 | Dependencies not complete |
 | CS-20 | Blocked | Unassigned | Public root-domain telemetry UI | CS-13 | Dependency not complete |
@@ -89,11 +89,11 @@ Plan: `docs/superpowers/plans/2026-09-13-cycle-sentinel-telemetry.md`
 
 ## CS-10 details
 
-- Current slice: implementation-plan Task 1 only, canister scaffold plus versioned stable domain model.
-- File ownership: `src/rumi_cycle_sentinel/Cargo.toml`, `src/rumi_cycle_sentinel/src/{lib,types,state}.rs`, root `Cargo.toml`, and `Cargo.lock` only when dependency resolution requires it.
-- Acceptance: disabled defaults, strict init signer validation, reserved-principal and bound checks, versioned stable round trips, distinct memory IDs, focused tests, host check, and Wasm build.
+- Completed scope: implementation-plan Tasks 1 and 2, including the canister scaffold, versioned stable domain model, dynamic registry, multisig/timelock governance, immediate pause, governed unpause, and bounded alarm lifecycle.
+- File ownership: `src/rumi_cycle_sentinel/Cargo.toml`, `src/rumi_cycle_sentinel/src/{lib,types,state,governance}.rs`, root `Cargo.toml`, and `Cargo.lock` only when dependency resolution requires it.
+- Acceptance: disabled defaults, strict init signer validation, reserved-principal and bound checks, versioned stable round trips, distinct memory IDs, signer authorization, threshold/timelock execution, current-state revalidation, exact-once proposal execution, safe signer removal, alarm deduplication/acknowledgement/resolution, focused tests, host check, and Wasm build.
 - Worktree/branch: `/Users/robertripley/.codex/worktrees/455c/rumi-protocol-v2`, `codex/cycle-sentinel-telemetry`.
-- Review evidence: Task 1b domain model passed 191 focused tests, host check, Wasm release build, and fresh Sonnet closeout review after closing findings 1-10 and A-H. Task 1c stable-memory wiring and whole-state validation remain pending.
+- Review evidence: Task 1 accepted after 343 tests and two fresh Sonnet closeout PASS verdicts. Task 2 accepted after 409 tests and independent governance/alarm closeouts; Sonnet found three blockers that were corrected, then its session cap required the recorded Luna fallback for the final two PASS verdicts. Reports are under `.superpowers/sdd/2026-09-13-cycle-sentinel-telemetry/`.
 
 ## Cycle Sentinel coordination rules
 

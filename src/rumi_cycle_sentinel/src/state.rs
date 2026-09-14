@@ -789,7 +789,7 @@ pub(crate) fn insert_target(record: TargetRecord) -> Result<(), InsertTargetErro
     })
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RemoveTargetError {
     /// An unresolved `FundingOperation` still targets this principal — its
     /// exact recipient/policy snapshot must remain reachable until the
@@ -978,23 +978,29 @@ pub(crate) fn get_alarm(id: u64) -> Option<Alarm> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum InsertAlarmError {
     /// `ALARMS` is at `types::MAX_ALARMS`, `alarm.id` is not already a key,
-    /// and every existing alarm is still `Open` — there is no safely
-    /// removable (`Acknowledged`/`Resolved`) victim, so the insert fails
+    /// and no existing alarm is `Resolved` — `Open` and `Acknowledged` are
+    /// both still-active statuses (see the `alarms` module doc's "only
+    /// `Resolved` is terminal" contract) and neither is ever an eviction
+    /// victim, so there is no safely removable row and the insert fails
     /// closed rather than overflowing the map. Automatic detection
     /// (burn anomaly, low balance, unreachable, ...) must treat this as a
     /// signal to resolve/acknowledge existing alarms, not a reason to trap
     /// at the next `post_upgrade`.
-    TooManyOpenAlarms,
+    NoResolvedAlarmToEvict,
 }
 
-/// Self-enforcing at the storage boundary (storage review Finding 2):
-/// overwriting an EXISTING alarm id (e.g. acknowledging or resolving it) is
-/// always allowed regardless of bound, since it never grows the map. A
-/// genuinely new id at the bound evicts the oldest (`opened_at_secs`)
-/// non-`Open` (`Acknowledged`/`Resolved`) alarm; if every alarm is still
-/// `Open`, the insert fails closed instead of overflowing the map — matching
-/// `insert_proposal`'s and `insert_terminal_summary`'s self-evicting pattern
-/// rather than relying on a `post_upgrade` trap to ever catch this.
+/// Self-enforcing at the storage boundary (storage review Finding 2,
+/// narrowed by the alarm review's Blocker 1): overwriting an EXISTING alarm
+/// id (e.g. acknowledging or resolving it) is always allowed regardless of
+/// bound, since it never grows the map. A genuinely new id at the bound
+/// evicts the oldest (`opened_at_secs`) `Resolved` alarm — the only status
+/// the `alarms` module treats as terminal; an `Acknowledged` alarm is still
+/// active and is NEVER an eviction candidate, no matter how much older it is
+/// than the oldest `Resolved` row. If no `Resolved` alarm exists (every
+/// alarm is `Open` and/or `Acknowledged`), the insert fails closed instead
+/// of overflowing the map — matching `insert_proposal`'s and
+/// `insert_terminal_summary`'s self-evicting pattern rather than relying on
+/// a `post_upgrade` trap to ever catch this.
 pub(crate) fn insert_alarm(alarm: Alarm) -> Result<(), InsertAlarmError> {
     let id = alarm.id;
     ALARMS.with(|m| {
@@ -1004,14 +1010,14 @@ pub(crate) fn insert_alarm(alarm: Alarm) -> Result<(), InsertAlarmError> {
             let victim = map
                 .iter()
                 .map(|(k, v)| (k, v.into_current()))
-                .filter(|(_, a)| a.status != types::AlarmStatus::Open)
+                .filter(|(_, a)| a.status == types::AlarmStatus::Resolved)
                 .min_by_key(|(_, a)| a.opened_at_secs)
                 .map(|(k, _)| k);
             match victim {
                 Some(victim_id) => {
                     map.remove(&victim_id);
                 }
-                None => return Err(InsertAlarmError::TooManyOpenAlarms),
+                None => return Err(InsertAlarmError::NoResolvedAlarmToEvict),
             }
         }
         map.insert(id, StoredAlarm::V1(alarm));
@@ -1046,6 +1052,146 @@ pub(crate) fn find_open_alarm(target: Option<Principal>, kind: AlarmKind) -> Opt
                     && alarm.status == types::AlarmStatus::Open
             })
     })
+}
+
+/// Same linear scan as [`find_open_alarm`], widened to `Acknowledged` too:
+/// the underlying condition has not cleared yet even once a signer has seen
+/// the alarm, so dedup (`alarms::raise_at`) and auto-resolution
+/// (`alarms::resolve_at`) must both treat `Open` and `Acknowledged` alike as
+/// "active". Only `Resolved` is terminal. Kept here, alongside
+/// `find_open_alarm`, rather than inside the `alarms` submodule below, so
+/// every direct `ALARMS` scan stays in one place.
+pub(crate) fn find_active_alarm(target: Option<Principal>, kind: AlarmKind) -> Option<Alarm> {
+    ALARMS.with(|m| {
+        m.borrow()
+            .iter()
+            .map(|(_, v)| v.into_current())
+            .find(|alarm| {
+                alarm.target == target
+                    && alarm.kind == kind
+                    && alarm.status != types::AlarmStatus::Resolved
+            })
+    })
+}
+
+// ─────────────────────── Alarm lifecycle (Task 2B) ───────────────────────
+//
+// Layered on the raw storage functions above (`insert_alarm`, `get_alarm`,
+// `find_open_alarm`/`find_active_alarm`), exactly like `governance.rs` is
+// layered on the rest of this file: nothing here checks a caller's
+// identity — `governance::acknowledge_alarm_at` is the only caller-gated
+// entry point that reaches `acknowledge_at`, and it calls `require_signer`
+// before it ever does.
+//
+// **Dedup.** `raise_at` is idempotent for a still-active condition: a
+// second `raise_at` for the same `(target, kind)` while the first alarm is
+// still `Open` or `Acknowledged` reuses that alarm's id and performs no
+// write at all, so a condition re-detected every sample interval never
+// grows `ALARMS`. Once an alarm has actually `Resolved`, a fresh
+// `raise_at` for the same `(target, kind)` is treated as a NEW incident and
+// always allocates a new id — the resolved alarm's own history
+// (`resolved_at_secs`, etc.) is left untouched rather than reopened in
+// place. This is a deliberate design choice, not a re-derivation of an
+// existing contract: it keeps each `Alarm` row an honest, append-only
+// record of one incident's lifecycle instead of a mutable ledger that could
+// silently overwrite a past resolution's timestamp.
+//
+// **Acknowledge.** `acknowledge_at` is idempotent the same way
+// `ProposalRecord::record_approval` is: acknowledging an already
+// `Acknowledged` alarm is a no-op (`Ok(false)`, no write, original
+// `acknowledged_at_secs` preserved) rather than an error. Acknowledging a
+// `Resolved` alarm is rejected — the condition already cleared, so there is
+// nothing left to acknowledge.
+//
+// **Auto-resolve.** `resolve_at` is exact (only the matching
+// `(target, kind)` alarm is touched) and idempotent (no active alarm for
+// that pair — already resolved, or never raised — is a silent `None`, never
+// a trap or an error): auto-resolution racing itself (e.g. two consecutive
+// clean samples both trying to clear the same alarm) must be safe.
+pub(crate) mod alarms {
+    use super::{find_active_alarm, get_alarm, insert_alarm, next_alarm_id, InsertAlarmError};
+    use crate::types::{Alarm, AlarmKind, AlarmStatus};
+    use candid::{CandidType, Principal};
+    use serde::Deserialize;
+
+    #[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum AlarmError {
+        AlarmNotFound,
+        /// The alarm's condition already cleared; there is nothing left to
+        /// acknowledge.
+        AlarmAlreadyResolved,
+        /// `ALARMS` is at `types::MAX_ALARMS` and no existing alarm is
+        /// `Resolved` — see `InsertAlarmError::NoResolvedAlarmToEvict`. Only
+        /// `raise_at` can hit this: `acknowledge_at`/`resolve_at` only ever
+        /// overwrite an existing id, which `insert_alarm` always allows
+        /// regardless of the bound.
+        NoResolvedAlarmToEvict,
+    }
+
+    impl From<InsertAlarmError> for AlarmError {
+        fn from(_: InsertAlarmError) -> Self {
+            AlarmError::NoResolvedAlarmToEvict
+        }
+    }
+
+    /// See the module doc's "Dedup" section for the full reuse-vs-reraise
+    /// contract.
+    pub(crate) fn raise_at(
+        target: Option<Principal>,
+        kind: AlarmKind,
+        now_secs: u64,
+    ) -> Result<u64, AlarmError> {
+        if let Some(existing) = find_active_alarm(target, kind) {
+            return Ok(existing.id);
+        }
+        let id = next_alarm_id();
+        let alarm = Alarm {
+            id,
+            target,
+            kind,
+            status: AlarmStatus::Open,
+            opened_at_secs: now_secs,
+            acknowledged_at_secs: None,
+            resolved_at_secs: None,
+        };
+        insert_alarm(alarm)?;
+        Ok(id)
+    }
+
+    /// See the module doc's "Acknowledge" section. Not caller-gated itself —
+    /// `governance::acknowledge_alarm_at` is.
+    pub(crate) fn acknowledge_at(id: u64, now_secs: u64) -> Result<bool, AlarmError> {
+        let mut alarm = get_alarm(id).ok_or(AlarmError::AlarmNotFound)?;
+        match alarm.status {
+            AlarmStatus::Acknowledged => Ok(false),
+            AlarmStatus::Resolved => Err(AlarmError::AlarmAlreadyResolved),
+            AlarmStatus::Open => {
+                alarm.status = AlarmStatus::Acknowledged;
+                alarm.acknowledged_at_secs = Some(now_secs);
+                insert_alarm(alarm).expect(
+                    "rumi_cycle_sentinel: acknowledging an existing alarm id never exceeds MAX_ALARMS",
+                );
+                Ok(true)
+            }
+        }
+    }
+
+    /// See the module doc's "Auto-resolve" section. Internal only — no
+    /// Candid method reaches this in this task; a later observation/funding
+    /// task calls it once a condition is confirmed cleared.
+    pub(crate) fn resolve_at(
+        target: Option<Principal>,
+        kind: AlarmKind,
+        now_secs: u64,
+    ) -> Option<u64> {
+        let mut alarm = find_active_alarm(target, kind)?;
+        alarm.status = AlarmStatus::Resolved;
+        alarm.resolved_at_secs = Some(now_secs);
+        let id = alarm.id;
+        insert_alarm(alarm)
+            .expect("rumi_cycle_sentinel: resolving an existing alarm id never exceeds MAX_ALARMS");
+        Some(id)
+    }
 }
 
 // ─────────────────────── Samples ───────────────────────
@@ -1556,6 +1702,24 @@ pub(crate) fn list_nonterminal_operations() -> Vec<FundingOperation> {
             .iter()
             .map(|(_, v)| v.into_current())
             .filter(|op| !op.state().stops_automatic_retry())
+            .collect()
+    })
+}
+
+/// Unresolved (`!is_resolved()`), non-`SelfRecovery` operations only — the
+/// exact operation set `validate_whole_state`'s
+/// `OperationDailyCapExceedsGlobalCap` check walks (a resolved operation is
+/// an immutable historical snapshot never re-judged against a later policy;
+/// self-recovery has its own independent cap, checked separately). Used by
+/// `governance::check_targets_fit_global_cap` so a `SetGlobalPolicy`
+/// proposal can never write a cap that would trap the very next
+/// `post_upgrade`.
+pub(crate) fn list_unresolved_ordinary_operations() -> Vec<FundingOperation> {
+    FUNDING_OPERATIONS.with(|m| {
+        m.borrow()
+            .iter()
+            .map(|(_, v)| v.into_current())
+            .filter(|op| !op.state().is_resolved() && op.trigger() != FundingTrigger::SelfRecovery)
             .collect()
     })
 }
@@ -4365,10 +4529,10 @@ mod tests {
     }
 
     /// Self-enforcing eviction mirrors `insert_proposal`: the oldest
-    /// non-`Open` (`Acknowledged`/`Resolved`) alarm is evicted automatically
-    /// once a genuinely new id arrives at the bound.
+    /// `Resolved` alarm is evicted automatically once a genuinely new id
+    /// arrives at the bound.
     #[test]
-    fn alarm_insert_self_evicts_oldest_non_open_at_bound() {
+    fn alarm_insert_self_evicts_oldest_resolved_alarm_at_bound() {
         for i in 0..(types::MAX_ALARMS as u64 + 1) {
             let mut alarm = test_alarm(i, None);
             if i == 0 {
@@ -4391,9 +4555,71 @@ mod tests {
         }
         assert_eq!(
             insert_alarm(test_alarm(types::MAX_ALARMS as u64, None)),
-            Err(InsertAlarmError::TooManyOpenAlarms)
+            Err(InsertAlarmError::NoResolvedAlarmToEvict)
         );
         assert_eq!(ALARMS.with(|m| m.borrow().len()), types::MAX_ALARMS as u64);
+    }
+
+    /// Alarm review Blocker 1: fail-closed applies even when the map is full
+    /// of a MIX of `Open` and `Acknowledged` rows (not just all-`Open`) —
+    /// `Acknowledged` is still active per the `alarms` module's "only
+    /// `Resolved` is terminal" contract and must never be treated as an
+    /// eviction victim.
+    #[test]
+    fn alarm_insert_fails_closed_when_no_resolved_alarm_exists() {
+        for i in 0..(types::MAX_ALARMS as u64) {
+            let mut alarm = test_alarm(i, None);
+            if i == 0 {
+                alarm.status = types::AlarmStatus::Acknowledged;
+            }
+            insert_alarm(alarm).unwrap();
+        }
+        assert_eq!(
+            insert_alarm(test_alarm(types::MAX_ALARMS as u64, None)),
+            Err(InsertAlarmError::NoResolvedAlarmToEvict)
+        );
+        assert_eq!(ALARMS.with(|m| m.borrow().len()), types::MAX_ALARMS as u64);
+    }
+
+    /// Alarm review Blocker 1's exact reproduction, kept permanently as a
+    /// regression: an older `Acknowledged` alarm (still active) must survive
+    /// eviction even when a chronologically NEWER `Resolved` alarm (already
+    /// terminal) exists in the same map — eviction picks by terminal status
+    /// first, `opened_at_secs` only breaks ties among `Resolved` rows.
+    #[test]
+    fn raise_evicts_resolved_alarm_ahead_of_older_acknowledged_alarm_at_bound() {
+        let mut ids = Vec::with_capacity(types::MAX_ALARMS);
+        for i in 0..(types::MAX_ALARMS as u64) {
+            let id = next_alarm_id();
+            ids.push(id);
+            let mut alarm = test_alarm(id, None);
+            if i == 0 {
+                // Oldest row, but ACTIVE — must never be evicted.
+                alarm.status = types::AlarmStatus::Acknowledged;
+                alarm.opened_at_secs = 1;
+                alarm.acknowledged_at_secs = Some(1);
+            } else if i == 1 {
+                // Newer than id 0, but genuinely TERMINAL — the only valid
+                // eviction victim here.
+                alarm.status = types::AlarmStatus::Resolved;
+                alarm.opened_at_secs = 50;
+                alarm.resolved_at_secs = Some(50);
+            } else {
+                alarm.opened_at_secs = 100;
+            }
+            insert_alarm(alarm).unwrap();
+        }
+        let new_id =
+            alarms::raise_at(Some(test_target_principal(99)), AlarmKind::Unreachable, 500).unwrap();
+        assert_eq!(ALARMS.with(|m| m.borrow().len()), types::MAX_ALARMS as u64);
+        // The live, older Acknowledged alarm survives...
+        assert_eq!(
+            get_alarm(ids[0]).map(|a| a.status),
+            Some(types::AlarmStatus::Acknowledged)
+        );
+        // ...while the newer, but terminal, Resolved alarm is evicted.
+        assert_eq!(get_alarm(ids[1]), None);
+        assert!(get_alarm(new_id).is_some());
     }
 
     /// Overwriting an EXISTING alarm id (e.g. acknowledging/resolving it) is
@@ -4406,6 +4632,211 @@ mod tests {
         let mut resolved = test_alarm(0, None);
         resolved.status = types::AlarmStatus::Resolved;
         assert_eq!(insert_alarm(resolved), Ok(()));
+        assert_eq!(ALARMS.with(|m| m.borrow().len()), types::MAX_ALARMS as u64);
+    }
+
+    // ── alarm lifecycle (Task 2B): raise / acknowledge / resolve ──
+
+    #[test]
+    fn raise_dedupes_active_alarm_for_same_target_and_kind() {
+        let target = test_target_principal(1);
+        let first = alarms::raise_at(Some(target), AlarmKind::LowBalance, 100).unwrap();
+        let second = alarms::raise_at(Some(target), AlarmKind::LowBalance, 200).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(ALARMS.with(|m| m.borrow().len()), 1);
+        // The original `opened_at_secs` is untouched by the deduped call.
+        assert_eq!(get_alarm(first).unwrap().opened_at_secs, 100);
+    }
+
+    #[test]
+    fn raise_allocates_distinct_ids_for_distinct_kind_or_target() {
+        let target_a = test_target_principal(1);
+        let target_b = test_target_principal(2);
+        let low_a = alarms::raise_at(Some(target_a), AlarmKind::LowBalance, 100).unwrap();
+        let unreachable_a = alarms::raise_at(Some(target_a), AlarmKind::Unreachable, 100).unwrap();
+        let low_b = alarms::raise_at(Some(target_b), AlarmKind::LowBalance, 100).unwrap();
+        let global_low = alarms::raise_at(None, AlarmKind::LowBalance, 100).unwrap();
+        let ids = [low_a, unreachable_a, low_b, global_low];
+        let unique: BTreeSet<u64> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), ids.len());
+        assert_eq!(ALARMS.with(|m| m.borrow().len()), 4);
+    }
+
+    /// Once `Resolved`, a fresh detection of the same condition is a NEW
+    /// incident: `raise_at` allocates a new id rather than reopening the
+    /// resolved row, and the resolved row's own timestamps are untouched.
+    #[test]
+    fn raise_reraises_with_new_id_after_resolve() {
+        let target = test_target_principal(1);
+        let first = alarms::raise_at(Some(target), AlarmKind::LowBalance, 100).unwrap();
+        assert_eq!(
+            alarms::resolve_at(Some(target), AlarmKind::LowBalance, 150),
+            Some(first)
+        );
+        let second = alarms::raise_at(Some(target), AlarmKind::LowBalance, 200).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(ALARMS.with(|m| m.borrow().len()), 2);
+        let resolved = get_alarm(first).unwrap();
+        assert_eq!(resolved.status, types::AlarmStatus::Resolved);
+        assert_eq!(resolved.resolved_at_secs, Some(150));
+        let reopened = get_alarm(second).unwrap();
+        assert_eq!(reopened.status, types::AlarmStatus::Open);
+        assert_eq!(reopened.opened_at_secs, 200);
+    }
+
+    /// Dedup covers `Acknowledged`, not only `Open`: the underlying
+    /// condition is still active even though a signer has seen it, so
+    /// `raise_at` must reuse the same id and must NOT reset status back to
+    /// `Open`.
+    #[test]
+    fn raise_while_acknowledged_reuses_id_without_reopening_status() {
+        let target = test_target_principal(1);
+        let id = alarms::raise_at(Some(target), AlarmKind::LowBalance, 100).unwrap();
+        assert_eq!(alarms::acknowledge_at(id, 150), Ok(true));
+        let reused = alarms::raise_at(Some(target), AlarmKind::LowBalance, 200).unwrap();
+        assert_eq!(id, reused);
+        let alarm = get_alarm(id).unwrap();
+        assert_eq!(alarm.status, types::AlarmStatus::Acknowledged);
+        assert_eq!(alarm.acknowledged_at_secs, Some(150));
+    }
+
+    #[test]
+    fn acknowledge_rejects_missing_alarm() {
+        assert_eq!(
+            alarms::acknowledge_at(9_999, 100),
+            Err(alarms::AlarmError::AlarmNotFound)
+        );
+    }
+
+    /// Idempotent replay: a second `acknowledge_at` on an already
+    /// `Acknowledged` alarm is a no-op (`Ok(false)`) and does not overwrite
+    /// the original `acknowledged_at_secs`.
+    #[test]
+    fn acknowledge_replay_is_idempotent_and_preserves_original_timestamp() {
+        let id =
+            alarms::raise_at(Some(test_target_principal(1)), AlarmKind::LowBalance, 100).unwrap();
+        assert_eq!(alarms::acknowledge_at(id, 150), Ok(true));
+        assert_eq!(alarms::acknowledge_at(id, 999), Ok(false));
+        assert_eq!(get_alarm(id).unwrap().acknowledged_at_secs, Some(150));
+    }
+
+    #[test]
+    fn acknowledge_rejects_resolved_alarm() {
+        let target = test_target_principal(1);
+        let id = alarms::raise_at(Some(target), AlarmKind::LowBalance, 100).unwrap();
+        alarms::resolve_at(Some(target), AlarmKind::LowBalance, 150).unwrap();
+        assert_eq!(
+            alarms::acknowledge_at(id, 200),
+            Err(alarms::AlarmError::AlarmAlreadyResolved)
+        );
+    }
+
+    /// Auto-resolve reaches an `Acknowledged` alarm too, not only `Open`
+    /// ones — acknowledgement suppresses noise for a signer, it does not
+    /// change what "the condition cleared" means.
+    #[test]
+    fn resolve_clears_acknowledged_alarm() {
+        let target = test_target_principal(1);
+        let id = alarms::raise_at(Some(target), AlarmKind::LowBalance, 100).unwrap();
+        alarms::acknowledge_at(id, 120).unwrap();
+        assert_eq!(
+            alarms::resolve_at(Some(target), AlarmKind::LowBalance, 150),
+            Some(id)
+        );
+        assert_eq!(get_alarm(id).unwrap().status, types::AlarmStatus::Resolved);
+    }
+
+    /// Idempotent, exact: resolving with no matching active alarm (never
+    /// raised, or already resolved) is a silent no-op, and resolving one
+    /// `(target, kind)` pair never touches a different alarm.
+    #[test]
+    fn resolve_auto_resolve_replay_is_idempotent_and_exact() {
+        let target = test_target_principal(1);
+        assert_eq!(
+            alarms::resolve_at(Some(target), AlarmKind::LowBalance, 100),
+            None
+        );
+        let low = alarms::raise_at(Some(target), AlarmKind::LowBalance, 100).unwrap();
+        let unreachable = alarms::raise_at(Some(target), AlarmKind::Unreachable, 100).unwrap();
+        assert_eq!(
+            alarms::resolve_at(Some(target), AlarmKind::LowBalance, 150),
+            Some(low)
+        );
+        // Replay: already resolved, so a second call is a no-op.
+        assert_eq!(
+            alarms::resolve_at(Some(target), AlarmKind::LowBalance, 999),
+            None
+        );
+        assert_eq!(get_alarm(low).unwrap().resolved_at_secs, Some(150));
+        // The unrelated `Unreachable` alarm for the same target was never touched.
+        assert_eq!(
+            get_alarm(unreachable).unwrap().status,
+            types::AlarmStatus::Open
+        );
+    }
+
+    /// `raise_at` inherits `insert_alarm`'s fail-closed-at-bound behavior
+    /// when every alarm is still `Open` and the new `(target, kind)` pair
+    /// genuinely has no active alarm to dedupe against. Fills the bound via
+    /// `next_alarm_id()` (not a hand-picked `0..MAX_ALARMS` range like the
+    /// plain `insert_alarm` bound tests above use) so the alarm-id counter
+    /// stays in sync with what is actually stored — `raise_at` itself always
+    /// draws from that same counter, and a test that let the two drift out
+    /// of sync could let `raise_at`'s own next id collide with an
+    /// already-used one and silently overwrite it instead of hitting the
+    /// bound.
+    #[test]
+    fn raise_fails_closed_when_every_alarm_is_open_at_bound() {
+        for _ in 0..(types::MAX_ALARMS as u64) {
+            let id = next_alarm_id();
+            insert_alarm(test_alarm(id, None)).unwrap();
+        }
+        assert_eq!(
+            alarms::raise_at(Some(test_target_principal(1)), AlarmKind::LowBalance, 100),
+            Err(alarms::AlarmError::NoResolvedAlarmToEvict)
+        );
+        assert_eq!(ALARMS.with(|m| m.borrow().len()), types::MAX_ALARMS as u64);
+    }
+
+    /// `raise_at` inherits `insert_alarm`'s self-eviction of the oldest
+    /// `Resolved` alarm at the bound. See the previous test's doc for why
+    /// the fill loop draws ids from `next_alarm_id()`.
+    #[test]
+    fn raise_evicts_oldest_resolved_alarm_at_bound() {
+        let mut ids = Vec::with_capacity(types::MAX_ALARMS);
+        for i in 0..(types::MAX_ALARMS as u64) {
+            let id = next_alarm_id();
+            ids.push(id);
+            let mut alarm = test_alarm(id, None);
+            if i == 0 {
+                alarm.status = types::AlarmStatus::Resolved;
+            }
+            insert_alarm(alarm).unwrap();
+        }
+        let new_id =
+            alarms::raise_at(Some(test_target_principal(1)), AlarmKind::LowBalance, 100).unwrap();
+        assert_eq!(ALARMS.with(|m| m.borrow().len()), types::MAX_ALARMS as u64);
+        assert_eq!(get_alarm(ids[0]), None);
+        assert!(get_alarm(new_id).is_some());
+    }
+
+    /// `acknowledge_at`/`resolve_at` only ever overwrite an existing id, so
+    /// neither can fail at the bound even when every alarm is `Open`. See
+    /// `raise_fails_closed_when_every_alarm_is_open_at_bound`'s doc for why
+    /// the fill loop draws ids from `next_alarm_id()`.
+    #[test]
+    fn acknowledge_and_resolve_never_fail_at_bound() {
+        let mut ids = Vec::with_capacity(types::MAX_ALARMS);
+        for _ in 0..(types::MAX_ALARMS as u64) {
+            let id = next_alarm_id();
+            ids.push(id);
+            insert_alarm(test_alarm(id, None)).unwrap();
+        }
+        assert_eq!(alarms::acknowledge_at(ids[0], 100), Ok(true));
+        // Which specific alarm `resolve_at` picks among the many sharing
+        // `(None, LowBalance)` is not the point here — only that neither
+        // call fails/panics once the store is at its bound.
+        assert!(alarms::resolve_at(None, AlarmKind::LowBalance, 100).is_some());
         assert_eq!(ALARMS.with(|m| m.borrow().len()), types::MAX_ALARMS as u64);
     }
 

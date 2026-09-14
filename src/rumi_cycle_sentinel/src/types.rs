@@ -117,7 +117,7 @@ fn cycles_ledger_principal() -> Principal {
     Principal::from_text("um5iw-rqaaa-aaaaq-qaaba-cai").unwrap()
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReservedPrincipalKind {
     Anonymous,
     SentinelSelf,
@@ -346,7 +346,7 @@ pub struct GovernanceTimelocksArgs {
     pub unpause_secs: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GovernanceTimelocksError {
     ZeroTargetRegistrySecs,
     ZeroSpendPolicySecs,
@@ -438,7 +438,7 @@ pub struct GlobalPolicyArgs {
     pub self_recovery_policy: SelfRecoveryPolicyArgs,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub enum GlobalPolicyError {
     CyclesValueOverflow,
     ZeroGlobalDailyCap,
@@ -627,7 +627,7 @@ pub struct TargetFundingPolicyArgs {
     pub burn_anomaly_limit_cycles_per_day: Option<Nat>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TargetValidationError {
     ReservedPrincipal(ReservedPrincipalKind),
     DuplicateTarget,
@@ -2689,7 +2689,7 @@ pub struct SelfRecoveryPolicyArgs {
     pub refill_cycles: Nat,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelfRecoveryPolicyError {
     CyclesValueOverflow,
     ZeroLowBalanceThreshold,
