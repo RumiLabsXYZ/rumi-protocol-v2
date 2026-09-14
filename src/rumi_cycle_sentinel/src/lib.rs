@@ -3,6 +3,8 @@ use rumi_cycle_manager::{
     DEFAULT_LOW_WATERMARK_CYCLES,
 };
 
+mod types;
+
 #[ic_cdk::query]
 fn cycles_status() -> CycleManagerCyclesStatus {
     self_cycles_status(

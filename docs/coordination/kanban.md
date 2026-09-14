@@ -66,7 +66,7 @@ Plan: `docs/superpowers/plans/2026-09-13-cycle-sentinel-telemetry.md`
 | CS-01 | Done | Sonnet backend mapper | Map canister, state, Candid, and test integration | None | Accepted `/private/tmp/cycle-sentinel-backend-map.md` |
 | CS-02 | Done | Sonnet frontend mapper | Map both telemetry surfaces | None | Accepted `/private/tmp/cycle-sentinel-frontend-map.md` |
 | CS-03 | Done | Sonnet reference mapper | Audit delegated-vault reuse and failure gaps | None | Accepted `/private/tmp/cycle-sentinel-reference-map.md` |
-| CS-10 | In progress | Sonnet Task 1 implementer | Stable domain, registry, and governance | CS-00 | Claimed in current worktree; Task 1 file scope only |
+| CS-10 | In progress | Sonnet Task 1 implementer | Stable domain, registry, and governance | CS-00 | Domain model accepted after 191 tests and fresh Sonnet closeout PASS; stable state remains in progress |
 | CS-11 | Blocked | Unassigned | Observation, history, and public API | CS-10 | Dependency not complete |
 | CS-12 | Blocked | Unassigned | Both funding rails, recovery, and reconciliation | CS-10, CS-11 | Dependencies not complete |
 | CS-13 | Blocked | Unassigned | Timers, Candid, config, declarations, and PocketIC | CS-10 through CS-12 | Dependencies not complete |
@@ -93,7 +93,7 @@ Plan: `docs/superpowers/plans/2026-09-13-cycle-sentinel-telemetry.md`
 - File ownership: `src/rumi_cycle_sentinel/Cargo.toml`, `src/rumi_cycle_sentinel/src/{lib,types,state}.rs`, root `Cargo.toml`, and `Cargo.lock` only when dependency resolution requires it.
 - Acceptance: disabled defaults, strict init signer validation, reserved-principal and bound checks, versioned stable round trips, distinct memory IDs, focused tests, host check, and Wasm build.
 - Worktree/branch: `/Users/robertripley/.codex/worktrees/455c/rumi-protocol-v2`, `codex/cycle-sentinel-telemetry`.
-- Review evidence: pending implementer report and separate Sonnet specification review.
+- Review evidence: Task 1b domain model passed 191 focused tests, host check, Wasm release build, and fresh Sonnet closeout review after closing findings 1-10 and A-H. Task 1c stable-memory wiring and whole-state validation remain pending.
 
 ## Cycle Sentinel coordination rules
 
