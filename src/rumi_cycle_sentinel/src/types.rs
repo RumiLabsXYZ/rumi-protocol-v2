@@ -60,6 +60,14 @@ pub const MAX_SAMPLES_PER_TARGET: usize = 2_160;
 pub const MAX_ALARMS: usize = 1_024;
 pub const MAX_PROPOSALS: usize = 256;
 pub const MAX_TERMINAL_SUMMARIES: usize = 512;
+/// `FUNDING_OPERATIONS` (memory ID 8) retains unresolved operations only —
+/// a resolved operation is compacted into a `TerminalFundingSummary` and
+/// removed in the same call (`state::compact_operation`). At most one
+/// unresolved operation may exist per registered ordinary target
+/// (`MAX_TARGETS`), plus Sentinel's own single self-recovery lane, so this
+/// is the whole-state ceiling for the store — never an eviction target,
+/// since an unresolved operation is never safely prunable.
+pub const MAX_FUNDING_OPERATIONS: usize = MAX_TARGETS + 1;
 pub const MAX_PUBLIC_PAGE: usize = 100;
 /// Shared byte bound for `TargetArgs::display_name` and `TargetArgs::project`.
 pub const MAX_NAME_BYTES: usize = 64;
@@ -1409,6 +1417,21 @@ impl FundingRailArguments {
             Self::Icp(snapshot) => snapshot.expected_cycles,
         }
     }
+
+    /// The recipient embedded in this rail's own snapshot
+    /// (`CyclesWithdrawSnapshot::destination` or
+    /// `IcpCmcSnapshot::target_canister`) — the ground truth for where the
+    /// rail executor actually sends cycles. `FundingOperation::open` and its
+    /// decode-time re-validation both check `target` against this, mirroring
+    /// the existing `embedded_amount_cycles` check, so "who this operation is
+    /// for" (`target`, everything else in this file reasons about) can never
+    /// silently diverge from "who the outbound call actually pays."
+    pub fn embedded_destination(&self) -> Principal {
+        match self {
+            Self::Cycles(snapshot) => snapshot.destination,
+            Self::Icp(snapshot) => snapshot.target_canister,
+        }
+    }
 }
 
 #[derive(CandidType, Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -1684,6 +1707,13 @@ pub enum FundingOperationOpenError {
     /// reservation and the actual rail call could disagree about how much
     /// is being spent.
     ReservedAmountMismatch,
+    /// `target` must exactly match the recipient embedded in
+    /// `rail_arguments` (`CyclesWithdrawSnapshot::destination` or
+    /// `IcpCmcSnapshot::target_canister`) — otherwise every piece of this
+    /// file's bookkeeping (reservation linkage, cascade-delete on
+    /// `remove_target`, the public API) could reason about a recipient
+    /// different from the one the rail executor actually pays.
+    DestinationMismatch,
 }
 
 /// Every field except `state`, `attempts`, `confirmed_block_index`, and
@@ -1734,6 +1764,9 @@ impl FundingOperation {
         };
         if reserved_amount_cycles != rail_arguments.embedded_amount_cycles() {
             return Err(FundingOperationOpenError::ReservedAmountMismatch);
+        }
+        if target != rail_arguments.embedded_destination() {
+            return Err(FundingOperationOpenError::DestinationMismatch);
         }
         Ok(Self {
             id,
@@ -1941,6 +1974,11 @@ impl<'de> Deserialize<'de> for FundingOperation {
         if raw.reserved_amount_cycles != raw.rail_arguments.embedded_amount_cycles() {
             return Err(invariant_decode_error(
                 FundingOperationOpenError::ReservedAmountMismatch,
+            ));
+        }
+        if raw.target != raw.rail_arguments.embedded_destination() {
+            return Err(invariant_decode_error(
+                FundingOperationOpenError::DestinationMismatch,
             ));
         }
         if raw.confirmed_block_index.is_some() && raw.rail_arguments.rail() != FundingRail::IcpCmc {
@@ -2751,26 +2789,107 @@ impl SelfRecoveryPolicy {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelfRecoveryStateError {
     AlreadyInFlight,
+    Overflow,
+    CapExceeded,
+    DuplicateOperation,
+    Bound,
 }
 
-/// Stable memory ID 12. While an operation is in flight, ordinary target
-/// distribution must be suppressed entirely.
-#[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelfRecoverySettleError {
+    Mismatch,
+    /// Propagated from `RollingSpendLedger::settle`'s `Bound`: see that
+    /// variant's doc comment.
+    Bound,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelfRecoveryReleaseError {
+    Mismatch,
+}
+
+#[derive(Debug)]
+struct MoreThanOnePendingSelfRecoveryReservationError;
+
+/// Stable memory ID 12 (current/V2 shape; see `state.rs`'s versioned-envelope
+/// pattern for the frozen V1 predecessor and its migration). While an
+/// operation is in flight, ordinary target distribution must be suppressed
+/// entirely.
+///
+/// `rolling_spend` is this lane's OWN independent ledger, checked against
+/// `SelfRecoveryPolicy.daily_cap_cycles` — it is never
+/// `TARGET_RESERVATIONS` or `GLOBAL_ROLLING_SPEND`, which back ordinary
+/// registry targets only (design doc: self-recovery is "a hard-coded lane
+/// outside the dynamic registry" and "ordinary targets cannot consume the
+/// protected self-recovery reserve").
+#[derive(CandidType, Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct SelfRecoveryState {
-    in_flight_operation_id: Option<u64>,
+    rolling_spend: RollingSpendLedger,
     last_recovery_at_secs: Option<u64>,
+}
+
+/// Re-enforces the same "at most one pending reservation" invariant
+/// `TargetReservationState` enforces for its own singleton-lane ledger:
+/// self-recovery is hard-coded to at most one in-flight operation at a time,
+/// so a decoded value with more than one pending entry is corrupt.
+impl<'de> Deserialize<'de> for SelfRecoveryState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Raw {
+            rolling_spend: RollingSpendLedger,
+            last_recovery_at_secs: Option<u64>,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+        if raw.rolling_spend.pending().len() > 1 {
+            return Err(invariant_decode_error(
+                MoreThanOnePendingSelfRecoveryReservationError,
+            ));
+        }
+        Ok(Self {
+            rolling_spend: raw.rolling_spend,
+            last_recovery_at_secs: raw.last_recovery_at_secs,
+        })
+    }
 }
 
 impl SelfRecoveryState {
     pub fn new() -> Self {
         Self {
-            in_flight_operation_id: None,
+            rolling_spend: RollingSpendLedger::new(),
             last_recovery_at_secs: None,
         }
     }
 
+    /// Used only by `state.rs`'s V1 -> V2 migration. Legacy V1 bytes predate
+    /// this ledger and carry no reserved-amount data, so migration always
+    /// starts from an empty ledger rather than guessing an amount: if a
+    /// genuinely live self-recovery operation still exists post-migration,
+    /// `validate_whole_state`'s reverse in-flight check traps the upgrade
+    /// instead of silently fabricating an unrecoverable amount.
+    pub(crate) fn from_legacy(last_recovery_at_secs: Option<u64>) -> Self {
+        Self {
+            rolling_spend: RollingSpendLedger::new(),
+            last_recovery_at_secs,
+        }
+    }
+
     pub fn in_flight_operation_id(&self) -> Option<u64> {
-        self.in_flight_operation_id
+        self.rolling_spend.pending_operation_id()
+    }
+
+    pub fn in_flight_amount_cycles(&self) -> Option<u128> {
+        self.rolling_spend
+            .pending()
+            .first()
+            .map(|p| p.amount_cycles)
+    }
+
+    pub fn rolling_spend(&self) -> &RollingSpendLedger {
+        &self.rolling_spend
     }
 
     pub fn last_recovery_at_secs(&self) -> Option<u64> {
@@ -2778,24 +2897,78 @@ impl SelfRecoveryState {
     }
 
     pub fn is_suppressing_distribution(&self) -> bool {
-        self.in_flight_operation_id.is_some()
+        self.in_flight_operation_id().is_some()
     }
 
-    pub fn begin(&self, operation_id: u64) -> Result<Self, SelfRecoveryStateError> {
-        if self.in_flight_operation_id.is_some() {
+    /// Reserves `amount_cycles` against `cap_cycles` (the live
+    /// `SelfRecoveryPolicy.daily_cap_cycles`) before any await, mirroring
+    /// `TargetReservationState::reserve`'s in-flight guard.
+    pub fn begin(
+        &self,
+        operation_id: u64,
+        amount_cycles: u128,
+        now_secs: u64,
+        window_secs: u64,
+        cap_cycles: u128,
+    ) -> Result<Self, SelfRecoveryStateError> {
+        if self.in_flight_operation_id().is_some() {
             return Err(SelfRecoveryStateError::AlreadyInFlight);
         }
+        let rolling_spend = self
+            .rolling_spend
+            .reserve(
+                operation_id,
+                amount_cycles,
+                now_secs,
+                window_secs,
+                cap_cycles,
+            )
+            .map_err(|err| match err {
+                RollingSpendReserveError::Overflow => SelfRecoveryStateError::Overflow,
+                RollingSpendReserveError::CapExceeded => SelfRecoveryStateError::CapExceeded,
+                RollingSpendReserveError::DuplicateOperation => {
+                    SelfRecoveryStateError::DuplicateOperation
+                }
+                RollingSpendReserveError::Bound => SelfRecoveryStateError::Bound,
+            })?;
         Ok(Self {
-            in_flight_operation_id: Some(operation_id),
+            rolling_spend,
             last_recovery_at_secs: self.last_recovery_at_secs,
         })
     }
 
-    pub fn complete(&self, completed_at_secs: u64) -> Self {
-        Self {
-            in_flight_operation_id: None,
+    /// Confirmed spend: moves the reservation to a settled ledger entry and
+    /// records `completed_at_secs` as the last recovery time.
+    pub fn complete(
+        &self,
+        operation_id: u64,
+        completed_at_secs: u64,
+        window_secs: u64,
+    ) -> Result<Self, SelfRecoverySettleError> {
+        let rolling_spend = self
+            .rolling_spend
+            .settle(operation_id, completed_at_secs, window_secs)
+            .map_err(|err| match err {
+                RollingSpendSettleError::UnknownOperation => SelfRecoverySettleError::Mismatch,
+                RollingSpendSettleError::Bound => SelfRecoverySettleError::Bound,
+            })?;
+        Ok(Self {
+            rolling_spend,
             last_recovery_at_secs: Some(completed_at_secs),
-        }
+        })
+    }
+
+    /// Proven no-spend: releases only the matching pending reservation and
+    /// leaves `last_recovery_at_secs` untouched.
+    pub fn release_no_spend(&self, operation_id: u64) -> Result<Self, SelfRecoveryReleaseError> {
+        let rolling_spend = self
+            .rolling_spend
+            .release_no_spend(operation_id)
+            .map_err(|_| SelfRecoveryReleaseError::Mismatch)?;
+        Ok(Self {
+            rolling_spend,
+            last_recovery_at_secs: self.last_recovery_at_secs,
+        })
     }
 }
 
@@ -4519,6 +4692,94 @@ mod tests {
         );
     }
 
+    // ─── FundingOperation::open target/destination consistency (Finding N3) ───
+
+    #[test]
+    fn open_rejects_target_disagreeing_with_cycles_snapshot_destination() {
+        let target = target_principal(1);
+        let different_destination = target_principal(2);
+        assert_eq!(
+            FundingOperation::open(
+                1,
+                target,
+                1,
+                test_funding_policy(),
+                FundingTrigger::LowBalanceAutoTopup,
+                FundingRailArguments::Cycles(cycles_withdraw_snapshot(different_destination)),
+                10,
+                0,
+            ),
+            Err(FundingOperationOpenError::DestinationMismatch)
+        );
+    }
+
+    #[test]
+    fn open_rejects_target_disagreeing_with_icp_snapshot_destination() {
+        let target = target_principal(1);
+        let different_destination = target_principal(2);
+        assert_eq!(
+            FundingOperation::open(
+                1,
+                target,
+                1,
+                test_funding_policy(),
+                FundingTrigger::LowBalanceAutoTopup,
+                FundingRailArguments::Icp(icp_cmc_snapshot(different_destination)),
+                10,
+                0,
+            ),
+            Err(FundingOperationOpenError::DestinationMismatch)
+        );
+    }
+
+    #[test]
+    fn funding_operation_decode_rejects_target_disagreeing_with_snapshot_destination() {
+        // Built by bypassing `open`'s checked constructor entirely (mirrors
+        // the review's own repro): construct a value whose `target` differs
+        // from its `rail_arguments`' embedded destination, encode it with
+        // the SAME `#[derive(CandidType, Serialize)]` shape `FundingOperation`
+        // itself derives, then decode through the real (checked) `Deserialize`
+        // impl. This can only ever be reached via a corrupt/legacy blob, not
+        // through any safe-code constructor — exactly what the custom
+        // `Deserialize` impl exists to catch at the stable-memory boundary.
+        #[derive(CandidType, Serialize)]
+        struct RawFundingOperationForTest {
+            id: u64,
+            target: Principal,
+            target_registry_revision: u64,
+            funding_policy: TargetFundingPolicy,
+            trigger: FundingTrigger,
+            rail_arguments: FundingRailArguments,
+            reserved_amount_cycles: u128,
+            state: FundingOperationState,
+            attempts: FundingAttempts,
+            confirmed_block_index: Option<u64>,
+            created_at_secs: u64,
+            updated_at_secs: u64,
+        }
+        let target = target_principal(1);
+        let different_destination = target_principal(2);
+        let raw = RawFundingOperationForTest {
+            id: 1,
+            target,
+            target_registry_revision: 1,
+            funding_policy: test_funding_policy(),
+            trigger: FundingTrigger::LowBalanceAutoTopup,
+            rail_arguments: FundingRailArguments::Cycles(cycles_withdraw_snapshot(
+                different_destination,
+            )),
+            reserved_amount_cycles: 10,
+            state: FundingOperationState::Cycles(CyclesFundingState::PlannedReserved),
+            attempts: FundingAttempts::new(),
+            confirmed_block_index: None,
+            created_at_secs: 0,
+            updated_at_secs: 0,
+        };
+        let bytes = candid::encode_one(&raw).unwrap();
+        let decoded: Result<FundingOperation, _> = candid::decode_one(&bytes);
+        assert!(decoded.is_err());
+    }
+
     // ─── FundingOperation::attach_confirmed_block ───
 
     #[test]
@@ -5010,24 +5271,81 @@ mod tests {
     fn self_recovery_state_begin_suppresses_distribution() {
         let state = SelfRecoveryState::new();
         assert!(!state.is_suppressing_distribution());
-        let started = state.begin(1).unwrap();
+        let started = state.begin(1, 10, 0, 86_400, 100).unwrap();
         assert!(started.is_suppressing_distribution());
         assert_eq!(started.in_flight_operation_id(), Some(1));
+        assert_eq!(started.in_flight_amount_cycles(), Some(10));
     }
 
     #[test]
     fn self_recovery_state_begin_rejects_second_start_while_unresolved() {
-        let state = SelfRecoveryState::new().begin(1).unwrap();
-        assert_eq!(state.begin(2), Err(SelfRecoveryStateError::AlreadyInFlight));
+        let state = SelfRecoveryState::new()
+            .begin(1, 10, 0, 86_400, 100)
+            .unwrap();
+        assert_eq!(
+            state.begin(2, 10, 1, 86_400, 100),
+            Err(SelfRecoveryStateError::AlreadyInFlight)
+        );
+    }
+
+    #[test]
+    fn self_recovery_state_begin_rejects_amount_exceeding_daily_cap() {
+        let state = SelfRecoveryState::new();
+        assert_eq!(
+            state.begin(1, 101, 0, 86_400, 100),
+            Err(SelfRecoveryStateError::CapExceeded)
+        );
     }
 
     #[test]
     fn self_recovery_state_complete_clears_suppression_and_records_time() {
-        let state = SelfRecoveryState::new().begin(1).unwrap();
-        let completed = state.complete(500);
+        let state = SelfRecoveryState::new()
+            .begin(1, 10, 0, 86_400, 100)
+            .unwrap();
+        let completed = state.complete(1, 500, 86_400).unwrap();
         assert!(!completed.is_suppressing_distribution());
         assert_eq!(completed.in_flight_operation_id(), None);
         assert_eq!(completed.last_recovery_at_secs(), Some(500));
+    }
+
+    #[test]
+    fn self_recovery_state_complete_rejects_mismatched_operation_id() {
+        let state = SelfRecoveryState::new()
+            .begin(1, 10, 0, 86_400, 100)
+            .unwrap();
+        assert_eq!(
+            state.complete(2, 500, 86_400),
+            Err(SelfRecoverySettleError::Mismatch)
+        );
+    }
+
+    #[test]
+    fn self_recovery_state_release_no_spend_clears_suppression_without_recording_time() {
+        let state = SelfRecoveryState::new()
+            .begin(1, 10, 0, 86_400, 100)
+            .unwrap();
+        let released = state.release_no_spend(1).unwrap();
+        assert!(!released.is_suppressing_distribution());
+        assert_eq!(released.last_recovery_at_secs(), None);
+    }
+
+    #[test]
+    fn self_recovery_state_release_no_spend_rejects_mismatched_operation_id() {
+        let state = SelfRecoveryState::new()
+            .begin(1, 10, 0, 86_400, 100)
+            .unwrap();
+        assert_eq!(
+            state.release_no_spend(2),
+            Err(SelfRecoveryReleaseError::Mismatch)
+        );
+    }
+
+    #[test]
+    fn self_recovery_state_from_legacy_starts_with_empty_ledger() {
+        let migrated = SelfRecoveryState::from_legacy(Some(777));
+        assert!(!migrated.is_suppressing_distribution());
+        assert_eq!(migrated.in_flight_operation_id(), None);
+        assert_eq!(migrated.last_recovery_at_secs(), Some(777));
     }
 
     // ─── Public read models ───
@@ -5648,6 +5966,63 @@ mod tests {
         let bytes = Encode!(&raw).unwrap();
         let state = Decode!(&bytes, GlobalRollingSpendState).unwrap();
         assert_eq!(state.rolling_spend().pending().len(), 2);
+    }
+
+    #[derive(CandidType, Serialize)]
+    struct RawSelfRecoveryStateForTest {
+        rolling_spend: RawRollingSpendLedgerForTest,
+        last_recovery_at_secs: Option<u64>,
+    }
+
+    #[test]
+    fn self_recovery_state_decode_rejects_more_than_one_pending() {
+        // Mirrors `target_reservation_state_decode_rejects_more_than_one_pending`:
+        // self-recovery is hard-coded to one in-flight operation, so its own
+        // decode-time check (not reachable through `begin`'s in-flight
+        // guard) must catch this.
+        let raw = RawSelfRecoveryStateForTest {
+            rolling_spend: RawRollingSpendLedgerForTest {
+                settled: Vec::new(),
+                pending: vec![
+                    PendingReservation {
+                        operation_id: 1,
+                        amount_cycles: 10,
+                        reserved_at_secs: 0,
+                    },
+                    PendingReservation {
+                        operation_id: 2,
+                        amount_cycles: 5,
+                        reserved_at_secs: 1,
+                    },
+                ],
+            },
+            last_recovery_at_secs: None,
+        };
+        let bytes = Encode!(&raw).unwrap();
+        assert!(Decode!(&bytes, SelfRecoveryState).is_err());
+    }
+
+    #[test]
+    fn self_recovery_state_decode_accepts_valid_round_trip() {
+        let raw = RawSelfRecoveryStateForTest {
+            rolling_spend: RawRollingSpendLedgerForTest {
+                settled: vec![SpendEntry {
+                    settled_at_secs: 0,
+                    amount_cycles: 10,
+                }],
+                pending: vec![PendingReservation {
+                    operation_id: 1,
+                    amount_cycles: 5,
+                    reserved_at_secs: 1,
+                }],
+            },
+            last_recovery_at_secs: Some(42),
+        };
+        let bytes = Encode!(&raw).unwrap();
+        let state = Decode!(&bytes, SelfRecoveryState).unwrap();
+        assert_eq!(state.in_flight_operation_id(), Some(1));
+        assert_eq!(state.in_flight_amount_cycles(), Some(5));
+        assert_eq!(state.last_recovery_at_secs(), Some(42));
     }
 
     #[derive(CandidType, Serialize)]

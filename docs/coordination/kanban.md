@@ -66,7 +66,7 @@ Plan: `docs/superpowers/plans/2026-09-13-cycle-sentinel-telemetry.md`
 | CS-01 | Done | Sonnet backend mapper | Map canister, state, Candid, and test integration | None | Accepted `/private/tmp/cycle-sentinel-backend-map.md` |
 | CS-02 | Done | Sonnet frontend mapper | Map both telemetry surfaces | None | Accepted `/private/tmp/cycle-sentinel-frontend-map.md` |
 | CS-03 | Done | Sonnet reference mapper | Audit delegated-vault reuse and failure gaps | None | Accepted `/private/tmp/cycle-sentinel-reference-map.md` |
-| CS-10 | In progress | Sonnet Task 1 implementer | Stable domain, registry, and governance | CS-00 | Domain model accepted after 191 tests and fresh Sonnet closeout PASS; stable state remains in progress |
+| CS-10 | In progress | Sonnet Task 2 implementer | Stable domain, registry, and governance | CS-00 | Domain + stable state accepted after 343 tests, release Wasm build, and two fresh Sonnet closeout PASS verdicts; governance remains |
 | CS-11 | Blocked | Unassigned | Observation, history, and public API | CS-10 | Dependency not complete |
 | CS-12 | Blocked | Unassigned | Both funding rails, recovery, and reconciliation | CS-10, CS-11 | Dependencies not complete |
 | CS-13 | Blocked | Unassigned | Timers, Candid, config, declarations, and PocketIC | CS-10 through CS-12 | Dependencies not complete |
