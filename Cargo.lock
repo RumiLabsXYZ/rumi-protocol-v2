@@ -7271,6 +7271,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rumi_cycle_sentinel"
+version = "0.1.0"
+dependencies = [
+ "candid",
+ "ic-cdk 0.12.2",
+ "ic-cdk-timers 0.10.0",
+ "ic-stable-structures",
+ "rumi_cycle_manager",
+ "serde",
+ "serde_bytes",
+ "sha2",
+]
+
+[[package]]
 name = "rumi_points"
 version = "0.1.0"
 dependencies = [

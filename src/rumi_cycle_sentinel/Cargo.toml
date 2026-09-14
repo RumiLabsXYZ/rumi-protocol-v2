@@ -1,0 +1,18 @@
+[package]
+name = "rumi_cycle_sentinel"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+candid = "0.10.6"
+serde = { version = "1.0.210", features = ["derive"] }
+ic-cdk = "0.12.0"
+ic-cdk-timers = "0.10.0"
+ic-stable-structures = "0.6.5"
+serde_bytes = "0.11"
+sha2 = "0.10.2"
+rumi_cycle_manager = { path = "../rumi_cycle_manager" }
