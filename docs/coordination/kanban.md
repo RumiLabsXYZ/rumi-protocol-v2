@@ -47,3 +47,50 @@ Updated: 2026-09-13
 - A fallback to Luna must be recorded here with the Sonnet failure reason before work starts.
 - Only the coordinator may perform merges, canister upgrades, DNS mutations, config mutations, activation, or fund-moving tests.
 - Production readiness is an exact-head and live-state claim, not a build-only claim.
+
+---
+
+# Cycle Sentinel implementation board
+
+Last updated: 2026-09-13
+
+Branch: `codex/cycle-sentinel-telemetry`
+
+Spec: `docs/superpowers/specs/2026-09-13-cycle-sentinel-telemetry-design.md`
+
+Plan: `docs/superpowers/plans/2026-09-13-cycle-sentinel-telemetry.md`
+
+| ID | State | Owner | Task | Depends on | Evidence / blocker |
+| --- | --- | --- | --- | --- | --- |
+| CS-00 | Done | Codex coordinator | Lock executable plan and interfaces | None | Fresh Sonnet review PASS; coordinator corrected proxy, execution, and card-ID issues |
+| CS-01 | Done | Sonnet backend mapper | Map canister, state, Candid, and test integration | None | Accepted `/private/tmp/cycle-sentinel-backend-map.md` |
+| CS-02 | Done | Sonnet frontend mapper | Map both telemetry surfaces | None | Accepted `/private/tmp/cycle-sentinel-frontend-map.md` |
+| CS-03 | Done | Sonnet reference mapper | Audit delegated-vault reuse and failure gaps | None | Accepted `/private/tmp/cycle-sentinel-reference-map.md` |
+| CS-10 | Ready | Unassigned | Stable domain, registry, and governance | CS-00 | Approved plan; ready for one sequential Sonnet implementer |
+| CS-11 | Blocked | Unassigned | Observation, history, and public API | CS-10 | Dependency not complete |
+| CS-12 | Blocked | Unassigned | Both funding rails, recovery, and reconciliation | CS-10, CS-11 | Dependencies not complete |
+| CS-13 | Blocked | Unassigned | Timers, Candid, config, declarations, and PocketIC | CS-10 through CS-12 | Dependencies not complete |
+| CS-20 | Blocked | Unassigned | Public root-domain telemetry UI | CS-13 | Dependency not complete |
+| CS-21 | Blocked | Unassigned | Authenticated operator telemetry UI | CS-13 | Dependency not complete |
+| CS-30 | Blocked | Codex plus two fresh Sonnet reviewers | Deterministic and adversarial source gate | CS-10 through CS-21 | Source not complete |
+| CS-40 | Blocked | Codex coordinator | Push, PR, terminal exact-head CI, and merge | CS-30 | Source gate not complete |
+| CS-50 | Blocked | Codex live operator | Create, deploy, and verify Sentinel | CS-40 | Requires merged exact-head rebuild and live preflight |
+| CS-51 | Blocked | Codex live operator | Add verified blackhole as an additional controller | CS-50 | One target at a time with before/after controller proof |
+| CS-52 | Blocked | Codex live operator | Fund, shadow, and activate policies incrementally | CS-50, CS-51 | Exact policy manifest must be authoritative |
+| CS-53 | Blocked | Codex live operator | Remove CycleOps after replacement proof | CS-52 | Terminal cutover gate |
+
+## CS-00 details
+
+- Scope: approved design, implementation plan, shared interfaces, task ordering, and board transitions only.
+- Worktree/branch: `/Users/robertripley/.codex/worktrees/455c/rumi-protocol-v2`, `codex/cycle-sentinel-telemetry`.
+- Acceptance: every approved requirement maps to a task, shared files have sequential ownership, and exact source, merge, and live gates are explicit.
+- Owner/harness: Codex coordinator using three authenticated Sonnet repository mappers plus a fresh Sonnet plan reviewer.
+- Review evidence: Sonnet PASS at `/private/tmp/cycle-sentinel-plan-review.md`; coordinator separately rejected the earlier unnecessary new-proxy design, preserved distinct proposal approval/execution, and corrected board IDs.
+
+## Cycle Sentinel coordination rules
+
+- Only Ready cards may be dispatched. One Sonnet implementer owns each sequential card and a separate Sonnet reviewer assesses its evidence.
+- Sonnet has task-relevant repository read/write access but no secrets, merge authority, wallet authority, or live-action authority.
+- Codex owns architecture, accepted findings, shared-file integration, exact-head verification, merge, controller changes, funding, activation, and cutover.
+- Source tests, a pushed branch, a PR, a merge, a deployment, funding, controller changes, activation, and CycleOps removal are distinct states.
+- The existing `rumi_treasury` source, Candid, controller configuration, and `/treasury` behavior remain unchanged.

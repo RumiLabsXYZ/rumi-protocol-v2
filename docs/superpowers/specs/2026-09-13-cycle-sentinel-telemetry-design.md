@@ -2,7 +2,7 @@
 
 Date: 2026-09-13
 Branch: `codex/cycle-sentinel-telemetry`
-Status: adversarially reviewed, awaiting written-spec approval
+Status: approved by Rob on 2026-09-13; implementation authorized
 
 ## Decision summary
 
