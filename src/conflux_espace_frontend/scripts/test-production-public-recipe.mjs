@@ -6,6 +6,8 @@ import { Principal } from "@dfinity/principal";
 import {
   PRODUCTION_BACKEND,
   PRODUCTION_ICUSD,
+  PUBLIC_ASSET_CANISTER_ID,
+  PUBLIC_CUSTOM_ORIGIN,
   PUBLIC_CANISTER_NAME,
   PUBLIC_ENVIRONMENT,
   VERIFICATION_CANISTER,
@@ -82,13 +84,19 @@ rejects(
   "missing SPA aliasing must fail",
 );
 
-const deploymentCanister = Principal.fromUint8Array(Uint8Array.from([1, 2, 3, 4, 1])).toText();
+const deploymentCanister = PUBLIC_ASSET_CANISTER_ID;
 const deploymentOrigin = canonicalOriginForCanister(deploymentCanister, "deployment");
+assert.equal(deploymentOrigin, PUBLIC_CUSTOM_ORIGIN);
 const mappingText = JSON.stringify({ [PUBLIC_CANISTER_NAME]: deploymentCanister });
 assert.deepEqual(provisioningFromMappingText(mappingText), {
   canisterId: deploymentCanister,
   canonicalOrigin: deploymentOrigin,
 });
+const unreviewedCanister = Principal.fromUint8Array(Uint8Array.from([1, 2, 3, 4, 1])).toText();
+rejects(
+  () => provisioningFromMappingText(JSON.stringify({ [PUBLIC_CANISTER_NAME]: unreviewedCanister })),
+  "a newly invented canister must not acquire the reviewed custom origin",
+);
 const trackedIds = await trackedCanisterIds(resolve(repoRoot, ".icp/data/mappings"));
 for (const knownId of trackedIds) {
   rejects(

@@ -15,6 +15,9 @@ export const PUBLIC_WASM_ARTIFACT = ".icp/cache/artifacts/conflux_public_fronten
 export const PUBLIC_RECIPE_TYPE = "@dfinity/asset-canister@v2.3.0";
 export const PUBLIC_BUILD_COMMAND =
   "bash -c 'cd src/conflux_espace_frontend && npm ci && npm run build:production-public:deploy'";
+export const PUBLIC_ASSET_CANISTER_ID = "a52ri-naaaa-aaaas-qgy4a-cai";
+export const PUBLIC_CUSTOM_DOMAIN = "conflux.rumiprotocol.com";
+export const PUBLIC_CUSTOM_ORIGIN = `https://${PUBLIC_CUSTOM_DOMAIN}`;
 
 export const PRODUCTION_BACKEND = "tfesu-vyaaa-aaaap-qrd7a-cai";
 export const PRODUCTION_CHAIN_ID = 1030;
@@ -53,13 +56,17 @@ export function canonicalOriginForCanister(principalText, context = "deployment"
   }
   if (context === "deployment-verification") {
     if (principalText !== VERIFICATION_CANISTER) fail("verification is locked to its denylisted test Principal");
+    return `https://${principalText}.icp0.io`;
   } else if (context === "deployment") {
     if (principalText === VERIFICATION_CANISTER) fail("the deterministic verification Principal cannot be deployed");
     if (principalText === PRODUCTION_BACKEND) fail("the public asset canister must not be the production backend");
+    if (principalText !== PUBLIC_ASSET_CANISTER_ID) {
+      fail(`the production-public mapping must retain the existing provisioned canister ${PUBLIC_ASSET_CANISTER_ID}`);
+    }
   } else {
     fail(`unsupported origin context ${context}`);
   }
-  return `https://${principalText}.icp0.io`;
+  return PUBLIC_CUSTOM_ORIGIN;
 }
 
 export function assertDedicatedBuildEnvironment(value) {
@@ -232,6 +239,20 @@ export function verifyPublicAssetPolicy(policy) {
   if (!Array.isArray(policy) || policy.length === 0) fail("asset policy must contain at least one rule");
   if (!policy.every((rule) => rule && rule.allow_raw_access === false)) {
     fail("every production-public asset rule must disable raw access");
+  }
+  const ownershipDirectoryRule = policy.find((rule) => rule.match === ".well-known");
+  if (!ownershipDirectoryRule || ownershipDirectoryRule.ignore !== false) {
+    fail("asset policy must explicitly include the hidden .well-known directory");
+  }
+  const ownershipRule = policy.find((rule) => rule.match === ".well-known/ic-domains");
+  if (!ownershipRule) fail("asset policy must explicitly include the ic-domains ownership file");
+  const ownershipHeaders = ownershipRule.headers;
+  for (const [header, expected] of [
+    ["Content-Type", "text/plain; charset=utf-8"],
+    ["Content-Security-Policy", "default-src 'none';base-uri 'none';form-action 'none';frame-ancestors 'none'"],
+    ["X-Content-Type-Options", "nosniff"],
+  ]) {
+    if (ownershipHeaders?.[header] !== expected) fail(`.well-known asset rule must set ${header}`);
   }
   if (!policy.some((rule) => rule.match === "**/*" && rule.enable_aliasing === true)) {
     fail("asset policy must enable SPA aliasing for the catch-all rule");
