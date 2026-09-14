@@ -95,9 +95,9 @@
                         {/each}
                       </span>
                       {group.label}
+                      <img class="composition-chevron" src="/brand/chevron-right.svg" alt="" aria-hidden="true" />
                     </span>
                     <strong>{group.value}</strong>
-                    <img src="/brand/chevron-right.svg" alt="" aria-hidden="true" />
                   </summary>
                   <ul>
                     {#each group.members as member}
@@ -399,7 +399,7 @@
   .composition-nested summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .composition-row { padding: 3px 0; font-size: 14px; }
   .composition-row strong,
-  .composition-nested summary strong { font-weight: 600; text-align: right; }
+  .composition-nested summary strong { flex: none; font-weight: 600; text-align: right; white-space: nowrap; }
   .composition-label { display: inline-flex; align-items: center; gap: 8px; min-width: 0; overflow-wrap: anywhere; }
   .composition-dot { display: inline-block; flex: none; width: 8px; height: 8px; border-radius: 50%; }
   .dot-cluster { display: inline-flex; align-items: center; }
@@ -411,7 +411,8 @@
     font-size: 14px;
     list-style: none;
   }
-  .composition-nested summary > img { width: 16px; height: 16px; }
+  .composition-chevron { width: 16px; height: 16px; flex: none; filter: brightness(0) invert(1); transition: transform .16s ease; }
+  .composition-nested[open] > summary .composition-chevron { transform: rotate(90deg); }
   .composition-nested ul { margin: 2px 0 6px; padding-left: 0; list-style: none; color: var(--workspace-muted); font-size: 13px; line-height: 1.5; }
   .composition-nested li { display: flex; align-items: center; gap: 8px; padding: 4px 0 4px 16px; }
   .composition-nested li span:first-of-type { flex: 1; min-width: 0; overflow-wrap: anywhere; }
