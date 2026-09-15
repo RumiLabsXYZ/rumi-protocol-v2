@@ -1,0 +1,407 @@
+type AdvisoryCyclesBalance = variant { Exact : nat; Overflow };
+type AlarmError = variant {
+  AlarmNotFound;
+  NoResolvedAlarmToEvict;
+  AlarmAlreadyResolved;
+};
+type AlarmKind = variant {
+  LowBalance;
+  SelfRecoveryUnresolved;
+  BurnAnomaly;
+  Unreachable;
+  FundingUnderDelivery;
+  FundingOverDelivery;
+  FundingQuarantined;
+};
+type AlarmStatus = variant { Open; Acknowledged; Resolved };
+type AuthenticatedQueryError = variant {
+  TooManyItems;
+  InvalidCursor;
+  FutureCursor;
+  NotSigner;
+};
+type Criticality = variant { Important; Experimental; Critical; Standard };
+type CycleManagerCyclesStatus = record {
+  idle_burn_cycles_per_day : opt nat;
+  stable_memory_bytes : opt nat64;
+  low_watermark : nat;
+  balance : nat;
+  heap_memory_bytes : opt nat64;
+  healthy : bool;
+  freeze_threshold_secs : nat64;
+};
+type CyclesFundingState = variant {
+  PlannedReserved;
+  Complete;
+  Confirmed;
+  Unknown;
+  Terminal;
+  Submitted;
+  Quarantined;
+};
+type CyclesWithdrawSnapshot = record {
+  destination : principal;
+  created_at_time_ns : nat64;
+  fee_cycles : nat;
+  from_subaccount : opt blob;
+  amount_cycles : nat;
+};
+type Environment = variant { Local; Production; Test; Archived; Staging };
+type FundingAttemptRecord = record {
+  at_secs : nat64;
+  result_class : FundingAttemptResultClass;
+  ordinal : nat32;
+  phase : FundingOperationState;
+};
+type FundingAttemptResultClass = variant {
+  TerminalFailure;
+  Indeterminate;
+  Success;
+  RetryableFailure;
+};
+type FundingOperation = record {
+  id : nat64;
+  actual_cycles : opt nat;
+  trigger : FundingTrigger;
+  reserved_amount_cycles : nat;
+  attempts : vec FundingAttemptRecord;
+  updated_at_secs : nat64;
+  notify_attempt_started_at_secs : opt nat64;
+  state : FundingOperationState;
+  target : principal;
+  confirmed_block_index : opt nat64;
+  target_registry_revision : nat64;
+  rail_arguments : FundingRailArguments;
+  refund_block_index : opt nat64;
+  created_at_secs : nat64;
+  refund_block_hint : opt nat64;
+  funding_policy : TargetFundingPolicy;
+};
+type FundingOperationState = variant {
+  Icp : IcpFundingState;
+  Cycles : CyclesFundingState;
+};
+type FundingOutcome = variant { Refunded; Terminal; Completed };
+type FundingRail = variant { IcpCmc; CyclesLedger };
+type FundingRailArguments = variant {
+  Icp : IcpCmcSnapshot;
+  Cycles : CyclesWithdrawSnapshot;
+};
+type FundingTrigger = variant {
+  LowBalanceAutoTopup;
+  SelfRecovery;
+  ManualTopup;
+};
+type GlobalPolicyArgs = record {
+  global_daily_cap_cycles : nat;
+  self_recovery_policy : SelfRecoveryPolicyArgs;
+  sample_interval_secs : nat64;
+  timelocks : GovernanceTimelocksArgs;
+  stale_after_secs : nat64;
+  min_icp_reserve_e8s : nat;
+};
+type GlobalPolicyError = variant {
+  StaleAfterBelowSampleInterval;
+  ZeroSampleInterval;
+  InvalidSelfRecoveryPolicy : SelfRecoveryPolicyError;
+  CyclesValueOverflow;
+  InvalidTimelocks : GovernanceTimelocksError;
+  ZeroGlobalDailyCap;
+};
+type GovernanceError = variant {
+  SelfRecoveryCapBelowPendingReservation : record { operation_id : nat64 };
+  ManagementSigner;
+  DuplicateSigner : principal;
+  TargetNotPaused;
+  ProposalNotFound;
+  ThresholdNotMet;
+  RemoveTargetBlocked : RemoveTargetError;
+  InvalidGlobalPolicy : GlobalPolicyError;
+  TooManyTargets;
+  TargetNotFound;
+  EmptySigners;
+  GlobalCapBelowExistingTargetCap : record { target : principal };
+  TimelockNotElapsed;
+  ThresholdExceedsSigners : record { threshold : nat32; signer_count : nat32 };
+  ProposalNotOpen;
+  Alarm : AlarmError;
+  GlobalCapBelowUnresolvedOperationCap : record { operation_id : nat64 };
+  SignerNotFound : principal;
+  TooManyOpenProposals;
+  NotSigner;
+  InvalidTarget : TargetValidationError;
+  ThresholdZero;
+  AnonymousSigner;
+};
+type GovernanceTimelocksArgs = record {
+  unpause_secs : nat64;
+  spend_policy_secs : nat64;
+  target_registry_secs : nat64;
+  signer_change_secs : nat64;
+};
+type GovernanceTimelocksError = variant {
+  ZeroSignerChangeSecs;
+  ZeroUnpauseSecs;
+  ZeroSpendPolicySecs;
+  ZeroTargetRegistrySecs;
+};
+type IcpCmcSnapshot = record {
+  source_subaccount : opt blob;
+  rate_timestamp_secs : nat64;
+  created_at_time_ns : nat64;
+  cmc_principal : principal;
+  memo : nat64;
+  fee_e8s : nat64;
+  rate_xdr_permyriad_per_icp : nat64;
+  amount_e8s : nat64;
+  cmc_account_identifier : blob;
+  target_canister : principal;
+  ledger_principal : principal;
+  source_principal : principal;
+  expected_cycles : nat;
+};
+type IcpFundingState = variant {
+  NotifyPending;
+  TransferUnknown;
+  Refunded;
+  PlannedReserved;
+  TransferConfirmed;
+  Complete;
+  Terminal;
+  Quarantined;
+  LedgerSubmitted;
+};
+type InitArgs = record {
+  approval_threshold : nat32;
+  signers : vec principal;
+  global_policy : GlobalPolicyArgs;
+};
+type ObservationMode = variant { SelfReport; BlackholeRelay; Unobserved };
+type PermissionsView = record { is_signer : bool };
+type ProposalPayload = variant {
+  AddSigner : record { signer : principal };
+  UpdateTarget : record { "principal" : principal; patch : TargetPatch };
+  SetSignerThreshold : record { threshold : nat32 };
+  RemoveTarget : record { "principal" : principal };
+  SetGlobalPolicy : GlobalPolicyArgs;
+  UnpauseTarget : record { "principal" : principal };
+  RemoveSigner : record { signer : principal };
+  RegisterTarget : TargetArgs;
+};
+type ProposalRecord = record {
+  id : nat64;
+  status : ProposalStatus;
+  proposer : principal;
+  created_at_secs : nat64;
+  payload : ProposalPayload;
+  approvals : vec principal;
+};
+type ProposalStatus = variant { Open; Executed; Cancelled };
+type PublicAlarm = record {
+  id : nat64;
+  status : AlarmStatus;
+  acknowledged_at_secs : opt nat64;
+  kind : AlarmKind;
+  target : opt principal;
+  opened_at_secs : nat64;
+  resolved_at_secs : opt nat64;
+};
+type PublicOverview = record {
+  unreachable_count : nat64;
+  total_observed_cycles : nat;
+  next_sample_at_secs : opt nat64;
+  alarm_count : nat64;
+  uninstalled_count : nat64;
+  low_count : nat64;
+  runtime_cycles : nat;
+  last_sample_at_secs : opt nat64;
+  unobserved_count : nat64;
+  stopped_count : nat64;
+  protected_self_reserve_cycles : opt nat;
+  icp_available_e8s : opt nat;
+  cycles_ledger_available_cycles : opt nat;
+  target_count : nat64;
+  healthy_count : nat64;
+};
+type PublicPage = record { next_cursor : opt text; items : vec ProposalRecord };
+type PublicPage_1 = record { next_cursor : opt text; items : vec PublicAlarm };
+type PublicPage_2 = record { next_cursor : opt text; items : vec Sample };
+type PublicPage_3 = record {
+  next_cursor : opt text;
+  items : vec PublicTargetRow;
+};
+type PublicPage_4 = record {
+  next_cursor : opt text;
+  items : vec PublicTopupSummary;
+};
+type PublicPage_5 = record {
+  next_cursor : opt text;
+  items : vec FundingOperation;
+};
+type PublicQueryError = variant {
+  TargetNotFound;
+  TooManyItems;
+  InvalidCursor;
+  FutureCursor;
+  StaleCursor;
+};
+type PublicTargetRow = record {
+  "principal" : principal;
+  advisory_balance_overflowed : bool;
+  last_success_at_secs : opt nat64;
+  recent_topups : vec PublicTopupSummary;
+  refill_cycles : nat;
+  next_sample_at_secs : opt nat64;
+  advisory_balance_cycles : opt nat;
+  display_name : text;
+  low_balance_threshold_cycles : nat;
+  state : PublicTargetState;
+  runway_secs : opt nat64;
+  as_of_secs : nat64;
+  reported_operational_healthy : opt bool;
+  criticality : Criticality;
+  environment : Environment;
+  stale_for_secs : opt nat64;
+  burn_cycles_per_day : opt nat;
+  observation_mode : ObservationMode;
+  project : text;
+};
+type PublicTargetState = variant {
+  Low;
+  Stopped;
+  Healthy;
+  Unreachable;
+  Unobserved;
+  Uninstalled;
+};
+type PublicTopupSummary = record {
+  rail : FundingRail;
+  amount_cycles : nat;
+  outcome : FundingOutcome;
+  resolved_at_secs : nat64;
+};
+type RemoveTargetError = variant {
+  PendingReservationExists;
+  UnresolvedOperationExists;
+};
+type ReservedPrincipalKind = variant {
+  Cmc;
+  Anonymous;
+  IcpLedger;
+  SentinelSelf;
+  CyclesLedger;
+  ManagementCanister;
+};
+type Result = variant { Ok : bool; Err : GovernanceError };
+type Result_1 = variant { Ok : FundingOperation; Err : text };
+type Result_10 = variant { Ok : nat64; Err : GovernanceError };
+type Result_2 = variant { Ok; Err : GovernanceError };
+type Result_3 = variant { Ok : PermissionsView; Err : AuthenticatedQueryError };
+type Result_4 = variant { Ok : PublicPage; Err : AuthenticatedQueryError };
+type Result_5 = variant { Ok : PublicPage_1; Err : PublicQueryError };
+type Result_6 = variant { Ok : PublicPage_2; Err : PublicQueryError };
+type Result_7 = variant { Ok : PublicPage_3; Err : PublicQueryError };
+type Result_8 = variant { Ok : PublicPage_4; Err : PublicQueryError };
+type Result_9 = variant { Ok : PublicPage_5; Err : AuthenticatedQueryError };
+type Sample = record {
+  balance : opt AdvisoryCyclesBalance;
+  state : PublicTargetState;
+  reported_operational_healthy : opt bool;
+  burn_cycles_per_hour : opt nat;
+  timestamp_secs : nat64;
+};
+type SelfRecoveryPolicyArgs = record {
+  refill_cycles : nat;
+  low_balance_threshold_cycles : nat;
+  daily_cap_cycles : nat;
+  protected_reserve_cycles : nat;
+};
+type SelfRecoveryPolicyError = variant {
+  DailyCapBelowRefill;
+  ZeroLowBalanceThreshold;
+  ProtectedReserveBelowRefill;
+  ZeroRefillCycles;
+  ZeroDailyCap;
+  CyclesValueOverflow;
+};
+type TargetArgs = record {
+  "principal" : principal;
+  tags : vec text;
+  display_name : text;
+  criticality : Criticality;
+  environment : Environment;
+  observation_mode : ObservationMode;
+  project : text;
+  funding_policy : TargetFundingPolicy;
+};
+type TargetFundingPolicy = record {
+  refill_cycles : nat;
+  burn_anomaly_limit_cycles_per_day : opt nat;
+  low_balance_threshold_cycles : nat;
+  daily_cap_cycles : nat;
+  cooldown_secs : nat64;
+};
+type TargetPatch = record {
+  auto_topup : opt bool;
+  tags : opt vec text;
+  display_name : opt text;
+  enabled : opt bool;
+  criticality : opt Criticality;
+  environment : opt Environment;
+  observation_mode : opt ObservationMode;
+  project : opt text;
+  funding_policy : opt TargetFundingPolicy;
+};
+type TargetValidationError = variant {
+  DuplicateTarget;
+  DailyCapBelowRefill;
+  ZeroLowBalanceThreshold;
+  NameEmpty;
+  ZeroRefillCycles;
+  TagTooLong;
+  ProjectTooLong;
+  TooManyTargets;
+  ReservedPrincipal : ReservedPrincipalKind;
+  GlobalCapBelowDailyCap;
+  AutoTopupRequiresEnabledAndObserved;
+  BurnAnomalyLimitExceedsMaximum;
+  NameTooLong;
+  LowBalanceThresholdExceedsMaximum;
+  ProjectEmpty;
+  TagEmpty;
+  DailyCapExceedsMaximum;
+  RefillExceedsMaximum;
+  CyclesValueOverflow;
+  DuplicateTag;
+  ZeroBurnAnomalyLimit;
+  TooManyTags;
+};
+service : (InitArgs) -> {
+  acknowledge_alarm : (nat64) -> (Result);
+  approve_proposal : (nat64) -> (Result);
+  attach_block_proof : (nat64, nat64) -> (Result_1);
+  attach_refund_block_proof : (nat64, nat64) -> (Result_1);
+  cancel_proposal : (nat64) -> (Result_2);
+  cycles_status : () -> (CycleManagerCyclesStatus) query;
+  execute_proposal : (nat64) -> (Result_2);
+  get_my_permissions : () -> (Result_3) query;
+  get_public_overview : () -> (PublicOverview) query;
+  get_public_target : (principal) -> (opt PublicTargetRow) query;
+  list_governance_proposals : (opt text, nat16) -> (Result_4) query;
+  list_public_alarms : (opt text, nat16) -> (Result_5) query;
+  list_public_samples : (principal, opt text, nat16) -> (Result_6) query;
+  list_public_targets : (opt text, nat16) -> (Result_7) query;
+  list_public_topups : (principal, opt text, nat16) -> (Result_8) query;
+  list_unresolved_funding_operations : (opt text, nat16) -> (Result_9) query;
+  manual_top_up : (principal) -> (Result_1);
+  pause_target : (principal) -> (Result_2);
+  propose_add_signer : (principal) -> (Result_10);
+  propose_register_target : (TargetArgs) -> (Result_10);
+  propose_remove_signer : (principal) -> (Result_10);
+  propose_remove_target : (principal) -> (Result_10);
+  propose_set_global_policy : (GlobalPolicyArgs) -> (Result_10);
+  propose_set_signer_threshold : (nat32) -> (Result_10);
+  propose_unpause_target : (principal) -> (Result_10);
+  propose_update_target : (principal, TargetPatch) -> (Result_10);
+  resolve_unknown_as_spent : (nat64) -> (Result_1);
+}

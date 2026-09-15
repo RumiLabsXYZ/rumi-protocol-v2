@@ -5,6 +5,7 @@ import { idlFactory as threePoolIDL } from '$declarations/rumi_3pool/rumi_3pool.
 import { idlFactory as rumiAmmIDL } from '$declarations/rumi_amm/rumi_amm.did.js';
 import { idlFactory as icusdIndexIDL } from '$declarations/icusd_index/icusd_index.did.js';
 import { idlFactory as analyticsIDL } from '$declarations/rumi_analytics/rumi_analytics.did.js';
+import { canisterId as cycleSentinelCanisterId } from '$declarations/rumi_cycle_sentinel';
 import { idlFactory as icpswapPoolIDL } from '$declarations/icpswap_pool/icpswap_pool.did.js';
 
 // Canister IDs for production (Rumi Protocol v2 - mainnet)
@@ -27,6 +28,8 @@ export const CANISTER_IDS = {
   LIQUIDATION_BOT: "nygob-3qaaa-aaaap-qttcq-cai",
   // Rumi Analytics (time-series data, protocol metrics)
   ANALYTICS: "dtlu2-uqaaa-aaaap-qugcq-cai",
+  // Populated only after Task 10's authoritative Sentinel deployment.
+  CYCLE_SENTINEL: cycleSentinelCanisterId ?? "",
   // ICPswap pools (external DEX for routing)
   ICPSWAP_3USD_ICP_POOL: "mu2zw-6iaaa-aaaar-qb56q-cai",
   ICPSWAP_ICUSD_ICP_POOL: "nqxwe-hiaaa-aaaar-qb5yq-cai",
@@ -85,7 +88,10 @@ export const LOCAL_CANISTER_IDS = {
   TREASURY: "tlg74-oiaaa-aaaap-qrd6a-cai",
   STABILITY_POOL: "tmhzi-dqaaa-aaaap-qrd6q-cai",
   INTERNET_IDENTITY: "rdmx6-jaaaa-aaaaa-aaadq-cai", // Local II canister
+  CYCLE_SENTINEL: "",
 } as const;
+
+export const isCycleSentinelConfigured = CANISTER_IDS.CYCLE_SENTINEL.trim().length > 0;
 
 // Frontend canister ID
 export const vault_frontend = "tcfua-yaaaa-aaaap-qrd7q-cai";

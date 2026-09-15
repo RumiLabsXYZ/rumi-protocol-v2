@@ -87,6 +87,16 @@
       "wasm": "src/ledger/ic-icrc1-ledger.wasm",
       "shrink": false
     },
+    "rumi_cycle_sentinel": {
+      "candid": "src/rumi_cycle_sentinel/rumi_cycle_sentinel.did",
+      "package": "rumi_cycle_sentinel",
+      "type": "rust",
+      "metadata": [
+        {
+          "name": "candid:service"
+        }
+      ]
+    },
     "rumi_treasury": {
       "candid": "src/rumi_treasury/rumi_treasury.did",
       "package": "rumi_treasury",

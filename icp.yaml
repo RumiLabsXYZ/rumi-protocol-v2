@@ -494,6 +494,53 @@ canisters:
         amm = principal "aaaaa-aa"
       })
 
+  # Task 6: Cycle Sentinel. This is a new canister and has no relationship
+  # to the existing rumi_treasury canister. The reviewed signer roster is
+  # 2-of-4. It governs Sentinel policy and funding operations; controller
+  # authority is supplied separately to `icp deploy` with four explicit
+  # `--controller` flags during the first mainnet install.
+  #
+  # Cycle Sentinel has no Upgrade-variant escape hatch: these init bytes are
+  # consumed by production `#[ic_cdk::init]` on a first install.
+  # Target registration is deliberately absent from init. The canister starts
+  # with no fundable targets, so a separate governed registration action is
+  # required before any target can receive cycles.
+  - name: rumi_cycle_sentinel
+    recipe:
+      type: "@dfinity/rust@v3.2.0"
+      configuration:
+        package: rumi_cycle_sentinel
+        candid: src/rumi_cycle_sentinel/rumi_cycle_sentinel.did
+        shrink: true
+    init_args: |
+      (record {
+        signers = vec {
+          principal "ft3ml-xex6k-ppiwj-ie6tc-zwkgb-ybm2x-eat4a-5p2jg-auzl3-latf4-aae";
+          principal "zegjz-jpi6k-qkand-c2bgf-qw6za-xk4si-nz3gx-qzzia-fk6fg-snepb-tae";
+          principal "stzp3-bnvwm-zqzjh-o6mv6-ci53m-wj5k6-xyhe7-fnyp2-c64o3-7vokj-bqe";
+          principal "4alqm-afk6k-bybok-qvdyo-cnv7y-klel6-xm2pz-7h7jk-utmys-kttf3-vqe"
+        };
+        approval_threshold = 2 : nat32;
+        global_policy = record {
+          global_daily_cap_cycles = 10_000_000_000_000 : nat;
+          sample_interval_secs = 3600 : nat64;
+          stale_after_secs = 7200 : nat64;
+          min_icp_reserve_e8s = 0 : nat;
+          timelocks = record {
+            target_registry_secs = 86400 : nat64;
+            spend_policy_secs = 86400 : nat64;
+            signer_change_secs = 172800 : nat64;
+            unpause_secs = 86400 : nat64
+          };
+          self_recovery_policy = record {
+            protected_reserve_cycles = 100_000_000_000_000 : nat;
+            daily_cap_cycles = 10_000_000_000_000 : nat;
+            low_balance_threshold_cycles = 1_000_000_000_000 : nat;
+            refill_cycles = 1_000_000_000_000 : nat
+          }
+        }
+      })
+
   # Task 16: rumi_protocol_backend (mainnet tfesu-vyaaa-aaaap-qrd7a-cai). THE
   # crown-jewel canister: the CDP engine that holds every vault, every debt
   # balance, every collateral config, the redemption-tier table, the stability-
@@ -757,6 +804,7 @@ environments:
       - rumi_treasury
       - rumi_amm
       - rumi_analytics
+      - rumi_cycle_sentinel
       - rumi_protocol_backend
       - rumi_points
       - vault_frontend
@@ -987,5 +1035,6 @@ environments:
       - rumi_3pool
       - rumi_stability_pool
       - rumi_treasury
+      - rumi_cycle_sentinel
       - rumi_amm
       - rumi_points

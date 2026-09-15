@@ -47,3 +47,65 @@ Updated: 2026-09-13
 - A fallback to Luna must be recorded here with the Sonnet failure reason before work starts.
 - Only the coordinator may perform merges, canister upgrades, DNS mutations, config mutations, activation, or fund-moving tests.
 - Production readiness is an exact-head and live-state claim, not a build-only claim.
+
+---
+
+# Cycle Sentinel implementation board
+
+Last updated: 2026-09-14
+
+Branch: `codex/cycle-sentinel-telemetry`
+
+Spec: `docs/superpowers/specs/2026-09-13-cycle-sentinel-telemetry-design.md`
+
+Plan: `docs/superpowers/plans/2026-09-13-cycle-sentinel-telemetry.md`
+
+| ID | State | Owner | Task | Depends on | Evidence / blocker |
+| --- | --- | --- | --- | --- | --- |
+| CS-00 | Done | Codex coordinator | Lock executable plan and interfaces | None | Fresh Sonnet review PASS; coordinator corrected proxy, execution, and card-ID issues |
+| CS-01 | Done | Sonnet backend mapper | Map canister, state, Candid, and test integration | None | Accepted `/private/tmp/cycle-sentinel-backend-map.md` |
+| CS-02 | Done | Sonnet frontend mapper | Map both telemetry surfaces | None | Accepted `/private/tmp/cycle-sentinel-frontend-map.md` |
+| CS-03 | Done | Sonnet reference mapper | Audit delegated-vault reuse and failure gaps | None | Accepted `/private/tmp/cycle-sentinel-reference-map.md` |
+| CS-10 | Done | Sonnet implementer + Sonnet/Luna reviewers + Codex | Stable domain, registry, governance, and alarms | CS-00 | 409 tests, host check, release Wasm, fmt, and diff validation passed. Initial Sonnet reviews found and corrected pre-staged unpause, cap-revalidation, and active-alarm eviction flaws. After Sonnet hit its authenticated session cap, two user-approved Luna fallback closeouts independently returned PASS. |
+| CS-11 | Done | Luna fallback implementer + Luna reviewers + Codex | Observation, history, and public API | CS-10 | 433 tests, host check, release Wasm, fmt, and diff validation passed. Independent review found and corrected eviction-unsafe pagination, incomplete burn-credit coverage, public operation-ID leakage, exact-Nat overflow, and a same-second retention edge. Two final closeouts returned PASS. |
+| CS-12 | Done | Sonnet implementer + Luna fallback implementer/reviewers + Codex | Both funding rails, recovery, and reconciliation | CS-10, CS-11 | Cycles Ledger withdrawal, protected self-recovery, ICRC-1/CMC fallback, exact retry/quarantine, authoritative proof/refund reconciliation, single-flight guards, and source reservations accepted. Adversarial corrections closed unsafe Cycles `Duplicate` semantics, cache races, actual-cycle cap accounting, refund association, attempt exhaustion, and lifecycle coverage. Final dual Task 5 closeout passed with 573 tests including 14 reconciliation tests, scoped fmt, host check, release Wasm, and diff validation. |
+| CS-13 | Done | Codex + Sonnet/Luna reviewers | Timers, Candid, config, declarations, and PocketIC | CS-10 through CS-12 | Independent review passed; exact production Wasm and focused live integration evidence recorded |
+| CS-20 | Done | Codex + Sonnet/Luna review fallback | Public root-domain telemetry UI | CS-13 | 9 tests and production build passed; injected canister ID verified; independent review passed after recent-top-up and mobile-navigation corrections |
+| CS-21 | Done | Luna fallback implementer + Sonnet reviewer + Codex | Authenticated operator telemetry UI | CS-13 | 607 frontend tests and production build passed; 28-error type-check baseline unchanged; authenticated Sonnet closeout PASS |
+| CS-30 | Done | Codex plus Sonnet and Luna fallback reviewers | Deterministic and adversarial source gate | CS-10 through CS-21 | Strict Clippy/fmt, 593 Rust tests, 4 official-ledger tests, 20 PocketIC tests, 616 frontend tests, declaration regeneration, root production build, fresh Wasm hash/endpoint scan, and diff check passed. Sonnet security review PASS; independent Luna release review found no source blocker. |
+| CS-40 | Doing | Codex coordinator | Push, PR, terminal exact-head CI, and merge | CS-30 | Source gate passed; branch commit and PR/CI gate in progress |
+| CS-50 | Blocked | Codex live operator | Create, deploy, and verify Sentinel | CS-40 | Requires merged exact-head rebuild and live preflight |
+| CS-51 | Blocked | Codex live operator | Add verified blackhole as an additional controller | CS-50 | One target at a time with before/after controller proof |
+| CS-52 | Blocked | Codex live operator | Fund, shadow, and activate policies incrementally | CS-50, CS-51 | Exact policy manifest must be authoritative |
+| CS-53 | Blocked | Codex live operator | Remove CycleOps after replacement proof | CS-52 | Terminal cutover gate |
+
+## CS-00 details
+
+- Scope: approved design, implementation plan, shared interfaces, task ordering, and board transitions only.
+- Worktree/branch: `/Users/robertripley/.codex/worktrees/455c/rumi-protocol-v2`, `codex/cycle-sentinel-telemetry`.
+- Acceptance: every approved requirement maps to a task, shared files have sequential ownership, and exact source, merge, and live gates are explicit.
+- Owner/harness: Codex coordinator using three authenticated Sonnet repository mappers plus a fresh Sonnet plan reviewer.
+- Review evidence: Sonnet PASS at `/private/tmp/cycle-sentinel-plan-review.md`; coordinator separately rejected the earlier unnecessary new-proxy design, preserved distinct proposal approval/execution, and corrected board IDs.
+
+## CS-10 details
+
+- Completed scope: implementation-plan Tasks 1 and 2, including the canister scaffold, versioned stable domain model, dynamic registry, multisig/timelock governance, immediate pause, governed unpause, and bounded alarm lifecycle.
+- File ownership: `src/rumi_cycle_sentinel/Cargo.toml`, `src/rumi_cycle_sentinel/src/{lib,types,state,governance}.rs`, root `Cargo.toml`, and `Cargo.lock` only when dependency resolution requires it.
+- Acceptance: disabled defaults, strict init signer validation, reserved-principal and bound checks, versioned stable round trips, distinct memory IDs, signer authorization, threshold/timelock execution, current-state revalidation, exact-once proposal execution, safe signer removal, alarm deduplication/acknowledgement/resolution, focused tests, host check, and Wasm build.
+- Worktree/branch: `/Users/robertripley/.codex/worktrees/455c/rumi-protocol-v2`, `codex/cycle-sentinel-telemetry`.
+- Review evidence: Task 1 accepted after 343 tests and two fresh Sonnet closeout PASS verdicts. Task 2 accepted after 409 tests and independent governance/alarm closeouts; Sonnet found three blockers that were corrected, then its session cap required the recorded Luna fallback for the final two PASS verdicts. Reports are under `.superpowers/sdd/2026-09-13-cycle-sentinel-telemetry/`.
+
+## CS-11 details
+
+- Completed scope: verified self-report and pinned-blackhole observation, six distinct public health states, bounded hourly sample history, top-up-corrected burn accounting, anomaly pause/alarm behavior, and cached anonymous telemetry queries.
+- Safety properties: failed reads never become zero or healthy; target advisory policy cannot override the governed threshold; stale registry results are discarded after await; unknown or retention-gapped funding intervals produce indeterminate burn; public rows omit signer, proposal, ledger, reconciliation, and operation-ID internals.
+- Acceptance: 433 tests, host check, release Wasm build, scoped formatting, and diff validation passed. The initial observation review passed; the public review rejected four correctness/privacy defects, which were corrected. A fresh full closeout passed, and the specialist closeout passed after tightening the same-second eviction boundary.
+- Fallback record: Sonnet's authenticated CLI remained session-capped until 7:10 a.m.; the explicitly approved Luna fallback implemented and reviewed this bounded card. Reports are under `.superpowers/sdd/2026-09-13-cycle-sentinel-telemetry/`.
+
+## Cycle Sentinel coordination rules
+
+- Only Ready cards may be dispatched. One Sonnet implementer owns each sequential card and a separate Sonnet reviewer assesses its evidence.
+- Sonnet has task-relevant repository read/write access but no secrets, merge authority, wallet authority, or live-action authority.
+- Codex owns architecture, accepted findings, shared-file integration, exact-head verification, merge, controller changes, funding, activation, and cutover.
+- Source tests, a pushed branch, a PR, a merge, a deployment, funding, controller changes, activation, and CycleOps removal are distinct states.
+- The existing `rumi_treasury` source, Candid, controller configuration, and `/treasury` behavior remain unchanged.
