@@ -75,6 +75,7 @@
     {#if isConnected && canViewVaults}<a href="/vaults" class="nav-link" class:active={currentPath.startsWith('/vaults')}><span>Vaults</span></a>{/if}
     {#if isConnected && $permissionStore.isDeveloper}<a href="/treasury" class="nav-link" class:active={currentPath === '/treasury'}><span>Treasury</span></a>{/if}
     <a href="/explorer" class="nav-link" class:active={currentPath.startsWith('/explorer')}><span>Explorer</span></a>
+    <a href="/telemetry" class="nav-link" class:active={currentPath.startsWith('/telemetry')}><span>Telemetry</span></a>
     {#if POINTS_ENABLED}<a href="/points" class="nav-link nav-airdrop" class:active={currentPath.startsWith('/points')} title="View your points"><span class="airdrop-pill">✨ Points</span></a>{/if}
   </nav>
   <div class="top-actions">
@@ -125,6 +126,7 @@
   <a href="/swap" class="mob-item" class:active={currentPath === '/swap'}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 1l4 4-4 4"/><path d="M3 9h18"/><path d="M7 23l-4-4 4-4"/><path d="M21 15H3"/></svg><span>Swap</span></a>
   <a href="/vaults" class="mob-item" class:active={currentPath.startsWith('/vaults')}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><span>Vaults</span></a>
   <a href="/explorer" class="mob-item" class:active={currentPath.startsWith('/explorer')}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><span>Explorer</span></a>
+  <a href="/telemetry" class="mob-item" class:active={currentPath.startsWith('/telemetry')}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 19V5m0 14h16M8 15v-3m4 3V8m4 7V4"/></svg><span>Telemetry</span></a>
   {#if POINTS_ENABLED}<a href="/points" class="mob-item mob-airdrop" class:active={currentPath.startsWith('/points')}><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 2l2.2 5.8L20 10l-5.8 2.2L12 18l-2.2-5.8L4 10l5.8-2.2z"/></svg><span>Points</span></a>{/if}
 </nav>
 {#if isDevelopment && showDebug}<div class="fixed bottom-4 right-4 z-50"><div class="flex flex-col gap-2"><PriceDebug /><WalletDebug /></div></div>{/if}
