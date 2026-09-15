@@ -72,7 +72,7 @@ Plan: `docs/superpowers/plans/2026-09-13-cycle-sentinel-telemetry.md`
 | CS-13 | Done | Codex + Sonnet/Luna reviewers | Timers, Candid, config, declarations, and PocketIC | CS-10 through CS-12 | Independent review passed; exact production Wasm and focused live integration evidence recorded |
 | CS-20 | Done | Codex + Sonnet/Luna review fallback | Public root-domain telemetry UI | CS-13 | 9 tests and production build passed; injected canister ID verified; independent review passed after recent-top-up and mobile-navigation corrections |
 | CS-21 | Done | Luna fallback implementer + Sonnet reviewer + Codex | Authenticated operator telemetry UI | CS-13 | 607 frontend tests and production build passed; 28-error type-check baseline unchanged; authenticated Sonnet closeout PASS |
-| CS-30 | Ready | Codex plus two fresh Sonnet reviewers | Deterministic and adversarial source gate | CS-10 through CS-21 | Source implementation complete |
+| CS-30 | Doing | Codex plus two fresh Sonnet reviewers | Deterministic and adversarial source gate | CS-10 through CS-21 | Source implementation complete; exact-head verification in progress |
 | CS-40 | Blocked | Codex coordinator | Push, PR, terminal exact-head CI, and merge | CS-30 | Source gate not complete |
 | CS-50 | Blocked | Codex live operator | Create, deploy, and verify Sentinel | CS-40 | Requires merged exact-head rebuild and live preflight |
 | CS-51 | Blocked | Codex live operator | Add verified blackhole as an additional controller | CS-50 | One target at a time with before/after controller proof |
