@@ -2,6 +2,7 @@
 members = [
     "src/rumi_cycle_manager",
     "src/rumi_cycle_sentinel",
+    "src/rumi_cycle_sentinel/tests/mock_canister",
     "src/rumi_protocol_backend",
     "src/rumi_treasury",
     "src/stability_pool",

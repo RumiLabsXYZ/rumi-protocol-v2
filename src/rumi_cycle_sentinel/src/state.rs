@@ -1099,6 +1099,10 @@ pub(crate) fn next_alarm_id() -> u64 {
     })
 }
 
+pub(crate) fn alarm_count() -> u64 {
+    ALARMS.with(|m| m.borrow().len())
+}
+
 pub(crate) fn get_alarm(id: u64) -> Option<Alarm> {
     ALARMS.with(|m| m.borrow().get(&id).map(|v| v.into_current()))
 }
@@ -1585,6 +1589,10 @@ pub(crate) fn terminal_summary_coverage() -> (usize, Option<u64>) {
     })
 }
 
+pub(crate) fn terminal_summary_count() -> u64 {
+    TERMINAL_SUMMARIES.with(|m| m.borrow().len())
+}
+
 // ─────────────────────── Funding: operations, reservations, self-recovery ───────────────────────
 
 pub(crate) fn next_operation_id() -> u64 {
@@ -1954,6 +1962,35 @@ pub(crate) fn list_unresolved_ordinary_operations() -> Vec<FundingOperation> {
     })
 }
 
+/// Signer-facing inventory of every live unresolved/quarantined operation,
+/// bounded and cursor-paginated by `id` exactly like
+/// `list_proposals_after`/`list_alarms_after`. Unlike
+/// `list_unresolved_ordinary_operations`, this deliberately INCLUDES
+/// `SelfRecovery`-triggered operations: a signer reconciling
+/// `resolve_unknown_as_spent`/`attach_block_proof` needs the complete live
+/// set, not just the ordinary-target subset the global-cap check cares
+/// about. `FUNDING_OPERATIONS` holds only unresolved operations by
+/// construction — a resolved one is compacted out in the same call that
+/// resolves it (`compact_operation`) — but the `is_resolved()` filter is
+/// kept here defensively rather than relying on that invariant alone.
+pub(crate) fn list_unresolved_operations_after(
+    cursor: Option<u64>,
+    limit: usize,
+) -> Vec<FundingOperation> {
+    FUNDING_OPERATIONS.with(|m| {
+        let map = m.borrow();
+        let start = match cursor {
+            Some(id) => std::ops::Bound::Excluded(id),
+            None => std::ops::Bound::Unbounded,
+        };
+        map.range((start, std::ops::Bound::Unbounded))
+            .map(|(_, v)| v.into_current())
+            .filter(|op| !op.state().is_resolved())
+            .take(limit)
+            .collect()
+    })
+}
+
 /// Absence is a legitimate "never reserved" state, not corruption — returns
 /// a fresh `TargetReservationState::new()` rather than `Option`.
 pub(crate) fn get_target_reservation(principal: Principal) -> TargetReservationState {
@@ -2240,6 +2277,10 @@ pub(crate) enum StateValidationError {
     GlobalConfigUninitialized,
     EmptySigners,
     AnonymousSigner,
+    /// The management canister principal (`aaaaa-aa`) can never originate
+    /// an update call, so it can never approve or execute a proposal — see
+    /// `types::InitArgsError::ManagementSigner`.
+    ManagementSigner,
     DuplicateSigner(Principal),
     ThresholdZero,
     ThresholdExceedsSigners {
@@ -2439,6 +2480,9 @@ fn validate_signer_set(signers: &[Principal], threshold: u32) -> Result<(), Stat
     for signer in signers {
         if *signer == Principal::anonymous() {
             return Err(StateValidationError::AnonymousSigner);
+        }
+        if *signer == Principal::management_canister() {
+            return Err(StateValidationError::ManagementSigner);
         }
         if !seen.insert(*signer) {
             return Err(StateValidationError::DuplicateSigner(*signer));
@@ -5642,6 +5686,106 @@ mod tests {
             .all(|candidate| candidate.id() != 3));
     }
 
+    /// `list_unresolved_operations_after` backs the signer-only inventory
+    /// query that replaces having to already know an `operation_id` before
+    /// calling `resolve_unknown_as_spent`/`attach_block_proof`. Unlike
+    /// `list_unresolved_ordinary_operations`, it must include a
+    /// `SelfRecovery`-triggered operation too, since a signer reconciling
+    /// needs the complete live set regardless of trigger.
+    #[test]
+    fn list_unresolved_operations_after_includes_self_recovery_and_quarantined() {
+        let global = test_global_policy(1_000_000);
+        let target = register_test_target(1, &global);
+        let ordinary =
+            test_funding_operation(1, target, FundingTrigger::LowBalanceAutoTopup, &global, 10);
+        insert_operation(ordinary.clone()).unwrap();
+        let quarantined_base =
+            test_funding_operation(2, target, FundingTrigger::LowBalanceAutoTopup, &global, 10);
+        let submitted = quarantined_base
+            .record_attempt(
+                FundingOperationState::Cycles(CyclesFundingState::Submitted),
+                11,
+                FundingAttemptResultClass::Success,
+            )
+            .unwrap();
+        insert_operation(submitted.clone()).unwrap();
+        let quarantined = submitted
+            .record_attempt(
+                FundingOperationState::Cycles(CyclesFundingState::Quarantined),
+                12,
+                FundingAttemptResultClass::RetryableFailure,
+            )
+            .unwrap();
+        update_operation(quarantined.clone()).unwrap();
+        let self_recovery = test_funding_operation(
+            3,
+            test_sentinel_id(),
+            FundingTrigger::SelfRecovery,
+            &global,
+            10,
+        );
+        insert_operation(self_recovery.clone()).unwrap();
+
+        let listed = list_unresolved_operations_after(None, 100);
+        let ids: BTreeSet<u64> = listed.iter().map(|op| op.id()).collect();
+        assert_eq!(ids, BTreeSet::from([1, 2, 3]));
+        assert!(list_unresolved_ordinary_operations()
+            .iter()
+            .all(|op| op.id() != 3));
+    }
+
+    /// A resolved (`Complete`/`Terminal`/`Refunded`) operation is compacted
+    /// out of `FUNDING_OPERATIONS` by `compact_operation`, so it must never
+    /// reappear in the live inventory — this is the exact set a signer would
+    /// otherwise be tempted to "resolve" a second time.
+    #[test]
+    fn list_unresolved_operations_after_excludes_compacted_operations() {
+        let global = test_global_policy(1_000_000);
+        let target = register_test_target(2, &global);
+        let live =
+            test_funding_operation(1, target, FundingTrigger::LowBalanceAutoTopup, &global, 10);
+        insert_operation(live.clone()).unwrap();
+        let resolved = test_resolved_operation(2, target, &global, 10);
+        insert_operation(resolved.clone()).unwrap();
+        let summary = TerminalFundingSummary::from_resolved(&resolved, 10).unwrap();
+        compact_operation(2, summary).unwrap();
+
+        let listed = list_unresolved_operations_after(None, 100);
+        assert_eq!(listed.iter().map(|op| op.id()).collect::<Vec<_>>(), vec![1]);
+    }
+
+    /// Cursor pagination walks strictly-increasing ids, matching
+    /// `list_proposals_after`/`list_alarms_after`'s own contract: a
+    /// one-at-a-time page never repeats or skips an id.
+    #[test]
+    fn list_unresolved_operations_after_paginates_by_id() {
+        let global = test_global_policy(1_000_000);
+        let target = register_test_target(3, &global);
+        for id in 1..=3u64 {
+            let op = test_funding_operation(
+                id,
+                target,
+                FundingTrigger::LowBalanceAutoTopup,
+                &global,
+                10,
+            );
+            insert_operation(op).unwrap();
+        }
+
+        let mut seen = Vec::new();
+        let mut cursor = None;
+        loop {
+            let mut page = list_unresolved_operations_after(cursor, 1);
+            if page.is_empty() {
+                break;
+            }
+            let op = page.pop().unwrap();
+            cursor = Some(op.id());
+            seen.push(op.id());
+        }
+        assert_eq!(seen, vec![1, 2, 3]);
+    }
+
     #[test]
     fn burn_anomaly_pauses_dedupes_resolves_but_never_unpauses() {
         let global = test_global_policy(1_000_000);
@@ -5800,6 +5944,28 @@ mod tests {
         assert_eq!(
             validate_whole_state(test_sentinel_id()),
             Err(StateValidationError::AnonymousSigner)
+        );
+    }
+
+    /// Correction pass: a checked-in deployment default previously listed
+    /// the management canister principal (`aaaaa-aa`) as the sole signer.
+    /// It can never originate an update call, so `post_upgrade`'s whole-state
+    /// validation must reject it exactly like an anonymous signer rather
+    /// than silently accepting a permanently unusable governance config.
+    #[test]
+    fn validate_whole_state_rejects_management_canister_signer() {
+        GLOBAL_CONFIG.with(|c| {
+            c.borrow_mut()
+                .set(StoredGlobalConfig::V1(Some(GlobalConfig {
+                    signers: vec![Principal::management_canister()],
+                    approval_threshold: 1,
+                    global_policy: test_global_policy(1_000),
+                })))
+                .unwrap();
+        });
+        assert_eq!(
+            validate_whole_state(test_sentinel_id()),
+            Err(StateValidationError::ManagementSigner)
         );
     }
 

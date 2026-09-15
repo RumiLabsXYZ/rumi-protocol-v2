@@ -571,9 +571,18 @@ pub struct InitArgs {
 pub enum InitArgsError {
     EmptySigners,
     AnonymousSigner,
+    /// The IC management canister principal (`aaaaa-aa`) can never call an
+    /// update method itself, so it can never approve or execute a proposal.
+    /// Accepting it as a signer would silently brick governance — this is
+    /// the exact placeholder some deployment configs default to before the
+    /// authoritative signer is substituted in.
+    ManagementSigner,
     DuplicateSigner(Principal),
     ThresholdZero,
-    ThresholdExceedsSigners { threshold: u32, signer_count: u32 },
+    ThresholdExceedsSigners {
+        threshold: u32,
+        signer_count: u32,
+    },
     InvalidGlobalPolicy(GlobalPolicyError),
 }
 
@@ -596,6 +605,9 @@ impl ValidatedInitArgs {
         for signer in &args.signers {
             if *signer == Principal::anonymous() {
                 return Err(InitArgsError::AnonymousSigner);
+            }
+            if *signer == Principal::management_canister() {
+                return Err(InitArgsError::ManagementSigner);
             }
             if !seen.insert(*signer) {
                 return Err(InitArgsError::DuplicateSigner(*signer));
@@ -5525,6 +5537,28 @@ mod tests {
         assert_eq!(
             ValidatedInitArgs::validate(init_args(vec![Principal::anonymous()], 1)),
             Err(InitArgsError::AnonymousSigner)
+        );
+    }
+
+    /// Correction pass: `icp.yaml`'s checked-in default previously listed
+    /// `principal "aaaaa-aa"` (the management canister) as the sole signer.
+    /// That principal can never originate an update call, so it can never
+    /// approve or execute a proposal — an accidental deploy with this
+    /// default would silently and permanently brick governance. `init` must
+    /// reject it exactly like an anonymous signer, including when mixed with
+    /// an otherwise-valid signer.
+    #[test]
+    fn init_args_rejects_management_canister_signer() {
+        assert_eq!(
+            ValidatedInitArgs::validate(init_args(vec![Principal::management_canister()], 1)),
+            Err(InitArgsError::ManagementSigner)
+        );
+        assert_eq!(
+            ValidatedInitArgs::validate(init_args(
+                vec![signer(1), Principal::management_canister()],
+                1
+            )),
+            Err(InitArgsError::ManagementSigner)
         );
     }
 

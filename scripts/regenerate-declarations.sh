@@ -45,6 +45,7 @@ canister_names=(
   "rumi_3pool"
   "rumi_amm"
   "rumi_analytics"
+  "rumi_cycle_sentinel"
   "rumi_points"
   "rumi_protocol_backend"
   "rumi_stability_pool"
@@ -65,6 +66,7 @@ canister_did_paths=(
   "src/rumi_3pool/rumi_3pool.did"
   "src/rumi_amm/rumi_amm.did"
   "src/rumi_analytics/rumi_analytics.did"
+  "src/rumi_cycle_sentinel/rumi_cycle_sentinel.did"
   "src/rumi_points/rumi_points.did"
   "src/rumi_protocol_backend/rumi_protocol_backend.did"
   "src/stability_pool/stability_pool.did"
@@ -222,6 +224,13 @@ regenerate_one() {
   fi
 
   mkdir -p "$out_dir"
+  # Keep checked-in declaration copies synchronized where the repository uses
+  # them. `icp_ledger` is an alias whose directory intentionally contains only
+  # bindings, and some canisters already use the destination as their source.
+  local generated_did="$out_dir/$name.did"
+  if [ "$name" != "icp_ledger" ] && [ "$did" != "$generated_did" ]; then
+    cp "$did" "$generated_did"
+  fi
   write_did_js "$name" "$did" "$out_dir"
   write_did_ts "$name" "$did" "$out_dir"
 

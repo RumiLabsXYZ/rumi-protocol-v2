@@ -38,7 +38,13 @@ pub enum EligibilityError {
     /// (`AdvisoryCyclesBalance::Overflow`) — either way there is no
     /// trustworthy balance to compare against the threshold.
     Unreachable,
-    /// Observed balance is strictly above the registry threshold.
+    /// The latest observed `PublicTargetState` is not `Low` — either the
+    /// observed balance is strictly above the registry threshold, or the
+    /// target is `Healthy`, `Stopped`, `Uninstalled`, or `Unobserved`.
+    /// `Stopped`/`Uninstalled` targets still carry a reported balance (for
+    /// display), but funding a canister that is not installed and running
+    /// would not restore it, so only an explicit `Low` classification is
+    /// ever eligible.
     NotLow,
     OperationInFlight,
     Cooldown,
@@ -85,6 +91,15 @@ pub(crate) fn check_ordinary_eligibility(
     }
     if sample.state == PublicTargetState::Unreachable {
         return Err(EligibilityError::Unreachable);
+    }
+    // A `Stopped` or `Uninstalled` target still reports its exact balance
+    // for display, but that balance is never funding evidence: only an
+    // observation explicitly classified `Low` (installed, running, and at
+    // or below the threshold at sample time) may proceed. This also covers
+    // `Healthy` and `Unobserved` (the latter is already excluded above via
+    // `record.observation_mode()`, but a defensive check here costs nothing).
+    if sample.state != PublicTargetState::Low {
+        return Err(EligibilityError::NotLow);
     }
     let balance = sample
         .balance
@@ -397,10 +412,10 @@ pub mod cycles {
     /// `Unknown` one (design: "Exact retry reconstructs byte-equivalent
     /// WithdrawArgs from the persisted snapshot"). `pub(crate)` so
     /// `self_recovery.rs` can call it directly after its own prepare step.
-    pub(crate) async fn execute(
+    pub(crate) async fn execute_with_outcome(
         op: FundingOperation,
         now_secs: u64,
-    ) -> Result<FundingOperation, FundingError> {
+    ) -> Result<(FundingOperation, WithdrawOutcome), FundingError> {
         let FundingRailArguments::Cycles(snapshot) = op.rail_arguments().clone() else {
             return Err(FundingError::WrongRail);
         };
@@ -415,7 +430,9 @@ pub mod cycles {
             FundingOperationState::Cycles(CyclesFundingState::Confirmed)
         ) && op.confirmed_block_index().is_some()
         {
-            return complete_confirmed_operation(op, now_secs);
+            let block = op.confirmed_block_index().expect("checked above");
+            return complete_confirmed_operation(op, now_secs)
+                .map(|completed| (completed, WithdrawOutcome::Confirmed(block)));
         }
         // Mark the source debit before the await. Refreshes are rejected
         // while this marker is present, so a post-call cache observation can
@@ -428,7 +445,16 @@ pub mod cycles {
             created_at_time: Some(snapshot.created_at_time_ns),
         };
         let outcome = cycles_ledger::withdraw(types::cycles_ledger_principal(), args).await;
-        resolve_operation(op, outcome, now_secs)
+        resolve_operation(op, outcome, now_secs).map(|resolved| (resolved, outcome))
+    }
+
+    pub(crate) async fn execute(
+        op: FundingOperation,
+        now_secs: u64,
+    ) -> Result<FundingOperation, FundingError> {
+        execute_with_outcome(op, now_secs)
+            .await
+            .map(|(resolved, _)| resolved)
     }
 
     /// `prepare_ordinary` then `execute` — the manual/timer-shared entry
@@ -441,6 +467,22 @@ pub mod cycles {
     ) -> Result<FundingOperation, FundingError> {
         let op = prepare_ordinary(target, trigger, now_secs, now_ns)?;
         execute(op, now_secs).await
+    }
+
+    /// Same operation as [`run_ordinary`], retaining the classified ledger
+    /// outcome for the timer's rail-selection seam. A proven
+    /// `TerminalNoSpend` is the only value that may admit the ICP fallback;
+    /// `Unknown`, `Duplicate`, and every known-debit result remain on the
+    /// Cycles Ledger path and are never silently converted into a second
+    /// source debit.
+    pub(crate) async fn run_ordinary_with_outcome(
+        target: Principal,
+        trigger: FundingTrigger,
+        now_secs: u64,
+        now_ns: u64,
+    ) -> Result<(FundingOperation, WithdrawOutcome), FundingError> {
+        let op = prepare_ordinary(target, trigger, now_secs, now_ns)?;
+        execute_with_outcome(op, now_secs).await
     }
 
     /// Retries an already-open, still-retryable Cycles-rail operation
@@ -460,6 +502,23 @@ pub mod cycles {
             return Err(FundingError::NotResumable);
         }
         execute(op, now_secs).await
+    }
+
+    /// Resume counterpart for the timer's outcome-preserving path. Pending
+    /// operations are resumed with their immutable snapshot; only a newly
+    /// observed, proven no-spend may be considered for a future fallback.
+    pub(crate) async fn resume_with_outcome(
+        operation_id: u64,
+        now_secs: u64,
+    ) -> Result<(FundingOperation, WithdrawOutcome), FundingError> {
+        let op = state::get_operation(operation_id).ok_or(FundingError::NotFound)?;
+        if op.rail() != types::FundingRail::CyclesLedger {
+            return Err(FundingError::WrongRail);
+        }
+        if op.state().stops_automatic_retry() {
+            return Err(FundingError::NotResumable);
+        }
+        execute_with_outcome(op, now_secs).await
     }
 
     /// Resolves a quarantined Cycles operation only from an explicit,
@@ -543,6 +602,61 @@ pub mod cycles {
         commit_settlement(settlement, source);
         state::compact_operation(resolved.id(), summary).map_err(FundingError::Compact)?;
         Ok(resolved)
+    }
+
+    /// Signer-directed conservative reconciliation for the public
+    /// `resolve_unknown_as_spent` update.  An `Unknown` operation is first
+    /// durably moved to `Quarantined`; only then is the explicit full-held
+    /// debit evidence applied.  Self-recovery deliberately cannot use this
+    /// path: its protected reserve remains suppressed until a delivery proof
+    /// is supplied through the dedicated reconciliation seam.
+    pub(crate) fn resolve_unknown_as_spent(
+        operation_id: u64,
+        now_secs: u64,
+    ) -> Result<FundingOperation, FundingError> {
+        let op = state::get_operation(operation_id).ok_or(FundingError::NotFound)?;
+        if op.rail() != types::FundingRail::CyclesLedger {
+            return Err(FundingError::WrongRail);
+        }
+        if op.trigger() == FundingTrigger::SelfRecovery {
+            return Err(FundingError::Reconciliation(
+                ReconciliationError::SelfRecoveryDeliveryProofRequired,
+            ));
+        }
+        let quarantined = match op.state() {
+            FundingOperationState::Cycles(CyclesFundingState::Unknown) => {
+                let next = op
+                    .record_attempt(
+                        FundingOperationState::Cycles(CyclesFundingState::Quarantined),
+                        now_secs,
+                        FundingAttemptResultClass::Indeterminate,
+                    )
+                    .map_err(FundingError::Transition)?;
+                state::update_operation(next.clone()).map_err(FundingError::Update)?;
+                raise_quarantine_alarm(&next, now_secs);
+                next
+            }
+            FundingOperationState::Cycles(CyclesFundingState::Quarantined) => op,
+            _ => {
+                return Err(FundingError::Reconciliation(
+                    ReconciliationError::NotQuarantined,
+                ))
+            }
+        };
+        let FundingRailArguments::Cycles(snapshot) = quarantined.rail_arguments().clone() else {
+            return Err(FundingError::WrongRail);
+        };
+        let held = snapshot
+            .amount_cycles
+            .checked_add(snapshot.fee_cycles)
+            .ok_or(FundingError::Overflow)?;
+        reconcile_quarantined_cycles(
+            operation_id,
+            QuarantinedCyclesEvidence::FeeDebited {
+                known_spent_cycles: held,
+            },
+            now_secs,
+        )
     }
 
     /// The precomputed, not-yet-committed result of settling every
@@ -3489,6 +3603,44 @@ mod tests {
         );
     }
 
+    /// Exhaustive `PublicTargetState` regression coverage (correction pass):
+    /// only `Low` may ever fund. `Stopped` and `Uninstalled` samples still
+    /// carry a genuine reported balance for display — `classify_blackhole_target`
+    /// sets it even when that balance is at or below the registry threshold
+    /// — and, before this fix, `check_ordinary_eligibility` only excluded
+    /// `Unreachable`, so a `Stopped`/`Uninstalled` target with a low reported
+    /// balance was wrongly treated as eligible for both automatic and manual
+    /// funding.
+    #[test]
+    fn eligibility_rejects_every_non_low_state_even_with_balance_at_or_below_threshold() {
+        let global = test_global_policy(600);
+        init_test_state(global.clone());
+        let target = register_test_target(1, &global, true);
+        for (state_, manual) in [
+            (PublicTargetState::Healthy, false),
+            (PublicTargetState::Healthy, true),
+            (PublicTargetState::Stopped, false),
+            (PublicTargetState::Stopped, true),
+            (PublicTargetState::Uninstalled, false),
+            (PublicTargetState::Uninstalled, true),
+            (PublicTargetState::Unobserved, false),
+            (PublicTargetState::Unobserved, true),
+        ] {
+            // Balance (5) is strictly below the registered threshold (100),
+            // so only the state itself can be the reason this is rejected.
+            state::record_sample(target, sample(1_000, 5, state_)).unwrap();
+            assert_eq!(
+                check_ordinary_eligibility(target, 1_000, manual),
+                Err(EligibilityError::NotLow),
+                "state {state_:?} (manual={manual}) must never be treated as eligible"
+            );
+        }
+        // Sanity: the exact same balance under `Low` is eligible, proving the
+        // rejections above are driven by state, not the balance/threshold math.
+        state::record_sample(target, sample(1_000, 5, PublicTargetState::Low)).unwrap();
+        assert!(check_ordinary_eligibility(target, 1_000, true).is_ok());
+    }
+
     #[test]
     fn eligibility_rejects_in_flight_operation_and_cooldown() {
         let global = test_global_policy(600);
@@ -4361,4 +4513,155 @@ mod reconciliation {
         );
         assert_eq!(state::validate_whole_state(sentinel_id()), Ok(()));
     }
+
+    // ─── `attach_refund_block_proof` guard clauses (Task 6 correction: this
+    // endpoint was implemented but unreachable from Candid, so its own guard
+    // order had no coverage). Every branch below returns before the
+    // function's one `.await` (the ledger block lookup), so a single poll
+    // with a no-op waker observes the exact same synchronous rejection a
+    // live call would produce, without ever needing a replica. ───
+
+    fn noop_raw_waker() -> std::task::RawWaker {
+        fn no_op(_: *const ()) {}
+        fn clone(_: *const ()) -> std::task::RawWaker {
+            noop_raw_waker()
+        }
+        static VTABLE: std::task::RawWakerVTable =
+            std::task::RawWakerVTable::new(clone, no_op, no_op, no_op);
+        std::task::RawWaker::new(std::ptr::null(), &VTABLE)
+    }
+
+    /// Polls `fut` exactly once. Every guard tested below returns
+    /// synchronously (`Poll::Ready`) on this first poll; a guard that instead
+    /// reached the ledger await would return `Poll::Pending` here, which the
+    /// assertions below would then visibly fail on rather than silently pass.
+    fn poll_once<F: std::future::Future>(fut: F) -> std::task::Poll<F::Output> {
+        let waker = unsafe { std::task::Waker::from_raw(noop_raw_waker()) };
+        let mut cx = std::task::Context::from_waker(&waker);
+        Box::pin(fut).as_mut().poll(&mut cx)
+    }
+
+    fn open_cycles_rail_operation(id: u64, target_seed: u8) -> FundingOperation {
+        let target = target_id(target_seed);
+        let policy = state::get_target(target).unwrap().funding_policy().clone();
+        let cycles_snapshot = crate::types::CyclesWithdrawSnapshot {
+            destination: target,
+            from_subaccount: None,
+            amount_cycles: 10,
+            fee_cycles: 0,
+            created_at_time_ns: NOW * 1_000_000_000,
+        };
+        let opened = FundingOperation::open(
+            id,
+            target,
+            2,
+            policy,
+            FundingTrigger::ManualTopup,
+            FundingRailArguments::Cycles(cycles_snapshot),
+            10,
+            NOW,
+        )
+        .unwrap();
+        state::insert_operation(opened.clone()).unwrap();
+        opened
+    }
+
+    /// Reaches `Quarantined` with an immutable CMC refund-block hint via the
+    /// exact production path (`resolve_notify`'s `RefundedWithBlock` arm),
+    /// matching `refunded_hint_requires_exact_proof_and_matching_refund_settles_net_debit`'s
+    /// setup above.
+    fn quarantine_with_refund_hint(
+        id: u64,
+        target_seed: u8,
+        hinted_block: u64,
+    ) -> FundingOperation {
+        let op = open_submitted_operation(id, target_seed);
+        let pending = enter_notify_pending(op, 77, NOW + 1);
+        icp::reconciliation_support::resolve_notify_for_test(
+            pending,
+            icp_cmc::NotifyOutcome::RefundedWithBlock(hinted_block),
+            NOW + 2,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn attach_refund_block_proof_rejects_cycles_rail_operation_before_any_ledger_call() {
+        let global = global_policy();
+        state::init(InitArgs {
+            signers: vec![Principal::from_slice(&[1])],
+            approval_threshold: 1,
+            global_policy: global.to_args(),
+        })
+        .unwrap();
+        register_target(&global, target_id(1));
+        let op = open_cycles_rail_operation(1, 1);
+
+        assert_eq!(
+            poll_once(icp::attach_refund_block_proof(
+                op.id(),
+                1,
+                NOW,
+                sentinel_id()
+            )),
+            std::task::Poll::Ready(Err(icp::FundingError::WrongRail))
+        );
+        // Nothing was mutated: still exactly the freshly-opened operation.
+        assert_eq!(state::get_operation(op.id()), Some(op));
+    }
+
+    #[test]
+    fn attach_refund_block_proof_rejects_an_unquarantined_icp_operation() {
+        let op = open_submitted_operation(1, 1);
+
+        assert_eq!(
+            poll_once(icp::attach_refund_block_proof(
+                op.id(),
+                1,
+                NOW,
+                sentinel_id()
+            )),
+            std::task::Poll::Ready(Err(icp::FundingError::Reconciliation(
+                icp::ReconciliationError::NotQuarantined
+            )))
+        );
+        assert_eq!(
+            state::get_operation(op.id()).unwrap().state(),
+            FundingOperationState::Icp(IcpFundingState::LedgerSubmitted)
+        );
+    }
+
+    #[test]
+    fn attach_refund_block_proof_rejects_a_block_index_other_than_the_persisted_hint() {
+        let quarantined = quarantine_with_refund_hint(1, 1, 88);
+
+        assert_eq!(
+            poll_once(icp::attach_refund_block_proof(
+                quarantined.id(),
+                99,
+                NOW + 3,
+                sentinel_id()
+            )),
+            std::task::Poll::Ready(Err(icp::FundingError::Reconciliation(
+                icp::ReconciliationError::RefundBlockHintMismatch
+            )))
+        );
+        // The mismatch is rejected before any state mutation: the hint and
+        // the reservation both remain exactly as quarantined.
+        let unchanged = state::get_operation(quarantined.id()).unwrap();
+        assert_eq!(unchanged.refund_block_hint(), Some(88));
+        assert_eq!(unchanged.refund_block_index(), None);
+        assert_eq!(
+            unchanged.state(),
+            FundingOperationState::Icp(IcpFundingState::Quarantined)
+        );
+    }
+
+    // `SentinelIdentityMismatch` (the branch immediately after the hint
+    // check above, guarding `ic_cdk::id() != sentinel_id`) is deliberately
+    // not covered here: `ic0::canister_self_size` traps when called outside
+    // an actual canister execution context, so exercising that branch
+    // natively would crash the test process rather than fail cleanly. Every
+    // other guard in this function returns before that call and is covered
+    // above; this one is exercised only by the PocketIC integration suite.
 }

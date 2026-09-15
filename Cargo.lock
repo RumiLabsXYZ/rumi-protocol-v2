@@ -1321,6 +1321,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cycle_sentinel_test_mock"
+version = "0.1.0"
+dependencies = [
+ "candid",
+ "ic-cdk 0.12.2",
+ "rumi_cycle_manager",
+ "serde",
+]
+
+[[package]]
 name = "darling"
 version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7275,9 +7285,11 @@ name = "rumi_cycle_sentinel"
 version = "0.1.0"
 dependencies = [
  "candid",
+ "candid_parser",
  "ic-cdk 0.12.2",
  "ic-cdk-timers 0.10.0",
  "ic-stable-structures",
+ "pocket-ic",
  "rumi_cycle_manager",
  "serde",
  "serde_bytes",

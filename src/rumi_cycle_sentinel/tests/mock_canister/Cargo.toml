@@ -1,0 +1,16 @@
+[package]
+name = "cycle_sentinel_test_mock"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Test-only mock endpoints for Cycle Sentinel PocketIC integration tests"
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+candid = "0.10.6"
+ic-cdk = "0.12.0"
+rumi_cycle_manager = { path = "../../../rumi_cycle_manager" }
+serde = { version = "1.0.210", features = ["derive"] }

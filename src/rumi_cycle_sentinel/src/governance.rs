@@ -105,6 +105,12 @@ pub(crate) enum GovernanceError {
     TooManyTargets,
     TooManyOpenProposals,
     AnonymousSigner,
+    /// The management canister principal (`aaaaa-aa`) can never originate an
+    /// update call, so it can never approve or execute a proposal — adding it
+    /// as a signer would silently and permanently brick governance. Checked
+    /// both at propose time (fast-fail) and again in `apply_payload`'s
+    /// `AddSigner` arm at execute time, mirroring `AnonymousSigner` above.
+    ManagementSigner,
     DuplicateSigner(Principal),
     SignerNotFound(Principal),
     /// Removing this signer would leave zero signers.
@@ -301,6 +307,9 @@ pub(crate) fn propose_add_signer_at(
     require_signer(caller)?;
     if signer == Principal::anonymous() {
         return Err(GovernanceError::AnonymousSigner);
+    }
+    if signer == Principal::management_canister() {
+        return Err(GovernanceError::ManagementSigner);
     }
     let config = state::global_config();
     if config.signers.contains(&signer) {
@@ -512,10 +521,17 @@ fn apply_payload(
                 approval_threshold: config.approval_threshold,
                 global_policy: new_policy,
             });
+            // The policy's sample interval is live configuration. Re-arm
+            // after the durable write so the next callback uses the new
+            // interval and public next_sample_at_secs remains truthful.
+            crate::sampler::setup_timer();
         }
         ProposalPayload::AddSigner { signer } => {
             if signer == Principal::anonymous() {
                 return Err(GovernanceError::AnonymousSigner);
+            }
+            if signer == Principal::management_canister() {
+                return Err(GovernanceError::ManagementSigner);
             }
             if config.signers.contains(&signer) {
                 return Err(GovernanceError::DuplicateSigner(signer));
@@ -1094,6 +1110,21 @@ mod tests {
         assert_eq!(
             propose_add_signer_at(signer(1), 0, signer(1)),
             Err(GovernanceError::DuplicateSigner(signer(1)))
+        );
+    }
+
+    /// Correction pass: the management canister principal (`aaaaa-aa`) can
+    /// never originate an update call, so it can never approve or execute a
+    /// proposal. Rejected here at propose time (the only production path
+    /// that can ever construct an `AddSigner` proposal); `apply_payload`'s
+    /// `AddSigner` arm carries the identical check as defense in depth,
+    /// mirroring how `AnonymousSigner` is already checked in both places.
+    #[test]
+    fn propose_add_signer_rejects_management_canister() {
+        init_governed(vec![signer(1)], 1, 1_000);
+        assert_eq!(
+            propose_add_signer_at(signer(1), 0, Principal::management_canister()),
+            Err(GovernanceError::ManagementSigner)
         );
     }
 
