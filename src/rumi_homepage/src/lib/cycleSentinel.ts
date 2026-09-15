@@ -27,6 +27,10 @@ export type TelemetryLoadState = {
 
 export const PAGE_SIZE = 100;
 export const OPERATOR_TELEMETRY_URL = 'https://app.rumiprotocol.com/telemetry';
+// `icp deploy` supplies PUBLIC_CANISTER_ID:* rather than this legacy
+// declaration's CANISTER_ID_* variable. Keep the deployed mainnet identity as
+// a fallback so the public page is live across both build conventions.
+export const DEPLOYED_CYCLE_SENTINEL_ID = 'joh3a-5aaaa-aaaap-quy6a-cai';
 
 export const PUBLIC_QUERY_METHODS = [
 	'get_public_overview',
@@ -153,7 +157,9 @@ async function collectAlarms(actor: SentinelActor): Promise<PublicAlarm[]> {
 	}
 }
 
-export function createAnonymousSentinelActor(id = sentinelCanisterId()): SentinelActor | undefined {
+export function createAnonymousSentinelActor(
+	id = sentinelCanisterId() ?? DEPLOYED_CYCLE_SENTINEL_ID
+): SentinelActor | undefined {
 	return id ? (createActor(id) as SentinelActor) : undefined;
 }
 
