@@ -210,9 +210,9 @@ impl AdvisoryCyclesBalance {
 
     /// Safe for public display: `Overflow` renders as `u128::MAX` rather
     /// than trapping or losing precision.
-    pub fn to_nat(&self) -> Nat {
+    pub fn to_nat(self) -> Nat {
         match self {
-            Self::Exact(value) => Nat::from(*value),
+            Self::Exact(value) => Nat::from(value),
             Self::Overflow => Nat::from(u128::MAX),
         }
     }
@@ -244,7 +244,7 @@ impl BoundedName {
         if value.is_empty() {
             return Err(BoundedFieldError::Empty);
         }
-        if value.as_bytes().len() > MAX_NAME_BYTES {
+        if value.len() > MAX_NAME_BYTES {
             return Err(BoundedFieldError::TooLong);
         }
         Ok(Self(value.to_string()))
@@ -281,7 +281,7 @@ impl BoundedTags {
             if tag.is_empty() {
                 return Err(BoundedFieldError::Empty);
             }
-            if tag.as_bytes().len() > MAX_TAG_BYTES {
+            if tag.len() > MAX_TAG_BYTES {
                 return Err(BoundedFieldError::TooLong);
             }
             if !seen.insert(tag.clone()) {
@@ -363,6 +363,7 @@ pub struct GovernanceTimelocksArgs {
 }
 
 #[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
 pub enum GovernanceTimelocksError {
     ZeroTargetRegistrySecs,
     ZeroSpendPolicySecs,
@@ -432,7 +433,7 @@ impl GovernanceTimelocks {
         self.unpause_secs
     }
 
-    pub fn to_args(&self) -> GovernanceTimelocksArgs {
+    pub fn to_args(self) -> GovernanceTimelocksArgs {
         GovernanceTimelocksArgs {
             target_registry_secs: self.target_registry_secs,
             spend_policy_secs: self.spend_policy_secs,
@@ -1405,7 +1406,7 @@ impl FixedBytes32 {
         &self.0
     }
 
-    pub fn to_vec(&self) -> Vec<u8> {
+    pub fn to_vec(self) -> Vec<u8> {
         self.0.to_vec()
     }
 }
@@ -2051,6 +2052,9 @@ pub struct FundingOperation {
 impl FundingOperation {
     /// Checked constructor: rejects a `reserved_amount_cycles` that
     /// disagrees with the amount embedded in `rail_arguments`.
+    // This constructor mirrors the persisted operation fields and is kept
+    // explicit so each invariant-bearing input remains visible at the callsite.
+    #[allow(clippy::too_many_arguments)]
     pub fn open(
         id: u64,
         target: Principal,
@@ -3591,7 +3595,7 @@ impl<'de> Deserialize<'de> for RollingSpendLedger {
             .settled
             .len()
             .checked_add(raw.pending.len())
-            .map_or(true, |count| count > MAX_ROLLING_SPEND_SETTLED_ENTRIES)
+            .is_none_or(|count| count > MAX_ROLLING_SPEND_SETTLED_ENTRIES)
         {
             return Err(invariant_decode_error(
                 RollingSpendLedgerDecodeError::CombinedCapacityExceeded,
@@ -5462,7 +5466,7 @@ mod tests {
         let tags: Vec<String> = (0..MAX_TAGS)
             .map(|i| format!("{i:02}{}", "a".repeat(MAX_TAG_BYTES - 2)))
             .collect();
-        assert!(tags.iter().all(|t| t.as_bytes().len() == MAX_TAG_BYTES));
+        assert!(tags.iter().all(|t| t.len() == MAX_TAG_BYTES));
         assert!(BoundedTags::new(tags).is_ok());
     }
 

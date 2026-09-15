@@ -494,20 +494,17 @@ canisters:
         amm = principal "aaaaa-aa"
       })
 
-  # Task 6: Cycle Sentinel.  This is a new canister and has no relationship
-  # to the existing rumi_treasury canister.  The checked-in init shape is a
-  # schema-valid placeholder for local/config validation only; deployment
-  # must supply the authoritative signer principals and reviewed policy
-  # (Task 10 in the implementation plan).
+  # Task 6: Cycle Sentinel. This is a new canister and has no relationship
+  # to the existing rumi_treasury canister. The reviewed signer roster is
+  # 2-of-4. It governs Sentinel policy and funding operations; controller
+  # authority is supplied separately to `icp deploy` with four explicit
+  # `--controller` flags during the first mainnet install.
   #
   # Cycle Sentinel has no Upgrade-variant escape hatch: these init bytes are
-  # consumed by production `#[ic_cdk::init]` on a first install. Keep the
-  # checked-in value deliberately invalid (`signers = vec {}`), so an
-  # ordinary deploy fails closed instead of installing a valid sole-signer
-  # placeholder or spending policy. Operators must replace this value with
-  # the reviewed signer roster and policy in an explicitly authorized install
-  # change. The local and mainnet-live listings remain present for project
-  # completeness, but neither silently authorizes activation or spending.
+  # consumed by production `#[ic_cdk::init]` on a first install.
+  # Target registration is deliberately absent from init. The canister starts
+  # with no fundable targets, so a separate governed registration action is
+  # required before any target can receive cycles.
   - name: rumi_cycle_sentinel
     recipe:
       type: "@dfinity/rust@v3.2.0"
@@ -517,8 +514,13 @@ canisters:
         shrink: true
     init_args: |
       (record {
-        signers = vec {};
-        approval_threshold = 0 : nat32;
+        signers = vec {
+          principal "ft3ml-xex6k-ppiwj-ie6tc-zwkgb-ybm2x-eat4a-5p2jg-auzl3-latf4-aae";
+          principal "zegjz-jpi6k-qkand-c2bgf-qw6za-xk4si-nz3gx-qzzia-fk6fg-snepb-tae";
+          principal "stzp3-bnvwm-zqzjh-o6mv6-ci53m-wj5k6-xyhe7-fnyp2-c64o3-7vokj-bqe";
+          principal "4alqm-afk6k-bybok-qvdyo-cnv7y-klel6-xm2pz-7h7jk-utmys-kttf3-vqe"
+        };
+        approval_threshold = 2 : nat32;
         global_policy = record {
           global_daily_cap_cycles = 10_000_000_000_000 : nat;
           sample_interval_secs = 3600 : nat64;

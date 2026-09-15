@@ -44,6 +44,9 @@ pub fn interval_coverage_complete(
         && oldest_retained_resolved_at_secs.is_some_and(|oldest| start > oldest)
 }
 
+// Keep this pure helper's explicit interval inputs visible at callsites; they
+// correspond one-for-one to the retained-history coverage contract.
+#[allow(clippy::too_many_arguments)]
 pub fn calculate_burn_for_interval(
     starting_sample_secs: Option<u64>,
     summary_count: usize,

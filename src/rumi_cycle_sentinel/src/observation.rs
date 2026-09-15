@@ -100,7 +100,7 @@ pub async fn sample_target(
             .into_iter()
             .filter(|summary| summary.outcome() == crate::types::FundingOutcome::Completed)
             .filter(|summary| {
-                start_secs.map_or(true, |start| {
+                start_secs.is_none_or(|start| {
                     summary.resolved_at_secs() > start && summary.resolved_at_secs() <= now_secs
                 })
             })
@@ -158,7 +158,7 @@ pub async fn sample_target(
 fn burn_anomaly_exceeds(hourly: u128, daily_limit: u128) -> bool {
     hourly
         .checked_mul(24)
-        .map_or(true, |daily| daily > daily_limit)
+        .is_none_or(|daily| daily > daily_limit)
 }
 
 /// Apply the observation-side safety transition. `None` burn, including an
@@ -241,7 +241,7 @@ pub fn classify_blackhole_target(
             observation_mode: ObservationMode::BlackholeRelay,
         });
     }
-    if status.module_hash.as_ref().map_or(true, Vec::is_empty) {
+    if status.module_hash.as_ref().is_none_or(Vec::is_empty) {
         return Ok(Observation {
             balance: Some(balance),
             state: PublicTargetState::Uninstalled,

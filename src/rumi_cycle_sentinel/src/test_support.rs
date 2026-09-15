@@ -104,7 +104,7 @@ pub(crate) struct TestBoundsReport {
 
 fn bounds_counts(sample_target: Principal) -> TestBoundsReport {
     TestBoundsReport {
-        target_count: state::target_count() as u64,
+        target_count: state::target_count(),
         sample_count: state::sample_meta(sample_target)
             .map(|meta| meta.filled_slots as u64)
             .unwrap_or_default(),
@@ -273,7 +273,7 @@ pub(crate) fn fill_bounds(
             resolved_at_secs: None,
         })
         .map_err(failure)?;
-        alarm_oldest_pruned = first_alarm_id.map_or(false, |id| state::get_alarm(id).is_none());
+        alarm_oldest_pruned = first_alarm_id.is_some_and(|id| state::get_alarm(id).is_none());
     }
 
     // Proposals have no safe eviction for open records. Use valid open
@@ -951,7 +951,7 @@ fn icp_operation(
         let refunded = current
             .reconcile_quarantined_icp(IcpFundingState::Refunded, None, None, None, now_secs)
             .map_err(failure)?;
-        current = persist_transition(current.clone(), refunded)?;
+        persist_transition(current.clone(), refunded)?;
     }
     if matches!(
         desired,

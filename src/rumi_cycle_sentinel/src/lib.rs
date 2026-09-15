@@ -1,3 +1,8 @@
+// Native Clippy builds do not retain the generated IC entrypoint references
+// that connect these private modules in the Wasm canister. Keep native-host
+// dead-code noise scoped to this crate; all other warnings remain strict.
+#![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+
 use candid::Principal;
 use rumi_cycle_manager::{
     self_cycles_status, CycleManagerCyclesStatus, DEFAULT_FREEZE_THRESHOLD_SECS,

@@ -115,6 +115,9 @@ enum MockRole {
 /// classifies as an indeterminate withdrawal — the only way to hold an
 /// injected operation in an unresolved, in-flight state while the maintenance
 /// timer is free to run.
+// These enums mirror complete wire-level fixture surfaces; individual tests
+// intentionally exercise only the variants needed by each lifecycle case.
+#[allow(dead_code)]
 #[derive(CandidType)]
 enum WithdrawMode {
     Confirmed,
@@ -127,6 +130,7 @@ enum WithdrawMode {
     FullAmountDebited,
 }
 
+#[allow(dead_code)]
 #[derive(CandidType)]
 enum TransferMode {
     Confirmed,
@@ -136,6 +140,7 @@ enum TransferMode {
     BadFee,
 }
 
+#[allow(dead_code)]
 #[derive(CandidType)]
 enum NotifyMode {
     Completed,
@@ -144,6 +149,7 @@ enum NotifyMode {
     Invalid,
 }
 
+#[allow(dead_code)]
 #[derive(CandidType)]
 enum IcpLedgerValue {
     Blob(Vec<u8>),
@@ -245,6 +251,7 @@ struct TargetStatus {
     module_hash: Option<Vec<u8>>,
 }
 
+#[allow(dead_code)]
 #[derive(CandidType)]
 enum TargetStatusKind {
     Running,
@@ -266,6 +273,7 @@ struct TargetPatch {
     auto_topup: Option<bool>,
 }
 
+#[allow(dead_code)]
 #[derive(CandidType)]
 enum Environment {
     Production,
@@ -275,6 +283,7 @@ enum Environment {
     Archived,
 }
 
+#[allow(dead_code)]
 #[derive(CandidType)]
 enum Criticality {
     Critical,

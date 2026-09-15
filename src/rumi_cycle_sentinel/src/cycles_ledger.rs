@@ -507,7 +507,7 @@ mod tests {
     #[test]
     fn every_withdraw_error_variant_round_trips_exactly() {
         for variant in withdraw_error_variants() {
-            let bytes = candid::encode_one(&variant).unwrap();
+            let bytes = candid::encode_one(variant.clone()).unwrap();
             assert_eq!(
                 candid::decode_one::<WithdrawError>(&bytes).unwrap(),
                 variant
@@ -527,7 +527,7 @@ mod tests {
             RejectionCode::CanisterReject,
         ];
         for variant in variants {
-            let bytes = candid::encode_one(&variant).unwrap();
+            let bytes = candid::encode_one(variant).unwrap();
             assert_eq!(
                 candid::decode_one::<RejectionCode>(&bytes).unwrap(),
                 variant

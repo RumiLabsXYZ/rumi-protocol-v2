@@ -299,7 +299,7 @@ fn official_ledger_reports_real_fee_and_seeded_balance() {
     let ledger = install_official_ledger(&pic, owner, seed_balance);
 
     let fee = query_fee(&pic, ledger);
-    assert!(fee > Nat::from(0u32), "official ledger fee must be nonzero");
+    assert!(fee > 0u32, "official ledger fee must be nonzero");
 
     let balance = query_balance(&pic, ledger, owner);
     assert_eq!(

@@ -85,6 +85,9 @@ fn sample_without_balance() -> Sample {
     }
 }
 
+// Keep the projection helper's explicit inputs aligned with the public row's
+// fixed fields; grouping them would obscure the Candid-shaped mapping.
+#[allow(clippy::too_many_arguments)]
 pub fn public_row_from_sample(
     principal: Principal,
     display_name: String,
@@ -110,6 +113,9 @@ pub fn public_row_from_sample(
     )
 }
 
+// Keep the projection helper's explicit inputs aligned with the public row's
+// fixed fields; grouping them would obscure the Candid-shaped mapping.
+#[allow(clippy::too_many_arguments)]
 pub fn public_row_from_samples(
     principal: Principal,
     display_name: String,
@@ -208,7 +214,7 @@ fn target_row(target: &TargetRecord, now_secs: u64) -> PublicTargetRow {
         .map(|at| now_secs.saturating_sub(at));
     row.next_sample_at_secs = target
         .enabled()
-        .then(|| sample.as_ref())
+        .then_some(sample.as_ref())
         .flatten()
         .map(|sample| {
             sample

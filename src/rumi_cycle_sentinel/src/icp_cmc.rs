@@ -674,11 +674,11 @@ pub fn verify_block_matches_snapshot(
     // record-shaped block representation used by the repository fixture.
     let amount = map_nat(map_field(map, "amt").or_else(|| map_field(map, "amount")))
         .ok_or(BlockProofError::MissingField)?;
-    if amount != Nat::from(snapshot.amount_e8s) {
+    if amount != snapshot.amount_e8s {
         return Err(BlockProofError::WrongAmount);
     }
     let fee = map_nat(map_field(map, "fee")).ok_or(BlockProofError::MissingField)?;
-    if fee != Nat::from(snapshot.fee_e8s) {
+    if fee != snapshot.fee_e8s {
         return Err(BlockProofError::WrongFee);
     }
     let memo = match map_field(map, "memo").ok_or(BlockProofError::MissingField)? {
@@ -731,7 +731,7 @@ pub fn verify_transaction_matches_snapshot(
     {
         return Err(BlockProofError::WrongDestination);
     }
-    if transfer.amount != Nat::from(snapshot.amount_e8s) {
+    if transfer.amount != snapshot.amount_e8s {
         return Err(BlockProofError::WrongAmount);
     }
     if transfer.fee != Some(Nat::from(snapshot.fee_e8s)) {
@@ -801,11 +801,11 @@ pub fn verify_refund_block_matches_snapshot(
         expected_refund_amount_e8s(snapshot).ok_or(BlockProofError::NoRefundAmount)?;
     let amount = map_nat(map_field(map, "amt").or_else(|| map_field(map, "amount")))
         .ok_or(BlockProofError::MissingField)?;
-    if amount != Nat::from(expected_amount) {
+    if amount != expected_amount {
         return Err(BlockProofError::WrongRefundAmount);
     }
     let fee = map_nat(map_field(map, "fee")).ok_or(BlockProofError::MissingField)?;
-    if fee != Nat::from(snapshot.fee_e8s) {
+    if fee != snapshot.fee_e8s {
         return Err(BlockProofError::WrongRefundFee);
     }
     if let Some(memo) = map_field(map, "memo") {
