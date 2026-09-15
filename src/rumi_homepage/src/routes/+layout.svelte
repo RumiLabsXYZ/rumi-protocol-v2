@@ -21,9 +21,11 @@
       <a href="/about" class="nav-link" class:active={$page.url.pathname === '/about'}>About</a>
       <a href="/Rumi-Protocol-v2-Whitepaper.pdf" target="_blank" class="nav-link">Whitepaper</a>
       <a href="/security" class="nav-link" class:active={$page.url.pathname === '/security'}>Security</a>
+      <a href="/telemetry" class="nav-link" class:active={$page.url.pathname === '/telemetry'}>Telemetry</a>
     </nav>
 
     <div class="top-actions">
+		<a href="/telemetry" class="mobile-telemetry" class:active={$page.url.pathname === '/telemetry'}>Telemetry</a>
       <div class="top-social">
         <a href="mailto:info@rumiprotocol.com" class="header-icon-link" aria-label="Email">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -63,11 +65,12 @@
   <footer class="w-full px-6 py-8 border-t mt-auto"
           style="background: var(--rumi-bg-surface1); border-color: var(--rumi-border);">
     <div class="max-w-6xl mx-auto flex flex-col md:flex-row justify-between items-center gap-4">
-      <div class="flex items-center gap-6 text-sm" style="color: var(--rumi-text-muted);">
+      <div class="flex flex-wrap items-center justify-center gap-6 text-sm md:justify-start" style="color: var(--rumi-text-muted);">
         <span>&copy; 2025–{new Date().getFullYear()} Rumi Labs LLC</span>
         <a href="https://github.com/RumiLabsXYZ/rumi-protocol-v2" target="_blank" rel="noopener" class="footer-link">GitHub</a>
         <a href="/Rumi-Protocol-v2-Whitepaper.pdf" target="_blank" class="footer-link">Whitepaper</a>
         <a href="/security" class="footer-link">Security</a>
+        <a href="/telemetry" class="footer-link">Telemetry</a>
         <a href="/branding" class="footer-link">Branding</a>
         <a href="mailto:info@rumiprotocol.com" class="footer-link">Contact</a>
       </div>
@@ -168,11 +171,14 @@
     background: var(--rumi-action-bright);
     box-shadow: 0 0 20px rgba(52,211,153,0.15);
   }
+	.mobile-telemetry { display: none; color: var(--rumi-text-secondary); text-decoration: none; font-size: .875rem; font-weight: 600; }
+	.mobile-telemetry.active { color: var(--rumi-action); }
 
   /* ── Mobile: hide nav ── */
   @media (max-width: 768px) {
     .top-nav { display: none; }
     .top-social { display: none; }
+		.mobile-telemetry { display: inline-flex; }
   }
 
   .footer-link {
