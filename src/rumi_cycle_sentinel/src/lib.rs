@@ -14,6 +14,7 @@ mod funding;
 mod governance;
 mod history;
 mod icp_cmc;
+mod icrc21;
 mod observation;
 mod public_api;
 mod sampler;
@@ -156,6 +157,21 @@ fn pause_target(principal: Principal) -> Result<(), governance::GovernanceError>
 #[ic_cdk::query]
 fn get_my_permissions() -> Result<types::PermissionsView, public_api::AuthenticatedQueryError> {
     public_api::get_my_permissions_at(ic_cdk::caller())
+}
+
+/// Wallet signers request this standard, unauthenticated update before they
+/// forward a call.  It only returns a bounded human-readable description and
+/// never changes Sentinel state or grants authority.
+#[ic_cdk::update]
+fn icrc21_canister_call_consent_message(
+    request: icrc21::ConsentMessageRequest,
+) -> icrc21::ConsentMessageResult {
+    icrc21::icrc21_canister_call_consent_message(request)
+}
+
+#[ic_cdk::query]
+fn icrc10_supported_standards() -> Vec<icrc21::StandardRecord> {
+    icrc21::icrc10_supported_standards()
 }
 
 #[ic_cdk::query]

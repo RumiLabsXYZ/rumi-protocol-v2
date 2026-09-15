@@ -21,6 +21,32 @@ export type AuthenticatedQueryError = { 'TooManyItems' : null } |
   { 'InvalidCursor' : null } |
   { 'FutureCursor' : null } |
   { 'NotSigner' : null };
+export interface ConsentInfo {
+  'metadata' : ConsentMessageMetadata,
+  'consent_message' : ConsentMessage,
+}
+export type ConsentMessage = {
+    'FieldsDisplayMessage' : {
+      'fields' : Array<[string, Value]>,
+      'intent' : string,
+    }
+  } |
+  { 'GenericDisplayMessage' : string };
+export interface ConsentMessageMetadata {
+  'utc_offset_minutes' : [] | [number],
+  'language' : string,
+}
+export interface ConsentMessageRequest {
+  'arg' : Uint8Array | number[],
+  'method' : string,
+  'user_preferences' : ConsentMessageSpec,
+}
+export type ConsentMessageResult = { 'Ok' : ConsentInfo } |
+  { 'Err' : Icrc21Error };
+export interface ConsentMessageSpec {
+  'metadata' : ConsentMessageMetadata,
+  'device_spec' : [] | [DeviceSpec],
+}
 export type Criticality = { 'Important' : null } |
   { 'Experimental' : null } |
   { 'Critical' : null } |
@@ -48,11 +74,15 @@ export interface CyclesWithdrawSnapshot {
   'from_subaccount' : [] | [Uint8Array | number[]],
   'amount_cycles' : bigint,
 }
+export type DeviceSpec = { 'GenericDisplay' : null } |
+  { 'FieldsDisplay' : null };
+export interface DurationSeconds { 'amount' : bigint }
 export type Environment = { 'Local' : null } |
   { 'Production' : null } |
   { 'Test' : null } |
   { 'Archived' : null } |
   { 'Staging' : null };
+export interface ErrorInfo { 'description' : string }
 export interface FundingAttemptRecord {
   'at_secs' : bigint,
   'result_class' : FundingAttemptResultClass,
@@ -171,6 +201,12 @@ export type IcpFundingState = { 'NotifyPending' : null } |
   { 'Terminal' : null } |
   { 'Quarantined' : null } |
   { 'LedgerSubmitted' : null };
+export type Icrc21Error = {
+    'GenericError' : { 'description' : string, 'error_code' : bigint }
+  } |
+  { 'InsufficientPayment' : ErrorInfo } |
+  { 'UnsupportedCanisterCall' : ErrorInfo } |
+  { 'ConsentMessageUnavailable' : ErrorInfo };
 export interface InitArgs {
   'approval_threshold' : number,
   'signers' : Array<Principal>,
@@ -336,6 +372,7 @@ export type SelfRecoveryPolicyError = { 'DailyCapBelowRefill' : null } |
   { 'ZeroRefillCycles' : null } |
   { 'ZeroDailyCap' : null } |
   { 'CyclesValueOverflow' : null };
+export interface StandardRecord { 'url' : string, 'name' : string }
 export interface TargetArgs {
   'principal' : Principal,
   'tags' : Array<string>,
@@ -386,6 +423,17 @@ export type TargetValidationError = { 'DuplicateTarget' : null } |
   { 'DuplicateTag' : null } |
   { 'ZeroBurnAnomalyLimit' : null } |
   { 'TooManyTags' : null };
+export interface TextValue { 'content' : string }
+export interface TimestampSeconds { 'amount' : bigint }
+export interface TokenAmount {
+  'decimals' : number,
+  'amount' : bigint,
+  'symbol' : string,
+}
+export type Value = { 'Text' : TextValue } |
+  { 'TokenAmount' : TokenAmount } |
+  { 'TimestampSeconds' : TimestampSeconds } |
+  { 'DurationSeconds' : DurationSeconds };
 export interface _SERVICE {
   'acknowledge_alarm' : ActorMethod<[bigint], Result>,
   'approve_proposal' : ActorMethod<[bigint], Result>,
@@ -397,6 +445,11 @@ export interface _SERVICE {
   'get_my_permissions' : ActorMethod<[], Result_3>,
   'get_public_overview' : ActorMethod<[], PublicOverview>,
   'get_public_target' : ActorMethod<[Principal], [] | [PublicTargetRow]>,
+  'icrc10_supported_standards' : ActorMethod<[], Array<StandardRecord>>,
+  'icrc21_canister_call_consent_message' : ActorMethod<
+    [ConsentMessageRequest],
+    ConsentMessageResult
+  >,
   'list_governance_proposals' : ActorMethod<[[] | [string], number], Result_4>,
   'list_public_alarms' : ActorMethod<[[] | [string], number], Result_5>,
   'list_public_samples' : ActorMethod<

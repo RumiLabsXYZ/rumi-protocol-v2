@@ -21,6 +21,28 @@ type AuthenticatedQueryError = variant {
   NotSigner;
 };
 type Criticality = variant { Important; Experimental; Critical; Standard };
+type ConsentInfo = record {
+  consent_message : ConsentMessage;
+  metadata : ConsentMessageMetadata;
+};
+type ConsentMessage = variant {
+  GenericDisplayMessage : text;
+  FieldsDisplayMessage : record { intent : text; fields : vec record { text; Value } };
+};
+type ConsentMessageMetadata = record {
+  language : text;
+  utc_offset_minutes : opt int16;
+};
+type ConsentMessageRequest = record {
+  method : text;
+  arg : blob;
+  user_preferences : ConsentMessageSpec;
+};
+type ConsentMessageResult = variant { Ok : ConsentInfo; Err : Icrc21Error };
+type ConsentMessageSpec = record {
+  metadata : ConsentMessageMetadata;
+  device_spec : opt DeviceSpec;
+};
 type CycleManagerCyclesStatus = record {
   idle_burn_cycles_per_day : opt nat;
   stable_memory_bytes : opt nat64;
@@ -30,6 +52,11 @@ type CycleManagerCyclesStatus = record {
   healthy : bool;
   freeze_threshold_secs : nat64;
 };
+type DeviceSpec = variant {
+  GenericDisplay;
+  FieldsDisplay;
+};
+type ErrorInfo = record { description : text };
 type CyclesFundingState = variant {
   PlannedReserved;
   Complete;
@@ -159,6 +186,22 @@ type IcpCmcSnapshot = record {
   ledger_principal : principal;
   source_principal : principal;
   expected_cycles : nat;
+};
+type Icrc21Error = variant {
+  UnsupportedCanisterCall : ErrorInfo;
+  ConsentMessageUnavailable : ErrorInfo;
+  InsufficientPayment : ErrorInfo;
+  GenericError : record { error_code : nat; description : text };
+};
+type TokenAmount = record { decimals : nat8; amount : nat64; symbol : text };
+type TimestampSeconds = record { amount : nat64 };
+type DurationSeconds = record { amount : nat64 };
+type TextValue = record { content : text };
+type Value = variant {
+  TokenAmount : TokenAmount;
+  TimestampSeconds : TimestampSeconds;
+  DurationSeconds : DurationSeconds;
+  Text : TextValue;
 };
 type IcpFundingState = variant {
   NotifyPending;
@@ -324,6 +367,7 @@ type SelfRecoveryPolicyError = variant {
   ZeroDailyCap;
   CyclesValueOverflow;
 };
+type StandardRecord = record { name : text; url : text };
 type TargetArgs = record {
   "principal" : principal;
   tags : vec text;
@@ -387,6 +431,8 @@ service : (InitArgs) -> {
   get_my_permissions : () -> (Result_3) query;
   get_public_overview : () -> (PublicOverview) query;
   get_public_target : (principal) -> (opt PublicTargetRow) query;
+  icrc10_supported_standards : () -> (vec StandardRecord) query;
+  icrc21_canister_call_consent_message : (ConsentMessageRequest) -> (ConsentMessageResult);
   list_governance_proposals : (opt text, nat16) -> (Result_4) query;
   list_public_alarms : (opt text, nat16) -> (Result_5) query;
   list_public_samples : (principal, opt text, nat16) -> (Result_6) query;

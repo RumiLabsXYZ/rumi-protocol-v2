@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { Principal } from '@dfinity/principal';
   import { walletStore } from '$lib/stores/wallet';
+  import { currentWalletType, walletSessionGeneration } from '$lib/services/auth';
   import {
     createAnonymousSentinelActor,
     createAuthenticatedSentinelActor,
@@ -35,6 +36,14 @@
   let proposals: ProposalRecord[] = [];
   let unresolved: FundingOperation[] = [];
   let signer = false;
+  let operatorChecked = false;
+  let checkingOperatorAccess = false;
+  let checkedSession: string | undefined;
+  let operatorAccessEpoch = 0;
+  let observedWalletSession: string | undefined;
+  let latestWalletConnection: { isConnected: boolean; principal: Principal | null } = { isConnected: false, principal: null };
+  let latestWalletType: string | null = null;
+  let latestWalletSessionGeneration = 0;
   let loading = true;
   let publicError = '';
   let authError = '';
@@ -85,6 +94,54 @@
   const CriticalityVariant = { Important: null, Experimental: null, Critical: null, Standard: null } as const;
   const observationVariant = (value: keyof typeof ObservationModeVariant): ObservationMode => ({ [value]: null } as ObservationMode);
   const ObservationModeVariant = { SelfReport: null, BlackholeRelay: null, Unobserved: null } as const;
+
+  function walletSession(
+    connection = latestWalletConnection,
+    walletType = latestWalletType,
+    generation = latestWalletSessionGeneration,
+  ): string | undefined {
+    if (!connection.isConnected || !connection.principal) return undefined;
+    // Wallet type is part of the binding: a Plug/Oisy/II switch must never
+    // retain an actor or signer result, even where the principal is the same.
+    return `${generation}:${walletType ?? 'unclassified'}:${connection.principal.toText()}`;
+  }
+
+  function currentWalletSession(): string | undefined {
+    return walletSession(
+      { isConnected: $walletStore.isConnected, principal: $walletStore.principal },
+      $currentWalletType,
+      $walletSessionGeneration,
+    );
+  }
+
+  function invalidateOperatorAccess(): void {
+    operatorAccessEpoch += 1;
+    signer = false;
+    operatorChecked = false;
+    checkingOperatorAccess = false;
+    checkedSession = undefined;
+    actor = undefined;
+    proposals = [];
+    unresolved = [];
+  }
+
+  function assertCurrentSigner(): void {
+    const session = currentWalletSession();
+    if (!signer || !actor || !checkedSession || checkedSession !== session) {
+      invalidateOperatorAccess();
+      throw new Error('Operator access changed. Check signer access again before submitting an action.');
+    }
+  }
+
+  function observeWalletSession(): void {
+    const nextSession = walletSession();
+    if (nextSession === observedWalletSession) return;
+    observedWalletSession = nextSession;
+    // Store subscriptions observe every connect, disconnect, and wallet-type
+    // transition. This prevents a same-principal reconnection from retaining
+    // a previously-created authenticated actor.
+    invalidateOperatorAccess();
+  }
 
   function fundingPolicy(): TargetFundingPolicy {
     return {
@@ -148,34 +205,53 @@
   async function refresh(): Promise<void> {
     loading = true;
     publicError = '';
-    authError = '';
     if (isCycleSentinelConfigured) {
       try { snapshot = await loadPublicTelemetry(createAnonymousSentinelActor()); }
       catch (error) { publicError = error instanceof Error ? error.message : String(error); }
     } else snapshot = null;
-    if ($walletStore.isConnected && isCycleSentinelConfigured) {
-      try {
-        const authenticated = await createAuthenticatedSentinelActor();
-        const permissions = await getPermissions(authenticated);
-        actor = authenticated;
-        signer = permissions.is_signer;
-        if (signer) {
-          [proposals, unresolved] = await Promise.all([listProposals(authenticated), listUnresolvedFundingOperations(authenticated)]);
-        } else { proposals = []; unresolved = []; }
-      } catch (error) {
-        signer = false;
-        proposals = [];
-        unresolved = [];
+    loading = false;
+  }
+
+  async function checkOperatorAccess(): Promise<void> {
+    authError = '';
+    actionMessage = '';
+    operatorChecked = false;
+    checkingOperatorAccess = true;
+    signer = false;
+    actor = undefined;
+    proposals = [];
+    unresolved = [];
+    let session: string | undefined;
+    try {
+      session = currentWalletSession();
+      if (!session) throw new Error('Connect a wallet before checking operator access.');
+      const epoch = ++operatorAccessEpoch;
+      const authenticated = await createAuthenticatedSentinelActor();
+      const permissions = await getPermissions(authenticated);
+      if (epoch !== operatorAccessEpoch || session !== currentWalletSession()) return;
+      actor = authenticated;
+      signer = permissions.is_signer;
+      operatorChecked = true;
+      checkedSession = session;
+      if (signer) {
+        [proposals, unresolved] = await Promise.all([listProposals(authenticated), listUnresolvedFundingOperations(authenticated)]);
+      }
+    } catch (error) {
+      if (currentWalletSession() === session) {
+        // A partially completed signer check is not authorization. If either
+        // signer-only follow-up query fails, clear the actor and controls.
+        invalidateOperatorAccess();
         authError = error instanceof Error ? error.message : String(error);
       }
-    } else { signer = false; actor = undefined; proposals = []; unresolved = []; }
-    loading = false;
+    } finally {
+      if (currentWalletSession() === session) checkingOperatorAccess = false;
+    }
   }
 
   async function run(action: () => Promise<unknown>): Promise<void> {
     actionMessage = '';
     authError = '';
-    try { await action(); actionMessage = 'Action accepted by Cycle Sentinel.'; await refresh(); }
+    try { assertCurrentSigner(); await action(); actionMessage = 'Action accepted by Cycle Sentinel.'; await refresh(); }
     catch (error) { authError = error instanceof Error ? error.message : String(error); }
   }
 
@@ -185,7 +261,26 @@
   function proposal(): bigint { return id(proposalId, 'Proposal ID'); }
   function alarmCanBeAcknowledged(alarm: PublicAlarm): boolean { return variant(alarm.status) === 'Open'; }
 
-  onMount(refresh);
+  onMount(() => {
+    const unsubscribeWallet = walletStore.subscribe((state) => {
+      latestWalletConnection = { isConnected: state.isConnected, principal: state.principal };
+      observeWalletSession();
+    });
+    const unsubscribeWalletType = currentWalletType.subscribe((walletType) => {
+      latestWalletType = walletType;
+      observeWalletSession();
+    });
+    const unsubscribeWalletSessionGeneration = walletSessionGeneration.subscribe((generation) => {
+      latestWalletSessionGeneration = generation;
+      observeWalletSession();
+    });
+    void refresh();
+    return () => {
+      unsubscribeWallet();
+      unsubscribeWalletType();
+      unsubscribeWalletSessionGeneration();
+    };
+  });
 </script>
 
 <svelte:head><title>Cycle Sentinel Telemetry | Rumi</title></svelte:head>
@@ -202,7 +297,7 @@
       <article><h2>Alarms</h2>{#if snapshot.alarms.length}{#each snapshot.alarms as alarm}<div class="alarm"><span class="dot"></span><div><strong>{variant(alarm.kind)}</strong><small>{alarm.target[0]?.toText() ?? 'Sentinel'}</small></div><span>{variant(alarm.status)}</span>{#if signer && actor && alarmCanBeAcknowledged(alarm)}<button on:click={() => run(() => sentinelManagement.acknowledgeAlarm(actor!, alarm.id))}>Acknowledge</button>{/if}</div>{/each}{:else}<p class="muted">No public alarms.</p>{/if}</article></div>
   {/if}
 
-  {#if $walletStore.isConnected && isCycleSentinelConfigured}<section class="operator"><h2>Operator console <span class:confirmed={signer} class="badge">{signer ? 'Signer confirmed on-chain' : 'Connected, not a signer'}</span></h2>
+  {#if $walletStore.isConnected && isCycleSentinelConfigured}<section class="operator"><h2>Operator console <span class:confirmed={signer} class="badge">{signer ? 'Signer confirmed on-chain' : operatorChecked ? 'Connected, not a signer' : 'Access not checked'}</span></h2>
     {#if signer && actor}
       <article><h3>Register target</h3><p class="muted">Registration is fail-closed: the canister creates the target disabled with auto-top-up off. Enablement is a separate governed update.</p><div class="form-grid"><label>Target principal<input bind:value={targetPrincipal} /></label><label>Display name<input bind:value={displayName} /></label><label>Project<input bind:value={project} /></label><label>Tags (comma separated)<input bind:value={tags} /></label><label>Low threshold cycles<input bind:value={lowThreshold} /></label><label>Refill cycles<input bind:value={refill} /></label><label>Daily cap cycles<input bind:value={dailyCap} /></label><label>Cooldown seconds<input bind:value={cooldown} /></label><label>Optional burn anomaly limit<input bind:value={burnAnomalyLimit} /></label><label>Environment<select bind:value={environment}>{#each Object.keys(EnvironmentVariant) as value}<option value={value}>{value}</option>{/each}</select></label><label>Criticality<select bind:value={criticality}>{#each Object.keys(CriticalityVariant) as value}<option value={value}>{value}</option>{/each}</select></label><label>Observation mode<select bind:value={observationMode}>{#each Object.keys(ObservationModeVariant) as value}<option value={value}>{value}</option>{/each}</select></label></div><button on:click={() => run(() => sentinelManagement.proposeRegisterTarget(actor!, targetArgs()))}>Propose register target</button></article>
       <article><h3>Update or remove target</h3><p class="muted">Update includes funding policy, enabled, and auto-top-up choices. Removal is governed and remains fail-closed while unresolved operations exist.</p><div class="form-grid"><label>Target principal<input bind:value={targetPrincipal} /></label><label>Display name<input bind:value={displayName} /></label><label>Project<input bind:value={project} /></label><label>Tags<input bind:value={tags} /></label><label>Low threshold cycles<input bind:value={lowThreshold} /></label><label>Refill cycles<input bind:value={refill} /></label><label>Daily cap cycles<input bind:value={dailyCap} /></label><label>Cooldown seconds<input bind:value={cooldown} /></label><label>Burn anomaly limit<input bind:value={burnAnomalyLimit} /></label><label>Environment<select bind:value={environment}>{#each Object.keys(EnvironmentVariant) as value}<option value={value}>{value}</option>{/each}</select></label><label>Criticality<select bind:value={criticality}>{#each Object.keys(CriticalityVariant) as value}<option value={value}>{value}</option>{/each}</select></label><label>Observation mode<select bind:value={observationMode}>{#each Object.keys(ObservationModeVariant) as value}<option value={value}>{value}</option>{/each}</select></label><label class="check"><input type="checkbox" bind:checked={enabled} /> Enabled</label><label class="check"><input type="checkbox" bind:checked={autoTopup} /> Auto-top-up</label></div><div class="actions"><button on:click={() => run(() => sentinelManagement.proposeUpdateTarget(actor!, target(), targetPatch()))}>Propose target update</button><button on:click={() => run(() => sentinelManagement.proposeRemoveTarget(actor!, target()))}>Propose target removal</button><button on:click={() => run(() => sentinelManagement.pauseTarget(actor!, target()))}>Pause target immediately</button><button on:click={() => run(() => sentinelManagement.proposeUnpauseTarget(actor!, target()))}>Propose governed unpause</button><button on:click={() => run(() => sentinelManagement.manualTopUp(actor!, target()))}>Manual top-up</button></div></article>
@@ -210,7 +305,7 @@
       <article><h3>Global policy governance</h3><div class="form-grid"><label>Global daily cap<input bind:value={globalDailyCap} inputmode="numeric" /></label><label>Sample interval seconds<input bind:value={sampleInterval} inputmode="numeric" /></label><label>Stale-after seconds<input bind:value={staleAfter} inputmode="numeric" /></label><label>Minimum ICP reserve e8s<input bind:value={minIcpReserve} inputmode="numeric" /></label><label>Self-recovery refill<input bind:value={selfRefill} inputmode="numeric" /></label><label>Self-recovery low threshold<input bind:value={selfLowThreshold} inputmode="numeric" /></label><label>Self-recovery daily cap<input bind:value={selfDailyCap} inputmode="numeric" /></label><label>Protected reserve cycles<input bind:value={protectedReserve} inputmode="numeric" /></label><label>Unpause timelock seconds<input bind:value={unpauseTimelock} inputmode="numeric" /></label><label>Spend-policy timelock seconds<input bind:value={spendTimelock} inputmode="numeric" /></label><label>Target-registry timelock seconds<input bind:value={targetTimelock} inputmode="numeric" /></label><label>Signer-change timelock seconds<input bind:value={signerTimelock} inputmode="numeric" /></label></div><button on:click={() => run(() => sentinelManagement.proposeSetGlobalPolicy(actor!, globalPolicy()))}>Propose global policy</button></article>
       <article><h3>Proposal list and actions</h3><label>Proposal ID<input bind:value={proposalId} inputmode="numeric" /></label><div class="actions"><button on:click={() => run(() => sentinelManagement.approveProposal(actor!, proposal()))}>Approve proposal</button><button on:click={() => run(() => sentinelManagement.executeProposal(actor!, proposal()))}>Execute proposal</button><button on:click={() => run(() => sentinelManagement.cancelProposal(actor!, proposal()))}>Cancel proposal</button></div>{#if proposals.length}<ul>{#each proposals as item}<li>#{item.id.toString()} · {variant(item.status)} · {variant(item.payload)} · {item.approvals.length} approval(s)</li>{/each}</ul>{:else}<p class="muted">No proposals returned.</p>{/if}</article>
       <article><h3>Unresolved funding operations</h3><div class="form-grid"><label>Operation ID<input bind:value={operationId} inputmode="numeric" /></label><label>Ledger block index<input bind:value={blockIndex} inputmode="numeric" /></label></div><div class="actions"><button on:click={() => run(() => sentinelManagement.attachBlockProof(actor!, operation(), id(blockIndex, 'Block index')))}>Attach delivery proof</button><button on:click={() => run(() => sentinelManagement.attachRefundBlockProof(actor!, operation(), id(blockIndex, 'Block index')))}>Attach refund proof</button><button on:click={() => run(() => sentinelManagement.resolveUnknownAsSpent(actor!, operation()) )}>Resolve unknown as spent</button></div>{#if unresolved.length}<ul>{#each unresolved as item}<li>#{item.id.toString()} · {variant(item.state)} · target {item.target.toText()} · reserved {item.reserved_amount_cycles.toString()} cycles</li>{/each}</ul>{:else}<p class="muted">No unresolved funding operations returned.</p>{/if}</article>
-    {:else}<p class="muted">This wallet is authenticated but is not a configured Sentinel signer. Public telemetry remains available.</p>{/if}
+    {:else}<p class="muted">{operatorChecked ? 'This wallet is authenticated but is not a configured Sentinel signer. Public telemetry remains available.' : 'Checking operator access asks your wallet to approve a read-only signer-permission query. It never changes Sentinel policy or moves cycles.'}</p><button on:click={checkOperatorAccess} disabled={checkingOperatorAccess}>{checkingOperatorAccess ? 'Checking operator access…' : 'Check operator access'}</button>{/if}
   </section>{:else}<div class="login-note">Connect a wallet to check signer permissions and access operator controls.</div>{/if}
 </section>
 

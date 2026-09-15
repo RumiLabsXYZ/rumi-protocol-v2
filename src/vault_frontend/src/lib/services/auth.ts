@@ -30,6 +30,14 @@ export type WalletType = typeof WALLET_TYPES[keyof typeof WALLET_TYPES];
 export const selectedWalletId = writable<string | null>(null);
 export const connectionError = writable<string | null>(null);
 export const currentWalletType = writable<WalletType | null>(null);
+// Components with privileged controls subscribe to this generation rather than
+// waiting for an asynchronous signer logout to publish isConnected: false.
+// Bump it synchronously before any connect/disconnect wallet API call.
+export const walletSessionGeneration = writable(0);
+
+export function beginWalletSessionTransition(): void {
+  walletSessionGeneration.update((generation) => generation + 1);
+}
 
 // Type definition for auth state
 interface AuthState {
@@ -290,6 +298,7 @@ function createAuthStore() {
 
     async connect(walletId: string): Promise<{owner: Principal} | null> {
       try {
+        beginWalletSessionTransition();
         connectionError.set(null);
         
         if (walletId === WALLET_TYPES.INTERNET_IDENTITY) {
@@ -446,6 +455,7 @@ function createAuthStore() {
     },
 
     async disconnect(): Promise<void> {
+      beginWalletSessionTransition();
       const state = get(store);
 
       // Clear Oisy direct signer agent
