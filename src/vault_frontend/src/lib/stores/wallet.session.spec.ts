@@ -66,6 +66,7 @@ vi.mock('../services/auth', () => ({
   },
   WALLET_TYPES: { PLUG: 'plug', INTERNET_IDENTITY: 'internet-identity', OISY: 'oisy' },
   currentWalletType: writable(null),
+  beginWalletSessionTransition: vi.fn(),
   selectedWalletId: writable(null),
   connectionError: writable(null),
 }));

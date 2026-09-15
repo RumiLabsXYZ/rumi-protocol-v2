@@ -4,7 +4,7 @@ import type { Principal } from '@dfinity/principal';
 import { CONFIG, CANISTER_IDS, LOCAL_CANISTER_IDS } from '../config';
 import { pnp, canisterIDLs } from '../services/pnp';
 import { TokenService } from '../services/tokenService';
-import { auth, WALLET_TYPES } from '../services/auth';
+import { auth, beginWalletSessionTransition, WALLET_TYPES } from '../services/auth';
 import { RequestDeduplicator } from '../services/RequestDeduplicator';
 import { getThreeUsdPrice } from '../services/threeUsdPrice';
 import { appDataStore } from './appDataStore';
@@ -455,6 +455,7 @@ function createWalletStore() {
     // a failure from ever un-connecting the wallet.
     async connect(walletId: string) {
       try {
+        beginWalletSessionTransition();
         update(s => ({ ...s, loading: true, error: null }));
 
         await cleanupPendingOperations();
@@ -502,6 +503,7 @@ function createWalletStore() {
 
     async disconnect() {
       try {
+        beginWalletSessionTransition();
         // Use auth service for proper disconnect handling (Internet Identity + Plug)
         await auth.disconnect();
         

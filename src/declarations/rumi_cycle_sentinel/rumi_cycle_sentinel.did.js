@@ -315,6 +315,63 @@ export const idlFactory = ({ IDL }) => {
     'observation_mode' : ObservationMode,
     'project' : IDL.Text,
   });
+  const StandardRecord = IDL.Record({ 'url' : IDL.Text, 'name' : IDL.Text });
+  const ConsentMessageMetadata = IDL.Record({
+    'utc_offset_minutes' : IDL.Opt(IDL.Int16),
+    'language' : IDL.Text,
+  });
+  const DeviceSpec = IDL.Variant({
+    'GenericDisplay' : IDL.Null,
+    'FieldsDisplay' : IDL.Null,
+  });
+  const ConsentMessageSpec = IDL.Record({
+    'metadata' : ConsentMessageMetadata,
+    'device_spec' : IDL.Opt(DeviceSpec),
+  });
+  const ConsentMessageRequest = IDL.Record({
+    'arg' : IDL.Vec(IDL.Nat8),
+    'method' : IDL.Text,
+    'user_preferences' : ConsentMessageSpec,
+  });
+  const TextValue = IDL.Record({ 'content' : IDL.Text });
+  const TokenAmount = IDL.Record({
+    'decimals' : IDL.Nat8,
+    'amount' : IDL.Nat64,
+    'symbol' : IDL.Text,
+  });
+  const TimestampSeconds = IDL.Record({ 'amount' : IDL.Nat64 });
+  const DurationSeconds = IDL.Record({ 'amount' : IDL.Nat64 });
+  const Value = IDL.Variant({
+    'Text' : TextValue,
+    'TokenAmount' : TokenAmount,
+    'TimestampSeconds' : TimestampSeconds,
+    'DurationSeconds' : DurationSeconds,
+  });
+  const ConsentMessage = IDL.Variant({
+    'FieldsDisplayMessage' : IDL.Record({
+      'fields' : IDL.Vec(IDL.Tuple(IDL.Text, Value)),
+      'intent' : IDL.Text,
+    }),
+    'GenericDisplayMessage' : IDL.Text,
+  });
+  const ConsentInfo = IDL.Record({
+    'metadata' : ConsentMessageMetadata,
+    'consent_message' : ConsentMessage,
+  });
+  const ErrorInfo = IDL.Record({ 'description' : IDL.Text });
+  const Icrc21Error = IDL.Variant({
+    'GenericError' : IDL.Record({
+      'description' : IDL.Text,
+      'error_code' : IDL.Nat,
+    }),
+    'InsufficientPayment' : ErrorInfo,
+    'UnsupportedCanisterCall' : ErrorInfo,
+    'ConsentMessageUnavailable' : ErrorInfo,
+  });
+  const ConsentMessageResult = IDL.Variant({
+    'Ok' : ConsentInfo,
+    'Err' : Icrc21Error,
+  });
   const ProposalStatus = IDL.Variant({
     'Open' : IDL.Null,
     'Executed' : IDL.Null,
@@ -470,6 +527,16 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Principal],
         [IDL.Opt(PublicTargetRow)],
         ['query'],
+      ),
+    'icrc10_supported_standards' : IDL.Func(
+        [],
+        [IDL.Vec(StandardRecord)],
+        ['query'],
+      ),
+    'icrc21_canister_call_consent_message' : IDL.Func(
+        [ConsentMessageRequest],
+        [ConsentMessageResult],
+        [],
       ),
     'list_governance_proposals' : IDL.Func(
         [IDL.Opt(IDL.Text), IDL.Nat16],
