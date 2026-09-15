@@ -28,8 +28,10 @@ export const CANISTER_IDS = {
   LIQUIDATION_BOT: "nygob-3qaaa-aaaap-qttcq-cai",
   // Rumi Analytics (time-series data, protocol metrics)
   ANALYTICS: "dtlu2-uqaaa-aaaap-qugcq-cai",
-  // Populated only after Task 10's authoritative Sentinel deployment.
-  CYCLE_SENTINEL: cycleSentinelCanisterId ?? "",
+  // The generated declaration may be populated by a legacy build variable.
+  // Keep the deployed mainnet identity as the fallback so the operator console
+  // remains wired when an asset-canister build does not provide that variable.
+  CYCLE_SENTINEL: cycleSentinelCanisterId?.trim() || "joh3a-5aaaa-aaaap-quy6a-cai",
   // ICPswap pools (external DEX for routing)
   ICPSWAP_3USD_ICP_POOL: "mu2zw-6iaaa-aaaar-qb56q-cai",
   ICPSWAP_ICUSD_ICP_POOL: "nqxwe-hiaaa-aaaar-qb5yq-cai",
