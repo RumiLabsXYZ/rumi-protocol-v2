@@ -107,6 +107,10 @@ export function mapLiquidationSuccessWithFee(
     block_index: bigint | number;
     fee_amount_paid: bigint | number;
     xrp_claim_id?: CandidOpt<bigint | number | string>;
+    // The icUSD debt the backend actually cleared (e8s). `[]` on paths that
+    // don't populate it; callers should fall back to their own local
+    // prediction in that case rather than treat it as zero.
+    debt_liquidated_e8s?: CandidOpt<bigint | number>;
   }
 ): VaultOperationResult {
   const result: VaultOperationResult = {
@@ -120,6 +124,12 @@ export function mapLiquidationSuccessWithFee(
   if (xrpClaimId !== undefined) {
     result.xrpClaimId = xrpClaimId;
   }
+
+  const debtLiquidated = ok.debt_liquidated_e8s;
+  if (debtLiquidated && debtLiquidated.length > 0) {
+    result.debtLiquidatedIcusd = Number(debtLiquidated[0]) / E8S;
+  }
+
   return result;
 }
 

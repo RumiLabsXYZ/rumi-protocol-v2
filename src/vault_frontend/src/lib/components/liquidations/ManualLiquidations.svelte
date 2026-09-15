@@ -28,6 +28,13 @@
     type ManualXrpPendingClaim,
     type ManualXrpPendingClaimMap,
   } from '$lib/services/manualXrpLiquidation';
+  import {
+    computeLiquidationCap,
+    getEffectiveLiquidationAmount,
+    getMaxLiquidatableForBalance,
+    DEFAULT_DUST_LIQUIDATION_THRESHOLD_ICUSD,
+    type LiquidationCapParams,
+  } from '$lib/utils/liquidationAmount';
 
   const ANON_PRINCIPAL = '2vxsx-fae';
   const MANUAL_XRP_PENDING_CLAIMS_PREFIX = 'rumi_manual_xrp_pending_claims:';
@@ -116,6 +123,8 @@
   let icpPrice = 0;
   let liquidationBonus = 1.15;
   let recoveryTargetCr = 1.55;
+  let dustLiquidationThresholdIcusd = DEFAULT_DUST_LIQUIDATION_THRESHOLD_ICUSD;
+  let isRecoveryMode = false;
   let isLoading = true;
   let isPriceLoading = true;
   let liquidationError = "";
@@ -226,23 +235,35 @@
     return isNativeXrpPrincipal(ci.ctPrincipal);
   }
 
+  // Builds the pure-math input for src/lib/utils/liquidationAmount.ts from a vault.
+  // Per-collateral values come from collateralStore (backend CollateralConfig);
+  // liquidationBonus/recoveryTargetCr fall back to the protocol-wide defaults
+  // (from get_protocol_status) if the per-collateral config isn't loaded yet.
+  // minimumCr/liquidationCr already have per-collateral fallbacks via
+  // getMinimumCR/getLiquidationCR (see $lib/protocol).
+  function getLiquidationCapParams(vault: CandidVault): LiquidationCapParams {
+    const ci = getVaultCollateralInfo(vault);
+    const info = collateralStore.getCollateralInfo(ci.ctPrincipal);
+    return {
+      debtIcusd: getVaultDebt(vault),
+      collateralAmount: ci.collateralAmount,
+      priceUsd: ci.price,
+      liquidationBonus: info?.liquidationBonus ?? liquidationBonus,
+      minimumCr: getMinimumCR(ci.ctPrincipal),
+      liquidationCr: getLiquidationCR(ci.ctPrincipal),
+      recoveryTargetCr: info?.recoveryTargetCr ?? recoveryTargetCr,
+      isRecoveryMode,
+      dustThresholdIcusd: dustLiquidationThresholdIcusd,
+      minVaultDebtIcusd: info?.minVaultDebt ? info.minVaultDebt / 1e8 : 0,
+    };
+  }
+
+  // Max shown/settable on the Amount input: the backend's true partial-liquidation
+  // cap (dust vaults show the full debt — see liquidationAmount.ts), clamped by
+  // the wallet balance in whichever token is currently selected.
   function getMaxLiquidation(vault: CandidVault): number {
-    const debt = getVaultDebt(vault);
     const bal = getActiveBalance(vault.vault_id);
-    const { collateralAmount, price } = getVaultCollateralInfo(vault);
-    const currentPrice = price || 0;
-
-    if (currentPrice > 0 && debt > 0) {
-      const collateralValue = collateralAmount * currentPrice;
-      const factor = recoveryTargetCr - liquidationBonus;
-      const numerator = recoveryTargetCr * debt - collateralValue;
-      if (factor > 0 && numerator > 0) {
-        const restoreCap = numerator / factor;
-        return Math.min(bal, debt, restoreCap);
-      }
-    }
-
-    return Math.min(bal, debt);
+    return getMaxLiquidatableForBalance(getLiquidationCapParams(vault), bal);
   }
 
   function calculateSeizure(vault: CandidVault, icusdAmount: number): { collateralSeized: number, usdValue: number, symbol: string } {
@@ -273,7 +294,8 @@
     const v = parseFloat(_amounts[vault.vault_id]) || 0;
     if (v <= 0) return null;
     if (v > getMaxLiquidation(vault)) return null;
-    return calculateSeizure(vault, v);
+    const effectiveAmount = getEffectiveLiquidationAmount(getLiquidationCapParams(vault), v);
+    return calculateSeizure(vault, effectiveAmount);
   }
 
   function setMax(vault: CandidVault) {
@@ -457,18 +479,24 @@
 
     const token = getLiqToken(vault.vault_id);
     const vaultDebt = getVaultDebt(vault);
-    const isFullLiquidation = token === 'icUSD' && inputAmount >= vaultDebt * 0.999;
+    // The backend may take more than the typed amount: a dust vault (debt at or
+    // below dust_liquidation_threshold) is always repaid in full, and any amount
+    // that would leave an un-liquidatable residual is bumped up to the full debt
+    // too. Compute that here (pure, synchronous — no gesture-window cost for
+    // Oisy) so approval, balance checks, and the submitted amount all agree.
+    const effectiveAmount = getEffectiveLiquidationAmount(getLiquidationCapParams(vault), inputAmount);
+    const isFullLiquidation = token === 'icUSD' && effectiveAmount >= vaultDebt;
 
     liquidationError = ""; liquidationSuccess = ""; processingVaultId = vault.vault_id;
     try {
       const bal = getActiveBalance(vault.vault_id);
-      if (bal < inputAmount) {
-        liquidationError = `Insufficient ${token}. Need ${formatStableTx(inputAmount)}, have ${formatStableTx(bal)}.`;
+      if (bal < effectiveAmount) {
+        liquidationError = `Insufficient ${token}. Need ${formatStableTx(effectiveAmount)}, have ${formatStableTx(bal)}.`;
         processingVaultId = null; return;
       }
 
       if (token === 'icUSD' && !isOisyWallet()) {
-        if (!await checkAndApproveAllowance(inputAmount * 1.20)) { processingVaultId = null; return; }
+        if (!await checkAndApproveAllowance(effectiveAmount * 1.20)) { processingVaultId = null; return; }
       }
 
       // Non-Oisy: re-fetch to confirm the vault is still liquidatable. For Oisy
@@ -487,14 +515,17 @@
         if (isFullLiquidation) {
           result = await protocolService.liquidateVault(vault.vault_id);
         } else {
-          result = await protocolService.partialLiquidateVault(vault.vault_id, inputAmount);
+          result = await protocolService.partialLiquidateVault(vault.vault_id, effectiveAmount);
         }
       } else {
-        result = await protocolService.partialLiquidateVaultWithStable(vault.vault_id, inputAmount, token);
+        // No full-liquidation entrypoint accepts a stable token; a dust vault's
+        // effectiveAmount is still the full debt here, and the backend takes it
+        // in full via the partial endpoint regardless of the amount argument.
+        result = await protocolService.partialLiquidateVaultWithStable(vault.vault_id, effectiveAmount, token);
       }
 
       if (result.success) {
-        const seizure = calculateSeizure(vault, inputAmount);
+        const seizure = calculateSeizure(vault, effectiveAmount);
         if (isXrp && xrpPayout?.ok) {
           if (result.xrpClaimId) {
             const pendingClaim: ManualXrpPendingClaim = {
@@ -517,7 +548,18 @@
             await loadLiquidatableVaults();
           }
         } else {
-          liquidationSuccess = `Liquidated vault #${vault.vault_id}. Paid ${formatStableTx(inputAmount)} ${token}, received ${formatNumber(seizure.collateralSeized, 4)} ${seizure.symbol}.`;
+          // The backend returns the amount it ACTUALLY cleared as
+          // `debt_liquidated_e8s` (icUSD-denominated). Prefer it for the
+          // success message over our local prediction (`effectiveAmount`),
+          // which can only ever be a pre-call estimate; fall back to the
+          // prediction when the backend doesn't populate the field (e.g. a
+          // stable-token repay, where the field isn't icUSD-comparable to
+          // the paid token) or on an older backend build.
+          const paidAmount =
+            token === 'icUSD' && result.debtLiquidatedIcusd !== undefined
+              ? result.debtLiquidatedIcusd
+              : effectiveAmount;
+          liquidationSuccess = `Liquidated vault #${vault.vault_id}. Paid ${formatStableTx(paidAmount)} ${token}, received ${formatNumber(seizure.collateralSeized, 4)} ${seizure.symbol}.`;
           liquidationAmounts[vault.vault_id] = '';
           await loadLiquidatableVaults();
         }
@@ -560,6 +602,10 @@
       icpPrice = status.lastIcpRate;
       if (status.liquidationBonus > 0) liquidationBonus = status.liquidationBonus;
       if (status.recoveryTargetCr > 0) recoveryTargetCr = status.recoveryTargetCr;
+      if (Number.isFinite(status.dustLiquidationThresholdIcusd) && status.dustLiquidationThresholdIcusd >= 0) {
+        dustLiquidationThresholdIcusd = status.dustLiquidationThresholdIcusd;
+      }
+      isRecoveryMode = !!(status.mode && typeof status.mode === 'object' && 'Recovery' in status.mode);
     }
     catch (error) { console.error("Error fetching protocol status:", error); }
     finally { isPriceLoading = false; }
@@ -644,13 +690,16 @@
       {#each sortedVaults as vault (vault.vault_id)}
         {@const cr = calculateCollateralRatio(vault)}
         {@const debt = getVaultDebt(vault)}
-        {@const maxLiq = getMaxLiquidation(vault)}
+        {@const capParams = getLiquidationCapParams(vault)}
+        {@const maxLiq = getMaxLiquidatableForBalance(capParams, getActiveBalance(vault.vault_id))}
+        {@const isDust = computeLiquidationCap(capParams).isDustVault}
         {@const isProcessingThis = processingVaultId === vault.vault_id}
         {@const crDanger = cr < 130}
         {@const crCaution = cr >= 130 && cr < 150}
         {@const inputVal = parseFloat(liquidationAmounts[vault.vault_id] || '') || 0}
         {@const overMax = inputVal > 0 && maxLiq > 0 && inputVal > maxLiq}
-        {@const s = inputVal > 0 && !overMax ? calculateSeizure(vault, inputVal) : null}
+        {@const effectiveAmount = inputVal > 0 && !overMax ? getEffectiveLiquidationAmount(capParams, inputVal) : 0}
+        {@const s = effectiveAmount > 0 ? calculateSeizure(vault, effectiveAmount) : null}
         {@const ci = getVaultCollateralInfo(vault)}
         {@const isXrp = isNativeXrpPrincipal(ci.ctPrincipal)}
         {@const vaultPendingXrpClaims = pendingManualXrpClaimsByVault[vault.vault_id] ?? []}
@@ -732,6 +781,9 @@
                   <span class="max-loading">Max: ····</span>
                 {/if}
               </div>
+              {#if isDust}
+                <div class="dust-hint">Small position: liquidated in full</div>
+              {/if}
               <div class="exec-row">
                 <div class="input-wrap">
                   <input type="number" class="liq-input liq-input-with-select" class:input-over={overMax}
@@ -1050,6 +1102,12 @@
     animation: pulse-subtle 1.5s ease-in-out infinite;
   }
   @keyframes pulse-subtle { 0%, 100% { opacity: 0.35; } 50% { opacity: 0.65; } }
+
+  .dust-hint {
+    font-size: 0.6875rem;
+    color: var(--rumi-text-muted);
+    margin-bottom: 0.25rem;
+  }
 
   .exec-row { display: flex; gap: 0.375rem; align-items: center; }
 

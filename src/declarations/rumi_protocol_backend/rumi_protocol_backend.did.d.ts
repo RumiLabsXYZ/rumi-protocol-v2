@@ -589,6 +589,7 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'liquidation_bonus' : string,
     }
   } |
+  { 'set_dust_liquidation_threshold' : { 'amount' : string } } |
   { 'set_amm1_pool_id' : { 'pool_id' : string } } |
   {
     'set_global_icusd_mint_cap' : {
@@ -906,6 +907,7 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'mode' : Mode,
       'icp_rate' : Uint8Array | number[],
       'vault_id' : bigint,
+      'repay_amount' : [] | [bigint],
       'timestamp' : [] | [bigint],
       'liquidator' : [] | [Principal],
     }
@@ -1203,6 +1205,7 @@ export interface ProtocolStatus {
   'interest_split' : Array<InterestSplitArg>,
   'recovery_cr_multiplier' : number,
   'interest_pool_share' : number,
+  'dust_liquidation_threshold_e8s' : bigint,
   'total_icusd_borrowed' : bigint,
   'min_icusd_amount' : bigint,
   'snapshot_ts_ns' : bigint,
@@ -1618,6 +1621,7 @@ export interface _SERVICE {
     Array<[SpProofLedger, bigint]>
   >,
   'get_deposit_account' : ActorMethod<[[] | [Principal]], Account>,
+  'get_dust_liquidation_threshold' : ActorMethod<[], bigint>,
   'get_effective_chain_debt_config' : ActorMethod<
     [number],
     [] | [ChainDebtConfigV1]
@@ -1845,6 +1849,7 @@ export interface _SERVICE {
   'set_collateral_status' : ActorMethod<[Principal, CollateralStatus], Result>,
   'set_deficit_readonly_threshold_e8s' : ActorMethod<[bigint], Result>,
   'set_deficit_repayment_fraction' : ActorMethod<[number], Result>,
+  'set_dust_liquidation_threshold' : ActorMethod<[bigint], Result>,
   'set_evm_rpc_principal' : ActorMethod<[Principal], Result>,
   'set_global_icusd_mint_cap' : ActorMethod<[bigint], Result>,
   'set_healthy_cr' : ActorMethod<[Principal, [] | [number]], Result>,

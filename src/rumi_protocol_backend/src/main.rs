@@ -1151,6 +1151,7 @@ fn get_protocol_status() -> ProtocolStatus {
         reserve_redemption_fee: s.reserve_redemption_fee.to_f64(),
         ckstable_repay_fee: s.ckstable_repay_fee.to_f64(),
         min_icusd_amount: s.min_icusd_amount.to_u64(),
+        dust_liquidation_threshold_e8s: s.dust_liquidation_threshold.to_u64(),
         global_icusd_mint_cap: s.global_icusd_mint_cap,
         frozen: s.frozen,
         manual_mode_override: s.manual_mode_override,
@@ -6257,11 +6258,15 @@ async fn stability_pool_liquidate(
                     ));
                 }
 
-                // Calculate optimal amount to restore vault to target CR
-                let optimal_amount = s.compute_partial_liquidation_cap(vault, collateral_price_usd);
-                let actual_liquidatable_debt = optimal_amount
-                    .min(vault.borrowed_icusd_amount)
-                    .min(max_debt_to_liquidate.into());
+                // LIQ-0XX: single shared decision point (dust-vault full-close,
+                // recovery/partial cap, capped by the SP's requested
+                // `max_debt_to_liquidate`, min floor, LIQ-003 round-up) so a
+                // dust vault's recommendation isn't silently zero here.
+                let actual_liquidatable_debt = s.effective_liquidation_amount(
+                    vault,
+                    collateral_price_usd,
+                    Some(max_debt_to_liquidate.into()),
+                );
 
                 // Calculate collateral that will be seized (debt + liquidation bonus)
                 let liquidation_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
@@ -6861,10 +6866,10 @@ async fn stability_pool_liquidate_with_reserves(
     // Pre-validate: vault exists, has debt, price available — before pulling any tokens.
     // This prevents pulling 3USD and then failing on a stale/removed vault.
     let liquidation_amount: rumi_protocol_backend::numeric::ICUSD = icusd_debt_covered_e8s.into();
-    if liquidation_amount < read_state(|s| s.min_icusd_amount) {
-        return Err(ProtocolError::AmountTooLow {
-            minimum_amount: read_state(|s| s.min_icusd_amount).to_u64(),
-        });
+    if liquidation_amount == rumi_protocol_backend::numeric::ICUSD::new(0) {
+        return Err(ProtocolError::GenericError(
+            "Cannot liquidate zero amount".to_string(),
+        ));
     }
     read_state(|s| match s.vault_id_to_vaults.get(&vault_id) {
         Some(vault) => {
@@ -6887,6 +6892,17 @@ async fn stability_pool_liquidate_with_reserves(
                 return Err(ProtocolError::GenericError(
                     "Cannot liquidate zero amount — vault has no debt".to_string(),
                 ));
+            }
+            // LIQ-0XX: min_icusd_amount applies to the FINAL (debt-capped)
+            // amount and is skipped when it closes the vault fully. This
+            // path pulls 3USD from the SP based on `icusd_debt_covered_e8s`
+            // AFTER this check, so a dust vault (full debt below the floor)
+            // must be allowed through here rather than being permanently
+            // unreachable via the SP write-down path.
+            if capped < s.min_icusd_amount && capped != vault.borrowed_icusd_amount {
+                return Err(ProtocolError::AmountTooLow {
+                    minimum_amount: s.min_icusd_amount.to_u64(),
+                });
             }
             Ok(())
         }
@@ -8349,11 +8365,21 @@ async fn bot_claim_liquidation(vault_id: u64) -> Result<BotLiquidationResult, Pr
             )));
             }
 
-            let actual = s.compute_partial_liquidation_cap(vault, collateral_price_usd);
+            // LIQ-0XX: `recommended_liquidation_amount_for` (dust-vault
+            // full-close, recovery/partial cap, min floor, LIQ-003 round-up,
+            // native-XRP full-debt) replaces the raw partial cap so a dust
+            // vault correctly claims for its full debt instead of falling
+            // through to the zero-cap rejection below. A genuinely
+            // above-target vault (the TOCTOU tolerance band case in the
+            // comment below) still yields 0 here: the min floor inside the
+            // helper only applies once the cap itself is nonzero, so it
+            // cannot manufacture liquidatability for a vault that isn't
+            // actually below its partial-liquidation target.
+            let actual = s.recommended_liquidation_amount_for(vault, collateral_price_usd);
 
             // Defense-in-depth: with the tolerance applied, `ratio` may sit
             // above the partial-cap target CR (`borrow_threshold_ratio`),
-            // in which case `compute_partial_liquidation_cap` returns 0.
+            // in which case the recommended amount is 0.
             // Reject explicitly rather than claiming a 0-debt liquidation,
             // which would deduct nothing from the budget and seize 0
             // collateral — pointless work that would still write a noisy
@@ -8771,8 +8797,9 @@ async fn dev_force_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, 
 }
 
 /// Developer test: force a PARTIAL bot liquidation, bypassing the CR health check.
-/// Uses compute_partial_liquidation_cap to determine debt amount (same as bot_claim_liquidation)
-/// but skips the requirement that the vault be below the liquidation threshold.
+/// Uses `recommended_liquidation_amount_for` to determine debt amount (same as
+/// bot_claim_liquidation) but skips the requirement that the vault be below
+/// the liquidation threshold.
 ///
 /// Compiled out of the mainnet wasm via `cfg(feature = "test_endpoints")` (AUTH-002).
 #[cfg(feature = "test_endpoints")]
@@ -8834,8 +8861,10 @@ async fn dev_force_partial_bot_liquidate(
                 .map(|c| c.decimals)
                 .unwrap_or(8);
 
-            // Use partial liquidation cap — same as bot_claim_liquidation
-            let actual = s.compute_partial_liquidation_cap(vault, collateral_price_usd);
+            // LIQ-0XX: recommended amount (dust-vault full-close, recovery/
+            // partial cap, min floor, LIQ-003 round-up, native-XRP full-debt)
+            // — same as bot_claim_liquidation.
+            let actual = s.recommended_liquidation_amount_for(vault, collateral_price_usd);
 
             let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
             let collateral_raw =
@@ -8949,7 +8978,11 @@ async fn dev_test_pool_only_liquidation(vault_id: u64) -> Result<String, Protoco
                 "No price available".to_string(),
             ))?;
         let price_e8s = collateral_price_usd.to_e8s();
-        let optimal_liq = s.compute_partial_liquidation_cap(vault, collateral_price_usd);
+        // LIQ-0XX: matches the production `check_vaults` recommendation path
+        // (dust-vault full-close, recovery/partial cap, min floor, LIQ-003
+        // round-up, native-XRP full-debt) so this dev/test notification is
+        // never a stale zero for a dust vault.
+        let optimal_liq = s.recommended_liquidation_amount_for(vault, collateral_price_usd);
 
         Ok(rumi_protocol_backend::LiquidatableVaultInfo {
             vault_id: vault.vault_id,
@@ -9194,6 +9227,47 @@ async fn set_min_icusd_amount(new_amount_e8s: u64) -> Result<(), ProtocolError> 
 #[query]
 fn get_min_icusd_amount() -> u64 {
     read_state(|s| s.min_icusd_amount.to_u64())
+}
+
+/// LIQ-0XX: set the global dust-liquidation threshold (developer only).
+/// Amount is in e8s, <= 10_000_000_000 (100 icUSD). A vault whose debt is at
+/// or below this threshold is always liquidated in full (never partially) —
+/// see `State::effective_liquidation_amount`. `0` disables the dust-forces-
+/// full-close rule and the dust-threshold extension to the LIQ-003 residual
+/// round-up; the per-collateral `min_vault_debt` round-up still applies
+/// regardless.
+#[candid_method(update)]
+#[update]
+async fn set_dust_liquidation_threshold(new_amount_e8s: u64) -> Result<(), ProtocolError> {
+    let caller = ic_cdk::caller();
+    let is_developer = read_state(|s| s.developer_principal == caller);
+    if !is_developer {
+        return Err(ProtocolError::GenericError(
+            "Only developer can set the dust liquidation threshold".to_string(),
+        ));
+    }
+    if new_amount_e8s > rumi_protocol_backend::state::MAX_DUST_LIQUIDATION_THRESHOLD_E8S {
+        return Err(ProtocolError::GenericError(
+            "Amount must be <= 100 icUSD (10_000_000_000 e8s)".to_string(),
+        ));
+    }
+    let amount = ICUSD::new(new_amount_e8s);
+    mutate_state(|s| {
+        rumi_protocol_backend::event::record_set_dust_liquidation_threshold(s, amount);
+    });
+    log!(
+        INFO,
+        "[set_dust_liquidation_threshold] Dust liquidation threshold set to: {} e8s",
+        new_amount_e8s
+    );
+    Ok(())
+}
+
+/// Get the current dust-liquidation threshold (in e8s)
+#[candid_method(query)]
+#[query]
+fn get_dust_liquidation_threshold() -> u64 {
+    read_state(|s| s.dust_liquidation_threshold.to_u64())
 }
 
 /// Set the global cap on total icUSD that can be minted (developer only).

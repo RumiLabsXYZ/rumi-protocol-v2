@@ -536,6 +536,7 @@ type Event = variant {
   };
   set_reserve_redemptions_enabled : record { enabled : bool };
   set_min_icusd_amount : record { amount : text };
+  set_dust_liquidation_threshold : record { amount : text };
   set_borrowing_fee_curve : record { markers : text };
   chain_interest_minted : record {
     mint_id : nat64;
@@ -752,6 +753,7 @@ type Event = variant {
     vault_id : nat64;
     timestamp : opt nat64;
     liquidator : opt principal;
+    repay_amount : opt nat64;
   };
   set_collateral_borrow_threshold : record {
     borrow_threshold_ratio : text;
@@ -1024,6 +1026,7 @@ type ProtocolStatus = record {
   interest_pool_share : float64;
   total_icusd_borrowed : nat64;
   min_icusd_amount : nat64;
+  dust_liquidation_threshold_e8s : nat64;
   snapshot_ts_ns : nat64;
   total_collateral_ratio : float64;
   deficit_repayment_fraction : float64;
@@ -1385,6 +1388,7 @@ service : (ProtocolArg) -> {
       vec record { SpProofLedger; nat64 },
     ) query;
   get_deposit_account : (opt principal) -> (Account) query;
+  get_dust_liquidation_threshold : () -> (nat64) query;
   get_effective_chain_debt_config : (nat32) -> (opt ChainDebtConfigV1) query;
   get_event_count : () -> (nat64) query;
   get_event_timestamps : (nat64, nat64) -> (vec nat64) query;
@@ -1543,6 +1547,7 @@ service : (ProtocolArg) -> {
   set_collateral_status : (principal, CollateralStatus) -> (Result);
   set_deficit_readonly_threshold_e8s : (nat64) -> (Result);
   set_deficit_repayment_fraction : (float64) -> (Result);
+  set_dust_liquidation_threshold : (nat64) -> (Result);
   set_evm_rpc_principal : (principal) -> (Result);
   set_global_icusd_mint_cap : (nat64) -> (Result);
   set_healthy_cr : (principal, opt float64) -> (Result);

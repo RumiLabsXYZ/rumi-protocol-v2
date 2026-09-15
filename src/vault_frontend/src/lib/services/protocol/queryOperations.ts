@@ -36,6 +36,10 @@ export class QueryOperations {
         recoveryTargetCr: Number(canisterStatus.recovery_target_cr),
         recoveryModeThreshold: Number(canisterStatus.recovery_mode_threshold),
         recoveryCrMultiplier: Number(canisterStatus.recovery_cr_multiplier),
+        // `dust_liquidation_threshold_e8s` may not exist on the deployed candid yet
+        // (backend rollout in progress); default to 1 icUSD (100_000_000 e8s) so
+        // small-position liquidation still behaves correctly against an older backend.
+        dustLiquidationThresholdIcusd: Number((canisterStatus as any).dust_liquidation_threshold_e8s ?? 100_000_000) / E8S,
         reserveRedemptionsEnabled: Boolean((canisterStatus as any).reserve_redemptions_enabled),
         reserveRedemptionFee: Number((canisterStatus as any).reserve_redemption_fee),
         ckstableRepayFee: Number((canisterStatus as any).ckstable_repay_fee ?? 0),

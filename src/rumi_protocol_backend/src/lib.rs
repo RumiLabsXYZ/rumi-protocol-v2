@@ -160,6 +160,10 @@ pub struct ProtocolStatus {
     pub reserve_redemption_fee: f64,
     pub ckstable_repay_fee: f64,
     pub min_icusd_amount: u64,
+    /// LIQ-0XX: admin-settable dust-liquidation threshold (icUSD, e8s). A
+    /// vault whose debt is at or below this threshold is always liquidated
+    /// in full rather than partially. See `State::effective_liquidation_amount`.
+    pub dust_liquidation_threshold_e8s: u64,
     pub global_icusd_mint_cap: u64,
     pub frozen: bool,
     pub manual_mode_override: bool,

@@ -44,6 +44,17 @@ pub type VaultId = u64;
 pub const DEFAULT_BORROW_FEE: Ratio = Ratio::new(dec!(0.005));
 pub const DEFAULT_CKSTABLE_REPAY_FEE: Ratio = Ratio::new(dec!(0.0005)); // 0.05%
 pub const DEFAULT_MIN_ICUSD_AMOUNT: ICUSD = ICUSD::new(10_000_000); // 0.1 icUSD
+/// LIQ-0XX small-position-liquidation fix: default `dust_liquidation_threshold`.
+/// A vault at or below this debt always liquidates in full — see
+/// `State::effective_liquidation_amount`.
+pub const DEFAULT_DUST_LIQUIDATION_THRESHOLD: ICUSD = ICUSD::new(100_000_000); // 1 icUSD
+/// Admin cap for `set_dust_liquidation_threshold` (matches the
+/// `set_min_icusd_amount` cap).
+pub const MAX_DUST_LIQUIDATION_THRESHOLD_E8S: u64 = 10_000_000_000; // 100 icUSD
+
+fn default_dust_liquidation_threshold() -> ICUSD {
+    DEFAULT_DUST_LIQUIDATION_THRESHOLD
+}
 pub const DEFAULT_LIQUIDATION_BONUS: Ratio = Ratio::new(dec!(1.15)); // 115% (15% bonus)
 pub const DEFAULT_MAX_PARTIAL_LIQUIDATION_RATIO: Ratio = Ratio::new(dec!(0.5)); // 50% max
 pub const DEFAULT_REDEMPTION_FEE_FLOOR: Ratio = Ratio::new(dec!(0.003)); // 0.3%
@@ -1350,6 +1361,33 @@ pub struct State {
     /// Admin-settable minimum icUSD amount for borrow/repay/redemption operations (in e8s).
     /// Default set in `From<InitArg>`, updated via `record_set_min_icusd_amount` event.
     pub min_icusd_amount: ICUSD,
+    /// LIQ-0XX small-position-liquidation fix: admin-settable global dust
+    /// threshold (icUSD, e8s) used by `State::effective_liquidation_amount`,
+    /// the single shared decision point every ICP-side liquidation path
+    /// (full, partial, bot dispatch, SP absorb, reporting) uses to size a
+    /// liquidation. A vault whose debt is at or below this threshold is
+    /// always liquidated IN FULL, and the threshold also extends the LIQ-003
+    /// residual round-up (`round_up_partial_liq_dust`) alongside each
+    /// collateral's `min_vault_debt`.
+    ///
+    /// Fixes a real stuck-vault bug: `compute_partial_liquidation_cap` can
+    /// compute a cap far below `min_icusd_amount` for a small vault (e.g. a
+    /// vault with ~0.2 icUSD debt can have a cap of ~0.018 icUSD), and every
+    /// partial-liquidation endpoint rejected any requested amount below
+    /// `min_icusd_amount` — so no valid liquidation amount existed and the
+    /// vault sat forever, even though it was genuinely liquidatable.
+    ///
+    /// Default `DEFAULT_DUST_LIQUIDATION_THRESHOLD` (1 icUSD). `0` disables
+    /// the dust-forces-full-close rule and the dust-threshold extension to
+    /// the LIQ-003 round-up; the per-collateral `min_vault_debt` round-up
+    /// still applies regardless. `#[serde(default = ...)]` intentionally
+    /// decodes a pre-existing mainnet snapshot (missing this field) to the 1
+    /// icUSD default rather than 0 — defaulting to 0 would silently
+    /// reintroduce the stuck-vault bug on upgrade. Set via
+    /// `set_dust_liquidation_threshold` (developer only), event-recorded via
+    /// `record_set_dust_liquidation_threshold` for replay.
+    #[serde(default = "default_dust_liquidation_threshold")]
+    pub dust_liquidation_threshold: ICUSD,
     /// Global cap on total icUSD that can be minted across all collateral types (in e8s).
     /// Default u64::MAX = uncapped. Updated via `record_set_global_icusd_mint_cap` event.
     pub global_icusd_mint_cap: u64,
@@ -1985,6 +2023,7 @@ impl Default for State {
             ckusdc_ledger_principal: None,
             ckstable_repay_fee: DEFAULT_CKSTABLE_REPAY_FEE,
             min_icusd_amount: DEFAULT_MIN_ICUSD_AMOUNT,
+            dust_liquidation_threshold: DEFAULT_DUST_LIQUIDATION_THRESHOLD,
             global_icusd_mint_cap: u64::MAX,
             ckusdt_enabled: false,
             ckusdc_enabled: false,
@@ -2141,6 +2180,7 @@ impl From<InitArg> for State {
             ckusdc_ledger_principal: args.ckusdc_ledger_principal,
             ckstable_repay_fee: DEFAULT_CKSTABLE_REPAY_FEE,
             min_icusd_amount: DEFAULT_MIN_ICUSD_AMOUNT,
+            dust_liquidation_threshold: DEFAULT_DUST_LIQUIDATION_THRESHOLD,
             global_icusd_mint_cap: u64::MAX,
             ckusdt_enabled: true,
             ckusdc_enabled: true,
@@ -4070,7 +4110,7 @@ impl State {
         {
             return vault.borrowed_icusd_amount;
         }
-        self.compute_partial_liquidation_cap(vault, price)
+        self.effective_liquidation_amount(vault, price, None)
     }
 
     /// Whether the liquidation bot may be offered vaults of this collateral
@@ -4486,6 +4526,99 @@ impl State {
         repay_amount.min(vault.borrowed_icusd_amount)
     }
 
+    // ─── LIQ-0XX: small-position-liquidation fix ───
+
+    /// Single source of truth for how much debt a liquidation should repay,
+    /// for a vault the caller has ALREADY confirmed is liquidatable (this
+    /// function never signals "not liquidatable" — callers must run their own
+    /// CR/liquidatability gate first, exactly as they did before this fix).
+    /// Every ICP-side liquidation path (full `liquidate_vault`, the three
+    /// partial endpoints, the SP write-down recommendation, bot dispatch, and
+    /// liquidatable-vault reporting) must route its amount decision through
+    /// this helper so a small vault can never again get stuck with no valid
+    /// liquidation amount (see `dust_liquidation_threshold` doc comment for
+    /// the bug this fixes). Claim-based rails (native-XRP; see
+    /// `recommended_liquidation_amount_for`) bypass this helper entirely and
+    /// always dispatch the full debt — they settle via an off-chain claim
+    /// that cannot be partially sized.
+    ///
+    /// `requested`: an optional caller-requested amount (e.g. a liquidator's
+    /// chosen `icusd_amount`, or a stability-pool's `max_debt_to_liquidate`).
+    /// `None` means "give me as much as the protocol will allow" (used by
+    /// `liquidate_vault`, bot dispatch, and reporting, which have no
+    /// caller-chosen amount).
+    ///
+    /// Rule (in order):
+    ///  1. Dust: if `debt <= dust_liquidation_threshold` (and the threshold
+    ///     is nonzero), the amount is the FULL debt — a vault this small can
+    ///     never clear the base cap below, so partial-liquidating it would
+    ///     leave it stuck forever.
+    ///  2. Base cap: `compute_recovery_repay_cap` when it returns `Some`
+    ///     (Recovery mode, vault CR inside the per-collateral recovery
+    ///     band), else `compute_partial_liquidation_cap`. If `requested` is
+    ///     given, the amount is `min(requested, cap)`.
+    ///  3. Minimum floor: once a vault is confirmed liquidatable (`cap > 0`),
+    ///     the amount is never below `min(min_icusd_amount, debt)` — a large
+    ///     vault just under the line can always be liquidated for at least
+    ///     the protocol's borrow minimum. A `cap == 0` (vault not actually
+    ///     below its partial-liquidation target — e.g. the bot's CR-tolerance
+    ///     TOCTOU band) is NOT floored; callers that treat a zero result as
+    ///     "skip" keep doing so correctly.
+    ///  4. No new dust: round the amount up to the full debt if the residual
+    ///     debt after applying it would land in `(0, max(dust_liquidation_threshold,
+    ///     min_vault_debt)]` — LIQ-003, extended so the dust threshold also
+    ///     forecloses new sub-dust residuals, not just sub-`min_vault_debt`
+    ///     ones.
+    pub fn effective_liquidation_amount(
+        &self,
+        vault: &Vault,
+        collateral_price: UsdIcp,
+        requested: Option<ICUSD>,
+    ) -> ICUSD {
+        let debt = vault.borrowed_icusd_amount;
+        if debt.0 == 0 {
+            return ICUSD::new(0);
+        }
+
+        // Rule 1: dust vaults always close in full, regardless of `requested`
+        // or the base cap.
+        if self.dust_liquidation_threshold.0 > 0 && debt <= self.dust_liquidation_threshold {
+            return debt;
+        }
+
+        // Rule 2: base cap (recovery-mode target-CR repay, else the generic
+        // partial-liquidation cap), narrowed by any caller-requested amount.
+        let cap = self
+            .compute_recovery_repay_cap(vault, collateral_price)
+            .unwrap_or_else(|| self.compute_partial_liquidation_cap(vault, collateral_price));
+        let mut amount = match requested {
+            Some(r) => r.min(cap),
+            None => cap,
+        };
+
+        // Rule 3: minimum floor. Only applies once the vault is confirmed
+        // liquidatable by the cap math itself (cap > 0) — a zero cap means
+        // "not below its partial-liquidation target", which callers rely on
+        // as a liquidatability signal and must not be manufactured away.
+        if cap.0 > 0 {
+            let floor = self.min_icusd_amount.min(debt);
+            if amount < floor {
+                amount = floor;
+            }
+        }
+        amount = amount.min(debt);
+
+        // Rule 4: no new dust. Extend the LIQ-003 round-up floor with the
+        // dust threshold so a residual just above `min_vault_debt` but still
+        // <= the dust threshold doesn't recreate a stuck vault.
+        let min_vault_debt = self
+            .get_collateral_config(&vault.collateral_type)
+            .map(|c| c.min_vault_debt)
+            .unwrap_or(ICUSD::new(0));
+        let dust_floor = self.dust_liquidation_threshold.max(min_vault_debt);
+        crate::vault::round_up_partial_liq_dust(vault, amount, dust_floor)
+    }
+
     // ─── Wave-8e LIQ-005: deficit-account helpers ───
 
     /// Increment `protocol_deficit_icusd` by `shortfall` and return the
@@ -4664,13 +4797,87 @@ impl State {
             .sum()
     }
 
+    /// Pre-LIQ-0XX repay-amount decision, preserved EXACTLY for replaying
+    /// historical `LiquidateVault` events recorded before `Event::LiquidateVault`
+    /// gained its `repay_amount` field (see that field's doc comment). A
+    /// pre-fix GeneralAvailability liquidation always took the full debt, and
+    /// a pre-fix Recovery-mode liquidation only capped the amount when the
+    /// vault's CR was above the GLOBAL `MINIMUM_COLLATERAL_RATIO` constant
+    /// (using the per-collateral recovery-target formula) — otherwise it too
+    /// took the full debt. Do not change this function's behavior; it exists
+    /// solely so `State::liquidate_vault`'s `repay_amount: None` branch keeps
+    /// reproducing on-chain history bit for bit. Every new call site must
+    /// route through `effective_liquidation_amount` and pass a pinned
+    /// `Some(repay_amount)` instead.
+    ///
+    /// Returns `None` when the vault cannot be liquidated at all (missing
+    /// collateral config or price) — the caller treats that the same as a
+    /// zero amount. Returns `Some(ICUSD::new(0))` for the old "already at or
+    /// above the recovery target" short-circuit, which pre-fix returned zero
+    /// (and applied no mutation) directly from the whole function.
+    fn legacy_recovery_or_full_repay_amount(
+        &self,
+        vault: &Vault,
+        mode: Mode,
+        collateral_price: UsdIcp,
+    ) -> Option<ICUSD> {
+        let ct = vault.collateral_type;
+        let vault_collateral_ratio = compute_collateral_ratio(vault, collateral_price, self);
+
+        if mode == Mode::Recovery && vault_collateral_ratio > MINIMUM_COLLATERAL_RATIO {
+            // Recovery mode: liquidate only enough to restore CR to recovery_target_cr.
+            let config = self.get_collateral_config(&ct)?;
+            let price = config.last_price.and_then(Decimal::from_f64)?;
+            let decimals = config.decimals;
+
+            let collateral_value: ICUSD =
+                crate::numeric::collateral_usd_value(vault.collateral_amount, price, decimals);
+            let recovery_target = self.get_recovery_target_cr_for(&ct);
+            let liq_bonus = self.get_liquidation_bonus_for(&ct);
+            let numerator_icusd = vault.borrowed_icusd_amount * recovery_target;
+
+            if numerator_icusd <= collateral_value {
+                return Some(ICUSD::new(0)); // already at/above target
+            }
+
+            let deficit = numerator_icusd - collateral_value;
+            let denominator = recovery_target - liq_bonus;
+            Some((deficit / denominator).min(vault.borrowed_icusd_amount))
+        } else {
+            Some(vault.borrowed_icusd_amount) // full liquidation
+        }
+    }
+
     /// Liquidate a vault. Returns the interest share of the debt reduction
     /// so callers can route it to treasury.
+    ///
+    /// LIQ-0XX / event-replay fix: `repay_amount` is `Some(pinned)` for every
+    /// live caller — `vault::liquidate_vault` decides the amount via
+    /// `effective_liquidation_amount` BEFORE its `transfer_icusd_from(...).await`
+    /// and passes that pinned amount through here, so the icUSD pulled from
+    /// the liquidator always equals the amount applied (previously this
+    /// function independently RE-EVALUATED `effective_liquidation_amount`
+    /// after the await, so an admin setter landing during the transfer could
+    /// make the two amounts diverge). The pinned amount is still re-capped
+    /// downward against the LIVE debt (`.min(vault.borrowed_icusd_amount)`)
+    /// so a concurrent debt reduction or interest accrual during the await
+    /// can only shrink it, never trap or overshoot.
+    ///
+    /// `None` means "decide it now" — used by `record_liquidate_vault` (no
+    /// pre-await snapshot to pin) and, critically, by replay of a PRE-FIX
+    /// `LiquidateVault` event that predates `Event::LiquidateVault::repay_amount`.
+    /// For that historical case this must NOT route through
+    /// `effective_liquidation_amount` (which applies the new unified
+    /// partial-liquidation rule and can compute a smaller amount than what
+    /// actually happened on-chain, leaving a replayed vault open when it was
+    /// really closed in full) — it reproduces the exact pre-fix decision via
+    /// `legacy_recovery_or_full_repay_amount` instead.
     pub fn liquidate_vault(
         &mut self,
         vault_id: u64,
         mode: Mode,
         collateral_price: UsdIcp,
+        repay_amount: Option<ICUSD>,
     ) -> ICUSD {
         // ASYNC-002 defense-in-depth: never trap on a missing vault. The
         // vault-level `vault::liquidate_vault` now presence-checks and refunds
@@ -4685,10 +4892,22 @@ impl State {
         };
 
         let ct = vault.collateral_type;
-        let vault_collateral_ratio = compute_collateral_ratio(&vault, collateral_price, self);
+        let repay_amount = match repay_amount {
+            Some(pinned) => pinned.min(vault.borrowed_icusd_amount),
+            None => match self.legacy_recovery_or_full_repay_amount(&vault, mode, collateral_price)
+            {
+                Some(amount) => amount,
+                None => return ICUSD::new(0),
+            },
+        };
+        if repay_amount.0 == 0 {
+            return ICUSD::new(0);
+        }
 
-        if mode == Mode::Recovery && vault_collateral_ratio > MINIMUM_COLLATERAL_RATIO {
-            // Recovery mode: liquidate only enough to restore CR to recovery_target_cr
+        if repay_amount < vault.borrowed_icusd_amount {
+            // Partial: restores CR toward the recovery/partial-liquidation
+            // target (or is the dust/min-floor amount `effective_liquidation_amount`
+            // decided on, which is still less than the full debt).
             let config = match self.get_collateral_config(&ct) {
                 Some(c) => c,
                 None => return ICUSD::new(0), // unknown collateral — cannot liquidate
@@ -4698,20 +4917,7 @@ impl State {
                 None => return ICUSD::new(0), // no price — cannot compute
             };
             let decimals = config.decimals;
-
-            let collateral_value: ICUSD =
-                crate::numeric::collateral_usd_value(vault.collateral_amount, price, decimals);
-            let recovery_target = self.get_recovery_target_cr_for(&ct);
             let liq_bonus = self.get_liquidation_bonus_for(&ct);
-            let numerator_icusd = vault.borrowed_icusd_amount * recovery_target;
-
-            if numerator_icusd <= collateral_value {
-                return ICUSD::new(0); // already at/above target
-            }
-
-            let deficit = numerator_icusd - collateral_value;
-            let denominator = recovery_target - liq_bonus;
-            let repay_amount = (deficit / denominator).min(vault.borrowed_icusd_amount);
 
             // Collateral seized = icusd_to_collateral_amount(repay_amount * bonus)
             let repay_with_bonus: ICUSD = repay_amount * liq_bonus;
@@ -4743,8 +4949,8 @@ impl State {
                 }
                 None => ic_cdk::trap("liquidating unknown vault"),
             };
-            // Wave-8b LIQ-002: recovery-mode partial liquidation mutates the
-            // vault in place; re-key its index entry to reflect the new CR.
+            // Wave-8b LIQ-002: partial liquidation mutates the vault in
+            // place; re-key its index entry to reflect the new CR.
             self.reindex_vault_cr(vault_id);
             interest_share
         } else {
@@ -5881,8 +6087,10 @@ mod tests {
             cr_before.to_f64()
         );
 
-        // Execute protocol's recovery liquidation logic
-        mutate_state(|s| s.liquidate_vault(vault_id, s.mode, collateral_price));
+        // Execute protocol's recovery liquidation logic. `None` reproduces the
+        // pre-LIQ-0XX legacy decision (see `legacy_recovery_or_full_repay_amount`),
+        // which is exactly what this test exercises.
+        mutate_state(|s| s.liquidate_vault(vault_id, s.mode, collateral_price, None));
 
         // After recovery-mode targeted liquidation:
         // - Vault should still exist (not fully liquidated)
@@ -6569,17 +6777,54 @@ mod tests {
         );
 
         // Verify the sync State::liquidate_vault still works correctly
-        // (it doesn't split the fee — the async callers do that)
-        let interest_share = state.liquidate_vault(10, Mode::GeneralAvailability, collateral_price);
-        // Full liquidation: all accrued_interest is returned
-        assert_eq!(
-            interest_share.0, 100_000_000,
-            "Full liquidation should return all accrued_interest"
-        );
-        // Vault should be removed
+        // (it doesn't split the fee — the async callers do that).
+        //
+        // LIQ-0XX: `State::liquidate_vault` applies a PINNED repay amount
+        // decided by `effective_liquidation_amount`, applied in ALL modes
+        // (not just Recovery) — this is the approved backend enforcement of
+        // the partial-liquidation cap. This vault's CR (~130.4%) yields a
+        // real partial cap (well below the 150% borrow-threshold target), so
+        // pinning that cap and applying it here does a PARTIAL liquidation
+        // instead of unconditionally liquidating in full — an intentional
+        // behavior change from the pre-fix code, which only capped in
+        // Recovery mode and otherwise always took the full debt. (`None`
+        // would instead reproduce that OLD full-liquidation-in-GA behavior —
+        // see `legacy_recovery_or_full_repay_amount` and the event-replay
+        // tests below — so this test pins the amount explicitly, exactly as
+        // `vault::liquidate_vault` now does pre-await.)
+        let vault_before = state.vault_id_to_vaults.get(&10).cloned().unwrap();
+        let expected_repay =
+            state.compute_partial_liquidation_cap(&vault_before, collateral_price);
         assert!(
-            state.vault_id_to_vaults.get(&10).is_none(),
-            "Vault should be removed after full liquidation"
+            expected_repay > ICUSD::new(0) && expected_repay < vault_before.borrowed_icusd_amount,
+            "premise: this vault's CR must yield a genuine partial cap under the new unified logic"
+        );
+        let pinned = state.effective_liquidation_amount(&vault_before, collateral_price, None);
+        assert_eq!(
+            pinned, expected_repay,
+            "premise: effective_liquidation_amount should agree with the raw partial cap here (no dust/floor rules triggered)"
+        );
+        let expected_interest_share = (rust_decimal::Decimal::from(expected_repay.0)
+            * rust_decimal::Decimal::from(vault_before.accrued_interest.0)
+            / rust_decimal::Decimal::from(vault_before.borrowed_icusd_amount.0))
+        .to_u64()
+        .unwrap_or(0);
+
+        let interest_share =
+            state.liquidate_vault(10, Mode::GeneralAvailability, collateral_price, Some(pinned));
+        assert_eq!(
+            interest_share.0, expected_interest_share,
+            "partial liquidation should return the proportional interest share"
+        );
+        // Vault should remain open with debt reduced by exactly the repaid amount.
+        let remaining = state
+            .vault_id_to_vaults
+            .get(&10)
+            .expect("vault should remain open after a partial liquidation");
+        assert_eq!(
+            remaining.borrowed_icusd_amount,
+            vault_before.borrowed_icusd_amount - expected_repay,
+            "remaining debt should be reduced by exactly the repaid amount"
         );
     }
 
@@ -8399,5 +8644,813 @@ mod tests {
         // Sanity: in Recovery the base is at or above the borrow threshold.
         let borrow_threshold = state.get_min_collateral_ratio_for(&icp);
         assert!(base >= borrow_threshold);
+    }
+
+
+    // ─────────────────────────────────────────────────────────────────
+    // LIQ-0XX: small-position-liquidation fix.
+    //
+    // Bug: `compute_partial_liquidation_cap` can compute a cap far below
+    // `min_icusd_amount` for a small vault (mainnet vault #172: BOB
+    // collateral, debt 0.2076 icUSD, CR 143.2% — just below its
+    // liquidation ratio, cap ~0.0184 icUSD). Every partial-liquidation
+    // endpoint rejected any requested/capped amount below
+    // `min_icusd_amount`, so no valid liquidation amount existed and the
+    // vault sat forever. `State::effective_liquidation_amount` is the
+    // shared fix: dust vaults close in full, a large vault's cap is
+    // floored to `min_icusd_amount`, and any residual left in the dust
+    // band still rounds up to a full close (LIQ-003, extended).
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Clones the default ICP collateral config as a template and overrides
+    /// just the fields a given test scenario needs, registered under `ct`.
+    /// Avoids re-listing all ~25 `CollateralConfig` fields per test.
+    fn liq0xx_collateral(
+        state: &mut State,
+        ct: Principal,
+        liquidation_ratio: Ratio,
+        borrow_threshold_ratio: Ratio,
+        liquidation_bonus: Ratio,
+        price: f64,
+    ) {
+        let icp = state.icp_collateral_type();
+        let mut cfg = state.collateral_configs.get(&icp).unwrap().clone();
+        cfg.ledger_canister_id = ct;
+        cfg.liquidation_ratio = liquidation_ratio;
+        cfg.borrow_threshold_ratio = borrow_threshold_ratio;
+        cfg.liquidation_bonus = liquidation_bonus;
+        cfg.last_price = Some(price);
+        cfg.status = CollateralStatus::Sunset;
+        state.collateral_configs.insert(ct, cfg);
+    }
+
+    fn liq0xx_vault(vault_id: u64, ct: Principal, collateral_amount: u64, debt_e8s: u64) -> Vault {
+        Vault {
+            owner: Principal::anonymous(),
+            vault_id,
+            collateral_amount,
+            borrowed_icusd_amount: ICUSD::new(debt_e8s),
+            collateral_type: ct,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        }
+    }
+
+    #[test]
+    fn liq0xx_vault_172_dust_debt_liquidates_in_full() {
+        // Mainnet vault #172 exact numbers: BOB collateral (Sunset), debt
+        // 20_762_188 e8s (0.2076 icUSD), collateral 551_502_002 raw (8
+        // decimals) at price 0.053922 (CR ~143.2%). The BOB config's actual
+        // liquidation_ratio/borrow_threshold_ratio aren't recorded in the
+        // bug report, so this test derives a narrow liquidation-to-target
+        // band around the vault's real CR — close enough that the resulting
+        // partial cap is a tiny fraction of the debt (same shape as the
+        // reported ~0.0184 icUSD cap), and asserts the dust rule (rule 1)
+        // makes the exact band irrelevant: below the dust threshold, the
+        // vault always closes in full regardless of the cap.
+        let mut state = test_state();
+        let bob = Principal::from_slice(b"liq0xx-bob-collateral");
+
+        let debt_e8s = 20_762_188u64;
+        let collateral_amount = 551_502_002u64;
+        let price = 0.053922f64;
+        let price_dec = Decimal::from_f64(price).unwrap();
+        let collateral_value =
+            crate::numeric::collateral_usd_value(collateral_amount, price_dec, 8);
+        let cr = Decimal::from(collateral_value.to_u64()) / Decimal::from(debt_e8s);
+
+        // Narrow band: liquidatable just below `cr`, target just above it.
+        let liq_ratio = Ratio::from(cr + dec!(0.0001));
+        let target_cr = Ratio::from(cr + dec!(0.0005));
+        liq0xx_collateral(
+            &mut state,
+            bob,
+            liq_ratio,
+            target_cr,
+            Ratio::from(dec!(1.15)),
+            price,
+        );
+
+        let vault = liq0xx_vault(172, bob, collateral_amount, debt_e8s);
+        let price_usd = UsdIcp::from(price_dec);
+
+        // Premise: the raw partial cap is real (not saturated to full debt)
+        // and, critically, below `min_icusd_amount` — this is the exact
+        // condition that stranded the vault pre-fix.
+        let raw_cap = state.compute_partial_liquidation_cap(&vault, price_usd);
+        assert!(
+            raw_cap > ICUSD::new(0) && raw_cap < state.min_icusd_amount,
+            "premise: raw cap {} must be a nonzero amount below min_icusd_amount {}",
+            raw_cap.to_u64(),
+            state.min_icusd_amount.to_u64()
+        );
+        assert!(
+            debt_e8s as u64 <= state.dust_liquidation_threshold.to_u64(),
+            "premise: vault #172's debt must be at or below the default dust threshold"
+        );
+
+        let full_debt = ICUSD::new(debt_e8s);
+        assert_eq!(
+            state.effective_liquidation_amount(&vault, price_usd, None),
+            full_debt,
+            "dust vault (None requested) must liquidate in full"
+        );
+        assert_eq!(
+            state.effective_liquidation_amount(&vault, price_usd, Some(ICUSD::new(1))),
+            full_debt,
+            "dust vault must liquidate in full even for a tiny requested amount"
+        );
+        assert_eq!(
+            state.effective_liquidation_amount(&vault, price_usd, Some(full_debt)),
+            full_debt,
+            "dust vault liquidates in full when the requested amount already is the full debt"
+        );
+    }
+
+    #[test]
+    fn liq0xx_dust_threshold_zero_disables_full_close_and_uses_min_floor() {
+        // Same vault #172 scenario, but with the dust rule disabled
+        // (`dust_liquidation_threshold = 0`). The amount must fall through
+        // to the normal cap/floor path instead of forcing a full close:
+        // the raw cap is still below `min_icusd_amount`, so rule 3 floors
+        // it to exactly `min_icusd_amount`, and the vault stays open.
+        let mut state = test_state();
+        let bob = Principal::from_slice(b"liq0xx-bob-collateral");
+
+        let debt_e8s = 20_762_188u64;
+        let collateral_amount = 551_502_002u64;
+        let price = 0.053922f64;
+        let price_dec = Decimal::from_f64(price).unwrap();
+        let collateral_value =
+            crate::numeric::collateral_usd_value(collateral_amount, price_dec, 8);
+        let cr = Decimal::from(collateral_value.to_u64()) / Decimal::from(debt_e8s);
+        let liq_ratio = Ratio::from(cr + dec!(0.0001));
+        let target_cr = Ratio::from(cr + dec!(0.0005));
+        liq0xx_collateral(
+            &mut state,
+            bob,
+            liq_ratio,
+            target_cr,
+            Ratio::from(dec!(1.15)),
+            price,
+        );
+        state.dust_liquidation_threshold = ICUSD::new(0);
+
+        let vault = liq0xx_vault(172, bob, collateral_amount, debt_e8s);
+        let price_usd = UsdIcp::from(price_dec);
+
+        let result = state.effective_liquidation_amount(&vault, price_usd, None);
+        assert_eq!(
+            result, state.min_icusd_amount,
+            "with the dust rule disabled, a below-floor cap must still be floored to min_icusd_amount"
+        );
+        assert!(
+            result < vault.borrowed_icusd_amount,
+            "the vault must stay open (partial), not close in full, when the dust rule is disabled"
+        );
+    }
+
+    #[test]
+    fn liq0xx_large_vault_cap_below_floor_gets_floored_and_stays_open() {
+        // A large (non-dust) vault whose partial-liquidation cap is, by
+        // construction, below `min_icusd_amount` (a narrow liquidation-to-
+        // borrow-threshold band). Pre-fix, every partial endpoint would
+        // reject this vault outright even though it is genuinely
+        // liquidatable. Post-fix, rule 3 floors the amount to
+        // `min_icusd_amount` and the vault remains open (partial, not full).
+        let mut state = test_state();
+        let ct = Principal::from_slice(b"liq0xx-large-vault");
+
+        let debt = ICUSD::new(5_000_000_000); // 50 icUSD — far above the dust threshold
+        let collateral_amount = 6_700_000_000u64; // price=1.0, decimals=8 -> CR = 134.00%
+        let liq_ratio = Ratio::from(dec!(1.3400));
+        let target_cr = Ratio::from(dec!(1.3402)); // 0.02-point band above the vault's CR
+        let bonus = Ratio::from(dec!(1.15));
+        liq0xx_collateral(&mut state, ct, liq_ratio, target_cr, bonus, 1.0);
+
+        let vault = liq0xx_vault(1, ct, collateral_amount, debt.to_u64());
+        let price_usd = UsdIcp::from(Decimal::ONE);
+
+        let raw_cap = state.compute_partial_liquidation_cap(&vault, price_usd);
+        assert!(
+            raw_cap > ICUSD::new(0) && raw_cap < state.min_icusd_amount,
+            "premise: raw cap {} must be a nonzero amount below min_icusd_amount {}",
+            raw_cap.to_u64(),
+            state.min_icusd_amount.to_u64()
+        );
+
+        let result = state.effective_liquidation_amount(&vault, price_usd, None);
+        assert_eq!(
+            result, state.min_icusd_amount,
+            "cap below the floor must be raised to exactly min_icusd_amount"
+        );
+        assert!(
+            result < debt,
+            "the vault must stay open — the floor must not force a full close"
+        );
+    }
+
+    #[test]
+    fn liq0xx_partial_residual_at_or_below_dust_threshold_rounds_to_full_debt() {
+        // Rule 4: a residual that would land in (0, dust_threshold] — even
+        // when it's above `min_vault_debt` — rounds the amount up to the
+        // full debt, extending LIQ-003. Uses a deeply-underwater vault
+        // (`target_cr <= liquidation_bonus`, so `compute_partial_liquidation_cap`
+        // saturates to the full debt) and a caller-`requested` amount that
+        // would leave a residual inside the (min_vault_debt, dust_threshold]
+        // band, distinct from the dust-debt short-circuit in rule 1 (this
+        // vault's FULL debt, 2 icUSD, is well above the 1 icUSD default
+        // dust threshold).
+        let mut state = test_state();
+        let ct = Principal::from_slice(b"liq0xx-residual-round-up");
+
+        let debt = ICUSD::new(200_000_000); // 2.0 icUSD — above the dust threshold
+        let collateral_amount = 100_000_000u64; // deeply underwater
+        let liq_ratio = Ratio::from(dec!(1.10));
+        // `Ratio::sub` panics on a negative result, so `target_cr` can only
+        // reach the `denominator <= 0` saturate-to-full-debt branch via
+        // EQUALITY with `bonus` (denominator == 0), not by going below it.
+        let target_cr = Ratio::from(dec!(1.15));
+        let bonus = Ratio::from(dec!(1.15)); // target_cr == bonus -> cap saturates to full debt
+        liq0xx_collateral(&mut state, ct, liq_ratio, target_cr, bonus, 1.0);
+
+        let vault = liq0xx_vault(1, ct, collateral_amount, debt.to_u64());
+        let price_usd = UsdIcp::from(Decimal::ONE);
+
+        assert_eq!(
+            state.compute_partial_liquidation_cap(&vault, price_usd),
+            debt,
+            "premise: a deeply underwater vault's raw cap saturates to the full debt"
+        );
+
+        // Requesting 1.5 icUSD would leave a 0.5 icUSD residual — above
+        // min_vault_debt (0.1) but at/below the default dust threshold (1.0).
+        let requested = ICUSD::new(150_000_000);
+        let result = state.effective_liquidation_amount(&vault, price_usd, Some(requested));
+        assert_eq!(
+            result, debt,
+            "a residual inside the dust band must round the amount up to the full debt"
+        );
+    }
+
+    #[test]
+    fn liq0xx_normal_partial_liquidation_is_unchanged() {
+        // A standard partial liquidation (cap well above min_icusd_amount,
+        // residual well above the dust threshold) must be byte-identical
+        // to the raw `compute_partial_liquidation_cap` result — the fix
+        // must not perturb the common case.
+        let mut state = test_state();
+        let icp = state.icp_collateral_type();
+        // Default ICP config: liquidation_ratio 133%, borrow_threshold 150%,
+        // liquidation_bonus 115%.
+        state.collateral_configs.get_mut(&icp).unwrap().last_price = Some(1.0);
+
+        let debt = ICUSD::new(1_000_000_000); // 10 icUSD
+        let collateral_amount = 1_250_000_000u64; // CR = 125% (below the 133% liquidation ratio)
+        let vault = liq0xx_vault(1, icp, collateral_amount, debt.to_u64());
+        let price_usd = UsdIcp::from(Decimal::ONE);
+
+        let raw_cap = state.compute_partial_liquidation_cap(&vault, price_usd);
+        // Premise: this is a genuine partial cap, comfortably clear of both
+        // the min-amount floor and the dust round-up band.
+        assert!(raw_cap > state.min_icusd_amount);
+        assert!(debt.saturating_sub(raw_cap) > state.dust_liquidation_threshold);
+
+        assert_eq!(
+            state.effective_liquidation_amount(&vault, price_usd, None),
+            raw_cap,
+            "a normal partial liquidation must be unaffected by the dust/floor rules"
+        );
+    }
+
+    #[test]
+    fn liq0xx_recovery_mode_cap_is_used_when_applicable() {
+        // In Recovery mode, with the vault's CR inside the per-collateral
+        // recovery band (between liquidation_ratio and borrow_threshold_ratio),
+        // `compute_recovery_repay_cap` (not the generic partial cap) must
+        // drive the amount.
+        let mut state = test_state();
+        let icp = state.icp_collateral_type();
+        state.collateral_configs.get_mut(&icp).unwrap().last_price = Some(1.0);
+        state.mode = Mode::Recovery;
+
+        let debt = ICUSD::new(1_000_000_000); // 10 icUSD
+        let collateral_amount = 1_400_000_000u64; // CR = 140% (between 133% and 150%)
+        let vault = liq0xx_vault(1, icp, collateral_amount, debt.to_u64());
+        let price_usd = UsdIcp::from(Decimal::ONE);
+
+        let recovery_cap = state
+            .compute_recovery_repay_cap(&vault, price_usd)
+            .expect("premise: vault CR must be inside the recovery band");
+        assert!(recovery_cap > ICUSD::new(0) && recovery_cap < debt);
+
+        assert_eq!(
+            state.effective_liquidation_amount(&vault, price_usd, None),
+            recovery_cap,
+            "Recovery mode must drive the amount via compute_recovery_repay_cap"
+        );
+    }
+
+    #[test]
+    fn liq0xx_non_liquidatable_vault_is_unaffected() {
+        // A healthy, non-dust vault (CR above the partial-cap target) must
+        // still yield 0 — the min-amount floor (rule 3) must never
+        // manufacture liquidatability for a vault the cap math says is fine.
+        let mut state = test_state();
+        let icp = state.icp_collateral_type();
+        state.collateral_configs.get_mut(&icp).unwrap().last_price = Some(1.0);
+
+        let debt = ICUSD::new(1_000_000_000); // 10 icUSD — above the dust threshold
+        let collateral_amount = 1_600_000_000u64; // CR = 160% (above the 150% target)
+        let vault = liq0xx_vault(1, icp, collateral_amount, debt.to_u64());
+        let price_usd = UsdIcp::from(Decimal::ONE);
+
+        assert_eq!(
+            state.compute_partial_liquidation_cap(&vault, price_usd),
+            ICUSD::new(0),
+            "premise: a healthy vault's raw cap is zero"
+        );
+        assert_eq!(
+            state.effective_liquidation_amount(&vault, price_usd, None),
+            ICUSD::new(0),
+            "a healthy vault must not be floored into false liquidatability"
+        );
+    }
+
+    #[test]
+    fn liq0xx_zero_debt_vault_returns_zero() {
+        let state = test_state();
+        let icp = state.icp_collateral_type();
+        let vault = liq0xx_vault(1, icp, 1_000_000_000, 0);
+        let price_usd = UsdIcp::from(Decimal::ONE);
+        assert_eq!(
+            state.effective_liquidation_amount(&vault, price_usd, None),
+            ICUSD::new(0)
+        );
+    }
+
+    #[test]
+    fn liq0xx_set_dust_liquidation_threshold_replays_correctly() {
+        // `record_set_dust_liquidation_threshold` itself calls `storage::record_event`,
+        // which calls `ic_cdk::api::time()` and therefore can only run inside a
+        // canister (same limitation as every other `record_set_*` admin setter
+        // in this file — none are unit-testable directly, only via PocketIC).
+        // What IS unit-testable, and what actually matters for the "persists
+        // across upgrade via event replay" requirement, is that
+        // `Event::SetDustLiquidationThreshold` round-trips through
+        // `event::replay` and lands on the right field.
+        let init_arg = InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: Principal::anonymous(),
+            icp_ledger_principal: Principal::anonymous(),
+            fee_e8s: 0,
+            developer_principal: Principal::anonymous(),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        };
+        let events = vec![
+            crate::event::Event::Init(init_arg),
+            crate::event::Event::SetDustLiquidationThreshold {
+                amount: "50000000".to_string(),
+            },
+        ];
+        let replayed = crate::event::replay(events.into_iter()).expect("replay must succeed");
+        assert_eq!(replayed.dust_liquidation_threshold, ICUSD::new(50_000_000));
+
+        // 0 is a valid, meaningful setting (disables the dust rule), unlike
+        // `min_icusd_amount` which must stay > 0. Confirm it replays too.
+        let init_arg = InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: Principal::anonymous(),
+            icp_ledger_principal: Principal::anonymous(),
+            fee_e8s: 0,
+            developer_principal: Principal::anonymous(),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        };
+        let events = vec![
+            crate::event::Event::Init(init_arg),
+            crate::event::Event::SetDustLiquidationThreshold {
+                amount: "0".to_string(),
+            },
+        ];
+        let replayed = crate::event::replay(events.into_iter()).expect("replay must succeed");
+        assert_eq!(replayed.dust_liquidation_threshold, ICUSD::new(0));
+    }
+
+    #[test]
+    fn liq0xx_max_dust_liquidation_threshold_bound_is_100_icusd() {
+        // Pins the admin-setter bound `set_dust_liquidation_threshold` in
+        // main.rs enforces, mirroring `set_min_icusd_amount`'s bound.
+        assert_eq!(MAX_DUST_LIQUIDATION_THRESHOLD_E8S, 10_000_000_000);
+    }
+
+    #[test]
+    fn liq0xx_dust_liquidation_threshold_defaults_to_one_icusd_on_old_snapshot() {
+        // An old (pre-fix) mainnet snapshot predates `dust_liquidation_threshold`.
+        // Prove that a CBOR map missing the field decodes to the 1 icUSD
+        // default (not 0) — defaulting to 0 would silently reintroduce the
+        // stuck-vault bug on upgrade. Mirrors
+        // `test_solana_workers_enabled_defaults_false_on_old_snapshot`.
+        let state = test_state();
+        assert_eq!(
+            state.dust_liquidation_threshold,
+            DEFAULT_DUST_LIQUIDATION_THRESHOLD
+        );
+
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&state, &mut buf).unwrap();
+
+        let value: ciborium::Value = ciborium::de::from_reader(buf.as_slice()).unwrap();
+        if let ciborium::Value::Map(mut entries) = value {
+            let original_len = entries.len();
+            entries.retain(|(k, _)| {
+                if let ciborium::Value::Text(key) = k {
+                    key != "dust_liquidation_threshold"
+                } else {
+                    true
+                }
+            });
+            assert_eq!(
+                entries.len(),
+                original_len - 1,
+                "should have removed the dust_liquidation_threshold field"
+            );
+
+            let mut modified_buf = Vec::new();
+            ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut modified_buf).unwrap();
+
+            let restored: State = ciborium::de::from_reader(modified_buf.as_slice()).unwrap();
+            assert_eq!(
+                restored.dust_liquidation_threshold, DEFAULT_DUST_LIQUIDATION_THRESHOLD,
+                "a pre-fix snapshot missing the field must default to 1 icUSD, not 0"
+            );
+            // Other fields stay intact (no data loss on upgrade).
+            assert_eq!(restored.mode, state.mode);
+            assert_eq!(restored.developer_principal, state.developer_principal);
+        } else {
+            panic!("expected CBOR map");
+        }
+    }
+
+    #[test]
+    fn liq0xx_state_invariant_after_liquidation_debt_is_zero_or_above_dust_threshold() {
+        // State-level regression fence (mirrors
+        // `audit_pocs_liq_003_partial_liq_min_debt.rs`'s Layer 2 invariant
+        // sweep, extended to the dust threshold): sweep a range of
+        // caller-requested amounts through `effective_liquidation_amount`
+        // on several vault sizes (including a genuine dust vault) and
+        // assert the resulting post-liquidation debt is always 0 or
+        // strictly above the dust threshold — never stuck in the dust band.
+        let mut state = test_state();
+        let icp = state.icp_collateral_type();
+        state.collateral_configs.get_mut(&icp).unwrap().last_price = Some(1.0);
+        let dust_threshold = state.dust_liquidation_threshold;
+
+        // (debt_e8s, collateral_amount) pairs: a dust vault (below the
+        // threshold), a normal vault, and a large vault — CR = 125% for all
+        // (collateral_amount = debt_e8s * 1.25, price = 1.0, decimals = 8).
+        let scenarios: [(u64, u64); 3] = [
+            (50_000_000, 62_500_000),       // 0.5 icUSD debt — dust vault
+            (1_000_000_000, 1_250_000_000), // 10 icUSD debt
+            (5_000_000_000, 6_250_000_000), // 50 icUSD debt
+        ];
+
+        for (debt_e8s, collateral_amount) in scenarios {
+            let vault = liq0xx_vault(1, icp, collateral_amount, debt_e8s);
+            let price_usd = UsdIcp::from(Decimal::ONE);
+
+            let step = (debt_e8s / 20).max(1); // ~20 samples across the range
+            let mut requested = step;
+            while requested <= debt_e8s {
+                let amount = state.effective_liquidation_amount(
+                    &vault,
+                    price_usd,
+                    Some(ICUSD::new(requested)),
+                );
+                assert!(
+                    amount <= vault.borrowed_icusd_amount,
+                    "amount {} must never exceed the vault's debt {}",
+                    amount.to_u64(),
+                    debt_e8s
+                );
+                let post_debt = vault.borrowed_icusd_amount.saturating_sub(amount);
+                assert!(
+                    post_debt == ICUSD::new(0) || post_debt > dust_threshold,
+                    "LIQ-0XX invariant violated: post-liquidation debt {} is in (0, dust_threshold] \
+                     (requested={}, debt={}, amount={})",
+                    post_debt.to_u64(),
+                    requested,
+                    debt_e8s,
+                    amount.to_u64()
+                );
+                requested += step;
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Review finding 1 (HIGH): pinned repay amount must survive a live
+    // config change landing during `vault::liquidate_vault`'s pre-transfer
+    // await. `State::liquidate_vault` used to re-derive
+    // `effective_liquidation_amount` itself (reading live state), so an
+    // admin setter (e.g. `set_dust_liquidation_threshold`) racing the
+    // icUSD transfer could make the liquidator pay one amount while a
+    // different amount was applied to the vault. Fixed by threading the
+    // pre-await amount through as an explicit `Some(repay_amount)`
+    // parameter, downward-re-capped against the live debt only.
+    // ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn liq001_pinned_repay_amount_survives_live_dust_threshold_change_across_await() {
+        let mut state = test_state();
+        let ct = Principal::from_slice(b"liq001-pin-race");
+
+        // A non-dust vault (debt well above the default 1 icUSD dust
+        // threshold) whose CR yields a genuine partial cap.
+        let debt = ICUSD::new(500_000_000); // 5 icUSD
+        let collateral_amount = 670_000_000u64; // price=1.0, decimals=8 -> CR = 134.00%
+        let liq_ratio = Ratio::from(dec!(1.3400));
+        let target_cr = Ratio::from(dec!(1.5000));
+        let bonus = Ratio::from(dec!(1.15));
+        liq0xx_collateral(&mut state, ct, liq_ratio, target_cr, bonus, 1.0);
+
+        let vault = liq0xx_vault(900, ct, collateral_amount, debt.to_u64());
+        state.open_vault(vault.clone());
+        let price_usd = UsdIcp::from(Decimal::ONE);
+
+        // Pin the amount BEFORE the simulated await, exactly as
+        // `vault::liquidate_vault` does at its Step 2 (before
+        // `transfer_icusd_from(...).await`).
+        let pinned = state.effective_liquidation_amount(&vault, price_usd, None);
+        assert!(
+            pinned > ICUSD::new(0) && pinned < debt,
+            "premise: this vault must yield a genuine partial (non-dust, non-full) cap, got {}",
+            pinned.to_u64()
+        );
+
+        // Simulate `set_dust_liquidation_threshold` landing DURING the
+        // await: raise the threshold to cover the vault's full debt, so a
+        // LIVE recompute after this point decides "dust -> full debt"
+        // instead of the pinned partial amount.
+        state.dust_liquidation_threshold = debt;
+        let live_recompute = state.effective_liquidation_amount(&vault, price_usd, None);
+        assert_eq!(
+            live_recompute, debt,
+            "premise: the live recompute after the config change must diverge (full debt, not the pinned partial amount)"
+        );
+        assert_ne!(
+            pinned, live_recompute,
+            "premise: pinned and live-recomputed amounts must genuinely differ for this test to prove anything"
+        );
+
+        // Apply the PINNED amount, as `vault::liquidate_vault` does
+        // post-await (its icUSD pull from the liquidator already used
+        // `pinned`, so the vault-side reduction must match it exactly).
+        state.liquidate_vault(900, Mode::GeneralAvailability, price_usd, Some(pinned));
+
+        let remaining = state.vault_id_to_vaults.get(&900).expect(
+            "vault must remain open — only the pinned PARTIAL amount was applied, \
+             not the drifted full-debt amount the live config change would have produced",
+        );
+        assert_eq!(
+            remaining.borrowed_icusd_amount,
+            debt - pinned,
+            "the amount APPLIED must equal the PINNED amount, not a re-evaluation against \
+             the drifted dust_liquidation_threshold — icUSD pulled must always equal debt reduced"
+        );
+    }
+
+    #[test]
+    fn liq001_pinned_amount_is_still_recapped_downward_against_live_debt() {
+        // The pinned amount is re-capped downward (never upward) against the
+        // LIVE debt, so a concurrent debt reduction during the await can
+        // only shrink what gets applied, never overshoot or trap.
+        let mut state = test_state();
+        let icp = state.icp_collateral_type();
+        state.collateral_configs.get_mut(&icp).unwrap().last_price = Some(1.0);
+
+        let vault = liq0xx_vault(901, icp, 1_000_000_000, 1_000_000_000); // 10 icUSD debt
+        state.open_vault(vault);
+        let price_usd = UsdIcp::from(Decimal::ONE);
+
+        // Pin an amount larger than what the live vault can now supply
+        // (simulates a concurrent repay/interest-accrual shrinking the debt
+        // during the await).
+        let pinned = ICUSD::new(1_000_000_000); // 10 icUSD, equal to the original full debt
+        if let Some(v) = state.vault_id_to_vaults.get_mut(&901) {
+            v.borrowed_icusd_amount = ICUSD::new(300_000_000); // shrunk to 3 icUSD concurrently
+        }
+
+        state.liquidate_vault(901, Mode::GeneralAvailability, price_usd, Some(pinned));
+
+        assert!(
+            state.vault_id_to_vaults.get(&901).is_none(),
+            "the vault must be fully (not over-) liquidated: the pinned amount is capped down to the live debt, which triggers a full close"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Review finding 2 (HIGH): event replay of `LiquidateVault` must
+    // reproduce what actually happened on-chain. Pre-fix, GA-mode replay
+    // always applied the full debt; post-LIQ-0XX, replaying through
+    // `effective_liquidation_amount` can compute a smaller capped amount,
+    // leaving a reconstructed vault open when it was really closed. Fixed
+    // by recording the realized `repay_amount` on the event and replaying
+    // it exactly; a `None` (pre-fix historical event) reproduces the exact
+    // OLD decision via `legacy_recovery_or_full_repay_amount`.
+    // ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn liq002_replay_of_legacy_ga_event_without_repay_amount_closes_vault_in_full() {
+        // A synthetic pre-fix `LiquidateVault` event (no `repay_amount`,
+        // GeneralAvailability mode) replayed against a vault whose CR would
+        // yield a nonzero PARTIAL cap under the new unified rule. Pre-fix,
+        // GA-mode liquidation always took the full debt — replay must
+        // reproduce that, not the new partial-cap behavior.
+        let mut state = test_state();
+        let ct = Principal::from_slice(b"liq002-legacy-ga");
+        let liq_ratio = Ratio::from(dec!(1.3400));
+        let target_cr = Ratio::from(dec!(1.5000));
+        let bonus = Ratio::from(dec!(1.15));
+        liq0xx_collateral(&mut state, ct, liq_ratio, target_cr, bonus, 1.0);
+
+        let debt = ICUSD::new(500_000_000); // 5 icUSD
+        let collateral_amount = 670_000_000u64; // CR = 134.00%
+        let vault = liq0xx_vault(950, ct, collateral_amount, debt.to_u64());
+        state.open_vault(vault.clone());
+        let price_usd = UsdIcp::from(Decimal::ONE);
+
+        // Premise: the new unified helper WOULD partially cap this vault —
+        // proving that a naive `None -> effective_liquidation_amount` replay
+        // would diverge from history if it were used.
+        let new_rule_amount = state.effective_liquidation_amount(&vault, price_usd, None);
+        assert!(
+            new_rule_amount > ICUSD::new(0) && new_rule_amount < debt,
+            "premise: the new unified rule must yield a genuine partial cap here"
+        );
+
+        // Replay the legacy event (repay_amount = None).
+        state.liquidate_vault(950, Mode::GeneralAvailability, price_usd, None);
+
+        assert!(
+            state.vault_id_to_vaults.get(&950).is_none(),
+            "replaying a legacy (pre-fix) GeneralAvailability LiquidateVault event must close the vault in full, matching on-chain history"
+        );
+    }
+
+    #[test]
+    fn liq002_replay_of_new_event_with_recorded_amount_applies_exactly_that_amount() {
+        // A new-format event with a recorded `repay_amount` must apply
+        // exactly that amount on replay, regardless of what a live
+        // recompute would decide.
+        let mut state = test_state();
+        let ct = Principal::from_slice(b"liq002-recorded");
+        let liq_ratio = Ratio::from(dec!(1.3400));
+        let target_cr = Ratio::from(dec!(1.5000));
+        let bonus = Ratio::from(dec!(1.15));
+        liq0xx_collateral(&mut state, ct, liq_ratio, target_cr, bonus, 1.0);
+
+        let debt = ICUSD::new(500_000_000); // 5 icUSD
+        let collateral_amount = 670_000_000u64;
+        let vault = liq0xx_vault(951, ct, collateral_amount, debt.to_u64());
+        state.open_vault(vault);
+        let price_usd = UsdIcp::from(Decimal::ONE);
+
+        // An arbitrary recorded amount, deliberately different from what
+        // any live cap formula would produce, to prove replay doesn't
+        // recompute it.
+        let recorded_amount = ICUSD::new(123_456_789);
+        state.liquidate_vault(
+            951,
+            Mode::GeneralAvailability,
+            price_usd,
+            Some(recorded_amount),
+        );
+
+        let remaining = state
+            .vault_id_to_vaults
+            .get(&951)
+            .expect("vault should remain open after a partial replay");
+        assert_eq!(
+            remaining.borrowed_icusd_amount,
+            debt - recorded_amount,
+            "replay of a new-format event must apply exactly the recorded amount"
+        );
+    }
+
+    #[test]
+    fn liq002_replay_of_legacy_recovery_event_reproduces_old_recovery_formula() {
+        // A synthetic pre-fix Recovery-mode `LiquidateVault` event (no
+        // `repay_amount`) with the vault's CR above the GLOBAL
+        // `MINIMUM_COLLATERAL_RATIO` (133%) — the pre-fix gate for the
+        // Recovery partial-cap branch. Replay must reproduce the OLD
+        // recovery-target formula exactly (same math
+        // `compute_recovery_repay_cap` uses today), not the new unified
+        // per-collateral-band gate.
+        let mut state = test_state();
+        state.mode = Mode::Recovery;
+        let collateral_price = UsdIcp::from(dec!(5));
+        state.set_icp_rate(collateral_price, None);
+
+        let vault_id = 952u64;
+        state.open_vault(Vault {
+            owner: Principal::anonymous(),
+            vault_id,
+            collateral_amount: 280_000_000, // 2.8 ICP
+            borrowed_icusd_amount: ICUSD::new(1_000_000_000), // 10 icUSD
+            collateral_type: Principal::anonymous(),
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        });
+
+        let cr_before = {
+            let vault = state.vault_id_to_vaults.get(&vault_id).unwrap();
+            compute_collateral_ratio(vault, collateral_price, &state)
+        };
+        assert!(
+            cr_before > MINIMUM_COLLATERAL_RATIO,
+            "premise: CR must be above the legacy Recovery-branch gate"
+        );
+
+        // Replay the legacy event (repay_amount = None).
+        state.liquidate_vault(vault_id, Mode::Recovery, collateral_price, None);
+
+        let remaining = state
+            .vault_id_to_vaults
+            .get(&vault_id)
+            .expect("legacy Recovery-mode replay should partially liquidate, not close, this vault");
+        let cr_after = compute_collateral_ratio(remaining, collateral_price, &state);
+        assert!(
+            (cr_after.to_f64() - 1.55).abs() < 0.01,
+            "legacy Recovery replay should restore CR to ~recovery_target_cr (155%), got {}",
+            cr_after.to_f64()
+        );
+    }
+
+    #[test]
+    fn liq002_partial_liquidate_vault_replay_uses_recorded_amount_not_recompute() {
+        // Sibling check: `Event::PartialLiquidateVault` replay (event.rs)
+        // reduces the vault directly by the event's recorded
+        // `liquidator_payment` field — it never calls
+        // `effective_liquidation_amount` or `State::liquidate_vault`, so it
+        // cannot suffer the same divergence. This test pins that contract:
+        // replaying a `PartialLiquidateVault` event applies exactly the
+        // recorded payment even though a `SetDustLiquidationThreshold` event
+        // earlier in the SAME replayed log set a dust threshold that would,
+        // if replay recomputed anything through the new unified helper,
+        // force a full close instead (222_222_222 e8s debt reduction on a
+        // 1_000_000_000 e8s vault leaves a 777_777_778 e8s residual, which
+        // is itself above the threshold below — the point is that replay
+        // never even consults the threshold for this event kind).
+        let icp = Principal::anonymous();
+        let events = vec![
+            crate::event::Event::Init(InitArg {
+                xrc_principal: Principal::anonymous(),
+                icusd_ledger_principal: Principal::anonymous(),
+                icp_ledger_principal: Principal::anonymous(),
+                fee_e8s: 0,
+                developer_principal: Principal::anonymous(),
+                treasury_principal: None,
+                stability_pool_principal: None,
+                ckusdt_ledger_principal: None,
+                ckusdc_ledger_principal: None,
+            }),
+            crate::event::Event::SetDustLiquidationThreshold {
+                amount: "1000000000".to_string(), // 10 icUSD — >= the vault's full debt
+            },
+            crate::event::Event::OpenVault {
+                vault: liq0xx_vault(953, icp, 1_250_000_000, 1_000_000_000),
+                block_index: 0,
+                timestamp: Some(0),
+            },
+            crate::event::Event::PartialLiquidateVault {
+                vault_id: 953,
+                liquidator_payment: ICUSD::new(222_222_222),
+                icp_to_liquidator: ICP::new(1),
+                liquidator: None,
+                icp_rate: None,
+                protocol_fee_collateral: None,
+                timestamp: Some(0),
+                three_usd_reserves_e8s: None,
+            },
+        ];
+
+        let replayed = crate::event::replay(events.into_iter()).expect("replay should succeed");
+        let remaining = replayed
+            .vault_id_to_vaults
+            .get(&953)
+            .expect("vault should remain open after the partial replay");
+        assert_eq!(
+            remaining.borrowed_icusd_amount,
+            ICUSD::new(1_000_000_000 - 222_222_222),
+            "PartialLiquidateVault replay must reduce debt by exactly the recorded liquidator_payment"
+        );
     }
 }
