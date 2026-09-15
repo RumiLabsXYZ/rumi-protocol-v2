@@ -490,8 +490,8 @@ private static async refreshVaultData(): Promise<void> {
       return `Transfer error: ${BigIntUtils.stringify(tfe)}`;
     } 
     else if ('AmountTooLow' in error) {
-      return `Amount too low. Minimum amount: ${Number(error.AmountTooLow.minimum_amount)} raw units`;
-    } 
+      return `Amount too low. Minimum amount: ${Number(error.AmountTooLow.minimum_amount) / E8S} icUSD`;
+    }
     else if ('AlreadyProcessing' in error) {
       return 'This operation is already in progress. Please wait.';
     }

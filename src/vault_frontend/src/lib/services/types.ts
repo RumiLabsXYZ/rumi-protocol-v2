@@ -26,6 +26,13 @@ export interface VaultOperationResult {
   xrpClaimId?: string;
   message?: string;
   /**
+   * The icUSD debt the backend actually cleared (human icUSD), when the
+   * backend populates `debt_liquidated_e8s` on this result. Authoritative —
+   * prefer this over a client-side prediction for user-facing messages.
+   * `undefined` on operations/paths that don't return it.
+   */
+  debtLiquidatedIcusd?: number;
+  /**
    * True when the underlying signer (Oisy) returned a false-negative `_arr`
    * error but on-chain verification confirmed the operation actually landed.
    * Callers can surface a softer toast ("Submitted, refresh to confirm").
@@ -107,6 +114,13 @@ export interface ProtocolStatusDTO {
   recoveryTargetCr: number;
   recoveryModeThreshold: number;
   recoveryCrMultiplier: number;
+  /**
+   * Global admin `dust_liquidation_threshold_e8s`, human icUSD. Below this debt
+   * a liquidatable vault is always repaid in full by the backend, regardless
+   * of the amount argument sent. Defaults to 1 icUSD when the backend doesn't
+   * return the field yet (see QueryOperations.getProtocolStatus).
+   */
+  dustLiquidationThresholdIcusd: number;
   reserveRedemptionsEnabled: boolean;
   reserveRedemptionFee: number;
   ckstableRepayFee: number;

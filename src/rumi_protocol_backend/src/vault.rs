@@ -5442,11 +5442,14 @@ pub async fn liquidate_vault_partial(
 
     let liquidation_amount: ICUSD = icusd_amount.into();
 
-    if liquidation_amount < read_state(|s| s.min_icusd_amount) {
+    // LIQ-0XX: a requested amount of exactly zero is always rejected,
+    // regardless of the dust rule below (which can still close a vault
+    // whose FULL debt is small, but never accepts a caller-requested 0).
+    if liquidation_amount == ICUSD::new(0) {
         guard_principal.fail();
-        return Err(ProtocolError::AmountTooLow {
-            minimum_amount: read_state(|s| s.min_icusd_amount).to_u64(),
-        });
+        return Err(ProtocolError::GenericError(
+            "Cannot liquidate zero amount".to_string(),
+        ));
     }
 
     // Step 1: Validate vault is liquidatable and get partial liquidation amounts
@@ -5493,23 +5496,14 @@ pub async fn liquidate_vault_partial(
                         min_liq_ratio.to_f64()
                     ))
                 } else {
-                    // Cap at the amount needed to restore vault CR to recovery_target_cr
-                    let max_liquidatable =
-                        s.compute_partial_liquidation_cap(vault, collateral_price_usd);
-
-                    // Ensure requested amount doesn't exceed maximum
-                    let capped_amount = liquidation_amount
-                        .min(max_liquidatable)
-                        .min(vault.borrowed_icusd_amount);
-
-                    // LIQ-003: round residual up to full debt if it would land
-                    // in (0, min_vault_debt). Mirrors the repay-side invariant.
-                    let min_vault_debt = s
-                        .get_collateral_config(&vault.collateral_type)
-                        .map(|c| c.min_vault_debt)
-                        .unwrap_or(ICUSD::new(0));
-                    let actual_liquidation_amount =
-                        round_up_partial_liq_dust(vault, capped_amount, min_vault_debt);
+                    // LIQ-0XX: single shared decision point for the amount —
+                    // dust-vault full-close, cap (recovery/partial), requested
+                    // amount, min floor, and the LIQ-003 residual round-up.
+                    let actual_liquidation_amount = s.effective_liquidation_amount(
+                        vault,
+                        collateral_price_usd,
+                        Some(liquidation_amount),
+                    );
 
                     if actual_liquidation_amount == ICUSD::new(0) {
                         return Err("Cannot liquidate zero amount".to_string());
@@ -5558,6 +5552,21 @@ pub async fn liquidate_vault_partial(
             return Err(ProtocolError::GenericError(msg));
         }
     };
+
+    // LIQ-0XX: min_icusd_amount applies to the FINAL (post-cap, post-dust-
+    // round-up) amount, and is skipped when that amount closes the vault
+    // fully — a dust vault must be closable even if the liquidator's
+    // requested amount, or the computed cap, is below the floor. `vault`
+    // here is the pre-liquidation snapshot, so `vault.borrowed_icusd_amount`
+    // is the full debt being compared against.
+    if max_liquidatable_debt < read_state(|s| s.min_icusd_amount)
+        && max_liquidatable_debt != vault.borrowed_icusd_amount
+    {
+        guard_principal.fail();
+        return Err(ProtocolError::AmountTooLow {
+            minimum_amount: read_state(|s| s.min_icusd_amount).to_u64(),
+        });
+    }
 
     log!(INFO,
         "[liquidate_vault_partial] Vault #{}: liquidating {} icUSD (max: {}), getting {} ICP collateral (protocol fee: {} ICP)",
@@ -5850,11 +5859,14 @@ pub async fn liquidate_vault_partial_with_stable(
     let raw_amount_e8s = stable_amount - (stable_amount % 100);
     let liquidation_amount: ICUSD = raw_amount_e8s.into();
 
-    if liquidation_amount < read_state(|s| s.min_icusd_amount) {
+    // LIQ-0XX: a requested amount of exactly zero is always rejected,
+    // regardless of the dust rule below (which can still close a vault
+    // whose FULL debt is small, but never accepts a caller-requested 0).
+    if liquidation_amount == ICUSD::new(0) {
         guard_principal.fail();
-        return Err(ProtocolError::AmountTooLow {
-            minimum_amount: read_state(|s| s.min_icusd_amount).to_u64(),
-        });
+        return Err(ProtocolError::GenericError(
+            "Cannot liquidate zero amount".to_string(),
+        ));
     }
 
     // Step 1: Validate vault is liquidatable and get partial liquidation amounts
@@ -5901,22 +5913,14 @@ pub async fn liquidate_vault_partial_with_stable(
                         min_liq_ratio.to_f64()
                     ))
                 } else {
-                    // Cap at the amount needed to restore vault CR to recovery_target_cr
-                    let max_liquidatable =
-                        s.compute_partial_liquidation_cap(vault, collateral_price_usd);
-
-                    let capped_amount = liquidation_amount
-                        .min(max_liquidatable)
-                        .min(vault.borrowed_icusd_amount);
-
-                    // LIQ-003: round residual up to full debt if it would land
-                    // in (0, min_vault_debt). Mirrors the repay-side invariant.
-                    let min_vault_debt = s
-                        .get_collateral_config(&vault.collateral_type)
-                        .map(|c| c.min_vault_debt)
-                        .unwrap_or(ICUSD::new(0));
-                    let actual_liquidation_amount =
-                        round_up_partial_liq_dust(vault, capped_amount, min_vault_debt);
+                    // LIQ-0XX: single shared decision point for the amount —
+                    // dust-vault full-close, cap (recovery/partial), requested
+                    // amount, min floor, and the LIQ-003 residual round-up.
+                    let actual_liquidation_amount = s.effective_liquidation_amount(
+                        vault,
+                        collateral_price_usd,
+                        Some(liquidation_amount),
+                    );
 
                     if actual_liquidation_amount == ICUSD::new(0) {
                         return Err("Cannot liquidate zero amount".to_string());
@@ -5964,6 +5968,18 @@ pub async fn liquidate_vault_partial_with_stable(
             return Err(ProtocolError::GenericError(msg));
         }
     };
+
+    // LIQ-0XX: min_icusd_amount applies to the FINAL (post-cap, post-dust-
+    // round-up) amount, and is skipped when that amount closes the vault
+    // fully. `vault` here is the pre-liquidation snapshot.
+    if max_liquidatable_debt < read_state(|s| s.min_icusd_amount)
+        && max_liquidatable_debt != vault.borrowed_icusd_amount
+    {
+        guard_principal.fail();
+        return Err(ProtocolError::AmountTooLow {
+            minimum_amount: read_state(|s| s.min_icusd_amount).to_u64(),
+        });
+    }
 
     log!(INFO,
         "[liquidate_vault_stable] Vault #{}: liquidating {} {:?} (max: {}), getting {} ICP collateral (protocol fee: {} ICP)",
@@ -6315,12 +6331,13 @@ pub async fn liquidate_vault_debt_already_burned(
 
     let liquidation_amount: ICUSD = icusd_burned_e8s.into();
 
-    if liquidation_amount < read_state(|s| s.min_icusd_amount) {
-        guard_principal.fail();
-        return Err(ProtocolError::AmountTooLow {
-            minimum_amount: read_state(|s| s.min_icusd_amount).to_u64(),
-        });
-    }
+    // LIQ-0XX: the `min_icusd_amount` check moves below, to run on the FINAL
+    // amount (`liquidation_amount.min(vault.borrowed_icusd_amount)`) and skip
+    // when that amount closes the vault fully. This path honors icUSD the SP
+    // has ALREADY burned atomically in the 3pool — rejecting a write-down
+    // for a dust vault (full debt below the floor) here would strand that
+    // burn with no vault relief, which is worse than the small-position
+    // stuck-vault bug this fix targets.
 
     // Wave-8d LIQ-004 Phase 2 (replay defense + ICRC-3 verification). Verify
     // the proof BEFORE touching any state. If the proof's
@@ -6494,6 +6511,19 @@ pub async fn liquidate_vault_debt_already_burned(
             return Err(ProtocolError::GenericError(msg));
         }
     };
+
+    // LIQ-0XX: min_icusd_amount applies to the FINAL amount and is skipped
+    // when that amount closes the vault fully (see comment above — the icUSD
+    // was already burned, so rejecting a genuine dust vault here would
+    // strand it rather than protect anything).
+    if max_liquidatable_debt < read_state(|s| s.min_icusd_amount)
+        && max_liquidatable_debt != vault.borrowed_icusd_amount
+    {
+        guard_principal.fail();
+        return Err(ProtocolError::AmountTooLow {
+            minimum_amount: read_state(|s| s.min_icusd_amount).to_u64(),
+        });
+    }
 
     log!(INFO,
         "[liquidate_vault_debt_burned] Vault #{}: writing down {} icUSD (burned via 3pool), releasing {} collateral (protocol fee: {})",
@@ -6815,8 +6845,18 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
             }
         };
 
-    // Step 2: Calculate liquidation amounts
-    // Check if this is a recovery-mode targeted liquidation (vault CR between 133-150%)
+    // Step 2: Calculate liquidation amounts.
+    // LIQ-0XX: `debt_amount` is decided by `effective_liquidation_amount`,
+    // the single shared cap/dust decision point — applied in ALL modes, not
+    // just Recovery (this is the approved backend enforcement of the
+    // partial-liquidation cap; see the helper's doc comment). Previously
+    // this branched only on `compute_recovery_repay_cap` (Recovery mode) and
+    // otherwise ALWAYS took the full debt uncapped in GeneralAvailability —
+    // that asymmetry is what let a small vault's cap fall below
+    // `min_icusd_amount` with no partial-liquidation endpoint able to accept
+    // it. `is_partial_liquidation` (was `is_recovery_partial`) now means
+    // "the helper returned less than the full debt", covering both the
+    // recovery-target-CR case and the (new) GA-mode partial-cap case.
     let vault_collateral = ICP::from(vault.collateral_amount);
     let (
         debt_amount,
@@ -6824,65 +6864,47 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         total_to_seize,
         protocol_cut,
         excess_collateral,
-        is_recovery_partial,
+        is_partial_liquidation,
     ) = read_state(|s| {
         let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
         let protocol_share = s.get_liquidation_protocol_share();
-        if let Some(repay_cap) = s.compute_recovery_repay_cap(&vault, collateral_price_usd) {
-            // Recovery mode: only liquidate enough to restore CR to target
-            let collateral_raw = crate::numeric::icusd_to_collateral_amount(
-                repay_cap,
-                collateral_price,
-                config_decimals,
-            );
-            let total_to_seize = (ICP::from(collateral_raw) * liq_bonus).min(vault_collateral);
-            // Split: protocol gets a share of the bonus portion (liquidator's profit)
-            let bonus_portion = total_to_seize.to_u64().saturating_sub(collateral_raw);
-            let protocol_cut = (rust_decimal::Decimal::from(bonus_portion) * protocol_share.0)
-                .to_u64()
-                .unwrap_or(0);
-            let collateral_to_liquidator = ICP::from(total_to_seize.to_u64() - protocol_cut);
-            (
-                repay_cap,
-                collateral_to_liquidator,
-                total_to_seize,
-                protocol_cut,
-                ICP::new(0),
-                true,
-            )
+        let debt = s.effective_liquidation_amount(&vault, collateral_price_usd, None);
+        let is_partial = debt < vault.borrowed_icusd_amount;
+        let collateral_raw =
+            crate::numeric::icusd_to_collateral_amount(debt, collateral_price, config_decimals);
+        let total_to_seize = (ICP::from(collateral_raw) * liq_bonus).min(vault_collateral);
+        // Split: protocol gets a share of the bonus portion (liquidator's profit)
+        let bonus_portion = total_to_seize.to_u64().saturating_sub(collateral_raw);
+        let protocol_cut = (rust_decimal::Decimal::from(bonus_portion) * protocol_share.0)
+            .to_u64()
+            .unwrap_or(0);
+        let collateral_to_liquidator = ICP::from(total_to_seize.to_u64() - protocol_cut);
+        // Excess collateral only returns to the owner on a full liquidation —
+        // a partial liquidation leaves the vault open with its remaining
+        // collateral backing its remaining debt.
+        let excess = if is_partial {
+            ICP::new(0)
         } else {
-            // Normal full liquidation
-            let debt = vault.borrowed_icusd_amount;
-            let collateral_raw =
-                crate::numeric::icusd_to_collateral_amount(debt, collateral_price, config_decimals);
-            let icp_with_bonus = ICP::from(collateral_raw) * liq_bonus;
-            let total_to_seize = icp_with_bonus.min(vault_collateral);
-            // Split: protocol gets a share of the bonus portion (liquidator's profit)
-            let bonus_portion = total_to_seize.to_u64().saturating_sub(collateral_raw);
-            let protocol_cut = (rust_decimal::Decimal::from(bonus_portion) * protocol_share.0)
-                .to_u64()
-                .unwrap_or(0);
-            let collateral_to_liquidator = ICP::from(total_to_seize.to_u64() - protocol_cut);
-            let excess = vault_collateral.saturating_sub(total_to_seize);
-            (
-                debt,
-                collateral_to_liquidator,
-                total_to_seize,
-                protocol_cut,
-                excess,
-                false,
-            )
-        }
+            vault_collateral.saturating_sub(total_to_seize)
+        };
+        (
+            debt,
+            collateral_to_liquidator,
+            total_to_seize,
+            protocol_cut,
+            excess,
+            is_partial,
+        )
     });
 
     log!(INFO,
-        "[liquidate_vault] Vault #{}: debt_to_repay={} icUSD, liquidator gets {} ICP (protocol fee: {} ICP), excess={} ICP, recovery_partial={}",
+        "[liquidate_vault] Vault #{}: debt_to_repay={} icUSD, liquidator gets {} ICP (protocol fee: {} ICP), excess={} ICP, partial={}",
         vault_id,
         debt_amount.to_u64(),
         collateral_to_liquidator.to_u64(),
         protocol_cut,
         excess_collateral.to_u64(),
-        is_recovery_partial
+        is_partial_liquidation
     );
 
     // Step 3: Take icUSD from liquidator (this must succeed for liquidation to proceed)
@@ -6938,9 +6960,15 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
             ),
         );
 
-        // Execute the liquidation in state first (this must happen)
-        // liquidate_vault returns the interest share of the debt reduction
-        let interest_share = s.liquidate_vault(vault_id, mode, collateral_price_usd);
+        // Execute the liquidation in state first (this must happen).
+        // LIQ-0XX (review finding 1): pass the PINNED `debt_amount` decided
+        // pre-await (Step 2 above, before `transfer_icusd_from(...).await`)
+        // so the amount applied here always equals the amount pulled from
+        // the liquidator, even if an admin setter (e.g.
+        // `set_dust_liquidation_threshold`) landed during the await.
+        // liquidate_vault returns the interest share of the debt reduction.
+        let interest_share =
+            s.liquidate_vault(vault_id, mode, collateral_price_usd, Some(debt_amount));
 
         // Wave-10 LIQ-008: append the gross debt cleared to the rolling-
         // window log for the mass-liquidation circuit breaker.
@@ -6978,13 +7006,16 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
             }
         }
 
-        // Record the liquidation event
+        // Record the liquidation event. LIQ-0XX (review finding 2): record
+        // the realized `debt_amount` so replay applies exactly this amount
+        // instead of recomputing (and potentially diverging) on upgrade.
         let event = crate::event::Event::LiquidateVault {
             vault_id,
             mode,
             icp_rate: collateral_price_usd,
             liquidator: Some(caller),
             timestamp: Some(ic_cdk::api::time()),
+            repay_amount: Some(debt_amount),
         };
         crate::storage::record_event(&event);
 
@@ -7002,8 +7033,8 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         );
 
         // Create pending transfer for excess collateral to vault owner (if any)
-        // (only for full liquidations, not recovery partial)
-        if !is_recovery_partial && excess_pay > ICP::new(0) {
+        // (only for full liquidations, not partial)
+        if !is_partial_liquidation && excess_pay > ICP::new(0) {
             log!(
                 INFO,
                 "[liquidate_vault] Scheduling excess collateral return to vault owner"
@@ -7040,7 +7071,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         log!(
             INFO,
             "[liquidate_vault] Protocol state updated, {} pending transfers created",
-            if !is_recovery_partial && excess_pay > ICP::new(0) {
+            if !is_partial_liquidation && excess_pay > ICP::new(0) {
                 2
             } else {
                 1
@@ -7195,8 +7226,13 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         block_index: icusd_block_index,
         fee_amount_paid: fee_amount.to_u64(),
         collateral_amount_received: Some(collateral_to_liquidator.to_u64()),
-        debt_liquidated_e8s: None, // SP-101
-        stable_pulled_e6s: None,   // SP-110
+        // Review finding 4: expose the authoritative realized amount so the
+        // frontend success message doesn't have to trust its own local
+        // prediction. `debt_amount` is the SAME pinned amount applied to the
+        // vault (see the `Some(debt_amount)` passed to `s.liquidate_vault`
+        // above), so this is exact, not an estimate.
+        debt_liquidated_e8s: Some(debt_amount.to_u64()),
+        stable_pulled_e6s: None, // SP-110 (icUSD path: no stable surcharge)
         xrp_claim_id,
     })
 }
@@ -7498,6 +7534,16 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
 
     let liquidator_payment: ICUSD = arg.amount.into();
 
+    // LIQ-0XX: a requested amount of exactly zero is always rejected,
+    // regardless of the dust rule below (which can still close a vault
+    // whose FULL debt is small, but never accepts a caller-requested 0).
+    if liquidator_payment == ICUSD::new(0) {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(
+            "Cannot liquidate zero amount".to_string(),
+        ));
+    }
+
     // Accrue interest before liquidation so CR check uses up-to-date debt.
     let now = ic_cdk::api::time();
     mutate_state(|s| s.accrue_single_vault(arg.vault_id, now));
@@ -7550,26 +7596,31 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
             }
         };
 
-    // Step 2: Validate liquidator payment amount
-    if liquidator_payment < read_state(|s| s.min_icusd_amount) {
+    // Step 2: LIQ-0XX single shared decision point for the amount — dust-
+    // vault full-close, cap (recovery/partial), requested amount, min floor,
+    // and the LIQ-003 residual round-up.
+    let liquidator_payment = read_state(|s| {
+        s.effective_liquidation_amount(&vault, collateral_price_usd, Some(liquidator_payment))
+    });
+
+    if liquidator_payment == ICUSD::new(0) {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(
+            "Cannot liquidate zero amount".to_string(),
+        ));
+    }
+
+    // min_icusd_amount applies to the FINAL amount, and is skipped when the
+    // final amount closes the vault fully (a dust vault must be closable
+    // even if the liquidator requested less than the floor).
+    if liquidator_payment < read_state(|s| s.min_icusd_amount)
+        && liquidator_payment != vault.borrowed_icusd_amount
+    {
         guard_principal.fail();
         return Err(ProtocolError::AmountTooLow {
             minimum_amount: read_state(|s| s.min_icusd_amount).to_u64(),
         });
     }
-
-    // Cap payment to recovery_target_cr, then round residual up to full debt
-    // if it would land in (0, min_vault_debt) (LIQ-003: mirrors the repay-side
-    // invariant in `check_min_vault_debt_after_repay`).
-    let liquidator_payment = read_state(|s| {
-        let cap = s.compute_partial_liquidation_cap(&vault, collateral_price_usd);
-        let capped = liquidator_payment.min(cap);
-        let min_vault_debt = s
-            .get_collateral_config(&vault.collateral_type)
-            .map(|c| c.min_vault_debt)
-            .unwrap_or(ICUSD::new(0));
-        round_up_partial_liq_dust(&vault, capped, min_vault_debt)
-    });
 
     if liquidator_payment > vault.borrowed_icusd_amount {
         guard_principal.fail();

@@ -89,6 +89,49 @@ describe('XRP payout helpers', () => {
     });
   });
 
+  it('maps the authoritative debt_liquidated_e8s onto debtLiquidatedIcusd when present (review finding 4)', () => {
+    expect(
+      mapLiquidationSuccessWithFee(9, {
+        block_index: 13n,
+        fee_amount_paid: 50_000_000n,
+        debt_liquidated_e8s: [500_000_000n],
+      })
+    ).toEqual({
+      success: true,
+      vaultId: 9,
+      blockIndex: 13,
+      feePaid: 0.5,
+      debtLiquidatedIcusd: 5,
+    });
+  });
+
+  it('leaves debtLiquidatedIcusd unset when debt_liquidated_e8s is an empty opt or absent (older backend)', () => {
+    expect(
+      mapLiquidationSuccessWithFee(10, {
+        block_index: 14n,
+        fee_amount_paid: 10_000_000n,
+        debt_liquidated_e8s: [],
+      })
+    ).toEqual({
+      success: true,
+      vaultId: 10,
+      blockIndex: 14,
+      feePaid: 0.1,
+    });
+
+    expect(
+      mapLiquidationSuccessWithFee(11, {
+        block_index: 15n,
+        fee_amount_paid: 10_000_000n,
+      })
+    ).toEqual({
+      success: true,
+      vaultId: 11,
+      blockIndex: 15,
+      feePaid: 0.1,
+    });
+  });
+
   it('unwraps Candid opt vec payout address and destination tag maps', () => {
     expect(unwrapNativePayoutAddresses({ native_payout_addresses: [] })).toEqual(new Map());
     expect(unwrapNativePayoutDestinationTags({ native_payout_destination_tags: [] })).toEqual(new Map());

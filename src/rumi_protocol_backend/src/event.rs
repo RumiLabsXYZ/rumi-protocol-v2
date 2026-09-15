@@ -84,6 +84,19 @@ pub enum Event {
         liquidator: Option<Principal>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timestamp: Option<u64>,
+        /// LIQ-0XX (review finding 2): the icUSD debt actually repaid by this
+        /// liquidation, pinned pre-await by the caller (see
+        /// `State::liquidate_vault`'s `repay_amount` parameter). `None` for
+        /// every event recorded before this field existed — replay of those
+        /// legacy events reproduces the EXACT pre-fix decision instead of
+        /// recomputing through `effective_liquidation_amount`, which can
+        /// return a different (smaller, capped) amount under the new unified
+        /// partial-liquidation rule and would otherwise leave a replayed
+        /// vault open when it was actually closed in full on-chain. Always
+        /// `Some` for events recorded after this field was added, including
+        /// the GA-mode full-debt case (an explicit pin, not an inferred one).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repay_amount: Option<ICUSD>,
     },
 
     #[serde(rename = "partial_liquidate_vault")]
@@ -307,6 +320,11 @@ pub enum Event {
 
     #[serde(rename = "set_min_icusd_amount")]
     SetMinIcusdAmount { amount: String },
+
+    /// LIQ-0XX: admin set the global dust-liquidation threshold. See
+    /// `State::dust_liquidation_threshold`.
+    #[serde(rename = "set_dust_liquidation_threshold")]
+    SetDustLiquidationThreshold { amount: String },
 
     /// Admin set global icUSD mint cap.
     /// Field `cap` is a legacy alias kept for replay compat.
@@ -961,6 +979,7 @@ impl Event {
             Event::DustForgiven { vault_id, .. } => vault_id == filter_vault_id,
             Event::SetCkstableRepayFee { .. } => false,
             Event::SetMinIcusdAmount { .. } => false,
+            Event::SetDustLiquidationThreshold { .. } => false,
             Event::SetGlobalIcusdMintCap { .. } => false,
             Event::SetStableTokenEnabled { .. } => false,
             Event::SetStableLedgerPrincipal { .. } => false,
@@ -1136,6 +1155,7 @@ impl Event {
             Event::Upgrade(_) => Some("Upgrade"),
             Event::SetCkstableRepayFee { .. } => Some("SetCkstableRepayFee"),
             Event::SetMinIcusdAmount { .. } => Some("SetMinIcusdAmount"),
+            Event::SetDustLiquidationThreshold { .. } => Some("SetDustLiquidationThreshold"),
             Event::SetGlobalIcusdMintCap { .. } => Some("SetGlobalIcusdMintCap"),
             Event::SetStableTokenEnabled { .. } => Some("SetStableTokenEnabled"),
             Event::SetStableLedgerPrincipal { .. } => Some("SetStableLedgerPrincipal"),
@@ -1536,8 +1556,16 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
                 vault_id,
                 mode,
                 icp_rate,
+                repay_amount,
                 ..
-            } => { let _ = state.liquidate_vault(vault_id, mode, icp_rate); },
+            } => {
+                // LIQ-0XX (review finding 2): `repay_amount` is `None` for
+                // legacy events (pre-fix) and `Some(pinned)` for events
+                // recorded after this field existed — `State::liquidate_vault`
+                // reproduces the exact pre-fix decision for the `None` case,
+                // so replay matches on-chain history in both cases.
+                let _ = state.liquidate_vault(vault_id, mode, icp_rate, repay_amount);
+            },
             Event::PartialLiquidateVault {
                 vault_id,
                 liquidator_payment,
@@ -1719,6 +1747,11 @@ pub fn replay(mut events: impl Iterator<Item = Event>) -> Result<State, ReplayLo
             Event::SetMinIcusdAmount { amount } => {
                 if let Ok(val) = amount.parse::<u64>() {
                     state.min_icusd_amount = ICUSD::new(val);
+                }
+            },
+            Event::SetDustLiquidationThreshold { amount } => {
+                if let Ok(val) = amount.parse::<u64>() {
+                    state.dust_liquidation_threshold = ICUSD::new(val);
                 }
             },
             Event::SetGlobalIcusdMintCap { amount, cap } => {
@@ -2174,14 +2207,24 @@ pub fn record_liquidate_vault(
     mode: Mode,
     collateral_price: UsdIcp,
 ) {
+    // No pre-await snapshot exists for this synchronous caller, so decide
+    // the amount now (equivalent to a `None`-style live decision) and pin
+    // that SAME decided value into both the event and the applied mutation,
+    // so a future replay of this event's `Some(repay_amount)` reproduces
+    // exactly what happened here.
+    let repay_amount = state
+        .vault_id_to_vaults
+        .get(&vault_id)
+        .map(|v| state.effective_liquidation_amount(v, collateral_price, None));
     record_event(&Event::LiquidateVault {
         vault_id,
         mode,
         icp_rate: collateral_price,
         liquidator: None,
         timestamp: Some(now()),
+        repay_amount,
     });
-    let _ = state.liquidate_vault(vault_id, mode, collateral_price);
+    let _ = state.liquidate_vault(vault_id, mode, collateral_price, repay_amount);
 }
 
 pub fn record_redistribute_vault(state: &mut State, vault_id: u64) {
@@ -2726,6 +2769,15 @@ pub fn record_set_min_icusd_amount(state: &mut State, amount: ICUSD) {
         amount: amount.to_u64().to_string(),
     });
     state.min_icusd_amount = amount;
+}
+
+/// LIQ-0XX: admin set the global dust-liquidation threshold. See
+/// `State::dust_liquidation_threshold`.
+pub fn record_set_dust_liquidation_threshold(state: &mut State, amount: ICUSD) {
+    record_event(&Event::SetDustLiquidationThreshold {
+        amount: amount.to_u64().to_string(),
+    });
+    state.dust_liquidation_threshold = amount;
 }
 
 pub fn record_set_global_icusd_mint_cap(state: &mut State, amount: u64) {
@@ -3418,6 +3470,7 @@ mod filter_tests {
             icp_rate: UsdIcp::new(Decimal::from(5u32)),
             liquidator: Some(liquidator),
             timestamp: Some(ts),
+            repay_amount: None,
         }
     }
 

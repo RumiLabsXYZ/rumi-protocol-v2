@@ -691,6 +691,7 @@ export const idlFactory = ({ IDL }) => {
       'collateral_type' : IDL.Principal,
       'liquidation_bonus' : IDL.Text,
     }),
+    'set_dust_liquidation_threshold' : IDL.Record({ 'amount' : IDL.Text }),
     'set_amm1_pool_id' : IDL.Record({ 'pool_id' : IDL.Text }),
     'set_global_icusd_mint_cap' : IDL.Record({
       'cap' : IDL.Opt(IDL.Text),
@@ -953,6 +954,7 @@ export const idlFactory = ({ IDL }) => {
       'mode' : Mode,
       'icp_rate' : IDL.Vec(IDL.Nat8),
       'vault_id' : IDL.Nat64,
+      'repay_amount' : IDL.Opt(IDL.Nat64),
       'timestamp' : IDL.Opt(IDL.Nat64),
       'liquidator' : IDL.Opt(IDL.Principal),
     }),
@@ -1160,6 +1162,7 @@ export const idlFactory = ({ IDL }) => {
     'interest_split' : IDL.Vec(InterestSplitArg),
     'recovery_cr_multiplier' : IDL.Float64,
     'interest_pool_share' : IDL.Float64,
+    'dust_liquidation_threshold_e8s' : IDL.Nat64,
     'total_icusd_borrowed' : IDL.Nat64,
     'min_icusd_amount' : IDL.Nat64,
     'snapshot_ts_ns' : IDL.Nat64,
@@ -1631,6 +1634,7 @@ export const idlFactory = ({ IDL }) => {
         [Account],
         ['query'],
       ),
+    'get_dust_liquidation_threshold' : IDL.Func([], [IDL.Nat64], ['query']),
     'get_effective_chain_debt_config' : IDL.Func(
         [IDL.Nat32],
         [IDL.Opt(ChainDebtConfigV1)],
@@ -2065,6 +2069,7 @@ export const idlFactory = ({ IDL }) => {
       ),
     'set_deficit_readonly_threshold_e8s' : IDL.Func([IDL.Nat64], [Result], []),
     'set_deficit_repayment_fraction' : IDL.Func([IDL.Float64], [Result], []),
+    'set_dust_liquidation_threshold' : IDL.Func([IDL.Nat64], [Result], []),
     'set_evm_rpc_principal' : IDL.Func([IDL.Principal], [Result], []),
     'set_global_icusd_mint_cap' : IDL.Func([IDL.Nat64], [Result], []),
     'set_healthy_cr' : IDL.Func(
