@@ -73,10 +73,10 @@ Plan: `docs/superpowers/plans/2026-09-13-cycle-sentinel-telemetry.md`
 | CS-20 | Done | Codex + Sonnet/Luna review fallback | Public root-domain telemetry UI | CS-13 | 9 tests and production build passed; injected canister ID verified; independent review passed after recent-top-up and mobile-navigation corrections |
 | CS-21 | Done | Luna fallback implementer + Sonnet reviewer + Codex | Authenticated operator telemetry UI | CS-13 | 607 frontend tests and production build passed; 28-error type-check baseline unchanged; authenticated Sonnet closeout PASS |
 | CS-30 | Done | Codex plus Sonnet and Luna fallback reviewers | Deterministic and adversarial source gate | CS-10 through CS-21 | Strict Clippy/fmt, 593 Rust tests, 4 official-ledger tests, 20 PocketIC tests, 616 frontend tests, declaration regeneration, root production build, fresh Wasm hash/endpoint scan, and diff check passed. Sonnet security review PASS; independent Luna release review found no source blocker. |
-| CS-40 | Doing | Codex coordinator | Push, PR, terminal exact-head CI, and merge | CS-30 | Source gate passed; branch commit and PR/CI gate in progress |
-| CS-50 | Blocked | Codex live operator | Create, deploy, and verify Sentinel | CS-40 | Requires merged exact-head rebuild and live preflight |
+| CS-40 | Done | Codex coordinator | Push, PR, terminal exact-head CI, and merge | CS-30 | PR #390 and deployed-ID follow-up PR #391 merged. GitHub has no configured PR checks; exact local source gate and independent reviews are recorded in CS-30. |
+| CS-50 | Done | Codex live operator | Create, deploy, and verify Sentinel | CS-40 | Sentinel `joh3a-5aaaa-aaaap-quy6a-cai` installed and running with the four approved controllers; anonymous overview reports 16 targets. Both published telemetry routes return HTTP 200. |
 | CS-51 | Blocked | Codex live operator | Add verified blackhole as an additional controller | CS-50 | One target at a time with before/after controller proof |
-| CS-52 | Blocked | Codex live operator | Fund, shadow, and activate policies incrementally | CS-50, CS-51 | Exact policy manifest must be authoritative |
+| CS-52 | Blocked | Codex live operator | Fund, shadow, and activate policies incrementally | CS-50, CS-51 | Requires an authoritative policy manifest and a second 2-of-4 signer. All 16 initial targets remain disabled with auto-top-up off. |
 | CS-53 | Blocked | Codex live operator | Remove CycleOps after replacement proof | CS-52 | Terminal cutover gate |
 
 ## CS-00 details
