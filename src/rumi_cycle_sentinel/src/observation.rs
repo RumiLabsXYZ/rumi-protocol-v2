@@ -9,8 +9,8 @@ use crate::{history, state};
 
 pub const BLACKHOLE_PRINCIPAL_TEXT: &str = "e3mmv-5qaaa-aaaah-aadma-cai";
 pub const PINNED_BLACKHOLE_HASH: [u8; 32] = [
-    0x21, 0x0c, 0x94, 0x1e, 0x5e, 0xca, 0x77, 0xda, 0xac, 0x31, 0x4d, 0xa9, 0x15, 0x17, 0x48, 0x3a,
-    0xc1, 0x71, 0x26, 0x45, 0x27, 0xe3, 0xd0, 0xd7, 0x13, 0xb9, 0x2b, 0xb9, 0x52, 0x39, 0xd7, 0xde,
+    0x21, 0x0c, 0xf9, 0x41, 0xe5, 0xca, 0x77, 0xda, 0xac, 0x31, 0x4a, 0x91, 0x51, 0x74, 0x83, 0xac,
+    0x17, 0x12, 0x64, 0x52, 0x7e, 0x3d, 0x0d, 0x71, 0x3b, 0x92, 0xbb, 0x95, 0x23, 0x9d, 0x7d, 0xe0,
 ];
 
 #[derive(CandidType, Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -389,6 +389,24 @@ mod tests {
             status: state,
             cycles: Nat::from(cycles),
         }
+    }
+
+    /// The module hash the live mainnet blackhole `e3mmv-5qaaa-aaaah-aadma-cai`
+    /// reports for itself via its own `canister_status` (checked 2026-09-16).
+    /// Pinned as a hex string, not byte literals: the original byte array had
+    /// transposed nibbles, so every BlackholeRelay target would have failed
+    /// proxy verification forever. The mock canister copied the same bytes,
+    /// which is why no integration test caught it.
+    const LIVE_BLACKHOLE_HASH_HEX: &str =
+        "210cf941e5ca77daac314a91517483ac171264527e3d0d713b92bb95239d7de0";
+
+    #[test]
+    fn pinned_blackhole_hash_matches_live_mainnet_blackhole() {
+        let hex: String = PINNED_BLACKHOLE_HASH
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(hex, LIVE_BLACKHOLE_HASH_HEX);
     }
 
     #[test]
