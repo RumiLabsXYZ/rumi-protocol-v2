@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-const source = readFileSync(resolve(process.cwd(), 'src/routes/telemetry/+page.svelte'), 'utf8');
+const source = readFileSync(resolve(process.cwd(), 'src/routes/explorer/telemetry/+page.svelte'), 'utf8');
 const serviceSource = readFileSync(resolve(process.cwd(), 'src/lib/services/cycleSentinelService.ts'), 'utf8');
 
 describe('Cycle Sentinel telemetry route contract', () => {
@@ -44,5 +44,23 @@ describe('Cycle Sentinel telemetry route contract', () => {
       'proposeSetGlobalPolicy', 'approveProposal', 'executeProposal', 'cancelProposal',
       'acknowledgeAlarm', 'manualTopUp', 'attachBlockProof', 'attachRefundBlockProof', 'resolveUnknownAsSpent',
     ]) expect(source).toContain(`sentinelManagement.${method}`);
+  });
+  it('explains an idle registry and shows cycle usage instead of a silent wall of Unavailable', () => {
+    expect(source).toContain('snapshot.overview.unobserved_count === snapshot.overview.target_count');
+    expect(source).toContain('Observation has not been switched on yet.');
+    expect(source).toContain('{#if fundingUnavailable}');
+    expect(source).toContain('<th>Burn / day</th>');
+    expect(source).toContain('<th>Runway</th>');
+    expect(source).toContain('optional(row.burn_cycles_per_day)');
+    expect(source).toContain('optional(row.runway_secs)');
+  });
+
+  it('lives under the Explorer tab, not the app header, and keeps the old URL working', () => {
+    const appLayout = readFileSync(resolve(process.cwd(), 'src/routes/+layout.svelte'), 'utf8');
+    const explorerLayout = readFileSync(resolve(process.cwd(), 'src/routes/explorer/+layout.svelte'), 'utf8');
+    const legacyRedirect = readFileSync(resolve(process.cwd(), 'src/routes/telemetry/+page.ts'), 'utf8');
+    expect(appLayout).not.toContain('href="/telemetry"');
+    expect(explorerLayout).toContain("href: '/explorer/telemetry'");
+    expect(legacyRedirect).toContain("redirect(308, '/explorer/telemetry')");
   });
 });

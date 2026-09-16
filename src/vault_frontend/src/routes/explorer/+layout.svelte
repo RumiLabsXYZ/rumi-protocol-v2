@@ -31,9 +31,10 @@
 
   let currentPath = $derived($page.url.pathname);
 
-  // Three-section IA: Protocol (lens-scoped dashboard), Activity (query layer),
-  // Entities (vault / token / address / pool / canister / event — reached via
-  // search + links, no dedicated nav tab).
+  // Four-section IA: Protocol (lens-scoped dashboard), Activity (query layer),
+  // Telemetry (Cycle Sentinel runtime health + operator console), Entities
+  // (vault / token / address / pool / canister / event — reached via search +
+  // links, no dedicated nav tab).
   const NAV_ITEMS = [
     {
       href: '/explorer',
@@ -59,6 +60,11 @@
         || p.startsWith('/explorer/event/')
         || p.startsWith('/explorer/e/event/')
         || p.startsWith('/explorer/dex/')
+    },
+    {
+      href: '/explorer/telemetry',
+      label: 'Telemetry',
+      match: (p: string) => p.startsWith('/explorer/telemetry')
     },
   ];
 
