@@ -87,6 +87,23 @@
   const variant = (value: Record<string, unknown>): string => Object.keys(value)[0] ?? 'Unknown';
   const format = (value: bigint | undefined): string => value === undefined ? 'Unavailable' : value.toLocaleString();
   const optional = <T,>(value: [] | [T]): T | undefined => value.length ? value[0] : undefined;
+
+  // Cycle counts are 12-to-15 digit integers. Render them in T/B units so a
+  // balance, a burn rate, and a threshold can be compared at a glance; the
+  // exact integer stays available in the cell's title attribute.
+  function formatCycles(value: bigint | undefined): string {
+    if (value === undefined) return 'Unavailable';
+    if (value >= 1_000_000_000_000n) return `${(Number(value) / 1e12).toFixed(2)}T`;
+    if (value >= 1_000_000_000n) return `${(Number(value) / 1e9).toFixed(2)}B`;
+    return value.toLocaleString();
+  }
+
+  function formatRunway(secs: bigint | undefined): string {
+    if (secs === undefined) return 'Unavailable';
+    const days = Number(secs) / 86_400;
+    if (days >= 1) return `${days.toFixed(1)}d`;
+    return `${(Number(secs) / 3_600).toFixed(1)}h`;
+  }
   const opt = <T,>(value: T | undefined): [] | [T] => value === undefined ? [] : [value];
   const principalVariant = (value: keyof typeof EnvironmentVariant): Record<string, null> => ({ [value]: null });
   const EnvironmentVariant = { Local: null, Production: null, Test: null, Archived: null, Staging: null } as const;
@@ -202,6 +219,25 @@
     };
   }
 
+  // Every target reads Unobserved when it is disabled OR its observation mode
+  // is Unobserved (see rumi_cycle_sentinel public_api.rs `target_row`). In that
+  // state the sampler never runs, so balance, burn, and runway are genuinely
+  // absent rather than zero. Say so explicitly: a table of "Unavailable" with
+  // no explanation reads like a broken page.
+  $: registryIdle = !!snapshot
+    && snapshot.overview.target_count > 0n
+    && snapshot.overview.unobserved_count === snapshot.overview.target_count;
+  $: neverSampled = !!snapshot && optional(snapshot.overview.last_sample_at_secs) === undefined;
+  $: fundingSource = snapshot
+    ? {
+        cycles: optional(snapshot.overview.cycles_ledger_available_cycles),
+        icp: optional(snapshot.overview.icp_available_e8s),
+      }
+    : undefined;
+  $: fundingUnavailable = !!fundingSource
+    && fundingSource.cycles === undefined
+    && fundingSource.icp === undefined;
+
   async function refresh(): Promise<void> {
     loading = true;
     publicError = '';
@@ -293,7 +329,15 @@
   {:else if loading}<p class="muted">Loading public telemetry…</p>
   {:else if snapshot}
     <div class="stats"><div><span>Targets</span><strong>{format(snapshot.overview.target_count)}</strong></div><div><span>Healthy</span><strong>{format(snapshot.overview.healthy_count)}</strong></div><div><span>Runtime cycles</span><strong>{format(snapshot.overview.runtime_cycles)}</strong></div><div><span>Open alarms</span><strong>{format(snapshot.overview.alarm_count)}</strong></div></div>
-    <div class="grid"><article><h2>Target registry</h2>{#if snapshot.targets.length}<table><thead><tr><th>Target</th><th>State</th><th>Balance</th><th>Environment</th></tr></thead><tbody>{#each snapshot.targets as row}<tr><td><strong>{row.display_name}</strong><small>{row.principal.toText()}</small><small>{row.project}</small></td><td>{variant(row.state)}</td><td>{row.advisory_balance_overflowed ? 'Overflow' : format(optional(row.advisory_balance_cycles))}</td><td>{variant(row.environment)}</td></tr>{/each}</tbody></table>{:else}<p class="muted">No targets have been published.</p>{/if}</article>
+    {#if registryIdle}
+      <div class="notice idle">
+        <strong>Observation has not been switched on yet.</strong>
+        <p>All {snapshot.overview.target_count.toString()} registered targets are still disabled or set to <em>Unobserved</em>, so the Sentinel has never sampled them{neverSampled ? '' : ' recently'}. That is why balance, burn rate, and runway read <em>Unavailable</em> rather than zero — the values are genuinely unknown, not missing from the page.</p>
+        <p class="muted">Registration is deliberately fail-closed: a target is created disabled with auto-top-up off. Turning observation on is a separate governed change — a signer proposes a target update with <em>Enabled</em> checked, a second signer approves it, and it executes after the target-registry timelock.</p>
+        {#if fundingUnavailable}<p class="muted">The Sentinel also reports no funding source yet (no cycles-ledger balance and no ICP), so top-ups would be rejected even for an enabled target.</p>{/if}
+      </div>
+    {/if}
+    <div class="grid"><article><h2>Target registry</h2>{#if snapshot.targets.length}<table><thead><tr><th>Target</th><th>State</th><th>Balance</th><th>Burn / day</th><th>Runway</th><th>Environment</th></tr></thead><tbody>{#each snapshot.targets as row}<tr><td><strong>{row.display_name}</strong><small>{row.principal.toText()}</small><small>{row.project} · {variant(row.observation_mode)}</small></td><td>{variant(row.state)}</td><td title={format(optional(row.advisory_balance_cycles))}>{row.advisory_balance_overflowed ? 'Overflow' : formatCycles(optional(row.advisory_balance_cycles))}</td><td title={format(optional(row.burn_cycles_per_day))}>{formatCycles(optional(row.burn_cycles_per_day))}</td><td>{formatRunway(optional(row.runway_secs))}</td><td>{variant(row.environment)}</td></tr>{/each}</tbody></table>{:else}<p class="muted">No targets have been published.</p>{/if}</article>
       <article><h2>Alarms</h2>{#if snapshot.alarms.length}{#each snapshot.alarms as alarm}<div class="alarm"><span class="dot"></span><div><strong>{variant(alarm.kind)}</strong><small>{alarm.target[0]?.toText() ?? 'Sentinel'}</small></div><span>{variant(alarm.status)}</span>{#if signer && actor && alarmCanBeAcknowledged(alarm)}<button on:click={() => run(() => sentinelManagement.acknowledgeAlarm(actor!, alarm.id))}>Acknowledge</button>{/if}</div>{/each}{:else}<p class="muted">No public alarms.</p>{/if}</article></div>
   {/if}
 
@@ -310,5 +354,5 @@
 </section>
 
 <style>
-  .telemetry-page{max-width:1120px;margin:0 auto;color:var(--rumi-text-primary)}.hero{display:flex;align-items:flex-end;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-bottom:2rem}.hero h1{margin:.1rem 0;font-size:2.5rem}.lede{max-width:700px;color:var(--rumi-text-secondary)}.eyebrow{color:var(--rumi-teal);font-size:.72rem;letter-spacing:.14em}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:.75rem;margin-bottom:1rem}.stats div,article,.operator,.login-note{padding:1rem;background:var(--rumi-bg-surface-1);border:1px solid var(--rumi-border);border-radius:.5rem}.stats span,.muted,small{display:block;color:var(--rumi-text-muted);font-size:.78rem}.stats strong{font-size:1.25rem}.grid{display:grid;grid-template-columns:2fr 1fr;gap:1rem}h2,h3{margin-top:0}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:.55rem;border-bottom:1px solid var(--rumi-border);font-size:.82rem}.alarm{display:flex;gap:.5rem;align-items:center;border-bottom:1px solid var(--rumi-border);padding:.65rem 0}.alarm>span:nth-last-of-type(1){margin-left:auto;font-size:.75rem}.dot{width:.45rem;height:.45rem;background:#e05252;border-radius:50%}.operator{margin-top:1rem;display:grid;gap:1rem}.operator>h2,.operator>p{margin-bottom:0}.badge{font-size:.7rem;padding:.25rem .5rem;border-radius:99px;color:var(--rumi-text-muted);background:var(--rumi-bg-surface3)}.badge.confirmed{color:var(--rumi-teal);background:rgba(45,212,191,.12)}.form-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:.7rem}.form-grid label{display:block;font-size:.75rem;color:var(--rumi-text-muted)}input,select{display:block;width:100%;box-sizing:border-box;margin-top:.25rem;padding:.5rem;background:var(--rumi-bg-surface3);border:1px solid var(--rumi-border);color:inherit;border-radius:.3rem}.check{display:flex!important;gap:.5rem;align-items:center}.check input{width:auto}.actions{display:flex;gap:.4rem;flex-wrap:wrap;margin-top:.7rem}button{border:1px solid var(--rumi-border-hover);background:var(--rumi-bg-surface3);color:inherit;border-radius:.4rem;padding:.55rem .8rem;cursor:pointer;font-size:.78rem}button:hover{border-color:var(--rumi-action)}button:disabled{opacity:.5}.notice{padding:.7rem;margin-bottom:1rem;border-radius:.4rem}.error{color:#ff9b9b;background:rgba(224,82,82,.12)}.success{color:var(--rumi-teal);background:rgba(45,212,191,.1)}.login-note{margin-top:1rem}li{margin:.4rem 0;font-size:.82rem}@media(max-width:768px){.stats{grid-template-columns:repeat(2,1fr)}.grid,.form-grid{grid-template-columns:1fr}table{font-size:.72rem}}
+  .telemetry-page{max-width:1120px;margin:0 auto;color:var(--rumi-text-primary)}.hero{display:flex;align-items:flex-end;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-bottom:2rem}.hero h1{margin:.1rem 0;font-size:2.5rem}.lede{max-width:700px;color:var(--rumi-text-secondary)}.eyebrow{color:var(--rumi-teal);font-size:.72rem;letter-spacing:.14em}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:.75rem;margin-bottom:1rem}.stats div,article,.operator,.login-note{padding:1rem;background:var(--rumi-bg-surface-1);border:1px solid var(--rumi-border);border-radius:.5rem}.stats span,.muted,small{display:block;color:var(--rumi-text-muted);font-size:.78rem}.stats strong{font-size:1.25rem}.grid{display:grid;grid-template-columns:2fr 1fr;gap:1rem}h2,h3{margin-top:0}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:.55rem;border-bottom:1px solid var(--rumi-border);font-size:.82rem}.alarm{display:flex;gap:.5rem;align-items:center;border-bottom:1px solid var(--rumi-border);padding:.65rem 0}.alarm>span:nth-last-of-type(1){margin-left:auto;font-size:.75rem}.dot{width:.45rem;height:.45rem;background:#e05252;border-radius:50%}.operator{margin-top:1rem;display:grid;gap:1rem}.operator>h2,.operator>p{margin-bottom:0}.badge{font-size:.7rem;padding:.25rem .5rem;border-radius:99px;color:var(--rumi-text-muted);background:var(--rumi-bg-surface3)}.badge.confirmed{color:var(--rumi-teal);background:rgba(45,212,191,.12)}.form-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:.7rem}.form-grid label{display:block;font-size:.75rem;color:var(--rumi-text-muted)}input,select{display:block;width:100%;box-sizing:border-box;margin-top:.25rem;padding:.5rem;background:var(--rumi-bg-surface3);border:1px solid var(--rumi-border);color:inherit;border-radius:.3rem}.check{display:flex!important;gap:.5rem;align-items:center}.check input{width:auto}.actions{display:flex;gap:.4rem;flex-wrap:wrap;margin-top:.7rem}button{border:1px solid var(--rumi-border-hover);background:var(--rumi-bg-surface3);color:inherit;border-radius:.4rem;padding:.55rem .8rem;cursor:pointer;font-size:.78rem}button:hover{border-color:var(--rumi-action)}button:disabled{opacity:.5}.notice{padding:.7rem;margin-bottom:1rem;border-radius:.4rem}.error{color:#ff9b9b;background:rgba(224,82,82,.12)}.idle{background:var(--rumi-bg-surface-1);border:1px solid var(--rumi-border)}.idle strong{display:block;margin-bottom:.35rem}.idle p{margin:.35rem 0;font-size:.82rem;color:var(--rumi-text-secondary)}.idle p.muted{font-size:.78rem}.success{color:var(--rumi-teal);background:rgba(45,212,191,.1)}.login-note{margin-top:1rem}li{margin:.4rem 0;font-size:.82rem}@media(max-width:768px){.stats{grid-template-columns:repeat(2,1fr)}.grid,.form-grid{grid-template-columns:1fr}table{font-size:.72rem}}
 </style>
