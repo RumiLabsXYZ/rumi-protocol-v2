@@ -1524,6 +1524,9 @@
         riskWriteDisabledReason={publicRiskWriteBlocker}
         recoveryWritesEnabled={publicRecoveryWritesEnabled}
         recoveryWriteDisabledReason={publicRecoveryWriteBlocker}
+        livePriceE8s={publicStatus?.collateral_price_is_fresh ? publicStatus.collateral_price_e8[0] ?? null : null}
+        liveMinCrE4={publicStatus?.min_cr_e4[0] ?? null}
+        liveLiquidationCrE4={publicStatus?.liquidation_threshold_e4[0] ?? null}
         isGuidedVault={__RUMI_PRODUCTION_CANARY_BUILD__ && canary?.vaultId === v.vault_id.toString()}
         guidedPhase={__RUMI_PRODUCTION_CANARY_BUILD__ && canary?.vaultId === v.vault_id.toString() ? canary.phase : null}
         {onAction}

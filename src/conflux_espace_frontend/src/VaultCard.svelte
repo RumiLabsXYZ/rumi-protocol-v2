@@ -3,14 +3,21 @@
   import type { CanaryPhase } from "./canaryState";
   import { statusName, type ChainVault } from "./backend";
   import { addressUrl, fmtCfx, fmtIcusd, toE8s, toWei } from "./evm";
+  import { positionPreview } from "./borrowMath";
 
-  let { vault, busy, riskWritesEnabled, riskWriteDisabledReason, recoveryWritesEnabled, recoveryWriteDisabledReason, isGuidedVault, guidedPhase, onAction }: {
+  let {
+    vault, busy, riskWritesEnabled, riskWriteDisabledReason, recoveryWritesEnabled, recoveryWriteDisabledReason,
+    livePriceE8s, liveMinCrE4, liveLiquidationCrE4, isGuidedVault, guidedPhase, onAction,
+  }: {
     vault: ChainVault;
     busy: string | null;
     riskWritesEnabled: boolean;
     riskWriteDisabledReason: string | null;
     recoveryWritesEnabled: boolean;
     recoveryWriteDisabledReason: string | null;
+    livePriceE8s: bigint | null;
+    liveMinCrE4: bigint | null;
+    liveLiquidationCrE4: bigint | null;
     isGuidedVault: boolean;
     guidedPhase: CanaryPhase | null;
     onAction: (kind: string, vault: ChainVault, amount?: bigint) => void;
@@ -19,6 +26,11 @@
   const status = $derived(statusName(vault.status));
   const custody = $derived(vault.custody_address);
   const mainnet = $derived(__RUMI_PRODUCTION_CANARY_BUILD__ || __RUMI_PRODUCTION_PUBLIC_BUILD__);
+  // Same integer math as the Borrow page's live projected-position meter —
+  // null (renders nothing) unless price is fresh and the vault carries debt.
+  const health = $derived(__RUMI_PRODUCTION_PUBLIC_BUILD__
+    ? positionPreview(vault.collateral_amount_e18, vault.debt_e8s, livePriceE8s, liveMinCrE4, liveLiquidationCrE4)
+    : null);
 
   let borrowAmt = $state("0.1");
   let repayAmt = $state("");
@@ -37,6 +49,12 @@
   <div class="kv"><span class="k">Collateral</span><span class="v">{fmtCfx(vault.collateral_amount_e18)} CFX</span></div>
   {#if vault.pending_mint_e8s > 0n}
     <div class="kv"><span class="k">Pending mint</span><span class="v">{fmtIcusd(vault.pending_mint_e8s)} icUSD</span></div>
+  {/if}
+  {#if health}
+    <div class="kv health-kv"><span class="k">Collateral ratio</span><span class="v tone-{health.tone}">{health.ratioPercent.toLocaleString("en-US", { maximumFractionDigits: 1 })}%</span></div>
+    <div class="fill-bar" role="img" aria-label="Collateral ratio {health.ratioPercent.toFixed(0)}% of {fmtCfx(vault.collateral_amount_e18)} CFX collateral">
+      <div class="fill-bar-inner tone-{health.tone}" style="width:{health.position}%"></div>
+    </div>
   {/if}
   <div class="kv custody-row"><span class="k">Custody</span>
     <span class="v custody-actions">
