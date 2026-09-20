@@ -53,6 +53,8 @@ describe('Cycle Sentinel telemetry route contract', () => {
     expect(source).toContain('<th>Runway</th>');
     expect(source).toContain('optional(row.burn_cycles_per_day)');
     expect(source).toContain('optional(row.runway_secs)');
+    expect(source).toContain('targetStateLabel(row)');
+    expect(source).toContain('Awaiting first sample');
   });
 
   it('lives under the Explorer tab, not the app header, and keeps the old URL working', () => {
