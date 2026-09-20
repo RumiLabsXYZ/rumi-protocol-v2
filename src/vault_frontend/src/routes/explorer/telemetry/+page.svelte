@@ -3,6 +3,7 @@
   import { Principal } from '@dfinity/principal';
   import { walletStore } from '$lib/stores/wallet';
   import { currentWalletType, walletSessionGeneration } from '$lib/services/auth';
+  import { targetStateLabel } from '$lib/services/cycleSentinelTelemetry';
   import {
     createAnonymousSentinelActor,
     createAuthenticatedSentinelActor,
@@ -337,7 +338,7 @@
         {#if fundingUnavailable}<p class="muted">The Sentinel also reports no funding source yet (no cycles-ledger balance and no ICP), so top-ups would be rejected even for an enabled target.</p>{/if}
       </div>
     {/if}
-    <div class="grid"><article><h2>Target registry</h2>{#if snapshot.targets.length}<table><thead><tr><th>Target</th><th>State</th><th>Balance</th><th>Burn / day</th><th>Runway</th><th>Environment</th></tr></thead><tbody>{#each snapshot.targets as row}<tr><td><strong>{row.display_name}</strong><small>{row.principal.toText()}</small><small>{row.project} · {variant(row.observation_mode)}</small></td><td>{variant(row.state)}</td><td title={format(optional(row.advisory_balance_cycles))}>{row.advisory_balance_overflowed ? 'Overflow' : formatCycles(optional(row.advisory_balance_cycles))}</td><td title={format(optional(row.burn_cycles_per_day))}>{formatCycles(optional(row.burn_cycles_per_day))}</td><td>{formatRunway(optional(row.runway_secs))}</td><td>{variant(row.environment)}</td></tr>{/each}</tbody></table>{:else}<p class="muted">No targets have been published.</p>{/if}</article>
+    <div class="grid"><article><h2>Target registry</h2>{#if snapshot.targets.length}<table><thead><tr><th>Target</th><th>State</th><th>Balance</th><th>Burn / day</th><th>Runway</th><th>Environment</th></tr></thead><tbody>{#each snapshot.targets as row}<tr><td><strong>{row.display_name}</strong><small>{row.principal.toText()}</small><small>{row.project} · {variant(row.observation_mode)}</small></td><td title={targetStateLabel(row) === 'Awaiting first sample' ? 'Monitoring is enabled. The next scheduled observation has not completed yet.' : undefined}>{targetStateLabel(row)}</td><td title={format(optional(row.advisory_balance_cycles))}>{row.advisory_balance_overflowed ? 'Overflow' : formatCycles(optional(row.advisory_balance_cycles))}</td><td title={format(optional(row.burn_cycles_per_day))}>{formatCycles(optional(row.burn_cycles_per_day))}</td><td>{formatRunway(optional(row.runway_secs))}</td><td>{variant(row.environment)}</td></tr>{/each}</tbody></table>{:else}<p class="muted">No targets have been published.</p>{/if}</article>
       <article><h2>Alarms</h2>{#if snapshot.alarms.length}{#each snapshot.alarms as alarm}<div class="alarm"><span class="dot"></span><div><strong>{variant(alarm.kind)}</strong><small>{alarm.target[0]?.toText() ?? 'Sentinel'}</small></div><span>{variant(alarm.status)}</span>{#if signer && actor && alarmCanBeAcknowledged(alarm)}<button on:click={() => run(() => sentinelManagement.acknowledgeAlarm(actor!, alarm.id))}>Acknowledge</button>{/if}</div>{/each}{:else}<p class="muted">No public alarms.</p>{/if}</article></div>
   {/if}
 
