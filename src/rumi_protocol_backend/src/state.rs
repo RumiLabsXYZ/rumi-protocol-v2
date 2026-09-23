@@ -109,13 +109,13 @@ fn default_min_xrc_sources_used() -> u32 {
 /// these fields hydrate to the same cadence the canister has shipped
 /// with from Wave 14b onward.
 fn default_xrc_fetch_interval_secs() -> u64 {
-    300
+    480
 }
 fn default_interest_treasury_tick_interval_secs() -> u64 {
-    60
+    300
 }
 fn default_vault_check_tick_interval_secs() -> u64 {
-    300
+    600
 }
 
 /// Phase 1b Task 15: production defaults for the Monad async-loop cadences.
@@ -1216,18 +1216,18 @@ pub struct State {
     #[serde(default = "default_min_xrc_sources_used")]
     pub min_xrc_sources_used: u32,
     /// Wave-14b CDP-12 follow-up: cadence (seconds) for Timer A
-    /// (`fetch_icp_rate`). Default 300. Tunable via developer endpoint
+    /// (`fetch_icp_rate`). Default 480. Tunable via developer endpoint
     /// `set_xrc_fetch_interval_secs`. Setting to 0 is rejected by the
     /// setter (a 0s interval would saturate the canister).
     #[serde(default = "default_xrc_fetch_interval_secs")]
     pub xrc_fetch_interval_secs: u64,
     /// Wave-14b CDP-12 follow-up: cadence (seconds) for Timer B
-    /// (`interest_and_treasury_tick`). Default 60. Tunable via
+    /// (`interest_and_treasury_tick`). Default 300. Tunable via
     /// `set_interest_treasury_tick_interval_secs`.
     #[serde(default = "default_interest_treasury_tick_interval_secs")]
     pub interest_treasury_tick_interval_secs: u64,
     /// Wave-14b CDP-12 follow-up: cadence (seconds) for Timer C
-    /// (`vault_check_tick`). Default 300. Tunable via
+    /// (`vault_check_tick`). Default 600. Tunable via
     /// `set_vault_check_tick_interval_secs`.
     #[serde(default = "default_vault_check_tick_interval_secs")]
     pub vault_check_tick_interval_secs: u64,
@@ -1246,14 +1246,14 @@ pub struct State {
     pub collateral_price_fetch_interval_secs: BTreeMap<CollateralType, u64>,
     /// Phase 1b Task 15: cadence (seconds) for Timer D (the settlement
     /// fan-out, `main::run_all_settlements`, which dispatches each registered
-    /// chain to its kind's `run_settlement`). Default 30. Tunable via
+    /// chain to its kind's `run_settlement`). Default 300. Tunable via
     /// `set_settlement_tick_interval_secs`. The register fn floors a 0 to 30
     /// so a missing serde-default or bad setter value never busy-loops.
     #[serde(default = "default_settlement_tick_interval_secs")]
     pub settlement_tick_interval_secs: u64,
     /// Phase 1b Task 15: cadence (seconds) for the inbound observer fan-out
     /// (`main::run_all_observers`, which dispatches each registered chain to its
-    /// kind's `run_observer`). Default 30. Tunable via
+    /// kind's `run_observer`). Default 300. Tunable via
     /// `set_observer_tick_interval_secs`. Same 0-floor protection as above.
     #[serde(default = "default_observer_tick_interval_secs")]
     pub observer_tick_interval_secs: u64,

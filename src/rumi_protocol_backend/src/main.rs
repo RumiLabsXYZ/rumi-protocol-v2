@@ -493,7 +493,9 @@ fn register_observer_timer() {
 }
 
 /// De-scaffold pass (2026-08-20): register the XRC-sourced chains price
-/// timer. 300s cadence, matching the rest of the protocol's XRC polling
+/// timer. 900s cadence. Chain-1030 public readiness allows a 1,800s maximum
+/// price age, so this removes redundant XRC work while leaving a full 15-minute
+/// safety margin before the fail-closed stale-price gate.
 /// (`xrc::FETCHING_ICP_RATE_INTERVAL`, `xrc::DEFAULT_COLLATERAL_PRICE_FETCH_SECS`).
 /// No settable interval: unlike the ICP/collateral price timers this one has
 /// no operator-facing tuning knob (yet) since it's gated to zero cost until a
@@ -506,7 +508,7 @@ fn register_chains_price_timer() {
         if let Some(old) = cell.get() {
             ic_cdk_timers::clear_timer(old);
         }
-        let new_id = ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(300), || {
+        let new_id = ic_cdk_timers::set_timer_interval(std::time::Duration::from_secs(900), || {
             ic_cdk::spawn(rumi_protocol_backend::xrc::fetch_chains_prices())
         });
         cell.set(Some(new_id));
@@ -608,7 +610,7 @@ fn setup_timers() {
     // ── Phase 1b Task 15: Monad async loops (Timer D + inbound observer) ─────
     // Both tick fns fan out over registered+enabled chains and are NO-OPS when
     // no chain is registered, so they are safe to run on the staging canister
-    // before Monad is configured. Cadences live in State (default 30s) and are
+    // before Monad is configured. Cadences live in State (default 300s) and are
     // tunable via `set_settlement_tick_interval_secs` /
     // `set_observer_tick_interval_secs`, which re-register in place. The register
     // helpers FLOOR a 0 interval to 30s (never a busy-loop). Per-chain
@@ -5460,23 +5462,15 @@ fn get_vault_history_paged(vault_id: u64, start: u64, length: u64) -> VaultHisto
 
     let length = length.min(MAX_VAULT_HISTORY as u64);
 
-    let all_matches: Vec<(u64, Event)> = events()
-        .enumerate()
-        .filter(|(_, e)| e.is_vault_related(&vault_id))
-        .map(|(i, e)| (i as u64, e))
-        .collect();
-    let total = all_matches.len() as u64;
-
-    let events_page: Vec<(u64, Event)> = if start >= total {
-        Vec::new()
-    } else {
-        all_matches
-            .into_iter()
-            .rev()
-            .skip(start as usize)
-            .take(length as usize)
-            .collect()
-    };
+    // Keep the response bounded even when a vault has a long history. Normal
+    // pages use a bounded ring buffer; pathological page numbers fall back to
+    // two bounded-memory passes so `total` remains exact.
+    let (total, events_page) = collect_paged_event_matches(
+        || events(),
+        start,
+        length,
+        |event| event.is_vault_related(&vault_id),
+    );
 
     VaultHistoryPagedResponse {
         total,
@@ -5484,15 +5478,99 @@ fn get_vault_history_paged(vault_id: u64, start: u64, length: u64) -> VaultHisto
     }
 }
 
+/// Collect one newest-first page from an append-only event stream without
+/// materializing the complete matching result set.
+///
+/// A bounded ring buffer handles normal page requests in one pass. A second
+/// pass is used only when a pathological page number would require retaining
+/// more than the hard buffer cap. This preserves exact `total` semantics while
+/// avoiding an allocation proportional to the full event log.
+const MAX_PAGED_EVENT_BUFFER: usize = 5_000;
+const MAX_PAGED_EVENT_PAGE_SIZE: u64 = MAX_VAULT_HISTORY as u64;
+
+fn collect_paged_event_matches<T, I, S, P>(
+    source: S,
+    newest_offset: u64,
+    page_size: u64,
+    predicate: P,
+) -> (u64, Vec<(u64, T)>)
+where
+    S: Fn() -> I,
+    I: Iterator<Item = T>,
+    P: Fn(&T) -> bool,
+{
+    let page_size = page_size.min(MAX_PAGED_EVENT_PAGE_SIZE);
+    if page_size == 0 {
+        let total = source().filter(|event| predicate(event)).count() as u64;
+        return (total, Vec::new());
+    }
+
+    let requested_capacity = newest_offset.saturating_add(page_size);
+    if requested_capacity <= MAX_PAGED_EVENT_BUFFER as u64 {
+        let mut total = 0_u64;
+        let requested_capacity = requested_capacity as usize;
+        let mut latest = std::collections::VecDeque::with_capacity(requested_capacity);
+        for (index, event) in source().enumerate() {
+            if predicate(&event) {
+                total = total.saturating_add(1);
+                if latest.len() == requested_capacity {
+                    latest.pop_front();
+                }
+                latest.push_back((index as u64, event));
+            }
+        }
+
+        let page_end = total.saturating_sub(newest_offset);
+        if page_end == 0 {
+            return (total, Vec::new());
+        }
+        let page_start = page_end.saturating_sub(page_size);
+        let first_retained = total.saturating_sub(latest.len() as u64);
+        let local_start = page_start.saturating_sub(first_retained) as usize;
+        let local_end = page_end.saturating_sub(first_retained) as usize;
+        let mut page_events: Vec<(u64, T)> = latest
+            .into_iter()
+            .skip(local_start)
+            .take(local_end.saturating_sub(local_start))
+            .collect();
+        page_events.reverse();
+        return (total, page_events);
+    }
+
+    let total = source().filter(|event| predicate(event)).count() as u64;
+    let page_end = total.saturating_sub(newest_offset);
+    if page_end == 0 {
+        return (total, Vec::new());
+    }
+    let page_start = page_end.saturating_sub(page_size);
+
+    let mut matching_index = 0_u64;
+    let mut page_events = Vec::with_capacity((page_end - page_start) as usize);
+    for (index, event) in source().enumerate() {
+        if predicate(&event) {
+            if matching_index >= page_start && matching_index < page_end {
+                page_events.push((index as u64, event));
+            }
+            matching_index = matching_index.saturating_add(1);
+            if matching_index >= page_end {
+                break;
+            }
+        }
+    }
+    page_events.reverse();
+    (total, page_events)
+}
+
 #[candid_method(query)]
 #[query]
 fn get_events(args: GetEventsArg) -> Vec<Event> {
     const MAX_EVENTS_PER_QUERY: usize = 2000;
+    let Ok(start) = usize::try_from(args.start) else {
+        return Vec::new();
+    };
+    let length = args.length.min(MAX_EVENTS_PER_QUERY as u64) as usize;
 
-    events()
-        .skip(args.start as usize)
-        .take(MAX_EVENTS_PER_QUERY.min(args.length as usize))
-        .collect()
+    events().skip(start).take(length).collect()
 }
 
 #[candid_method(query)]
@@ -5549,8 +5627,8 @@ fn get_events_filtered(args: GetEventsArg) -> GetEventsFilteredResponse {
         ic_cdk::trap("update call rejected");
     }
     const MAX_PAGE_SIZE: usize = 200;
-    let page_size = MAX_PAGE_SIZE.min(args.length as usize);
-    let page = args.start as usize;
+    let page_size = args.length.min(MAX_PAGE_SIZE as u64);
+    let page = args.start;
 
     let now = ic_cdk::api::time();
     let cache_key = filtered_events_cache_key(&args, page, page_size);
@@ -5584,10 +5662,12 @@ fn get_events_filtered(args: GetEventsArg) -> GetEventsFilteredResponse {
         .filter(|v| !v.is_empty())
         .map(|v| v.iter().cloned().collect());
 
-    let filtered: Vec<(u64, Event)> = events()
-        .enumerate()
-        .filter(|(_, e)| {
-            e.passes_filters(
+    let (total, page_events) = collect_paged_event_matches(
+        || events(),
+        page.saturating_mul(page_size),
+        page_size,
+        |event| {
+            event.passes_filters(
                 types_set.as_ref(),
                 args.principal.as_ref(),
                 args.collateral_token.as_ref(),
@@ -5597,18 +5677,8 @@ fn get_events_filtered(args: GetEventsArg) -> GetEventsFilteredResponse {
                 &vault_lookup,
                 icp_price_e8s,
             )
-        })
-        .map(|(i, e)| (i as u64, e))
-        .collect();
-
-    let total = filtered.len() as u64;
-    let start_idx = page * page_size;
-    let page_events: Vec<(u64, Event)> = filtered
-        .into_iter()
-        .rev()
-        .skip(start_idx)
-        .take(page_size)
-        .collect();
+        },
+    );
 
     let resp = GetEventsFilteredResponse {
         total,
@@ -5634,6 +5704,26 @@ fn get_events_filtered(args: GetEventsArg) -> GetEventsFilteredResponse {
 /// the points-canister ingestion use case. Added for `rumi_points` (airdrop).
 const FORWARD_FILTERED_MAX_SCAN: u64 = 2000;
 
+/// Bound a forward event cursor to the addressable range of the deployed
+/// wasm target. Returning `None` means the requested window would end beyond
+/// `usize::MAX`; callers must leave the cursor unchanged rather than advance
+/// to a position they cannot seek to on wasm32.
+fn bounded_forward_event_cursor(
+    start: u64,
+    scan: u64,
+    count: u64,
+) -> Option<(u64, bool)> {
+    let start_usize = usize::try_from(start).ok()?;
+    if start >= count {
+        return Some((count, true));
+    }
+    if scan > (usize::MAX - start_usize) as u64 {
+        return None;
+    }
+    let next_start = start.saturating_add(scan).min(count);
+    Some((next_start, next_start >= count))
+}
+
 /// Pure forward-scan + type-filter + cursor logic, generic over the event source
 /// so it is unit-testable with a `Vec<Event>`. `count` is the total event count
 /// (the resume cursor is clamped to it). Production passes `events()` +
@@ -5647,17 +5737,38 @@ fn scan_events_forward_filtered<I: Iterator<Item = Event>>(
     types_set: Option<&std::collections::HashSet<EventTypeFilter>>,
 ) -> ForwardFilteredEventsResponse {
     let scan = max_scan.min(FORWARD_FILTERED_MAX_SCAN);
+    let Some((next_start, reached_end)) = bounded_forward_event_cursor(start, scan, count)
+    else {
+        return ForwardFilteredEventsResponse {
+            events: Vec::new(),
+            next_start: start,
+            reached_end: false,
+        };
+    };
+    if start >= count {
+        return ForwardFilteredEventsResponse {
+            events: Vec::new(),
+            next_start,
+            reached_end,
+        };
+    }
+    let Some(start_usize) = usize::try_from(start).ok() else {
+        return ForwardFilteredEventsResponse {
+            events: Vec::new(),
+            next_start: start,
+            reached_end: false,
+        };
+    };
     let empty_lookup = std::collections::HashMap::new();
     let matched: Vec<(u64, Event)> = source
         .enumerate()
-        .skip(start as usize)
+        .skip(start_usize)
         .take(scan as usize)
         .filter(|(_, e)| {
             e.passes_filters(types_set, None, None, None, None, None, &empty_lookup, 0)
         })
         .map(|(i, e)| (i as u64, e))
         .collect();
-    let next_start = start.saturating_add(scan).min(count);
     ForwardFilteredEventsResponse {
         events: matched,
         next_start,
@@ -5708,7 +5819,7 @@ thread_local! {
     > = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
-fn filtered_events_cache_key(args: &GetEventsArg, page: usize, page_size: usize) -> u64 {
+fn filtered_events_cache_key(args: &GetEventsArg, page: u64, page_size: u64) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut hasher = DefaultHasher::new();
@@ -5805,20 +5916,27 @@ fn get_events_by_principal_paged(
 
     let total_events = rumi_protocol_backend::storage::count_events();
     let scan_length = scan_length.min(MAX_EVENTS_BY_PRINCIPAL_SCAN);
-    let scan_end = scan_start.saturating_add(scan_length).min(total_events);
+    let bounded_cursor = bounded_forward_event_cursor(scan_start, scan_length, total_events);
+    let scan_end = bounded_cursor
+        .map(|(next, _)| next)
+        .unwrap_or(scan_start);
 
     let mut events_page: Vec<(u64, Event)> = Vec::new();
     if scan_start < total_events && scan_length > 0 {
-        for (offset, event) in events()
-            .skip(scan_start as usize)
-            .take(scan_length as usize)
-            .enumerate()
-        {
-            if !event.is_accrue_interest() && event.involves_principal(&principal) {
-                let idx = scan_start.saturating_add(offset as u64);
-                events_page.push((idx, event));
-                if events_page.len() == MAX_EVENTS_BY_PRINCIPAL_OUTPUT {
-                    break;
+        if bounded_cursor.is_some() {
+            if let Ok(scan_start_usize) = usize::try_from(scan_start) {
+                for (offset, event) in events()
+                    .skip(scan_start_usize)
+                    .take(scan_length as usize)
+                    .enumerate()
+                {
+                    if !event.is_accrue_interest() && event.involves_principal(&principal) {
+                        let idx = scan_start.saturating_add(offset as u64);
+                        events_page.push((idx, event));
+                        if events_page.len() == MAX_EVENTS_BY_PRINCIPAL_OUTPUT {
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -5839,10 +5957,14 @@ fn get_protocol_snapshots(args: GetSnapshotsArg) -> Vec<ProtocolSnapshot> {
         ic_cdk::trap("update call rejected");
     }
     const MAX_SNAPSHOTS_PER_QUERY: usize = 2000;
+    let Ok(start) = usize::try_from(args.start) else {
+        return Vec::new();
+    };
+    let length = args.length.min(MAX_SNAPSHOTS_PER_QUERY as u64) as usize;
 
     rumi_protocol_backend::storage::snapshots()
-        .skip(args.start as usize)
-        .take(MAX_SNAPSHOTS_PER_QUERY.min(args.length as usize))
+        .skip(start)
+        .take(length)
         .collect()
 }
 
@@ -10258,7 +10380,7 @@ async fn set_xrc_fetch_interval_secs(secs: u64) -> Result<(), ProtocolError> {
 }
 
 /// Wave-14b CDP-12 follow-up: tune the Timer B (interest accrual +
-/// treasury drains) interval in seconds. Default 60. Re-registers in
+/// treasury drains) interval in seconds. Default 300. Re-registers in
 /// place.
 ///
 /// Trade-offs: cheap in cycles (pure in-memory work + 3 short ICRC calls).
@@ -10291,7 +10413,7 @@ async fn set_interest_treasury_tick_interval_secs(secs: u64) -> Result<(), Proto
 }
 
 /// Wave-14b CDP-12 follow-up: tune the Timer C (vault health sweep +
-/// aggregate snapshot refresh) interval in seconds. Default 300.
+/// aggregate snapshot refresh) interval in seconds. Default 600.
 /// Re-registers in place.
 ///
 /// Trade-offs: this is the liquidation-latency knob. Lowering means
@@ -10415,7 +10537,7 @@ fn get_collateral_price_fetch_intervals() -> Vec<(Principal, u64)> {
 }
 
 /// Phase 1b Task 15: tune the Timer D (Monad outbound settlement fan-out)
-/// interval in seconds. Default 30. Re-registers in place.
+/// interval in seconds. Default 300. Re-registers in place.
 ///
 /// Rejects `secs == 0` (belt-and-suspenders with the hard floor in
 /// `register_settlement_timer`, which would coerce a 0 to 30 anyway). Lowering
@@ -10716,7 +10838,7 @@ async fn get_chain_reserve_address(
 }
 
 /// Phase 1b Task 15: tune the Monad inbound observer fan-out interval in
-/// seconds. Default 30. Re-registers in place.
+/// seconds. Default 300. Re-registers in place.
 ///
 /// Rejects `secs == 0` (belt-and-suspenders with the hard floor in
 /// `register_observer_timer`). Lowering tightens deposit-detection and
@@ -13535,6 +13657,71 @@ fn forward_filtered_scan_windows_filters_and_advances_cursor() {
     assert!(r.events.is_empty());
     assert_eq!(r.next_start, 3);
     assert!(r.reached_end);
+
+    // A wasm32 cursor that cannot be represented as usize must not be advanced
+    // to the apparent end of a log that could still be larger than usize::MAX.
+    #[cfg(target_pointer_width = "32")]
+    {
+        assert_eq!(bounded_forward_event_cursor(u64::MAX, 0, 0), None);
+        assert_eq!(
+            bounded_forward_event_cursor(u32::MAX as u64, 1, u64::MAX),
+            None
+        );
+        let r = scan_events_forward_filtered(
+            vec![close(0)].into_iter(),
+            u32::MAX as u64,
+            1,
+            u64::MAX,
+            Some(&close_filter),
+        );
+        assert!(r.events.is_empty());
+        assert_eq!(r.next_start, u32::MAX as u64);
+        assert!(!r.reached_end);
+    }
+}
+
+#[test]
+fn paged_event_matches_preserves_newest_first_pages_with_bounded_storage() {
+    let source = || vec![10_u8, 11, 12, 13, 14].into_iter();
+    let matches_all = |_: &u8| true;
+
+    let (total, page) = collect_paged_event_matches(source, 0, 2, matches_all);
+    assert_eq!(total, 5);
+    assert_eq!(page, vec![(4, 14), (3, 13)]);
+
+    let (total, page) = collect_paged_event_matches(source, 2, 2, matches_all);
+    assert_eq!(total, 5);
+    assert_eq!(page, vec![(2, 12), (1, 11)]);
+
+    let (total, page) = collect_paged_event_matches(source, 4, 2, matches_all);
+    assert_eq!(total, 5);
+    assert_eq!(page, vec![(0, 10)]);
+
+    let (total, page) = collect_paged_event_matches(source, 6, 2, matches_all);
+    assert_eq!(total, 5);
+    assert!(page.is_empty());
+
+    let only_even = |value: &u8| *value % 2 == 0;
+    let (total, page) = collect_paged_event_matches(source, 0, 2, only_even);
+    assert_eq!(total, 3);
+    assert_eq!(page, vec![(4, 14), (2, 12)]);
+
+    let (total, page) = collect_paged_event_matches(source, 1, 2, only_even);
+    assert_eq!(total, 3);
+    assert_eq!(page, vec![(2, 12), (0, 10)]);
+
+    let (total, page) = collect_paged_event_matches(source, 0, 0, matches_all);
+    assert_eq!(total, 5);
+    assert!(page.is_empty());
+
+    let (total, page) = collect_paged_event_matches(source, u64::MAX, 2, matches_all);
+    assert_eq!(total, 5);
+    assert!(page.is_empty());
+
+    let large_source = || (0_u32..6_001).into_iter();
+    let (total, page) = collect_paged_event_matches(large_source, 5_000, 2, |_: &u32| true);
+    assert_eq!(total, 6_001);
+    assert_eq!(page, vec![(1_000, 1_000), (999, 999)]);
 }
 
 // Proves `evm_vault_params` resolves the native price symbol + min CR per chain

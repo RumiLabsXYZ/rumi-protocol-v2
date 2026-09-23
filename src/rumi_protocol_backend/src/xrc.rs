@@ -200,11 +200,12 @@ pub fn register_collateral_price_timer(ledger_id: Principal) {
 }
 
 /// How often to passively fetch ICP price from XRC (background polling).
-/// Each XRC call costs ~1B cycles. At 60s = ~$58/month, at 300s = ~$12/month.
+/// Each XRC call costs ~1B cycles. The 480s cadence is background-only;
+/// price-sensitive operations still fetch on demand when their cache is stale.
 /// Price-sensitive operations will fetch on-demand if the cached price is older
 /// than `PRICE_FRESHNESS_THRESHOLD_NANOS` (60s as of Wave-5 F-004), so this
 /// timer is just a lazy background refresh for display/query purposes.
-pub const FETCHING_ICP_RATE_INTERVAL: Duration = Duration::from_secs(300);
+pub const FETCHING_ICP_RATE_INTERVAL: Duration = Duration::from_secs(480);
 
 /// Maximum age (in nanoseconds) of a cached price before a price-sensitive
 /// operation triggers an on-demand XRC fetch.
@@ -397,7 +398,7 @@ pub async fn interest_and_treasury_tick() {
     crate::treasury::flush_pending_amm1_donations().await;
 
     // Phase 1b foreign-chain-only supply-invariant self-check. Runs on every
-    // Timer B tick (default cadence 60s) per spec Section 3. On drift, halt
+    // Timer B tick (default cadence 300s) per spec Section 3. On drift, halt
     // new debt issuance + supply mutations and flip the protocol into
     // ReadOnly. Manual recovery requires `clear_invariant_halt` (Phase 1b
     // operational tooling) plus a developer-gated mode flip.
@@ -464,11 +465,11 @@ pub async fn vault_check_tick() {
 
 /// Wave-14b CDP-12: cadence for the interest / treasury maintenance timer
 /// (Timer B). Cheaper than Timer A's XRC fetch, so 60s is comfortable.
-pub const INTEREST_AND_TREASURY_TICK_INTERVAL: Duration = Duration::from_secs(60);
+pub const INTEREST_AND_TREASURY_TICK_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Wave-14b CDP-12: cadence for the vault-check timer (Timer C). Matches
-/// the legacy 300s `check_vaults` cadence.
-pub const VAULT_CHECK_TICK_INTERVAL: Duration = Duration::from_secs(300);
+/// a bounded 600s cadence that preserves the fail-closed price gate.
+pub const VAULT_CHECK_TICK_INTERVAL: Duration = Duration::from_secs(600);
 
 /// Ensures the price for the given collateral type is fresh enough for
 /// a price-sensitive operation. ICP uses its own dedicated path; other
