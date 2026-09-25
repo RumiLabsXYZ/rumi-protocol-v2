@@ -39,6 +39,9 @@
   let midMarketRate: number | null = null;
   let slippageBps = 50;
   let showSlippage = false;
+  // User-picked venue (RouteOption id); null = router default (best quote).
+  let venueOverride: string | null = null;
+  let showVenuePicker = false;
   let showFromDropdown = false;
   let showToDropdown = false;
 
@@ -197,7 +200,7 @@
       // Oisy's "Signer window should not be opened outside of click handler"
       // guard.
       const [route, , , snapshot] = await Promise.all([
-        resolveRoute(fromToken, toToken, amountRaw),
+        resolveRoute(fromToken, toToken, amountRaw, { venue: venueOverride ?? undefined }),
         preWarmOisySigner(),
         preWarmOisyFees(),
         walletState.principal
@@ -224,7 +227,7 @@
       // Use the GROSS output: the flat ledger fee dominates a 0.01-token quote
       // and would wreck the rate if the net estimate were used (FE-003).
       const tinyAmount = BigInt(Math.pow(10, Math.max(fromToken.decimals - 2, 0)));
-      const tinyRoute = await resolveRoute(fromToken, toToken, tinyAmount);
+      const tinyRoute = await resolveRoute(fromToken, toToken, tinyAmount, { venue: venueOverride ?? undefined });
       const tinyOut = Number(tinyRoute.grossOutput) / Math.pow(10, toToken.decimals);
       return tinyOut * 100; // scale up to per-1-token rate
     } catch {
@@ -237,6 +240,8 @@
     fromIdx = toIdx;
     toIdx = tmp;
     amount = '';
+    venueOverride = null;
+    showVenuePicker = false;
     currentRoute = null;
     beforeToBalanceSnapshot = null;
     error = '';
@@ -247,6 +252,8 @@
     fromIdx = index;
     showFromDropdown = false;
     amount = '';
+    venueOverride = null;
+    showVenuePicker = false;
     currentRoute = null;
     beforeToBalanceSnapshot = null;
     error = '';
@@ -256,6 +263,8 @@
     if (index === fromIdx) fromIdx = toIdx;
     toIdx = index;
     showToDropdown = false;
+    venueOverride = null;
+    showVenuePicker = false;
     currentRoute = null;
     beforeToBalanceSnapshot = null;
     error = '';
@@ -266,6 +275,14 @@
     const adjusted = walletBalance > totalFees ? walletBalance - totalFees : 0n;
     const divisor = Math.pow(10, fromToken.decimals);
     amount = (Number(adjusted) / divisor).toFixed(fromToken.decimals);
+  }
+
+  function pickVenue(id: string) {
+    showVenuePicker = false;
+    if (id === currentRoute?.selectedVenue) return;
+    venueOverride = id;
+    currentRoute = null;
+    void fetchQuote();
   }
 
   function setSlippage(bps: number) {
@@ -543,9 +560,32 @@
             <span class="info-label">Route</span>
             <span class="route-cell">
               <span class="info-value route-path">{currentRoute.pathDisplay}</span>
-              <span class="provider-pill">{routeVenue}</span>
+              {#if currentRoute.alternatives && currentRoute.alternatives.length > 1}
+                <button class="provider-pill provider-pill-btn" disabled={loading}
+                  on:click|stopPropagation={() => { showVenuePicker = !showVenuePicker; }}
+                  title="Choose a different venue">
+                  {routeVenue}
+                  <svg class="token-chevron" width="8" height="5" viewBox="0 0 10 6" fill="none">
+                    <path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                </button>
+              {:else}
+                <span class="provider-pill">{routeVenue}</span>
+              {/if}
             </span>
           </div>
+          {#if showVenuePicker && currentRoute.alternatives}
+            <div class="venue-picker">
+              {#each currentRoute.alternatives as opt}
+                {@const best = currentRoute.alternatives.every(o => opt.estimatedOutput >= o.estimatedOutput)}
+                <button class="venue-option" class:active={opt.id === currentRoute.selectedVenue}
+                  on:click|stopPropagation={() => pickVenue(opt.id)}>
+                  <span>{opt.label}{#if best} <span class="venue-best">best</span>{/if}</span>
+                  <span class="venue-out">{formatTokenAmount(opt.estimatedOutput, toToken.decimals)} {toToken.symbol}</span>
+                </button>
+              {/each}
+            </div>
+          {/if}
         {/if}
         <div class="info-row">
           <span class="info-label">Slippage tolerance</span>
@@ -916,6 +956,37 @@
     color: var(--rumi-text-secondary);
     white-space: nowrap;
   }
+
+  .provider-pill-btn {
+    cursor: pointer;
+    gap: 0.3rem;
+    color: var(--rumi-teal);
+    border-color: var(--rumi-teal);
+  }
+  .provider-pill-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .venue-picker {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    margin: 0.25rem 0 0.5rem;
+  }
+  .venue-option {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.6rem;
+    background: var(--rumi-bg-surface3);
+    border: 1px solid var(--rumi-border);
+    border-radius: 0.375rem;
+    font-size: 0.75rem;
+    color: var(--rumi-text-secondary);
+    cursor: pointer;
+  }
+  .venue-option.active { border-color: var(--rumi-teal); color: var(--rumi-text-primary); }
+  .venue-best { color: var(--rumi-safe); font-size: 0.6875rem; margin-left: 0.25rem; }
+  .venue-out { font-family: 'SF Mono', 'Fira Code', monospace; }
 
   /* ── Slippage ── */
   .slippage-toggle {
