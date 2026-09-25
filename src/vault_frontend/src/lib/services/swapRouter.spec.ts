@@ -339,6 +339,30 @@ describe('swapRouter — provider registry integration', () => {
       expect(route.providerQuote).toBeUndefined();
     });
 
+    it('lets the user force the 3pool when ICPswap is the default winner', async () => {
+      threePoolMock.quoteSwap.mockResolvedValue({ amount_out: 900n, fee_bps: 30, is_rebalancing: false });
+      stableCkusdtCkusdcMock.supports.mockReturnValue(true);
+      stableCkusdtCkusdcMock.quote.mockResolvedValue(stableIcpswapQuote('icpswap_ckusdt_ckusdc', 950n));
+
+      const route = await resolveRoute(ckUsdt, ckUsdc, 1_000n, { venue: 'three_pool' });
+
+      expect(route.type).toBe('three_pool_swap');
+      expect(route.selectedVenue).toBe('three_pool');
+      expect(route.estimatedOutput).toBe(890n);
+      expect(route.alternatives?.map(a => a.id)).toEqual(['three_pool', 'icpswap_ckusdt_ckusdc']);
+    });
+
+    it('lets the user force ICPswap when the 3pool is the default winner', async () => {
+      threePoolMock.quoteSwap.mockResolvedValue({ amount_out: 950n, fee_bps: 30, is_rebalancing: false });
+      stableCkusdtCkusdcMock.supports.mockReturnValue(true);
+      stableCkusdtCkusdcMock.quote.mockResolvedValue(stableIcpswapQuote('icpswap_ckusdt_ckusdc', 900n));
+
+      const route = await resolveRoute(ckUsdt, ckUsdc, 1_000n, { venue: 'icpswap_ckusdt_ckusdc' });
+
+      expect(route.type).toBe('icpswap_stable_direct');
+      expect(route.selectedVenue).toBe('icpswap_ckusdt_ckusdc');
+    });
+
     it('routes to three_pool_swap on an exact tie (3pool wins ties)', async () => {
       threePoolMock.quoteSwap.mockResolvedValue({ amount_out: 900n, fee_bps: 30, is_rebalancing: false });
       stableCkusdtCkusdcMock.supports.mockReturnValue(true);

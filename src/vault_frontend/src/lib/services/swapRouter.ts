@@ -12,6 +12,7 @@ import { IcpswapProvider } from './providers/icpswapProvider';
 import { ProviderRegistry } from './providers/providerRegistry';
 import { fetchLedgerFee, getCachedLedgerFee } from './ledgerFeeService';
 import type { ProviderQuote } from './providers/types';
+import { providerLabel } from '../components/swap/routePresentation';
 import { isOisyLandedSentinel, type OisyLandedSentinel } from './protocol/oisyResilience';
 
 // ──────────────────────────────────────────────────────────────
@@ -163,8 +164,31 @@ export type RouteType =
   | 'icp_to_stable_via_icusd' // ICP -> icUSD (ICPswap) -> Stablecoin (3pool)
   | 'icusd_icp_direct';     // icUSD <-> ICP (direct ICPswap icUSD/ICP pool)
 
+/**
+ * A venue the user can pick for a route. Only offered where two independent
+ * venues can each carry the whole swap (currently stablecoin <-> stablecoin:
+ * Rumi 3pool vs the best direct ICPswap pool).
+ */
+export interface RouteOption {
+  /** 'three_pool' or the ICPswap ProviderId */
+  id: string;
+  /** Venue label shown in the picker */
+  label: string;
+  /** Net estimated output (raw units of the output token) */
+  estimatedOutput: bigint;
+}
+
+export interface RouteOptions {
+  /** Force a venue (a RouteOption id). Ignored if that venue has no quote. */
+  venue?: string;
+}
+
 export interface SwapRoute {
   type: RouteType;
+  /** Venues the user may switch between, when more than one can quote. */
+  alternatives?: RouteOption[];
+  /** id of the RouteOption this route uses (present with `alternatives`). */
+  selectedVenue?: string;
   /** Human-readable path, e.g. "ckUSDC -> 3USD -> ICP" */
   pathDisplay: string;
   /** Number of on-chain hops */
@@ -274,6 +298,7 @@ export async function resolveRoute(
   from: AmmToken,
   to: AmmToken,
   amountIn: bigint,
+  options: RouteOptions = {},
 ): Promise<SwapRoute> {
 
   // Case 1: Stablecoin <-> Stablecoin. The 3pool and ICPswap's direct pools
@@ -318,8 +343,31 @@ export async function resolveRoute(
     // whichever side wins. The 3pool wins ties: it is first-party and one
     // less external dependency, so ICPswap must strictly beat it to be
     // selected. If only one venue produced a quote, that venue carries the
-    // route alone.
-    if (icpswapQuote && (!threePoolQuote || icpswapQuote.amountOut > threePoolQuote.amount_out)) {
+    // route alone. A user-picked venue (options.venue) overrides the default
+    // whenever that venue actually has a quote.
+    const defaultIcpswap = !!icpswapQuote && (!threePoolQuote || icpswapQuote.amountOut > threePoolQuote.amount_out);
+    const useIcpswap =
+      options.venue === 'three_pool' && threePoolQuote ? false
+      : options.venue && icpswapQuote && options.venue === icpswapQuote.provider ? true
+      : defaultIcpswap;
+
+    const alternatives: RouteOption[] = [];
+    if (threePoolQuote) {
+      alternatives.push({
+        id: 'three_pool',
+        label: 'Rumi 3pool',
+        estimatedOutput: await netOfOutputLedgerFee(threePoolQuote.amount_out, to),
+      });
+    }
+    if (icpswapQuote) {
+      alternatives.push({
+        id: icpswapQuote.provider,
+        label: providerLabel(icpswapQuote.provider),
+        estimatedOutput: await netOfOutputLedgerFee(icpswapQuote.amountOut, to),
+      });
+    }
+
+    if (useIcpswap && icpswapQuote) {
       return {
         type: 'icpswap_stable_direct',
         pathDisplay: icpswapQuote.label,
@@ -328,6 +376,8 @@ export async function resolveRoute(
         grossOutput: icpswapQuote.amountOut,
         feeDisplay: icpswapQuote.feeDisplay,
         providerQuote: icpswapQuote,
+        alternatives,
+        selectedVenue: icpswapQuote.provider,
       };
     }
 
@@ -338,6 +388,8 @@ export async function resolveRoute(
       estimatedOutput: await netOfOutputLedgerFee(threePoolQuote!.amount_out, to),
       grossOutput: threePoolQuote!.amount_out,
       feeDisplay: threePoolFeeDisplay(threePoolQuote!.fee_bps, threePoolQuote!.is_rebalancing),
+      alternatives,
+      selectedVenue: 'three_pool',
     };
   }
 
