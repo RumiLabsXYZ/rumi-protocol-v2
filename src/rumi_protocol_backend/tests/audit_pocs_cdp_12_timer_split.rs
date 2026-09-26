@@ -54,27 +54,28 @@ fn cdp_12_three_timer_entry_points_exist_with_unit_return() {
 
 #[test]
 fn cdp_12_intervals_have_sensible_defaults() {
-    // Timer A (XRC) keeps the legacy 300s cadence to avoid a 5x cycle
-    // increase that would come from going to the plan-suggested 60s
-    // without an ops review.
+    // Timer A (XRC) is a background-only refresh: price-sensitive operations
+    // fetch on demand when the cache is stale. Slowed 300s -> 480s
+    // (2026-09-23 cycle-burn reduction) to cut XRC calls.
     assert_eq!(
         FETCHING_ICP_RATE_INTERVAL,
-        Duration::from_secs(300),
-        "Timer A interval must remain 300s to preserve XRC cycle budget",
+        Duration::from_secs(480),
+        "Timer A interval must stay at 480s to preserve XRC cycle budget",
     );
 
-    // Timer B (interest + treasury) at 60s per the plan; cheap in cycles.
+    // Timer B (interest + treasury) slowed 60s -> 300s in the same pass.
     assert_eq!(
         INTEREST_AND_TREASURY_TICK_INTERVAL,
-        Duration::from_secs(60),
-        "Timer B interval should be 60s for fast interest accrual",
+        Duration::from_secs(300),
+        "Timer B interval should be 300s",
     );
 
-    // Timer C (check_vaults + aggregate-snapshot refresh) at 300s — same
-    // cadence the chained version had, so liquidation latency is unchanged.
+    // Timer C (check_vaults + aggregate-snapshot refresh) slowed 300s -> 600s
+    // in the same pass. This is the liquidation-detection latency knob, and
+    // prod runs it live at 600s via `set_vault_check_tick_interval_secs`.
     assert_eq!(
         VAULT_CHECK_TICK_INTERVAL,
-        Duration::from_secs(300),
-        "Timer C interval must match the legacy 300s check_vaults cadence",
+        Duration::from_secs(600),
+        "Timer C interval must match the 600s check_vaults cadence",
     );
 }

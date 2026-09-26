@@ -67,7 +67,7 @@ pub const HOT_WALLET_BALANCE_MAX_AGE_NS: u64 = 300_000_000_000;
 /// (`deposit_watch::run_conflux_hot_wallet_proactive_refresh`) uses this
 /// tighter threshold so a healthy RPC keeps the cache fresh well ahead of the
 /// unchanged public TTL.
-pub const CONFLUX_HOT_WALLET_PROACTIVE_REFRESH_MIN_AGE_NS: u64 = 180_000_000_000;
+pub const CONFLUX_HOT_WALLET_PROACTIVE_REFRESH_MIN_AGE_NS: u64 = 240_000_000_000;
 
 /// Bound defensive URL de-duplication even if a hand-restored snapshot bypassed
 /// setter validation.

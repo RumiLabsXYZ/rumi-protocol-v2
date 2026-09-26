@@ -611,7 +611,9 @@ fn open_second_vault(fixture: &Fixture) -> u64 {
 }
 
 /// Drop ICP price to `new_price_e8s` and tick until the protocol's cached
-/// price reflects it.
+/// price reflects it. The wait spans one background XRC tick (480s): a drop
+/// this large is a sanity-band outlier, and that tick supplies the first of
+/// the two samples needed to accept it.
 fn drop_icp_price(fixture: &Fixture, new_price_e8s: u64) {
     xrc_set_rate(
         &fixture.pic,
@@ -621,7 +623,7 @@ fn drop_icp_price(fixture: &Fixture, new_price_e8s: u64) {
         "USD",
         new_price_e8s,
     );
-    fixture.pic.advance_time(Duration::from_secs(310));
+    fixture.pic.advance_time(Duration::from_secs(490));
     for _ in 0..10 {
         fixture.pic.tick();
     }
