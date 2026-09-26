@@ -516,8 +516,11 @@ fn setup_fixture() -> Fixture {
 }
 
 /// Drop ICP price to `new_price_e8s` and tick until the protocol's cached
-/// price reflects it. The protocol fetches prices on a 5-minute timer
-/// and on-demand via `validate_call` before liquidation entry points.
+/// price reflects it. The protocol fetches prices on an 8-minute timer
+/// and on-demand via `validate_call` before liquidation entry points. A
+/// drop this large is a sanity-band outlier that needs a second confirming
+/// sample, so the wait must span one background tick (480s) for the
+/// on-demand fetch at liquidation to be that confirmation.
 fn drop_icp_price(fixture: &Fixture, new_price_e8s: u64) {
     xrc_set_rate(
         &fixture.pic,
@@ -527,7 +530,7 @@ fn drop_icp_price(fixture: &Fixture, new_price_e8s: u64) {
         "USD",
         new_price_e8s,
     );
-    fixture.pic.advance_time(Duration::from_secs(310));
+    fixture.pic.advance_time(Duration::from_secs(490));
     for _ in 0..10 {
         fixture.pic.tick();
     }
