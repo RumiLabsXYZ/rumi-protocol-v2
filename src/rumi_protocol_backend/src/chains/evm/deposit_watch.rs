@@ -167,30 +167,15 @@ impl std::fmt::Display for BurnApplyError {
 /// mint excess is NOT a burn and must NOT trigger the sweep: it is permanent, so
 /// scanning on `!=` would scan the full window every tick forever, silently
 /// reintroducing the per-tick `eth_getLogs` cost the backstop exists to avoid.
-/// A mint-like settlement op could mask a burn in the supply delta, so the
-/// observer must retain its cursor until that op is terminal. Once the mint
-/// confirms, the recorded supply includes it and a same-window burn becomes a
-/// detectable drop on the next totalSupply probe.
+/// A mint in flight could mask a burn in the supply delta, so we stay in the
+/// cheap path during the (short, infrequent) mint window; `submit_burn_proof`
+/// plus the next post-confirm tick reconcile any burn then.
 pub fn backstop_should_scan(
     onchain_total_supply_e8s: u128,
     recorded_supply_e8s: u128,
     has_inflight_mint: bool,
 ) -> bool {
     !has_inflight_mint && onchain_total_supply_e8s < recorded_supply_e8s
-}
-
-/// Return whether an async `totalSupply` probe is stale enough that the burn
-/// cursor must be retained for another tick. State can change while the RPC
-/// call is suspended: a mint-like operation may become active or a burn/mint
-/// confirmation may update the recorded supply. In either case, advancing
-/// from the pre-await snapshot could skip a burn that the probe could not
-/// distinguish.
-pub fn backstop_probe_requires_cursor_retention(
-    recorded_supply_before: u128,
-    recorded_supply_after: u128,
-    has_supply_increasing_op_after: bool,
-) -> bool {
-    has_supply_increasing_op_after || recorded_supply_before != recorded_supply_after
 }
 
 /// The burn-watch cycle gate can skip only when the chain has no remaining
@@ -824,10 +809,9 @@ pub async fn run_observer(chain: ChainId) {
 
     // ── No-supply-obligation fast path (cycle gate) ──────────────────────────
     //
-    // When there is no live vault debt, no SP-path pending-burn backing, AND no
-    // pending mint-like settlement op, the chain has no foreign-supply
-    // obligation the burn watcher can resolve. Skip the expensive get_logs
-    // scan entirely — that is ceil(window /
+    // When there is no live vault debt AND no SP-path pending-burn backing, the
+    // chain has no foreign-supply obligation the burn watcher can resolve. Skip
+    // the expensive get_logs scan entirely — that is ceil(window /
     // MONAD_GETLOGS_MAX_RANGE) EVM-RPC outcalls per advancing tick (~764M cycles
     // each, measured 2026-05-31). A nonzero pending-burn term is different:
     // IC-side icUSD was burned while the foreign representation is still
@@ -839,11 +823,7 @@ pub async fn run_observer(chain: ChainId) {
             s.multi_chain.total_pending_chain_burn_e8s(),
         )
     });
-    let has_supply_increasing_op =
-        read_state(|s| s.multi_chain.has_supply_increasing_settlement_op(chain));
-    if burn_watch_can_skip_for_no_supply_obligation(total_chain_debt, pending_chain_burn)
-        && !has_supply_increasing_op
-    {
+    if burn_watch_can_skip_for_no_supply_obligation(total_chain_debt, pending_chain_burn) {
         mutate_state(|s| advance_cursor_and_prune(&mut s.multi_chain, chain, finalized));
         return;
     }
@@ -860,14 +840,13 @@ pub async fn run_observer(chain: ChainId) {
     // #215 supply gate, the "Task 8" backstop #214 deferred): probe the icUSD
     // `totalSupply()` at `finalized` (a specific, consensus-safe block) and
     // compare it to our recorded `chain_supplies[chain]`. The canister is the
-    // SOLE minter, so with no mint-like settlement op pending a drop below
-    // `recorded` means a burn landed that `submit_burn_proof` never caught;
-    // ONLY then do we run the (expensive) catch-up sweep to find it. A
-    // mint-like op can mask a same-window burn in totalSupply, so retain the
-    // cursor while one is queued or inflight; after it becomes terminal, the
-    // recorded supply makes that burn observable as a drop. Probe errors also
-    // retain the cursor for retry. A match or unexplained excess remains on
-    // the cheap advance path because `submit_burn_proof` is the primary catch.
+    // SOLE minter, so with no mint in flight a drop below `recorded` means a
+    // burn landed that `submit_burn_proof` never caught; ONLY then do we run the
+    // (expensive) catch-up sweep to find it. A match, a mint in flight, or a
+    // probe error all stay in the cheap path (advance cursor + return) because
+    // `submit_burn_proof` remains the primary catch, so a flaky probe can never
+    // reintroduce the per-tick sweep cost. The cursor still advances + prunes so
+    // mint-confirm finality stays current (a stalled cursor was the Gate-4 bug).
     let poll_enabled = read_state(|s| {
         s.multi_chain
             .chain_configs
@@ -883,85 +862,56 @@ pub async fn run_observer(chain: ChainId) {
                 .copied()
                 .unwrap_or(0)
         });
-        // Do not advance while a mint-like settlement op is queued or inflight:
-        // its on-chain supply increase can mask a burn in the same window. Once
-        // the op is terminal, the next probe compares against the updated
-        // recorded supply and can safely detect that burn.
-        if has_supply_increasing_op {
-            log!(
-                INFO,
-                "[observer chain={:?}] backstop: supply-increasing settlement op pending; retaining cursor until it is terminal",
-                chain
-            );
-            return;
-        }
-        // Run the catch-up sweep ONLY on a proven divergence: a readable
-        // totalSupply that has DROPPED below `recorded` (an unsubmitted burn).
-        // A failed probe must RETRY without advancing the cursor, otherwise an
-        // unseen burn could be skipped.
-        let mut probe_failed = false;
-        let should_scan = match erc20_total_supply_at(chain, &contract, finalized).await {
-            Ok(onchain_supply) => {
-                // FLAG-2 positive-divergence alarm: with no pending mint-like
-                // op, an on-chain supply ABOVE recorded is unexplained — the
-                // unbacked-mint signature (a mint that landed on-chain but was
-                // never credited, or an out-of-band mint). The pre-existing
-                // backstop only reacts to a DROP (a burn); this catches the
-                // EXCESS direction. Alarm loudly but do NOT auto-halt: this
-                // single-provider read can be transiently wrong (FLAG-1), so
-                // the operator reconciles and halts via existing controls.
-                if onchain_supply > recorded_supply {
+        let has_inflight_mint =
+            read_state(|s| s.multi_chain.has_supply_increasing_settlement_op(chain));
+        // Run the catch-up sweep ONLY on a proven divergence: no mint in flight
+        // AND a readable totalSupply that has DROPPED below `recorded` (an
+        // unsubmitted burn). Mint-in-flight, probe errors, and a mint EXCESS
+        // (onchain > recorded) all fall through to the cheap advance-and-return
+        // path below.
+        let should_scan = if has_inflight_mint {
+            false
+        } else {
+            match erc20_total_supply_at(chain, &contract, finalized).await {
+                Ok(onchain_supply) => {
+                    // FLAG-2 positive-divergence alarm: `has_inflight_mint` is
+                    // false in this arm, so an on-chain supply ABOVE recorded is
+                    // unexplained — the unbacked-mint signature (a mint that
+                    // landed but was never credited, or an out-of-band mint). The
+                    // pre-existing backstop only reacts to a DROP (a burn); this
+                    // catches the EXCESS direction. Alarm loudly but do NOT
+                    // auto-halt: this single-provider read can be transiently
+                    // wrong (FLAG-1), so the operator reconciles (reconcile_chain_supply)
+                    // and halts via existing controls rather than a flaky read
+                    // freezing the chain.
+                    if onchain_supply > recorded_supply {
+                        log!(
+                            INFO,
+                            "[observer chain={:?}] SUPPLY DIVERGENCE ALARM: onchain totalSupply {} EXCEEDS recorded {} by {} with no mint in flight (possible unbacked mint); run reconcile_chain_supply",
+                            chain, onchain_supply, recorded_supply, onchain_supply.saturating_sub(recorded_supply)
+                        );
+                    }
+                    let scan =
+                        backstop_should_scan(onchain_supply, recorded_supply, has_inflight_mint);
+                    if scan {
+                        log!(
+                            INFO,
+                            "[observer chain={:?}] backstop: onchain totalSupply {} < recorded {}; unsubmitted burn, running catch-up sweep",
+                            chain, onchain_supply, recorded_supply
+                        );
+                    }
+                    scan
+                }
+                Err(e) => {
                     log!(
                         INFO,
-                        "[observer chain={:?}] SUPPLY DIVERGENCE ALARM: onchain totalSupply {} EXCEEDS recorded {} by {} with no pending mint-like op (possible unbacked mint); run reconcile_chain_supply",
-                        chain, onchain_supply, recorded_supply, onchain_supply.saturating_sub(recorded_supply)
+                        "[observer chain={:?}] backstop: totalSupply probe failed ({}); staying in notify-then-verify cheap path",
+                        chain, e
                     );
+                    false
                 }
-                let scan = backstop_should_scan(onchain_supply, recorded_supply, false);
-                if scan {
-                    log!(
-                        INFO,
-                        "[observer chain={:?}] backstop: onchain totalSupply {} < recorded {}; unsubmitted burn, running catch-up sweep",
-                        chain, onchain_supply, recorded_supply
-                    );
-                }
-                scan
-            }
-            Err(e) => {
-                log!(
-                    INFO,
-                    "[observer chain={:?}] backstop: totalSupply probe failed ({}); retaining cursor for retry",
-                    chain, e
-                );
-                probe_failed = true;
-                false
             }
         };
-        if probe_failed {
-            return;
-        }
-        let (recorded_supply_after, has_supply_increasing_op_after) = read_state(|s| {
-            (
-                s.multi_chain
-                    .chain_supplies
-                    .get(&chain)
-                    .copied()
-                    .unwrap_or(0),
-                s.multi_chain.has_supply_increasing_settlement_op(chain),
-            )
-        });
-        if backstop_probe_requires_cursor_retention(
-            recorded_supply,
-            recorded_supply_after,
-            has_supply_increasing_op_after,
-        ) {
-            log!(
-                INFO,
-                "[observer chain={:?}] backstop: supply state changed during totalSupply probe; retaining cursor for a fresh retry",
-                chain
-            );
-            return;
-        }
         if !should_scan {
             mutate_state(|s| advance_cursor_and_prune(&mut s.multi_chain, chain, finalized));
             return;

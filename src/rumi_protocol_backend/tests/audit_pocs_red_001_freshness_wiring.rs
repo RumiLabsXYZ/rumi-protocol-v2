@@ -177,9 +177,10 @@ fn f_004_freshness_threshold_matches_xrc_margin() {
 
 #[test]
 fn f_004_background_fetch_interval_unchanged() {
-    // The background timer interval is 300s; bumping the threshold to 60s
-    // doesn't relax the lazy refresh cadence — it just lets bursts of
-    // user-driven operations within ~60s of the last fetch reuse the cache.
-    let three_hundred_seconds = std::time::Duration::from_secs(300);
-    assert_eq!(FETCHING_ICP_RATE_INTERVAL, three_hundred_seconds);
+    // The background timer interval is 480s (slowed from 300s on 2026-09-23);
+    // bumping the threshold to 60s doesn't relax the lazy refresh cadence, it
+    // just lets bursts of user-driven operations within ~60s of the last
+    // fetch reuse the cache.
+    let background_interval = std::time::Duration::from_secs(480);
+    assert_eq!(FETCHING_ICP_RATE_INTERVAL, background_interval);
 }

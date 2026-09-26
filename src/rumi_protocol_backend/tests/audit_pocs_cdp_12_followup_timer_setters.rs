@@ -27,22 +27,23 @@ fn fresh_state() -> State {
 #[test]
 fn cdp_12_default_intervals_match_consts() {
     let s = fresh_state();
-    assert_eq!(s.xrc_fetch_interval_secs, 300, "Timer A default mirrors xrc::FETCHING_ICP_RATE_INTERVAL");
-    assert_eq!(s.interest_treasury_tick_interval_secs, 60, "Timer B default mirrors xrc::INTEREST_AND_TREASURY_TICK_INTERVAL");
-    assert_eq!(s.vault_check_tick_interval_secs, 300, "Timer C default mirrors xrc::VAULT_CHECK_TICK_INTERVAL");
+    assert_eq!(s.xrc_fetch_interval_secs, 480, "Timer A default mirrors xrc::FETCHING_ICP_RATE_INTERVAL");
+    assert_eq!(s.interest_treasury_tick_interval_secs, 300, "Timer B default mirrors xrc::INTEREST_AND_TREASURY_TICK_INTERVAL");
+    assert_eq!(s.vault_check_tick_interval_secs, 600, "Timer C default mirrors xrc::VAULT_CHECK_TICK_INTERVAL");
 }
 
 #[test]
 fn cdp_12_intervals_are_independently_settable() {
     let mut s = fresh_state();
 
+    // Values chosen to differ from every default, so each assert proves a write.
     s.xrc_fetch_interval_secs = 120;
     s.interest_treasury_tick_interval_secs = 30;
-    s.vault_check_tick_interval_secs = 600;
+    s.vault_check_tick_interval_secs = 900;
 
     assert_eq!(s.xrc_fetch_interval_secs, 120);
     assert_eq!(s.interest_treasury_tick_interval_secs, 30);
-    assert_eq!(s.vault_check_tick_interval_secs, 600);
+    assert_eq!(s.vault_check_tick_interval_secs, 900);
 }
 
 #[test]
@@ -64,7 +65,7 @@ fn cdp_12_legacy_snapshot_decodes_to_defaults() {
     let stripped = serde_json::to_string(&value).expect("stripped JSON");
     let decoded: State = serde_json::from_str(&stripped).expect("legacy decode");
 
-    assert_eq!(decoded.xrc_fetch_interval_secs, 300);
-    assert_eq!(decoded.interest_treasury_tick_interval_secs, 60);
-    assert_eq!(decoded.vault_check_tick_interval_secs, 300);
+    assert_eq!(decoded.xrc_fetch_interval_secs, 480);
+    assert_eq!(decoded.interest_treasury_tick_interval_secs, 300);
+    assert_eq!(decoded.vault_check_tick_interval_secs, 600);
 }
