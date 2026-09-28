@@ -186,7 +186,9 @@ type IcpCmcSnapshot = record {
   ledger_principal : principal;
   source_principal : principal;
   expected_cycles : nat;
+  delivery : IcpCmcDelivery;
 };
+type IcpCmcDelivery = variant { DirectTopUp; SharedReserveMint };
 type Icrc21Error = variant {
   UnsupportedCanisterCall : ErrorInfo;
   ConsentMessageUnavailable : ErrorInfo;
@@ -265,7 +267,15 @@ type PublicOverview = record {
   cycles_ledger_available_cycles : opt nat;
   target_count : nat64;
   healthy_count : nat64;
+  funding_account_owner : principal;
+  cycles_ledger_balance_cycles : opt nat;
+  cycles_ledger_balance_as_of_secs : opt nat64;
+  icp_ledger_balance_e8s : opt nat;
+  icp_ledger_balance_as_of_secs : opt nat64;
+  min_icp_reserve_e8s : opt nat;
+  shared_reserve_conversion_status : PublicFundingStatus;
 };
+type PublicFundingStatus = variant { Ready; Pending; Blocked; Unknown };
 type PublicPage = record { next_cursor : opt text; items : vec ProposalRecord };
 type PublicPage_1 = record { next_cursor : opt text; items : vec PublicAlarm };
 type PublicPage_2 = record { next_cursor : opt text; items : vec Sample };
@@ -308,6 +318,13 @@ type PublicTargetRow = record {
   burn_cycles_per_day : opt nat;
   observation_mode : ObservationMode;
   project : text;
+  enabled : bool;
+  auto_topup : bool;
+  paused : bool;
+  daily_cap_cycles : nat;
+  cooldown_secs : nat64;
+  tags : vec text;
+  burn_anomaly_limit_cycles_per_day : opt nat;
 };
 type PublicTargetState = variant {
   Low;

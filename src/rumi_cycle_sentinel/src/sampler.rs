@@ -354,7 +354,7 @@ pub(crate) async fn tick_at(now_secs: u64, now_ns: u64, sentinel_id: Principal) 
         if !target.enabled() || resumed_targets.contains(&target.principal()) {
             continue;
         }
-        if let Ok((resolved, outcome)) = funding::cycles::run_ordinary_with_outcome(
+        match funding::cycles::run_ordinary_with_outcome(
             target.principal(),
             types::FundingTrigger::LowBalanceAutoTopup,
             now_secs,
@@ -362,17 +362,56 @@ pub(crate) async fn tick_at(now_secs: u64, now_ns: u64, sentinel_id: Principal) 
         )
         .await
         {
-            maybe_fallback_after_no_spend(
-                resolved.target(),
-                resolved.trigger(),
-                outcome,
-                now_secs,
-                now_ns,
-                sentinel_id,
-            )
-            .await;
+            Ok((resolved, outcome)) => {
+                maybe_fallback_after_no_spend(
+                    resolved.target(),
+                    resolved.trigger(),
+                    outcome,
+                    now_secs,
+                    now_ns,
+                    sentinel_id,
+                )
+                .await
+            }
+            // `prepare_ordinary` only returns this after consuming a fresh
+            // source-cache snapshot and proving balance < pending + floor +
+            // exact withdrawal. No stale/unknown/ledger-error condition is
+            // admitted to the ICP conversion lane.
+            Err(funding::cycles::FundingError::SourceReserve(
+                types::SourceReserveError::InsufficientReserve,
+            )) => {
+                maybe_convert_shared_reserve_after_proven_insufficiency(
+                    target.principal(),
+                    sentinel_id,
+                )
+                .await;
+            }
+            Err(_) => {}
         }
     }
+}
+
+async fn maybe_convert_shared_reserve_after_proven_insufficiency(
+    target: Principal,
+    sentinel_id: Principal,
+) {
+    let rate = match icp_cmc::query_rate(icp_cmc::cmc_principal()).await {
+        Ok(rate) => rate,
+        Err(_) => return,
+    };
+    // The rate query is an await. Refresh the admission timestamp so cache
+    // and rate freshness are evaluated when the durable ICP reservation is
+    // opened, not when this timer pass began.
+    let admission_now_ns = ic_cdk::api::time();
+    let _ = funding::icp::run_after_proven_cycles_insufficient(
+        target,
+        types::FundingTrigger::LowBalanceAutoTopup,
+        admission_now_ns / 1_000_000_000,
+        admission_now_ns,
+        rate,
+        sentinel_id,
+    )
+    .await;
 }
 
 fn update_observation_alarms(target: Principal, status: types::PublicTargetState, now_secs: u64) {
@@ -398,8 +437,8 @@ async fn maybe_fallback_after_no_spend(
     target: Principal,
     trigger: types::FundingTrigger,
     outcome: crate::cycles_ledger::WithdrawOutcome,
-    now_secs: u64,
-    now_ns: u64,
+    _now_secs: u64,
+    _now_ns: u64,
     sentinel_id: Principal,
 ) {
     if trigger == types::FundingTrigger::SelfRecovery
@@ -411,11 +450,12 @@ async fn maybe_fallback_after_no_spend(
         Ok(rate) => rate,
         Err(_) => return,
     };
+    let admission_now_ns = ic_cdk::api::time();
     let _ = funding::icp::run_after_cycles_no_spend(
         target,
         trigger,
-        now_secs,
-        now_ns,
+        admission_now_ns / 1_000_000_000,
+        admission_now_ns,
         outcome,
         rate,
         sentinel_id,

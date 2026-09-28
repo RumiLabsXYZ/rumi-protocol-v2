@@ -11,7 +11,7 @@
 use candid::{CandidType, Int, Nat, Principal};
 use serde::Deserialize;
 
-use crate::types::{FixedBytes32, IcpCmcSnapshot};
+use crate::types::{FixedBytes32, IcpCmcDelivery, IcpCmcSnapshot};
 
 /// Mainnet NNS CMC.  This is a protocol constant, not a configurable
 /// funding destination.
@@ -24,12 +24,16 @@ pub const ICP_LEDGER_PRINCIPAL_TEXT: &str = "ryjl3-tyaaa-aaaaa-aaaba-cai";
 /// required by the ICP Ledger transfer.  The numeric value is the ASCII
 /// bytes `TPUP` in little-endian order.
 pub const TPUP_MEMO: u64 = 1_347_768_404;
+/// CMC's shared Cycles Ledger mint memo (`MINT` in little-endian form).
+pub const MINT_CYCLES_MEMO: u64 = 0x544e494d;
 
 /// A rate is not safe to use after this age.  The bound is deliberately
 /// independent of the public sample interval.
 pub const RATE_MAX_AGE_SECS: u64 = 600;
 
-/// ICP sizing includes ten percent headroom over the requested cycle refill.
+/// Legacy direct top-up operations retain their ten-percent headroom sizing
+/// for immutable-snapshot compatibility. Shared-reserve conversions use the
+/// separate exact helper below because the target withdrawal itself is exact.
 pub const HEADROOM_NUMERATOR: u128 = 11;
 pub const HEADROOM_DENOMINATOR: u128 = 10;
 
@@ -232,6 +236,22 @@ pub enum NotifyError {
 
 pub type NotifyTopUpReply = Result<Nat, NotifyError>;
 
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct NotifyMintCyclesArg {
+    pub block_index: u64,
+    pub to_subaccount: Option<Vec<u8>>,
+    pub deposit_memo: Option<Vec<u8>>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct NotifyMintCyclesSuccess {
+    pub block_index: Nat,
+    pub minted: Nat,
+    pub balance: Nat,
+}
+
+pub type NotifyMintCyclesReply = Result<NotifyMintCyclesSuccess, NotifyError>;
+
 #[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IcpXdrConversionRate {
     pub timestamp_seconds: u64,
@@ -297,10 +317,18 @@ pub fn validate_snapshot(
     if snapshot.cmc_principal != cmc_principal() {
         return Err(SnapshotValidationError::WrongCmcPrincipal);
     }
-    if snapshot.cmc_account_identifier != cmc_subaccount(snapshot.target_canister) {
+    let cmc_destination = match snapshot.delivery {
+        IcpCmcDelivery::DirectTopUp => snapshot.target_canister,
+        IcpCmcDelivery::SharedReserveMint => snapshot.source_principal,
+    };
+    if snapshot.cmc_account_identifier != cmc_subaccount(cmc_destination) {
         return Err(SnapshotValidationError::WrongCmcAccount);
     }
-    if snapshot.memo != TPUP_MEMO {
+    let expected_memo = match snapshot.delivery {
+        IcpCmcDelivery::DirectTopUp => TPUP_MEMO,
+        IcpCmcDelivery::SharedReserveMint => MINT_CYCLES_MEMO,
+    };
+    if snapshot.memo != expected_memo {
         return Err(SnapshotValidationError::WrongMemo);
     }
     if snapshot.amount_e8s == 0 {
@@ -377,6 +405,10 @@ pub fn cmc_account(target: Principal) -> Account {
 
 pub fn tpup_memo_bytes() -> Vec<u8> {
     TPUP_MEMO.to_le_bytes().to_vec()
+}
+
+pub fn mint_cycles_memo_bytes() -> Vec<u8> {
+    MINT_CYCLES_MEMO.to_le_bytes().to_vec()
 }
 
 /// Builds the exact transfer wire value from the immutable operation
@@ -458,6 +490,20 @@ pub fn icp_amount_e8s_for_cycles(
     u64::try_from(amount).map_err(|_| RateError::Overflow)
 }
 
+/// Exact conversion sizing for the shared reserve. The later Cycles Ledger
+/// withdrawal carries the configured target refill unchanged; this amount
+/// only covers the proven reserve deficit (including its ledger fee/floor).
+pub fn icp_amount_e8s_for_exact_cycles(
+    cycles: u128,
+    rate: IcpXdrConversionRate,
+) -> Result<u64, RateError> {
+    if rate.xdr_permyriad_per_icp == 0 {
+        return Err(RateError::Zero);
+    }
+    let amount = checked_ceil_div(cycles, rate.xdr_permyriad_per_icp as u128)?;
+    u64::try_from(amount).map_err(|_| RateError::Overflow)
+}
+
 pub fn expected_cycles(amount_e8s: u64, rate: IcpXdrConversionRate) -> Result<u128, RateError> {
     (amount_e8s as u128)
         .checked_mul(rate.xdr_permyriad_per_icp as u128)
@@ -497,9 +543,10 @@ pub fn classify_transfer_reply(reply: TransferReply) -> TransferOutcome {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NotifyOutcome {
     Delivered { cycles: u128 },
+    Minted(crate::types::SharedReserveMintReceipt),
     Pending,
     RefundedWithBlock(u64),
     RefundedWithoutBlock,
@@ -942,6 +989,51 @@ pub async fn notify_top_up(
     }
 }
 
+/// Converts a verified ICP transfer into the caller/Sentinel's default
+/// Cycles Ledger account. The exact transfer block and deposit memo remain
+/// in the immutable snapshot; retries therefore never create another ICP
+/// debit and always notify the same CMC transfer.
+pub async fn notify_mint_shared_reserve(
+    snapshot: &IcpCmcSnapshot,
+    block_index: u64,
+) -> Result<NotifyOutcome, SnapshotValidationError> {
+    validate_snapshot(snapshot, None, None)?;
+    if snapshot.delivery != IcpCmcDelivery::SharedReserveMint {
+        return Err(SnapshotValidationError::WrongCmcAccount);
+    }
+    let args = NotifyMintCyclesArg {
+        block_index,
+        to_subaccount: None,
+        deposit_memo: None,
+    };
+    match ic_cdk::call::<(NotifyMintCyclesArg,), (NotifyMintCyclesReply,)>(
+        snapshot.cmc_principal,
+        "notify_mint_cycles",
+        (args,),
+    )
+    .await
+    {
+        Ok((Ok(success),)) => {
+            let minted_cycles = u128::try_from(success.minted.0)
+                .map_err(|_| SnapshotValidationError::RateOverflow)?;
+            let cmc_deposit_block_index = u64::try_from(success.block_index.0)
+                .map_err(|_| SnapshotValidationError::RateOverflow)?;
+            let post_mint_balance_cycles = u128::try_from(success.balance.0)
+                .map_err(|_| SnapshotValidationError::RateOverflow)?;
+            Ok(NotifyOutcome::Minted(
+                crate::types::SharedReserveMintReceipt {
+                    cmc_deposit_block_index,
+                    minted_cycles,
+                    post_mint_balance_cycles,
+                    recorded_at_secs: ic_cdk::api::time() / 1_000_000_000,
+                },
+            ))
+        }
+        Ok((Err(error),)) => Ok(classify_notify_reply(Err(error))),
+        Err(_) => Ok(NotifyOutcome::Unknown),
+    }
+}
+
 pub async fn query_rate(cmc: Principal) -> Result<IcpXdrConversionRate, RateError> {
     let (response,) =
         ic_cdk::call::<(), (IcpXdrConversionRateResponse,)>(cmc, "get_icp_xdr_conversion_rate", ())
@@ -1027,6 +1119,7 @@ mod tests {
             source_subaccount: None,
             cmc_account_identifier: cmc_subaccount(target()),
             target_canister: target(),
+            delivery: crate::types::IcpCmcDelivery::DirectTopUp,
             amount_e8s: 123,
             fee_e8s: 10,
             memo: TPUP_MEMO,
@@ -1050,6 +1143,14 @@ mod tests {
     #[test]
     fn tpup_is_exact_little_endian_eight_bytes() {
         assert_eq!(tpup_memo_bytes(), vec![b'T', b'P', b'U', b'P', 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn mint_is_exact_little_endian_eight_bytes() {
+        assert_eq!(
+            mint_cycles_memo_bytes(),
+            vec![b'M', b'I', b'N', b'T', 0, 0, 0, 0]
+        );
     }
 
     #[test]

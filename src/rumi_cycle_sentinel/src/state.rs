@@ -1,8 +1,8 @@
 //! Stable-storage layer for Cycle Sentinel (Task 1c).
 //!
 //! Wires the pure domain types in `types.rs` into `ic-stable-structures`
-//! storage: one `MemoryManager` partitions stable memory into 17 regions
-//! (memory IDs 0-16, see `MEMORY_LAYOUT` below), each backing exactly one
+//! storage: one `MemoryManager` partitions stable memory into 19 regions
+//! (memory IDs 0-18, see `MEMORY_LAYOUT` below), each backing exactly one
 //! `StableCell`/`StableBTreeMap`. This file owns storage + raw CRUD + count
 //! bound enforcement at the storage boundary; it does **not** own
 //! governance/funding *policy* (threshold math, proposal execution, rail
@@ -82,12 +82,13 @@ use ic_stable_structures::{
 use serde::Deserialize;
 
 use crate::types::{
-    self, Alarm, AlarmKind, FundingOperation, FundingOperationV1, FundingOperationV2, FundingRail,
-    FundingTrigger, GlobalPolicy, GlobalRollingSpendState, IcpSourceAttemptError,
-    IcpSourceReserveError, IcpSourceReserveState, InitArgs, InitArgsError, PendingIcpSourceDebit,
-    PendingReservation, PendingSourceDebit, ProposalRecord, ProposalStatus, ReservedPrincipalKind,
-    Sample, SelfRecoveryState, SourceAttemptError, SourceReserveError, SourceReserveState,
-    TargetRecord, TargetReservationState, TerminalFundingSummary, ValidatedInitArgs,
+    self, Alarm, AlarmKind, FundingOperation, FundingOperationV1, FundingOperationV2,
+    FundingOperationV3, FundingRail, FundingTrigger, GlobalPolicy, GlobalRollingSpendState,
+    IcpSourceAttemptError, IcpSourceReserveError, IcpSourceReserveState, InitArgs, InitArgsError,
+    PendingIcpSourceDebit, PendingReservation, PendingSourceDebit, ProposalRecord, ProposalStatus,
+    ReservedPrincipalKind, Sample, SelfRecoveryState, SharedReserveMintReceipt, SourceAttemptError,
+    SourceReserveError, SourceReserveState, TargetRecord, TargetReservationState,
+    TerminalFundingSummary, ValidatedInitArgs,
 };
 
 type VMem = VirtualMemory<DefaultMemoryImpl>;
@@ -122,6 +123,8 @@ const MEM_TERMINAL_SUMMARIES: MemoryId = MemoryId::new(13); // StableBTreeMap<u6
 const MEM_SOURCE_RESERVE: MemoryId = MemoryId::new(14); // StableCell<StoredSourceReserveState> (singleton)
 const MEM_SOURCE_REFRESH_GENERATION: MemoryId = MemoryId::new(15); // StableCell<StoredSourceRefreshGeneration> (singleton)
 const MEM_ICP_SOURCE_RESERVE: MemoryId = MemoryId::new(16); // StableCell<StoredIcpSourceReserveState> (singleton)
+const MEM_SHARED_CONVERSION_BUDGET: MemoryId = MemoryId::new(17); // StableCell<StoredGlobalRollingSpendState> (singleton)
+const MEM_SHARED_RESERVE_MINT_RECEIPTS: MemoryId = MemoryId::new(18); // StableBTreeMap<u64, StoredSharedReserveMintReceipt>
 
 /// Every stable memory slot this canister owns, paired with a human label.
 /// Single source of truth for the layout; iterated by `memory_ids_unique`.
@@ -143,6 +146,11 @@ const MEMORY_LAYOUT: &[(MemoryId, &str)] = &[
     (MEM_SOURCE_RESERVE, "source_reserve"),
     (MEM_SOURCE_REFRESH_GENERATION, "source_refresh_generation"),
     (MEM_ICP_SOURCE_RESERVE, "icp_source_reserve"),
+    (MEM_SHARED_CONVERSION_BUDGET, "shared_conversion_budget"),
+    (
+        MEM_SHARED_RESERVE_MINT_RECEIPTS,
+        "shared_reserve_mint_receipts",
+    ),
 ];
 
 // ─────────────────────── state.rs-owned bookkeeping types ───────────────────────
@@ -414,7 +422,21 @@ impl StoredAlarm {
 enum StoredFundingOperation {
     V1(FundingOperationV1),
     V2(FundingOperationV2),
-    V3(FundingOperation),
+    V3(FundingOperationV3),
+    V4(FundingOperation),
+}
+
+#[derive(CandidType, Deserialize, Clone)]
+enum StoredSharedReserveMintReceipt {
+    V1(SharedReserveMintReceipt),
+}
+
+impl StoredSharedReserveMintReceipt {
+    fn into_current(self) -> SharedReserveMintReceipt {
+        match self {
+            Self::V1(v) => v,
+        }
+    }
 }
 
 impl StoredFundingOperation {
@@ -422,7 +444,8 @@ impl StoredFundingOperation {
         match self {
             Self::V1(v) => v.into(),
             Self::V2(v) => v.into(),
-            Self::V3(v) => v,
+            Self::V3(v) => v.into(),
+            Self::V4(v) => v,
         }
     }
 }
@@ -587,6 +610,7 @@ impl_candid_storable!(StoredProposalRecord);
 impl_candid_storable!(StoredSample);
 impl_candid_storable!(StoredAlarm);
 impl_candid_storable!(StoredFundingOperation);
+impl_candid_storable!(StoredSharedReserveMintReceipt);
 impl_candid_storable!(StoredTargetReservationState);
 impl_candid_storable!(StoredGlobalRollingSpendState);
 impl_candid_storable!(StoredSelfRecoveryState);
@@ -776,6 +800,12 @@ thread_local! {
                 .expect("rumi_cycle_sentinel: failed to init global rolling spend cell")
         ));
 
+    static SHARED_CONVERSION_BUDGET: RefCell<StableCell<StoredGlobalRollingSpendState, VMem>> =
+        MEMORY_MANAGER.with(|m| RefCell::new(
+            StableCell::init(m.borrow().get(MEM_SHARED_CONVERSION_BUDGET), StoredGlobalRollingSpendState::V1(GlobalRollingSpendState::new()))
+                .expect("rumi_cycle_sentinel: failed to init shared conversion budget cell")
+        ));
+
     static SELF_RECOVERY: RefCell<StableCell<StoredSelfRecoveryState, VMem>> =
         MEMORY_MANAGER.with(|m| RefCell::new(
             StableCell::init(m.borrow().get(MEM_SELF_RECOVERY), StoredSelfRecoveryState::V2(SelfRecoveryState::new()))
@@ -808,6 +838,9 @@ thread_local! {
             )
             .expect("rumi_cycle_sentinel: failed to init ICP source reserve cell")
         ));
+
+    static SHARED_RESERVE_MINT_RECEIPTS: RefCell<StableBTreeMap<u64, StoredSharedReserveMintReceipt, VMem>> =
+        MEMORY_MANAGER.with(|m| RefCell::new(StableBTreeMap::init(m.borrow().get(MEM_SHARED_RESERVE_MINT_RECEIPTS))));
 }
 
 // ─────────────────────── init / global config ───────────────────────
@@ -1648,7 +1681,7 @@ pub(crate) fn get_operation(id: u64) -> Option<FundingOperation> {
 fn raw_insert_operation(op: FundingOperation) {
     let id = op.id();
     FUNDING_OPERATIONS.with(|m| {
-        m.borrow_mut().insert(id, StoredFundingOperation::V3(op));
+        m.borrow_mut().insert(id, StoredFundingOperation::V4(op));
     });
 }
 
@@ -1842,6 +1875,7 @@ pub(crate) enum CompactOperationError {
     /// names `id` as a pending debit. The operation must settle/release its
     /// ICP hold before its full record is compacted.
     IcpSourceReservationStillPending,
+    SharedConversionBudgetStillPending,
 }
 
 /// The self-enforcing compaction primitive for `FUNDING_OPERATIONS`
@@ -1885,7 +1919,7 @@ pub(crate) fn compact_operation(
         if get_self_recovery_state().in_flight_operation_id() == Some(id) {
             return Err(CompactOperationError::SelfRecoveryReservationStillPending);
         }
-    } else {
+    } else if !op.is_shared_reserve_conversion() {
         if get_target_reservation(op.target())
             .rolling_spend()
             .pending()
@@ -1919,7 +1953,58 @@ pub(crate) fn compact_operation(
     {
         return Err(CompactOperationError::IcpSourceReservationStillPending);
     }
-    insert_terminal_summary(summary);
+    if op.is_shared_reserve_conversion()
+        && get_shared_conversion_budget()
+            .rolling_spend()
+            .pending()
+            .iter()
+            .any(|p| p.operation_id == id)
+    {
+        return Err(CompactOperationError::SharedConversionBudgetStillPending);
+    }
+    // A shared reserve conversion is never a payment to `op.target()`.
+    // Generic reconciliation paths still pass a structurally valid summary
+    // so their terminal-state checks remain intact, but do not project it
+    // into the per-target RecentTopups ring. Successful mint evidence is
+    // retained independently in `SHARED_RESERVE_MINT_RECEIPTS`.
+    if !op.is_shared_reserve_conversion() {
+        insert_terminal_summary(summary);
+    }
+    FUNDING_OPERATIONS.with(|m| {
+        m.borrow_mut().remove(&id);
+    });
+    Ok(())
+}
+
+/// Compacts a resolved shared-reserve conversion without creating a target
+/// top-up summary. Its CMC receipt lives in `SHARED_RESERVE_MINT_RECEIPTS`;
+/// keeping these flows separate prevents reserve credits from being shown as
+/// payments to `op.target()`.
+pub(crate) fn compact_shared_reserve_conversion(id: u64) -> Result<(), CompactOperationError> {
+    let op = get_operation(id).ok_or(CompactOperationError::Missing)?;
+    if !op.is_shared_reserve_conversion() || op.state().resolved_outcome().is_none() {
+        return Err(CompactOperationError::Unresolved);
+    }
+    if get_icp_source_reserve()
+        .pending()
+        .iter()
+        .any(|pending| pending.operation_id == id)
+    {
+        return Err(CompactOperationError::IcpSourceReservationStillPending);
+    }
+    if get_shared_conversion_budget()
+        .rolling_spend()
+        .pending()
+        .iter()
+        .any(|pending| pending.operation_id == id)
+    {
+        return Err(CompactOperationError::SharedConversionBudgetStillPending);
+    }
+    if op.trigger() == FundingTrigger::SelfRecovery
+        && get_self_recovery_state().in_flight_operation_id() == Some(id)
+    {
+        return Err(CompactOperationError::SelfRecoveryReservationStillPending);
+    }
     FUNDING_OPERATIONS.with(|m| {
         m.borrow_mut().remove(&id);
     });
@@ -2025,6 +2110,19 @@ pub(crate) fn set_global_rolling_spend(state: GlobalRollingSpendState) {
     bump_source_refresh_generation();
 }
 
+pub(crate) fn get_shared_conversion_budget() -> GlobalRollingSpendState {
+    SHARED_CONVERSION_BUDGET.with(|c| c.borrow().get().clone().into_current())
+}
+
+pub(crate) fn set_shared_conversion_budget(state: GlobalRollingSpendState) {
+    SHARED_CONVERSION_BUDGET.with(|c| {
+        c.borrow_mut()
+            .set(StoredGlobalRollingSpendState::V1(state))
+            .expect("rumi_cycle_sentinel: failed to write shared conversion budget cell");
+    });
+    bump_source_refresh_generation();
+}
+
 pub(crate) fn get_self_recovery_state() -> SelfRecoveryState {
     SELF_RECOVERY.with(|c| c.borrow().get().clone().into_current())
 }
@@ -2051,6 +2149,45 @@ pub(crate) fn insert_terminal_summary(summary: TerminalFundingSummary) {
             .insert(id, StoredTerminalFundingSummary::V1(summary));
     });
     evict_oldest_terminal_summary_if_over_bound();
+}
+
+/// Retains CMC mint evidence independently of target top-up history.  A
+/// shared-reserve conversion is not a target payment, so it must never be
+/// projected into `RecentTopups`.  Keep the same bounded retention as
+/// terminal summaries while preserving the immutable CMC receipt for audit
+/// and post-upgrade reconciliation.
+pub(crate) fn insert_shared_reserve_mint_receipt(
+    operation_id: u64,
+    receipt: SharedReserveMintReceipt,
+) {
+    SHARED_RESERVE_MINT_RECEIPTS.with(|m| {
+        m.borrow_mut()
+            .insert(operation_id, StoredSharedReserveMintReceipt::V1(receipt));
+    });
+    SHARED_RESERVE_MINT_RECEIPTS.with(|m| {
+        let mut map = m.borrow_mut();
+        if map.len() as usize <= types::MAX_TERMINAL_SUMMARIES {
+            return;
+        }
+        let victim = map
+            .iter()
+            .map(|(id, receipt)| (id, receipt.into_current().recorded_at_secs))
+            .min_by_key(|(_, recorded_at_secs)| *recorded_at_secs)
+            .map(|(id, _)| id);
+        if let Some(id) = victim {
+            map.remove(&id);
+        }
+    });
+}
+
+pub(crate) fn get_shared_reserve_mint_receipt(
+    operation_id: u64,
+) -> Option<SharedReserveMintReceipt> {
+    SHARED_RESERVE_MINT_RECEIPTS.with(|m| {
+        m.borrow()
+            .get(&operation_id)
+            .map(StoredSharedReserveMintReceipt::into_current)
+    })
 }
 
 fn evict_oldest_terminal_summary_if_over_bound() {
@@ -2470,6 +2607,15 @@ pub(crate) enum StateValidationError {
         operation_id: u64,
     },
     IcpSourceReservePendingAmountOverflow,
+    SharedConversionBudgetMissingOperation {
+        operation_id: u64,
+    },
+    SharedConversionOperationMissingBudget {
+        operation_id: u64,
+    },
+    SharedConversionBudgetAmountMismatch {
+        operation_id: u64,
+    },
 }
 
 fn validate_signer_set(signers: &[Principal], threshold: u32) -> Result<(), StateValidationError> {
@@ -2672,14 +2818,17 @@ pub(crate) fn validate_whole_state(sentinel_id: Principal) -> Result<(), StateVa
             .map_err(|_| StateValidationError::IcpSnapshotInvalid {
                 operation_id: op.id(),
             })?;
-            let minimum = crate::icp_cmc::cycles_with_headroom(op.funding_policy().refill_cycles())
-                .map_err(|_| StateValidationError::IcpSnapshotInvalid {
-                    operation_id: op.id(),
-                })?;
-            if snapshot.expected_cycles < minimum {
-                return Err(StateValidationError::IcpSnapshotInvalid {
-                    operation_id: op.id(),
-                });
+            if snapshot.delivery == types::IcpCmcDelivery::DirectTopUp {
+                let minimum =
+                    crate::icp_cmc::cycles_with_headroom(op.funding_policy().refill_cycles())
+                        .map_err(|_| StateValidationError::IcpSnapshotInvalid {
+                            operation_id: op.id(),
+                        })?;
+                if snapshot.expected_cycles < minimum {
+                    return Err(StateValidationError::IcpSnapshotInvalid {
+                        operation_id: op.id(),
+                    });
+                }
             }
             let state = match op.state() {
                 types::FundingOperationState::Icp(state) => state,
@@ -2768,10 +2917,14 @@ pub(crate) fn validate_whole_state(sentinel_id: Principal) -> Result<(), StateVa
     // registered target), so comparing it against the ordinary-targets
     // global cap is a category error; self-recovery's own cap is enforced
     // below via `SelfRecoveryPolicy.daily_cap_cycles`.
-    for op in operations
-        .iter()
-        .filter(|op| !op.state().is_resolved() && op.trigger() != FundingTrigger::SelfRecovery)
-    {
+    for op in operations.iter().filter(|op| {
+        !op.state().is_resolved()
+                && op.trigger() != FundingTrigger::SelfRecovery
+                // A shared-reserve conversion holds only the ICP source
+                // debit. It has not paid a target yet, so target/global
+                // reservations begin later with the exact Cycles withdrawal.
+                && !op.is_shared_reserve_conversion()
+    }) {
         if op.funding_policy().daily_cap_cycles() > global_daily_cap_cycles {
             return Err(StateValidationError::OperationDailyCapExceedsGlobalCap {
                 operation_id: op.id(),
@@ -2797,10 +2950,11 @@ pub(crate) fn validate_whole_state(sentinel_id: Principal) -> Result<(), StateVa
     // reject it (the reverse direction finds no matching forward entry).
     let mut nonterminal_by_target: std::collections::BTreeMap<Principal, Vec<&FundingOperation>> =
         std::collections::BTreeMap::new();
-    for op in operations
-        .iter()
-        .filter(|op| !op.state().is_resolved() && op.trigger() != FundingTrigger::SelfRecovery)
-    {
+    for op in operations.iter().filter(|op| {
+        !op.state().is_resolved()
+            && op.trigger() != FundingTrigger::SelfRecovery
+            && !op.is_shared_reserve_conversion()
+    }) {
         nonterminal_by_target
             .entry(op.target())
             .or_default()
@@ -2918,6 +3072,54 @@ pub(crate) fn validate_whole_state(sentinel_id: Principal) -> Result<(), StateVa
         }
     }
 
+    // ── Shared-conversion budget linkage ──
+    // Reserve-mint operations consume the separately bounded conversion
+    // budget, never the ordinary target/global delivery budget.  This keeps
+    // the protected-floor restoration auditable across upgrades while the
+    // later exact withdrawal remains subject to its usual cap.
+    let conversion_budget = get_shared_conversion_budget();
+    validate_rolling_spend_ledger(conversion_budget.rolling_spend())?;
+    let conversion_pending: std::collections::BTreeMap<u64, PendingReservation> = conversion_budget
+        .rolling_spend()
+        .pending()
+        .iter()
+        .copied()
+        .map(|pending| (pending.operation_id, pending))
+        .collect();
+    for op in operations
+        .iter()
+        .filter(|op| !op.state().is_resolved() && op.is_shared_reserve_conversion())
+    {
+        match conversion_pending.get(&op.id()) {
+            Some(entry) if entry.amount_cycles == op.reserved_amount_cycles() => {}
+            Some(_) => {
+                return Err(StateValidationError::SharedConversionBudgetAmountMismatch {
+                    operation_id: op.id(),
+                })
+            }
+            None => {
+                return Err(
+                    StateValidationError::SharedConversionOperationMissingBudget {
+                        operation_id: op.id(),
+                    },
+                )
+            }
+        }
+    }
+    for operation_id in conversion_pending.keys() {
+        if !operations.iter().any(|op| {
+            !op.state().is_resolved()
+                && op.is_shared_reserve_conversion()
+                && op.id() == *operation_id
+        }) {
+            return Err(
+                StateValidationError::SharedConversionBudgetMissingOperation {
+                    operation_id: *operation_id,
+                },
+            );
+        }
+    }
+
     // ── Self-recovery in-flight link (bidirectional) ──
     //
     // Self-recovery owns its own independent `RollingSpendLedger` (memory ID
@@ -2970,7 +3172,12 @@ pub(crate) fn validate_whole_state(sentinel_id: Principal) -> Result<(), StateVa
                 operation_id: op_id,
             });
         }
-        if self_recovery.in_flight_amount_cycles() != Some(op.reserved_amount_cycles()) {
+        let expected_latched_amount = if op.is_shared_reserve_conversion() {
+            op.funding_policy().refill_cycles()
+        } else {
+            op.reserved_amount_cycles()
+        };
+        if self_recovery.in_flight_amount_cycles() != Some(expected_latched_amount) {
             return Err(StateValidationError::SelfRecoveryLedgerAmountMismatch {
                 operation_id: op_id,
             });
@@ -3203,9 +3410,10 @@ mod tests {
     use crate::types::{
         AdvisoryCyclesBalance, AlarmStatus, Criticality, CyclesFundingState,
         CyclesWithdrawSnapshot, Environment, FundingAttemptResultClass, FundingOperationState,
-        FundingRailArguments, GlobalPolicyArgs, GovernanceTimelocksArgs, ObservationMode,
-        ProposalPayload, PublicTargetState, SelfRecoveryPolicyArgs, TargetArgs,
-        TargetFundingPolicy, TargetFundingPolicyArgs, TargetPatch, TargetRegistrationContext,
+        FundingRailArguments, GlobalPolicyArgs, GovernanceTimelocksArgs, IcpCmcDelivery,
+        IcpCmcSnapshot, IcpFundingState, ObservationMode, ProposalPayload, PublicTargetState,
+        SelfRecoveryPolicyArgs, TargetArgs, TargetFundingPolicy, TargetFundingPolicyArgs,
+        TargetPatch, TargetRegistrationContext,
     };
     use candid::Nat;
 
@@ -3396,10 +3604,10 @@ mod tests {
                 "duplicate stable MemoryId {id:?} (store {label:?}) — pick an unused slot"
             );
         }
-        assert_eq!(MEMORY_LAYOUT.len(), 17, "expected exactly 17 memory ids");
+        assert_eq!(MEMORY_LAYOUT.len(), 19, "expected exactly 19 memory ids");
     }
 
-    // ── round-trip tests, one per stable structure (17) ──
+    // ── round-trip tests, one per stable structure ──
 
     #[test]
     fn global_config_round_trips() {
@@ -3892,6 +4100,155 @@ mod tests {
         ))
         .into_current();
         assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn stored_funding_operation_v3_icp_snapshot_without_delivery_decodes_as_direct_topup() {
+        // This exactly models the previous V3 on-disk envelope: its ICP
+        // snapshot had no delivery discriminator. Candid record subtyping is
+        // intentionally not relied on here; V3 remains a frozen payload and
+        // the migration explicitly selects the legacy direct-top-up rail.
+        let global = test_global_policy(1_000);
+        let target = test_target_principal(7);
+        let current = test_funding_operation(17, target, FundingTrigger::ManualTopup, &global, 100);
+        let legacy = FundingOperationV3 {
+            id: current.id(),
+            target: current.target(),
+            target_registry_revision: current.target_registry_revision(),
+            funding_policy: current.funding_policy().clone(),
+            trigger: current.trigger(),
+            rail_arguments: types::FundingRailArgumentsV2::Icp(types::IcpCmcSnapshotV2 {
+                source_principal: test_sentinel_id(),
+                ledger_principal: types::icp_ledger_principal_for_sentinel(),
+                cmc_principal: crate::icp_cmc::cmc_principal(),
+                source_subaccount: None,
+                cmc_account_identifier: crate::icp_cmc::cmc_subaccount(target),
+                target_canister: target,
+                amount_e8s: 100,
+                fee_e8s: 10,
+                memo: crate::icp_cmc::TPUP_MEMO,
+                created_at_time_ns: 100_000_000_000,
+                rate_xdr_permyriad_per_icp: 10_000,
+                rate_timestamp_secs: 100,
+                expected_cycles: 1_000,
+            }),
+            reserved_amount_cycles: current.reserved_amount_cycles(),
+            state: current.state(),
+            attempts: current.attempts().clone(),
+            confirmed_block_index: None,
+            actual_cycles: None,
+            refund_block_hint: None,
+            refund_block_index: None,
+            notify_attempt_started_at_secs: None,
+            created_at_secs: current.created_at_secs(),
+            updated_at_secs: current.updated_at_secs(),
+        };
+        let bytes = candid::encode_one(&StoredFundingOperation::V3(legacy)).unwrap();
+        let decoded =
+            <StoredFundingOperation as Storable>::from_bytes(Cow::Owned(bytes)).into_current();
+        let snapshot = match decoded.rail_arguments() {
+            types::FundingRailArguments::Icp(snapshot) => snapshot,
+            _ => panic!("legacy ICP operation decoded as the wrong rail"),
+        };
+        assert_eq!(snapshot.delivery, types::IcpCmcDelivery::DirectTopUp);
+        assert_eq!(snapshot.memo, crate::icp_cmc::TPUP_MEMO);
+        assert_eq!(snapshot.target_canister, target);
+    }
+
+    #[test]
+    fn stored_funding_operation_v2_old_wire_icp_snapshot_decodes_as_direct_and_keeps_refund() {
+        // V2 predates the delivery discriminator. Encode the frozen V2
+        // envelope itself so this proves an actual old wire shape, rather
+        // than relying on Candid to default a missing current record field.
+        let global = test_global_policy(1_000);
+        let target = test_target_principal(8);
+        let current = test_funding_operation(18, target, FundingTrigger::ManualTopup, &global, 100);
+        let legacy = FundingOperationV2 {
+            id: current.id(),
+            target: current.target(),
+            target_registry_revision: current.target_registry_revision(),
+            funding_policy: current.funding_policy().clone(),
+            trigger: current.trigger(),
+            rail_arguments: types::FundingRailArgumentsV2::Icp(types::IcpCmcSnapshotV2 {
+                source_principal: test_sentinel_id(),
+                ledger_principal: types::icp_ledger_principal_for_sentinel(),
+                cmc_principal: crate::icp_cmc::cmc_principal(),
+                source_subaccount: None,
+                cmc_account_identifier: crate::icp_cmc::cmc_subaccount(target),
+                target_canister: target,
+                amount_e8s: 100,
+                fee_e8s: 10,
+                memo: crate::icp_cmc::TPUP_MEMO,
+                created_at_time_ns: 100_000_000_000,
+                rate_xdr_permyriad_per_icp: 10_000,
+                rate_timestamp_secs: 100,
+                expected_cycles: 1_000,
+            }),
+            reserved_amount_cycles: 1_000,
+            state: FundingOperationState::Icp(IcpFundingState::Refunded),
+            attempts: current.attempts().clone(),
+            confirmed_block_index: Some(42),
+            actual_cycles: Some(999),
+            refund_block_index: Some(77),
+            created_at_secs: current.created_at_secs(),
+            updated_at_secs: current.updated_at_secs(),
+        };
+        let bytes = candid::encode_one(&StoredFundingOperation::V2(legacy)).unwrap();
+        let decoded =
+            <StoredFundingOperation as Storable>::from_bytes(Cow::Owned(bytes)).into_current();
+        let snapshot = match decoded.rail_arguments() {
+            types::FundingRailArguments::Icp(snapshot) => snapshot,
+            _ => panic!("legacy ICP operation decoded as the wrong rail"),
+        };
+        assert_eq!(snapshot.delivery, IcpCmcDelivery::DirectTopUp);
+        assert_eq!(snapshot.memo, crate::icp_cmc::TPUP_MEMO);
+        assert_eq!(snapshot.expected_cycles, 1_000);
+        assert_eq!(decoded.refund_block_hint(), Some(77));
+        assert_eq!(decoded.refund_block_index(), Some(77));
+        assert_eq!(decoded.actual_cycles(), Some(999));
+    }
+
+    #[test]
+    fn stored_v4_shared_mint_floor_deficit_round_trips_below_direct_headroom() {
+        let expected_cycles = 2_000_200_000_000;
+        let sentinel_id = test_sentinel_id();
+        let global = test_global_policy(4_000_000_000_000);
+        let funding_policy = TargetFundingPolicy::validate(
+            &test_funding_policy_args(1, 2_000_000_000_000, 2_000_000_000_000),
+            &global,
+        )
+        .unwrap();
+        let snapshot = IcpCmcSnapshot {
+            source_principal: sentinel_id,
+            ledger_principal: types::icp_ledger_principal_for_sentinel(),
+            cmc_principal: crate::icp_cmc::cmc_principal(),
+            source_subaccount: None,
+            cmc_account_identifier: crate::icp_cmc::cmc_subaccount(sentinel_id),
+            target_canister: sentinel_id,
+            delivery: IcpCmcDelivery::SharedReserveMint,
+            amount_e8s: expected_cycles as u64,
+            fee_e8s: 1,
+            memo: crate::icp_cmc::MINT_CYCLES_MEMO,
+            created_at_time_ns: 1,
+            rate_xdr_permyriad_per_icp: 1,
+            rate_timestamp_secs: 0,
+            expected_cycles,
+        };
+        let op = FundingOperation::open(
+            18,
+            sentinel_id,
+            0,
+            funding_policy,
+            FundingTrigger::SelfRecovery,
+            FundingRailArguments::Icp(snapshot),
+            expected_cycles,
+            0,
+        )
+        .unwrap();
+        let bytes = candid::encode_one(&StoredFundingOperation::V4(op.clone())).unwrap();
+        let decoded =
+            <StoredFundingOperation as Storable>::from_bytes(Cow::Owned(bytes)).into_current();
+        assert_eq!(decoded, op);
     }
 
     /// Frozen fixture captured once from `candid::encode_one(&StoredTargetReservationState::V1(TargetReservationState::new()
@@ -6084,7 +6441,7 @@ mod tests {
         let wrong_key = 99u64;
         FUNDING_OPERATIONS.with(|m| {
             m.borrow_mut()
-                .insert(wrong_key, StoredFundingOperation::V3(op.clone()));
+                .insert(wrong_key, StoredFundingOperation::V4(op.clone()));
         });
         assert_eq!(
             validate_whole_state(sentinel_id),
@@ -6586,7 +6943,7 @@ mod tests {
         let op = test_resolved_operation(1, sentinel_id, &global, 10);
         FUNDING_OPERATIONS.with(|m| {
             m.borrow_mut()
-                .insert(op.id(), StoredFundingOperation::V3(op.clone()));
+                .insert(op.id(), StoredFundingOperation::V4(op.clone()));
         });
         set_self_recovery_state(
             SelfRecoveryState::new()
@@ -6616,7 +6973,7 @@ mod tests {
         let op = test_funding_operation(1, sentinel_id, FundingTrigger::ManualTopup, &global, 10);
         FUNDING_OPERATIONS.with(|m| {
             m.borrow_mut()
-                .insert(op.id(), StoredFundingOperation::V3(op.clone()));
+                .insert(op.id(), StoredFundingOperation::V4(op.clone()));
         });
         assert_eq!(
             validate_whole_state(sentinel_id),
@@ -6642,7 +6999,7 @@ mod tests {
             test_funding_operation(1, target, FundingTrigger::LowBalanceAutoTopup, &global, 10);
         FUNDING_OPERATIONS.with(|m| {
             m.borrow_mut()
-                .insert(op.id(), StoredFundingOperation::V3(op.clone()));
+                .insert(op.id(), StoredFundingOperation::V4(op.clone()));
         });
         assert_eq!(
             validate_whole_state(sentinel_id),
@@ -6666,7 +7023,7 @@ mod tests {
         let op = test_resolved_operation(1, target, &global, 10);
         FUNDING_OPERATIONS.with(|m| {
             m.borrow_mut()
-                .insert(op.id(), StoredFundingOperation::V3(op.clone()));
+                .insert(op.id(), StoredFundingOperation::V4(op.clone()));
         });
         assert_eq!(validate_whole_state(sentinel_id), Ok(()));
     }
@@ -7268,7 +7625,7 @@ mod tests {
             let op =
                 test_funding_operation(i, target, FundingTrigger::LowBalanceAutoTopup, &global, 10);
             FUNDING_OPERATIONS.with(|m| {
-                m.borrow_mut().insert(i, StoredFundingOperation::V3(op));
+                m.borrow_mut().insert(i, StoredFundingOperation::V4(op));
             });
         }
         assert_eq!(

@@ -150,6 +150,13 @@ pub fn public_row_from_samples(
         environment,
         criticality,
         observation_mode,
+        enabled: false,
+        auto_topup: false,
+        paused: false,
+        daily_cap_cycles: Nat::from(0u8),
+        cooldown_secs: 0,
+        tags: Vec::new(),
+        burn_anomaly_limit_cycles_per_day: None,
         state: latest.state,
         reported_operational_healthy: latest.reported_operational_healthy,
         advisory_balance_cycles: balance.map(|b| b.to_nat()),
@@ -207,6 +214,16 @@ fn target_row(target: &TargetRecord, now_secs: u64) -> PublicTargetRow {
         recent_topups,
     );
     row.project = target.project().to_string();
+    row.tags = target.tags().to_vec();
+    row.enabled = target.enabled();
+    row.auto_topup = target.auto_topup();
+    row.paused = target.paused();
+    row.daily_cap_cycles = Nat::from(target.funding_policy().daily_cap_cycles());
+    row.cooldown_secs = target.funding_policy().cooldown_secs();
+    row.burn_anomaly_limit_cycles_per_day = target
+        .funding_policy()
+        .burn_anomaly_limit_cycles_per_day()
+        .map(Nat::from);
     let meta = state::sample_meta(target.principal());
     row.last_success_at_secs = meta.and_then(|m| m.last_success_at_secs);
     row.stale_for_secs = row
@@ -255,9 +272,14 @@ fn available_from_cached_balance(
     if as_of_secs > now_secs || now_secs.saturating_sub(as_of_secs) > max_age_secs {
         return None;
     }
-    balance
-        .checked_sub(pending?)
-        .and_then(|available| available.checked_sub(protected_floor))
+    // A fresh balance below the protected floor has a known spendable
+    // amount of zero. Reserve `None` for a genuinely unknown or stale
+    // observation, never for a safely non-spendable one.
+    Some(
+        balance
+            .saturating_sub(pending?)
+            .saturating_sub(protected_floor),
+    )
 }
 
 /// Returns only source capacity that can safely be spent by the ordinary
@@ -299,6 +321,33 @@ fn icp_available_e8s(now_secs: u64) -> Option<Nat> {
 
 pub fn get_public_overview_at(now_secs: u64) -> PublicOverview {
     let targets = state::list_targets_after(None, types::MAX_TARGETS);
+    let cycles_cache = state::get_source_reserve().cache();
+    let icp_cache = state::get_icp_source_reserve().cache();
+    let unresolved_icp =
+        state::list_unresolved_operations_after(None, types::MAX_FUNDING_OPERATIONS);
+    let has_blocked_icp = unresolved_icp.iter().any(|operation| {
+        operation.rail() == types::FundingRail::IcpCmc && operation.state().stops_automatic_retry()
+    });
+    let has_pending_icp = unresolved_icp
+        .iter()
+        .any(|operation| operation.rail() == types::FundingRail::IcpCmc);
+    let caches_fresh = cycles_cache.is_some_and(|cache| {
+        cache.as_of_secs <= now_secs
+            && now_secs.saturating_sub(cache.as_of_secs)
+                <= state::global_config().global_policy.stale_after_secs()
+    }) && icp_cache.is_some_and(|cache| {
+        cache.as_of_secs <= now_secs
+            && now_secs.saturating_sub(cache.as_of_secs) <= types::icp_source_cache_max_age_secs()
+    });
+    let shared_reserve_conversion_status = if has_blocked_icp {
+        types::PublicFundingStatus::Blocked
+    } else if has_pending_icp {
+        types::PublicFundingStatus::Pending
+    } else if !caches_fresh {
+        types::PublicFundingStatus::Unknown
+    } else {
+        types::PublicFundingStatus::Ready
+    };
     let mut overview = PublicOverview {
         target_count: targets.len() as u64,
         healthy_count: 0,
@@ -309,6 +358,11 @@ pub fn get_public_overview_at(now_secs: u64) -> PublicOverview {
         unobserved_count: 0,
         total_observed_cycles: Nat::from(0u8),
         runtime_cycles: Nat::from(ic_cdk::api::canister_balance128()),
+        funding_account_owner: ic_cdk::id(),
+        cycles_ledger_balance_cycles: cycles_cache.map(|cache| Nat::from(cache.balance_cycles)),
+        cycles_ledger_balance_as_of_secs: cycles_cache.map(|cache| cache.as_of_secs),
+        icp_ledger_balance_e8s: icp_cache.map(|cache| Nat::from(cache.balance_e8s)),
+        icp_ledger_balance_as_of_secs: icp_cache.map(|cache| cache.as_of_secs),
         cycles_ledger_available_cycles: cycles_ledger_available_cycles(now_secs),
         icp_available_e8s: icp_available_e8s(now_secs),
         protected_self_reserve_cycles: Some(Nat::from(
@@ -317,6 +371,10 @@ pub fn get_public_overview_at(now_secs: u64) -> PublicOverview {
                 .self_recovery_policy()
                 .protected_reserve_cycles(),
         )),
+        min_icp_reserve_e8s: Some(Nat::from(
+            state::global_config().global_policy.min_icp_reserve_e8s(),
+        )),
+        shared_reserve_conversion_status,
         alarm_count: 0,
         last_sample_at_secs: None,
         next_sample_at_secs: None,
@@ -657,14 +715,14 @@ mod tests {
     }
 
     #[test]
-    fn available_balance_fails_closed_on_hold_or_floor_underflow() {
+    fn available_balance_reports_zero_for_fresh_floor_underflow() {
         assert_eq!(
             available_from_cached_balance(100, Some(101), 0, 100, 100, 600),
-            None
+            Some(0)
         );
         assert_eq!(
             available_from_cached_balance(100, Some(25), 76, 100, 100, 600),
-            None
+            Some(0)
         );
         assert_eq!(
             available_from_cached_balance(100, None, 0, 100, 100, 600),

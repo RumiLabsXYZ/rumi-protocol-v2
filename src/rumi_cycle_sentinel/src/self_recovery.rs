@@ -36,6 +36,7 @@ use crate::types::{
     FundingOperation, FundingOperationState, FundingRailArguments, FundingTrigger,
     SelfRecoveryPolicy, SourceReserveError, TargetFundingPolicy, TargetFundingPolicyArgs,
 };
+use crate::{funding, icp_cmc};
 
 /// Compiled floor for the EFFECTIVE runtime low-balance threshold — always
 /// enforced regardless of what a governed `SelfRecoveryPolicy` proposes.
@@ -59,7 +60,7 @@ pub fn effective_threshold(policy_threshold_cycles: u128) -> u128 {
 /// independent governed inputs with no required relationship to the
 /// ordinary `GlobalPolicy.global_daily_cap_cycles` ordinary targets share
 /// (see that method's doc comment in `types.rs` for the full reasoning).
-fn placeholder_funding_policy(
+pub(crate) fn placeholder_funding_policy(
     policy: &SelfRecoveryPolicy,
 ) -> Result<TargetFundingPolicy, types::TargetValidationError> {
     TargetFundingPolicy::validate_self_contained(&TargetFundingPolicyArgs {
@@ -169,6 +170,36 @@ fn prepare_at(
     Ok(submitted)
 }
 
+/// Performs the actual exact runtime withdrawal after a shared reserve mint
+/// has been confirmed and the Cycles Ledger cache refreshed. A mint is only
+/// reserve maintenance; callers must use this result, not the CMC completion,
+/// to decide whether runtime recovery succeeded.
+pub(crate) async fn withdraw_after_shared_mint(
+    sentinel_id: Principal,
+    now_secs: u64,
+    now_ns: u64,
+) -> Result<Option<FundingOperation>, funding_cycles::FundingError> {
+    let global_policy = state::global_config().global_policy;
+    let policy = global_policy.self_recovery_policy();
+    if ic_cdk::api::canister_balance128()
+        > effective_threshold(policy.low_balance_threshold_cycles())
+    {
+        // A reserve mint is not a runtime delivery. If another path restored
+        // the runtime across the mint/refresh awaits, open no duplicate
+        // withdrawal and let the caller decide from this explicit outcome.
+        state::alarms::resolve_at(None, AlarmKind::LowBalance, now_secs);
+        return Ok(None);
+    }
+    let operation = prepare_at(
+        ic_cdk::id(),
+        sentinel_id,
+        policy.refill_cycles(),
+        now_secs,
+        now_ns,
+    )?;
+    funding_cycles::execute(operation, now_secs).await.map(Some)
+}
+
 #[cfg(test)]
 fn prepare(
     sentinel_id: Principal,
@@ -201,7 +232,7 @@ fn prepare(
 ///   unknown/stale source cache, or the reservation itself being refused) —
 ///   design: "If the protected reserve is insufficient, Sentinel alarms and
 ///   does not distribute funds that would worsen its own recoverability."
-pub async fn run(now_secs: u64, now_ns: u64, sentinel_id: Principal) -> bool {
+pub async fn run(now_secs: u64, _now_ns: u64, sentinel_id: Principal) -> bool {
     if funding_cycles::require_sentinel_identity(ic_cdk::id(), sentinel_id).is_err() {
         let _ = state::alarms::raise_at(None, AlarmKind::SelfRecoveryUnresolved, now_secs);
         return false;
@@ -210,7 +241,14 @@ pub async fn run(now_secs: u64, now_ns: u64, sentinel_id: Principal) -> bool {
     if let Some(op_id) = before.in_flight_operation_id() {
         if let Some(op) = state::get_operation(op_id) {
             if !op.state().stops_automatic_retry() {
-                let _ = funding_cycles::execute(op, now_secs).await;
+                match op.rail() {
+                    types::FundingRail::CyclesLedger => {
+                        let _ = funding_cycles::execute(op, now_secs).await;
+                    }
+                    types::FundingRail::IcpCmc => {
+                        let _ = funding::icp::resume(op.id(), now_secs, sentinel_id).await;
+                    }
+                }
             }
         }
     }
@@ -233,20 +271,110 @@ pub async fn run(now_secs: u64, now_ns: u64, sentinel_id: Principal) -> bool {
         return true;
     }
 
+    // Self-recovery runs before the sampler's ordinary refresh. At the next
+    // production tick, the preceding snapshot can therefore be older than
+    // the freshness limit. Refresh the Cycles reserve before admitting a new
+    // runtime withdrawal; query failure remains fail-closed.
+    if funding::refresh_cycles_ledger_cache(now_secs, sentinel_id)
+        .await
+        .is_err()
+    {
+        let _ = state::alarms::raise_at(None, AlarmKind::LowBalance, now_secs);
+        return false;
+    }
+    // The source refresh is itself an await. All newly opened Cycles work
+    // must use the clock at admission, while resumed operations above retain
+    // their already-persisted timestamps and immutable snapshots.
+    let cycles_admission_now_ns = ic_cdk::api::time();
+    let cycles_admission_now_secs = cycles_admission_now_ns / 1_000_000_000;
+    // Governance and runtime balance can both change across the refresh
+    // await. Re-read them before opening any new withdrawal so its frozen
+    // amount and current threshold are evaluated together at admission.
+    let current_global_policy = state::global_config().global_policy;
+    let current_policy = current_global_policy.self_recovery_policy();
+    if ic_cdk::api::canister_balance128()
+        > effective_threshold(current_policy.low_balance_threshold_cycles())
+    {
+        state::alarms::resolve_at(None, AlarmKind::LowBalance, cycles_admission_now_secs);
+        return true;
+    }
+
     match prepare_at(
         ic_cdk::id(),
         sentinel_id,
-        policy.refill_cycles(),
-        now_secs,
-        now_ns,
+        current_policy.refill_cycles(),
+        cycles_admission_now_secs,
+        cycles_admission_now_ns,
     ) {
-        Ok(op) => match funding_cycles::execute(op, now_secs).await {
+        Ok(op) => match funding_cycles::execute(op, cycles_admission_now_secs).await {
             Ok(resolved) => apply_recovery_result(resolved.state(), now_secs),
             Err(_) => {
                 let _ = state::alarms::raise_at(None, AlarmKind::LowBalance, now_secs);
                 false
             }
         },
+        Err(FundingError::SourceReserve(SourceReserveError::InsufficientReserve)) => {
+            // The Cycles reserve is fresh and proven insufficient. Only now
+            // may the ICP reserve be considered; unknown/stale cache states
+            // remain fail-closed and never authorize an ICP debit.
+            if funding::icp::refresh_icp_ledger_cache(now_secs, sentinel_id)
+                .await
+                .is_err()
+            {
+                let _ = state::alarms::raise_at(None, AlarmKind::LowBalance, now_secs);
+                return false;
+            }
+            let result = match icp_cmc::query_rate(icp_cmc::cmc_principal()).await {
+                Ok(rate) => {
+                    // Rate lookup is an await: make freshness and durable
+                    // created-at checks at actual conversion admission, not
+                    // at this timer pass's start.
+                    let admission_now_ns = ic_cdk::api::time();
+                    let admission_global_policy = state::global_config().global_policy;
+                    let admission_policy = admission_global_policy.self_recovery_policy();
+                    if ic_cdk::api::canister_balance128()
+                        > effective_threshold(admission_policy.low_balance_threshold_cycles())
+                    {
+                        state::alarms::resolve_at(
+                            None,
+                            AlarmKind::LowBalance,
+                            admission_now_ns / 1_000_000_000,
+                        );
+                        return true;
+                    }
+                    funding::icp::run_self_recovery_with_rate(
+                        sentinel_id,
+                        admission_now_ns / 1_000_000_000,
+                        admission_now_ns,
+                        rate,
+                    )
+                    .await
+                }
+                Err(_) => Err(funding::icp::FundingError::Rate(
+                    icp_cmc::RateError::Overflow,
+                )),
+            };
+            match result {
+                Ok(resolved) => apply_recovery_result(resolved.state(), now_secs),
+                Err(funding::icp::FundingError::RuntimeAlreadyHealthy) => {
+                    if state::get_self_recovery_state().is_suppressing_distribution() {
+                        let _ = state::alarms::raise_at(
+                            None,
+                            AlarmKind::SelfRecoveryUnresolved,
+                            now_secs,
+                        );
+                        return false;
+                    }
+                    state::alarms::resolve_at(None, AlarmKind::LowBalance, now_secs);
+                    state::alarms::resolve_at(None, AlarmKind::SelfRecoveryUnresolved, now_secs);
+                    true
+                }
+                Err(_) => {
+                    let _ = state::alarms::raise_at(None, AlarmKind::LowBalance, now_secs);
+                    false
+                }
+            }
+        }
         Err(_) => {
             // Reservation itself failed (unknown/stale cache, insufficient
             // reserve, or daily cap) — no operation was ever opened, so

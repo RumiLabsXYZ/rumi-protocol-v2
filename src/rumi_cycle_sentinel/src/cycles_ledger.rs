@@ -183,6 +183,10 @@ pub enum WithdrawOutcome {
     /// the ledger rejected the request before ever touching the account —
     /// proven no delivery AND no fee debit.
     TerminalNoSpend,
+    /// The ledger proved the shared Cycles Ledger balance is insufficient.
+    /// It is the only decoded withdrawal failure eligible to open the
+    /// separate ICP reserve-conversion lane.
+    InsufficientReserve,
     /// `Err(FailedToWithdraw { fee_block: Some(block), .. })`: outbound
     /// delivery is proven to have failed, and the pinned ledger's own
     /// reimbursement logic proves a KNOWN net debit of exactly `2 * fee`
@@ -248,8 +252,8 @@ pub fn classify_withdraw_reply(reply: WithdrawReply) -> WithdrawOutcome {
         Err(WithdrawError::TooOld) => WithdrawOutcome::Quarantined,
         Err(WithdrawError::BadFee { .. })
         | Err(WithdrawError::InvalidReceiver { .. })
-        | Err(WithdrawError::CreatedInFuture { .. })
-        | Err(WithdrawError::InsufficientFunds { .. }) => WithdrawOutcome::TerminalNoSpend,
+        | Err(WithdrawError::CreatedInFuture { .. }) => WithdrawOutcome::TerminalNoSpend,
+        Err(WithdrawError::InsufficientFunds { .. }) => WithdrawOutcome::InsufficientReserve,
         Err(WithdrawError::FailedToWithdraw {
             fee_block: Some(fee_block),
             ..
@@ -608,7 +612,7 @@ mod tests {
     }
 
     #[test]
-    fn classifies_validation_failures_as_terminal_no_spend() {
+    fn classifies_only_validation_failures_as_terminal_no_spend() {
         for err in [
             WithdrawError::BadFee {
                 expected_fee: Nat::from(1u32),
@@ -617,15 +621,19 @@ mod tests {
                 receiver: Principal::anonymous(),
             },
             WithdrawError::CreatedInFuture { ledger_time: 1 },
-            WithdrawError::InsufficientFunds {
-                balance: Nat::from(0u32),
-            },
         ] {
             assert_eq!(
                 classify_withdraw_reply(Err(err)),
                 WithdrawOutcome::TerminalNoSpend
             );
         }
+
+        assert_eq!(
+            classify_withdraw_reply(Err(WithdrawError::InsufficientFunds {
+                balance: Nat::from(0u32),
+            })),
+            WithdrawOutcome::InsufficientReserve
+        );
     }
 
     #[test]

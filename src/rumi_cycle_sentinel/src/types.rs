@@ -1444,6 +1444,11 @@ pub struct IcpCmcSnapshot {
     pub source_subaccount: Option<FixedBytes32>,
     pub cmc_account_identifier: FixedBytes32,
     pub target_canister: Principal,
+    /// Legacy operations top up `target_canister` directly. New automatic
+    /// fallback operations mint into Sentinel's shared default Cycles Ledger
+    /// account first, then use the normal exact-withdraw rail.
+    #[serde(default)]
+    pub delivery: IcpCmcDelivery,
     pub amount_e8s: u64,
     pub fee_e8s: u64,
     pub memo: u64,
@@ -1451,6 +1456,26 @@ pub struct IcpCmcSnapshot {
     pub rate_xdr_permyriad_per_icp: u64,
     pub rate_timestamp_secs: u64,
     pub expected_cycles: u128,
+}
+
+#[derive(CandidType, Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum IcpCmcDelivery {
+    #[default]
+    DirectTopUp,
+    SharedReserveMint,
+}
+
+/// Authoritative CMC evidence for a completed shared-reserve mint.  This is
+/// deliberately separate from a target delivery amount: `minted_cycles` is
+/// attached by the CMC and `post_mint_balance_cycles` is the CMC receipt's
+/// reported balance, neither of which says that the logical target received
+/// a refill.  State retains this evidence after the operation is compacted.
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SharedReserveMintReceipt {
+    pub(crate) cmc_deposit_block_index: u64,
+    pub(crate) minted_cycles: u128,
+    pub(crate) post_mint_balance_cycles: u128,
+    pub(crate) recorded_at_secs: u64,
 }
 
 /// The rail-specific argument snapshot for a `FundingOperation`. Which
@@ -1468,6 +1493,16 @@ impl FundingRailArguments {
             Self::Cycles(_) => FundingRail::CyclesLedger,
             Self::Icp(_) => FundingRail::IcpCmc,
         }
+    }
+
+    pub fn is_shared_reserve_conversion(&self) -> bool {
+        matches!(
+            self,
+            Self::Icp(IcpCmcSnapshot {
+                delivery: IcpCmcDelivery::SharedReserveMint,
+                ..
+            })
+        )
     }
 
     /// The cycle amount embedded in this rail's own snapshot
@@ -1892,6 +1927,7 @@ impl From<IcpCmcSnapshotV1> for IcpCmcSnapshot {
             source_subaccount: value.source_subaccount,
             cmc_account_identifier: value.cmc_account_identifier,
             target_canister: value.target_canister,
+            delivery: IcpCmcDelivery::DirectTopUp,
             amount_e8s: value.amount_e8s,
             fee_e8s: value.fee_e8s,
             memo: value.memo,
@@ -1964,7 +2000,7 @@ pub(crate) struct FundingOperationV2 {
     pub(crate) target_registry_revision: u64,
     pub(crate) funding_policy: TargetFundingPolicy,
     pub(crate) trigger: FundingTrigger,
-    pub(crate) rail_arguments: FundingRailArguments,
+    pub(crate) rail_arguments: FundingRailArgumentsV2,
     pub(crate) reserved_amount_cycles: u128,
     pub(crate) state: FundingOperationState,
     pub(crate) attempts: FundingAttempts,
@@ -1983,7 +2019,7 @@ impl From<FundingOperationV2> for FundingOperation {
             target_registry_revision: value.target_registry_revision,
             funding_policy: value.funding_policy,
             trigger: value.trigger,
-            rail_arguments: value.rail_arguments,
+            rail_arguments: value.rail_arguments.into(),
             reserved_amount_cycles: value.reserved_amount_cycles,
             state: value.state,
             attempts: value.attempts,
@@ -1996,6 +2032,107 @@ impl From<FundingOperationV2> for FundingOperation {
             refund_block_hint: value.refund_block_index,
             refund_block_index: value.refund_block_index,
             notify_attempt_started_at_secs: None,
+            created_at_secs: value.created_at_secs,
+            updated_at_secs: value.updated_at_secs,
+        }
+    }
+}
+
+/// Frozen Task-5 ICP snapshot, before shared-reserve delivery mode was
+/// added. It must remain byte-compatible with every persisted direct CMC
+/// operation so an upgrade never reinterprets an old top-up as a mint.
+#[derive(CandidType, Deserialize, Clone)]
+pub(crate) struct IcpCmcSnapshotV2 {
+    pub(crate) source_principal: Principal,
+    pub(crate) ledger_principal: Principal,
+    pub(crate) cmc_principal: Principal,
+    pub(crate) source_subaccount: Option<FixedBytes32>,
+    pub(crate) cmc_account_identifier: FixedBytes32,
+    pub(crate) target_canister: Principal,
+    pub(crate) amount_e8s: u64,
+    pub(crate) fee_e8s: u64,
+    pub(crate) memo: u64,
+    pub(crate) created_at_time_ns: u64,
+    pub(crate) rate_xdr_permyriad_per_icp: u64,
+    pub(crate) rate_timestamp_secs: u64,
+    pub(crate) expected_cycles: u128,
+}
+
+impl From<IcpCmcSnapshotV2> for IcpCmcSnapshot {
+    fn from(value: IcpCmcSnapshotV2) -> Self {
+        Self {
+            source_principal: value.source_principal,
+            ledger_principal: value.ledger_principal,
+            cmc_principal: value.cmc_principal,
+            source_subaccount: value.source_subaccount,
+            cmc_account_identifier: value.cmc_account_identifier,
+            target_canister: value.target_canister,
+            delivery: IcpCmcDelivery::DirectTopUp,
+            amount_e8s: value.amount_e8s,
+            fee_e8s: value.fee_e8s,
+            memo: value.memo,
+            created_at_time_ns: value.created_at_time_ns,
+            rate_xdr_permyriad_per_icp: value.rate_xdr_permyriad_per_icp,
+            rate_timestamp_secs: value.rate_timestamp_secs,
+            expected_cycles: value.expected_cycles,
+        }
+    }
+}
+
+#[derive(CandidType, Deserialize, Clone)]
+pub(crate) enum FundingRailArgumentsV2 {
+    Cycles(CyclesWithdrawSnapshot),
+    Icp(IcpCmcSnapshotV2),
+}
+
+impl From<FundingRailArgumentsV2> for FundingRailArguments {
+    fn from(value: FundingRailArgumentsV2) -> Self {
+        match value {
+            FundingRailArgumentsV2::Cycles(snapshot) => Self::Cycles(snapshot),
+            FundingRailArgumentsV2::Icp(snapshot) => Self::Icp(snapshot.into()),
+        }
+    }
+}
+
+/// Frozen operation record used by the former `StoredFundingOperation::V3`.
+/// Its only distinction is the pre-shared-reserve ICP snapshot above.
+#[derive(CandidType, Deserialize, Clone)]
+pub(crate) struct FundingOperationV3 {
+    pub(crate) id: u64,
+    pub(crate) target: Principal,
+    pub(crate) target_registry_revision: u64,
+    pub(crate) funding_policy: TargetFundingPolicy,
+    pub(crate) trigger: FundingTrigger,
+    pub(crate) rail_arguments: FundingRailArgumentsV2,
+    pub(crate) reserved_amount_cycles: u128,
+    pub(crate) state: FundingOperationState,
+    pub(crate) attempts: FundingAttempts,
+    pub(crate) confirmed_block_index: Option<u64>,
+    pub(crate) actual_cycles: Option<u128>,
+    pub(crate) refund_block_hint: Option<u64>,
+    pub(crate) refund_block_index: Option<u64>,
+    pub(crate) notify_attempt_started_at_secs: Option<u64>,
+    pub(crate) created_at_secs: u64,
+    pub(crate) updated_at_secs: u64,
+}
+
+impl From<FundingOperationV3> for FundingOperation {
+    fn from(value: FundingOperationV3) -> Self {
+        Self {
+            id: value.id,
+            target: value.target,
+            target_registry_revision: value.target_registry_revision,
+            funding_policy: value.funding_policy,
+            trigger: value.trigger,
+            rail_arguments: value.rail_arguments.into(),
+            reserved_amount_cycles: value.reserved_amount_cycles,
+            state: value.state,
+            attempts: value.attempts,
+            confirmed_block_index: value.confirmed_block_index,
+            actual_cycles: value.actual_cycles,
+            refund_block_hint: value.refund_block_hint,
+            refund_block_index: value.refund_block_index,
+            notify_attempt_started_at_secs: value.notify_attempt_started_at_secs,
             created_at_secs: value.created_at_secs,
             updated_at_secs: value.updated_at_secs,
         }
@@ -2088,25 +2225,27 @@ impl FundingOperation {
         if let FundingRailArguments::Icp(snapshot) = &rail_arguments {
             crate::icp_cmc::validate_snapshot(snapshot, Some(now_secs), None)
                 .map_err(FundingOperationOpenError::IcpSnapshotInvalid)?;
-            let minimum = crate::icp_cmc::cycles_with_headroom(funding_policy.refill_cycles())
-                .map_err(|error| {
-                    FundingOperationOpenError::IcpSnapshotInvalid(match error {
-                        crate::icp_cmc::RateError::Zero => {
-                            crate::icp_cmc::SnapshotValidationError::RateZero
-                        }
-                        crate::icp_cmc::RateError::Future => {
-                            crate::icp_cmc::SnapshotValidationError::RateFuture
-                        }
-                        crate::icp_cmc::RateError::Stale => {
-                            crate::icp_cmc::SnapshotValidationError::RateStale
-                        }
-                        crate::icp_cmc::RateError::Overflow => {
-                            crate::icp_cmc::SnapshotValidationError::RateOverflow
-                        }
-                    })
-                })?;
-            if snapshot.expected_cycles < minimum {
-                return Err(FundingOperationOpenError::IcpSnapshotInsufficientHeadroom);
+            if snapshot.delivery == IcpCmcDelivery::DirectTopUp {
+                let minimum = crate::icp_cmc::cycles_with_headroom(funding_policy.refill_cycles())
+                    .map_err(|error| {
+                        FundingOperationOpenError::IcpSnapshotInvalid(match error {
+                            crate::icp_cmc::RateError::Zero => {
+                                crate::icp_cmc::SnapshotValidationError::RateZero
+                            }
+                            crate::icp_cmc::RateError::Future => {
+                                crate::icp_cmc::SnapshotValidationError::RateFuture
+                            }
+                            crate::icp_cmc::RateError::Stale => {
+                                crate::icp_cmc::SnapshotValidationError::RateStale
+                            }
+                            crate::icp_cmc::RateError::Overflow => {
+                                crate::icp_cmc::SnapshotValidationError::RateOverflow
+                            }
+                        })
+                    })?;
+                if snapshot.expected_cycles < minimum {
+                    return Err(FundingOperationOpenError::IcpSnapshotInsufficientHeadroom);
+                }
             }
         }
         Ok(Self {
@@ -2155,6 +2294,10 @@ impl FundingOperation {
 
     pub fn rail(&self) -> FundingRail {
         self.rail_arguments.rail()
+    }
+
+    pub fn is_shared_reserve_conversion(&self) -> bool {
+        self.rail_arguments.is_shared_reserve_conversion()
     }
 
     pub fn reserved_amount_cycles(&self) -> u128 {
@@ -3103,16 +3246,19 @@ impl<'de> Deserialize<'de> for FundingOperation {
         if let FundingRailArguments::Icp(snapshot) = &raw.rail_arguments {
             crate::icp_cmc::validate_snapshot(snapshot, Some(raw.created_at_secs), None)
                 .map_err(invariant_decode_error)?;
-            let minimum = crate::icp_cmc::cycles_with_headroom(raw.funding_policy.refill_cycles())
-                .map_err(|_| {
-                    invariant_decode_error(FundingOperationOpenError::IcpSnapshotInvalid(
-                        crate::icp_cmc::SnapshotValidationError::RateOverflow,
-                    ))
-                })?;
-            if snapshot.expected_cycles < minimum {
-                return Err(invariant_decode_error(
-                    FundingOperationOpenError::IcpSnapshotInsufficientHeadroom,
-                ));
+            if snapshot.delivery == IcpCmcDelivery::DirectTopUp {
+                let minimum =
+                    crate::icp_cmc::cycles_with_headroom(raw.funding_policy.refill_cycles())
+                        .map_err(|_| {
+                            invariant_decode_error(FundingOperationOpenError::IcpSnapshotInvalid(
+                                crate::icp_cmc::SnapshotValidationError::RateOverflow,
+                            ))
+                        })?;
+                if snapshot.expected_cycles < minimum {
+                    return Err(invariant_decode_error(
+                        FundingOperationOpenError::IcpSnapshotInsufficientHeadroom,
+                    ));
+                }
             }
         }
         if raw.confirmed_block_index.is_some() && !state_allows_confirmed_block(&raw.state) {
@@ -4614,6 +4760,29 @@ impl SourceReserveState {
         self.cache
     }
 
+    /// Discards a balance snapshot after an external CMC mint has been
+    /// confirmed. Pending Cycles withdrawals remain intact, but no caller
+    /// may size another reserve conversion from a pre-mint balance while a
+    /// fresh ledger read is outstanding.
+    pub fn invalidate_cache(&self) -> Self {
+        Self {
+            cache: None,
+            pending: self.pending.clone(),
+        }
+    }
+
+    /// Conversion admission reads the exact same fresh snapshot as a normal
+    /// withdrawal reservation. It does not reserve a Cycles debit because
+    /// the conversion credits this account; the caller must still prove a
+    /// normal reservation was insufficient before it may use this value.
+    pub fn fresh_cache_for_conversion(
+        &self,
+        now_secs: u64,
+        max_age_secs: u64,
+    ) -> Result<CyclesLedgerCache, SourceReserveError> {
+        self.fresh_cache(now_secs, max_age_secs)
+    }
+
     pub fn pending(&self) -> &[PendingSourceDebit] {
         &self.pending
     }
@@ -4988,11 +5157,11 @@ impl IcpSourceReserveState {
         fee_e8s: u128,
         as_of_secs: u64,
     ) -> Result<Self, IcpSourceReserveError> {
-        if self
-            .pending
-            .iter()
-            .any(|debit| debit.attempt_started_at_secs.is_some())
-        {
+        // A ledger balance queried after a transfer commits but before its
+        // durable operation settles already reflects the debit. Replacing
+        // the pre-debit cache here would make `settle` subtract it again, so
+        // no ICP cache refresh is admissible while any debit remains held.
+        if !self.pending.is_empty() {
             return Err(IcpSourceReserveError::AttemptInFlight);
         }
         if let Some(previous) = self.cache {
@@ -5179,14 +5348,39 @@ pub struct PublicOverview {
     pub unobserved_count: u64,
     pub total_observed_cycles: Nat,
     pub runtime_cycles: Nat,
+    /// Both funding assets use this owner with the default account
+    /// (subaccount omitted).  Publishing the owner makes the deposit route
+    /// auditable without exposing any signer or reconciliation material.
+    pub funding_account_owner: Principal,
+    /// Cached raw Cycles Ledger balance and the time it was observed.  This
+    /// is deliberately distinct from the spendable balance below: unknown
+    /// and stale observations are never represented as zero.
+    pub cycles_ledger_balance_cycles: Option<Nat>,
+    pub cycles_ledger_balance_as_of_secs: Option<u64>,
+    /// Cached raw ICP Ledger balance and the time it was observed.
+    pub icp_ledger_balance_e8s: Option<Nat>,
+    pub icp_ledger_balance_as_of_secs: Option<u64>,
     /// Reserve balances are optional because they are populated by the
     /// funding sampler. Unknown must not be serialized as a real zero.
     pub cycles_ledger_available_cycles: Option<Nat>,
     pub icp_available_e8s: Option<Nat>,
     pub protected_self_reserve_cycles: Option<Nat>,
+    pub min_icp_reserve_e8s: Option<Nat>,
+    /// Bounded public indication of whether the automatic ICP fallback has
+    /// live work. It intentionally exposes no operation id, block index, or
+    /// reconciliation evidence.
+    pub shared_reserve_conversion_status: PublicFundingStatus,
     pub alarm_count: u64,
     pub last_sample_at_secs: Option<u64>,
     pub next_sample_at_secs: Option<u64>,
+}
+
+#[derive(CandidType, Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PublicFundingStatus {
+    Ready,
+    Pending,
+    Blocked,
+    Unknown,
 }
 
 /// A public-safe projection of `TerminalFundingSummary`: no signer
@@ -5254,6 +5448,15 @@ pub struct PublicTargetRow {
     pub environment: Environment,
     pub criticality: Criticality,
     pub observation_mode: ObservationMode,
+    /// Governed automation controls are public so a low-balance row never
+    /// leaves operators guessing whether it is eligible to receive funds.
+    pub enabled: bool,
+    pub auto_topup: bool,
+    pub paused: bool,
+    pub daily_cap_cycles: Nat,
+    pub cooldown_secs: u64,
+    pub tags: Vec<String>,
+    pub burn_anomaly_limit_cycles_per_day: Option<Nat>,
     pub state: PublicTargetState,
     pub reported_operational_healthy: Option<bool>,
     /// `None` means no successful observation is available.  In particular,
@@ -6519,6 +6722,7 @@ mod tests {
             source_subaccount: None,
             cmc_account_identifier: crate::icp_cmc::cmc_subaccount(target_canister),
             target_canister,
+            delivery: IcpCmcDelivery::DirectTopUp,
             amount_e8s: 1,
             fee_e8s: 1,
             memo: 1_347_768_404,
@@ -6531,6 +6735,34 @@ mod tests {
 
     fn icp_cmc_snapshot(target_canister: Principal) -> IcpCmcSnapshot {
         icp_cmc_snapshot_at(target_canister, 0)
+    }
+
+    fn shared_mint_snapshot(target_canister: Principal, expected_cycles: u128) -> IcpCmcSnapshot {
+        IcpCmcSnapshot {
+            source_principal: target_canister,
+            ledger_principal: Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap(),
+            cmc_principal: Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap(),
+            source_subaccount: None,
+            cmc_account_identifier: crate::icp_cmc::cmc_subaccount(target_canister),
+            target_canister,
+            delivery: IcpCmcDelivery::SharedReserveMint,
+            amount_e8s: u64::try_from(expected_cycles).unwrap(),
+            fee_e8s: 1,
+            memo: crate::icp_cmc::MINT_CYCLES_MEMO,
+            created_at_time_ns: 1,
+            rate_xdr_permyriad_per_icp: 1,
+            rate_timestamp_secs: 0,
+            expected_cycles,
+        }
+    }
+
+    fn two_trillion_refill_policy() -> TargetFundingPolicy {
+        let global = GlobalPolicy::validate(&global_policy_args(4_000_000_000_000)).unwrap();
+        TargetFundingPolicy::validate(
+            &funding_policy_args(1, 2_000_000_000_000, 2_000_000_000_000),
+            &global,
+        )
+        .unwrap()
     }
 
     fn icp_notify_pending_operation(target: Principal) -> FundingOperation {
@@ -8018,6 +8250,13 @@ mod tests {
             environment: Environment::Production,
             criticality: Criticality::Standard,
             observation_mode: ObservationMode::SelfReport,
+            enabled: true,
+            auto_topup: true,
+            paused: false,
+            daily_cap_cycles: Nat::from(100u64),
+            cooldown_secs: 60,
+            tags: vec!["cycles".to_string()],
+            burn_anomaly_limit_cycles_per_day: None,
             state: PublicTargetState::Healthy,
             reported_operational_healthy: Some(true),
             advisory_balance_cycles: Some(advisory.to_nat()),
@@ -8169,9 +8408,16 @@ mod tests {
             unobserved_count: 1,
             total_observed_cycles: Nat::from(1_000_000u64),
             runtime_cycles: Nat::from(500_000u64),
+            funding_account_owner: target_principal(1),
+            cycles_ledger_balance_cycles: Some(Nat::from(2_100_000u64)),
+            cycles_ledger_balance_as_of_secs: Some(100),
+            icp_ledger_balance_e8s: Some(Nat::from(200_000_000u64)),
+            icp_ledger_balance_as_of_secs: Some(100),
             cycles_ledger_available_cycles: Some(Nat::from(2_000_000u64)),
             icp_available_e8s: Some(Nat::from(100_000_000u64)),
             protected_self_reserve_cycles: Some(Nat::from(300_000u64)),
+            min_icp_reserve_e8s: Some(Nat::from(100_000_000u64)),
+            shared_reserve_conversion_status: PublicFundingStatus::Ready,
             alarm_count: 3,
             last_sample_at_secs: Some(100),
             next_sample_at_secs: Some(400),
@@ -8815,6 +9061,48 @@ mod tests {
     }
 
     #[test]
+    fn shared_mint_partial_deficit_opens_and_round_trips_below_the_configured_refill() {
+        let target = target_principal(1);
+        let expected_cycles = 1_000_200_000_000;
+        let op = FundingOperation::open(
+            1,
+            target,
+            1,
+            two_trillion_refill_policy(),
+            FundingTrigger::LowBalanceAutoTopup,
+            FundingRailArguments::Icp(shared_mint_snapshot(target, expected_cycles)),
+            expected_cycles,
+            0,
+        )
+        .unwrap();
+        let bytes = Encode!(&raw_funding_operation_for_test(&op)).unwrap();
+        assert_eq!(Decode!(&bytes, FundingOperation).unwrap(), op);
+    }
+
+    #[test]
+    fn direct_topup_below_legacy_headroom_remains_rejected() {
+        let target = target_principal(1);
+        let expected_cycles = 2_000_200_000_000;
+        let mut snapshot = icp_cmc_snapshot(target);
+        snapshot.amount_e8s = u64::try_from(expected_cycles).unwrap();
+        snapshot.rate_xdr_permyriad_per_icp = 1;
+        snapshot.expected_cycles = expected_cycles;
+        assert_eq!(
+            FundingOperation::open(
+                1,
+                target,
+                1,
+                two_trillion_refill_policy(),
+                FundingTrigger::LowBalanceAutoTopup,
+                FundingRailArguments::Icp(snapshot),
+                expected_cycles,
+                0,
+            ),
+            Err(FundingOperationOpenError::IcpSnapshotInsufficientHeadroom)
+        );
+    }
+
+    #[test]
     fn funding_operation_decode_rejects_non_default_icp_source_subaccount() {
         let target = target_principal(1);
         let op = FundingOperation::open(
@@ -9099,6 +9387,10 @@ mod tests {
     fn source_reserve_stale_cache_fails_closed() {
         let state = SourceReserveState::new().refresh(1_000, 1, 100).unwrap();
         assert_eq!(
+            state.fresh_cache_for_conversion(161, 60),
+            Err(SourceReserveError::StaleCache)
+        );
+        assert_eq!(
             state.reserve_ordinary(1, 10, 0, 161, 60),
             Err(SourceReserveError::StaleCache)
         );
@@ -9112,6 +9404,10 @@ mod tests {
     #[test]
     fn source_reserve_future_dated_cache_fails_closed() {
         let state = SourceReserveState::new().refresh(1_000, 0, 500).unwrap();
+        assert_eq!(
+            state.fresh_cache_for_conversion(100, 60),
+            Err(SourceReserveError::FutureCache)
+        );
         assert_eq!(
             state.reserve_ordinary(1, 10, 0, 100, 60),
             Err(SourceReserveError::FutureCache)
@@ -9405,5 +9701,19 @@ mod tests {
         assert_eq!(reset.pending()[0].amount_plus_fee_e8s, 100);
         assert_eq!(reset.cache(), state.cache());
         assert!(reset.mark_attempt(42, 12).is_ok());
+
+        // A transfer can commit while its await is in flight, then leave the
+        // operation NotifyPending after the marker clears. A queried zero
+        // balance at that point already includes the debit and must not
+        // replace the pre-debit cache before settlement subtracts exactly
+        // once.
+        let cleared = marked.clear_attempt(42).unwrap();
+        assert_eq!(
+            cleared.refresh(0, 8, 12),
+            Err(IcpSourceReserveError::AttemptInFlight)
+        );
+        let settled = cleared.settle(42, 100).unwrap();
+        assert_eq!(settled.cache().unwrap().balance_e8s, 900);
+        assert!(settled.pending().is_empty());
     }
 }

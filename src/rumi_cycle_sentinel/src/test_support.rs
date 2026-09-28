@@ -775,6 +775,7 @@ fn icp_operation(
         source_subaccount: None,
         cmc_account_identifier: icp_cmc::cmc_subaccount(target),
         target_canister: target,
+        delivery: crate::types::IcpCmcDelivery::DirectTopUp,
         amount_e8s,
         fee_e8s,
         memo: icp_cmc::TPUP_MEMO,
