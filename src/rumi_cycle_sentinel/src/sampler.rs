@@ -437,8 +437,8 @@ async fn maybe_fallback_after_no_spend(
     target: Principal,
     trigger: types::FundingTrigger,
     outcome: crate::cycles_ledger::WithdrawOutcome,
-    now_secs: u64,
-    now_ns: u64,
+    _now_secs: u64,
+    _now_ns: u64,
     sentinel_id: Principal,
 ) {
     if trigger == types::FundingTrigger::SelfRecovery
@@ -450,11 +450,12 @@ async fn maybe_fallback_after_no_spend(
         Ok(rate) => rate,
         Err(_) => return,
     };
+    let admission_now_ns = ic_cdk::api::time();
     let _ = funding::icp::run_after_cycles_no_spend(
         target,
         trigger,
-        now_secs,
-        now_ns,
+        admission_now_ns / 1_000_000_000,
+        admission_now_ns,
         outcome,
         rate,
         sentinel_id,

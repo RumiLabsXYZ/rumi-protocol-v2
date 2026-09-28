@@ -453,7 +453,12 @@ pub mod cycles {
             created_at_time: Some(snapshot.created_at_time_ns),
         };
         let outcome = cycles_ledger::withdraw(types::cycles_ledger_principal(), args).await;
-        resolve_operation(op, outcome, now_secs).map(|resolved| (resolved, outcome))
+        // The ledger call is an await. Settlement starts cooldown and rolling
+        // spend entries, so it uses confirmation time rather than the old
+        // admission timestamp; the immutable withdraw arguments above do not
+        // change.
+        let confirmation_now_secs = ic_cdk::api::time() / 1_000_000_000;
+        resolve_operation(op, outcome, confirmation_now_secs).map(|resolved| (resolved, outcome))
     }
 
     pub(crate) async fn execute(
@@ -2368,6 +2373,11 @@ pub mod icp {
         BlockProof(icp_cmc::BlockProofError),
         Overflow,
         NoProvenCyclesDeficit,
+        /// A confirmed shared reserve mint finished while Sentinel's runtime
+        /// recovered through another path. No target or runtime withdrawal
+        /// was opened; the caller may proceed only after observing current
+        /// runtime health itself.
+        RuntimeAlreadyHealthy,
         Reconciliation(ReconciliationError),
     }
 
@@ -3160,7 +3170,9 @@ pub mod icp {
         state::clear_icp_notify_attempt(marked.id()).map_err(FundingError::Transition)?;
         let cleared = state::get_operation(marked.id()).ok_or(FundingError::NotFound)?;
         let outcome = call_result.map_err(FundingError::Snapshot)?;
-        let resolved = resolve_notify(cleared, outcome, now_secs)?;
+        let notify_completion_now_ns = ic_cdk::api::time();
+        let notify_completion_now_secs = notify_completion_now_ns / 1_000_000_000;
+        let resolved = resolve_notify(cleared, outcome, notify_completion_now_secs)?;
         if snapshot.delivery == types::IcpCmcDelivery::SharedReserveMint
             && resolved.state() == FundingOperationState::Icp(IcpFundingState::Complete)
         {
@@ -3169,23 +3181,36 @@ pub mod icp {
             // ICP reply. The following exact withdrawal is best effort in
             // this tick; a transient refresh/withdraw failure leaves the
             // minted reserve intact for the next timer pass.
-            super::refresh_cycles_ledger_cache(now_secs, snapshot.source_principal)
-                .await
-                .map_err(|_| FundingError::StaleCacheRefresh)?;
+            super::refresh_cycles_ledger_cache(
+                notify_completion_now_secs,
+                snapshot.source_principal,
+            )
+            .await
+            .map_err(|_| FundingError::StaleCacheRefresh)?;
+            // The balance refresh is another await. Admit a new exact
+            // withdrawal under the actual post-refresh clock; existing ICP
+            // snapshots above remain immutable and retain their original
+            // timestamps.
+            let delivery_admission_now_ns = ic_cdk::api::time();
+            let delivery_admission_now_secs = delivery_admission_now_ns / 1_000_000_000;
             if resolved.trigger() == FundingTrigger::SelfRecovery {
-                return crate::self_recovery::withdraw_after_shared_mint(
+                return match crate::self_recovery::withdraw_after_shared_mint(
                     snapshot.source_principal,
-                    now_secs,
-                    ic_cdk::api::time(),
+                    delivery_admission_now_secs,
+                    delivery_admission_now_ns,
                 )
                 .await
-                .map_err(FundingError::CyclesDelivery);
+                .map_err(FundingError::CyclesDelivery)?
+                {
+                    Some(delivery) => Ok(delivery),
+                    None => Err(FundingError::RuntimeAlreadyHealthy),
+                };
             }
             return super::cycles::run_ordinary(
                 resolved.target(),
                 resolved.trigger(),
-                now_secs,
-                ic_cdk::api::time(),
+                delivery_admission_now_secs,
+                delivery_admission_now_ns,
             )
             .await
             .map_err(FundingError::CyclesDelivery);

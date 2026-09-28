@@ -340,7 +340,7 @@
   $: fundingProtectedCycles = funding ? fundingOptionalBigInt(funding.protected_self_reserve_cycles) : undefined;
   $: fundingIcpBalance = funding ? fundingOptionalBigInt(funding.icp_ledger_balance_e8s) : undefined;
   $: fundingIcpBalanceAsOf = funding ? fundingOptionalBigInt(funding.icp_ledger_balance_as_of_secs) : undefined;
-  $: fundingIcpBalanceStale = fundingIcpBalanceAsOf !== undefined && isStale(fundingIcpBalanceAsOf, undefined, 180n);
+  $: fundingIcpBalanceStale = fundingIcpBalanceAsOf !== undefined && isStale(fundingIcpBalanceAsOf, undefined, 600n);
   $: fundingIcpAvailable = funding ? fundingOptionalBigInt(funding.icp_available_e8s) : undefined;
   $: fundingMinIcpReserve = funding ? fundingOptionalBigInt(funding.min_icp_reserve_e8s) : undefined;
   $: fundingConversionStatus = funding ? variantLabel(funding.shared_reserve_conversion_status) : 'Unavailable';

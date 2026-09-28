@@ -178,9 +178,18 @@ pub(crate) async fn withdraw_after_shared_mint(
     sentinel_id: Principal,
     now_secs: u64,
     now_ns: u64,
-) -> Result<FundingOperation, funding_cycles::FundingError> {
+) -> Result<Option<FundingOperation>, funding_cycles::FundingError> {
     let global_policy = state::global_config().global_policy;
     let policy = global_policy.self_recovery_policy();
+    if ic_cdk::api::canister_balance128()
+        > effective_threshold(policy.low_balance_threshold_cycles())
+    {
+        // A reserve mint is not a runtime delivery. If another path restored
+        // the runtime across the mint/refresh awaits, open no duplicate
+        // withdrawal and let the caller decide from this explicit outcome.
+        state::alarms::resolve_at(None, AlarmKind::LowBalance, now_secs);
+        return Ok(None);
+    }
     let operation = prepare_at(
         ic_cdk::id(),
         sentinel_id,
@@ -188,7 +197,7 @@ pub(crate) async fn withdraw_after_shared_mint(
         now_secs,
         now_ns,
     )?;
-    funding_cycles::execute(operation, now_secs).await
+    funding_cycles::execute(operation, now_secs).await.map(Some)
 }
 
 #[cfg(test)]
@@ -321,6 +330,18 @@ pub async fn run(now_secs: u64, _now_ns: u64, sentinel_id: Principal) -> bool {
                     // created-at checks at actual conversion admission, not
                     // at this timer pass's start.
                     let admission_now_ns = ic_cdk::api::time();
+                    let admission_global_policy = state::global_config().global_policy;
+                    let admission_policy = admission_global_policy.self_recovery_policy();
+                    if ic_cdk::api::canister_balance128()
+                        > effective_threshold(admission_policy.low_balance_threshold_cycles())
+                    {
+                        state::alarms::resolve_at(
+                            None,
+                            AlarmKind::LowBalance,
+                            admission_now_ns / 1_000_000_000,
+                        );
+                        return true;
+                    }
                     funding::icp::run_self_recovery_with_rate(
                         sentinel_id,
                         admission_now_ns / 1_000_000_000,
@@ -335,6 +356,19 @@ pub async fn run(now_secs: u64, _now_ns: u64, sentinel_id: Principal) -> bool {
             };
             match result {
                 Ok(resolved) => apply_recovery_result(resolved.state(), now_secs),
+                Err(funding::icp::FundingError::RuntimeAlreadyHealthy) => {
+                    if state::get_self_recovery_state().is_suppressing_distribution() {
+                        let _ = state::alarms::raise_at(
+                            None,
+                            AlarmKind::SelfRecoveryUnresolved,
+                            now_secs,
+                        );
+                        return false;
+                    }
+                    state::alarms::resolve_at(None, AlarmKind::LowBalance, now_secs);
+                    state::alarms::resolve_at(None, AlarmKind::SelfRecoveryUnresolved, now_secs);
+                    true
+                }
                 Err(_) => {
                     let _ = state::alarms::raise_at(None, AlarmKind::LowBalance, now_secs);
                     false

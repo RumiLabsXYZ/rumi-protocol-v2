@@ -2314,6 +2314,47 @@ fn shared_reserve_icp_only_runtime_recovery_waits_for_exact_runtime_delivery() {
 }
 
 #[test]
+fn shared_reserve_pending_runtime_mint_skips_withdrawal_after_external_recovery() {
+    let (pic, sentinel, signer) = boot_with_funding(40 * T, 10 * T, 900_000_000_000);
+    shared_setup(&pic, 0);
+    set_mock_notify_mode(&pic, principal(CMC), NotifyMode::Processing);
+    run_timer(&pic, sentinel);
+    assert_eq!(mock_count(&pic, ICP_LEDGER, "transfer_delivery_count"), 1);
+    assert_eq!(mock_count(&pic, CMC, "mint_delivery_count"), 0);
+    assert!(!unresolved_operation_ids(&pic, sentinel, signer).is_empty());
+    assert_exact_withdrawals(&pic, &[]);
+
+    // A separate operator has already recovered runtime while the CMC receipt
+    // was pending. Settlement must recheck runtime before withdrawing again.
+    pic.add_cycles(sentinel, 20 * T);
+    let restored_runtime = pic.cycle_balance(sentinel);
+    set_mock_notify_mode(&pic, principal(CMC), NotifyMode::Completed);
+    run_timer(&pic, sentinel);
+    assert_eq!(
+        mock_nat(&pic, CMC, "minted_cycles"),
+        11 * T + 2 * CYCLES_FEE
+    );
+    assert_exact_withdrawals(&pic, &[]);
+    assert!(unresolved_operation_ids(&pic, sentinel, signer).is_empty());
+    assert!(pic.cycle_balance(sentinel) <= restored_runtime);
+    assert!(pic.cycle_balance(sentinel) > restored_runtime - T);
+    let target = principal(SELF_REPORT_TARGETS[0]);
+    assert!(public_topups(&pic, sentinel, target).is_empty());
+
+    // The settled mint leaves no recovery latch that blocks later ordinary
+    // distribution from an independently sufficient deposited cycles balance.
+    set_mock_ledger_balance(&pic, principal(CYCLES_LEDGER), 12 * T + CYCLES_FEE);
+    enable_shared_target(&pic, sentinel, signer);
+    run_timer(&pic, sentinel);
+    assert_exact_withdrawals(&pic, &[2 * T]);
+    let history = public_topups(&pic, sentinel, target);
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].amount_cycles, Nat::from(2 * T));
+    assert!(unresolved_operation_ids(&pic, sentinel, signer).is_empty());
+    assert_eq!(mock_count(&pic, ICP_LEDGER, "transfer_delivery_count"), 1);
+}
+
+#[test]
 fn shared_reserve_lost_mint_receipt_upgrade_reuses_cmc_block_without_second_mint() {
     let (pic, sentinel, signer) = boot_with_funding(40 * T, 10 * T, 20_000 * T);
     shared_setup(&pic, 0);

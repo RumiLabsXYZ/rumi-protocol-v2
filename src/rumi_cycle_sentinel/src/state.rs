@@ -3411,7 +3411,7 @@ mod tests {
         AdvisoryCyclesBalance, AlarmStatus, Criticality, CyclesFundingState,
         CyclesWithdrawSnapshot, Environment, FundingAttemptResultClass, FundingOperationState,
         FundingRailArguments, GlobalPolicyArgs, GovernanceTimelocksArgs, IcpCmcDelivery,
-        IcpCmcSnapshot, ObservationMode, ProposalPayload, PublicTargetState,
+        IcpCmcSnapshot, IcpFundingState, ObservationMode, ProposalPayload, PublicTargetState,
         SelfRecoveryPolicyArgs, TargetArgs, TargetFundingPolicy, TargetFundingPolicyArgs,
         TargetPatch, TargetRegistrationContext,
     };
@@ -4153,6 +4153,59 @@ mod tests {
         assert_eq!(snapshot.delivery, types::IcpCmcDelivery::DirectTopUp);
         assert_eq!(snapshot.memo, crate::icp_cmc::TPUP_MEMO);
         assert_eq!(snapshot.target_canister, target);
+    }
+
+    #[test]
+    fn stored_funding_operation_v2_old_wire_icp_snapshot_decodes_as_direct_and_keeps_refund() {
+        // V2 predates the delivery discriminator. Encode the frozen V2
+        // envelope itself so this proves an actual old wire shape, rather
+        // than relying on Candid to default a missing current record field.
+        let global = test_global_policy(1_000);
+        let target = test_target_principal(8);
+        let current = test_funding_operation(18, target, FundingTrigger::ManualTopup, &global, 100);
+        let legacy = FundingOperationV2 {
+            id: current.id(),
+            target: current.target(),
+            target_registry_revision: current.target_registry_revision(),
+            funding_policy: current.funding_policy().clone(),
+            trigger: current.trigger(),
+            rail_arguments: types::FundingRailArgumentsV2::Icp(types::IcpCmcSnapshotV2 {
+                source_principal: test_sentinel_id(),
+                ledger_principal: types::icp_ledger_principal_for_sentinel(),
+                cmc_principal: crate::icp_cmc::cmc_principal(),
+                source_subaccount: None,
+                cmc_account_identifier: crate::icp_cmc::cmc_subaccount(target),
+                target_canister: target,
+                amount_e8s: 100,
+                fee_e8s: 10,
+                memo: crate::icp_cmc::TPUP_MEMO,
+                created_at_time_ns: 100_000_000_000,
+                rate_xdr_permyriad_per_icp: 10_000,
+                rate_timestamp_secs: 100,
+                expected_cycles: 1_000,
+            }),
+            reserved_amount_cycles: 1_000,
+            state: FundingOperationState::Icp(IcpFundingState::Refunded),
+            attempts: current.attempts().clone(),
+            confirmed_block_index: Some(42),
+            actual_cycles: Some(999),
+            refund_block_index: Some(77),
+            created_at_secs: current.created_at_secs(),
+            updated_at_secs: current.updated_at_secs(),
+        };
+        let bytes = candid::encode_one(&StoredFundingOperation::V2(legacy)).unwrap();
+        let decoded =
+            <StoredFundingOperation as Storable>::from_bytes(Cow::Owned(bytes)).into_current();
+        let snapshot = match decoded.rail_arguments() {
+            types::FundingRailArguments::Icp(snapshot) => snapshot,
+            _ => panic!("legacy ICP operation decoded as the wrong rail"),
+        };
+        assert_eq!(snapshot.delivery, IcpCmcDelivery::DirectTopUp);
+        assert_eq!(snapshot.memo, crate::icp_cmc::TPUP_MEMO);
+        assert_eq!(snapshot.expected_cycles, 1_000);
+        assert_eq!(decoded.refund_block_hint(), Some(77));
+        assert_eq!(decoded.refund_block_index(), Some(77));
+        assert_eq!(decoded.actual_cycles(), Some(999));
     }
 
     #[test]
