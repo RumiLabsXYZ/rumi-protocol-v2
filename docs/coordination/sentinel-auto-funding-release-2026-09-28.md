@@ -1,44 +1,42 @@
 # Cycle Sentinel automatic funding release evidence
 
 Date: 2026-09-28
-Status: Final source frozen; deployment pending verification.
+Status: Source, artifact, tests and two isolated final reviews PASS; bounded publication pending.
 PR: https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/401
 Base: ac59a6519730744dd30c33958b959577dec12123
+Production source: 1ff4225265ea42f8bcabfa819ac1fe5228879658
+Current tested head: 9136011632f90d3694d567b15b13462662ea8b9b
 
-## Authorization and result
+## Authorization and resulting behavior
 
-Rob requested implementation with subagents, activation and publication. He explicitly approved the pushed reserve policy in commit 51f4a20e, SHA-256 a984e3c3f2895cc2f67b84ea18306db31febf86fabff61ba4920801fc4a04d0c. That artifact remains unchanged. No deposit from another wallet was authorized.
+Rob requested implementation with subagents, activation and publication, and explicitly approved the pushed reserve policy in commit 51f4a20e. Its SHA-256 remains a984e3c3f2895cc2f67b84ea18306db31febf86fabff61ba4920801fc4a04d0c. No external-wallet deposit amount was supplied or transferred.
 
-Deposited Cycles Ledger funds pay first after protected reserves and holds. A fresh proven deficit permits an immutable ICP payment and CMC MINT into the Sentinel/default Cycles Ledger account. The separate durable conversion budget bounds new commitments by the governed global cap; actual exact canister withdrawals retain their own caps and cooldowns. Unknown outcomes retain holds, including across upgrade. Legacy direct top-up operations retain their frozen semantics.
+Deposited Cycles Ledger funds pay first after the protected floor, holds and fees. A fresh proven deficit permits an immutable ICP payment and CMC MINT into the Sentinel/default Cycles Ledger account. A separate durable conversion budget bounds new commitments by the governed global cap; exact target withdrawals keep their own caps and cooldowns. Unknown outcomes retain holds across upgrades. Legacy direct top-up operations retain frozen semantics.
 
-The telemetry page has Deposit cycles and Deposit ICP cards above the registry, receiving-account copy buttons, raw/spendable/protected balances, timestamps, conversion status, scheduled checks and readable target policies. Runtime fuel is separate. The correct legacy ICP destination is a907060d486046ae0a21bcca2a4a2cbd8c48a9c4a7ab31ffbd06a4b5a20a1e2e, verified through SDK and independent SHA224/CRC32.
+The telemetry page adds prominent Deposit cycles and Deposit ICP cards above the registry, receiving-account copy buttons, raw/spendable/protected balances, timestamps, conversion status, scheduled checks and readable target rules. Runtime fuel is separate. The receiving principal/default account is joh3a-5aaaa-aaaap-quy6a-cai. The legacy ICP receiving account is a907060d486046ae0a21bcca2a4a2cbd8c48a9c4a7ab31ffbd06a4b5a20a1e2e, verified through the SDK and independent SHA224/CRC32 derivation.
 
-## Deterministic evidence
+## Deterministic proof
 
-- Frozen full backend lib suite: 607 passed, 0 failed, terminal exit 0, 238.59s; /private/tmp/rumi-sentinel-final-lib.log.
-- Final focused review regressions: 6/6 passed, terminal exit 0; /private/tmp/rumi-sentinel-final-review-focused.log.
-- Frontend funding tests: 10/10 passed, terminal exit 0; /private/tmp/sentinel-frontend-test-final.log.
-- Frontend production build and full asset recipe: terminal exit 0; /private/tmp/sentinel-frontend-build-final3.log and /private/tmp/sentinel-frontend-recipe-build.log. Domain/icon files present in dist.
-- Scoped format and whitespace checks passed. Canonical DID regenerated into JS/TS declarations; didc backwards service check against origin/main passed.
-- Full frontend typecheck retains 28 baseline errors in 23 unrelated files; telemetry and funding helper have no errors. /private/tmp/sentinel-frontend-check.log.
-- Built desktop and 390x844 browser proof: correct destinations, missing balances unavailable, panel fits; /private/tmp/sentinel-pr401-preview-final.png and /private/tmp/sentinel-pr401-preview-mobile.png. Both receiving-address copy buttons independently verified. Old live backend decode errors are expected until backend-first deployment.
-- Final production artifact and 15 new real timer/PocketIC flows plus complete integration suite remain pending. Cancelled/superseded builds are not passing evidence.
+- Backend: 608 passed, 0 failed, terminal exit 0, 205.10s, session47715; /private/tmp/rumi-sentinel-round2-final-lib.log. Focused legacy V2 wire and direct-rail headroom regressions also passed, session72109; /private/tmp/rumi-sentinel-round2b-focused.log.
+- Final test fixtures built successfully, session59508; /private/tmp/sentinel-flow-fixture-build-round2-final.log. Official PocketIC server7.0.0 matches pinned crate6.0.0; version, official source and hashes are in /private/tmp/sentinel-pocketic7-provenance.json. Test-only commit61fb4fad adds a documented optional managed-server URL; commit91360116 corrects a stale baseline manifest assertion to the existing four signers/threshold2. Neither changes production source or dependencies.
+- Full36 real integration cases, including16 new timer scenarios, passed:36passed,0failed,0ignored, terminal exit0,1028.44s, session51505, bounded2 independent test threads; /private/tmp/sentinel-flow-full-server7-two-threads-final.log. Fixture hashes are in /private/tmp/sentinel-flow-final-fixtures.json. The corrected manifest case and separate real-timer protected-floor case also passed. Failed or cancelled earlier attempts are not passing evidence.
+- Funding-page tests: 10/10 passed; /private/tmp/sentinel-frontend-test-final.log. Final helper7/7 passed after the freshness display alignment, session82027; /private/tmp/sentinel-frontend-test-final4.log.
+- Full production frontend asset recipe passed, session85457; /private/tmp/sentinel-frontend-recipe-debug.log. Domain/icon files are present in dist; no package or lockfile changes were made.
+- Whole frontend typecheck retains28 baseline errors in23 unrelated files; telemetry and the funding helper have no errors. /private/tmp/sentinel-frontend-check.log.
+- Built desktop/mobile layout and both receiving-account copy buttons were verified; /private/tmp/sentinel-pr401-preview-final.png and /private/tmp/sentinel-pr401-preview-mobile-final.png. Preview decode errors against the old live backend are expected until the backend-first upgrade.
+- Scoped format and whitespace checks passed. Canonical Candid and generated JS/TS bindings agree; old-service compatibility passed.
+- Production build session32670 exited0; /private/tmp/sentinel-production-build-round2.log. Raw Wasm SHA256 c19ea76d19abf583524d61a69143988ba762c5887d3df61bbd1c106ddb093e2f, 2,923,342bytes; executable code section2,381,832bytes. Install gzip SHA256 df085a633822aa84a611f9cdc9065c5422230c7fff920eaefe06dadea07f04fe, 731,870bytes, exact raw roundtrip. Strict extracted Candid equality both directions, backwards service compatibility and endpoint checker exited0; only five explicit CDK/lifecycle exports are hidden, with no test controls. /private/tmp/sentinel-production-artifact-final.json. Production is unchanged after the two test-only commits.
 
 ## Independent review
 
-Two isolated first-round reviewers returned FAIL with concrete issues. Accepted fixes cover:
+Two isolated first-round reviews identified shared floor/partial-deficit validation, low-runtime source refresh, pending-ICP cache double accounting and stale-clock admission issues. Two isolated second-round reviews identified a nested V2 wire migration mismatch, post-await clock handling and recovery delivery after external runtime restoration. All accepted findings were repaired and covered by focused regressions and real-timer cases. The frozen V2 nested wire explicitly migrates to DirectTopUp. New admission and settlement use actual post-await clocks; immutable paid retries remain unchanged. A mint completed after external runtime restoration retains reserve and opens no synthetic runtime withdrawal/history.
 
-1. Shared mints must allow floor and partial deficits; old 110% minimum remains only for DirectTopUp. Constructor, custom decode and whole-state validation now agree.
-2. Low-runtime self recovery refreshes its source before new admission at the 3,600-second production cadence and rechecks current policy/runtime after the await.
-3. A pending ICP debit preserves its pre-payment cache until settlement; a post-payment refresh cannot subtract the same payment twice.
-4. New conversion admission uses the actual IC clock after rate lookup; already-paid retry snapshots remain unchanged.
+Both fresh isolated third-round reviewers returned PASS after independently inspecting the complete36-case result, final artifact identity, source, approved policy and test-only harness changes. No confirmed blocking finding remains. Readable final reports are docs/coordination/sentinel-auto-funding-review-a3-2026-09-28.md and docs/coordination/sentinel-auto-funding-review-b3-2026-09-28.md. A later-target FutureCache can defer additional targets to the next scheduled pass after a mint; this fails closed and is optional throughput backlog, not a release gate. Fixed raw-cache age display under future policy changes and comment cleanup are also deferred optional notes.
 
-Reports: /private/tmp/sentinel-pr401-review-a1.md and /private/tmp/sentinel-pr401-review-b1.md. Fresh isolated reviews of the repaired output remain pending; no readiness claim is made from announced repairs alone.
+## Mainnet preflight and release scope
 
-## Mainnet preflight and bounded release
+Read-only snapshot: /private/tmp/sentinel-live-final-preflight/snapshot.json. Fresh raw status proof supersedes a controller transcription typo in that snapshot: /private/tmp/sentinel-immediate-before-status.txt, /private/tmp/sentinel-frontend-immediate-before-status.txt and /private/tmp/sentinel-release-before-authoritative.json. Governance, public targets and unresolved operations were refreshed successfully into /private/tmp/sentinel-immediate-before-proposals.json, targets.json and unresolved.json. Sentinel joh3a-5aaaa-aaaap-quy6a-cai is Running, old module18e39e8ad9eae91be9f52a2e5ad349877f9fc9855d581d2a4c13b1d9b9049626; robvector is signer/controller. Frontend tcfua-yaaaa-aaaap-qrd7q-cai is Running, module04e565b3425fe7510ee16b02adcfe3f01abc9a2725c82a21cb08969241debd62; rumi_identity is asset controller. Preserve the exact four Sentinel and five frontend controllers, all signers and policies.
 
-Sentinel joh3a-5aaaa-aaaap-quy6a-cai is Running; module 18e39e8ad9eae91be9f52a2e5ad349877f9fc9855d581d2a4c13b1d9b9049626. robvector is a signer/controller. vault_frontend tcfua-yaaaa-aaaap-qrd7q-cai is Running; asset-controller identity is rumi_identity and module 04e565b3425fe7510ee16b02adcfe3f01abc9a2725c82a21cb08969241debd62. Controllers/signers/policies are preserved.
+All16 registered targets already have enabled and auto_topup true; threshold3T, refill2T, cap6T per24h, cooldown3,600seconds. Global40T per24h, sample3,600seconds, stale7,200seconds, protected Cycles Ledger floor10T, ICP floor0, runtime self threshold/refill1T and self cap10T. Timelocks remain unchanged. Stopped and uninstalled targets remain ineligible. All17 proposals were executed, no funding operations were unresolved, and both source-ledger balances were0 at preflight and at the fresh direct ledger queries before publication (/private/tmp/sentinel-immediate-before-cycles-ledger.json and /private/tmp/sentinel-immediate-before-icp-ledger.json).
 
-All 16 registered targets already have enabled and auto_topup true; threshold 3T / refill 2T / cap 6T per 24h / cooldown 3,600 seconds. Global 40T per 24h, sample interval 3,600 seconds, stale after 7,200 seconds, protected Cycles Ledger floor 10T, ICP floor 0, runtime self threshold/refill 1T and self daily cap 10T. Stopped and uninstalled targets remain ineligible. All 17 governance proposals executed, no unresolved funding operations, both source-ledger balances 0. Read-only snapshots: /private/tmp/sentinel-live-preupgrade.txt and /private/tmp/sentinel-release-prep.txt.
-
-After green source/review/artifact gates, merge PR 401. Build/inspect the production Sentinel Wasm without test endpoints, extract/compare Candid and record hashes. Upgrade only rumi_cycle_sentinel in mainnet-live using robvector, mode upgrade, args '()'. Never reinstall or use the stale init record. Publish vault_frontend assets with explicit icp sync using rumi_identity, without changing its Wasm. Verify deployed hashes, live public fields, configuration, controllers, flags and served browser bundle. Empty source accounts mean automation awaits a user deposit; local proof is not mainnet mint/delivery proof.
+After final green verification, merge the exact reviewed head of PR401, then upgrade only rumi_cycle_sentinel in mainnet-live using robvector and the verified gzip. Use zero-argument post_upgrade, never reinstall or stale InitArgs. Publish vault_frontend assets only using icp sync and rumi_identity, preserving its Wasm. Verify deployed hash, new public fields, policy/controller preservation and actual served browser UI. Empty source accounts mean active automation awaits a user deposit; local simulations are not mainnet mint/delivery proof.

@@ -119,11 +119,11 @@ Authorization: Rob requested implementation, subagents, deployment, and activati
 
 | ID | State | Owner | Task | Depends on | Evidence / blocker |
 | --- | --- | --- | --- | --- | --- |
-| CS-60 | Review | backend worker | Durable ICP reserve refill, cycles-first funding, runtime recovery, public funding status | Approved policy at 51f4a20e | Frozen repaired source: 607 lib tests and six focused review regressions pass; final PocketIC flows pending |
-| CS-61 | Review | frontend worker | Obvious deposit destinations, balances, funding status, readable target rules | CS-60 interface | 10 focused tests, production build and full asset recipe pass; built desktop/mobile and account-copy proof pass; live browser proof pending |
-| CS-62 | Done | operations investigator | Verify current live policy, signers, mappings, deploy recipe and activation path | None | /private/tmp/sentinel-live-before.txt; /private/tmp/sentinel-release-prep.txt; official PocketIC 6.0 runtime prepared |
-| CS-63 | In progress | independent reviewers | Security, stable-state, interface and product review | CS-60, CS-61 | First isolated round identified four confirmed issues, repaired; fresh round and final artifact/PocketIC evidence pending |
-| CS-64 | Ready | coordinator | Merge, deploy, sync assets, activate and verify live | CS-63 | Exact artifact/controller/activation proof required |
+| CS-60 | Done | backend worker | Durable ICP reserve refill, cycles-first funding, runtime recovery, public funding status | Approved policy at 51f4a20e | Frozen production source1ff42252:608 lib and full36 integration tests pass, including16 new real-timer flows; exact production artifact verified |
+| CS-61 | Done | frontend worker | Obvious deposit destinations, balances, funding status, readable target rules | CS-60 interface | 10 focused tests, production build and full asset recipe pass; built desktop/mobile and account-copy proof pass; live browser proof pending |
+| CS-62 | Done | operations investigator | Verify current live policy, signers, mappings, deploy recipe and activation path | None | /private/tmp/sentinel-live-before.txt; /private/tmp/sentinel-release-prep.txt; official PocketIC server7.0.0 matches pinned crate6.0.0; managed local server used |
+| CS-63 | Done | independent reviewers | Security, stable-state, interface and product review | CS-60, CS-61 | Full36 integration suite and608 backend tests passed; two fresh isolated final reviewers returned PASS; readable reports committed with release evidence |
+| CS-64 | In progress | coordinator | Merge, deploy, sync assets, activate and verify live | CS-63 | Source/review/artifact gates PASS; coordinator executing exact-head merge, Sentinel upgrade, assets sync and authoritative/browser readback |
 
 Model selection: Sonnet CLI reports loggedIn=false. Native Terra is selected for CS-60 due to durable token conversion, stable-state, async retries and ICP-only runtime recovery complexity. Native Luna is selected for bounded frontend and operations work. Coordinator owns generated interfaces and release.
 
