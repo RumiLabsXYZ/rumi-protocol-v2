@@ -2020,10 +2020,38 @@ fn live_stable_bounds_fill_prune_reject_and_survive_upgrade() {
 }
 
 #[test]
-fn checked_in_sentinel_init_is_semantically_invalid_fail_closed() {
+fn checked_in_sentinel_init_pins_reviewed_signers_and_threshold() {
     let manifest = include_str!("../../../icp.yaml");
-    assert!(manifest.contains("signers = vec {};"));
-    assert!(manifest.contains("approval_threshold = 0 : nat32;"));
+    let sentinel = manifest
+        .split_once("  - name: rumi_cycle_sentinel\n")
+        .expect("Sentinel manifest entry")
+        .1
+        .split("\n  - name:")
+        .next()
+        .unwrap();
+    let signer_block = sentinel
+        .split_once("signers = vec {")
+        .expect("Sentinel signer vector")
+        .1
+        .split_once("};")
+        .expect("Sentinel signer vector terminator")
+        .0;
+    let signers: Vec<Principal> = signer_block
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("principal \""))
+        .map(|line| principal(line.split_once('"').expect("signer principal").0))
+        .collect();
+    let expected: Vec<Principal> = [
+        "ft3ml-xex6k-ppiwj-ie6tc-zwkgb-ybm2x-eat4a-5p2jg-auzl3-latf4-aae",
+        "zegjz-jpi6k-qkand-c2bgf-qw6za-xk4si-nz3gx-qzzia-fk6fg-snepb-tae",
+        "stzp3-bnvwm-zqzjh-o6mv6-ci53m-wj5k6-xyhe7-fnyp2-c64o3-7vokj-bqe",
+        "4alqm-afk6k-bybok-qvdyo-cnv7y-klel6-xm2pz-7h7jk-utmys-kttf3-vqe",
+    ]
+    .into_iter()
+    .map(principal)
+    .collect();
+    assert_eq!(signers, expected);
+    assert!(sentinel.contains("approval_threshold = 2 : nat32;"));
 }
 
 // Shared-reserve funding tests use the actual maintenance timer and opt-in
