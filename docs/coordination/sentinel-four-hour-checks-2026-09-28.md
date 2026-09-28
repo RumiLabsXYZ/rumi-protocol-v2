@@ -16,7 +16,7 @@ Creating and approving the proposal records one signer approval and cannot activ
 
 The page shows the actual active interval and actual next scheduled deadline. The four-hour policy is pending until authoritative execution; the UI must not claim it is active earlier.
 
-Verification and publication evidence will be appended after implementation.
+Publication and final live evidence are recorded in [the live-proof report](sentinel-cadence-live-proof-2026-09-28.md).
 
 ## Live cadence proposal
 
@@ -45,3 +45,7 @@ Proposed durable persona lesson: publish the actual armed timer deadline as tran
 The final full real-canister suite terminated with exit 0: **40 passed, 0 failed**, 1,288.85 seconds, session42930. It used frozen source `77f8445000342e13fcb0978f78d006464d8cac94`, Sentinel test fixture `bc15f76e37ce562f7f757fe03539a4f83979f704a058a96e62f0dbb02e2ef374`, and the unchanged mock `77fed5805cdaabc2f29dcd6825181a341a787e8c73721713aaf0b21860565a36`. All four new maintenance regressions and all existing funding/recovery regressions passed. Production raw/gzip hashes were rechecked before publication and match the recorded build.
 
 The PR has no configured GitHub status checks; the exact local terminal checks and independent reviews form this release evidence. Mainnet publication remains limited to upgrading Sentinel and syncing frontend assets; no other canister deployment, controller change or target-policy mutation is included.
+
+## Mainnet publication
+
+PR406 is merged. Sentinel upgrade and frontend asset publication both succeeded; live hashes and the public served version match the tested artifacts. A signer-authenticated immediate mainnet check returned Ok, advanced observations and preserved the next scheduled deadline. All16 target policies and governance records were preserved; receiving balances remain0 cycles/0 ICP, so no target top-up occurred. The live public page shows the receiving cards and hourly cadence. Four-hour proposal17 still needs a second signer and execution after its24-hour waiting period. Authenticated browser-button proof awaits the user's OISY sign-in. See [the exact release and live evidence](sentinel-cadence-live-proof-2026-09-28.md).
