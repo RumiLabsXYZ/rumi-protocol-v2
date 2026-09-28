@@ -1,0 +1,18 @@
+(record {
+  global_daily_cap_cycles = 40000000000000 : nat;
+  sample_interval_secs = 14400 : nat64;
+  stale_after_secs = 28800 : nat64;
+  min_icp_reserve_e8s = 0 : nat;
+  timelocks = record {
+    unpause_secs = 86400 : nat64;
+    spend_policy_secs = 86400 : nat64;
+    target_registry_secs = 86400 : nat64;
+    signer_change_secs = 172800 : nat64;
+  };
+  self_recovery_policy = record {
+    refill_cycles = 1000000000000 : nat;
+    low_balance_threshold_cycles = 1000000000000 : nat;
+    daily_cap_cycles = 10000000000000 : nat;
+    protected_reserve_cycles = 10000000000000 : nat;
+  };
+})

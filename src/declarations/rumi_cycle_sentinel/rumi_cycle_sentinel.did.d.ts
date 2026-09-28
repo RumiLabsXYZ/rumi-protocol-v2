@@ -215,6 +215,8 @@ export interface InitArgs {
   'signers' : Array<Principal>,
   'global_policy' : GlobalPolicyArgs,
 }
+export type MaintenanceResult = { 'Ok' : null } |
+  { 'Err' : string };
 export type ObservationMode = { 'SelfReport' : null } |
   { 'BlackholeRelay' : null } |
   { 'Unobserved' : null };
@@ -262,12 +264,14 @@ export interface PublicOverview {
   'low_count' : bigint,
   'runtime_cycles' : bigint,
   'last_sample_at_secs' : [] | [bigint],
+  'sample_interval_secs' : [] | [bigint],
   'unobserved_count' : bigint,
   'stopped_count' : bigint,
   'funding_account_owner' : Principal,
   'protected_self_reserve_cycles' : [] | [bigint],
   'cycles_ledger_balance_cycles' : [] | [bigint],
   'shared_reserve_conversion_status' : PublicFundingStatus,
+  'stale_after_secs' : [] | [bigint],
   'icp_available_e8s' : [] | [bigint],
   'cycles_ledger_available_cycles' : [] | [bigint],
   'target_count' : bigint,
@@ -497,6 +501,7 @@ export interface _SERVICE {
   'propose_unpause_target' : ActorMethod<[Principal], Result_10>,
   'propose_update_target' : ActorMethod<[Principal, TargetPatch], Result_10>,
   'resolve_unknown_as_spent' : ActorMethod<[bigint], Result_1>,
+  'run_maintenance_now' : ActorMethod<[], MaintenanceResult>,
 }
 export declare const idlFactory: IDL.InterfaceFactory;
 export declare const init: (args: { IDL: typeof IDL }) => IDL.Type[];

@@ -5370,6 +5370,12 @@ pub struct PublicOverview {
     /// live work. It intentionally exposes no operation id, block index, or
     /// reconciliation evidence.
     pub shared_reserve_conversion_status: PublicFundingStatus,
+    /// The live governed maintenance cadence.  Optional so older consumers
+    /// can distinguish an unavailable projection from a real zero interval.
+    pub sample_interval_secs: Option<u64>,
+    /// The live governed freshness allowance used when rendering cached
+    /// telemetry.  It is distinct from the shorter ICP source-cache bound.
+    pub stale_after_secs: Option<u64>,
     pub alarm_count: u64,
     pub last_sample_at_secs: Option<u64>,
     pub next_sample_at_secs: Option<u64>,
@@ -8418,6 +8424,8 @@ mod tests {
             protected_self_reserve_cycles: Some(Nat::from(300_000u64)),
             min_icp_reserve_e8s: Some(Nat::from(100_000_000u64)),
             shared_reserve_conversion_status: PublicFundingStatus::Ready,
+            sample_interval_secs: Some(300),
+            stale_after_secs: Some(600),
             alarm_count: 3,
             last_sample_at_secs: Some(100),
             next_sample_at_secs: Some(400),

@@ -258,12 +258,14 @@ export const idlFactory = ({ IDL }) => {
     'low_count' : IDL.Nat64,
     'runtime_cycles' : IDL.Nat,
     'last_sample_at_secs' : IDL.Opt(IDL.Nat64),
+    'sample_interval_secs' : IDL.Opt(IDL.Nat64),
     'unobserved_count' : IDL.Nat64,
     'stopped_count' : IDL.Nat64,
     'funding_account_owner' : IDL.Principal,
     'protected_self_reserve_cycles' : IDL.Opt(IDL.Nat),
     'cycles_ledger_balance_cycles' : IDL.Opt(IDL.Nat),
     'shared_reserve_conversion_status' : PublicFundingStatus,
+    'stale_after_secs' : IDL.Opt(IDL.Nat64),
     'icp_available_e8s' : IDL.Opt(IDL.Nat),
     'cycles_ledger_available_cycles' : IDL.Opt(IDL.Nat),
     'target_count' : IDL.Nat64,
@@ -534,6 +536,7 @@ export const idlFactory = ({ IDL }) => {
     'Err' : AuthenticatedQueryError,
   });
   const Result_10 = IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : GovernanceError });
+  const MaintenanceResult = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text });
   return IDL.Service({
     'acknowledge_alarm' : IDL.Func([IDL.Nat64], [Result], []),
     'approve_proposal' : IDL.Func([IDL.Nat64], [Result], []),
@@ -608,6 +611,7 @@ export const idlFactory = ({ IDL }) => {
         [],
       ),
     'resolve_unknown_as_spent' : IDL.Func([IDL.Nat64], [Result_1], []),
+    'run_maintenance_now' : IDL.Func([], [MaintenanceResult], []),
   });
 };
 export const init = ({ IDL }) => {

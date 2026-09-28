@@ -194,6 +194,34 @@ fn list_unresolved_funding_operations(
     public_api::list_unresolved_funding_operations_at(ic_cdk::caller(), cursor, limit)
 }
 
+fn require_maintenance_signer(
+    caller: Principal,
+    is_signer: impl FnOnce() -> bool,
+) -> Result<(), String> {
+    if caller == Principal::anonymous() {
+        return Err("anonymous caller not allowed".to_string());
+    }
+    if !is_signer() {
+        return Err(format!("{:?}", governance::GovernanceError::NotSigner));
+    }
+    Ok(())
+}
+
+/// Requests one full maintenance pass using the timer's existing durable
+/// policy, funding, and recovery path.  It neither changes the timer nor
+/// overrides caps, cooldowns, reserves, or governance configuration.
+#[ic_cdk::update]
+async fn run_maintenance_now() -> Result<(), String> {
+    let caller = ic_cdk::caller();
+    // Authenticate before acquiring the shared work guard or beginning any
+    // observation/funding work.  Anonymous traffic therefore cannot start a
+    // maintenance pass or cause source calls by repeatedly requesting one.
+    require_maintenance_signer(caller, || state::is_signer(caller))?;
+    sampler::run_maintenance_now()
+        .await
+        .map_err(|err| err.to_string())
+}
+
 /// Manual maintenance uses the same Cycles Ledger state machine as the timer.
 /// The timer may additionally choose the ICP/CMC fallback after a proven
 /// no-spend result; it never trusts a caller-provided rail or amount.
@@ -431,5 +459,39 @@ mod candid_tests {
                 "rumi_cycle_sentinel.did is out of sync with the canister interface:\n{err}\n\n{generated}"
             )
         });
+    }
+}
+
+#[cfg(test)]
+mod maintenance_authorization_tests {
+    use super::*;
+
+    #[test]
+    fn maintenance_rejects_anonymous_before_signer_lookup() {
+        let mut signer_lookup_called = false;
+        assert_eq!(
+            require_maintenance_signer(Principal::anonymous(), || {
+                signer_lookup_called = true;
+                true
+            }),
+            Err("anonymous caller not allowed".to_string())
+        );
+        assert!(!signer_lookup_called);
+    }
+
+    #[test]
+    fn maintenance_rejects_non_signers() {
+        assert_eq!(
+            require_maintenance_signer(Principal::from_slice(&[7]), || false),
+            Err(format!("{:?}", governance::GovernanceError::NotSigner))
+        );
+    }
+
+    #[test]
+    fn maintenance_allows_signers() {
+        assert_eq!(
+            require_maintenance_signer(Principal::from_slice(&[7]), || true),
+            Ok(())
+        );
     }
 }
