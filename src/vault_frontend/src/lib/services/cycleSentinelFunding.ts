@@ -8,6 +8,8 @@ export const CYCLES_LEDGER_PRINCIPAL = 'um5iw-rqaaa-aaaaq-qaaba-cai';
 export const ICP_LEDGER_PRINCIPAL = 'ryjl3-tyaaa-aaaaa-aaaba-cai';
 
 export type FundingOverview = PublicOverview & {
+	'sample_interval_secs'?: [] | [bigint];
+	'stale_after_secs'?: [] | [bigint];
 	'funding_account_owner'?: Principal;
 	'cycles_ledger_balance_cycles'?: [] | [bigint];
 	'cycles_ledger_balance_as_of_secs'?: [] | [bigint];
@@ -31,6 +33,22 @@ export const optionalBigInt = (value: [] | [bigint] | undefined): bigint | undef
 
 export function fundingOverview(overview: PublicOverview): FundingOverview {
 	return overview as FundingOverview;
+}
+
+/** The published schedule, with no assumed cadence on older backends. */
+export function checkIntervalLabel(intervalSecs: bigint | undefined): string {
+	if (intervalSecs === undefined || intervalSecs < 1n) return 'Unavailable';
+	const [amount, unit] = intervalSecs % 3600n === 0n
+		? [intervalSecs / 3600n, 'hour'] as const
+		: intervalSecs % 60n === 0n
+			? [intervalSecs / 60n, 'minute'] as const
+			: [intervalSecs, 'second'] as const;
+	return `Every ${amount.toString()} ${unit}${amount === 1n ? '' : 's'}`;
+}
+
+/** Older backends did not publish the configured cycles-cache freshness. */
+export function cyclesBalanceMaxAgeSecs(overview: PublicOverview): bigint {
+	return optionalBigInt(fundingOverview(overview).stale_after_secs) ?? 7200n;
 }
 
 export function fundingTarget(row: PublicTargetRow): FundingTargetRow {

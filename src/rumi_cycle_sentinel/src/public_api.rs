@@ -3,12 +3,12 @@
 use candid::{CandidType, Nat, Principal};
 use serde::{Deserialize, Serialize};
 
-use crate::state;
 use crate::types::{
     self, Criticality, Environment, FundingOperation, ObservationMode, PageError, PermissionsView,
     ProposalRecord, PublicAlarm, PublicOverview, PublicPage, PublicTargetRow, PublicTargetState,
     RecentTopups, Sample, TargetRecord,
 };
+use crate::{sampler, state};
 
 const CURSOR_MASK: u64 = 0x9e37_79b9_7f4a_7c15;
 
@@ -229,15 +229,14 @@ fn target_row(target: &TargetRecord, now_secs: u64) -> PublicTargetRow {
     row.stale_for_secs = row
         .last_success_at_secs
         .map(|at| now_secs.saturating_sub(at));
+    // A target's next observation is the shared maintenance timer, not a
+    // target-local arithmetic projection from its last sample.  In
+    // particular, an authorized manual check updates the latter without
+    // moving the former.
     row.next_sample_at_secs = target
         .enabled()
-        .then_some(sample.as_ref())
-        .flatten()
-        .map(|sample| {
-            sample
-                .timestamp_secs
-                .saturating_add(state::global_config().global_policy.sample_interval_secs())
-        });
+        .then(sampler::next_scheduled_check_at_secs)
+        .flatten();
     row
 }
 
@@ -375,9 +374,11 @@ pub fn get_public_overview_at(now_secs: u64) -> PublicOverview {
             state::global_config().global_policy.min_icp_reserve_e8s(),
         )),
         shared_reserve_conversion_status,
+        sample_interval_secs: Some(state::global_config().global_policy.sample_interval_secs()),
+        stale_after_secs: Some(state::global_config().global_policy.stale_after_secs()),
         alarm_count: 0,
         last_sample_at_secs: None,
-        next_sample_at_secs: None,
+        next_sample_at_secs: sampler::next_scheduled_check_at_secs(),
     };
     for target in &targets {
         let row = target_row(target, now_secs);
@@ -393,7 +394,9 @@ pub fn get_public_overview_at(now_secs: u64) -> PublicOverview {
             overview.total_observed_cycles += balance;
         }
         overview.last_sample_at_secs = overview.last_sample_at_secs.max(row.last_success_at_secs);
-        overview.next_sample_at_secs = overview.next_sample_at_secs.max(row.next_sample_at_secs);
+        // The global overview reports the actual armed runtime timer.  Do not
+        // infer it from per-target observations: manual maintenance updates
+        // those observations but deliberately never postpones this deadline.
     }
     overview.alarm_count = state::list_alarms_after(None, types::MAX_ALARMS)
         .iter()

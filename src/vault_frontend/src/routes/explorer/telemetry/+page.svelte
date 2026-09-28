@@ -7,6 +7,8 @@
   import { targetStateLabel } from '$lib/services/cycleSentinelTelemetry';
   import {
     ageLabel,
+    checkIntervalLabel,
+    cyclesBalanceMaxAgeSecs,
     CYCLES_LEDGER_PRINCIPAL,
     ICP_LEDGER_PRINCIPAL,
     formatIcp,
@@ -56,6 +58,7 @@
   let signer = false;
   let operatorChecked = false;
   let checkingOperatorAccess = false;
+  let checkingNow = false;
   let checkedSession: string | undefined;
   let operatorAccessEpoch = 0;
   let observedWalletSession: string | undefined;
@@ -219,6 +222,7 @@
 
   function invalidateOperatorAccess(): void {
     operatorAccessEpoch += 1;
+    actionMessage = '';
     signer = false;
     operatorChecked = false;
     checkingOperatorAccess = false;
@@ -335,7 +339,8 @@
   $: icpAccountText = fundingPrincipal ? legacyIcpAccountIdentifier(fundingPrincipal) : 'Unavailable';
   $: fundingCyclesBalance = funding ? fundingOptionalBigInt(funding.cycles_ledger_balance_cycles) : undefined;
   $: fundingCyclesBalanceAsOf = funding ? fundingOptionalBigInt(funding.cycles_ledger_balance_as_of_secs) : undefined;
-  $: fundingCyclesBalanceStale = fundingCyclesBalanceAsOf !== undefined && isStale(fundingCyclesBalanceAsOf, undefined, 7200n);
+  $: fundingCyclesBalanceStale = fundingCyclesBalanceAsOf !== undefined && !!snapshot
+    && isStale(fundingCyclesBalanceAsOf, undefined, cyclesBalanceMaxAgeSecs(snapshot.overview));
   $: fundingCyclesAvailable = funding ? fundingOptionalBigInt(funding.cycles_ledger_available_cycles) : undefined;
   $: fundingProtectedCycles = funding ? fundingOptionalBigInt(funding.protected_self_reserve_cycles) : undefined;
   $: fundingIcpBalance = funding ? fundingOptionalBigInt(funding.icp_ledger_balance_e8s) : undefined;
@@ -344,6 +349,7 @@
   $: fundingIcpAvailable = funding ? fundingOptionalBigInt(funding.icp_available_e8s) : undefined;
   $: fundingMinIcpReserve = funding ? fundingOptionalBigInt(funding.min_icp_reserve_e8s) : undefined;
   $: fundingConversionStatus = funding ? variantLabel(funding.shared_reserve_conversion_status) : 'Unavailable';
+  $: automaticCheckCadence = checkIntervalLabel(funding ? fundingOptionalBigInt(funding.sample_interval_secs) : undefined);
   $: fundingNextCheck = snapshot ? nextCheckLabel(optional(snapshot.overview.next_sample_at_secs)) : 'Unavailable';
   $: fundingUnavailable = !!funding
     && fundingCyclesBalance === undefined
@@ -400,6 +406,38 @@
     }
   }
 
+  async function runCheckNow(): Promise<void> {
+    if (checkingNow) return;
+    actionMessage = '';
+    authError = '';
+    try { assertCurrentSigner(); }
+    catch (error) { authError = error instanceof Error ? error.message : String(error); return; }
+    const authenticated = actor!;
+    const session = checkedSession;
+    const epoch = operatorAccessEpoch;
+    const checkSessionIsCurrent = (): boolean => epoch === operatorAccessEpoch
+      && session === currentWalletSession()
+      && checkedSession === session
+      && actor === authenticated
+      && signer;
+    checkingNow = true;
+    try {
+      await sentinelManagement.runMaintenanceNow(authenticated);
+      if (!checkSessionIsCurrent()) return;
+      assertCurrentSigner();
+      await refresh();
+      if (!checkSessionIsCurrent()) return;
+      assertCurrentSigner();
+      actionMessage = publicError
+        ? 'Check completed. The latest telemetry could not be loaded; refresh telemetry to try again.'
+        : 'Check completed. Telemetry refreshed; top-up results appear below.';
+    } catch (error) {
+      if (checkSessionIsCurrent()) authError = error instanceof Error ? error.message : String(error);
+    } finally {
+      checkingNow = false;
+    }
+  }
+
   async function run(action: () => Promise<unknown>): Promise<void> {
     actionMessage = '';
     authError = '';
@@ -437,7 +475,20 @@
 
 <svelte:head><title>Cycle Sentinel Telemetry | Rumi</title></svelte:head>
 <section class="telemetry-page">
-  <header class="hero"><div><p class="eyebrow">RUMI OPERATIONS</p><h1>Cycle Sentinel</h1><p class="lede">Public runtime health and auditable cycle maintenance. Operator controls appear only after the canister confirms signer permission.</p></div><button on:click={refresh} disabled={loading}>Refresh telemetry</button></header>
+  <header class="hero">
+    <div class="hero-copy"><p class="eyebrow">RUMI OPERATIONS</p><h1>Cycle Sentinel</h1><p class="lede">Public runtime health and auditable cycle maintenance. Operator controls appear only after the canister confirms signer permission.</p></div>
+    <div class="check-controls">
+      <p class="check-schedule">Automatic checks: <strong>{automaticCheckCadence}</strong></p>
+      <div class="check-buttons">
+        <button on:click={refresh} disabled={loading || checkingNow}>{loading ? 'Refreshing telemetry…' : 'Refresh telemetry'}</button>
+        {#if signer && actor}
+          <button class="run-check" on:click={runCheckNow} disabled={checkingNow || loading} aria-describedby="manual-check-description">{checkingNow ? 'Checking now…' : 'Run check now'}</button>
+        {/if}
+      </div>
+      <p class="fine-print">Refresh telemetry reads saved results.</p>
+      {#if signer && actor}<p id="manual-check-description" class="fine-print">Run check now checks balances immediately and may top up canisters under the current thresholds and spending limits.</p>{/if}
+    </div>
+  </header>
   {#if publicError}<div class="notice error" role="alert">Public telemetry unavailable: {publicError}</div>{/if}
   {#if authError}<div class="notice error" role="alert">Operator query/action: {authError}</div>{/if}
   {#if actionMessage}<div class="notice success">{actionMessage}</div>{/if}
@@ -507,5 +558,6 @@
 
 <style>
   .telemetry-page{max-width:1120px;margin:0 auto;color:var(--rumi-text-primary)}.hero{display:flex;align-items:flex-end;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-bottom:2rem}.hero h1{margin:.1rem 0;font-size:2.5rem}.lede{max-width:700px;color:var(--rumi-text-secondary)}.eyebrow{color:var(--rumi-teal);font-size:.72rem;letter-spacing:.14em}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:.75rem;margin-bottom:1rem}.stats div,article,.operator,.login-note{padding:1rem;background:var(--rumi-bg-surface-1);border:1px solid var(--rumi-border);border-radius:.5rem}.stats span,.muted,small{display:block;color:var(--rumi-text-muted);font-size:.78rem}.stats strong{font-size:1.25rem}.grid{display:grid;grid-template-columns:2fr 1fr;gap:1rem}h2,h3{margin-top:0}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:.55rem;border-bottom:1px solid var(--rumi-border);font-size:.82rem;vertical-align:top}.alarm{display:flex;gap:.5rem;align-items:center;border-bottom:1px solid var(--rumi-border);padding:.65rem 0}.alarm>span:nth-last-of-type(1){margin-left:auto;font-size:.75rem}.dot{width:.45rem;height:.45rem;background:#e05252;border-radius:50%}.operator{margin-top:1rem;display:grid;gap:1rem}.operator>h2,.operator>p{margin-bottom:0}.badge{font-size:.7rem;padding:.25rem .5rem;border-radius:99px;color:var(--rumi-text-muted);background:var(--rumi-bg-surface3)}.badge.confirmed{color:var(--rumi-teal);background:rgba(45,212,191,.12)}.form-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:.7rem}.form-grid label{display:block;font-size:.75rem;color:var(--rumi-text-muted)}input,select{display:block;width:100%;box-sizing:border-box;margin-top:.25rem;padding:.5rem;background:var(--rumi-bg-surface3);border:1px solid var(--rumi-border);color:inherit;border-radius:.3rem}.check{display:flex!important;gap:.5rem;align-items:center}.check input{width:auto}.actions{display:flex;gap:.4rem;flex-wrap:wrap;margin-top:.7rem}button{border:1px solid var(--rumi-border-hover);background:var(--rumi-bg-surface3);color:inherit;border-radius:.4rem;padding:.55rem .8rem;cursor:pointer;font-size:.78rem}button:hover{border-color:var(--rumi-action)}button:disabled{opacity:.5}.notice{padding:.7rem;margin-bottom:1rem;border-radius:.4rem}.error{color:#ff9b9b;background:rgba(224,82,82,.12)}.idle{background:var(--rumi-bg-surface-1);border:1px solid var(--rumi-border)}.idle strong{display:block;margin-bottom:.35rem}.idle p{margin:.35rem 0;font-size:.82rem;color:var(--rumi-text-secondary)}.idle p.muted{font-size:.78rem}.success{color:var(--rumi-teal);background:rgba(45,212,191,.1)}.login-note{margin-top:1rem}li{margin:.4rem 0;font-size:.82rem}.funding-wallet{padding:1.2rem;background:linear-gradient(135deg,rgba(31,48,78,.75),rgba(19,29,52,.95));border:1px solid rgba(45,212,191,.35);border-radius:.65rem;margin-bottom:1rem}.funding-heading{display:flex;justify-content:space-between;gap:1rem;align-items:flex-start;margin-bottom:1rem}.funding-heading h2{margin:.1rem 0 .35rem}.funding-heading p{margin:0}.funding-balances{display:grid;grid-template-columns:1fr 1fr;gap:.8rem}.funding-balance{padding:1rem;background:rgba(8,15,30,.35);border-color:rgba(255,255,255,.12)}.balance-title{display:flex;align-items:baseline;justify-content:space-between;gap:.5rem}.balance-title h3{margin:0}.network{font-size:.7rem;color:var(--rumi-teal)}.balance-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:.5rem;margin:1rem 0}.balance-grid>div{min-width:0;padding:.6rem;background:rgba(255,255,255,.04);border-radius:.35rem}.balance-grid strong{display:block;min-width:0;overflow-wrap:anywhere;word-break:break-word;font-size:1.05rem;margin-top:.2rem}.deposit-copy{color:var(--rumi-text-secondary);font-size:.82rem;line-height:1.45}.address-row{display:grid;grid-template-columns:9.5rem minmax(0,1fr) auto;align-items:center;gap:.5rem;margin-top:.5rem}.address-label{font-size:.72rem;color:var(--rumi-text-muted)}code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.73rem;overflow-wrap:anywhere;user-select:all}.address-row code{padding:.45rem;background:rgba(0,0,0,.22);border-radius:.25rem}.address-row button{padding:.4rem .55rem}.fine-print{font-size:.72rem;color:var(--rumi-text-muted);line-height:1.4}.funding-footer{display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-top:.8rem;color:var(--rumi-text-muted);font-size:.75rem}.rule{display:block;white-space:nowrap}.selected-row{background:rgba(45,212,191,.07)}.select-target{padding:.4rem .5rem;white-space:nowrap}@media(max-width:768px){.stats{grid-template-columns:repeat(2,1fr)}.grid,.form-grid,.funding-balances{grid-template-columns:1fr}.balance-grid{grid-template-columns:1fr 1fr}.address-row{grid-template-columns:1fr}.address-row button{justify-self:start}table{font-size:.72rem}}
+  .hero-copy{flex:1 1 30rem}.check-controls{flex:1 1 18rem;max-width:390px}.check-schedule{margin:0 0 .5rem;font-size:.82rem;color:var(--rumi-text-secondary)}.check-buttons{display:flex;flex-wrap:wrap;gap:.5rem}.check-controls .fine-print{margin:.4rem 0 0}.run-check{border-color:var(--rumi-teal);color:var(--rumi-teal)}
   .funding-wallet .deposit-copy,.funding-wallet .address-label,.funding-wallet .fine-print,.funding-wallet .service-reference{color:var(--rumi-text-secondary)}.service-reference{margin:.5rem 0 0;font-size:.72rem;line-height:1.4}.service-reference code{padding:0;background:transparent;color:inherit}
 </style>

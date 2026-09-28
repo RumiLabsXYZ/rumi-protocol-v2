@@ -323,6 +323,8 @@ struct PublicOverview {
     alarm_count: u64,
     last_sample_at_secs: Option<u64>,
     next_sample_at_secs: Option<u64>,
+    sample_interval_secs: Option<u64>,
+    stale_after_secs: Option<u64>,
 }
 
 #[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -1158,7 +1160,9 @@ fn timer_samples_cached_states_and_public_queries_never_require_login() {
         Some(Nat::from(1_000_000_000_000_000u128))
     );
     assert!(overview.last_sample_at_secs.is_none());
-    assert!(overview.next_sample_at_secs.is_none());
+    assert!(overview.next_sample_at_secs.is_some());
+    assert_eq!(overview.sample_interval_secs, Some(1));
+    assert_eq!(overview.stale_after_secs, Some(10));
 
     let conflux: Option<PublicTargetRow> = call_query(
         &pic,
@@ -2666,5 +2670,356 @@ fn shared_reserve_minimum_icp_processing_refresh_settles_without_double_debit() 
     assert!(
         unresolved_operation_ids(&pic, sentinel, signer).is_empty(),
         "confirmed mint and withdrawal settled without subtracting the ICP payment twice"
+    );
+}
+
+// Manual maintenance shares the actual timer path. These cases intentionally
+// use long deadlines so signer requests do not accidentally rely on a timer.
+const FOUR_HOUR_INTERVAL: u64 = 14_400;
+
+fn maintenance_generation(pic: &PocketIc, sentinel: Principal) -> u64 {
+    call_query(
+        pic,
+        sentinel,
+        Principal::anonymous(),
+        "test_get_completed_tick_generation",
+        Encode!().unwrap(),
+    )
+}
+
+fn maintenance_now(pic: &PocketIc, sentinel: Principal, caller: Principal) -> Result<(), String> {
+    call_update(
+        pic,
+        sentinel,
+        caller,
+        "run_maintenance_now",
+        Encode!().unwrap(),
+    )
+}
+
+fn maintenance_time_secs(pic: &PocketIc) -> u64 {
+    pic.get_time()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+#[derive(CandidType, Deserialize)]
+struct MaintenanceTargetDeadline {
+    next_sample_at_secs: Option<u64>,
+}
+
+fn maintenance_target_deadline(
+    pic: &PocketIc,
+    sentinel: Principal,
+    target: Principal,
+) -> Option<u64> {
+    call_query::<Option<MaintenanceTargetDeadline>>(
+        pic,
+        sentinel,
+        Principal::anonymous(),
+        "get_public_target",
+        Encode!(&target).unwrap(),
+    )
+    .expect("registered target")
+    .next_sample_at_secs
+}
+
+fn maintenance_set_four_hour_policy(pic: &PocketIc, sentinel: Principal, signer: Principal) {
+    let policy = GlobalPolicyArgs {
+        global_daily_cap_cycles: Nat::from(40 * T),
+        sample_interval_secs: FOUR_HOUR_INTERVAL,
+        stale_after_secs: 2 * FOUR_HOUR_INTERVAL,
+        min_icp_reserve_e8s: Nat::from(0u8),
+        timelocks: Timelocks {
+            target_registry_secs: 1,
+            spend_policy_secs: 1,
+            signer_change_secs: 1,
+            unpause_secs: 1,
+        },
+        self_recovery_policy: SelfRecoveryPolicyArgs {
+            protected_reserve_cycles: Nat::from(10 * T),
+            daily_cap_cycles: Nat::from(10 * T),
+            low_balance_threshold_cycles: Nat::from(T),
+            refill_cycles: Nat::from(T),
+        },
+    };
+    let proposal = decode_ok_u64(&call_update_raw(
+        pic,
+        sentinel,
+        signer,
+        "propose_set_global_policy",
+        Encode!(&policy).unwrap(),
+    ));
+    assert_ok(&call_update_raw(
+        pic,
+        sentinel,
+        signer,
+        "approve_proposal",
+        Encode!(&proposal).unwrap(),
+    ));
+    pic.advance_time(Duration::from_secs(2));
+    assert_ok(&call_update_raw(
+        pic,
+        sentinel,
+        signer,
+        "execute_proposal",
+        Encode!(&proposal).unwrap(),
+    ));
+}
+
+#[test]
+fn maintenance_rejects_anonymous_and_nonsigner_without_observation_or_funding() {
+    let (pic, sentinel, signer) =
+        boot_with_funding_and_interval(40 * T, 10 * T, 20_000 * T, FOUR_HOUR_INTERVAL);
+    shared_setup(&pic, 12 * T + CYCLES_FEE);
+    let target = enable_shared_target(&pic, sentinel, signer);
+    let before = shared_overview(&pic, sentinel);
+    assert!(before.last_sample_at_secs.is_none());
+    assert!(before.cycles_ledger_available_cycles.is_none());
+    assert!(before.icp_available_e8s.is_none());
+    for caller in [Principal::anonymous(), Principal::from_slice(&[8; 10])] {
+        let error =
+            maintenance_now(&pic, sentinel, caller).expect_err("only a signer may check now");
+        assert!(error.contains("anonymous") || error.contains("NotSigner"));
+    }
+    let after = shared_overview(&pic, sentinel);
+    assert_eq!(maintenance_generation(&pic, sentinel), 0);
+    assert_eq!(after.last_sample_at_secs, before.last_sample_at_secs);
+    assert_eq!(after.total_observed_cycles, before.total_observed_cycles);
+    // Empty caches remain empty; no successful source refresh happened.
+    assert_eq!(
+        after.cycles_ledger_available_cycles,
+        before.cycles_ledger_available_cycles
+    );
+    assert_eq!(after.icp_available_e8s, before.icp_available_e8s);
+    assert_eq!(after.next_sample_at_secs, before.next_sample_at_secs);
+    assert_eq!(
+        mock_nat(&pic, CYCLES_LEDGER, "ledger_balance"),
+        12 * T + CYCLES_FEE
+    );
+    assert_eq!(
+        mock_nat(&pic, ICP_LEDGER, "ledger_balance"),
+        DEPOSIT_ICP_E8S
+    );
+    assert_eq!(
+        (
+            withdraw_call_count(&pic),
+            transfer_call_count(&pic),
+            notify_call_count(&pic)
+        ),
+        (0, 0, 0)
+    );
+    assert!(public_topups(&pic, sentinel, target).is_empty());
+    assert!(unresolved_operation_ids(&pic, sentinel, signer).is_empty());
+}
+
+#[test]
+fn maintenance_signer_runs_exact_refill_now_and_respects_target_cap() {
+    let (pic, sentinel, signer) =
+        boot_with_funding_and_interval(40 * T, 10 * T, 20_000 * T, FOUR_HOUR_INTERVAL);
+    shared_setup(&pic, 14 * T + 2 * CYCLES_FEE);
+    let target = principal(SELF_REPORT_TARGETS[0]);
+    set_mock_cycles_balance(&pic, target, T);
+    let mut patch = target_patch_enable("manual maintenance cap");
+    patch.funding_policy = Some(FundingPolicyArgs {
+        low_balance_threshold_cycles: Nat::from(3 * T),
+        refill_cycles: Nat::from(2 * T),
+        daily_cap_cycles: Nat::from(2 * T),
+        cooldown_secs: 0,
+        burn_anomaly_limit_cycles_per_day: None,
+    });
+    propose_update_and_execute(&pic, sentinel, signer, target, patch);
+    let before = shared_overview(&pic, sentinel);
+    let start_secs = maintenance_time_secs(&pic);
+    assert_eq!(before.sample_interval_secs, Some(FOUR_HOUR_INTERVAL));
+    assert_eq!(before.stale_after_secs, Some(2 * FOUR_HOUR_INTERVAL));
+    assert!(before.next_sample_at_secs.unwrap() > start_secs);
+    maintenance_now(&pic, sentinel, signer).expect("signer runs complete maintenance");
+    assert_eq!(maintenance_generation(&pic, sentinel), 1);
+    assert_exact_withdrawals(&pic, &[2 * T]);
+    assert_eq!(
+        public_topups(&pic, sentinel, target),
+        vec![PublicTopupSummary {
+            rail: FundingRailView::CyclesLedger,
+            outcome: FundingOutcomeView::Completed,
+            amount_cycles: Nat::from(2 * T),
+        }]
+    );
+    let after = shared_overview(&pic, sentinel);
+    assert!(after.last_sample_at_secs.is_some());
+    assert_eq!(after.next_sample_at_secs, before.next_sample_at_secs);
+    assert_eq!(maintenance_time_secs(&pic), start_secs);
+    // The target still reports a low balance and has no cooldown. A second
+    // manual pass is refused funding solely by its spent 2T daily allowance.
+    maintenance_now(&pic, sentinel, signer).expect("maintenance does not bypass funding caps");
+    assert_eq!(maintenance_generation(&pic, sentinel), 2);
+    assert_exact_withdrawals(&pic, &[2 * T]);
+    assert_eq!(withdraw_call_count(&pic), 1);
+    assert_eq!(
+        mock_nat(&pic, CYCLES_LEDGER, "ledger_balance"),
+        12 * T + CYCLES_FEE
+    );
+    assert_eq!((transfer_call_count(&pic), notify_call_count(&pic)), (0, 0));
+    assert_eq!(maintenance_time_secs(&pic), start_secs);
+    assert_eq!(
+        shared_overview(&pic, sentinel).next_sample_at_secs,
+        before.next_sample_at_secs
+    );
+    assert!(unresolved_operation_ids(&pic, sentinel, signer).is_empty());
+}
+
+#[test]
+fn maintenance_four_hour_policy_cancels_old_timer_and_manual_keeps_deadline() {
+    let (pic, sentinel, signer) = boot_with_funding_and_interval(40 * T, 10 * T, 20_000 * T, 3_600);
+    let old_deadline = shared_overview(&pic, sentinel).next_sample_at_secs.unwrap();
+    let target = principal(SELF_REPORT_TARGETS[0]);
+    propose_update_and_execute(
+        &pic,
+        sentinel,
+        signer,
+        target,
+        TargetPatch {
+            enabled: Some(true),
+            ..target_patch_display_name("cadence observation")
+        },
+    );
+    maintenance_set_four_hour_policy(&pic, sentinel, signer);
+    let governed = shared_overview(&pic, sentinel);
+    let deadline = governed.next_sample_at_secs.unwrap();
+    assert_eq!(governed.sample_interval_secs, Some(FOUR_HOUR_INTERVAL));
+    assert_eq!(governed.stale_after_secs, Some(2 * FOUR_HOUR_INTERVAL));
+    assert_eq!(deadline, maintenance_time_secs(&pic) + FOUR_HOUR_INTERVAL);
+    assert!(deadline > old_deadline);
+    assert_eq!(
+        maintenance_target_deadline(&pic, sentinel, target),
+        Some(deadline)
+    );
+    // The previous one-hour callback must have been cleared by governance.
+    pic.advance_time(Duration::from_secs(
+        old_deadline + 1 - maintenance_time_secs(&pic),
+    ));
+    pic.tick();
+    assert_eq!(maintenance_generation(&pic, sentinel), 0);
+    maintenance_now(&pic, sentinel, signer).unwrap();
+    assert_eq!(maintenance_generation(&pic, sentinel), 1);
+    assert!(shared_overview(&pic, sentinel)
+        .last_sample_at_secs
+        .is_some());
+    assert_eq!(
+        shared_overview(&pic, sentinel).next_sample_at_secs,
+        Some(deadline)
+    );
+    // A manual pass immediately before the real deadline updates observations
+    // but must neither postpone the automatic callback nor invent early work.
+    pic.advance_time(Duration::from_secs(
+        deadline - 1 - maintenance_time_secs(&pic),
+    ));
+    pic.tick();
+    assert_eq!(maintenance_generation(&pic, sentinel), 1);
+    maintenance_now(&pic, sentinel, signer).unwrap();
+    assert_eq!(maintenance_generation(&pic, sentinel), 2);
+    assert_eq!(
+        shared_overview(&pic, sentinel).next_sample_at_secs,
+        Some(deadline)
+    );
+    assert_eq!(
+        maintenance_target_deadline(&pic, sentinel, target),
+        Some(deadline)
+    );
+    run_timer_after(&pic, sentinel, Duration::from_secs(2));
+    assert_eq!(maintenance_generation(&pic, sentinel), 3);
+    let after = shared_overview(&pic, sentinel);
+    assert_eq!(
+        after.next_sample_at_secs,
+        Some(maintenance_time_secs(&pic) + FOUR_HOUR_INTERVAL)
+    );
+    assert_eq!(
+        (
+            withdraw_call_count(&pic),
+            transfer_call_count(&pic),
+            notify_call_count(&pic)
+        ),
+        (0, 0, 0)
+    );
+}
+
+#[test]
+fn maintenance_overlap_rejects_second_manual_and_skips_busy_timer_once() {
+    let (pic, sentinel, signer) =
+        boot_with_funding_and_interval(40 * T, 10 * T, 20_000 * T, FOUR_HOUR_INTERVAL);
+    let deadline = shared_overview(&pic, sentinel).next_sample_at_secs.unwrap();
+    // Existing self-report calls provide real external await boundaries;
+    // observation is enabled while every target's automatic funding stays off.
+    for text in SELF_REPORT_TARGETS {
+        propose_update_and_execute(
+            &pic,
+            sentinel,
+            signer,
+            principal(text),
+            TargetPatch {
+                enabled: Some(true),
+                ..target_patch_display_name("maintenance overlap")
+            },
+        );
+    }
+    let first = pic
+        .submit_call(sentinel, signer, "run_maintenance_now", Encode!().unwrap())
+        .unwrap();
+    pic.tick();
+    assert_eq!(maintenance_generation(&pic, sentinel), 0);
+    assert_eq!(
+        maintenance_now(&pic, sentinel, signer),
+        Err("maintenance already running".into())
+    );
+    assert_eq!(maintenance_generation(&pic, sentinel), 0);
+    pic.advance_time(Duration::from_secs(
+        deadline + 1 - maintenance_time_secs(&pic),
+    ));
+    // Observe the callback actually re-arm while the first pass is unfinished,
+    // proving the timer encountered the same held work guard as manual ingress.
+    for _ in 0..256 {
+        if shared_overview(&pic, sentinel).next_sample_at_secs != Some(deadline) {
+            break;
+        }
+        pic.tick();
+        assert_eq!(
+            maintenance_generation(&pic, sentinel),
+            0,
+            "manual pass remains pending until timer overlap is observed"
+        );
+    }
+    let next = shared_overview(&pic, sentinel).next_sample_at_secs.unwrap();
+    assert!(
+        next > deadline,
+        "scheduled callback ran and re-armed its timer"
+    );
+    let reply = match pic.await_call(first).unwrap() {
+        WasmResult::Reply(bytes) => bytes,
+        WasmResult::Reject(message) => panic!("maintenance ingress rejected: {message}"),
+    };
+    assert_eq!(Decode!(&reply, Result<(), String>).unwrap(), Ok(()));
+    assert_eq!(
+        maintenance_generation(&pic, sentinel),
+        1,
+        "busy callback did not create another pass"
+    );
+    run_timer_after(
+        &pic,
+        sentinel,
+        Duration::from_secs(next + 1 - maintenance_time_secs(&pic)),
+    );
+    assert_eq!(
+        maintenance_generation(&pic, sentinel),
+        2,
+        "work guard was released for the next automatic pass"
+    );
+    assert_eq!(
+        (
+            withdraw_call_count(&pic),
+            transfer_call_count(&pic),
+            notify_call_count(&pic)
+        ),
+        (0, 0, 0)
     );
 }

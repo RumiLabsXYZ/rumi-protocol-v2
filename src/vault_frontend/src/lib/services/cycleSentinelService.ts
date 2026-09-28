@@ -195,6 +195,9 @@ function assertPatch(patch: TargetPatch): void {
 }
 
 export const sentinelManagement = {
+  async runMaintenanceNow(actor: SentinelActor): Promise<void> {
+    resultOk(await actor.run_maintenance_now());
+  },
   proposeAddSigner(actor: SentinelActor, principal: Principal) {
     if (principal.isAnonymous()) throw new Error('Signer principal cannot be anonymous.');
     return actor.propose_add_signer(principal).then(resultOk);

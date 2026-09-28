@@ -129,10 +129,32 @@ thread_local! {
     /// Prevents a fast/overlapping interval callback from spawning a second
     /// maintenance future while the first one is awaiting external calls.
     static TICK_IN_FLIGHT: Cell<bool> = const { Cell::new(false) };
+    /// The deadline of the one-shot runtime timer currently armed by this
+    /// canister.  It is deliberately transient: upgrades and governed policy
+    /// changes re-arm it from the live policy.  Manual maintenance never
+    /// changes it, so public telemetry cannot imply that a manual check
+    /// postponed the scheduled one.
+    static NEXT_SCHEDULED_CHECK_AT_SECS: Cell<Option<u64>> = const { Cell::new(None) };
     /// Test-only completion generation.  This is runtime state, not stable
     /// protocol state, and is deliberately omitted from production Candid.
     #[cfg(feature = "test_endpoints")]
     static COMPLETED_TICK_GENERATION: Cell<u64> = const { Cell::new(0) };
+}
+
+/// The next actual, transient timer deadline.  This is intentionally not
+/// reconstructed from target observations: a manual maintenance pass changes
+/// those observations but never changes the timer schedule.
+pub(crate) fn next_scheduled_check_at_secs() -> Option<u64> {
+    NEXT_SCHEDULED_CHECK_AT_SECS.with(Cell::get)
+}
+
+fn deadline_after(now_ns: u64, interval_secs: u64) -> u64 {
+    now_ns.saturating_add(interval_secs.saturating_mul(1_000_000_000)) / 1_000_000_000
+}
+
+fn record_next_scheduled_check(now_ns: u64, interval_secs: u64) {
+    NEXT_SCHEDULED_CHECK_AT_SECS
+        .with(|deadline| deadline.set(Some(deadline_after(now_ns, interval_secs))));
 }
 
 #[cfg(feature = "test_endpoints")]
@@ -211,22 +233,35 @@ pub(crate) fn setup_timer() {
             ic_cdk_timers::clear_timer(previous);
         }
     });
+    // In the pinned timer implementation `clear_timer` removes the task
+    // before a queued self-call can invoke its closure.  A closure already
+    // running has no await before it arms its successor, so a governed policy
+    // update executes afterwards and clears that successor before arming the
+    // policy's replacement.  An old callback therefore cannot restore an old
+    // cadence after a policy reload.
+    arm_next_timer();
+}
+
+/// `ic-cdk-timers`' interval helper re-arms from its outer global-timer
+/// dispatch timestamp, which is not exposed to this canister.  Use a
+/// one-shot timer instead so we record the exact deadline calculated from the
+/// callback's clock and the currently governed policy.  That makes the
+/// public deadline truthful and keeps manual checks out of scheduling.
+#[cfg(target_arch = "wasm32")]
+fn arm_next_timer() {
     let interval_secs = state::global_config()
         .global_policy
         .sample_interval_secs()
         .max(1);
-    let timer = ic_cdk_timers::set_timer_interval(Duration::from_secs(interval_secs), || {
-        let start = TICK_IN_FLIGHT.with(|in_flight| {
-            if in_flight.get() {
-                false
-            } else {
-                in_flight.set(true);
-                true
-            }
-        });
-        if start {
-            ic_cdk::spawn(async {
-                tick().await;
+    let now_ns = ic_cdk::api::time();
+    record_next_scheduled_check(now_ns, interval_secs);
+    let timer = ic_cdk_timers::set_timer(Duration::from_secs(interval_secs), || {
+        // Re-arm before starting potentially long maintenance work.  The
+        // shared in-flight guard below still prevents overlapping passes.
+        arm_next_timer();
+        if let Ok(guard) = TickGuard::acquire() {
+            ic_cdk::spawn(async move {
+                run_tick_with_guard(guard).await;
             });
         }
     });
@@ -234,6 +269,19 @@ pub(crate) fn setup_timer() {
 }
 
 struct TickGuard;
+
+impl TickGuard {
+    fn acquire() -> Result<Self, MaintenanceError> {
+        TICK_IN_FLIGHT.with(|in_flight| {
+            if in_flight.get() {
+                Err(MaintenanceError::Busy)
+            } else {
+                in_flight.set(true);
+                Ok(Self)
+            }
+        })
+    }
+}
 
 impl Drop for TickGuard {
     fn drop(&mut self) {
@@ -243,8 +291,29 @@ impl Drop for TickGuard {
     }
 }
 
-async fn tick() {
-    let _guard = TickGuard;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MaintenanceError {
+    Busy,
+}
+
+impl std::fmt::Display for MaintenanceError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Busy => formatter.write_str("maintenance already running"),
+        }
+    }
+}
+
+/// Runs exactly the same guarded maintenance pass as the timer.  This starts
+/// no timer and changes no policy, so a signer-requested check cannot delay
+/// the independent scheduled callback.
+pub(crate) async fn run_maintenance_now() -> Result<(), MaintenanceError> {
+    let guard = TickGuard::acquire()?;
+    run_tick_with_guard(guard).await;
+    Ok(())
+}
+
+async fn run_tick_with_guard(_guard: TickGuard) {
     let now_ns = ic_cdk::api::time();
     let now_secs = now_ns / 1_000_000_000;
     tick_at(now_secs, now_ns, ic_cdk::id()).await;
@@ -507,5 +576,29 @@ mod tests {
         // Activation is a TargetRecord constructor invariant, not a property
         // of the observation-mode table.  The table intentionally contains no
         // enabled/auto-topup fields that could bypass that invariant.
+    }
+
+    #[test]
+    fn deadline_uses_the_live_interval_from_the_callback_clock() {
+        assert_eq!(deadline_after(10_500_000_000, 14_400), 14_410);
+        assert_eq!(deadline_after(u64::MAX, 1), u64::MAX / 1_000_000_000);
+    }
+
+    #[test]
+    fn recording_a_deadline_is_independent_of_maintenance_work() {
+        record_next_scheduled_check(7_000_000_000, 14_400);
+        assert_eq!(next_scheduled_check_at_secs(), Some(14_407));
+        NEXT_SCHEDULED_CHECK_AT_SECS.with(|deadline| deadline.set(None));
+    }
+
+    #[test]
+    fn shared_guard_reports_busy_and_releases_when_dropped() {
+        TICK_IN_FLIGHT.with(|in_flight| in_flight.set(false));
+        let guard = TickGuard::acquire().expect("first maintenance pass starts");
+        assert!(matches!(TickGuard::acquire(), Err(MaintenanceError::Busy)));
+        drop(guard);
+        let second_guard = TickGuard::acquire().expect("dropped guard releases the tick");
+        drop(second_guard);
+        TICK_IN_FLIGHT.with(|in_flight| in_flight.set(false));
     }
 }
