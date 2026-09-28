@@ -117,8 +117,7 @@ pub(crate) fn check_ordinary_eligibility(
         || state::list_unresolved_operations_after(None, types::MAX_FUNDING_OPERATIONS)
             .iter()
             .any(|operation| {
-                operation.target() == target
-                    && operation.trigger() != FundingTrigger::SelfRecovery
+                operation.target() == target && operation.trigger() != FundingTrigger::SelfRecovery
             })
     {
         return Err(EligibilityError::OperationInFlight);
@@ -965,7 +964,7 @@ pub mod cycles {
                 // Still reserved: needs a signer, never falls through to ICP.
                 Ok(quarantined)
             }
-            WithdrawOutcome::TerminalNoSpend => {
+            WithdrawOutcome::TerminalNoSpend | WithdrawOutcome::InsufficientReserve => {
                 let terminal = op
                     .record_attempt(
                         FundingOperationState::Cycles(CyclesFundingState::Terminal),
@@ -2323,8 +2322,8 @@ pub mod icp {
         IcpSourceAttemptError, IcpSourceReserveError, IcpSourceSettleError,
         RollingSpendReleaseError, RollingSpendReserveError, RollingSpendSettleError,
         SelfRecoveryReleaseError, SelfRecoverySettleError, SelfRecoveryStateError,
-        TargetReleaseError, TargetReservationError, TargetSettleError, TerminalFundingSummary,
-        TerminalFundingSummaryError,
+        SourceReserveError, TargetReleaseError, TargetReservationError, TargetSettleError,
+        TerminalFundingSummary, TerminalFundingSummaryError,
     };
 
     use super::EligibilityError;
@@ -2345,6 +2344,8 @@ pub mod icp {
         StaleCacheRefresh,
         SourceAttempt(IcpSourceAttemptError),
         SourceReserve(IcpSourceReserveError),
+        CyclesSourceReserve(SourceReserveError),
+        CyclesDelivery(super::cycles::FundingError),
         SourceSettle(IcpSourceSettleError),
         TargetReserve(TargetReservationError),
         TargetSettle(TargetSettleError),
@@ -2366,6 +2367,7 @@ pub mod icp {
         BlockLookup(BlockLookupError),
         BlockProof(icp_cmc::BlockProofError),
         Overflow,
+        NoProvenCyclesDeficit,
         Reconciliation(ReconciliationError),
     }
 
@@ -2398,7 +2400,7 @@ pub mod icp {
     /// source debit.  Keep this predicate pure and small so every timer and
     /// manual caller can be tested against the same allow-list.
     pub fn can_fallback_after_cycles(outcome: WithdrawOutcome) -> bool {
-        matches!(outcome, WithdrawOutcome::TerminalNoSpend)
+        matches!(outcome, WithdrawOutcome::InsufficientReserve)
     }
 
     pub async fn refresh_icp_ledger_cache(
@@ -2549,15 +2551,34 @@ pub mod icp {
         if ic_cdk::id() != sentinel_id {
             return Err(FundingError::SentinelIdentityMismatch);
         }
+        if state::list_unresolved_operations_after(None, types::MAX_FUNDING_OPERATIONS)
+            .iter()
+            .any(FundingOperation::is_shared_reserve_conversion)
+        {
+            return Err(FundingError::Eligibility(
+                EligibilityError::OperationInFlight,
+            ));
+        }
         let global_policy = state::global_config().global_policy;
         let self_policy = global_policy.self_recovery_policy();
         let rate = icp_cmc::validate_rate(rate, now_secs).map_err(FundingError::Rate)?;
         let refill_cycles = self_policy.refill_cycles();
-        let amount_e8s =
-            icp_cmc::icp_amount_e8s_for_cycles(refill_cycles, rate).map_err(FundingError::Rate)?;
+        let cycles_source = state::get_source_reserve();
+        let cycles_cache = cycles_source
+            .fresh_cache_for_conversion(now_secs, global_policy.stale_after_secs())
+            .map_err(FundingError::CyclesSourceReserve)?;
+        let required_mint_cycles = shared_conversion_expected_cycles(
+            &cycles_source,
+            cycles_cache,
+            self_policy.protected_reserve_cycles(),
+            refill_cycles,
+        )?
+        .ok_or(FundingError::NoProvenCyclesDeficit)?;
+        let amount_e8s = icp_cmc::icp_amount_e8s_for_exact_cycles(required_mint_cycles, rate)
+            .map_err(FundingError::Rate)?;
         let expected_cycles =
             icp_cmc::expected_cycles(amount_e8s, rate).map_err(FundingError::Rate)?;
-        if expected_cycles < refill_cycles {
+        if expected_cycles < required_mint_cycles {
             return Err(FundingError::Rate(RateError::Overflow));
         }
         let source = state::get_icp_source_reserve();
@@ -2572,12 +2593,24 @@ pub mod icp {
         let self_recovery_reservation = state::get_self_recovery_state()
             .begin(
                 operation_id,
-                expected_cycles,
+                // This is an eligibility/in-flight latch for the later
+                // exact runtime withdrawal. The larger floor-restoring CMC
+                // mint is charged only to the conversion budget below.
+                refill_cycles,
                 now_secs,
                 ROLLING_CAP_WINDOW_SECS,
                 self_policy.daily_cap_cycles(),
             )
             .map_err(FundingError::SelfRecoveryReserve)?;
+        let conversion_budget = state::get_shared_conversion_budget()
+            .reserve(
+                operation_id,
+                expected_cycles,
+                now_secs,
+                ROLLING_CAP_WINDOW_SECS,
+                global_policy.global_daily_cap_cycles(),
+            )
+            .map_err(FundingError::GlobalReserve)?;
         let source_reservation = source
             .reserve_ordinary(
                 operation_id,
@@ -2628,6 +2661,7 @@ pub mod icp {
         state::insert_operation(submitted.clone()).map_err(FundingError::Insert)?;
         state::set_self_recovery_state(self_recovery_reservation);
         state::set_icp_source_reserve(source_reservation);
+        state::set_shared_conversion_budget(conversion_budget);
         Ok(submitted)
     }
 
@@ -2642,6 +2676,41 @@ pub mod icp {
         rate: icp_cmc::IcpXdrConversionRate,
     ) -> Result<FundingOperation, FundingError> {
         prepare_ordinary_with_rate(target, trigger, now_secs, now_ns, rate)
+    }
+
+    const CYCLES_LEDGER_DEPOSIT_FEE_CYCLES: u128 = 100_000_000;
+
+    /// Sizes the shared-reserve CMC mint from a fresh raw Cycles Ledger
+    /// balance. The result restores the configured protected floor while
+    /// reserving enough for all already-held withdrawals, the due exact
+    /// withdrawal plus its fee, and the Cycles Ledger deposit fee CMC will
+    /// charge on mint. It never treats an unknown or stale cache as zero.
+    fn shared_conversion_expected_cycles(
+        source: &types::SourceReserveState,
+        cache: types::CyclesLedgerCache,
+        protected_floor_cycles: u128,
+        refill_cycles: u128,
+    ) -> Result<Option<u128>, FundingError> {
+        let required_after_mint = protected_floor_cycles
+            .checked_add(
+                source
+                    .pending_total_cycles()
+                    .map_err(FundingError::CyclesSourceReserve)?,
+            )
+            .and_then(|total| total.checked_add(refill_cycles))
+            .and_then(|total| total.checked_add(cache.fee_cycles))
+            .ok_or(FundingError::Overflow)?;
+        let Some(shortfall_after_credit) = required_after_mint.checked_sub(cache.balance_cycles)
+        else {
+            return Ok(None);
+        };
+        if shortfall_after_credit == 0 {
+            return Ok(None);
+        }
+        shortfall_after_credit
+            .checked_add(CYCLES_LEDGER_DEPOSIT_FEE_CYCLES)
+            .map(Some)
+            .ok_or(FundingError::Overflow)
     }
 
     /// Opens an ICP conversion into Sentinel's shared Cycles Ledger reserve.
@@ -2661,6 +2730,19 @@ pub mod icp {
         if ic_cdk::id() != sentinel_id {
             return Err(FundingError::SentinelIdentityMismatch);
         }
+        // The raw Cycles cache cannot reflect a CMC mint until its notify
+        // reply is reconciled and a fresh ledger read commits. One global
+        // reserve conversion at a time prevents a second low target from
+        // independently restoring the same protected floor against that
+        // stale-but-otherwise-fresh cache.
+        if state::list_unresolved_operations_after(None, types::MAX_FUNDING_OPERATIONS)
+            .iter()
+            .any(FundingOperation::is_shared_reserve_conversion)
+        {
+            return Err(FundingError::Eligibility(
+                EligibilityError::OperationInFlight,
+            ));
+        }
         let (record, _) = super::check_ordinary_eligibility(
             target,
             now_secs,
@@ -2668,20 +2750,26 @@ pub mod icp {
         )
         .map_err(FundingError::Eligibility)?;
         let global_policy = state::global_config().global_policy;
-        let cycles_cache = state::get_source_reserve()
+        let source_cycles = state::get_source_reserve();
+        let cycles_cache = source_cycles
             .fresh_cache_for_conversion(now_secs, global_policy.stale_after_secs())
-            .map_err(|_| FundingError::Rate(RateError::Overflow))?;
-        let refill_plus_fee = record
-            .funding_policy()
-            .refill_cycles()
-            .checked_add(cycles_cache.fee_cycles)
-            .ok_or(FundingError::Overflow)?;
+            .map_err(FundingError::CyclesSourceReserve)?;
+        let expected_floor_refill_and_fees = shared_conversion_expected_cycles(
+            &source_cycles,
+            cycles_cache,
+            global_policy
+                .self_recovery_policy()
+                .protected_reserve_cycles(),
+            record.funding_policy().refill_cycles(),
+        )?
+        .ok_or(FundingError::NoProvenCyclesDeficit)?;
         let rate = icp_cmc::validate_rate(rate, now_secs).map_err(FundingError::Rate)?;
-        let amount_e8s = icp_cmc::icp_amount_e8s_for_exact_cycles(refill_plus_fee, rate)
-            .map_err(FundingError::Rate)?;
-        let expected_cycles = icp_cmc::expected_cycles(amount_e8s, rate)
-            .map_err(FundingError::Rate)?;
-        if expected_cycles < refill_plus_fee {
+        let amount_e8s =
+            icp_cmc::icp_amount_e8s_for_exact_cycles(expected_floor_refill_and_fees, rate)
+                .map_err(FundingError::Rate)?;
+        let expected_cycles =
+            icp_cmc::expected_cycles(amount_e8s, rate).map_err(FundingError::Rate)?;
+        if expected_cycles < expected_floor_refill_and_fees {
             return Err(FundingError::Rate(RateError::Overflow));
         }
         let source = state::get_icp_source_reserve();
@@ -2693,6 +2781,37 @@ pub mod icp {
             .checked_add(fee_e8s as u128)
             .ok_or(FundingError::Overflow)?;
         let operation_id = state::next_operation_id();
+        // Recheck the future exact delivery capacity against current durable
+        // ledgers after the rate await. These are deliberately dry-run
+        // reservations: the real Cycles withdrawal opens its own holds only
+        // after the shared reserve has been refreshed.
+        state::get_target_reservation(target)
+            .reserve(
+                operation_id,
+                record.funding_policy().refill_cycles(),
+                now_secs,
+                ROLLING_CAP_WINDOW_SECS,
+                record.funding_policy().daily_cap_cycles(),
+            )
+            .map_err(FundingError::TargetReserve)?;
+        state::get_global_rolling_spend()
+            .reserve(
+                operation_id,
+                record.funding_policy().refill_cycles(),
+                now_secs,
+                ROLLING_CAP_WINDOW_SECS,
+                global_policy.global_daily_cap_cycles(),
+            )
+            .map_err(FundingError::GlobalReserve)?;
+        let conversion_budget = state::get_shared_conversion_budget()
+            .reserve(
+                operation_id,
+                expected_cycles,
+                now_secs,
+                ROLLING_CAP_WINDOW_SECS,
+                global_policy.global_daily_cap_cycles(),
+            )
+            .map_err(FundingError::GlobalReserve)?;
         let source_reservation = source
             .reserve_ordinary(
                 operation_id,
@@ -2739,6 +2858,7 @@ pub mod icp {
         .map_err(FundingError::Transition)?;
         state::insert_operation(op.clone()).map_err(FundingError::Insert)?;
         state::set_icp_source_reserve(source_reservation);
+        state::set_shared_conversion_budget(conversion_budget);
         Ok(op)
     }
 
@@ -3049,19 +3169,26 @@ pub mod icp {
             // ICP reply. The following exact withdrawal is best effort in
             // this tick; a transient refresh/withdraw failure leaves the
             // minted reserve intact for the next timer pass.
-            if super::refresh_cycles_ledger_cache(now_secs, snapshot.source_principal)
+            super::refresh_cycles_ledger_cache(now_secs, snapshot.source_principal)
                 .await
-                .is_ok()
-                && resolved.trigger() != FundingTrigger::SelfRecovery
-            {
-                let _ = super::cycles::run_ordinary(
-                    resolved.target(),
-                    resolved.trigger(),
+                .map_err(|_| FundingError::StaleCacheRefresh)?;
+            if resolved.trigger() == FundingTrigger::SelfRecovery {
+                return crate::self_recovery::withdraw_after_shared_mint(
+                    snapshot.source_principal,
                     now_secs,
                     ic_cdk::api::time(),
                 )
-                .await;
+                .await
+                .map_err(FundingError::CyclesDelivery);
             }
+            return super::cycles::run_ordinary(
+                resolved.target(),
+                resolved.trigger(),
+                now_secs,
+                ic_cdk::api::time(),
+            )
+            .await
+            .map_err(FundingError::CyclesDelivery);
         }
         Ok(resolved)
     }
@@ -3239,6 +3366,10 @@ pub mod icp {
                 state::update_operation(complete.clone()).map_err(FundingError::Update)?;
                 commit_settlement(settlement, source);
                 state::insert_shared_reserve_mint_receipt(complete.id(), receipt);
+                // Do this before the next await. If the authoritative ledger
+                // refresh fails, the prior pre-mint balance cannot be reused
+                // to size another protected-floor restoration.
+                state::set_source_reserve(state::get_source_reserve().invalidate_cache());
                 state::compact_shared_reserve_conversion(complete.id())
                     .map_err(FundingError::Compact)?;
                 Ok(complete)
@@ -3260,10 +3391,28 @@ pub mod icp {
                 }
                 Ok(next)
             }
+            NotifyOutcome::RefundedWithBlock(refund_block_index) => {
+                let hinted = op
+                    .attach_refund_block_hint(refund_block_index)
+                    .map_err(FundingError::Transition)?;
+                let quarantined = if hinted.attempts().len() >= types::MAX_FUNDING_ATTEMPTS - 1 {
+                    hinted.quarantine_after_attempt_limit(now_secs)
+                } else {
+                    hinted.record_attempt(
+                        FundingOperationState::Icp(IcpFundingState::Quarantined),
+                        now_secs,
+                        FundingAttemptResultClass::Indeterminate,
+                    )
+                }
+                .map_err(FundingError::Transition)?;
+                state::update_operation(quarantined.clone()).map_err(FundingError::Update)?;
+                raise_quarantine_alarm(&quarantined, now_secs);
+                Ok(quarantined)
+            }
             // The original ICP transfer is already known and must remain
             // quarantined for signer proof/reconciliation, never retried as
             // a fresh conversion.
-            NotifyOutcome::Quarantined | NotifyOutcome::RefundedWithBlock(_) | NotifyOutcome::RefundedWithoutBlock => {
+            NotifyOutcome::Quarantined | NotifyOutcome::RefundedWithoutBlock => {
                 let quarantined = op
                     .record_attempt(
                         FundingOperationState::Icp(IcpFundingState::Quarantined),
@@ -3286,7 +3435,10 @@ pub mod icp {
             global_reservation: types::GlobalRollingSpendState,
         },
         SelfRecovery(types::SelfRecoveryState),
-        SharedReserveConversion,
+        SharedReserveConversion {
+            budget: types::GlobalRollingSpendState,
+            released_self_recovery: Option<types::SelfRecoveryState>,
+        },
     }
 
     fn compute_settlement(
@@ -3299,13 +3451,42 @@ pub mod icp {
             let source = state::get_icp_source_reserve()
                 .settle(op.id(), source_known_spent_e8s)
                 .map_err(FundingError::SourceSettle)?;
-            if op.trigger() == FundingTrigger::SelfRecovery {
-                let self_recovery = state::get_self_recovery_state()
+            let budget = match delivered_cycles {
+                Some(actual_minted_cycles) => state::get_shared_conversion_budget()
+                    .settle_with_amount(
+                        op.id(),
+                        actual_minted_cycles,
+                        now_secs,
+                        ROLLING_CAP_WINDOW_SECS,
+                    )
+                    .map_err(FundingError::GlobalSettle)?,
+                None if source_known_spent_e8s == 0 => state::get_shared_conversion_budget()
                     .release_no_spend(op.id())
-                    .map_err(FundingError::SelfRecoveryRelease)?;
-                return Ok((Settlement::SelfRecovery(self_recovery), source));
-            }
-            return Ok((Settlement::SharedReserveConversion, source));
+                    .map_err(FundingError::GlobalRelease)?,
+                // A signer-authorized unknown-as-spent outcome proves the
+                // ICP debit but not the mint. Keep the already-reserved
+                // conversion amount in the rolling limit rather than
+                // allowing repeated unresolved mints to evade that cap.
+                None => state::get_shared_conversion_budget()
+                    .settle(op.id(), now_secs, ROLLING_CAP_WINDOW_SECS)
+                    .map_err(FundingError::GlobalSettle)?,
+            };
+            let released_self_recovery = if op.trigger() == FundingTrigger::SelfRecovery {
+                Some(
+                    state::get_self_recovery_state()
+                        .release_no_spend(op.id())
+                        .map_err(FundingError::SelfRecoveryRelease)?,
+                )
+            } else {
+                None
+            };
+            return Ok((
+                Settlement::SharedReserveConversion {
+                    budget,
+                    released_self_recovery,
+                },
+                source,
+            ));
         }
         if op.trigger() == FundingTrigger::SelfRecovery {
             let self_recovery = state::get_self_recovery_state();
@@ -3375,7 +3556,15 @@ pub mod icp {
             Settlement::SelfRecovery(self_recovery) => {
                 state::set_self_recovery_state(self_recovery);
             }
-            Settlement::SharedReserveConversion => {}
+            Settlement::SharedReserveConversion {
+                budget,
+                released_self_recovery,
+            } => {
+                state::set_shared_conversion_budget(budget);
+                if let Some(self_recovery) = released_self_recovery {
+                    state::set_self_recovery_state(self_recovery);
+                }
+            }
         }
         state::set_icp_source_reserve(source);
     }
@@ -3728,8 +3917,11 @@ pub mod icp {
         use super::*;
 
         #[test]
-        fn fallback_is_only_admitted_for_definitive_no_spend() {
-            assert!(can_fallback_after_cycles(WithdrawOutcome::TerminalNoSpend));
+        fn fallback_is_only_admitted_for_proven_insufficient_reserve() {
+            assert!(can_fallback_after_cycles(
+                WithdrawOutcome::InsufficientReserve
+            ));
+            assert!(!can_fallback_after_cycles(WithdrawOutcome::TerminalNoSpend));
             assert!(!can_fallback_after_cycles(WithdrawOutcome::Unknown));
             assert!(!can_fallback_after_cycles(WithdrawOutcome::Quarantined));
             assert!(!can_fallback_after_cycles(
@@ -3739,6 +3931,38 @@ pub mod icp {
                 WithdrawOutcome::TerminalFullAmountDebited
             ));
             assert!(!can_fallback_after_cycles(WithdrawOutcome::Duplicate(1)));
+        }
+
+        fn shared_mint_size(raw_balance_cycles: u128) -> Option<u128> {
+            shared_conversion_expected_cycles(
+                &types::SourceReserveState::new(),
+                types::CyclesLedgerCache {
+                    balance_cycles: raw_balance_cycles,
+                    fee_cycles: 100_000_000,
+                    as_of_secs: 1,
+                },
+                10_000_000_000_000,
+                2_000_000_000_000,
+            )
+            .unwrap()
+        }
+
+        #[test]
+        fn shared_mint_from_empty_reserve_restores_floor_and_exact_refill_with_two_fees() {
+            assert_eq!(shared_mint_size(0), Some(12_000_200_000_000));
+        }
+
+        #[test]
+        fn shared_mint_from_protected_floor_needs_exact_refill_without_legacy_headroom() {
+            assert_eq!(
+                shared_mint_size(10_000_000_000_000),
+                Some(2_000_200_000_000)
+            );
+        }
+
+        #[test]
+        fn shared_mint_refuses_a_fee_only_conversion_when_raw_reserve_already_covers_delivery() {
+            assert_eq!(shared_mint_size(12_000_100_000_000), None);
         }
     }
 }

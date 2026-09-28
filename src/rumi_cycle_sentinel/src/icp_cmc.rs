@@ -1020,12 +1020,14 @@ pub async fn notify_mint_shared_reserve(
                 .map_err(|_| SnapshotValidationError::RateOverflow)?;
             let post_mint_balance_cycles = u128::try_from(success.balance.0)
                 .map_err(|_| SnapshotValidationError::RateOverflow)?;
-            Ok(NotifyOutcome::Minted(crate::types::SharedReserveMintReceipt {
-                cmc_deposit_block_index,
-                minted_cycles,
-                post_mint_balance_cycles,
-                recorded_at_secs: ic_cdk::api::time() / 1_000_000_000,
-            }))
+            Ok(NotifyOutcome::Minted(
+                crate::types::SharedReserveMintReceipt {
+                    cmc_deposit_block_index,
+                    minted_cycles,
+                    post_mint_balance_cycles,
+                    recorded_at_secs: ic_cdk::api::time() / 1_000_000_000,
+                },
+            ))
         }
         Ok((Err(error),)) => Ok(classify_notify_reply(Err(error))),
         Err(_) => Ok(NotifyOutcome::Unknown),
@@ -1145,7 +1147,10 @@ mod tests {
 
     #[test]
     fn mint_is_exact_little_endian_eight_bytes() {
-        assert_eq!(mint_cycles_memo_bytes(), vec![b'M', b'I', b'N', b'T', 0, 0, 0, 0]);
+        assert_eq!(
+            mint_cycles_memo_bytes(),
+            vec![b'M', b'I', b'N', b'T', 0, 0, 0, 0]
+        );
     }
 
     #[test]

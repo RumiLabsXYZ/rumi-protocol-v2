@@ -9,7 +9,7 @@
 //! * `Blackhole`: the pinned relay's `canister_status` projection;
 //! * `CyclesLedger`: balance, fee, and official `withdraw` result variants;
 //! * `IcpLedger`: ICRC-1 balance/fee/transfer and `get_blocks`;
-//! * `Cmc`: conversion rate and `notify_top_up`.
+//! * `Cmc`: conversion rate, legacy top-up, and deduplicated shared-reserve mint.
 //!
 //! Control methods are intentionally unauthenticated because this canister
 //! exists only inside a test replica.  Tests install it at fixed protocol
@@ -46,6 +46,8 @@ pub enum WithdrawMode {
     Duplicate,
     TooOld,
     TerminalNoSpend,
+    InvalidReceiver,
+    CreatedInFuture,
     FeeDebited,
     FullAmountDebited,
 }
@@ -53,6 +55,7 @@ pub enum WithdrawMode {
 #[derive(CandidType, Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransferMode {
     Confirmed,
+    CommittedLostReply,
     Unknown,
     Duplicate,
     TooOld,
@@ -62,6 +65,7 @@ pub enum TransferMode {
 #[derive(CandidType, Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NotifyMode {
     Completed,
+    CommittedLostReply,
     Processing,
     Refunded,
     Invalid,
@@ -140,6 +144,11 @@ struct State {
     notify_calls: u64,
     withdraw_dedup: BTreeMap<WithdrawKey, u64>,
     transfer_dedup: BTreeMap<TransferKey, u64>,
+    accounting: bool,
+    transfer_records: BTreeMap<u64, TransferArg>,
+    mint_receipts: BTreeMap<u64, NotifyMintCyclesSuccess>,
+    minted_cycles: u128,
+    withdrawals: Vec<WithdrawArgs>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -219,11 +228,79 @@ fn init(args: MockInit) {
             notify_calls: 0,
             withdraw_dedup: BTreeMap::new(),
             transfer_dedup: BTreeMap::new(),
+            accounting: false,
+            transfer_records: BTreeMap::new(),
+            mint_receipts: BTreeMap::new(),
+            minted_cycles: 0,
+            withdrawals: Vec::new(),
         });
     });
 }
 
 // ─────────────────────────── Test controls ───────────────────────────
+
+/// Opt-in accounting keeps legacy fixture outcomes unchanged.
+#[update]
+fn enable_accounting() {
+    with_state_mut(|state| state.accounting = true);
+}
+
+#[query]
+fn ledger_balance() -> Nat {
+    with_state(|state| state.config.ledger_balance.clone())
+}
+
+#[query]
+fn transfer_delivery_count() -> u64 {
+    with_state(|state| state.transfer_records.len() as u64)
+}
+
+#[query]
+fn mint_delivery_count() -> u64 {
+    with_state(|state| state.mint_receipts.len() as u64)
+}
+
+#[query]
+fn minted_cycles() -> Nat {
+    with_state(|state| Nat::from(state.minted_cycles))
+}
+
+#[query]
+fn withdrawal_amounts() -> Vec<Nat> {
+    with_state(|state| {
+        state
+            .withdrawals
+            .iter()
+            .map(|arg| arg.amount.clone())
+            .collect()
+    })
+}
+
+#[query]
+fn transfer_at(block_index: u64) -> Option<TransferArg> {
+    require_role(MockRole::IcpLedger);
+    with_state(|state| state.transfer_records.get(&block_index).cloned())
+}
+
+#[update]
+fn mint_credit(amount: Nat) -> Nat {
+    require_role(MockRole::CyclesLedger);
+    assert_eq!(
+        ic_cdk::caller(),
+        Principal::from_text("rkp4c-7iaaa-aaaaa-aaaca-cai").unwrap()
+    );
+    with_state_mut(|state| {
+        let credit = nat_u128(&amount)
+            .checked_sub(nat_u128(&state.config.fee))
+            .expect("mint deposit covers fee");
+        state.config.ledger_balance = Nat::from(
+            nat_u128(&state.config.ledger_balance)
+                .checked_add(credit)
+                .unwrap(),
+        );
+        state.config.ledger_balance.clone()
+    })
+}
 
 #[update]
 fn set_config(config: MockConfig) {
@@ -460,9 +537,10 @@ fn next_block(state: &mut State) -> Nat {
 }
 
 #[update]
-fn withdraw(args: WithdrawArgs) -> Result<Nat, WithdrawError> {
+async fn withdraw(args: WithdrawArgs) -> Result<Nat, WithdrawError> {
     require_role(MockRole::CyclesLedger);
-    with_state_mut(|state| {
+    let mut deliver = false;
+    let result = with_state_mut(|state| {
         state.withdraw_calls = state.withdraw_calls.saturating_add(1);
         let key = WithdrawKey {
             caller: ic_cdk::caller(),
@@ -475,6 +553,25 @@ fn withdraw(args: WithdrawArgs) -> Result<Nat, WithdrawError> {
             return Err(WithdrawError::Duplicate {
                 duplicate_of: Nat::from(*block),
             });
+        }
+        if state.accounting
+            && matches!(
+                state.config.withdraw_mode,
+                WithdrawMode::Confirmed | WithdrawMode::CommittedLostReply
+            )
+        {
+            let debit = nat_u128(&args.amount)
+                .checked_add(nat_u128(&state.config.fee))
+                .unwrap();
+            let balance = nat_u128(&state.config.ledger_balance);
+            if debit > balance {
+                return Err(WithdrawError::InsufficientFunds {
+                    balance: state.config.ledger_balance.clone(),
+                });
+            }
+            state.config.ledger_balance = Nat::from(balance - debit);
+            state.withdrawals.push(args.clone());
+            deliver = true;
         }
         match state.config.withdraw_mode {
             WithdrawMode::Confirmed => {
@@ -495,6 +592,10 @@ fn withdraw(args: WithdrawArgs) -> Result<Nat, WithdrawError> {
             WithdrawMode::TerminalNoSpend => Err(WithdrawError::BadFee {
                 expected_fee: state.config.fee.clone(),
             }),
+            WithdrawMode::InvalidReceiver => {
+                Err(WithdrawError::InvalidReceiver { receiver: args.to })
+            }
+            WithdrawMode::CreatedInFuture => Err(WithdrawError::CreatedInFuture { ledger_time: 1 }),
             WithdrawMode::FeeDebited => Err(WithdrawError::FailedToWithdraw {
                 fee_block: Some(next_block(state)),
                 rejection_code: RejectionCode::CanisterReject,
@@ -506,7 +607,19 @@ fn withdraw(args: WithdrawArgs) -> Result<Nat, WithdrawError> {
                 rejection_reason: "fixture full debit".to_string(),
             }),
         }
-    })
+    });
+    if deliver {
+        use ic_cdk::api::management_canister::main::{deposit_cycles, CanisterIdRecord};
+        deposit_cycles(
+            CanisterIdRecord {
+                canister_id: args.to,
+            },
+            nat_u128(&args.amount),
+        )
+        .await
+        .expect("mock delivers execution cycles");
+    }
+    result
 }
 
 #[query]
@@ -618,10 +731,33 @@ fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
             });
         }
         match state.config.transfer_mode {
-            TransferMode::Confirmed => {
+            TransferMode::Confirmed | TransferMode::CommittedLostReply => {
+                if state.accounting {
+                    let debit = nat_u128(&args.amount)
+                        .checked_add(
+                            args.fee
+                                .as_ref()
+                                .map(nat_u128)
+                                .unwrap_or_else(|| nat_u128(&state.config.fee)),
+                        )
+                        .unwrap();
+                    let balance = nat_u128(&state.config.ledger_balance);
+                    if debit > balance {
+                        return Err(TransferError::InsufficientFunds {
+                            balance: state.config.ledger_balance.clone(),
+                        });
+                    }
+                    state.config.ledger_balance = Nat::from(balance - debit);
+                }
                 let block = next_block(state);
-                state.transfer_dedup.insert(key, nat_u128(&block) as u64);
-                Ok(block)
+                let block_index = nat_u128(&block) as u64;
+                state.transfer_dedup.insert(key, block_index);
+                state.transfer_records.insert(block_index, args);
+                if state.config.transfer_mode == TransferMode::CommittedLostReply {
+                    Err(TransferError::TemporarilyUnavailable)
+                } else {
+                    Ok(block)
+                }
             }
             TransferMode::Unknown => Err(TransferError::TemporarilyUnavailable),
             TransferMode::Duplicate => Err(TransferError::Duplicate {
@@ -724,7 +860,9 @@ fn notify_top_up(args: NotifyTopUpArg) -> Result<Nat, NotifyError> {
     with_state_mut(|state| {
         state.notify_calls = state.notify_calls.saturating_add(1);
         match state.config.notify_mode {
-            NotifyMode::Completed => Ok(Nat::from(5_000_000_000_000u128)),
+            NotifyMode::Completed | NotifyMode::CommittedLostReply => {
+                Ok(Nat::from(5_000_000_000_000u128))
+            }
             NotifyMode::Processing => Err(NotifyError::Processing),
             NotifyMode::Refunded => Err(NotifyError::Refunded {
                 reason: format!("fixture refund for {}", args.canister_id),
@@ -735,4 +873,92 @@ fn notify_top_up(args: NotifyTopUpArg) -> Result<Nat, NotifyError> {
             )),
         }
     })
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct NotifyMintCyclesArg {
+    pub block_index: u64,
+    pub to_subaccount: Option<Vec<u8>>,
+    pub deposit_memo: Option<Vec<u8>>,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct NotifyMintCyclesSuccess {
+    pub block_index: Nat,
+    pub minted: Nat,
+    pub balance: Nat,
+}
+
+#[update]
+async fn notify_mint_cycles(
+    args: NotifyMintCyclesArg,
+) -> Result<NotifyMintCyclesSuccess, NotifyError> {
+    require_role(MockRole::Cmc);
+    let caller = ic_cdk::caller();
+    let (cached, mode, rate) = with_state_mut(|state| {
+        state.notify_calls += 1;
+        (
+            state.mint_receipts.get(&args.block_index).cloned(),
+            state.config.notify_mode,
+            state.config.rate_xdr_permyriad_per_icp,
+        )
+    });
+    if let Some(receipt) = cached {
+        return Ok(receipt);
+    }
+    match mode {
+        NotifyMode::Processing => return Err(NotifyError::Processing),
+        NotifyMode::Refunded => {
+            return Err(NotifyError::Refunded {
+                reason: "fixture mint refund".to_string(),
+                block_index: Some(args.block_index + 1),
+            })
+        }
+        NotifyMode::Invalid => {
+            return Err(NotifyError::InvalidTransaction(
+                "fixture invalid mint".to_string(),
+            ))
+        }
+        NotifyMode::Completed | NotifyMode::CommittedLostReply => {}
+    }
+    let ledger = Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap();
+    let (transfer,): (Option<TransferArg>,) =
+        ic_cdk::call(ledger, "transfer_at", (args.block_index,))
+            .await
+            .expect("mock reads persisted ICP transfer");
+    let transfer = transfer.expect("mint block exists");
+    assert_eq!(transfer.to.owner, ic_cdk::id());
+    let mut subaccount = vec![0; 32];
+    subaccount[0] = caller.as_slice().len() as u8;
+    subaccount[1..1 + caller.as_slice().len()].copy_from_slice(caller.as_slice());
+    assert_eq!(transfer.to.subaccount, Some(subaccount));
+    assert_eq!(transfer.memo, Some(0x544e494du64.to_le_bytes().to_vec()));
+    assert!(args.to_subaccount.is_none());
+    assert!(args.deposit_memo.is_none());
+    let minted = nat_u128(&transfer.amount)
+        .checked_mul(rate as u128)
+        .unwrap();
+    let cycles_ledger = Principal::from_text("um5iw-rqaaa-aaaaq-qaaba-cai").unwrap();
+    let (balance,): (Nat,) = ic_cdk::call(cycles_ledger, "mint_credit", (Nat::from(minted),))
+        .await
+        .expect("mock mint credits shared ledger");
+    let receipt = NotifyMintCyclesSuccess {
+        block_index: Nat::from(args.block_index + 1000),
+        minted: Nat::from(minted),
+        balance,
+    };
+    with_state_mut(|state| {
+        state.minted_cycles += minted;
+        state
+            .mint_receipts
+            .insert(args.block_index, receipt.clone());
+    });
+    if mode == NotifyMode::CommittedLostReply {
+        Err(NotifyError::Other {
+            error_code: 999,
+            error_message: "fixture mint committed but reply lost".to_string(),
+        })
+    } else {
+        Ok(receipt)
+    }
 }

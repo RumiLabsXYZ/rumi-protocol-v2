@@ -163,6 +163,10 @@ export const idlFactory = ({ IDL }) => {
     'ordinal' : IDL.Nat32,
     'phase' : FundingOperationState,
   });
+  const IcpCmcDelivery = IDL.Variant({
+    'SharedReserveMint' : IDL.Null,
+    'DirectTopUp' : IDL.Null,
+  });
   const IcpCmcSnapshot = IDL.Record({
     'source_subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
     'rate_timestamp_secs' : IDL.Nat64,
@@ -175,6 +179,7 @@ export const idlFactory = ({ IDL }) => {
     'cmc_account_identifier' : IDL.Vec(IDL.Nat8),
     'target_canister' : IDL.Principal,
     'ledger_principal' : IDL.Principal,
+    'delivery' : IcpCmcDelivery,
     'source_principal' : IDL.Principal,
     'expected_cycles' : IDL.Nat,
   });
@@ -236,7 +241,15 @@ export const idlFactory = ({ IDL }) => {
     'Ok' : PermissionsView,
     'Err' : AuthenticatedQueryError,
   });
+  const PublicFundingStatus = IDL.Variant({
+    'Blocked' : IDL.Null,
+    'Ready' : IDL.Null,
+    'Unknown' : IDL.Null,
+    'Pending' : IDL.Null,
+  });
   const PublicOverview = IDL.Record({
+    'icp_ledger_balance_e8s' : IDL.Opt(IDL.Nat),
+    'cycles_ledger_balance_as_of_secs' : IDL.Opt(IDL.Nat64),
     'unreachable_count' : IDL.Nat64,
     'total_observed_cycles' : IDL.Nat,
     'next_sample_at_secs' : IDL.Opt(IDL.Nat64),
@@ -247,10 +260,15 @@ export const idlFactory = ({ IDL }) => {
     'last_sample_at_secs' : IDL.Opt(IDL.Nat64),
     'unobserved_count' : IDL.Nat64,
     'stopped_count' : IDL.Nat64,
+    'funding_account_owner' : IDL.Principal,
     'protected_self_reserve_cycles' : IDL.Opt(IDL.Nat),
+    'cycles_ledger_balance_cycles' : IDL.Opt(IDL.Nat),
+    'shared_reserve_conversion_status' : PublicFundingStatus,
     'icp_available_e8s' : IDL.Opt(IDL.Nat),
     'cycles_ledger_available_cycles' : IDL.Opt(IDL.Nat),
     'target_count' : IDL.Nat64,
+    'icp_ledger_balance_as_of_secs' : IDL.Opt(IDL.Nat64),
+    'min_icp_reserve_e8s' : IDL.Opt(IDL.Nat),
     'healthy_count' : IDL.Nat64,
   });
   const FundingRail = IDL.Variant({
@@ -299,21 +317,28 @@ export const idlFactory = ({ IDL }) => {
     'advisory_balance_overflowed' : IDL.Bool,
     'last_success_at_secs' : IDL.Opt(IDL.Nat64),
     'recent_topups' : IDL.Vec(PublicTopupSummary),
+    'auto_topup' : IDL.Bool,
     'refill_cycles' : IDL.Nat,
+    'tags' : IDL.Vec(IDL.Text),
     'next_sample_at_secs' : IDL.Opt(IDL.Nat64),
     'advisory_balance_cycles' : IDL.Opt(IDL.Nat),
+    'burn_anomaly_limit_cycles_per_day' : IDL.Opt(IDL.Nat),
     'display_name' : IDL.Text,
     'low_balance_threshold_cycles' : IDL.Nat,
+    'enabled' : IDL.Bool,
     'state' : PublicTargetState,
     'runway_secs' : IDL.Opt(IDL.Nat64),
     'as_of_secs' : IDL.Nat64,
     'reported_operational_healthy' : IDL.Opt(IDL.Bool),
     'criticality' : Criticality,
     'environment' : Environment,
+    'daily_cap_cycles' : IDL.Nat,
     'stale_for_secs' : IDL.Opt(IDL.Nat64),
     'burn_cycles_per_day' : IDL.Opt(IDL.Nat),
+    'paused' : IDL.Bool,
     'observation_mode' : ObservationMode,
     'project' : IDL.Text,
+    'cooldown_secs' : IDL.Nat64,
   });
   const StandardRecord = IDL.Record({ 'url' : IDL.Text, 'name' : IDL.Text });
   const ConsentMessageMetadata = IDL.Record({

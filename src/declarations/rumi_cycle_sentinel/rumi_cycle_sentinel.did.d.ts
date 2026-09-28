@@ -177,6 +177,8 @@ export type GovernanceTimelocksError = { 'ZeroSignerChangeSecs' : null } |
   { 'ZeroUnpauseSecs' : null } |
   { 'ZeroSpendPolicySecs' : null } |
   { 'ZeroTargetRegistrySecs' : null };
+export type IcpCmcDelivery = { 'SharedReserveMint' : null } |
+  { 'DirectTopUp' : null };
 export interface IcpCmcSnapshot {
   'source_subaccount' : [] | [Uint8Array | number[]],
   'rate_timestamp_secs' : bigint,
@@ -189,6 +191,7 @@ export interface IcpCmcSnapshot {
   'cmc_account_identifier' : Uint8Array | number[],
   'target_canister' : Principal,
   'ledger_principal' : Principal,
+  'delivery' : IcpCmcDelivery,
   'source_principal' : Principal,
   'expected_cycles' : bigint,
 }
@@ -244,7 +247,13 @@ export interface PublicAlarm {
   'opened_at_secs' : bigint,
   'resolved_at_secs' : [] | [bigint],
 }
+export type PublicFundingStatus = { 'Blocked' : null } |
+  { 'Ready' : null } |
+  { 'Unknown' : null } |
+  { 'Pending' : null };
 export interface PublicOverview {
+  'icp_ledger_balance_e8s' : [] | [bigint],
+  'cycles_ledger_balance_as_of_secs' : [] | [bigint],
   'unreachable_count' : bigint,
   'total_observed_cycles' : bigint,
   'next_sample_at_secs' : [] | [bigint],
@@ -255,10 +264,15 @@ export interface PublicOverview {
   'last_sample_at_secs' : [] | [bigint],
   'unobserved_count' : bigint,
   'stopped_count' : bigint,
+  'funding_account_owner' : Principal,
   'protected_self_reserve_cycles' : [] | [bigint],
+  'cycles_ledger_balance_cycles' : [] | [bigint],
+  'shared_reserve_conversion_status' : PublicFundingStatus,
   'icp_available_e8s' : [] | [bigint],
   'cycles_ledger_available_cycles' : [] | [bigint],
   'target_count' : bigint,
+  'icp_ledger_balance_as_of_secs' : [] | [bigint],
+  'min_icp_reserve_e8s' : [] | [bigint],
   'healthy_count' : bigint,
 }
 export interface PublicPage {
@@ -295,21 +309,28 @@ export interface PublicTargetRow {
   'advisory_balance_overflowed' : boolean,
   'last_success_at_secs' : [] | [bigint],
   'recent_topups' : Array<PublicTopupSummary>,
+  'auto_topup' : boolean,
   'refill_cycles' : bigint,
+  'tags' : Array<string>,
   'next_sample_at_secs' : [] | [bigint],
   'advisory_balance_cycles' : [] | [bigint],
+  'burn_anomaly_limit_cycles_per_day' : [] | [bigint],
   'display_name' : string,
   'low_balance_threshold_cycles' : bigint,
+  'enabled' : boolean,
   'state' : PublicTargetState,
   'runway_secs' : [] | [bigint],
   'as_of_secs' : bigint,
   'reported_operational_healthy' : [] | [boolean],
   'criticality' : Criticality,
   'environment' : Environment,
+  'daily_cap_cycles' : bigint,
   'stale_for_secs' : [] | [bigint],
   'burn_cycles_per_day' : [] | [bigint],
+  'paused' : boolean,
   'observation_mode' : ObservationMode,
   'project' : string,
+  'cooldown_secs' : bigint,
 }
 export type PublicTargetState = { 'Low' : null } |
   { 'Stopped' : null } |

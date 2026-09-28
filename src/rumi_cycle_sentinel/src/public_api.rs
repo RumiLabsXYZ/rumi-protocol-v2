@@ -323,15 +323,27 @@ pub fn get_public_overview_at(now_secs: u64) -> PublicOverview {
     let targets = state::list_targets_after(None, types::MAX_TARGETS);
     let cycles_cache = state::get_source_reserve().cache();
     let icp_cache = state::get_icp_source_reserve().cache();
-    let has_pending_icp = state::list_unresolved_operations_after(
-        None,
-        types::MAX_FUNDING_OPERATIONS,
-    )
-    .iter()
-    .any(|operation| operation.rail() == types::FundingRail::IcpCmc);
-    let shared_reserve_conversion_status = if has_pending_icp {
+    let unresolved_icp =
+        state::list_unresolved_operations_after(None, types::MAX_FUNDING_OPERATIONS);
+    let has_blocked_icp = unresolved_icp.iter().any(|operation| {
+        operation.rail() == types::FundingRail::IcpCmc && operation.state().stops_automatic_retry()
+    });
+    let has_pending_icp = unresolved_icp
+        .iter()
+        .any(|operation| operation.rail() == types::FundingRail::IcpCmc);
+    let caches_fresh = cycles_cache.is_some_and(|cache| {
+        cache.as_of_secs <= now_secs
+            && now_secs.saturating_sub(cache.as_of_secs)
+                <= state::global_config().global_policy.stale_after_secs()
+    }) && icp_cache.is_some_and(|cache| {
+        cache.as_of_secs <= now_secs
+            && now_secs.saturating_sub(cache.as_of_secs) <= types::icp_source_cache_max_age_secs()
+    });
+    let shared_reserve_conversion_status = if has_blocked_icp {
+        types::PublicFundingStatus::Blocked
+    } else if has_pending_icp {
         types::PublicFundingStatus::Pending
-    } else if cycles_cache.is_none() || icp_cache.is_none() {
+    } else if !caches_fresh {
         types::PublicFundingStatus::Unknown
     } else {
         types::PublicFundingStatus::Ready
@@ -703,14 +715,14 @@ mod tests {
     }
 
     #[test]
-    fn available_balance_fails_closed_on_hold_or_floor_underflow() {
+    fn available_balance_reports_zero_for_fresh_floor_underflow() {
         assert_eq!(
             available_from_cached_balance(100, Some(101), 0, 100, 100, 600),
-            None
+            Some(0)
         );
         assert_eq!(
             available_from_cached_balance(100, Some(25), 76, 100, 100, 600),
-            None
+            Some(0)
         );
         assert_eq!(
             available_from_cached_balance(100, None, 0, 100, 100, 600),

@@ -14,7 +14,8 @@
 //!
 //! The mock fixture is installed at the protocol's pinned principals.  No
 //! mainnet call or funding action is possible from this test: every endpoint
-//! is local Wasm and all 16 bootstrap targets remain disabled/auto-top-up-off.
+//! is local Wasm. All 16 bootstrap targets begin disabled/auto-top-up-off;
+//! funding tests enable only their local fixtures through governance.
 
 use candid::{CandidType, Decode, Encode, IDLArgs, IDLValue, Nat, Principal};
 use pocket_ic::{PocketIc, PocketIcBuilder, WasmResult};
@@ -126,6 +127,8 @@ enum WithdrawMode {
     Duplicate,
     TooOld,
     TerminalNoSpend,
+    InvalidReceiver,
+    CreatedInFuture,
     FeeDebited,
     FullAmountDebited,
 }
@@ -134,6 +137,7 @@ enum WithdrawMode {
 #[derive(CandidType)]
 enum TransferMode {
     Confirmed,
+    CommittedLostReply,
     Unknown,
     Duplicate,
     TooOld,
@@ -144,6 +148,7 @@ enum TransferMode {
 #[derive(CandidType)]
 enum NotifyMode {
     Completed,
+    CommittedLostReply,
     Processing,
     Refunded,
     Invalid,
@@ -972,6 +977,27 @@ fn target_patch_enable(name: &str) -> TargetPatch {
 }
 
 fn boot() -> (PocketIc, Principal, Principal) {
+    boot_with_funding(
+        10_000_000_000_000,
+        100_000_000_000_000,
+        20_000_000_000_000_000,
+    )
+}
+
+fn boot_with_funding(
+    global_cap: u128,
+    protected_reserve: u128,
+    runtime_cycles: u128,
+) -> (PocketIc, Principal, Principal) {
+    boot_with_funding_and_interval(global_cap, protected_reserve, runtime_cycles, 1)
+}
+
+fn boot_with_funding_and_interval(
+    global_cap: u128,
+    protected_reserve: u128,
+    runtime_cycles: u128,
+    sample_interval_secs: u64,
+) -> (PocketIc, Principal, Principal) {
     // The fixtures intentionally use the real mainnet principals. PocketIC's
     // routing table assigns the ledger/system principals to their matching
     // subnet kinds, so those subnets must exist even though every installed
@@ -984,7 +1010,7 @@ fn boot() -> (PocketIc, Principal, Principal) {
         .build();
     let sentinel = pic.create_canister();
     let signer = Principal::from_slice(&[9; 10]);
-    pic.add_cycles(sentinel, 20_000_000_000_000_000);
+    pic.add_cycles(sentinel, runtime_cycles);
 
     for text in SELF_REPORT_TARGETS {
         create_and_install_mock(&pic, principal(text), MockRole::SelfReport);
@@ -998,9 +1024,9 @@ fn boot() -> (PocketIc, Principal, Principal) {
         signers: vec![signer],
         approval_threshold: 1,
         global_policy: GlobalPolicyArgs {
-            global_daily_cap_cycles: Nat::from(10_000_000_000_000u128),
-            sample_interval_secs: 1,
-            stale_after_secs: 10,
+            global_daily_cap_cycles: Nat::from(global_cap),
+            sample_interval_secs,
+            stale_after_secs: (2 * sample_interval_secs).max(10),
             min_icp_reserve_e8s: Nat::from(0u8),
             timelocks: Timelocks {
                 target_registry_secs: 1,
@@ -1009,7 +1035,7 @@ fn boot() -> (PocketIc, Principal, Principal) {
                 unpause_secs: 1,
             },
             self_recovery_policy: SelfRecoveryPolicyArgs {
-                protected_reserve_cycles: Nat::from(100_000_000_000_000u128),
+                protected_reserve_cycles: Nat::from(protected_reserve),
                 daily_cap_cycles: Nat::from(10_000_000_000_000u128),
                 low_balance_threshold_cycles: Nat::from(1_000_000_000_000u128),
                 refill_cycles: Nat::from(1_000_000_000_000u128),
@@ -1026,6 +1052,10 @@ fn boot() -> (PocketIc, Principal, Principal) {
 }
 
 fn run_timer(pic: &PocketIc, sentinel: Principal) {
+    run_timer_after(pic, sentinel, Duration::from_secs(2));
+}
+
+fn run_timer_after(pic: &PocketIc, sentinel: Principal, elapsed: Duration) {
     const MAX_MAINTENANCE_PROGRESS_TICKS: usize = 256;
     let generation_before: u64 = call_query(
         pic,
@@ -1034,7 +1064,7 @@ fn run_timer(pic: &PocketIc, sentinel: Principal) {
         "test_get_completed_tick_generation",
         Encode!().unwrap(),
     );
-    pic.advance_time(Duration::from_secs(2));
+    pic.advance_time(elapsed);
     for _ in 0..MAX_MAINTENANCE_PROGRESS_TICKS {
         pic.tick();
         let generation_after: u64 = call_query(
@@ -1989,4 +2019,578 @@ fn checked_in_sentinel_init_is_semantically_invalid_fail_closed() {
     let manifest = include_str!("../../../icp.yaml");
     assert!(manifest.contains("signers = vec {};"));
     assert!(manifest.contains("approval_threshold = 0 : nat32;"));
+}
+
+// Shared-reserve funding tests use the actual maintenance timer and opt-in
+// ledger accounting. Mint receipts never count as target delivery; only the
+// Cycles Ledger's exact withdrawal produces a public target top-up summary.
+const T: u128 = 1_000_000_000_000;
+const CYCLES_FEE: u128 = 100_000_000;
+const ICP_FEE: u128 = 10_000;
+const DEPOSIT_ICP_E8S: u128 = 10_000_000_000;
+
+fn mock_nat(pic: &PocketIc, id: &str, method: &str) -> u128 {
+    let value: Nat = call_query(
+        pic,
+        principal(id),
+        Principal::anonymous(),
+        method,
+        Encode!().unwrap(),
+    );
+    value.0.try_into().unwrap()
+}
+
+fn mock_count(pic: &PocketIc, id: &str, method: &str) -> u64 {
+    call_query(
+        pic,
+        principal(id),
+        Principal::anonymous(),
+        method,
+        Encode!().unwrap(),
+    )
+}
+
+fn set_mock_ledger_balance(pic: &PocketIc, ledger: Principal, balance: u128) {
+    call_update_unit(
+        pic,
+        ledger,
+        Principal::anonymous(),
+        "set_ledger_balance",
+        Encode!(&Nat::from(balance)).unwrap(),
+    );
+}
+
+fn set_mock_fee(pic: &PocketIc, ledger: Principal, fee: u128) {
+    call_update_unit(
+        pic,
+        ledger,
+        Principal::anonymous(),
+        "set_fee",
+        Encode!(&Nat::from(fee)).unwrap(),
+    );
+}
+
+fn shared_setup(pic: &PocketIc, cycles_balance: u128) {
+    for id in [CYCLES_LEDGER, ICP_LEDGER] {
+        call_update_unit(
+            pic,
+            principal(id),
+            Principal::anonymous(),
+            "enable_accounting",
+            Encode!().unwrap(),
+        );
+    }
+    set_mock_ledger_balance(pic, principal(CYCLES_LEDGER), cycles_balance);
+    set_mock_fee(pic, principal(CYCLES_LEDGER), CYCLES_FEE);
+    set_mock_ledger_balance(pic, principal(ICP_LEDGER), DEPOSIT_ICP_E8S);
+    set_mock_fee(pic, principal(ICP_LEDGER), ICP_FEE);
+    set_mock_rate_current(pic, principal(CMC));
+}
+
+fn enable_shared_target(pic: &PocketIc, sentinel: Principal, signer: Principal) -> Principal {
+    let target = principal(SELF_REPORT_TARGETS[0]);
+    set_mock_cycles_balance(pic, target, T);
+    let mut patch = target_patch_enable("shared reserve test");
+    patch.funding_policy = Some(FundingPolicyArgs {
+        low_balance_threshold_cycles: Nat::from(3 * T),
+        refill_cycles: Nat::from(2 * T),
+        daily_cap_cycles: Nat::from(6 * T),
+        cooldown_secs: 3_600,
+        burn_anomaly_limit_cycles_per_day: None,
+    });
+    // Governance advances replica time. Deposit ICP after enablement so an
+    // interleaved timer cannot consume the first modeled reply before the
+    // explicit maintenance tick under test.
+    set_mock_ledger_balance(pic, principal(ICP_LEDGER), 0);
+    propose_update_and_execute(pic, sentinel, signer, target, patch);
+    set_mock_ledger_balance(pic, principal(ICP_LEDGER), DEPOSIT_ICP_E8S);
+    target
+}
+
+fn shared_overview(pic: &PocketIc, sentinel: Principal) -> PublicOverview {
+    call_query(
+        pic,
+        sentinel,
+        Principal::anonymous(),
+        "get_public_overview",
+        Encode!().unwrap(),
+    )
+}
+
+fn assert_exact_withdrawals(pic: &PocketIc, amounts: &[u128]) {
+    let actual: Vec<Nat> = call_query(
+        pic,
+        principal(CYCLES_LEDGER),
+        Principal::anonymous(),
+        "withdrawal_amounts",
+        Encode!().unwrap(),
+    );
+    assert_eq!(
+        actual,
+        amounts.iter().copied().map(Nat::from).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn shared_reserve_empty_cycles_mints_deficit_and_delivers_exact_refill() {
+    let (pic, sentinel, signer) = boot_with_funding(40 * T, 10 * T, 20_000 * T);
+    shared_setup(&pic, 0);
+    let target = enable_shared_target(&pic, sentinel, signer);
+    run_timer(&pic, sentinel);
+    assert_eq!(
+        mock_nat(&pic, CMC, "minted_cycles"),
+        12 * T + 2 * CYCLES_FEE
+    );
+    assert_eq!(mock_nat(&pic, CYCLES_LEDGER, "ledger_balance"), 10 * T);
+    assert_eq!(
+        mock_nat(&pic, ICP_LEDGER, "ledger_balance"),
+        DEPOSIT_ICP_E8S - (12 * T + 2 * CYCLES_FEE) / 10_000 - ICP_FEE
+    );
+    assert_exact_withdrawals(&pic, &[2 * T]);
+    assert_eq!(
+        public_topups(&pic, sentinel, target),
+        vec![PublicTopupSummary {
+            rail: FundingRailView::CyclesLedger,
+            outcome: FundingOutcomeView::Completed,
+            amount_cycles: Nat::from(2 * T)
+        }]
+    );
+    assert_eq!(
+        shared_overview(&pic, sentinel).cycles_ledger_available_cycles,
+        Some(Nat::from(0u8))
+    );
+    assert!(unresolved_operation_ids(&pic, sentinel, signer).is_empty());
+}
+
+#[test]
+fn shared_reserve_uses_cycles_first_without_icp_payment_or_mint() {
+    let (pic, sentinel, signer) = boot_with_funding(40 * T, 10 * T, 20_000 * T);
+    shared_setup(&pic, 12 * T + CYCLES_FEE);
+    let target = enable_shared_target(&pic, sentinel, signer);
+    run_timer(&pic, sentinel);
+    assert_eq!(transfer_call_count(&pic), 0);
+    assert_eq!(notify_call_count(&pic), 0);
+    assert_eq!(
+        mock_nat(&pic, ICP_LEDGER, "ledger_balance"),
+        DEPOSIT_ICP_E8S
+    );
+    assert_eq!(mock_nat(&pic, CYCLES_LEDGER, "ledger_balance"), 10 * T);
+    assert_exact_withdrawals(&pic, &[2 * T]);
+    assert_eq!(public_topups(&pic, sentinel, target).len(), 1);
+}
+
+#[test]
+fn shared_reserve_processing_upgrade_keeps_hold_and_conversion_cap() {
+    let (pic, sentinel, signer) = boot_with_funding(13 * T, 10 * T, 20_000 * T);
+    shared_setup(&pic, 0);
+    set_mock_notify_mode(&pic, principal(CMC), NotifyMode::Processing);
+    let target = enable_shared_target(&pic, sentinel, signer);
+    run_timer(&pic, sentinel);
+    let ids = unresolved_operation_ids(&pic, sentinel, signer);
+    assert_eq!(ids.len(), 1);
+    let before = test_operation(&pic, sentinel, ids[0]);
+    assert_eq!(
+        before.reserved_amount_cycles,
+        Nat::from(12 * T + 2 * CYCLES_FEE)
+    );
+    assert_eq!(
+        before.state,
+        FundingState::Icp(FundingIcpState::NotifyPending)
+    );
+    let available_before = shared_overview(&pic, sentinel).icp_available_e8s;
+    assert!(public_topups(&pic, sentinel, target).is_empty());
+    assert_exact_withdrawals(&pic, &[]);
+    upgrade_sentinel(&pic, sentinel, SENTINEL_WASM, signer);
+    assert_eq!(
+        test_operation(&pic, sentinel, ids[0]).reserved_amount_cycles,
+        before.reserved_amount_cycles
+    );
+    assert_eq!(
+        shared_overview(&pic, sentinel).icp_available_e8s,
+        available_before
+    );
+    run_timer(&pic, sentinel);
+    assert_eq!(mock_count(&pic, ICP_LEDGER, "transfer_delivery_count"), 1);
+    assert_eq!(mock_count(&pic, CMC, "mint_delivery_count"), 0);
+    set_mock_notify_mode(&pic, principal(CMC), NotifyMode::Completed);
+    run_timer(&pic, sentinel);
+    pic.advance_time(Duration::from_secs(3_601));
+    set_mock_rate_current(&pic, principal(CMC));
+    run_timer(&pic, sentinel);
+    // The target remains low in the reporting fixture, but the first mint
+    // exhausted all but 0.9998T of the 13T conversion cap across upgrade.
+    assert_eq!(mock_count(&pic, ICP_LEDGER, "transfer_delivery_count"), 1);
+    assert_eq!(mock_count(&pic, CMC, "mint_delivery_count"), 1);
+    assert_exact_withdrawals(&pic, &[2 * T]);
+    assert_eq!(public_topups(&pic, sentinel, target).len(), 1);
+    assert!(unresolved_operation_ids(&pic, sentinel, signer).is_empty());
+}
+
+#[test]
+fn shared_reserve_committed_icp_reply_loss_upgrade_retries_identical_payment() {
+    let (pic, sentinel, signer) = boot_with_funding(40 * T, 10 * T, 20_000 * T);
+    shared_setup(&pic, 0);
+    set_mock_transfer_mode(
+        &pic,
+        principal(ICP_LEDGER),
+        TransferMode::CommittedLostReply,
+    );
+    let target = enable_shared_target(&pic, sentinel, signer);
+    run_timer(&pic, sentinel);
+    let ids = unresolved_operation_ids(&pic, sentinel, signer);
+    assert_eq!(ids.len(), 1);
+    assert_eq!(
+        test_operation(&pic, sentinel, ids[0]).state,
+        FundingState::Icp(FundingIcpState::TransferUnknown)
+    );
+    let paid_balance = mock_nat(&pic, ICP_LEDGER, "ledger_balance");
+    assert!(public_topups(&pic, sentinel, target).is_empty());
+    upgrade_sentinel(&pic, sentinel, SENTINEL_WASM, signer);
+    run_timer(&pic, sentinel);
+    assert_eq!(mock_nat(&pic, ICP_LEDGER, "ledger_balance"), paid_balance);
+    assert_eq!(mock_count(&pic, ICP_LEDGER, "transfer_delivery_count"), 1);
+    assert_eq!(mock_count(&pic, CMC, "mint_delivery_count"), 1);
+    assert_exact_withdrawals(&pic, &[2 * T]);
+    assert_eq!(public_topups(&pic, sentinel, target).len(), 1);
+    assert!(unresolved_operation_ids(&pic, sentinel, signer).is_empty());
+}
+
+#[test]
+fn shared_reserve_conversion_cap_blocks_initial_deficit_without_debit() {
+    let (pic, sentinel, signer) = boot_with_funding(11 * T, 10 * T, 20_000 * T);
+    shared_setup(&pic, 0);
+    let target = enable_shared_target(&pic, sentinel, signer);
+    run_timer(&pic, sentinel);
+    assert_eq!(transfer_call_count(&pic), 0);
+    assert_eq!(
+        mock_nat(&pic, ICP_LEDGER, "ledger_balance"),
+        DEPOSIT_ICP_E8S
+    );
+    assert_exact_withdrawals(&pic, &[]);
+    assert!(public_topups(&pic, sentinel, target).is_empty());
+    assert!(unresolved_operation_ids(&pic, sentinel, signer).is_empty());
+}
+
+#[test]
+fn shared_reserve_icp_only_runtime_recovery_waits_for_exact_runtime_delivery() {
+    let (pic, sentinel, signer) = boot_with_funding(40 * T, 10 * T, 900_000_000_000);
+    shared_setup(&pic, 0);
+    set_mock_notify_mode(&pic, principal(CMC), NotifyMode::Processing);
+    let target = enable_shared_target(&pic, sentinel, signer);
+    // First tick refreshes empty caches; the next opens recovery.
+    run_timer(&pic, sentinel);
+    run_timer(&pic, sentinel);
+    assert_eq!(mock_count(&pic, ICP_LEDGER, "transfer_delivery_count"), 1);
+    assert_eq!(mock_count(&pic, CMC, "mint_delivery_count"), 0);
+    assert_exact_withdrawals(&pic, &[]);
+    assert!(public_topups(&pic, sentinel, target).is_empty());
+    upgrade_sentinel(&pic, sentinel, SENTINEL_WASM, signer);
+    // A mint receipt followed by ambiguous runtime withdrawal still cannot
+    // authorize target funding. Only a confirmed exact runtime withdrawal can.
+    set_mock_withdraw_mode(&pic, principal(CYCLES_LEDGER), WithdrawMode::Unknown);
+    set_mock_notify_mode(&pic, principal(CMC), NotifyMode::Completed);
+    run_timer(&pic, sentinel);
+    assert_eq!(
+        mock_nat(&pic, CMC, "minted_cycles"),
+        11 * T + 2 * CYCLES_FEE
+    );
+    assert_exact_withdrawals(&pic, &[]);
+    assert!(public_topups(&pic, sentinel, target).is_empty());
+    assert_eq!(mock_count(&pic, ICP_LEDGER, "transfer_delivery_count"), 1);
+    set_mock_withdraw_mode(&pic, principal(CYCLES_LEDGER), WithdrawMode::Confirmed);
+    run_timer(&pic, sentinel);
+    let withdrawals: Vec<Nat> = call_query(
+        &pic,
+        principal(CYCLES_LEDGER),
+        Principal::anonymous(),
+        "withdrawal_amounts",
+        Encode!().unwrap(),
+    );
+    assert_eq!(withdrawals.first(), Some(&Nat::from(T)));
+    assert!(
+        pic.cycle_balance(sentinel) > T,
+        "runtime received the configured 1T before ordinary distribution"
+    );
+}
+
+#[test]
+fn shared_reserve_lost_mint_receipt_upgrade_reuses_cmc_block_without_second_mint() {
+    let (pic, sentinel, signer) = boot_with_funding(40 * T, 10 * T, 20_000 * T);
+    shared_setup(&pic, 0);
+    set_mock_notify_mode(&pic, principal(CMC), NotifyMode::CommittedLostReply);
+    let target = enable_shared_target(&pic, sentinel, signer);
+    run_timer(&pic, sentinel);
+    assert_eq!(mock_count(&pic, ICP_LEDGER, "transfer_delivery_count"), 1);
+    assert_eq!(mock_count(&pic, CMC, "mint_delivery_count"), 1);
+    assert_eq!(
+        mock_nat(&pic, CMC, "minted_cycles"),
+        12 * T + 2 * CYCLES_FEE
+    );
+    assert!(public_topups(&pic, sentinel, target).is_empty());
+    assert_exact_withdrawals(&pic, &[]);
+    let ids = unresolved_operation_ids(&pic, sentinel, signer);
+    assert_eq!(ids.len(), 1);
+    let paid_balance = mock_nat(&pic, ICP_LEDGER, "ledger_balance");
+    upgrade_sentinel(&pic, sentinel, SENTINEL_WASM, signer);
+    run_timer(&pic, sentinel);
+    assert_eq!(mock_count(&pic, CMC, "mint_delivery_count"), 1);
+    assert_eq!(
+        mock_nat(&pic, CMC, "minted_cycles"),
+        12 * T + 2 * CYCLES_FEE
+    );
+    assert_eq!(mock_nat(&pic, ICP_LEDGER, "ledger_balance"), paid_balance);
+    assert_exact_withdrawals(&pic, &[2 * T]);
+    assert_eq!(public_topups(&pic, sentinel, target).len(), 1);
+    assert!(unresolved_operation_ids(&pic, sentinel, signer).is_empty());
+}
+
+#[test]
+fn shared_reserve_two_low_targets_processing_has_only_one_icp_debit() {
+    let (pic, sentinel, signer) = boot_with_funding(40 * T, 10 * T, 20_000 * T);
+    shared_setup(&pic, 0);
+    set_mock_notify_mode(&pic, principal(CMC), NotifyMode::Processing);
+    let first = enable_shared_target(&pic, sentinel, signer);
+    let second = principal(SELF_REPORT_TARGETS[1]);
+    set_mock_cycles_balance(&pic, second, T);
+    let mut patch = target_patch_enable("second low target");
+    patch.funding_policy = Some(FundingPolicyArgs {
+        low_balance_threshold_cycles: Nat::from(3 * T),
+        refill_cycles: Nat::from(2 * T),
+        daily_cap_cycles: Nat::from(6 * T),
+        cooldown_secs: 3_600,
+        burn_anomaly_limit_cycles_per_day: None,
+    });
+    propose_update_and_execute(&pic, sentinel, signer, second, patch);
+    run_timer(&pic, sentinel);
+    assert_eq!(mock_count(&pic, ICP_LEDGER, "transfer_delivery_count"), 1);
+    assert_eq!(unresolved_operation_ids(&pic, sentinel, signer).len(), 1);
+    assert_exact_withdrawals(&pic, &[]);
+    assert!(public_topups(&pic, sentinel, first).is_empty());
+    assert!(public_topups(&pic, sentinel, second).is_empty());
+    upgrade_sentinel(&pic, sentinel, SENTINEL_WASM, signer);
+    run_timer(&pic, sentinel);
+    assert_eq!(mock_count(&pic, ICP_LEDGER, "transfer_delivery_count"), 1);
+    assert_eq!(unresolved_operation_ids(&pic, sentinel, signer).len(), 1);
+}
+
+#[test]
+fn shared_reserve_bad_fee_receiver_and_clock_errors_never_trigger_icp_conversion() {
+    for mode in [
+        WithdrawMode::TerminalNoSpend,
+        WithdrawMode::InvalidReceiver,
+        WithdrawMode::CreatedInFuture,
+    ] {
+        let (pic, sentinel, signer) = boot_with_funding(40 * T, 10 * T, 20_000 * T);
+        shared_setup(&pic, 12 * T + CYCLES_FEE);
+        set_mock_withdraw_mode(&pic, principal(CYCLES_LEDGER), mode);
+        let target = enable_shared_target(&pic, sentinel, signer);
+        run_timer(&pic, sentinel);
+        assert!(withdraw_call_count(&pic) >= 1);
+        assert_eq!(transfer_call_count(&pic), 0);
+        assert_eq!(
+            mock_nat(&pic, ICP_LEDGER, "ledger_balance"),
+            DEPOSIT_ICP_E8S
+        );
+        assert_exact_withdrawals(&pic, &[]);
+        assert!(public_topups(&pic, sentinel, target)
+            .iter()
+            .all(|topup| topup.outcome != FundingOutcomeView::Completed));
+    }
+}
+
+#[test]
+fn shared_reserve_refund_hint_keeps_payment_and_budget_holds_across_upgrade() {
+    let (pic, sentinel, signer) = boot_with_funding(40 * T, 10 * T, 20_000 * T);
+    shared_setup(&pic, 0);
+    set_mock_notify_mode(&pic, principal(CMC), NotifyMode::Refunded);
+    let target = enable_shared_target(&pic, sentinel, signer);
+    run_timer(&pic, sentinel);
+    let ids = unresolved_operation_ids(&pic, sentinel, signer);
+    assert_eq!(ids.len(), 1);
+    let before = test_operation(&pic, sentinel, ids[0]);
+    assert_eq!(
+        before.state,
+        FundingState::Icp(FundingIcpState::Quarantined)
+    );
+    assert_eq!(before.refund_block_hint, Some(1));
+    assert!(
+        before.refund_block_index.is_none(),
+        "CMC hint is not verified refund proof"
+    );
+    assert_exact_withdrawals(&pic, &[]);
+    assert!(public_topups(&pic, sentinel, target).is_empty());
+    let balance = mock_nat(&pic, ICP_LEDGER, "ledger_balance");
+    upgrade_sentinel(&pic, sentinel, SENTINEL_WASM, signer);
+    run_timer(&pic, sentinel);
+    assert_operations_unchanged(&pic, sentinel, &[before], "quarantined refund upgrade");
+    assert_eq!(mock_nat(&pic, ICP_LEDGER, "ledger_balance"), balance);
+    assert_eq!(mock_count(&pic, ICP_LEDGER, "transfer_delivery_count"), 1);
+    assert_eq!(mock_count(&pic, CMC, "mint_delivery_count"), 0);
+    assert!(public_topups(&pic, sentinel, target).is_empty());
+}
+
+#[test]
+fn shared_reserve_unknown_spend_resolution_charges_conversion_cap_without_target_history() {
+    let (pic, sentinel, signer) = boot_with_funding(13 * T, 10 * T, 20_000 * T);
+    shared_setup(&pic, 0);
+    set_mock_transfer_mode(
+        &pic,
+        principal(ICP_LEDGER),
+        TransferMode::CommittedLostReply,
+    );
+    let target = enable_shared_target(&pic, sentinel, signer);
+    run_timer(&pic, sentinel);
+    let ids = unresolved_operation_ids(&pic, sentinel, signer);
+    assert_eq!(ids.len(), 1);
+    assert_eq!(
+        test_operation(&pic, sentinel, ids[0]).state,
+        FundingState::Icp(FundingIcpState::TransferUnknown)
+    );
+    let paid_balance = mock_nat(&pic, ICP_LEDGER, "ledger_balance");
+    assert_ok(&call_update_raw(
+        &pic,
+        sentinel,
+        signer,
+        "resolve_unknown_as_spent",
+        Encode!(&ids[0]).unwrap(),
+    ));
+    assert!(unresolved_operation_ids(&pic, sentinel, signer).is_empty());
+    assert!(
+        public_topups(&pic, sentinel, target).is_empty(),
+        "reserve conversion resolution must not masquerade as a target top-up"
+    );
+    assert_eq!(
+        shared_overview(&pic, sentinel).icp_available_e8s,
+        Some(Nat::from(paid_balance)),
+        "ICP hold was settled against the conservative debit"
+    );
+    upgrade_sentinel(&pic, sentinel, SENTINEL_WASM, signer);
+    run_timer(&pic, sentinel);
+    // The uncertain 12.0002T conversion remains charged against 13T. With
+    // no known mint credit, another deficit requires 12.0002T and is denied.
+    assert_eq!(mock_count(&pic, ICP_LEDGER, "transfer_delivery_count"), 1);
+    assert_eq!(mock_nat(&pic, ICP_LEDGER, "ledger_balance"), paid_balance);
+    assert_eq!(mock_count(&pic, CMC, "mint_delivery_count"), 0);
+    assert_exact_withdrawals(&pic, &[]);
+    assert!(public_topups(&pic, sentinel, target).is_empty());
+    assert!(unresolved_operation_ids(&pic, sentinel, signer).is_empty());
+}
+
+#[test]
+fn shared_reserve_at_protected_floor_mints_only_exact_refill_and_fees() {
+    let (pic, sentinel, signer) = boot_with_funding(40 * T, 10 * T, 20_000 * T);
+    shared_setup(&pic, 10 * T);
+    let target = enable_shared_target(&pic, sentinel, signer);
+    run_timer(&pic, sentinel);
+    assert_eq!(mock_nat(&pic, CMC, "minted_cycles"), 2 * T + 2 * CYCLES_FEE);
+    assert_eq!(mock_nat(&pic, CYCLES_LEDGER, "ledger_balance"), 10 * T);
+    assert_exact_withdrawals(&pic, &[2 * T]);
+    assert_eq!(
+        public_topups(&pic, sentinel, target),
+        vec![PublicTopupSummary {
+            rail: FundingRailView::CyclesLedger,
+            outcome: FundingOutcomeView::Completed,
+            amount_cycles: Nat::from(2 * T)
+        }]
+    );
+    assert!(unresolved_operation_ids(&pic, sentinel, signer).is_empty());
+}
+
+#[test]
+fn shared_reserve_partial_deficit_processing_upgrade_preserves_small_mint() {
+    let (pic, sentinel, signer) = boot_with_funding(40 * T, 10 * T, 20_000 * T);
+    shared_setup(&pic, 11 * T);
+    set_mock_notify_mode(&pic, principal(CMC), NotifyMode::Processing);
+    let target = enable_shared_target(&pic, sentinel, signer);
+    run_timer(&pic, sentinel);
+    let ids = unresolved_operation_ids(&pic, sentinel, signer);
+    assert_eq!(ids.len(), 1);
+    let before = test_operation(&pic, sentinel, ids[0]);
+    assert_eq!(before.reserved_amount_cycles, Nat::from(T + 2 * CYCLES_FEE));
+    assert_eq!(
+        before.state,
+        FundingState::Icp(FundingIcpState::NotifyPending)
+    );
+    assert_exact_withdrawals(&pic, &[]);
+    upgrade_sentinel(&pic, sentinel, SENTINEL_WASM, signer);
+    assert_operations_unchanged(&pic, sentinel, &[before], "partial deficit upgrade");
+    set_mock_notify_mode(&pic, principal(CMC), NotifyMode::Completed);
+    run_timer(&pic, sentinel);
+    assert_eq!(mock_count(&pic, ICP_LEDGER, "transfer_delivery_count"), 1);
+    assert_eq!(mock_nat(&pic, CMC, "minted_cycles"), T + 2 * CYCLES_FEE);
+    assert_eq!(mock_nat(&pic, CYCLES_LEDGER, "ledger_balance"), 10 * T);
+    assert_exact_withdrawals(&pic, &[2 * T]);
+    assert_eq!(public_topups(&pic, sentinel, target).len(), 1);
+    assert!(unresolved_operation_ids(&pic, sentinel, signer).is_empty());
+}
+
+#[test]
+fn shared_reserve_production_cadence_recovers_runtime_without_prewarmed_sources() {
+    let (pic, sentinel, _) = boot_with_funding_and_interval(40 * T, 10 * T, 900_000_000_000, 3_600);
+    shared_setup(&pic, 0);
+    assert_eq!(transfer_call_count(&pic), 0);
+    // The CMC fixture publishes a rate current at the future scheduled tick;
+    // no Sentinel source-cache refresh or maintenance call prewarms state.
+    let scheduled_rate_at = pic
+        .get_time()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3_601;
+    call_update_unit(
+        &pic,
+        principal(CMC),
+        Principal::anonymous(),
+        "set_rate",
+        Encode!(&scheduled_rate_at, &10_000u64).unwrap(),
+    );
+    run_timer_after(&pic, sentinel, Duration::from_secs(3_601));
+    assert_eq!(mock_count(&pic, ICP_LEDGER, "transfer_delivery_count"), 1);
+    assert_eq!(
+        mock_nat(&pic, CMC, "minted_cycles"),
+        11 * T + 2 * CYCLES_FEE
+    );
+    assert_exact_withdrawals(&pic, &[T]);
+    assert_eq!(mock_nat(&pic, CYCLES_LEDGER, "ledger_balance"), 10 * T);
+    assert!(
+        pic.cycle_balance(sentinel) > T,
+        "first production-cadence timer delivered runtime fuel without a prewarm tick"
+    );
+    assert!(public_topups(&pic, sentinel, principal(SELF_REPORT_TARGETS[0])).is_empty());
+}
+
+#[test]
+fn shared_reserve_minimum_icp_processing_refresh_settles_without_double_debit() {
+    let (pic, sentinel, signer) = boot_with_funding(40 * T, 10 * T, 20_000 * T);
+    shared_setup(&pic, 0);
+    set_mock_notify_mode(&pic, principal(CMC), NotifyMode::Processing);
+    let target = enable_shared_target(&pic, sentinel, signer);
+    let minimum_icp = (12 * T + 2 * CYCLES_FEE) / 10_000 + ICP_FEE;
+    set_mock_ledger_balance(&pic, principal(ICP_LEDGER), minimum_icp);
+    run_timer(&pic, sentinel);
+    assert_eq!(
+        mock_nat(&pic, ICP_LEDGER, "ledger_balance"),
+        0,
+        "one exact transfer and its fee consumed the minimally sufficient deposit"
+    );
+    assert_eq!(mock_count(&pic, ICP_LEDGER, "transfer_delivery_count"), 1);
+    assert_eq!(unresolved_operation_ids(&pic, sentinel, signer).len(), 1);
+    run_timer(&pic, sentinel); // refresh attempts observe the post-debit zero
+    assert_eq!(mock_nat(&pic, ICP_LEDGER, "ledger_balance"), 0);
+    assert_exact_withdrawals(&pic, &[]);
+    set_mock_notify_mode(&pic, principal(CMC), NotifyMode::Completed);
+    run_timer(&pic, sentinel);
+    assert_eq!(mock_count(&pic, ICP_LEDGER, "transfer_delivery_count"), 1);
+    assert_eq!(mock_count(&pic, CMC, "mint_delivery_count"), 1);
+    assert_exact_withdrawals(&pic, &[2 * T]);
+    assert_eq!(mock_nat(&pic, CYCLES_LEDGER, "ledger_balance"), 10 * T);
+    assert_eq!(
+        shared_overview(&pic, sentinel).icp_available_e8s,
+        Some(Nat::from(0u8))
+    );
+    assert_eq!(public_topups(&pic, sentinel, target).len(), 1);
+    assert!(
+        unresolved_operation_ids(&pic, sentinel, signer).is_empty(),
+        "confirmed mint and withdrawal settled without subtracting the ICP payment twice"
+    );
 }

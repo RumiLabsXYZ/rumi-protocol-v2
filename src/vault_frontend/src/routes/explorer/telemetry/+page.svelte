@@ -3,10 +3,12 @@
   import { Principal } from '@dfinity/principal';
   import { walletStore } from '$lib/stores/wallet';
   import { currentWalletType, walletSessionGeneration } from '$lib/services/auth';
+  import { CANISTER_IDS } from '$lib/config';
   import { targetStateLabel } from '$lib/services/cycleSentinelTelemetry';
   import {
     ageLabel,
     CYCLES_LEDGER_PRINCIPAL,
+    ICP_LEDGER_PRINCIPAL,
     formatIcp,
     formatTCycles,
     fundingOwner,
@@ -324,17 +326,33 @@
     loadedTarget = null;
     selectedTargetPrincipal = '';
   }
-  $: fundingPrincipal = snapshot ? fundingOwner(snapshot.overview, CANISTER_IDS.CYCLE_SENTINEL) : undefined;
+  $: fundingPrincipal = snapshot
+    ? fundingOwner(snapshot.overview, CANISTER_IDS.CYCLE_SENTINEL)
+    : isCycleSentinelConfigured
+      ? Principal.fromText(CANISTER_IDS.CYCLE_SENTINEL)
+      : undefined;
   $: fundingOwnerText = fundingPrincipal?.toText() ?? 'Unavailable';
   $: icpAccountText = fundingPrincipal ? legacyIcpAccountIdentifier(fundingPrincipal) : 'Unavailable';
+  $: fundingCyclesBalance = funding ? fundingOptionalBigInt(funding.cycles_ledger_balance_cycles) : undefined;
+  $: fundingCyclesBalanceAsOf = funding ? fundingOptionalBigInt(funding.cycles_ledger_balance_as_of_secs) : undefined;
+  $: fundingCyclesBalanceStale = fundingCyclesBalanceAsOf !== undefined && isStale(fundingCyclesBalanceAsOf, undefined, 7200n);
+  $: fundingCyclesAvailable = funding ? fundingOptionalBigInt(funding.cycles_ledger_available_cycles) : undefined;
+  $: fundingProtectedCycles = funding ? fundingOptionalBigInt(funding.protected_self_reserve_cycles) : undefined;
+  $: fundingIcpBalance = funding ? fundingOptionalBigInt(funding.icp_ledger_balance_e8s) : undefined;
+  $: fundingIcpBalanceAsOf = funding ? fundingOptionalBigInt(funding.icp_ledger_balance_as_of_secs) : undefined;
+  $: fundingIcpBalanceStale = fundingIcpBalanceAsOf !== undefined && isStale(fundingIcpBalanceAsOf, undefined, 180n);
+  $: fundingIcpAvailable = funding ? fundingOptionalBigInt(funding.icp_available_e8s) : undefined;
+  $: fundingMinIcpReserve = funding ? fundingOptionalBigInt(funding.min_icp_reserve_e8s) : undefined;
+  $: fundingConversionStatus = funding ? variantLabel(funding.shared_reserve_conversion_status) : 'Unavailable';
+  $: fundingNextCheck = snapshot ? nextCheckLabel(optional(snapshot.overview.next_sample_at_secs)) : 'Unavailable';
   $: fundingUnavailable = !!funding
-    && fundingOptionalBigInt(funding.cycles_ledger_balance_cycles) === undefined
-    && fundingOptionalBigInt(funding.cycles_ledger_available_cycles) === undefined
-    && fundingOptionalBigInt(funding.icp_ledger_balance_e8s) === undefined
-    && fundingOptionalBigInt(funding.icp_available_e8s) === undefined;
+    && fundingCyclesBalance === undefined
+    && fundingCyclesAvailable === undefined
+    && fundingIcpBalance === undefined
+    && fundingIcpAvailable === undefined;
   $: fundingEmpty = !!funding
-    && fundingOptionalBigInt(funding.cycles_ledger_available_cycles) === 0n
-    && fundingOptionalBigInt(funding.icp_available_e8s) === 0n;
+    && fundingCyclesAvailable === 0n
+    && fundingIcpAvailable === 0n;
 
   async function refresh(): Promise<void> {
     loading = true;
@@ -424,9 +442,9 @@
   {#if authError}<div class="notice error" role="alert">Operator query/action: {authError}</div>{/if}
   {#if actionMessage}<div class="notice success">{actionMessage}</div>{/if}
   {#if !isCycleSentinelConfigured}<div class="notice">Cycle Sentinel is not configured yet. This page remains fail-closed until the authoritative Task 10 deployment.</div>
-  {:else if loading}<p class="muted">Loading public telemetry…</p>
-  {:else if snapshot}
-    <div class="stats"><div><span>Targets</span><strong>{format(snapshot.overview.target_count)}</strong></div><div><span>Healthy</span><strong>{format(snapshot.overview.healthy_count)}</strong></div><div><span>Runtime fuel</span><strong>{formatTCycles(snapshot.overview.runtime_cycles)} T</strong><small>This is Sentinel's own operating fuel.</small></div><div><span>Open alarms</span><strong>{format(snapshot.overview.alarm_count)}</strong></div></div>
+  {:else}
+    {#if loading}<p class="muted">Loading public telemetry… Funding destinations are available below.</p>{/if}
+    {#if snapshot}<div class="stats"><div><span>Targets</span><strong>{format(snapshot.overview.target_count)}</strong></div><div><span>Healthy</span><strong>{format(snapshot.overview.healthy_count)}</strong></div><div><span>Runtime fuel</span><strong>{formatTCycles(snapshot.overview.runtime_cycles)} T</strong><small>This is Sentinel's own operating fuel.</small></div><div><span>Open alarms</span><strong>{format(snapshot.overview.alarm_count)}</strong></div></div>{/if}
     <section class="funding-wallet" aria-labelledby="funding-wallet-heading">
       <div class="funding-heading">
         <div>
@@ -436,44 +454,43 @@
         </div>
         <span class="badge confirmed">Uses cycles first · ICP fallback</span>
       </div>
-      {#if funding}
         <div class="funding-balances">
           <article class="funding-balance">
-            <div class="balance-title"><h3>Cycles reserve</h3><span class="network">ICRC Cycles Ledger</span></div>
-            <div class="balance-grid"><div><span>Ledger balance</span><strong>{formatTCycles(fundingOptionalBigInt(funding.cycles_ledger_balance_cycles))} T</strong><small class:stale={isStale(fundingOptionalBigInt(funding.cycles_ledger_balance_as_of_secs), undefined, 7200n)}>{isStale(fundingOptionalBigInt(funding.cycles_ledger_balance_as_of_secs), undefined, 7200n) ? 'Stale · ' : ''}{ageLabel(fundingOptionalBigInt(funding.cycles_ledger_balance_as_of_secs))}</small></div><div><span>Spendable</span><strong>{formatTCycles(fundingOptionalBigInt(funding.cycles_ledger_available_cycles))} T</strong><small>After protected reserves</small></div><div><span>Protected</span><strong>{formatTCycles(fundingOptionalBigInt(funding.protected_self_reserve_cycles))} T</strong><small>Kept for Sentinel recovery</small></div></div>
+            <div class="balance-title"><h3>Deposit cycles</h3><span class="network">ICRC Cycles Ledger</span></div>
+            <div class="balance-grid"><div><span>Ledger balance</span><strong>{formatTCycles(fundingCyclesBalance)} T</strong><small class:stale={fundingCyclesBalanceStale}>{fundingCyclesBalanceStale ? 'Stale · ' : ''}{ageLabel(fundingCyclesBalanceAsOf)}</small></div><div><span>Spendable</span><strong>{formatTCycles(fundingCyclesAvailable)} T</strong><small>After protected reserves</small></div><div><span>Protected</span><strong>{formatTCycles(fundingProtectedCycles)} T</strong><small>Kept for Sentinel recovery</small></div></div>
             <p class="deposit-copy">Send cycles to the Cycles Ledger using the Sentinel principal as the owner and the default subaccount.</p>
             <div class="address-row"><span class="address-label">Cycles deposit owner</span><code>{fundingOwnerText}</code><button on:click={() => copyLabel('Cycles deposit owner', fundingOwnerText)}>Copy</button></div>
-            <div class="address-row"><span class="address-label">Cycles Ledger canister</span><code>{CYCLES_LEDGER_PRINCIPAL}</code><button on:click={() => copyLabel('Cycles Ledger canister', CYCLES_LEDGER_PRINCIPAL)}>Copy</button></div>
-            <p class="fine-print">The default subaccount is empty. This account is the funding pool; sending cycles directly to a target canister only changes that target's runtime balance.</p>
+            <p class="service-reference">Cycles Ledger service reference: <code>{CYCLES_LEDGER_PRINCIPAL}</code></p>
+            <p class="fine-print">Use a Cycles Ledger transfer to the Sentinel owner/default subaccount above. Sending runtime cycles directly to the Sentinel or a target canister does not fund this ledger pool; it only changes that canister's runtime balance.</p>
           </article>
           <article class="funding-balance">
-            <div class="balance-title"><h3>ICP fallback reserve</h3><span class="network">ICP Ledger · mainnet</span></div>
-            <div class="balance-grid"><div><span>Ledger balance</span><strong>{formatIcp(fundingOptionalBigInt(funding.icp_ledger_balance_e8s))} ICP</strong><small class:stale={isStale(fundingOptionalBigInt(funding.icp_ledger_balance_as_of_secs), undefined, 180n)}>{isStale(fundingOptionalBigInt(funding.icp_ledger_balance_as_of_secs), undefined, 180n) ? 'Stale · ' : ''}{ageLabel(fundingOptionalBigInt(funding.icp_ledger_balance_as_of_secs))}</small></div><div><span>Spendable</span><strong>{formatIcp(fundingOptionalBigInt(funding.icp_available_e8s))} ICP</strong><small>After reserve policy</small></div><div><span>Minimum reserve</span><strong>{formatIcp(fundingOptionalBigInt(funding.min_icp_reserve_e8s))} ICP</strong><small>Held back from conversion</small></div></div>
+            <div class="balance-title"><h3>Deposit ICP</h3><span class="network">ICP Ledger · mainnet</span></div>
+            <div class="balance-grid"><div><span>Ledger balance</span><strong>{formatIcp(fundingIcpBalance)} ICP</strong><small class:stale={fundingIcpBalanceStale}>{fundingIcpBalanceStale ? 'Stale · ' : ''}{ageLabel(fundingIcpBalanceAsOf)}</small></div><div><span>Spendable</span><strong>{formatIcp(fundingIcpAvailable)} ICP</strong><small>After reserve policy</small></div><div><span>Minimum reserve</span><strong>{formatIcp(fundingMinIcpReserve)} ICP</strong><small>Held back from conversion</small></div></div>
             <p class="deposit-copy">Send ICP to the Sentinel owner on the ICP Ledger using the default subaccount. ICRC wallets can use the principal below; legacy wallets can use the 64-character account identifier. Sentinel converts ICP through the NNS Cycles Minting Canister only when spendable cycles cannot cover a refill.</p>
             <div class="address-row"><span class="address-label">ICRC owner principal</span><code>{fundingOwnerText}</code><button on:click={() => copyLabel('ICRC owner principal', fundingOwnerText)}>Copy</button></div>
             <div class="address-row"><span class="address-label">ICP account identifier</span><code>{icpAccountText}</code><button on:click={() => copyLabel('ICP account identifier', icpAccountText)}>Copy</button></div>
-            <div class="address-row"><span class="address-label">ICP Ledger canister</span><code>{ICP_LEDGER_PRINCIPAL}</code><button on:click={() => copyLabel('ICP Ledger canister', ICP_LEDGER_PRINCIPAL)}>Copy</button></div>
+            <p class="service-reference">ICP Ledger service reference: <code>{ICP_LEDGER_PRINCIPAL}</code></p>
             <p class="fine-print">The ICRC owner uses the empty/default subaccount. The legacy identifier is the same owner account encoded for older ICP Ledger send forms.</p>
           </article>
         </div>
-        <div class="funding-footer"><span>Conversion status: <strong>{variantLabel(funding.shared_reserve_conversion_status)}</strong></span><span>Funding owner: <code>{fundingOwnerText}</code></span><span>Next scheduled check: <strong>{nextCheckLabel(optional(snapshot.overview.next_sample_at_secs))}</strong></span></div>
+        <div class="funding-footer"><span>Conversion status: <strong>{fundingConversionStatus}</strong></span><span>Funding owner: <code>{fundingOwnerText}</code></span><span>Next scheduled check: <strong>{fundingNextCheck}</strong></span></div>
         {#if fundingEmpty}<p class="notice idle"><strong>Automation is configured but awaiting funds.</strong> Deposit cycles or ICP above; the next scheduled Sentinel check will recognize the reserve. Refreshing this page reads current public state but does not force a funding run.</p>{/if}
+        {#if !funding}<p class="notice idle"><strong>Funding balances are unavailable right now.</strong> The deposit destinations above are ready; balances and automation status will appear after the Sentinel publishes its public funding status.</p>{/if}
         {#if copyMessage}<p class="notice success" role="status">{copyMessage}</p>{/if}
         {#if copyError}<p class="notice error" role="alert">{copyError}</p>{/if}
-      {:else}
-        <p class="muted">Funding balances are unavailable until the Sentinel publishes its funding status.</p>
-      {/if}
     </section>
-    {#if registryIdle}
+    {#if snapshot}
+      {#if registryIdle}
       <div class="notice idle">
         <strong>Observation has not been switched on yet.</strong>
         <p>All {snapshot.overview.target_count.toString()} registered targets are still disabled or set to <em>Unobserved</em>, so the Sentinel has never sampled them{neverSampled ? '' : ' recently'}. That is why balance, burn rate, and runway read <em>Unavailable</em> rather than zero — the values are genuinely unknown, not missing from the page.</p>
         <p class="muted">Registration is deliberately fail-closed: a target is created disabled with auto-top-up off. Turning observation on is a separate governed change — a signer proposes a target update with <em>Enabled</em> checked, a second signer approves it, and it executes after the target-registry timelock.</p>
         {#if fundingUnavailable}<p class="muted">The Sentinel also reports no funding source yet (no cycles-ledger balance and no ICP), so top-ups would be rejected even for an enabled target.</p>{/if}
       </div>
-    {/if}
+      {/if}
     <div class="grid"><article><h2>Target registry</h2>{#if snapshot.targets.length}<table><thead><tr><th>Target</th><th>State</th><th>Rule</th><th>Balance</th><th>Burn / day</th><th>Runway</th><th>Environment</th><th></th></tr></thead><tbody>{#each snapshot.targets as row}<tr class:selected-row={selectedTargetPrincipal === row.principal.toText()}><td><strong>{row.display_name}</strong><small>{row.principal.toText()}</small><small>{row.project} · {variant(row.observation_mode)}</small></td><td title={targetStateLabel(row) === 'Awaiting first sample' ? 'Monitoring is enabled. The next scheduled observation has not completed yet.' : undefined}><strong>{fundingTarget(row).paused ? 'Paused' : targetStateLabel(row)}</strong><small>{fundingTarget(row).enabled ? 'Enabled' : 'Disabled'} · {fundingTarget(row).auto_topup ? 'Auto-top-up on' : 'Auto-top-up off'}</small></td><td><span class="rule">At {formatTCycles(row.low_balance_threshold_cycles)}T, add {formatTCycles(row.refill_cycles)}T</span><small>Cap {formatTCycles(fundingTarget(row).daily_cap_cycles ?? undefined)}T · cooldown {fundingTarget(row).cooldown_secs?.toString() ?? 'Unavailable'}s</small>{#if row.recent_topups.length}<small>Last top-up: {variant(row.recent_topups[row.recent_topups.length - 1].outcome)} · {formatTCycles(row.recent_topups[row.recent_topups.length - 1].amount_cycles)}T</small>{/if}</td><td title={format(optional(row.advisory_balance_cycles))}>{row.advisory_balance_overflowed ? 'Overflow' : formatCycles(optional(row.advisory_balance_cycles))}</td><td title={format(optional(row.burn_cycles_per_day))}>{formatCycles(optional(row.burn_cycles_per_day))}</td><td>{formatRunway(optional(row.runway_secs))}</td><td>{variant(row.environment)}</td><td><button class="select-target" on:click={() => selectTarget(row)}>Use settings</button></td></tr>{/each}</tbody></table>{:else}<p class="muted">No targets have been published.</p>{/if}</article>
       <article><h2>Alarms</h2>{#if snapshot.alarms.length}{#each snapshot.alarms as alarm}<div class="alarm"><span class="dot"></span><div><strong>{variant(alarm.kind)}</strong><small>{alarm.target[0]?.toText() ?? 'Sentinel'}</small></div><span>{variant(alarm.status)}</span>{#if signer && actor && alarmCanBeAcknowledged(alarm)}<button on:click={() => run(() => sentinelManagement.acknowledgeAlarm(actor!, alarm.id))}>Acknowledge</button>{/if}</div>{/each}{:else}<p class="muted">No public alarms.</p>{/if}</article></div>
+    {/if}
   {/if}
 
   {#if $walletStore.isConnected && isCycleSentinelConfigured}<section class="operator"><h2>Operator console <span class:confirmed={signer} class="badge">{signer ? 'Signer confirmed on-chain' : operatorChecked ? 'Connected, not a signer' : 'Access not checked'}</span></h2>
@@ -489,5 +506,6 @@
 </section>
 
 <style>
-  .telemetry-page{max-width:1120px;margin:0 auto;color:var(--rumi-text-primary)}.hero{display:flex;align-items:flex-end;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-bottom:2rem}.hero h1{margin:.1rem 0;font-size:2.5rem}.lede{max-width:700px;color:var(--rumi-text-secondary)}.eyebrow{color:var(--rumi-teal);font-size:.72rem;letter-spacing:.14em}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:.75rem;margin-bottom:1rem}.stats div,article,.operator,.login-note{padding:1rem;background:var(--rumi-bg-surface-1);border:1px solid var(--rumi-border);border-radius:.5rem}.stats span,.muted,small{display:block;color:var(--rumi-text-muted);font-size:.78rem}.stats strong{font-size:1.25rem}.grid{display:grid;grid-template-columns:2fr 1fr;gap:1rem}h2,h3{margin-top:0}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:.55rem;border-bottom:1px solid var(--rumi-border);font-size:.82rem;vertical-align:top}.alarm{display:flex;gap:.5rem;align-items:center;border-bottom:1px solid var(--rumi-border);padding:.65rem 0}.alarm>span:nth-last-of-type(1){margin-left:auto;font-size:.75rem}.dot{width:.45rem;height:.45rem;background:#e05252;border-radius:50%}.operator{margin-top:1rem;display:grid;gap:1rem}.operator>h2,.operator>p{margin-bottom:0}.badge{font-size:.7rem;padding:.25rem .5rem;border-radius:99px;color:var(--rumi-text-muted);background:var(--rumi-bg-surface3)}.badge.confirmed{color:var(--rumi-teal);background:rgba(45,212,191,.12)}.form-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:.7rem}.form-grid label{display:block;font-size:.75rem;color:var(--rumi-text-muted)}input,select{display:block;width:100%;box-sizing:border-box;margin-top:.25rem;padding:.5rem;background:var(--rumi-bg-surface3);border:1px solid var(--rumi-border);color:inherit;border-radius:.3rem}.check{display:flex!important;gap:.5rem;align-items:center}.check input{width:auto}.actions{display:flex;gap:.4rem;flex-wrap:wrap;margin-top:.7rem}button{border:1px solid var(--rumi-border-hover);background:var(--rumi-bg-surface3);color:inherit;border-radius:.4rem;padding:.55rem .8rem;cursor:pointer;font-size:.78rem}button:hover{border-color:var(--rumi-action)}button:disabled{opacity:.5}.notice{padding:.7rem;margin-bottom:1rem;border-radius:.4rem}.error{color:#ff9b9b;background:rgba(224,82,82,.12)}.idle{background:var(--rumi-bg-surface-1);border:1px solid var(--rumi-border)}.idle strong{display:block;margin-bottom:.35rem}.idle p{margin:.35rem 0;font-size:.82rem;color:var(--rumi-text-secondary)}.idle p.muted{font-size:.78rem}.success{color:var(--rumi-teal);background:rgba(45,212,191,.1)}.login-note{margin-top:1rem}li{margin:.4rem 0;font-size:.82rem}.funding-wallet{padding:1.2rem;background:linear-gradient(135deg,rgba(31,48,78,.75),rgba(19,29,52,.95));border:1px solid rgba(45,212,191,.35);border-radius:.65rem;margin-bottom:1rem}.funding-heading{display:flex;justify-content:space-between;gap:1rem;align-items:flex-start;margin-bottom:1rem}.funding-heading h2{margin:.1rem 0 .35rem}.funding-heading p{margin:0}.funding-balances{display:grid;grid-template-columns:1fr 1fr;gap:.8rem}.funding-balance{padding:1rem;background:rgba(8,15,30,.35);border-color:rgba(255,255,255,.12)}.balance-title{display:flex;align-items:baseline;justify-content:space-between;gap:.5rem}.balance-title h3{margin:0}.network{font-size:.7rem;color:var(--rumi-teal)}.balance-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:.5rem;margin:1rem 0}.balance-grid>div{padding:.6rem;background:rgba(255,255,255,.04);border-radius:.35rem}.balance-grid strong{display:block;font-size:1.05rem;margin-top:.2rem}.deposit-copy{color:var(--rumi-text-secondary);font-size:.82rem;line-height:1.45}.address-row{display:grid;grid-template-columns:9.5rem minmax(0,1fr) auto;align-items:center;gap:.5rem;margin-top:.5rem}.address-label{font-size:.72rem;color:var(--rumi-text-muted)}code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.73rem;overflow-wrap:anywhere;user-select:all}.address-row code{padding:.45rem;background:rgba(0,0,0,.22);border-radius:.25rem}.address-row button{padding:.4rem .55rem}.fine-print{font-size:.72rem;color:var(--rumi-text-muted);line-height:1.4}.funding-footer{display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-top:.8rem;color:var(--rumi-text-muted);font-size:.75rem}.rule{display:block;white-space:nowrap}.selected-row{background:rgba(45,212,191,.07)}.select-target{padding:.4rem .5rem;white-space:nowrap}@media(max-width:768px){.stats{grid-template-columns:repeat(2,1fr)}.grid,.form-grid,.funding-balances{grid-template-columns:1fr}.balance-grid{grid-template-columns:1fr 1fr}.address-row{grid-template-columns:1fr}.address-row button{justify-self:start}table{font-size:.72rem}}
+  .telemetry-page{max-width:1120px;margin:0 auto;color:var(--rumi-text-primary)}.hero{display:flex;align-items:flex-end;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-bottom:2rem}.hero h1{margin:.1rem 0;font-size:2.5rem}.lede{max-width:700px;color:var(--rumi-text-secondary)}.eyebrow{color:var(--rumi-teal);font-size:.72rem;letter-spacing:.14em}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:.75rem;margin-bottom:1rem}.stats div,article,.operator,.login-note{padding:1rem;background:var(--rumi-bg-surface-1);border:1px solid var(--rumi-border);border-radius:.5rem}.stats span,.muted,small{display:block;color:var(--rumi-text-muted);font-size:.78rem}.stats strong{font-size:1.25rem}.grid{display:grid;grid-template-columns:2fr 1fr;gap:1rem}h2,h3{margin-top:0}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:.55rem;border-bottom:1px solid var(--rumi-border);font-size:.82rem;vertical-align:top}.alarm{display:flex;gap:.5rem;align-items:center;border-bottom:1px solid var(--rumi-border);padding:.65rem 0}.alarm>span:nth-last-of-type(1){margin-left:auto;font-size:.75rem}.dot{width:.45rem;height:.45rem;background:#e05252;border-radius:50%}.operator{margin-top:1rem;display:grid;gap:1rem}.operator>h2,.operator>p{margin-bottom:0}.badge{font-size:.7rem;padding:.25rem .5rem;border-radius:99px;color:var(--rumi-text-muted);background:var(--rumi-bg-surface3)}.badge.confirmed{color:var(--rumi-teal);background:rgba(45,212,191,.12)}.form-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:.7rem}.form-grid label{display:block;font-size:.75rem;color:var(--rumi-text-muted)}input,select{display:block;width:100%;box-sizing:border-box;margin-top:.25rem;padding:.5rem;background:var(--rumi-bg-surface3);border:1px solid var(--rumi-border);color:inherit;border-radius:.3rem}.check{display:flex!important;gap:.5rem;align-items:center}.check input{width:auto}.actions{display:flex;gap:.4rem;flex-wrap:wrap;margin-top:.7rem}button{border:1px solid var(--rumi-border-hover);background:var(--rumi-bg-surface3);color:inherit;border-radius:.4rem;padding:.55rem .8rem;cursor:pointer;font-size:.78rem}button:hover{border-color:var(--rumi-action)}button:disabled{opacity:.5}.notice{padding:.7rem;margin-bottom:1rem;border-radius:.4rem}.error{color:#ff9b9b;background:rgba(224,82,82,.12)}.idle{background:var(--rumi-bg-surface-1);border:1px solid var(--rumi-border)}.idle strong{display:block;margin-bottom:.35rem}.idle p{margin:.35rem 0;font-size:.82rem;color:var(--rumi-text-secondary)}.idle p.muted{font-size:.78rem}.success{color:var(--rumi-teal);background:rgba(45,212,191,.1)}.login-note{margin-top:1rem}li{margin:.4rem 0;font-size:.82rem}.funding-wallet{padding:1.2rem;background:linear-gradient(135deg,rgba(31,48,78,.75),rgba(19,29,52,.95));border:1px solid rgba(45,212,191,.35);border-radius:.65rem;margin-bottom:1rem}.funding-heading{display:flex;justify-content:space-between;gap:1rem;align-items:flex-start;margin-bottom:1rem}.funding-heading h2{margin:.1rem 0 .35rem}.funding-heading p{margin:0}.funding-balances{display:grid;grid-template-columns:1fr 1fr;gap:.8rem}.funding-balance{padding:1rem;background:rgba(8,15,30,.35);border-color:rgba(255,255,255,.12)}.balance-title{display:flex;align-items:baseline;justify-content:space-between;gap:.5rem}.balance-title h3{margin:0}.network{font-size:.7rem;color:var(--rumi-teal)}.balance-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:.5rem;margin:1rem 0}.balance-grid>div{min-width:0;padding:.6rem;background:rgba(255,255,255,.04);border-radius:.35rem}.balance-grid strong{display:block;min-width:0;overflow-wrap:anywhere;word-break:break-word;font-size:1.05rem;margin-top:.2rem}.deposit-copy{color:var(--rumi-text-secondary);font-size:.82rem;line-height:1.45}.address-row{display:grid;grid-template-columns:9.5rem minmax(0,1fr) auto;align-items:center;gap:.5rem;margin-top:.5rem}.address-label{font-size:.72rem;color:var(--rumi-text-muted)}code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.73rem;overflow-wrap:anywhere;user-select:all}.address-row code{padding:.45rem;background:rgba(0,0,0,.22);border-radius:.25rem}.address-row button{padding:.4rem .55rem}.fine-print{font-size:.72rem;color:var(--rumi-text-muted);line-height:1.4}.funding-footer{display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-top:.8rem;color:var(--rumi-text-muted);font-size:.75rem}.rule{display:block;white-space:nowrap}.selected-row{background:rgba(45,212,191,.07)}.select-target{padding:.4rem .5rem;white-space:nowrap}@media(max-width:768px){.stats{grid-template-columns:repeat(2,1fr)}.grid,.form-grid,.funding-balances{grid-template-columns:1fr}.balance-grid{grid-template-columns:1fr 1fr}.address-row{grid-template-columns:1fr}.address-row button{justify-self:start}table{font-size:.72rem}}
+  .funding-wallet .deposit-copy,.funding-wallet .address-label,.funding-wallet .fine-print,.funding-wallet .service-reference{color:var(--rumi-text-secondary)}.service-reference{margin:.5rem 0 0;font-size:.72rem;line-height:1.4}.service-reference code{padding:0;background:transparent;color:inherit}
 </style>
