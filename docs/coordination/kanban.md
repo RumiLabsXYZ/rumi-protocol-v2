@@ -143,11 +143,17 @@ Authorization: Rob requested checks every four hours with a manual refresh butto
 
 | ID | State | Owner | Task | Depends on | Evidence / blocker |
 | --- | --- | --- | --- | --- | --- |
-| CS-65 | In progress | sentinel_backend | Signer-only immediate maintenance, shared concurrency guard, actual scheduled deadline and cadence fields | None | Existing Terra worker retained for integration of the previously reviewed asynchronous maintenance path; no stable schema or funding-rail changes |
-| CS-66 | In progress | cadence_frontend | Obvious active cadence and signer-only Run check now; preserve public read-only refresh | CS-65 interface | Loaded Rumi frontend release persona; no declaration or dependency edits |
-| CS-67 | In progress | sentinel_flow_tests | Real canister auth, manual pass and four-hour timer regression coverage | CS-65 | Reuse exact official PocketIC7 and existing fixture/cache stack |
+| CS-65 | Review | sentinel_backend | Signer-only immediate maintenance, shared concurrency guard, actual scheduled deadline and cadence fields | None | Existing Terra worker retained for integration of the previously reviewed asynchronous maintenance path; no stable schema or funding-rail changes |
+| CS-66 | Review | cadence_frontend | Obvious active cadence and signer-only Run check now; preserve public read-only refresh | CS-65 interface | Loaded Rumi frontend release persona; no declaration or dependency edits |
+| CS-67 | Review | sentinel_flow_tests | Real canister auth, manual pass and four-hour timer regression coverage | CS-65 | Reuse exact official PocketIC7 and existing fixture/cache stack |
 | CS-68 | In progress | coordinator | Preserve policy, propose four-hour cadence, integrate declarations, review, publish and verify | CS-65 through CS-67 | Two-of-four signer threshold and 86,400-second spend-policy timelock must remain; only robvector is available locally |
 
 Acceptance: immediate maintenance is authorized, single-flight and follows existing reserves/caps/cooldowns; public reads cannot spend funds; manual checks do not postpone the automatic schedule; active cadence is derived from live policy; four-hour policy changes only sample interval to14,400 seconds and stale window to28,800 seconds, preserving the current two-interval relationship and all other fields. Source publication, schedule proposal, approval and execution are separate proof states.
 
 Sonnet availability remains the previously verified loggedIn=false; native workers continue without external source sharing. Root owns shared bindings, ICRC-21 consent, commits, review and all live actions. Disk-pressure cleanup fetched origin and removed0 worktrees:0 eligible,12 protected/dirty/unmerged; 23GiB free, preserved.
+
+### Four-hour cadence review checkpoint
+
+Final source: `77f8445000342e13fcb0978f78d006464d8cac94`; PR406. CS-65 and CS-66 are in Review with 615 native tests plus five final consent tests, 24 frontend tests, and both production builds passing. CS-67 final full 40-case run uses the frozen fixture `bc15f76e37ce562f7f757fe03539a4f83979f704a058a96e62f0dbb02e2ef374`; four new cases already passed on the unchanged functional implementation. Two fresh native GPT-5.6 Luna reviewers own the second review round; Sonnet authentication was unavailable and that fallback was already surfaced. Reviewers have no write or deployment authority.
+
+CS-68 policy proposal17 has one signer approval and a 24-hour waiting period ending 2026-09-29T17:55:57Z. A second configured signer and eventual execution are required for the four-hour schedule; manual-check publication is independent of that wait. There is no bypass or automatic assumption that pending policy is active.
