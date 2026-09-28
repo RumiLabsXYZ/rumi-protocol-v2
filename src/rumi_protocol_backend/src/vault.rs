@@ -34,7 +34,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 /// One ten-minute maximum-age contract shared by quote display, ranking refresh,
 /// and pre/post-pull verification. This matches XRC's existing hard ceiling.
 const REDEMPTION_PRICE_MAX_AGE_NS: u64 = 10 * 60 * 1_000_000_000;
-const MAX_REDEMPTION_PRICE_CANDIDATES: usize = 64;
+pub(crate) const MAX_REDEMPTION_PRICE_CANDIDATES: usize = 64;
 
 /// Fee inputs frozen for one read-only queue calculation. The elapsed-hour
 /// decay and per-collateral debt total are invariant across capacity probes;
@@ -103,7 +103,7 @@ fn redemption_simulation_plan(
     )
 }
 
-fn redemption_candidate_types(state: &crate::state::State) -> Vec<Principal> {
+pub(crate) fn redemption_candidate_types(state: &crate::state::State) -> Vec<Principal> {
     let mut types = std::collections::BTreeSet::new();
     for vault in state.vault_id_to_vaults.values() {
         if vault.borrowed_icusd_amount == 0
