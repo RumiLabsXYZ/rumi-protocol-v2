@@ -1,0 +1,470 @@
+# REVIEW ONLY — do not apply without a fresh direct review of this exact paired proposal.
+# Includes event/state replay separation and the frozen approved reserve tuple/ID-recorder hunk.
+# Generated from current event/state/vault/audit source; not applied, compiled, or tested.
+--- a/src/rumi_protocol_backend/src/event.rs
++++ b/src/rumi_protocol_backend/src/event.rs
+@@ -138,6 +138,12 @@
+         /// None for legacy events recorded before this field existed.
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         vault_redemptions: Option<Vec<VaultRedemption>>,
++        /// Exact native-unit payout pinned for new redemption events.
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        payout_collateral_raw: Option<u64>,
++        /// Minimum net native-unit payout consented to by the redeemer.
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        min_net_collateral_raw: Option<u64>,
+     },
+ 
+     #[serde(rename = "redemption_transfered")]
+@@ -1625,6 +1631,8 @@
+                 icusd_block_index,
+                 collateral_type,
+                 ref vault_redemptions,
++                payout_collateral_raw,
++                min_net_collateral_raw,
+                 ..
+             } => {
+                 state.provide_liquidity(fee_amount, state.developer_principal);
+@@ -1637,22 +1645,33 @@
+                 // cannot reconstruct. The consumed-based margin mirrors the
+                 // live payout clamp. Pre-Wave-9 events (no stored outcomes)
+                 // keep the legacy re-run + full-claim margin.
+-                let margin: ICP = match vault_redemptions {
++                let historical_margin: ICP = match vault_redemptions {
+                     Some(vrs) => {
+                         state.apply_vault_redemptions(vrs);
+                         let consumed: u64 = vrs.iter().map(|v| v.icusd_redeemed_e8s).sum();
+                         ICUSD::from(consumed) / current_icp_rate
+                     }
+                     None => {
+-                        state.redeem_on_vaults(icusd_amount, current_icp_rate, &redeem_ct);
++                        state.redeem_on_vaults_legacy_full_type_for_replay(
++                            icusd_amount, current_icp_rate, &redeem_ct,
++                        );
+                         icusd_amount / current_icp_rate
+                     }
+                 };
++                // Only newly recorded events pin native-unit payout. Older events
++                // preserve their historical reconstruction exactly.
++                let margin = payout_collateral_raw
++                    .map(ICP::from)
++                    .unwrap_or(historical_margin);
+                 if margin.to_u64() > 0 {
+                     let nonce = state.next_op_nonce();
+-                    state
+-                        .pending_redemption_transfer
+-                        .insert(icusd_block_index, PendingMarginTransfer { owner, margin, collateral_type: redeem_ct, retry_count: 0, op_nonce: nonce });
++                    state.pending_redemption_transfer.insert(
++                        icusd_block_index,
++                        PendingMarginTransfer {
++                            owner, margin, collateral_type: redeem_ct, retry_count: 0,
++                            op_nonce: nonce, min_net_collateral_raw,
++                        },
++                    );
+                 }
+             }
+             Event::RedemptionTransfered {
+@@ -2520,7 +2539,7 @@
+     pub margin: ICP,
+ }
+ 
+-pub fn record_redemption_on_vaults(
++pub fn record_redemption_on_vault_run(
+     state: &mut State,
+     owner: Principal,
+     icusd_amount: ICUSD,
+@@ -2528,6 +2547,8 @@
+     collateral_price: UsdIcp,
+     icusd_block_index: u64,
+     redeem_ct: Principal,
++    allowed_vault_ids: &[u64],
++    min_net_collateral_raw: Option<u64>,
+ ) -> RedemptionOutcome {
+     // Fee is already deducted from icusd_amount before calling redeem_on_vaults,
+     // so vault owners effectively keep the fee (less collateral seized for their debt).
+@@ -2564,7 +2585,9 @@
+         })
+         .unwrap_or((ct_price.0, 8));
+ 
+-    let vault_redemptions = state.redeem_on_vaults(icusd_amount, ct_price, &redeem_ct);
++    let vault_redemptions = state.redeem_on_vaults_for_vault_ids(
++        icusd_amount, ct_price, &redeem_ct, allowed_vault_ids,
++    );
+     record_event(&Event::RedemptionOnVaults {
+         owner,
+         current_icp_rate: ct_price,
+@@ -2573,11 +2596,11 @@
+         icusd_block_index,
+         collateral_type: Some(redeem_ct),
+         timestamp: Some(now()),
+-        vault_redemptions: if vault_redemptions.is_empty() {
+-            None
+-        } else {
+-            Some(vault_redemptions.clone())
+-        },
++        // Some(empty) distinguishes a new no-op from legacy events whose
++        // missing outcome vector requires historical full-type replay.
++        vault_redemptions: Some(vault_redemptions.clone()),
++        payout_collateral_raw: Some(total_actual_collateral_seized(&vault_redemptions)),
++        min_net_collateral_raw,
+     });
+ 
+     // RED-001 (audit 2026-06-09): the payout is derived from the icUSD the
+@@ -2610,7 +2633,8 @@
+         now(),
+     );
+ 
+-    let margin: ICP = consumed / ct_price;
++    let payout_collateral_raw = total_actual_collateral_seized(&vault_redemptions);
++    let margin = ICP::from(payout_collateral_raw);
+     if margin.to_u64() > 0 {
+         let op_nonce = state.next_op_nonce();
+         state.pending_redemption_transfer.insert(
+@@ -2621,10 +2645,17 @@
+                 collateral_type: redeem_ct,
+                 retry_count: 0,
+                 op_nonce,
++                min_net_collateral_raw,
+             },
+         );
+     }
+     RedemptionOutcome { consumed, margin }
++}
++
++fn total_actual_collateral_seized(vault_redemptions: &[VaultRedemption]) -> u64 {
++    vault_redemptions.iter().fold(0u64, |total, redemption| {
++        total.saturating_add(redemption.collateral_seized)
++    })
+ }
+ 
+ /// Wave-9 RED-002: pure-math predicate for the redemption shortfall.
+--- a/src/rumi_protocol_backend/src/state.rs
++++ b/src/rumi_protocol_backend/src/state.rs
+@@ -5090,6 +5090,192 @@
+         }
+     }
+ 
++    /// Historical replay compatibility only. Keep this body identical to the pre-queue
++    /// `redeem_on_vaults` algorithm; live callers must use the explicit-ID method.
++    pub fn redeem_on_vaults_legacy_full_type_for_replay(
++        &mut self,
++        icusd_amount: ICUSD,
++        collateral_price: UsdIcp,
++        collateral_type: &CollateralType,
++    ) -> Vec<crate::event::VaultRedemption> {
++        let mut results = Vec::new();
++
++        if icusd_amount == 0 {
++            return results;
++        }
++
++        // Resolve config for price & decimals.
++        // During event replay the collateral config may not have a price yet,
++        // so fall back to the price stored in the event (passed as collateral_price).
++        let (price, decimals) = match self.get_collateral_config(collateral_type) {
++            Some(config) => {
++                let p = config
++                    .last_price
++                    .and_then(Decimal::from_f64)
++                    .unwrap_or(collateral_price.0);
++                (p, config.decimals)
++            }
++            None => {
++                // Config not yet created during replay; use event price and ICP decimals
++                (collateral_price.0, 8)
++            }
++        };
++
++        let resolved_ct = if collateral_type == &Principal::anonymous() {
++            self.icp_ledger_principal
++        } else {
++            *collateral_type
++        };
++
++        // Collect eligible vaults sorted by CR ascending
++        let mut vault_entries: Vec<(Decimal, VaultId)> = Vec::new();
++        for vault in self.vault_id_to_vaults.values() {
++            if vault.borrowed_icusd_amount == 0 {
++                continue; // skip zero-debt vaults
++            }
++            // AR-B-001 (audit 2026-06-09): a vault the liquidation bot has
++            // claimed but not yet confirmed (collateral already paid to the
++            // bot, write-down deferred) or that another operation holds the
++            // per-vault lock on MUST NOT be redeemed against: the water-fill
++            // would seize collateral that was already paid out (double-seize
++            // from the shared pool) or invalidate an in-flight operation's
++            // snapshot. Mirrors the `check_vaults` bot_processing skip.
++            // Replay stays exact because `RedemptionOnVaults` replay applies
++            // the event's stored `vault_redemptions` instead of re-running
++            // this scan (see `apply_vault_redemptions`).
++            if vault.bot_processing || crate::guard::is_vault_liquidating(vault.vault_id) {
++                continue;
++            }
++            let vault_ct = if vault.collateral_type == Principal::anonymous() {
++                self.icp_ledger_principal
++            } else {
++                vault.collateral_type
++            };
++            if vault_ct != resolved_ct {
++                continue;
++            }
++            let cr = crate::compute_collateral_ratio(vault, collateral_price, self);
++            vault_entries.push((cr.0, vault.vault_id));
++        }
++        vault_entries.sort_by(|a, b| a.0.cmp(&b.0));
++
++        if vault_entries.is_empty() {
++            return results;
++        }
++
++        let mut remaining = icusd_amount.to_u64() as u128;
++
++        // Water-filling: process from lowest CR upward
++        let mut band_start = 0usize;
++        while remaining > 0 && band_start < vault_entries.len() {
++            // Current band = all vaults from band_start that share the lowest CR
++            let band_cr = vault_entries[band_start].0;
++
++            // Find the CR of the next tier (first vault above current band)
++            let mut band_end = band_start + 1;
++            while band_end < vault_entries.len() && vault_entries[band_end].0 == band_cr {
++                band_end += 1;
++            }
++
++            // Compute total debt in the current band
++            let band_vault_ids: Vec<VaultId> = vault_entries[band_start..band_end]
++                .iter()
++                .map(|(_, id)| *id)
++                .collect();
++            let band_debts: Vec<u128> = band_vault_ids
++                .iter()
++                .map(|id| {
++                    self.vault_id_to_vaults
++                        .get(id)
++                        .unwrap()
++                        .borrowed_icusd_amount
++                        .to_u64() as u128
++                })
++                .collect();
++            let total_band_debt: u128 = band_debts.iter().sum();
++
++            if total_band_debt == 0 {
++                band_start = band_end;
++                continue;
++            }
++
++            if band_end >= vault_entries.len() {
++                // No next tier — distribute all remaining proportionally across band
++                self.distribute_redemption_across_band(
++                    &band_vault_ids,
++                    &band_debts,
++                    total_band_debt,
++                    remaining,
++                    price,
++                    decimals,
++                    &mut results,
++                );
++                break;
++            }
++
++            // Calculate how much icUSD (e8s) is needed to raise all band vaults to next tier CR
++            let next_cr = vault_entries[band_end].0;
++            // Formula: x_i = D_i * (CR_next - CR_current) / (CR_next - 1)
++            let cr_diff = next_cr - band_cr;
++            let cr_denom = next_cr - Decimal::ONE;
++            if cr_denom <= Decimal::ZERO {
++                // Safety: if next CR <= 1, just drain proportionally
++                self.distribute_redemption_across_band(
++                    &band_vault_ids,
++                    &band_debts,
++                    total_band_debt,
++                    remaining,
++                    price,
++                    decimals,
++                    &mut results,
++                );
++                break;
++            }
++
++            // Total icUSD needed to level up the band (in e8s)
++            let total_needed_dec = Decimal::from(total_band_debt as u64) * cr_diff / cr_denom;
++            let total_needed = total_needed_dec.to_u64().unwrap_or(u64::MAX) as u128;
++
++            if remaining >= total_needed && total_needed > 0 {
++                // Level up the entire band
++                self.distribute_redemption_across_band(
++                    &band_vault_ids,
++                    &band_debts,
++                    total_band_debt,
++                    total_needed,
++                    price,
++                    decimals,
++                    &mut results,
++                );
++                remaining -= total_needed;
++
++                // Re-read CRs for band vaults and merge into next tier
++                // (they should now match next_cr approximately)
++                for i in band_start..band_end {
++                    vault_entries[i].0 = next_cr;
++                }
++                // Continue with band_start unchanged — the band now includes the next tier
++                // Actually, we advance to process the merged group in next iteration
++                // Don't advance band_start — loop will re-evaluate with the wider band
++                continue;
++            } else {
++                // Can't reach next tier. Distribute remaining proportionally.
++                self.distribute_redemption_across_band(
++                    &band_vault_ids,
++                    &band_debts,
++                    total_band_debt,
++                    remaining,
++                    price,
++                    decimals,
++                    &mut results,
++                );
++                break;
++            }
++        }
++
++        results
++    }
++
+     /// Water-filling redemption: spread redemptions across vaults to equalize CR.
+     ///
+     /// Instead of draining the lowest-CR vault completely, this algorithm raises
+--- a/src/rumi_protocol_backend/src/vault.rs
++++ b/src/rumi_protocol_backend/src/vault.rs
+@@ -843,16 +843,24 @@
+ 
+     // Handle vault spillover if reserves didn't cover everything
+     if spillover_e8s > 0 {
+-        let planned_ct = spillover_plan.as_ref().map(|plan| plan.0);
+         let (refund_e8s, actual_spillover_e8s) = mutate_state(|s| {
+             let spillover_icusd = ICUSD::from(spillover_e8s);
+-            // Re-read the run and price immediately before the synchronous
+-            // event mutation. If the selected asset changed during the stable
+-            // ledger await, skip vault seizure and refund the spillover tail.
++            // Stable and treasury ledger calls have awaited. Compare the full
++            // pre-pull snapshot before the synchronous event mutation. If any
++            // part changed, do not seize and refund only the spillover tail.
+             let Some(run) = s.redemption_runs().into_iter().next() else {
+                 return (spillover_e8s, 0);
+             };
+-            if Some(run.collateral_type) != planned_ct {
++            let Some((expected_ct, expected_ids, expected_price, expected_decimals)) =
++                &spillover_plan
++            else {
++                return (spillover_e8s, 0);
++            };
++            if run.collateral_type != *expected_ct
++                || run.vault_ids.as_slice() != expected_ids.as_slice()
++                || run.price_usd.to_bits() != expected_price.to_bits()
++                || run.decimals != *expected_decimals
++            {
+                 return (spillover_e8s, 0);
+             }
+             let Some(config) = s.get_collateral_config(&run.collateral_type) else {
+@@ -902,7 +910,7 @@
+                 ic_cdk::api::time(),
+             );
+ 
+-            let outcome = record_redemption_on_vaults(
++            let outcome = crate::event::record_redemption_on_vault_run(
+                 s,
+                 caller,
+                 bounded_effective,
+@@ -910,6 +918,8 @@
+                 current_price,
+                 icusd_block_index,
+                 run.collateral_type,
++                &run.vault_ids,
++                None,
+             );
+ 
+             // Wave-8e LIQ-005: route the spillover-portion fee through
+--- a/src/rumi_protocol_backend/tests/audit_pocs_red_002_redemption_deficit.rs
++++ b/src/rumi_protocol_backend/tests/audit_pocs_red_002_redemption_deficit.rs
+@@ -8,7 +8,7 @@
+ //! # What the bug was
+ //!
+ //! `redeem_collateral` and `redeem_reserves` (vault-spillover branch)
+-//! both delegate to `event::record_redemption_on_vaults`, which calls
++//! both delegate to `event::record_redemption_on_vault_run`, which calls
+ //! `state.redeem_on_vaults` to walk the cr-index ascending and deduct
+ //! collateral per vault. When a vault's collateral runs short of the
+ //! redeemer's claim at oracle price, the
+@@ -32,7 +32,7 @@
+ //!     breakdown with actual (post-saturation) `collateral_seized`,
+ //!     and `event::compute_redemption_shortfall` derives the icUSD
+ //!     shortfall from that breakdown. Both are state-side helpers
+-//!     used inside `record_redemption_on_vaults` on a live canister.
++//!     used inside `record_redemption_on_vault_run` on a live canister.
+ //!   * State mutation: `state.accrue_deficit_shortfall` increments
+ //!     `protocol_deficit_icusd`. The composed
+ //!     `accrue_redemption_shortfall_at` helper additionally records
+@@ -53,7 +53,7 @@
+ //!     (no false-positive accrual).
+ //!   * Scenario C (TDD red-green) — `DeficitSource::Redemption` is a
+ //!     distinct variant carrying the redeemer principal, AND
+-//!     `record_redemption_on_vaults` constructs that variant rather
++//!     `record_redemption_on_vault_run` constructs that variant rather
+ //!     than reusing `Liquidation`. Structural fence reads
+ //!     `event.rs` directly to pin the wiring.
+ //!   * `red_002_deficit_accrued_event_with_liquidation_source_round_trips`
+@@ -238,7 +238,7 @@
+     // Two-part fence:
+     //   1. `DeficitSource::Redemption` is a distinct variant carrying
+     //      the redeemer principal — exercised at the type level here.
+-    //   2. `record_redemption_on_vaults` (event.rs) constructs that
++    //   2. `record_redemption_on_vault_run` (event.rs) constructs that
+     //      variant on the deficit-accrual leg, NOT
+     //      `DeficitSource::Liquidation`. Structural fence reads the
+     //      event.rs source directly and asserts the wiring.
+@@ -270,7 +270,7 @@
+     let event_rs = std::fs::read_to_string(&event_rs_path)
+         .unwrap_or_else(|e| panic!("read {}: {}", event_rs_path.display(), e));
+ 
+-    // The fix wires `record_redemption_on_vaults` → the new
++    // The fix wires `record_redemption_on_vault_run` → the new
+     // `accrue_redemption_shortfall_at` helper, which in turn calls
+     // `record_deficit_accrued` with `DeficitSource::Redemption`.
+     // Pin both call sites textually so refactoring this path can't
+@@ -291,12 +291,12 @@
+     );
+ 
+     let entry_decl_idx = event_rs
+-        .find("pub fn record_redemption_on_vaults(")
+-        .expect("event.rs must define `record_redemption_on_vaults`");
++        .find("pub fn record_redemption_on_vault_run(")
++        .expect("event.rs must define `record_redemption_on_vault_run`");
+     let entry_to_helper_slice = &event_rs[entry_decl_idx..];
+     assert!(
+         entry_to_helper_slice.contains("accrue_redemption_shortfall_at"),
+-        "record_redemption_on_vaults must invoke \
++        "record_redemption_on_vault_run must invoke \
+          accrue_redemption_shortfall_at so every redemption that walks the \
+          vault cr-index has its shortfall (if any) routed into the deficit \
+          account (audit RED-002)."
+--- a/src/rumi_protocol_backend/tests/audit_pocs_2026_06_09_redemption_userop_locks.rs
++++ b/src/rumi_protocol_backend/tests/audit_pocs_2026_06_09_redemption_userop_locks.rs
+@@ -129,13 +129,13 @@
+ }
+ 
+ #[test]
+-fn red001_redemption_payout_derived_from_consumed() {
++fn red001_redemption_payout_uses_actual_native_collateral() {
+     let src = read("src/event.rs");
+-    let body = fn_body(&src, "pub fn record_redemption_on_vaults(");
+-    assert!(
+-        body.contains("let margin: ICP = consumed / ct_price"),
+-        "the redemption payout must be derived from the icUSD actually consumed by the \
+-         water-fill, never from the requested claim (RED-001)."
++    let body = fn_body(&src, "pub fn record_redemption_on_vault_run(");
++    assert!(
++        body.contains("total_actual_collateral_seized(&vault_redemptions)"),
++        "the payout must use the actual post-saturation native collateral removed by the \
++         selected-ID water-fill (RED-001)."
+     );
+     assert!(
+         !body.contains("let margin: ICP = icusd_amount / ct_price"),

@@ -1,7 +1,7 @@
 REVIEW-ONLY SUPPORTING SOURCE SNAPSHOT
 Baseline: ac59a6519730744dd30c33958b959577dec12123 (origin/main)
 Branch: codex/redemption-health-queue
-This snapshot captures the actual current tracked source diffs plus nonignored untracked source/test files under src/. It excludes docs, generated/dependency caches, and unrelated checkout content. It is review context only: uncompiled and nonfinal. Do not apply this patch.
+This snapshot captures actual current tracked source diffs plus nonignored untracked source/test files under src/. It excludes docs, generated/dependency caches, and unrelated checkout content. It is review context only: uncompiled and nonfinal. Do not apply this patch.
 
 diff --git a/src/rumi_protocol_backend/src/lib.rs b/src/rumi_protocol_backend/src/lib.rs
 index c0bdc7f6..5a06193a 100644
@@ -367,7 +367,7 @@ index 2879894a..c33e8a7c 100644
  #[update]
  async fn open_vault(
 diff --git a/src/rumi_protocol_backend/src/state.rs b/src/rumi_protocol_backend/src/state.rs
-index d43d6dea..177a5e4c 100644
+index d43d6dea..8461cd8f 100644
 --- a/src/rumi_protocol_backend/src/state.rs
 +++ b/src/rumi_protocol_backend/src/state.rs
 @@ -41,6 +41,29 @@ macro_rules! ensure {
@@ -915,7 +915,7 @@ index d43d6dea..177a5e4c 100644
      /// Distribute a redemption amount proportionally across a band of vaults by debt size.
      /// Returns per-vault breakdown of what was redeemed/seized.
      fn distribute_redemption_across_band(
-@@ -8202,6 +8543,321 @@ mod tests {
+@@ -8202,6 +8543,371 @@ mod tests {
          );
      }
  
@@ -1112,6 +1112,56 @@ index d43d6dea..177a5e4c 100644
 +        let executed = s.redeem_on_vaults_for_vault_ids(amount, rate, &icp, &[916]);
 +        assert_eq!(executed, preview);
 +        assert_eq!(s.vault_id_to_vaults.get(&916).unwrap().collateral_amount, 0);
++    }
++
++    #[test]
++    fn redemption_simulation_matches_execution_at_fractional_prices_and_native_decimals() {
++        let mut vault_id = 940;
++        for decimals in [6u8, 8, 18] {
++            for price in [0.1f64, 0.3] {
++                let mut s = test_state();
++                let icp = s.icp_collateral_type();
++                let config = s.collateral_configs.get_mut(&icp).unwrap();
++                config.decimals = decimals;
++                config.last_price = Some(price);
++                let collateral = 10u64 * 10u64.pow(decimals as u32);
++                // $20 of debt lets the $0.30 effective request exercise the
++                // fractional-price conversion without hitting the debt cap.
++                s.open_vault(audit_vault(vault_id, icp, collateral, 2_000_000_000));
++                let before = s.vault_id_to_vaults.get(&vault_id).unwrap().clone();
++                let amount = ICUSD::new(30_000_000); // $0.30 effective input
++                let rate = UsdIcp::from(rust_decimal::Decimal::from_f64_retain(price).unwrap());
++
++                let preview = s.simulate_redemption_for_vault_ids(amount, rate, &icp, &[vault_id]);
++                assert_eq!(preview.len(), 1, "decimals={decimals}, price={price}");
++                let expected_collateral = crate::numeric::icusd_to_collateral_amount(
++                    amount,
++                    rust_decimal::Decimal::from_f64_retain(price).unwrap(),
++                    decimals,
++                );
++                assert_eq!(preview[0].collateral_seized, expected_collateral);
++                assert_eq!(
++                    s.vault_id_to_vaults
++                        .get(&vault_id)
++                        .unwrap()
++                        .collateral_amount,
++                    before.collateral_amount,
++                    "simulation mutated collateral at decimals={decimals}, price={price}"
++                );
++                assert_eq!(
++                    s.vault_id_to_vaults
++                        .get(&vault_id)
++                        .unwrap()
++                        .borrowed_icusd_amount,
++                    before.borrowed_icusd_amount,
++                    "simulation mutated debt at decimals={decimals}, price={price}"
++                );
++
++                let executed = s.redeem_on_vaults_for_vault_ids(amount, rate, &icp, &[vault_id]);
++                assert_eq!(executed, preview, "decimals={decimals}, price={price}");
++                vault_id += 1;
++            }
++        }
 +    }
 +
 +    #[test]
