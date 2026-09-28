@@ -1002,12 +1002,17 @@ fn boot_with_funding_and_interval(
     // routing table assigns the ledger/system principals to their matching
     // subnet kinds, so those subnets must exist even though every installed
     // Wasm in this test is local.
-    let pic = PocketIcBuilder::new()
+    let mut builder = PocketIcBuilder::new()
         .with_nns_subnet()
         .with_ii_subnet()
         .with_fiduciary_subnet()
-        .with_application_subnet()
-        .build();
+        .with_application_subnet();
+    // An explicitly managed matching server keeps startup and stderr evidence
+    // available on busy hosts; default local developer autostart is unchanged.
+    if let Ok(server_url) = std::env::var("SENTINEL_POCKET_IC_SERVER_URL") {
+        builder = builder.with_server_url(server_url.parse().expect("PocketIC server URL"));
+    }
+    let pic = builder.build();
     let sentinel = pic.create_canister();
     let signer = Principal::from_slice(&[9; 10]);
     pic.add_cycles(sentinel, runtime_cycles);
