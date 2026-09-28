@@ -16,7 +16,9 @@
 use candid::Principal;
 
 use crate::state;
-use crate::types::{self, AdvisoryCyclesBalance, ObservationMode, PublicTargetState, TargetRecord};
+use crate::types::{
+    self, AdvisoryCyclesBalance, FundingTrigger, ObservationMode, PublicTargetState, TargetRecord,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EligibilityError {
@@ -111,7 +113,14 @@ pub(crate) fn check_ordinary_eligibility(
         return Err(EligibilityError::NotLow);
     }
     let reservation = state::get_target_reservation(target);
-    if reservation.in_flight_operation_id().is_some() {
+    if reservation.in_flight_operation_id().is_some()
+        || state::list_unresolved_operations_after(None, types::MAX_FUNDING_OPERATIONS)
+            .iter()
+            .any(|operation| {
+                operation.target() == target
+                    && operation.trigger() != FundingTrigger::SelfRecovery
+            })
+    {
         return Err(EligibilityError::OperationInFlight);
     }
     if reservation.is_on_cooldown(now_secs) {
@@ -2313,6 +2322,7 @@ pub mod icp {
         FundingRail, FundingRailArguments, FundingTrigger, IcpCmcSnapshot, IcpFundingState,
         IcpSourceAttemptError, IcpSourceReserveError, IcpSourceSettleError,
         RollingSpendReleaseError, RollingSpendReserveError, RollingSpendSettleError,
+        SelfRecoveryReleaseError, SelfRecoverySettleError, SelfRecoveryStateError,
         TargetReleaseError, TargetReservationError, TargetSettleError, TerminalFundingSummary,
         TerminalFundingSummaryError,
     };
@@ -2342,6 +2352,9 @@ pub mod icp {
         GlobalReserve(RollingSpendReserveError),
         GlobalSettle(RollingSpendSettleError),
         GlobalRelease(RollingSpendReleaseError),
+        SelfRecoveryReserve(SelfRecoveryStateError),
+        SelfRecoverySettle(SelfRecoverySettleError),
+        SelfRecoveryRelease(SelfRecoveryReleaseError),
         Open(FundingOperationOpenError),
         Insert(state::InsertOperationError),
         Transition(FundingOperationTransitionError),
@@ -2485,6 +2498,7 @@ pub mod icp {
             source_subaccount: None,
             cmc_account_identifier: icp_cmc::cmc_subaccount(target_principal),
             target_canister: target_principal,
+            delivery: types::IcpCmcDelivery::DirectTopUp,
             amount_e8s,
             fee_e8s,
             memo: icp_cmc::TPUP_MEMO,
@@ -2521,6 +2535,102 @@ pub mod icp {
         Ok(submitted)
     }
 
+    /// Opens the one ICP/CMC fallback that can repair Sentinel's own runtime
+    /// balance.  It mirrors the ordinary ICP outbox's immutable transfer and
+    /// source reservation, but deliberately uses the singleton
+    /// `SelfRecoveryState` cap rather than target/global ledgers.  The CMC
+    /// top-up destination is the authenticated Sentinel identity only.
+    pub(crate) fn prepare_self_recovery_with_rate(
+        sentinel_id: Principal,
+        now_secs: u64,
+        now_ns: u64,
+        rate: icp_cmc::IcpXdrConversionRate,
+    ) -> Result<FundingOperation, FundingError> {
+        if ic_cdk::id() != sentinel_id {
+            return Err(FundingError::SentinelIdentityMismatch);
+        }
+        let global_policy = state::global_config().global_policy;
+        let self_policy = global_policy.self_recovery_policy();
+        let rate = icp_cmc::validate_rate(rate, now_secs).map_err(FundingError::Rate)?;
+        let refill_cycles = self_policy.refill_cycles();
+        let amount_e8s =
+            icp_cmc::icp_amount_e8s_for_cycles(refill_cycles, rate).map_err(FundingError::Rate)?;
+        let expected_cycles =
+            icp_cmc::expected_cycles(amount_e8s, rate).map_err(FundingError::Rate)?;
+        if expected_cycles < refill_cycles {
+            return Err(FundingError::Rate(RateError::Overflow));
+        }
+        let source = state::get_icp_source_reserve();
+        let cache = source.cache().ok_or(FundingError::SourceReserve(
+            IcpSourceReserveError::UnknownCache,
+        ))?;
+        let fee_e8s = u64::try_from(cache.fee_e8s).map_err(|_| FundingError::Overflow)?;
+        let amount_plus_fee = (amount_e8s as u128)
+            .checked_add(fee_e8s as u128)
+            .ok_or(FundingError::Overflow)?;
+        let operation_id = state::next_operation_id();
+        let self_recovery_reservation = state::get_self_recovery_state()
+            .begin(
+                operation_id,
+                expected_cycles,
+                now_secs,
+                ROLLING_CAP_WINDOW_SECS,
+                self_policy.daily_cap_cycles(),
+            )
+            .map_err(FundingError::SelfRecoveryReserve)?;
+        let source_reservation = source
+            .reserve_ordinary(
+                operation_id,
+                amount_plus_fee,
+                global_policy.min_icp_reserve_e8s(),
+                now_secs,
+                types::icp_source_cache_max_age_secs(),
+            )
+            .map_err(FundingError::SourceReserve)?;
+        let created_at_time_ns =
+            state::next_created_at_time_ns(now_ns).map_err(FundingError::MonotonicTime)?;
+        let snapshot = IcpCmcSnapshot {
+            source_principal: sentinel_id,
+            ledger_principal: types::icp_ledger_principal_for_sentinel(),
+            cmc_principal: icp_cmc::cmc_principal(),
+            source_subaccount: None,
+            cmc_account_identifier: icp_cmc::cmc_subaccount(sentinel_id),
+            target_canister: sentinel_id,
+            delivery: types::IcpCmcDelivery::SharedReserveMint,
+            amount_e8s,
+            fee_e8s,
+            memo: icp_cmc::MINT_CYCLES_MEMO,
+            created_at_time_ns,
+            rate_xdr_permyriad_per_icp: rate.xdr_permyriad_per_icp,
+            rate_timestamp_secs: rate.timestamp_seconds,
+            expected_cycles,
+        };
+        let placeholder = crate::self_recovery::placeholder_funding_policy(self_policy)
+            .map_err(|_| FundingError::WrongRail)?;
+        let op = FundingOperation::open(
+            operation_id,
+            sentinel_id,
+            0,
+            placeholder,
+            FundingTrigger::SelfRecovery,
+            FundingRailArguments::Icp(snapshot),
+            expected_cycles,
+            now_secs,
+        )
+        .map_err(FundingError::Open)?;
+        let submitted = op
+            .record_attempt(
+                FundingOperationState::Icp(IcpFundingState::LedgerSubmitted),
+                now_secs,
+                FundingAttemptResultClass::Indeterminate,
+            )
+            .map_err(FundingError::Transition)?;
+        state::insert_operation(submitted.clone()).map_err(FundingError::Insert)?;
+        state::set_self_recovery_state(self_recovery_reservation);
+        state::set_icp_source_reserve(source_reservation);
+        Ok(submitted)
+    }
+
     /// Test/wiring seam for callers that already have a checked fresh rate.
     /// No network call or mutation occurs before the complete reservation and
     /// operation value is ready.
@@ -2532,6 +2642,138 @@ pub mod icp {
         rate: icp_cmc::IcpXdrConversionRate,
     ) -> Result<FundingOperation, FundingError> {
         prepare_ordinary_with_rate(target, trigger, now_secs, now_ns, rate)
+    }
+
+    /// Opens an ICP conversion into Sentinel's shared Cycles Ledger reserve.
+    /// This is admitted only by the caller after a fresh ordinary Cycles
+    /// reservation proved insufficient. The conversion is bounded to the
+    /// due target's configured refill plus the known Cycles Ledger fee; it
+    /// creates no target/global spend reservation because no target is paid
+    /// until the subsequent normal exact-withdraw operation is opened.
+    fn prepare_shared_conversion_with_rate(
+        target: Principal,
+        trigger: FundingTrigger,
+        now_secs: u64,
+        now_ns: u64,
+        rate: icp_cmc::IcpXdrConversionRate,
+        sentinel_id: Principal,
+    ) -> Result<FundingOperation, FundingError> {
+        if ic_cdk::id() != sentinel_id {
+            return Err(FundingError::SentinelIdentityMismatch);
+        }
+        let (record, _) = super::check_ordinary_eligibility(
+            target,
+            now_secs,
+            trigger == FundingTrigger::ManualTopup,
+        )
+        .map_err(FundingError::Eligibility)?;
+        let global_policy = state::global_config().global_policy;
+        let cycles_cache = state::get_source_reserve()
+            .fresh_cache_for_conversion(now_secs, global_policy.stale_after_secs())
+            .map_err(|_| FundingError::Rate(RateError::Overflow))?;
+        let refill_plus_fee = record
+            .funding_policy()
+            .refill_cycles()
+            .checked_add(cycles_cache.fee_cycles)
+            .ok_or(FundingError::Overflow)?;
+        let rate = icp_cmc::validate_rate(rate, now_secs).map_err(FundingError::Rate)?;
+        let amount_e8s = icp_cmc::icp_amount_e8s_for_exact_cycles(refill_plus_fee, rate)
+            .map_err(FundingError::Rate)?;
+        let expected_cycles = icp_cmc::expected_cycles(amount_e8s, rate)
+            .map_err(FundingError::Rate)?;
+        if expected_cycles < refill_plus_fee {
+            return Err(FundingError::Rate(RateError::Overflow));
+        }
+        let source = state::get_icp_source_reserve();
+        let cache = source.cache().ok_or(FundingError::SourceReserve(
+            IcpSourceReserveError::UnknownCache,
+        ))?;
+        let fee_e8s = u64::try_from(cache.fee_e8s).map_err(|_| FundingError::Overflow)?;
+        let held_e8s = (amount_e8s as u128)
+            .checked_add(fee_e8s as u128)
+            .ok_or(FundingError::Overflow)?;
+        let operation_id = state::next_operation_id();
+        let source_reservation = source
+            .reserve_ordinary(
+                operation_id,
+                held_e8s,
+                global_policy.min_icp_reserve_e8s(),
+                now_secs,
+                types::icp_source_cache_max_age_secs(),
+            )
+            .map_err(FundingError::SourceReserve)?;
+        let created_at_time_ns =
+            state::next_created_at_time_ns(now_ns).map_err(FundingError::MonotonicTime)?;
+        let snapshot = IcpCmcSnapshot {
+            source_principal: sentinel_id,
+            ledger_principal: types::icp_ledger_principal_for_sentinel(),
+            cmc_principal: icp_cmc::cmc_principal(),
+            source_subaccount: None,
+            cmc_account_identifier: icp_cmc::cmc_subaccount(sentinel_id),
+            target_canister: target,
+            delivery: types::IcpCmcDelivery::SharedReserveMint,
+            amount_e8s,
+            fee_e8s,
+            memo: icp_cmc::MINT_CYCLES_MEMO,
+            created_at_time_ns,
+            rate_xdr_permyriad_per_icp: rate.xdr_permyriad_per_icp,
+            rate_timestamp_secs: rate.timestamp_seconds,
+            expected_cycles,
+        };
+        let op = FundingOperation::open(
+            operation_id,
+            target,
+            record.revision(),
+            record.funding_policy().clone(),
+            trigger,
+            FundingRailArguments::Icp(snapshot),
+            expected_cycles,
+            now_secs,
+        )
+        .map_err(FundingError::Open)?
+        .record_attempt(
+            FundingOperationState::Icp(IcpFundingState::LedgerSubmitted),
+            now_secs,
+            FundingAttemptResultClass::Indeterminate,
+        )
+        .map_err(FundingError::Transition)?;
+        state::insert_operation(op.clone()).map_err(FundingError::Insert)?;
+        state::set_icp_source_reserve(source_reservation);
+        Ok(op)
+    }
+
+    pub(crate) async fn run_self_recovery_with_rate(
+        sentinel_id: Principal,
+        now_secs: u64,
+        now_ns: u64,
+        rate: icp_cmc::IcpXdrConversionRate,
+    ) -> Result<FundingOperation, FundingError> {
+        let op = prepare_self_recovery_with_rate(sentinel_id, now_secs, now_ns, rate)?;
+        execute(op, now_secs, sentinel_id).await
+    }
+
+    /// The Cycles cache only reaches `InsufficientReserve` after its
+    /// freshness, pending-debit, and protected-floor checks all succeeded.
+    /// It is the sole prepare-time failure that is proof enough to select
+    /// the ICP rail; unknown, stale, bad-fee, or concurrent outcomes never
+    /// enter this path.
+    pub(crate) async fn run_after_proven_cycles_insufficient(
+        target: Principal,
+        trigger: FundingTrigger,
+        now_secs: u64,
+        now_ns: u64,
+        rate: icp_cmc::IcpXdrConversionRate,
+        sentinel_id: Principal,
+    ) -> Result<FundingOperation, FundingError> {
+        let op = prepare_shared_conversion_with_rate(
+            target,
+            trigger,
+            now_secs,
+            now_ns,
+            rate,
+            sentinel_id,
+        )?;
+        execute(op, now_secs, sentinel_id).await
     }
 
     pub async fn manual_top_up_at(
@@ -2627,7 +2869,14 @@ pub mod icp {
                 ReconciliationError::NoSpendRequired,
             ));
         }
-        let op = prepare_ordinary_with_rate(target, trigger, now_secs, now_ns, rate)?;
+        let op = prepare_shared_conversion_with_rate(
+            target,
+            trigger,
+            now_secs,
+            now_ns,
+            rate,
+            sentinel_id,
+        )?;
         execute(op, now_secs, sentinel_id).await
     }
 
@@ -2777,14 +3026,44 @@ pub mod icp {
             .ok_or(FundingError::Reconciliation(
                 ReconciliationError::ConfirmedBlockRequired,
             ))?;
-        let call_result = icp_cmc::notify_top_up(&snapshot, block_index).await;
+        let call_result = match snapshot.delivery {
+            types::IcpCmcDelivery::DirectTopUp => {
+                icp_cmc::notify_top_up(&snapshot, block_index).await
+            }
+            types::IcpCmcDelivery::SharedReserveMint => {
+                icp_cmc::notify_mint_shared_reserve(&snapshot, block_index).await
+            }
+        };
         // Always clear after a returned call result, including a typed
         // snapshot error. If clearing itself fails, retain the marker and do
         // not risk a second external call.
         state::clear_icp_notify_attempt(marked.id()).map_err(FundingError::Transition)?;
         let cleared = state::get_operation(marked.id()).ok_or(FundingError::NotFound)?;
         let outcome = call_result.map_err(FundingError::Snapshot)?;
-        resolve_notify(cleared, outcome, now_secs)
+        let resolved = resolve_notify(cleared, outcome, now_secs)?;
+        if snapshot.delivery == types::IcpCmcDelivery::SharedReserveMint
+            && resolved.state() == FundingOperationState::Icp(IcpFundingState::Complete)
+        {
+            // Refresh after the CMC has authoritatively reported the mint;
+            // public/cache readers never infer a new Cycles balance from an
+            // ICP reply. The following exact withdrawal is best effort in
+            // this tick; a transient refresh/withdraw failure leaves the
+            // minted reserve intact for the next timer pass.
+            if super::refresh_cycles_ledger_cache(now_secs, snapshot.source_principal)
+                .await
+                .is_ok()
+                && resolved.trigger() != FundingTrigger::SelfRecovery
+            {
+                let _ = super::cycles::run_ordinary(
+                    resolved.target(),
+                    resolved.trigger(),
+                    now_secs,
+                    ic_cdk::api::time(),
+                )
+                .await;
+            }
+        }
+        Ok(resolved)
     }
 
     fn resolve_notify(
@@ -2795,6 +3074,9 @@ pub mod icp {
         let FundingRailArguments::Icp(snapshot) = op.rail_arguments().clone() else {
             return Err(FundingError::WrongRail);
         };
+        if snapshot.delivery == types::IcpCmcDelivery::SharedReserveMint {
+            return resolve_shared_reserve_mint(op, outcome, now_secs);
+        }
         match outcome {
             NotifyOutcome::Delivered { cycles } => {
                 let complete = op
@@ -2920,6 +3202,80 @@ pub mod icp {
                 raise_quarantine_alarm(&quarantined, now_secs);
                 Ok(quarantined)
             }
+            NotifyOutcome::Minted(_) => Err(FundingError::WrongRail),
+        }
+    }
+
+    /// Settles only the immutable ICP conversion operation. A successful CMC
+    /// mint credits Sentinel's shared Cycles Ledger account; it does not yet
+    /// pay `op.target()`, so ordinary target/global spend reservations are
+    /// intentionally absent and the subsequent Cycles operation remains the
+    /// only path that delivers the configured exact refill.
+    fn resolve_shared_reserve_mint(
+        op: FundingOperation,
+        outcome: NotifyOutcome,
+        now_secs: u64,
+    ) -> Result<FundingOperation, FundingError> {
+        let FundingRailArguments::Icp(snapshot) = op.rail_arguments().clone() else {
+            return Err(FundingError::WrongRail);
+        };
+        match outcome {
+            NotifyOutcome::Minted(receipt) => {
+                let minted_cycles = receipt.minted_cycles;
+                let complete = op
+                    .record_attempt_with_bounded_compaction(
+                        FundingOperationState::Icp(IcpFundingState::Complete),
+                        now_secs,
+                        FundingAttemptResultClass::Success,
+                    )
+                    .map_err(FundingError::Transition)?
+                    .attach_actual_cycles(minted_cycles)
+                    .map_err(FundingError::Transition)?;
+                let known_spent = (snapshot.amount_e8s as u128)
+                    .checked_add(snapshot.fee_e8s as u128)
+                    .ok_or(FundingError::Overflow)?;
+                let (settlement, source) =
+                    compute_settlement(&complete, Some(minted_cycles), known_spent, now_secs)?;
+                state::update_operation(complete.clone()).map_err(FundingError::Update)?;
+                commit_settlement(settlement, source);
+                state::insert_shared_reserve_mint_receipt(complete.id(), receipt);
+                state::compact_shared_reserve_conversion(complete.id())
+                    .map_err(FundingError::Compact)?;
+                Ok(complete)
+            }
+            NotifyOutcome::Pending | NotifyOutcome::Unknown => {
+                let next = if op.attempts().len() >= types::MAX_FUNDING_ATTEMPTS - 1 {
+                    op.quarantine_after_attempt_limit(now_secs)
+                } else {
+                    op.record_attempt(
+                        FundingOperationState::Icp(IcpFundingState::NotifyPending),
+                        now_secs,
+                        FundingAttemptResultClass::Indeterminate,
+                    )
+                }
+                .map_err(FundingError::Transition)?;
+                state::update_operation(next.clone()).map_err(FundingError::Update)?;
+                if next.state().stops_automatic_retry() {
+                    raise_quarantine_alarm(&next, now_secs);
+                }
+                Ok(next)
+            }
+            // The original ICP transfer is already known and must remain
+            // quarantined for signer proof/reconciliation, never retried as
+            // a fresh conversion.
+            NotifyOutcome::Quarantined | NotifyOutcome::RefundedWithBlock(_) | NotifyOutcome::RefundedWithoutBlock => {
+                let quarantined = op
+                    .record_attempt(
+                        FundingOperationState::Icp(IcpFundingState::Quarantined),
+                        now_secs,
+                        FundingAttemptResultClass::Indeterminate,
+                    )
+                    .map_err(FundingError::Transition)?;
+                state::update_operation(quarantined.clone()).map_err(FundingError::Update)?;
+                raise_quarantine_alarm(&quarantined, now_secs);
+                Ok(quarantined)
+            }
+            NotifyOutcome::Delivered { .. } => Err(FundingError::WrongRail),
         }
     }
 
@@ -2929,6 +3285,8 @@ pub mod icp {
             target_reservation: types::TargetReservationState,
             global_reservation: types::GlobalRollingSpendState,
         },
+        SelfRecovery(types::SelfRecoveryState),
+        SharedReserveConversion,
     }
 
     fn compute_settlement(
@@ -2937,8 +3295,33 @@ pub mod icp {
         source_known_spent_e8s: u128,
         now_secs: u64,
     ) -> Result<(Settlement, types::IcpSourceReserveState), FundingError> {
+        if op.is_shared_reserve_conversion() {
+            let source = state::get_icp_source_reserve()
+                .settle(op.id(), source_known_spent_e8s)
+                .map_err(FundingError::SourceSettle)?;
+            if op.trigger() == FundingTrigger::SelfRecovery {
+                let self_recovery = state::get_self_recovery_state()
+                    .release_no_spend(op.id())
+                    .map_err(FundingError::SelfRecoveryRelease)?;
+                return Ok((Settlement::SelfRecovery(self_recovery), source));
+            }
+            return Ok((Settlement::SharedReserveConversion, source));
+        }
         if op.trigger() == FundingTrigger::SelfRecovery {
-            return Err(FundingError::WrongRail);
+            let self_recovery = state::get_self_recovery_state();
+            let self_recovery = if delivered_cycles.is_some() {
+                self_recovery
+                    .complete(op.id(), now_secs, ROLLING_CAP_WINDOW_SECS)
+                    .map_err(FundingError::SelfRecoverySettle)?
+            } else {
+                self_recovery
+                    .release_no_spend(op.id())
+                    .map_err(FundingError::SelfRecoveryRelease)?
+            };
+            let source = state::get_icp_source_reserve()
+                .settle(op.id(), source_known_spent_e8s)
+                .map_err(FundingError::SourceSettle)?;
+            return Ok((Settlement::SelfRecovery(self_recovery), source));
         }
         let target = state::get_target_reservation(op.target());
         let target = if let Some(actual_cycles) = delivered_cycles {
@@ -2989,14 +3372,22 @@ pub mod icp {
                 state::set_target_reservation(target, target_reservation);
                 state::set_global_rolling_spend(global_reservation);
             }
+            Settlement::SelfRecovery(self_recovery) => {
+                state::set_self_recovery_state(self_recovery);
+            }
+            Settlement::SharedReserveConversion => {}
         }
         state::set_icp_source_reserve(source);
     }
 
     fn raise_quarantine_alarm(op: &FundingOperation, now_secs: u64) {
         let _ = state::alarms::raise_at(
-            Some(op.target()),
-            types::AlarmKind::FundingQuarantined,
+            (op.trigger() != FundingTrigger::SelfRecovery).then_some(op.target()),
+            if op.trigger() == FundingTrigger::SelfRecovery {
+                types::AlarmKind::SelfRecoveryUnresolved
+            } else {
+                types::AlarmKind::FundingQuarantined
+            },
             now_secs,
         );
     }
@@ -3778,6 +4169,7 @@ mod reconciliation {
             source_subaccount: None,
             cmc_account_identifier: icp_cmc::cmc_subaccount(target),
             target_canister: target,
+            delivery: types::IcpCmcDelivery::DirectTopUp,
             amount_e8s: AMOUNT_E8S,
             fee_e8s: FEE_E8S,
             memo: icp_cmc::TPUP_MEMO,

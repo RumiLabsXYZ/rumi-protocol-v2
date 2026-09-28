@@ -30,6 +30,7 @@
 use candid::{Nat, Principal};
 
 use crate::funding::cycles::{self as funding_cycles, FundingError};
+use crate::{funding, icp_cmc};
 use crate::state;
 use crate::types::{
     self, AlarmKind, CyclesFundingState, CyclesWithdrawSnapshot, FundingAttemptResultClass,
@@ -59,7 +60,7 @@ pub fn effective_threshold(policy_threshold_cycles: u128) -> u128 {
 /// independent governed inputs with no required relationship to the
 /// ordinary `GlobalPolicy.global_daily_cap_cycles` ordinary targets share
 /// (see that method's doc comment in `types.rs` for the full reasoning).
-fn placeholder_funding_policy(
+pub(crate) fn placeholder_funding_policy(
     policy: &SelfRecoveryPolicy,
 ) -> Result<TargetFundingPolicy, types::TargetValidationError> {
     TargetFundingPolicy::validate_self_contained(&TargetFundingPolicyArgs {
@@ -210,7 +211,14 @@ pub async fn run(now_secs: u64, now_ns: u64, sentinel_id: Principal) -> bool {
     if let Some(op_id) = before.in_flight_operation_id() {
         if let Some(op) = state::get_operation(op_id) {
             if !op.state().stops_automatic_retry() {
-                let _ = funding_cycles::execute(op, now_secs).await;
+                match op.rail() {
+                    types::FundingRail::CyclesLedger => {
+                        let _ = funding_cycles::execute(op, now_secs).await;
+                    }
+                    types::FundingRail::IcpCmc => {
+                        let _ = funding::icp::resume(op.id(), now_secs, sentinel_id).await;
+                    }
+                }
             }
         }
     }
@@ -247,6 +255,28 @@ pub async fn run(now_secs: u64, now_ns: u64, sentinel_id: Principal) -> bool {
                 false
             }
         },
+        Err(FundingError::SourceReserve(SourceReserveError::InsufficientReserve)) => {
+            // The Cycles reserve is fresh and proven insufficient. Only now
+            // may the ICP reserve be considered; unknown/stale cache states
+            // remain fail-closed and never authorize an ICP debit.
+            let result = match icp_cmc::query_rate(icp_cmc::cmc_principal()).await {
+                Ok(rate) => funding::icp::run_self_recovery_with_rate(
+                    sentinel_id,
+                    now_secs,
+                    now_ns,
+                    rate,
+                )
+                .await,
+                Err(_) => Err(funding::icp::FundingError::Rate(icp_cmc::RateError::Overflow)),
+            };
+            match result {
+                Ok(resolved) => apply_recovery_result(resolved.state(), now_secs),
+                Err(_) => {
+                    let _ = state::alarms::raise_at(None, AlarmKind::LowBalance, now_secs);
+                    false
+                }
+            }
+        }
         Err(_) => {
             // Reservation itself failed (unknown/stale cache, insufficient
             // reserve, or daily cap) — no operation was ever opened, so

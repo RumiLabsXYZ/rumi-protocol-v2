@@ -110,3 +110,25 @@ Plan: `docs/superpowers/plans/2026-09-13-cycle-sentinel-telemetry.md`
 - Codex owns architecture, accepted findings, shared-file integration, exact-head verification, merge, controller changes, funding, activation, and cutover.
 - Source tests, a pushed branch, a PR, a merge, a deployment, funding, controller changes, activation, and CycleOps removal are distinct states.
 - The existing `rumi_treasury` source, Candid, controller configuration, and `/treasury` behavior remain unchanged.
+
+
+# Cycle Sentinel automatic funding release — 2026-09-28
+
+Worktree: `/Users/robertripley/.codex/worktrees/sentinel-funding-live/rumi-protocol-v2`; branch: `codex/sentinel-auto-funding-live`.
+Authorization: Rob requested implementation, subagents, deployment, and activation using existing approved target policies. No external-wallet deposit amount was supplied.
+
+| ID | State | Owner | Task | Depends on | Evidence / blocker |
+| --- | --- | --- | --- | --- | --- |
+| CS-60 | Blocked for reserve conversion | backend worker | Durable ICP reserve refill, cycles-first funding, runtime recovery, public funding status | Explicit reserve amount authorization | Automatic review rejected both deficit and capped deficit; compatibility and compile work continue |
+| CS-61 | Review | frontend worker | Obvious deposit destinations, balances, funding status, readable target rules | CS-60 interface | 10 focused tests pass; production build and built/live browser proof pending |
+| CS-62 | Done | operations investigator | Verify current live policy, signers, mappings, deploy recipe and activation path | None | /private/tmp/sentinel-live-before.txt; /private/tmp/sentinel-release-prep.txt; official PocketIC 6.0 runtime prepared |
+| CS-63 | Ready | independent reviewers | Security, stable-state, interface and product review | CS-60, CS-61 | Two independent reviews plus deterministic checks |
+| CS-64 | Ready | coordinator | Merge, deploy, sync assets, activate and verify live | CS-63 | Exact artifact/controller/activation proof required |
+
+Model selection: Sonnet CLI reports loggedIn=false. Native Terra is selected for CS-60 due to durable token conversion, stable-state, async retries and ICP-only runtime recovery complexity. Native Luna is selected for bounded frontend and operations work. Coordinator owns generated interfaces and release.
+
+Acceptance: deposited cycles are used first; ICP supports an empty cycles reserve and runtime recovery; configured target refill amounts stay exact; caps, cooldown, protected reserves and one unresolved operation remain enforced; unknown or duplicate payments never cause a second debit; state survives upgrades; deposit destinations are derived from the configured Sentinel principal and default account; the live page distinguishes runtime fuel from funding-wallet money.
+
+Reserve conversion approval artifact: `docs/coordination/sentinel-auto-funding-reserve-policy-2026-09-28.md`, pushed in commit `51f4a20e`, SHA-256 `a984e3c3f2895cc2f67b84ea18306db31febf86fabff61ba4920801fc4a04d0c`. User approval question pending. No implementation deployed.
+
+Verified default ICP address correction: SDK and independent SHA-224/CRC-32 derivations agree on `a907060d486046ae0a21bcca2a4a2cbd8c48a9c4a7ab31ffbd06a4b5a20a1e2e`; earlier `1253387a...` draft was incorrect and is not a deposit destination.

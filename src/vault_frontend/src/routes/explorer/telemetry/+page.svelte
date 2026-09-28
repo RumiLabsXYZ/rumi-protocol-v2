@@ -5,6 +5,21 @@
   import { currentWalletType, walletSessionGeneration } from '$lib/services/auth';
   import { targetStateLabel } from '$lib/services/cycleSentinelTelemetry';
   import {
+    ageLabel,
+    CYCLES_LEDGER_PRINCIPAL,
+    formatIcp,
+    formatTCycles,
+    fundingOwner,
+    fundingOverview,
+    fundingTarget,
+    isStale,
+    legacyIcpAccountIdentifier,
+    optionalBigInt as fundingOptionalBigInt,
+    parseTCycles,
+    targetFundingPolicyChanged,
+    variantLabel,
+  } from '$lib/services/cycleSentinelFunding';
+  import {
     createAnonymousSentinelActor,
     createAuthenticatedSentinelActor,
     getPermissions,
@@ -49,6 +64,9 @@
   let publicError = '';
   let authError = '';
   let actionMessage = '';
+  let copyMessage = '';
+  let copyError = '';
+  let selectedTargetPrincipal = '';
   let actor: SentinelActor | undefined;
 
   let targetPrincipal = '';
@@ -58,13 +76,31 @@
   let environment: keyof typeof EnvironmentVariant = 'Production';
   let criticality: keyof typeof CriticalityVariant = 'Standard';
   let observationMode: keyof typeof ObservationModeVariant = 'SelfReport';
-  let lowThreshold = '1000000000000';
-  let refill = '1000000000000';
-  let dailyCap = '10000000000000';
+  let lowThreshold = '1';
+  let refill = '1';
+  let dailyCap = '10';
   let cooldown = '3600';
   let burnAnomalyLimit = '';
   let enabled = false;
   let autoTopup = false;
+  let loadedTarget: {
+    principal: string;
+    displayName: string;
+    project: string;
+    environment: keyof typeof EnvironmentVariant;
+    criticality: keyof typeof CriticalityVariant;
+    observationMode: keyof typeof ObservationModeVariant;
+    lowThreshold: string;
+    refill: string;
+    dailyCap: string;
+    cooldown: string;
+    burnAnomalyLimit: string;
+    tags: string;
+    tagsKnown: boolean;
+    burnAnomalyKnown: boolean;
+    enabled: boolean;
+    autoTopup: boolean;
+  } | null = null;
 
   let signerPrincipal = '';
   let signerThreshold = '1';
@@ -104,6 +140,53 @@
     const days = Number(secs) / 86_400;
     if (days >= 1) return `${days.toFixed(1)}d`;
     return `${(Number(secs) / 3_600).toFixed(1)}h`;
+  }
+
+  function nextCheckLabel(value: bigint | undefined): string {
+    if (value === undefined) return 'Unavailable';
+    return new Date(Number(value) * 1000).toLocaleString();
+  }
+
+  function copyLabel(label: string, value: string): void {
+    copyError = '';
+    copyMessage = '';
+    if (!value || value === 'Unavailable') {
+      copyError = `${label} is unavailable until the Sentinel publishes its funding account.`;
+      return;
+    }
+    if (!navigator.clipboard) {
+      copyError = 'Clipboard access is unavailable. Select and copy the address manually.';
+      return;
+    }
+    void navigator.clipboard.writeText(value).then(() => {
+      copyMessage = `${label} copied.`;
+    }).catch(() => {
+      copyError = `Could not copy ${label.toLowerCase()}. Select the visible address and copy it manually.`;
+    });
+  }
+
+  function selectTarget(row: TelemetrySnapshot['targets'][number]): void {
+    const current = fundingTarget(row);
+    selectedTargetPrincipal = current.principal.toText();
+    targetPrincipal = current.principal.toText();
+    displayName = current.display_name;
+    project = current.project;
+    tags = current.tags?.join(', ') ?? '';
+    lowThreshold = formatTCycles(current.low_balance_threshold_cycles);
+    refill = formatTCycles(current.refill_cycles);
+    dailyCap = formatTCycles(current.daily_cap_cycles ?? current.refill_cycles);
+    cooldown = current.cooldown_secs?.toString() ?? cooldown;
+    const anomalyLimit = fundingOptionalBigInt(current.burn_anomaly_limit_cycles_per_day);
+    burnAnomalyLimit = anomalyLimit === undefined
+      ? ''
+      : formatTCycles(anomalyLimit);
+    enabled = current.enabled ?? false;
+    autoTopup = current.auto_topup ?? false;
+    environment = variant(current.environment) as keyof typeof EnvironmentVariant;
+    criticality = variant(current.criticality) as keyof typeof CriticalityVariant;
+    observationMode = variant(current.observation_mode) as keyof typeof ObservationModeVariant;
+    loadedTarget = { principal: current.principal.toText(), displayName, project, environment, criticality, observationMode, lowThreshold, refill, dailyCap, cooldown, burnAnomalyLimit, tags, tagsKnown: current.tags !== undefined, burnAnomalyKnown: current.burn_anomaly_limit_cycles_per_day !== undefined, enabled, autoTopup };
+    actionMessage = `${current.display_name} settings loaded into the operator form.`;
   }
   const opt = <T,>(value: T | undefined): [] | [T] => value === undefined ? [] : [value];
   const principalVariant = (value: keyof typeof EnvironmentVariant): Record<string, null> => ({ [value]: null });
@@ -163,11 +246,11 @@
 
   function fundingPolicy(): TargetFundingPolicy {
     return {
-      low_balance_threshold_cycles: parseNat(lowThreshold, 'Low balance threshold'),
-      refill_cycles: parseNat(refill, 'Refill cycles'),
-      daily_cap_cycles: parseNat(dailyCap, 'Daily cap'),
+      low_balance_threshold_cycles: parseTCycles(lowThreshold, 'Low balance threshold'),
+      refill_cycles: parseTCycles(refill, 'Refill cycles'),
+      daily_cap_cycles: parseTCycles(dailyCap, 'Daily cap'),
       cooldown_secs: parseNat(cooldown, 'Cooldown'),
-      burn_anomaly_limit_cycles_per_day: opt(burnAnomalyLimit.trim() ? parseNat(burnAnomalyLimit, 'Burn anomaly limit') : undefined),
+      burn_anomaly_limit_cycles_per_day: opt(burnAnomalyLimit.trim() ? parseTCycles(burnAnomalyLimit, 'Burn anomaly limit') : undefined),
     };
   }
 
@@ -186,16 +269,23 @@
   }
 
   function targetPatch(): TargetPatch {
+    const currentFunding = { lowThreshold, refill, dailyCap, cooldown, burnAnomalyLimit };
+    const fundingChanged = loadedTarget
+      ? targetFundingPolicyChanged(loadedTarget.burnAnomalyKnown ? loadedTarget : { ...loadedTarget, burnAnomalyLimit: '' }, currentFunding)
+      : true;
+    if (loadedTarget && fundingChanged && !loadedTarget.burnAnomalyKnown) {
+      throw new Error('This target does not expose its burn anomaly limit yet. Refresh telemetry after the backend update before changing its funding policy.');
+    }
     return {
-      display_name: [requireText(displayName, 'Display name')],
-      project: [requireText(project, 'Project')],
-      tags: [tags.split(',').map((tag) => tag.trim()).filter(Boolean)],
-      environment: [principalVariant(environment) as Environment],
-      criticality: [criticalityVariant(criticality)],
-      observation_mode: [observationVariant(observationMode)],
-      funding_policy: [fundingPolicy()],
-      enabled: [enabled],
-      auto_topup: [autoTopup],
+      display_name: loadedTarget && loadedTarget.displayName === displayName ? [] : [requireText(displayName, 'Display name')],
+      project: loadedTarget && loadedTarget.project === project ? [] : [requireText(project, 'Project')],
+      tags: loadedTarget && !tags.trim() && !loadedTarget.tagsKnown ? [] : [tags.split(',').map((tag) => tag.trim()).filter(Boolean)],
+      environment: loadedTarget && loadedTarget.environment === environment ? [] : [principalVariant(environment) as Environment],
+      criticality: loadedTarget && loadedTarget.criticality === criticality ? [] : [criticalityVariant(criticality)],
+      observation_mode: loadedTarget && loadedTarget.observationMode === observationMode ? [] : [observationVariant(observationMode)],
+      funding_policy: fundingChanged ? [fundingPolicy()] : [],
+      enabled: loadedTarget && loadedTarget.enabled === enabled ? [] : [enabled],
+      auto_topup: loadedTarget && loadedTarget.autoTopup === autoTopup ? [] : [autoTopup],
     };
   }
 
@@ -229,15 +319,22 @@
     && snapshot.overview.target_count > 0n
     && snapshot.overview.unobserved_count === snapshot.overview.target_count;
   $: neverSampled = !!snapshot && optional(snapshot.overview.last_sample_at_secs) === undefined;
-  $: fundingSource = snapshot
-    ? {
-        cycles: optional(snapshot.overview.cycles_ledger_available_cycles),
-        icp: optional(snapshot.overview.icp_available_e8s),
-      }
-    : undefined;
-  $: fundingUnavailable = !!fundingSource
-    && fundingSource.cycles === undefined
-    && fundingSource.icp === undefined;
+  $: funding = snapshot ? fundingOverview(snapshot.overview) : undefined;
+  $: if (loadedTarget && targetPrincipal.trim() !== loadedTarget.principal && selectedTargetPrincipal === loadedTarget.principal) {
+    loadedTarget = null;
+    selectedTargetPrincipal = '';
+  }
+  $: fundingPrincipal = snapshot ? fundingOwner(snapshot.overview, CANISTER_IDS.CYCLE_SENTINEL) : undefined;
+  $: fundingOwnerText = fundingPrincipal?.toText() ?? 'Unavailable';
+  $: icpAccountText = fundingPrincipal ? legacyIcpAccountIdentifier(fundingPrincipal) : 'Unavailable';
+  $: fundingUnavailable = !!funding
+    && fundingOptionalBigInt(funding.cycles_ledger_balance_cycles) === undefined
+    && fundingOptionalBigInt(funding.cycles_ledger_available_cycles) === undefined
+    && fundingOptionalBigInt(funding.icp_ledger_balance_e8s) === undefined
+    && fundingOptionalBigInt(funding.icp_available_e8s) === undefined;
+  $: fundingEmpty = !!funding
+    && fundingOptionalBigInt(funding.cycles_ledger_available_cycles) === 0n
+    && fundingOptionalBigInt(funding.icp_available_e8s) === 0n;
 
   async function refresh(): Promise<void> {
     loading = true;
@@ -329,7 +426,44 @@
   {#if !isCycleSentinelConfigured}<div class="notice">Cycle Sentinel is not configured yet. This page remains fail-closed until the authoritative Task 10 deployment.</div>
   {:else if loading}<p class="muted">Loading public telemetry…</p>
   {:else if snapshot}
-    <div class="stats"><div><span>Targets</span><strong>{format(snapshot.overview.target_count)}</strong></div><div><span>Healthy</span><strong>{format(snapshot.overview.healthy_count)}</strong></div><div><span>Runtime cycles</span><strong>{format(snapshot.overview.runtime_cycles)}</strong></div><div><span>Open alarms</span><strong>{format(snapshot.overview.alarm_count)}</strong></div></div>
+    <div class="stats"><div><span>Targets</span><strong>{format(snapshot.overview.target_count)}</strong></div><div><span>Healthy</span><strong>{format(snapshot.overview.healthy_count)}</strong></div><div><span>Runtime fuel</span><strong>{formatTCycles(snapshot.overview.runtime_cycles)} T</strong><small>This is Sentinel's own operating fuel.</small></div><div><span>Open alarms</span><strong>{format(snapshot.overview.alarm_count)}</strong></div></div>
+    <section class="funding-wallet" aria-labelledby="funding-wallet-heading">
+      <div class="funding-heading">
+        <div>
+          <p class="eyebrow">AUTOMATIC TOP-UPS</p>
+          <h2 id="funding-wallet-heading">Sentinel funding wallet</h2>
+          <p class="muted">Deposit here to fund target top-ups. This reserve is separate from the <strong>Runtime fuel</strong> number above.</p>
+        </div>
+        <span class="badge confirmed">Uses cycles first · ICP fallback</span>
+      </div>
+      {#if funding}
+        <div class="funding-balances">
+          <article class="funding-balance">
+            <div class="balance-title"><h3>Cycles reserve</h3><span class="network">ICRC Cycles Ledger</span></div>
+            <div class="balance-grid"><div><span>Ledger balance</span><strong>{formatTCycles(fundingOptionalBigInt(funding.cycles_ledger_balance_cycles))} T</strong><small class:stale={isStale(fundingOptionalBigInt(funding.cycles_ledger_balance_as_of_secs), undefined, 7200n)}>{isStale(fundingOptionalBigInt(funding.cycles_ledger_balance_as_of_secs), undefined, 7200n) ? 'Stale · ' : ''}{ageLabel(fundingOptionalBigInt(funding.cycles_ledger_balance_as_of_secs))}</small></div><div><span>Spendable</span><strong>{formatTCycles(fundingOptionalBigInt(funding.cycles_ledger_available_cycles))} T</strong><small>After protected reserves</small></div><div><span>Protected</span><strong>{formatTCycles(fundingOptionalBigInt(funding.protected_self_reserve_cycles))} T</strong><small>Kept for Sentinel recovery</small></div></div>
+            <p class="deposit-copy">Send cycles to the Cycles Ledger using the Sentinel principal as the owner and the default subaccount.</p>
+            <div class="address-row"><span class="address-label">Cycles deposit owner</span><code>{fundingOwnerText}</code><button on:click={() => copyLabel('Cycles deposit owner', fundingOwnerText)}>Copy</button></div>
+            <div class="address-row"><span class="address-label">Cycles Ledger canister</span><code>{CYCLES_LEDGER_PRINCIPAL}</code><button on:click={() => copyLabel('Cycles Ledger canister', CYCLES_LEDGER_PRINCIPAL)}>Copy</button></div>
+            <p class="fine-print">The default subaccount is empty. This account is the funding pool; sending cycles directly to a target canister only changes that target's runtime balance.</p>
+          </article>
+          <article class="funding-balance">
+            <div class="balance-title"><h3>ICP fallback reserve</h3><span class="network">ICP Ledger · mainnet</span></div>
+            <div class="balance-grid"><div><span>Ledger balance</span><strong>{formatIcp(fundingOptionalBigInt(funding.icp_ledger_balance_e8s))} ICP</strong><small class:stale={isStale(fundingOptionalBigInt(funding.icp_ledger_balance_as_of_secs), undefined, 180n)}>{isStale(fundingOptionalBigInt(funding.icp_ledger_balance_as_of_secs), undefined, 180n) ? 'Stale · ' : ''}{ageLabel(fundingOptionalBigInt(funding.icp_ledger_balance_as_of_secs))}</small></div><div><span>Spendable</span><strong>{formatIcp(fundingOptionalBigInt(funding.icp_available_e8s))} ICP</strong><small>After reserve policy</small></div><div><span>Minimum reserve</span><strong>{formatIcp(fundingOptionalBigInt(funding.min_icp_reserve_e8s))} ICP</strong><small>Held back from conversion</small></div></div>
+            <p class="deposit-copy">Send ICP to the Sentinel owner on the ICP Ledger using the default subaccount. ICRC wallets can use the principal below; legacy wallets can use the 64-character account identifier. Sentinel converts ICP through the NNS Cycles Minting Canister only when spendable cycles cannot cover a refill.</p>
+            <div class="address-row"><span class="address-label">ICRC owner principal</span><code>{fundingOwnerText}</code><button on:click={() => copyLabel('ICRC owner principal', fundingOwnerText)}>Copy</button></div>
+            <div class="address-row"><span class="address-label">ICP account identifier</span><code>{icpAccountText}</code><button on:click={() => copyLabel('ICP account identifier', icpAccountText)}>Copy</button></div>
+            <div class="address-row"><span class="address-label">ICP Ledger canister</span><code>{ICP_LEDGER_PRINCIPAL}</code><button on:click={() => copyLabel('ICP Ledger canister', ICP_LEDGER_PRINCIPAL)}>Copy</button></div>
+            <p class="fine-print">The ICRC owner uses the empty/default subaccount. The legacy identifier is the same owner account encoded for older ICP Ledger send forms.</p>
+          </article>
+        </div>
+        <div class="funding-footer"><span>Conversion status: <strong>{variantLabel(funding.shared_reserve_conversion_status)}</strong></span><span>Funding owner: <code>{fundingOwnerText}</code></span><span>Next scheduled check: <strong>{nextCheckLabel(optional(snapshot.overview.next_sample_at_secs))}</strong></span></div>
+        {#if fundingEmpty}<p class="notice idle"><strong>Automation is configured but awaiting funds.</strong> Deposit cycles or ICP above; the next scheduled Sentinel check will recognize the reserve. Refreshing this page reads current public state but does not force a funding run.</p>{/if}
+        {#if copyMessage}<p class="notice success" role="status">{copyMessage}</p>{/if}
+        {#if copyError}<p class="notice error" role="alert">{copyError}</p>{/if}
+      {:else}
+        <p class="muted">Funding balances are unavailable until the Sentinel publishes its funding status.</p>
+      {/if}
+    </section>
     {#if registryIdle}
       <div class="notice idle">
         <strong>Observation has not been switched on yet.</strong>
@@ -338,14 +472,14 @@
         {#if fundingUnavailable}<p class="muted">The Sentinel also reports no funding source yet (no cycles-ledger balance and no ICP), so top-ups would be rejected even for an enabled target.</p>{/if}
       </div>
     {/if}
-    <div class="grid"><article><h2>Target registry</h2>{#if snapshot.targets.length}<table><thead><tr><th>Target</th><th>State</th><th>Balance</th><th>Burn / day</th><th>Runway</th><th>Environment</th></tr></thead><tbody>{#each snapshot.targets as row}<tr><td><strong>{row.display_name}</strong><small>{row.principal.toText()}</small><small>{row.project} · {variant(row.observation_mode)}</small></td><td title={targetStateLabel(row) === 'Awaiting first sample' ? 'Monitoring is enabled. The next scheduled observation has not completed yet.' : undefined}>{targetStateLabel(row)}</td><td title={format(optional(row.advisory_balance_cycles))}>{row.advisory_balance_overflowed ? 'Overflow' : formatCycles(optional(row.advisory_balance_cycles))}</td><td title={format(optional(row.burn_cycles_per_day))}>{formatCycles(optional(row.burn_cycles_per_day))}</td><td>{formatRunway(optional(row.runway_secs))}</td><td>{variant(row.environment)}</td></tr>{/each}</tbody></table>{:else}<p class="muted">No targets have been published.</p>{/if}</article>
+    <div class="grid"><article><h2>Target registry</h2>{#if snapshot.targets.length}<table><thead><tr><th>Target</th><th>State</th><th>Rule</th><th>Balance</th><th>Burn / day</th><th>Runway</th><th>Environment</th><th></th></tr></thead><tbody>{#each snapshot.targets as row}<tr class:selected-row={selectedTargetPrincipal === row.principal.toText()}><td><strong>{row.display_name}</strong><small>{row.principal.toText()}</small><small>{row.project} · {variant(row.observation_mode)}</small></td><td title={targetStateLabel(row) === 'Awaiting first sample' ? 'Monitoring is enabled. The next scheduled observation has not completed yet.' : undefined}><strong>{fundingTarget(row).paused ? 'Paused' : targetStateLabel(row)}</strong><small>{fundingTarget(row).enabled ? 'Enabled' : 'Disabled'} · {fundingTarget(row).auto_topup ? 'Auto-top-up on' : 'Auto-top-up off'}</small></td><td><span class="rule">At {formatTCycles(row.low_balance_threshold_cycles)}T, add {formatTCycles(row.refill_cycles)}T</span><small>Cap {formatTCycles(fundingTarget(row).daily_cap_cycles ?? undefined)}T · cooldown {fundingTarget(row).cooldown_secs?.toString() ?? 'Unavailable'}s</small>{#if row.recent_topups.length}<small>Last top-up: {variant(row.recent_topups[row.recent_topups.length - 1].outcome)} · {formatTCycles(row.recent_topups[row.recent_topups.length - 1].amount_cycles)}T</small>{/if}</td><td title={format(optional(row.advisory_balance_cycles))}>{row.advisory_balance_overflowed ? 'Overflow' : formatCycles(optional(row.advisory_balance_cycles))}</td><td title={format(optional(row.burn_cycles_per_day))}>{formatCycles(optional(row.burn_cycles_per_day))}</td><td>{formatRunway(optional(row.runway_secs))}</td><td>{variant(row.environment)}</td><td><button class="select-target" on:click={() => selectTarget(row)}>Use settings</button></td></tr>{/each}</tbody></table>{:else}<p class="muted">No targets have been published.</p>{/if}</article>
       <article><h2>Alarms</h2>{#if snapshot.alarms.length}{#each snapshot.alarms as alarm}<div class="alarm"><span class="dot"></span><div><strong>{variant(alarm.kind)}</strong><small>{alarm.target[0]?.toText() ?? 'Sentinel'}</small></div><span>{variant(alarm.status)}</span>{#if signer && actor && alarmCanBeAcknowledged(alarm)}<button on:click={() => run(() => sentinelManagement.acknowledgeAlarm(actor!, alarm.id))}>Acknowledge</button>{/if}</div>{/each}{:else}<p class="muted">No public alarms.</p>{/if}</article></div>
   {/if}
 
   {#if $walletStore.isConnected && isCycleSentinelConfigured}<section class="operator"><h2>Operator console <span class:confirmed={signer} class="badge">{signer ? 'Signer confirmed on-chain' : operatorChecked ? 'Connected, not a signer' : 'Access not checked'}</span></h2>
     {#if signer && actor}
-      <article><h3>Register target</h3><p class="muted">Registration is fail-closed: the canister creates the target disabled with auto-top-up off. Enablement is a separate governed update.</p><div class="form-grid"><label>Target principal<input bind:value={targetPrincipal} /></label><label>Display name<input bind:value={displayName} /></label><label>Project<input bind:value={project} /></label><label>Tags (comma separated)<input bind:value={tags} /></label><label>Low threshold cycles<input bind:value={lowThreshold} /></label><label>Refill cycles<input bind:value={refill} /></label><label>Daily cap cycles<input bind:value={dailyCap} /></label><label>Cooldown seconds<input bind:value={cooldown} /></label><label>Optional burn anomaly limit<input bind:value={burnAnomalyLimit} /></label><label>Environment<select bind:value={environment}>{#each Object.keys(EnvironmentVariant) as value}<option value={value}>{value}</option>{/each}</select></label><label>Criticality<select bind:value={criticality}>{#each Object.keys(CriticalityVariant) as value}<option value={value}>{value}</option>{/each}</select></label><label>Observation mode<select bind:value={observationMode}>{#each Object.keys(ObservationModeVariant) as value}<option value={value}>{value}</option>{/each}</select></label></div><button on:click={() => run(() => sentinelManagement.proposeRegisterTarget(actor!, targetArgs()))}>Propose register target</button></article>
-      <article><h3>Update or remove target</h3><p class="muted">Update includes funding policy, enabled, and auto-top-up choices. Removal is governed and remains fail-closed while unresolved operations exist.</p><div class="form-grid"><label>Target principal<input bind:value={targetPrincipal} /></label><label>Display name<input bind:value={displayName} /></label><label>Project<input bind:value={project} /></label><label>Tags<input bind:value={tags} /></label><label>Low threshold cycles<input bind:value={lowThreshold} /></label><label>Refill cycles<input bind:value={refill} /></label><label>Daily cap cycles<input bind:value={dailyCap} /></label><label>Cooldown seconds<input bind:value={cooldown} /></label><label>Burn anomaly limit<input bind:value={burnAnomalyLimit} /></label><label>Environment<select bind:value={environment}>{#each Object.keys(EnvironmentVariant) as value}<option value={value}>{value}</option>{/each}</select></label><label>Criticality<select bind:value={criticality}>{#each Object.keys(CriticalityVariant) as value}<option value={value}>{value}</option>{/each}</select></label><label>Observation mode<select bind:value={observationMode}>{#each Object.keys(ObservationModeVariant) as value}<option value={value}>{value}</option>{/each}</select></label><label class="check"><input type="checkbox" bind:checked={enabled} /> Enabled</label><label class="check"><input type="checkbox" bind:checked={autoTopup} /> Auto-top-up</label></div><div class="actions"><button on:click={() => run(() => sentinelManagement.proposeUpdateTarget(actor!, target(), targetPatch()))}>Propose target update</button><button on:click={() => run(() => sentinelManagement.proposeRemoveTarget(actor!, target()))}>Propose target removal</button><button on:click={() => run(() => sentinelManagement.pauseTarget(actor!, target()))}>Pause target immediately</button><button on:click={() => run(() => sentinelManagement.proposeUnpauseTarget(actor!, target()))}>Propose governed unpause</button><button on:click={() => run(() => sentinelManagement.manualTopUp(actor!, target()))}>Manual top-up</button></div></article>
+      <article><h3>Register target</h3><p class="muted">Registration is fail-closed: the canister creates the target disabled with auto-top-up off. Enablement is a separate governed update.</p><div class="form-grid"><label>Target principal<input bind:value={targetPrincipal} /></label><label>Display name<input bind:value={displayName} /></label><label>Project<input bind:value={project} /></label><label>Tags (comma separated)<input bind:value={tags} /></label><label>Low threshold (T-cycles)<input bind:value={lowThreshold} inputmode="decimal" /></label><label>Refill amount (T-cycles)<input bind:value={refill} inputmode="decimal" /></label><label>Daily cap (T-cycles)<input bind:value={dailyCap} inputmode="decimal" /></label><label>Cooldown seconds<input bind:value={cooldown} inputmode="numeric" /></label><label>Optional burn anomaly limit (T-cycles)<input bind:value={burnAnomalyLimit} inputmode="decimal" /></label><label>Environment<select bind:value={environment}>{#each Object.keys(EnvironmentVariant) as value}<option value={value}>{value}</option>{/each}</select></label><label>Criticality<select bind:value={criticality}>{#each Object.keys(CriticalityVariant) as value}<option value={value}>{value}</option>{/each}</select></label><label>Observation mode<select bind:value={observationMode}>{#each Object.keys(ObservationModeVariant) as value}<option value={value}>{value}</option>{/each}</select></label></div><p class="fine-print">For example: threshold 2, refill 6 means “At 2T, add 6T.” Values are converted to exact cycle integers before submission.</p><button on:click={() => run(() => sentinelManagement.proposeRegisterTarget(actor!, targetArgs()))}>Propose register target</button></article>
+      <article><h3>Update or remove target</h3><p class="muted">Update includes funding policy, enabled, and auto-top-up choices. Removal is governed and remains fail-closed while unresolved operations exist.</p><div class="form-grid"><label>Target principal<input bind:value={targetPrincipal} /></label><label>Display name<input bind:value={displayName} /></label><label>Project<input bind:value={project} /></label><label>Tags<input bind:value={tags} /></label><label>Low threshold (T-cycles)<input bind:value={lowThreshold} inputmode="decimal" /></label><label>Refill amount (T-cycles)<input bind:value={refill} inputmode="decimal" /></label><label>Daily cap (T-cycles)<input bind:value={dailyCap} inputmode="decimal" /></label><label>Cooldown seconds<input bind:value={cooldown} inputmode="numeric" /></label><label>Burn anomaly limit (T-cycles)<input bind:value={burnAnomalyLimit} inputmode="decimal" /></label><label>Environment<select bind:value={environment}>{#each Object.keys(EnvironmentVariant) as value}<option value={value}>{value}</option>{/each}</select></label><label>Criticality<select bind:value={criticality}>{#each Object.keys(CriticalityVariant) as value}<option value={value}>{value}</option>{/each}</select></label><label>Observation mode<select bind:value={observationMode}>{#each Object.keys(ObservationModeVariant) as value}<option value={value}>{value}</option>{/each}</select></label><label class="check"><input type="checkbox" bind:checked={enabled} /> Enabled</label><label class="check"><input type="checkbox" bind:checked={autoTopup} /> Auto-top-up</label></div><p class="fine-print">Use “Use settings” in the registry to load the selected target’s current threshold, refill, cap, cooldown, and switches before editing.</p><div class="actions"><button on:click={() => run(() => sentinelManagement.proposeUpdateTarget(actor!, target(), targetPatch()))}>Propose target update</button><button on:click={() => run(() => sentinelManagement.proposeRemoveTarget(actor!, target()))}>Propose target removal</button><button on:click={() => run(() => sentinelManagement.pauseTarget(actor!, target()))}>Pause target immediately</button><button on:click={() => run(() => sentinelManagement.proposeUnpauseTarget(actor!, target()))}>Propose governed unpause</button><button on:click={() => run(() => sentinelManagement.manualTopUp(actor!, target()))}>Manual top-up</button></div></article>
       <article><h3>Signer governance</h3><div class="form-grid"><label>Signer principal<input bind:value={signerPrincipal} /></label><label>Signer threshold (nat32)<input bind:value={signerThreshold} inputmode="numeric" /></label></div><div class="actions"><button on:click={() => run(() => sentinelManagement.proposeAddSigner(actor!, parsePrincipal(signerPrincipal, 'Signer principal')))}>Propose add signer</button><button on:click={() => run(() => sentinelManagement.proposeRemoveSigner(actor!, parsePrincipal(signerPrincipal, 'Signer principal')))}>Propose remove signer</button><button on:click={() => run(() => sentinelManagement.proposeSetSignerThreshold(actor!, parseNat32(signerThreshold, 'Signer threshold')))}>Propose signer threshold</button></div></article>
       <article><h3>Global policy governance</h3><div class="form-grid"><label>Global daily cap<input bind:value={globalDailyCap} inputmode="numeric" /></label><label>Sample interval seconds<input bind:value={sampleInterval} inputmode="numeric" /></label><label>Stale-after seconds<input bind:value={staleAfter} inputmode="numeric" /></label><label>Minimum ICP reserve e8s<input bind:value={minIcpReserve} inputmode="numeric" /></label><label>Self-recovery refill<input bind:value={selfRefill} inputmode="numeric" /></label><label>Self-recovery low threshold<input bind:value={selfLowThreshold} inputmode="numeric" /></label><label>Self-recovery daily cap<input bind:value={selfDailyCap} inputmode="numeric" /></label><label>Protected reserve cycles<input bind:value={protectedReserve} inputmode="numeric" /></label><label>Unpause timelock seconds<input bind:value={unpauseTimelock} inputmode="numeric" /></label><label>Spend-policy timelock seconds<input bind:value={spendTimelock} inputmode="numeric" /></label><label>Target-registry timelock seconds<input bind:value={targetTimelock} inputmode="numeric" /></label><label>Signer-change timelock seconds<input bind:value={signerTimelock} inputmode="numeric" /></label></div><button on:click={() => run(() => sentinelManagement.proposeSetGlobalPolicy(actor!, globalPolicy()))}>Propose global policy</button></article>
       <article><h3>Proposal list and actions</h3><label>Proposal ID<input bind:value={proposalId} inputmode="numeric" /></label><div class="actions"><button on:click={() => run(() => sentinelManagement.approveProposal(actor!, proposal()))}>Approve proposal</button><button on:click={() => run(() => sentinelManagement.executeProposal(actor!, proposal()))}>Execute proposal</button><button on:click={() => run(() => sentinelManagement.cancelProposal(actor!, proposal()))}>Cancel proposal</button></div>{#if proposals.length}<ul>{#each proposals as item}<li>#{item.id.toString()} · {variant(item.status)} · {variant(item.payload)} · {item.approvals.length} approval(s)</li>{/each}</ul>{:else}<p class="muted">No proposals returned.</p>{/if}</article>
@@ -355,5 +489,5 @@
 </section>
 
 <style>
-  .telemetry-page{max-width:1120px;margin:0 auto;color:var(--rumi-text-primary)}.hero{display:flex;align-items:flex-end;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-bottom:2rem}.hero h1{margin:.1rem 0;font-size:2.5rem}.lede{max-width:700px;color:var(--rumi-text-secondary)}.eyebrow{color:var(--rumi-teal);font-size:.72rem;letter-spacing:.14em}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:.75rem;margin-bottom:1rem}.stats div,article,.operator,.login-note{padding:1rem;background:var(--rumi-bg-surface-1);border:1px solid var(--rumi-border);border-radius:.5rem}.stats span,.muted,small{display:block;color:var(--rumi-text-muted);font-size:.78rem}.stats strong{font-size:1.25rem}.grid{display:grid;grid-template-columns:2fr 1fr;gap:1rem}h2,h3{margin-top:0}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:.55rem;border-bottom:1px solid var(--rumi-border);font-size:.82rem}.alarm{display:flex;gap:.5rem;align-items:center;border-bottom:1px solid var(--rumi-border);padding:.65rem 0}.alarm>span:nth-last-of-type(1){margin-left:auto;font-size:.75rem}.dot{width:.45rem;height:.45rem;background:#e05252;border-radius:50%}.operator{margin-top:1rem;display:grid;gap:1rem}.operator>h2,.operator>p{margin-bottom:0}.badge{font-size:.7rem;padding:.25rem .5rem;border-radius:99px;color:var(--rumi-text-muted);background:var(--rumi-bg-surface3)}.badge.confirmed{color:var(--rumi-teal);background:rgba(45,212,191,.12)}.form-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:.7rem}.form-grid label{display:block;font-size:.75rem;color:var(--rumi-text-muted)}input,select{display:block;width:100%;box-sizing:border-box;margin-top:.25rem;padding:.5rem;background:var(--rumi-bg-surface3);border:1px solid var(--rumi-border);color:inherit;border-radius:.3rem}.check{display:flex!important;gap:.5rem;align-items:center}.check input{width:auto}.actions{display:flex;gap:.4rem;flex-wrap:wrap;margin-top:.7rem}button{border:1px solid var(--rumi-border-hover);background:var(--rumi-bg-surface3);color:inherit;border-radius:.4rem;padding:.55rem .8rem;cursor:pointer;font-size:.78rem}button:hover{border-color:var(--rumi-action)}button:disabled{opacity:.5}.notice{padding:.7rem;margin-bottom:1rem;border-radius:.4rem}.error{color:#ff9b9b;background:rgba(224,82,82,.12)}.idle{background:var(--rumi-bg-surface-1);border:1px solid var(--rumi-border)}.idle strong{display:block;margin-bottom:.35rem}.idle p{margin:.35rem 0;font-size:.82rem;color:var(--rumi-text-secondary)}.idle p.muted{font-size:.78rem}.success{color:var(--rumi-teal);background:rgba(45,212,191,.1)}.login-note{margin-top:1rem}li{margin:.4rem 0;font-size:.82rem}@media(max-width:768px){.stats{grid-template-columns:repeat(2,1fr)}.grid,.form-grid{grid-template-columns:1fr}table{font-size:.72rem}}
+  .telemetry-page{max-width:1120px;margin:0 auto;color:var(--rumi-text-primary)}.hero{display:flex;align-items:flex-end;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-bottom:2rem}.hero h1{margin:.1rem 0;font-size:2.5rem}.lede{max-width:700px;color:var(--rumi-text-secondary)}.eyebrow{color:var(--rumi-teal);font-size:.72rem;letter-spacing:.14em}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:.75rem;margin-bottom:1rem}.stats div,article,.operator,.login-note{padding:1rem;background:var(--rumi-bg-surface-1);border:1px solid var(--rumi-border);border-radius:.5rem}.stats span,.muted,small{display:block;color:var(--rumi-text-muted);font-size:.78rem}.stats strong{font-size:1.25rem}.grid{display:grid;grid-template-columns:2fr 1fr;gap:1rem}h2,h3{margin-top:0}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:.55rem;border-bottom:1px solid var(--rumi-border);font-size:.82rem;vertical-align:top}.alarm{display:flex;gap:.5rem;align-items:center;border-bottom:1px solid var(--rumi-border);padding:.65rem 0}.alarm>span:nth-last-of-type(1){margin-left:auto;font-size:.75rem}.dot{width:.45rem;height:.45rem;background:#e05252;border-radius:50%}.operator{margin-top:1rem;display:grid;gap:1rem}.operator>h2,.operator>p{margin-bottom:0}.badge{font-size:.7rem;padding:.25rem .5rem;border-radius:99px;color:var(--rumi-text-muted);background:var(--rumi-bg-surface3)}.badge.confirmed{color:var(--rumi-teal);background:rgba(45,212,191,.12)}.form-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:.7rem}.form-grid label{display:block;font-size:.75rem;color:var(--rumi-text-muted)}input,select{display:block;width:100%;box-sizing:border-box;margin-top:.25rem;padding:.5rem;background:var(--rumi-bg-surface3);border:1px solid var(--rumi-border);color:inherit;border-radius:.3rem}.check{display:flex!important;gap:.5rem;align-items:center}.check input{width:auto}.actions{display:flex;gap:.4rem;flex-wrap:wrap;margin-top:.7rem}button{border:1px solid var(--rumi-border-hover);background:var(--rumi-bg-surface3);color:inherit;border-radius:.4rem;padding:.55rem .8rem;cursor:pointer;font-size:.78rem}button:hover{border-color:var(--rumi-action)}button:disabled{opacity:.5}.notice{padding:.7rem;margin-bottom:1rem;border-radius:.4rem}.error{color:#ff9b9b;background:rgba(224,82,82,.12)}.idle{background:var(--rumi-bg-surface-1);border:1px solid var(--rumi-border)}.idle strong{display:block;margin-bottom:.35rem}.idle p{margin:.35rem 0;font-size:.82rem;color:var(--rumi-text-secondary)}.idle p.muted{font-size:.78rem}.success{color:var(--rumi-teal);background:rgba(45,212,191,.1)}.login-note{margin-top:1rem}li{margin:.4rem 0;font-size:.82rem}.funding-wallet{padding:1.2rem;background:linear-gradient(135deg,rgba(31,48,78,.75),rgba(19,29,52,.95));border:1px solid rgba(45,212,191,.35);border-radius:.65rem;margin-bottom:1rem}.funding-heading{display:flex;justify-content:space-between;gap:1rem;align-items:flex-start;margin-bottom:1rem}.funding-heading h2{margin:.1rem 0 .35rem}.funding-heading p{margin:0}.funding-balances{display:grid;grid-template-columns:1fr 1fr;gap:.8rem}.funding-balance{padding:1rem;background:rgba(8,15,30,.35);border-color:rgba(255,255,255,.12)}.balance-title{display:flex;align-items:baseline;justify-content:space-between;gap:.5rem}.balance-title h3{margin:0}.network{font-size:.7rem;color:var(--rumi-teal)}.balance-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:.5rem;margin:1rem 0}.balance-grid>div{padding:.6rem;background:rgba(255,255,255,.04);border-radius:.35rem}.balance-grid strong{display:block;font-size:1.05rem;margin-top:.2rem}.deposit-copy{color:var(--rumi-text-secondary);font-size:.82rem;line-height:1.45}.address-row{display:grid;grid-template-columns:9.5rem minmax(0,1fr) auto;align-items:center;gap:.5rem;margin-top:.5rem}.address-label{font-size:.72rem;color:var(--rumi-text-muted)}code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.73rem;overflow-wrap:anywhere;user-select:all}.address-row code{padding:.45rem;background:rgba(0,0,0,.22);border-radius:.25rem}.address-row button{padding:.4rem .55rem}.fine-print{font-size:.72rem;color:var(--rumi-text-muted);line-height:1.4}.funding-footer{display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-top:.8rem;color:var(--rumi-text-muted);font-size:.75rem}.rule{display:block;white-space:nowrap}.selected-row{background:rgba(45,212,191,.07)}.select-target{padding:.4rem .5rem;white-space:nowrap}@media(max-width:768px){.stats{grid-template-columns:repeat(2,1fr)}.grid,.form-grid,.funding-balances{grid-template-columns:1fr}.balance-grid{grid-template-columns:1fr 1fr}.address-row{grid-template-columns:1fr}.address-row button{justify-self:start}table{font-size:.72rem}}
 </style>

@@ -869,6 +869,7 @@ pub struct TargetArgs {
     pub criticality: Criticality,
     pub observation_mode: ObservationMode,
     pub tags: Vec<String>,
+    pub tags: Vec<String>,
     pub funding_policy: TargetFundingPolicyArgs,
 }
 
@@ -1444,6 +1445,11 @@ pub struct IcpCmcSnapshot {
     pub source_subaccount: Option<FixedBytes32>,
     pub cmc_account_identifier: FixedBytes32,
     pub target_canister: Principal,
+    /// Legacy operations top up `target_canister` directly. New automatic
+    /// fallback operations mint into Sentinel's shared default Cycles Ledger
+    /// account first, then use the normal exact-withdraw rail.
+    #[serde(default)]
+    pub delivery: IcpCmcDelivery,
     pub amount_e8s: u64,
     pub fee_e8s: u64,
     pub memo: u64,
@@ -1451,6 +1457,26 @@ pub struct IcpCmcSnapshot {
     pub rate_xdr_permyriad_per_icp: u64,
     pub rate_timestamp_secs: u64,
     pub expected_cycles: u128,
+}
+
+#[derive(CandidType, Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum IcpCmcDelivery {
+    #[default]
+    DirectTopUp,
+    SharedReserveMint,
+}
+
+/// Authoritative CMC evidence for a completed shared-reserve mint.  This is
+/// deliberately separate from a target delivery amount: `minted_cycles` is
+/// attached by the CMC and `post_mint_balance_cycles` is the CMC receipt's
+/// reported balance, neither of which says that the logical target received
+/// a refill.  State retains this evidence after the operation is compacted.
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SharedReserveMintReceipt {
+    pub(crate) cmc_deposit_block_index: u64,
+    pub(crate) minted_cycles: u128,
+    pub(crate) post_mint_balance_cycles: u128,
+    pub(crate) recorded_at_secs: u64,
 }
 
 /// The rail-specific argument snapshot for a `FundingOperation`. Which
@@ -1534,6 +1560,16 @@ impl FundingOperationState {
             Self::Cycles(_) => FundingRail::CyclesLedger,
             Self::Icp(_) => FundingRail::IcpCmc,
         }
+    }
+
+    pub fn is_shared_reserve_conversion(&self) -> bool {
+        matches!(
+            self,
+            Self::Icp(IcpCmcSnapshot {
+                delivery: IcpCmcDelivery::SharedReserveMint,
+                ..
+            })
+        )
     }
 
     /// True once no further automatic attempt will ever be made. This is
@@ -1892,6 +1928,7 @@ impl From<IcpCmcSnapshotV1> for IcpCmcSnapshot {
             source_subaccount: value.source_subaccount,
             cmc_account_identifier: value.cmc_account_identifier,
             target_canister: value.target_canister,
+            delivery: IcpCmcDelivery::DirectTopUp,
             amount_e8s: value.amount_e8s,
             fee_e8s: value.fee_e8s,
             memo: value.memo,
@@ -1996,6 +2033,107 @@ impl From<FundingOperationV2> for FundingOperation {
             refund_block_hint: value.refund_block_index,
             refund_block_index: value.refund_block_index,
             notify_attempt_started_at_secs: None,
+            created_at_secs: value.created_at_secs,
+            updated_at_secs: value.updated_at_secs,
+        }
+    }
+}
+
+/// Frozen Task-5 ICP snapshot, before shared-reserve delivery mode was
+/// added. It must remain byte-compatible with every persisted direct CMC
+/// operation so an upgrade never reinterprets an old top-up as a mint.
+#[derive(CandidType, Deserialize, Clone)]
+pub(crate) struct IcpCmcSnapshotV2 {
+    pub(crate) source_principal: Principal,
+    pub(crate) ledger_principal: Principal,
+    pub(crate) cmc_principal: Principal,
+    pub(crate) source_subaccount: Option<FixedBytes32>,
+    pub(crate) cmc_account_identifier: FixedBytes32,
+    pub(crate) target_canister: Principal,
+    pub(crate) amount_e8s: u64,
+    pub(crate) fee_e8s: u64,
+    pub(crate) memo: u64,
+    pub(crate) created_at_time_ns: u64,
+    pub(crate) rate_xdr_permyriad_per_icp: u64,
+    pub(crate) rate_timestamp_secs: u64,
+    pub(crate) expected_cycles: u128,
+}
+
+impl From<IcpCmcSnapshotV2> for IcpCmcSnapshot {
+    fn from(value: IcpCmcSnapshotV2) -> Self {
+        Self {
+            source_principal: value.source_principal,
+            ledger_principal: value.ledger_principal,
+            cmc_principal: value.cmc_principal,
+            source_subaccount: value.source_subaccount,
+            cmc_account_identifier: value.cmc_account_identifier,
+            target_canister: value.target_canister,
+            delivery: IcpCmcDelivery::DirectTopUp,
+            amount_e8s: value.amount_e8s,
+            fee_e8s: value.fee_e8s,
+            memo: value.memo,
+            created_at_time_ns: value.created_at_time_ns,
+            rate_xdr_permyriad_per_icp: value.rate_xdr_permyriad_per_icp,
+            rate_timestamp_secs: value.rate_timestamp_secs,
+            expected_cycles: value.expected_cycles,
+        }
+    }
+}
+
+#[derive(CandidType, Deserialize, Clone)]
+pub(crate) enum FundingRailArgumentsV2 {
+    Cycles(CyclesWithdrawSnapshot),
+    Icp(IcpCmcSnapshotV2),
+}
+
+impl From<FundingRailArgumentsV2> for FundingRailArguments {
+    fn from(value: FundingRailArgumentsV2) -> Self {
+        match value {
+            FundingRailArgumentsV2::Cycles(snapshot) => Self::Cycles(snapshot),
+            FundingRailArgumentsV2::Icp(snapshot) => Self::Icp(snapshot.into()),
+        }
+    }
+}
+
+/// Frozen operation record used by the former `StoredFundingOperation::V3`.
+/// Its only distinction is the pre-shared-reserve ICP snapshot above.
+#[derive(CandidType, Deserialize, Clone)]
+pub(crate) struct FundingOperationV3 {
+    pub(crate) id: u64,
+    pub(crate) target: Principal,
+    pub(crate) target_registry_revision: u64,
+    pub(crate) funding_policy: TargetFundingPolicy,
+    pub(crate) trigger: FundingTrigger,
+    pub(crate) rail_arguments: FundingRailArgumentsV2,
+    pub(crate) reserved_amount_cycles: u128,
+    pub(crate) state: FundingOperationState,
+    pub(crate) attempts: FundingAttempts,
+    pub(crate) confirmed_block_index: Option<u64>,
+    pub(crate) actual_cycles: Option<u128>,
+    pub(crate) refund_block_hint: Option<u64>,
+    pub(crate) refund_block_index: Option<u64>,
+    pub(crate) notify_attempt_started_at_secs: Option<u64>,
+    pub(crate) created_at_secs: u64,
+    pub(crate) updated_at_secs: u64,
+}
+
+impl From<FundingOperationV3> for FundingOperation {
+    fn from(value: FundingOperationV3) -> Self {
+        Self {
+            id: value.id,
+            target: value.target,
+            target_registry_revision: value.target_registry_revision,
+            funding_policy: value.funding_policy,
+            trigger: value.trigger,
+            rail_arguments: value.rail_arguments.into(),
+            reserved_amount_cycles: value.reserved_amount_cycles,
+            state: value.state,
+            attempts: value.attempts,
+            confirmed_block_index: value.confirmed_block_index,
+            actual_cycles: value.actual_cycles,
+            refund_block_hint: value.refund_block_hint,
+            refund_block_index: value.refund_block_index,
+            notify_attempt_started_at_secs: value.notify_attempt_started_at_secs,
             created_at_secs: value.created_at_secs,
             updated_at_secs: value.updated_at_secs,
         }
@@ -2155,6 +2293,10 @@ impl FundingOperation {
 
     pub fn rail(&self) -> FundingRail {
         self.rail_arguments.rail()
+    }
+
+    pub fn is_shared_reserve_conversion(&self) -> bool {
+        self.rail_arguments.is_shared_reserve_conversion()
     }
 
     pub fn reserved_amount_cycles(&self) -> u128 {
@@ -4614,6 +4756,18 @@ impl SourceReserveState {
         self.cache
     }
 
+    /// Conversion admission reads the exact same fresh snapshot as a normal
+    /// withdrawal reservation. It does not reserve a Cycles debit because
+    /// the conversion credits this account; the caller must still prove a
+    /// normal reservation was insufficient before it may use this value.
+    pub fn fresh_cache_for_conversion(
+        &self,
+        now_secs: u64,
+        max_age_secs: u64,
+    ) -> Result<CyclesLedgerCache, SourceReserveError> {
+        self.fresh_cache(now_secs, max_age_secs)
+    }
+
     pub fn pending(&self) -> &[PendingSourceDebit] {
         &self.pending
     }
@@ -5179,14 +5333,39 @@ pub struct PublicOverview {
     pub unobserved_count: u64,
     pub total_observed_cycles: Nat,
     pub runtime_cycles: Nat,
+    /// Both funding assets use this owner with the default account
+    /// (subaccount omitted).  Publishing the owner makes the deposit route
+    /// auditable without exposing any signer or reconciliation material.
+    pub funding_account_owner: Principal,
+    /// Cached raw Cycles Ledger balance and the time it was observed.  This
+    /// is deliberately distinct from the spendable balance below: unknown
+    /// and stale observations are never represented as zero.
+    pub cycles_ledger_balance_cycles: Option<Nat>,
+    pub cycles_ledger_balance_as_of_secs: Option<u64>,
+    /// Cached raw ICP Ledger balance and the time it was observed.
+    pub icp_ledger_balance_e8s: Option<Nat>,
+    pub icp_ledger_balance_as_of_secs: Option<u64>,
     /// Reserve balances are optional because they are populated by the
     /// funding sampler. Unknown must not be serialized as a real zero.
     pub cycles_ledger_available_cycles: Option<Nat>,
     pub icp_available_e8s: Option<Nat>,
     pub protected_self_reserve_cycles: Option<Nat>,
+    pub min_icp_reserve_e8s: Option<Nat>,
+    /// Bounded public indication of whether the automatic ICP fallback has
+    /// live work. It intentionally exposes no operation id, block index, or
+    /// reconciliation evidence.
+    pub shared_reserve_conversion_status: PublicFundingStatus,
     pub alarm_count: u64,
     pub last_sample_at_secs: Option<u64>,
     pub next_sample_at_secs: Option<u64>,
+}
+
+#[derive(CandidType, Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PublicFundingStatus {
+    Ready,
+    Pending,
+    Blocked,
+    Unknown,
 }
 
 /// A public-safe projection of `TerminalFundingSummary`: no signer
@@ -5254,6 +5433,14 @@ pub struct PublicTargetRow {
     pub environment: Environment,
     pub criticality: Criticality,
     pub observation_mode: ObservationMode,
+    /// Governed automation controls are public so a low-balance row never
+    /// leaves operators guessing whether it is eligible to receive funds.
+    pub enabled: bool,
+    pub auto_topup: bool,
+    pub paused: bool,
+    pub daily_cap_cycles: Nat,
+    pub cooldown_secs: u64,
+    pub burn_anomaly_limit_cycles_per_day: Option<Nat>,
     pub state: PublicTargetState,
     pub reported_operational_healthy: Option<bool>,
     /// `None` means no successful observation is available.  In particular,
@@ -6519,6 +6706,7 @@ mod tests {
             source_subaccount: None,
             cmc_account_identifier: crate::icp_cmc::cmc_subaccount(target_canister),
             target_canister,
+            delivery: IcpCmcDelivery::DirectTopUp,
             amount_e8s: 1,
             fee_e8s: 1,
             memo: 1_347_768_404,
