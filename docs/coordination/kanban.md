@@ -134,3 +134,20 @@ Reserve conversion approval artifact: `docs/coordination/sentinel-auto-funding-r
 Verified default ICP address correction: SDK and independent SHA-224/CRC-32 derivations agree on `a907060d486046ae0a21bcca2a4a2cbd8c48a9c4a7ab31ffbd06a4b5a20a1e2e`; earlier `1253387a...` draft was incorrect and is not a deposit destination.
 
 Approval accepted 2026-09-28: preserve policy artifact at commit `51f4a20e` unchanged, including its SHA-256. Draft implementation PR: https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/401 at WIP `928833c8`. Current disk-pressure helper run: 13 registered worktrees, 6% free, 0 eligible and 0 removed; protected/dirty/unmerged worktrees preserved.
+
+
+# Cycle Sentinel four-hour checks — 2026-09-28
+
+Worktree: `/Users/robertripley/.codex/worktrees/sentinel-funding-live/rumi-protocol-v2`; branch: `codex/sentinel-four-hour-checks`.
+Authorization: Rob requested checks every four hours with a manual refresh button; prior publication and activation approval persists.
+
+| ID | State | Owner | Task | Depends on | Evidence / blocker |
+| --- | --- | --- | --- | --- | --- |
+| CS-65 | In progress | sentinel_backend | Signer-only immediate maintenance, shared concurrency guard, actual scheduled deadline and cadence fields | None | Existing Terra worker retained for integration of the previously reviewed asynchronous maintenance path; no stable schema or funding-rail changes |
+| CS-66 | In progress | cadence_frontend | Obvious active cadence and signer-only Run check now; preserve public read-only refresh | CS-65 interface | Loaded Rumi frontend release persona; no declaration or dependency edits |
+| CS-67 | In progress | sentinel_flow_tests | Real canister auth, manual pass and four-hour timer regression coverage | CS-65 | Reuse exact official PocketIC7 and existing fixture/cache stack |
+| CS-68 | In progress | coordinator | Preserve policy, propose four-hour cadence, integrate declarations, review, publish and verify | CS-65 through CS-67 | Two-of-four signer threshold and 86,400-second spend-policy timelock must remain; only robvector is available locally |
+
+Acceptance: immediate maintenance is authorized, single-flight and follows existing reserves/caps/cooldowns; public reads cannot spend funds; manual checks do not postpone the automatic schedule; active cadence is derived from live policy; four-hour policy changes only sample interval to14,400 seconds and stale window to28,800 seconds, preserving the current two-interval relationship and all other fields. Source publication, schedule proposal, approval and execution are separate proof states.
+
+Sonnet availability remains the previously verified loggedIn=false; native workers continue without external source sharing. Root owns shared bindings, ICRC-21 consent, commits, review and all live actions. Disk-pressure cleanup fetched origin and removed0 worktrees:0 eligible,12 protected/dirty/unmerged; 23GiB free, preserved.
