@@ -10,7 +10,7 @@ use crate::management::{
     transfer_stable_from,
 };
 use crate::numeric::{Ratio, UsdIcp, ICP, ICUSD};
-use crate::state::Mode;
+use crate::state::{compute_redemption_fee_with_rate, Mode, RedemptionSimulationPlan};
 use crate::GuardError;
 use crate::PendingMarginTransfer;
 use crate::DEBUG;
@@ -35,6 +35,73 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 /// and pre/post-pull verification. This matches XRC's existing hard ceiling.
 const REDEMPTION_PRICE_MAX_AGE_NS: u64 = 10 * 60 * 1_000_000_000;
 const MAX_REDEMPTION_PRICE_CANDIDATES: usize = 64;
+
+/// Fee inputs frozen for one read-only queue calculation. The elapsed-hour
+/// decay and per-collateral debt total are invariant across capacity probes;
+/// snapshotting them avoids repeating a full debt-index scan and decay loop.
+#[derive(Clone, Copy)]
+struct RedemptionFeeSnapshot {
+    total_debt: ICUSD,
+    decayed_base_rate: Ratio,
+    fee_floor: Ratio,
+    fee_ceiling: Ratio,
+}
+
+impl RedemptionFeeSnapshot {
+    fn fee(self, amount: ICUSD) -> Ratio {
+        compute_redemption_fee_with_rate(
+            amount,
+            self.total_debt,
+            self.decayed_base_rate,
+            self.fee_floor,
+            self.fee_ceiling,
+        )
+    }
+}
+
+fn redemption_fee_snapshot(
+    state: &crate::state::State,
+    collateral_type: &Principal,
+    now: u64,
+) -> RedemptionFeeSnapshot {
+    let (total_debt, current_base_rate, fee_floor, fee_ceiling, last_redemption_time) = state
+        .get_collateral_config(collateral_type)
+        .map(|config| {
+            (
+                state.total_debt_for_collateral(collateral_type),
+                config.current_base_rate,
+                config.redemption_fee_floor,
+                config.redemption_fee_ceiling,
+                config.last_redemption_time,
+            )
+        })
+        .unwrap_or((
+            state.total_borrowed_icusd_amount(),
+            state.current_base_rate,
+            state.redemption_fee_floor,
+            state.redemption_fee_ceiling,
+            state.last_redemption_time,
+        ));
+    let elapsed_hours = (now - last_redemption_time) / 1_000_000_000 / 3600;
+    RedemptionFeeSnapshot {
+        total_debt,
+        decayed_base_rate: current_base_rate * Ratio::new(dec!(0.94)).pow(elapsed_hours),
+        fee_floor,
+        fee_ceiling,
+    }
+}
+
+fn redemption_simulation_plan(
+    state: &crate::state::State,
+    run: &crate::state::RedemptionRun,
+) -> RedemptionSimulationPlan {
+    let price = Decimal::from_f64_retain(run.price_usd).unwrap_or(Decimal::ZERO);
+    state.prepare_redemption_simulation_for_vault_ids(
+        UsdIcp::from(price),
+        &run.collateral_type,
+        &run.vault_ids,
+    )
+}
 
 fn redemption_candidate_types(state: &crate::state::State) -> Vec<Principal> {
     let mut types = std::collections::BTreeSet::new();
@@ -380,11 +447,23 @@ pub fn get_redemption_queue() -> RedemptionQueue {
     read_state(|s| {
         let runs = s.redemption_runs();
         let ranking_fresh = redemption_ranking_is_fresh(s, &runs, now);
+        let mut fee_snapshots = std::collections::BTreeMap::new();
+        for run in &runs {
+            fee_snapshots
+                .entry(run.collateral_type)
+                .or_insert_with(|| redemption_fee_snapshot(s, &run.collateral_type, now));
+        }
         let entries = runs
             .into_iter()
             .map(|run| {
-                let max_input = max_input_for_run(s, &run);
-                let max_net = net_for_run_input(s, &run, max_input).unwrap_or(0);
+                let fee_snapshot = fee_snapshots
+                    .get(&run.collateral_type)
+                    .copied()
+                    .expect("fee snapshot prepared for every redemption run");
+                let simulation = redemption_simulation_plan(s, &run);
+                let max_input = max_input_for_run_with(s, &run, fee_snapshot, &simulation);
+                let max_net =
+                    net_for_run_input(s, &run, max_input, fee_snapshot, &simulation).unwrap_or(0);
                 RedemptionQueueEntry {
                     run_index: run.run_index,
                     collateral_type: run.collateral_type,
@@ -437,28 +516,20 @@ pub fn get_redemption_quote(amount_e8s: u64) -> Result<RedemptionQuote, Redempti
             }
             .into());
         }
-        let max_input = max_input_for_run(s, &run);
+        let fee_snapshot = redemption_fee_snapshot(s, &run.collateral_type, now);
+        let simulation = redemption_simulation_plan(s, &run);
+        let max_input = max_input_for_run_with(s, &run, fee_snapshot, &simulation);
         if amount_e8s > max_input {
             return Err(RedemptionError::RedemptionCapacityExceeded {
                 max_input_icusd_e8s: max_input,
             });
         }
         let amount = ICUSD::from(amount_e8s);
-        let fee_ratio = s.get_redemption_fee_for(&run.collateral_type, amount);
+        let fee_ratio = fee_snapshot.fee(amount);
         let fee = amount * fee_ratio;
         let rmr = s.get_redemption_margin_ratio();
         let effective = (amount - fee) * rmr;
-        let price = UsdIcp::from(Decimal::from_f64_retain(run.price_usd).ok_or_else(|| {
-            RedemptionError::RedemptionQuoteUnavailable(
-                "Collateral price is unavailable.".to_string(),
-            )
-        })?);
-        let simulated = s.simulate_redemption_for_vault_ids(
-            effective,
-            price,
-            &run.collateral_type,
-            &run.vault_ids,
-        );
+        let simulated = simulation.simulate(effective);
         let gross = simulated_collateral_total_raw(&simulated).ok_or_else(|| {
             RedemptionError::RedemptionQuoteUnavailable(
                 "The selected collateral payout exceeds the supported raw-token range.".to_string(),
@@ -502,30 +573,37 @@ pub fn get_redemption_quote(amount_e8s: u64) -> Result<RedemptionQuote, Redempti
 }
 
 fn max_input_for_run(state: &crate::state::State, run: &crate::state::RedemptionRun) -> u64 {
+    let now = ic_cdk::api::time();
+    let fee_snapshot = redemption_fee_snapshot(state, &run.collateral_type, now);
+    let simulation = redemption_simulation_plan(state, run);
+    max_input_for_run_with(state, run, fee_snapshot, &simulation)
+}
+
+fn max_input_for_run_with(
+    state: &crate::state::State,
+    run: &crate::state::RedemptionRun,
+    fee_snapshot: RedemptionFeeSnapshot,
+    simulation: &RedemptionSimulationPlan,
+) -> u64 {
     let debt = run.eligible_debt_e8s;
     let rmr = state.get_redemption_margin_ratio();
     if debt == 0 || rmr.0 <= Decimal::ZERO {
         return 0;
     }
+    let Some(price) = Decimal::from_f64_retain(run.price_usd) else {
+        return 0;
+    };
     max_input_matching(u64::MAX, |raw| {
         let amount = ICUSD::from(raw);
-        let fee = amount * state.get_redemption_fee_for(&run.collateral_type, amount);
+        let fee = amount * fee_snapshot.fee(amount);
         let effective = (amount - fee) * rmr;
         if effective.to_u64() > debt {
             return false;
         }
-        let Some(price) = Decimal::from_f64_retain(run.price_usd) else {
-            return false;
-        };
         if !theoretical_collateral_target_fits_u64(effective, price, run.decimals) {
             return false;
         }
-        let simulated = state.simulate_redemption_for_vault_ids(
-            effective,
-            UsdIcp::from(price),
-            &run.collateral_type,
-            &run.vault_ids,
-        );
+        let simulated = simulation.simulate(effective);
         simulated_collateral_total_raw(&simulated).is_some()
     })
 }
@@ -623,20 +701,16 @@ fn net_for_run_input(
     state: &crate::state::State,
     run: &crate::state::RedemptionRun,
     amount_e8s: u64,
+    fee_snapshot: RedemptionFeeSnapshot,
+    simulation: &RedemptionSimulationPlan,
 ) -> Option<u64> {
     if amount_e8s == 0 {
         return Some(0);
     }
     let amount = ICUSD::from(amount_e8s);
-    let fee = amount * state.get_redemption_fee_for(&run.collateral_type, amount);
+    let fee = amount * fee_snapshot.fee(amount);
     let effective = (amount - fee) * state.get_redemption_margin_ratio();
-    let price = UsdIcp::from(Decimal::from_f64_retain(run.price_usd)?);
-    let simulated = state.simulate_redemption_for_vault_ids(
-        effective,
-        price,
-        &run.collateral_type,
-        &run.vault_ids,
-    );
+    let simulated = simulation.simulate(effective);
     let gross = simulated_collateral_total_raw(&simulated)?;
     let ledger_fee = state
         .get_collateral_config(&run.collateral_type)?

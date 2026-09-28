@@ -64,6 +64,151 @@ pub struct RedemptionRun {
     pub eligible_debt_e8s: u64,
     pub max_input_icusd_e8s: u64,
 }
+
+/// Query-local scratch prepared once for a redemption run. Reusing this plan
+/// avoids rebuilding the selected-ID set, re-reading vaults, recomputing CRs,
+/// and sorting the same vaults for every capacity-search probe. Each preview
+/// still clones the prepared scratch and executes the exact existing water-fill
+/// and collateral-clamp logic.
+#[derive(Clone)]
+pub(crate) struct RedemptionSimulationPlan {
+    vaults: Vec<RedemptionSimVault>,
+    price: Decimal,
+    decimals: u8,
+}
+
+#[derive(Clone)]
+struct RedemptionSimVault {
+    cr: Decimal,
+    id: VaultId,
+    debt: u64,
+    collateral: u64,
+}
+
+impl RedemptionSimulationPlan {
+    pub(crate) fn simulate(&self, icusd_amount: ICUSD) -> Vec<crate::event::VaultRedemption> {
+        fn distribute(
+            vaults: &mut [RedemptionSimVault],
+            indices: &[usize],
+            total_debt: u128,
+            redemption_e8s: u128,
+            price: Decimal,
+            decimals: u8,
+            results: &mut Vec<crate::event::VaultRedemption>,
+        ) {
+            if total_debt == 0 || redemption_e8s == 0 {
+                return;
+            }
+            let mut distributed = 0u128;
+            for (position, index) in indices.iter().enumerate() {
+                let vault_debt = vaults[*index].debt as u128;
+                let share = if position + 1 == indices.len() {
+                    redemption_e8s - distributed
+                } else {
+                    redemption_e8s * vault_debt / total_debt
+                };
+                if share == 0 {
+                    continue;
+                }
+                let actual_share = share.min(vault_debt);
+                let debt_to_deduct = ICUSD::new(actual_share as u64);
+                let collateral_to_deduct = crate::numeric::icusd_to_collateral_amount(
+                    debt_to_deduct,
+                    price,
+                    decimals,
+                );
+                let vault = &mut vaults[*index];
+                let actual_collateral = collateral_to_deduct.min(vault.collateral);
+                vault.debt = vault.debt.saturating_sub(actual_share as u64);
+                vault.collateral = vault.collateral.saturating_sub(actual_collateral);
+                distributed += actual_share;
+                results.push(crate::event::VaultRedemption {
+                    vault_id: vault.id,
+                    icusd_redeemed_e8s: actual_share as u64,
+                    collateral_seized: actual_collateral,
+                });
+            }
+        }
+
+        if icusd_amount == 0 || self.vaults.is_empty() {
+            return Vec::new();
+        }
+        let mut vaults = self.vaults.clone();
+        let mut results = Vec::new();
+        let mut remaining = icusd_amount.to_u64() as u128;
+        let mut band_start = 0usize;
+        while remaining > 0 && band_start < vaults.len() {
+            let band_cr = vaults[band_start].cr;
+            let mut band_end = band_start + 1;
+            while band_end < vaults.len() && vaults[band_end].cr == band_cr {
+                band_end += 1;
+            }
+            let indices: Vec<usize> = (band_start..band_end).collect();
+            let total_debt: u128 = indices.iter().map(|i| vaults[*i].debt as u128).sum();
+            if total_debt == 0 {
+                band_start = band_end;
+                continue;
+            }
+            if band_end >= vaults.len() {
+                distribute(
+                    &mut vaults,
+                    &indices,
+                    total_debt,
+                    remaining,
+                    self.price,
+                    self.decimals,
+                    &mut results,
+                );
+                break;
+            }
+            let next_cr = vaults[band_end].cr;
+            let cr_denom = next_cr - Decimal::ONE;
+            if cr_denom <= Decimal::ZERO {
+                distribute(
+                    &mut vaults,
+                    &indices,
+                    total_debt,
+                    remaining,
+                    self.price,
+                    self.decimals,
+                    &mut results,
+                );
+                break;
+            }
+            let needed = (Decimal::from(total_debt as u64) * (next_cr - band_cr) / cr_denom)
+                .to_u64()
+                .unwrap_or(u64::MAX) as u128;
+            if remaining >= needed && needed > 0 {
+                distribute(
+                    &mut vaults,
+                    &indices,
+                    total_debt,
+                    needed,
+                    self.price,
+                    self.decimals,
+                    &mut results,
+                );
+                remaining -= needed;
+                for vault in &mut vaults[band_start..band_end] {
+                    vault.cr = next_cr;
+                }
+            } else {
+                distribute(
+                    &mut vaults,
+                    &indices,
+                    total_debt,
+                    remaining,
+                    self.price,
+                    self.decimals,
+                    &mut results,
+                );
+                break;
+            }
+        }
+        results
+    }
+}
+
 pub const DEFAULT_BORROW_FEE: Ratio = Ratio::new(dec!(0.005));
 pub const DEFAULT_CKSTABLE_REPAY_FEE: Ratio = Ratio::new(dec!(0.0005)); // 0.05%
 pub const DEFAULT_MIN_ICUSD_AMOUNT: ICUSD = ICUSD::new(10_000_000); // 0.1 icUSD
@@ -5530,66 +5675,21 @@ impl State {
         results
     }
 
-    /// Pure preview of the exact selected-run water-fill. It uses the same
-    /// band ordering, integer splits, conversion, and physical-collateral clamp
-    /// as execution, while leaving vault state untouched.
-    pub fn simulate_redemption_for_vault_ids(
+    /// Prepare a reusable, query-local plan for previews of the exact selected-run water-fill.
+    /// The plan snapshots the same eligible vaults, CR ordering, price and decimals that a
+    /// single call to `simulate_redemption_for_vault_ids` would use.
+    pub(crate) fn prepare_redemption_simulation_for_vault_ids(
         &self,
-        icusd_amount: ICUSD,
         collateral_price: UsdIcp,
         collateral_type: &CollateralType,
         allowed_ids: &[VaultId],
-    ) -> Vec<crate::event::VaultRedemption> {
-        #[derive(Clone)]
-        struct SimVault {
-            cr: Decimal,
-            id: VaultId,
-            debt: u64,
-            collateral: u64,
-        }
-
-        fn distribute(
-            vaults: &mut [SimVault],
-            indices: &[usize],
-            total_debt: u128,
-            redemption_e8s: u128,
-            price: Decimal,
-            decimals: u8,
-            results: &mut Vec<crate::event::VaultRedemption>,
-        ) {
-            if total_debt == 0 || redemption_e8s == 0 {
-                return;
-            }
-            let mut distributed = 0u128;
-            for (position, index) in indices.iter().enumerate() {
-                let vault_debt = vaults[*index].debt as u128;
-                let share = if position + 1 == indices.len() {
-                    redemption_e8s - distributed
-                } else {
-                    redemption_e8s * vault_debt / total_debt
-                };
-                if share == 0 {
-                    continue;
-                }
-                let actual_share = share.min(vault_debt);
-                let debt_to_deduct = ICUSD::new(actual_share as u64);
-                let collateral_to_deduct =
-                    crate::numeric::icusd_to_collateral_amount(debt_to_deduct, price, decimals);
-                let vault = &mut vaults[*index];
-                let actual_collateral = collateral_to_deduct.min(vault.collateral);
-                vault.debt = vault.debt.saturating_sub(actual_share as u64);
-                vault.collateral = vault.collateral.saturating_sub(actual_collateral);
-                distributed += actual_share;
-                results.push(crate::event::VaultRedemption {
-                    vault_id: vault.id,
-                    icusd_redeemed_e8s: actual_share as u64,
-                    collateral_seized: actual_collateral,
-                });
-            }
-        }
-
-        if icusd_amount == 0 || allowed_ids.is_empty() {
-            return Vec::new();
+    ) -> RedemptionSimulationPlan {
+        if allowed_ids.is_empty() {
+            return RedemptionSimulationPlan {
+                vaults: Vec::new(),
+                price: collateral_price.0,
+                decimals: 0,
+            };
         }
         let resolved_ct = if collateral_type == &Principal::anonymous() {
             self.icp_ledger_principal
@@ -5597,10 +5697,18 @@ impl State {
             *collateral_type
         };
         let Some(config) = self.get_collateral_config(&resolved_ct) else {
-            return Vec::new();
+            return RedemptionSimulationPlan {
+                vaults: Vec::new(),
+                price: collateral_price.0,
+                decimals: 0,
+            };
         };
         if !config.status.allows_redemption() || config.is_native_xrp() {
-            return Vec::new();
+            return RedemptionSimulationPlan {
+                vaults: Vec::new(),
+                price: collateral_price.0,
+                decimals: config.decimals,
+            };
         }
         let price = config
             .last_price
@@ -5629,7 +5737,7 @@ impl State {
                 continue;
             }
             let cr = crate::compute_collateral_ratio(vault, dummy_rate, self).0;
-            vaults.push(SimVault {
+            vaults.push(RedemptionSimVault {
                 cr,
                 id,
                 debt: vault.borrowed_icusd_amount.to_u64(),
@@ -5637,82 +5745,32 @@ impl State {
             });
         }
         vaults.sort_by(|a, b| a.cr.cmp(&b.cr).then_with(|| a.id.cmp(&b.id)));
-        if vaults.is_empty() {
+        RedemptionSimulationPlan {
+            vaults,
+            price,
+            decimals,
+        }
+    }
+
+    /// Pure preview of the exact selected-run water-fill. It uses the same
+    /// band ordering, integer splits, conversion, and physical-collateral clamp
+    /// as execution, while leaving vault state untouched.
+    pub fn simulate_redemption_for_vault_ids(
+        &self,
+        icusd_amount: ICUSD,
+        collateral_price: UsdIcp,
+        collateral_type: &CollateralType,
+        allowed_ids: &[VaultId],
+    ) -> Vec<crate::event::VaultRedemption> {
+        if icusd_amount == 0 {
             return Vec::new();
         }
-
-        let mut results = Vec::new();
-        let mut remaining = icusd_amount.to_u64() as u128;
-        let mut band_start = 0usize;
-        while remaining > 0 && band_start < vaults.len() {
-            let band_cr = vaults[band_start].cr;
-            let mut band_end = band_start + 1;
-            while band_end < vaults.len() && vaults[band_end].cr == band_cr {
-                band_end += 1;
-            }
-            let indices: Vec<usize> = (band_start..band_end).collect();
-            let total_debt: u128 = indices.iter().map(|i| vaults[*i].debt as u128).sum();
-            if total_debt == 0 {
-                band_start = band_end;
-                continue;
-            }
-            if band_end >= vaults.len() {
-                distribute(
-                    &mut vaults,
-                    &indices,
-                    total_debt,
-                    remaining,
-                    price,
-                    decimals,
-                    &mut results,
-                );
-                break;
-            }
-            let next_cr = vaults[band_end].cr;
-            let cr_denom = next_cr - Decimal::ONE;
-            if cr_denom <= Decimal::ZERO {
-                distribute(
-                    &mut vaults,
-                    &indices,
-                    total_debt,
-                    remaining,
-                    price,
-                    decimals,
-                    &mut results,
-                );
-                break;
-            }
-            let needed = (Decimal::from(total_debt as u64) * (next_cr - band_cr) / cr_denom)
-                .to_u64()
-                .unwrap_or(u64::MAX) as u128;
-            if remaining >= needed && needed > 0 {
-                distribute(
-                    &mut vaults,
-                    &indices,
-                    total_debt,
-                    needed,
-                    price,
-                    decimals,
-                    &mut results,
-                );
-                remaining -= needed;
-                for vault in &mut vaults[band_start..band_end] {
-                    vault.cr = next_cr;
-                }
-            } else {
-                distribute(
-                    &mut vaults,
-                    &indices,
-                    total_debt,
-                    remaining,
-                    price,
-                    decimals,
-                    &mut results,
-                );
-                break;
-            }
-        }
-        results
+        self.prepare_redemption_simulation_for_vault_ids(
+            collateral_price,
+            collateral_type,
+            allowed_ids,
+        )
+        .simulate(icusd_amount)
     }
 
     /// Distribute a redemption amount proportionally across a band of vaults by debt size.
@@ -6099,7 +6157,6 @@ pub fn compute_redemption_fee(
     if total_borrowed_icusd_amount == 0 {
         return Ratio::from(Decimal::ZERO);
     }
-    const REEDEMED_PROPORTION: Ratio = Ratio::new(dec!(0.5)); // 0.5
     const DECAY_FACTOR: Ratio = Ratio::new(dec!(0.94));
 
     log!(
@@ -6108,6 +6165,29 @@ pub fn compute_redemption_fee(
     );
 
     let rate = current_base_rate * DECAY_FACTOR.pow(elapsed_hours);
+    compute_redemption_fee_with_rate(
+        redeemed_amount,
+        total_borrowed_icusd_amount,
+        rate,
+        fee_floor,
+        fee_ceiling,
+    )
+}
+
+/// Compute the redemption fee from an already-decayed base rate. Callers that
+/// price multiple candidate amounts in one query can calculate the decay once
+/// and preserve the same amount-dependent formula and rounding for every probe.
+pub(crate) fn compute_redemption_fee_with_rate(
+    redeemed_amount: ICUSD,
+    total_borrowed_icusd_amount: ICUSD,
+    rate: Ratio,
+    fee_floor: Ratio,
+    fee_ceiling: Ratio,
+) -> Ratio {
+    if total_borrowed_icusd_amount == 0 {
+        return Ratio::from(Decimal::ZERO);
+    }
+    const REEDEMED_PROPORTION: Ratio = Ratio::new(dec!(0.5)); // 0.5
     let total_rate = rate + redeemed_amount / total_borrowed_icusd_amount * REEDEMED_PROPORTION;
     debug_assert!(total_rate < Ratio::from(dec!(1.0)));
     total_rate.max(fee_floor).min(fee_ceiling)
@@ -6140,6 +6220,41 @@ pub fn replace_state(state: State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_redemption_fee_rate_matches_full_decay_formula() {
+        let base_rate = Ratio::new(dec!(0.035));
+        let floor = Ratio::new(dec!(0.003));
+        let ceiling = Ratio::new(dec!(0.05));
+        let total_debt = ICUSD::new(10_000_000_000);
+        for elapsed_hours in [0, 1, 24, 168, 2_000] {
+            for amount in [
+                ICUSD::new(1),
+                ICUSD::new(100_000_000),
+                ICUSD::new(1_000_000_000),
+            ] {
+                let decayed_rate = base_rate * Ratio::new(dec!(0.94)).pow(elapsed_hours);
+                assert_eq!(
+                    compute_redemption_fee(
+                        elapsed_hours,
+                        amount,
+                        total_debt,
+                        base_rate,
+                        floor,
+                        ceiling
+                    ),
+                    compute_redemption_fee_with_rate(
+                        amount,
+                        total_debt,
+                        decayed_rate,
+                        floor,
+                        ceiling
+                    ),
+                    "elapsed_hours={elapsed_hours}, amount={amount:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn band_rational_matches_the_f64_constant() {
@@ -8850,12 +8965,13 @@ mod tests {
 
         // At $1 per token and 18 decimals, 20 icUSD effective input requests
         // 20 native tokens, split evenly across the two equally healthy vaults.
-        let preview = s.simulate_redemption_for_vault_ids(
-            ICUSD::new(2_000_000_000), // 20 icUSD effective input
+        let plan = s.prepare_redemption_simulation_for_vault_ids(
             UsdIcp::from(rust_decimal_macros::dec!(1.0)),
             &icp,
             &[906, 907],
         );
+        let preview = plan.simulate(ICUSD::new(2_000_000_000)); // 20 icUSD effective input
+        assert_eq!(preview, plan.simulate(ICUSD::new(2_000_000_000)));
 
         assert_eq!(preview.len(), 2);
         assert!(preview
@@ -8940,7 +9056,9 @@ mod tests {
         let before = s.vault_id_to_vaults.get(&916).unwrap().clone();
         let amount = ICUSD::new(200_000_000);
         let rate = UsdIcp::from(rust_decimal_macros::dec!(1.0));
-        let preview = s.simulate_redemption_for_vault_ids(amount, rate, &icp, &[916]);
+        let plan = s.prepare_redemption_simulation_for_vault_ids(rate, &icp, &[916]);
+        let preview = plan.simulate(amount);
+        assert_eq!(preview, plan.simulate(amount));
         assert_eq!(preview.len(), 1);
         assert_eq!(preview[0].collateral_seized, 100_000_000);
         assert_eq!(
@@ -8978,7 +9096,9 @@ mod tests {
                 let amount = ICUSD::new(30_000_000); // $0.30 effective input
                 let rate = UsdIcp::from(rust_decimal::Decimal::from_f64_retain(price).unwrap());
 
-                let preview = s.simulate_redemption_for_vault_ids(amount, rate, &icp, &[vault_id]);
+                let plan = s.prepare_redemption_simulation_for_vault_ids(rate, &icp, &[vault_id]);
+                let preview = plan.simulate(amount);
+                assert_eq!(preview, plan.simulate(amount));
                 assert_eq!(preview.len(), 1, "decimals={decimals}, price={price}");
                 let expected_collateral = crate::numeric::icusd_to_collateral_amount(
                     amount,
@@ -9020,7 +9140,9 @@ mod tests {
         let amount = ICUSD::new(100_000_000);
         let price = UsdIcp::from(rust_decimal_macros::dec!(1.0));
 
-        let preview = s.simulate_redemption_for_vault_ids(amount, price, &icp, &[917]);
+        let plan = s.prepare_redemption_simulation_for_vault_ids(price, &icp, &[917]);
+        let preview = plan.simulate(amount);
+        assert_eq!(preview, plan.simulate(amount));
         assert_eq!(preview.len(), 1);
         assert_eq!(preview[0].icusd_redeemed_e8s, 100_000_000);
         assert_eq!(preview[0].collateral_seized, 50_000_000);
