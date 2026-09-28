@@ -120,16 +120,16 @@ Authorization: Rob requested implementation, subagents, deployment, and activati
 | ID | State | Owner | Task | Depends on | Evidence / blocker |
 | --- | --- | --- | --- | --- | --- |
 | CS-60 | Done | backend worker | Durable ICP reserve refill, cycles-first funding, runtime recovery, public funding status | Approved policy at 51f4a20e | Frozen production source1ff42252:608 lib and full36 integration tests pass, including16 new real-timer flows; exact production artifact verified |
-| CS-61 | Done | frontend worker | Obvious deposit destinations, balances, funding status, readable target rules | CS-60 interface | 10 focused tests, production build and full asset recipe pass; built desktop/mobile and account-copy proof pass; live browser proof pending |
+| CS-61 | Done | frontend worker | Obvious deposit destinations, balances, funding status, readable target rules | CS-60 interface | Focused tests and full production asset recipe pass; built desktop/mobile proof and both live receiving-address copy buttons verified; served page decodes upgraded backend |
 | CS-62 | Done | operations investigator | Verify current live policy, signers, mappings, deploy recipe and activation path | None | /private/tmp/sentinel-live-before.txt; /private/tmp/sentinel-release-prep.txt; official PocketIC server7.0.0 matches pinned crate6.0.0; managed local server used |
 | CS-63 | Done | independent reviewers | Security, stable-state, interface and product review | CS-60, CS-61 | Full36 integration suite and608 backend tests passed; two fresh isolated final reviewers returned PASS; readable reports committed with release evidence |
-| CS-64 | In progress | coordinator | Merge, deploy, sync assets, activate and verify live | CS-63 | Source/review/artifact gates PASS; coordinator executing exact-head merge, Sentinel upgrade, assets sync and authoritative/browser readback |
+| CS-64 | Done | coordinator | Merge, deploy, sync assets, activate and verify live | CS-63 | PR401 merged4f667585; Sentinel upgrade53647exit0/hashdf085a63 verified;645assets sync8071exit0; exact controllers/governance/rules preserved; live cards/copy buttons verified; wallet empty awaiting user deposit |
 
 Model selection: Sonnet CLI reports loggedIn=false. Native Terra is selected for CS-60 due to durable token conversion, stable-state, async retries and ICP-only runtime recovery complexity. Native Luna is selected for bounded frontend and operations work. Coordinator owns generated interfaces and release.
 
 Acceptance: deposited cycles are used first; ICP supports an empty cycles reserve and runtime recovery; configured target refill amounts stay exact; caps, cooldown, protected reserves and one unresolved operation remain enforced; unknown or duplicate payments never cause a second debit; state survives upgrades; deposit destinations are derived from the configured Sentinel principal and default account; the live page distinguishes runtime fuel from funding-wallet money.
 
-Reserve conversion approval artifact: `docs/coordination/sentinel-auto-funding-reserve-policy-2026-09-28.md`, pushed in commit `51f4a20e`, SHA-256 `a984e3c3f2895cc2f67b84ea18306db31febf86fabff61ba4920801fc4a04d0c`. User explicitly approved this policy in the following message: "approved". Implementation resumed; no implementation deployed yet.
+Reserve conversion approval artifact: `docs/coordination/sentinel-auto-funding-reserve-policy-2026-09-28.md`, pushed in commit `51f4a20e`, SHA-256 `a984e3c3f2895cc2f67b84ea18306db31febf86fabff61ba4920801fc4a04d0c`. User explicitly approved this policy in the following message: "approved". Implementation merged and deployed with authoritative and browser proof; no external-wallet deposit performed.
 
 Verified default ICP address correction: SDK and independent SHA-224/CRC-32 derivations agree on `a907060d486046ae0a21bcca2a4a2cbd8c48a9c4a7ab31ffbd06a4b5a20a1e2e`; earlier `1253387a...` draft was incorrect and is not a deposit destination.
 
