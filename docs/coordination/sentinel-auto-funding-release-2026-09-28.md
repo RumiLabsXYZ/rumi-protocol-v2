@@ -1,7 +1,7 @@
 # Cycle Sentinel automatic funding release evidence
 
 Date: 2026-09-28
-Status: Source, artifact, tests and two isolated final reviews PASS; bounded publication pending.
+Status: LIVE. Source, artifact, tests and two isolated final reviews PASS; mainnet upgrade, asset publication and live readback completed.
 PR: https://github.com/RumiLabsXYZ/rumi-protocol-v2/pull/401
 Base: ac59a6519730744dd30c33958b959577dec12123
 Production source: 1ff4225265ea42f8bcabfa819ac1fe5228879658
@@ -40,3 +40,15 @@ Read-only snapshot: /private/tmp/sentinel-live-final-preflight/snapshot.json. Fr
 All16 registered targets already have enabled and auto_topup true; threshold3T, refill2T, cap6T per24h, cooldown3,600seconds. Global40T per24h, sample3,600seconds, stale7,200seconds, protected Cycles Ledger floor10T, ICP floor0, runtime self threshold/refill1T and self cap10T. Timelocks remain unchanged. Stopped and uninstalled targets remain ineligible. All17 proposals were executed, no funding operations were unresolved, and both source-ledger balances were0 at preflight and at the fresh direct ledger queries before publication (/private/tmp/sentinel-immediate-before-cycles-ledger.json and /private/tmp/sentinel-immediate-before-icp-ledger.json).
 
 After final green verification, merge the exact reviewed head of PR401, then upgrade only rumi_cycle_sentinel in mainnet-live using robvector and the verified gzip. Use zero-argument post_upgrade, never reinstall or stale InitArgs. Publish vault_frontend assets only using icp sync and rumi_identity, preserving its Wasm. Verify deployed hash, new public fields, policy/controller preservation and actual served browser UI. Empty source accounts mean active automation awaits a user deposit; local simulations are not mainnet mint/delivery proof.
+
+## Completed mainnet publication
+
+PR401 merged at4f6675854233a6c4344d0291558d3fcddb9421d5. Merged production source matches the verified1ff42252 artifact byte for byte. The exact gzip upgrade used robvector, mainnet-live, mode upgrade and empty Candid bytes4449444c0000, without reinstalling. Install session53647 exited0; /private/tmp/sentinel-mainnet-install-2026-09-28.log records success. Authoritative status is Running with deployed module SHA256 df085a633822aa84a611f9cdc9065c5422230c7fff920eaefe06dadea07f04fe, matching the installed gzip. All four Sentinel controllers were preserved.
+
+Frontend assets-only sync session8071 exited0 and published645assets; /private/tmp/sentinel-mainnet-assets-sync-2026-09-28.log. The frontend Wasm remains04e565b3425fe7510ee16b02adcfe3f01abc9a2725c82a21cb08969241debd62 and all five controllers are unchanged.
+
+Post-upgrade queries decode the new funding-wallet fields successfully. All16 targets remain enabled with auto-top-up on and the existing3T trigger/2T refill/6T daily cap/3,600second cooldown. All17 governance proposal records are preserved byte for byte, the current signer is authorized, and no unresolved funding operation is returned. Direct post-upgrade Cycles Ledger and ICP Ledger reads confirm0 in the shared receiving accounts. No external-wallet deposit, mainnet mint or canister delivery is claimed. Activation is complete and awaits a user deposit; checks follow the existing hourly policy.
+
+The served https://app.rumiprotocol.com/explorer/telemetry page was verified against the upgraded backend. Deposit cycles and Deposit ICP cards display the correct receiving accounts,10T protected reserve, honest cached balances/freshness, cycles-first behavior and all16 readable automation rules. Both unique receiving-address copy buttons were independently tested and the previous clipboard restored. Screenshot: /private/tmp/sentinel-pr401-live-deposit-panel.png. The initially stale ICP cache correctly displays unavailable spendability and Unknown conversion status; public refresh does not run maintenance, while direct ledger reads confirm the empty account.
+
+Machine-readable local proof: /private/tmp/sentinel-mainnet-release-proof.json. Root verified merge, install, authoritative module identity, preserved state, assets-only publication and served-browser behavior as separate evidence states. The temporary test server was stopped cleanly after all47 owned instances were deleted; shared caches and proof logs remain available.
