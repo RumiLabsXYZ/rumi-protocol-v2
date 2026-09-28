@@ -8,7 +8,7 @@
 //! # What the bug was
 //!
 //! `redeem_collateral` and `redeem_reserves` (vault-spillover branch)
-//! both delegate to `event::record_redemption_on_vaults`, which calls
+//! both delegate to `event::record_redemption_on_vault_run`, which calls
 //! `state.redeem_on_vaults` to walk the cr-index ascending and deduct
 //! collateral per vault. When a vault's collateral runs short of the
 //! redeemer's claim at oracle price, the
@@ -32,7 +32,7 @@
 //!     breakdown with actual (post-saturation) `collateral_seized`,
 //!     and `event::compute_redemption_shortfall` derives the icUSD
 //!     shortfall from that breakdown. Both are state-side helpers
-//!     used inside `record_redemption_on_vaults` on a live canister.
+//!     used inside `record_redemption_on_vault_run` on a live canister.
 //!   * State mutation: `state.accrue_deficit_shortfall` increments
 //!     `protocol_deficit_icusd`. The composed
 //!     `accrue_redemption_shortfall_at` helper additionally records
@@ -53,7 +53,7 @@
 //!     (no false-positive accrual).
 //!   * Scenario C (TDD red-green) — `DeficitSource::Redemption` is a
 //!     distinct variant carrying the redeemer principal, AND
-//!     `record_redemption_on_vaults` constructs that variant rather
+//!     `record_redemption_on_vault_run` constructs that variant rather
 //!     than reusing `Liquidation`. Structural fence reads
 //!     `event.rs` directly to pin the wiring.
 //!   * `red_002_deficit_accrued_event_with_liquidation_source_round_trips`
@@ -238,7 +238,7 @@ fn red_002_scenario_c_event_carries_redemption_source_variant() {
     // Two-part fence:
     //   1. `DeficitSource::Redemption` is a distinct variant carrying
     //      the redeemer principal — exercised at the type level here.
-    //   2. `record_redemption_on_vaults` (event.rs) constructs that
+    //   2. `record_redemption_on_vault_run` (event.rs) constructs that
     //      variant on the deficit-accrual leg, NOT
     //      `DeficitSource::Liquidation`. Structural fence reads the
     //      event.rs source directly and asserts the wiring.
@@ -270,7 +270,7 @@ fn red_002_scenario_c_event_carries_redemption_source_variant() {
     let event_rs = std::fs::read_to_string(&event_rs_path)
         .unwrap_or_else(|e| panic!("read {}: {}", event_rs_path.display(), e));
 
-    // The fix wires `record_redemption_on_vaults` → the new
+    // The fix wires `record_redemption_on_vault_run` → the new
     // `accrue_redemption_shortfall_at` helper, which in turn calls
     // `record_deficit_accrued` with `DeficitSource::Redemption`.
     // Pin both call sites textually so refactoring this path can't
@@ -291,12 +291,12 @@ fn red_002_scenario_c_event_carries_redemption_source_variant() {
     );
 
     let entry_decl_idx = event_rs
-        .find("pub fn record_redemption_on_vaults(")
-        .expect("event.rs must define `record_redemption_on_vaults`");
+        .find("pub fn record_redemption_on_vault_run(")
+        .expect("event.rs must define `record_redemption_on_vault_run`");
     let entry_to_helper_slice = &event_rs[entry_decl_idx..];
     assert!(
         entry_to_helper_slice.contains("accrue_redemption_shortfall_at"),
-        "record_redemption_on_vaults must invoke \
+        "record_redemption_on_vault_run must invoke \
          accrue_redemption_shortfall_at so every redemption that walks the \
          vault cr-index has its shortfall (if any) routed into the deficit \
          account (audit RED-002)."

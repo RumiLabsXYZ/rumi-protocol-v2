@@ -15,9 +15,26 @@ use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
-/// Maximum number of retries for a pending transfer before it is abandoned.
-/// At 5-second intervals, 60 retries = 5 minutes of attempts.
-const MAX_PENDING_RETRIES: u8 = 60;
+/// Maximum number of automatic retries before a failed obligation is held for
+/// manual recovery. At 5-second intervals, 60 retries = 5 minutes of attempts.
+pub const MAX_PENDING_RETRIES: u8 = 60;
+
+fn pending_refund_is_automatically_retryable(retry_count: u8) -> bool {
+    retry_count < MAX_PENDING_RETRIES
+}
+
+fn redemption_transfer_meets_minimum(
+    gross_raw: u64,
+    fee_raw: u64,
+    minimum_net_raw: Option<u64>,
+) -> bool {
+    minimum_net_raw
+        .map(|minimum| {
+            let net = gross_raw.saturating_sub(fee_raw);
+            net > 0 && net >= minimum
+        })
+        .unwrap_or(true)
+}
 
 pub mod chains;
 pub mod dashboard;
@@ -292,6 +309,90 @@ pub struct SuccessWithFee {
     /// Native-XRP manual liquidation payout claim id for the liquidator reward.
     /// `None` for non-XRP collateral and non-liquidation SuccessWithFee results.
     pub xrp_claim_id: Option<u64>,
+}
+
+/// Snapshot of one consecutive run of same-collateral vaults in global
+/// redemption-health order. Capacities are for this run only; a redemption
+/// never crosses into the next row automatically.
+#[derive(CandidType, Deserialize, Debug, Clone)]
+pub struct RedemptionQueueEntry {
+    pub run_index: u32,
+    pub collateral_type: Principal,
+    pub symbol: String,
+    pub decimals: u8,
+    pub price_usd: f64,
+    pub price_timestamp_ns: u64,
+    pub price_fresh: bool,
+    pub min_cr: f64,
+    pub liquidation_cr: f64,
+    pub weakest_vault_cr: f64,
+    /// Unclamped shade headroom. Lower means closer to the displayed red zone.
+    pub health_headroom: f64,
+    pub vault_count: u64,
+    /// Total physical collateral in this eligible run, in native token units.
+    pub eligible_collateral_raw: u128,
+    pub eligible_debt_e8s: u64,
+    pub max_input_icusd_e8s: u64,
+    /// Maximum backed payout after the collateral ledger fee, in native units.
+    pub max_net_collateral_raw: u64,
+}
+
+#[derive(CandidType, Deserialize, Debug, Clone)]
+pub struct RedemptionQueue {
+    pub observed_at_ns: u64,
+    /// False if any eligible collateral that could affect the global order is
+    /// missing a valid in-window price or cannot be represented in the runs.
+    pub ranking_fresh: bool,
+    pub rmr: f64,
+    pub price_freshness_window_ns: u64,
+    pub entries: Vec<RedemptionQueueEntry>,
+}
+
+#[derive(CandidType, Deserialize, Debug, Clone)]
+pub struct RedemptionQuote {
+    pub quoted_at_ns: u64,
+    /// Lifetime of the displayed quote snapshot; distinct from cached price age.
+    pub quote_validity_window_ns: u64,
+    pub ranking_fresh: bool,
+    pub amount_e8s: u64,
+    pub run_index: u32,
+    pub collateral_type: Principal,
+    pub symbol: String,
+    pub decimals: u8,
+    pub price_usd: f64,
+    pub price_timestamp_ns: u64,
+    pub price_fresh: bool,
+    pub fee_e8s: u64,
+    pub rmr: f64,
+    pub effective_icusd_e8s: u64,
+    pub gross_collateral_raw: u64,
+    pub ledger_fee_raw: u64,
+    pub net_collateral_raw: u64,
+    pub max_input_icusd_e8s: u64,
+}
+
+#[derive(CandidType, Deserialize, Debug, Clone)]
+pub struct RedeemQuotedRequest {
+    pub amount_e8s: u64,
+    pub expected_collateral_type: Principal,
+    pub min_net_collateral_raw: u64,
+}
+
+#[derive(CandidType, Deserialize, Debug, Clone)]
+pub struct RedemptionResult {
+    pub icusd_block_index: u64,
+    pub fee_paid_e8s: u64,
+    pub collateral_type: Principal,
+    pub symbol: String,
+    pub decimals: u8,
+    pub net_collateral_raw: u64,
+    /// Queued means the durable payout is pending ledger delivery.
+    pub payout_status: RedemptionPayoutStatus,
+}
+
+#[derive(CandidType, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum RedemptionPayoutStatus {
+    Queued,
 }
 
 /// Result from stability pool liquidation (both standard and debt-already-burned paths).
@@ -726,6 +827,43 @@ pub enum ProtocolError {
     /// rejection). Wraps a developer-facing message. Appended AFTER `ChainAdmin`
     /// so historical on-chain events keep decoding (append-only Candid surface).
     EvmAuth(String),
+}
+
+/// Structured errors for the quote-based redemption API. Keeping these
+/// variants separate from `ProtocolError` preserves the established error
+/// shape used by the existing public methods.
+#[derive(CandidType, Debug, Clone, Deserialize)]
+pub enum RedemptionError {
+    /// A truthful vault-collateral redemption quote could not be produced.
+    RedemptionQuoteUnavailable(String),
+    /// Requested input exceeds the first globally ordered collateral run.
+    RedemptionCapacityExceeded {
+        max_input_icusd_e8s: u64,
+    },
+    /// The globally first collateral changed after the quote was observed.
+    RedemptionPriorityChanged {
+        expected: Principal,
+        actual: Principal,
+    },
+    /// Actual backed native-token payout cannot satisfy the caller's bound.
+    RedemptionMinimumNotMet {
+        minimum_net_raw: u64,
+        actual_net_raw: u64,
+    },
+    /// An existing protocol error such as authorization, transfer, or amount validation.
+    Protocol(ProtocolError),
+}
+
+impl From<ProtocolError> for RedemptionError {
+    fn from(error: ProtocolError) -> Self {
+        Self::Protocol(error)
+    }
+}
+
+impl From<GuardError> for RedemptionError {
+    fn from(error: GuardError) -> Self {
+        Self::Protocol(ProtocolError::from(error))
+    }
 }
 
 impl From<GuardError> for ProtocolError {
@@ -1575,6 +1713,21 @@ pub async fn process_pending_transfer() {
                 },
             );
 
+        let gross_raw = pending_transfer.margin.to_u64();
+        let fee_raw = transfer_fee.to_u64();
+        let net_amount = ICP::from(gross_raw.saturating_sub(fee_raw));
+        if !redemption_transfer_meets_minimum(
+            gross_raw,
+            fee_raw,
+            pending_transfer.min_net_collateral_raw,
+        ) {
+            let minimum_net = pending_transfer.min_net_collateral_raw.unwrap_or(0);
+            log!(INFO,
+                "[transfering_redemptions] Holding quoted redemption {}: current net {} is below bound {}; collateral {} remains pending",
+                icusd_block_index, net_amount, minimum_net, pending_transfer.collateral_type
+            );
+            continue;
+        }
         if pending_transfer.margin <= transfer_fee {
             log!(
                 INFO,
@@ -1587,7 +1740,7 @@ pub async fn process_pending_transfer() {
             continue;
         }
         match crate::management::transfer_collateral_with_nonce(
-            (pending_transfer.margin - transfer_fee).to_u64(),
+            net_amount.to_u64(),
             pending_transfer.owner,
             ledger,
             pending_transfer.op_nonce,
@@ -1652,7 +1805,9 @@ pub async fn process_pending_transfer() {
                             0
                         }
                     });
-                    if retries >= MAX_PENDING_RETRIES {
+                    if retries >= MAX_PENDING_RETRIES
+                        && pending_transfer.min_net_collateral_raw.is_none()
+                    {
                         log!(INFO,
                             "[transfering_redemptions] CRITICAL: abandoning redemption transfer {} \
                              after {} retries. Owner: {}, amount: {}. Use recover_pending_transfer to retry manually.",
@@ -1674,6 +1829,7 @@ pub async fn process_pending_transfer() {
     let pending_refunds = read_state(|s| {
         s.pending_refunds
             .iter()
+            .filter(|(_, refund)| pending_refund_is_automatically_retryable(refund.retry_count))
             .map(|(k, v)| (*k, *v))
             .collect::<Vec<(u64, crate::state::PendingRefund)>>()
     });
@@ -1721,16 +1877,13 @@ pub async fn process_pending_transfer() {
                     if retries >= MAX_PENDING_RETRIES {
                         log!(
                             INFO,
-                            "[refunding] CRITICAL: abandoning icUSD refund for {} (burn block {}) \
-                             after {} retries. Amount: {}. Manual reconciliation required.",
+                            "[refunding] CRITICAL: holding durable icUSD refund claim for {} (burn block {}) \
+                             after {} automatic retries. Amount: {}. Owner can inspect it; manual recovery is required.",
                             refund.user,
                             icusd_block_index,
                             retries,
                             refund.amount_e8s
                         );
-                        mutate_state(|s| {
-                            s.pending_refunds.remove(&icusd_block_index);
-                        });
                     }
                 }
             }
@@ -1818,8 +1971,12 @@ pub async fn process_pending_transfer() {
     if read_state(|s| {
         !s.pending_margin_transfers.is_empty()
             || !s.pending_excess_transfers.is_empty()
-            || !s.pending_redemption_transfer.is_empty()
-            || !s.pending_refunds.is_empty()
+            || s.pending_redemption_transfer
+                .values()
+                .any(|transfer| transfer.retry_count < MAX_PENDING_RETRIES)
+            || s.pending_refunds
+                .values()
+                .any(|refund| pending_refund_is_automatically_retryable(refund.retry_count))
             || !s.pending_3usd_refunds.is_empty()
     }) {
         // Schedule another check in 5 seconds

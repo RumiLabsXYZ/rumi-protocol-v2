@@ -67,6 +67,10 @@ export class ProtocolService {
   static redeemIcp = ApiClient.redeemIcp;
   static redeemCollateral = ApiClient.redeemCollateral;
   static redeemReserves = ApiClient.redeemReserves;
+  static getRedemptionQueue = ApiClient.getRedemptionQueue;
+  static getRedemptionQuote = ApiClient.getRedemptionQuote;
+  static getRedemptionPreflight = ApiClient.getRedemptionPreflight;
+  static redeemQuoted = ApiClient.redeemQuoted;
   static getReserveBalances = ApiClient.getReserveBalances;
   static withdrawCollateral = ApiClient.withdrawCollateral;
   static withdrawPartialCollateral = ApiClient.withdrawPartialCollateral;
@@ -128,6 +132,10 @@ export const protocolService = {
   redeemIcp: ProtocolService.redeemIcp,
   redeemCollateral: ProtocolService.redeemCollateral,
   redeemReserves: ProtocolService.redeemReserves,
+  getRedemptionQueue: ProtocolService.getRedemptionQueue,
+  getRedemptionQuote: ProtocolService.getRedemptionQuote,
+  getRedemptionPreflight: ProtocolService.getRedemptionPreflight,
+  redeemQuoted: ProtocolService.redeemQuoted,
   getReserveBalances: ProtocolService.getReserveBalances,
   getLiquidityStatus: ProtocolService.getLiquidityStatus,
   provideLiquidity: ProtocolService.provideLiquidity,
@@ -165,6 +173,4 @@ export const protocolService = {
   isAlreadyProcessingError: ProtocolService.isAlreadyProcessingError,
   isStaleProcessingState: ProtocolService.isStaleProcessingState,
 };
-
-
 

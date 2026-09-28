@@ -1,6 +1,6 @@
 use crate::event::{
     record_add_margin_to_vault, record_borrow_from_vault, record_open_vault,
-    record_redemption_on_vaults, record_repayed_to_vault,
+    record_repayed_to_vault,
 };
 use crate::guard::{GuardPrincipal, VaultLiquidationGuard};
 use crate::logs::INFO;
@@ -15,8 +15,11 @@ use crate::GuardError;
 use crate::PendingMarginTransfer;
 use crate::DEBUG;
 use crate::{
-    mutate_state, read_state, ProtocolError, StabilityPoolLiquidationResult, StableTokenType,
-    SuccessWithFee, VaultArgWithToken, DUST_THRESHOLD,
+    mutate_state, read_state, ProtocolError, RedeemQuotedRequest, RedemptionError,
+    RedemptionPayoutStatus, RedemptionQueue, RedemptionQueueEntry, RedemptionQuote,
+    RedemptionResult,
+    StabilityPoolLiquidationResult, StableTokenType, SuccessWithFee, VaultArgWithToken,
+    DUST_THRESHOLD,
 };
 use candid::{CandidType, Deserialize, Principal};
 use ic_canister_log::log;
@@ -27,6 +30,619 @@ use rust_decimal_macros::dec;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+
+/// One ten-minute maximum-age contract shared by quote display, ranking refresh,
+/// and pre/post-pull verification. This matches XRC's existing hard ceiling.
+const REDEMPTION_PRICE_MAX_AGE_NS: u64 = 10 * 60 * 1_000_000_000;
+const MAX_REDEMPTION_PRICE_CANDIDATES: usize = 64;
+
+fn redemption_candidate_types(state: &crate::state::State) -> Vec<Principal> {
+    let mut types = std::collections::BTreeSet::new();
+    for vault in state.vault_id_to_vaults.values() {
+        if vault.borrowed_icusd_amount == 0
+            || vault.bot_processing
+            || crate::guard::is_vault_liquidating(vault.vault_id)
+        {
+            continue;
+        }
+        let collateral_type = if vault.collateral_type == Principal::anonymous() {
+            state.icp_collateral_type()
+        } else {
+            vault.collateral_type
+        };
+        let Some(config) = state.get_collateral_config(&collateral_type) else {
+            continue;
+        };
+        if config.status.allows_redemption() && !config.is_native_xrp() {
+            types.insert(collateral_type);
+        }
+    }
+    types.into_iter().collect()
+}
+
+fn redemption_candidate_prices_are_fresh(
+    state: &crate::state::State,
+    candidates: &[Principal],
+    now: u64,
+) -> bool {
+    candidates.iter().all(|collateral_type| {
+        state
+            .get_collateral_config(collateral_type)
+            .and_then(|config| Some((config.last_price?, config.last_price_timestamp?)))
+            .map(|(price, timestamp)| {
+                price.is_finite()
+                    && price > 0.0
+                    && redemption_price_timestamp_is_fresh(timestamp, now)
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn redemption_price_timestamp_is_fresh(timestamp: u64, now: u64) -> bool {
+    timestamp <= now && now - timestamp <= REDEMPTION_PRICE_MAX_AGE_NS
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RedemptionRunSnapshot {
+    collateral_type: Principal,
+    vault_ids: Vec<u64>,
+    price_bits: u64,
+    decimals: u8,
+}
+
+impl RedemptionRunSnapshot {
+    fn capture(run: &crate::state::RedemptionRun) -> Self {
+        Self {
+            collateral_type: run.collateral_type,
+            vault_ids: run.vault_ids.clone(),
+            price_bits: run.price_usd.to_bits(),
+            decimals: run.decimals,
+        }
+    }
+
+    fn matches(&self, run: &crate::state::RedemptionRun) -> bool {
+        self.collateral_type == run.collateral_type
+            && self.vault_ids == run.vault_ids
+            && self.price_bits == run.price_usd.to_bits()
+            && self.decimals == run.decimals
+    }
+}
+
+fn redemption_run_snapshot_error(
+    expected: &RedemptionRunSnapshot,
+    actual: &crate::state::RedemptionRun,
+) -> Option<RedemptionError> {
+    if expected.matches(actual) {
+        None
+    } else if expected.collateral_type != actual.collateral_type {
+        Some(RedemptionError::RedemptionPriorityChanged {
+            expected: expected.collateral_type,
+            actual: actual.collateral_type,
+        })
+    } else {
+        Some(RedemptionError::RedemptionQuoteUnavailable(
+            "The selected collateral run or price changed during the icUSD pull.".to_string(),
+        ))
+    }
+}
+
+fn legacy_redemption_run_for_request(
+    state: &crate::state::State,
+    requested_collateral_type: Principal,
+) -> Result<crate::state::RedemptionRun, ProtocolError> {
+    let requested_collateral_type = if requested_collateral_type == Principal::anonymous() {
+        state.icp_collateral_type()
+    } else {
+        requested_collateral_type
+    };
+    let run = state
+        .redemption_runs()
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            ProtocolError::TemporarilyUnavailable(
+                "No eligible collateral vaults are available for redemption.".to_string(),
+            )
+        })?;
+    if run.collateral_type != requested_collateral_type {
+        let requested_symbol = state
+            .get_collateral_config(&requested_collateral_type)
+            .and_then(|config| config.symbol.clone())
+            .unwrap_or_else(|| requested_collateral_type.to_text());
+        return Err(ProtocolError::GenericError(format!(
+            "The next collateral is {}, but this request is for {}. Refresh the redemption page and review a new quote.",
+            run.symbol, requested_symbol
+        )));
+    }
+    Ok(run)
+}
+
+fn validate_legacy_reserve_spillover_asset(
+    state: &crate::state::State,
+    run: &crate::state::RedemptionRun,
+) -> Result<(), ProtocolError> {
+    let icp = state.icp_collateral_type();
+    if run.collateral_type == icp {
+        return Ok(());
+    }
+    Err(ProtocolError::GenericError(format!(
+        "The next collateral is {}, but this reserve redemption can only spill over to ICP. Refresh the redemption page and review a new quote.",
+        run.symbol
+    )))
+}
+
+fn legacy_reserve_spillover_run(
+    state: &crate::state::State,
+    spillover_e8s: u64,
+) -> Result<Option<crate::state::RedemptionRun>, ProtocolError> {
+    if spillover_e8s == 0 {
+        return Ok(None);
+    }
+    let run = state
+        .redemption_runs()
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            ProtocolError::TemporarilyUnavailable(
+                "No eligible collateral vaults are available for reserve spillover.".to_string(),
+            )
+        })?;
+    validate_legacy_reserve_spillover_asset(state, &run)?;
+    Ok(Some(run))
+}
+
+fn current_legacy_reserve_run_for_snapshot(
+    state: &crate::state::State,
+    expected: &RedemptionRunSnapshot,
+) -> Option<crate::state::RedemptionRun> {
+    let run = state.redemption_runs().into_iter().next()?;
+    (expected.matches(&run) && validate_legacy_reserve_spillover_asset(state, &run).is_ok())
+        .then_some(run)
+}
+
+fn current_fresh_legacy_reserve_run_for_snapshot(
+    state: &crate::state::State,
+    expected: &RedemptionRunSnapshot,
+    now: u64,
+) -> Option<crate::state::RedemptionRun> {
+    let runs = state.redemption_runs();
+    if !redemption_ranking_is_fresh(state, &runs, now) {
+        return None;
+    }
+    let run = runs.into_iter().next()?;
+    (expected.matches(&run) && validate_legacy_reserve_spillover_asset(state, &run).is_ok())
+        .then_some(run)
+}
+
+fn reserve_spillover_raw_refund_budget(
+    net_after_reserve_fee_e8s: u64,
+    stable_paid_e6s: u64,
+    rmr: Ratio,
+) -> u64 {
+    if rmr.0 <= Decimal::ZERO {
+        return 0;
+    }
+    // Reserve payment is denominated in the already-RMR-scaled effective
+    // amount. Convert it back with ceiling so a rounded raw refund cannot
+    // overlap the raw icUSD budget attributable to the stable transfer.
+    let stable_effective_e8s = Decimal::from(stable_paid_e6s) * Decimal::from(100u64);
+    let stable_raw_e8s = (stable_effective_e8s / rmr.0)
+        .ceil()
+        .to_u64()
+        .unwrap_or(net_after_reserve_fee_e8s);
+    net_after_reserve_fee_e8s.saturating_sub(stable_raw_e8s)
+}
+
+fn redemption_tail_raw_refund(
+    unconsumed_effective_e8s: Decimal,
+    rmr: Ratio,
+    raw_spillover_budget_e8s: u64,
+) -> u64 {
+    if unconsumed_effective_e8s <= Decimal::ZERO || rmr.0 <= Decimal::ZERO {
+        return 0;
+    }
+    ((unconsumed_effective_e8s / rmr.0)
+        .floor()
+        .min(Decimal::from(raw_spillover_budget_e8s)))
+    .to_u64()
+    .unwrap_or(0)
+}
+
+fn redemption_raw_refund(
+    raw_post_fee_budget_e8s: u64,
+    consumed_effective_e8s: u64,
+    rmr: Ratio,
+    raw_refund_cap_e8s: u64,
+) -> u64 {
+    let unconsumed_effective = (Decimal::from(raw_post_fee_budget_e8s) * rmr.0
+        - Decimal::from(consumed_effective_e8s))
+    .max(Decimal::ZERO);
+    redemption_tail_raw_refund(unconsumed_effective, rmr, raw_refund_cap_e8s)
+}
+
+fn reserve_spillover_snapshot_mismatch_refund(
+    _spillover_e8s: u64,
+    _rmr: Ratio,
+    raw_spillover_budget_e8s: u64,
+) -> u64 {
+    // The stable leg has settled, but no native fee or debt consumption has
+    // committed. Return the entire post-stable raw input budget.
+    raw_spillover_budget_e8s
+}
+
+fn reserve_post_settlement_raw_refund(
+    raw_post_reserve_fee_budget_e8s: u64,
+    stable_paid_e6s: u64,
+    committed_native_fee_e8s: u64,
+    actual_native_consumed_e8s: u64,
+    rmr: Ratio,
+) -> u64 {
+    if rmr.0 <= Decimal::ZERO {
+        return 0;
+    }
+
+    // Convert all committed effective-value legs back to raw icUSD together.
+    // A single ceiling avoids losing additional units to per-leg rounding.
+    let effective_spent_e8s = Decimal::from(stable_paid_e6s) * Decimal::from(100u64)
+        + Decimal::from(committed_native_fee_e8s)
+        + Decimal::from(actual_native_consumed_e8s);
+    let raw_spent = (effective_spent_e8s / rmr.0).ceil();
+    let raw_spent = raw_spent.min(Decimal::from(raw_post_reserve_fee_budget_e8s));
+    raw_post_reserve_fee_budget_e8s.saturating_sub(raw_spent.to_u64().unwrap_or(u64::MAX))
+}
+
+fn persist_rejected_redemption_refund(
+    state: &mut crate::state::State,
+    owner: Principal,
+    burn_block_index: u64,
+    amount_e8s: u64,
+    op_nonce: u128,
+) {
+    state.pending_refunds.insert(
+        burn_block_index,
+        crate::state::PendingRefund {
+            user: owner,
+            amount_e8s,
+            retry_count: 0,
+            op_nonce,
+        },
+    );
+}
+
+pub(crate) fn redemption_ranking_is_fresh(
+    state: &crate::state::State,
+    runs: &[crate::state::RedemptionRun],
+    now: u64,
+) -> bool {
+    let candidates = redemption_candidate_types(state);
+    let ranked_types = runs
+        .iter()
+        .map(|run| run.collateral_type)
+        .collect::<Vec<_>>();
+    let all_prices_fresh = redemption_candidate_prices_are_fresh(state, &candidates, now);
+    redemption_ranking_is_complete(
+        &candidates,
+        &ranked_types,
+        all_prices_fresh,
+        MAX_REDEMPTION_PRICE_CANDIDATES,
+    )
+}
+
+fn redemption_ranking_is_complete(
+    candidates: &[Principal],
+    ranked_types: &[Principal],
+    all_prices_fresh: bool,
+    max_candidates: usize,
+) -> bool {
+    if candidates.is_empty() || candidates.len() > max_candidates || !all_prices_fresh {
+        return false;
+    }
+    let candidate_set: std::collections::BTreeSet<_> = candidates.iter().copied().collect();
+    let ranked_set: std::collections::BTreeSet<_> = ranked_types.iter().copied().collect();
+    candidate_set == ranked_set
+}
+
+/// Refresh all assets that can influence the global sort, then verify the set
+/// and timestamps after the XRC awaits. Two bounded passes handle candidate-set
+/// changes during an await without creating an unbounded refresh loop.
+async fn refresh_redemption_candidate_prices() -> Result<(), ProtocolError> {
+    for _ in 0..2 {
+        let candidates = read_state(redemption_candidate_types);
+        if candidates.len() > MAX_REDEMPTION_PRICE_CANDIDATES {
+            return Err(ProtocolError::TemporarilyUnavailable(format!(
+                "Too many eligible collateral price sources to refresh safely ({} > {}).",
+                candidates.len(),
+                MAX_REDEMPTION_PRICE_CANDIDATES
+            )));
+        }
+        for collateral_type in &candidates {
+            crate::xrc::ensure_fresh_price_for(collateral_type).await?;
+        }
+        let now = ic_cdk::api::time();
+        let current = read_state(redemption_candidate_types);
+        if current == candidates
+            && current.len() <= MAX_REDEMPTION_PRICE_CANDIDATES
+            && read_state(|state| redemption_candidate_prices_are_fresh(state, &current, now))
+        {
+            return Ok(());
+        }
+    }
+    Err(ProtocolError::TemporarilyUnavailable(
+        "Eligible collateral prices changed or remained stale while refreshing redemption priority. Retry shortly.".to_string(),
+    ))
+}
+
+/// Return a snapshot of consecutive collateral runs in the global health order.
+/// Each row's capacity is limited to that run's vault IDs; a later row requires
+/// a separate redemption call and may move after every state change.
+pub fn get_redemption_queue() -> RedemptionQueue {
+    let now = ic_cdk::api::time();
+    read_state(|s| {
+        let runs = s.redemption_runs();
+        let ranking_fresh = redemption_ranking_is_fresh(s, &runs, now);
+        let entries = runs
+            .into_iter()
+            .map(|run| {
+                let max_input = max_input_for_run(s, &run);
+                let max_net = net_for_run_input(s, &run, max_input).unwrap_or(0);
+                RedemptionQueueEntry {
+                    run_index: run.run_index,
+                    collateral_type: run.collateral_type,
+                    symbol: run.symbol,
+                    decimals: run.decimals,
+                    price_usd: run.price_usd,
+                    price_timestamp_ns: run.price_timestamp_ns,
+                    price_fresh: redemption_price_timestamp_is_fresh(run.price_timestamp_ns, now),
+                    min_cr: run.min_cr,
+                    liquidation_cr: run.liquidation_cr,
+                    weakest_vault_cr: run.weakest_vault_cr,
+                    health_headroom: run.health_headroom,
+                    vault_count: run.vault_ids.len() as u64,
+                    eligible_collateral_raw: run.eligible_collateral_raw,
+                    eligible_debt_e8s: run.eligible_debt_e8s,
+                    max_input_icusd_e8s: max_input,
+                    max_net_collateral_raw: max_net,
+                }
+            })
+            .collect();
+        RedemptionQueue {
+            observed_at_ns: now,
+            ranking_fresh,
+            rmr: s.get_redemption_margin_ratio().to_f64(),
+            price_freshness_window_ns: REDEMPTION_PRICE_MAX_AGE_NS,
+            entries,
+        }
+    })
+}
+
+/// Build an authoritative snapshot quote for the first health-ranked run.
+/// The quote reports cached price age; submit refreshes and revalidates it.
+pub fn get_redemption_quote(amount_e8s: u64) -> Result<RedemptionQuote, RedemptionError> {
+    let now = ic_cdk::api::time();
+    read_state(|s| {
+        let runs = s.redemption_runs();
+        if !redemption_ranking_is_fresh(s, &runs, now) {
+            return Err(RedemptionError::RedemptionQuoteUnavailable(
+                "The global collateral ranking has a missing, invalid, or stale candidate price. Refresh and retry.".to_string(),
+            ));
+        }
+        let run = runs.into_iter().next().ok_or_else(|| {
+            RedemptionError::RedemptionQuoteUnavailable(
+                "No eligible collateral vaults are available for redemption.".to_string(),
+            )
+        })?;
+        if amount_e8s < s.min_icusd_amount.to_u64() {
+            return Err(ProtocolError::AmountTooLow {
+                minimum_amount: s.min_icusd_amount.to_u64(),
+            }
+            .into());
+        }
+        let max_input = max_input_for_run(s, &run);
+        if amount_e8s > max_input {
+            return Err(RedemptionError::RedemptionCapacityExceeded {
+                max_input_icusd_e8s: max_input,
+            });
+        }
+        let amount = ICUSD::from(amount_e8s);
+        let fee_ratio = s.get_redemption_fee_for(&run.collateral_type, amount);
+        let fee = amount * fee_ratio;
+        let rmr = s.get_redemption_margin_ratio();
+        let effective = (amount - fee) * rmr;
+        let price = UsdIcp::from(Decimal::from_f64_retain(run.price_usd).ok_or_else(|| {
+            RedemptionError::RedemptionQuoteUnavailable(
+                "Collateral price is unavailable.".to_string(),
+            )
+        })?);
+        let simulated = s.simulate_redemption_for_vault_ids(
+            effective,
+            price,
+            &run.collateral_type,
+            &run.vault_ids,
+        );
+        let gross = simulated_collateral_total_raw(&simulated).ok_or_else(|| {
+            RedemptionError::RedemptionQuoteUnavailable(
+                "The selected collateral payout exceeds the supported raw-token range.".to_string(),
+            )
+        })?;
+        let config = s
+            .get_collateral_config(&run.collateral_type)
+            .ok_or_else(|| {
+                RedemptionError::RedemptionQuoteUnavailable(
+                    "Collateral configuration disappeared.".to_string(),
+                )
+            })?;
+        let ledger_fee = config.ledger_fee;
+        let net = gross.saturating_sub(ledger_fee);
+        if net == 0 {
+            return Err(RedemptionError::RedemptionQuoteUnavailable(
+                "The selected collateral run cannot produce a positive net payout.".to_string(),
+            ));
+        }
+        Ok(RedemptionQuote {
+            quoted_at_ns: now,
+            quote_validity_window_ns: 60 * 1_000_000_000,
+            ranking_fresh: true,
+            amount_e8s,
+            run_index: run.run_index,
+            collateral_type: run.collateral_type,
+            symbol: run.symbol,
+            decimals: run.decimals,
+            price_usd: run.price_usd,
+            price_timestamp_ns: run.price_timestamp_ns,
+            price_fresh: redemption_price_timestamp_is_fresh(run.price_timestamp_ns, now),
+            fee_e8s: fee.to_u64(),
+            rmr: rmr.to_f64(),
+            effective_icusd_e8s: effective.to_u64(),
+            gross_collateral_raw: gross,
+            ledger_fee_raw: ledger_fee,
+            net_collateral_raw: net,
+            max_input_icusd_e8s: max_input,
+        })
+    })
+}
+
+fn max_input_for_run(state: &crate::state::State, run: &crate::state::RedemptionRun) -> u64 {
+    let debt = run.eligible_debt_e8s;
+    let rmr = state.get_redemption_margin_ratio();
+    if debt == 0 || rmr.0 <= Decimal::ZERO {
+        return 0;
+    }
+    max_input_matching(u64::MAX, |raw| {
+        let amount = ICUSD::from(raw);
+        let fee = amount * state.get_redemption_fee_for(&run.collateral_type, amount);
+        let effective = (amount - fee) * rmr;
+        if effective.to_u64() > debt {
+            return false;
+        }
+        let Some(price) = Decimal::from_f64_retain(run.price_usd) else {
+            return false;
+        };
+        if !theoretical_collateral_target_fits_u64(effective, price, run.decimals) {
+            return false;
+        }
+        let simulated = state.simulate_redemption_for_vault_ids(
+            effective,
+            UsdIcp::from(price),
+            &run.collateral_type,
+            &run.vault_ids,
+        );
+        simulated_collateral_total_raw(&simulated).is_some()
+    })
+}
+
+fn theoretical_collateral_target_fits_u64(
+    effective_icusd: ICUSD,
+    price_usd: Decimal,
+    decimals: u8,
+) -> bool {
+    if price_usd <= Decimal::ZERO {
+        return false;
+    }
+    let Some(scale) = 10u64.checked_pow(decimals as u32) else {
+        return false;
+    };
+    let target_raw = Decimal::from(effective_icusd.to_u64()) / dec!(100_000_000) / price_usd
+        * Decimal::from(scale);
+    target_raw.is_sign_positive() && target_raw <= Decimal::from(u64::MAX)
+}
+
+fn max_effective_icusd_for_u64_payout(price_usd: Decimal, decimals: u8) -> u64 {
+    max_input_matching(u64::MAX, |effective_e8s| {
+        theoretical_collateral_target_fits_u64(ICUSD::new(effective_e8s), price_usd, decimals)
+    })
+}
+
+fn max_input_matching(upper_bound: u64, mut fits: impl FnMut(u64) -> bool) -> u64 {
+    let mut low = 0u64;
+    let mut high = upper_bound;
+    while low < high {
+        // Upper midpoint guarantees progress even when low == MAX - 1.
+        let mid = low + (high - low) / 2 + 1;
+        if fits(mid) {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    low
+}
+
+fn simulated_collateral_total_raw(redemptions: &[crate::event::VaultRedemption]) -> Option<u64> {
+    let total = redemptions.iter().try_fold(0u128, |sum, redemption| {
+        sum.checked_add(redemption.collateral_seized as u128)
+    })?;
+    u64::try_from(total).ok()
+}
+
+fn redemption_record_error_to_protocol(error: crate::event::RedemptionRecordError) -> RedemptionError {
+    match error {
+        crate::event::RedemptionRecordError::PayoutUnrepresentable => {
+            RedemptionError::RedemptionQuoteUnavailable(
+                "The selected collateral payout exceeds the supported raw-token range.".to_string(),
+            )
+        }
+        crate::event::RedemptionRecordError::MinimumNotMet {
+            minimum_net_raw,
+            actual_net_raw,
+        } => RedemptionError::RedemptionMinimumNotMet {
+            minimum_net_raw,
+            actual_net_raw,
+        },
+    }
+}
+
+/// Preserve the historical error ABI for legacy redemption entry points.
+fn legacy_redemption_error(error: RedemptionError) -> ProtocolError {
+    match error {
+        RedemptionError::Protocol(error) => error,
+        RedemptionError::RedemptionQuoteUnavailable(message) => {
+            ProtocolError::TemporarilyUnavailable(message)
+        }
+        RedemptionError::RedemptionCapacityExceeded {
+            max_input_icusd_e8s,
+        } => ProtocolError::GenericError(format!(
+            "The requested amount exceeds the current first collateral run capacity ({} icUSD e8s). Refresh and review the redemption order.",
+            max_input_icusd_e8s
+        )),
+        RedemptionError::RedemptionPriorityChanged { expected, actual } => {
+            ProtocolError::GenericError(format!(
+                "The redemption priority changed from {} to {}. Refresh and review the redemption order.",
+                expected, actual
+            ))
+        }
+        RedemptionError::RedemptionMinimumNotMet {
+            minimum_net_raw,
+            actual_net_raw,
+        } => ProtocolError::GenericError(format!(
+            "The actual net payout ({actual_net_raw} raw units) is below the requested minimum ({minimum_net_raw} raw units). Refresh and review the redemption order."
+        )),
+    }
+}
+
+fn net_for_run_input(
+    state: &crate::state::State,
+    run: &crate::state::RedemptionRun,
+    amount_e8s: u64,
+) -> Option<u64> {
+    if amount_e8s == 0 {
+        return Some(0);
+    }
+    let amount = ICUSD::from(amount_e8s);
+    let fee = amount * state.get_redemption_fee_for(&run.collateral_type, amount);
+    let effective = (amount - fee) * state.get_redemption_margin_ratio();
+    let price = UsdIcp::from(Decimal::from_f64_retain(run.price_usd)?);
+    let simulated = state.simulate_redemption_for_vault_ids(
+        effective,
+        price,
+        &run.collateral_type,
+        &run.vault_ids,
+    );
+    let gross = simulated_collateral_total_raw(&simulated)?;
+    let ledger_fee = state
+        .get_collateral_config(&run.collateral_type)?
+        .ledger_fee;
+    Some(gross.saturating_sub(ledger_fee))
+}
 
 use crate::compute_collateral_ratio;
 
@@ -229,7 +845,7 @@ pub async fn redeem_reserves(
 
     // RED-101 / RED-003: gate on protocol mode here too. The endpoint keeps its
     // own validate_mode() (defense in depth), but the spillover branch below
-    // calls record_redemption_on_vaults DIRECTLY (it does not route through
+    // calls record_redemption_on_vault_run DIRECTLY (it does not route through
     // redeem_collateral), so the redeem_collateral gate does not cover it. Gate
     // at this entry point so the reserve path is covered by construction as well.
     if read_state(|s| s.mode) == Mode::ReadOnly {
@@ -326,11 +942,76 @@ pub async fn redeem_reserves(
 
     let spillover_e6s = net_e6s - available_for_user;
     let spillover_e8s = spillover_e6s * 100; // convert back to icUSD e8s
+    let raw_spillover_refund_budget_e8s =
+        reserve_spillover_raw_refund_budget(net_icusd.to_u64(), available_for_user, rmr);
+
+    // Bound a native-collateral spillover before the icUSD pull. The reserve
+    // portion is settled separately, so only the planned remainder is checked.
+    // The nominal target is conservative across any within-run allocation and
+    // protects the u64 pending-payout/event representation.
+    let spillover_plan = if spillover_e8s > 0 {
+        refresh_redemption_candidate_prices().await?;
+        let plan = read_state(|state| {
+            let run = legacy_reserve_spillover_run(state, spillover_e8s)?
+                .expect("positive spillover must have a selected run");
+            let amount = ICUSD::from(spillover_e8s);
+            let fee = amount * state.get_redemption_fee_for(&run.collateral_type, amount);
+            let effective = amount - fee; // RMR was applied above.
+            let price = Decimal::from_f64_retain(run.price_usd).ok_or_else(|| {
+                ProtocolError::TemporarilyUnavailable(
+                    "The reserve spillover collateral price is unavailable.".to_string(),
+                )
+            })?;
+            if !theoretical_collateral_target_fits_u64(effective, price, run.decimals) {
+                return Err(ProtocolError::TemporarilyUnavailable(
+                    "The reserve spillover exceeds the supported native payout range; try a smaller amount.".to_string(),
+                ));
+            }
+            Ok(RedemptionRunSnapshot::capture(&run))
+        })?;
+        Some(plan)
+    } else {
+        None
+    };
 
     // Pull icUSD from caller (effectively burns it)
     let icusd_block_index = transfer_icusd_from(icusd_amount, caller)
         .await
         .map_err(|e| ProtocolError::TransferFromError(e, icusd_amount.to_u64()))?;
+
+    // The pull awaited. Revalidate the same run before the first reserve
+    // settlement so a changed price/rank can still be compensated in full.
+    if let Some(expected_snapshot) = &spillover_plan {
+        let refreshed = refresh_redemption_candidate_prices().await;
+        let still_representable = refreshed.is_ok()
+            && read_state(|state| {
+                let Some(run) =
+                    current_legacy_reserve_run_for_snapshot(state, expected_snapshot)
+                else {
+                    return false;
+                };
+                let amount = ICUSD::from(spillover_e8s);
+                let fee = amount * state.get_redemption_fee_for(&run.collateral_type, amount);
+                let effective = amount - fee; // RMR was applied above.
+                Decimal::from_f64_retain(run.price_usd)
+                    .map(|price| {
+                        theoretical_collateral_target_fits_u64(effective, price, run.decimals)
+                    })
+                    .unwrap_or(false)
+            });
+        if !still_representable {
+            return Err(refund_rejected_quoted_redemption(
+                caller,
+                icusd_amount.to_u64(),
+                icusd_block_index,
+                ProtocolError::TemporarilyUnavailable(
+                    "The reserve spillover ranking or payout range changed; the icUSD refund was started."
+                        .to_string(),
+                ),
+            )
+            .await);
+        }
+    }
 
     // Transfer ckStable to user from reserves.
     // CRITICAL: If this fails we MUST refund the icUSD, otherwise the user
@@ -435,48 +1116,121 @@ pub async fn redeem_reserves(
     }
 
     // Handle vault spillover if reserves didn't cover everything
-    if spillover_e8s > 0 {
-        // Pick the best collateral type for vault redemption based on tier priority
-        let best_ct = read_state(|s| {
-            s.get_collateral_types_by_redemption_priority()
-                .first()
-                .copied()
-                .unwrap_or_else(|| s.icp_collateral_type())
-        });
-        // Wave-5 RED-001: spillover redeems against the best-priority collateral,
-        // which may be non-ICP. validate_call only refreshes ICP. Refresh the
-        // spillover collateral's price on-demand so the redeemer can't capture a
-        // stale price during the 300s background-timer window.
-        crate::xrc::ensure_fresh_price_for(&best_ct).await?;
-        let collateral_price = read_state(|s| s.get_collateral_price_decimal(&best_ct)).ok_or(
-            ProtocolError::TemporarilyUnavailable(
-                "No price for vault spillover collateral".to_string(),
-            ),
-        )?;
-        let current_price = UsdIcp::from(collateral_price);
-
-        let refund_e8s = mutate_state(|s| {
+    let refund_e8s = if spillover_e8s > 0 {
+        mutate_state(|s| {
             let spillover_icusd = ICUSD::from(spillover_e8s);
+            // Stable and treasury ledger calls have awaited. Compare the full
+            // pre-pull snapshot before the synchronous event mutation. If any
+            // part changed, do not seize and refund only the spillover tail.
+            let Some(expected_snapshot) = &spillover_plan
+            else {
+                return reserve_spillover_snapshot_mismatch_refund(
+                    spillover_e8s,
+                    rmr,
+                    raw_spillover_refund_budget_e8s,
+                );
+            };
+            let Some(run) = current_legacy_reserve_run_for_snapshot(s, expected_snapshot) else {
+                return reserve_spillover_snapshot_mismatch_refund(
+                    spillover_e8s,
+                    rmr,
+                    raw_spillover_refund_budget_e8s,
+                );
+            };
+            // Stable and treasury transfers may span the full oracle freshness
+            // window without changing the tuple's numeric price. Recheck the
+            // complete candidate set synchronously at the seizure cutpoint.
+            let now = ic_cdk::api::time();
+            if current_fresh_legacy_reserve_run_for_snapshot(s, expected_snapshot, now).is_none() {
+                return reserve_spillover_snapshot_mismatch_refund(
+                    spillover_e8s,
+                    rmr,
+                    raw_spillover_refund_budget_e8s,
+                );
+            }
+            let Some(config) = s.get_collateral_config(&run.collateral_type) else {
+                return reserve_spillover_snapshot_mismatch_refund(
+                    spillover_e8s,
+                    rmr,
+                    raw_spillover_refund_budget_e8s,
+                );
+            };
+            let Some(price_decimal) = config
+                .last_price
+                .and_then(Decimal::from_f64_retain)
+                .filter(|price| *price > Decimal::ZERO)
+            else {
+                return reserve_spillover_snapshot_mismatch_refund(
+                    spillover_e8s,
+                    rmr,
+                    raw_spillover_refund_budget_e8s,
+                )
+            };
+            let current_price = UsdIcp::from(price_decimal);
+
             // Wave-14b CDP-03: per-collateral fee path (see redeem_collateral
-            // for full rationale). The spillover redeems against `best_ct`,
+            // for full rationale). The spillover redeems against the selected run,
             // so the base rate is read from and written back to that
             // collateral's config alone.
-            let base_fee = s.get_redemption_fee_for(&best_ct, spillover_icusd);
-            crate::record_per_collateral_redemption_fee(s, &best_ct, base_fee, ic_cdk::api::time());
+            let base_fee = s.get_redemption_fee_for(&run.collateral_type, spillover_icusd);
             let vault_fee = spillover_icusd * base_fee;
 
             // Note: RMR was already applied when computing spillover_e8s (line 160).
             // Do NOT apply it again here — that would double-discount.
             let effective_spillover = spillover_icusd - vault_fee;
 
-            let outcome = record_redemption_on_vaults(
+            // A ckStable transfer awaited before this point. Cap the remaining
+            // native payout against the current price/decimals so the event's
+            // historical u64 sum and pending transfer amount stay representable.
+            let safe_effective_e8s =
+                max_effective_icusd_for_u64_payout(price_decimal, run.decimals);
+            let bounded_effective =
+                ICUSD::new(effective_spillover.to_u64().min(safe_effective_e8s));
+            let simulated = s.simulate_redemption_for_vault_ids(
+                bounded_effective,
+                current_price,
+                &run.collateral_type,
+                &run.vault_ids,
+            );
+            if simulated_collateral_total_raw(&simulated).is_none() {
+                return reserve_spillover_snapshot_mismatch_refund(
+                    spillover_e8s,
+                    rmr,
+                    raw_spillover_refund_budget_e8s,
+                )
+            }
+
+            let outcome = match crate::event::record_redemption_on_vault_run(
                 s,
                 caller,
-                effective_spillover,
+                bounded_effective,
                 vault_fee,
                 current_price,
                 icusd_block_index,
-                best_ct,
+                run.collateral_type,
+                &run.vault_ids,
+                None,
+            ) {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    log!(
+                        crate::INFO,
+                        "[redeem_reserves] Spillover recorder rejected before mutation: {:?}",
+                        error
+                    );
+                    return reserve_spillover_snapshot_mismatch_refund(
+                        spillover_e8s,
+                        rmr,
+                        raw_spillover_refund_budget_e8s,
+                    );
+                }
+            };
+
+            crate::record_per_collateral_redemption_fee(
+                s,
+                &run.collateral_type,
+                base_fee,
+                ic_cdk::api::time(),
             );
 
             // Wave-8e LIQ-005: route the spillover-portion fee through
@@ -487,54 +1241,63 @@ pub async fn redeem_reserves(
                 crate::event::FeeSource::RedemptionFee,
             );
 
-            // RED-001: unconsumed spillover is refunded (RMR already applied
-            // upstream, so the unconsumed effective amount IS the raw refund;
-            // the fee stays with the protocol as priced).
-            effective_spillover
-                .saturating_sub(outcome.consumed)
-                .to_u64()
-        });
-        if refund_e8s > 0 {
-            let refund_nonce = mutate_state(|s| s.next_op_nonce());
-            match management::transfer_icusd_with_nonce(
-                ICUSD::from(refund_e8s),
-                caller,
-                refund_nonce,
+            // Return the raw amount not represented by the settled stable
+            // payment, committed vault fee, and actual debt consumption. Apply
+            // one aggregate RMR conversion so the legs cannot each round away
+            // a separate unit.
+            reserve_post_settlement_raw_refund(
+                net_icusd.to_u64(),
+                available_for_user,
+                vault_fee.to_u64(),
+                outcome.consumed.to_u64(),
+                rmr,
             )
-            .await
-            {
-                Ok(refund_block) => {
-                    log!(
-                        crate::INFO,
-                        "[redeem_reserves] Refunded {} unconsumed spillover icUSD to {} (block {})",
-                        refund_e8s,
-                        caller,
-                        refund_block
+        })
+    } else {
+        // Even a fully reserve-funded redemption can leave raw icUSD dust
+        // because the stable payout is quantized to e6.
+        raw_spillover_refund_budget_e8s
+    };
+    if refund_e8s > 0 {
+        let refund_nonce = mutate_state(|s| s.next_op_nonce());
+        match management::transfer_icusd_with_nonce(
+            ICUSD::from(refund_e8s),
+            caller,
+            refund_nonce,
+        )
+        .await
+        {
+            Ok(refund_block) => {
+                log!(
+                    crate::INFO,
+                    "[redeem_reserves] Refunded {} unconsumed spillover icUSD to {} (block {})",
+                    refund_e8s,
+                    caller,
+                    refund_block
+                );
+            }
+            Err(refund_err) => {
+                log!(crate::INFO,
+                    "[redeem_reserves] Unconsumed-spillover refund of {} icUSD to {} failed: {:?}. Enqueueing durable refund (block {}).",
+                    refund_e8s, caller, refund_err, icusd_block_index
+                );
+                mutate_state(|s| {
+                    s.pending_refunds.insert(
+                        icusd_block_index,
+                        crate::state::PendingRefund {
+                            user: caller,
+                            amount_e8s: refund_e8s,
+                            retry_count: 0,
+                            op_nonce: refund_nonce,
+                        },
                     );
-                }
-                Err(refund_err) => {
-                    log!(crate::INFO,
-                        "[redeem_reserves] Unconsumed-spillover refund of {} icUSD to {} failed: {:?}. Enqueueing durable refund (block {}).",
-                        refund_e8s, caller, refund_err, icusd_block_index
-                    );
-                    mutate_state(|s| {
-                        s.pending_refunds.insert(
-                            icusd_block_index,
-                            crate::state::PendingRefund {
-                                user: caller,
-                                amount_e8s: refund_e8s,
-                                retry_count: 0,
-                                op_nonce: refund_nonce,
-                            },
-                        );
-                    });
-                }
+                });
             }
         }
-        ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), || {
-            ic_cdk::spawn(crate::process_pending_transfer())
-        });
     }
+    ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), || {
+        ic_cdk::spawn(crate::process_pending_transfer())
+    });
 
     log!(INFO, "[redeem_reserves] {} redeemed {} icUSD: {} e6s from reserves, {} e8s vault spillover, fee {} e6s",
         caller, icusd_amount.to_u64(), available_for_user, spillover_e8s, fee_e6s);
@@ -544,6 +1307,9 @@ pub async fn redeem_reserves(
         stable_amount_sent: available_for_user,
         fee_amount: fee_icusd.to_u64(),
         stable_token_used: stable_ledger,
+        // Preserve the historical response meaning: effective spillover
+        // before the vault fee/capacity outcome, not the amount actually
+        // consumed by selected vaults.
         vault_spillover_amount: spillover_e8s,
     })
 }
@@ -603,12 +1369,13 @@ pub async fn redeem_collateral(
     // the water-fill seized the priority winner, so a redeemer could pass a
     // deep-debt type to floor the dynamic fee while draining a thin type
     // against a price with no staleness gate.
-    let redeem_ct = read_state(|s| {
-        s.get_collateral_types_by_redemption_priority()
-            .first()
-            .copied()
-            .unwrap_or_else(|| s.icp_collateral_type())
-    });
+    let selected_run = read_state(|s| s.redemption_runs().into_iter().next());
+    let Some(selected_run) = selected_run else {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "No eligible collateral vaults are available for redemption.".to_string(),
+        ));
+    };
+    let redeem_ct = selected_run.collateral_type;
 
     let redeem_status = read_state(|s| s.get_collateral_status(&redeem_ct));
     if let Some(status) = redeem_status {
@@ -627,9 +1394,12 @@ pub async fn redeem_collateral(
 
     // Fail closed on a stale price for the collateral actually being seized
     // (VER-001 ceiling applies inside ensure_fresh_price_for).
-    crate::xrc::ensure_fresh_price_for(&redeem_ct).await?;
-
-    let collateral_price = read_state(|s| s.get_collateral_price_decimal(&redeem_ct)).ok_or(
+    refresh_redemption_candidate_prices().await?;
+    let pre_pull_run =
+        read_state(|s| legacy_redemption_run_for_request(s, collateral_type))?;
+    let pre_pull_snapshot = RedemptionRunSnapshot::capture(&pre_pull_run);
+    let redeem_ct = pre_pull_run.collateral_type;
+    let collateral_price = Decimal::from_f64_retain(pre_pull_run.price_usd).ok_or(
         ProtocolError::TemporarilyUnavailable("No price available for collateral".to_string()),
     )?;
     let current_collateral_price = UsdIcp::from(collateral_price);
@@ -641,27 +1411,130 @@ pub async fn redeem_collateral(
     // redeemed. The estimate uses the pre-pull fee/RMR; any residual gap
     // (state moving during the icUSD pull) is covered by the unconsumed
     // refund below.
-    let (estimated_effective, total_redeemable) = read_state(|s| {
+    let (estimated_effective, run_debt, max_input, payout_representable) = read_state(|s| {
         let base_fee = s.get_redemption_fee_for(&redeem_ct, icusd_amount);
         let fee_est = icusd_amount * base_fee;
         let rmr = s.get_redemption_margin_ratio();
+        let run = s
+            .redemption_runs()
+            .into_iter()
+            .next()
+            .filter(|run| run.collateral_type == redeem_ct);
+        let effective = (icusd_amount - fee_est) * rmr;
+        let payout_representable = run
+            .as_ref()
+            .and_then(|run| {
+                let price = Decimal::from_f64_retain(run.price_usd)?;
+                let simulated = s.simulate_redemption_for_vault_ids(
+                    effective,
+                    UsdIcp::from(price),
+                    &run.collateral_type,
+                    &run.vault_ids,
+                );
+                simulated_collateral_total_raw(&simulated)
+            })
+            .is_some();
         (
-            (icusd_amount - fee_est) * rmr,
-            s.total_redeemable_debt_for(&redeem_ct),
+            effective,
+            run.as_ref().map(|run| run.eligible_debt_e8s).unwrap_or(0),
+            run.as_ref()
+                .map(|run| max_input_for_run(s, run))
+                .unwrap_or(0),
+            payout_representable,
         )
     });
-    if estimated_effective > total_redeemable {
+    if _icusd_amount > max_input || estimated_effective.to_u64() > run_debt {
         return Err(ProtocolError::GenericError(format!(
-            "Redemption exceeds redeemable debt for {}: effective claim {} > redeemable {}. Reduce the amount.",
-            redeem_ct,
-            estimated_effective.to_u64(),
-            total_redeemable.to_u64()
+            "The requested amount exceeds the current first collateral run capacity ({} icUSD e8s). Refresh and review the redemption order.",
+            max_input
         )));
+    }
+    if !payout_representable {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "The selected collateral payout exceeds the supported raw-token range.".to_string(),
+        ));
     }
 
     match transfer_icusd_from(icusd_amount, caller).await {
         Ok(block_index) => {
-            let (fee_amount, outcome, refund_e8s) = mutate_state(|s| {
+            // The pull is an await boundary. If global rank or eligible capacity
+            // changed while it was in flight, refund the full input before any
+            // fee/base-rate mutation or vault seizure.
+            if let Err(error) = refresh_redemption_candidate_prices().await {
+                return Err(refund_rejected_quoted_redemption(
+                    caller,
+                    icusd_amount.to_u64(),
+                    block_index,
+                    error,
+                )
+                .await);
+            }
+            let post_pull_run = read_state(|state| state.redemption_runs().into_iter().next());
+            let Some(post_pull_run) = post_pull_run else {
+                return Err(refund_rejected_quoted_redemption(
+                    caller,
+                    icusd_amount.to_u64(),
+                    block_index,
+                    ProtocolError::TemporarilyUnavailable(
+                        "No eligible collateral run remains after the icUSD pull.".to_string(),
+                    ),
+                )
+                .await);
+            };
+            if let Some(error) = redemption_run_snapshot_error(&pre_pull_snapshot, &post_pull_run)
+            {
+                return Err(refund_rejected_quoted_redemption(
+                    caller,
+                    icusd_amount.to_u64(),
+                    block_index,
+                    legacy_redemption_error(error),
+                )
+                .await);
+            }
+            let post_pull = match get_redemption_quote(icusd_amount.to_u64()) {
+                Ok(quote) => quote,
+                Err(error) => {
+                    return Err(refund_rejected_quoted_redemption(
+                        caller,
+                        icusd_amount.to_u64(),
+                        block_index,
+                        legacy_redemption_error(error),
+                    )
+                    .await)
+                }
+            };
+            if post_pull.collateral_type != redeem_ct {
+                return Err(refund_rejected_quoted_redemption(
+                    caller,
+                    icusd_amount.to_u64(),
+                    block_index,
+                    ProtocolError::GenericError(format!(
+                        "The redemption priority changed from {} to {}. Refresh and review the redemption order.",
+                        redeem_ct, post_pull.collateral_type
+                    )),
+                )
+                .await);
+            }
+            let run_vault_ids = read_state(|state| {
+                state
+                    .redemption_runs()
+                    .into_iter()
+                    .next()
+                    .filter(|run| run.collateral_type == redeem_ct)
+                    .map(|run| run.vault_ids)
+            });
+            let Some(run_vault_ids) = run_vault_ids else {
+                return Err(refund_rejected_quoted_redemption(
+                    caller,
+                    icusd_amount.to_u64(),
+                    block_index,
+                    ProtocolError::TemporarilyUnavailable(
+                        "The selected collateral run changed before execution.".to_string(),
+                    ),
+                )
+                .await);
+            };
+            let mutation_result = mutate_state(|s| {
                 // Wave-14b CDP-03: price the fee against the per-collateral
                 // base rate, and write the post-redemption rate back to the
                 // per-collateral config (NOT the legacy global fields). A
@@ -669,19 +1542,13 @@ pub async fn redeem_collateral(
                 // base rate used to price redemptions against any other.
                 // RED-002: keyed on the seized collateral, not the caller's.
                 let base_fee = s.get_redemption_fee_for(&redeem_ct, icusd_amount);
-                crate::record_per_collateral_redemption_fee(
-                    s,
-                    &redeem_ct,
-                    base_fee,
-                    ic_cdk::api::time(),
-                );
                 let fee_amount = icusd_amount * base_fee;
 
                 // Apply dynamic Redemption Margin Ratio: redeemers get RMR × face value
                 let rmr = s.get_redemption_margin_ratio();
                 let effective_icusd = (icusd_amount - fee_amount) * rmr;
 
-                let outcome = record_redemption_on_vaults(
+                let outcome = crate::event::record_redemption_on_vault_run(
                     s,
                     caller,
                     effective_icusd,
@@ -689,22 +1556,28 @@ pub async fn redeem_collateral(
                     current_collateral_price,
                     block_index,
                     redeem_ct,
+                    &run_vault_ids,
+                    None,
+                )
+                .map_err(|error| legacy_redemption_error(redemption_record_error_to_protocol(error)))?;
+
+                crate::record_per_collateral_redemption_fee(
+                    s,
+                    &redeem_ct,
+                    base_fee,
+                    ic_cdk::api::time(),
                 );
 
                 // RED-001: refund the unconsumed remainder of the claim in raw
                 // icUSD (un-scale by RMR; the fee stays with the protocol as
                 // priced). Floor division favors the protocol; capped at the
                 // post-fee pull so a refund can never exceed what was taken.
-                let unconsumed = effective_icusd.saturating_sub(outcome.consumed);
-                let refund_e8s: u64 =
-                    if unconsumed.to_u64() == 0 || rmr.0 <= rust_decimal::Decimal::ZERO {
-                        0
-                    } else {
-                        let raw = (rust_decimal::Decimal::from(unconsumed.to_u64()) / rmr.0)
-                            .to_u64()
-                            .unwrap_or(0);
-                        raw.min((icusd_amount - fee_amount).to_u64())
-                    };
+                let refund_e8s = redemption_raw_refund(
+                    (icusd_amount - fee_amount).to_u64(),
+                    outcome.consumed.to_u64(),
+                    rmr,
+                    (icusd_amount - fee_amount).to_u64(),
+                );
 
                 // Wave-8e LIQ-005: route a configurable fraction of the
                 // redemption fee toward deficit repayment. The redeemer's
@@ -718,8 +1591,20 @@ pub async fn redeem_collateral(
                     crate::event::FeeSource::RedemptionFee,
                 );
 
-                (fee_amount, outcome, refund_e8s)
+                Ok((fee_amount, outcome, refund_e8s))
             });
+            let (fee_amount, outcome, refund_e8s) = match mutation_result {
+                Ok(result) => result,
+                Err(error) => {
+                    return Err(refund_rejected_quoted_redemption(
+                        caller,
+                        icusd_amount.to_u64(),
+                        block_index,
+                        error,
+                    )
+                    .await)
+                }
+            };
 
             // RED-001: pay back the unconsumed icUSD. Same saga as
             // redeem_reserves (Wave-4 ICC-007): inline refund first, durable
@@ -779,6 +1664,260 @@ pub async fn redeem_collateral(
             transfer_from_error,
             icusd_amount.to_u64(),
         )),
+    }
+}
+
+/// Execute a vault-only redemption against exactly the first globally ranked
+/// same-collateral run. The submitted token and net payout floor are checked
+/// again after the icUSD pull and before any vault mutation.
+pub async fn redeem_quoted(
+    request: RedeemQuotedRequest,
+) -> Result<RedemptionResult, RedemptionError> {
+    let caller = ic_cdk::api::caller();
+    let _guard = GuardPrincipal::new(caller, "redeem_quoted")?;
+    if read_state(|state| state.mode) == Mode::ReadOnly {
+        return Err(ProtocolError::read_only_mode().into());
+    }
+    if request.amount_e8s < read_state(|state| state.min_icusd_amount.to_u64()) {
+        return Err(ProtocolError::AmountTooLow {
+            minimum_amount: read_state(|state| state.min_icusd_amount.to_u64()),
+        }
+        .into());
+    }
+
+    // Refresh only the quoted collateral. After the await, rebuild the global
+    // queue so stale rank changes fail closed instead of paying another asset.
+    refresh_redemption_candidate_prices().await?;
+    let pre_quote = get_redemption_quote(request.amount_e8s)?;
+    if pre_quote.collateral_type != request.expected_collateral_type {
+        return Err(RedemptionError::RedemptionPriorityChanged {
+            expected: request.expected_collateral_type,
+            actual: pre_quote.collateral_type,
+        });
+    }
+    if pre_quote.net_collateral_raw < request.min_net_collateral_raw {
+        return Err(RedemptionError::RedemptionMinimumNotMet {
+            minimum_net_raw: request.min_net_collateral_raw,
+            actual_net_raw: pre_quote.net_collateral_raw,
+        });
+    }
+
+    match transfer_icusd_from(ICUSD::from(request.amount_e8s), caller).await {
+        Err(error) => Err(ProtocolError::TransferFromError(error, request.amount_e8s).into()),
+        Ok(block_index) => {
+            // The pull awaited. A concurrent redemption or a refreshed price can
+            // change the global first run. Validate a fresh snapshot before any
+            // fee update, event, debt mutation, or collateral seizure.
+            if let Err(error) = refresh_redemption_candidate_prices().await {
+                return Err(refund_rejected_quoted_redemption(
+                    caller,
+                    request.amount_e8s,
+                    block_index,
+                    RedemptionError::from(error),
+                )
+                .await);
+            }
+            let post_quote = match get_redemption_quote(request.amount_e8s) {
+                Ok(quote) => quote,
+                Err(error) => {
+                    return Err(refund_rejected_quoted_redemption(
+                        caller,
+                        request.amount_e8s,
+                        block_index,
+                        error,
+                    )
+                    .await)
+                }
+            };
+            if post_quote.collateral_type != request.expected_collateral_type {
+                let error = RedemptionError::RedemptionPriorityChanged {
+                    expected: request.expected_collateral_type,
+                    actual: post_quote.collateral_type,
+                };
+                return Err(refund_rejected_quoted_redemption(
+                    caller,
+                    request.amount_e8s,
+                    block_index,
+                    error,
+                )
+                .await);
+            }
+            if post_quote.net_collateral_raw < request.min_net_collateral_raw {
+                let error = RedemptionError::RedemptionMinimumNotMet {
+                    minimum_net_raw: request.min_net_collateral_raw,
+                    actual_net_raw: post_quote.net_collateral_raw,
+                };
+                return Err(refund_rejected_quoted_redemption(
+                    caller,
+                    request.amount_e8s,
+                    block_index,
+                    error,
+                )
+                .await);
+            }
+
+            let mutation_result: Result<
+                (ICUSD, crate::event::RedemptionOutcome, u64, String, u8),
+                RedemptionError,
+            > = mutate_state(|state| {
+                // No await separates the post-pull check from this mutation.
+                let run = state.redemption_runs().into_iter().next().ok_or_else(|| {
+                    RedemptionError::RedemptionQuoteUnavailable(
+                        "Eligible collateral run disappeared.".to_string(),
+                    )
+                })?;
+                if run.collateral_type != request.expected_collateral_type {
+                    return Err(RedemptionError::RedemptionPriorityChanged {
+                        expected: request.expected_collateral_type,
+                        actual: run.collateral_type,
+                    });
+                }
+                let max_input = max_input_for_run(state, &run);
+                if request.amount_e8s > max_input {
+                    return Err(RedemptionError::RedemptionCapacityExceeded {
+                        max_input_icusd_e8s: max_input,
+                    });
+                }
+                let amount = ICUSD::from(request.amount_e8s);
+                let fee_ratio = state.get_redemption_fee_for(&run.collateral_type, amount);
+                let fee = amount * fee_ratio;
+                let rmr = state.get_redemption_margin_ratio();
+                let effective = (amount - fee) * rmr;
+                let price =
+                    UsdIcp::from(Decimal::from_f64_retain(run.price_usd).ok_or_else(|| {
+                        RedemptionError::RedemptionQuoteUnavailable(
+                            "Collateral price is unavailable.".to_string(),
+                        )
+                    })?);
+                let simulated = state.simulate_redemption_for_vault_ids(
+                    effective,
+                    price,
+                    &run.collateral_type,
+                    &run.vault_ids,
+                );
+                let gross = simulated_collateral_total_raw(&simulated).ok_or_else(|| {
+                    RedemptionError::RedemptionQuoteUnavailable(
+                        "The selected collateral payout exceeds the supported raw-token range."
+                            .to_string(),
+                    )
+                })?;
+                let config = state
+                    .get_collateral_config(&run.collateral_type)
+                    .ok_or_else(|| {
+                        RedemptionError::RedemptionQuoteUnavailable(
+                            "Collateral configuration disappeared.".to_string(),
+                        )
+                    })?;
+                let net = gross.saturating_sub(config.ledger_fee);
+                if net < request.min_net_collateral_raw {
+                    return Err(RedemptionError::RedemptionMinimumNotMet {
+                        minimum_net_raw: request.min_net_collateral_raw,
+                        actual_net_raw: net,
+                    });
+                }
+
+                let ct = run.collateral_type;
+                let symbol = run.symbol;
+                let decimals = run.decimals;
+                let outcome = crate::event::record_redemption_on_vault_run(
+                    state,
+                    caller,
+                    effective,
+                    fee,
+                    price,
+                    block_index,
+                    ct,
+                    &run.vault_ids,
+                    Some(request.min_net_collateral_raw),
+                )
+                .map_err(redemption_record_error_to_protocol)?;
+                crate::record_per_collateral_redemption_fee(
+                    state,
+                    &ct,
+                    fee_ratio,
+                    ic_cdk::api::time(),
+                );
+                let refund_e8s = redemption_raw_refund(
+                    (amount - fee).to_u64(),
+                    outcome.consumed.to_u64(),
+                    rmr,
+                    (amount - fee).to_u64(),
+                );
+                if refund_e8s > 0 {
+                    let refund_nonce = state.next_op_nonce();
+                    state.pending_refunds.insert(
+                        block_index,
+                        crate::state::PendingRefund {
+                            user: caller,
+                            amount_e8s: refund_e8s,
+                            retry_count: 0,
+                            op_nonce: refund_nonce,
+                        },
+                    );
+                }
+                let _ = crate::treasury::plan_fee_routing(
+                    state,
+                    fee,
+                    crate::event::FeeSource::RedemptionFee,
+                );
+                Ok((fee, outcome, net, symbol, decimals))
+            });
+
+            let (fee, outcome, net, symbol, decimals) = match mutation_result {
+                Ok(values) => values,
+                Err(error) => {
+                    return Err(refund_rejected_quoted_redemption(
+                        caller,
+                        request.amount_e8s,
+                        block_index,
+                        error,
+                    )
+                    .await)
+                }
+            };
+
+            ic_cdk_timers::set_timer(std::time::Duration::from_secs(0), || {
+                ic_cdk::spawn(crate::process_pending_transfer())
+            });
+            Ok(RedemptionResult {
+                icusd_block_index: block_index,
+                fee_paid_e8s: fee.to_u64(),
+                collateral_type: post_quote.collateral_type,
+                symbol,
+                decimals,
+                net_collateral_raw: net,
+                payout_status: RedemptionPayoutStatus::Queued,
+            })
+        }
+    }
+}
+
+async fn refund_rejected_quoted_redemption<E>(
+    caller: Principal,
+    amount_e8s: u64,
+    original_block: u64,
+    reason: E,
+) -> E {
+    let refund_nonce = mutate_state(|state| state.next_op_nonce());
+    match management::transfer_icusd_with_nonce(ICUSD::from(amount_e8s), caller, refund_nonce).await
+    {
+        Ok(_) => reason,
+        Err(refund_error) => {
+            mutate_state(|state| {
+                persist_rejected_redemption_refund(
+                    state,
+                    caller,
+                    original_block,
+                    amount_e8s,
+                    refund_nonce,
+                );
+            });
+            log!(INFO,
+                "[redeem_quoted] Full icUSD refund for rejected redemption {} is queued after transfer failure: {:?}",
+                original_block, refund_error
+            );
+            reason
+        }
     }
 }
 
@@ -1321,6 +2460,7 @@ fn queue_collateral_payout(
                 collateral_type,
                 retry_count: 0,
                 op_nonce,
+                min_net_collateral_raw: None,
             },
         );
         None
@@ -7063,6 +8203,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
                         collateral_type: vault.collateral_type,
                         retry_count: 0,
                         op_nonce: excess_nonce,
+                        min_net_collateral_raw: None,
                     },
                 );
             }
@@ -8919,5 +10060,753 @@ mod xrp_sp_absorb_contract_tests {
         assert!(!state
             .sp_xrp_absorb_results_by_proof
             .contains_key(&(SpProofLedger::IcusdBurn, 1)));
+    }
+}
+
+#[cfg(test)]
+mod redemption_ranking_completeness_tests {
+    use super::{
+        max_input_matching, redemption_price_timestamp_is_fresh, redemption_ranking_is_complete,
+        simulated_collateral_total_raw, REDEMPTION_PRICE_MAX_AGE_NS,
+    };
+    use candid::Principal;
+
+    #[test]
+    fn missing_competitor_price_cannot_look_like_a_complete_rank() {
+        let icp = Principal::from_slice(&[1]);
+        let xaut = Principal::from_slice(&[2]);
+
+        assert!(!redemption_ranking_is_complete(
+            &[icp, xaut],
+            &[icp],
+            false,
+            64,
+        ));
+        assert!(redemption_ranking_is_complete(
+            &[icp, xaut],
+            &[icp, xaut],
+            true,
+            64,
+        ));
+    }
+
+    #[test]
+    fn redemption_candidate_limit_accepts_64_and_rejects_65() {
+        let candidates: Vec<_> = (0..65).map(|i| Principal::from_slice(&[i])).collect();
+        let first_64: Vec<_> = candidates.iter().take(64).copied().collect();
+        assert!(redemption_ranking_is_complete(
+            &first_64,
+            &first_64,
+            true,
+            64,
+        ));
+        assert!(!redemption_ranking_is_complete(
+            &candidates,
+            &candidates,
+            true,
+            64,
+        ));
+    }
+
+    #[test]
+    fn redemption_capacity_search_covers_low_rmr_and_checks_next_unit() {
+        // 50% redemption fee and 1% RMR yield 0.5% effective debt reduction.
+        // A 100-unit debt therefore supports 20,000 input units, far beyond
+        // the old arbitrary 100x search ceiling.
+        let capacity = max_input_matching(u64::MAX, |input| {
+            input / 200 + u64::from(input % 200 != 0) <= 100
+        });
+        assert_eq!(capacity, 20_000);
+        assert!(capacity / 200 <= 100);
+        assert!((capacity + 1) / 200 + u64::from((capacity + 1) % 200 != 0) > 100);
+    }
+
+    #[test]
+    fn redemption_payout_rejects_native_sum_above_u64() {
+        let large = 10_000_000_000_000_000_000u64;
+        let simulated = vec![
+            crate::event::VaultRedemption {
+                vault_id: 1,
+                icusd_redeemed_e8s: 1,
+                collateral_seized: large,
+            },
+            crate::event::VaultRedemption {
+                vault_id: 2,
+                icusd_redeemed_e8s: 1,
+                collateral_seized: large,
+            },
+        ];
+        assert!(simulated_collateral_total_raw(&simulated).is_none());
+
+        let representable = vec![crate::event::VaultRedemption {
+            vault_id: 1,
+            icusd_redeemed_e8s: 1,
+            collateral_seized: u64::MAX,
+        }];
+        assert_eq!(
+            simulated_collateral_total_raw(&representable),
+            Some(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn redemption_price_freshness_rejects_future_timestamps() {
+        let now = 1_000_000_000_000;
+        assert!(redemption_price_timestamp_is_fresh(
+            now - REDEMPTION_PRICE_MAX_AGE_NS,
+            now
+        ));
+        assert!(!redemption_price_timestamp_is_fresh(now + 1, now));
+        assert!(!redemption_price_timestamp_is_fresh(
+            now - REDEMPTION_PRICE_MAX_AGE_NS - 1,
+            now
+        ));
+    }
+}
+
+#[cfg(test)]
+mod redemption_await_boundary_tests {
+    use super::{
+        current_fresh_legacy_reserve_run_for_snapshot,
+        current_legacy_reserve_run_for_snapshot, legacy_redemption_run_for_request,
+        legacy_reserve_spillover_run, persist_rejected_redemption_refund,
+        redemption_raw_refund, redemption_ranking_is_fresh,
+        redemption_run_snapshot_error, reserve_spillover_raw_refund_budget,
+        redemption_tail_raw_refund, reserve_spillover_snapshot_mismatch_refund,
+        reserve_post_settlement_raw_refund, RedemptionRunSnapshot, Vault,
+        REDEMPTION_PRICE_MAX_AGE_NS,
+    };
+    use crate::numeric::{Ratio, ICUSD};
+    use crate::state::State;
+    use candid::Principal;
+    use rust_decimal::prelude::ToPrimitive;
+    use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
+
+    const E8: u64 = 100_000_000;
+
+    fn principal(byte: u8) -> Principal {
+        Principal::from_slice(&[byte; 29])
+    }
+
+    fn redemption_state(xaut_collateral_raw: u64) -> (State, Principal, Principal) {
+        let icp = principal(0x11);
+        let xaut = principal(0x22);
+        let mut state = State::from(crate::InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: principal(0x33),
+            icp_ledger_principal: icp,
+            fee_e8s: 0,
+            developer_principal: principal(0x44),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        });
+        state.min_icusd_amount = ICUSD::new(0);
+
+        let mut icp_config = state.collateral_configs.get(&icp).unwrap().clone();
+        icp_config.last_price = Some(1.0);
+        icp_config.last_price_timestamp = Some(1);
+        icp_config.borrow_threshold_ratio = Ratio::from(dec!(1.50));
+        icp_config.liquidation_ratio = Ratio::from(dec!(1.33));
+        icp_config.symbol = Some("ICP".to_string());
+        state.collateral_configs.insert(icp, icp_config.clone());
+
+        let mut xaut_config = icp_config;
+        xaut_config.ledger_canister_id = xaut;
+        xaut_config.borrow_threshold_ratio = Ratio::from(dec!(1.18));
+        xaut_config.liquidation_ratio = Ratio::from(dec!(1.12));
+        xaut_config.symbol = Some("ckXAUT".to_string());
+        state.collateral_configs.insert(xaut, xaut_config);
+
+        state.open_vault(Vault {
+            owner: principal(0x55),
+            vault_id: 1,
+            borrowed_icusd_amount: ICUSD::new(E8),
+            collateral_amount: 150_000_000,
+            collateral_type: icp,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        });
+        state.open_vault(Vault {
+            owner: principal(0x66),
+            vault_id: 2,
+            borrowed_icusd_amount: ICUSD::new(E8),
+            collateral_amount: xaut_collateral_raw,
+            collateral_type: xaut,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        });
+        (state, icp, xaut)
+    }
+
+    fn vault_balances(state: &State) -> Vec<(u64, u64, u64)> {
+        state
+            .vault_id_to_vaults
+            .values()
+            .map(|vault| {
+                (
+                    vault.vault_id,
+                    vault.borrowed_icusd_amount.to_u64(),
+                    vault.collateral_amount,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn legacy_icp_request_rejects_non_icp_first_run_before_any_accounting_change() {
+        let (state, icp, xaut) = redemption_state(120_000_000);
+        let first = state.redemption_runs().into_iter().next().unwrap();
+        assert_eq!(first.collateral_type, xaut);
+        let before_balances = vault_balances(&state);
+        let before_pending_refunds = state.pending_refunds.len();
+        let before_pending_payouts = state.pending_redemption_transfer.len();
+        let before_base_rate = state.collateral_configs[&xaut].current_base_rate;
+
+        let error = legacy_redemption_run_for_request(&state, icp).unwrap_err();
+        let crate::ProtocolError::GenericError(message) = error else {
+            panic!("expected a pre-pull requested-asset rejection");
+        };
+        assert!(message.contains("ckXAUT") && message.contains("ICP"));
+        assert!(message.contains("review a new quote"));
+        assert_eq!(vault_balances(&state), before_balances);
+        assert_eq!(state.pending_refunds.len(), before_pending_refunds);
+        assert_eq!(state.pending_redemption_transfer.len(), before_pending_payouts);
+        assert_eq!(state.collateral_configs[&xaut].current_base_rate, before_base_rate);
+
+        assert_eq!(
+            legacy_redemption_run_for_request(&state, xaut)
+                .unwrap()
+                .collateral_type,
+            xaut,
+            "matching the global first asset remains allowed"
+        );
+    }
+
+    #[test]
+    fn direct_post_pull_guard_rejects_same_asset_price_and_order_changes() {
+        let (mut state, icp, xaut) = redemption_state(0);
+        state
+            .vault_id_to_vaults
+            .get_mut(&2)
+            .unwrap()
+            .borrowed_icusd_amount = ICUSD::new(0);
+        let first = state.redemption_runs().into_iter().next().unwrap();
+        assert_eq!(first.collateral_type, icp);
+        let expected = RedemptionRunSnapshot::capture(&first);
+        let before = vault_balances(&state);
+
+        state.collateral_configs.get_mut(&icp).unwrap().last_price = Some(1.01);
+        let changed_price = state.redemption_runs().into_iter().next().unwrap();
+        assert_eq!(changed_price.collateral_type, icp);
+        assert!(redemption_run_snapshot_error(&expected, &changed_price).is_some());
+        assert_eq!(vault_balances(&state), before);
+
+        // Restore the price, add a second same-asset vault, and change its
+        // health so the ordered IDs reverse while the selected token stays ICP.
+        state.collateral_configs.get_mut(&icp).unwrap().last_price = Some(1.0);
+        state.open_vault(Vault {
+            owner: principal(0x77),
+            vault_id: 3,
+            borrowed_icusd_amount: ICUSD::new(E8),
+            collateral_amount: 148_000_000,
+            collateral_type: icp,
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        });
+        let before_order = state.redemption_runs().into_iter().next().unwrap();
+        let order_snapshot = RedemptionRunSnapshot::capture(&before_order);
+        state
+            .vault_id_to_vaults
+            .get_mut(&1)
+            .unwrap()
+            .collateral_amount = 147_000_000;
+        state
+            .vault_id_to_vaults
+            .get_mut(&3)
+            .unwrap()
+            .collateral_amount = 151_000_000;
+        let reordered = state.redemption_runs().into_iter().next().unwrap();
+        assert_eq!(reordered.collateral_type, icp);
+        assert_ne!(reordered.vault_ids, before_order.vault_ids);
+        assert!(redemption_run_snapshot_error(&order_snapshot, &reordered).is_some());
+    }
+
+    #[test]
+    fn reserve_spillover_is_icp_only_but_stable_only_remains_available() {
+        let (state, icp, xaut) = redemption_state(120_000_000);
+        assert_eq!(state.redemption_runs()[0].collateral_type, xaut);
+        assert_eq!(legacy_reserve_spillover_run(&state, 0).unwrap(), None);
+        assert!(legacy_reserve_spillover_run(&state, 1).is_err());
+
+        let (mut state, icp, xaut) = redemption_state(145_000_000);
+        let icp_run = legacy_reserve_spillover_run(&state, 1).unwrap().unwrap();
+        assert_eq!(icp_run.collateral_type, icp);
+        let snapshot = RedemptionRunSnapshot::capture(&icp_run);
+        let before = vault_balances(&state);
+
+        // Simulate a post-stable-settlement oracle update that moves ICP behind
+        // ckXAUT. The synchronous final gate must decline the native event and
+        // return the entire unconsumed spillover tail for refund.
+        state.collateral_configs.get_mut(&icp).unwrap().last_price = Some(2.0);
+        let new_first = state.redemption_runs().into_iter().next().unwrap();
+        assert_eq!(new_first.collateral_type, xaut);
+        assert!(current_legacy_reserve_run_for_snapshot(&state, &snapshot).is_none());
+        let rmr = Ratio::from(dec!(0.9));
+        assert_eq!(reserve_spillover_snapshot_mismatch_refund(700, rmr, 777), 777);
+        assert_eq!(vault_balances(&state), before);
+        assert!(state.pending_redemption_transfer.is_empty());
+    }
+
+    #[test]
+    fn reserve_final_gate_rejects_unchanged_but_stale_global_price_snapshot() {
+        let (mut state, icp, xaut) = redemption_state(145_000_000);
+        let first = state.redemption_runs().into_iter().next().unwrap();
+        assert_eq!(first.collateral_type, icp);
+        let snapshot = RedemptionRunSnapshot::capture(&first);
+        let boundary_now = 1 + REDEMPTION_PRICE_MAX_AGE_NS;
+        assert!(redemption_ranking_is_fresh(
+            &state,
+            &state.redemption_runs(),
+            boundary_now
+        ));
+        assert!(current_fresh_legacy_reserve_run_for_snapshot(
+            &state,
+            &snapshot,
+            boundary_now
+        )
+        .is_some());
+
+        // Both prices and the selected IDs remain identical, but the stable
+        // transfer crossed the ten-minute cache-age limit before seizure.
+        let stale_now = boundary_now + 1;
+        let unchanged_first = state.redemption_runs().into_iter().next().unwrap();
+        assert!(snapshot.matches(&unchanged_first));
+        assert!(current_legacy_reserve_run_for_snapshot(&state, &snapshot).is_some());
+        assert!(!redemption_ranking_is_fresh(
+            &state,
+            &state.redemption_runs(),
+            stale_now
+        ));
+        assert!(current_fresh_legacy_reserve_run_for_snapshot(
+            &state,
+            &snapshot,
+            stale_now
+        )
+        .is_none());
+
+        // A future competitor timestamp also makes the complete ordering
+        // unavailable, even though the selected ICP quote itself is unchanged.
+        state
+            .collateral_configs
+            .get_mut(&xaut)
+            .unwrap()
+            .last_price_timestamp = Some(stale_now + 1);
+        assert!(!redemption_ranking_is_fresh(
+            &state,
+            &state.redemption_runs(),
+            stale_now
+        ));
+    }
+
+    #[test]
+    fn reserve_partial_spillover_refund_conserves_raw_input_through_rmr_and_fees() {
+        let (mut state, icp, _xaut) = redemption_state(0);
+        state
+            .vault_id_to_vaults
+            .get_mut(&2)
+            .unwrap()
+            .borrowed_icusd_amount = ICUSD::new(0);
+        state
+            .vault_id_to_vaults
+            .get_mut(&1)
+            .unwrap()
+            .borrowed_icusd_amount = ICUSD::new(40_095_000);
+        state.rmr_floor = Ratio::from(dec!(0.9));
+        state.total_collateral_ratio = state.rmr_floor_cr;
+        state.reserve_redemption_fee = Ratio::from(dec!(0.1));
+        let mut config = state.collateral_configs.get(&icp).unwrap().clone();
+        config.redemption_fee_floor = Ratio::from(dec!(0.01));
+        config.redemption_fee_ceiling = Ratio::from(dec!(0.01));
+        state.collateral_configs.insert(icp, config);
+
+        let input_e8s = 100_000_000u64;
+        let rmr = state.get_redemption_margin_ratio();
+        assert_eq!(rmr, Ratio::from(dec!(0.9)));
+        let reserve_fee = ICUSD::from(input_e8s) * state.reserve_redemption_fee;
+        assert_eq!(reserve_fee.to_u64(), 10_000_000);
+        let net_after_reserve_fee = ICUSD::from(input_e8s) - reserve_fee;
+        let total_effective = net_after_reserve_fee * rmr;
+        let available_for_user = 405_000;
+        let stable_effective_e8s = available_for_user * 100;
+        let spillover_e8s = total_effective.to_u64() - stable_effective_e8s;
+        assert_eq!(spillover_e8s, 40_500_000);
+        let raw_budget = reserve_spillover_raw_refund_budget(
+            net_after_reserve_fee.to_u64(),
+            available_for_user,
+            rmr,
+        );
+        assert_eq!(raw_budget, 45_000_000);
+
+        // The fixture config pins both fee bounds to 1%, avoiding the dynamic
+        // fee helper's canister-clock read in this host-side unit test.
+        let base_fee = Ratio::from(dec!(0.01));
+        assert_eq!(base_fee, Ratio::from(dec!(0.01)));
+        let vault_fee = ICUSD::from(spillover_e8s) * base_fee;
+        assert_eq!(vault_fee.to_u64(), 405_000);
+        let effective_spillover = ICUSD::from(spillover_e8s) - vault_fee;
+        let run = state.redemption_runs().into_iter().next().unwrap();
+        assert_eq!(run.collateral_type, icp);
+        let mut persisted_events = Vec::new();
+        let outcome = crate::event::record_redemption_on_vault_run_at(
+            &mut state,
+            principal(0x99),
+            effective_spillover,
+            vault_fee,
+            crate::numeric::UsdIcp::from(dec!(1)),
+            700,
+            icp,
+            &run.vault_ids,
+            None,
+            1_000_000_000_000,
+            &mut persisted_events,
+        )
+        .unwrap();
+        assert_eq!(outcome.consumed.to_u64(), 40_095_000);
+        assert_eq!(outcome.margin.to_u64(), 40_095_000);
+        assert_eq!(
+            state.vault_id_to_vaults[&1]
+                .borrowed_icusd_amount
+                .to_u64(),
+            0,
+            "the selected-run execution really retires the fixture vault debt"
+        );
+        let consumed = outcome.consumed;
+        let [crate::event::Event::RedemptionOnVaults {
+            vault_redemptions: Some(redemptions),
+            payout_collateral_raw: Some(payout_raw),
+            ..
+        }] = persisted_events.as_slice()
+        else {
+            panic!("the checked recorder should persist one pinned redemption event");
+        };
+        assert_eq!(*payout_raw, 40_095_000);
+        assert_eq!(
+            redemptions
+                .iter()
+                .map(|redemption| redemption.icusd_redeemed_e8s)
+                .sum::<u64>(),
+            consumed.to_u64()
+        );
+        let pending = state.pending_redemption_transfer.get(&700).unwrap();
+        assert_eq!(pending.margin.to_u64(), *payout_raw);
+        assert_eq!(pending.collateral_type, icp);
+
+        let refund_raw = reserve_post_settlement_raw_refund(
+            net_after_reserve_fee.to_u64(),
+            available_for_user,
+            vault_fee.to_u64(),
+            consumed.to_u64(),
+            rmr,
+        );
+        assert_eq!(refund_raw, 0);
+        // Independent oracle: stable payout plus committed native fee/debt is
+        // 81,000,000 effective e8s; / .9 consumes the full 90,000,000 raw
+        // post-reserve-fee budget exactly once.
+        let raw_native_leg =
+            (rust_decimal::Decimal::from(vault_fee.to_u64() + consumed.to_u64()) / rmr.0)
+                .to_u64()
+                .unwrap();
+        assert_eq!(raw_native_leg, 45_000_000);
+        let stable_raw_leg = (Decimal::from(available_for_user * 100) / rmr.0)
+            .ceil()
+            .to_u64()
+            .unwrap();
+        assert_eq!(stable_raw_leg, 45_000_000);
+        assert_eq!(
+            reserve_fee.to_u64() + refund_raw + raw_native_leg + stable_raw_leg,
+            input_e8s,
+            "reserve fee, settled stable leg, successful native fee/debt reduction, and raw refund conserve pulled icUSD"
+        );
+
+        // The cap also excludes the raw equivalent of the stable payout.
+        let stable_raw_budget = reserve_spillover_raw_refund_budget(90_000_000, 405_000, rmr);
+        assert_eq!(stable_raw_budget, 45_000_000);
+        assert_eq!(
+            redemption_tail_raw_refund(
+                Decimal::from(40_500_000),
+                rmr,
+                stable_raw_budget
+            ),
+            45_000_000
+        );
+
+    }
+
+    #[test]
+    fn reserve_partial_native_consumption_refunds_actual_recorder_tail() {
+        let (mut state, icp, _xaut) = redemption_state(0);
+        state
+            .vault_id_to_vaults
+            .get_mut(&2)
+            .unwrap()
+            .borrowed_icusd_amount = ICUSD::new(0);
+        state
+            .vault_id_to_vaults
+            .get_mut(&1)
+            .unwrap()
+            .borrowed_icusd_amount = ICUSD::new(40_095_000);
+        state.rmr_floor = Ratio::from(dec!(0.9));
+        state.total_collateral_ratio = state.rmr_floor_cr;
+        state.reserve_redemption_fee = Ratio::from(dec!(0.1));
+        let mut config = state.collateral_configs.get(&icp).unwrap().clone();
+        config.redemption_fee_floor = Ratio::from(dec!(0.01));
+        config.redemption_fee_ceiling = Ratio::from(dec!(0.01));
+        state.collateral_configs.insert(icp, config);
+
+        let input_e8s = 100_000_000u64;
+        let rmr = state.get_redemption_margin_ratio();
+        let reserve_fee = ICUSD::from(input_e8s) * state.reserve_redemption_fee;
+        let net_after_reserve_fee = ICUSD::from(input_e8s) - reserve_fee;
+        let spillover_e8s = (net_after_reserve_fee * rmr).to_u64();
+        assert_eq!(spillover_e8s, 81_000_000);
+        let raw_budget = net_after_reserve_fee.to_u64();
+        let raw_budget_after_stable =
+            reserve_spillover_raw_refund_budget(raw_budget, 0, rmr);
+        assert_eq!(raw_budget_after_stable, 90_000_000);
+
+        // Pin both fee bounds to 1% so the actual recorder is independent of
+        // canister time in this host-side test.
+        let vault_fee = ICUSD::from(spillover_e8s) * Ratio::from(dec!(0.01));
+        assert_eq!(vault_fee.to_u64(), 810_000);
+        let effective_spillover = ICUSD::from(spillover_e8s) - vault_fee;
+        let run = state.redemption_runs().into_iter().next().unwrap();
+        assert_eq!(run.collateral_type, icp);
+        let mut persisted_events = Vec::new();
+        let outcome = crate::event::record_redemption_on_vault_run_at(
+            &mut state,
+            principal(0x99),
+            effective_spillover,
+            vault_fee,
+            crate::numeric::UsdIcp::from(dec!(1)),
+            702,
+            icp,
+            &run.vault_ids,
+            None,
+            1_000_000_000_000,
+            &mut persisted_events,
+        )
+        .unwrap();
+        assert_eq!(outcome.consumed.to_u64(), 40_095_000);
+        assert_eq!(
+            state.vault_id_to_vaults[&1]
+                .borrowed_icusd_amount
+                .to_u64(),
+            0
+        );
+        let [crate::event::Event::RedemptionOnVaults {
+            payout_collateral_raw: Some(payout_raw),
+            ..
+        }] = persisted_events.as_slice()
+        else {
+            panic!("the checked recorder should persist its actual native payout");
+        };
+        assert_eq!(*payout_raw, 40_095_000);
+
+        let refund_raw = reserve_post_settlement_raw_refund(
+            raw_budget,
+            0,
+            vault_fee.to_u64(),
+            outcome.consumed.to_u64(),
+            rmr,
+        );
+        // Independent oracle: V + C = 40,905,000 effective e8s;
+        // ceil(40,905,000 / .9) = 45,450,000 raw, leaving 44,550,000.
+        assert_eq!(refund_raw, 44_550_000);
+        let native_raw_spent =
+            (Decimal::from(vault_fee.to_u64() + outcome.consumed.to_u64()) / rmr.0)
+                .ceil()
+                .to_u64()
+                .unwrap();
+        assert_eq!(native_raw_spent, 45_450_000);
+        assert_eq!(
+            reserve_fee.to_u64() + refund_raw + native_raw_spent,
+            input_e8s,
+            "reserve fee, committed native leg, and actual-recorder tail refund conserve input"
+        );
+    }
+
+    #[test]
+    fn fractional_effective_tail_is_divided_by_rmr_before_flooring() {
+        let rmr_09 = Ratio::from(dec!(0.9));
+        let input = Decimal::from(100_000_001u64);
+        let effective = input * rmr_09.0;
+        let unconsumed_after_one = effective - Decimal::ONE;
+        // Independent oracle: (90,000,000.9 - 1) / .9 floors to
+        // 99,999,999. Flooring the effective tail first under-refunds one.
+        assert_eq!(
+            redemption_tail_raw_refund(unconsumed_after_one, rmr_09, 100_000_001),
+            99_999_999
+        );
+        assert_eq!(
+            redemption_raw_refund(100_000_001, 1, rmr_09, 100_000_001),
+            99_999_999,
+            "the production direct/quoted calculation reconstructs unrounded E before subtracting actual consumption"
+        );
+
+        let fully_consumed_native = effective - Decimal::from(90_000_000u64);
+        assert_eq!(fully_consumed_native, Decimal::new(9, 1));
+        // This sub-unit tail still represents one raw icUSD unit after
+        // unscaling; an early `to_u64() == 0` guard would incorrectly drop it.
+        assert_eq!(
+            redemption_tail_raw_refund(fully_consumed_native, rmr_09, 100_000_001),
+            1
+        );
+        assert_eq!(
+            redemption_raw_refund(100_000_001, 90_000_000, rmr_09, 100_000_001),
+            1,
+            "the actual integer Token execution still refunds the unrounded 0.9 remainder"
+        );
+
+        let rmr_half = Ratio::from(dec!(0.5));
+        assert_eq!(
+            redemption_tail_raw_refund(Decimal::new(99, 2), rmr_half, 100),
+            1,
+            "a 0.99 effective tail at 50% RMR floors to one raw input unit"
+        );
+        assert_eq!(
+            redemption_tail_raw_refund(Decimal::from(100u64), rmr_half, 17),
+            17,
+            "the result remains capped by its original raw-input budget"
+        );
+        let above_u64 = Decimal::from(u64::MAX) + Decimal::ONE;
+        assert_eq!(
+            redemption_tail_raw_refund(above_u64, rmr_half, u64::MAX),
+            u64::MAX,
+            "cap the Decimal result before converting to u64"
+        );
+    }
+
+    #[test]
+    fn reserve_recorder_error_refunds_spillover_without_charging_uncommitted_vault_fee() {
+        let (mut state, icp, _xaut) = redemption_state(0);
+        state
+            .vault_id_to_vaults
+            .get_mut(&2)
+            .unwrap()
+            .borrowed_icusd_amount = ICUSD::new(0);
+        state
+            .vault_id_to_vaults
+            .get_mut(&1)
+            .unwrap()
+            .borrowed_icusd_amount = ICUSD::new(100_000_000);
+        state.rmr_floor = Ratio::from(dec!(0.9));
+        state.total_collateral_ratio = state.rmr_floor_cr;
+        state.reserve_redemption_fee = Ratio::from(dec!(0.1));
+        let mut config = state.collateral_configs.get(&icp).unwrap().clone();
+        config.redemption_fee_floor = Ratio::from(dec!(0.01));
+        config.redemption_fee_ceiling = Ratio::from(dec!(0.01));
+        state.collateral_configs.insert(icp, config);
+
+        let input_e8s = 100_000_000;
+        let rmr = state.get_redemption_margin_ratio();
+        let reserve_fee = ICUSD::from(input_e8s) * state.reserve_redemption_fee;
+        let net_after_reserve_fee = ICUSD::from(input_e8s) - reserve_fee;
+        let spillover_e8s = (net_after_reserve_fee * rmr).to_u64();
+        let raw_budget = reserve_spillover_raw_refund_budget(net_after_reserve_fee.to_u64(), 0, rmr);
+        let planned_vault_fee = ICUSD::from(spillover_e8s) * Ratio::from(dec!(0.01));
+        assert_eq!(planned_vault_fee.to_u64(), 810_000);
+        let effective_spillover = ICUSD::from(spillover_e8s) - planned_vault_fee;
+        let run = state.redemption_runs().into_iter().next().unwrap();
+        assert_eq!(run.collateral_type, icp);
+        let before = vault_balances(&state);
+        let before_pending = state.pending_redemption_transfer.len();
+        let before_base_rate = state.collateral_configs[&icp].current_base_rate;
+        let mut persisted_events = Vec::new();
+        let result = crate::event::record_redemption_on_vault_run_at(
+            &mut state,
+            principal(0x99),
+            effective_spillover,
+            planned_vault_fee,
+            crate::numeric::UsdIcp::from(dec!(1)),
+            701,
+            icp,
+            &run.vault_ids,
+            Some(u64::MAX),
+            1_000_000_000_000,
+            &mut persisted_events,
+        );
+        assert!(matches!(
+            result,
+            Err(crate::event::RedemptionRecordError::MinimumNotMet { .. })
+        ));
+        assert_eq!(vault_balances(&state), before);
+        assert_eq!(state.pending_redemption_transfer.len(), before_pending);
+        assert_eq!(state.collateral_configs[&icp].current_base_rate, before_base_rate);
+        assert!(persisted_events.is_empty());
+
+        // The recorder failed before committing the native fee. Preserve the
+        // settled reserve fee, refund the entire effective spillover tail, and
+        // do not subtract the locally calculated but uncommitted 1% fee.
+        assert_eq!(
+            reserve_post_settlement_raw_refund(
+                net_after_reserve_fee.to_u64(),
+                0,
+                0,
+                0,
+                rmr,
+            ),
+            90_000_000
+        );
+        assert_eq!(
+            reserve_spillover_snapshot_mismatch_refund(spillover_e8s, rmr, raw_budget),
+            90_000_000,
+            "a recorder error commits neither its planned vault fee nor debt consumption"
+        );
+        assert_eq!(input_e8s - 90_000_000, reserve_fee.to_u64());
+    }
+
+    #[test]
+    fn reserve_full_stable_leg_returns_sub_e6_raw_dust() {
+        let rmr = Ratio::from(dec!(0.9));
+        let raw_after_fee = 100_000_111u64;
+        let effective_e8s = (ICUSD::from(raw_after_fee) * rmr).to_u64();
+        let net_e6s = effective_e8s / 100;
+        let stable_paid_e6s = effective_e8s / 100;
+        let spillover_e8s = net_e6s * 100 - stable_paid_e6s * 100;
+        assert_eq!(effective_e8s, 90_000_099);
+        assert_eq!(stable_paid_e6s, 900_000);
+        assert_eq!(spillover_e8s, 0);
+        assert_eq!(effective_e8s - stable_paid_e6s * 100, 99);
+
+        let raw_budget = reserve_spillover_raw_refund_budget(raw_after_fee, stable_paid_e6s, rmr);
+        assert_eq!(raw_budget, 111);
+        assert_eq!(
+            reserve_post_settlement_raw_refund(raw_after_fee, stable_paid_e6s, 0, 0, rmr),
+            111,
+            "stable e6 quantization must not retain the remaining raw icUSD budget"
+        );
+    }
+
+    #[test]
+    fn rejected_redemption_refund_failure_persists_the_original_claim_and_nonce() {
+        let (mut state, _, _) = redemption_state(0);
+        let owner = principal(0x88);
+        let before = vault_balances(&state);
+        let block = 123;
+        let nonce = 456;
+        persist_rejected_redemption_refund(&mut state, owner, block, 987_654, nonce);
+        let claim = state.pending_refunds.get(&block).unwrap();
+        assert_eq!(claim.user, owner);
+        assert_eq!(claim.amount_e8s, 987_654);
+        assert_eq!(claim.retry_count, 0);
+        assert_eq!(claim.op_nonce, nonce);
+        assert_eq!(vault_balances(&state), before);
+        assert!(state.pending_redemption_transfer.is_empty());
     }
 }

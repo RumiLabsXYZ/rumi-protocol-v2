@@ -129,13 +129,13 @@ fn arb001_bot_confirm_and_admin_resolve_saturate() {
 }
 
 #[test]
-fn red001_redemption_payout_derived_from_consumed() {
+fn red001_redemption_payout_uses_actual_native_collateral() {
     let src = read("src/event.rs");
-    let body = fn_body(&src, "pub fn record_redemption_on_vaults(");
+    let body = fn_body(&src, "pub fn record_redemption_on_vault_run(");
     assert!(
-        body.contains("let margin: ICP = consumed / ct_price"),
-        "the redemption payout must be derived from the icUSD actually consumed by the \
-         water-fill, never from the requested claim (RED-001)."
+        body.contains("total_actual_collateral_seized(&vault_redemptions)"),
+        "the payout must use the actual post-saturation native collateral removed by the \
+         selected-ID water-fill (RED-001)."
     );
     assert!(
         !body.contains("let margin: ICP = icusd_amount / ct_price"),
