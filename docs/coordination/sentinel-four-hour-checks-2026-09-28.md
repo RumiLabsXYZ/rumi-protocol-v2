@@ -17,3 +17,9 @@ Creating and approving the proposal records one signer approval and cannot activ
 The page shows the actual active interval and actual next scheduled deadline. The four-hour policy is pending until authoritative execution; the UI must not claim it is active earlier.
 
 Verification and publication evidence will be appended after implementation.
+
+## Live cadence proposal
+
+Exact policy was pushed at4f43a0ec; argument SHA-256 is b2ebe76efacabaa8b2cf3ab9a7580e3e8fab96bd31a32d03eafad29044661441. A bounded independent review compared all fields against the fresh executed-policy snapshot and returned PASS.
+
+Mainnet `propose_set_global_policy` returned Ok17; explicit robvector `approve_proposal(17)` returned Oktrue. Fresh authenticated readback shows proposal17 Open with exactly one distinct approval, created1790618157. The earliest existing24-hour timelock expiry is2026-09-29T17:55:57Z (10:55:57 Pacific). A second configured signer must approve before execution. Cadence remains hourly until execution. Raw local receipts are /private/tmp/sentinel-cadence-propose.json, -approve.json and -after-proposals.json. Creating/approving this policy caused no cycle delivery or ICP conversion.

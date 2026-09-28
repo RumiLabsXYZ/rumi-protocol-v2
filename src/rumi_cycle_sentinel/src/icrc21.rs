@@ -151,7 +151,7 @@ fn consent_message(method: &str) -> Option<&'static str> {
             "Acknowledge a Cycle Sentinel alarm. This changes the alarm record only and cannot transfer cycles.",
         ),
         "run_maintenance_now" => Some(
-            "Run a Cycle Sentinel maintenance check now. For an authorized signer, this checks balances and may convert ICP into cycles or top up registered canisters under the existing reserve, cap, cooldown and target policies. It does not change the automatic schedule or policy.",
+            "Run a Cycle Sentinel maintenance check now. For an authorized signer, this checks balances and may convert ICP into cycles, refuel Sentinel under its self-recovery policy, or top up registered canisters under their target policies. Existing reserves, caps and cooldowns still apply. It does not change the automatic schedule or policy.",
         ),
         "manual_top_up" => Some(
             "Request a manual Cycle Sentinel top-up for the selected target. If authorized by the stored policy and available funding rail, this can transfer cycles to that target.",
@@ -247,6 +247,8 @@ mod tests {
         };
         assert!(message.contains("convert ICP"));
         assert!(message.contains("top up registered canisters"));
+        assert!(message.contains("refuel Sentinel under its self-recovery policy"));
+        assert!(message.contains("under their target policies"));
         assert!(message.contains("does not change the automatic schedule or policy"));
         assert!(!message.contains("cannot change a target"));
     }

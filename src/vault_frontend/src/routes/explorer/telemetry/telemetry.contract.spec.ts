@@ -33,7 +33,7 @@ describe('Cycle Sentinel telemetry route contract', () => {
     expect(controls).toMatch(/\{#if signer && actor\}[\s\S]*on:click=\{runCheckNow\}/);
     expect(controls).toContain('disabled={checkingNow || loading}');
     expect(controls).toContain("checkingNow ? 'Checking now…' : 'Run check now'");
-    expect(controls).toContain('may top up canisters under the current thresholds and spending limits');
+    expect(controls).toContain('may refuel Sentinel or top up registered canisters under the current reserves, thresholds and spending limits');
     expect(controls).toContain('Refresh telemetry reads saved results.');
     const refreshSource = source.slice(source.indexOf('async function refresh()'), source.indexOf('async function checkOperatorAccess()'));
     expect(refreshSource).not.toContain('runMaintenanceNow');

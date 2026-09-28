@@ -486,7 +486,7 @@
         {/if}
       </div>
       <p class="fine-print">Refresh telemetry reads saved results.</p>
-      {#if signer && actor}<p id="manual-check-description" class="fine-print">Run check now checks balances immediately and may top up canisters under the current thresholds and spending limits.</p>{/if}
+      {#if signer && actor}<p id="manual-check-description" class="fine-print">Run check now checks balances immediately and may refuel Sentinel or top up registered canisters under the current reserves, thresholds and spending limits.</p>{/if}
     </div>
   </header>
   {#if publicError}<div class="notice error" role="alert">Public telemetry unavailable: {publicError}</div>{/if}
