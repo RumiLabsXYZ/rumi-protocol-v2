@@ -41,6 +41,29 @@ macro_rules! ensure {
 
 pub const ICP_TRANSFER_FEE: ICP = ICP::new(10_000); // 0.0001 ICP — standard ICP ledger fee
 pub type VaultId = u64;
+/// One consecutive same-collateral run in the global redemption health order.
+/// A collateral type can appear in more than one run when another asset's
+/// vaults rank between its vaults.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RedemptionRun {
+    pub run_index: u32,
+    pub collateral_type: CollateralType,
+    pub symbol: String,
+    pub vault_ids: Vec<VaultId>,
+    pub weakest_vault_cr: f64,
+    pub health_headroom: f64,
+    pub decimals: u8,
+    pub price_usd: f64,
+    pub price_timestamp_ns: u64,
+    pub price_fresh: bool,
+    pub min_cr: f64,
+    pub liquidation_cr: f64,
+    /// Exact sum of native collateral in this run; multiple u64 vault balances
+    /// may exceed the per-transfer u64 range.
+    pub eligible_collateral_raw: u128,
+    pub eligible_debt_e8s: u64,
+    pub max_input_icusd_e8s: u64,
+}
 pub const DEFAULT_BORROW_FEE: Ratio = Ratio::new(dec!(0.005));
 pub const DEFAULT_CKSTABLE_REPAY_FEE: Ratio = Ratio::new(dec!(0.0005)); // 0.05%
 pub const DEFAULT_MIN_ICUSD_AMOUNT: ICUSD = ICUSD::new(10_000_000); // 0.1 icUSD
@@ -1041,6 +1064,10 @@ pub struct PendingMarginTransfer {
     /// without dedup, matching prior behaviour, no regression).
     #[serde(default)]
     pub op_nonce: u128,
+    /// Minimum net collateral the user consented to receive for a redemption.
+    /// Absent on older snapshots/events, which preserves their prior behavior.
+    #[serde(default)]
+    pub min_net_collateral_raw: Option<u64>,
 }
 
 /// Wave-4 ICC-007: durable refund record for `redeem_reserves` failures.
@@ -1049,9 +1076,10 @@ pub struct PendingMarginTransfer {
 /// but the ckStable transfer back fails AND the inline icUSD refund also fails,
 /// the user is left with nothing. Pre-Wave-4 the only recovery path was a
 /// CRITICAL log. Now the failure persists a `PendingRefund` keyed by the burn
-/// block index, and `process_pending_transfer` retries it until success or
-/// MAX_PENDING_RETRIES. The `op_nonce` is minted once and reused across retries
-/// so the icUSD ledger deduplicates if a previous retry's reply was lost.
+/// block index. `process_pending_transfer` retries below the automatic retry
+/// cap and leaves the entry durably held after `MAX_PENDING_RETRIES`. The
+/// `op_nonce` is minted once and reused across retries so the icUSD ledger
+/// deduplicates if a previous retry's reply was lost.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize, Copy)]
 pub struct PendingRefund {
     pub user: Principal,
@@ -2630,9 +2658,17 @@ impl State {
     /// `PendingMarginTransfer`) and pass it back into the helper on retries —
     /// that is what makes the transfer idempotent at the ledger.
     pub fn next_op_nonce(&mut self) -> u128 {
+        self.next_op_nonce_at(ic_cdk::api::time())
+    }
+
+    /// Build an operation nonce from an explicit timestamp.
+    ///
+    /// Keeping nonce construction separate from the IC clock lets event replay
+    /// and recorder tests use deterministic time while preserving the exact
+    /// production counter and bit layout.
+    pub fn next_op_nonce_at(&mut self, now: u64) -> u128 {
         let counter = self.op_nonce_counter;
         self.op_nonce_counter = self.op_nonce_counter.wrapping_add(1);
-        let now = ic_cdk::api::time();
         ((now as u128) << 64) | (counter as u128)
     }
 
@@ -2854,73 +2890,148 @@ impl State {
         self.icp_ledger_principal
     }
 
-    /// Return collateral types ordered by redemption priority:
-    /// primary sort by `redemption_tier` ascending (tier 1 first), secondary sort
-    /// by worst health score among that type's vaults (lowest health first).
-    /// Only includes active collateral types that have a price and at least one vault with debt.
-    pub fn get_collateral_types_by_redemption_priority(&self) -> Vec<CollateralType> {
-        let mut entries: Vec<(u8, f64, CollateralType)> = Vec::new();
+    /// Return consecutive same-collateral runs from the global redemption
+    /// order. Vault health is compared before redemption tier, matching the
+    /// unbounded shade headroom shown by the frontend.
+    pub fn redemption_runs(&self) -> Vec<RedemptionRun> {
+        let mut entries: Vec<(
+            f64,
+            u8,
+            VaultId,
+            CollateralType,
+            f64,
+            u64,
+            u64,
+            u8,
+            f64,
+            u64,
+            String,
+            f64,
+            f64,
+        )> = Vec::new();
+        let dummy_rate = UsdIcp::from(Decimal::ZERO);
 
-        for (ct, config) in &self.collateral_configs {
-            // Skip inactive or no-price collateral
-            if !config.status.allows_redemption() {
+        for vault in self.vault_id_to_vaults.values() {
+            if vault.borrowed_icusd_amount == 0
+                || vault.bot_processing
+                || crate::guard::is_vault_liquidating(vault.vault_id)
+            {
                 continue;
             }
-            // P4: native-XRP redemption (multi-vault water-fill -> per-vault XRP
-            // claims) is a focused follow-up; until it lands, exclude native-XRP
-            // from redemption priority so redemption never seizes XRP collateral
-            // (redeemers still redeem other collaterals; XRP simply isn't a target).
-            // Latent until P5 registers an XRP collateral.
-            if config.is_native_xrp() {
-                continue;
-            }
-            // Verify price exists (needed for CR computation inside compute_collateral_ratio)
-            match config.last_price {
-                Some(p) if p > 0.0 => { /* price is available */ }
-                _ => continue,
+            let ct = if vault.collateral_type == Principal::anonymous() {
+                self.icp_ledger_principal
+            } else {
+                vault.collateral_type
             };
-
-            // Find the worst (lowest) health score among this type's vaults
-            let liq_ratio = config.liquidation_ratio.to_f64();
-            let mut worst_health: f64 = f64::MAX;
-            let mut has_debt = false;
-
-            if let Some(vault_ids) = self.collateral_to_vault_ids.get(ct) {
-                for vid in vault_ids {
-                    if let Some(vault) = self.vault_id_to_vaults.get(vid) {
-                        if vault.borrowed_icusd_amount == 0 {
-                            continue;
-                        }
-                        has_debt = true;
-                        // Note: compute_collateral_ratio ignores the rate parameter
-                        // (reads from config.last_price instead), so we pass a dummy value.
-                        let cr = crate::compute_collateral_ratio(
-                            vault,
-                            crate::numeric::UsdIcp::from(rust_decimal::Decimal::ZERO),
-                            self,
-                        );
-                        let health = vault.health_score(cr.to_f64(), liq_ratio);
-                        if health < worst_health {
-                            worst_health = health;
-                        }
-                    }
-                }
+            let Some(config) = self.get_collateral_config(&ct) else {
+                continue;
+            };
+            if !config.status.allows_redemption() || config.is_native_xrp() {
+                continue;
             }
-
-            if !has_debt {
-                continue; // no point redeeming from a type with no debt
+            let Some(price) = config.last_price.filter(|p| p.is_finite() && *p > 0.0) else {
+                continue;
+            };
+            let liq = config.liquidation_ratio.to_f64();
+            let borrow = config.borrow_threshold_ratio.to_f64();
+            let denom = 1.351 * borrow - liq;
+            if !liq.is_finite() || !borrow.is_finite() || !denom.is_finite() || denom <= 0.0 {
+                continue;
             }
-
-            entries.push((config.redemption_tier, worst_health, *ct));
+            let cr = crate::compute_collateral_ratio(vault, dummy_rate, self).to_f64();
+            if !cr.is_finite() {
+                continue;
+            }
+            let headroom = (cr - liq) / denom;
+            if !headroom.is_finite() {
+                continue;
+            }
+            let timestamp = config.last_price_timestamp.unwrap_or(0);
+            entries.push((
+                headroom,
+                config.redemption_tier,
+                vault.vault_id,
+                ct,
+                cr,
+                vault.borrowed_icusd_amount.to_u64(),
+                vault.collateral_amount,
+                config.decimals,
+                price,
+                timestamp,
+                config.symbol.clone().unwrap_or_default(),
+                borrow,
+                liq,
+            ));
         }
 
-        // Sort: tier ascending, then worst health ascending (most vulnerable first)
         entries.sort_by(|a, b| {
-            a.0.cmp(&b.0)
-                .then_with(|| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            a.0.total_cmp(&b.0)
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.2.cmp(&b.2))
+                .then_with(|| a.3.as_slice().cmp(b.3.as_slice()))
         });
 
-        entries.into_iter().map(|(_, _, ct)| ct).collect()
+        let mut runs: Vec<RedemptionRun> = Vec::new();
+        for entry in entries {
+            let (
+                headroom,
+                _tier,
+                vault_id,
+                ct,
+                cr,
+                debt,
+                collateral,
+                decimals,
+                price,
+                timestamp,
+                symbol,
+                borrow_cr,
+                liquidation_cr,
+            ) = entry;
+            let append = runs
+                .last()
+                .map(|run| run.collateral_type == ct)
+                .unwrap_or(false);
+            if append {
+                let run = runs.last_mut().unwrap();
+                run.vault_ids.push(vault_id);
+                run.eligible_debt_e8s = run.eligible_debt_e8s.saturating_add(debt);
+                run.eligible_collateral_raw += collateral as u128;
+                run.max_input_icusd_e8s = run.eligible_debt_e8s;
+            } else {
+                runs.push(RedemptionRun {
+                    run_index: runs.len() as u32,
+                    collateral_type: ct,
+                    symbol,
+                    vault_ids: vec![vault_id],
+                    weakest_vault_cr: cr,
+                    health_headroom: headroom,
+                    decimals,
+                    price_usd: price,
+                    price_timestamp_ns: timestamp,
+                    price_fresh: timestamp != 0,
+                    min_cr: borrow_cr,
+                    liquidation_cr,
+                    eligible_collateral_raw: collateral as u128,
+                    eligible_debt_e8s: debt,
+                    max_input_icusd_e8s: debt,
+                });
+            }
+        }
+        runs
+    }
+
+    /// Compatibility projection for older callers. Repeated collateral types
+    /// collapse to their first occurrence in the global run order.
+    pub fn get_collateral_types_by_redemption_priority(&self) -> Vec<CollateralType> {
+        let mut seen = BTreeSet::new();
+        self.redemption_runs()
+            .into_iter()
+            .filter_map(|run| {
+                seen.insert(run.collateral_type)
+                    .then_some(run.collateral_type)
+            })
+            .collect()
     }
 
     /// Set the ICP rate on both the global field AND the ICP CollateralConfig's `last_price`.
@@ -4987,13 +5098,9 @@ impl State {
         }
     }
 
-    /// Water-filling redemption: spread redemptions across vaults to equalize CR.
-    ///
-    /// Instead of draining the lowest-CR vault completely, this algorithm raises
-    /// the lowest-CR vault(s) until they match the next tier, then splits
-    /// proportionally by debt among all vaults in the band. This maximizes
-    /// capital efficiency and fairness to vault owners.
-    pub fn redeem_on_vaults(
+    /// Historical replay compatibility only. Keep this body identical to the pre-queue
+    /// `redeem_on_vaults` algorithm; live callers must use the explicit-ID method.
+    pub fn redeem_on_vaults_legacy_full_type_for_replay(
         &mut self,
         icusd_amount: ICUSD,
         collateral_price: UsdIcp,
@@ -5174,6 +5281,437 @@ impl State {
             }
         }
 
+        results
+    }
+
+    /// Compatibility projection for the first globally ranked collateral run.
+    ///
+    /// Production live paths should call `redeem_on_vaults_for_vault_ids` with
+    /// the quoted run's explicit IDs. Legacy `None` event replay uses
+    /// `redeem_on_vaults_legacy_full_type_for_replay` to preserve historical
+    /// requested-collateral behavior.
+    pub fn redeem_on_vaults(
+        &mut self,
+        icusd_amount: ICUSD,
+        collateral_price: UsdIcp,
+        collateral_type: &CollateralType,
+    ) -> Vec<crate::event::VaultRedemption> {
+        let Some(first_run) = self.redemption_runs().into_iter().next() else {
+            return Vec::new();
+        };
+        if first_run.collateral_type != *collateral_type {
+            return Vec::new();
+        }
+        self.redeem_on_vaults_for_vault_ids(
+            icusd_amount,
+            collateral_price,
+            collateral_type,
+            &first_run.vault_ids,
+        )
+    }
+
+    /// Water-fill a redemption using only the vaults in a selected consecutive
+    /// same-collateral run. This restriction prevents a run from reaching later,
+    /// healthier vaults of the same asset after another asset interrupts it.
+    pub fn redeem_on_vaults_for_vault_ids(
+        &mut self,
+        icusd_amount: ICUSD,
+        collateral_price: UsdIcp,
+        collateral_type: &CollateralType,
+        allowed_ids: &[VaultId],
+    ) -> Vec<crate::event::VaultRedemption> {
+        self.redeem_on_vaults_with_vault_ids(
+            icusd_amount,
+            collateral_price,
+            collateral_type,
+            allowed_ids,
+            true,
+        )
+    }
+
+    fn redeem_on_vaults_with_vault_ids(
+        &mut self,
+        icusd_amount: ICUSD,
+        collateral_price: UsdIcp,
+        collateral_type: &CollateralType,
+        allowed_ids: &[VaultId],
+        retain_price_precision: bool,
+    ) -> Vec<crate::event::VaultRedemption> {
+        let mut results = Vec::new();
+
+        if icusd_amount == 0 || allowed_ids.is_empty() {
+            return results;
+        }
+        let allowed: BTreeSet<VaultId> = allowed_ids.iter().copied().collect();
+
+        // Resolve config for price & decimals.
+        // During event replay the collateral config may not have a price yet,
+        // so fall back to the price stored in the event (passed as collateral_price).
+        let (price, decimals) = match self.get_collateral_config(collateral_type) {
+            Some(config) => {
+                let price_decimal = config.last_price.and_then(|price| {
+                    if retain_price_precision {
+                        Decimal::from_f64_retain(price)
+                    } else {
+                        Decimal::from_f64(price)
+                    }
+                });
+                let p = price_decimal.unwrap_or(collateral_price.0);
+                (p, config.decimals)
+            }
+            None => {
+                // Config not yet created during replay; use event price and ICP decimals
+                (collateral_price.0, 8)
+            }
+        };
+
+        let resolved_ct = if collateral_type == &Principal::anonymous() {
+            self.icp_ledger_principal
+        } else {
+            *collateral_type
+        };
+
+        // Collect eligible vaults sorted by CR ascending
+        let mut vault_entries: Vec<(Decimal, VaultId)> = Vec::new();
+        for vault in self.vault_id_to_vaults.values() {
+            if !allowed.contains(&vault.vault_id) {
+                continue;
+            }
+            if vault.borrowed_icusd_amount == 0 {
+                continue; // skip zero-debt vaults
+            }
+            // AR-B-001 (audit 2026-06-09): a vault the liquidation bot has
+            // claimed but not yet confirmed (collateral already paid to the
+            // bot, write-down deferred) or that another operation holds the
+            // per-vault lock on MUST NOT be redeemed against: the water-fill
+            // would seize collateral that was already paid out (double-seize
+            // from the shared pool) or invalidate an in-flight operation's
+            // snapshot. Mirrors the `check_vaults` bot_processing skip.
+            // Replay stays exact because `RedemptionOnVaults` replay applies
+            // the event's stored `vault_redemptions` instead of re-running
+            // this scan (see `apply_vault_redemptions`).
+            if vault.bot_processing || crate::guard::is_vault_liquidating(vault.vault_id) {
+                continue;
+            }
+            let vault_ct = if vault.collateral_type == Principal::anonymous() {
+                self.icp_ledger_principal
+            } else {
+                vault.collateral_type
+            };
+            if vault_ct != resolved_ct {
+                continue;
+            }
+            if self
+                .get_collateral_config(&resolved_ct)
+                .map(|config| !config.status.allows_redemption() || config.is_native_xrp())
+                .unwrap_or(true)
+            {
+                continue;
+            }
+            let cr = crate::compute_collateral_ratio(vault, collateral_price, self);
+            vault_entries.push((cr.0, vault.vault_id));
+        }
+        vault_entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        if vault_entries.is_empty() {
+            return results;
+        }
+
+        let mut remaining = icusd_amount.to_u64() as u128;
+
+        // Water-filling: process from lowest CR upward
+        let mut band_start = 0usize;
+        while remaining > 0 && band_start < vault_entries.len() {
+            // Current band = all vaults from band_start that share the lowest CR
+            let band_cr = vault_entries[band_start].0;
+
+            // Find the CR of the next tier (first vault above current band)
+            let mut band_end = band_start + 1;
+            while band_end < vault_entries.len() && vault_entries[band_end].0 == band_cr {
+                band_end += 1;
+            }
+
+            // Compute total debt in the current band
+            let band_vault_ids: Vec<VaultId> = vault_entries[band_start..band_end]
+                .iter()
+                .map(|(_, id)| *id)
+                .collect();
+            let band_debts: Vec<u128> = band_vault_ids
+                .iter()
+                .map(|id| {
+                    self.vault_id_to_vaults
+                        .get(id)
+                        .unwrap()
+                        .borrowed_icusd_amount
+                        .to_u64() as u128
+                })
+                .collect();
+            let total_band_debt: u128 = band_debts.iter().sum();
+
+            if total_band_debt == 0 {
+                band_start = band_end;
+                continue;
+            }
+
+            if band_end >= vault_entries.len() {
+                // No next tier — distribute all remaining proportionally across band
+                self.distribute_redemption_across_band(
+                    &band_vault_ids,
+                    &band_debts,
+                    total_band_debt,
+                    remaining,
+                    price,
+                    decimals,
+                    &mut results,
+                );
+                break;
+            }
+
+            // Calculate how much icUSD (e8s) is needed to raise all band vaults to next tier CR
+            let next_cr = vault_entries[band_end].0;
+            // Formula: x_i = D_i * (CR_next - CR_current) / (CR_next - 1)
+            let cr_diff = next_cr - band_cr;
+            let cr_denom = next_cr - Decimal::ONE;
+            if cr_denom <= Decimal::ZERO {
+                // Safety: if next CR <= 1, just drain proportionally
+                self.distribute_redemption_across_band(
+                    &band_vault_ids,
+                    &band_debts,
+                    total_band_debt,
+                    remaining,
+                    price,
+                    decimals,
+                    &mut results,
+                );
+                break;
+            }
+
+            // Total icUSD needed to level up the band (in e8s)
+            let total_needed_dec = Decimal::from(total_band_debt as u64) * cr_diff / cr_denom;
+            let total_needed = total_needed_dec.to_u64().unwrap_or(u64::MAX) as u128;
+
+            if remaining >= total_needed && total_needed > 0 {
+                // Level up the entire band
+                self.distribute_redemption_across_band(
+                    &band_vault_ids,
+                    &band_debts,
+                    total_band_debt,
+                    total_needed,
+                    price,
+                    decimals,
+                    &mut results,
+                );
+                remaining -= total_needed;
+
+                // Re-read CRs for band vaults and merge into next tier
+                // (they should now match next_cr approximately)
+                for i in band_start..band_end {
+                    vault_entries[i].0 = next_cr;
+                }
+                // Continue with band_start unchanged — the band now includes the next tier
+                // Actually, we advance to process the merged group in next iteration
+                // Don't advance band_start — loop will re-evaluate with the wider band
+                continue;
+            } else {
+                // Can't reach next tier. Distribute remaining proportionally.
+                self.distribute_redemption_across_band(
+                    &band_vault_ids,
+                    &band_debts,
+                    total_band_debt,
+                    remaining,
+                    price,
+                    decimals,
+                    &mut results,
+                );
+                break;
+            }
+        }
+
+        results
+    }
+
+    /// Pure preview of the exact selected-run water-fill. It uses the same
+    /// band ordering, integer splits, conversion, and physical-collateral clamp
+    /// as execution, while leaving vault state untouched.
+    pub fn simulate_redemption_for_vault_ids(
+        &self,
+        icusd_amount: ICUSD,
+        collateral_price: UsdIcp,
+        collateral_type: &CollateralType,
+        allowed_ids: &[VaultId],
+    ) -> Vec<crate::event::VaultRedemption> {
+        #[derive(Clone)]
+        struct SimVault {
+            cr: Decimal,
+            id: VaultId,
+            debt: u64,
+            collateral: u64,
+        }
+
+        fn distribute(
+            vaults: &mut [SimVault],
+            indices: &[usize],
+            total_debt: u128,
+            redemption_e8s: u128,
+            price: Decimal,
+            decimals: u8,
+            results: &mut Vec<crate::event::VaultRedemption>,
+        ) {
+            if total_debt == 0 || redemption_e8s == 0 {
+                return;
+            }
+            let mut distributed = 0u128;
+            for (position, index) in indices.iter().enumerate() {
+                let vault_debt = vaults[*index].debt as u128;
+                let share = if position + 1 == indices.len() {
+                    redemption_e8s - distributed
+                } else {
+                    redemption_e8s * vault_debt / total_debt
+                };
+                if share == 0 {
+                    continue;
+                }
+                let actual_share = share.min(vault_debt);
+                let debt_to_deduct = ICUSD::new(actual_share as u64);
+                let collateral_to_deduct =
+                    crate::numeric::icusd_to_collateral_amount(debt_to_deduct, price, decimals);
+                let vault = &mut vaults[*index];
+                let actual_collateral = collateral_to_deduct.min(vault.collateral);
+                vault.debt = vault.debt.saturating_sub(actual_share as u64);
+                vault.collateral = vault.collateral.saturating_sub(actual_collateral);
+                distributed += actual_share;
+                results.push(crate::event::VaultRedemption {
+                    vault_id: vault.id,
+                    icusd_redeemed_e8s: actual_share as u64,
+                    collateral_seized: actual_collateral,
+                });
+            }
+        }
+
+        if icusd_amount == 0 || allowed_ids.is_empty() {
+            return Vec::new();
+        }
+        let resolved_ct = if collateral_type == &Principal::anonymous() {
+            self.icp_ledger_principal
+        } else {
+            *collateral_type
+        };
+        let Some(config) = self.get_collateral_config(&resolved_ct) else {
+            return Vec::new();
+        };
+        if !config.status.allows_redemption() || config.is_native_xrp() {
+            return Vec::new();
+        }
+        let price = config
+            .last_price
+            .and_then(Decimal::from_f64_retain)
+            .unwrap_or(collateral_price.0);
+        let decimals = config.decimals;
+        let allowed: BTreeSet<VaultId> = allowed_ids.iter().copied().collect();
+        let dummy_rate = UsdIcp::from(Decimal::ZERO);
+        let mut vaults = Vec::new();
+        for id in allowed {
+            let Some(vault) = self.vault_id_to_vaults.get(&id) else {
+                continue;
+            };
+            if vault.borrowed_icusd_amount == 0
+                || vault.bot_processing
+                || crate::guard::is_vault_liquidating(vault.vault_id)
+            {
+                continue;
+            }
+            let vault_ct = if vault.collateral_type == Principal::anonymous() {
+                self.icp_ledger_principal
+            } else {
+                vault.collateral_type
+            };
+            if vault_ct != resolved_ct {
+                continue;
+            }
+            let cr = crate::compute_collateral_ratio(vault, dummy_rate, self).0;
+            vaults.push(SimVault {
+                cr,
+                id,
+                debt: vault.borrowed_icusd_amount.to_u64(),
+                collateral: vault.collateral_amount,
+            });
+        }
+        vaults.sort_by(|a, b| a.cr.cmp(&b.cr).then_with(|| a.id.cmp(&b.id)));
+        if vaults.is_empty() {
+            return Vec::new();
+        }
+
+        let mut results = Vec::new();
+        let mut remaining = icusd_amount.to_u64() as u128;
+        let mut band_start = 0usize;
+        while remaining > 0 && band_start < vaults.len() {
+            let band_cr = vaults[band_start].cr;
+            let mut band_end = band_start + 1;
+            while band_end < vaults.len() && vaults[band_end].cr == band_cr {
+                band_end += 1;
+            }
+            let indices: Vec<usize> = (band_start..band_end).collect();
+            let total_debt: u128 = indices.iter().map(|i| vaults[*i].debt as u128).sum();
+            if total_debt == 0 {
+                band_start = band_end;
+                continue;
+            }
+            if band_end >= vaults.len() {
+                distribute(
+                    &mut vaults,
+                    &indices,
+                    total_debt,
+                    remaining,
+                    price,
+                    decimals,
+                    &mut results,
+                );
+                break;
+            }
+            let next_cr = vaults[band_end].cr;
+            let cr_denom = next_cr - Decimal::ONE;
+            if cr_denom <= Decimal::ZERO {
+                distribute(
+                    &mut vaults,
+                    &indices,
+                    total_debt,
+                    remaining,
+                    price,
+                    decimals,
+                    &mut results,
+                );
+                break;
+            }
+            let needed = (Decimal::from(total_debt as u64) * (next_cr - band_cr) / cr_denom)
+                .to_u64()
+                .unwrap_or(u64::MAX) as u128;
+            if remaining >= needed && needed > 0 {
+                distribute(
+                    &mut vaults,
+                    &indices,
+                    total_debt,
+                    needed,
+                    price,
+                    decimals,
+                    &mut results,
+                );
+                remaining -= needed;
+                for vault in &mut vaults[band_start..band_end] {
+                    vault.cr = next_cr;
+                }
+            } else {
+                distribute(
+                    &mut vaults,
+                    &indices,
+                    total_debt,
+                    remaining,
+                    price,
+                    decimals,
+                    &mut results,
+                );
+                break;
+            }
+        }
         results
     }
 
@@ -6992,6 +7530,9 @@ mod tests {
         // write-down deferred) must never be water-filled by a redemption.
         let mut state = test_state();
         let icp_ct = state.icp_collateral_type();
+        // The redemption planner now requires a configured price to rank the
+        // candidate set; keep this legacy water-fill regression non-vacuous.
+        state.collateral_configs.get_mut(&icp_ct).unwrap().last_price = Some(5.0);
         state.open_vault(audit_vault(1, icp_ct, 500_000_000, 300_000_000));
         state.open_vault(audit_vault(2, icp_ct, 800_000_000, 500_000_000));
         state.vault_id_to_vaults.get_mut(&1).unwrap().bot_processing = true;
@@ -7020,6 +7561,9 @@ mod tests {
         // or owner write-op mid-flight) must be skipped by redemption.
         let mut state = test_state();
         let icp_ct = state.icp_collateral_type();
+        // Ranking candidates need a configured price; otherwise no run is
+        // eligible and the lock assertion would pass without exercising it.
+        state.collateral_configs.get_mut(&icp_ct).unwrap().last_price = Some(5.0);
         state.open_vault(audit_vault(1, icp_ct, 500_000_000, 300_000_000));
         state.open_vault(audit_vault(2, icp_ct, 800_000_000, 500_000_000));
 
@@ -7044,6 +7588,7 @@ mod tests {
         // the claim is oversized.
         let mut state = test_state();
         let icp_ct = state.icp_collateral_type();
+        state.collateral_configs.get_mut(&icp_ct).unwrap().last_price = Some(5.0);
         state.open_vault(audit_vault(1, icp_ct, 500_000_000, 300_000_000));
 
         let price = UsdIcp::from(rust_decimal_macros::dec!(5.0));
@@ -8200,6 +8745,390 @@ mod tests {
             !priority.contains(&xrp),
             "native-XRP must be excluded from redemption priority"
         );
+    }
+
+    #[test]
+    fn redemption_priority_uses_vault_color_health_before_tier() {
+        // ICP at 150% CR is closer to its red liquidation band than ckXAUT at
+        // 145% CR, even though ckXAUT's face-value CR is lower and it has a
+        // numerically earlier configured tier.
+        let mut s = test_state();
+        let icp = s.icp_collateral_type();
+        let xaut = Principal::from_text("nza5v-qaaaa-aaaar-qahzq-cai").unwrap();
+        let mut icp_cfg = s.collateral_configs.get(&icp).unwrap().clone();
+        icp_cfg.last_price = Some(1.0);
+        icp_cfg.last_price_timestamp = Some(1_000_000_000);
+        icp_cfg.borrow_threshold_ratio = Ratio::from(dec!(1.50));
+        icp_cfg.liquidation_ratio = Ratio::from(dec!(1.33));
+        icp_cfg.redemption_tier = 3;
+        s.collateral_configs.insert(icp, icp_cfg.clone());
+
+        let mut xaut_cfg = icp_cfg;
+        xaut_cfg.ledger_canister_id = xaut;
+        xaut_cfg.borrow_threshold_ratio = Ratio::from(dec!(1.18));
+        xaut_cfg.liquidation_ratio = Ratio::from(dec!(1.12));
+        xaut_cfg.redemption_tier = 1;
+        xaut_cfg.symbol = Some("ckXAUT".to_string());
+        s.collateral_configs.insert(xaut, xaut_cfg);
+
+        s.open_vault(audit_vault(801, icp, 150_000_000, 100_000_000));
+        s.open_vault(audit_vault(802, xaut, 145_000_000, 100_000_000));
+
+        let ordered = s.get_collateral_types_by_redemption_priority();
+        assert_eq!(ordered.first(), Some(&icp));
+    }
+
+    #[test]
+    fn redemption_runs_group_only_consecutive_same_collateral_vaults() {
+        let mut s = test_state();
+        let icp = s.icp_collateral_type();
+        s.collateral_configs.get_mut(&icp).unwrap().last_price = Some(1.0);
+        let xaut = Principal::from_text("nza5v-qaaaa-aaaar-qahzq-cai").unwrap();
+        let mut xaut_cfg = s.collateral_configs.get(&icp).unwrap().clone();
+        xaut_cfg.ledger_canister_id = xaut;
+        xaut_cfg.symbol = Some("ckXAUT".to_string());
+        s.collateral_configs.insert(xaut, xaut_cfg);
+        s.open_vault(audit_vault(901, icp, 140_000_000, 100_000_000));
+        s.open_vault(audit_vault(902, xaut, 145_000_000, 100_000_000));
+        s.open_vault(audit_vault(903, icp, 148_000_000, 100_000_000));
+
+        let runs = s.redemption_runs();
+        assert_eq!(runs.len(), 3);
+        assert_eq!(
+            runs.iter().map(|r| r.collateral_type).collect::<Vec<_>>(),
+            vec![icp, xaut, icp]
+        );
+        assert_eq!(runs[0].vault_ids, vec![901]);
+        assert_eq!(runs[2].vault_ids, vec![903]);
+        assert_eq!(runs[0].eligible_debt_e8s, 100_000_000);
+    }
+
+    #[test]
+    fn redemption_run_collateral_total_preserves_values_above_u64() {
+        let mut s = test_state();
+        let icp = s.icp_collateral_type();
+        let config = s.collateral_configs.get_mut(&icp).unwrap();
+        config.decimals = 18;
+        config.last_price = Some(1.0);
+        let per_vault = 10_000_000_000_000_000_000u64;
+        s.open_vault(audit_vault(904, icp, per_vault, 100_000_000));
+        s.open_vault(audit_vault(905, icp, per_vault, 100_000_000));
+
+        let runs = s.redemption_runs();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].vault_ids, vec![904, 905]);
+        assert_eq!(
+            runs[0].eligible_collateral_raw,
+            20_000_000_000_000_000_000u128
+        );
+        assert!(runs[0].eligible_collateral_raw > u64::MAX as u128);
+    }
+
+    #[test]
+    fn redemption_simulation_18_decimal_aggregate_exceeds_u64_without_mutation() {
+        let mut s = test_state();
+        let icp = s.icp_collateral_type();
+        let config = s.collateral_configs.get_mut(&icp).unwrap();
+        config.decimals = 18;
+        config.last_price = Some(1.0);
+        let per_vault_collateral = 10_000_000_000_000_000_000u64;
+        let per_vault_debt = ICUSD::new(2_000_000_000); // 20 icUSD
+        s.open_vault(audit_vault(
+            906,
+            icp,
+            per_vault_collateral,
+            per_vault_debt.to_u64(),
+        ));
+        s.open_vault(audit_vault(
+            907,
+            icp,
+            per_vault_collateral,
+            per_vault_debt.to_u64(),
+        ));
+        let before_906 = s.vault_id_to_vaults.get(&906).unwrap().clone();
+        let before_907 = s.vault_id_to_vaults.get(&907).unwrap().clone();
+
+        // At $1 per token and 18 decimals, 20 icUSD effective input requests
+        // 20 native tokens, split evenly across the two equally healthy vaults.
+        let preview = s.simulate_redemption_for_vault_ids(
+            ICUSD::new(2_000_000_000), // 20 icUSD effective input
+            UsdIcp::from(rust_decimal_macros::dec!(1.0)),
+            &icp,
+            &[906, 907],
+        );
+
+        assert_eq!(preview.len(), 2);
+        assert!(preview
+            .iter()
+            .all(|redemption| redemption.icusd_redeemed_e8s == 1_000_000_000));
+        assert!(preview
+            .iter()
+            .all(|redemption| redemption.collateral_seized == per_vault_collateral));
+        let total_seized = preview.iter().fold(0u128, |total, redemption| {
+            total + redemption.collateral_seized as u128
+        });
+        assert_eq!(total_seized, 20_000_000_000_000_000_000u128);
+        assert!(total_seized > u64::MAX as u128);
+        assert!(u64::try_from(total_seized).is_err());
+
+        let after_906 = s.vault_id_to_vaults.get(&906).unwrap();
+        let after_907 = s.vault_id_to_vaults.get(&907).unwrap();
+        assert_eq!(
+            after_906.borrowed_icusd_amount,
+            before_906.borrowed_icusd_amount
+        );
+        assert_eq!(after_906.collateral_amount, before_906.collateral_amount);
+        assert_eq!(
+            after_907.borrowed_icusd_amount,
+            before_907.borrowed_icusd_amount
+        );
+        assert_eq!(after_907.collateral_amount, before_907.collateral_amount);
+
+        // State-level execution remains exact per vault, while the aggregate
+        // native payout cannot be represented by the downstream u64 ledger
+        // amount and must be rejected by the payout preflight.
+        let executed = s.redeem_on_vaults_for_vault_ids(
+            ICUSD::new(2_000_000_000),
+            UsdIcp::from(rust_decimal_macros::dec!(1.0)),
+            &icp,
+            &[906, 907],
+        );
+        assert_eq!(executed, preview);
+        let executed_total = executed.iter().fold(0u128, |total, redemption| {
+            total + redemption.collateral_seized as u128
+        });
+        assert_eq!(executed_total, total_seized);
+        assert!(u64::try_from(executed_total).is_err());
+    }
+
+    #[test]
+    fn redemption_execution_does_not_reach_a_later_healthier_run() {
+        let mut s = test_state();
+        let icp = s.icp_collateral_type();
+        let xaut = Principal::from_text("nza5v-qaaaa-aaaar-qahzq-cai").unwrap();
+        let mut xaut_cfg = s.collateral_configs.get(&icp).unwrap().clone();
+        xaut_cfg.ledger_canister_id = xaut;
+        s.collateral_configs.insert(xaut, xaut_cfg);
+        s.open_vault(audit_vault(911, icp, 140_000_000, 100_000_000));
+        s.open_vault(audit_vault(912, xaut, 145_000_000, 100_000_000));
+        s.open_vault(audit_vault(913, icp, 148_000_000, 100_000_000));
+
+        let later_before = s.vault_id_to_vaults.get(&913).unwrap().clone();
+        let rate = UsdIcp::from(rust_decimal_macros::dec!(1.0));
+        let results = s.redeem_on_vaults_for_vault_ids(ICUSD::new(50_000_000), rate, &icp, &[911]);
+        assert!(!results.is_empty());
+        assert!(results.iter().all(|result| result.vault_id == 911));
+        assert_eq!(
+            s.vault_id_to_vaults.get(&913).unwrap().collateral_amount,
+            later_before.collateral_amount
+        );
+        assert_eq!(
+            s.vault_id_to_vaults
+                .get(&913)
+                .unwrap()
+                .borrowed_icusd_amount,
+            later_before.borrowed_icusd_amount
+        );
+    }
+
+    #[test]
+    fn redemption_simulation_matches_clamped_execution_without_mutating_state() {
+        let mut s = test_state();
+        let icp = s.icp_collateral_type();
+        s.collateral_configs.get_mut(&icp).unwrap().last_price = Some(1.0);
+        s.open_vault(audit_vault(916, icp, 100_000_000, 200_000_000));
+        let before = s.vault_id_to_vaults.get(&916).unwrap().clone();
+        let amount = ICUSD::new(200_000_000);
+        let rate = UsdIcp::from(rust_decimal_macros::dec!(1.0));
+        let preview = s.simulate_redemption_for_vault_ids(amount, rate, &icp, &[916]);
+        assert_eq!(preview.len(), 1);
+        assert_eq!(preview[0].collateral_seized, 100_000_000);
+        assert_eq!(
+            s.vault_id_to_vaults.get(&916).unwrap().collateral_amount,
+            before.collateral_amount
+        );
+        assert_eq!(
+            s.vault_id_to_vaults
+                .get(&916)
+                .unwrap()
+                .borrowed_icusd_amount,
+            before.borrowed_icusd_amount
+        );
+
+        let executed = s.redeem_on_vaults_for_vault_ids(amount, rate, &icp, &[916]);
+        assert_eq!(executed, preview);
+        assert_eq!(s.vault_id_to_vaults.get(&916).unwrap().collateral_amount, 0);
+    }
+
+    #[test]
+    fn redemption_simulation_matches_execution_at_fractional_prices_and_native_decimals() {
+        let mut vault_id = 940;
+        for decimals in [6u8, 8, 18] {
+            for price in [0.1f64, 0.3] {
+                let mut s = test_state();
+                let icp = s.icp_collateral_type();
+                let config = s.collateral_configs.get_mut(&icp).unwrap();
+                config.decimals = decimals;
+                config.last_price = Some(price);
+                let collateral = 10u64 * 10u64.pow(decimals as u32);
+                // $20 of debt lets the $0.30 effective request exercise the
+                // fractional-price conversion without hitting the debt cap.
+                s.open_vault(audit_vault(vault_id, icp, collateral, 2_000_000_000));
+                let before = s.vault_id_to_vaults.get(&vault_id).unwrap().clone();
+                let amount = ICUSD::new(30_000_000); // $0.30 effective input
+                let rate = UsdIcp::from(rust_decimal::Decimal::from_f64_retain(price).unwrap());
+
+                let preview = s.simulate_redemption_for_vault_ids(amount, rate, &icp, &[vault_id]);
+                assert_eq!(preview.len(), 1, "decimals={decimals}, price={price}");
+                let expected_collateral = crate::numeric::icusd_to_collateral_amount(
+                    amount,
+                    rust_decimal::Decimal::from_f64_retain(price).unwrap(),
+                    decimals,
+                );
+                assert_eq!(preview[0].collateral_seized, expected_collateral);
+                assert_eq!(
+                    s.vault_id_to_vaults
+                        .get(&vault_id)
+                        .unwrap()
+                        .collateral_amount,
+                    before.collateral_amount,
+                    "simulation mutated collateral at decimals={decimals}, price={price}"
+                );
+                assert_eq!(
+                    s.vault_id_to_vaults
+                        .get(&vault_id)
+                        .unwrap()
+                        .borrowed_icusd_amount,
+                    before.borrowed_icusd_amount,
+                    "simulation mutated debt at decimals={decimals}, price={price}"
+                );
+
+                let executed = s.redeem_on_vaults_for_vault_ids(amount, rate, &icp, &[vault_id]);
+                assert_eq!(executed, preview, "decimals={decimals}, price={price}");
+                vault_id += 1;
+            }
+        }
+    }
+
+    #[test]
+    fn underwater_redemption_reduces_full_debt_and_clamps_to_available_collateral() {
+        let mut s = test_state();
+        let icp = s.icp_collateral_type();
+        s.collateral_configs.get_mut(&icp).unwrap().last_price = Some(1.0);
+        s.open_vault(audit_vault(917, icp, 50_000_000, 100_000_000));
+        let before = s.vault_id_to_vaults.get(&917).unwrap().clone();
+        let amount = ICUSD::new(100_000_000);
+        let price = UsdIcp::from(rust_decimal_macros::dec!(1.0));
+
+        let preview = s.simulate_redemption_for_vault_ids(amount, price, &icp, &[917]);
+        assert_eq!(preview.len(), 1);
+        assert_eq!(preview[0].icusd_redeemed_e8s, 100_000_000);
+        assert_eq!(preview[0].collateral_seized, 50_000_000);
+        assert_eq!(
+            s.vault_id_to_vaults.get(&917).unwrap().collateral_amount,
+            before.collateral_amount
+        );
+        assert_eq!(
+            s.vault_id_to_vaults
+                .get(&917)
+                .unwrap()
+                .borrowed_icusd_amount,
+            before.borrowed_icusd_amount
+        );
+
+        let executed = s.redeem_on_vaults_for_vault_ids(amount, price, &icp, &[917]);
+        assert_eq!(executed, preview);
+        let after = s.vault_id_to_vaults.get(&917).unwrap();
+        assert_eq!(
+            before.borrowed_icusd_amount - after.borrowed_icusd_amount,
+            ICUSD::new(100_000_000)
+        );
+        assert_eq!(after.borrowed_icusd_amount, ICUSD::new(0));
+        assert_eq!(after.collateral_amount, 0);
+        assert!(executed[0].collateral_seized <= before.collateral_amount);
+    }
+
+    #[test]
+    fn redemption_runs_skip_zero_debt_locked_bot_inactive_and_native_xrp() {
+        let mut s = test_state();
+        let icp = s.icp_collateral_type();
+        s.collateral_configs.get_mut(&icp).unwrap().last_price = Some(1.0);
+        let xaut = Principal::from_text("nza5v-qaaaa-aaaar-qahzq-cai").unwrap();
+        let mut paused = s.collateral_configs.get(&icp).unwrap().clone();
+        paused.ledger_canister_id = xaut;
+        paused.status = CollateralStatus::Paused;
+        s.collateral_configs.insert(xaut, paused);
+        let xrp = xrp_collateral_principal();
+        let mut native = s.collateral_configs.get(&icp).unwrap().clone();
+        native.ledger_canister_id = xrp;
+        native.custody_kind = Some(CustodyKind::NativeXrp);
+        s.collateral_configs.insert(xrp, native);
+        s.open_vault(audit_vault(921, icp, 150_000_000, 100_000_000));
+        s.open_vault(audit_vault(922, icp, 150_000_000, 0));
+        s.open_vault(audit_vault(923, xaut, 150_000_000, 100_000_000));
+        s.open_vault(audit_vault(924, xrp, 150_000_000, 100_000_000));
+        s.open_vault(audit_vault(925, icp, 160_000_000, 100_000_000));
+        s.vault_id_to_vaults.get_mut(&925).unwrap().bot_processing = true;
+        let lock = crate::guard::VaultLiquidationGuard::new(921).expect("lock vault 921");
+
+        let runs = s.redemption_runs();
+        assert!(
+            runs.is_empty(),
+            "all configured debt-bearing vaults are ineligible"
+        );
+        drop(lock);
+        let after_unlock = s.redemption_runs();
+        assert_eq!(after_unlock.len(), 1);
+        assert_eq!(after_unlock[0].vault_ids, vec![921]);
+    }
+
+    #[test]
+    fn redemption_runs_skip_invalid_nonfinite_price_and_headroom_configs() {
+        let mut s = test_state();
+        let icp = s.icp_collateral_type();
+        s.open_vault(audit_vault(931, icp, 150_000_000, 100_000_000));
+        s.collateral_configs.get_mut(&icp).unwrap().last_price = Some(f64::INFINITY);
+        assert!(s.redemption_runs().is_empty());
+        s.collateral_configs.get_mut(&icp).unwrap().last_price = Some(1.0);
+        s.collateral_configs
+            .get_mut(&icp)
+            .unwrap()
+            .borrow_threshold_ratio = Ratio::from(dec!(0.5));
+        assert!(
+            s.redemption_runs().is_empty(),
+            "nonpositive normalized denominator is invalid"
+        );
+    }
+
+    #[test]
+    fn pending_margin_transfer_minimum_defaults_and_round_trips() {
+        let transfer = PendingMarginTransfer {
+            owner: Principal::anonymous(),
+            margin: ICP::new(123),
+            collateral_type: Principal::anonymous(),
+            retry_count: 1,
+            op_nonce: 42,
+            min_net_collateral_raw: Some(100),
+        };
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&transfer, &mut encoded).unwrap();
+        let round_trip: PendingMarginTransfer =
+            ciborium::de::from_reader(encoded.as_slice()).unwrap();
+        assert_eq!(round_trip.min_net_collateral_raw, Some(100));
+
+        let value: ciborium::Value = ciborium::de::from_reader(encoded.as_slice()).unwrap();
+        let mut legacy = match value {
+            ciborium::Value::Map(entries) => entries,
+            other => panic!("expected transfer map, got {other:?}"),
+        };
+        legacy.retain(|(key, _)| {
+            !matches!(key, ciborium::Value::Text(name) if name == "min_net_collateral_raw")
+        });
+        let mut legacy_encoded = Vec::new();
+        ciborium::ser::into_writer(&ciborium::Value::Map(legacy), &mut legacy_encoded).unwrap();
+        let restored: PendingMarginTransfer =
+            ciborium::de::from_reader(legacy_encoded.as_slice()).unwrap();
+        assert_eq!(restored.min_net_collateral_raw, None);
     }
 
     #[test]

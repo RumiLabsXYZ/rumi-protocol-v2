@@ -1,0 +1,238 @@
+# REVIEW ONLY — proposal only; do not apply before explicit implementation approval.
+# Generated against current event.rs; not applied and not tested.
+--- a/src/rumi_protocol_backend/src/event.rs
++++ b/src/rumi_protocol_backend/src/event.rs
+@@ -138,6 +138,14 @@
+         /// None for legacy events recorded before this field existed.
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         vault_redemptions: Option<Vec<VaultRedemption>>,
++        /// Exact native-unit collateral committed as the payout for new events.
++        /// None on legacy events, whose historical replay calculation is retained.
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        payout_collateral_raw: Option<u64>,
++        /// Minimum net native-unit payout requested by the redeemer.
++        /// None on legacy events and redemptions without a quoted minimum.
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        min_net_collateral_raw: Option<u64>,
+     },
+ 
+     #[serde(rename = "redemption_transfered")]
+@@ -1625,6 +1633,8 @@
+                 icusd_block_index,
+                 collateral_type,
+                 ref vault_redemptions,
++                payout_collateral_raw,
++                min_net_collateral_raw,
+                 ..
+             } => {
+                 state.provide_liquidity(fee_amount, state.developer_principal);
+@@ -1637,7 +1647,7 @@
+                 // cannot reconstruct. The consumed-based margin mirrors the
+                 // live payout clamp. Pre-Wave-9 events (no stored outcomes)
+                 // keep the legacy re-run + full-claim margin.
+-                let margin: ICP = match vault_redemptions {
++                let historical_margin: ICP = match vault_redemptions {
+                     Some(vrs) => {
+                         state.apply_vault_redemptions(vrs);
+                         let consumed: u64 = vrs.iter().map(|v| v.icusd_redeemed_e8s).sum();
+@@ -1648,11 +1658,25 @@
+                         icusd_amount / current_icp_rate
+                     }
+                 };
++                // New events pin the payout in native token units. Old events
++                // retain their historical reconstruction so upgrades do not
++                // silently rewrite already-committed pending claims.
++                let margin = payout_collateral_raw
++                    .map(ICP::from)
++                    .unwrap_or(historical_margin);
+                 if margin.to_u64() > 0 {
+                     let nonce = state.next_op_nonce();
+-                    state
+-                        .pending_redemption_transfer
+-                        .insert(icusd_block_index, PendingMarginTransfer { owner, margin, collateral_type: redeem_ct, retry_count: 0, op_nonce: nonce });
++                    state.pending_redemption_transfer.insert(
++                        icusd_block_index,
++                        PendingMarginTransfer {
++                            owner,
++                            margin,
++                            collateral_type: redeem_ct,
++                            retry_count: 0,
++                            op_nonce: nonce,
++                            min_net_collateral_raw,
++                        },
++                    );
+                 }
+             }
+             Event::RedemptionTransfered {
+@@ -2529,6 +2553,24 @@
+     icusd_block_index: u64,
+     redeem_ct: Principal,
+ ) -> RedemptionOutcome {
++    record_redemption_on_vaults_inner(state, owner, icusd_amount, fee_amount, collateral_price, icusd_block_index, redeem_ct, None, None)
++}
++
++/// Record a redemption against one consecutive same-collateral run selected
++/// before the ledger await. The event pins the native payout and minimum.
++pub fn record_redemption_on_vault_run(
++    state: &mut State, owner: Principal, icusd_amount: ICUSD, fee_amount: ICUSD,
++    collateral_price: UsdIcp, icusd_block_index: u64, redeem_ct: Principal,
++    allowed_vault_ids: &[u64], min_net_collateral_raw: Option<u64>,
++) -> RedemptionOutcome {
++    record_redemption_on_vaults_inner(state, owner, icusd_amount, fee_amount, collateral_price, icusd_block_index, redeem_ct, Some(allowed_vault_ids), min_net_collateral_raw)
++}
++
++fn record_redemption_on_vaults_inner(
++    state: &mut State, owner: Principal, icusd_amount: ICUSD, fee_amount: ICUSD,
++    collateral_price: UsdIcp, icusd_block_index: u64, redeem_ct: Principal,
++    allowed_vault_ids: Option<&[u64]>, min_net_collateral_raw: Option<u64>,
++) -> RedemptionOutcome {
+     // Fee is already deducted from icusd_amount before calling redeem_on_vaults,
+     // so vault owners effectively keep the fee (less collateral seized for their debt).
+     // The fee portion of icUSD stays in the protocol canister (burned).
+@@ -2564,7 +2606,10 @@
+         })
+         .unwrap_or((ct_price.0, 8));
+ 
+-    let vault_redemptions = state.redeem_on_vaults(icusd_amount, ct_price, &redeem_ct);
++    let vault_redemptions = match allowed_vault_ids {
++        Some(ids) => state.redeem_on_vaults_for_vault_ids(icusd_amount, ct_price, &redeem_ct, ids),
++        None => state.redeem_on_vaults(icusd_amount, ct_price, &redeem_ct),
++    };
+     record_event(&Event::RedemptionOnVaults {
+         owner,
+         current_icp_rate: ct_price,
+@@ -2573,11 +2618,10 @@
+         icusd_block_index,
+         collateral_type: Some(redeem_ct),
+         timestamp: Some(now()),
+-        vault_redemptions: if vault_redemptions.is_empty() {
+-            None
+-        } else {
+-            Some(vault_redemptions.clone())
+-        },
++        // Record empty outcomes too, so replay never re-runs a new redemption.
++        vault_redemptions: Some(vault_redemptions.clone()),
++        payout_collateral_raw: Some(total_actual_collateral_seized(&vault_redemptions)),
++        min_net_collateral_raw,
+     });
+ 
+     // RED-001 (audit 2026-06-09): the payout is derived from the icUSD the
+@@ -2610,7 +2654,9 @@
+         now(),
+     );
+ 
+-    let margin: ICP = consumed / ct_price;
++    // Seized collateral already uses the selected token's raw native units.
++    let payout_collateral_raw = total_actual_collateral_seized(&vault_redemptions);
++    let margin = ICP::from(payout_collateral_raw);
+     if margin.to_u64() > 0 {
+         let op_nonce = state.next_op_nonce();
+         state.pending_redemption_transfer.insert(
+@@ -2621,10 +2667,15 @@
+                 collateral_type: redeem_ct,
+                 retry_count: 0,
+                 op_nonce,
++                min_net_collateral_raw,
+             },
+         );
+     }
+     RedemptionOutcome { consumed, margin }
++}
++
++fn total_actual_collateral_seized(vault_redemptions: &[VaultRedemption]) -> u64 {
++    vault_redemptions.iter().fold(0u64, |total, redemption| total.saturating_add(redemption.collateral_seized))
+ }
+ 
+ /// Wave-9 RED-002: pure-math predicate for the redemption shortfall.
+@@ -4017,3 +4068,91 @@
+         ));
+     }
+ }
++
++
++#[cfg(test)]
++mod redemption_event_contract_tests {
++    use super::*;
++
++    fn init_event() -> Event {
++        Event::Init(InitArg {
++            xrc_principal: Principal::anonymous(), icusd_ledger_principal: Principal::anonymous(),
++            icp_ledger_principal: Principal::anonymous(), fee_e8s: 0,
++            developer_principal: Principal::anonymous(), treasury_principal: None,
++            stability_pool_principal: None, ckusdt_ledger_principal: None,
++            ckusdc_ledger_principal: None,
++        })
++    }
++
++    fn redemption_event(vault_redemptions: Option<Vec<VaultRedemption>>, payout: Option<u64>, minimum: Option<u64>) -> Event {
++        Event::RedemptionOnVaults {
++            owner: Principal::anonymous(), current_icp_rate: UsdIcp::from(Decimal::from(5u8)),
++            icusd_amount: ICUSD::new(100_000_000), fee_amount: ICUSD::new(0),
++            icusd_block_index: 7, collateral_type: Some(Principal::anonymous()),
++            timestamp: Some(1), vault_redemptions, payout_collateral_raw: payout,
++            min_net_collateral_raw: minimum,
++        }
++    }
++
++    #[test]
++    fn payout_uses_native_raw_units_for_six_eight_and_eighteen_decimal_assets() {
++        for (raw, expected) in [
++            (1_250_000u64, 1_250_000u64),
++            (125_000_000u64, 125_000_000u64),
++            (1_250_000_000_000_000_000u64, 1_250_000_000_000_000_000u64),
++        ] {
++            let outcome = [VaultRedemption { vault_id: 1, icusd_redeemed_e8s: 1, collateral_seized: raw }];
++            assert_eq!(total_actual_collateral_seized(&outcome), expected);
++        }
++    }
++
++    #[test]
++    fn payout_uses_actual_saturated_and_rounded_seized_sum() {
++        let outcomes = [
++            VaultRedemption { vault_id: 1, icusd_redeemed_e8s: 100, collateral_seized: 80 },
++            VaultRedemption { vault_id: 2, icusd_redeemed_e8s: 1, collateral_seized: 7 },
++        ];
++        assert_eq!(total_actual_collateral_seized(&outcomes), 87);
++        let overflow = [
++            VaultRedemption { vault_id: 3, icusd_redeemed_e8s: 1, collateral_seized: u64::MAX },
++            VaultRedemption { vault_id: 4, icusd_redeemed_e8s: 1, collateral_seized: 1 },
++        ];
++        assert_eq!(total_actual_collateral_seized(&overflow), u64::MAX);
++    }
++
++    #[test]
++    fn new_event_round_trip_preserves_payout_and_minimum() {
++        let event = redemption_event(Some(Vec::new()), Some(1_250_000), Some(1_200_000));
++        let encoded = serde_json::to_vec(&event).unwrap();
++        let decoded: Event = serde_json::from_slice(&encoded).unwrap();
++        assert_eq!(decoded, event);
++    }
++
++    #[test]
++    fn old_event_fields_default_and_old_pending_claim_replay_is_preserved() {
++        let event = redemption_event(Some(vec![VaultRedemption {
++            vault_id: 999, icusd_redeemed_e8s: 100_000_000, collateral_seized: 80_000,
++        }]), Some(80_000), Some(70_000));
++        let mut json = serde_json::to_value(event).unwrap();
++        let payload = json.as_object_mut().and_then(|outer| outer.values_mut().next())
++            .and_then(serde_json::Value::as_object_mut).unwrap();
++        payload.remove("payout_collateral_raw");
++        payload.remove("min_net_collateral_raw");
++        let legacy: Event = serde_json::from_value(json).unwrap();
++        let replayed = replay(vec![init_event(), legacy].into_iter()).unwrap();
++        let pending = replayed.pending_redemption_transfer.get(&7).unwrap();
++        assert_eq!(pending.margin.to_u64(), 20_000_000);
++        assert_eq!(pending.min_net_collateral_raw, None);
++    }
++
++    #[test]
++    fn new_event_replay_restores_exact_payout_and_minimum() {
++        let event = redemption_event(Some(vec![VaultRedemption {
++            vault_id: 999, icusd_redeemed_e8s: 100_000_000, collateral_seized: 80_000,
++        }]), Some(80_000), Some(70_000));
++        let replayed = replay(vec![init_event(), event].into_iter()).unwrap();
++        let pending = replayed.pending_redemption_transfer.get(&7).unwrap();
++        assert_eq!(pending.margin.to_u64(), 80_000);
++        assert_eq!(pending.min_net_collateral_raw, Some(70_000));
++    }
++}

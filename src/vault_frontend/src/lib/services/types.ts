@@ -40,6 +40,18 @@ export interface VaultOperationResult {
    * normal response carrying them was never delivered.
    */
   oisyResilient?: boolean;
+  /** Redemption output accepted into the ledger-send queue. This is not proof of delivery. */
+  redemption?: QueuedRedemptionReceipt;
+  /** The signer returned no result even though the icUSD debit was observed. */
+  ambiguous?: boolean;
+}
+
+export interface QueuedRedemptionReceipt {
+  collateralType: string;
+  symbol: string;
+  decimals: number;
+  netCollateralRaw: bigint;
+  payoutStatus: string | Record<string, unknown>;
 }
 
 export interface VaultHistoryEvent {

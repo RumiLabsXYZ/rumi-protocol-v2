@@ -6,6 +6,39 @@ use proptest::collection::vec as pvec;
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 
+#[test]
+fn quoted_redemption_minimum_holds_on_fee_increase_and_legacy_is_unbounded() {
+    assert!(crate::redemption_transfer_meets_minimum(
+        1_000,
+        100,
+        Some(900)
+    ));
+    assert!(!crate::redemption_transfer_meets_minimum(
+        1_000,
+        101,
+        Some(900)
+    ));
+    assert!(!crate::redemption_transfer_meets_minimum(
+        1_000,
+        150,
+        Some(900)
+    ));
+    assert!(crate::redemption_transfer_meets_minimum(1_000, 999, None));
+    assert!(!crate::redemption_transfer_meets_minimum(
+        1_000,
+        1_001,
+        Some(0)
+    ));
+}
+
+#[test]
+fn exhausted_icusd_refunds_are_held_without_being_auto_retried() {
+    assert!(crate::pending_refund_is_automatically_retryable(0));
+    assert!(crate::pending_refund_is_automatically_retryable(59));
+    assert!(!crate::pending_refund_is_automatically_retryable(60));
+    assert!(!crate::pending_refund_is_automatically_retryable(u8::MAX));
+}
+
 fn arb_vault() -> impl Strategy<Value = Vault> {
     (arb_principal(), any::<u64>(), arb_amount()).prop_map(|(owner, borrowed_icusd, icp_margin)| {
         Vault {

@@ -19,6 +19,7 @@
   import { nativeXrpKeepOpenCloseCopy } from '$lib/utils/nativeXrpBorrowFlow';
   import { computeBorrowMax } from '$lib/utils/borrowLimits';
   import { computeSafeIcusdRepayMax } from '$lib/utils/repayLimits';
+  import { getVaultCrTextColor, VAULT_CR_DANGER } from '$lib/utils/vaultHealth';
   import { appDataStore, protocolStatus, collateralTotals } from '$lib/stores/appDataStore';
 
   export let vault: Vault;
@@ -190,10 +191,8 @@
   // ── Dual-channel color system ──
   // Meter (marker): green → purple → pink
   // CR text + rail + interest: white → pink (no purple)
-  const DANGER_HEX = '#e06b9f';
   const CAUTION_HEX = '#a78bfa';
   const SAFE_HEX = '#2DD4BF';
-  const WHITE_HEX = '#e2e8f0';
 
   function lerpColor(c1: string, c2: string, t: number): string {
     const r1 = parseInt(c1.slice(1, 3), 16), g1 = parseInt(c1.slice(3, 5), 16), b1 = parseInt(c1.slice(5, 7), 16);
@@ -214,18 +213,13 @@
       const t = (fadeStartPct - gaugePct) / (fadeStartPct - fadeEndPct);
       return lerpColor(SAFE_HEX, CAUTION_HEX, t);
     }
-    if (gaugePct <= liqZonePct) return DANGER_HEX;
+    if (gaugePct <= liqZonePct) return VAULT_CR_DANGER;
     const t = (fadeEndPct - gaugePct) / (fadeEndPct - liqZonePct);
-    return lerpColor(CAUTION_HEX, DANGER_HEX, t);
+    return lerpColor(CAUTION_HEX, VAULT_CR_DANGER, t);
   })();
 
-  // CR text color: white → pink directly (no purple)
-  $: crColor = (() => {
-    if (gaugePct >= fadeStartPct) return WHITE_HEX;
-    if (gaugePct <= liqZonePct) return DANGER_HEX;
-    const t = (fadeStartPct - gaugePct) / (fadeStartPct - liqZonePct);
-    return lerpColor(WHITE_HEX, DANGER_HEX, t);
-  })();
+  // CR text color: shared white → pink tint, also used for cross-collateral health ordering.
+  $: crColor = getVaultCrTextColor(collateralRatio, vaultMinCR, vaultLiqCR);
 
   // Rail: opacity fades in through the gradient zone
   $: railStyle = (() => {

@@ -29,6 +29,7 @@ import {
 import { pnp } from '../pnp';
 import { get } from 'svelte/store';
 import { QueryOperations } from './queryOperations';
+import { currentWalletType, walletSessionGeneration, WALLET_TYPES } from '../auth';
 import { permissionManager } from '../PermissionManager';
 import type {
   VaultDTO,
@@ -37,10 +38,17 @@ import type {
   LiquidityStatusDTO,
   CandidVault
 } from '../types';
+import type {
+  RedemptionQueue,
+  RedemptionQuoteResult,
+  RedemptionQuotedRequest,
+  RedemptionResultVariant,
+} from '$lib/utils/redemptionPreview';
 import { RequestDeduplicator } from '../RequestDeduplicator';
 import { collateralStore } from '$lib/stores/collateralStore';
 import {
   callWithOisyFalseNegativeGuard,
+  isOisyArrFalseNegative,
   isOisyLandedSentinel,
 } from './oisyResilience';
 import {
@@ -146,6 +154,25 @@ export interface BoundBorrowFromVaultResult {
   feePaidRaw: bigint | null;
   errorMessage: string | null;
   submittedIcusdRaw: bigint;
+}
+
+export type RedeemQuotedResult = VaultOperationResult & {
+  /** Which wallet mutation had an uncertain transport result. */
+  ambiguityStage?: 'approval' | 'submission';
+  /** Typed backend response belongs to the initiating session, which is no longer active. */
+  sessionChangedAfterSubmission?: boolean;
+};
+
+/** Fresh icUSD ledger reads prepared before the click-handler signer window. */
+export interface RedemptionPreflight {
+  principalText: string;
+  walletType: string | null;
+  sessionGeneration: number;
+  ledgerId: string;
+  observedAtMs: number;
+  allowanceRaw: bigint;
+  balanceRaw: bigint;
+  feeRaw: bigint;
 }
 
 /**
@@ -375,6 +402,9 @@ private static async refreshVaultData(): Promise<void> {
   /**
    * Make a call to a public endpoint that doesn't require authentication
    */
+  static getPublicData(method: 'get_redemption_queue'): ReturnType<_SERVICE['get_redemption_queue']>;
+  static getPublicData(method: 'get_redemption_quote', amountE8s: bigint): ReturnType<_SERVICE['get_redemption_quote']>;
+  static async getPublicData<T>(method: keyof typeof publicActor, ...args: any[]): Promise<T>;
   static async getPublicData<T>(
     method: keyof typeof publicActor,
     ...args: any[]
@@ -2558,7 +2588,7 @@ static async repayToVaultWithStable(
      * Redeem ICP by providing icUSD
      * @param icusdAmount Amount of icUSD to redeem
      */
-    static async redeemIcp(icusdAmount: number): Promise<VaultOperationResult> {
+      static async redeemIcp(icusdAmount: number): Promise<VaultOperationResult> {
       try {
         console.log(`Redeeming ${icusdAmount} icUSD for ICP`);
 
@@ -3165,6 +3195,237 @@ static async repayToVaultWithStable(
       timestamp: transfer.timestamp,
       completed: false
     }));
+  }
+
+  /** Read the backend's globally health-ordered, consecutive same-collateral redemption runs. */
+  static async getRedemptionQueue(): Promise<RedemptionQueue> {
+    return ApiClient.getPublicData('get_redemption_queue');
+  }
+
+  /** Read the exact quote for the first currently eligible redemption run. */
+  static async getRedemptionQuote(amountE8s: bigint): Promise<RedemptionQuoteResult> {
+    return ApiClient.getPublicData('get_redemption_quote', amountE8s);
+  }
+
+  /**
+   * Prepare fresh ICRC-2 allowance, icUSD balance, and ledger fee reads before
+   * a signer gesture. Oisy callers pass this snapshot into redeemQuoted so no
+   * asynchronous ledger query is needed between the click and approval.
+   */
+  static async getRedemptionPreflight(): Promise<RedemptionPreflight> {
+    const walletState = get(walletStore);
+    const principal = walletState.principal;
+    const principalText = principal?.toText() ?? '';
+    const expectedWalletType = get(currentWalletType);
+    if (!walletState.isConnected || !principal || !principalText || !expectedWalletType) {
+      throw new Error('Connect a wallet before checking redemption allowance and balance.');
+    }
+    const expectedOisy = expectedWalletType === WALLET_TYPES.OISY;
+    const expectedSessionGeneration = get(walletSessionGeneration);
+    const ctx: ActionBoundContext = {
+      expectedPrincipalText: principalText,
+      assertCurrent: () => get(walletStore).isConnected
+        && get(currentWalletType) === expectedWalletType
+        && get(walletSessionGeneration) === expectedSessionGeneration,
+    };
+    assertActionBoundContextCurrent(ctx);
+    const ledgerId = CONFIG.currentIcusdLedgerId;
+    const ledgerActor = Actor.createActor(icusd_ledgerIDL as any, {
+      agent: anonymousAgent,
+      canisterId: ledgerId,
+    }) as any;
+    const account = { owner: Principal.fromText(principalText), subaccount: [] };
+    const spender = { owner: Principal.fromText(CONFIG.currentCanisterId), subaccount: [] };
+    const [allowance, balance, fee] = await Promise.all([
+      ledgerActor.icrc2_allowance({ account, spender }),
+      ledgerActor.icrc1_balance_of(account),
+      ledgerActor.icrc1_fee(),
+    ]);
+    assertActionBoundContextCurrent(ctx);
+    return {
+      principalText,
+      walletType: expectedWalletType,
+      sessionGeneration: expectedSessionGeneration,
+      ledgerId,
+      observedAtMs: Date.now(),
+      allowanceRaw: BigInt(allowance.allowance),
+      balanceRaw: BigInt(balance),
+      feeRaw: BigInt(fee),
+    };
+  }
+
+  /** Submit a quote-bound direct-vault redemption. A successful result means queued, not delivered. */
+  static async redeemQuoted(
+    request: RedemptionQuotedRequest,
+    preparedPreflight?: RedemptionPreflight
+  ): Promise<RedeemQuotedResult> {
+    let submissionDispatched = false;
+    let submissionReplyObserved = false;
+    try {
+      const walletState = get(walletStore);
+      const expectedPrincipalText = walletState.principal?.toText() ?? '';
+      const expectedWalletType = get(currentWalletType);
+      const expectedSessionGeneration = get(walletSessionGeneration);
+      const expectedOisy = expectedWalletType === WALLET_TYPES.OISY;
+      if (!walletState.isConnected || !expectedPrincipalText || !expectedWalletType) {
+        return { success: false, error: 'Connect a wallet before redeeming.' };
+      }
+      const actionContext: ActionBoundContext = {
+        expectedPrincipalText,
+        assertCurrent: () => get(walletStore).isConnected
+          && get(currentWalletType) === expectedWalletType
+          && get(walletSessionGeneration) === expectedSessionGeneration,
+      };
+      assertActionBoundContextCurrent(actionContext);
+
+      // Oisy's signer gesture cannot safely span an asynchronous allowance
+      // query. Match the other Oisy flows: request an explicit, amount-bounded
+      // approval, then submit the action as the next signer operation.
+      const spender = Principal.fromText(CONFIG.currentCanisterId);
+      const preflight = expectedOisy
+        ? preparedPreflight
+        : await ApiClient.getRedemptionPreflight();
+      assertActionBoundContextCurrent(actionContext);
+      if (!preflight
+        || preflight.principalText !== expectedPrincipalText
+        || preflight.walletType !== expectedWalletType
+        || preflight.sessionGeneration !== expectedSessionGeneration
+        || preflight.ledgerId !== CONFIG.currentIcusdLedgerId
+        || !Number.isSafeInteger(preflight.observedAtMs)
+        || Date.now() - preflight.observedAtMs > 30_000
+        || preflight.observedAtMs > Date.now() + 1_000
+        || typeof preflight.allowanceRaw !== 'bigint'
+        || preflight.allowanceRaw < 0n
+        || typeof preflight.balanceRaw !== 'bigint'
+        || preflight.balanceRaw < 0n
+        || typeof preflight.feeRaw !== 'bigint'
+        || preflight.feeRaw < 0n
+        || typeof request.amount_e8s !== 'bigint'
+        || request.amount_e8s <= 0n) {
+        return {
+          success: false,
+          error: expectedOisy
+            ? 'The icUSD allowance, balance, and ledger fee check is missing or stale. Refresh the redemption preflight before signing.'
+            : 'The icUSD allowance, balance, or ledger fee check is stale. Refresh before redeeming.',
+        };
+      }
+
+      const requiredAllowance = request.amount_e8s + preflight.feeRaw;
+      const needsApproval = preflight.allowanceRaw < requiredAllowance;
+      const requiredBalance = request.amount_e8s + preflight.feeRaw * (needsApproval ? 2n : 1n);
+      if (preflight.balanceRaw < requiredBalance) {
+        return {
+          success: false,
+          error: needsApproval
+            ? `Insufficient icUSD for this redemption and its approval/transfer fees. Required ${requiredBalance} raw units; available ${preflight.balanceRaw}.`
+            : `Insufficient icUSD for this redemption and its transfer fee. Required ${requiredBalance} raw units; available ${preflight.balanceRaw}.`,
+        };
+      }
+
+      if (expectedOisy) {
+        await pnp.getSignerAgent();
+        assertActionBoundContextCurrent(actionContext);
+      }
+
+      if (needsApproval) {
+        assertActionBoundContextCurrent(actionContext);
+        const approvalActor = await walletStore.getActor(
+          CONFIG.currentIcusdLedgerId, CONFIG.icusd_ledgerIDL
+        ) as any;
+        assertActionBoundContextCurrent(actionContext);
+        let approvalResult: any;
+        try {
+          approvalResult = await approvalActor.icrc2_approve({
+            amount: requiredAllowance,
+            spender: { owner: spender, subaccount: [] },
+            expires_at: largeApprovalExpiry(),
+            expected_allowance: [], memo: [], fee: [],
+            from_subaccount: [], created_at_time: [],
+          });
+        } catch (err) {
+          return {
+            success: false,
+            ambiguous: true,
+            ambiguityStage: 'approval',
+            error: err instanceof Error
+              ? `The icUSD approval response was unclear. Check the allowance before retrying. (${err.message})`
+              : 'The icUSD approval response was unclear. Check the allowance before retrying.',
+          };
+        }
+        assertActionBoundContextCurrent(actionContext);
+        if (approvalResult && 'Err' in approvalResult) {
+          return {
+            success: false,
+            ambiguityStage: 'approval',
+            error: `icUSD approval failed: ${JSON.stringify(approvalResult.Err)}`,
+          };
+        }
+      }
+
+      assertActionBoundContextCurrent(actionContext);
+      const actor = await ApiClient.getBoundAuthenticatedActor(actionContext);
+      assertActionBoundContextCurrent(actionContext);
+
+      let result: RedemptionResultVariant;
+      submissionDispatched = true;
+      try {
+        result = await actor.redeem_quoted(request);
+      } catch (err) {
+        return {
+          success: false,
+          ambiguous: true,
+          ambiguityStage: 'submission',
+          error: err instanceof Error
+            ? `The redemption request was submitted, but its reply was not received. Check the redemption queue before retrying. (${err.message})`
+            : 'The redemption request was submitted, but its reply was not received. Check the redemption queue before retrying.',
+        };
+      }
+      submissionReplyObserved = true;
+      let sessionChangedAfterSubmission = false;
+      try {
+        assertActionBoundContextCurrent(actionContext);
+      } catch (err) {
+        if (!(err instanceof StaleActionSessionError)) throw err;
+        sessionChangedAfterSubmission = true;
+      }
+
+      if ('Err' in result) {
+        return {
+          success: false,
+          error: ApiClient.formatProtocolError(result.Err),
+          ...(sessionChangedAfterSubmission ? { sessionChangedAfterSubmission: true } : {}),
+        };
+      }
+
+      const redeemed = result.Ok;
+      return {
+        success: true,
+        blockIndex: Number(redeemed.icusd_block_index),
+        feePaid: Number(redeemed.fee_paid_e8s) / E8S,
+        redemption: {
+          collateralType: redeemed.collateral_type.toText(),
+          symbol: redeemed.symbol,
+          decimals: Number(redeemed.decimals),
+          netCollateralRaw: redeemed.net_collateral_raw,
+          payoutStatus: redeemed.payout_status,
+        },
+        ...(sessionChangedAfterSubmission
+          ? {
+              sessionChangedAfterSubmission: true,
+              message: 'The backend confirmed this redemption for the previous wallet session. Check that wallet’s redemption queue before starting another redemption.',
+            }
+          : {}),
+      };
+    } catch (err) {
+      console.error('Error submitting quoted redemption:', err);
+      return {
+        success: false,
+        ...(submissionDispatched && !submissionReplyObserved
+          ? { ambiguous: true, ambiguityStage: 'submission' as const }
+          : {}),
+        error: err instanceof Error ? err.message : 'Unknown error submitting quoted redemption',
+      };
+    }
   }
 
   /**

@@ -27,13 +27,15 @@ use rumi_protocol_backend::{
     CollateralInterestInfo, CollateralSnapshot, CollateralTotals, EventTypeFilter,
     EventsByPrincipalPagedResponse, Fees, ForwardFilteredEventsResponse, GetEventsArg,
     GetEventsFilteredResponse, GetSnapshotsArg, InterestSplitArg, PerCollateralRateCurve,
-    ProtocolArg, ProtocolError, ProtocolSnapshot, ProtocolStatus, ReserveBalance,
-    ReserveRedemptionResult, StabilityPoolLiquidationResult, StableTokenType, SuccessWithFee,
-    SupplyAudit, SupplyAuditEntry, VaultArgWithToken, VaultHistoryPagedResponse,
-    VaultsPageResponse, XrpSpAbsorbPreflight, XrpSpAbsorbRequest, XrpSpAbsorbResult,
-    MAX_EVENTS_BY_PRINCIPAL_LEGACY, MAX_EVENTS_BY_PRINCIPAL_OUTPUT, MAX_EVENTS_BY_PRINCIPAL_SCAN,
-    MAX_VAULTS_LEGACY_PAGE, MAX_VAULTS_PAGE_LIMIT, MAX_VAULT_HISTORY,
-    PROTOCOL_STATUS_SNAPSHOT_TTL_NANOS, TREASURY_STATS_SNAPSHOT_TTL_NANOS,
+    ProtocolArg, ProtocolError, ProtocolSnapshot, ProtocolStatus, RedeemQuotedRequest,
+    RedemptionError, RedemptionQueue, RedemptionQuote, RedemptionResult, ReserveBalance,
+    ReserveRedemptionResult,
+    StabilityPoolLiquidationResult, StableTokenType, SuccessWithFee, SupplyAudit, SupplyAuditEntry,
+    VaultArgWithToken, VaultHistoryPagedResponse, VaultsPageResponse, XrpSpAbsorbPreflight,
+    XrpSpAbsorbRequest, XrpSpAbsorbResult, MAX_EVENTS_BY_PRINCIPAL_LEGACY,
+    MAX_EVENTS_BY_PRINCIPAL_OUTPUT, MAX_EVENTS_BY_PRINCIPAL_SCAN, MAX_VAULTS_LEGACY_PAGE,
+    MAX_VAULTS_PAGE_LIMIT, MAX_VAULT_HISTORY, PROTOCOL_STATUS_SNAPSHOT_TTL_NANOS,
+    TREASURY_STATS_SNAPSHOT_TTL_NANOS,
 };
 use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::prelude::ToPrimitive;
@@ -46,6 +48,18 @@ pub struct StabilityPoolConfig {
     pub stability_pool_canister: Option<Principal>,
     pub liquidation_discount: u64,
     pub enabled: bool,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PendingIcusdRefundView {
+    pub burn_block_index: u64,
+    pub amount_e8s: u64,
+    pub retry_count: u8,
+    pub held_for_manual_retry: bool,
+}
+
+fn pending_refund_visible_to(claim_owner: Principal, caller: Principal) -> bool {
+    claim_owner == caller
 }
 
 #[cfg(feature = "self_check")]
@@ -6097,13 +6111,9 @@ async fn redeem_collateral(
     // bad-debt position by extracting collateral from a protocol that
     // already owes more than it holds.
     validate_mode()?;
-    // Wave-5 RED-001: validate_call only refreshes ICP. For non-ICP collaterals
-    // (BOB, EXE, ckBTC, ckETH, ckXAUT, nICP) the redeemer would otherwise pay
-    // out at whatever last_price is cached, which could be hours stale if the
-    // background timer for that asset has been failing. ensure_fresh_price_for
-    // delegates to ensure_fresh_price for ICP (already handled), so this is
-    // safe to call unconditionally.
-    rumi_protocol_backend::xrc::ensure_fresh_price_for(&collateral_type).await?;
+    // The vault path refreshes and validates every eligible collateral that
+    // participates in the global health sort. Refreshing only the caller's
+    // requested type here could leave a stale competing asset at the front.
     check_postcondition(
         rumi_protocol_backend::vault::redeem_collateral(collateral_type, icusd_amount).await,
     )
@@ -6117,6 +6127,68 @@ fn get_redemption_rate() -> f64 {
         s.get_redemption_fee_for(&icp_ct, ICUSD::from(100_000_000))
             .to_f64()
     })
+}
+
+/// Snapshot the exact consecutive collateral runs the backend would consume,
+/// ordered by the vault CR label's underlying health shade.
+#[candid_method(query)]
+#[query]
+fn get_redemption_queue() -> RedemptionQueue {
+    rumi_protocol_backend::vault::get_redemption_queue()
+}
+
+/// Quote a single-collateral redemption against the first currently eligible run.
+/// Price age is explicit; submission refreshes and revalidates priority and payout.
+#[candid_method(query)]
+#[query]
+fn get_redemption_quote(amount_e8s: u64) -> Result<RedemptionQuote, RedemptionError> {
+    rumi_protocol_backend::vault::get_redemption_quote(amount_e8s)
+}
+
+/// Return the caller's outstanding icUSD refund claims, including claims held
+/// after the bounded automatic retry window. This is visibility only; held
+/// claims require manual recovery and are not guaranteed automatic delivery.
+#[candid_method(query)]
+#[query]
+fn get_my_pending_icusd_refunds() -> Vec<PendingIcusdRefundView> {
+    let caller = ic_cdk::caller();
+    read_state(|s| {
+        s.pending_refunds
+            .iter()
+            .filter(|(_, refund)| pending_refund_visible_to(refund.user, caller))
+            .map(|(burn_block_index, refund)| PendingIcusdRefundView {
+                burn_block_index: *burn_block_index,
+                amount_e8s: refund.amount_e8s,
+                retry_count: refund.retry_count,
+                held_for_manual_retry: refund.retry_count
+                    >= rumi_protocol_backend::MAX_PENDING_RETRIES,
+            })
+            .collect()
+    })
+}
+
+#[cfg(test)]
+mod pending_icusd_refund_visibility_tests {
+    use super::pending_refund_visible_to;
+    use candid::Principal;
+
+    #[test]
+    fn refund_claims_are_visible_only_to_their_owner() {
+        let owner = Principal::from_slice(&[1]);
+        let other = Principal::from_slice(&[2]);
+        assert!(pending_refund_visible_to(owner, owner));
+        assert!(!pending_refund_visible_to(owner, other));
+    }
+}
+
+/// Redeem against one collateral run with an explicit expected token and strict
+/// minimum net payout. The reply says payout is queued, not ledger-delivered.
+#[candid_method(update)]
+#[update]
+async fn redeem_quoted(request: RedeemQuotedRequest) -> Result<RedemptionResult, RedemptionError> {
+    validate_call().await.map_err(RedemptionError::from)?;
+    validate_mode().map_err(RedemptionError::from)?;
+    check_postcondition(rumi_protocol_backend::vault::redeem_quoted(request).await)
 }
 
 #[candid_method(update)]
@@ -14321,7 +14393,71 @@ mod chain_sp_absorb_entry_tests {
 // Checks the real candid interface against the one declared in the did file
 #[test]
 fn check_candid_interface_compatibility() {
-    use candid_parser::utils::{service_equal, CandidSource};
+    use candid_parser::utils::{service_compatible, service_equal, CandidSource};
+
+    // Focused frozen contract excerpt from the live Candid snapshot captured
+    // 2026-09-28 (SHA-256 ff10422bbf586345322affbaf5508b48f04c425fb3b9ffd7af3d8275d8e45b91).
+    // Keep this small old service projection independent of the generated
+    // current .did so new quote methods cannot mask a legacy result-type break.
+    const LEGACY_REDEMPTION_SERVICE: &str = r#"
+type ProtocolError = variant {
+  GenericError : text;
+  TemporarilyUnavailable : text;
+  TransferError : TransferError;
+  AlreadyProcessing;
+  NotLowestCR;
+  SupplyInvariantHalted;
+  EvmAuth : text;
+  AnonymousCallerNotAllowed;
+  ChainAdmin : text;
+  AmountTooLow : record { minimum_amount : nat64 };
+  TransferFromError : record { TransferFromError; nat64 };
+  CallerNotOwner;
+};
+type TransferError = variant {
+  GenericError : record { message : text; error_code : nat };
+  TemporarilyUnavailable;
+  BadBurn : record { min_burn_amount : nat };
+  Duplicate : record { duplicate_of : nat };
+  BadFee : record { expected_fee : nat };
+  CreatedInFuture : record { ledger_time : nat64 };
+  TooOld;
+  InsufficientFunds : record { balance : nat };
+};
+type TransferFromError = variant {
+  GenericError : record { message : text; error_code : nat };
+  TemporarilyUnavailable;
+  InsufficientAllowance : record { allowance : nat };
+  BadBurn : record { min_burn_amount : nat };
+  Duplicate : record { duplicate_of : nat };
+  BadFee : record { expected_fee : nat };
+  CreatedInFuture : record { ledger_time : nat64 };
+  TooOld;
+  InsufficientFunds : record { balance : nat };
+};
+type SuccessWithFee = record {
+  block_index : nat64;
+  debt_liquidated_e8s : opt nat64;
+  fee_amount_paid : nat64;
+  stable_pulled_e6s : opt nat64;
+  collateral_amount_received : opt nat64;
+  xrp_claim_id : opt nat64;
+};
+type ReserveRedemptionResult = record {
+  icusd_block_index : nat64;
+  stable_token_used : principal;
+  vault_spillover_amount : nat64;
+  fee_amount : nat64;
+  stable_amount_sent : nat64;
+};
+type Result_4 = variant { Ok : SuccessWithFee; Err : ProtocolError };
+type Result_17 = variant { Ok : ReserveRedemptionResult; Err : ProtocolError };
+service : {
+  redeem_collateral : (principal, nat64) -> (Result_4);
+  redeem_icp : (nat64) -> (Result_4);
+  redeem_reserves : (nat64, opt principal) -> (Result_17);
+}
+"#;
 
     fn source_to_str(source: &CandidSource) -> String {
         match source {
@@ -14357,6 +14493,11 @@ fn check_candid_interface_compatibility() {
     candid::export_service!();
 
     let new_interface = __export_service();
+    service_compatible(
+        CandidSource::Text(&new_interface),
+        CandidSource::Text(LEGACY_REDEMPTION_SERVICE),
+    )
+    .expect("current canister must remain compatible with the frozen live redemption service");
 
     // The anonymous launch projection may report the defensively-distinct
     // endpoint COUNT, but must never expose configured URLs: operator-supplied

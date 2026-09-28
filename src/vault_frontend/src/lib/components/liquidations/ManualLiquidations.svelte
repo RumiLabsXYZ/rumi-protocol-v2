@@ -10,6 +10,7 @@
   import { CONFIG, CANISTER_IDS } from "$lib/config";
   import { collateralStore } from '$lib/stores/collateralStore';
   import { getLiquidationCR, getMinimumCR } from '$lib/protocol';
+  import { getVaultCrTextColor, VAULT_CR_DANGER } from '$lib/utils/vaultHealth';
   import { XrpVaultService } from '$lib/services/xrpVaultService';
   import {
     isNativeXrpPrincipal,
@@ -51,10 +52,8 @@
   }
 
   // ── Color interpolation for health gauge (from VaultCard) ──
-  const DANGER_HEX = '#e06b9f';
   const CAUTION_HEX = '#a78bfa';
   const SAFE_HEX = '#2DD4BF';
-  const WHITE_HEX = '#e2e8f0';
 
   function lerpColor(c1: string, c2: string, t: number): string {
     const r1 = parseInt(c1.slice(1, 3), 16), g1 = parseInt(c1.slice(3, 5), 16), b1 = parseInt(c1.slice(5, 7), 16);
@@ -82,13 +81,10 @@
     let gaugeColor: string;
     if (gaugePct >= fadeStartPct) gaugeColor = SAFE_HEX;
     else if (gaugePct >= fadeEndPct) { const t = (fadeStartPct - gaugePct) / (fadeStartPct - fadeEndPct); gaugeColor = lerpColor(SAFE_HEX, CAUTION_HEX, t); }
-    else if (gaugePct <= liqZonePct) gaugeColor = DANGER_HEX;
-    else { const t = (fadeEndPct - gaugePct) / (fadeEndPct - liqZonePct); gaugeColor = lerpColor(CAUTION_HEX, DANGER_HEX, t); }
+    else if (gaugePct <= liqZonePct) gaugeColor = VAULT_CR_DANGER;
+    else { const t = (fadeEndPct - gaugePct) / (fadeEndPct - liqZonePct); gaugeColor = lerpColor(CAUTION_HEX, VAULT_CR_DANGER, t); }
 
-    let crColor: string;
-    if (gaugePct >= fadeStartPct) crColor = WHITE_HEX;
-    else if (gaugePct <= liqZonePct) crColor = DANGER_HEX;
-    else { const t = (fadeStartPct - gaugePct) / (fadeStartPct - liqZonePct); crColor = lerpColor(WHITE_HEX, DANGER_HEX, t); }
+    const crColor = getVaultCrTextColor(cr, vaultMinCR, vaultLiqCR);
 
     let railStyle = '';
     if (gaugePct < fadeStartPct) {
