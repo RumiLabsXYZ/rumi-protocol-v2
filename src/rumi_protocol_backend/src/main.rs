@@ -10601,7 +10601,7 @@ fn get_collateral_price_fetch_intervals() -> Vec<(Principal, u64)> {
             .map(|ct| {
                 (
                     *ct,
-                    rumi_protocol_backend::xrc::collateral_price_fetch_secs(s, ct),
+                    rumi_protocol_backend::xrc::effective_collateral_price_fetch_secs(s, ct),
                 )
             })
             .collect()

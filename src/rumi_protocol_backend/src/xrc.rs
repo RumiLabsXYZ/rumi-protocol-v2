@@ -166,6 +166,50 @@ pub fn collateral_price_fetch_secs(state: &State, ledger_id: &Principal) -> u64 
     }
 }
 
+/// Effective interval as reported to operators. ICP's price timer is Timer A,
+/// not the per-collateral timer map used for all other assets.
+pub fn effective_collateral_price_fetch_secs(state: &State, ledger_id: &Principal) -> u64 {
+    if *ledger_id == state.icp_collateral_type() {
+        state.xrc_fetch_interval_secs
+    } else {
+        collateral_price_fetch_secs(state, ledger_id)
+    }
+}
+
+/// Return only active, debt-backed LstWrapped redemption candidates whose
+/// stored source timestamp has not caught up to the newly accepted ICP sample.
+/// `None` signals that the full eligible set exceeds the shared refresh bound.
+pub(crate) fn lst_redemption_refresh_candidates(
+    state: &State,
+    icp_timestamp_ns: u64,
+) -> Option<Vec<Principal>> {
+    let candidates = crate::vault::redemption_candidate_types(state);
+    if candidates.len() > crate::vault::MAX_REDEMPTION_PRICE_CANDIDATES {
+        return None;
+    }
+
+    Some(
+        candidates
+            .into_iter()
+            .filter(|collateral_type| {
+                let Some(config) = state.get_collateral_config(collateral_type) else {
+                    return false;
+                };
+                let is_icp_wrapped_lst = matches!(
+                    &config.price_source,
+                    crate::state::PriceSource::LstWrapped { base_asset, .. }
+                        if base_asset == "ICP"
+                );
+                is_icp_wrapped_lst
+                    && should_fetch_collateral_price(state, collateral_type)
+                    && config
+                        .last_price_timestamp
+                        .map_or(true, |timestamp| timestamp < icp_timestamp_ns)
+            })
+            .collect(),
+    )
+}
+
 /// Wave-9d DOS-011: registers the recurring per-collateral XRC price
 /// timer with the status-check gate baked in. Used by both
 /// `setup_timers()` (re-registering after upgrade) and
@@ -228,6 +272,7 @@ pub async fn fetch_icp_rate() {
     // consecutive-failure counter. We set this to true on the success
     // path AFTER source-floor / sanity-band acceptance.
     let mut xrc_call_succeeded = false;
+    let mut accepted_icp_timestamp_ns = None;
 
     match crate::management::fetch_icp_price().await {
         Ok(call_result) => match call_result {
@@ -326,6 +371,7 @@ pub async fn fetch_icp_rate() {
                                 crate::event::record_price_update(icp_ct, rate, ts_nanos);
                             });
                             xrc_call_succeeded = true;
+                            accepted_icp_timestamp_ns = Some(ts_nanos);
                         }
                     }
                 } // end of Wave-14a CDP-14 source-floor `else` block
@@ -361,6 +407,42 @@ pub async fn fetch_icp_rate() {
     }
     if let Some(last_icp_rate) = read_state(|s| s.last_icp_rate) {
         mutate_state(|s| s.update_total_collateral_ratio_and_mode(last_icp_rate));
+    }
+    // Do not serialize future ICP publications behind an LST rate-canister
+    // await. The LST helper has its own per-collateral guard and verifies the
+    // captured ICP timestamp again before publishing.
+    drop(_guard);
+    if let Some(timestamp_ns) = accepted_icp_timestamp_ns {
+        let lst_candidates = read_state(|state| {
+            lst_redemption_refresh_candidates(state, timestamp_ns)
+        });
+        match lst_candidates {
+            Some(collateral_types) => {
+                for collateral_type in collateral_types {
+                    let outcome = crate::management::refresh_lst_wrapped_price_for_icp_timestamp(
+                        collateral_type,
+                        timestamp_ns,
+                    )
+                    .await;
+                    if outcome != crate::management::LstPriceRefreshOutcome::Published
+                        && outcome != crate::management::LstPriceRefreshOutcome::AlreadyCurrent
+                    {
+                        log!(
+                            TRACE_XRC,
+                            "[FetchPrice] ICP sample {} accepted, but LstWrapped collateral {} did not publish: {:?}",
+                            timestamp_ns,
+                            collateral_type,
+                            outcome
+                        );
+                    }
+                }
+            }
+            None => log!(
+                TRACE_XRC,
+                "[FetchPrice] ICP sample {} accepted, but redemption candidate set exceeds the bounded LstWrapped refresh limit",
+                timestamp_ns
+            ),
+        }
     }
     // Wave-14b CDP-12: the post-fetch interest / treasury / vault-check work
     // moved out of this function and into separate, independently scheduled
@@ -1210,6 +1292,7 @@ mod xrc_rate_to_price_e8_tests {
 mod cycle_cadence_tests {
     use super::{
         collateral_needs_periodic_price_refresh, collateral_price_fetch_secs,
+        effective_collateral_price_fetch_secs, lst_redemption_refresh_candidates,
         should_fetch_collateral_price, DEFAULT_COLLATERAL_PRICE_FETCH_SECS,
     };
     use crate::state::{CollateralStatus, State};
@@ -1264,6 +1347,48 @@ mod cycle_cadence_tests {
         let mut s = State::default();
         s.collateral_price_fetch_interval_secs.insert(ckbtc(), 1800);
         assert_eq!(collateral_price_fetch_secs(&s, &ckbtc()), 1800);
+    }
+
+    #[test]
+    fn reported_icp_interval_uses_timer_a_not_per_asset_default() {
+        let mut state = State::default();
+        let icp = state.icp_collateral_type();
+        state.xrc_fetch_interval_secs = 480;
+        state.collateral_price_fetch_interval_secs.insert(icp, 900);
+        assert_eq!(effective_collateral_price_fetch_secs(&state, &icp), 480);
+        assert_eq!(effective_collateral_price_fetch_secs(&state, &ckbtc()), 300);
+        state.collateral_price_fetch_interval_secs.insert(ckbtc(), 900);
+        assert_eq!(effective_collateral_price_fetch_secs(&state, &ckbtc()), 900);
+    }
+
+    #[test]
+    fn accepted_icp_sample_selects_only_stale_debt_backed_lst_candidates() {
+        use crate::state::{PriceSource, XrcAssetClass};
+
+        let mut state = configured_state();
+        let icp = state.icp_collateral_type();
+        let lst = Principal::from_slice(&[42]);
+        let mut config = state
+            .get_collateral_config(&icp)
+            .expect("ICP config")
+            .clone();
+        config.ledger_canister_id = lst;
+        config.price_source = PriceSource::LstWrapped {
+            base_asset: "ICP".to_string(),
+            base_asset_class: XrcAssetClass::Cryptocurrency,
+            quote_asset: "USD".to_string(),
+            quote_asset_class: XrcAssetClass::FiatCurrency,
+            rate_canister_id: Principal::from_slice(&[43]),
+            rate_method: "get_info".to_string(),
+            haircut: 0.05,
+        };
+        config.last_price = Some(1.0);
+        config.last_price_timestamp = Some(100);
+        state.collateral_configs.insert(lst, config);
+        state.open_vault(vault(77, lst, 100_000_000, 100_000_000));
+
+        assert_eq!(lst_redemption_refresh_candidates(&state, 200), Some(vec![lst]));
+        assert_eq!(lst_redemption_refresh_candidates(&state, 100), Some(vec![]));
     }
 
     #[test]

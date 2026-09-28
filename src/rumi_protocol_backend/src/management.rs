@@ -11,7 +11,314 @@ use icrc_ledger_client_cdk::{CdkRuntime, ICRC1Client};
 use num_traits::ToPrimitive;
 use sha2::{Sha256, Digest};
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+
+thread_local! {
+    /// Avoid duplicate WaterNeuron rate-canister calls when the per-asset timer,
+    /// an on-demand refresh, and the ICP-coupled refresh overlap. Transient by
+    /// design; a trap/upgrade drops the in-flight task and resets this set.
+    static LST_PRICE_FETCH_IN_FLIGHT: RefCell<HashSet<Principal>> =
+        RefCell::new(HashSet::new());
+}
+
+struct LstPriceFetchGuard(Principal);
+
+impl LstPriceFetchGuard {
+    fn try_acquire(collateral_type: Principal) -> Option<Self> {
+        LST_PRICE_FETCH_IN_FLIGHT.with(|in_flight| {
+            let mut in_flight = in_flight.borrow_mut();
+            if !in_flight.insert(collateral_type) {
+                return None;
+            }
+            Some(Self(collateral_type))
+        })
+    }
+}
+
+impl Drop for LstPriceFetchGuard {
+    fn drop(&mut self) {
+        LST_PRICE_FETCH_IN_FLIGHT.with(|in_flight| {
+            in_flight.borrow_mut().remove(&self.0);
+        });
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LstPriceRefreshOutcome {
+    Published,
+    AlreadyCurrent,
+    InFlight,
+    NoIcpPrice,
+    IcpTimestampChanged,
+    NotLstWrapped,
+    UnsupportedUnderlying,
+    RateCallFailed,
+    InvalidRate,
+    SanityRejected,
+    ConfigurationChanged,
+}
+
+async fn refresh_lst_with_one_catch_up<F, Fut, L>(
+    collateral_type: Principal,
+    expected_icp_timestamp_ns: u64,
+    mut attempt: F,
+    latest_timestamp: L,
+) -> LstPriceRefreshOutcome
+where
+    F: FnMut(Principal, u64) -> Fut,
+    Fut: std::future::Future<Output = LstPriceRefreshOutcome>,
+    L: Fn() -> Option<u64>,
+{
+    let outcome = attempt(collateral_type, expected_icp_timestamp_ns).await;
+    if outcome != LstPriceRefreshOutcome::IcpTimestampChanged {
+        return outcome;
+    }
+    let Some(latest_timestamp_ns) = latest_timestamp()
+        .filter(|latest| *latest > expected_icp_timestamp_ns)
+    else {
+        return outcome;
+    };
+    // At most one catch-up attempt: repeated source churn or a concurrent
+    // fetch remains fail-closed until the next accepted sample/timer tick.
+    attempt(collateral_type, latest_timestamp_ns).await
+}
+
+fn lst_refresh_preflight(
+    current_icp_timestamp_ns: Option<u64>,
+    expected_icp_timestamp_ns: u64,
+    has_icp_price: bool,
+    last_lst_timestamp_ns: Option<u64>,
+) -> Result<(), LstPriceRefreshOutcome> {
+    if current_icp_timestamp_ns != Some(expected_icp_timestamp_ns) {
+        return Err(LstPriceRefreshOutcome::IcpTimestampChanged);
+    }
+    if !has_icp_price {
+        return Err(LstPriceRefreshOutcome::NoIcpPrice);
+    }
+    if last_lst_timestamp_ns.is_some_and(|timestamp| timestamp >= expected_icp_timestamp_ns) {
+        return Err(LstPriceRefreshOutcome::AlreadyCurrent);
+    }
+    Ok(())
+}
+
+fn lst_publication_preflight(
+    current_icp_timestamp_ns: Option<u64>,
+    expected_icp_timestamp_ns: u64,
+    source_matches: bool,
+    last_lst_timestamp_ns: Option<u64>,
+) -> Result<(), LstPriceRefreshOutcome> {
+    if current_icp_timestamp_ns != Some(expected_icp_timestamp_ns) {
+        return Err(LstPriceRefreshOutcome::IcpTimestampChanged);
+    }
+    if !source_matches {
+        return Err(LstPriceRefreshOutcome::ConfigurationChanged);
+    }
+    if last_lst_timestamp_ns.is_some_and(|timestamp| timestamp >= expected_icp_timestamp_ns) {
+        return Err(LstPriceRefreshOutcome::AlreadyCurrent);
+    }
+    Ok(())
+}
+
+fn commit_lst_wrapped_price(
+    state: &mut crate::state::State,
+    collateral_type: &Principal,
+    expected_icp_timestamp_ns: u64,
+    source: &crate::state::PriceSource,
+    final_rate: f64,
+) -> LstPriceRefreshOutcome {
+    let Some(config) = state.get_collateral_config(collateral_type) else {
+        return LstPriceRefreshOutcome::NotLstWrapped;
+    };
+    if !matches!(source, crate::state::PriceSource::LstWrapped { .. }) {
+        return LstPriceRefreshOutcome::NotLstWrapped;
+    }
+    if let Err(outcome) = lst_publication_preflight(
+        state.last_icp_timestamp,
+        expected_icp_timestamp_ns,
+        config.price_source == *source,
+        config.last_price_timestamp,
+    ) {
+        return outcome;
+    }
+    if !state.check_price_sanity_band(collateral_type, final_rate) {
+        return LstPriceRefreshOutcome::SanityRejected;
+    }
+    state.on_collateral_price_change(collateral_type, final_rate);
+    if let Some(config) = state.collateral_configs.get_mut(collateral_type) {
+        config.last_price_timestamp = Some(expected_icp_timestamp_ns);
+    }
+    LstPriceRefreshOutcome::Published
+}
+
+#[cfg(test)]
+mod lst_refresh_guard_tests {
+    use super::{
+        commit_lst_wrapped_price, lst_publication_preflight, lst_refresh_preflight,
+        refresh_lst_with_one_catch_up, LstPriceFetchGuard, LstPriceRefreshOutcome,
+    };
+    use candid::Principal;
+    use crate::state::{PriceSource, State, XrcAssetClass};
+    use crate::{InitArg, UsdIcp};
+    use rust_decimal::Decimal;
+
+    fn configured_state() -> State {
+        State::from(InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: Principal::anonymous(),
+            icp_ledger_principal: Principal::anonymous(),
+            fee_e8s: 0,
+            developer_principal: Principal::anonymous(),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        })
+    }
+
+    fn add_lst_config(state: &mut State, collateral: Principal) -> PriceSource {
+        let icp = state.icp_collateral_type();
+        let mut config = state.get_collateral_config(&icp).unwrap().clone();
+        let source = PriceSource::LstWrapped {
+            base_asset: "ICP".to_string(),
+            base_asset_class: XrcAssetClass::Cryptocurrency,
+            quote_asset: "USD".to_string(),
+            quote_asset_class: XrcAssetClass::FiatCurrency,
+            rate_canister_id: Principal::from_slice(&[42]),
+            rate_method: "get_info".to_string(),
+            haircut: 0.05,
+        };
+        config.ledger_canister_id = collateral;
+        config.price_source = source.clone();
+        config.last_price = Some(1.0);
+        config.last_price_timestamp = Some(90);
+        state.collateral_configs.insert(collateral, config);
+        state.set_icp_rate(UsdIcp::from(Decimal::ONE), Some(100));
+        source
+    }
+
+    #[test]
+    fn lst_inflight_guard_rejects_duplicate_and_releases_after_completion() {
+        let collateral = Principal::from_slice(&[249, 1]);
+        let first = LstPriceFetchGuard::try_acquire(collateral)
+            .expect("first refresh acquires the per-collateral guard");
+        assert!(LstPriceFetchGuard::try_acquire(collateral).is_none());
+        drop(first);
+        assert!(LstPriceFetchGuard::try_acquire(collateral).is_some());
+    }
+
+    #[test]
+    fn lst_refresh_skips_unchanged_source_and_rejects_old_icp_samples() {
+        assert_eq!(
+            lst_refresh_preflight(Some(10), 10, true, Some(10)),
+            Err(LstPriceRefreshOutcome::AlreadyCurrent)
+        );
+        assert_eq!(
+            lst_refresh_preflight(Some(11), 10, true, Some(9)),
+            Err(LstPriceRefreshOutcome::IcpTimestampChanged)
+        );
+        assert_eq!(
+            lst_refresh_preflight(Some(10), 10, false, Some(9)),
+            Err(LstPriceRefreshOutcome::NoIcpPrice)
+        );
+        assert_eq!(lst_refresh_preflight(Some(10), 10, true, Some(9)), Ok(()));
+    }
+
+    #[test]
+    fn delayed_lst_callback_cannot_publish_over_newer_sample_or_config() {
+        assert_eq!(
+            lst_publication_preflight(Some(11), 10, true, Some(9)),
+            Err(LstPriceRefreshOutcome::IcpTimestampChanged)
+        );
+        assert_eq!(
+            lst_publication_preflight(Some(10), 10, false, Some(9)),
+            Err(LstPriceRefreshOutcome::ConfigurationChanged)
+        );
+        assert_eq!(
+            lst_publication_preflight(Some(10), 10, true, Some(10)),
+            Err(LstPriceRefreshOutcome::AlreadyCurrent)
+        );
+        assert_eq!(lst_publication_preflight(Some(10), 10, true, Some(9)), Ok(()));
+    }
+
+    #[test]
+    fn stale_timer_refresh_catches_up_once_after_new_sample_hit_inflight_guard() {
+        use std::cell::RefCell;
+        use std::collections::VecDeque;
+
+        let collateral = Principal::from_slice(&[249, 3]);
+        // Represents the t0 timer/submit callback while its rate-canister call
+        // is still pending. The t1 ICP-coupled request must not overlap it.
+        let old_refresh = LstPriceFetchGuard::try_acquire(collateral).unwrap();
+        let t1_result = futures::executor::block_on(refresh_lst_with_one_catch_up(
+            collateral,
+            11,
+            |ct, _| async move {
+                if LstPriceFetchGuard::try_acquire(ct).is_some() {
+                    LstPriceRefreshOutcome::Published
+                } else {
+                    LstPriceRefreshOutcome::InFlight
+                }
+            },
+            || Some(11),
+        ));
+        assert_eq!(t1_result, LstPriceRefreshOutcome::InFlight);
+
+        // The old response completes after t1 was accepted. Its result is
+        // discarded, releasing the guard; the common wrapper retries once
+        // using t1 and publishes, regardless of whether the original caller
+        // was Timer A, the per-asset timer, or an on-demand refresh.
+        drop(old_refresh);
+        let results = RefCell::new(VecDeque::from([
+            LstPriceRefreshOutcome::IcpTimestampChanged,
+            LstPriceRefreshOutcome::Published,
+        ]));
+        let attempted_timestamps = RefCell::new(Vec::new());
+        let result = futures::executor::block_on(refresh_lst_with_one_catch_up(
+            collateral,
+            10,
+            |_, timestamp| {
+                attempted_timestamps.borrow_mut().push(timestamp);
+                let result = results.borrow_mut().pop_front().unwrap();
+                async move { result }
+            },
+            || Some(11),
+        ));
+        assert_eq!(result, LstPriceRefreshOutcome::Published);
+        assert_eq!(*attempted_timestamps.borrow(), vec![10, 11]);
+        assert!(results.borrow().is_empty());
+    }
+
+    #[test]
+    fn accepted_icp_timestamp_is_published_to_lst_and_stale_callback_preserves_price() {
+        let mut state = configured_state();
+        let collateral = Principal::from_slice(&[249, 2]);
+        let source = add_lst_config(&mut state, collateral);
+        assert_eq!(
+            commit_lst_wrapped_price(&mut state, &collateral, 100, &source, f64::NAN),
+            LstPriceRefreshOutcome::SanityRejected
+        );
+        let config = state.get_collateral_config(&collateral).unwrap();
+        assert_eq!(config.last_price_timestamp, Some(90));
+        assert_eq!(config.last_price, Some(1.0));
+
+        assert_eq!(
+            commit_lst_wrapped_price(&mut state, &collateral, 100, &source, 1.25),
+            LstPriceRefreshOutcome::Published
+        );
+        let config = state.get_collateral_config(&collateral).unwrap();
+        assert_eq!(config.last_price_timestamp, Some(100));
+        assert_eq!(config.last_price, Some(1.25));
+
+        state.set_icp_rate(UsdIcp::from(Decimal::from(2)), Some(101));
+        assert_eq!(
+            commit_lst_wrapped_price(&mut state, &collateral, 100, &source, 1.5),
+            LstPriceRefreshOutcome::IcpTimestampChanged
+        );
+        let config = state.get_collateral_config(&collateral).unwrap();
+        assert_eq!(config.last_price_timestamp, Some(100));
+        assert_eq!(config.last_price, Some(1.25));
+    }
+}
 use std::fmt;
 use crate::log;
 use crate::DEBUG;
@@ -446,6 +753,157 @@ pub fn compute_lst_wrapped_price(
     Some(adjusted)
 }
 
+/// Refresh one LstWrapped price against a specific accepted ICP source timestamp.
+/// Every timer, on-demand caller, and ICP-coupled caller passes through this
+/// shared in-flight guard and the same post-await source/timestamp checks.
+pub(crate) async fn refresh_lst_wrapped_price_for_icp_timestamp(
+    collateral_type: Principal,
+    expected_icp_timestamp_ns: u64,
+) -> LstPriceRefreshOutcome {
+    refresh_lst_with_one_catch_up(
+        collateral_type,
+        expected_icp_timestamp_ns,
+        refresh_lst_wrapped_price_once,
+        || read_state(|state| state.last_icp_timestamp),
+    )
+    .await
+}
+
+async fn refresh_lst_wrapped_price_once(
+    collateral_type: Principal,
+    expected_icp_timestamp_ns: u64,
+) -> LstPriceRefreshOutcome {
+    use crate::state::{mutate_state, PriceSource};
+    use ic_canister_log::log;
+    use crate::logs::TRACE_XRC;
+    use rust_decimal::prelude::FromPrimitive;
+
+    let Some(_guard) = LstPriceFetchGuard::try_acquire(collateral_type) else {
+        return LstPriceRefreshOutcome::InFlight;
+    };
+
+    let snapshot = read_state(|state| {
+        let Some(config) = state.get_collateral_config(&collateral_type) else {
+            return Err(LstPriceRefreshOutcome::NotLstWrapped);
+        };
+        let icp_rate = state.last_icp_rate.map(|rate| rate.0);
+        lst_refresh_preflight(
+            state.last_icp_timestamp,
+            expected_icp_timestamp_ns,
+            icp_rate.is_some(),
+            config.last_price_timestamp,
+        )?;
+        let icp_rate = icp_rate.ok_or(LstPriceRefreshOutcome::NoIcpPrice)?;
+        let source = config.price_source.clone();
+        let PriceSource::LstWrapped {
+            base_asset,
+            rate_canister_id,
+            rate_method,
+            haircut,
+            ..
+        } = &source
+        else {
+            return Err(LstPriceRefreshOutcome::NotLstWrapped);
+        };
+        if base_asset != "ICP" {
+            return Err(LstPriceRefreshOutcome::UnsupportedUnderlying);
+        }
+        Ok((icp_rate, source.clone(), *rate_canister_id, rate_method.clone(), *haircut))
+    });
+    let (icp_rate, source, rate_canister_id, rate_method, haircut) = match snapshot {
+        Ok(snapshot) => snapshot,
+        Err(outcome) => return outcome,
+    };
+
+    let rate_result: Result<(LstCanisterInfo,), _> =
+        ic_cdk::call(rate_canister_id, rate_method.as_str(), ()).await;
+    let info = match rate_result {
+        Ok((info,)) => info,
+        Err((code, msg)) => {
+            log!(
+                TRACE_XRC,
+                "[fetch_collateral_price] LstWrapped rate canister error for {}: {:?} {}",
+                collateral_type,
+                code,
+                msg
+            );
+            return LstPriceRefreshOutcome::RateCallFailed;
+        }
+    };
+
+    let Some(final_rate) = compute_lst_wrapped_price(icp_rate, info.exchange_rate, haircut) else {
+        log!(
+            TRACE_XRC,
+            "[fetch_collateral_price] LstWrapped {}: compute returned None (underlying={}, wn_rate={}, haircut={})",
+            collateral_type,
+            icp_rate,
+            info.exchange_rate,
+            haircut
+        );
+        return LstPriceRefreshOutcome::InvalidRate;
+    };
+    use rust_decimal::prelude::ToPrimitive;
+    let Some(final_rate_f64) = final_rate.to_f64().filter(|value| value.is_finite() && *value > 0.0) else {
+        return LstPriceRefreshOutcome::InvalidRate;
+    };
+
+    // Revalidate the exact underlying sample and config in the same synchronous
+    // state mutation that publishes. A delayed callback can never overwrite a
+    // newer ICP observation or a changed LST price-source configuration.
+    let published = mutate_state(|state| {
+        let Some(config) = state.get_collateral_config(&collateral_type) else {
+            return false;
+        };
+        if lst_publication_preflight(
+            state.last_icp_timestamp,
+            expected_icp_timestamp_ns,
+            config.price_source == source,
+            config.last_price_timestamp,
+        )
+        .is_err()
+        {
+            return false;
+        }
+        if !state.check_price_sanity_band(&collateral_type, final_rate_f64) {
+            return false;
+        }
+        state.on_collateral_price_change(&collateral_type, final_rate_f64);
+        if let Some(config) = state.collateral_configs.get_mut(&collateral_type) {
+            config.last_price_timestamp = Some(expected_icp_timestamp_ns);
+        }
+        true
+    });
+    if !published {
+        return if read_state(|state| {
+            state.last_icp_timestamp != Some(expected_icp_timestamp_ns)
+        }) {
+            LstPriceRefreshOutcome::IcpTimestampChanged
+        } else if read_state(|state| {
+            state
+                .get_collateral_config(&collateral_type)
+                .is_some_and(|config| config.price_source != source)
+        }) {
+            LstPriceRefreshOutcome::ConfigurationChanged
+        } else if read_state(|state| {
+            state
+                .get_collateral_config(&collateral_type)
+                .and_then(|config| config.last_price_timestamp)
+                .is_some_and(|timestamp| timestamp >= expected_icp_timestamp_ns)
+        }) {
+            LstPriceRefreshOutcome::AlreadyCurrent
+        } else {
+            LstPriceRefreshOutcome::SanityRejected
+        };
+    }
+
+    crate::event::record_price_update(
+        collateral_type,
+        final_rate,
+        expected_icp_timestamp_ns,
+    );
+    LstPriceRefreshOutcome::Published
+}
+
 /// Generic price fetch for any collateral type using its PriceSource config.
 /// Routes to XRC, CoinGecko HTTPS outcall, or LstWrapped depending on config.
 pub async fn fetch_collateral_price(collateral_type: Principal) {
@@ -466,132 +924,26 @@ pub async fn fetch_collateral_price(collateral_type: Principal) {
         }
     };
 
-    // Wave-14a follow-up: LstWrapped derives its price from the cached
-    // underlying-asset rate (currently always ICP/USD, maintained by
-    // Timer A via `xrc::fetch_icp_rate`). No XRC call is issued here —
-    // duplicating that call burned ~1B cycles per refresh per LST
-    // collateral and doubled every source-count rejection event. The
-    // LST canister call (`get_info`) is still required, since the
-    // redemption rate is not cached anywhere else.
-    if let PriceSource::LstWrapped {
-        rate_canister_id,
-        rate_method,
-        haircut,
-        ref base_asset,
-        ..
-    } = price_source
-    {
-        // Today, ICP is the only supported LstWrapped underlying. If a
-        // future config wires up a non-ICP base, route it explicitly here
-        // rather than silently falling through to a stale path.
-        if base_asset != "ICP" {
-            log!(
-                TRACE_XRC,
-                "[fetch_collateral_price] LstWrapped base_asset {:?} for {} not yet supported; skipping",
-                base_asset,
-                collateral_type
-            );
-            return;
-        }
-
-        let cached = read_state(|s| match (s.last_icp_rate, s.last_icp_timestamp) {
-            (Some(rate), Some(ts)) => Some((rate, ts)),
-            _ => None,
-        });
-        let Some((icp_rate, ts_nanos)) = cached else {
-            log!(
-                TRACE_XRC,
-                "[fetch_collateral_price] LstWrapped {}: no cached ICP rate yet (Timer A has not landed); skipping",
-                collateral_type
-            );
-            return;
-        };
-
-        let rate_result: Result<(LstCanisterInfo,), _> =
-            ic_cdk::call(rate_canister_id, rate_method.as_str(), ()).await;
-        let info = match rate_result {
-            Ok((info,)) => info,
-            Err((code, msg)) => {
+    // LstWrapped prices derive from the cached ICP sample. The shared helper
+    // skips already-current samples before making the LST rate-canister call.
+    if matches!(&price_source, PriceSource::LstWrapped { .. }) {
+        if let Some(timestamp_ns) = read_state(|s| s.last_icp_timestamp) {
+            let outcome = refresh_lst_wrapped_price_for_icp_timestamp(collateral_type, timestamp_ns).await;
+            if !matches!(outcome, LstPriceRefreshOutcome::Published | LstPriceRefreshOutcome::AlreadyCurrent) {
                 log!(
                     TRACE_XRC,
-                    "[fetch_collateral_price] LstWrapped rate canister error for {}: {:?} {}",
-                    collateral_type, code, msg
+                    "[fetch_collateral_price] LstWrapped refresh for {} did not publish: {:?}",
+                    collateral_type,
+                    outcome
                 );
-                return;
             }
-        };
-
-        let underlying_decimal = icp_rate.0;
-        let Some(final_rate) =
-            compute_lst_wrapped_price(underlying_decimal, info.exchange_rate, haircut)
-        else {
+        } else {
             log!(
                 TRACE_XRC,
-                "[fetch_collateral_price] LstWrapped {}: compute returned None (underlying={}, wn_rate={}, haircut={})",
-                collateral_type, underlying_decimal, info.exchange_rate, haircut
+                "[fetch_collateral_price] LstWrapped {} has no cached ICP price yet",
+                collateral_type
             );
-            return;
-        };
-
-        log!(
-            TRACE_XRC,
-            "[fetch_collateral_price] LstWrapped final: {} (underlying={}, wn_rate={}, haircut={})",
-            final_rate, underlying_decimal, info.exchange_rate, haircut
-        );
-
-        // Honor the same monotonic-timestamp gate as the XRC path: only
-        // publish if the cached underlying timestamp is newer than the
-        // collateral's last stored timestamp. Re-publishing the same
-        // underlying tick would emit a duplicate `price_update` event for
-        // no observable change.
-        let should_update = read_state(|s| {
-            s.get_collateral_config(&collateral_type)
-                .map(|c| match c.last_price_timestamp {
-                    Some(last_ts) => last_ts < ts_nanos,
-                    None => true,
-                })
-                .unwrap_or(false)
-        });
-        if !should_update {
-            return;
         }
-
-        // Wave-5 LIQ-007: gate the LST-side price through the sanity band
-        // (rejects single outliers; multi-confirmation required to accept).
-        use rust_decimal::prelude::ToPrimitive;
-        let final_rate_f64 = match final_rate.to_f64() {
-            Some(v) if v.is_finite() && v > 0.0 => v,
-            _ => {
-                log!(
-                    TRACE_XRC,
-                    "[fetch_collateral_price] LstWrapped {}: non-positive/non-finite final rate {}; skipping",
-                    collateral_type, final_rate
-                );
-                return;
-            }
-        };
-        let accepted =
-            mutate_state(|s| s.check_price_sanity_band(&collateral_type, final_rate_f64));
-        if !accepted {
-            log!(
-                TRACE_XRC,
-                "[fetch_collateral_price] rejecting outlier LstWrapped rate {} for {}; awaiting confirmation",
-                final_rate_f64, collateral_type
-            );
-            return;
-        }
-
-        mutate_state(|s| {
-            if s.collateral_configs.contains_key(&collateral_type) {
-                // Re-keys this collateral's vaults so band-only check_vaults
-                // ticks see vaults that the price move alone pushed underwater.
-                s.on_collateral_price_change(&collateral_type, final_rate_f64);
-                if let Some(config) = s.collateral_configs.get_mut(&collateral_type) {
-                    config.last_price_timestamp = Some(ts_nanos);
-                }
-                crate::event::record_price_update(collateral_type, final_rate, ts_nanos);
-            }
-        });
         return;
     }
 
