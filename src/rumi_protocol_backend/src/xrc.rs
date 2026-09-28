@@ -419,28 +419,11 @@ pub async fn fetch_icp_rate() {
         match lst_candidates {
             Some(collateral_types) => {
                 for collateral_type in collateral_types {
-                    let mut outcome = crate::management::refresh_lst_wrapped_price_for_icp_timestamp(
+                    let outcome = crate::management::refresh_lst_wrapped_price_for_icp_timestamp(
                         collateral_type,
                         timestamp_ns,
                     )
                     .await;
-                    // If a newer ICP publication arrived while this LST call
-                    // was in flight, the old result is discarded by the
-                    // helper. Catch up once against the latest accepted
-                    // sample now that its per-LST guard has been released.
-                    if outcome == crate::management::LstPriceRefreshOutcome::IcpTimestampChanged {
-                        if let Some(latest_timestamp_ns) = read_state(|state| {
-                            state
-                                .last_icp_timestamp
-                                .filter(|latest| *latest > timestamp_ns)
-                        }) {
-                            outcome = crate::management::refresh_lst_wrapped_price_for_icp_timestamp(
-                                collateral_type,
-                                latest_timestamp_ns,
-                            )
-                            .await;
-                        }
-                    }
                     if outcome != crate::management::LstPriceRefreshOutcome::Published
                         && outcome != crate::management::LstPriceRefreshOutcome::AlreadyCurrent
                     {

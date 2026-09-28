@@ -58,6 +58,31 @@ pub(crate) enum LstPriceRefreshOutcome {
     ConfigurationChanged,
 }
 
+async fn refresh_lst_with_one_catch_up<F, Fut, L>(
+    collateral_type: Principal,
+    expected_icp_timestamp_ns: u64,
+    mut attempt: F,
+    latest_timestamp: L,
+) -> LstPriceRefreshOutcome
+where
+    F: FnMut(Principal, u64) -> Fut,
+    Fut: std::future::Future<Output = LstPriceRefreshOutcome>,
+    L: Fn() -> Option<u64>,
+{
+    let outcome = attempt(collateral_type, expected_icp_timestamp_ns).await;
+    if outcome != LstPriceRefreshOutcome::IcpTimestampChanged {
+        return outcome;
+    }
+    let Some(latest_timestamp_ns) = latest_timestamp()
+        .filter(|latest| *latest > expected_icp_timestamp_ns)
+    else {
+        return outcome;
+    };
+    // At most one catch-up attempt: repeated source churn or a concurrent
+    // fetch remains fail-closed until the next accepted sample/timer tick.
+    attempt(collateral_type, latest_timestamp_ns).await
+}
+
 fn lst_refresh_preflight(
     current_icp_timestamp_ns: Option<u64>,
     expected_icp_timestamp_ns: u64,
@@ -129,7 +154,7 @@ fn commit_lst_wrapped_price(
 mod lst_refresh_guard_tests {
     use super::{
         commit_lst_wrapped_price, lst_publication_preflight, lst_refresh_preflight,
-        LstPriceFetchGuard, LstPriceRefreshOutcome,
+        refresh_lst_with_one_catch_up, LstPriceFetchGuard, LstPriceRefreshOutcome,
     };
     use candid::Principal;
     use crate::state::{PriceSource, State, XrcAssetClass};
@@ -213,6 +238,54 @@ mod lst_refresh_guard_tests {
             Err(LstPriceRefreshOutcome::AlreadyCurrent)
         );
         assert_eq!(lst_publication_preflight(Some(10), 10, true, Some(9)), Ok(()));
+    }
+
+    #[test]
+    fn stale_timer_refresh_catches_up_once_after_new_sample_hit_inflight_guard() {
+        use std::cell::RefCell;
+        use std::collections::VecDeque;
+
+        let collateral = Principal::from_slice(&[249, 3]);
+        // Represents the t0 timer/submit callback while its rate-canister call
+        // is still pending. The t1 ICP-coupled request must not overlap it.
+        let old_refresh = LstPriceFetchGuard::try_acquire(collateral).unwrap();
+        let t1_result = futures::executor::block_on(refresh_lst_with_one_catch_up(
+            collateral,
+            11,
+            |ct, _| async move {
+                if LstPriceFetchGuard::try_acquire(ct).is_some() {
+                    LstPriceRefreshOutcome::Published
+                } else {
+                    LstPriceRefreshOutcome::InFlight
+                }
+            },
+            || Some(11),
+        ));
+        assert_eq!(t1_result, LstPriceRefreshOutcome::InFlight);
+
+        // The old response completes after t1 was accepted. Its result is
+        // discarded, releasing the guard; the common wrapper retries once
+        // using t1 and publishes, regardless of whether the original caller
+        // was Timer A, the per-asset timer, or an on-demand refresh.
+        drop(old_refresh);
+        let results = RefCell::new(VecDeque::from([
+            LstPriceRefreshOutcome::IcpTimestampChanged,
+            LstPriceRefreshOutcome::Published,
+        ]));
+        let attempted_timestamps = RefCell::new(Vec::new());
+        let result = futures::executor::block_on(refresh_lst_with_one_catch_up(
+            collateral,
+            10,
+            |_, timestamp| {
+                attempted_timestamps.borrow_mut().push(timestamp);
+                let result = results.borrow_mut().pop_front().unwrap();
+                async move { result }
+            },
+            || Some(11),
+        ));
+        assert_eq!(result, LstPriceRefreshOutcome::Published);
+        assert_eq!(*attempted_timestamps.borrow(), vec![10, 11]);
+        assert!(results.borrow().is_empty());
     }
 
     #[test]
@@ -684,6 +757,19 @@ pub fn compute_lst_wrapped_price(
 /// Every timer, on-demand caller, and ICP-coupled caller passes through this
 /// shared in-flight guard and the same post-await source/timestamp checks.
 pub(crate) async fn refresh_lst_wrapped_price_for_icp_timestamp(
+    collateral_type: Principal,
+    expected_icp_timestamp_ns: u64,
+) -> LstPriceRefreshOutcome {
+    refresh_lst_with_one_catch_up(
+        collateral_type,
+        expected_icp_timestamp_ns,
+        refresh_lst_wrapped_price_once,
+        || read_state(|state| state.last_icp_timestamp),
+    )
+    .await
+}
+
+async fn refresh_lst_wrapped_price_once(
     collateral_type: Principal,
     expected_icp_timestamp_ns: u64,
 ) -> LstPriceRefreshOutcome {
