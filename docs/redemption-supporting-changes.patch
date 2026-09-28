@@ -1,30 +1,43 @@
-REVIEW ONLY — evolving implementation snapshot
-
-Base commit: ac59a6519730744dd30c33958b959577dec12123
-Captured from the current shared working tree while backend implementation is still in progress. This patch preserves review context only. It is not final, must not be applied over the current tree, and does not demonstrate compilation, tests, or payout correctness.
+REVIEW-ONLY SUPPORTING SOURCE SNAPSHOT
+Baseline: ac59a6519730744dd30c33958b959577dec12123 (origin/main)
+Branch: codex/redemption-health-queue
+This snapshot captures the actual current tracked source diffs plus nonignored untracked source/test files under src/. It excludes docs, generated/dependency caches, and unrelated checkout content. It is review context only: uncompiled and nonfinal. Do not apply this patch.
 
 diff --git a/src/rumi_protocol_backend/src/lib.rs b/src/rumi_protocol_backend/src/lib.rs
-index c0bdc7f6..db9e1a6a 100644
+index c0bdc7f6..5a06193a 100644
 --- a/src/rumi_protocol_backend/src/lib.rs
 +++ b/src/rumi_protocol_backend/src/lib.rs
-@@ -19,6 +19,16 @@ use rust_decimal_macros::dec;
- /// At 5-second intervals, 60 retries = 5 minutes of attempts.
- const MAX_PENDING_RETRIES: u8 = 60;
+@@ -15,9 +15,26 @@ use rust_decimal::prelude::FromPrimitive;
+ use rust_decimal::Decimal;
+ use rust_decimal_macros::dec;
  
+-/// Maximum number of retries for a pending transfer before it is abandoned.
+-/// At 5-second intervals, 60 retries = 5 minutes of attempts.
+-const MAX_PENDING_RETRIES: u8 = 60;
++/// Maximum number of automatic retries before a failed obligation is held for
++/// manual recovery. At 5-second intervals, 60 retries = 5 minutes of attempts.
++pub const MAX_PENDING_RETRIES: u8 = 60;
++
++fn pending_refund_is_automatically_retryable(retry_count: u8) -> bool {
++    retry_count < MAX_PENDING_RETRIES
++}
++
 +fn redemption_transfer_meets_minimum(
 +    gross_raw: u64,
 +    fee_raw: u64,
 +    minimum_net_raw: Option<u64>,
 +) -> bool {
 +    minimum_net_raw
-+        .map(|minimum| gross_raw.saturating_sub(fee_raw) >= minimum)
++        .map(|minimum| {
++            let net = gross_raw.saturating_sub(fee_raw);
++            net > 0 && net >= minimum
++        })
 +        .unwrap_or(true)
 +}
-+
+ 
  pub mod chains;
  pub mod dashboard;
- pub mod event;
-@@ -294,6 +304,83 @@ pub struct SuccessWithFee {
+@@ -294,6 +311,90 @@ pub struct SuccessWithFee {
      pub xrp_claim_id: Option<u64>,
  }
  
@@ -47,7 +60,7 @@ index c0bdc7f6..db9e1a6a 100644
 +    pub health_headroom: f64,
 +    pub vault_count: u64,
 +    /// Total physical collateral in this eligible run, in native token units.
-+    pub eligible_collateral_raw: u64,
++    pub eligible_collateral_raw: u128,
 +    pub eligible_debt_e8s: u64,
 +    pub max_input_icusd_e8s: u64,
 +    /// Maximum backed payout after the collateral ledger fee, in native units.
@@ -57,6 +70,9 @@ index c0bdc7f6..db9e1a6a 100644
 +#[derive(CandidType, Deserialize, Debug, Clone)]
 +pub struct RedemptionQueue {
 +    pub observed_at_ns: u64,
++    /// False if any eligible collateral that could affect the global order is
++    /// missing a valid in-window price or cannot be represented in the runs.
++    pub ranking_fresh: bool,
 +    pub rmr: f64,
 +    pub price_freshness_window_ns: u64,
 +    pub entries: Vec<RedemptionQueueEntry>,
@@ -64,6 +80,10 @@ index c0bdc7f6..db9e1a6a 100644
 +
 +#[derive(CandidType, Deserialize, Debug, Clone)]
 +pub struct RedemptionQuote {
++    pub quoted_at_ns: u64,
++    /// Lifetime of the displayed quote snapshot; distinct from cached price age.
++    pub quote_validity_window_ns: u64,
++    pub ranking_fresh: bool,
 +    pub amount_e8s: u64,
 +    pub run_index: u32,
 +    pub collateral_type: Principal,
@@ -108,7 +128,7 @@ index c0bdc7f6..db9e1a6a 100644
  /// Result from stability pool liquidation (both standard and debt-already-burned paths).
  #[derive(CandidType, Deserialize, Debug)]
  pub struct StabilityPoolLiquidationResult {
-@@ -726,6 +813,22 @@ pub enum ProtocolError {
+@@ -726,6 +827,22 @@ pub enum ProtocolError {
      /// rejection). Wraps a developer-facing message. Appended AFTER `ChainAdmin`
      /// so historical on-chain events keep decoding (append-only Candid surface).
      EvmAuth(String),
@@ -131,7 +151,7 @@ index c0bdc7f6..db9e1a6a 100644
  }
  
  impl From<GuardError> for ProtocolError {
-@@ -1575,6 +1678,21 @@ pub async fn process_pending_transfer() {
+@@ -1575,6 +1692,21 @@ pub async fn process_pending_transfer() {
                  },
              );
  
@@ -153,7 +173,7 @@ index c0bdc7f6..db9e1a6a 100644
          if pending_transfer.margin <= transfer_fee {
              log!(
                  INFO,
-@@ -1587,7 +1705,7 @@ pub async fn process_pending_transfer() {
+@@ -1587,7 +1719,7 @@ pub async fn process_pending_transfer() {
              continue;
          }
          match crate::management::transfer_collateral_with_nonce(
@@ -162,7 +182,7 @@ index c0bdc7f6..db9e1a6a 100644
              pending_transfer.owner,
              ledger,
              pending_transfer.op_nonce,
-@@ -1652,7 +1770,9 @@ pub async fn process_pending_transfer() {
+@@ -1652,7 +1784,9 @@ pub async fn process_pending_transfer() {
                              0
                          }
                      });
@@ -173,19 +193,111 @@ index c0bdc7f6..db9e1a6a 100644
                          log!(INFO,
                              "[transfering_redemptions] CRITICAL: abandoning redemption transfer {} \
                               after {} retries. Owner: {}, amount: {}. Use recover_pending_transfer to retry manually.",
+@@ -1674,6 +1808,7 @@ pub async fn process_pending_transfer() {
+     let pending_refunds = read_state(|s| {
+         s.pending_refunds
+             .iter()
++            .filter(|(_, refund)| pending_refund_is_automatically_retryable(refund.retry_count))
+             .map(|(k, v)| (*k, *v))
+             .collect::<Vec<(u64, crate::state::PendingRefund)>>()
+     });
+@@ -1721,16 +1856,13 @@ pub async fn process_pending_transfer() {
+                     if retries >= MAX_PENDING_RETRIES {
+                         log!(
+                             INFO,
+-                            "[refunding] CRITICAL: abandoning icUSD refund for {} (burn block {}) \
+-                             after {} retries. Amount: {}. Manual reconciliation required.",
++                            "[refunding] CRITICAL: holding durable icUSD refund claim for {} (burn block {}) \
++                             after {} automatic retries. Amount: {}. Owner can inspect it; manual recovery is required.",
+                             refund.user,
+                             icusd_block_index,
+                             retries,
+                             refund.amount_e8s
+                         );
+-                        mutate_state(|s| {
+-                            s.pending_refunds.remove(&icusd_block_index);
+-                        });
+                     }
+                 }
+             }
+@@ -1818,8 +1950,12 @@ pub async fn process_pending_transfer() {
+     if read_state(|s| {
+         !s.pending_margin_transfers.is_empty()
+             || !s.pending_excess_transfers.is_empty()
+-            || !s.pending_redemption_transfer.is_empty()
+-            || !s.pending_refunds.is_empty()
++            || s.pending_redemption_transfer
++                .values()
++                .any(|transfer| transfer.retry_count < MAX_PENDING_RETRIES)
++            || s.pending_refunds
++                .values()
++                .any(|refund| pending_refund_is_automatically_retryable(refund.retry_count))
+             || !s.pending_3usd_refunds.is_empty()
+     }) {
+         // Schedule another check in 5 seconds
 diff --git a/src/rumi_protocol_backend/src/main.rs b/src/rumi_protocol_backend/src/main.rs
-index 2879894a..b484c730 100644
+index 2879894a..c33e8a7c 100644
 --- a/src/rumi_protocol_backend/src/main.rs
 +++ b/src/rumi_protocol_backend/src/main.rs
-@@ -30,6 +30,7 @@ use rumi_protocol_backend::{
-     ProtocolArg, ProtocolError, ProtocolSnapshot, ProtocolStatus, ReserveBalance,
-     ReserveRedemptionResult, StabilityPoolLiquidationResult, StableTokenType, SuccessWithFee,
-     SupplyAudit, SupplyAuditEntry, VaultArgWithToken, VaultHistoryPagedResponse,
-+    RedemptionQueue, RedemptionQuote, RedeemQuotedRequest, RedemptionResult,
-     VaultsPageResponse, XrpSpAbsorbPreflight, XrpSpAbsorbRequest, XrpSpAbsorbResult,
-     MAX_EVENTS_BY_PRINCIPAL_LEGACY, MAX_EVENTS_BY_PRINCIPAL_OUTPUT, MAX_EVENTS_BY_PRINCIPAL_SCAN,
-     MAX_VAULTS_LEGACY_PAGE, MAX_VAULTS_PAGE_LIMIT, MAX_VAULT_HISTORY,
-@@ -6119,6 +6120,32 @@ fn get_redemption_rate() -> f64 {
+@@ -27,13 +27,14 @@ use rumi_protocol_backend::{
+     CollateralInterestInfo, CollateralSnapshot, CollateralTotals, EventTypeFilter,
+     EventsByPrincipalPagedResponse, Fees, ForwardFilteredEventsResponse, GetEventsArg,
+     GetEventsFilteredResponse, GetSnapshotsArg, InterestSplitArg, PerCollateralRateCurve,
+-    ProtocolArg, ProtocolError, ProtocolSnapshot, ProtocolStatus, ReserveBalance,
+-    ReserveRedemptionResult, StabilityPoolLiquidationResult, StableTokenType, SuccessWithFee,
+-    SupplyAudit, SupplyAuditEntry, VaultArgWithToken, VaultHistoryPagedResponse,
+-    VaultsPageResponse, XrpSpAbsorbPreflight, XrpSpAbsorbRequest, XrpSpAbsorbResult,
+-    MAX_EVENTS_BY_PRINCIPAL_LEGACY, MAX_EVENTS_BY_PRINCIPAL_OUTPUT, MAX_EVENTS_BY_PRINCIPAL_SCAN,
+-    MAX_VAULTS_LEGACY_PAGE, MAX_VAULTS_PAGE_LIMIT, MAX_VAULT_HISTORY,
+-    PROTOCOL_STATUS_SNAPSHOT_TTL_NANOS, TREASURY_STATS_SNAPSHOT_TTL_NANOS,
++    ProtocolArg, ProtocolError, ProtocolSnapshot, ProtocolStatus, RedeemQuotedRequest,
++    RedemptionQueue, RedemptionQuote, RedemptionResult, ReserveBalance, ReserveRedemptionResult,
++    StabilityPoolLiquidationResult, StableTokenType, SuccessWithFee, SupplyAudit, SupplyAuditEntry,
++    VaultArgWithToken, VaultHistoryPagedResponse, VaultsPageResponse, XrpSpAbsorbPreflight,
++    XrpSpAbsorbRequest, XrpSpAbsorbResult, MAX_EVENTS_BY_PRINCIPAL_LEGACY,
++    MAX_EVENTS_BY_PRINCIPAL_OUTPUT, MAX_EVENTS_BY_PRINCIPAL_SCAN, MAX_VAULTS_LEGACY_PAGE,
++    MAX_VAULTS_PAGE_LIMIT, MAX_VAULT_HISTORY, PROTOCOL_STATUS_SNAPSHOT_TTL_NANOS,
++    TREASURY_STATS_SNAPSHOT_TTL_NANOS,
+ };
+ use rust_decimal::prelude::FromPrimitive;
+ use rust_decimal::prelude::ToPrimitive;
+@@ -48,6 +49,18 @@ pub struct StabilityPoolConfig {
+     pub enabled: bool,
+ }
+ 
++#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
++pub struct PendingIcusdRefundView {
++    pub burn_block_index: u64,
++    pub amount_e8s: u64,
++    pub retry_count: u8,
++    pub held_for_manual_retry: bool,
++}
++
++fn pending_refund_visible_to(claim_owner: Principal, caller: Principal) -> bool {
++    claim_owner == caller
++}
++
+ #[cfg(feature = "self_check")]
+ fn ok_or_die(result: Result<(), String>) {
+     if let Err(msg) = result {
+@@ -6097,13 +6110,9 @@ async fn redeem_collateral(
+     // bad-debt position by extracting collateral from a protocol that
+     // already owes more than it holds.
+     validate_mode()?;
+-    // Wave-5 RED-001: validate_call only refreshes ICP. For non-ICP collaterals
+-    // (BOB, EXE, ckBTC, ckETH, ckXAUT, nICP) the redeemer would otherwise pay
+-    // out at whatever last_price is cached, which could be hours stale if the
+-    // background timer for that asset has been failing. ensure_fresh_price_for
+-    // delegates to ensure_fresh_price for ICP (already handled), so this is
+-    // safe to call unconditionally.
+-    rumi_protocol_backend::xrc::ensure_fresh_price_for(&collateral_type).await?;
++    // The vault path refreshes and validates every eligible collateral that
++    // participates in the global health sort. Refreshing only the caller's
++    // requested type here could leave a stale competing asset at the front.
+     check_postcondition(
+         rumi_protocol_backend::vault::redeem_collateral(collateral_type, icusd_amount).await,
+     )
+@@ -6119,6 +6128,68 @@ fn get_redemption_rate() -> f64 {
      })
  }
  
@@ -205,6 +317,42 @@ index 2879894a..b484c730 100644
 +    rumi_protocol_backend::vault::get_redemption_quote(amount_e8s)
 +}
 +
++/// Return the caller's outstanding icUSD refund claims, including claims held
++/// after the bounded automatic retry window. This is visibility only; held
++/// claims require manual recovery and are not guaranteed automatic delivery.
++#[candid_method(query)]
++#[query]
++fn get_my_pending_icusd_refunds() -> Vec<PendingIcusdRefundView> {
++    let caller = ic_cdk::caller();
++    read_state(|s| {
++        s.pending_refunds
++            .iter()
++            .filter(|(_, refund)| pending_refund_visible_to(refund.user, caller))
++            .map(|(burn_block_index, refund)| PendingIcusdRefundView {
++                burn_block_index: *burn_block_index,
++                amount_e8s: refund.amount_e8s,
++                retry_count: refund.retry_count,
++                held_for_manual_retry: refund.retry_count
++                    >= rumi_protocol_backend::MAX_PENDING_RETRIES,
++            })
++            .collect()
++    })
++}
++
++#[cfg(test)]
++mod pending_icusd_refund_visibility_tests {
++    use super::pending_refund_visible_to;
++    use candid::Principal;
++
++    #[test]
++    fn refund_claims_are_visible_only_to_their_owner() {
++        let owner = Principal::from_slice(&[1]);
++        let other = Principal::from_slice(&[2]);
++        assert!(pending_refund_visible_to(owner, owner));
++        assert!(!pending_refund_visible_to(owner, other));
++    }
++}
++
 +/// Redeem against one collateral run with an explicit expected token and strict
 +/// minimum net payout. The reply says payout is queued, not ledger-delivered.
 +#[candid_method(update)]
@@ -219,10 +367,10 @@ index 2879894a..b484c730 100644
  #[update]
  async fn open_vault(
 diff --git a/src/rumi_protocol_backend/src/state.rs b/src/rumi_protocol_backend/src/state.rs
-index d43d6dea..fb838a21 100644
+index d43d6dea..177a5e4c 100644
 --- a/src/rumi_protocol_backend/src/state.rs
 +++ b/src/rumi_protocol_backend/src/state.rs
-@@ -41,6 +41,28 @@ macro_rules! ensure {
+@@ -41,6 +41,29 @@ macro_rules! ensure {
  
  pub const ICP_TRANSFER_FEE: ICP = ICP::new(10_000); // 0.0001 ICP — standard ICP ledger fee
  pub type VaultId = u64;
@@ -243,15 +391,16 @@ index d43d6dea..fb838a21 100644
 +    pub price_fresh: bool,
 +    pub min_cr: f64,
 +    pub liquidation_cr: f64,
-+    pub eligible_collateral_raw: u64,
++    /// Exact sum of native collateral in this run; multiple u64 vault balances
++    /// may exceed the per-transfer u64 range.
++    pub eligible_collateral_raw: u128,
 +    pub eligible_debt_e8s: u64,
 +    pub max_input_icusd_e8s: u64,
-+    pub max_net_collateral_raw: u64,
 +}
  pub const DEFAULT_BORROW_FEE: Ratio = Ratio::new(dec!(0.005));
  pub const DEFAULT_CKSTABLE_REPAY_FEE: Ratio = Ratio::new(dec!(0.0005)); // 0.05%
  pub const DEFAULT_MIN_ICUSD_AMOUNT: ICUSD = ICUSD::new(10_000_000); // 0.1 icUSD
-@@ -1041,6 +1063,10 @@ pub struct PendingMarginTransfer {
+@@ -1041,6 +1064,10 @@ pub struct PendingMarginTransfer {
      /// without dedup, matching prior behaviour, no regression).
      #[serde(default)]
      pub op_nonce: u128,
@@ -262,7 +411,21 @@ index d43d6dea..fb838a21 100644
  }
  
  /// Wave-4 ICC-007: durable refund record for `redeem_reserves` failures.
-@@ -2854,73 +2880,167 @@ impl State {
+@@ -1049,9 +1076,10 @@ pub struct PendingMarginTransfer {
+ /// but the ckStable transfer back fails AND the inline icUSD refund also fails,
+ /// the user is left with nothing. Pre-Wave-4 the only recovery path was a
+ /// CRITICAL log. Now the failure persists a `PendingRefund` keyed by the burn
+-/// block index, and `process_pending_transfer` retries it until success or
+-/// MAX_PENDING_RETRIES. The `op_nonce` is minted once and reused across retries
+-/// so the icUSD ledger deduplicates if a previous retry's reply was lost.
++/// block index. `process_pending_transfer` retries below the automatic retry
++/// cap and leaves the entry durably held after `MAX_PENDING_RETRIES`. The
++/// `op_nonce` is minted once and reused across retries so the icUSD ledger
++/// deduplicates if a previous retry's reply was lost.
+ #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize, Copy)]
+ pub struct PendingRefund {
+     pub user: Principal,
+@@ -2854,73 +2882,148 @@ impl State {
          self.icp_ledger_principal
      }
  
@@ -426,8 +589,7 @@ index d43d6dea..fb838a21 100644
 +                let run = runs.last_mut().unwrap();
 +                run.vault_ids.push(vault_id);
 +                run.eligible_debt_e8s = run.eligible_debt_e8s.saturating_add(debt);
-+                run.eligible_collateral_raw =
-+                    run.eligible_collateral_raw.saturating_add(collateral);
++                run.eligible_collateral_raw += collateral as u128;
 +                run.max_input_icusd_e8s = run.eligible_debt_e8s;
 +            } else {
 +                runs.push(RedemptionRun {
@@ -443,29 +605,11 @@ index d43d6dea..fb838a21 100644
 +                    price_fresh: timestamp != 0,
 +                    min_cr: borrow_cr,
 +                    liquidation_cr,
-+                    eligible_collateral_raw: collateral,
++                    eligible_collateral_raw: collateral as u128,
 +                    eligible_debt_e8s: debt,
 +                    max_input_icusd_e8s: debt,
-+                    max_net_collateral_raw: 0,
 +                });
 +            }
-+        }
-+        for run in &mut runs {
-+            let gross: u64 = self
-+                .simulate_redemption_for_vault_ids(
-+                    ICUSD::new(run.max_input_icusd_e8s),
-+                    UsdIcp::from(Decimal::from_f64(run.price_usd).unwrap_or(Decimal::ZERO)),
-+                    &run.collateral_type,
-+                    &run.vault_ids,
-+                )
-+                .iter()
-+                .map(|result| result.collateral_seized)
-+                .fold(0u64, u64::saturating_add);
-+            let ledger_fee = self
-+                .get_collateral_config(&run.collateral_type)
-+                .map(|config| config.ledger_fee)
-+                .unwrap_or(0);
-+            run.max_net_collateral_raw = gross.saturating_sub(ledger_fee);
 +        }
 +        runs
 +    }
@@ -484,7 +628,7 @@ index d43d6dea..fb838a21 100644
      }
  
      /// Set the ICP rate on both the global field AND the ICP CollateralConfig's `last_price`.
-@@ -4998,12 +5118,37 @@ impl State {
+@@ -4998,22 +5101,65 @@ impl State {
          icusd_amount: ICUSD,
          collateral_price: UsdIcp,
          collateral_type: &CollateralType,
@@ -496,10 +640,7 @@ index d43d6dea..fb838a21 100644
 +            return Vec::new();
 +        }
 +        self.redeem_on_vaults_for_vault_ids(
-+            icusd_amount,
-+            collateral_price,
-+            collateral_type,
-+            &first_run.vault_ids,
++            icusd_amount, collateral_price, collateral_type, &first_run.vault_ids,
 +        )
 +    }
 +
@@ -512,6 +653,23 @@ index d43d6dea..fb838a21 100644
 +        collateral_price: UsdIcp,
 +        collateral_type: &CollateralType,
 +        allowed_ids: &[VaultId],
++    ) -> Vec<crate::event::VaultRedemption> {
++        self.redeem_on_vaults_with_vault_ids(
++            icusd_amount,
++            collateral_price,
++            collateral_type,
++            allowed_ids,
++            true,
++        )
++    }
++
++    fn redeem_on_vaults_with_vault_ids(
++        &mut self,
++        icusd_amount: ICUSD,
++        collateral_price: UsdIcp,
++        collateral_type: &CollateralType,
++        allowed_ids: &[VaultId],
++        retain_price_precision: bool,
      ) -> Vec<crate::event::VaultRedemption> {
          let mut results = Vec::new();
  
@@ -523,7 +681,25 @@ index d43d6dea..fb838a21 100644
  
          // Resolve config for price & decimals.
          // During event replay the collateral config may not have a price yet,
-@@ -5031,6 +5176,9 @@ impl State {
+         // so fall back to the price stored in the event (passed as collateral_price).
+         let (price, decimals) = match self.get_collateral_config(collateral_type) {
+             Some(config) => {
+-                let p = config
+-                    .last_price
+-                    .and_then(Decimal::from_f64)
+-                    .unwrap_or(collateral_price.0);
++                let price_decimal = config.last_price.and_then(|price| {
++                    if retain_price_precision {
++                        Decimal::from_f64_retain(price)
++                    } else {
++                        Decimal::from_f64(price)
++                    }
++                });
++                let p = price_decimal.unwrap_or(collateral_price.0);
+                 (p, config.decimals)
+             }
+             None => {
+@@ -5031,6 +5177,9 @@ impl State {
          // Collect eligible vaults sorted by CR ascending
          let mut vault_entries: Vec<(Decimal, VaultId)> = Vec::new();
          for vault in self.vault_id_to_vaults.values() {
@@ -533,7 +709,7 @@ index d43d6dea..fb838a21 100644
              if vault.borrowed_icusd_amount == 0 {
                  continue; // skip zero-debt vaults
              }
-@@ -5055,6 +5203,13 @@ impl State {
+@@ -5055,6 +5204,13 @@ impl State {
              if vault_ct != resolved_ct {
                  continue;
              }
@@ -547,7 +723,7 @@ index d43d6dea..fb838a21 100644
              let cr = crate::compute_collateral_ratio(vault, collateral_price, self);
              vault_entries.push((cr.0, vault.vault_id));
          }
-@@ -5177,6 +5332,191 @@ impl State {
+@@ -5177,6 +5333,191 @@ impl State {
          results
      }
  
@@ -625,7 +801,7 @@ index d43d6dea..fb838a21 100644
 +        }
 +        let price = config
 +            .last_price
-+            .and_then(Decimal::from_f64)
++            .and_then(Decimal::from_f64_retain)
 +            .unwrap_or(collateral_price.0);
 +        let decimals = config.decimals;
 +        let allowed: BTreeSet<VaultId> = allowed_ids.iter().copied().collect();
@@ -739,7 +915,7 @@ index d43d6dea..fb838a21 100644
      /// Distribute a redemption amount proportionally across a band of vaults by debt size.
      /// Returns per-vault breakdown of what was redeemed/seized.
      fn distribute_redemption_across_band(
-@@ -8202,6 +8542,198 @@ mod tests {
+@@ -8202,6 +8543,321 @@ mod tests {
          );
      }
  
@@ -799,6 +975,87 @@ index d43d6dea..fb838a21 100644
 +    }
 +
 +    #[test]
++    fn redemption_run_collateral_total_preserves_values_above_u64() {
++        let mut s = test_state();
++        let icp = s.icp_collateral_type();
++        let config = s.collateral_configs.get_mut(&icp).unwrap();
++        config.decimals = 18;
++        config.last_price = Some(1.0);
++        let per_vault = 10_000_000_000_000_000_000u64;
++        s.open_vault(audit_vault(904, icp, per_vault, 100_000_000));
++        s.open_vault(audit_vault(905, icp, per_vault, 100_000_000));
++
++        let runs = s.redemption_runs();
++        assert_eq!(runs.len(), 1);
++        assert_eq!(runs[0].vault_ids, vec![904, 905]);
++        assert_eq!(
++            runs[0].eligible_collateral_raw,
++            20_000_000_000_000_000_000u128
++        );
++        assert!(runs[0].eligible_collateral_raw > u64::MAX as u128);
++    }
++
++    #[test]
++    fn redemption_simulation_18_decimal_aggregate_exceeds_u64_without_mutation() {
++        let mut s = test_state();
++        let icp = s.icp_collateral_type();
++        let config = s.collateral_configs.get_mut(&icp).unwrap();
++        config.decimals = 18;
++        config.last_price = Some(1.0);
++        let per_vault_collateral = 10_000_000_000_000_000_000u64;
++        let per_vault_debt = ICUSD::new(2_000_000_000); // 20 icUSD
++        s.open_vault(audit_vault(
++            906,
++            icp,
++            per_vault_collateral,
++            per_vault_debt.to_u64(),
++        ));
++        s.open_vault(audit_vault(
++            907,
++            icp,
++            per_vault_collateral,
++            per_vault_debt.to_u64(),
++        ));
++        let before_906 = s.vault_id_to_vaults.get(&906).unwrap().clone();
++        let before_907 = s.vault_id_to_vaults.get(&907).unwrap().clone();
++
++        // At $1 per token and 18 decimals, 20 icUSD effective input requests
++        // 20 native tokens, split evenly across the two equally healthy vaults.
++        let preview = s.simulate_redemption_for_vault_ids(
++            ICUSD::new(2_000_000_000), // 20 icUSD effective input
++            UsdIcp::from(rust_decimal_macros::dec!(1.0)),
++            &icp,
++            &[906, 907],
++        );
++
++        assert_eq!(preview.len(), 2);
++        assert!(preview
++            .iter()
++            .all(|redemption| redemption.icusd_redeemed_e8s == 1_000_000_000));
++        assert!(preview
++            .iter()
++            .all(|redemption| redemption.collateral_seized == per_vault_collateral));
++        let total_seized = preview.iter().fold(0u128, |total, redemption| {
++            total + redemption.collateral_seized as u128
++        });
++        assert_eq!(total_seized, 20_000_000_000_000_000_000u128);
++        assert!(total_seized > u64::MAX as u128);
++
++        let after_906 = s.vault_id_to_vaults.get(&906).unwrap();
++        let after_907 = s.vault_id_to_vaults.get(&907).unwrap();
++        assert_eq!(
++            after_906.borrowed_icusd_amount,
++            before_906.borrowed_icusd_amount
++        );
++        assert_eq!(after_906.collateral_amount, before_906.collateral_amount);
++        assert_eq!(
++            after_907.borrowed_icusd_amount,
++            before_907.borrowed_icusd_amount
++        );
++        assert_eq!(after_907.collateral_amount, before_907.collateral_amount);
++    }
++
++    #[test]
 +    fn redemption_execution_does_not_reach_a_later_healthier_run() {
 +        let mut s = test_state();
 +        let icp = s.icp_collateral_type();
@@ -812,7 +1069,7 @@ index d43d6dea..fb838a21 100644
 +
 +        let later_before = s.vault_id_to_vaults.get(&913).unwrap().clone();
 +        let rate = UsdIcp::from(rust_decimal_macros::dec!(1.0));
-+        let results = s.redeem_on_vaults(ICUSD::new(50_000_000), rate, &icp);
++        let results = s.redeem_on_vaults_for_vault_ids(ICUSD::new(50_000_000), rate, &icp, &[911]);
 +        assert!(!results.is_empty());
 +        assert!(results.iter().all(|result| result.vault_id == 911));
 +        assert_eq!(
@@ -858,6 +1115,44 @@ index d43d6dea..fb838a21 100644
 +    }
 +
 +    #[test]
++    fn underwater_redemption_reduces_full_debt_and_clamps_to_available_collateral() {
++        let mut s = test_state();
++        let icp = s.icp_collateral_type();
++        s.collateral_configs.get_mut(&icp).unwrap().last_price = Some(1.0);
++        s.open_vault(audit_vault(917, icp, 50_000_000, 100_000_000));
++        let before = s.vault_id_to_vaults.get(&917).unwrap().clone();
++        let amount = ICUSD::new(100_000_000);
++        let price = UsdIcp::from(rust_decimal_macros::dec!(1.0));
++
++        let preview = s.simulate_redemption_for_vault_ids(amount, price, &icp, &[917]);
++        assert_eq!(preview.len(), 1);
++        assert_eq!(preview[0].icusd_redeemed_e8s, 100_000_000);
++        assert_eq!(preview[0].collateral_seized, 50_000_000);
++        assert_eq!(
++            s.vault_id_to_vaults.get(&917).unwrap().collateral_amount,
++            before.collateral_amount
++        );
++        assert_eq!(
++            s.vault_id_to_vaults
++                .get(&917)
++                .unwrap()
++                .borrowed_icusd_amount,
++            before.borrowed_icusd_amount
++        );
++
++        let executed = s.redeem_on_vaults_for_vault_ids(amount, price, &icp, &[917]);
++        assert_eq!(executed, preview);
++        let after = s.vault_id_to_vaults.get(&917).unwrap();
++        assert_eq!(
++            before.borrowed_icusd_amount - after.borrowed_icusd_amount,
++            ICUSD::new(100_000_000)
++        );
++        assert_eq!(after.borrowed_icusd_amount, ICUSD::new(0));
++        assert_eq!(after.collateral_amount, 0);
++        assert!(executed[0].collateral_seized <= before.collateral_amount);
++    }
++
++    #[test]
 +    fn redemption_runs_skip_zero_debt_locked_bot_inactive_and_native_xrp() {
 +        let mut s = test_state();
 +        let icp = s.icp_collateral_type();
@@ -877,13 +1172,17 @@ index d43d6dea..fb838a21 100644
 +        s.open_vault(audit_vault(924, xrp, 150_000_000, 100_000_000));
 +        s.open_vault(audit_vault(925, icp, 160_000_000, 100_000_000));
 +        s.vault_id_to_vaults.get_mut(&925).unwrap().bot_processing = true;
-+        let _lock = crate::guard::VaultLiquidationGuard::new(921).expect("lock vault 921");
++        let lock = crate::guard::VaultLiquidationGuard::new(921).expect("lock vault 921");
 +
 +        let runs = s.redemption_runs();
 +        assert!(
 +            runs.is_empty(),
 +            "all configured debt-bearing vaults are ineligible"
 +        );
++        drop(lock);
++        let after_unlock = s.redemption_runs();
++        assert_eq!(after_unlock.len(), 1);
++        assert_eq!(after_unlock[0].vault_ids, vec![921]);
 +    }
 +
 +    #[test]
@@ -939,43 +1238,184 @@ index d43d6dea..fb838a21 100644
      fn xrp_collateral_principal_is_stable_and_not_a_canister_id() {
          let p = xrp_collateral_principal();
 diff --git a/src/rumi_protocol_backend/src/tests.rs b/src/rumi_protocol_backend/src/tests.rs
-index 10159471..bb381ccd 100644
+index 10159471..d9ed55e6 100644
 --- a/src/rumi_protocol_backend/src/tests.rs
 +++ b/src/rumi_protocol_backend/src/tests.rs
-@@ -6,6 +6,15 @@ use proptest::collection::vec as pvec;
+@@ -6,6 +6,39 @@ use proptest::collection::vec as pvec;
  use proptest::prelude::*;
  use std::collections::BTreeMap;
  
 +#[test]
 +fn quoted_redemption_minimum_holds_on_fee_increase_and_legacy_is_unbounded() {
-+    assert!(crate::redemption_transfer_meets_minimum(1_000, 100, Some(900)));
-+    assert!(!crate::redemption_transfer_meets_minimum(1_000, 101, Some(900)));
-+    assert!(!crate::redemption_transfer_meets_minimum(1_000, 150, Some(900)));
++    assert!(crate::redemption_transfer_meets_minimum(
++        1_000,
++        100,
++        Some(900)
++    ));
++    assert!(!crate::redemption_transfer_meets_minimum(
++        1_000,
++        101,
++        Some(900)
++    ));
++    assert!(!crate::redemption_transfer_meets_minimum(
++        1_000,
++        150,
++        Some(900)
++    ));
 +    assert!(crate::redemption_transfer_meets_minimum(1_000, 999, None));
-+    assert!(!crate::redemption_transfer_meets_minimum(1_000, 1_001, Some(0)));
++    assert!(!crate::redemption_transfer_meets_minimum(
++        1_000,
++        1_001,
++        Some(0)
++    ));
++}
++
++#[test]
++fn exhausted_icusd_refunds_are_held_without_being_auto_retried() {
++    assert!(crate::pending_refund_is_automatically_retryable(0));
++    assert!(crate::pending_refund_is_automatically_retryable(59));
++    assert!(!crate::pending_refund_is_automatically_retryable(60));
++    assert!(!crate::pending_refund_is_automatically_retryable(u8::MAX));
 +}
 +
  fn arb_vault() -> impl Strategy<Value = Vault> {
      (arb_principal(), any::<u64>(), arb_amount()).prop_map(|(owner, borrowed_icusd, icp_margin)| {
          Vault {
 diff --git a/src/rumi_protocol_backend/src/vault.rs b/src/rumi_protocol_backend/src/vault.rs
-index 94fc71d3..102ddde1 100644
+index 94fc71d3..66e387e3 100644
 --- a/src/rumi_protocol_backend/src/vault.rs
 +++ b/src/rumi_protocol_backend/src/vault.rs
-@@ -16,7 +16,8 @@ use crate::PendingMarginTransfer;
+@@ -15,8 +15,10 @@ use crate::GuardError;
+ use crate::PendingMarginTransfer;
  use crate::DEBUG;
  use crate::{
-     mutate_state, read_state, ProtocolError, StabilityPoolLiquidationResult, StableTokenType,
+-    mutate_state, read_state, ProtocolError, StabilityPoolLiquidationResult, StableTokenType,
 -    SuccessWithFee, VaultArgWithToken, DUST_THRESHOLD,
-+    SuccessWithFee, VaultArgWithToken, DUST_THRESHOLD, RedemptionQueue, RedemptionQueueEntry,
-+    RedemptionQuote, RedeemQuotedRequest, RedemptionResult, RedemptionPayoutStatus,
++    mutate_state, read_state, ProtocolError, RedeemQuotedRequest, RedemptionPayoutStatus,
++    RedemptionQueue, RedemptionQueueEntry, RedemptionQuote, RedemptionResult,
++    StabilityPoolLiquidationResult, StableTokenType, SuccessWithFee, VaultArgWithToken,
++    DUST_THRESHOLD,
  };
  use candid::{CandidType, Deserialize, Principal};
  use ic_canister_log::log;
-@@ -28,6 +29,165 @@ use serde::Serialize;
+@@ -28,6 +30,346 @@ use serde::Serialize;
  use sha2::{Digest, Sha256};
  use std::panic::{catch_unwind, AssertUnwindSafe};
  
++/// One ten-minute maximum-age contract shared by quote display, ranking refresh,
++/// and pre/post-pull verification. This matches XRC's existing hard ceiling.
++const REDEMPTION_PRICE_MAX_AGE_NS: u64 = 10 * 60 * 1_000_000_000;
++const MAX_REDEMPTION_PRICE_CANDIDATES: usize = 64;
++
++fn redemption_candidate_types(state: &crate::state::State) -> Vec<Principal> {
++    let mut types = std::collections::BTreeSet::new();
++    for vault in state.vault_id_to_vaults.values() {
++        if vault.borrowed_icusd_amount == 0
++            || vault.bot_processing
++            || crate::guard::is_vault_liquidating(vault.vault_id)
++        {
++            continue;
++        }
++        let collateral_type = if vault.collateral_type == Principal::anonymous() {
++            state.icp_collateral_type()
++        } else {
++            vault.collateral_type
++        };
++        let Some(config) = state.get_collateral_config(&collateral_type) else {
++            continue;
++        };
++        if config.status.allows_redemption() && !config.is_native_xrp() {
++            types.insert(collateral_type);
++        }
++    }
++    types.into_iter().collect()
++}
++
++fn redemption_candidate_prices_are_fresh(
++    state: &crate::state::State,
++    candidates: &[Principal],
++    now: u64,
++) -> bool {
++    candidates.iter().all(|collateral_type| {
++        state
++            .get_collateral_config(collateral_type)
++            .and_then(|config| Some((config.last_price?, config.last_price_timestamp?)))
++            .map(|(price, timestamp)| {
++                price.is_finite()
++                    && price > 0.0
++                    && redemption_price_timestamp_is_fresh(timestamp, now)
++            })
++            .unwrap_or(false)
++    })
++}
++
++fn redemption_price_timestamp_is_fresh(timestamp: u64, now: u64) -> bool {
++    timestamp <= now && now - timestamp <= REDEMPTION_PRICE_MAX_AGE_NS
++}
++
++pub(crate) fn redemption_ranking_is_fresh(
++    state: &crate::state::State,
++    runs: &[crate::state::RedemptionRun],
++    now: u64,
++) -> bool {
++    let candidates = redemption_candidate_types(state);
++    let ranked_types = runs
++        .iter()
++        .map(|run| run.collateral_type)
++        .collect::<Vec<_>>();
++    let all_prices_fresh = redemption_candidate_prices_are_fresh(state, &candidates, now);
++    redemption_ranking_is_complete(
++        &candidates,
++        &ranked_types,
++        all_prices_fresh,
++        MAX_REDEMPTION_PRICE_CANDIDATES,
++    )
++}
++
++fn redemption_ranking_is_complete(
++    candidates: &[Principal],
++    ranked_types: &[Principal],
++    all_prices_fresh: bool,
++    max_candidates: usize,
++) -> bool {
++    if candidates.is_empty() || candidates.len() > max_candidates || !all_prices_fresh {
++        return false;
++    }
++    let candidate_set: std::collections::BTreeSet<_> = candidates.iter().copied().collect();
++    let ranked_set: std::collections::BTreeSet<_> = ranked_types.iter().copied().collect();
++    candidate_set == ranked_set
++}
++
++/// Refresh all assets that can influence the global sort, then verify the set
++/// and timestamps after the XRC awaits. Two bounded passes handle candidate-set
++/// changes during an await without creating an unbounded refresh loop.
++async fn refresh_redemption_candidate_prices() -> Result<(), ProtocolError> {
++    for _ in 0..2 {
++        let candidates = read_state(redemption_candidate_types);
++        if candidates.len() > MAX_REDEMPTION_PRICE_CANDIDATES {
++            return Err(ProtocolError::TemporarilyUnavailable(format!(
++                "Too many eligible collateral price sources to refresh safely ({} > {}).",
++                candidates.len(),
++                MAX_REDEMPTION_PRICE_CANDIDATES
++            )));
++        }
++        for collateral_type in &candidates {
++            crate::xrc::ensure_fresh_price_for(collateral_type).await?;
++        }
++        let now = ic_cdk::api::time();
++        let current = read_state(redemption_candidate_types);
++        if current == candidates
++            && current.len() <= MAX_REDEMPTION_PRICE_CANDIDATES
++            && read_state(|state| redemption_candidate_prices_are_fresh(state, &current, now))
++        {
++            return Ok(());
++        }
++    }
++    Err(ProtocolError::TemporarilyUnavailable(
++        "Eligible collateral prices changed or remained stale while refreshing redemption priority. Retry shortly.".to_string(),
++    ))
++}
++
 +/// Return a snapshot of consecutive collateral runs in the global health order.
 +/// Each row's capacity is limited to that run's vault IDs; a later row requires
 +/// a separate redemption call and may move after every state change.
@@ -983,6 +1423,7 @@ index 94fc71d3..102ddde1 100644
 +    let now = ic_cdk::api::time();
 +    read_state(|s| {
 +        let runs = s.redemption_runs();
++        let ranking_fresh = redemption_ranking_is_fresh(s, &runs, now);
 +        let entries = runs
 +            .into_iter()
 +            .map(|run| {
@@ -995,8 +1436,7 @@ index 94fc71d3..102ddde1 100644
 +                    decimals: run.decimals,
 +                    price_usd: run.price_usd,
 +                    price_timestamp_ns: run.price_timestamp_ns,
-+                    price_fresh: now.saturating_sub(run.price_timestamp_ns)
-+                        <= crate::xrc::PRICE_FRESHNESS_THRESHOLD_NANOS,
++                    price_fresh: redemption_price_timestamp_is_fresh(run.price_timestamp_ns, now),
 +                    min_cr: run.min_cr,
 +                    liquidation_cr: run.liquidation_cr,
 +                    weakest_vault_cr: run.weakest_vault_cr,
@@ -1011,8 +1451,9 @@ index 94fc71d3..102ddde1 100644
 +            .collect();
 +        RedemptionQueue {
 +            observed_at_ns: now,
++            ranking_fresh,
 +            rmr: s.get_redemption_margin_ratio().to_f64(),
-+            price_freshness_window_ns: crate::xrc::PRICE_FRESHNESS_THRESHOLD_NANOS,
++            price_freshness_window_ns: REDEMPTION_PRICE_MAX_AGE_NS,
 +            entries,
 +        }
 +    })
@@ -1023,7 +1464,13 @@ index 94fc71d3..102ddde1 100644
 +pub fn get_redemption_quote(amount_e8s: u64) -> Result<RedemptionQuote, ProtocolError> {
 +    let now = ic_cdk::api::time();
 +    read_state(|s| {
-+        let run = s.redemption_runs().into_iter().next().ok_or_else(|| {
++        let runs = s.redemption_runs();
++        if !redemption_ranking_is_fresh(s, &runs, now) {
++            return Err(ProtocolError::RedemptionQuoteUnavailable(
++                "The global collateral ranking has a missing, invalid, or stale candidate price. Refresh and retry.".to_string(),
++            ));
++        }
++        let run = runs.into_iter().next().ok_or_else(|| {
 +            ProtocolError::RedemptionQuoteUnavailable(
 +                "No eligible collateral vaults are available for redemption.".to_string(),
 +            )
@@ -1044,8 +1491,10 @@ index 94fc71d3..102ddde1 100644
 +        let fee = amount * fee_ratio;
 +        let rmr = s.get_redemption_margin_ratio();
 +        let effective = (amount - fee) * rmr;
-+        let price = UsdIcp::from(Decimal::from_f64(run.price_usd).ok_or_else(|| {
-+            ProtocolError::RedemptionQuoteUnavailable("Collateral price is unavailable.".to_string())
++        let price = UsdIcp::from(Decimal::from_f64_retain(run.price_usd).ok_or_else(|| {
++            ProtocolError::RedemptionQuoteUnavailable(
++                "Collateral price is unavailable.".to_string(),
++            )
 +        })?);
 +        let simulated = s.simulate_redemption_for_vault_ids(
 +            effective,
@@ -1053,14 +1502,18 @@ index 94fc71d3..102ddde1 100644
 +            &run.collateral_type,
 +            &run.vault_ids,
 +        );
-+        let gross_u128 = simulated
-+            .iter()
-+            .map(|redemption| redemption.collateral_seized as u128)
-+            .sum::<u128>();
-+        let gross = u64::try_from(gross_u128).unwrap_or(u64::MAX);
-+        let config = s.get_collateral_config(&run.collateral_type).ok_or_else(|| {
-+            ProtocolError::RedemptionQuoteUnavailable("Collateral configuration disappeared.".to_string())
++        let gross = simulated_collateral_total_raw(&simulated).ok_or_else(|| {
++            ProtocolError::RedemptionQuoteUnavailable(
++                "The selected collateral payout exceeds the supported raw-token range.".to_string(),
++            )
 +        })?;
++        let config = s
++            .get_collateral_config(&run.collateral_type)
++            .ok_or_else(|| {
++                ProtocolError::RedemptionQuoteUnavailable(
++                    "Collateral configuration disappeared.".to_string(),
++                )
++            })?;
 +        let ledger_fee = config.ledger_fee;
 +        let net = gross.saturating_sub(ledger_fee);
 +        if net == 0 {
@@ -1069,6 +1522,9 @@ index 94fc71d3..102ddde1 100644
 +            ));
 +        }
 +        Ok(RedemptionQuote {
++            quoted_at_ns: now,
++            quote_validity_window_ns: 60 * 1_000_000_000,
++            ranking_fresh: true,
 +            amount_e8s,
 +            run_index: run.run_index,
 +            collateral_type: run.collateral_type,
@@ -1076,8 +1532,7 @@ index 94fc71d3..102ddde1 100644
 +            decimals: run.decimals,
 +            price_usd: run.price_usd,
 +            price_timestamp_ns: run.price_timestamp_ns,
-+            price_fresh: now.saturating_sub(run.price_timestamp_ns)
-+                <= crate::xrc::PRICE_FRESHNESS_THRESHOLD_NANOS,
++            price_fresh: redemption_price_timestamp_is_fresh(run.price_timestamp_ns, now),
 +            fee_e8s: fee.to_u64(),
 +            rmr: rmr.to_f64(),
 +            effective_icusd_e8s: effective.to_u64(),
@@ -1091,23 +1546,75 @@ index 94fc71d3..102ddde1 100644
 +
 +fn max_input_for_run(state: &crate::state::State, run: &crate::state::RedemptionRun) -> u64 {
 +    let debt = run.eligible_debt_e8s;
-+    if debt == 0 {
++    let rmr = state.get_redemption_margin_ratio();
++    if debt == 0 || rmr.0 <= Decimal::ZERO {
 +        return 0;
 +    }
-+    let mut low = 0u64;
-+    let mut high = debt.saturating_mul(100).max(debt).saturating_add(1);
-+    while low.saturating_add(1) < high {
-+        let mid = low + (high - low) / 2;
-+        let amount = ICUSD::from(mid);
++    max_input_matching(u64::MAX, |raw| {
++        let amount = ICUSD::from(raw);
 +        let fee = amount * state.get_redemption_fee_for(&run.collateral_type, amount);
-+        let effective = (amount - fee) * state.get_redemption_margin_ratio();
-+        if effective.to_u64() <= debt {
++        let effective = (amount - fee) * rmr;
++        if effective.to_u64() > debt {
++            return false;
++        }
++        let Some(price) = Decimal::from_f64_retain(run.price_usd) else {
++            return false;
++        };
++        if !theoretical_collateral_target_fits_u64(effective, price, run.decimals) {
++            return false;
++        }
++        let simulated = state.simulate_redemption_for_vault_ids(
++            effective,
++            UsdIcp::from(price),
++            &run.collateral_type,
++            &run.vault_ids,
++        );
++        simulated_collateral_total_raw(&simulated).is_some()
++    })
++}
++
++fn theoretical_collateral_target_fits_u64(
++    effective_icusd: ICUSD,
++    price_usd: Decimal,
++    decimals: u8,
++) -> bool {
++    if price_usd <= Decimal::ZERO {
++        return false;
++    }
++    let Some(scale) = 10u64.checked_pow(decimals as u32) else {
++        return false;
++    };
++    let target_raw = Decimal::from(effective_icusd.to_u64()) / dec!(100_000_000) / price_usd
++        * Decimal::from(scale);
++    target_raw.is_sign_positive() && target_raw <= Decimal::from(u64::MAX)
++}
++
++fn max_effective_icusd_for_u64_payout(price_usd: Decimal, decimals: u8) -> u64 {
++    max_input_matching(u64::MAX, |effective_e8s| {
++        theoretical_collateral_target_fits_u64(ICUSD::new(effective_e8s), price_usd, decimals)
++    })
++}
++
++fn max_input_matching(upper_bound: u64, mut fits: impl FnMut(u64) -> bool) -> u64 {
++    let mut low = 0u64;
++    let mut high = upper_bound;
++    while low < high {
++        // Upper midpoint guarantees progress even when low == MAX - 1.
++        let mid = low + (high - low) / 2 + 1;
++        if fits(mid) {
 +            low = mid;
 +        } else {
-+            high = mid;
++            high = mid - 1;
 +        }
 +    }
 +    low
++}
++
++fn simulated_collateral_total_raw(redemptions: &[crate::event::VaultRedemption]) -> Option<u64> {
++    let total = redemptions.iter().try_fold(0u128, |sum, redemption| {
++        sum.checked_add(redemption.collateral_seized as u128)
++    })?;
++    u64::try_from(total).ok()
 +}
 +
 +fn net_for_run_input(
@@ -1121,24 +1628,225 @@ index 94fc71d3..102ddde1 100644
 +    let amount = ICUSD::from(amount_e8s);
 +    let fee = amount * state.get_redemption_fee_for(&run.collateral_type, amount);
 +    let effective = (amount - fee) * state.get_redemption_margin_ratio();
-+    let price = UsdIcp::from(Decimal::from_f64(run.price_usd)?);
++    let price = UsdIcp::from(Decimal::from_f64_retain(run.price_usd)?);
 +    let simulated = state.simulate_redemption_for_vault_ids(
 +        effective,
 +        price,
 +        &run.collateral_type,
 +        &run.vault_ids,
 +    );
-+    let gross = simulated.iter().fold(0u128, |sum, result| {
-+        sum.saturating_add(result.collateral_seized as u128)
-+    });
-+    let ledger_fee = state.get_collateral_config(&run.collateral_type)?.ledger_fee;
-+    Some(u64::try_from(gross).unwrap_or(u64::MAX).saturating_sub(ledger_fee))
++    let gross = simulated_collateral_total_raw(&simulated)?;
++    let ledger_fee = state
++        .get_collateral_config(&run.collateral_type)?
++        .ledger_fee;
++    Some(gross.saturating_sub(ledger_fee))
 +}
 +
  use crate::compute_collateral_ratio;
  
  /// INT-003 defense in depth: clamp a raw borrow fee so `amount - fee >= 1 e8s`.
-@@ -603,12 +763,13 @@ pub async fn redeem_collateral(
+@@ -327,11 +669,76 @@ pub async fn redeem_reserves(
+     let spillover_e6s = net_e6s - available_for_user;
+     let spillover_e8s = spillover_e6s * 100; // convert back to icUSD e8s
+ 
++    // Bound a native-collateral spillover before the icUSD pull. The reserve
++    // portion is settled separately, so only the planned remainder is checked.
++    // The nominal target is conservative across any within-run allocation and
++    // protects the u64 pending-payout/event representation.
++    let spillover_plan = if spillover_e8s > 0 {
++        refresh_redemption_candidate_prices().await?;
++        Some(read_state(|state| {
++            let run = state.redemption_runs().into_iter().next()?;
++            let amount = ICUSD::from(spillover_e8s);
++            let fee = amount * state.get_redemption_fee_for(&run.collateral_type, amount);
++            let effective = amount - fee; // RMR was applied above.
++            let price = Decimal::from_f64_retain(run.price_usd)?;
++            if !theoretical_collateral_target_fits_u64(effective, price, run.decimals) {
++                return None;
++            }
++            Some((run.collateral_type, run.vault_ids, run.price_usd, run.decimals))
++        })
++        .ok_or_else(|| {
++            ProtocolError::RedemptionQuoteUnavailable(
++                "The reserve spillover exceeds the supported native payout range; try a smaller amount.".to_string(),
++            )
++        })?)
++    } else {
++        None
++    };
++
+     // Pull icUSD from caller (effectively burns it)
+     let icusd_block_index = transfer_icusd_from(icusd_amount, caller)
+         .await
+         .map_err(|e| ProtocolError::TransferFromError(e, icusd_amount.to_u64()))?;
+ 
++    // The pull awaited. Revalidate the same run before the first reserve
++    // settlement so a changed price/rank can still be compensated in full.
++    if let Some((expected_ct, expected_ids, expected_price, expected_decimals)) = &spillover_plan {
++        let refreshed = refresh_redemption_candidate_prices().await;
++        let still_representable = refreshed.is_ok()
++            && read_state(|state| {
++                let Some(run) = state.redemption_runs().into_iter().next() else {
++                    return false;
++                };
++                if run.collateral_type != *expected_ct
++                    || run.vault_ids.as_slice() != expected_ids.as_slice()
++                    || run.price_usd.to_bits() != expected_price.to_bits()
++                    || run.decimals != *expected_decimals
++                {
++                    return false;
++                }
++                let amount = ICUSD::from(spillover_e8s);
++                let fee = amount * state.get_redemption_fee_for(&run.collateral_type, amount);
++                let effective = amount - fee; // RMR was applied above.
++                Decimal::from_f64_retain(run.price_usd)
++                    .map(|price| {
++                        theoretical_collateral_target_fits_u64(effective, price, run.decimals)
++                    })
++                    .unwrap_or(false)
++            });
++        if !still_representable {
++            return Err(refund_rejected_quoted_redemption(
++                caller,
++                icusd_amount.to_u64(),
++                icusd_block_index,
++                ProtocolError::RedemptionQuoteUnavailable(
++                    "The reserve spillover ranking or payout range changed; the icUSD refund was started."
++                        .to_string(),
++                ),
++            )
++            .await);
++        }
++    }
++
+     // Transfer ckStable to user from reserves.
+     // CRITICAL: If this fails we MUST refund the icUSD, otherwise the user
+     // loses funds with nothing received. ICP inter-canister calls are NOT
+@@ -436,47 +843,73 @@ pub async fn redeem_reserves(
+ 
+     // Handle vault spillover if reserves didn't cover everything
+     if spillover_e8s > 0 {
+-        // Pick the best collateral type for vault redemption based on tier priority
+-        let best_ct = read_state(|s| {
+-            s.get_collateral_types_by_redemption_priority()
+-                .first()
+-                .copied()
+-                .unwrap_or_else(|| s.icp_collateral_type())
+-        });
+-        // Wave-5 RED-001: spillover redeems against the best-priority collateral,
+-        // which may be non-ICP. validate_call only refreshes ICP. Refresh the
+-        // spillover collateral's price on-demand so the redeemer can't capture a
+-        // stale price during the 300s background-timer window.
+-        crate::xrc::ensure_fresh_price_for(&best_ct).await?;
+-        let collateral_price = read_state(|s| s.get_collateral_price_decimal(&best_ct)).ok_or(
+-            ProtocolError::TemporarilyUnavailable(
+-                "No price for vault spillover collateral".to_string(),
+-            ),
+-        )?;
+-        let current_price = UsdIcp::from(collateral_price);
+-
+-        let refund_e8s = mutate_state(|s| {
++        let planned_ct = spillover_plan.as_ref().map(|plan| plan.0);
++        let (refund_e8s, actual_spillover_e8s) = mutate_state(|s| {
+             let spillover_icusd = ICUSD::from(spillover_e8s);
++            // Re-read the run and price immediately before the synchronous
++            // event mutation. If the selected asset changed during the stable
++            // ledger await, skip vault seizure and refund the spillover tail.
++            let Some(run) = s.redemption_runs().into_iter().next() else {
++                return (spillover_e8s, 0);
++            };
++            if Some(run.collateral_type) != planned_ct {
++                return (spillover_e8s, 0);
++            }
++            let Some(config) = s.get_collateral_config(&run.collateral_type) else {
++                return (spillover_e8s, 0);
++            };
++            let Some(price_decimal) = config
++                .last_price
++                .and_then(Decimal::from_f64_retain)
++                .filter(|price| *price > Decimal::ZERO)
++            else {
++                return (spillover_e8s, 0);
++            };
++            let current_price = UsdIcp::from(price_decimal);
++
+             // Wave-14b CDP-03: per-collateral fee path (see redeem_collateral
+-            // for full rationale). The spillover redeems against `best_ct`,
++            // for full rationale). The spillover redeems against the selected run,
+             // so the base rate is read from and written back to that
+             // collateral's config alone.
+-            let base_fee = s.get_redemption_fee_for(&best_ct, spillover_icusd);
+-            crate::record_per_collateral_redemption_fee(s, &best_ct, base_fee, ic_cdk::api::time());
++            let base_fee = s.get_redemption_fee_for(&run.collateral_type, spillover_icusd);
+             let vault_fee = spillover_icusd * base_fee;
+ 
+             // Note: RMR was already applied when computing spillover_e8s (line 160).
+             // Do NOT apply it again here — that would double-discount.
+             let effective_spillover = spillover_icusd - vault_fee;
+ 
++            // A ckStable transfer awaited before this point. Cap the remaining
++            // native payout against the current price/decimals so the event's
++            // historical u64 sum and pending transfer amount stay representable.
++            let safe_effective_e8s =
++                max_effective_icusd_for_u64_payout(price_decimal, run.decimals);
++            let bounded_effective =
++                ICUSD::new(effective_spillover.to_u64().min(safe_effective_e8s));
++            let simulated = s.simulate_redemption_for_vault_ids(
++                bounded_effective,
++                current_price,
++                &run.collateral_type,
++                &run.vault_ids,
++            );
++            if simulated_collateral_total_raw(&simulated).is_none() {
++                return (spillover_e8s, 0);
++            }
++
++            crate::record_per_collateral_redemption_fee(
++                s,
++                &run.collateral_type,
++                base_fee,
++                ic_cdk::api::time(),
++            );
++
+             let outcome = record_redemption_on_vaults(
+                 s,
+                 caller,
+-                effective_spillover,
++                bounded_effective,
+                 vault_fee,
+                 current_price,
+                 icusd_block_index,
+-                best_ct,
++                run.collateral_type,
+             );
+ 
+             // Wave-8e LIQ-005: route the spillover-portion fee through
+@@ -490,9 +923,12 @@ pub async fn redeem_reserves(
+             // RED-001: unconsumed spillover is refunded (RMR already applied
+             // upstream, so the unconsumed effective amount IS the raw refund;
+             // the fee stays with the protocol as priced).
+-            effective_spillover
+-                .saturating_sub(outcome.consumed)
+-                .to_u64()
++            (
++                effective_spillover
++                    .saturating_sub(outcome.consumed)
++                    .to_u64(),
++                outcome.consumed.to_u64(),
++            )
+         });
+         if refund_e8s > 0 {
+             let refund_nonce = mutate_state(|s| s.next_op_nonce());
+@@ -544,7 +980,7 @@ pub async fn redeem_reserves(
+         stable_amount_sent: available_for_user,
+         fee_amount: fee_icusd.to_u64(),
+         stable_token_used: stable_ledger,
+-        vault_spillover_amount: spillover_e8s,
++        vault_spillover_amount: actual_spillover_e8s,
+     })
+ }
+ 
+@@ -603,12 +1039,13 @@ pub async fn redeem_collateral(
      // the water-fill seized the priority winner, so a redeemer could pass a
      // deep-debt type to floor the dynamic fee while draining a thin type
      // against a price with no staleness gate.
@@ -1158,12 +1866,32 @@ index 94fc71d3..102ddde1 100644
  
      let redeem_status = read_state(|s| s.get_collateral_status(&redeem_ct));
      if let Some(status) = redeem_status {
-@@ -641,26 +802,58 @@ pub async fn redeem_collateral(
+@@ -627,7 +1064,18 @@ pub async fn redeem_collateral(
+ 
+     // Fail closed on a stale price for the collateral actually being seized
+     // (VER-001 ceiling applies inside ensure_fresh_price_for).
+-    crate::xrc::ensure_fresh_price_for(&redeem_ct).await?;
++    refresh_redemption_candidate_prices().await?;
++    let redeem_ct = read_state(|s| {
++        s.redemption_runs()
++            .into_iter()
++            .next()
++            .map(|run| run.collateral_type)
++    })
++    .ok_or_else(|| {
++        ProtocolError::RedemptionQuoteUnavailable(
++            "No eligible collateral vaults are available for redemption.".to_string(),
++        )
++    })?;
+ 
+     let collateral_price = read_state(|s| s.get_collateral_price_decimal(&redeem_ct)).ok_or(
+         ProtocolError::TemporarilyUnavailable("No price available for collateral".to_string()),
+@@ -641,26 +1089,106 @@ pub async fn redeem_collateral(
      // redeemed. The estimate uses the pre-pull fee/RMR; any residual gap
      // (state moving during the icUSD pull) is covered by the unconsumed
      // refund below.
 -    let (estimated_effective, total_redeemable) = read_state(|s| {
-+    let (estimated_effective, run_debt, max_input) = read_state(|s| {
++    let (estimated_effective, run_debt, max_input, payout_representable) = read_state(|s| {
          let base_fee = s.get_redemption_fee_for(&redeem_ct, icusd_amount);
          let fee_est = icusd_amount * base_fee;
          let rmr = s.get_redemption_margin_ratio();
@@ -1172,13 +1900,29 @@ index 94fc71d3..102ddde1 100644
 +            .into_iter()
 +            .next()
 +            .filter(|run| run.collateral_type == redeem_ct);
++        let effective = (icusd_amount - fee_est) * rmr;
++        let payout_representable = run
++            .as_ref()
++            .and_then(|run| {
++                let price = Decimal::from_f64_retain(run.price_usd)?;
++                let simulated = s.simulate_redemption_for_vault_ids(
++                    effective,
++                    UsdIcp::from(price),
++                    &run.collateral_type,
++                    &run.vault_ids,
++                );
++                simulated_collateral_total_raw(&simulated)
++            })
++            .is_some();
          (
-             (icusd_amount - fee_est) * rmr,
+-            (icusd_amount - fee_est) * rmr,
 -            s.total_redeemable_debt_for(&redeem_ct),
++            effective,
 +            run.as_ref().map(|run| run.eligible_debt_e8s).unwrap_or(0),
 +            run.as_ref()
 +                .map(|run| max_input_for_run(s, run))
 +                .unwrap_or(0),
++            payout_representable,
          )
      });
 -    if estimated_effective > total_redeemable {
@@ -1192,6 +1936,11 @@ index 94fc71d3..102ddde1 100644
 +        return Err(ProtocolError::RedemptionCapacityExceeded {
 +            max_input_icusd_e8s: max_input,
 +        });
++    }
++    if !payout_representable {
++        return Err(ProtocolError::RedemptionQuoteUnavailable(
++            "The selected collateral payout exceeds the supported raw-token range.".to_string(),
++        ));
      }
  
      match transfer_icusd_from(icusd_amount, caller).await {
@@ -1199,6 +1948,15 @@ index 94fc71d3..102ddde1 100644
 +            // The pull is an await boundary. If global rank or eligible capacity
 +            // changed while it was in flight, refund the full input before any
 +            // fee/base-rate mutation or vault seizure.
++            if let Err(error) = refresh_redemption_candidate_prices().await {
++                return Err(refund_rejected_quoted_redemption(
++                    caller,
++                    icusd_amount.to_u64(),
++                    block_index,
++                    error,
++                )
++                .await);
++            }
 +            let post_pull = match get_redemption_quote(icusd_amount.to_u64()) {
 +                Ok(quote) => quote,
 +                Err(error) => {
@@ -1223,10 +1981,47 @@ index 94fc71d3..102ddde1 100644
 +                )
 +                .await);
 +            }
++            let run_vault_ids = read_state(|state| {
++                state
++                    .redemption_runs()
++                    .into_iter()
++                    .next()
++                    .filter(|run| run.collateral_type == redeem_ct)
++                    .map(|run| run.vault_ids)
++            });
++            let Some(run_vault_ids) = run_vault_ids else {
++                return Err(refund_rejected_quoted_redemption(
++                    caller,
++                    icusd_amount.to_u64(),
++                    block_index,
++                    ProtocolError::RedemptionQuoteUnavailable(
++                        "The selected collateral run changed before execution.".to_string(),
++                    ),
++                )
++                .await);
++            };
              let (fee_amount, outcome, refund_e8s) = mutate_state(|s| {
                  // Wave-14b CDP-03: price the fee against the per-collateral
                  // base rate, and write the post-redemption rate back to the
-@@ -782,6 +975,249 @@ pub async fn redeem_collateral(
+@@ -681,7 +1209,7 @@ pub async fn redeem_collateral(
+                 let rmr = s.get_redemption_margin_ratio();
+                 let effective_icusd = (icusd_amount - fee_amount) * rmr;
+ 
+-                let outcome = record_redemption_on_vaults(
++                let outcome = crate::event::record_redemption_on_vault_run(
+                     s,
+                     caller,
+                     effective_icusd,
+@@ -689,6 +1217,8 @@ pub async fn redeem_collateral(
+                     current_collateral_price,
+                     block_index,
+                     redeem_ct,
++                    &run_vault_ids,
++                    None,
+                 );
+ 
+                 // RED-001: refund the unconsumed remainder of the claim in raw
+@@ -782,6 +1312,263 @@ pub async fn redeem_collateral(
      }
  }
  
@@ -1249,7 +2044,7 @@ index 94fc71d3..102ddde1 100644
 +
 +    // Refresh only the quoted collateral. After the await, rebuild the global
 +    // queue so stale rank changes fail closed instead of paying another asset.
-+    crate::xrc::ensure_fresh_price_for(&request.expected_collateral_type).await?;
++    refresh_redemption_candidate_prices().await?;
 +    let pre_quote = get_redemption_quote(request.amount_e8s)?;
 +    if pre_quote.collateral_type != request.expected_collateral_type {
 +        return Err(ProtocolError::RedemptionPriorityChanged {
@@ -1265,14 +2060,20 @@ index 94fc71d3..102ddde1 100644
 +    }
 +
 +    match transfer_icusd_from(ICUSD::from(request.amount_e8s), caller).await {
-+        Err(error) => Err(ProtocolError::TransferFromError(
-+            error,
-+            request.amount_e8s,
-+        )),
++        Err(error) => Err(ProtocolError::TransferFromError(error, request.amount_e8s)),
 +        Ok(block_index) => {
 +            // The pull awaited. A concurrent redemption or a refreshed price can
 +            // change the global first run. Validate a fresh snapshot before any
 +            // fee update, event, debt mutation, or collateral seizure.
++            if let Err(error) = refresh_redemption_candidate_prices().await {
++                return Err(refund_rejected_quoted_redemption(
++                    caller,
++                    request.amount_e8s,
++                    block_index,
++                    error,
++                )
++                .await);
++            }
 +            let post_quote = match get_redemption_quote(request.amount_e8s) {
 +                Ok(quote) => quote,
 +                Err(error) => {
@@ -1312,7 +2113,10 @@ index 94fc71d3..102ddde1 100644
 +                .await);
 +            }
 +
-+            let mutation_result = mutate_state(|state| {
++            let mutation_result: Result<
++                (ICUSD, crate::event::RedemptionOutcome, u64, String, u8),
++                ProtocolError,
++            > = mutate_state(|state| {
 +                // No await separates the post-pull check from this mutation.
 +                let run = state.redemption_runs().into_iter().next().ok_or_else(|| {
 +                    ProtocolError::RedemptionQuoteUnavailable(
@@ -1336,28 +2140,32 @@ index 94fc71d3..102ddde1 100644
 +                let fee = amount * fee_ratio;
 +                let rmr = state.get_redemption_margin_ratio();
 +                let effective = (amount - fee) * rmr;
-+                let price = UsdIcp::from(Decimal::from_f64(run.price_usd).ok_or_else(|| {
-+                    ProtocolError::RedemptionQuoteUnavailable(
-+                        "Collateral price is unavailable.".to_string(),
-+                    )
-+                })?);
++                let price =
++                    UsdIcp::from(Decimal::from_f64_retain(run.price_usd).ok_or_else(|| {
++                        ProtocolError::RedemptionQuoteUnavailable(
++                            "Collateral price is unavailable.".to_string(),
++                        )
++                    })?);
 +                let simulated = state.simulate_redemption_for_vault_ids(
 +                    effective,
 +                    price,
 +                    &run.collateral_type,
 +                    &run.vault_ids,
 +                );
-+                let gross = simulated.iter().fold(0u128, |sum, item| {
-+                    sum.saturating_add(item.collateral_seized as u128)
-+                });
-+                let config = state.get_collateral_config(&run.collateral_type).ok_or_else(|| {
++                let gross = simulated_collateral_total_raw(&simulated).ok_or_else(|| {
 +                    ProtocolError::RedemptionQuoteUnavailable(
-+                        "Collateral configuration disappeared.".to_string(),
++                        "The selected collateral payout exceeds the supported raw-token range."
++                            .to_string(),
 +                    )
 +                })?;
-+                let net = u64::try_from(gross)
-+                    .unwrap_or(u64::MAX)
-+                    .saturating_sub(config.ledger_fee);
++                let config = state
++                    .get_collateral_config(&run.collateral_type)
++                    .ok_or_else(|| {
++                        ProtocolError::RedemptionQuoteUnavailable(
++                            "Collateral configuration disappeared.".to_string(),
++                        )
++                    })?;
++                let net = gross.saturating_sub(config.ledger_fee);
 +                if net < request.min_net_collateral_raw {
 +                    return Err(ProtocolError::RedemptionMinimumNotMet {
 +                        minimum_net_raw: request.min_net_collateral_raw,
@@ -1450,7 +2258,8 @@ index 94fc71d3..102ddde1 100644
 +    reason: ProtocolError,
 +) -> ProtocolError {
 +    let refund_nonce = mutate_state(|state| state.next_op_nonce());
-+    match management::transfer_icusd_with_nonce(ICUSD::from(amount_e8s), caller, refund_nonce).await {
++    match management::transfer_icusd_with_nonce(ICUSD::from(amount_e8s), caller, refund_nonce).await
++    {
 +        Ok(_) => reason,
 +        Err(refund_error) => {
 +            mutate_state(|state| {
@@ -1476,7 +2285,7 @@ index 94fc71d3..102ddde1 100644
  pub async fn open_vault(
      collateral_amount_raw: u64,
      collateral_type_opt: Option<Principal>,
-@@ -1321,6 +1757,7 @@ fn queue_collateral_payout(
+@@ -1321,6 +2108,7 @@ fn queue_collateral_payout(
                  collateral_type,
                  retry_count: 0,
                  op_nonce,
@@ -1484,7 +2293,7 @@ index 94fc71d3..102ddde1 100644
              },
          );
          None
-@@ -7063,6 +7500,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
+@@ -7063,6 +7851,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
                          collateral_type: vault.collateral_type,
                          retry_count: 0,
                          op_nonce: excess_nonce,
@@ -1492,6 +2301,93 @@ index 94fc71d3..102ddde1 100644
                      },
                  );
              }
+@@ -8921,3 +9710,86 @@ mod xrp_sp_absorb_contract_tests {
+             .contains_key(&(SpProofLedger::IcusdBurn, 1)));
+     }
+ }
++
++#[cfg(test)]
++mod redemption_ranking_completeness_tests {
++    use super::{
++        max_input_matching, redemption_price_timestamp_is_fresh, redemption_ranking_is_complete,
++        simulated_collateral_total_raw, REDEMPTION_PRICE_MAX_AGE_NS,
++    };
++    use candid::Principal;
++
++    #[test]
++    fn missing_competitor_price_cannot_look_like_a_complete_rank() {
++        let icp = Principal::from_slice(&[1]);
++        let xaut = Principal::from_slice(&[2]);
++
++        assert!(!redemption_ranking_is_complete(
++            &[icp, xaut],
++            &[icp],
++            false,
++            64,
++        ));
++        assert!(redemption_ranking_is_complete(
++            &[icp, xaut],
++            &[icp, xaut],
++            true,
++            64,
++        ));
++    }
++
++    #[test]
++    fn redemption_capacity_search_covers_low_rmr_and_checks_next_unit() {
++        // 50% redemption fee and 1% RMR yield 0.5% effective debt reduction.
++        // A 100-unit debt therefore supports 20,000 input units, far beyond
++        // the old arbitrary 100x search ceiling.
++        let capacity = max_input_matching(u64::MAX, |input| {
++            input / 200 + u64::from(input % 200 != 0) <= 100
++        });
++        assert_eq!(capacity, 20_000);
++        assert!(capacity / 200 <= 100);
++        assert!((capacity + 1) / 200 > 100);
++    }
++
++    #[test]
++    fn redemption_payout_rejects_native_sum_above_u64() {
++        let large = 10_000_000_000_000_000_000u64;
++        let simulated = vec![
++            crate::event::VaultRedemption {
++                vault_id: 1,
++                icusd_redeemed_e8s: 1,
++                collateral_seized: large,
++            },
++            crate::event::VaultRedemption {
++                vault_id: 2,
++                icusd_redeemed_e8s: 1,
++                collateral_seized: large,
++            },
++        ];
++        assert!(simulated_collateral_total_raw(&simulated).is_none());
++
++        let representable = vec![crate::event::VaultRedemption {
++            vault_id: 1,
++            icusd_redeemed_e8s: 1,
++            collateral_seized: u64::MAX,
++        }];
++        assert_eq!(
++            simulated_collateral_total_raw(&representable),
++            Some(u64::MAX)
++        );
++    }
++
++    #[test]
++    fn redemption_price_freshness_rejects_future_timestamps() {
++        let now = 10_000_000_000;
++        assert!(redemption_price_timestamp_is_fresh(
++            now - REDEMPTION_PRICE_MAX_AGE_NS,
++            now
++        ));
++        assert!(!redemption_price_timestamp_is_fresh(now + 1, now));
++        assert!(!redemption_price_timestamp_is_fresh(
++            now - REDEMPTION_PRICE_MAX_AGE_NS - 1,
++            now
++        ));
++    }
++}
 diff --git a/src/vault_frontend/src/lib/components/liquidations/ManualLiquidations.svelte b/src/vault_frontend/src/lib/components/liquidations/ManualLiquidations.svelte
 index 506b4fd4..5210da9a 100644
 --- a/src/vault_frontend/src/lib/components/liquidations/ManualLiquidations.svelte
@@ -1579,39 +2475,340 @@ index 4e103bf8..97590cfa 100644
    // Rail: opacity fades in through the gradient zone
    $: railStyle = (() => {
 diff --git a/src/vault_frontend/src/lib/services/protocol.ts b/src/vault_frontend/src/lib/services/protocol.ts
-index 54562a61..0d6f4647 100644
+index 54562a61..a0bc01a5 100644
 --- a/src/vault_frontend/src/lib/services/protocol.ts
 +++ b/src/vault_frontend/src/lib/services/protocol.ts
-@@ -67,6 +67,9 @@ export class ProtocolService {
+@@ -67,6 +67,10 @@ export class ProtocolService {
    static redeemIcp = ApiClient.redeemIcp;
    static redeemCollateral = ApiClient.redeemCollateral;
    static redeemReserves = ApiClient.redeemReserves;
 +  static getRedemptionQueue = ApiClient.getRedemptionQueue;
 +  static getRedemptionQuote = ApiClient.getRedemptionQuote;
++  static getRedemptionPreflight = ApiClient.getRedemptionPreflight;
 +  static redeemQuoted = ApiClient.redeemQuoted;
    static getReserveBalances = ApiClient.getReserveBalances;
    static withdrawCollateral = ApiClient.withdrawCollateral;
    static withdrawPartialCollateral = ApiClient.withdrawPartialCollateral;
-@@ -128,6 +131,9 @@ export const protocolService = {
+@@ -128,6 +132,10 @@ export const protocolService = {
    redeemIcp: ProtocolService.redeemIcp,
    redeemCollateral: ProtocolService.redeemCollateral,
    redeemReserves: ProtocolService.redeemReserves,
 +  getRedemptionQueue: ProtocolService.getRedemptionQueue,
 +  getRedemptionQuote: ProtocolService.getRedemptionQuote,
++  getRedemptionPreflight: ProtocolService.getRedemptionPreflight,
 +  redeemQuoted: ProtocolService.redeemQuoted,
    getReserveBalances: ProtocolService.getReserveBalances,
    getLiquidityStatus: ProtocolService.getLiquidityStatus,
    provideLiquidity: ProtocolService.provideLiquidity,
-@@ -167,4 +173,3 @@ export const protocolService = {
+@@ -166,5 +174,3 @@ export const protocolService = {
+   isStaleProcessingState: ProtocolService.isStaleProcessingState,
  };
  
- 
 -
+-
+diff --git a/src/vault_frontend/src/lib/services/protocol/actionBoundary.spec.ts b/src/vault_frontend/src/lib/services/protocol/actionBoundary.spec.ts
+index 9e801369..ddbed70e 100644
+--- a/src/vault_frontend/src/lib/services/protocol/actionBoundary.spec.ts
++++ b/src/vault_frontend/src/lib/services/protocol/actionBoundary.spec.ts
+@@ -19,6 +19,8 @@ import { Principal } from '@dfinity/principal';
+ const mocks = vi.hoisted(() => ({
+   getActor: vi.fn(),
+   anonAllowance: vi.fn(),
++  anonBalance: vi.fn(),
++  ledgerFee: vi.fn(),
+   getSignerAgent: vi.fn(),
+   walletState: { isConnected: true, principal: null as any },
+   // Literal, not sourced from '../../config': vi.mock factories are hoisted
+@@ -34,7 +36,11 @@ vi.mock('@dfinity/agent', async () => {
+     ...actual,
+     Actor: {
+       ...actual.Actor,
+-      createActor: vi.fn(() => ({ icrc2_allowance: mocks.anonAllowance })),
++      createActor: vi.fn(() => ({
++        icrc2_allowance: mocks.anonAllowance,
++        icrc1_balance_of: mocks.anonBalance,
++        icrc1_fee: mocks.ledgerFee,
++      })),
+     },
+     HttpAgent: vi.fn(() => ({ fetchRootKey: vi.fn().mockResolvedValue(undefined) })),
+     AnonymousIdentity: vi.fn(() => ({})),
+@@ -72,6 +78,7 @@ vi.mock('../pnp', () => ({
+ vi.mock('../PermissionManager', () => ({ permissionManager: {} }));
+ 
+ import { CONFIG, CANISTER_IDS } from '../../config';
++import { currentWalletType, walletSessionGeneration, WALLET_TYPES } from '../auth';
+ import {
+   ApiClient,
+   type BoundOpenVaultAndBorrowResult,
+@@ -104,7 +111,11 @@ function makeCtx(expectedPrincipalText: string, assertCurrent: () => boolean = (
+   return { expectedPrincipalText, assertCurrent };
+ }
+ 
+-let backendActor: { open_vault_and_borrow: ReturnType<typeof vi.fn>; borrow_from_vault: ReturnType<typeof vi.fn> };
++let backendActor: {
++  open_vault_and_borrow: ReturnType<typeof vi.fn>;
++  borrow_from_vault: ReturnType<typeof vi.fn>;
++  redeem_quoted: ReturnType<typeof vi.fn>;
++};
+ let ledgerActor: { icrc2_approve: ReturnType<typeof vi.fn> };
+ 
+ beforeEach(() => {
+@@ -113,10 +124,21 @@ beforeEach(() => {
+   vi.spyOn(console, 'warn').mockImplementation(() => {});
+   vi.spyOn(console, 'error').mockImplementation(() => {});
+   localStorage.clear();
++  walletSessionGeneration.set(0);
++  currentWalletType.set(WALLET_TYPES.PLUG);
+ 
+   backendActor = {
+     open_vault_and_borrow: vi.fn().mockResolvedValue({ Ok: { vault_id: 7n, block_index: 99n } }),
+     borrow_from_vault: vi.fn().mockResolvedValue({ Ok: { block_index: 55n, fee_amount_paid: 1_000n } }),
++    redeem_quoted: vi.fn().mockResolvedValue({ Ok: {
++      icusd_block_index: 88n,
++      fee_paid_e8s: 1_000n,
++      collateral_type: Principal.fromText(CKDOGE_LEDGER_ID),
++      symbol: 'ckDOGE',
++      decimals: 8,
++      net_collateral_raw: 123_000n,
++      payout_status: 'queued',
++    } }),
+   };
+   ledgerActor = {
+     icrc2_approve: vi.fn().mockResolvedValue({ Ok: 1n }),
+@@ -124,10 +146,12 @@ beforeEach(() => {
+ 
+   mocks.getActor.mockImplementation(async (canisterId: string) => {
+     if (canisterId === BACKEND_ID) return backendActor;
+-    if (canisterId === CKDOGE_LEDGER_ID) return ledgerActor;
++    if (canisterId === CKDOGE_LEDGER_ID || canisterId === CONFIG.currentIcusdLedgerId) return ledgerActor;
+     throw new Error(`unexpected getActor(${canisterId})`);
+   });
+   mocks.anonAllowance.mockResolvedValue({ allowance: 0n });
++  mocks.anonBalance.mockResolvedValue(100_000_000_000n);
++  mocks.ledgerFee.mockResolvedValue(100_000n);
+   mocks.getSignerAgent.mockResolvedValue(null);
+ 
+   setLivePrincipal(PRINCIPAL_A);
+@@ -303,6 +327,206 @@ describe('ApiClient.openVaultAndBorrowBound — standard ICRC-2 path (Internet I
+   });
+ });
+ 
++describe('ApiClient.redeemQuoted — bounded ICRC-2 allowance and submission outcome', () => {
++  const request = {
++    amount_e8s: 12_345_678n,
++    expected_collateral_type: Principal.fromText(CKDOGE_LEDGER_ID),
++    min_net_collateral_raw: 100_000n,
++  };
++
++  it('approves the exact requested icUSD amount before submission when allowance is absent', async () => {
++    mocks.anonAllowance.mockResolvedValue({ allowance: 0n });
++
++    const result = await ApiClient.redeemQuoted(request);
++
++    expect(ledgerActor.icrc2_approve).toHaveBeenCalledOnce();
++    expect(ledgerActor.icrc2_approve).toHaveBeenCalledWith(expect.objectContaining({
++      amount: request.amount_e8s + 100_000n,
++      spender: { owner: Principal.fromText(BACKEND_ID), subaccount: [] },
++    }));
++    expect(typeof ledgerActor.icrc2_approve.mock.calls[0][0].expires_at[0]).toBe('bigint');
++    expect(backendActor.redeem_quoted).toHaveBeenCalledOnce();
++    expect(ledgerActor.icrc2_approve.mock.invocationCallOrder[0])
++      .toBeLessThan(backendActor.redeem_quoted.mock.invocationCallOrder[0]);
++    expect(result).toMatchObject({ success: true, blockIndex: 88, redemption: { payoutStatus: 'queued' } });
++  });
++
++  it('skips approval when the existing allowance covers the quoted amount', async () => {
++    mocks.anonAllowance.mockResolvedValue({ allowance: request.amount_e8s + 100_000n });
++
++    const result = await ApiClient.redeemQuoted(request);
++
++    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
++    expect(backendActor.redeem_quoted).toHaveBeenCalledOnce();
++    expect(result.success).toBe(true);
++  });
++
++  it('does not dispatch redemption when the wallet switches during approval', async () => {
++    mocks.anonAllowance.mockResolvedValue({ allowance: 0n });
++    ledgerActor.icrc2_approve.mockImplementation(async () => {
++      setLivePrincipal(PRINCIPAL_B);
++      return { Ok: 3n };
++    });
++
++    const result = await ApiClient.redeemQuoted(request);
++
++    expect(ledgerActor.icrc2_approve).toHaveBeenCalledOnce();
++    expect(backendActor.redeem_quoted).not.toHaveBeenCalled();
++    expect(result.success).toBe(false);
++    expect(result.ambiguous).toBeUndefined();
++  });
++
++  it('does not dispatch redemption after a same-principal wallet session transition during approval', async () => {
++    mocks.anonAllowance.mockResolvedValue({ allowance: 0n });
++    ledgerActor.icrc2_approve.mockImplementation(async () => {
++      walletSessionGeneration.update((generation) => generation + 1);
++      return { Ok: 3n };
++    });
++
++    const result = await ApiClient.redeemQuoted(request);
++
++    expect(backendActor.redeem_quoted).not.toHaveBeenCalled();
++    expect(result.success).toBe(false);
++    expect(result.ambiguous).toBeUndefined();
++  });
++
++  it('preserves the approval fee when checking a first-use maximum balance', async () => {
++    mocks.anonAllowance.mockResolvedValue({ allowance: 0n });
++    mocks.anonBalance.mockResolvedValue(request.amount_e8s + 100_000n);
++
++    const result = await ApiClient.redeemQuoted(request);
++
++    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
++    expect(backendActor.redeem_quoted).not.toHaveBeenCalled();
++    expect(result.success).toBe(false);
++    expect(result.error).toContain(`${request.amount_e8s + 200_000n} raw units`);
++  });
++
++  it('reports a lost approval reply at the approval stage and never submits redemption', async () => {
++    mocks.anonAllowance.mockResolvedValue({ allowance: 0n });
++    ledgerActor.icrc2_approve.mockRejectedValue(new Error('approval reply timed out'));
++
++    const result = await ApiClient.redeemQuoted(request);
++
++    expect(backendActor.redeem_quoted).not.toHaveBeenCalled();
++    expect(result).toMatchObject({ success: false, ambiguous: true, ambiguityStage: 'approval' });
++  });
++
++  it('fails closed on missing or stale Oisy preflight before acquiring a signer', async () => {
++    localStorage.setItem('rumi_last_wallet', 'oisy');
++    currentWalletType.set(WALLET_TYPES.OISY);
++
++    const result = await ApiClient.redeemQuoted(request);
++
++    expect(mocks.getSignerAgent).not.toHaveBeenCalled();
++    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
++    expect(backendActor.redeem_quoted).not.toHaveBeenCalled();
++    expect(result.success).toBe(false);
++    expect(result.error).toContain('check is missing or stale');
++  });
++
++  it('fails closed when an Oisy preflight snapshot contains invalid fee or balance data', async () => {
++    localStorage.setItem('rumi_last_wallet', 'oisy');
++    currentWalletType.set(WALLET_TYPES.OISY);
++    const preparedPreflight = {
++      principalText: PRINCIPAL_A,
++      walletType: WALLET_TYPES.OISY,
++      sessionGeneration: 0,
++      ledgerId: CONFIG.currentIcusdLedgerId,
++      observedAtMs: Date.now(),
++      allowanceRaw: 0n,
++      balanceRaw: request.amount_e8s + 200_000n,
++      feeRaw: -1n,
++    };
++
++    const result = await ApiClient.redeemQuoted(request, preparedPreflight);
++
++    expect(mocks.getSignerAgent).not.toHaveBeenCalled();
++    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
++    expect(backendActor.redeem_quoted).not.toHaveBeenCalled();
++    expect(result.success).toBe(false);
++  });
++
++  it('uses the Oisy preflight when wallet storage is absent but the active wallet type is Oisy', async () => {
++    currentWalletType.set(WALLET_TYPES.OISY);
++    mocks.getSignerAgent.mockResolvedValue({});
++    const preparedPreflight = {
++      principalText: PRINCIPAL_A,
++      walletType: WALLET_TYPES.OISY,
++      sessionGeneration: 0,
++      ledgerId: CONFIG.currentIcusdLedgerId,
++      observedAtMs: Date.now(),
++      allowanceRaw: request.amount_e8s + 100_000n,
++      balanceRaw: request.amount_e8s + 100_000n,
++      feeRaw: 100_000n,
++    };
++
++    const result = await ApiClient.redeemQuoted(request, preparedPreflight);
++
++    expect(mocks.getSignerAgent).toHaveBeenCalledOnce();
++    expect(mocks.anonAllowance).not.toHaveBeenCalled();
++    expect(mocks.anonBalance).not.toHaveBeenCalled();
++    expect(mocks.ledgerFee).not.toHaveBeenCalled();
++    expect(backendActor.redeem_quoted).toHaveBeenCalledOnce();
++    expect(result.success).toBe(true);
++  });
++
++  it('does not use a balance change to upgrade a lost Oisy submission reply', async () => {
++    localStorage.setItem('rumi_last_wallet', 'oisy');
++    currentWalletType.set(WALLET_TYPES.OISY);
++    mocks.getSignerAgent.mockResolvedValue({});
++    ledgerActor.icrc2_approve.mockResolvedValue({ Ok: 3n });
++    backendActor.redeem_quoted.mockRejectedValue(new Error("Cannot read properties of undefined (reading '_arr')"));
++    const preparedPreflight = {
++      principalText: PRINCIPAL_A,
++      walletType: WALLET_TYPES.OISY,
++      sessionGeneration: 0,
++      ledgerId: CONFIG.currentIcusdLedgerId,
++      observedAtMs: Date.now(),
++      allowanceRaw: 0n,
++      balanceRaw: request.amount_e8s + 200_000n,
++      feeRaw: 100_000n,
++    };
++
++    const result = await ApiClient.redeemQuoted(request, preparedPreflight);
++
++    expect(backendActor.redeem_quoted).toHaveBeenCalledOnce();
++    expect(mocks.anonBalance).not.toHaveBeenCalled();
++    expect(result).toMatchObject({
++      success: false,
++      ambiguous: true,
++      ambiguityStage: 'submission',
++    });
++    expect(result.redemption).toBeUndefined();
++  });
++
++  it('rechecks session after submit and labels a typed queued result from the previous session', async () => {
++    backendActor.redeem_quoted.mockImplementation(async () => {
++      walletSessionGeneration.update((generation) => generation + 1);
++      return {
++        Ok: {
++          icusd_block_index: 88n,
++          fee_paid_e8s: 1_000n,
++          collateral_type: Principal.fromText(CKDOGE_LEDGER_ID),
++          symbol: 'ckDOGE',
++          decimals: 8,
++          net_collateral_raw: 123_000n,
++          payout_status: 'queued',
++        },
++      };
++    });
++
++    const result = await ApiClient.redeemQuoted(request);
++
++    expect(result).toMatchObject({
++      success: true,
++      sessionChangedAfterSubmission: true,
++      message: expect.stringContaining('previous wallet session'),
++      redemption: { payoutStatus: 'queued' },
++    });
++  });
++});
++
+ describe('ApiClient.openVaultAndBorrowBound — Oisy ICRC-112 batched path', () => {
+   const COLLATERAL_RAW = 50_000_000n;
+   const ICUSD_RAW = 10_000_000n;
 diff --git a/src/vault_frontend/src/lib/services/protocol/apiClient.ts b/src/vault_frontend/src/lib/services/protocol/apiClient.ts
-index 1e02e46c..9880562e 100644
+index 1e02e46c..fc7ddc98 100644
 --- a/src/vault_frontend/src/lib/services/protocol/apiClient.ts
 +++ b/src/vault_frontend/src/lib/services/protocol/apiClient.ts
-@@ -37,10 +37,17 @@ import type {
+@@ -29,6 +29,7 @@ import {
+ import { pnp } from '../pnp';
+ import { get } from 'svelte/store';
+ import { QueryOperations } from './queryOperations';
++import { currentWalletType, walletSessionGeneration, WALLET_TYPES } from '../auth';
+ import { permissionManager } from '../PermissionManager';
+ import type {
+   VaultDTO,
+@@ -37,10 +38,17 @@ import type {
    LiquidityStatusDTO,
    CandidVault
  } from '../types';
@@ -1629,16 +2826,42 @@ index 1e02e46c..9880562e 100644
    isOisyLandedSentinel,
  } from './oisyResilience';
  import {
-@@ -2558,7 +2565,7 @@ static async repayToVaultWithStable(
+@@ -148,6 +156,25 @@ export interface BoundBorrowFromVaultResult {
+   submittedIcusdRaw: bigint;
+ }
+ 
++export type RedeemQuotedResult = VaultOperationResult & {
++  /** Which wallet mutation had an uncertain transport result. */
++  ambiguityStage?: 'approval' | 'submission';
++  /** Typed backend response belongs to the initiating session, which is no longer active. */
++  sessionChangedAfterSubmission?: boolean;
++};
++
++/** Fresh icUSD ledger reads prepared before the click-handler signer window. */
++export interface RedemptionPreflight {
++  principalText: string;
++  walletType: string | null;
++  sessionGeneration: number;
++  ledgerId: string;
++  observedAtMs: number;
++  allowanceRaw: bigint;
++  balanceRaw: bigint;
++  feeRaw: bigint;
++}
++
+ /**
+  * Core API client for interacting with the protocol backend
+  */
+@@ -2558,7 +2585,7 @@ static async repayToVaultWithStable(
       * Redeem ICP by providing icUSD
       * @param icusdAmount Amount of icUSD to redeem
       */
 -    static async redeemIcp(icusdAmount: number): Promise<VaultOperationResult> {
-+  static async redeemIcp(icusdAmount: number): Promise<VaultOperationResult> {
++      static async redeemIcp(icusdAmount: number): Promise<VaultOperationResult> {
        try {
          console.log(`Redeeming ${icusdAmount} icUSD for ICP`);
  
-@@ -3167,6 +3174,95 @@ static async repayToVaultWithStable(
+@@ -3167,6 +3194,238 @@ static async repayToVaultWithStable(
      }));
    }
  
@@ -1653,54 +2876,194 @@ index 1e02e46c..9880562e 100644
 +    return ApiClient.getPublicData<RedemptionQuoteResult>('get_redemption_quote' as any, amountE8s);
 +  }
 +
++  /**
++   * Prepare fresh ICRC-2 allowance, icUSD balance, and ledger fee reads before
++   * a signer gesture. Oisy callers pass this snapshot into redeemQuoted so no
++   * asynchronous ledger query is needed between the click and approval.
++   */
++  static async getRedemptionPreflight(): Promise<RedemptionPreflight> {
++    const walletState = get(walletStore);
++    const principal = walletState.principal;
++    const principalText = principal?.toText() ?? '';
++    const expectedWalletType = get(currentWalletType);
++    if (!walletState.isConnected || !principal || !principalText || !expectedWalletType) {
++      throw new Error('Connect a wallet before checking redemption allowance and balance.');
++    }
++    const expectedOisy = expectedWalletType === WALLET_TYPES.OISY;
++    const expectedSessionGeneration = get(walletSessionGeneration);
++    const ctx: ActionBoundContext = {
++      expectedPrincipalText: principalText,
++      assertCurrent: () => get(walletStore).isConnected
++        && get(currentWalletType) === expectedWalletType
++        && get(walletSessionGeneration) === expectedSessionGeneration,
++    };
++    assertActionBoundContextCurrent(ctx);
++    const ledgerId = CONFIG.currentIcusdLedgerId;
++    const ledgerActor = Actor.createActor(icusd_ledgerIDL as any, {
++      agent: anonymousAgent,
++      canisterId: ledgerId,
++    }) as any;
++    const account = { owner: Principal.fromText(principalText), subaccount: [] };
++    const spender = { owner: Principal.fromText(CONFIG.currentCanisterId), subaccount: [] };
++    const [allowance, balance, fee] = await Promise.all([
++      ledgerActor.icrc2_allowance({ account, spender }),
++      ledgerActor.icrc1_balance_of(account),
++      ledgerActor.icrc1_fee(),
++    ]);
++    assertActionBoundContextCurrent(ctx);
++    return {
++      principalText,
++      walletType: expectedWalletType,
++      sessionGeneration: expectedSessionGeneration,
++      ledgerId,
++      observedAtMs: Date.now(),
++      allowanceRaw: BigInt(allowance.allowance),
++      balanceRaw: BigInt(balance),
++      feeRaw: BigInt(fee),
++    };
++  }
++
 +  /** Submit a quote-bound direct-vault redemption. A successful result means queued, not delivered. */
-+  static async redeemQuoted(request: RedemptionQuotedRequest): Promise<VaultOperationResult> {
++  static async redeemQuoted(
++    request: RedemptionQuotedRequest,
++    preparedPreflight?: RedemptionPreflight
++  ): Promise<RedeemQuotedResult> {
++    let submissionDispatched = false;
++    let submissionReplyObserved = false;
 +    try {
 +      const walletState = get(walletStore);
 +      const expectedPrincipalText = walletState.principal?.toText() ?? '';
-+      const expectedOisy = isOisyWallet();
-+      if (!walletState.isConnected || !expectedPrincipalText) {
++      const expectedWalletType = get(currentWalletType);
++      const expectedSessionGeneration = get(walletSessionGeneration);
++      const expectedOisy = expectedWalletType === WALLET_TYPES.OISY;
++      if (!walletState.isConnected || !expectedPrincipalText || !expectedWalletType) {
 +        return { success: false, error: 'Connect a wallet before redeeming.' };
 +      }
 +      const actionContext: ActionBoundContext = {
 +        expectedPrincipalText,
-+        assertCurrent: () => get(walletStore).isConnected && isOisyWallet() === expectedOisy,
++        assertCurrent: () => get(walletStore).isConnected
++          && get(currentWalletType) === expectedWalletType
++          && get(walletSessionGeneration) === expectedSessionGeneration,
 +      };
-+      const actor = await ApiClient.getBoundAuthenticatedActor(actionContext);
-+      assertActionBoundContextCurrent(actionContext);
-+      const beforeIcusd = isOisyWallet()
-+        ? (walletState.tokenBalances?.ICUSD?.raw ?? null)
-+        : (walletState.principal
-+            ? await TokenService.getTokenBalance(CONFIG.currentIcusdLedgerId, walletState.principal, { skipCache: true }).catch(() => null)
-+            : null);
 +      assertActionBoundContextCurrent(actionContext);
 +
-+      const result = await callWithOisyFalseNegativeGuard<RedemptionResultVariant>(
-+        () => {
-+          assertActionBoundContextCurrent(actionContext);
-+          return (actor as any).redeem_quoted(request);
-+        },
-+        async () => {
-+          if (beforeIcusd === null || !walletState.principal) return false;
-+          const after = await TokenService.getTokenBalance(
-+            CONFIG.currentIcusdLedgerId, walletState.principal, { skipCache: true }
-+          ).catch(() => null);
-+          if (after === null) return false;
-+          return beforeIcusd - after >= (request.amount_e8s * 95n) / 100n;
-+        },
-+        `redeem_quoted ${request.amount_e8s} e8s`
-+      );
-+
-+      if (isOisyLandedSentinel(result)) {
++      // Oisy's signer gesture cannot safely span an asynchronous allowance
++      // query. Match the other Oisy flows: request an explicit, amount-bounded
++      // approval, then submit the action as the next signer operation.
++      const spender = Principal.fromText(CONFIG.currentCanisterId);
++      const preflight = expectedOisy
++        ? preparedPreflight
++        : await ApiClient.getRedemptionPreflight();
++      assertActionBoundContextCurrent(actionContext);
++      if (!preflight
++        || preflight.principalText !== expectedPrincipalText
++        || preflight.walletType !== expectedWalletType
++        || preflight.sessionGeneration !== expectedSessionGeneration
++        || preflight.ledgerId !== CONFIG.currentIcusdLedgerId
++        || !Number.isSafeInteger(preflight.observedAtMs)
++        || Date.now() - preflight.observedAtMs > 30_000
++        || preflight.observedAtMs > Date.now() + 1_000
++        || typeof preflight.allowanceRaw !== 'bigint'
++        || preflight.allowanceRaw < 0n
++        || typeof preflight.balanceRaw !== 'bigint'
++        || preflight.balanceRaw < 0n
++        || typeof preflight.feeRaw !== 'bigint'
++        || preflight.feeRaw < 0n
++        || typeof request.amount_e8s !== 'bigint'
++        || request.amount_e8s <= 0n) {
 +        return {
 +          success: false,
-+          ambiguous: true,
-+          error: 'The icUSD balance changed, but the wallet did not return the redemption result. The collateral payout is unconfirmed. Refresh your balances and redemption quote before choosing what to do next.'
++          error: expectedOisy
++            ? 'The icUSD allowance, balance, and ledger fee check is missing or stale. Refresh the redemption preflight before signing.'
++            : 'The icUSD allowance, balance, or ledger fee check is stale. Refresh before redeeming.',
 +        };
 +      }
 +
++      const requiredAllowance = request.amount_e8s + preflight.feeRaw;
++      const needsApproval = preflight.allowanceRaw < requiredAllowance;
++      const requiredBalance = request.amount_e8s + preflight.feeRaw * (needsApproval ? 2n : 1n);
++      if (preflight.balanceRaw < requiredBalance) {
++        return {
++          success: false,
++          error: needsApproval
++            ? `Insufficient icUSD for this redemption and its approval/transfer fees. Required ${requiredBalance} raw units; available ${preflight.balanceRaw}.`
++            : `Insufficient icUSD for this redemption and its transfer fee. Required ${requiredBalance} raw units; available ${preflight.balanceRaw}.`,
++        };
++      }
++
++      if (expectedOisy) {
++        await pnp.getSignerAgent();
++        assertActionBoundContextCurrent(actionContext);
++      }
++
++      if (needsApproval) {
++        assertActionBoundContextCurrent(actionContext);
++        const approvalActor = await walletStore.getActor(
++          CONFIG.currentIcusdLedgerId, CONFIG.icusd_ledgerIDL
++        ) as any;
++        assertActionBoundContextCurrent(actionContext);
++        let approvalResult: any;
++        try {
++          approvalResult = await approvalActor.icrc2_approve({
++            amount: requiredAllowance,
++            spender: { owner: spender, subaccount: [] },
++            expires_at: largeApprovalExpiry(),
++            expected_allowance: [], memo: [], fee: [],
++            from_subaccount: [], created_at_time: [],
++          });
++        } catch (err) {
++          return {
++            success: false,
++            ambiguous: true,
++            ambiguityStage: 'approval',
++            error: err instanceof Error
++              ? `The icUSD approval response was unclear. Check the allowance before retrying. (${err.message})`
++              : 'The icUSD approval response was unclear. Check the allowance before retrying.',
++          };
++        }
++        assertActionBoundContextCurrent(actionContext);
++        if (approvalResult && 'Err' in approvalResult) {
++          return {
++            success: false,
++            ambiguityStage: 'approval',
++            error: `icUSD approval failed: ${JSON.stringify(approvalResult.Err)}`,
++          };
++        }
++      }
++
++      assertActionBoundContextCurrent(actionContext);
++      const actor = await ApiClient.getBoundAuthenticatedActor(actionContext);
++      assertActionBoundContextCurrent(actionContext);
++
++      let result: RedemptionResultVariant;
++      submissionDispatched = true;
++      try {
++        result = await (actor as any).redeem_quoted(request);
++      } catch (err) {
++        return {
++          success: false,
++          ambiguous: true,
++          ambiguityStage: 'submission',
++          error: err instanceof Error
++            ? `The redemption request was submitted, but its reply was not received. Check the redemption queue before retrying. (${err.message})`
++            : 'The redemption request was submitted, but its reply was not received. Check the redemption queue before retrying.',
++        };
++      }
++      submissionReplyObserved = true;
++      let sessionChangedAfterSubmission = false;
++      try {
++        assertActionBoundContextCurrent(actionContext);
++      } catch (err) {
++        if (!(err instanceof StaleActionSessionError)) throw err;
++        sessionChangedAfterSubmission = true;
++      }
++
 +      if ('Err' in result) {
-+        return { success: false, error: ApiClient.formatProtocolError(result.Err) };
++        return {
++          success: false,
++          error: ApiClient.formatProtocolError(result.Err),
++          ...(sessionChangedAfterSubmission ? { sessionChangedAfterSubmission: true } : {}),
++        };
 +      }
 +
 +      const redeemed = result.Ok;
@@ -1715,18 +3078,21 @@ index 1e02e46c..9880562e 100644
 +          netCollateralRaw: redeemed.net_collateral_raw,
 +          payoutStatus: redeemed.payout_status,
 +        },
++        ...(sessionChangedAfterSubmission
++          ? {
++              sessionChangedAfterSubmission: true,
++              message: 'The backend confirmed this redemption for the previous wallet session. Check that wallet’s redemption queue before starting another redemption.',
++            }
++          : {}),
 +      };
 +    } catch (err) {
 +      console.error('Error submitting quoted redemption:', err);
 +      return {
 +        success: false,
-+        ...(isOisyWallet() && isOisyArrFalseNegative(err) ? { ambiguous: true } : {}),
-+        ...(isOisyWallet() && isOisyArrFalseNegative(err)
-+          ? { error: 'The wallet did not return the redemption result. The payout may be pending. Refresh your balances and redemption quote before choosing what to do next.' }
++        ...(submissionDispatched && !submissionReplyObserved
++          ? { ambiguous: true, ambiguityStage: 'submission' as const }
 +          : {}),
-+        ...(!(isOisyWallet() && isOisyArrFalseNegative(err))
-+          ? { error: err instanceof Error ? err.message : 'Unknown error submitting quoted redemption' }
-+          : {}),
++        error: err instanceof Error ? err.message : 'Unknown error submitting quoted redemption',
 +      };
 +    }
 +  }
@@ -1758,10 +3124,10 @@ index 63101799..c86e6c6e 100644
  
  export interface VaultHistoryEvent {
 diff --git a/src/vault_frontend/src/routes/redeem/+page.svelte b/src/vault_frontend/src/routes/redeem/+page.svelte
-index 07aa2e8a..76db68b2 100644
+index 07aa2e8a..307fc49f 100644
 --- a/src/vault_frontend/src/routes/redeem/+page.svelte
 +++ b/src/vault_frontend/src/routes/redeem/+page.svelte
-@@ -2,333 +2,311 @@
+@@ -2,333 +2,421 @@
    import { onMount } from 'svelte';
    import { walletStore as wallet } from '$lib/stores/wallet';
    import { protocolService } from '$lib/services/protocol';
@@ -1770,7 +3136,9 @@ index 07aa2e8a..76db68b2 100644
 -  import { TokenService } from '$lib/services/tokenService';
 -  import { Principal } from '@dfinity/principal';
 -  import { publicActor } from '$lib/services/protocol/apiClient';
++  import { currentWalletType, walletSessionGeneration } from '$lib/services/auth';
 +  import { ApiClient } from '$lib/services/protocol/apiClient';
++  import { CONFIG } from '$lib/config';
 +  import { formatNumber } from '$lib/utils/format';
    import ProtocolStats from '$lib/components/dashboard/ProtocolStats.svelte';
    import { resolveRoute } from '$lib/services/swapRouter';
@@ -1781,11 +3149,15 @@ index 07aa2e8a..76db68b2 100644
 +    formatUsd,
 +    quoteIsFresh,
 +    quoteMatchesAmount,
++    queueCandidatePricesFresh,
++    maxRedeemableInput,
++    redemptionPreflightIsFresh,
 +    toHumanIcusd,
 +    toHumanRawAmount,
 +    toQueueEntryViews,
 +    type RedemptionQueue,
 +    type RedemptionQuote,
++    type RedemptionPreflight,
 +  } from '$lib/utils/redemptionPreview';
  
 -  // ── State ───────────────────────────────────────────────────────────
@@ -1802,6 +3174,10 @@ index 07aa2e8a..76db68b2 100644
 -  let rmrCeilingCr = 1.5;   // System CR below which rmrCeiling applies
 -  let systemCR = 2.0;       // Current system collateral ratio
    let icusdBalance = 0;
++  let redemptionPreflight: RedemptionPreflight | null = null;
++  let preflightLoading = false;
++  let preflightError = '';
++  let preflightRevision = 0;
 +  let walletPrincipal: string | null = null;
 +  let walletSnapshotReady = false;
    let icusdAmount = 0;
@@ -1825,6 +3201,7 @@ index 07aa2e8a..76db68b2 100644
 +  let quoteRevision = 0;
 +  let lastObservedAmountE8s = -1n;
 +  let quoteDebounceTimer: ReturnType<typeof setTimeout> | null = null;
++  let preserveSuccessMessageOnInputReset = false;
 +  let freshnessTimer: ReturnType<typeof setInterval> | null = null;
 +  let freshnessNowMs = Date.now();
  
@@ -1835,14 +3212,27 @@ index 07aa2e8a..76db68b2 100644
 +  $: quoteFresh = quoteIsFresh(quote, queue, BigInt(freshnessNowMs) * 1_000_000n);
 +  $: quoteAmountMatches = quoteMatchesAmount(quote, amountE8s);
 +  $: quoteWalletMatches = quoteWalletPrincipal === walletPrincipal;
++  $: preflightFresh = redemptionPreflightIsFresh(
++    redemptionPreflight,
++    walletPrincipal,
++    CONFIG.currentIcusdLedgerId,
++    $currentWalletType,
++    $walletSessionGeneration,
++    freshnessNowMs,
++  );
 +  $: quoteNetAmount = quote ? toHumanRawAmount(quote.net_collateral_raw, quote.decimals) : '';
 +  $: quoteNetValueUsd = quote && quote.price_usd > 0
 +    ? Number(quote.net_collateral_raw) / 10 ** quote.decimals * quote.price_usd
 +    : 0;
 +  $: quoteUsable = !!quote && quoteFresh && quoteAmountMatches && quoteWalletMatches && !quoteLoading && !queueLoading;
++  $: maxWalletAmount = Number(maxRedeemableInput(null, redemptionPreflight)) / Number(ICUSD_E8S);
 +  $: maxFirstRunAmount = firstRun
-+    ? Math.max(0, Math.min(icusdBalance - 0.001, Number(firstRun.maxInputIcusdE8s) / Number(ICUSD_E8S)))
++    ? Number(maxRedeemableInput(firstRun.maxInputIcusdE8s, redemptionPreflight)) / Number(ICUSD_E8S)
 +    : 0;
++  $: exceedsFreshBalance = redemptionPreflight
++    ? amountE8s > redemptionPreflight.balanceRaw
++    : icusdAmount > icusdBalance;
++  $: canSubmit = quoteUsable && preflightFresh && !preflightLoading;
  
 -  // Preferred ckStable token
 -  type StableToken = 'auto' | 'ckUSDT' | 'ckUSDC';
@@ -1859,8 +3249,14 @@ index 07aa2e8a..76db68b2 100644
 +    walletPrincipal = nextPrincipal;
 +    walletSnapshotReady = true;
 +    if (principalChanged) {
-+      invalidateQuote('Wallet changed. Refresh the quote before redeeming.');
-+      if (amountE8s > 0n) schedulePreview(amountE8s);
++      redemptionPreflight = null;
++      if (amountE8s > 0n) {
++        schedulePreview(amountE8s);
++        quoteError = 'Wallet changed. Refresh the quote before redeeming.';
++      } else {
++        invalidateQuote('Wallet changed. Refresh the quote before redeeming.');
++      }
++      void refreshRedemptionPreflight();
 +    }
    });
  
@@ -1915,6 +3311,8 @@ index 07aa2e8a..76db68b2 100644
 +
 +  function schedulePreview(amount: bigint) {
 +    invalidateQuote();
++    if (preserveSuccessMessageOnInputReset) preserveSuccessMessageOnInputReset = false;
++    else successMessage = '';
 +    if (amount <= 0n) return;
 +    quoteLoading = true;
 +    quoteDebounceTimer = setTimeout(() => {
@@ -1960,11 +3358,11 @@ index 07aa2e8a..76db68b2 100644
 +      }
 +      if ('RedemptionPriorityChanged' in variant) {
 +        return 'The redemption order changed before the quote could be prepared. Refresh to review the new first run.';
-+      }
-+      if ('RedemptionMinimumNotMet' in variant) {
-+        return 'The current net payout no longer meets the quoted minimum. Refresh the quote before redeeming.';
        }
 -    }, 300);
++      if ('RedemptionMinimumNotMet' in variant) {
++        return 'The current net payout no longer meets the quoted minimum. Refresh the quote before redeeming.';
++      }
 +    }
 +    try {
 +      return ApiClient.formatProtocolError(error);
@@ -2087,7 +3485,6 @@ index 07aa2e8a..76db68b2 100644
 +    quote = null;
 +    quoteWalletPrincipal = null;
 +    quoteError = '';
-+    successMessage = '';
 +    queueError = '';
 +    queueLoading = true;
 +    quoteLoading = amount > 0n;
@@ -2102,7 +3499,19 @@ index 07aa2e8a..76db68b2 100644
 -        publicActor.get_rmr_floor_cr() as Promise<number>,
 -        publicActor.get_rmr_ceiling_cr() as Promise<number>,
 -      ]);
--
++      const beforeQueue = await protocolService.getRedemptionQueue();
++      if (revision !== quoteRevision || amount !== toE8s(icusdAmount) || requestedForWallet !== walletPrincipal) return;
++      queue = beforeQueue;
++      if (amount <= 0n || beforeQueue.entries.length === 0) return;
++      if (!beforeQueue.ranking_fresh) {
++        quoteError = 'The backend reports that the global collateral ranking is incomplete. Refresh later before redeeming.';
++        return;
++      }
++      if (!queueCandidatePricesFresh(beforeQueue, BigInt(Date.now()) * 1_000_000n)) {
++        quoteError = 'At least one collateral price used to rank the candidate order is older than the allowed 10-minute price age. Refresh before redeeming.';
++        return;
++      }
+ 
 -      icpPrice = status.lastIcpRate;
 -      systemCR = status.totalCollateralRatio;
 -      // Initialize vault fee to 0 — the reactive $: block will fetch the
@@ -2110,45 +3519,54 @@ index 07aa2e8a..76db68b2 100644
 -      vaultRedemptionFee = 0;
 -      reserveRedemptionFee = status.reserveRedemptionFee || 0;
 -      reserveRedemptionsEnabled = status.reserveRedemptionsEnabled || false;
--
--      rmrFloor = Number(rFloor);
--      rmrCeiling = Number(rCeiling);
--      rmrFloorCr = Number(rFloorCr);
--      rmrCeilingCr = Number(rCeilingCr);
--
--      // Fetch reserve balances directly from ledger canisters
--      // (backend query can't do inter-canister calls, so it always returns 0)
--      await fetchReserveBalances();
--
--      if (isConnected) await wallet.refreshBalance({ skipCache: true });
-+      const beforeQueue = await protocolService.getRedemptionQueue();
-+      if (revision !== quoteRevision || amount !== toE8s(icusdAmount) || requestedForWallet !== walletPrincipal) return;
-+      queue = beforeQueue;
-+      if (amount <= 0n || beforeQueue.entries.length === 0) return;
-+
 +      const response = await protocolService.getRedemptionQuote(amount);
 +      if (revision !== quoteRevision || amount !== toE8s(icusdAmount) || requestedForWallet !== walletPrincipal) return;
 +      if ('Err' in response) {
 +        quoteError = backendError(response.Err);
 +        return;
 +      }
-+
+ 
+-      rmrFloor = Number(rFloor);
+-      rmrCeiling = Number(rCeiling);
+-      rmrFloorCr = Number(rFloorCr);
+-      rmrCeilingCr = Number(rCeilingCr);
 +      const preparedQuote = response.Ok;
 +      if (preparedQuote.amount_e8s !== amount) {
 +        quoteError = 'The backend returned a quote for a different amount. Refresh the quote before continuing.';
 +        return;
 +      }
-+
+ 
+-      // Fetch reserve balances directly from ledger canisters
+-      // (backend query can't do inter-canister calls, so it always returns 0)
+-      await fetchReserveBalances();
 +      const afterQueue = await protocolService.getRedemptionQueue();
 +      if (revision !== quoteRevision || amount !== toE8s(icusdAmount) || requestedForWallet !== walletPrincipal) return;
 +      const firstBefore = beforeQueue.entries[0]?.run_index;
 +      const firstAfter = afterQueue.entries[0]?.run_index;
-+      if (Number(preparedQuote.run_index) !== Number(firstBefore) || Number(firstAfter) !== Number(firstBefore)) {
++      const firstBeforeType = beforeQueue.entries[0]?.collateral_type.toText();
++      const firstAfterType = afterQueue.entries[0]?.collateral_type.toText();
++      if (!afterQueue.ranking_fresh || !queueCandidatePricesFresh(afterQueue, BigInt(Date.now()) * 1_000_000n)) {
++        queue = afterQueue;
++        quoteError = afterQueue.ranking_fresh
++          ? 'A collateral price became stale while the quote was being prepared. Refresh before redeeming.'
++          : 'The backend reports that the global collateral ranking is incomplete. Refresh before redeeming.';
++        return;
++      }
++      if (Number(preparedQuote.run_index) !== Number(firstBefore)
++        || Number(firstAfter) !== Number(firstBefore)
++        || firstAfterType !== firstBeforeType
++        || preparedQuote.collateral_type.toText() !== firstBeforeType) {
 +        queue = afterQueue;
 +        quoteError = 'The redemption order changed while this quote was being prepared. Refresh the quote to see the current first run.';
 +        return;
 +      }
-+
++      if (!quoteIsFresh(preparedQuote, afterQueue, BigInt(Date.now()) * 1_000_000n)) {
++        queue = afterQueue;
++        quoteError = 'The quote price or 60-second quote snapshot is stale or no longer matches the current collateral ranking. Refresh before redeeming.';
++        return;
++      }
+ 
+-      if (isConnected) await wallet.refreshBalance({ skipCache: true });
 +      queue = afterQueue;
 +      quote = preparedQuote;
 +      quoteWalletPrincipal = requestedForWallet;
@@ -2177,21 +3595,55 @@ index 07aa2e8a..76db68b2 100644
 +  }
 +
 +  function useWalletMaximum() {
-+    if (icusdBalance > 0) icusdAmount = Math.max(0, icusdBalance - 0.001);
++    if (maxWalletAmount > 0) icusdAmount = maxWalletAmount;
 +  }
 +
-+  async function refreshAfterAmbiguousResult() {
++  async function refreshRedemptionPreflight() {
++    const revision = ++preflightRevision;
++    const requestedPrincipal = walletPrincipal;
++    if (!isConnected || !requestedPrincipal) {
++      redemptionPreflight = null;
++      preflightError = '';
++      preflightLoading = false;
++      return;
++    }
++    preflightLoading = true;
++    preflightError = '';
      try {
 -      const [usdt, usdc] = await Promise.all([
 -        TokenService.getTokenBalance(CANISTER_IDS.CKUSDT_LEDGER, protocolPrincipal),
 -        TokenService.getTokenBalance(CANISTER_IDS.CKUSDC_LEDGER, protocolPrincipal),
--      ]);
++      const snapshot = await protocolService.getRedemptionPreflight();
++      if (revision !== preflightRevision || requestedPrincipal !== walletPrincipal) return;
++      if (snapshot.principalText !== requestedPrincipal || snapshot.ledgerId !== CONFIG.currentIcusdLedgerId) {
++        redemptionPreflight = null;
++        preflightError = 'The fee and allowance snapshot belongs to a different wallet or ledger. Refresh before redeeming.';
++        return;
++      }
++      redemptionPreflight = snapshot;
++      // The component's last periodic tick may predate this async response.
++      freshnessNowMs = Date.now();
++    } catch (error) {
++      if (revision !== preflightRevision) return;
++      redemptionPreflight = null;
++      preflightError = error instanceof Error ? error.message : 'Could not refresh icUSD balance, allowance, and ledger fee.';
++    } finally {
++      if (revision === preflightRevision) preflightLoading = false;
++    }
++  }
++
++  async function refreshAfterAmbiguousResult() {
++    try {
++      await Promise.all([
++        wallet.refreshBalance({ skipCache: true }),
++        refreshRedemptionPreflight(),
++        refreshPreview(amountE8s, true),
+       ]);
 -      ckusdtReserve = Number(usdt);
 -      ckusdcReserve = Number(usdc);
 -    } catch (e) {
 -      console.error('Reserve balance fetch error:', e);
-+      await wallet.refreshBalance({ skipCache: true });
-+      await refreshPreview(amountE8s, true);
++      ambiguousNeedsRefresh = false;
 +    } catch (error) {
 +      queueError = error instanceof Error ? error.message : 'Could not refresh wallet balances and redemption quote.';
      }
@@ -2246,8 +3698,9 @@ index 07aa2e8a..76db68b2 100644
      successMessage = '';
 +    if (!isConnected) { errorMessage = 'Connect a wallet before redeeming.'; return; }
 +    if (amountE8s <= 0n) { errorMessage = 'Enter a valid icUSD amount.'; return; }
-+    if (icusdAmount > icusdBalance) { errorMessage = 'Your wallet balance is below this amount.'; return; }
++    if (exceedsFreshBalance) { errorMessage = 'Your live icUSD balance is below this amount plus the required ledger fee reserve.'; return; }
 +    if (!quoteUsable || !quote) { errorMessage = 'Refresh the quote before redeeming.'; return; }
++    if (!preflightFresh || !redemptionPreflight) { errorMessage = 'Refresh the icUSD balance, allowance, and ledger fee before redeeming.'; return; }
 +    if (ambiguousNeedsRefresh) { errorMessage = 'Refresh balances and the quote before choosing whether to retry.'; return; }
  
 +    actionInProgress = true;
@@ -2281,19 +3734,24 @@ index 07aa2e8a..76db68b2 100644
 -          } else {
 -            errorMessage = msg;
 -          }
--        }
 +      const result = await protocolService.redeemQuoted({
 +        amount_e8s: quote.amount_e8s,
 +        expected_collateral_type: quote.collateral_type,
 +        min_net_collateral_raw: quote.net_collateral_raw,
-+      });
++      }, redemptionPreflight);
 +      if (result.ambiguous) {
 +        ambiguousNeedsRefresh = true;
-+        ambiguousMessage = result.error || 'The payout result is unknown. Refresh balances and quote before choosing what to do next.';
++        ambiguousMessage = result.ambiguityStage === 'approval'
++          ? 'The approval response was lost. The redemption call was not sent. Refresh balances and the quote before choosing whether to retry approval.'
++          : result.error || 'The redemption response was lost after submission. The payout is unconfirmed. Refresh balances and redemption quote before choosing what to do next.';
 +        invalidateQuote();
 +        return;
 +      }
 +      if (!result.success) {
++        if (result.ambiguityStage === 'approval') {
++          errorMessage = result.error || 'The icUSD approval was rejected. The redemption was not submitted.';
++          return;
+         }
 +        errorMessage = result.error || 'The quoted redemption was not accepted. Refresh the quote and try again.';
 +        invalidateQuote('The prior quote is no longer usable. Refresh it before redeeming.');
 +        return;
@@ -2305,7 +3763,7 @@ index 07aa2e8a..76db68b2 100644
 +          ? receipt.payoutStatus
 +          : Object.keys(receipt.payoutStatus ?? {})[0] ?? 'Pending';
 +        const block = result.blockIndex !== undefined ? ` icUSD block ${result.blockIndex}.` : '';
-+        successMessage = `${payoutStatus}: ${toHumanRawAmount(receipt.netCollateralRaw, receipt.decimals)} ${receipt.symbol} queued for delivery. The payout has not been credited yet.${block}`;
++        successMessage = `${payoutStatus}: ${toHumanRawAmount(receipt.netCollateralRaw, receipt.decimals)} ${receipt.symbol} queued for delivery. The payout has not been credited yet.${block}${result.message ? ` ${result.message}` : ''}`;
        } else {
 -        // No reserves available — fall back to direct ICP vault redemption
 -        const result = await protocolService.redeemIcp(icusdAmount);
@@ -2322,12 +3780,22 @@ index 07aa2e8a..76db68b2 100644
 -        } else {
 -          errorMessage = result.error || 'Failed to redeem ICP';
 -        }
-+        successMessage = 'Redemption accepted. Refresh your wallet to check the pending payout.';
++        successMessage = result.message || 'Redemption accepted. Refresh your wallet to check the pending payout.';
++      }
++      if (!result.sessionChangedAfterSubmission) {
++        preserveSuccessMessageOnInputReset = true;
++        icusdAmount = 0;
++        invalidateQuote();
++      } else {
++        // Keep the amount and stale quote visible: a typed reply belongs to the
++        // old wallet session and must not be mistaken for the newly active one.
++        invalidateQuote(result.message || 'This redemption belongs to the prior wallet session. Verify that wallet’s queue before continuing.');
++      }
++      if (!result.sessionChangedAfterSubmission) {
++        await wallet.refreshBalance({ skipCache: true });
++        await refreshRedemptionPreflight();
++        void refreshPreview(0n);
        }
-+      icusdAmount = 0;
-+      invalidateQuote();
-+      await wallet.refreshBalance({ skipCache: true });
-+      void refreshPreview(0n);
      } catch (error) {
 -      console.error('Error redeeming:', error);
 -      errorMessage = error instanceof Error ? error.message : 'An unexpected error occurred';
@@ -2341,18 +3809,20 @@ index 07aa2e8a..76db68b2 100644
 -  onMount(fetchData);
 +  onMount(() => {
 +    void refreshPreview(0n, false);
++    void refreshRedemptionPreflight();
 +    freshnessTimer = setInterval(() => { freshnessNowMs = Date.now(); }, 1000);
 +    return () => {
 +      if (quoteDebounceTimer) clearTimeout(quoteDebounceTimer);
 +      if (swapQuoteTimer) clearTimeout(swapQuoteTimer);
 +      if (freshnessTimer) clearInterval(freshnessTimer);
++      preflightRevision += 1;
 +      unsubscribeWallet?.();
 +    };
 +  });
  </script>
  
  <svelte:head>
-@@ -346,26 +324,6 @@
+@@ -346,26 +434,6 @@
  
      <!-- RIGHT: Action card -->
      <div class="action-column">
@@ -2379,7 +3849,7 @@ index 07aa2e8a..76db68b2 100644
        <!-- Main redeem card -->
        <div class="action-card">
          <div class="card-body">
-@@ -381,89 +339,86 @@
+@@ -381,89 +449,95 @@
                  step="0.01"
                  class="amount-input"
                  placeholder="0.00"
@@ -2398,17 +3868,19 @@ index 07aa2e8a..76db68b2 100644
 -                  on:click={() => icusdAmount = Math.max(0, icusdBalance - 0.001)}
 -                  disabled={actionInProgress}
 +                  on:click={useWalletMaximum}
-+                  disabled={actionInProgress || icusdBalance <= 0.001}
++                  disabled={actionInProgress || preflightLoading || !preflightFresh || maxWalletAmount <= 0}
++                  title="Uses the fresh balance, allowance, and ledger fee snapshot."
                  >
 -                  Max: {formatStableTx(Math.max(0, icusdBalance - 0.001))}
-+                  Wallet max: {formatNumber(Math.max(0, icusdBalance - 0.001), 4)}
++                  Wallet max (fee-aware): {formatNumber(maxWalletAmount, 4)}
                  </button>
 +                {#if firstRun}
-+                  <button class="max-btn" on:click={useMaximumForFirstRun} disabled={actionInProgress || maxFirstRunAmount <= 0}>
++                  <button class="max-btn" on:click={useMaximumForFirstRun} disabled={actionInProgress || preflightLoading || !preflightFresh || maxFirstRunAmount <= 0}>
 +                    Max for first run: {formatNumber(maxFirstRunAmount, 4)}
 +                  </button>
 +                {/if}
                </div>
++              <p class="fee-buffer-note">Maximum amounts leave one current icUSD ledger fee when your allowance covers the amount, or two fees when approval is needed. The service rechecks the live balance, allowance, and fee before signing.</p>
              {/if}
            </div>
  
@@ -2440,13 +3912,13 @@ index 07aa2e8a..76db68b2 100644
 +                <span>{toHumanIcusd(quote.fee_e8s)} icUSD</span>
 +              </div>
 +              <div class="fee-row">
-+                <span>Net payout queued:</span>
++                <span>Estimated net payout:</span>
 +                <span class="value-highlight">{quoteNetAmount} {quote.symbol}</span>
-+              </div>
+               </div>
 +              <div class="fee-row">
 +                <span>Estimated value at quoted price:</span>
 +                <span class="value-highlight">{formatUsd(quoteNetValueUsd)}</span>
-               </div>
++              </div>
 +              {#if quote.ledger_fee_raw > 0n}
 +                <div class="fee-row muted">
 +                  <span>Collateral ledger fee:</span>
@@ -2506,6 +3978,13 @@ index 07aa2e8a..76db68b2 100644
 +              {/if}
 +            </div>
 +          {/if}
++          {#if preflightLoading}
++            <div class="msg msg-info" role="status">Refreshing the icUSD balance, approval allowance, and live ledger fee…</div>
++          {:else if preflightError}
++            <div class="msg msg-error" role="alert">{preflightError}<button class="inline-action" on:click={refreshRedemptionPreflight}>Refresh wallet checks</button></div>
++          {:else if isConnected && !preflightFresh}
++            <div class="msg msg-info" role="status">Wallet checks expired. Refresh them before redeeming.<button class="inline-action" on:click={refreshRedemptionPreflight}>Refresh wallet checks</button></div>
++          {/if}
 +          {#if quote && !quoteFresh}
 +            <div class="msg msg-error" role="alert">This quote has expired. Refresh it before redeeming.</div>
 +          {/if}
@@ -2526,7 +4005,7 @@ index 07aa2e8a..76db68b2 100644
              <div class="swap-banner">
                <div class="swap-banner-header">
                  <span class="swap-banner-icon">&#x2191;</span>
-@@ -472,7 +427,7 @@
+@@ -472,7 +546,7 @@
                <div class="swap-banner-body">
                  <div class="swap-compare-row">
                    <span>Redeeming:</span>
@@ -2535,12 +4014,12 @@ index 07aa2e8a..76db68b2 100644
                  </div>
                  <div class="swap-compare-row highlight">
                    <span>Swapping to {bestSwapQuote.symbol}:</span>
-@@ -505,16 +460,16 @@
+@@ -505,16 +579,20 @@
            <button
              class="submit-btn"
              on:click={handleRedeem}
 -            disabled={actionInProgress || !isConnected || icusdAmount <= 0 || icusdAmount > icusdBalance || isLoading || swapIsBetter}
-+            disabled={actionInProgress || !isConnected || amountE8s <= 0n || icusdAmount > icusdBalance || !quoteUsable || ambiguousNeedsRefresh}
++            disabled={actionInProgress || !isConnected || amountE8s <= 0n || exceedsFreshBalance || !canSubmit || ambiguousNeedsRefresh}
            >
              {#if !isConnected}
                Connect Wallet to Continue
@@ -2550,6 +4029,10 @@ index 07aa2e8a..76db68b2 100644
 -              Loading...
 -            {:else if swapIsBetter}
 -              Use Swap for Better Rate
++            {:else if preflightLoading}
++              Refreshing Wallet Checks…
++            {:else if !preflightFresh}
++              Refresh Wallet Checks to Continue
 +            {:else if queueLoading || quoteLoading || isLoading}
 +              Preparing Quote…
 +            {:else if !quoteUsable}
@@ -2557,7 +4040,7 @@ index 07aa2e8a..76db68b2 100644
              {:else}
                Redeem icUSD
              {/if}
-@@ -529,38 +484,92 @@
+@@ -529,38 +607,103 @@
            <ol class="how-steps">
              <li>
                <strong>Burn icUSD</strong>
@@ -2607,8 +4090,8 @@ index 07aa2e8a..76db68b2 100644
 +      <section class="redemption-queue" aria-labelledby="redemption-queue-heading">
 +        <div class="queue-heading-row">
 +          <div>
-+            <h2 id="redemption-queue-heading">Collateral on deck</h2>
-+            <p class="queue-subtitle">Consecutive same-collateral runs in current weakest-health-first order.</p>
++          <h2 id="redemption-queue-heading">Eligible collateral on deck</h2>
++            <p class="queue-subtitle">Eligible debt-backed supported ICRC collateral, grouped into consecutive same-collateral runs in weakest-health-first order. Native XRP is not included.</p>
 +          </div>
 +          <button class="queue-refresh" on:click={() => refreshPreview(amountE8s, true)} disabled={queueLoading || quoteLoading}>
 +            Refresh order
@@ -2624,12 +4107,23 @@ index 07aa2e8a..76db68b2 100644
 +          <div class="queue-state" role="status">Loading current redemption order…</div>
 +        {:else if queueError}
 +          <div class="queue-state queue-state-error" role="alert">{queueError} Refresh to try again.</div>
++        {:else if queueLoading}
++          <div class="queue-state" role="status">Refreshing the order. Rows cannot be submitted until refresh finishes.</div>
 +        {:else if queue && queue.entries.length === 0}
 +          <div class="queue-state">No debt-backed vault collateral is currently eligible for redemption.</div>
 +        {:else if queue}
++          {#if !queueCandidatePricesFresh(queue, BigInt(freshnessNowMs) * 1_000_000n)}
++            <div class="queue-state queue-state-error" role="alert">
++              {#if !queue.ranking_fresh}
++                The backend cannot provide a complete collateral ranking. Refresh before relying on these rows or redeeming; the candidate set or its price data may be incomplete.
++              {:else}
++                At least one price used to rank the candidate order is older than the allowed 10-minute price age. Refresh before relying on this order.
++              {/if}
++            </div>
++          {/if}
 +          <ol class="queue-list">
 +            {#each queueRows as row (row.runIndex)}
-+              <li class="queue-entry" class:first-run={row.runIndex === queueRows[0]?.runIndex} class:quoted-run={quote?.run_index === row.runIndex}>
++              <li class="queue-entry" class:first-run={row.runIndex === queueRows[0]?.runIndex} class:quoted-run={quoteUsable && quote?.run_index === row.runIndex}>
 +                <div class="queue-entry-top">
 +                  <div class="queue-token">
 +                    <span class="queue-rank">{row.runIndex + 1}</span>
@@ -2637,7 +4131,7 @@ index 07aa2e8a..76db68b2 100644
 +                    {#if queueRows.slice(0, row.runIndex).some(previous => previous.symbol === row.symbol)}
 +                      <span class="queue-repeat">later run</span>
 +                    {/if}
-+                    {#if quote?.run_index === row.runIndex}<span class="queue-selected">quoted</span>{/if}
++                    {#if quoteUsable && quote?.run_index === row.runIndex}<span class="queue-selected">quoted</span>{/if}
 +                  </div>
 +                  <div class="queue-health">
 +                    <span class="health-dot" style="background:{getVaultCrTextColor(row.weakestVaultCr, row.minCr, row.liquidationCr)}"></span>
@@ -2676,7 +4170,7 @@ index 07aa2e8a..76db68b2 100644
      </div>
    </div>
  </div>
-@@ -683,7 +692,10 @@
+@@ -683,7 +826,10 @@
      color: var(--rumi-text-muted);
    }
    .max-btn-row {
@@ -2688,7 +4182,21 @@ index 07aa2e8a..76db68b2 100644
      margin-top: 0.25rem;
    }
    .max-btn {
-@@ -834,6 +846,23 @@
+@@ -697,6 +843,13 @@
+   .max-btn:hover {
+     color: #93bbfd;
+   }
++  .fee-buffer-note {
++    margin: 0.3rem 0 0;
++    color: var(--rumi-text-muted);
++    font-size: 0.625rem;
++    line-height: 1.45;
++    text-align: right;
++  }
+ 
+   /* Hide number input spinners */
+   .amount-input::-webkit-outer-spin-button,
+@@ -834,6 +987,23 @@
      border: 1px solid rgba(45, 212, 191, 0.25);
      color: #5eead4;
    }
@@ -2712,7 +4220,7 @@ index 07aa2e8a..76db68b2 100644
  
    /* ── Submit button ─────────────────────────────────────────────── */
    .submit-btn {
-@@ -932,6 +961,134 @@
+@@ -932,6 +1102,134 @@
      margin: 0;
    }
  
@@ -2847,7 +4355,7 @@ index 07aa2e8a..76db68b2 100644
    /* ── Responsive ────────────────────────────────────────────────── */
    @media (max-width: 768px) {
      .page-layout {
-@@ -944,5 +1101,8 @@
+@@ -944,5 +1242,8 @@
      .action-column {
        order: 1;
      }
@@ -2858,25 +4366,40 @@ index 07aa2e8a..76db68b2 100644
  </style>
 diff --git a/src/vault_frontend/src/lib/utils/redemptionPreview.spec.ts b/src/vault_frontend/src/lib/utils/redemptionPreview.spec.ts
 new file mode 100644
-index 00000000..a7cfd2b9
+index 00000000..dd938fc9
 --- /dev/null
 +++ b/src/vault_frontend/src/lib/utils/redemptionPreview.spec.ts
-@@ -0,0 +1,92 @@
+@@ -0,0 +1,134 @@
 +import { Principal } from '@dfinity/principal';
 +import { describe, expect, it } from 'vitest';
 +import {
 +	quoteIsFresh,
 +	quoteMatchesAmount,
++	queueCandidatePricesFresh,
++	maxRedeemableInput,
++	redemptionPreflightIsFresh,
 +	toHumanIcusd,
 +	toHumanRawAmount,
 +	toQueueEntryViews,
 +	type RedemptionQueue,
 +	type RedemptionQueueEntry,
 +	type RedemptionQuote,
++	type RedemptionPreflight,
 +} from './redemptionPreview';
 +
 +const icp = Principal.fromText('ryjl3-tyaaa-aaaaa-aaaba-cai');
 +const xaut = Principal.fromText('nza5v-qaaaa-aaaar-qahzq-cai');
++const snapshotNs = 1_000_000_000_000n;
++const preflight: RedemptionPreflight = {
++	principalText: '2vxsx-fae',
++	walletType: null,
++	sessionGeneration: 0,
++	ledgerId: 'ryjl3-tyaaa-aaaaa-aaaba-cai',
++	observedAtMs: 10_000,
++	allowanceRaw: 0n,
++	balanceRaw: 1_000n,
++	feeRaw: 10n,
++};
 +
 +function entry(runIndex: number, symbol: string, principal = icp): RedemptionQueueEntry {
 +	return {
@@ -2885,7 +4408,7 @@ index 00000000..a7cfd2b9
 +		symbol,
 +		decimals: symbol === 'ckXAUT' ? 6 : 8,
 +		price_usd: symbol === 'ICP' ? 6 : 2_000,
-+		price_timestamp_ns: 1_000_000_000n,
++		price_timestamp_ns: snapshotNs,
 +		price_fresh: true,
 +		min_cr: symbol === 'ICP' ? 1.5 : 1.18,
 +		liquidation_cr: symbol === 'ICP' ? 1.33 : 1.12,
@@ -2903,11 +4426,12 @@ index 00000000..a7cfd2b9
 +	return {
 +		run_index: runIndex,
 +		amount_e8s: amount,
++		ranking_fresh: true,
 +		collateral_type: icp,
 +		symbol: 'ICP',
 +		decimals: 8,
 +		price_usd: 6,
-+		price_timestamp_ns: 1_000_000_000n,
++		price_timestamp_ns: snapshotNs,
 +		price_fresh: true,
 +		fee_e8s: 150_000n,
 +		rmr: 0.97,
@@ -2916,6 +4440,8 @@ index 00000000..a7cfd2b9
 +		ledger_fee_raw: 10_000n,
 +		net_collateral_raw: 805_823_333n,
 +		max_input_icusd_e8s: 100_000_000n,
++		quoted_at_ns: snapshotNs,
++		quote_validity_window_ns: 60_000_000_000n,
 +	};
 +}
 +
@@ -2932,20 +4458,28 @@ index 00000000..a7cfd2b9
 +		expect(rows[0].lockedCollateralRaw).toBe(7_000_000_000n);
 +		expect(rows[0].maxNetCollateralRaw).toBe(1_200_000_000n);
 +		expect(rows[0].lockedCollateralRaw).not.toBe(rows[0].maxNetCollateralRaw);
++		expect(rows[0].minCr).toBe(1.5);
++		expect(rows[0].liquidationCr).toBe(1.33);
 +	});
 +
 +	it('checks queue and price freshness before allowing a quote to be used', () => {
 +		const quoteValue = quote(0);
 +		const queue: RedemptionQueue = {
-+			observed_at_ns: 1_000_000_000n,
++			observed_at_ns: snapshotNs,
++			ranking_fresh: true,
 +			rmr: 0.97,
-+			price_freshness_window_ns: 500_000_000n,
++			price_freshness_window_ns: 600_000_000_000n,
 +			entries: [entry(0, 'ICP')],
 +		};
-+		expect(quoteIsFresh(quoteValue, queue, 1_250_000_000n)).toBe(true);
-+		expect(quoteIsFresh(quoteValue, queue, 1_600_000_000n)).toBe(false);
-+		expect(quoteIsFresh(quoteValue, { ...queue, entries: [{ ...entry(0, 'ICP'), price_fresh: false }] }, 1_250_000_000n)).toBe(false);
-+		expect(quoteIsFresh(quoteValue, null, 1_250_000_000n)).toBe(false);
++		expect(quoteIsFresh(quoteValue, queue, snapshotNs + 30_000_000_000n)).toBe(true);
++		expect(quoteIsFresh(quoteValue, queue, snapshotNs + 61_000_000_000n)).toBe(false);
++		expect(quoteIsFresh(quoteValue, { ...queue, entries: [{ ...entry(0, 'ICP'), price_fresh: false }] }, snapshotNs + 1n)).toBe(false);
++		expect(quoteIsFresh(quoteValue, { ...queue, ranking_fresh: false }, snapshotNs + 1n)).toBe(false);
++		expect(quoteIsFresh(quoteValue, { ...queue, entries: [entry(0, 'ICP'), { ...entry(1, 'ckXAUT', xaut), price_fresh: false }] }, snapshotNs + 1n)).toBe(false);
++		expect(queueCandidatePricesFresh(queue, snapshotNs + 599_000_000_000n)).toBe(true);
++		expect(queueCandidatePricesFresh(queue, snapshotNs + 601_000_000_000n)).toBe(false);
++		expect(quoteIsFresh({ ...quoteValue, ranking_fresh: false }, queue, snapshotNs + 1n)).toBe(false);
++		expect(quoteIsFresh(quoteValue, null, snapshotNs + 1n)).toBe(false);
 +	});
 +
 +	it('requires the quote amount to exactly match the current request', () => {
@@ -2953,13 +4487,29 @@ index 00000000..a7cfd2b9
 +		expect(quoteMatchesAmount(quote(0), 50_000_001n)).toBe(false);
 +		expect(quoteMatchesAmount(null, 50_000_000n)).toBe(false);
 +	});
++
++	it('uses one live fee when allowance covers the amount and two when approval is required', () => {
++		expect(maxRedeemableInput(null, preflight)).toBe(980n);
++		expect(maxRedeemableInput(950n, preflight)).toBe(950n);
++		expect(maxRedeemableInput(null, { ...preflight, allowanceRaw: 1_000n })).toBe(990n);
++		expect(maxRedeemableInput(500n, { ...preflight, allowanceRaw: 1_000n })).toBe(500n);
++	});
++
++	it('binds preflight snapshots to the current wallet and 30-second freshness window', () => {
++		expect(redemptionPreflightIsFresh(preflight, '2vxsx-fae', preflight.ledgerId, null, 0, 40_000)).toBe(true);
++		expect(redemptionPreflightIsFresh(preflight, 'w7x7r-cok77-xa', preflight.ledgerId, null, 0, 10_001)).toBe(false);
++		expect(redemptionPreflightIsFresh(preflight, preflight.principalText, 'another-ledger', null, 0, 10_001)).toBe(false);
++		expect(redemptionPreflightIsFresh(preflight, preflight.principalText, preflight.ledgerId, 'plug', 0, 10_001)).toBe(false);
++		expect(redemptionPreflightIsFresh(preflight, preflight.principalText, preflight.ledgerId, null, 1, 10_001)).toBe(false);
++		expect(redemptionPreflightIsFresh(preflight, preflight.principalText, preflight.ledgerId, null, 0, 40_001)).toBe(false);
++	});
 +});
 diff --git a/src/vault_frontend/src/lib/utils/redemptionPreview.ts b/src/vault_frontend/src/lib/utils/redemptionPreview.ts
 new file mode 100644
-index 00000000..d56dd2d7
+index 00000000..0302b9ab
 --- /dev/null
 +++ b/src/vault_frontend/src/lib/utils/redemptionPreview.ts
-@@ -0,0 +1,135 @@
+@@ -0,0 +1,211 @@
 +import type { Principal } from '@dfinity/principal';
 +
 +export interface RedemptionQueueEntry {
@@ -2983,6 +4533,7 @@ index 00000000..d56dd2d7
 +
 +export interface RedemptionQueue {
 +	observed_at_ns: bigint;
++	ranking_fresh: boolean;
 +	rmr: number;
 +	price_freshness_window_ns: bigint;
 +	entries: RedemptionQueueEntry[];
@@ -2991,6 +4542,7 @@ index 00000000..d56dd2d7
 +export interface RedemptionQuote {
 +	run_index: number;
 +	amount_e8s: bigint;
++	ranking_fresh: boolean;
 +	collateral_type: Principal;
 +	symbol: string;
 +	decimals: number;
@@ -3004,6 +4556,8 @@ index 00000000..d56dd2d7
 +	ledger_fee_raw: bigint;
 +	net_collateral_raw: bigint;
 +	max_input_icusd_e8s: bigint;
++	quoted_at_ns: bigint;
++	quote_validity_window_ns: bigint;
 +}
 +
 +export type RedemptionQuoteResult = { Ok: RedemptionQuote } | { Err: unknown };
@@ -3026,12 +4580,25 @@ index 00000000..d56dd2d7
 +
 +export type RedemptionResultVariant = { Ok: RedemptionResult } | { Err: unknown };
 +
++export interface RedemptionPreflight {
++	principalText: string;
++	walletType: string | null;
++	sessionGeneration: number;
++	ledgerId: string;
++	observedAtMs: number;
++	allowanceRaw: bigint;
++	balanceRaw: bigint;
++	feeRaw: bigint;
++}
++
 +export interface RedemptionQueueEntryView {
 +	runIndex: number;
 +	symbol: string;
 +	decimals: number;
 +	priceUsd: number;
 +	priceFresh: boolean;
++	minCr: number;
++	liquidationCr: number;
 +	weakestVaultCr: number;
 +	healthHeadroom: number;
 +	vaultCount: number;
@@ -3064,6 +4631,8 @@ index 00000000..d56dd2d7
 +		decimals: Number(entry.decimals),
 +		priceUsd: Number(entry.price_usd),
 +		priceFresh: Boolean(entry.price_fresh),
++		minCr: Number(entry.min_cr),
++		liquidationCr: Number(entry.liquidation_cr),
 +		weakestVaultCr: Number(entry.weakest_vault_cr),
 +		healthHeadroom: Number(entry.health_headroom),
 +		vaultCount: Number(entry.vault_count),
@@ -3078,17 +4647,74 @@ index 00000000..d56dd2d7
 +	queue: RedemptionQueue | null,
 +	nowNs: bigint = BigInt(Date.now()) * 1_000_000n,
 +): boolean {
-+	if (!quote || !queue || queue.price_freshness_window_ns <= 0n) return false;
++	if (!quote || !queue || !quote.ranking_fresh || queue.price_freshness_window_ns <= 0n) return false;
++	if (!queueCandidatePricesFresh(queue, nowNs)) return false;
 +	const entry = queue.entries.find((candidate) => Number(candidate.run_index) === Number(quote.run_index));
 +	if (!entry?.price_fresh || !quote.price_fresh) return false;
 +	const priceAge = nowNs - quote.price_timestamp_ns;
++	const quoteAge = nowNs - quote.quoted_at_ns;
 +	const queueAge = nowNs - queue.observed_at_ns;
-+	return priceAge >= 0n && priceAge <= queue.price_freshness_window_ns
-+		&& queueAge >= 0n && queueAge <= queue.price_freshness_window_ns;
++	return entry.collateral_type.toText() === quote.collateral_type.toText()
++		&& entry.price_timestamp_ns === quote.price_timestamp_ns
++		&& entry.price_usd === quote.price_usd
++		&& priceAge >= 0n && priceAge <= queue.price_freshness_window_ns
++		&& quote.quote_validity_window_ns > 0n
++		&& quoteAge >= 0n && quoteAge <= quote.quote_validity_window_ns
++		&& queueAge >= 0n && queueAge <= quote.quote_validity_window_ns;
++}
++
++/** The displayed global order is only trustworthy while every candidate price is fresh. */
++export function queueCandidatePricesFresh(
++	queue: RedemptionQueue | null,
++	nowNs: bigint = BigInt(Date.now()) * 1_000_000n,
++): boolean {
++	if (!queue || queue.entries.length === 0 || queue.price_freshness_window_ns <= 0n) return false;
++	if (!queue.ranking_fresh) return false;
++	const queueAge = nowNs - queue.observed_at_ns;
++	if (queueAge < 0n) return false;
++	return queue.entries.every((entry) => {
++		const age = nowNs - entry.price_timestamp_ns;
++		return entry.price_fresh && age >= 0n && age <= queue.price_freshness_window_ns;
++	});
 +}
 +
 +export function quoteMatchesAmount(quote: RedemptionQuote | null, requestedE8s: bigint): boolean {
 +	return quote !== null && quote.amount_e8s === requestedE8s;
++}
++
++export function redemptionPreflightIsFresh(
++	preflight: RedemptionPreflight | null,
++	principalText: string | null,
++	ledgerId: string,
++	walletType: string | null,
++	sessionGeneration: number,
++	nowMs = Date.now(),
++	ttlMs = 30_000,
++): boolean {
++	if (!preflight || !principalText || preflight.principalText !== principalText || preflight.ledgerId !== ledgerId
++		|| preflight.walletType !== walletType || preflight.sessionGeneration !== sessionGeneration) return false;
++	const age = nowMs - preflight.observedAtMs;
++	return Number.isFinite(age) && age >= 0 && age <= ttlMs
++		&& preflight.allowanceRaw >= 0n && preflight.balanceRaw >= 0n && preflight.feeRaw >= 0n;
++}
++
++/** Maximum input after preserving one transfer fee, or two when approval is needed. */
++export function maxRedeemableInput(
++	capacityRaw: bigint | null,
++	preflight: RedemptionPreflight | null,
++): bigint {
++	if (!preflight || preflight.balanceRaw <= 0n || preflight.feeRaw < 0n) return 0n;
++	const cap = capacityRaw === null ? preflight.balanceRaw : capacityRaw;
++	if (cap <= 0n) return 0n;
++	const minimum = (a: bigint, b: bigint) => a < b ? a : b;
++	const spendableAfterTransferFee = preflight.balanceRaw > preflight.feeRaw
++		? preflight.balanceRaw - preflight.feeRaw : 0n;
++	const noApprovalLimit = preflight.allowanceRaw > preflight.feeRaw
++		? preflight.allowanceRaw - preflight.feeRaw : 0n;
++	const noApprovalMaximum = minimum(cap, minimum(spendableAfterTransferFee, noApprovalLimit));
++	const approvalMaximum = preflight.balanceRaw > preflight.feeRaw * 2n
++		? minimum(cap, preflight.balanceRaw - preflight.feeRaw * 2n) : 0n;
++	return noApprovalMaximum > approvalMaximum ? noApprovalMaximum : approvalMaximum;
 +}
 +
 +export function formatUsd(value: number): string {
@@ -3164,3 +4790,354 @@ index 00000000..05a4f62f
 +	if (headroom <= 0) return VAULT_CR_DANGER;
 +	return interpolateHex(VAULT_CR_SAFE, VAULT_CR_DANGER, 1 - headroom);
 +}
+diff --git a/src/vault_frontend/src/routes/redeem/ProtocolStatsStub.svelte b/src/vault_frontend/src/routes/redeem/ProtocolStatsStub.svelte
+new file mode 100644
+index 00000000..5e89ba05
+--- /dev/null
++++ b/src/vault_frontend/src/routes/redeem/ProtocolStatsStub.svelte
+@@ -0,0 +1 @@
++<div data-testid="protocol-stats-stub"></div>
+diff --git a/src/vault_frontend/src/routes/redeem/redeem.spec.ts b/src/vault_frontend/src/routes/redeem/redeem.spec.ts
+new file mode 100644
+index 00000000..3b1bceb6
+--- /dev/null
++++ b/src/vault_frontend/src/routes/redeem/redeem.spec.ts
+@@ -0,0 +1,338 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++import { flushSync, mount, tick, unmount } from 'svelte';
++import { Principal } from '@dfinity/principal';
++import { CONFIG } from '$lib/config';
++import type { RedemptionQueue, RedemptionQueueEntry, RedemptionQuote } from '$lib/utils/redemptionPreview';
++import { getVaultCrTextColor } from '$lib/utils/vaultHealth';
++
++const mocks = vi.hoisted(() => {
++	let state: any = {};
++	const subscribers = new Set<(value: any) => void>();
++	const readable = (initial: any) => {
++		let value = initial;
++		const listeners = new Set<(next: any) => void>();
++		return {
++			subscribe(fn: (next: any) => void) { fn(value); listeners.add(fn); return () => listeners.delete(fn); },
++			set(next: any) { value = next; for (const fn of listeners) fn(value); },
++			get: () => value,
++		};
++	};
++	const walletStore = {
++		subscribe(fn: (value: any) => void) {
++			fn(state);
++			subscribers.add(fn);
++			return () => subscribers.delete(fn);
++		},
++		setState(next: any) {
++			state = next;
++			for (const fn of subscribers) fn(state);
++		},
++		getState: () => state,
++		refreshBalance: vi.fn().mockResolvedValue(undefined),
++	};
++	return {
++		walletStore,
++		currentWalletType: readable(null),
++		walletSessionGeneration: readable(0),
++		getRedemptionQueue: vi.fn(),
++		getRedemptionQuote: vi.fn(),
++		getRedemptionPreflight: vi.fn(),
++		redeemQuoted: vi.fn(),
++		resolveRoute: vi.fn().mockResolvedValue({ estimatedOutput: 0n }),
++		formatProtocolError: vi.fn((error: unknown) => String(error)),
++	};
++});
++
++vi.mock('$lib/stores/wallet', () => ({ walletStore: mocks.walletStore }));
++vi.mock('$lib/services/auth', () => ({
++	currentWalletType: mocks.currentWalletType,
++	walletSessionGeneration: mocks.walletSessionGeneration,
++}));
++vi.mock('$lib/services/protocol', () => ({
++	protocolService: {
++		getRedemptionQueue: mocks.getRedemptionQueue,
++		getRedemptionQuote: mocks.getRedemptionQuote,
++		getRedemptionPreflight: mocks.getRedemptionPreflight,
++		redeemQuoted: mocks.redeemQuoted,
++	},
++}));
++vi.mock('$lib/services/protocol/apiClient', () => ({ ApiClient: { formatProtocolError: mocks.formatProtocolError } }));
++vi.mock('$lib/components/dashboard/ProtocolStats.svelte', async () => ({
++	default: (await vi.importActual<typeof import('./ProtocolStatsStub.svelte')>('./ProtocolStatsStub.svelte')).default,
++}));
++vi.mock('$lib/services/swapRouter', () => ({ resolveRoute: mocks.resolveRoute }));
++vi.mock('$lib/services/ammService', () => ({
++	AMM_TOKENS: ['icUSD', 'ckUSDT', 'ckUSDC', 'ICP'].map((symbol) => ({ symbol })),
++}));
++
++import Page from './+page.svelte';
++
++const ICP = Principal.fromText('ryjl3-tyaaa-aaaaa-aaaba-cai');
++const XAUT = Principal.fromText('nza5v-qaaaa-aaaar-qahzq-cai');
++
++function makeEntry(run: number, symbol: string, collateral: Principal, nowNs: bigint): RedemptionQueueEntry {
++	return {
++		run_index: run,
++		collateral_type: collateral,
++		symbol,
++		decimals: symbol === 'ckXAUT' ? 6 : 8,
++		price_usd: symbol === 'ICP' ? 6 : 2_000,
++		price_timestamp_ns: nowNs,
++		price_fresh: true,
++		min_cr: symbol === 'ICP' ? 1.5 : 1.18,
++		liquidation_cr: symbol === 'ICP' ? 1.33 : 1.12,
++		weakest_vault_cr: symbol === 'ICP' ? 1.5 : 1.45,
++		health_headroom: 0.25,
++		vault_count: 2n,
++		eligible_collateral_raw: 7_000_000_000n,
++		eligible_debt_e8s: 100_000_000_000n,
++		max_input_icusd_e8s: 100_000_000_000n,
++		max_net_collateral_raw: 1_200_000_000n,
++	};
++}
++
++function makeQueue(nowNs = BigInt(Date.now()) * 1_000_000n, rankingFresh = true): RedemptionQueue {
++	return {
++		observed_at_ns: nowNs,
++		ranking_fresh: rankingFresh,
++		rmr: 0.97,
++		price_freshness_window_ns: 600_000_000_000n,
++		entries: [makeEntry(0, 'ICP', ICP, nowNs), makeEntry(1, 'ckXAUT', XAUT, nowNs), makeEntry(2, 'ICP', ICP, nowNs)],
++	};
++}
++
++function makeQuote(amount: bigint, nowNs = BigInt(Date.now()) * 1_000_000n): RedemptionQuote {
++	return {
++		run_index: 0,
++		amount_e8s: amount,
++		ranking_fresh: true,
++		collateral_type: ICP,
++		symbol: 'ICP',
++		decimals: 8,
++		price_usd: 6,
++		price_timestamp_ns: nowNs,
++		price_fresh: true,
++		fee_e8s: amount / 100n,
++		rmr: 0.97,
++		effective_icusd_e8s: amount * 97n / 100n,
++		gross_collateral_raw: 805_833_333n,
++		ledger_fee_raw: 10_000n,
++		net_collateral_raw: 805_823_333n,
++		max_input_icusd_e8s: 100_000_000_000n,
++		quoted_at_ns: nowNs,
++		quote_validity_window_ns: 60_000_000_000n,
++	};
++}
++
++function makePreflight(principalText = '2vxsx-fae') {
++	return {
++		principalText,
++		walletType: null,
++		sessionGeneration: 0,
++		ledgerId: CONFIG.currentIcusdLedgerId,
++		observedAtMs: Date.now(),
++		allowanceRaw: 0n,
++		balanceRaw: 10_000_000_000n,
++		feeRaw: 100_000n,
++	};
++}
++
++function connectedWallet(principalText = '2vxsx-fae') {
++	return {
++		isConnected: true,
++		principal: { toText: () => principalText, toString: () => principalText },
++		tokenBalances: { ICUSD: { formatted: '100', raw: 10_000_000_000n } },
++	};
++}
++
++async function settle(rounds = 10) {
++	for (let i = 0; i < rounds; i++) {
++		await Promise.resolve();
++		await tick();
++		flushSync();
++	}
++}
++
++function deferred<T>() {
++	let resolve!: (value: T) => void;
++	const promise = new Promise<T>((done) => { resolve = done; });
++	return { promise, resolve };
++}
++
++let host: HTMLDivElement;
++let instance: unknown;
++let nowNs: bigint;
++
++function render() {
++	instance = mount(Page, { target: host });
++	flushSync();
++}
++
++async function setAmount(amount: string) {
++	const input = host.querySelector<HTMLInputElement>('#icusd-amount')!;
++	input.value = amount;
++	input.dispatchEvent(new Event('input', { bubbles: true }));
++	flushSync();
++	await vi.advanceTimersByTimeAsync(350);
++	await settle();
++}
++
++beforeEach(() => {
++	vi.useFakeTimers();
++	nowNs = BigInt(Date.now()) * 1_000_000n;
++	host = document.createElement('div');
++	document.body.appendChild(host);
++	mocks.walletStore.setState(connectedWallet());
++	mocks.currentWalletType.set(null);
++	mocks.walletSessionGeneration.set(0);
++	mocks.walletStore.refreshBalance.mockReset().mockResolvedValue(undefined);
++	mocks.getRedemptionQueue.mockReset().mockImplementation(async () => makeQueue(nowNs));
++	mocks.getRedemptionQuote.mockReset().mockImplementation(async (amount: bigint) => ({ Ok: makeQuote(amount, nowNs) }));
++	mocks.getRedemptionPreflight.mockReset().mockImplementation(async () => makePreflight(mocks.walletStore.getState().principal.toText()));
++	mocks.redeemQuoted.mockReset().mockResolvedValue({
++		success: true,
++		blockIndex: 321,
++		redemption: { collateralType: ICP.toText(), symbol: 'ICP', decimals: 8, netCollateralRaw: 805_823_333n, payoutStatus: { Queued: null } },
++	});
++	flushSync();
++});
++
++afterEach(() => {
++	if (instance) unmount(instance as any);
++	host.remove();
++	vi.useRealTimers();
++});
++
++describe('redemption route quote and queue safety', () => {
++	it('renders consecutive repeated-token runs below How Redemption Works with per-asset CR tint thresholds', async () => {
++		render();
++		await settle();
++		const how = host.querySelector('.how-it-works')!;
++		const queue = host.querySelector('.redemption-queue')!;
++		expect(how.compareDocumentPosition(queue) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
++		expect(queue.querySelectorAll('.queue-entry')).toHaveLength(3);
++		expect(Array.from(queue.querySelectorAll('.queue-token strong')).map((node) => node.textContent)).toEqual(['ICP', 'ckXAUT', 'ICP']);
++		expect(queue.textContent).toContain('later run');
++		const health = queue.querySelectorAll<HTMLElement>('.queue-health span[style]');
++		const expectedIcp = document.createElement('span');
++		expectedIcp.style.color = getVaultCrTextColor(1.5, 1.5, 1.33);
++		const expectedXaut = document.createElement('span');
++		expectedXaut.style.color = getVaultCrTextColor(1.45, 1.18, 1.12);
++		expect(health[1].style.color).toBe(expectedIcp.style.color);
++		expect(health[3].style.color).toBe(expectedXaut.style.color);
++		expect(health[1].style.color).not.toBe(health[3].style.color);
++	});
++
++	it('ignores a slower quote for an older amount after a newer request completes', async () => {
++		const oldQuote = deferred<{ Ok: RedemptionQuote }>();
++		mocks.getRedemptionQuote.mockReturnValueOnce(oldQuote.promise);
++		render();
++		await settle();
++		await setAmount('10');
++		expect(mocks.getRedemptionQuote).toHaveBeenCalledTimes(1);
++		await setAmount('20');
++		expect(host.textContent).toContain('19.4 icUSD value');
++		oldQuote.resolve({ Ok: makeQuote(1_000_000_000n, nowNs) });
++		await settle();
++		expect(host.textContent).toContain('19.4 icUSD value');
++		expect(host.textContent).not.toContain('9.7 icUSD value');
++	});
++
++	it('invalidates a displayed quote synchronously when the wallet principal changes', async () => {
++		render();
++		await settle();
++		await setAmount('10');
++		const submit = host.querySelector<HTMLButtonElement>('.submit-btn')!;
++		expect(submit.disabled).toBe(false);
++		mocks.walletStore.setState(connectedWallet('w7x7r-cok77-xa'));
++		flushSync();
++		expect(submit.disabled).toBe(true);
++		expect(host.textContent).toContain('Wallet changed. Refresh the quote');
++	});
++
++	it('invalidates wallet checks after a same-principal reconnect generation change', async () => {
++		render();
++		await settle();
++		await setAmount('10');
++		expect(host.querySelector<HTMLButtonElement>('.submit-btn')!.disabled).toBe(false);
++		mocks.walletSessionGeneration.set(1);
++		flushSync();
++		expect(host.querySelector<HTMLButtonElement>('.submit-btn')!.disabled).toBe(true);
++		expect(host.textContent).toContain('Wallet checks expired. Refresh them before redeeming.');
++	});
++
++	it('binds the exact quoted token, amount and minimum payout; typed Queued is not shown as delivered', async () => {
++		render();
++		await settle();
++		await setAmount('10');
++		host.querySelector<HTMLButtonElement>('.submit-btn')!.click();
++		await settle();
++		expect(mocks.redeemQuoted.mock.calls[0][0]).toEqual({
++			amount_e8s: 1_000_000_000n,
++			expected_collateral_type: ICP,
++			min_net_collateral_raw: 805_823_333n,
++		});
++		expect(mocks.redeemQuoted.mock.calls[0][1]).toMatchObject({
++			principalText: '2vxsx-fae',
++			ledgerId: CONFIG.currentIcusdLedgerId,
++			allowanceRaw: 0n,
++			balanceRaw: 10_000_000_000n,
++			feeRaw: 100_000n,
++		});
++		expect(host.textContent).toContain('Queued: 8.05823333 ICP queued for delivery. The payout has not been credited yet.');
++	});
++
++	it('keeps a reply-lost submission ambiguous and requires deliberate refresh before retry', async () => {
++		mocks.redeemQuoted.mockResolvedValue({ success: false, ambiguous: true, ambiguityStage: 'submission', error: 'Payout result is unknown.' });
++		render();
++		await settle();
++		await setAmount('10');
++		host.querySelector<HTMLButtonElement>('.submit-btn')!.click();
++		await settle();
++		expect(host.textContent).toContain('Payout result is unknown.');
++		expect(host.textContent).not.toContain('queued for delivery');
++		expect(host.querySelector('.submit-btn')!.hasAttribute('disabled')).toBe(true);
++		expect(host.textContent).toContain('Refresh balances and quote');
++	});
++
++	it('keeps a typed queued receipt tied to the previous wallet session after reconnect', async () => {
++		mocks.redeemQuoted.mockResolvedValue({
++			success: true,
++			blockIndex: 322,
++			redemption: { collateralType: ICP.toText(), symbol: 'ICP', decimals: 8, netCollateralRaw: 805_823_333n, payoutStatus: { Queued: null } },
++			sessionChangedAfterSubmission: true,
++			message: 'Check the previous wallet session queue.',
++		});
++		render();
++		await settle();
++		await setAmount('10');
++		host.querySelector<HTMLButtonElement>('.submit-btn')!.click();
++		await settle();
++		expect(host.textContent).toContain('Queued: 8.05823333 ICP queued for delivery. The payout has not been credited yet.');
++		expect(host.textContent).toContain('Check the previous wallet session queue.');
++		expect(host.querySelector<HTMLInputElement>('#icusd-amount')!.value).toBe('10');
++		expect(mocks.walletStore.refreshBalance).not.toHaveBeenCalled();
++	});
++
++	it('does not describe a lost approval reply as a submitted redemption', async () => {
++		mocks.redeemQuoted.mockResolvedValue({ success: false, ambiguous: true, ambiguityStage: 'approval', error: 'Approval response lost.' });
++		render();
++		await settle();
++		await setAmount('10');
++		host.querySelector<HTMLButtonElement>('.submit-btn')!.click();
++		await settle();
++		expect(host.textContent).toContain('The approval response was lost. The redemption call was not sent.');
++		expect(host.textContent).not.toContain('The payout is unconfirmed.');
++		expect(host.querySelector('.submit-btn')!.hasAttribute('disabled')).toBe(true);
++	});
++
++	it('fails closed when the backend marks the global ranking incomplete', async () => {
++		mocks.getRedemptionQueue.mockImplementation(async () => makeQueue(nowNs, false));
++		render();
++		await settle();
++		await setAmount('10');
++		expect(host.textContent).toContain('global collateral ranking is incomplete');
++		expect((host.querySelector('.submit-btn') as HTMLButtonElement).disabled).toBe(true);
++		expect(mocks.getRedemptionQuote).not.toHaveBeenCalled();
++	});
++});

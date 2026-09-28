@@ -1,0 +1,47 @@
+# REVIEW ONLY — proposal only; do not apply without explicit approval of this exact integration.
+# Depends on the separate frozen event proposal docs/redemption-event.patch (SHA-256 f7e7886ef86dc408a397c30fb5f8367cb2c872fbaf7ac37d660199da5a9a28ca).
+# Not applied, compiled, or tested.
+--- a/src/rumi_protocol_backend/src/vault.rs
++++ b/src/rumi_protocol_backend/src/vault.rs
+@@ -828,14 +828,23 @@
+     // Handle vault spillover if reserves didn't cover everything
+     if spillover_e8s > 0 {
+-        let planned_ct = spillover_plan.as_ref().map(|plan| plan.0);
+         let (refund_e8s, actual_spillover_e8s) = mutate_state(|s| {
+             let spillover_icusd = ICUSD::from(spillover_e8s);
+-            // Re-read the run and price immediately before the synchronous
+-            // event mutation. If the selected asset changed during the stable
+-            // ledger await, skip vault seizure and refund the spillover tail.
++            // Stable and treasury ledger calls have awaited. Compare the full
++            // pre-pull snapshot immediately before the synchronous event call.
++            // If anything changed, retain the already-settled stable payout,
++            // skip vault seizure, and refund the unconsumed spillover tail.
+             let Some(run) = s.redemption_runs().into_iter().next() else {
+                 return (spillover_e8s, 0);
+             };
+-            if Some(run.collateral_type) != planned_ct {
++            let Some((expected_ct, expected_ids, expected_price, expected_decimals)) =
++                &spillover_plan
++            else {
++                return (spillover_e8s, 0);
++            };
++            if run.collateral_type != *expected_ct
++                || run.vault_ids.as_slice() != expected_ids.as_slice()
++                || run.price_usd.to_bits() != expected_price.to_bits()
++                || run.decimals != *expected_decimals
++            {
+                 return (spillover_e8s, 0);
+             }
+@@ -891,9 +900,11 @@
+-            let outcome = record_redemption_on_vaults(
++            let outcome = crate::event::record_redemption_on_vault_run(
+                 s,
+                 caller,
+                 bounded_effective,
+                 vault_fee,
+                 current_price,
+                 icusd_block_index,
+                 run.collateral_type,
++                &run.vault_ids,
++                None,
+             );
