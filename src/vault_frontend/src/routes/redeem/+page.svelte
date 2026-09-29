@@ -618,7 +618,7 @@
                   <span>Its terms cannot be accepted. Check for a new live offer.</span>
                 {:else}
                   <strong>Indicative estimate</strong>
-                  <span>Prices from {snapshotAgeLabel(quote.quoted_at_ns)} · not an accepted offer</span>
+                  <span>Price data from {snapshotAgeLabel(quote.price_timestamp_ns)} · not an accepted offer</span>
                 {/if}
               </div>
               <div class="fee-row muted">
