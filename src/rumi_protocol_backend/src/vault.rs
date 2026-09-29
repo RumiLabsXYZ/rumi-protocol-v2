@@ -39,17 +39,19 @@ const REDEMPTION_PRICE_MAX_AGE_NS: u64 = 10 * 60 * 1_000_000_000;
 pub(crate) const MAX_REDEMPTION_PRICE_CANDIDATES: usize = 64;
 const MAX_REDEMPTION_OFFER_REFRESH_PASSES: usize = 2;
 const MAX_LST_EXTERNAL_CALLS_PER_REFRESH: usize = 2;
+const MAX_REDEMPTION_OFFER_REFRESH_TARGETS_PER_PASS: usize =
+    MAX_REDEMPTION_PRICE_CANDIDATES + 1; // one off-set ICP source dependency
 const REDEMPTION_OFFER_REFRESH_COOLDOWN_NS: u64 = 300 * 1_000_000_000;
 const REDEMPTION_OFFER_REFRESH_LEASE_NS: u64 = 300 * 1_000_000_000;
-// Deliberately loose upper bound: two passes over 64 candidates, at most two
-// source calls per direct refresh (LstWrapped's initial call plus one catch-up),
-// plus two ICP refresh calls and two possible ICP-coupled LST waves. The ICP
-// candidate appears at most once per pass, and an LST refresh itself never
-// fetches ICP; the extra ICP allowance makes the bound robust to a second pass
-// after the first sample ages out. `fetch_icp_rate` couples at most 64 LSTs,
-// each with the same two-call ceiling. This is 514 calls maximum.
+// Deliberately loose upper bound: two passes over at most 64 candidates plus
+// one ICP dependency target, at most two source calls per direct refresh
+// (LstWrapped's initial call plus one catch-up), plus two ICP XRC calls and two
+// possible ICP-coupled LST waves. At most one ICP target is included per pass
+// even when it is both a candidate and an LST dependency. `fetch_icp_rate`
+// couples at most 64 LSTs, each with the same two-call ceiling. This is 518
+// calls maximum.
 const MAX_REDEMPTION_OFFER_EXTERNAL_CALLS: usize =
-    (MAX_REDEMPTION_OFFER_REFRESH_PASSES * MAX_REDEMPTION_PRICE_CANDIDATES
+    (MAX_REDEMPTION_OFFER_REFRESH_PASSES * MAX_REDEMPTION_OFFER_REFRESH_TARGETS_PER_PASS
         * MAX_LST_EXTERNAL_CALLS_PER_REFRESH)
         + MAX_REDEMPTION_OFFER_REFRESH_PASSES
         + (MAX_REDEMPTION_OFFER_REFRESH_PASSES
@@ -245,6 +247,63 @@ fn stale_redemption_candidate_types(
         .copied()
         .filter(|ct| !redemption_candidate_price_is_valid(state, ct, now, true))
         .collect()
+}
+
+fn is_icp_wrapped_lst(state: &crate::state::State, collateral_type: &Principal) -> bool {
+    state
+        .get_collateral_config(collateral_type)
+        .is_some_and(|config| {
+            matches!(
+                &config.price_source,
+                crate::state::PriceSource::LstWrapped { base_asset, .. }
+                    if base_asset == "ICP"
+            )
+        })
+}
+
+fn cached_icp_source_is_fresh(state: &crate::state::State, now: u64) -> bool {
+    state
+        .last_icp_rate
+        .is_some_and(|rate| rate.0 > Decimal::ZERO)
+        && state
+            .last_icp_timestamp
+            .is_some_and(|timestamp| redemption_price_timestamp_is_fresh(timestamp, now))
+}
+
+#[derive(Clone, Debug)]
+struct RedemptionOfferPriceRefreshSnapshot {
+    candidates: Vec<Principal>,
+    refresh_targets: Vec<Principal>,
+    ranking_fresh: bool,
+}
+
+fn redemption_offer_price_refresh_snapshot(
+    state: &crate::state::State,
+    now: u64,
+) -> RedemptionOfferPriceRefreshSnapshot {
+    let candidates = redemption_candidate_types(state);
+    let stale = stale_redemption_candidate_types(state, &candidates, now);
+    let stale_icp_lst = stale
+        .iter()
+        .any(|collateral_type| is_icp_wrapped_lst(state, collateral_type));
+    let mut refresh_targets = stale;
+
+    // An LstWrapped candidate's value is derived from the cached ICP source,
+    // even when there is no ICP-denominated vault in the candidate set. Add
+    // that dependency once and put it first so the LST refresh observes the
+    // newly accepted source timestamp. A direct ICP candidate is deduplicated.
+    if stale_icp_lst && !cached_icp_source_is_fresh(state, now) {
+        let icp_collateral_type = state.icp_collateral_type();
+        refresh_targets.retain(|candidate| *candidate != icp_collateral_type);
+        refresh_targets.insert(0, icp_collateral_type);
+    }
+
+    let ranking_fresh = redemption_ranking_is_fresh(state, &state.redemption_runs(), now);
+    RedemptionOfferPriceRefreshSnapshot {
+        candidates,
+        refresh_targets,
+        ranking_fresh,
+    }
 }
 
 fn redemption_candidate_price_is_valid(
@@ -592,38 +651,16 @@ async fn refresh_redemption_candidate_prices() -> Result<(), ProtocolError> {
 /// pass has at most one ICP candidate refresh, and that XRC path may couple at
 /// most 64 LST refreshes (again at most two rate calls each). A second ICP
 /// refresh/coupling wave is possible if time elapses across awaits, so the
-/// deliberately loose ceiling is 514 external calls. LstWrapped refreshes use
+/// deliberately loose ceiling is 518 external calls. LstWrapped refreshes use
 /// cached ICP and do not recursively fetch ICP. Unlike
 /// `refresh_redemption_candidate_prices`, this helper is only used by the
 /// public no-funds offer endpoint.
 async fn refresh_stale_redemption_candidates_for_offer(
 ) -> Result<(), RedemptionOfferRefreshError> {
-    for _ in 0..MAX_REDEMPTION_OFFER_REFRESH_PASSES {
-        let now = ic_cdk::api::time();
-        let (candidates, stale) = read_state(|state| {
-            let candidates = redemption_candidate_types(state);
-            let stale = stale_redemption_candidate_types(state, &candidates, now);
-            (candidates, stale)
-        });
-        if candidates.len() > MAX_REDEMPTION_PRICE_CANDIDATES {
-            return Err(RedemptionOfferRefreshError::CandidateLimitExceeded {
-                max_candidates: MAX_REDEMPTION_PRICE_CANDIDATES as u64,
-            });
-        }
-        if stale.is_empty() {
-            let complete_and_fresh = read_state(|state| {
-                let current = redemption_candidate_types(state);
-                current == candidates
-                    && current.len() <= MAX_REDEMPTION_PRICE_CANDIDATES
-                    && redemption_ranking_is_fresh(state, &state.redemption_runs(), now)
-            });
-            if complete_and_fresh {
-                return Ok(());
-            }
-            continue;
-        }
-
-        for collateral_type in stale {
+    refresh_stale_redemption_candidates_for_offer_with(
+        || ic_cdk::api::time(),
+        |now| read_state(|state| redemption_offer_price_refresh_snapshot(state, now)),
+        |collateral_type| async move {
             crate::xrc::ensure_fresh_price_for(&collateral_type)
                 .await
                 .map_err(|error| RedemptionOfferRefreshError::RefreshUnavailable {
@@ -631,17 +668,47 @@ async fn refresh_stale_redemption_candidates_for_offer(
                     retry_after_ns: redemption_offer_refresh_cooldown_remaining(
                         ic_cdk::api::time(),
                     ),
-                })?;
+                })
+        },
+    )
+    .await
+}
+
+async fn refresh_stale_redemption_candidates_for_offer_with<Now, Snapshot, Refresh, RefreshFuture>(
+    mut now: Now,
+    mut snapshot: Snapshot,
+    mut refresh: Refresh,
+) -> Result<(), RedemptionOfferRefreshError>
+where
+    Now: FnMut() -> u64,
+    Snapshot: FnMut(u64) -> RedemptionOfferPriceRefreshSnapshot,
+    Refresh: FnMut(Principal) -> RefreshFuture,
+    RefreshFuture:
+        std::future::Future<Output = Result<(), RedemptionOfferRefreshError>>,
+{
+    for _ in 0..MAX_REDEMPTION_OFFER_REFRESH_PASSES {
+        let current = snapshot(now());
+        if current.candidates.len() > MAX_REDEMPTION_PRICE_CANDIDATES {
+            return Err(RedemptionOfferRefreshError::CandidateLimitExceeded {
+                max_candidates: MAX_REDEMPTION_PRICE_CANDIDATES as u64,
+            });
+        }
+        if current.refresh_targets.is_empty() {
+            if current.ranking_fresh {
+                return Ok(());
+            }
+            continue;
         }
 
-        let now = ic_cdk::api::time();
-        let verified = read_state(|state| {
-            let current = redemption_candidate_types(state);
-            current == candidates
-                && current.len() <= MAX_REDEMPTION_PRICE_CANDIDATES
-                && redemption_ranking_is_fresh(state, &state.redemption_runs(), now)
-        });
-        if verified {
+        for collateral_type in current.refresh_targets {
+            refresh(collateral_type).await?;
+        }
+
+        let verified = snapshot(now());
+        if verified.candidates == current.candidates
+            && verified.candidates.len() <= MAX_REDEMPTION_PRICE_CANDIDATES
+            && verified.ranking_fresh
+        {
             return Ok(());
         }
     }
@@ -10678,6 +10745,8 @@ mod redemption_await_boundary_tests {
         current_legacy_reserve_run_for_snapshot, legacy_redemption_run_for_request,
         build_redemption_queue_and_quote, cached_redemption_offer_is_fresh,
         prepared_offer_from_current_state, stale_redemption_candidate_types,
+        redemption_offer_price_refresh_snapshot,
+        refresh_stale_redemption_candidates_for_offer_with,
         RedemptionOfferRefreshGateState, REDEMPTION_OFFER_REFRESH_COOLDOWN_NS,
         REDEMPTION_OFFER_REFRESH_LEASE_NS,
         legacy_reserve_spillover_run, persist_rejected_redemption_refund,
@@ -10752,6 +10821,29 @@ mod redemption_await_boundary_tests {
             bot_processing: false,
         });
         (state, icp, xaut)
+    }
+
+    fn stale_lst_only_redemption_state() -> (State, Principal, Principal) {
+        let (mut state, icp, lst) = redemption_state(120_000_000);
+        state
+            .vault_id_to_vaults
+            .get_mut(&1)
+            .unwrap()
+            .borrowed_icusd_amount = ICUSD::new(0);
+        state.set_icp_rate(crate::numeric::UsdIcp::from(dec!(1)), Some(1));
+        let mut config = state.collateral_configs.get(&lst).unwrap().clone();
+        config.price_source = crate::state::PriceSource::LstWrapped {
+            base_asset: "ICP".to_string(),
+            base_asset_class: crate::state::XrcAssetClass::Cryptocurrency,
+            quote_asset: "USD".to_string(),
+            quote_asset_class: crate::state::XrcAssetClass::FiatCurrency,
+            rate_canister_id: principal(0x77),
+            rate_method: "get_info".to_string(),
+            haircut: 0.0,
+        };
+        config.last_price_timestamp = Some(1);
+        state.collateral_configs.insert(lst, config);
+        (state, icp, lst)
     }
 
     fn vault_balances(state: &State) -> Vec<(u64, u64, u64)> {
@@ -11444,6 +11536,20 @@ mod redemption_await_boundary_tests {
         assert_eq!(state.pending_refunds.len(), before_pending_refunds);
         assert_eq!(state.pending_redemption_transfer.len(), before_pending_payouts);
         assert_eq!(state.total_borrowed_icusd_amount(), before_debt);
+
+        let refresh_calls = std::cell::Cell::new(0usize);
+        let refresh_result = futures::executor::block_on(
+            refresh_stale_redemption_candidates_for_offer_with(
+                || now,
+                |at| redemption_offer_price_refresh_snapshot(&state, at),
+                |_| {
+                    refresh_calls.set(refresh_calls.get() + 1);
+                    std::future::ready(Ok::<(), crate::RedemptionOfferRefreshError>(()))
+                },
+            ),
+        );
+        assert!(refresh_result.is_ok());
+        assert_eq!(refresh_calls.get(), 0, "all-fresh cache bypasses oracle work");
     }
 
     #[test]
@@ -11469,10 +11575,157 @@ mod redemption_await_boundary_tests {
             "the offer refresh loop has two passes over at most 64 candidates"
         );
         assert_eq!(
-            super::MAX_REDEMPTION_OFFER_EXTERNAL_CALLS,
-            514,
-            "bound allows two candidate passes, two ICP-coupled LST waves, and two ICP XRC calls"
+            super::MAX_REDEMPTION_OFFER_REFRESH_TARGETS_PER_PASS,
+            65,
+            "at most 64 eligible assets plus the one deduplicated ICP dependency"
         );
+        assert_eq!(
+            super::MAX_REDEMPTION_OFFER_EXTERNAL_CALLS,
+            518,
+            "bound includes the optional ICP dependency and two possible coupled LST waves"
+        );
+    }
+
+    #[test]
+    fn nicp_only_offer_refreshes_stale_icp_dependency_before_quoting() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let (initial_state, icp, nicp) = stale_lst_only_redemption_state();
+
+        let now = 1_000_000_000_000;
+        let initial_snapshot = redemption_offer_price_refresh_snapshot(&initial_state, now);
+        assert_eq!(initial_snapshot.candidates, vec![nicp]);
+        assert_eq!(
+            initial_snapshot.refresh_targets,
+            vec![icp, nicp],
+            "the missing ICP source must be requested first even without ICP debt"
+        );
+        assert!(!initial_snapshot.ranking_fresh);
+
+        // Inject only the price-source await. This runs the same offer refresh
+        // orchestration and revalidation used by the public endpoint; accepting
+        // ICP also simulates the existing LST coupling publication.
+        let state = Rc::new(RefCell::new(initial_state));
+        let requested = Rc::new(RefCell::new(Vec::new()));
+        let result = futures::executor::block_on(
+            refresh_stale_redemption_candidates_for_offer_with(
+                || now,
+                {
+                    let state = Rc::clone(&state);
+                    move |at| redemption_offer_price_refresh_snapshot(&state.borrow(), at)
+                },
+                {
+                    let state = Rc::clone(&state);
+                    let requested = Rc::clone(&requested);
+                    move |collateral_type| {
+                        let state = Rc::clone(&state);
+                        let requested = Rc::clone(&requested);
+                        async move {
+                            requested.borrow_mut().push(collateral_type);
+                            if collateral_type == icp {
+                                let mut state = state.borrow_mut();
+                                state.set_icp_rate(
+                                    crate::numeric::UsdIcp::from(dec!(1.05)),
+                                    Some(now),
+                                );
+                                let lst_price = crate::management::compute_lst_wrapped_price(
+                                    dec!(1.05),
+                                    E8,
+                                    0.0,
+                                )
+                                .unwrap()
+                                .to_f64()
+                                .unwrap();
+                                state.on_collateral_price_change(&nicp, lst_price);
+                                state
+                                    .collateral_configs
+                                    .get_mut(&nicp)
+                                    .unwrap()
+                                    .last_price_timestamp = Some(now);
+                            }
+                            Ok(())
+                        }
+                    }
+                },
+            ),
+        );
+        assert!(result.is_ok(), "a fresh accepted dependency permits the offer");
+        assert_eq!(*requested.borrow(), vec![icp, nicp]);
+
+        let state = state.borrow();
+        assert_eq!(state.last_icp_timestamp, Some(now));
+        assert_eq!(state.collateral_configs[&nicp].last_price_timestamp, Some(now));
+        let (queue, quote) = build_redemption_queue_and_quote(&state, now, E8, false);
+        assert!(queue.ranking_fresh);
+        assert_eq!(queue.entries.len(), 1);
+        assert_eq!(queue.entries[0].collateral_type, nicp);
+        assert_eq!(quote.unwrap().collateral_type, nicp);
+    }
+
+    #[test]
+    fn stale_icp_candidate_and_lst_dependency_are_deduplicated() {
+        let (mut state, icp, lst) = redemption_state(120_000_000);
+        state.set_icp_rate(crate::numeric::UsdIcp::from(dec!(1)), Some(1));
+        let mut config = state.collateral_configs.get(&lst).unwrap().clone();
+        config.price_source = crate::state::PriceSource::LstWrapped {
+            base_asset: "ICP".to_string(),
+            base_asset_class: crate::state::XrcAssetClass::Cryptocurrency,
+            quote_asset: "USD".to_string(),
+            quote_asset_class: crate::state::XrcAssetClass::FiatCurrency,
+            rate_canister_id: principal(0x77),
+            rate_method: "get_info".to_string(),
+            haircut: 0.0,
+        };
+        config.last_price_timestamp = Some(1);
+        state.collateral_configs.insert(lst, config);
+
+        let snapshot = redemption_offer_price_refresh_snapshot(&state, 1_000_000_000_000);
+        assert_eq!(snapshot.candidates, vec![icp, lst]);
+        assert_eq!(snapshot.refresh_targets, vec![icp, lst]);
+        assert_eq!(
+            snapshot
+                .refresh_targets
+                .iter()
+                .filter(|candidate| **candidate == icp)
+                .count(),
+            1,
+            "the ICP source is fetched once even when it is both candidate and dependency"
+        );
+    }
+
+    #[test]
+    fn failed_icp_dependency_refresh_returns_no_stale_offer() {
+        let (state, icp, _nicp) = stale_lst_only_redemption_state();
+        let now = 1_000_000_000_000;
+        let result = futures::executor::block_on(
+            refresh_stale_redemption_candidates_for_offer_with(
+                || now,
+                |at| redemption_offer_price_refresh_snapshot(&state, at),
+                move |collateral_type| {
+                    assert_eq!(collateral_type, icp, "dependency is refreshed before nICP");
+                    std::future::ready(Err(
+                        crate::RedemptionOfferRefreshError::RefreshUnavailable {
+                            message: "XRC returned no acceptable ICP sample".to_string(),
+                            retry_after_ns: 300_000_000_000,
+                        },
+                    ))
+                },
+            ),
+        );
+        assert!(matches!(
+            result,
+            Err(crate::RedemptionOfferRefreshError::RefreshUnavailable {
+                message,
+                retry_after_ns: 300_000_000_000,
+            }) if message.contains("no acceptable ICP sample")
+        ));
+        let (queue, quote) = build_redemption_queue_and_quote(&state, now, E8, false);
+        assert!(!queue.ranking_fresh);
+        assert!(matches!(
+            quote,
+            Err(crate::RedemptionError::RedemptionQuoteUnavailable(_))
+        ));
     }
 
     #[test]
