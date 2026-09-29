@@ -8,8 +8,13 @@ export const CKERC20_MINTER_IDL = ({ IDL }) => {
     erc20_contract_address: IDL.Text,
     ledger_canister_id: IDL.Principal,
   });
+  const MinimumDepositAmount = IDL.Record({
+    erc20_contract_address: IDL.Text,
+    minimum_deposit_amount: IDL.Nat,
+  });
   const MinterInfo = IDL.Record({
     deposit_with_subaccount_helper_contract_address: IDL.Opt(IDL.Text),
+    minimum_deposit_amounts: IDL.Opt(IDL.Vec(MinimumDepositAmount)),
     supported_ckerc20_tokens: IDL.Opt(IDL.Vec(CkErc20Token)),
     cketh_ledger_id: IDL.Opt(IDL.Principal),
   });

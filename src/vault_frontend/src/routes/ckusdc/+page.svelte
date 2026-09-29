@@ -4,8 +4,8 @@
   import { isConnected as isConnectedStore, principal as principalStore } from '$lib/stores/wallet';
   import { CANISTER_IDS } from '$lib/config';
   import {
-    CKUSDC,
     CKERC20_MINTER_DASHBOARD,
+    discoverCkErc20Tokens,
     approveAndWithdrawCkErc20,
     assertTokenSupported,
     encodeAddressWord,
@@ -17,6 +17,7 @@
     getCkErc20WithdrawalQuote,
     parseTokenAmount,
     validateEthereumAddress,
+    type CkErc20TokenConfig,
   } from '$lib/services/ckerc20Minter';
 
   type Eip1193Provider = {
@@ -32,16 +33,20 @@
   let connected = false;
   let ownerPrincipal: Principal | null = null;
   let activeTab: 'mint' | 'redeem' = 'mint';
+  let supportedTokens: CkErc20TokenConfig[] = [];
+  let selectedTokenLedgerId = '';
+  let selectedToken: CkErc20TokenConfig | null = null;
+  $: selectedToken = supportedTokens.find((token) => token.ledgerId === selectedTokenLedgerId) ?? null;
   let evmAccount = '';
   let evmMessage = '';
-  let usdcBalance: bigint | null = null;
-  let usdcBalanceBusy = false;
-  let usdcBalanceError = '';
-  let usdcBalanceRequestId = 0;
+  let evmTokenBalance: bigint | null = null;
+  let evmTokenBalanceBusy = false;
+  let evmTokenBalanceError = '';
+  let evmTokenBalanceRequestId = 0;
   let minterReady = false;
   let minterError = '';
   let helperAddress = '';
-  let ckUsdcBalance: bigint | null = null;
+  let ckTokenBalance: bigint | null = null;
   let ckEthBalance: bigint | null = null;
   let refreshBusy = false;
   let depositAmount = '';
@@ -54,9 +59,9 @@
   let error = '';
   let approveHash = '';
   let depositHash = '';
-  let pendingDeposit: { hash: string; amount: string; recipient: string; evmAccount: string; principal: string; createdAt: number } | null = null;
-  let pendingWithdrawal: { amount: string; recipient: string; owner: string; createdAt: number } | null = null;
-  let redeemIndices: { ckEth: bigint; ckUsdc: bigint } | null = null;
+  let pendingDeposit: { hash: string; amount: string; recipient: string; evmAccount: string; principal: string; tokenLedgerId?: string; tokenSymbol?: string; createdAt: number } | null = null;
+  let pendingWithdrawal: { amount: string; recipient: string; owner: string; tokenLedgerId?: string; tokenSymbol?: string; createdAt: number } | null = null;
+  let redeemIndices: { ckEth: bigint; ckToken: bigint } | null = null;
   let destroyed = false;
 
   const unsubs: Array<() => void> = [];
@@ -65,7 +70,11 @@
   let accountChangedListener: ((accounts: unknown) => void) | null = null;
   let chainChangedListener: ((chainId: unknown) => void) | null = null;
 
-  function depositStorageKey(evm: string, principal: string) {
+  function depositStorageKey(evm: string, principal: string, ledgerId: string) {
+    return `rumi:ckerc20:pending-deposit:${evm.toLowerCase()}:${principal}:${ledgerId}`;
+  }
+
+  function legacyCkUsdcDepositStorageKey(evm: string, principal: string) {
     return `rumi:ckusdc:pending-deposit:${evm.toLowerCase()}:${principal}`;
   }
 
@@ -75,28 +84,37 @@
     localStorage.removeItem(key);
   }
 
-  function syncPendingDeposit() {
+  function syncPendingDeposit(token = selectedToken) {
     pendingDeposit = null;
-    if (!evmAccount || !ownerPrincipal || ownerPrincipal.isAnonymous()) return;
+    if (!evmAccount || !ownerPrincipal || ownerPrincipal.isAnonymous() || !token) return;
     try {
-      const value = localStorage.getItem(depositStorageKey(evmAccount, ownerPrincipal.toText()));
-      if (value) pendingDeposit = JSON.parse(value);
+      const value = localStorage.getItem(depositStorageKey(evmAccount, ownerPrincipal.toText(), token.ledgerId)) ??
+        (token.ledgerId === CANISTER_IDS.CKUSDC_LEDGER
+          ? localStorage.getItem(legacyCkUsdcDepositStorageKey(evmAccount, ownerPrincipal.toText()))
+          : null);
+      if (value) {
+        const pending = JSON.parse(value);
+        pendingDeposit = { ...pending, tokenLedgerId: pending.tokenLedgerId ?? token.ledgerId, tokenSymbol: pending.tokenSymbol ?? token.symbol };
+      }
     } catch { /* Storage may be unavailable; the in-memory guard still applies. */ }
   }
 
-  function savePendingDeposit(hash: string, amount: string, recipient: string, evm: string, principal: string) {
-    pendingDeposit = { hash, amount, recipient, evmAccount: evm, principal, createdAt: Date.now() };
-    try { localStorage.setItem(depositStorageKey(evm, principal), JSON.stringify(pendingDeposit)); } catch { /* The unresolved intent written before wallet dispatch remains as a conservative lock. */ }
+  function savePendingDeposit(hash: string, amount: string, recipient: string, evm: string, principal: string, token: CkErc20TokenConfig) {
+    pendingDeposit = { hash, amount, recipient, evmAccount: evm, principal, tokenLedgerId: token.ledgerId, tokenSymbol: token.symbol, createdAt: Date.now() };
+    try { localStorage.setItem(depositStorageKey(evm, principal, token.ledgerId), JSON.stringify(pendingDeposit)); } catch { /* The unresolved intent written before wallet dispatch remains as a conservative lock. */ }
   }
 
-  function beginPendingDeposit(amount: string, recipient: string, evm: string, principal: string) {
-    const pending = { hash: '', amount, recipient, evmAccount: evm, principal, createdAt: Date.now() };
-    localStorage.setItem(depositStorageKey(evm, principal), JSON.stringify(pending));
+  function beginPendingDeposit(amount: string, recipient: string, evm: string, principal: string, token: CkErc20TokenConfig) {
+    const pending = { hash: '', amount, recipient, evmAccount: evm, principal, tokenLedgerId: token.ledgerId, tokenSymbol: token.symbol, createdAt: Date.now() };
+    localStorage.setItem(depositStorageKey(evm, principal, token.ledgerId), JSON.stringify(pending));
     pendingDeposit = pending;
   }
 
-  function clearPendingDepositMarker(evm: string, principal: string) {
-    try { localStorage.removeItem(depositStorageKey(evm, principal)); } catch { /* Keep a stale persistent lock rather than risk a retry. */ }
+  function clearPendingDepositMarker(evm: string, principal: string, token: CkErc20TokenConfig) {
+    try {
+      localStorage.removeItem(depositStorageKey(evm, principal, token.ledgerId));
+      if (token.ledgerId === CANISTER_IDS.CKUSDC_LEDGER) localStorage.removeItem(legacyCkUsdcDepositStorageKey(evm, principal));
+    } catch { /* Keep a stale persistent lock rather than risk a retry. */ }
     if (pendingDeposit?.evmAccount.toLowerCase() === evm.toLowerCase() && pendingDeposit?.principal === principal) pendingDeposit = null;
   }
 
@@ -104,38 +122,46 @@
     if (!pendingDeposit) return;
     const confirmed = window.confirm('Only clear this retry lock after checking Ethereum wallet activity and confirming the deposit did not complete. Clearing it while the transaction is pending could allow a duplicate deposit.');
     if (!confirmed) return;
-    clearPendingDepositMarker(pendingDeposit.evmAccount, pendingDeposit.principal);
+    const token = supportedTokens.find((candidate) => candidate.ledgerId === pendingDeposit?.tokenLedgerId);
+    if (!token) return;
+    clearPendingDepositMarker(pendingDeposit.evmAccount, pendingDeposit.principal, token);
   }
 
   function withdrawalStorageKey(owner: string) {
-    return `rumi:ckusdc:pending-withdrawal:${owner}`;
+    return `rumi:ckerc20:pending-withdrawal:${owner}`;
   }
 
   function syncPendingWithdrawal(owner: Principal | null) {
     pendingWithdrawal = null;
     if (!owner || owner.isAnonymous()) return;
     try {
-      const value = localStorage.getItem(withdrawalStorageKey(owner.toText()));
-      if (value) pendingWithdrawal = JSON.parse(value);
+      const value = localStorage.getItem(withdrawalStorageKey(owner.toText())) ?? localStorage.getItem(`rumi:ckusdc:pending-withdrawal:${owner.toText()}`);
+      if (value) {
+        const pending = JSON.parse(value);
+        pendingWithdrawal = { ...pending, tokenLedgerId: pending.tokenLedgerId ?? CANISTER_IDS.CKUSDC_LEDGER, tokenSymbol: pending.tokenSymbol ?? 'ckUSDC' };
+      }
     } catch { /* Storage may be unavailable; the in-memory guard still applies. */ }
   }
 
-  function markWithdrawalPending(amount: bigint, recipient: string, owner: Principal) {
-    const pending = { amount: amount.toString(), recipient, owner: owner.toText(), createdAt: Date.now() };
+  function markWithdrawalPending(amount: bigint, recipient: string, owner: Principal, token: CkErc20TokenConfig) {
+    const pending = { amount: amount.toString(), recipient, owner: owner.toText(), tokenLedgerId: token.ledgerId, tokenSymbol: token.symbol, createdAt: Date.now() };
     localStorage.setItem(withdrawalStorageKey(owner.toText()), JSON.stringify(pending));
     pendingWithdrawal = pending;
   }
 
   function clearPendingWithdrawal() {
     if (!pendingWithdrawal) return;
-    const confirmed = window.confirm('Only clear this retry lock after checking the ckUSDC and ckETH ledger history and the minter dashboard to confirm the request was not accepted. Clearing it without reconciliation could burn the amount twice.');
+    const confirmed = window.confirm(`Only clear this retry lock after checking the ${pendingWithdrawal.tokenSymbol ?? 'ckUSDC'} and ckETH ledger history and the minter dashboard to confirm the request was not accepted. Clearing it without reconciliation could burn the amount twice.`);
     if (!confirmed) return;
-    try { localStorage.removeItem(withdrawalStorageKey(pendingWithdrawal.owner)); } catch { /* The current page lock is still cleared below. */ }
+    try {
+      localStorage.removeItem(withdrawalStorageKey(pendingWithdrawal.owner));
+      localStorage.removeItem(`rumi:ckusdc:pending-withdrawal:${pendingWithdrawal.owner}`);
+    } catch { /* The current page lock is still cleared below. */ }
     pendingWithdrawal = null;
   }
 
   function resetForWallet() {
-    ckUsdcBalance = null;
+    ckTokenBalance = null;
     ckEthBalance = null;
     notice = '';
     error = '';
@@ -143,16 +169,13 @@
     depositHash = '';
     redeemIndices = null;
     withdrawalQuote = null;
-    minterReady = false;
-    minterError = '';
-    helperAddress = '';
   }
 
   onMount(() => {
     unsubs.push(isConnectedStore.subscribe((value) => {
       connected = value;
       if (!value) resetForWallet();
-      else if (ownerPrincipal && !ownerPrincipal.isAnonymous()) void loadMinterInfo(ownerPrincipal);
+      else if (ownerPrincipal && !ownerPrincipal.isAnonymous()) void refreshBalances(ownerPrincipal);
     }));
     unsubs.push(principalStore.subscribe((value) => {
       ownerPrincipal = value;
@@ -163,33 +186,34 @@
         previousPrincipal = key;
         resetForWallet();
       }
-      if (value && !value.isAnonymous()) void loadMinterInfo(value);
+      if (value && !value.isAnonymous()) void refreshBalances(value);
     }));
     ethereumProvider = getEthereumProvider();
     accountChangedListener = (accounts) => {
-      usdcBalanceRequestId += 1;
-      usdcBalanceBusy = false;
+      evmTokenBalanceRequestId += 1;
+      evmTokenBalanceBusy = false;
       evmAccount = Array.isArray(accounts) && accounts[0] ? String(accounts[0]) : '';
       syncPendingDeposit();
-      usdcBalance = null;
-      usdcBalanceError = '';
+      evmTokenBalance = null;
+      evmTokenBalanceError = '';
       evmMessage = '';
-      if (evmAccount) void refreshUsdcBalance(evmAccount);
+      if (evmAccount) void refreshEvmTokenBalance(evmAccount);
     };
     chainChangedListener = (chainId) => {
-      usdcBalanceRequestId += 1;
-      usdcBalanceBusy = false;
-      usdcBalance = null;
-      usdcBalanceError = '';
+      evmTokenBalanceRequestId += 1;
+      evmTokenBalanceBusy = false;
+      evmTokenBalance = null;
+      evmTokenBalanceError = '';
       if (chainId === '0x1') {
         evmMessage = '';
-        if (evmAccount) void refreshUsdcBalance(evmAccount);
+        if (evmAccount) void refreshEvmTokenBalance(evmAccount);
       } else {
-        evmMessage = 'Choose Ethereum Mainnet in your EVM wallet to read USDC and deposit.';
+        evmMessage = 'Choose Ethereum Mainnet in your EVM wallet to read your token balance and deposit.';
       }
     };
     ethereumProvider?.on?.('accountsChanged', accountChangedListener);
     ethereumProvider?.on?.('chainChanged', chainChangedListener);
+    void loadMinterInfo();
     void (async () => {
       try {
         const [accounts, chainId] = await Promise.all([
@@ -201,9 +225,9 @@
         syncPendingDeposit();
         if (chainId === '0x1') {
           evmMessage = '';
-          if (evmAccount) await refreshUsdcBalance(evmAccount);
+          if (evmAccount) await refreshEvmTokenBalance(evmAccount);
         } else if (evmAccount) {
-          evmMessage = 'Choose Ethereum Mainnet in your EVM wallet to read USDC and deposit.';
+          evmMessage = 'Choose Ethereum Mainnet in your EVM wallet to read your token balance and deposit.';
         }
       } catch { /* A missing or locked EVM wallet is handled when the user connects. */ }
     })();
@@ -216,78 +240,107 @@
     if (chainChangedListener) ethereumProvider?.removeListener?.('chainChanged', chainChangedListener);
   });
 
-  async function refreshUsdcBalance(account = evmAccount) {
+  async function refreshEvmTokenBalance(account = evmAccount, token = selectedToken) {
     const provider = getEthereumProvider();
-    if (!provider || !account) return;
-    const requestId = ++usdcBalanceRequestId;
-    usdcBalanceBusy = true;
-    usdcBalanceError = '';
+    if (!provider || !account || !token) return;
+    const requestId = ++evmTokenBalanceRequestId;
+    evmTokenBalanceBusy = true;
+    evmTokenBalanceError = '';
     try {
       const chainId = await provider.request({ method: 'eth_chainId' });
       if (chainId !== '0x1') {
-        if (requestId === usdcBalanceRequestId) {
-          usdcBalance = null;
-          evmMessage = 'Choose Ethereum Mainnet in your EVM wallet to read USDC and deposit.';
+        if (requestId === evmTokenBalanceRequestId) {
+          evmTokenBalance = null;
+          evmMessage = 'Choose Ethereum Mainnet in your EVM wallet to read your token balance and deposit.';
         }
         return;
       }
-      const data = `0x70a08231${encodeAddressWord(account)}`;
-      const rawBalance = await provider.request({ method: 'eth_call', params: [{ to: CKUSDC.erc20Address, data }, 'latest'] });
-      if (typeof rawBalance !== 'string' || !/^0x[0-9a-fA-F]+$/.test(rawBalance)) {
-        throw new Error('The Ethereum wallet returned an invalid USDC balance.');
+      const decimalsHex = await provider.request({ method: 'eth_call', params: [{ to: token.erc20Address, data: '0x313ce567' }, 'latest'] });
+      if (Number(BigInt(String(decimalsHex))) !== token.decimals) {
+        throw new Error(`${token.symbol} Ethereum and ckERC20 ledgers report different decimal counts.`);
       }
-      if (!destroyed && requestId === usdcBalanceRequestId && evmAccount.toLowerCase() === account.toLowerCase()) {
-        usdcBalance = BigInt(rawBalance);
+      const data = `0x70a08231${encodeAddressWord(account)}`;
+      const rawBalance = await provider.request({ method: 'eth_call', params: [{ to: token.erc20Address, data }, 'latest'] });
+      if (typeof rawBalance !== 'string' || !/^0x[0-9a-fA-F]+$/.test(rawBalance)) {
+        throw new Error(`The Ethereum wallet returned an invalid ${token.symbol} balance.`);
+      }
+      if (!destroyed && requestId === evmTokenBalanceRequestId && evmAccount.toLowerCase() === account.toLowerCase() && selectedTokenLedgerId === token.ledgerId) {
+        evmTokenBalance = BigInt(rawBalance);
         evmMessage = '';
       }
     } catch (cause) {
-      if (!destroyed && requestId === usdcBalanceRequestId) {
-        usdcBalance = null;
-        usdcBalanceError = cause instanceof Error ? cause.message : 'Could not read USDC balance from Ethereum.';
+      if (!destroyed && requestId === evmTokenBalanceRequestId) {
+        evmTokenBalance = null;
+        evmTokenBalanceError = cause instanceof Error ? cause.message : `Could not read ${token.symbol} balance from Ethereum.`;
       }
     } finally {
-      if (requestId === usdcBalanceRequestId) usdcBalanceBusy = false;
+      if (requestId === evmTokenBalanceRequestId) evmTokenBalanceBusy = false;
     }
   }
 
   function setMaxDeposit() {
-    if (usdcBalance === null || usdcBalance <= 0n) return;
-    depositAmount = formatTokenAmount(usdcBalance, CKUSDC.decimals, CKUSDC.decimals);
+    if (evmTokenBalance === null || evmTokenBalance <= 0n || !selectedToken) return;
+    depositAmount = formatTokenAmount(evmTokenBalance, selectedToken.decimals, selectedToken.decimals);
   }
 
-  async function loadMinterInfo(principal: Principal) {
+  async function selectToken(ledgerId: string) {
+    const token = supportedTokens.find((candidate) => candidate.ledgerId === ledgerId);
+    if (!token || busy || quoteBusy || refreshBusy) return;
+    selectedTokenLedgerId = token.ledgerId;
+    depositAmount = '';
+    redeemAmount = '';
+    withdrawalQuote = null;
+    redeemIndices = null;
+    evmTokenBalance = null;
+    evmTokenBalanceError = '';
+    ckTokenBalance = null;
+    notice = '';
+    error = '';
+    syncPendingDeposit(token);
+    if (evmAccount) void refreshEvmTokenBalance(evmAccount, token);
+    if (ownerPrincipal && !ownerPrincipal.isAnonymous()) await refreshBalances(ownerPrincipal, token);
+  }
+
+  async function loadMinterInfo() {
     minterError = '';
     minterReady = false;
     try {
       const actor = await getCkErc20MinterActor();
       const info = await actor.get_minter_info();
-      if (destroyed || ownerPrincipal?.toText() !== principal.toText()) return;
-      assertTokenSupported(info, CKUSDC);
+      const tokens = await discoverCkErc20Tokens(info);
+      if (destroyed) return;
       const helper = info.deposit_with_subaccount_helper_contract_address?.[0];
       if (!helper || !/^0x[0-9a-fA-F]{40}$/.test(helper)) throw new Error('The minter did not return a valid live Ethereum helper address.');
+      const previousToken = selectedTokenLedgerId;
+      supportedTokens = tokens;
+      selectedTokenLedgerId = tokens.some((token) => token.ledgerId === previousToken)
+        ? previousToken
+        : (tokens.find((token) => token.symbol === 'ckUSDC') ?? tokens[0]).ledgerId;
       helperAddress = helper;
       minterReady = true;
-      await refreshBalances(principal);
+      syncPendingDeposit(supportedTokens.find((token) => token.ledgerId === selectedTokenLedgerId));
+      if (evmAccount) void refreshEvmTokenBalance(evmAccount, supportedTokens.find((token) => token.ledgerId === selectedTokenLedgerId));
+      if (ownerPrincipal && !ownerPrincipal.isAnonymous()) await refreshBalances(ownerPrincipal);
     } catch (cause) {
       if (destroyed) return;
       minterError = cause instanceof Error ? cause.message : 'Could not read ckERC20 minter configuration.';
     }
   }
 
-  async function refreshBalances(principal = ownerPrincipal) {
-    if (!principal || principal.isAnonymous() || refreshBusy) return;
+  async function refreshBalances(principal = ownerPrincipal, token = selectedToken) {
+    if (!principal || principal.isAnonymous() || !token || refreshBusy) return;
     refreshBusy = true;
     try {
-      const [usdcLedger, ethLedger] = await Promise.all([
-        getCkErc20LedgerActor(CKUSDC.ledgerId),
+      const [tokenLedger, ethLedger] = await Promise.all([
+        getCkErc20LedgerActor(token.ledgerId),
         getCkErc20LedgerActor(CANISTER_IDS.CKETH_LEDGER),
       ]);
-      const [usdc, eth] = await Promise.all([
-        usdcLedger.icrc1_balance_of({ owner: principal, subaccount: [] }),
+      const [tokenBalance, eth] = await Promise.all([
+        tokenLedger.icrc1_balance_of({ owner: principal, subaccount: [] }),
         ethLedger.icrc1_balance_of({ owner: principal, subaccount: [] }),
       ]);
-      if (destroyed || ownerPrincipal?.toText() !== principal.toText()) return;
-      ckUsdcBalance = BigInt(usdc);
+      if (destroyed || ownerPrincipal?.toText() !== principal.toText() || selectedTokenLedgerId !== token.ledgerId) return;
+      ckTokenBalance = BigInt(tokenBalance);
       ckEthBalance = BigInt(eth);
     } catch (cause) {
       error = cause instanceof Error ? cause.message : 'Could not refresh ledger balances.';
@@ -301,7 +354,7 @@
     evmMessage = '';
     const provider = getEthereumProvider();
     if (!provider) {
-      evmMessage = 'Install or unlock an EVM wallet such as Rabby or MetaMask to deposit USDC.';
+      evmMessage = 'Install or unlock an EVM wallet such as Rabby or MetaMask to deposit.';
       return;
     }
     try {
@@ -314,7 +367,7 @@
       }
       evmAccount = String(accounts[0]);
       syncPendingDeposit();
-      await refreshUsdcBalance(evmAccount);
+      await refreshEvmTokenBalance(evmAccount);
     } catch (cause) {
       evmMessage = cause instanceof Error ? cause.message : 'EVM wallet connection was not completed.';
     }
@@ -373,67 +426,88 @@
     notice = '';
     approveHash = '';
     depositHash = '';
+    const token = selectedToken;
+    if (!token) { error = 'Choose a supported ckERC20 token first.'; return; }
     if (pendingDeposit) { error = pendingDeposit.hash ? `A deposit transaction is still unresolved: ${pendingDeposit.hash}. Check its status before starting another deposit.` : 'A prior deposit submission has no confirmed result. Check Ethereum wallet activity before retrying.'; return; }
     if (!connected || !ownerPrincipal || ownerPrincipal.isAnonymous()) {
-      error = 'Connect an Internet Identity or another Rumi wallet first. This wallet receives ckUSDC.';
+      error = 'Connect an Internet Identity or another Rumi wallet first. This wallet receives the selected ckERC20 token.';
       return;
     }
     if (!minterReady || !helperAddress) { error = minterError || 'The live ckERC20 minter configuration is not ready.'; return; }
-    if (!evmAccount) { evmMessage = 'Connect an Ethereum wallet to pay for the USDC approval and deposit transactions.'; return; }
+    if (!evmAccount) { evmMessage = 'Connect an Ethereum wallet to pay for the token approval and deposit transactions.'; return; }
     let amount: bigint;
-    try { amount = parseTokenAmount(depositAmount); }
+    try { amount = parseTokenAmount(depositAmount, token.decimals); }
     catch (cause) { error = cause instanceof Error ? cause.message : 'Invalid amount.'; return; }
+    if (token.minimumDepositAmount === null) { error = `The minter has not provided a minimum deposit for ${token.symbol}; deposits for this token are disabled.`; return; }
+    if (amount < token.minimumDepositAmount) {
+      error = `The minimum ${token.symbol} deposit is ${formatTokenAmount(token.minimumDepositAmount, token.decimals)} ${token.symbol}.`;
+      return;
+    }
     const liveOwner = ownerPrincipal;
     const locks = (navigator as any).locks;
     if (!locks?.request) { error = 'This browser cannot safely coordinate minter transactions across tabs. Use a supported browser with Web Locks enabled.'; return; }
     busy = true;
     try {
-      await locks.request(`rumi:ckusdc:deposit:${evmAccount.toLowerCase()}`, { mode: 'exclusive', ifAvailable: true }, async (lock: unknown) => {
-      if (!lock) throw new Error('Another ckUSDC deposit is already active in another tab. Wait for it to finish, then check its status.');
-      syncPendingDeposit();
+      await locks.request(`rumi:ckerc20:deposit:${evmAccount.toLowerCase()}:${token.ledgerId}`, { mode: 'exclusive', ifAvailable: true }, async (lock: unknown) => {
+      if (!lock) throw new Error(`Another ${token.symbol} deposit is already active in another tab. Wait for it to finish, then check its status.`);
+      syncPendingDeposit(token);
       if (pendingDeposit) throw new Error(pendingDeposit.hash ? `A deposit transaction is still unresolved: ${pendingDeposit.hash}. Check its status before starting another deposit.` : 'A prior deposit submission has no confirmed result. Check Ethereum wallet activity before retrying.');
       requirePersistentOperationState();
       const minterActor = await getCkErc20MinterActor();
       const currentInfo = await minterActor.get_minter_info();
-      assertTokenSupported(currentInfo, CKUSDC);
+      assertTokenSupported(currentInfo, token);
+      const liveMinimum = (currentInfo.minimum_deposit_amounts?.[0] ?? []).find(
+        (item: any) => String(item.erc20_contract_address).toLowerCase() === token.erc20Address.toLowerCase(),
+      );
+      if (!liveMinimum) throw new Error(`The minter did not return a current minimum deposit for ${token.symbol}.`);
+      if (amount < BigInt(liveMinimum.minimum_deposit_amount)) {
+        throw new Error(`The current minimum ${token.symbol} deposit is ${formatTokenAmount(BigInt(liveMinimum.minimum_deposit_amount), token.decimals)} ${token.symbol}.`);
+      }
       const transactionHelper = currentInfo.deposit_with_subaccount_helper_contract_address?.[0];
       if (!transactionHelper || !/^0x[0-9a-fA-F]{40}$/.test(transactionHelper)) throw new Error('The minter did not return a valid live Ethereum helper address.');
       helperAddress = transactionHelper;
-      const allowanceData = `0xdd62ed3e${encodeAddressWord(evmAccount)}${encodeAddressWord(transactionHelper)}`;
       const provider = getEthereumProvider();
-      if (!provider) throw new Error('Connect an Ethereum wallet before checking its USDC allowance.');
-      const allowanceHex = await provider.request({ method: 'eth_call', params: [{ to: CKUSDC.erc20Address, data: allowanceData }, 'latest'] });
+      if (!provider) throw new Error('Connect an Ethereum wallet before checking its token allowance.');
+      const decimalsHex = await provider.request({ method: 'eth_call', params: [{ to: token.erc20Address, data: '0x313ce567' }, 'latest'] });
+      if (Number(BigInt(String(decimalsHex))) !== token.decimals) throw new Error(`${token.symbol} Ethereum and ckERC20 ledgers report different decimal counts.`);
+      const balanceData = `0x70a08231${encodeAddressWord(evmAccount)}`;
+      const balanceHex = await provider.request({ method: 'eth_call', params: [{ to: token.erc20Address, data: balanceData }, 'latest'] });
+      const freshEvmBalance = BigInt(String(balanceHex));
+      evmTokenBalance = freshEvmBalance;
+      if (freshEvmBalance < amount) throw new Error(`Not enough ${token.symbol} in the connected Ethereum wallet. Current balance: ${formatTokenAmount(freshEvmBalance, token.decimals)} ${token.symbol}.`);
+      const allowanceData = `0xdd62ed3e${encodeAddressWord(evmAccount)}${encodeAddressWord(transactionHelper)}`;
+      const allowanceHex = await provider.request({ method: 'eth_call', params: [{ to: token.erc20Address, data: allowanceData }, 'latest'] });
       const existingAllowance = BigInt(String(allowanceHex));
       if (existingAllowance > 0n) {
-        notice = 'Reset the existing USDC allowance to zero before setting this deposit amount.';
+        notice = `Reset the existing ${token.symbol} allowance to zero before setting this deposit amount.`;
         const resetData = `0x095ea7b3${encodeAddressWord(transactionHelper)}${encodeUint256(0n)}`;
-        approveHash = await submitEthereumTransaction(CKUSDC.erc20Address, resetData, (hash) => approveHash = hash);
+        approveHash = await submitEthereumTransaction(token.erc20Address, resetData, (hash) => approveHash = hash);
       }
       const approveData = `0x095ea7b3${encodeAddressWord(transactionHelper)}${encodeUint256(amount)}`;
-      notice = 'Approve the exact USDC amount in your Ethereum wallet.';
-      approveHash = await submitEthereumTransaction(CKUSDC.erc20Address, approveData, (hash) => approveHash = hash);
-      if (ownerPrincipal?.toText() !== liveOwner.toText()) throw new Error(`USDC approval confirmed, but the receiving Internet Identity changed. No deposit was submitted. Approval transaction: ${approveHash}`);
+      notice = `Approve exactly ${formatTokenAmount(amount, token.decimals)} ${token.symbol} in your Ethereum wallet.`;
+      approveHash = await submitEthereumTransaction(token.erc20Address, approveData, (hash) => approveHash = hash);
+      if (ownerPrincipal?.toText() !== liveOwner.toText()) throw new Error(`${token.symbol} approval confirmed, but the receiving Internet Identity changed. No deposit was submitted. Approval transaction: ${approveHash}`);
       const latestInfo = await minterActor.get_minter_info();
-      assertTokenSupported(latestInfo, CKUSDC);
+      assertTokenSupported(latestInfo, token);
       const latestHelper = latestInfo.deposit_with_subaccount_helper_contract_address?.[0];
       if (!latestHelper || latestHelper.toLowerCase() !== transactionHelper.toLowerCase()) {
-        throw new Error(`USDC approval confirmed for ${transactionHelper}, but the minter helper changed. No deposit was submitted. Check the helper and allowance before continuing. Approval transaction: ${approveHash}`);
+        throw new Error(`${token.symbol} approval confirmed for ${transactionHelper}, but the minter helper changed. No deposit was submitted. Check the helper and allowance before continuing. Approval transaction: ${approveHash}`);
       }
-      notice = 'USDC approval confirmed. Confirm the deposit transaction in your Ethereum wallet.';
+      notice = `${token.symbol} approval confirmed. Confirm the deposit transaction in your Ethereum wallet.`;
       const liveRecipient = liveOwner.toText();
-      const liveDepositKey = depositStorageKey(evmAccount, liveRecipient);
+      const liveDepositKey = depositStorageKey(evmAccount, liveRecipient, token.ledgerId);
       depositHash = await submitEthereumTransaction(
         latestHelper,
-        encodeDepositErc20(CKUSDC, amount, liveOwner),
-        (hash) => { depositHash = hash; savePendingDeposit(hash, depositAmount, liveRecipient, evmAccount, liveRecipient); },
+        encodeDepositErc20(token, amount, liveOwner),
+        (hash) => { depositHash = hash; savePendingDeposit(hash, depositAmount, liveRecipient, evmAccount, liveRecipient, token); },
         () => {
           try { localStorage.removeItem(liveDepositKey); } catch { /* Continue with confirmed receipt. */ }
           pendingDeposit = null;
         },
-        () => beginPendingDeposit(depositAmount, liveRecipient, evmAccount, liveRecipient),
-        () => clearPendingDepositMarker(evmAccount, liveRecipient),
+        () => beginPendingDeposit(depositAmount, liveRecipient, evmAccount, liveRecipient, token),
+        () => clearPendingDepositMarker(evmAccount, liveRecipient, token),
       );
-      notice = 'Ethereum deposit confirmed. The minter still needs to detect and mint ckUSDC; refresh the ICP balance to confirm arrival.';
+      notice = `Ethereum deposit confirmed. The minter still needs to detect and mint ${token.symbol}; refresh the ICP balance to confirm arrival.`;
       depositAmount = '';
       });
     } catch (cause) {
@@ -447,17 +521,19 @@
     error = '';
     notice = '';
     redeemIndices = null;
+    const token = selectedToken;
+    if (!token) { error = 'Choose a supported ckERC20 token first.'; return; }
     if (pendingWithdrawal && pendingWithdrawal.owner === ownerPrincipal?.toText()) {
       error = 'A prior withdrawal request has no confirmed response. Reconcile its ledger activity and minter status before retrying.';
       return;
     }
     if (!connected || !ownerPrincipal || ownerPrincipal.isAnonymous()) {
-      error = 'Connect the Rumi wallet holding ckUSDC and ckETH first.';
+      error = `Connect the Rumi wallet holding ${token.symbol} and ckETH first.`;
       return;
     }
     if (!validateEthereumAddress(redeemAddress)) { error = 'Enter a valid Ethereum destination address.'; return; }
     let amount: bigint;
-    try { amount = parseTokenAmount(redeemAmount); }
+    try { amount = parseTokenAmount(redeemAmount, token.decimals); }
     catch (cause) { error = cause instanceof Error ? cause.message : 'Invalid amount.'; return; }
     if (!withdrawalQuote || withdrawalQuote.owner.toText() !== ownerPrincipal.toText() || withdrawalQuote.amount !== amount || Date.now() - withdrawalQuote.quotedAtMs > 60_000) {
       error = 'Get a fresh fee quote for this wallet and amount before approving.';
@@ -469,23 +545,25 @@
     if (!locks?.request) { error = 'This browser cannot safely coordinate minter transactions across tabs. Use a supported browser with Web Locks enabled.'; return; }
     busy = true;
     try {
-      await locks.request(`rumi:ckusdc:withdrawal:${owner.toText()}`, { mode: 'exclusive', ifAvailable: true }, async (lock: unknown) => {
-      if (!lock) throw new Error('Another ckUSDC withdrawal is active in another tab. Wait for it to finish, then reconcile its status.');
+      await locks.request(`rumi:ckerc20:withdrawal:${owner.toText()}:${token.ledgerId}`, { mode: 'exclusive', ifAvailable: true }, async (lock: unknown) => {
+      if (!lock) throw new Error(`Another ${token.symbol} withdrawal is active in another tab. Wait for it to finish, then reconcile its status.`);
       syncPendingWithdrawal(owner);
       if (pendingWithdrawal?.owner === owner.toText()) throw new Error('A prior withdrawal request has no confirmed response. Reconcile its ledger activity and minter status before retrying.');
       requirePersistentOperationState();
       const isLive = () => !destroyed && ownerPrincipal?.toText() === owner.toText();
-      notice = 'Review and approve the ckETH transaction fee allowance in your wallet.';
+      const minterActor = await getCkErc20MinterActor();
+      assertTokenSupported(await minterActor.get_minter_info(), token);
+      notice = `Review and approve the ckETH fee and ${token.symbol} allowances in your Rumi wallet.`;
       const recipient = redeemAddress.trim();
       const result = await approveAndWithdrawCkErc20({
-        token: CKUSDC, amount, recipient, owner, quote, isLive,
-        onWithdrawalSubmitted: () => markWithdrawalPending(amount, recipient, owner),
+        token, amount, recipient, owner, quote, isLive,
+        onWithdrawalSubmitted: () => markWithdrawalPending(amount, recipient, owner, token),
         onWithdrawalResolved: () => {
           try { localStorage.removeItem(withdrawalStorageKey(owner.toText())); } catch { /* Continue with resolved response. */ }
           pendingWithdrawal = null;
         },
       });
-      redeemIndices = { ckEth: result.ckEthBurnBlock, ckUsdc: result.ckUsdcBurnBlock };
+      redeemIndices = { ckEth: result.ckEthBurnBlock, ckToken: result.ckTokenBurnBlock };
       notice = 'The ckERC20 minter accepted the withdrawal request. The Ethereum payout is pending; the burn blocks below only confirm the request, not payout finality.';
       redeemAmount = '';
       });
@@ -500,15 +578,17 @@
   async function refreshWithdrawalQuote() {
     error = '';
     withdrawalQuote = null;
-    if (!ownerPrincipal || ownerPrincipal.isAnonymous()) { error = 'Connect the Rumi wallet that holds ckUSDC and ckETH first.'; return; }
+    const token = selectedToken;
+    if (!token) { error = 'Choose a supported ckERC20 token first.'; return; }
+    if (!ownerPrincipal || ownerPrincipal.isAnonymous()) { error = `Connect the Rumi wallet that holds ${token.symbol} and ckETH first.`; return; }
     let amount: bigint;
-    try { amount = parseTokenAmount(redeemAmount); }
+    try { amount = parseTokenAmount(redeemAmount, token.decimals); }
     catch (cause) { error = cause instanceof Error ? cause.message : 'Invalid amount.'; return; }
     quoteBusy = true;
     try {
       const owner = ownerPrincipal;
-      const quote = await getCkErc20WithdrawalQuote(CKUSDC, amount, owner);
-      if (destroyed || ownerPrincipal?.toText() !== owner.toText()) return;
+      const quote = await getCkErc20WithdrawalQuote(token, amount, owner);
+      if (destroyed || ownerPrincipal?.toText() !== owner.toText() || selectedTokenLedgerId !== token.ledgerId) return;
       withdrawalQuote = quote;
     } catch (cause) {
       error = cause instanceof Error ? cause.message : 'Could not load a current withdrawal quote.';
@@ -528,8 +608,8 @@
 </script>
 
 <svelte:head>
-  <title>ckUSDC Minter | Rumi</title>
-  <meta name="description" content="Mint ckUSDC on the Internet Computer from Ethereum USDC using Rumi." />
+  <title>ckERC20 Minter | Rumi</title>
+  <meta name="description" content="Mint and redeem DFINITY-supported ckERC20 tokens with Rumi." />
 </svelte:head>
 
 <main class="minter-page">
@@ -537,73 +617,88 @@
   <header class="hero">
     <div class="coin-mark">$</div>
     <p class="eyebrow">ETHEREUM ↔ INTERNET COMPUTER</p>
-    <h1>ckUSDC Minter</h1>
-    <p class="subtitle">Move USDC to the Internet Computer and redeem it back to Ethereum.</p>
-    <p class="powered">Rumi’s minter experience uses DFINITY’s ckERC20 minter.</p>
+    <h1>ckERC20 Minter</h1>
+    <p class="subtitle">Mint supported Ethereum tokens on the Internet Computer and redeem them back.</p>
+    <p class="powered">Supported tokens and their ledgers are loaded from DFINITY’s ckERC20 minter.</p>
   </header>
 
-  <section class="card" aria-label="ckUSDC mint and redeem">
+  <section class="card" aria-label="ckERC20 mint and redeem">
     <div class="wallet-summary">
       <div>
         <span class="label">RECEIVING INTERNET IDENTITY</span>
         <strong>{#if connected && ownerPrincipal}{ownerPrincipal.toText()}{:else}Connect a Rumi wallet{/if}</strong>
       </div>
       <div class="balance-box">
-        <span class="label">CKUSDC BALANCE</span>
-        <strong>{ckUsdcBalance === null ? '—' : `${formatTokenAmount(ckUsdcBalance)} ckUSDC`}</strong>
+        <span class="label">{selectedToken ? `${selectedToken.symbol.toUpperCase()} BALANCE` : 'TOKEN BALANCE'}</span>
+        <strong>{ckTokenBalance === null || !selectedToken ? '—' : `${formatTokenAmount(ckTokenBalance, selectedToken.decimals)} ${selectedToken.symbol}`}</strong>
         <button class="text-button" disabled={!ownerPrincipal || refreshBusy} on:click={() => refreshBalances()}>{refreshBusy ? 'Refreshing…' : 'Refresh'}</button>
       </div>
     </div>
 
     <div class="tabs" role="tablist" aria-label="Minter direction">
-      <button role="tab" aria-selected={activeTab === 'mint'} class:active={activeTab === 'mint'} on:click={() => activeTab = 'mint'}>Mint ckUSDC</button>
-      <button role="tab" aria-selected={activeTab === 'redeem'} class:active={activeTab === 'redeem'} on:click={() => activeTab = 'redeem'}>Redeem USDC</button>
+      <button role="tab" aria-selected={activeTab === 'mint'} class:active={activeTab === 'mint'} on:click={() => activeTab = 'mint'}>Mint {selectedToken?.symbol ?? 'token'}</button>
+      <button role="tab" aria-selected={activeTab === 'redeem'} class:active={activeTab === 'redeem'} on:click={() => activeTab = 'redeem'}>Redeem {selectedToken?.symbol.replace(/^ck/, '') ?? 'token'}</button>
     </div>
 
     {#if !connected}
-      <div class="wallet-hint">Connect your Internet Identity or Rumi wallet with the wallet button in the header. That identity receives ckUSDC and signs any ICP approvals.</div>
+      <div class="wallet-hint">Connect your Internet Identity or Rumi wallet with the wallet button in the header. That identity receives the selected ckERC20 token and signs any ICP approvals.</div>
     {/if}
 
     {#if minterError}
       <div class="alert error">Could not verify the live ckERC20 minter configuration: {minterError}</div>
-    {:else if connected && !minterReady}
-      <div class="wallet-hint">Checking live ckUSDC support and the current helper address…</div>
+    {:else if !minterReady}
+      <div class="wallet-hint">Loading the live supported token list and current helper address…</div>
+    {:else if supportedTokens.length === 0}
+      <div class="wallet-hint">The minter did not return any supported tokens.</div>
     {/if}
 
-    {#if activeTab === 'mint'}
-      <div class="flow-label">USDC → CKUSDC</div>
-      <div class="steps"><span class="step-current">1&nbsp; Approve USDC</span><i></i><span>2&nbsp; Deposit USDC</span><i></i><span>3&nbsp; ckUSDC minted</span></div>
-      <div class="risk-note">Send only Ethereum Mainnet USDC through this page. Minting may take around 20 minutes after Ethereum finality. The minter helper and supported token are checked live before transactions are enabled.</div>
+    {#if !selectedToken}
+      <div class="wallet-hint">{minterReady ? 'No token is available to select.' : 'The supported token list will appear here when the minter responds.'}</div>
+    {:else if activeTab === 'mint'}
+      <div class="flow-label">{selectedToken.symbol.replace(/^ck/, '')} → {selectedToken.symbol}</div>
+      <div class="steps"><span class="step-current">1&nbsp; Approve {selectedToken.symbol.replace(/^ck/, '')}</span><i></i><span>2&nbsp; Deposit</span><i></i><span>3&nbsp; {selectedToken.symbol} minted</span></div>
+      <div class="risk-note">Send only Ethereum Mainnet {selectedToken.symbol.replace(/^ck/, '')} through this page. Minting starts after Ethereum finality and the minter’s next scan. The selected token and helper are checked live before transactions are enabled.</div>
 
-      <label class="field-label" for="deposit-amount">USDC amount</label>
-      <div class="amount-input"><input id="deposit-amount" type="text" inputmode="decimal" autocomplete="off" placeholder="0.00" bind:value={depositAmount} disabled={busy} /><span>USDC</span></div>
+      <label class="field-label" for="deposit-amount">Deposit amount</label>
+      <div class="amount-input">
+        <input id="deposit-amount" type="text" inputmode="decimal" autocomplete="off" placeholder="0.00" bind:value={depositAmount} disabled={busy} />
+        <select class="token-select" aria-label="Token to mint" value={selectedTokenLedgerId} on:change={(event) => selectToken((event.currentTarget as HTMLSelectElement).value)} disabled={!minterReady || busy || quoteBusy || refreshBusy}>
+          {#each supportedTokens as token (token.ledgerId)}<option value={token.ledgerId}>{token.symbol}</option>{/each}
+        </select>
+      </div>
+      {#if selectedToken.minimumDepositAmount !== null}<p class="minimum-note">Minimum deposit: {formatTokenAmount(selectedToken.minimumDepositAmount, selectedToken.decimals)} {selectedToken.symbol.replace(/^ck/, '')}</p>{:else}<p class="minimum-note">Minimum deposit unavailable. Deposits for this token are disabled.</p>{/if}
       <div class="amount-meta">
-        <span>{!evmAccount ? 'Connect an Ethereum wallet to view its USDC balance' : usdcBalanceBusy ? 'Reading wallet balance…' : usdcBalance === null ? 'USDC wallet balance unavailable' : `Wallet balance: ${formatTokenAmount(usdcBalance, CKUSDC.decimals)} USDC`}</span>
+        <span>{!evmAccount ? 'Connect an Ethereum wallet to view its balance' : evmTokenBalanceBusy ? 'Reading wallet balance…' : evmTokenBalance === null ? `${selectedToken.symbol.replace(/^ck/, '')} wallet balance unavailable` : `Wallet balance: ${formatTokenAmount(evmTokenBalance, selectedToken.decimals)} ${selectedToken.symbol.replace(/^ck/, '')}`}</span>
         <div class="amount-actions">
-          <button class="text-button" on:click={() => refreshUsdcBalance()} disabled={!evmAccount || usdcBalanceBusy || busy}>{usdcBalanceBusy ? 'Refreshing…' : 'Refresh'}</button>
-          <button class="text-button" on:click={setMaxDeposit} disabled={usdcBalance === null || usdcBalance <= 0n || busy}>Max</button>
+          <button class="text-button" on:click={() => refreshEvmTokenBalance()} disabled={!evmAccount || evmTokenBalanceBusy || busy}>{evmTokenBalanceBusy ? 'Refreshing…' : 'Refresh'}</button>
+          <button class="text-button" on:click={setMaxDeposit} disabled={evmTokenBalance === null || evmTokenBalance <= 0n || busy}>Max</button>
         </div>
       </div>
-      {#if usdcBalanceError}<p class="inline-hint">Could not read the Ethereum USDC balance: {usdcBalanceError}</p>{/if}
-      <div class="destination"><span class="label">CKUSDC WILL BE MINTED TO</span><code>{connected && ownerPrincipal ? ownerPrincipal.toText() : 'Connect a Rumi wallet to choose the recipient'}</code></div>
+      {#if evmTokenBalanceError}<p class="inline-hint">Could not read the Ethereum token balance: {evmTokenBalanceError}</p>{/if}
+      <div class="destination"><span class="label">{selectedToken.symbol} WILL BE MINTED TO</span><code>{connected && ownerPrincipal ? ownerPrincipal.toText() : 'Connect a Rumi wallet to choose the recipient'}</code></div>
 
       <div class="wallet-row">
         <div><span class="label">ETHEREUM WALLET</span><strong>{evmAccount ? `${evmAccount.slice(0, 7)}…${evmAccount.slice(-5)}` : 'Not connected'}</strong></div>
         {#if !evmAccount}<button class="secondary" on:click={connectEthereum} disabled={busy}>Connect Ethereum wallet</button>{/if}
       </div>
       {#if evmMessage}<p class="inline-hint">{evmMessage}</p>{/if}
-      <p class="fee-note">You need ETH in this Ethereum wallet for gas. The flow usually takes two transactions; if USDC already has an allowance for the minter helper, it first resets that allowance to zero, so it can take three. Rumi does not sponsor Ethereum gas in this flow.</p>
-      <button class="primary" on:click={submitDeposit} disabled={busy || !!pendingDeposit || !connected || !minterReady || !evmAccount}>{pendingDeposit ? 'Check pending deposit before retrying' : busy ? 'Waiting for wallet…' : 'Approve and mint ckUSDC'}</button>
-      {#if approveHash}<p class="tx-line">USDC approval: <a href={`https://etherscan.io/tx/${approveHash}`} target="_blank" rel="noreferrer">{approveHash.slice(0, 14)}…</a></p>{/if}
-      {#if depositHash}<p class="tx-line">Deposit transaction: <a href={`https://etherscan.io/tx/${depositHash}`} target="_blank" rel="noreferrer">{depositHash.slice(0, 14)}…</a></p>{/if}
-      {#if pendingDeposit}<div class="alert error">{#if pendingDeposit.hash}A previous deposit transaction has no confirmed receipt yet: <a href={`https://etherscan.io/tx/${pendingDeposit.hash}`} target="_blank" rel="noreferrer">check Ethereum status</a>.{:else}A previous deposit submission did not return a transaction hash. Check the connected Ethereum wallet's activity.{/if} New deposits are locked to prevent a duplicate. After checking the transaction, use the recovery control only if you confirmed it did not complete.<button class="text-button recovery-button" on:click={clearPendingDeposit}>Clear retry lock after reconciliation</button></div>{/if}
+      <p class="fee-note">This Ethereum wallet needs ETH for gas. A deposit usually takes two transactions; a nonzero helper allowance must first be reset to zero, adding a transaction. Rumi does not sponsor Ethereum gas in this flow.</p>
+      <button class="primary" on:click={submitDeposit} disabled={busy || !!pendingDeposit || !connected || !minterReady || !evmAccount || !selectedToken.minimumDepositAmount}>{pendingDeposit ? 'Check pending deposit before retrying' : busy ? 'Waiting for wallet…' : `Approve and mint ${selectedToken.symbol}`}</button>
+      {#if approveHash}<p class="tx-line">{selectedToken.symbol.replace(/^ck/, '')} approval: <a href={`https://etherscan.io/tx/${approveHash}`} target="_blank" rel="noreferrer">{approveHash.slice(0, 14)}…</a></p>{/if}
+      {#if depositHash}<p class="tx-line">Deposit transaction: <a href={`https://etherscan.io/tx/${depositHash}`} target="_blank" rel="noreferrer">{depositHash.slice(0, 14)}…</a> · <a href={CKERC20_MINTER_DASHBOARD} target="_blank" rel="noreferrer">Track mint on DFINITY dashboard</a></p>{/if}
+      {#if pendingDeposit}<div class="alert error">{#if pendingDeposit.hash}A previous {pendingDeposit.tokenSymbol ?? selectedToken.symbol} deposit is unresolved: <a href={`https://etherscan.io/tx/${pendingDeposit.hash}`} target="_blank" rel="noreferrer">check Ethereum status</a>. You can also search this hash on the <a href={CKERC20_MINTER_DASHBOARD} target="_blank" rel="noreferrer">DFINITY minter dashboard</a>.{:else}A previous deposit submission did not return a transaction hash. Check the connected Ethereum wallet's activity.{/if} New deposits for this token are locked to prevent a duplicate. Clear the retry lock only after confirming the deposit did not complete.<button class="text-button recovery-button" on:click={clearPendingDeposit}>Clear retry lock after reconciliation</button></div>{/if}
       {#if helperAddress}<p class="small-note">Live minter helper: <code>{helperAddress}</code></p>{/if}
     {:else}
-      <div class="flow-label">CKUSDC → USDC</div>
-      <div class="steps"><span class="step-current">1&nbsp; Approve ckETH fee</span><i></i><span>2&nbsp; Approve ckUSDC</span><i></i><span>3&nbsp; Ethereum payout</span></div>
-      <div class="risk-note">Redeeming requires ckUSDC and ckETH. ckETH pays the Ethereum transaction fee through the DFINITY minter; your own Ethereum wallet does not sign or pay gas for the payout.</div>
-      <label class="field-label" for="redeem-amount">ckUSDC amount</label>
-      <div class="amount-input"><input id="redeem-amount" type="text" inputmode="decimal" autocomplete="off" placeholder="0.00" bind:value={redeemAmount} on:input={invalidateWithdrawalQuote} disabled={busy} /><span>ckUSDC</span></div>
+      <div class="flow-label">{selectedToken.symbol} → {selectedToken.symbol.replace(/^ck/, '')}</div>
+      <div class="steps"><span class="step-current">1&nbsp; Approve ckETH fee</span><i></i><span>2&nbsp; Approve {selectedToken.symbol}</span><i></i><span>3&nbsp; Ethereum payout</span></div>
+      <div class="risk-note">Redeeming requires {selectedToken.symbol} and ckETH. ckETH pays the Ethereum transaction fee through the DFINITY minter; your own Ethereum wallet does not sign or pay gas for the payout.</div>
+      <label class="field-label" for="redeem-amount">Redemption amount</label>
+      <div class="amount-input">
+        <input id="redeem-amount" type="text" inputmode="decimal" autocomplete="off" placeholder="0.00" bind:value={redeemAmount} on:input={invalidateWithdrawalQuote} disabled={busy} />
+        <select class="token-select" aria-label="Token to redeem" value={selectedTokenLedgerId} on:change={(event) => selectToken((event.currentTarget as HTMLSelectElement).value)} disabled={!minterReady || busy || quoteBusy || refreshBusy}>
+          {#each supportedTokens as token (token.ledgerId)}<option value={token.ledgerId}>{token.symbol}</option>{/each}
+        </select>
+      </div>
       <label class="field-label" for="redeem-address">Ethereum destination</label>
       <input id="redeem-address" class="address-input" type="text" autocomplete="off" spellcheck="false" placeholder="0x…" bind:value={redeemAddress} disabled={busy} />
       <div class="wallet-row redeem-balance"><div><span class="label">CKETH FEE BALANCE</span><strong>{ckEthBalance === null ? '—' : `${formatTokenAmount(ckEthBalance, 18, 8)} ckETH`}</strong></div><button class="text-button" disabled={!ownerPrincipal || refreshBusy} on:click={() => refreshBalances()}>{refreshBusy ? 'Refreshing…' : 'Refresh balances'}</button></div>
@@ -611,24 +706,24 @@
       {#if withdrawalQuote}
         <div class="quote-card">
           <span class="label">CURRENT WITHDRAWAL QUOTE · REFRESHED {new Date(withdrawalQuote.quotedAtMs).toLocaleTimeString()}{#if withdrawalQuote.minterPriceTimestampMs} · MINTER PRICE {new Date(withdrawalQuote.minterPriceTimestampMs).toLocaleTimeString()}{/if}</span>
-          <div><span>ckUSDC amount</span><strong>{formatTokenAmount(withdrawalQuote.amount)} ckUSDC</strong></div>
+          <div><span>{selectedToken.symbol} amount</span><strong>{formatTokenAmount(withdrawalQuote.amount, selectedToken.decimals)} {selectedToken.symbol}</strong></div>
           <div><span>ckETH max Ethereum fee</span><strong>{formatTokenAmount(withdrawalQuote.maxTransactionFee, 18, 8)} ckETH</strong></div>
           <div><span>ckETH allowance cap (includes ledger fee)</span><strong>{formatTokenAmount(withdrawalQuote.ckEthAllowance, 18, 8)} ckETH</strong></div>
-          <div><span>ckUSDC allowance cap (includes ledger fee)</span><strong>{formatTokenAmount(withdrawalQuote.ckTokenAllowance)} ckUSDC</strong></div>
+          <div><span>{selectedToken.symbol} allowance cap (includes ledger fee)</span><strong>{formatTokenAmount(withdrawalQuote.ckTokenAllowance, selectedToken.decimals)} {selectedToken.symbol}</strong></div>
           <p>{withdrawalQuoteIsExecutable(withdrawalQuote) ? 'Balances cover this quote. Quote expires in 60 seconds.' : 'Your current balances do not cover this quote.'}</p>
         </div>
       {/if}
-      {#if pendingWithdrawal && pendingWithdrawal.owner === ownerPrincipal?.toText()}<div class="alert error">A previous withdrawal request has no confirmed response. Check the ckUSDC and ckETH ledger activity and the <a href={CKERC20_MINTER_DASHBOARD} target="_blank" rel="noreferrer">minter dashboard</a> before retrying. A lock prevents an accidental second burn.<button class="text-button recovery-button" on:click={clearPendingWithdrawal}>Clear retry lock after reconciliation</button></div>{/if}
-      <button class="primary" on:click={submitWithdrawal} disabled={busy || pendingWithdrawal?.owner === ownerPrincipal?.toText() || !connected || !minterReady || !withdrawalQuote || !withdrawalQuoteIsExecutable(withdrawalQuote)}>{pendingWithdrawal?.owner === ownerPrincipal?.toText() ? 'Reconcile previous request first' : busy ? 'Confirm approvals in your wallet…' : 'Approve and request USDC redemption'}</button>
-      {#if redeemIndices}<div class="success-box">Withdrawal request accepted by the minter.<br />ckETH fee burn block: {redeemIndices.ckEth}<br />ckUSDC burn block: {redeemIndices.ckUsdc}<br /><a href={CKERC20_MINTER_DASHBOARD} target="_blank" rel="noreferrer">Open ckERC20 minter dashboard</a></div>{/if}
-      <p class="small-note">Before any approval, the page reads current ckETH and ckUSDC ledger fees, your balances, and the minter’s current Ethereum fee estimate. Approvals are limited to this withdrawal and expire after 10 minutes.</p>
+      {#if pendingWithdrawal && pendingWithdrawal.owner === ownerPrincipal?.toText()}<div class="alert error">A previous {pendingWithdrawal.tokenSymbol ?? 'ckERC20'} withdrawal request has no confirmed response. Check its ckERC20 and ckETH ledger activity and the <a href={CKERC20_MINTER_DASHBOARD} target="_blank" rel="noreferrer">minter dashboard</a> before retrying. A lock prevents an accidental second burn.<button class="text-button recovery-button" on:click={clearPendingWithdrawal}>Clear retry lock after reconciliation</button></div>{/if}
+      <button class="primary" on:click={submitWithdrawal} disabled={busy || pendingWithdrawal?.owner === ownerPrincipal?.toText() || !connected || !minterReady || !withdrawalQuote || !withdrawalQuoteIsExecutable(withdrawalQuote)}>{pendingWithdrawal?.owner === ownerPrincipal?.toText() ? 'Reconcile previous request first' : busy ? 'Confirm approvals in your wallet…' : `Approve and request ${selectedToken.symbol.replace(/^ck/, '')} redemption`}</button>
+      {#if redeemIndices}<div class="success-box">Withdrawal request accepted by the minter.<br />ckETH fee burn block: {redeemIndices.ckEth}<br />{selectedToken.symbol} burn block: {redeemIndices.ckToken}<br /><a href={CKERC20_MINTER_DASHBOARD} target="_blank" rel="noreferrer">Open ckERC20 minter dashboard</a></div>{/if}
+      <p class="small-note">Before any approval, the page reads current ckETH and {selectedToken.symbol} ledger fees, your balances, and the minter’s current Ethereum fee estimate. Approvals are limited to this withdrawal and expire after 10 minutes.</p>
     {/if}
 
     {#if notice}<div class="alert notice" aria-live="polite">{notice}</div>{/if}
     {#if error}<div class="alert error" role="alert">{error}</div>{/if}
   </section>
 
-  <footer class="disclaimer">ckUSDC is minted by DFINITY’s ckETH minter against Ethereum USDC deposits. Confirm the destination identity, asset, and network before every transaction. Deposits and redemptions are subject to Ethereum finality and minter processing.</footer>
+  <footer class="disclaimer">ckERC20 tokens are minted by DFINITY’s ckETH minter against supported Ethereum ERC-20 deposits. Confirm the destination identity, selected asset, and network before every transaction. Deposits and redemptions are subject to Ethereum finality and minter processing.</footer>
 </main>
 
 <style>
@@ -658,11 +753,12 @@
   .steps .step-current { color: #59d9b0; white-space: nowrap; }
   .field-label { display: block; margin: 20px 0 8px; color: #d8d4e7; font-size: 14px; font-weight: 700; }
   .amount-input { height: 58px; display: flex; align-items: center; padding: 0 16px; border: 1px solid #242c43; border-radius: 10px; background: #0d1222; }
+  .amount-input .token-select { flex: 0 0 auto; max-width: 170px; height: 40px; margin-left: 12px; padding: 0 10px; color: #e9e4f4; background: #171d31; border: 1px solid #313954; border-radius: 8px; font-size: 13px; font-weight: 700; }
+  .minimum-note { margin: 6px 0 0; color: #817c91; font-size: 11px; }
   .amount-meta { display: flex; justify-content: space-between; align-items: center; gap: 12px; min-height: 30px; color: #8f8aa1; font-size: 12px; }
   .amount-actions { display: flex; align-items: center; gap: 18px; }
   .amount-actions .text-button { margin: 0; }
   input { min-width: 0; width: 100%; color: #f1edff; background: transparent; border: 0; outline: none; font-size: 18px; }
-  .amount-input span { color: #a4a0b3; font-weight: 700; }
   .destination { display: grid; gap: 8px; margin: 18px 0; padding: 14px 16px; background: #0b1020; border-radius: 10px; }
   code { color: #b8b2ca; font-size: 12px; overflow-wrap: anywhere; }
   .wallet-row { margin: 20px 0; }

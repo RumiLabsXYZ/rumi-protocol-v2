@@ -10,21 +10,10 @@ export interface CkErc20TokenConfig {
   decimals: number;
   ledgerId: string;
   erc20Address: string;
+  minimumDepositAmount: bigint | null;
 }
 
-// Keep this registry deliberately limited to ckUSDC for the first release.
-// New supported tokens can be enabled by adding a reviewed config entry.
-export const CKERC20_TOKENS: Record<string, CkErc20TokenConfig> = {
-  ckUSDC: {
-    symbol: 'ckUSDC',
-    decimals: 6,
-    ledgerId: CANISTER_IDS.CKUSDC_LEDGER,
-    erc20Address: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
-  },
-};
-export const CKUSDC = CKERC20_TOKENS.ckUSDC;
-
-export const CKERC20_MINTER_DASHBOARD = 'https://sv3dd-oaaaa-aaaar-qacoa-cai.raw.icp0.io/';
+export const CKERC20_MINTER_DASHBOARD = 'https://sv3dd-oaaaa-aaaar-qacoa-cai.raw.icp0.io/dashboard';
 
 let queryAgent: HttpAgent | null = null;
 
@@ -41,7 +30,7 @@ export async function getCkErc20MinterActor(): Promise<any> {
   return Actor.createActor(minterIdl as any, { agent, canisterId: CANISTER_IDS.CKERC20_MINTER });
 }
 
-export async function getCkErc20LedgerActor(ledgerId = CKUSDC.ledgerId): Promise<any> {
+export async function getCkErc20LedgerActor(ledgerId: string): Promise<any> {
   const agent = await getQueryAgent();
   return Actor.createActor(ledgerIdl as any, { agent, canisterId: ledgerId });
 }
@@ -52,6 +41,40 @@ export async function getWalletLedgerActor(ledgerId: string): Promise<any> {
 
 export async function getWalletCkErc20MinterActor(): Promise<any> {
   return walletStore.getActor(CANISTER_IDS.CKERC20_MINTER, minterIdl);
+}
+
+export async function discoverCkErc20Tokens(info: any): Promise<CkErc20TokenConfig[]> {
+  const supported = info.supported_ckerc20_tokens?.[0] ?? [];
+  if (!supported.length) throw new Error('The live ckETH minter did not return any supported ckERC20 tokens.');
+  const minimums = new Map<string, bigint>(
+    (info.minimum_deposit_amounts?.[0] ?? []).map((item: any) => [
+      String(item.erc20_contract_address).toLowerCase(), BigInt(item.minimum_deposit_amount),
+    ]),
+  );
+  return Promise.all(supported.map(async (candidate: any) => {
+    const symbol = String(candidate.ckerc20_token_symbol ?? '').trim();
+    const ledgerId = candidate.ledger_canister_id?.toText?.() ?? '';
+    const erc20Address = String(candidate.erc20_contract_address ?? '').trim();
+    if (!/^ck[A-Za-z0-9]+$/.test(symbol) || !ledgerId || !validateEthereumAddress(erc20Address)) {
+      throw new Error(`The minter returned invalid metadata for supported token ${symbol || '(unknown)'}.`);
+    }
+    const ledger = await getCkErc20LedgerActor(ledgerId);
+    const [ledgerSymbol, decimalsValue] = await Promise.all([ledger.icrc1_symbol(), ledger.icrc1_decimals()]);
+    const decimals = Number(decimalsValue);
+    if (String(ledgerSymbol).trim() !== symbol) {
+      throw new Error(`${symbol} metadata does not match its ledger symbol (${String(ledgerSymbol)}).`);
+    }
+    if (!Number.isInteger(decimals) || decimals < 0 || decimals > 18) {
+      throw new Error(`${symbol} ledger returned an unsupported decimal count (${String(decimalsValue)}).`);
+    }
+    return {
+      symbol,
+      decimals,
+      ledgerId,
+      erc20Address,
+      minimumDepositAmount: minimums.get(erc20Address.toLowerCase()) ?? null,
+    };
+  }));
 }
 
 export function assertTokenSupported(info: any, config: CkErc20TokenConfig) {
@@ -65,7 +88,7 @@ export function assertTokenSupported(info: any, config: CkErc20TokenConfig) {
   return token;
 }
 
-export function parseTokenAmount(value: string, decimals = CKUSDC.decimals): bigint {
+export function parseTokenAmount(value: string, decimals: number): bigint {
   const input = value.trim();
   if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(input)) throw new Error('Enter a valid positive amount.');
   const [whole, fraction = ''] = input.split('.');
@@ -182,14 +205,14 @@ export async function approveAndWithdrawCkErc20(params: {
   isLive: () => boolean;
   onWithdrawalSubmitted?: () => void;
   onWithdrawalResolved?: () => void;
-}): Promise<{ ckEthApproveBlock: bigint; ckUsdcApproveBlock: bigint; ckEthBurnBlock: bigint; ckUsdcBurnBlock: bigint }> {
+}): Promise<{ ckEthApproveBlock: bigint; ckTokenApproveBlock: bigint; ckEthBurnBlock: bigint; ckTokenBurnBlock: bigint }> {
   const { token, amount, recipient, owner, quote, isLive, onWithdrawalSubmitted, onWithdrawalResolved } = params;
   if (!validateEthereumAddress(recipient)) throw new Error('Enter a valid Ethereum address.');
   if (quote.owner.toText() !== owner.toText() || quote.tokenLedgerId !== token.ledgerId || quote.amount !== amount) {
     throw new Error('The withdrawal quote does not match the current wallet, token, or amount. Refresh the quote.');
   }
   if (Date.now() - quote.quotedAtMs > 60_000) throw new Error('The withdrawal fee quote expired. Refresh it before approving.');
-  const ckUsdcPrincipal = Principal.fromText(token.ledgerId);
+  const ckTokenPrincipal = Principal.fromText(token.ledgerId);
   const minterPrincipal = Principal.fromText(CANISTER_IDS.CKERC20_MINTER);
   if (!isLive()) throw new Error('Wallet changed before approval. Reconnect and review the request again.');
   const freshQuote = await getCkErc20WithdrawalQuote(token, amount, owner);
@@ -213,20 +236,20 @@ export async function approveAndWithdrawCkErc20(params: {
   const ckEthApproveBlock = unwrapOk(ckEthApprove, 'ckETH approval failed');
   if (!isLive()) throw new Error(`ckETH approval confirmed at block ${ckEthApproveBlock}, but the connected wallet changed. No withdrawal was requested.`);
 
-  const ckUsdcActor = await getWalletLedgerActor(token.ledgerId);
-  const ckUsdcApprove = await ckUsdcActor.icrc2_approve({
+  const ckTokenActor = await getWalletLedgerActor(token.ledgerId);
+  const ckTokenApprove = await ckTokenActor.icrc2_approve({
     from_subaccount: [], spender: { owner: minterPrincipal, subaccount: [] }, amount: freshQuote.ckTokenAllowance,
     expected_allowance: [], expires_at: [expiresAt], fee: [freshQuote.ckTokenFee], memo: [], created_at_time: [],
   });
-  const ckUsdcApproveBlock = unwrapOk(ckUsdcApprove, 'ckUSDC approval failed');
-  if (!isLive()) throw new Error(`Both approvals were confirmed (ckETH ${ckEthApproveBlock}, ckUSDC ${ckUsdcApproveBlock}), but the connected wallet changed. No withdrawal was requested.`);
+  const ckTokenApproveBlock = unwrapOk(ckTokenApprove, `${token.symbol} approval failed`);
+  if (!isLive()) throw new Error(`Both approvals were confirmed (ckETH ${ckEthApproveBlock}, ${token.symbol} ${ckTokenApproveBlock}), but the connected wallet changed. No withdrawal was requested.`);
 
   const minterActor = await getWalletCkErc20MinterActor();
   if (!isLive()) throw new Error('Wallet changed before the withdrawal request was submitted. No withdrawal was requested.');
   onWithdrawalSubmitted?.();
   const result = await minterActor.withdraw_erc20({
     amount,
-    ckerc20_ledger_id: ckUsdcPrincipal,
+    ckerc20_ledger_id: ckTokenPrincipal,
     recipient: recipient.trim(),
     from_cketh_subaccount: [],
     from_ckerc20_subaccount: [],
@@ -239,14 +262,14 @@ export async function approveAndWithdrawCkErc20(params: {
     const errorTag = Object.keys(result.Err)[0];
     if (errorTag === 'CkErc20LedgerError') {
       const partial = result.Err.CkErc20LedgerError;
-      throw new Error(`ckUSDC withdrawal was rejected after ckETH processing. ckETH burn block: ${partial.cketh_block_index}. Ledger error: ${Object.keys(partial.error)[0]}.`);
+      throw new Error(`${token.symbol} withdrawal was rejected after ckETH processing. ckETH burn block: ${partial.cketh_block_index}. Ledger error: ${Object.keys(partial.error)[0]}.`);
     }
     throw new Error(`Withdrawal request rejected: ${errorTag}`);
   }
   return {
     ckEthApproveBlock,
-    ckUsdcApproveBlock,
+    ckTokenApproveBlock,
     ckEthBurnBlock: BigInt(result.Ok.cketh_block_index),
-    ckUsdcBurnBlock: BigInt(result.Ok.ckerc20_block_index),
+    ckTokenBurnBlock: BigInt(result.Ok.ckerc20_block_index),
   };
 }
