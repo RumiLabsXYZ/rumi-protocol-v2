@@ -34,8 +34,8 @@ const mocks = vi.hoisted(() => {
 		walletStore,
 		currentWalletType: readable(null),
 		walletSessionGeneration: readable(0),
-		getRedemptionQueue: vi.fn(),
-		getRedemptionQuote: vi.fn(),
+    getRedemptionPreview: vi.fn(),
+    prepareRedemptionOffer: vi.fn(),
 		getRedemptionPreflight: vi.fn(),
 		redeemQuoted: vi.fn(),
 		resolveRoute: vi.fn().mockResolvedValue({ estimatedOutput: 0n }),
@@ -49,9 +49,9 @@ vi.mock('$lib/services/auth', () => ({
 	walletSessionGeneration: mocks.walletSessionGeneration,
 }));
 vi.mock('$lib/services/protocol', () => ({
-	protocolService: {
-		getRedemptionQueue: mocks.getRedemptionQueue,
-		getRedemptionQuote: mocks.getRedemptionQuote,
+    protocolService: {
+      getRedemptionPreview: mocks.getRedemptionPreview,
+      prepareRedemptionOffer: mocks.prepareRedemptionOffer,
 		getRedemptionPreflight: mocks.getRedemptionPreflight,
 		redeemQuoted: mocks.redeemQuoted,
 	},
@@ -101,15 +101,15 @@ function makeQueue(nowNs = BigInt(Date.now()) * 1_000_000n, rankingFresh = true)
 	};
 }
 
-function makeQuote(amount: bigint, nowNs = BigInt(Date.now()) * 1_000_000n): RedemptionQuote {
+function makeQuote(amount: bigint, nowNs = BigInt(Date.now()) * 1_000_000n, symbol = 'ICP', collateral = ICP): RedemptionQuote {
 	return {
 		run_index: 0,
 		amount_e8s: amount,
 		ranking_fresh: true,
-		collateral_type: ICP,
-		symbol: 'ICP',
-		decimals: 8,
-		price_usd: 6,
+		collateral_type: collateral,
+		symbol,
+		decimals: symbol === 'ckXAUT' ? 6 : 8,
+		price_usd: symbol === 'ckXAUT' ? 2_000 : 6,
 		price_timestamp_ns: nowNs,
 		price_fresh: true,
 		fee_e8s: amount / 100n,
@@ -122,6 +122,14 @@ function makeQuote(amount: bigint, nowNs = BigInt(Date.now()) * 1_000_000n): Red
 		quoted_at_ns: nowNs,
 		quote_validity_window_ns: 60_000_000_000n,
 	};
+}
+
+function makePreview(amount: bigint, queue = makeQueue(nowNs), estimate: { Ok: RedemptionQuote } | { Err: unknown } = { Ok: makeQuote(amount, nowNs, queue.entries[0]?.symbol, queue.entries[0]?.collateral_type) }) {
+  return { queue, estimate };
+}
+
+function makePreparedOffer(amount: bigint, queue = makeQueue(nowNs), quote: { Ok: RedemptionQuote } | { Err: unknown } = { Ok: makeQuote(amount, nowNs, queue.entries[0]?.symbol, queue.entries[0]?.collateral_type) }) {
+  return { Ok: { queue, quote } };
 }
 
 function makePreflight(principalText = '2vxsx-fae') {
@@ -177,6 +185,12 @@ async function setAmount(amount: string) {
 	await settle();
 }
 
+async function checkLiveOffer() {
+  const button = host.querySelector<HTMLButtonElement>('#check-live-offer')!;
+  button.click();
+  await settle();
+}
+
 beforeEach(() => {
 	vi.useFakeTimers();
 	nowNs = BigInt(Date.now()) * 1_000_000n;
@@ -186,8 +200,8 @@ beforeEach(() => {
 	mocks.currentWalletType.set(null);
 	mocks.walletSessionGeneration.set(0);
 	mocks.walletStore.refreshBalance.mockReset().mockResolvedValue(undefined);
-	mocks.getRedemptionQueue.mockReset().mockImplementation(async () => makeQueue(nowNs));
-	mocks.getRedemptionQuote.mockReset().mockImplementation(async (amount: bigint) => ({ Ok: makeQuote(amount, nowNs) }));
+  mocks.getRedemptionPreview.mockReset().mockImplementation(async (amount: bigint) => makePreview(amount));
+  mocks.prepareRedemptionOffer.mockReset().mockImplementation(async (amount: bigint) => makePreparedOffer(amount));
 	mocks.getRedemptionPreflight.mockReset().mockImplementation(async () => makePreflight(mocks.walletStore.getState().principal.toText()));
 	mocks.redeemQuoted.mockReset().mockResolvedValue({
 		success: true,
@@ -223,48 +237,145 @@ describe('redemption route quote and queue safety', () => {
 		expect(health[1].style.color).not.toBe(health[3].style.color);
 	});
 
-	it('ignores a slower quote for an older amount after a newer request completes', async () => {
-		const oldQuote = deferred<{ Ok: RedemptionQuote }>();
-		mocks.getRedemptionQuote.mockReturnValueOnce(oldQuote.promise);
+	it('keeps cached estimates advisory and Checking a live offer never submits', async () => {
+		render();
+		await settle();
+		await setAmount('1');
+		expect(host.textContent).toContain('Indicative estimate');
+		expect(host.textContent).toContain('not an accepted offer');
+		await checkLiveOffer();
+		expect(mocks.prepareRedemptionOffer).toHaveBeenCalledWith(100_000_000n);
+		expect(mocks.redeemQuoted).not.toHaveBeenCalled();
+		expect(host.textContent).toContain('Live offer · not yet accepted');
+		expect(host.textContent).toContain('Accept and redeem');
+	});
+
+	it('ignores a slower cached preview after the amount changes', async () => {
+		const oldPreview = deferred<ReturnType<typeof makePreview>>();
+		mocks.getRedemptionPreview.mockImplementation(async (amount: bigint) => amount === 1_000_000_000n ? oldPreview.promise : makePreview(amount));
 		render();
 		await settle();
 		await setAmount('10');
-		expect(mocks.getRedemptionQuote).toHaveBeenCalledTimes(1);
 		await setAmount('20');
 		expect(host.textContent).toContain('19.4 icUSD value');
-		oldQuote.resolve({ Ok: makeQuote(1_000_000_000n, nowNs) });
+		oldPreview.resolve(makePreview(1_000_000_000n));
 		await settle();
 		expect(host.textContent).toContain('19.4 icUSD value');
 		expect(host.textContent).not.toContain('9.7 icUSD value');
 	});
 
-	it('invalidates a displayed quote synchronously when the wallet principal changes', async () => {
+	it('invalidates the prepared offer when the wallet principal changes', async () => {
 		render();
 		await settle();
 		await setAmount('10');
-		const submit = host.querySelector<HTMLButtonElement>('.submit-btn')!;
-		expect(submit.disabled).toBe(false);
+		await checkLiveOffer();
+		expect(host.textContent).toContain('Accept and redeem');
 		mocks.walletStore.setState(connectedWallet('w7x7r-cok77-xa'));
 		flushSync();
-		expect(submit.disabled).toBe(true);
-		expect(host.textContent).toContain('Wallet changed. Refresh the quote');
+		expect(host.textContent).not.toContain('Accept and redeem');
+		expect(host.textContent).toContain('Wallet changed. Check a live offer again');
+		expect(mocks.redeemQuoted).not.toHaveBeenCalled();
 	});
 
 	it('invalidates wallet checks after a same-principal reconnect generation change', async () => {
 		render();
 		await settle();
 		await setAmount('10');
-		expect(host.querySelector<HTMLButtonElement>('.submit-btn')!.disabled).toBe(false);
+		await checkLiveOffer();
+		expect(host.textContent).toContain('Accept and redeem');
 		mocks.walletSessionGeneration.set(1);
 		flushSync();
-		expect(host.querySelector<HTMLButtonElement>('.submit-btn')!.disabled).toBe(true);
+		expect(host.textContent).not.toContain('Accept and redeem');
 		expect(host.textContent).toContain('Wallet checks expired. Refresh them before redeeming.');
+		expect(mocks.redeemQuoted).not.toHaveBeenCalled();
+	});
+
+	it('declining retains the fresh queue snapshot and never calls redemption', async () => {
+		const refreshedQueue = { ...makeQueue(nowNs), entries: [makeEntry(0, 'ckXAUT', XAUT, nowNs)] };
+		mocks.prepareRedemptionOffer.mockResolvedValue(makePreparedOffer(1_000_000_000n, refreshedQueue));
+		render();
+		await settle();
+		await setAmount('10');
+		await checkLiveOffer();
+		expect(Array.from(host.querySelectorAll('.queue-token strong')).map((node) => node.textContent)).toEqual(['ckXAUT']);
+		host.querySelector<HTMLButtonElement>('.decline-offer')!.click();
+		flushSync();
+		expect(host.textContent).toContain('Offer declined. This snapshot remains visible for reference');
+		expect(host.textContent).toContain('Check a new live offer');
+		expect(mocks.redeemQuoted).not.toHaveBeenCalled();
+	});
+
+	it('amount edits invalidate a prepared offer before any acceptance', async () => {
+		render();
+		await settle();
+		await setAmount('10');
+		await checkLiveOffer();
+		expect(host.textContent).toContain('Live offer · not yet accepted');
+		await setAmount('11');
+		expect(host.textContent).not.toContain('Accept and redeem');
+		expect(host.textContent).toContain('Indicative estimate');
+		expect(mocks.redeemQuoted).not.toHaveBeenCalled();
+	});
+
+	it('discards a late live-offer response after the amount changes', async () => {
+		const pending = deferred<ReturnType<typeof makePreparedOffer>>();
+		mocks.prepareRedemptionOffer.mockImplementationOnce(async () => pending.promise);
+		render();
+		await settle();
+		await setAmount('10');
+		host.querySelector<HTMLButtonElement>('#check-live-offer')!.click();
+		await settle();
+		await setAmount('11');
+		pending.resolve(makePreparedOffer(1_000_000_000n));
+		await settle();
+		expect(host.textContent).toContain('Indicative estimate');
+		expect(host.textContent).not.toContain('Live offer · not yet accepted');
+		expect(host.textContent).not.toContain('Accept and redeem');
+		expect(host.querySelector<HTMLButtonElement>('#check-live-offer')?.disabled).toBe(false);
+		expect(mocks.redeemQuoted).not.toHaveBeenCalled();
+	});
+
+	it('keeps the fresh queue and capacity error when the prepared inner quote is an error', async () => {
+		const refreshedQueue = { ...makeQueue(nowNs), entries: [makeEntry(0, 'ckXAUT', XAUT, nowNs)] };
+		mocks.prepareRedemptionOffer.mockResolvedValue(makePreparedOffer(1_000_000n, refreshedQueue, { Err: { RedemptionCapacityExceeded: { max_input_icusd_e8s: 250_000_000n } } }));
+		render();
+		await settle();
+		await setAmount('0.01');
+		await checkLiveOffer();
+		expect(Array.from(host.querySelectorAll('.queue-token strong')).map((node) => node.textContent)).toEqual(['ckXAUT']);
+		expect(host.textContent).toContain('2.5 icUSD max');
+		expect(host.textContent).not.toContain('Accept and redeem');
+		expect(mocks.redeemQuoted).not.toHaveBeenCalled();
+	});
+
+	it('keeps the estimate when live preparation is rate limited', async () => {
+		mocks.prepareRedemptionOffer.mockResolvedValue({ Err: { RefreshCooldown: { retry_after_ns: 3_000_000_000n } } });
+		render();
+		await settle();
+		await setAmount('10');
+		await checkLiveOffer();
+		expect(host.textContent).toContain('Indicative estimate');
+		expect(host.textContent).toContain('Try again in about 3 seconds');
+		expect(mocks.redeemQuoted).not.toHaveBeenCalled();
+	});
+
+	it('expires a prepared offer and requires a new live check before acceptance', async () => {
+		render();
+		await settle();
+		await setAmount('10');
+		await checkLiveOffer();
+		await vi.advanceTimersByTimeAsync(61_000);
+		await settle();
+		expect(host.textContent).toContain('Expired live offer');
+		expect(host.textContent).toContain('Check live offer');
+		expect(mocks.redeemQuoted).not.toHaveBeenCalled();
 	});
 
 	it('binds the exact quoted token, amount and minimum payout; typed Queued is not shown as delivered', async () => {
 		render();
 		await settle();
 		await setAmount('10');
+		await checkLiveOffer();
 		host.querySelector<HTMLButtonElement>('.submit-btn')!.click();
 		await settle();
 		expect(mocks.redeemQuoted.mock.calls[0][0]).toEqual({
@@ -279,6 +390,12 @@ describe('redemption route quote and queue safety', () => {
 			balanceRaw: 10_000_000_000n,
 			feeRaw: 100_000n,
 		});
+		expect(mocks.redeemQuoted.mock.calls[0][2]).toMatchObject({
+			amountE8s: 1_000_000_000n,
+			collateralTypeText: ICP.toText(),
+			minimumNetCollateralRaw: 805_823_333n,
+			validUntilNs: nowNs + 60_000_000_000n,
+		});
 		expect(host.textContent).toContain('Queued: 8.05823333 ICP queued for delivery. The payout has not been credited yet.');
 	});
 
@@ -287,6 +404,7 @@ describe('redemption route quote and queue safety', () => {
 		render();
 		await settle();
 		await setAmount('10');
+		await checkLiveOffer();
 		host.querySelector<HTMLButtonElement>('.submit-btn')!.click();
 		await settle();
 		expect(host.textContent).toContain('Payout result is unknown.');
@@ -306,6 +424,7 @@ describe('redemption route quote and queue safety', () => {
 		render();
 		await settle();
 		await setAmount('10');
+		await checkLiveOffer();
 		host.querySelector<HTMLButtonElement>('.submit-btn')!.click();
 		await settle();
 		expect(host.textContent).toContain('Queued: 8.05823333 ICP queued for delivery. The payout has not been credited yet.');
@@ -319,6 +438,7 @@ describe('redemption route quote and queue safety', () => {
 		render();
 		await settle();
 		await setAmount('10');
+		await checkLiveOffer();
 		host.querySelector<HTMLButtonElement>('.submit-btn')!.click();
 		await settle();
 		expect(host.textContent).toContain('The approval response was lost. The redemption call was not sent.');
@@ -329,7 +449,7 @@ describe('redemption route quote and queue safety', () => {
 	it('unwraps a legacy ProtocolError carried by the redemption-specific error variant', async () => {
 		const protocolError = { TemporarilyUnavailable: 'protocol is in read-only mode' };
 		mocks.formatProtocolError.mockClear();
-		mocks.getRedemptionQuote.mockResolvedValue({ Err: { Protocol: protocolError } });
+		mocks.getRedemptionPreview.mockResolvedValue(makePreview(1_000_000_000n, makeQueue(nowNs), { Err: { Protocol: protocolError } }));
 		render();
 		await settle();
 		await setAmount('10');
@@ -338,12 +458,15 @@ describe('redemption route quote and queue safety', () => {
 	});
 
 	it('fails closed when the backend marks the global ranking incomplete', async () => {
-		mocks.getRedemptionQueue.mockImplementation(async () => makeQueue(nowNs, false));
+		mocks.getRedemptionPreview.mockImplementation(async (amount: bigint) => makePreview(amount, makeQueue(nowNs, false)));
 		render();
 		await settle();
 		await setAmount('10');
-		expect(host.textContent).toContain('global collateral ranking is incomplete');
-		expect((host.querySelector('.submit-btn') as HTMLButtonElement).disabled).toBe(true);
-		expect(mocks.getRedemptionQuote).not.toHaveBeenCalled();
+		mocks.prepareRedemptionOffer.mockResolvedValue({ Err: { RefreshUnavailable: { message: 'Ranking remains incomplete', retry_after_ns: 0n } } });
+		await checkLiveOffer();
+		expect(host.textContent).toContain('Indicative estimate');
+		expect(host.textContent).toContain('Ranking remains incomplete');
+		expect(host.textContent).not.toContain('Accept and redeem');
+		expect(mocks.redeemQuoted).not.toHaveBeenCalled();
 	});
 });

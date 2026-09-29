@@ -28,8 +28,8 @@ use rumi_protocol_backend::{
     EventsByPrincipalPagedResponse, Fees, ForwardFilteredEventsResponse, GetEventsArg,
     GetEventsFilteredResponse, GetSnapshotsArg, InterestSplitArg, PerCollateralRateCurve,
     ProtocolArg, ProtocolError, ProtocolSnapshot, ProtocolStatus, RedeemQuotedRequest,
-    RedemptionError, RedemptionQueue, RedemptionQuote, RedemptionResult, ReserveBalance,
-    ReserveRedemptionResult,
+    PreparedRedemptionOffer, RedemptionError, RedemptionOfferRefreshError, RedemptionPreview,
+    RedemptionQueue, RedemptionQuote, RedemptionResult, ReserveBalance, ReserveRedemptionResult,
     StabilityPoolLiquidationResult, StableTokenType, SuccessWithFee, SupplyAudit, SupplyAuditEntry,
     VaultArgWithToken, VaultHistoryPagedResponse, VaultsPageResponse, XrpSpAbsorbPreflight,
     XrpSpAbsorbRequest, XrpSpAbsorbResult, MAX_EVENTS_BY_PRINCIPAL_LEGACY,
@@ -203,7 +203,10 @@ fn inspect_message() {
 
     match method.as_str() {
         // Query-like reads exposed as update for certification: accept all callers
-        "icrc21_canister_call_consent_message" | "icrc10_supported_standards" => {
+        // and the read-only offer preparation endpoint never transfers funds.
+        "icrc21_canister_call_consent_message"
+        | "icrc10_supported_standards"
+        | "prepare_redemption_offer" => {
             ic_cdk::api::call::accept_message();
         }
         // M2 EVM-native self-serve: authority is the EIP-712 signature, so the IC
@@ -6137,12 +6140,32 @@ fn get_redemption_queue() -> RedemptionQueue {
     rumi_protocol_backend::vault::get_redemption_queue()
 }
 
+/// Cached-price redemption preview. It is advisory only and can include stale
+/// prices; execution requires `prepare_redemption_offer` followed by the normal
+/// explicitly quoted submit path.
+#[candid_method(query)]
+#[query]
+fn get_redemption_preview(amount_e8s: u64) -> RedemptionPreview {
+    rumi_protocol_backend::vault::get_redemption_preview(amount_e8s)
+}
+
 /// Quote a single-collateral redemption against the first currently eligible run.
 /// Price age is explicit; submission refreshes and revalidates priority and payout.
 #[candid_method(query)]
 #[query]
 fn get_redemption_quote(amount_e8s: u64) -> Result<RedemptionQuote, RedemptionError> {
     rumi_protocol_backend::vault::get_redemption_quote(amount_e8s)
+}
+
+/// Refresh stale candidate prices and return a current queue/offer without
+/// approving or pulling icUSD. A fresh queue is preserved when the requested
+/// amount itself cannot be quoted.
+#[candid_method(update)]
+#[update]
+async fn prepare_redemption_offer(
+    amount_e8s: u64,
+) -> Result<PreparedRedemptionOffer, RedemptionOfferRefreshError> {
+    rumi_protocol_backend::vault::prepare_redemption_offer(amount_e8s).await
 }
 
 /// Return the caller's outstanding icUSD refund claims, including claims held

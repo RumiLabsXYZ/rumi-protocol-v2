@@ -371,6 +371,39 @@ pub struct RedemptionQuote {
     pub max_input_icusd_e8s: u64,
 }
 
+/// Cached redemption preview. It may describe an old but complete price
+/// ranking; consumers must treat it as advisory and never submit it directly.
+#[derive(CandidType, Deserialize, Debug, Clone)]
+pub struct RedemptionPreview {
+    pub queue: RedemptionQueue,
+    pub estimate: Result<RedemptionQuote, RedemptionError>,
+}
+
+/// Fresh, read-only offer preparation result. A fresh queue is returned even
+/// when the requested amount is below minimum or exceeds current capacity.
+#[derive(CandidType, Deserialize, Debug, Clone)]
+pub struct PreparedRedemptionOffer {
+    pub queue: RedemptionQueue,
+    pub quote: Result<RedemptionQuote, RedemptionError>,
+}
+
+/// Failure while refreshing prices for a read-only redemption offer. These
+/// variants are intentionally separate from the historical ProtocolError and
+/// RedemptionError contracts.
+#[derive(CandidType, Debug, Clone, Deserialize)]
+pub enum RedemptionOfferRefreshError {
+    /// Another bounded candidate refresh is in flight. `retry_after_ns` is a
+    /// duration, not an absolute timestamp.
+    RefreshInProgress { retry_after_ns: u64 },
+    /// A previous stale-price batch is still in its global cooldown.
+    RefreshCooldown { retry_after_ns: u64 },
+    CandidateLimitExceeded { max_candidates: u64 },
+    RefreshUnavailable {
+        message: String,
+        retry_after_ns: u64,
+    },
+}
+
 #[derive(CandidType, Deserialize, Debug, Clone)]
 pub struct RedeemQuotedRequest {
     pub amount_e8s: u64,

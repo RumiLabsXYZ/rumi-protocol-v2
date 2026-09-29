@@ -16,7 +16,8 @@ use crate::PendingMarginTransfer;
 use crate::DEBUG;
 use crate::{
     mutate_state, read_state, ProtocolError, RedeemQuotedRequest, RedemptionError,
-    RedemptionPayoutStatus, RedemptionQueue, RedemptionQueueEntry, RedemptionQuote,
+    PreparedRedemptionOffer, RedemptionOfferRefreshError, RedemptionPayoutStatus,
+    RedemptionPreview, RedemptionQueue, RedemptionQueueEntry, RedemptionQuote,
     RedemptionResult,
     StabilityPoolLiquidationResult, StableTokenType, SuccessWithFee, VaultArgWithToken,
     DUST_THRESHOLD,
@@ -30,11 +31,108 @@ use rust_decimal_macros::dec;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::cell::RefCell;
 
 /// One ten-minute maximum-age contract shared by quote display, ranking refresh,
 /// and pre/post-pull verification. This matches XRC's existing hard ceiling.
 const REDEMPTION_PRICE_MAX_AGE_NS: u64 = 10 * 60 * 1_000_000_000;
 pub(crate) const MAX_REDEMPTION_PRICE_CANDIDATES: usize = 64;
+const MAX_REDEMPTION_OFFER_REFRESH_PASSES: usize = 2;
+const MAX_LST_EXTERNAL_CALLS_PER_REFRESH: usize = 2;
+const REDEMPTION_OFFER_REFRESH_COOLDOWN_NS: u64 = 300 * 1_000_000_000;
+const REDEMPTION_OFFER_REFRESH_LEASE_NS: u64 = 300 * 1_000_000_000;
+// Deliberately loose upper bound: two passes over 64 candidates, at most two
+// source calls per direct refresh (LstWrapped's initial call plus one catch-up),
+// plus two ICP refresh calls and two possible ICP-coupled LST waves. The ICP
+// candidate appears at most once per pass, and an LST refresh itself never
+// fetches ICP; the extra ICP allowance makes the bound robust to a second pass
+// after the first sample ages out. `fetch_icp_rate` couples at most 64 LSTs,
+// each with the same two-call ceiling. This is 514 calls maximum.
+const MAX_REDEMPTION_OFFER_EXTERNAL_CALLS: usize =
+    (MAX_REDEMPTION_OFFER_REFRESH_PASSES * MAX_REDEMPTION_PRICE_CANDIDATES
+        * MAX_LST_EXTERNAL_CALLS_PER_REFRESH)
+        + MAX_REDEMPTION_OFFER_REFRESH_PASSES
+        + (MAX_REDEMPTION_OFFER_REFRESH_PASSES
+            * MAX_REDEMPTION_PRICE_CANDIDATES
+            * MAX_LST_EXTERNAL_CALLS_PER_REFRESH);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RedemptionOfferRefreshGateState {
+    next_token: u64,
+    in_flight: Option<(u64, u64)>,
+    cooldown_until_ns: u64,
+}
+
+impl RedemptionOfferRefreshGateState {
+    fn try_acquire(
+        &mut self,
+        now_ns: u64,
+    ) -> Result<u64, RedemptionOfferRefreshError> {
+        if let Some((_, started_at_ns)) = self.in_flight {
+            let elapsed = now_ns.saturating_sub(started_at_ns);
+            if now_ns < started_at_ns || elapsed < REDEMPTION_OFFER_REFRESH_LEASE_NS {
+                return Err(RedemptionOfferRefreshError::RefreshInProgress {
+                    retry_after_ns: REDEMPTION_OFFER_REFRESH_LEASE_NS.saturating_sub(elapsed),
+                });
+            }
+            // A suspended refresh may have lost its continuation. Expire its
+            // lease; the token check in release prevents its late Drop from
+            // clearing a newer owner's guard.
+            self.in_flight = None;
+        }
+        if now_ns < self.cooldown_until_ns {
+            return Err(RedemptionOfferRefreshError::RefreshCooldown {
+                retry_after_ns: self.cooldown_until_ns - now_ns,
+            });
+        }
+
+        self.next_token = self.next_token.wrapping_add(1).max(1);
+        let token = self.next_token;
+        self.in_flight = Some((token, now_ns));
+        self.cooldown_until_ns = now_ns.saturating_add(REDEMPTION_OFFER_REFRESH_COOLDOWN_NS);
+        Ok(token)
+    }
+
+    fn release(&mut self, token: u64) {
+        if self.in_flight.map(|(current, _)| current) == Some(token) {
+            self.in_flight = None;
+        }
+    }
+}
+
+thread_local! {
+    /// The refresh lock/cooldown is transient because it controls public oracle
+    /// work rather than financial state. A 300s owner-safe lease recovers a
+    /// dropped continuation; refreshes are revalidated from current State.
+    static REDEMPTION_OFFER_REFRESH_GATE: RefCell<RedemptionOfferRefreshGateState> =
+        RefCell::new(RedemptionOfferRefreshGateState::default());
+}
+
+struct RedemptionOfferRefreshGuard(u64);
+
+impl RedemptionOfferRefreshGuard {
+    fn try_acquire(now_ns: u64) -> Result<Self, RedemptionOfferRefreshError> {
+        REDEMPTION_OFFER_REFRESH_GATE.with(|gate| {
+            gate.borrow_mut()
+                .try_acquire(now_ns)
+                .map(Self)
+        })
+    }
+}
+
+impl Drop for RedemptionOfferRefreshGuard {
+    fn drop(&mut self) {
+        REDEMPTION_OFFER_REFRESH_GATE.with(|gate| gate.borrow_mut().release(self.0));
+    }
+}
+
+fn redemption_offer_refresh_cooldown_remaining(now_ns: u64) -> u64 {
+    REDEMPTION_OFFER_REFRESH_GATE.with(|gate| {
+        gate.borrow()
+            .cooldown_until_ns
+            .saturating_sub(now_ns)
+    })
+}
 
 /// Fee inputs frozen for one read-only queue calculation. The elapsed-hour
 /// decay and per-collateral debt total are invariant across capacity probes;
@@ -132,17 +230,39 @@ fn redemption_candidate_prices_are_fresh(
     candidates: &[Principal],
     now: u64,
 ) -> bool {
-    candidates.iter().all(|collateral_type| {
-        state
-            .get_collateral_config(collateral_type)
-            .and_then(|config| Some((config.last_price?, config.last_price_timestamp?)))
-            .map(|(price, timestamp)| {
-                price.is_finite()
-                    && price > 0.0
-                    && redemption_price_timestamp_is_fresh(timestamp, now)
-            })
-            .unwrap_or(false)
-    })
+    candidates
+        .iter()
+        .all(|collateral_type| redemption_candidate_price_is_valid(state, collateral_type, now, true))
+}
+
+fn stale_redemption_candidate_types(
+    state: &crate::state::State,
+    candidates: &[Principal],
+    now: u64,
+) -> Vec<Principal> {
+    candidates
+        .iter()
+        .copied()
+        .filter(|ct| !redemption_candidate_price_is_valid(state, ct, now, true))
+        .collect()
+}
+
+fn redemption_candidate_price_is_valid(
+    state: &crate::state::State,
+    collateral_type: &Principal,
+    now: u64,
+    require_fresh: bool,
+) -> bool {
+    state
+        .get_collateral_config(collateral_type)
+        .and_then(|config| Some((config.last_price?, config.last_price_timestamp?)))
+        .map(|(price, timestamp)| {
+            price.is_finite()
+                && price > 0.0
+                && timestamp <= now
+                && (!require_fresh || now - timestamp <= REDEMPTION_PRICE_MAX_AGE_NS)
+        })
+        .unwrap_or(false)
 }
 
 fn redemption_price_timestamp_is_fresh(timestamp: u64, now: u64) -> bool {
@@ -395,6 +515,27 @@ pub(crate) fn redemption_ranking_is_fresh(
     )
 }
 
+fn redemption_ranking_has_complete_cached_prices(
+    state: &crate::state::State,
+    runs: &[crate::state::RedemptionRun],
+    now: u64,
+) -> bool {
+    let candidates = redemption_candidate_types(state);
+    let ranked_types = runs
+        .iter()
+        .map(|run| run.collateral_type)
+        .collect::<Vec<_>>();
+    let all_prices_valid = candidates.iter().all(|collateral_type| {
+        redemption_candidate_price_is_valid(state, collateral_type, now, false)
+    });
+    redemption_ranking_is_complete(
+        &candidates,
+        &ranked_types,
+        all_prices_valid,
+        MAX_REDEMPTION_PRICE_CANDIDATES,
+    )
+}
+
 fn redemption_ranking_is_complete(
     candidates: &[Principal],
     ranked_types: &[Principal],
@@ -407,6 +548,11 @@ fn redemption_ranking_is_complete(
     let candidate_set: std::collections::BTreeSet<_> = candidates.iter().copied().collect();
     let ranked_set: std::collections::BTreeSet<_> = ranked_types.iter().copied().collect();
     candidate_set == ranked_set
+}
+
+fn cached_redemption_offer_is_fresh(state: &crate::state::State, now: u64) -> bool {
+    let runs = state.redemption_runs();
+    redemption_ranking_is_fresh(state, &runs, now)
 }
 
 /// Refresh all assets that can influence the global sort, then verify the set
@@ -437,6 +583,240 @@ async fn refresh_redemption_candidate_prices() -> Result<(), ProtocolError> {
     Err(ProtocolError::TemporarilyUnavailable(
         "Eligible collateral prices changed or remained stale while refreshing redemption priority. Retry shortly.".to_string(),
     ))
+}
+
+/// Refresh only candidates whose cached price is missing, invalid, future-dated,
+/// or older than the redemption's unchanged 600s bound. There are at most 64
+/// candidates per pass and two passes. Each direct LstWrapped refresh can make
+/// at most two rate-canister calls due to its existing single catch-up. Each
+/// pass has at most one ICP candidate refresh, and that XRC path may couple at
+/// most 64 LST refreshes (again at most two rate calls each). A second ICP
+/// refresh/coupling wave is possible if time elapses across awaits, so the
+/// deliberately loose ceiling is 514 external calls. LstWrapped refreshes use
+/// cached ICP and do not recursively fetch ICP. Unlike
+/// `refresh_redemption_candidate_prices`, this helper is only used by the
+/// public no-funds offer endpoint.
+async fn refresh_stale_redemption_candidates_for_offer(
+) -> Result<(), RedemptionOfferRefreshError> {
+    for _ in 0..MAX_REDEMPTION_OFFER_REFRESH_PASSES {
+        let now = ic_cdk::api::time();
+        let (candidates, stale) = read_state(|state| {
+            let candidates = redemption_candidate_types(state);
+            let stale = stale_redemption_candidate_types(state, &candidates, now);
+            (candidates, stale)
+        });
+        if candidates.len() > MAX_REDEMPTION_PRICE_CANDIDATES {
+            return Err(RedemptionOfferRefreshError::CandidateLimitExceeded {
+                max_candidates: MAX_REDEMPTION_PRICE_CANDIDATES as u64,
+            });
+        }
+        if stale.is_empty() {
+            let complete_and_fresh = read_state(|state| {
+                let current = redemption_candidate_types(state);
+                current == candidates
+                    && current.len() <= MAX_REDEMPTION_PRICE_CANDIDATES
+                    && redemption_ranking_is_fresh(state, &state.redemption_runs(), now)
+            });
+            if complete_and_fresh {
+                return Ok(());
+            }
+            continue;
+        }
+
+        for collateral_type in stale {
+            crate::xrc::ensure_fresh_price_for(&collateral_type)
+                .await
+                .map_err(|error| RedemptionOfferRefreshError::RefreshUnavailable {
+                    message: format!("Unable to refresh redemption collateral prices: {error:?}"),
+                    retry_after_ns: redemption_offer_refresh_cooldown_remaining(
+                        ic_cdk::api::time(),
+                    ),
+                })?;
+        }
+
+        let now = ic_cdk::api::time();
+        let verified = read_state(|state| {
+            let current = redemption_candidate_types(state);
+            current == candidates
+                && current.len() <= MAX_REDEMPTION_PRICE_CANDIDATES
+                && redemption_ranking_is_fresh(state, &state.redemption_runs(), now)
+        });
+        if verified {
+            return Ok(());
+        }
+    }
+
+    Err(RedemptionOfferRefreshError::RefreshUnavailable {
+        message: "Eligible collateral prices or the candidate set changed during refresh; no live offer is available.".to_string(),
+        retry_after_ns: redemption_offer_refresh_cooldown_remaining(ic_cdk::api::time()),
+    })
+}
+
+fn build_redemption_queue_and_quote(
+    state: &crate::state::State,
+    now: u64,
+    amount_e8s: u64,
+    allow_stale_complete_ranking: bool,
+) -> (RedemptionQueue, Result<RedemptionQuote, RedemptionError>) {
+    let runs = state.redemption_runs();
+    let ranking_fresh = redemption_ranking_is_fresh(state, &runs, now);
+    let ranking_complete = ranking_fresh
+        || (allow_stale_complete_ranking
+            && redemption_ranking_has_complete_cached_prices(state, &runs, now));
+    let mut fee_snapshots = std::collections::BTreeMap::new();
+    for run in &runs {
+        fee_snapshots
+            .entry(run.collateral_type)
+            .or_insert_with(|| redemption_fee_snapshot(state, &run.collateral_type, now));
+    }
+
+    let mut entries = Vec::with_capacity(runs.len());
+    let mut quote_result = None;
+    for (index, run) in runs.iter().enumerate() {
+        let fee_snapshot = fee_snapshots
+            .get(&run.collateral_type)
+            .copied()
+            .expect("fee snapshot prepared for every redemption run");
+        let simulation = redemption_simulation_plan(state, run);
+        let max_input = max_input_for_run_with(state, run, fee_snapshot, &simulation);
+        let max_net = net_for_run_input(state, run, max_input, fee_snapshot, &simulation)
+            .unwrap_or(0);
+        if index == 0 {
+            quote_result = Some(if ranking_complete {
+                quote_for_redemption_run(
+                    state,
+                    run,
+                    &simulation,
+                    fee_snapshot,
+                    max_input,
+                    amount_e8s,
+                    now,
+                    ranking_fresh,
+                )
+            } else {
+                Err(RedemptionError::RedemptionQuoteUnavailable(
+                    "Cached collateral prices are incomplete or invalid; no complete advisory estimate is available.".to_string(),
+                ))
+            });
+        }
+        entries.push(RedemptionQueueEntry {
+            run_index: run.run_index,
+            collateral_type: run.collateral_type,
+            symbol: run.symbol.clone(),
+            decimals: run.decimals,
+            price_usd: run.price_usd,
+            price_timestamp_ns: run.price_timestamp_ns,
+            price_fresh: redemption_price_timestamp_is_fresh(run.price_timestamp_ns, now),
+            min_cr: run.min_cr,
+            liquidation_cr: run.liquidation_cr,
+            weakest_vault_cr: run.weakest_vault_cr,
+            health_headroom: run.health_headroom,
+            vault_count: run.vault_ids.len() as u64,
+            eligible_collateral_raw: run.eligible_collateral_raw,
+            eligible_debt_e8s: run.eligible_debt_e8s,
+            max_input_icusd_e8s: max_input,
+            max_net_collateral_raw: max_net,
+        });
+    }
+
+    let quote = quote_result.unwrap_or_else(|| {
+        Err(RedemptionError::RedemptionQuoteUnavailable(
+            "No eligible collateral vaults are available for redemption.".to_string(),
+        ))
+    });
+    (
+        RedemptionQueue {
+            observed_at_ns: now,
+            ranking_fresh,
+            rmr: state.get_redemption_margin_ratio().to_f64(),
+            price_freshness_window_ns: REDEMPTION_PRICE_MAX_AGE_NS,
+            entries,
+        },
+        quote,
+    )
+}
+
+fn quote_for_redemption_run(
+    state: &crate::state::State,
+    run: &crate::state::RedemptionRun,
+    simulation: &RedemptionSimulationPlan,
+    fee_snapshot: RedemptionFeeSnapshot,
+    max_input: u64,
+    amount_e8s: u64,
+    now: u64,
+    ranking_fresh: bool,
+) -> Result<RedemptionQuote, RedemptionError> {
+    if amount_e8s < state.min_icusd_amount.to_u64() {
+        return Err(ProtocolError::AmountTooLow {
+            minimum_amount: state.min_icusd_amount.to_u64(),
+        }
+        .into());
+    }
+    if amount_e8s > max_input {
+        return Err(RedemptionError::RedemptionCapacityExceeded {
+            max_input_icusd_e8s: max_input,
+        });
+    }
+    let amount = ICUSD::from(amount_e8s);
+    let fee = amount * fee_snapshot.fee(amount);
+    let rmr = state.get_redemption_margin_ratio();
+    let effective = (amount - fee) * rmr;
+    let simulated = simulation.simulate(effective);
+    let gross = simulated_collateral_total_raw(&simulated).ok_or_else(|| {
+        RedemptionError::RedemptionQuoteUnavailable(
+            "The selected collateral payout exceeds the supported raw-token range.".to_string(),
+        )
+    })?;
+    let config = state
+        .get_collateral_config(&run.collateral_type)
+        .ok_or_else(|| {
+            RedemptionError::RedemptionQuoteUnavailable(
+                "Collateral configuration disappeared.".to_string(),
+            )
+        })?;
+    let ledger_fee = config.ledger_fee;
+    let net = gross.saturating_sub(ledger_fee);
+    if net == 0 {
+        return Err(RedemptionError::RedemptionQuoteUnavailable(
+            "The selected collateral run cannot produce a positive net payout.".to_string(),
+        ));
+    }
+    Ok(RedemptionQuote {
+        quoted_at_ns: now,
+        quote_validity_window_ns: 60 * 1_000_000_000,
+        ranking_fresh,
+        amount_e8s,
+        run_index: run.run_index,
+        collateral_type: run.collateral_type,
+        symbol: run.symbol.clone(),
+        decimals: run.decimals,
+        price_usd: run.price_usd,
+        price_timestamp_ns: run.price_timestamp_ns,
+        price_fresh: redemption_price_timestamp_is_fresh(run.price_timestamp_ns, now),
+        fee_e8s: fee.to_u64(),
+        rmr: rmr.to_f64(),
+        effective_icusd_e8s: effective.to_u64(),
+        gross_collateral_raw: gross,
+        ledger_fee_raw: ledger_fee,
+        net_collateral_raw: net,
+        max_input_icusd_e8s: max_input,
+    })
+}
+
+fn prepared_offer_from_current_state(
+    state: &crate::state::State,
+    now: u64,
+    amount_e8s: u64,
+    retry_after_ns: u64,
+) -> Result<PreparedRedemptionOffer, RedemptionOfferRefreshError> {
+    let (queue, quote) = build_redemption_queue_and_quote(state, now, amount_e8s, false);
+    if !queue.ranking_fresh {
+        return Err(RedemptionOfferRefreshError::RefreshUnavailable {
+            message: "The complete collateral ranking is no longer fresh; refresh the offer again.".to_string(),
+            retry_after_ns,
+        });
+    }
+    Ok(PreparedRedemptionOffer { queue, quote })
 }
 
 /// Return a snapshot of consecutive collateral runs in the global health order.
@@ -569,6 +949,59 @@ pub fn get_redemption_quote(amount_e8s: u64) -> Result<RedemptionQuote, Redempti
             net_collateral_raw: net,
             max_input_icusd_e8s: max_input,
         })
+    })
+}
+
+/// Cached preview for display only. A stale but complete finite-positive price
+/// snapshot can produce an estimate; callers must not use it as a submission
+/// authorization. Missing, invalid, or future-dated candidate data remains an
+/// explicit incomplete-ranking error.
+pub fn get_redemption_preview(amount_e8s: u64) -> RedemptionPreview {
+    let now = ic_cdk::api::time();
+    read_state(|state| {
+        let (queue, estimate) =
+            build_redemption_queue_and_quote(state, now, amount_e8s, true);
+        RedemptionPreview { queue, estimate }
+    })
+}
+
+/// Prepare a fresh executable offer without approving or pulling icUSD and
+/// without mutating vault, debt, redemption-event, or payout state. When cache
+/// prices are already fresh this performs no oracle calls. Stale-price work is
+/// guarded and globally rate-limited; submission still runs its independent
+/// pre- and post-pull refresh/revalidation.
+pub async fn prepare_redemption_offer(
+    amount_e8s: u64,
+) -> Result<PreparedRedemptionOffer, RedemptionOfferRefreshError> {
+    let now = ic_cdk::api::time();
+    let cached_fresh = read_state(|state| cached_redemption_offer_is_fresh(state, now));
+
+    if !cached_fresh {
+        let now = ic_cdk::api::time();
+        let (candidate_count, has_stale_price) = read_state(|state| {
+            let candidates = redemption_candidate_types(state);
+            let stale = stale_redemption_candidate_types(state, &candidates, now);
+            (candidates.len(), !stale.is_empty())
+        });
+        if candidate_count > MAX_REDEMPTION_PRICE_CANDIDATES {
+            return Err(RedemptionOfferRefreshError::CandidateLimitExceeded {
+                max_candidates: MAX_REDEMPTION_PRICE_CANDIDATES as u64,
+            });
+        }
+        if !has_stale_price {
+            return Err(RedemptionOfferRefreshError::RefreshUnavailable {
+                message: "Cached candidate prices are fresh, but they do not form a complete eligible ranking.".to_string(),
+                retry_after_ns: 0,
+            });
+        }
+        let _refresh_guard = RedemptionOfferRefreshGuard::try_acquire(now)?;
+        refresh_stale_redemption_candidates_for_offer().await?;
+    }
+
+    let snapshot_now = ic_cdk::api::time();
+    let retry_after_ns = redemption_offer_refresh_cooldown_remaining(snapshot_now);
+    read_state(|state| {
+        prepared_offer_from_current_state(state, snapshot_now, amount_e8s, retry_after_ns)
     })
 }
 
@@ -10243,6 +10676,10 @@ mod redemption_await_boundary_tests {
     use super::{
         current_fresh_legacy_reserve_run_for_snapshot,
         current_legacy_reserve_run_for_snapshot, legacy_redemption_run_for_request,
+        build_redemption_queue_and_quote, cached_redemption_offer_is_fresh,
+        prepared_offer_from_current_state, stale_redemption_candidate_types,
+        RedemptionOfferRefreshGateState, REDEMPTION_OFFER_REFRESH_COOLDOWN_NS,
+        REDEMPTION_OFFER_REFRESH_LEASE_NS,
         legacy_reserve_spillover_run, persist_rejected_redemption_refund,
         redemption_raw_refund, redemption_ranking_is_fresh,
         redemption_run_snapshot_error, reserve_spillover_raw_refund_budget,
@@ -10882,5 +11319,187 @@ mod redemption_await_boundary_tests {
         assert_eq!(claim.op_nonce, nonce);
         assert_eq!(vault_balances(&state), before);
         assert!(state.pending_redemption_transfer.is_empty());
+    }
+
+    #[test]
+    fn advisory_preview_can_quote_old_complete_prices_but_never_marks_them_fresh() {
+        let (state, _icp, _xaut) = redemption_state(120_000_000);
+        let now = 1 + REDEMPTION_PRICE_MAX_AGE_NS + 1;
+        let before_vaults = vault_balances(&state);
+        let before_refunds = state.pending_refunds.len();
+        let before_payouts = state.pending_redemption_transfer.len();
+        let (queue, estimate) = build_redemption_queue_and_quote(&state, now, E8, true);
+
+        assert!(!queue.ranking_fresh);
+        assert!(queue.entries.len() == 2);
+        assert!(queue.entries.iter().all(|entry| !entry.price_fresh));
+        let quote = estimate.expect("complete stale cached prices remain advisory-quotable");
+        assert!(!quote.ranking_fresh);
+        assert!(!quote.price_fresh);
+        assert!(quote.net_collateral_raw > 0);
+        assert_eq!(vault_balances(&state), before_vaults);
+        assert_eq!(state.pending_refunds.len(), before_refunds);
+        assert_eq!(state.pending_redemption_transfer.len(), before_payouts);
+
+        let (_, executable_quote) = build_redemption_queue_and_quote(&state, now, E8, false);
+        assert!(matches!(
+            executable_quote,
+            Err(crate::RedemptionError::RedemptionQuoteUnavailable(_))
+        ));
+    }
+
+    #[test]
+    fn incomplete_cached_ranking_does_not_invent_an_advisory_quote() {
+        let (mut state, _icp, xaut) = redemption_state(120_000_000);
+        state
+            .collateral_configs
+            .get_mut(&xaut)
+            .unwrap()
+            .last_price = None;
+        let (queue, estimate) = build_redemption_queue_and_quote(&state, 10, E8, true);
+        assert!(!queue.ranking_fresh);
+        assert_eq!(queue.entries.len(), 1);
+        assert!(matches!(
+            estimate,
+            Err(crate::RedemptionError::RedemptionQuoteUnavailable(_))
+        ));
+    }
+
+    #[test]
+    fn refreshed_snapshot_reranks_every_candidate_and_preserves_fresh_queue_on_capacity_error() {
+        let (mut state, icp, xaut) = redemption_state(120_000_000);
+        let now = 10_000_000_000_000;
+        for ct in [icp, xaut] {
+            state
+                .collateral_configs
+                .get_mut(&ct)
+                .unwrap()
+                .last_price_timestamp = Some(now);
+        }
+        let (initial, initial_quote) = build_redemption_queue_and_quote(&state, now, E8, false);
+        assert!(initial.ranking_fresh);
+        assert_eq!(initial.entries[0].collateral_type, xaut);
+        assert_eq!(initial_quote.unwrap().collateral_type, xaut);
+
+        // A new price for the competing asset changes the global health order;
+        // the offer builder must recalculate the whole ranking before quoting.
+        state.collateral_configs.get_mut(&xaut).unwrap().last_price = Some(2.0);
+        let (reranked, quote) = build_redemption_queue_and_quote(&state, now, E8, false);
+        assert!(reranked.ranking_fresh);
+        assert_eq!(reranked.entries[0].collateral_type, icp);
+        assert_eq!(quote.unwrap().collateral_type, icp);
+
+        let (fresh_queue, too_large) =
+            build_redemption_queue_and_quote(&state, now, u64::MAX, false);
+        assert!(fresh_queue.ranking_fresh);
+        assert!(matches!(
+            too_large,
+            Err(crate::RedemptionError::RedemptionCapacityExceeded { .. })
+        ));
+        assert_eq!(fresh_queue.entries[0].collateral_type, icp);
+    }
+
+    #[test]
+    fn fresh_offer_snapshot_is_cache_only_and_leaves_redemption_state_unchanged() {
+        let (mut state, icp, xaut) = redemption_state(120_000_000);
+        let now = 10_000_000_000_000;
+        for ct in [icp, xaut] {
+            state
+                .collateral_configs
+                .get_mut(&ct)
+                .unwrap()
+                .last_price_timestamp = Some(now);
+        }
+        let mut xaut_config = state.collateral_configs.get(&xaut).unwrap().clone();
+        xaut_config.redemption_fee_floor = Ratio::from(dec!(0.01));
+        xaut_config.redemption_fee_ceiling = Ratio::from(dec!(0.01));
+        state.collateral_configs.insert(xaut, xaut_config);
+        assert!(cached_redemption_offer_is_fresh(&state, now));
+        assert!(stale_redemption_candidate_types(
+            &state,
+            &super::redemption_candidate_types(&state),
+            now
+        )
+        .is_empty());
+
+        let before_vaults = vault_balances(&state);
+        let before_pending_refunds = state.pending_refunds.len();
+        let before_pending_payouts = state.pending_redemption_transfer.len();
+        let before_debt = state.total_borrowed_icusd_amount();
+        let offer = prepared_offer_from_current_state(&state, now, E8, 0).unwrap();
+        let quote = offer.quote.unwrap();
+        assert!(offer.queue.ranking_fresh);
+        assert!(quote.ranking_fresh && quote.price_fresh);
+        assert_eq!(quote.quoted_at_ns, now);
+        assert_eq!(
+            quote
+                .quoted_at_ns
+                .checked_add(quote.quote_validity_window_ns),
+            Some(now + 60 * 1_000_000_000)
+        );
+        assert_eq!(quote.fee_e8s, E8 / 100, "configured 1% fee is included");
+        assert!(quote.ledger_fee_raw > 0);
+        assert!(quote.net_collateral_raw > 0);
+        assert_eq!(vault_balances(&state), before_vaults);
+        assert_eq!(state.pending_refunds.len(), before_pending_refunds);
+        assert_eq!(state.pending_redemption_transfer.len(), before_pending_payouts);
+        assert_eq!(state.total_borrowed_icusd_amount(), before_debt);
+    }
+
+    #[test]
+    fn stale_candidate_refresh_selection_skips_fresh_competitors() {
+        let (mut state, icp, xaut) = redemption_state(120_000_000);
+        let now = 1 + REDEMPTION_PRICE_MAX_AGE_NS + 1;
+        state
+            .collateral_configs
+            .get_mut(&icp)
+            .unwrap()
+            .last_price_timestamp = Some(now);
+        let candidates = super::redemption_candidate_types(&state);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(
+            stale_redemption_candidate_types(&state, &candidates, now),
+            vec![xaut],
+            "the fresh ICP competitor must not cause an unnecessary oracle call"
+        );
+        assert_eq!(
+            super::MAX_REDEMPTION_OFFER_REFRESH_PASSES
+                * super::MAX_REDEMPTION_PRICE_CANDIDATES,
+            128,
+            "the offer refresh loop has two passes over at most 64 candidates"
+        );
+        assert_eq!(
+            super::MAX_REDEMPTION_OFFER_EXTERNAL_CALLS,
+            514,
+            "bound allows two candidate passes, two ICP-coupled LST waves, and two ICP XRC calls"
+        );
+    }
+
+    #[test]
+    fn offer_refresh_gate_has_bounded_retry_and_owner_safe_lease_recovery() {
+        let start = 1_000_000_000_000;
+        let mut gate = RedemptionOfferRefreshGateState::default();
+        let old_owner = gate.try_acquire(start).unwrap();
+        assert!(matches!(
+            gate.try_acquire(start + 1),
+            Err(crate::RedemptionOfferRefreshError::RefreshInProgress {
+                retry_after_ns
+            }) if retry_after_ns == REDEMPTION_OFFER_REFRESH_LEASE_NS - 1
+        ));
+
+        let new_start = start + REDEMPTION_OFFER_REFRESH_LEASE_NS + 1;
+        let new_owner = gate.try_acquire(new_start).unwrap();
+        gate.release(old_owner);
+        assert_eq!(gate.in_flight, Some((new_owner, new_start)));
+        gate.release(new_owner);
+        assert!(matches!(
+            gate.try_acquire(new_start + 1),
+            Err(crate::RedemptionOfferRefreshError::RefreshCooldown {
+                retry_after_ns
+            }) if retry_after_ns == REDEMPTION_OFFER_REFRESH_COOLDOWN_NS - 1
+        ));
+        assert!(gate
+            .try_acquire(new_start + REDEMPTION_OFFER_REFRESH_COOLDOWN_NS)
+            .is_ok());
     }
 }

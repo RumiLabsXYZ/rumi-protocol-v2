@@ -6189,7 +6189,10 @@ pub(crate) fn compute_redemption_fee_with_rate(
     }
     const REEDEMED_PROPORTION: Ratio = Ratio::new(dec!(0.5)); // 0.5
     let total_rate = rate + redeemed_amount / total_borrowed_icusd_amount * REEDEMED_PROPORTION;
-    debug_assert!(total_rate < Ratio::from(dec!(1.0)));
+    // Capacity searches deliberately probe values well above the executable
+    // debt limit before rejecting them. At those probes `total_rate` can exceed
+    // 1, but the configured ceiling still gives the same bounded fee result;
+    // asserting before the clamp made read-only queue/quote evaluation panic.
     total_rate.max(fee_floor).min(fee_ceiling)
 }
 
@@ -6254,6 +6257,19 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn redemption_fee_ceiling_clamps_infeasible_capacity_probe() {
+        let ceiling = Ratio::new(dec!(0.05));
+        let fee = compute_redemption_fee_with_rate(
+            ICUSD::new(10_000_000_000),
+            ICUSD::new(100_000_000),
+            Ratio::new(dec!(0.035)),
+            Ratio::new(dec!(0.003)),
+            ceiling,
+        );
+        assert_eq!(fee, ceiling);
     }
 
     #[test]

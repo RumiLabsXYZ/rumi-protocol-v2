@@ -69,6 +69,8 @@ export class ProtocolService {
   static redeemReserves = ApiClient.redeemReserves;
   static getRedemptionQueue = ApiClient.getRedemptionQueue;
   static getRedemptionQuote = ApiClient.getRedemptionQuote;
+  static getRedemptionPreview = ApiClient.getRedemptionPreview;
+  static prepareRedemptionOffer = ApiClient.prepareRedemptionOffer;
   static getRedemptionPreflight = ApiClient.getRedemptionPreflight;
   static redeemQuoted = ApiClient.redeemQuoted;
   static getReserveBalances = ApiClient.getReserveBalances;
@@ -134,6 +136,8 @@ export const protocolService = {
   redeemReserves: ProtocolService.redeemReserves,
   getRedemptionQueue: ProtocolService.getRedemptionQueue,
   getRedemptionQuote: ProtocolService.getRedemptionQuote,
+  getRedemptionPreview: ProtocolService.getRedemptionPreview,
+  prepareRedemptionOffer: ProtocolService.prepareRedemptionOffer,
   getRedemptionPreflight: ProtocolService.getRedemptionPreflight,
   redeemQuoted: ProtocolService.redeemQuoted,
   getReserveBalances: ProtocolService.getReserveBalances,
@@ -173,4 +177,3 @@ export const protocolService = {
   isAlreadyProcessingError: ProtocolService.isAlreadyProcessingError,
   isStaleProcessingState: ProtocolService.isStaleProcessingState,
 };
-

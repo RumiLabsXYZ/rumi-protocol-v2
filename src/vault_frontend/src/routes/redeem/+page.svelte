@@ -12,6 +12,8 @@
   import { getVaultCrTextColor } from '$lib/utils/vaultHealth';
   import {
     ICUSD_E8S,
+    acceptPreparedRedemptionOffer,
+    acceptedRedemptionOfferIsCurrent,
     formatUsd,
     quoteIsFresh,
     quoteMatchesAmount,
@@ -24,6 +26,8 @@
     type RedemptionQueue,
     type RedemptionQuote,
     type RedemptionPreflight,
+    type RedemptionOfferContext,
+    type AcceptedRedemptionOffer,
   } from '$lib/utils/redemptionPreview';
 
   let isConnected = false;
@@ -42,14 +46,22 @@
   let ambiguousMessage = '';
   let ambiguousNeedsRefresh = false;
 
-  let queue: RedemptionQueue | null = null;
+  let advisoryQueue: RedemptionQueue | null = null;
+  let advisoryQuote: RedemptionQuote | null = null;
+  let preparedQueue: RedemptionQueue | null = null;
+  let preparedQuote: RedemptionQuote | null = null;
+  let preparedContext: RedemptionOfferContext | null = null;
+  let offerDeclined = false;
+  let acceptedOffer: AcceptedRedemptionOffer | null = null;
+  let liveOfferLoading = false;
+  let liveOfferError = '';
+  let liveOfferNotice = '';
   let queueLoading = false;
   let queueError = '';
-  let quote: RedemptionQuote | null = null;
   let quoteLoading = false;
   let quoteError = '';
-  let quoteWalletPrincipal: string | null = null;
   let quoteRevision = 0;
+  let offerRevision = 0;
   let lastObservedAmountE8s = -1n;
   let quoteDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   let preserveSuccessMessageOnInputReset = false;
@@ -57,11 +69,22 @@
   let freshnessNowMs = Date.now();
 
   $: amountE8s = toE8s(icusdAmount);
+  $: queue = preparedQueue ?? advisoryQueue;
+  $: quote = preparedQuote ?? advisoryQuote;
+  $: quoteSource = preparedQuote ? 'live-offer' : advisoryQuote ? 'estimate' : null;
+  $: offerContext = {
+    principalText: walletPrincipal ?? '',
+    ledgerId: CONFIG.currentIcusdLedgerId,
+    walletType: $currentWalletType,
+    sessionGeneration: $walletSessionGeneration,
+    networkKey: CONFIG.host,
+  };
   $: queueRows = queue ? toQueueEntryViews(queue.entries) : [];
   $: firstRun = queueRows[0] ?? null;
   $: quoteFresh = quoteIsFresh(quote, queue, BigInt(freshnessNowMs) * 1_000_000n);
   $: quoteAmountMatches = quoteMatchesAmount(quote, amountE8s);
-  $: quoteWalletMatches = quoteWalletPrincipal === walletPrincipal;
+  $: liveOfferContextMatches = preparedContext !== null && offerContextsMatch(preparedContext, offerContext);
+  $: liveOfferUsable = quoteSource === 'live-offer' && !!quote && quoteFresh && quoteAmountMatches && liveOfferContextMatches;
   $: preflightFresh = redemptionPreflightIsFresh(
     redemptionPreflight,
     walletPrincipal,
@@ -74,7 +97,6 @@
   $: quoteNetValueUsd = quote && quote.price_usd > 0
     ? Number(quote.net_collateral_raw) / 10 ** quote.decimals * quote.price_usd
     : 0;
-  $: quoteUsable = !!quote && quoteFresh && quoteAmountMatches && quoteWalletMatches && !quoteLoading && !queueLoading;
   $: maxWalletAmount = Number(maxRedeemableInput(null, redemptionPreflight)) / Number(ICUSD_E8S);
   $: maxFirstRunAmount = firstRun
     ? Number(maxRedeemableInput(firstRun.maxInputIcusdE8s, redemptionPreflight)) / Number(ICUSD_E8S)
@@ -82,7 +104,7 @@
   $: exceedsFreshBalance = redemptionPreflight
     ? amountE8s > redemptionPreflight.balanceRaw
     : icusdAmount > icusdBalance;
-  $: canSubmit = quoteUsable && preflightFresh && !preflightLoading;
+  $: canAcceptOffer = liveOfferUsable && !offerDeclined && preflightFresh && !preflightLoading && !ambiguousNeedsRefresh;
 
   let unsubscribeWallet: (() => void) | null = null;
   unsubscribeWallet = wallet.subscribe(state => {
@@ -94,32 +116,74 @@
     walletSnapshotReady = true;
     if (principalChanged) {
       redemptionPreflight = null;
-      if (amountE8s > 0n) {
-        schedulePreview(amountE8s);
-        quoteError = 'Wallet changed. Refresh the quote before redeeming.';
-      } else {
-        invalidateQuote('Wallet changed. Refresh the quote before redeeming.');
-      }
+      acceptedOffer = null;
+      liveOfferNotice = 'Wallet changed. Check a live offer again before accepting it.';
       void refreshRedemptionPreflight();
     }
   });
+
+  function currentOfferContext(): RedemptionOfferContext {
+    return {
+      principalText: walletPrincipal ?? '',
+      ledgerId: CONFIG.currentIcusdLedgerId,
+      walletType: $currentWalletType,
+      sessionGeneration: $walletSessionGeneration,
+      networkKey: CONFIG.host,
+    };
+  }
+
+  function offerContextsMatch(a: RedemptionOfferContext, b: RedemptionOfferContext): boolean {
+    return a.principalText === b.principalText && a.ledgerId === b.ledgerId
+      && a.walletType === b.walletType && a.sessionGeneration === b.sessionGeneration
+      && a.networkKey === b.networkKey;
+  }
+
+  function snapshotAgeLabel(timestampNs: bigint | undefined): string {
+    if (timestampNs === undefined || timestampNs < 0n) return 'time unavailable';
+    const ageNs = BigInt(Date.now()) * 1_000_000n - timestampNs;
+    if (ageNs < 0n) return 'timestamp is ahead of this device clock';
+    const seconds = Number(ageNs / 1_000_000_000n);
+    if (seconds < 60) return `${seconds}s ago`;
+    if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+    return `${Math.floor(seconds / 3600)}h ago`;
+  }
+
+  function offerExpiryLabel(quote: RedemptionQuote): string {
+    const expiresNs = quote.quoted_at_ns + quote.quote_validity_window_ns;
+    const remaining = expiresNs - BigInt(Date.now()) * 1_000_000n;
+    if (remaining <= 0n) return 'expired';
+    return `expires in ${Math.max(1, Math.ceil(Number(remaining) / 1_000_000_000))}s`;
+  }
 
   function toE8s(amount: number): bigint {
     if (!Number.isFinite(amount) || amount <= 0) return 0n;
     return BigInt(Math.floor(amount * Number(ICUSD_E8S) + 1e-7));
   }
 
+  function invalidatePreparedOffer() {
+    offerRevision += 1;
+    acceptedOffer = null;
+    liveOfferLoading = false;
+    preparedQueue = null;
+    preparedQuote = null;
+    preparedContext = null;
+    offerDeclined = false;
+  }
+
   function invalidateQuote(message = '') {
     quoteRevision += 1;
-    quote = null;
-    quoteWalletPrincipal = null;
+    advisoryQuote = null;
+    invalidatePreparedOffer();
     quoteError = message;
+    liveOfferError = '';
+    liveOfferNotice = '';
     if (quoteDebounceTimer) clearTimeout(quoteDebounceTimer);
     quoteLoading = false;
   }
 
   function schedulePreview(amount: bigint) {
     invalidateQuote();
+    queueError = '';
     if (preserveSuccessMessageOnInputReset) preserveSuccessMessageOnInputReset = false;
     else successMessage = '';
     if (amount <= 0n) return;
@@ -168,83 +232,108 @@
     return /capacity|exceeds.*run|run.*exceed/i.test(message);
   }
 
+  function offerRefreshError(error: unknown): string {
+    if (error && typeof error === 'object') {
+      const variants = error as Record<string, any>;
+      const [name] = Object.keys(variants);
+      const details = variants[name];
+      const retryAfterNs = details?.retry_after_ns;
+      if (typeof retryAfterNs === 'bigint' && retryAfterNs > 0n) {
+        const seconds = Math.max(1, Math.ceil(Number(retryAfterNs) / 1_000_000_000));
+        return `A live offer is being prepared or the refresh limit was reached. Try again in about ${seconds} seconds.`;
+      }
+      if (typeof details?.message === 'string') return details.message;
+      if (name === 'CandidateLimitExceeded') {
+        return `The live order has more than ${details?.max_candidates ?? 'the allowed number of'} collateral types to refresh safely. The estimate is unchanged.`;
+      }
+      if (name === 'Protocol') return ApiClient.formatProtocolError(details);
+    }
+    try {
+      return ApiClient.formatProtocolError(error);
+    } catch {
+      return error instanceof Error ? error.message : 'The backend could not prepare a live offer. Your estimate is unchanged.';
+    }
+  }
+
+  async function checkLiveOffer(amount = amountE8s) {
+    if (amount <= 0n) {
+      liveOfferError = 'Enter an icUSD amount before checking a live offer.';
+      return;
+    }
+    invalidatePreparedOffer();
+    const revision = ++offerRevision;
+    const requestContext = currentOfferContext();
+    liveOfferLoading = true;
+    liveOfferError = '';
+    liveOfferNotice = '';
+    try {
+      const response = await protocolService.prepareRedemptionOffer(amount);
+      if (revision !== offerRevision || amount !== toE8s(icusdAmount)
+        || !offerContextsMatch(requestContext, currentOfferContext())) return;
+      if ('Err' in response) {
+        liveOfferError = offerRefreshError(response.Err);
+        return;
+      }
+
+      const refreshed = response.Ok;
+      preparedQueue = refreshed.queue;
+      advisoryQueue = refreshed.queue;
+      if ('Err' in refreshed.quote) {
+        liveOfferError = backendError(refreshed.quote.Err);
+        return;
+      }
+
+      const candidate = refreshed.quote.Ok;
+      const nowNs = BigInt(Date.now()) * 1_000_000n;
+      if (candidate.amount_e8s !== amount || !quoteIsFresh(candidate, refreshed.queue, nowNs)) {
+        liveOfferError = 'The live offer was incomplete or expired before it could be reviewed. Check for a new offer.';
+        return;
+      }
+      preparedQuote = candidate;
+      preparedContext = requestContext;
+      freshnessNowMs = Date.now();
+    } catch (error) {
+      if (revision !== offerRevision) return;
+      liveOfferError = offerRefreshError(error);
+    } finally {
+      if (revision === offerRevision) liveOfferLoading = false;
+    }
+  }
+
+  function declineLiveOffer() {
+    acceptedOffer = null;
+    offerDeclined = true;
+    liveOfferNotice = 'Offer declined. This snapshot remains visible for reference; check a new live offer before accepting another one.';
+  }
+
   async function refreshPreview(amount = amountE8s, userRequested = true) {
     if (quoteDebounceTimer) clearTimeout(quoteDebounceTimer);
     const revision = ++quoteRevision;
-    quote = null;
-    quoteWalletPrincipal = null;
     quoteError = '';
     queueError = '';
+    liveOfferError = '';
+    invalidatePreparedOffer();
     queueLoading = true;
     quoteLoading = amount > 0n;
     isLoading = true;
-    const requestedForWallet = walletPrincipal;
+    const requestedContext = currentOfferContext();
 
     try {
-      const beforeQueue = await protocolService.getRedemptionQueue();
-      if (revision !== quoteRevision || amount !== toE8s(icusdAmount) || requestedForWallet !== walletPrincipal) return;
-      queue = beforeQueue;
-      if (amount <= 0n || beforeQueue.entries.length === 0) return;
-      if (!beforeQueue.ranking_fresh) {
-        quoteError = 'The backend reports that the global collateral ranking is incomplete. Refresh later before redeeming.';
-        return;
-      }
-      if (!queueCandidatePricesFresh(beforeQueue, BigInt(Date.now()) * 1_000_000n)) {
-        quoteError = 'At least one collateral price used to rank the candidate order is older than the allowed 10-minute price age. Refresh before redeeming.';
-        return;
-      }
-
-      const response = await protocolService.getRedemptionQuote(amount);
-      if (revision !== quoteRevision || amount !== toE8s(icusdAmount) || requestedForWallet !== walletPrincipal) return;
-      if ('Err' in response) {
-        quoteError = backendError(response.Err);
-        return;
-      }
-
-      const preparedQuote = response.Ok;
-      if (preparedQuote.amount_e8s !== amount) {
-        quoteError = 'The backend returned a quote for a different amount. Refresh the quote before continuing.';
-        return;
-      }
-
-      const afterQueue = await protocolService.getRedemptionQueue();
-      if (revision !== quoteRevision || amount !== toE8s(icusdAmount) || requestedForWallet !== walletPrincipal) return;
-      const firstBefore = beforeQueue.entries[0]?.run_index;
-      const firstAfter = afterQueue.entries[0]?.run_index;
-      const firstBeforeType = beforeQueue.entries[0]?.collateral_type.toText();
-      const firstAfterType = afterQueue.entries[0]?.collateral_type.toText();
-      if (!afterQueue.ranking_fresh || !queueCandidatePricesFresh(afterQueue, BigInt(Date.now()) * 1_000_000n)) {
-        queue = afterQueue;
-        quoteError = afterQueue.ranking_fresh
-          ? 'A collateral price became stale while the quote was being prepared. Refresh before redeeming.'
-          : 'The backend reports that the global collateral ranking is incomplete. Refresh before redeeming.';
-        return;
-      }
-      if (Number(preparedQuote.run_index) !== Number(firstBefore)
-        || Number(firstAfter) !== Number(firstBefore)
-        || firstAfterType !== firstBeforeType
-        || preparedQuote.collateral_type.toText() !== firstBeforeType) {
-        queue = afterQueue;
-        quoteError = 'The redemption order changed while this quote was being prepared. Refresh the quote to see the current first run.';
-        return;
-      }
-      if (!quoteIsFresh(preparedQuote, afterQueue, BigInt(Date.now()) * 1_000_000n)) {
-        queue = afterQueue;
-        quoteError = 'The quote price or 60-second quote snapshot is stale or no longer matches the current collateral ranking. Refresh before redeeming.';
-        return;
-      }
-
-      queue = afterQueue;
-      quote = preparedQuote;
-      quoteWalletPrincipal = requestedForWallet;
+      const response = await protocolService.getRedemptionPreview(amount);
+      if (revision !== quoteRevision || amount !== toE8s(icusdAmount)
+        || !offerContextsMatch(requestedContext, currentOfferContext())) return;
+      advisoryQueue = response.queue;
+      advisoryQuote = amount > 0n && 'Ok' in response.estimate ? response.estimate.Ok : null;
+      if ('Err' in response.estimate && amount > 0n) quoteError = backendError(response.estimate.Err);
+      freshnessNowMs = Date.now();
       if (ambiguousNeedsRefresh && userRequested) {
         ambiguousNeedsRefresh = false;
-        ambiguousMessage = 'A fresh balance and quote are ready. Review them before deciding whether to submit again.';
+        ambiguousMessage = 'The estimate and wallet checks have refreshed. Check a live offer before deciding whether to redeem.';
       }
     } catch (error) {
       if (revision !== quoteRevision) return;
-      queueError = error instanceof Error ? error.message : 'Could not load the current redemption order.';
-      if (amount > 0n) quoteError = 'No current quote is available. Refresh before redeeming.';
+      queueError = error instanceof Error ? error.message : 'Could not refresh the cached redemption estimate.';
+      if (amount > 0n) quoteError = 'The cached estimate could not be refreshed. You can still check for a live offer.';
     } finally {
       if (revision === quoteRevision) {
         queueLoading = false;
@@ -344,38 +433,66 @@
     : 0;
   $: swapIsBetter = swapAdvantageUsd > 0;
 
-  async function handleRedeem() {
+  async function acceptAndRedeem() {
+    const accepted = acceptPreparedRedemptionOffer(
+      preparedQuote,
+      preparedQueue,
+      amountE8s,
+      currentOfferContext(),
+      BigInt(Date.now()) * 1_000_000n,
+    );
+    if (!accepted || !preflightFresh || !redemptionPreflight) {
+      acceptedOffer = null;
+      liveOfferNotice = !accepted
+        ? 'This live offer has expired or no longer matches the form. Check a new live offer.'
+        : 'Wallet checks expired. Refresh them before accepting this offer.';
+      return;
+    }
+    acceptedOffer = accepted;
+    await handleRedeem(accepted);
+  }
+
+  async function handleRedeem(accepted: AcceptedRedemptionOffer) {
     errorMessage = '';
     successMessage = '';
     if (!isConnected) { errorMessage = 'Connect a wallet before redeeming.'; return; }
     if (amountE8s <= 0n) { errorMessage = 'Enter a valid icUSD amount.'; return; }
     if (exceedsFreshBalance) { errorMessage = 'Your live icUSD balance is below this amount plus the required ledger fee reserve.'; return; }
-    if (!quoteUsable || !quote) { errorMessage = 'Refresh the quote before redeeming.'; return; }
+    if (!preparedQuote || !preparedQueue
+      || !acceptedRedemptionOfferIsCurrent(accepted, preparedQuote, preparedQueue, amountE8s, currentOfferContext(), BigInt(Date.now()) * 1_000_000n)) {
+      acceptedOffer = null;
+      errorMessage = 'This offer is no longer current. Check a new live offer before accepting it.';
+      return;
+    }
     if (!preflightFresh || !redemptionPreflight) { errorMessage = 'Refresh the icUSD balance, allowance, and ledger fee before redeeming.'; return; }
     if (ambiguousNeedsRefresh) { errorMessage = 'Refresh balances and the quote before choosing whether to retry.'; return; }
 
     actionInProgress = true;
     try {
       const result = await protocolService.redeemQuoted({
-        amount_e8s: quote.amount_e8s,
-        expected_collateral_type: quote.collateral_type,
-        min_net_collateral_raw: quote.net_collateral_raw,
-      }, redemptionPreflight);
+        amount_e8s: accepted.amountE8s,
+        expected_collateral_type: preparedQuote.collateral_type,
+        min_net_collateral_raw: accepted.minimumNetCollateralRaw,
+      }, redemptionPreflight, accepted);
       if (result.ambiguous) {
         ambiguousNeedsRefresh = true;
         ambiguousMessage = result.ambiguityStage === 'approval'
           ? 'The approval response was lost. The redemption call was not sent. Refresh balances and the quote before choosing whether to retry approval.'
           : result.error || 'The redemption response was lost after submission. The payout is unconfirmed. Refresh balances and redemption quote before choosing what to do next.';
-        invalidateQuote();
+        advisoryQueue = preparedQueue ?? advisoryQueue;
+        invalidatePreparedOffer();
         return;
       }
       if (!result.success) {
+        acceptedOffer = null;
         if (result.ambiguityStage === 'approval') {
           errorMessage = result.error || 'The icUSD approval was rejected. The redemption was not submitted.';
           return;
         }
         errorMessage = result.error || 'The quoted redemption was not accepted. Refresh the quote and try again.';
-        invalidateQuote('The prior quote is no longer usable. Refresh it before redeeming.');
+        advisoryQueue = preparedQueue ?? advisoryQueue;
+        invalidatePreparedOffer();
+        liveOfferNotice = 'The offer was not accepted by the backend. Check a new live offer before trying again.';
         return;
       }
 
@@ -392,11 +509,15 @@
       if (!result.sessionChangedAfterSubmission) {
         preserveSuccessMessageOnInputReset = true;
         icusdAmount = 0;
-        invalidateQuote();
+        advisoryQueue = preparedQueue ?? advisoryQueue;
+        advisoryQuote = preparedQuote ?? advisoryQuote;
+        invalidatePreparedOffer();
       } else {
         // Keep the amount and stale quote visible: a typed reply belongs to the
         // old wallet session and must not be mistaken for the newly active one.
-        invalidateQuote(result.message || 'This redemption belongs to the prior wallet session. Verify that wallet’s queue before continuing.');
+        advisoryQueue = preparedQueue ?? advisoryQueue;
+        invalidatePreparedOffer();
+        liveOfferNotice = result.message || 'This redemption belongs to the prior wallet session. Verify that wallet’s queue before continuing.';
       }
       if (!result.sessionChangedAfterSubmission) {
         await wallet.refreshBalance({ skipCache: true });
@@ -405,7 +526,9 @@
       }
     } catch (error) {
       errorMessage = error instanceof Error ? error.message : 'An unexpected error occurred while submitting the redemption.';
-      invalidateQuote('Refresh this quote before trying again.');
+      advisoryQueue = preparedQueue ?? advisoryQueue;
+      invalidatePreparedOffer();
+      liveOfferNotice = 'The submission result is uncertain. Refresh balances and check a new live offer before another redemption.';
     } finally {
       actionInProgress = false;
     }
@@ -483,6 +606,21 @@
 
           {#if quote}
             <div class="fee-breakdown">
+              <div class="offer-kind-row">
+                {#if quoteSource === 'live-offer' && liveOfferUsable}
+                  <strong>Live offer · not yet accepted</strong>
+                  <span>Updated {snapshotAgeLabel(quote.quoted_at_ns)} · {offerExpiryLabel(quote)}</span>
+                {:else if quoteSource === 'live-offer' && !liveOfferContextMatches}
+                  <strong>Offer from a previous wallet or network session</strong>
+                  <span>Check a new live offer before accepting it.</span>
+                {:else if quoteSource === 'live-offer'}
+                  <strong>Expired live offer</strong>
+                  <span>Its terms cannot be accepted. Check for a new live offer.</span>
+                {:else}
+                  <strong>Indicative estimate</strong>
+                  <span>Prices from {snapshotAgeLabel(quote.quoted_at_ns)} · not an accepted offer</span>
+                {/if}
+              </div>
               <div class="fee-row muted">
                 <span>RMR ({(quote.rmr * 100).toFixed(0)}%):</span>
                 <span>{toHumanIcusd(quote.effective_icusd_e8s)} icUSD value</span>
@@ -492,7 +630,7 @@
                 <span>{toHumanIcusd(quote.fee_e8s)} icUSD</span>
               </div>
               <div class="fee-row">
-                <span>Estimated net payout:</span>
+                <span>{quoteSource === 'live-offer' && liveOfferUsable ? 'Net payout in this offer:' : 'Indicative net payout:'}</span>
                 <span class="value-highlight">{quoteNetAmount} {quote.symbol}</span>
               </div>
               <div class="fee-row">
@@ -509,7 +647,10 @@
           {/if}
 
           {#if quoteLoading}
-            <div class="msg msg-info" role="status">Refreshing the collateral order and quote…</div>
+            <div class="msg msg-info" role="status">Refreshing the estimate…</div>
+          {/if}
+          {#if liveOfferLoading}
+            <div class="msg msg-info" role="status">Checking current prices and preparing a live offer. This does not approve or move icUSD.</div>
           {/if}
           {#if quoteError}
             <div class="msg msg-error" role="alert">
@@ -529,7 +670,20 @@
             <div class="msg msg-info" role="status">Wallet checks expired. Refresh them before redeeming.<button class="inline-action" on:click={refreshRedemptionPreflight}>Refresh wallet checks</button></div>
           {/if}
           {#if quote && !quoteFresh}
-            <div class="msg msg-error" role="alert">This quote has expired. Refresh it before redeeming.</div>
+            <div class="msg msg-info" role="status">This snapshot is only an estimate. Check a live offer before accepting or redeeming.</div>
+          {/if}
+          {#if liveOfferError}
+            <div class="msg msg-error" role="alert">
+              <span>{liveOfferError}</span>
+              {#if isCapacityError(liveOfferError) && firstRun}
+                <button class="inline-action" on:click={useMaximumForFirstRun} disabled={maxFirstRunAmount <= 0}>
+                  Use max for this run ({formatNumber(maxFirstRunAmount, 4)} icUSD)
+                </button>
+              {/if}
+            </div>
+          {/if}
+          {#if liveOfferNotice}
+            <div class="msg msg-info" role="status">{liveOfferNotice}</div>
           {/if}
           {#if ambiguousMessage}
             <div class="msg msg-info" role="status">
@@ -543,7 +697,7 @@
           {/if}
 
           <!-- Swap comparison banner (only shown when swapping gives more) -->
-          {#if quoteUsable && swapIsBetter && bestSwapQuote}
+          {#if quoteSource === 'estimate' && quoteFresh && swapIsBetter && bestSwapQuote}
             <div class="swap-banner">
               <div class="swap-banner-header">
                 <span class="swap-banner-icon">&#x2191;</span>
@@ -581,28 +735,44 @@
             <div class="msg msg-success">{successMessage}</div>
           {/if}
 
-          <!-- Submit -->
-          <button
-            class="submit-btn"
-            on:click={handleRedeem}
-            disabled={actionInProgress || !isConnected || amountE8s <= 0n || exceedsFreshBalance || !canSubmit || ambiguousNeedsRefresh}
-          >
-            {#if !isConnected}
-              Connect Wallet to Continue
-            {:else if actionInProgress}
-              Processing Redemption...
-            {:else if preflightLoading}
-              Refreshing Wallet Checks…
-            {:else if !preflightFresh}
-              Refresh Wallet Checks to Continue
-            {:else if queueLoading || quoteLoading || isLoading}
-              Preparing Quote…
-            {:else if !quoteUsable}
-              Refresh Quote to Continue
+          {#if liveOfferUsable && preparedQuote}
+            {#if offerDeclined}
+              <button id="check-live-offer" class="submit-btn" on:click={() => checkLiveOffer(amountE8s)} disabled={liveOfferLoading || actionInProgress || amountE8s <= 0n}>
+                Check a new live offer
+              </button>
             {:else}
-              Redeem icUSD
+              <button
+                class="submit-btn"
+                on:click={acceptAndRedeem}
+                disabled={actionInProgress || !isConnected || amountE8s <= 0n || exceedsFreshBalance || !canAcceptOffer}
+              >
+                {#if actionInProgress}
+                  Processing accepted offer…
+                {:else if !isConnected}
+                  Connect Wallet to Accept
+                {:else if preflightLoading || !preflightFresh}
+                  Refresh Wallet Checks to Continue
+                {:else}
+                  Accept and redeem
+                {/if}
+              </button>
+              <button class="decline-offer" on:click={declineLiveOffer} disabled={actionInProgress}>Decline</button>
+              <p class="offer-acceptance-note">Accepting authorizes this exact amount, collateral, and minimum payout. Your wallet may ask you to approve icUSD before the redemption is submitted.</p>
             {/if}
-          </button>
+          {:else}
+            <button
+              id="check-live-offer"
+              class="submit-btn"
+              on:click={() => checkLiveOffer(amountE8s)}
+              disabled={liveOfferLoading || actionInProgress || amountE8s <= 0n || ambiguousNeedsRefresh}
+            >
+              {#if liveOfferLoading}
+                Checking live offer…
+              {:else}
+                Check live offer
+              {/if}
+            </button>
+          {/if}
         </div>
       </div>
 
@@ -635,9 +805,10 @@
           <div>
           <h2 id="redemption-queue-heading">Eligible collateral on deck</h2>
             <p class="queue-subtitle">Eligible debt-backed supported ICRC collateral, grouped into consecutive same-collateral runs in weakest-health-first order. Native XRP is not included.</p>
+            {#if queue}<p class="queue-subtitle">Snapshot updated {snapshotAgeLabel(queue.observed_at_ns)}. The order may change before a live offer is prepared.</p>{/if}
           </div>
-          <button class="queue-refresh" on:click={() => refreshPreview(amountE8s, true)} disabled={queueLoading || quoteLoading}>
-            Refresh order
+          <button class="queue-refresh" on:click={() => refreshPreview(amountE8s, true)} disabled={queueLoading || quoteLoading || liveOfferLoading}>
+            Refresh estimate
           </button>
         </div>
 
@@ -658,15 +829,15 @@
           {#if !queueCandidatePricesFresh(queue, BigInt(freshnessNowMs) * 1_000_000n)}
             <div class="queue-state queue-state-error" role="alert">
               {#if !queue.ranking_fresh}
-                The backend cannot provide a complete collateral ranking. Refresh before relying on these rows or redeeming; the candidate set or its price data may be incomplete.
+                The backend cannot provide a complete collateral ranking. These rows are estimates only; check a live offer to refresh the prices before accepting anything.
               {:else}
-                At least one price used to rank the candidate order is older than the allowed 10-minute price age. Refresh before relying on this order.
+                At least one price used to rank this order is older than the allowed 10-minute price age. Check a live offer to refresh it before relying on the order.
               {/if}
             </div>
           {/if}
           <ol class="queue-list">
             {#each queueRows as row (row.runIndex)}
-              <li class="queue-entry" class:first-run={row.runIndex === queueRows[0]?.runIndex} class:quoted-run={quoteUsable && quote?.run_index === row.runIndex}>
+              <li class="queue-entry" class:first-run={row.runIndex === queueRows[0]?.runIndex} class:quoted-run={liveOfferUsable && quote?.run_index === row.runIndex}>
                 <div class="queue-entry-top">
                   <div class="queue-token">
                     <span class="queue-rank">{row.runIndex + 1}</span>
@@ -674,7 +845,7 @@
                     {#if queueRows.slice(0, row.runIndex).some(previous => previous.symbol === row.symbol)}
                       <span class="queue-repeat">later run</span>
                     {/if}
-                    {#if quoteUsable && quote?.run_index === row.runIndex}<span class="queue-selected">quoted</span>{/if}
+                    {#if liveOfferUsable && quote?.run_index === row.runIndex}<span class="queue-selected">live offer</span>{/if}
                   </div>
                   <div class="queue-health">
                     <span class="health-dot" style="background:{getVaultCrTextColor(row.weakestVaultCr, row.minCr, row.liquidationCr)}"></span>
@@ -702,7 +873,7 @@
                   {:else}
                     Price is stale; this run cannot be quoted right now.
                   {/if}
-                  · {row.runIndex === 0 ? 'This is the run quoted by the form above.' : 'A later row requires its own call after the queue is refreshed.'}
+                  · {row.runIndex === 0 ? 'This is the first run in the displayed snapshot.' : 'A later row requires its own call after the queue is refreshed.'}
                 </div>
               </li>
             {/each}
@@ -916,6 +1087,21 @@
     color: #fbbf24;
     margin-top: 0.25rem;
   }
+  .offer-kind-row {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    margin-bottom: 0.2rem;
+    font-size: 0.75rem;
+  }
+  .offer-kind-row strong { color: var(--rumi-text-primary); }
+  .offer-kind-row span { color: var(--rumi-text-muted); font-size: 0.6875rem; }
+  .offer-acceptance-note {
+    margin: 0;
+    color: var(--rumi-text-muted);
+    font-size: 0.6875rem;
+    line-height: 1.45;
+  }
   .value-highlight {
     font-weight: 600;
     color: var(--rumi-text-primary);
@@ -1031,6 +1217,16 @@
     opacity: 0.45;
     cursor: not-allowed;
   }
+  .decline-offer {
+    width: 100%;
+    padding: 0.5rem 1rem;
+    border: 1px solid var(--rumi-border);
+    border-radius: 0.5rem;
+    background: var(--rumi-bg-surface2);
+    color: var(--rumi-text-secondary);
+    cursor: pointer;
+  }
+  .decline-offer:disabled { opacity: 0.45; cursor: not-allowed; }
 
   /* ── How it works ──────────────────────────────────────────────── */
   .how-it-works {
