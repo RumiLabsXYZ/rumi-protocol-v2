@@ -19,7 +19,11 @@
     validateEthereumAddress,
   } from '$lib/services/ckerc20Minter';
 
-  type Eip1193Provider = { request(args: { method: string; params?: unknown[] }): Promise<any> };
+  type Eip1193Provider = {
+    request(args: { method: string; params?: unknown[] }): Promise<any>;
+    on?: (event: string, listener: (...args: any[]) => void) => void;
+    removeListener?: (event: string, listener: (...args: any[]) => void) => void;
+  };
 
   function getEthereumProvider(): Eip1193Provider | undefined {
     return (window as Window & { ethereum?: Eip1193Provider }).ethereum;
@@ -30,6 +34,10 @@
   let activeTab: 'mint' | 'redeem' = 'mint';
   let evmAccount = '';
   let evmMessage = '';
+  let usdcBalance: bigint | null = null;
+  let usdcBalanceBusy = false;
+  let usdcBalanceError = '';
+  let usdcBalanceRequestId = 0;
   let minterReady = false;
   let minterError = '';
   let helperAddress = '';
@@ -53,6 +61,9 @@
 
   const unsubs: Array<() => void> = [];
   let previousPrincipal = '';
+  let ethereumProvider: Eip1193Provider | undefined;
+  let accountChangedListener: ((accounts: unknown) => void) | null = null;
+  let chainChangedListener: ((chainId: unknown) => void) | null = null;
 
   function depositStorageKey(evm: string, principal: string) {
     return `rumi:ckusdc:pending-deposit:${evm.toLowerCase()}:${principal}`;
@@ -154,19 +165,95 @@
       }
       if (value && !value.isAnonymous()) void loadMinterInfo(value);
     }));
-    const provider = getEthereumProvider();
-    provider?.request({ method: 'eth_accounts' }).then((accounts) => {
-      if (Array.isArray(accounts) && accounts[0]) { evmAccount = String(accounts[0]); syncPendingDeposit(); }
-    }).catch(() => {});
-    provider?.request({ method: 'eth_chainId' }).then((chainId) => {
-      if (chainId !== '0x1') evmMessage = 'Choose Ethereum Mainnet in your EVM wallet.';
-    }).catch(() => {});
+    ethereumProvider = getEthereumProvider();
+    accountChangedListener = (accounts) => {
+      usdcBalanceRequestId += 1;
+      usdcBalanceBusy = false;
+      evmAccount = Array.isArray(accounts) && accounts[0] ? String(accounts[0]) : '';
+      syncPendingDeposit();
+      usdcBalance = null;
+      usdcBalanceError = '';
+      evmMessage = '';
+      if (evmAccount) void refreshUsdcBalance(evmAccount);
+    };
+    chainChangedListener = (chainId) => {
+      usdcBalanceRequestId += 1;
+      usdcBalanceBusy = false;
+      usdcBalance = null;
+      usdcBalanceError = '';
+      if (chainId === '0x1') {
+        evmMessage = '';
+        if (evmAccount) void refreshUsdcBalance(evmAccount);
+      } else {
+        evmMessage = 'Choose Ethereum Mainnet in your EVM wallet to read USDC and deposit.';
+      }
+    };
+    ethereumProvider?.on?.('accountsChanged', accountChangedListener);
+    ethereumProvider?.on?.('chainChanged', chainChangedListener);
+    void (async () => {
+      try {
+        const [accounts, chainId] = await Promise.all([
+          ethereumProvider?.request({ method: 'eth_accounts' }),
+          ethereumProvider?.request({ method: 'eth_chainId' }),
+        ]);
+        if (destroyed) return;
+        evmAccount = Array.isArray(accounts) && accounts[0] ? String(accounts[0]) : '';
+        syncPendingDeposit();
+        if (chainId === '0x1') {
+          evmMessage = '';
+          if (evmAccount) await refreshUsdcBalance(evmAccount);
+        } else if (evmAccount) {
+          evmMessage = 'Choose Ethereum Mainnet in your EVM wallet to read USDC and deposit.';
+        }
+      } catch { /* A missing or locked EVM wallet is handled when the user connects. */ }
+    })();
   });
 
   onDestroy(() => {
     destroyed = true;
     unsubs.forEach((unsubscribe) => unsubscribe());
+    if (accountChangedListener) ethereumProvider?.removeListener?.('accountsChanged', accountChangedListener);
+    if (chainChangedListener) ethereumProvider?.removeListener?.('chainChanged', chainChangedListener);
   });
+
+  async function refreshUsdcBalance(account = evmAccount) {
+    const provider = getEthereumProvider();
+    if (!provider || !account) return;
+    const requestId = ++usdcBalanceRequestId;
+    usdcBalanceBusy = true;
+    usdcBalanceError = '';
+    try {
+      const chainId = await provider.request({ method: 'eth_chainId' });
+      if (chainId !== '0x1') {
+        if (requestId === usdcBalanceRequestId) {
+          usdcBalance = null;
+          evmMessage = 'Choose Ethereum Mainnet in your EVM wallet to read USDC and deposit.';
+        }
+        return;
+      }
+      const data = `0x70a08231${encodeAddressWord(account)}`;
+      const rawBalance = await provider.request({ method: 'eth_call', params: [{ to: CKUSDC.erc20Address, data }, 'latest'] });
+      if (typeof rawBalance !== 'string' || !/^0x[0-9a-fA-F]+$/.test(rawBalance)) {
+        throw new Error('The Ethereum wallet returned an invalid USDC balance.');
+      }
+      if (!destroyed && requestId === usdcBalanceRequestId && evmAccount.toLowerCase() === account.toLowerCase()) {
+        usdcBalance = BigInt(rawBalance);
+        evmMessage = '';
+      }
+    } catch (cause) {
+      if (!destroyed && requestId === usdcBalanceRequestId) {
+        usdcBalance = null;
+        usdcBalanceError = cause instanceof Error ? cause.message : 'Could not read USDC balance from Ethereum.';
+      }
+    } finally {
+      if (requestId === usdcBalanceRequestId) usdcBalanceBusy = false;
+    }
+  }
+
+  function setMaxDeposit() {
+    if (usdcBalance === null || usdcBalance <= 0n) return;
+    depositAmount = formatTokenAmount(usdcBalance, CKUSDC.decimals, CKUSDC.decimals);
+  }
 
   async function loadMinterInfo(principal: Principal) {
     minterError = '';
@@ -227,6 +314,7 @@
       }
       evmAccount = String(accounts[0]);
       syncPendingDeposit();
+      await refreshUsdcBalance(evmAccount);
     } catch (cause) {
       evmMessage = cause instanceof Error ? cause.message : 'EVM wallet connection was not completed.';
     }
@@ -489,6 +577,14 @@
 
       <label class="field-label" for="deposit-amount">USDC amount</label>
       <div class="amount-input"><input id="deposit-amount" type="text" inputmode="decimal" autocomplete="off" placeholder="0.00" bind:value={depositAmount} disabled={busy} /><span>USDC</span></div>
+      <div class="amount-meta">
+        <span>{!evmAccount ? 'Connect an Ethereum wallet to view its USDC balance' : usdcBalanceBusy ? 'Reading wallet balance…' : usdcBalance === null ? 'USDC wallet balance unavailable' : `Wallet balance: ${formatTokenAmount(usdcBalance, CKUSDC.decimals)} USDC`}</span>
+        <div class="amount-actions">
+          <button class="text-button" on:click={() => refreshUsdcBalance()} disabled={!evmAccount || usdcBalanceBusy || busy}>{usdcBalanceBusy ? 'Refreshing…' : 'Refresh'}</button>
+          <button class="text-button" on:click={setMaxDeposit} disabled={usdcBalance === null || usdcBalance <= 0n || busy}>Max</button>
+        </div>
+      </div>
+      {#if usdcBalanceError}<p class="inline-hint">Could not read the Ethereum USDC balance: {usdcBalanceError}</p>{/if}
       <div class="destination"><span class="label">CKUSDC WILL BE MINTED TO</span><code>{connected && ownerPrincipal ? ownerPrincipal.toText() : 'Connect a Rumi wallet to choose the recipient'}</code></div>
 
       <div class="wallet-row">
@@ -562,6 +658,9 @@
   .steps .step-current { color: #59d9b0; white-space: nowrap; }
   .field-label { display: block; margin: 20px 0 8px; color: #d8d4e7; font-size: 14px; font-weight: 700; }
   .amount-input { height: 58px; display: flex; align-items: center; padding: 0 16px; border: 1px solid #242c43; border-radius: 10px; background: #0d1222; }
+  .amount-meta { display: flex; justify-content: space-between; align-items: center; gap: 12px; min-height: 30px; color: #8f8aa1; font-size: 12px; }
+  .amount-actions { display: flex; align-items: center; gap: 18px; }
+  .amount-actions .text-button { margin: 0; }
   input { min-width: 0; width: 100%; color: #f1edff; background: transparent; border: 0; outline: none; font-size: 18px; }
   .amount-input span { color: #a4a0b3; font-weight: 700; }
   .destination { display: grid; gap: 8px; margin: 18px 0; padding: 14px 16px; background: #0b1020; border-radius: 10px; }
