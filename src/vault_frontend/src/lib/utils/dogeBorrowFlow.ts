@@ -386,7 +386,7 @@ export function disconnectedWalletCopy(): string {
 }
 
 export function betaRiskNotice(): string {
-  return 'ckDOGE is in beta. Bridging can have bugs, so do not send more DOGE than you can afford to have stuck. There are no security or timing guarantees, but this rail is actively monitored.';
+  return 'ckDOGE is in beta. The minter can have bugs, so do not send more DOGE than you can afford to have stuck. There are no security or timing guarantees, but this rail is actively monitored.';
 }
 
 /**

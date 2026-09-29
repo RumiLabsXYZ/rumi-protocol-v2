@@ -103,7 +103,8 @@
   <div class="footer-inner">
     <div class="footer-links">
       <a href="/redeem" class="footer-link">Redeem</a>
-      <a href="/doge" class="footer-link">ckDOGE Bridge</a>
+      <a href="/doge" class="footer-link">ckDOGE Minter</a>
+      <a href="/ckusdc" class="footer-link">ckUSDC Minter</a>
       <a href="/doge/borrow" class="footer-link">Borrow with DOGE</a>
       <a href="/liquidations?tab=manual" class="footer-link">Liquidate{#if hasLiquidatableVaults}<span class="liq-alert-dot"></span>{/if}</a>
       <a href="/transparency" class="footer-link">Transparency</a>

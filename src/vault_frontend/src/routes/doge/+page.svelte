@@ -498,11 +498,11 @@
         <span class="doge-logo-fallback" aria-hidden="true">ckÐ</span>
       {/if}
     </div>
-    <h1>ckDOGE Bridge</h1>
+    <h1>ckDOGE Minter</h1>
     <p class="doge-subtitle">Move DOGE onto the Internet Computer and back.</p>
   </div>
 
-  <div class="doge-tabs" role="tablist" aria-label="ckDOGE bridge direction">
+  <div class="doge-tabs" role="tablist" aria-label="ckDOGE minter direction">
     <button
       role="tab"
       id="doge-tab-mint"
