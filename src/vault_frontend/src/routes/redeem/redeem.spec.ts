@@ -250,6 +250,25 @@ describe('redemption route quote and queue safety', () => {
 		expect(host.textContent).toContain('Accept and redeem');
 	});
 
+	it('labels cached estimates with source-price age, not quote calculation time', async () => {
+		const stalePriceTimestamp = nowNs - 15n * 60n * 1_000_000_000n;
+		const queue = makeQueue(nowNs);
+		queue.ranking_fresh = false;
+		queue.entries[0] = { ...queue.entries[0], price_timestamp_ns: stalePriceTimestamp, price_fresh: false };
+		const quote = makeQuote(100_000_000n, nowNs, queue.entries[0].symbol, queue.entries[0].collateral_type);
+		quote.price_timestamp_ns = stalePriceTimestamp;
+		quote.price_fresh = false;
+		mocks.getRedemptionPreview.mockResolvedValue({ queue, estimate: { Ok: quote } });
+
+		render();
+		await settle();
+		await setAmount('1');
+
+		expect(host.textContent).toContain('Price data from 15m ago');
+		expect(host.textContent).not.toContain('Prices from 1s ago');
+		expect(host.textContent).toContain('not an accepted offer');
+	});
+
 	it('ignores a slower cached preview after the amount changes', async () => {
 		const oldPreview = deferred<ReturnType<typeof makePreview>>();
 		mocks.getRedemptionPreview.mockImplementation(async (amount: bigint) => amount === 1_000_000_000n ? oldPreview.promise : makePreview(amount));
