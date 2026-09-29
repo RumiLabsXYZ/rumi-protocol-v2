@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Principal } from '@dfinity/principal';
+import { get } from 'svelte/store';
 
 /**
  * Boundary tests for the action-bound (identity/session-pinned) mutating
@@ -21,6 +22,8 @@ const mocks = vi.hoisted(() => ({
   anonAllowance: vi.fn(),
   anonBalance: vi.fn(),
   ledgerFee: vi.fn(),
+  getRedemptionPreview: vi.fn(),
+  prepareRedemptionOffer: vi.fn(),
   getSignerAgent: vi.fn(),
   walletState: { isConnected: true, principal: null as any },
   // Literal, not sourced from '../../config': vi.mock factories are hoisted
@@ -40,6 +43,8 @@ vi.mock('@dfinity/agent', async () => {
         icrc2_allowance: mocks.anonAllowance,
         icrc1_balance_of: mocks.anonBalance,
         icrc1_fee: mocks.ledgerFee,
+        get_redemption_preview: mocks.getRedemptionPreview,
+        prepare_redemption_offer: mocks.prepareRedemptionOffer,
       })),
     },
     HttpAgent: vi.fn(() => ({ fetchRootKey: vi.fn().mockResolvedValue(undefined) })),
@@ -84,6 +89,7 @@ import {
   type BoundOpenVaultAndBorrowResult,
   type BoundBorrowFromVaultResult,
 } from './apiClient';
+import type { AcceptedRedemptionOffer } from '$lib/utils/redemptionPreview';
 import { walletOperations, StaleActionSessionError, type ActionBoundContext } from './walletOperations';
 
 const CKDOGE_LEDGER_ID = CANISTER_IDS.CKDOGE_LEDGER;
@@ -101,6 +107,26 @@ const PRINCIPAL_B = Principal.fromUint8Array(new Uint8Array([2, 2, 2, 2])).toTex
 function setLivePrincipal(text: string | null) {
   mocks.walletState.principal = text ? Principal.fromText(text) : null;
   mocks.walletState.isConnected = !!text;
+}
+
+function acceptedOfferFor(request: {
+  amount_e8s: bigint;
+  expected_collateral_type: Principal;
+  min_net_collateral_raw: bigint;
+}, expiryNs = BigInt(Date.now() + 60_000) * 1_000_000n): AcceptedRedemptionOffer {
+  return {
+    amountE8s: request.amount_e8s,
+    collateralTypeText: request.expected_collateral_type.toText(),
+    minimumNetCollateralRaw: request.min_net_collateral_raw,
+    validUntilNs: expiryNs,
+    context: {
+      principalText: PRINCIPAL_A,
+      ledgerId: CONFIG.currentIcusdLedgerId,
+      walletType: get(currentWalletType),
+      sessionGeneration: get(walletSessionGeneration),
+      networkKey: CONFIG.host,
+    },
+  };
 }
 
 /** A context that is current until `live` is flipped false — models both an
@@ -152,6 +178,8 @@ beforeEach(() => {
   mocks.anonAllowance.mockResolvedValue({ allowance: 0n });
   mocks.anonBalance.mockResolvedValue(100_000_000_000n);
   mocks.ledgerFee.mockResolvedValue(100_000n);
+  mocks.getRedemptionPreview.mockReset().mockResolvedValue({ queue: { entries: [] }, estimate: { Err: { RedemptionQuoteUnavailable: 'test' } } });
+  mocks.prepareRedemptionOffer.mockReset().mockResolvedValue({ Err: { RefreshCooldown: { retry_after_ns: 1n } } });
   mocks.getSignerAgent.mockResolvedValue(null);
 
   setLivePrincipal(PRINCIPAL_A);
@@ -334,10 +362,63 @@ describe('ApiClient.redeemQuoted — bounded ICRC-2 allowance and submission out
     min_net_collateral_raw: 100_000n,
   };
 
+  it('loads cached advisory preview through the generated public query without ledger or wallet actions', async () => {
+    const preview = { queue: { entries: [] }, estimate: { Err: { RedemptionQuoteUnavailable: 'stale price' } } };
+    mocks.getRedemptionPreview.mockResolvedValue(preview);
+
+    const result = await ApiClient.getRedemptionPreview(request.amount_e8s);
+
+    expect(result).toEqual(preview);
+    expect(mocks.getRedemptionPreview).toHaveBeenCalledWith(request.amount_e8s);
+    expect(mocks.prepareRedemptionOffer).not.toHaveBeenCalled();
+    expect(mocks.anonAllowance).not.toHaveBeenCalled();
+    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+    expect(backendActor.redeem_quoted).not.toHaveBeenCalled();
+  });
+
+  it('prepares a live offer through the anonymous update without reading allowance or submitting', async () => {
+    const response = { Ok: { queue: { entries: [] }, quote: { Err: { RedemptionCapacityExceeded: { max_input_icusd_e8s: 1n } } } } };
+    mocks.prepareRedemptionOffer.mockResolvedValue(response);
+
+    const result = await ApiClient.prepareRedemptionOffer(request.amount_e8s);
+
+    expect(result).toEqual(response);
+    expect(mocks.prepareRedemptionOffer).toHaveBeenCalledWith(request.amount_e8s);
+    expect(mocks.getRedemptionPreview).not.toHaveBeenCalled();
+    expect(mocks.anonAllowance).not.toHaveBeenCalled();
+    expect(mocks.anonBalance).not.toHaveBeenCalled();
+    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+    expect(backendActor.redeem_quoted).not.toHaveBeenCalled();
+  });
+
+  it('fails before any ledger read, approval, or submit when no accepted offer is provided', async () => {
+    const result = await ApiClient.redeemQuoted(request, undefined, null as unknown as AcceptedRedemptionOffer);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Accept a fresh live offer');
+    expect(mocks.anonAllowance).not.toHaveBeenCalled();
+    expect(mocks.anonBalance).not.toHaveBeenCalled();
+    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+    expect(backendActor.redeem_quoted).not.toHaveBeenCalled();
+  });
+
+  it('fails before any ledger read when accepted amount, collateral, or minimum differs from the request', async () => {
+    const accepted = acceptedOfferFor(request);
+    const result = await ApiClient.redeemQuoted(request, undefined, {
+      ...accepted,
+      minimumNetCollateralRaw: request.min_net_collateral_raw + 1n,
+    });
+
+    expect(result.success).toBe(false);
+    expect(mocks.anonAllowance).not.toHaveBeenCalled();
+    expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
+    expect(backendActor.redeem_quoted).not.toHaveBeenCalled();
+  });
+
   it('approves the exact requested icUSD amount before submission when allowance is absent', async () => {
     mocks.anonAllowance.mockResolvedValue({ allowance: 0n });
 
-    const result = await ApiClient.redeemQuoted(request);
+    const result = await ApiClient.redeemQuoted(request, undefined, acceptedOfferFor(request));
 
     expect(ledgerActor.icrc2_approve).toHaveBeenCalledOnce();
     expect(ledgerActor.icrc2_approve).toHaveBeenCalledWith(expect.objectContaining({
@@ -354,7 +435,7 @@ describe('ApiClient.redeemQuoted — bounded ICRC-2 allowance and submission out
   it('skips approval when the existing allowance covers the quoted amount', async () => {
     mocks.anonAllowance.mockResolvedValue({ allowance: request.amount_e8s + 100_000n });
 
-    const result = await ApiClient.redeemQuoted(request);
+    const result = await ApiClient.redeemQuoted(request, undefined, acceptedOfferFor(request));
 
     expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
     expect(backendActor.redeem_quoted).toHaveBeenCalledOnce();
@@ -368,7 +449,7 @@ describe('ApiClient.redeemQuoted — bounded ICRC-2 allowance and submission out
       return { Ok: 3n };
     });
 
-    const result = await ApiClient.redeemQuoted(request);
+    const result = await ApiClient.redeemQuoted(request, undefined, acceptedOfferFor(request));
 
     expect(ledgerActor.icrc2_approve).toHaveBeenCalledOnce();
     expect(backendActor.redeem_quoted).not.toHaveBeenCalled();
@@ -383,18 +464,34 @@ describe('ApiClient.redeemQuoted — bounded ICRC-2 allowance and submission out
       return { Ok: 3n };
     });
 
-    const result = await ApiClient.redeemQuoted(request);
+    const result = await ApiClient.redeemQuoted(request, undefined, acceptedOfferFor(request));
 
     expect(backendActor.redeem_quoted).not.toHaveBeenCalled();
     expect(result.success).toBe(false);
     expect(result.ambiguous).toBeUndefined();
   });
 
+  it('does not dispatch after approval finishes if the accepted offer expired during the approval await', async () => {
+    mocks.anonAllowance.mockResolvedValue({ allowance: 0n });
+    ledgerActor.icrc2_approve.mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return { Ok: 3n };
+    });
+    const accepted = acceptedOfferFor(request, BigInt(Date.now() + 5) * 1_000_000n);
+
+    const result = await ApiClient.redeemQuoted(request, undefined, accepted);
+
+    expect(ledgerActor.icrc2_approve).toHaveBeenCalledOnce();
+    expect(backendActor.redeem_quoted).not.toHaveBeenCalled();
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('offer expired');
+  });
+
   it('preserves the approval fee when checking a first-use maximum balance', async () => {
     mocks.anonAllowance.mockResolvedValue({ allowance: 0n });
     mocks.anonBalance.mockResolvedValue(request.amount_e8s + 100_000n);
 
-    const result = await ApiClient.redeemQuoted(request);
+    const result = await ApiClient.redeemQuoted(request, undefined, acceptedOfferFor(request));
 
     expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
     expect(backendActor.redeem_quoted).not.toHaveBeenCalled();
@@ -406,7 +503,7 @@ describe('ApiClient.redeemQuoted — bounded ICRC-2 allowance and submission out
     mocks.anonAllowance.mockResolvedValue({ allowance: 0n });
     ledgerActor.icrc2_approve.mockRejectedValue(new Error('approval reply timed out'));
 
-    const result = await ApiClient.redeemQuoted(request);
+    const result = await ApiClient.redeemQuoted(request, undefined, acceptedOfferFor(request));
 
     expect(backendActor.redeem_quoted).not.toHaveBeenCalled();
     expect(result).toMatchObject({ success: false, ambiguous: true, ambiguityStage: 'approval' });
@@ -416,7 +513,7 @@ describe('ApiClient.redeemQuoted — bounded ICRC-2 allowance and submission out
     localStorage.setItem('rumi_last_wallet', 'oisy');
     currentWalletType.set(WALLET_TYPES.OISY);
 
-    const result = await ApiClient.redeemQuoted(request);
+    const result = await ApiClient.redeemQuoted(request, undefined, acceptedOfferFor(request));
 
     expect(mocks.getSignerAgent).not.toHaveBeenCalled();
     expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
@@ -439,7 +536,7 @@ describe('ApiClient.redeemQuoted — bounded ICRC-2 allowance and submission out
       feeRaw: -1n,
     };
 
-    const result = await ApiClient.redeemQuoted(request, preparedPreflight);
+    const result = await ApiClient.redeemQuoted(request, preparedPreflight, acceptedOfferFor(request));
 
     expect(mocks.getSignerAgent).not.toHaveBeenCalled();
     expect(ledgerActor.icrc2_approve).not.toHaveBeenCalled();
@@ -461,7 +558,7 @@ describe('ApiClient.redeemQuoted — bounded ICRC-2 allowance and submission out
       feeRaw: 100_000n,
     };
 
-    const result = await ApiClient.redeemQuoted(request, preparedPreflight);
+    const result = await ApiClient.redeemQuoted(request, preparedPreflight, acceptedOfferFor(request));
 
     expect(mocks.getSignerAgent).toHaveBeenCalledOnce();
     expect(mocks.anonAllowance).not.toHaveBeenCalled();
@@ -488,7 +585,7 @@ describe('ApiClient.redeemQuoted — bounded ICRC-2 allowance and submission out
       feeRaw: 100_000n,
     };
 
-    const result = await ApiClient.redeemQuoted(request, preparedPreflight);
+    const result = await ApiClient.redeemQuoted(request, preparedPreflight, acceptedOfferFor(request));
 
     expect(backendActor.redeem_quoted).toHaveBeenCalledOnce();
     expect(mocks.anonBalance).not.toHaveBeenCalled();
@@ -516,7 +613,7 @@ describe('ApiClient.redeemQuoted — bounded ICRC-2 allowance and submission out
       };
     });
 
-    const result = await ApiClient.redeemQuoted(request);
+    const result = await ApiClient.redeemQuoted(request, undefined, acceptedOfferFor(request));
 
     expect(result).toMatchObject({
       success: true,

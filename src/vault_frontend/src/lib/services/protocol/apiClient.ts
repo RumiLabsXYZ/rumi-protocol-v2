@@ -40,10 +40,14 @@ import type {
 } from '../types';
 import type {
   RedemptionQueue,
+  RedemptionPreview,
   RedemptionQuoteResult,
+  RedemptionOfferRefreshResult,
   RedemptionQuotedRequest,
   RedemptionResultVariant,
+  AcceptedRedemptionOffer,
 } from '$lib/utils/redemptionPreview';
+import { acceptedRedemptionOfferTermsAreCurrent } from '$lib/utils/redemptionPreview';
 import { RequestDeduplicator } from '../RequestDeduplicator';
 import { collateralStore } from '$lib/stores/collateralStore';
 import {
@@ -404,6 +408,7 @@ private static async refreshVaultData(): Promise<void> {
    */
   static getPublicData(method: 'get_redemption_queue'): ReturnType<_SERVICE['get_redemption_queue']>;
   static getPublicData(method: 'get_redemption_quote', amountE8s: bigint): ReturnType<_SERVICE['get_redemption_quote']>;
+  static getPublicData(method: 'get_redemption_preview', amountE8s: bigint): ReturnType<_SERVICE['get_redemption_preview']>;
   static async getPublicData<T>(method: keyof typeof publicActor, ...args: any[]): Promise<T>;
   static async getPublicData<T>(
     method: keyof typeof publicActor,
@@ -3202,6 +3207,16 @@ static async repayToVaultWithStable(
     return ApiClient.getPublicData('get_redemption_queue');
   }
 
+  /** Read a cached redemption snapshot for an indicative estimate only. */
+  static async getRedemptionPreview(amountE8s: bigint): Promise<RedemptionPreview> {
+    return ApiClient.getPublicData('get_redemption_preview', amountE8s);
+  }
+
+  /** Refresh stale candidate prices and prepare a no-funds live offer. */
+  static async prepareRedemptionOffer(amountE8s: bigint): Promise<RedemptionOfferRefreshResult> {
+    return publicActor.prepare_redemption_offer(amountE8s);
+  }
+
   /** Read the exact quote for the first currently eligible redemption run. */
   static async getRedemptionQuote(amountE8s: bigint): Promise<RedemptionQuoteResult> {
     return ApiClient.getPublicData('get_redemption_quote', amountE8s);
@@ -3257,7 +3272,8 @@ static async repayToVaultWithStable(
   /** Submit a quote-bound direct-vault redemption. A successful result means queued, not delivered. */
   static async redeemQuoted(
     request: RedemptionQuotedRequest,
-    preparedPreflight?: RedemptionPreflight
+    preparedPreflight: RedemptionPreflight | undefined,
+    acceptedOffer: AcceptedRedemptionOffer,
   ): Promise<RedeemQuotedResult> {
     let submissionDispatched = false;
     let submissionReplyObserved = false;
@@ -3269,6 +3285,27 @@ static async repayToVaultWithStable(
       const expectedOisy = expectedWalletType === WALLET_TYPES.OISY;
       if (!walletState.isConnected || !expectedPrincipalText || !expectedWalletType) {
         return { success: false, error: 'Connect a wallet before redeeming.' };
+      }
+      const acceptedOfferIsCurrent = () => {
+        const currentWallet = get(walletStore);
+        const currentWalletTypeValue = get(currentWalletType);
+        const currentPrincipalText = currentWallet.principal?.toText() ?? '';
+        return currentWallet.isConnected && acceptedRedemptionOfferTermsAreCurrent(
+          acceptedOffer,
+          request.amount_e8s,
+          request.expected_collateral_type.toText(),
+          request.min_net_collateral_raw,
+          {
+            principalText: currentPrincipalText,
+            ledgerId: CONFIG.currentIcusdLedgerId,
+            walletType: currentWalletTypeValue,
+            sessionGeneration: get(walletSessionGeneration),
+            networkKey: CONFIG.host,
+          },
+        );
+      };
+      if (!acceptedOfferIsCurrent()) {
+        return { success: false, error: 'Accept a fresh live offer for this amount, asset, wallet, and network before redeeming.' };
       }
       const actionContext: ActionBoundContext = {
         expectedPrincipalText,
@@ -3286,6 +3323,9 @@ static async repayToVaultWithStable(
         ? preparedPreflight
         : await ApiClient.getRedemptionPreflight();
       assertActionBoundContextCurrent(actionContext);
+      if (!acceptedOfferIsCurrent()) {
+        return { success: false, error: 'The accepted live offer expired or changed before approval. Check and accept a new offer.' };
+      }
       if (!preflight
         || preflight.principalText !== expectedPrincipalText
         || preflight.walletType !== expectedWalletType
@@ -3325,14 +3365,23 @@ static async repayToVaultWithStable(
       if (expectedOisy) {
         await pnp.getSignerAgent();
         assertActionBoundContextCurrent(actionContext);
+        if (!acceptedOfferIsCurrent()) {
+          return { success: false, error: 'The accepted live offer expired while preparing the wallet. Check and accept a new offer.' };
+        }
       }
 
       if (needsApproval) {
         assertActionBoundContextCurrent(actionContext);
+        if (!acceptedOfferIsCurrent()) {
+          return { success: false, error: 'The accepted live offer expired before approval. Check and accept a new offer.' };
+        }
         const approvalActor = await walletStore.getActor(
           CONFIG.currentIcusdLedgerId, CONFIG.icusd_ledgerIDL
         ) as any;
         assertActionBoundContextCurrent(actionContext);
+        if (!acceptedOfferIsCurrent()) {
+          return { success: false, error: 'The accepted live offer expired before approval. Check and accept a new offer.' };
+        }
         let approvalResult: any;
         try {
           approvalResult = await approvalActor.icrc2_approve({
@@ -3353,6 +3402,9 @@ static async repayToVaultWithStable(
           };
         }
         assertActionBoundContextCurrent(actionContext);
+        if (!acceptedOfferIsCurrent()) {
+          return { success: false, error: 'The approval completed, but the offer expired before redemption. No redemption was submitted; check and accept a new offer.' };
+        }
         if (approvalResult && 'Err' in approvalResult) {
           return {
             success: false,
@@ -3363,8 +3415,14 @@ static async repayToVaultWithStable(
       }
 
       assertActionBoundContextCurrent(actionContext);
+      if (!acceptedOfferIsCurrent()) {
+        return { success: false, error: 'The accepted live offer expired before redemption. Check and accept a new offer.' };
+      }
       const actor = await ApiClient.getBoundAuthenticatedActor(actionContext);
       assertActionBoundContextCurrent(actionContext);
+      if (!acceptedOfferIsCurrent()) {
+        return { success: false, error: 'The accepted live offer expired before redemption. Check and accept a new offer.' };
+      }
 
       let result: RedemptionResultVariant;
       submissionDispatched = true;

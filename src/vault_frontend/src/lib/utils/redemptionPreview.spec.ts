@@ -1,10 +1,13 @@
 import { Principal } from '@dfinity/principal';
 import { describe, expect, it } from 'vitest';
 import {
+	acceptPreparedRedemptionOffer,
+	acceptedRedemptionOfferIsCurrent,
 	quoteIsFresh,
 	quoteMatchesAmount,
 	queueCandidatePricesFresh,
 	maxRedeemableInput,
+	redemptionOfferExpiryNs,
 	redemptionPreflightIsFresh,
 	toHumanIcusd,
 	toHumanRawAmount,
@@ -114,6 +117,41 @@ describe('redemption preview presentation helpers', () => {
 		expect(quoteMatchesAmount(quote(0), 50_000_000n)).toBe(true);
 		expect(quoteMatchesAmount(quote(0), 50_000_001n)).toBe(false);
 		expect(quoteMatchesAmount(null, 50_000_000n)).toBe(false);
+	});
+
+	it('accepts only a fresh exact-amount offer and invalidates it on expiry or context changes', () => {
+		const liveQuote = quote(0);
+		const liveQueue: RedemptionQueue = {
+			observed_at_ns: snapshotNs,
+			ranking_fresh: true,
+			rmr: 0.97,
+			price_freshness_window_ns: 600_000_000_000n,
+			entries: [entry(0, 'ICP')],
+		};
+		const context = {
+			principalText: '2vxsx-fae',
+			ledgerId: preflight.ledgerId,
+			walletType: 'oisy',
+			sessionGeneration: 7,
+			networkKey: 'https://ic0.app',
+		};
+		const accepted = acceptPreparedRedemptionOffer(liveQuote, liveQueue, 50_000_000n, context, snapshotNs + 1n);
+		expect(accepted).toMatchObject({
+			amountE8s: 50_000_000n,
+			collateralTypeText: icp.toText(),
+			minimumNetCollateralRaw: liveQuote.net_collateral_raw,
+			validUntilNs: snapshotNs + liveQuote.quote_validity_window_ns,
+		});
+		expect(acceptedRedemptionOfferIsCurrent(accepted, liveQuote, liveQueue, 50_000_000n, context, snapshotNs + 2n)).toBe(true);
+		expect(acceptedRedemptionOfferIsCurrent(accepted, liveQuote, liveQueue, 50_000_001n, context, snapshotNs + 2n)).toBe(false);
+		expect(acceptedRedemptionOfferIsCurrent(accepted, liveQuote, liveQueue, 50_000_000n, { ...context, principalText: 'w7x7r-cok77-xa' }, snapshotNs + 2n)).toBe(false);
+		expect(acceptedRedemptionOfferIsCurrent(accepted, liveQuote, liveQueue, 50_000_000n, { ...context, sessionGeneration: 8 }, snapshotNs + 2n)).toBe(false);
+		expect(acceptedRedemptionOfferIsCurrent(accepted, liveQuote, liveQueue, 50_000_000n, { ...context, networkKey: 'https://icp0.io' }, snapshotNs + 2n)).toBe(false);
+		expect(acceptedRedemptionOfferIsCurrent(accepted, liveQuote, liveQueue, 50_000_000n, context, snapshotNs + liveQuote.quote_validity_window_ns)).toBe(false);
+		expect(acceptPreparedRedemptionOffer(liveQuote, { ...liveQueue, ranking_fresh: false }, 50_000_000n, context, snapshotNs + 1n)).toBeNull();
+		expect(acceptPreparedRedemptionOffer(liveQuote, liveQueue, 50_000_001n, context, snapshotNs + 1n)).toBeNull();
+		expect(redemptionOfferExpiryNs(null)).toBeNull();
+		expect(redemptionOfferExpiryNs({ ...liveQuote, quote_validity_window_ns: 0n })).toBeNull();
 	});
 
 	it('uses one live fee when allowance covers the amount and two when approval is required', () => {

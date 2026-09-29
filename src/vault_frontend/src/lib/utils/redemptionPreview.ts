@@ -2,6 +2,9 @@ import type {
 	RedemptionQueue as CanisterRedemptionQueue,
 	RedemptionQueueEntry as CanisterRedemptionQueueEntry,
 	RedemptionQuote as CanisterRedemptionQuote,
+	RedemptionPreview as CanisterRedemptionPreview,
+	PreparedRedemptionOffer as CanisterPreparedRedemptionOffer,
+	RedemptionOfferRefreshError as CanisterRedemptionOfferRefreshError,
 	RedeemQuotedRequest as CanisterRedeemQuotedRequest,
 	RedemptionResult as CanisterRedemptionResult,
 	_SERVICE,
@@ -10,10 +13,14 @@ import type {
 export type RedemptionQueue = CanisterRedemptionQueue;
 export type RedemptionQueueEntry = CanisterRedemptionQueueEntry;
 export type RedemptionQuote = CanisterRedemptionQuote;
+export type RedemptionPreview = CanisterRedemptionPreview;
+export type PreparedRedemptionOffer = CanisterPreparedRedemptionOffer;
+export type RedemptionOfferRefreshError = CanisterRedemptionOfferRefreshError;
 export type RedemptionQuotedRequest = CanisterRedeemQuotedRequest;
 export type RedemptionResult = CanisterRedemptionResult;
 
 export type RedemptionQuoteResult = Awaited<ReturnType<_SERVICE['get_redemption_quote']>>;
+export type RedemptionOfferRefreshResult = Awaited<ReturnType<_SERVICE['prepare_redemption_offer']>>;
 export type RedemptionResultVariant = Awaited<ReturnType<_SERVICE['redeem_quoted']>>;
 
 export interface RedemptionPreflight {
@@ -25,6 +32,24 @@ export interface RedemptionPreflight {
 	allowanceRaw: bigint;
 	balanceRaw: bigint;
 	feeRaw: bigint;
+}
+
+/** Session context in which a user explicitly accepted one prepared offer. */
+export interface RedemptionOfferContext {
+	principalText: string;
+	ledgerId: string;
+	walletType: string | null;
+	sessionGeneration: number;
+	networkKey: string;
+}
+
+/** Immutable terms retained after the user chooses “Accept and redeem”. */
+export interface AcceptedRedemptionOffer {
+	amountE8s: bigint;
+	collateralTypeText: string;
+	minimumNetCollateralRaw: bigint;
+	validUntilNs: bigint;
+	context: RedemptionOfferContext;
 }
 
 export interface RedemptionQueueEntryView {
@@ -116,6 +141,77 @@ export function queueCandidatePricesFresh(
 
 export function quoteMatchesAmount(quote: RedemptionQuote | null, requestedE8s: bigint): boolean {
 	return quote !== null && quote.amount_e8s === requestedE8s;
+}
+
+/** The quote's own checked snapshot TTL is the authoritative offer expiry. */
+export function redemptionOfferExpiryNs(quote: RedemptionQuote | null): bigint | null {
+	if (!quote || quote.quoted_at_ns < 0n || quote.quote_validity_window_ns <= 0n) return null;
+	const expiry = quote.quoted_at_ns + quote.quote_validity_window_ns;
+	return expiry > quote.quoted_at_ns ? expiry : null;
+}
+
+/** Create a submit-capable binding only from a fresh, exact-amount live quote. */
+export function acceptPreparedRedemptionOffer(
+	quote: RedemptionQuote | null,
+	queue: RedemptionQueue | null,
+	requestedE8s: bigint,
+	context: RedemptionOfferContext,
+	nowNs: bigint = BigInt(Date.now()) * 1_000_000n,
+): AcceptedRedemptionOffer | null {
+	const expiry = redemptionOfferExpiryNs(quote);
+	if (!quote || !queue || requestedE8s <= 0n || quote.amount_e8s !== requestedE8s
+		|| !quoteIsFresh(quote, queue, nowNs) || expiry === null || nowNs >= expiry
+		|| !context.principalText || !context.ledgerId || !context.networkKey) return null;
+	return {
+		amountE8s: quote.amount_e8s,
+		collateralTypeText: quote.collateral_type.toText(),
+		minimumNetCollateralRaw: quote.net_collateral_raw,
+		validUntilNs: expiry,
+		context: { ...context },
+	};
+}
+
+/** Guard the accepted terms against UI edits, a replacement quote, expiry, or a wallet/network transition. */
+export function acceptedRedemptionOfferIsCurrent(
+	accepted: AcceptedRedemptionOffer | null,
+	quote: RedemptionQuote | null,
+	queue: RedemptionQueue | null,
+	requestedE8s: bigint,
+	context: RedemptionOfferContext,
+	nowNs: bigint = BigInt(Date.now()) * 1_000_000n,
+): boolean {
+	if (!accepted || !quote || !queue || !quoteIsFresh(quote, queue, nowNs)) return false;
+	const expiry = redemptionOfferExpiryNs(quote);
+	return expiry !== null && nowNs < accepted.validUntilNs && expiry === accepted.validUntilNs
+		&& accepted.amountE8s === requestedE8s && quote.amount_e8s === requestedE8s
+		&& accepted.collateralTypeText === quote.collateral_type.toText()
+		&& accepted.minimumNetCollateralRaw === quote.net_collateral_raw
+		&& accepted.context.principalText === context.principalText
+		&& accepted.context.ledgerId === context.ledgerId
+		&& accepted.context.walletType === context.walletType
+		&& accepted.context.sessionGeneration === context.sessionGeneration
+		&& accepted.context.networkKey === context.networkKey;
+}
+
+/** Service-side authorization guard; validates the accepted terms without trusting page state. */
+export function acceptedRedemptionOfferTermsAreCurrent(
+	accepted: AcceptedRedemptionOffer | null,
+	amountE8s: bigint,
+	collateralTypeText: string,
+	minimumNetCollateralRaw: bigint,
+	context: RedemptionOfferContext,
+	nowNs: bigint = BigInt(Date.now()) * 1_000_000n,
+): boolean {
+	return accepted !== null && accepted.amountE8s === amountE8s && amountE8s > 0n
+		&& accepted.collateralTypeText === collateralTypeText
+		&& accepted.minimumNetCollateralRaw === minimumNetCollateralRaw
+		&& accepted.minimumNetCollateralRaw > 0n
+		&& accepted.validUntilNs > nowNs
+		&& accepted.context.principalText === context.principalText && !!context.principalText
+		&& accepted.context.ledgerId === context.ledgerId
+		&& accepted.context.walletType === context.walletType
+		&& accepted.context.sessionGeneration === context.sessionGeneration
+		&& accepted.context.networkKey === context.networkKey;
 }
 
 export function redemptionPreflightIsFresh(

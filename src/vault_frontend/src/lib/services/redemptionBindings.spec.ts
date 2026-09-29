@@ -88,6 +88,51 @@ describe('generated redemption Candid bindings', () => {
 		expect(decoded.entries[0].liquidation_cr).toBe(1.33);
 	});
 
+	it('exposes an advisory preview whose stale queue and estimate error roundtrip independently', () => {
+		const method = generatedMethod('get_redemption_preview');
+		expect(method.argTypes).toHaveLength(1);
+		const [decodedAmount] = candidRoundTrip(method.argTypes, [AMOUNT_E8S]);
+		expect(decodedAmount).toBe(AMOUNT_E8S);
+
+		const samplePreview = {
+			queue: {
+				observed_at_ns: 1_800_000_001_000_000_000n,
+				ranking_fresh: true,
+				rmr: 0.97,
+				price_freshness_window_ns: 600_000_000_000n,
+				entries: [queueEntry(ICP, 'ICP', 0)],
+			},
+			estimate: { Err: { RedemptionQuoteUnavailable: 'cached ranking is stale; preview remains advisory' } },
+		};
+		const [decoded] = candidRoundTrip(method.retTypes, [samplePreview]) as [typeof samplePreview];
+		expect(decoded.queue.entries[0].eligible_collateral_raw).toBe(LARGE_NATIVE_AMOUNT);
+		expect(decoded.estimate).toEqual(samplePreview.estimate);
+	});
+
+	it('exposes a separate update offer call with fresh queue on inner capacity error and refresh cooldown at the outer layer', () => {
+		const method = generatedMethod('prepare_redemption_offer');
+		expect(method.argTypes).toHaveLength(1);
+		const [decodedAmount] = candidRoundTrip(method.argTypes, [AMOUNT_E8S]);
+		expect(decodedAmount).toBe(AMOUNT_E8S);
+
+		const queue = {
+			observed_at_ns: 1_800_000_001_000_000_000n,
+			ranking_fresh: true,
+			rmr: 0.97,
+			price_freshness_window_ns: 600_000_000_000n,
+			entries: [queueEntry(ICP, 'ICP', 0)],
+		};
+		const [prepared] = candidRoundTrip(method.retTypes, [{ Ok: {
+			queue,
+			quote: { Err: { RedemptionCapacityExceeded: { max_input_icusd_e8s: 7_000_000_000n } } },
+		} }]) as [any];
+		expect(prepared.Ok.queue.entries[0].eligible_collateral_raw).toBe(LARGE_NATIVE_AMOUNT);
+		expect(prepared.Ok.quote.Err.RedemptionCapacityExceeded.max_input_icusd_e8s).toBe(7_000_000_000n);
+
+		const [cooldown] = candidRoundTrip(method.retTypes, [{ Err: { RefreshCooldown: { retry_after_ns: 300_000_000_000n } } }]) as [any];
+		expect(cooldown.Err.RefreshCooldown.retry_after_ns).toBe(300_000_000_000n);
+	});
+
 	it('exposes a nat64 quote query and roundtrips its typed Ok quote result', () => {
 		const method = generatedMethod('get_redemption_quote');
 		expect(method.argTypes).toHaveLength(1);
