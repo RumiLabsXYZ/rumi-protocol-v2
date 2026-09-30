@@ -437,6 +437,14 @@ fn telemetry_viewer() -> Principal {
     principal("zegjz-jpi6k-qkand-c2bgf-qw6za-xk4si-nz3gx-qzzia-fk6fg-snepb-tae")
 }
 
+fn telemetry_viewers() -> [Principal; 3] {
+    [
+        telemetry_viewer(),
+        principal("stzp3-bnvwm-zqzjh-o6mv6-ci53m-wj5k6-xyhe7-fnyp2-c64o3-7vokj-bqe"),
+        principal("4alqm-afk6k-bybok-qvdyo-cnv7y-klel6-xm2pz-7h7jk-utmys-kttf3-vqe"),
+    ]
+}
+
 fn create_and_install_mock(pic: &PocketIc, id: Principal, role: MockRole) {
     pic.create_canister_with_id(None, None, id)
         .expect("create fixed mock principal");
@@ -1132,6 +1140,58 @@ fn bootstrap_exposes_all_sixteen_and_leaves_them_disabled() {
             "{} starts auto-top-up off",
             target.principal
         );
+    }
+}
+
+#[test]
+fn private_telemetry_queries_reject_unapproved_callers_and_allow_all_viewers() {
+    let (pic, sentinel, _) = boot();
+    let target = principal(ALL_TARGETS[0]);
+    let queries = [
+        ("cycles_status", Encode!().unwrap()),
+        ("get_public_overview", Encode!().unwrap()),
+        (
+            "list_public_targets",
+            Encode!(&None::<String>, &10u16).unwrap(),
+        ),
+        ("get_public_target", Encode!(&target).unwrap()),
+        (
+            "list_public_samples",
+            Encode!(&target, &None::<String>, &10u16).unwrap(),
+        ),
+        (
+            "list_public_topups",
+            Encode!(&target, &None::<String>, &10u16).unwrap(),
+        ),
+        (
+            "list_public_alarms",
+            Encode!(&None::<String>, &10u16).unwrap(),
+        ),
+    ];
+
+    let denied_callers = [Principal::anonymous(), Principal::from_slice(&[0x42])];
+    for caller in denied_callers {
+        for (method, args) in &queries {
+            let result = pic
+                .query_call(sentinel, caller, method, args.clone())
+                .expect("query transport succeeds");
+            assert!(
+                matches!(result, WasmResult::Reject(_)),
+                "{method} should reject caller {caller}"
+            );
+        }
+    }
+
+    for caller in telemetry_viewers() {
+        for (method, args) in &queries {
+            let result = pic
+                .query_call(sentinel, caller, method, args.clone())
+                .expect("query transport succeeds");
+            assert!(
+                matches!(result, WasmResult::Reply(_)),
+                "{method} should reply to allowlisted caller {caller}"
+            );
+        }
     }
 }
 
