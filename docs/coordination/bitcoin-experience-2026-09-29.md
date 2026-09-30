@@ -64,4 +64,10 @@ Two isolated `gpt-6-luna` reviewers used the same rubric. The release reviewer r
 
 Fixes: approval allowance now equals the exact requested withdrawal amount; its ledger fee remains explicit and its balance reserve still covers amount plus approval fee. The unused status classifier now reverses a copied transaction-ID byte array, matching explorer display without mutating input. Fresh deterministic checks and two new independent reviewers follow these corrections.
 
+### Independent review round 2 and final source gate
+
+Fresh isolated wallet and release reviewers both returned **PASS** on clean source commit `0d0f0cf162ebb6f757a786ffaad7dbbb557afad0`. Final combined focused regressions again passed **427/427** across 12 files; the minter's mounted fixture also passed **5/5** after adding exact allowance, approval fee, withdrawal amount and destination assertions. The final static production build passed; typecheck retained the same **28 existing errors and 55 warnings**. `git diff --check` passed.
+
+One optional recovery improvement is deferred: if approval succeeds as the wallet session changes, the service cancels before retrieval and may omit the approval block notice after reconnect. No withdrawal is dispatched, and the exact allowance expires after ten minutes. The reviewers found no duplicate-withdrawal path in this case. This is a nonblocking UX backlog item, not a required release gate.
+
 No wallet connection, signature, real deposit, mint, borrow, redemption or Bitcoin deployment was performed. The separately authorized ckERC20 deployment belongs to the other chat. Source review does not prove a live wallet round trip.

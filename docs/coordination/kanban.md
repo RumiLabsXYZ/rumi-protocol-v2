@@ -169,10 +169,10 @@ Authorization: Rob requested DFINITY ckBTC mint/redeem at `/bitcoin`, a dedicate
 
 | ID | State | Owner | Requested / actual model | Scope | Acceptance / evidence |
 | --- | --- | --- | --- | --- | --- |
-| BTC-01 | In progress | bitcoin_minter | Luna / gpt-6-luna | `/bitcoin` minter, ckBTC IDL/actors and minter helpers/tests; no shared layout/config edits | Official upstream interface, bounded polling, exact amounts, frozen withdrawals, owner/session guards, DFINITY ckBTC only |
-| BTC-02 | In progress | bitcoin_borrow | Luna / gpt-6-luna | `/bitcoin/borrow`, dedicated BTC wizard helpers/tests; no shared files | DOGE parity including partial-outcome recovery, dynamic ckBTC configuration, Bitcoin-only collateral, same visual direction |
-| BTC-03 | In progress | coordinator | root | Shared navigation/config/wallet permissions, integration, deterministic checks and ckUSDC coordination | Focused Bitcoin navigation; Bitcoin routes remain independently executable |
-| BTC-05 | In progress | bitcoin_fixtures | Luna / gpt-6-luna | Bitcoin mounted-component regression fixtures only | Wallet changes, exact sats, partial outcomes and safe recovery |
-| BTC-04 | Ready | independent reviewers | Luna / gpt-6-luna | Read-only wallet/security/product reviews after implementation | Two independent reviews, fix confirmed defects, repeat after material changes |
+| BTC-01 | Done | bitcoin_minter | Luna / gpt-6-luna | `/bitcoin` minter, ckBTC IDL/actors and minter helpers/tests | Official upstream interface, bounded polling, exact amounts/allowance/fees, frozen withdrawals, owner/session guards, DFINITY ckBTC only |
+| BTC-02 | Done | bitcoin_borrow | Luna / gpt-6-luna | `/bitcoin/borrow`, dedicated BTC wizard helpers/tests; scoped Bitcoin-only VaultCard repayment prop | DOGE parity, explicit existing ckBTC opt-in, partial-outcome recovery, strict current terms and refresh action |
+| BTC-03 | Done | coordinator | root | Shared navigation/config/wallet permissions, integration, deterministic checks and ckUSDC coordination | Preserves reviewed ckERC20 commit6a7e44ae history; combined build and427/427 focused checks pass;28-error existing typecheck baseline retained |
+| BTC-05 | Done | bitcoin_fixtures | Luna / gpt-6-luna | Bitcoin mounted-component regression fixtures | 9 borrow+5 minter mounted cases; exact satoshi/allowance/fee/destination, wallet changes, partial outcomes and persisted uncertain withdrawal recovery |
+| BTC-04 | Done | two fresh reviewer pairs | Luna / gpt-6-luna | Two independent wallet/release review rounds | Round1 excess allowance corrected; unused txid helper corrected. Both fresh round2 reviewers PASS on0d0f0cf1. No live wallet/funds/deployment proof |
 
 Workers own only their listed paths. Shared `config.ts`, `pnp.ts`, `ledgerFeeService.ts`, `routes/+layout.svelte` and coordination artifacts belong to root. Existing DOGE sources are read-only for workers. No worker commits, PRs, deployment, wallet signatures or real deposits.
