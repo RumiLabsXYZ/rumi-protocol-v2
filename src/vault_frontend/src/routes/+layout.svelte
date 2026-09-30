@@ -117,6 +117,7 @@
       <a href="/doge" class="footer-link">ckDOGE Minter</a>
       <a href="/bitcoin" class="footer-link">Bitcoin Minter</a>
       <a href="/bitcoin/borrow" class="footer-link">Borrow with Bitcoin</a>
+      <a href="/ckusdc" class="footer-link">ckERC20 Minter</a>
       <a href="/doge/borrow" class="footer-link">Borrow with DOGE</a>
       <a href="/liquidations?tab=manual" class="footer-link">Liquidate{#if hasLiquidatableVaults}<span class="liq-alert-dot"></span>{/if}</a>
       {/if}

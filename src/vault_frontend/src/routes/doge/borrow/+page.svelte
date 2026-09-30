@@ -1252,7 +1252,7 @@
       {/if}
     </div>
     <h1>Much DOGE. More possibilities.</h1>
-    <p class="dbw-subtitle">Borrow icUSD against your DOGE. No selling, no bridge you have to learn on your own.</p>
+    <p class="dbw-subtitle">Borrow icUSD against your DOGE. No selling or separate tool to learn.</p>
   </div>
 
   <div class="dbw-stepper" aria-label="Borrowing steps">
@@ -1358,7 +1358,7 @@
         Continue with this loan
       </button>
 
-      <p class="dbw-doge-only-hint">Want the full ckDOGE mint/redeem bridge instead? <a href="/doge">Go to the ckDOGE Bridge</a>.</p>
+      <p class="dbw-doge-only-hint">Want to mint or redeem ckDOGE? <a href="/doge">Go to the ckDOGE Minter</a>.</p>
     {:else if step === 'signin'}
       <button type="button" class="dbw-link-btn dbw-back-link" on:click={() => (step = 'choose')}>&larr; Back to amounts</button>
       <h2>Sign in to continue</h2>
@@ -1383,7 +1383,7 @@
         <p>
           Your DOGE moves onto the Internet Computer as ckDOGE, a 1:1 representation your wallet can hold and Rumi
           can accept as collateral. You can send it back to a normal Dogecoin address later from the
-          <a href="/doge">ckDOGE Bridge</a>.
+          <a href="/doge">ckDOGE Minter</a>.
         </p>
       </details>
     {:else if step === 'send'}
@@ -1492,7 +1492,7 @@
 
         <p class="dbw-panel-sub">
           Changed your mind about borrowing? Your deposit address does not expire, but minting will not happen on its
-          own while this tab stays closed — come back here (or the <a href="/doge">ckDOGE Bridge</a>) and check again
+          own while this tab stays closed — come back here (or the <a href="/doge">ckDOGE Minter</a>) and check again
           once it is confirmed. From there you can hold the ckDOGE, send it back to a Dogecoin address, or finish
           borrowing later.
         </p>
@@ -1753,7 +1753,7 @@
   }
   .dbw-recovery-card p { margin: 0; }
 
-  /* Hand-drawn Comic Sans marginalia, reused from the ckDOGE Bridge page. Purely
+  /* Hand-drawn Comic Sans marginalia, reused from the ckDOGE Minter page. Purely
      decorative; never the primary voice for instructions or safety copy. */
   .dbw-annotation {
     display: block; margin-top: 0.375rem; font-family: 'Comic Sans MS', 'Comic Sans', 'Chalkboard SE', cursive;

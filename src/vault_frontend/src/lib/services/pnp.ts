@@ -70,6 +70,8 @@ export const getAllDelegationTargets = (): string[] => {
     CANISTER_IDS.CKDOGE_LEDGER,             // ckDOGE Ledger
     CANISTER_IDS.CKBTC_MINTER,              // DFINITY ckBTC minter
     CANISTER_IDS.CKBTC_LEDGER,              // DFINITY ckBTC Ledger
+    CANISTER_IDS.CKERC20_MINTER,            // ckERC20 minter (shared with ckETH)
+    CANISTER_IDS.CKETH_LEDGER,              // ckETH ledger (withdrawal fees)
   ].filter(Boolean); // Filter out any undefined values
 };
 
