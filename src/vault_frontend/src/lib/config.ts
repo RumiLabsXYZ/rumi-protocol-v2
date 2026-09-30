@@ -47,6 +47,12 @@ export const CANISTER_IDS = {
   // ckDOGE minter and ledger on ICP mainnet
   CKDOGE_MINTER: "eqltq-xqaaa-aaaar-qb3vq-cai",
   CKDOGE_LEDGER: "efmc5-wyaaa-aaaar-qb3wa-cai",
+  // DFINITY ckBTC minter and ledger on ICP mainnet
+  CKBTC_MINTER: "mqygn-kiaaa-aaaar-qaadq-cai",
+  CKBTC_LEDGER: "mxzaz-hqaaa-aaaar-qaada-cai",
+  // DFINITY ckETH minter also operates the ckERC20 rails (including ckUSDC).
+  CKERC20_MINTER: "sv3dd-oaaaa-aaaar-qacoa-cai",
+  CKETH_LEDGER: "ss2fx-dyaaa-aaaar-qacoq-cai",
 } as const;
 
 /** The /points airdrop section is shown only once the rumi_points canister id

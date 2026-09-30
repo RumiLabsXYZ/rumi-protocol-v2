@@ -1,108 +1,106 @@
 import type { Principal } from '@dfinity/principal';
 
-export const KOINU_PER_DOGE = 100_000_000;
-export const KOINU_DECIMALS = 8;
-/** nat64 upper bound — the wire type for every koinu amount field. */
-export const NAT64_MAX_KOINU = 18446744073709551615n;
+export const SATOSHI_PER_BTC = 100_000_000;
+export const BTC_DECIMALS = 8;
+/** nat64 upper bound — the wire type for every satoshi amount field. */
+export const NAT64_MAX_SATOSHI = 18446744073709551615n;
 
 /** Client-side bound on the update_balance confirmation poll. Named per spec: 60s cadence, 120 attempts. */
 export const POLL_INTERVAL_MS = 60_000;
 export const POLL_MAX_ATTEMPTS = 120;
 
-// Dogecoin mainnet P2PKH addresses start with 'D', P2SH with '9' or 'A', base58 (no 0/O/I/l).
-const DOGE_ADDRESS_PATTERN = /^[D9A][a-km-zA-HJ-NP-Z1-9]{24,33}$/;
+// Bitcoin mainnet address shapes: bech32, P2PKH (1), or P2SH (3). Checksum verification is left to the minter.
+const BTC_ADDRESS_PATTERN = /^(bc1|[13])[a-zA-HJ-NP-Z0-9]{25,90}$/i;
 
-export function isPlausibleDogecoinAddress(address: string): boolean {
-  return DOGE_ADDRESS_PATTERN.test(address.trim());
+export function isPlausibleBitcoinAddress(address: string): boolean {
+  return BTC_ADDRESS_PATTERN.test(address.trim());
 }
 
-/** Positive integer koinu only — no blanks, decimals, signs, or leading zeroes. */
-export function parseKoinuInput(raw: string): bigint | null {
+/** Positive integer satoshi only — no blanks, decimals, signs, or leading zeroes. */
+export function parseSatoshiInput(raw: string): bigint | null {
   const trimmed = raw.trim();
   if (!/^[1-9][0-9]*$/.test(trimmed)) return null;
   return BigInt(trimmed);
 }
 
-export function koinuToDoge(koinu: bigint): number {
-  return Number(koinu) / KOINU_PER_DOGE;
+export function satoshiToBtc(satoshi: bigint): number {
+  return Number(satoshi) / SATOSHI_PER_BTC;
 }
 
-export function dogeToKoinu(amountDoge: number): bigint {
-  return BigInt(Math.round(amountDoge * KOINU_PER_DOGE));
+export function btcToSatoshi(amountBtc: number): bigint {
+  return BigInt(Math.round(amountBtc * SATOSHI_PER_BTC));
 }
 
 /**
- * Parses a user-entered decimal DOGE amount (e.g. "50", "1.25", "0.00000001")
- * into exact koinu using only string/BigInt arithmetic — never Number/parseFloat,
- * since a float multiply against KOINU_PER_DOGE can misround fractional input.
+ * Parses a user-entered decimal BTC amount (e.g. "50", "1.25", "0.00000001")
+ * into exact satoshi using only string/BigInt arithmetic — never Number/parseFloat,
+ * since a float multiply against SATOSHI_PER_BTC can misround fractional input.
  * Rejects blank, zero, negative, scientific notation, malformed strings, more
- * than 8 fractional digits (koinu is the smallest unit — no silent rounding),
+ * than 8 fractional digits (satoshi is the smallest unit — no silent rounding),
  * and anything above the nat64 wire bound.
  */
-export function parseDogeAmountInput(raw: string): bigint | null {
+export function parseBtcAmountInput(raw: string): bigint | null {
   const trimmed = raw.trim();
   const match = /^(0|[1-9][0-9]*)(?:\.([0-9]{1,8}))?$/.exec(trimmed);
   if (!match) return null;
   const [, wholePart, fracPart = ''] = match;
-  const koinu = BigInt(wholePart + fracPart.padEnd(KOINU_DECIMALS, '0'));
-  if (koinu <= 0n || koinu > NAT64_MAX_KOINU) return null;
-  return koinu;
+  const satoshi = BigInt(wholePart + fracPart.padEnd(BTC_DECIMALS, '0'));
+  if (satoshi <= 0n || satoshi > NAT64_MAX_SATOSHI) return null;
+  return satoshi;
 }
 
-export function formatKoinuAsDoge(koinu: bigint): string {
-  const rounded = koinuToDoge(koinu).toFixed(8).replace(/\.?0+$/, '');
-  return `${rounded === '' ? '0' : rounded} DOGE`;
+export function formatSatoshiAsBtc(satoshi: bigint): string {
+  const rounded = satoshiToBtc(satoshi).toFixed(8).replace(/\.?0+$/, '');
+  return `${rounded === '' ? '0' : rounded} BTC`;
 }
 
-export function computeApprovalAmount(requestedKoinu: bigint, ledgerFeeKoinu: bigint): bigint {
-  return requestedKoinu + ledgerFeeKoinu;
+export function computeApprovalAmount(requestedSatoshi: bigint, ledgerFeeSatoshi: bigint): bigint {
+  return requestedSatoshi + ledgerFeeSatoshi;
 }
 
-export function formatWithdrawalFeeSummary(dogecoinFeeKoinu: bigint, minterFeeKoinu: bigint, ledgerFeeKoinu: bigint): string {
-  return `Network fee ~${formatKoinuAsDoge(dogecoinFeeKoinu)} + minter fee ${formatKoinuAsDoge(minterFeeKoinu)} + ledger fee ${formatKoinuAsDoge(ledgerFeeKoinu)}`;
+export function formatWithdrawalFeeSummary(bitcoinFeeSatoshi: bigint, minterFeeSatoshi: bigint, ledgerFeeSatoshi: bigint): string {
+  return `Network fee ~${formatSatoshiAsBtc(bitcoinFeeSatoshi)} + minter fee ${formatSatoshiAsBtc(minterFeeSatoshi)} + ledger fee ${formatSatoshiAsBtc(ledgerFeeSatoshi)}`;
 }
 
 export interface WithdrawalFeeEstimate {
-  dogecoinFeeKoinu: bigint;
-  minterFeeKoinu: bigint;
+  bitcoinFeeSatoshi: bigint;
+  minterFeeSatoshi: bigint;
 }
 
-/** estimate_withdrawal_fee returns variant {Ok; Err} — never a bare record, never a `doge_fee` field. */
+/** ckBTC estimate_withdrawal_fee returns a bare record with bitcoin_fee and minter_fee. */
 export function parseWithdrawalFeeEstimate(result: Record<string, any>): WithdrawalFeeEstimate | null {
-  if ('Ok' in result) {
-    return {
-      dogecoinFeeKoinu: BigInt(result.Ok.dogecoin_fee),
-      minterFeeKoinu: BigInt(result.Ok.minter_fee),
-    };
+  try {
+    if (!result || typeof result !== 'object' || !('bitcoin_fee' in result) || !('minter_fee' in result)) return null;
+    const bitcoinFeeSatoshi = BigInt(result.bitcoin_fee);
+    const minterFeeSatoshi = BigInt(result.minter_fee);
+    if (bitcoinFeeSatoshi < 0n || minterFeeSatoshi < 0n) return null;
+    return { bitcoinFeeSatoshi, minterFeeSatoshi };
+  } catch {
+    return null;
   }
-  return null;
 }
 
-export function summarizeWithdrawalFeeError(err: Record<string, any>): string {
-  if ('AmountTooLow' in err) {
-    return `Below the minimum amount this minter will estimate a fee for: ${formatKoinuAsDoge(BigInt(err.AmountTooLow.min_amount))}`;
-  }
-  if ('AmountTooHigh' in err) {
-    return 'That amount is too high to estimate a withdrawal fee for.';
-  }
-  return 'An unknown error occurred estimating the withdrawal fee.';
+export function summarizeWithdrawalFeeError(err: unknown): string {
+  if (err instanceof Error && err.message) return `Bitcoin minter fee estimate failed: ${err.message}`;
+  if (typeof err === 'string' && err.trim()) return `Bitcoin minter fee estimate failed: ${err}`;
+  return 'Bitcoin minter could not estimate the withdrawal fee.';
 }
 
 export type WithdrawalFeeEstimateOutcome =
   | { success: true; estimate: WithdrawalFeeEstimate; label: string }
   | { success: false; label: string };
 
-/** estimate_withdrawal_fee variant {Ok:{dogecoin_fee, minter_fee}; Err:{AmountTooLow}|{AmountTooHigh}} — no made-up doge_fee, no ledger fee (that's a separate ICRC-2 concern). */
+/** Summarizes the bare record returned by ckBTC estimate_withdrawal_fee. */
 export function summarizeWithdrawalFeeEstimate(result: Record<string, any>): WithdrawalFeeEstimateOutcome {
-  if ('Ok' in result) {
-    const estimate = parseWithdrawalFeeEstimate(result) as WithdrawalFeeEstimate;
-    return {
-      success: true,
-      estimate,
-      label: `Network fee ~${formatKoinuAsDoge(estimate.dogecoinFeeKoinu)} + minter fee ${formatKoinuAsDoge(estimate.minterFeeKoinu)}`,
-    };
+  const estimate = parseWithdrawalFeeEstimate(result);
+  if (!estimate) {
+    return { success: false, label: 'Bitcoin minter returned an invalid fee estimate.' };
   }
-  return { success: false, label: summarizeWithdrawalFeeError(result.Err ?? {}) };
+  return {
+    success: true,
+    estimate,
+    label: `Network fee ~${formatSatoshiAsBtc(estimate.bitcoinFeeSatoshi)} + minter fee ${formatSatoshiAsBtc(estimate.minterFeeSatoshi)}`,
+  };
 }
 
 export interface CandidAccountArgs {
@@ -126,10 +124,10 @@ export interface ApproveArgs {
   expires_at: [];
 }
 
-export function buildApproveArgs(minterPrincipal: Principal, amountKoinu: bigint): ApproveArgs {
+export function buildApproveArgs(minterPrincipal: Principal, amountSatoshi: bigint): ApproveArgs {
   return {
     spender: { owner: minterPrincipal, subaccount: [] },
-    amount: amountKoinu,
+    amount: amountSatoshi,
     fee: [],
     memo: [],
     from_subaccount: [],
@@ -145,8 +143,8 @@ export interface RetrieveWithApprovalArgs {
   from_subaccount: [];
 }
 
-export function buildRetrieveWithApprovalArgs(address: string, amountKoinu: bigint): RetrieveWithApprovalArgs {
-  return { address: address.trim(), amount: amountKoinu, from_subaccount: [] };
+export function buildRetrieveWithApprovalArgs(address: string, amountSatoshi: bigint): RetrieveWithApprovalArgs {
+  return { address: address.trim(), amount: amountSatoshi, from_subaccount: [] };
 }
 
 export type UtxoStatusKind = 'Checked' | 'ValueTooSmall' | 'Tainted' | 'Minted' | 'Unknown';
@@ -154,17 +152,17 @@ export type UtxoStatusKind = 'Checked' | 'ValueTooSmall' | 'Tainted' | 'Minted' 
 export interface UtxoStatusSummary {
   kind: UtxoStatusKind;
   label: string;
-  koinuAmount?: bigint;
+  satoshiAmount?: bigint;
   blockIndex?: bigint;
 }
 
 export function classifyUtxoStatus(status: Record<string, any>): UtxoStatusSummary {
   if ('Minted' in status) {
-    const koinuAmount = BigInt(status.Minted.minted_amount);
+    const satoshiAmount = BigInt(status.Minted.minted_amount);
     return {
       kind: 'Minted',
-      label: `Minted ${formatKoinuAsDoge(koinuAmount)} into your wallet.`,
-      koinuAmount,
+      label: `Minted ${formatSatoshiAsBtc(satoshiAmount)} into your wallet.`,
+      satoshiAmount,
       blockIndex: BigInt(status.Minted.block_index),
     };
   }
@@ -186,18 +184,18 @@ export function isTerminalUtxoKind(kind: UtxoStatusKind): boolean {
 }
 
 export interface PendingUtxoSummary {
-  koinuAmount: bigint;
+  satoshiAmount: bigint;
   confirmations: number;
   label: string;
 }
 
 export function summarizePendingUtxos(pending: Array<{ value: bigint | number; confirmations: number }>): PendingUtxoSummary[] {
   return pending.map((p) => {
-    const koinuAmount = BigInt(p.value);
+    const satoshiAmount = BigInt(p.value);
     return {
-      koinuAmount,
+      satoshiAmount,
       confirmations: p.confirmations,
-      label: `${formatKoinuAsDoge(koinuAmount)} pending, ${p.confirmations} confirmations so far`,
+      label: `${formatSatoshiAsBtc(satoshiAmount)} pending, ${p.confirmations} confirmations so far`,
     };
   });
 }
@@ -249,6 +247,7 @@ function formatTxid(txid: unknown): string | undefined {
   if (typeof txid === 'string') return txid;
   if (Array.isArray(txid) || txid instanceof Uint8Array) {
     return Array.from(txid as Iterable<number>)
+      .reverse()
       .map((b) => b.toString(16).padStart(2, '0'))
       .join('');
   }
@@ -272,15 +271,15 @@ export interface RetrieveStatusSummary {
   txid?: string;
 }
 
-export function classifyRetrieveDogeStatus(status: Record<string, any>): RetrieveStatusSummary {
+export function classifyRetrieveBtcStatus(status: Record<string, any>): RetrieveStatusSummary {
   if ('Confirmed' in status) {
-    return { kind: 'Confirmed', label: 'DOGE has landed on chain.', txid: formatTxid(status.Confirmed.txid) };
+    return { kind: 'Confirmed', label: 'BTC has landed on chain.', txid: formatTxid(status.Confirmed.txid) };
   }
   if ('Submitted' in status) {
-    return { kind: 'Submitted', label: 'Submitted to the Dogecoin network.', txid: formatTxid(status.Submitted.txid) };
+    return { kind: 'Submitted', label: 'Submitted to the Bitcoin network.', txid: formatTxid(status.Submitted.txid) };
   }
   if ('Sending' in status) {
-    return { kind: 'Sending', label: 'Minter is sending your DOGE now.', txid: formatTxid(status.Sending.txid) };
+    return { kind: 'Sending', label: 'Minter is sending your BTC now.', txid: formatTxid(status.Sending.txid) };
   }
   if ('Signing' in status) {
     return { kind: 'Signing', label: 'Minter is signing your withdrawal transaction.' };
@@ -292,19 +291,19 @@ export function classifyRetrieveDogeStatus(status: Record<string, any>): Retriev
     return { kind: 'AmountTooLow', label: 'Amount is below the minimum. Try a larger amount.' };
   }
   if ('WillReimburse' in status) {
-    return { kind: 'WillReimburse', label: 'Withdrawal failed. Minter will reimburse your ckDOGE balance soon.' };
+    return { kind: 'WillReimburse', label: 'Withdrawal failed. Minter will reimburse your ckBTC balance soon.' };
   }
   if ('Reimbursed' in status) {
-    return { kind: 'Reimbursed', label: 'Withdrawal failed and your DOGE balance has been reimbursed.' };
+    return { kind: 'Reimbursed', label: 'Withdrawal failed and your BTC balance has been reimbursed.' };
   }
   return { kind: 'Unknown', label: 'Unrecognized status.' };
 }
 
 export function summarizeRetrieveError(err: Record<string, any>): string {
   if ('MalformedAddress' in err) return `Invalid address: ${err.MalformedAddress}`;
-  if ('AmountTooLow' in err) return `Amount is below the minimum withdrawal: ${formatKoinuAsDoge(BigInt(err.AmountTooLow))}`;
-  if ('InsufficientFunds' in err) return `Not enough DOGE in your balance. You have ${formatKoinuAsDoge(BigInt(err.InsufficientFunds.balance))}`;
-  if ('InsufficientAllowance' in err) return `Approval too small. Allowance is only ${formatKoinuAsDoge(BigInt(err.InsufficientAllowance.allowance))}`;
+  if ('AmountTooLow' in err) return `Amount is below the minimum withdrawal: ${formatSatoshiAsBtc(BigInt(err.AmountTooLow))}`;
+  if ('InsufficientFunds' in err) return `Not enough BTC in your balance. You have ${formatSatoshiAsBtc(BigInt(err.InsufficientFunds.balance))}`;
+  if ('InsufficientAllowance' in err) return `Approval too small. Allowance is only ${formatSatoshiAsBtc(BigInt(err.InsufficientAllowance.allowance))}`;
   if ('TemporarilyUnavailable' in err) return `Minter is temporarily unavailable: ${err.TemporarilyUnavailable}`;
   if ('AlreadyProcessing' in err) return 'A withdrawal is already processing.';
   if ('GenericError' in err) return `Error: ${err.GenericError.error_message}`;
@@ -314,13 +313,13 @@ export function summarizeRetrieveError(err: Record<string, any>): string {
 /** ICRC-2 icrc2_approve Err variant — numeric/BigInt fields are coerced with String()/BigInt(), never JSON.stringify (which throws on BigInt). */
 export function summarizeApproveError(err: Record<string, any>): string {
   if ('BadFee' in err) {
-    return `Ledger requires an exact fee of ${formatKoinuAsDoge(BigInt(err.BadFee.expected_fee))}.`;
+    return `Ledger requires an exact fee of ${formatSatoshiAsBtc(BigInt(err.BadFee.expected_fee))}.`;
   }
   if ('InsufficientFunds' in err) {
-    return `Not enough ckDOGE to cover that approval. You have ${formatKoinuAsDoge(BigInt(err.InsufficientFunds.balance))}`;
+    return `Not enough ckBTC to cover that approval. You have ${formatSatoshiAsBtc(BigInt(err.InsufficientFunds.balance))}`;
   }
   if ('AllowanceChanged' in err) {
-    return `Allowance changed. It is now ${formatKoinuAsDoge(BigInt(err.AllowanceChanged.current_allowance))}. Try again.`;
+    return `Allowance changed. It is now ${formatSatoshiAsBtc(BigInt(err.AllowanceChanged.current_allowance))}. Try again.`;
   }
   if ('Expired' in err) {
     return `Approval expired (ledger time ${String(err.Expired.ledger_time)}).`;
@@ -358,15 +357,16 @@ export interface MinterInfoSummary {
 /** get_minter_info's fields are all non-optional — no kyt_fee on this minter. */
 export function summarizeMinterInfo(info: {
   min_confirmations: number;
-  deposit_doge_min_amount: bigint | number;
-  retrieve_doge_min_amount: bigint | number;
+  deposit_btc_min_amount: [] | [bigint | number];
+  retrieve_btc_min_amount: bigint | number;
 }): MinterInfoSummary {
-  const minDepositValue = formatKoinuAsDoge(BigInt(info.deposit_doge_min_amount));
+  const minDepositRaw = info.deposit_btc_min_amount[0];
+  const minDepositValue = minDepositRaw === undefined ? 'Unavailable' : formatSatoshiAsBtc(BigInt(minDepositRaw));
   const minConfirmationsValue = `${info.min_confirmations}`;
   return {
     minConfirmationsLabel: `min confirmations: ${info.min_confirmations}`,
     minDepositLabel: `min deposit: ${minDepositValue}`,
-    minWithdrawalLabel: `min withdrawal: ${formatKoinuAsDoge(BigInt(info.retrieve_doge_min_amount))}`,
+    minWithdrawalLabel: `min withdrawal: ${formatSatoshiAsBtc(BigInt(info.retrieve_btc_min_amount))}`,
     minDepositValue,
     minConfirmationsValue,
     minConfirmationsCount: info.min_confirmations,
@@ -382,16 +382,13 @@ export function isPollingExhausted(attempt: number, maxAttempts: number = POLL_M
 }
 
 export function disconnectedWalletCopy(): string {
-  return 'Connect your wallet to get a personal ckDOGE deposit address.';
+  return 'Connect your wallet to get a personal ckBTC deposit address.';
 }
 
-export function betaRiskNotice(): string {
-  return 'ckDOGE is in beta. The minter can have bugs, so do not send more DOGE than you can afford to have stuck. There are no security or timing guarantees, but this rail is actively monitored.';
-}
 
 /**
  * The compact mint tracker's active step. Deposit stays current until the user
- * clicks "I sent the DOGE"; Confirmations stays current for the whole bounded
+ * clicks "I sent the BTC"; Confirmations stays current for the whole bounded
  * poll, including after it pauses while still waiting (not just while isPolling
  * is literally true); Minted only lights up once a Minted UTXO is actually observed.
  */
@@ -434,7 +431,7 @@ export interface ConfirmationDisplay {
   statusLabel: string;
   /** null when the minter hasn't reported any real confirmation count yet. */
   meter: ConfirmationMeter | null;
-  /** Sum of every pending UTXO's detected value, formatted as DOGE. null when none detected. */
+  /** Sum of every pending UTXO's detected value, formatted as BTC. null when none detected. */
   amountDetectedLabel: string | null;
   /** e.g. "2 UTXOs detected" — only rendered when more than one UTXO is pending. */
   utxoCountLabel: string | null;
@@ -467,8 +464,8 @@ export function computeConfirmationDisplay(params: {
       phase: 'minted',
       statusLabel: 'Minted',
       meter: null,
-      amountDetectedLabel: params.mintedSummary.koinuAmount !== undefined
-        ? formatKoinuAsDoge(params.mintedSummary.koinuAmount)
+      amountDetectedLabel: params.mintedSummary.satoshiAmount !== undefined
+        ? formatSatoshiAsBtc(params.mintedSummary.satoshiAmount)
         : null,
       utxoCountLabel: null,
       nextCheckLabel: null,
@@ -501,8 +498,8 @@ export function computeConfirmationDisplay(params: {
   } else if (pending.length > 0) {
     const minConfirmations = Math.min(...pending.map((p) => p.confirmations));
     meter = { confirmations: minConfirmations, requiredConfirmations: params.lastUpdateBalanceError!.requiredConfirmations! };
-    const totalKoinu = pending.reduce((sum, p) => sum + p.koinuAmount, 0n);
-    amountDetectedLabel = formatKoinuAsDoge(totalKoinu);
+    const totalSatoshi = pending.reduce((sum, p) => sum + p.satoshiAmount, 0n);
+    amountDetectedLabel = formatSatoshiAsBtc(totalSatoshi);
     utxoCountLabel = pending.length === 1 ? '1 UTXO detected' : `${pending.length} UTXOs detected`;
   } else if (
     params.lastUpdateBalanceError?.currentConfirmations !== undefined &&
@@ -531,3 +528,7 @@ export function computeConfirmationDisplay(params: {
 
   return { phase, statusLabel, meter, amountDetectedLabel, utxoCountLabel, nextCheckLabel };
 }
+
+export const satoshiToBitcoin = satoshiToBtc;
+export const formatSatoshiAsBitcoin = formatSatoshiAsBtc;
+export const bitcoinToSatoshi = btcToSatoshi;

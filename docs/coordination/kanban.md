@@ -161,3 +161,18 @@ CS-68 policy proposal17 has one signer approval and a 24-hour waiting period end
 ### Four-hour cadence live checkpoint
 
 PR406 merged as `1b525338cb7b391f406f84d226a13155bc781ab6`. Both fresh final reviewers closed PASS; the final full real-canister suite exited0 with40/40 cases passed. CS-65 and CS-67 are complete. Backend upgrade and frontend assets-only publication succeeded with authoritative hashes/controller inventories preserved. An authenticated mainnet immediate check returned Ok and kept the scheduled deadline unchanged. CS-66 public UI is live and verified; the remaining signer-button browser proof awaits OISY sign-in. CS-68 publication is complete, but four-hour activation is blocked on the existing second-signer/timelock/execution requirements. Receiving balances are0 cycles/0 ICP. [Live evidence](sentinel-cadence-live-proof-2026-09-28.md).
+
+# Bitcoin experience — 2026-09-29
+
+Worktree: `/Users/robertripley/.codex/worktrees/f22c/rumi-protocol-v2`; branch `codex/bitcoin-minter-vaults`.
+Authorization: Rob requested DFINITY ckBTC mint/redeem at `/bitcoin`, a dedicated `/bitcoin/borrow` journey matching DOGE mechanics, Bitcoin audience design, and Luna subagents. Coordinate with ckUSDC chat `01a0ebc3-fc5e-7070-874b-279ecec48a67` before PR/deployment. No live financial action or deployment authorized.
+
+| ID | State | Owner | Requested / actual model | Scope | Acceptance / evidence |
+| --- | --- | --- | --- | --- | --- |
+| BTC-01 | Done | bitcoin_minter | Luna / gpt-6-luna | `/bitcoin` minter, ckBTC IDL/actors and minter helpers/tests | Official upstream interface, bounded polling, exact amounts/allowance/fees, frozen withdrawals, owner/session guards, DFINITY ckBTC only |
+| BTC-02 | Done | bitcoin_borrow | Luna / gpt-6-luna | `/bitcoin/borrow`, dedicated BTC wizard helpers/tests; scoped Bitcoin-only VaultCard repayment prop | DOGE parity, explicit existing ckBTC opt-in, partial-outcome recovery, strict current terms and refresh action |
+| BTC-03 | Done | coordinator | root | Shared navigation/config/wallet permissions, integration, deterministic checks and ckUSDC coordination | Preserves reviewed ckERC20 commit6a7e44ae history; combined build and427/427 focused checks pass;28-error existing typecheck baseline retained |
+| BTC-05 | Done | bitcoin_fixtures | Luna / gpt-6-luna | Bitcoin mounted-component regression fixtures | 9 borrow+5 minter mounted cases; exact satoshi/allowance/fee/destination, wallet changes, partial outcomes and persisted uncertain withdrawal recovery |
+| BTC-04 | Done | two fresh reviewer pairs | Luna / gpt-6-luna | Two independent wallet/release review rounds | Round1 excess allowance corrected; unused txid helper corrected. Both fresh round2 reviewers PASS on0d0f0cf1. No live wallet/funds/deployment proof |
+
+Workers own only their listed paths. Shared `config.ts`, `pnp.ts`, `ledgerFeeService.ts`, `routes/+layout.svelte` and coordination artifacts belong to root. Existing DOGE sources are read-only for workers. No worker commits, PRs, deployment, wallet signatures or real deposits.

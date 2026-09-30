@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy, onMount, tick } from 'svelte';
   import { Principal } from '@dfinity/principal';
   import QRCode from 'qrcode';
   import { walletStore, isConnected as isConnectedStore, principal as principalStore } from '$lib/stores/wallet';
@@ -10,28 +10,26 @@
   import { publicActor } from '$lib/services/protocol/apiClient';
   import { CANISTER_IDS, CONFIG } from '$lib/config';
   import { WALLET_TYPES } from '$lib/services/auth';
-  import { getPublicMinterActor, updateDogeBalanceForOwner } from '$lib/services/ckdogeMinterActors';
+  import { getPublicCkbtcMinterActor, updateBtcBalanceForOwner } from '$lib/services/ckbtcMinterActors';
   import { formatNumber, formatAddress } from '$lib/utils/format';
   import {
     POLL_INTERVAL_MS,
-    betaRiskNotice,
     buildAccountArgs,
     classifyUtxoStatus,
     computeConfirmationDisplay,
     computeMintStepIndex,
     confirmationMeterPercent,
-    dogeToKoinu,
-    formatKoinuAsDoge,
+    parseBtcAmountInput,
     isPollingExhausted,
     isRetryableUpdateBalanceError,
     isTerminalUtxoKind,
-    koinuToDoge,
+    satoshiToBitcoin,
     summarizeMinterInfo,
     summarizeUpdateBalanceError,
     type MinterInfoSummary,
     type UpdateBalanceErrorSummary,
     type UtxoStatusSummary,
-  } from '$lib/utils/dogeBorrowFlow';
+  } from '$lib/utils/bitcoinBorrowFlow';
   import {
     createInitialIntent,
     loadIntent,
@@ -51,32 +49,32 @@
     classifyFinishBorrowOutcomeFromBound,
     classifyRecheckOutcome,
     runExclusiveAction,
-    dogeBorrowActionLockName,
-    computeDogeBorrowRisk,
+    bitcoinBorrowActionLockName,
+    computeBitcoinBorrowRisk,
     computeMaxBorrow,
     projectRatioAtPriceDrop,
     haveTermsChangedMaterially,
     canSubmitBorrow,
-    type DogeBorrowIntentRecord,
-    type DogeBorrowStep,
+    type BitcoinBorrowIntentRecord,
+    type BitcoinBorrowStep,
     type VaultLite,
     type OpenAndBorrowOutcome,
     type TermsSnapshot,
     type ExpectedWire,
     type ExclusiveLocksLike,
-  } from '$lib/utils/dogeBorrowWizard';
+  } from '$lib/utils/bitcoinBorrowWizard';
   import { userVaults } from '$lib/stores/appDataStore';
   import VaultCard from '$lib/components/vault/VaultCard.svelte';
   import { toastStore } from '$lib/stores/toast';
 
-  const CKDOGE_PRINCIPAL = CANISTER_IDS.CKDOGE_LEDGER;
+  const CKBTC_PRINCIPAL = CANISTER_IDS.CKBTC_LEDGER;
   // Storage/lock scoping: a local-dev environment must never read/write a mainnet record (or
   // vice versa) for the same principal text.
   const NETWORK_SCOPE = CONFIG.isLocal ? 'local' : 'mainnet';
   const OBSOLETE_TOKEN_FUNDS_ERROR = 'Insufficient token funds. Your balance is too low for this amount.';
 
   function clearObsoleteTokenFundsError() {
-    // The DOGE flow owns the authoritative success boundary. Retire only the
+    // The BTC flow owns the authoritative success boundary. Retire only the
     // exact terminal transfer error left over from an earlier failed attempt;
     // other current errors and success/info toasts remain visible.
     toastStore.removeError(OBSOLETE_TOKEN_FUNDS_ERROR);
@@ -89,7 +87,6 @@
     return anyNav.locks ?? null;
   }
 
-  let ckDogeLogoFailed = false;
 
   // ── Wallet/principal tracking ────────────────────────────────────────
   let isConnected = false;
@@ -121,8 +118,8 @@
   }
 
   // ── Wizard step + persisted intent ───────────────────────────────────
-  let step: DogeBorrowStep = 'choose';
-  let intent: DogeBorrowIntentRecord | null = null;
+  let step: BitcoinBorrowStep = 'choose';
+  let intent: BitcoinBorrowIntentRecord | null = null;
   let step1Snapshot: TermsSnapshot | null = null;
 
   function persistIntent(): boolean {
@@ -130,27 +127,39 @@
   }
 
   // ── Step 1: calculator ───────────────────────────────────────────────
-  let collateralAmount = 1000;
+  let collateralAmountInput = '0.01';
+  let collateralAmount: number;
+  $: collateralAmount = Number(collateralAmountInput) || 0;
   let icusdAmount = 50;
   let dropPct = 25;
   let step1Error = '';
+  let freshnessNow = Date.now();
+  let freshnessTimer: ReturnType<typeof setInterval> | null = null;
+  let borrowingTermsRefreshBusy = false;
+  let borrowingTermsRefreshError = '';
+  let nextAutomaticTermsRefreshAt = 0;
+  $: collateralConfigFresh = $collateralStore.lastFetch > 0 && freshnessNow - $collateralStore.lastFetch <= 30_000 && !$collateralStore.error;
 
-  $: ckdogeInfo = $collateralStore.collaterals.find((c) => c.principal === CKDOGE_PRINCIPAL);
-  $: collateralConfigLoading = $collateralStore.loading && !ckdogeInfo;
-  $: collateralConfigMissing = !$collateralStore.loading && $collateralStore.collaterals.length > 0 && !ckdogeInfo;
-  $: collateralPrice = ckdogeInfo?.price ?? 0;
-  $: liquidationCr = ckdogeInfo?.liquidationCr ?? 1.2;
-  $: minimumCr = ckdogeInfo?.minimumCr ?? 1.35;
-  $: borrowingFeeRate = ckdogeInfo?.borrowingFee ?? 0;
+  $: ckbtcInfo = $collateralStore.collaterals.find((c) => c.principal === CKBTC_PRINCIPAL);
+  $: collateralConfigLoading = $collateralStore.loading && !ckbtcInfo;
+  $: collateralConfigMissing = !$collateralStore.loading && (!ckbtcInfo || ckbtcInfo.status !== 'Active');
+  $: collateralPrice = ckbtcInfo?.price ?? 0;
+  $: liquidationCr = ckbtcInfo?.liquidationCr ?? 0;
+  $: minimumCr = ckbtcInfo?.minimumCr ?? 0;
+  $: borrowingFeeRate = ckbtcInfo?.borrowingFee ?? 0;
   $: feeCurve = $protocolStatus?.borrowingFeeCurveResolved ?? [];
-  // Live ckDOGE ledger transfer fee (raw koinu), as reported by get_supported_collaterals. Falls
-  // back to the same conservative default apiClient.ts already uses for this ledger's actual
-  // approve/transfer_from calls (never 0 — a zero fallback would fail closed into "reserve
-  // nothing", reopening the exact-balance bug this guards against while config is still loading).
-  $: ckdogeLedgerFeeKoinu = BigInt(Math.trunc(ckdogeInfo?.ledgerFee ?? 10_000));
+  // Live ckBTC ledger transfer fee (raw satoshi), from the current backend collateral config.
+  // Missing fee data remains zero here and keeps calculatorReady false.
+  $: ckbtcLedgerFeeSatoshi = BigInt(Math.trunc(ckbtcInfo?.ledgerFee ?? 0));
+  $: calculatorReady = Boolean(
+    collateralConfigFresh && ckbtcInfo?.status === 'Active' && Number.isFinite(collateralPrice) && collateralPrice > 0 &&
+    Number.isFinite(liquidationCr) && liquidationCr > 0 && Number.isFinite(minimumCr) && minimumCr > 0 &&
+    Number.isFinite(borrowingFeeRate) && borrowingFeeRate >= 0 && Number.isFinite(ckbtcInfo?.debtCeiling) && ckbtcInfo.debtCeiling > 0 &&
+    Number.isFinite(ckbtcInfo?.ledgerFee) && ckbtcInfo.ledgerFee >= 0 && $protocolStatus && Array.isArray(feeCurve)
+  );
 
-  $: risk = computeDogeBorrowRisk({
-    collateralAmountDoge: collateralAmount,
+  $: risk = computeBitcoinBorrowRisk({
+    collateralAmountBitcoin: collateralAmount,
     icusdAmount,
     collateralPriceUsd: collateralPrice,
     liquidationCr,
@@ -160,7 +169,7 @@
   });
   $: maxBorrow = computeMaxBorrow(collateralAmount, collateralPrice, minimumCr);
   $: downside = projectRatioAtPriceDrop(
-    { collateralAmountDoge: collateralAmount, icusdAmount, collateralPriceUsd: collateralPrice },
+    { collateralAmountBitcoin: collateralAmount, icusdAmount, collateralPriceUsd: collateralPrice },
     dropPct
   );
   $: crBand =
@@ -183,15 +192,49 @@
       const existing = loadIntent(localStorage, ownerPrincipalText, Date.now(), NETWORK_SCOPE);
       intent = existing ?? createInitialIntent(ownerPrincipalText, collateralAmount, icusdAmount, Date.now());
     } else {
-      intent = { ...intent, collateralAmountDoge: collateralAmount, icusdAmount, updatedAt: Date.now() };
+      intent = { ...intent, collateralAmountBitcoin: collateralAmount, icusdAmount, updatedAt: Date.now() };
     }
     persistIntent();
   }
 
-  function proceedToSignIn() {
+  async function refreshBorrowingTerms(): Promise<boolean> {
+    if (borrowingTermsRefreshBusy) return false;
+    borrowingTermsRefreshBusy = true;
+    borrowingTermsRefreshError = '';
+    try {
+      await Promise.all([
+        collateralStore.fetchSupportedCollateral(true, { strict: true }),
+        appDataStore.fetchProtocolStatus(true),
+      ]);
+      freshnessNow = Date.now();
+      await tick();
+      if (!calculatorReady) {
+        borrowingTermsRefreshError = 'Fresh backend data does not include active ckBTC price and borrowing terms.';
+        nextAutomaticTermsRefreshAt = Date.now() + 30_000;
+        return false;
+      }
+      nextAutomaticTermsRefreshAt = 0;
+      return true;
+    } catch {
+      freshnessNow = Date.now();
+      borrowingTermsRefreshError = 'Could not refresh live ckBTC borrowing terms. Try again when the backend is available.';
+      nextAutomaticTermsRefreshAt = Date.now() + 30_000;
+      return false;
+    } finally {
+      borrowingTermsRefreshBusy = false;
+    }
+  }
+
+  async function proceedToSignIn() {
     step1Error = '';
-    if (!(collateralAmount > 0)) {
-      step1Error = 'Enter how much DOGE you plan to send.';
+    if (!(await refreshBorrowingTerms())) {
+      if (!borrowingTermsRefreshBusy) {
+        step1Error = borrowingTermsRefreshError || 'Live ckBTC collateral settings are unavailable, stale, or inactive.';
+      }
+      return;
+    }
+    if (parseBtcAmountInput(collateralAmountInput) === null || !(collateralAmount > 0)) {
+      step1Error = 'Enter how much BTC you plan to send.';
       return;
     }
     if (!(icusdAmount > 0)) {
@@ -205,8 +248,8 @@
       borrowFeeIcusd: risk.borrowFeeIcusd,
       borrowingFeeRate,
       minimumCr,
-      debtCeiling: ckdogeInfo?.debtCeiling,
-      collateralStatus: ckdogeInfo?.status,
+      debtCeiling: ckbtcInfo?.debtCeiling,
+      collateralStatus: ckbtcInfo?.status,
       borrowingFeeCurve: feeCurve.map(([cr, multiplier]) => [cr, multiplier] as [number, number]),
     };
     if (isConnected && ownerPrincipalText) {
@@ -239,7 +282,7 @@
     walletStore.disconnect().catch(() => {});
   }
 
-  // ── Step 3: send DOGE (deposit address + poll) ───────────────────────
+  // ── Step 3: send BTC (deposit address + poll) ───────────────────────
   let depositAddress: string | null = null;
   let addressLoading = false;
   let addressError = '';
@@ -276,28 +319,26 @@
     minConfirmationsHint: minterInfoSummary?.minConfirmationsCount,
   });
 
-  $: sessionMintedKoinu = intent ? BigInt(intent.sessionMintedKoinu) : 0n;
-  $: walletCkdogeBalanceKoinu = (() => {
-    const symbol = ckdogeInfo?.symbol ?? 'ckDOGE';
-    const bal = $walletStore.tokenBalances?.[symbol];
-    return bal ? bal.raw : 0n;
+  $: sessionMintedSatoshi = intent ? BigInt(intent.sessionMintedSatoshi) : 0n;
+  $: walletCkbtcBalanceSatoshi = (() => {
+    const symbol = ckbtcInfo?.symbol ?? 'ckBTC';
+    return $walletStore.tokenBalances?.[symbol]?.raw ?? 0n;
   })();
   $: collateralResolution = resolveCollateralAmountForBorrow({
-    sessionMintedKoinu,
-    walletCkdogeBalanceKoinu,
+    sessionMintedSatoshi,
+    walletCkbtcBalanceSatoshi,
     useAvailableBalanceOptIn,
-    ledgerFeeKoinu: ckdogeLedgerFeeKoinu,
+    ledgerFeeSatoshi: ckbtcLedgerFeeSatoshi,
   });
-  $: resolvedCollateralDoge = koinuToDoge(collateralResolution.koinuAmount);
-  $: feeReservedDoge = koinuToDoge(collateralResolution.feeReservedKoinu);
-  $: canOfferExistingBalance =
-    sessionMintedKoinu === 0n && walletCkdogeBalanceKoinu > 0n && !useAvailableBalanceOptIn && pollAttempt > 0;
+  $: resolvedCollateralBitcoin = satoshiToBitcoin(collateralResolution.satoshiAmount);
+  $: feeReservedBitcoin = satoshiToBitcoin(collateralResolution.feeReservedSatoshi);
   // The source balance this collateral was drawn from (session mint or opted-in wallet balance),
   // before the ledger-fee reservation — used only to disclose the reservation transparently.
-  $: sourceBalanceKoinu = collateralResolution.source === 'existing_balance_opt_in' ? walletCkdogeBalanceKoinu : sessionMintedKoinu;
+  $: canOfferExistingBalance = sessionMintedSatoshi === 0n && walletCkbtcBalanceSatoshi > 0n && !useAvailableBalanceOptIn && pollAttempt > 0;
+  $: sourceBalanceSatoshi = collateralResolution.source === 'existing_balance_opt_in' ? walletCkbtcBalanceSatoshi : sessionMintedSatoshi;
   // True once we have a real balance to draw from but the fee reservation consumed all of it —
   // the wallet flow must explain this instead of silently hiding the "continue" button.
-  $: collateralAllConsumedByFees = collateralResolution.koinuAmount === 0n && sourceBalanceKoinu > 0n;
+  $: collateralAllConsumedByFees = collateralResolution.satoshiAmount === 0n && sourceBalanceSatoshi > 0n;
 
   $: if (step === 'send' && isConnected && ownerPrincipal && !depositAddress && !addressLoading && !addressError) {
     requestDepositAddress();
@@ -316,10 +357,10 @@
     addressLoading = true;
     addressError = '';
     try {
-      const actor = await getPublicMinterActor();
+      const actor = await getPublicCkbtcMinterActor();
       if (!isLive()) return;
       const args = buildAccountArgs(requestPrincipal);
-      const address: string = await actor.get_doge_address(args);
+      const address: string = await actor.get_btc_address(args);
       if (!isLive()) return;
       depositAddress = address;
       qrDataUrl = '';
@@ -341,7 +382,7 @@
     } catch (err) {
       if (isLive()) {
         addressError =
-          err instanceof Error ? `Could not fetch your DOGE address: ${err.message}` : 'Could not fetch your DOGE address.';
+          err instanceof Error ? `Could not fetch your BTC address: ${err.message}` : 'Could not fetch your BTC address.';
       }
     } finally {
       if (isLive()) addressLoading = false;
@@ -365,7 +406,7 @@
       });
       if (isQrLive()) qrDataUrl = dataUrl;
     } catch (err) {
-      console.error('DOGE QR generation failed:', err);
+      console.error('BTC QR generation failed:', err);
       if (isQrLive()) qrDataUrl = '';
     }
   }
@@ -395,7 +436,7 @@
     }
   }
 
-  async function beginSentDogeFlow() {
+  async function beginSentBitcoinFlow() {
     if (!isConnected || !ownerPrincipal || !depositAddress || isPolling) return;
     stopPolling();
     pollAttempt = 0;
@@ -448,7 +489,7 @@
     pollAttempt += 1;
 
     try {
-      const result = await updateDogeBalanceForOwner(sessionPrincipal, cycleIsLive);
+      const result = await updateBtcBalanceForOwner(sessionPrincipal, cycleIsLive);
       if (!cycleIsLive()) return;
 
       if ('Ok' in result) {
@@ -457,8 +498,8 @@
         const minted = utxoStatuses.find((s) => s.kind === 'Minted');
         if (minted) {
           mintedSummary = minted;
-          if (minted.blockIndex !== undefined && minted.koinuAmount !== undefined && intent) {
-            intent = addMintedReceipt(intent, minted.blockIndex, minted.koinuAmount, Date.now());
+          if (minted.blockIndex !== undefined && minted.satoshiAmount !== undefined && intent) {
+            intent = addMintedReceipt(intent, minted.blockIndex, minted.satoshiAmount, Date.now());
             persistIntent();
           }
           stopPolling();
@@ -521,7 +562,7 @@
   }
 
   function proceedToConfirm() {
-    if (resolvedCollateralDoge <= 0) return;
+    if (resolvedCollateralBitcoin <= 0) return;
     if (intent) {
       intent = { ...intent, step: 'confirm', updatedAt: Date.now() };
       persistIntent();
@@ -533,7 +574,7 @@
   // ── Step 4: confirm and borrow ───────────────────────────────────────
   let finalTermsLoaded = false;
   let finalTermsError = '';
-  let finalRisk: ReturnType<typeof computeDogeBorrowRisk> | null = null;
+  let finalRisk: ReturnType<typeof computeBitcoinBorrowRisk> | null = null;
   let finalSnapshot: TermsSnapshot | null = null;
   let termsChanged = false;
   let termsConfirmed = false;
@@ -567,7 +608,7 @@
       return;
     }
     if (!isCurrentRefresh()) return;
-    const info = $collateralStore.collaterals.find((c) => c.principal === CKDOGE_PRINCIPAL);
+    const info = $collateralStore.collaterals.find((c) => c.principal === CKBTC_PRINCIPAL);
     const freshPrice = info?.price ?? collateralPrice;
     const freshLiqCr = info?.liquidationCr ?? liquidationCr;
     const freshMinCr = info?.minimumCr ?? minimumCr;
@@ -593,8 +634,8 @@
     // ratio gate blocks submission and the user must edit/reconfirm explicitly.
     confirmIcusdAmount = icusdAmount;
 
-    finalRisk = computeDogeBorrowRisk({
-      collateralAmountDoge: resolvedCollateralDoge,
+    finalRisk = computeBitcoinBorrowRisk({
+      collateralAmountBitcoin: resolvedCollateralBitcoin,
       icusdAmount: confirmIcusdAmount,
       collateralPriceUsd: freshPrice,
       liquidationCr: freshLiqCr,
@@ -659,7 +700,7 @@
 
   type ConfirmAndBorrowRun =
     | { aborted: true; reason: 'other_tab_pending' | 'session_changed' | 'durability_failed' }
-    | { aborted: false; classified: OpenAndBorrowOutcome; resolvedIntent: DogeBorrowIntentRecord; approvalMayHaveMutated: boolean };
+    | { aborted: false; classified: OpenAndBorrowOutcome; resolvedIntent: BitcoinBorrowIntentRecord; approvalMayHaveMutated: boolean };
 
   async function confirmAndBorrow() {
     if (!canConfirm || !intent || !ownerPrincipal) return;
@@ -671,7 +712,7 @@
     const baseIntent = intent;
 
     const locks = getLocks();
-    const lockName = dogeBorrowActionLockName(actionOwnerText, NETWORK_SCOPE);
+    const lockName = bitcoinBorrowActionLockName(actionOwnerText, NETWORK_SCOPE);
 
     const exec = await runExclusiveAction<ConfirmAndBorrowRun>(locks, lockName, async () => {
       // Re-read persisted state now that the lock is held, in case another tab already started
@@ -699,11 +740,11 @@
       // Persist the in-flight attempt BEFORE the mutating call, with enough of a snapshot
       // (pre-action vault ids + exact submitted amounts) to recover a still-unknown vault id
       // after a reload/crash, even if this tab never sees the call resolve.
-      const submittedCollateralRaw = collateralResolution.koinuAmount;
+      const submittedCollateralRaw = collateralResolution.satoshiAmount;
       const submittedIcusdRaw = icusdAmountToRawE8s(confirmIcusdAmount);
       const pendingIntent = beginPendingAction(baseIntent, 'open_and_borrow', Date.now(), {
         preActionVaultIds: Array.from(beforeIds),
-        submittedCollateralKoinu: submittedCollateralRaw.toString(),
+        submittedCollateralSatoshi: submittedCollateralRaw.toString(),
         submittedIcusdAmount: confirmIcusdAmount,
         submittedIcusdAmountRaw: submittedIcusdRaw.toString(),
       });
@@ -730,7 +771,7 @@
         ctx,
         submittedCollateralRaw,
         submittedIcusdRaw,
-        CKDOGE_PRINCIPAL
+        CKBTC_PRINCIPAL
       );
 
       // Resolve against the CAPTURED owner, regardless of who is connected by the time this awaits resolve.
@@ -745,11 +786,11 @@
         signal: { kind: result.kind, vaultId: result.vaultId, errorMessage: result.errorMessage },
         vaults: vaultsAfter,
         beforeIds,
-        ckdogePrincipal: CKDOGE_PRINCIPAL,
+        ckbtcPrincipal: CKBTC_PRINCIPAL,
         expected: { collateralAmountRaw: submittedCollateralRaw, borrowedAmountRaw: submittedIcusdRaw },
       });
 
-      const resolvedIntent: DogeBorrowIntentRecord = {
+      const resolvedIntent: BitcoinBorrowIntentRecord = {
         ...pendingIntent,
         vaultId: classified.vaultId,
         borrowConfirmed: classified.kind === 'success',
@@ -807,7 +848,7 @@
 
   type FinishBorrowRun =
     | { aborted: true; reason: 'other_tab_pending' | 'preflight_unavailable' | 'session_changed' | 'durability_failed' }
-    | { aborted: false; finalOutcome: OpenAndBorrowOutcome; resolvedIntent: DogeBorrowIntentRecord };
+    | { aborted: false; finalOutcome: OpenAndBorrowOutcome; resolvedIntent: BitcoinBorrowIntentRecord };
 
   async function finishBorrowOnVault() {
     const knownVaultId = outcome?.vaultId ?? intent?.vaultId ?? null;
@@ -820,7 +861,7 @@
     const baseIntent = intent;
     const vaultId = knownVaultId;
 
-    const writeResolved = (resolved: DogeBorrowIntentRecord, finalOutcome: OpenAndBorrowOutcome) => {
+    const writeResolved = (resolved: BitcoinBorrowIntentRecord, finalOutcome: OpenAndBorrowOutcome) => {
       if (isLiveIntentSession(session, baseIntent.createdAt)) {
         intent = resolved;
         outcome = finalOutcome;
@@ -843,7 +884,7 @@
     }
 
     const locks = getLocks();
-    const lockName = dogeBorrowActionLockName(actionOwnerText, NETWORK_SCOPE);
+    const lockName = bitcoinBorrowActionLockName(actionOwnerText, NETWORK_SCOPE);
 
     const exec = await runExclusiveAction<FinishBorrowRun>(locks, lockName, async () => {
       const latest = loadIntent(localStorage, actionOwnerText, Date.now(), NETWORK_SCOPE);
@@ -911,7 +952,7 @@
         expectedBorrowedRaw: submittedIcusdRaw,
       });
 
-      const resolvedIntent: DogeBorrowIntentRecord = {
+      const resolvedIntent: BitcoinBorrowIntentRecord = {
         ...pendingIntent,
         vaultId,
         borrowConfirmed: finalOutcome.kind === 'success',
@@ -950,9 +991,9 @@
   }
 
   /** The exact wire amounts THIS record's mutating attempt actually submitted (or 0 if never submitted), for exact-match verification — never re-derived from the live, possibly-since-edited calculator inputs. */
-  function expectedWireFromIntent(record: DogeBorrowIntentRecord): ExpectedWire {
+  function expectedWireFromIntent(record: BitcoinBorrowIntentRecord): ExpectedWire {
     return {
-      collateralAmountRaw: record.submittedCollateralKoinu ? BigInt(record.submittedCollateralKoinu) : 0n,
+      collateralAmountRaw: record.submittedCollateralSatoshi ? BigInt(record.submittedCollateralSatoshi) : 0n,
       // Records written before the raw field was introduced retain the human amount. Convert that
       // legacy field only as a compatibility fallback; every new attempt persists and reuses the
       // exact bigint returned to the bound API.
@@ -979,11 +1020,11 @@
         knownVaultId,
         vaults: after,
         beforeIds: new Set(baseIntent.preActionVaultIds ?? []),
-        ckdogePrincipal: CKDOGE_PRINCIPAL,
+        ckbtcPrincipal: CKBTC_PRINCIPAL,
         expected: expectedWireFromIntent(baseIntent),
       });
 
-      const resolvedIntent: DogeBorrowIntentRecord = {
+      const resolvedIntent: BitcoinBorrowIntentRecord = {
         ...baseIntent,
         vaultId: reclassified.vaultId,
         borrowConfirmed: reclassified.kind === 'success',
@@ -1010,7 +1051,7 @@
     }
   }
 
-  // ── Done step: inline ckDOGE position view (reuses the existing VaultCard/actions) ──
+  // ── Done step: inline ckBTC position view (reuses the existing VaultCard/actions) ──
   let doneExpandedVaultId: number | null = null;
   function handleDoneVaultToggle(e: CustomEvent<{ vaultId: number }>) {
     doneExpandedVaultId = doneExpandedVaultId === e.detail.vaultId ? null : e.detail.vaultId;
@@ -1018,10 +1059,10 @@
   function handleDoneVaultUpdated() {
     if (ownerPrincipal) void appDataStore.fetchUserVaults(ownerPrincipal, true).catch(() => {});
   }
-  $: doneCkdogeVaults = $userVaults.filter((v) => (v.collateralType || '') === CKDOGE_PRINCIPAL);
-  $: confirmedDoneVault = doneCkdogeVaults.find((v) => v.vaultId === (outcome?.vaultId ?? intent?.vaultId)) ?? null;
-  $: confirmedCollateralDoge = confirmedDoneVault?.collateralAmount ??
-    (intent?.submittedCollateralKoinu ? koinuToDoge(BigInt(intent.submittedCollateralKoinu)) : resolvedCollateralDoge);
+  $: doneCkbtcVaults = $userVaults.filter((v) => (v.collateralType || '') === CKBTC_PRINCIPAL);
+  $: confirmedDoneVault = doneCkbtcVaults.find((v) => v.vaultId === (outcome?.vaultId ?? intent?.vaultId)) ?? null;
+  $: confirmedCollateralBitcoin = confirmedDoneVault?.collateralAmount ??
+    (intent?.submittedCollateralSatoshi ? satoshiToBitcoin(BigInt(intent.submittedCollateralSatoshi)) : resolvedCollateralBitcoin);
   $: confirmedDoneDebt = confirmedDoneVault?.borrowedIcusd ??
     (intent?.submittedIcusdAmountRaw ? Number(BigInt(intent.submittedIcusdAmountRaw)) / 100_000_000 : confirmIcusdAmount || icusdAmount);
   $: if (step === 'done' && ownerPrincipal) {
@@ -1042,6 +1083,7 @@
 
   // ── Result / reset ───────────────────────────────────────────────────
   function resetFlow() {
+    useAvailableBalanceOptIn = false;
     if (ownerPrincipalText) clearIntent(localStorage, ownerPrincipalText, NETWORK_SCOPE);
     intent = null;
     outcome = null;
@@ -1060,11 +1102,11 @@
     pollingPrincipal = null;
     pollingSession = null;
     pollingLineage = null;
-    useAvailableBalanceOptIn = false;
     finalTermsLoaded = false;
     termsConfirmed = false;
     termsChanged = false;
-    collateralAmount = 1000;
+    useAvailableBalanceOptIn = false;
+    collateralAmountInput = '0.01';
     icusdAmount = 50;
     dropPct = 25;
     step = 'choose';
@@ -1082,7 +1124,7 @@
       return;
     }
     intent = loaded;
-    collateralAmount = loaded.collateralAmountDoge;
+    collateralAmountInput = String(loaded.collateralAmountBitcoin);
     icusdAmount = loaded.icusdAmount;
 
     if (loaded.borrowConfirmed && loaded.vaultId !== null) {
@@ -1105,7 +1147,7 @@
           knownVaultId: loaded.vaultId,
           vaults,
           beforeIds: new Set(loaded.preActionVaultIds ?? []),
-          ckdogePrincipal: CKDOGE_PRINCIPAL,
+          ckbtcPrincipal: CKBTC_PRINCIPAL,
           expected: expectedWireFromIntent(loaded),
         });
         // A finish marker with this durable flag came from an earlier explicit backend partial
@@ -1115,11 +1157,11 @@
           classified = {
             kind: 'partial_zero_debt',
             vaultId: classified.vaultId ?? loaded.vaultId,
-            message: 'Your DOGE collateral is safely locked in this vault. Finish borrowing when you are ready.',
+            message: 'Your BTC collateral is safely locked in this vault. Finish borrowing when you are ready.',
           };
         }
         outcome = classified;
-        const resolved: DogeBorrowIntentRecord = {
+        const resolved: BitcoinBorrowIntentRecord = {
           ...loaded,
           vaultId: classified.vaultId,
           borrowConfirmed: classified.kind === 'success',
@@ -1161,7 +1203,6 @@
     pollingPrincipal = null;
     pollingSession = null;
     pollingLineage = null;
-    useAvailableBalanceOptIn = false;
     finalTermsLoaded = false;
     termsConfirmed = false;
     termsChanged = false;
@@ -1202,57 +1243,37 @@
     void reconcileForPrincipal(ownerPrincipalText, captureSession());
   }
 
-  let faviconLink: HTMLLinkElement | null = null;
-  let faviconOriginalHref = '';
-  let faviconOriginalType = '';
-
   onMount(() => {
-    collateralStore.fetchSupportedCollateral();
-    appDataStore.fetchProtocolStatus();
+    void refreshBorrowingTerms();
+    freshnessTimer = setInterval(() => {
+      freshnessNow = Date.now();
+      if (document.visibilityState !== 'visible' || borrowingTermsRefreshBusy || freshnessNow < nextAutomaticTermsRefreshAt) return;
+      if (!calculatorReady) void refreshBorrowingTerms();
+    }, 5_000);
     if (typeof window !== 'undefined') window.addEventListener('storage', handleStorageEvent);
 
-    if (typeof document !== 'undefined') {
-      faviconLink = document.querySelector('link[rel="icon"]');
-      if (faviconLink) {
-        faviconOriginalHref = faviconLink.getAttribute('href') ?? '';
-        faviconOriginalType = faviconLink.getAttribute('type') ?? '';
-        faviconLink.setAttribute('href', '/ckdoge-logo.svg');
-        faviconLink.setAttribute('type', 'image/svg+xml');
-      }
-    }
   });
 
   onDestroy(() => {
     destroyed = true;
+    if (freshnessTimer !== null) clearInterval(freshnessTimer);
     unsubConnected();
     unsubPrincipal();
     stopPolling();
     if (addressCopyTimer !== null) clearTimeout(addressCopyTimer);
     if (typeof window !== 'undefined') window.removeEventListener('storage', handleStorageEvent);
-    if (faviconLink) {
-      faviconLink.setAttribute('href', faviconOriginalHref);
-      if (faviconOriginalType) {
-        faviconLink.setAttribute('type', faviconOriginalType);
-      } else {
-        faviconLink.removeAttribute('type');
-      }
-    }
   });
 </script>
 
-<svelte:head><title>Borrow with DOGE | Rumi Protocol</title></svelte:head>
+<svelte:head><title>Borrow with BTC | Rumi Protocol</title></svelte:head>
 
 <div class="dbw-page">
   <div class="dbw-hero">
     <div class="dbw-hero-logo">
-      {#if !ckDogeLogoFailed}
-        <img src="/ckdoge-logo.svg" alt="ckDOGE" on:error={() => (ckDogeLogoFailed = true)} />
-      {:else}
-        <span class="dbw-logo-fallback" aria-hidden="true">ckD</span>
-      {/if}
+      <span class="dbw-bitcoin-mark" aria-label="Bitcoin">₿</span>
     </div>
-    <h1>Much DOGE. More possibilities.</h1>
-    <p class="dbw-subtitle">Borrow icUSD against your DOGE. No selling or separate tool to learn.</p>
+    <h1>Keep your Bitcoin. Borrow dollars.</h1>
+    <p class="dbw-subtitle">Borrow icUSD against ckBTC, the Internet Computer’s 1:1 Bitcoin representation. icUSD is dollar-denominated; your collateral remains Bitcoin-backed.</p>
   </div>
 
   <div class="dbw-stepper" aria-label="Borrowing steps">
@@ -1265,7 +1286,7 @@
     </div>
     <span class="dbw-step-line"></span>
     <div class="dbw-step" class:is-active={step === 'send'} class:is-done={step === 'confirm' || step === 'done'}>
-      <span class="dbw-step-circle">3</span><span class="dbw-step-label">Send DOGE</span>
+      <span class="dbw-step-circle">3</span><span class="dbw-step-label">Send BTC</span>
     </div>
     <span class="dbw-step-line"></span>
     <div class="dbw-step" class:is-active={step === 'confirm' || step === 'done'} class:is-done={step === 'done'}>
@@ -1283,26 +1304,33 @@
   <div class="dbw-panel">
     {#if step === 'choose'}
       <div class="dbw-row dbw-row--annotated">
-        <label class="dbw-field-label" for="dbw-collateral">DOGE you'll send</label>
+        <label class="dbw-field-label" for="dbw-collateral">BTC you'll send</label>
         <div class="dbw-input-wrap">
           <input
             id="dbw-collateral"
-            type="number"
-            min="0"
-            step="1"
-            bind:value={collateralAmount}
+            type="text"
+            inputmode="decimal"
+            bind:value={collateralAmountInput}
             class="dbw-input"
           />
-          <span class="dbw-input-suffix">DOGE</span>
+          <span class="dbw-input-suffix">BTC</span>
         </div>
-        {#if collateralPrice > 0}
-          <p class="dbw-hint">&asymp; ${formatNumber(collateralAmount * collateralPrice)} at today's DOGE price</p>
+        {#if calculatorReady}
+          <p class="dbw-hint">&asymp; ${formatNumber(collateralAmount * collateralPrice)} at today's BTC price</p>
         {:else if collateralConfigLoading}
-          <p class="dbw-hint">Loading live DOGE price&hellip;</p>
+          <p class="dbw-hint">Loading live BTC price&hellip;</p>
         {:else}
-          <p class="dbw-hint dbw-hint--warn">Live price unavailable right now. Try again shortly.</p>
+          <p class="dbw-hint dbw-hint--warn">
+            {#if borrowingTermsRefreshBusy}
+              Refreshing live collateral price and borrowing terms…
+            {:else}
+              {borrowingTermsRefreshError || 'Live price or borrowing terms need a refresh.'}
+            {/if}
+          </p>
+          <button class="dbw-btn dbw-btn--secondary" type="button" on:click={() => void refreshBorrowingTerms()} disabled={borrowingTermsRefreshBusy}>
+            {borrowingTermsRefreshBusy ? 'Refreshing…' : 'Refresh borrowing terms'}
+          </button>
         {/if}
-        <span class="dbw-annotation dbw-annotation--purple" aria-hidden="true">much DOGE.<br />very collateral.</span>
       </div>
 
       <div class="dbw-row">
@@ -1318,47 +1346,51 @@
         </div>
       </div>
 
-      <p class="dbw-note">These starting numbers are just an example. Everything below updates live as you type.</p>
+      <p class="dbw-note">Estimates update as you type and use current backend terms when available.</p>
 
       <div class="dbw-result-strip">
         <div class="dbw-result-item">
           <span class="dbw-result-label">Collateral ratio</span>
           <span class="dbw-result-value dbw-band-{crBand}">
-            {risk.collateralRatioPct === Infinity ? 'no debt' : `${formatNumber(risk.collateralRatioPct)}%`}
+            {calculatorReady ? (risk.collateralRatioPct === Infinity ? 'no debt' : `${formatNumber(risk.collateralRatioPct)}%`) : 'Unavailable'}
           </span>
         </div>
         <div class="dbw-result-item">
           <span class="dbw-result-label">Borrow fee</span>
-          <span class="dbw-result-value">{formatNumber(risk.borrowFeeIcusd, 4)} icUSD</span>
+          <span class="dbw-result-value">{calculatorReady ? `${formatNumber(risk.borrowFeeIcusd, 4)} icUSD` : 'Unavailable'}</span>
         </div>
         <div class="dbw-result-item">
-          <span class="dbw-result-label">icUSD received on ICP</span>
-          <span class="dbw-result-value">{formatNumber(risk.icusdReceived, 4)} icUSD</span>
+          <span class="dbw-result-label">icUSD received</span>
+          <span class="dbw-result-value">{calculatorReady ? `${formatNumber(risk.icusdReceived, 4)} icUSD` : 'Unavailable'}</span>
         </div>
         <div class="dbw-result-item">
           <span class="dbw-result-label">Liquidation price</span>
-          <span class="dbw-result-value dbw-band-{liqBand}">${formatNumber(risk.liquidationPriceUsd, 4)}</span>
+          <span class="dbw-result-value dbw-band-{liqBand}">{calculatorReady ? `$${formatNumber(risk.liquidationPriceUsd, 4)}` : 'Unavailable'}</span>
         </div>
       </div>
 
+      {#if calculatorReady}
       <div class="dbw-downside">
-        <label class="dbw-field-label" for="dbw-drop">If DOGE fell by {dropPct}%, your ratio would be about {formatNumber(downside.impliedCrPct)}%.</label>
+        <label class="dbw-field-label" for="dbw-drop">If BTC fell by {dropPct}%, your ratio would be about {formatNumber(downside.impliedCrPct)}%.</label>
         <input id="dbw-drop" type="range" min="1" max="90" bind:value={dropPct} class="dbw-slider" />
         {#if risk.safetyDeltaPct > 0}
-          <p class="dbw-hint">You'd be at your liquidation price if DOGE fell about {formatNumber(risk.safetyDeltaPct)}% from here.</p>
+          <p class="dbw-hint">You'd be at your liquidation price if BTC fell about {formatNumber(risk.safetyDeltaPct)}% from here.</p>
         {/if}
       </div>
+      {:else}
+        <p class="dbw-hint">Live collateral price and borrowing terms are unavailable or stale. Risk estimates will appear after a fresh backend read.</p>
+      {/if}
 
-      <p class="dbw-risk">{betaRiskNotice()} Borrowing puts your DOGE at risk of liquidation if its price falls far enough. There is no guaranteed peg, no guaranteed timing, and no promise you will avoid liquidation.</p>
+      <p class="dbw-risk">ckBTC deposits need Bitcoin confirmations, and the minter may hold or reject deposits under its deposit checks. Borrowing can lead to liquidation if the collateral value falls below the required threshold.</p>
 
       {#if step1Error}<p class="dbw-error" role="alert">{step1Error}</p>{/if}
-      {#if collateralConfigMissing}<p class="dbw-error" role="alert">ckDOGE collateral is not available right now. Please try again later.</p>{/if}
+      {#if collateralConfigMissing}<p class="dbw-error" role="alert">ckBTC collateral is not available right now. Please try again later.</p>{/if}
 
-      <button class="dbw-btn dbw-btn--primary dbw-btn--full" type="button" on:click={proceedToSignIn} disabled={collateralConfigMissing}>
-        Continue with this loan
+      <button class="dbw-btn dbw-btn--primary dbw-btn--full" type="button" on:click={proceedToSignIn} disabled={!calculatorReady || borrowingTermsRefreshBusy}>
+        {borrowingTermsRefreshBusy ? 'Refreshing terms…' : 'Continue with this loan'}
       </button>
 
-      <p class="dbw-doge-only-hint">Want to mint or redeem ckDOGE? <a href="/doge">Go to the ckDOGE Minter</a>.</p>
+      <p class="dbw-bitcoin-only-hint">Need to mint or redeem ckBTC? <a href="/bitcoin">Go to the Bitcoin minter</a>.</p>
     {:else if step === 'signin'}
       <button type="button" class="dbw-link-btn dbw-back-link" on:click={() => (step = 'choose')}>&larr; Back to amounts</button>
       <h2>Sign in to continue</h2>
@@ -1379,25 +1411,24 @@
       {#if signInError}<p class="dbw-error" role="alert">{signInError}</p>{/if}
 
       <details class="dbw-disclosure">
-        <summary>What happens to my DOGE?</summary>
+        <summary>What happens to my BTC?</summary>
         <p>
-          Your DOGE moves onto the Internet Computer as ckDOGE, a 1:1 representation your wallet can hold and Rumi
-          can accept as collateral. You can send it back to a normal Dogecoin address later from the
-          <a href="/doge">ckDOGE Minter</a>.
+          DFINITY’s minter holds the BTC backing your ckBTC. Rumi locks that ckBTC as vault collateral. After repaying
+          the debt and withdrawing the collateral, you can redeem through the <a href="/bitcoin">Bitcoin minter</a>.
         </p>
       </details>
     {:else if step === 'send'}
-      <h2>Send DOGE to your address</h2>
-      <p class="dbw-panel-sub">Your ckDOGE will arrive in your connected wallet, then you'll borrow against it.</p>
+      <h2>Send BTC to your address</h2>
+      <p class="dbw-panel-sub">Your ckBTC will arrive in your connected wallet, then you'll borrow against it.</p>
 
       <div class="dbw-intent-strip">
-        <div><span class="dbw-intent-label">Send</span><strong>{formatNumber(collateralAmount)} DOGE</strong></div>
+        <div><span class="dbw-intent-label">Send</span><strong>{formatNumber(collateralAmount)} BTC</strong></div>
         <div><span class="dbw-intent-label">Borrow</span><strong>{formatNumber(icusdAmount)} icUSD</strong></div>
       </div>
 
       <p class="dbw-risk">
-        Dogecoin deposits need {minterInfoSummary?.minConfirmationsValue ?? '60'} confirmations before they mint,
-        roughly an hour, and can be longer if the network is busy. You can close this tab and come back; your
+        Bitcoin deposits need {minterInfoSummary?.minConfirmationsValue ?? 'unavailable'} confirmations before they mint,
+        confirmation timing depends on Bitcoin network conditions. You can close this tab and come back; your
         deposit address does not change.
       </p>
 
@@ -1412,18 +1443,18 @@
         <div class="dbw-deposit-grid">
           <div class="dbw-qr-pane">
             {#if qrDataUrl}
-              <img src={qrDataUrl} alt="DOGE deposit address QR code" class="dbw-qr" />
+              <img src={qrDataUrl} alt="BTC deposit address QR code" class="dbw-qr" />
             {:else}
               <div class="dbw-qr-empty">QR</div>
             {/if}
           </div>
           <div class="dbw-address-pane">
-            <span class="dbw-field-label">Your DOGE deposit address</span>
+            <span class="dbw-field-label">Your BTC deposit address</span>
             <button type="button" class="dbw-address-btn" on:click={copyDepositAddress}>
               <span>{depositAddress}</span>
               <small>{addressCopied ? 'Copied' : 'Copy'}</small>
             </button>
-            <p class="dbw-doge-only-send">Only send DOGE to this address. Sending anything else, or from an exchange that does not support Dogecoin withdrawals, may lose funds.</p>
+            <p class="dbw-bitcoin-only-send">Only send BTC to this address. Sending anything else, or from an exchange that does not support Bitcoin withdrawals, may lose funds.</p>
           </div>
         </div>
 
@@ -1439,7 +1470,7 @@
         </div>
 
         {#if mintStepIndex < 2 && !isPolling}
-          <button class="dbw-btn dbw-btn--primary dbw-btn--full" type="button" on:click={beginSentDogeFlow}>I sent the DOGE</button>
+          <button class="dbw-btn dbw-btn--primary dbw-btn--full" type="button" on:click={beginSentBitcoinFlow}>I sent the BTC</button>
         {:else}
           <div class="dbw-poll-status">
             <p><strong>{confirmationDisplay.statusLabel}</strong></p>
@@ -1457,43 +1488,38 @@
         {/if}
 
         {#if mintedSummary}
-          <p class="dbw-success">Minted {koinuToDoge(mintedSummary.koinuAmount ?? 0n)} DOGE worth of ckDOGE into your wallet.</p>
+          <p class="dbw-success">Minted {satoshiToBitcoin(mintedSummary.satoshiAmount ?? 0n)} BTC worth of ckBTC into your wallet.</p>
         {/if}
+
+
 
         {#if canOfferExistingBalance}
           <div class="dbw-recovery-card">
-            <p>
-              We have not detected a new deposit from this session yet, but your wallet already holds
-              {formatNumber(koinuToDoge(walletCkdogeBalanceKoinu), 8)} ckDOGE (perhaps minted earlier or in another
-              tab). Use that as your collateral instead?
-            </p>
-            <button class="dbw-btn dbw-btn--secondary" type="button" on:click={useExistingBalance}>
-              Use my available {formatNumber(koinuToDoge(walletCkdogeBalanceKoinu), 8)} ckDOGE
-            </button>
+            <p>We have not detected a new deposit from this session, but this wallet holds {formatNumber(satoshiToBitcoin(walletCkbtcBalanceSatoshi), 8)} ckBTC. Choose whether to use this existing ckBTC as collateral.</p>
+            <button class="dbw-btn dbw-btn--secondary" type="button" on:click={useExistingBalance}>Use existing ckBTC balance</button>
           </div>
         {/if}
 
-        {#if resolvedCollateralDoge > 0}
+        {#if resolvedCollateralBitcoin > 0}
           <p class="dbw-hint">
-            Collateral ready for borrowing: {formatNumber(resolvedCollateralDoge, 8)} ckDOGE
-            {#if collateralResolution.source === 'existing_balance_opt_in'}(from your existing wallet balance){/if}
-            {#if collateralResolution.feeReservedKoinu > 0n}
-              (network fee of {formatNumber(feeReservedDoge, 8)} ckDOGE reserved from your {formatNumber(koinuToDoge(sourceBalanceKoinu), 8)} ckDOGE so the transfer can go through)
+            Collateral ready for borrowing: {formatNumber(resolvedCollateralBitcoin, 8)} ckBTC{collateralResolution.source === 'existing_balance_opt_in' ? ' (from your explicitly selected wallet balance)' : ''}
+            {#if collateralResolution.feeReservedSatoshi > 0n}
+              (reserve {formatNumber(feeReservedBitcoin, 8)} ckBTC for two ledger fees of {formatNumber(satoshiToBitcoin(ckbtcLedgerFeeSatoshi), 8)} each, from your {formatNumber(satoshiToBitcoin(sourceBalanceSatoshi), 8)} ckBTC)
             {/if}
           </p>
           <button class="dbw-btn dbw-btn--primary dbw-btn--full" type="button" on:click={proceedToConfirm}>Continue to confirm borrow</button>
         {:else if collateralAllConsumedByFees}
           <p class="dbw-error" role="alert">
-            Your {formatNumber(koinuToDoge(sourceBalanceKoinu), 8)} ckDOGE is too small to cover the network fees
-            required to deposit it as collateral (about {formatNumber(feeReservedDoge, 8)} ckDOGE). Send a larger
-            amount of DOGE to use this flow.
+            Your {formatNumber(satoshiToBitcoin(sourceBalanceSatoshi), 8)} ckBTC is too small to cover the network fees
+            required to deposit it as collateral (about {formatNumber(feeReservedBitcoin, 8)} ckBTC). Send a larger
+            amount of BTC to use this flow.
           </p>
         {/if}
 
         <p class="dbw-panel-sub">
           Changed your mind about borrowing? Your deposit address does not expire, but minting will not happen on its
-          own while this tab stays closed — come back here (or the <a href="/doge">ckDOGE Minter</a>) and check again
-          once it is confirmed. From there you can hold the ckDOGE, send it back to a Dogecoin address, or finish
+          own while this tab stays closed — come back here (or the <a href="/bitcoin">Bitcoin minter</a>) and check again
+          once it is confirmed. From there you can hold the ckBTC, send it back to a Bitcoin address, or finish
           borrowing later.
         </p>
       {/if}
@@ -1510,7 +1536,7 @@
         </button>
       {:else if outcome && outcome.kind === 'partial_zero_debt'}
         <p class="dbw-error" role="alert">{outcome.message}</p>
-        <p class="dbw-panel-sub">Your DOGE collateral is safely locked in vault #{outcome.vaultId}. Finish the borrow below, or come back later; nothing will be created again.</p>
+        <p class="dbw-panel-sub">Your BTC collateral is safely locked in vault #{outcome.vaultId}. Finish the borrow below, or come back later; nothing will be created again.</p>
         <button class="dbw-btn dbw-btn--primary dbw-btn--full" type="button" disabled={actionInProgress} on:click={finishBorrowOnVault}>
           {actionInProgress ? 'Borrowing…' : `Finish borrowing ${formatNumber(confirmIcusdAmount)} icUSD`}
         </button>
@@ -1529,9 +1555,10 @@
         <p class="dbw-panel-sub" aria-live="polite">{finalTermsError || 'Refreshing live terms before you borrow…'}</p>
       {:else if finalRisk}
         <div class="dbw-intent-strip">
-          <div><span class="dbw-intent-label">Collateral</span><strong>{formatNumber(resolvedCollateralDoge, 8)} ckDOGE</strong></div>
+          <div><span class="dbw-intent-label">Collateral to lock</span><strong>{formatNumber(resolvedCollateralBitcoin, 8)} ckBTC</strong></div>
           <div><span class="dbw-intent-label">Borrow</span><strong>{formatNumber(confirmIcusdAmount)} icUSD</strong></div>
         </div>
+        <p class="dbw-hint">Reserve {formatNumber(feeReservedBitcoin, 8)} ckBTC for two ledger fees ({formatNumber(satoshiToBitcoin(ckbtcLedgerFeeSatoshi), 8)} ckBTC each).</p>
 
         <div class="dbw-result-strip">
           <div class="dbw-result-item">
@@ -1539,7 +1566,7 @@
             <span class="dbw-result-value">{finalRisk.collateralRatioPct === Infinity ? 'no debt' : `${formatNumber(finalRisk.collateralRatioPct)}%`}</span>
           </div>
           <div class="dbw-result-item">
-            <span class="dbw-result-label">icUSD received on ICP</span>
+            <span class="dbw-result-label">icUSD received</span>
             <span class="dbw-result-value">{formatNumber(finalRisk.icusdReceived, 4)} icUSD</span>
           </div>
           <div class="dbw-result-item">
@@ -1551,13 +1578,13 @@
         {#if !finalRisk.isValidCr}
           <p class="dbw-error" role="alert">
             At the current live price, this collateral ratio is below the {formatNumber(minimumCr * 100)}% minimum.
-            Lower the icUSD amount or go back and send more DOGE.
+            Lower the icUSD amount or go back and send more BTC.
           </p>
         {/if}
 
         {#if termsChanged && !termsConfirmed}
           <div class="dbw-recovery-card">
-            <p>DOGE moved since you started. These are the refreshed numbers above, not your original Step 1 estimate.</p>
+            <p>BTC moved since you started. These are the refreshed numbers above, not your original Step 1 estimate.</p>
             <button class="dbw-btn dbw-btn--secondary" type="button" on:click={acknowledgeUpdatedTerms}>I see the updated terms, continue</button>
           </div>
         {/if}
@@ -1569,24 +1596,24 @@
         </button>
       {/if}
     {:else if step === 'done'}
-      <h2>Your DOGE position</h2>
+      <h2>Your BTC position</h2>
       <p class="dbw-success">
-        Vault #{outcome?.vaultId ?? intent?.vaultId} opened. Confirmed collateral: {formatNumber(confirmedCollateralDoge, 8)} ckDOGE
-        (about the same amount of DOGE deposited). Debt on the vault is
+        Vault #{outcome?.vaultId ?? intent?.vaultId} opened. Confirmed collateral: {formatNumber(confirmedCollateralBitcoin, 8)} ckBTC
+        (about the same amount of BTC deposited). Debt on the vault is
         {formatNumber(confirmedDoneDebt)} icUSD
         {#if finalRisk}({formatNumber(finalRisk.icusdReceived, 4)} icUSD estimated wallet receipt after the borrowing fee){/if}.
       </p>
 
-      {#if doneCkdogeVaults.length > 0}
+      {#if doneCkbtcVaults.length > 0}
         <div class="dbw-vault-list">
-          {#each doneCkdogeVaults as vault (vault.vaultId)}
-            <VaultCard {vault} icpPrice={0} expandedVaultId={doneExpandedVaultId} on:updated={handleDoneVaultUpdated} on:toggle={handleDoneVaultToggle} />
+          {#each doneCkbtcVaults as vault (vault.vaultId)}
+            <VaultCard {vault} icpPrice={0} bitcoinOnly={true} expandedVaultId={doneExpandedVaultId} on:updated={handleDoneVaultUpdated} on:toggle={handleDoneVaultToggle} />
           {/each}
         </div>
       {/if}
 
       <div class="dbw-signin-actions">
-        <a class="dbw-btn dbw-btn--secondary" href="/vaults">View all my vaults</a>
+        <a class="dbw-btn dbw-btn--secondary" href="/bitcoin">Mint or redeem Bitcoin</a>
         <button class="dbw-btn dbw-btn--secondary" type="button" on:click={resetFlow}>Do it again</button>
       </div>
     {/if}
@@ -1598,15 +1625,9 @@
 
   .dbw-hero { text-align: center; margin-bottom: 1.5rem; }
   .dbw-hero-logo { display: flex; align-items: center; justify-content: center; margin: 0 auto 0.75rem; }
-  .dbw-hero-logo img { width: 72px; height: 72px; display: block; }
-  .dbw-logo-fallback {
-    display: inline-flex; align-items: center; justify-content: center;
-    width: 72px; height: 72px; border-radius: 50%;
-    background: var(--rumi-bg-surface2); border: 2px solid var(--rumi-border-hover);
-    font-size: 1.5rem; font-weight: 700; color: var(--rumi-purple-accent);
-  }
+  .dbw-bitcoin-mark { width: 72px; height: 72px; display: grid; place-items: center; border-radius: 50%; background: #f7931a; color: #fff; font-size: 2.6rem; font-weight: 700; }
   .dbw-hero h1 {
-    font-family: 'Comic Sans MS', 'Comic Sans', 'Chalkboard SE', cursive;
+    font-family: inherit;
     font-weight: 700; font-size: 1.9rem; margin: 0.25rem 0; color: var(--rumi-text-primary);
   }
   .dbw-subtitle { font-size: 1rem; color: var(--rumi-text-secondary); margin: 0; font-family: 'Inter', sans-serif; }
@@ -1704,8 +1725,8 @@
   .dbw-btn--primary:disabled { opacity: 0.5; cursor: not-allowed; }
   .dbw-btn--secondary { background: var(--rumi-bg-surface2); border: 1px solid var(--rumi-border-hover); color: var(--rumi-text-primary); }
 
-  .dbw-doge-only-hint { margin: 0; font-size: 0.75rem; color: var(--rumi-text-secondary); text-align: center; }
-  .dbw-doge-only-hint a, .dbw-panel-sub a { color: var(--rumi-action); }
+  .dbw-bitcoin-only-hint { margin: 0; font-size: 0.75rem; color: var(--rumi-text-secondary); text-align: center; }
+  .dbw-bitcoin-only-hint a, .dbw-panel-sub a { color: var(--rumi-action); }
 
   .dbw-signin-actions { display: flex; flex-direction: column; gap: 0.625rem; }
   .dbw-disclosure { font-size: 0.8125rem; color: var(--rumi-text-secondary); }
@@ -1722,7 +1743,7 @@
   .dbw-deposit-grid { display: grid; grid-template-columns: 180px 1fr; gap: 1rem; }
   .dbw-qr-pane {
     display: grid; place-items: center; min-height: 180px; border: 1px solid rgba(45,212,191,0.18);
-    border-radius: 0.5rem; background: linear-gradient(180deg, rgba(45,212,191,0.08), rgba(209,118,232,0.05));
+    border-radius: 0.5rem; background: var(--rumi-bg-surface2);
   }
   .dbw-qr { width: 160px; height: 160px; padding: 0.375rem; border-radius: 0.5rem; background: #fff; }
   .dbw-qr-empty { display: grid; place-items: center; width: 160px; height: 160px; border: 1px dashed var(--rumi-border-hover); color: var(--rumi-text-muted); }
@@ -1734,8 +1755,8 @@
     text-align: left; cursor: pointer;
   }
   .dbw-address-btn span { min-width: 0; overflow-wrap: anywhere; }
-  .dbw-address-btn small { color: var(--rumi-teal); font-weight: 700; flex-shrink: 0; }
-  .dbw-doge-only-send { margin: 0; font-size: 0.75rem; color: var(--rumi-danger); }
+  .dbw-address-btn small { color: var(--rumi-action); font-weight: 700; flex-shrink: 0; }
+  .dbw-bitcoin-only-send { margin: 0; font-size: 0.75rem; color: var(--rumi-danger); }
 
   .dbw-stats-row { display: flex; gap: 1.5rem; }
   .dbw-stat { display: flex; flex-direction: column; gap: 0.125rem; }
@@ -1753,17 +1774,7 @@
   }
   .dbw-recovery-card p { margin: 0; }
 
-  /* Hand-drawn Comic Sans marginalia, reused from the ckDOGE Minter page. Purely
-     decorative; never the primary voice for instructions or safety copy. */
-  .dbw-annotation {
-    display: block; margin-top: 0.375rem; font-family: 'Comic Sans MS', 'Comic Sans', 'Chalkboard SE', cursive;
-    font-size: 0.8125rem; line-height: 1.25; color: var(--rumi-purple-accent); opacity: 0.85; pointer-events: none;
-  }
-  @media (min-width: 1220px) {
-    .dbw-annotation {
-      position: absolute; top: 0; left: calc(100% + 24px); width: 140px; text-align: left; margin-top: 0;
-    }
-  }
+  /* Decorative annotation; the main interface uses restrained system typography. */
 
   @media (max-width: 640px) {
     .dbw-deposit-grid { grid-template-columns: 1fr; }
