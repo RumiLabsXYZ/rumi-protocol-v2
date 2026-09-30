@@ -460,6 +460,7 @@ service : (InitArgs) -> {
   list_public_topups : (principal, opt text, nat16) -> (Result_8) query;
   list_unresolved_funding_operations : (opt text, nat16) -> (Result_9) query;
   manual_top_up : (principal) -> (Result_1);
+  manual_top_up_with_amount : (principal, FundingRail, nat) -> (Result_1);
   run_maintenance_now : () -> (MaintenanceResult);
   pause_target : (principal) -> (Result_2);
   propose_add_signer : (principal) -> (Result_10);

@@ -233,6 +233,25 @@ async fn manual_top_up(target: Principal) -> Result<types::FundingOperation, Str
         .map_err(|err| format!("{err:?}"))
 }
 
+/// Request a signer-authorized top-up using an explicit rail and raw amount.
+/// CyclesLedger amounts are cycles; IcpCmc amounts are ICP e8s.
+#[ic_cdk::update]
+async fn manual_top_up_with_amount(
+    target: Principal,
+    rail: types::FundingRail,
+    amount: u128,
+) -> Result<types::FundingOperation, String> {
+    funding::manual_top_up_with_amount_at(
+        ic_cdk::caller(),
+        now_secs(),
+        now_ns(),
+        target,
+        rail,
+        amount,
+    )
+    .await
+}
+
 /// Resolve an ambiguous operation conservatively.  Both rails retain their
 /// immutable snapshots and reservations until this signer-gated call has
 /// completed; self-recovery refuses the spent-only path and still requires a

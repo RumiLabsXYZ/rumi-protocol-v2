@@ -491,6 +491,10 @@ export interface _SERVICE {
     Result_9
   >,
   'manual_top_up' : ActorMethod<[Principal], Result_1>,
+  'manual_top_up_with_amount' : ActorMethod<
+    [Principal, FundingRail, bigint],
+    Result_1
+  >,
   'pause_target' : ActorMethod<[Principal], Result_2>,
   'propose_add_signer' : ActorMethod<[Principal], Result_10>,
   'propose_register_target' : ActorMethod<[TargetArgs], Result_10>,

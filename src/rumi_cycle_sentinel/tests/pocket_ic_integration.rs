@@ -1276,6 +1276,24 @@ fn anonymous_authenticated_reads_and_mutations_are_rejected_in_canister_code() {
         manual.unwrap_err().contains("NotSigner"),
         "failure identifies authorization boundary"
     );
+
+    let explicit: Result<OperationStub, String> = call_update(
+        &pic,
+        sentinel,
+        Principal::anonymous(),
+        "manual_top_up_with_amount",
+        Encode!(
+            &principal(ALL_TARGETS[0]),
+            &FundingRailView::CyclesLedger,
+            &1_000_000_000_000u128
+        )
+        .unwrap(),
+    );
+    assert!(
+        explicit.is_err(),
+        "anonymous explicit top-up must fail closed"
+    );
+    assert!(explicit.unwrap_err().contains("NotSigner"));
 }
 
 #[test]

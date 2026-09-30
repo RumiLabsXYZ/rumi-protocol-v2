@@ -90,6 +90,16 @@ export function parseTCycles(value: string, label: string): bigint {
 	return BigInt(whole) * 1_000_000_000_000n + BigInt((fraction + '0'.repeat(12)).slice(0, 12));
 }
 
+/** Parse an ICP decimal amount into ledger e8s without Number precision loss. */
+export function parseIcp(value: string, label: string): bigint {
+	const text = value.trim();
+	if (!/^\d+(?:\.\d{1,8})?$/.test(text)) {
+		throw new Error(`${label} must be a non-negative decimal in ICP (up to 8 decimal places).`);
+	}
+	const [whole, fraction = ''] = text.split('.');
+	return BigInt(whole) * 100_000_000n + BigInt((fraction + '0'.repeat(8)).slice(0, 8));
+}
+
 export function formatTCycles(value: bigint | undefined): string {
 	if (value === undefined) return 'Unavailable';
 	const whole = value / 1_000_000_000_000n;

@@ -144,6 +144,75 @@ pub async fn manual_top_up_at(
     cycles::run_ordinary(target, types::FundingTrigger::ManualTopup, now_secs, now_ns).await
 }
 
+/// Explicit signer-selected funding rail and amount. Cycles amounts are raw
+/// cycles; ICP amounts are raw ledger e8s. ICP is minted directly to the
+/// target through the CMC using a fresh rate and never uses the shared pool.
+pub async fn manual_top_up_with_amount_at(
+    caller: Principal,
+    now_secs: u64,
+    now_ns: u64,
+    target: Principal,
+    rail: types::FundingRail,
+    amount: u128,
+) -> Result<types::FundingOperation, String> {
+    require_manual_top_up_signer(caller)?;
+    if amount == 0 {
+        return Err(format!("{:?}", cycles::FundingError::ZeroAmount));
+    }
+    match rail {
+        types::FundingRail::CyclesLedger => cycles::run_ordinary_with_amount(
+            target,
+            types::FundingTrigger::ManualTopup,
+            now_secs,
+            now_ns,
+            amount,
+        )
+        .await
+        .map_err(|err| format!("{err:?}")),
+        types::FundingRail::IcpCmc => {
+            let amount_e8s =
+                u64::try_from(amount).map_err(|_| format!("{:?}", icp::FundingError::Overflow))?;
+            let rate = crate::icp_cmc::query_rate(crate::icp_cmc::cmc_principal())
+                .await
+                .map_err(|err| format!("{err:?}"))?;
+            // The caller can be removed as a signer while the CMC rate query
+            // is suspended. Re-authorize before preparing or admitting an
+            // operation so the pre-await check cannot authorize stale work.
+            let admission_ns = ic_cdk::api::time();
+            let admission_secs = admission_ns / 1_000_000_000;
+            let op = prepare_manual_top_up_if_current_signer(caller, || {
+                icp::prepare_manual_top_up_with_amount(
+                    target,
+                    admission_secs,
+                    admission_ns,
+                    amount_e8s,
+                    rate,
+                )
+                .map_err(|err| format!("{err:?}"))
+            })?;
+            icp::execute(op, admission_secs, ic_cdk::id())
+                .await
+                .map_err(|err| format!("{err:?}"))
+        }
+    }
+}
+
+fn require_manual_top_up_signer(caller: Principal) -> Result<(), String> {
+    if state::is_signer(caller) {
+        Ok(())
+    } else {
+        Err(format!("{:?}", cycles::FundingError::NotSigner))
+    }
+}
+
+fn prepare_manual_top_up_if_current_signer<T>(
+    caller: Principal,
+    prepare: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    require_manual_top_up_signer(caller)?;
+    prepare()
+}
+
 /// The Task 4 "separate refresh seam" (design requirement 4): queries the
 /// Cycles Ledger's actual balance/fee and replaces Sentinel's cached
 /// snapshot. `prepare`/`reserve_*` never do this themselves — see
@@ -214,6 +283,7 @@ pub mod cycles {
     pub enum FundingError {
         Eligibility(EligibilityError),
         NotSigner,
+        ZeroAmount,
         NotFound,
         WrongRail,
         /// The operation has already `stops_automatic_retry()` — nothing
@@ -312,6 +382,16 @@ pub mod cycles {
         now_secs: u64,
         now_ns: u64,
     ) -> Result<FundingOperation, FundingError> {
+        prepare_ordinary_with_amount(target_principal, trigger, now_secs, now_ns, None)
+    }
+
+    fn prepare_ordinary_with_amount(
+        target_principal: Principal,
+        trigger: FundingTrigger,
+        now_secs: u64,
+        now_ns: u64,
+        amount_override: Option<u128>,
+    ) -> Result<FundingOperation, FundingError> {
         let (record, _observed_balance) = super::check_ordinary_eligibility(
             target_principal,
             now_secs,
@@ -320,7 +400,8 @@ pub mod cycles {
         .map_err(FundingError::Eligibility)?;
 
         let global_policy = state::global_config().global_policy;
-        let refill_cycles = record.funding_policy().refill_cycles();
+        let refill_cycles =
+            amount_override.unwrap_or_else(|| record.funding_policy().refill_cycles());
 
         let cache = state::get_source_reserve()
             .cache()
@@ -479,6 +560,21 @@ pub mod cycles {
         now_ns: u64,
     ) -> Result<FundingOperation, FundingError> {
         let op = prepare_ordinary(target, trigger, now_secs, now_ns)?;
+        execute(op, now_secs).await
+    }
+
+    pub async fn run_ordinary_with_amount(
+        target: Principal,
+        trigger: FundingTrigger,
+        now_secs: u64,
+        now_ns: u64,
+        amount_cycles: u128,
+    ) -> Result<FundingOperation, FundingError> {
+        if amount_cycles == 0 {
+            return Err(FundingError::ZeroAmount);
+        }
+        let op =
+            prepare_ordinary_with_amount(target, trigger, now_secs, now_ns, Some(amount_cycles))?;
         execute(op, now_secs).await
     }
 
@@ -1212,6 +1308,45 @@ pub mod cycles {
                 .pending()
                 .iter()
                 .any(|p| p.operation_id == op.id()));
+        }
+
+        #[test]
+        fn explicit_cycles_amount_is_snapshotted_and_checked_against_target_cap() {
+            let global = test_global_policy(1_000_000, 600);
+            init_test_state(global.clone());
+            let target = register_and_prime_target(1, &global, 100, 10, 25, 60);
+            state::record_sample(target, sample(1_000, 5, PublicTargetState::Low)).unwrap();
+            seed_fresh_cache(1_000_000, 1, 1_000);
+
+            let op = prepare_ordinary_with_amount(
+                target,
+                FundingTrigger::ManualTopup,
+                1_000,
+                1_000_000_000_000,
+                Some(20),
+            )
+            .unwrap();
+            let FundingRailArguments::Cycles(snapshot) = op.rail_arguments() else {
+                panic!("cycles rail should preserve the explicit selection");
+            };
+            assert_eq!(snapshot.amount_cycles, 20);
+            assert_eq!(
+                state::get_target_reservation(target).in_flight_amount_cycles(),
+                Some(20)
+            );
+
+            let other = register_and_prime_target(2, &global, 100, 10, 15, 60);
+            state::record_sample(other, sample(1_000, 5, PublicTargetState::Low)).unwrap();
+            assert!(matches!(
+                prepare_ordinary_with_amount(
+                    other,
+                    FundingTrigger::ManualTopup,
+                    1_000,
+                    2_000_000_000_000,
+                    Some(20),
+                ),
+                Err(FundingError::TargetReserve(_))
+            ));
         }
 
         #[test]
@@ -2339,6 +2474,7 @@ pub mod icp {
     pub enum FundingError {
         Eligibility(EligibilityError),
         NotSigner,
+        ZeroAmount,
         NotFound,
         WrongRail,
         NotResumable,
@@ -2540,6 +2676,125 @@ pub mod icp {
         // The operation is written first, and every subsequent write uses a
         // precomputed value.  Exact ICP args, fee, memo, rate, account, and
         // timestamp are therefore durable before any ledger await.
+        state::insert_operation(submitted.clone()).map_err(FundingError::Insert)?;
+        state::set_target_reservation(target_principal, target_reservation);
+        state::set_global_rolling_spend(global_reservation);
+        state::set_icp_source_reserve(source_reservation);
+        Ok(submitted)
+    }
+
+    /// Prepare a signer-selected direct ICP top-up. The ICP amount is fixed
+    /// in e8s before reservation; its expected cycles debit is used for the
+    /// same target/global rolling caps as cycle-ledger withdrawals.
+    pub(crate) fn prepare_manual_top_up_with_amount(
+        target_principal: Principal,
+        now_secs: u64,
+        now_ns: u64,
+        amount_e8s: u64,
+        rate: icp_cmc::IcpXdrConversionRate,
+    ) -> Result<FundingOperation, FundingError> {
+        prepare_manual_top_up_with_amount_for_sentinel(
+            target_principal,
+            now_secs,
+            now_ns,
+            amount_e8s,
+            rate,
+            ic_cdk::id(),
+        )
+    }
+
+    pub(super) fn prepare_manual_top_up_with_amount_for_sentinel(
+        target_principal: Principal,
+        now_secs: u64,
+        now_ns: u64,
+        amount_e8s: u64,
+        rate: icp_cmc::IcpXdrConversionRate,
+        sentinel_id: Principal,
+    ) -> Result<FundingOperation, FundingError> {
+        if amount_e8s == 0 {
+            return Err(FundingError::ZeroAmount);
+        }
+        let (record, _) = super::check_ordinary_eligibility(target_principal, now_secs, true)
+            .map_err(FundingError::Eligibility)?;
+        let rate = icp_cmc::validate_rate(rate, now_secs).map_err(FundingError::Rate)?;
+        let expected_cycles =
+            icp_cmc::expected_cycles(amount_e8s, rate).map_err(FundingError::Rate)?;
+        if expected_cycles == 0 {
+            return Err(FundingError::ZeroAmount);
+        }
+        let source = state::get_icp_source_reserve();
+        let cache = source.cache().ok_or(FundingError::SourceReserve(
+            IcpSourceReserveError::UnknownCache,
+        ))?;
+        let fee_e8s = u64::try_from(cache.fee_e8s).map_err(|_| FundingError::Overflow)?;
+        let amount_plus_fee = (amount_e8s as u128)
+            .checked_add(fee_e8s as u128)
+            .ok_or(FundingError::Overflow)?;
+        let global_policy = state::global_config().global_policy;
+        let operation_id = state::next_operation_id();
+        let target_reservation = state::get_target_reservation(target_principal)
+            .reserve(
+                operation_id,
+                expected_cycles,
+                now_secs,
+                ROLLING_CAP_WINDOW_SECS,
+                record.funding_policy().daily_cap_cycles(),
+            )
+            .map_err(FundingError::TargetReserve)?;
+        let global_reservation = state::get_global_rolling_spend()
+            .reserve(
+                operation_id,
+                expected_cycles,
+                now_secs,
+                ROLLING_CAP_WINDOW_SECS,
+                global_policy.global_daily_cap_cycles(),
+            )
+            .map_err(FundingError::GlobalReserve)?;
+        let source_reservation = source
+            .reserve_ordinary(
+                operation_id,
+                amount_plus_fee,
+                global_policy.min_icp_reserve_e8s(),
+                now_secs,
+                types::icp_source_cache_max_age_secs(),
+            )
+            .map_err(FundingError::SourceReserve)?;
+        let created_at_time_ns =
+            state::next_created_at_time_ns(now_ns).map_err(FundingError::MonotonicTime)?;
+        let snapshot = IcpCmcSnapshot {
+            source_principal: sentinel_id,
+            ledger_principal: types::icp_ledger_principal_for_sentinel(),
+            cmc_principal: icp_cmc::cmc_principal(),
+            source_subaccount: None,
+            cmc_account_identifier: icp_cmc::cmc_subaccount(target_principal),
+            target_canister: target_principal,
+            delivery: types::IcpCmcDelivery::DirectTopUp,
+            amount_e8s,
+            fee_e8s,
+            memo: icp_cmc::TPUP_MEMO,
+            created_at_time_ns,
+            rate_xdr_permyriad_per_icp: rate.xdr_permyriad_per_icp,
+            rate_timestamp_secs: rate.timestamp_seconds,
+            expected_cycles,
+        };
+        let op = FundingOperation::open(
+            operation_id,
+            target_principal,
+            record.revision(),
+            record.funding_policy().clone(),
+            FundingTrigger::ManualTopup,
+            FundingRailArguments::Icp(snapshot),
+            expected_cycles,
+            now_secs,
+        )
+        .map_err(FundingError::Open)?;
+        let submitted = op
+            .record_attempt(
+                FundingOperationState::Icp(IcpFundingState::LedgerSubmitted),
+                now_secs,
+                FundingAttemptResultClass::Indeterminate,
+            )
+            .map_err(FundingError::Transition)?;
         state::insert_operation(submitted.clone()).map_err(FundingError::Insert)?;
         state::set_target_reservation(target_principal, target_reservation);
         state::set_global_rolling_spend(global_reservation);
@@ -4050,6 +4305,30 @@ mod tests {
         .unwrap();
     }
 
+    #[test]
+    fn manual_top_up_signer_guard_rejects_signer_revoked_during_rate_lookup() {
+        let caller = Principal::from_slice(&[1]);
+        init_test_state(test_global_policy(3_600));
+
+        // The pre-await authorization succeeds, then governance removes the
+        // signer while the ICP rate query is pending. The post-await guard
+        // must reject before operation preparation/admission.
+        assert_eq!(require_manual_top_up_signer(caller), Ok(()));
+        let mut config = state::global_config();
+        config.signers.retain(|signer| *signer != caller);
+        state::set_global_config(config);
+
+        let mut preparation_started = false;
+        assert_eq!(
+            prepare_manual_top_up_if_current_signer(caller, || {
+                preparation_started = true;
+                Ok(())
+            }),
+            Err(format!("{:?}", cycles::FundingError::NotSigner))
+        );
+        assert!(!preparation_started);
+    }
+
     fn register_test_target(seed: u8, global: &GlobalPolicy, auto_topup: bool) -> Principal {
         let principal = target_principal(seed);
         let empty = BTreeSet::new();
@@ -4497,6 +4776,84 @@ mod reconciliation {
             .unwrap();
         state::set_icp_source_reserve(source);
         submitted
+    }
+
+    #[test]
+    fn explicit_icp_amount_is_direct_snapshotted_and_cap_checked() {
+        let global = global_policy();
+        state::init(InitArgs {
+            signers: vec![Principal::from_slice(&[1])],
+            approval_threshold: 1,
+            global_policy: global.to_args(),
+        })
+        .unwrap();
+        let target = target_id(1);
+        register_target(&global, target);
+        state::record_sample(
+            target,
+            types::Sample {
+                timestamp_secs: NOW,
+                balance: Some(types::AdvisoryCyclesBalance::Exact(1)),
+                state: types::PublicTargetState::Low,
+                reported_operational_healthy: None,
+                burn_cycles_per_hour: None,
+            },
+        )
+        .unwrap();
+        let source = state::get_icp_source_reserve()
+            .refresh(SOURCE_BALANCE_E8S, FEE_E8S as u128, NOW)
+            .unwrap();
+        state::set_icp_source_reserve(source);
+        let rate = icp_cmc::IcpXdrConversionRate {
+            xdr_permyriad_per_icp: RATE_XDR_PERMYRIAD_PER_ICP,
+            timestamp_seconds: NOW,
+        };
+
+        let op = icp::prepare_manual_top_up_with_amount_for_sentinel(
+            target,
+            NOW,
+            NOW * 1_000_000_000,
+            AMOUNT_E8S,
+            rate,
+            sentinel_id(),
+        )
+        .unwrap();
+        let FundingRailArguments::Icp(snapshot) = op.rail_arguments() else {
+            panic!("ICP rail should preserve the explicit selection");
+        };
+        assert_eq!(snapshot.amount_e8s, AMOUNT_E8S);
+        assert_eq!(snapshot.expected_cycles, EXPECTED_CYCLES);
+        assert_eq!(snapshot.target_canister, target);
+        assert_eq!(snapshot.delivery, types::IcpCmcDelivery::DirectTopUp);
+        assert_eq!(
+            state::get_icp_source_reserve().pending_total_e8s(),
+            Ok(1_010)
+        );
+
+        let over_cap = target_id(2);
+        register_target(&global, over_cap);
+        state::record_sample(
+            over_cap,
+            types::Sample {
+                timestamp_secs: NOW,
+                balance: Some(types::AdvisoryCyclesBalance::Exact(1)),
+                state: types::PublicTargetState::Low,
+                reported_operational_healthy: None,
+                burn_cycles_per_hour: None,
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            icp::prepare_manual_top_up_with_amount_for_sentinel(
+                over_cap,
+                NOW,
+                NOW * 1_000_000_000,
+                6_000,
+                rate,
+                sentinel_id(),
+            ),
+            Err(icp::FundingError::TargetReserve(_))
+        ));
     }
 
     fn operation_snapshot(op: &FundingOperation) -> IcpCmcSnapshot {
