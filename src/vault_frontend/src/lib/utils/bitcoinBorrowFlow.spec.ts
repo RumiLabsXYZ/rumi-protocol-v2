@@ -1,0 +1,524 @@
+import { describe, expect, it } from 'vitest';
+import { Principal } from '@dfinity/principal';
+import {
+  SATOSHI_PER_BTC,
+  NAT64_MAX_SATOSHI,
+  POLL_MAX_ATTEMPTS,
+  buildAccountArgs,
+  buildApproveArgs,
+  buildRetrieveWithApprovalArgs,
+  classifyRetrieveBtcStatus,
+  classifyUtxoStatus,
+  computeApprovalAmount,
+  computeConfirmationDisplay,
+  computeMintStepIndex,
+  confirmationMeterPercent,
+  btcToSatoshi,
+  formatSatoshiAsBtc,
+  formatWithdrawalFeeSummary,
+  isPlausibleBitcoinAddress,
+  isPollingExhausted,
+  isRetryableUpdateBalanceError,
+  isTerminalUtxoKind,
+  satoshiToBtc,
+  parseBtcAmountInput,
+  parseSatoshiInput,
+  parseWithdrawalFeeEstimate,
+  pollProgressLabel,
+  summarizeMinterInfo,
+  summarizePendingUtxos,
+  summarizeApproveError,
+  summarizeRetrieveError,
+  summarizeUpdateBalanceError,
+  summarizeWithdrawalFeeError,
+  summarizeWithdrawalFeeEstimate,
+  type UpdateBalanceErrorSummary,
+  type UtxoStatusSummary,
+} from './bitcoinBorrowFlow';
+
+const OWNER = Principal.fromText('zegjz-jpi6k-qkand-c2bgf-qw6za-xk4si-nz3gx-qzzia-fk6fg-snepb-tae');
+const MINTER = Principal.fromText('eqltq-xqaaa-aaaar-qb3vq-cai');
+
+describe('satoshi/BTC conversion', () => {
+  it('round-trips whole BTC amounts through satoshi', () => {
+    expect(btcToSatoshi(1)).toBe(BigInt(SATOSHI_PER_BTC));
+    expect(satoshiToBtc(BigInt(SATOSHI_PER_BTC))).toBe(1);
+  });
+
+  it('formats satoshi as a trimmed BTC label', () => {
+    expect(formatSatoshiAsBtc(100_000_000n)).toBe('1 BTC');
+    expect(formatSatoshiAsBtc(150_000_000n)).toBe('1.5 BTC');
+    expect(formatSatoshiAsBtc(1n)).toBe('0.00000001 BTC');
+    expect(formatSatoshiAsBtc(0n)).toBe('0 BTC');
+  });
+
+  it('computes the runtime approval amount as requested + ledger fee', () => {
+    expect(computeApprovalAmount(500_000_000n, 100_000n)).toBe(500_100_000n);
+  });
+
+  it('builds a fee summary mentioning the bitcoin, minter, and ledger fees separately', () => {
+    const summary = formatWithdrawalFeeSummary(25_000n, 50_000n, 100_000n);
+    expect(summary).toContain('0.00025 BTC');
+    expect(summary).toContain('0.0005 BTC');
+    expect(summary).toContain('0.001 BTC');
+  });
+});
+
+describe('satoshi input validation', () => {
+  it('accepts positive integers only', () => {
+    expect(parseSatoshiInput('500000000')).toBe(500_000_000n);
+    expect(parseSatoshiInput(' 42 ')).toBe(42n);
+  });
+
+  it('rejects blank, zero, negative, decimal, and non-numeric input', () => {
+    expect(parseSatoshiInput('')).toBeNull();
+    expect(parseSatoshiInput('   ')).toBeNull();
+    expect(parseSatoshiInput('0')).toBeNull();
+    expect(parseSatoshiInput('-5')).toBeNull();
+    expect(parseSatoshiInput('1.5')).toBeNull();
+    expect(parseSatoshiInput('abc')).toBeNull();
+    expect(parseSatoshiInput('01')).toBeNull();
+  });
+});
+
+describe('decimal BTC amount input parsing (redeem form)', () => {
+  it('parses whole BTC amounts to exact satoshi', () => {
+    expect(parseBtcAmountInput('50')).toBe(5_000_000_000n);
+  });
+
+  it('parses the smallest representable unit exactly', () => {
+    expect(parseBtcAmountInput('0.00000001')).toBe(1n);
+  });
+
+  it('parses fractional BTC amounts to exact satoshi, no floating-point drift', () => {
+    expect(parseBtcAmountInput('1.25')).toBe(125_000_000n);
+  });
+
+  it('accepts the exact nat64 boundary and rejects one satoshi beyond it', () => {
+    // NAT64_MAX_SATOSHI = 18446744073709551615n = 184467440737.09551615 BTC.
+    expect(parseBtcAmountInput('184467440737.09551615')).toBe(NAT64_MAX_SATOSHI);
+    expect(parseBtcAmountInput('184467440737.09551616')).toBeNull();
+    expect(parseBtcAmountInput('184467440738')).toBeNull();
+  });
+
+  it('rejects more than 8 decimal places instead of silently rounding', () => {
+    expect(parseBtcAmountInput('1.123456789')).toBeNull();
+    expect(parseBtcAmountInput('0.000000001')).toBeNull();
+  });
+
+  it('rejects negative amounts', () => {
+    expect(parseBtcAmountInput('-5')).toBeNull();
+    expect(parseBtcAmountInput('-0.5')).toBeNull();
+  });
+
+  it('rejects scientific notation', () => {
+    expect(parseBtcAmountInput('5e10')).toBeNull();
+    expect(parseBtcAmountInput('1E-8')).toBeNull();
+  });
+
+  it('rejects malformed input', () => {
+    expect(parseBtcAmountInput('abc')).toBeNull();
+    expect(parseBtcAmountInput('1.')).toBeNull();
+    expect(parseBtcAmountInput('.5')).toBeNull();
+    expect(parseBtcAmountInput('1.2.3')).toBeNull();
+    expect(parseBtcAmountInput('01')).toBeNull();
+  });
+
+  it('rejects blank and zero amounts', () => {
+    expect(parseBtcAmountInput('')).toBeNull();
+    expect(parseBtcAmountInput('   ')).toBeNull();
+    expect(parseBtcAmountInput('0')).toBeNull();
+    expect(parseBtcAmountInput('0.00000000')).toBeNull();
+  });
+});
+
+describe('Bitcoin address validation', () => {
+  it('accepts plausible mainnet P2PKH/P2SH-shaped addresses', () => {
+    expect(isPlausibleBitcoinAddress('bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080')).toBe(true);
+    expect(isPlausibleBitcoinAddress('3QJmV3qfvL9SuYo34YihAf3sRCW3qSinyC')).toBe(true);
+  });
+
+  it('rejects blank and clearly impossible strings', () => {
+    expect(isPlausibleBitcoinAddress('')).toBe(false);
+    expect(isPlausibleBitcoinAddress('   ')).toBe(false);
+    expect(isPlausibleBitcoinAddress('not-an-address')).toBe(false);
+    expect(isPlausibleBitcoinAddress('1abc')).toBe(false); // BTC prefix
+    expect(isPlausibleBitcoinAddress('D')).toBe(false); // too short
+  });
+});
+
+describe('argument builders', () => {
+  it('explicitly binds the connected principal with the default subaccount', () => {
+    expect(buildAccountArgs(OWNER)).toEqual({ owner: [OWNER], subaccount: [] });
+  });
+
+  it('builds ICRC-2 approve args targeting the minter as spender', () => {
+    const args = buildApproveArgs(MINTER, 500_100_000n);
+    expect(args.spender).toEqual({ owner: MINTER, subaccount: [] });
+    expect(args.amount).toBe(500_100_000n);
+    expect(args.fee).toEqual([]);
+  });
+
+  it('builds retrieve_btc_with_approval args with the requested amount only (fee excluded)', () => {
+    const args = buildRetrieveWithApprovalArgs(' bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh ', 500_000_000n);
+    expect(args).toEqual({
+      address: 'bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh',
+      amount: 500_000_000n,
+      from_subaccount: [],
+    });
+  });
+});
+
+describe('UTXO status classification', () => {
+  it('classifies Minted with amount and block index', () => {
+    const summary = classifyUtxoStatus({
+      Minted: { block_index: 42n, minted_amount: 500_000_000n, utxo: {} },
+    });
+    expect(summary.kind).toBe('Minted');
+    expect(summary.satoshiAmount).toBe(500_000_000n);
+    expect(summary.blockIndex).toBe(42n);
+    expect(summary.label).toContain('5 BTC');
+  });
+
+  it('classifies Checked, ValueTooSmall, and Tainted', () => {
+    expect(classifyUtxoStatus({ Checked: {} }).kind).toBe('Checked');
+    expect(classifyUtxoStatus({ ValueTooSmall: {} }).kind).toBe('ValueTooSmall');
+    expect(classifyUtxoStatus({ Tainted: {} }).kind).toBe('Tainted');
+  });
+
+  it('falls back to Unknown for an unrecognized variant tag', () => {
+    expect(classifyUtxoStatus({ SomethingNew: {} }).kind).toBe('Unknown');
+  });
+
+  it('treats Minted, Tainted, and ValueTooSmall as terminal, Checked as retryable', () => {
+    expect(isTerminalUtxoKind('Minted')).toBe(true);
+    expect(isTerminalUtxoKind('Tainted')).toBe(true);
+    expect(isTerminalUtxoKind('ValueTooSmall')).toBe(true);
+    expect(isTerminalUtxoKind('Checked')).toBe(false);
+  });
+
+  it('summarizes pending UTXOs with amount and confirmations', () => {
+    const pending = summarizePendingUtxos([{ value: 100_000_000n, confirmations: 2 }]);
+    expect(pending).toHaveLength(1);
+    expect(pending[0].satoshiAmount).toBe(100_000_000n);
+    expect(pending[0].confirmations).toBe(2);
+    expect(pending[0].label).toContain('1 BTC');
+    expect(pending[0].label).toContain('2 confirmations');
+  });
+});
+
+describe('update_balance error summarization', () => {
+  it('extracts current/required confirmations and pending UTXOs from NoNewUtxos', () => {
+    const summary = summarizeUpdateBalanceError({
+      NoNewUtxos: {
+        current_confirmations: [3],
+        required_confirmations: 6,
+        pending_utxos: [[{ value: 100_000_000n, confirmations: 3 }]],
+      },
+    });
+    expect(summary.kind).toBe('NoNewUtxos');
+    expect(summary.currentConfirmations).toBe(3);
+    expect(summary.requiredConfirmations).toBe(6);
+    expect(summary.pendingUtxos).toHaveLength(1);
+    expect(summary.message).toContain('3/6 confirmations');
+  });
+
+  it('handles NoNewUtxos with no confirmations yet observed', () => {
+    const summary = summarizeUpdateBalanceError({
+      NoNewUtxos: { current_confirmations: [], required_confirmations: 6, pending_utxos: [] },
+    });
+    expect(summary.currentConfirmations).toBeUndefined();
+    expect(summary.message).toContain('needs 6 confirmations');
+  });
+
+  it('classifies AlreadyProcessing, TemporarilyUnavailable, GenericError, and unknown variants', () => {
+    expect(summarizeUpdateBalanceError({ AlreadyProcessing: null }).kind).toBe('AlreadyProcessing');
+    expect(summarizeUpdateBalanceError({ TemporarilyUnavailable: 'down' }).message).toContain('down');
+    expect(
+      summarizeUpdateBalanceError({ GenericError: { error_code: 1n, error_message: 'boom' } }).message
+    ).toContain('boom');
+    expect(summarizeUpdateBalanceError({ SomethingElse: null }).kind).toBe('Unknown');
+  });
+
+  it('flags NoNewUtxos, AlreadyProcessing, and TemporarilyUnavailable as retryable, Generic/unknown as terminal', () => {
+    expect(isRetryableUpdateBalanceError('NoNewUtxos')).toBe(true);
+    expect(isRetryableUpdateBalanceError('AlreadyProcessing')).toBe(true);
+    expect(isRetryableUpdateBalanceError('TemporarilyUnavailable')).toBe(true);
+    expect(isRetryableUpdateBalanceError('GenericError')).toBe(false);
+    expect(isRetryableUpdateBalanceError('Unknown')).toBe(false);
+  });
+});
+
+describe('retrieve_btc_status classification', () => {
+  it('classifies every known status and decodes a byte-array txid to hex', () => {
+    expect(classifyRetrieveBtcStatus({ Pending: null }).kind).toBe('Pending');
+    expect(classifyRetrieveBtcStatus({ AmountTooLow: null }).kind).toBe('AmountTooLow');
+    expect(classifyRetrieveBtcStatus({ Unknown: null }).kind).toBe('Unknown');
+
+    const sending = classifyRetrieveBtcStatus({ Sending: { txid: [0xde, 0xad, 0xbe, 0xef] } });
+    expect(sending.kind).toBe('Sending');
+    expect(sending.txid).toBe('deadbeef');
+
+    const confirmed = classifyRetrieveBtcStatus({ Confirmed: { txid: 'already-hex-string' } });
+    expect(confirmed.kind).toBe('Confirmed');
+    expect(confirmed.txid).toBe('already-hex-string');
+  });
+
+  it('falls back to Unknown for an unrecognized variant tag', () => {
+    expect(classifyRetrieveBtcStatus({ SomethingNew: null }).kind).toBe('Unknown');
+  });
+
+  it('classifies Signing as in-flight, not success', () => {
+    expect(classifyRetrieveBtcStatus({ Signing: null }).kind).toBe('Signing');
+  });
+
+  it('classifies WillReimburse and Reimbursed as non-success recovery states', () => {
+    const willReimburse = classifyRetrieveBtcStatus({ WillReimburse: null });
+    expect(willReimburse.kind).toBe('WillReimburse');
+    expect(willReimburse.label.toLowerCase()).not.toContain('confirmed');
+
+    const reimbursed = classifyRetrieveBtcStatus({ Reimbursed: null });
+    expect(reimbursed.kind).toBe('Reimbursed');
+    expect(reimbursed.label.toLowerCase()).not.toContain('confirmed');
+  });
+});
+
+describe('retrieve error summarization', () => {
+  it('renders every known error variant with the relevant number', () => {
+    expect(summarizeRetrieveError({ MalformedAddress: 'nope' })).toContain('nope');
+    expect(summarizeRetrieveError({ AmountTooLow: 100_000_000n })).toContain('1 BTC');
+    expect(summarizeRetrieveError({ InsufficientFunds: { balance: 50_000_000n } })).toContain('0.5 BTC');
+    expect(summarizeRetrieveError({ InsufficientAllowance: { allowance: 0n } })).toContain('0 BTC');
+    expect(summarizeRetrieveError({ TemporarilyUnavailable: 'busy' })).toContain('busy');
+    expect(summarizeRetrieveError({ AlreadyProcessing: null })).toContain('already processing');
+    expect(summarizeRetrieveError({ GenericError: { error_code: 1n, error_message: 'oops' } })).toContain('oops');
+    expect(summarizeRetrieveError({ SomethingElse: null })).toContain('unknown');
+  });
+});
+
+describe('ICRC-2 approve error summarization', () => {
+  it('formats a BigInt InsufficientFunds payload without throwing', () => {
+    expect(() => summarizeApproveError({ InsufficientFunds: { balance: 50_000_000n } })).not.toThrow();
+    expect(summarizeApproveError({ InsufficientFunds: { balance: 50_000_000n } })).toContain('0.5 BTC');
+  });
+
+  it('formats a BigInt BadFee payload without throwing', () => {
+    expect(() => summarizeApproveError({ BadFee: { expected_fee: 100_000n } })).not.toThrow();
+    expect(summarizeApproveError({ BadFee: { expected_fee: 100_000n } })).toContain('0.001 BTC');
+  });
+
+  it('formats every other standard variant with numeric/BigInt fields, never using JSON.stringify', () => {
+    expect(summarizeApproveError({ AllowanceChanged: { current_allowance: 0n } })).toContain('0 BTC');
+    expect(summarizeApproveError({ Expired: { ledger_time: 1_700_000_000_000_000_000n } })).toContain('1700000000000000000');
+    expect(summarizeApproveError({ TooOld: null })).toContain('too old');
+    expect(summarizeApproveError({ CreatedInFuture: { ledger_time: 42n } })).toContain('42');
+    expect(summarizeApproveError({ Duplicate: { duplicate_of: 7n } })).toContain('7');
+    expect(summarizeApproveError({ TemporarilyUnavailable: null })).toContain('unavailable');
+    expect(summarizeApproveError({ GenericError: { error_code: 1n, error_message: 'boom' } })).toContain('boom');
+    expect(summarizeApproveError({ SomethingElse: null })).toContain('unknown');
+  });
+});
+
+describe('minter info summarization', () => {
+  it('renders min confirmations, min deposit, and min withdrawal from non-optional fields', () => {
+    const summary = summarizeMinterInfo({
+      min_confirmations: 6,
+      deposit_btc_min_amount: [200_000_000n],
+      retrieve_btc_min_amount: 100_000_000n,
+    });
+    expect(summary.minConfirmationsLabel).toContain('6');
+    expect(summary.minDepositLabel).toContain('2 BTC');
+    expect(summary.minWithdrawalLabel).toContain('1 BTC');
+    expect(summary.minConfirmationsValue).toBe('6');
+    expect(summary.minDepositValue).toBe('2 BTC');
+    expect(summary.minConfirmationsCount).toBe(6);
+  });
+});
+
+describe('mint step tracker derivation', () => {
+  it('stays on step 1 before the user has sent anything', () => {
+    expect(computeMintStepIndex({ isPolling: false, pollingStopped: false, hasMinted: false })).toBe(1);
+  });
+
+  it('moves to step 2 while actively polling', () => {
+    expect(computeMintStepIndex({ isPolling: true, pollingStopped: false, hasMinted: false })).toBe(2);
+  });
+
+  it('stays on step 2 after the bounded poll pauses while still waiting, not step 1', () => {
+    expect(computeMintStepIndex({ isPolling: false, pollingStopped: true, hasMinted: false })).toBe(2);
+  });
+
+  it('only reaches step 3 once a mint has actually landed, never from isPolling=false alone', () => {
+    expect(computeMintStepIndex({ isPolling: false, pollingStopped: false, hasMinted: true })).toBe(3);
+    expect(computeMintStepIndex({ isPolling: true, pollingStopped: false, hasMinted: true })).toBe(3);
+  });
+});
+
+describe('withdrawal fee estimate parsing', () => {
+  it('extracts bitcoin_fee and minter_fee from the bare record', () => {
+    const estimate = parseWithdrawalFeeEstimate({ bitcoin_fee: 25_000n, minter_fee: 50_000n });
+    expect(estimate).toEqual({ bitcoinFeeSatoshi: 25_000n, minterFeeSatoshi: 50_000n });
+  });
+
+  it('returns null for malformed records instead of fabricating a fee', () => {
+    expect(parseWithdrawalFeeEstimate({ bitcoin_fee: 'nope', minter_fee: 2n })).toBeNull();
+    expect(parseWithdrawalFeeEstimate({ Err: { AmountTooHigh: null } })).toBeNull();
+  });
+
+  it('summarizes thrown minter errors without assuming a Candid error variant', () => {
+    expect(summarizeWithdrawalFeeError(new Error('unavailable'))).toContain('unavailable');
+    expect(summarizeWithdrawalFeeError({ SomethingElse: null })).toContain('could not estimate');
+  });
+});
+
+describe('withdrawal fee estimate summarization (ckBTC bare Candid record)', () => {
+  it('produces a success summary from Ok without assuming a btc_fee or ledger fee', () => {
+    const outcome = summarizeWithdrawalFeeEstimate({ bitcoin_fee: 25_000n, minter_fee: 50_000n });
+    expect(outcome.success).toBe(true);
+    if (outcome.success) {
+      expect(outcome.estimate).toEqual({ bitcoinFeeSatoshi: 25_000n, minterFeeSatoshi: 50_000n });
+      expect(outcome.label).toContain('0.00025 BTC');
+      expect(outcome.label).toContain('0.0005 BTC');
+      expect(outcome.label).not.toContain('ledger fee');
+    }
+  });
+
+  it('rejects invalid fee records without fabricating an error variant', () => {
+    const invalid = summarizeWithdrawalFeeEstimate({ Err: { AmountTooHigh: null } });
+    expect(invalid.success).toBe(false);
+    expect(invalid.label).toContain('invalid fee estimate');
+  });
+});
+
+describe('polling bounds', () => {
+  it('is not exhausted before the max attempt count', () => {
+    expect(isPollingExhausted(POLL_MAX_ATTEMPTS - 1)).toBe(false);
+  });
+
+  it('is exhausted at and beyond the max attempt count', () => {
+    expect(isPollingExhausted(POLL_MAX_ATTEMPTS)).toBe(true);
+    expect(isPollingExhausted(POLL_MAX_ATTEMPTS + 1)).toBe(true);
+  });
+
+  it('labels progress with the current attempt and the bound', () => {
+    expect(pollProgressLabel(5)).toContain(`5 of ${POLL_MAX_ATTEMPTS}`);
+  });
+});
+
+describe('confirmationMeterPercent', () => {
+  it('computes the real fraction, never rounding a partial count up to 100', () => {
+    expect(confirmationMeterPercent({ confirmations: 25, requiredConfirmations: 60 })).toBeCloseTo((25 / 60) * 100);
+  });
+
+  it('clamps at 100 and 0', () => {
+    expect(confirmationMeterPercent({ confirmations: 90, requiredConfirmations: 60 })).toBe(100);
+    expect(confirmationMeterPercent({ confirmations: 0, requiredConfirmations: 60 })).toBe(0);
+  });
+
+  it('treats a non-positive requirement as fully satisfied rather than dividing by zero', () => {
+    expect(confirmationMeterPercent({ confirmations: 0, requiredConfirmations: 0 })).toBe(100);
+  });
+});
+
+describe('computeConfirmationDisplay — the combined status pill / meter / ticket rows', () => {
+  const baseParams = {
+    isPolling: true,
+    pollingStopped: false,
+    pollAttempt: 4,
+    mintedSummary: null,
+    pollFatalMessage: '',
+    lastUpdateBalanceError: null,
+    utxoStatuses: [] as UtxoStatusSummary[],
+  };
+
+  it('is "waiting" with no meter when nothing has been detected yet — never a synthesized 0/required meter', () => {
+    const display = computeConfirmationDisplay(baseParams);
+    expect(display.phase).toBe('confirming');
+    expect(display.meter).toBeNull();
+    expect(display.amountDetectedLabel).toBeNull();
+    expect(display.statusLabel).toContain('Watching for your deposit');
+    expect(display.statusLabel).toContain('4');
+  });
+
+  it('reads the meter and amount from real pending-UTXO data — never derived from pollAttempt', () => {
+    const lastUpdateBalanceError: UpdateBalanceErrorSummary = {
+      kind: 'NoNewUtxos',
+      message: '25/60 confirmations so far. Not minted yet.',
+      currentConfirmations: 25,
+      requiredConfirmations: 60,
+      pendingUtxos: [{ satoshiAmount: 2_400_000_000n, confirmations: 25, label: '24 BTC pending, 25 confirmations so far' }],
+    };
+    const display = computeConfirmationDisplay({ ...baseParams, pollAttempt: 4, lastUpdateBalanceError });
+
+    expect(display.meter).toEqual({ confirmations: 25, requiredConfirmations: 60 });
+    expect(display.amountDetectedLabel).toBe('24 BTC');
+    expect(display.utxoCountLabel).toBe('1 UTXO detected');
+    expect(display.statusLabel).toContain('Checking, attempt 4');
+    // Changing pollAttempt must never move the meter — it is sourced only from the minter.
+    const differentAttempt = computeConfirmationDisplay({ ...baseParams, pollAttempt: 99, lastUpdateBalanceError });
+    expect(differentAttempt.meter).toEqual({ confirmations: 25, requiredConfirmations: 60 });
+  });
+
+  it('covers multiple pending UTXOs: sums the detected amount and meters off the least-confirmed one', () => {
+    const lastUpdateBalanceError: UpdateBalanceErrorSummary = {
+      kind: 'NoNewUtxos',
+      message: 'pending',
+      requiredConfirmations: 60,
+      pendingUtxos: [
+        { satoshiAmount: 1_000_000_000n, confirmations: 10, label: 'a' },
+        { satoshiAmount: 500_000_000n, confirmations: 3, label: 'b' },
+      ],
+    };
+    const display = computeConfirmationDisplay({ ...baseParams, lastUpdateBalanceError });
+
+    expect(display.meter).toEqual({ confirmations: 3, requiredConfirmations: 60 });
+    expect(display.amountDetectedLabel).toBe('15 BTC');
+    expect(display.utxoCountLabel).toBe('2 UTXOs detected');
+  });
+
+  it('shows a full meter once a UTXO is Checked (already confirmed, waiting to mint) using the minter-info hint', () => {
+    const utxoStatuses: UtxoStatusSummary[] = [{ kind: 'Checked', label: 'Confirmed and waiting to mint.' }];
+    const display = computeConfirmationDisplay({ ...baseParams, utxoStatuses, minConfirmationsHint: 60 });
+
+    expect(display.meter).toEqual({ confirmations: 60, requiredConfirmations: 60 });
+    expect(display.statusLabel).toBe('Confirmed, waiting to mint');
+  });
+
+  it('is "minted" once a Minted UTXO is present, regardless of isPolling/pollingStopped', () => {
+    const mintedSummary: UtxoStatusSummary = {
+      kind: 'Minted',
+      label: 'Minted 24 BTC into your wallet.',
+      satoshiAmount: 2_400_000_000n,
+      blockIndex: 5n,
+    };
+    const display = computeConfirmationDisplay({ ...baseParams, isPolling: false, pollingStopped: true, mintedSummary });
+
+    expect(display.phase).toBe('minted');
+    expect(display.meter).toBeNull();
+    expect(display.amountDetectedLabel).toBe('24 BTC');
+    expect(display.nextCheckLabel).toBeNull();
+  });
+
+  it('is "error" (not "stopped") when a fatal message is present, and suppresses the meter', () => {
+    const display = computeConfirmationDisplay({ ...baseParams, isPolling: false, pollingStopped: true, pollFatalMessage: 'boom' });
+    expect(display.phase).toBe('error');
+    expect(display.meter).toBeNull();
+  });
+
+  it('is "stopped" (not an error) when the bounded poll exhausts while still waiting', () => {
+    const display = computeConfirmationDisplay({ ...baseParams, isPolling: false, pollingStopped: true, pollAttempt: 120 });
+    expect(display.phase).toBe('stopped');
+    expect(display.statusLabel).toContain('Paused after attempt 120');
+  });
+
+  it('only includes a next-check estimate while actively confirming — never once stopped or errored', () => {
+    const confirming = computeConfirmationDisplay(baseParams);
+    expect(confirming.nextCheckLabel).toBe('Next check in ~60s');
+
+    const stopped = computeConfirmationDisplay({ ...baseParams, isPolling: false, pollingStopped: true });
+    expect(stopped.nextCheckLabel).toBeNull();
+
+    const errored = computeConfirmationDisplay({ ...baseParams, isPolling: false, pollingStopped: true, pollFatalMessage: 'boom' });
+    expect(errored.nextCheckLabel).toBeNull();
+  });
+});

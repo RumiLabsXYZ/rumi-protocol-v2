@@ -8,13 +8,15 @@
   import { truncatePrincipal, copyToClipboard } from '../../utils/principalHelpers';
   import { formatTokenBalance } from '../../utils/format';
   import { TokenService } from '../../services/tokenService';
-  import { CONFIG } from '../../config';
+  import { CONFIG, CANISTER_IDS } from '../../config';
   import { collateralStore } from '../../stores/collateralStore';
   import Toast from '../common/Toast.svelte';
   import { transferICRC1, queryICRC1Fee, isValidPrincipal } from '../../services/transferService';
   import { threePoolService } from '../../services/threePoolService';
   import { formatTokenAmount } from '../../services/threePoolService';
   import QRCode from 'qrcode';
+
+  export let bitcoinOnly = false;
 
   interface WalletInfo {
     id: string;
@@ -260,7 +262,7 @@
 
   async function fetchThreeUsdBalance() {
     const p = $walletStore.principal;
-    if (!p) { threeUsdBalance = 0n; return; }
+    if (!p || bitcoinOnly) { threeUsdBalance = 0n; return; }
     try {
       const bal = await threePoolService.getLpBalance(p);
       threeUsdBalance = BigInt(bal);
@@ -293,7 +295,13 @@
   $: isConnected = $walletStore.isConnected;
   $: account = $walletStore.principal?.toString() ?? null;
   $: currentIcon = $walletStore.icon;
-  $: tokenBalances = $walletStore.tokenBalances ?? {};
+  $: allTokenBalances = $walletStore.tokenBalances ?? {};
+  $: tokenBalances = bitcoinOnly
+    ? Object.fromEntries(Object.entries(allTokenBalances).filter(([key]) => {
+        const ledgerId = collateralTokenMeta[key]?.canisterId;
+        return ledgerId === CANISTER_IDS.CKBTC_LEDGER || ledgerId === CONFIG.currentIcusdLedgerId;
+      }))
+    : allTokenBalances;
   $: isInternetIdentity = $currentWalletType === WALLET_TYPES.INTERNET_IDENTITY;
 
   // Compute total USD value
@@ -464,7 +472,7 @@
   }
 </script>
 
-<div id="wallet-container">
+<div id="wallet-container" class:bitcoin-wallet={bitcoinOnly}>
   {#if !isConnected}
     <button
       id="wallet-button"
@@ -601,7 +609,7 @@
             <!-- USD Total + Rumi logo -->
             <div class="dropdown-total">
               <div class="dropdown-total-left">
-                <span class="dropdown-total-label">Total Balance</span>
+                <span class="dropdown-total-label">{bitcoinOnly ? "Bitcoin & dollar balance" : "Total Balance"}</span>
                 <span class="dropdown-total-value">${totalUsdValue.toFixed(2)}</span>
               </div>
               <img src="/main-logo-without-BG.png" alt="Rumi" class="dropdown-total-logo" />
@@ -901,6 +909,10 @@
 {/if}
 
 <style>
+  @media (max-width: 768px) {
+    .bitcoin-wallet .icp-button { padding: 0.5rem 0.65rem; min-height: 44px; font-size: 0.8125rem; white-space: nowrap; }
+    .bitcoin-wallet .icp-button svg { flex-shrink: 0; }
+  }
   /* ═══ Connected: Icon-only header button ═══ */
   .wallet-icon-btn {
     position: relative;

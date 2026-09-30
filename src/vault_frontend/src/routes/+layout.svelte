@@ -23,6 +23,7 @@
   let showDebug = false;
   let hasLiquidatableVaults = false;
   $: currentPath = $page.url.pathname;
+  $: isBitcoinRoute = currentPath === '/bitcoin' || currentPath.startsWith('/bitcoin/');
   $: earnActive = currentPath.startsWith('/earn') || currentPath.startsWith('/3usd') || currentPath.startsWith('/stability-pool');
   $: ({ isConnected } = $wallet);
   // Pre-warm the Oisy signer agent on connect so every write flow (mint,
@@ -66,9 +67,14 @@
     return () => cleanups.forEach(fn => fn());
   });
 </script>
+<div class:bitcoin-experience={isBitcoinRoute}>
 <header class="top-bar">
-  <a href="/" class="top-brand"><img src="/rumilogo-vector-v2_inset2.png" alt="Rumi" class="top-logo" /><span class="top-wordmark">RUMI</span><span class="beta-chip" title="This protocol is in beta. Use at your own risk.">Beta</span></a>
-  <nav class="top-nav">
+  <a href={isBitcoinRoute ? "/bitcoin" : "/"} class="top-brand"><img src="/rumilogo-vector-v2_inset2.png" alt="Rumi" class="top-logo" /><span class="top-wordmark">RUMI{#if isBitcoinRoute}<span class="bitcoin-wordmark"> / BITCOIN</span>{/if}</span><span class="beta-chip" title="This protocol is in beta. Use at your own risk.">Beta</span></a>
+  <nav class="top-nav" aria-label={isBitcoinRoute ? "Bitcoin" : "Main"}>
+    {#if isBitcoinRoute}
+      <a href="/bitcoin" class="nav-link" class:active={currentPath === "/bitcoin"}><span>Minter</span></a>
+      <a href="/bitcoin/borrow" class="nav-link" class:active={currentPath.startsWith("/bitcoin/borrow")}><span>Borrow</span></a>
+    {:else}
     <a href="/" class="nav-link" class:active={currentPath === '/'}><span>Borrow</span></a>
     <a href="/earn" class="nav-link" class:active={earnActive}><span>Earn</span></a>
     <a href="/swap" class="nav-link" class:active={currentPath === '/swap'}><span>Swap</span></a>
@@ -76,36 +82,44 @@
     {#if isConnected && $permissionStore.isDeveloper}<a href="/treasury" class="nav-link" class:active={currentPath === '/treasury'}><span>Treasury</span></a>{/if}
     <a href="/explorer" class="nav-link" class:active={currentPath.startsWith('/explorer')}><span>Explorer</span></a>
     {#if POINTS_ENABLED}<a href="/points" class="nav-link nav-airdrop" class:active={currentPath.startsWith('/points')} title="View your points"><span class="airdrop-pill">✨ Points</span></a>{/if}
+    {/if}
   </nav>
   <div class="top-actions">
-    {#if hasLiquidatableVaults}
+    {#if hasLiquidatableVaults && !isBitcoinRoute}
       <a href="/liquidations" class="liq-alert" title="Vaults available for manual liquidation">
         <svg viewBox="0 0 20 20" fill="currentColor" width="16" height="16"><path fill-rule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.168 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z" clip-rule="evenodd"/></svg>
         <span class="liq-dot"></span>
       </a>
     {/if}
-    <a href="/docs" class="docs-chip">Docs</a>
-    <div class="top-social">
+    <a href={isBitcoinRoute ? "https://docs.internetcomputer.org/concepts/chain-fusion/bitcoin" : "/docs"} class="docs-chip">{isBitcoinRoute ? "About ckBTC" : "Docs"}</a>
+    {#if !isBitcoinRoute}<div class="top-social">
       <a href="mailto:info@rumiprotocol.com" class="header-icon-link" aria-label="Email"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg></a>
       <a href="https://x.com/rumilabsxyz" target="_blank" rel="noopener noreferrer" class="header-icon-link" aria-label="Twitter"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg></a>
       <a href="https://github.com/RumiLabsXYZ/rumi-protocol-v2" target="_blank" rel="noopener noreferrer" class="header-icon-link" aria-label="GitHub"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/></svg></a>
       <a href="https://t.me/+nVydvqMbUWY3MGE5" target="_blank" rel="noopener noreferrer" class="header-icon-link" aria-label="Telegram"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.479.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z"/></svg></a>
       <a href="https://discord.gg/Fg5WyajwQR" target="_blank" rel="noopener noreferrer" class="header-icon-link" aria-label="Discord"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M20.317 4.3698a19.7913 19.7913 0 00-4.8851-1.5152.0741.0741 0 00-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 00-.0785-.037 19.7363 19.7363 0 00-4.8852 1.515.0699.0699 0 00-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 00.0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 00.0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 00-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 01-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 01.0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 01.0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 01-.0066.1276 12.2986 12.2986 0 01-1.873.8914.0766.0766 0 00-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 00.0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 00.0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 00-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189z"/></svg></a>
     </div>
-    <WalletConnector />
+    {/if}
+    {#key isBitcoinRoute}<WalletConnector bitcoinOnly={isBitcoinRoute} />{/key}
   </div>
 </header>
-<PositionStrip />
-<XrpPendingDepositBanner />
+{#if !isBitcoinRoute}<PositionStrip /><XrpPendingDepositBanner />{/if}
 <ToastContainer />
-<main class="main-content">{#if POINTS_ENABLED && !currentPath.startsWith('/points')}<SeasonBar />{/if}<slot /></main>
+<main class="main-content">{#if POINTS_ENABLED && !isBitcoinRoute && !currentPath.startsWith('/points')}<SeasonBar />{/if}<slot /></main>
 <footer class="app-footer">
   <div class="footer-inner">
     <div class="footer-links">
+      {#if isBitcoinRoute}
+        <a href="/bitcoin" class="footer-link">Bitcoin minter</a>
+        <a href="/bitcoin/borrow" class="footer-link">Borrow with Bitcoin</a>
+      {:else}
       <a href="/redeem" class="footer-link">Redeem</a>
-      <a href="/doge" class="footer-link">ckDOGE Bridge</a>
+      <a href="/doge" class="footer-link">ckDOGE Minter</a>
+      <a href="/bitcoin" class="footer-link">Bitcoin Minter</a>
+      <a href="/bitcoin/borrow" class="footer-link">Borrow with Bitcoin</a>
       <a href="/doge/borrow" class="footer-link">Borrow with DOGE</a>
       <a href="/liquidations?tab=manual" class="footer-link">Liquidate{#if hasLiquidatableVaults}<span class="liq-alert-dot"></span>{/if}</a>
+      {/if}
       <a href="/transparency" class="footer-link">Transparency</a>
       <a href="/docs" class="footer-link">Docs</a>
       <a href="mailto:info@rumiprotocol.com" class="footer-link">Contact</a>
@@ -119,16 +133,36 @@
     </div>
   </div>
 </footer>
-<nav class="mobile-nav">
+<nav class="mobile-nav" aria-label={isBitcoinRoute ? "Bitcoin mobile" : "Main mobile"}>
+  {#if isBitcoinRoute}
+    <a href="/bitcoin" class="mob-item" class:active={currentPath === '/bitcoin'}><span class="bitcoin-mobile-icon" aria-hidden="true">₿</span><span>Minter</span></a>
+    <a href="/bitcoin/borrow" class="mob-item" class:active={currentPath.startsWith('/bitcoin/borrow')}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><span>Borrow</span></a>
+  {:else}
   <a href="/" class="mob-item" class:active={currentPath === '/'}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9,22 9,12 15,12 15,22"/></svg><span>Borrow</span></a>
   <a href="/earn" class="mob-item" class:active={earnActive}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg><span>Earn</span></a>
   <a href="/swap" class="mob-item" class:active={currentPath === '/swap'}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 1l4 4-4 4"/><path d="M3 9h18"/><path d="M7 23l-4-4 4-4"/><path d="M21 15H3"/></svg><span>Swap</span></a>
   <a href="/vaults" class="mob-item" class:active={currentPath.startsWith('/vaults')}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><span>Vaults</span></a>
   <a href="/explorer" class="mob-item" class:active={currentPath.startsWith('/explorer')}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><span>Explorer</span></a>
   {#if POINTS_ENABLED}<a href="/points" class="mob-item mob-airdrop" class:active={currentPath.startsWith('/points')}><svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 2l2.2 5.8L20 10l-5.8 2.2L12 18l-2.2-5.8L4 10l5.8-2.2z"/></svg><span>Points</span></a>{/if}
+  {/if}
 </nav>
 {#if isDevelopment && showDebug}<div class="fixed bottom-4 right-4 z-50"><div class="flex flex-col gap-2"><PriceDebug /><WalletDebug /></div></div>{/if}
+</div>
 <style>
+  .bitcoin-experience { min-height:100vh;background:#10100f;--rumi-bg-surface-1:#151514;--rumi-border:#34332f;--rumi-border-hover:#57544e;--rumi-text-primary:#f5f1e8;--rumi-text-secondary:#c9c2b7;--rumi-text-muted:#aaa397;--rumi-action:#f7931a; }
+  .bitcoin-experience {
+    --rumi-bg-primary:#10100f;--rumi-bg-secondary:#181817;
+    --rumi-bg-surface1:#181817;--rumi-bg-surface2:#22221f;--rumi-bg-surface3:#2d2c28;
+    --rumi-bg-surface-2:#22221f;--rumi-bg-surface-3:#2d2c28;--rumi-bg-card:#181817;--rumi-bg-card-hover:#22221f;--rumi-bg-elevated:#22221f;
+    --rumi-action-bright:#ffad46;--rumi-action-muted:#d77b0d;--rumi-action-dim:rgba(247,147,26,0.1);
+    --rumi-purple-accent:#f5f1e8;--rumi-teal:#f7931a;--rumi-border-accent:rgba(247,147,26,0.3);
+    --rumi-safe:#8fbc92;--rumi-caution:#e7b35f;--rumi-danger:#ef8b7b;--rumi-critical:#ff7360;
+  }
+  .bitcoin-experience .main-content { padding-top:5.5rem; }
+  .bitcoin-experience .nav-link.active::after { background:#f7931a; }
+  .bitcoin-wordmark { font-family:'Inter',sans-serif;letter-spacing:0.04em;color:#f7931a;font-size:0.72rem; }
+  .bitcoin-mobile-icon { font-size:1.3rem;line-height:1.125rem;color:#f7931a; }
+  .bitcoin-experience .mob-item.active { color:#f7931a; }
   /* ── Top bar: CSS Grid for true center nav ──
      3-column grid: [brand] [nav] [actions]
      Nav is viewport-centered regardless of left/right content width.
@@ -220,6 +254,7 @@
   @keyframes airdrop-glow-mob { 0%,100% { filter:drop-shadow(0 0 4px rgba(45,212,191,0.55)); } 50% { filter:drop-shadow(0 0 9px rgba(167,139,250,0.85)); } }
   @media (prefers-reduced-motion: reduce) { .mob-airdrop svg { animation:none; } }
   .mob-item.active { color:var(--rumi-action); }
+  @media (max-width:380px) { .bitcoin-wordmark { display:none; } }
   @media (max-width:768px) {
     .top-nav{display:none}
     .main-content{padding:calc(4.25rem + var(--rumi-xrp-recovery-height, 0px) + var(--rumi-strip-height, 0px)) 1rem 5rem}

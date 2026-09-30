@@ -25,6 +25,7 @@
   export let vault: Vault;
   export let icpPrice: number = 0;
   export let expandedVaultId: number | null = null;
+  export let bitcoinOnly: boolean = false;
 
   // ── Per-collateral derived values ──
   $: vaultCollateralType = vault.collateralType || CANISTER_IDS.ICP_LEDGER;
@@ -416,10 +417,17 @@
     : repayTokenType === 'CKUSDT' ? 'ckUSDT' : 'ckUSDC';
 
   function selectToken(token: 'icUSD' | 'CKUSDT' | 'CKUSDC') {
+    if (bitcoinOnly && token !== 'icUSD') return;
     repayTokenType = token;
     hasChangedToken = true;
     showTokenDropdown = false;
     onTokenChange();
+  }
+
+  $: if (bitcoinOnly && repayTokenType !== 'icUSD') {
+    repayTokenType = 'icUSD';
+    repayAmount = '';
+    showTokenDropdown = false;
   }
 
   // ── Projected CR calculations ──
@@ -1076,30 +1084,36 @@
                 <input type="number" class="action-input action-input-repay" bind:value={repayAmount}
                   on:blur={() => clampInput('repay')}
                   placeholder="0.00" min="0" max={repayInputMax} step="0.00000001" inputmode="decimal" disabled={isProcessing} />
-                <button class="token-selector" class:token-selector-pulse={!hasChangedToken}
-                  on:click={() => { showTokenDropdown = !showTokenDropdown; }}
-                  disabled={isProcessing}>
-                  <span class="token-dot" class:token-dot-icusd={repayTokenType === 'icUSD'}
-                    class:token-dot-ckusdt={repayTokenType === 'CKUSDT'}
-                    class:token-dot-ckusdc={repayTokenType === 'CKUSDC'}></span>
-                  {repayTokenLabel}
-                  <span class="token-chevron">▾</span>
-                </button>
-                {#if showTokenDropdown}
-                  <div class="token-dropdown">
-                    <button class="token-option" class:token-option-active={repayTokenType === 'icUSD'}
-                      on:click={() => selectToken('icUSD')}>
-                      <span class="token-dot token-dot-icusd"></span> icUSD
-                    </button>
-                    <button class="token-option" class:token-option-active={repayTokenType === 'CKUSDT'}
-                      on:click={() => selectToken('CKUSDT')}>
-                      <span class="token-dot token-dot-ckusdt"></span> ckUSDT
-                    </button>
-                    <button class="token-option" class:token-option-active={repayTokenType === 'CKUSDC'}
-                      on:click={() => selectToken('CKUSDC')}>
-                      <span class="token-dot token-dot-ckusdc"></span> ckUSDC
-                    </button>
-                  </div>
+                {#if bitcoinOnly}
+                  <span class="token-selector" aria-label="Repayment token: icUSD">
+                    <span class="token-dot token-dot-icusd"></span> icUSD
+                  </span>
+                {:else}
+                  <button class="token-selector" class:token-selector-pulse={!hasChangedToken}
+                    on:click={() => { showTokenDropdown = !showTokenDropdown; }}
+                    disabled={isProcessing}>
+                    <span class="token-dot" class:token-dot-icusd={repayTokenType === 'icUSD'}
+                      class:token-dot-ckusdt={repayTokenType === 'CKUSDT'}
+                      class:token-dot-ckusdc={repayTokenType === 'CKUSDC'}></span>
+                    {repayTokenLabel}
+                    <span class="token-chevron">▾</span>
+                  </button>
+                  {#if showTokenDropdown}
+                    <div class="token-dropdown">
+                      <button class="token-option" class:token-option-active={repayTokenType === 'icUSD'}
+                        on:click={() => selectToken('icUSD')}>
+                        <span class="token-dot token-dot-icusd"></span> icUSD
+                      </button>
+                      <button class="token-option" class:token-option-active={repayTokenType === 'CKUSDT'}
+                        on:click={() => selectToken('CKUSDT')}>
+                        <span class="token-dot token-dot-ckusdt"></span> ckUSDT
+                      </button>
+                      <button class="token-option" class:token-option-active={repayTokenType === 'CKUSDC'}
+                        on:click={() => selectToken('CKUSDC')}>
+                        <span class="token-dot token-dot-ckusdc"></span> ckUSDC
+                      </button>
+                    </div>
+                  {/if}
                 {/if}
               </div>
               {#if canKeepVaultOpenOnFullRepay && !isNativeXrp}
@@ -1128,7 +1142,7 @@
                 </span>
               {/if}
               <div class="input-submit-row">
-                {#if !hasChangedToken}
+                {#if !bitcoinOnly && !hasChangedToken}
                   <span class="token-hint">Click token name to pay with ckUSDT or ckUSDC</span>
                 {/if}
                 <button class="btn-submit btn-submit-debt" on:click={handleRepay}

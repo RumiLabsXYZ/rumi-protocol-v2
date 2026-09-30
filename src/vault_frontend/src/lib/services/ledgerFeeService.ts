@@ -105,6 +105,22 @@ export async function fetchLedgerFee(ref: LedgerFeeRef): Promise<bigint> {
   }
 }
 
+/** Query the current ledger fee without a decimal-based fallback.
+ * Use this before approvals where an inaccurate fallback could create a
+ * misleading allowance amount. A failed query is surfaced to the caller.
+ */
+export async function fetchLedgerFeeStrict(ref: LedgerFeeRef): Promise<bigint> {
+  const now = Date.now();
+  const agent = await getAnonAgent();
+  const actor = Actor.createActor(ICRC1_IDL as any, {
+    agent,
+    canisterId: ref.ledgerId,
+  });
+  const fee = BigInt(await (actor as any).icrc1_fee());
+  cache.set(ref.ledgerId, { fee, fetchedAt: now });
+  return fee;
+}
+
 /**
  * Synchronous accessor — returns the cached fee if present, else the fallback.
  * Use only after `fetchLedgerFee` has been awaited at least once for this ledger,

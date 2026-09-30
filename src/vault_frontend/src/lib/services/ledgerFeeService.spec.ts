@@ -33,7 +33,7 @@ vi.mock('../idls/ledger.idl.js', () => ({
   ICRC1_IDL: {},
 }));
 
-import { fetchLedgerFee, getCachedLedgerFee, _clearLedgerFeeCache } from './ledgerFeeService';
+import { fetchLedgerFee, fetchLedgerFeeStrict, getCachedLedgerFee, _clearLedgerFeeCache } from './ledgerFeeService';
 
 describe('ledgerFeeService', () => {
   beforeEach(() => {
@@ -106,5 +106,28 @@ describe('ledgerFeeService', () => {
 
   it('getCachedLedgerFee returns the ICP fallback when symbol is ICP and nothing is cached', () => {
     expect(getCachedLedgerFee({ ledgerId: 'icp-cold', symbol: 'ICP', decimals: 8 })).toBe(10_000n);
+  });
+});
+
+
+describe('strict fee reads for ckBTC approval quotes', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _clearLedgerFeeCache();
+  });
+
+  it('re-queries a cached ledger so a changed fee cannot use an old quote', async () => {
+    mocks.icrc1Fee.mockResolvedValueOnce(10n).mockResolvedValueOnce(20n);
+    const ref = { ledgerId: 'mxzaz-hqaaa-aaaar-qaada-cai', decimals: 8, symbol: 'ckBTC' };
+    expect(await fetchLedgerFee(ref)).toBe(10n);
+    expect(await fetchLedgerFeeStrict(ref)).toBe(20n);
+    expect(mocks.icrc1Fee).toHaveBeenCalledTimes(2);
+    expect(getCachedLedgerFee(ref)).toBe(20n);
+  });
+
+  it('rejects an unavailable fee rather than approving the 8-decimal fallback', async () => {
+    mocks.icrc1Fee.mockRejectedValueOnce(new Error('ledger unavailable'));
+    await expect(fetchLedgerFeeStrict({ ledgerId: 'ckbtc-unavailable', decimals: 8, symbol: 'ckBTC' }))
+      .rejects.toThrow('ledger unavailable');
   });
 });
