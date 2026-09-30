@@ -3,6 +3,8 @@
   import { Principal } from '@dfinity/principal';
   import { isConnected as isConnectedStore, principal as principalStore } from '$lib/stores/wallet';
   import { CANISTER_IDS } from '$lib/config';
+  import CkErc20TokenSelect from '$lib/components/common/CkErc20TokenSelect.svelte';
+  import { ckErc20Logo, featuredCkErc20Symbols } from '$lib/utils/ckerc20Logos';
   import {
     CKERC20_MINTER_DASHBOARD,
     discoverCkErc20Tokens,
@@ -38,6 +40,10 @@
   let selectedToken: CkErc20TokenConfig | null = null;
   $: selectedToken = supportedTokens.find((token) => token.ledgerId === selectedTokenLedgerId) ?? null;
   let evmAccount = '';
+  let evmConnectBusy = false;
+  let evmManuallyDisconnected = false;
+  let evmSessionEpoch = 0;
+  const EVM_DISCONNECT_KEY = 'rumi:ckerc20:evm-disconnected';
   let evmMessage = '';
   let evmTokenBalance: bigint | null = null;
   let evmTokenBalanceBusy = false;
@@ -63,6 +69,15 @@
   let pendingWithdrawal: { amount: string; recipient: string; owner: string; tokenLedgerId?: string; tokenSymbol?: string; createdAt: number } | null = null;
   let redeemIndices: { ckEth: bigint; ckToken: bigint } | null = null;
   let destroyed = false;
+  let tokenSupply: bigint | null = null;
+  let ckEthSupply: bigint | null = null;
+  let supplyBusy = false;
+  let supplyError = '';
+  let supplyUpdatedAt: Date | null = null;
+  let supplyRequestId = 0;
+  $: featuredTokens = supportedTokens.filter((token) => featuredCkErc20Symbols.includes(token.symbol));
+  $: otherTokens = supportedTokens.filter((token) => !featuredCkErc20Symbols.includes(token.symbol));
+  $: withdrawalPendingForOwner = !!pendingWithdrawal && !!ownerPrincipal && pendingWithdrawal.owner === ownerPrincipal.toText();
 
   const unsubs: Array<() => void> = [];
   let previousPrincipal = '';
@@ -172,6 +187,7 @@
   }
 
   onMount(() => {
+    try { evmManuallyDisconnected = sessionStorage.getItem(EVM_DISCONNECT_KEY) === 'true'; } catch { /* In-memory disconnect still works. */ }
     unsubs.push(isConnectedStore.subscribe((value) => {
       connected = value;
       if (!value) resetForWallet();
@@ -190,6 +206,7 @@
     }));
     ethereumProvider = getEthereumProvider();
     accountChangedListener = (accounts) => {
+      if (evmManuallyDisconnected) return;
       evmTokenBalanceRequestId += 1;
       evmTokenBalanceBusy = false;
       evmAccount = Array.isArray(accounts) && accounts[0] ? String(accounts[0]) : '';
@@ -200,6 +217,7 @@
       if (evmAccount) void refreshEvmTokenBalance(evmAccount);
     };
     chainChangedListener = (chainId) => {
+      if (evmManuallyDisconnected) return;
       evmTokenBalanceRequestId += 1;
       evmTokenBalanceBusy = false;
       evmTokenBalance = null;
@@ -215,12 +233,14 @@
     ethereumProvider?.on?.('chainChanged', chainChangedListener);
     void loadMinterInfo();
     void (async () => {
+      const sessionEpoch = evmSessionEpoch;
+      if (evmManuallyDisconnected) return;
       try {
         const [accounts, chainId] = await Promise.all([
           ethereumProvider?.request({ method: 'eth_accounts' }),
           ethereumProvider?.request({ method: 'eth_chainId' }),
         ]);
-        if (destroyed) return;
+        if (destroyed || evmManuallyDisconnected || sessionEpoch !== evmSessionEpoch) return;
         evmAccount = Array.isArray(accounts) && accounts[0] ? String(accounts[0]) : '';
         syncPendingDeposit();
         if (chainId === '0x1') {
@@ -296,7 +316,10 @@
     ckTokenBalance = null;
     notice = '';
     error = '';
+    approveHash = '';
+    depositHash = '';
     syncPendingDeposit(token);
+    void refreshCirculatingSupply(token);
     if (evmAccount) void refreshEvmTokenBalance(evmAccount, token);
     if (ownerPrincipal && !ownerPrincipal.isAnonymous()) await refreshBalances(ownerPrincipal, token);
   }
@@ -318,13 +341,42 @@
         : (tokens.find((token) => token.symbol === 'ckUSDC') ?? tokens[0]).ledgerId;
       helperAddress = helper;
       minterReady = true;
-      syncPendingDeposit(supportedTokens.find((token) => token.ledgerId === selectedTokenLedgerId));
-      if (evmAccount) void refreshEvmTokenBalance(evmAccount, supportedTokens.find((token) => token.ledgerId === selectedTokenLedgerId));
-      if (ownerPrincipal && !ownerPrincipal.isAnonymous()) await refreshBalances(ownerPrincipal);
+      const token = tokens.find((candidate) => candidate.ledgerId === selectedTokenLedgerId)!;
+      syncPendingDeposit(token);
+      void refreshCirculatingSupply(token);
+      if (evmAccount) void refreshEvmTokenBalance(evmAccount, token);
+      if (ownerPrincipal && !ownerPrincipal.isAnonymous()) await refreshBalances(ownerPrincipal, token);
     } catch (cause) {
       if (destroyed) return;
       minterError = cause instanceof Error ? cause.message : 'Could not read ckERC20 minter configuration.';
     }
+  }
+
+  async function refreshCirculatingSupply(token = selectedToken) {
+    if (!token) return;
+    const requestId = ++supplyRequestId;
+    tokenSupply = null;
+    ckEthSupply = null;
+    supplyUpdatedAt = null;
+    supplyError = '';
+    supplyBusy = true;
+    try {
+      const [tokenResult, ethResult] = await Promise.allSettled([
+        getCkErc20LedgerActor(token.ledgerId).then((ledger) => ledger.icrc1_total_supply()),
+        getCkErc20LedgerActor(CANISTER_IDS.CKETH_LEDGER).then((ledger) => ledger.icrc1_total_supply()),
+      ]);
+      if (destroyed || requestId !== supplyRequestId || selectedTokenLedgerId !== token.ledgerId) return;
+      if (tokenResult.status === 'fulfilled') tokenSupply = BigInt(tokenResult.value);
+      if (ethResult.status === 'fulfilled') ckEthSupply = BigInt(ethResult.value);
+      if (tokenResult.status === 'rejected' || ethResult.status === 'rejected') supplyError = 'Some supply data is unavailable. Try refreshing.';
+      supplyUpdatedAt = new Date();
+    } catch { if (!destroyed && requestId === supplyRequestId) supplyError = 'Supply data is unavailable. Try refreshing.'; }
+    finally { if (requestId === supplyRequestId) supplyBusy = false; }
+  }
+
+  function formatSupply(amount: bigint, decimals: number): string {
+    const [whole, fraction] = formatTokenAmount(amount, decimals, 4).split('.');
+    return whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',') + (fraction ? `.${fraction}` : '');
   }
 
   async function refreshBalances(principal = ownerPrincipal, token = selectedToken) {
@@ -350,6 +402,7 @@
   }
 
   async function connectEthereum() {
+    if (busy || evmConnectBusy) return;
     error = '';
     evmMessage = '';
     const provider = getEthereumProvider();
@@ -357,20 +410,42 @@
       evmMessage = 'Install or unlock an EVM wallet such as Rabby or MetaMask to deposit.';
       return;
     }
+    const sessionEpoch = ++evmSessionEpoch;
+    evmConnectBusy = true;
     try {
       const accounts = await provider.request({ method: 'eth_requestAccounts' });
       if (!Array.isArray(accounts) || !accounts[0]) throw new Error('The EVM wallet did not return an account.');
       const chainId = await provider.request({ method: 'eth_chainId' });
+      if (destroyed || sessionEpoch !== evmSessionEpoch) return;
       if (chainId !== '0x1') {
         evmMessage = 'Switch your EVM wallet to Ethereum Mainnet, then connect again.';
         return;
       }
       evmAccount = String(accounts[0]);
+      evmManuallyDisconnected = false;
+      try { sessionStorage.removeItem(EVM_DISCONNECT_KEY); } catch { /* In-memory connection still works. */ }
       syncPendingDeposit();
-      await refreshEvmTokenBalance(evmAccount);
+      void refreshEvmTokenBalance(evmAccount);
     } catch (cause) {
       evmMessage = cause instanceof Error ? cause.message : 'EVM wallet connection was not completed.';
-    }
+    } finally { if (sessionEpoch === evmSessionEpoch) evmConnectBusy = false; }
+  }
+
+  function disconnectEthereum() {
+    if (busy || evmConnectBusy) return;
+    evmManuallyDisconnected = true;
+    evmSessionEpoch += 1;
+    evmTokenBalanceRequestId += 1;
+    evmAccount = '';
+    evmTokenBalance = null;
+    evmTokenBalanceBusy = false;
+    evmTokenBalanceError = '';
+    evmMessage = '';
+    approveHash = '';
+    depositHash = '';
+    pendingDeposit = null;
+    try { sessionStorage.setItem(EVM_DISCONNECT_KEY, 'true'); } catch { /* In-memory disconnect still works. */ }
+    // Keep persistent transaction markers so reconnecting restores unresolved operations.
   }
 
   async function waitForReceipt(hash: string, onReceipt?: () => void) {
@@ -613,174 +688,120 @@
 </svelte:head>
 
 <main class="minter-page">
-  <a class="back-link" href="/">← Rumi</a>
-  <header class="hero">
-    <div class="coin-mark">$</div>
-    <p class="eyebrow">ETHEREUM ↔ INTERNET COMPUTER</p>
-    <h1>ckERC20 Minter</h1>
-    <p class="subtitle">Mint supported Ethereum tokens on the Internet Computer and redeem them back.</p>
-    <p class="powered">Supported tokens and their ledgers are loaded from DFINITY’s ckERC20 minter.</p>
-  </header>
-
-  <section class="card" aria-label="ckERC20 mint and redeem">
-    <div class="wallet-summary">
-      <div>
-        <span class="label">RECEIVING INTERNET IDENTITY</span>
-        <strong>{#if connected && ownerPrincipal}{ownerPrincipal.toText()}{:else}Connect a Rumi wallet{/if}</strong>
-      </div>
-      <div class="balance-box">
-        <span class="label">{selectedToken ? `${selectedToken.symbol.toUpperCase()} BALANCE` : 'TOKEN BALANCE'}</span>
-        <strong>{ckTokenBalance === null || !selectedToken ? '—' : `${formatTokenAmount(ckTokenBalance, selectedToken.decimals)} ${selectedToken.symbol}`}</strong>
-        <button class="text-button" disabled={!ownerPrincipal || refreshBusy} on:click={() => refreshBalances()}>{refreshBusy ? 'Refreshing…' : 'Refresh'}</button>
-      </div>
-    </div>
-
-    <div class="tabs" role="tablist" aria-label="Minter direction">
-      <button role="tab" aria-selected={activeTab === 'mint'} class:active={activeTab === 'mint'} on:click={() => activeTab = 'mint'}>Mint {selectedToken?.symbol ?? 'token'}</button>
-      <button role="tab" aria-selected={activeTab === 'redeem'} class:active={activeTab === 'redeem'} on:click={() => activeTab = 'redeem'}>Redeem {selectedToken?.symbol.replace(/^ck/, '') ?? 'token'}</button>
-    </div>
-
-    {#if !connected}
-      <div class="wallet-hint">Connect your Internet Identity or Rumi wallet with the wallet button in the header. That identity receives the selected ckERC20 token and signs any ICP approvals.</div>
-    {/if}
-
-    {#if minterError}
-      <div class="alert error">Could not verify the live ckERC20 minter configuration: {minterError}</div>
-    {:else if !minterReady}
-      <div class="wallet-hint">Loading the live supported token list and current helper address…</div>
-    {:else if supportedTokens.length === 0}
-      <div class="wallet-hint">The minter did not return any supported tokens.</div>
-    {/if}
-
-    {#if !selectedToken}
-      <div class="wallet-hint">{minterReady ? 'No token is available to select.' : 'The supported token list will appear here when the minter responds.'}</div>
-    {:else if activeTab === 'mint'}
-      <div class="flow-label">{selectedToken.symbol.replace(/^ck/, '')} → {selectedToken.symbol}</div>
-      <div class="steps"><span class="step-current">1&nbsp; Approve {selectedToken.symbol.replace(/^ck/, '')}</span><i></i><span>2&nbsp; Deposit</span><i></i><span>3&nbsp; {selectedToken.symbol} minted</span></div>
-      <div class="risk-note">Send only Ethereum Mainnet {selectedToken.symbol.replace(/^ck/, '')} through this page. Minting starts after Ethereum finality and the minter’s next scan. The selected token and helper are checked live before transactions are enabled.</div>
-
-      <label class="field-label" for="deposit-amount">Deposit amount</label>
-      <div class="amount-input">
-        <input id="deposit-amount" type="text" inputmode="decimal" autocomplete="off" placeholder="0.00" bind:value={depositAmount} disabled={busy} />
-        <select class="token-select" aria-label="Token to mint" value={selectedTokenLedgerId} on:change={(event) => selectToken((event.currentTarget as HTMLSelectElement).value)} disabled={!minterReady || busy || quoteBusy || refreshBusy}>
-          {#each supportedTokens as token (token.ledgerId)}<option value={token.ledgerId}>{token.symbol}</option>{/each}
-        </select>
-      </div>
-      {#if selectedToken.minimumDepositAmount !== null}<p class="minimum-note">Minimum deposit: {formatTokenAmount(selectedToken.minimumDepositAmount, selectedToken.decimals)} {selectedToken.symbol.replace(/^ck/, '')}</p>{:else}<p class="minimum-note">Minimum deposit unavailable. Deposits for this token are disabled.</p>{/if}
-      <div class="amount-meta">
-        <span>{!evmAccount ? 'Connect an Ethereum wallet to view its balance' : evmTokenBalanceBusy ? 'Reading wallet balance…' : evmTokenBalance === null ? `${selectedToken.symbol.replace(/^ck/, '')} wallet balance unavailable` : `Wallet balance: ${formatTokenAmount(evmTokenBalance, selectedToken.decimals)} ${selectedToken.symbol.replace(/^ck/, '')}`}</span>
-        <div class="amount-actions">
-          <button class="text-button" on:click={() => refreshEvmTokenBalance()} disabled={!evmAccount || evmTokenBalanceBusy || busy}>{evmTokenBalanceBusy ? 'Refreshing…' : 'Refresh'}</button>
-          <button class="text-button" on:click={setMaxDeposit} disabled={evmTokenBalance === null || evmTokenBalance <= 0n || busy}>Max</button>
+  <div class="page-grid">
+    <section class="overview" aria-label="ckERC20 minter overview">
+      <p class="eyebrow">ETHEREUM ↔ INTERNET COMPUTER</p>
+      <h1>ckERC20 Minter</h1>
+      <p class="subtitle">Bring supported Ethereum assets to the Internet Computer, then redeem them back when needed.</p>
+      <a class="activity-link" href={CKERC20_MINTER_DASHBOARD} target="_blank" rel="noreferrer">View minter activity on DFINITY <span aria-hidden="true">↗</span></a>
+      <div class="asset-showcase" aria-label="Supported ckERC20 assets">
+        <div class="eth-feature"><img src={ckErc20Logo('ckETH')} alt="ckETH" width="72" height="72" /><div><span class="asset-kicker">FEE TOKEN</span><strong>ckETH</strong><small>Used for Ethereum redemption fees</small></div></div>
+        <div class="featured-assets" aria-label="Featured supported assets">
+          {#each featuredTokens as token, index (token.ledgerId)}{#if ckErc20Logo(token.symbol)}<span class="fan-token" style={`--fan-index:${index}`} title={token.symbol}><img src={ckErc20Logo(token.symbol)} alt={token.symbol} width="42" height="42" /></span>{/if}{/each}
+          {#if featuredTokens.length === 0}<span class="asset-loading">{minterReady ? 'Featured tokens unavailable' : 'Loading supported tokens…'}</span>{/if}
         </div>
+        <div class="other-assets"><span class="asset-kicker">MORE SUPPORTED ASSETS ({Math.max(0, otherTokens.length - (otherTokens.some((token) => token.symbol === 'ckETH') ? 1 : 0))})</span><div class="small-token-list">
+          {#each otherTokens.filter((token) => token.symbol !== 'ckETH') as token (token.ledgerId)}{#if ckErc20Logo(token.symbol)}<span title={token.symbol}><img src={ckErc20Logo(token.symbol)} alt={token.symbol} width="25" height="25" /></span>{/if}{/each}
+        </div></div>
       </div>
-      {#if evmTokenBalanceError}<p class="inline-hint">Could not read the Ethereum token balance: {evmTokenBalanceError}</p>{/if}
-      <div class="destination"><span class="label">{selectedToken.symbol} WILL BE MINTED TO</span><code>{connected && ownerPrincipal ? ownerPrincipal.toText() : 'Connect a Rumi wallet to choose the recipient'}</code></div>
+      <div class="supply-card" aria-label="Circulating supply on ICP">
+        <div class="supply-heading"><span class="asset-kicker">SUPPLY ON ICP</span><button class="text-button" on:click={() => refreshCirculatingSupply()} disabled={supplyBusy || !selectedToken}>{supplyBusy ? 'Refreshing…' : 'Refresh'}</button></div>
+        {#if selectedToken}<div class="supply-row"><span>{#if ckErc20Logo(selectedToken.symbol)}<img src={ckErc20Logo(selectedToken.symbol)} alt="" width="20" height="20" />{/if} {selectedToken.symbol}</span><strong>{supplyBusy && tokenSupply === null ? 'Loading…' : tokenSupply === null ? 'Unavailable' : `≈ ${formatSupply(tokenSupply, selectedToken.decimals)}`}</strong></div>{/if}
+        <div class="supply-row"><span><img src={ckErc20Logo('ckETH')} alt="" width="20" height="20" /> ckETH</span><strong>{supplyBusy && ckEthSupply === null ? 'Loading…' : ckEthSupply === null ? 'Unavailable' : `≈ ${formatSupply(ckEthSupply, 18)}`}</strong></div>
+        {#if supplyError}<p class="supply-error">{supplyError}</p>{/if}{#if supplyUpdatedAt}<p class="updated-at">Updated {supplyUpdatedAt.toLocaleTimeString()}</p>{/if}
+      </div>
+      <p class="powered">Supported tokens are loaded from DFINITY’s live ckERC20 minter.</p><p class="overview-note">ckERC20 tokens are minted by DFINITY’s ckETH minter against supported Ethereum ERC-20 deposits. Confirm the destination account, selected asset, and network before each transaction. Deposits and redemptions depend on Ethereum finality and minter processing.</p>
+    </section>
 
-      <div class="wallet-row">
-        <div><span class="label">ETHEREUM WALLET</span><strong>{evmAccount ? `${evmAccount.slice(0, 7)}…${evmAccount.slice(-5)}` : 'Not connected'}</strong></div>
-        {#if !evmAccount}<button class="secondary" on:click={connectEthereum} disabled={busy}>Connect Ethereum wallet</button>{/if}
+    <section class="card" aria-label="ckERC20 mint and redeem">
+      <div class="evm-bar"><div class="evm-status"><span class:online={!!evmAccount} class="status-dot"></span><span>{evmAccount ? `${evmAccount.slice(0, 7)}…${evmAccount.slice(-5)}` : 'Ethereum wallet'}</span></div>
+        {#if evmAccount}<button class="secondary wallet-action" title="Disconnect Ethereum wallet from this page" on:click={disconnectEthereum} disabled={busy || evmConnectBusy}>Disconnect</button>{:else}<button class="secondary wallet-action" on:click={connectEthereum} disabled={busy || evmConnectBusy}>{evmConnectBusy ? 'Connecting…' : 'Connect Ethereum'}</button>{/if}
       </div>
-      {#if evmMessage}<p class="inline-hint">{evmMessage}</p>{/if}
-      <p class="fee-note">This Ethereum wallet needs ETH for gas. A deposit usually takes two transactions; a nonzero helper allowance must first be reset to zero, adding a transaction. Rumi does not sponsor Ethereum gas in this flow.</p>
-      <button class="primary" on:click={submitDeposit} disabled={busy || !!pendingDeposit || !connected || !minterReady || !evmAccount || !selectedToken.minimumDepositAmount}>{pendingDeposit ? 'Check pending deposit before retrying' : busy ? 'Waiting for wallet…' : `Approve and mint ${selectedToken.symbol}`}</button>
-      {#if approveHash}<p class="tx-line">{selectedToken.symbol.replace(/^ck/, '')} approval: <a href={`https://etherscan.io/tx/${approveHash}`} target="_blank" rel="noreferrer">{approveHash.slice(0, 14)}…</a></p>{/if}
-      {#if depositHash}<p class="tx-line">Deposit transaction: <a href={`https://etherscan.io/tx/${depositHash}`} target="_blank" rel="noreferrer">{depositHash.slice(0, 14)}…</a> · <a href={CKERC20_MINTER_DASHBOARD} target="_blank" rel="noreferrer">Track mint on DFINITY dashboard</a></p>{/if}
-      {#if pendingDeposit}<div class="alert error">{#if pendingDeposit.hash}A previous {pendingDeposit.tokenSymbol ?? selectedToken.symbol} deposit is unresolved: <a href={`https://etherscan.io/tx/${pendingDeposit.hash}`} target="_blank" rel="noreferrer">check Ethereum status</a>. You can also search this hash on the <a href={CKERC20_MINTER_DASHBOARD} target="_blank" rel="noreferrer">DFINITY minter dashboard</a>.{:else}A previous deposit submission did not return a transaction hash. Check the connected Ethereum wallet's activity.{/if} New deposits for this token are locked to prevent a duplicate. Clear the retry lock only after confirming the deposit did not complete.<button class="text-button recovery-button" on:click={clearPendingDeposit}>Clear retry lock after reconciliation</button></div>{/if}
-      {#if helperAddress}<p class="small-note">Live minter helper: <code>{helperAddress}</code></p>{/if}
-    {:else}
-      <div class="flow-label">{selectedToken.symbol} → {selectedToken.symbol.replace(/^ck/, '')}</div>
-      <div class="steps"><span class="step-current">1&nbsp; Approve ckETH fee</span><i></i><span>2&nbsp; Approve {selectedToken.symbol}</span><i></i><span>3&nbsp; Ethereum payout</span></div>
-      <div class="risk-note">Redeeming requires {selectedToken.symbol} and ckETH. ckETH pays the Ethereum transaction fee through the DFINITY minter; your own Ethereum wallet does not sign or pay gas for the payout.</div>
-      <label class="field-label" for="redeem-amount">Redemption amount</label>
-      <div class="amount-input">
-        <input id="redeem-amount" type="text" inputmode="decimal" autocomplete="off" placeholder="0.00" bind:value={redeemAmount} on:input={invalidateWithdrawalQuote} disabled={busy} />
-        <select class="token-select" aria-label="Token to redeem" value={selectedTokenLedgerId} on:change={(event) => selectToken((event.currentTarget as HTMLSelectElement).value)} disabled={!minterReady || busy || quoteBusy || refreshBusy}>
-          {#each supportedTokens as token (token.ledgerId)}<option value={token.ledgerId}>{token.symbol}</option>{/each}
-        </select>
-      </div>
-      <label class="field-label" for="redeem-address">Ethereum destination</label>
-      <input id="redeem-address" class="address-input" type="text" autocomplete="off" spellcheck="false" placeholder="0x…" bind:value={redeemAddress} disabled={busy} />
-      <div class="wallet-row redeem-balance"><div><span class="label">CKETH FEE BALANCE</span><strong>{ckEthBalance === null ? '—' : `${formatTokenAmount(ckEthBalance, 18, 8)} ckETH`}</strong></div><button class="text-button" disabled={!ownerPrincipal || refreshBusy} on:click={() => refreshBalances()}>{refreshBusy ? 'Refreshing…' : 'Refresh balances'}</button></div>
-      <button class="secondary quote-button" on:click={refreshWithdrawalQuote} disabled={quoteBusy || busy || !connected}>{quoteBusy ? 'Loading current fees…' : 'Get current fee quote'}</button>
-      {#if withdrawalQuote}
-        <div class="quote-card">
-          <span class="label">CURRENT WITHDRAWAL QUOTE · REFRESHED {new Date(withdrawalQuote.quotedAtMs).toLocaleTimeString()}{#if withdrawalQuote.minterPriceTimestampMs} · MINTER PRICE {new Date(withdrawalQuote.minterPriceTimestampMs).toLocaleTimeString()}{/if}</span>
-          <div><span>{selectedToken.symbol} amount</span><strong>{formatTokenAmount(withdrawalQuote.amount, selectedToken.decimals)} {selectedToken.symbol}</strong></div>
-          <div><span>ckETH max Ethereum fee</span><strong>{formatTokenAmount(withdrawalQuote.maxTransactionFee, 18, 8)} ckETH</strong></div>
-          <div><span>ckETH allowance cap (includes ledger fee)</span><strong>{formatTokenAmount(withdrawalQuote.ckEthAllowance, 18, 8)} ckETH</strong></div>
-          <div><span>{selectedToken.symbol} allowance cap (includes ledger fee)</span><strong>{formatTokenAmount(withdrawalQuote.ckTokenAllowance, selectedToken.decimals)} {selectedToken.symbol}</strong></div>
-          <p>{withdrawalQuoteIsExecutable(withdrawalQuote) ? 'Balances cover this quote. Quote expires in 60 seconds.' : 'Your current balances do not cover this quote.'}</p>
-        </div>
+      {#if evmMessage}<p class="inline-hint evm-message">{evmMessage}</p>{/if}
+      <div class="tabs" role="tablist" aria-label="Minter direction"><button role="tab" aria-selected={activeTab === 'mint'} class:active={activeTab === 'mint'} on:click={() => activeTab = 'mint'}>Mint</button><button role="tab" aria-selected={activeTab === 'redeem'} class:active={activeTab === 'redeem'} on:click={() => activeTab = 'redeem'}>Redeem</button></div>
+      {#if !connected}<div class="wallet-hint">Connect a Rumi wallet in the page header to receive tokens and approve ICP transactions.</div>{/if}
+      {#if minterError}<div class="alert error">Could not verify the live ckERC20 minter configuration: {minterError}</div>{:else if !minterReady}<div class="wallet-hint">Loading supported tokens and the current helper address…</div>{:else if supportedTokens.length === 0}<div class="wallet-hint">The minter did not return any supported tokens.</div>{/if}
+      {#if !selectedToken}<div class="wallet-hint">{minterReady ? 'No token is available to select.' : 'The supported token list will appear here when the minter responds.'}</div>
+      {:else if activeTab === 'mint'}
+        <div class="flow-heading"><div><span class="asset-kicker">MINT FROM ETHEREUM</span><h2>{selectedToken.symbol.replace(/^ck/, '')} <i>→</i> {selectedToken.symbol}</h2></div><span class="step-current">1 / 3</span></div>
+        <div class="steps"><span class="step-current">Approve</span><i></i><span>Deposit</span><i></i><span>Minted</span></div>
+        <div class="risk-note">Send only Ethereum Mainnet {selectedToken.symbol.replace(/^ck/, '')}. Minting starts after Ethereum finality and the minter’s next scan. Token and helper configuration is checked live.</div>
+        <label class="field-label" for="deposit-amount">Amount to deposit</label>
+        <div class="amount-input"><input id="deposit-amount" type="text" inputmode="decimal" autocomplete="off" placeholder="0.00" bind:value={depositAmount} disabled={busy} /><CkErc20TokenSelect tokens={supportedTokens} selectedLedgerId={selectedTokenLedgerId} disabled={!minterReady || busy || quoteBusy || refreshBusy} label="Token to mint" id="mint-token-options" onSelect={selectToken} /></div>
+        {#if selectedToken.minimumDepositAmount !== null}<p class="minimum-note">Minimum {formatTokenAmount(selectedToken.minimumDepositAmount, selectedToken.decimals)} {selectedToken.symbol.replace(/^ck/, '')}</p>{:else}<p class="minimum-note">Minimum deposit unavailable. Deposits for this token are disabled.</p>{/if}
+        <div class="amount-meta"><span>{!evmAccount ? 'Connect Ethereum to view balance' : evmTokenBalanceBusy ? 'Reading wallet balance…' : evmTokenBalance === null ? `${selectedToken.symbol.replace(/^ck/, '')} balance unavailable` : `Ethereum: ${formatTokenAmount(evmTokenBalance, selectedToken.decimals)} ${selectedToken.symbol.replace(/^ck/, '')}`}</span><span>ICP: {ckTokenBalance === null ? '—' : `${formatTokenAmount(ckTokenBalance, selectedToken.decimals)} ${selectedToken.symbol}`}</span><div class="amount-actions"><button class="text-button" on:click={() => refreshEvmTokenBalance()} disabled={!evmAccount || evmTokenBalanceBusy || busy}>{evmTokenBalanceBusy ? 'Refreshing…' : 'Refresh'}</button><button class="text-button" on:click={setMaxDeposit} disabled={evmTokenBalance === null || evmTokenBalance <= 0n || busy}>Max</button></div></div>
+        {#if evmTokenBalanceError}<p class="inline-hint">Could not read the Ethereum token balance: {evmTokenBalanceError}</p>{/if}
+        <div class="destination"><span class="label">ICP RECEIVING ACCOUNT · {selectedToken.symbol}</span><code>{connected && ownerPrincipal ? ownerPrincipal.toText() : 'Connect a Rumi wallet to choose the recipient'}</code></div>
+        <p class="fee-note">Your Ethereum wallet needs ETH for gas. Deposits usually take two transactions; a nonzero helper allowance may need a zero reset first. Gas is not sponsored.</p>
+        <button class="primary" on:click={submitDeposit} disabled={busy || !!pendingDeposit || !connected || !minterReady || !evmAccount || !selectedToken.minimumDepositAmount}>{pendingDeposit ? 'Check pending deposit before retrying' : busy ? 'Waiting for wallet…' : `Approve and mint ${selectedToken.symbol}`}</button>
+        {#if approveHash}<p class="tx-line">{selectedToken.symbol.replace(/^ck/, '')} approval: <a href={`https://etherscan.io/tx/${approveHash}`} target="_blank" rel="noreferrer">{approveHash.slice(0, 14)}…</a></p>{/if}
+        {#if depositHash}<p class="tx-line">Deposit: <a href={`https://etherscan.io/tx/${depositHash}`} target="_blank" rel="noreferrer">{depositHash.slice(0, 14)}…</a> · <a href={CKERC20_MINTER_DASHBOARD} target="_blank" rel="noreferrer">Track mint</a></p>{/if}
+        {#if pendingDeposit}<div class="alert error">{#if pendingDeposit.hash}A previous {pendingDeposit.tokenSymbol ?? selectedToken.symbol} deposit is unresolved: <a href={`https://etherscan.io/tx/${pendingDeposit.hash}`} target="_blank" rel="noreferrer">check Ethereum status</a> or search the <a href={CKERC20_MINTER_DASHBOARD} target="_blank" rel="noreferrer">DFINITY minter dashboard</a>.{:else}A previous deposit submission did not return a transaction hash. Check your Ethereum wallet activity.{/if} New deposits for this token are locked. Clear the retry lock only after confirming the deposit did not complete.<button class="text-button recovery-button" on:click={clearPendingDeposit}>Clear retry lock after reconciliation</button></div>{/if}
+        {#if helperAddress}<p class="small-note">Live minter helper: <code>{helperAddress}</code></p>{/if}
+      {:else}
+        <div class="flow-heading"><div><span class="asset-kicker">REDEEM TO ETHEREUM</span><h2>{selectedToken.symbol} <i>→</i> {selectedToken.symbol.replace(/^ck/, '')}</h2></div><span class="step-current">1 / 3</span></div>
+        <div class="steps"><span class="step-current">Approve fees</span><i></i><span>Approve token</span><i></i><span>Payout</span></div>
+        <div class="risk-note">Redeeming uses {selectedToken.symbol} plus ckETH for the Ethereum transaction fee. Your Ethereum wallet does not sign or pay for the payout.</div>
+        <label class="field-label" for="redeem-amount">Amount to redeem</label>
+        <div class="amount-input"><input id="redeem-amount" type="text" inputmode="decimal" autocomplete="off" placeholder="0.00" bind:value={redeemAmount} on:input={invalidateWithdrawalQuote} disabled={busy} /><CkErc20TokenSelect tokens={supportedTokens} selectedLedgerId={selectedTokenLedgerId} disabled={!minterReady || busy || quoteBusy || refreshBusy} label="Token to redeem" id="redeem-token-options" onSelect={selectToken} /></div>
+        <div class="amount-meta"><span>{ckTokenBalance === null ? 'ICP token balance unavailable' : `Balance: ${formatTokenAmount(ckTokenBalance, selectedToken.decimals)} ${selectedToken.symbol}`}</span><span>{ckEthBalance === null ? 'ckETH fee balance unavailable' : `${formatTokenAmount(ckEthBalance, 18, 8)} ckETH fee balance`}</span></div>
+        <label class="field-label" for="redeem-address">Ethereum destination</label><input id="redeem-address" class="address-input" type="text" autocomplete="off" spellcheck="false" placeholder="0x…" bind:value={redeemAddress} disabled={busy} />
+        <div class="wallet-row redeem-balance"><span class="label">RUMI WALLET BALANCES</span><button class="text-button" disabled={!ownerPrincipal || refreshBusy} on:click={() => refreshBalances()}>{refreshBusy ? 'Refreshing…' : 'Refresh'}</button></div>
+        <button class="secondary quote-button" on:click={refreshWithdrawalQuote} disabled={quoteBusy || busy || !connected}>{quoteBusy ? 'Loading current fees…' : 'Get current fee quote'}</button>
+        {#if withdrawalQuote}<div class="quote-card"><span class="label">CURRENT QUOTE · REFRESHED {new Date(withdrawalQuote.quotedAtMs).toLocaleTimeString()}{#if withdrawalQuote.minterPriceTimestampMs} · MINTER PRICE {new Date(withdrawalQuote.minterPriceTimestampMs).toLocaleTimeString()}{/if}</span><div><span>{selectedToken.symbol} amount</span><strong>{formatTokenAmount(withdrawalQuote.amount, selectedToken.decimals)} {selectedToken.symbol}</strong></div><div><span>ckETH max Ethereum fee</span><strong>{formatTokenAmount(withdrawalQuote.maxTransactionFee, 18, 8)} ckETH</strong></div><div><span>ckETH allowance cap (includes ledger fee)</span><strong>{formatTokenAmount(withdrawalQuote.ckEthAllowance, 18, 8)} ckETH</strong></div><div><span>{selectedToken.symbol} allowance cap (includes ledger fee)</span><strong>{formatTokenAmount(withdrawalQuote.ckTokenAllowance, selectedToken.decimals)} {selectedToken.symbol}</strong></div><p>{withdrawalQuoteIsExecutable(withdrawalQuote) ? 'Balances cover this quote. It expires in 60 seconds.' : 'Your current balances do not cover this quote.'}</p></div>{/if}
+        {#if withdrawalPendingForOwner}<div class="alert error">A previous {pendingWithdrawal?.tokenSymbol ?? 'ckERC20'} withdrawal request has no confirmed response. Check its ckERC20 and ckETH ledger activity and the <a href={CKERC20_MINTER_DASHBOARD} target="_blank" rel="noreferrer">minter dashboard</a> before retrying. A lock prevents a second burn.<button class="text-button recovery-button" on:click={clearPendingWithdrawal}>Clear retry lock after reconciliation</button></div>{/if}
+        <button class="primary" on:click={submitWithdrawal} disabled={busy || withdrawalPendingForOwner || !connected || !minterReady || !withdrawalQuote || !withdrawalQuoteIsExecutable(withdrawalQuote)}>{withdrawalPendingForOwner ? 'Reconcile previous request first' : busy ? 'Confirm approvals in your wallet…' : `Approve and request ${selectedToken.symbol.replace(/^ck/, '')} redemption`}</button>
+        {#if redeemIndices}<div class="success-box">Withdrawal request accepted by the minter.<br />ckETH fee burn block: {redeemIndices.ckEth}<br />{selectedToken.symbol} burn block: {redeemIndices.ckToken}<br /><a href={CKERC20_MINTER_DASHBOARD} target="_blank" rel="noreferrer">Open ckERC20 minter dashboard</a></div>{/if}
+        <p class="small-note">Before approval, current ckETH and {selectedToken.symbol} fees, balances, and the minter’s Ethereum fee estimate are checked. Approvals are limited to this withdrawal and expire after 10 minutes.</p>
       {/if}
-      {#if pendingWithdrawal && pendingWithdrawal.owner === ownerPrincipal?.toText()}<div class="alert error">A previous {pendingWithdrawal.tokenSymbol ?? 'ckERC20'} withdrawal request has no confirmed response. Check its ckERC20 and ckETH ledger activity and the <a href={CKERC20_MINTER_DASHBOARD} target="_blank" rel="noreferrer">minter dashboard</a> before retrying. A lock prevents an accidental second burn.<button class="text-button recovery-button" on:click={clearPendingWithdrawal}>Clear retry lock after reconciliation</button></div>{/if}
-      <button class="primary" on:click={submitWithdrawal} disabled={busy || pendingWithdrawal?.owner === ownerPrincipal?.toText() || !connected || !minterReady || !withdrawalQuote || !withdrawalQuoteIsExecutable(withdrawalQuote)}>{pendingWithdrawal?.owner === ownerPrincipal?.toText() ? 'Reconcile previous request first' : busy ? 'Confirm approvals in your wallet…' : `Approve and request ${selectedToken.symbol.replace(/^ck/, '')} redemption`}</button>
-      {#if redeemIndices}<div class="success-box">Withdrawal request accepted by the minter.<br />ckETH fee burn block: {redeemIndices.ckEth}<br />{selectedToken.symbol} burn block: {redeemIndices.ckToken}<br /><a href={CKERC20_MINTER_DASHBOARD} target="_blank" rel="noreferrer">Open ckERC20 minter dashboard</a></div>{/if}
-      <p class="small-note">Before any approval, the page reads current ckETH and {selectedToken.symbol} ledger fees, your balances, and the minter’s current Ethereum fee estimate. Approvals are limited to this withdrawal and expire after 10 minutes.</p>
-    {/if}
-
-    {#if notice}<div class="alert notice" aria-live="polite">{notice}</div>{/if}
-    {#if error}<div class="alert error" role="alert">{error}</div>{/if}
-  </section>
-
-  <footer class="disclaimer">ckERC20 tokens are minted by DFINITY’s ckETH minter against supported Ethereum ERC-20 deposits. Confirm the destination identity, selected asset, and network before every transaction. Deposits and redemptions are subject to Ethereum finality and minter processing.</footer>
+      {#if notice}<div class="alert notice" aria-live="polite">{notice}</div>{/if}{#if error}<div class="alert error" role="alert">{error}</div>{/if}
+    </section>
+  </div>
 </main>
-
 <style>
-  :global(body) { background: #080b16; }
-  .minter-page { max-width: 900px; margin: 0 auto; padding: 36px 24px 72px; color: #f2efff; }
-  .back-link { color: #9a96ad; text-decoration: none; font-size: 14px; }
-  .hero { text-align: center; padding: 40px 0 30px; }
-  .coin-mark { width: 68px; height: 68px; margin: 0 auto 16px; display: grid; place-items: center; border: 5px solid #693fe3; border-radius: 50%; color: #b0fff0; font-size: 34px; font-weight: 800; box-shadow: inset 0 0 0 4px #18b889; }
-  .eyebrow, .label, .flow-label { color: #7b768e; font-size: 11px; letter-spacing: .12em; font-weight: 700; }
-  h1 { margin: 8px 0; font-size: clamp(32px, 5vw, 44px); letter-spacing: -.04em; }
-  .subtitle { margin: 0; color: #9e99b1; font-size: 17px; }
-  .powered { color: #706b82; font-size: 12px; }
-  .card { max-width: 760px; margin: 0 auto; padding: 30px; background: linear-gradient(145deg, #101525, #0c1120); border: 1px solid #1c263b; border-radius: 20px; box-shadow: 0 24px 80px #0003; }
-  .wallet-summary, .wallet-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
-  .wallet-summary strong, .wallet-row strong { display: block; margin-top: 7px; font-size: 13px; overflow-wrap: anywhere; }
-  .balance-box { text-align: right; }
-  .text-button { display: block; margin: 6px 0 0 auto; padding: 0; border: 0; background: none; color: #54d8ae; cursor: pointer; font-size: 12px; }
-  button:disabled { opacity: .5; cursor: not-allowed; }
-  .tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 26px 0; }
-  .tabs button { height: 52px; color: #9a95ac; background: #111629; border: 1px solid #1d2740; border-radius: 11px; font-weight: 700; cursor: pointer; }
-  .tabs button.active { color: #eeeaff; border-color: #15bc89; box-shadow: inset 0 0 0 1px #15bc89; }
-  .wallet-hint, .risk-note, .success-box { margin: 14px 0 22px; padding: 14px 16px; border: 1px solid #242d48; border-radius: 10px; background: #11172a; color: #aaa5bb; font-size: 13px; line-height: 1.6; }
-  .risk-note { border-color: #38304e; background: #17142a; }
-  .flow-label { margin-bottom: 18px; }
-  .steps { display: flex; align-items: center; gap: 10px; margin-bottom: 22px; color: #747087; font-size: 12px; }
-  .steps i { height: 1px; flex: 1; background: #272c44; }
-  .steps .step-current { color: #59d9b0; white-space: nowrap; }
-  .field-label { display: block; margin: 20px 0 8px; color: #d8d4e7; font-size: 14px; font-weight: 700; }
-  .amount-input { height: 58px; display: flex; align-items: center; padding: 0 16px; border: 1px solid #242c43; border-radius: 10px; background: #0d1222; }
-  .amount-input .token-select { flex: 0 0 auto; max-width: 170px; height: 40px; margin-left: 12px; padding: 0 10px; color: #e9e4f4; background: #171d31; border: 1px solid #313954; border-radius: 8px; font-size: 13px; font-weight: 700; }
-  .minimum-note { margin: 6px 0 0; color: #817c91; font-size: 11px; }
-  .amount-meta { display: flex; justify-content: space-between; align-items: center; gap: 12px; min-height: 30px; color: #8f8aa1; font-size: 12px; }
-  .amount-actions { display: flex; align-items: center; gap: 18px; }
-  .amount-actions .text-button { margin: 0; }
-  input { min-width: 0; width: 100%; color: #f1edff; background: transparent; border: 0; outline: none; font-size: 18px; }
-  .destination { display: grid; gap: 8px; margin: 18px 0; padding: 14px 16px; background: #0b1020; border-radius: 10px; }
-  code { color: #b8b2ca; font-size: 12px; overflow-wrap: anywhere; }
-  .wallet-row { margin: 20px 0; }
-  .secondary { padding: 10px 14px; background: #171d31; border: 1px solid #313954; border-radius: 9px; color: #d9d4e9; cursor: pointer; }
-  .inline-hint, .fee-note, .small-note { color: #8f8aa1; font-size: 12px; line-height: 1.6; }
-  .fee-note { margin: 18px 0; }
-  .primary { width: 100%; min-height: 52px; border: 0; border-radius: 10px; background: linear-gradient(90deg, #24c69a, #8858ed); color: white; font-weight: 800; cursor: pointer; }
-  .address-input { height: 54px; padding: 0 16px; border: 1px solid #242c43; border-radius: 10px; background: #0d1222; font-size: 14px; }
-  .quote-button { width: 100%; margin: 4px 0 14px; }
-  .quote-card { display: grid; gap: 10px; margin: 14px 0; padding: 16px; border: 1px solid #28334c; border-radius: 10px; background: #0d1222; }
-  .quote-card > div { display: flex; justify-content: space-between; gap: 12px; color: #a5a0b5; font-size: 12px; }
-  .quote-card strong { color: #e4e0ef; text-align: right; }
-  .quote-card p { margin: 0; color: #8f8aa1; font-size: 11px; }
-  .redeem-balance { padding: 14px 0; border-top: 1px solid #20263b; }
-  .tx-line { color: #8f8aa1; font-size: 12px; overflow-wrap: anywhere; }
-  a { color: #59d9b0; }
-  .small-note { margin-top: 16px; }
-  .recovery-button { margin: 12px 0 0; color: #ffb3c5; text-decoration: underline; }
-  .alert { margin-top: 16px; padding: 13px 15px; border-radius: 10px; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
-  .notice { border: 1px solid #1c735d; background: #0e2825; color: #9cebd0; }
-  .error { border: 1px solid #7b3c54; background: #2d1723; color: #ffb3c5; }
-  .success-box { color: #a8efda; border-color: #1c735d; }
-  .disclaimer { max-width: 740px; margin: 22px auto 0; color: #6f6b7e; text-align: center; font-size: 11px; line-height: 1.7; }
-  @media (max-width: 640px) { .minter-page { padding: 22px 14px 50px; } .card { padding: 20px 16px; } .wallet-summary { align-items: flex-start; } .wallet-summary strong { max-width: 47vw; } .steps { gap: 5px; font-size: 10px; } .steps i { min-width: 8px; } .wallet-row { align-items: flex-start; flex-wrap: wrap; } }
+  .minter-page { max-width:1200px; margin:0 auto; padding:0 32px 20px; color:var(--rumi-text-primary); }
+  .page-grid { display:grid; grid-template-columns:minmax(250px,.78fr) minmax(500px,1.45fr); align-items:start; gap:26px; }
+  .overview { min-width:0; padding-top:6px; }
+  .eyebrow,.label,.asset-kicker { color:var(--rumi-text-secondary); font-size:10px; letter-spacing:.09em; font-weight:600; }
+  .eyebrow { margin:0 0 10px; }
+  h1 { margin:0 0 12px; font-size:clamp(30px,3.2vw,42px); line-height:1.08; letter-spacing:-.04em; }
+  .subtitle { max-width:380px; margin:0; color:var(--rumi-text-secondary); font-size:13px; line-height:1.5; }
+  .activity-link { display:inline-flex; gap:7px; margin-top:13px; color:var(--rumi-action-bright); text-decoration:none; font-size:12px; font-weight:600; }
+  .asset-showcase { margin-top:19px; }
+  .eth-feature { display:flex; align-items:center; gap:14px; padding-bottom:17px; border-bottom:1px solid var(--rumi-border); }
+  .eth-feature img { width:72px; height:72px; object-fit:contain; filter:drop-shadow(0 8px 14px #0004); }
+  .eth-feature div { display:grid; gap:3px; }.eth-feature strong { font-size:20px; }.eth-feature small { color:var(--rumi-text-secondary); font-size:11px; }
+  .featured-assets { display:flex; align-items:center; min-height:67px; padding-top:6px; }
+  .fan-token { position:relative; z-index:calc(5 - var(--fan-index)); display:grid; place-items:center; width:54px; height:54px; margin-left:calc(var(--fan-index) * -9px); border:1px solid var(--rumi-bg-surface1); border-radius:50%; background:var(--rumi-bg-surface2); }
+  .fan-token:first-child { margin-left:0; }.fan-token img { width:46px; height:46px; border-radius:50%; object-fit:contain; }
+  .asset-loading { color:var(--rumi-text-muted); font-size:12px; }
+  .small-token-list { display:flex; flex-wrap:wrap; gap:8px; margin-top:9px; }.small-token-list span { display:grid; place-items:center; width:33px; height:33px; border:1px solid var(--rumi-border); border-radius:50%; background:var(--rumi-bg-surface1); }.small-token-list img { width:24px; height:24px; object-fit:contain; }
+  .supply-card { margin-top:20px; padding:13px 14px 10px; border:1px solid var(--rumi-border); border-radius:9px; background:var(--rumi-bg-surface1); }
+  .supply-heading,.supply-row { display:flex; justify-content:space-between; align-items:center; gap:10px; }.supply-row { margin-top:11px; font-size:11px; }
+  .supply-row span { display:flex; align-items:center; gap:7px; color:var(--rumi-text-secondary); }.supply-row img { border-radius:50%; object-fit:contain; }.supply-row strong { text-align:right; font-variant-numeric:tabular-nums; }
+  .supply-error,.updated-at { margin:8px 0 0; color:var(--rumi-text-muted); font-size:10px; }.supply-error { color:#e5a0b4; }.powered { margin-top:10px; color:var(--rumi-text-muted); font-size:10px; line-height:1.5; }.overview-note { max-width:390px; margin:12px 0 0; padding-top:12px; border-top:1px solid var(--rumi-border); color:var(--rumi-text-secondary); font-size:12px; line-height:1.6; }
+  .card { min-width:0; padding:12px 20px 12px; border:1px solid var(--rumi-border); border-radius:11px; background:var(--rumi-bg-surface1); box-shadow:inset 0 1px 0 rgba(200,210,240,.03); }
+  .evm-bar,.wallet-row { display:flex; justify-content:space-between; align-items:center; gap:12px; }.evm-bar { min-height:31px; padding-bottom:7px; border-bottom:1px solid var(--rumi-border); }
+  .evm-status { display:flex; align-items:center; gap:8px; min-width:0; color:var(--rumi-text-secondary); font-size:11px; }.evm-status>span:last-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .status-dot { width:7px; height:7px; flex:0 0 7px; border-radius:50%; background:var(--rumi-text-muted); }.status-dot.online { background:var(--rumi-action); }
+  .secondary { padding:7px 11px; color:var(--rumi-text-primary); background:var(--rumi-bg-surface2); border:1px solid var(--rumi-border-hover); border-radius:7px; font:inherit; font-size:11px; font-weight:600; cursor:pointer; }.wallet-action { min-width:124px; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .tabs { display:grid; grid-template-columns:1fr 1fr; gap:4px; margin:8px 0 10px; padding:3px; border:1px solid var(--rumi-border); border-radius:8px; background:var(--rumi-bg-primary); }
+  .tabs button { height:30px; color:var(--rumi-text-secondary); background:transparent; border:1px solid transparent; border-radius:5px; font:inherit; font-size:12px; font-weight:600; cursor:pointer; }.tabs button.active { color:var(--rumi-text-primary); background:var(--rumi-bg-surface2); border-color:var(--rumi-border-hover); }
+  .wallet-hint,.risk-note,.success-box { margin:6px 0 8px; padding:7px 10px; border:1px solid var(--rumi-border); border-radius:7px; background:var(--rumi-bg-surface2); color:var(--rumi-text-secondary); font-size:10px; line-height:1.5; }.risk-note { border-color:rgba(167,139,250,.18); background:rgba(167,139,250,.045); }
+  .flow-heading { display:flex; justify-content:space-between; align-items:center; gap:12px; }.flow-heading h2 { margin:3px 0 0; font-size:17px; letter-spacing:-.02em; }.flow-heading h2 i { color:var(--rumi-text-muted); font-style:normal; font-weight:400; }.flow-heading>.step-current { padding:4px 8px; border:1px solid var(--rumi-border-accent); border-radius:20px; font-size:10px; }
+  .steps { display:flex; align-items:center; gap:8px; margin:6px 0 8px; color:var(--rumi-text-muted); font-size:10px; }.steps i { height:1px; flex:1; background:var(--rumi-border-hover); }.steps .step-current { color:var(--rumi-action-bright); white-space:nowrap; }
+  .field-label { display:block; margin:9px 0 4px; color:var(--rumi-text-secondary); font-size:11px; font-weight:600; }
+  .amount-input { min-height:48px; display:flex; align-items:center; gap:7px; padding:4px 7px 4px 12px; border:1px solid var(--rumi-border-hover); border-radius:8px; background:var(--rumi-bg-primary); }.amount-input:focus-within,.address-input:focus-visible { border-color:var(--rumi-border-accent); box-shadow:0 0 0 2px var(--rumi-action-dim); }
+  .minimum-note { margin:4px 0 0; color:var(--rumi-text-muted); font-size:10px; }
+  .amount-meta { display:flex; justify-content:space-between; align-items:center; gap:8px; min-height:23px; color:var(--rumi-text-secondary); font-size:10px; }.amount-actions { display:flex; align-items:center; gap:12px; flex-shrink:0; }.amount-actions .text-button { margin:0; }
+  input { min-width:0; width:100%; color:var(--rumi-text-primary); background:transparent; border:0; outline:none; font:inherit; font-size:19px; font-variant-numeric:tabular-nums; }.destination { display:grid; gap:4px; margin-top:6px; padding:6px 9px; border:1px solid var(--rumi-border); border-radius:7px; background:rgba(255,255,255,.015); }.destination code,.small-note code { color:var(--rumi-text-secondary); font-size:10px; overflow-wrap:anywhere; }
+  .fee-note,.small-note { margin:6px 0; color:var(--rumi-text-muted); font-size:10px; line-height:1.45; }.primary { width:100%; min-height:40px; border:1px solid rgba(52,211,153,.22); border-radius:7px; background:var(--rumi-action); color:#06251b; font:inherit; font-size:12px; font-weight:700; cursor:pointer; }.primary:hover:not(:disabled) { background:var(--rumi-action-bright); }
+  .inline-hint { margin:6px 0; color:var(--rumi-text-secondary); font-size:10px; line-height:1.4; }.address-input { height:43px; padding:0 11px; border:1px solid var(--rumi-border-hover); border-radius:7px; background:var(--rumi-bg-primary); font-size:14px; }
+  .quote-button { width:100%; margin:7px 0 9px; }.quote-card { display:grid; gap:7px; margin:9px 0; padding:10px; border:1px solid var(--rumi-border); border-radius:7px; background:var(--rumi-bg-primary); }.quote-card>div { display:flex; justify-content:space-between; gap:10px; color:var(--rumi-text-secondary); font-size:10px; }.quote-card strong { color:var(--rumi-text-primary); text-align:right; font-weight:600; }.quote-card p { margin:0; color:var(--rumi-text-secondary); font-size:10px; }
+  .redeem-balance { margin-top:8px; padding-top:8px; border-top:1px solid var(--rumi-border); }.tx-line { color:var(--rumi-text-secondary); font-size:10px; overflow-wrap:anywhere; }a { color:var(--rumi-action-bright); }
+  .text-button { display:block; margin:3px 0 0; padding:0; border:0; background:none; color:var(--rumi-action-bright); cursor:pointer; font:inherit; font-size:10px; }.recovery-button { margin-top:8px; color:#ffb3c5; text-decoration:underline; }
+  .alert { margin-top:10px; padding:10px 11px; border-radius:7px; font-size:10px; line-height:1.45; overflow-wrap:anywhere; }.notice { border:1px solid rgba(45,212,191,.25); background:var(--rumi-teal-dim); color:#9cebd0; }.error { border:1px solid rgba(224,107,159,.3); background:rgba(224,107,159,.09); color:#ffb3c5; }.success-box { color:#a8efda; border-color:rgba(45,212,191,.25); }
+  @media(max-width:850px) { .minter-page { padding:0 22px 28px; }.page-grid { grid-template-columns:minmax(0,1fr); gap:20px; }.card { grid-row:1; padding:17px 19px; }.overview { grid-row:2; padding-top:0; }.asset-showcase { margin-top:18px; }.supply-card { max-width:500px; } }
+  @media(max-width:480px) { .minter-page { padding:0 12px 24px; }.page-grid { gap:17px; }.card { padding:13px 12px; }h1 { font-size:29px; }.amount-meta { align-items:flex-start; flex-wrap:wrap; padding:4px 0; }.amount-actions { margin-left:auto; }.steps { gap:5px; font-size:9px; }.steps i { min-width:8px; } }
 </style>
