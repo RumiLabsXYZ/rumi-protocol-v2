@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { _SERVICE, PublicOverview, ProposalRecord } from '$declarations/rumi_cycle_sentinel/rumi_cycle_sentinel.did';
+import { Principal } from '@dfinity/principal';
+import type { _SERVICE, FundingOperation, PublicOverview, ProposalRecord } from '$declarations/rumi_cycle_sentinel/rumi_cycle_sentinel.did';
 import {
   canisterError,
   createAnonymousSentinelActor,
@@ -7,6 +8,7 @@ import {
   listProposals,
   listUnresolvedFundingOperations,
   loadPublicTelemetry,
+  manualTopUpDisposition,
   parseNat,
   parseNat32,
   parsePrincipal,
@@ -82,6 +84,26 @@ describe('cycleSentinelService', () => {
     await sentinelManagement.resolveUnknownAsSpent(actor, id);
     expect(actor.execute_proposal).toHaveBeenCalledWith(id);
     expect(actor.resolve_unknown_as_spent).toHaveBeenCalledWith(id);
+  });
+
+  it('submits an explicit manual top-up rail and raw amount without number conversion', async () => {
+    const operation = {};
+    const target = Principal.fromText('joh3a-5aaaa-aaaap-quy6a-cai');
+    const amount = 100_000_000_000_001n;
+    const actor = actorOf({ manual_top_up_with_amount: vi.fn().mockResolvedValue({ Ok: operation }) });
+    await expect(sentinelManagement.manualTopUpWithAmount(actor, target, { CyclesLedger: null }, amount)).resolves.toBe(operation);
+    expect(actor.manual_top_up_with_amount).toHaveBeenCalledWith(target, { CyclesLedger: null }, amount);
+    expect(() => sentinelManagement.manualTopUpWithAmount(actor, target, { IcpCmc: null }, 0n)).toThrow('greater than zero');
+    expect(actor.manual_top_up_with_amount).toHaveBeenCalledTimes(1);
+  });
+
+  it('distinguishes completed, terminal, pending, and uncertain funding operation states', () => {
+    const operation = (state: Record<string, unknown>) => ({ state }) as FundingOperation;
+    expect(manualTopUpDisposition(operation({ Cycles: { Complete: null } })).disposition).toBe('completed');
+    expect(manualTopUpDisposition(operation({ Icp: { Refunded: null } })).disposition).toBe('terminal');
+    expect(manualTopUpDisposition(operation({ Cycles: { Submitted: null } })).disposition).toBe('pending');
+    expect(manualTopUpDisposition(operation({ Icp: { TransferUnknown: null } })).disposition).toBe('uncertain');
+    expect(manualTopUpDisposition(operation({ Cycles: { Quarantined: null } })).disposition).toBe('uncertain');
   });
 
   it('validates principals, text, bigint nat fields, nat32, and management errors before calls', async () => {

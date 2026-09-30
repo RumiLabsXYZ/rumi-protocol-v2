@@ -5,6 +5,7 @@ import type {
   _SERVICE,
   AuthenticatedQueryError,
   FundingOperation,
+  FundingRail,
   GlobalPolicyArgs,
   ProposalRecord,
   PublicAlarm,
@@ -23,6 +24,20 @@ export { isCycleSentinelConfigured } from '../config';
 
 export type SentinelActor = _SERVICE;
 export type Cursor = [] | [string];
+export type ManualTopUpDisposition = 'completed' | 'terminal' | 'pending' | 'uncertain';
+
+export function manualTopUpDisposition(operation: FundingOperation): { disposition: ManualTopUpDisposition; state: string } {
+  const rail = Object.keys(operation.state)[0] ?? 'Unknown';
+  const phaseValue = operation.state[rail as keyof typeof operation.state] as Record<string, unknown> | undefined;
+  const phase = phaseValue ? Object.keys(phaseValue)[0] ?? 'Unknown' : 'Unknown';
+  if (phase === 'Complete') return { disposition: 'completed', state: `${rail} · ${phase}` };
+  if (phase === 'Terminal' || phase === 'Refunded') return { disposition: 'terminal', state: `${rail} · ${phase}` };
+  if (phase === 'Unknown' || phase === 'TransferUnknown' || phase === 'Quarantined') {
+    return { disposition: 'uncertain', state: `${rail} · ${phase}` };
+  }
+  return { disposition: 'pending', state: `${rail} · ${phase}` };
+}
+
 export type TelemetrySnapshot = {
   overview: PublicOverview;
   targets: PublicTargetRow[];
@@ -241,9 +256,14 @@ export const sentinelManagement = {
   acknowledgeAlarm(actor: SentinelActor, id: bigint) { assertNat(id, 'Alarm ID'); return actor.acknowledge_alarm(id).then(resultOk); },
   pauseTarget(actor: SentinelActor, target: Principal) { if (target.isAnonymous()) throw new Error('Target principal cannot be anonymous.'); return actor.pause_target(target).then(resultOk); },
   manualTopUp(actor: SentinelActor, target: Principal): Promise<FundingOperation> { if (target.isAnonymous()) throw new Error('Target principal cannot be anonymous.'); return actor.manual_top_up(target).then(resultOk); },
+  manualTopUpWithAmount(actor: SentinelActor, target: Principal, rail: FundingRail, amount: bigint): Promise<FundingOperation> {
+    if (target.isAnonymous()) throw new Error('Target principal cannot be anonymous.');
+    if (amount <= 0n) throw new Error('Manual top-up amount must be greater than zero.');
+    return actor.manual_top_up_with_amount(target, rail, amount).then(resultOk);
+  },
   attachBlockProof(actor: SentinelActor, operation: bigint, block: bigint): Promise<FundingOperation> { assertNat(operation, 'Operation ID'); assertNat(block, 'Block index'); return actor.attach_block_proof(operation, block).then(resultOk); },
   attachRefundBlockProof(actor: SentinelActor, operation: bigint, block: bigint): Promise<FundingOperation> { assertNat(operation, 'Operation ID'); assertNat(block, 'Block index'); return actor.attach_refund_block_proof(operation, block).then(resultOk); },
   resolveUnknownAsSpent(actor: SentinelActor, operation: bigint): Promise<FundingOperation> { assertNat(operation, 'Operation ID'); return actor.resolve_unknown_as_spent(operation).then(resultOk); },
 };
 
-export type { AuthenticatedQueryError, FundingOperation, GlobalPolicyArgs, ProposalRecord, PublicAlarm, PublicOverview, PublicTargetRow, TargetArgs, TargetFundingPolicy, TargetPatch };
+export type { AuthenticatedQueryError, FundingOperation, FundingRail, GlobalPolicyArgs, ProposalRecord, PublicAlarm, PublicOverview, PublicTargetRow, TargetArgs, TargetFundingPolicy, TargetPatch };

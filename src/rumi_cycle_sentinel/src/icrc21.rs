@@ -156,6 +156,9 @@ fn consent_message(method: &str) -> Option<&'static str> {
         "manual_top_up" => Some(
             "Request a manual Cycle Sentinel top-up for the selected target. If authorized by the stored policy and available funding rail, this can transfer cycles to that target.",
         ),
+        "manual_top_up_with_amount" => Some(
+            "Request a manual Cycle Sentinel top-up to the named target using the rail and amount specified in this request. The selected Cycles Ledger amount is denominated in cycles; the selected ICP/CMC amount is denominated in ICP e8s. If authorized, this can spend that amount plus the applicable ledger fee. Fresh low-balance evidence, signer permission, source reserves, per-target and global rolling caps, and cooldowns still apply. An uncertain result remains reserved for exact reconciliation or retry.",
+        ),
         "attach_block_proof" | "attach_refund_block_proof" | "resolve_unknown_as_spent" => Some(
             "Reconcile a retained Cycle Sentinel funding operation using the supplied operation evidence. This can settle recorded accounting state but cannot initiate a new cycle transfer.",
         ),
@@ -222,7 +225,12 @@ mod tests {
 
     #[test]
     fn supports_read_governance_and_funding_messages() {
-        for method in ["get_my_permissions", "approve_proposal", "manual_top_up"] {
+        for method in [
+            "get_my_permissions",
+            "approve_proposal",
+            "manual_top_up",
+            "manual_top_up_with_amount",
+        ] {
             let result = icrc21_canister_call_consent_message(request(method));
             let ConsentMessageResult::Ok(info) = result else {
                 panic!("{method} should have a consent message");

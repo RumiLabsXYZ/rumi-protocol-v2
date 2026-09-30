@@ -16,11 +16,15 @@ describe('Cycle Sentinel telemetry route contract', () => {
     expect(source).toContain('async function checkOperatorAccess()');
     expect(source).toContain('Check operator access');
     expect(source).toContain('checkedSession !== session');
-    expect(source).toContain('session !== currentWalletSession()');
+    expect(source).toContain('operatorCheckIsCurrent(session, epoch)');
     expect(source).toContain('currentWalletType.subscribe');
     expect(source).toContain('walletSessionGeneration.subscribe');
     expect(source).toContain('walletStore.subscribe');
-    expect(source).toContain('A partially completed signer check is not authorization');
+    expect(source).toContain('OPERATOR_QUERY_TIMEOUT_MS = 25_000');
+    expect(source).toContain("Checking signer permission");
+    expect(source).toContain('Signer access is confirmed, but the proposal and unresolved-operation lists did not load');
+    expect(source).toContain('Retry list loading');
+    expect(source).toContain('operatorCheckIsCurrent(session, epoch)');
     expect(source).toContain('assertCurrentSigner();');
     expect(source).toContain('{#if signer && actor}');
     expect(serviceSource).toContain('auth.getActor<SentinelActor>');
@@ -50,6 +54,18 @@ describe('Cycle Sentinel telemetry route contract', () => {
     expect(checkSource.lastIndexOf('if (!checkSessionIsCurrent()) return;')).toBeGreaterThan(checkSource.indexOf('await refresh();'));
     expect(checkSource).not.toContain('Action accepted');
     expect(checkSource).toContain('if (checkSessionIsCurrent()) authError');
+  });
+
+  it('bounds signer checks and keeps server-confirmed access during ancillary list failures', () => {
+    expect(source).toContain('OPERATOR_QUERY_TIMEOUT_MS = 25_000');
+    expect(source).toContain("withOperatorQueryTimeout(createAuthenticatedSentinelActor(), 'Connecting to the wallet')");
+    expect(source).toContain("withOperatorQueryTimeout(getPermissions(authenticated), 'Checking signer permission')");
+    const dataLoadSource = source.slice(source.indexOf('async function loadOperatorData('), source.indexOf('async function checkOperatorAccess()'));
+    expect(dataLoadSource).toContain("'Loading signer data'");
+    expect(dataLoadSource).toContain('operatorDataError = error instanceof Error');
+    expect(dataLoadSource).not.toContain('invalidateOperatorAccess()');
+    expect(source).toContain('assertCurrentSigner();');
+    expect(source).toContain('Retry list loading');
   });
 
   it('reads the schedule and source freshness from published policy', () => {
@@ -88,7 +104,8 @@ describe('Cycle Sentinel telemetry route contract', () => {
       'Pause target immediately', 'Propose governed unpause', 'Propose add signer',
       'Propose remove signer', 'Propose signer threshold', 'Propose global policy',
       'Approve proposal', 'Execute proposal', 'Cancel proposal', 'Acknowledge',
-      'Manual top-up', 'Attach delivery proof', 'Attach refund proof', 'Resolve unknown as spent',
+      'Manual top-up', 'Funding source', 'Amount in T-cycles', 'Amount in ICP', 'Confirm top-up',
+      'Attach delivery proof', 'Attach refund proof', 'Resolve unknown as spent',
       'Display name', 'Project', 'Tags', 'Environment', 'Criticality', 'Observation mode',
       'Low threshold (T-cycles)', 'Refill amount (T-cycles)', 'Daily cap (T-cycles)', 'Cooldown seconds',
       'Optional burn anomaly limit (T-cycles)', 'Enabled', 'Auto-top-up', 'Unpause timelock seconds',
@@ -98,9 +115,47 @@ describe('Cycle Sentinel telemetry route contract', () => {
       'proposeRegisterTarget', 'proposeUpdateTarget', 'proposeRemoveTarget', 'pauseTarget',
       'proposeUnpauseTarget', 'proposeAddSigner', 'proposeRemoveSigner', 'proposeSetSignerThreshold',
       'proposeSetGlobalPolicy', 'approveProposal', 'executeProposal', 'cancelProposal',
-      'acknowledgeAlarm', 'manualTopUp', 'attachBlockProof', 'attachRefundBlockProof', 'resolveUnknownAsSpent',
+      'acknowledgeAlarm', 'manualTopUpWithAmount', 'attachBlockProof', 'attachRefundBlockProof', 'resolveUnknownAsSpent',
     ]) expect(source).toContain(`sentinelManagement.${method}`);
   });
+
+  it('requires an outcome-neutral explicit acknowledgement before clearing a durable top-up lock', () => {
+    expect(source).toContain('requiresOperatorAcknowledgement: true');
+    expect(source).toContain('This does not confirm whether funds moved');
+    expect(source).toContain('the UI cannot independently confirm whether the prior request moved funds');
+    expect(source).toContain('does not assert success or failure');
+    expect(source).toContain('I reviewed the outcome and checked balances — clear retry lock');
+    expect(source).toContain('function acknowledgeManualTopUpOutcomeReviewed()');
+    expect(source).toContain('lockedTargetRow.recent_topups.slice(-3)');
+    expect(source).toContain('Sentinel funding balances: cycles');
+  });
+
+  it('restores unresolved manual top-up locks on reload and preserves active dispatches', () => {
+    const dataLoadSource = source.slice(source.indexOf('async function loadOperatorData('), source.indexOf('async function checkOperatorAccess()'));
+    expect(dataLoadSource).toContain("nextUnresolved.find((item) => variant(item.trigger) === 'ManualTopup')");
+    expect(dataLoadSource).toContain('authorizedSession: session');
+    expect(dataLoadSource.indexOf('if (manualTopUpLock?.inFlight)')).toBeLessThan(dataLoadSource.indexOf("nextUnresolved.find((item) => variant(item.trigger) === 'ManualTopup')"));
+    expect(dataLoadSource).toContain('operationId: unresolvedManualTopUp.id');
+    expect(dataLoadSource).toContain('Do not submit another top-up until it is reconciled.');
+    expect(source).toContain('sessionStorage.getItem(manualTopUpMarkerStorageKey(identityKey))');
+    expect(source).toContain("return principal.toText();");
+    const walletObserveSource = source.slice(source.indexOf('function observeWalletSession()'), source.indexOf('function fundingPolicy()'));
+    expect(walletObserveSource).toContain('manualTopUpLock.identityKey !== currentWalletIdentityKey()');
+    expect(walletObserveSource).toContain('restoreManualTopUpMarker();');
+    const submitSource = source.slice(source.indexOf('async function confirmManualTopUp()'), source.indexOf('const opt ='));
+    expect(submitSource.indexOf('storeManualTopUpMarker({ identityKey: requestIdentityKey')).toBeLessThan(submitSource.indexOf('await sentinelManagement.manualTopUpWithAmount'));
+    expect(submitSource).toContain('clearManualTopUpMarker(requestIdentityKey)');
+    expect(source).toContain('!clearManualTopUpMarker(manualTopUpLock.identityKey)');
+  });
+
+  it('only lets the current confirmed signer acknowledge an uncertain top-up lock', () => {
+    const authoritySource = source.slice(source.indexOf('function hasCurrentManualTopUpAuthority()'), source.indexOf('async function confirmManualTopUp()'));
+    expect(authoritySource).toContain('checkedSession === session');
+    expect(authoritySource).toContain('manualTopUpLock.authorizedSession === session');
+    expect(authoritySource).toContain('|| !hasCurrentManualTopUpAuthority()');
+    expect(source).toContain('{#if manualTopUpLock.requiresOperatorAcknowledgement && hasCurrentManualTopUpAuthority()}');
+  });
+
   it('explains an idle registry and shows cycle usage instead of a silent wall of Unavailable', () => {
     expect(source).toContain('snapshot.overview.unobserved_count === snapshot.overview.target_count');
     expect(source).toContain('Observation has not been switched on yet.');

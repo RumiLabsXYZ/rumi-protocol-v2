@@ -11,6 +11,7 @@ import {
 	isStale,
 	optionalBigInt,
 	parseTCycles,
+	parseIcp,
 	targetFundingPolicyChanged,
 	variantLabel,
 } from './cycleSentinelFunding';
@@ -45,6 +46,13 @@ describe('cycleSentinelFunding', () => {
 		expect(parseTCycles('2.000000000001', 'threshold')).toBe(2_000_000_000_001n);
 		expect(formatTCycles(6_000_000_000_001n)).toBe('6.000000000001');
 		expect(() => parseTCycles('1.1234567890123', 'threshold')).toThrow('12 decimal places');
+	});
+
+	it('parses ICP to ledger e8s exactly and rejects excess precision', () => {
+		expect(parseIcp('0.1', 'amount')).toBe(10_000_000n);
+		expect(parseIcp('12.00000001', 'amount')).toBe(1_200_000_001n);
+		expect(() => parseIcp('1.123456789', 'amount')).toThrow('8 decimal places');
+		expect(() => parseIcp('1e-3', 'amount')).toThrow('decimal');
 	});
 
 	it('formats zero as zero and missing values as unavailable', () => {

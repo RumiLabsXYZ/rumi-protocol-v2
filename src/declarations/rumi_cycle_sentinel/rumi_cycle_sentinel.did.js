@@ -597,6 +597,11 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'manual_top_up' : IDL.Func([IDL.Principal], [Result_1], []),
+    'manual_top_up_with_amount' : IDL.Func(
+        [IDL.Principal, FundingRail, IDL.Nat],
+        [Result_1],
+        [],
+      ),
     'pause_target' : IDL.Func([IDL.Principal], [Result_2], []),
     'propose_add_signer' : IDL.Func([IDL.Principal], [Result_10], []),
     'propose_register_target' : IDL.Func([TargetArgs], [Result_10], []),
