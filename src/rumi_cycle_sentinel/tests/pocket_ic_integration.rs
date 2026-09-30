@@ -433,6 +433,18 @@ fn principal(text: &str) -> Principal {
     Principal::from_text(text).expect("valid fixture principal")
 }
 
+fn telemetry_viewer() -> Principal {
+    principal("zegjz-jpi6k-qkand-c2bgf-qw6za-xk4si-nz3gx-qzzia-fk6fg-snepb-tae")
+}
+
+fn telemetry_viewers() -> [Principal; 3] {
+    [
+        telemetry_viewer(),
+        principal("stzp3-bnvwm-zqzjh-o6mv6-ci53m-wj5k6-xyhe7-fnyp2-c64o3-7vokj-bqe"),
+        principal("4alqm-afk6k-bybok-qvdyo-cnv7y-klel6-xm2pz-7h7jk-utmys-kttf3-vqe"),
+    ]
+}
+
 fn create_and_install_mock(pic: &PocketIc, id: Principal, role: MockRole) {
     pic.create_canister_with_id(None, None, id)
         .expect("create fixed mock principal");
@@ -617,7 +629,7 @@ fn public_topups(
     let page: Result<PublicPage<PublicTopupSummary>, PublicQueryError> = call_query(
         pic,
         sentinel,
-        Principal::anonymous(),
+        telemetry_viewer(),
         "list_public_topups",
         Encode!(&target, &None::<String>, &100u16).unwrap(),
     );
@@ -1096,11 +1108,11 @@ fn bootstrap_exposes_all_sixteen_and_leaves_them_disabled() {
     let page: Result<PublicPage<PublicTargetRow>, PublicQueryError> = call_query(
         &pic,
         sentinel,
-        Principal::anonymous(),
+        telemetry_viewer(),
         "list_public_targets",
         Encode!(&None::<String>, &100u16).unwrap(),
     );
-    let page = page.expect("public target query succeeds anonymously");
+    let page = page.expect("allowlisted viewer target query succeeds");
     let ids: std::collections::BTreeSet<_> = page.items.iter().map(|row| row.principal).collect();
     assert_eq!(ids.len(), 16);
     assert_eq!(
@@ -1132,14 +1144,66 @@ fn bootstrap_exposes_all_sixteen_and_leaves_them_disabled() {
 }
 
 #[test]
-fn timer_samples_cached_states_and_public_queries_never_require_login() {
+fn private_telemetry_queries_reject_unapproved_callers_and_allow_all_viewers() {
+    let (pic, sentinel, _) = boot();
+    let target = principal(ALL_TARGETS[0]);
+    let queries = [
+        ("cycles_status", Encode!().unwrap()),
+        ("get_public_overview", Encode!().unwrap()),
+        (
+            "list_public_targets",
+            Encode!(&None::<String>, &10u16).unwrap(),
+        ),
+        ("get_public_target", Encode!(&target).unwrap()),
+        (
+            "list_public_samples",
+            Encode!(&target, &None::<String>, &10u16).unwrap(),
+        ),
+        (
+            "list_public_topups",
+            Encode!(&target, &None::<String>, &10u16).unwrap(),
+        ),
+        (
+            "list_public_alarms",
+            Encode!(&None::<String>, &10u16).unwrap(),
+        ),
+    ];
+
+    let denied_callers = [Principal::anonymous(), Principal::from_slice(&[0x42])];
+    for caller in denied_callers {
+        for (method, args) in &queries {
+            let result = pic
+                .query_call(sentinel, caller, method, args.clone())
+                .expect("query transport succeeds");
+            assert!(
+                matches!(result, WasmResult::Reject(_)),
+                "{method} should reject caller {caller}"
+            );
+        }
+    }
+
+    for caller in telemetry_viewers() {
+        for (method, args) in &queries {
+            let result = pic
+                .query_call(sentinel, caller, method, args.clone())
+                .expect("query transport succeeds");
+            assert!(
+                matches!(result, WasmResult::Reply(_)),
+                "{method} should reply to allowlisted caller {caller}"
+            );
+        }
+    }
+}
+
+#[test]
+fn timer_samples_cached_states_and_allowlisted_viewers_read_telemetry() {
     let (pic, sentinel, _) = boot();
     run_timer(&pic, sentinel);
 
     let overview: PublicOverview = call_query(
         &pic,
         sentinel,
-        Principal::anonymous(),
+        telemetry_viewer(),
         "get_public_overview",
         Encode!().unwrap(),
     );
@@ -1167,7 +1231,7 @@ fn timer_samples_cached_states_and_public_queries_never_require_login() {
     let conflux: Option<PublicTargetRow> = call_query(
         &pic,
         sentinel,
-        Principal::anonymous(),
+        telemetry_viewer(),
         "get_public_target",
         Encode!(&principal(CONFLUX_FRONTEND)).unwrap(),
     );
@@ -1439,7 +1503,7 @@ fn observation_states_render_healthy_low_stopped_uninstalled_and_unreachable() {
     let low: PublicTargetRow = call_query::<Option<PublicTargetRow>>(
         &pic,
         sentinel,
-        Principal::anonymous(),
+        telemetry_viewer(),
         "get_public_target",
         Encode!(&principal(SELF_REPORT_TARGETS[0])).unwrap(),
     )
@@ -1448,7 +1512,7 @@ fn observation_states_render_healthy_low_stopped_uninstalled_and_unreachable() {
     let unreachable: PublicTargetRow = call_query::<Option<PublicTargetRow>>(
         &pic,
         sentinel,
-        Principal::anonymous(),
+        telemetry_viewer(),
         "get_public_target",
         Encode!(&principal(SELF_REPORT_TARGETS[1])).unwrap(),
     )
@@ -1457,7 +1521,7 @@ fn observation_states_render_healthy_low_stopped_uninstalled_and_unreachable() {
     let stopped: PublicTargetRow = call_query::<Option<PublicTargetRow>>(
         &pic,
         sentinel,
-        Principal::anonymous(),
+        telemetry_viewer(),
         "get_public_target",
         Encode!(&principal(ALL_TARGETS[1])).unwrap(),
     )
@@ -1486,7 +1550,7 @@ fn observation_states_render_healthy_low_stopped_uninstalled_and_unreachable() {
     let uninstalled: PublicTargetRow = call_query::<Option<PublicTargetRow>>(
         &pic,
         sentinel,
-        Principal::anonymous(),
+        telemetry_viewer(),
         "get_public_target",
         Encode!(&principal(ALL_TARGETS[1])).unwrap(),
     )
@@ -1495,12 +1559,12 @@ fn observation_states_render_healthy_low_stopped_uninstalled_and_unreachable() {
 }
 
 #[test]
-fn public_history_queries_are_anonymous_and_bounded() {
+fn private_history_queries_remain_bounded_for_allowlisted_viewers() {
     let (pic, sentinel, _) = boot();
     let too_many: Result<PublicPage<PublicTargetRow>, PublicQueryError> = call_query(
         &pic,
         sentinel,
-        Principal::anonymous(),
+        telemetry_viewer(),
         "list_public_targets",
         Encode!(&None::<String>, &101u16).unwrap(),
     );
@@ -1509,7 +1573,7 @@ fn public_history_queries_are_anonymous_and_bounded() {
     let invalid: Result<PublicPage<PublicTargetRow>, PublicQueryError> = call_query(
         &pic,
         sentinel,
-        Principal::anonymous(),
+        telemetry_viewer(),
         "list_public_targets",
         Encode!(&Some("not-a-cursor".to_string()), &10u16).unwrap(),
     );
@@ -1619,7 +1683,7 @@ fn target_edit_preserves_injected_operation_snapshot_and_removal_is_blocked() {
     assert!(call_query::<Option<PublicTargetRow>>(
         &pic,
         sentinel,
-        Principal::anonymous(),
+        telemetry_viewer(),
         "get_public_target",
         Encode!(&target).unwrap(),
     )
@@ -2014,7 +2078,7 @@ fn live_stable_bounds_fill_prune_reject_and_survive_upgrade() {
             let page: Result<PublicPage<PublicTargetRow>, PublicQueryError> = call_query(
                 &pic,
                 sentinel,
-                Principal::anonymous(),
+                telemetry_viewer(),
                 "list_public_targets",
                 Encode!(&None::<String>, &101u16).unwrap(),
             );
@@ -2148,7 +2212,7 @@ fn shared_overview(pic: &PocketIc, sentinel: Principal) -> PublicOverview {
     call_query(
         pic,
         sentinel,
-        Principal::anonymous(),
+        telemetry_viewer(),
         "get_public_overview",
         Encode!().unwrap(),
     )
@@ -2717,7 +2781,7 @@ fn maintenance_target_deadline(
     call_query::<Option<MaintenanceTargetDeadline>>(
         pic,
         sentinel,
-        Principal::anonymous(),
+        telemetry_viewer(),
         "get_public_target",
         Encode!(&target).unwrap(),
     )

@@ -8,8 +8,10 @@ const source = readFileSync(resolve(process.cwd(), 'src/routes/explorer/telemetr
 const serviceSource = readFileSync(resolve(process.cwd(), 'src/lib/services/cycleSentinelService.ts'), 'utf8');
 
 describe('Cycle Sentinel telemetry route contract', () => {
-  it('keeps public telemetry anonymous and performs the wallet signer check only from an explicit operator action', () => {
-    expect(source).toContain('loadPublicTelemetry(createAnonymousSentinelActor())');
+  it('loads private telemetry only through an authenticated wallet and keeps signer checks separate', () => {
+    expect(source).toContain('loadPublicTelemetry(authenticated)');
+    expect(source).toContain('canViewSentinelTelemetry(latestWalletConnection.principal)');
+    expect(source).toContain('Sentinel telemetry is private');
     expect(source).toContain('getPermissions(authenticated)');
     expect(source).toContain('async function checkOperatorAccess()');
     expect(source).toContain('Check operator access');
@@ -24,7 +26,7 @@ describe('Cycle Sentinel telemetry route contract', () => {
     expect(serviceSource).toContain('auth.getActor<SentinelActor>');
     expect(serviceSource).not.toMatch(/\bany\b/);
     const refreshSource = source.slice(source.indexOf('async function refresh()'), source.indexOf('async function checkOperatorAccess()'));
-    expect(refreshSource).toContain('loadPublicTelemetry(createAnonymousSentinelActor())');
+    expect(refreshSource).toContain('loadPublicTelemetry(authenticated)');
     expect(refreshSource).not.toContain('getPermissions(');
   });
 
@@ -37,7 +39,7 @@ describe('Cycle Sentinel telemetry route contract', () => {
     expect(controls).toContain('Refresh telemetry reads saved results.');
     const refreshSource = source.slice(source.indexOf('async function refresh()'), source.indexOf('async function checkOperatorAccess()'));
     expect(refreshSource).not.toContain('runMaintenanceNow');
-    expect(refreshSource).not.toContain('createAuthenticatedSentinelActor');
+    expect(refreshSource).toContain('createAuthenticatedSentinelActor');
     const checkSource = source.slice(source.indexOf('async function runCheckNow()'), source.indexOf('async function run(action:'));
     expect(checkSource.indexOf('assertCurrentSigner();')).toBeLessThan(checkSource.indexOf('await sentinelManagement.runMaintenanceNow(authenticated)'));
     expect(checkSource).toContain('if (checkingNow) return;');

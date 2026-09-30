@@ -20,6 +20,7 @@ mod public_api;
 mod sampler;
 mod self_recovery;
 mod state;
+mod telemetry_access;
 #[cfg(feature = "test_endpoints")]
 mod test_support;
 mod types;
@@ -70,7 +71,7 @@ fn post_upgrade() {
     sampler::setup_timer();
 }
 
-#[ic_cdk::query]
+#[ic_cdk::query(guard = "require_telemetry_viewer")]
 fn cycles_status() -> CycleManagerCyclesStatus {
     self_cycles_status(
         DEFAULT_LOW_WATERMARK_CYCLES,
@@ -390,14 +391,22 @@ fn acknowledge_alarm(id: u64) -> Result<bool, governance::GovernanceError> {
     governance::acknowledge_alarm_at(ic_cdk::caller(), now_secs(), id)
 }
 
-// ─────────────────────────── Public cached telemetry ───────────────────────────
+// ─────────────────────────── Private cached telemetry ───────────────────────────
 
-#[ic_cdk::query]
+fn require_telemetry_viewer() -> Result<(), String> {
+    if telemetry_access::is_telemetry_viewer(ic_cdk::caller()) {
+        Ok(())
+    } else {
+        Err("caller is not authorized to view private telemetry".to_string())
+    }
+}
+
+#[ic_cdk::query(guard = "require_telemetry_viewer")]
 fn get_public_overview() -> types::PublicOverview {
     public_api::get_public_overview_at(now_secs())
 }
 
-#[ic_cdk::query]
+#[ic_cdk::query(guard = "require_telemetry_viewer")]
 fn list_public_targets(
     cursor: Option<String>,
     limit: u16,
@@ -405,12 +414,12 @@ fn list_public_targets(
     public_api::list_public_targets_at(cursor, limit, now_secs())
 }
 
-#[ic_cdk::query]
+#[ic_cdk::query(guard = "require_telemetry_viewer")]
 fn get_public_target(principal: Principal) -> Option<types::PublicTargetRow> {
     public_api::get_public_target_at(principal, now_secs())
 }
 
-#[ic_cdk::query]
+#[ic_cdk::query(guard = "require_telemetry_viewer")]
 fn list_public_samples(
     principal: Principal,
     cursor: Option<String>,
@@ -419,7 +428,7 @@ fn list_public_samples(
     public_api::list_public_samples_at(principal, cursor, limit)
 }
 
-#[ic_cdk::query]
+#[ic_cdk::query(guard = "require_telemetry_viewer")]
 fn list_public_topups(
     principal: Principal,
     cursor: Option<String>,
@@ -428,7 +437,7 @@ fn list_public_topups(
     public_api::list_public_topups_at(principal, cursor, limit)
 }
 
-#[ic_cdk::query]
+#[ic_cdk::query(guard = "require_telemetry_viewer")]
 fn list_public_alarms(
     cursor: Option<String>,
     limit: u16,
