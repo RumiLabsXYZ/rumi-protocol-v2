@@ -247,6 +247,7 @@ function formatTxid(txid: unknown): string | undefined {
   if (typeof txid === 'string') return txid;
   if (Array.isArray(txid) || txid instanceof Uint8Array) {
     return Array.from(txid as Iterable<number>)
+      .reverse()
       .map((b) => b.toString(16).padStart(2, '0'))
       .join('');
   }

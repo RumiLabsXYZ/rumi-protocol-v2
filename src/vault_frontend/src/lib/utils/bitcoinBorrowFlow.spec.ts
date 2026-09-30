@@ -250,14 +250,18 @@ describe('update_balance error summarization', () => {
 });
 
 describe('retrieve_btc_status classification', () => {
-  it('classifies every known status and decodes a byte-array txid to hex', () => {
+  it('classifies known statuses and reverses little-endian txid bytes for display', () => {
     expect(classifyRetrieveBtcStatus({ Pending: null }).kind).toBe('Pending');
     expect(classifyRetrieveBtcStatus({ AmountTooLow: null }).kind).toBe('AmountTooLow');
     expect(classifyRetrieveBtcStatus({ Unknown: null }).kind).toBe('Unknown');
 
     const sending = classifyRetrieveBtcStatus({ Sending: { txid: [0xde, 0xad, 0xbe, 0xef] } });
     expect(sending.kind).toBe('Sending');
-    expect(sending.txid).toBe('deadbeef');
+    expect(sending.txid).toBe('efbeadde');
+
+    const txidBytes = new Uint8Array([0xde, 0xad, 0xbe, 0xef]);
+    expect(classifyRetrieveBtcStatus({ Confirmed: { txid: txidBytes } }).txid).toBe('efbeadde');
+    expect(Array.from(txidBytes)).toEqual([0xde, 0xad, 0xbe, 0xef]);
 
     const confirmed = classifyRetrieveBtcStatus({ Confirmed: { txid: 'already-hex-string' } });
     expect(confirmed.kind).toBe('Confirmed');

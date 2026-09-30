@@ -49,4 +49,19 @@ Every blocking finding needs a concrete file/line or reproducible scenario. Opti
 
 ## Verification
 
-Implementation and final checks in progress. Preliminary browser inspection of the local source showed both routes with the focused Bitcoin navigation. No wallet connected and no funds moved. Global typecheck baseline and final test/build/review evidence will be recorded after the workers finish.
+Combined branch includes the exact history of reviewed ckERC20 commit `6a7e44ae`. Shared merge resolutions retain both minters' IDs and delegation targets, the ckERC20 general footer entry, and Bitcoin-only navigation on the Bitcoin routes.
+
+- Combined focused regression command covers Bitcoin flow/wizard/mounted pages, minter actors and address utilities, strict ledger fees, existing DOGE flow/wizard/mounted page/actors, and the ckERC20 page. Initial combined run: 12 files, **427/427 passed**.
+- `npm run build`: production static build passed, with output written to `src/vault_frontend/dist`.
+- `npm run check`: **28 existing errors and 55 warnings in 23 files** remain. New ckBTC and bundled ckERC20 IDL factory argument annotations removed the two added implicit-any diagnostics. The pre-existing `POINTS_ENABLED` comparison diagnostic in shared `config.ts` is unchanged.
+- `git diff --check`: passed.
+- Local desktop and 390px mobile views inspected: readable Bitcoin-only navigation, no horizontal overflow, mint/redeem tabs, fail-closed calculator, public live term loading, and mobile wallet button fit. A stale preview tab stopped responding; a fresh production-preview tab recovered and displayed the built borrowing route.
+- Initial inventory: 13 worktrees, about 8% volume free, zero eligible removals. Dirty, unmerged, active, primary and current checkouts were preserved.
+
+### Independent review round 1
+
+Two isolated `gpt-6-luna` reviewers used the same rubric. The release reviewer returned PASS with one unused-helper accuracy note. The wallet reviewer returned FAIL with one accepted finding: redemption approval allowance included an extra ledger fee even though the burn is fee-free and the approval fee is separately charged.
+
+Fixes: approval allowance now equals the exact requested withdrawal amount; its ledger fee remains explicit and its balance reserve still covers amount plus approval fee. The unused status classifier now reverses a copied transaction-ID byte array, matching explorer display without mutating input. Fresh deterministic checks and two new independent reviewers follow these corrections.
+
+No wallet connection, signature, real deposit, mint, borrow, redemption or Bitcoin deployment was performed. The separately authorized ckERC20 deployment belongs to the other chat. Source review does not prove a live wallet round trip.

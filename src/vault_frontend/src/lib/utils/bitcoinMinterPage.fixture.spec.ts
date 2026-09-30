@@ -90,6 +90,14 @@ describe('/bitcoin minter mounted flow', () => {
     expect(submit.disabled).toBe(false);
     submit.click(); await settle();
     expect(fx.submit).toHaveBeenCalledTimes(1);
+    const [submitted] = fx.submit.mock.calls[0] as unknown as [{
+      approveArgs: { amount: bigint; fee: [] | [bigint] };
+      retrieveArgs: { amount: bigint; address: string };
+    }];
+    expect(submitted.approveArgs.amount).toBe(100_000n);
+    expect(submitted.approveArgs.fee).toEqual([10n]);
+    expect(submitted.retrieveArgs.amount).toBe(100_000n);
+    expect(submitted.retrieveArgs.address).toBe(BITCOIN_ADDRESS);
     expect(host.textContent).toContain('Previous result needs reconciliation');
     const savedKey = withdrawalKey(OWNER_A_TEXT);
     expect(JSON.parse(localStorage.getItem(savedKey)!).state).toBe('uncertain');

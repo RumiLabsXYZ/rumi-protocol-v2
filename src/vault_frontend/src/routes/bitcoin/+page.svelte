@@ -425,7 +425,7 @@
         ledgerIdl: ICRC1_IDL,
         approveArgs: {
           spender: { owner: Principal.fromText(CANISTER_IDS.CKBTC_MINTER), subaccount: [] },
-          amount: amountSats + feeAtClick,
+          amount: amountSats,
           fee: [feeAtClick], memo: [], from_subaccount: [], created_at_time: [now],
           expected_allowance: [], expires_at: [now + 10n * 60n * 1_000_000_000n],
         },

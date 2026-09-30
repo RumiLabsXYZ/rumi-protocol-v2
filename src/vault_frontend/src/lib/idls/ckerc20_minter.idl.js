@@ -1,6 +1,7 @@
-import { IDL } from '@dfinity/candid';
+import { IDL as CandidIDL } from '@dfinity/candid';
 
 /** Minimal, hand-maintained interface for DFINITY's ckETH/ckERC20 minter. */
+/** @param {{ IDL: typeof CandidIDL }} factory */
 export const CKERC20_MINTER_IDL = ({ IDL }) => {
   const Subaccount = IDL.Vec(IDL.Nat8);
   const CkErc20Token = IDL.Record({
