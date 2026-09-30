@@ -1,8 +1,10 @@
 <script lang="ts">
+  import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
   import { Principal } from '@dfinity/principal';
   import { walletStore } from '$lib/stores/wallet';
   import { currentWalletType, walletSessionGeneration } from '$lib/services/auth';
+  import { canViewSentinelTelemetry } from '$lib/services/cycleSentinelAccess';
   import { CANISTER_IDS } from '$lib/config';
   import { targetStateLabel } from '$lib/services/cycleSentinelTelemetry';
   import {
@@ -24,7 +26,6 @@
     variantLabel,
   } from '$lib/services/cycleSentinelFunding';
   import {
-    createAnonymousSentinelActor,
     createAuthenticatedSentinelActor,
     getPermissions,
     listProposals,
@@ -61,7 +62,8 @@
   let checkingNow = false;
   let checkedSession: string | undefined;
   let operatorAccessEpoch = 0;
-  let observedWalletSession: string | undefined;
+  let observedWalletSession: string | undefined | null = null;
+  let telemetryLoadEpoch = 0;
   let latestWalletConnection: { isConnected: boolean; principal: Principal | null } = { isConnected: false, principal: null };
   let latestWalletType: string | null = null;
   let latestWalletSessionGeneration = 0;
@@ -248,6 +250,12 @@
     // transition. This prevents a same-principal reconnection from retaining
     // a previously-created authenticated actor.
     invalidateOperatorAccess();
+    snapshot = null;
+    if (!canViewSentinelTelemetry(latestWalletConnection.principal)) {
+      void goto('/explorer', { replaceState: true });
+      return;
+    }
+    void refresh();
   }
 
   function fundingPolicy(): TargetFundingPolicy {
@@ -361,13 +369,27 @@
     && fundingIcpAvailable === 0n;
 
   async function refresh(): Promise<void> {
+    const epoch = ++telemetryLoadEpoch;
+    const session = currentWalletSession();
     loading = true;
     publicError = '';
-    if (isCycleSentinelConfigured) {
-      try { snapshot = await loadPublicTelemetry(createAnonymousSentinelActor()); }
-      catch (error) { publicError = error instanceof Error ? error.message : String(error); }
-    } else snapshot = null;
-    loading = false;
+    snapshot = null;
+    if (!session || !canViewSentinelTelemetry(latestWalletConnection.principal) || !isCycleSentinelConfigured) {
+      publicError = 'Connect with an approved principal to view private Sentinel telemetry.';
+      loading = false;
+      return;
+    }
+    try {
+      const authenticated = await createAuthenticatedSentinelActor();
+      const next = await loadPublicTelemetry(authenticated);
+      if (epoch === telemetryLoadEpoch && session === currentWalletSession()) snapshot = next;
+    } catch {
+      if (epoch === telemetryLoadEpoch && session === currentWalletSession()) {
+        publicError = 'Sentinel telemetry is private and unavailable to this identity.';
+      }
+    } finally {
+      if (epoch === telemetryLoadEpoch) loading = false;
+    }
   }
 
   async function checkOperatorAccess(): Promise<void> {
@@ -464,7 +486,6 @@
       latestWalletSessionGeneration = generation;
       observeWalletSession();
     });
-    void refresh();
     return () => {
       unsubscribeWallet();
       unsubscribeWalletType();
@@ -473,10 +494,18 @@
   });
 </script>
 
-<svelte:head><title>Cycle Sentinel Telemetry | Rumi</title></svelte:head>
+<svelte:head>
+  {#if canViewSentinelTelemetry($walletStore.principal)}<title>Cycle Sentinel Telemetry | Rumi</title>{/if}
+</svelte:head>
 <section class="telemetry-page">
+  {#if canViewSentinelTelemetry($walletStore.principal)}
+  {#if loading}
+    <div class="login-note">Verifying access to private Sentinel telemetry…</div>
+  {:else if !snapshot}
+    <div class="login-note">{publicError || 'Sentinel telemetry is private. Connect with an approved principal.'}</div>
+  {:else}
   <header class="hero">
-    <div class="hero-copy"><p class="eyebrow">RUMI OPERATIONS</p><h1>Cycle Sentinel</h1><p class="lede">Public runtime health and auditable cycle maintenance. Operator controls appear only after the canister confirms signer permission.</p></div>
+    <div class="hero-copy"><p class="eyebrow">RUMI OPERATIONS</p><h1>Cycle Sentinel</h1><p class="lede">Private runtime health and auditable cycle maintenance. Operator controls appear only after the canister confirms signer permission.</p></div>
     <div class="check-controls">
       <p class="check-schedule">Automatic checks: <strong>{automaticCheckCadence}</strong></p>
       <div class="check-buttons">
@@ -494,7 +523,7 @@
   {#if actionMessage}<div class="notice success">{actionMessage}</div>{/if}
   {#if !isCycleSentinelConfigured}<div class="notice">Cycle Sentinel is not configured yet. This page remains fail-closed until the authoritative Task 10 deployment.</div>
   {:else}
-    {#if loading}<p class="muted">Loading public telemetry… Funding destinations are available below.</p>{/if}
+    {#if loading}<p class="muted">Loading private telemetry…</p>{/if}
     {#if snapshot}<div class="stats"><div><span>Targets</span><strong>{format(snapshot.overview.target_count)}</strong></div><div><span>Healthy</span><strong>{format(snapshot.overview.healthy_count)}</strong></div><div><span>Runtime fuel</span><strong>{formatTCycles(snapshot.overview.runtime_cycles)} T</strong><small>This is Sentinel's own operating fuel.</small></div><div><span>Open alarms</span><strong>{format(snapshot.overview.alarm_count)}</strong></div></div>{/if}
     <section class="funding-wallet" aria-labelledby="funding-wallet-heading">
       <div class="funding-heading">
@@ -552,8 +581,10 @@
       <article><h3>Global policy governance</h3><div class="form-grid"><label>Global daily cap<input bind:value={globalDailyCap} inputmode="numeric" /></label><label>Sample interval seconds<input bind:value={sampleInterval} inputmode="numeric" /></label><label>Stale-after seconds<input bind:value={staleAfter} inputmode="numeric" /></label><label>Minimum ICP reserve e8s<input bind:value={minIcpReserve} inputmode="numeric" /></label><label>Self-recovery refill<input bind:value={selfRefill} inputmode="numeric" /></label><label>Self-recovery low threshold<input bind:value={selfLowThreshold} inputmode="numeric" /></label><label>Self-recovery daily cap<input bind:value={selfDailyCap} inputmode="numeric" /></label><label>Protected reserve cycles<input bind:value={protectedReserve} inputmode="numeric" /></label><label>Unpause timelock seconds<input bind:value={unpauseTimelock} inputmode="numeric" /></label><label>Spend-policy timelock seconds<input bind:value={spendTimelock} inputmode="numeric" /></label><label>Target-registry timelock seconds<input bind:value={targetTimelock} inputmode="numeric" /></label><label>Signer-change timelock seconds<input bind:value={signerTimelock} inputmode="numeric" /></label></div><button on:click={() => run(() => sentinelManagement.proposeSetGlobalPolicy(actor!, globalPolicy()))}>Propose global policy</button></article>
       <article><h3>Proposal list and actions</h3><label>Proposal ID<input bind:value={proposalId} inputmode="numeric" /></label><div class="actions"><button on:click={() => run(() => sentinelManagement.approveProposal(actor!, proposal()))}>Approve proposal</button><button on:click={() => run(() => sentinelManagement.executeProposal(actor!, proposal()))}>Execute proposal</button><button on:click={() => run(() => sentinelManagement.cancelProposal(actor!, proposal()))}>Cancel proposal</button></div>{#if proposals.length}<ul>{#each proposals as item}<li>#{item.id.toString()} · {variant(item.status)} · {variant(item.payload)} · {item.approvals.length} approval(s)</li>{/each}</ul>{:else}<p class="muted">No proposals returned.</p>{/if}</article>
       <article><h3>Unresolved funding operations</h3><div class="form-grid"><label>Operation ID<input bind:value={operationId} inputmode="numeric" /></label><label>Ledger block index<input bind:value={blockIndex} inputmode="numeric" /></label></div><div class="actions"><button on:click={() => run(() => sentinelManagement.attachBlockProof(actor!, operation(), id(blockIndex, 'Block index')))}>Attach delivery proof</button><button on:click={() => run(() => sentinelManagement.attachRefundBlockProof(actor!, operation(), id(blockIndex, 'Block index')))}>Attach refund proof</button><button on:click={() => run(() => sentinelManagement.resolveUnknownAsSpent(actor!, operation()) )}>Resolve unknown as spent</button></div>{#if unresolved.length}<ul>{#each unresolved as item}<li>#{item.id.toString()} · {variant(item.state)} · target {item.target.toText()} · reserved {item.reserved_amount_cycles.toString()} cycles</li>{/each}</ul>{:else}<p class="muted">No unresolved funding operations returned.</p>{/if}</article>
-    {:else}<p class="muted">{operatorChecked ? 'This wallet is authenticated but is not a configured Sentinel signer. Public telemetry remains available.' : 'Checking operator access asks your wallet to approve a read-only signer-permission query. It never changes Sentinel policy or moves cycles.'}</p><button on:click={checkOperatorAccess} disabled={checkingOperatorAccess}>{checkingOperatorAccess ? 'Checking operator access…' : 'Check operator access'}</button>{/if}
+    {:else}<p class="muted">{operatorChecked ? 'This wallet is authenticated but is not a configured Sentinel signer. Private telemetry remains available to approved principals.' : 'Checking operator access asks your wallet to approve a read-only signer-permission query. It never changes Sentinel policy or moves cycles.'}</p><button on:click={checkOperatorAccess} disabled={checkingOperatorAccess}>{checkingOperatorAccess ? 'Checking operator access…' : 'Check operator access'}</button>{/if}
   </section>{:else}<div class="login-note">Connect a wallet to check signer permissions and access operator controls.</div>{/if}
+  {/if}
+  {/if}
 </section>
 
 <style>

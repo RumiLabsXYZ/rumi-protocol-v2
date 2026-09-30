@@ -3,6 +3,8 @@
   import { page } from '$app/stores';
   import { onMount } from 'svelte';
   import SearchBar from '$lib/components/explorer/SearchBar.svelte';
+  import { walletStore } from '$lib/stores/wallet';
+  import { canViewSentinelTelemetry } from '$lib/services/cycleSentinelAccess';
   import {
     isVaultId, isEventIndex, parseEventIndex, isPrincipal, resolveTokenAlias
   } from '$lib/utils/explorerHelpers';
@@ -68,6 +70,10 @@
     },
   ];
 
+  let visibleNavItems = $derived(NAV_ITEMS.filter((item) =>
+    item.href !== '/explorer/telemetry' || canViewSentinelTelemetry($walletStore.principal)
+  ));
+
   function handleSearch(query: string) {
     const q = query.trim();
     if (!q) return;
@@ -97,7 +103,7 @@
 
     <!-- Center: Nav tabs (desktop) -->
     <nav class="hidden md:flex items-center gap-0.5">
-      {#each NAV_ITEMS as item}
+      {#each visibleNavItems as item}
         <a
           href={item.href}
           class="relative px-3 py-1.5 text-sm font-medium rounded-md transition-colors"
@@ -164,7 +170,7 @@
   <!-- Mobile nav dropdown -->
   {#if mobileNavOpen}
     <nav class="md:hidden px-4 py-2" style="border-top: 1px solid var(--rumi-border); background: var(--rumi-bg-surface1);">
-      {#each NAV_ITEMS as item}
+      {#each visibleNavItems as item}
         <a
           href={item.href}
           onclick={handleNavClick}
