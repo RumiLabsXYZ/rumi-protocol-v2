@@ -1,0 +1,184 @@
+--- a/src/rumi_protocol_backend/src/vault.rs
++++ b/src/rumi_protocol_backend/src/vault.rs
+@@ -3214,6 +3214,25 @@
+         return Err(ProtocolError::TemporarilyUnavailable(
+             "SP writedown path is disabled by admin".to_string(),
+         ));
++    }
++    // This may be a retry after the backend persisted its reservation but the
++    // response was lost. Reuse the exact sizing snapshot, even after its
++    // advertised expiry; never replace an unresolved reservation with new
++    // economics. Only a matching absorb or the registered SP's explicit
++    // release removes it.
++    if let Some(existing) = state.sp_xrp_absorb_preflights.get(&vault_id) {
++        if existing.caller == caller && existing.icusd_burn_e8s == expected_icusd_burn_e8s {
++            return Ok(crate::XrpSpAbsorbPreflight {
++                vault_id: existing.vault_id,
++                icusd_burn_e8s: existing.icusd_burn_e8s,
++                collateral_received_drops: existing.collateral_received_drops,
++                collateral_price_e8s: existing.collateral_price_e8s,
++                expires_at_ns: existing.expires_at_ns,
++            });
++        }
++        return Err(ProtocolError::TemporarilyUnavailable(format!(
++            "Vault #{vault_id} has an unresolved native-XRP stability-pool reservation; the registered SP must consume or release it before another preflight"
++        )));
+     }
+     if crate::guard::is_vault_liquidating(vault_id) {
+         return Err(ProtocolError::TemporarilyUnavailable(format!(
+@@ -3243,8 +3262,8 @@
+ ///
+ /// A reservation blocks every vault-mutating entry point for `vault_id`
+ /// (including the manual liquidation paths) until it is consumed by a
+-/// successful absorb or expires after `XRP_SP_ABSORB_PREFLIGHT_TTL_NS`. When
+-/// the SP reserves and then gives up BEFORE burning any icUSD -- e.g. the
++/// successful absorb or explicitly released. When the SP reserves and then
++/// gives up BEFORE burning any icUSD -- e.g. the
+ /// payout allocation build finds no opted-in depositor holding icUSD, or the
+ /// fan-out exceeds the allocation cap -- that window would otherwise leave an
+ /// underwater vault unliquidatable by any path for a full 15 minutes.
+@@ -3293,9 +3312,10 @@
+ /// the submit consumes it, the burn proof is independently verified and single-use
+ /// (`consumed_writedown_proofs`), the caller must be the registered SP, and the
+ /// submit guards that the vault still holds at least the reserved gross seizure
+-/// before minting any claim. Expiry still blocks NEW vault mutations via
+-/// `ensure_no_active_xrp_sp_absorb_preflight`, and a fresh preflight overwrites a
+-/// stale one for the same vault.
++/// before minting any claim. The expiry timestamp is advisory: it does not prove
++/// the burn was not committed. While the reservation remains in state, it blocks
++/// vault mutations and cannot be overwritten by a fresh preflight. The registered
++/// SP must consume it or explicitly release it after a known pre-burn failure.
+ fn matching_xrp_absorb_preflight(
+     state: &crate::state::State,
+     vault_id: u64,
+@@ -3313,14 +3333,12 @@
+ fn ensure_no_active_xrp_sp_absorb_preflight(
+     state: &crate::state::State,
+     vault_id: u64,
+-    now_ns: u64,
++    _now_ns: u64,
+ ) -> Result<(), ProtocolError> {
+-    if let Some(preflight) = state.sp_xrp_absorb_preflights.get(&vault_id) {
+-        if preflight.expires_at_ns >= now_ns {
+-            return Err(ProtocolError::TemporarilyUnavailable(format!(
+-                "Vault #{vault_id} has a pending native-XRP stability-pool liquidation reservation; retry after it expires or completes"
+-            )));
+-        }
++    if state.sp_xrp_absorb_preflights.contains_key(&vault_id) {
++        return Err(ProtocolError::TemporarilyUnavailable(format!(
++            "Vault #{vault_id} has an unresolved native-XRP stability-pool liquidation reservation; retry after the SP consumes or explicitly releases it"
++        )));
+     }
+     Ok(())
+ }
+@@ -9857,15 +9875,25 @@
+         // including the manual liquidation paths. If the SP gives up AFTER
+         // reserving but BEFORE burning (e.g. no opted-in depositor holds
+         // icUSD), it must be able to hand the reservation back instead of
+-        // leaving the vault unliquidatable by any path until the 15-minute
+-        // TTL expires.
++        // leaving the vault blocked until an SP retry or explicit release.
+         let mut state = test_state_with_xrp_vault();
+-        stability_pool_preflight_xrp_absorb_in_state(&mut state, sp(), VAULT_ID, 100 * E8, 10)
+-            .expect("preflight reservation");
++        let pf = stability_pool_preflight_xrp_absorb_in_state(
++            &mut state,
++            sp(),
++            VAULT_ID,
++            100 * E8,
++            10,
++        )
++        .expect("preflight reservation");
+         assert!(
+             ensure_no_active_xrp_sp_absorb_preflight(&state, VAULT_ID, 20).is_err(),
+             "an active reservation must block vault operations"
+         );
++        assert!(
++            ensure_no_active_xrp_sp_absorb_preflight(&state, VAULT_ID, pf.expires_at_ns + 1)
++                .is_err(),
++            "expiry alone must not authorize mutation while burn outcome is unresolved"
++        );
+ 
+         let released =
+             stability_pool_release_xrp_absorb_preflight_in_state(&mut state, sp(), VAULT_ID, 100 * E8)
+@@ -9873,7 +9901,8 @@
+         assert!(released, "release must report that a reservation was cleared");
+         assert!(state.sp_xrp_absorb_preflights.is_empty());
+         assert!(
+-            ensure_no_active_xrp_sp_absorb_preflight(&state, VAULT_ID, 20).is_ok(),
++            ensure_no_active_xrp_sp_absorb_preflight(&state, VAULT_ID, pf.expires_at_ns + 1)
++                .is_ok(),
+             "releasing the reservation must unblock vault operations immediately"
+         );
+ 
+@@ -10097,17 +10126,42 @@
+     }
+ 
+     #[test]
+-    fn xrp_sp_active_preflight_blocks_vault_mutations_until_expiry() {
++    fn xrp_sp_preflight_retry_reuses_reserved_snapshot_and_rejects_mismatch() {
+         let mut state = test_state_with_xrp_vault();
+-        let pf =
++        let original =
+             stability_pool_preflight_xrp_absorb_in_state(&mut state, sp(), VAULT_ID, 100 * E8, 10)
+                 .expect("preflight accepted");
+ 
+-        assert!(ensure_no_active_xrp_sp_absorb_preflight(&state, VAULT_ID, 20).is_err());
+-        assert!(
+-            ensure_no_active_xrp_sp_absorb_preflight(&state, VAULT_ID, pf.expires_at_ns + 1)
+-                .is_ok()
++        let retry = stability_pool_preflight_xrp_absorb_in_state(
++            &mut state,
++            sp(),
++            VAULT_ID,
++            100 * E8,
++            original.expires_at_ns + 1,
++        )
++        .expect("same caller and burn amount must reuse the persisted snapshot");
++        assert_eq!(retry, original, "retry must not refresh economics or expiry");
++
++        let stored_before = state.sp_xrp_absorb_preflights.get(&VAULT_ID).unwrap().clone();
++        assert!(stability_pool_preflight_xrp_absorb_in_state(
++            &mut state,
++            sp(),
++            VAULT_ID,
++            99 * E8,
++            original.expires_at_ns + 2,
++        )
++        .is_err());
++        assert_eq!(
++            state.sp_xrp_absorb_preflights.get(&VAULT_ID).unwrap(),
++            &stored_before,
++            "a mismatched retry must not overwrite the original sizing reservation"
+         );
++        assert!(ensure_no_active_xrp_sp_absorb_preflight(
++            &state,
++            VAULT_ID,
++            original.expires_at_ns + 3
++        )
++        .is_err());
+     }
+ 
+     #[test]
+@@ -10324,12 +10378,19 @@
+     #[test]
+     fn xrp_sp_absorb_submit_honors_expired_preflight_after_burn() {
+         // The SP burns icUSD before submitting. If the backend is unreachable past the
+-        // preflight TTL, the persisted reservation must still finalize the absorb
+-        // rather than stranding the burned icUSD forever (review blocker B-2).
++        // preflight TTL, mutations remain fenced and the persisted reservation can
++        // still finalize the absorb rather than stranding the burned icUSD.
+         let mut state = test_state_with_xrp_vault();
+         let pf =
+             stability_pool_preflight_xrp_absorb_in_state(&mut state, sp(), VAULT_ID, 100 * E8, 10)
+                 .expect("preflight reservation");
++
++        assert!(ensure_no_active_xrp_sp_absorb_preflight(
++            &state,
++            VAULT_ID,
++            pf.expires_at_ns + 1
++        )
++        .is_err(), "expired-but-unresolved burn reservation must still fence mutation");
+ 
+         let result = stability_pool_liquidate_xrp_vault_in_state(
+             &mut state,
