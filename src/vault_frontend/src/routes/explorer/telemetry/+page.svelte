@@ -393,7 +393,8 @@
         }
         topupResult = { id: operation.id, disposition: result.disposition, state: result.state, amount: requestAmountLabel, source: requestSource };
         if (result.disposition === 'completed') {
-          actionMessage = `${requestTargetName}: top-up operation #${operation.id.toString()} completed (${requestAmountLabel}, ${requestSource}).`;
+          actionMessage = `Top-up confirmed: ${requestTargetName}, operation #${operation.id.toString()} completed (${requestAmountLabel}, ${requestSource}).`;
+          topupTarget = null;
           void refresh();
         } else if (result.disposition === 'terminal') {
           topupError = `Operation #${operation.id.toString()} ended in ${result.state}; the backend reports no completed top-up. Review the operation before trying again.`;
