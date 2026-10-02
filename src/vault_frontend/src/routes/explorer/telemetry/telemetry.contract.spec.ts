@@ -160,12 +160,21 @@ describe('Cycle Sentinel telemetry route contract', () => {
     expect(source).toContain('snapshot.overview.unobserved_count === snapshot.overview.target_count');
     expect(source).toContain('Observation has not been switched on yet.');
     expect(source).toContain('{#if fundingUnavailable}');
-    expect(source).toContain('<th>Burn / day</th>');
-    expect(source).toContain('<th>Runway</th>');
+    expect(source).toContain('<th scope="col">Burn / day</th>');
+    expect(source).toContain('<th scope="col">Runway</th>');
+    expect(source).toContain('<span class="metric-label">Burn / day</span>');
+    expect(source).toContain('<span class="metric-label">Runway</span>');
     expect(source).toContain('optional(row.burn_cycles_per_day)');
     expect(source).toContain('optional(row.runway_secs)');
     expect(source).toContain('targetStateLabel(row)');
     expect(source).toContain('Awaiting first sample');
+  });
+
+  it('does not erase an unknown burn anomaly guard from inline rule proposals', () => {
+    const ruleSource = source.slice(source.indexOf('async function saveRule('), source.indexOf('async function toggleTargetEnabled('));
+    expect(ruleSource).toContain('if (current.burn_anomaly_limit_cycles_per_day === undefined)');
+    expect(ruleSource).toContain('burn_anomaly_limit_cycles_per_day: current.burn_anomaly_limit_cycles_per_day');
+    expect(ruleSource).not.toContain('burn_anomaly_limit_cycles_per_day ?? []');
   });
 
   it('lives under the Explorer tab, not the app header, and keeps the old URL working', () => {
