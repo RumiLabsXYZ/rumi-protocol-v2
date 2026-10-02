@@ -93,6 +93,7 @@
   let manualTopUpLock: { session: string; authorizedSession?: string; identityKey: string; target: Principal; rail?: 'CyclesLedger' | 'IcpCmc'; amount?: string; disposition: 'dispatching' | 'pending' | 'uncertain'; operationId?: bigint; inFlight: boolean; requiresOperatorAcknowledgement?: boolean } | null = null;
   const MANUAL_TOPUP_MARKER_KEY = 'rumi:cycle-sentinel:manual-topup';
   let ruleDrafts: Record<string, { lowThreshold: string; refill: string; dailyCap: string; cooldown: string }> = {};
+  let ruleErrors: Record<string, string> = {};
 
   let targetPrincipal = '';
   let displayName = '';
@@ -220,6 +221,10 @@
     observationMode = variant(current.observation_mode) as keyof typeof ObservationModeVariant;
     loadedTarget = { principal: current.principal.toText(), displayName, project, environment, criticality, observationMode, lowThreshold, refill, dailyCap, cooldown, burnAnomalyLimit, tags, tagsKnown: current.tags !== undefined, burnAnomalyKnown: current.burn_anomaly_limit_cycles_per_day !== undefined, enabled, autoTopup };
     actionMessage = `${current.display_name} settings loaded into the operator form.`;
+    const scrollBehavior = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
+    const settingsField = document.querySelector<HTMLInputElement>('.operator article:nth-of-type(2) input');
+    settingsField?.focus({ preventScroll: true });
+    settingsField?.scrollIntoView({ behavior: scrollBehavior, block: 'start' });
   }
 
   function ruleDraft(row: TelemetrySnapshot['targets'][number]) {
@@ -227,8 +232,8 @@
     ruleDrafts[principal] ??= {
       lowThreshold: formatTCycles(row.low_balance_threshold_cycles),
       refill: formatTCycles(row.refill_cycles),
-      dailyCap: formatTCycles(fundingTarget(row).daily_cap_cycles),
-      cooldown: fundingTarget(row).cooldown_secs.toString(),
+      dailyCap: fundingTarget(row).daily_cap_cycles === undefined ? '' : formatTCycles(fundingTarget(row).daily_cap_cycles),
+      cooldown: fundingTarget(row).cooldown_secs?.toString() ?? '',
     };
     return ruleDrafts[principal];
   }
@@ -261,15 +266,27 @@
   }
 
   async function saveRule(row: TelemetrySnapshot['targets'][number]): Promise<void> {
-    const draft = ruleDraft(row);
-    const policy: TargetFundingPolicy = {
-      low_balance_threshold_cycles: parseTCycles(draft.lowThreshold, 'Low balance threshold'),
-      refill_cycles: parseTCycles(draft.refill, 'Refill amount'),
-      daily_cap_cycles: parseTCycles(draft.dailyCap, 'Daily cap'),
-      cooldown_secs: parseNat(draft.cooldown, 'Cooldown'),
-      burn_anomaly_limit_cycles_per_day: fundingTarget(row).burn_anomaly_limit_cycles_per_day ?? [],
-    };
-    await updateTarget(row, targetPatchFor({ funding_policy: [policy] }), `${row.display_name}: rule change proposed. A second signer must approve it before execution.`);
+    const principal = row.principal.toText();
+    ruleErrors = { ...ruleErrors, [principal]: '' };
+    authError = '';
+    try {
+      const draft = ruleDraft(row);
+      const current = fundingTarget(row);
+      if (current.burn_anomaly_limit_cycles_per_day === undefined) {
+        throw new Error('This target does not expose its burn anomaly limit yet. Refresh telemetry after the backend update before changing its funding policy.');
+      }
+      const policy: TargetFundingPolicy = {
+        low_balance_threshold_cycles: parseTCycles(draft.lowThreshold, 'Low balance threshold'),
+        refill_cycles: parseTCycles(draft.refill, 'Refill amount'),
+        daily_cap_cycles: parseTCycles(draft.dailyCap, 'Daily cap'),
+        cooldown_secs: parseNat(draft.cooldown, 'Cooldown'),
+        burn_anomaly_limit_cycles_per_day: current.burn_anomaly_limit_cycles_per_day,
+      };
+      await updateTarget(row, targetPatchFor({ funding_policy: [policy] }), `${row.display_name}: rule change proposed. A second signer must approve it before execution.`);
+      if (authError) ruleErrors = { ...ruleErrors, [principal]: authError };
+    } catch (error) {
+      ruleErrors = { ...ruleErrors, [principal]: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   async function toggleTargetEnabled(row: TelemetrySnapshot['targets'][number], value: boolean): Promise<void> {
@@ -278,10 +295,6 @@
 
   async function toggleAutoTopup(row: TelemetrySnapshot['targets'][number], value: boolean): Promise<void> {
     await updateTarget(row, targetPatchFor({ auto_topup: [value] }), `${row.display_name}: auto-top-up change proposed. A second signer must approve it before execution.`);
-  }
-
-  async function changeEnvironment(row: TelemetrySnapshot['targets'][number], value: keyof typeof EnvironmentVariant): Promise<void> {
-    await updateTarget(row, targetPatchFor({ environment: [principalVariant(value) as Environment] }), `${row.display_name}: environment change proposed. A second signer must approve it before execution.`);
   }
 
   function openManualTopUp(row: TelemetrySnapshot['targets'][number]): void {
@@ -987,13 +1000,14 @@
             </section>{/if}
           </div>
         </div>
-        {#if snapshot.targets.length}<div class="table-scroll"><table><thead><tr><th>Target</th><th>State</th><th>Rule</th><th>Balance</th><th>Burn / day</th><th>Runway</th><th>Environment</th><th>Actions</th></tr></thead><tbody>{#each snapshot.targets as row}<tr class:selected-row={selectedTargetPrincipal === row.principal.toText()}>
-          <td><strong>{row.display_name}</strong><button class="principal-copy" title="Copy canister ID" on:click={() => copyLabel('Canister ID', row.principal.toText())}>{row.principal.toText()}</button><small>{variant(row.observation_mode)}</small></td>
-          <td title={targetStateLabel(row) === 'Awaiting first sample' ? 'Monitoring is enabled. The next scheduled observation has not completed yet.' : undefined}><strong>{fundingTarget(row).paused ? 'Paused' : targetStateLabel(row)}</strong>{#if signer && actor}<label class="inline-toggle"><input type="checkbox" checked={fundingTarget(row).enabled} on:change={(event) => toggleTargetEnabled(row, event.currentTarget.checked)} /> Enabled</label><label class="inline-toggle"><input type="checkbox" checked={fundingTarget(row).auto_topup} on:change={(event) => toggleAutoTopup(row, event.currentTarget.checked)} /> Auto-top-up</label>{#if fundingTarget(row).paused}<button class="row-action" on:click={() => run(() => sentinelManagement.proposeUnpauseTarget(actor!, row.principal))}>Propose unpause</button>{:else}<button class="row-action" on:click={() => run(() => sentinelManagement.pauseTarget(actor!, row.principal))}>Pause</button>{/if}{:else}<small>{fundingTarget(row).enabled ? 'Enabled' : 'Disabled'} · Auto-top-up {fundingTarget(row).auto_topup ? 'on' : 'off'}</small>{/if}</td>
-          <td><div class="rule-editor"><label>At <input aria-label={`Low balance threshold for ${row.display_name}, T-cycles`} inputmode="decimal" value={ruleDraft(row).lowThreshold} disabled={!signer} on:input={(event) => ruleDraft(row).lowThreshold = event.currentTarget.value} /> T</label><label>add <input aria-label={`Refill amount for ${row.display_name}, T-cycles`} inputmode="decimal" value={ruleDraft(row).refill} disabled={!signer} on:input={(event) => ruleDraft(row).refill = event.currentTarget.value} /> T</label><label>cap <input aria-label={`Daily cap for ${row.display_name}, T-cycles`} inputmode="decimal" value={ruleDraft(row).dailyCap} disabled={!signer} on:input={(event) => ruleDraft(row).dailyCap = event.currentTarget.value} /> T</label><label>cooldown <input aria-label={`Cooldown for ${row.display_name}, seconds`} inputmode="numeric" value={ruleDraft(row).cooldown} disabled={!signer} on:input={(event) => ruleDraft(row).cooldown = event.currentTarget.value} /> s</label>{#if signer}<button class="row-action" on:click={() => saveRule(row)}>Propose rule</button>{/if}</div>{#if row.recent_topups.length}<small>Last top-up: {variant(row.recent_topups[row.recent_topups.length - 1].outcome)} · {formatTCycles(row.recent_topups[row.recent_topups.length - 1].amount_cycles)}T</small>{/if}</td>
-          <td title={format(optional(row.advisory_balance_cycles))}>{row.advisory_balance_overflowed ? 'Overflow' : formatCycles(optional(row.advisory_balance_cycles))}</td><td title={format(optional(row.burn_cycles_per_day))}>{formatCycles(optional(row.burn_cycles_per_day))}</td><td>{formatRunway(optional(row.runway_secs))}</td>
-          <td>{#if signer && actor}<select aria-label={`Environment for ${row.display_name}`} value={variant(row.environment)} on:change={(event) => changeEnvironment(row, event.currentTarget.value as keyof typeof EnvironmentVariant)}>{#each Object.keys(EnvironmentVariant) as value}<option value={value}>{value}</option>{/each}</select>{:else}{variant(row.environment)}{/if}</td>
-          <td class="row-actions">{#if signer && actor}<button class="row-action" disabled={!!manualTopUpLock} on:click={() => openManualTopUp(row)}>Manual top-up</button>{/if}<button class="row-action" on:click={() => selectTarget(row)}>More settings</button></td>
+        {#if snapshot.targets.length}<div class="table-scroll"><table><thead><tr><th scope="col">Target</th><th scope="col">State</th><th scope="col">Balance</th><th scope="col">Burn / day</th><th scope="col">Runway</th><th scope="col">Top-up rule</th><th scope="col">Actions</th></tr></thead><tbody>{#each snapshot.targets as row}<tr class:selected-row={selectedTargetPrincipal === row.principal.toText()}>
+          <td class="target-cell"><strong>{row.display_name}</strong><button class="principal-copy" title="Copy canister ID" on:click={() => copyLabel('Canister ID', row.principal.toText())}>{row.principal.toText()}</button><small>{variant(row.environment)} · {variant(row.observation_mode)}</small></td>
+          <td class="state-cell" title={targetStateLabel(row) === 'Awaiting first sample' ? 'Monitoring is enabled. The next scheduled observation has not completed yet.' : undefined}><span class:state-low={!fundingTarget(row).paused && targetStateLabel(row) === 'Low'} class:state-healthy={!fundingTarget(row).paused && targetStateLabel(row) === 'Healthy'} class="state-pill">{fundingTarget(row).paused ? 'Paused' : targetStateLabel(row)}</span><small>{fundingTarget(row).enabled ? 'Monitoring on' : 'Monitoring off'} · Auto {fundingTarget(row).auto_topup ? 'on' : 'off'}</small></td>
+          <td class="metric-cell" title={format(optional(row.advisory_balance_cycles))}><span class="metric-label">Balance</span><strong>{row.advisory_balance_overflowed ? 'Overflow' : formatCycles(optional(row.advisory_balance_cycles))}</strong></td>
+          <td class="metric-cell" title={format(optional(row.burn_cycles_per_day))}><span class="metric-label">Burn / day</span><strong>{formatCycles(optional(row.burn_cycles_per_day))}</strong></td>
+          <td class="metric-cell"><span class="metric-label">Runway</span><strong>{formatRunway(optional(row.runway_secs))}</strong></td>
+          <td class="rule-cell"><span class="metric-label">Top-up rule</span><div class="rule-summary"><strong>At {formatTCycles(row.low_balance_threshold_cycles)}T</strong><span>add {formatTCycles(row.refill_cycles)}T</span></div><small>{fundingTarget(row).daily_cap_cycles === undefined ? 'Cap unavailable' : `Cap ${formatTCycles(fundingTarget(row).daily_cap_cycles)}T/day`} · {fundingTarget(row).cooldown_secs === undefined ? 'Cooldown unavailable' : `${fundingTarget(row).cooldown_secs.toString()}s cooldown`}</small>{#if row.recent_topups.length}<small>Last: {variant(row.recent_topups[row.recent_topups.length - 1].outcome)} · {formatTCycles(row.recent_topups[row.recent_topups.length - 1].amount_cycles)}T</small>{/if}{#if signer && actor}<details class="row-disclosure rule-disclosure"><summary aria-label={`Edit rule for ${row.display_name}`}>Edit rule</summary><div class="rule-editor"><label>Threshold <span><input aria-label={`Low balance threshold for ${row.display_name}, T-cycles`} inputmode="decimal" value={ruleDraft(row).lowThreshold} on:input={(event) => ruleDraft(row).lowThreshold = event.currentTarget.value} /> T</span></label><label>Refill <span><input aria-label={`Refill amount for ${row.display_name}, T-cycles`} inputmode="decimal" value={ruleDraft(row).refill} on:input={(event) => ruleDraft(row).refill = event.currentTarget.value} /> T</span></label><label>Daily cap <span><input aria-label={`Daily cap for ${row.display_name}, T-cycles`} inputmode="decimal" value={ruleDraft(row).dailyCap} on:input={(event) => ruleDraft(row).dailyCap = event.currentTarget.value} /> T</span></label><label>Cooldown <span><input aria-label={`Cooldown for ${row.display_name}, seconds`} inputmode="numeric" value={ruleDraft(row).cooldown} on:input={(event) => ruleDraft(row).cooldown = event.currentTarget.value} /> s</span></label><button class="row-action" on:click={() => saveRule(row)}>Propose rule</button></div>{#if ruleErrors[row.principal.toText()]}<small class="rule-error" role="alert">{ruleErrors[row.principal.toText()]}</small>{/if}</details>{/if}</td>
+          <td class="row-actions">{#if signer && actor}<details class="row-disclosure"><summary aria-label={`Manage ${row.display_name}`}>Manage</summary><div class="manage-controls"><label class="inline-toggle"><input type="checkbox" checked={fundingTarget(row).enabled} on:change={(event) => toggleTargetEnabled(row, event.currentTarget.checked)} /> Enabled</label><label class="inline-toggle"><input type="checkbox" checked={fundingTarget(row).auto_topup} on:change={(event) => toggleAutoTopup(row, event.currentTarget.checked)} /> Auto-top-up</label>{#if fundingTarget(row).paused}<button class="row-action" on:click={() => run(() => sentinelManagement.proposeUnpauseTarget(actor!, row.principal))}>Propose unpause</button>{:else}<button class="row-action" on:click={() => run(() => sentinelManagement.pauseTarget(actor!, row.principal))}>Pause</button>{/if}<button class="row-action" disabled={!!manualTopUpLock} on:click={() => openManualTopUp(row)}>Manual top-up</button><button class="row-action" on:click={() => selectTarget(row)}>Use settings</button></div></details>{/if}</td>
         </tr>{/each}</tbody></table></div>{:else}<p class="muted">No targets have been published.</p>{/if}
       </article>
     </div>
@@ -1247,5 +1261,72 @@
     .registry-heading h2 { font-size: 1.1rem; }
     .table-scroll { margin-right: -.8rem; margin-left: -.8rem; padding-right: .8rem; padding-left: .8rem; }
     .alarm-popover { right: -.25rem; width: min(27rem, calc(100vw - 1.5rem)); }
+  }
+
+  /* The registry is telemetry first; editing expands only for the selected target. */
+  .table-scroll { overflow-x: auto; }
+  .table-scroll table { min-width: 1060px; table-layout: fixed; }
+  .registry-card th:nth-child(1) { width: 19%; }
+  .registry-card th:nth-child(2) { width: 14%; }
+  .registry-card th:nth-child(3), .registry-card th:nth-child(4), .registry-card th:nth-child(5) { width: 10%; }
+  .registry-card th:nth-child(6) { width: 25%; }
+  .registry-card th:nth-child(7) { width: 12%; }
+  .registry-card td:first-child, .registry-card td:nth-child(2), .registry-card td:nth-child(3) { min-width: 0; }
+  .registry-card td { padding-top: 1rem; padding-bottom: 1rem; }
+  .target-cell > strong { color: #f4f7fc; }
+  .target-cell small { margin-top: .15rem; }
+  .principal-copy { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .state-pill { display: inline-flex; align-items: center; padding: .2rem .55rem; border: 1px solid rgba(181, 200, 227, .18); border-radius: 99px; background: rgba(181, 200, 227, .08); color: #d4dfed; font-size: .75rem; font-weight: 650; line-height: 1.2; }
+  .state-pill.state-low { border-color: rgba(238, 178, 89, .32); background: rgba(238, 178, 89, .1); color: #f3c987; }
+  .state-pill.state-healthy { border-color: rgba(82, 223, 200, .23); background: rgba(82, 223, 200, .09); color: #8be9d8; }
+  .state-cell small { margin-top: .5rem; line-height: 1.3; }
+  .metric-cell strong { display: block; color: #f0f5fc; font-size: .94rem; font-variant-numeric: tabular-nums; font-weight: 620; }
+  .metric-label { display: none; }
+  .rule-summary { display: flex; align-items: baseline; gap: .35rem; flex-wrap: wrap; font-variant-numeric: tabular-nums; }
+  .rule-summary strong { color: #eaf5f4; font-size: .86rem; }
+  .rule-summary span { color: #8ce6d7; font-size: .83rem; }
+  .rule-summary span::before { content: '→'; margin-right: .35rem; color: #7e91ab; }
+  .rule-cell small { line-height: 1.35; }
+  .registry-card td.rule-cell { white-space: normal; }
+  .row-disclosure { margin-top: .55rem; }
+  .row-disclosure summary { width: max-content; max-width: 100%; color: #92e9d9; cursor: pointer; font-size: .75rem; font-weight: 600; list-style-position: inside; }
+  .row-disclosure summary:hover { color: #c5fff3; }
+  .row-disclosure summary:focus-visible { outline: 2px solid var(--sentinel-teal); outline-offset: 3px; border-radius: .2rem; }
+  .rule-editor, .manage-controls { display: grid; gap: .55rem; margin-top: .7rem; padding-top: .7rem; border-top: 1px solid var(--sentinel-line); }
+  .rule-editor { grid-template-columns: repeat(2, minmax(0, 1fr)); min-width: 0; }
+  .rule-editor label { display: block; min-width: 0; color: #c5d1e3; font-size: .72rem; }
+  .rule-editor label span { display: flex; align-items: center; gap: .3rem; margin-top: .2rem; }
+  .rule-editor input { width: 100%; min-width: 0; max-width: 7.5rem; min-height: 2rem; margin: 0; padding: .3rem .45rem; font-size: .78rem; font-variant-numeric: tabular-nums; }
+  .rule-editor .row-action { grid-column: 1 / -1; justify-self: start; }
+  .registry-card .rule-error { margin-top: .5rem; color: #ffb7b7; line-height: 1.4; white-space: normal; }
+  .manage-controls .inline-toggle { margin: 0; }
+  .manage-controls .row-action { width: 100%; margin: 0; text-align: left; white-space: normal; }
+  .row-actions { min-width: 0; vertical-align: top !important; }
+  .row-actions .row-disclosure { margin-top: 0; }
+
+  @media (max-width: 1100px) {
+    .table-scroll { overflow: visible; margin: .85rem 0 0; padding: 0; }
+    .table-scroll table { display: block; min-width: 0; width: 100%; }
+    .table-scroll thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+    .table-scroll tbody { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem; }
+    .registry-card tbody tr { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-areas: 'target target state' 'balance burn runway' 'rule rule rule' 'actions actions actions'; align-content: start; gap: .75rem .55rem; padding: 1rem; border: 1px solid var(--sentinel-line); border-radius: .55rem; background: rgba(9, 18, 33, .45); }
+    .registry-card tbody tr:hover { background: rgba(20, 37, 59, .6); }
+    .registry-card td, .registry-card tbody tr:last-child td { display: block; min-width: 0; padding: 0; border: 0; }
+    .target-cell { grid-area: target; }
+    .state-cell { grid-area: state; text-align: right; }
+    .state-cell small { font-size: .68rem; }
+    .metric-cell:nth-child(3) { grid-area: balance; }
+    .metric-cell:nth-child(4) { grid-area: burn; }
+    .metric-cell:nth-child(5) { grid-area: runway; }
+    .metric-cell { padding-top: .65rem !important; border-top: 1px solid var(--sentinel-line) !important; }
+    .metric-label { display: block; margin-bottom: .15rem; color: #9fb0c8; font-size: .69rem; }
+    .rule-cell { grid-area: rule; padding-top: .65rem !important; border-top: 1px solid var(--sentinel-line) !important; }
+    .row-actions { grid-area: actions; }
+    .row-actions .row-disclosure { margin-top: 0; }
+    .manage-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  @media (max-width: 760px) {
+    .table-scroll tbody { grid-template-columns: 1fr; }
+    .registry-card tbody tr { padding: .9rem; }
   }
 </style>
