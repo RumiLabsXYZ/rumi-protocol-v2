@@ -130,6 +130,19 @@ describe('Cycle Sentinel telemetry route contract', () => {
     expect(source).toContain('Sentinel funding balances: cycles');
   });
 
+  it('closes the manual top-up modal only after the backend reports completion', () => {
+    const submitSource = source.slice(source.indexOf('async function confirmManualTopUp()'), source.indexOf('const opt ='));
+    const completedBranch = submitSource.slice(
+      submitSource.indexOf("if (result.disposition === 'completed')"),
+      submitSource.indexOf("} else if (result.disposition === 'terminal')"),
+    );
+    expect(completedBranch).toContain('Top-up confirmed:');
+    expect(completedBranch).toContain('topupTarget = null;');
+    expect(submitSource).toContain("else if (result.disposition === 'terminal')");
+    expect(submitSource).toContain("else if (result.disposition === 'uncertain')");
+    expect(submitSource).toContain('is still pending');
+  });
+
   it('restores unresolved manual top-up locks on reload and preserves active dispatches', () => {
     const dataLoadSource = source.slice(source.indexOf('async function loadOperatorData('), source.indexOf('async function checkOperatorAccess()'));
     expect(dataLoadSource).toContain("nextUnresolved.find((item) => variant(item.trigger) === 'ManualTopup')");
