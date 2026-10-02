@@ -1,6 +1,6 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { Principal } from '@dfinity/principal';
   import { walletStore } from '$lib/stores/wallet';
   import { currentWalletType, walletSessionGeneration } from '$lib/services/auth';
@@ -83,6 +83,9 @@
   let selectedTargetPrincipal = '';
   let actor: SentinelActor | undefined;
   let alarmsOpen = false;
+  let alarmStorageWarning = '';
+  let acknowledgedAlarmIds = new Set<string>();
+  let acknowledgedAlarmIdentity: string | undefined;
   let topupTarget: TelemetrySnapshot['targets'][number] | null = null;
   let topupRail: 'CyclesLedger' | 'IcpCmc' = 'CyclesLedger';
   let topupCyclesAmount = '';
@@ -92,6 +95,7 @@
   let topupResult: { id: bigint; disposition: 'completed' | 'terminal' | 'pending' | 'uncertain'; state: string; amount: string; source: string } | null = null;
   let manualTopUpLock: { session: string; authorizedSession?: string; identityKey: string; target: Principal; rail?: 'CyclesLedger' | 'IcpCmc'; amount?: string; disposition: 'dispatching' | 'pending' | 'uncertain'; operationId?: bigint; inFlight: boolean; requiresOperatorAcknowledgement?: boolean } | null = null;
   const MANUAL_TOPUP_MARKER_KEY = 'rumi:cycle-sentinel:manual-topup';
+  const ACKNOWLEDGED_ALARMS_KEY = 'rumi:cycle-sentinel:acknowledged-alarms';
   let ruleDrafts: Record<string, { lowThreshold: string; refill: string; dailyCap: string; cooldown: string }> = {};
   let ruleErrors: Record<string, string> = {};
 
@@ -465,6 +469,70 @@
     return principal.toText();
   }
 
+  function acknowledgedAlarmsStoragePrefix(identityKey: string): string {
+    return `${ACKNOWLEDGED_ALARMS_KEY}:${CANISTER_IDS.CYCLE_SENTINEL}:${encodeURIComponent(identityKey)}:`;
+  }
+
+  function loadAcknowledgedAlarms(identityKey: string | undefined): void {
+    acknowledgedAlarmIdentity = identityKey;
+    acknowledgedAlarmIds = new Set();
+    alarmStorageWarning = '';
+    if (!identityKey) return;
+    try {
+      const prefix = acknowledgedAlarmsStoragePrefix(identityKey);
+      const ids = new Set<string>();
+      for (let index = 0; index < localStorage.length; index += 1) {
+        const key = localStorage.key(index);
+        if (key?.startsWith(prefix) && localStorage.getItem(key) === '1') {
+          const id = key.slice(prefix.length);
+          if (/^\d+$/.test(id)) ids.add(id);
+        }
+      }
+      acknowledgedAlarmIds = ids;
+    } catch {
+      // Browser storage may be disabled. Acknowledgement still works until reload.
+    }
+  }
+
+  function onAcknowledgedAlarmsStorageChange(event: StorageEvent): void {
+    const identityKey = latestWalletConnection.isConnected ? latestWalletConnection.principal?.toText() : undefined;
+    if (!identityKey) return;
+    if (event.key === null) {
+      loadAcknowledgedAlarms(identityKey);
+      return;
+    }
+    const prefix = acknowledgedAlarmsStoragePrefix(identityKey);
+    if (!event.key.startsWith(prefix)) return;
+    const id = event.key.slice(prefix.length);
+    if (!/^\d+$/.test(id)) return;
+    const next = new Set(acknowledgedAlarmIds);
+    if (event.newValue === '1') next.add(id);
+    else next.delete(id);
+    acknowledgedAlarmIds = next;
+  }
+
+  async function acknowledgeAlarmLocally(alarm: PublicAlarm, button: HTMLButtonElement): Promise<void> {
+    const identityKey = currentWalletIdentityKey();
+    if (!identityKey) return;
+    if (acknowledgedAlarmIdentity !== identityKey) loadAcknowledgedAlarms(identityKey);
+    const popover = button.closest('.alarm-popover');
+    const buttons = [...(popover?.querySelectorAll<HTMLButtonElement>('[data-alert-ack]') ?? [])];
+    const index = buttons.indexOf(button);
+    const nextFocus = buttons[index + 1] ?? buttons[index - 1] ?? popover?.querySelector<HTMLButtonElement>('[aria-label="Close alerts"]');
+    const next = new Set(acknowledgedAlarmIds);
+    const id = alarm.id.toString();
+    next.add(id);
+    alarmStorageWarning = '';
+    try {
+      localStorage.setItem(`${acknowledgedAlarmsStoragePrefix(identityKey)}${id}`, '1');
+    } catch {
+      alarmStorageWarning = 'Browser storage is unavailable; this alert may reappear after refresh or reconnect.';
+    }
+    acknowledgedAlarmIds = next;
+    await tick();
+    if (currentWalletIdentityKey() === identityKey && nextFocus?.isConnected) nextFocus.focus();
+  }
+
   function manualTopUpMarkerStorageKey(identityKey: string): string {
     return `${MANUAL_TOPUP_MARKER_KEY}:${encodeURIComponent(identityKey)}`;
   }
@@ -547,6 +615,7 @@
     const nextSession = walletSession();
     if (nextSession === observedWalletSession) return;
     observedWalletSession = nextSession;
+    loadAcknowledgedAlarms(nextSession ? latestWalletConnection.principal?.toText() : undefined);
     if (manualTopUpLock && manualTopUpLock.identityKey !== currentWalletIdentityKey()) manualTopUpLock = null;
     // Store subscriptions observe every connect, disconnect, and wallet-type
     // transition. This prevents a same-principal reconnection from retaining
@@ -670,7 +739,8 @@
   $: fundingEmpty = !!funding
     && fundingCyclesAvailable === 0n
     && fundingIcpAvailable === 0n;
-  $: openAlarmCount = snapshot?.alarms.filter((alarm) => alarmCanBeAcknowledged(alarm)).length ?? 0;
+  $: visibleAlarms = snapshot?.alarms.filter((alarm) => alarmCanBeAcknowledged(alarm) && !acknowledgedAlarmIds.has(alarm.id.toString())) ?? [];
+  $: openAlarmCount = visibleAlarms.length;
 
   async function refresh(): Promise<void> {
     const epoch = ++telemetryLoadEpoch;
@@ -868,6 +938,7 @@
   function alarmCanBeAcknowledged(alarm: PublicAlarm): boolean { return variant(alarm.status) === 'Open'; }
 
   onMount(() => {
+    window.addEventListener('storage', onAcknowledgedAlarmsStorageChange);
     const unsubscribeWallet = walletStore.subscribe((state) => {
       latestWalletConnection = { isConnected: state.isConnected, principal: state.principal };
       observeWalletSession();
@@ -881,6 +952,7 @@
       observeWalletSession();
     });
     return () => {
+      window.removeEventListener('storage', onAcknowledgedAlarmsStorageChange);
       unsubscribeWallet();
       unsubscribeWalletType();
       unsubscribeWalletSessionGeneration();
@@ -943,7 +1015,7 @@
   {#if !isCycleSentinelConfigured}<div class="notice">Cycle Sentinel is not configured yet. This page remains fail-closed until the authoritative Task 10 deployment.</div>
   {:else}
     {#if loading}<p class="muted">Loading private telemetry…</p>{/if}
-    {#if snapshot}<div class="stats"><div><span>Targets</span><strong>{format(snapshot.overview.target_count)}</strong></div><div><span>Healthy</span><strong>{format(snapshot.overview.healthy_count)}</strong></div><div><span>Runtime fuel</span><strong>{formatTCycles(snapshot.overview.runtime_cycles)} T</strong><small>This is Sentinel's own operating fuel.</small></div><div><span>Open alarms</span><strong>{format(snapshot.overview.alarm_count)}</strong></div></div>{/if}
+    {#if snapshot}<div class="stats"><div><span>Targets</span><strong>{format(snapshot.overview.target_count)}</strong></div><div><span>Healthy</span><strong>{format(snapshot.overview.healthy_count)}</strong></div><div><span>Runtime fuel</span><strong>{formatTCycles(snapshot.overview.runtime_cycles)} T</strong><small>This is Sentinel's own operating fuel.</small></div><div><span>Alerts to review</span><strong>{openAlarmCount}</strong></div></div>{/if}
     <section class="funding-wallet" aria-labelledby="funding-wallet-heading">
       <div class="funding-heading">
         <div>
@@ -991,12 +1063,13 @@
       <article class="registry-card">
         <div class="registry-heading"><h2>Target registry</h2>
           <div class="alarm-menu">
-            <button class="alarm-trigger" aria-label={`Alarms${openAlarmCount ? `, ${openAlarmCount} open` : ''}`} aria-expanded={alarmsOpen} on:click={() => alarmsOpen = !alarmsOpen}>
-              <span aria-hidden="true">🔔</span>{#if openAlarmCount}<i class="alarm-indicator"></i>{/if}<span>Alarms</span>{#if openAlarmCount}<b>{openAlarmCount}</b>{/if}
+            <button class="alarm-trigger" aria-label={`Alerts${openAlarmCount ? `, ${openAlarmCount} to review` : ', none to review'}`} aria-expanded={alarmsOpen} on:click={() => alarmsOpen = !alarmsOpen}>
+              <span aria-hidden="true">🔔</span>{#if openAlarmCount}<i class="alarm-indicator"></i>{/if}<span>Alerts</span>{#if openAlarmCount}<b>{openAlarmCount}</b>{/if}
             </button>
-            {#if alarmsOpen}<section class="alarm-popover" aria-label="Sentinel alarms">
-              <div class="alarm-popover-heading"><strong>Alarms</strong><button class="quiet-button" aria-label="Close alarms" on:click={() => alarmsOpen = false}>×</button></div>
-              {#if snapshot.alarms.length}{#each snapshot.alarms as alarm}<div class="alarm-row"><span class:dot-open={alarmCanBeAcknowledged(alarm)} class="alarm-dot"></span><div class="alarm-copy"><strong>{variant(alarm.kind)}</strong><small>{alarm.target[0]?.toText() ?? 'Sentinel'}</small></div><span class="alarm-status">{variant(alarm.status)}</span>{#if signer && actor && alarmCanBeAcknowledged(alarm)}<button class="quiet-button" on:click={() => run(() => sentinelManagement.acknowledgeAlarm(actor!, alarm.id))}>Acknowledge</button>{/if}</div>{/each}{:else}<p class="muted">No alarms.</p>{/if}
+            {#if alarmsOpen}<section class="alarm-popover" aria-label="Sentinel alerts">
+              <div class="alarm-popover-heading"><strong>Alerts to review</strong><span class="muted" role="status" aria-live="polite" aria-atomic="true">{openAlarmCount} remaining</span><button class="quiet-button" aria-label="Close alerts" on:click={() => alarmsOpen = false}>×</button></div>
+              {#if alarmStorageWarning}<p class="fine-print" role="alert">{alarmStorageWarning}</p>{/if}
+              {#if visibleAlarms.length}<p class="fine-print">Acknowledge hides an alert in this browser. Monitoring continues, and a new incident will appear.</p>{#each visibleAlarms as alarm (alarm.id.toString())}<div class="alarm-row"><span class="alarm-dot dot-open"></span><div class="alarm-copy"><strong>{variant(alarm.kind)}</strong><small>{alarm.target[0]?.toText() ?? 'Sentinel'}</small></div><button class="quiet-button alarm-status" data-alert-ack aria-label={`Acknowledge ${variant(alarm.kind)} alert for ${alarm.target[0]?.toText() ?? 'Sentinel'}`} on:click={(event) => acknowledgeAlarmLocally(alarm, event.currentTarget)}>Acknowledge</button></div>{/each}{:else}<p class="muted">No alerts to review.</p>{/if}
             </section>{/if}
           </div>
         </div>
