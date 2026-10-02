@@ -115,8 +115,21 @@ describe('Cycle Sentinel telemetry route contract', () => {
       'proposeRegisterTarget', 'proposeUpdateTarget', 'proposeRemoveTarget', 'pauseTarget',
       'proposeUnpauseTarget', 'proposeAddSigner', 'proposeRemoveSigner', 'proposeSetSignerThreshold',
       'proposeSetGlobalPolicy', 'approveProposal', 'executeProposal', 'cancelProposal',
-      'acknowledgeAlarm', 'manualTopUpWithAmount', 'attachBlockProof', 'attachRefundBlockProof', 'resolveUnknownAsSpent',
+      'manualTopUpWithAmount', 'attachBlockProof', 'attachRefundBlockProof', 'resolveUnknownAsSpent',
     ]) expect(source).toContain(`sentinelManagement.${method}`);
+  });
+
+  it('clears alerts from the current browser without a wallet transaction', () => {
+    expect(source).toContain('on:click={(event) => acknowledgeAlarmLocally(alarm, event.currentTarget)}');
+    expect(source).not.toContain('sentinelManagement.acknowledgeAlarm(');
+    expect(source).toContain("localStorage.setItem(`${acknowledgedAlarmsStoragePrefix(identityKey)}${id}`, '1')");
+    expect(source).toContain('loadAcknowledgedAlarms(nextSession ? latestWalletConnection.principal?.toText() : undefined)');
+    expect(source).toContain("window.addEventListener('storage', onAcknowledgedAlarmsStorageChange)");
+    expect(source).toContain('!acknowledgedAlarmIds.has(alarm.id.toString())');
+    expect(source).toContain('Alerts to review</span><strong>{openAlarmCount}');
+    expect(source).toContain('aria-live="polite" aria-atomic="true">{openAlarmCount} remaining');
+    expect(source).toContain('aria-label={`Acknowledge ${variant(alarm.kind)} alert for ${alarm.target[0]?.toText() ?? \'Sentinel\'}`}');
+    expect(source).toContain('nextFocus?.isConnected) nextFocus.focus()');
   });
 
   it('requires an outcome-neutral explicit acknowledgement before clearing a durable top-up lock', () => {

@@ -253,7 +253,6 @@ export const sentinelManagement = {
   approveProposal(actor: SentinelActor, id: bigint) { assertNat(id, 'Proposal ID'); return actor.approve_proposal(id).then(resultOk); },
   executeProposal(actor: SentinelActor, id: bigint) { assertNat(id, 'Proposal ID'); return actor.execute_proposal(id).then(resultOk); },
   cancelProposal(actor: SentinelActor, id: bigint) { assertNat(id, 'Proposal ID'); return actor.cancel_proposal(id).then(resultOk); },
-  acknowledgeAlarm(actor: SentinelActor, id: bigint) { assertNat(id, 'Alarm ID'); return actor.acknowledge_alarm(id).then(resultOk); },
   pauseTarget(actor: SentinelActor, target: Principal) { if (target.isAnonymous()) throw new Error('Target principal cannot be anonymous.'); return actor.pause_target(target).then(resultOk); },
   manualTopUp(actor: SentinelActor, target: Principal): Promise<FundingOperation> { if (target.isAnonymous()) throw new Error('Target principal cannot be anonymous.'); return actor.manual_top_up(target).then(resultOk); },
   manualTopUpWithAmount(actor: SentinelActor, target: Principal, rail: FundingRail, amount: bigint): Promise<FundingOperation> {
