@@ -102,6 +102,13 @@ fn propose_update_target(
 }
 
 #[ic_cdk::update]
+fn propose_update_targets(
+    updates: Vec<types::TargetUpdate>,
+) -> Result<u64, governance::GovernanceError> {
+    governance::propose_update_targets_at(ic_cdk::caller(), now_secs(), updates)
+}
+
+#[ic_cdk::update]
 fn propose_remove_target(principal: Principal) -> Result<u64, governance::GovernanceError> {
     governance::propose_remove_target_at(ic_cdk::caller(), now_secs(), principal)
 }
@@ -413,7 +420,8 @@ fn acknowledge_alarm(id: u64) -> Result<bool, governance::GovernanceError> {
 // ─────────────────────────── Private cached telemetry ───────────────────────────
 
 fn require_telemetry_viewer() -> Result<(), String> {
-    if telemetry_access::is_telemetry_viewer(ic_cdk::caller()) {
+    let caller = ic_cdk::caller();
+    if telemetry_access::is_telemetry_viewer(caller) || state::is_signer(caller) {
         Ok(())
     } else {
         Err("caller is not authorized to view private telemetry".to_string())

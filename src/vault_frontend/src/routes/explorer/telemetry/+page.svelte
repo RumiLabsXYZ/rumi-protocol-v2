@@ -51,6 +51,7 @@
     TargetArgs,
     TargetFundingPolicy,
     TargetPatch,
+    TargetUpdate,
     GlobalPolicyArgs,
     FundingOperation,
     FundingRail,
@@ -82,6 +83,7 @@
   let copyError = '';
   let selectedTargetPrincipal = '';
   let actor: SentinelActor | undefined;
+  let cachedActorForSession: { session: string; promise: Promise<SentinelActor> } | null = null;
   let alarmsOpen = false;
   let alarmStorageWarning = '';
   let acknowledgedAlarmIds = new Set<string>();
@@ -93,7 +95,7 @@
   let submittingTopup = false;
   let topupError = '';
   let topupResult: { id: bigint; disposition: 'completed' | 'terminal' | 'pending' | 'uncertain'; state: string; amount: string; source: string } | null = null;
-  let manualTopUpLock: { session: string; authorizedSession?: string; identityKey: string; target: Principal; rail?: 'CyclesLedger' | 'IcpCmc'; amount?: string; disposition: 'dispatching' | 'pending' | 'uncertain'; operationId?: bigint; inFlight: boolean; requiresOperatorAcknowledgement?: boolean } | null = null;
+  let manualTopUpLock: { session: string; authorizedSession?: string; identityKey: string; target: Principal; rail?: 'CyclesLedger' | 'IcpCmc'; amount?: string; requestId?: string; disposition: 'dispatching' | 'pending' | 'uncertain'; operationId?: bigint; inFlight: boolean; requiresOperatorAcknowledgement?: boolean } | null = null;
   const MANUAL_TOPUP_MARKER_KEY = 'rumi:cycle-sentinel:manual-topup';
   const ACKNOWLEDGED_ALARMS_KEY = 'rumi:cycle-sentinel:acknowledged-alarms';
   let ruleDrafts: Record<string, { lowThreshold: string; refill: string; dailyCap: string; cooldown: string }> = {};
@@ -159,6 +161,12 @@
       timer = setTimeout(() => reject(new Error(`${stage} timed out. Check that your wallet request completed, then retry.`)), OPERATOR_QUERY_TIMEOUT_MS);
     });
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  }
+  function authenticatedActorForSession(session: string): Promise<SentinelActor> {
+    if (cachedActorForSession?.session === session) return cachedActorForSession.promise;
+    const promise = createAuthenticatedSentinelActor();
+    cachedActorForSession = { session, promise };
+    return promise;
   }
   const format = (value: bigint | undefined): string => value === undefined ? 'Unavailable' : value.toLocaleString();
   const optional = <T,>(value: [] | [T]): T | undefined => value.length ? value[0] : undefined;
@@ -255,6 +263,45 @@
     }
   }
 
+  async function proposeBulkTargetFlags(mode: 'enable' | 'auto-top-up'): Promise<void> {
+    authError = '';
+    actionMessage = '';
+    try {
+      assertCurrentSigner();
+      if (!snapshot) throw new Error('Refresh telemetry before proposing target changes.');
+      const unobserved = snapshot.targets.filter((row) => variant(row.observation_mode) === 'Unobserved').length;
+      const paused = mode === 'auto-top-up'
+        ? snapshot.targets.filter((row) => variant(row.observation_mode) !== 'Unobserved' && fundingTarget(row).paused).length
+        : 0;
+      const candidates = snapshot.targets.filter((row) => {
+        const current = fundingTarget(row);
+        if (variant(row.observation_mode) === 'Unobserved') return false;
+        if (mode === 'auto-top-up' && current.paused) return false;
+        return mode === 'enable' ? !current.enabled : !current.enabled || !current.auto_topup;
+      });
+      if (candidates.length === 0) {
+        const skipped = [
+          unobserved ? `${unobserved} unobserved skipped` : '',
+          paused ? `${paused} paused skipped` : '',
+        ].filter(Boolean).join('; ');
+        actionMessage = `${mode === 'enable' ? 'All observable targets are already enabled.' : 'All eligible targets already have monitoring and auto top-up enabled.'}${skipped ? ` ${skipped}.` : ''}`;
+        return;
+      }
+      const updates: TargetUpdate[] = candidates.map((row) => ({
+        principal: row.principal,
+        patch: mode === 'enable'
+          ? targetPatchFor({ enabled: [true] })
+          : targetPatchFor({ enabled: [true], auto_topup: [true] }),
+      }));
+      await sentinelManagement.proposeUpdateTargets(actor!, updates);
+      const alreadyMatched = snapshot.targets.length - candidates.length - unobserved - paused;
+      actionMessage = `One governed proposal was created for ${candidates.length} target${candidates.length === 1 ? '' : 's'}${alreadyMatched > 0 ? `; ${alreadyMatched} already matched` : ''}${unobserved > 0 ? `; ${unobserved} unobserved target${unobserved === 1 ? ' was' : 's were'} skipped` : ''}${paused > 0 ? `; ${paused} paused target${paused === 1 ? ' was' : 's were'} skipped` : ''}. A second signer must approve it, then the target-registry timelock applies.`;
+      await refresh();
+    } catch (error) {
+      authError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
   function targetPatchFor(changes: Partial<TargetPatch>): TargetPatch {
     return {
       display_name: changes.display_name ?? [],
@@ -334,6 +381,15 @@
     try { return selectedTopUpAmount() > 0n; } catch { return false; }
   }
 
+  function selectedAmountExceedsFreshSpendableBalance(): boolean {
+    if (!validTopUpAmount()) return false;
+    const amount = selectedTopUpAmount();
+    if (topupRail === 'CyclesLedger') {
+      return !fundingCyclesBalanceStale && fundingCyclesAvailable !== undefined && amount > fundingCyclesAvailable;
+    }
+    return !fundingIcpBalanceStale && fundingIcpAvailable !== undefined && amount > fundingIcpAvailable;
+  }
+
   function hasCurrentManualTopUpAuthority(): boolean {
     const session = currentWalletSession();
     return !!session && signer && !!actor && checkedSession === session
@@ -362,6 +418,7 @@
     let requestAmount: bigint;
     let requestAmountLabel: string;
     let requestSource: string;
+    let requestId: string;
     try {
       assertCurrentSigner();
       const session = currentWalletSession();
@@ -372,6 +429,7 @@
         throw new Error('Operator access changed. Check signer access again before submitting an action.');
       }
       requestSession = session;
+      requestId = crypto.randomUUID();
       requestEpoch = operatorAccessEpoch;
       requestActor = capturedActor;
       requestTarget = capturedTarget.principal;
@@ -389,11 +447,11 @@
         && signer
         && checkedSession === requestSession;
 
-      storeManualTopUpMarker({ identityKey: requestIdentityKey, target: requestTarget.toText(), rail: topupRail, amount: requestAmountLabel });
+      storeManualTopUpMarker({ identityKey: requestIdentityKey, target: requestTarget.toText(), rail: topupRail, amount: requestAmountLabel, requestId });
       submittingTopup = true;
       topupError = '';
       actionMessage = '';
-      manualTopUpLock = { session: requestSession, authorizedSession: requestSession, identityKey: requestIdentityKey, target: requestTarget, rail: topupRail, amount: requestAmountLabel, disposition: 'dispatching', inFlight: true };
+      manualTopUpLock = { session: requestSession, authorizedSession: requestSession, identityKey: requestIdentityKey, target: requestTarget, rail: topupRail, amount: requestAmountLabel, requestId, disposition: 'dispatching', inFlight: true };
       try {
         const operation = await sentinelManagement.manualTopUpWithAmount(requestActor, requestTarget, requestRail, requestAmount);
         const result = manualTopUpDisposition(operation);
@@ -402,8 +460,8 @@
           return;
         }
         if (result.disposition === 'pending' || result.disposition === 'uncertain') {
-          manualTopUpLock = { session: requestSession, authorizedSession: requestSession, identityKey: requestIdentityKey, target: requestTarget, rail: topupRail, amount: requestAmountLabel, disposition: result.disposition, operationId: operation.id, inFlight: false };
-          storeManualTopUpMarker({ identityKey: requestIdentityKey, target: requestTarget.toText(), rail: topupRail, amount: requestAmountLabel, operationId: operation.id, state: result.state });
+          manualTopUpLock = { session: requestSession, authorizedSession: requestSession, identityKey: requestIdentityKey, target: requestTarget, rail: topupRail, amount: requestAmountLabel, requestId, disposition: result.disposition, operationId: operation.id, inFlight: false };
+          storeManualTopUpMarker({ identityKey: requestIdentityKey, target: requestTarget.toText(), rail: topupRail, amount: requestAmountLabel, requestId, operationId: operation.id, state: result.state });
         } else {
           clearManualTopUpMarker(requestIdentityKey);
           manualTopUpLock = null;
@@ -421,13 +479,26 @@
           topupError = `Operation #${operation.id.toString()} is still pending (${result.state}). Do not submit again until it settles; review it in the operator console.`;
         }
       } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message.includes('SourceReserve(InsufficientReserve)')) {
+          // The canister rejects this during preparation, before it persists
+          // an operation or awaits a ledger transfer.
+          clearManualTopUpMarker(requestIdentityKey, requestId);
+          if (!isCurrentRequest()) {
+            if (manualTopUpLock?.requestId === requestId) manualTopUpLock = null;
+            return;
+          }
+          manualTopUpLock = null;
+          topupError = 'Cycle Sentinel stopped this before sending a ledger transfer; no unresolved funding operation was created. Spendable cycles could not cover the transfer and fee while preserving the protected reserve. Refresh funding balances and wait until spendable funds cover both before considering another attempt.';
+          return;
+        }
         // A rejected wallet/network promise does not prove the canister rejected
         // the call: the update may have reached execution already.
         if (!isCurrentRequest()) {
           if (manualTopUpLock?.session === requestSession && manualTopUpLock.target.toText() === requestTarget.toText()) manualTopUpLock = { ...manualTopUpLock, inFlight: false };
           return;
         }
-        manualTopUpLock = { session: requestSession, authorizedSession: requestSession, identityKey: requestIdentityKey, target: requestTarget, rail: topupRail, amount: requestAmountLabel, disposition: 'uncertain', inFlight: false };
+        manualTopUpLock = { session: requestSession, authorizedSession: requestSession, identityKey: requestIdentityKey, target: requestTarget, rail: topupRail, amount: requestAmountLabel, requestId, disposition: 'uncertain', inFlight: false };
         topupError = `The request outcome could not be confirmed${error instanceof Error ? ` (${error.message})` : ''}. Do not submit it again. Check unresolved funding operations in the operator console before retrying.`;
       } finally {
         if (isCurrentRequest()) submittingTopup = false;
@@ -533,24 +604,55 @@
     if (currentWalletIdentityKey() === identityKey && nextFocus?.isConnected) nextFocus.focus();
   }
 
+  async function acknowledgeAllAlarms(): Promise<void> {
+    const identityKey = currentWalletIdentityKey();
+    if (!identityKey) return;
+    if (acknowledgedAlarmIdentity !== identityKey) loadAcknowledgedAlarms(identityKey);
+    const alarms = [...visibleAlarms];
+    if (!alarms.length) return;
+    const next = new Set(acknowledgedAlarmIds);
+    let storageFailed = false;
+    for (const alarm of alarms) {
+      const id = alarm.id.toString();
+      next.add(id);
+      try {
+        localStorage.setItem(`${acknowledgedAlarmsStoragePrefix(identityKey)}${id}`, '1');
+      } catch {
+        storageFailed = true;
+      }
+    }
+    acknowledgedAlarmIds = next;
+    alarmStorageWarning = storageFailed
+      ? 'Some acknowledgements could not be saved in browser storage; those alerts may reappear after refresh or reconnect.'
+      : '';
+    await tick();
+    document.querySelector<HTMLButtonElement>('.alarm-trigger')?.focus();
+  }
+
   function manualTopUpMarkerStorageKey(identityKey: string): string {
     return `${MANUAL_TOPUP_MARKER_KEY}:${encodeURIComponent(identityKey)}`;
   }
 
-  function storeManualTopUpMarker(marker: { identityKey: string; target: string; rail: 'CyclesLedger' | 'IcpCmc'; amount: string; operationId?: bigint; state?: string }): void {
+  function storeManualTopUpMarker(marker: { identityKey: string; target: string; rail: 'CyclesLedger' | 'IcpCmc'; amount: string; requestId?: string; operationId?: bigint; state?: string }): void {
     sessionStorage.setItem(manualTopUpMarkerStorageKey(marker.identityKey), JSON.stringify({
       principal: marker.identityKey,
       target: marker.target,
       rail: marker.rail,
       amount: marker.amount,
+      requestId: marker.requestId,
       operationId: marker.operationId?.toString(),
       state: marker.state,
     }));
   }
 
-  function clearManualTopUpMarker(identityKey: string): boolean {
+  function clearManualTopUpMarker(identityKey: string, expectedRequestId?: string): boolean {
     try {
-      sessionStorage.removeItem(manualTopUpMarkerStorageKey(identityKey));
+      const key = manualTopUpMarkerStorageKey(identityKey);
+      if (expectedRequestId !== undefined) {
+        const raw = sessionStorage.getItem(key);
+        if (!raw || (JSON.parse(raw) as { requestId?: string }).requestId !== expectedRequestId) return true;
+      }
+      sessionStorage.removeItem(key);
       return true;
     } catch {
       return false;
@@ -599,6 +701,7 @@
     operatorDataError = '';
     checkedSession = undefined;
     actor = undefined;
+    cachedActorForSession = null;
     proposals = [];
     unresolved = [];
   }
@@ -628,6 +731,7 @@
       return;
     }
     void refresh();
+    if (nextSession && isCycleSentinelConfigured) void checkOperatorAccess();
   }
 
   function fundingPolicy(): TargetFundingPolicy {
@@ -754,7 +858,7 @@
       return;
     }
     try {
-      const authenticated = await createAuthenticatedSentinelActor();
+      const authenticated = await authenticatedActorForSession(session);
       const next = await loadPublicTelemetry(authenticated);
       if (epoch === telemetryLoadEpoch && session === currentWalletSession()) snapshot = next;
     } catch {
@@ -859,7 +963,7 @@
       session = currentWalletSession();
       if (!session) throw new Error('Connect a wallet before checking operator access.');
       epoch = ++operatorAccessEpoch;
-      const authenticated = await withOperatorQueryTimeout(createAuthenticatedSentinelActor(), 'Connecting to the wallet');
+      const authenticated = await withOperatorQueryTimeout(authenticatedActorForSession(session), 'Connecting to the wallet');
       if (!operatorCheckIsCurrent(session, epoch)) return;
       const permissions = await withOperatorQueryTimeout(getPermissions(authenticated), 'Checking signer permission');
       if (!operatorCheckIsCurrent(session, epoch)) return;
@@ -1062,12 +1166,13 @@
     <div class="registry-shell">
       <article class="registry-card">
         <div class="registry-heading"><h2>Target registry</h2>
+          {#if signer && actor}<div class="registry-bulk-actions"><button on:click={() => proposeBulkTargetFlags('enable')}>Enable All</button><button class="bulk-primary" on:click={() => proposeBulkTargetFlags('auto-top-up')}>Auto Top Up All</button></div>{/if}
           <div class="alarm-menu">
             <button class="alarm-trigger" aria-label={`Alerts${openAlarmCount ? `, ${openAlarmCount} to review` : ', none to review'}`} aria-expanded={alarmsOpen} on:click={() => alarmsOpen = !alarmsOpen}>
               <span aria-hidden="true">🔔</span>{#if openAlarmCount}<i class="alarm-indicator"></i>{/if}<span>Alerts</span>{#if openAlarmCount}<b>{openAlarmCount}</b>{/if}
             </button>
             {#if alarmsOpen}<section class="alarm-popover" aria-label="Sentinel alerts">
-              <div class="alarm-popover-heading"><strong>Alerts to review</strong><span class="muted" role="status" aria-live="polite" aria-atomic="true">{openAlarmCount} remaining</span><button class="quiet-button" aria-label="Close alerts" on:click={() => alarmsOpen = false}>×</button></div>
+              <div class="alarm-popover-heading"><strong>Alerts to review</strong><span class="muted" role="status" aria-live="polite" aria-atomic="true">{openAlarmCount} remaining</span>{#if openAlarmCount}<button class="quiet-button acknowledge-all" on:click={acknowledgeAllAlarms}>Acknowledge All</button>{/if}<button class="quiet-button" aria-label="Close alerts" on:click={() => alarmsOpen = false}>×</button></div>
               {#if alarmStorageWarning}<p class="fine-print" role="alert">{alarmStorageWarning}</p>{/if}
               {#if visibleAlarms.length}<p class="fine-print">Acknowledge hides an alert in this browser. Monitoring continues, and a new incident will appear.</p>{#each visibleAlarms as alarm (alarm.id.toString())}<div class="alarm-row"><span class="alarm-dot dot-open"></span><div class="alarm-copy"><strong>{variant(alarm.kind)}</strong><small>{alarm.target[0]?.toText() ?? 'Sentinel'}</small></div><button class="quiet-button alarm-status" data-alert-ack aria-label={`Acknowledge ${variant(alarm.kind)} alert for ${alarm.target[0]?.toText() ?? 'Sentinel'}`} on:click={(event) => acknowledgeAlarmLocally(alarm, event.currentTarget)}>Acknowledge</button></div>{/each}{:else}<p class="muted">No alerts to review.</p>{/if}
             </section>{/if}
@@ -1097,7 +1202,7 @@
       <article><h3>Global policy governance</h3><div class="form-grid"><label>Global daily cap<input bind:value={globalDailyCap} inputmode="numeric" /></label><label>Sample interval seconds<input bind:value={sampleInterval} inputmode="numeric" /></label><label>Stale-after seconds<input bind:value={staleAfter} inputmode="numeric" /></label><label>Minimum ICP reserve e8s<input bind:value={minIcpReserve} inputmode="numeric" /></label><label>Self-recovery refill<input bind:value={selfRefill} inputmode="numeric" /></label><label>Self-recovery low threshold<input bind:value={selfLowThreshold} inputmode="numeric" /></label><label>Self-recovery daily cap<input bind:value={selfDailyCap} inputmode="numeric" /></label><label>Protected reserve cycles<input bind:value={protectedReserve} inputmode="numeric" /></label><label>Unpause timelock seconds<input bind:value={unpauseTimelock} inputmode="numeric" /></label><label>Spend-policy timelock seconds<input bind:value={spendTimelock} inputmode="numeric" /></label><label>Target-registry timelock seconds<input bind:value={targetTimelock} inputmode="numeric" /></label><label>Signer-change timelock seconds<input bind:value={signerTimelock} inputmode="numeric" /></label></div><button on:click={() => run(() => sentinelManagement.proposeSetGlobalPolicy(actor!, globalPolicy()))}>Propose global policy</button></article>
       <article><h3>Proposal list and actions</h3><label>Proposal ID<input bind:value={proposalId} inputmode="numeric" /></label><div class="actions"><button on:click={() => run(() => sentinelManagement.approveProposal(actor!, proposal()))}>Approve proposal</button><button on:click={() => run(() => sentinelManagement.executeProposal(actor!, proposal()))}>Execute proposal</button><button on:click={() => run(() => sentinelManagement.cancelProposal(actor!, proposal()))}>Cancel proposal</button></div>{#if !operatorDataLoaded}<p class="muted">{operatorDataLoading ? 'Loading proposals…' : operatorDataError ? 'Proposal list unavailable; retry list loading above.' : 'Proposal list has not been loaded.'}</p>{:else if proposals.length}<ul>{#each proposals as item}<li>#{item.id.toString()} · {variant(item.status)} · {variant(item.payload)} · {item.approvals.length} approval(s)</li>{/each}</ul>{:else}<p class="muted">No proposals returned.</p>{/if}</article>
       <article><h3>Unresolved funding operations</h3><div class="form-grid"><label>Operation ID<input bind:value={operationId} inputmode="numeric" /></label><label>Ledger block index<input bind:value={blockIndex} inputmode="numeric" /></label></div><div class="actions"><button on:click={() => run(() => sentinelManagement.attachBlockProof(actor!, operation(), id(blockIndex, 'Block index')))}>Attach delivery proof</button><button on:click={() => run(() => sentinelManagement.attachRefundBlockProof(actor!, operation(), id(blockIndex, 'Block index')))}>Attach refund proof</button><button on:click={() => run(() => sentinelManagement.resolveUnknownAsSpent(actor!, operation()) )}>Resolve unknown as spent</button></div>{#if !operatorDataLoaded}<p class="muted">{operatorDataLoading ? 'Loading unresolved operations…' : operatorDataError ? 'Unresolved-operation list unavailable; retry list loading above.' : 'Unresolved-operation list has not been loaded.'}</p>{:else if unresolved.length}<ul>{#each unresolved as item}<li>#{item.id.toString()} · {variant(item.state)} · target {item.target.toText()} · reserved {item.reserved_amount_cycles.toString()} cycles</li>{/each}</ul>{:else}<p class="muted">No unresolved funding operations returned.</p>{/if}</article>
-    {:else}<p class="muted">{operatorChecked ? 'This wallet is authenticated but is not a configured Sentinel signer. Private telemetry remains available to approved principals.' : 'Checking operator access asks your wallet to approve a read-only signer-permission query. It never changes Sentinel policy or moves cycles.'}</p><button on:click={checkOperatorAccess} disabled={checkingOperatorAccess}>{checkingOperatorAccess ? 'Checking operator access…' : 'Check operator access'}</button>{/if}
+    {:else}<p class="muted" role={checkingOperatorAccess ? 'status' : undefined}>{checkingOperatorAccess ? 'Checking signer permissions with the connected wallet…' : operatorChecked ? 'This wallet is connected but is not a configured Sentinel signer. Telemetry access does not grant operator controls.' : 'Signer permission could not be confirmed. Retry with the connected wallet.'}</p>{#if !operatorChecked || authError}<button on:click={checkOperatorAccess} disabled={checkingOperatorAccess}>{checkingOperatorAccess ? 'Checking signer access…' : 'Retry signer check'}</button>{/if}{/if}
   </section>{:else}<div class="login-note">Connect a wallet to check signer permissions and access operator controls.</div>{/if}
   {/if}
   {/if}
@@ -1133,7 +1238,8 @@
       {#if topupResult}<div class:notice={true} class:success={topupResult.disposition === 'completed'} class:error={topupResult.disposition !== 'completed'} role="status">
         Operation #{topupResult.id.toString()} · {topupResult.state} · {topupResult.amount} · {topupResult.source}
       </div>{/if}
-      <div class="modal-actions"><button on:click={() => topupTarget = null}>Close</button><button class="confirm-topup" disabled={submittingTopup || !!manualTopUpLock || !!topupResult || !validTopUpAmount()} on:click={confirmManualTopUp}>{submittingTopup ? 'Submitting…' : manualTopUpLock ? 'Awaiting confirmation' : 'Confirm top-up'}</button></div>
+      {#if selectedAmountExceedsFreshSpendableBalance()}<p class="notice error" role="alert">The requested transfer is above the fresh spendable balance, before ledger fees. Add funds above the protected reserve and refresh before submitting.</p>{/if}
+      <div class="modal-actions"><button on:click={() => topupTarget = null}>Close</button><button class="confirm-topup" disabled={submittingTopup || !!manualTopUpLock || !!topupResult || !validTopUpAmount() || selectedAmountExceedsFreshSpendableBalance()} on:click={confirmManualTopUp}>{submittingTopup ? 'Submitting…' : manualTopUpLock ? 'Awaiting confirmation' : selectedAmountExceedsFreshSpendableBalance() ? 'Insufficient spendable balance' : 'Confirm top-up'}</button></div>
     </div>
   </div>
 {/if}
@@ -1234,6 +1340,10 @@
   }
   .registry-heading { align-items: center; padding-bottom: .9rem; border-bottom: 1px solid var(--sentinel-line); }
   .registry-heading h2 { margin: 0; font-size: 1.3rem; letter-spacing: -.02em; }
+  .registry-bulk-actions { display: flex; flex-wrap: wrap; gap: .45rem; margin-left: auto; }
+  .registry-bulk-actions .bulk-primary { color: #071b1c; background: #69dfcb; border-color: #69dfcb; font-weight: 700; }
+  .registry-bulk-actions .bulk-primary:hover:not(:disabled) { background: #a1f3e5; border-color: #a1f3e5; }
+  .acknowledge-all { color: #8debdc; border-color: rgba(82, 223, 200, .45); }
   .table-scroll { margin: .25rem -1.4rem 0; padding: 0 1.4rem .5rem; scrollbar-color: #435776 #111c30; }
   .table-scroll table { min-width: 1380px; border-collapse: separate; border-spacing: 0; }
   .registry-card th { padding: .8rem .7rem; color: #b4c3da; font-size: .75rem; font-weight: 600; letter-spacing: .025em; border-bottom: 1px solid rgba(174, 195, 224, .23); }
@@ -1307,7 +1417,10 @@
   .topup-summary dt { color: #b6c5dc; }
   .topup-summary dd { color: #edf2fa; line-height: 1.45; }
   .topup-modal .fine-print { color: #b4c1d6; font-size: .76rem; }
-  .modal-actions { padding-top: .8rem; border-top: 1px solid rgba(180, 198, 226, .15); }
+  .modal-actions { position: sticky; bottom: -1.5rem; z-index: 1; padding: .8rem 0 0; border-top: 1px solid rgba(180, 198, 226, .22); background: #17243a; }
+  .telemetry-page .confirm-topup:not(:disabled) { color: #061a1b; background: #69dfcb; border-color: #69dfcb; font-weight: 750; box-shadow: 0 0 0 1px rgba(6, 26, 27, .2) inset; }
+  .telemetry-page .confirm-topup:not(:disabled):hover { color: #061a1b; background: #a1f3e5; border-color: #a1f3e5; }
+  .telemetry-page .confirm-topup:disabled { color: #e5edf7; background: #354963; border-color: #72849d; opacity: 1; cursor: not-allowed; }
   @media (min-width: 1580px) {
     .telemetry-page { width: 1540px; margin-left: calc(50% - 770px); }
   }
@@ -1317,6 +1430,9 @@
     .check-controls { flex: 1 1 100%; max-width: none; }
     .funding-wallet { padding: 1rem; }
     .registry-card { padding: 1rem; }
+    .registry-heading { flex-wrap: wrap; }
+    .registry-bulk-actions { order: 3; width: 100%; margin-left: 0; }
+    .alarm-menu { margin-left: auto; }
     .table-scroll { margin-right: -1rem; margin-left: -1rem; padding-right: 1rem; padding-left: 1rem; }
     .table-scroll table { min-width: 1280px; }
   }

@@ -68,8 +68,9 @@ use crate::state::{self, GlobalConfig, RemoveTargetError};
 use crate::types::{
     self, GlobalPolicy, GlobalPolicyArgs, GlobalPolicyError, GovernanceTimelocks, ProposalKind,
     ProposalPayload, ProposalRecord, ProposalStatus, TargetArgs, TargetPatch, TargetRecord,
-    TargetRegistrationContext, TargetValidationError,
+    TargetRegistrationContext, TargetUpdate, TargetValidationError,
 };
+use std::collections::BTreeSet;
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum GovernanceError {
@@ -143,6 +144,9 @@ pub(crate) enum GovernanceError {
     SelfRecoveryCapBelowPendingReservation {
         operation_id: u64,
     },
+    EmptyTargetUpdates,
+    TooManyTargetUpdates,
+    DuplicateTargetUpdate(Principal),
     Alarm(AlarmError),
 }
 
@@ -154,16 +158,17 @@ fn require_signer(caller: Principal) -> Result<(), GovernanceError> {
     }
 }
 
-/// The design's four timelock buckets map onto the eight proposal kinds by
+/// The design's four timelock buckets map onto the nine proposal kinds by
 /// what they govern: registry membership/shape (`RegisterTarget`,
-/// `UpdateTarget`, `RemoveTarget`), spend authority (`SetGlobalPolicy`),
+/// `UpdateTarget`, `UpdateTargets`, `RemoveTarget`), spend authority (`SetGlobalPolicy`),
 /// who can approve at all (`AddSigner`, `RemoveSigner`,
 /// `SetSignerThreshold`), and resuming a paused target (`UnpauseTarget`).
 fn required_timelock_secs(kind: ProposalKind, timelocks: &GovernanceTimelocks) -> u64 {
     match kind {
-        ProposalKind::RegisterTarget | ProposalKind::UpdateTarget | ProposalKind::RemoveTarget => {
-            timelocks.target_registry_secs()
-        }
+        ProposalKind::RegisterTarget
+        | ProposalKind::UpdateTarget
+        | ProposalKind::UpdateTargets
+        | ProposalKind::RemoveTarget => timelocks.target_registry_secs(),
         ProposalKind::SetGlobalPolicy => timelocks.spend_policy_secs(),
         ProposalKind::AddSigner | ProposalKind::RemoveSigner | ProposalKind::SetSignerThreshold => {
             timelocks.signer_change_secs()
@@ -261,6 +266,51 @@ pub(crate) fn propose_update_target_at(
     insert_new_proposal(ProposalRecord::new(
         id,
         ProposalPayload::UpdateTarget { principal, patch },
+        caller,
+        now_secs,
+    ))
+}
+
+fn validate_target_updates(
+    updates: &[TargetUpdate],
+    global_policy: &GlobalPolicy,
+) -> Result<Vec<TargetRecord>, GovernanceError> {
+    if updates.is_empty() {
+        return Err(GovernanceError::EmptyTargetUpdates);
+    }
+    if updates.len() > types::MAX_TARGETS {
+        return Err(GovernanceError::TooManyTargetUpdates);
+    }
+    let mut seen = BTreeSet::new();
+    updates
+        .iter()
+        .map(|update| {
+            if !seen.insert(update.principal) {
+                return Err(GovernanceError::DuplicateTargetUpdate(update.principal));
+            }
+            let existing =
+                state::get_target(update.principal).ok_or(GovernanceError::TargetNotFound)?;
+            existing
+                .apply_patch(update.patch.clone(), global_policy)
+                .map_err(GovernanceError::InvalidTarget)
+        })
+        .collect()
+}
+
+/// Create one atomic, target-registry proposal for a bounded set of target
+/// updates. Every entry is validated before the proposal is written.
+pub(crate) fn propose_update_targets_at(
+    caller: Principal,
+    now_secs: u64,
+    updates: Vec<TargetUpdate>,
+) -> Result<u64, GovernanceError> {
+    require_signer(caller)?;
+    let config = state::global_config();
+    validate_target_updates(&updates, &config.global_policy)?;
+    let id = state::next_proposal_id();
+    insert_new_proposal(ProposalRecord::new(
+        id,
+        ProposalPayload::UpdateTargets { updates },
         caller,
         now_secs,
     ))
@@ -505,6 +555,17 @@ fn apply_payload(
             state::insert_target(updated).expect(
                 "rumi_cycle_sentinel: updating an existing target principal never exceeds MAX_TARGETS",
             );
+        }
+        ProposalPayload::UpdateTargets { updates } => {
+            // Compute and validate the complete next registry first. No
+            // target is written unless every target still exists and every
+            // patch remains valid at execution time.
+            let updated = validate_target_updates(&updates, &config.global_policy)?;
+            for record in updated {
+                state::insert_target(record).expect(
+                    "rumi_cycle_sentinel: bulk update of existing targets never exceeds MAX_TARGETS",
+                );
+            }
         }
         ProposalPayload::RemoveTarget { principal } => {
             if state::get_target(principal).is_none() {
