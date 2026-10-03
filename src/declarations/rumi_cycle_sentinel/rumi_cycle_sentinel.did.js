@@ -104,6 +104,7 @@ export const idlFactory = ({ IDL }) => {
     'GlobalCapBelowExistingTargetCap' : IDL.Record({
       'target' : IDL.Principal,
     }),
+    'EmptyTargetUpdates' : IDL.Null,
     'TimelockNotElapsed' : IDL.Null,
     'ThresholdExceedsSigners' : IDL.Record({
       'threshold' : IDL.Nat32,
@@ -114,11 +115,13 @@ export const idlFactory = ({ IDL }) => {
     'GlobalCapBelowUnresolvedOperationCap' : IDL.Record({
       'operation_id' : IDL.Nat64,
     }),
+    'TooManyTargetUpdates' : IDL.Null,
     'SignerNotFound' : IDL.Principal,
     'TooManyOpenProposals' : IDL.Null,
     'NotSigner' : IDL.Null,
     'InvalidTarget' : TargetValidationError,
     'ThresholdZero' : IDL.Null,
+    'DuplicateTargetUpdate' : IDL.Principal,
     'AnonymousSigner' : IDL.Null,
   });
   const Result = IDL.Variant({ 'Ok' : IDL.Bool, 'Err' : GovernanceError });
@@ -415,6 +418,10 @@ export const idlFactory = ({ IDL }) => {
     'project' : IDL.Opt(IDL.Text),
     'funding_policy' : IDL.Opt(TargetFundingPolicy),
   });
+  const TargetUpdate = IDL.Record({
+    'principal' : IDL.Principal,
+    'patch' : TargetPatch,
+  });
   const TargetArgs = IDL.Record({
     'principal' : IDL.Principal,
     'tags' : IDL.Vec(IDL.Text),
@@ -431,6 +438,7 @@ export const idlFactory = ({ IDL }) => {
       'principal' : IDL.Principal,
       'patch' : TargetPatch,
     }),
+    'UpdateTargets' : IDL.Record({ 'updates' : IDL.Vec(TargetUpdate) }),
     'SetSignerThreshold' : IDL.Record({ 'threshold' : IDL.Nat32 }),
     'RemoveTarget' : IDL.Record({ 'principal' : IDL.Principal }),
     'SetGlobalPolicy' : GlobalPolicyArgs,
@@ -612,6 +620,11 @@ export const idlFactory = ({ IDL }) => {
     'propose_unpause_target' : IDL.Func([IDL.Principal], [Result_10], []),
     'propose_update_target' : IDL.Func(
         [IDL.Principal, TargetPatch],
+        [Result_10],
+        [],
+      ),
+    'propose_update_targets' : IDL.Func(
+        [IDL.Vec(TargetUpdate)],
         [Result_10],
         [],
       ),

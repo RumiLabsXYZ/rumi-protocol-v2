@@ -3413,7 +3413,7 @@ mod tests {
         FundingRailArguments, GlobalPolicyArgs, GovernanceTimelocksArgs, IcpCmcDelivery,
         IcpCmcSnapshot, IcpFundingState, ObservationMode, ProposalPayload, PublicTargetState,
         SelfRecoveryPolicyArgs, TargetArgs, TargetFundingPolicy, TargetFundingPolicyArgs,
-        TargetPatch, TargetRegistrationContext,
+        TargetPatch, TargetRegistrationContext, TargetUpdate,
     };
     use candid::Nat;
 
@@ -3577,6 +3577,23 @@ mod tests {
         }
     }
 
+    fn test_target_update(principal: Principal) -> TargetUpdate {
+        TargetUpdate {
+            principal,
+            patch: TargetPatch {
+                display_name: None,
+                project: None,
+                environment: None,
+                criticality: None,
+                observation_mode: None,
+                tags: None,
+                funding_policy: None,
+                enabled: Some(true),
+                auto_topup: Some(true),
+            },
+        }
+    }
+
     fn test_alarm(id: u64, target: Option<Principal>) -> Alarm {
         Alarm {
             id,
@@ -3640,6 +3657,17 @@ mod tests {
         );
         insert_proposal(record.clone()).unwrap();
         assert_eq!(get_proposal(7), Some(record));
+
+        let bulk_record = ProposalRecord::new(
+            8,
+            ProposalPayload::UpdateTargets {
+                updates: vec![test_target_update(test_target_principal(3))],
+            },
+            proposer,
+            101,
+        );
+        insert_proposal(bulk_record.clone()).unwrap();
+        assert_eq!(get_proposal(8), Some(bulk_record));
     }
 
     #[test]
@@ -5423,8 +5451,11 @@ mod tests {
         let sample = test_sample(1, PublicTargetState::Healthy);
         let proposal = ProposalRecord::new(
             1,
-            ProposalPayload::AddSigner {
-                signer: test_signer(2),
+            ProposalPayload::UpdateTargets {
+                updates: vec![
+                    test_target_update(test_target_principal(4)),
+                    test_target_update(test_target_principal(5)),
+                ],
             },
             test_signer(1),
             10,

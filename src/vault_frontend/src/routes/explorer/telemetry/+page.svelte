@@ -51,6 +51,7 @@
     TargetArgs,
     TargetFundingPolicy,
     TargetPatch,
+    TargetUpdate,
     GlobalPolicyArgs,
     FundingOperation,
     FundingRail,
@@ -78,6 +79,7 @@
   let publicError = '';
   let authError = '';
   let actionMessage = '';
+  let proposingBulkTargets: 'enable' | 'auto-top-up' | null = null;
   let copyMessage = '';
   let copyError = '';
   let selectedTargetPrincipal = '';
@@ -252,6 +254,71 @@
       await refresh();
     } catch (error) {
       authError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  async function proposeBulkTargetFlags(mode: 'enable' | 'auto-top-up'): Promise<void> {
+    if (proposingBulkTargets !== null) return;
+    proposingBulkTargets = mode;
+    authError = '';
+    actionMessage = '';
+    try {
+      assertCurrentSigner();
+      const requestSession = checkedSession;
+      const requestEpoch = operatorAccessEpoch;
+      const requestActor = actor;
+      if (!requestSession || !requestActor) throw new Error('Check signer access before proposing target changes.');
+
+      await refresh();
+      assertCurrentSigner();
+      const current = snapshot;
+      if (!current) throw new Error(publicError || 'Refresh telemetry before proposing target changes.');
+      if (current.targets.length === 0) {
+        actionMessage = 'There are no registered targets to update.';
+        return;
+      }
+
+      const unobserved = current.targets.filter((row) => variant(row.observation_mode) === 'Unobserved').length;
+      const paused = mode === 'auto-top-up'
+        ? current.targets.filter((row) => variant(row.observation_mode) !== 'Unobserved' && fundingTarget(row).paused).length
+        : 0;
+      const candidates = current.targets.filter((row) => {
+        const target = fundingTarget(row);
+        if (variant(row.observation_mode) === 'Unobserved') return false;
+        if (mode === 'auto-top-up' && target.paused) return false;
+        return mode === 'enable' ? !target.enabled : !target.enabled || !target.auto_topup;
+      });
+      if (candidates.length === 0) {
+        const skipped = [
+          unobserved ? `${unobserved} unobserved skipped` : '',
+          paused ? `${paused} paused skipped` : '',
+        ].filter(Boolean).join('; ');
+        actionMessage = `${mode === 'enable' ? 'All observable targets are already enabled.' : 'All eligible targets already have monitoring and auto top-up enabled.'}${skipped ? ` ${skipped}.` : ''}`;
+        return;
+      }
+
+      const updates: TargetUpdate[] = candidates.map((row) => ({
+        principal: row.principal,
+        patch: targetPatchFor(mode === 'enable' ? { enabled: [true] } : { enabled: [true], auto_topup: [true] }),
+      }));
+      const createdProposalId = await sentinelManagement.proposeUpdateTargets(requestActor, updates);
+      if (requestSession !== currentWalletSession()
+        || requestEpoch !== operatorAccessEpoch
+        || requestActor !== actor
+        || checkedSession !== requestSession
+        || !signer) return;
+
+      proposalId = createdProposalId.toString();
+      const skipped = [
+        unobserved ? `${unobserved} unobserved skipped` : '',
+        paused ? `${paused} paused skipped` : '',
+      ].filter(Boolean).join('; ');
+      actionMessage = `Proposal #${proposalId} created for ${candidates.length} target${candidates.length === 1 ? '' : 's'}${skipped ? `; ${skipped}` : ''}. It needs the normal approval threshold, then a signer must execute it after the target-registry timelock.`;
+      await loadOperatorData(requestActor, requestSession, requestEpoch);
+    } catch (error) {
+      authError = error instanceof Error ? error.message : String(error);
+    } finally {
+      proposingBulkTargets = null;
     }
   }
 
@@ -1062,6 +1129,7 @@
     <div class="registry-shell">
       <article class="registry-card">
         <div class="registry-heading"><h2>Target registry</h2>
+          {#if signer && actor}<div class="registry-bulk-controls"><div class="registry-bulk-actions" aria-label="Bulk target controls"><button type="button" disabled={proposingBulkTargets !== null || loading} title="Create one governed proposal to enable monitoring for every eligible target." on:click={() => proposeBulkTargetFlags('enable')}>{proposingBulkTargets === 'enable' ? 'Submitting…' : 'Enable All'}</button><button type="button" class="bulk-primary" disabled={proposingBulkTargets !== null || loading} title="Create one governed proposal to enable auto top-up for every eligible target." on:click={() => proposeBulkTargetFlags('auto-top-up')}>{proposingBulkTargets === 'auto-top-up' ? 'Submitting…' : 'Auto Top-Up Enabled for All'}</button></div><small>One proposal per action; approval and execution delay still apply.</small></div>{/if}
           <div class="alarm-menu">
             <button class="alarm-trigger" aria-label={`Alerts${openAlarmCount ? `, ${openAlarmCount} to review` : ', none to review'}`} aria-expanded={alarmsOpen} on:click={() => alarmsOpen = !alarmsOpen}>
               <span aria-hidden="true">🔔</span>{#if openAlarmCount}<i class="alarm-indicator"></i>{/if}<span>Alerts</span>{#if openAlarmCount}<b>{openAlarmCount}</b>{/if}
@@ -1234,6 +1302,12 @@
   }
   .registry-heading { align-items: center; padding-bottom: .9rem; border-bottom: 1px solid var(--sentinel-line); }
   .registry-heading h2 { margin: 0; font-size: 1.3rem; letter-spacing: -.02em; }
+  .registry-bulk-controls { display: grid; justify-items: end; gap: .2rem; margin-left: auto; }
+  .registry-bulk-controls small { color: #aebbd2; font-size: .68rem; text-align: right; }
+  .registry-bulk-actions { display: flex; flex-wrap: wrap; justify-content: end; gap: .45rem; }
+  .registry-bulk-actions button { min-height: 2.45rem; }
+  .registry-bulk-actions .bulk-primary { color: #071b1c; background: #69dfcb; border-color: #69dfcb; font-weight: 700; }
+  .registry-bulk-actions .bulk-primary:hover:not(:disabled) { background: #a1f3e5; border-color: #a1f3e5; }
   .table-scroll { margin: .25rem -1.4rem 0; padding: 0 1.4rem .5rem; scrollbar-color: #435776 #111c30; }
   .table-scroll table { min-width: 1380px; border-collapse: separate; border-spacing: 0; }
   .registry-card th { padding: .8rem .7rem; color: #b4c3da; font-size: .75rem; font-weight: 600; letter-spacing: .025em; border-bottom: 1px solid rgba(174, 195, 224, .23); }
@@ -1317,6 +1391,10 @@
     .check-controls { flex: 1 1 100%; max-width: none; }
     .funding-wallet { padding: 1rem; }
     .registry-card { padding: 1rem; }
+    .registry-heading { flex-wrap: wrap; }
+    .registry-bulk-controls { flex: 1 1 100%; order: 3; align-items: start; margin-left: 0; }
+    .registry-bulk-actions { justify-content: start; }
+    .registry-bulk-controls small { text-align: left; }
     .table-scroll { margin-right: -1rem; margin-left: -1rem; padding-right: 1rem; padding-left: 1rem; }
     .table-scroll table { min-width: 1280px; }
   }
@@ -1324,6 +1402,8 @@
     .telemetry-page { width: 100%; }
     .stats > div { padding: .8rem .7rem; }
     .stats strong { font-size: 1.15rem; }
+    .registry-bulk-actions { display: grid; grid-template-columns: 1fr; width: 100%; }
+    .registry-bulk-actions button { width: 100%; }
     .funding-heading { align-items: flex-start; flex-direction: column; }
     .balance-grid { grid-template-columns: 1fr; }
     .address-row { grid-template-columns: 1fr auto; }

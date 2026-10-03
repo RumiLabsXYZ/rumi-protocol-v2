@@ -1,8 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import { Principal } from '@dfinity/principal';
 import { loadPublicTelemetry, sentinelManagement, type SentinelActor } from '$lib/services/cycleSentinelService';
-import type { PublicOverview } from '$declarations/rumi_cycle_sentinel/rumi_cycle_sentinel.did';
+import type { PublicOverview, TargetUpdate } from '$declarations/rumi_cycle_sentinel/rumi_cycle_sentinel.did';
 
 const source = readFileSync(resolve(process.cwd(), 'src/routes/explorer/telemetry/+page.svelte'), 'utf8');
 const serviceSource = readFileSync(resolve(process.cwd(), 'src/lib/services/cycleSentinelService.ts'), 'utf8');
@@ -117,6 +118,37 @@ describe('Cycle Sentinel telemetry route contract', () => {
       'proposeSetGlobalPolicy', 'approveProposal', 'executeProposal', 'cancelProposal',
       'manualTopUpWithAmount', 'attachBlockProof', 'attachRefundBlockProof', 'resolveUnknownAsSpent',
     ]) expect(source).toContain(`sentinelManagement.${method}`);
+  });
+
+  it('proposes bulk target flags once and reports the proposal ID and remaining governance steps', () => {
+    expect(source).toContain('Enable All');
+    expect(source).toContain('Auto Top-Up Enabled for All');
+    expect(source).toContain('await refresh();');
+    expect(source).toContain('const updates: TargetUpdate[] = candidates.map');
+    expect(source).toContain('await sentinelManagement.proposeUpdateTargets(requestActor, updates)');
+    expect(source).toContain('proposalId = createdProposalId.toString()');
+    expect(source).toContain('await loadOperatorData(requestActor, requestSession, requestEpoch)');
+    expect(source).toContain('the normal approval threshold, then a signer must execute it after the target-registry timelock');
+  });
+
+  it('sends one batch call for a bulk target proposal and rejects duplicate principals', async () => {
+    const actor = {
+      propose_update_targets: vi.fn().mockResolvedValue({ Ok: 42n }),
+    } as unknown as SentinelActor;
+    const patch: TargetUpdate['patch'] = {
+      display_name: [], project: [], tags: [], environment: [], criticality: [],
+      observation_mode: [], funding_policy: [], enabled: [true], auto_topup: [true],
+    };
+    const update = (text: string): TargetUpdate => ({ principal: Principal.fromText(text), patch });
+    const updates = [
+      update('bfnu3-6aaaa-aaaab-qhanq-cai'),
+      update('ucjxv-nqaaa-aaaaj-qrsaq-cai'),
+    ];
+
+    await expect(sentinelManagement.proposeUpdateTargets(actor, updates)).resolves.toBe(42n);
+    expect(actor.propose_update_targets).toHaveBeenCalledTimes(1);
+    expect(actor.propose_update_targets).toHaveBeenCalledWith(updates);
+    expect(() => sentinelManagement.proposeUpdateTargets(actor, [updates[0], updates[0]])).toThrow('A bulk update cannot include a target more than once.');
   });
 
   it('clears alerts from the current browser without a wallet transaction', () => {
