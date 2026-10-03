@@ -146,6 +146,9 @@ type GovernanceError = variant {
   InvalidGlobalPolicy : GlobalPolicyError;
   TooManyTargets;
   TargetNotFound;
+  EmptyTargetUpdates;
+  TooManyTargetUpdates;
+  DuplicateTargetUpdate : principal;
   EmptySigners;
   GlobalCapBelowExistingTargetCap : record { target : principal };
   TimelockNotElapsed;
@@ -232,6 +235,7 @@ type ProposalPayload = variant {
   UnpauseTarget : record { "principal" : principal };
   RemoveSigner : record { signer : principal };
   RegisterTarget : TargetArgs;
+  UpdateTargets : record { updates : vec TargetUpdate };
 };
 type ProposalRecord = record {
   id : nat64;
@@ -415,6 +419,7 @@ type TargetPatch = record {
   project : opt text;
   funding_policy : opt TargetFundingPolicy;
 };
+type TargetUpdate = record { "principal" : principal; patch : TargetPatch };
 type TargetValidationError = variant {
   DuplicateTarget;
   DailyCapBelowRefill;
@@ -471,5 +476,6 @@ service : (InitArgs) -> {
   propose_set_signer_threshold : (nat32) -> (Result_10);
   propose_unpause_target : (principal) -> (Result_10);
   propose_update_target : (principal, TargetPatch) -> (Result_10);
+  propose_update_targets : (vec TargetUpdate) -> (Result_10);
   resolve_unknown_as_spent : (nat64) -> (Result_1);
 }

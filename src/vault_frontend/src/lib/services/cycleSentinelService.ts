@@ -17,6 +17,7 @@ import type {
   TargetArgs,
   TargetFundingPolicy,
   TargetPatch,
+  TargetUpdate,
 } from '$declarations/rumi_cycle_sentinel/rumi_cycle_sentinel.did';
 import { auth } from './auth';
 import { CONFIG, CANISTER_IDS, isCycleSentinelConfigured } from '../config';
@@ -233,6 +234,18 @@ export const sentinelManagement = {
     if (principal.isAnonymous()) throw new Error('Target principal cannot be anonymous.');
     assertPatch(patch);
     return actor.propose_update_target(principal, patch).then(resultOk);
+  },
+  proposeUpdateTargets(actor: SentinelActor, updates: TargetUpdate[]) {
+    if (updates.length === 0) throw new Error('Select at least one target to update.');
+    if (updates.length > 128) throw new Error('A bulk update cannot include more than 128 targets.');
+    const principals = new Set<string>();
+    for (const update of updates) {
+      if (update.principal.isAnonymous()) throw new Error('Target principal cannot be anonymous.');
+      if (principals.has(update.principal.toText())) throw new Error('A bulk update cannot include a target more than once.');
+      principals.add(update.principal.toText());
+      assertPatch(update.patch);
+    }
+    return actor.propose_update_targets(updates).then(resultOk);
   },
   proposeRemoveTarget(actor: SentinelActor, principal: Principal) {
     if (principal.isAnonymous()) throw new Error('Target principal cannot be anonymous.');

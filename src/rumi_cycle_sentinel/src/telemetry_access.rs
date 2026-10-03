@@ -1,7 +1,8 @@
 //! Read access for the private Cycle Sentinel telemetry surface.
 //!
-//! Keep this allowlist independent from signer governance: visibility does
-//! not grant permission to operate the Sentinel.
+//! This allowlist grants read-only access. Governance signers are also allowed
+//! to read private telemetry by `require_telemetry_viewer`; visibility still
+//! does not grant permission to operate the Sentinel.
 
 use candid::Principal;
 

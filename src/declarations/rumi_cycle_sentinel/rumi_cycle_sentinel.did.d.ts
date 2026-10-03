@@ -151,6 +151,7 @@ export type GovernanceError = {
   { 'TargetNotFound' : null } |
   { 'EmptySigners' : null } |
   { 'GlobalCapBelowExistingTargetCap' : { 'target' : Principal } } |
+  { 'EmptyTargetUpdates' : null } |
   { 'TimelockNotElapsed' : null } |
   {
     'ThresholdExceedsSigners' : {
@@ -161,11 +162,13 @@ export type GovernanceError = {
   { 'ProposalNotOpen' : null } |
   { 'Alarm' : AlarmError } |
   { 'GlobalCapBelowUnresolvedOperationCap' : { 'operation_id' : bigint } } |
+  { 'TooManyTargetUpdates' : null } |
   { 'SignerNotFound' : Principal } |
   { 'TooManyOpenProposals' : null } |
   { 'NotSigner' : null } |
   { 'InvalidTarget' : TargetValidationError } |
   { 'ThresholdZero' : null } |
+  { 'DuplicateTargetUpdate' : Principal } |
   { 'AnonymousSigner' : null };
 export interface GovernanceTimelocksArgs {
   'unpause_secs' : bigint,
@@ -223,6 +226,7 @@ export type ObservationMode = { 'SelfReport' : null } |
 export interface PermissionsView { 'is_signer' : boolean }
 export type ProposalPayload = { 'AddSigner' : { 'signer' : Principal } } |
   { 'UpdateTarget' : { 'principal' : Principal, 'patch' : TargetPatch } } |
+  { 'UpdateTargets' : { 'updates' : Array<TargetUpdate> } } |
   { 'SetSignerThreshold' : { 'threshold' : number } } |
   { 'RemoveTarget' : { 'principal' : Principal } } |
   { 'SetGlobalPolicy' : GlobalPolicyArgs } |
@@ -426,6 +430,7 @@ export interface TargetPatch {
   'project' : [] | [string],
   'funding_policy' : [] | [TargetFundingPolicy],
 }
+export interface TargetUpdate { 'principal' : Principal, 'patch' : TargetPatch }
 export type TargetValidationError = { 'DuplicateTarget' : null } |
   { 'DailyCapBelowRefill' : null } |
   { 'ZeroLowBalanceThreshold' : null } |
@@ -504,6 +509,7 @@ export interface _SERVICE {
   'propose_set_signer_threshold' : ActorMethod<[number], Result_10>,
   'propose_unpause_target' : ActorMethod<[Principal], Result_10>,
   'propose_update_target' : ActorMethod<[Principal, TargetPatch], Result_10>,
+  'propose_update_targets' : ActorMethod<[Array<TargetUpdate>], Result_10>,
   'resolve_unknown_as_spent' : ActorMethod<[bigint], Result_1>,
   'run_maintenance_now' : ActorMethod<[], MaintenanceResult>,
 }
