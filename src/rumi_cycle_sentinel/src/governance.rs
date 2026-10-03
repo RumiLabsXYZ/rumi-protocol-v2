@@ -62,13 +62,14 @@
 
 use candid::{CandidType, Principal};
 use serde::Deserialize;
+use std::collections::BTreeSet;
 
 use crate::state::alarms::AlarmError;
 use crate::state::{self, GlobalConfig, RemoveTargetError};
 use crate::types::{
     self, GlobalPolicy, GlobalPolicyArgs, GlobalPolicyError, GovernanceTimelocks, ProposalKind,
     ProposalPayload, ProposalRecord, ProposalStatus, TargetArgs, TargetPatch, TargetRecord,
-    TargetRegistrationContext, TargetValidationError,
+    TargetRegistrationContext, TargetUpdate, TargetValidationError,
 };
 
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -143,6 +144,9 @@ pub(crate) enum GovernanceError {
     SelfRecoveryCapBelowPendingReservation {
         operation_id: u64,
     },
+    EmptyTargetUpdates,
+    TooManyTargetUpdates,
+    DuplicateTargetUpdate(Principal),
     Alarm(AlarmError),
 }
 
@@ -154,16 +158,17 @@ fn require_signer(caller: Principal) -> Result<(), GovernanceError> {
     }
 }
 
-/// The design's four timelock buckets map onto the eight proposal kinds by
+/// The design's four timelock buckets map onto the nine proposal kinds by
 /// what they govern: registry membership/shape (`RegisterTarget`,
-/// `UpdateTarget`, `RemoveTarget`), spend authority (`SetGlobalPolicy`),
+/// `UpdateTarget`, `UpdateTargets`, `RemoveTarget`), spend authority (`SetGlobalPolicy`),
 /// who can approve at all (`AddSigner`, `RemoveSigner`,
 /// `SetSignerThreshold`), and resuming a paused target (`UnpauseTarget`).
 fn required_timelock_secs(kind: ProposalKind, timelocks: &GovernanceTimelocks) -> u64 {
     match kind {
-        ProposalKind::RegisterTarget | ProposalKind::UpdateTarget | ProposalKind::RemoveTarget => {
-            timelocks.target_registry_secs()
-        }
+        ProposalKind::RegisterTarget
+        | ProposalKind::UpdateTarget
+        | ProposalKind::UpdateTargets
+        | ProposalKind::RemoveTarget => timelocks.target_registry_secs(),
         ProposalKind::SetGlobalPolicy => timelocks.spend_policy_secs(),
         ProposalKind::AddSigner | ProposalKind::RemoveSigner | ProposalKind::SetSignerThreshold => {
             timelocks.signer_change_secs()
@@ -261,6 +266,51 @@ pub(crate) fn propose_update_target_at(
     insert_new_proposal(ProposalRecord::new(
         id,
         ProposalPayload::UpdateTarget { principal, patch },
+        caller,
+        now_secs,
+    ))
+}
+
+fn validate_target_updates(
+    updates: &[TargetUpdate],
+    global_policy: &GlobalPolicy,
+) -> Result<Vec<TargetRecord>, GovernanceError> {
+    if updates.is_empty() {
+        return Err(GovernanceError::EmptyTargetUpdates);
+    }
+    if updates.len() > types::MAX_TARGETS {
+        return Err(GovernanceError::TooManyTargetUpdates);
+    }
+    let mut seen = BTreeSet::new();
+    updates
+        .iter()
+        .map(|update| {
+            if !seen.insert(update.principal) {
+                return Err(GovernanceError::DuplicateTargetUpdate(update.principal));
+            }
+            let existing =
+                state::get_target(update.principal).ok_or(GovernanceError::TargetNotFound)?;
+            existing
+                .apply_patch(update.patch.clone(), global_policy)
+                .map_err(GovernanceError::InvalidTarget)
+        })
+        .collect()
+}
+
+/// Create one atomic, target-registry proposal for a bounded set of target
+/// updates. Every entry is validated before the proposal is written.
+pub(crate) fn propose_update_targets_at(
+    caller: Principal,
+    now_secs: u64,
+    updates: Vec<TargetUpdate>,
+) -> Result<u64, GovernanceError> {
+    require_signer(caller)?;
+    let config = state::global_config();
+    validate_target_updates(&updates, &config.global_policy)?;
+    let id = state::next_proposal_id();
+    insert_new_proposal(ProposalRecord::new(
+        id,
+        ProposalPayload::UpdateTargets { updates },
         caller,
         now_secs,
     ))
@@ -505,6 +555,16 @@ fn apply_payload(
             state::insert_target(updated).expect(
                 "rumi_cycle_sentinel: updating an existing target principal never exceeds MAX_TARGETS",
             );
+        }
+        ProposalPayload::UpdateTargets { updates } => {
+            // Validate every next record before writing any of them. This
+            // keeps a stale or invalid entry from applying a partial batch.
+            let updated = validate_target_updates(&updates, &config.global_policy)?;
+            for record in updated {
+                state::insert_target(record).expect(
+                    "rumi_cycle_sentinel: bulk update of existing targets never exceeds MAX_TARGETS",
+                );
+            }
         }
         ProposalPayload::RemoveTarget { principal } => {
             if state::get_target(principal).is_none() {
@@ -757,6 +817,27 @@ mod tests {
         }
     }
 
+    fn enable_auto_topup_patch() -> TargetPatch {
+        TargetPatch {
+            display_name: None,
+            project: None,
+            environment: None,
+            criticality: None,
+            observation_mode: None,
+            tags: None,
+            funding_policy: None,
+            enabled: Some(true),
+            auto_topup: Some(true),
+        }
+    }
+
+    fn target_update(principal: Principal) -> TargetUpdate {
+        TargetUpdate {
+            principal,
+            patch: enable_auto_topup_patch(),
+        }
+    }
+
     /// Proposes, approves (by every signer in `signers`), and executes a
     /// `RegisterTarget` proposal for `principal` at `now_secs` (with the
     /// timelock already elapsed by construction — see call sites), leaving
@@ -813,6 +894,18 @@ mod tests {
                         auto_topup: None,
                     }
                 ),
+                Err(GovernanceError::NotSigner)
+            );
+        }
+    }
+
+    #[test]
+    fn propose_update_targets_requires_signer() {
+        init_governed(vec![signer(1)], 1, 1_000);
+        register_target(&[signer(1)], target_principal(1), 0);
+        for caller in [Principal::anonymous(), nonsigner()] {
+            assert_eq!(
+                propose_update_targets_at(caller, 2_000, vec![target_update(target_principal(1))]),
                 Err(GovernanceError::NotSigner)
             );
         }
@@ -1000,6 +1093,149 @@ mod tests {
                 }
             ),
             Err(GovernanceError::TargetNotFound)
+        );
+    }
+
+    #[test]
+    fn propose_update_targets_validates_entire_batch_before_inserting_a_proposal() {
+        init_governed(vec![signer(1)], 1, 1_000);
+        register_target(&[signer(1)], target_principal(1), 0);
+        register_target(&[signer(1)], target_principal(2), 2_000);
+        let proposal_count_before = state::list_proposals_after(None, types::MAX_PROPOSALS).len();
+
+        assert_eq!(
+            propose_update_targets_at(signer(1), 4_000, vec![]),
+            Err(GovernanceError::EmptyTargetUpdates)
+        );
+        assert_eq!(
+            propose_update_targets_at(
+                signer(1),
+                4_000,
+                vec![target_update(target_principal(1)); types::MAX_TARGETS + 1]
+            ),
+            Err(GovernanceError::TooManyTargetUpdates)
+        );
+        assert_eq!(
+            propose_update_targets_at(
+                signer(1),
+                4_000,
+                vec![
+                    target_update(target_principal(1)),
+                    target_update(target_principal(1)),
+                ]
+            ),
+            Err(GovernanceError::DuplicateTargetUpdate(target_principal(1)))
+        );
+        assert_eq!(
+            propose_update_targets_at(signer(1), 4_000, vec![target_update(target_principal(9))]),
+            Err(GovernanceError::TargetNotFound)
+        );
+        let mut invalid_patch = enable_auto_topup_patch();
+        invalid_patch.enabled = None;
+        assert_eq!(
+            propose_update_targets_at(
+                signer(1),
+                4_000,
+                vec![TargetUpdate {
+                    principal: target_principal(1),
+                    patch: invalid_patch,
+                }]
+            ),
+            Err(GovernanceError::InvalidTarget(
+                TargetValidationError::AutoTopupRequiresEnabledAndObserved
+            ))
+        );
+
+        assert_eq!(
+            state::list_proposals_after(None, types::MAX_PROPOSALS).len(),
+            proposal_count_before,
+            "invalid batches must not add a proposal"
+        );
+    }
+
+    #[test]
+    fn bulk_target_proposal_uses_threshold_and_target_registry_timelock() {
+        init_governed(vec![signer(1), signer(2)], 2, 1_000);
+        register_target(&[signer(1), signer(2)], target_principal(1), 0);
+        register_target(&[signer(1), signer(2)], target_principal(2), 2_000);
+
+        let updates = vec![
+            target_update(target_principal(1)),
+            target_update(target_principal(2)),
+        ];
+        let id = propose_update_targets_at(signer(1), 4_000, updates.clone()).unwrap();
+        let proposal = state::get_proposal(id).unwrap();
+        assert_eq!(proposal.payload, ProposalPayload::UpdateTargets { updates });
+        assert_eq!(proposal.approval_count(), 0);
+        for principal in [target_principal(1), target_principal(2)] {
+            let target = state::get_target(principal).unwrap();
+            assert!(!target.enabled());
+            assert!(!target.auto_topup());
+        }
+
+        approve_proposal_at(signer(1), id).unwrap();
+        approve_proposal_at(signer(2), id).unwrap();
+        assert_eq!(
+            execute_proposal_at(signer(1), 4_099, sentinel_id(), id),
+            Err(GovernanceError::TimelockNotElapsed)
+        );
+        execute_proposal_at(signer(1), 4_100, sentinel_id(), id).unwrap();
+        for principal in [target_principal(1), target_principal(2)] {
+            let target = state::get_target(principal).unwrap();
+            assert!(target.enabled());
+            assert!(target.auto_topup());
+        }
+    }
+
+    #[test]
+    fn bulk_target_execution_revalidates_before_applying_any_target() {
+        init_governed(vec![signer(1), signer(2)], 2, 1_000);
+        register_target(&[signer(1), signer(2)], target_principal(1), 0);
+        register_target(&[signer(1), signer(2)], target_principal(2), 2_000);
+        let id = propose_update_targets_at(
+            signer(1),
+            4_000,
+            vec![
+                target_update(target_principal(1)),
+                target_update(target_principal(2)),
+            ],
+        )
+        .unwrap();
+        approve_proposal_at(signer(1), id).unwrap();
+        approve_proposal_at(signer(2), id).unwrap();
+
+        let global = state::global_config();
+        let second = state::get_target(target_principal(2)).unwrap();
+        let now_unobserved = second
+            .apply_patch(
+                TargetPatch {
+                    display_name: None,
+                    project: None,
+                    environment: None,
+                    criticality: None,
+                    observation_mode: Some(ObservationMode::Unobserved),
+                    tags: None,
+                    funding_policy: None,
+                    enabled: None,
+                    auto_topup: None,
+                },
+                &global.global_policy,
+            )
+            .unwrap();
+        state::insert_target(now_unobserved).unwrap();
+
+        assert_eq!(
+            execute_proposal_at(signer(1), 4_100, sentinel_id(), id),
+            Err(GovernanceError::InvalidTarget(
+                TargetValidationError::AutoTopupRequiresEnabledAndObserved
+            ))
+        );
+        assert!(!state::get_target(target_principal(1)).unwrap().enabled());
+        assert!(!state::get_target(target_principal(1)).unwrap().auto_topup());
+        assert_eq!(
+            state::get_proposal(id).unwrap().status,
+            ProposalStatus::Open,
+            "failed execution leaves the proposal retryable/cancellable"
         );
     }
 

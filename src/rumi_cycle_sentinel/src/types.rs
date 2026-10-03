@@ -888,6 +888,13 @@ pub struct TargetPatch {
     pub auto_topup: Option<bool>,
 }
 
+/// One target entry in an atomic, governed multi-target update proposal.
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct TargetUpdate {
+    pub principal: Principal,
+    pub patch: TargetPatch,
+}
+
 pub struct TargetRegistrationContext<'a> {
     pub sentinel_id: Principal,
     pub existing_target_count: usize,
@@ -1215,6 +1222,7 @@ pub enum ProposalKind {
     RemoveSigner,
     SetSignerThreshold,
     UnpauseTarget,
+    UpdateTargets,
 }
 
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
@@ -1240,6 +1248,11 @@ pub enum ProposalPayload {
     UnpauseTarget {
         principal: Principal,
     },
+    /// Appended to preserve the serialized discriminants of existing
+    /// proposal payloads in stable state.
+    UpdateTargets {
+        updates: Vec<TargetUpdate>,
+    },
 }
 
 impl ProposalPayload {
@@ -1253,6 +1266,7 @@ impl ProposalPayload {
             Self::RemoveSigner { .. } => ProposalKind::RemoveSigner,
             Self::SetSignerThreshold { .. } => ProposalKind::SetSignerThreshold,
             Self::UnpauseTarget { .. } => ProposalKind::UnpauseTarget,
+            Self::UpdateTargets { .. } => ProposalKind::UpdateTargets,
         }
     }
 }
@@ -6695,6 +6709,16 @@ mod tests {
             }
             .kind(),
             ProposalKind::UnpauseTarget
+        );
+        assert_eq!(
+            ProposalPayload::UpdateTargets {
+                updates: vec![TargetUpdate {
+                    principal: target_principal(1),
+                    patch: no_op_patch(),
+                }],
+            }
+            .kind(),
+            ProposalKind::UpdateTargets
         );
     }
 
