@@ -5446,10 +5446,9 @@ pub enum PublicFundingStatus {
     Unknown,
 }
 
-/// A public-safe projection of `TerminalFundingSummary`: no signer
-/// principals, ledger subaccounts, or reconciliation evidence, and the
-/// target principal is dropped since it is already the enclosing
-/// `PublicTargetRow`'s own principal.
+/// A public-safe projection of `TerminalFundingSummary`: includes the target
+/// and trigger needed to label public history, but omits signer principals,
+/// ledger subaccounts, and reconciliation evidence.
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct PublicTopupSummary {
     pub target: Principal,
@@ -8424,7 +8423,7 @@ mod tests {
     }
 
     #[test]
-    fn public_topup_summary_from_terminal_funding_summary_drops_target() {
+    fn public_topup_summary_from_terminal_funding_summary_preserves_target_and_trigger() {
         let target = target_principal(1);
         let op = FundingOperation::open(
             7,
@@ -8463,7 +8462,9 @@ mod tests {
         .unwrap();
         let summary = TerminalFundingSummary::from_resolved(&op, 900).unwrap();
         let public = PublicTopupSummary::from(&summary);
+        assert_eq!(public.target, target);
         assert_eq!(public.rail, FundingRail::IcpCmc);
+        assert_eq!(public.trigger, Some(FundingTrigger::LowBalanceAutoTopup));
         assert_eq!(public.outcome, FundingOutcome::Refunded);
         assert_eq!(public.amount_cycles, Nat::from(11u64));
         assert_eq!(public.resolved_at_secs, 900);
