@@ -1369,6 +1369,13 @@ impl ProposalRecord {
         }
     }
 
+    /// Clears approvals after an explicit signer-set or threshold change.
+    /// An approval collected under the previous quorum must not silently
+    /// make an open proposal executable under a new quorum.
+    pub fn clear_approvals(&mut self) {
+        self.approvals.clear();
+    }
+
     pub fn approval_count(&self) -> usize {
         self.approvals.len()
     }
@@ -3572,9 +3579,37 @@ pub struct TerminalFundingSummary {
     operation_id: u64,
     target: Principal,
     rail: FundingRail,
+    /// Absent only for V1 terminal summaries written before origin tracking.
+    trigger: Option<FundingTrigger>,
     outcome: FundingOutcome,
     amount_cycles: u128,
     resolved_at_secs: u64,
+}
+
+/// Frozen V1 stable shape. Do not add fields: existing terminal-summary
+/// entries are decoded through this type and promoted to the current shape.
+#[derive(CandidType, Deserialize, Clone)]
+pub(crate) struct TerminalFundingSummaryV1 {
+    pub(crate) operation_id: u64,
+    pub(crate) target: Principal,
+    pub(crate) rail: FundingRail,
+    pub(crate) outcome: FundingOutcome,
+    pub(crate) amount_cycles: u128,
+    pub(crate) resolved_at_secs: u64,
+}
+
+impl From<TerminalFundingSummaryV1> for TerminalFundingSummary {
+    fn from(value: TerminalFundingSummaryV1) -> Self {
+        Self {
+            operation_id: value.operation_id,
+            target: value.target,
+            rail: value.rail,
+            trigger: None,
+            outcome: value.outcome,
+            amount_cycles: value.amount_cycles,
+            resolved_at_secs: value.resolved_at_secs,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -3597,6 +3632,8 @@ impl<'de> Deserialize<'de> for TerminalFundingSummary {
             operation_id: u64,
             target: Principal,
             rail: FundingRail,
+            #[serde(default)]
+            trigger: Option<FundingTrigger>,
             outcome: FundingOutcome,
             amount_cycles: u128,
             resolved_at_secs: u64,
@@ -3610,6 +3647,7 @@ impl<'de> Deserialize<'de> for TerminalFundingSummary {
             operation_id: raw.operation_id,
             target: raw.target,
             rail: raw.rail,
+            trigger: raw.trigger,
             outcome: raw.outcome,
             amount_cycles: raw.amount_cycles,
             resolved_at_secs: raw.resolved_at_secs,
@@ -3630,6 +3668,7 @@ impl TerminalFundingSummary {
             operation_id: operation.id(),
             target: operation.target(),
             rail: operation.rail(),
+            trigger: Some(operation.trigger()),
             outcome,
             amount_cycles: operation.reserved_amount_cycles(),
             resolved_at_secs,
@@ -3646,6 +3685,10 @@ impl TerminalFundingSummary {
 
     pub fn rail(&self) -> FundingRail {
         self.rail
+    }
+
+    pub fn trigger(&self) -> Option<FundingTrigger> {
+        self.trigger
     }
 
     pub fn outcome(&self) -> FundingOutcome {
@@ -5409,7 +5452,10 @@ pub enum PublicFundingStatus {
 /// `PublicTargetRow`'s own principal.
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct PublicTopupSummary {
+    pub target: Principal,
     pub rail: FundingRail,
+    /// `None` marks legacy history created before trigger tracking was added.
+    pub trigger: Option<FundingTrigger>,
     pub outcome: FundingOutcome,
     pub amount_cycles: Nat,
     pub resolved_at_secs: u64,
@@ -5418,12 +5464,52 @@ pub struct PublicTopupSummary {
 impl From<&TerminalFundingSummary> for PublicTopupSummary {
     fn from(summary: &TerminalFundingSummary) -> Self {
         Self {
+            target: summary.target(),
             rail: summary.rail,
+            trigger: summary.trigger(),
             outcome: summary.outcome,
             amount_cycles: Nat::from(summary.amount_cycles),
             resolved_at_secs: summary.resolved_at_secs,
         }
     }
+}
+
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct OperatorGovernanceView {
+    pub is_signer: bool,
+    pub signers: Vec<Principal>,
+    pub configured_operator_principals: Vec<Principal>,
+    pub approval_threshold: u32,
+    pub is_single_operator_mode: bool,
+    pub single_operator_setup_available: bool,
+}
+
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct OperatorDashboard {
+    pub overview: PublicOverview,
+    /// Every registered target (the registry has a fixed maximum of 128).
+    pub targets: Vec<PublicTargetRow>,
+    /// Every retained alarm (the alarm store has a fixed maximum of 1,024).
+    pub alarms: Vec<PublicAlarm>,
+    /// All terminal summaries currently retained by Sentinel (at most 512).
+    pub topup_history: Vec<PublicTopupSummary>,
+    pub governance: OperatorGovernanceView,
+    /// Present only for a caller currently authorized as a signer.
+    pub proposals: Option<PublicPage<ProposalRecord>>,
+    /// Present only for a caller currently authorized as a signer.
+    pub unresolved_operations: Option<PublicPage<FundingOperation>>,
+}
+
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub enum OperatorDashboardError {
+    InvalidProjection,
+}
+
+#[derive(CandidType, Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SingleOperatorSetupError {
+    NotOperator,
+    InvalidProjection,
+    SetupAlreadyUsed,
 }
 
 /// Bounds how many recent top-ups a single `PublicTargetRow` can carry.
@@ -8328,7 +8414,9 @@ mod tests {
 
     fn topup_summary(resolved_at_secs: u64) -> PublicTopupSummary {
         PublicTopupSummary {
+            target: target_principal(1),
             rail: FundingRail::CyclesLedger,
+            trigger: None,
             outcome: FundingOutcome::Completed,
             amount_cycles: Nat::from(1_000u64),
             resolved_at_secs,

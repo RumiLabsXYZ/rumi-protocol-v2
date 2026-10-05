@@ -7,13 +7,16 @@ import type {
   FundingOperation,
   FundingRail,
   GlobalPolicyArgs,
+  OperatorDashboard,
+  OperatorGovernanceView,
   ProposalRecord,
   PublicAlarm,
   PublicOverview,
   PublicTargetRow,
-  Result_3,
+  PublicTopupSummary,
   Result_4,
-  Result_9,
+  Result_6,
+  Result_11,
   TargetArgs,
   TargetFundingPolicy,
   TargetPatch,
@@ -44,6 +47,16 @@ export type TelemetrySnapshot = {
   targets: PublicTargetRow[];
   alarms: PublicAlarm[];
   refreshedAt: Date;
+};
+
+export type OperatorDashboardSnapshot = TelemetrySnapshot & {
+  topupHistory: PublicTopupSummary[];
+  governance: OperatorGovernanceView;
+  operatorRecordsAvailable: boolean;
+  proposals: ProposalRecord[];
+  proposalsNextCursor: Cursor;
+  unresolved: FundingOperation[];
+  unresolvedNextCursor: Cursor;
 };
 export const PAGE_SIZE = 100;
 
@@ -129,8 +142,34 @@ export async function loadPublicTelemetry(actor: SentinelActor = createAnonymous
   return { overview, targets, alarms, refreshedAt: new Date() };
 }
 
+/** Loads the private view in one canister call so wallet signers only need a
+ * single initial approval to see telemetry and current operator access. */
+export async function loadOperatorDashboard(actor: SentinelActor): Promise<OperatorDashboardSnapshot> {
+  const result: { Ok: OperatorDashboard } | { Err: Variant } = await actor.get_operator_dashboard();
+  if ('Err' in result) canisterError(result);
+  return operatorDashboardSnapshot(result.Ok);
+}
+
+export function operatorDashboardSnapshot(dashboard: OperatorDashboard): OperatorDashboardSnapshot {
+  const proposals = dashboard.proposals[0];
+  const unresolved = dashboard.unresolved_operations[0];
+  return {
+    overview: dashboard.overview,
+    targets: dashboard.targets,
+    alarms: dashboard.alarms,
+    topupHistory: dashboard.topup_history,
+    governance: dashboard.governance,
+    operatorRecordsAvailable: dashboard.proposals.length > 0 && dashboard.unresolved_operations.length > 0,
+    proposals: proposals?.items ?? [],
+    proposalsNextCursor: proposals?.next_cursor ?? [],
+    unresolved: unresolved?.items ?? [],
+    unresolvedNextCursor: unresolved?.next_cursor ?? [],
+    refreshedAt: new Date(),
+  };
+}
+
 export async function getPermissions(actor: SentinelActor): Promise<{ is_signer: boolean }> {
-  const result: Result_3 = await actor.get_my_permissions();
+  const result: Result_4 = await actor.get_my_permissions();
   if ('Err' in result) {
     if ('NotSigner' in result.Err) return { is_signer: false };
     canisterError(result);
@@ -140,14 +179,14 @@ export async function getPermissions(actor: SentinelActor): Promise<{ is_signer:
 
 export function listProposals(actor: SentinelActor): Promise<ProposalRecord[]> {
   return collect<ProposalRecord>(
-    (cursor, size): Promise<Result_4> => actor.list_governance_proposals(cursor, size),
+    (cursor, size): Promise<Result_6> => actor.list_governance_proposals(cursor, size),
     'proposal',
   );
 }
 
 export function listUnresolvedFundingOperations(actor: SentinelActor): Promise<FundingOperation[]> {
   return collect<FundingOperation>(
-    (cursor, size): Promise<Result_9> => actor.list_unresolved_funding_operations(cursor, size),
+    (cursor, size): Promise<Result_11> => actor.list_unresolved_funding_operations(cursor, size),
     'funding operation',
   );
 }

@@ -20,22 +20,24 @@ type AuthenticatedQueryError = variant {
   FutureCursor;
   NotSigner;
 };
-type Criticality = variant { Important; Experimental; Critical; Standard };
 type ConsentInfo = record {
-  consent_message : ConsentMessage;
   metadata : ConsentMessageMetadata;
+  consent_message : ConsentMessage;
 };
 type ConsentMessage = variant {
+  FieldsDisplayMessage : record {
+    fields : vec record { text; Value };
+    intent : text;
+  };
   GenericDisplayMessage : text;
-  FieldsDisplayMessage : record { intent : text; fields : vec record { text; Value } };
 };
 type ConsentMessageMetadata = record {
-  language : text;
   utc_offset_minutes : opt int16;
+  language : text;
 };
 type ConsentMessageRequest = record {
-  method : text;
   arg : blob;
+  method : text;
   user_preferences : ConsentMessageSpec;
 };
 type ConsentMessageResult = variant { Ok : ConsentInfo; Err : Icrc21Error };
@@ -43,6 +45,7 @@ type ConsentMessageSpec = record {
   metadata : ConsentMessageMetadata;
   device_spec : opt DeviceSpec;
 };
+type Criticality = variant { Important; Experimental; Critical; Standard };
 type CycleManagerCyclesStatus = record {
   idle_burn_cycles_per_day : opt nat;
   stable_memory_bytes : opt nat64;
@@ -52,11 +55,6 @@ type CycleManagerCyclesStatus = record {
   healthy : bool;
   freeze_threshold_secs : nat64;
 };
-type DeviceSpec = variant {
-  GenericDisplay;
-  FieldsDisplay;
-};
-type ErrorInfo = record { description : text };
 type CyclesFundingState = variant {
   PlannedReserved;
   Complete;
@@ -73,7 +71,10 @@ type CyclesWithdrawSnapshot = record {
   from_subaccount : opt blob;
   amount_cycles : nat;
 };
+type DeviceSpec = variant { GenericDisplay; FieldsDisplay };
+type DurationSeconds = record { amount : nat64 };
 type Environment = variant { Local; Production; Test; Archived; Staging };
+type ErrorInfo = record { description : text };
 type FundingAttemptRecord = record {
   at_secs : nat64;
   result_class : FundingAttemptResultClass;
@@ -146,21 +147,21 @@ type GovernanceError = variant {
   InvalidGlobalPolicy : GlobalPolicyError;
   TooManyTargets;
   TargetNotFound;
-  EmptyTargetUpdates;
-  TooManyTargetUpdates;
-  DuplicateTargetUpdate : principal;
   EmptySigners;
   GlobalCapBelowExistingTargetCap : record { target : principal };
+  EmptyTargetUpdates;
   TimelockNotElapsed;
   ThresholdExceedsSigners : record { threshold : nat32; signer_count : nat32 };
   ProposalNotOpen;
   Alarm : AlarmError;
   GlobalCapBelowUnresolvedOperationCap : record { operation_id : nat64 };
+  TooManyTargetUpdates;
   SignerNotFound : principal;
   TooManyOpenProposals;
   NotSigner;
   InvalidTarget : TargetValidationError;
   ThresholdZero;
+  DuplicateTargetUpdate : principal;
   AnonymousSigner;
 };
 type GovernanceTimelocksArgs = record {
@@ -175,6 +176,7 @@ type GovernanceTimelocksError = variant {
   ZeroSpendPolicySecs;
   ZeroTargetRegistrySecs;
 };
+type IcpCmcDelivery = variant { SharedReserveMint; DirectTopUp };
 type IcpCmcSnapshot = record {
   source_subaccount : opt blob;
   rate_timestamp_secs : nat64;
@@ -187,26 +189,9 @@ type IcpCmcSnapshot = record {
   cmc_account_identifier : blob;
   target_canister : principal;
   ledger_principal : principal;
+  delivery : IcpCmcDelivery;
   source_principal : principal;
   expected_cycles : nat;
-  delivery : IcpCmcDelivery;
-};
-type IcpCmcDelivery = variant { DirectTopUp; SharedReserveMint };
-type Icrc21Error = variant {
-  UnsupportedCanisterCall : ErrorInfo;
-  ConsentMessageUnavailable : ErrorInfo;
-  InsufficientPayment : ErrorInfo;
-  GenericError : record { error_code : nat; description : text };
-};
-type TokenAmount = record { decimals : nat8; amount : nat64; symbol : text };
-type TimestampSeconds = record { amount : nat64 };
-type DurationSeconds = record { amount : nat64 };
-type TextValue = record { content : text };
-type Value = variant {
-  TokenAmount : TokenAmount;
-  TimestampSeconds : TimestampSeconds;
-  DurationSeconds : DurationSeconds;
-  Text : TextValue;
 };
 type IcpFundingState = variant {
   NotifyPending;
@@ -219,23 +204,47 @@ type IcpFundingState = variant {
   Quarantined;
   LedgerSubmitted;
 };
+type Icrc21Error = variant {
+  GenericError : record { description : text; error_code : nat };
+  InsufficientPayment : ErrorInfo;
+  UnsupportedCanisterCall : ErrorInfo;
+  ConsentMessageUnavailable : ErrorInfo;
+};
 type InitArgs = record {
   approval_threshold : nat32;
   signers : vec principal;
   global_policy : GlobalPolicyArgs;
 };
 type ObservationMode = variant { SelfReport; BlackholeRelay; Unobserved };
+type OperatorDashboard = record {
+  alarms : vec PublicAlarm;
+  topup_history : vec PublicTopupSummary;
+  overview : PublicOverview;
+  targets : vec PublicTargetRow;
+  unresolved_operations : opt PublicPage;
+  governance : OperatorGovernanceView;
+  proposals : opt PublicPage_1;
+};
+type OperatorDashboardError = variant { InvalidProjection };
+type OperatorGovernanceView = record {
+  approval_threshold : nat32;
+  signers : vec principal;
+  is_single_operator_mode : bool;
+  is_signer : bool;
+  single_operator_setup_available : bool;
+  configured_operator_principals : vec principal;
+};
 type PermissionsView = record { is_signer : bool };
 type ProposalPayload = variant {
   AddSigner : record { signer : principal };
-  UpdateTarget : record { "principal" : principal; patch : TargetPatch };
+  UpdateTarget : TargetUpdate;
+  UpdateTargets : record { updates : vec TargetUpdate };
   SetSignerThreshold : record { threshold : nat32 };
   RemoveTarget : record { "principal" : principal };
   SetGlobalPolicy : GlobalPolicyArgs;
   UnpauseTarget : record { "principal" : principal };
   RemoveSigner : record { signer : principal };
   RegisterTarget : TargetArgs;
-  UpdateTargets : record { updates : vec TargetUpdate };
 };
 type ProposalRecord = record {
   id : nat64;
@@ -255,9 +264,10 @@ type PublicAlarm = record {
   opened_at_secs : nat64;
   resolved_at_secs : opt nat64;
 };
+type PublicFundingStatus = variant { Blocked; Ready; Unknown; Pending };
 type PublicOverview = record {
-  sample_interval_secs : opt nat64;
-  stale_after_secs : opt nat64;
+  icp_ledger_balance_e8s : opt nat;
+  cycles_ledger_balance_as_of_secs : opt nat64;
   unreachable_count : nat64;
   total_observed_cycles : nat;
   next_sample_at_secs : opt nat64;
@@ -266,36 +276,38 @@ type PublicOverview = record {
   low_count : nat64;
   runtime_cycles : nat;
   last_sample_at_secs : opt nat64;
+  sample_interval_secs : opt nat64;
   unobserved_count : nat64;
   stopped_count : nat64;
+  funding_account_owner : principal;
   protected_self_reserve_cycles : opt nat;
+  cycles_ledger_balance_cycles : opt nat;
+  shared_reserve_conversion_status : PublicFundingStatus;
+  stale_after_secs : opt nat64;
   icp_available_e8s : opt nat;
   cycles_ledger_available_cycles : opt nat;
   target_count : nat64;
-  healthy_count : nat64;
-  funding_account_owner : principal;
-  cycles_ledger_balance_cycles : opt nat;
-  cycles_ledger_balance_as_of_secs : opt nat64;
-  icp_ledger_balance_e8s : opt nat;
   icp_ledger_balance_as_of_secs : opt nat64;
   min_icp_reserve_e8s : opt nat;
-  shared_reserve_conversion_status : PublicFundingStatus;
+  healthy_count : nat64;
 };
-type PublicFundingStatus = variant { Ready; Pending; Blocked; Unknown };
-type PublicPage = record { next_cursor : opt text; items : vec ProposalRecord };
-type PublicPage_1 = record { next_cursor : opt text; items : vec PublicAlarm };
-type PublicPage_2 = record { next_cursor : opt text; items : vec Sample };
-type PublicPage_3 = record {
+type PublicPage = record {
+  next_cursor : opt text;
+  items : vec FundingOperation;
+};
+type PublicPage_1 = record {
+  next_cursor : opt text;
+  items : vec ProposalRecord;
+};
+type PublicPage_2 = record { next_cursor : opt text; items : vec PublicAlarm };
+type PublicPage_3 = record { next_cursor : opt text; items : vec Sample };
+type PublicPage_4 = record {
   next_cursor : opt text;
   items : vec PublicTargetRow;
 };
-type PublicPage_4 = record {
-  next_cursor : opt text;
-  items : vec PublicTopupSummary;
-};
 type PublicPage_5 = record {
   next_cursor : opt text;
-  items : vec FundingOperation;
+  items : vec PublicTopupSummary;
 };
 type PublicQueryError = variant {
   TargetNotFound;
@@ -309,28 +321,28 @@ type PublicTargetRow = record {
   advisory_balance_overflowed : bool;
   last_success_at_secs : opt nat64;
   recent_topups : vec PublicTopupSummary;
+  auto_topup : bool;
   refill_cycles : nat;
+  tags : vec text;
   next_sample_at_secs : opt nat64;
   advisory_balance_cycles : opt nat;
+  burn_anomaly_limit_cycles_per_day : opt nat;
   display_name : text;
   low_balance_threshold_cycles : nat;
+  enabled : bool;
   state : PublicTargetState;
   runway_secs : opt nat64;
   as_of_secs : nat64;
   reported_operational_healthy : opt bool;
   criticality : Criticality;
   environment : Environment;
+  daily_cap_cycles : nat;
   stale_for_secs : opt nat64;
   burn_cycles_per_day : opt nat;
+  paused : bool;
   observation_mode : ObservationMode;
   project : text;
-  enabled : bool;
-  auto_topup : bool;
-  paused : bool;
-  daily_cap_cycles : nat;
   cooldown_secs : nat64;
-  tags : vec text;
-  burn_anomaly_limit_cycles_per_day : opt nat;
 };
 type PublicTargetState = variant {
   Low;
@@ -341,7 +353,9 @@ type PublicTargetState = variant {
   Uninstalled;
 };
 type PublicTopupSummary = record {
+  trigger : opt FundingTrigger;
   rail : FundingRail;
+  target : principal;
   amount_cycles : nat;
   outcome : FundingOutcome;
   resolved_at_secs : nat64;
@@ -360,15 +374,24 @@ type ReservedPrincipalKind = variant {
 };
 type Result = variant { Ok : bool; Err : GovernanceError };
 type Result_1 = variant { Ok : FundingOperation; Err : text };
-type Result_10 = variant { Ok : nat64; Err : GovernanceError };
+type Result_10 = variant { Ok : PublicPage_5; Err : PublicQueryError };
+type Result_11 = variant { Ok : PublicPage; Err : AuthenticatedQueryError };
+type Result_12 = variant { Ok : nat64; Err : GovernanceError };
+type Result_13 = variant { Ok; Err : text };
 type Result_2 = variant { Ok; Err : GovernanceError };
-type Result_3 = variant { Ok : PermissionsView; Err : AuthenticatedQueryError };
-type Result_4 = variant { Ok : PublicPage; Err : AuthenticatedQueryError };
-type Result_5 = variant { Ok : PublicPage_1; Err : PublicQueryError };
-type Result_6 = variant { Ok : PublicPage_2; Err : PublicQueryError };
-type Result_7 = variant { Ok : PublicPage_3; Err : PublicQueryError };
-type Result_8 = variant { Ok : PublicPage_4; Err : PublicQueryError };
-type Result_9 = variant { Ok : PublicPage_5; Err : AuthenticatedQueryError };
+type Result_3 = variant {
+  Ok : OperatorDashboard;
+  Err : SingleOperatorSetupError;
+};
+type Result_4 = variant { Ok : PermissionsView; Err : AuthenticatedQueryError };
+type Result_5 = variant {
+  Ok : OperatorDashboard;
+  Err : OperatorDashboardError;
+};
+type Result_6 = variant { Ok : PublicPage_1; Err : AuthenticatedQueryError };
+type Result_7 = variant { Ok : PublicPage_2; Err : PublicQueryError };
+type Result_8 = variant { Ok : PublicPage_3; Err : PublicQueryError };
+type Result_9 = variant { Ok : PublicPage_4; Err : PublicQueryError };
 type Sample = record {
   balance : opt AdvisoryCyclesBalance;
   state : PublicTargetState;
@@ -390,7 +413,12 @@ type SelfRecoveryPolicyError = variant {
   ZeroDailyCap;
   CyclesValueOverflow;
 };
-type StandardRecord = record { name : text; url : text };
+type SingleOperatorSetupError = variant {
+  SetupAlreadyUsed;
+  NotOperator;
+  InvalidProjection;
+};
+type StandardRecord = record { url : text; name : text };
 type TargetArgs = record {
   "principal" : principal;
   tags : vec text;
@@ -444,38 +472,49 @@ type TargetValidationError = variant {
   ZeroBurnAnomalyLimit;
   TooManyTags;
 };
-type MaintenanceResult = variant { Ok; Err : text };
+type TextValue = record { content : text };
+type TokenAmount = record { decimals : nat8; amount : nat64; symbol : text };
+type Value = variant {
+  Text : TextValue;
+  TokenAmount : TokenAmount;
+  TimestampSeconds : DurationSeconds;
+  DurationSeconds : DurationSeconds;
+};
 service : (InitArgs) -> {
   acknowledge_alarm : (nat64) -> (Result);
   approve_proposal : (nat64) -> (Result);
   attach_block_proof : (nat64, nat64) -> (Result_1);
   attach_refund_block_proof : (nat64, nat64) -> (Result_1);
   cancel_proposal : (nat64) -> (Result_2);
+  configure_single_operator_governance : () -> (Result_3);
   cycles_status : () -> (CycleManagerCyclesStatus) query;
   execute_proposal : (nat64) -> (Result_2);
-  get_my_permissions : () -> (Result_3) query;
+  get_my_permissions : () -> (Result_4) query;
+  get_operator_dashboard : () -> (Result_5) query;
   get_public_overview : () -> (PublicOverview) query;
   get_public_target : (principal) -> (opt PublicTargetRow) query;
   icrc10_supported_standards : () -> (vec StandardRecord) query;
-  icrc21_canister_call_consent_message : (ConsentMessageRequest) -> (ConsentMessageResult);
-  list_governance_proposals : (opt text, nat16) -> (Result_4) query;
-  list_public_alarms : (opt text, nat16) -> (Result_5) query;
-  list_public_samples : (principal, opt text, nat16) -> (Result_6) query;
-  list_public_targets : (opt text, nat16) -> (Result_7) query;
-  list_public_topups : (principal, opt text, nat16) -> (Result_8) query;
-  list_unresolved_funding_operations : (opt text, nat16) -> (Result_9) query;
+  icrc21_canister_call_consent_message : (ConsentMessageRequest) -> (
+      ConsentMessageResult,
+    );
+  list_governance_proposals : (opt text, nat16) -> (Result_6) query;
+  list_public_alarms : (opt text, nat16) -> (Result_7) query;
+  list_public_samples : (principal, opt text, nat16) -> (Result_8) query;
+  list_public_targets : (opt text, nat16) -> (Result_9) query;
+  list_public_topups : (principal, opt text, nat16) -> (Result_10) query;
+  list_unresolved_funding_operations : (opt text, nat16) -> (Result_11) query;
   manual_top_up : (principal) -> (Result_1);
   manual_top_up_with_amount : (principal, FundingRail, nat) -> (Result_1);
-  run_maintenance_now : () -> (MaintenanceResult);
   pause_target : (principal) -> (Result_2);
-  propose_add_signer : (principal) -> (Result_10);
-  propose_register_target : (TargetArgs) -> (Result_10);
-  propose_remove_signer : (principal) -> (Result_10);
-  propose_remove_target : (principal) -> (Result_10);
-  propose_set_global_policy : (GlobalPolicyArgs) -> (Result_10);
-  propose_set_signer_threshold : (nat32) -> (Result_10);
-  propose_unpause_target : (principal) -> (Result_10);
-  propose_update_target : (principal, TargetPatch) -> (Result_10);
-  propose_update_targets : (vec TargetUpdate) -> (Result_10);
+  propose_add_signer : (principal) -> (Result_12);
+  propose_register_target : (TargetArgs) -> (Result_12);
+  propose_remove_signer : (principal) -> (Result_12);
+  propose_remove_target : (principal) -> (Result_12);
+  propose_set_global_policy : (GlobalPolicyArgs) -> (Result_12);
+  propose_set_signer_threshold : (nat32) -> (Result_12);
+  propose_unpause_target : (principal) -> (Result_12);
+  propose_update_target : (principal, TargetPatch) -> (Result_12);
+  propose_update_targets : (vec TargetUpdate) -> (Result_12);
   resolve_unknown_as_spent : (nat64) -> (Result_1);
+  run_maintenance_now : () -> (Result_13);
 }

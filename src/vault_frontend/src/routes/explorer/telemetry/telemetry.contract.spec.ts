@@ -9,29 +9,24 @@ const source = readFileSync(resolve(process.cwd(), 'src/routes/explorer/telemetr
 const serviceSource = readFileSync(resolve(process.cwd(), 'src/lib/services/cycleSentinelService.ts'), 'utf8');
 
 describe('Cycle Sentinel telemetry route contract', () => {
-  it('loads private telemetry only through an authenticated wallet and keeps signer checks separate', () => {
-    expect(source).toContain('loadPublicTelemetry(authenticated)');
+  it('loads telemetry and initial operator state from one authenticated dashboard query', () => {
+    expect(source).toContain('loadOperatorDashboard(authenticated)');
     expect(source).toContain('canViewSentinelTelemetry(latestWalletConnection.principal)');
     expect(source).toContain('Sentinel telemetry is private');
-    expect(source).toContain('getPermissions(authenticated)');
-    expect(source).toContain('async function checkOperatorAccess()');
-    expect(source).toContain('Check operator access');
-    expect(source).toContain('checkedSession !== session');
-    expect(source).toContain('operatorCheckIsCurrent(session, epoch)');
-    expect(source).toContain('currentWalletType.subscribe');
-    expect(source).toContain('walletSessionGeneration.subscribe');
+    expect(source).toContain('signer = next.governance.is_signer');
+    expect(source).toContain('proposals = next.proposals');
+    expect(source).toContain('unresolved = next.unresolved');
     expect(source).toContain('walletStore.subscribe');
     expect(source).toContain('OPERATOR_QUERY_TIMEOUT_MS = 25_000');
-    expect(source).toContain("Checking signer permission");
-    expect(source).toContain('Signer access is confirmed, but the proposal and unresolved-operation lists did not load');
-    expect(source).toContain('Retry list loading');
-    expect(source).toContain('operatorCheckIsCurrent(session, epoch)');
     expect(source).toContain('assertCurrentSigner();');
     expect(source).toContain('{#if signer && actor}');
-    expect(serviceSource).toContain('auth.getActor<SentinelActor>');
+    expect(serviceSource).toContain('actor.get_operator_dashboard()');
     expect(serviceSource).not.toMatch(/\bany\b/);
-    const refreshSource = source.slice(source.indexOf('async function refresh()'), source.indexOf('async function checkOperatorAccess()'));
-    expect(refreshSource).toContain('loadPublicTelemetry(authenticated)');
+    expect(source).not.toContain('async function checkOperatorAccess()');
+    expect(source).not.toContain('Check operator access');
+    const refreshSource = source.slice(source.indexOf('async function refresh()'), source.indexOf('function reconcileManualTopUpLock('));
+    expect(refreshSource).toContain('loadOperatorDashboard(authenticated)');
+    expect(refreshSource).not.toContain('runMaintenanceNow');
     expect(refreshSource).not.toContain('getPermissions(');
   });
 
@@ -42,9 +37,9 @@ describe('Cycle Sentinel telemetry route contract', () => {
     expect(controls).toContain("checkingNow ? 'Checking now…' : 'Run check now'");
     expect(controls).toContain('may refuel Sentinel or top up registered canisters under the current reserves, thresholds and spending limits');
     expect(controls).toContain('Refresh telemetry reads saved results.');
-    const refreshSource = source.slice(source.indexOf('async function refresh()'), source.indexOf('async function checkOperatorAccess()'));
+    const refreshSource = source.slice(source.indexOf('async function refresh()'), source.indexOf('function reconcileManualTopUpLock('));
     expect(refreshSource).not.toContain('runMaintenanceNow');
-    expect(refreshSource).toContain('createAuthenticatedSentinelActor');
+    expect(refreshSource).toContain('loadOperatorDashboard(authenticated)');
     const checkSource = source.slice(source.indexOf('async function runCheckNow()'), source.indexOf('async function run(action:'));
     expect(checkSource.indexOf('assertCurrentSigner();')).toBeLessThan(checkSource.indexOf('await sentinelManagement.runMaintenanceNow(authenticated)'));
     expect(checkSource).toContain('if (checkingNow) return;');
@@ -57,16 +52,16 @@ describe('Cycle Sentinel telemetry route contract', () => {
     expect(checkSource).toContain('if (checkSessionIsCurrent()) authError');
   });
 
-  it('bounds signer checks and keeps server-confirmed access during ancillary list failures', () => {
+  it('bounds the combined dashboard query and keeps signer-only record loading explicit', () => {
     expect(source).toContain('OPERATOR_QUERY_TIMEOUT_MS = 25_000');
-    expect(source).toContain("withOperatorQueryTimeout(createAuthenticatedSentinelActor(), 'Connecting to the wallet')");
-    expect(source).toContain("withOperatorQueryTimeout(getPermissions(authenticated), 'Checking signer permission')");
-    const dataLoadSource = source.slice(source.indexOf('async function loadOperatorData('), source.indexOf('async function checkOperatorAccess()'));
-    expect(dataLoadSource).toContain("'Loading signer data'");
-    expect(dataLoadSource).toContain('operatorDataError = error instanceof Error');
-    expect(dataLoadSource).not.toContain('invalidateOperatorAccess()');
+    expect(source).toContain("withOperatorQueryTimeout(loadOperatorDashboard(authenticated), 'Loading Sentinel telemetry and operator status')");
+    const dataLoadSource = source.slice(source.indexOf('async function refresh()'), source.indexOf('function reconcileManualTopUpLock('));
+    expect(dataLoadSource).toContain('const authenticated = await createAuthenticatedSentinelActor()');
+    expect(dataLoadSource).toContain('operatorDataError = signer && !next.operatorRecordsAvailable');
+    expect(source).toContain('async function loadAllOperatorRecords()');
+    expect(source).toContain("'Loading remaining operator records'");
     expect(source).toContain('assertCurrentSigner();');
-    expect(source).toContain('Retry list loading');
+    expect(source).toContain('Load all proposal and unresolved records');
   });
 
   it('reads the schedule and source freshness from published policy', () => {
@@ -121,14 +116,23 @@ describe('Cycle Sentinel telemetry route contract', () => {
   });
 
   it('proposes bulk target flags once and reports the proposal ID and remaining governance steps', () => {
-    expect(source).toContain('Enable All');
-    expect(source).toContain('Auto Top-Up Enabled for All');
+    expect(source).toContain('`Enable monitoring · ${monitoringPendingCount}`');
+    expect(source).toContain("'Monitoring enabled for all'");
+    expect(source).toContain('`Enable auto top-up · ${autoTopupPendingCount}`');
+    expect(source).toContain("'Auto top-up enabled for all'");
+    expect(source).toContain('Monitoring is already enabled for every observable target.');
+    expect(source).toContain('Auto top-up is already enabled for every eligible target.');
+    expect(source).toContain('Unobserved targets are skipped');
     expect(source).toContain('await refresh();');
     expect(source).toContain('const updates: TargetUpdate[] = candidates.map');
     expect(source).toContain('await sentinelManagement.proposeUpdateTargets(requestActor, updates)');
     expect(source).toContain('proposalId = createdProposalId.toString()');
-    expect(source).toContain('await loadOperatorData(requestActor, requestSession, requestEpoch)');
-    expect(source).toContain('the normal approval threshold, then a signer must execute it after the target-registry timelock');
+    const bulkSource = source.slice(source.indexOf('async function proposeBulkTargetFlags('), source.indexOf('function targetPatchFor('));
+    expect(bulkSource).toContain('requestActor !== actor');
+    expect(bulkSource).toContain('Proposal #${proposalId} created for ${candidates.length} target');
+    expect(bulkSource).not.toContain('loadAllOperatorRecords(');
+    expect(bulkSource).not.toContain('refresh()');
+    expect(source).toContain('The configured on-chain approval threshold and target-registry timelock apply.');
   });
 
   it('sends one batch call for a bulk target proposal and rejects duplicate principals', async () => {
@@ -189,12 +193,15 @@ describe('Cycle Sentinel telemetry route contract', () => {
   });
 
   it('restores unresolved manual top-up locks on reload and preserves active dispatches', () => {
-    const dataLoadSource = source.slice(source.indexOf('async function loadOperatorData('), source.indexOf('async function checkOperatorAccess()'));
-    expect(dataLoadSource).toContain("nextUnresolved.find((item) => variant(item.trigger) === 'ManualTopup')");
-    expect(dataLoadSource).toContain('authorizedSession: session');
-    expect(dataLoadSource.indexOf('if (manualTopUpLock?.inFlight)')).toBeLessThan(dataLoadSource.indexOf("nextUnresolved.find((item) => variant(item.trigger) === 'ManualTopup')"));
-    expect(dataLoadSource).toContain('operationId: unresolvedManualTopUp.id');
-    expect(dataLoadSource).toContain('Do not submit another top-up until it is reconciled.');
+    const dataLoadSource = source.slice(source.indexOf('async function refresh()'), source.indexOf('function reconcileManualTopUpLock('));
+    expect(dataLoadSource).toContain('loadOperatorDashboard(authenticated)');
+    expect(dataLoadSource).toContain('reconcileManualTopUpLock(next, session)');
+    const lockSource = source.slice(source.indexOf('function reconcileManualTopUpLock('), source.indexOf('async function retryOperatorData()'));
+    expect(lockSource).toContain("data.unresolved.find((item) => variant(item.trigger) === 'ManualTopup')");
+    expect(lockSource).toContain('authorizedSession: session');
+    expect(lockSource.indexOf('if (manualTopUpLock?.inFlight) return;')).toBeLessThan(lockSource.indexOf("data.unresolved.find((item) => variant(item.trigger) === 'ManualTopup')"));
+    expect(lockSource).toContain('operationId: unresolvedManualTopUp.id');
+    expect(lockSource).toContain('Do not submit another top-up until it is reconciled.');
     expect(source).toContain('sessionStorage.getItem(manualTopUpMarkerStorageKey(identityKey))');
     expect(source).toContain("return principal.toText();");
     const walletObserveSource = source.slice(source.indexOf('function observeWalletSession()'), source.indexOf('function fundingPolicy()'));
