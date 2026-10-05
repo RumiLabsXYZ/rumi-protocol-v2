@@ -88,7 +88,7 @@ use crate::types::{
     PendingIcpSourceDebit, PendingReservation, PendingSourceDebit, ProposalRecord, ProposalStatus,
     ReservedPrincipalKind, Sample, SelfRecoveryState, SharedReserveMintReceipt, SourceAttemptError,
     SourceReserveError, SourceReserveState, TargetRecord, TargetReservationState,
-    TerminalFundingSummary, ValidatedInitArgs,
+    TerminalFundingSummary, TerminalFundingSummaryV1, ValidatedInitArgs,
 };
 
 type VMem = VirtualMemory<DefaultMemoryImpl>;
@@ -125,6 +125,7 @@ const MEM_SOURCE_REFRESH_GENERATION: MemoryId = MemoryId::new(15); // StableCell
 const MEM_ICP_SOURCE_RESERVE: MemoryId = MemoryId::new(16); // StableCell<StoredIcpSourceReserveState> (singleton)
 const MEM_SHARED_CONVERSION_BUDGET: MemoryId = MemoryId::new(17); // StableCell<StoredGlobalRollingSpendState> (singleton)
 const MEM_SHARED_RESERVE_MINT_RECEIPTS: MemoryId = MemoryId::new(18); // StableBTreeMap<u64, StoredSharedReserveMintReceipt>
+const MEM_SINGLE_OPERATOR_SETUP: MemoryId = MemoryId::new(19); // StableCell<StoredSingleOperatorSetup> (singleton)
 
 /// Every stable memory slot this canister owns, paired with a human label.
 /// Single source of truth for the layout; iterated by `memory_ids_unique`.
@@ -151,6 +152,7 @@ const MEMORY_LAYOUT: &[(MemoryId, &str)] = &[
         MEM_SHARED_RESERVE_MINT_RECEIPTS,
         "shared_reserve_mint_receipts",
     ),
+    (MEM_SINGLE_OPERATOR_SETUP, "single_operator_setup"),
 ];
 
 // ─────────────────────── state.rs-owned bookkeeping types ───────────────────────
@@ -344,6 +346,22 @@ impl StoredFundingCounters {
     }
 }
 
+/// Memory ID 19. A durable one-shot marker for the direct operator setup
+/// escape hatch. Older canisters start with V1(false) when this new memory
+/// region is first initialized.
+#[derive(CandidType, Deserialize, Clone, Copy)]
+enum StoredSingleOperatorSetup {
+    V1(bool),
+}
+
+impl StoredSingleOperatorSetup {
+    fn into_current(self) -> bool {
+        match self {
+            Self::V1(used) => used,
+        }
+    }
+}
+
 #[derive(CandidType, Deserialize, Clone)]
 enum StoredTargetRecord {
     V1(TargetRecord),
@@ -513,13 +531,15 @@ impl StoredSelfRecoveryState {
 
 #[derive(CandidType, Deserialize, Clone)]
 enum StoredTerminalFundingSummary {
-    V1(TerminalFundingSummary),
+    V1(TerminalFundingSummaryV1),
+    V2(TerminalFundingSummary),
 }
 
 impl StoredTerminalFundingSummary {
     fn into_current(self) -> TerminalFundingSummary {
         match self {
-            Self::V1(v) => v,
+            Self::V1(v) => v.into(),
+            Self::V2(v) => v,
         }
     }
 }
@@ -605,6 +625,7 @@ impl_candid_storable!(StoredGovernanceCounters);
 impl_candid_storable!(StoredSampleMeta);
 impl_candid_storable!(StoredAlarmCounters);
 impl_candid_storable!(StoredFundingCounters);
+impl_candid_storable!(StoredSingleOperatorSetup);
 impl_candid_storable!(StoredTargetRecord);
 impl_candid_storable!(StoredProposalRecord);
 impl_candid_storable!(StoredSample);
@@ -791,6 +812,12 @@ thread_local! {
                 .expect("rumi_cycle_sentinel: failed to init funding counters cell")
         ));
 
+    static SINGLE_OPERATOR_SETUP: RefCell<StableCell<StoredSingleOperatorSetup, VMem>> =
+        MEMORY_MANAGER.with(|m| RefCell::new(
+            StableCell::init(m.borrow().get(MEM_SINGLE_OPERATOR_SETUP), StoredSingleOperatorSetup::V1(false))
+                .expect("rumi_cycle_sentinel: failed to init single-operator setup cell")
+        ));
+
     static TARGET_RESERVATIONS: RefCell<StableBTreeMap<StorablePrincipal, StoredTargetReservationState, VMem>> =
         MEMORY_MANAGER.with(|m| RefCell::new(StableBTreeMap::init(m.borrow().get(MEM_TARGET_RESERVATIONS))));
 
@@ -863,8 +890,13 @@ pub(crate) fn init(args: InitArgs) -> Result<(), InitArgsError> {
             approval_threshold: validated.approval_threshold(),
             global_policy: validated.global_policy().clone(),
         };
+        let setup_already_complete = crate::telemetry_access::is_single_operator_set(
+            &config.signers,
+            config.approval_threshold,
+        );
         cell.set(StoredGlobalConfig::V1(Some(config)))
             .expect("rumi_cycle_sentinel: global config fits one StableCell page");
+        set_single_operator_setup_used(setup_already_complete);
     });
     Ok(())
 }
@@ -891,6 +923,77 @@ pub(crate) fn set_global_config(config: GlobalConfig) {
             .set(StoredGlobalConfig::V1(Some(config)))
             .expect("rumi_cycle_sentinel: failed to write global config cell");
     });
+}
+
+fn single_operator_setup_used() -> bool {
+    SINGLE_OPERATOR_SETUP.with(|cell| cell.borrow().get().clone().into_current())
+}
+
+fn set_single_operator_setup_used(used: bool) {
+    SINGLE_OPERATOR_SETUP.with(|cell| {
+        cell.borrow_mut()
+            .set(StoredSingleOperatorSetup::V1(used))
+            .expect("rumi_cycle_sentinel: single-operator setup marker fits one StableCell page");
+    });
+}
+
+pub(crate) fn single_operator_setup_available() -> bool {
+    !single_operator_setup_used()
+}
+
+/// Migrate existing canisters that already have the designated one-of-three
+/// signer set: their setup is complete even though Memory ID 19 did not exist
+/// before this release. Existing `true` markers are never cleared.
+pub(crate) fn migrate_single_operator_setup_usage_on_upgrade() {
+    if !single_operator_setup_used() {
+        let config = global_config();
+        if crate::telemetry_access::is_single_operator_set(
+            &config.signers,
+            config.approval_threshold,
+        ) {
+            set_single_operator_setup_used(true);
+        }
+    }
+}
+
+/// Applies the operator's explicit single-signature setup. This direct,
+/// operator-authorized setup intentionally bypasses the signer-change delay:
+/// it is the escape hatch from the existing multi-signer quorum. The fixed
+/// three operator principals are the only signers afterward, and each
+/// approval is sufficient.
+pub(crate) fn configure_single_operator_governance(
+    caller: Principal,
+) -> Result<bool, types::SingleOperatorSetupError> {
+    if !crate::telemetry_access::is_operator(caller) {
+        return Err(types::SingleOperatorSetupError::NotOperator);
+    }
+    if single_operator_setup_used() {
+        return Err(types::SingleOperatorSetupError::SetupAlreadyUsed);
+    }
+    let signers = crate::telemetry_access::operator_principals();
+    let mut config = global_config();
+    let current_signers: BTreeSet<Principal> = config.signers.iter().copied().collect();
+    let requested_signers: BTreeSet<Principal> = signers.iter().copied().collect();
+    if config.approval_threshold == 1 && current_signers == requested_signers {
+        set_single_operator_setup_used(true);
+        return Ok(false);
+    }
+
+    // Approval counts belong to the old signer/quorum configuration. Clear
+    // them from every open proposal before installing the new quorum so a
+    // previously approved action cannot become executable as a side effect.
+    for mut proposal in list_proposals_after(None, types::MAX_PROPOSALS) {
+        if proposal.status == ProposalStatus::Open {
+            proposal.clear_approvals();
+            insert_proposal(proposal)
+                .expect("overwriting an existing proposal cannot exceed the storage bound");
+        }
+    }
+    config.signers = signers;
+    config.approval_threshold = 1;
+    set_global_config(config);
+    set_single_operator_setup_used(true);
+    Ok(true)
 }
 
 pub(crate) fn is_signer(principal: Principal) -> bool {
@@ -1626,6 +1729,19 @@ pub(crate) fn terminal_summary_count() -> u64 {
     TERMINAL_SUMMARIES.with(|m| m.borrow().len())
 }
 
+/// Returns the complete bounded set of retained terminal summaries. The
+/// caller supplies the established ring bound, so this scan cannot exceed
+/// `MAX_TERMINAL_SUMMARIES`.
+pub(crate) fn list_terminal_summaries(limit: usize) -> Vec<TerminalFundingSummary> {
+    TERMINAL_SUMMARIES.with(|m| {
+        m.borrow()
+            .iter()
+            .map(|(_, value)| value.into_current())
+            .take(limit)
+            .collect()
+    })
+}
+
 // ─────────────────────── Funding: operations, reservations, self-recovery ───────────────────────
 
 pub(crate) fn next_operation_id() -> u64 {
@@ -2141,12 +2257,13 @@ pub(crate) fn set_self_recovery_state(state: SelfRecoveryState) {
 /// `TerminalFundingSummary::from_resolved`, never from raw bytes or an
 /// external/untrusted decode path), inserts it keyed by `operation_id`,
 /// then evicts the entry with the oldest `resolved_at_secs` if the store
-/// exceeds `MAX_TERMINAL_SUMMARIES`.
+/// exceeds `MAX_TERMINAL_SUMMARIES`. New entries use the V2 envelope; old
+/// V1 entries remain readable and surface an unavailable trigger.
 pub(crate) fn insert_terminal_summary(summary: TerminalFundingSummary) {
     let id = summary.operation_id();
     TERMINAL_SUMMARIES.with(|m| {
         m.borrow_mut()
-            .insert(id, StoredTerminalFundingSummary::V1(summary));
+            .insert(id, StoredTerminalFundingSummary::V2(summary));
     });
     evict_oldest_terminal_summary_if_over_bound();
 }
@@ -3621,7 +3738,7 @@ mod tests {
                 "duplicate stable MemoryId {id:?} (store {label:?}) — pick an unused slot"
             );
         }
-        assert_eq!(MEMORY_LAYOUT.len(), 19, "expected exactly 19 memory ids");
+        assert_eq!(MEMORY_LAYOUT.len(), 20, "expected exactly 20 memory ids");
     }
 
     // ── round-trip tests, one per stable structure ──
@@ -3633,6 +3750,91 @@ mod tests {
         let config = global_config();
         assert_eq!(config.signers, signers);
         assert_eq!(config.approval_threshold, 1);
+    }
+
+    #[test]
+    fn single_operator_setup_rejects_non_operator_without_mutation() {
+        let existing_signers = vec![test_signer(1), test_signer(2)];
+        init_test_state(existing_signers.clone(), 2, 1_000_000);
+        let before = global_config();
+
+        assert_eq!(
+            configure_single_operator_governance(test_signer(99)),
+            Err(types::SingleOperatorSetupError::NotOperator)
+        );
+        assert_eq!(global_config(), before);
+        assert!(single_operator_setup_available());
+    }
+
+    #[test]
+    fn single_operator_setup_replaces_signers_once_and_clears_only_open_approvals() {
+        let old_signer_a = test_signer(1);
+        let old_signer_b = test_signer(2);
+        init_test_state(vec![old_signer_a, old_signer_b], 2, 1_000_000);
+
+        let mut open = ProposalRecord::new(
+            1,
+            ProposalPayload::AddSigner {
+                signer: test_signer(3),
+            },
+            old_signer_a,
+            10,
+        );
+        open.record_approval(old_signer_a);
+        open.record_approval(old_signer_b);
+        insert_proposal(open).unwrap();
+
+        let mut closed = ProposalRecord::new(
+            2,
+            ProposalPayload::AddSigner {
+                signer: test_signer(4),
+            },
+            old_signer_a,
+            11,
+        );
+        closed.record_approval(old_signer_a);
+        closed.status = ProposalStatus::Executed;
+        insert_proposal(closed).unwrap();
+
+        let operator = crate::telemetry_access::operator_principals()[0];
+        assert_eq!(configure_single_operator_governance(operator), Ok(true));
+        let config = global_config();
+        assert_eq!(
+            config.signers,
+            crate::telemetry_access::operator_principals()
+        );
+        assert_eq!(config.approval_threshold, 1);
+        assert!(!single_operator_setup_available());
+        assert!(get_proposal(1).unwrap().approvals().is_empty());
+        assert_eq!(get_proposal(2).unwrap().approval_count(), 1);
+
+        let changed_config = GlobalConfig {
+            signers: vec![old_signer_a, old_signer_b],
+            approval_threshold: 2,
+            global_policy: config.global_policy,
+        };
+        set_global_config(changed_config.clone());
+        let other_operator = crate::telemetry_access::operator_principals()[1];
+        assert_eq!(
+            configure_single_operator_governance(other_operator),
+            Err(types::SingleOperatorSetupError::SetupAlreadyUsed)
+        );
+        assert_eq!(global_config(), changed_config);
+        assert!(!single_operator_setup_available());
+    }
+
+    #[test]
+    fn upgrade_marks_existing_single_operator_governance_as_already_setup() {
+        set_global_config(GlobalConfig {
+            signers: crate::telemetry_access::operator_principals(),
+            approval_threshold: 1,
+            global_policy: test_global_policy(1_000_000),
+        });
+        set_single_operator_setup_used(false);
+
+        migrate_single_operator_setup_usage_on_upgrade();
+
+        assert!(!single_operator_setup_available());
     }
 
     #[test]
@@ -4385,11 +4587,17 @@ mod tests {
             TERMINAL_FUNDING_SUMMARY_V1_FIXTURE,
         ))
         .into_current();
-        assert_eq!(decoded, expected);
+        assert_eq!(decoded.operation_id(), expected.operation_id());
+        assert_eq!(decoded.target(), expected.target());
+        assert_eq!(decoded.rail(), expected.rail());
+        assert_eq!(decoded.outcome(), expected.outcome());
+        assert_eq!(decoded.amount_cycles(), expected.amount_cycles());
+        assert_eq!(decoded.resolved_at_secs(), expected.resolved_at_secs());
+        assert_eq!(decoded.trigger(), None);
     }
 
-    /// Frozen fixture captured once from `candid::encode_one(&StoredTerminalFundingSummary::V1(TerminalFundingSummary::from_resolved(
-    /// &test_resolved_operation(1, test_target_principal(1), &test_global_policy(1_000), 10), 20).unwrap()))`.
+    /// Frozen fixture captured from the V1 terminal-summary record, before
+    /// origin tracking was added.
     const TERMINAL_FUNDING_SUMMARY_V1_FIXTURE: &[u8] = &[
         68, 73, 68, 76, 4, 107, 1, 155, 150, 1, 1, 108, 6, 210, 146, 145, 221, 4, 2, 179, 128, 231,
         143, 6, 120, 209, 230, 179, 183, 8, 104, 212, 255, 174, 244, 10, 125, 146, 241, 190, 222,
@@ -5429,6 +5637,7 @@ mod tests {
         samples: RefCell<StableBTreeMap<SampleKey, StoredSample, VMem>>,
         proposals: RefCell<StableBTreeMap<u64, StoredProposalRecord, VMem>>,
         global_config: RefCell<StableCell<StoredGlobalConfig, VMem>>,
+        single_operator_setup: RefCell<StableCell<StoredSingleOperatorSetup, VMem>>,
     }
 
     fn open_all(memory: DefaultMemoryImpl) -> TestStores {
@@ -5439,6 +5648,13 @@ mod tests {
             proposals: RefCell::new(StableBTreeMap::init(mm.get(MEM_PROPOSALS))),
             global_config: RefCell::new(
                 StableCell::init(mm.get(MEM_GLOBAL_CONFIG), StoredGlobalConfig::V1(None)).unwrap(),
+            ),
+            single_operator_setup: RefCell::new(
+                StableCell::init(
+                    mm.get(MEM_SINGLE_OPERATOR_SETUP),
+                    StoredSingleOperatorSetup::V1(false),
+                )
+                .unwrap(),
             ),
         }
     }
@@ -5486,6 +5702,11 @@ mod tests {
                 .borrow_mut()
                 .set(StoredGlobalConfig::V1(Some(config.clone())))
                 .unwrap();
+            stores
+                .single_operator_setup
+                .borrow_mut()
+                .set(StoredSingleOperatorSetup::V1(true))
+                .unwrap();
         }
         let stores = open_all(backing);
         assert_eq!(
@@ -5518,6 +5739,12 @@ mod tests {
                 .map(|c| c.signers),
             Some(config.signers)
         );
+        assert!(stores
+            .single_operator_setup
+            .borrow()
+            .get()
+            .clone()
+            .into_current());
     }
 
     // ── Task 1 state gates (accessor smoke tests) ──
@@ -6515,7 +6742,7 @@ mod tests {
         let wrong_key = 99u64;
         TERMINAL_SUMMARIES.with(|m| {
             m.borrow_mut()
-                .insert(wrong_key, StoredTerminalFundingSummary::V1(summary.clone()));
+                .insert(wrong_key, StoredTerminalFundingSummary::V2(summary.clone()));
         });
         assert_eq!(
             validate_whole_state(sentinel_id),
@@ -7810,7 +8037,7 @@ mod tests {
             let summary = TerminalFundingSummary::from_resolved(&op, i).unwrap();
             TERMINAL_SUMMARIES.with(|m| {
                 m.borrow_mut()
-                    .insert(i, StoredTerminalFundingSummary::V1(summary));
+                    .insert(i, StoredTerminalFundingSummary::V2(summary));
             });
         }
         assert_eq!(

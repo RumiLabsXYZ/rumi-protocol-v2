@@ -68,6 +68,7 @@ fn post_upgrade() {
             "rumi_cycle_sentinel: post_upgrade state validation failed: {err:?}"
         ));
     }
+    state::migrate_single_operator_setup_usage_on_upgrade();
     sampler::setup_timer();
 }
 
@@ -165,6 +166,16 @@ fn pause_target(principal: Principal) -> Result<(), governance::GovernanceError>
 #[ic_cdk::query]
 fn get_my_permissions() -> Result<types::PermissionsView, public_api::AuthenticatedQueryError> {
     public_api::get_my_permissions_at(ic_cdk::caller())
+}
+
+/// Explicitly replaces the signer set with the three user-designated
+/// operator principals and sets the approval quorum to one. Funding policy
+/// and its timelocks are untouched. Approvals on existing open proposals are
+/// cleared so no action inherits approvals from the previous quorum.
+#[ic_cdk::update(guard = "require_telemetry_operator")]
+fn configure_single_operator_governance(
+) -> Result<types::OperatorDashboard, types::SingleOperatorSetupError> {
+    public_api::configure_single_operator_governance_at(ic_cdk::caller(), now_secs())
 }
 
 /// Wallet signers request this standard, unauthenticated update before they
@@ -425,6 +436,19 @@ fn require_telemetry_viewer() -> Result<(), String> {
     } else {
         Err("caller is not authorized to view private telemetry".to_string())
     }
+}
+
+fn require_telemetry_operator() -> Result<(), String> {
+    if telemetry_access::is_operator(ic_cdk::caller()) {
+        Ok(())
+    } else {
+        Err("caller is not an authorized Cycle Sentinel operator".to_string())
+    }
+}
+
+#[ic_cdk::query(guard = "require_telemetry_viewer")]
+fn get_operator_dashboard() -> Result<types::OperatorDashboard, types::OperatorDashboardError> {
+    public_api::get_operator_dashboard_at(ic_cdk::caller(), now_secs())
 }
 
 #[ic_cdk::query(guard = "require_telemetry_viewer")]

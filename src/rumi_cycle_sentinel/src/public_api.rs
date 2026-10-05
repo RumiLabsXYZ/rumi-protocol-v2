@@ -4,9 +4,10 @@ use candid::{CandidType, Nat, Principal};
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
-    self, Criticality, Environment, FundingOperation, ObservationMode, PageError, PermissionsView,
-    ProposalRecord, PublicAlarm, PublicOverview, PublicPage, PublicTargetRow, PublicTargetState,
-    RecentTopups, Sample, TargetRecord,
+    self, Criticality, Environment, FundingOperation, ObservationMode, OperatorDashboard,
+    OperatorDashboardError, OperatorGovernanceView, PageError, PermissionsView, ProposalRecord,
+    PublicAlarm, PublicOverview, PublicPage, PublicTargetRow, PublicTargetState,
+    PublicTopupSummary, RecentTopups, Sample, TargetRecord,
 };
 use crate::{sampler, state};
 
@@ -450,6 +451,13 @@ pub fn list_governance_proposals_at(
     if !state::is_signer(caller) {
         return Err(AuthenticatedQueryError::NotSigner);
     }
+    governance_proposal_page(cursor, limit)
+}
+
+fn governance_proposal_page(
+    cursor: Option<String>,
+    limit: u16,
+) -> Result<PublicPage<ProposalRecord>, AuthenticatedQueryError> {
     let proposal_id = cursor
         .map(|value| decode_cursor(&value).ok_or(AuthenticatedQueryError::InvalidCursor))
         .transpose()?;
@@ -482,6 +490,13 @@ pub fn list_unresolved_funding_operations_at(
     if !state::is_signer(caller) {
         return Err(AuthenticatedQueryError::NotSigner);
     }
+    unresolved_funding_operation_page(cursor, limit)
+}
+
+fn unresolved_funding_operation_page(
+    cursor: Option<String>,
+    limit: u16,
+) -> Result<PublicPage<FundingOperation>, AuthenticatedQueryError> {
     let operation_id = cursor
         .map(|value| decode_cursor(&value).ok_or(AuthenticatedQueryError::InvalidCursor))
         .transpose()?;
@@ -504,6 +519,150 @@ pub fn get_my_permissions_at(
         return Err(AuthenticatedQueryError::NotSigner);
     }
     Ok(PermissionsView { is_signer: true })
+}
+
+/// One bounded read for the private Sentinel page. Combining the telemetry,
+/// signer status, and first management pages avoids separate wallet-routed
+/// query approvals for each section of the initial view.
+pub fn get_operator_dashboard_at(
+    caller: Principal,
+    now_secs: u64,
+) -> Result<OperatorDashboard, OperatorDashboardError> {
+    get_operator_dashboard_at_internal(caller, now_secs, false)
+}
+
+fn get_operator_dashboard_at_internal(
+    caller: Principal,
+    now_secs: u64,
+    include_operator_records_for_operator: bool,
+) -> Result<OperatorDashboard, OperatorDashboardError> {
+    let mut targets = Vec::new();
+    let mut target_cursor = None;
+    loop {
+        let page = list_public_targets_at(target_cursor, types::MAX_PUBLIC_PAGE as u16, now_secs)
+            .map_err(|_| OperatorDashboardError::InvalidProjection)?;
+        let page_len = page.items.len();
+        let next_cursor = page.next_cursor;
+        targets.extend(page.items);
+        if targets.len() > types::MAX_TARGETS {
+            return Err(OperatorDashboardError::InvalidProjection);
+        }
+        match next_cursor {
+            Some(next) if page_len > 0 => target_cursor = Some(next),
+            Some(_) => return Err(OperatorDashboardError::InvalidProjection),
+            None => break,
+        }
+    }
+
+    let mut alarms = Vec::new();
+    let mut alarm_cursor = None;
+    loop {
+        let page = list_public_alarms_at(alarm_cursor, types::MAX_PUBLIC_PAGE as u16)
+            .map_err(|_| OperatorDashboardError::InvalidProjection)?;
+        let page_len = page.items.len();
+        let next_cursor = page.next_cursor;
+        alarms.extend(page.items);
+        if alarms.len() > types::MAX_ALARMS {
+            return Err(OperatorDashboardError::InvalidProjection);
+        }
+        match next_cursor {
+            Some(next) if page_len > 0 => alarm_cursor = Some(next),
+            Some(_) => return Err(OperatorDashboardError::InvalidProjection),
+            None => break,
+        }
+    }
+    let signer = state::is_signer(caller);
+    let include_operator_records = signer
+        || (include_operator_records_for_operator && crate::telemetry_access::is_operator(caller));
+    let proposals = if include_operator_records {
+        Some(
+            governance_proposal_page(None, types::MAX_PUBLIC_PAGE as u16)
+                .map_err(|_| OperatorDashboardError::InvalidProjection)?,
+        )
+    } else {
+        None
+    };
+    let unresolved_operations = if include_operator_records {
+        Some(
+            unresolved_funding_operation_page(None, types::MAX_PUBLIC_PAGE as u16)
+                .map_err(|_| OperatorDashboardError::InvalidProjection)?,
+        )
+    } else {
+        None
+    };
+    let mut topup_history: Vec<PublicTopupSummary> =
+        state::list_terminal_summaries(types::MAX_TERMINAL_SUMMARIES)
+            .iter()
+            .map(Into::into)
+            .collect();
+    topup_history.sort_by_key(|entry| (entry.resolved_at_secs, entry.target));
+    topup_history.reverse();
+    let config = state::global_config();
+
+    Ok(OperatorDashboard {
+        overview: get_public_overview_at(now_secs),
+        targets,
+        alarms,
+        topup_history,
+        governance: OperatorGovernanceView {
+            is_signer: signer,
+            is_single_operator_mode: crate::telemetry_access::is_single_operator_set(
+                &config.signers,
+                config.approval_threshold,
+            ),
+            single_operator_setup_available: state::single_operator_setup_available(),
+            signers: config.signers,
+            configured_operator_principals: crate::telemetry_access::operator_principals(),
+            approval_threshold: config.approval_threshold,
+        },
+        proposals,
+        unresolved_operations,
+    })
+}
+
+pub fn configure_single_operator_governance_at(
+    caller: Principal,
+    now_secs: u64,
+) -> Result<OperatorDashboard, types::SingleOperatorSetupError> {
+    configure_single_operator_governance_with_projection(caller, || {
+        get_operator_dashboard_at_internal(caller, now_secs, true)
+    })
+}
+
+fn configure_single_operator_governance_with_projection(
+    caller: Principal,
+    project: impl FnOnce() -> Result<OperatorDashboard, OperatorDashboardError>,
+) -> Result<OperatorDashboard, types::SingleOperatorSetupError> {
+    if !crate::telemetry_access::is_operator(caller) {
+        return Err(types::SingleOperatorSetupError::NotOperator);
+    }
+
+    // Build every fallible part of the response before changing permissions.
+    // If projection fails, the caller receives an error and governance is
+    // still untouched. The fixed operator allowlist can read these records
+    // during setup so this call can return the complete post-setup view.
+    let mut dashboard =
+        project().map_err(|_| types::SingleOperatorSetupError::InvalidProjection)?;
+    let changed = state::configure_single_operator_governance(caller)?;
+    let signers = crate::telemetry_access::operator_principals();
+    dashboard.governance = OperatorGovernanceView {
+        is_signer: true,
+        signers,
+        configured_operator_principals: crate::telemetry_access::operator_principals(),
+        approval_threshold: 1,
+        is_single_operator_mode: true,
+        single_operator_setup_available: state::single_operator_setup_available(),
+    };
+    if changed {
+        if let Some(proposals) = dashboard.proposals.as_mut() {
+            for proposal in &mut proposals.items {
+                if proposal.status == types::ProposalStatus::Open {
+                    proposal.clear_approvals();
+                }
+            }
+        }
+    }
+    Ok(dashboard)
 }
 
 pub fn list_public_samples_at(
@@ -781,6 +940,28 @@ mod tests {
             approval_threshold: 1,
             global_policy,
         });
+    }
+
+    #[test]
+    fn single_operator_setup_projection_failure_leaves_signer_state_unchanged() {
+        state::set_global_config(state::GlobalConfig {
+            signers: vec![test_signer(1), test_signer(2)],
+            approval_threshold: 2,
+            global_policy: test_global_policy(),
+        });
+        let config_before = state::global_config();
+        let caller = crate::telemetry_access::operator_principals()[0];
+
+        let result = configure_single_operator_governance_with_projection(caller, || {
+            Err(OperatorDashboardError::InvalidProjection)
+        });
+
+        assert_eq!(
+            result,
+            Err(types::SingleOperatorSetupError::InvalidProjection)
+        );
+        assert_eq!(state::global_config(), config_before);
+        assert!(state::single_operator_setup_available());
     }
 
     fn register_test_target(seed: u8, global: &types::GlobalPolicy) -> Principal {

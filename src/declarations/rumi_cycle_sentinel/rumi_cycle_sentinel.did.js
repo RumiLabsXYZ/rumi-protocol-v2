@@ -224,25 +224,45 @@ export const idlFactory = ({ IDL }) => {
   });
   const Result_1 = IDL.Variant({ 'Ok' : FundingOperation, 'Err' : IDL.Text });
   const Result_2 = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : GovernanceError });
-  const CycleManagerCyclesStatus = IDL.Record({
-    'idle_burn_cycles_per_day' : IDL.Opt(IDL.Nat),
-    'stable_memory_bytes' : IDL.Opt(IDL.Nat64),
-    'low_watermark' : IDL.Nat,
-    'balance' : IDL.Nat,
-    'heap_memory_bytes' : IDL.Opt(IDL.Nat64),
-    'healthy' : IDL.Bool,
-    'freeze_threshold_secs' : IDL.Nat64,
+  const AlarmStatus = IDL.Variant({
+    'Open' : IDL.Null,
+    'Acknowledged' : IDL.Null,
+    'Resolved' : IDL.Null,
   });
-  const PermissionsView = IDL.Record({ 'is_signer' : IDL.Bool });
-  const AuthenticatedQueryError = IDL.Variant({
-    'TooManyItems' : IDL.Null,
-    'InvalidCursor' : IDL.Null,
-    'FutureCursor' : IDL.Null,
-    'NotSigner' : IDL.Null,
+  const AlarmKind = IDL.Variant({
+    'LowBalance' : IDL.Null,
+    'SelfRecoveryUnresolved' : IDL.Null,
+    'BurnAnomaly' : IDL.Null,
+    'Unreachable' : IDL.Null,
+    'FundingUnderDelivery' : IDL.Null,
+    'FundingOverDelivery' : IDL.Null,
+    'FundingQuarantined' : IDL.Null,
   });
-  const Result_3 = IDL.Variant({
-    'Ok' : PermissionsView,
-    'Err' : AuthenticatedQueryError,
+  const PublicAlarm = IDL.Record({
+    'id' : IDL.Nat64,
+    'status' : AlarmStatus,
+    'acknowledged_at_secs' : IDL.Opt(IDL.Nat64),
+    'kind' : AlarmKind,
+    'target' : IDL.Opt(IDL.Principal),
+    'opened_at_secs' : IDL.Nat64,
+    'resolved_at_secs' : IDL.Opt(IDL.Nat64),
+  });
+  const FundingRail = IDL.Variant({
+    'IcpCmc' : IDL.Null,
+    'CyclesLedger' : IDL.Null,
+  });
+  const FundingOutcome = IDL.Variant({
+    'Refunded' : IDL.Null,
+    'Terminal' : IDL.Null,
+    'Completed' : IDL.Null,
+  });
+  const PublicTopupSummary = IDL.Record({
+    'trigger' : IDL.Opt(FundingTrigger),
+    'rail' : FundingRail,
+    'target' : IDL.Principal,
+    'amount_cycles' : IDL.Nat,
+    'outcome' : FundingOutcome,
+    'resolved_at_secs' : IDL.Nat64,
   });
   const PublicFundingStatus = IDL.Variant({
     'Blocked' : IDL.Null,
@@ -275,21 +295,6 @@ export const idlFactory = ({ IDL }) => {
     'icp_ledger_balance_as_of_secs' : IDL.Opt(IDL.Nat64),
     'min_icp_reserve_e8s' : IDL.Opt(IDL.Nat),
     'healthy_count' : IDL.Nat64,
-  });
-  const FundingRail = IDL.Variant({
-    'IcpCmc' : IDL.Null,
-    'CyclesLedger' : IDL.Null,
-  });
-  const FundingOutcome = IDL.Variant({
-    'Refunded' : IDL.Null,
-    'Terminal' : IDL.Null,
-    'Completed' : IDL.Null,
-  });
-  const PublicTopupSummary = IDL.Record({
-    'rail' : FundingRail,
-    'amount_cycles' : IDL.Nat,
-    'outcome' : FundingOutcome,
-    'resolved_at_secs' : IDL.Nat64,
   });
   const PublicTargetState = IDL.Variant({
     'Low' : IDL.Null,
@@ -345,62 +350,17 @@ export const idlFactory = ({ IDL }) => {
     'project' : IDL.Text,
     'cooldown_secs' : IDL.Nat64,
   });
-  const StandardRecord = IDL.Record({ 'url' : IDL.Text, 'name' : IDL.Text });
-  const ConsentMessageMetadata = IDL.Record({
-    'utc_offset_minutes' : IDL.Opt(IDL.Int16),
-    'language' : IDL.Text,
+  const PublicPage = IDL.Record({
+    'next_cursor' : IDL.Opt(IDL.Text),
+    'items' : IDL.Vec(FundingOperation),
   });
-  const DeviceSpec = IDL.Variant({
-    'GenericDisplay' : IDL.Null,
-    'FieldsDisplay' : IDL.Null,
-  });
-  const ConsentMessageSpec = IDL.Record({
-    'metadata' : ConsentMessageMetadata,
-    'device_spec' : IDL.Opt(DeviceSpec),
-  });
-  const ConsentMessageRequest = IDL.Record({
-    'arg' : IDL.Vec(IDL.Nat8),
-    'method' : IDL.Text,
-    'user_preferences' : ConsentMessageSpec,
-  });
-  const TextValue = IDL.Record({ 'content' : IDL.Text });
-  const TokenAmount = IDL.Record({
-    'decimals' : IDL.Nat8,
-    'amount' : IDL.Nat64,
-    'symbol' : IDL.Text,
-  });
-  const TimestampSeconds = IDL.Record({ 'amount' : IDL.Nat64 });
-  const DurationSeconds = IDL.Record({ 'amount' : IDL.Nat64 });
-  const Value = IDL.Variant({
-    'Text' : TextValue,
-    'TokenAmount' : TokenAmount,
-    'TimestampSeconds' : TimestampSeconds,
-    'DurationSeconds' : DurationSeconds,
-  });
-  const ConsentMessage = IDL.Variant({
-    'FieldsDisplayMessage' : IDL.Record({
-      'fields' : IDL.Vec(IDL.Tuple(IDL.Text, Value)),
-      'intent' : IDL.Text,
-    }),
-    'GenericDisplayMessage' : IDL.Text,
-  });
-  const ConsentInfo = IDL.Record({
-    'metadata' : ConsentMessageMetadata,
-    'consent_message' : ConsentMessage,
-  });
-  const ErrorInfo = IDL.Record({ 'description' : IDL.Text });
-  const Icrc21Error = IDL.Variant({
-    'GenericError' : IDL.Record({
-      'description' : IDL.Text,
-      'error_code' : IDL.Nat,
-    }),
-    'InsufficientPayment' : ErrorInfo,
-    'UnsupportedCanisterCall' : ErrorInfo,
-    'ConsentMessageUnavailable' : ErrorInfo,
-  });
-  const ConsentMessageResult = IDL.Variant({
-    'Ok' : ConsentInfo,
-    'Err' : Icrc21Error,
+  const OperatorGovernanceView = IDL.Record({
+    'approval_threshold' : IDL.Nat32,
+    'signers' : IDL.Vec(IDL.Principal),
+    'is_single_operator_mode' : IDL.Bool,
+    'is_signer' : IDL.Bool,
+    'single_operator_setup_available' : IDL.Bool,
+    'configured_operator_principals' : IDL.Vec(IDL.Principal),
   });
   const ProposalStatus = IDL.Variant({
     'Open' : IDL.Null,
@@ -434,10 +394,7 @@ export const idlFactory = ({ IDL }) => {
   });
   const ProposalPayload = IDL.Variant({
     'AddSigner' : IDL.Record({ 'signer' : IDL.Principal }),
-    'UpdateTarget' : IDL.Record({
-      'principal' : IDL.Principal,
-      'patch' : TargetPatch,
-    }),
+    'UpdateTarget' : TargetUpdate,
     'UpdateTargets' : IDL.Record({ 'updates' : IDL.Vec(TargetUpdate) }),
     'SetSignerThreshold' : IDL.Record({ 'threshold' : IDL.Nat32 }),
     'RemoveTarget' : IDL.Record({ 'principal' : IDL.Principal }),
@@ -454,38 +411,116 @@ export const idlFactory = ({ IDL }) => {
     'payload' : ProposalPayload,
     'approvals' : IDL.Vec(IDL.Principal),
   });
-  const PublicPage = IDL.Record({
+  const PublicPage_1 = IDL.Record({
     'next_cursor' : IDL.Opt(IDL.Text),
     'items' : IDL.Vec(ProposalRecord),
   });
+  const OperatorDashboard = IDL.Record({
+    'alarms' : IDL.Vec(PublicAlarm),
+    'topup_history' : IDL.Vec(PublicTopupSummary),
+    'overview' : PublicOverview,
+    'targets' : IDL.Vec(PublicTargetRow),
+    'unresolved_operations' : IDL.Opt(PublicPage),
+    'governance' : OperatorGovernanceView,
+    'proposals' : IDL.Opt(PublicPage_1),
+  });
+  const SingleOperatorSetupError = IDL.Variant({
+    'SetupAlreadyUsed' : IDL.Null,
+    'NotOperator' : IDL.Null,
+    'InvalidProjection' : IDL.Null,
+  });
+  const Result_3 = IDL.Variant({
+    'Ok' : OperatorDashboard,
+    'Err' : SingleOperatorSetupError,
+  });
+  const CycleManagerCyclesStatus = IDL.Record({
+    'idle_burn_cycles_per_day' : IDL.Opt(IDL.Nat),
+    'stable_memory_bytes' : IDL.Opt(IDL.Nat64),
+    'low_watermark' : IDL.Nat,
+    'balance' : IDL.Nat,
+    'heap_memory_bytes' : IDL.Opt(IDL.Nat64),
+    'healthy' : IDL.Bool,
+    'freeze_threshold_secs' : IDL.Nat64,
+  });
+  const PermissionsView = IDL.Record({ 'is_signer' : IDL.Bool });
+  const AuthenticatedQueryError = IDL.Variant({
+    'TooManyItems' : IDL.Null,
+    'InvalidCursor' : IDL.Null,
+    'FutureCursor' : IDL.Null,
+    'NotSigner' : IDL.Null,
+  });
   const Result_4 = IDL.Variant({
-    'Ok' : PublicPage,
+    'Ok' : PermissionsView,
     'Err' : AuthenticatedQueryError,
   });
-  const AlarmStatus = IDL.Variant({
-    'Open' : IDL.Null,
-    'Acknowledged' : IDL.Null,
-    'Resolved' : IDL.Null,
+  const OperatorDashboardError = IDL.Variant({
+    'InvalidProjection' : IDL.Null,
   });
-  const AlarmKind = IDL.Variant({
-    'LowBalance' : IDL.Null,
-    'SelfRecoveryUnresolved' : IDL.Null,
-    'BurnAnomaly' : IDL.Null,
-    'Unreachable' : IDL.Null,
-    'FundingUnderDelivery' : IDL.Null,
-    'FundingOverDelivery' : IDL.Null,
-    'FundingQuarantined' : IDL.Null,
+  const Result_5 = IDL.Variant({
+    'Ok' : OperatorDashboard,
+    'Err' : OperatorDashboardError,
   });
-  const PublicAlarm = IDL.Record({
-    'id' : IDL.Nat64,
-    'status' : AlarmStatus,
-    'acknowledged_at_secs' : IDL.Opt(IDL.Nat64),
-    'kind' : AlarmKind,
-    'target' : IDL.Opt(IDL.Principal),
-    'opened_at_secs' : IDL.Nat64,
-    'resolved_at_secs' : IDL.Opt(IDL.Nat64),
+  const StandardRecord = IDL.Record({ 'url' : IDL.Text, 'name' : IDL.Text });
+  const ConsentMessageMetadata = IDL.Record({
+    'utc_offset_minutes' : IDL.Opt(IDL.Int16),
+    'language' : IDL.Text,
   });
-  const PublicPage_1 = IDL.Record({
+  const DeviceSpec = IDL.Variant({
+    'GenericDisplay' : IDL.Null,
+    'FieldsDisplay' : IDL.Null,
+  });
+  const ConsentMessageSpec = IDL.Record({
+    'metadata' : ConsentMessageMetadata,
+    'device_spec' : IDL.Opt(DeviceSpec),
+  });
+  const ConsentMessageRequest = IDL.Record({
+    'arg' : IDL.Vec(IDL.Nat8),
+    'method' : IDL.Text,
+    'user_preferences' : ConsentMessageSpec,
+  });
+  const TextValue = IDL.Record({ 'content' : IDL.Text });
+  const TokenAmount = IDL.Record({
+    'decimals' : IDL.Nat8,
+    'amount' : IDL.Nat64,
+    'symbol' : IDL.Text,
+  });
+  const DurationSeconds = IDL.Record({ 'amount' : IDL.Nat64 });
+  const Value = IDL.Variant({
+    'Text' : TextValue,
+    'TokenAmount' : TokenAmount,
+    'TimestampSeconds' : DurationSeconds,
+    'DurationSeconds' : DurationSeconds,
+  });
+  const ConsentMessage = IDL.Variant({
+    'FieldsDisplayMessage' : IDL.Record({
+      'fields' : IDL.Vec(IDL.Tuple(IDL.Text, Value)),
+      'intent' : IDL.Text,
+    }),
+    'GenericDisplayMessage' : IDL.Text,
+  });
+  const ConsentInfo = IDL.Record({
+    'metadata' : ConsentMessageMetadata,
+    'consent_message' : ConsentMessage,
+  });
+  const ErrorInfo = IDL.Record({ 'description' : IDL.Text });
+  const Icrc21Error = IDL.Variant({
+    'GenericError' : IDL.Record({
+      'description' : IDL.Text,
+      'error_code' : IDL.Nat,
+    }),
+    'InsufficientPayment' : ErrorInfo,
+    'UnsupportedCanisterCall' : ErrorInfo,
+    'ConsentMessageUnavailable' : ErrorInfo,
+  });
+  const ConsentMessageResult = IDL.Variant({
+    'Ok' : ConsentInfo,
+    'Err' : Icrc21Error,
+  });
+  const Result_6 = IDL.Variant({
+    'Ok' : PublicPage_1,
+    'Err' : AuthenticatedQueryError,
+  });
+  const PublicPage_2 = IDL.Record({
     'next_cursor' : IDL.Opt(IDL.Text),
     'items' : IDL.Vec(PublicAlarm),
   });
@@ -496,8 +531,8 @@ export const idlFactory = ({ IDL }) => {
     'FutureCursor' : IDL.Null,
     'StaleCursor' : IDL.Null,
   });
-  const Result_5 = IDL.Variant({
-    'Ok' : PublicPage_1,
+  const Result_7 = IDL.Variant({
+    'Ok' : PublicPage_2,
     'Err' : PublicQueryError,
   });
   const AdvisoryCyclesBalance = IDL.Variant({
@@ -511,40 +546,36 @@ export const idlFactory = ({ IDL }) => {
     'burn_cycles_per_hour' : IDL.Opt(IDL.Nat),
     'timestamp_secs' : IDL.Nat64,
   });
-  const PublicPage_2 = IDL.Record({
+  const PublicPage_3 = IDL.Record({
     'next_cursor' : IDL.Opt(IDL.Text),
     'items' : IDL.Vec(Sample),
   });
-  const Result_6 = IDL.Variant({
-    'Ok' : PublicPage_2,
-    'Err' : PublicQueryError,
-  });
-  const PublicPage_3 = IDL.Record({
-    'next_cursor' : IDL.Opt(IDL.Text),
-    'items' : IDL.Vec(PublicTargetRow),
-  });
-  const Result_7 = IDL.Variant({
+  const Result_8 = IDL.Variant({
     'Ok' : PublicPage_3,
     'Err' : PublicQueryError,
   });
   const PublicPage_4 = IDL.Record({
     'next_cursor' : IDL.Opt(IDL.Text),
-    'items' : IDL.Vec(PublicTopupSummary),
+    'items' : IDL.Vec(PublicTargetRow),
   });
-  const Result_8 = IDL.Variant({
+  const Result_9 = IDL.Variant({
     'Ok' : PublicPage_4,
     'Err' : PublicQueryError,
   });
   const PublicPage_5 = IDL.Record({
     'next_cursor' : IDL.Opt(IDL.Text),
-    'items' : IDL.Vec(FundingOperation),
+    'items' : IDL.Vec(PublicTopupSummary),
   });
-  const Result_9 = IDL.Variant({
+  const Result_10 = IDL.Variant({
     'Ok' : PublicPage_5,
+    'Err' : PublicQueryError,
+  });
+  const Result_11 = IDL.Variant({
+    'Ok' : PublicPage,
     'Err' : AuthenticatedQueryError,
   });
-  const Result_10 = IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : GovernanceError });
-  const MaintenanceResult = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text });
+  const Result_12 = IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : GovernanceError });
+  const Result_13 = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text });
   return IDL.Service({
     'acknowledge_alarm' : IDL.Func([IDL.Nat64], [Result], []),
     'approve_proposal' : IDL.Func([IDL.Nat64], [Result], []),
@@ -555,9 +586,11 @@ export const idlFactory = ({ IDL }) => {
         [],
       ),
     'cancel_proposal' : IDL.Func([IDL.Nat64], [Result_2], []),
+    'configure_single_operator_governance' : IDL.Func([], [Result_3], []),
     'cycles_status' : IDL.Func([], [CycleManagerCyclesStatus], ['query']),
     'execute_proposal' : IDL.Func([IDL.Nat64], [Result_2], []),
-    'get_my_permissions' : IDL.Func([], [Result_3], ['query']),
+    'get_my_permissions' : IDL.Func([], [Result_4], ['query']),
+    'get_operator_dashboard' : IDL.Func([], [Result_5], ['query']),
     'get_public_overview' : IDL.Func([], [PublicOverview], ['query']),
     'get_public_target' : IDL.Func(
         [IDL.Principal],
@@ -576,32 +609,32 @@ export const idlFactory = ({ IDL }) => {
       ),
     'list_governance_proposals' : IDL.Func(
         [IDL.Opt(IDL.Text), IDL.Nat16],
-        [Result_4],
+        [Result_6],
         ['query'],
       ),
     'list_public_alarms' : IDL.Func(
         [IDL.Opt(IDL.Text), IDL.Nat16],
-        [Result_5],
+        [Result_7],
         ['query'],
       ),
     'list_public_samples' : IDL.Func(
         [IDL.Principal, IDL.Opt(IDL.Text), IDL.Nat16],
-        [Result_6],
+        [Result_8],
         ['query'],
       ),
     'list_public_targets' : IDL.Func(
         [IDL.Opt(IDL.Text), IDL.Nat16],
-        [Result_7],
+        [Result_9],
         ['query'],
       ),
     'list_public_topups' : IDL.Func(
         [IDL.Principal, IDL.Opt(IDL.Text), IDL.Nat16],
-        [Result_8],
+        [Result_10],
         ['query'],
       ),
     'list_unresolved_funding_operations' : IDL.Func(
         [IDL.Opt(IDL.Text), IDL.Nat16],
-        [Result_9],
+        [Result_11],
         ['query'],
       ),
     'manual_top_up' : IDL.Func([IDL.Principal], [Result_1], []),
@@ -611,25 +644,25 @@ export const idlFactory = ({ IDL }) => {
         [],
       ),
     'pause_target' : IDL.Func([IDL.Principal], [Result_2], []),
-    'propose_add_signer' : IDL.Func([IDL.Principal], [Result_10], []),
-    'propose_register_target' : IDL.Func([TargetArgs], [Result_10], []),
-    'propose_remove_signer' : IDL.Func([IDL.Principal], [Result_10], []),
-    'propose_remove_target' : IDL.Func([IDL.Principal], [Result_10], []),
-    'propose_set_global_policy' : IDL.Func([GlobalPolicyArgs], [Result_10], []),
-    'propose_set_signer_threshold' : IDL.Func([IDL.Nat32], [Result_10], []),
-    'propose_unpause_target' : IDL.Func([IDL.Principal], [Result_10], []),
+    'propose_add_signer' : IDL.Func([IDL.Principal], [Result_12], []),
+    'propose_register_target' : IDL.Func([TargetArgs], [Result_12], []),
+    'propose_remove_signer' : IDL.Func([IDL.Principal], [Result_12], []),
+    'propose_remove_target' : IDL.Func([IDL.Principal], [Result_12], []),
+    'propose_set_global_policy' : IDL.Func([GlobalPolicyArgs], [Result_12], []),
+    'propose_set_signer_threshold' : IDL.Func([IDL.Nat32], [Result_12], []),
+    'propose_unpause_target' : IDL.Func([IDL.Principal], [Result_12], []),
     'propose_update_target' : IDL.Func(
         [IDL.Principal, TargetPatch],
-        [Result_10],
+        [Result_12],
         [],
       ),
     'propose_update_targets' : IDL.Func(
         [IDL.Vec(TargetUpdate)],
-        [Result_10],
+        [Result_12],
         [],
       ),
     'resolve_unknown_as_spent' : IDL.Func([IDL.Nat64], [Result_1], []),
-    'run_maintenance_now' : IDL.Func([], [MaintenanceResult], []),
+    'run_maintenance_now' : IDL.Func([], [Result_13], []),
   });
 };
 export const init = ({ IDL }) => {

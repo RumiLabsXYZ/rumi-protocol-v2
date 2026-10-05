@@ -1,7 +1,8 @@
-//! Read access for the private Cycle Sentinel telemetry surface.
+//! Principal lists for the private Cycle Sentinel control plane.
 //!
-//! Keep this allowlist independent from signer governance: visibility does
-//! not grant permission to operate the Sentinel.
+//! These three principals may read telemetry. They become the one-of-three
+//! operator signer set only after an operator explicitly applies that setup;
+//! telemetry visibility alone never grants mutation authority.
 
 use candid::Principal;
 
@@ -17,6 +18,26 @@ pub(crate) fn is_telemetry_viewer(caller: Principal) -> bool {
     }
     let caller_text = caller.to_text();
     TELEMETRY_VIEWERS.contains(&caller_text.as_str())
+}
+
+pub(crate) fn is_operator(caller: Principal) -> bool {
+    is_telemetry_viewer(caller)
+}
+
+pub(crate) fn operator_principals() -> Vec<Principal> {
+    TELEMETRY_VIEWERS
+        .iter()
+        .map(|text| Principal::from_text(text).expect("valid configured Cycle Sentinel operator"))
+        .collect()
+}
+
+pub(crate) fn is_single_operator_set(signers: &[Principal], threshold: u32) -> bool {
+    let configured = operator_principals();
+    threshold == 1
+        && signers.len() == configured.len()
+        && configured
+            .iter()
+            .all(|principal| signers.contains(principal))
 }
 
 #[cfg(test)]

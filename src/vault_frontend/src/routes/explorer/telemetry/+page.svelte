@@ -28,10 +28,10 @@
   } from '$lib/services/cycleSentinelFunding';
   import {
     createAuthenticatedSentinelActor,
-    getPermissions,
+    loadOperatorDashboard,
     listProposals,
     listUnresolvedFundingOperations,
-    loadPublicTelemetry,
+    operatorDashboardSnapshot,
     manualTopUpDisposition,
     parseNat,
     parseNat32,
@@ -40,6 +40,7 @@
     sentinelManagement,
     isCycleSentinelConfigured,
     type SentinelActor,
+    type OperatorDashboardSnapshot,
     type TelemetrySnapshot,
   } from '$lib/services/cycleSentinelService';
   import type {
@@ -48,6 +49,7 @@
     ObservationMode,
     ProposalRecord,
     PublicAlarm,
+    PublicTopupSummary,
     TargetArgs,
     TargetFundingPolicy,
     TargetPatch,
@@ -57,19 +59,18 @@
     FundingRail,
   } from '$declarations/rumi_cycle_sentinel/rumi_cycle_sentinel.did';
 
-  let snapshot: TelemetrySnapshot | null = null;
+  let snapshot: OperatorDashboardSnapshot | null = null;
   let proposals: ProposalRecord[] = [];
   let unresolved: FundingOperation[] = [];
   let signer = false;
   let operatorChecked = false;
-  let checkingOperatorAccess = false;
+  let singleOperatorMode = false;
   let operatorDataLoading = false;
   let operatorDataLoaded = false;
   let operatorDataError = '';
   let checkingNow = false;
   let checkedSession: string | undefined;
   let operatorAccessEpoch = 0;
-  let operatorDataEpoch = 0;
   let observedWalletSession: string | undefined | null = null;
   let telemetryLoadEpoch = 0;
   let latestWalletConnection: { isConnected: boolean; principal: Principal | null } = { isConnected: false, principal: null };
@@ -80,6 +81,8 @@
   let authError = '';
   let actionMessage = '';
   let proposingBulkTargets: 'enable' | 'auto-top-up' | null = null;
+  let configuringSingleOperator = false;
+  let loadingAllOperatorRecords = false;
   let copyMessage = '';
   let copyError = '';
   let selectedTargetPrincipal = '';
@@ -152,6 +155,15 @@
   let spendTimelock = '3600';
   let targetTimelock = '3600';
   let signerTimelock = '86400';
+  let observableTargets: TelemetrySnapshot['targets'] = [];
+  let autoTopupEligibleTargets: TelemetrySnapshot['targets'] = [];
+  let monitoringEnabledCount = 0;
+  let monitoringPendingCount = 0;
+  let autoTopupEnabledCount = 0;
+  let autoTopupPendingCount = 0;
+  let unresolvedRecordsComplete = false;
+  let unobservedTargetCount = 0;
+  let pausedTargetCount = 0;
 
   const variant = (value: Record<string, unknown>): string => Object.keys(value)[0] ?? 'Unknown';
   const OPERATOR_QUERY_TIMEOUT_MS = 25_000;
@@ -185,6 +197,28 @@
   function nextCheckLabel(value: bigint | undefined): string {
     if (value === undefined) return 'Unavailable';
     return new Date(Number(value) * 1000).toLocaleString();
+  }
+
+  function topupOrigin(item: PublicTopupSummary): string {
+    const trigger = optional(item.trigger);
+    if (!trigger) return 'Origin unavailable';
+    switch (variant(trigger)) {
+      case 'ManualTopup': return 'Manual';
+      case 'LowBalanceAutoTopup': return 'Automatic';
+      case 'SelfRecovery': return 'Sentinel self-recovery';
+      default: return 'Unknown';
+    }
+  }
+
+  function topupTimeLabel(seconds: bigint): string {
+    const value = Number(seconds);
+    if (!Number.isSafeInteger(value)) return 'Unavailable';
+    return new Date(value * 1000).toLocaleString();
+  }
+
+  function topupTargetLabel(item: PublicTopupSummary): string {
+    return snapshot?.targets.find((row) => row.principal.toText() === item.target.toText())?.display_name
+      ?? item.target.toText();
   }
 
   function copyLabel(label: string, value: string): void {
@@ -251,7 +285,6 @@
       assertCurrentSigner();
       await sentinelManagement.proposeUpdateTarget(actor!, row.principal, patch);
       actionMessage = success;
-      await refresh();
     } catch (error) {
       authError = error instanceof Error ? error.message : String(error);
     }
@@ -267,10 +300,7 @@
       const requestSession = checkedSession;
       const requestEpoch = operatorAccessEpoch;
       const requestActor = actor;
-      if (!requestSession || !requestActor) throw new Error('Check signer access before proposing target changes.');
-
-      await refresh();
-      assertCurrentSigner();
+      if (!requestSession || !requestActor) throw new Error('Refresh telemetry to confirm operator access before proposing target changes.');
       const current = snapshot;
       if (!current) throw new Error(publicError || 'Refresh telemetry before proposing target changes.');
       if (current.targets.length === 0) {
@@ -313,8 +343,7 @@
         unobserved ? `${unobserved} unobserved skipped` : '',
         paused ? `${paused} paused skipped` : '',
       ].filter(Boolean).join('; ');
-      actionMessage = `Proposal #${proposalId} created for ${candidates.length} target${candidates.length === 1 ? '' : 's'}${skipped ? `; ${skipped}` : ''}. It needs the normal approval threshold, then a signer must execute it after the target-registry timelock.`;
-      await loadOperatorData(requestActor, requestSession, requestEpoch);
+      actionMessage = `Proposal #${proposalId} created for ${candidates.length} target${candidates.length === 1 ? '' : 's'}${skipped ? `; ${skipped}` : ''}. The configured on-chain approval threshold and target-registry timelock apply.`;
     } catch (error) {
       authError = error instanceof Error ? error.message : String(error);
     } finally {
@@ -353,7 +382,7 @@
         cooldown_secs: parseNat(draft.cooldown, 'Cooldown'),
         burn_anomaly_limit_cycles_per_day: current.burn_anomaly_limit_cycles_per_day,
       };
-      await updateTarget(row, targetPatchFor({ funding_policy: [policy] }), `${row.display_name}: rule change proposed. A second signer must approve it before execution.`);
+      await updateTarget(row, targetPatchFor({ funding_policy: [policy] }), `${row.display_name}: rule change proposed. The configured approval threshold and target-registry timelock apply.`);
       if (authError) ruleErrors = { ...ruleErrors, [principal]: authError };
     } catch (error) {
       ruleErrors = { ...ruleErrors, [principal]: error instanceof Error ? error.message : String(error) };
@@ -361,15 +390,15 @@
   }
 
   async function toggleTargetEnabled(row: TelemetrySnapshot['targets'][number], value: boolean): Promise<void> {
-    await updateTarget(row, targetPatchFor({ enabled: [value] }), `${row.display_name}: ${value ? 'enable' : 'disable'} change proposed. A second signer must approve it before execution.`);
+    await updateTarget(row, targetPatchFor({ enabled: [value] }), `${row.display_name}: ${value ? 'enable' : 'disable'} change proposed. The configured approval threshold and target-registry timelock apply.`);
   }
 
   async function toggleAutoTopup(row: TelemetrySnapshot['targets'][number], value: boolean): Promise<void> {
-    await updateTarget(row, targetPatchFor({ auto_topup: [value] }), `${row.display_name}: auto-top-up change proposed. A second signer must approve it before execution.`);
+    await updateTarget(row, targetPatchFor({ auto_topup: [value] }), `${row.display_name}: auto-top-up change proposed. The configured approval threshold and target-registry timelock apply.`);
   }
 
   function openManualTopUp(row: TelemetrySnapshot['targets'][number]): void {
-    if (manualTopUpLock) return;
+    if (manualTopUpLock || !unresolvedRecordsComplete) return;
     topupTarget = row;
     topupRail = 'CyclesLedger';
     topupCyclesAmount = formatTCycles(row.refill_cycles);
@@ -436,7 +465,7 @@
       const capturedActor = actor;
       const capturedTarget = topupTarget;
       if (!session || !requestIdentityKey || !capturedActor || !checkedSession || checkedSession !== session) {
-        throw new Error('Operator access changed. Check signer access again before submitting an action.');
+        throw new Error('Operator access changed. Refresh telemetry to confirm signer access before submitting an action.');
       }
       requestSession = session;
       requestEpoch = operatorAccessEpoch;
@@ -477,9 +506,8 @@
         }
         topupResult = { id: operation.id, disposition: result.disposition, state: result.state, amount: requestAmountLabel, source: requestSource };
         if (result.disposition === 'completed') {
-          actionMessage = `Top-up confirmed: ${requestTargetName}, operation #${operation.id.toString()} completed (${requestAmountLabel}, ${requestSource}).`;
+          actionMessage = `Top-up confirmed: ${requestTargetName}, operation #${operation.id.toString()} completed (${requestAmountLabel}, ${requestSource}). Refresh telemetry to reload balances and history.`;
           topupTarget = null;
-          void refresh();
         } else if (result.disposition === 'terminal') {
           topupError = `Operation #${operation.id.toString()} ended in ${result.state}; the backend reports no completed top-up. Review the operation before trying again.`;
         } else if (result.disposition === 'uncertain') {
@@ -652,7 +680,6 @@
 
   function invalidateOperatorAccess(): void {
     operatorAccessEpoch += 1;
-    operatorDataEpoch += 1;
     actionMessage = '';
     topupTarget = null;
     topupError = '';
@@ -660,7 +687,6 @@
     submittingTopup = false;
     signer = false;
     operatorChecked = false;
-    checkingOperatorAccess = false;
     operatorDataLoading = false;
     operatorDataLoaded = false;
     operatorDataError = '';
@@ -674,7 +700,7 @@
     const session = currentWalletSession();
     if (!signer || !actor || !checkedSession || checkedSession !== session) {
       invalidateOperatorAccess();
-      throw new Error('Operator access changed. Check signer access again before submitting an action.');
+      throw new Error('Operator access changed. Refresh telemetry to confirm signer access before submitting an action.');
     }
   }
 
@@ -768,6 +794,14 @@
   // state the sampler never runs, so balance, burn, and runway are genuinely
   // absent rather than zero. Say so explicitly: a table of "Unavailable" with
   // no explanation reads like a broken page.
+  $: observableTargets = snapshot?.targets.filter((row) => variant(row.observation_mode) !== 'Unobserved') ?? [];
+  $: autoTopupEligibleTargets = observableTargets.filter((row) => !fundingTarget(row).paused);
+  $: monitoringEnabledCount = observableTargets.filter((row) => fundingTarget(row).enabled).length;
+  $: monitoringPendingCount = observableTargets.length - monitoringEnabledCount;
+  $: autoTopupEnabledCount = autoTopupEligibleTargets.filter((row) => fundingTarget(row).enabled && fundingTarget(row).auto_topup).length;
+  $: autoTopupPendingCount = autoTopupEligibleTargets.length - autoTopupEnabledCount;
+  $: unobservedTargetCount = snapshot?.targets.filter((row) => variant(row.observation_mode) === 'Unobserved').length ?? 0;
+  $: pausedTargetCount = observableTargets.filter((row) => fundingTarget(row).paused).length;
   $: registryIdle = !!snapshot
     && snapshot.overview.target_count > 0n
     && snapshot.overview.unobserved_count === snapshot.overview.target_count;
@@ -808,154 +842,136 @@
     && fundingIcpAvailable === 0n;
   $: visibleAlarms = snapshot?.alarms.filter((alarm) => alarmCanBeAcknowledged(alarm) && !acknowledgedAlarmIds.has(alarm.id.toString())) ?? [];
   $: openAlarmCount = visibleAlarms.length;
+  $: singleOperatorMode = snapshot?.governance.is_single_operator_mode ?? false;
+  $: unresolvedRecordsComplete = !!snapshot
+    && snapshot.operatorRecordsAvailable
+    && snapshot.unresolvedNextCursor.length === 0;
 
   async function refresh(): Promise<void> {
     const epoch = ++telemetryLoadEpoch;
+    const accessEpoch = ++operatorAccessEpoch;
     const session = currentWalletSession();
     loading = true;
+    operatorDataLoading = true;
     publicError = '';
     snapshot = null;
     if (!session || !canViewSentinelTelemetry(latestWalletConnection.principal) || !isCycleSentinelConfigured) {
       publicError = 'Connect with an approved principal to view private Sentinel telemetry.';
       loading = false;
+      operatorDataLoading = false;
       return;
     }
     try {
       const authenticated = await createAuthenticatedSentinelActor();
-      const next = await loadPublicTelemetry(authenticated);
-      if (epoch === telemetryLoadEpoch && session === currentWalletSession()) snapshot = next;
+      const next = await withOperatorQueryTimeout(loadOperatorDashboard(authenticated), 'Loading Sentinel telemetry and operator status');
+      if (epoch === telemetryLoadEpoch && accessEpoch === operatorAccessEpoch && session === currentWalletSession()) {
+        actor = authenticated;
+        snapshot = next;
+        signer = next.governance.is_signer;
+        operatorChecked = true;
+        checkedSession = session;
+        proposals = next.proposals;
+        unresolved = next.unresolved;
+        operatorDataLoaded = signer && next.operatorRecordsAvailable;
+        operatorDataError = signer && !next.operatorRecordsAvailable
+          ? 'The dashboard response omitted signer-only records. Refresh telemetry before managing proposals or funding operations.'
+          : '';
+        reconcileManualTopUpLock(next, session);
+      }
     } catch {
-      if (epoch === telemetryLoadEpoch && session === currentWalletSession()) {
+      if (epoch === telemetryLoadEpoch && accessEpoch === operatorAccessEpoch && session === currentWalletSession()) {
         publicError = 'Sentinel telemetry is private and unavailable to this identity.';
+        signer = false;
+        operatorChecked = false;
+        checkedSession = undefined;
+        actor = undefined;
+        proposals = [];
+        unresolved = [];
+        operatorDataLoaded = false;
       }
     } finally {
-      if (epoch === telemetryLoadEpoch) loading = false;
+      if (epoch === telemetryLoadEpoch) {
+        loading = false;
+        operatorDataLoading = false;
+      }
     }
   }
 
-  function operatorCheckIsCurrent(session: string, epoch: number): boolean {
-    return epoch === operatorAccessEpoch && session === currentWalletSession();
-  }
-
-  async function loadOperatorData(authenticated: SentinelActor, session: string, accessEpoch: number): Promise<void> {
-    if (!operatorCheckIsCurrent(session, accessEpoch) || actor !== authenticated || !signer || checkedSession !== session) return;
-    const dataEpoch = ++operatorDataEpoch;
-    operatorDataLoading = true;
-    operatorDataLoaded = false;
-    operatorDataError = '';
-    const isCurrent = (): boolean => operatorCheckIsCurrent(session, accessEpoch)
-      && dataEpoch === operatorDataEpoch
-      && actor === authenticated
-      && signer
-      && checkedSession === session;
-    try {
-      const [nextProposals, nextUnresolved] = await withOperatorQueryTimeout(
-        Promise.all([listProposals(authenticated), listUnresolvedFundingOperations(authenticated)]),
-        'Loading signer data',
-      );
-      if (!isCurrent()) return;
-      proposals = nextProposals;
-      unresolved = nextUnresolved;
-      if (manualTopUpLock?.inFlight) {
-        // Never reconcile an active update from a parallel list refresh.
-      } else if (manualTopUpLock && manualTopUpLock.identityKey !== currentWalletIdentityKey()) {
-        // A different wallet identity cannot reconcile or acknowledge this marker.
-      } else if (manualTopUpLock) {
-        const tracked = manualTopUpLock.operationId !== undefined
-          ? nextUnresolved.find((item) => item.id === manualTopUpLock?.operationId)
-          : nextUnresolved.find((item) => item.target.toText() === manualTopUpLock!.target.toText() && variant(item.trigger) === 'ManualTopup');
-        if (!tracked) {
-          manualTopUpLock = { ...manualTopUpLock, authorizedSession: session, disposition: 'uncertain', inFlight: false, requiresOperatorAcknowledgement: true };
-          topupError = 'No unresolved manual top-up was found. This does not confirm whether funds moved. Verify recent top-ups, the target balance, and the Sentinel funding ledger before deciding whether to retry.';
-        } else {
-          const result = manualTopUpDisposition(tracked);
-          if (result.disposition === 'completed' || result.disposition === 'terminal') {
-            manualTopUpLock = { ...manualTopUpLock, authorizedSession: session, disposition: 'uncertain', operationId: tracked.id, inFlight: false, requiresOperatorAcknowledgement: true };
-            topupError = `Operation #${tracked.id.toString()} is ${result.state} in the unresolved-operation history. Verify the target balance and funding ledger before explicitly unlocking retries.`;
-          }
-          else {
-            manualTopUpLock = { ...manualTopUpLock, authorizedSession: session, disposition: result.disposition, operationId: tracked.id, inFlight: false, requiresOperatorAcknowledgement: false };
-            if (manualTopUpLock.rail && manualTopUpLock.amount) storeManualTopUpMarker({ identityKey: manualTopUpLock.identityKey, target: manualTopUpLock.target.toText(), rail: manualTopUpLock.rail, amount: manualTopUpLock.amount, operationId: tracked.id, state: result.state });
-            topupError = `Operation #${tracked.id.toString()} remains unresolved (${result.state}). Do not submit again; reconcile it before retrying.`;
-          }
+  function reconcileManualTopUpLock(data: OperatorDashboardSnapshot, session: string): void {
+    if (!data.operatorRecordsAvailable) return;
+    if (manualTopUpLock?.inFlight) return;
+    if (manualTopUpLock && manualTopUpLock.identityKey !== currentWalletIdentityKey()) return;
+    const complete = data.unresolvedNextCursor.length === 0;
+    if (manualTopUpLock) {
+      const tracked = manualTopUpLock.operationId !== undefined
+        ? data.unresolved.find((item) => item.id === manualTopUpLock?.operationId)
+        : data.unresolved.find((item) => item.target.toText() === manualTopUpLock!.target.toText() && variant(item.trigger) === 'ManualTopup');
+      if (!tracked) {
+        if (!complete) {
+          topupError = 'More unresolved records are available. Load them before deciding whether this top-up moved or retrying.';
+          return;
         }
+        manualTopUpLock = { ...manualTopUpLock, authorizedSession: session, disposition: 'uncertain', inFlight: false, requiresOperatorAcknowledgement: true };
+        topupError = 'No unresolved manual top-up was found. This does not confirm whether funds moved. Verify recent top-ups, the target balance, and the Sentinel funding ledger before deciding whether to retry.';
       } else {
-        const unresolvedManualTopUp = nextUnresolved.find((item) => variant(item.trigger) === 'ManualTopup');
-        if (unresolvedManualTopUp) {
-          const result = manualTopUpDisposition(unresolvedManualTopUp);
-          manualTopUpLock = {
-            session,
-            authorizedSession: session,
-            identityKey: currentWalletIdentityKey()!,
-            target: unresolvedManualTopUp.target,
-            disposition: result.disposition === 'pending' ? 'pending' : 'uncertain',
-            operationId: unresolvedManualTopUp.id,
-            inFlight: false,
-            requiresOperatorAcknowledgement: result.disposition === 'completed' || result.disposition === 'terminal',
-          };
-          if (result.disposition === 'completed' || result.disposition === 'terminal') {
-            topupError = `Operation #${unresolvedManualTopUp.id.toString()} is ${result.state} in the unresolved-operation history. Verify the target balance and funding ledger before explicitly unlocking retries.`;
-          } else {
-            topupError = `Operation #${unresolvedManualTopUp.id.toString()} was restored from the unresolved-operation list (${result.state}). Do not submit another top-up until it is reconciled.`;
-          }
+        const result = manualTopUpDisposition(tracked);
+        if (result.disposition === 'completed' || result.disposition === 'terminal') {
+          manualTopUpLock = { ...manualTopUpLock, authorizedSession: session, disposition: 'uncertain', operationId: tracked.id, inFlight: false, requiresOperatorAcknowledgement: true };
+          topupError = `Operation #${tracked.id.toString()} is ${result.state} in the unresolved-operation history. Verify the target balance and funding ledger before explicitly unlocking retries.`;
+        } else {
+          manualTopUpLock = { ...manualTopUpLock, authorizedSession: session, disposition: result.disposition, operationId: tracked.id, inFlight: false, requiresOperatorAcknowledgement: false };
+          if (manualTopUpLock.rail && manualTopUpLock.amount) storeManualTopUpMarker({ identityKey: manualTopUpLock.identityKey, target: manualTopUpLock.target.toText(), rail: manualTopUpLock.rail, amount: manualTopUpLock.amount, operationId: tracked.id, state: result.state });
+          topupError = `Operation #${tracked.id.toString()} remains unresolved (${result.state}). Do not submit again; reconcile it before retrying.`;
         }
       }
-      operatorDataLoaded = true;
-    } catch (error) {
-      if (isCurrent()) operatorDataError = error instanceof Error ? error.message : String(error);
-    } finally {
-      if (isCurrent()) operatorDataLoading = false;
-    }
-  }
-
-  async function checkOperatorAccess(): Promise<void> {
-    authError = '';
-    actionMessage = '';
-    operatorChecked = false;
-    checkingOperatorAccess = true;
-    signer = false;
-    actor = undefined;
-    proposals = [];
-    unresolved = [];
-    operatorDataLoading = false;
-    operatorDataLoaded = false;
-    operatorDataError = '';
-    let session: string | undefined;
-    let epoch = 0;
-    try {
-      session = currentWalletSession();
-      if (!session) throw new Error('Connect a wallet before checking operator access.');
-      epoch = ++operatorAccessEpoch;
-      const authenticated = await withOperatorQueryTimeout(createAuthenticatedSentinelActor(), 'Connecting to the wallet');
-      if (!operatorCheckIsCurrent(session, epoch)) return;
-      const permissions = await withOperatorQueryTimeout(getPermissions(authenticated), 'Checking signer permission');
-      if (!operatorCheckIsCurrent(session, epoch)) return;
-      actor = authenticated;
-      signer = permissions.is_signer;
-      operatorChecked = true;
-      checkedSession = session;
-      // Permission confirmation is authoritative and independent from the
-      // ancillary lists. Keep confirmed signer access if either list is slow.
-      checkingOperatorAccess = false;
-      if (signer) await loadOperatorData(authenticated, session, epoch);
-    } catch (error) {
-      if (session && operatorCheckIsCurrent(session, epoch)) {
-        invalidateOperatorAccess();
-        authError = error instanceof Error ? error.message : String(error);
-      } else if (!session) {
-        authError = error instanceof Error ? error.message : String(error);
+    } else if (complete) {
+      const unresolvedManualTopUp = data.unresolved.find((item) => variant(item.trigger) === 'ManualTopup');
+      if (unresolvedManualTopUp) {
+        const result = manualTopUpDisposition(unresolvedManualTopUp);
+        manualTopUpLock = {
+          session,
+          authorizedSession: session,
+          identityKey: currentWalletIdentityKey()!,
+          target: unresolvedManualTopUp.target,
+          disposition: result.disposition === 'pending' ? 'pending' : 'uncertain',
+          operationId: unresolvedManualTopUp.id,
+          inFlight: false,
+          requiresOperatorAcknowledgement: result.disposition === 'completed' || result.disposition === 'terminal',
+        };
+        topupError = result.disposition === 'completed' || result.disposition === 'terminal'
+          ? `Operation #${unresolvedManualTopUp.id.toString()} is ${result.state} in the unresolved-operation history. Verify the target balance and funding ledger before explicitly unlocking retries.`
+          : `Operation #${unresolvedManualTopUp.id.toString()} was restored from the unresolved-operation list (${result.state}). Do not submit another top-up until it is reconciled.`;
       }
-    } finally {
-      if (!session || operatorCheckIsCurrent(session, epoch)) checkingOperatorAccess = false;
     }
   }
 
   async function retryOperatorData(): Promise<void> {
+    await refresh();
+  }
+
+  async function loadAllOperatorRecords(): Promise<void> {
+    if (loadingAllOperatorRecords) return;
+    loadingAllOperatorRecords = true;
     try {
       assertCurrentSigner();
-      await loadOperatorData(actor!, checkedSession!, operatorAccessEpoch);
+      if (!actor || !snapshot) throw new Error('Refresh telemetry before loading operator records.');
+      const requestActor = actor;
+      const session = checkedSession;
+      const [allProposals, allUnresolved] = await withOperatorQueryTimeout(
+        Promise.all([listProposals(requestActor), listUnresolvedFundingOperations(requestActor)]),
+        'Loading remaining operator records',
+      );
+      if (!session || session !== currentWalletSession() || requestActor !== actor || !signer || !snapshot) return;
+      proposals = allProposals;
+      unresolved = allUnresolved;
+      snapshot = { ...snapshot, proposals: allProposals, unresolved: allUnresolved, proposalsNextCursor: [], unresolvedNextCursor: [] };
+      operatorDataLoaded = true;
+      operatorDataError = '';
+      reconcileManualTopUpLock(snapshot, session);
     } catch (error) {
       authError = error instanceof Error ? error.message : String(error);
+    } finally {
+      loadingAllOperatorRecords = false;
     }
   }
 
@@ -977,13 +993,7 @@
     try {
       await sentinelManagement.runMaintenanceNow(authenticated);
       if (!checkSessionIsCurrent()) return;
-      assertCurrentSigner();
-      await refresh();
-      if (!checkSessionIsCurrent()) return;
-      assertCurrentSigner();
-      actionMessage = publicError
-        ? 'Check completed. The latest telemetry could not be loaded; refresh telemetry to try again.'
-        : 'Check completed. Telemetry refreshed; top-up results appear below.';
+      actionMessage = 'Check completed. Refresh telemetry to read the saved results.';
     } catch (error) {
       if (checkSessionIsCurrent()) authError = error instanceof Error ? error.message : String(error);
     } finally {
@@ -994,8 +1004,58 @@
   async function run(action: () => Promise<unknown>): Promise<void> {
     actionMessage = '';
     authError = '';
-    try { assertCurrentSigner(); await action(); actionMessage = 'Action accepted by Cycle Sentinel.'; await refresh(); }
+    try {
+      assertCurrentSigner();
+      const result = await action();
+      if (typeof result === 'bigint') proposalId = result.toString();
+      actionMessage = 'Action accepted by Cycle Sentinel. Refresh telemetry when you want to reload saved state.';
+    }
     catch (error) { authError = error instanceof Error ? error.message : String(error); }
+  }
+
+  async function configureSingleOperatorGovernance(): Promise<void> {
+    if (configuringSingleOperator) return;
+    const requestActor = actor;
+    const session = currentWalletSession();
+    authError = '';
+    actionMessage = '';
+    if (!requestActor || !session || session !== checkedSession || !snapshot) {
+      authError = 'Refresh telemetry with one of the configured operator principals before changing signer access.';
+      return;
+    }
+    configuringSingleOperator = true;
+    try {
+      const result = await requestActor.configure_single_operator_governance();
+      if (session !== currentWalletSession() || requestActor !== actor || session !== checkedSession) return;
+      if ('Err' in result) {
+        const error = Object.keys(result.Err)[0] ?? 'Unknown';
+        authError = error === 'NotOperator'
+          ? 'This principal is not one of the three configured Cycle Sentinel operators.'
+          : error === 'InvalidProjection'
+            ? 'The dashboard could not be prepared, so signer access was not changed. Refresh telemetry and try again.'
+            : error === 'SetupAlreadyUsed'
+              ? 'The one-time signer setup has already been used. Signer changes now follow the configured governance delay.'
+            : `Cycle Sentinel rejected the signer update: ${error}`;
+        return;
+      }
+      const wasSingleOperatorMode = snapshot.governance.is_single_operator_mode;
+      const next = operatorDashboardSnapshot(result.Ok);
+      snapshot = next;
+      signer = next.governance.is_signer;
+      operatorChecked = true;
+      operatorDataLoaded = next.operatorRecordsAvailable;
+      operatorDataError = next.operatorRecordsAvailable ? '' : 'The operator dashboard is incomplete. Refresh telemetry before using signer-only record lists.';
+      proposals = next.proposals;
+      unresolved = next.unresolved;
+      reconcileManualTopUpLock(next, session);
+      actionMessage = wasSingleOperatorMode
+        ? 'Single-signature access was already active: any one of the three configured operator principals can manage Sentinel.'
+        : 'Single-signature access is active: any one of the three configured operator principals can manage Sentinel. This setup bypassed the signer-change timelock and cleared approvals on open proposals; funding policy and its other timelocks are unchanged.';
+    } catch (error) {
+      authError = `The update response could not be confirmed${error instanceof Error ? ` (${error.message})` : ''}. It may have applied; refresh telemetry to check before retrying.`;
+    } finally {
+      configuringSingleOperator = false;
+    }
   }
 
   function id(value: string, label: string): bigint { return parseNat(value, label); }
@@ -1122,14 +1182,22 @@
       <div class="notice idle">
         <strong>Observation has not been switched on yet.</strong>
         <p>All {snapshot.overview.target_count.toString()} registered targets are still disabled or set to <em>Unobserved</em>, so the Sentinel has never sampled them{neverSampled ? '' : ' recently'}. That is why balance, burn rate, and runway read <em>Unavailable</em> rather than zero — the values are genuinely unknown, not missing from the page.</p>
-        <p class="muted">Registration is deliberately fail-closed: a target is created disabled with auto-top-up off. Turning observation on is a separate governed change — a signer proposes a target update with <em>Enabled</em> checked, a second signer approves it, and it executes after the target-registry timelock.</p>
+        <p class="muted">Registration is deliberately fail-closed: a target is created with monitoring off and auto-top-up off. Turning observation on is a separate governed change; the active approval threshold and target-registry timelock apply.</p>
         {#if fundingUnavailable}<p class="muted">The Sentinel also reports no funding source yet (no cycles-ledger balance and no ICP), so top-ups would be rejected even for an enabled target.</p>{/if}
       </div>
       {/if}
     <div class="registry-shell">
       <article class="registry-card">
-        <div class="registry-heading"><h2>Target registry</h2>
-          {#if signer && actor}<div class="registry-bulk-controls"><div class="registry-bulk-actions" aria-label="Bulk target controls"><button type="button" disabled={proposingBulkTargets !== null || loading} title="Create one governed proposal to enable monitoring for every eligible target." on:click={() => proposeBulkTargetFlags('enable')}>{proposingBulkTargets === 'enable' ? 'Submitting…' : 'Enable All'}</button><button type="button" class="bulk-primary" disabled={proposingBulkTargets !== null || loading} title="Create one governed proposal to enable auto top-up for every eligible target." on:click={() => proposeBulkTargetFlags('auto-top-up')}>{proposingBulkTargets === 'auto-top-up' ? 'Submitting…' : 'Auto Top-Up Enabled for All'}</button></div><small>One proposal per action; approval and execution delay still apply.</small></div>{/if}
+        <div class="registry-heading"><div class="registry-title"><h2>Target registry</h2>
+          {#if snapshot}<div class="registry-state-summary" aria-label="Target monitoring and auto top-up status">
+            <span class="registry-count"><strong>Monitoring</strong><b>{monitoringEnabledCount}/{observableTargets.length}</b><small>enabled</small></span>
+            <span class="registry-count"><strong>Auto top-up</strong><b>{autoTopupEnabledCount}/{autoTopupEligibleTargets.length}</b><small>enabled · eligible</small></span>
+            {#if unobservedTargetCount || pausedTargetCount}<small class="registry-exclusions">{#if unobservedTargetCount}{unobservedTargetCount} unobserved skipped{/if}{#if unobservedTargetCount && pausedTargetCount} · {/if}{#if pausedTargetCount}{pausedTargetCount} paused for auto top-up{/if}</small>{/if}
+          </div>{/if}</div>
+          {#if signer && actor}<div class="registry-bulk-controls"><div class="registry-bulk-actions" aria-label="Bulk target controls">
+            <button type="button" disabled={proposingBulkTargets !== null || loading || monitoringPendingCount === 0} title={monitoringPendingCount ? `Create one proposal to enable monitoring for ${monitoringPendingCount} observable target${monitoringPendingCount === 1 ? '' : 's'}.` : 'Monitoring is already enabled for every observable target.'} on:click={() => proposeBulkTargetFlags('enable')}>{proposingBulkTargets === 'enable' ? 'Submitting…' : monitoringPendingCount ? `Enable monitoring · ${monitoringPendingCount}` : 'Monitoring enabled for all'}</button>
+            <button type="button" class="bulk-primary" disabled={proposingBulkTargets !== null || loading || autoTopupPendingCount === 0} title={autoTopupPendingCount ? `Create one proposal to enable monitoring and auto top-up for ${autoTopupPendingCount} eligible target${autoTopupPendingCount === 1 ? '' : 's'}.` : 'Auto top-up is already enabled for every eligible target.'} on:click={() => proposeBulkTargetFlags('auto-top-up')}>{proposingBulkTargets === 'auto-top-up' ? 'Submitting…' : autoTopupPendingCount ? `Enable auto top-up · ${autoTopupPendingCount}` : 'Auto top-up enabled for all'}</button>
+          </div><small>Unobserved targets are skipped; paused targets are skipped for auto top-up. Each action creates one proposal; the on-chain approval threshold and delay apply.</small></div>{/if}
           <div class="alarm-menu">
             <button class="alarm-trigger" aria-label={`Alerts${openAlarmCount ? `, ${openAlarmCount} to review` : ', none to review'}`} aria-expanded={alarmsOpen} on:click={() => alarmsOpen = !alarmsOpen}>
               <span aria-hidden="true">🔔</span>{#if openAlarmCount}<i class="alarm-indicator"></i>{/if}<span>Alerts</span>{#if openAlarmCount}<b>{openAlarmCount}</b>{/if}
@@ -1143,29 +1211,42 @@
         </div>
         {#if snapshot.targets.length}<div class="table-scroll"><table><thead><tr><th scope="col">Target</th><th scope="col">State</th><th scope="col">Balance</th><th scope="col">Burn / day</th><th scope="col">Runway</th><th scope="col">Top-up rule</th><th scope="col">Actions</th></tr></thead><tbody>{#each snapshot.targets as row}<tr class:selected-row={selectedTargetPrincipal === row.principal.toText()}>
           <td class="target-cell"><strong>{row.display_name}</strong><button class="principal-copy" title="Copy canister ID" on:click={() => copyLabel('Canister ID', row.principal.toText())}>{row.principal.toText()}</button><small>{variant(row.environment)} · {variant(row.observation_mode)}</small></td>
-          <td class="state-cell" title={targetStateLabel(row) === 'Awaiting first sample' ? 'Monitoring is enabled. The next scheduled observation has not completed yet.' : undefined}><span class:state-low={!fundingTarget(row).paused && targetStateLabel(row) === 'Low'} class:state-healthy={!fundingTarget(row).paused && targetStateLabel(row) === 'Healthy'} class="state-pill">{fundingTarget(row).paused ? 'Paused' : targetStateLabel(row)}</span><small>{fundingTarget(row).enabled ? 'Monitoring on' : 'Monitoring off'} · Auto {fundingTarget(row).auto_topup ? 'on' : 'off'}</small></td>
+          <td class="state-cell" title={targetStateLabel(row) === 'Awaiting first sample' ? 'Monitoring is enabled. The next scheduled observation has not completed yet.' : undefined}><span class:state-low={!fundingTarget(row).paused && targetStateLabel(row) === 'Low'} class:state-healthy={!fundingTarget(row).paused && targetStateLabel(row) === 'Healthy'} class="state-pill">{fundingTarget(row).paused ? 'Paused' : targetStateLabel(row)}</span><div class="target-flags"><span class:flag-off={!fundingTarget(row).enabled} class="target-flag"><i aria-hidden="true"></i>Enabled <strong>{fundingTarget(row).enabled ? 'ON' : 'OFF'}</strong></span><span class:flag-off={!fundingTarget(row).auto_topup} class="target-flag"><i aria-hidden="true"></i>Auto top-up <strong>{fundingTarget(row).auto_topup ? 'ON' : 'OFF'}</strong></span></div></td>
           <td class="metric-cell" title={format(optional(row.advisory_balance_cycles))}><span class="metric-label">Balance</span><strong>{row.advisory_balance_overflowed ? 'Overflow' : formatCycles(optional(row.advisory_balance_cycles))}</strong></td>
           <td class="metric-cell" title={format(optional(row.burn_cycles_per_day))}><span class="metric-label">Burn / day</span><strong>{formatCycles(optional(row.burn_cycles_per_day))}</strong></td>
           <td class="metric-cell"><span class="metric-label">Runway</span><strong>{formatRunway(optional(row.runway_secs))}</strong></td>
           <td class="rule-cell"><span class="metric-label">Top-up rule</span><div class="rule-summary"><strong>At {formatTCycles(row.low_balance_threshold_cycles)}T</strong><span>add {formatTCycles(row.refill_cycles)}T</span></div><small>{fundingTarget(row).daily_cap_cycles === undefined ? 'Cap unavailable' : `Cap ${formatTCycles(fundingTarget(row).daily_cap_cycles)}T/day`} · {fundingTarget(row).cooldown_secs === undefined ? 'Cooldown unavailable' : `${fundingTarget(row).cooldown_secs.toString()}s cooldown`}</small>{#if row.recent_topups.length}<small>Last: {variant(row.recent_topups[row.recent_topups.length - 1].outcome)} · {formatTCycles(row.recent_topups[row.recent_topups.length - 1].amount_cycles)}T</small>{/if}{#if signer && actor}<details class="row-disclosure rule-disclosure"><summary aria-label={`Edit rule for ${row.display_name}`}>Edit rule</summary><div class="rule-editor"><label>Threshold <span><input aria-label={`Low balance threshold for ${row.display_name}, T-cycles`} inputmode="decimal" value={ruleDraft(row).lowThreshold} on:input={(event) => ruleDraft(row).lowThreshold = event.currentTarget.value} /> T</span></label><label>Refill <span><input aria-label={`Refill amount for ${row.display_name}, T-cycles`} inputmode="decimal" value={ruleDraft(row).refill} on:input={(event) => ruleDraft(row).refill = event.currentTarget.value} /> T</span></label><label>Daily cap <span><input aria-label={`Daily cap for ${row.display_name}, T-cycles`} inputmode="decimal" value={ruleDraft(row).dailyCap} on:input={(event) => ruleDraft(row).dailyCap = event.currentTarget.value} /> T</span></label><label>Cooldown <span><input aria-label={`Cooldown for ${row.display_name}, seconds`} inputmode="numeric" value={ruleDraft(row).cooldown} on:input={(event) => ruleDraft(row).cooldown = event.currentTarget.value} /> s</span></label><button class="row-action" on:click={() => saveRule(row)}>Propose rule</button></div>{#if ruleErrors[row.principal.toText()]}<small class="rule-error" role="alert">{ruleErrors[row.principal.toText()]}</small>{/if}</details>{/if}</td>
-          <td class="row-actions">{#if signer && actor}<details class="row-disclosure"><summary aria-label={`Manage ${row.display_name}`}>Manage</summary><div class="manage-controls"><label class="inline-toggle"><input type="checkbox" checked={fundingTarget(row).enabled} on:change={(event) => toggleTargetEnabled(row, event.currentTarget.checked)} /> Enabled</label><label class="inline-toggle"><input type="checkbox" checked={fundingTarget(row).auto_topup} on:change={(event) => toggleAutoTopup(row, event.currentTarget.checked)} /> Auto-top-up</label>{#if fundingTarget(row).paused}<button class="row-action" on:click={() => run(() => sentinelManagement.proposeUnpauseTarget(actor!, row.principal))}>Propose unpause</button>{:else}<button class="row-action" on:click={() => run(() => sentinelManagement.pauseTarget(actor!, row.principal))}>Pause</button>{/if}<button class="row-action" disabled={!!manualTopUpLock} on:click={() => openManualTopUp(row)}>Manual top-up</button><button class="row-action" on:click={() => selectTarget(row)}>Use settings</button></div></details>{/if}</td>
+          <td class="row-actions">{#if signer && actor}<details class="row-disclosure"><summary aria-label={`Manage ${row.display_name}`}>Manage</summary><div class="manage-controls"><label class="inline-toggle"><input type="checkbox" checked={fundingTarget(row).enabled} on:change={(event) => toggleTargetEnabled(row, event.currentTarget.checked)} /> Enabled</label><label class="inline-toggle"><input type="checkbox" checked={fundingTarget(row).auto_topup} on:change={(event) => toggleAutoTopup(row, event.currentTarget.checked)} /> Auto-top-up</label>{#if fundingTarget(row).paused}<button class="row-action" on:click={() => run(() => sentinelManagement.proposeUnpauseTarget(actor!, row.principal))}>Propose unpause</button>{:else}<button class="row-action" on:click={() => run(() => sentinelManagement.pauseTarget(actor!, row.principal))}>Pause</button>{/if}<button class="row-action" disabled={!!manualTopUpLock || !unresolvedRecordsComplete} title={unresolvedRecordsComplete ? 'Request a manual top-up.' : 'Load all unresolved-operation pages before submitting a manual top-up.'} on:click={() => openManualTopUp(row)}>Manual top-up</button><button class="row-action" on:click={() => selectTarget(row)}>Use settings</button></div></details>{/if}</td>
         </tr>{/each}</tbody></table></div>{:else}<p class="muted">No targets have been published.</p>{/if}
       </article>
     </div>
+    <article class="topup-history">
+      <div class="history-heading"><div><h2>Top-up history</h2><p class="muted">Manual requests, automatic low-balance top-ups, and Sentinel self-recovery in one timeline.</p></div><strong>{snapshot.topupHistory.length} retained record{snapshot.topupHistory.length === 1 ? '' : 's'}</strong></div>
+      <p class="fine-print">Sentinel retains up to 512 terminal records. Older records may have aged out. Records saved before origin tracking was added show “Origin unavailable.”</p>
+      {#if snapshot.topupHistory.length}<div class="table-scroll"><table><thead><tr><th scope="col">Date</th><th scope="col">Target</th><th scope="col">Origin</th><th scope="col">Outcome</th><th scope="col">Rail</th><th scope="col">Amount</th></tr></thead><tbody>
+        {#each snapshot.topupHistory as item, index (`${item.resolved_at_secs.toString()}-${item.target.toText()}-${index}`)}<tr><td>{topupTimeLabel(item.resolved_at_secs)}</td><td><strong>{topupTargetLabel(item)}</strong><small>{item.target.toText()}</small></td><td>{topupOrigin(item)}</td><td>{variant(item.outcome)}</td><td>{variant(item.rail)}</td><td>{formatTCycles(item.amount_cycles)} T-cycles</td></tr>{/each}
+      </tbody></table></div>{:else}<p class="muted">No completed or terminal top-ups are currently retained.</p>{/if}
+    </article>
     {/if}
   {/if}
 
-  {#if $walletStore.isConnected && isCycleSentinelConfigured}<section class="operator"><h2>Operator console <span class:confirmed={signer} class="badge">{signer ? 'Signer confirmed on-chain' : operatorChecked ? 'Connected, not a signer' : 'Access not checked'}</span></h2>
+  {#if $walletStore.isConnected && isCycleSentinelConfigured}<section class="operator"><h2>Operator console <span class:confirmed={signer} class="badge">{signer ? `Signer · ${snapshot?.governance.approval_threshold ?? 0} of ${snapshot?.governance.signers.length ?? 0}` : operatorChecked ? 'Telemetry access confirmed' : 'Access not loaded'}</span></h2>
+    {#if snapshot}<article class="operator-access"><h3>Signer access</h3><p>Current on-chain approval threshold: <strong>{snapshot.governance.approval_threshold} of {snapshot.governance.signers.length}</strong>. {snapshot.governance.is_signer ? 'This wallet can manage Cycle Sentinel.' : 'This wallet can view telemetry but cannot manage Cycle Sentinel yet.'}</p>
+      <details open><summary>Current signer principals</summary><ul>{#each snapshot.governance.signers as principal}<li><code>{principal.toText()}</code></li>{/each}</ul></details>
+      {#if singleOperatorMode}<p class="notice success">Single-signature mode is active. Any one of the three configured operator principals can manage the Sentinel alone.</p>
+      {:else if snapshot.governance.single_operator_setup_available}<p class="muted">These are the three operator principals authorized by this canister. This one-time setup immediately replaces the signer list with them and sets the threshold to one, bypassing the signer-change timelock. It clears existing approvals on open proposals. Funding policy and its other timelocks do not change. The setup cannot be repeated; future signer changes follow governance delays.</p><details><summary>Configured operator principals</summary><ul>{#each snapshot.governance.configured_operator_principals as principal}<li><code>{principal.toText()}</code></li>{/each}</ul></details><button on:click={configureSingleOperatorGovernance} disabled={configuringSingleOperator || !operatorChecked}>{configuringSingleOperator ? 'Updating signer access…' : 'Use one-time single-signature setup'}</button>{:else}<p class="muted">The one-time signer setup has already been used. Future signer changes follow the configured governance delay.</p>{/if}
+    </article>{/if}
     {#if signer && actor}
-      {#if operatorDataLoading}<p class="muted" role="status">Loading signer-only proposals and unresolved funding records…</p>{/if}
-      {#if operatorDataError}<div class="notice error" role="alert">Signer access is confirmed, but the proposal and unresolved-operation lists did not load: {operatorDataError}<button on:click={retryOperatorData} disabled={operatorDataLoading}>Retry list loading</button></div>{/if}
+      {#if operatorDataLoading}<p class="muted" role="status">Loading telemetry and operator data…</p>{/if}
+      {#if operatorDataError}<div class="notice error" role="alert">{operatorDataError}<button on:click={retryOperatorData} disabled={operatorDataLoading}>Refresh telemetry</button></div>{/if}
+      {#if snapshot?.operatorRecordsAvailable && (snapshot.proposalsNextCursor.length || snapshot.unresolvedNextCursor.length)}<div class="notice idle"><p>More than one page of operator records is retained. Load all pages only when needed; each additional wallet-routed query may ask for approval.</p><button on:click={loadAllOperatorRecords} disabled={loadingAllOperatorRecords}>{loadingAllOperatorRecords ? 'Loading all records…' : 'Load all proposal and unresolved records'}</button></div>{/if}
       <article><h3>Register target</h3><p class="muted">Registration is fail-closed: the canister creates the target disabled with auto-top-up off. Enablement is a separate governed update.</p><div class="form-grid"><label>Target principal<input bind:value={targetPrincipal} /></label><label>Display name<input bind:value={displayName} /></label><label>Project<input bind:value={project} /></label><label>Tags (comma separated)<input bind:value={tags} /></label><label>Low threshold (T-cycles)<input bind:value={lowThreshold} inputmode="decimal" /></label><label>Refill amount (T-cycles)<input bind:value={refill} inputmode="decimal" /></label><label>Daily cap (T-cycles)<input bind:value={dailyCap} inputmode="decimal" /></label><label>Cooldown seconds<input bind:value={cooldown} inputmode="numeric" /></label><label>Optional burn anomaly limit (T-cycles)<input bind:value={burnAnomalyLimit} inputmode="decimal" /></label><label>Environment<select bind:value={environment}>{#each Object.keys(EnvironmentVariant) as value}<option value={value}>{value}</option>{/each}</select></label><label>Criticality<select bind:value={criticality}>{#each Object.keys(CriticalityVariant) as value}<option value={value}>{value}</option>{/each}</select></label><label>Observation mode<select bind:value={observationMode}>{#each Object.keys(ObservationModeVariant) as value}<option value={value}>{value}</option>{/each}</select></label></div><p class="fine-print">For example: threshold 2, refill 6 means “At 2T, add 6T.” Values are converted to exact cycle integers before submission.</p><button on:click={() => run(() => sentinelManagement.proposeRegisterTarget(actor!, targetArgs()))}>Propose register target</button></article>
       <article><h3>Update or remove target</h3><p class="muted">Update includes funding policy, enabled, and auto-top-up choices. Removal is governed and remains fail-closed while unresolved operations exist.</p><div class="form-grid"><label>Target principal<input bind:value={targetPrincipal} /></label><label>Display name<input bind:value={displayName} /></label><label>Project<input bind:value={project} /></label><label>Tags<input bind:value={tags} /></label><label>Low threshold (T-cycles)<input bind:value={lowThreshold} inputmode="decimal" /></label><label>Refill amount (T-cycles)<input bind:value={refill} inputmode="decimal" /></label><label>Daily cap (T-cycles)<input bind:value={dailyCap} inputmode="decimal" /></label><label>Cooldown seconds<input bind:value={cooldown} inputmode="numeric" /></label><label>Burn anomaly limit (T-cycles)<input bind:value={burnAnomalyLimit} inputmode="decimal" /></label><label>Environment<select bind:value={environment}>{#each Object.keys(EnvironmentVariant) as value}<option value={value}>{value}</option>{/each}</select></label><label>Criticality<select bind:value={criticality}>{#each Object.keys(CriticalityVariant) as value}<option value={value}>{value}</option>{/each}</select></label><label>Observation mode<select bind:value={observationMode}>{#each Object.keys(ObservationModeVariant) as value}<option value={value}>{value}</option>{/each}</select></label><label class="check"><input type="checkbox" bind:checked={enabled} /> Enabled</label><label class="check"><input type="checkbox" bind:checked={autoTopup} /> Auto-top-up</label></div><p class="fine-print">Use “Use settings” in the registry to load the selected target’s current threshold, refill, cap, cooldown, and switches before editing.</p><div class="actions"><button on:click={() => run(() => sentinelManagement.proposeUpdateTarget(actor!, target(), targetPatch()))}>Propose target update</button><button on:click={() => run(() => sentinelManagement.proposeRemoveTarget(actor!, target()))}>Propose target removal</button><button on:click={() => run(() => sentinelManagement.pauseTarget(actor!, target()))}>Pause target immediately</button><button on:click={() => run(() => sentinelManagement.proposeUnpauseTarget(actor!, target()))}>Propose governed unpause</button></div></article>
       <article><h3>Signer governance</h3><div class="form-grid"><label>Signer principal<input bind:value={signerPrincipal} /></label><label>Signer threshold (nat32)<input bind:value={signerThreshold} inputmode="numeric" /></label></div><div class="actions"><button on:click={() => run(() => sentinelManagement.proposeAddSigner(actor!, parsePrincipal(signerPrincipal, 'Signer principal')))}>Propose add signer</button><button on:click={() => run(() => sentinelManagement.proposeRemoveSigner(actor!, parsePrincipal(signerPrincipal, 'Signer principal')))}>Propose remove signer</button><button on:click={() => run(() => sentinelManagement.proposeSetSignerThreshold(actor!, parseNat32(signerThreshold, 'Signer threshold')))}>Propose signer threshold</button></div></article>
       <article><h3>Global policy governance</h3><div class="form-grid"><label>Global daily cap<input bind:value={globalDailyCap} inputmode="numeric" /></label><label>Sample interval seconds<input bind:value={sampleInterval} inputmode="numeric" /></label><label>Stale-after seconds<input bind:value={staleAfter} inputmode="numeric" /></label><label>Minimum ICP reserve e8s<input bind:value={minIcpReserve} inputmode="numeric" /></label><label>Self-recovery refill<input bind:value={selfRefill} inputmode="numeric" /></label><label>Self-recovery low threshold<input bind:value={selfLowThreshold} inputmode="numeric" /></label><label>Self-recovery daily cap<input bind:value={selfDailyCap} inputmode="numeric" /></label><label>Protected reserve cycles<input bind:value={protectedReserve} inputmode="numeric" /></label><label>Unpause timelock seconds<input bind:value={unpauseTimelock} inputmode="numeric" /></label><label>Spend-policy timelock seconds<input bind:value={spendTimelock} inputmode="numeric" /></label><label>Target-registry timelock seconds<input bind:value={targetTimelock} inputmode="numeric" /></label><label>Signer-change timelock seconds<input bind:value={signerTimelock} inputmode="numeric" /></label></div><button on:click={() => run(() => sentinelManagement.proposeSetGlobalPolicy(actor!, globalPolicy()))}>Propose global policy</button></article>
       <article><h3>Proposal list and actions</h3><label>Proposal ID<input bind:value={proposalId} inputmode="numeric" /></label><div class="actions"><button on:click={() => run(() => sentinelManagement.approveProposal(actor!, proposal()))}>Approve proposal</button><button on:click={() => run(() => sentinelManagement.executeProposal(actor!, proposal()))}>Execute proposal</button><button on:click={() => run(() => sentinelManagement.cancelProposal(actor!, proposal()))}>Cancel proposal</button></div>{#if !operatorDataLoaded}<p class="muted">{operatorDataLoading ? 'Loading proposals…' : operatorDataError ? 'Proposal list unavailable; retry list loading above.' : 'Proposal list has not been loaded.'}</p>{:else if proposals.length}<ul>{#each proposals as item}<li>#{item.id.toString()} · {variant(item.status)} · {variant(item.payload)} · {item.approvals.length} approval(s)</li>{/each}</ul>{:else}<p class="muted">No proposals returned.</p>{/if}</article>
       <article><h3>Unresolved funding operations</h3><div class="form-grid"><label>Operation ID<input bind:value={operationId} inputmode="numeric" /></label><label>Ledger block index<input bind:value={blockIndex} inputmode="numeric" /></label></div><div class="actions"><button on:click={() => run(() => sentinelManagement.attachBlockProof(actor!, operation(), id(blockIndex, 'Block index')))}>Attach delivery proof</button><button on:click={() => run(() => sentinelManagement.attachRefundBlockProof(actor!, operation(), id(blockIndex, 'Block index')))}>Attach refund proof</button><button on:click={() => run(() => sentinelManagement.resolveUnknownAsSpent(actor!, operation()) )}>Resolve unknown as spent</button></div>{#if !operatorDataLoaded}<p class="muted">{operatorDataLoading ? 'Loading unresolved operations…' : operatorDataError ? 'Unresolved-operation list unavailable; retry list loading above.' : 'Unresolved-operation list has not been loaded.'}</p>{:else if unresolved.length}<ul>{#each unresolved as item}<li>#{item.id.toString()} · {variant(item.state)} · target {item.target.toText()} · reserved {item.reserved_amount_cycles.toString()} cycles</li>{/each}</ul>{:else}<p class="muted">No unresolved funding operations returned.</p>{/if}</article>
-    {:else}<p class="muted">{operatorChecked ? 'This wallet is authenticated but is not a configured Sentinel signer. Private telemetry remains available to approved principals.' : 'Checking operator access asks your wallet to approve a read-only signer-permission query. It never changes Sentinel policy or moves cycles.'}</p><button on:click={checkOperatorAccess} disabled={checkingOperatorAccess}>{checkingOperatorAccess ? 'Checking operator access…' : 'Check operator access'}</button>{/if}
+    {:else}<p class="muted">{operatorChecked ? 'Telemetry and signer access were read together. After single-signature setup, any of the three listed operator principals can manage the Sentinel alone.' : 'Refresh telemetry to read telemetry and signer access together.'}</p>{/if}
   </section>{:else}<div class="login-note">Connect a wallet to check signer permissions and access operator controls.</div>{/if}
   {/if}
   {/if}
@@ -1201,7 +1282,7 @@
       {#if topupResult}<div class:notice={true} class:success={topupResult.disposition === 'completed'} class:error={topupResult.disposition !== 'completed'} role="status">
         Operation #{topupResult.id.toString()} · {topupResult.state} · {topupResult.amount} · {topupResult.source}
       </div>{/if}
-      <div class="modal-actions"><button on:click={() => topupTarget = null}>Close</button><button class="confirm-topup" disabled={submittingTopup || !!manualTopUpLock || !!topupResult || !validTopUpAmount()} on:click={confirmManualTopUp}>{submittingTopup ? 'Submitting…' : manualTopUpLock ? 'Awaiting confirmation' : 'Confirm top-up'}</button></div>
+      <div class="modal-actions"><button on:click={() => topupTarget = null}>Close</button><button class="confirm-topup" disabled={submittingTopup || !!manualTopUpLock || !!topupResult || !unresolvedRecordsComplete || !validTopUpAmount()} on:click={confirmManualTopUp}>{submittingTopup ? 'Submitting…' : manualTopUpLock ? 'Awaiting confirmation' : 'Confirm top-up'}</button></div>
     </div>
   </div>
 {/if}
@@ -1213,6 +1294,7 @@
   .registry-shell{display:block}.registry-card{min-width:0}.registry-heading{display:flex;align-items:center;justify-content:space-between;gap:1rem}.registry-heading h2{margin-bottom:0}.table-scroll{overflow-x:auto;margin-top:.75rem}.table-scroll table{min-width:1000px}.registry-card th{white-space:nowrap}.registry-card td{vertical-align:middle}.principal-copy{display:block;margin:.2rem 0 0;padding:0;border:0;background:transparent;color:var(--rumi-text-muted);font:inherit;font-size:.72rem;text-align:left;overflow-wrap:anywhere;user-select:text}.principal-copy:hover{color:var(--rumi-teal)}.inline-toggle{display:flex;align-items:center;gap:.3rem;margin-top:.25rem;color:var(--rumi-text-muted);font-size:.7rem;white-space:nowrap}.inline-toggle input{width:auto;margin:0}.row-action{margin-top:.3rem;padding:.35rem .5rem;font-size:.69rem;white-space:nowrap}.rule-editor{display:grid;grid-template-columns:repeat(2,minmax(5rem,1fr));gap:.2rem .4rem;min-width:12rem}.rule-editor label{display:flex;align-items:center;gap:.2rem;color:var(--rumi-text-muted);font-size:.68rem;white-space:nowrap}.rule-editor input{min-width:0;width:4.5rem;margin:0;padding:.28rem .3rem;font-size:.7rem}.rule-editor .row-action{grid-column:1/-1;justify-self:start}.alarm-menu{position:relative}.alarm-trigger{position:relative;display:flex;align-items:center;gap:.45rem}.alarm-trigger>span:first-child{font-size:1.1rem}.alarm-indicator{position:absolute;left:1.38rem;top:.25rem;width:.45rem;height:.45rem;border-radius:50%;background:#ef5350;box-shadow:0 0 0 2px var(--rumi-bg-surface-1)}.alarm-trigger b{display:grid;place-items:center;min-width:1.1rem;height:1.1rem;padding:0 .15rem;border-radius:99px;background:#b4232c;color:white;font-size:.65rem}.alarm-popover{position:absolute;z-index:20;right:0;top:calc(100% + .5rem);width:min(27rem,calc(100vw - 3rem));max-height:65vh;overflow:auto;padding:.8rem;background:var(--rumi-bg-surface-1);border:1px solid var(--rumi-border-hover);border-radius:.55rem;box-shadow:0 14px 36px rgba(0,0,0,.42)}.alarm-popover-heading{display:flex;justify-content:space-between;align-items:center;padding-bottom:.45rem;border-bottom:1px solid var(--rumi-border)}.alarm-row{display:flex;align-items:center;gap:.55rem;padding:.65rem 0;border-bottom:1px solid var(--rumi-border)}.alarm-dot{flex:none;width:.48rem;height:.48rem;border-radius:50%;background:var(--rumi-text-muted)}.alarm-dot.dot-open{background:#ef5350}.alarm-copy{min-width:0}.alarm-copy small{overflow-wrap:anywhere}.alarm-status{margin-left:auto;color:var(--rumi-text-muted);font-size:.7rem;white-space:nowrap}.quiet-button{padding:.35rem .5rem;white-space:nowrap}.alarm-popover .muted{padding:.5rem 0}
   @media(max-width:768px){.registry-heading{align-items:flex-start}.alarm-popover{right:-.5rem}.table-scroll table{min-width:1050px}}
   .modal-backdrop{position:fixed;z-index:1000;inset:0;display:grid;place-items:center;padding:1rem;background:rgba(2,8,20,.72);backdrop-filter:blur(3px)}.topup-modal{width:min(30rem,100%);padding:1.2rem;background:var(--rumi-bg-surface-1);border:1px solid var(--rumi-border-hover);border-radius:.7rem;box-shadow:0 22px 60px rgba(0,0,0,.5)}.modal-heading{display:flex;align-items:center;justify-content:space-between;gap:1rem}.modal-heading h2{margin:0}.modal-heading button{font-size:1.15rem;padding:.25rem .55rem}.topup-summary{margin:1rem 0}.topup-summary>div{display:grid;grid-template-columns:8rem 1fr;gap:.7rem;padding:.55rem 0;border-bottom:1px solid var(--rumi-border)}.topup-summary dt{color:var(--rumi-text-muted);font-size:.75rem}.topup-summary dd{margin:0;font-size:.82rem}.modal-actions{display:flex;justify-content:flex-end;gap:.5rem;margin-top:1rem}.confirm-topup{border-color:var(--rumi-teal);color:var(--rumi-teal)}
+  .topup-history{margin-top:1rem}.history-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:1rem}.history-heading h2{margin-bottom:.2rem}.history-heading p{margin:.25rem 0}.history-heading>strong{white-space:nowrap;color:var(--rumi-teal);font-size:.8rem}.topup-history table{min-width:820px}.topup-history td small{max-width:16rem;overflow-wrap:anywhere}.operator-access details{margin:.6rem 0}.operator-access code{overflow-wrap:anywhere}.operator-access .notice{margin:.5rem 0}
 
   /* Cycle Sentinel: a wide, calm control room for long-lived operational data. */
   .telemetry-page {
@@ -1300,8 +1382,15 @@
     border-radius: .75rem;
     box-shadow: 0 12px 35px rgba(1, 7, 18, .2);
   }
-  .registry-heading { align-items: center; padding-bottom: .9rem; border-bottom: 1px solid var(--sentinel-line); }
+  .registry-heading { align-items: flex-start; padding-bottom: .9rem; border-bottom: 1px solid var(--sentinel-line); }
+  .registry-title { display: grid; gap: .65rem; min-width: 15rem; }
   .registry-heading h2 { margin: 0; font-size: 1.3rem; letter-spacing: -.02em; }
+  .registry-state-summary { display: flex; flex-wrap: wrap; align-items: stretch; gap: .4rem; }
+  .registry-count { display: grid; grid-template-columns: auto auto; align-items: baseline; column-gap: .35rem; padding: .35rem .55rem; border: 1px solid rgba(174, 195, 224, .16); border-radius: .45rem; background: rgba(8, 15, 29, .34); }
+  .registry-count strong { color: #c6d3e7; font-size: .7rem; font-weight: 550; }
+  .registry-count b { color: #edf2fa; font-size: .78rem; font-variant-numeric: tabular-nums; }
+  .registry-count small { grid-column: 1 / -1; color: #8f9fb9; font-size: .62rem; line-height: 1.2; }
+  .registry-state-summary .registry-exclusions { align-self: center; color: #9eacc3; font-size: .66rem; }
   .registry-bulk-controls { display: grid; justify-items: end; gap: .2rem; margin-left: auto; }
   .registry-bulk-controls small { color: #aebbd2; font-size: .68rem; text-align: right; }
   .registry-bulk-actions { display: flex; flex-wrap: wrap; justify-content: end; gap: .45rem; }
@@ -1433,6 +1522,13 @@
   .state-pill.state-low { border-color: rgba(238, 178, 89, .32); background: rgba(238, 178, 89, .1); color: #f3c987; }
   .state-pill.state-healthy { border-color: rgba(82, 223, 200, .23); background: rgba(82, 223, 200, .09); color: #8be9d8; }
   .state-cell small { margin-top: .5rem; line-height: 1.3; }
+  .target-flags { display: grid; justify-items: start; gap: .35rem; margin-top: .5rem; }
+  .target-flag { display: inline-flex; align-items: center; gap: .38rem; padding: .27rem .48rem; border: 1px solid rgba(82, 223, 200, .23); border-radius: .38rem; background: rgba(82, 223, 200, .075); color: #9be9dc; font-size: .7rem; line-height: 1.15; white-space: nowrap; }
+  .target-flag i { width: .42rem; height: .42rem; flex: none; border-radius: 50%; background: var(--sentinel-teal); }
+  .target-flag strong { color: #c5fff4; font-size: .65rem; letter-spacing: .045em; }
+  .target-flag.flag-off { border-color: rgba(174, 195, 224, .17); background: rgba(174, 195, 224, .055); color: #c3cee0; }
+  .target-flag.flag-off i { background: #7f8fa9; }
+  .target-flag.flag-off strong { color: #d0d9e8; }
   .metric-cell strong { display: block; color: #f0f5fc; font-size: .94rem; font-variant-numeric: tabular-nums; font-weight: 620; }
   .metric-label { display: none; }
   .rule-summary { display: flex; align-items: baseline; gap: .35rem; flex-wrap: wrap; font-variant-numeric: tabular-nums; }

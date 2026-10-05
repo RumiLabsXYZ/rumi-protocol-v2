@@ -116,6 +116,7 @@ fn consent_message(method: &str) -> Option<&'static str> {
         // query such as get_my_permissions.
         "cycles_status"
         | "get_my_permissions"
+        | "get_operator_dashboard"
         | "get_public_overview"
         | "get_public_target"
         | "list_governance_proposals"
@@ -134,6 +135,9 @@ fn consent_message(method: &str) -> Option<&'static str> {
         ),
         "propose_add_signer" | "propose_remove_signer" | "propose_set_signer_threshold" => Some(
             "Create a Cycle Sentinel signer-governance proposal. This records a proposal only; it cannot change the signer set or approval threshold until the required signers approve it and the proposal is executed.",
+        ),
+        "configure_single_operator_governance" => Some(
+            "Immediately replace Cycle Sentinel signers with the three configured operator principals and set the approval threshold to one. This explicit setup bypasses the signer-change timelock and clears approvals from all currently open proposals so they must be approved again under the new quorum. Funding policy and its other timelocks remain unchanged. This does not spend cycles.",
         ),
         "approve_proposal" => Some(
             "Approve a Cycle Sentinel governance proposal. Your approval can help make the proposal executable under the configured signer threshold, but does not execute it or transfer cycles by itself.",

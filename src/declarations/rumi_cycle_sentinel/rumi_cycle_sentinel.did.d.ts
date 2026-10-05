@@ -218,14 +218,30 @@ export interface InitArgs {
   'signers' : Array<Principal>,
   'global_policy' : GlobalPolicyArgs,
 }
-export type MaintenanceResult = { 'Ok' : null } |
-  { 'Err' : string };
 export type ObservationMode = { 'SelfReport' : null } |
   { 'BlackholeRelay' : null } |
   { 'Unobserved' : null };
+export interface OperatorDashboard {
+  'alarms' : Array<PublicAlarm>,
+  'topup_history' : Array<PublicTopupSummary>,
+  'overview' : PublicOverview,
+  'targets' : Array<PublicTargetRow>,
+  'unresolved_operations' : [] | [PublicPage],
+  'governance' : OperatorGovernanceView,
+  'proposals' : [] | [PublicPage_1],
+}
+export type OperatorDashboardError = { 'InvalidProjection' : null };
+export interface OperatorGovernanceView {
+  'approval_threshold' : number,
+  'signers' : Array<Principal>,
+  'is_single_operator_mode' : boolean,
+  'is_signer' : boolean,
+  'single_operator_setup_available' : boolean,
+  'configured_operator_principals' : Array<Principal>,
+}
 export interface PermissionsView { 'is_signer' : boolean }
 export type ProposalPayload = { 'AddSigner' : { 'signer' : Principal } } |
-  { 'UpdateTarget' : { 'principal' : Principal, 'patch' : TargetPatch } } |
+  { 'UpdateTarget' : TargetUpdate } |
   { 'UpdateTargets' : { 'updates' : Array<TargetUpdate> } } |
   { 'SetSignerThreshold' : { 'threshold' : number } } |
   { 'RemoveTarget' : { 'principal' : Principal } } |
@@ -285,27 +301,27 @@ export interface PublicOverview {
 }
 export interface PublicPage {
   'next_cursor' : [] | [string],
-  'items' : Array<ProposalRecord>,
+  'items' : Array<FundingOperation>,
 }
 export interface PublicPage_1 {
   'next_cursor' : [] | [string],
-  'items' : Array<PublicAlarm>,
+  'items' : Array<ProposalRecord>,
 }
 export interface PublicPage_2 {
   'next_cursor' : [] | [string],
-  'items' : Array<Sample>,
+  'items' : Array<PublicAlarm>,
 }
 export interface PublicPage_3 {
   'next_cursor' : [] | [string],
-  'items' : Array<PublicTargetRow>,
+  'items' : Array<Sample>,
 }
 export interface PublicPage_4 {
   'next_cursor' : [] | [string],
-  'items' : Array<PublicTopupSummary>,
+  'items' : Array<PublicTargetRow>,
 }
 export interface PublicPage_5 {
   'next_cursor' : [] | [string],
-  'items' : Array<FundingOperation>,
+  'items' : Array<PublicTopupSummary>,
 }
 export type PublicQueryError = { 'TargetNotFound' : null } |
   { 'TooManyItems' : null } |
@@ -347,7 +363,9 @@ export type PublicTargetState = { 'Low' : null } |
   { 'Unobserved' : null } |
   { 'Uninstalled' : null };
 export interface PublicTopupSummary {
+  'trigger' : [] | [FundingTrigger],
   'rail' : FundingRail,
+  'target' : Principal,
   'amount_cycles' : bigint,
   'outcome' : FundingOutcome,
   'resolved_at_secs' : bigint,
@@ -364,24 +382,30 @@ export type Result = { 'Ok' : boolean } |
   { 'Err' : GovernanceError };
 export type Result_1 = { 'Ok' : FundingOperation } |
   { 'Err' : string };
-export type Result_10 = { 'Ok' : bigint } |
+export type Result_10 = { 'Ok' : PublicPage_5 } |
+  { 'Err' : PublicQueryError };
+export type Result_11 = { 'Ok' : PublicPage } |
+  { 'Err' : AuthenticatedQueryError };
+export type Result_12 = { 'Ok' : bigint } |
   { 'Err' : GovernanceError };
+export type Result_13 = { 'Ok' : null } |
+  { 'Err' : string };
 export type Result_2 = { 'Ok' : null } |
   { 'Err' : GovernanceError };
-export type Result_3 = { 'Ok' : PermissionsView } |
+export type Result_3 = { 'Ok' : OperatorDashboard } |
+  { 'Err' : SingleOperatorSetupError };
+export type Result_4 = { 'Ok' : PermissionsView } |
   { 'Err' : AuthenticatedQueryError };
-export type Result_4 = { 'Ok' : PublicPage } |
+export type Result_5 = { 'Ok' : OperatorDashboard } |
+  { 'Err' : OperatorDashboardError };
+export type Result_6 = { 'Ok' : PublicPage_1 } |
   { 'Err' : AuthenticatedQueryError };
-export type Result_5 = { 'Ok' : PublicPage_1 } |
+export type Result_7 = { 'Ok' : PublicPage_2 } |
   { 'Err' : PublicQueryError };
-export type Result_6 = { 'Ok' : PublicPage_2 } |
+export type Result_8 = { 'Ok' : PublicPage_3 } |
   { 'Err' : PublicQueryError };
-export type Result_7 = { 'Ok' : PublicPage_3 } |
+export type Result_9 = { 'Ok' : PublicPage_4 } |
   { 'Err' : PublicQueryError };
-export type Result_8 = { 'Ok' : PublicPage_4 } |
-  { 'Err' : PublicQueryError };
-export type Result_9 = { 'Ok' : PublicPage_5 } |
-  { 'Err' : AuthenticatedQueryError };
 export interface Sample {
   'balance' : [] | [AdvisoryCyclesBalance],
   'state' : PublicTargetState,
@@ -401,6 +425,9 @@ export type SelfRecoveryPolicyError = { 'DailyCapBelowRefill' : null } |
   { 'ZeroRefillCycles' : null } |
   { 'ZeroDailyCap' : null } |
   { 'CyclesValueOverflow' : null };
+export type SingleOperatorSetupError = { 'SetupAlreadyUsed' : null } |
+  { 'NotOperator' : null } |
+  { 'InvalidProjection' : null };
 export interface StandardRecord { 'url' : string, 'name' : string }
 export interface TargetArgs {
   'principal' : Principal,
@@ -454,7 +481,6 @@ export type TargetValidationError = { 'DuplicateTarget' : null } |
   { 'ZeroBurnAnomalyLimit' : null } |
   { 'TooManyTags' : null };
 export interface TextValue { 'content' : string }
-export interface TimestampSeconds { 'amount' : bigint }
 export interface TokenAmount {
   'decimals' : number,
   'amount' : bigint,
@@ -462,7 +488,7 @@ export interface TokenAmount {
 }
 export type Value = { 'Text' : TextValue } |
   { 'TokenAmount' : TokenAmount } |
-  { 'TimestampSeconds' : TimestampSeconds } |
+  { 'TimestampSeconds' : DurationSeconds } |
   { 'DurationSeconds' : DurationSeconds };
 export interface _SERVICE {
   'acknowledge_alarm' : ActorMethod<[bigint], Result>,
@@ -470,9 +496,11 @@ export interface _SERVICE {
   'attach_block_proof' : ActorMethod<[bigint, bigint], Result_1>,
   'attach_refund_block_proof' : ActorMethod<[bigint, bigint], Result_1>,
   'cancel_proposal' : ActorMethod<[bigint], Result_2>,
+  'configure_single_operator_governance' : ActorMethod<[], Result_3>,
   'cycles_status' : ActorMethod<[], CycleManagerCyclesStatus>,
   'execute_proposal' : ActorMethod<[bigint], Result_2>,
-  'get_my_permissions' : ActorMethod<[], Result_3>,
+  'get_my_permissions' : ActorMethod<[], Result_4>,
+  'get_operator_dashboard' : ActorMethod<[], Result_5>,
   'get_public_overview' : ActorMethod<[], PublicOverview>,
   'get_public_target' : ActorMethod<[Principal], [] | [PublicTargetRow]>,
   'icrc10_supported_standards' : ActorMethod<[], Array<StandardRecord>>,
@@ -480,20 +508,20 @@ export interface _SERVICE {
     [ConsentMessageRequest],
     ConsentMessageResult
   >,
-  'list_governance_proposals' : ActorMethod<[[] | [string], number], Result_4>,
-  'list_public_alarms' : ActorMethod<[[] | [string], number], Result_5>,
+  'list_governance_proposals' : ActorMethod<[[] | [string], number], Result_6>,
+  'list_public_alarms' : ActorMethod<[[] | [string], number], Result_7>,
   'list_public_samples' : ActorMethod<
-    [Principal, [] | [string], number],
-    Result_6
-  >,
-  'list_public_targets' : ActorMethod<[[] | [string], number], Result_7>,
-  'list_public_topups' : ActorMethod<
     [Principal, [] | [string], number],
     Result_8
   >,
+  'list_public_targets' : ActorMethod<[[] | [string], number], Result_9>,
+  'list_public_topups' : ActorMethod<
+    [Principal, [] | [string], number],
+    Result_10
+  >,
   'list_unresolved_funding_operations' : ActorMethod<
     [[] | [string], number],
-    Result_9
+    Result_11
   >,
   'manual_top_up' : ActorMethod<[Principal], Result_1>,
   'manual_top_up_with_amount' : ActorMethod<
@@ -501,17 +529,17 @@ export interface _SERVICE {
     Result_1
   >,
   'pause_target' : ActorMethod<[Principal], Result_2>,
-  'propose_add_signer' : ActorMethod<[Principal], Result_10>,
-  'propose_register_target' : ActorMethod<[TargetArgs], Result_10>,
-  'propose_remove_signer' : ActorMethod<[Principal], Result_10>,
-  'propose_remove_target' : ActorMethod<[Principal], Result_10>,
-  'propose_set_global_policy' : ActorMethod<[GlobalPolicyArgs], Result_10>,
-  'propose_set_signer_threshold' : ActorMethod<[number], Result_10>,
-  'propose_unpause_target' : ActorMethod<[Principal], Result_10>,
-  'propose_update_target' : ActorMethod<[Principal, TargetPatch], Result_10>,
-  'propose_update_targets' : ActorMethod<[Array<TargetUpdate>], Result_10>,
+  'propose_add_signer' : ActorMethod<[Principal], Result_12>,
+  'propose_register_target' : ActorMethod<[TargetArgs], Result_12>,
+  'propose_remove_signer' : ActorMethod<[Principal], Result_12>,
+  'propose_remove_target' : ActorMethod<[Principal], Result_12>,
+  'propose_set_global_policy' : ActorMethod<[GlobalPolicyArgs], Result_12>,
+  'propose_set_signer_threshold' : ActorMethod<[number], Result_12>,
+  'propose_unpause_target' : ActorMethod<[Principal], Result_12>,
+  'propose_update_target' : ActorMethod<[Principal, TargetPatch], Result_12>,
+  'propose_update_targets' : ActorMethod<[Array<TargetUpdate>], Result_12>,
   'resolve_unknown_as_spent' : ActorMethod<[bigint], Result_1>,
-  'run_maintenance_now' : ActorMethod<[], MaintenanceResult>,
+  'run_maintenance_now' : ActorMethod<[], Result_13>,
 }
 export declare const idlFactory: IDL.InterfaceFactory;
 export declare const init: (args: { IDL: typeof IDL }) => IDL.Type[];
