@@ -668,20 +668,18 @@ canisters:
   # the `**/*` security_policy plus the custom Content-Security-Policy and
   # Permissions-Policy headers. SvelteKit's adapter-static copies static/ into
   # dist/ during `vite build`, so that real config is ALREADY in dist/ after the
-  # build (along with the SPA fallback index.html). The separate `assets/` dir
-  # (dfx.json listed it as a second `source`) holds only the things the build
-  # does NOT place in dist/: a redundant 60-byte `.ic-assets.json5` stub (just a
-  # .well-known un-ignore rule), the `.well-known/` dir (ic-domains for the
-  # custom domains + ii-alternative-origins for vault_frontend's cross-origin
-  # II), and `favicon.ico` (static/ only has favicon.png).
+  # build (along with the SPA fallback index.html). vault_frontend's auth and
+  # domain .well-known files also live in static/, so a plain build + icp sync
+  # includes them. rumi_homepage still copies its .well-known from assets/.
+  # The separate assets/ directories also hold favicon.ico and a redundant
+  # .ic-assets.json5 stub; never copy that stub into dist/.
   #
   # DO NOT copy `assets/.ic-assets.json5` into dist/. dfx tolerated both a
   # `.ic-assets.json` and a `.ic-assets.json5` in its upload set (it processed
   # dist/ and assets/ as two separate source roots); icp-cli's asset gatherer
   # uploads from a single `dir`, and two asset-config files in one directory
   # makes it fail with "Failed to gather asset descriptors". So the merge below
-  # copies ONLY `.well-known/` and `favicon.ico` from assets/ (the two things
-  # the build does not already place in dist/), leaving static/.ic-assets.json
+  # copies ONLY missing files from assets/, leaving static/.ic-assets.json
   # as the sole config, and deletes the macOS `.DS_Store` that static/ drags
   # into dist/. This reproduces the exact dfx upload set minus the redundant
   # json5 stub and the junk dotfile. (Learned the hard way: the first
@@ -694,13 +692,15 @@ canisters:
   # workspace's prebuild (`@sveltejs/kit sync`) then build (`vite build`) into
   # src/<name>/dist. The recipe's build steps run in your working tree, and the
   # asset SYNC uploads from the in-repo `dir` (src/<name>/dist) - so the
-  # .well-known copy and .DS_Store delete must land in the working-tree dist,
-  # which is what the relative paths below do. The `rm -rf dist/.well-known`
-  # before the copy keeps it idempotent (BSD cp would otherwise nest
-  # assets/.well-known inside an existing dist/.well-known on a re-run). Deploy
+  # homepage's .well-known copy and .DS_Store delete must land in that dist.
+  # Its `rm -rf dist/.well-known` before the copy keeps it idempotent (BSD cp
+  # would otherwise nest assets/.well-known inside an existing dist/.well-known
+  # on a re-run). Deploy
   # frontends INDIVIDUALLY (`icp deploy vault_frontend -e mainnet-live`); a bare
   # full-env `icp deploy -e mainnet-live` would run two `npm ci` against the
   # shared root node_modules in parallel (and upgrade every Rust canister).
+  # Direct `icp sync` does not run recipe build steps. The frontend's npm
+  # postbuild verifies its auth/domain files before the build reports success.
   - name: vault_frontend
     recipe:
       type: "@dfinity/asset-canister@v2.3.0"
@@ -710,8 +710,6 @@ canisters:
           - npm ci
           - npm run build --workspace vault_frontend
           - rm -f src/vault_frontend/dist/.DS_Store
-          - rm -rf src/vault_frontend/dist/.well-known
-          - cp -R src/vault_frontend/assets/.well-known src/vault_frontend/dist/.well-known
           - cp -f src/vault_frontend/assets/favicon.ico src/vault_frontend/dist/favicon.ico
 
   - name: rumi_homepage

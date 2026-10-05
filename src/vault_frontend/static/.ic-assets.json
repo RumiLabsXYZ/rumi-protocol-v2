@@ -12,5 +12,13 @@
             "Permissions-Policy": "clipboard-read=(self), clipboard-write=(self)"
         },
         "allow_raw_access": true
+    },
+    {
+        "match": ".well-known/ii-alternative-origins",
+        "ignore": false,
+        "headers": {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*"
+        }
     }
 ]
