@@ -17,23 +17,28 @@ use crate::numeric::NANOS_PER_YEAR;
 /// 0 on zero debt / zero elapsed / zero rate, and DEFERS (returns 0, never
 /// panics) on any Decimal overflow — mirroring ICP's overflow-defer.
 pub fn accrued_chain_interest_e8s(debt_e8s: u128, apr_bps: u64, elapsed_ns: u64) -> u128 {
+    checked_accrued_chain_interest_e8s(debt_e8s, apr_bps, elapsed_ns).unwrap_or(0)
+}
+
+/// Checked form for risk admission paths. `None` means an intermediate
+/// Decimal operation or final conversion could not represent the projection;
+/// callers must reject rather than treating unrepresentable interest as zero.
+pub fn checked_accrued_chain_interest_e8s(
+    debt_e8s: u128,
+    apr_bps: u64,
+    elapsed_ns: u64,
+) -> Option<u128> {
     if debt_e8s == 0 || apr_bps == 0 || elapsed_ns == 0 {
-        return 0;
+        return Some(0);
     }
-    // Defer (not panic) if debt cannot be represented as a Decimal.
-    let debt = match Decimal::from_u128(debt_e8s) {
-        Some(d) => d,
-        None => return 0,
-    };
-    let rate = Decimal::from(apr_bps) / Decimal::from(10_000u64);
-    let factor = Decimal::ONE + rate * Decimal::from(elapsed_ns) / Decimal::from(NANOS_PER_YEAR);
-    // new_debt = ceil(debt * factor); the accrued interest is the delta. Defer
-    // on a Decimal->u128 overflow (unreachable at real debt scales).
-    let new_debt = match (debt * factor).ceil().to_u128() {
-        Some(n) => n,
-        None => return 0,
-    };
-    new_debt.saturating_sub(debt_e8s)
+    let debt = Decimal::from_u128(debt_e8s)?;
+    let rate = Decimal::from(apr_bps).checked_div(Decimal::from(10_000u64))?;
+    let annualized = rate
+        .checked_mul(Decimal::from(elapsed_ns))?
+        .checked_div(Decimal::from(NANOS_PER_YEAR))?;
+    let factor = Decimal::ONE.checked_add(annualized)?;
+    let new_debt = debt.checked_mul(factor)?.ceil().to_u128()?;
+    Some(new_debt.saturating_sub(debt_e8s))
 }
 
 use crate::chains::config::ChainId;
@@ -136,7 +141,7 @@ pub fn harvest_chain_interest_in_state(
 
 #[cfg(test)]
 mod tests {
-    use super::accrued_chain_interest_e8s;
+    use super::{accrued_chain_interest_e8s, checked_accrued_chain_interest_e8s};
     const E8: u128 = 100_000_000;
     const NANOS_PER_YEAR: u64 = 365 * 24 * 60 * 60 * 1_000_000_000;
 
@@ -183,6 +188,10 @@ mod tests {
         assert_eq!(
             accrued_chain_interest_e8s(u128::MAX, 200, NANOS_PER_YEAR),
             0
+        );
+        assert_eq!(
+            checked_accrued_chain_interest_e8s(u128::MAX, 200, NANOS_PER_YEAR),
+            None
         );
     }
 

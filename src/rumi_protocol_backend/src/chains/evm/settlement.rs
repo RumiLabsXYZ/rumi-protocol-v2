@@ -428,6 +428,38 @@ pub fn confirm_interest_mint_in_state(
     Ok(())
 }
 
+/// Select only settle-token Transfer logs emitted by the exact transaction and
+/// block returned by receipt confirmation. `get_logs` is already restricted
+/// to the configured token contract and Transfer topic. Same-block transfers
+/// from other transactions must never determine realized liquidation output.
+pub(super) fn select_liquidation_swap_output(
+    logs: &[(Vec<String>, String, String, u64, u64)],
+    confirmed_tx_hash: &str,
+    confirmed_block: u64,
+    reserve_to: &str,
+) -> Option<u128> {
+    let mut total = 0u128;
+    let mut matched = false;
+    let mut seen_log_indices = std::collections::BTreeSet::new();
+    for (topics, data, log_tx, log_block, log_index) in logs {
+        if !log_tx.eq_ignore_ascii_case(confirmed_tx_hash) || *log_block != confirmed_block {
+            continue;
+        }
+        let Ok(transfer) = evm_rpc::TransferLog::from_raw(topics, data) else {
+            continue;
+        };
+        if !transfer.to.eq_ignore_ascii_case(reserve_to) {
+            continue;
+        }
+        if !seen_log_indices.insert(*log_index) {
+            return None;
+        }
+        total = total.checked_add(transfer.amount)?;
+        matched = true;
+    }
+    (matched && total > 0).then_some(total)
+}
+
 /// Phase 2 of the bot liquidation (spec §4.9): USDC is in hand — move
 /// `debt_e8s -> reserve_backing_e8s` (the ONLY invariant move; `chain_supplies`
 /// is NOT touched, no icUSD burned). Modeled on `confirm_interest_mint_in_state`:
@@ -3277,16 +3309,12 @@ async fn confirm_op(chain: ChainId, op_id: u64, op: crate::chains::settlement_qu
             if ensure_chain_still_registered(chain).is_err() {
                 return;
             }
-            let mut realized: Option<u128> = None;
-            for (topics, data, _log_tx, _log_block, _log_index) in &logs {
-                if let Ok(t) = evm_rpc::TransferLog::from_raw(topics, data) {
-                    if t.to.eq_ignore_ascii_case(&reserve_to) {
-                        realized = Some(t.amount);
-                        break;
-                    }
-                }
-            }
-            let realized_usdc = match realized {
+            let realized_usdc = match select_liquidation_swap_output(
+                &logs,
+                &tx_hash,
+                block_number,
+                &reserve_to,
+            ) {
                 Some(a) => a,
                 None => {
                     // Receipt is OK but no Transfer-to-reserve is visible yet (a

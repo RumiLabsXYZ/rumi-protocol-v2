@@ -1,8 +1,9 @@
 use super::settlement::{
     claim_liquidation_swap_submit_in_state, confirm_interest_mint_in_state, confirm_mint_in_state,
     ensure_liquidation_swap_submit_still_allowed_in_state, exact_native_transfer_is_funded,
-    fundable_withdrawal_value, requires_public_mint_gate, rotate_queued_op_to_tail, select_next_op,
-    select_next_op_with_submit_filter, ClaimLiquidationSwapSubmitError,
+    fundable_withdrawal_value, requires_public_mint_gate, rotate_queued_op_to_tail,
+    select_liquidation_swap_output, select_next_op, select_next_op_with_submit_filter,
+    ClaimLiquidationSwapSubmitError,
     LiquidationSwapSubmitSnapshot, OpAction,
 };
 use crate::chains::config::{ChainConfigV3, ChainId, ChainStatus, GasStrategy};
@@ -14,6 +15,83 @@ use crate::state::State;
 use candid::Principal;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+
+fn transfer_query_log(
+    tx_hash: &str,
+    block_number: u64,
+    log_index: u64,
+    recipient: &str,
+    amount: u128,
+) -> (Vec<String>, String, String, u64, u64) {
+    let recipient_topic = format!("0x{:0>64}", recipient.trim_start_matches("0x"));
+    (
+        vec![
+            super::evm_rpc::TRANSFER_EVENT_TOPIC0.to_string(),
+            format!("0x{:0>64}", "1"),
+            recipient_topic,
+        ],
+        format!("0x{:x}", amount),
+        tx_hash.to_string(),
+        block_number,
+        log_index,
+    )
+}
+
+#[test]
+fn liquidation_output_requires_confirmed_transaction_and_block() {
+    let reserve = "0x5555555555555555555555555555555555555555";
+    let logs = vec![
+        // An unrelated dust transfer appears first in the same block.
+        transfer_query_log("0xother-tx", 77, 1, reserve, 1),
+        // A matching transaction hash from another block is also excluded.
+        transfer_query_log("0xconfirmed-swap", 76, 2, reserve, 2),
+        // A matching transaction/block transfer to another recipient is excluded.
+        transfer_query_log(
+            "0xconfirmed-swap",
+            77,
+            3,
+            "0x7777777777777777777777777777777777777777",
+            3,
+        ),
+        transfer_query_log("0xconfirmed-swap", 77, 4, reserve, 90),
+        transfer_query_log("0xconfirmed-swap", 77, 5, reserve, 10),
+    ];
+    assert_eq!(
+        select_liquidation_swap_output(&logs, "0xconfirmed-swap", 77, reserve),
+        Some(100)
+    );
+    assert_eq!(
+        select_liquidation_swap_output(&logs[..1], "0xconfirmed-swap", 77, reserve),
+        None,
+        "unrelated same-block output cannot settle the operation"
+    );
+}
+
+#[test]
+fn liquidation_output_rejects_duplicate_indices_zero_and_overflow() {
+    let reserve = "0x5555555555555555555555555555555555555555";
+    let duplicate = vec![
+        transfer_query_log("0xconfirmed-swap", 77, 4, reserve, 90),
+        transfer_query_log("0xconfirmed-swap", 77, 4, reserve, 10),
+    ];
+    assert_eq!(
+        select_liquidation_swap_output(&duplicate, "0xconfirmed-swap", 77, reserve),
+        None
+    );
+    let zero = vec![transfer_query_log("0xconfirmed-swap", 77, 6, reserve, 0)];
+    assert_eq!(
+        select_liquidation_swap_output(&zero, "0xconfirmed-swap", 77, reserve),
+        None
+    );
+    let overflow = vec![
+        transfer_query_log("0xconfirmed-swap", 77, 7, reserve, u128::MAX),
+        transfer_query_log("0xconfirmed-swap", 77, 8, reserve, 1),
+    ];
+    assert_eq!(
+        select_liquidation_swap_output(&overflow, "0xconfirmed-swap", 77, reserve),
+        None
+    );
+}
 
 fn vault_pending(s: &mut MultiChainState, vault_id: u64, pending: u128) {
     s.chain_vaults.insert(
