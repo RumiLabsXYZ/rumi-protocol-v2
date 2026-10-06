@@ -1,6 +1,6 @@
 {
   "engines": {
-    "node": ">=16.0.0",
+    "node": "^20.19.0 || ^22.12.0 || >=24.0.0",
     "npm": ">=7.0.0"
   },
   "name": "rumi_protocol",
@@ -19,7 +19,7 @@
     "src/vault_frontend"
   ],
   "devDependencies": {
-    "vite": "^5.4.11"
+    "vite": "^6.4.1"
   },
   "overrides": {
     "@dfinity/principal": "2.3.0",
@@ -29,7 +29,7 @@
   "dependencies": {
     "@sveltejs/adapter-static": "^3.0.8",
     "@sveltejs/kit": "^2.19.0",
-    "@sveltejs/vite-plugin-svelte": "^4.0.0",
+    "@sveltejs/vite-plugin-svelte": "^6.2.4",
     "@types/qrcode": "^1.5.6",
     "autoprefixer": "^10.4.20",
     "eslint": "^9.7.0",
@@ -47,6 +47,6 @@
     "tailwindcss": "^3.4.9",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.0.0",
-    "vitest": "^2.0.4"
+    "vitest": "^4.1.11"
   }
 }

@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Off-chain monitor + auto-refresher for the Rumi Protocol chains-rail manual CFX price (audit F-01 mitigation).",
   "engines": {
-    "node": ">=20"
+    "node": "^20.19.0 || ^22.12.0 || >=24.0.0"
   },
   "scripts": {
     "test": "vitest run",
@@ -23,6 +23,6 @@
     "@types/node": "^22.19.21",
     "tsx": "^4.19.2",
     "typescript": "^5.6.3",
-    "vitest": "^2.1.8"
+    "vitest": "^4.1.11"
   }
 }
