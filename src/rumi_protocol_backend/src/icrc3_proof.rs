@@ -709,8 +709,10 @@ pub fn validate_icrc3_transfer_block_with_fee(
         Some(expected_memo),
         Some(expected_created_at_time),
     )?;
-    if block.transaction_fee != Some(expected_fee_raw as u128) {
-        return Err("block tx.fee does not match the persisted explicit fee".to_string());
+    if block.spender.is_some()
+        || block.transaction_fee != Some(expected_fee_raw as u128)
+    {
+        return Err("block spender or tx.fee does not match the persisted direct-transfer tuple".to_string());
     }
     Ok(())
 }
@@ -1083,6 +1085,18 @@ mod direct_transfer_tests {
         .is_ok());
 
         block.spender = Some(account(3));
+        block.transaction_fee = Some(0);
+        assert!(validate_icrc3_transfer_block_with_fee(
+            &block,
+            from.clone(),
+            to.clone(),
+            100,
+            0,
+            b"reserve",
+            7,
+        )
+        .unwrap_err()
+        .contains("spender"));
         assert!(validate_icrc3_direct_transfer_block(
             &block,
             from,
