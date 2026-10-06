@@ -4533,6 +4533,27 @@ mod redemption_replay_tests {
             .expect("replay fixture should be consistent")
     }
 
+    #[test]
+    fn replay_rejects_3usd_reserve_total_overflow() {
+        let args = init_args(principal(1));
+        let partial = |credit| Event::PartialLiquidateVault {
+            vault_id: 999,
+            liquidator_payment: ICUSD::new(0),
+            icp_to_liquidator: ICP::new(0),
+            liquidator: None,
+            icp_rate: None,
+            protocol_fee_collateral: None,
+            timestamp: Some(2),
+            three_usd_reserves_e8s: Some(credit),
+        };
+        let result = super::replay_with_nonce_time(
+            vec![Event::Init(args), partial(u64::MAX), partial(1)].into_iter(),
+            || 2,
+        );
+        assert!(matches!(result, Err(ReplayLogError::InconsistentLog(message))
+            if message.contains("3USD reserve total overflows")));
+    }
+
     fn remove_v2_fields(event: Event) -> Event {
         let mut value = serde_json::to_value(event).expect("serialize event");
         let payload = value
