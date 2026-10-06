@@ -25,6 +25,7 @@ export const idlFactory = ({ IDL }) => {
       'actual_bps' : IDL.Nat16,
       'max_bps' : IDL.Nat16,
     }),
+    'DonationIntentConflict' : IDL.Null,
     'NotAuthorizedBurnCaller' : IDL.Null,
     'ZeroAmount' : IDL.Null,
     'InsufficientLpBalance' : IDL.Record({
@@ -797,6 +798,11 @@ export const idlFactory = ({ IDL }) => {
       ),
     'receive_donation' : IDL.Func(
         [IDL.Nat8, IDL.Nat],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : ThreePoolError })],
+        [],
+      ),
+    'receive_donation_with_id' : IDL.Func(
+        [IDL.Nat, IDL.Nat8, IDL.Nat],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : ThreePoolError })],
         [],
       ),

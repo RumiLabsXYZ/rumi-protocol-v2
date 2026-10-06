@@ -18,7 +18,7 @@ mod admin;
 mod logs;
 
 use crate::types::*;
-use crate::state::{mutate_state, read_state, MAX_PROCESSED_NONCES};
+use crate::state::{mutate_state, read_state};
 use crate::math::{compute_swap, compute_initial_lp_shares, compute_proportional_lp_shares,
                    compute_remove_liquidity, MINIMUM_LIQUIDITY};
 use crate::transfers::{transfer_from_user, transfer_reward_icusd, transfer_to_user};
@@ -688,7 +688,10 @@ pub async fn notify_reward_received(
         }
 
         // Verify expected balance growth.
-        let expected = pool.reward_balance_snapshot.saturating_add(amount);
+        let expected = pool
+            .reward_balance_snapshot
+            .checked_add(amount)
+            .ok_or(AmmError::MathOverflow)?;
         if on_chain < expected {
             return Err(AmmError::InsufficientOnChainBalance {
                 expected,
@@ -708,14 +711,13 @@ pub async fn notify_reward_received(
         }
         pool.total_rewards_distributed = pool.total_rewards_distributed.saturating_add(amount);
 
-        // Update snapshot to match the new on-chain balance.
-        pool.reward_balance_snapshot = on_chain;
+        // Advance only by the amount acknowledged here. The live balance may
+        // include another donation whose receipt has not been accepted yet.
+        pool.reward_balance_snapshot = expected;
 
-        // Record nonce + ring-buffer prune.
+        // Keep every accepted identity so a delayed backend retry can never
+        // be credited again after a bounded dedup window expires.
         pool.processed_donation_nonces.push_back(nonce);
-        while pool.processed_donation_nonces.len() > MAX_PROCESSED_NONCES {
-            pool.processed_donation_nonces.pop_front();
-        }
 
         // Emit event.
         let total_shares = pool.total_lp_shares;
@@ -766,24 +768,14 @@ pub async fn claim_rewards(pool_id: PoolId) -> Result<u128, AmmError> {
 
     match transfer_result {
         Ok(_block_index) => {
-            // Refetch live balance so the snapshot reflects the real payout
-            // (and any concurrent third-party transfers). Mirrors the
-            // notify_reward_received pattern of trusting on-chain truth.
-            // On query failure, fall back to subtracting amount: transfer_reward_icusd
-            // now sends amount - fee, so the subaccount drops by exactly amount
-            // (the claimant bears the fee), not amount + fee.
-            let after_balance = query_reward_subaccount_balance(&pool_id).await;
+            // A successful reward transfer decreases the reward subaccount by
+            // exactly `amount` (the recipient bears the ledger fee). Do not
+            // replace credited liability with the observed total: that total
+            // can include a concurrent donation not yet acknowledged below.
             mutate_state(|s| {
                 if let Some(pool) = s.pools.get_mut(&pool_id) {
-                    match after_balance {
-                        Ok(on_chain) => {
-                            pool.reward_balance_snapshot = on_chain;
-                        }
-                        Err(_) => {
-                            pool.reward_balance_snapshot =
-                                pool.reward_balance_snapshot.saturating_sub(amount);
-                        }
-                    }
+                    pool.reward_balance_snapshot =
+                        pool.reward_balance_snapshot.saturating_sub(amount);
                 }
                 s.record_claim_event(pool_id.clone(), caller, amount);
             });

@@ -866,6 +866,7 @@ pub async fn interest_and_treasury_tick() {
     // Flush accumulated interest to pools/treasury when threshold is reached.
     crate::treasury::flush_pending_interest().await;
     crate::treasury::flush_pending_stability_pool_interest_notifications().await;
+    crate::treasury::flush_pending_three_pool_donations().await;
     crate::treasury::flush_pending_amm1_donations().await;
 
     // Phase 1b foreign-chain-only supply-invariant self-check. Runs on every

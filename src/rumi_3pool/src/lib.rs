@@ -1419,6 +1419,97 @@ pub async fn receive_donation(token_index: u8, amount: u128) -> Result<(), Three
     Ok(())
 }
 
+/// Receive an already-minted backend donation with a permanent exact receipt.
+/// The backend reuses `op_nonce` for both its ledger mint and this call, so a
+/// retry after an acknowledgment error cannot apply the pool balance twice.
+#[update]
+pub async fn receive_donation_with_id(
+    op_nonce: candid::Nat,
+    token_index: u8,
+    amount: candid::Nat,
+) -> Result<(), ThreePoolError> {
+    let caller = ic_cdk::api::caller();
+    let admin = read_state(|s| s.config.admin);
+    if caller != admin && !ic_cdk::api::is_controller(&caller) {
+        return Err(ThreePoolError::Unauthorized);
+    }
+    let op_nonce: u128 = op_nonce.0.try_into().map_err(|_| {
+        ThreePoolError::DonationIntentConflict
+    })?;
+    let amount: u128 = amount.0.try_into().map_err(|_| ThreePoolError::MathOverflow)?;
+    if op_nonce == 0 {
+        return Err(ThreePoolError::DonationIntentConflict);
+    }
+    if let Some(existing) = receipts::get_donation(caller, op_nonce) {
+        return if existing.token_index == token_index && existing.amount == amount {
+            Ok(())
+        } else {
+            Err(ThreePoolError::DonationIntentConflict)
+        };
+    }
+    if read_state(|s| s.is_paused) {
+        return Err(ThreePoolError::PoolPaused);
+    }
+    if amount == 0 {
+        return Err(ThreePoolError::ZeroAmount);
+    }
+    let idx = token_index as usize;
+    if idx >= 3 {
+        return Err(ThreePoolError::InvalidCoinIndex);
+    }
+    if read_state(|s| s.lp_total_supply) == 0 {
+        return Err(ThreePoolError::PoolEmpty);
+    }
+
+    let _pool_guard = pool_guard::PoolGuard::new()?;
+    let (ledger, symbol, expected_min) = read_state(|s| {
+        (
+            s.config.tokens[idx].ledger_id,
+            s.config.tokens[idx].symbol.clone(),
+            s.balances[idx].checked_add(amount),
+        )
+    });
+    let expected_min = expected_min.ok_or(ThreePoolError::MathOverflow)?;
+    let balance: Result<(candid::Nat,), _> = ic_cdk::call(
+        ledger,
+        "icrc1_balance_of",
+        (icrc_ledger_types::icrc1::account::Account {
+            owner: ic_cdk::id(),
+            subaccount: None,
+        },),
+    )
+    .await;
+    let on_chain_balance: u128 = match balance {
+        Ok((nat,)) => nat.0.try_into().map_err(|_| ThreePoolError::MathOverflow)?,
+        Err((code, msg)) => {
+            return Err(ThreePoolError::TransferFailed {
+                token: symbol,
+                reason: format!("balance check failed: {:?} {}", code, msg),
+            });
+        }
+    };
+    if on_chain_balance < expected_min {
+        return Err(ThreePoolError::TransferFailed {
+            token: symbol,
+            reason: format!("on-chain balance {} < expected {}", on_chain_balance, expected_min),
+        });
+    }
+
+    // No await separates the exact balance preflight from the paired durable
+    // state writes; the pool guard excludes concurrent pool mutations.
+    mutate_state(|s| {
+        s.balances[idx] = expected_min;
+    });
+    receipts::save_donation(receipts::ThreePoolDonationReceipt {
+        caller,
+        op_nonce,
+        token_index,
+        amount,
+    });
+    log!(INFO, "ReceiveDonationWithId: {} of {} (token {}) from {} nonce {}", amount, symbol, token_index, caller, op_nonce);
+    Ok(())
+}
+
 // ─── Query Endpoints ───
 
 #[query]

@@ -502,6 +502,46 @@ pub enum InterestDestination {
     Amm1,
 }
 
+/// Durable two-phase interest donation to the 3pool. The operation nonce is
+/// shared by the ledger mint dedup tuple and the destination receipt.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct PendingThreePoolDonation {
+    pub pool: Principal,
+    pub ledger: Principal,
+    pub amount_e8s: u64,
+    pub phase: ThreePoolDonationPhase,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum ThreePoolDonationPhase {
+    MintPending,
+    MintedAwaitingAck { mint_block: u64 },
+}
+
+/// Durable AMM interest donation. `notify_nonce` is the receiver idempotency
+/// key; `mint_op_nonce` is the independent source-ledger dedup identity.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct PendingAmmDonation {
+    pub amm_canister: Principal,
+    pub ledger: Option<Principal>,
+    pub amount_e8s: u64,
+    pub notify_nonce: u64,
+    pub mint_op_nonce: Option<u128>,
+    pub pool_id: Option<String>,
+    pub reward_subaccount: Option<[u8; 32]>,
+    pub phase: AmmDonationPhase,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum AmmDonationPhase {
+    AwaitingPoolConfig,
+    MintPending,
+    NotifyPending { mint_block: u64 },
+    /// Exact transfer tuple is outside the ledger dedup horizon; never retry
+    /// under a new identity absent a complete history proof.
+    MintHeldAfterTooOld,
+}
+
 /// One slice of the interest split: destination + share in basis points.
 #[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub struct InterestRecipient {
@@ -2451,14 +2491,23 @@ pub struct State {
     pub pending_stability_pool_interest_notifications:
         BTreeMap<u64, PendingStabilityPoolInterestNotification>,
 
-    /// AMM1-specific re-queue: (amount_e8s, nonce). Distinct from
-    /// `pending_interest_for_pools` (which is keyed by collateral_type
-    /// and re-splits across all destinations on retry). AMM1's
-    /// idempotency requires the SAME nonce on retry, so failed
-    /// donations are persisted with their original nonce here and
-    /// retried via `flush_pending_amm1_donations`.
+    /// Legacy AMM1 tuple rows retained for stable-state compatibility.
+    /// They are deliberately not auto-retried: this representation does not
+    /// identify the original ledger mint tuple or exact destination config.
     #[serde(default)]
     pub pending_amm1_donations: std::collections::VecDeque<(u64, u64)>,
+
+    /// New donation operations have exact source and destination identities.
+    /// Old tuple rows above remain untouched because their original mint
+    /// outcome and destination are not recoverable from that representation.
+    #[serde(default)]
+    pub pending_amm_donations: BTreeMap<u64, PendingAmmDonation>,
+    #[serde(default)]
+    pub pending_three_pool_donations: BTreeMap<u128, PendingThreePoolDonation>,
+    #[serde(default)]
+    pub amm_donation_retry_cursor: Option<u64>,
+    #[serde(default)]
+    pub three_pool_donation_retry_cursor: Option<u128>,
 
     /// Minimum interest (e8s) per collateral bucket before flushing. Admin-settable.
     /// Default = 10_000_000 (0.1 icUSD). At 0.01 the ledger fee eats ~10%.
@@ -2504,8 +2553,8 @@ pub struct State {
     #[serde(default)]
     pub amm1_pool_id: Option<String>,
 
-    /// Monotonic nonce for AMM1 donation idempotency. Incremented on every
-    /// `donate_icusd_to_amm1` call. Survives upgrades via stable storage.
+    /// Monotonic AMM receiver nonce. New journal rows use a separate stable
+    /// ICRC mint operation nonce so retries bind both saga legs independently.
     #[serde(default)]
     pub amm1_donation_nonce: u64,
 
@@ -3112,6 +3161,10 @@ impl Default for State {
             pending_interest_for_pools: BTreeMap::new(),
             pending_stability_pool_interest_notifications: BTreeMap::new(),
             pending_amm1_donations: std::collections::VecDeque::new(),
+            pending_amm_donations: BTreeMap::new(),
+            pending_three_pool_donations: BTreeMap::new(),
+            amm_donation_retry_cursor: None,
+            three_pool_donation_retry_cursor: None,
             interest_flush_threshold_e8s: default_flush_threshold(),
             pending_treasury_interest: ICUSD::new(0),
             pending_treasury_collateral: Vec::new(),
@@ -3540,6 +3593,10 @@ impl From<InitArg> for State {
             pending_interest_for_pools: BTreeMap::new(),
             pending_stability_pool_interest_notifications: BTreeMap::new(),
             pending_amm1_donations: std::collections::VecDeque::new(),
+            pending_amm_donations: BTreeMap::new(),
+            pending_three_pool_donations: BTreeMap::new(),
+            amm_donation_retry_cursor: None,
+            three_pool_donation_retry_cursor: None,
             interest_flush_threshold_e8s: default_flush_threshold(),
 
             // Treasury fee routing
@@ -11321,6 +11378,72 @@ mod tests {
         } else {
             panic!("expected CBOR map");
         }
+    }
+
+    #[test]
+    fn donation_journals_default_empty_when_loading_pre_saga_state() {
+        let mut state = test_state();
+        state.pending_amm1_donations.push_back((123, 9));
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&state, &mut bytes).unwrap();
+        let value: ciborium::Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        let mut entries = match value {
+            ciborium::Value::Map(entries) => entries,
+            other => panic!("expected State map, got {other:?}"),
+        };
+        let fields = [
+            "pending_amm_donations",
+            "pending_three_pool_donations",
+            "amm_donation_retry_cursor",
+            "three_pool_donation_retry_cursor",
+        ];
+        for field in fields {
+            let before = entries.len();
+            entries.retain(|(key, _)| {
+                !matches!(key, ciborium::Value::Text(name) if name == field)
+            });
+            assert_eq!(entries.len(), before - 1, "expected field {field} in new snapshot");
+        }
+        let mut legacy_bytes = Vec::new();
+        ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut legacy_bytes).unwrap();
+        let restored: State = ciborium::de::from_reader(legacy_bytes.as_slice())
+            .expect("pre-saga stable state must decode");
+        assert!(restored.pending_amm_donations.is_empty());
+        assert!(restored.pending_three_pool_donations.is_empty());
+        assert_eq!(restored.amm_donation_retry_cursor, None);
+        assert_eq!(restored.three_pool_donation_retry_cursor, None);
+        assert_eq!(restored.pending_amm1_donations, state.pending_amm1_donations);
+    }
+
+    #[test]
+    fn amm_donation_snapshot_pins_separate_mint_and_acknowledgment_ids() {
+        let mut state = test_state();
+        let notify_nonce = 41;
+        let mint_op_nonce = 9_001u128;
+        state.pending_amm_donations.insert(
+            notify_nonce,
+            PendingAmmDonation {
+                amm_canister: Principal::from_slice(b"amm-donation"),
+                ledger: Some(Principal::from_slice(b"ledger-donation")),
+                amount_e8s: 123,
+                notify_nonce,
+                mint_op_nonce: Some(mint_op_nonce),
+                pool_id: Some("pool-a".into()),
+                reward_subaccount: Some([7; 32]),
+                phase: AmmDonationPhase::NotifyPending { mint_block: 88 },
+            },
+        );
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&state, &mut bytes).unwrap();
+        let restored: State = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        let row = restored.pending_amm_donations.get(&notify_nonce).unwrap();
+        assert_eq!(row.notify_nonce, notify_nonce);
+        assert_eq!(row.mint_op_nonce, Some(mint_op_nonce));
+        assert_ne!(row.notify_nonce as u128, mint_op_nonce);
+        assert_eq!(row.phase, AmmDonationPhase::NotifyPending { mint_block: 88 });
+        assert_eq!(row.amm_canister, Principal::from_slice(b"amm-donation"));
+        assert_eq!(row.pool_id.as_deref(), Some("pool-a"));
+        assert_eq!(row.reward_subaccount, Some([7; 32]));
     }
 
     #[test]

@@ -15319,11 +15319,13 @@ fn get_amm1_pool_id() -> Option<String> {
     read_state(|s| s.amm1_pool_id.clone())
 }
 
-/// Diagnostic: return the length of the AMM1 donation retry queue.
+/// Diagnostic: count held legacy AMM1 tuples and durable AMM donation rows.
 #[candid_method(query)]
 #[query]
 fn get_pending_amm1_donations_count() -> u64 {
-    read_state(|s| s.pending_amm1_donations.len() as u64)
+    read_state(|s| {
+        (s.pending_amm1_donations.len() + s.pending_amm_donations.len()) as u64
+    })
 }
 
 /// Lightweight payload for the AMM TVL sampler (the latest cached XRC ICP/USD

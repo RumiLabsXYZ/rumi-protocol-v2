@@ -740,9 +740,9 @@ pub async fn distribute_interest(interest: ICUSD, collateral_type: Principal) ->
             }
             crate::state::InterestDestination::ThreePool => {
                 if let Some(pool_canister) = three_pool {
-                    if let Err(unsent_e8s) = donate_to_three_pool(pool_canister, share_e8s).await {
-                        unminted_e8s = unminted_e8s.saturating_add(unsent_e8s);
-                    }
+                    // The durable journal owns this share from before its
+                    // first await; do not restore/re-split it on delivery error.
+                    donate_to_three_pool(pool_canister, share_e8s).await;
                 } else {
                     log!(INFO, "[treasury] WARNING: 3pool interest share ({} icUSD) has no target canister configured, sending to treasury instead", share_e8s);
                     if let Err(unsent) = mint_interest_to_treasury(share).await {
@@ -756,24 +756,7 @@ pub async fn distribute_interest(interest: ICUSD, collateral_type: Principal) ->
                     (s.amm1_canister, s.amm1_donation_nonce)
                 });
                 if let Some(amm_canister) = amm_opt {
-                    if let Err(unsent_e8s) =
-                        donate_icusd_to_amm1(amm_canister, share_e8s, nonce).await
-                    {
-                        // Persist (amount, nonce) so retry uses the same nonce.
-                        crate::state::mutate_state(|s| {
-                            s.pending_amm1_donations.push_back((unsent_e8s, nonce));
-                        });
-                        log!(
-                            INFO,
-                            "[treasury] AMM1 donation failed; queued ({}, nonce {}) for retry",
-                            unsent_e8s,
-                            nonce
-                        );
-                    }
-                    // Note: do NOT add to unminted_e8s. The Amm1 retry queue
-                    // is independent of pending_interest_for_pools; the latter
-                    // would re-split this amount across all destinations
-                    // on next flush, losing the Amm1 association.
+                    donate_to_amm1(amm_canister, share_e8s, nonce).await;
                 } else {
                     log!(INFO, "[treasury] WARNING: AMM1 interest share ({} icUSD) has no target canister configured, sending to treasury instead", share_e8s);
                     if let Err(unsent) = mint_interest_to_treasury(share).await {
@@ -860,7 +843,7 @@ pub async fn distribute_stablecoin_interest(
             }
             crate::state::InterestDestination::ThreePool => {
                 if let Some(pool_canister) = three_pool {
-                    let _ = donate_to_three_pool(pool_canister, share_e8s).await;
+                    donate_to_three_pool(pool_canister, share_e8s).await;
                 } else {
                     // Fallback: mint icUSD to treasury (same as distribute_interest)
                     log!(INFO, "[treasury] WARNING: 3pool interest share ({} icUSD) has no target canister, sending to treasury instead", share_e8s);
@@ -873,14 +856,7 @@ pub async fn distribute_stablecoin_interest(
                     (s.amm1_canister, s.amm1_donation_nonce)
                 });
                 if let Some(amm_canister) = amm_opt {
-                    if let Err(unsent_e8s) =
-                        donate_icusd_to_amm1(amm_canister, share_e8s, nonce).await
-                    {
-                        crate::state::mutate_state(|s| {
-                            s.pending_amm1_donations.push_back((unsent_e8s, nonce));
-                        });
-                        log!(INFO, "[treasury] AMM1 stablecoin-interest donation failed; queued ({}, nonce {}) for retry", unsent_e8s, nonce);
-                    }
+                    donate_to_amm1(amm_canister, share_e8s, nonce).await;
                 } else {
                     log!(INFO, "[treasury] WARNING: AMM1 stablecoin interest share ({} icUSD) has no target canister; routing to treasury", share_e8s);
                     let pool_icusd = ICUSD::from(share_e8s);
@@ -891,66 +867,119 @@ pub async fn distribute_stablecoin_interest(
     }
 }
 
-/// Mint icUSD directly to the 3pool canister, then call `receive_donation`
-/// so the pool updates its internal balances.
-/// Non-critical: failures are logged but don't block protocol operations.
-///
-/// Returns `Ok(())` when the icUSD mint succeeded — the subsequent
-/// `receive_donation` notification is bookkeeping and its failure does
-/// not roll back the mint. Returns `Err(amount_e8s)` when the mint
-/// itself failed; the caller re-queues this via the snapshot-then-
-/// decrement restore path.
-async fn donate_to_three_pool(pool_canister: Principal, amount_e8s: u64) -> Result<(), u64> {
-    // 1. Mint icUSD directly to the 3pool canister
-    let icusd = ICUSD::from(amount_e8s);
-    match crate::management::mint_icusd(icusd, pool_canister).await {
-        Ok(block_index) => {
-            log!(
-                INFO,
-                "[treasury] Minted {} icUSD to 3pool for donation (block {})",
-                amount_e8s,
-                block_index
-            );
-        }
-        Err(e) => {
-            log!(
-                INFO,
-                "[treasury] WARNING: 3pool donation mint failed: {:?}",
-                e
-            );
-            return Err(amount_e8s);
-        }
+/// Persist before mint, then advance a two-phase donation with one nonce for
+/// both the icUSD ledger tuple and the 3pool's permanent receipt.
+async fn donate_to_three_pool(pool_canister: Principal, amount_e8s: u64) {
+    if amount_e8s == 0 {
+        return;
     }
+    let op_nonce = crate::state::mutate_state(|s| {
+        let nonce = s.next_op_nonce();
+        let ledger = s.icusd_ledger_principal;
+        s.pending_three_pool_donations.insert(
+            nonce,
+            crate::state::PendingThreePoolDonation {
+                pool: pool_canister,
+                ledger,
+                amount_e8s,
+                phase: crate::state::ThreePoolDonationPhase::MintPending,
+            },
+        );
+        nonce
+    });
+    process_pending_three_pool_donation(op_nonce).await;
+}
 
-    // 2. Call receive_donation(0, amount) so 3pool updates internal balances
-    let donate_amount = candid::Nat::from(amount_e8s);
-    let result: Result<(Result<(), ThreePoolDonateError>,), _> =
-        ic_cdk::call(pool_canister, "receive_donation", (0u8, donate_amount)).await;
+/// Bounded round-robin retry of pending 3pool donations. Existing persisted
+/// rows own their amount and are never split into a second operation.
+pub async fn flush_pending_three_pool_donations() {
+    const LIMIT: usize = 8;
+    let rows = crate::state::mutate_state(|s| {
+        use std::ops::Bound::{Excluded, Unbounded};
+        let cursor = s.three_pool_donation_retry_cursor;
+        let mut selected: Vec<_> = if let Some(cursor) = cursor {
+            s.pending_three_pool_donations
+                .range((Excluded(cursor), Unbounded))
+                .take(LIMIT)
+                .map(|(id, _)| *id)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if selected.len() < LIMIT {
+            selected.extend(
+                s.pending_three_pool_donations
+                    .range(..=cursor.unwrap_or(u128::MAX))
+                    .take(LIMIT - selected.len())
+                    .map(|(id, _)| *id),
+            );
+        }
+        if let Some(last) = selected.last() {
+            s.three_pool_donation_retry_cursor = Some(*last);
+        }
+        selected
+    });
+    for id in rows {
+        process_pending_three_pool_donation(id).await;
+    }
+}
+
+async fn process_pending_three_pool_donation(op_nonce: u128) {
+    let Some(mut donation) = crate::state::read_state(|s| {
+        s.pending_three_pool_donations.get(&op_nonce).cloned()
+    }) else {
+        return;
+    };
+    let mint_block = match donation.phase {
+        crate::state::ThreePoolDonationPhase::MintPending => {
+            let to = icrc_ledger_types::icrc1::account::Account {
+                owner: donation.pool,
+                subaccount: None,
+            };
+            match crate::management::mint_icusd_with_nonce(
+                donation.ledger,
+                ICUSD::from(donation.amount_e8s),
+                to,
+                op_nonce,
+            )
+            .await
+            {
+                Ok(block) => {
+                    let phase = crate::state::ThreePoolDonationPhase::MintedAwaitingAck {
+                        mint_block: block,
+                    };
+                    donation.phase = phase.clone();
+                    crate::state::mutate_state(|s| {
+                        if let Some(row) = s.pending_three_pool_donations.get_mut(&op_nonce) {
+                            row.phase = phase;
+                        }
+                    });
+                    block
+                }
+                Err(error) => {
+                    log!(INFO, "[treasury] 3pool donation mint remains pending (nonce {}): {:?}", op_nonce, error);
+                    return;
+                }
+            }
+        }
+        crate::state::ThreePoolDonationPhase::MintedAwaitingAck { mint_block } => mint_block,
+    };
+    let result: Result<(Result<(), ThreePoolDonateError>,), _> = ic_cdk::call(
+        donation.pool,
+        "receive_donation_with_id",
+        (candid::Nat::from(op_nonce), 0u8, candid::Nat::from(donation.amount_e8s)),
+    )
+    .await;
     match result {
         Ok((Ok(()),)) => {
-            log!(
-                INFO,
-                "[treasury] 3pool acknowledged donation of {} icUSD",
-                amount_e8s
-            );
+            crate::state::mutate_state(|s| {
+                s.pending_three_pool_donations.remove(&op_nonce);
+            });
+            log!(INFO, "[treasury] 3pool acknowledged donation nonce {} (mint block {})", op_nonce, mint_block);
         }
-        Ok((Err(e),)) => {
-            log!(
-                INFO,
-                "[treasury] WARNING: 3pool receive_donation returned error: {:?}",
-                e
-            );
-        }
-        Err((code, msg)) => {
-            log!(
-                INFO,
-                "[treasury] WARNING: 3pool receive_donation call failed: {:?} {}",
-                code,
-                msg
-            );
-        }
+        Ok((Err(error),)) => log!(INFO, "[treasury] 3pool donation nonce {} remains pending acknowledgment: {:?}", op_nonce, error),
+        Err((code, message)) => log!(INFO, "[treasury] 3pool donation nonce {} acknowledgment failed: {:?} {}", op_nonce, code, message),
     }
-    Ok(())
 }
 
 /// Mirror of the 3pool ThreePoolError for the donate response.
@@ -974,89 +1003,48 @@ enum ThreePoolDonateError {
     MathOverflow,
     InvariantNotConverged,
     PoolPaused,
+    DonationIntentConflict,
 }
 
-/// Mint icUSD directly into the AMM1 canister's per-pool reward
-/// subaccount, then call `notify_reward_received` to bump the
-/// per-share accumulator. Idempotent on the supplied `nonce` —
-/// AMM1 dedups on duplicate nonces and returns Ok, so a re-queue
-/// with the same nonce is safe.
-///
-/// Returns Err(amount_e8s) on any failure so the caller can re-queue.
-/// On notify-only failure (mint succeeded but call failed), the icUSD
-/// is already on AMM1 at the reward subaccount; the next retry uses
-/// the SAME nonce, AMM1 detects duplication and the accumulator is
-/// bumped exactly once.
-async fn donate_icusd_to_amm1(
-    amm_canister: Principal,
-    amount_e8s: u64,
-    nonce: u64,
-) -> Result<(), u64> {
-    let pool_id = match crate::state::read_state(|s| s.amm1_pool_id.clone()) {
-        Some(p) => p,
-        None => {
-            log!(
-                INFO,
-                "[treasury] AMM1 pool_id not configured; refusing to donate {} icUSD (nonce {})",
-                amount_e8s,
-                nonce
-            );
-            return Err(amount_e8s);
-        }
-    };
-    let donate_amount_u128 = amount_e8s as u128;
-
-    // Compute the AMM's reward subaccount client-side.
-    // Must match rumi_amm::reward_subaccount_for: SHA-256("rumi_amm:rewards:" || pool_id)
-    let reward_sub = compute_amm_reward_subaccount(&pool_id);
-
-    // 1. Mint icUSD into amm_canister at the reward subaccount.
-    let icusd = ICUSD::from(amount_e8s);
-    let mint_result = mint_icusd_to_subaccount(icusd, amm_canister, reward_sub).await;
-
-    match mint_result {
-        Ok(block_index) => {
-            log!(
-                INFO,
-                "[treasury] Minted {} icUSD to AMM1 reward subaccount (block {}, nonce {})",
-                amount_e8s,
-                block_index,
-                nonce
-            );
-        }
-        Err(e) => {
-            log!(INFO, "[treasury] WARNING: AMM1 donation mint failed: {:?}, returning {} for re-queue (nonce {})", e, amount_e8s, nonce);
-            return Err(amount_e8s);
-        }
+/// Persist the donation and both operation identities before invoking either
+/// the ledger or AMM. A missing pool configuration is held without minting.
+async fn donate_to_amm1(amm_canister: Principal, amount_e8s: u64, notify_nonce: u64) {
+    if amount_e8s == 0 {
+        return;
     }
-
-    // 2. Call notify_reward_received with the nonce.
-    let notify_result: Result<(Result<(), AmmDonateError>,), _> = ic_cdk::call(
-        amm_canister,
-        "notify_reward_received",
-        (pool_id.clone(), donate_amount_u128, nonce),
-    )
-    .await;
-
-    match notify_result {
-        Ok((Ok(()),)) => {
-            log!(
-                INFO,
-                "[treasury] AMM1 acknowledged donation of {} icUSD (nonce {})",
+    let configured = read_state(|s| {
+        (s.amm1_canister == Some(amm_canister))
+            .then(|| s.amm1_pool_id.clone().map(|pool| (pool, s.icusd_ledger_principal)))
+            .flatten()
+    });
+    let (ledger, pool_id, reward_subaccount, mint_op_nonce, phase) =
+        if let Some((pool_id, ledger)) = configured {
+            let nonce = crate::state::mutate_state(|s| s.next_op_nonce());
+            (
+                Some(ledger),
+                Some(pool_id.clone()),
+                Some(compute_amm_reward_subaccount(&pool_id)),
+                Some(nonce),
+                crate::state::AmmDonationPhase::MintPending,
+            )
+        } else {
+            (None, None, None, None, crate::state::AmmDonationPhase::AwaitingPoolConfig)
+        };
+    crate::state::mutate_state(|s| {
+        s.pending_amm_donations.entry(notify_nonce).or_insert(
+            crate::state::PendingAmmDonation {
+                amm_canister,
+                ledger,
                 amount_e8s,
-                nonce
-            );
-            Ok(())
-        }
-        Ok((Err(e),)) => {
-            log!(INFO, "[treasury] WARNING: AMM1 notify_reward_received returned err: {:?}; will re-queue with same nonce {}", e, nonce);
-            Err(amount_e8s)
-        }
-        Err((code, msg)) => {
-            log!(INFO, "[treasury] WARNING: AMM1 notify_reward_received call failed: {:?} {}; will re-queue with same nonce {}", code, msg, nonce);
-            Err(amount_e8s)
-        }
-    }
+                notify_nonce,
+                mint_op_nonce,
+                pool_id,
+                reward_subaccount,
+                phase,
+            },
+        );
+    });
+    process_pending_amm_donation(notify_nonce).await;
 }
 
 /// Compute the per-pool reward subaccount on AMM1.
@@ -1072,33 +1060,8 @@ fn compute_amm_reward_subaccount(pool_id: &str) -> [u8; 32] {
     sub
 }
 
-/// Mint icUSD to a specific subaccount of `to`. Used by AMM1 reward
-/// flow to deposit icUSD directly into the per-pool reward subaccount
-/// without an extra transfer hop.
-async fn mint_icusd_to_subaccount(
-    amount: crate::numeric::ICUSD,
-    to: Principal,
-    subaccount: [u8; 32],
-) -> Result<u64, icrc_ledger_types::icrc1::transfer::TransferError> {
-    use icrc_ledger_types::icrc1::account::Account;
-    let (ledger, op_nonce) =
-        crate::state::mutate_state(|s| (s.icusd_ledger_principal, s.next_op_nonce()));
-    crate::management::transfer_idempotent(
-        ledger,
-        None,
-        Account {
-            owner: to,
-            subaccount: Some(subaccount),
-        },
-        amount.to_u64() as u128,
-        op_nonce,
-        None,
-    )
-    .await
-}
-
 /// Mirror of the AMM's AmmError for the notify response.
-/// Only used for deserialization; we treat any Err the same way (re-queue).
+/// Only used for deserialization; any Err leaves the durable row pending.
 #[derive(CandidType, Deserialize, Clone, Debug)]
 enum AmmDonateError {
     PoolBusy,
@@ -1138,6 +1101,111 @@ enum AmmDonateError {
         available: candid::Nat,
     },
     MaintenanceMode,
+}
+
+async fn process_pending_amm_donation(notify_nonce: u64) {
+    let Some(mut donation) =
+        crate::state::read_state(|s| s.pending_amm_donations.get(&notify_nonce).cloned())
+    else {
+        return;
+    };
+    if matches!(&donation.phase, crate::state::AmmDonationPhase::AwaitingPoolConfig) {
+        let Some((ledger, pool_id, op_nonce)) = crate::state::mutate_state(|s| {
+            if s.amm1_canister != Some(donation.amm_canister) {
+                return None;
+            }
+            let pool_id = s.amm1_pool_id.clone()?;
+            let ledger = s.icusd_ledger_principal;
+            let op_nonce = s.next_op_nonce();
+            let row = s.pending_amm_donations.get_mut(&notify_nonce)?;
+            row.ledger = Some(ledger);
+            row.pool_id = Some(pool_id.clone());
+            row.reward_subaccount = Some(compute_amm_reward_subaccount(&pool_id));
+            row.mint_op_nonce = Some(op_nonce);
+            row.phase = crate::state::AmmDonationPhase::MintPending;
+            Some((ledger, pool_id, op_nonce))
+        }) else {
+            return;
+        };
+        donation.ledger = Some(ledger);
+        donation.pool_id = Some(pool_id.clone());
+        donation.reward_subaccount = Some(compute_amm_reward_subaccount(&pool_id));
+        donation.mint_op_nonce = Some(op_nonce);
+        donation.phase = crate::state::AmmDonationPhase::MintPending;
+    }
+
+    if matches!(&donation.phase, crate::state::AmmDonationPhase::MintPending) {
+        let (Some(ledger), Some(op_nonce), Some(subaccount), Some(pool_id)) = (
+            donation.ledger,
+            donation.mint_op_nonce,
+            donation.reward_subaccount,
+            donation.pool_id.clone(),
+        ) else {
+            return;
+        };
+        let destination = Account {
+            owner: donation.amm_canister,
+            subaccount: Some(subaccount),
+        };
+        match crate::management::transfer_idempotent(
+            ledger,
+            None,
+            destination,
+            donation.amount_e8s as u128,
+            op_nonce,
+            None,
+        )
+        .await
+        {
+            Ok(block_index) => {
+                let phase = crate::state::AmmDonationPhase::NotifyPending { mint_block: block_index };
+                crate::state::mutate_state(|s| {
+                    if let Some(row) = s.pending_amm_donations.get_mut(&notify_nonce) {
+                        row.phase = phase;
+                    }
+                });
+                donation.phase = crate::state::AmmDonationPhase::NotifyPending { mint_block: block_index };
+            }
+            Err(icrc_ledger_types::icrc1::transfer::TransferError::TooOld) => {
+                crate::state::mutate_state(|s| {
+                    if let Some(row) = s.pending_amm_donations.get_mut(&notify_nonce) {
+                        row.phase = crate::state::AmmDonationPhase::MintHeldAfterTooOld;
+                    }
+                });
+                log!(INFO, "[treasury] AMM donation {} held: exact mint tuple is TooOld; refusing a fresh mint identity", notify_nonce);
+                return;
+            }
+            Err(error) => {
+                log!(INFO, "[treasury] AMM donation {} mint remains pending: {:?}", notify_nonce, error);
+                return;
+            }
+        }
+        donation.pool_id = Some(pool_id);
+    }
+
+    let crate::state::AmmDonationPhase::NotifyPending { .. } = donation.phase else {
+        return;
+    };
+    let (Some(pool_id), Some(_ledger), Some(_nonce)) =
+        (donation.pool_id.clone(), donation.ledger, donation.mint_op_nonce)
+    else {
+        return;
+    };
+    let response: Result<(Result<(), AmmDonateError>,), _> = ic_cdk::call(
+        donation.amm_canister,
+        "notify_reward_received",
+        (pool_id, donation.amount_e8s as u128, donation.notify_nonce),
+    )
+    .await;
+    match response {
+        Ok((Ok(()),)) => {
+            crate::state::mutate_state(|s| {
+                s.pending_amm_donations.remove(&notify_nonce);
+            });
+        }
+        Ok((Err(error),)) => log!(INFO, "[treasury] AMM donation {} acknowledgment remains pending: {:?}", notify_nonce, error),
+        Err((code, message)) => log!(INFO, "[treasury] AMM donation {} acknowledgment failed: {:?} {}", notify_nonce, code, message),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1294,63 +1362,38 @@ pub async fn flush_pending_interest() {
     }
 }
 
-/// Drain the AMM1 retry queue. Each entry is `(amount_e8s, nonce)`;
-/// retries reuse the original nonce so AMM1 dedups correctly. Failed
-/// retries get re-queued at the back. This function is called from
-/// the same timer tick that calls `flush_pending_interest`.
+/// Retry a bounded round-robin prefix of durable AMM donation journals.
+/// Legacy tuple rows are intentionally not replayed because their mint
+/// outcome and destination cannot be reconstructed safely.
 pub async fn flush_pending_amm1_donations() {
-    let drained: Vec<(u64, u64)> =
-        crate::state::mutate_state(|s| s.pending_amm1_donations.drain(..).collect());
-    if drained.is_empty() {
-        return;
-    }
-
-    let amm_opt = read_state(|s| s.amm1_canister);
-    let amm_canister = match amm_opt {
-        Some(p) => p,
-        None => {
-            // Backend principal not configured; restore drained items.
-            crate::state::mutate_state(|s| {
-                for entry in drained {
-                    s.pending_amm1_donations.push_back(entry);
-                }
-            });
-            log!(
-                INFO,
-                "[treasury] AMM1 retry queue: amm1_canister not configured; restoring {} entries",
-                crate::state::read_state(|s| s.pending_amm1_donations.len())
+    const LIMIT: usize = 8;
+    let rows = crate::state::mutate_state(|s| {
+        use std::ops::Bound::{Excluded, Unbounded};
+        let cursor = s.amm_donation_retry_cursor;
+        let mut selected: Vec<_> = if let Some(cursor) = cursor {
+            s.pending_amm_donations
+                .range((Excluded(cursor), Unbounded))
+                .take(LIMIT)
+                .map(|(id, _)| *id)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if selected.len() < LIMIT {
+            selected.extend(
+                s.pending_amm_donations
+                    .range(..=cursor.unwrap_or(u64::MAX))
+                    .take(LIMIT - selected.len())
+                    .map(|(id, _)| *id),
             );
-            return;
         }
-    };
-
-    log!(
-        INFO,
-        "[treasury] AMM1 retry queue: draining {} entries",
-        drained.len()
-    );
-    for (amount, nonce) in drained {
-        match donate_icusd_to_amm1(amm_canister, amount, nonce).await {
-            Ok(()) => {
-                log!(
-                    INFO,
-                    "[treasury] AMM1 retry succeeded for ({}, nonce {})",
-                    amount,
-                    nonce
-                );
-            }
-            Err(unsent) => {
-                crate::state::mutate_state(|s| {
-                    s.pending_amm1_donations.push_back((unsent, nonce));
-                });
-                log!(
-                    INFO,
-                    "[treasury] AMM1 retry failed for ({}, nonce {}); re-queued",
-                    unsent,
-                    nonce
-                );
-            }
+        if let Some(last) = selected.last() {
+            s.amm_donation_retry_cursor = Some(*last);
         }
+        selected
+    });
+    for id in rows {
+        process_pending_amm_donation(id).await;
     }
 }
 

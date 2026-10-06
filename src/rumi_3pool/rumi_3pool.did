@@ -57,6 +57,7 @@ type ThreePoolError = variant {
   MathOverflow;
   InvariantNotConverged;
   PoolPaused;
+  DonationIntentConflict;
   NotAuthorizedBurnCaller;
   BurnSlippageExceeded : record { max_bps : nat16; actual_bps : nat16 };
   InsufficientPoolBalance : record { token : text; required : nat; available : nat };
@@ -573,6 +574,7 @@ service : (ThreePoolInitArgs) -> {
   remove_one_coin : (nat, nat8, nat) -> (variant { Ok : nat; Err : ThreePoolError });
   donate : (nat8, nat) -> (variant { Ok; Err : ThreePoolError });
   receive_donation : (nat8, nat) -> (variant { Ok; Err : ThreePoolError });
+  receive_donation_with_id : (nat, nat8, nat) -> (variant { Ok; Err : ThreePoolError });
   get_pool_status : () -> (PoolStatus) query;
   get_lp_balance : (principal) -> (nat) query;
   get_all_lp_holders : () -> (vec record { principal; nat }) query;

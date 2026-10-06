@@ -391,6 +391,8 @@ pub enum ThreePoolError {
     InvariantNotConverged,
     /// Pool is paused by admin.
     PoolPaused,
+    /// A retained donation operation ID was reused with different arguments.
+    DonationIntentConflict,
     /// Caller is not in the authorized burn callers set.
     NotAuthorizedBurnCaller,
     /// LP/token ratio exceeds max slippage tolerance.

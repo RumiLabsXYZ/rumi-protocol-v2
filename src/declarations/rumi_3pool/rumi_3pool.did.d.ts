@@ -375,6 +375,7 @@ export type ThreePoolError = {
   { 'PoolPaused' : null } |
   { 'InvalidCoinIndex' : null } |
   { 'BurnSlippageExceeded' : { 'actual_bps' : number, 'max_bps' : number } } |
+  { 'DonationIntentConflict' : null } |
   { 'NotAuthorizedBurnCaller' : null } |
   { 'ZeroAmount' : null } |
   { 'InsufficientLpBalance' : { 'available' : bigint, 'required' : bigint } } |
@@ -646,6 +647,11 @@ export interface _SERVICE {
   >,
   'receive_donation' : ActorMethod<
     [number, bigint],
+    { 'Ok' : null } |
+      { 'Err' : ThreePoolError }
+  >,
+  'receive_donation_with_id' : ActorMethod<
+    [bigint, number, bigint],
     { 'Ok' : null } |
       { 'Err' : ThreePoolError }
   >,

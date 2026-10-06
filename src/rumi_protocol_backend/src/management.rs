@@ -1582,6 +1582,18 @@ pub async fn mint_icusd(amount: ICUSD, to: Principal) -> Result<u64, TransferErr
     .await
 }
 
+/// Mint to an explicit account using a previously journaled idempotency
+/// nonce. Callers must persist `op_nonce` before the first await and reuse it
+/// until the exact transfer is confirmed or held for reconciliation.
+pub async fn mint_icusd_with_nonce(
+    ledger: Principal,
+    amount: ICUSD,
+    to: Account,
+    op_nonce: u128,
+) -> Result<u64, TransferError> {
+    transfer_idempotent(ledger, None, to, amount.to_u64() as u128, op_nonce, None).await
+}
+
 pub async fn transfer_icusd_from(amount: ICUSD, caller: Principal) -> Result<u64, TransferFromError> {
     let (ledger, op_nonce) = crate::state::mutate_state(|s| (s.icusd_ledger_principal, s.next_op_nonce()));
     let protocol_id = ic_cdk::id();

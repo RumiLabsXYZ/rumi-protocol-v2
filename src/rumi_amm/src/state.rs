@@ -19,6 +19,8 @@ pub const MAX_HOLDER_SNAPSHOTS: usize = 1_000; // ~500 days at 2/day
 pub const MAX_PENDING_CLAIMS: usize = 1_000;
 pub const MAX_REWARD_EVENTS: usize = 50_000;
 pub const MAX_CLAIM_EVENTS: usize = 50_000;
+/// Historical compatibility constant. Donation receipt identities are no
+/// longer pruned at this boundary because backend retries are durable.
 pub const MAX_PROCESSED_NONCES: usize = 1024;
 pub const REWARD_SCALE: u128 = 1_000_000_000_000; // 1e12 fixed-point for acc_reward_per_share
 /// Minimum claimable amount: 10x the live icUSD ledger fee (100_000 e8s =

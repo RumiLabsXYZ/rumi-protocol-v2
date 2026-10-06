@@ -8,6 +8,38 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const MAX_RECEIPTS: u64 = 10_000;
+
+/// Permanent receipt for a backend-minted donation. It is separate from swap
+/// receipts and never evicted: a retry must not credit pool balances twice.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreePoolDonationReceipt {
+    pub caller: Principal,
+    pub op_nonce: u128,
+    pub token_index: u8,
+    pub amount: u128,
+}
+
+pub fn donation_key(caller: Principal, op_nonce: u128) -> Vec<u8> {
+    let mut key = Vec::with_capacity(1 + caller.as_slice().len() + 16);
+    key.push(caller.as_slice().len() as u8);
+    key.extend_from_slice(caller.as_slice());
+    key.extend_from_slice(&op_nonce.to_be_bytes());
+    key
+}
+
+pub fn get_donation(caller: Principal, op_nonce: u128) -> Option<ThreePoolDonationReceipt> {
+    storage::THREE_POOL_DONATION_RECEIPTS
+        .with(|m| m.borrow().get(&donation_key(caller, op_nonce)))
+}
+
+pub fn save_donation(receipt: ThreePoolDonationReceipt) {
+    storage::THREE_POOL_DONATION_RECEIPTS.with(|m| {
+        m.borrow_mut().insert(
+            donation_key(receipt.caller, receipt.op_nonce),
+            receipt,
+        )
+    });
+}
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SwapRequestV1 {
     pub intent_id: Vec<u8>,

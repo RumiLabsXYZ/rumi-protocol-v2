@@ -1438,3 +1438,24 @@ fn reward_claims_succeed_after_fee_drift() {
         reward_balance_after,
     );
 }
+
+#[test]
+fn overlapping_unacknowledged_donations_advance_only_credited_liability() {
+    let env = setup_flaky_with_rewards();
+    let pool_id = create_pool_rw(&env);
+    let first = 2_000_000u128;
+    let second = 3_000_000u128;
+
+    // Both source mints land before either destination receipt. A receiver
+    // that snapshots the total live balance after the first ack would absorb
+    // the second, still-unacknowledged donation and reject its exact amount.
+    mint_icusd_to_reward_subaccount_rw(&env, &pool_id, first);
+    mint_icusd_to_reward_subaccount_rw(&env, &pool_id, second);
+    notify_reward_rw(&env, &pool_id, first, 8001)
+        .expect("first donation receipt should credit its own liability");
+    notify_reward_rw(&env, &pool_id, second, 8002)
+        .expect("second donation receipt should see only credited liability");
+
+    // Exact retry remains a no-op after later donations have been accepted.
+    notify_reward_rw(&env, &pool_id, first, 8001).expect("old exact receipt should deduplicate");
+}

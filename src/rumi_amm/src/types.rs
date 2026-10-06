@@ -49,7 +49,8 @@ pub struct Pool {
     #[serde(default)]
     pub total_rewards_distributed: u128,
     /// Recently processed donation nonces (ring buffer, oldest first).
-    /// Bounded by `MAX_PROCESSED_NONCES` to prevent unbounded growth.
+    /// Permanent dedup identities for accepted donations. Pruning permits an
+    /// old durable backend retry to credit the same transfer a second time.
     #[serde(default)]
     pub processed_donation_nonces: std::collections::VecDeque<u64>,
     /// Last verified on-chain icUSD balance held in the per-pool reward
