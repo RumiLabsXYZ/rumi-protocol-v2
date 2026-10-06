@@ -213,6 +213,7 @@ pub struct SettlementQueueV1 {
 #[derive(Debug, PartialEq, Eq)]
 pub enum SettlementQueueError {
     DuplicateIdempotencyKey(String),
+    OpIdSpaceExhausted,
 }
 
 impl SettlementQueueV1 {
@@ -222,13 +223,17 @@ impl SettlementQueueV1 {
                 op.idempotency_key,
             ));
         }
+        let next_tail = self
+            .tail
+            .checked_add(1)
+            .ok_or(SettlementQueueError::OpIdSpaceExhausted)?;
         let assigned = self.tail;
         op.op_id = assigned;
         self.seen_idempotency_keys
             .insert(op.idempotency_key.clone());
         self.drain_order.push_back(assigned);
         self.pending.insert(assigned, op);
-        self.tail = self.tail.saturating_add(1);
+        self.tail = next_tail;
         Ok(assigned)
     }
 
@@ -408,6 +413,26 @@ mod tests {
         q.prune_terminal();
         assert_eq!(q.pending_len(), 1);
         assert_eq!(q.head, before_head);
+    }
+
+    #[test]
+    fn enqueue_rejects_exhausted_op_id_space_without_mutating_queue() {
+        let mut q = SettlementQueueV1 {
+            head: u64::MAX,
+            tail: u64::MAX,
+            ..SettlementQueueV1::default()
+        };
+        let before = q.clone();
+
+        assert_eq!(
+            q.enqueue(mint_op("last")),
+            Err(SettlementQueueError::OpIdSpaceExhausted)
+        );
+        assert_eq!(q.head, before.head);
+        assert_eq!(q.tail, before.tail);
+        assert!(q.pending.is_empty());
+        assert_eq!(q.seen_idempotency_keys, before.seen_idempotency_keys);
+        assert_eq!(q.drain_order, before.drain_order);
     }
 
     #[test]

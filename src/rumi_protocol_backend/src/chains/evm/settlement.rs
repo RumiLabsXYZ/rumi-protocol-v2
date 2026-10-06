@@ -737,6 +737,9 @@ pub fn claim_chain_collateral_in_state(
             crate::chains::settlement_queue::SettlementQueueError::DuplicateIdempotencyKey(key) => {
                 format!("Duplicate chain collateral claim payout idempotency key {key}")
             }
+            crate::chains::settlement_queue::SettlementQueueError::OpIdSpaceExhausted => {
+                "Chain collateral claim payout operation ID space exhausted".to_string()
+            }
         })?;
 
     let claim = state
