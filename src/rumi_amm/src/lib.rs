@@ -793,11 +793,9 @@ async fn claim_pending(claim_id: u64) -> Result<(), AmmError> {
     let claim_claimant = claim.claimant;
     let claim_amount = claim.amount;
 
-    // Audit 2026-06-09 (IC-S-003): transfer_to_user silently skips sends of
-    // amount <= ledger fee, which would consume the claim with nothing
-    // received. Keep the claim and return a clear error; it becomes payable
-    // again if the ledger fee ever drops below the claim amount.
-    let fee = crate::transfers::ledger_fee(claim.token).await;
+    // Keep fee-sized claims until the ledger fee drops below the amount.
+    // ledger_fee_for_amount refreshes stale-high cache data before this check.
+    let fee = crate::transfers::ledger_fee_for_amount(claim.token, claim.amount).await;
     if claim.amount <= fee {
         mutate_state(|s| s.pending_claims.push(claim));
         return Err(AmmError::BelowMinClaim {
@@ -889,12 +887,13 @@ async fn swap(
     // Enforce slippage against the NET amount the taker receives. transfer_to_user
     // pays `amount_out - ledger_fee`, so checking the gross output could let the
     // taker receive up to one ledger fee less than `min_amount_out`. The fee
-    // lookup is cached (the transfer below reuses it), so this adds no real cost.
-    let net_out = amount_out.saturating_sub(crate::transfers::ledger_fee(ledger_out).await);
-    // Audit 2026-06-09 (IC-S-003): a zero NET output means transfer_to_user
-    // would skip the send entirely (amount_out <= ledger fee) while the input
-    // is still pulled and reserves credited, silently consuming the input for
-    // nothing. Require a positive net output regardless of min_amount_out.
+    // lookup uses the cache and refreshes it only if amount_out is no larger
+    // than the cached fee.
+    let net_out = amount_out.saturating_sub(
+        crate::transfers::ledger_fee_for_amount(ledger_out, amount_out).await,
+    );
+    // Require a positive net output before pulling input when the swap cannot
+    // pay anything to the caller.
     if net_out == 0 || net_out < min_amount_out {
         return Err(AmmError::InsufficientOutput {
             expected_min: min_amount_out.max(1),
@@ -1181,12 +1180,15 @@ async fn remove_liquidity(
 
     // Enforce slippage against the NET amounts the withdrawer receives (each leg
     // pays `amount - ledger_fee`), so min_amount_a/b are true minimums received.
-    // Fee lookups are cached (the transfers below reuse them).
-    let net_a = amount_a.saturating_sub(crate::transfers::ledger_fee(token_a).await);
-    let net_b = amount_b.saturating_sub(crate::transfers::ledger_fee(token_b).await);
-    // Audit 2026-06-09 (IC-S-003): a payable leg that nets to zero would be
-    // silently consumed (shares burned, reserves debited, nothing sent).
-    // Reject the whole removal up front, before the LP burn.
+    // Lookups use the cache and refresh only when an amount is no larger than
+    // the cached fee.
+    let net_a = amount_a.saturating_sub(
+        crate::transfers::ledger_fee_for_amount(token_a, amount_a).await,
+    );
+    let net_b = amount_b.saturating_sub(
+        crate::transfers::ledger_fee_for_amount(token_b, amount_b).await,
+    );
+    // Reject zero NET output before changing reserves or burning LP.
     if (amount_a > 0 && net_a == 0) || (amount_b > 0 && net_b == 0) {
         return Err(AmmError::InsufficientOutput { expected_min: 1, actual: 0 });
     }

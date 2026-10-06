@@ -68,6 +68,33 @@ pub async fn ledger_fee(ledger: Principal) -> u128 {
     fee
 }
 
+/// Refresh a cached fee from the ledger. Used only when a payout is no larger
+/// than the cached fee, where stale-high cache data would otherwise prevent a
+/// transfer attempt (and thus never receive BadFee after the ledger fee drops).
+pub async fn refresh_ledger_fee(ledger: Principal) -> Result<u128, String> {
+    let result: Result<(candid::Nat,), _> = ic_cdk::call(ledger, "icrc1_fee", ()).await;
+    let fee: u128 = match result {
+        Ok((fee,)) => fee
+            .0
+            .try_into()
+            .map_err(|_| format!("ledger {} returned an unsupported icrc1_fee", ledger))?,
+        Err((code, message)) => {
+            return Err(format!("icrc1_fee query failed: {:?} - {}", code, message));
+        }
+    };
+    LEDGER_FEES.with(|cache| cache.borrow_mut().insert(ledger, fee));
+    Ok(fee)
+}
+
+pub async fn ledger_fee_for_amount(ledger: Principal, amount: u128) -> u128 {
+    let cached = ledger_fee(ledger).await;
+    if amount <= cached {
+        refresh_ledger_fee(ledger).await.unwrap_or(cached)
+    } else {
+        cached
+    }
+}
+
 /// Transfer tokens FROM a user TO this canister (requires prior ICRC-2 approval).
 pub async fn transfer_from_user(
     ledger: Principal,
@@ -124,12 +151,15 @@ pub async fn transfer_to_user(
     to: Principal,
     amount: u128,
 ) -> Result<(), String> {
-    let fee = ledger_fee(ledger).await;
+    let fee = ledger_fee_for_amount(ledger, amount).await;
     if amount <= fee {
-        // Nothing transferable once the ledger fee is covered. The caller has
-        // already debited `amount` from the pool balance, so leaving this dust
-        // keeps tracked balances <= real holdings (solvency-safe).
-        return Ok(());
+        // Returning success here would make admin/debt callers clear a value
+        // obligation without making any ledger transfer. Preserve it by
+        // treating fee-sized dust as a failed payout.
+        return Err(format!(
+            "amount {} does not exceed ledger fee {}; payout not sent",
+            amount, fee
+        ));
     }
     let send = amount - fee;
     let args = TransferArg {
@@ -139,7 +169,10 @@ pub async fn transfer_to_user(
             subaccount: None,
         },
         amount: candid::Nat::from(send),
-        fee: None,
+        // Supplying the fee we used to calculate `send` makes fee-cache drift
+        // fail atomically with BadFee instead of letting the ledger charge a
+        // different fee while the pool debits only the cached amount.
+        fee: Some(candid::Nat::from(fee)),
         memo: None,
         created_at_time: Some(ic_cdk::api::time()),
     };
@@ -155,6 +188,15 @@ pub async fn transfer_to_user(
                 ledger, duplicate_of
             );
             Ok(())
+        }
+        Ok((Err(TransferError::BadFee { expected_fee }),)) => {
+            if let Ok(expected) = expected_fee.0.clone().try_into() {
+                LEDGER_FEES.with(|c| c.borrow_mut().insert(ledger, expected));
+            }
+            Err(format!(
+                "icrc1_transfer BadFee; refreshed fee cache, retry operation: expected {}",
+                expected_fee
+            ))
         }
         Ok((Err(e),)) => Err(format!("icrc1_transfer error: {:?}", e)),
         Err((code, msg)) => Err(format!(

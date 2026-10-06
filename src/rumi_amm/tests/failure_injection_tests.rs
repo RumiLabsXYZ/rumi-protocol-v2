@@ -824,6 +824,64 @@ fn full_withdrawal_succeeds_after_fee_drift() {
         "reserve_b should drain to the locked minimum, got {}", pool_after.reserve_b);
 }
 
+#[test]
+fn stale_cached_fee_badfee_refresh_preserves_amm_protocol_fee_claim() {
+    let env = setup_flaky();
+    set_fee(&env, env.token_a_id, 10_000);
+    set_fee(&env, env.token_b_id, 10_000);
+
+    let pool_id = create_pool(&env);
+    let _: () = decode_ok(
+        env.pic
+            .update_call(
+                env.amm_id,
+                env.admin,
+                "set_protocol_fee",
+                encode_args((pool_id.clone(), 5_000u16)).unwrap(),
+            )
+            .expect("set_protocol_fee call failed"),
+    );
+    add_initial_liquidity(&env, &pool_id, 50_000_000_000_000);
+
+    let pool = get_pool_info(&env, &pool_id).unwrap();
+    swap_exact(&env, &pool_id, pool.token_a, 10_000_000_000_000);
+    swap_exact(&env, &pool_id, pool.token_b, 10_000_000_000_000);
+
+    // Both cache entries were warmed at 10,000. The first withdrawal must
+    // receive BadFee for token A, refresh the cache, and restore that debt.
+    set_fee(&env, pool.token_a, 20_000);
+    let first: Result<(u128, u128), AmmError> = match env
+        .pic
+        .update_call(
+            env.amm_id,
+            env.admin,
+            "withdraw_protocol_fees",
+            encode_one(pool_id.clone()).unwrap(),
+        )
+        .expect("withdraw_protocol_fees call failed")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode withdrawal result"),
+        WasmResult::Reject(message) => panic!("withdrawal rejected: {message}"),
+    };
+    assert!(matches!(first, Err(AmmError::TransferFailed { .. })));
+
+    let second: Result<(u128, u128), AmmError> = match env
+        .pic
+        .update_call(
+            env.amm_id,
+            env.admin,
+            "withdraw_protocol_fees",
+            encode_one(pool_id.clone()).unwrap(),
+        )
+        .expect("withdraw_protocol_fees retry failed")
+    {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode retry result"),
+        WasmResult::Reject(message) => panic!("withdrawal retry rejected: {message}"),
+    };
+    let (paid_a, _) = second.expect("the retry must use the refreshed fee");
+    assert!(paid_a > 20_000, "restored token-A fee claim was not paid: {paid_a}");
+}
+
 // ════════════════════════════════════════════════════════════════════════
 // Test: slippage (`min_amount_out`) is enforced against the NET amount the
 // taker actually receives (gross output minus the ledger fee), not the gross

@@ -373,11 +373,9 @@ pub async fn claim_pending(claim_id: u64) -> Result<(), ThreePoolError> {
         return Err(ThreePoolError::Unauthorized);
     }
 
-    // Audit 2026-06-09 (IC-S-003): transfer_to_user silently skips sends of
-    // amount <= ledger fee, which would consume the claim with nothing
-    // received. Keep the claim and return a clear error; it becomes payable
-    // again if the ledger fee ever drops below the claim amount.
-    let fee = crate::transfers::ledger_fee(claim.ledger).await;
+    // Keep fee-sized claims until the ledger fee drops below the amount.
+    // ledger_fee_for_amount refreshes stale-high cache data before this check.
+    let fee = crate::transfers::ledger_fee_for_amount(claim.ledger, claim.amount).await;
     if claim.amount <= fee {
         let err = ThreePoolError::TransferFailed {
             token: claim.symbol.clone(),
@@ -534,11 +532,12 @@ async fn swap_inner(
     // 6. Slippage check against the NET amount the taker receives. The output
     //    transfer pays `output - ledger_fee`, so check net so `min_dy` is a true
     //    minimum received. Fee lookup is cached (the output transfer reuses it).
-    let net_output = output.saturating_sub(crate::transfers::ledger_fee(token_j_ledger).await);
-    // Audit 2026-06-09 (IC-S-003): a zero NET output means transfer_to_user
-    // would skip the send entirely (output <= ledger fee) while the pool still
-    // debits balances, silently consuming the input for nothing. Reject before
-    // pulling the input so no value moves.
+    let net_output = output.saturating_sub(
+        crate::transfers::ledger_fee_for_amount(token_j_ledger, output).await,
+    );
+    // Reject zero NET output before pulling input. The payout helper now fails
+    // closed for fee-sized amounts; this avoids pulling input when the swap
+    // cannot pay anything to the caller.
     if net_output == 0 {
         return Err(ThreePoolError::InsufficientOutput {
             expected_min: 1,
@@ -554,8 +553,8 @@ async fn swap_inner(
     let token_i_symbol = read_state(|s| s.config.tokens[i_idx].symbol.clone());
 
     if let Some(r) = receipt.as_deref_mut() {
-        let input_fee = crate::transfers::ledger_fee(token_i_ledger).await;
-        let output_fee = crate::transfers::ledger_fee(token_j_ledger).await;
+        let input_fee = crate::transfers::ledger_fee_for_amount(token_i_ledger, dx).await;
+        let output_fee = crate::transfers::ledger_fee_for_amount(token_j_ledger, output).await;
         r.pool_fee = Some(fee);
         r.gross_output = Some(output);
         receipts::set_fence(true);
@@ -607,11 +606,22 @@ async fn swap_inner(
                     ),
                 }
             } else {
+                let claim_id = record_pending_claim(
+                    caller,
+                    i,
+                    token_i_ledger,
+                    &token_i_symbol,
+                    dx,
+                    &format!("confirmed swap input; output transfer failed: {reason}"),
+                );
                 receipts::fail(
                     r,
-                    format!("output: {reason}; input too small to refund after fee"),
-                    true,
+                    format!(
+                        "output: {reason}; input too small to refund after fee; pending claim {claim_id}"
+                    ),
+                    false,
                 );
+                receipts::set_fence(false);
             }
             return Err(ThreePoolError::TransferFailed {
                 token: token_j_symbol,
@@ -901,7 +911,8 @@ pub async fn remove_liquidity(
 
     // 4. Check each NET amount (after the per-leg ledger fee) >= min_amounts.
     //    transfer_to_user pays `amount - ledger_fee`, so check net so min_amounts
-    //    are true minimums received. Fee lookups are cached (transfers reuse them).
+    //    are true minimums received. Lookups use the cache and refresh only
+    //    when an amount is no larger than the cached fee.
     let token_ledgers = read_state(|s| {
         [
             s.config.tokens[0].ledger_id,
@@ -910,7 +921,9 @@ pub async fn remove_liquidity(
         ]
     });
     for k in 0..3 {
-        let net_k = amounts[k].saturating_sub(crate::transfers::ledger_fee(token_ledgers[k]).await);
+        let net_k = amounts[k].saturating_sub(
+            crate::transfers::ledger_fee_for_amount(token_ledgers[k], amounts[k]).await,
+        );
         // Audit 2026-06-09 (IC-S-003): a payable leg that nets to zero would be
         // silently consumed (debited from the pool with nothing sent). Reject
         // the whole removal up front, before the LP burn; the caller can burn
@@ -1072,10 +1085,10 @@ pub async fn remove_one_coin(
     // 4. Slippage check against the NET amount the taker receives (the output
     //    transfer pays `amount - ledger_fee`), so `min_amount` is a true minimum.
     let out_ledger = read_state(|s| s.config.tokens[idx].ledger_id);
-    let net_amount = amount.saturating_sub(crate::transfers::ledger_fee(out_ledger).await);
-    // Audit 2026-06-09 (IC-S-003): a zero NET amount means transfer_to_user
-    // would skip the send while LP and balances are still debited. Reject
-    // before any state change.
+    let net_amount = amount.saturating_sub(
+        crate::transfers::ledger_fee_for_amount(out_ledger, amount).await,
+    );
+    // Reject a zero NET amount before changing balances or burning LP.
     if net_amount == 0 {
         return Err(ThreePoolError::InsufficientOutput { expected_min: 1, actual: 0 });
     }

@@ -456,8 +456,9 @@ pub fn icrc2_transfer_from(
     }
 
     let result = mutate_state(|s| {
-        // Check and deduct allowance (unless self-transfer)
-        if caller != from_principal {
+        // Preflight the allowance (unless self-transfer); do not mutate it
+        // until the sender's balance has also passed validation.
+        let allowance_after = if caller != from_principal {
             let existing = crate::storage::allowance_get(&from_principal, &caller);
             let current_allowance = existing
                 .as_ref()
@@ -468,16 +469,16 @@ pub fn icrc2_transfer_from(
                     allowance: Nat::from(current_allowance),
                 });
             }
-
-            // Deduct allowance
-            let mut entry = existing.unwrap();
-            entry.amount = entry.amount.saturating_sub(amount);
-            if entry.amount == 0 {
-                crate::storage::allowance_remove(&from_principal, &caller);
-            } else {
-                crate::storage::allowance_set(from_principal, caller, entry);
-            }
-        }
+            let mut entry = existing.expect("sufficient allowance must have an entry");
+            entry.amount = entry.amount.checked_sub(amount).ok_or(
+                TransferFromError::InsufficientAllowance {
+                    allowance: Nat::from(current_allowance),
+                },
+            )?;
+            Some(entry)
+        } else {
+            None
+        };
 
         // Check balance
         let from_balance = crate::storage::lp_balance_get(&from_principal);
@@ -485,6 +486,17 @@ pub fn icrc2_transfer_from(
             return Err(TransferFromError::InsufficientFunds {
                 balance: Nat::from(from_balance),
             });
+        }
+
+        // All rejecting preconditions have now passed. Mutate allowance only
+        // alongside a transfer that can commit, so InsufficientFunds cannot
+        // consume an approved spender's allowance.
+        if let Some(entry) = allowance_after {
+            if entry.amount == 0 {
+                crate::storage::allowance_remove(&from_principal, &caller);
+            } else {
+                crate::storage::allowance_set(from_principal, caller, entry);
+            }
         }
 
         // Debit (set-to-0 removes the entry from stable storage)

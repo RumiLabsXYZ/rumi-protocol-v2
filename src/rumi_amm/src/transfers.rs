@@ -36,6 +36,24 @@ pub async fn ledger_fee(ledger: Principal) -> u128 {
     fee
 }
 
+/// Refresh when a payout is no larger than the cached fee. This lets small
+/// retained claims become payable after a fee reduction without adding an
+/// await to ordinary warm-cache transfers.
+pub async fn ledger_fee_for_amount(ledger: Principal, amount: u128) -> u128 {
+    let cached = ledger_fee(ledger).await;
+    if amount <= cached {
+        let result: Result<(candid::Nat,), _> =
+            ic_cdk::call(ledger, "icrc1_fee", ()).await;
+        if let Ok((fee,)) = result {
+            if let Ok(fee) = fee.0.try_into() {
+                LEDGER_FEES.with(|cache| cache.borrow_mut().insert(ledger, fee));
+                return fee;
+            }
+        }
+    }
+    cached
+}
+
 /// Transfer tokens FROM a user TO a pool's subaccount (requires prior ICRC-2 approval).
 pub async fn transfer_from_user(
     ledger: Principal,
@@ -101,12 +119,14 @@ pub async fn transfer_to_user(
     to: Principal,
     amount: u128,
 ) -> Result<u64, String> {
-    let fee = ledger_fee(ledger).await;
+    let fee = ledger_fee_for_amount(ledger, amount).await;
     if amount <= fee {
-        // Nothing is transferable once the ledger fee is covered. The caller
-        // has already debited `amount` from its reserve, so leaving this dust
-        // in the subaccount keeps reserves <= the real balance (solvency-safe).
-        return Ok(0);
+        // Success would let admin/claim callers clear a value obligation
+        // without a ledger send. Preserve the amount for a later retry.
+        return Err(format!(
+            "amount {} does not exceed ledger fee {}; payout not sent",
+            amount, fee
+        ));
     }
     let send = amount - fee;
     let args = TransferArg {
@@ -116,7 +136,9 @@ pub async fn transfer_to_user(
             subaccount: None,
         },
         amount: candid::Nat::from(send),
-        fee: None,
+        // Match the fee used to calculate `send`. A changed ledger fee must
+        // reject before debit rather than silently drift the reserve.
+        fee: Some(candid::Nat::from(fee)),
         memo: None,
         // Set created_at_time for ledger-side deduplication.
         created_at_time: Some(ic_cdk::api::time()),
@@ -136,6 +158,15 @@ pub async fn transfer_to_user(
         Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
             let idx: u64 = duplicate_of.0.try_into().unwrap_or(0);
             Ok(idx)
+        }
+        Ok((Err(TransferError::BadFee { expected_fee }),)) => {
+            if let Ok(expected) = expected_fee.0.clone().try_into() {
+                LEDGER_FEES.with(|c| c.borrow_mut().insert(ledger, expected));
+            }
+            Err(format!(
+                "icrc1_transfer BadFee; refreshed fee cache, retry operation: expected {}",
+                expected_fee
+            ))
         }
         Ok((Err(e),)) => Err(format!("icrc1_transfer error: {:?}", e)),
         Err((code, msg)) => Err(format!("inter-canister call failed: {:?} - {}", code, msg)),
@@ -177,7 +208,7 @@ pub async fn transfer_reward_icusd(
 ) -> Result<u64, String> {
     let icusd_ledger = Principal::from_text(crate::ICUSD_LEDGER)
         .expect("invalid icUSD ledger principal");
-    let fee = ledger_fee(icusd_ledger).await;
+    let fee = ledger_fee_for_amount(icusd_ledger, amount).await;
     if amount <= fee {
         return Err(format!(
             "reward amount {} does not exceed ledger fee {}; refusing to burn the claim",
@@ -193,7 +224,7 @@ pub async fn transfer_reward_icusd(
             subaccount: None,
         },
         amount: candid::Nat::from(send),
-        fee: None,
+        fee: Some(candid::Nat::from(fee)),
         memo: None,
         // Set created_at_time for ledger-side deduplication; matches the
         // pattern used by transfer_to_user above.
@@ -215,6 +246,15 @@ pub async fn transfer_reward_icusd(
         Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
             let idx: u64 = duplicate_of.0.try_into().unwrap_or(0);
             Ok(idx)
+        }
+        Ok((Err(TransferError::BadFee { expected_fee }),)) => {
+            if let Ok(expected) = expected_fee.0.clone().try_into() {
+                LEDGER_FEES.with(|c| c.borrow_mut().insert(icusd_ledger, expected));
+            }
+            Err(format!(
+                "icrc1_transfer BadFee; refreshed fee cache, retry operation: expected {}",
+                expected_fee
+            ))
         }
         Ok((Err(e),)) => Err(format!("icrc1_transfer error: {:?}", e)),
         Err((code, msg)) => Err(format!("inter-canister call failed: {:?} - {}", code, msg)),

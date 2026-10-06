@@ -214,6 +214,14 @@ fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
             }
         }
 
+        if let Some(requested_fee) = args.fee.as_ref().map(nat_to_u128) {
+            if requested_fee != state.fee {
+                return Err(TransferError::BadFee {
+                    expected_fee: Nat::from(state.fee),
+                });
+            }
+        }
+
         if state.bad_fee_failures_remaining > 0 {
             state.bad_fee_failures_remaining -= 1;
             return Err(TransferError::BadFee {
