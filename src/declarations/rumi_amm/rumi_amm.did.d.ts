@@ -120,6 +120,7 @@ export type AmmIngressKind = {
 export interface AmmIngressLeg {
   'block_index' : [] | [bigint],
   'receipt_scan_end' : [] | [bigint],
+  'transfer_fee' : [] | [bigint],
   'to_subaccount' : Uint8Array | number[],
   'from' : Principal,
   'memo' : Uint8Array | number[],

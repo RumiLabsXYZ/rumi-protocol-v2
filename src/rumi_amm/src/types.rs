@@ -218,6 +218,8 @@ pub struct AmmIngressLeg {
     pub memo: Vec<u8>,
     pub created_at_time: u64,
     #[serde(default)]
+    pub transfer_fee: Option<u128>,
+    #[serde(default)]
     pub attempt_generation: u32,
     /// Number of durable dispatch intents written before ICRC-2 awaits. A
     /// later typed rejection cannot erase uncertainty from an earlier lost reply.

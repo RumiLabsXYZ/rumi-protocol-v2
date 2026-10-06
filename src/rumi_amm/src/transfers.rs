@@ -132,7 +132,11 @@ pub async fn transfer_from_user_exact(
             subaccount: Some(leg.to_subaccount),
         },
         amount: candid::Nat::from(leg.amount),
-        fee: None,
+        fee: Some(candid::Nat::from(leg.transfer_fee.ok_or_else(|| {
+            IngressTransferError::Ambiguous(
+                "exact ingress transfer fee was not journaled before dispatch".to_string(),
+            )
+        })?)),
         memo: Some(icrc_ledger_types::icrc1::transfer::Memo(
             serde_bytes::ByteBuf::from(leg.memo.clone()),
         )),
@@ -150,9 +154,13 @@ pub async fn transfer_from_user_exact(
             })
         }
         Ok((Err(TransferFromError::TooOld),)) => Err(IngressTransferError::TooOld),
-        Ok((Err(TransferFromError::BadFee { expected_fee }),)) => Err(
-            IngressTransferError::NoEffect(format!("BadFee expected {}", expected_fee)),
-        ),
+        Ok((Err(TransferFromError::BadFee { expected_fee }),)) => {
+            invalidate_ledger_fee(leg.ledger);
+            Err(IngressTransferError::NoEffect(format!(
+                "BadFee expected {}",
+                expected_fee
+            )))
+        }
         Ok((Err(TransferFromError::BadBurn { min_burn_amount }),)) => Err(
             IngressTransferError::NoEffect(format!("BadBurn minimum {}", min_burn_amount)),
         ),

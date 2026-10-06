@@ -91,6 +91,7 @@ type AmmIngressLeg = record {
   amount : nat;
   memo : blob;
   created_at_time : nat64;
+  transfer_fee : opt nat;
   attempt_generation : nat32;
   dispatch_count : nat32;
   block_index : opt nat64;

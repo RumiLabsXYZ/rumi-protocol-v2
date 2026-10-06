@@ -22,7 +22,7 @@ use crate::math::{
     compute_initial_lp_shares, compute_proportional_lp_shares, compute_remove_liquidity,
     compute_swap, MINIMUM_LIQUIDITY,
 };
-use crate::state::{mutate_state, read_state};
+use crate::state::{mutate_state, read_state, AmmState};
 use crate::types::*;
 
 /// New user-pull routes remain unavailable until each configured ledger has a
@@ -809,6 +809,14 @@ fn receipt_scan_page_end(cursor: u64, frozen_tip: u64) -> u64 {
     cursor.saturating_add(32).min(frozen_tip)
 }
 
+fn checked_receipt_scan_page_end(cursor: u64, tip: u64) -> Result<u64, String> {
+    if cursor > tip {
+        Err("ledger log length fell below the persisted receipt-scan cursor".to_string())
+    } else {
+        Ok(receipt_scan_page_end(cursor, tip))
+    }
+}
+
 fn receipt_scan_tip(frozen_tip: Option<u64>, observed_log_length: u64) -> Result<u64, String> {
     match frozen_tip {
         Some(tip) if observed_log_length < tip => {
@@ -817,6 +825,16 @@ fn receipt_scan_tip(frozen_tip: Option<u64>, observed_log_length: u64) -> Result
         Some(tip) => Ok(tip),
         None => Ok(observed_log_length),
     }
+}
+
+fn sort_and_reject_duplicate_block_ids(
+    blocks: &mut Vec<icrc_ledger_types::icrc3::blocks::BlockWithId>,
+) -> Result<(), String> {
+    blocks.sort_by(|a, b| a.id.cmp(&b.id));
+    if blocks.windows(2).any(|pair| pair[0].id == pair[1].id) {
+        return Err("ICRC-3 direct/archive responses overlap block IDs; cursor held".to_string());
+    }
+    Ok(())
 }
 
 /// Drop a staged request only after source proves that no external value moved.
@@ -935,6 +953,7 @@ fn begin_swap_operation(
             amount: amount_in,
             memo: ingress_memo,
             created_at_time: ic_cdk::api::time(),
+            transfer_fee: None,
             attempt_generation: 0,
             dispatch_count: 0,
             block_index: None,
@@ -1072,6 +1091,7 @@ fn begin_add_operation(
                     amount: amount_a,
                     memo: memo_a,
                     created_at_time: ic_cdk::api::time(),
+                    transfer_fee: None,
                     attempt_generation: 0,
                     dispatch_count: 0,
                     block_index: None,
@@ -1086,6 +1106,7 @@ fn begin_add_operation(
                     amount: amount_b,
                     memo: memo_b,
                     created_at_time: ic_cdk::api::time(),
+                    transfer_fee: None,
                     attempt_generation: 0,
                     dispatch_count: 0,
                     block_index: None,
@@ -1296,6 +1317,31 @@ async fn process_ingress_leg(operation_id: u64, leg_index: usize) -> Result<u64,
         leg.receipt_scan_start = Some(start);
         leg.receipt_scan_cursor = start;
     }
+    if leg.transfer_fee.is_none() {
+        let fee = crate::transfers::ledger_fee(leg.ledger).await;
+        let saved = mutate_state(|s| {
+            if let Some(op) = s
+                .ingress_operations
+                .iter_mut()
+                .find(|op| op.id == operation_id)
+            {
+                if let Some(stored) = op.legs.get_mut(leg_index) {
+                    if *stored == leg {
+                        stored.transfer_fee = Some(fee);
+                        return true;
+                    }
+                }
+            }
+            false
+        });
+        if !saved {
+            return Err(AmmError::TransferFailed {
+                token: format!("ingress:{}", leg_index),
+                reason: "ingress changed while persisting exact transfer fee".to_string(),
+            });
+        }
+        leg.transfer_fee = Some(fee);
+    }
     let prior_dispatches = mutate_state(|s| {
         if let Some(op) = s
             .ingress_operations
@@ -1433,24 +1479,31 @@ fn account_matches(
     value: Option<&icrc_ledger_types::icrc::generic_value::ICRC3Value>,
     owner: Principal,
     expected_subaccount: Option<[u8; 32]>,
-) -> bool {
+) -> Result<bool, String> {
     let Some(icrc_ledger_types::icrc::generic_value::ICRC3Value::Array(parts)) = value else {
-        return false;
+        return Err("ICRC-3 transfer account has unknown shape".to_string());
     };
     if parts.is_empty() || parts.len() > 2 {
-        return false;
+        return Err("ICRC-3 transfer account has invalid component count".to_string());
     }
     let Some(owner_bytes) = value_as_blob(parts.first()) else {
-        return false;
+        return Err("ICRC-3 transfer account owner is not a blob".to_string());
     };
     if owner_bytes.as_slice() != owner.as_slice() {
-        return false;
+        return Ok(false);
     }
-    let sub = parts.get(1).and_then(|value| value_as_blob(Some(value)));
+    let sub = match parts.get(1) {
+        Some(icrc_ledger_types::icrc::generic_value::ICRC3Value::Blob(bytes)) => {
+            Some(bytes.as_slice())
+        }
+        Some(_) => return Err("ICRC-3 transfer account subaccount is not a blob".to_string()),
+        None => None,
+    };
     match (expected_subaccount, parts.len(), sub) {
-        (None, 1, None) => true,
-        (Some(expected), 2, Some(bytes)) => bytes.as_slice() == expected,
-        _ => false,
+        (None, 1, None) => Ok(true),
+        (Some(expected), 2, Some(bytes)) => Ok(bytes == expected),
+        (None, 2, Some(_)) | (Some(_), 1, None) => Ok(false),
+        _ => Err("ICRC-3 transfer account subaccount shape is inconsistent".to_string()),
     }
 }
 
@@ -1466,36 +1519,73 @@ fn value_as_u64(value: Option<&icrc_ledger_types::icrc::generic_value::ICRC3Valu
 fn block_matches_exact_receipt(
     block: &icrc_ledger_types::icrc3::blocks::BlockWithId,
     expected: &ExactTransferReceipt,
-) -> bool {
+) -> Result<bool, String> {
     let Some(root) = value_as_map(&block.block) else {
-        return false;
+        return Err("ICRC-3 block has unknown top-level shape".to_string());
     };
     let Some(tx) = root.get("tx").and_then(value_as_map) else {
-        return false;
+        return Err("ICRC-3 block is missing a recognized transaction map".to_string());
     };
-    if !matches!(tx.get("op"), Some(icrc_ledger_types::icrc::generic_value::ICRC3Value::Text(op)) if op == "xfer")
-        || value_as_u64(tx.get("ts")) != Some(expected.created_at_time)
-    {
-        return false;
+    match tx.get("op") {
+        Some(icrc_ledger_types::icrc::generic_value::ICRC3Value::Text(op)) if op == "xfer" => {}
+        Some(icrc_ledger_types::icrc::generic_value::ICRC3Value::Text(op))
+            if matches!(op.as_str(), "mint" | "burn" | "approve") =>
+        {
+            return Ok(false)
+        }
+        Some(icrc_ledger_types::icrc::generic_value::ICRC3Value::Text(op)) => {
+            return Err(format!(
+                "unrecognized ICRC-3 operation `{}`; absence proof held",
+                op
+            ))
+        }
+        _ => return Err("ICRC-3 transaction has missing or malformed operation kind".to_string()),
     }
-    if !account_matches(tx.get("from"), expected.from, expected.from_subaccount)
-        || !account_matches(tx.get("to"), expected.to, expected.to_subaccount)
-        || value_as_nat(tx.get("amt")) != Some(expected.amount)
-        || value_as_blob(tx.get("memo")) != Some(expected.memo.clone())
+    let tx_time = match tx.get("ts") {
+        None => return Ok(false),
+        Some(value) => value_as_u64(Some(value))
+            .ok_or_else(|| "ICRC-3 transfer has malformed created_at_time".to_string())?,
+    };
+    let amount = value_as_nat(tx.get("amt"))
+        .ok_or_else(|| "ICRC-3 transfer has missing or malformed amount".to_string())?;
+    let memo = match tx.get("memo") {
+        None => return Ok(false),
+        Some(value) => value_as_blob(Some(value))
+            .ok_or_else(|| "ICRC-3 transfer has malformed memo".to_string())?,
+    };
+    let from_matches = account_matches(tx.get("from"), expected.from, expected.from_subaccount)?;
+    let to_matches = account_matches(tx.get("to"), expected.to, expected.to_subaccount)?;
+    if !from_matches
+        || !to_matches
+        || amount != expected.amount
+        || memo != expected.memo
+        || tx_time != expected.created_at_time
     {
-        return false;
+        return Ok(false);
     }
     match expected.spender {
-        Some(spender) if !account_matches(tx.get("spender"), spender, None) => return false,
-        None if tx.contains_key("spender") => return false,
+        Some(spender) => {
+            let Some(spender_value) = tx.get("spender") else {
+                return Ok(false);
+            };
+            if !account_matches(Some(spender_value), spender, None)? {
+                return Ok(false);
+            }
+        }
+        None if tx.contains_key("spender") => return Ok(false),
         _ => {}
     }
     if let Some(expected_fee) = expected.fee {
-        if value_as_nat(tx.get("fee")) != Some(expected_fee) {
-            return false;
+        let Some(fee_value) = tx.get("fee") else {
+            return Ok(false);
+        };
+        let fee = value_as_nat(Some(fee_value))
+            .ok_or_else(|| "ICRC-3 transfer has malformed fee".to_string())?;
+        if fee != expected_fee {
+            return Ok(false);
         }
     }
-    true
+    Ok(true)
 }
 
 /// Capture an authoritative replicated ledger-history lower bound before the
@@ -1558,7 +1648,7 @@ async fn scan_exact_transfer_receipt(
         .try_into()
         .map_err(|_| "ledger log length exceeds u64".to_string())?;
     let tip = receipt_scan_tip(frozen_tip, log_length)?;
-    let end = receipt_scan_page_end(cursor, tip);
+    let end = checked_receipt_scan_page_end(cursor, tip)?;
     if cursor >= tip {
         return Ok((None, cursor, tip));
     }
@@ -1581,8 +1671,7 @@ async fn scan_exact_transfer_receipt(
         })?;
         blocks.extend(archived_result.blocks);
     }
-    blocks.sort_by(|a, b| a.id.cmp(&b.id));
-    blocks.dedup_by(|a, b| a.id == b.id);
+    sort_and_reject_duplicate_block_ids(&mut blocks)?;
     let mut next = cursor;
     for block in &blocks {
         let index: u64 = block
@@ -1594,7 +1683,7 @@ async fn scan_exact_transfer_receipt(
         if index < cursor || index >= end {
             continue;
         }
-        if block_matches_exact_receipt(block, expected) {
+        if block_matches_exact_receipt(block, expected)? {
             return Ok((Some(index), index, log_length));
         }
         if index == next {
@@ -2427,7 +2516,7 @@ async fn reconcile_amm_ingress(request_id: Vec<u8>) -> Result<bool, AmmError> {
         to: ic_cdk::id(),
         to_subaccount: Some(leg.to_subaccount),
         amount: leg.amount,
-        fee: None,
+        fee: leg.transfer_fee,
         memo: leg.memo.clone(),
         created_at_time: leg.created_at_time,
         spender: Some(ic_cdk::id()),
@@ -4085,23 +4174,68 @@ mod amm_receipt_tests {
         assert!(block_matches_exact_receipt(
             &transfer_block("xfer", 77, Some(spender), 9),
             &expected
-        ));
+        )
+        .unwrap());
         assert!(!block_matches_exact_receipt(
             &transfer_block("mint", 77, Some(spender), 9),
             &expected
-        ));
+        )
+        .unwrap());
         assert!(!block_matches_exact_receipt(
             &transfer_block("xfer", 78, Some(spender), 9),
             &expected
-        ));
-        assert!(!block_matches_exact_receipt(
-            &transfer_block("xfer", 77, None, 9),
-            &expected
-        ));
+        )
+        .unwrap());
+        assert!(
+            !block_matches_exact_receipt(&transfer_block("xfer", 77, None, 9), &expected).unwrap()
+        );
         assert!(!block_matches_exact_receipt(
             &transfer_block("xfer", 77, Some(spender), 10),
             &expected
-        ));
+        )
+        .unwrap());
+        assert!(block_matches_exact_receipt(
+            &transfer_block("future_op", 77, Some(spender), 9),
+            &expected
+        )
+        .is_err());
+        assert!(block_matches_exact_receipt(
+            &transfer_block("xfer", 77, Some(spender), 9),
+            &expected
+        )
+        .is_ok());
+        let mut ordinary_xfer = transfer_block("xfer", 77, Some(spender), 9);
+        if let icrc_ledger_types::icrc::generic_value::ICRC3Value::Map(root) =
+            &mut ordinary_xfer.block
+        {
+            if let Some(icrc_ledger_types::icrc::generic_value::ICRC3Value::Map(tx)) =
+                root.get_mut("tx")
+            {
+                tx.remove("ts");
+                tx.remove("memo");
+            }
+        }
+        assert!(!block_matches_exact_receipt(&ordinary_xfer, &expected).unwrap());
+    }
+
+    #[test]
+    fn duplicate_direct_and_archive_block_ids_fail_closed() {
+        let direct = transfer_block("xfer", 77, None, 9);
+        let mut archived_conflict = transfer_block("xfer", 77, None, 9);
+        if let icrc_ledger_types::icrc::generic_value::ICRC3Value::Map(root) =
+            &mut archived_conflict.block
+        {
+            if let Some(icrc_ledger_types::icrc::generic_value::ICRC3Value::Map(tx)) =
+                root.get_mut("tx")
+            {
+                tx.insert(
+                    "amt".to_string(),
+                    icrc_ledger_types::icrc::generic_value::ICRC3Value::Nat(Nat::from(124u64)),
+                );
+            }
+        }
+        let mut blocks = vec![direct, archived_conflict];
+        assert!(sort_and_reject_duplicate_block_ids(&mut blocks).is_err());
     }
 
     #[test]
@@ -4128,6 +4262,7 @@ mod amm_receipt_tests {
         assert_eq!(receipt_scan_tip(None, 65).unwrap(), 65);
         assert_eq!(receipt_scan_tip(Some(65), 96).unwrap(), 65);
         assert!(receipt_scan_tip(Some(65), 64).is_err());
+        assert!(checked_receipt_scan_page_end(66, 65).is_err());
     }
 
     #[test]

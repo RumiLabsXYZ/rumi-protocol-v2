@@ -231,6 +231,7 @@ export const idlFactory = ({ IDL }) => {
   const AmmIngressLeg = IDL.Record({
     'block_index' : IDL.Opt(IDL.Nat64),
     'receipt_scan_end' : IDL.Opt(IDL.Nat64),
+    'transfer_fee' : IDL.Opt(IDL.Nat),
     'to_subaccount' : IDL.Vec(IDL.Nat8),
     'from' : IDL.Principal,
     'memo' : IDL.Vec(IDL.Nat8),
