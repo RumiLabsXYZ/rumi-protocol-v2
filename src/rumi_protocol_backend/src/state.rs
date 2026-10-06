@@ -3271,7 +3271,10 @@ impl State {
                     refund.amount_e8s.checked_add(current_fee_e8s.max(*fee_e8s))?
                 }
                 Some(Dispatch::SubmittedOrUnknown { tuple })
-                    if tuple.source_subaccount.is_none() =>
+                    if tuple.source_subaccount.is_none()
+                        && tuple.amount_e8s == refund.amount_e8s
+                        && tuple.destination.owner == refund.stability_pool
+                        && tuple.destination.subaccount.is_none() =>
                 {
                     tuple.amount_e8s.checked_add(tuple.fee_e8s)?
                 }
@@ -3328,7 +3331,8 @@ impl State {
                         ThreeUsdRefundDispatchState::SubmittedOrUnknown { tuple }
                             if tuple.source_subaccount.is_none()
                                 && tuple.amount_e8s == child.gross_amount_e8s
-                                && tuple.destination.owner == key.stability_pool => {}
+                                && tuple.destination.owner == key.stability_pool
+                                && tuple.destination.subaccount.is_none() => {}
                         _ => return None,
                     }
                     true
