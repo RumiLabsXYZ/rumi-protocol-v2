@@ -240,6 +240,50 @@ mod three_usd_v2_migration_tests {
     }
 
     #[test]
+    fn v2_partial_refund_child_uses_committed_proof_before_parent_terminalizes() {
+        let ledger = Principal::from_slice(&[0x43]);
+        let pool = Principal::from_slice(&[0x41]);
+        let key = ThreeUsdReserveIngressKey { stability_pool: pool, vault_id: 3, absorb_id: 9 };
+        let nonce = 7;
+        let proof = crate::icrc3_proof::SpWritedownProof {
+            block_index: 10,
+            ledger_kind: crate::icrc3_proof::SpProofLedger::ThreePoolTransferDefault,
+            vault_id_memo: 3,
+        };
+        let mut state = State::default();
+        let mut journal = ingress_journal(ThreeUsdReserveIngressPhase::TransferConfirmed {
+            tuple: ingress_tuple(), block_index: 10,
+        });
+        journal.refund = Some(ThreeUsdReserveIngressRefund {
+            op_nonce: nonce, gross_amount_e8s: 50, source_subaccount: None,
+            settled_receipt: None,
+        });
+        state.three_usd_reserve_ingress_journals.insert(key.clone(), journal);
+        state.pending_3usd_refunds.insert(nonce, PendingThreeUsdRefund {
+            stability_pool: pool, ledger, amount_e8s: 50, vault_id: 3,
+            retry_count: 0, op_nonce: nonce, parent_absorb_id: Some(9),
+        });
+        state.pending_3usd_refund_journals.insert(
+            nonce, ThreeUsdRefundDispatchState::NeverDispatchedDefault { gross_amount_e8s: 50 },
+        );
+        let result = crate::StabilityPoolLiquidationResult {
+            success: true, vault_id: 3, liquidated_debt: 100,
+            collateral_received: 50, collateral_type: "ICP".into(),
+            block_index: 0, fee: 0, collateral_price_e8s: 1,
+        };
+        state.sp_three_usd_reserve_absorb_results_by_proof.insert(
+            (proof.ledger_kind, proof.block_index), StoredThreeUsdReserveAbsorbResult {
+                caller: pool, vault_id: 3, icusd_debt_covered_e8s: 200,
+                three_usd_amount_e8s: 100, ledger, proof: proof.clone(), result,
+            },
+        );
+        state.consumed_writedown_proofs.insert((proof.ledger_kind, proof.block_index));
+        assert_eq!(state.three_usd_default_account_refund_commitment(ledger, 7), Some(57));
+        state.sp_three_usd_reserve_absorb_results_by_proof.clear();
+        assert_eq!(state.three_usd_default_account_refund_commitment(ledger, 7), None);
+    }
+
+    #[test]
     fn cl07_pending_payout_invariant_uses_operation_id_and_exact_identity() {
         let pool = Principal::from_slice(&[0x41]);
         let ledger = Principal::from_slice(&[0x43]);
@@ -3504,6 +3548,46 @@ impl State {
                 let expected_refund = match &journal.phase {
                     ThreeUsdReserveIngressPhase::Absorbed { .. } => {
                         journal.expected_absorbed_refund_e8s()
+                    }
+                    // The refund child is journaled before the parent phase
+                    // becomes terminal. A committed absorb requires its exact
+                    // proportional excess; an unconsumed proof requires the
+                    // full amount. Missing/contradictory proof state holds
+                    // admission instead of guessing the obligation.
+                    ThreeUsdReserveIngressPhase::TransferConfirmed { block_index, .. } => {
+                        let proof_key = (
+                            crate::icrc3_proof::SpProofLedger::ThreePoolTransferDefault,
+                            *block_index,
+                        );
+                        match self.sp_three_usd_reserve_absorb_results_by_proof.get(&proof_key) {
+                            Some(committed)
+                                if committed.caller == key.stability_pool
+                                    && committed.vault_id == key.vault_id
+                                    && committed.icusd_debt_covered_e8s
+                                        == journal.request.icusd_debt_covered_e8s
+                                    && committed.three_usd_amount_e8s
+                                        == journal.request.three_usd_amount_e8s
+                                    && committed.ledger == ledger
+                                    && committed.proof.ledger_kind == proof_key.0
+                                    && committed.proof.block_index == proof_key.1
+                                    && committed.proof.vault_id_memo == key.vault_id
+                                    && committed.result.success
+                                    && committed.result.vault_id == key.vault_id
+                                    && committed.result.liquidated_debt
+                                        <= journal.request.icusd_debt_covered_e8s
+                                    && journal.request.icusd_debt_covered_e8s > 0 => {
+                                let realized = (journal.request.three_usd_amount_e8s as u128)
+                                    .checked_mul(committed.result.liquidated_debt as u128)?
+                                    / journal.request.icusd_debt_covered_e8s as u128;
+                                journal.request.three_usd_amount_e8s
+                                    .checked_sub(u64::try_from(realized).ok()?)
+                            }
+                            Some(_) => None,
+                            None if !self.consumed_writedown_proofs.contains(&proof_key) => {
+                                Some(journal.request.three_usd_amount_e8s)
+                            }
+                            None => None,
+                        }
                     }
                     ThreeUsdReserveIngressPhase::FailedAfterTransfer { .. } => {
                         Some(journal.request.three_usd_amount_e8s)

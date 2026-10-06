@@ -140,6 +140,10 @@ struct LedgerState {
     fail_transfer_from: bool,
     /// Next N transfers commit but return a transient error (simulates lost reply).
     phantom_failures_remaining: u32,
+    /// Next matching caller's committed transfer traps after an inter-canister await.
+    trap_after_commit_for_caller: Option<Principal>,
+    /// Next N transfers return TooOld before changing balances.
+    too_old_failures_remaining: u32,
     /// Next N transfers return BadFee with the current fee value.
     bad_fee_failures_remaining: u32,
     /// Recent transfers keyed by their dedup tuple. Retained until reset_dedup().
@@ -257,9 +261,10 @@ fn icrc1_fee() -> Nat {
 }
 
 #[update]
-fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
+async fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
     let caller = ic_cdk::caller();
-    STATE.with(|s| {
+    let mut trap_after_commit = false;
+    let transfer_result = STATE.with(|s| {
         let mut state = s.borrow_mut();
 
         if state.fail_transfers {
@@ -281,10 +286,16 @@ fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
             }
         }
 
+        let is_mint = state.minting_account.as_ref().is_some_and(|minting| {
+            minting.owner == caller && args.from_subaccount.is_none()
+        });
+        let is_burn = !is_mint && state.minting_account.as_ref() == Some(&args.to);
+
         if let Some(requested_fee) = args.fee.as_ref().map(nat_to_u128) {
-            if requested_fee != state.fee {
+            let expected_fee = if is_burn { 0 } else { state.fee };
+            if requested_fee != expected_fee {
                 return Err(TransferError::BadFee {
-                    expected_fee: Nat::from(state.fee),
+                    expected_fee: Nat::from(expected_fee),
                 });
             }
         }
@@ -318,16 +329,18 @@ fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
             }
         }
 
-        let is_mint = state.minting_account.as_ref().is_some_and(|minting| {
-            minting.owner == caller && args.from_subaccount.is_none()
-        });
-        let is_burn = !is_mint && state.minting_account.as_ref() == Some(&args.to);
+        if state.too_old_failures_remaining > 0 {
+            state.too_old_failures_remaining -= 1;
+            return Err(TransferError::TooOld);
+        }
+
         // Minting-account transfers create tokens; transfers to the configured
-        // minting account burn the source amount. All other transfers debit the
-        // caller and credit the recipient.
+        // minting account burn the source amount without a fee. All other
+        // transfers debit the caller and credit the recipient.
         if !is_mint {
             let balance = state.balances.get(&from).copied().unwrap_or(0);
-            if amount + state.fee > balance {
+            let debit = amount + if is_burn { 0 } else { state.fee };
+            if debit > balance {
                 return Err(TransferError::InsufficientFunds {
                     balance: Nat::from(balance),
                 });
@@ -337,17 +350,18 @@ fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
         if is_mint {
             *state.balances.entry(args.to.clone()).or_insert(0) += amount;
         } else {
-            *state.balances.entry(from.clone()).or_insert(0) -= amount + state.fee;
+            let debit = amount + if is_burn { 0 } else { state.fee };
+            *state.balances.entry(from.clone()).or_insert(0) -= debit;
             if !is_burn {
                 *state.balances.entry(args.to.clone()).or_insert(0) += amount;
             }
         }
-        state.block_index += 1;
         let landed_block = state.block_index;
+        state.block_index += 1;
         let (btype, op, block_from, block_to, block_fee) = if is_mint {
             ("1mint", "mint", None, Some(icrc_account(args.to.owner, args.to.subaccount)), None)
         } else if is_burn {
-            ("1burn", "burn", Some(icrc_account(caller, args.from_subaccount)), None, Some(state.fee))
+            ("1burn", "burn", Some(icrc_account(caller, args.from_subaccount)), None, None)
         } else {
             ("1xfer", "xfer", Some(icrc_account(caller, args.from_subaccount)), Some(icrc_account(args.to.owner, args.to.subaccount)), Some(state.fee))
         };
@@ -366,6 +380,11 @@ fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
             state.dedup.insert(key, landed_block);
         }
 
+        if state.trap_after_commit_for_caller == Some(caller) {
+            state.trap_after_commit_for_caller = None;
+            trap_after_commit = true;
+        }
+
         // Phantom-failure mode: the transfer committed above but we return an
         // error to the caller, simulating a lost reply.
         if state.phantom_failures_remaining > 0 {
@@ -377,7 +396,17 @@ fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
         }
 
         Ok(Nat::from(landed_block))
-    })
+    });
+
+    if trap_after_commit {
+        // Await a self-call after the state changes have crossed an IC await
+        // boundary, then trap so the caller receives a transport reject while
+        // the committed ledger mutation remains visible.
+        let _: Result<(), _> = ic_cdk::call(ic_cdk::id(), "yield_after_commit", ()).await;
+        ic_cdk::trap("Injected trap after committed transfer");
+    }
+
+    transfer_result
 }
 
 // ─── ICRC-2 ───
@@ -393,8 +422,8 @@ fn icrc2_approve(args: ApproveArgs) -> Result<Nat, ApproveError> {
 
         state.allowances.insert((from.clone(), spender.clone()), amount);
 
-        state.block_index += 1;
         let index = state.block_index;
+        state.block_index += 1;
         push_block(
             &mut state, "2approve", "approve", Some(icrc_account(from.owner, from.subaccount)),
             None, amount, None, args.memo.clone(), args.created_at_time, Some(icrc_account(spender.owner, spender.subaccount)),
@@ -466,8 +495,8 @@ fn icrc2_transfer_from(args: TransferFromArgs) -> Result<Nat, TransferFromError>
 
         *state.balances.entry(from.clone()).or_insert(0) -= amount + state.fee;
         *state.balances.entry(args.to.clone()).or_insert(0) += amount;
-        state.block_index += 1;
         let landed_block = state.block_index;
+        state.block_index += 1;
         let transfer_fee = state.fee;
         push_block(
             &mut state, "2xfer", "xfer", Some(icrc_account(from.owner, from.subaccount)),
@@ -543,6 +572,22 @@ fn set_phantom_failures(n: u32) {
 #[update]
 fn set_phantom_transfer_failures(n: u32) {
     set_phantom_failures(n);
+}
+
+/// Cause the next transfer from `caller` to trap after committing and yielding.
+#[update]
+fn set_trap_after_commit_for_caller(caller: Option<Principal>) {
+    STATE.with(|s| s.borrow_mut().trap_after_commit_for_caller = caller);
+}
+
+/// Self-call target used to create an await boundary after a committed transfer.
+#[update]
+fn yield_after_commit() {}
+
+/// Make the next N transfers return TooOld before any balance mutation.
+#[update]
+fn set_too_old_failures(n: u32) {
+    STATE.with(|s| s.borrow_mut().too_old_failures_remaining = n);
 }
 
 /// Test-only ICRC-1 minting-account configuration.

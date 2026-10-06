@@ -509,19 +509,12 @@ fn configured_token_ledger(ledger: Principal) -> bool {
     crate::state::read_state(|s| s.config.tokens.iter().any(|token| token.ledger_id == ledger))
 }
 
-fn has_reviewed_ledger_lineage(ledger: Principal) -> bool {
-    // Runtime admission is bound to the configured principal. These profiles
-    // are the source/module-hash pairs independently checked for this release:
-    // icUSD uses the Rumi-pinned `fc278709` source (live hash cb0c3233...);
-    // ckUSDT and ckUSDC use official DFINITY `ledger-suite-icrc-2026-03-09`
-    // source `cf41372e3d4dc1accfe2c09a7969f8bddc729dc1` (live hash
-    // 390e2237...bda4c56). The production V1 admission gate remains closed
-    // until final artifact/review checks; unknown principals stay held.
-    [
-        "t6bor-paaaa-aaaap-qrd5q-cai",
-        "cngnf-vqaaa-aaaar-qag4q-cai",
-        "xevnm-gaaaa-aaaar-qafnq-cai",
-    ].into_iter().filter_map(|text| Principal::from_text(text).ok()).any(|id| id == ledger)
+fn has_reviewed_ledger_lineage(_ledger: Principal) -> bool {
+    // A principal alone does not pin the installed ledger implementation.
+    // Keep production absence-based identity rotation disabled until admission
+    // binds each ledger's actual module hash and archive schema. Positive exact
+    // receipt reconciliation remains available without an absence profile.
+    false
 }
 
 /// Scan at most 100 consecutive ledger indexes. Missing, duplicate, extra,
@@ -620,8 +613,6 @@ fn validate_scannable_block(block: &Icrc3Value) -> Result<(), String> {
     }
     fn is_nat(value: Option<&Icrc3Value>) -> bool { matches!(value, Some(Icrc3Value::Nat(_))) }
     fn is_blob(value: Option<&Icrc3Value>) -> bool { matches!(value, Some(Icrc3Value::Blob(_))) }
-    fn optional_nat(value: Option<&Icrc3Value>) -> bool { value.is_none() || is_nat(value) }
-    fn optional_blob(value: Option<&Icrc3Value>) -> bool { value.is_none() || is_blob(value) }
     fn is_account(value: Option<&Icrc3Value>) -> bool {
         matches!(value, Some(Icrc3Value::Array(parts)) if (1..=2).contains(&parts.len()) && matches!(parts.first(), Some(Icrc3Value::Blob(_))) && parts.get(1).map(|v| matches!(v, Icrc3Value::Blob(bytes) if bytes.len() == 32)).unwrap_or(true))
     }
@@ -636,8 +627,12 @@ fn validate_scannable_block(block: &Icrc3Value) -> Result<(), String> {
     match (btype, op) {
         (None, "xfer") | (Some("1xfer"), "xfer") | (Some("2xfer"), "xfer") => {
             if !is_account(field(tx, "from")) || !is_account(field(tx, "to"))
-                || !is_nat(field(tx, "amt")) || !optional_nat(field(tx, "fee").or_else(|| field(block, "fee")))
-                || !optional_nat(field(tx, "ts")) || !optional_blob(field(tx, "memo"))
+                // Absence proof is only safe when every field used by the
+                // exact matcher is present. Treating a missing identity field
+                // as a mismatch could retire an obligation whose ledger
+                // history omits metadata needed to recognize its transfer.
+                || !is_nat(field(tx, "amt")) || !is_nat(field(tx, "fee").or_else(|| field(block, "fee")))
+                || !is_nat(field(tx, "ts")) || !is_blob(field(tx, "memo"))
                 || (btype == Some("2xfer") && !is_account(field(tx, "spender")))
             { return Err("malformed transfer block cannot support absence proof".into()); }
         }
@@ -925,6 +920,19 @@ fn transfer_identity_hash(transfer: &SwapTransferV1) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn production_absence_profiles_remain_closed_without_live_hash_attestation() {
+        for ledger in [
+            "t6bor-paaaa-aaaap-qrd5q-cai",
+            "cngnf-vqaaa-aaaar-qag4q-cai",
+            "xevnm-gaaaa-aaaar-qafnq-cai",
+        ] {
+            assert!(!has_reviewed_ledger_lineage(
+                Principal::from_text(ledger).expect("known ledger principal")
+            ));
+        }
+    }
     fn intent_id(sequence: u64) -> Vec<u8> {
         let mut id = vec![0; 32];
         id[..8].copy_from_slice(&sequence.to_be_bytes());
@@ -987,16 +995,22 @@ mod tests {
             ("tx".into(), Icrc3Value::Map(vec![("op".into(), Icrc3Value::Text("future".into()))])),
         ]);
         assert!(validate_scannable_block(&unknown).is_err());
-        let no_optional_fields = Icrc3Value::Map(vec![
+        // Same accounts and amount as the saved transfer, but no memo or
+        // created-at timestamp. It cannot be treated as a non-match in an
+        // absence scan because it may be an incomplete ledger encoding of
+        // that exact transfer.
+        let missing_identity_fields = Icrc3Value::Map(vec![
             ("btype".into(), Icrc3Value::Text("1xfer".into())),
             ("tx".into(), Icrc3Value::Map(vec![
                 ("op".into(), Icrc3Value::Text("xfer".into())),
+                ("fee".into(), Icrc3Value::Nat(Nat::from(10u8))),
                 ("from".into(), account(pool)),
                 ("to".into(), account(user)),
-                ("amt".into(), Icrc3Value::Nat(Nat::from(1u8))),
+                ("amt".into(), Icrc3Value::Nat(Nat::from(900u16))),
             ])),
         ]);
-        assert!(validate_scannable_block(&no_optional_fields).is_ok());
+        assert!(!block_matches_transfer(&missing_identity_fields, &expected, false, pool));
+        assert!(validate_scannable_block(&missing_identity_fields).is_err());
         let mut malformed = block;
         if let Icrc3Value::Map(fields) = &mut malformed {
             if let Some((_, Icrc3Value::Map(tx))) = fields.iter_mut().find(|(key, _)| key == "tx") {

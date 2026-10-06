@@ -2446,6 +2446,8 @@ mod pending_burn_history_scan_tests {
             fee: None,
             memo: Some(crate::liquidation::encode_chain_writedown_memo(VAULT)),
             created_at_time: Some(CAT),
+            expected_allowance: None,
+            expires_at: None,
         }
     }
 

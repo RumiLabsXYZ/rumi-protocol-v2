@@ -591,7 +591,7 @@ pub async fn get_events_resilient(
     backend: Principal,
     start: u64,
     length: u64,
-) -> Result<(Vec<BackendEvent>, u64), String> {
+) -> Result<(Vec<(u64, BackendEvent)>, u64), String> {
     let arg = GetEventsArg { start, length };
     let arg_bytes = candid::encode_one(&arg)
         .map_err(|e| format!("get_events_resilient encode: {}", e))?;

@@ -963,8 +963,8 @@ mod three_usd_ingress_receipt_tests {
                 _marker: std::marker::PhantomData,
             },
         };
-        assert!(archive_covers_index(&archive, 43));
-        assert!(!archive_covers_index(&archive, 44));
+        assert!(archive.args.iter().any(|request| request_covers_index(request, 43)));
+        assert!(!archive.args.iter().any(|request| request_covers_index(request, 44)));
 
         let exact = GetBlocksResult {
             log_length: Nat::from(100u64),
@@ -980,13 +980,28 @@ mod three_usd_ingress_receipt_tests {
             }],
             archived_blocks: vec![],
         };
-        assert!(extract_exact_archive_block(exact.clone(), 43).is_ok());
+        let ledger = Principal::from_slice(&[0x47]);
+        let response = GetBlocksResult {
+            log_length: Nat::from(100u64),
+            blocks: vec![],
+            archived_blocks: vec![archive.clone()],
+        };
+        let exact_response = exact.clone();
+        assert!(futures::executor::block_on(resolve_block_with_archive(
+            ledger, 43, response.clone(), |_archive_id, _method, _request| async move {
+                Ok(exact_response)
+            },
+        )).is_ok());
 
         let wrong_id = GetBlocksResult {
             blocks: vec![icrc_ledger_types::icrc3::blocks::BlockWithId { id: Nat::from(44u64), block: exact.blocks[0].block.clone() }],
             ..exact
         };
-        assert!(extract_exact_archive_block(wrong_id, 43).is_err());
+        assert!(futures::executor::block_on(resolve_block_with_archive(
+            ledger, 43, response, |_archive_id, _method, _request| async move {
+                Ok(wrong_id)
+            },
+        )).is_err());
     }
 }
 

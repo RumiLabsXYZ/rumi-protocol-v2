@@ -1260,7 +1260,9 @@ fn refund_identity_for_block(
             Some(_) => false,
             // The bundled official icUSD ledger can encode a recognized
             // operation in tx.op without a top-level btype.
-            None => matches!(decoded.op.as_str(), "mint" | "burn" | "xfer" | "approve"),
+            None => matches!(fields.get("tx"), Some(ICRC3Value::Map(tx))
+                if matches!(tx.get("op"), Some(ICRC3Value::Text(op))
+                    if matches!(op.as_str(), "mint" | "burn" | "xfer" | "approve"))),
         },
         _ => false,
     };

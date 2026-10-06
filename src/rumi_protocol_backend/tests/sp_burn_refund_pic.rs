@@ -269,7 +269,7 @@ fn fixture_with_memo_limit(max_memo_length: u16) -> Fixture {
         encode_args((init,)).expect("encode backend init"),
         None,
     );
-    expect_unit(
+    expect_ok(
         pic.update_call(
             backend,
             developer,
@@ -544,7 +544,12 @@ fn consumed_proofs(f: &Fixture) -> Vec<(SpProofLedger, u64)> {
 fn expired_refund_scans_archive_then_retries_only_after_too_old_and_complete_absence() {
     let f = fixture_with_memo_limit(21);
     let (_, proof) = burn(&f);
-    let original_created_at_time = f.pic.get_time().as_nanos_since_unix_epoch();
+    let original_created_at_time: u64 = f.pic.get_time()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("PocketIC time is after Unix epoch")
+        .as_nanos()
+        .try_into()
+        .expect("PocketIC timestamp fits u64 nanoseconds");
 
     // The official ledger accepts the 21-byte burn memo and rejects the
     // backend's 24-byte refund memo. Proof and minter reads therefore succeed,
@@ -691,7 +696,12 @@ fn committed_refund_lost_reply_recovers_original_mint_after_dedup_expiry() {
             .expect("arm lost-reply injection"),
         "arm lost-reply injection",
     );
-    assert!(refund(&f, f.sp, f.vault_id, f.amount, proof.clone()).is_err());
+    let first_error = refund(&f, f.sp, f.vault_id, f.amount, proof.clone())
+        .expect_err("injected lost reply should return a protocol error");
+    assert!(
+        format!("{first_error:?}").contains("Injected trap after committed transfer"),
+        "the first refund must fail at the committed ledger reply: {first_error:?}"
+    );
     assert_eq!(balance(&f), f.starting_balance);
 
     // This test ledger exposes explicit controls instead of implementing the

@@ -1624,7 +1624,7 @@ mod claim_intent_tests {
                 claim_transfer: None,
             }),
         };
-        let tuple = |fee, amount, created_at_time| BotClaimReturnTransfer {
+        let tuple = |fee: u64, amount: u64, created_at_time: u64| BotClaimReturnTransfer {
             ledger,
             from: Account { owner: bot, subaccount: None },
             collateral_amount_e8s: 1_000,

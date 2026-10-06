@@ -16,16 +16,13 @@ unknown block types, or malformed transfer fields. A complete negative scan
 retains a hash-chain tombstone and rotates the exact transfer timestamp/memo;
 it does not dispatch the replacement in the same call.
 
-That recovery path is still not a production admission decision. Reviewed
-source/module-hash profiles cover icUSD (`t6bor-paaaa-aaaap-qrd5q-cai`, pinned
-Rumi source `fc278709`), ckUSDT (`cngnf-vqaaa-aaaar-qag4q-cai`), and ckUSDC
-(`xevnm-gaaaa-aaaar-qafnq-cai`); the latter two match the official DFINITY
-`ledger-suite-icrc-2026-03-09` source commit
-`cf41372e3d4dc1accfe2c09a7969f8bddc729dc1`. The scan allowlist is principal
-based and the canister does not attest a ledger's live module hash at runtime.
-Production V1 ingress remains explicitly disabled until the source-matched
-PocketIC/archive matrix and independent review pass and the ledger-specific
-trust gate is resolved. Do not describe V1 ingress as ready for rollout.
+That recovery path is still not a production admission decision. Production
+absence-based rotation is disabled for every ledger: a configured principal
+alone cannot prove the installed module hash or archive schema. A matching
+exact transfer receipt can still be reconciled. Production V1 ingress also
+remains explicitly disabled until the source-matched PocketIC/archive matrix,
+independent review, and ledger-specific trust gate are complete. Do not
+describe V1 ingress or absence recovery as ready for rollout.
 
 A receipt request binds an exactly 32-byte `intent_id`, input/output coin
 indices, input amount `dx`, and net minimum received `min_dy`. IDs are scoped to

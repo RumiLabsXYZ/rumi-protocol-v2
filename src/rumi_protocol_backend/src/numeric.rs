@@ -26,14 +26,6 @@ pub fn proportional_interest_share(repaid_e8s: u64, accrued_e8s: u64, debt_e8s: 
     share.min(u128::from(accrued_e8s)) as u64
 }
 
-pub fn try_icusd_to_collateral_amount(icusd_value: ICUSD, price_usd: Decimal, decimals: u8) -> Option<u64> {
-    if price_usd <= Decimal::ZERO { return None; }
-    let usd_value = Decimal::from(icusd_value.to_u64()) / dec!(100_000_000);
-    let scale = 10u64.checked_pow(decimals as u32)?;
-    usd_value.checked_div(price_usd)?.checked_mul(Decimal::from(scale))?.to_u64()
-}
-
-
 #[derive(PartialEq, Eq, Debug, Ord, PartialOrd, Clone, Copy)]
 pub struct Amount<T>(pub Decimal, pub PhantomData<T>);
 
@@ -505,9 +497,9 @@ pub fn collateral_to_whole_tokens(amount: u64, decimals: u8) -> Decimal {
 /// Given a USD value (as ICUSD e8s), a price per whole token, and decimals,
 /// returns the raw token amount in native precision.
 /// Example: 10 icUSD at $5/token with 8 decimals = 2 * 10^8 = 200_000_000 raw units.
-/// Returns `None` when the conversion is undefined or the raw amount cannot be
-/// represented as a `u64`. Financial decision points must use this checked
-/// form rather than interpreting an overflow as zero collateral.
+/// Returns `None` when the conversion is undefined, arithmetic overflows, or
+/// the raw amount cannot be represented as a `u64`. Financial decision points
+/// must use this checked form rather than interpreting failure as zero collateral.
 pub fn try_icusd_to_collateral_amount(
     icusd_value: ICUSD,
     price_usd: Decimal,
@@ -517,9 +509,9 @@ pub fn try_icusd_to_collateral_amount(
         return None;
     }
     let raw_unit_scale = 10u64.checked_pow(u32::from(decimals))?;
-    let usd_value = Decimal::from(icusd_value.to_u64()) / dec!(100_000_000);
-    let whole_tokens = usd_value / price_usd;
-    let raw_amount = whole_tokens * Decimal::from(raw_unit_scale);
+    let usd_value = Decimal::from(icusd_value.to_u64()).checked_div(Decimal::from(E8S))?;
+    let whole_tokens = usd_value.checked_div(price_usd)?;
+    let raw_amount = whole_tokens.checked_mul(Decimal::from_u64(raw_unit_scale)?)?;
     raw_amount.to_u64()
 }
 
@@ -528,25 +520,6 @@ pub fn try_icusd_to_collateral_amount(
 /// `try_icusd_to_collateral_amount` and handle failure explicitly.
 pub fn icusd_to_collateral_amount(icusd_value: ICUSD, price_usd: Decimal, decimals: u8) -> u64 {
     try_icusd_to_collateral_amount(icusd_value, price_usd, decimals).unwrap_or(0)
-}
-
-/// Checked form for paths that have already accepted an external payment.
-/// Invalid prices, decimal ranges, arithmetic overflow, and raw amounts that
-/// cannot be represented all fail closed instead of silently becoming zero.
-pub fn try_icusd_to_collateral_amount(
-    icusd_value: ICUSD,
-    price_usd: Decimal,
-    decimals: u8,
-) -> Option<u64> {
-    if price_usd <= Decimal::ZERO {
-        return None;
-    }
-    let scale = 10u64.checked_pow(u32::from(decimals))?;
-    let usd_value = Decimal::from(icusd_value.to_u64())
-        .checked_div(Decimal::from(E8S))?;
-    let whole_tokens = usd_value.checked_div(price_usd)?;
-    let raw_amount = whole_tokens.checked_mul(Decimal::from_u64(scale)?)?;
-    raw_amount.to_u64()
 }
 
 impl<T> fmt::Display for Amount<T> {

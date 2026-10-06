@@ -721,7 +721,7 @@ async fn admin_backfill_add_margin_events(
         {
             if storage::events::push_add_margin_if_new(storage::events::AnalyticsVaultEvent {
                 timestamp_ns: timestamp.unwrap_or(0),
-                source_event_id: event_id,
+                source_event_id: *event_id,
                 vault_id: *vault_id,
                 owner: actor.unwrap_or(candid::Principal::anonymous()),
                 event_kind: storage::events::VaultEventKind::CollateralDeposited,

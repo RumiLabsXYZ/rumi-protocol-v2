@@ -796,7 +796,7 @@ impl StabilityPoolState {
         {
             return false;
         }
-        self.add_deposit(caller, token_ledger, amount);
+        self.add_deposit_at(caller, token_ledger, amount, now_ns);
         self.pending_deposit_intents
             .as_mut()
             .expect("pending deposit map initialized")
@@ -939,10 +939,14 @@ impl StabilityPoolState {
     }
 
     pub fn add_deposit(&mut self, user: Principal, token_ledger: Principal, amount: u64) {
+        self.add_deposit_at(user, token_ledger, amount, ic_cdk::api::time());
+    }
+
+    fn add_deposit_at(&mut self, user: Principal, token_ledger: Principal, amount: u64, now_ns: u64) {
         let position = self
             .deposits
             .entry(user)
-            .or_insert_with(|| DepositPosition::new(ic_cdk::api::time()));
+            .or_insert_with(|| DepositPosition::new(now_ns));
         *position
             .stablecoin_balances
             .entry(token_ledger)

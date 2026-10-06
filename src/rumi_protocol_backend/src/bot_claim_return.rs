@@ -202,6 +202,9 @@ pub fn validate_icrc3_return_block(
     memo: &[u8],
     created_at_time: u64,
 ) -> Result<(), String> {
+    if block.btype.as_deref() != Some("1xfer") || block.spender.is_some() {
+        return Err("return receipt must be a bot-authored ICRC-1 transfer".into());
+    }
     if block.op != "transfer" && block.op != "xfer" {
         return Err("return receipt is not a transfer block".into());
     }
@@ -534,6 +537,21 @@ mod tests {
         let mut donation_like = valid.clone();
         donation_like.amount = 1_000;
         assert!(validate_icrc3_return_block(&donation_like, bot, destination, 1_000, 10, &memo, 501).is_err());
+        let mut delegated = valid.clone();
+        delegated.btype = Some("2xfer".into());
+        delegated.spender = Some(Account { owner: Principal::from_slice(&[5]), subaccount: None });
+        assert!(validate_icrc3_return_block(
+            &delegated, bot, valid.to.clone().unwrap(), 1_000, 10, &memo, 501,
+        ).is_err());
+        delegated.btype = Some("1xfer".into());
+        assert!(validate_icrc3_return_block(
+            &delegated, bot, valid.to.clone().unwrap(), 1_000, 10, &memo, 501,
+        ).is_err());
+        delegated.spender = None;
+        delegated.btype = None;
+        assert!(validate_icrc3_return_block(
+            &delegated, bot, valid.to.clone().unwrap(), 1_000, 10, &memo, 501,
+        ).is_err());
     }
 
     #[test]

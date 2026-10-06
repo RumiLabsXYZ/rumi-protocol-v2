@@ -7413,7 +7413,7 @@ async fn cl07_recovered_vault_after_pull_test_gate() -> Result<(), ProtocolError
 
 #[cfg(test)]
 mod legacy_three_usd_reserve_endpoint_tests {
-    use super::{stability_pool_liquidate_with_reserves, ProtocolError};
+    use super::{stability_pool_liquidate_with_reserves, v2_committed_refund_child_compatible, ProtocolError};
     use candid::Principal;
 
     #[test]
@@ -7432,6 +7432,22 @@ mod legacy_three_usd_reserve_endpoint_tests {
             }
             other => panic!("expected typed legacy-route refusal, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn committed_v2_proof_can_recreate_missing_refund_child_but_not_replace_wrong_one() {
+        assert!(v2_committed_refund_child_compatible(None, 50));
+        assert!(v2_committed_refund_child_compatible(Some(50), 50));
+        assert!(!v2_committed_refund_child_compatible(Some(49), 50));
+        assert!(v2_committed_refund_child_compatible(None, 0));
+        assert!(!v2_committed_refund_child_compatible(Some(1), 0));
+    }
+}
+
+fn v2_committed_refund_child_compatible(existing: Option<u64>, expected: u64) -> bool {
+    match existing {
+        None => true,
+        Some(amount) => expected > 0 && amount == expected,
     }
 }
 
@@ -7970,8 +7986,10 @@ async fn stability_pool_liquidate_with_reserves_inner(
                     ))?
                     / icusd_debt_covered_e8s as u128) as u64;
                 let expected_refund = three_usd_amount_e8s.saturating_sub(realized_3usd);
-                if journal.refund.as_ref().map(|refund| refund.gross_amount_e8s)
-                    != (expected_refund > 0).then_some(expected_refund)
+                if !v2_committed_refund_child_compatible(
+                    journal.refund.as_ref().map(|refund| refund.gross_amount_e8s),
+                    expected_refund,
+                )
                 {
                     return Err(ProtocolError::GenericError(
                         "V2 proportional refund child disagrees with the committed applied result; held for reconciliation".into(),
@@ -14499,13 +14517,41 @@ fn get_sp_writedown_disabled() -> bool {
     read_state(|s| s.sp_writedown_disabled)
 }
 
-/// Wave-8d LIQ-004: snapshot of the consumed-writedown-proof set, used by
-/// ops monitoring (cross-check on-chain reserves vs sum of writedowns) and
-/// by the PocketIC fence for the Phase-2 wave. Returned as a Vec rather
-/// than a Set so it round-trips cleanly through Candid.
+/// Frozen projection for clients that predate the 3USD default-account proof
+/// kind. Adding a variant to this method's result would make those clients
+/// unable to decode even an empty response under Candid subtype checks.
+#[derive(candid::CandidType, serde::Deserialize)]
+enum ConsumedWritedownProofLedgerV1 {
+    IcusdBurn,
+    ThreePoolTransfer,
+}
+
+/// Legacy monitoring projection. New proof kinds are exposed by the V2 query
+/// below; do not mislabel them as an older ledger kind.
 #[candid_method(query)]
 #[query]
-fn get_consumed_writedown_proofs() -> Vec<(rumi_protocol_backend::icrc3_proof::SpProofLedger, u64)>
+fn get_consumed_writedown_proofs() -> Vec<(ConsumedWritedownProofLedgerV1, u64)>
+{
+    use rumi_protocol_backend::icrc3_proof::SpProofLedger;
+    read_state(|s| {
+        s.consumed_writedown_proofs
+            .iter()
+            .filter_map(|(kind, block)| {
+                let legacy = match kind {
+                    SpProofLedger::IcusdBurn => ConsumedWritedownProofLedgerV1::IcusdBurn,
+                    SpProofLedger::ThreePoolTransfer => ConsumedWritedownProofLedgerV1::ThreePoolTransfer,
+                    SpProofLedger::ThreePoolTransferDefault => return None,
+                };
+                Some((legacy, *block))
+            })
+            .collect()
+    })
+}
+
+/// Complete proof set, including receipt-backed 3USD default-account ingress.
+#[candid_method(query)]
+#[query]
+fn get_consumed_writedown_proofs_v2() -> Vec<(rumi_protocol_backend::icrc3_proof::SpProofLedger, u64)>
 {
     read_state(|s| s.consumed_writedown_proofs.iter().copied().collect())
 }

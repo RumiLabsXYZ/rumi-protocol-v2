@@ -1789,6 +1789,8 @@ mod tests {
             fee: Some(10_000),
             memo: Some(memo),
             created_at_time: Some(123),
+            expected_allowance: None,
+            expires_at: None,
         };
         let source = Account { owner: Principal::anonymous(), subaccount: None };
         let mut exact = exact;

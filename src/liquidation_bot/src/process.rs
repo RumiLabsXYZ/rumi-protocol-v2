@@ -3218,7 +3218,7 @@ mod tests {
                 },
                 amount: candid::Nat::from(101u64),
                 fee: Some(candid::Nat::from(1u64)),
-                memo: Some(icrc_ledger_types::icrc1::transfer::Memo::from(b"return".as_slice())),
+                memo: Some(icrc_ledger_types::icrc1::transfer::Memo::from(b"return".to_vec())),
                 created_at_time: Some(56),
             },
             block_index: None,
