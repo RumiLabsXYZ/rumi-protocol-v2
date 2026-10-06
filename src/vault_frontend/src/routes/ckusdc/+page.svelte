@@ -5,6 +5,7 @@
   import { CANISTER_IDS } from '$lib/config';
   import CkErc20TokenSelect from '$lib/components/common/CkErc20TokenSelect.svelte';
   import { ckErc20Logo, featuredCkErc20Symbols } from '$lib/utils/ckerc20Logos';
+  import { withCkErc20WithdrawalLock } from '$lib/utils/ckerc20WithdrawalLock';
   import {
     CKERC20_MINTER_DASHBOARD,
     discoverCkErc20Tokens,
@@ -27,6 +28,36 @@
     on?: (event: string, listener: (...args: any[]) => void) => void;
     removeListener?: (event: string, listener: (...args: any[]) => void) => void;
   };
+
+  type EvmSessionSnapshot = {
+    provider: Eip1193Provider;
+    account: string;
+    epoch: number;
+  };
+
+  function assertEvmSessionCurrent(session: EvmSessionSnapshot) {
+    if (
+      destroyed || evmManuallyDisconnected ||
+      getEthereumProvider() !== session.provider ||
+      evmSessionEpoch !== session.epoch ||
+      evmAccount.toLowerCase() !== session.account.toLowerCase()
+    ) {
+      throw new Error('The Ethereum wallet account, network, or provider changed during this deposit. No later transaction was sent; restart and review the deposit.');
+    }
+  }
+
+  async function assertEvmSessionOnProvider(session: EvmSessionSnapshot) {
+    assertEvmSessionCurrent(session);
+    const chainId = await session.provider.request({ method: 'eth_chainId' });
+    assertEvmSessionCurrent(session);
+    if (chainId !== '0x1') throw new Error('Choose Ethereum Mainnet again, then restart and review the deposit.');
+
+    const accounts = await session.provider.request({ method: 'eth_accounts' });
+    assertEvmSessionCurrent(session);
+    if (!Array.isArray(accounts) || String(accounts[0] ?? '').toLowerCase() !== session.account.toLowerCase()) {
+      throw new Error('The selected Ethereum account changed during this deposit. No later transaction was sent; reconnect and review it again.');
+    }
+  }
 
   function getEthereumProvider(): Eip1193Provider | undefined {
     return (window as Window & { ethereum?: Eip1193Provider }).ethereum;
@@ -84,6 +115,7 @@
   let ethereumProvider: Eip1193Provider | undefined;
   let accountChangedListener: ((accounts: unknown) => void) | null = null;
   let chainChangedListener: ((chainId: unknown) => void) | null = null;
+  let providerDisconnectedListener: (() => void) | null = null;
 
   function depositStorageKey(evm: string, principal: string, ledgerId: string) {
     return `rumi:ckerc20:pending-deposit:${evm.toLowerCase()}:${principal}:${ledgerId}`;
@@ -207,6 +239,7 @@
     ethereumProvider = getEthereumProvider();
     accountChangedListener = (accounts) => {
       if (evmManuallyDisconnected) return;
+      evmSessionEpoch += 1;
       evmTokenBalanceRequestId += 1;
       evmTokenBalanceBusy = false;
       evmAccount = Array.isArray(accounts) && accounts[0] ? String(accounts[0]) : '';
@@ -218,6 +251,7 @@
     };
     chainChangedListener = (chainId) => {
       if (evmManuallyDisconnected) return;
+      evmSessionEpoch += 1;
       evmTokenBalanceRequestId += 1;
       evmTokenBalanceBusy = false;
       evmTokenBalance = null;
@@ -229,8 +263,19 @@
         evmMessage = 'Choose Ethereum Mainnet in your EVM wallet to read your token balance and deposit.';
       }
     };
+    providerDisconnectedListener = () => {
+      if (evmManuallyDisconnected) return;
+      evmSessionEpoch += 1;
+      evmTokenBalanceRequestId += 1;
+      evmTokenBalanceBusy = false;
+      evmAccount = '';
+      evmTokenBalance = null;
+      evmTokenBalanceError = '';
+      evmMessage = 'The Ethereum wallet disconnected. Reconnect it and review the deposit again.';
+    };
     ethereumProvider?.on?.('accountsChanged', accountChangedListener);
     ethereumProvider?.on?.('chainChanged', chainChangedListener);
+    ethereumProvider?.on?.('disconnect', providerDisconnectedListener);
     void loadMinterInfo();
     void (async () => {
       const sessionEpoch = evmSessionEpoch;
@@ -258,6 +303,7 @@
     unsubs.forEach((unsubscribe) => unsubscribe());
     if (accountChangedListener) ethereumProvider?.removeListener?.('accountsChanged', accountChangedListener);
     if (chainChangedListener) ethereumProvider?.removeListener?.('chainChanged', chainChangedListener);
+    if (providerDisconnectedListener) ethereumProvider?.removeListener?.('disconnect', providerDisconnectedListener);
   });
 
   async function refreshEvmTokenBalance(account = evmAccount, token = selectedToken) {
@@ -448,9 +494,7 @@
     // Keep persistent transaction markers so reconnecting restores unresolved operations.
   }
 
-  async function waitForReceipt(hash: string, onReceipt?: () => void) {
-    const provider = getEthereumProvider();
-    if (!provider) throw new Error('EVM wallet disconnected while waiting for transaction confirmation.');
+  async function waitForReceipt(hash: string, provider: Eip1193Provider, onReceipt?: () => void) {
     const deadline = Date.now() + 180_000;
     while (Date.now() < deadline) {
       const receipt = await provider.request({ method: 'eth_getTransactionReceipt', params: [hash] });
@@ -466,6 +510,7 @@
   }
 
   async function submitEthereumTransaction(
+    session: EvmSessionSnapshot,
     to: string,
     data: string,
     onSubmitted: (hash: string) => void,
@@ -473,18 +518,14 @@
     onSubmitting?: () => void,
     onRejected?: () => void,
   ): Promise<string> {
-    const provider = getEthereumProvider();
-    if (!provider || !evmAccount) throw new Error('Connect an Ethereum wallet first.');
-    const chainId = await provider.request({ method: 'eth_chainId' });
-    if (chainId !== '0x1') throw new Error('Switch your EVM wallet to Ethereum Mainnet before submitting.');
-    const accounts = await provider.request({ method: 'eth_accounts' });
-    if (!Array.isArray(accounts) || String(accounts[0]).toLowerCase() !== evmAccount.toLowerCase()) {
-      throw new Error('The selected Ethereum account changed. Reconnect it and review the recipient identity before submitting.');
-    }
+    await assertEvmSessionOnProvider(session);
     onSubmitting?.();
+    // Recheck synchronously at the send boundary so an event delivered after
+    // the RPC checks cannot authorize a transaction under a stale session.
+    assertEvmSessionCurrent(session);
     let response: any;
     try {
-      response = await provider.request({ method: 'eth_sendTransaction', params: [{ from: evmAccount, to, data, value: '0x0' }] });
+      response = await session.provider.request({ method: 'eth_sendTransaction', params: [{ from: session.account, to, data, value: '0x0' }] });
     } catch (cause) {
       if ((cause as any)?.code === 4001) onRejected?.();
       throw cause;
@@ -492,7 +533,7 @@
     const hash = String(response);
     if (!/^0x[0-9a-f]{64}$/i.test(hash)) throw new Error('The wallet did not return a valid transaction hash. The submission remains locked until you reconcile Ethereum wallet activity.');
     onSubmitted(hash);
-    await waitForReceipt(hash, onReceipt);
+    await waitForReceipt(hash, session.provider, onReceipt);
     return hash;
   }
 
@@ -509,7 +550,11 @@
       return;
     }
     if (!minterReady || !helperAddress) { error = minterError || 'The live ckERC20 minter configuration is not ready.'; return; }
-    if (!evmAccount) { evmMessage = 'Connect an Ethereum wallet to pay for the token approval and deposit transactions.'; return; }
+    const expectedProvider = getEthereumProvider();
+    const expectedEvmAccount = evmAccount;
+    const expectedEvmEpoch = evmSessionEpoch;
+    if (!expectedProvider || !expectedEvmAccount) { evmMessage = 'Connect an Ethereum wallet to pay for the token approval and deposit transactions.'; return; }
+    const evmSession: EvmSessionSnapshot = { provider: expectedProvider, account: expectedEvmAccount, epoch: expectedEvmEpoch };
     let amount: bigint;
     try { amount = parseTokenAmount(depositAmount, token.decimals); }
     catch (cause) { error = cause instanceof Error ? cause.message : 'Invalid amount.'; return; }
@@ -523,13 +568,16 @@
     if (!locks?.request) { error = 'This browser cannot safely coordinate minter transactions across tabs. Use a supported browser with Web Locks enabled.'; return; }
     busy = true;
     try {
-      await locks.request(`rumi:ckerc20:deposit:${evmAccount.toLowerCase()}:${token.ledgerId}`, { mode: 'exclusive', ifAvailable: true }, async (lock: unknown) => {
+      await locks.request(`rumi:ckerc20:deposit:${evmSession.account.toLowerCase()}:${token.ledgerId}`, { mode: 'exclusive', ifAvailable: true }, async (lock: unknown) => {
       if (!lock) throw new Error(`Another ${token.symbol} deposit is already active in another tab. Wait for it to finish, then check its status.`);
+      assertEvmSessionCurrent(evmSession);
       syncPendingDeposit(token);
       if (pendingDeposit) throw new Error(pendingDeposit.hash ? `A deposit transaction is still unresolved: ${pendingDeposit.hash}. Check its status before starting another deposit.` : 'A prior deposit submission has no confirmed result. Check Ethereum wallet activity before retrying.');
       requirePersistentOperationState();
       const minterActor = await getCkErc20MinterActor();
+      assertEvmSessionCurrent(evmSession);
       const currentInfo = await minterActor.get_minter_info();
+      assertEvmSessionCurrent(evmSession);
       assertTokenSupported(currentInfo, token);
       const liveMinimum = (currentInfo.minimum_deposit_amounts?.[0] ?? []).find(
         (item: any) => String(item.erc20_contract_address).toLowerCase() === token.erc20Address.toLowerCase(),
@@ -542,27 +590,33 @@
       if (!transactionHelper || !/^0x[0-9a-fA-F]{40}$/.test(transactionHelper)) throw new Error('The minter did not return a valid live Ethereum helper address.');
       helperAddress = transactionHelper;
       const provider = getEthereumProvider();
-      if (!provider) throw new Error('Connect an Ethereum wallet before checking its token allowance.');
+      if (!provider || provider !== evmSession.provider) throw new Error('The Ethereum provider changed. Reconnect and review the deposit again.');
+      await assertEvmSessionOnProvider(evmSession);
       const decimalsHex = await provider.request({ method: 'eth_call', params: [{ to: token.erc20Address, data: '0x313ce567' }, 'latest'] });
+      assertEvmSessionCurrent(evmSession);
       if (Number(BigInt(String(decimalsHex))) !== token.decimals) throw new Error(`${token.symbol} Ethereum and ckERC20 ledgers report different decimal counts.`);
-      const balanceData = `0x70a08231${encodeAddressWord(evmAccount)}`;
+      const balanceData = `0x70a08231${encodeAddressWord(evmSession.account)}`;
       const balanceHex = await provider.request({ method: 'eth_call', params: [{ to: token.erc20Address, data: balanceData }, 'latest'] });
+      assertEvmSessionCurrent(evmSession);
       const freshEvmBalance = BigInt(String(balanceHex));
       evmTokenBalance = freshEvmBalance;
       if (freshEvmBalance < amount) throw new Error(`Not enough ${token.symbol} in the connected Ethereum wallet. Current balance: ${formatTokenAmount(freshEvmBalance, token.decimals)} ${token.symbol}.`);
-      const allowanceData = `0xdd62ed3e${encodeAddressWord(evmAccount)}${encodeAddressWord(transactionHelper)}`;
+      const allowanceData = `0xdd62ed3e${encodeAddressWord(evmSession.account)}${encodeAddressWord(transactionHelper)}`;
       const allowanceHex = await provider.request({ method: 'eth_call', params: [{ to: token.erc20Address, data: allowanceData }, 'latest'] });
+      assertEvmSessionCurrent(evmSession);
       const existingAllowance = BigInt(String(allowanceHex));
       if (existingAllowance > 0n) {
         notice = `Reset the existing ${token.symbol} allowance to zero before setting this deposit amount.`;
         const resetData = `0x095ea7b3${encodeAddressWord(transactionHelper)}${encodeUint256(0n)}`;
-        approveHash = await submitEthereumTransaction(token.erc20Address, resetData, (hash) => approveHash = hash);
+        approveHash = await submitEthereumTransaction(evmSession, token.erc20Address, resetData, (hash) => approveHash = hash);
       }
       const approveData = `0x095ea7b3${encodeAddressWord(transactionHelper)}${encodeUint256(amount)}`;
       notice = `Approve exactly ${formatTokenAmount(amount, token.decimals)} ${token.symbol} in your Ethereum wallet.`;
-      approveHash = await submitEthereumTransaction(token.erc20Address, approveData, (hash) => approveHash = hash);
+      approveHash = await submitEthereumTransaction(evmSession, token.erc20Address, approveData, (hash) => approveHash = hash);
+      assertEvmSessionCurrent(evmSession);
       if (ownerPrincipal?.toText() !== liveOwner.toText()) throw new Error(`${token.symbol} approval confirmed, but the receiving Internet Identity changed. No deposit was submitted. Approval transaction: ${approveHash}`);
       const latestInfo = await minterActor.get_minter_info();
+      assertEvmSessionCurrent(evmSession);
       assertTokenSupported(latestInfo, token);
       const latestHelper = latestInfo.deposit_with_subaccount_helper_contract_address?.[0];
       if (!latestHelper || latestHelper.toLowerCase() !== transactionHelper.toLowerCase()) {
@@ -570,17 +624,18 @@
       }
       notice = `${token.symbol} approval confirmed. Confirm the deposit transaction in your Ethereum wallet.`;
       const liveRecipient = liveOwner.toText();
-      const liveDepositKey = depositStorageKey(evmAccount, liveRecipient, token.ledgerId);
+      const liveDepositKey = depositStorageKey(evmSession.account, liveRecipient, token.ledgerId);
       depositHash = await submitEthereumTransaction(
+        evmSession,
         latestHelper,
         encodeDepositErc20(token, amount, liveOwner),
-        (hash) => { depositHash = hash; savePendingDeposit(hash, depositAmount, liveRecipient, evmAccount, liveRecipient, token); },
+        (hash) => { depositHash = hash; savePendingDeposit(hash, depositAmount, liveRecipient, evmSession.account, liveRecipient, token); },
         () => {
           try { localStorage.removeItem(liveDepositKey); } catch { /* Continue with confirmed receipt. */ }
           pendingDeposit = null;
         },
-        () => beginPendingDeposit(depositAmount, liveRecipient, evmAccount, liveRecipient, token),
-        () => clearPendingDepositMarker(evmAccount, liveRecipient, token),
+        () => beginPendingDeposit(depositAmount, liveRecipient, evmSession.account, liveRecipient, token),
+        () => clearPendingDepositMarker(evmSession.account, liveRecipient, token),
       );
       notice = `Ethereum deposit confirmed. The minter still needs to detect and mint ${token.symbol}; refresh the ICP balance to confirm arrival.`;
       depositAmount = '';
@@ -620,8 +675,8 @@
     if (!locks?.request) { error = 'This browser cannot safely coordinate minter transactions across tabs. Use a supported browser with Web Locks enabled.'; return; }
     busy = true;
     try {
-      await locks.request(`rumi:ckerc20:withdrawal:${owner.toText()}:${token.ledgerId}`, { mode: 'exclusive', ifAvailable: true }, async (lock: unknown) => {
-      if (!lock) throw new Error(`Another ${token.symbol} withdrawal is active in another tab. Wait for it to finish, then reconcile its status.`);
+      await withCkErc20WithdrawalLock(locks, owner.toText(), token.ledgerId, async (lock: unknown) => {
+      if (!lock) throw new Error('Another ckERC20 withdrawal is active in another tab. Wait for it to finish, then reconcile its status.');
       syncPendingWithdrawal(owner);
       if (pendingWithdrawal?.owner === owner.toText()) throw new Error('A prior withdrawal request has no confirmed response. Reconcile its ledger activity and minter status before retrying.');
       requirePersistentOperationState();

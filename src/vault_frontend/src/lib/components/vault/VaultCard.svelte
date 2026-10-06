@@ -12,7 +12,12 @@
   import { collateralStore } from '../../stores/collateralStore';
   import { TokenService } from '../../services/tokenService';
   import { toastStore } from '../../stores/toast';
-  import { isOisyWallet } from '../../services/protocol/walletOperations';
+  import {
+    captureActionBoundContext,
+    assertActionBoundContextCurrent,
+    isOisyWallet,
+    walletOperations,
+  } from '../../services/protocol/walletOperations';
   import { ApiClient } from '../../services/protocol/apiClient';
   import MultiplierBadge from '../points/MultiplierBadge.svelte';
   import { seasonStore, earningActive } from '$lib/stores/seasonStore';
@@ -639,6 +644,7 @@
     if (addOverMax) { toastStore.error(`Exceeds wallet balance (${formatNumber(maxAddCollateral, 4)} ${collateralSymbol})`, 8000); return; }
     clearMessages(); isProcessing = true;
     try {
+      const actionContext = captureActionBoundContext();
       // Oisy: skip pre-approval — ApiClient handles approve+add_margin as two
       // sequential consent screens. Any async work here burns the browser user
       // gesture context before the first Oisy popup opens.
@@ -646,15 +652,26 @@
         const ledgerCanisterId = vaultCollateralInfo?.ledgerCanisterId ?? CONFIG.currentIcpLedgerId;
         const amountRaw = BigInt(Math.floor(amount * collateralDecimalsFactor));
         const spenderCanisterId = CONFIG.currentCanisterId;
-        const currentAllowance = await protocolService.checkCollateralAllowance(spenderCanisterId, ledgerCanisterId);
+        const currentAllowance = await walletOperations.checkCollateralAllowanceBound(actionContext, spenderCanisterId, ledgerCanisterId);
+        assertActionBoundContextCurrent(actionContext);
         if (currentAllowance < amountRaw) {
           const bufferAmount = amountRaw * BigInt(120) / BigInt(100);
-          const approvalResult = await protocolService.approveCollateralTransfer(bufferAmount, spenderCanisterId, ledgerCanisterId);
+          const approvalResult = await walletOperations.approveCollateralTransferBound(actionContext, bufferAmount, spenderCanisterId, ledgerCanisterId);
+          assertActionBoundContextCurrent(actionContext);
           if (!approvalResult.success) { toastStore.error(approvalResult.error || 'Approval failed', 8000); return; }
           await new Promise(r => setTimeout(r, 2000));
+          assertActionBoundContextCurrent(actionContext);
         }
       }
-      const result = await protocolService.addMarginToVault(vault.vaultId, amount, vaultCollateralType);
+      assertActionBoundContextCurrent(actionContext);
+      const result = await protocolService.addMarginToVault(vault.vaultId, amount, vaultCollateralType, actionContext);
+      try { assertActionBoundContextCurrent(actionContext); }
+      catch {
+        toastStore.error(result.success
+          ? 'The top-up may have completed under the previous wallet. Check that wallet’s vault before retrying.'
+          : result.error || 'Wallet changed. Check the original wallet before retrying.', 10000);
+        return;
+      }
       if (result.success) {
         const msg = result.oisyResilient
           ? `Added ${amount} ${collateralSymbol} (wallet glitch ignored — operation confirmed on-chain).`

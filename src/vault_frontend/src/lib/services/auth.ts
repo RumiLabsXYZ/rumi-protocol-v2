@@ -39,6 +39,27 @@ export function beginWalletSessionTransition(): void {
   walletSessionGeneration.update((generation) => generation + 1);
 }
 
+/** Verify the live Plug identity at actor and mutation boundaries. */
+export function assertPlugPrincipal(expectedPrincipalText: string): void {
+  const livePrincipalText = typeof window === 'undefined' ? undefined : window.ic?.plug?.principalId;
+  if (!livePrincipalText || livePrincipalText !== expectedPrincipalText) {
+    throw new Error('Plug account changed or is unavailable. Reconnect your wallet before signing.');
+  }
+}
+
+function bindPlugActorToPrincipal<T extends object>(actor: T, principalText: string): T {
+  return new Proxy(actor, {
+    get(target, property, receiver) {
+      const method = Reflect.get(target, property, receiver);
+      if (typeof method !== 'function') return method;
+      return (...args: unknown[]) => {
+        assertPlugPrincipal(principalText);
+        return Reflect.apply(method, target, args);
+      };
+    },
+  });
+}
+
 // Type definition for auth state
 interface AuthState {
   isConnected: boolean;
@@ -524,6 +545,14 @@ function createAuthStore() {
       } else if (state.walletType === WALLET_TYPES.OISY || state.walletType === WALLET_TYPES.PLUG) {
         // Use PNP for both Oisy and Plug wallets — pass walletType so pnp
         // only uses Plug shortcut when Plug is the active wallet (not Oisy)
+        if (state.walletType === WALLET_TYPES.PLUG) {
+          const principalText = state.account?.owner.toText();
+          if (!principalText) throw new Error('Plug account is unavailable. Reconnect your wallet before signing.');
+          assertPlugPrincipal(principalText);
+          const actor = await pnp.getActor(canisterId, idl, state.walletType);
+          assertPlugPrincipal(principalText);
+          return bindPlugActorToPrincipal(actor as object, principalText) as T;
+        }
         return pnp.getActor(canisterId, idl, state.walletType) as unknown as T;
       } else {
         // Fallback for any other PNP-based wallets

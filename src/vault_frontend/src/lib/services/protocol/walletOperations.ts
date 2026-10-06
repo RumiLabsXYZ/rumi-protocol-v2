@@ -3,6 +3,7 @@ import { Actor, HttpAgent, AnonymousIdentity } from "@dfinity/agent";
 import { get } from 'svelte/store';
 import { walletStore } from '../../stores/wallet';
 import { CONFIG } from '../../config';
+import { assertPlugPrincipal, currentWalletType, WALLET_TYPES, walletSessionGeneration } from '../auth';
 import { permissionManager } from '../PermissionManager';
 import type { UserBalances } from '../types';
 
@@ -159,6 +160,29 @@ export function assertActionBoundContextCurrent(ctx: ActionBoundContext): void {
   if (livePrincipalText !== ctx.expectedPrincipalText) {
     throw new StaleActionSessionError();
   }
+  if (get(currentWalletType) === WALLET_TYPES.PLUG) {
+    try {
+      assertPlugPrincipal(ctx.expectedPrincipalText);
+    } catch {
+      throw new StaleActionSessionError('Plug account changed during this action. Nothing further was submitted.');
+    }
+  }
+}
+
+/** Capture the connected identity and generation for one wallet action. */
+export function captureActionBoundContext(): ActionBoundContext {
+  const wallet = get(walletStore);
+  const expectedPrincipalText = wallet.principal?.toText() ?? '';
+  const walletType = get(currentWalletType);
+  const generation = get(walletSessionGeneration);
+  const context: ActionBoundContext = {
+    expectedPrincipalText,
+    assertCurrent: () => get(walletStore).isConnected
+      && get(currentWalletType) === walletType
+      && get(walletSessionGeneration) === generation,
+  };
+  assertActionBoundContextCurrent(context);
+  return context;
 }
 
 /**

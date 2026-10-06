@@ -1362,14 +1362,19 @@ static async borrowFromVaultBound(
  * @param collateralAmount Amount in human-readable units
  * @param collateralTypePrincipal Optional: the collateral type principal. If omitted, looks up from vault data or defaults to ICP.
  */
-static async addMarginToVault(vaultId: number, collateralAmount: number, collateralTypePrincipal?: string): Promise<VaultOperationResult> {
+static async addMarginToVault(vaultId: number, collateralAmount: number, collateralTypePrincipal?: string, actionContext?: ActionBoundContext): Promise<VaultOperationResult> {
   return ApiClient.executeSequentialOperation(async () => {
     try {
+      const assertCurrent = () => {
+        if (actionContext) assertActionBoundContextCurrent(actionContext);
+      };
+      assertCurrent();
       // Resolve collateral info — try the provided principal, or look up from vault, or default to ICP
       let ctPrincipal = collateralTypePrincipal;
       if (!ctPrincipal) {
         // Try to get collateral type from the user's vault data
         const vault = await ApiClient.getVaultById(vaultId);
+        assertCurrent();
         ctPrincipal = vault?.collateralType || CANISTER_IDS.ICP_LEDGER;
       }
       const ctInfo = collateralStore.getCollateralInfo(ctPrincipal);
@@ -1395,6 +1400,7 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
       // The canister validates balance anyway.
       if (ctPrincipal === CANISTER_IDS.ICP_LEDGER && !isOisyWallet()) {
         const hasSufficientBalance = await walletOperations.checkSufficientBalance(Number(bufferAmount) / ctDecimalsFactor);
+        assertCurrent();
         if (!hasSufficientBalance) {
           return {
             success: false,
@@ -1403,22 +1409,28 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
         }
       }
 
-      const actor = await ApiClient.getAuthenticatedActor();
+      const actor = actionContext
+        ? await ApiClient.getBoundAuthenticatedActor(actionContext)
+        : await ApiClient.getAuthenticatedActor();
+      assertCurrent();
 
       // Snapshot pre-add collateral for the Oisy false-negative verifier.
       // We read RAW token units so we can compare with BigInt arithmetic.
       // Oisy reads the warm sync cache (no network await inside the click
       // gesture window); non-Oisy awaits a fresh snapshot.
       const beforeCollateral = isOisyWallet() ? ApiClient.getCachedRawCollateralAmount(vaultId) : await ApiClient.getRawCollateralAmount(vaultId);
+      assertCurrent();
 
       // ─── Oisy ICRC-112 batched path ───
       // Batches approve + add_margin into a single signer popup via ICRC-112.
       const marginSignerAgent = isOisyWallet() ? await pnp.getSignerAgent() : null;
+      assertCurrent();
 
       if (marginSignerAgent) {
         console.log(`[Oisy] Sequential approve + add_margin for vault #${vaultId}`);
 
         const ledgerActor = await walletStore.getActor(ledgerCanisterId, CONFIG.icp_ledgerIDL) as any;
+        assertCurrent();
 
         // 1) Approve (first Oisy consent screen).
         const approveResult = await ledgerActor.icrc2_approve({
@@ -1434,6 +1446,7 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
           from_subaccount: [],
           created_at_time: []
         });
+        assertCurrent();
         if (approveResult && 'Err' in approveResult) {
           return {
             success: false,
@@ -1442,6 +1455,7 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
         }
 
         // 2) add_margin_to_vault (second consent screen), guarded against _arr.
+        assertCurrent();
         const marginResult = await callWithOisyFalseNegativeGuard(
           () => actor.add_margin_to_vault({
             vault_id: BigInt(vaultId),
@@ -1455,6 +1469,8 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
           },
           `Oisy add_margin ${collateralAmount} ${symbol} to vault #${vaultId}`
         );
+        try { assertCurrent(); }
+        catch { throw new Error('The add-margin call may have completed under the previous wallet. Check that wallet’s vault before retrying.'); }
 
         if (isOisyLandedSentinel(marginResult)) {
           return {
@@ -1485,7 +1501,10 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
       let currentAllowance;
 
       try {
-        currentAllowance = await walletOperations.checkCollateralAllowance(spenderCanisterId, ledgerCanisterId);
+        currentAllowance = actionContext
+          ? await walletOperations.checkCollateralAllowanceBound(actionContext, spenderCanisterId, ledgerCanisterId)
+          : await walletOperations.checkCollateralAllowance(spenderCanisterId, ledgerCanisterId);
+        assertCurrent();
         console.log(`Current ${symbol} allowance:`, currentAllowance.toString());
       } catch (err) {
         console.error('Error checking allowance:', err);
@@ -1500,9 +1519,11 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
         console.log(`Requesting ${bufferAmount} raw (original: ${amountRaw} raw)`);
 
         try {
-          const approvalResult = await walletOperations.approveCollateralTransfer(
-            bufferAmount, spenderCanisterId, ledgerCanisterId
-          );
+          assertCurrent();
+          const approvalResult = actionContext
+            ? await walletOperations.approveCollateralTransferBound(actionContext, bufferAmount, spenderCanisterId, ledgerCanisterId)
+            : await walletOperations.approveCollateralTransfer(bufferAmount, spenderCanisterId, ledgerCanisterId);
+          assertCurrent();
 
           if (!approvalResult.success) {
             return {
@@ -1513,9 +1534,13 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
 
           // Short delay to allow approval to be processed
           await new Promise(resolve => setTimeout(resolve, 2000));
+          assertCurrent();
 
           // Verify approval worked
-          const newAllowance = await walletOperations.checkCollateralAllowance(spenderCanisterId, ledgerCanisterId);
+          const newAllowance = actionContext
+            ? await walletOperations.checkCollateralAllowanceBound(actionContext, spenderCanisterId, ledgerCanisterId)
+            : await walletOperations.checkCollateralAllowance(spenderCanisterId, ledgerCanisterId);
+          assertCurrent();
           console.log('New allowance after approval:', newAllowance.toString());
 
           if (newAllowance < amountRaw) {
@@ -1539,13 +1564,16 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
         if (currentAllowance < bufferAmount) {
           console.log('Existing allowance is close to required amount, increasing for safety');
           try {
-            const approvalResult = await walletOperations.approveCollateralTransfer(
-              bufferAmount, spenderCanisterId, ledgerCanisterId
-            );
+            assertCurrent();
+            const approvalResult = actionContext
+              ? await walletOperations.approveCollateralTransferBound(actionContext, bufferAmount, spenderCanisterId, ledgerCanisterId)
+              : await walletOperations.approveCollateralTransfer(bufferAmount, spenderCanisterId, ledgerCanisterId);
+            assertCurrent();
 
             if (approvalResult.success) {
               console.log('Successfully increased allowance for future operations');
               await new Promise(resolve => setTimeout(resolve, 2000));
+              assertCurrent();
             } else {
               console.warn('Failed to increase allowance, but continuing with existing allowance');
             }
@@ -1566,6 +1594,7 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
         amount: vaultArg.amount.toString()
       });
 
+      assertCurrent();
       const result = await callWithOisyFalseNegativeGuard(
         () => actor.add_margin_to_vault(vaultArg),
         async () => {
@@ -1576,6 +1605,8 @@ static async addMarginToVault(vaultId: number, collateralAmount: number, collate
         },
         `add_margin ${collateralAmount} ${symbol} to vault #${vaultId}`
       );
+      try { assertCurrent(); }
+      catch { throw new Error('The add-margin call may have completed under the previous wallet. Check that wallet’s vault before retrying.'); }
 
       if (isOisyLandedSentinel(result)) {
         return {
