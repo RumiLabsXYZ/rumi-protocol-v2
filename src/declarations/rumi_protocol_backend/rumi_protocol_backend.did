@@ -1299,6 +1299,17 @@ type SpWritedownProof = record {
   ledger_kind : SpProofLedger;
   vault_id_memo : nat64;
 };
+type SpBurnRefundReceipt = record {
+  vault_id : nat64;
+  amount_e8s : nat64;
+  ledger : principal;
+  recipient : principal;
+  burn_block_index : nat64;
+  refund_block_index : nat64;
+  refund_created_at_time : nat64;
+  refund_memo : vec nat8;
+};
+type ResultSpBurnRefund = variant { Ok : SpBurnRefundReceipt; Err : ProtocolError };
 type StabilityPoolConfig = record {
   enabled : bool;
   liquidation_discount : nat64;
@@ -1457,6 +1468,12 @@ type XrpSpAbsorbResult = record {
   payout_claims : vec XrpSpPayoutClaim;
   collateral_received_drops : nat64;
   success : bool;
+};
+type XrpSpAbsorbStatus = variant {
+  Accepted : XrpSpAbsorbResult;
+  RefundJournaled;
+  Unseen;
+  ConsumedWithoutResult;
 };
 type XrpSpPayoutAllocation = record {
   claimant : principal;
@@ -1813,6 +1830,10 @@ service : (ProtocolArg) -> {
       Result_24,
     );
   stability_pool_liquidate_xrp_vault : (XrpSpAbsorbRequest) -> (Result_26);
+  stability_pool_xrp_absorb_status : (XrpSpAbsorbRequest) -> (variant { Ok : XrpSpAbsorbStatus; Err : ProtocolError });
+  refund_stability_pool_burn : (nat64, nat64, SpWritedownProof) -> (ResultSpBurnRefund);
+  reconcile_stability_pool_burn_refund : (nat64, nat64, SpWritedownProof, nat64) -> (ResultSpBurnRefund);
+  reconcile_stability_pool_burn_refund_from_history : (nat64, nat64, SpWritedownProof) -> (ResultSpBurnRefund);
   stability_pool_preflight_chain_absorb : (nat64, nat64) -> (Result);
   stability_pool_preflight_xrp_absorb : (nat64, nat64) -> (Result_27);
   stability_pool_release_xrp_absorb_preflight : (nat64, nat64) -> (Result_18);

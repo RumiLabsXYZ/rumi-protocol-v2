@@ -217,6 +217,7 @@ pub mod liquidity_pool;
 pub mod logs;
 pub mod management;
 pub mod numeric;
+pub mod sp_burn_refund;
 pub mod state;
 pub mod storage;
 pub mod treasury;
@@ -680,6 +681,15 @@ pub struct XrpSpAbsorbResult {
     pub payout_claims: Vec<XrpSpPayoutClaim>,
     pub block_index: u64,
     pub collateral_price_e8s: u64,
+}
+
+/// Reconciliation status for one exact native-XRP Stability Pool absorb.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum XrpSpAbsorbStatus {
+    Accepted(XrpSpAbsorbResult),
+    RefundJournaled,
+    Unseen,
+    ConsumedWithoutResult,
 }
 
 /// Coarse classification of an `Event` for the explorer's type facet.

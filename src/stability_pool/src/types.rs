@@ -270,6 +270,10 @@ pub struct NativeXrpAbsorbIntent {
     pub collateral_price_e8s: u64,
     pub allocations: Vec<XrpSpPayoutAllocation>,
     pub burn_created_at_time_ns: u64,
+    /// `None` on a legacy snapshot means dispatch history is unknown. `Some(true)` is
+    /// persisted before awaiting the ledger so a retry reuses the exact tuple.
+    #[serde(default)]
+    pub burn_attempted: Option<bool>,
     pub status: NativeXrpAbsorbIntentStatus,
     pub burn_proof: Option<rumi_protocol_backend::icrc3_proof::SpWritedownProof>,
     pub backend_result: Option<XrpSpAbsorbResult>,
@@ -436,6 +440,10 @@ pub struct ChainSpAbsorbIntent {
     pub icusd_to_burn_e8s: u64,
     pub stables_consumed: BTreeMap<Principal, u64>,
     pub burn_created_at_time_ns: u64,
+    /// `None` on a legacy snapshot means dispatch history is unknown. `Some(true)` is
+    /// persisted before awaiting the ledger so a retry reuses the exact tuple.
+    #[serde(default)]
+    pub burn_attempted: Option<bool>,
     pub status: ChainSpAbsorbIntentStatus,
     pub burn_proof: Option<rumi_protocol_backend::icrc3_proof::SpWritedownProof>,
     pub backend_result: Option<ChainStabilityPoolLiquidationResult>,
@@ -557,11 +565,39 @@ pub struct PendingRefund {
     pub id: u64,
     pub user: Principal,
     pub token_ledger: Principal,
-    /// Gross amount still held by the pool (native decimals). The payout
-    /// sends this minus the ledger transfer fee.
+    /// Full principal still owed to the user (native decimals). The protocol
+    /// pays the transfer fee from separately receipt-funded capacity.
     pub amount: u64,
     pub reason: String,
     pub created_at: u64,
+    /// Missing on pre-migration rows: their dispatch history is ambiguous and
+    /// they must remain held pending independent ledger evidence.
+    #[serde(default)]
+    pub transfer_attempted: Option<bool>,
+    /// Exact ICRC-1 identity persisted before the first payout call.
+    #[serde(default)]
+    pub transfer_created_at_time_ns: Option<u64>,
+    #[serde(default)]
+    pub transfer_fee: Option<u64>,
+    #[serde(default)]
+    pub transfer_memo: Option<Vec<u8>>,
+    /// Monotonic local attempt number. Changed only after an audited complete
+    /// history scan proves a TooOld transfer had no ledger effect.
+    #[serde(default)]
+    pub transfer_attempt_no: Option<u32>,
+    /// True only after the configured icUSD ledger returned typed TooOld for
+    /// this exact persisted transfer tuple.
+    #[serde(default)]
+    pub transfer_too_old_rejected: Option<bool>,
+    /// Cursor and fixed log tip for bounded, archive-aware no-effect scans.
+    #[serde(default)]
+    pub transfer_history_scan_cursor: Option<u64>,
+    #[serde(default)]
+    pub transfer_history_scan_tip: Option<u64>,
+    /// Fee capacity reserved from receipt-backed protocol funding. Retained
+    /// across ambiguous replies so another refund cannot consume it.
+    #[serde(default)]
+    pub protocol_fee_reserved: Option<u64>,
 }
 
 /// A durable, batched forward of interest that could not be allocated because

@@ -1,13 +1,9 @@
 //! Stability-pool audit fences (2026-06-09-e49ed10):
 //!
-//! IC-S-001: `deposit_as_3usd` refunds were best-effort: the GROSS amount was
-//!   sent with fee:None (the ledger debits amount+fee, drifting the pool one
-//!   fee below its tracked deposits per refund) and a failed refund was
-//!   DISCARDED, stranding the user's pulled tokens with no record. The fix
-//!   refunds net of the ledger fee (cached `icrc1_fee` with a conservative
-//!   fallback, mirroring rumi_3pool::transfers) and persists a pending-refund
-//!   record recoverable via `claim_pending_refund` / `get_pending_refunds`
-//!   (mirroring rumi_3pool's pending-claims pattern).
+//! IC-S-001: failed `deposit_as_3usd` refunds could strand pulled user tokens.
+//!   The fix journals a full-principal refund before dispatch, pays the ledger
+//!   fee from a separately receipt-funded protocol reserve, and holds ambiguous
+//!   outcomes for exact receipt or audited history reconciliation.
 //!
 //! AR-S-002: `opt_in_collateral` / `opt_out_collateral` were the only
 //!   synchronous permissionless mutations NOT gated on the SP liquidation
@@ -34,7 +30,9 @@ fn read(rel: &str) -> String {
 }
 
 fn fn_body<'a>(src: &'a str, header: &'a str) -> &'a str {
-    let start = src.find(header).unwrap_or_else(|| panic!("`{}` not found", header));
+    let start = src
+        .find(header)
+        .unwrap_or_else(|| panic!("`{}` not found", header));
     let after = start + header.len();
     let end = ["\npub async fn ", "\npub fn ", "\nasync fn ", "\nfn "]
         .iter()
@@ -45,18 +43,21 @@ fn fn_body<'a>(src: &'a str, header: &'a str) -> &'a str {
 }
 
 #[test]
-fn ic_s_001_refund_is_net_of_ledger_fee() {
+fn ic_s_001_refund_pays_full_principal_from_separate_protocol_fee_reserve() {
     let src = read("src/deposits.rs");
     let body = fn_body(&src, "async fn refund_user(");
     assert!(
-        body.contains("refund_ledger_fee"),
-        "refund_user must look up the ledger fee (cached icrc1_fee, conservative fallback) \
-         (audit IC-S-001).",
+        body.contains("record_pending_refund"),
+        "full principal must be durably journaled before the refund transfer.",
+    );
+    let claim = fn_body(&src, "pub async fn claim_pending_refund(");
+    assert!(
+        claim.contains("amount: refund.amount.into()") && claim.contains("fee: Some(fee.into())"),
+        "refund must pay the full principal and specify the separately reserved protocol fee.",
     );
     assert!(
-        body.contains("amount - fee"),
-        "refund_user must send the amount NET of the ledger fee, not gross with fee:None \
-         (a gross refund debits amount+fee from the pool) (audit IC-S-001).",
+        claim.contains("TooOld") && claim.contains("mark_pending_refund_too_old"),
+        "TooOld must hold the exact tuple for proof-backed reconciliation, never blind-rotate.",
     );
 }
 
@@ -87,7 +88,12 @@ fn ic_s_001_recovery_endpoints_exist_and_are_declared() {
         "the SP must expose a get_pending_refunds query (audit IC-S-001).",
     );
     let did = read("stability_pool.did");
-    for method in ["claim_pending_refund", "get_pending_refunds", "PendingRefund", "RefundClaimNotFound"] {
+    for method in [
+        "claim_pending_refund",
+        "get_pending_refunds",
+        "PendingRefund",
+        "RefundClaimNotFound",
+    ] {
         assert!(
             did.contains(method),
             "stability_pool.did must declare `{}` (audit IC-S-001).",
@@ -97,31 +103,29 @@ fn ic_s_001_recovery_endpoints_exist_and_are_declared() {
 }
 
 #[test]
-fn ic_s_001_claim_removes_record_before_transfer() {
+fn ic_s_001_claim_persists_exact_tuple_before_transfer() {
     let src = read("src/deposits.rs");
     let body = fn_body(&src, "pub async fn claim_pending_refund(");
-    let take = body.find("take_pending_refund")
-        .expect("claim_pending_refund must remove the record via take_pending_refund (audit IC-S-001)");
-    let transfer = body.find("icrc1_transfer")
+    let journal = body
+        .find("prepare_pending_refund_transfer")
+        .expect("claim_pending_refund must persist its exact tuple before dispatch");
+    let transfer = body
+        .find("icrc1_transfer")
         .expect("claim_pending_refund must pay out via icrc1_transfer (audit IC-S-001)");
     assert!(
-        take < transfer,
-        "the record must be removed BEFORE the async transfer so two concurrent claims \
-         cannot both pay out (audit IC-S-001).",
+        journal < transfer,
+        "the full obligation and exact transfer tuple must remain durable before dispatch.",
     );
     assert!(
-        body.contains("put_pending_refund"),
-        "a failed payout must re-insert the record so the user can retry (audit IC-S-001).",
+        body.contains("legacy refund has unknown transfer history"),
+        "legacy refund rows with missing identity must remain held.",
     );
 }
 
 #[test]
 fn ar_s_002_opt_endpoints_reject_during_liquidation() {
     let src = read("src/lib.rs");
-    for header in [
-        "pub fn opt_out_collateral(",
-        "pub fn opt_in_collateral(",
-    ] {
+    for header in ["pub fn opt_out_collateral(", "pub fn opt_in_collateral("] {
         let body = fn_body(&src, header);
         assert!(
             body.contains("liquidation_in_progress"),

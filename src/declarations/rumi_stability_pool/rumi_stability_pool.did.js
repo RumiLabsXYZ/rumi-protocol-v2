@@ -94,6 +94,14 @@ export const idlFactory = ({ IDL }) => {
     'completed_at_ns' : IDL.Nat64,
     'vault_id' : IDL.Nat64,
   });
+  const LedgerReconciliationEntry = IDL.Record({
+    'healthy' : IDL.Bool,
+    'ledger' : IDL.Principal,
+    'live_e8s' : IDL.Nat64,
+    'recorded_e8s' : IDL.Nat64,
+    'symbol' : IDL.Text,
+    'delta_e8s' : IDL.Int64,
+  });
   const PoolLiquidationRecord = IDL.Record({
     'collateral_price_e8s' : IDL.Opt(IDL.Nat64),
     'stables_consumed' : IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat64)),
@@ -154,6 +162,7 @@ export const idlFactory = ({ IDL }) => {
     'chain_sentinel' : IDL.Principal,
     'created_at_ns' : IDL.Nat64,
     'burn_created_at_time_ns' : IDL.Nat64,
+    'burn_attempted' : IDL.Opt(IDL.Bool),
     'chain_id' : IDL.Nat32,
     'backend_result' : IDL.Opt(ChainStabilityPoolLiquidationResult),
     'icusd_ledger' : IDL.Principal,
@@ -161,10 +170,19 @@ export const idlFactory = ({ IDL }) => {
   });
   const PendingRefund = IDL.Record({
     'id' : IDL.Nat64,
+    'transfer_attempted' : IDL.Opt(IDL.Bool),
+    'transfer_fee' : IDL.Opt(IDL.Nat64),
     'user' : IDL.Principal,
     'created_at' : IDL.Nat64,
+    'transfer_created_at_time_ns' : IDL.Opt(IDL.Nat64),
+    'transfer_too_old_rejected' : IDL.Opt(IDL.Bool),
+    'protocol_fee_reserved' : IDL.Opt(IDL.Nat64),
+    'transfer_history_scan_cursor' : IDL.Opt(IDL.Nat64),
     'amount' : IDL.Nat64,
+    'transfer_memo' : IDL.Opt(IDL.Vec(IDL.Nat8)),
     'token_ledger' : IDL.Principal,
+    'transfer_history_scan_tip' : IDL.Opt(IDL.Nat64),
+    'transfer_attempt_no' : IDL.Opt(IDL.Nat32),
     'reason' : IDL.Text,
   });
   const UnallocatedInterestForwardBatch = IDL.Record({
@@ -358,6 +376,16 @@ export const idlFactory = ({ IDL }) => {
     'vault_id' : IDL.Nat64,
     'collateral_type' : IDL.Principal,
   });
+  const SpBurnRefundReceipt = IDL.Record({
+    'refund_memo' : IDL.Vec(IDL.Nat8),
+    'recipient' : IDL.Principal,
+    'vault_id' : IDL.Nat64,
+    'amount_e8s' : IDL.Nat64,
+    'burn_block_index' : IDL.Nat64,
+    'ledger' : IDL.Principal,
+    'refund_block_index' : IDL.Nat64,
+    'refund_created_at_time' : IDL.Nat64,
+  });
   const CfxClaimPayoutRecovery = IDL.Record({
     'claim_id' : IDL.Nat64,
     'claimant' : IDL.Principal,
@@ -472,6 +500,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : LiquidationResult, 'Err' : StabilityPoolError })],
         [],
       ),
+    'fund_pending_refund_fee_reserve' : IDL.Func(
+        [IDL.Principal, IDL.Nat64, IDL.Nat64, IDL.Nat64, IDL.Vec(IDL.Nat8)],
+        [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : StabilityPoolError })],
+        [],
+      ),
     'get_chain_absorb_auto_status' : IDL.Func(
         [],
         [ChainAbsorbAutoStatus],
@@ -486,6 +519,16 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Opt(IDL.Nat64)],
         [IDL.Vec(ChainSpAbsorbCompletion)],
         ['query'],
+      ),
+    'get_ledger_reconciliation' : IDL.Func(
+        [],
+        [
+          IDL.Variant({
+            'Ok' : IDL.Vec(LedgerReconciliationEntry),
+            'Err' : StabilityPoolError,
+          }),
+        ],
+        [],
       ),
     'get_liquidation_history' : IDL.Func(
         [IDL.Opt(IDL.Nat64)],
@@ -519,11 +562,6 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'get_pool_status' : IDL.Func([], [StabilityPoolStatus], ['query']),
-    'get_suspended_tokens' : IDL.Func(
-        [],
-        [IDL.Vec(IDL.Tuple(IDL.Principal, IDL.Nat32))],
-        ['query'],
-      ),
     'get_user_position' : IDL.Func(
         [IDL.Opt(IDL.Principal)],
         [IDL.Opt(UserStabilityPosition)],
@@ -589,6 +627,41 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
         [],
       ),
+    'reconcile_pending_icusd_burn' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
+        [],
+      ),
+    'reconcile_pending_icusd_burn_refund' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [
+          IDL.Variant({
+            'Ok' : SpBurnRefundReceipt,
+            'Err' : StabilityPoolError,
+          }),
+        ],
+        [],
+      ),
+    'reconcile_pending_icusd_burn_refund_from_history' : IDL.Func(
+        [IDL.Nat64],
+        [
+          IDL.Variant({
+            'Ok' : SpBurnRefundReceipt,
+            'Err' : StabilityPoolError,
+          }),
+        ],
+        [],
+      ),
+    'reconcile_pending_refund' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : StabilityPoolError })],
+        [],
+      ),
+    'reconcile_pending_refund_history' : IDL.Func(
+        [IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
+        [],
+      ),
     'recredit_failed_cfx_claim_payout' : IDL.Func(
         [CfxClaimPayoutRecovery],
         [IDL.Variant({ 'Ok' : IDL.Bool, 'Err' : StabilityPoolError })],
@@ -614,6 +687,16 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
         [],
       ),
+    'retry_pending_icusd_burn_refund' : IDL.Func(
+        [IDL.Nat64],
+        [
+          IDL.Variant({
+            'Ok' : SpBurnRefundReceipt,
+            'Err' : StabilityPoolError,
+          }),
+        ],
+        [],
+      ),
     'retry_unallocated_interest_forward' : IDL.Func(
         [IDL.Nat64],
         [IDL.Variant({ 'Ok' : IDL.Null, 'Err' : StabilityPoolError })],
@@ -627,6 +710,11 @@ export const idlFactory = ({ IDL }) => {
             'Err' : StabilityPoolError,
           }),
         ],
+        [],
+      ),
+    'scan_pending_icusd_burn_history' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64, IDL.Nat64],
+        [IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : StabilityPoolError })],
         [],
       ),
     'set_chain_absorb_auto_config' : IDL.Func(

@@ -1416,6 +1416,8 @@ export interface ReserveSettlementProofArg {
 }
 export type Result = { 'Ok' : null } |
   { 'Err' : ProtocolError };
+export type ResultSpBurnRefund = { 'Ok' : SpBurnRefundReceipt } |
+  { 'Err' : ProtocolError };
 export type Result_1 = { 'Ok' : bigint } |
   { 'Err' : ProtocolError };
 export type Result_10 = { 'Ok' : number } |
@@ -1475,6 +1477,16 @@ export type Result_9 = { 'Ok' : RedemptionQuote } |
 export interface SettlementProofIds {
   'pending' : Array<string>,
   'reserve' : Array<string>,
+}
+export interface SpBurnRefundReceipt {
+  'refund_memo' : Uint8Array | number[],
+  'recipient' : Principal,
+  'vault_id' : bigint,
+  'amount_e8s' : bigint,
+  'burn_block_index' : bigint,
+  'ledger' : Principal,
+  'refund_block_index' : bigint,
+  'refund_created_at_time' : bigint,
 }
 export type SpProofLedger = { 'IcusdBurn' : null } |
   { 'ThreePoolTransfer' : null };
@@ -1654,6 +1666,10 @@ export interface XrpSpAbsorbResult {
   'collateral_received_drops' : bigint,
   'success' : boolean,
 }
+export type XrpSpAbsorbStatus = { 'ConsumedWithoutResult' : null } |
+  { 'Unseen' : null } |
+  { 'Accepted' : XrpSpAbsorbResult } |
+  { 'RefundJournaled' : null };
 export interface XrpSpPayoutAllocation {
   'claimant' : Principal,
   'destination_tag' : [] | [number],
@@ -1974,6 +1990,14 @@ export interface _SERVICE {
   'prepare_redemption_offer' : ActorMethod<[bigint], Result_16>,
   'provide_liquidity' : ActorMethod<[bigint], Result_1>,
   'reconcile_chain_supply' : ActorMethod<[number], Result_17>,
+  'reconcile_stability_pool_burn_refund' : ActorMethod<
+    [bigint, bigint, SpWritedownProof, bigint],
+    ResultSpBurnRefund
+  >,
+  'reconcile_stability_pool_burn_refund_from_history' : ActorMethod<
+    [bigint, bigint, SpWritedownProof],
+    ResultSpBurnRefund
+  >,
   'recover_pending_transfer' : ActorMethod<[bigint], Result_18>,
   'recover_stuck_chain_vault' : ActorMethod<[number, bigint], Result>,
   'redeem_collateral' : ActorMethod<[Principal, bigint], Result_4>,
@@ -1981,6 +2005,10 @@ export interface _SERVICE {
   'redeem_quoted' : ActorMethod<[RedeemQuotedRequest], Result_19>,
   'redeem_reserves' : ActorMethod<[bigint, [] | [Principal]], Result_20>,
   'refresh_chain_hot_wallet_balance' : ActorMethod<[number], Result_21>,
+  'refund_stability_pool_burn' : ActorMethod<
+    [bigint, bigint, SpWritedownProof],
+    ResultSpBurnRefund
+  >,
   'register_chain' : ActorMethod<[RegisterChainArg], Result>,
   'register_ckdoge_collateral' : ActorMethod<[], Result>,
   'register_xrp_collateral' : ActorMethod<[], Result>,
@@ -2155,6 +2183,11 @@ export interface _SERVICE {
   'stability_pool_settle_xrp_claim' : ActorMethod<
     [bigint, Principal, string, [] | [number]],
     Result_2
+  >,
+  'stability_pool_xrp_absorb_status' : ActorMethod<
+    [XrpSpAbsorbRequest],
+    { 'Ok' : XrpSpAbsorbStatus } |
+      { 'Err' : ProtocolError }
   >,
   'stability_pool_xrp_claim_outstanding' : ActorMethod<
     [bigint, Principal],

@@ -24,6 +24,10 @@
 // second call returns Duplicate { duplicate_of }.
 
 use candid::{CandidType, Nat, Principal};
+use icrc_ledger_types::icrc::generic_value::{ICRC3Map, ICRC3Value};
+use icrc_ledger_types::icrc3::blocks::{BlockWithId, GetBlocksRequest, GetBlocksResult};
+use icrc_ledger_types::icrc1::account::Account as IcrcAccount;
+use num_traits::ToPrimitive;
 use ic_cdk::{init, query, update};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -129,6 +133,8 @@ struct LedgerState {
     balances: BTreeMap<Account, u128>,
     allowances: BTreeMap<(Account, Account), u128>,
     block_index: u64,
+    blocks: Vec<ICRC3Value>,
+    minting_account: Option<Account>,
     fee: u128,
     fail_transfers: bool,
     fail_transfer_from: bool,
@@ -154,6 +160,62 @@ struct LedgerState {
 
 thread_local! {
     static STATE: RefCell<LedgerState> = RefCell::new(LedgerState::default());
+}
+
+fn icrc_account(owner: Principal, subaccount: Option<[u8; 32]>) -> IcrcAccount {
+    IcrcAccount { owner, subaccount }
+}
+
+fn account_value(account: &IcrcAccount) -> ICRC3Value {
+    let mut parts = vec![ICRC3Value::Blob(account.owner.as_slice().to_vec().into())];
+    if let Some(subaccount) = account.subaccount {
+        parts.push(ICRC3Value::Blob(subaccount.to_vec().into()));
+    }
+    ICRC3Value::Array(parts)
+}
+
+fn push_block(
+    state: &mut LedgerState,
+    btype: &str,
+    op: &str,
+    from: Option<IcrcAccount>,
+    to: Option<IcrcAccount>,
+    amount: u128,
+    fee: Option<u128>,
+    memo: Option<Vec<u8>>,
+    created_at_time: Option<u64>,
+    spender: Option<IcrcAccount>,
+) {
+    let mut tx: ICRC3Map = BTreeMap::new();
+    tx.insert("op".into(), ICRC3Value::Text(op.into()));
+    if let Some(account) = from { tx.insert("from".into(), account_value(&account)); }
+    if let Some(account) = to { tx.insert("to".into(), account_value(&account)); }
+    tx.insert("amt".into(), ICRC3Value::Nat(Nat::from(amount)));
+    if let Some(fee) = fee { tx.insert("fee".into(), ICRC3Value::Nat(Nat::from(fee))); }
+    if let Some(memo) = memo { tx.insert("memo".into(), ICRC3Value::Blob(memo.into())); }
+    if let Some(time) = created_at_time { tx.insert("ts".into(), ICRC3Value::Nat(Nat::from(time))); }
+    if let Some(account) = spender { tx.insert("spender".into(), account_value(&account)); }
+    let mut block = ICRC3Map::new();
+    block.insert("btype".into(), ICRC3Value::Text(btype.into()));
+    block.insert("tx".into(), ICRC3Value::Map(tx));
+    state.blocks.push(ICRC3Value::Map(block));
+}
+
+#[query]
+fn icrc3_get_blocks(args: Vec<GetBlocksRequest>) -> GetBlocksResult {
+    STATE.with(|s| {
+        let state = s.borrow();
+        let mut blocks = Vec::new();
+        for request in args {
+            let Some(start) = request.start.0.to_u64() else { continue };
+            let Some(length) = request.length.0.to_u64() else { continue };
+            let end = start.saturating_add(length).min(state.blocks.len() as u64);
+            for index in start..end {
+                blocks.push(BlockWithId { id: Nat::from(index), block: state.blocks[index as usize].clone() });
+            }
+        }
+        GetBlocksResult { log_length: Nat::from(state.blocks.len() as u64), blocks, archived_blocks: vec![] }
+    })
 }
 
 fn nat_to_u128(n: &Nat) -> u128 {
@@ -182,6 +244,11 @@ fn icrc1_balance_of(account: Account) -> Nat {
         }
         Nat::from(state.balances.get(&account).copied().unwrap_or(0))
     })
+}
+
+#[query]
+fn icrc1_minting_account() -> Option<Account> {
+    STATE.with(|s| s.borrow().minting_account.clone())
 }
 
 #[query]
@@ -251,19 +318,40 @@ fn icrc1_transfer(args: TransferArg) -> Result<Nat, TransferError> {
             }
         }
 
-        // Balance check (against the caller's debit, not the to-account).
-        let balance = state.balances.get(&from).copied().unwrap_or(0);
-        if amount + state.fee > balance {
-            return Err(TransferError::InsufficientFunds {
-                balance: Nat::from(balance),
-            });
+        let is_mint = state.minting_account.as_ref().is_some_and(|minting| {
+            minting.owner == caller && args.from_subaccount.is_none()
+        });
+        let is_burn = !is_mint && state.minting_account.as_ref() == Some(&args.to);
+        // Minting-account transfers create tokens; transfers to the configured
+        // minting account burn the source amount. All other transfers debit the
+        // caller and credit the recipient.
+        if !is_mint {
+            let balance = state.balances.get(&from).copied().unwrap_or(0);
+            if amount + state.fee > balance {
+                return Err(TransferError::InsufficientFunds {
+                    balance: Nat::from(balance),
+                });
+            }
         }
 
-        // Commit balances and bump block index.
-        *state.balances.entry(from).or_insert(0) -= amount + state.fee;
-        *state.balances.entry(args.to.clone()).or_insert(0) += amount;
+        if is_mint {
+            *state.balances.entry(args.to.clone()).or_insert(0) += amount;
+        } else {
+            *state.balances.entry(from.clone()).or_insert(0) -= amount + state.fee;
+            if !is_burn {
+                *state.balances.entry(args.to.clone()).or_insert(0) += amount;
+            }
+        }
         state.block_index += 1;
         let landed_block = state.block_index;
+        let (btype, op, block_from, block_to, block_fee) = if is_mint {
+            ("1mint", "mint", None, Some(icrc_account(args.to.owner, args.to.subaccount)), None)
+        } else if is_burn {
+            ("1burn", "burn", Some(icrc_account(caller, args.from_subaccount)), None, Some(state.fee))
+        } else {
+            ("1xfer", "xfer", Some(icrc_account(caller, args.from_subaccount)), Some(icrc_account(args.to.owner, args.to.subaccount)), Some(state.fee))
+        };
+        push_block(&mut state, btype, op, block_from, block_to, amount, block_fee, args.memo.clone(), args.created_at_time, None);
 
         if let Some(t) = args.created_at_time {
             let key = DedupKey {
@@ -303,10 +391,15 @@ fn icrc2_approve(args: ApproveArgs) -> Result<Nat, ApproveError> {
         let spender = args.spender;
         let amount = nat_to_u128(&args.amount);
 
-        state.allowances.insert((from, spender), amount);
+        state.allowances.insert((from.clone(), spender.clone()), amount);
 
         state.block_index += 1;
-        Ok(Nat::from(state.block_index))
+        let index = state.block_index;
+        push_block(
+            &mut state, "2approve", "approve", Some(icrc_account(from.owner, from.subaccount)),
+            None, amount, None, args.memo.clone(), args.created_at_time, Some(icrc_account(spender.owner, spender.subaccount)),
+        );
+        Ok(Nat::from(index))
     })
 }
 
@@ -375,6 +468,12 @@ fn icrc2_transfer_from(args: TransferFromArgs) -> Result<Nat, TransferFromError>
         *state.balances.entry(args.to.clone()).or_insert(0) += amount;
         state.block_index += 1;
         let landed_block = state.block_index;
+        let transfer_fee = state.fee;
+        push_block(
+            &mut state, "2xfer", "xfer", Some(icrc_account(from.owner, from.subaccount)),
+            Some(icrc_account(args.to.owner, args.to.subaccount)), amount, Some(transfer_fee),
+            args.memo.clone(), args.created_at_time, Some(icrc_account(spender, args.spender_subaccount)),
+        );
 
         if let Some(t) = args.created_at_time {
             let key = DedupKey {
@@ -409,7 +508,9 @@ fn mint(account: Account, amount: Nat) {
     STATE.with(|s| {
         let mut state = s.borrow_mut();
         let amt = nat_to_u128(&amount);
-        *state.balances.entry(account).or_insert(0) += amt;
+        *state.balances.entry(account.clone()).or_insert(0) += amt;
+        state.block_index += 1;
+        push_block(&mut state, "1mint", "mint", None, Some(icrc_account(account.owner, account.subaccount)), amt, None, None, None, None);
     });
 }
 
@@ -436,6 +537,18 @@ fn set_fee(fee: Nat) {
 #[update]
 fn set_phantom_failures(n: u32) {
     STATE.with(|s| s.borrow_mut().phantom_failures_remaining = n);
+}
+
+/// Compatibility name used by the burn-reconciliation PocketIC fixture.
+#[update]
+fn set_phantom_transfer_failures(n: u32) {
+    set_phantom_failures(n);
+}
+
+/// Test-only ICRC-1 minting-account configuration.
+#[update]
+fn set_minting_account(account: Option<Account>) {
+    STATE.with(|s| s.borrow_mut().minting_account = account);
 }
 
 /// Next N transfers return BadFee { expected_fee = current fee } before

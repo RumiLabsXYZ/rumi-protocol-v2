@@ -2733,6 +2733,11 @@ pub struct State {
     #[serde(default)]
     pub sp_three_usd_reserve_absorb_results_by_proof:
         BTreeMap<(crate::icrc3_proof::SpProofLedger, u64), StoredThreeUsdReserveAbsorbResult>,
+    /// Durable exact-principal compensation obligations, keyed by their
+    /// consumed burn proof. The journal and tombstone are committed together.
+    #[serde(default)]
+    pub sp_burn_refunds_by_proof:
+        BTreeMap<(crate::icrc3_proof::SpProofLedger, u64), StoredSpBurnRefund>,
     /// Inc 8: idempotent result cache for SP chain-vault absorbs keyed by the
     /// consumed proof. Lets the SP recover a lost reply without burning again.
     #[serde(default)]
@@ -3065,6 +3070,61 @@ pub struct StoredXrpSpAbsorbPreflight {
     pub expires_at_ns: u64,
 }
 
+/// Stable backend journal for one exact post-burn compensation. A persisted
+/// history-prefix absence is only a snapshot. It authorizes tuple rotation
+/// only when paired with typed TooOld from the pinned official ledger.
+#[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct StoredSpBurnRefund {
+    pub caller: Principal,
+    pub vault_id: u64,
+    pub amount_e8s: u64,
+    pub ledger: Principal,
+    pub burn_block_index: u64,
+    pub op_nonce: u128,
+    pub refund_created_at_time: u64,
+    pub refund_memo: Vec<u8>,
+    pub refund_block_index: Option<u64>,
+    #[serde(default)]
+    pub attempt_history: Vec<(u128, u64, Vec<u8>)>,
+    #[serde(default)]
+    pub history_scan: Option<StoredSpBurnRefundHistoryScan>,
+    #[serde(default)]
+    pub no_effect_evidence: Option<StoredSpBurnRefundNoEffectEvidence>,
+    #[serde(default)]
+    pub attempt_no_effect_evidence: Vec<StoredSpBurnRefundNoEffectEvidence>,
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct StoredSpBurnRefundHistoryScan {
+    pub ledger: Principal,
+    pub recipient: Principal,
+    pub amount_e8s: u64,
+    pub op_nonce: u128,
+    pub created_at_time: u64,
+    pub memo: Vec<u8>,
+    pub snapshot_log_length: u64,
+    pub next_index: u64,
+}
+
+/// Exact persisted prefix-scan snapshot. Despite the legacy field name, this
+/// is not finality/no-effect proof and cannot authorize a new transfer tuple.
+#[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct StoredSpBurnRefundNoEffectEvidence {
+    pub ledger: Principal,
+    pub recipient: Principal,
+    pub amount_e8s: u64,
+    pub op_nonce: u128,
+    pub created_at_time: u64,
+    pub memo: Vec<u8>,
+    pub log_length: u64,
+    /// True only when the same pinned ledger also returned TooOld for this
+    /// exact tuple before the complete history prefix was verified.
+    #[serde(default)]
+    pub too_old_rejected: bool,
+}
+
+pub const MAX_SP_BURN_REFUND_ATTEMPTS: usize = 4;
+
 /// Serde-only fallback: provides zero/empty/None defaults for fields missing from
 /// old CBOR snapshots. Never used for actual State construction (use From<InitArg>).
 impl Default for State {
@@ -3210,6 +3270,7 @@ impl Default for State {
             sp_writedown_disabled: false,
             consumed_writedown_proofs: BTreeSet::new(),
             sp_three_usd_reserve_absorb_results_by_proof: BTreeMap::new(),
+            sp_burn_refunds_by_proof: BTreeMap::new(),
             sp_chain_absorb_results_by_proof: BTreeMap::new(),
             sp_chain_absorb_preflights: BTreeMap::new(),
             sp_xrp_absorb_preflights: BTreeMap::new(),
@@ -3651,6 +3712,7 @@ impl From<InitArg> for State {
             sp_writedown_disabled: false,
             consumed_writedown_proofs: BTreeSet::new(),
             sp_three_usd_reserve_absorb_results_by_proof: BTreeMap::new(),
+            sp_burn_refunds_by_proof: BTreeMap::new(),
             sp_chain_absorb_results_by_proof: BTreeMap::new(),
             sp_chain_absorb_preflights: BTreeMap::new(),
             sp_xrp_absorb_preflights: BTreeMap::new(),

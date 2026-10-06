@@ -6822,6 +6822,51 @@ async fn stability_pool_liquidate_debt_burned(
     .await
 }
 
+/// Compensate an authenticated Stability Pool burn if absorption cannot
+/// complete. The backend journals the exact ledger identity before minting.
+#[update]
+#[candid_method(update)]
+async fn refund_stability_pool_burn(
+    vault_id: u64,
+    amount_e8s: u64,
+    proof: rumi_protocol_backend::icrc3_proof::SpWritedownProof,
+) -> Result<rumi_protocol_backend::sp_burn_refund::SpBurnRefundReceipt, ProtocolError> {
+    rumi_protocol_backend::sp_burn_refund::refund_stability_pool_burn(vault_id, amount_e8s, proof)
+        .await
+}
+
+/// Record proof of a refund mint that already landed; this method never mints.
+#[update]
+#[candid_method(update)]
+async fn reconcile_stability_pool_burn_refund(
+    vault_id: u64,
+    amount_e8s: u64,
+    proof: rumi_protocol_backend::icrc3_proof::SpWritedownProof,
+    refund_block_index: u64,
+) -> Result<rumi_protocol_backend::sp_burn_refund::SpBurnRefundReceipt, ProtocolError> {
+    rumi_protocol_backend::sp_burn_refund::reconcile_stability_pool_burn_refund(
+        vault_id,
+        amount_e8s,
+        proof,
+        refund_block_index,
+    )
+    .await
+}
+
+/// Advance a bounded exact-history scan for an unresolved refund obligation.
+#[update]
+#[candid_method(update)]
+async fn reconcile_stability_pool_burn_refund_from_history(
+    vault_id: u64,
+    amount_e8s: u64,
+    proof: rumi_protocol_backend::icrc3_proof::SpWritedownProof,
+) -> Result<rumi_protocol_backend::sp_burn_refund::SpBurnRefundReceipt, ProtocolError> {
+    rumi_protocol_backend::sp_burn_refund::reconcile_stability_pool_burn_refund_from_history(
+        vault_id, amount_e8s, proof,
+    )
+    .await
+}
+
 async fn verify_sp_icusd_burn_proof(
     vault_id: u64,
     icusd_burned_e8s: u64,
@@ -7195,6 +7240,20 @@ async fn stability_pool_liquidate_xrp_vault(
 /// Returns true only while the backend still has an outstanding claim for that
 /// exact depositor; false means the claim is absent and the SP reminder may be
 /// removed.
+#[update]
+#[candid_method(update)]
+fn stability_pool_xrp_absorb_status(
+    request: XrpSpAbsorbRequest,
+) -> Result<rumi_protocol_backend::XrpSpAbsorbStatus, ProtocolError> {
+    if ic_cdk::caller() == Principal::anonymous() {
+        return Err(ProtocolError::AnonymousCallerNotAllowed);
+    }
+    let caller = ic_cdk::api::caller();
+    read_state(|state| {
+        rumi_protocol_backend::vault::xrp_sp_absorb_status_in_state(state, caller, &request)
+    })
+}
+
 #[update]
 #[candid_method(update)]
 fn stability_pool_xrp_claim_outstanding(

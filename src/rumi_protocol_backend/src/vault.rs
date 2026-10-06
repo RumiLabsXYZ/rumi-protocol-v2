@@ -3970,6 +3970,81 @@ pub fn xrp_sp_absorb_cached_replay_result(
     )
 }
 
+
+/// Look up the durable outcome of one exact XRP SP absorb request without
+/// performing proof verification, liquidation, or any other state transition.
+pub fn xrp_sp_absorb_status_in_state(
+    state: &crate::state::State,
+    caller: Principal,
+    request: &crate::XrpSpAbsorbRequest,
+) -> Result<crate::XrpSpAbsorbStatus, ProtocolError> {
+    ensure_registered_sp(state, caller)?;
+
+    let proof_key = (request.proof.ledger_kind, request.proof.block_index);
+    let refund = state.sp_burn_refunds_by_proof.get(&proof_key);
+    let absorb = state.sp_xrp_absorb_results_by_proof.get(&proof_key);
+    // If both terminal records exist, do not choose one: the proof has
+    // contradictory backend outcomes and requires recovery.
+    if refund.is_some() && absorb.is_some() {
+        return Ok(crate::XrpSpAbsorbStatus::ConsumedWithoutResult);
+    }
+    let consumed = state.consumed_writedown_proofs.contains(&proof_key);
+    if let Some(refund) = refund {
+        let exact_refund = consumed
+            && request.proof.ledger_kind == crate::icrc3_proof::SpProofLedger::IcusdBurn
+            && request.proof.vault_id_memo == request.vault_id
+            && refund.caller == caller
+            && refund.vault_id == request.vault_id
+            && refund.amount_e8s == request.icusd_burned_e8s
+            && refund.ledger == state.icusd_ledger_principal
+            && refund.burn_block_index == request.proof.block_index;
+        return Ok(if exact_refund {
+            crate::XrpSpAbsorbStatus::RefundJournaled
+        } else {
+            crate::XrpSpAbsorbStatus::ConsumedWithoutResult
+        });
+    }
+    let Some(stored) = absorb else {
+        return Ok(if consumed {
+            crate::XrpSpAbsorbStatus::ConsumedWithoutResult
+        } else {
+            crate::XrpSpAbsorbStatus::Unseen
+        });
+    };
+
+    // A cached result is authoritative only when the replay tombstone agrees,
+    // the persisted record is bound to the lookup key, and the full canonical
+    // request fingerprint matches. Any inconsistency remains fail-closed.
+    if !consumed
+        || stored.proof_ledger != request.proof.ledger_kind
+        || stored.proof_block_index != request.proof.block_index
+        || !stored.result.success
+        || stored.result.vault_id != request.vault_id
+        || stored.result.block_index != request.proof.block_index
+        || stored.result.liquidated_debt_e8s != request.icusd_burned_e8s
+    {
+        return Ok(crate::XrpSpAbsorbStatus::ConsumedWithoutResult);
+    }
+
+    let matches = validate_xrp_sp_allocations(
+        &request.allocations,
+        stored.result.collateral_received_drops,
+    )
+    .map(|allocations| {
+        let fingerprint = xrp_sp_allocation_fingerprint(caller, request, &allocations);
+        request.proof.vault_id_memo == request.vault_id
+            && stored_xrp_sp_absorb_matches_retry(stored, caller, request, &fingerprint)
+    })
+    .unwrap_or(false);
+
+    Ok(if matches {
+        crate::XrpSpAbsorbStatus::Accepted(stored.result.clone())
+    } else {
+        crate::XrpSpAbsorbStatus::ConsumedWithoutResult
+    })
+}
+
+
 pub fn stability_pool_liquidate_xrp_vault_in_state(
     state: &mut crate::state::State,
     caller: Principal,
@@ -10793,8 +10868,8 @@ mod xrp_sp_absorb_contract_tests {
     use super::*;
     use crate::icrc3_proof::{SpProofLedger, SpWritedownProof};
     use crate::state::{
-        xrp_collateral_principal, CollateralStatus, CustodyKind, State, StoredXrpSpAbsorbResult,
-        MAX_SP_XRP_ABSORB_RESULTS_BY_PROOF,
+        xrp_collateral_principal, CollateralStatus, CustodyKind, State, StoredSpBurnRefund,
+        StoredXrpSpAbsorbResult, MAX_SP_XRP_ABSORB_RESULTS_BY_PROOF,
     };
     use crate::{XrpSpAbsorbRequest, XrpSpPayoutAllocation, MAX_XRP_SP_PAYOUT_ALLOCATIONS};
 
@@ -11672,6 +11747,74 @@ mod xrp_sp_absorb_contract_tests {
                 .result,
             result,
         );
+    }
+
+    fn stored_refund_for(block_index: u64, caller: Principal, amount_e8s: u64) -> StoredSpBurnRefund {
+        StoredSpBurnRefund {
+            caller,
+            vault_id: VAULT_ID,
+            amount_e8s,
+            ledger: principal(0x10),
+            burn_block_index: block_index,
+            op_nonce: 1,
+            refund_created_at_time: 1,
+            refund_memo: vec![],
+            refund_block_index: None,
+            attempt_history: Vec::new(),
+            history_scan: None,
+            no_effect_evidence: None,
+            attempt_no_effect_evidence: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn xrp_absorb_status_requires_matching_terminal_refund_record() {
+        let mut state = test_state_with_xrp_vault();
+        let request = valid_request(71);
+        assert_eq!(xrp_sp_absorb_status_in_state(&state, sp(), &request).unwrap(), crate::XrpSpAbsorbStatus::Unseen);
+        let key = (SpProofLedger::IcusdBurn, 71);
+        state.consumed_writedown_proofs.insert(key);
+        assert_eq!(xrp_sp_absorb_status_in_state(&state, sp(), &request).unwrap(), crate::XrpSpAbsorbStatus::ConsumedWithoutResult);
+        state.sp_burn_refunds_by_proof.insert(key, stored_refund_for(71, sp(), request.icusd_burned_e8s));
+        assert_eq!(xrp_sp_absorb_status_in_state(&state, sp(), &request).unwrap(), crate::XrpSpAbsorbStatus::RefundJournaled);
+
+        let mut mismatch = stored_refund_for(71, sp(), request.icusd_burned_e8s);
+        mismatch.vault_id += 1;
+        state.sp_burn_refunds_by_proof.insert(key, mismatch);
+        assert_eq!(xrp_sp_absorb_status_in_state(&state, sp(), &request).unwrap(), crate::XrpSpAbsorbStatus::ConsumedWithoutResult);
+        assert!(xrp_sp_absorb_status_in_state(&state, depositor_a(), &request).is_err());
+    }
+
+    #[test]
+    fn xrp_absorb_status_accepts_only_exact_consumed_cached_request() {
+        let mut state = test_state_with_xrp_vault();
+        let request = valid_request(72);
+        let key = (SpProofLedger::IcusdBurn, 72);
+        let allocations = canonical_xrp_allocations(&request.allocations);
+        let fingerprint = xrp_sp_allocation_fingerprint(sp(), &request, &allocations);
+        let result = crate::XrpSpAbsorbResult {
+            success: true,
+            vault_id: VAULT_ID,
+            liquidated_debt_e8s: request.icusd_burned_e8s,
+            collateral_received_drops: 100_000_000,
+            payout_claims: vec![],
+            block_index: 72,
+            collateral_price_e8s: 50_000_000,
+        };
+        state.consumed_writedown_proofs.insert(key);
+        state.sp_xrp_absorb_results_by_proof.insert(key, StoredXrpSpAbsorbResult {
+            caller: sp(), vault_id: VAULT_ID, icusd_burned_e8s: request.icusd_burned_e8s,
+            proof_ledger: SpProofLedger::IcusdBurn, proof_block_index: 72,
+            allocation_fingerprint: fingerprint, result: result.clone(), accepted_at_ns: 10,
+        });
+        assert_eq!(xrp_sp_absorb_status_in_state(&state, sp(), &request).unwrap(), crate::XrpSpAbsorbStatus::Accepted(result));
+
+        state.sp_burn_refunds_by_proof.insert(key, stored_refund_for(72, sp(), request.icusd_burned_e8s));
+        assert_eq!(xrp_sp_absorb_status_in_state(&state, sp(), &request).unwrap(), crate::XrpSpAbsorbStatus::ConsumedWithoutResult);
+        state.sp_burn_refunds_by_proof.remove(&key);
+        let mut conflicting = request;
+        conflicting.allocations[0].payout_address = "other-address".to_string();
+        assert_eq!(xrp_sp_absorb_status_in_state(&state, sp(), &conflicting).unwrap(), crate::XrpSpAbsorbStatus::ConsumedWithoutResult);
     }
 
     fn stored_result_for(block_index: u64) -> StoredXrpSpAbsorbResult {

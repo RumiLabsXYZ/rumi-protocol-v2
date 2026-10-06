@@ -179,6 +179,13 @@ pub struct StabilityPoolState {
     /// Highest processed mint block used to bound replay protection memory.
     #[serde(default)]
     pub processed_interest_mint_block_high_watermark: Option<u64>,
+    /// Per-ledger protocol-funded refund fee capacity, credited only by an
+    /// independently verified admin transfer receipt.
+    #[serde(default)]
+    pub pending_refund_fee_reserves: Option<BTreeMap<Principal, u64>>,
+    /// ICRC-3 funding blocks already credited; prevents receipt replay.
+    #[serde(default)]
+    pub pending_refund_fee_funding_blocks: Option<BTreeSet<(Principal, u64)>>,
 }
 
 impl Default for StabilityPoolState {
@@ -225,6 +232,8 @@ impl Default for StabilityPoolState {
             pending_deposit_intents: Some(BTreeMap::new()),
             processed_interest_mint_blocks: Some(BTreeSet::new()),
             processed_interest_mint_block_high_watermark: None,
+            pending_refund_fee_reserves: Some(BTreeMap::new()),
+            pending_refund_fee_funding_blocks: Some(BTreeSet::new()),
         }
     }
 }
@@ -232,11 +241,6 @@ impl Default for StabilityPoolState {
 /// Maximum pool events retained in memory.
 const MAX_POOL_EVENTS: usize = 10_000;
 
-/// Maximum outstanding pending refunds (audit IC-S-001). A record is only
-/// created when a refund transfer fails after the user's tokens were pulled,
-/// which is not caller-controllable, so this is a memory-safety bound rather
-/// than an anti-DoS one (mirrors rumi_3pool's MAX_PENDING_CLAIMS).
-pub const MAX_PENDING_REFUNDS: usize = 10_000;
 pub const MAX_PENDING_CHAIN_ABSORBS: usize = 1_000;
 pub const MAX_PENDING_NATIVE_XRP_ABSORBS: usize = 1_000;
 pub const MAX_COMPLETED_CHAIN_ABSORBS: usize = 10_000;
@@ -1950,8 +1954,8 @@ impl StabilityPoolState {
     // ─── Pending Refunds (audit IC-S-001) ───
 
     /// Record tokens the pool owes `user` after a failed `deposit_as_3usd`
-    /// refund so they can be recovered via `claim_pending_refund`. `amount` is
-    /// the GROSS amount still held by the pool; the payout nets the ledger fee.
+    /// refund so they can be recovered via `claim_pending_refund`. The payout
+    /// preserves this full principal; a separately funded reserve pays fees.
     /// Returns the refund id. `now` is passed explicitly so the bookkeeping is
     /// testable without the IC runtime.
     pub fn record_pending_refund(
@@ -1963,14 +1967,6 @@ impl StabilityPoolState {
         now: u64,
     ) -> u64 {
         let refunds = self.pending_refunds.get_or_insert_with(BTreeMap::new);
-        // Bound memory. Ids are monotonic, so the smallest key is the oldest
-        // record; dropping it is a (logged at the call site) value loss, but
-        // reaching the cap requires thousands of genuine ledger failures.
-        if refunds.len() >= MAX_PENDING_REFUNDS {
-            if let Some(oldest) = refunds.keys().next().copied() {
-                refunds.remove(&oldest);
-            }
-        }
         let id = self.next_pending_refund_id.unwrap_or(0);
         self.next_pending_refund_id = Some(id + 1);
         refunds.insert(
@@ -1982,22 +1978,277 @@ impl StabilityPoolState {
                 amount,
                 reason,
                 created_at: now,
+                transfer_attempted: Some(false),
+                transfer_created_at_time_ns: None,
+                transfer_fee: None,
+                transfer_memo: None,
+                transfer_attempt_no: Some(0),
+                transfer_too_old_rejected: None,
+                transfer_history_scan_cursor: None,
+                transfer_history_scan_tip: None,
+                protocol_fee_reserved: None,
             },
         );
         id
     }
 
-    /// Remove and return a pending refund. Removal happens BEFORE the payout
-    /// transfer so two concurrent claims cannot both pay out; the caller
-    /// re-inserts via `put_pending_refund` if the transfer fails.
-    pub fn take_pending_refund(&mut self, id: u64) -> Option<PendingRefund> {
-        self.pending_refunds.as_mut().and_then(|m| m.remove(&id))
+    /// Called on upgrade because newly added optional fields decode as `None`
+    /// from older stable snapshots. It intentionally does not modify pending
+    /// refund rows, whose absent attempt identity must remain held for evidence.
+    pub fn normalize_pending_refund_fee_state(&mut self) {
+        self.pending_refund_fee_reserves
+            .get_or_insert_with(BTreeMap::new);
+        self.pending_refund_fee_funding_blocks
+            .get_or_insert_with(BTreeSet::new);
     }
 
-    pub fn put_pending_refund(&mut self, refund: PendingRefund) {
+    /// Credit fee capacity only once for an exact ledger funding receipt.
+    pub fn credit_pending_refund_fee_reserve(
+        &mut self,
+        ledger: Principal,
+        block_index: u64,
+        amount: u64,
+    ) -> Result<(), &'static str> {
+        let receipts = self
+            .pending_refund_fee_funding_blocks
+            .as_mut()
+            .ok_or("refund fee funding history is unavailable")?;
+        if !receipts.insert((ledger, block_index)) {
+            return Err("refund fee funding block was already credited");
+        }
+        let reserves = self
+            .pending_refund_fee_reserves
+            .as_mut()
+            .ok_or("refund fee reserve state is unavailable")?;
+        let current = reserves.get(&ledger).copied().unwrap_or(0);
+        let Some(next) = current.checked_add(amount) else {
+            receipts.remove(&(ledger, block_index));
+            return Err("refund fee reserve balance overflow");
+        };
+        reserves.insert(ledger, next);
+        Ok(())
+    }
+
+    /// Persist the exact full-principal transfer identity and reserve its fee
+    /// before any ledger call. A missing dispatch marker is legacy ambiguity.
+    pub fn prepare_pending_refund_transfer(
+        &mut self,
+        id: u64,
+        fee: u64,
+        created_at_time_ns: u64,
+        memo: Vec<u8>,
+    ) -> Result<PendingRefund, &'static str> {
+        let refund = self
+            .pending_refunds
+            .as_mut()
+            .and_then(|refunds| refunds.get_mut(&id))
+            .ok_or("pending refund not found")?;
+        match refund.transfer_attempted {
+            None => return Err("legacy refund has unknown transfer history and remains held"),
+            Some(true) => {
+                if refund.transfer_created_at_time_ns.is_some()
+                    && refund.transfer_fee.is_some()
+                    && refund.transfer_memo.is_some()
+                    && refund.protocol_fee_reserved == refund.transfer_fee
+                {
+                    return Ok(refund.clone());
+                }
+                return Err("pending refund transfer journal is incomplete and remains held");
+            }
+            Some(false) => {}
+        }
+        if refund.transfer_created_at_time_ns.is_some()
+            || refund.transfer_fee.is_some()
+            || refund.transfer_memo.is_some()
+            || refund.protocol_fee_reserved.is_some()
+        {
+            return Err("unattempted refund unexpectedly contains a transfer identity");
+        }
+        let reserves = self
+            .pending_refund_fee_reserves
+            .as_mut()
+            .ok_or("refund fee reserve state is unavailable")?;
+        let available = reserves.get(&refund.token_ledger).copied().unwrap_or(0);
+        if available < fee {
+            return Err("protocol-funded refund fee reserve is insufficient");
+        }
+        reserves.insert(refund.token_ledger, available - fee);
+        refund.transfer_created_at_time_ns = Some(created_at_time_ns);
+        refund.transfer_fee = Some(fee);
+        refund.transfer_memo = Some(memo);
+        refund.protocol_fee_reserved = Some(fee);
+        refund.transfer_attempted = Some(true);
+        Ok(refund.clone())
+    }
+
+    /// Refresh only the fee after an ICRC-1 `BadFee`, which proves the old
+    /// transfer had no effect. The immutable timestamp and memo remain fixed;
+    /// fee capacity is reconciled before a replacement attempt is persisted.
+    pub fn refresh_pending_refund_fee_after_bad_fee(
+        &mut self,
+        id: u64,
+        corrected_fee: u64,
+    ) -> Result<PendingRefund, &'static str> {
+        let refunds = self
+            .pending_refunds
+            .as_mut()
+            .ok_or("pending refund state is unavailable")?;
+        let refund = refunds.get_mut(&id).ok_or("pending refund not found")?;
+        if refund.transfer_attempted != Some(true) {
+            return Err("refund fee refresh requires a journaled prior attempt");
+        }
+        let old_fee = refund
+            .transfer_fee
+            .ok_or("refund transfer fee is missing from its journal")?;
+        if refund.transfer_created_at_time_ns.is_none()
+            || refund.transfer_memo.is_none()
+            || refund.protocol_fee_reserved != Some(old_fee)
+        {
+            return Err("pending refund transfer journal is incomplete and remains held");
+        }
+        let reserves = self
+            .pending_refund_fee_reserves
+            .as_mut()
+            .ok_or("refund fee reserve state is unavailable")?;
+        let available = reserves.get(&refund.token_ledger).copied().unwrap_or(0);
+        let capacity = available
+            .checked_add(old_fee)
+            .ok_or("refund fee reserve balance overflow")?;
+        if capacity < corrected_fee {
+            return Err("protocol-funded refund fee reserve is insufficient for corrected fee");
+        }
+        reserves.insert(refund.token_ledger, capacity - corrected_fee);
+        refund.transfer_fee = Some(corrected_fee);
+        refund.protocol_fee_reserved = Some(corrected_fee);
+        Ok(refund.clone())
+    }
+
+    pub fn complete_pending_refund(&mut self, id: u64) -> Option<PendingRefund> {
         self.pending_refunds
-            .get_or_insert_with(BTreeMap::new)
-            .insert(refund.id, refund);
+            .as_mut()
+            .and_then(|refunds| refunds.remove(&id))
+    }
+
+    /// Record a typed TooOld response for the exact persisted attempt. This
+    /// keeps the tuple fixed and starts no-effect reconciliation from block 0.
+    pub fn mark_pending_refund_too_old(&mut self, id: u64) -> Result<PendingRefund, &'static str> {
+        let refund = self
+            .pending_refunds
+            .as_mut()
+            .and_then(|refunds| refunds.get_mut(&id))
+            .ok_or("pending refund not found")?;
+        if refund.transfer_attempted != Some(true)
+            || refund.transfer_created_at_time_ns.is_none()
+            || refund.transfer_fee.is_none()
+            || refund.transfer_memo.is_none()
+            || refund.protocol_fee_reserved != refund.transfer_fee
+        {
+            return Err("TooOld recovery requires the complete exact refund journal");
+        }
+        refund.transfer_too_old_rejected = Some(true);
+        refund.transfer_history_scan_cursor = None;
+        refund.transfer_history_scan_tip = None;
+        Ok(refund.clone())
+    }
+
+    pub fn start_pending_refund_history_scan(
+        &mut self,
+        id: u64,
+        log_length: u64,
+    ) -> Result<PendingRefund, &'static str> {
+        let refund = self
+            .pending_refunds
+            .as_mut()
+            .and_then(|refunds| refunds.get_mut(&id))
+            .ok_or("pending refund not found")?;
+        if refund.transfer_too_old_rejected != Some(true) {
+            return Err("history scan requires a typed TooOld response for this refund");
+        }
+        match (refund.transfer_history_scan_cursor, refund.transfer_history_scan_tip) {
+            (None, None) => {
+                refund.transfer_history_scan_cursor = Some(0);
+                refund.transfer_history_scan_tip = Some(log_length);
+            }
+            (Some(_), Some(existing_tip)) if existing_tip == log_length => {}
+            (Some(_), Some(_)) => {
+                return Err("refund history scan tip changed; restart required");
+            }
+            _ => return Err("refund history scan journal is incomplete"),
+        }
+        Ok(refund.clone())
+    }
+
+    pub fn advance_pending_refund_history_scan(
+        &mut self,
+        id: u64,
+        expected_cursor: u64,
+        log_length: u64,
+        next_cursor: u64,
+    ) -> Result<PendingRefund, &'static str> {
+        let refund = self
+            .pending_refunds
+            .as_mut()
+            .and_then(|refunds| refunds.get_mut(&id))
+            .ok_or("pending refund not found")?;
+        if refund.transfer_too_old_rejected != Some(true)
+            || refund.transfer_history_scan_cursor != Some(expected_cursor)
+            || refund.transfer_history_scan_tip != Some(log_length)
+            || next_cursor < expected_cursor
+            || next_cursor > log_length
+        {
+            return Err("refund history scan state changed or range is invalid");
+        }
+        refund.transfer_history_scan_cursor = Some(next_cursor);
+        Ok(refund.clone())
+    }
+
+    /// Release the reserved fee and permit a new exact identity only after the
+    /// complete pinned-ledger history prefix has been scanned without a match.
+    pub fn rotate_pending_refund_after_no_effect(
+        &mut self,
+        id: u64,
+    ) -> Result<PendingRefund, &'static str> {
+        const MAX_ATTEMPTS: u32 = 5;
+        let refund = self
+            .pending_refunds
+            .as_mut()
+            .and_then(|refunds| refunds.get_mut(&id))
+            .ok_or("pending refund not found")?;
+        if refund.transfer_attempted != Some(true)
+            || refund.transfer_too_old_rejected != Some(true)
+            || refund.transfer_history_scan_cursor != refund.transfer_history_scan_tip
+            || refund.transfer_history_scan_tip.is_none()
+            || refund.transfer_fee.is_none()
+            || refund.protocol_fee_reserved != refund.transfer_fee
+        {
+            return Err("fresh refund identity requires a complete no-effect history proof");
+        }
+        let next_attempt = refund
+            .transfer_attempt_no
+            .unwrap_or(0)
+            .checked_add(1)
+            .filter(|attempt| *attempt < MAX_ATTEMPTS)
+            .ok_or("pending refund retry limit reached")?;
+        let fee = refund.transfer_fee.expect("checked above");
+        let reserves = self
+            .pending_refund_fee_reserves
+            .as_mut()
+            .ok_or("refund fee reserve state is unavailable")?;
+        let available = reserves.get(&refund.token_ledger).copied().unwrap_or(0);
+        let restored = available
+            .checked_add(fee)
+            .ok_or("refund fee reserve balance overflow")?;
+        reserves.insert(refund.token_ledger, restored);
+        refund.transfer_attempted = Some(false);
+        refund.transfer_created_at_time_ns = None;
+        refund.transfer_fee = None;
+        refund.transfer_memo = None;
+        refund.transfer_attempt_no = Some(next_attempt);
+        refund.transfer_too_old_rejected = None;
+        refund.transfer_history_scan_cursor = None;
+        refund.transfer_history_scan_tip = None;
+        refund.protocol_fee_reserved = None;
+        Ok(refund.clone())
     }
 
     pub fn pending_refunds_for(&self, user: &Principal) -> Vec<PendingRefund> {
@@ -3322,6 +3573,8 @@ impl From<StabilityPoolStateV1> for StabilityPoolState {
             pending_deposit_intents: Some(BTreeMap::new()),
             processed_interest_mint_blocks: Some(BTreeSet::new()),
             processed_interest_mint_block_high_watermark: None,
+            pending_refund_fee_reserves: Some(BTreeMap::new()),
+            pending_refund_fee_funding_blocks: Some(BTreeSet::new()),
         }
     }
 }
@@ -6357,20 +6610,11 @@ mod tests {
         assert_eq!(state.pending_refunds_for(&user_b()).len(), 1);
         assert!(state.pending_refunds_for(&user_c()).is_empty());
 
-        // take removes the record (remove-before-transfer): a second take
-        // returns None, so two concurrent claims cannot both pay out.
-        let taken = state.take_pending_refund(id0).expect("first take succeeds");
-        assert_eq!(taken.amount, 5_00000000);
-        assert!(
-            state.take_pending_refund(id0).is_none(),
-            "double-claim must not pay twice"
-        );
-
-        // put_pending_refund restores the record after a failed payout transfer.
-        state.put_pending_refund(taken);
+        // The obligation remains present while a stable exact-tuple transfer
+        // is in flight; only a verified receipt may remove it.
         assert_eq!(state.pending_refunds_for(&user_a()).len(), 2);
 
-        // ids keep growing across take/put cycles.
+        // ids keep growing across retained obligations.
         let id3 = state.record_pending_refund(user_c(), icusd_ledger(), 1, "x".to_string(), 400);
         assert_eq!(id3, 3);
     }
@@ -6404,9 +6648,132 @@ mod tests {
     }
 
     #[test]
-    fn ic_s_001_pending_refund_cap_drops_oldest() {
+    fn pending_refund_too_old_scan_is_persistent_and_only_complete_scan_rotates_identity() {
         let mut state = test_state();
-        for i in 0..MAX_PENDING_REFUNDS {
+        state.normalize_pending_refund_fee_state();
+        state
+            .credit_pending_refund_fee_reserve(icusd_ledger(), 90, 20)
+            .unwrap();
+        let id = state.record_pending_refund(user_a(), icusd_ledger(), 1_000, "failed".into(), 5);
+        let first = state
+            .prepare_pending_refund_transfer(id, 10, 100, b"refund-0".to_vec())
+            .unwrap();
+        state.mark_pending_refund_too_old(id).unwrap();
+        assert_eq!(
+            state.rotate_pending_refund_after_no_effect(id),
+            Err("fresh refund identity requires a complete no-effect history proof"),
+            "TooOld alone must never rotate an identity",
+        );
+
+        state.start_pending_refund_history_scan(id, 130).unwrap();
+        state.advance_pending_refund_history_scan(id, 0, 130, 64).unwrap();
+        let bytes = Encode!(&state).expect("encode partially scanned stable state");
+        let mut restored = Decode!(&bytes, StabilityPoolState).expect("restore scan after upgrade");
+        assert_eq!(
+            restored.pending_refunds.as_ref().unwrap()[&id].transfer_history_scan_cursor,
+            Some(64),
+        );
+        assert_eq!(
+            restored.rotate_pending_refund_after_no_effect(id),
+            Err("fresh refund identity requires a complete no-effect history proof"),
+            "partial history must remain held across upgrade",
+        );
+        restored
+            .advance_pending_refund_history_scan(id, 64, 130, 130)
+            .unwrap();
+        let rotated = restored
+            .rotate_pending_refund_after_no_effect(id)
+            .expect("complete no-effect proof may release the old reserved fee");
+        assert_eq!(rotated.transfer_attempted, Some(false));
+        assert_eq!(rotated.transfer_attempt_no, Some(1));
+        assert_eq!(rotated.protocol_fee_reserved, None);
+        assert_eq!(rotated.transfer_memo, None);
+        assert_eq!(restored.pending_refund_fee_reserves.as_ref().unwrap()[&icusd_ledger()], 20);
+
+        let second = restored
+            .prepare_pending_refund_transfer(id, 10, 200, b"refund-1".to_vec())
+            .unwrap();
+        assert_ne!(first.transfer_memo, second.transfer_memo);
+        assert_eq!(second.transfer_attempt_no, Some(1));
+        assert_eq!(second.transfer_created_at_time_ns, Some(200));
+    }
+
+    #[test]
+    fn pending_refund_fee_capacity_is_receipt_bound_and_tuple_is_stable() {
+        let mut state = test_state();
+        let ledger = icusd_ledger();
+        let refund_id =
+            state.record_pending_refund(user_a(), ledger, 10_000_000, "refund failed".into(), 100);
+        assert_eq!(
+            state.credit_pending_refund_fee_reserve(ledger, 55, 20),
+            Ok(())
+        );
+        assert_eq!(
+            state.credit_pending_refund_fee_reserve(ledger, 55, 20),
+            Err("refund fee funding block was already credited"),
+        );
+        let memo = b"rumi-sp-refund-v1:test".to_vec();
+        let first = state
+            .prepare_pending_refund_transfer(refund_id, 20, 123, memo.clone())
+            .expect("receipt-backed reserve funds the fee");
+        let retry = state
+            .prepare_pending_refund_transfer(refund_id, 20, 999, b"different".to_vec())
+            .expect("retry reuses the existing transfer journal");
+        assert_eq!(retry, first);
+        assert_eq!(first.amount, 10_000_000, "refund principal is not netted");
+        assert_eq!(first.transfer_fee, Some(20));
+        assert_eq!(first.transfer_created_at_time_ns, Some(123));
+        assert_eq!(first.transfer_memo, Some(memo.clone()));
+        assert_eq!(
+            state
+                .pending_refund_fee_reserves
+                .as_ref()
+                .unwrap()
+                .get(&ledger),
+            Some(&0),
+            "fee capacity is reserved once before dispatch",
+        );
+
+        state
+            .credit_pending_refund_fee_reserve(ledger, 56, 15)
+            .expect("top-up for the corrected fee is receipt-bound");
+        let repriced = state
+            .refresh_pending_refund_fee_after_bad_fee(refund_id, 25)
+            .expect("BadFee proves the old fee tuple had no effect");
+        assert_eq!(repriced.transfer_fee, Some(25));
+        assert_eq!(repriced.transfer_created_at_time_ns, Some(123));
+        assert_eq!(repriced.transfer_memo, Some(memo));
+        assert_eq!(repriced.amount, 10_000_000, "principal remains full");
+        assert_eq!(
+            state
+                .pending_refund_fee_reserves
+                .as_ref()
+                .unwrap()
+                .get(&ledger),
+            Some(&10),
+            "only corrected fee capacity is reserved",
+        );
+
+        let legacy_id =
+            state.record_pending_refund(user_b(), ledger, 10_000_000, "legacy".into(), 200);
+        let legacy = state
+            .pending_refunds
+            .as_mut()
+            .unwrap()
+            .get_mut(&legacy_id)
+            .unwrap();
+        legacy.transfer_attempted = None;
+        assert_eq!(
+            state.prepare_pending_refund_transfer(legacy_id, 1, 1, vec![]),
+            Err("legacy refund has unknown transfer history and remains held"),
+        );
+    }
+
+    #[test]
+    fn pending_refund_queue_retains_every_unpaid_obligation_past_old_cap() {
+        const OLD_CAP: usize = 10_000;
+        let mut state = test_state();
+        for i in 0..OLD_CAP {
             state.record_pending_refund(
                 user_a(),
                 icusd_ledger(),
@@ -6417,21 +6784,18 @@ mod tests {
         }
         assert_eq!(
             state.pending_refunds_for(&user_a()).len(),
-            MAX_PENDING_REFUNDS
+            OLD_CAP
         );
 
         let id =
             state.record_pending_refund(user_a(), icusd_ledger(), 999, "fail".to_string(), 999);
-        assert_eq!(id as usize, MAX_PENDING_REFUNDS);
+        assert_eq!(id as usize, OLD_CAP);
         assert_eq!(
             state.pending_refunds_for(&user_a()).len(),
-            MAX_PENDING_REFUNDS,
-            "cap must hold",
+            OLD_CAP + 1,
+            "no unpaid obligation may be evicted",
         );
-        assert!(
-            state.take_pending_refund(0).is_none(),
-            "oldest record dropped at cap"
-        );
+        assert!(state.pending_refunds.as_ref().unwrap().get(&0).is_some());
     }
 
     #[test]
@@ -6461,7 +6825,8 @@ mod tests {
         };
         let bytes = Encode!(&v1).expect("encode v1 snapshot");
 
-        let decoded = try_decode_state(&bytes).expect("v1 snapshot must decode");
+        let mut decoded = try_decode_state(&bytes).expect("v1 snapshot must decode");
+        decoded.normalize_pending_refund_fee_state();
         assert_eq!(
             decoded
                 .deposits
@@ -6588,6 +6953,37 @@ mod tests {
                 .unwrap_or_default()
                 .is_empty());
         }
+    }
+
+    #[test]
+    fn legacy_ambiguous_pending_refund_survives_fee_state_migration_held() {
+        let mut state = test_state();
+        let id = state.record_pending_refund(
+            user_a(),
+            icusd_ledger(),
+            12_00000000,
+            "legacy failure".into(),
+            123,
+        );
+        let refund = state.pending_refunds.as_mut().unwrap().get_mut(&id).unwrap();
+        refund.transfer_attempted = None;
+        refund.transfer_created_at_time_ns = None;
+        refund.transfer_fee = None;
+        refund.transfer_memo = None;
+        refund.protocol_fee_reserved = None;
+        state.pending_refund_fee_reserves = None;
+        state.pending_refund_fee_funding_blocks = None;
+
+        state.normalize_pending_refund_fee_state();
+
+        let retained = state.pending_refunds.as_ref().unwrap().get(&id).unwrap();
+        assert_eq!(retained.transfer_attempted, None);
+        assert!(retained.transfer_created_at_time_ns.is_none());
+        assert_eq!(state.pending_refund_fee_reserves, Some(BTreeMap::new()));
+        assert_eq!(
+            state.pending_refund_fee_funding_blocks,
+            Some(BTreeSet::new())
+        );
     }
 
     #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
