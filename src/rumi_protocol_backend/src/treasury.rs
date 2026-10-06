@@ -1003,6 +1003,7 @@ enum ThreePoolDonateError {
     MathOverflow,
     InvariantNotConverged,
     PoolPaused,
+    PoolLocked,
     DonationIntentConflict,
 }
 

@@ -88,11 +88,13 @@ const MEM_NEXT_CLAIM_ID: MemoryId = MemoryId::new(21);
 const MEM_SWAP_RECEIPTS_V1: MemoryId = MemoryId::new(22);
 const MEM_SWAP_RECEIPT_FENCE: MemoryId = MemoryId::new(23);
 const MEM_SWAP_RECEIPT_CLIENTS: MemoryId = MemoryId::new(24);
-const MEM_PENDING_PAYOUTS: MemoryId = MemoryId::new(25);
-const MEM_INGRESS_RECEIPTS: MemoryId = MemoryId::new(26);
-const MEM_INTENT_HIGH_WATER: MemoryId = MemoryId::new(27);
+// Preserve the donation receipt slot introduced by the preceding source
+// revision so a future upgrade cannot reinterpret its stable bytes as payouts.
+const MEM_THREE_POOL_DONATION_RECEIPTS: MemoryId = MemoryId::new(25);
+const MEM_PENDING_PAYOUTS: MemoryId = MemoryId::new(26);
+const MEM_INGRESS_RECEIPTS: MemoryId = MemoryId::new(27);
+const MEM_INTENT_HIGH_WATER: MemoryId = MemoryId::new(28);
 pub(crate) const MAX_INTENT_OWNERS: u64 = 100_000;
-const MEM_THREE_POOL_DONATION_RECEIPTS: MemoryId = MemoryId::new(28);
 
 // ─── SlimState ───────────────────────────────────────────────────────────────
 //
