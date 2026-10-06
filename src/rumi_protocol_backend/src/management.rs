@@ -431,6 +431,22 @@ pub async fn transfer_idempotent(
         ledger,
         from_subaccount,
     )?;
+    if let Some(guard) = _default_account_guard.as_ref() {
+        let fee_before = get_ledger_fee(ledger).await.map_err(default_account_capacity_error)?;
+        let balance = get_icrc1_reserve_balance(
+            ledger,
+            Account { owner: ic_cdk::id(), subaccount: None },
+        )
+        .await
+        .map_err(default_account_capacity_error)?;
+        let fee = get_ledger_fee(ledger).await.map_err(default_account_capacity_error)?;
+        if !default_fee_is_stable_and_legacy_compatible(fee_before, fee) {
+            return Err(default_account_capacity_error(
+                "3USD ledger fee is nonzero or changed during preflight; legacy transfer remains held",
+            ));
+        }
+        ensure_default_account_spend_with_balance(guard, ledger, amount, fee, balance)?;
+    }
     let created_at_time = nonce_to_created_at_time(op_nonce);
     let memo = memo.unwrap_or_else(|| nonce_to_memo(op_nonce));
 
@@ -442,6 +458,8 @@ pub async fn transfer_idempotent(
         .transfer(TransferArg {
             from_subaccount,
             to,
+            // Preserve the legacy dedup tuple for existing pending operations:
+            // this generic path has always omitted the fee field.
             fee: None,
             created_at_time: Some(created_at_time),
             memo: Some(memo),
@@ -462,6 +480,9 @@ pub async fn transfer_idempotent_exact(
     created_at_time: u64,
 ) -> Result<u64, TransferError> {
     let _guard = acquire_three_usd_default_account_transfer_guard(ledger, from_subaccount)?;
+    if let Some(guard) = _guard.as_ref() {
+        ensure_default_account_spend_preserves_refunds(guard, ledger, amount, fee).await?;
+    }
     transfer_idempotent_exact_inner(ledger, from_subaccount, to, amount, fee, memo, created_at_time).await
 }
 
@@ -481,6 +502,8 @@ pub async fn transfer_idempotent_exact_with_three_usd_guard(
             message: "3USD default-account transfer guard does not match the persisted source".into(),
         });
     }
+    // The refund worker capacity-checks the initial tuple before persisting it.
+    // Retries replay that exact tuple and verify its receipt before clearing it.
     transfer_idempotent_exact_inner(ledger, from_subaccount, to, amount, fee, memo, created_at_time).await
 }
 
@@ -509,7 +532,8 @@ fn acquire_three_usd_default_account_transfer_guard(
     ledger: Principal,
     from_subaccount: Option<[u8; 32]>,
 ) -> Result<Option<crate::ThreeUsdDefaultAccountTransferGuard>, TransferError> {
-    if from_subaccount.is_some() || !crate::state::read_state(|state| state.three_pool_canister == Some(ledger)) {
+    let is_default_source = from_subaccount.map_or(true, |subaccount| subaccount == [0; 32]);
+    if !is_default_source || !crate::state::read_state(|state| state.three_pool_canister == Some(ledger)) {
         return Ok(None);
     }
     crate::ThreeUsdDefaultAccountTransferGuard::try_acquire(ledger).map(Some).ok_or_else(|| {
@@ -518,6 +542,83 @@ fn acquire_three_usd_default_account_transfer_guard(
             message: "3USD default-account transfer is held by a reserve capacity check".into(),
         }
     })
+}
+
+fn default_account_capacity_error(message: impl Into<String>) -> TransferError {
+    TransferError::GenericError {
+        error_code: Nat::from(0u64),
+        message: message.into(),
+    }
+}
+
+fn default_account_spend_fits(balance: u64, amount: u64, fee: u64, commitment: u64) -> bool {
+    amount
+        .checked_add(fee)
+        .and_then(|debit| balance.checked_sub(debit))
+        .is_some_and(|remaining| remaining >= commitment)
+}
+
+fn default_fee_is_stable_and_legacy_compatible(before: u64, after: u64) -> bool {
+    before == 0 && after == 0
+}
+
+async fn ensure_default_account_spend_preserves_refunds(
+    guard: &crate::ThreeUsdDefaultAccountTransferGuard,
+    ledger: Principal,
+    amount: u128,
+    fee: u64,
+) -> Result<(), TransferError> {
+    let balance = get_icrc1_reserve_balance(
+        ledger,
+        Account { owner: ic_cdk::id(), subaccount: None },
+    )
+    .await
+    .map_err(default_account_capacity_error)?;
+    ensure_default_account_spend_with_balance(guard, ledger, amount, fee, balance)
+}
+
+fn ensure_default_account_spend_with_balance(
+    guard: &crate::ThreeUsdDefaultAccountTransferGuard,
+    ledger: Principal,
+    amount: u128,
+    fee: u64,
+    balance: u64,
+) -> Result<(), TransferError> {
+    if !guard.protects(ledger) {
+        return Err(default_account_capacity_error("3USD default-account spend has no matching capacity guard"));
+    }
+    let amount = u64::try_from(amount)
+        .map_err(|_| default_account_capacity_error("3USD default-account debit exceeds u64"))?;
+    let commitment = read_state(|state| state.three_usd_default_account_refund_commitment(ledger, fee))
+        .ok_or_else(|| default_account_capacity_error(
+            "3USD default-account refund obligations are uncertain; debit remains held",
+        ))?;
+    if !default_account_spend_fits(balance, amount, fee, commitment) {
+        return Err(default_account_capacity_error(format!(
+            "3USD default-account debit would violate refund commitments (balance {balance}, debit {amount}+{fee}, committed {commitment})",
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod three_usd_default_spend_capacity_tests {
+    use super::{default_account_spend_fits, default_fee_is_stable_and_legacy_compatible};
+
+    #[test]
+    fn default_spend_must_leave_all_refunds_funded() {
+        assert!(default_account_spend_fits(150, 20, 10, 120));
+        assert!(!default_account_spend_fits(149, 20, 10, 120));
+        assert!(!default_account_spend_fits(150, 20, 10, 121));
+        assert!(!default_account_spend_fits(u64::MAX, u64::MAX, 1, 0));
+    }
+
+    #[test]
+    fn generic_legacy_fee_tuple_is_only_allowed_for_stable_zero_fee_ledger() {
+        assert!(default_fee_is_stable_and_legacy_compatible(0, 0));
+        assert!(!default_fee_is_stable_and_legacy_compatible(0, 1));
+        assert!(!default_fee_is_stable_and_legacy_compatible(1, 1));
+    }
 }
 
 /// Idempotent ICRC-2 transfer_from. Same semantics as `transfer_idempotent`
@@ -1546,7 +1647,7 @@ pub async fn get_ledger_fee(ledger: Principal) -> Result<u64, String> {
         ledger_canister_id: ledger,
     };
     let fee = client.fee().await.map_err(|e| format!("icrc1_fee call failed: {:?}", e))?;
-    Ok(fee.0.to_u64().unwrap_or(0))
+    fee.0.to_u64().ok_or_else(|| "ledger fee exceeds the supported u64 range".to_string())
 }
 
 /// Generic collateral transfer: move tokens from the protocol canister to a recipient.
@@ -1594,6 +1695,11 @@ pub async fn transfer_collateral_with_exact_tuple(
     memo: Vec<u8>,
     created_at_time: u64,
 ) -> Result<u64, TransferError> {
+    let _default_account_guard =
+        acquire_three_usd_default_account_transfer_guard(ledger, from.subaccount)?;
+    if let Some(guard) = _default_account_guard.as_ref() {
+        ensure_default_account_spend_preserves_refunds(guard, ledger, amount as u128, fee).await?;
+    }
     let args = TransferArg {
         from_subaccount: from.subaccount,
         to,

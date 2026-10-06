@@ -88,6 +88,198 @@ mod three_usd_v2_migration_tests {
             .expect("legacy refund row must retain its legacy meaning");
         assert_eq!(restored.parent_absorb_id, None);
     }
+
+    fn ingress_journal(phase: ThreeUsdReserveIngressPhase) -> ThreeUsdReserveIngressJournal {
+        ThreeUsdReserveIngressJournal {
+            request: ThreeUsdReserveIngressRequest {
+                icusd_debt_covered_e8s: 200,
+                three_usd_amount_e8s: 100,
+                ledger: Principal::from_slice(&[0x43]),
+            },
+            phase,
+            refund: None,
+            payout: None,
+            refund_fee_reserved_e8s: Some(5),
+        }
+    }
+
+    fn ingress_tuple() -> ThreeUsdReserveIngressTuple {
+        ThreeUsdReserveIngressTuple {
+            spender_owner: Principal::anonymous(),
+            spender_subaccount: None,
+            source: icrc_ledger_types::icrc1::account::Account {
+                owner: Principal::anonymous(),
+                subaccount: None,
+            },
+            destination: icrc_ledger_types::icrc1::account::Account {
+                owner: Principal::from_slice(&[0x41]),
+                subaccount: None,
+            },
+            amount_e8s: 100,
+            fee_e8s: None,
+            memo: [0; 16],
+            created_at_time_ns: 1,
+            op_nonce: 7,
+            parent_absorb_id: Some(9),
+        }
+    }
+
+    #[test]
+    fn v2_default_account_commitment_covers_live_ingress_then_releases_on_absorb() {
+        let ledger = Principal::from_slice(&[0x43]);
+        let key = ThreeUsdReserveIngressKey {
+            stability_pool: Principal::from_slice(&[0x41]),
+            vault_id: 3,
+            absorb_id: 9,
+        };
+        let mut state = State::default();
+        let mut journal = ingress_journal(ThreeUsdReserveIngressPhase::AdmissionPending);
+        state.three_usd_reserve_ingress_journals.insert(key.clone(), journal.clone());
+        assert_eq!(state.three_usd_default_account_refund_commitment(ledger, 7), Some(7));
+
+        journal.phase = ThreeUsdReserveIngressPhase::SubmittedOrUnknown { tuple: ingress_tuple() };
+        state.three_usd_reserve_ingress_journals.insert(key.clone(), journal.clone());
+        assert_eq!(state.three_usd_default_account_refund_commitment(ledger, 7), Some(107));
+
+        journal.phase = ThreeUsdReserveIngressPhase::TransferConfirmed {
+            tuple: ingress_tuple(),
+            block_index: 10,
+        };
+        state.three_usd_reserve_ingress_journals.insert(key.clone(), journal.clone());
+        assert_eq!(state.three_usd_default_account_refund_commitment(ledger, 7), Some(107));
+
+        journal.phase = ThreeUsdReserveIngressPhase::Absorbed {
+            tuple: ingress_tuple(),
+            block_index: 10,
+            result: ThreeUsdReserveIngressResult {
+                success: true,
+                vault_id: 3,
+                liquidated_debt: 100,
+                collateral_received: 50,
+                collateral_type: "ICP".into(),
+                block_index: 0,
+                fee: 0,
+                collateral_price_e8s: 1,
+            },
+        };
+        state.three_usd_reserve_ingress_journals.insert(key.clone(), journal.clone());
+        assert_eq!(state.three_usd_default_account_refund_commitment(ledger, 7), None);
+
+        journal.phase = ThreeUsdReserveIngressPhase::Absorbed {
+            tuple: ingress_tuple(),
+            block_index: 10,
+            result: ThreeUsdReserveIngressResult {
+                success: true,
+                vault_id: 3,
+                liquidated_debt: 200,
+                collateral_received: 100,
+                collateral_type: "ICP".into(),
+                block_index: 0,
+                fee: 0,
+                collateral_price_e8s: 1,
+            },
+        };
+        state.three_usd_reserve_ingress_journals.insert(key, journal);
+        assert_eq!(state.three_usd_default_account_refund_commitment(ledger, 7), Some(0));
+    }
+
+    #[test]
+    fn failed_v2_ingress_without_child_retains_full_principal_and_fee_commitment() {
+        let ledger = Principal::from_slice(&[0x43]);
+        let key = ThreeUsdReserveIngressKey {
+            stability_pool: Principal::from_slice(&[0x41]),
+            vault_id: 3,
+            absorb_id: 9,
+        };
+        let mut state = State::default();
+        state.three_usd_reserve_ingress_journals.insert(
+            key,
+            ingress_journal(ThreeUsdReserveIngressPhase::FailedAfterTransfer {
+                tuple: ingress_tuple(),
+                block_index: 10,
+                error: "failed".into(),
+            }),
+        );
+        assert_eq!(state.three_usd_default_account_refund_commitment(ledger, 7), Some(107));
+    }
+
+    #[test]
+    fn v2_refund_child_is_counted_once_by_its_exact_default_dispatch() {
+        let ledger = Principal::from_slice(&[0x43]);
+        let pool = Principal::from_slice(&[0x41]);
+        let key = ThreeUsdReserveIngressKey { stability_pool: pool, vault_id: 3, absorb_id: 9 };
+        let nonce = 7;
+        let mut state = State::default();
+        let mut journal = ingress_journal(ThreeUsdReserveIngressPhase::TransferConfirmed {
+            tuple: ingress_tuple(),
+            block_index: 10,
+        });
+        journal.refund = Some(ThreeUsdReserveIngressRefund {
+            op_nonce: nonce,
+            gross_amount_e8s: 100,
+            source_subaccount: None,
+            settled_receipt: None,
+        });
+        state.three_usd_reserve_ingress_journals.insert(key, journal);
+        state.pending_3usd_refunds.insert(nonce, PendingThreeUsdRefund {
+            stability_pool: pool,
+            ledger,
+            amount_e8s: 100,
+            vault_id: 3,
+            retry_count: 0,
+            op_nonce: nonce,
+            parent_absorb_id: Some(9),
+        });
+        state.pending_3usd_refund_journals.insert(
+            nonce,
+            ThreeUsdRefundDispatchState::NeverDispatchedDefault { gross_amount_e8s: 100 },
+        );
+        assert_eq!(state.three_usd_default_account_refund_commitment(ledger, 7), Some(107));
+    }
+
+    #[test]
+    fn cl07_pending_payout_invariant_uses_operation_id_and_exact_identity() {
+        let pool = Principal::from_slice(&[0x41]);
+        let ledger = Principal::from_slice(&[0x43]);
+        let key = ThreeUsdReserveIngressKey { stability_pool: pool, vault_id: 3, absorb_id: 9 };
+        let nonce = 77;
+        let mut state = State::default();
+        let mut journal = ingress_journal(ThreeUsdReserveIngressPhase::AdmissionPending);
+        journal.payout = Some(ThreeUsdReserveIngressPayout {
+            tuple: ThreeUsdReserveIngressPayoutTuple {
+                op_nonce: nonce,
+                ledger,
+                proof_kind: PayoutProofKind::Icrc3,
+                source: icrc_ledger_types::icrc1::account::Account { owner: Principal::anonymous(), subaccount: None },
+                destination: icrc_ledger_types::icrc1::account::Account { owner: pool, subaccount: None },
+                gross_amount_e8s: 100,
+                net_amount_e8s: 90,
+                fee_e8s: 10,
+                memo: [0; 16],
+                created_at_time_ns: 77,
+                collateral_type: ledger,
+            },
+            receipt: None,
+        });
+        state.three_usd_reserve_ingress_journals.insert(key.clone(), journal);
+        state.three_usd_reserve_payout_parents.insert(nonce, key);
+        state.pending_margin_transfers.insert(nonce, PendingMarginTransfer {
+            vault_id: 3,
+            owner: pool,
+            margin: ICP::new(100),
+            collateral_type: ledger,
+            retry_count: 0,
+            op_nonce: nonce,
+            ledger: Some(ledger),
+            transfer_amount_raw: Some(90),
+            held_for_manual_retry: false,
+            reconciliation_required: false,
+            min_net_collateral_raw: None,
+        });
+        assert!(state.check_invariants().is_ok());
+        state.pending_margin_transfers.get_mut(&nonce).unwrap().vault_id = 4;
+        assert!(state.check_invariants().unwrap_err().contains("lost its pending margin row"));
+    }
 }
 
 macro_rules! ensure {
@@ -3045,24 +3237,90 @@ impl State {
             if journal.request.ledger != ledger {
                 continue;
             }
-            let Some(fee_hold) = journal.refund_fee_reserved_e8s else {
-                continue;
-            };
-            match journal.refund.as_ref() {
-                Some(child) if child.settled_receipt.is_some() => {}
-                Some(child) => {
+            let child_is_pending = if let Some(child) = journal.refund.as_ref() {
+                let expected_refund = match &journal.phase {
+                    ThreeUsdReserveIngressPhase::Absorbed { .. } => {
+                        journal.expected_absorbed_refund_e8s()
+                    }
+                    ThreeUsdReserveIngressPhase::FailedAfterTransfer { .. } => {
+                        Some(journal.request.three_usd_amount_e8s)
+                    }
+                    _ => None,
+                };
+                if expected_refund != Some(child.gross_amount_e8s) {
+                    return None;
+                }
+                if child.settled_receipt.is_some() {
+                    false
+                } else {
                     let Some(refund) = self.pending_3usd_refunds.get(&child.op_nonce) else {
                         return None;
                     };
                     if refund.parent_absorb_id != Some(key.absorb_id)
                         || refund.stability_pool != key.stability_pool
                         || refund.vault_id != key.vault_id
+                        || refund.ledger != ledger
                         || refund.amount_e8s != child.gross_amount_e8s
                     {
                         return None;
                     }
+                    let Some(dispatch) = self.pending_3usd_refund_journals.get(&child.op_nonce)
+                    else {
+                        return None;
+                    };
+                    match dispatch {
+                        ThreeUsdRefundDispatchState::NeverDispatchedDefault { gross_amount_e8s }
+                        | ThreeUsdRefundDispatchState::UnpayableDefault { gross_amount_e8s, .. }
+                            if *gross_amount_e8s == child.gross_amount_e8s => {}
+                        ThreeUsdRefundDispatchState::SubmittedOrUnknown { tuple }
+                            if tuple.source_subaccount.is_none()
+                                && tuple.amount_e8s == child.gross_amount_e8s
+                                && tuple.destination.owner == key.stability_pool => {}
+                        _ => return None,
+                    }
+                    true
                 }
-                None => total = total.checked_add(fee_hold)?,
+            } else {
+                false
+            };
+            // An unsettled child is already counted in pending_3usd_refunds.
+            // Do not add its parent reserve a second time.
+            if child_is_pending
+                || journal
+                    .refund
+                    .as_ref()
+                    .is_some_and(|child| child.settled_receipt.is_some())
+            {
+                continue;
+            }
+            let fee_hold = journal
+                .refund_fee_reserved_e8s
+                .unwrap_or(0)
+                .max(current_fee_e8s);
+            match journal.refund.as_ref() {
+                Some(_) => return None,
+                None => match &journal.phase {
+                    ThreeUsdReserveIngressPhase::AdmissionPending => {
+                        total = total.checked_add(fee_hold)?;
+                    }
+                    ThreeUsdReserveIngressPhase::SubmittedOrUnknown { .. }
+                    | ThreeUsdReserveIngressPhase::TransferConfirmed { .. } => {
+                        total = total.checked_add(
+                            journal.request.three_usd_amount_e8s.checked_add(fee_hold)?,
+                        )?;
+                    }
+                    ThreeUsdReserveIngressPhase::FailedAfterTransfer { .. } => {
+                        total = total.checked_add(
+                            journal.request.three_usd_amount_e8s.checked_add(fee_hold)?,
+                        )?;
+                    }
+                    ThreeUsdReserveIngressPhase::PreTransferRejected { .. } => {}
+                    ThreeUsdReserveIngressPhase::Absorbed { .. } => {
+                        if journal.expected_absorbed_refund_e8s() != Some(0) {
+                            return None;
+                        }
+                    }
+                },
             }
         }
         Some(total)
@@ -6885,16 +7143,19 @@ impl State {
             {
                 return Err(format!("3USD payout {nonce} differs from its parent identity"));
             }
-            let pending = self.pending_margin_transfers
-                .get(&(key.vault_id, key.stability_pool));
+            let pending = self.pending_margin_transfers.get(nonce);
             if payout.receipt.is_some() {
                 if pending.is_some() {
                     return Err(format!("settled 3USD payout {nonce} still has a pending margin row"));
                 }
             } else if !pending.is_some_and(|transfer| {
                 transfer.op_nonce == *nonce
+                    && transfer.vault_id == key.vault_id
                     && transfer.margin.to_u64() == payout.tuple.gross_amount_e8s
                     && transfer.owner == key.stability_pool
+                    && transfer.collateral_type == payout.tuple.collateral_type
+                    && transfer.ledger == Some(payout.tuple.ledger)
+                    && transfer.transfer_amount_raw == Some(payout.tuple.net_amount_e8s)
             }) {
                 return Err(format!("unsettled 3USD payout {nonce} lost its pending margin row"));
             }
