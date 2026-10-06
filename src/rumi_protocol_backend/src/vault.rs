@@ -1256,6 +1256,114 @@ fn check_min_vault_debt_after_repay(
     Ok(())
 }
 
+/// Compute the ckStable pull for a finalized icUSD debt reduction. Since
+/// icUSD uses 8 decimals and ckStable uses 6, round the base pull upward so
+/// the transferred principal always covers the debt that will be retired.
+/// The configurable surcharge is then charged on that rounded base amount.
+fn stable_repay_pull_e6s(amount: ICUSD, fee_rate: Ratio) -> Result<(u64, u64, u64), ProtocolError> {
+    let amount_e8s = amount.0;
+    let base_e6s = (amount_e8s / 100)
+        .checked_add(u64::from(amount_e8s % 100 != 0))
+        .ok_or_else(|| ProtocolError::GenericError("Stable repayment amount overflow.".into()))?;
+    let fee_e6s = Decimal::from(base_e6s)
+        .checked_mul(fee_rate.0)
+        .and_then(|fee| fee.to_u64())
+        .ok_or_else(|| ProtocolError::GenericError("Stable repayment fee overflow.".into()))?;
+    let total_e6s = base_e6s
+        .checked_add(fee_e6s)
+        .ok_or_else(|| ProtocolError::GenericError("Stable repayment pull overflow.".into()))?;
+    Ok((base_e6s, fee_e6s, total_e6s))
+}
+
+#[cfg(test)]
+mod stable_repay_rounding_tests {
+    use super::stable_repay_pull_e6s;
+    use crate::numeric::{ICUSD, Ratio};
+    use crate::ProtocolError;
+    use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
+
+    #[test]
+    fn rounded_base_covers_final_debt_after_near_full_repay_snap() {
+        let requested_e8s = 10_000_000_000u64;
+        let debt_e8s = 10_050_000_000u64;
+        let snap_threshold = std::cmp::max(debt_e8s / 100, 1_000_000);
+        assert!(debt_e8s - requested_e8s <= snap_threshold);
+
+        // Current full-repay policy retires all of debt when the remainder is
+        // inside the dust threshold. A base computed from the request alone
+        // would cover only 10,000,000,000 e8s and underfund that retirement.
+        assert!(u128::from(requested_e8s / 100) * 100 < u128::from(debt_e8s));
+        let (base_e6s, fee_e6s, total_e6s) = stable_repay_pull_e6s(
+            ICUSD::new(debt_e8s),
+            Ratio::new(dec!(0.01)),
+        )
+        .unwrap();
+        assert_eq!(base_e6s, 100_500_000);
+        assert_eq!(fee_e6s, 1_005_000);
+        assert_eq!(total_e6s, 101_505_000);
+        assert!(u128::from(base_e6s) * 100 >= u128::from(debt_e8s));
+        assert!(u128::from(base_e6s - 1) * 100 < u128::from(debt_e8s));
+        assert_eq!(base_e6s.checked_add(fee_e6s), Some(total_e6s));
+    }
+
+    #[test]
+    fn fractional_e8_debt_rounds_up_and_fee_is_not_counted_as_principal() {
+        let finalized_debt_e8s = 10_000_000_001u64;
+        let (base_e6s, fee_e6s, total_e6s) = stable_repay_pull_e6s(
+            ICUSD::new(finalized_debt_e8s),
+            Ratio::new(dec!(0.0005)),
+        )
+        .unwrap();
+        assert_eq!(base_e6s, 100_000_001);
+        assert_eq!(fee_e6s, 50_000);
+        assert_eq!(total_e6s, 100_050_001);
+        assert!(u128::from(base_e6s) * 100 >= u128::from(finalized_debt_e8s));
+        assert_eq!(
+            u128::from(base_e6s) * 100 - u128::from(finalized_debt_e8s),
+            99,
+            "only decimal conversion rounding may exceed the retired debt",
+        );
+    }
+
+    #[test]
+    fn stable_repay_pull_rejects_fee_overflow() {
+        assert!(matches!(
+            stable_repay_pull_e6s(ICUSD::new(u64::MAX), Ratio::new(Decimal::MAX)),
+            Err(ProtocolError::GenericError(_)),
+        ));
+    }
+
+    #[test]
+    fn stable_liquidation_dust_round_up_pulls_enough_for_full_nonmultiple_debt() {
+        let debt_e8s = 10_000_000_001u64;
+        let vault = super::Vault {
+            owner: candid::Principal::anonymous(),
+            borrowed_icusd_amount: ICUSD::new(debt_e8s),
+            collateral_amount: 1,
+            vault_id: 1,
+            collateral_type: candid::Principal::anonymous(),
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        };
+        let retired = super::round_up_partial_liq_dust(
+            &vault,
+            ICUSD::new(debt_e8s - 1),
+            ICUSD::new(100),
+        );
+        assert_eq!(retired, ICUSD::new(debt_e8s));
+
+        let (base_e6s, fee_e6s, total_e6s) =
+            stable_repay_pull_e6s(retired, Ratio::new(dec!(0.0005))).unwrap();
+        assert_eq!(base_e6s, 100_000_001);
+        assert_eq!(fee_e6s, 50_000);
+        assert_eq!(total_e6s, 100_050_001);
+        assert!(u128::from(base_e6s) * 100 >= u128::from(retired.0));
+        assert!(u128::from(retired.0 / 100) * 100 < u128::from(retired.0));
+    }
+}
+
 /// LIQ-003: round a partial-liquidation amount up to the vault's full debt if
 /// the residual would land in the open interval `(0, min_vault_debt)`. Mirrors
 /// the dust-forgiveness pattern in `repay_to_vault`. The repay path enforces
@@ -5741,13 +5849,18 @@ pub async fn repay_to_vault_with_stable(arg: VaultArgWithToken) -> Result<u64, P
         return Err(e);
     }
 
-    // Convert e8s (icUSD) to e6s (ckstable) and add fee surcharge
-    let base_stable_e6s = raw_amount_e8s / 100;
+    // Derive the stable pull from finalized retired debt, including any
+    // near-full-debt snap. Ceiling the conversion prevents retiring more
+    // icUSD debt than the stable principal can cover.
     let fee_rate = read_state(|s| s.ckstable_repay_fee);
-    let fee_e6s = (rust_decimal::Decimal::from(base_stable_e6s) * fee_rate.0)
-        .to_u64()
-        .unwrap_or(0);
-    let total_pull_e6s = base_stable_e6s + fee_e6s;
+    let (_base_stable_e6s, fee_e6s, total_pull_e6s) =
+        match stable_repay_pull_e6s(amount, fee_rate) {
+            Ok(pull) => pull,
+            Err(error) => {
+                guard_principal.fail();
+                return Err(error);
+            }
+        };
 
     // Transfer the stable token from user (in 6-decimal units)
     match transfer_stable_from(arg.token_type.clone(), total_pull_e6s, caller).await {
@@ -7705,14 +7818,17 @@ pub async fn liquidate_vault_partial_with_stable(
         protocol_cut
     );
 
-    // Step 2: Convert e8s to e6s and add fee surcharge, then take stable token from liquidator
-    let debt_e8s = max_liquidatable_debt.to_u64();
-    let base_stable_e6s = debt_e8s / 100;
+    // Step 2: Pull enough stable principal to cover the finalized liquidation
+    // debt, which may be rounded up to the full debt to prevent a dust remainder.
     let fee_rate = read_state(|s| s.ckstable_repay_fee);
-    let fee_e6s = (rust_decimal::Decimal::from(base_stable_e6s) * fee_rate.0)
-        .to_u64()
-        .unwrap_or(0);
-    let total_pull_e6s = base_stable_e6s + fee_e6s;
+    let (_base_stable_e6s, fee_e6s, total_pull_e6s) =
+        match stable_repay_pull_e6s(max_liquidatable_debt, fee_rate) {
+            Ok(pull) => pull,
+            Err(error) => {
+                guard_principal.fail();
+                return Err(error);
+            }
+        };
 
     let stable_block_index =
         match transfer_stable_from(token_type.clone(), total_pull_e6s, caller).await {
