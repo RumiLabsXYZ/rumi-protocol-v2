@@ -278,6 +278,9 @@ class AmmService {
 
     if (cached?.fingerprint === fingerprint) {
       const id = hexToBytes(cached.id);
+      // A typed first-dispatch no-effect is discarded on-chain because no
+      // value moved. With no row present, safely reuse the cached caller ID.
+      if (id && !pending) return id;
       if (id && pendingId && bytesToHex(id) === bytesToHex(pendingId) && onChainFingerprint(pending) === fingerprint) return id;
     }
 

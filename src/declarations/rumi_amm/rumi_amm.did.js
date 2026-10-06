@@ -237,6 +237,8 @@ export const idlFactory = ({ IDL }) => {
     'dispatch_count' : IDL.Nat32,
     'receipt_scan_cursor' : IDL.Nat64,
     'ledger' : IDL.Principal,
+    'receipt_scan_start' : IDL.Opt(IDL.Nat64),
+    'attempt_generation' : IDL.Nat32,
     'created_at_time' : IDL.Nat64,
     'amount' : IDL.Nat,
   });
@@ -287,6 +289,7 @@ export const idlFactory = ({ IDL }) => {
     'operation_id' : IDL.Nat64,
     'receipt_scan_cursor' : IDL.Nat64,
     'ledger' : IDL.Principal,
+    'receipt_scan_start' : IDL.Opt(IDL.Nat64),
     'attempt_generation' : IDL.Nat32,
     'phase' : AmmPayoutPhase,
     'created_at_time' : IDL.Nat64,

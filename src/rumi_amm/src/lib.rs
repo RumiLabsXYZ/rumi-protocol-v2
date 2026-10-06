@@ -777,6 +777,7 @@ fn new_payout_row(
         attempt_generation: 0,
         dispatch_count: 0,
         phase: AmmPayoutPhase::Staged,
+        receipt_scan_start: None,
         receipt_scan_cursor: 0,
         receipt_scan_end: None,
         last_error: None,
@@ -806,6 +807,32 @@ fn ingress_memo(
 
 fn receipt_scan_page_end(cursor: u64, frozen_tip: u64) -> u64 {
     cursor.saturating_add(32).min(frozen_tip)
+}
+
+fn receipt_scan_tip(frozen_tip: Option<u64>, observed_log_length: u64) -> Result<u64, String> {
+    match frozen_tip {
+        Some(tip) if observed_log_length < tip => {
+            Err("ledger log length fell below the frozen receipt-scan tip".to_string())
+        }
+        Some(tip) => Ok(tip),
+        None => Ok(observed_log_length),
+    }
+}
+
+/// Drop a staged request only after source proves that no external value moved.
+/// Such a row has no replay-protection duty and must not consume scarce global
+/// identity capacity.
+fn discard_unaccepted_ingress(state: &mut AmmState, operation_id: u64) {
+    let payout_ids = state
+        .ingress_operations
+        .iter()
+        .find(|op| op.id == operation_id)
+        .map(|op| op.payout_ids.clone())
+        .unwrap_or_default();
+    state.ingress_operations.retain(|op| op.id != operation_id);
+    state
+        .pending_payouts
+        .retain(|row| !payout_ids.contains(&row.id));
 }
 
 fn payout_phase_has_prior_ambiguity(phase: &AmmPayoutPhase) -> bool {
@@ -911,6 +938,7 @@ fn begin_swap_operation(
             attempt_generation: 0,
             dispatch_count: 0,
             block_index: None,
+            receipt_scan_start: None,
             receipt_scan_cursor: 0,
             receipt_scan_end: None,
         };
@@ -1047,6 +1075,7 @@ fn begin_add_operation(
                     attempt_generation: 0,
                     dispatch_count: 0,
                     block_index: None,
+                    receipt_scan_start: None,
                     receipt_scan_cursor: 0,
                     receipt_scan_end: None,
                 },
@@ -1060,6 +1089,7 @@ fn begin_add_operation(
                     attempt_generation: 0,
                     dispatch_count: 0,
                     block_index: None,
+                    receipt_scan_start: None,
                     receipt_scan_cursor: 0,
                     receipt_scan_end: None,
                 },
@@ -1225,13 +1255,46 @@ async fn process_ingress_leg(operation_id: u64, leg_index: usize) -> Result<u64,
             .cloned()
     })
     .ok_or(AmmError::ClaimNotFound)?;
-    let leg = operation
+    let mut leg = operation
         .legs
         .get(leg_index)
         .cloned()
         .ok_or(AmmError::ClaimNotFound)?;
     if let Some(block) = leg.block_index {
         return Ok(block);
+    }
+    if leg.dispatch_count == 0 && leg.receipt_scan_start.is_none() {
+        let start =
+            ledger_receipt_tip(leg.ledger)
+                .await
+                .map_err(|reason| AmmError::TransferFailed {
+                    token: format!("ingress:{}", leg_index),
+                    reason,
+                })?;
+        let saved = mutate_state(|s| {
+            if let Some(op) = s
+                .ingress_operations
+                .iter_mut()
+                .find(|op| op.id == operation_id && **op == operation)
+            {
+                if let Some(stored) = op.legs.get_mut(leg_index) {
+                    if *stored == leg {
+                        stored.receipt_scan_start = Some(start);
+                        stored.receipt_scan_cursor = start;
+                        return true;
+                    }
+                }
+            }
+            false
+        });
+        if !saved {
+            return Err(AmmError::TransferFailed {
+                token: format!("ingress:{}", leg_index),
+                reason: "ingress changed while capturing pre-dispatch ledger tip".to_string(),
+            });
+        }
+        leg.receipt_scan_start = Some(start);
+        leg.receipt_scan_cursor = start;
     }
     let prior_dispatches = mutate_state(|s| {
         if let Some(op) = s
@@ -1435,6 +1498,31 @@ fn block_matches_exact_receipt(
     true
 }
 
+/// Capture an authoritative replicated ledger-history lower bound before the
+/// first exact transfer dispatch. All possible executions of this tuple occur
+/// after this point, so old blocks need not be scanned for this identity.
+async fn ledger_receipt_tip(ledger: Principal) -> Result<u64, String> {
+    use icrc_ledger_types::icrc3::blocks::{GetBlocksRequest, GetBlocksResult};
+    let request = GetBlocksRequest {
+        start: Nat::from(0u64),
+        length: Nat::from(1u64),
+    };
+    let (response,): (GetBlocksResult,) =
+        ic_cdk::call(ledger, "icrc3_get_blocks", (vec![request],))
+            .await
+            .map_err(|(code, message)| {
+                format!(
+                    "ICRC-3 replicated tip query unavailable: {:?} - {}",
+                    code, message
+                )
+            })?;
+    response
+        .log_length
+        .0
+        .try_into()
+        .map_err(|_| "ledger log length exceeds u64".to_string())
+}
+
 /// Scan at most 32 block indexes per invocation. Archive callbacks are followed
 /// only for ranges advertised by `icrc3_get_blocks`; cursor advances only when
 /// every index in the bounded window was returned, including archived blocks.
@@ -1469,17 +1557,17 @@ async fn scan_exact_transfer_receipt(
         .clone()
         .try_into()
         .map_err(|_| "ledger log length exceeds u64".to_string())?;
-    let tip = frozen_tip.unwrap_or(log_length);
-    if log_length < tip {
-        return Err("ledger log length fell below the frozen receipt-scan tip".to_string());
-    }
+    let tip = receipt_scan_tip(frozen_tip, log_length)?;
     let end = receipt_scan_page_end(cursor, tip);
     if cursor >= tip {
         return Ok((None, cursor, tip));
     }
     let mut blocks = std::mem::take(&mut response.blocks);
-    if response.archived_blocks.len() > 4 {
-        return Err("too many archive callbacks for one receipt page; cursor held".to_string());
+    if response.archived_blocks.len() > 32 {
+        return Err(
+            "ICRC-3 response advertises more archive callbacks than the bounded page can cover"
+                .to_string(),
+        );
     }
     for archived in response.archived_blocks {
         let (archived_result,): (GetBlocksResult,) = ic_cdk::call(
@@ -1519,7 +1607,7 @@ async fn scan_exact_transfer_receipt(
             next
         ));
     }
-    Ok((None, end, log_length))
+    Ok((None, end, tip))
 }
 
 /// Send or retry a payout using its persisted exact ICRC-1 identity. `TooOld`
@@ -1557,6 +1645,9 @@ pub(crate) async fn process_payout_attempt(payout_id: u64) -> Result<u64, String
             row.send_amount = None;
             row.fee = None;
             row.dispatch_count = 0;
+            row.receipt_scan_start = None;
+            row.receipt_scan_cursor = 0;
+            row.receipt_scan_end = None;
             row.phase = AmmPayoutPhase::AwaitingFee;
             row.last_error = None;
             Ok(())
@@ -1604,7 +1695,7 @@ pub(crate) async fn process_payout_attempt(payout_id: u64) -> Result<u64, String
         }
     };
 
-    let current = read_state(|s| {
+    let mut current = read_state(|s| {
         s.pending_payouts
             .iter()
             .find(|p| p.id == payout_id)
@@ -1614,6 +1705,37 @@ pub(crate) async fn process_payout_attempt(payout_id: u64) -> Result<u64, String
     if current.phase == AmmPayoutPhase::HeldTooOld || current.phase == AmmPayoutPhase::LegacyUnknown
     {
         return Err("payout is held pending exact ledger receipt reconciliation".to_string());
+    }
+    if current.dispatch_count == 0 && current.receipt_scan_start.is_none() {
+        // The transfer itself remains safe without ICRC-3 support because all
+        // retries keep the exact persisted tuple. The baseline only bounds a
+        // later absence proof; if the profile cannot answer, send once and
+        // hold ambiguous outcomes rather than blocking LP exits pre-send.
+        if let Ok(start) = ledger_receipt_tip(current.ledger).await {
+            let saved = mutate_state(|s| {
+                if let Some(row) = s
+                    .pending_payouts
+                    .iter_mut()
+                    .find(|row| row.id == payout_id && **row == current)
+                {
+                    row.receipt_scan_start = Some(start);
+                    row.receipt_scan_cursor = start;
+                    true
+                } else {
+                    false
+                }
+            });
+            if !saved {
+                return Err("payout changed while capturing pre-dispatch ledger tip".to_string());
+            }
+            current = read_state(|s| {
+                s.pending_payouts
+                    .iter()
+                    .find(|row| row.id == payout_id)
+                    .cloned()
+            })
+            .ok_or_else(|| "payout attempt was resolved".to_string())?;
+        }
     }
     let had_prior_ambiguity = payout_phase_has_prior_ambiguity(&current.phase);
     // Store Submitted before invoking the ledger. A reject or trap is
@@ -2380,6 +2502,7 @@ async fn reconcile_amm_ingress(request_id: Vec<u8>) -> Result<bool, AmmError> {
                                 );
                                 stored.created_at_time = ic_cdk::api::time();
                                 stored.dispatch_count = 0;
+                                stored.receipt_scan_start = None;
                                 stored.receipt_scan_cursor = 0;
                                 stored.receipt_scan_end = None;
                                 rearmed = true;
@@ -2647,19 +2770,9 @@ async fn swap_v2(
     // nothing. Require a positive net output regardless of min_amount_out.
     if net_out == 0 || net_out < min_amount_out {
         mutate_state(|s| {
-            let payout_ids = if let Some(op) = s
-                .ingress_operations
-                .iter_mut()
-                .find(|op| op.id == operation_id)
-            {
-                op.phase = AmmIngressPhase::Complete;
-                op.last_error =
-                    Some("swap slippage check failed before the input pull".to_string());
-                op.payout_ids.clone()
-            } else {
-                Vec::new()
-            };
-            s.pending_payouts.retain(|p| !payout_ids.contains(&p.id));
+            // No external effect occurred, so retaining a replay tombstone
+            // here would let cheap rejected requests consume the global cap.
+            discard_unaccepted_ingress(s, operation_id);
         });
         return Err(AmmError::InsufficientOutput {
             expected_min: min_amount_out.max(1),
@@ -2683,21 +2796,8 @@ async fn swap_v2(
                 .unwrap_or(false)
         });
         if rejected {
-            mutate_state(|s| {
-                let payout_ids = if let Some(op) = s
-                    .ingress_operations
-                    .iter_mut()
-                    .find(|op| op.id == operation_id)
-                {
-                    op.phase = AmmIngressPhase::Complete;
-                    op.last_error = Some("input transfer was definitively rejected on its first dispatch; no payout is owed".to_string());
-                    op.payout_ids.clone()
-                } else {
-                    Vec::new()
-                };
-                s.pending_payouts
-                    .retain(|row| !payout_ids.contains(&row.id));
-            });
+            // A typed first-dispatch no-effect proves no external value moved.
+            mutate_state(|s| discard_unaccepted_ingress(s, operation_id));
         }
         return Err(error);
     }
@@ -2951,24 +3051,8 @@ async fn add_liquidity_v2(
                 .unwrap_or(false)
         });
         if rejected {
-            mutate_state(|s| {
-                let payout_ids = if let Some(op) = s
-                    .ingress_operations
-                    .iter_mut()
-                    .find(|op| op.id == operation_id)
-                {
-                    op.phase = AmmIngressPhase::Complete;
-                    op.last_error = Some(
-                        "first input transfer was definitively rejected; no input was accepted"
-                            .to_string(),
-                    );
-                    op.payout_ids.clone()
-                } else {
-                    Vec::new()
-                };
-                s.pending_payouts
-                    .retain(|row| !payout_ids.contains(&row.id));
-            });
+            // No first-leg transfer occurred, so no replay tombstone is needed.
+            mutate_state(|s| discard_unaccepted_ingress(s, operation_id));
         }
         return Err(error);
     }
@@ -4041,6 +4125,9 @@ mod amm_receipt_tests {
         assert_eq!(receipt_scan_page_end(64, frozen_tip), 65);
         // New blocks arriving after the frozen tip do not extend this scan.
         assert_eq!(receipt_scan_page_end(65, frozen_tip), 65);
+        assert_eq!(receipt_scan_tip(None, 65).unwrap(), 65);
+        assert_eq!(receipt_scan_tip(Some(65), 96).unwrap(), 65);
+        assert!(receipt_scan_tip(Some(65), 64).is_err());
     }
 
     #[test]
@@ -4051,5 +4138,70 @@ mod amm_receipt_tests {
         let retry = ingress_memo(caller, request, 1, 1);
         assert_ne!(first, retry);
         assert_ne!(first, ingress_memo(caller, request, 0, 0));
+    }
+
+    #[test]
+    fn first_no_effect_rejection_releases_global_ingress_capacity() {
+        let caller = Principal::self_authenticating(b"capacity caller");
+        let pool_id = "capacity-pool".to_string();
+        let mut state = AmmState::default();
+        let complete = AmmIngressOperation {
+            id: 0,
+            caller,
+            request_id: [0; 32],
+            pool_id: pool_id.clone(),
+            kind: AmmIngressKind::Swap {
+                token_in: Principal::anonymous(),
+                amount_in: 1,
+                min_amount_out: 0,
+            },
+            legs: Vec::new(),
+            payout_ids: Vec::new(),
+            confirmed_payout_ids: Vec::new(),
+            computed_values: Vec::new(),
+            phase: AmmIngressPhase::Complete,
+            result: None,
+            last_error: None,
+        };
+        state
+            .ingress_operations
+            .resize(state::MAX_INGRESS_OPERATIONS - 1, complete.clone());
+        let rejected_id = (state::MAX_INGRESS_OPERATIONS - 1) as u64;
+        let mut rejected = complete;
+        rejected.id = rejected_id;
+        rejected.phase = AmmIngressPhase::Rejected { leg_index: 0 };
+        rejected.payout_ids.push(8);
+        state.ingress_operations.push(rejected);
+        state.pending_payouts.push(AmmPayoutAttempt {
+            id: 8,
+            operation_id: rejected_id,
+            pool_id,
+            claimant: caller,
+            ledger: Principal::anonymous(),
+            subaccount: [0; 32],
+            gross_amount: 1,
+            send_amount: None,
+            fee: None,
+            memo: Vec::new(),
+            created_at_time: 0,
+            attempt_generation: 0,
+            dispatch_count: 0,
+            phase: AmmPayoutPhase::Staged,
+            receipt_scan_start: None,
+            receipt_scan_cursor: 0,
+            receipt_scan_end: None,
+            last_error: None,
+        });
+
+        assert_eq!(
+            state.ingress_operations.len(),
+            state::MAX_INGRESS_OPERATIONS
+        );
+        discard_unaccepted_ingress(&mut state, rejected_id);
+        assert_eq!(
+            state.ingress_operations.len(),
+            state::MAX_INGRESS_OPERATIONS - 1
+        );
+        assert!(state.pending_payouts.is_empty());
     }
 }

@@ -126,6 +126,8 @@ export interface AmmIngressLeg {
   'dispatch_count' : number,
   'receipt_scan_cursor' : bigint,
   'ledger' : Principal,
+  'receipt_scan_start' : [] | [bigint],
+  'attempt_generation' : number,
   'created_at_time' : bigint,
   'amount' : bigint,
 }
@@ -179,6 +181,7 @@ export interface AmmPayoutAttempt {
   'operation_id' : bigint,
   'receipt_scan_cursor' : bigint,
   'ledger' : Principal,
+  'receipt_scan_start' : [] | [bigint],
   'attempt_generation' : number,
   'phase' : AmmPayoutPhase,
   'created_at_time' : bigint,

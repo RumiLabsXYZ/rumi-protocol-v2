@@ -152,6 +152,8 @@ pub struct AmmPayoutAttempt {
     #[serde(default)]
     pub dispatch_count: u32,
     pub phase: AmmPayoutPhase,
+    #[serde(default)]
+    pub receipt_scan_start: Option<u64>,
     pub receipt_scan_cursor: u64,
     pub receipt_scan_end: Option<u64>,
     pub last_error: Option<String>,
@@ -222,6 +224,8 @@ pub struct AmmIngressLeg {
     #[serde(default)]
     pub dispatch_count: u32,
     pub block_index: Option<u64>,
+    #[serde(default)]
+    pub receipt_scan_start: Option<u64>,
     pub receipt_scan_cursor: u64,
     pub receipt_scan_end: Option<u64>,
 }

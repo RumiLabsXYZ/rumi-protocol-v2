@@ -74,6 +74,7 @@ type AmmPayoutAttempt = record {
   attempt_generation : nat32;
   dispatch_count : nat32;
   phase : AmmPayoutPhase;
+  receipt_scan_start : opt nat64;
   receipt_scan_cursor : nat64;
   receipt_scan_end : opt nat64;
   last_error : opt text;
@@ -90,8 +91,10 @@ type AmmIngressLeg = record {
   amount : nat;
   memo : blob;
   created_at_time : nat64;
+  attempt_generation : nat32;
   dispatch_count : nat32;
   block_index : opt nat64;
+  receipt_scan_start : opt nat64;
   receipt_scan_cursor : nat64;
   receipt_scan_end : opt nat64;
 };
