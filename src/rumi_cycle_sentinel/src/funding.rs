@@ -335,6 +335,9 @@ pub mod cycles {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum ReconciliationError {
         NotQuarantined,
+        /// Quarantined operations remain held until rail-specific evidence is
+        /// independently verified; signer assertions are not proof.
+        VerifiedEvidenceRequired,
         /// Self-recovery remains suppressed until independent evidence proves
         /// the recovery delivered to Sentinel itself.
         SelfRecoveryDeliveryProofRequired,
@@ -713,59 +716,19 @@ pub mod cycles {
         Ok(resolved)
     }
 
-    /// Signer-directed conservative reconciliation for the public
-    /// `resolve_unknown_as_spent` update.  An `Unknown` operation is first
-    /// durably moved to `Quarantined`; only then is the explicit full-held
-    /// debit evidence applied.  Self-recovery deliberately cannot use this
-    /// path: its protected reserve remains suppressed until a delivery proof
-    /// is supplied through the dedicated reconciliation seam.
+    /// Cycles Ledger quarantine cannot be resolved from a signer assertion.
+    /// Keep the operation and all reservations held until a rail-specific
+    /// adapter supplies independently verified evidence.
     pub(crate) fn resolve_unknown_as_spent(
         operation_id: u64,
-        now_secs: u64,
+        _now_secs: u64,
     ) -> Result<FundingOperation, FundingError> {
-        let op = state::get_operation(operation_id).ok_or(FundingError::NotFound)?;
-        if op.rail() != types::FundingRail::CyclesLedger {
-            return Err(FundingError::WrongRail);
+        if state::get_operation(operation_id).is_none() {
+            return Err(FundingError::NotFound);
         }
-        if op.trigger() == FundingTrigger::SelfRecovery {
-            return Err(FundingError::Reconciliation(
-                ReconciliationError::SelfRecoveryDeliveryProofRequired,
-            ));
-        }
-        let quarantined = match op.state() {
-            FundingOperationState::Cycles(CyclesFundingState::Unknown) => {
-                let next = op
-                    .record_attempt(
-                        FundingOperationState::Cycles(CyclesFundingState::Quarantined),
-                        now_secs,
-                        FundingAttemptResultClass::Indeterminate,
-                    )
-                    .map_err(FundingError::Transition)?;
-                state::update_operation(next.clone()).map_err(FundingError::Update)?;
-                raise_quarantine_alarm(&next, now_secs);
-                next
-            }
-            FundingOperationState::Cycles(CyclesFundingState::Quarantined) => op,
-            _ => {
-                return Err(FundingError::Reconciliation(
-                    ReconciliationError::NotQuarantined,
-                ))
-            }
-        };
-        let FundingRailArguments::Cycles(snapshot) = quarantined.rail_arguments().clone() else {
-            return Err(FundingError::WrongRail);
-        };
-        let held = snapshot
-            .amount_cycles
-            .checked_add(snapshot.fee_cycles)
-            .ok_or(FundingError::Overflow)?;
-        reconcile_quarantined_cycles(
-            operation_id,
-            QuarantinedCyclesEvidence::FeeDebited {
-                known_spent_cycles: held,
-            },
-            now_secs,
-        )
+        Err(FundingError::Reconciliation(
+            ReconciliationError::VerifiedEvidenceRequired,
+        ))
     }
 
     /// The precomputed, not-yet-committed result of settling every
@@ -1008,8 +971,8 @@ pub mod cycles {
                 // `Duplicate` reply therefore proves only that an earlier
                 // request was recorded, not that delivery succeeded.  Do
                 // not settle any reservation or attach the duplicate block
-                // as delivery proof; retain the operation for signer-led
-                // reconciliation instead.
+                // as delivery proof; retain the operation until a
+                // rail-specific adapter supplies independently verified evidence.
                 let quarantined = if op.attempts().len() >= types::MAX_FUNDING_ATTEMPTS - 1 {
                     op.quarantine_after_attempt_limit(now_secs)
                 } else {
@@ -1028,7 +991,7 @@ pub mod cycles {
                 // Never consume the final append slot with another
                 // ambiguous attempt.  Quarantine in that slot (or replace
                 // the terminal record for an already-full legacy history)
-                // so the operation remains bounded and signer-resolvable.
+                // so the operation remains bounded and held for verified reconciliation.
                 let unknown = if op.attempts().len() >= types::MAX_FUNDING_ATTEMPTS - 1 {
                     op.quarantine_after_attempt_limit(now_secs)
                 } else {
@@ -1901,6 +1864,28 @@ pub mod cycles {
         }
 
         #[test]
+        fn signer_only_unknown_resolution_keeps_cycles_quarantine_held() {
+            init_bare();
+            let target = register_bare_target(1);
+            let op =
+                open_submitted_op(1, target, FundingTrigger::LowBalanceAutoTopup, 10, 3, 1_000);
+            seed_ordinary_reservations(&op, 1_000);
+            let quarantined = resolve_operation(op, WithdrawOutcome::Duplicate(55), 1_000).unwrap();
+            let source_before = state::get_source_reserve();
+            let reservation_before = state::get_target_reservation(target);
+
+            assert_eq!(
+                resolve_unknown_as_spent(quarantined.id(), 1_001),
+                Err(FundingError::Reconciliation(
+                    ReconciliationError::VerifiedEvidenceRequired
+                ))
+            );
+            assert_eq!(state::get_operation(quarantined.id()), Some(quarantined));
+            assert_eq!(state::get_source_reserve(), source_before);
+            assert_eq!(state::get_target_reservation(target), reservation_before);
+        }
+
+        #[test]
         fn reconcile_quarantined_cycles_requires_explicit_evidence_and_accounts_fee_debit() {
             init_bare();
             let target = register_bare_target(1);
@@ -1993,8 +1978,8 @@ pub mod cycles {
             assert_eq!(state::get_operation(current.id()), Some(current.clone()));
             assert!(current.state().stops_automatic_retry());
             assert!(!current.state().is_resolved());
-            // Reservations remain linked to the retained operation, so a
-            // signer/reconciliation path can still resolve it later.
+            // Reservations remain linked to the retained operation until a
+            // rail-specific verified-evidence path can resolve it.
             assert_eq!(
                 state::get_target_reservation(target).in_flight_operation_id(),
                 Some(current.id())
@@ -2524,6 +2509,8 @@ pub mod icp {
         KnownDebitExceedsHeld,
         ZeroKnownDebit,
         RefundProofRequired,
+        /// ICP/CMC unknown outcomes require operation-bound native ledger proof.
+        LedgerProofRequired,
         /// The supplied ledger block is not the exact block index returned
         /// by the CMC and persisted as this operation's immutable hint.
         RefundBlockHintMismatch,
@@ -3690,8 +3677,8 @@ pub mod icp {
                 Ok(quarantined)
             }
             // The original ICP transfer is already known and must remain
-            // quarantined for signer proof/reconciliation, never retried as
-            // a fresh conversion.
+            // quarantined until operation-bound ledger evidence can be
+            // verified, never retried as a fresh conversion.
             NotifyOutcome::Quarantined | NotifyOutcome::RefundedWithoutBlock => {
                 let quarantined = op
                     .record_attempt(
@@ -3946,79 +3933,18 @@ pub mod icp {
         Ok(state)
     }
 
-    /// Conservative signer resolution: if the transfer outcome is unknown,
-    /// treat the full held amount-plus-fee as spent and release cycle-cap
-    /// reservations without claiming delivery. It is never callable for an
-    /// already resolved operation.
+    /// ICP/CMC unknown outcomes remain held until the original ledger transfer
+    /// is independently verified. A signer assertion is not ledger evidence.
     pub(crate) fn resolve_unknown_as_spent(
         operation_id: u64,
-        now_secs: u64,
+        _now_secs: u64,
     ) -> Result<FundingOperation, FundingError> {
-        let op = state::get_operation(operation_id).ok_or(FundingError::NotFound)?;
-        if !matches!(
-            op.state(),
-            FundingOperationState::Icp(
-                IcpFundingState::TransferUnknown
-                    | IcpFundingState::NotifyPending
-                    | IcpFundingState::Quarantined
-            )
-        ) {
-            return Err(FundingError::Reconciliation(
-                ReconciliationError::NotQuarantined,
-            ));
+        if state::get_operation(operation_id).is_none() {
+            return Err(FundingError::NotFound);
         }
-        if op.notify_attempt_started_at_secs().is_some() {
-            return Err(FundingError::Transition(
-                FundingOperationTransitionError::NotifyAttemptInFlight,
-            ));
-        }
-        if op.refund_block_hint().is_some() {
-            // A CMC refund hint is an unresolved, operation-bound proof
-            // obligation. It cannot be converted into a caller-trusted full
-            // debit by the generic unknown-spend resolver.
-            return Err(FundingError::Reconciliation(
-                ReconciliationError::RefundProofRequired,
-            ));
-        }
-        let FundingRailArguments::Icp(snapshot) = op.rail_arguments().clone() else {
-            return Err(FundingError::WrongRail);
-        };
-        let held = (snapshot.amount_e8s as u128)
-            .checked_add(snapshot.fee_e8s as u128)
-            .ok_or(FundingError::Overflow)?;
-        // `TransferUnknown` and `NotifyPending` cannot jump directly to a
-        // terminal state.  Persist the explicit quarantine edge first, then
-        // use the signer-only reconciliation edge.  This keeps the durable
-        // lifecycle valid even if execution is interrupted between the two
-        // synchronous state writes.
-        let quarantined = if op.state() == FundingOperationState::Icp(IcpFundingState::Quarantined)
-        {
-            op
-        } else {
-            let next = if op.attempts().len() >= types::MAX_FUNDING_ATTEMPTS - 1 {
-                op.quarantine_after_attempt_limit(now_secs)
-            } else {
-                op.record_attempt(
-                    FundingOperationState::Icp(IcpFundingState::Quarantined),
-                    now_secs,
-                    FundingAttemptResultClass::Indeterminate,
-                )
-            }
-            .map_err(FundingError::Transition)?;
-            state::update_operation(next.clone()).map_err(FundingError::Update)?;
-            raise_quarantine_alarm(&next, now_secs);
-            next
-        };
-        let resolved = quarantined
-            .reconcile_quarantined_icp(IcpFundingState::Terminal, None, None, None, now_secs)
-            .map_err(FundingError::Transition)?;
-        let (settlement, source) = compute_settlement(&resolved, None, held, now_secs)?;
-        let summary = TerminalFundingSummary::from_resolved(&resolved, now_secs)
-            .map_err(FundingError::TerminalSummary)?;
-        state::update_operation(resolved.clone()).map_err(FundingError::Update)?;
-        commit_settlement(settlement, source);
-        state::compact_operation(resolved.id(), summary).map_err(FundingError::Compact)?;
-        Ok(resolved)
+        Err(FundingError::Reconciliation(
+            ReconciliationError::LedgerProofRequired,
+        ))
     }
 
     /// Reads and verifies an authoritative ledger block before handing the
@@ -4045,8 +3971,30 @@ pub mod icp {
         let block = icp_cmc::query_block(types::icp_ledger_principal_for_sentinel(), block_index)
             .await
             .map_err(FundingError::BlockLookup)?;
-        icp_cmc::verify_block_matches_snapshot(&block, &snapshot, sentinel_id)
-            .map_err(FundingError::BlockProof)?;
+        let source_account_identifier = icp_cmc::account_identifier(&icp_cmc::Account {
+            owner: snapshot.source_principal,
+            subaccount: snapshot.source_subaccount.map(|value| value.to_vec()),
+        })
+        .map_err(FundingError::BlockLookup)?;
+        let cmc_account_identifier = icp_cmc::account_identifier(&icp_cmc::Account {
+            owner: snapshot.cmc_principal,
+            subaccount: Some(snapshot.cmc_account_identifier.to_vec()),
+        })
+        .map_err(FundingError::BlockLookup)?;
+        icp_cmc::verify_native_block_matches_snapshot(
+            &block,
+            &snapshot,
+            sentinel_id,
+            &source_account_identifier,
+            &cmc_account_identifier,
+        )
+        .map_err(FundingError::BlockProof)?;
+        // Ledger reads above yield; do not settle against an obsolete operation snapshot.
+        if state::get_operation(operation_id).as_ref() != Some(&op) {
+            return Err(FundingError::Update(
+                state::UpdateOperationError::InvalidTransition,
+            ));
+        }
         match op.state() {
             FundingOperationState::Icp(
                 IcpFundingState::LedgerSubmitted | IcpFundingState::TransferUnknown,
@@ -4114,8 +4062,29 @@ pub mod icp {
         let block = icp_cmc::query_block(snapshot.ledger_principal, block_index)
             .await
             .map_err(FundingError::BlockLookup)?;
-        icp_cmc::verify_refund_block_matches_snapshot(&block, &snapshot)
-            .map_err(FundingError::BlockProof)?;
+        let source_account_identifier = icp_cmc::account_identifier(&icp_cmc::Account {
+            owner: snapshot.source_principal,
+            subaccount: snapshot.source_subaccount.map(|value| value.to_vec()),
+        })
+        .map_err(FundingError::BlockLookup)?;
+        let cmc_account_identifier = icp_cmc::account_identifier(&icp_cmc::Account {
+            owner: snapshot.cmc_principal,
+            subaccount: Some(snapshot.cmc_account_identifier.to_vec()),
+        })
+        .map_err(FundingError::BlockLookup)?;
+        icp_cmc::verify_native_refund_block_matches_snapshot(
+            &block,
+            &snapshot,
+            &source_account_identifier,
+            &cmc_account_identifier,
+        )
+        .map_err(FundingError::BlockProof)?;
+        // The query yields, so require the original quarantine and hint to remain current.
+        if state::get_operation(operation_id).as_ref() != Some(&op) {
+            return Err(FundingError::Update(
+                state::UpdateOperationError::InvalidTransition,
+            ));
+        }
         let net_debit =
             icp_cmc::refund_net_debit_e8s(&snapshot).map_err(FundingError::BlockProof)?;
         let attached = op
@@ -5345,7 +5314,7 @@ mod reconciliation {
     }
 
     #[test]
-    fn manual_unknown_resolution_quarantines_then_closes_with_full_debit() {
+    fn manual_unknown_resolution_requires_ledger_proof_and_keeps_hold() {
         let op = open_submitted_operation(1, 1);
         let mut adapter = MockIcpAdapter::scripted(
             vec![Err(icp_cmc::TransferError::GenericError {
@@ -5355,21 +5324,21 @@ mod reconciliation {
             vec![],
         );
         let unknown = transfer_attempt(&mut adapter, op, NOW + 1).unwrap();
-        let terminal = icp::resolve_unknown_as_spent(unknown.id(), NOW + 2).unwrap();
+        let source_before = state::get_icp_source_reserve();
+        let reservation_before = state::get_target_reservation(target_id(1));
         assert_eq!(
-            terminal.state(),
-            FundingOperationState::Icp(IcpFundingState::Terminal)
+            icp::resolve_unknown_as_spent(unknown.id(), NOW + 2),
+            Err(icp::FundingError::Reconciliation(
+                icp::ReconciliationError::LedgerProofRequired
+            ))
         );
         assert_eq!(adapter.transfer_calls.len(), 1);
-        assert_eq!(state::get_operation(1), None);
-        assert!(state::get_target_reservation(target_id(1))
-            .rolling_spend()
-            .pending()
-            .is_empty());
+        assert_eq!(state::get_operation(1), Some(unknown));
         assert_eq!(
-            state::get_icp_source_reserve().cache().unwrap().balance_e8s,
-            SOURCE_BALANCE_E8S - AMOUNT_E8S as u128 - FEE_E8S as u128
+            state::get_target_reservation(target_id(1)),
+            reservation_before
         );
+        assert_eq!(state::get_icp_source_reserve(), source_before);
     }
 
     #[test]
@@ -5477,12 +5446,17 @@ mod reconciliation {
             vec![],
         );
         let unknown = transfer_attempt(&mut adapter, op, NOW + 1).unwrap();
-        let terminal = icp::resolve_unknown_as_spent(unknown.id(), NOW + 2).unwrap();
         assert_eq!(
-            terminal.state(),
-            FundingOperationState::Icp(IcpFundingState::Terminal)
+            icp::resolve_unknown_as_spent(unknown.id(), NOW + 2),
+            Err(icp::FundingError::Reconciliation(
+                icp::ReconciliationError::LedgerProofRequired
+            ))
         );
-        assert!(state::remove_target(target).unwrap().is_some());
+        assert_eq!(
+            state::remove_target(target),
+            Err(state::RemoveTargetError::UnresolvedOperationExists)
+        );
+        assert_eq!(state::get_operation(unknown.id()), Some(unknown));
         assert_eq!(before.target_canister, target);
     }
 
