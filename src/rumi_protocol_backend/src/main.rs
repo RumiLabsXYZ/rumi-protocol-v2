@@ -50,6 +50,8 @@ const MAX_BOT_PAYMENT_BLOCKS_PER_CLAIM: usize = 16;
 const MAX_BOT_PAYMENT_BLOCK_RECEIPTS: usize = 65_536;
 const MAX_BOT_PAYMENT_AGGREGATE_RECEIPTS: usize = 4_096;
 const MAX_BOT_RETURN_BLOCK_RECEIPTS: usize = 4_096;
+const MAX_BOT_RETURN_TOPUPS: usize = 16;
+const MAX_BOT_RETURN_BUFFER_RECORDS: usize = 4_096;
 
 /// Stability pool configuration
 #[derive(CandidType, Deserialize, Debug)]
@@ -10759,6 +10761,77 @@ fn bot_cancel_transfer_for_source_balance(
     })
 }
 
+/// Reprice only the backend consolidation leg after the original bot return
+/// block has been authenticated. The original return fee remains pinned in
+/// the journal; a lower consolidation fee leaves the unused buffer isolated
+/// as generation-specific dust. A higher fee requires a separately proven
+/// top-up and is never funded by sweeping unrelated balance.
+fn bot_cancel_repriced_transfer(
+    claim: &rumi_protocol_backend::state::BotClaim,
+    ledger: Principal,
+    available_fee_buffer: u64,
+    consolidation_fee: u64,
+    created_at_time: u64,
+    history_start_index: u64,
+    attempt: usize,
+    backend_id: Principal,
+) -> Result<(rumi_protocol_backend::state::BotClaimCancelTransfer, u64), ProtocolError> {
+    if consolidation_fee > available_fee_buffer {
+        return Err(ProtocolError::TemporarilyUnavailable(format!(
+            "Consolidation fee {consolidation_fee} exceeds the authenticated return buffer {available_fee_buffer}; a verified generation-bound top-up is required"
+        )));
+    }
+    let source_balance = claim.collateral_amount.checked_add(consolidation_fee).ok_or_else(|| {
+        ProtocolError::GenericError("Repriced claim consolidation amount overflows".into())
+    })?;
+    let dust = available_fee_buffer - consolidation_fee;
+    let transfer = bot_cancel_transfer_for_source_balance(
+        claim,
+        ledger,
+        consolidation_fee,
+        source_balance,
+        created_at_time,
+        history_start_index,
+        attempt,
+        backend_id,
+    )?;
+    if transfer.amount != claim.collateral_amount {
+        return Err(ProtocolError::GenericError(
+            "Repriced consolidation does not preserve exact claim collateral".into(),
+        ));
+    }
+    Ok((transfer, dust))
+}
+
+fn bot_claim_verified_return_buffer(
+    journal: &rumi_protocol_backend::state::BotClaimCancelJournal,
+) -> Result<u64, ProtocolError> {
+    let return_fee = journal.return_fee_e8s.ok_or_else(|| ProtocolError::GenericError(
+        "Cancellation journal has no authenticated return fee".into(),
+    ))?;
+    if journal.return_topups.len() > MAX_BOT_RETURN_TOPUPS
+        || journal.return_topups.iter().enumerate().any(|(index, receipt)| {
+            receipt.ledger != journal.claim.collateral_type
+                || receipt.amount_e8s == 0
+                || receipt.sequence != index as u64
+                || receipt.created_at_time < journal.claim.claimed_at
+                || journal.return_topups[..index].iter().any(|previous| {
+                    previous.block_index == receipt.block_index
+                        || previous.created_at_time >= receipt.created_at_time
+                })
+        })
+    {
+        return Err(ProtocolError::GenericError(
+            "Persisted top-up receipts do not form a unique ordered claim-generation proof set".into(),
+        ));
+    }
+    journal.return_topups.iter().try_fold(return_fee, |total, receipt| {
+        total.checked_add(receipt.amount_e8s).ok_or_else(|| ProtocolError::GenericError(
+            "Verified claim-generation return buffer overflows".into(),
+        ))
+    })
+}
+
 fn bot_claim_matches_recovery_identity(
     claim: &rumi_protocol_backend::state::BotClaim,
     vault_id: u64,
@@ -10919,6 +10992,10 @@ async fn submit_pending_bot_claim_transfer(
                         return_created_at_time: None,
                         return_fee_e8s: None,
                         return_fee_recovery_enabled: true,
+                        consolidation_fee_e8s: None,
+                        return_topup_required_e8s: None,
+                        return_topups: Vec::new(),
+                        return_dust_e8s: 0,
                         transfer: None,
                         history_scan: None,
                         completed_block_index: None,
@@ -12084,6 +12161,186 @@ async fn bot_cancel_liquidation_with_generation(
     ).await
 }
 
+/// Prove a positive fee-buffer top-up into this claim generation's isolated
+/// return account. The amount is derived from the durable hold, then matched
+/// against the exact sender, destination, block fee, memo, and timestamp.
+#[candid_method(update)]
+#[update]
+async fn bot_prove_claim_return_topup(
+    vault_id: u64,
+    claim_timestamp: u64,
+    block_index: u64,
+    created_at_time: u64,
+    fee_e8s: u64,
+) -> Result<(), ProtocolError> {
+    validate_call().await?;
+    let caller = ic_cdk::api::caller();
+    if !read_state(|s| s.liquidation_bot_principal == Some(caller)) {
+        return Err(ProtocolError::GenericError(
+            "Caller is not the registered liquidation bot canister".into(),
+        ));
+    }
+    let _vault_liq_guard = rumi_protocol_backend::guard::VaultLiquidationGuard::new(vault_id)?;
+    let (claim, journal) = read_state(|s| {
+        if s.liquidation_bot_principal != Some(caller) {
+            return Err(ProtocolError::GenericError("Bot registration changed".into()));
+        }
+        let claim = s.bot_claims.get(&vault_id).cloned().ok_or_else(|| {
+            ProtocolError::GenericError(format!("No active claim for vault #{vault_id}"))
+        })?;
+        if claim.claimed_at != claim_timestamp || claim.claiming_bot != Some(caller) {
+            return Err(ProtocolError::GenericError(
+                "Top-up proof does not match the active claim generation and bot".into(),
+            ));
+        }
+        let journal = s.bot_claim_cancel_journals.get(&vault_id).cloned()
+            .filter(|journal| journal.claim == claim)
+            .ok_or_else(|| ProtocolError::GenericError(
+                "Claim has no current cancellation recovery journal".into(),
+            ))?;
+        Ok((claim, journal))
+    })?;
+    if let Some(existing) = journal.return_topups.iter().find(|receipt| receipt.block_index == block_index) {
+        return if existing.created_at_time == created_at_time && existing.fee_e8s == fee_e8s {
+            Ok(())
+        } else {
+            Err(ProtocolError::GenericError(
+                "Top-up block is already bound to a different exact claim-generation receipt".into(),
+            ))
+        };
+    }
+    let required = journal.return_topup_required_e8s.filter(|amount| *amount > 0)
+        .ok_or_else(|| ProtocolError::GenericError(
+            "Claim generation has no outstanding verified top-up requirement".into(),
+        ))?;
+    if journal.transfer.is_some() {
+        return Err(ProtocolError::GenericError(
+            "Cannot add fee buffer after a consolidation tuple has been prepared".into(),
+        ));
+    }
+    let sequence = u64::try_from(journal.return_topups.len()).map_err(|_| {
+        ProtocolError::TemporarilyUnavailable("Top-up proof sequence exhausted".into())
+    })?;
+    if journal.return_topups.len() >= MAX_BOT_RETURN_TOPUPS {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "Generation-bound top-up proof limit reached; claim remains held for operator review".into(),
+        ));
+    }
+    if journal.return_topups.iter().any(|receipt| receipt.created_at_time >= created_at_time)
+        || created_at_time < claim_timestamp
+    {
+        return Err(ProtocolError::GenericError(
+            "Top-up timestamp must be after the claim and all prior generation top-ups".into(),
+        ));
+    }
+    rumi_protocol_backend::bot_claim_return::verify_topup_block(
+        claim.collateral_type,
+        caller,
+        ic_cdk::id(),
+        rumi_protocol_backend::bot_claim_return_subaccount(vault_id, claim_timestamp),
+        vault_id,
+        claim_timestamp,
+        sequence,
+        required,
+        fee_e8s,
+        block_index,
+        created_at_time,
+        bot_cancel_uses_native_icp_history(claim.collateral_type),
+    ).await.map_err(|error| ProtocolError::TemporarilyUnavailable(format!(
+        "Exact generation-bound fee-buffer receipt is pending: {error}"
+    )))?;
+
+    let mut next = journal.clone();
+    next.return_topups.push(rumi_protocol_backend::state::BotClaimReturnTopupReceipt {
+        ledger: claim.collateral_type,
+        block_index,
+        created_at_time,
+        amount_e8s: required,
+        fee_e8s,
+        sequence,
+    });
+    let available_buffer = bot_claim_verified_return_buffer(&next)?;
+    let current_fee = management::get_ledger_fee(claim.collateral_type).await.map_err(|error| {
+        ProtocolError::TemporarilyUnavailable(format!(
+            "Top-up receipt is verified but current consolidation fee could not be refreshed: {error}"
+        ))
+    })?;
+    let return_account = icrc_ledger_types::icrc1::account::Account {
+        owner: ic_cdk::id(),
+        subaccount: Some(rumi_protocol_backend::bot_claim_return_subaccount(vault_id, claim_timestamp)),
+    };
+    let balance_result: Result<(candid::Nat,), _> = ic_cdk::call(
+        claim.collateral_type, "icrc1_balance_of", (return_account.clone(),),
+    ).await;
+    let balance = balance_result.map_err(|(code, message)| ProtocolError::TemporarilyUnavailable(
+        format!("Could not recheck isolated claim return after top-up proof: {code:?} {message}"),
+    ))?.0.0.to_u64().ok_or_else(|| ProtocolError::GenericError(
+        "Claim-specific collateral balance exceeds supported range".into(),
+    ))?;
+    if current_fee > available_buffer {
+        next.consolidation_fee_e8s = Some(current_fee);
+        next.return_topup_required_e8s = Some(current_fee - available_buffer);
+        next.return_dust_e8s = 0;
+        next.transfer = None;
+    } else {
+        let source_budget = claim.collateral_amount.checked_add(current_fee).ok_or_else(|| {
+            ProtocolError::GenericError("Repriced claim consolidation amount overflows".into())
+        })?;
+        if balance < source_budget {
+            next.return_topup_required_e8s = None;
+            next.consolidation_fee_e8s = Some(current_fee);
+            next.return_dust_e8s = available_buffer - current_fee;
+            next.transfer = None;
+        } else {
+            let history_start = bot_cancel_history_length(
+                claim.collateral_type, bot_cancel_uses_native_icp_history(claim.collateral_type),
+            ).await.map_err(|error| ProtocolError::TemporarilyUnavailable(format!(
+                "Verified top-up could not establish the exact consolidation history boundary: {error}"
+            )))?;
+            let now = ic_cdk::api::time();
+            if now <= created_at_time {
+                return Err(ProtocolError::TemporarilyUnavailable(
+                    "IC time has not advanced beyond the proven top-up tuple".into(),
+                ));
+            }
+            let (transfer, dust) = bot_cancel_repriced_transfer(
+                &claim,
+                claim.collateral_type,
+                available_buffer,
+                current_fee,
+                now,
+                history_start,
+                next.attempts.len() + next.return_topups.len(),
+                ic_cdk::id(),
+            )?;
+            next.consolidation_fee_e8s = Some(current_fee);
+            next.return_topup_required_e8s = None;
+            next.return_dust_e8s = dust;
+            next.transfer = Some(transfer);
+        }
+    }
+    mutate_state(|s| {
+        if s.bot_claims.get(&vault_id) != Some(&claim)
+            || s.bot_claim_cancel_journals.get(&vault_id) != Some(&journal)
+            || s.liquidation_bot_principal != Some(caller)
+        {
+            return Err(ProtocolError::GenericError(
+                "Claim or fee-recovery journal changed while top-up proof was checked".into(),
+            ));
+        }
+        reserve_bot_claim_return_block_in_state(
+            s,
+            (claim.collateral_type, block_index),
+            vault_id,
+            claim_timestamp,
+            MAX_BOT_RETURN_BLOCK_RECEIPTS,
+        )?;
+        s.bot_claim_cancel_journals.insert(vault_id, next);
+        Ok(())
+    })?;
+    Ok(())
+}
+
 async fn bot_cancel_liquidation_impl(
     vault_id: u64,
     requested_generation: Option<u64>,
@@ -12273,9 +12530,12 @@ async fn bot_cancel_liquidation_impl(
                         "Bot cancellation rotation limit reached after complete history absence; claim remains held".into(),
                     ));
                 }
-                let fee = journal.return_fee_e8s.ok_or_else(|| ProtocolError::GenericError(
-                    "Cancellation journal has no authenticated return fee".into(),
-                ))?;
+                let available_buffer = bot_claim_verified_return_buffer(&journal)?;
+                let fee = management::get_ledger_fee(claim.collateral_type).await.map_err(|error| {
+                    ProtocolError::TemporarilyUnavailable(format!(
+                        "Could not refresh exact consolidation fee after complete history absence: {error}"
+                    ))
+                })?;
                 let balance_result: Result<(candid::Nat,), _> = ic_cdk::call(
                     claim.collateral_type,
                     "icrc1_balance_of",
@@ -12288,12 +12548,6 @@ async fn bot_cancel_liquidation_impl(
         })?.0.0.to_u64().ok_or_else(|| ProtocolError::GenericError(
             "Claim-specific collateral balance exceeds supported range".into(),
         ))?;
-                if balance < transfer.source_balance {
-                    return Err(ProtocolError::GenericError(format!(
-                        "Exact prior consolidation is absent but claim subaccount balance {balance} is below the prior tuple's pinned source budget {}; claim remains held",
-                        transfer.source_balance,
-                    )));
-                }
                 let new_history_start = bot_cancel_history_length(
                     claim.collateral_type, native_icp_history,
                 ).await.map_err(|error| ProtocolError::TemporarilyUnavailable(format!(
@@ -12305,10 +12559,6 @@ async fn bot_cancel_liquidation_impl(
                         "IC time has not advanced beyond the TooOld cancellation tuple; claim remains held".into(),
                     ));
                 }
-                let next_transfer = bot_cancel_transfer_for_source_balance(
-                    &claim, transfer.ledger, fee, transfer.source_balance, next_time, new_history_start,
-                    journal.attempts.len() + 1, ic_cdk::id(),
-                )?;
                 let mut next_journal = journal.clone();
                 next_journal.attempts.push(rumi_protocol_backend::state::BotClaimCancelAttempt {
                     transfer: transfer.clone(),
@@ -12317,6 +12567,51 @@ async fn bot_cancel_liquidation_impl(
                     },
                 });
                 next_journal.history_scan = None;
+                let (next_transfer, dust) = match bot_cancel_repriced_transfer(
+                    &claim,
+                    transfer.ledger,
+                    available_buffer,
+                    fee,
+                    next_time,
+                    new_history_start,
+                    journal.attempts.len() + 1,
+                    ic_cdk::id(),
+                ) {
+                    Ok(prepared) => prepared,
+                    Err(ProtocolError::TemporarilyUnavailable(_)) => {
+                        next_journal.transfer = None;
+                        next_journal.consolidation_fee_e8s = Some(fee);
+                        next_journal.return_topup_required_e8s = Some(
+                            fee.saturating_sub(available_buffer),
+                        );
+                        next_journal.return_dust_e8s = 0;
+                        mutate_state(|s| {
+                            if s.bot_claims.get(&vault_id) != Some(&claim)
+                                || s.bot_claim_cancel_journals.get(&vault_id) != Some(&journal)
+                            {
+                                return Err(ProtocolError::GenericError(
+                                    "Bot claim or cancellation journal changed before fee hold was saved".into(),
+                                ));
+                            }
+                            s.bot_claim_cancel_journals.insert(vault_id, next_journal);
+                            Ok(())
+                        })?;
+                        return Err(ProtocolError::TemporarilyUnavailable(format!(
+                            "Authenticated return fee buffer is {available_buffer}; consolidation fee is {fee}. Claim is durably held pending a verified generation-bound top-up of {} e8s",
+                            fee.saturating_sub(available_buffer),
+                        )));
+                    }
+                    Err(error) => return Err(error),
+                };
+                if balance < next_transfer.source_balance {
+                    return Err(ProtocolError::GenericError(format!(
+                        "Exact prior consolidation is absent but claim subaccount balance {balance} is below the exact repriced source budget {}; claim remains held",
+                        next_transfer.source_balance,
+                    )));
+                }
+                next_journal.consolidation_fee_e8s = Some(fee);
+                next_journal.return_topup_required_e8s = None;
+                next_journal.return_dust_e8s = dust;
                 next_journal.transfer = Some(next_transfer);
                 mutate_state(|s| {
                     if s.bot_claims.get(&vault_id) != Some(&claim)
@@ -12340,6 +12635,8 @@ async fn bot_cancel_liquidation_impl(
         "Cancellation journal has no authenticated return fee".into(),
     ))?;
     if journal.transfer.is_none() {
+        let expected_before_prepare = journal.clone();
+        let available_buffer = bot_claim_verified_return_buffer(&journal)?;
         // No journal row exists for pre-upgrade claims; those returned above.
         // This path is only for a claim promoted by this version.
         let balance_result: Result<(candid::Nat,), _> = ic_cdk::call(
@@ -12356,12 +12653,18 @@ async fn bot_cancel_liquidation_impl(
             }
             _ => None,
         });
-        if bad_fee_retry.as_ref().is_some_and(|(_, expected_fee)| *expected_fee != fee) {
-            return Err(ProtocolError::TemporarilyUnavailable(
-                "Ledger fee changed from the claim-pinned return buffer; collateral is held until an exact supported fee retry is possible".into(),
-            ));
-        }
-        let required = claim.collateral_amount.checked_add(fee).ok_or_else(|| {
+        let has_history_absence = journal.attempts.last().is_some_and(|attempt| {
+            matches!(
+                attempt.evidence,
+                rumi_protocol_backend::state::BotClaimCancelAttemptEvidence::HistoryAbsent { .. }
+            )
+        });
+        let fee_recovery_pending = bad_fee_retry.is_some()
+            || journal.return_topup_required_e8s.is_some_and(|required| required > 0)
+            || journal.consolidation_fee_e8s.is_some()
+            || !journal.return_topups.is_empty()
+            || has_history_absence;
+        let required = claim.collateral_amount.checked_add(available_buffer).ok_or_else(|| {
             ProtocolError::GenericError("Fee-buffered collateral return amount overflows".into())
         })?;
         if let Some((previous, _expected_fee)) = bad_fee_retry.as_ref() {
@@ -12377,7 +12680,7 @@ async fn bot_cancel_liquidation_impl(
                     "IC time has not advanced beyond the typed BadFee tuple; claim remains held".into(),
                 ));
             }
-        } else if balance < required {
+        } else if !fee_recovery_pending && balance < required {
             return Err(ProtocolError::GenericError(format!(
                 "Cannot cancel claim for vault #{vault_id}: isolated collateral balance {balance} < required {required}; return the claim collateral first"
             )));
@@ -12387,18 +12690,62 @@ async fn bot_cancel_liquidation_impl(
                 "Could not establish cancellation history boundary: {error}"
             )))?;
         let now = ic_cdk::api::time();
-        let transfer = if let Some((previous, expected_fee)) = bad_fee_retry {
-            bot_cancel_transfer_for_source_balance(
-                &claim, claim.collateral_type, expected_fee, previous.source_balance, now, start,
+        let transfer = if fee_recovery_pending {
+            let current_fee = management::get_ledger_fee(claim.collateral_type).await.map_err(|error| {
+                ProtocolError::TemporarilyUnavailable(format!(
+                    "Could not refresh exact consolidation fee during recovery: {error}"
+                ))
+            })?;
+            if current_fee > available_buffer {
+                let mut held = journal.clone();
+                held.transfer = None;
+                held.consolidation_fee_e8s = Some(current_fee);
+                held.return_topup_required_e8s = Some(current_fee - available_buffer);
+                held.return_dust_e8s = 0;
+                mutate_state(|s| {
+                    if s.bot_claims.get(&vault_id) != Some(&claim)
+                        || s.bot_claim_cancel_journals.get(&vault_id) != Some(&expected_before_prepare)
+                    {
+                        return Err(ProtocolError::GenericError(
+                            "Bot claim or cancellation journal changed before fee hold was saved".into(),
+                        ));
+                    }
+                    s.bot_claim_cancel_journals.insert(vault_id, held);
+                    Ok(())
+                })?;
+                return Err(ProtocolError::TemporarilyUnavailable(format!(
+                    "Exact prior-tuple rejection/absence is recorded, but the verified return buffer is short; claim is durably held pending a generation-bound top-up of {} e8s",
+                    current_fee - available_buffer,
+                )));
+            }
+            if balance < claim.collateral_amount.checked_add(current_fee).ok_or_else(|| {
+                ProtocolError::GenericError("Repriced claim consolidation amount overflows".into())
+            })? {
+                return Err(ProtocolError::TemporarilyUnavailable(format!(
+                    "Verified generation buffer is sufficient, but isolated return balance {balance} is below the exact repriced source budget {}; claim remains held",
+                    claim.collateral_amount + current_fee,
+                )));
+            }
+            let (transfer, dust) = bot_cancel_repriced_transfer(
+                &claim, claim.collateral_type, available_buffer, current_fee, now, start,
                 journal.attempts.len(), ic_cdk::id(),
-            )?
+            )?;
+            let mut prepared = journal.clone();
+            prepared.consolidation_fee_e8s = Some(current_fee);
+            prepared.return_topup_required_e8s = None;
+            prepared.return_dust_e8s = dust;
+            journal = prepared;
+            transfer
         } else {
+            journal.consolidation_fee_e8s = Some(fee);
+            journal.return_topup_required_e8s = None;
+            journal.return_dust_e8s = 0;
             bot_cancel_transfer_for(
                 &claim, claim.collateral_type, fee, now, start,
                 journal.attempts.len(), ic_cdk::id(),
             )?
         };
-        let expected = journal.clone();
+        let expected = expected_before_prepare;
         journal.transfer = Some(transfer);
         mutate_state(|s| {
             if s.bot_claims.get(&vault_id) != Some(&claim)
@@ -12578,9 +12925,39 @@ fn reserve_bot_claim_return_block_in_state(
     }
 }
 
+/// Fee dust stays attributable while isolated funds remain. We deliberately
+/// do not evict these records; once the bounded registry fills, further
+/// dust-bearing cancellations fail closed until an audited recovery path is
+/// added. Operators can inspect `get_bot_claim_return_buffer_capacity`.
+fn bot_return_buffer_record_capacity_available(
+    state: &State,
+    key: (u64, u64),
+    needs_record: bool,
+) -> bool {
+    !needs_record
+        || state.bot_claim_return_buffer_receipts.contains_key(&key)
+        || state.bot_claim_return_buffer_receipts.len() < MAX_BOT_RETURN_BUFFER_RECORDS
+}
+
 #[cfg(test)]
 mod bot_claim_return_block_consumption_tests {
     use super::*;
+
+    fn sample_claim() -> rumi_protocol_backend::state::BotClaim {
+        rumi_protocol_backend::state::BotClaim {
+            vault_id: 12,
+            collateral_amount: 1_000,
+            debt_amount: 500,
+            collateral_type: Principal::from_slice(&[0x31]),
+            claimed_at: 99,
+            collateral_price_e8s: 1,
+            payment_memo: Some(vec![1]),
+            request_id: Some(4),
+            claiming_bot: Some(Principal::from_slice(&[0x32])),
+            claim_transfer: None,
+            claim_payment_subaccount: None,
+        }
+    }
 
     #[test]
     fn return_block_is_idempotent_for_one_generation_but_cannot_be_replayed() {
@@ -12590,6 +12967,74 @@ mod bot_claim_return_block_consumption_tests {
         assert!(reserve_bot_claim_return_block_in_state(&mut state, (ledger, 17), 4, 100, 4).is_ok());
         assert!(reserve_bot_claim_return_block_in_state(&mut state, (ledger, 17), 5, 101, 4).is_err());
         assert!(reserve_bot_claim_return_block_in_state(&mut state, (ledger, 18), 5, 101, 4).is_ok());
+    }
+
+    #[test]
+    fn lower_consolidation_fee_preserves_claim_and_attributes_generation_dust() {
+        let claim = sample_claim();
+        let backend = Principal::from_slice(&[0x33]);
+        let (transfer, dust) = bot_cancel_repriced_transfer(
+            &claim, claim.collateral_type, 10, 4, 123, 8, 1, backend,
+        ).expect("fee decrease can use the authenticated return buffer");
+
+        assert_eq!(transfer.amount, claim.collateral_amount);
+        assert_eq!(transfer.fee, 4);
+        assert_eq!(transfer.source_balance, claim.collateral_amount + 4);
+        assert_eq!(dust, 6);
+    }
+
+    #[test]
+    fn higher_consolidation_fee_requires_topup_instead_of_sweeping() {
+        let claim = sample_claim();
+        let result = bot_cancel_repriced_transfer(
+            &claim, claim.collateral_type, 4, 10, 123, 8, 1, Principal::from_slice(&[0x33]),
+        );
+        assert!(matches!(result, Err(ProtocolError::TemporarilyUnavailable(_))));
+    }
+
+    #[test]
+    fn exact_verified_topup_can_fund_only_the_repriced_fee() {
+        let claim = sample_claim();
+        let original_fee = 4;
+        let verified_topup = 6;
+        let target_fee = 10;
+        let available_buffer = original_fee + verified_topup;
+        let (transfer, dust) = bot_cancel_repriced_transfer(
+            &claim,
+            claim.collateral_type,
+            available_buffer,
+            target_fee,
+            123,
+            8,
+            1,
+            Principal::from_slice(&[0x33]),
+        ).expect("exact top-up funds the exact fee");
+        assert_eq!(transfer.amount, claim.collateral_amount);
+        assert_eq!(transfer.source_balance, claim.collateral_amount + target_fee);
+        assert_eq!(dust, 0);
+    }
+
+    #[test]
+    fn return_buffer_registry_fails_closed_at_capacity_without_evicting_dust() {
+        let mut state = State::default();
+        let ledger = Principal::from_slice(&[0x31]);
+    for index in 0..MAX_BOT_RETURN_BUFFER_RECORDS as u64 {
+            state.bot_claim_return_buffer_receipts.insert(
+                (index, index),
+                rumi_protocol_backend::state::BotClaimReturnBufferReceipt {
+                    ledger,
+                    authenticated_return_fee_e8s: 10,
+                    consolidation_fee_e8s: 9,
+                    verified_topup_e8s: 0,
+                    topup_count: 0,
+                    dust_e8s: 1,
+                },
+            );
+        }
+        assert!(bot_return_buffer_record_capacity_available(&state, (0, 0), true));
+        assert!(!bot_return_buffer_record_capacity_available(&state, (4_096, 4_096), true));
+        assert!(bot_return_buffer_record_capacity_available(&state, (4_096, 4_096), false));
+        assert_eq!(state.bot_claim_return_buffer_receipts.len(), MAX_BOT_RETURN_BUFFER_RECORDS);
     }
 }
 
@@ -12637,6 +13082,14 @@ fn acknowledge_bot_claim_cancellation_in_state(
         s.completed_bot_claim_cancellations.remove(&completed_key);
         if let Some(receipt) = s.bot_claim_return_block_receipts.remove(&completed_key) {
             s.consumed_bot_claim_return_blocks.remove(&(receipt.ledger, receipt.block_index));
+            for topup in receipt.topups {
+                s.consumed_bot_claim_return_blocks.remove(&(topup.ledger, topup.block_index));
+            }
+        }
+        if s.bot_claim_return_buffer_receipts.get(&completed_key)
+            .is_some_and(|receipt| receipt.dust_e8s == 0)
+        {
+            s.bot_claim_return_buffer_receipts.remove(&completed_key);
         }
     }
     s.acknowledged_bot_claim_cancellations.insert((claim_timestamp, vault_id), acked_at);
@@ -12675,6 +13128,28 @@ fn commit_bot_claim_cancellation(
         let return_fee_e8s = journal.return_fee_e8s.ok_or_else(|| {
             ProtocolError::GenericError("Cancellation journal has no authenticated return fee".into())
         })?;
+        let verified_buffer_e8s = bot_claim_verified_return_buffer(journal)?;
+        let transfer = journal.transfer.as_ref().ok_or_else(|| {
+            ProtocolError::GenericError("Completed cancellation has no exact consolidation tuple".into())
+        })?;
+        if transfer.amount != claim.collateral_amount
+            || transfer.amount.checked_add(transfer.fee) != Some(transfer.source_balance)
+        {
+            return Err(ProtocolError::GenericError(
+                "Completed cancellation tuple does not restore exact claim collateral".into(),
+            ));
+        }
+        let consolidation_fee_e8s = journal.consolidation_fee_e8s.unwrap_or(transfer.fee);
+        let return_dust_e8s = verified_buffer_e8s.checked_sub(transfer.fee).ok_or_else(|| {
+            ProtocolError::GenericError("Consolidation fee exceeds verified generation return buffer".into())
+        })?;
+        if consolidation_fee_e8s != transfer.fee
+            || (journal.return_dust_e8s != 0 && journal.return_dust_e8s != return_dust_e8s)
+        {
+            return Err(ProtocolError::GenericError(
+                "Persisted consolidation fee or dust does not match the exact transfer tuple".into(),
+            ));
+        }
         if !s.completed_bot_claim_cancellations.contains_key(&key)
             && s.completed_bot_claim_cancellations.len() >= 4096
         {
@@ -12689,17 +13164,49 @@ fn commit_bot_claim_cancellation(
                 "Authenticated return receipt capacity is full; claim remains held for bot ACKs".into(),
             ));
         }
+        let verified_topup_e8s = verified_buffer_e8s - return_fee_e8s;
+        let needs_buffer_receipt = return_dust_e8s > 0;
+        if !bot_return_buffer_record_capacity_available(s, key, needs_buffer_receipt) {
+            return Err(ProtocolError::TemporarilyUnavailable(
+                "Generation-specific return dust record capacity is full; cancellation remains held".into(),
+            ));
+        }
+        if let Some(existing_dust) = s.bot_claim_return_buffer_receipts.get(&key) {
+            if existing_dust.dust_e8s != return_dust_e8s
+                || existing_dust.authenticated_return_fee_e8s != return_fee_e8s
+                || existing_dust.consolidation_fee_e8s != consolidation_fee_e8s
+                || existing_dust.verified_topup_e8s != verified_topup_e8s
+                || existing_dust.ledger != claim.collateral_type
+            {
+                return Err(ProtocolError::GenericError(
+                    "Claim generation already has a different durable return dust record".into(),
+                ));
+            }
+        }
         let consumed_key = (claim.collateral_type, return_block_index);
         if s.consumed_bot_claim_return_blocks.get(&consumed_key) != Some(&key) {
             return Err(ProtocolError::GenericError(
                 "Authenticated return block replay reservation is missing".into(),
             ));
         }
+        if needs_buffer_receipt && !s.bot_claim_return_buffer_receipts.contains_key(&key) {
+            s.bot_claim_return_buffer_receipts.insert(key, rumi_protocol_backend::state::BotClaimReturnBufferReceipt {
+                ledger: claim.collateral_type,
+                authenticated_return_fee_e8s: return_fee_e8s,
+                consolidation_fee_e8s,
+                verified_topup_e8s,
+                topup_count: journal.return_topups.len() as u64,
+                dust_e8s: return_dust_e8s,
+            });
+        }
         s.bot_claim_return_block_receipts.insert(key, rumi_protocol_backend::state::BotClaimReturnBlockReceipt {
             ledger: claim.collateral_type,
             block_index: return_block_index,
             created_at_time: return_created_at_time,
             fee_e8s: return_fee_e8s,
+            consolidation_fee_e8s: Some(consolidation_fee_e8s),
+            return_dust_e8s,
+            topups: journal.return_topups.clone(),
         });
         s.completed_bot_claim_cancellations.insert(key, block_index);
         if let Some(vault) = s.vault_id_to_vaults.get_mut(&vault_id) {
@@ -12861,6 +13368,10 @@ async fn dev_force_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, 
                 return_created_at_time: None,
                 return_fee_e8s: None,
                 return_fee_recovery_enabled: true,
+                consolidation_fee_e8s: None,
+                return_topup_required_e8s: None,
+                return_topups: Vec::new(),
+                return_dust_e8s: 0,
                 transfer: None,
                 history_scan: None,
                 completed_block_index: None,
@@ -13035,6 +13546,10 @@ async fn dev_force_partial_bot_liquidate(
                 return_created_at_time: None,
                 return_fee_e8s: None,
                 return_fee_recovery_enabled: true,
+                consolidation_fee_e8s: None,
+                return_topup_required_e8s: None,
+                return_topups: Vec::new(),
+                return_dust_e8s: 0,
                 transfer: None,
                 history_scan: None,
                 completed_block_index: None,
@@ -13213,6 +13728,66 @@ fn get_bot_stats() -> BotStatsResponse {
 #[query]
 fn get_bot_claim_vault_ids() -> Vec<u64> {
     read_state(|s| s.bot_claims.keys().copied().collect())
+}
+
+/// Inspect fee-drift recovery for an active or completed claim generation.
+/// A positive `topup_required_e8s` remains held until exact ledger evidence is
+/// implemented and accepted; caller-supplied amounts cannot clear that state.
+#[candid_method(query)]
+#[query]
+fn get_bot_claim_cancel_recovery_status(
+    vault_id: u64,
+    claim_timestamp: u64,
+) -> Option<rumi_protocol_backend::state::BotClaimCancelRecoveryStatus> {
+    read_state(|s| {
+        let key = (vault_id, claim_timestamp);
+        if let Some(journal) = s.bot_claim_cancel_journals.get(&vault_id) {
+            if journal.claim.claimed_at != claim_timestamp {
+                return None;
+            }
+            return Some(rumi_protocol_backend::state::BotClaimCancelRecoveryStatus {
+                authenticated_return_fee_e8s: journal.return_fee_e8s?,
+                consolidation_fee_e8s: journal.consolidation_fee_e8s,
+                topup_required_e8s: journal.return_topup_required_e8s,
+                return_dust_e8s: journal.return_dust_e8s,
+                verified_topup_e8s: journal.return_topups.iter().try_fold(0u64, |total, item| {
+                    total.checked_add(item.amount_e8s)
+                })?,
+                next_topup_sequence: u64::try_from(journal.return_topups.len()).ok()?,
+            });
+        }
+        if let Some(dust) = s.bot_claim_return_buffer_receipts.get(&key) {
+            return Some(rumi_protocol_backend::state::BotClaimCancelRecoveryStatus {
+                authenticated_return_fee_e8s: dust.authenticated_return_fee_e8s,
+                consolidation_fee_e8s: Some(dust.consolidation_fee_e8s),
+                topup_required_e8s: None,
+                return_dust_e8s: dust.dust_e8s,
+                verified_topup_e8s: dust.verified_topup_e8s,
+                next_topup_sequence: dust.topup_count,
+            });
+        }
+        let receipt = s.bot_claim_return_block_receipts.get(&key)?;
+        Some(rumi_protocol_backend::state::BotClaimCancelRecoveryStatus {
+            authenticated_return_fee_e8s: receipt.fee_e8s,
+            consolidation_fee_e8s: receipt.consolidation_fee_e8s,
+            topup_required_e8s: None,
+            return_dust_e8s: s.bot_claim_return_buffer_receipts.get(&key).map(|dust| dust.dust_e8s)
+                .unwrap_or(receipt.return_dust_e8s),
+            verified_topup_e8s: 0,
+            next_topup_sequence: 0,
+        })
+    })
+}
+
+/// Lifetime capacity for persistent claim-generation fee-dust attribution.
+/// Dust is not evicted because the isolated return subaccounts still hold it.
+#[candid_method(query)]
+#[query]
+fn get_bot_claim_return_buffer_capacity() -> (u64, u64) {
+    read_state(|s| (
+        s.bot_claim_return_buffer_receipts.len() as u64,
+        MAX_BOT_RETURN_BUFFER_RECORDS as u64,
+    ))
 }
 
 /// Admin-only: force-resolve a stuck bot claim. Used when the bot's ckUSDC transfer

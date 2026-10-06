@@ -7,6 +7,7 @@
 use candid::{CandidType, Deserialize, Principal};
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc3::archive::QueryArchiveFn;
+use sha2::{Digest, Sha256};
 
 /// Derive the bot's fee-buffered return credit and the exact backend
 /// consolidation debit/credit for a claim generation.
@@ -67,6 +68,122 @@ pub async fn verify_return_block(
         &memo,
         created_at_time,
     )
+}
+
+/// Verify an operator/bot top-up sent from the registered bot's default
+/// account into this claim generation's isolated return account. The amount
+/// is derived from the journal by the caller; this function only proves that
+/// exact tuple and never treats a caller-supplied amount as evidence.
+pub async fn verify_topup_block(
+    ledger: Principal,
+    bot: Principal,
+    backend: Principal,
+    return_subaccount: [u8; 32],
+    vault_id: u64,
+    claim_timestamp: u64,
+    topup_sequence: u64,
+    expected_amount: u64,
+    expected_fee: u64,
+    block_index: u64,
+    created_at_time: u64,
+    native_icp: bool,
+) -> Result<(), String> {
+    if expected_amount == 0 || created_at_time < claim_timestamp {
+        return Err("top-up amount must be positive and timestamp must match the claim generation".into());
+    }
+    let memo = topup_memo(vault_id, claim_timestamp, topup_sequence, expected_amount, created_at_time);
+    let destination = Account { owner: backend, subaccount: Some(return_subaccount) };
+    if native_icp {
+        let block = fetch_native_icp_block(ledger, block_index).await?;
+        return validate_native_icp_topup_block(
+            ledger, bot, destination, expected_amount, expected_fee, &memo, created_at_time, &block,
+        ).await;
+    }
+    let decoded = crate::icrc3_proof::fetch_icrc3_block(ledger, block_index).await?;
+    validate_icrc3_topup_block(
+        &decoded, bot, destination, expected_amount, expected_fee, &memo, created_at_time,
+    )
+}
+
+pub fn topup_memo(
+    vault_id: u64,
+    claim_timestamp: u64,
+    sequence: u64,
+    amount_e8s: u64,
+    created_at_time: u64,
+) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"RUMI_BOT_RETURN_TOPUP_V1");
+    hasher.update(vault_id.to_be_bytes());
+    hasher.update(claim_timestamp.to_be_bytes());
+    hasher.update(sequence.to_be_bytes());
+    hasher.update(amount_e8s.to_be_bytes());
+    hasher.update(created_at_time.to_be_bytes());
+    hasher.finalize().to_vec()
+}
+
+pub fn validate_icrc3_topup_block(
+    block: &crate::icrc3_proof::DecodedBlock,
+    bot: Principal,
+    destination: Account,
+    amount: u64,
+    fee: u64,
+    memo: &[u8],
+    created_at_time: u64,
+) -> Result<(), String> {
+    if block.btype.as_deref() != Some("1xfer") {
+        return Err("top-up block type does not identify an ICRC-1 transfer".into());
+    }
+    if block.op != "transfer" && block.op != "xfer" {
+        return Err("top-up receipt is not a transfer block".into());
+    }
+    if block.from.as_ref() != Some(&Account { owner: bot, subaccount: None })
+        || block.to.as_ref() != Some(&destination)
+        || block.spender.is_some()
+        || block.amount != u128::from(amount)
+        || block.memo.as_deref() != Some(memo)
+        || block.created_at_time != Some(created_at_time)
+        || block.transaction_fee != Some(u128::from(fee))
+        || block.fee != Some(u128::from(fee))
+    {
+        return Err("top-up block differs from its exact generation-bound source, destination, amount, fee, memo, or timestamp".into());
+    }
+    Ok(())
+}
+
+async fn validate_native_icp_topup_block(
+    ledger: Principal,
+    bot: Principal,
+    destination: Account,
+    amount_e8s: u64,
+    fee_e8s: u64,
+    memo: &[u8],
+    created_at_time: u64,
+    block: &NativeBlock,
+) -> Result<(), String> {
+    let Some(NativeOperation::Transfer { from, to, spender, amount, fee }) =
+        block.transaction.operation.as_ref()
+    else {
+        return Err("native ICP top-up receipt is not a transfer".into());
+    };
+    if spender.is_some() || from.len() != 32 || to.len() != 32 {
+        return Err("native ICP top-up has unexpected spender or malformed account IDs".into());
+    }
+    let (source_id,): (Vec<u8>,) = ic_cdk::call(
+        ledger, "account_identifier", (Account { owner: bot, subaccount: None },),
+    ).await.map_err(|(code, message)| format!("native ICP bot account lookup failed: {code:?} {message}"))?;
+    let (destination_id,): (Vec<u8>,) = ic_cdk::call(
+        ledger, "account_identifier", (destination,),
+    ).await.map_err(|(code, message)| format!("native ICP return account lookup failed: {code:?} {message}"))?;
+    if source_id.len() != 32 || destination_id.len() != 32
+        || *from != source_id || *to != destination_id
+        || amount.e8s != amount_e8s || fee.e8s != fee_e8s
+        || block.transaction.icrc1_memo.as_deref() != Some(memo)
+        || block.transaction.created_at_time.timestamp_nanos != created_at_time
+    {
+        return Err("native ICP top-up block differs from its exact generation-bound transfer tuple".into());
+    }
+    Ok(())
 }
 
 pub fn return_memo(vault_id: u64, claim_timestamp: u64) -> Vec<u8> {
@@ -417,5 +534,69 @@ mod tests {
         let mut donation_like = valid.clone();
         donation_like.amount = 1_000;
         assert!(validate_icrc3_return_block(&donation_like, bot, destination, 1_000, 10, &memo, 501).is_err());
+    }
+
+    #[test]
+    fn topup_receipt_binds_generation_sequence_credit_fee_and_timestamp() {
+        let bot = Principal::from_slice(&[1]);
+        let backend = Principal::from_slice(&[2]);
+        let destination = Account { owner: backend, subaccount: Some([3; 32]) };
+        let memo = topup_memo(7, 500, 0, 6, 501);
+        assert_eq!(memo.len(), 32);
+        let valid = DecodedBlock {
+            btype: Some("1xfer".into()),
+            op: "transfer".into(),
+            from: Some(Account { owner: bot, subaccount: None }),
+            to: Some(destination.clone()),
+            spender: None,
+            amount: 6,
+            transaction_fee: Some(2),
+            fee: Some(2),
+            memo: Some(memo.clone()),
+            created_at_time: Some(501),
+            expected_allowance: None,
+            expires_at: None,
+        };
+        assert!(validate_icrc3_topup_block(&valid, bot, destination.clone(), 6, 2, &memo, 501).is_ok());
+        assert!(validate_icrc3_topup_block(&valid, Principal::from_slice(&[4]), destination.clone(), 6, 2, &memo, 501).is_err());
+        assert!(validate_icrc3_topup_block(&valid, bot, destination.clone(), 7, 2, &memo, 501).is_err());
+        assert!(validate_icrc3_topup_block(&valid, bot, destination.clone(), 6, 3, &memo, 501).is_err());
+        assert!(validate_icrc3_topup_block(&valid, bot, destination.clone(), 6, 2, &memo, 502).is_err());
+        let other_generation = topup_memo(8, 500, 0, 6, 501);
+        assert!(validate_icrc3_topup_block(&valid, bot, destination, 6, 2, &other_generation, 501).is_err());
+        let mut delegated = valid;
+        delegated.spender = Some(Account { owner: Principal::from_slice(&[5]), subaccount: None });
+        assert!(validate_icrc3_topup_block(
+            &delegated,
+            bot,
+            Account { owner: backend, subaccount: Some([3; 32]) },
+            6,
+            2,
+            &memo,
+            501,
+        ).is_err());
+        let mut untyped = delegated.clone();
+        untyped.spender = None;
+        untyped.btype = None;
+        assert!(validate_icrc3_topup_block(
+            &untyped,
+            bot,
+            Account { owner: backend, subaccount: Some([3; 32]) },
+            6,
+            2,
+            &memo,
+            501,
+        ).is_err());
+        let mut delegated_type = untyped.clone();
+        delegated_type.btype = Some("2xfer".into());
+        assert!(validate_icrc3_topup_block(
+            &delegated_type,
+            bot,
+            Account { owner: backend, subaccount: Some([3; 32]) },
+            6,
+            2,
+            &memo,
+            501,
+        ).is_err());
     }
 }

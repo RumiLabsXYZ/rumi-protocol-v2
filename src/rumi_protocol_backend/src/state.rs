@@ -933,10 +933,119 @@ pub struct BotClaimCancelJournal {
     /// return block. Missing on migrated/legacy rows, which remain held.
     #[serde(default)]
     pub return_fee_recovery_enabled: bool,
+    /// Fresh consolidation fee after typed no-effect or complete-history
+    /// absence recovery. This never replaces the authenticated bot return fee.
+    #[serde(default)]
+    pub consolidation_fee_e8s: Option<u64>,
+    /// Fee delta still required from a separately verified generation-bound
+    /// top-up. Caller-provided amounts alone never clear this hold.
+    #[serde(default)]
+    pub return_topup_required_e8s: Option<u64>,
+    /// Positive exact top-up receipts accepted for this generation. These
+    /// amount-bearing blocks allow only proven return-buffer growth.
+    #[serde(default)]
+    pub return_topups: Vec<BotClaimReturnTopupReceipt>,
+    /// Known unspent claim-generation fee buffer after exact consolidation.
+    #[serde(default)]
+    pub return_dust_e8s: u64,
     pub transfer: Option<BotClaimCancelTransfer>,
     pub history_scan: Option<BotClaimCancelHistoryScan>,
     pub completed_block_index: Option<u64>,
     pub attempts: Vec<BotClaimCancelAttempt>,
+}
+
+#[derive(candid::CandidType, Clone, Debug, serde::Deserialize, Serialize, PartialEq, Eq)]
+pub struct BotClaimReturnTopupReceipt {
+    pub ledger: Principal,
+    pub block_index: u64,
+    pub created_at_time: u64,
+    pub amount_e8s: u64,
+    pub fee_e8s: u64,
+    pub sequence: u64,
+}
+
+#[cfg(test)]
+mod bot_claim_return_fee_migration_tests {
+    use super::*;
+
+    fn claim() -> BotClaim {
+        BotClaim {
+            vault_id: 9,
+            collateral_amount: 1_000,
+            debt_amount: 500,
+            collateral_type: Principal::from_slice(&[0x31]),
+            claimed_at: 77,
+            collateral_price_e8s: 2,
+            payment_memo: Some(vec![1]),
+            request_id: Some(3),
+            claiming_bot: Some(Principal::from_slice(&[0x32])),
+            claim_transfer: None,
+            claim_payment_subaccount: None,
+        }
+    }
+
+    #[test]
+    fn older_cancel_journals_decode_with_held_topup_defaults() {
+        let journal = BotClaimCancelJournal {
+            claim: claim(),
+            return_block_index: Some(10),
+            return_created_at_time: Some(11),
+            return_fee_e8s: Some(4),
+            return_fee_recovery_enabled: true,
+            consolidation_fee_e8s: Some(4),
+            return_topup_required_e8s: Some(1),
+            return_topups: vec![BotClaimReturnTopupReceipt {
+                ledger: Principal::from_slice(&[0x31]),
+                block_index: 12,
+                created_at_time: 13,
+                amount_e8s: 1,
+                fee_e8s: 2,
+                sequence: 0,
+            }],
+            return_dust_e8s: 0,
+            transfer: None,
+            history_scan: None,
+            completed_block_index: None,
+            attempts: Vec::new(),
+        };
+        let mut old = serde_json::to_value(journal).unwrap();
+        for field in [
+            "consolidation_fee_e8s",
+            "return_topup_required_e8s",
+            "return_topups",
+            "return_dust_e8s",
+        ] {
+            old.as_object_mut().unwrap().remove(field);
+        }
+        let decoded: BotClaimCancelJournal = serde_json::from_value(old).unwrap();
+        assert_eq!(decoded.return_fee_e8s, Some(4));
+        assert_eq!(decoded.consolidation_fee_e8s, None);
+        assert_eq!(decoded.return_topup_required_e8s, None);
+        assert!(decoded.return_topups.is_empty());
+        assert_eq!(decoded.return_dust_e8s, 0);
+    }
+
+    #[test]
+    fn older_return_receipts_decode_without_fee_drift_metadata() {
+        let receipt = BotClaimReturnBlockReceipt {
+            ledger: Principal::from_slice(&[0x31]),
+            block_index: 8,
+            created_at_time: 9,
+            fee_e8s: 4,
+            consolidation_fee_e8s: Some(3),
+            return_dust_e8s: 1,
+            topups: Vec::new(),
+        };
+        let mut old = serde_json::to_value(receipt).unwrap();
+        for field in ["consolidation_fee_e8s", "return_dust_e8s", "topups"] {
+            old.as_object_mut().unwrap().remove(field);
+        }
+        let decoded: BotClaimReturnBlockReceipt = serde_json::from_value(old).unwrap();
+        assert_eq!(decoded.fee_e8s, 4);
+        assert_eq!(decoded.consolidation_fee_e8s, None);
+        assert_eq!(decoded.return_dust_e8s, 0);
+        assert!(decoded.topups.is_empty());
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
@@ -946,6 +1055,37 @@ pub struct BotClaimReturnBlockReceipt {
     pub created_at_time: u64,
     #[serde(default)]
     pub fee_e8s: u64,
+    /// Fee actually used to consolidate the generation-isolated return.
+    #[serde(default)]
+    pub consolidation_fee_e8s: Option<u64>,
+    /// Fee buffer retained in this generation's isolated return account.
+    #[serde(default)]
+    pub return_dust_e8s: u64,
+    #[serde(default)]
+    pub topups: Vec<BotClaimReturnTopupReceipt>,
+}
+
+/// Publicly readable reconciliation status for one claim-generation return.
+#[derive(candid::CandidType, Clone, Debug, serde::Deserialize, Serialize, PartialEq, Eq)]
+pub struct BotClaimCancelRecoveryStatus {
+    pub authenticated_return_fee_e8s: u64,
+    pub consolidation_fee_e8s: Option<u64>,
+    pub topup_required_e8s: Option<u64>,
+    pub return_dust_e8s: u64,
+    pub verified_topup_e8s: u64,
+    pub next_topup_sequence: u64,
+}
+
+/// Durable attribution for the claim-generation return buffer after the bot
+/// ACKs and its bounded block-replay receipt can be released.
+#[derive(candid::CandidType, Clone, Debug, serde::Deserialize, Serialize, PartialEq, Eq)]
+pub struct BotClaimReturnBufferReceipt {
+    pub ledger: Principal,
+    pub authenticated_return_fee_e8s: u64,
+    pub consolidation_fee_e8s: u64,
+    pub verified_topup_e8s: u64,
+    pub topup_count: u64,
+    pub dust_e8s: u64,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, Serialize, PartialEq, Eq)]
@@ -2636,6 +2776,9 @@ pub struct State {
     /// exact claim generation for idempotent lost-reply recovery.
     #[serde(default)]
     pub bot_claim_return_block_receipts: BTreeMap<(u64, u64), BotClaimReturnBlockReceipt>,
+    /// Durable claim-generation return-buffer accounting retained after ACK.
+    #[serde(default)]
+    pub bot_claim_return_buffer_receipts: BTreeMap<(u64, u64), BotClaimReturnBufferReceipt>,
     /// Claims whose exact collateral transfer was reserved but not yet
     /// acknowledged. Kept separate from BotClaim because no collateral receipt
     /// is established until the fixed ledger tuple returns success/Duplicate.
@@ -3260,6 +3403,7 @@ impl Default for State {
             acknowledged_bot_claim_cancellations: BTreeMap::new(),
             consumed_bot_claim_return_blocks: BTreeMap::new(),
             bot_claim_return_block_receipts: BTreeMap::new(),
+            bot_claim_return_buffer_receipts: BTreeMap::new(),
             pending_bot_claim_transfers: BTreeMap::new(),
             bot_claim_payment_nonce: 0,
             consumed_bot_payment_blocks: BTreeMap::new(),
@@ -3702,6 +3846,7 @@ impl From<InitArg> for State {
             acknowledged_bot_claim_cancellations: BTreeMap::new(),
             consumed_bot_claim_return_blocks: BTreeMap::new(),
             bot_claim_return_block_receipts: BTreeMap::new(),
+            bot_claim_return_buffer_receipts: BTreeMap::new(),
             pending_bot_claim_transfers: BTreeMap::new(),
             bot_claim_payment_nonce: 0,
             consumed_bot_payment_blocks: BTreeMap::new(),
