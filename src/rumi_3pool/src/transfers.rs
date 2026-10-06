@@ -9,6 +9,9 @@ use candid::Principal;
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
 use icrc_ledger_types::icrc2::transfer_from::{TransferFromArgs, TransferFromError};
+use candid::CandidType;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -16,6 +19,50 @@ use std::collections::HashMap;
 /// when a ledger's `icrc1_fee` query cannot be reached. Erring high keeps the
 /// pool solvent (we send slightly less) rather than risking an over-send.
 const DEFAULT_LEDGER_FEE: u128 = 10_000;
+
+/// Exact identity for one persisted pending-claim payout attempt. The ledger
+/// deduplicates only structurally equal calls and only for its configured
+/// transaction window, so a retry must reuse this tuple and TooOld must leave
+/// the claim held for receipt-backed reconciliation.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PayoutAttempt {
+    pub fee: u128,
+    pub created_at_time: u64,
+    pub memo: Vec<u8>,
+    pub attempt_no: u32,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PendingPayoutState {
+    FreshNoDispatch,
+    /// Persisted before a ledger await. A later entry seeing this state must
+    /// assume the request may have committed and can only retry the same tuple.
+    Submitted(PayoutAttempt),
+    /// A typed clean rejection was observed with no earlier ambiguous dispatch.
+    ProvenNoEffect(PayoutAttempt),
+    /// At least one dispatch may have committed; even a later typed rejection
+    /// cannot authorize a new tuple or a refund.
+    Ambiguous(PayoutAttempt),
+}
+
+pub fn new_payout_attempt(claim_id: u64, fee: u128, attempt: u32) -> PayoutAttempt {
+    let mut digest = Sha256::new();
+    digest.update(b"rumi-3pool-claim-payout-v1");
+    digest.update(claim_id.to_be_bytes());
+    digest.update(attempt.to_be_bytes());
+    PayoutAttempt {
+        fee,
+        created_at_time: ic_cdk::api::time(),
+        memo: digest.finalize().to_vec(),
+        attempt_no: attempt,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PayoutFailure {
+    ProvenNoEffect(String),
+    Ambiguous(String),
+}
 
 thread_local! {
     /// Per-ledger transfer-fee cache, populated lazily from `icrc1_fee` on the
@@ -203,5 +250,57 @@ pub async fn transfer_to_user(
             "inter-canister call failed: {:?} - {}",
             code, msg
         )),
+    }
+}
+
+/// Execute a payout using the exact persisted identity of a pending claim.
+/// Duplicate is success only because this uses the same saved call tuple.
+pub async fn execute_claim_payout(
+    ledger: Principal,
+    to: Principal,
+    amount: u128,
+    attempt: &PayoutAttempt,
+    prior_ambiguous: bool,
+) -> Result<(), PayoutFailure> {
+    if amount <= attempt.fee {
+        let detail = format!("amount {} does not exceed ledger fee {}; payout not sent", amount, attempt.fee);
+        return Err(if prior_ambiguous { PayoutFailure::Ambiguous(detail) } else { PayoutFailure::ProvenNoEffect(detail) });
+    }
+    let args = TransferArg {
+        from_subaccount: None,
+        to: Account { owner: to, subaccount: None },
+        amount: candid::Nat::from(amount - attempt.fee),
+        fee: Some(candid::Nat::from(attempt.fee)),
+        memo: Some(attempt.memo.clone().into()),
+        created_at_time: Some(attempt.created_at_time),
+    };
+    let result: Result<(Result<candid::Nat, TransferError>,), _> =
+        ic_cdk::call(ledger, "icrc1_transfer", (args,)).await;
+    match result {
+        Ok((Ok(_),)) | Ok((Err(TransferError::Duplicate { .. }),)) => Ok(()),
+        Ok((Err(TransferError::BadFee { expected_fee }),)) => {
+            if let Ok(expected) = expected_fee.0.clone().try_into() {
+                LEDGER_FEES.with(|cache| cache.borrow_mut().insert(ledger, expected));
+            }
+            let detail = format!("icrc1_transfer BadFee; ledger reports fee {}", expected_fee);
+            if prior_ambiguous { Err(PayoutFailure::Ambiguous(detail)) }
+            else { Err(PayoutFailure::ProvenNoEffect(detail)) }
+        }
+        Ok((Err(e @ TransferError::BadBurn { .. }),))
+        | Ok((Err(e @ TransferError::InsufficientFunds { .. }),))
+        | Ok((Err(e @ TransferError::CreatedInFuture { .. }),)) => {
+            let detail = format!("icrc1_transfer error: {e:?}");
+            if prior_ambiguous { Err(PayoutFailure::Ambiguous(detail)) }
+            else { Err(PayoutFailure::ProvenNoEffect(detail)) }
+        }
+        // TooOld cannot distinguish an earlier committed dispatch after the
+        // ledger's finite dedup window, so keep this as an unresolved hold.
+        Ok((Err(e @ TransferError::TooOld),))
+        | Ok((Err(e @ TransferError::TemporarilyUnavailable),))
+        | Ok((Err(e @ TransferError::GenericError { .. }),)) =>
+            Err(PayoutFailure::Ambiguous(format!("icrc1_transfer error: {e:?}"))),
+        Err((code, msg)) => Err(PayoutFailure::Ambiguous(format!(
+            "inter-canister call failed: {:?} - {}", code, msg
+        ))),
     }
 }

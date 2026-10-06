@@ -54,6 +54,82 @@ export interface QuoteSwapResult {
   virtual_price_after: bigint;
 }
 
+type PersistedPoolIntent = { payload: string; idHex: string; sequence: string; state: 'pending' | 'complete' };
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  if (!/^(?:[0-9a-f]{2}){32}$/.test(hex)) throw new Error('Stored 3pool intent id is malformed');
+  return Uint8Array.from(hex.match(/.{2}/g)!, (byte) => Number.parseInt(byte, 16));
+}
+
+function optionValue<T>(value: any): T | undefined {
+  if (Array.isArray(value)) return value[0] as T | undefined;
+  return value as T | undefined;
+}
+
+function candidVariantName(value: any): string | undefined {
+  return value && typeof value === 'object' ? Object.keys(value)[0] : undefined;
+}
+
+/** Persist one caller intent before an update so wallet reloads and retry paths reuse its exact ID. */
+async function preparePoolIntent(actor: any, owner: Principal, action: string, payload: unknown): Promise<{ id: Uint8Array; storageKey: string; record: PersistedPoolIntent }> {
+  const payloadJson = JSON.stringify(payload, (_key, value) => typeof value === 'bigint' ? value.toString() : value);
+  const storageKey = `rumi.3pool.intent.v1.${owner.toText()}.${action}`;
+  const priorText = globalThis.localStorage?.getItem(storageKey);
+  if (priorText) {
+    const prior = JSON.parse(priorText) as PersistedPoolIntent;
+    if (prior.state === 'pending' && prior.payload === payloadJson) {
+      return { id: hexToBytes(prior.idHex), storageKey, record: prior };
+    }
+    if (prior.state === 'pending') {
+      const priorId = hexToBytes(prior.idHex);
+      const lookup = action === 'swap' ? actor.get_swap_receipt_v1 : actor.get_ingress_receipt_v1;
+      if (typeof lookup !== 'function') {
+        throw new Error('A previous 3pool operation is unresolved; this actor cannot verify its status, so a new operation is blocked');
+      }
+      const oldReceipt = optionValue<any>(await lookup(priorId));
+      if (oldReceipt) {
+        const status = candidVariantName(oldReceipt.status);
+        const terminal = action === 'swap'
+          ? ['Completed', 'Refunded', 'Failed'].includes(status ?? '')
+          : ['Completed', 'Failed'].includes(status ?? '');
+        if (!terminal) {
+          throw new Error('A previous 3pool operation is still pending; resume or reconcile it before starting a different operation');
+        }
+        markPoolIntentComplete(storageKey, prior);
+      } else {
+        const floorValue = optionValue<bigint>(await actor.get_next_intent_sequence_v1());
+        const priorSequence = BigInt(prior.sequence);
+        if (floorValue === undefined || floorValue > priorSequence) {
+          throw new Error('A previous 3pool operation was accepted but its receipt is unavailable; do not replace its intent');
+        }
+      }
+    }
+  }
+
+  const rawFloor = await actor.get_next_intent_sequence_v1();
+  const floor = optionValue<bigint>(rawFloor);
+  if (floor === undefined) throw new Error('3pool did not return an intent sequence for this wallet');
+  const id = new Uint8Array(32);
+  let sequence = floor;
+  if (sequence <= 0n || sequence > 0xffff_ffff_ffff_ffffn) throw new Error('3pool intent sequence is exhausted');
+  for (let index = 7; index >= 0; index--) {
+    id[index] = Number(sequence & 0xffn);
+    sequence >>= 8n;
+  }
+  globalThis.crypto.getRandomValues(id.subarray(8));
+  const record: PersistedPoolIntent = { payload: payloadJson, idHex: bytesToHex(id), sequence: floor.toString(), state: 'pending' };
+  globalThis.localStorage?.setItem(storageKey, JSON.stringify(record));
+  return { id, storageKey, record };
+}
+
+function markPoolIntentComplete(storageKey: string, record: PersistedPoolIntent): void {
+  globalThis.localStorage?.setItem(storageKey, JSON.stringify({ ...record, state: 'complete' }));
+}
+
 // ──────────────────────────────────────────────────────────────
 // Token metadata for the 3pool (matches canister init config)
 // ──────────────────────────────────────────────────────────────
@@ -446,10 +522,10 @@ class ThreePoolService {
   async swap(fromIndex: number, toIndex: number, dxRaw: bigint, minDyRaw: bigint): Promise<bigint> {
     const wallet = get(walletStore);
     if (!wallet.isConnected) throw new Error('Wallet not connected');
+    if (!wallet.principal) throw new Error('Connected wallet has no principal');
 
     const fromToken = POOL_TOKENS[fromIndex];
     const oisyDetected = isOisyWallet();
-    const approveAmt = await approvalAmount(dxRaw, fromToken);
 
     if (oisyDetected && wallet.principal) {
       // ─── Oisy sequential path (v5: no batch concept) ───
@@ -462,6 +538,10 @@ class ThreePoolService {
       const poolActor = createOisyActor(
         THREEPOOL_CANISTER_ID, canisterIDLs.three_pool, signerAgent
       );
+      const intent = await preparePoolIntent(poolActor, wallet.principal, 'swap', {
+        i: fromIndex, j: toIndex, dx: dxRaw, min_dy: minDyRaw,
+      });
+      const approveAmt = await approvalAmount(dxRaw, fromToken);
 
       // 1) Approve (first Oisy consent screen, Tier 1 native).
       const approveResult = await ledgerActor.icrc2_approve({
@@ -475,13 +555,30 @@ class ThreePoolService {
       }
 
       // 2) Swap (second Oisy consent screen).
-      const swapResult = await poolActor.swap(fromIndex, toIndex, dxRaw, minDyRaw);
+      const swapResult = await poolActor.swap_with_receipt_v1({
+        intent_id: intent.id, i: fromIndex, j: toIndex, dx: dxRaw, min_dy: minDyRaw,
+      });
       if ('Err' in swapResult) {
         throw new Error(this.formatError(swapResult.Err));
       }
-      return swapResult.Ok;
+      const status = candidVariantName(swapResult.Ok.status);
+      if (status === 'Completed') {
+        markPoolIntentComplete(intent.storageKey, intent.record);
+        const output = optionValue<bigint>(swapResult.Ok.gross_output);
+        if (output === undefined) throw new Error('3pool completed swap receipt omitted gross output');
+        return output;
+      }
+      if (status === 'Refunded' || status === 'Failed') markPoolIntentComplete(intent.storageKey, intent.record);
+      throw new Error(`3pool swap remains ${status ?? 'unresolved'}; the original intent is saved for status lookup or exact retry`);
     } else {
       // ─── Non-Oisy path (Plug, II, etc.) ───
+      const poolActor = await walletStore.getActor(
+        THREEPOOL_CANISTER_ID, canisterIDLs.three_pool
+      ) as any;
+      const intent = await preparePoolIntent(poolActor, wallet.principal!, 'swap', {
+        i: fromIndex, j: toIndex, dx: dxRaw, min_dy: minDyRaw,
+      });
+      const approveAmt = await approvalAmount(dxRaw, fromToken);
       const ledgerActor = await walletStore.getActor(
         fromToken.ledgerId, CONFIG.icusd_ledgerIDL
       ) as any;
@@ -500,14 +597,21 @@ class ThreePoolService {
       // Small delay for ledger sync
       await new Promise(r => setTimeout(r, 2000));
 
-      const poolActor = await walletStore.getActor(
-        THREEPOOL_CANISTER_ID, canisterIDLs.three_pool
-      ) as any;
-      const result = await poolActor.swap(fromIndex, toIndex, dxRaw, minDyRaw) as { Ok: bigint } | { Err: any };
+      const result = await poolActor.swap_with_receipt_v1({
+        intent_id: intent.id, i: fromIndex, j: toIndex, dx: dxRaw, min_dy: minDyRaw,
+      }) as { Ok: any } | { Err: any };
       if ('Err' in result) {
         throw new Error(this.formatError(result.Err));
       }
-      return result.Ok;
+      const status = candidVariantName(result.Ok.status);
+      if (status === 'Completed') {
+        markPoolIntentComplete(intent.storageKey, intent.record);
+        const output = optionValue<bigint>(result.Ok.gross_output);
+        if (output === undefined) throw new Error('3pool completed swap receipt omitted gross output');
+        return output;
+      }
+      if (status === 'Refunded' || status === 'Failed') markPoolIntentComplete(intent.storageKey, intent.record);
+      throw new Error(`3pool swap remains ${status ?? 'unresolved'}; the original intent is saved for status lookup or exact retry`);
     }
   }
 
@@ -518,6 +622,7 @@ class ThreePoolService {
   ): Promise<bigint | OisyLandedSentinel> {
     const wallet = get(walletStore);
     if (!wallet.isConnected) throw new Error('Wallet not connected');
+    if (!wallet.principal) throw new Error('Connected wallet has no principal');
 
     const oisyDetected = isOisyWallet();
     const spender = { owner: Principal.fromText(THREEPOOL_CANISTER_ID), subaccount: [] };
@@ -550,6 +655,8 @@ class ThreePoolService {
       // ─── Oisy sequential path (v5: no batch concept) ───
       console.log(`[Oisy] Sequential approve(s) + 3pool add_liquidity via @icp-sdk/signer v5`);
       const signerAgent = await getOisySignerAgent(wallet.principal);
+      const poolActor = createOisyActor(THREEPOOL_CANISTER_ID, canisterIDLs.three_pool, signerAgent);
+      const intent = await preparePoolIntent(poolActor, wallet.principal, 'add-liquidity', { amounts, minLp });
 
       // 1) Approve each non-zero token sequentially (Tier 1 native consent screens).
       for (let k = 0; k < 3; k++) {
@@ -568,12 +675,19 @@ class ThreePoolService {
       }
 
       // 2) add_liquidity (final consent screen), guarded against _arr false-negative.
-      const poolActor = createOisyActor(THREEPOOL_CANISTER_ID, canisterIDLs.three_pool, signerAgent);
       const guarded = await callWithOisyFalseNegativeGuard(
         async () => {
-          const addResult = await poolActor.add_liquidity(amounts, minLp) as { Ok: bigint } | { Err: any };
+          const addResult = await poolActor.add_liquidity_with_receipt_v1(intent.id, amounts, minLp) as { Ok: any } | { Err: any };
           if ('Err' in addResult) throw new Error(this.formatError(addResult.Err));
-          return addResult.Ok;
+          const status = candidVariantName(addResult.Ok.status);
+          if (status === 'Completed') {
+            markPoolIntentComplete(intent.storageKey, intent.record);
+            const minted = optionValue<bigint>(addResult.Ok.result_lp);
+            if (minted === undefined) throw new Error('3pool completed liquidity receipt omitted LP amount');
+            return minted;
+          }
+          if (status === 'Failed') markPoolIntentComplete(intent.storageKey, intent.record);
+          throw new Error(`3pool add-liquidity remains ${status ?? 'unresolved'}; the original intent is saved for status lookup or exact retry`);
         },
         verifyAddLanded,
         `Oisy 3pool add_liquidity`
@@ -581,6 +695,8 @@ class ThreePoolService {
       return guarded;
     } else {
       // ─── Non-Oisy path: sequential approvals ───
+      const poolActor = await walletStore.getActor(THREEPOOL_CANISTER_ID, canisterIDLs.three_pool) as any;
+      const intent = await preparePoolIntent(poolActor, wallet.principal, 'add-liquidity', { amounts, minLp });
       for (let k = 0; k < 3; k++) {
         if (amounts[k] > 0n) {
           const token = POOL_TOKENS[k];
@@ -597,12 +713,19 @@ class ThreePoolService {
         }
       }
 
-      const poolActor = await walletStore.getActor(THREEPOOL_CANISTER_ID, canisterIDLs.three_pool) as any;
       const result = await callWithOisyFalseNegativeGuard(
         async () => {
-          const r = await poolActor.add_liquidity(amounts, minLp) as { Ok: bigint } | { Err: any };
+          const r = await poolActor.add_liquidity_with_receipt_v1(intent.id, amounts, minLp) as { Ok: any } | { Err: any };
           if ('Err' in r) throw new Error(this.formatError(r.Err));
-          return r.Ok;
+          const status = candidVariantName(r.Ok.status);
+          if (status === 'Completed') {
+            markPoolIntentComplete(intent.storageKey, intent.record);
+            const minted = optionValue<bigint>(r.Ok.result_lp);
+            if (minted === undefined) throw new Error('3pool completed liquidity receipt omitted LP amount');
+            return minted;
+          }
+          if (status === 'Failed') markPoolIntentComplete(intent.storageKey, intent.record);
+          throw new Error(`3pool add-liquidity remains ${status ?? 'unresolved'}; the original intent is saved for status lookup or exact retry`);
         },
         verifyAddLanded,
         `3pool add_liquidity`

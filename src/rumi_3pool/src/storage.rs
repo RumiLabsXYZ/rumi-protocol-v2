@@ -12,7 +12,7 @@
 //     first time on the new wasm (one-shot drain from the legacy blob) or
 //     subsequent times (load `SlimState` from its cell).
 //
-// Memory ID layout (26 IDs used; 255 available):
+// Memory ID layout (29 IDs used; 255 available):
 //
 //   0       SlimState cell              — bounded residual heap
 //   1       lp_balances                 — BTreeMap<Principal, u128>
@@ -29,10 +29,13 @@
 //                                         to blocks log; entry i == hash of block i)
 //   20      pending_claims              — BTreeMap<u64, ThreePoolPendingClaim>
 //   21      next_claim_id cell          — monotonic u64 claim id counter
-//   22      swap_receipts_v1            — never-evicted caller-scoped attempts
+//   22      swap_receipts_v1            — bounded caller-scoped active attempts
 //   23      swap_receipt_fence          — durable reserve mutation fence
 //   24      swap_receipt_clients        — bounded admin-managed capability set
-//   25      donation_receipts            — permanent backend donation dedup receipts
+//   25      pending_payouts              — exact idempotency tuples for claims
+//   26      ingress_receipts             — caller-scoped durable input operations
+//   27      intent_high_water            — persistent per-caller replay floor
+//   28      donation_receipts            — permanent backend donation dedup receipts
 //
 // Migration semantics: the first `post_upgrade` after the Phase A deploy runs
 // a one-shot drain (see `storage::migration`). All subsequent upgrades just
@@ -85,7 +88,11 @@ const MEM_NEXT_CLAIM_ID: MemoryId = MemoryId::new(21);
 const MEM_SWAP_RECEIPTS_V1: MemoryId = MemoryId::new(22);
 const MEM_SWAP_RECEIPT_FENCE: MemoryId = MemoryId::new(23);
 const MEM_SWAP_RECEIPT_CLIENTS: MemoryId = MemoryId::new(24);
-const MEM_THREE_POOL_DONATION_RECEIPTS: MemoryId = MemoryId::new(25);
+const MEM_PENDING_PAYOUTS: MemoryId = MemoryId::new(25);
+const MEM_INGRESS_RECEIPTS: MemoryId = MemoryId::new(26);
+const MEM_INTENT_HIGH_WATER: MemoryId = MemoryId::new(27);
+pub(crate) const MAX_INTENT_OWNERS: u64 = 100_000;
+const MEM_THREE_POOL_DONATION_RECEIPTS: MemoryId = MemoryId::new(28);
 
 // ─── SlimState ───────────────────────────────────────────────────────────────
 //
@@ -314,6 +321,8 @@ impl_storable_candid_unbounded!(LpAllowance);
 impl_storable_candid_unbounded!(ThreePoolPendingClaim);
 impl_storable_candid_unbounded!(crate::receipts::SwapReceiptV1);
 impl_storable_candid_unbounded!(crate::receipts::ThreePoolDonationReceipt);
+impl_storable_candid_unbounded!(crate::transfers::PendingPayoutState);
+impl_storable_candid_unbounded!(crate::receipts::IngressReceiptV1);
 
 // ─── MemoryManager + stable structures (thread-local) ────────────────────────
 //
@@ -332,6 +341,10 @@ thread_local! {
         RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_SWAP_RECEIPTS_V1))));
     pub(crate) static THREE_POOL_DONATION_RECEIPTS: RefCell<StableBTreeMap<Vec<u8>, crate::receipts::ThreePoolDonationReceipt, Memory>> =
         RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_THREE_POOL_DONATION_RECEIPTS))));
+    pub(crate) static INGRESS_RECEIPTS: RefCell<StableBTreeMap<Vec<u8>, crate::receipts::IngressReceiptV1, Memory>> =
+        RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_INGRESS_RECEIPTS))));
+    pub(crate) static INTENT_HIGH_WATER: RefCell<StableBTreeMap<StorablePrincipal, StorableU128, Memory>> =
+        RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_INTENT_HIGH_WATER))));
     pub(crate) static SWAP_RECEIPT_FENCE: RefCell<StableCell<u8, Memory>> = RefCell::new(
         StableCell::init(MM.with(|m| m.borrow().get(MEM_SWAP_RECEIPT_FENCE)), 0)
             .expect("init swap receipt fence"));
@@ -433,6 +446,10 @@ thread_local! {
         StableCell::init(MM.with(|m| m.borrow().get(MEM_NEXT_CLAIM_ID)), StorableU128(0))
             .expect("init next_claim_id cell"),
     );
+    /// Exact first-dispatch tuple for every new claim. Legacy claims have no
+    /// entry and are intentionally held rather than blindly retried.
+    pub(crate) static PENDING_PAYOUTS: RefCell<StableBTreeMap<StorableU128, crate::transfers::PendingPayoutState, Memory>> =
+        RefCell::new(StableBTreeMap::init(MM.with(|m| m.borrow().get(MEM_PENDING_PAYOUTS))));
 }
 
 // ─── Public API: SlimState cell ──────────────────────────────────────────────
@@ -628,6 +645,22 @@ pub mod pending_claims {
         PENDING_CLAIMS.with(|m| m.borrow_mut().remove(&StorableU128(id as u128)))
     }
 
+    pub fn get(id: u64) -> Option<ThreePoolPendingClaim> {
+        PENDING_CLAIMS.with(|m| m.borrow().get(&StorableU128(id as u128)))
+    }
+
+    pub fn set_payout_state(id: u64, state: crate::transfers::PendingPayoutState) {
+        PENDING_PAYOUTS.with(|m| { m.borrow_mut().insert(StorableU128(id as u128), state); });
+    }
+
+    pub fn payout_state(id: u64) -> Option<crate::transfers::PendingPayoutState> {
+        PENDING_PAYOUTS.with(|m| m.borrow().get(&StorableU128(id as u128)))
+    }
+
+    pub fn remove_payout(id: u64) {
+        PENDING_PAYOUTS.with(|m| { m.borrow_mut().remove(&StorableU128(id as u128)); });
+    }
+
     /// Number of outstanding pending claims.
     pub fn len() -> u64 {
         PENDING_CLAIMS.with(|m| m.borrow().len())
@@ -644,6 +677,51 @@ pub mod pending_claims {
                 .collect()
         })
     }
+}
+
+/// Accept a new caller-scoped intent sequence. The first eight bytes of every
+/// 32-byte ID are a big-endian, strictly increasing per-caller counter. Older
+/// terminal receipts may then be pruned safely: a delayed duplicate is below
+/// the durable high-water mark and cannot dispatch again.
+pub(crate) fn accept_intent_sequence(owner: Principal, intent_id: &[u8]) -> bool {
+    if intent_id.len() != 32 { return false; }
+    let Ok(seq_bytes) = <[u8; 8]>::try_from(&intent_id[..8]) else { return false; };
+    let seq = u64::from_be_bytes(seq_bytes);
+    if seq == 0 { return false; }
+    let owner_key = StorablePrincipal(owner);
+    let (old, new_owner, owners) = INTENT_HIGH_WATER.with(|m| {
+        let map = m.borrow();
+        (map.get(&owner_key).map(|n| n.0 as u64).unwrap_or(0), !map.contains_key(&owner_key), map.len())
+    });
+    if new_owner && owners >= MAX_INTENT_OWNERS { return false; }
+    if seq <= old { return false; }
+
+    INTENT_HIGH_WATER.with(|m| { m.borrow_mut().insert(owner_key, StorableU128(seq as u128)); });
+    let remove_swap_keys = SWAP_RECEIPTS.with(|m| m.borrow().iter()
+        .filter(|(_, r)| r.owner == owner && matches!(r.status,
+            crate::receipts::SwapReceiptStatusV1::Completed |
+            crate::receipts::SwapReceiptStatusV1::Refunded |
+            crate::receipts::SwapReceiptStatusV1::Failed))
+        .map(|(key, _)| key).collect::<Vec<_>>());
+    SWAP_RECEIPTS.with(|m| { let mut m = m.borrow_mut(); for key in remove_swap_keys { m.remove(&key); } });
+    let remove_ingress_keys = INGRESS_RECEIPTS.with(|m| m.borrow().iter()
+        .filter(|(_, r)| r.owner == owner && matches!(r.status,
+            crate::receipts::IngressStatusV1::Completed |
+            crate::receipts::IngressStatusV1::Failed))
+        .map(|(key, _)| key).collect::<Vec<_>>());
+    INGRESS_RECEIPTS.with(|m| { let mut m = m.borrow_mut(); for key in remove_ingress_keys { m.remove(&key); } });
+    true
+}
+
+pub(crate) fn intent_sequence_floor(owner: Principal) -> u64 {
+    INTENT_HIGH_WATER.with(|m| m.borrow().get(&StorablePrincipal(owner)).map(|n| n.0 as u64).unwrap_or(0))
+}
+
+pub(crate) fn intent_owner_capacity_available(owner: Principal) -> bool {
+    INTENT_HIGH_WATER.with(|m| {
+        let map = m.borrow();
+        map.contains_key(&StorablePrincipal(owner)) || map.len() < MAX_INTENT_OWNERS
+    })
 }
 
 // ─── Test helpers ────────────────────────────────────────────────────────────

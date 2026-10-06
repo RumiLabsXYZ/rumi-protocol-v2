@@ -12,7 +12,11 @@ pub mod swap;
 pub mod liquidity;
 pub mod transfers;
 pub mod receipts;
-use receipts::{SwapReceiptErrorV1, SwapReceiptStatusV1, SwapReceiptV1, SwapRequestV1};
+use receipts::{
+    AddLiquidityFactsV1, IngressReceiptErrorV1, IngressReceiptV1, IngressRequestV1,
+    IngressStatusV1,
+    SwapReceiptErrorV1, SwapReceiptStatusV1, SwapReceiptV1, SwapRequestV1,
+};
 pub mod admin;
 pub mod pool_guard;
 pub mod icrc21;
@@ -29,7 +33,7 @@ use crate::swap::calc_swap_output;
 use crate::liquidity::{
     calc_add_liquidity, calc_remove_liquidity, calc_remove_one_coin, preflight_lp_burn,
 };
-use crate::transfers::{transfer_from_user, transfer_to_user};
+use crate::transfers::transfer_from_user;
 use crate::logs::INFO;
 
 // ─── Init / Upgrade ───
@@ -337,12 +341,12 @@ fn pending_claim_limit() -> u64 {
 /// Reserve claim capacity before any await that could move user value. The
 /// canister-wide PoolGuard serializes 3pool's value-moving paths, while this
 /// reservation makes the capacity guarantee explicit across ledger awaits.
-struct PendingClaimSlots {
+pub(crate) struct PendingClaimSlots {
     remaining: u64,
 }
 
 impl PendingClaimSlots {
-    fn reserve(slots: u64) -> Result<Self, ThreePoolError> {
+    pub(crate) fn reserve(slots: u64) -> Result<Self, ThreePoolError> {
         let used = storage::pending_claims::len();
         let limit = pending_claim_limit();
         let accepted = RESERVED_PENDING_CLAIM_SLOTS.with(|reserved| {
@@ -369,6 +373,52 @@ impl PendingClaimSlots {
             reserved.set(reserved.get() - 1);
         });
     }
+
+    fn restore_one(&mut self) {
+        self.remaining += 1;
+        RESERVED_PENDING_CLAIM_SLOTS.with(|reserved| reserved.set(reserved.get() + 1));
+    }
+}
+
+fn remove_pending_claim(slots: &mut PendingClaimSlots, id: u64) {
+    if storage::pending_claims::remove(id).is_some() {
+        storage::pending_claims::remove_payout(id);
+        slots.restore_one();
+    }
+}
+
+async fn dispatch_ingress_pulls(
+    receipt: &mut IngressReceiptV1,
+) -> Result<(), String> {
+    for index in 0..receipt.pulls.len() {
+        if receipt.pulls[index].status == receipts::SwapTransferStatusV1::Confirmed {
+            continue;
+        }
+        receipt.status = receipts::IngressStatusV1::Pulling;
+        receipt.pulls[index].status = receipts::SwapTransferStatusV1::Submitted;
+        receipts::save_ingress(receipt);
+        match receipts::execute(&receipt.pulls[index], true).await {
+            Ok(block) => {
+                receipt.pulls[index].block_index = Some(block);
+                receipt.pulls[index].status = receipts::SwapTransferStatusV1::Confirmed;
+                receipt.error = None;
+                receipts::save_ingress(receipt);
+            }
+            Err((ambiguous, reason)) => {
+                receipt.pulls[index].status = if ambiguous {
+                    receipts::SwapTransferStatusV1::Unresolved
+                } else {
+                    receipts::SwapTransferStatusV1::Rejected
+                };
+                receipt.status = receipts::IngressStatusV1::Unresolved;
+                receipt.error = Some(reason.chars().take(512).collect());
+                receipts::save_ingress(receipt);
+                receipts::set_fence(true);
+                return Err(receipt.error.clone().unwrap_or_default());
+            }
+        }
+    }
+    Ok(())
 }
 
 impl Drop for PendingClaimSlots {
@@ -404,7 +454,57 @@ fn record_pending_claim(
         reason: reason.to_string(),
         created_at: ic_cdk::api::time() / 1_000_000_000,
     });
+    storage::pending_claims::set_payout_state(id, transfers::PendingPayoutState::FreshNoDispatch);
     id
+}
+
+/// Persist a payout obligation and its exact ledger identity before the first
+/// `icrc1_transfer` dispatch. Any ambiguous reject leaves this claim in place;
+/// claim_pending can only resend the identical tuple.
+pub(crate) async fn pay_or_hold_claim(
+    slots: &mut PendingClaimSlots,
+    claimant: Principal,
+    token_index: u8,
+    ledger: Principal,
+    symbol: &str,
+    amount: u128,
+    reason: &str,
+) -> Result<(), (u64, transfers::PayoutFailure)> {
+    slots.consume_one();
+    let id = storage::pending_claims::next_id();
+    storage::pending_claims::insert(crate::types::ThreePoolPendingClaim {
+        id,
+        claimant,
+        token_index,
+        ledger,
+        symbol: symbol.to_string(),
+        amount,
+        reason: reason.to_string(),
+        created_at: ic_cdk::api::time() / 1_000_000_000,
+    });
+    storage::pending_claims::set_payout_state(id, transfers::PendingPayoutState::FreshNoDispatch);
+
+    // The durable obligation exists before even the fee lookup await, because
+    // callers may already have burned LP or accepted input tokens.
+    let fee = transfers::ledger_fee_for_amount(ledger, amount).await;
+    let attempt = transfers::new_payout_attempt(id, fee, 0);
+    storage::pending_claims::set_payout_state(id, transfers::PendingPayoutState::Submitted(attempt.clone()));
+
+    match transfers::execute_claim_payout(ledger, claimant, amount, &attempt, false).await {
+        Ok(()) => {
+            storage::pending_claims::remove(id);
+            storage::pending_claims::remove_payout(id);
+            Ok(())
+        }
+        Err(failure) => {
+            let state = match &failure {
+                transfers::PayoutFailure::ProvenNoEffect(_) => transfers::PendingPayoutState::ProvenNoEffect(attempt),
+                transfers::PayoutFailure::Ambiguous(_) => transfers::PendingPayoutState::Ambiguous(attempt),
+            };
+            storage::pending_claims::set_payout_state(id, state);
+            Err((id, failure))
+        }
+    }
 }
 
 /// Recover tokens the pool owes after a failed payout/refund. The original
@@ -413,48 +513,112 @@ fn record_pending_claim(
 /// inserted if the transfer fails. Audit 2026-06-05 (3P-01/02/03).
 #[update]
 pub async fn claim_pending(claim_id: u64) -> Result<(), ThreePoolError> {
+    if receipts::fenced() { return Err(ThreePoolError::PoolLocked); }
     let _pool_guard = pool_guard::PoolGuard::new()?;
     let caller = ic_cdk::api::caller();
 
-    // Remove first (atomic) to prevent double-claim across the await.
-    let claim = storage::pending_claims::remove(claim_id)
+    // Keep the durable row present across the await. The pool guard prevents a
+    // concurrent claimant, and the stable payout tuple makes reply-loss retries
+    // idempotent. Legacy rows have no exact first-dispatch identity and must be
+    // held for receipt-backed reconciliation rather than blindly resent.
+    let claim = storage::pending_claims::get(claim_id)
         .ok_or(ThreePoolError::ClaimNotFound)?;
 
     let admin = read_state(|s| s.config.admin);
     if caller != claim.claimant && caller != admin {
-        // Not authorized — re-insert before returning so the claim is not lost.
-        storage::pending_claims::insert(claim);
         return Err(ThreePoolError::Unauthorized);
     }
 
-    // Keep fee-sized claims until the ledger fee drops below the amount.
-    // ledger_fee_for_amount refreshes stale-high cache data before this check.
-    let fee = crate::transfers::ledger_fee_for_amount(claim.ledger, claim.amount).await;
-    if claim.amount <= fee {
-        let err = ThreePoolError::TransferFailed {
-            token: claim.symbol.clone(),
-            reason: format!(
-                "claim amount {} does not exceed the ledger fee {}; nothing would be received",
-                claim.amount, fee
-            ),
-        };
-        storage::pending_claims::insert(claim);
-        return Err(err);
-    }
+    let (attempt, prior_ambiguous) = match storage::pending_claims::payout_state(claim_id) {
+        Some(transfers::PendingPayoutState::Submitted(attempt))
+        | Some(transfers::PendingPayoutState::Ambiguous(attempt)) => (attempt, true),
+        Some(transfers::PendingPayoutState::ProvenNoEffect(previous)) => {
+            let next = previous.attempt_no.checked_add(1).ok_or(ThreePoolError::MathOverflow)?;
+            let fee = transfers::ledger_fee_for_amount(claim.ledger, claim.amount).await;
+            (transfers::new_payout_attempt(claim_id, fee, next), false)
+        }
+        Some(transfers::PendingPayoutState::FreshNoDispatch) => {
+            let fee = transfers::ledger_fee_for_amount(claim.ledger, claim.amount).await;
+            (transfers::new_payout_attempt(claim_id, fee, 0), false)
+        }
+        None => return Err(ThreePoolError::TransferFailed {
+            token: claim.symbol,
+            reason: "legacy claim has no persisted transfer identity; held for receipt-backed reconciliation".to_string(),
+        }),
+    };
 
-    match transfer_to_user(claim.ledger, claim.claimant, claim.amount).await {
+    storage::pending_claims::set_payout_state(claim_id, transfers::PendingPayoutState::Submitted(attempt.clone()));
+    match transfers::execute_claim_payout(claim.ledger, claim.claimant, claim.amount, &attempt, prior_ambiguous).await {
         Ok(()) => {
+            storage::pending_claims::remove(claim_id);
+            storage::pending_claims::remove_payout(claim_id);
             log!(INFO, "Pending claim #{} resolved: {} received {} of {}",
                 claim_id, claim.claimant, claim.amount, claim.symbol);
             Ok(())
         }
         Err(reason) => {
-            // Transfer failed — re-insert so the user can retry.
-            let symbol = claim.symbol.clone();
-            storage::pending_claims::insert(claim);
-            Err(ThreePoolError::TransferFailed { token: symbol, reason })
+            // Keep both obligation and exact transfer tuple on every failure.
+            let next = match (&reason, prior_ambiguous) {
+                (transfers::PayoutFailure::ProvenNoEffect(_), false) => transfers::PendingPayoutState::ProvenNoEffect(attempt),
+                _ => transfers::PendingPayoutState::Ambiguous(attempt),
+            };
+            storage::pending_claims::set_payout_state(claim_id, next);
+            Err(ThreePoolError::TransferFailed { token: claim.symbol, reason: match reason {
+                transfers::PayoutFailure::ProvenNoEffect(reason)
+                | transfers::PayoutFailure::Ambiguous(reason) => reason,
+            } })
         }
     }
+}
+
+#[derive(candid::CandidType, Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub enum ClaimProofErrorV1 { NotFound, Unauthorized, LegacyIdentityUnavailable, ProofUnavailable, ProofMismatch }
+
+/// Attach a caller-supplied candidate ledger block to an ambiguous pending
+/// payout. The canister fetches the block from the claim's configured ledger
+/// (including its advertised archive callback) and checks every persisted
+/// transfer field before retiring the obligation. The index alone proves
+/// nothing; ledgers without ICRC-3 remain held.
+#[update]
+pub async fn reconcile_pending_claim_v1(claim_id: u64, block_index: candid::Nat) -> Result<(), ClaimProofErrorV1> {
+    let _pool_guard = pool_guard::PoolGuard::new().map_err(|_| ClaimProofErrorV1::ProofUnavailable)?;
+    let claim = storage::pending_claims::get(claim_id).ok_or(ClaimProofErrorV1::NotFound)?;
+    let caller = ic_cdk::caller();
+    let admin = read_state(|s| s.config.admin);
+    if caller != claim.claimant && caller != admin { return Err(ClaimProofErrorV1::Unauthorized); }
+    let attempt = match storage::pending_claims::payout_state(claim_id) {
+        Some(transfers::PendingPayoutState::Submitted(attempt))
+        | Some(transfers::PendingPayoutState::ProvenNoEffect(attempt))
+        | Some(transfers::PendingPayoutState::Ambiguous(attempt)) => attempt,
+        _ => return Err(ClaimProofErrorV1::LegacyIdentityUnavailable),
+    };
+    let transfer = receipts::SwapTransferV1 {
+        ledger: claim.ledger,
+        from: icrc_ledger_types::icrc1::account::Account { owner: ic_cdk::id(), subaccount: None },
+        to: icrc_ledger_types::icrc1::account::Account { owner: claim.claimant, subaccount: None },
+        amount: claim.amount,
+        fee: attempt.fee,
+        created_at_time: attempt.created_at_time,
+        memo: attempt.memo,
+        block_index: None,
+        status: receipts::SwapTransferStatusV1::Unresolved,
+    };
+    let matches = receipts::matches_ledger_block(claim.ledger, &block_index, &transfer, false).await
+        .map_err(|_| ClaimProofErrorV1::ProofUnavailable)?;
+    if !matches { return Err(ClaimProofErrorV1::ProofMismatch); }
+    storage::pending_claims::remove(claim_id);
+    storage::pending_claims::remove_payout(claim_id);
+    Ok(())
+}
+
+/// Return the next acceptable per-caller receipt sequence. If the browser's
+/// local state is lost it can resynchronize here; a stale query can only make
+/// a subsequent request fail before any value moves.
+#[query]
+pub fn get_next_intent_sequence_v1() -> Option<u64> {
+    let caller = ic_cdk::caller();
+    if caller == Principal::anonymous() || !storage::intent_owner_capacity_available(caller) { return None; }
+    storage::intent_sequence_floor(caller).checked_add(1)
 }
 
 /// View outstanding pending claims (bounded page; `limit` capped at 1000).
@@ -473,7 +637,11 @@ pub fn get_pending_claim_count() -> u64 {
 
 #[update]
 pub async fn swap(i: u8, j: u8, dx: u128, min_dy: u128) -> Result<u128, ThreePoolError> {
-    swap_inner(i, j, dx, min_dy, None).await
+    let _ = (i, j, dx, min_dy);
+    Err(ThreePoolError::TransferFailed {
+        token: "swap".to_string(),
+        reason: "use swap_with_receipt_v1 with a stable 32-byte caller intent id".to_string(),
+    })
 }
 
 #[query]
@@ -501,11 +669,23 @@ pub fn is_swap_receipt_client_v1(client: Principal) -> bool {
 pub async fn swap_with_receipt_v1(
     request: SwapRequestV1,
 ) -> Result<SwapReceiptV1, SwapReceiptErrorV1> {
-    if !receipts::client_enabled(ic_cdk::api::caller()) {
-        return Err(SwapReceiptErrorV1::Unauthorized);
+    // Receipt ingress remains dark in production until complete bounded
+    // ICRC-3/archive absence recovery can safely retire an aged ambiguous leg.
+    // The test-only build exercises the full route against source-matched PIC.
+    if !cfg!(feature = "test_endpoints") {
+        return Err(SwapReceiptErrorV1::PoolLocked);
+    }
+    if receipts::fenced() && receipts::get(ic_cdk::caller(), &request.intent_id).is_none() {
+        return Err(SwapReceiptErrorV1::PoolLocked);
+    }
+    if receipts::get_ingress(ic_cdk::caller(), &request.intent_id)
+        .map(|r| r.status != IngressStatusV1::Completed)
+        .unwrap_or(false)
+    {
+        return Err(SwapReceiptErrorV1::PoolLocked);
     }
     let (mut receipt, fresh) = receipts::reserve(ic_cdk::api::caller(), request.clone())?;
-    if !fresh {
+    if !fresh && (receipt.status == SwapReceiptStatusV1::Completed || receipt.status == SwapReceiptStatusV1::Refunded || receipt.status == SwapReceiptStatusV1::Failed) {
         return Ok(receipt);
     }
     if let Err(error) = swap_inner(
@@ -521,6 +701,39 @@ pub async fn swap_with_receipt_v1(
             receipts::fail(&mut receipt, format!("{error:?}"), false);
         }
     }
+    Ok(receipt)
+}
+
+/// Attach exact positive ICRC-3 evidence to one unresolved receipt transfer.
+/// The owner supplies only a candidate index; the configured ledger/archive
+/// response is fetched in replicated execution and compared with the saved
+/// tuple. A match advances that leg to Confirmed so the same intent can resume.
+#[update]
+pub async fn reconcile_swap_leg_v1(
+    intent_id: Vec<u8>,
+    leg: u8,
+    block_index: candid::Nat,
+) -> Result<SwapReceiptV1, SwapReceiptErrorV1> {
+    let _pool_guard = pool_guard::PoolGuard::new().map_err(|_| SwapReceiptErrorV1::PoolLocked)?;
+    let caller = ic_cdk::caller();
+    let mut receipt = receipts::get(caller, &intent_id).ok_or(SwapReceiptErrorV1::InvalidIntentId)?;
+    if leg > 2 { return Err(SwapReceiptErrorV1::InvalidRequest); }
+    let slot = match leg { 0 => &mut receipt.input, 1 => &mut receipt.output, _ => &mut receipt.refund };
+    let transfer = slot.as_mut().ok_or(SwapReceiptErrorV1::ProofMismatch)?;
+    if transfer.status == receipts::SwapTransferStatusV1::Confirmed {
+        return if transfer.block_index.as_ref() == Some(&block_index) { Ok(receipt) } else { Err(SwapReceiptErrorV1::ProofMismatch) };
+    }
+    if !matches!(transfer.status, receipts::SwapTransferStatusV1::Submitted | receipts::SwapTransferStatusV1::Unresolved) {
+        return Err(SwapReceiptErrorV1::ProofMismatch);
+    }
+    receipts::set_fence(true);
+    let pull = leg == 0;
+    let matches = receipts::matches_ledger_block(transfer.ledger, &block_index, transfer, pull).await
+        .map_err(|_| SwapReceiptErrorV1::ProofUnavailable)?;
+    if !matches { return Err(SwapReceiptErrorV1::ProofMismatch); }
+    transfer.status = receipts::SwapTransferStatusV1::Confirmed;
+    transfer.block_index = Some(block_index);
+    receipts::save(&receipt);
     Ok(receipt)
 }
 
@@ -605,12 +818,15 @@ async fn swap_inner(
     // Any post-pull failure path can require one durable refund claim. Hold
     // this slot across both ledger calls so a claim can never be rejected
     // after the input was accepted.
-    let mut claim_slots = PendingClaimSlots::reserve(1)?;
+    // Output dispatch can become one durable claim; only a typed no-effect
+    // rejection permits the second, input-refund obligation to be attempted.
+    let mut claim_slots = PendingClaimSlots::reserve(2)?;
 
     // 7. Transfer input token from user to pool
     let caller = ic_cdk::api::caller();
     let token_i_symbol = read_state(|s| s.config.tokens[i_idx].symbol.clone());
 
+    let mut ambiguous_output_failure: Option<String> = None;
     if let Some(r) = receipt.as_deref_mut() {
         let input_fee = crate::transfers::ledger_fee_for_amount(token_i_ledger, dx).await;
         let output_fee = crate::transfers::ledger_fee_for_amount(token_j_ledger, output).await;
@@ -704,24 +920,34 @@ async fn swap_inner(
         // with no accounting and no recourse for the user. Refund the input; if the
         // refund itself fails, record a pending claim so the user can recover it via
         // `claim_pending`. Audit 2026-06-05 (3P-01): mirrors rumi_amm's swap path.
-        if let Err(reason) = transfer_to_user(token_j_ledger, caller, output).await {
-            if let Err(refund_err) = transfer_to_user(token_i_ledger, caller, dx).await {
-                record_pending_claim(
-                    &mut claim_slots,
-                    caller,
-                    i,
-                    token_i_ledger,
-                    &token_i_symbol,
-                    dx,
-                    &format!(
-                        "swap output transfer failed ({reason}), then input refund failed ({refund_err})"
-                    ),
-                );
+        match pay_or_hold_claim(
+            &mut claim_slots, caller, j, token_j_ledger, &token_j_symbol, output,
+            "swap output payout",
+        ).await {
+            Ok(()) => {}
+            Err((claim_id, transfers::PayoutFailure::ProvenNoEffect(reason))) => {
+                remove_pending_claim(&mut claim_slots, claim_id);
+                if let Err((_, failure)) = pay_or_hold_claim(
+                    &mut claim_slots, caller, i, token_i_ledger, &token_i_symbol, dx,
+                    &format!("swap input refund after proven output rejection: {reason}"),
+                ).await {
+                    let refund_reason = match failure {
+                        transfers::PayoutFailure::ProvenNoEffect(reason)
+                        | transfers::PayoutFailure::Ambiguous(reason) => reason,
+                    };
+                    return Err(ThreePoolError::TransferFailed {
+                        token: token_i_symbol,
+                        reason: format!("output rejected: {reason}; refund held: {refund_reason}"),
+                    });
+                }
+                return Err(ThreePoolError::TransferFailed { token: token_j_symbol, reason });
             }
-            return Err(ThreePoolError::TransferFailed {
-                token: token_j_symbol,
-                reason,
-            });
+            Err((_, transfers::PayoutFailure::Ambiguous(reason))) => {
+                // We cannot safely issue a refund because the output may already
+                // have committed. Keep the exact output claim and account the
+                // swap conservatively as if the transfer completed.
+                ambiguous_output_failure = Some(reason);
+            }
         }
     }
 
@@ -773,6 +999,10 @@ async fn swap_inner(
         receipts::set_fence(false);
     }
 
+    if let Some(reason) = ambiguous_output_failure {
+        return Err(ThreePoolError::TransferFailed { token: token_j_symbol, reason });
+    }
+
     log!(
         INFO,
         "Swap: {} of token {} -> {} of token {} (fee: {}, admin_fee: {})",
@@ -791,6 +1021,150 @@ async fn swap_inner(
 
 #[update]
 pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, ThreePoolError> {
+    let _ = (amounts, min_lp);
+    Err(ThreePoolError::TransferFailed {
+        token: "liquidity".to_string(),
+        reason: "use add_liquidity_with_receipt_v1 with a stable 32-byte intent id".to_string(),
+    })
+}
+
+#[update]
+pub async fn add_liquidity_with_receipt_v1(
+    intent_id: Vec<u8>,
+    amounts: Vec<u128>,
+    min_lp: u128,
+) -> Result<IngressReceiptV1, IngressReceiptErrorV1> {
+    if !cfg!(feature = "test_endpoints") {
+        return Err(IngressReceiptErrorV1::PoolLocked);
+    }
+    if amounts.len() != 3 { return Err(IngressReceiptErrorV1::InvalidRequest); }
+    let amounts = [amounts[0], amounts[1], amounts[2]];
+    let caller = ic_cdk::caller();
+    let request = IngressRequestV1::AddLiquidity { amounts, min_lp };
+    let existing = receipts::get_ingress(caller, &intent_id);
+    if receipts::fenced() && existing.is_none() { return Err(IngressReceiptErrorV1::PoolLocked); }
+    let _pool_guard = pool_guard::PoolGuard::new().map_err(|_| IngressReceiptErrorV1::PoolLocked)?;
+    if read_state(|s| s.is_paused) { return Err(IngressReceiptErrorV1::PoolLocked); }
+
+    let (mut receipt, fresh) = receipts::reserve_ingress(caller, intent_id, request)?;
+    if !fresh && receipt.status == IngressStatusV1::Completed { return Ok(receipt); }
+    if fresh {
+        receipts::set_fence(true);
+        let amp = get_current_a();
+        let precision_muls = get_precision_muls();
+        let (old_balances, supply, curve, tokens) = read_state(|s| (
+            s.balances, s.lp_total_supply, s.config.fee_curve.unwrap_or_default(), s.config.tokens.clone()
+        ));
+        let outcome = match calc_add_liquidity(&amounts, &old_balances, &precision_muls, supply, amp, &curve) {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                receipt.status = IngressStatusV1::Failed;
+                receipt.error = Some("deposit does not satisfy pool invariants".to_string());
+                receipts::save_ingress(&receipt);
+                receipts::set_fence(false);
+                return Err(IngressReceiptErrorV1::InvalidRequest);
+            }
+        };
+        if outcome.lp_minted < min_lp {
+            receipt.status = IngressStatusV1::Failed;
+            receipt.error = Some("minimum LP amount not met".to_string());
+            receipts::save_ingress(&receipt);
+            receipts::set_fence(false);
+            return Err(IngressReceiptErrorV1::InvalidRequest);
+        }
+        let mut pulls = Vec::new();
+        for k in 0..3 {
+            if amounts[k] > 0 {
+                let fee = transfers::ledger_fee_for_amount(tokens[k].ledger_id, amounts[k]).await;
+                pulls.push(receipts::ingress_transfer_intent(
+                    caller, &receipt.intent_id, k as u8, tokens[k].ledger_id, caller,
+                    ic_cdk::id(), amounts[k], fee,
+                ));
+            }
+        }
+        receipt.pulls = pulls;
+        receipt.add_facts = Some(AddLiquidityFactsV1 {
+            lp_minted: outcome.lp_minted,
+            fees_native: outcome.fees_native,
+            fee_bps_used: outcome.fee_bps_used,
+            imbalance_before: outcome.imbalance_before,
+            imbalance_after: outcome.imbalance_after,
+            is_rebalancing: outcome.is_rebalancing,
+        });
+        receipt.status = IngressStatusV1::Prepared;
+        receipts::save_ingress(&receipt);
+    }
+    receipts::set_fence(true);
+    if let Err(reason) = dispatch_ingress_pulls(&mut receipt).await {
+        receipt.status = IngressStatusV1::Unresolved;
+        receipt.error = Some(reason);
+        receipts::save_ingress(&receipt);
+        return Ok(receipt);
+    }
+
+    let facts = receipt.add_facts.clone().ok_or(IngressReceiptErrorV1::InvalidRequest)?;
+    let amp = get_current_a();
+    let precision_muls = get_precision_muls();
+    mutate_state(|s| {
+        for k in 0..3 { s.balances[k] += amounts[k]; }
+        let current = storage::lp_balance_get(&caller);
+        storage::lp_balance_set(caller, current + facts.lp_minted);
+        s.lp_total_supply += facts.lp_minted;
+        s.is_initialized = true;
+        s.log_block(Icrc3Transaction::Mint { to: caller, amount: facts.lp_minted, to_subaccount: None });
+        let vp = virtual_price(&s.balances, &precision_muls, amp, s.lp_total_supply).unwrap_or(0);
+        let id = storage::liq_v2::len();
+        storage::liq_v2::push(LiquidityEventV2 {
+            id, timestamp: ic_cdk::api::time(), caller,
+            action: LiquidityAction::AddLiquidity, amounts,
+            lp_amount: facts.lp_minted, coin_index: None, fee: None,
+            fee_bps: Some(facts.fee_bps_used),
+            imbalance_before: facts.imbalance_before, imbalance_after: facts.imbalance_after,
+            is_rebalancing: facts.is_rebalancing, pool_balances_after: s.balances,
+            virtual_price_after: vp, migrated: false,
+        });
+    });
+    receipt.status = IngressStatusV1::Completed;
+    receipt.result_lp = Some(facts.lp_minted);
+    receipt.error = None;
+    receipts::save_ingress(&receipt);
+    receipts::set_fence(false);
+    Ok(receipt)
+}
+
+#[query]
+pub fn get_ingress_receipt_v1(intent_id: Vec<u8>) -> Option<IngressReceiptV1> {
+    receipts::get_ingress(ic_cdk::caller(), &intent_id)
+}
+
+#[update]
+pub async fn reconcile_ingress_pull_v1(
+    intent_id: Vec<u8>,
+    pull_index: u8,
+    block_index: candid::Nat,
+) -> Result<IngressReceiptV1, IngressReceiptErrorV1> {
+    let _pool_guard = pool_guard::PoolGuard::new().map_err(|_| IngressReceiptErrorV1::PoolLocked)?;
+    let caller = ic_cdk::caller();
+    let mut receipt = receipts::get_ingress(caller, &intent_id).ok_or(IngressReceiptErrorV1::InvalidIntentId)?;
+    let transfer = receipt.pulls.get_mut(pull_index as usize).ok_or(IngressReceiptErrorV1::InvalidRequest)?;
+    if transfer.status == receipts::SwapTransferStatusV1::Confirmed {
+        return if transfer.block_index.as_ref() == Some(&block_index) { Ok(receipt) } else { Err(IngressReceiptErrorV1::ProofMismatch) };
+    }
+    if !matches!(transfer.status, receipts::SwapTransferStatusV1::Submitted | receipts::SwapTransferStatusV1::Unresolved) {
+        return Err(IngressReceiptErrorV1::ProofMismatch);
+    }
+    receipts::set_fence(true);
+    let matches = receipts::matches_ledger_block(transfer.ledger, &block_index, transfer, true).await
+        .map_err(|_| IngressReceiptErrorV1::ProofUnavailable)?;
+    if !matches { return Err(IngressReceiptErrorV1::ProofMismatch); }
+    transfer.status = receipts::SwapTransferStatusV1::Confirmed;
+    transfer.block_index = Some(block_index);
+    receipts::save_ingress(&receipt);
+    Ok(receipt)
+}
+
+#[allow(dead_code)]
+async fn add_liquidity_legacy_unreachable(amounts: Vec<u128>, min_lp: u128) -> Result<u128, ThreePoolError> {
     // 1. Check not paused
     if read_state(|s| s.is_paused) {
         return Err(ThreePoolError::PoolPaused);
@@ -847,9 +1221,9 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
             (s.config.tokens[2].ledger_id, s.config.tokens[2].symbol.clone()),
         ]
     });
-    // At most one already-pulled leg can need a claim when a later input
-    // transfer fails. Reserve before the first transfer_from await.
-    let mut claim_slots = PendingClaimSlots::reserve(1)?;
+    // Up to two earlier input legs can need refund claims if a later pull
+    // fails. Reserve before the first transfer_from await.
+    let mut claim_slots = PendingClaimSlots::reserve(2)?;
     for k in 0..3 {
         if amounts_arr[k] > 0 {
             let (ledger, symbol) = &token_meta[k];
@@ -858,21 +1232,20 @@ pub async fn add_liquidity(amounts: Vec<u128>, min_lp: u128) -> Result<u128, Thr
                 for r in 0..k {
                     if amounts_arr[r] > 0 {
                         let (r_ledger, r_symbol) = &token_meta[r];
-                        if let Err(refund_err) =
-                            transfer_to_user(*r_ledger, caller, amounts_arr[r]).await
-                        {
-                            record_pending_claim(
+                        if let Err((_, refund_failure)) = pay_or_hold_claim(
                                 &mut claim_slots,
                                 caller,
                                 r as u8,
                                 *r_ledger,
                                 r_symbol,
                                 amounts_arr[r],
-                                &format!(
-                                    "add_liquidity aborted after token {k} pull failed; \
-                                     refund of token {r} also failed ({refund_err})"
-                                ),
-                            );
+                                &format!("add_liquidity refund of token {r} after token {k} pull failure"),
+                            ).await {
+                            let refund_err = match refund_failure {
+                                transfers::PayoutFailure::ProvenNoEffect(reason)
+                                | transfers::PayoutFailure::Ambiguous(reason) => reason,
+                            };
+                            log!(INFO, "Refund for token {r} held as pending claim: {refund_err}");
                         }
                     }
                 }
@@ -939,6 +1312,7 @@ pub async fn remove_liquidity(
     lp_burn: u128,
     min_amounts: Vec<u128>,
 ) -> Result<Vec<u128>, ThreePoolError> {
+    if receipts::fenced() { return Err(ThreePoolError::PoolLocked); }
     // 1. Validate min_amounts length
     if min_amounts.len() != 3 {
         return Err(ThreePoolError::InvalidCoinIndex);
@@ -1049,16 +1423,19 @@ pub async fn remove_liquidity(
     for k in 0..3 {
         if amounts[k] > 0 {
             let (ledger, symbol) = &token_meta[k];
-            if let Err(reason) = transfer_to_user(*ledger, caller, amounts[k]).await {
-                record_pending_claim(
+            if let Err((_, reason)) = pay_or_hold_claim(
                     &mut claim_slots,
                     caller,
                     k as u8,
                     *ledger,
                     symbol,
                     amounts[k],
-                    &format!("remove_liquidity payout of token {k} failed ({reason})"),
-                );
+                    &format!("remove_liquidity payout of token {k}"),
+                ).await {
+                let reason = match reason {
+                    transfers::PayoutFailure::ProvenNoEffect(reason)
+                    | transfers::PayoutFailure::Ambiguous(reason) => reason,
+                };
                 if first_failure.is_none() {
                     first_failure = Some((symbol.clone(), reason));
                 }
@@ -1112,6 +1489,7 @@ pub async fn remove_one_coin(
     coin_index: u8,
     min_amount: u128,
 ) -> Result<u128, ThreePoolError> {
+    if receipts::fenced() { return Err(ThreePoolError::PoolLocked); }
     let idx = coin_index as usize;
     if idx >= 3 {
         return Err(ThreePoolError::InvalidCoinIndex);
@@ -1215,16 +1593,19 @@ pub async fn remove_one_coin(
         (s.config.tokens[idx].ledger_id, s.config.tokens[idx].symbol.clone())
     });
 
-    if let Err(reason) = transfer_to_user(ledger, caller, amount).await {
-        record_pending_claim(
+    if let Err((_, reason)) = pay_or_hold_claim(
             &mut claim_slots,
             caller,
             coin_index,
             ledger,
             &symbol,
             amount,
-            &format!("remove_one_coin payout of token {idx} failed ({reason})"),
-        );
+            &format!("remove_one_coin payout of token {idx}"),
+        ).await {
+        let reason = match reason {
+            transfers::PayoutFailure::ProvenNoEffect(reason)
+            | transfers::PayoutFailure::Ambiguous(reason) => reason,
+        };
         return Err(ThreePoolError::TransferFailed { token: symbol, reason });
     }
 
@@ -1268,6 +1649,81 @@ pub async fn remove_one_coin(
 /// Permissionless: anyone (admin, treasury, or user) can donate.
 #[update]
 pub async fn donate(token_index: u8, amount: u128) -> Result<(), ThreePoolError> {
+    let _ = (token_index, amount);
+    Err(ThreePoolError::TransferFailed {
+        token: "donation".to_string(),
+        reason: "use donate_with_receipt_v1 with a stable 32-byte intent id".to_string(),
+    })
+}
+
+#[update]
+pub async fn donate_with_receipt_v1(
+    intent_id: Vec<u8>,
+    token_index: u8,
+    amount: u128,
+) -> Result<IngressReceiptV1, IngressReceiptErrorV1> {
+    if !cfg!(feature = "test_endpoints") {
+        return Err(IngressReceiptErrorV1::PoolLocked);
+    }
+    if token_index >= 3 || amount == 0 {
+        return Err(IngressReceiptErrorV1::InvalidRequest);
+    }
+    let caller = ic_cdk::caller();
+    let request = IngressRequestV1::Donate { token_index, amount };
+    let existing = receipts::get_ingress(caller, &intent_id);
+    if receipts::fenced() && existing.is_none() { return Err(IngressReceiptErrorV1::PoolLocked); }
+    let _pool_guard = pool_guard::PoolGuard::new().map_err(|_| IngressReceiptErrorV1::PoolLocked)?;
+    if read_state(|s| s.is_paused || s.lp_total_supply == 0) {
+        return Err(IngressReceiptErrorV1::InvalidRequest);
+    }
+    let (mut receipt, fresh) = receipts::reserve_ingress(caller, intent_id, request)?;
+    if !fresh && receipt.status == IngressStatusV1::Completed { return Ok(receipt); }
+    if fresh {
+        receipts::set_fence(true);
+        let ledger = read_state(|s| s.config.tokens[token_index as usize].ledger_id);
+        let fee = transfers::ledger_fee_for_amount(ledger, amount).await;
+        receipt.pulls = vec![receipts::ingress_transfer_intent(
+            caller, &receipt.intent_id, 0, ledger, caller, ic_cdk::id(), amount, fee,
+        )];
+        receipts::save_ingress(&receipt);
+    }
+    receipts::set_fence(true);
+    if let Err(reason) = dispatch_ingress_pulls(&mut receipt).await {
+        receipt.status = IngressStatusV1::Unresolved;
+        receipt.error = Some(reason);
+        receipts::save_ingress(&receipt);
+        return Ok(receipt);
+    }
+
+    let precision_muls = get_precision_muls();
+    let amp = get_current_a();
+    let imbalance_before = read_state(|s| crate::math::compute_imbalance(&s.balances, &precision_muls));
+    mutate_state(|s| {
+        s.balances[token_index as usize] += amount;
+        let lp_supply = s.lp_total_supply;
+        let vp_after = virtual_price(&s.balances, &precision_muls, amp, lp_supply).unwrap_or(0);
+        let balances_after = s.balances;
+        let imbalance_after = crate::math::compute_imbalance(&balances_after, &precision_muls);
+        let mut amounts = [0u128; 3];
+        amounts[token_index as usize] = amount;
+        let id = storage::liq_v2::len();
+        storage::liq_v2::push(LiquidityEventV2 {
+            id, timestamp: ic_cdk::api::time(), caller, action: LiquidityAction::Donate,
+            amounts, lp_amount: 0, coin_index: Some(token_index), fee: None, fee_bps: None,
+            imbalance_before, imbalance_after,
+            is_rebalancing: imbalance_after < imbalance_before,
+            pool_balances_after: balances_after, virtual_price_after: vp_after, migrated: false,
+        });
+    });
+    receipt.status = IngressStatusV1::Completed;
+    receipt.error = None;
+    receipts::save_ingress(&receipt);
+    receipts::set_fence(false);
+    Ok(receipt)
+}
+
+#[allow(dead_code)]
+async fn donate_legacy_unreachable(token_index: u8, amount: u128) -> Result<(), ThreePoolError> {
     if read_state(|s| s.is_paused) {
         return Err(ThreePoolError::PoolPaused);
     }
@@ -1351,6 +1807,7 @@ pub async fn donate(token_index: u8, amount: u128) -> Result<(), ThreePoolError>
 /// claimed amount before updating internal accounting.
 #[update]
 pub async fn receive_donation(token_index: u8, amount: u128) -> Result<(), ThreePoolError> {
+    if receipts::fenced() { return Err(ThreePoolError::PoolLocked); }
     let caller = ic_cdk::api::caller();
     let admin = read_state(|s| s.config.admin);
     if caller != admin && !ic_cdk::api::is_controller(&caller) {
@@ -1446,6 +1903,9 @@ pub async fn receive_donation_with_id(
         } else {
             Err(ThreePoolError::DonationIntentConflict)
         };
+    }
+    if receipts::fenced() {
+        return Err(ThreePoolError::PoolLocked);
     }
     if read_state(|s| s.is_paused) {
         return Err(ThreePoolError::PoolPaused);
@@ -2621,6 +3081,17 @@ pub fn get_authorized_burn_callers() -> Vec<Principal> {
 /// liquidations and peg management.
 #[update]
 pub async fn authorized_redeem_and_burn(
+    args: AuthorizedRedeemAndBurnArgs,
+) -> Result<RedeemAndBurnResult, ThreePoolError> {
+    let _ = args;
+    return Err(ThreePoolError::BurnFailed {
+        token: "ledger".to_string(),
+        reason: "legacy burn route is disabled pending receipt-backed v1 recovery".to_string(),
+    });
+}
+
+#[allow(dead_code)]
+async fn authorized_redeem_and_burn_legacy_unreachable(
     args: AuthorizedRedeemAndBurnArgs,
 ) -> Result<RedeemAndBurnResult, ThreePoolError> {
     let caller = ic_cdk::caller();

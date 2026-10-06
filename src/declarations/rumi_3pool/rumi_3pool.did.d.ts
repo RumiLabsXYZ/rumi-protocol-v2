@@ -6,6 +6,14 @@ export interface Account {
   'owner' : Principal,
   'subaccount' : [] | [Uint8Array | number[]],
 }
+export interface AddLiquidityFactsV1 {
+  'imbalance_after' : bigint,
+  'is_rebalancing' : boolean,
+  'fee_bps_used' : number,
+  'imbalance_before' : bigint,
+  'fees_native' : Array<bigint>,
+  'lp_minted' : bigint,
+}
 export interface Allowance {
   'allowance' : bigint,
   'expires_at' : [] | [bigint],
@@ -56,6 +64,13 @@ export interface BalancePoint {
   'balances' : Array<bigint>,
 }
 export interface BlockWithId { 'id' : bigint, 'block' : Icrc3Value }
+export type ClaimProofErrorV1 = { 'ProofUnavailable' : null } |
+  { 'NotFound' : null } |
+  { 'LegacyIdentityUnavailable' : null } |
+  { 'Unauthorized' : null } |
+  { 'ProofMismatch' : null };
+export type ClaimProofResultV1 = { 'Ok' : null } |
+  { 'Err' : ClaimProofErrorV1 };
 export interface ConsentInfo {
   'metadata' : ConsentMessageMetadata,
   'consent_message' : ConsentMessage,
@@ -163,6 +178,37 @@ export interface ImbalanceStats {
   'samples' : Array<[bigint, bigint]>,
   'current' : bigint,
 }
+export type IngressReceiptErrorV1 = { 'CapacityExceeded' : null } |
+  { 'IntentConflict' : null } |
+  { 'ProofUnavailable' : null } |
+  { 'PoolLocked' : null } |
+  { 'StaleIntentSequence' : null } |
+  { 'Unauthorized' : null } |
+  { 'ProofMismatch' : null } |
+  { 'InvalidRequest' : null } |
+  { 'InvalidIntentId' : null };
+export type IngressReceiptResultV1 = { 'Ok' : IngressReceiptV1 } |
+  { 'Err' : IngressReceiptErrorV1 };
+export interface IngressReceiptV1 {
+  'status' : IngressStatusV1,
+  'owner' : Principal,
+  'request' : IngressRequestV1,
+  'result_lp' : [] | [bigint],
+  'error' : [] | [string],
+  'add_facts' : [] | [AddLiquidityFactsV1],
+  'version' : number,
+  'pulls' : Array<SwapTransferV1>,
+  'intent_id' : Uint8Array | number[],
+}
+export type IngressRequestV1 = {
+    'AddLiquidity' : { 'min_lp' : bigint, 'amounts' : Array<bigint> }
+  } |
+  { 'Donate' : { 'token_index' : number, 'amount' : bigint } };
+export type IngressStatusV1 = { 'Failed' : null } |
+  { 'Pulling' : null } |
+  { 'Prepared' : null } |
+  { 'Unresolved' : null } |
+  { 'Completed' : null };
 export interface LineDisplayPage { 'lines' : Array<string> }
 export type LiquidityAction = { 'AddLiquidity' : null } |
   { 'Donate' : null } |
@@ -301,7 +347,11 @@ export type SwapReceiptClientResultV1 = { 'Ok' : null } |
   { 'Err' : SwapReceiptErrorV1 };
 export type SwapReceiptErrorV1 = { 'CapacityExceeded' : null } |
   { 'IntentConflict' : null } |
+  { 'ProofUnavailable' : null } |
+  { 'PoolLocked' : null } |
+  { 'StaleIntentSequence' : null } |
   { 'Unauthorized' : null } |
+  { 'ProofMismatch' : null } |
   { 'InvalidRequest' : null } |
   { 'InvalidIntentId' : null };
 export type SwapReceiptResultV1 = { 'Ok' : SwapReceiptV1 } |
@@ -482,6 +532,10 @@ export interface _SERVICE {
     { 'Ok' : bigint } |
       { 'Err' : ThreePoolError }
   >,
+  'add_liquidity_with_receipt_v1' : ActorMethod<
+    [Uint8Array | number[], Array<bigint>, bigint],
+    IngressReceiptResultV1
+  >,
   'authorized_redeem_and_burn' : ActorMethod<
     [AuthorizedRedeemAndBurnArgs],
     { 'Ok' : RedeemAndBurnResult } |
@@ -519,6 +573,10 @@ export interface _SERVICE {
     { 'Ok' : null } |
       { 'Err' : ThreePoolError }
   >,
+  'donate_with_receipt_v1' : ActorMethod<
+    [Uint8Array | number[], number, bigint],
+    IngressReceiptResultV1
+  >,
   'get_admin_event_count' : ActorMethod<[], bigint>,
   'get_admin_events' : ActorMethod<
     [bigint, bigint],
@@ -539,6 +597,10 @@ export interface _SERVICE {
     Array<ImbalanceSnapshot>
   >,
   'get_imbalance_stats' : ActorMethod<[StatsWindow], ImbalanceStats>,
+  'get_ingress_receipt_v1' : ActorMethod<
+    [Uint8Array | number[]],
+    [] | [IngressReceiptV1]
+  >,
   'get_liquidity_event_count' : ActorMethod<[], bigint>,
   'get_liquidity_event_count_v2' : ActorMethod<[], bigint>,
   'get_liquidity_events' : ActorMethod<[bigint, bigint], Array<LiquidityEvent>>,
@@ -556,6 +618,7 @@ export interface _SERVICE {
   >,
   'get_lp_balance' : ActorMethod<[Principal], bigint>,
   'get_lp_holders' : ActorMethod<[bigint, bigint], Array<[Principal, bigint]>>,
+  'get_next_intent_sequence_v1' : ActorMethod<[], [] | [bigint]>,
   'get_pending_claim_count' : ActorMethod<[], bigint>,
   'get_pending_claims' : ActorMethod<
     [bigint, bigint],
@@ -654,6 +717,18 @@ export interface _SERVICE {
     [bigint, number, bigint],
     { 'Ok' : null } |
       { 'Err' : ThreePoolError }
+  >,
+  'reconcile_ingress_pull_v1' : ActorMethod<
+    [Uint8Array | number[], number, bigint],
+    IngressReceiptResultV1
+  >,
+  'reconcile_pending_claim_v1' : ActorMethod<
+    [bigint, bigint],
+    ClaimProofResultV1
+  >,
+  'reconcile_swap_leg_v1' : ActorMethod<
+    [Uint8Array | number[], number, bigint],
+    SwapReceiptResultV1
   >,
   'remove_authorized_burn_caller' : ActorMethod<
     [Principal],

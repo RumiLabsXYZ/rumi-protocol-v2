@@ -111,12 +111,8 @@ fn enable(h: &ThreePoolHarness) {
     r.unwrap();
 }
 #[test]
-fn receipts_bind_ledger_economics_and_replay_survives_upgrade() {
+fn wallet_receipts_bind_ledger_economics_and_replay_survives_upgrade() {
     let h = deploy_pool_with_liquidity_fee_and_swaps(0, 10_000);
-    assert_eq!(
-        submit(&h, request()).unwrap_err(),
-        SwapReceiptErrorV1::Unauthorized
-    );
     assert!(query(&h, h.user).is_none());
     enable(&h);
     let before_in = balance(&h, h.ledgers[0], h.user);

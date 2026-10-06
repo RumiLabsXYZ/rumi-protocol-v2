@@ -507,9 +507,57 @@ type SwapReceiptResultV1 = variant { Ok : SwapReceiptV1; Err : SwapReceiptErrorV
 type SwapReceiptErrorV1 = variant {
   CapacityExceeded;
   IntentConflict;
+  ProofUnavailable;
+  PoolLocked;
+  StaleIntentSequence;
   Unauthorized;
+  ProofMismatch;
   InvalidRequest;
   InvalidIntentId;
+};
+type ClaimProofErrorV1 = variant {
+  ProofUnavailable;
+  NotFound;
+  LegacyIdentityUnavailable;
+  Unauthorized;
+  ProofMismatch;
+};
+type ClaimProofResultV1 = variant { Ok; Err : ClaimProofErrorV1 };
+type IngressReceiptErrorV1 = variant {
+  CapacityExceeded;
+  IntentConflict;
+  ProofUnavailable;
+  PoolLocked;
+  StaleIntentSequence;
+  Unauthorized;
+  ProofMismatch;
+  InvalidRequest;
+  InvalidIntentId;
+};
+type IngressReceiptResultV1 = variant { Ok : IngressReceiptV1; Err : IngressReceiptErrorV1 };
+type IngressStatusV1 = variant { Failed; Pulling; Prepared; Unresolved; Completed };
+type IngressRequestV1 = variant {
+  AddLiquidity : record { min_lp : nat; amounts : vec nat };
+  Donate : record { token_index : nat8; amount : nat };
+};
+type AddLiquidityFactsV1 = record {
+  imbalance_after : nat64;
+  is_rebalancing : bool;
+  fee_bps_used : nat16;
+  imbalance_before : nat64;
+  fees_native : vec nat;
+  lp_minted : nat;
+};
+type IngressReceiptV1 = record {
+  status : IngressStatusV1;
+  owner : principal;
+  request : IngressRequestV1;
+  result_lp : opt nat;
+  error : opt text;
+  add_facts : opt AddLiquidityFactsV1;
+  version : nat16;
+  pulls : vec SwapTransferV1;
+  intent_id : blob;
 };
 type SwapReceiptStatusV1 = variant {
   InputSubmitted;
@@ -560,8 +608,15 @@ type SwapTransferV1 = record {
 };
 
 service : (ThreePoolInitArgs) -> {
+  add_liquidity_with_receipt_v1 : (blob, vec nat, nat) -> (IngressReceiptResultV1);
+  donate_with_receipt_v1 : (blob, nat8, nat) -> (IngressReceiptResultV1);
+  get_ingress_receipt_v1 : (blob) -> (opt IngressReceiptV1) query;
+  get_next_intent_sequence_v1 : () -> (opt nat64) query;
   get_swap_receipt_v1 : (blob) -> (opt SwapReceiptV1) query;
   is_swap_receipt_client_v1 : (principal) -> (bool) query;
+  reconcile_ingress_pull_v1 : (blob, nat8, nat) -> (IngressReceiptResultV1);
+  reconcile_pending_claim_v1 : (nat64, nat) -> (ClaimProofResultV1);
+  reconcile_swap_leg_v1 : (blob, nat8, nat) -> (SwapReceiptResultV1);
   set_swap_receipt_client_v1 : (principal, bool) -> (SwapReceiptClientResultV1);
   swap_with_receipt_v1 : (SwapRequestV1) -> (SwapReceiptResultV1);
 

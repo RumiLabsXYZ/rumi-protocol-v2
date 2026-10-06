@@ -4,7 +4,6 @@ use candid::Principal;
 
 use crate::math::{get_a, IMB_SCALE};
 use crate::state::{mutate_state, read_state};
-use crate::transfers::transfer_to_user;
 use crate::types::{FeeCurveParams, ThreePoolError, ThreePoolAdminEvent, ThreePoolAdminAction};
 
 /// Hard cap on the dynamic fee curve max fee (10% in basis points).
@@ -116,6 +115,9 @@ pub fn stop_ramp_a(caller: Principal, now: u64) -> Result<(), ThreePoolError> {
 
 /// Withdraw accumulated admin fees, transferring them to the admin.
 pub async fn withdraw_admin_fees(caller: Principal) -> Result<[u128; 3], ThreePoolError> {
+    if crate::receipts::fenced() {
+        return Err(ThreePoolError::PoolLocked);
+    }
     // Serialize against concurrent withdrawals and against the swap/liquidity
     // paths that mutate `admin_fees`. Without this, two concurrent admin calls
     // both read the same non-zero `fees`, both zero it, and both transfer — a
@@ -130,7 +132,12 @@ pub async fn withdraw_admin_fees(caller: Principal) -> Result<[u128; 3], ThreePo
         return Err(ThreePoolError::Unauthorized);
     }
 
-    // Zero out fees first (deduct-before-transfer).
+    let slots_needed = fees.iter().filter(|fee| **fee > 0).count() as u64;
+    let mut claim_slots = crate::PendingClaimSlots::reserve(slots_needed)?;
+
+    // Zero out fees first (deduct-before-transfer). Every payout now has a
+    // durable claim/outbox before dispatch, so ambiguous replies remain owed
+    // without restoring an already-paid amount into admin_fees.
     mutate_state(|s| {
         s.admin_fees = [0; 3];
     });
@@ -142,16 +149,25 @@ pub async fn withdraw_admin_fees(caller: Principal) -> Result<[u128; 3], ThreePo
     let mut withdrawn = [0u128; 3];
     for k in 0..3 {
         if fees[k] > 0 {
-            match transfer_to_user(tokens[k].ledger_id, admin, fees[k]).await {
+            match crate::pay_or_hold_claim(
+                &mut claim_slots,
+                admin,
+                k as u8,
+                tokens[k].ledger_id,
+                &tokens[k].symbol,
+                fees[k],
+                "admin fee withdrawal",
+            ).await {
                 Ok(()) => {
                     withdrawn[k] = fees[k];
                 }
-                Err(reason) => {
-                    mutate_state(|s| {
-                        s.admin_fees[k] = s.admin_fees[k].saturating_add(fees[k]);
-                    });
+                Err((_, failure)) => {
+                    let reason = match failure {
+                        crate::transfers::PayoutFailure::ProvenNoEffect(reason)
+                        | crate::transfers::PayoutFailure::Ambiguous(reason) => reason,
+                    };
                     ic_cdk::println!(
-                        "[withdraw_admin_fees] token {} transfer failed: {}; fee restored",
+                        "[withdraw_admin_fees] token {} transfer held as pending claim: {}",
                         tokens[k].symbol, reason
                     );
                 }
