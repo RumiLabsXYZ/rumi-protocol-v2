@@ -7893,8 +7893,10 @@ async fn stability_pool_liquidate_with_reserves_inner(
         ));
     }
 
-    // All validation above may await. Recheck the durable borrow reservation
-    // immediately before pulling 3USD; there must be no await before transfer.
+    // The preflight checks avoid a pull for an already invalid request, but
+    // borrow may still finish while this transfer awaits. The post-pull
+    // liquidation helper takes the shared per-vault guard, snapshots current
+    // state, and rechecks health/value atomically before it commits accounting.
     }
 
     let transfer_block_index = if let Some(key) = ingress_key.as_ref() {
