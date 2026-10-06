@@ -481,3 +481,63 @@ fn resubmitting_after_clear_and_apply_is_a_dedup_noop_no_double_decrement() {
     assert_eq!(second.len(), 0, "deduped: nothing newly applied");
     assert_eq!(s.chain_vaults[&1].debt_e8s, 60, "no double-decrement");
 }
+
+#[test]
+fn anonymous_and_multiple_distinct_principals_never_enter_burn_proof_work() {
+    use super::burn_proof::{operator_may_submit_burn_proof, run_if_operator_admitted};
+    use crate::chains::config::BurnProofAdmissionMode;
+    use candid::Principal;
+    use std::cell::Cell;
+
+    let operator = Principal::from_slice(&[0x77]);
+    let callers = [
+        Principal::anonymous(),
+        Principal::from_slice(&[0x11]),
+        Principal::from_slice(&[0x22]),
+        Principal::from_slice(&[0x33]),
+    ];
+    let calls = Cell::new(0);
+    for caller in callers {
+        let admitted = operator_may_submit_burn_proof(
+            caller,
+            operator,
+            BurnProofAdmissionMode::OperatorOnly,
+        );
+        assert!(
+            run_if_operator_admitted(admitted, || calls.set(calls.get() + 1)).is_none(),
+            "caller {caller} must be rejected before lookup work"
+        );
+    }
+    assert_eq!(calls.get(), 0, "unauthorized callers trigger no receipt lookup");
+}
+
+#[test]
+fn only_non_anonymous_operator_reaches_work_and_public_mode_stays_closed() {
+    use super::burn_proof::{operator_may_submit_burn_proof, run_if_operator_admitted};
+    use crate::chains::config::BurnProofAdmissionMode;
+    use candid::Principal;
+    use std::cell::Cell;
+
+    let operator = Principal::from_slice(&[0x77]);
+    let calls = Cell::new(0);
+    assert!(!operator_may_submit_burn_proof(
+        operator,
+        operator,
+        BurnProofAdmissionMode::Public,
+    ));
+    assert!(run_if_operator_admitted(
+        operator_may_submit_burn_proof(
+            operator,
+            operator,
+            BurnProofAdmissionMode::OperatorOnly,
+        ),
+        || calls.set(calls.get() + 1),
+    )
+    .is_some());
+    assert_eq!(calls.get(), 1, "operator retains recovery access");
+    assert!(!operator_may_submit_burn_proof(
+        Principal::anonymous(),
+        Principal::anonymous(),
+        BurnProofAdmissionMode::OperatorOnly,
+    ));
+}

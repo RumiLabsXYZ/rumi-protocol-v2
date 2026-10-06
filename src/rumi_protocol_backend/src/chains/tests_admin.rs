@@ -86,6 +86,11 @@ fn delete_chain_purges_liquidation_config_no_silent_reattach_on_reregister() {
     let mut s = MultiChainState::default();
     let cfx = ChainId(1030);
     register_chain_in_state(&mut s, config_arg_cfx_mainnet(), 0).expect("register");
+    assert_eq!(
+        s.burn_proof_admission_mode(cfx),
+        super::config::BurnProofAdmissionMode::OperatorOnly,
+        "new chains must default to operator-only admission"
+    );
     s.chain_liquidation_configs.insert(cfx, m3_liq_config());
     assert!(
         crate::xrc::chain_is_xrc_managed(&wrap(&s), cfx),
@@ -99,6 +104,10 @@ fn delete_chain_purges_liquidation_config_no_silent_reattach_on_reregister() {
     );
 
     register_chain_in_state(&mut s, config_arg_cfx_mainnet(), 1).expect("re-register");
+    assert_eq!(
+        s.burn_proof_admission_mode(cfx),
+        super::config::BurnProofAdmissionMode::OperatorOnly
+    );
     assert!(
         !s.chain_liquidation_configs.contains_key(&cfx),
         "re-registering must not resurrect the deleted config row"
@@ -311,6 +320,8 @@ fn delete_chain_removes_zero_supply_chain() {
     // from the purge list; add it to this "populate every map" test so a
     // future regression here fails loudly instead of silently.
     s.chain_liquidation_configs.insert(c, m3_liq_config());
+    s.burn_proof_admission_mode_by_chain
+        .insert(c, super::config::BurnProofAdmissionMode::Public);
     // An unrelated chain's manual_prices entry must SURVIVE the delete.
     s.manual_prices
         .insert((ChainId(7), "MON".to_string()), 3_0000_0000);
@@ -327,6 +338,10 @@ fn delete_chain_removes_zero_supply_chain() {
     delete_chain_in_state(&mut s, c).expect("delete after replay history is covered");
 
     assert!(!s.chain_configs.contains_key(&c), "chain_configs retained");
+    assert!(
+        !s.burn_proof_admission_mode_by_chain.contains_key(&c),
+        "burn proof admission row retained after deletion"
+    );
     assert!(
         !s.chain_supplies.contains_key(&c),
         "chain_supplies retained"

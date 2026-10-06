@@ -808,6 +808,18 @@ fn post_upgrade(arg: ProtocolArg) {
             })
         }
     };
+    // CL11: any chain marked Public by the staged rollout is closed before
+    // replacing the live state. The resolver also fails closed during decode.
+    let held_public_burn_proof_modes = state
+        .multi_chain
+        .hold_legacy_public_burn_proof_admission();
+    if held_public_burn_proof_modes > 0 {
+        log!(
+            INFO,
+            "[upgrade]: held {} legacy public burn-proof admission mode(s)",
+            held_public_burn_proof_modes
+        );
+    }
     let xrp_guardrail_migration =
         rumi_protocol_backend::state::enforce_xrp_launch_guardrails(&mut state);
     if let Some(previous) = xrp_guardrail_migration.previous_status {
@@ -4859,16 +4871,11 @@ fn get_last_observed_block(chain: rumi_protocol_backend::chains::config::ChainId
 /// Finality lag is surfaced as `TemporarilyUnavailable` so the caller (the
 /// frontend, per plan Task 7) can poll-and-retry until the receipt is final.
 ///
-/// FUTURE ROBUSTNESS (flagged per Rob 2026-05-31): v1 liveness depends on the
-/// submitter (the dApp). Proper DoS protection (this is a permissionless
-/// endpoint that spends a ~2B-cycle `eth_getTransactionReceipt` outcall per
-/// call) needs the deferred relayer / incentivized-submitter design (audit
-/// FLAG-7). A naive per-caller wall-clock rate-limit was rejected: it both fails
-/// against principal rotation AND wrongly throttles legitimate back-to-back
-/// submissions (e.g. two distinct burns in the same second). The endpoint does
-/// reject the anonymous principal as basic hygiene (ingress anonymous is also
-/// dropped by `inspect_message`; this is belt-and-suspenders, and covers any
-/// future non-ingress entry that skips that hook).
+/// Admission is fail-closed to the configured non-anonymous operator. The
+/// former public lane spent a costly receipt outcall before a receipt existed,
+/// and per-principal limits cannot prevent global exhaustion through identity
+/// rotation. Permissionless access requires a global anti-Sybil design; legacy
+/// persisted `Public` values are treated as closed.
 #[candid_method(update)]
 #[update]
 async fn submit_burn_proof(
@@ -4876,16 +4883,27 @@ async fn submit_burn_proof(
     tx_hash: String,
 ) -> Result<u32, ProtocolError> {
     use rumi_protocol_backend::chains::monad::burn_proof::{
+        operator_may_submit_burn_proof, run_if_operator_admitted,
         verify_and_apply_burn_proof, BurnProofError,
     };
-
-    if ic_cdk::caller() == candid::Principal::anonymous() {
+    let caller = ic_cdk::caller();
+    let (operator, mode) = read_state(|s| {
+        (
+            s.developer_principal,
+            s.multi_chain.burn_proof_admission_mode(chain_id),
+        )
+    });
+    let allowed = operator_may_submit_burn_proof(caller, operator, mode);
+    let verification = run_if_operator_admitted(allowed, || {
+        verify_and_apply_burn_proof(chain_id, &tx_hash)
+    });
+    let Some(verification) = verification else {
         return Err(ProtocolError::ChainAdmin(
-            "anonymous caller not allowed for submit_burn_proof".into(),
+            "submit_burn_proof is restricted to the configured non-anonymous operator".into(),
         ));
-    }
+    };
 
-    match verify_and_apply_burn_proof(chain_id, &tx_hash).await {
+    match verification.await {
         Ok(n) => {
             if n > 0 {
                 log!(

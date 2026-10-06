@@ -10,6 +10,24 @@ use crate::logs::INFO;
 use crate::state::{mutate_state, read_state};
 use ic_canister_log::log;
 
+/// Only the configured non-anonymous operator may initiate a receipt lookup.
+/// Persisted `Public` values are rejected until a global anti-Sybil policy exists.
+pub fn operator_may_submit_burn_proof(
+    caller: candid::Principal,
+    operator: candid::Principal,
+    mode: crate::chains::config::BurnProofAdmissionMode,
+) -> bool {
+    caller != candid::Principal::anonymous()
+        && operator != candid::Principal::anonymous()
+        && caller == operator
+        && mode == crate::chains::config::BurnProofAdmissionMode::OperatorOnly
+}
+
+/// The expensive lookup closure is lazy, so rejected callers cause no work.
+pub fn run_if_operator_admitted<T>(allowed: bool, work: impl FnOnce() -> T) -> Option<T> {
+    allowed.then(work)
+}
+
 /// Apply every `Burn` log in `receipt` that was emitted by `contract` to protocol
 /// state, deduped by exact chain-qualified pending IDs and the monotonic
 /// finalized-coverage floor. Returns the

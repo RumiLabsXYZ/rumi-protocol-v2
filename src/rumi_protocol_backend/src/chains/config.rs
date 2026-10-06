@@ -22,6 +22,16 @@ pub enum ChainStatus {
     Disabled,
 }
 
+/// Admission policy for caller-triggered EVM burn-receipt lookups.
+/// `Public` remains only to decode snapshots from a staged rollout; runtime
+/// resolution always fails closed to `OperatorOnly` until global anti-Sybil
+/// admission exists. No public setter or permissionless lane is exposed.
+#[derive(CandidType, Deserialize, Serialize, Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BurnProofAdmissionMode {
+    OperatorOnly,
+    Public,
+}
+
 #[derive(CandidType, Deserialize, Serialize, Clone, Debug)]
 pub enum GasStrategy {
     /// EIP-1559 EVM chains (Monad, Ethereum, L2s).
