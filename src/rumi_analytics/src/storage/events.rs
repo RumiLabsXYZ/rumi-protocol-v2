@@ -5,7 +5,7 @@ use ic_stable_structures::storable::{Bound, Storable};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::cell::RefCell;
-use super::{Memory, get_memory};
+use super::{get_memory, Memory, MEM_ADD_MARGIN_EVENT_IDS};
 use super::{
     MEM_EVT_LIQUIDATIONS_IDX, MEM_EVT_LIQUIDATIONS_DATA,
     MEM_EVT_SWAPS_IDX, MEM_EVT_SWAPS_DATA,
@@ -181,6 +181,11 @@ storable_candid!(AnalyticsAmmLiquidityEvent);
 // --- StableLog instances ---
 
 thread_local! {
+    /// Sparse index of backend AddMargin events already represented in the
+    /// vault event log. Backfill and live tailing share this dedupe gate.
+    static ADD_MARGIN_EVENT_IDS: RefCell<ic_stable_structures::StableBTreeMap<u64, u8, Memory>> =
+        RefCell::new(ic_stable_structures::StableBTreeMap::init(get_memory(MEM_ADD_MARGIN_EVENT_IDS)));
+
     static EVT_LIQUIDATIONS_LOG: RefCell<ic_stable_structures::StableLog<AnalyticsLiquidationEvent, Memory, Memory>> =
         RefCell::new({
             ic_stable_structures::StableLog::init(
@@ -292,6 +297,44 @@ evt_accessors!(evt_vaults, EVT_VAULTS_LOG, AnalyticsVaultEvent);
 evt_accessors!(evt_stability, EVT_STABILITY_LOG, AnalyticsStabilityEvent);
 evt_accessors!(evt_admin, EVT_ADMIN_LOG, AnalyticsAdminEvent);
 evt_accessors!(evt_amm_liquidity, EVT_AMM_LIQUIDITY_LOG, AnalyticsAmmLiquidityEvent);
+
+/// Append one AddMargin row for each backend source event. The index claim and
+/// StableLog append are synchronous, so callbacks cannot interleave between
+/// them; a trap rolls both stable writes back with the message.
+pub fn push_add_margin_if_new(row: AnalyticsVaultEvent) -> bool {
+    if row.event_kind != VaultEventKind::CollateralDeposited {
+        return false;
+    }
+    let event_id = row.source_event_id;
+    let inserted = ADD_MARGIN_EVENT_IDS.with(|ids| {
+        let mut ids = ids.borrow_mut();
+        if ids.contains_key(&event_id) {
+            false
+        } else {
+            ids.insert(event_id, 1);
+            true
+        }
+    });
+    if inserted {
+        evt_vaults::push(row);
+    }
+    inserted
+}
+
+/// Index a bounded range of existing vault rows. Returns the next log index.
+pub fn index_existing_add_margin_rows(from: u64, limit: u64) -> u64 {
+    let end = from.saturating_add(limit).min(evt_vaults::len());
+    for index in from..end {
+        if let Some(row) = evt_vaults::get(index) {
+            if row.event_kind == VaultEventKind::CollateralDeposited {
+                ADD_MARGIN_EVENT_IDS.with(|ids| {
+                    ids.borrow_mut().insert(row.source_event_id, 1);
+                });
+            }
+        }
+    }
+    end
+}
 
 // --- Tests ---
 
@@ -433,5 +476,38 @@ mod tests {
         let decoded = AnalyticsAdminEvent::from_bytes(bytes);
         assert_eq!(decoded.label, "SetBorrowingFee");
         assert_eq!(decoded.source_event_id, 77);
+    }
+
+    #[test]
+    fn add_margin_append_is_idempotent_across_live_and_backfill_paths() {
+        let event_id = u64::MAX - 17;
+        let initial_len = evt_vaults::len();
+        let row = || AnalyticsVaultEvent {
+            timestamp_ns: 9,
+            source_event_id: event_id,
+            vault_id: 44,
+            owner: Principal::from_slice(&[4]),
+            event_kind: VaultEventKind::CollateralDeposited,
+            collateral_type: Principal::anonymous(),
+            amount: 123,
+            fee_amount: None,
+        };
+
+        assert!(push_add_margin_if_new(row()));
+        assert!(!push_add_margin_if_new(row()));
+        assert_eq!(evt_vaults::len(), initial_len + 1);
+
+        // Simulate a pre-index persisted row and ensure bounded index warming
+        // makes a subsequent backfill retry a no-op.
+        let legacy_id = u64::MAX - 18;
+        let mut legacy_row = row();
+        legacy_row.source_event_id = legacy_id;
+        evt_vaults::push(legacy_row);
+        let legacy_position = evt_vaults::len() - 1;
+        assert_eq!(index_existing_add_margin_rows(legacy_position, 1), evt_vaults::len());
+        let mut retry = row();
+        retry.source_event_id = legacy_id;
+        assert!(!push_add_margin_if_new(retry));
+        assert_eq!(evt_vaults::len(), initial_len + 2);
     }
 }

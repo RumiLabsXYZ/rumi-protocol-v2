@@ -8,6 +8,14 @@ use storage::events::*;
 use super::{BATCH_SIZE, update_cursor_success, update_cursor_error, update_cursor_source_count};
 
 pub async fn run() {
+    // Old stable logs have no AddMargin dedupe index. Warm it before any new
+    // backend rows can be appended, or an overlapping tailer/backfill could
+    // duplicate a pre-upgrade source event.
+    if let Err(e) = crate::advance_add_margin_dedupe_index() {
+        ic_cdk::println!("[tail_backend] AddMargin dedupe index warming: {}", e);
+        return;
+    }
+
     let backend = state::read_state(|s| s.sources.backend);
     let cursor = cursors::backend_events::get();
 
@@ -49,9 +57,8 @@ pub async fn run() {
             }
         };
 
-    for (i, event) in events.iter().enumerate() {
-        let event_id = cursor + i as u64;
-        route_backend_event(event_id, event);
+    for (event_id, event) in events.iter() {
+        route_backend_event(*event_id, event);
     }
 
     // Advance by total_fetched so unknown-variant events are not re-fetched.
@@ -140,7 +147,7 @@ fn route_backend_event(event_id: u64, event: &sources::backend::BackendEvent) {
             // Top-up of an existing vault. The collateral_type field on
             // AnalyticsVaultEvent is derived from the prior Opened row at
             // timeline-replay time, so leaving it anonymous here is fine.
-            evt_vaults::push(AnalyticsVaultEvent {
+            storage::events::push_add_margin_if_new(AnalyticsVaultEvent {
                 timestamp_ns: timestamp.unwrap_or(0),
                 source_event_id: event_id,
                 vault_id: *vault_id,

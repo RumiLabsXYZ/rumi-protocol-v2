@@ -132,4 +132,7 @@ dfx deploy rumi_analytics --network ic
 | 38-41    | StableLog       | Hourly snapshots (cycles, fee curve)    |
 | 44-51    | StableLog       | Event mirrors (liquidations, swaps, liquidity, vaults) |
 | 56-59    | StableBTreeMap  | BalanceTracker + FirstSeen maps (icUSD, 3USD) |
-| 26-29, 34-37, 42-43, 52-55, 60-63 | -- | Reserved |
+| 60-61    | StableLog       | AMM liquidity event mirror |
+| 62       | StableCell      | AMM liquidity cursor |
+| 63       | StableBTreeMap  | AddMargin source-event dedupe index |
+| 26-29, 34-37, 42-43, 52-55 | -- | Reserved |

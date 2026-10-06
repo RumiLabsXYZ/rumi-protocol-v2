@@ -667,9 +667,17 @@ async fn admin_backfill_add_margin_events(
     let admin = state::read_state(|s| s.admin);
     let caller = ic_cdk::caller();
     require_admin(caller, admin)?;
+    advance_add_margin_dedupe_index()?;
     let backend = state::read_state(|s| s.sources.backend);
     let cursor = state::read_state(|s| s.add_margin_backfill_cursor.unwrap_or(0));
     let count = sources::backend::get_event_count(backend).await?;
+    let current_cursor = state::read_state(|s| s.add_margin_backfill_cursor.unwrap_or(0));
+    if current_cursor != cursor {
+        return Err(format!(
+            "AddMargin backfill cursor advanced concurrently from {} to {}; retry",
+            cursor, current_cursor
+        ));
+    }
     if cursor >= count {
         return Ok(types::BackfillProgress {
             from: cursor,
@@ -680,11 +688,29 @@ async fn admin_backfill_add_margin_events(
             complete: true,
         });
     }
-    let want = batch_size.clamp(1, 5_000).min(count - cursor);
-    let events = sources::backend::get_events(backend, cursor, want).await?;
+    let want = batch_size.clamp(1, ADD_MARGIN_BACKFILL_BATCH_MAX).min(count - cursor);
+    let (events, fetched) = sources::backend::get_events_resilient(backend, cursor, want).await?;
+    if fetched != want {
+        return Err(format!(
+            "AddMargin backfill received short source window ({}/{}); retry",
+            fetched, want
+        ));
+    }
+    let cursor_after = cursor
+        .checked_add(fetched)
+        .ok_or_else(|| "AddMargin backfill cursor overflow".to_string())?;
+    let cursor_committed = state::mutate_state(|s| {
+        set_add_margin_cursor_if_current(s, cursor, cursor_after)
+    });
+    if !cursor_committed {
+        let current_cursor = state::read_state(|s| s.add_margin_backfill_cursor.unwrap_or(0));
+        return Err(format!(
+            "AddMargin backfill cursor advanced concurrently from {} to {}; retry",
+            cursor, current_cursor
+        ));
+    }
     let mut emitted = 0u64;
-    for (i, event) in events.iter().enumerate() {
-        let event_id = cursor + i as u64;
+    for (event_id, event) in events.iter() {
         if let sources::backend::BackendEvent::AddMarginToVault {
             vault_id,
             margin_added,
@@ -693,7 +719,7 @@ async fn admin_backfill_add_margin_events(
             ..
         } = event
         {
-            storage::events::evt_vaults::push(storage::events::AnalyticsVaultEvent {
+            if storage::events::push_add_margin_if_new(storage::events::AnalyticsVaultEvent {
                 timestamp_ns: timestamp.unwrap_or(0),
                 source_event_id: event_id,
                 vault_id: *vault_id,
@@ -702,22 +728,69 @@ async fn admin_backfill_add_margin_events(
                 collateral_type: candid::Principal::anonymous(),
                 amount: *margin_added,
                 fee_amount: None,
-            });
-            emitted += 1;
+            }) {
+                emitted += 1;
+            }
         }
     }
-    let cursor_after = cursor + events.len() as u64;
-    state::mutate_state(|s| {
-        s.add_margin_backfill_cursor = Some(cursor_after);
-    });
     Ok(types::BackfillProgress {
         from: cursor,
-        scanned: events.len() as u64,
+        scanned: fetched,
         emitted,
         cursor_after,
         total_events: count,
         complete: cursor_after >= count,
     })
+}
+
+const ADD_MARGIN_BACKFILL_BATCH_MAX: u64 = 5_000;
+
+fn set_add_margin_cursor_if_current(
+    state: &mut SlimState,
+    expected_cursor: u64,
+    next_cursor: u64,
+) -> bool {
+    if state.add_margin_backfill_cursor.unwrap_or(0) != expected_cursor {
+        return false;
+    }
+    state.add_margin_backfill_cursor = Some(next_cursor);
+    true
+}
+
+/// Rebuild the sparse dedupe index incrementally after upgrading old analytics
+/// state. Backend tailing and historical backfill pause until the old log is
+/// indexed, preventing a live event from duplicating a pre-upgrade row.
+pub(crate) fn advance_add_margin_dedupe_index() -> Result<(), String> {
+    let (ready, cursor) = state::read_state(|s| {
+        (
+            s.add_margin_dedupe_index_ready.unwrap_or(false),
+            s.add_margin_dedupe_index_cursor.unwrap_or(0),
+        )
+    });
+    if ready {
+        return Ok(());
+    }
+
+    let log_len = storage::events::evt_vaults::len();
+    let end = cursor
+        .saturating_add(ADD_MARGIN_BACKFILL_BATCH_MAX)
+        .min(log_len);
+    let next = storage::events::index_existing_add_margin_rows(cursor, end - cursor);
+    let caught_up = next >= storage::events::evt_vaults::len();
+    state::mutate_state(|s| {
+        if s.add_margin_dedupe_index_cursor.unwrap_or(0) == cursor {
+            s.add_margin_dedupe_index_cursor = Some(next);
+            s.add_margin_dedupe_index_ready = Some(caught_up);
+        }
+    });
+    if caught_up {
+        Ok(())
+    } else {
+        Err(format!(
+            "AddMargin dedupe index warming: scanned vault-event rows {}..{}; retry",
+            cursor, next
+        ))
+    }
 }
 
 #[ic_cdk_macros::update]
@@ -908,5 +981,19 @@ mod cycle_manager_tests {
                 pull_schedule::effective_period_ns(Some(period_secs)),
             ))
         );
+    }
+
+    #[test]
+    fn concurrent_add_margin_batches_cannot_both_commit_same_cursor() {
+        let mut slim = SlimState {
+            add_margin_backfill_cursor: Some(40),
+            ..SlimState::default()
+        };
+
+        assert!(set_add_margin_cursor_if_current(&mut slim, 40, 45));
+        // A second callback that fetched from the same old cursor must fail
+        // its compare-and-advance and leave the winner's cursor untouched.
+        assert!(!set_add_margin_cursor_if_current(&mut slim, 40, 50));
+        assert_eq!(slim.add_margin_backfill_cursor, Some(45));
     }
 }
