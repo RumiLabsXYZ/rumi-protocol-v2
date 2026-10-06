@@ -49,7 +49,8 @@ mod three_usd_v2_migration_tests {
                     || name == "three_usd_reserve_ingress_journals"
                     || name == "three_usd_reserve_payout_parents"
                     || name == "three_usd_reserve_ingress_enabled"
-                    || name == "sp_three_usd_reserve_absorb_results_by_proof")
+                    || name == "sp_three_usd_reserve_absorb_results_by_proof"
+                    || name == "sp_burn_refunds_by_proof")
         });
         let mut legacy = Vec::new();
         ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut legacy).unwrap();
@@ -60,6 +61,7 @@ mod three_usd_v2_migration_tests {
         assert!(restored.three_usd_reserve_ingress_journals.is_empty());
         assert!(restored.three_usd_reserve_payout_parents.is_empty());
         assert!(restored.sp_three_usd_reserve_absorb_results_by_proof.is_empty());
+        assert!(restored.sp_burn_refunds_by_proof.is_empty());
         assert!(!restored.three_usd_reserve_ingress_enabled);
     }
 
