@@ -64,6 +64,267 @@ fn applies_burn_log_from_correct_contract_and_dedups() {
 }
 
 #[test]
+fn proof_replay_is_rejected_after_observer_covers_and_prunes_its_block() {
+    use super::deposit_watch::advance_cursor_and_prune;
+
+    let mut s = state_with_open_vault(100);
+    let chain = ChainId(10143);
+    let contract = "0xcafe";
+    let receipt = TxReceiptWithLogs {
+        tx_hash: None,
+        success: true,
+        block_number: 10,
+        logs: vec![(
+            contract.to_string(),
+            vec![BURN_EVENT_TOPIC0.to_string(), word(1), word(0xdead)],
+            word(40),
+            3,
+        )],
+    };
+    let first = apply_receipt_burns_to_state(&mut s, chain, contract, "0xtx", &receipt)
+        .expect("first direct proof applies");
+    assert_eq!(first.len(), 1);
+    assert_eq!(s.chain_vaults[&1].debt_e8s, 60);
+    assert!(s.has_evm_burn_replay_id(chain, 10, "0xtx", 3));
+
+    advance_cursor_and_prune(&mut s, chain, 20);
+    assert_eq!(s.evm_burn_proof_floor_by_chain.get(&chain), Some(&20));
+    assert!(!s.has_evm_burn_replay_id(chain, 10, "0xtx", 3));
+    // Removing/reseeding the observer cursor cannot reopen the covered history.
+    s.last_observed_block.remove(&chain);
+    let replay = apply_receipt_burns_to_state(&mut s, chain, contract, "0xtx", &receipt);
+    assert_eq!(replay, Err(ApplyBurnsError::StaleProof { block: 10, floor: 20 }));
+    assert_eq!(s.chain_vaults[&1].debt_e8s, 60);
+    assert_eq!(s.chain_supplies[&chain], 60);
+}
+
+#[test]
+fn replay_tombstone_survives_another_chains_global_legacy_key_prune() {
+    use super::deposit_watch::{advance_cursor_and_prune, observer_burn_was_already_consumed};
+
+    let mut s = state_with_open_vault(100);
+    let proof_chain = ChainId(10143);
+    let other_chain = ChainId(1030);
+    let receipt = TxReceiptWithLogs {
+        tx_hash: None,
+        success: true,
+        block_number: 10,
+        logs: vec![(
+            "0xcafe".into(),
+            vec![BURN_EVENT_TOPIC0.into(), word(1), word(0xdead)],
+            word(40),
+            3,
+        )],
+    };
+
+    apply_receipt_burns_to_state(&mut s, proof_chain, "0xcafe", "0xtx", &receipt)
+        .expect("direct proof applies");
+    assert!(s.processed_burn_keys.contains_key(&10));
+    assert!(s.has_evm_burn_replay_id(proof_chain, 10, "0xtx", 3));
+
+    // The legacy processed map is global and another chain's cursor can prune
+    // its block key. The chain-qualified tombstone must still suppress replay.
+    advance_cursor_and_prune(&mut s, other_chain, 20);
+    assert!(!s.processed_burn_keys.contains_key(&10));
+    assert!(s.has_evm_burn_replay_id(proof_chain, 10, "0xtx", 3));
+    assert!(observer_burn_was_already_consumed(&s, proof_chain, 10, "0xtx", 3));
+    assert!(!observer_burn_was_already_consumed(&s, other_chain, 10, "0xtx", 3));
+    assert_eq!(s.chain_vaults[&1].debt_e8s, 60);
+    assert_eq!(s.chain_supplies[&proof_chain], 60);
+}
+
+#[test]
+fn pending_replay_ids_drain_only_after_bounded_coverage_windows() {
+    use super::deposit_watch::{
+        burn_proof_coverage_window, replay_catchup_is_required,
+    };
+
+    let chain = ChainId(10143);
+    let mut s = state_with_open_vault(100);
+    let receipt = TxReceiptWithLogs {
+        tx_hash: None,
+        success: true,
+        block_number: 1500,
+        logs: vec![(
+            "0xcafe".into(),
+            vec![BURN_EVENT_TOPIC0.into(), word(1), word(0xdead)],
+            word(40),
+            3,
+        )],
+    };
+    apply_receipt_burns_to_state(&mut s, chain, "0xcafe", "0xtx", &receipt)
+        .expect("direct proof applies");
+
+    assert!(replay_catchup_is_required(true, 0, 2048));
+    let first = burn_proof_coverage_window(0, 0, 2048).unwrap();
+    assert_eq!(first, (1, 1024));
+    s.advance_evm_burn_proof_floor(chain, first.1);
+    assert!(s.has_evm_burn_replay_id(chain, 1500, "0xtx", 3));
+
+    let second = burn_proof_coverage_window(first.1, 0, 2048).unwrap();
+    assert_eq!(second, (1025, 2048));
+    s.advance_evm_burn_proof_floor(chain, second.1);
+    assert!(!s.has_evm_burn_replay_id(chain, 1500, "0xtx", 3));
+    assert!(!replay_catchup_is_required(false, second.1, 2048));
+    assert_eq!(s.chain_vaults[&1].debt_e8s, 60);
+    assert_eq!(s.chain_supplies[&chain], 60);
+}
+
+#[test]
+fn full_replay_index_can_catch_up_through_a_new_observer_burn() {
+    use super::deposit_watch::apply_burn_log_window_and_advance;
+    use crate::chains::multi_chain_state::MAX_PENDING_EVM_BURN_REPLAY_IDS;
+
+    let chain = ChainId(10143);
+    let mut s = state_with_open_vault(100);
+    s.pending_evm_burn_replay_ids.insert(
+        (chain, 1),
+        (0..MAX_PENDING_EVM_BURN_REPLAY_IDS)
+            .map(|n| format!("0xpending{}:0", n))
+            .collect(),
+    );
+    assert!(!s.can_reserve_evm_burn_replay_ids(1));
+
+    // A complete bounded getLogs window can still process a new observer burn
+    // and commit its coverage floor atomically, without allocating durable
+    // replay-index capacity for logs covered by that same window.
+    let logs = vec![(
+        vec![BURN_EVENT_TOPIC0.into(), word(1), word(0xdead)],
+        word(40),
+        "0xnew-observer-burn".into(),
+        10,
+        0,
+    )];
+    let applied = apply_burn_log_window_and_advance(&mut s, chain, &logs, 1024)
+        .expect("complete observer window applies");
+    assert_eq!(applied.len(), 1);
+
+    assert_eq!(s.chain_vaults[&1].debt_e8s, 60);
+    assert_eq!(s.chain_supplies[&chain], 60);
+    assert_eq!(s.evm_burn_proof_floor_by_chain.get(&chain), Some(&1024));
+    assert!(s.pending_evm_burn_replay_ids.is_empty());
+    assert!(s.can_reserve_evm_burn_replay_ids(1));
+}
+
+#[test]
+fn deferred_later_burn_rolls_back_window_prefix_then_retry_commits_once() {
+    use super::deposit_watch::apply_burn_log_window_and_advance;
+    use crate::chains::monad::deposit_watch::BurnApplyError;
+
+    let chain = ChainId(10143);
+    let mut s = state_with_open_vault(100);
+    let mut deferred = s.chain_vaults[&1].clone();
+    deferred.vault_id = 2;
+    deferred.debt_e8s = 0;
+    s.chain_vaults.insert(2, deferred);
+    s.sp_attempted_chain_vaults.insert(2);
+    let logs = vec![
+        (
+            vec![BURN_EVENT_TOPIC0.into(), word(1), word(0xdead)],
+            word(40),
+            "0xfirst".into(),
+            10,
+            0,
+        ),
+        (
+            vec![BURN_EVENT_TOPIC0.into(), word(2), word(0xdead)],
+            word(1),
+            "0xdeferred".into(),
+            11,
+            1,
+        ),
+    ];
+
+    assert!(matches!(
+        apply_burn_log_window_and_advance(&mut s, chain, &logs, 1024),
+        Err(BurnApplyError::DeferredLiquidation)
+    ));
+    assert_eq!(s.chain_vaults[&1].debt_e8s, 100, "prefix debt rolls back");
+    assert_eq!(s.chain_supplies[&chain], 100, "prefix supply rolls back");
+    assert_eq!(s.evm_burn_proof_floor_by_chain.get(&chain), None);
+
+    s.sp_attempted_chain_vaults.remove(&2);
+    let applied = apply_burn_log_window_and_advance(&mut s, chain, &logs, 1024)
+        .expect("retry completes after deferred marker clears");
+    assert_eq!(applied.len(), 1, "only the valid first burn applies");
+    assert_eq!(s.chain_vaults[&1].debt_e8s, 60);
+    assert_eq!(s.chain_supplies[&chain], 60);
+    assert_eq!(s.evm_burn_proof_floor_by_chain.get(&chain), Some(&1024));
+}
+
+#[test]
+fn unscanned_observer_cursor_does_not_reject_later_direct_burn_proof() {
+    use super::deposit_watch::advance_cursor_without_burn_coverage;
+
+    let mut s = state_with_open_vault(100);
+    let chain = ChainId(10143);
+    let receipt = TxReceiptWithLogs {
+        tx_hash: None,
+        success: true,
+        block_number: 10,
+        logs: vec![(
+            "0xcafe".into(),
+            vec![BURN_EVENT_TOPIC0.into(), word(1), word(0xdead)],
+            word(40),
+            3,
+        )],
+    };
+
+    // Models the no-logs path used while a mint is in flight or the
+    // totalSupply probe fails: settlement may use this finalized cursor, but
+    // it does not establish burn-log coverage for blocks 1 through 20.
+    advance_cursor_without_burn_coverage(&mut s, chain, 20);
+    assert_eq!(s.last_observed_block.get(&chain), Some(&20));
+    assert_eq!(s.evm_burn_proof_floor_by_chain.get(&chain), Some(&0));
+
+    let applied = apply_receipt_burns_to_state(&mut s, chain, "0xcafe", "0xtx", &receipt)
+        .expect("a finalized proof in an unscanned gap remains admissible");
+    assert_eq!(applied.len(), 1);
+    assert_eq!(s.chain_vaults[&1].debt_e8s, 60);
+}
+
+#[test]
+fn legacy_cursor_history_is_held_as_ambiguous_until_developer_baseline() {
+    let mut s = state_with_open_vault(100);
+    let chain = ChainId(10143);
+    s.last_observed_block.insert(chain, 20);
+    let receipt = TxReceiptWithLogs {
+        tx_hash: None,
+        success: true,
+        block_number: 10,
+        logs: vec![(
+            "0xcafe".into(),
+            vec![BURN_EVENT_TOPIC0.into(), word(1), word(0xdead)],
+            word(40),
+            3,
+        )],
+    };
+
+    let held = apply_receipt_burns_to_state(&mut s, chain, "0xcafe", "0xtx", &receipt);
+    assert_eq!(
+        held,
+        Err(ApplyBurnsError::LegacyHistoryHeld {
+            block: 10,
+            held_through: 20,
+        })
+    );
+    assert_eq!(s.chain_vaults[&1].debt_e8s, 100);
+
+    // The developer-only current-tip activation assertion explicitly chooses
+    // to exclude this prior history, after which the ordinary stale guard is
+    // precise and no longer conflates it with an unknown legacy gap.
+    s.accept_evm_burn_proof_baseline(chain, 20);
+    assert_eq!(
+        apply_receipt_burns_to_state(&mut s, chain, "0xcafe", "0xtx", &receipt),
+        Err(ApplyBurnsError::StaleProof {
+            block: 10,
+            floor: 20,
+        })
+    );
+    assert_eq!(s.chain_vaults[&1].debt_e8s, 100);
+}
+
+#[test]
 fn rejects_log_from_wrong_contract() {
     let mut s = state_with_open_vault(100);
     let receipt = TxReceiptWithLogs {

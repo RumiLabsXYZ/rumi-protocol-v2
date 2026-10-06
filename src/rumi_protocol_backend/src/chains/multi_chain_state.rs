@@ -976,7 +976,141 @@ pub struct MultiChainStateV7 {
 
 impl_multi_chain_state_common!(MultiChainStateV7);
 
-pub type MultiChainState = MultiChainStateV7;
+/// Additive V8 stable-state root. The observer cursor is not itself a safe
+/// replay tombstone because V7 advanced it both after log scans and on no-scan
+/// paths. V8 keeps that legacy ambiguity as a fail-closed held range, while a
+/// separate lower bound advances only after complete log coverage or an
+/// explicit developer activation baseline. Recent proof identities remain in
+/// a bounded chain-qualified set until the lower bound passes them.
+#[derive(CandidType, Deserialize, Serialize, Clone, Debug, Default)]
+pub struct MultiChainStateV8 {
+    pub chain_configs: BTreeMap<ChainId, ChainConfigV3>,
+    pub chain_supplies: BTreeMap<ChainId, u128>,
+    pub settlement_queues: BTreeMap<ChainId, SettlementQueueV1>,
+    pub invariant_halted: bool,
+    #[serde(default)] pub chain_vaults: BTreeMap<u64, ChainVaultV1>,
+    #[serde(default)] pub chain_contracts: BTreeMap<ChainId, String>,
+    #[serde(default)] pub manual_prices: BTreeMap<(ChainId, String), u64>,
+    #[serde(default)] pub last_observed_block: BTreeMap<ChainId, u64>,
+    #[serde(default)] pub hot_wallet_balance_e18: BTreeMap<ChainId, u128>,
+    #[serde(default)] pub reorg_halted: BTreeMap<ChainId, bool>,
+    #[serde(default)] pub reorg_suspect_streak: BTreeMap<ChainId, u32>,
+    #[serde(default)] pub processed_burn_keys: BTreeMap<u64, BTreeSet<String>>,
+    #[serde(default)] pub evm_owner_nonces: BTreeMap<Principal, u64>,
+    #[serde(default)] pub manual_price_set_at_ns: BTreeMap<(ChainId, String), u64>,
+    #[serde(default)] pub reserve_backing_e8s: BTreeMap<ChainId, u128>,
+    #[serde(default)] pub reserve_usdc_native: BTreeMap<ChainId, u128>,
+    #[serde(default)] pub pending_chain_burn_e8s: BTreeMap<ChainId, u128>,
+    #[serde(default)] pub sp_attempted_chain_vaults: BTreeSet<u64>,
+    #[serde(default)] pub chain_liquidation_claims: BTreeMap<u64, ChainLiqClaimV1>,
+    #[serde(default)] pub chain_liquidation_configs: BTreeMap<ChainId, ChainLiquidationConfigV1>,
+    #[serde(default)] pub chain_debt_configs: BTreeMap<ChainId, ChainDebtConfigV1>,
+    #[serde(default)] pub bot_pending_chain_vaults: BTreeMap<u64, u64>,
+    #[serde(default)] pub chain_bad_debt_e8s: BTreeMap<ChainId, u128>,
+    #[serde(default)] pub settled_pending_burn_proofs: BTreeMap<String, SettlementProofRecord>,
+    #[serde(default)] pub settled_reserve_burn_proofs: BTreeMap<String, SettlementProofRecord>,
+    #[serde(default)] pub settled_settlement_burn_logs: BTreeSet<String>,
+    #[serde(default)] pub settled_reserve_transfer_e8s: BTreeMap<String, u128>,
+    #[serde(default)] pub chain_bad_debt_circuit_threshold_e8s: BTreeMap<ChainId, u128>,
+    #[serde(default)] pub chain_bad_debt_circuit_tripped_at_ns: BTreeMap<ChainId, u64>,
+    #[serde(default)] pub awaiting_deposit_cursor: BTreeMap<ChainId, u64>,
+    #[serde(default)] pub hot_wallet_balance_refreshed_at_ns: BTreeMap<ChainId, u64>,
+    /// Exact direct-proof identities retained until a verified coverage floor
+    /// or explicit developer activation baseline makes old replays rejectable.
+    #[serde(default)] pub pending_evm_burn_replay_ids: BTreeMap<(ChainId, u64), BTreeSet<String>>,
+    /// Monotonic per-chain lower bound; unlike the observer cursor this only
+    /// advances after a complete Burn-log scan or explicit developer baseline.
+    #[serde(default)] pub evm_burn_proof_floor_by_chain: BTreeMap<ChainId, u64>,
+    /// Legacy cursor range whose Burn-log coverage is unknowable because V7
+    /// advanced the cursor on both scanned and no-scan paths. Direct proofs in
+    /// this range remain held until explicit operator baseline/reconciliation.
+    #[serde(default)] pub evm_burn_proof_legacy_hold_through: BTreeMap<ChainId, u64>,
+}
+
+impl_multi_chain_state_common!(MultiChainStateV8);
+
+pub const MAX_PENDING_EVM_BURN_REPLAY_IDS: usize = 10_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EvmBurnReplayIndexError {
+    Full,
+}
+
+impl MultiChainStateV8 {
+    /// Initialize an upgraded chain's proof state. V7's observer cursor may
+    /// have advanced without a Burn `getLogs` scan, so preserve that ambiguous
+    /// range as an explicit hold instead of claiming it was covered. Fresh
+    /// chains start with an empty lower bound.
+    pub fn ensure_evm_burn_proof_floor(&mut self, chain: ChainId) -> u64 {
+        if !self.evm_burn_proof_floor_by_chain.contains_key(&chain) {
+            self.evm_burn_proof_floor_by_chain.insert(chain, 0);
+            if let Some(legacy_cursor) = self.last_observed_block.get(&chain).copied().filter(|cursor| *cursor > 0) {
+                self.evm_burn_proof_legacy_hold_through
+                    .entry(chain)
+                    .or_insert(legacy_cursor);
+            }
+        }
+        self.evm_burn_proof_floor_by_chain.get(&chain).copied().unwrap_or(0)
+    }
+
+    pub fn can_reserve_evm_burn_replay_ids(&self, additional: usize) -> bool {
+        self.pending_evm_burn_replay_ids.values()
+            .try_fold(0usize, |count, ids| count.checked_add(ids.len()))
+            .and_then(|count| count.checked_add(additional))
+            .is_some_and(|count| count <= MAX_PENDING_EVM_BURN_REPLAY_IDS)
+    }
+
+    pub fn has_evm_burn_replay_id(
+        &self, chain: ChainId, block: u64, tx_hash: &str, log_index: u64,
+    ) -> bool {
+        self.pending_evm_burn_replay_ids.get(&(chain, block))
+            .is_some_and(|ids| ids.contains(&format!("{}:{}", tx_hash.to_ascii_lowercase(), log_index)))
+    }
+
+    pub fn reserve_evm_burn_replay_id(
+        &mut self, chain: ChainId, block: u64, tx_hash: &str, log_index: u64,
+    ) -> Result<(), EvmBurnReplayIndexError> {
+        if self.has_evm_burn_replay_id(chain, block, tx_hash, log_index) {
+            return Ok(());
+        }
+        if !self.can_reserve_evm_burn_replay_ids(1) {
+            return Err(EvmBurnReplayIndexError::Full);
+        }
+        self.pending_evm_burn_replay_ids.entry((chain, block)).or_default()
+            .insert(format!("{}:{}", tx_hash.to_ascii_lowercase(), log_index));
+        Ok(())
+    }
+
+    /// Commit the proof lower bound monotonically after a complete Burn-log
+    /// scan. Configuration reset or observer cursor movement cannot reopen a
+    /// previously covered range.
+    pub fn advance_evm_burn_proof_floor(&mut self, chain: ChainId, through: u64) {
+        let floor = self.ensure_evm_burn_proof_floor(chain).max(through);
+        self.evm_burn_proof_floor_by_chain.insert(chain, floor);
+        let stale: Vec<_> = self.pending_evm_burn_replay_ids.keys()
+            .filter(|(entry_chain, block)| *entry_chain == chain && *block <= floor)
+            .copied()
+            .collect();
+        for key in stale { self.pending_evm_burn_replay_ids.remove(&key); }
+    }
+
+    /// Developer-gated activation assertion that history through `through` is
+    /// intentionally excluded from proof admission (normally the current tip).
+    /// A lower seed does not clear an older legacy hold.
+    pub fn accept_evm_burn_proof_baseline(&mut self, chain: ChainId, through: u64) {
+        self.ensure_evm_burn_proof_floor(chain);
+        if self.evm_burn_proof_legacy_hold_through
+            .get(&chain)
+            .is_some_and(|held_through| through < *held_through)
+        {
+            return;
+        }
+        self.evm_burn_proof_legacy_hold_through.remove(&chain);
+        self.advance_evm_burn_proof_floor(chain, through);
+    }
+}
+
+pub type MultiChainState = MultiChainStateV8;
 
 #[cfg(test)]
 mod manual_price_tests {

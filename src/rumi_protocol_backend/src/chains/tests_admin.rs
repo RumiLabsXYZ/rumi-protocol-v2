@@ -298,6 +298,9 @@ fn delete_chain_removes_zero_supply_chain() {
     s.manual_prices.insert((c, "MON".to_string()), 2_0000_0000);
     s.manual_price_set_at_ns.insert((c, "MON".to_string()), 123);
     s.last_observed_block.insert(c, 42);
+    s.evm_burn_proof_floor_by_chain.insert(c, 42);
+    s.evm_burn_proof_legacy_hold_through.insert(c, 41);
+    s.reserve_evm_burn_replay_id(c, 43, "0xabc", 7).expect("reserve direct proof identity");
     s.hot_wallet_balance_e18.insert(c, 1_000);
     s.reorg_halted.insert(c, true);
     s.reorg_suspect_streak.insert(c, 2);
@@ -314,7 +317,14 @@ fn delete_chain_removes_zero_supply_chain() {
     s.manual_price_set_at_ns
         .insert((ChainId(7), "MON".to_string()), 456);
 
-    delete_chain_in_state(&mut s, c).expect("delete");
+    let err = delete_chain_in_state(&mut s, c).expect_err("pending replay tombstones pin the chain");
+    assert!(matches!(err, ChainAdminError::InvalidConfig(message) if message.contains("burn proofs awaiting observer coverage")));
+    assert!(s.chain_configs.contains_key(&c), "failed delete must preserve registration");
+    assert!(s.has_evm_burn_replay_id(c, 43, "0xabc", 7));
+    // A completed coverage window safely retires the tombstone, after which
+    // the ordinary zero-supply deletion path can proceed.
+    s.advance_evm_burn_proof_floor(c, 43);
+    delete_chain_in_state(&mut s, c).expect("delete after replay history is covered");
 
     assert!(!s.chain_configs.contains_key(&c), "chain_configs retained");
     assert!(
@@ -333,6 +343,12 @@ fn delete_chain_removes_zero_supply_chain() {
         !s.last_observed_block.contains_key(&c),
         "last_observed_block retained"
     );
+    assert_eq!(s.evm_burn_proof_floor_by_chain.get(&c), Some(&43),
+        "deleting registration must not reopen covered burn history");
+    assert_eq!(s.evm_burn_proof_legacy_hold_through.get(&c), Some(&41),
+        "chain deletion must not erase ambiguous legacy history");
+    assert!(!s.has_evm_burn_replay_id(c, 43, "0xabc", 7),
+        "covered direct-proof identity is retired before deletion");
     assert!(
         !s.hot_wallet_balance_e18.contains_key(&c),
         "hot_wallet_balance_e18 retained"
