@@ -260,8 +260,8 @@ pub async fn claim_all_collateral() -> Result<BTreeMap<Principal, u64>, Stabilit
     crate::deposits::claim_all_collateral().await
 }
 
-/// Convenience: deposit a stablecoin (icUSD, ckUSDT, ckUSDC) and have the pool
-/// mint 3USD on the user's behalf by depositing into the 3pool.
+/// Temporarily fail-closed: 3pool add-liquidity lacks a durable receipt, so this
+/// endpoint returns a typed error before pulling any input tokens.
 #[update]
 pub async fn deposit_as_3usd(
     token_ledger: Principal,

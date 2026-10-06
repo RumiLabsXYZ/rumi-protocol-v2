@@ -6073,6 +6073,108 @@ mod tests {
             .is_empty());
     }
 
+    /// Exact StabilityPoolState Candid record at the candidate's parent
+    /// e1e15800, before cd8d8428 added the deposit intent fields.
+    #[derive(CandidType)]
+    struct StabilityPoolStatePreCandidate {
+        deposits: BTreeMap<Principal, DepositPosition>,
+        total_stablecoin_balances: BTreeMap<Principal, u64>,
+        stablecoin_registry: BTreeMap<Principal, StablecoinConfig>,
+        collateral_registry: BTreeMap<Principal, CollateralInfo>,
+        chain_collateral_sentinels: Option<BTreeSet<Principal>>,
+        chain_claim_sources: Option<BTreeMap<Principal, Vec<ChainClaimSource>>>,
+        pending_chain_absorbs: Option<BTreeMap<u64, ChainSpAbsorbIntent>>,
+        completed_chain_absorbs: Option<BTreeMap<u64, ChainSpAbsorbCompletion>>,
+        pending_native_xrp_absorbs: Option<BTreeMap<u64, NativeXrpAbsorbIntent>>,
+        chain_absorb_auto_config: Option<ChainAbsorbAutoConfig>,
+        chain_absorb_auto_last_tick: Option<ChainAbsorbAutoTickRecord>,
+        completed_cfx_claim_payout_recoveries:
+            Option<BTreeMap<CfxClaimPayoutRecoveryKey, CfxClaimPayoutRecoveryRecord>>,
+        completed_cfx_claim_payout_recovery_floor: Option<BTreeMap<Principal, u64>>,
+        protocol_canister_id: Principal,
+        configuration: PoolConfiguration,
+        liquidation_history: Vec<PoolLiquidationRecord>,
+        in_flight_liquidations: BTreeSet<u64>,
+        total_liquidations_executed: u64,
+        pool_creation_timestamp: u64,
+        total_interest_received_e8s: Option<u64>,
+        token_consecutive_failures: Option<BTreeMap<Principal, u32>>,
+        cached_virtual_prices: Option<BTreeMap<Principal, u128>>,
+        protocol_reserve_address: Option<Principal>,
+        interest_treasury: Option<Principal>,
+        unallocated_interest_forward_batches:
+            Option<BTreeMap<u64, UnallocatedInterestForwardBatch>>,
+        next_unallocated_interest_forward_batch_id: Option<u64>,
+        is_initialized: bool,
+        pool_events: Option<Vec<PoolEvent>>,
+        next_event_id: Option<u64>,
+        pending_refunds: Option<BTreeMap<u64, PendingRefund>>,
+        next_pending_refund_id: Option<u64>,
+    }
+
+    #[test]
+    fn pre_candidate_current_schema_snapshot_decodes_without_losing_state() {
+        let mut current = test_state();
+        add_deposit_direct(&mut current, user_a(), icusd_ledger(), 42_00000000);
+        let pre_candidate = StabilityPoolStatePreCandidate {
+            deposits: current.deposits.clone(),
+            total_stablecoin_balances: current.total_stablecoin_balances.clone(),
+            stablecoin_registry: current.stablecoin_registry.clone(),
+            collateral_registry: current.collateral_registry.clone(),
+            chain_collateral_sentinels: current.chain_collateral_sentinels.clone(),
+            chain_claim_sources: current.chain_claim_sources.clone(),
+            pending_chain_absorbs: current.pending_chain_absorbs.clone(),
+            completed_chain_absorbs: current.completed_chain_absorbs.clone(),
+            pending_native_xrp_absorbs: current.pending_native_xrp_absorbs.clone(),
+            chain_absorb_auto_config: current.chain_absorb_auto_config.clone(),
+            chain_absorb_auto_last_tick: current.chain_absorb_auto_last_tick.clone(),
+            completed_cfx_claim_payout_recoveries:
+                current.completed_cfx_claim_payout_recoveries.clone(),
+            completed_cfx_claim_payout_recovery_floor:
+                current.completed_cfx_claim_payout_recovery_floor.clone(),
+            protocol_canister_id: current.protocol_canister_id,
+            configuration: current.configuration.clone(),
+            liquidation_history: current.liquidation_history.clone(),
+            in_flight_liquidations: current.in_flight_liquidations.clone(),
+            total_liquidations_executed: current.total_liquidations_executed,
+            pool_creation_timestamp: current.pool_creation_timestamp,
+            total_interest_received_e8s: current.total_interest_received_e8s,
+            token_consecutive_failures: current.token_consecutive_failures.clone(),
+            cached_virtual_prices: current.cached_virtual_prices.clone(),
+            protocol_reserve_address: current.protocol_reserve_address,
+            interest_treasury: current.interest_treasury,
+            unallocated_interest_forward_batches:
+                current.unallocated_interest_forward_batches.clone(),
+            next_unallocated_interest_forward_batch_id:
+                current.next_unallocated_interest_forward_batch_id,
+            is_initialized: current.is_initialized,
+            pool_events: current.pool_events.clone(),
+            next_event_id: current.next_event_id,
+            pending_refunds: current.pending_refunds.clone(),
+            next_pending_refund_id: current.next_pending_refund_id,
+        };
+        let bytes = Encode!(&pre_candidate).expect("encode pre-candidate snapshot");
+
+        let decoded_current = Decode!(&bytes, StabilityPoolState)
+            .expect("exact origin/main schema must decode as current state");
+        let decoded = try_decode_state(&bytes).expect("pre-candidate snapshot must decode");
+        for decoded in [decoded_current, decoded] {
+            assert_eq!(
+                decoded
+                    .deposits
+                    .get(&user_a())
+                    .and_then(|p| p.stablecoin_balances.get(&icusd_ledger()).copied()),
+                Some(42_00000000),
+                "pre-candidate depositor position must survive",
+            );
+            assert!(decoded.last_deposit_transfer_created_at.is_none());
+            assert!(decoded
+                .pending_deposit_intents
+                .unwrap_or_default()
+                .is_empty());
+        }
+    }
+
     #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
     struct DepositPositionPreCfx {
         pub stablecoin_balances: BTreeMap<Principal, u64>,

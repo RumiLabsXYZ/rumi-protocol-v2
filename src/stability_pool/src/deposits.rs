@@ -936,9 +936,37 @@ pub async fn claim_all_collateral() -> Result<BTreeMap<Principal, u64>, Stabilit
     Ok(claimed)
 }
 
-/// Convenience deposit: user sends icUSD (or ckUSDT/ckUSDC) and the pool
-/// deposits it into the 3pool on their behalf, crediting the resulting 3USD.
+/// Keep the 3USD conversion entry point closed until the 3pool supports a
+/// durable add-liquidity receipt. The legacy flow below remains available for
+/// reference while the cross-canister receipt API is coordinated, but this
+/// wrapper never enters it and therefore performs no ledger call.
 pub async fn deposit_as_3usd(
+    token_ledger: Principal,
+    amount: u64,
+) -> Result<u64, StabilityPoolError> {
+    let continue_conversion = require_receipt_backed_3usd_conversion(|| {
+        deposit_as_3usd_inner(token_ledger, amount)
+    })?;
+    continue_conversion.await
+}
+
+fn require_receipt_backed_3usd_conversion<T>(
+    _continue_conversion: impl FnOnce() -> T,
+) -> Result<T, StabilityPoolError> {
+    // Method availability alone does not prove that the 3pool pull and LP mint
+    // can be reconciled across lost replies. Keep this before the input-token
+    // pull until the 3pool exposes a durable receipt for that operation.
+    Err(StabilityPoolError::InterCanisterCallFailed {
+        method: "deposit_as_3usd: receipt-backed conversion unavailable; no input tokens were pulled"
+            .to_string(),
+        target: "3pool add-liquidity recovery".to_string(),
+    })
+}
+
+/// Legacy financial path retained until it can be replaced with the complete
+/// receipt-backed saga. It is reachable only through the fail-closed wrapper
+/// above, whose operation closure is never invoked.
+async fn deposit_as_3usd_inner(
     token_ledger: Principal,
     amount: u64,
 ) -> Result<u64, StabilityPoolError> {
@@ -1364,6 +1392,33 @@ mod tests {
 
     fn principal(byte: u8) -> Principal {
         Principal::from_slice(&[byte])
+    }
+
+    #[test]
+    fn public_3usd_conversion_fails_before_entering_legacy_pull_path() {
+        let mut operation_entered = false;
+        let result = require_receipt_backed_3usd_conversion(|| {
+            operation_entered = true;
+        });
+
+        assert!(matches!(
+            result,
+            Err(StabilityPoolError::InterCanisterCallFailed { method, target })
+                if method.contains("receipt-backed conversion unavailable")
+                    && method.contains("no input tokens were pulled")
+                    && target.contains("3pool")
+        ));
+        assert!(
+            !operation_entered,
+            "legacy conversion closure must not run while 3pool lacks durable receipts"
+        );
+
+        let public_result = futures::executor::block_on(deposit_as_3usd(principal(10), 100));
+        assert!(matches!(
+            public_result,
+            Err(StabilityPoolError::InterCanisterCallFailed { method, .. })
+                if method.contains("receipt-backed conversion unavailable")
+        ));
     }
 
     fn pending_intent() -> ChainSpAbsorbIntent {
