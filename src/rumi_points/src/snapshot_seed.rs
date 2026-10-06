@@ -1,19 +1,17 @@
 //! Snapshot-timing randomization (spike 0.3, `2026-05-07-spike-0.3-snapshot-randomization.md`).
 //!
-//! PHASE 1 SCOPE: the seed STATE types below are real and wired into the stable
-//! layout (they must survive upgrades), but the commit-reveal ALGORITHM is a
-//! documented skeleton. The `derive_snapshot_times` / `SeedManager` bodies land
-//! in Phase 5 alongside the weekly epoch driver. Do not implement them here.
-//!
 //! Mechanism (commit-reveal with hash-chained per-epoch seeds, RANDAO-style):
 //!   - At init the admin commits to a secret 32-byte seed S0 by storing only
 //!     `H0 = sha256(S0)` on-chain (`pending_commit`). S0 is revealed after week 1.
-//!   - `seed_N = sha256(seed_{N-1} || epoch_{N-1}_summary_hash)`.
+//!   - `seed_N = sha256(seed_{N-1} || epoch_{N-1}_summary_hash || entropy_N)`,
+//!     where `entropy_N` comes from management-canister `raw_rand` after the
+//!     prior epoch closes and is withheld until epoch N closes. The prior
+//!     seed and summary remain part of the derivation for auditability.
 //!   - Two snapshot times per epoch are derived from `seed_N`, one in each half
 //!     of the week, so they are >= a few hours apart and unpredictable in
 //!     advance but verifiable after the reveal.
-//! Users cannot predict snapshot times; auditors can verify them post-hoc; the
-//! team cannot retroactively change them (each reveal locks the next commit).
+//! Users cannot predict later snapshot times from public reveals; auditors can
+//! verify them post-hoc; `H(seed_N)` locks the seed before epoch N opens.
 
 #![allow(dead_code)] // Phase 5 surface; types are used by the stable layout now.
 
@@ -50,6 +48,23 @@ pub struct SnapshotSeedSingleton {
     pub pending_commit: [u8; 32],
     /// Plaintext seed for the current (open) epoch, revealed when it closes.
     pub current_seed: Option<[u8; 32]>,
+    /// Management-canister entropy mixed into `current_seed` when it was
+    /// derived. Kept private until this epoch closes.
+    #[serde(default)]
+    pub current_entropy: Option<[u8; 32]>,
+    /// Durable fail-closed transition for a legacy predictable seed or the
+    /// bounded cleanup of its already-captured snapshot buffer.
+    #[serde(default)]
+    pub legacy_reseed_pending: bool,
+    /// A missed legacy next-epoch window is retained for operator review. No
+    /// epoch is opened and no reward summary is synthesized while this is set.
+    #[serde(default)]
+    pub legacy_transition_held: bool,
+    /// Set on fresh installs using precommitted S0. Missing in pre-CL09 stable
+    /// blobs, which lets upgrades distinguish a safe epoch-0 bootstrap from an
+    /// already-open legacy epoch whose remaining snapshot times need review.
+    #[serde(default)]
+    pub secure_seed_chain_v1: bool,
 }
 
 impl SnapshotSeedSingleton {
@@ -68,6 +83,9 @@ pub struct RevealedSeed {
     pub snapshot_time_a_ns: u64,
     pub snapshot_time_b_ns: u64,
     pub revealed_at_ns: u64,
+    /// Entropy used to derive this epoch from the prior epoch; absent for epoch 0.
+    #[serde(default)]
+    pub derivation_entropy: Option<[u8; 32]>,
 }
 
 #[derive(CandidType, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -77,6 +95,14 @@ pub enum SeedError {
     CommitMismatch,
     /// `start_epoch` was given no seed for epoch 1 and none was derivable.
     MissingSeed,
+    /// A preloaded seed has no private derivation entropy and must be migrated first.
+    MissingEntropy,
+    /// Legacy state cannot be securely reseeded because its closed audit row is missing.
+    LegacyHistoryMissing,
+    /// Management-canister randomness was unavailable; transition remains pending.
+    EntropyUnavailable,
+    /// Management-canister randomness did not return exactly 32 bytes.
+    InvalidEntropy,
 }
 
 /// Derive the two intra-epoch snapshot timestamps from a seed (spike 0.3).
@@ -104,9 +130,7 @@ pub fn derive_snapshot_times(
     (epoch_start_ns + a_offset, epoch_start_ns + half + b_offset)
 }
 
-/// Owns the commit-reveal chain across epochs. PHASE 5: full implementation per
-/// the spike's `start_epoch` / `close_epoch` outline. Scaffolded here so the
-/// epoch driver can be written against a stable interface.
+/// Owns the commit-reveal chain across epochs.
 pub struct SeedManager;
 
 impl SeedManager {
@@ -114,7 +138,8 @@ impl SeedManager {
     /// pre-loaded `current_seed` from the prior close), verify it against the
     /// pending commit (when committed), stash it as the open epoch's seed, and
     /// return the two snapshot times. `CommitMismatch` halts on tampering;
-    /// `MissingSeed` if neither an arg nor a pre-loaded seed is available.
+    /// `MissingSeed` if no seed is available, or `MissingEntropy` for an implicit
+    /// preloaded seed from legacy state that has not passed the secure transition.
     pub fn start_epoch(
         singleton: &mut SnapshotSeedSingleton,
         epoch_start_ns: u64,
@@ -124,6 +149,9 @@ impl SeedManager {
         let seed = seed_for_this_epoch
             .or(singleton.current_seed)
             .ok_or(SeedError::MissingSeed)?;
+        if seed_for_this_epoch.is_none() && singleton.current_entropy.is_none() {
+            return Err(SeedError::MissingEntropy);
+        }
         if singleton.is_committed() && sha256(&[&seed]) != singleton.pending_commit {
             // The seed for this epoch must hash to the commit locked in by the
             // previous reveal (or the init H0). A mismatch means corruption or
@@ -136,9 +164,9 @@ impl SeedManager {
 
     /// Reveal the open epoch's seed as a `RevealedSeed` (the caller appends it to
     /// the audit log), then pre-load the next epoch's seed
-    /// `next = sha256(seed || summary_hash)` and its commit `sha256(next)`. The
-    /// snapshot times and reveal timestamp are passed in (kept by the driver in
-    /// `State.open_epoch`) so the singleton needs no extra fields.
+    /// `next = sha256(seed || summary_hash || entropy)` and its commit
+    /// `sha256(next)`. Entropy is fetched from the management canister only after
+    /// this epoch finishes and remains private until the next epoch closes.
     pub fn close_epoch(
         singleton: &mut SnapshotSeedSingleton,
         epoch_index: u64,
@@ -146,6 +174,7 @@ impl SeedManager {
         snapshot_b_ns: u64,
         now_ns: u64,
         epoch_summary_hash: [u8; 32],
+        entropy_for_next_epoch: [u8; 32],
     ) -> Result<RevealedSeed, SeedError> {
         let seed = singleton.current_seed.ok_or(SeedError::MissingSeed)?;
         let revealed = RevealedSeed {
@@ -154,13 +183,14 @@ impl SeedManager {
             snapshot_time_a_ns: snapshot_a_ns,
             snapshot_time_b_ns: snapshot_b_ns,
             revealed_at_ns: now_ns,
+            derivation_entropy: singleton.current_entropy,
         };
-        // Chain the next epoch's seed off this one plus the epoch's summary, then
-        // lock its commit. The reveal of THIS seed (returned to the caller) fixes
-        // the next commit, so the team cannot retroactively change future times.
-        let next = sha256(&[&seed, &epoch_summary_hash]);
+        // Public seed and summary alone cannot calculate the next seed without
+        // this hidden management-canister entropy.
+        let next = sha256(&[&seed, &epoch_summary_hash, &entropy_for_next_epoch]);
         singleton.pending_commit = sha256(&[&next]);
         singleton.current_seed = Some(next);
+        singleton.current_entropy = Some(entropy_for_next_epoch);
         Ok(revealed)
     }
 }
@@ -247,6 +277,10 @@ mod seed_manager_tests {
         SnapshotSeedSingleton {
             pending_commit: h(&[seed]),
             current_seed: None,
+            current_entropy: None,
+            legacy_reseed_pending: false,
+            legacy_transition_held: false,
+            secure_seed_chain_v1: false,
         }
     }
 
@@ -283,6 +317,10 @@ mod seed_manager_tests {
         let mut sing = SnapshotSeedSingleton {
             pending_commit: h(&[&seed1]),
             current_seed: Some(seed1),
+            current_entropy: Some([12; 32]),
+            legacy_reseed_pending: false,
+            legacy_transition_held: false,
+            secure_seed_chain_v1: true,
         };
         let times = SeedManager::start_epoch(&mut sing, 0, WK, None).unwrap();
         assert_eq!(times, derive_snapshot_times(&seed1, 0, WK));
@@ -306,23 +344,32 @@ mod seed_manager_tests {
         let (a, b) = SeedManager::start_epoch(&mut sing, 0, WK, Some(s0)).unwrap();
         let summary = [9u8; 32];
 
-        let revealed = SeedManager::close_epoch(&mut sing, 0, a, b, 777, summary).unwrap();
+        let entropy = [10u8; 32];
+        let revealed = SeedManager::close_epoch(&mut sing, 0, a, b, 777, summary, entropy).unwrap();
         assert_eq!(revealed.epoch_index, 0);
         assert_eq!(revealed.seed, s0);
         assert_eq!(revealed.snapshot_time_a_ns, a);
         assert_eq!(revealed.snapshot_time_b_ns, b);
         assert_eq!(revealed.revealed_at_ns, 777);
 
-        // Next epoch's seed is sha256(seed || summary); its commit is sha256(next).
-        let next = h(&[&s0, &summary]);
+        assert_eq!(revealed.derivation_entropy, None);
+        // Public seed and summary are insufficient without the withheld entropy.
+        let next = h(&[&s0, &summary, &entropy]);
+        assert_ne!(
+            next,
+            h(&[&s0, &summary]),
+            "the old public seed chain must not predict the next seed"
+        );
         assert_eq!(sing.current_seed, Some(next));
         assert_eq!(sing.pending_commit, h(&[&next]));
+        assert_eq!(sing.current_entropy, Some(entropy));
     }
 
     #[test]
     fn close_without_open_seed_errors() {
         let mut sing = committed(&[3u8; 32]); // current_seed is None
-        let err = SeedManager::close_epoch(&mut sing, 0, 1, 2, 3, [0u8; 32]).unwrap_err();
+        let err =
+            SeedManager::close_epoch(&mut sing, 0, 1, 2, 3, [0u8; 32], [9u8; 32]).unwrap_err();
         assert_eq!(err, SeedError::MissingSeed);
     }
 
@@ -333,15 +380,88 @@ mod seed_manager_tests {
 
         // Epoch 0: provided S0.
         let (a0, b0) = SeedManager::start_epoch(&mut sing, 0, WK, Some(s0)).unwrap();
-        SeedManager::close_epoch(&mut sing, 0, a0, b0, 1, [1u8; 32]).unwrap();
+        let entropy1 = [21u8; 32];
+        SeedManager::close_epoch(&mut sing, 0, a0, b0, 1, [1u8; 32], entropy1).unwrap();
 
         // Epoch 1: derived seed, no arg; the pre-loaded commit must verify.
         let (a1, b1) = SeedManager::start_epoch(&mut sing, WK, 2 * WK, None)
             .expect("epoch 1 seed must satisfy the pending commit");
-        SeedManager::close_epoch(&mut sing, 1, a1, b1, 2, [2u8; 32]).unwrap();
+        let committed_epoch1 = sing.pending_commit;
+        let entropy2 = [22u8; 32];
+        let reveal1 =
+            SeedManager::close_epoch(&mut sing, 1, a1, b1, 2, [2u8; 32], entropy2).unwrap();
+        assert_eq!(reveal1.derivation_entropy, Some(entropy1));
+        let expected1 = h(&[&s0, &[1u8; 32], &entropy1]);
+        assert_eq!(reveal1.seed, expected1);
+        assert_eq!(committed_epoch1, h(&[&reveal1.seed]));
+        assert_eq!(
+            (reveal1.snapshot_time_a_ns, reveal1.snapshot_time_b_ns),
+            derive_snapshot_times(&expected1, WK, 2 * WK)
+        );
+        assert_eq!(
+            sing.pending_commit,
+            h(&[&h(&[&expected1, &[2u8; 32], &entropy2])])
+        );
 
         // Epoch 2: same, chain still intact.
         SeedManager::start_epoch(&mut sing, 2 * WK, 3 * WK, None)
             .expect("epoch 2 seed must satisfy the pending commit");
+    }
+
+    #[test]
+    fn old_stable_seed_singleton_decodes_with_no_entropy() {
+        #[derive(Serialize)]
+        struct SnapshotSeedSingletonV1 {
+            pending_commit: [u8; 32],
+            current_seed: Option<[u8; 32]>,
+        }
+
+        let old = SnapshotSeedSingletonV1 {
+            pending_commit: [4u8; 32],
+            current_seed: Some([5u8; 32]),
+        };
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&old, &mut bytes).unwrap();
+        let mut decoded: SnapshotSeedSingleton = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(decoded.pending_commit, old.pending_commit);
+        assert_eq!(decoded.current_seed, old.current_seed);
+        assert_eq!(decoded.current_entropy, None);
+        assert!(!decoded.legacy_reseed_pending);
+        assert!(!decoded.legacy_transition_held);
+        assert!(!decoded.secure_seed_chain_v1, "old schema defaults to legacy scheme provenance");
+        assert_eq!(
+            SeedManager::start_epoch(&mut decoded, 0, WK, None),
+            Err(SeedError::MissingEntropy),
+            "legacy derived seeds must not open without a private reseed"
+        );
+    }
+
+    #[test]
+    fn old_revealed_seed_row_decodes_without_derivation_entropy() {
+        #[derive(Serialize)]
+        struct RevealedSeedV1 {
+            epoch_index: u64,
+            seed: [u8; 32],
+            snapshot_time_a_ns: u64,
+            snapshot_time_b_ns: u64,
+            revealed_at_ns: u64,
+        }
+
+        let old = RevealedSeedV1 {
+            epoch_index: 7,
+            seed: [8; 32],
+            snapshot_time_a_ns: 10,
+            snapshot_time_b_ns: 20,
+            revealed_at_ns: 30,
+        };
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&old, &mut bytes).unwrap();
+        let decoded: RevealedSeed = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        assert_eq!(decoded.epoch_index, old.epoch_index);
+        assert_eq!(decoded.seed, old.seed);
+        assert_eq!(decoded.snapshot_time_a_ns, old.snapshot_time_a_ns);
+        assert_eq!(decoded.snapshot_time_b_ns, old.snapshot_time_b_ns);
+        assert_eq!(decoded.revealed_at_ns, old.revealed_at_ns);
+        assert_eq!(decoded.derivation_entropy, None);
     }
 }

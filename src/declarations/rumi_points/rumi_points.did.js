@@ -11,7 +11,7 @@ export const idlFactory = ({ IDL }) => {
     'Excluded' : IDL.Null,
   });
   const Result = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : PointsError });
-  const Result_3 = IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : IDL.Text });
+  const Result_1 = IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : IDL.Text });
   const CycleManagerMetric = IDL.Record({
     'key' : IDL.Text,
     'value' : IDL.Nat,
@@ -69,9 +69,11 @@ export const idlFactory = ({ IDL }) => {
     'epoch_end_ns' : IDL.Nat64,
   });
   const EpochStatus = IDL.Record({
+    'legacy_transition_held' : IDL.Bool,
     'open_epoch' : IDL.Opt(OpenEpoch),
     'snapshot_seed_committed' : IDL.Bool,
     'driver_interval_secs' : IDL.Nat64,
+    'legacy_reseed_pending' : IDL.Bool,
     'revealed_seed_count' : IDL.Nat64,
     'current_epoch_index' : IDL.Nat64,
     'driver_enabled' : IDL.Bool,
@@ -176,15 +178,16 @@ export const idlFactory = ({ IDL }) => {
   const RevealedSeed = IDL.Record({
     'revealed_at_ns' : IDL.Nat64,
     'epoch_index' : IDL.Nat64,
+    'derivation_entropy' : IDL.Opt(IDL.Vec(IDL.Nat8)),
     'seed' : IDL.Vec(IDL.Nat8),
     'snapshot_time_a_ns' : IDL.Nat64,
     'snapshot_time_b_ns' : IDL.Nat64,
   });
-  const Result_1 = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text });
-  const Result_2 = IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : PointsError });
+  const Result_2 = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text });
+  const Result_3 = IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : PointsError });
   return IDL.Service({
     'add_excluded_principal' : IDL.Func([IDL.Principal], [Result], []),
-    'admin_rebuild_3pool_recorded' : IDL.Func([], [Result_3], []),
+    'admin_rebuild_3pool_recorded' : IDL.Func([], [Result_1], []),
     'cycle_manager_metrics' : IDL.Func(
         [],
         [IDL.Vec(CycleManagerMetric)],
@@ -257,10 +260,10 @@ export const idlFactory = ({ IDL }) => {
       ),
     'set_poll_enabled' : IDL.Func([IDL.Bool], [Result], []),
     'set_poll_interval_secs' : IDL.Func([IDL.Nat64], [Result], []),
-    'set_season_end_ns' : IDL.Func([IDL.Nat64], [Result_1], []),
+    'set_season_end_ns' : IDL.Func([IDL.Nat64], [Result_2], []),
     'set_source_canister' : IDL.Func([IDL.Nat8, IDL.Principal], [Result], []),
-    'start_season' : IDL.Func([IDL.Vec(IDL.Nat8)], [Result_1], []),
-    'trigger_poll' : IDL.Func([], [Result_2], []),
+    'start_season' : IDL.Func([IDL.Vec(IDL.Nat8)], [Result_2], []),
+    'trigger_poll' : IDL.Func([], [Result_3], []),
   });
 };
 export const init = ({ IDL }) => {

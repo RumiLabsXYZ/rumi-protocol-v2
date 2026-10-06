@@ -36,6 +36,36 @@ use crate::valuation::SnapshotPrices;
 
 /// Length of one epoch. A week, expressed in nanoseconds (IC time unit).
 pub const EPOCH_DURATION_NS: u64 = 7 * 24 * 60 * 60 * 1_000_000_000;
+fn legacy_reseed_window_allowed(epoch_end_ns: u64, now_ns: u64) -> bool {
+    now_ns < epoch_end_ns
+}
+
+fn safe_due_epoch_start(scheduled_start_ns: u64, epoch_end_ns: u64, now_ns: u64) -> Option<u64> {
+    if now_ns < scheduled_start_ns || now_ns >= epoch_end_ns {
+        return None;
+    }
+    if now_ns == scheduled_start_ns {
+        Some(scheduled_start_ns)
+    } else if legacy_reseed_window_allowed(epoch_end_ns, now_ns) {
+        // A standby can miss the scheduled start. Rebase to this transition
+        // instant so the new open epoch never accrues a pre-open interval.
+        Some(now_ns)
+    } else {
+        None
+    }
+}
+
+fn legacy_open_epoch_requires_review(
+    epoch: &OpenEpoch,
+    current_entropy: Option<[u8; 32]>,
+    secure_seed_chain_v1: bool,
+) -> bool {
+    if epoch.epoch_index == 0 {
+        !secure_seed_chain_v1
+    } else {
+        current_entropy.is_none()
+    }
+}
 
 /// Bounds of epoch `index`: `[season_start + index*EPOCH, min(start + EPOCH,
 /// season_end)]`. The last epoch is partial (truncated at season end).
@@ -232,13 +262,29 @@ pub fn start_season(initial_seed: [u8; 32], now: u64) -> Result<(), StartSeasonE
 fn open_new_epoch(index: u64, seed_arg: Option<[u8; 32]>, _now: u64) -> Result<(), SeedError> {
     let (season_start, season_end) = state::season_bounds();
     let (start, end) = epoch_bounds(index, season_start, season_end);
+    open_epoch_at(index, start, end, seed_arg)
+}
+
+fn open_epoch_at(
+    index: u64,
+    epoch_start_ns: u64,
+    epoch_end_ns: u64,
+    seed_arg: Option<[u8; 32]>,
+) -> Result<(), SeedError> {
     let (a_ns, b_ns) =
-        state::with_state_mut(|s| SeedManager::start_epoch(&mut s.snapshot_seed, start, end, seed_arg))?;
+        state::with_state_mut(|s| {
+            SeedManager::start_epoch(
+                &mut s.snapshot_seed,
+                epoch_start_ns,
+                epoch_end_ns,
+                seed_arg,
+            )
+        })?;
     state::snapshot_buffer_clear();
     state::set_open_epoch(Some(OpenEpoch {
         epoch_index: index,
-        epoch_start_ns: start,
-        epoch_end_ns: end,
+        epoch_start_ns,
+        epoch_end_ns,
         snapshot_a_ns: a_ns,
         snapshot_b_ns: b_ns,
         a_cursor: None,
@@ -250,7 +296,191 @@ fn open_new_epoch(index: u64, seed_arg: Option<[u8; 32]>, _now: u64) -> Result<(
         close_points_accrued: 0,
         close_active: 0,
     }));
+    // Opening is only allowed after the epoch's entropy/commit requirements
+    // pass. Persist that provenance so old index-0 state that successfully
+    // bootstraps with committed S0 is not mistaken for an unsafe legacy open.
+    state::with_state_mut(|s| s.snapshot_seed.secure_seed_chain_v1 = true);
     Ok(())
+}
+
+async fn management_entropy() -> Result<[u8; 32], SeedError> {
+    match ic_cdk::api::management_canister::main::raw_rand().await {
+        Ok((bytes,)) => bytes.try_into().map_err(|_| SeedError::InvalidEntropy),
+        Err((code, message)) => {
+            ic_cdk::println!("[epoch] raw_rand failed ({:?}: {})", code, message);
+            Err(SeedError::EntropyUnavailable)
+        }
+    }
+}
+
+/// Synchronously fence legacy state before `post_upgrade` re-registers timers.
+/// This closes the interval in which a poll timer or an admin trigger could
+/// write points before the asynchronous epoch driver noticed the old seed.
+pub fn prepare_legacy_state_after_upgrade(now_ns: u64) {
+    if state::legacy_transition_held() {
+        return;
+    }
+    if let Some(open) = state::get_open_epoch() {
+        if legacy_open_epoch_requires_review(
+            &open,
+            state::current_epoch_entropy(),
+            state::secure_seed_chain_v1(),
+        ) {
+            state::set_legacy_transition_held(true);
+            state::set_legacy_reseed_pending(false);
+            ic_cdk::println!(
+                "[epoch] post_upgrade held active legacy epoch {} for admin review",
+                open.epoch_index
+            );
+        }
+        return;
+    }
+
+    let index = state::current_epoch_index();
+    if index == 0 || state::current_epoch_entropy().is_some() {
+        return;
+    }
+    let (season_start, season_end) = state::season_bounds();
+    let (scheduled_start, epoch_end) = epoch_bounds(index, season_start, season_end);
+    if now_ns < scheduled_start {
+        return;
+    }
+    if !legacy_reseed_window_allowed(epoch_end, now_ns) {
+        state::set_legacy_transition_held(true);
+        state::set_legacy_reseed_pending(false);
+        ic_cdk::println!(
+            "[epoch] post_upgrade held expired legacy epoch {} for admin review without advancing rewards",
+            index
+        );
+    } else {
+        state::set_legacy_reseed_pending(true);
+    }
+}
+
+fn secure_seed_from_history(index: u64, entropy: &[u8; 32]) -> Result<[u8; 32], SeedError> {
+    let previous_index = index
+        .checked_sub(1)
+        .ok_or(SeedError::LegacyHistoryMissing)?;
+    let previous_seed =
+        state::get_revealed_seed(previous_index).ok_or(SeedError::LegacyHistoryMissing)?;
+    let previous_summary = state::epoch_history(previous_index, 1)
+        .into_iter()
+        .next()
+        .ok_or(SeedError::LegacyHistoryMissing)?;
+    Ok(sha256(&[
+        &previous_seed.seed,
+        &summary_hash(&previous_summary),
+        entropy,
+    ]))
+}
+
+/// Resume migration only when an old release left the next epoch unopened.
+/// Already-open legacy epochs are held for operator review because their
+/// remaining snapshot times are publicly predictable.
+async fn resume_legacy_reseed() {
+    let _poll_guard = match state::PollGuard::new() {
+        Some(guard) => guard,
+        None => return,
+    };
+    let open = state::get_open_epoch();
+    if open.is_some() {
+        // Remaining legacy snapshot times are public. Pause without rewriting
+        // cursors, snapshots, accrued points, commitments, or the epoch index.
+        state::set_legacy_transition_held(true);
+        state::set_legacy_reseed_pending(false);
+        ic_cdk::println!(
+            "[epoch] active legacy epoch held for admin review; no captures or close will run"
+        );
+        return;
+    }
+    let index = state::current_epoch_index();
+    if index == 0 {
+        state::set_legacy_reseed_pending(false);
+        return;
+    }
+    let (season_start, season_end) = state::season_bounds();
+    let (mut scheduled_start, mut epoch_end) = epoch_bounds(index, season_start, season_end);
+    let transition_now = ic_cdk::api::time();
+    if transition_now < scheduled_start {
+        return;
+    }
+    if !legacy_reseed_window_allowed(epoch_end, transition_now) {
+        // Durable hold, visible via the admin epoch status. Do not synthesize a
+        // zero-point close or silently advance the epoch index: an operator must
+        // review the missed reward interval and explicitly decide how to resume.
+        state::set_legacy_transition_held(true);
+        state::set_legacy_reseed_pending(false);
+        ic_cdk::println!(
+            "[epoch] legacy epoch {} missed its unopened snapshot window; held for admin review without advancing rewards",
+            index
+        );
+        return;
+    }
+
+    if state::current_epoch_entropy().is_none() {
+        let entropy = match management_entropy().await {
+            Ok(entropy) => entropy,
+            Err(error) => {
+                ic_cdk::println!(
+                    "[epoch] secure legacy transition remains pending: {:?}",
+                    error
+                );
+                return;
+            }
+        };
+        // The season end is admin-adjustable. Re-read it after the await so a
+        // concurrent shortening cannot open this epoch past its current bound.
+        let (season_start, season_end) = state::season_bounds();
+        let (_, post_entropy_epoch_end) = epoch_bounds(index, season_start, season_end);
+        let transition_now = ic_cdk::api::time();
+        if !legacy_reseed_window_allowed(post_entropy_epoch_end, transition_now) {
+            state::set_legacy_transition_held(true);
+            state::set_legacy_reseed_pending(false);
+            ic_cdk::println!(
+                "[epoch] legacy epoch {} missed its unopened snapshot window during raw_rand; held for admin review",
+                index
+            );
+            return;
+        }
+        let seed = match secure_seed_from_history(index, &entropy) {
+            Ok(seed) => seed,
+            Err(error) => {
+                ic_cdk::println!(
+                    "[epoch] secure legacy transition remains pending: {:?}",
+                    error
+                );
+                return;
+            }
+        };
+        state::install_reseeded_epoch_seed(seed, entropy);
+    }
+
+    // Clear any stale legacy snapshot buffer incrementally after entropy is
+    // available. A raw_rand rejection therefore leaves reward/capture state
+    // untouched; the persisted pending bit only fences new polls during retry.
+    if !state::snapshot_buffer_clear_chunk() {
+        return;
+    }
+
+    // A retry may resume after a season-bound admin update while snapshot-buffer
+    // cleanup spans multiple ticks; the final open must use the latest window.
+    let (season_start, season_end) = state::season_bounds();
+    (scheduled_start, epoch_end) = epoch_bounds(index, season_start, season_end);
+    let transition_now = ic_cdk::api::time();
+    if !legacy_reseed_window_allowed(epoch_end, transition_now) {
+        state::set_legacy_transition_held(true);
+        state::set_legacy_reseed_pending(false);
+        return;
+    }
+    if let Err(error) = open_epoch_at(index, transition_now.max(scheduled_start), epoch_end, None) {
+        ic_cdk::println!(
+            "[epoch] secure legacy transition remains pending: {:?}",
+            error
+        );
+        return;
+    }
+    state::set_legacy_transition_held(false);
+    state::set_legacy_reseed_pending(false);
 }
 
 // ── Periodic driver tick ──
@@ -272,19 +502,60 @@ pub async fn run_tick() {
         None => return, // a tick is already in flight
     };
     let now = ic_cdk::api::time();
+    if state::legacy_transition_held() {
+        return;
+    }
+    if state::legacy_reseed_pending() {
+        resume_legacy_reseed().await;
+        return;
+    }
+    if let Some(open) = state::get_open_epoch() {
+        if legacy_open_epoch_requires_review(
+            &open,
+            state::current_epoch_entropy(),
+            state::secure_seed_chain_v1(),
+        ) {
+            // Persist a poll fence before awaiting the poll guard. Existing
+            // in-flight polls drain; subsequent poll calls see the pending bit.
+            state::set_legacy_reseed_pending(true);
+            resume_legacy_reseed().await;
+            return;
+        }
+    }
     let (season_start, season_end) = state::season_bounds();
     let open = state::get_open_epoch();
     let index = state::current_epoch_index();
     match next_action(&open, now, season_start, season_end, index) {
         DriverAction::Idle => {}
         DriverAction::Start => {
-            if let Err(e) = open_new_epoch(index, None, now) {
+            let result = if index > 0 && state::current_epoch_entropy().is_none() {
+                state::set_legacy_reseed_pending(true);
+                resume_legacy_reseed().await;
+                return;
+            } else {
+                let (scheduled_start, epoch_end) = epoch_bounds(index, season_start, season_end);
+                match safe_due_epoch_start(scheduled_start, epoch_end, now) {
+                    Some(start_ns) => open_epoch_at(index, start_ns, epoch_end, None),
+                    None => {
+                        if now >= epoch_end {
+                            state::set_legacy_transition_held(true);
+                            state::set_legacy_reseed_pending(false);
+                        }
+                        ic_cdk::println!(
+                            "[epoch] epoch {} missed its safe start window; held for admin review without advancing rewards",
+                            index
+                        );
+                        return;
+                    }
+                }
+            };
+            if let Err(e) = result {
                 ic_cdk::println!("[epoch] start of epoch {} failed: {:?}", index, e);
             }
         }
         DriverAction::CaptureA => capture(Snapshot::A).await,
         DriverAction::CaptureB => capture(Snapshot::B).await,
-        DriverAction::Close => close_current_epoch(now),
+        DriverAction::Close => close_current_epoch(now).await,
     }
 }
 
@@ -366,7 +637,14 @@ async fn capture(which: Snapshot) {
 /// the close re-entrant-safe (the single-tick `EPOCH_IN_PROGRESS` guard already
 /// serializes ticks) and idempotent (the cursor advances exactly-once per
 /// principal, so a re-run never double-credits).
-fn close_current_epoch(now: u64) {
+async fn close_current_epoch(now: u64) {
+    // Pair the durable `close_started` cutoff with the poll guard: an already
+    // running poll makes this close step wait, and new polls are rejected once
+    // the first close chunk persists its cutoff. Keep the guard over raw_rand.
+    let _poll_guard = match state::PollGuard::new() {
+        Some(guard) => guard,
+        None => return,
+    };
     let stats = match state::run_close_accrual_chunk(now) {
         // Still principals left to close: persist progress (already done inside the
         // chunk) and return. The epoch stays open; `next_action` returns `Close`
@@ -393,16 +671,22 @@ fn close_current_epoch(now: u64) {
         snapshot_b_ns: open.snapshot_b_ns,
     };
     let hash = summary_hash(&summary);
-    match state::with_state_mut(|s| {
-        SeedManager::close_epoch(
-            &mut s.snapshot_seed,
-            open.epoch_index,
-            open.snapshot_a_ns,
-            open.snapshot_b_ns,
-            now,
-            hash,
-        )
-    }) {
+    // Obtain fresh, unpredictable entropy only after all epoch captures and
+    // accrual are complete. On rejection, retain the open epoch and retry next
+    // tick; never fall back to publicly derivable entropy.
+    let entropy_for_next_epoch = match management_entropy().await {
+        Ok(entropy) => entropy,
+        Err(error) => {
+            ic_cdk::println!("[epoch] close remains pending: {:?}", error);
+            return;
+        }
+    };
+    match close_seed_after_entropy(
+        Ok(entropy_for_next_epoch),
+        &open,
+        ic_cdk::api::time(),
+        hash,
+    ) {
         Ok(revealed) => state::append_revealed_seed(revealed),
         // Unreachable in the live flow (`current_seed` is always `Some` once an
         // epoch is open). If it ever happens, trap to roll the whole close back
@@ -415,6 +699,29 @@ fn close_current_epoch(now: u64) {
     state::append_epoch_summary(summary);
     state::advance_epoch_index();
     state::set_open_epoch(None);
+}
+
+/// Commit the next seed only after entropy is available. Keeping the failure
+/// branch here makes an entropy rejection a no-op on the seed chain, leaving the
+/// persisted close cursor/points ready for an exact retry after upgrade.
+fn close_seed_after_entropy(
+    entropy: Result<[u8; 32], SeedError>,
+    open: &OpenEpoch,
+    now_ns: u64,
+    summary_hash: [u8; 32],
+) -> Result<crate::snapshot_seed::RevealedSeed, SeedError> {
+    let entropy = entropy?;
+    state::with_state_mut(|s| {
+        SeedManager::close_epoch(
+            &mut s.snapshot_seed,
+            open.epoch_index,
+            open.snapshot_a_ns,
+            open.snapshot_b_ns,
+            now_ns,
+            summary_hash,
+            entropy,
+        )
+    })
 }
 
 /// Deterministic hash binding the next seed to this epoch's chain state (spike 0.3).
@@ -632,6 +939,262 @@ mod tests {
         assert_eq!(epoch_bounds(0, 1_000, 1_000 + 100 * E), (1_000, 1_000 + E));
         // The last epoch is truncated at season end.
         assert_eq!(epoch_bounds(1, 0, E + 100), (E, E + 100));
+    }
+
+    #[test]
+    fn legacy_transition_rederives_from_history_plus_fresh_entropy() {
+        state::init_state(None, Principal::anonymous());
+        let summary = EpochSummary {
+            epoch_index: 0,
+            epoch_start_ns: 0,
+            epoch_end_ns: E,
+            total_points_all: 123,
+            points_accrued_this_epoch: 100,
+            active_principals: 1,
+            registered_principals: 1,
+            snapshot_a_ns: E / 4,
+            snapshot_b_ns: E * 3 / 4,
+        };
+        let previous_seed = [7u8; 32];
+        state::append_epoch_summary(summary.clone());
+        state::append_revealed_seed(crate::snapshot_seed::RevealedSeed {
+            epoch_index: 0,
+            seed: previous_seed,
+            snapshot_time_a_ns: summary.snapshot_a_ns,
+            snapshot_time_b_ns: summary.snapshot_b_ns,
+            revealed_at_ns: E,
+            derivation_entropy: None,
+        });
+
+        let entropy = [19u8; 32];
+        let migrated = secure_seed_from_history(1, &entropy).unwrap();
+        assert_eq!(
+            migrated,
+            sha256(&[&previous_seed, &summary_hash(&summary), &entropy])
+        );
+        assert_ne!(
+            migrated,
+            sha256(&[&previous_seed, &summary_hash(&summary)]),
+            "the legacy public derivation cannot survive into the new epoch"
+        );
+        state::install_reseeded_epoch_seed(migrated, entropy);
+        assert_eq!(
+            state::get_pending_commit(),
+            crate::snapshot_seed::commitment(&migrated)
+        );
+    }
+
+    #[test]
+    fn no_open_epoch_rebases_any_nonexpired_window_and_holds_expired_window() {
+        let scheduled_start = E;
+        let end = E * 2;
+        // The state-machine trigger remains due while standby, so the Start
+        // handler must enforce the end/cutoff independently before opening.
+        assert_eq!(
+            next_action(&None, end, 0, E * 3, 1),
+            DriverAction::Start
+        );
+        assert_eq!(
+            safe_due_epoch_start(scheduled_start, end, scheduled_start),
+            Some(scheduled_start)
+        );
+        let late = scheduled_start + 1_000;
+        assert_eq!(safe_due_epoch_start(scheduled_start, end, late), Some(late));
+        assert_eq!(safe_due_epoch_start(scheduled_start, end, end), None);
+        assert_eq!(safe_due_epoch_start(scheduled_start, end, end + 1), None);
+        assert_eq!(safe_due_epoch_start(scheduled_start, end, end - 1), Some(end - 1));
+    }
+
+    #[test]
+    fn post_upgrade_holds_active_legacy_epoch_before_ingress() {
+        state::init_state(None, Principal::anonymous());
+        let mut open = oe(true, false);
+        open.epoch_index = 4;
+        open.epoch_start_ns = E * 4;
+        open.epoch_end_ns = E * 5;
+        open.close_started = true;
+        open.close_cursor = Some(pr(8));
+        open.close_points_accrued = 99;
+        state::with_state_mut(|s| {
+            s.current_epoch_index = 4;
+            s.snapshot_seed.current_seed = Some([7; 32]);
+            s.snapshot_seed.current_entropy = None;
+        });
+        state::set_open_epoch(Some(open.clone()));
+
+        prepare_legacy_state_after_upgrade(E * 4 + 100);
+
+        let status = state::epoch_status();
+        assert!(status.legacy_transition_held);
+        assert!(!status.legacy_reseed_pending);
+        assert_eq!(status.current_epoch_index, 4);
+        assert_eq!(status.open_epoch, Some(open));
+        assert!(state::try_poll_guard().is_none());
+
+        // Older singleton blobs default the scheme marker to false. Even an
+        // already-open epoch zero is held; fresh init sets the marker true.
+        state::init_state(None, Principal::anonymous());
+        let legacy_zero = oe(true, false);
+        state::with_state_mut(|s| {
+            s.snapshot_seed.secure_seed_chain_v1 = false;
+            s.snapshot_seed.current_seed = Some([6; 32]);
+        });
+        state::set_open_epoch(Some(legacy_zero.clone()));
+        prepare_legacy_state_after_upgrade(100);
+        let status = state::epoch_status();
+        assert!(status.legacy_transition_held);
+        assert_eq!(status.open_epoch, Some(legacy_zero));
+        assert!(state::try_poll_guard().is_none());
+    }
+
+    #[test]
+    fn post_upgrade_fences_nonexpired_and_holds_expired_unopened_legacy_epoch() {
+        state::init_state(
+            Some(crate::types::InitArgs {
+                season_start_ns: Some(0),
+                season_end_ns: Some(3 * E),
+                ..Default::default()
+            }),
+            Principal::anonymous(),
+        );
+        state::with_state_mut(|s| {
+            s.current_epoch_index = 1;
+            s.snapshot_seed.current_seed = Some([7; 32]);
+            s.snapshot_seed.current_entropy = None;
+        });
+
+        prepare_legacy_state_after_upgrade(E + 100);
+        assert!(state::legacy_reseed_pending());
+        assert!(!state::legacy_transition_held());
+        assert!(state::try_poll_guard().is_none());
+
+        // A snapshot with no remaining epoch window is held for operator review;
+        // no summary is fabricated and no epoch index is consumed.
+        state::init_state(
+            Some(crate::types::InitArgs {
+                season_start_ns: Some(0),
+                season_end_ns: Some(3 * E),
+                ..Default::default()
+            }),
+            Principal::anonymous(),
+        );
+        state::with_state_mut(|s| {
+            s.current_epoch_index = 1;
+            s.snapshot_seed.current_seed = Some([7; 32]);
+            s.snapshot_seed.current_entropy = None;
+        });
+        prepare_legacy_state_after_upgrade(2 * E);
+        let status = state::epoch_status();
+        assert!(status.legacy_transition_held);
+        assert!(!status.legacy_reseed_pending);
+        assert_eq!(status.current_epoch_index, 1);
+        assert!(status.open_epoch.is_none());
+        assert!(state::epoch_history(0, u64::MAX).is_empty());
+        assert_eq!(state::revealed_seed_count(), 0);
+        assert!(state::try_poll_guard().is_none());
+    }
+
+    #[test]
+    fn active_and_closing_legacy_epochs_require_review_without_rewriting_state() {
+        let mut epoch = oe(true, true);
+        epoch.epoch_index = 4;
+        epoch.epoch_start_ns = E;
+        epoch.epoch_end_ns = E * 2;
+        epoch.a_cursor = Some(pr(1));
+        epoch.a_complete = true;
+        epoch.b_cursor = Some(pr(2));
+        epoch.b_complete = false;
+        epoch.close_started = true;
+        epoch.close_cursor = Some(pr(3));
+        epoch.close_points_accrued = 99;
+        epoch.close_active = 7;
+        let preserved = epoch.clone();
+        assert!(legacy_open_epoch_requires_review(&epoch, None, true));
+        assert_eq!(epoch, preserved, "review detection leaves an active epoch unchanged");
+        epoch.close_started = false;
+        assert!(legacy_open_epoch_requires_review(&epoch, None, true));
+        assert_eq!(epoch.epoch_start_ns, preserved.epoch_start_ns);
+        assert_eq!(epoch.snapshot_a_ns, preserved.snapshot_a_ns);
+        assert_eq!(epoch.snapshot_b_ns, preserved.snapshot_b_ns);
+        assert_eq!(epoch.close_cursor, preserved.close_cursor);
+        assert_eq!(epoch.close_points_accrued, preserved.close_points_accrued);
+        assert!(!legacy_open_epoch_requires_review(&epoch, Some([9; 32]), true));
+        assert!(!legacy_reseed_window_allowed(epoch.epoch_end_ns, epoch.epoch_end_ns));
+    }
+
+    #[test]
+    fn old_open_epoch_zero_is_held_but_fresh_precommitted_epoch_zero_is_not() {
+        let epoch_zero = oe(true, false);
+        assert!(legacy_open_epoch_requires_review(&epoch_zero, None, false));
+        assert!(
+            !legacy_open_epoch_requires_review(&epoch_zero, None, true),
+            "fresh epoch 0 is authorized by S0's init-time commitment"
+        );
+
+        let s0 = [4; 32];
+        state::init_state(
+            Some(crate::types::InitArgs {
+                snapshot_seed_commit: Some(crate::snapshot_seed::commitment(&s0)),
+                season_start_ns: Some(0),
+                season_end_ns: Some(3 * E),
+                ..Default::default()
+            }),
+            Principal::anonymous(),
+        );
+        state::with_state_mut(|s| s.snapshot_seed.secure_seed_chain_v1 = false);
+        start_season(s0, 1).expect("old but committed bootstrap remains valid");
+        assert!(state::secure_seed_chain_v1());
+        prepare_legacy_state_after_upgrade(100);
+        assert!(
+            !state::legacy_transition_held(),
+            "a secure bootstrap on an upgraded install must survive a second upgrade"
+        );
+    }
+
+    #[test]
+    fn entropy_failure_keeps_closed_epoch_pending_and_retryable() {
+        state::init_state(None, Principal::anonymous());
+        let mut open = oe(true, true);
+        open.epoch_index = 3;
+        open.epoch_start_ns = E * 3;
+        open.epoch_end_ns = E * 4;
+        open.close_started = true;
+        open.close_cursor = Some(pr(8));
+        open.close_points_accrued = 777;
+        state::with_state_mut(|s| {
+            s.current_epoch_index = 3;
+            s.snapshot_seed.current_seed = Some([7; 32]);
+            s.snapshot_seed.current_entropy = None; // migrated legacy seed
+        });
+        state::set_open_epoch(Some(open.clone()));
+
+        let seed_before = state::with_state(|s| s.snapshot_seed.clone());
+        let err = close_seed_after_entropy(
+            Err(SeedError::EntropyUnavailable),
+            &open,
+            E * 4,
+            [11; 32],
+        )
+        .unwrap_err();
+        assert_eq!(err, SeedError::EntropyUnavailable);
+        assert_eq!(state::with_state(|s| s.snapshot_seed.clone()), seed_before);
+        assert_eq!(state::current_epoch_index(), 3);
+        assert_eq!(state::get_open_epoch(), Some(open.clone()));
+        assert!(state::try_poll_guard().is_none());
+
+        // The same completed close can retry with a later raw_rand response;
+        // it does not repeat accrual or alter the legacy epoch being revealed.
+        let entropy = [19; 32];
+        let revealed = close_seed_after_entropy(Ok(entropy), &open, E * 4 + 1, [11; 32])
+            .expect("entropy retry should commit the next seed");
+        assert_eq!(revealed.epoch_index, 3);
+        assert_eq!(revealed.seed, [7; 32]);
+        assert_eq!(revealed.derivation_entropy, None);
+        let expected_next = sha256(&[&[7; 32], &[11; 32], &entropy]);
+        assert_eq!(state::current_epoch_seed(), Some(expected_next));
+        assert_eq!(state::current_epoch_entropy(), Some(entropy));
+        assert_eq!(state::get_pending_commit(), crate::snapshot_seed::commitment(&expected_next));
+        assert_eq!(state::current_epoch_index(), 3, "index advances after reveal is persisted");
     }
 
     fn oe(a_complete: bool, b_complete: bool) -> OpenEpoch {

@@ -286,6 +286,11 @@ pub struct EpochStatus {
     pub open_epoch: Option<OpenEpoch>,
     pub revealed_seed_count: u64,
     pub snapshot_seed_committed: bool,
+    /// A legacy snapshot schedule cannot safely resume automatically. The epoch
+    /// is held unchanged for admin review; rewards are neither skipped nor reset.
+    pub legacy_transition_held: bool,
+    /// A secure legacy reseed is waiting for entropy or incremental cleanup.
+    pub legacy_reseed_pending: bool,
 }
 
 /// PUBLIC epoch-driver status for the ops dashboard (POINTS-001). Mirrors
