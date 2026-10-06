@@ -29,6 +29,67 @@ macro_rules! ensure_eq {
     }
 }
 
+#[cfg(test)]
+mod three_usd_v2_migration_tests {
+    use super::*;
+
+    #[test]
+    fn pre_v2_snapshot_decodes_with_default_off_empty_sidecars() {
+        let state = State::default();
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&state, &mut encoded).unwrap();
+        let value: ciborium::Value = ciborium::de::from_reader(encoded.as_slice()).unwrap();
+        let mut entries = match value {
+            ciborium::Value::Map(entries) => entries,
+            other => panic!("expected a CBOR map, got {other:?}"),
+        };
+        entries.retain(|(field, _)| {
+            !matches!(field, ciborium::Value::Text(name)
+                if name == "pending_3usd_refund_journals"
+                    || name == "three_usd_reserve_ingress_journals"
+                    || name == "three_usd_reserve_payout_parents"
+                    || name == "three_usd_reserve_ingress_enabled"
+                    || name == "sp_three_usd_reserve_absorb_results_by_proof")
+        });
+        let mut legacy = Vec::new();
+        ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut legacy).unwrap();
+        let restored: State = ciborium::de::from_reader(legacy.as_slice())
+            .expect("pre-V2 stable state must decode through additive defaults");
+
+        assert!(restored.pending_3usd_refund_journals.is_empty());
+        assert!(restored.three_usd_reserve_ingress_journals.is_empty());
+        assert!(restored.three_usd_reserve_payout_parents.is_empty());
+        assert!(restored.sp_three_usd_reserve_absorb_results_by_proof.is_empty());
+        assert!(!restored.three_usd_reserve_ingress_enabled);
+    }
+
+    #[test]
+    fn pre_v2_refund_rows_decode_without_parent_identity() {
+        #[derive(serde::Serialize)]
+        struct PriorRefund {
+            stability_pool: Principal,
+            ledger: Principal,
+            amount_e8s: u64,
+            vault_id: u64,
+            retry_count: u8,
+            op_nonce: u128,
+        }
+        let prior = PriorRefund {
+            stability_pool: Principal::from_slice(&[0x41]),
+            ledger: Principal::from_slice(&[0x42]),
+            amount_e8s: 88,
+            vault_id: 73,
+            retry_count: 2,
+            op_nonce: 74,
+        };
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&prior, &mut encoded).unwrap();
+        let restored: PendingThreeUsdRefund = ciborium::de::from_reader(encoded.as_slice())
+            .expect("legacy refund row must retain its legacy meaning");
+        assert_eq!(restored.parent_absorb_id, None);
+    }
+}
+
 macro_rules! ensure {
     ($cond:expr, $msg:expr $(, $args:expr)* $(,)*) => {
         if !$cond {
@@ -1461,7 +1522,8 @@ pub struct PendingThreeUsdRefund {
     pub stability_pool: Principal,
     /// The 3USD ledger the refund transfers on.
     pub ledger: Principal,
-    /// 3USD amount to refund (in e8s), already net of the ledger fee.
+    /// Legacy amount field: old rows may be gross or net; new journaled rows
+    /// store the gross refund obligation here.
     pub amount_e8s: u64,
     /// Vault whose capped/failed liquidation stranded this refund (for tracing).
     pub vault_id: u64,
@@ -1470,6 +1532,259 @@ pub struct PendingThreeUsdRefund {
     /// Wave-3 ICRC dedup nonce. Minted once at first attempt, reused on every
     /// retry so the 3USD ledger deduplicates instead of double-refunding.
     pub op_nonce: u128,
+    /// Present only for a refund child linked to one V2 reserve absorb.
+    /// Older and legacy queue rows decode without a parent identity.
+    #[serde(default)]
+    pub parent_absorb_id: Option<u64>,
+}
+
+/// Additive private journal for 3USD refunds. A missing map entry denotes a
+/// legacy row whose amount may be gross or net; such rows are held unchanged.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize, Copy)]
+pub enum ThreeUsdRefundDispatchState {
+    /// Legacy reserve-account source, preserving the old endpoint's hashed
+    /// backend subaccount. Existing snapshots and old endpoint refunds keep
+    /// this meaning.
+    NeverDispatched { gross_amount_e8s: u64 },
+    /// New V2 ingress source: the backend's default account.
+    NeverDispatchedDefault { gross_amount_e8s: u64 },
+    SubmittedOrUnknown { tuple: ThreeUsdRefundTransferTuple },
+    Unpayable { gross_amount_e8s: u64, fee_e8s: u64 },
+    UnpayableDefault { gross_amount_e8s: u64, fee_e8s: u64 },
+    /// Legacy hashed-source refund held because its fee cannot safely be
+    /// charged to the principal owed. An optional old tuple is retained
+    /// unchanged for owner-scoped reconciliation; this is not terminal.
+    HeldLegacyProtocolPaid {
+        gross_amount_e8s: u64,
+        tuple: Option<ThreeUsdRefundTransferTuple>,
+    },
+}
+
+#[derive(candid::CandidType, Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum PayoutProofKind {
+    Icrc3,
+    NativeIcp,
+}
+
+/// Exact ICRC-1 tuple used by every retry after first dispatch.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize, Copy)]
+pub struct ThreeUsdRefundTransferTuple {
+    pub source_owner: Principal,
+    pub source_subaccount: Option<[u8; 32]>,
+    pub destination: icrc_ledger_types::icrc1::account::Account,
+    pub amount_e8s: u64,
+    pub fee_e8s: u64,
+    pub memo: [u8; 16],
+    pub created_at_time_ns: u64,
+}
+
+/// Canonical identity for one SP reserve absorption request. The ID is
+/// allocated durably by the Stability Pool before approval and reused across
+/// unknown-outcome retries.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, Serialize)]
+pub struct ThreeUsdReserveIngressKey {
+    pub stability_pool: Principal,
+    pub vault_id: u64,
+    pub absorb_id: u64,
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct ThreeUsdReserveIngressRequest {
+    pub icusd_debt_covered_e8s: u64,
+    pub three_usd_amount_e8s: u64,
+    pub ledger: Principal,
+}
+
+/// Exact ICRC-2 transaction arguments used for a reserve ingress. Fee remains
+/// `None`, matching the legacy transferFrom policy; all other arguments are
+/// persisted before dispatch and replayed unchanged.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct ThreeUsdReserveIngressTuple {
+    pub spender_owner: Principal,
+    pub spender_subaccount: Option<[u8; 32]>,
+    pub source: icrc_ledger_types::icrc1::account::Account,
+    pub destination: icrc_ledger_types::icrc1::account::Account,
+    pub amount_e8s: u64,
+    pub fee_e8s: Option<u64>,
+    pub memo: [u8; 16],
+    pub created_at_time_ns: u64,
+    pub op_nonce: u128,
+    /// Present only for a refund child linked to one V2 reserve absorb.
+    /// Older and legacy queue rows decode without a parent identity.
+    #[serde(default)]
+    pub parent_absorb_id: Option<u64>,
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct ThreeUsdReserveIngressResult {
+    pub success: bool,
+    pub vault_id: u64,
+    pub liquidated_debt: u64,
+    pub collateral_received: u64,
+    pub collateral_type: String,
+    pub block_index: u64,
+    pub fee: u64,
+    pub collateral_price_e8s: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub enum ThreeUsdReserveIngressPhase {
+    /// Durable admission marker written before any asynchronous validation.
+    /// Its presence means an update with this ID has been accepted, but no
+    /// transfer tuple has yet been dispatched.
+    AdmissionPending,
+    /// Terminal, replay-protected rejection before transfer dispatch. The
+    /// reason is diagnostic only; callers must use this phase, not text, as
+    /// the proof that this ID can never dispatch later.
+    PreTransferRejected { reason: String },
+    /// Written durably before the first transferFrom await. This includes a
+    /// trap or reply-loss boundary and therefore always replays the same tuple.
+    SubmittedOrUnknown { tuple: ThreeUsdReserveIngressTuple },
+    TransferConfirmed { tuple: ThreeUsdReserveIngressTuple, block_index: u64 },
+    Absorbed {
+        tuple: ThreeUsdReserveIngressTuple,
+        block_index: u64,
+        result: ThreeUsdReserveIngressResult,
+    },
+    FailedAfterTransfer {
+        tuple: ThreeUsdReserveIngressTuple,
+        block_index: u64,
+        error: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct ThreeUsdReserveIngressJournal {
+    pub request: ThreeUsdReserveIngressRequest,
+    pub phase: ThreeUsdReserveIngressPhase,
+    /// Deterministic child refund, inserted atomically with its pending queue
+    /// row before the ingress can become terminal. A missing refund means no
+    /// refund was required; old snapshots default to none.
+    #[serde(default)]
+    pub refund: Option<ThreeUsdReserveIngressRefund>,
+    /// Exact Stability Pool collateral payout committed with the proof-keyed
+    /// debt write-down. Old journals lack this link and remain nonterminal.
+    #[serde(default)]
+    pub payout: Option<ThreeUsdReserveIngressPayout>,
+    /// Protocol 3USD fee capacity reserved before the first pull. Retained
+    /// across the ingress saga until its refund child settles or no refund is
+    /// required. Old journals have no such reservation.
+    #[serde(default)]
+    pub refund_fee_reserved_e8s: Option<u64>,
+}
+
+impl ThreeUsdReserveIngressJournal {
+    /// A full refund child is the durable outcome choice for this ingress.
+    /// It remains authoritative even after its queue row is removed on payout
+    /// and before the parent phase can be terminalized.
+    pub fn has_full_refund_child(&self) -> bool {
+        self.refund.as_ref().is_some_and(|refund| {
+            refund.gross_amount_e8s >= self.request.three_usd_amount_e8s
+        })
+    }
+
+    /// The only refund amount compatible with a committed proportional V2
+    /// absorb result. `None` means the journal is not terminally absorbed.
+    pub fn expected_absorbed_refund_e8s(&self) -> Option<u64> {
+        let ThreeUsdReserveIngressPhase::Absorbed { result, .. } = &self.phase else {
+            return None;
+        };
+        if self.request.icusd_debt_covered_e8s == 0
+            || result.liquidated_debt > self.request.icusd_debt_covered_e8s
+        {
+            return None;
+        }
+        let realized = ((self.request.three_usd_amount_e8s as u128)
+            .checked_mul(result.liquidated_debt as u128)?
+            / self.request.icusd_debt_covered_e8s as u128) as u64;
+        Some(self.request.three_usd_amount_e8s.saturating_sub(realized))
+    }
+
+    /// Validate the replay-visible result while retaining the phase block as
+    /// the authoritative proof index. `result.block_index == 0` is the
+    /// established production result shape for this liquidation API.
+    pub fn absorbed_result_matches_parent(&self, vault_id: u64, proof_block_index: u64) -> bool {
+        let ThreeUsdReserveIngressPhase::Absorbed { result, block_index, .. } = &self.phase else {
+            return false;
+        };
+        let Some(expected_refund) = self.expected_absorbed_refund_e8s() else {
+            return false;
+        };
+        *block_index == proof_block_index
+            && result.vault_id == vault_id
+            && (result.block_index == 0 || result.block_index == proof_block_index)
+            && self.refund.as_ref().map(|refund| refund.gross_amount_e8s)
+                == (expected_refund > 0).then_some(expected_refund)
+    }
+}
+
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct ThreeUsdReserveIngressRefund {
+    pub op_nonce: u128,
+    pub gross_amount_e8s: u64,
+    /// `None` is the V2 default account; `Some` preserves the old reserves
+    /// subaccount source for any legacy row that is explicitly linked.
+    pub source_subaccount: Option<[u8; 32]>,
+    /// Exact receipt retained after the child is paid and its queue rows are
+    /// removed. Absence alone never proves that a linked child settled.
+    #[serde(default)]
+    pub settled_receipt: Option<ThreeUsdReserveIngressRefundReceipt>,
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize, Copy)]
+pub struct ThreeUsdReserveIngressRefundReceipt {
+    pub block_index: u64,
+    pub tuple: ThreeUsdRefundTransferTuple,
+}
+
+/// Exact outbound transfer tuple created atomically with a V2 3USD debt
+/// commit. Explicit accounts prevent legacy subaccounts or configuration
+/// changes from being reinterpreted as this payout.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct ThreeUsdReserveIngressPayoutTuple {
+    pub op_nonce: u128,
+    pub ledger: Principal,
+    pub proof_kind: PayoutProofKind,
+    pub source: icrc_ledger_types::icrc1::account::Account,
+    pub destination: icrc_ledger_types::icrc1::account::Account,
+    pub gross_amount_e8s: u64,
+    pub net_amount_e8s: u64,
+    pub fee_e8s: u64,
+    pub memo: [u8; 16],
+    pub created_at_time_ns: u64,
+    pub collateral_type: Principal,
+}
+
+/// Parent-retained evidence that the exact pinned payout block was fetched
+/// and validated against `tuple`. Queue removal and receipt retention are
+/// committed in the same state mutation.
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct ThreeUsdReserveIngressPayoutReceipt {
+    pub block_index: u64,
+    pub tuple: ThreeUsdReserveIngressPayoutTuple,
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct ThreeUsdReserveIngressPayout {
+    pub tuple: ThreeUsdReserveIngressPayoutTuple,
+    #[serde(default)]
+    pub receipt: Option<ThreeUsdReserveIngressPayoutReceipt>,
+}
+
+/// Exact request and committed result for a V2 3USD reserve absorb. The
+/// result is committed in the same stable-state mutation as proof consumption
+/// and debt write-down, so an SP retry after a lost reply cannot mistake an
+/// applied absorb for a failed operation and refund its reserves.
+#[derive(Clone, Debug, serde::Deserialize, Serialize)]
+pub struct StoredThreeUsdReserveAbsorbResult {
+    pub caller: Principal,
+    pub vault_id: u64,
+    pub icusd_debt_covered_e8s: u64,
+    pub three_usd_amount_e8s: u64,
+    pub ledger: Principal,
+    pub proof: crate::icrc3_proof::SpWritedownProof,
+    pub result: crate::StabilityPoolLiquidationResult,
 }
 
 thread_local! {
@@ -1557,6 +1872,15 @@ pub struct State {
     /// withdrawals. `serde(default)` keeps older snapshots decoding cleanly.
     #[serde(default)]
     pub pending_3usd_refunds: BTreeMap<u128, PendingThreeUsdRefund>,
+    #[serde(default)]
+    pub pending_3usd_refund_journals: BTreeMap<u128, ThreeUsdRefundDispatchState>,
+    #[serde(default)]
+    pub three_usd_reserve_ingress_journals:
+        BTreeMap<ThreeUsdReserveIngressKey, ThreeUsdReserveIngressJournal>,
+    #[serde(default)]
+    pub three_usd_reserve_payout_parents: BTreeMap<u128, ThreeUsdReserveIngressKey>,
+    #[serde(default)]
+    pub three_usd_reserve_ingress_enabled: bool,
     pub mode: Mode,
     /// Wave-14a CDP-01: count of consecutive XRC fetch failures. Reset
     /// to 0 on any successful fetch. When this reaches
@@ -2059,6 +2383,9 @@ pub struct State {
     /// concern.
     #[serde(default)]
     pub consumed_writedown_proofs: BTreeSet<(crate::icrc3_proof::SpProofLedger, u64)>,
+    #[serde(default)]
+    pub sp_three_usd_reserve_absorb_results_by_proof:
+        BTreeMap<(crate::icrc3_proof::SpProofLedger, u64), StoredThreeUsdReserveAbsorbResult>,
     /// Inc 8: idempotent result cache for SP chain-vault absorbs keyed by the
     /// consumed proof. Lets the SP recover a lost reply without burning again.
     #[serde(default)]
@@ -2404,6 +2731,10 @@ impl Default for State {
             bot_claim_reconciliation_last_emitted: BTreeMap::new(),
             pending_refunds: BTreeMap::new(),
             pending_3usd_refunds: BTreeMap::new(),
+            pending_3usd_refund_journals: BTreeMap::new(),
+            three_usd_reserve_ingress_journals: BTreeMap::new(),
+            three_usd_reserve_payout_parents: BTreeMap::new(),
+            three_usd_reserve_ingress_enabled: false,
             mode: Mode::default(),
             consecutive_xrc_failures: 0,
             mode_triggered_by_oracle: false,
@@ -2527,6 +2858,7 @@ impl Default for State {
             liquidation_ordering_tolerance: DEFAULT_LIQUIDATION_ORDERING_TOLERANCE,
             sp_writedown_disabled: false,
             consumed_writedown_proofs: BTreeSet::new(),
+            sp_three_usd_reserve_absorb_results_by_proof: BTreeMap::new(),
             sp_chain_absorb_results_by_proof: BTreeMap::new(),
             sp_chain_absorb_preflights: BTreeMap::new(),
             sp_xrp_absorb_preflights: BTreeMap::new(),
@@ -2560,6 +2892,77 @@ impl Default for State {
     }
 }
 
+impl State {
+    /// Reserve default-account debits for 3USD refunds and in-flight fee holds.
+    /// Legacy refunds sourced from the dedicated reserves subaccount do not
+    /// spend this account. Any V2 child without a matching dispatch identity
+    /// makes capacity unknowable and therefore closes admission.
+    pub fn three_usd_default_account_refund_commitment(
+        &self,
+        ledger: Principal,
+        current_fee_e8s: u64,
+    ) -> Option<u64> {
+        use ThreeUsdRefundDispatchState as Dispatch;
+        let mut total = 0u64;
+        for (nonce, refund) in &self.pending_3usd_refunds {
+            if refund.ledger != ledger {
+                continue;
+            }
+            let debit = match self.pending_3usd_refund_journals.get(nonce) {
+                Some(Dispatch::NeverDispatchedDefault { gross_amount_e8s })
+                    if *gross_amount_e8s == refund.amount_e8s =>
+                {
+                    refund.amount_e8s.checked_add(current_fee_e8s)?
+                }
+                Some(Dispatch::UnpayableDefault { gross_amount_e8s, fee_e8s })
+                    if *gross_amount_e8s == refund.amount_e8s =>
+                {
+                    refund.amount_e8s.checked_add(current_fee_e8s.max(*fee_e8s))?
+                }
+                Some(Dispatch::SubmittedOrUnknown { tuple })
+                    if tuple.source_subaccount.is_none() =>
+                {
+                    tuple.amount_e8s.checked_add(tuple.fee_e8s)?
+                }
+                Some(Dispatch::NeverDispatched { .. })
+                | Some(Dispatch::Unpayable { .. })
+                | Some(Dispatch::HeldLegacyProtocolPaid { .. }) => 0,
+                None if refund.parent_absorb_id.is_none() => 0,
+                None => return None,
+                Some(Dispatch::NeverDispatchedDefault { .. })
+                | Some(Dispatch::UnpayableDefault { .. })
+                | Some(Dispatch::SubmittedOrUnknown { .. }) => return None,
+            };
+            total = total.checked_add(debit)?;
+        }
+        for (key, journal) in &self.three_usd_reserve_ingress_journals {
+            if journal.request.ledger != ledger {
+                continue;
+            }
+            let Some(fee_hold) = journal.refund_fee_reserved_e8s else {
+                continue;
+            };
+            match journal.refund.as_ref() {
+                Some(child) if child.settled_receipt.is_some() => {}
+                Some(child) => {
+                    let Some(refund) = self.pending_3usd_refunds.get(&child.op_nonce) else {
+                        return None;
+                    };
+                    if refund.parent_absorb_id != Some(key.absorb_id)
+                        || refund.stability_pool != key.stability_pool
+                        || refund.vault_id != key.vault_id
+                        || refund.amount_e8s != child.gross_amount_e8s
+                    {
+                        return None;
+                    }
+                }
+                None => total = total.checked_add(fee_hold)?,
+            }
+        }
+        Some(total)
+    }
+}
+
 impl From<InitArg> for State {
     fn from(args: InitArg) -> Self {
         let fee = Decimal::from_u64(args.fee_e8s).unwrap() / dec!(100_000_000);
@@ -2575,6 +2978,10 @@ impl From<InitArg> for State {
             bot_claim_reconciliation_last_emitted: BTreeMap::new(),
             pending_refunds: BTreeMap::new(),
             pending_3usd_refunds: BTreeMap::new(),
+            pending_3usd_refund_journals: BTreeMap::new(),
+            three_usd_reserve_ingress_journals: BTreeMap::new(),
+            three_usd_reserve_payout_parents: BTreeMap::new(),
+            three_usd_reserve_ingress_enabled: false,
             vault_id_to_vaults: BTreeMap::new(),
             xrc_principal: args.xrc_principal,
             icusd_ledger_principal: args.icusd_ledger_principal,
@@ -2818,6 +3225,7 @@ impl From<InitArg> for State {
             liquidation_ordering_tolerance: DEFAULT_LIQUIDATION_ORDERING_TOLERANCE,
             sp_writedown_disabled: false,
             consumed_writedown_proofs: BTreeSet::new(),
+            sp_three_usd_reserve_absorb_results_by_proof: BTreeMap::new(),
             sp_chain_absorb_results_by_proof: BTreeMap::new(),
             sp_chain_absorb_preflights: BTreeMap::new(),
             sp_xrp_absorb_preflights: BTreeMap::new(),
@@ -3292,6 +3700,18 @@ impl State {
 
     /// Get the collateral config for a given collateral type.
     /// Resolves `Principal::anonymous()` (serde default for legacy vaults) to the ICP ledger.
+    /// Pin the receipt adapter from the ledger identity at payout admission.
+    /// The canonical ICP ledger is verified through `query_blocks`; all other
+    /// configured collateral ledgers use exact ICRC-3 transaction fields.
+    pub fn payout_proof_kind_for_ledger(&self, ledger: Principal) -> PayoutProofKind {
+        let canonical_icp = Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").ok();
+        if ledger == self.icp_ledger_principal || Some(ledger) == canonical_icp {
+            PayoutProofKind::NativeIcp
+        } else {
+            PayoutProofKind::Icrc3
+        }
+    }
+
     pub fn get_collateral_config(&self, ct: &CollateralType) -> Option<&CollateralConfig> {
         let resolved = if ct == &Principal::anonymous() {
             &self.icp_ledger_principal
@@ -6331,6 +6751,38 @@ impl State {
                         vault_id
                     ),
                 }
+            }
+        }
+
+        // A committed V2 reserve absorb owns exactly one operation-ID payout
+        // row until an exact ledger receipt is retained. This relation keeps
+        // upgrades and all transfer workers from silently separating the
+        // collateral obligation from its ingress parent.
+        for (nonce, key) in &self.three_usd_reserve_payout_parents {
+            let Some(journal) = self.three_usd_reserve_ingress_journals.get(key) else {
+                return Err(format!("3USD payout {nonce} has no ingress parent journal"));
+            };
+            let Some(payout) = journal.payout.as_ref() else {
+                return Err(format!("3USD payout {nonce} has no pinned payout tuple"));
+            };
+            if payout.tuple.op_nonce != *nonce
+                || payout.tuple.destination.owner != key.stability_pool
+                || payout.tuple.gross_amount_e8s == 0
+            {
+                return Err(format!("3USD payout {nonce} differs from its parent identity"));
+            }
+            let pending = self.pending_margin_transfers
+                .get(&(key.vault_id, key.stability_pool));
+            if payout.receipt.is_some() {
+                if pending.is_some() {
+                    return Err(format!("settled 3USD payout {nonce} still has a pending margin row"));
+                }
+            } else if !pending.is_some_and(|transfer| {
+                transfer.op_nonce == *nonce
+                    && transfer.margin.to_u64() == payout.tuple.gross_amount_e8s
+                    && transfer.owner == key.stability_pool
+            }) {
+                return Err(format!("unsettled 3USD payout {nonce} lost its pending margin row"));
             }
         }
 

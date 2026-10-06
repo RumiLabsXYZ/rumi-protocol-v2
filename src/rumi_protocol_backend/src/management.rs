@@ -427,6 +427,10 @@ pub async fn transfer_idempotent(
     op_nonce: u128,
     memo: Option<Memo>,
 ) -> Result<u64, TransferError> {
+    let _default_account_guard = acquire_three_usd_default_account_transfer_guard(
+        ledger,
+        from_subaccount,
+    )?;
     let created_at_time = nonce_to_created_at_time(op_nonce);
     let memo = memo.unwrap_or_else(|| nonce_to_memo(op_nonce));
 
@@ -446,6 +450,74 @@ pub async fn transfer_idempotent(
         .await;
 
     handle_transfer_outcome(ledger, outer)
+}
+
+pub async fn transfer_idempotent_exact(
+    ledger: Principal,
+    from_subaccount: Option<[u8; 32]>,
+    to: Account,
+    amount: u128,
+    fee: u64,
+    memo: Memo,
+    created_at_time: u64,
+) -> Result<u64, TransferError> {
+    let _guard = acquire_three_usd_default_account_transfer_guard(ledger, from_subaccount)?;
+    transfer_idempotent_exact_inner(ledger, from_subaccount, to, amount, fee, memo, created_at_time).await
+}
+
+pub async fn transfer_idempotent_exact_with_three_usd_guard(
+    guard: &crate::ThreeUsdDefaultAccountTransferGuard,
+    ledger: Principal,
+    from_subaccount: Option<[u8; 32]>,
+    to: Account,
+    amount: u128,
+    fee: u64,
+    memo: Memo,
+    created_at_time: u64,
+) -> Result<u64, TransferError> {
+    if from_subaccount.is_some() || !guard.protects(ledger) {
+        return Err(TransferError::GenericError {
+            error_code: Nat::from(0u64),
+            message: "3USD default-account transfer guard does not match the persisted source".into(),
+        });
+    }
+    transfer_idempotent_exact_inner(ledger, from_subaccount, to, amount, fee, memo, created_at_time).await
+}
+
+async fn transfer_idempotent_exact_inner(
+    ledger: Principal,
+    from_subaccount: Option<[u8; 32]>,
+    to: Account,
+    amount: u128,
+    fee: u64,
+    memo: Memo,
+    created_at_time: u64,
+) -> Result<u64, TransferError> {
+    let client = ICRC1Client { runtime: CdkRuntime, ledger_canister_id: ledger };
+    let outer = client.transfer(TransferArg {
+        from_subaccount,
+        to,
+        fee: Some(Nat::from(fee)),
+        created_at_time: Some(created_at_time),
+        memo: Some(memo),
+        amount: Nat::from(amount),
+    }).await;
+    handle_transfer_outcome(ledger, outer)
+}
+
+fn acquire_three_usd_default_account_transfer_guard(
+    ledger: Principal,
+    from_subaccount: Option<[u8; 32]>,
+) -> Result<Option<crate::ThreeUsdDefaultAccountTransferGuard>, TransferError> {
+    if from_subaccount.is_some() || !crate::state::read_state(|state| state.three_pool_canister == Some(ledger)) {
+        return Ok(None);
+    }
+    crate::ThreeUsdDefaultAccountTransferGuard::try_acquire(ledger).map(Some).ok_or_else(|| {
+        TransferError::GenericError {
+            error_code: Nat::from(0u64),
+            message: "3USD default-account transfer is held by a reserve capacity check".into(),
+        }
+    })
 }
 
 /// Idempotent ICRC-2 transfer_from. Same semantics as `transfer_idempotent`
@@ -1619,8 +1691,10 @@ pub fn protocol_3usd_reserves_subaccount() -> [u8; 32] {
 }
 
 /// Pull 3USD from the stability pool into the protocol's reserves subaccount via ICRC-2.
-/// The SP must have approved this canister to spend `amount` on `ledger` beforehand.
-pub async fn transfer_3usd_to_reserves(
+/// Legacy reserve pull retained for the old Candid entrypoint during the
+/// mixed-version window. The strict 3pool account guard rejects its hashed
+/// destination, so it cannot be used after the ledger policy cutover.
+pub async fn transfer_3usd_to_reserves_legacy(
     ledger: Principal,
     from: Principal,
     amount: u64,
@@ -1639,6 +1713,282 @@ pub async fn transfer_3usd_to_reserves(
         None,
     )
     .await
+}
+
+thread_local! {
+    static THREE_USD_RESERVE_INGRESS_IN_FLIGHT:
+        std::cell::RefCell<std::collections::BTreeSet<crate::state::ThreeUsdReserveIngressKey>> =
+        std::cell::RefCell::new(std::collections::BTreeSet::new());
+}
+
+/// Excludes concurrent copies of the same reserve absorption while an
+/// inter-canister call is suspended.
+pub struct ThreeUsdReserveIngressGuard(crate::state::ThreeUsdReserveIngressKey);
+
+impl ThreeUsdReserveIngressGuard {
+    pub fn try_acquire(key: &crate::state::ThreeUsdReserveIngressKey) -> Option<Self> {
+        THREE_USD_RESERVE_INGRESS_IN_FLIGHT.with(|keys| {
+            keys.borrow_mut().insert(key.clone()).then(|| Self(key.clone()))
+        })
+    }
+}
+
+impl Drop for ThreeUsdReserveIngressGuard {
+    fn drop(&mut self) {
+        THREE_USD_RESERVE_INGRESS_IN_FLIGHT.with(|keys| {
+            keys.borrow_mut().remove(&self.0);
+        });
+    }
+}
+
+pub fn three_usd_reserve_ingress_journal(
+    key: &crate::state::ThreeUsdReserveIngressKey,
+) -> Option<crate::state::ThreeUsdReserveIngressJournal> {
+    crate::state::read_state(|state| state.three_usd_reserve_ingress_journals.get(key).cloned())
+}
+
+/// Durably claims a V2 absorb identity before the caller's first await.
+/// Absence is intentionally not converted into a no-transfer result: only a
+/// persisted `PreTransferRejected` row can establish that this ID is terminal.
+pub fn admit_three_usd_reserve_ingress(
+    key: crate::state::ThreeUsdReserveIngressKey,
+    request: crate::state::ThreeUsdReserveIngressRequest,
+) -> Result<crate::state::ThreeUsdReserveIngressJournal, String> {
+    use crate::state::{ThreeUsdReserveIngressJournal as Journal, ThreeUsdReserveIngressPhase as Phase};
+    crate::state::mutate_state(|state| {
+        if key.stability_pool == Principal::anonymous() || key.absorb_id == 0 {
+            return Err("invalid 3USD reserve ingress identity".into());
+        }
+        if let Some(existing) = state.three_usd_reserve_ingress_journals.get(&key) {
+            return if existing.request == request {
+                Ok(existing.clone())
+            } else {
+                Err("SP absorb ID was reused with different 3USD reserve arguments".into())
+            };
+        }
+        let invalid_request = request.ledger == Principal::anonymous()
+            || request.three_usd_amount_e8s == 0
+            || request.icusd_debt_covered_e8s == 0;
+        let journal = Journal {
+            request,
+            phase: if invalid_request {
+                Phase::PreTransferRejected { reason: "invalid 3USD reserve ingress request".into() }
+            } else {
+                Phase::AdmissionPending
+            },
+            refund: None,
+            payout: None,
+            refund_fee_reserved_e8s: None,
+        };
+        state.three_usd_reserve_ingress_journals.insert(key, journal.clone());
+        Ok(journal)
+    })
+}
+
+/// New default-account ingress stays closed until fee capacity is reserved
+/// atomically against every durable obligation and every backend writer.
+/// This is deliberately a source gate: toggling the historical developer flag
+/// cannot bypass the missing account-capacity proof.
+pub const THREE_USD_INGRESS_FEE_CAPACITY_PREFLIGHT_READY: bool =
+    cfg!(feature = "three-usd-reserve-v2-test-admission");
+
+pub fn three_usd_reserve_ingress_is_enabled() -> bool {
+    THREE_USD_INGRESS_FEE_CAPACITY_PREFLIGHT_READY
+        && crate::state::read_state(|state| state.three_usd_reserve_ingress_enabled)
+}
+
+pub fn set_three_usd_reserve_ingress_enabled(enabled: bool) {
+    crate::state::mutate_state(|state| state.three_usd_reserve_ingress_enabled = enabled);
+}
+
+pub fn record_three_usd_reserve_ingress_absorbed(
+    key: &crate::state::ThreeUsdReserveIngressKey,
+    block_index: u64,
+    result: crate::state::ThreeUsdReserveIngressResult,
+) -> Result<(), String> {
+    use crate::state::ThreeUsdReserveIngressPhase as Phase;
+    crate::state::mutate_state(|state| {
+        let Some(journal) = state.three_usd_reserve_ingress_journals.get_mut(key) else {
+            return Err("reserve ingress journal disappeared before absorption receipt was stored".into());
+        };
+        let realized = if journal.request.icusd_debt_covered_e8s == 0 {
+            0
+        } else {
+            ((journal.request.three_usd_amount_e8s as u128)
+                .saturating_mul(result.liquidated_debt as u128)
+                / journal.request.icusd_debt_covered_e8s as u128) as u64
+        };
+        let expected_refund = journal.request.three_usd_amount_e8s.saturating_sub(realized);
+        match (expected_refund, journal.refund.as_ref()) {
+            (0, None) => {
+                journal.refund_fee_reserved_e8s = None;
+            }
+            (amount, Some(refund))
+                if amount > 0
+                    && refund.gross_amount_e8s == amount
+                    && refund.source_subaccount.is_none() => {}
+            _ => return Err("V2 reserve refund child is not durably linked before absorption terminalization".into()),
+        }
+        let tuple = match &journal.phase {
+            Phase::TransferConfirmed { tuple, block_index: confirmed }
+                if *confirmed == block_index => tuple.clone(),
+            Phase::Absorbed { block_index: confirmed, .. } if *confirmed == block_index => return Ok(()),
+            _ => return Err("reserve ingress journal is not confirmed for this transfer block".into()),
+        };
+        journal.phase = Phase::Absorbed { tuple, block_index, result };
+        Ok(())
+    })
+}
+
+pub fn record_three_usd_reserve_ingress_failed(
+    key: &crate::state::ThreeUsdReserveIngressKey,
+    block_index: u64,
+    error: String,
+) -> Result<(), String> {
+    use crate::state::ThreeUsdReserveIngressPhase as Phase;
+    crate::state::mutate_state(|state| {
+        let Some(journal) = state.three_usd_reserve_ingress_journals.get_mut(key) else {
+            return Err("reserve ingress journal disappeared before failure receipt was stored".into());
+        };
+        match journal.refund.as_ref() {
+            Some(refund)
+                if refund.gross_amount_e8s == journal.request.three_usd_amount_e8s
+                    && refund.source_subaccount.is_none() => {}
+            _ => return Err("V2 full-refund child is not durably linked before failure terminalization".into()),
+        }
+        let tuple = match &journal.phase {
+            Phase::TransferConfirmed { tuple, block_index: confirmed }
+                if *confirmed == block_index => tuple.clone(),
+            Phase::FailedAfterTransfer { block_index: confirmed, .. } if *confirmed == block_index => return Ok(()),
+            _ => return Err("reserve ingress journal is not confirmed for this transfer block".into()),
+        };
+        journal.phase = Phase::FailedAfterTransfer { tuple, block_index, error };
+        Ok(())
+    })
+}
+
+/// Pull 3USD into the backend's default account via ICRC-2. A complete tuple
+/// is journaled before the first ledger await and reused on exact retries.
+pub async fn transfer_3usd_to_reserves(
+    key: crate::state::ThreeUsdReserveIngressKey,
+    request: crate::state::ThreeUsdReserveIngressRequest,
+) -> Result<u64, String> {
+    use crate::state::{ThreeUsdReserveIngressPhase as Phase, ThreeUsdReserveIngressTuple};
+    use icrc_ledger_types::icrc2::transfer_from::TransferFromArgs;
+
+    let tuple = crate::state::mutate_state(|state| -> Result<ThreeUsdReserveIngressTuple, String> {
+        if let Some(existing) = state.three_usd_reserve_ingress_journals.get(&key) {
+            if existing.request != request {
+                return Err("SP absorb ID was reused with different 3USD reserve arguments".into());
+            }
+            return match &existing.phase {
+                Phase::AdmissionPending => {
+                    if !THREE_USD_INGRESS_FEE_CAPACITY_PREFLIGHT_READY
+                        || !state.three_usd_reserve_ingress_enabled
+                    {
+                        return Err("new 3USD reserve ingress is held until default-account fee capacity is proven".into());
+                    }
+                    let op_nonce = state.next_op_nonce();
+                    let tuple = ThreeUsdReserveIngressTuple {
+                        spender_owner: ic_cdk::id(),
+                        spender_subaccount: None,
+                        source: Account { owner: key.stability_pool, subaccount: None },
+                        destination: Account { owner: ic_cdk::id(), subaccount: None },
+                        amount_e8s: request.three_usd_amount_e8s,
+                        fee_e8s: None,
+                        memo: nonce_to_memo(op_nonce).0.as_slice().try_into()
+                            .map_err(|_| "operation memo must be 16 bytes".to_string())?,
+                        created_at_time_ns: nonce_to_created_at_time(op_nonce),
+                        op_nonce,
+                        parent_absorb_id: Some(key.absorb_id),
+                    };
+                    let journal = state.three_usd_reserve_ingress_journals.get_mut(&key)
+                        .expect("admission row was observed above");
+                    journal.phase = Phase::SubmittedOrUnknown { tuple: tuple.clone() };
+                    Ok(tuple)
+                }
+                Phase::PreTransferRejected { reason } => Err(format!("SP absorb ID is terminally rejected before transfer: {reason}")),
+                Phase::SubmittedOrUnknown { tuple }
+                | Phase::TransferConfirmed { tuple, .. }
+                | Phase::Absorbed { tuple, .. }
+                | Phase::FailedAfterTransfer { tuple, .. } => Ok(tuple.clone()),
+            };
+        }
+        if !THREE_USD_INGRESS_FEE_CAPACITY_PREFLIGHT_READY
+            || !state.three_usd_reserve_ingress_enabled
+        {
+            return Err("new 3USD reserve ingress is held until default-account fee capacity is proven".into());
+        }
+        if key.stability_pool == Principal::anonymous()
+            || request.ledger == Principal::anonymous()
+            || request.three_usd_amount_e8s == 0
+            || request.icusd_debt_covered_e8s == 0
+        {
+            return Err("invalid 3USD reserve ingress request".into());
+        }
+        Err("3USD reserve ingress ID must be durably admitted before transfer preparation".into())
+    })?;
+
+    if tuple.spender_owner != ic_cdk::id()
+        || tuple.spender_subaccount.is_some()
+        || tuple.source != (Account { owner: key.stability_pool, subaccount: None })
+        || tuple.destination != (Account { owner: ic_cdk::id(), subaccount: None })
+        || tuple.amount_e8s != request.three_usd_amount_e8s
+        || tuple.fee_e8s.is_some()
+        || tuple.memo.as_slice() != nonce_to_memo(tuple.op_nonce).0.as_slice()
+        || tuple.created_at_time_ns != nonce_to_created_at_time(tuple.op_nonce)
+    {
+        return Err("stored 3USD reserve ingress tuple does not match its request key".into());
+    }
+    crate::storage::mark_three_usd_reserve_ingress_v2_used()?;
+
+    match crate::state::read_state(|state| {
+        state.three_usd_reserve_ingress_journals.get(&key).map(|journal| journal.phase.clone())
+    }) {
+        Some(Phase::TransferConfirmed { block_index, .. })
+        | Some(Phase::Absorbed { block_index, .. })
+        | Some(Phase::FailedAfterTransfer { block_index, .. }) => return Ok(block_index),
+        Some(Phase::AdmissionPending) => return Err("3USD reserve ingress admission must be transferred to a submitted tuple first".into()),
+        Some(Phase::PreTransferRejected { reason }) => return Err(format!("SP absorb ID is terminally rejected before transfer: {reason}")),
+        Some(Phase::SubmittedOrUnknown { .. }) => {},
+        None => return Err("3USD reserve ingress journal disappeared before dispatch".into()),
+    }
+
+    let client = ICRC1Client { runtime: CdkRuntime, ledger_canister_id: request.ledger };
+    let outer = client.transfer_from(TransferFromArgs {
+        spender_subaccount: tuple.spender_subaccount,
+        from: tuple.source,
+        to: tuple.destination,
+        amount: Nat::from(tuple.amount_e8s),
+        fee: tuple.fee_e8s.map(Nat::from),
+        created_at_time: Some(tuple.created_at_time_ns),
+        memo: Some(Memo::from(tuple.memo.to_vec())),
+    }).await;
+    let block_index = match outer {
+        Ok(Ok(block)) => block.0.to_u64()
+            .ok_or_else(|| "3USD reserve transfer block exceeds u64; reconcile stored tuple".to_string())?,
+        Ok(Err(TransferFromError::Duplicate { duplicate_of })) => duplicate_of.0.to_u64()
+            .ok_or_else(|| "3USD reserve duplicate block exceeds u64; reconcile stored tuple".to_string())?,
+        Ok(Err(error)) => return Err(format!("3USD reserve transferFrom failed: {error:?}")),
+        Err((code, message)) => return Err(format!("3USD reserve transferFrom call failed ({code:?}): {message}")),
+    };
+
+    crate::state::mutate_state(|state| -> Result<(), String> {
+        let Some(journal) = state.three_usd_reserve_ingress_journals.get_mut(&key) else {
+            return Err("3USD reserve ingress journal disappeared after dispatch".into());
+        };
+        match &journal.phase {
+            Phase::SubmittedOrUnknown { tuple: stored } if stored == &tuple => {
+                journal.phase = Phase::TransferConfirmed { tuple, block_index };
+                Ok(())
+            }
+            Phase::TransferConfirmed { block_index: existing, .. }
+            | Phase::Absorbed { block_index: existing, .. }
+            | Phase::FailedAfterTransfer { block_index: existing, .. } if *existing == block_index => Ok(()),
+            _ => Err("3USD reserve ingress journal changed during transfer dispatch".into()),
+        }
+    })?;
+    Ok(block_index)
 }
 
 // ─── Push-deposit helpers (Oisy wallet integration) ───
@@ -1672,6 +2022,18 @@ pub async fn get_balance_of(account: Account, ledger: Principal) -> Result<u64, 
     match result {
         Ok((balance,)) => Ok(balance.0.to_u64().unwrap_or(0)),
         Err((code, msg)) => Err(format!("icrc1_balance_of failed: {:?} {}", code, msg)),
+    }
+}
+
+pub async fn get_icrc1_reserve_balance(ledger: Principal, account: Account) -> Result<u64, String> {
+    if ledger == Principal::anonymous() || account.owner == Principal::anonymous() {
+        return Err("ICRC-1 reserve ledger and account principals must be configured".into());
+    }
+    let result: Result<(Nat,), _> = ic_cdk::call(ledger, "icrc1_balance_of", (account,)).await;
+    match result {
+        Ok((balance,)) => balance.0.to_u64()
+            .ok_or_else(|| "ICRC-1 reserve balance exceeds u64 range".to_string()),
+        Err((code, message)) => Err(format!("icrc1_balance_of failed: {code:?} {message}")),
     }
 }
 

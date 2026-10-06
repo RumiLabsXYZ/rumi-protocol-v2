@@ -14,14 +14,183 @@ use num_traits::ToPrimitive;
 use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use std::cell::RefCell;
+use std::collections::BTreeSet;
 
 /// Maximum number of automatic retries before a failed obligation is held for
 /// manual recovery. At 5-second intervals, 60 retries = 5 minutes of attempts.
 pub const MAX_PENDING_RETRIES: u8 = 60;
 
+thread_local! {
+    static THREE_USD_REFUND_IN_FLIGHT: RefCell<BTreeSet<u128>> = RefCell::new(BTreeSet::new());
+}
+
+struct ThreeUsdRefundDispatchGuard(u128);
+
+impl ThreeUsdRefundDispatchGuard {
+    fn try_acquire(op_nonce: u128) -> Option<Self> {
+        let inserted =
+            THREE_USD_REFUND_IN_FLIGHT.with(|in_flight| in_flight.borrow_mut().insert(op_nonce));
+        inserted.then_some(Self(op_nonce))
+    }
+}
+
+impl Drop for ThreeUsdRefundDispatchGuard {
+    fn drop(&mut self) {
+        THREE_USD_REFUND_IN_FLIGHT.with(|in_flight| {
+            in_flight.borrow_mut().remove(&self.0);
+        });
+    }
+}
+
 fn pending_refund_is_automatically_retryable(retry_count: u8) -> bool {
     retry_count < MAX_PENDING_RETRIES
 }
+
+fn three_usd_refund_dispatch_is_retryable(
+    dispatch: Option<&crate::state::ThreeUsdRefundDispatchState>,
+) -> bool {
+    matches!(dispatch,
+        Some(crate::state::ThreeUsdRefundDispatchState::NeverDispatched { .. })
+        | Some(crate::state::ThreeUsdRefundDispatchState::NeverDispatchedDefault { .. })
+        | Some(crate::state::ThreeUsdRefundDispatchState::SubmittedOrUnknown { .. }))
+}
+
+fn hold_legacy_3usd_refund_for_protocol_paid_policy(
+    dispatch: crate::state::ThreeUsdRefundDispatchState,
+    gross_amount_e8s: u64,
+) -> Option<crate::state::ThreeUsdRefundDispatchState> {
+    use crate::state::ThreeUsdRefundDispatchState as Dispatch;
+    match dispatch {
+        Dispatch::NeverDispatched { .. } | Dispatch::Unpayable { .. } => {
+            Some(Dispatch::HeldLegacyProtocolPaid {
+                gross_amount_e8s,
+                tuple: None,
+            })
+        }
+        Dispatch::SubmittedOrUnknown { tuple } if tuple.source_subaccount.is_some() => {
+            Some(Dispatch::HeldLegacyProtocolPaid {
+                gross_amount_e8s,
+                tuple: Some(tuple),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn hold_pending_legacy_3usd_refunds_for_protocol_paid_policy() -> usize {
+    mutate_state(|state| {
+        let keys = state.pending_3usd_refund_journals.keys().copied().collect::<Vec<_>>();
+        let mut held = 0;
+        for nonce in keys {
+            let Some(refund) = state.pending_3usd_refunds.get(&nonce).copied() else {
+                continue;
+            };
+            let Some(dispatch) = state.pending_3usd_refund_journals.get(&nonce).copied() else {
+                continue;
+            };
+            if let Some(next) = hold_legacy_3usd_refund_for_protocol_paid_policy(
+                dispatch,
+                refund.amount_e8s,
+            ) {
+                state.pending_3usd_refund_journals.insert(nonce, next);
+                held += 1;
+            }
+        }
+        held
+    })
+}
+
+fn three_usd_refund_net_amount(gross: u64, fee: u64) -> Option<u64> {
+    gross.checked_sub(fee).filter(|net| *net > 0)
+}
+
+fn three_usd_refund_transfer_amount(
+    gross_principal: u64,
+    fee: u64,
+    source_subaccount: Option<[u8; 32]>,
+) -> Option<u64> {
+    if source_subaccount.is_none() {
+        Some(gross_principal)
+    } else {
+        three_usd_refund_net_amount(gross_principal, fee)
+    }
+}
+
+pub fn initial_three_usd_refund_dispatch_state(
+    source_subaccount: Option<[u8; 32]>,
+    gross_amount_e8s: u64,
+) -> crate::state::ThreeUsdRefundDispatchState {
+    match source_subaccount {
+        Some(_) => crate::state::ThreeUsdRefundDispatchState::NeverDispatched {
+            gross_amount_e8s,
+        },
+        None => crate::state::ThreeUsdRefundDispatchState::NeverDispatchedDefault {
+            gross_amount_e8s,
+        },
+    }
+}
+
+fn first_bad_fee_retry_state(
+    current: crate::state::ThreeUsdRefundDispatchState,
+    attempted: crate::state::ThreeUsdRefundTransferTuple,
+    first_dispatch: bool,
+    gross_amount_e8s: u64,
+) -> Option<crate::state::ThreeUsdRefundDispatchState> {
+    (first_dispatch
+        && current == (crate::state::ThreeUsdRefundDispatchState::SubmittedOrUnknown { tuple: attempted }))
+        .then_some(if attempted.source_subaccount.is_some() {
+            crate::state::ThreeUsdRefundDispatchState::NeverDispatched { gross_amount_e8s }
+        } else {
+            crate::state::ThreeUsdRefundDispatchState::NeverDispatchedDefault { gross_amount_e8s }
+        })
+}
+
+fn first_bad_fee_retry_transition(
+    current: crate::state::ThreeUsdRefundDispatchState,
+    attempted: crate::state::ThreeUsdRefundTransferTuple,
+    first_dispatch: bool,
+    gross_amount_e8s: u64,
+    retry_count: &mut u8,
+) -> Option<(crate::state::ThreeUsdRefundDispatchState, bool)> {
+    let next = first_bad_fee_retry_state(current, attempted, first_dispatch, gross_amount_e8s)?;
+    let retryable = advance_pending_retry_count(retry_count);
+    Some((next, retryable))
+}
+
+
+
+thread_local! {
+    static THREE_USD_DEFAULT_ACCOUNT_IN_FLIGHT: RefCell<BTreeSet<Principal>> = RefCell::new(BTreeSet::new());
+}
+
+/// Serializes outgoing transfers from the 3pool default account against the
+/// refund worker's balance/obligation check.
+pub struct ThreeUsdDefaultAccountTransferGuard(Principal);
+
+impl ThreeUsdDefaultAccountTransferGuard {
+    pub fn try_acquire(ledger: Principal) -> Option<Self> {
+        if !read_state(|state| state.three_pool_canister == Some(ledger)) {
+            return None;
+        }
+        THREE_USD_DEFAULT_ACCOUNT_IN_FLIGHT.with(|set| {
+            set.borrow_mut().insert(ledger).then_some(Self(ledger))
+        })
+    }
+
+    pub fn protects(&self, ledger: Principal) -> bool {
+        self.0 == ledger && read_state(|state| state.three_pool_canister == Some(ledger))
+    }
+}
+
+impl Drop for ThreeUsdDefaultAccountTransferGuard {
+    fn drop(&mut self) {
+        THREE_USD_DEFAULT_ACCOUNT_IN_FLIGHT.with(|set| {
+            set.borrow_mut().remove(&self.0);
+        });
+    }
+}
+
 
 fn redemption_transfer_meets_minimum(
     gross_raw: u64,
@@ -448,7 +617,7 @@ pub enum RedemptionPayoutStatus {
 }
 
 /// Result from stability pool liquidation (both standard and debt-already-burned paths).
-#[derive(CandidType, Deserialize, Debug)]
+#[derive(CandidType, Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct StabilityPoolLiquidationResult {
     pub success: bool,
     pub vault_id: u64,
@@ -1420,6 +1589,389 @@ fn drop_pending<K: std::cmp::Ord>(
     map.remove(key);
 }
 
+fn record_3usd_refund_retry_failure(
+    pending: &mut std::collections::BTreeMap<u128, crate::state::PendingThreeUsdRefund>,
+    nonce: &u128,
+) -> (u8, bool) {
+    let Some(refund) = pending.get_mut(nonce) else { return (0, false); };
+    refund.retry_count = refund.retry_count.saturating_add(1);
+    let count = refund.retry_count;
+    (count, count < MAX_PENDING_RETRIES)
+}
+
+fn advance_pending_retry_count(retry_count: &mut u8) -> bool {
+    *retry_count = retry_count.saturating_add(1);
+    *retry_count < MAX_PENDING_RETRIES
+}
+
+/// Process one journaled 3USD refund. Legacy rows have no journal entry and
+/// remain visible but are never dispatched automatically.
+pub async fn dispatch_pending_3usd_refund(op_nonce: u128) {
+    use crate::state::{ThreeUsdRefundDispatchState as Dispatch, ThreeUsdRefundTransferTuple};
+    use icrc_ledger_types::icrc1::account::Account;
+
+    let Some(_dispatch_guard) = ThreeUsdRefundDispatchGuard::try_acquire(op_nonce) else {
+        return;
+    };
+
+    let Some((refund, dispatch)) = read_state(|state| {
+        let refund = state.pending_3usd_refunds.get(&op_nonce).copied()?;
+        let dispatch = state.pending_3usd_refund_journals.get(&op_nonce).copied()?;
+        Some((refund, dispatch))
+    }) else {
+        return;
+    };
+    if let Some(held) = hold_legacy_3usd_refund_for_protocol_paid_policy(
+        dispatch,
+        refund.amount_e8s,
+    ) {
+        mutate_state(|state| {
+            if state.pending_3usd_refunds.get(&op_nonce) == Some(&refund)
+                && state.pending_3usd_refund_journals.get(&op_nonce) == Some(&dispatch)
+            {
+                state.pending_3usd_refund_journals.insert(op_nonce, held);
+            }
+        });
+        return;
+    }
+    if !pending_refund_is_automatically_retryable(refund.retry_count) {
+        return;
+    }
+
+    let mut default_account_guard = None;
+    let (tuple, first_dispatch, gross_amount_e8s) = match dispatch {
+        Dispatch::NeverDispatched { gross_amount_e8s }
+        | Dispatch::NeverDispatchedDefault { gross_amount_e8s } => {
+            let source_subaccount = match dispatch {
+                Dispatch::NeverDispatched { .. } => {
+                    Some(crate::management::protocol_3usd_reserves_subaccount())
+                }
+                Dispatch::NeverDispatchedDefault { .. } => None,
+                _ => unreachable!(),
+            };
+            if source_subaccount.is_none() {
+                default_account_guard =
+                    crate::ThreeUsdDefaultAccountTransferGuard::try_acquire(refund.ledger);
+                if default_account_guard.is_none() {
+                    return;
+                }
+            }
+            let fee = match crate::management::get_or_refresh_fee(refund.ledger).await {
+                Ok(fee) => fee,
+                Err(error) => {
+                    log!(INFO,
+                        "[refunding] 3USD refund fee lookup failed for SP {} (vault {}): {}. Gross liability remains journaled.",
+                        refund.stability_pool, refund.vault_id, error
+                    );
+                    return;
+                }
+            };
+            let amount = if source_subaccount.is_none() {
+                let balance = match crate::management::get_icrc1_reserve_balance(
+                    refund.ledger,
+                    Account { owner: ic_cdk::id(), subaccount: None },
+                ).await {
+                    Ok(balance) => balance,
+                    Err(error) => {
+                        log!(INFO, "[refunding] 3USD default-account balance is uncertain for SP {} (vault {}): {}. Refund remains unsubmitted.", refund.stability_pool, refund.vault_id, error);
+                        return;
+                    }
+                };
+                let Some(commitment) = read_state(|state| {
+                    state.three_usd_default_account_refund_commitment(refund.ledger, fee)
+                }) else {
+                    log!(INFO, "[refunding] 3USD default-account obligations are uncertain for SP {} (vault {}). Refund remains unsubmitted.", refund.stability_pool, refund.vault_id);
+                    return;
+                };
+                if balance < commitment {
+                    log!(INFO, "[refunding] 3USD default account lacks refund capacity for SP {} (vault {}): balance {}, committed {}. Refund remains unsubmitted.", refund.stability_pool, refund.vault_id, balance, commitment);
+                    return;
+                }
+                three_usd_refund_transfer_amount(gross_amount_e8s, fee, None)
+                    .expect("default-account refund amount is the full principal")
+            } else {
+                let Some(net_amount) = three_usd_refund_transfer_amount(
+                    gross_amount_e8s, fee, source_subaccount,
+                ) else {
+                mutate_state(|state| {
+                    let current = state.pending_3usd_refund_journals.get(&op_nonce).copied();
+                    let next = match current {
+                        Some(Dispatch::NeverDispatched { gross_amount_e8s: current })
+                            if current == gross_amount_e8s =>
+                                Some(Dispatch::Unpayable { gross_amount_e8s, fee_e8s: fee }),
+                        Some(Dispatch::NeverDispatchedDefault { gross_amount_e8s: current })
+                            if current == gross_amount_e8s =>
+                                Some(Dispatch::UnpayableDefault { gross_amount_e8s, fee_e8s: fee }),
+                        _ => None,
+                    };
+                    if let Some(next) = next {
+                        state.pending_3usd_refund_journals.insert(op_nonce, next);
+                    }
+                });
+                log!(INFO,
+                    "[refunding] CRITICAL: 3USD refund gross amount {} for SP {} (vault {}) cannot cover current fee {}; retained for reconciliation.",
+                    gross_amount_e8s, refund.stability_pool, refund.vault_id, fee
+                );
+                return;
+                };
+                net_amount
+            };
+            let tuple = ThreeUsdRefundTransferTuple {
+                source_owner: ic_cdk::id(),
+                // New reserve ingress lands in the backend's default account.
+                // SubmittedOrUnknown legacy tuples retain their persisted old
+                // source above and are never rebuilt through this branch.
+                source_subaccount,
+                destination: Account { owner: refund.stability_pool, subaccount: None },
+                amount_e8s: amount,
+                fee_e8s: fee,
+                memo: crate::management::nonce_to_memo(op_nonce).0.as_slice()
+                    .try_into().expect("nonce memo is 16 bytes"),
+                created_at_time_ns: crate::management::nonce_to_created_at_time(op_nonce),
+            };
+            if (tuple.source_subaccount.is_none() && tuple.amount_e8s != gross_amount_e8s)
+                || (tuple.source_subaccount.is_some()
+                    && tuple.amount_e8s.checked_add(tuple.fee_e8s) != Some(gross_amount_e8s))
+            {
+                return;
+            }
+            let committed = mutate_state(|state| {
+                if state.pending_3usd_refund_journals.get(&op_nonce) != Some(&dispatch) {
+                    return false;
+                }
+                state.pending_3usd_refund_journals.insert(
+                    op_nonce,
+                    Dispatch::SubmittedOrUnknown { tuple },
+                );
+                true
+            });
+            if !committed {
+                return;
+            }
+            (tuple, true, gross_amount_e8s)
+        }
+        Dispatch::SubmittedOrUnknown { tuple } => {
+            if tuple.source_subaccount.is_none() {
+                default_account_guard =
+                    crate::ThreeUsdDefaultAccountTransferGuard::try_acquire(refund.ledger);
+                if default_account_guard.is_none() {
+                    return;
+                }
+            }
+            (tuple, false, 0)
+        }
+        Dispatch::Unpayable { .. }
+        | Dispatch::UnpayableDefault { .. }
+        | Dispatch::HeldLegacyProtocolPaid { .. } => return,
+    };
+
+    if tuple.source_owner != ic_cdk::id() {
+        log!(INFO,
+            "[refunding] CRITICAL: 3USD refund source owner {} does not match this canister {}; retaining journal.",
+            tuple.source_owner, ic_cdk::id()
+        );
+        return;
+    }
+
+    // The journal above is committed before this await. The account path,
+    // transfer amount, fee, memo, and timestamp are replayed verbatim.
+    let transfer_result = if let Some(guard) = default_account_guard.as_ref() {
+        crate::management::transfer_idempotent_exact_with_three_usd_guard(
+            guard,
+            refund.ledger,
+            tuple.source_subaccount,
+            tuple.destination,
+            tuple.amount_e8s as u128,
+            tuple.fee_e8s,
+            icrc_ledger_types::icrc1::transfer::Memo::from(tuple.memo.to_vec()),
+            tuple.created_at_time_ns,
+        ).await
+    } else {
+        crate::management::transfer_idempotent_exact(
+            refund.ledger,
+            tuple.source_subaccount,
+            tuple.destination,
+            tuple.amount_e8s as u128,
+            tuple.fee_e8s,
+            icrc_ledger_types::icrc1::transfer::Memo::from(tuple.memo.to_vec()),
+            tuple.created_at_time_ns,
+        ).await
+    };
+    drop(default_account_guard);
+    match transfer_result {
+        Ok(block_index) => {
+            // Read the reported block back before clearing the obligation.
+            // New V2 refunds spend the backend default account and require the
+            // exact memo, caller timestamp, and explicit request fee. Legacy
+            // hashed-subaccount rows retain their historical visible-fields
+            // proof because old 3pool blocks omitted those fields.
+            let receipt = crate::icrc3_proof::fetch_icrc3_block(refund.ledger, block_index)
+                .await
+                .and_then(|block| {
+                    if tuple.source_subaccount.is_none() {
+                        crate::icrc3_proof::validate_three_usd_default_source_refund_block(
+                            &block, &tuple,
+                        )?;
+                    } else {
+                        crate::icrc3_proof::validate_icrc3_transfer_block(
+                            &block,
+                            Some(Account {
+                                owner: tuple.source_owner,
+                                subaccount: tuple.source_subaccount,
+                            }),
+                            tuple.destination,
+                            tuple.amount_e8s,
+                            None,
+                            None,
+                        )?;
+                        if block.spender.is_some() {
+                            return Err("refund receipt unexpectedly has an ICRC-2 spender".to_string());
+                        }
+                        if block.fee.is_some_and(|fee| fee != tuple.fee_e8s as u128) {
+                            return Err("refund receipt fee does not match the pinned ICRC-1 fee".to_string());
+                        }
+                    }
+                    Ok(())
+                });
+            match receipt {
+                Ok(()) => {
+                    let settlement = mutate_state(|state| -> Result<(), String> {
+                        let Some(current) = state.pending_3usd_refunds.get(&op_nonce).copied() else {
+                            return Err("refund queue row disappeared before verified receipt commit".into());
+                        };
+                        if current.stability_pool != refund.stability_pool
+                            || current.ledger != refund.ledger
+                            || current.vault_id != refund.vault_id
+                            || current.op_nonce != refund.op_nonce
+                            || current.parent_absorb_id != refund.parent_absorb_id
+                        {
+                            return Err("refund queue identity changed before verified receipt commit".into());
+                        }
+                        if !matches!(
+                            state.pending_3usd_refund_journals.get(&op_nonce),
+                            Some(Dispatch::SubmittedOrUnknown { tuple: submitted }) if *submitted == tuple
+                        ) {
+                            return Err("refund tuple journal changed before verified receipt commit".into());
+                        }
+                        if let Some(absorb_id) = refund.parent_absorb_id {
+                            let key = crate::state::ThreeUsdReserveIngressKey {
+                                stability_pool: refund.stability_pool,
+                                vault_id: refund.vault_id,
+                                absorb_id,
+                            };
+                            let Some(parent) = state.three_usd_reserve_ingress_journals.get_mut(&key) else {
+                                return Err("linked reserve ingress parent is missing; refund obligation retained".into());
+                            };
+                            if parent.request.ledger != refund.ledger {
+                                return Err("linked refund ledger does not match its parent; obligation retained".into());
+                            }
+                            let Some(child) = parent.refund.as_mut() else {
+                                return Err("linked reserve ingress refund child is missing; obligation retained".into());
+                            };
+                            if child.op_nonce != op_nonce
+                                || child.gross_amount_e8s != current.amount_e8s
+                                || child.source_subaccount != tuple.source_subaccount
+                                || tuple.source_owner != ic_cdk::id()
+                                || tuple.destination.owner != refund.stability_pool
+                                || tuple.destination.subaccount.is_some()
+                                || (if tuple.source_subaccount.is_none() {
+                                    tuple.amount_e8s != child.gross_amount_e8s
+                                } else {
+                                    tuple.amount_e8s.checked_add(tuple.fee_e8s)
+                                        != Some(child.gross_amount_e8s)
+                                })
+                                || tuple.memo.as_slice()
+                                    != crate::management::nonce_to_memo(op_nonce).0.as_slice()
+                                || tuple.created_at_time_ns
+                                    != crate::management::nonce_to_created_at_time(op_nonce)
+                            {
+                                return Err("verified refund tuple does not match the linked parent child; obligation retained".into());
+                            }
+                            let receipt = crate::state::ThreeUsdReserveIngressRefundReceipt {
+                                block_index,
+                                tuple,
+                            };
+                            if child.settled_receipt.is_some() {
+                                return Err("linked refund already has settlement evidence while queue rows remain".into());
+                            }
+                            child.settled_receipt = Some(receipt);
+                        }
+                        state.pending_3usd_refunds.remove(&op_nonce);
+                        state.pending_3usd_refund_journals.remove(&op_nonce);
+                        Ok(())
+                    });
+                    match settlement {
+                        Ok(()) => log!(INFO,
+                            "[refunding] 3USD reserve refund receipt verified for SP {} (vault {}, block {}, net {}, fee {})",
+                            refund.stability_pool, refund.vault_id, block_index, tuple.amount_e8s, tuple.fee_e8s
+                        ),
+                        Err(error) => {
+                            let (retries, retryable) = mutate_state(|state| {
+                                record_3usd_refund_retry_failure(&mut state.pending_3usd_refunds, &op_nonce)
+                            });
+                            log!(INFO,
+                                "[refunding] verified 3USD refund block {} could not be committed to its linked parent for SP {} (vault {}): {}; obligation and tuple retained at retry {} (retryable={})",
+                                block_index, refund.stability_pool, refund.vault_id, error, retries, retryable
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    let (retries, retryable) = mutate_state(|state| {
+                        record_3usd_refund_retry_failure(&mut state.pending_3usd_refunds, &op_nonce)
+                    });
+                    log!(INFO,
+                        "[refunding] 3USD refund reply block {} did not prove the exact visible receipt for SP {} (vault {}): {}; obligation and tuple retained at retry {} (retryable={}).",
+                        block_index, refund.stability_pool, refund.vault_id, error, retries, retryable
+                    );
+                }
+            }
+        }
+        Err(TransferError::BadFee { expected_fee }) if first_dispatch => {
+            // This is the very first transfer call for this journal, and the
+            // per-nonce in-flight guard excludes a competing dispatcher. A
+            // typed BadFee guarantees this attempt had no effect, so it is the
+            // only result that permits discarding this tuple and requoting.
+            let expected_fee = expected_fee.0.to_u64();
+            if let Some(expected_fee) = expected_fee {
+                crate::management::set_cached_fee(refund.ledger, expected_fee);
+                let (retries, retryable) = mutate_state(|state| {
+                    let Some(refund) = state.pending_3usd_refunds.get_mut(&op_nonce) else {
+                        return (0, false);
+                    };
+                    let Some(next) = state.pending_3usd_refund_journals.get(&op_nonce)
+                        .copied()
+                        .and_then(|current| first_bad_fee_retry_transition(
+                            current,
+                            tuple,
+                            first_dispatch,
+                            gross_amount_e8s,
+                            &mut refund.retry_count,
+                        )) else { return (refund.retry_count, false); };
+                    state.pending_3usd_refund_journals.insert(op_nonce, next.0);
+                    (refund.retry_count, next.1)
+                });
+                log!(INFO,
+                    "[refunding] first 3USD refund attempt was rejected with BadFee {}; gross liability remains unsubmitted for a fresh tuple at retry {} (retryable={}).",
+                    expected_fee, retries, retryable
+                );
+            }
+        }
+        Err(error) => {
+            // Includes TooOld and transport/ledger errors after a tuple was
+            // submitted. Preserve the exact tuple; never allocate a new nonce.
+            let (retries, retryable) = mutate_state(|state| {
+                record_3usd_refund_retry_failure(&mut state.pending_3usd_refunds, &op_nonce)
+            });
+            log!(INFO,
+                "[refunding] 3USD reserve refund for SP {} (vault {}) failed: {:?}; exact tuple retained at retry {} (retryable={}).",
+                refund.stability_pool, refund.vault_id, error, retries, retryable
+            );
+        }
+    }
+}
+
+
 pub async fn process_pending_transfer() {
     let _guard = match crate::guard::TimerLogicGuard::new() {
         Some(guard) => guard,
@@ -1428,6 +1980,8 @@ pub async fn process_pending_transfer() {
             return;
         }
     };
+
+    crate::vault::process_pending_three_usd_reserve_payouts().await;
 
     // Process pending margin transfers
     //
@@ -1451,6 +2005,9 @@ pub async fn process_pending_transfer() {
 
         s.pending_margin_transfers
             .iter()
+            .filter(|(_, margin_transfer)| {
+                !s.three_usd_reserve_payout_parents.contains_key(&margin_transfer.op_nonce)
+            })
             .map(|(key, margin_transfer)| (*key, *margin_transfer))
             .collect::<Vec<((u64, candid::Principal), PendingMarginTransfer)>>()
     });
@@ -1864,7 +2421,9 @@ pub async fn process_pending_transfer() {
         }
     }
 
-    // Durable retry queue for stranded 3USD reserve refunds
+    // Durable retry queue for stranded 3USD reserve refunds. Entries at the
+    // automatic retry cap remain visible for manual reconciliation but are
+    // excluded here so they do not generate repeated ledger calls.
     // (`stability_pool_liquidate_with_reserves`). Each entry is keyed by its
     // `op_nonce`, reused on every retry so the 3USD ledger deduplicates a
     // previously-committed-but-reply-lost transfer. Without this, a failed refund
@@ -1873,72 +2432,18 @@ pub async fn process_pending_transfer() {
     let pending_3usd_refunds = read_state(|s| {
         s.pending_3usd_refunds
             .iter()
-            .map(|(k, v)| (*k, *v))
-            .collect::<Vec<(u128, crate::state::PendingThreeUsdRefund)>>()
+            .filter(|(nonce, refund)| {
+                pending_refund_is_automatically_retryable(refund.retry_count)
+                    && three_usd_refund_dispatch_is_retryable(
+                        s.pending_3usd_refund_journals.get(nonce),
+                    )
+            })
+            .map(|(k, _)| *k)
+            .collect::<Vec<u128>>()
     });
 
-    for (nonce_key, refund) in pending_3usd_refunds {
-        match crate::management::transfer_idempotent(
-            refund.ledger,
-            Some(crate::management::protocol_3usd_reserves_subaccount()),
-            icrc_ledger_types::icrc1::account::Account {
-                owner: refund.stability_pool,
-                subaccount: None,
-            },
-            refund.amount_e8s as u128,
-            refund.op_nonce,
-            None,
-        )
-        .await
-        {
-            Ok(block_index) => {
-                log!(INFO,
-                    "[refunding] 3USD reserve refund settled for SP {} (vault {}, refund block {}, amount {})",
-                    refund.stability_pool, refund.vault_id, block_index, refund.amount_e8s
-                );
-                mutate_state(|s| {
-                    s.pending_3usd_refunds.remove(&nonce_key);
-                });
-            }
-            Err(error) => {
-                log!(
-                    INFO,
-                    "[refunding] 3USD reserve refund failed for SP {} (vault {}): {:?}. Will retry.",
-                    refund.stability_pool,
-                    refund.vault_id,
-                    error
-                );
-                if let TransferError::BadFee { expected_fee } = error {
-                    // Refresh fee cache; do NOT increment retry count on BadFee.
-                    if let Ok(expected_fee_u64) = expected_fee.0.clone().try_into() {
-                        crate::management::set_cached_fee(refund.ledger, expected_fee_u64);
-                    }
-                } else {
-                    let retries = mutate_state(|s| {
-                        if let Some(r) = s.pending_3usd_refunds.get_mut(&nonce_key) {
-                            r.retry_count = r.retry_count.saturating_add(1);
-                            r.retry_count
-                        } else {
-                            0
-                        }
-                    });
-                    if retries >= MAX_PENDING_RETRIES {
-                        log!(
-                            INFO,
-                            "[refunding] CRITICAL: abandoning 3USD reserve refund for SP {} (vault {}) \
-                             after {} retries. Amount: {}. Manual reconciliation required.",
-                            refund.stability_pool,
-                            refund.vault_id,
-                            retries,
-                            refund.amount_e8s
-                        );
-                        mutate_state(|s| {
-                            s.pending_3usd_refunds.remove(&nonce_key);
-                        });
-                    }
-                }
-            }
-        }
+    for nonce_key in pending_3usd_refunds {
+        dispatch_pending_3usd_refund(nonce_key).await;
     }
 
     // Schedule another run if needed, but with better timing
@@ -1951,7 +2456,12 @@ pub async fn process_pending_transfer() {
             || s.pending_refunds
                 .values()
                 .any(|refund| pending_refund_is_automatically_retryable(refund.retry_count))
-            || !s.pending_3usd_refunds.is_empty()
+            || s.pending_3usd_refunds.iter().any(|(nonce, refund)| {
+                pending_refund_is_automatically_retryable(refund.retry_count)
+                    && three_usd_refund_dispatch_is_retryable(
+                        s.pending_3usd_refund_journals.get(nonce),
+                    )
+            })
     }) {
         // Schedule another check in 5 seconds
         log!(

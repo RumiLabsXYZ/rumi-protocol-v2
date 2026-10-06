@@ -1218,6 +1218,328 @@ fn net_for_run_input(
     Some(gross.saturating_sub(ledger_fee))
 }
 
+const THREE_USD_VIRTUAL_PRICE_SCALE: u128 = 1_000_000_000_000_000_000;
+
+#[derive(CandidType, Deserialize)]
+struct ThreePoolVirtualPriceView {
+    virtual_price: candid::Nat,
+}
+
+async fn fetch_three_pool_virtual_price(pool: Principal) -> Result<u128, ProtocolError> {
+    let (view,): (ThreePoolVirtualPriceView,) =
+        ic_cdk::call(pool, "get_pool_state", ())
+            .await
+            .map_err(|(code, message): (ic_cdk::api::call::RejectionCode, String)| {
+                ProtocolError::GenericError(format!(
+                    "Unable to read configured 3pool virtual price ({code:?}): {message}"
+                ))
+            })?;
+    view.virtual_price.0.to_u128().ok_or_else(|| {
+        ProtocolError::GenericError("3pool virtual price exceeds the supported range.".to_string())
+    })
+}
+
+fn three_usd_covers_debt(three_usd_e8s: u64, debt_e8s: u64, virtual_price: u128) -> bool {
+    (three_usd_e8s as u128)
+        .checked_mul(virtual_price)
+        .zip((debt_e8s as u128).checked_mul(THREE_USD_VIRTUAL_PRICE_SCALE))
+        .is_some_and(|(provided, required)| provided >= required)
+}
+
+fn three_usd_live_value_matches_debt_quote(
+    three_usd_e8s: u64,
+    quoted_debt_e8s: u64,
+    virtual_price: u128,
+) -> bool {
+    (three_usd_e8s as u128)
+        .checked_mul(virtual_price)
+        .and_then(|value| u64::try_from(value / THREE_USD_VIRTUAL_PRICE_SCALE).ok())
+        == Some(quoted_debt_e8s)
+}
+
+fn realized_three_usd_for_applied_debt(
+    gross_three_usd_e8s: u64,
+    requested_debt_e8s: u64,
+    applied_debt_e8s: u64,
+) -> u64 {
+    if requested_debt_e8s == 0 {
+        return 0;
+    }
+    ((gross_three_usd_e8s as u128).saturating_mul(applied_debt_e8s as u128)
+        / requested_debt_e8s as u128) as u64
+}
+
+fn stored_three_usd_absorb_matches(
+    stored: &crate::state::StoredThreeUsdReserveAbsorbResult,
+    caller: Principal,
+    vault_id: u64,
+    debt_e8s: u64,
+    three_usd_e8s: Option<u64>,
+    ledger: Option<Principal>,
+    proof: &crate::icrc3_proof::SpWritedownProof,
+) -> bool {
+    stored.caller == caller
+        && stored.vault_id == vault_id
+        && stored.icusd_debt_covered_e8s == debt_e8s
+        && Some(stored.three_usd_amount_e8s) == three_usd_e8s
+        && Some(stored.ledger) == ledger
+        && &stored.proof == proof
+}
+
+fn replay_stored_three_usd_absorb_result(
+    state: &crate::state::State,
+    caller: Principal,
+    vault_id: u64,
+    debt_e8s: u64,
+    three_usd_e8s: Option<u64>,
+    proof: &crate::icrc3_proof::SpWritedownProof,
+) -> Result<Option<StabilityPoolLiquidationResult>, ProtocolError> {
+    if proof.ledger_kind != crate::icrc3_proof::SpProofLedger::ThreePoolTransferDefault {
+        return Ok(None);
+    }
+    let proof_key = (proof.ledger_kind, proof.block_index);
+    let Some(stored) = state
+        .sp_three_usd_reserve_absorb_results_by_proof
+        .get(&proof_key)
+    else {
+        if state.consumed_writedown_proofs.contains(&proof_key) {
+            return Err(ProtocolError::GenericError(
+                "V2 reserve proof was consumed without its replay result; hold for manual reconciliation".into(),
+            ));
+        }
+        return Ok(None);
+    };
+    if stored_three_usd_absorb_matches(
+        stored,
+        caller,
+        vault_id,
+        debt_e8s,
+        three_usd_e8s,
+        state.three_pool_canister,
+        proof,
+    ) {
+        return Ok(Some(stored.result.clone()));
+    }
+    Err(ProtocolError::GenericError(format!(
+        "SP reserve proof replay rejected: ({:?}, block {}) is committed to a different request",
+        proof.ledger_kind, proof.block_index
+    )))
+}
+
+/// Read the exact committed V2 result before an ingress retry chooses any
+/// refund or re-executes accounting. A consumed proof without its result is a
+/// reconciliation hold, never evidence that a refund is safe.
+pub fn replay_committed_three_usd_reserve_absorb_result(
+    caller: Principal,
+    vault_id: u64,
+    debt_e8s: u64,
+    three_usd_e8s: Option<u64>,
+    proof: &crate::icrc3_proof::SpWritedownProof,
+) -> Result<Option<StabilityPoolLiquidationResult>, ProtocolError> {
+    read_state(|state| {
+        replay_stored_three_usd_absorb_result(
+            state,
+            caller,
+            vault_id,
+            debt_e8s,
+            three_usd_e8s,
+            proof,
+        )
+    })
+}
+
+/// Verify and atomically retain the exact collateral payout receipt linked to
+/// a committed 3USD V2 absorb. The ordinary margin-transfer path cannot clear
+/// this row: it must first prove the pinned account, amount, fee, memo, time,
+/// ledger adapter, parent identity, and queued obligation.
+pub async fn verify_and_record_three_usd_reserve_payout(
+    op_nonce: u128,
+    block_index: u64,
+) -> Result<Option<bool>, String> {
+    use crate::state::{PayoutProofKind, ThreeUsdReserveIngressPayoutReceipt};
+    use icrc_ledger_types::icrc1::account::Account;
+
+    let snapshot = read_state(|state| -> Result<_, String> {
+        let Some(key) = state.three_usd_reserve_payout_parents.get(&op_nonce).cloned() else {
+            return Ok(None);
+        };
+        let journal = state.three_usd_reserve_ingress_journals.get(&key)
+            .ok_or_else(|| "linked V2 payout has no parent ingress journal".to_string())?;
+        let payout = journal.payout.as_ref()
+            .ok_or_else(|| "linked V2 payout parent has no exact pinned tuple".to_string())?;
+        if payout.tuple.op_nonce != op_nonce {
+            return Err("linked V2 payout nonce differs from its parent tuple".into());
+        }
+        if let Some(receipt) = payout.receipt.as_ref() {
+            if receipt.block_index == block_index && receipt.tuple == payout.tuple
+                && !state.pending_margin_transfers.contains_key(&(key.vault_id, key.stability_pool))
+            {
+                return Ok(Some((key, payout.tuple.clone(), None)));
+            }
+            return Err("linked V2 payout already has a different retained receipt".into());
+        }
+        let transfer = state.pending_margin_transfers
+            .get(&(key.vault_id, key.stability_pool)).copied()
+            .ok_or_else(|| "linked V2 payout has neither a receipt nor a pending transfer".to_string())?;
+        if transfer.op_nonce != op_nonce
+            || transfer.owner != key.stability_pool
+            || transfer.collateral_type != payout.tuple.collateral_type
+            || transfer.margin.to_u64() != payout.tuple.gross_amount_e8s
+        {
+            return Err("linked V2 payout parent no longer matches its exact queue row".into());
+        }
+        Ok(Some((key, payout.tuple.clone(), Some(transfer))))
+    })?;
+    let Some((key, tuple, transfer)) = snapshot else { return Ok(None); };
+    let Some(transfer) = transfer else { return Ok(Some(false)); };
+
+    let canonical_icp = Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai")
+        .expect("canonical ICP principal");
+    let source = Account { owner: ic_cdk::id(), subaccount: None };
+    let destination = Account { owner: key.stability_pool, subaccount: None };
+    let memo = management::nonce_to_memo(op_nonce);
+    let created_at_time = management::nonce_to_created_at_time(op_nonce);
+    if tuple.ledger == Principal::anonymous()
+        || tuple.source != source
+        || tuple.destination != destination
+        || tuple.gross_amount_e8s == 0
+        || tuple.net_amount_e8s == 0
+        || tuple.net_amount_e8s.checked_add(tuple.fee_e8s) != Some(tuple.gross_amount_e8s)
+        || tuple.memo.as_slice() != memo.0.as_slice()
+        || tuple.created_at_time_ns != created_at_time
+    {
+        return Err("linked V2 payout contains an invalid pinned account or transfer tuple".into());
+    }
+    match (tuple.proof_kind, tuple.ledger == canonical_icp) {
+        (PayoutProofKind::NativeIcp, true) => {
+            crate::treasury::verify_native_icp_transfer_receipt(
+                tuple.ledger, tuple.source.owner, tuple.destination.owner,
+                tuple.net_amount_e8s, tuple.fee_e8s, tuple.memo.as_slice(),
+                tuple.created_at_time_ns, block_index,
+            ).await?;
+        }
+        (PayoutProofKind::Icrc3, false) => {
+            let block = crate::icrc3_proof::fetch_icrc3_block(tuple.ledger, block_index).await?;
+            crate::icrc3_proof::validate_icrc3_transfer_block_with_fee(
+                &block, tuple.source, tuple.destination, tuple.net_amount_e8s,
+                tuple.fee_e8s, tuple.memo.as_slice(), tuple.created_at_time_ns,
+            )?;
+        }
+        _ => return Err("linked V2 payout ledger does not match its pinned receipt adapter".into()),
+    }
+
+    let receipt = ThreeUsdReserveIngressPayoutReceipt { block_index, tuple };
+    Ok(Some(mutate_state(|state| {
+        let exact = state.pending_margin_transfers
+            .get(&(key.vault_id, key.stability_pool)) == Some(&transfer)
+            && state.three_usd_reserve_payout_parents.get(&op_nonce) == Some(&key)
+            && state.three_usd_reserve_ingress_journals.get(&key)
+                .and_then(|journal| journal.payout.as_ref())
+                .is_some_and(|payout| payout.tuple == receipt.tuple && payout.receipt.is_none());
+        if !exact { return false; }
+        if let Some(payout) = state.three_usd_reserve_ingress_journals
+            .get_mut(&key).and_then(|journal| journal.payout.as_mut())
+        {
+            payout.receipt = Some(receipt);
+        } else {
+            return false;
+        }
+        crate::event::record_margin_transfer(
+            state, key.vault_id, key.stability_pool, block_index,
+        );
+        true
+    })))
+}
+
+/// Retry receipt-backed V2 collateral payouts before the legacy margin queue
+/// runs. Every retry uses the tuple persisted with the debt commit.
+pub async fn process_pending_three_usd_reserve_payouts() {
+    let payouts = read_state(|state| {
+        state.three_usd_reserve_payout_parents.iter().filter_map(|(nonce, key)| {
+            let tuple = state.three_usd_reserve_ingress_journals.get(key)?
+                .payout.as_ref()?.tuple.clone();
+            let transfer = state.pending_margin_transfers.get(&(key.vault_id, key.stability_pool))?;
+            (tuple.op_nonce == *nonce && transfer.op_nonce == *nonce)
+                .then_some((*nonce, tuple))
+        }).collect::<Vec<_>>()
+    });
+    for (nonce, tuple) in payouts {
+        match management::transfer_idempotent_exact(
+            tuple.ledger,
+            None,
+            tuple.destination,
+            u128::from(tuple.net_amount_e8s),
+            tuple.fee_e8s,
+            icrc_ledger_types::icrc1::transfer::Memo::from(tuple.memo.to_vec()),
+            tuple.created_at_time_ns,
+        ).await {
+            Ok(block_index) => match verify_and_record_three_usd_reserve_payout(nonce, block_index).await {
+                Ok(Some(true)) | Ok(Some(false)) | Ok(None) => {}
+                Err(error) => log!(INFO,
+                    "[three_usd_reserve_payout] nonce {} retained pending after receipt verification failure: {}", nonce, error),
+            },
+            Err(error) => log!(INFO,
+                "[three_usd_reserve_payout] nonce {} retained pending after exact transfer attempt: {}", nonce, error),
+        }
+    }
+}
+
+fn v2_reserve_commit_is_paused(state: &crate::state::State) -> bool {
+    state.frozen || state.liquidation_frozen || state.sp_writedown_disabled
+}
+
+#[cfg(test)]
+mod three_usd_reserve_value_tests {
+    use super::*;
+
+    #[test]
+    fn reserve_value_must_cover_retired_debt_with_checked_units() {
+        let one = THREE_USD_VIRTUAL_PRICE_SCALE;
+        assert!(three_usd_covers_debt(10_000_000_000, 10_000_000_000, one));
+        assert!(!three_usd_covers_debt(9_999_999_999, 10_000_000_000, one));
+        assert!(three_usd_covers_debt(10_000_000_000, 10_000_000_000, one + 1));
+        assert!(!three_usd_covers_debt(u64::MAX, u64::MAX, u128::MAX));
+    }
+
+    #[test]
+    fn live_value_must_match_the_exact_v2_debt_quote_after_pull() {
+        let one = THREE_USD_VIRTUAL_PRICE_SCALE;
+        assert!(three_usd_live_value_matches_debt_quote(12_500_000_000, 12_500_000_000, one));
+        assert!(!three_usd_live_value_matches_debt_quote(12_500_000_000, 12_499_999_999, one));
+        assert!(!three_usd_live_value_matches_debt_quote(12_500_000_001, 12_500_000_000, one));
+        assert!(!three_usd_live_value_matches_debt_quote(u64::MAX, 1, u128::MAX));
+    }
+
+    #[test]
+    fn applied_debt_records_only_its_proportional_reserve_value() {
+        assert_eq!(realized_three_usd_for_applied_debt(100, 100, 50), 50);
+        assert_eq!(realized_three_usd_for_applied_debt(100, 0, 50), 0);
+    }
+
+    #[test]
+    fn checked_liquidation_conversion_rejects_unrepresentable_collateral() {
+        assert_eq!(
+            crate::numeric::try_icusd_to_collateral_amount(
+                ICUSD::new(100_000_000), dec!(1), 8,
+            ),
+            Some(100_000_000),
+        );
+        assert_eq!(
+            crate::numeric::try_icusd_to_collateral_amount(
+                ICUSD::new(1), dec!(0), 8,
+            ),
+            None,
+        );
+        assert_eq!(
+            crate::numeric::try_icusd_to_collateral_amount(
+                ICUSD::new(u64::MAX), Decimal::new(1, 28), u8::MAX,
+            ),
+            None,
+        );
+    }
+}
+
+
 use crate::compute_collateral_ratio;
 
 /// INT-003 defense in depth: clamp a raw borrow fee so `amount - fee >= 1 e8s`.
@@ -3539,6 +3861,7 @@ fn xrp_sp_allocation_fingerprint(
     let proof_kind = match request.proof.ledger_kind {
         crate::icrc3_proof::SpProofLedger::IcusdBurn => 0u8,
         crate::icrc3_proof::SpProofLedger::ThreePoolTransfer => 1u8,
+        crate::icrc3_proof::SpProofLedger::ThreePoolTransferDefault => 2u8,
     };
     hasher.update([proof_kind]);
     hasher.update(request.proof.block_index.to_be_bytes());
@@ -7347,11 +7670,12 @@ pub async fn liquidate_vault_partial(
                     // Calculate collateral to transfer (debt + liquidation bonus)
                     let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
                     let protocol_share = s.get_liquidation_protocol_share();
-                    let collateral_raw = crate::numeric::icusd_to_collateral_amount(
+                    let collateral_raw = crate::numeric::try_icusd_to_collateral_amount(
                         actual_liquidation_amount,
                         price,
                         decimals,
-                    );
+                    )
+                    .ok_or_else(|| "Required liquidation collateral exceeds the supported raw-token range.".to_string())?;
                     let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
                     let total_to_seize =
                         collateral_with_bonus.min(ICP::from(vault.collateral_amount));
@@ -8126,6 +8450,52 @@ pub async fn liquidate_vault_debt_already_burned(
     three_usd_received_e8s: Option<u64>,
     proof: crate::icrc3_proof::SpWritedownProof,
 ) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
+    liquidate_vault_debt_already_burned_inner(
+        vault_id, icusd_burned_e8s, caller, three_usd_received_e8s, proof, None,
+    ).await
+}
+
+/// V2-only entry point that carries the exact durable ingress identity into
+/// the write-down verifier.
+pub async fn liquidate_vault_debt_already_burned_v2(
+    vault_id: u64,
+    icusd_burned_e8s: u64,
+    caller: Principal,
+    three_usd_received_e8s: Option<u64>,
+    proof: crate::icrc3_proof::SpWritedownProof,
+    ingress_key: crate::state::ThreeUsdReserveIngressKey,
+) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
+    liquidate_vault_debt_already_burned_inner(
+        vault_id, icusd_burned_e8s, caller, three_usd_received_e8s, proof, Some(ingress_key),
+    ).await
+}
+
+async fn liquidate_vault_debt_already_burned_inner(
+    vault_id: u64,
+    icusd_burned_e8s: u64,
+    caller: Principal,
+    three_usd_received_e8s: Option<u64>,
+    proof: crate::icrc3_proof::SpWritedownProof,
+    ingress_key: Option<crate::state::ThreeUsdReserveIngressKey>,
+) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
+    // V2 default-account reserve transfers are idempotent across a lost
+    // inter-canister reply. The proof-keyed result is committed atomically
+    // with the accounting mutation below, so return it before kill-switch or
+    // consumed-proof checks only for the exact original request. A consumed
+    // proof with no row remains fail-closed at the ordinary replay check.
+    if proof.ledger_kind == crate::icrc3_proof::SpProofLedger::ThreePoolTransferDefault {
+        let replay = replay_committed_three_usd_reserve_absorb_result(
+            caller,
+            vault_id,
+            icusd_burned_e8s,
+            three_usd_received_e8s,
+            &proof,
+        )?;
+        if let Some(result) = replay {
+            return Ok(result);
+        }
+    }
+
     // Wave-8b LIQ-002 band gate is deactivated globally as of 2026-05-18.
     // This path was never gated to begin with: it is the stability-pool-
     // triggered writedown, with the caller gated on
@@ -8199,13 +8569,20 @@ pub async fn liquidate_vault_debt_already_burned(
     let (ledger_principal, reserves_account) = read_state(|s| {
         let ledger = match proof.ledger_kind {
             crate::icrc3_proof::SpProofLedger::IcusdBurn => s.icusd_ledger_principal,
-            crate::icrc3_proof::SpProofLedger::ThreePoolTransfer => {
+            crate::icrc3_proof::SpProofLedger::ThreePoolTransfer
+            | crate::icrc3_proof::SpProofLedger::ThreePoolTransferDefault => {
                 s.three_pool_canister.unwrap_or(Principal::anonymous())
             }
         };
         let reserves = icrc_ledger_types::icrc1::account::Account {
             owner: ic_cdk::id(),
-            subaccount: Some(crate::management::protocol_3usd_reserves_subaccount()),
+            subaccount: match proof.ledger_kind {
+                crate::icrc3_proof::SpProofLedger::ThreePoolTransferDefault => None,
+                crate::icrc3_proof::SpProofLedger::IcusdBurn
+                | crate::icrc3_proof::SpProofLedger::ThreePoolTransfer => {
+                    Some(crate::management::protocol_3usd_reserves_subaccount())
+                }
+            },
         };
         (ledger, reserves)
     });
@@ -8219,7 +8596,10 @@ pub async fn liquidate_vault_debt_already_burned(
 
     let expected_amount_e8s = match proof.ledger_kind {
         crate::icrc3_proof::SpProofLedger::IcusdBurn => icusd_burned_e8s,
-        crate::icrc3_proof::SpProofLedger::ThreePoolTransfer => three_usd_received_e8s.unwrap_or(0),
+        crate::icrc3_proof::SpProofLedger::ThreePoolTransfer
+        | crate::icrc3_proof::SpProofLedger::ThreePoolTransferDefault => {
+            three_usd_received_e8s.unwrap_or(0)
+        }
     };
 
     let expectations = crate::icrc3_proof::ProofExpectations {
@@ -8230,13 +8610,63 @@ pub async fn liquidate_vault_debt_already_burned(
         vault_id_memo: vault_id,
     };
 
-    if let Err(err) = crate::icrc3_proof::fetch_and_validate_block(
-        ledger_principal,
-        proof.block_index,
-        &expectations,
-    )
-    .await
+    let proof_validation = if proof.ledger_kind
+        == crate::icrc3_proof::SpProofLedger::ThreePoolTransferDefault
     {
+        let Some(key) = ingress_key.as_ref() else {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "V2 reserve proof requires its exact persisted ingress identity".into(),
+            ));
+        };
+        if key.stability_pool != caller || key.vault_id != vault_id {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "V2 reserve proof ingress identity does not match the caller and vault".into(),
+            ));
+        }
+        let Some(journal) = crate::management::three_usd_reserve_ingress_journal(key) else {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "V2 reserve proof has no persisted ingress journal".into(),
+            ));
+        };
+        let (tuple, journal_block_index) = match journal.phase {
+            crate::state::ThreeUsdReserveIngressPhase::TransferConfirmed { tuple, block_index }
+            | crate::state::ThreeUsdReserveIngressPhase::Absorbed { tuple, block_index, .. }
+            | crate::state::ThreeUsdReserveIngressPhase::FailedAfterTransfer { tuple, block_index, .. } => (tuple, block_index),
+            crate::state::ThreeUsdReserveIngressPhase::AdmissionPending
+            | crate::state::ThreeUsdReserveIngressPhase::PreTransferRejected { .. }
+            | crate::state::ThreeUsdReserveIngressPhase::SubmittedOrUnknown { .. } => {
+                guard_principal.fail();
+                return Err(ProtocolError::GenericError(
+                    "V2 reserve proof journal has no confirmed transfer block".into(),
+                ));
+            }
+        };
+        if journal.request.ledger != ledger_principal
+            || journal.request.icusd_debt_covered_e8s != icusd_burned_e8s
+            || Some(journal.request.three_usd_amount_e8s) != three_usd_received_e8s
+        {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "V2 reserve proof request does not match its persisted ingress journal".into(),
+            ));
+        }
+        crate::icrc3_proof::verify_three_usd_reserve_ingress_block(
+            ledger_principal,
+            proof.block_index,
+            journal_block_index,
+            &tuple,
+        ).await
+    } else {
+        crate::icrc3_proof::fetch_and_validate_block(
+            ledger_principal,
+            proof.block_index,
+            &expectations,
+        ).await.map(|_| ())
+    };
+    if let Err(err) = proof_validation {
         guard_principal.fail();
         log!(
             INFO,
@@ -8266,6 +8696,43 @@ pub async fn liquidate_vault_debt_already_burned(
         )));
     }
 
+    // The reserves branch pulls 3USD after its own preflight canister call.
+    // Read the configured pool's current value here, after that await, so the
+    // backend itself binds the amount of 3USD to the debt it is about to retire.
+    let three_usd_virtual_price = if proof.ledger_kind
+        == crate::icrc3_proof::SpProofLedger::ThreePoolTransfer
+        || proof.ledger_kind == crate::icrc3_proof::SpProofLedger::ThreePoolTransferDefault
+    {
+        let Some(three_usd_e8s) = three_usd_received_e8s.filter(|amount| *amount > 0) else {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "Reserves liquidation requires a non-zero 3USD amount.".to_string(),
+            ));
+        };
+        let Some(pool) = read_state(|s| s.three_pool_canister) else {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "The configured 3pool is unavailable for reserves valuation.".to_string(),
+            ));
+        };
+        let virtual_price = match fetch_three_pool_virtual_price(pool).await {
+            Ok(value) if value > 0 => value,
+            Ok(_) => {
+                guard_principal.fail();
+                return Err(ProtocolError::GenericError(
+                    "The configured 3pool returned a zero virtual price.".to_string(),
+                ));
+            }
+            Err(error) => {
+                guard_principal.fail();
+                return Err(error);
+            }
+        };
+        Some((three_usd_e8s, virtual_price))
+    } else {
+        None
+    };
+
     // Step 1: Validate vault is liquidatable and compute collateral to release
     let (
         vault,
@@ -8276,6 +8743,9 @@ pub async fn liquidate_vault_debt_already_burned(
         collateral_to_liquidator,
         total_to_seize,
         protocol_cut,
+        liquidation_bonus,
+        protocol_share,
+        minimum_liquidation_ratio,
     ) = match read_state(|s| {
         match s.vault_id_to_vaults.get(&vault_id) {
             Some(vault) => {
@@ -8298,9 +8768,10 @@ pub async fn liquidate_vault_debt_already_burned(
                     .unwrap_or(8);
                 let collateral_price_usd = UsdIcp::from(price);
 
-                // NO CR CHECK HERE — icUSD was already burned by the 3pool.
-                // The backend MUST honor the write-down regardless of vault health.
-                // Rejecting would leave burned icUSD unaccounted for.
+                // The legacy burn path must honor already-burned icUSD even if
+                // the vault recovered. The reserves path is checked again below
+                // after its 3USD transfer await and can safely reject because
+                // the entry point refunds that transfer on error.
                 {
                     let actual_liquidation_amount =
                         liquidation_amount.min(vault.borrowed_icusd_amount);
@@ -8311,6 +8782,8 @@ pub async fn liquidate_vault_debt_already_burned(
 
                     let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
                     let protocol_share = s.get_liquidation_protocol_share();
+                    let minimum_liquidation_ratio =
+                        s.get_min_liquidation_ratio_for(&vault.collateral_type);
                     let collateral_raw = crate::numeric::icusd_to_collateral_amount(
                         actual_liquidation_amount,
                         price,
@@ -8337,6 +8810,9 @@ pub async fn liquidate_vault_debt_already_burned(
                         collateral_to_liquidator,
                         total_to_seize,
                         protocol_cut,
+                        liq_bonus,
+                        protocol_share,
+                        minimum_liquidation_ratio,
                     ))
                 }
             }
@@ -8368,16 +8844,23 @@ pub async fn liquidate_vault_debt_already_burned(
         vault_id, max_liquidatable_debt.to_u64(), collateral_to_liquidator.to_u64(), protocol_cut
     );
 
-    // Wave-8c LIQ-004 (sanity log on healthy vaults): if the pre-call CR is
-    // above min_liq_ratio, a buggy or malicious SP is writing down a
-    // non-underwater vault. Log loudly so an operator can investigate. Do
-    // NOT reject — the SP has already burned icUSD (or moved 3USD into
-    // reserves), so refusing here would orphan that token movement. The
-    // proof verification + kill switch are the enforcement layers; this
-    // is purely an alarm.
+    // The legacy burn path logs healthy-vault write-downs but cannot reject an
+    // already-burned amount. The reserves path has a refund route, so it rejects
+    // healthy vaults after the transfer await below.
     let pre_call_cr = read_state(|s| compute_collateral_ratio(&vault, collateral_price_usd, s));
     let min_liq = read_state(|s| s.get_min_liquidation_ratio_for(&vault.collateral_type));
     if pre_call_cr >= min_liq {
+        if matches!(
+            proof.ledger_kind,
+            crate::icrc3_proof::SpProofLedger::ThreePoolTransfer
+                | crate::icrc3_proof::SpProofLedger::ThreePoolTransferDefault
+        ) {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "Reserves liquidation rejected because the vault is no longer liquidatable."
+                    .to_string(),
+            ));
+        }
         log!(INFO,
             "[liquidate_vault_debt_burned] [LIQ-004] WARN: SP writedown applied to vault #{} \
              whose pre-call CR ({}) is above min_liq_ratio ({}). Caller={} proof={:?}. Investigate.",
@@ -8385,24 +8868,166 @@ pub async fn liquidate_vault_debt_already_burned(
         );
     }
 
+    if let Some((three_usd_e8s, virtual_price)) = three_usd_virtual_price {
+        if proof.ledger_kind == crate::icrc3_proof::SpProofLedger::ThreePoolTransferDefault
+            && !three_usd_live_value_matches_debt_quote(
+                three_usd_e8s,
+                icusd_burned_e8s,
+                virtual_price,
+            )
+        {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "3USD live virtual price no longer matches the V2 debt quote.".to_string(),
+            ));
+        }
+        if !three_usd_covers_debt(
+            three_usd_e8s,
+            max_liquidatable_debt.to_u64(),
+            virtual_price,
+        ) {
+            guard_principal.fail();
+            return Err(ProtocolError::GenericError(
+                "3USD reserves value is below the debt amount being retired.".to_string(),
+            ));
+        }
+    }
+
     // Step 2: SKIPPED — icUSD was already burned atomically in the 3pool.
     // The icUSD supply has already been reduced by `icusd_burned_e8s`.
 
     // Step 3: Update protocol state (partial liquidation)
-    let interest_share = mutate_state(|s| {
+    let (interest_share, committed_result) = match mutate_state(|s| -> Result<
+        (ICUSD, StabilityPoolLiquidationResult),
+        ProtocolError,
+    > {
+        let settlement_time = ic_cdk::api::time();
+        let proof_key = (proof.ledger_kind, proof.block_index);
+        // Pin every outbound field for V2's Stability Pool collateral receipt
+        // before consuming the proof or mutating debt. This check is repeated
+        // in the same commit message that installs the payout row and parent
+        // link, so the ledger route cannot rotate across the transfer await.
+        let v2_payout_binding = if proof.ledger_kind
+            == crate::icrc3_proof::SpProofLedger::ThreePoolTransferDefault
+        {
+            let Some(key) = ingress_key.as_ref() else {
+                return Err(ProtocolError::GenericError(
+                    "V2 reserve payout has no explicit ingress parent".into(),
+                ));
+            };
+            if key.stability_pool != caller || key.vault_id != vault_id
+                || s.stability_pool_canister != Some(caller)
+            {
+                return Err(ProtocolError::GenericError(
+                    "V2 reserve payout parent is not the registered Stability Pool operation".into(),
+                ));
+            }
+            if s.pending_margin_transfers.contains_key(&(vault_id, caller)) {
+                return Err(ProtocolError::GenericError(
+                    "V2 reserve payout cannot replace an existing margin obligation".into(),
+                ));
+            }
+            let Some(parent) = s.three_usd_reserve_ingress_journals.get(key) else {
+                return Err(ProtocolError::GenericError(
+                    "V2 reserve payout parent journal disappeared before debt commit".into(),
+                ));
+            };
+            if parent.payout.is_some()
+                || !matches!(&parent.phase,
+                    crate::state::ThreeUsdReserveIngressPhase::TransferConfirmed { block_index, .. }
+                        if *block_index == proof.block_index)
+                || parent.request.ledger != ledger_principal
+                || parent.request.icusd_debt_covered_e8s != icusd_burned_e8s
+                || Some(parent.request.three_usd_amount_e8s) != three_usd_received_e8s
+            {
+                return Err(ProtocolError::GenericError(
+                    "V2 reserve payout parent does not match its confirmed proof and request".into(),
+                ));
+            }
+            let live = s.vault_id_to_vaults.get(&vault_id).ok_or_else(|| {
+                ProtocolError::GenericError("V2 reserve payout vault disappeared before commit".into())
+            })?;
+            let Some(config) = s.get_collateral_config(&live.collateral_type) else {
+                return Err(ProtocolError::GenericError(
+                    "V2 reserve payout collateral has no pinned ledger configuration".into(),
+                ));
+            };
+            if config.is_native_xrp()
+                || config.ledger_canister_id == Principal::anonymous()
+            {
+                return Err(ProtocolError::GenericError(
+                    "V2 reserve payout requires a configured non-XRP collateral ledger".into(),
+                ));
+            }
+            let live_gross = total_to_seize.to_u64()
+                .min(live.collateral_amount)
+                .saturating_sub(protocol_cut.min(live.collateral_amount));
+            let live_net = live_gross.checked_sub(config.ledger_fee).filter(|amount| *amount > 0)
+                .ok_or_else(|| ProtocolError::GenericError(
+                    "V2 reserve payout cannot cover the pinned collateral ledger fee".into(),
+                ))?;
+            Some((key.clone(), config.ledger_canister_id, config.ledger_fee,
+                s.payout_proof_kind_for_ledger(config.ledger_canister_id),
+                live.collateral_type, live_gross, live_net))
+        } else {
+            None
+        };
+        if proof.ledger_kind == crate::icrc3_proof::SpProofLedger::ThreePoolTransferDefault {
+            if v2_reserve_commit_is_paused(s) {
+                return Err(ProtocolError::TemporarilyUnavailable(
+                    "V2 reserve liquidation was paused before accounting commit; exact refund reconciliation is required".into(),
+                ));
+            }
+            let live_vault = s.vault_id_to_vaults.get(&vault_id).ok_or_else(|| {
+                ProtocolError::GenericError("V2 reserve vault disappeared before commit".into())
+            })?;
+            let live_price = s.get_collateral_price_decimal(&live_vault.collateral_type);
+            let live_decimals = s
+                .get_collateral_config(&live_vault.collateral_type)
+                .map(|config| config.decimals)
+                .unwrap_or(8);
+            let live_status_allows = s
+                .get_collateral_status(&live_vault.collateral_type)
+                .is_none_or(|status| status.allows_liquidation());
+            let live_ratio = compute_collateral_ratio(
+                live_vault,
+                s.last_icp_rate.unwrap_or_else(|| UsdIcp::from(dec!(0.0))),
+                s,
+            );
+            if s.three_pool_canister != Some(ledger_principal)
+                || live_vault.borrowed_icusd_amount != vault.borrowed_icusd_amount
+                || live_vault.collateral_amount != vault.collateral_amount
+                || live_vault.accrued_interest != vault.accrued_interest
+                || live_price != Some(collateral_price)
+                || live_decimals != config_decimals
+                || !live_status_allows
+                || s.get_liquidation_bonus_for(&live_vault.collateral_type) != liquidation_bonus
+                || s.get_liquidation_protocol_share() != protocol_share
+                || s.get_min_liquidation_ratio_for(&live_vault.collateral_type)
+                    != minimum_liquidation_ratio
+                || live_ratio >= minimum_liquidation_ratio
+            {
+                return Err(ProtocolError::GenericError(
+                    "V2 reserve liquidation inputs changed before atomic commit; transfer retained for exact refund reconciliation".into(),
+                ));
+            }
+        }
+        if !s.consumed_writedown_proofs.insert(proof_key) {
+            return Err(ProtocolError::GenericError(format!(
+                "SP writedown proof replay rejected: ({:?}, block {}) was consumed while verifying",
+                proof.ledger_kind, proof.block_index
+            )));
+        }
         // Wave-8c LIQ-004: record the proof as consumed atomically with the
         // writedown so a partial failure cannot leave the proof unconsumed
         // (replay risk) or consumed without an effect (orphan risk).
-        s.consumed_writedown_proofs
-            .insert((proof.ledger_kind, proof.block_index));
-
         let interest_share = if let Some(vault) = s.vault_id_to_vaults.get(&vault_id) {
             if vault.accrued_interest.0 > 0 && vault.borrowed_icusd_amount.0 > 0 {
                 let share = (rust_decimal::Decimal::from(max_liquidatable_debt.0)
                     * rust_decimal::Decimal::from(vault.accrued_interest.0)
                     / rust_decimal::Decimal::from(vault.borrowed_icusd_amount.0))
-                .to_u64()
-                .unwrap_or(0);
+                    .to_u64()
+                    .unwrap_or(0);
                 ICUSD::new(share.min(vault.accrued_interest.0))
             } else {
                 ICUSD::new(0)
@@ -8434,7 +9059,14 @@ pub async fn liquidate_vault_debt_already_burned(
         // window log. SP writedowns count toward the breaker — a flood of
         // SP-absorbed liquidations is still a stress signal worth pausing
         // bot/SP auto-publishing on.
-        crate::event::record_liquidation_for_breaker(s, max_liquidatable_debt.to_u64());
+        let event_debt = if proof.ledger_kind
+            == crate::icrc3_proof::SpProofLedger::ThreePoolTransferDefault
+        {
+            debt_applied
+        } else {
+            max_liquidatable_debt
+        };
+        crate::event::record_liquidation_for_breaker(s, event_debt.to_u64());
 
         // Wave-8e LIQ-005: per-call deficit accrual on the SP writedown
         // path, against the APPLIED amounts. Even though icUSD was burned
@@ -8459,7 +9091,7 @@ pub async fn liquidate_vault_debt_already_burned(
                 s,
                 crate::event::DeficitSource::Liquidation { vault_id },
                 shortfall,
-                ic_cdk::api::time(),
+                settlement_time,
             );
             if s.check_deficit_readonly_latch() {
                 log!(INFO,
@@ -8469,10 +9101,19 @@ pub async fn liquidate_vault_debt_already_burned(
             }
         }
 
+        // Commit the applied fee obligation with the proof consumption and
+        // accounting event; native-XRP developer claims are pinned by exact id.
         // AR-B-001/BK-001 (audit 2026-06-09): applied payout, replay-exact.
+        let reserve_realized_e8s = three_usd_received_e8s.map(|gross| {
+            realized_three_usd_for_applied_debt(
+                gross,
+                icusd_burned_e8s,
+                event_debt.to_u64(),
+            )
+        });
         let event = crate::event::Event::PartialLiquidateVault {
             vault_id,
-            liquidator_payment: max_liquidatable_debt,
+            liquidator_payment: event_debt,
             icp_to_liquidator: payout_to_liquidator,
             liquidator: Some(caller),
             icp_rate: Some(collateral_price_usd),
@@ -8481,17 +9122,20 @@ pub async fn liquidate_vault_debt_already_burned(
             } else {
                 None
             },
-            timestamp: Some(ic_cdk::api::time()),
-            three_usd_reserves_e8s: three_usd_received_e8s,
+            timestamp: Some(settlement_time),
+            three_usd_reserves_e8s: reserve_realized_e8s,
         };
         crate::storage::record_event(&event);
 
         // Track 3USD reserves at runtime (also persisted via event replay)
-        if let Some(three_usd_e8s) = three_usd_received_e8s {
+        if let Some(three_usd_e8s) = reserve_realized_e8s {
             s.protocol_3usd_reserves += three_usd_e8s;
         }
 
-        let nonce = s.next_op_nonce();
+        let mut nonce = s.next_op_nonce();
+        while s.three_usd_reserve_payout_parents.contains_key(&nonce) {
+            nonce = s.next_op_nonce();
+        }
         queue_collateral_payout(
             s,
             vault_id,
@@ -8502,6 +9146,43 @@ pub async fn liquidate_vault_debt_already_burned(
             nonce,
             ic_cdk::api::time(),
         );
+        if let Some((key, ledger, fee, proof_kind, collateral_type, gross, net)) = v2_payout_binding {
+            let row = s.pending_margin_transfers.get(&(key.vault_id, key.stability_pool))
+                .expect("validated non-XRP V2 payout configuration must enqueue a margin transfer");
+            assert!(row.op_nonce == nonce
+                && row.owner == key.stability_pool
+                && row.margin.to_u64() == gross
+                && row.collateral_type == collateral_type,
+                "V2 reserve collateral payout differs from its commit-time pins");
+            let memo = crate::management::nonce_to_memo(nonce);
+            let payout_tuple = crate::state::ThreeUsdReserveIngressPayoutTuple {
+                op_nonce: nonce,
+                ledger,
+                proof_kind,
+                source: icrc_ledger_types::icrc1::account::Account {
+                    owner: ic_cdk::id(),
+                    subaccount: None,
+                },
+                destination: icrc_ledger_types::icrc1::account::Account {
+                    owner: key.stability_pool,
+                    subaccount: None,
+                },
+                gross_amount_e8s: gross,
+                net_amount_e8s: net,
+                fee_e8s: fee,
+                memo: memo.0.as_slice().try_into()
+                    .expect("nonce memo is exactly 16 bytes"),
+                created_at_time_ns: crate::management::nonce_to_created_at_time(nonce),
+                collateral_type,
+            };
+            s.three_usd_reserve_payout_parents.insert(nonce, key.clone());
+            let parent = s.three_usd_reserve_ingress_journals.get_mut(&key)
+                .expect("validated V2 reserve parent must survive the atomic debt commit");
+            parent.payout = Some(crate::state::ThreeUsdReserveIngressPayout {
+                tuple: payout_tuple,
+                receipt: None,
+            });
+        }
 
         // Shared drain rule (see state::cleanup_if_drained): remove the vault
         // if this liquidation emptied it, else re-key its CR index entry.
@@ -8516,8 +9197,55 @@ pub async fn liquidate_vault_debt_already_burned(
             );
         }
 
-        interest_share
-    });
+        let result_debt = event_debt.to_u64();
+        let result_collateral = if proof.ledger_kind
+            == crate::icrc3_proof::SpProofLedger::ThreePoolTransferDefault
+        {
+            payout_to_liquidator.to_u64()
+        } else {
+            collateral_to_liquidator.to_u64()
+        };
+        let liquidator_value_received = crate::numeric::collateral_usd_value(
+            result_collateral,
+            collateral_price,
+            config_decimals,
+        );
+        let fee_amount = if liquidator_value_received > event_debt {
+            liquidator_value_received - event_debt
+        } else {
+            ICUSD::new(0)
+        };
+        let result = StabilityPoolLiquidationResult {
+            success: true,
+            vault_id,
+            liquidated_debt: result_debt,
+            collateral_received: result_collateral,
+            collateral_type: vault.collateral_type.to_string(),
+            block_index: 0,
+            fee: fee_amount.to_u64(),
+            collateral_price_e8s: collateral_price_usd.to_e8s(),
+        };
+        if proof.ledger_kind == crate::icrc3_proof::SpProofLedger::ThreePoolTransferDefault {
+            let stored = crate::state::StoredThreeUsdReserveAbsorbResult {
+                caller,
+                vault_id,
+                icusd_debt_covered_e8s: icusd_burned_e8s,
+                three_usd_amount_e8s: three_usd_received_e8s.unwrap_or(0),
+                ledger: ledger_principal,
+                proof: proof.clone(),
+                result: result.clone(),
+            };
+            s.sp_three_usd_reserve_absorb_results_by_proof
+                .insert(proof_key, stored);
+        }
+        Ok((interest_share, result))
+    }) {
+        Ok(result) => result,
+        Err(err) => {
+            guard_principal.fail();
+            return Err(err);
+        }
+    };
 
     // Route interest share via N-way split
     // IC-B-002 (audit 2026-06-09): re-queue any unminted interest share so the
@@ -8530,35 +9258,9 @@ pub async fn liquidate_vault_debt_already_burned(
         });
     }
 
-    // Send protocol's liquidation fee cut to treasury
-    if protocol_cut > 0 {
-        if vault.collateral_type == crate::state::xrp_collateral_principal() {
-            // P5: native-XRP protocol fee -> a developer-settleable XrpClaim (the
-            // ICRC treasury transfer cannot target the synthetic XRP ledger). Keyed
-            // by collateral_type (not a vault lookup, since the vault may already be
-            // drained/removed by cleanup_if_drained above).
-            let dev = read_state(|s| s.developer_principal);
-            let now_ns = ic_cdk::api::time();
-            mutate_state(|s| {
-                record_xrp_claim(
-                    s,
-                    dev,
-                    vault.owner,
-                    vault.vault_id,
-                    protocol_cut.to_u64().unwrap_or(0),
-                    now_ns,
-                );
-            });
-        } else {
-            let asset_type = crate::treasury::collateral_to_asset_type(&vault.collateral_type);
-            crate::treasury::send_liquidation_fee_to_treasury(
-                protocol_cut,
-                vault.collateral_type,
-                asset_type,
-            )
-            .await;
-        }
-    }
+    // Fee obligations and native-XRP developer claims were persisted atomically
+    // with the liquidation accounting event above; outbox delivery is retried
+    // independently and cannot change the committed amounts.
 
     // Step 4: Process collateral transfer to stability pool
     match try_process_pending_transfers_immediate(vault_id).await {
@@ -8592,35 +9294,16 @@ pub async fn liquidate_vault_debt_already_burned(
 
     guard_principal.complete();
 
-    let liquidator_value_received = crate::numeric::collateral_usd_value(
-        collateral_to_liquidator.to_u64(),
-        collateral_price,
-        config_decimals,
-    );
-    let fee_amount = if liquidator_value_received > max_liquidatable_debt {
-        liquidator_value_received - max_liquidatable_debt
-    } else {
-        ICUSD::new(0)
-    };
-
     log!(
         INFO,
         "[liquidate_vault_debt_burned] Completed. Fee: {}, Collateral: {}",
-        fee_amount.to_u64(),
-        collateral_to_liquidator.to_u64()
+        committed_result.fee,
+        committed_result.collateral_received
     );
 
-    Ok(StabilityPoolLiquidationResult {
-        success: true,
-        vault_id,
-        liquidated_debt: max_liquidatable_debt.to_u64(),
-        collateral_received: collateral_to_liquidator.to_u64(),
-        collateral_type: vault.collateral_type.to_string(),
-        block_index: 0, // No ledger block — icUSD was burned in 3pool
-        fee: fee_amount.to_u64(),
-        collateral_price_e8s: collateral_price_usd.to_e8s(),
-    })
+    Ok(committed_result)
 }
+
 
 pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolError> {
     let caller = ic_cdk::api::caller();
@@ -9103,6 +9786,52 @@ async fn try_process_pending_transfers_immediate(vault_id: u64) -> Result<u32, S
 
     // Process each transfer
     for (transfer_type, transfer_vault_id, transfer_owner, transfer) in transfers_to_process {
+        // A V2 3USD absorb has a persisted exact payout tuple linked to the
+        // committed debt write-down. Never reprice it through the legacy
+        // margin path, and never remove its queue row on a transfer reply
+        // alone; retain the obligation until the exact receipt is verified.
+        let v2_payout = read_state(|state| {
+            let key = state.three_usd_reserve_payout_parents.get(&transfer.op_nonce)?;
+            let payout = state.three_usd_reserve_ingress_journals
+                .get(key)?.payout.as_ref()?;
+            (payout.tuple.op_nonce == transfer.op_nonce).then(|| payout.tuple.clone())
+        });
+        if let Some(tuple) = v2_payout {
+            if transfer_type != "margin"
+                || tuple.ledger == Principal::anonymous()
+                || tuple.source.owner != ic_cdk::id()
+                || tuple.source.subaccount.is_some()
+                || tuple.destination.owner != transfer_owner
+                || tuple.destination.subaccount.is_some()
+                || tuple.gross_amount_e8s != transfer.margin.to_u64()
+                || tuple.collateral_type != transfer.collateral_type
+            {
+                log!(INFO, "[immediate_transfer] Holding V2 reserve payout {} because its queue tuple does not match", transfer.op_nonce);
+                continue;
+            }
+            match management::transfer_idempotent_exact(
+                tuple.ledger,
+                None,
+                tuple.destination,
+                u128::from(tuple.net_amount_e8s),
+                tuple.fee_e8s,
+                icrc_ledger_types::icrc1::transfer::Memo::from(tuple.memo.to_vec()),
+                tuple.created_at_time_ns,
+            ).await {
+                Ok(block_index) => match verify_and_record_three_usd_reserve_payout(
+                    transfer.op_nonce, block_index,
+                ).await {
+                    Ok(Some(true)) => processed_count += 1,
+                    Ok(Some(false)) | Ok(None) => log!(INFO,
+                        "[immediate_transfer] V2 reserve payout {} remains pending until its exact receipt is committed", transfer.op_nonce),
+                    Err(error) => log!(INFO,
+                        "[immediate_transfer] V2 reserve payout {} remains pending because receipt verification failed: {}", transfer.op_nonce, error),
+                },
+                Err(error) => log!(INFO,
+                    "[immediate_transfer] V2 reserve payout {} remains pending after exact transfer attempt: {}", transfer.op_nonce, error),
+            }
+            continue;
+        }
         // Note: native-XRP collateral never reaches this ICRC processor — it is
         // converted to an XrpClaim at the moment of liquidation/withdrawal (see
         // `queue_collateral_payout`), so a NativeXrp `collateral_type` cannot appear

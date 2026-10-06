@@ -7115,21 +7115,9 @@ fn claim_chain_collateral(
     Ok(op_id)
 }
 
-/// Called by the stability pool to liquidate a vault using 3USD reserves.
-/// The SP must have approved this canister to spend `three_usd_amount_e8s` on `three_usd_ledger`.
-/// Validates vault first, then pulls 3USD, then writes down debt and releases collateral.
-/// Only callable by the registered stability pool canister.
-///
-/// Wave-8d LIQ-004 Phase 2: the backend builds the writedown proof
-/// internally from the block index returned by `transfer_3usd_to_reserves`.
-/// The SP does not pass a proof on this path (the block does not exist
-/// until after the backend's own transfer), so the proof argument has been
-/// retired from the entry point's surface; vault binding is enforced by
-/// `liquidate_vault_debt_already_burned`'s `vault_id_memo == vault_id`
-/// assertion. The 3pool ledger does not persist memos into ICRC-3 blocks,
-/// so the verifier skips the memo check on this path; replay defense via
-/// `consumed_writedown_proofs` and on-chain account/amount validation
-/// remain in force.
+/// Legacy Candid entrypoint retained for compatibility, but held closed because
+/// it has no durable reserve-ingress identity. It refuses before caller checks,
+/// awaits, or ledger transfers; new admissions use the receipt-backed V2 route.
 #[update]
 #[candid_method(update)]
 async fn stability_pool_liquidate_with_reserves(
@@ -7138,10 +7126,682 @@ async fn stability_pool_liquidate_with_reserves(
     three_usd_amount_e8s: u64,
     three_usd_ledger: Principal,
 ) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
-    validate_call().await?;
-    validate_liquidation_not_frozen()?;
-    validate_price_for_liquidation()?;
-    validate_freshness_for_vault(vault_id).await?;
+    let _ = (
+        vault_id,
+        icusd_debt_covered_e8s,
+        three_usd_amount_e8s,
+        three_usd_ledger,
+    );
+    Err(ProtocolError::TemporarilyUnavailable(
+        "Legacy 3USD reserve liquidation is disabled; use the receipt-backed V2 route after admission is enabled"
+            .into(),
+    ))
+}
+
+/// Versioned reserve path with a durable Stability Pool absorb identity.
+#[update]
+#[candid_method(update)]
+async fn stability_pool_liquidate_with_reserves_v2(
+    vault_id: u64,
+    absorb_id: u64,
+    icusd_debt_covered_e8s: u64,
+    three_usd_amount_e8s: u64,
+    three_usd_ledger: Principal,
+) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
+    stability_pool_liquidate_with_reserves_inner(
+        vault_id,
+        Some(absorb_id),
+        icusd_debt_covered_e8s,
+        three_usd_amount_e8s,
+        three_usd_ledger,
+    )
+    .await
+}
+
+/// Test-only barrier for the recovered-vault-after-pull PocketIC regression.
+/// This is absent from default production Wasms and intentionally has no
+/// runtime toggle or Candid surface.
+#[cfg(feature = "cl07-recovered-vault-after-pull-test-gate")]
+async fn cl07_recovered_vault_after_pull_test_gate() -> Result<(), ProtocolError> {
+    use ic_cdk::api::management_canister::http_request::{
+        http_request, CanisterHttpRequestArgument, HttpMethod,
+    };
+
+    let request = CanisterHttpRequestArgument {
+        url: "https://cl07-recovered-vault.test/after-pull".into(),
+        max_response_bytes: Some(1),
+        method: HttpMethod::GET,
+        headers: vec![],
+        body: None,
+        transform: None,
+    };
+    let (response,) = http_request(request, 1_000_000_000)
+        .await
+        .map_err(|error| ProtocolError::GenericError(format!(
+            "CL07 test gate outcall failed after 3USD pull: {error:?}"
+        )))?;
+    if response.status.0 != 200u8.into() {
+        return Err(ProtocolError::GenericError(format!(
+            "CL07 test gate returned HTTP status {} after 3USD pull",
+            response.status.0
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod legacy_three_usd_reserve_endpoint_tests {
+    use super::{stability_pool_liquidate_with_reserves, ProtocolError};
+    use candid::Principal;
+
+    #[test]
+    fn legacy_reserve_endpoint_refuses_before_entering_liquidation_inner() {
+        let result = futures::executor::block_on(stability_pool_liquidate_with_reserves(
+            7,
+            100_000_000,
+            100_000_000,
+            Principal::anonymous(),
+        ));
+
+        match result {
+            Err(ProtocolError::TemporarilyUnavailable(message)) => {
+                assert!(message.contains("Legacy 3USD reserve liquidation is disabled"));
+                assert!(message.contains("receipt-backed V2 route"));
+            }
+            other => panic!("expected typed legacy-route refusal, got {other:?}"),
+        }
+    }
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum ThreeUsdReserveIngressV2PendingStage {
+    TransferSubmittedOrUnknown {
+        tuple: rumi_protocol_backend::state::ThreeUsdReserveIngressTuple,
+    },
+    TransferConfirmed {
+        tuple: rumi_protocol_backend::state::ThreeUsdReserveIngressTuple,
+        transfer_block_index: u64,
+    },
+    AbsorbCommittedRefundPending {
+        tuple: rumi_protocol_backend::state::ThreeUsdReserveIngressTuple,
+        transfer_block_index: u64,
+        proof: rumi_protocol_backend::icrc3_proof::SpWritedownProof,
+        result: StabilityPoolLiquidationResult,
+        refund_amount_e8s: u64,
+    },
+    AbsorbCommittedPayoutPending {
+        tuple: rumi_protocol_backend::state::ThreeUsdReserveIngressTuple,
+        transfer_block_index: u64,
+        proof: rumi_protocol_backend::icrc3_proof::SpWritedownProof,
+        result: StabilityPoolLiquidationResult,
+        payout_tuple: rumi_protocol_backend::state::ThreeUsdReserveIngressPayoutTuple,
+    },
+    FailedRefundPending {
+        tuple: rumi_protocol_backend::state::ThreeUsdReserveIngressTuple,
+        transfer_block_index: u64,
+        error: String,
+        refund_amount_e8s: u64,
+    },
+    ReconciliationRequired { reason: String },
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum ThreeUsdReserveIngressV2Status {
+    /// No backend admission is currently visible. This is deliberately
+    /// nonterminal: callers must retry the exact same ID/request.
+    Unseen,
+    AdmissionPending,
+    PreTransferRejected { reason: String },
+    TransferPending { stage: ThreeUsdReserveIngressV2PendingStage },
+    Absorbed {
+        transfer_block_index: u64,
+        transfer_tuple: rumi_protocol_backend::state::ThreeUsdReserveIngressTuple,
+        proof: rumi_protocol_backend::icrc3_proof::SpWritedownProof,
+        result: StabilityPoolLiquidationResult,
+        proportional_refund: Option<rumi_protocol_backend::state::ThreeUsdReserveIngressRefundReceipt>,
+        collateral_payout_receipt: rumi_protocol_backend::state::ThreeUsdReserveIngressPayoutReceipt,
+    },
+    FailedAfterTransfer {
+        transfer_block_index: u64,
+        transfer_tuple: rumi_protocol_backend::state::ThreeUsdReserveIngressTuple,
+        proof: rumi_protocol_backend::icrc3_proof::SpWritedownProof,
+        error: String,
+        full_refund: rumi_protocol_backend::state::ThreeUsdReserveIngressRefundReceipt,
+    },
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ThreeUsdReserveIngressV2StatusView {
+    pub stability_pool: Principal,
+    pub vault_id: u64,
+    pub absorb_id: u64,
+    pub request: Option<rumi_protocol_backend::state::ThreeUsdReserveIngressRequest>,
+    pub status: ThreeUsdReserveIngressV2Status,
+}
+
+fn bounded_three_usd_ingress_diagnostic(message: &str) -> String {
+    message.chars().take(512).collect()
+}
+
+/// Machine-readable recovery status for one exact SP absorb identity. A
+/// missing row is `Unseen`, never proof of no effect.
+#[query]
+#[candid_method(query)]
+fn get_three_usd_reserve_ingress_v2_status(
+    vault_id: u64,
+    absorb_id: u64,
+) -> Result<ThreeUsdReserveIngressV2StatusView, ProtocolError> {
+    use rumi_protocol_backend::state::{
+        ThreeUsdReserveIngressKey, ThreeUsdReserveIngressPhase as Phase,
+    };
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() || !read_state(|s| s.stability_pool_canister == Some(caller)) {
+        return Err(ProtocolError::GenericError(
+            "Caller is not the registered stability pool canister".into(),
+        ));
+    }
+    let key = ThreeUsdReserveIngressKey { stability_pool: caller, vault_id, absorb_id };
+    let journal = rumi_protocol_backend::management::three_usd_reserve_ingress_journal(&key);
+    let Some(journal) = journal else {
+        return Ok(ThreeUsdReserveIngressV2StatusView {
+            stability_pool: caller,
+            vault_id,
+            absorb_id,
+            request: None,
+            status: ThreeUsdReserveIngressV2Status::Unseen,
+        });
+    };
+    let status = match &journal.phase {
+        Phase::AdmissionPending => ThreeUsdReserveIngressV2Status::AdmissionPending,
+        Phase::PreTransferRejected { reason } => ThreeUsdReserveIngressV2Status::PreTransferRejected {
+            reason: bounded_three_usd_ingress_diagnostic(reason),
+        },
+        Phase::SubmittedOrUnknown { tuple } => ThreeUsdReserveIngressV2Status::TransferPending {
+            stage: ThreeUsdReserveIngressV2PendingStage::TransferSubmittedOrUnknown { tuple: tuple.clone() },
+        },
+        Phase::TransferConfirmed { tuple, block_index } => ThreeUsdReserveIngressV2Status::TransferPending {
+            stage: ThreeUsdReserveIngressV2PendingStage::TransferConfirmed {
+                tuple: tuple.clone(),
+                transfer_block_index: *block_index,
+            },
+        },
+        Phase::Absorbed { tuple, block_index, result } => {
+            let proof = rumi_protocol_backend::icrc3_proof::SpWritedownProof {
+                block_index: *block_index,
+                ledger_kind: rumi_protocol_backend::icrc3_proof::SpProofLedger::ThreePoolTransferDefault,
+                vault_id_memo: vault_id,
+            };
+            let committed = read_state(|state| state.sp_three_usd_reserve_absorb_results_by_proof
+                .get(&(proof.ledger_kind, proof.block_index)).cloned());
+            let Some(committed) = committed else {
+                return Ok(ThreeUsdReserveIngressV2StatusView {
+                    stability_pool: caller, vault_id, absorb_id, request: Some(journal.request.clone()),
+                    status: ThreeUsdReserveIngressV2Status::TransferPending {
+                        stage: ThreeUsdReserveIngressV2PendingStage::ReconciliationRequired {
+                            reason: "absorbed journal lacks its proof-keyed committed result".into(),
+                        },
+                    },
+                });
+            };
+            if !journal.absorbed_result_matches_parent(vault_id, *block_index)
+                || tuple.spender_owner != ic_cdk::id()
+                || tuple.spender_subaccount.is_some()
+                || tuple.source.owner != caller
+                || tuple.source.subaccount.is_some()
+                || tuple.destination.owner != ic_cdk::id()
+                || tuple.destination.subaccount.is_some()
+                || tuple.amount_e8s != journal.request.three_usd_amount_e8s
+                || tuple.fee_e8s.is_some()
+                || tuple.memo.as_slice() != management::nonce_to_memo(tuple.op_nonce).0.as_slice()
+                || tuple.created_at_time_ns != management::nonce_to_created_at_time(tuple.op_nonce)
+                || committed.caller != caller
+                || committed.vault_id != vault_id
+                || committed.icusd_debt_covered_e8s != journal.request.icusd_debt_covered_e8s
+                || committed.three_usd_amount_e8s != journal.request.three_usd_amount_e8s
+                || committed.ledger != journal.request.ledger
+                || committed.proof != proof
+                || committed.result.success != result.success
+                || !result.success
+                || committed.result.vault_id != result.vault_id
+                || committed.result.liquidated_debt != result.liquidated_debt
+                || committed.result.collateral_received != result.collateral_received
+                || committed.result.collateral_type != result.collateral_type
+                || committed.result.block_index != result.block_index
+                || committed.result.fee != result.fee
+                || committed.result.collateral_price_e8s != result.collateral_price_e8s
+            {
+                ThreeUsdReserveIngressV2Status::TransferPending {
+                    stage: ThreeUsdReserveIngressV2PendingStage::ReconciliationRequired {
+                        reason: "absorbed journal and proof-keyed committed result disagree".into(),
+                    },
+                }
+            } else {
+                let expected_refund = journal.expected_absorbed_refund_e8s().unwrap_or(u64::MAX);
+                let refund_settled = match journal.refund.as_ref() {
+                    None => expected_refund == 0,
+                    Some(refund) if refund.gross_amount_e8s == expected_refund && expected_refund > 0 => {
+                        three_usd_ingress_refund_is_settled(&key, journal.request.ledger, refund).unwrap_or(false)
+                    }
+                    _ => false,
+                };
+                if !refund_settled {
+                    ThreeUsdReserveIngressV2Status::TransferPending {
+                        stage: ThreeUsdReserveIngressV2PendingStage::AbsorbCommittedRefundPending {
+                            tuple: tuple.clone(),
+                            transfer_block_index: *block_index,
+                            proof,
+                            result: StabilityPoolLiquidationResult {
+                                success: result.success,
+                                vault_id: result.vault_id,
+                                liquidated_debt: result.liquidated_debt,
+                                collateral_received: result.collateral_received,
+                                collateral_type: result.collateral_type.clone(),
+                                block_index: result.block_index,
+                                fee: result.fee,
+                                collateral_price_e8s: result.collateral_price_e8s,
+                            },
+                            refund_amount_e8s: expected_refund,
+                        },
+                    }
+                } else {
+                    let payout_settled = journal.payout.as_ref().and_then(|payout| {
+                        let receipt = payout.receipt.as_ref()?;
+                        read_state(|state| {
+                            (state.three_usd_reserve_payout_parents.get(&payout.tuple.op_nonce) == Some(&key)
+                                && !state.pending_margin_transfers.contains_key(&(key.vault_id, key.stability_pool))
+                                && receipt.tuple == payout.tuple
+                                && payout.tuple.op_nonce != 0
+                                && payout.tuple.source.owner == ic_cdk::id()
+                                && payout.tuple.source.subaccount.is_none()
+                                && payout.tuple.destination.owner == caller
+                                && payout.tuple.destination.subaccount.is_none()
+                                && payout.tuple.ledger != Principal::anonymous()
+                                && payout.tuple.proof_kind == state.payout_proof_kind_for_ledger(payout.tuple.ledger)
+                                && payout.tuple.gross_amount_e8s > 0
+                                && payout.tuple.net_amount_e8s > 0
+                                && payout.tuple.net_amount_e8s.checked_add(payout.tuple.fee_e8s)
+                                    == Some(payout.tuple.gross_amount_e8s)
+                                && payout.tuple.memo.as_slice()
+                                    == management::nonce_to_memo(payout.tuple.op_nonce).0.as_slice()
+                                && payout.tuple.created_at_time_ns
+                                    == management::nonce_to_created_at_time(payout.tuple.op_nonce)
+                                && payout.tuple.gross_amount_e8s == result.collateral_received
+                                && payout.tuple.collateral_type.to_string() == result.collateral_type)
+                                .then_some(receipt.clone())
+                        })
+                    });
+                    if let Some(collateral_payout_receipt) = payout_settled {
+                        ThreeUsdReserveIngressV2Status::Absorbed {
+                        transfer_block_index: *block_index,
+                        transfer_tuple: tuple.clone(),
+                        proof,
+                        result: StabilityPoolLiquidationResult {
+                            success: result.success,
+                            vault_id: result.vault_id,
+                            liquidated_debt: result.liquidated_debt,
+                            collateral_received: result.collateral_received,
+                            collateral_type: result.collateral_type.clone(),
+                            block_index: result.block_index,
+                            fee: result.fee,
+                            collateral_price_e8s: result.collateral_price_e8s,
+                        },
+                        proportional_refund: journal.refund.as_ref().and_then(|refund| refund.settled_receipt),
+                        collateral_payout_receipt,
+                        }
+                    } else if let Some(payout) = journal.payout.as_ref() {
+                        ThreeUsdReserveIngressV2Status::TransferPending {
+                            stage: ThreeUsdReserveIngressV2PendingStage::AbsorbCommittedPayoutPending {
+                                tuple: tuple.clone(),
+                                transfer_block_index: *block_index,
+                                proof,
+                                result: StabilityPoolLiquidationResult {
+                                    success: result.success,
+                                    vault_id: result.vault_id,
+                                    liquidated_debt: result.liquidated_debt,
+                                    collateral_received: result.collateral_received,
+                                    collateral_type: result.collateral_type.clone(),
+                                    block_index: result.block_index,
+                                    fee: result.fee,
+                                    collateral_price_e8s: result.collateral_price_e8s,
+                                },
+                                payout_tuple: payout.tuple.clone(),
+                            },
+                        }
+                    } else {
+                        ThreeUsdReserveIngressV2Status::TransferPending {
+                            stage: ThreeUsdReserveIngressV2PendingStage::ReconciliationRequired {
+                                reason: "absorbed V2 ingress lacks its exact linked collateral payout tuple".into(),
+                            },
+                        }
+                    }
+                }
+            }
+        }
+        Phase::FailedAfterTransfer { tuple, block_index, error } => {
+            let proof = rumi_protocol_backend::icrc3_proof::SpWritedownProof {
+                block_index: *block_index,
+                ledger_kind: rumi_protocol_backend::icrc3_proof::SpProofLedger::ThreePoolTransferDefault,
+                vault_id_memo: vault_id,
+            };
+            let proof_unresolved = read_state(|state| {
+                state.consumed_writedown_proofs.contains(&(proof.ledger_kind, proof.block_index))
+                    || state.sp_three_usd_reserve_absorb_results_by_proof
+                        .contains_key(&(proof.ledger_kind, proof.block_index))
+            });
+            let full_refund = journal.refund.as_ref().filter(|refund| {
+                refund.gross_amount_e8s == journal.request.three_usd_amount_e8s
+                    && refund.source_subaccount.is_none()
+            });
+            match (proof_unresolved, full_refund) {
+                (true, _) => ThreeUsdReserveIngressV2Status::TransferPending {
+                    stage: ThreeUsdReserveIngressV2PendingStage::ReconciliationRequired {
+                        reason: "failed ingress proof identity is already consumed or has a committed result".into(),
+                    },
+                },
+                (false, Some(refund)) if three_usd_ingress_refund_is_settled(&key, journal.request.ledger, refund).unwrap_or(false) => {
+                    match refund.settled_receipt {
+                        Some(receipt) => ThreeUsdReserveIngressV2Status::FailedAfterTransfer {
+                            transfer_block_index: *block_index,
+                            transfer_tuple: tuple.clone(),
+                            proof,
+                            error: bounded_three_usd_ingress_diagnostic(error),
+                            full_refund: receipt,
+                        },
+                        None => ThreeUsdReserveIngressV2Status::TransferPending {
+                            stage: ThreeUsdReserveIngressV2PendingStage::ReconciliationRequired {
+                                reason: "refund state reports settled without retaining its exact receipt".into(),
+                            },
+                        },
+                    }
+                }
+                (false, Some(_)) => ThreeUsdReserveIngressV2Status::TransferPending {
+                    stage: ThreeUsdReserveIngressV2PendingStage::FailedRefundPending {
+                        tuple: tuple.clone(),
+                        transfer_block_index: *block_index,
+                        error: bounded_three_usd_ingress_diagnostic(error),
+                        refund_amount_e8s: journal.request.three_usd_amount_e8s,
+                    },
+                },
+                (false, None) => ThreeUsdReserveIngressV2Status::TransferPending {
+                    stage: ThreeUsdReserveIngressV2PendingStage::ReconciliationRequired {
+                        reason: "failed ingress has no matching durable full-refund child".into(),
+                    },
+                },
+            }
+        }
+    };
+    Ok(ThreeUsdReserveIngressV2StatusView {
+        stability_pool: caller,
+        vault_id,
+        absorb_id,
+        request: Some(journal.request),
+        status,
+    })
+}
+
+async fn stability_pool_liquidate_with_reserves_inner(
+    vault_id: u64,
+    absorb_id: Option<u64>,
+    icusd_debt_covered_e8s: u64,
+    three_usd_amount_e8s: u64,
+    three_usd_ledger: Principal,
+) -> Result<StabilityPoolLiquidationResult, ProtocolError> {
+    use rumi_protocol_backend::state::{
+        ThreeUsdReserveIngressKey, ThreeUsdReserveIngressPhase as IngressPhase,
+    };
+    let caller = ic_cdk::api::caller();
+    if !read_state(|s| s.stability_pool_canister == Some(caller)) {
+        return Err(ProtocolError::GenericError(
+            "Caller is not the registered stability pool canister".to_string(),
+        ));
+    }
+    if absorb_id == Some(0) {
+        return Err(ProtocolError::GenericError(
+            "SP absorb ID must be nonzero".to_string(),
+        ));
+    }
+    let (ingress_key, _ingress_guard, existing_ingress) = if let Some(absorb_id) = absorb_id {
+        let key = ThreeUsdReserveIngressKey { stability_pool: caller, vault_id, absorb_id };
+        let Some(guard) = rumi_protocol_backend::management::ThreeUsdReserveIngressGuard::try_acquire(&key) else {
+            return Err(ProtocolError::AlreadyProcessing);
+        };
+        let expected_request = rumi_protocol_backend::state::ThreeUsdReserveIngressRequest {
+            icusd_debt_covered_e8s,
+            three_usd_amount_e8s,
+            ledger: three_usd_ledger,
+        };
+        // Claim this identity durably before validate_call/freshness can await.
+        let journal = Some(rumi_protocol_backend::management::admit_three_usd_reserve_ingress(
+            key.clone(), expected_request,
+        ).map_err(ProtocolError::GenericError)?);
+        if let Some(journal) = journal.as_ref() {
+            match &journal.phase {
+                IngressPhase::Absorbed { result, block_index, .. } => {
+                    if !journal.absorbed_result_matches_parent(vault_id, *block_index) {
+                        return Err(ProtocolError::GenericError(
+                            "V2 absorbed journal result and proportional refund child disagree; held for reconciliation".into(),
+                        ));
+                    }
+                    let proof = rumi_protocol_backend::icrc3_proof::SpWritedownProof {
+                        block_index: *block_index,
+                        ledger_kind: rumi_protocol_backend::icrc3_proof::SpProofLedger::ThreePoolTransferDefault,
+                        vault_id_memo: vault_id,
+                    };
+                    let committed = read_state(|state| {
+                        state.sp_three_usd_reserve_absorb_results_by_proof
+                            .get(&(proof.ledger_kind, proof.block_index)).cloned()
+                    });
+                    let Some(committed) = committed else {
+                        return Err(ProtocolError::GenericError(
+                            "V2 absorbed journal lacks its proof-keyed committed result; held for reconciliation".into(),
+                        ));
+                    };
+                    if committed.caller != caller
+                        || committed.vault_id != vault_id
+                        || committed.icusd_debt_covered_e8s != icusd_debt_covered_e8s
+                        || committed.three_usd_amount_e8s != three_usd_amount_e8s
+                        || committed.ledger != journal.request.ledger
+                        || committed.proof != proof
+                        || committed.result.success != result.success
+                        || committed.result.vault_id != result.vault_id
+                        || committed.result.liquidated_debt != result.liquidated_debt
+                        || committed.result.collateral_received != result.collateral_received
+                        || committed.result.collateral_type != result.collateral_type
+                        || committed.result.block_index != result.block_index
+                        || committed.result.fee != result.fee
+                        || committed.result.collateral_price_e8s != result.collateral_price_e8s
+                    {
+                        return Err(ProtocolError::GenericError(
+                            "V2 absorbed journal result differs from its proof-keyed committed result; held for reconciliation".into(),
+                        ));
+                    }
+                    if let Some(refund) = journal.refund.as_ref() {
+                        refund_3usd_for_reserve_ingress(
+                            &key,
+                            journal.request.ledger,
+                            refund.gross_amount_e8s,
+                        )
+                        .await
+                        .map_err(|error| ProtocolError::GenericError(format!(
+                            "V2 absorb result is retained until its exact refund receipt is committed: {error}"
+                        )))?;
+                    }
+                    return Ok(StabilityPoolLiquidationResult {
+                        success: result.success,
+                        vault_id: result.vault_id,
+                        liquidated_debt: result.liquidated_debt,
+                        collateral_received: result.collateral_received,
+                        collateral_type: result.collateral_type.clone(),
+                        block_index: result.block_index,
+                        fee: result.fee,
+                        collateral_price_e8s: result.collateral_price_e8s,
+                    });
+                }
+                IngressPhase::FailedAfterTransfer { error, .. } => {
+                    let Some(refund) = journal.refund.as_ref() else {
+                        return Err(ProtocolError::GenericError(
+                            "Failed V2 ingress has no durable full-refund child; held for reconciliation".into(),
+                        ));
+                    };
+                    if refund.gross_amount_e8s != journal.request.three_usd_amount_e8s
+                        || refund.source_subaccount.is_some()
+                    {
+                        return Err(ProtocolError::GenericError(
+                            "Failed V2 ingress refund child does not match the full default-source amount".into(),
+                        ));
+                    }
+                    rumi_protocol_backend::dispatch_pending_3usd_refund(refund.op_nonce).await;
+                    return Err(ProtocolError::GenericError(format!(
+                        "Previous 3USD reserve absorb failed after transfer and was retained for reconciliation: {error}"
+                    )));
+                }
+                IngressPhase::PreTransferRejected { reason } => {
+                    return Err(ProtocolError::GenericError(format!(
+                        "3USD reserve ingress ID is terminally rejected before transfer: {reason}"
+                    )));
+                }
+                IngressPhase::AdmissionPending
+                | IngressPhase::SubmittedOrUnknown { .. }
+                | IngressPhase::TransferConfirmed { .. } => {}
+            }
+        }
+        (Some(key), Some(guard), journal)
+    } else {
+        (None, None, None)
+    };
+    // A refund child is a monotonic outcome choice for this transfer. Once a
+    // full-refund child exists, an exact retry must never re-enter write-down,
+    // even if the refund receipt landed before the parent phase was updated.
+    // A proportional child is only valid alongside the atomic proof result.
+    if let (Some(key), Some(journal)) = (ingress_key.as_ref(), existing_ingress.as_ref()) {
+        if let IngressPhase::TransferConfirmed { block_index, .. } = &journal.phase {
+            let block_index = *block_index;
+            let proof = rumi_protocol_backend::icrc3_proof::SpWritedownProof {
+                block_index,
+                ledger_kind: rumi_protocol_backend::icrc3_proof::SpProofLedger::ThreePoolTransferDefault,
+                vault_id_memo: vault_id,
+            };
+            if journal.has_full_refund_child() {
+                if journal.refund.is_some() {
+                    match rumi_protocol_backend::vault::replay_committed_three_usd_reserve_absorb_result(
+                        caller,
+                        vault_id,
+                        icusd_debt_covered_e8s,
+                        Some(three_usd_amount_e8s),
+                        &proof,
+                    ) {
+                        Ok(None) => {}
+                        Ok(Some(_)) => {
+                            return Err(ProtocolError::GenericError(
+                                "V2 full-refund child conflicts with a committed proof result; held for reconciliation".into(),
+                            ));
+                        }
+                        Err(error) => {
+                            return Err(ProtocolError::GenericError(format!(
+                                "V2 full-refund child has an ambiguous proof outcome; held for reconciliation: {error:?}"
+                            )));
+                        }
+                    }
+                    refund_3usd_for_reserve_ingress(
+                        key,
+                        three_usd_ledger,
+                        three_usd_amount_e8s,
+                    )
+                    .await
+                    .map_err(|error| ProtocolError::GenericError(format!(
+                        "V2 full-refund child remains held for exact retry: {error}"
+                    )))?;
+                    rumi_protocol_backend::management::record_three_usd_reserve_ingress_failed(
+                        key,
+                        block_index,
+                        "V2 full-refund child was chosen before parent terminalization".into(),
+                    )
+                    .map_err(ProtocolError::GenericError)?;
+                    return Err(ProtocolError::GenericError(
+                        "Previous V2 attempt selected a full refund; the absorb will not be retried".into(),
+                    ));
+                }
+            }
+
+            let committed = rumi_protocol_backend::vault::replay_committed_three_usd_reserve_absorb_result(
+                caller,
+                vault_id,
+                icusd_debt_covered_e8s,
+                Some(three_usd_amount_e8s),
+                &proof,
+            )
+            .map_err(|error| ProtocolError::GenericError(format!(
+                "V2 exact retry could not reconcile its committed result: {error:?}"
+            )))?;
+            if let Some(success) = committed {
+                if icusd_debt_covered_e8s == 0
+                    || success.liquidated_debt > icusd_debt_covered_e8s
+                {
+                    return Err(ProtocolError::GenericError(
+                        "V2 committed result has invalid covered or applied debt; held for reconciliation".into(),
+                    ));
+                }
+                let realized_3usd = ((three_usd_amount_e8s as u128)
+                    .checked_mul(success.liquidated_debt as u128)
+                    .ok_or_else(|| ProtocolError::GenericError(
+                        "V2 committed result proportional calculation overflowed".into(),
+                    ))?
+                    / icusd_debt_covered_e8s as u128) as u64;
+                let expected_refund = three_usd_amount_e8s.saturating_sub(realized_3usd);
+                if journal.refund.as_ref().map(|refund| refund.gross_amount_e8s)
+                    != (expected_refund > 0).then_some(expected_refund)
+                {
+                    return Err(ProtocolError::GenericError(
+                        "V2 proportional refund child disagrees with the committed applied result; held for reconciliation".into(),
+                    ));
+                }
+                if expected_refund > 0 {
+                    refund_3usd_for_reserve_ingress(
+                        key,
+                        three_usd_ledger,
+                        expected_refund,
+                    )
+                    .await
+                    .map_err(|error| ProtocolError::GenericError(format!(
+                        "V2 committed result is durable, but its proportional refund child is held: {error}"
+                    )))?;
+                }
+                if let Err(error) = rumi_protocol_backend::management::record_three_usd_reserve_ingress_absorbed(
+                    key,
+                    block_index,
+                    rumi_protocol_backend::state::ThreeUsdReserveIngressResult {
+                        success: success.success,
+                        vault_id: success.vault_id,
+                        liquidated_debt: success.liquidated_debt,
+                        collateral_received: success.collateral_received,
+                        collateral_type: success.collateral_type.clone(),
+                        block_index: success.block_index,
+                        fee: success.fee,
+                        collateral_price_e8s: success.collateral_price_e8s,
+                    },
+                ) {
+                    return Err(ProtocolError::GenericError(format!(
+                        "V2 committed result recovered but parent terminalization is held: {error}"
+                    )));
+                }
+                return Ok(success);
+            }
+            if journal.refund.is_some() {
+                return Err(ProtocolError::GenericError(
+                    "V2 refund child exists without an atomic committed proof result; held for reconciliation".into(),
+                ));
+            }
+        }
+    }
+    // Exact terminal replays above are served from the original durable
+    // ingress even after a later ledger configuration rotation. New or
+    // nonterminal requests still require the configured ledger; the setter
+    // fences rotations while any such saga/refund is unresolved.
+    if read_state(|s| s.three_pool_canister) != Some(three_usd_ledger) {
+        return Err(ProtocolError::GenericError(
+            "3USD ledger does not match the configured 3pool canister".to_string(),
+        ));
+    }
     // Native-XRP collateral is claim-based. THIS path cannot settle an XrpClaim
     // (it would strand the seized XRP and burn SP depositors), so reject
     // native-XRP here. Native-XRP absorption goes through the dedicated flow
@@ -7153,16 +7813,18 @@ async fn stability_pool_liquidate_with_reserves(
             "Native-XRP collateral is liquidated manually (claim-based), not via the stability pool or bot".to_string(),
         ));
     }
-    let caller = ic_cdk::api::caller();
-
-    let is_stability_pool =
-        read_state(|s| s.stability_pool_canister.map_or(false, |sp| sp == caller));
-    if !is_stability_pool {
+    if ingress_key.is_none() || existing_ingress.as_ref().is_some_and(|journal| {
+        matches!(&journal.phase, IngressPhase::AdmissionPending)
+    }) {
+    if ingress_key.is_some() && !rumi_protocol_backend::management::three_usd_reserve_ingress_is_enabled() {
         return Err(ProtocolError::GenericError(
-            "Caller is not the registered stability pool canister".to_string(),
+            "New 3USD reserve ingress is held until default-account fee capacity is proven".into(),
         ));
     }
-
+    validate_call().await?;
+    validate_liquidation_not_frozen()?;
+    validate_price_for_liquidation()?;
+    validate_freshness_for_vault(vault_id).await?;
     // Pre-validate: vault exists, has debt, price available — before pulling any tokens.
     // This prevents pulling 3USD and then failing on a stale/removed vault.
     let liquidation_amount: rumi_protocol_backend::numeric::ICUSD = icusd_debt_covered_e8s.into();
@@ -7171,7 +7833,7 @@ async fn stability_pool_liquidate_with_reserves(
             "Cannot liquidate zero amount".to_string(),
         ));
     }
-    read_state(|s| match s.vault_id_to_vaults.get(&vault_id) {
+    let _capped_debt_e8s = read_state(|s| match s.vault_id_to_vaults.get(&vault_id) {
         Some(vault) => {
             if let Some(status) = s.get_collateral_status(&vault.collateral_type) {
                 if !status.allows_liquidation() {
@@ -7204,7 +7866,19 @@ async fn stability_pool_liquidate_with_reserves(
                     minimum_amount: s.min_icusd_amount.to_u64(),
                 });
             }
-            Ok(())
+            let ratio = rumi_protocol_backend::compute_collateral_ratio(
+                vault,
+                s.last_icp_rate.unwrap_or_else(|| UsdIcp::from(dec!(0.0))),
+                s,
+            );
+            if ratio == rumi_protocol_backend::numeric::Ratio::from(rust_decimal::Decimal::ZERO)
+                || ratio >= s.get_min_liquidation_ratio_for(&vault.collateral_type)
+            {
+                return Err(ProtocolError::GenericError(
+                    "Cannot liquidate a healthy vault with 3USD reserves".to_string(),
+                ));
+            }
+            Ok(capped.to_u64())
         }
         None => Err(ProtocolError::GenericError(format!(
             "Vault #{} not found",
@@ -7212,18 +7886,119 @@ async fn stability_pool_liquidate_with_reserves(
         ))),
     })?;
 
-    // Pull 3USD from the SP into protocol reserves subaccount (ICRC-2 transfer_from).
-    // Only runs after validation passes — no tokens move if vault is stale.
-    // The block index returned drives the Phase-2 internal proof below.
-    let transfer_block_index = rumi_protocol_backend::management::transfer_3usd_to_reserves(
-        three_usd_ledger,
-        caller,
-        three_usd_amount_e8s,
-    )
-    .await
-    .map_err(|e| {
-        ProtocolError::GenericError(format!("Failed to pull 3USD from stability pool: {:?}", e))
-    })?;
+    let configured_3pool = read_state(|s| s.three_pool_canister);
+    if configured_3pool != Some(three_usd_ledger) {
+        return Err(ProtocolError::GenericError(
+            "3USD ledger does not match the configured 3pool canister".to_string(),
+        ));
+    }
+
+    // All validation above may await. Recheck the durable borrow reservation
+    // immediately before pulling 3USD; there must be no await before transfer.
+    }
+
+    let transfer_block_index = if let Some(key) = ingress_key.as_ref() {
+        let first_pull = read_state(|state| {
+            state.three_usd_reserve_ingress_journals.get(key).is_some_and(|journal| {
+                matches!(&journal.phase, IngressPhase::AdmissionPending)
+            })
+        });
+        // Retried SubmittedOrUnknown transfer_from identities also hold this
+        // lock: a prior pull may have landed even if its reply was lost, and
+        // no backend payout may race the exact retry/reconciliation window.
+        let _default_account_guard =
+            rumi_protocol_backend::ThreeUsdDefaultAccountTransferGuard::try_acquire(
+                three_usd_ledger,
+            ).ok_or_else(|| ProtocolError::GenericError(
+                "3USD default-account capacity check is busy; no user pull was submitted".into(),
+            ))?;
+        if first_pull {
+            let fee = rumi_protocol_backend::management::get_ledger_fee(three_usd_ledger)
+                .await
+                .map_err(|error| ProtocolError::GenericError(format!(
+                    "3USD fee capacity is uncertain; no user pull was submitted: {error}"
+                )))?;
+            let balance = rumi_protocol_backend::management::get_icrc1_reserve_balance(
+                three_usd_ledger,
+                icrc_ledger_types::icrc1::account::Account {
+                    owner: ic_cdk::id(),
+                    subaccount: None,
+                },
+            )
+            .await
+            .map_err(|error| ProtocolError::GenericError(format!(
+                "3USD default-account balance is uncertain; no user pull was submitted: {error}"
+            )))?;
+            let fee_after = rumi_protocol_backend::management::get_ledger_fee(three_usd_ledger)
+                .await
+                .map_err(|error| ProtocolError::GenericError(format!(
+                    "3USD fee recheck failed; no user pull was submitted: {error}"
+                )))?;
+            if fee_after != fee {
+                return Err(ProtocolError::GenericError(
+                    "3USD fee changed during capacity check; no user pull was submitted".into(),
+                ));
+            }
+            let commitment = read_state(|state| {
+                state.three_usd_default_account_refund_commitment(three_usd_ledger, fee)
+            })
+            .ok_or_else(|| ProtocolError::GenericError(
+                "3USD default-account obligations are uncertain; no user pull was submitted".into(),
+            ))?;
+            let existing_hold = read_state(|state| {
+                state.three_usd_reserve_ingress_journals.get(key)
+                    .and_then(|journal| journal.refund_fee_reserved_e8s)
+            });
+            let additional_fee = fee.saturating_sub(existing_hold.unwrap_or(0));
+            let required = commitment.checked_add(additional_fee).ok_or_else(|| {
+                ProtocolError::GenericError(
+                    "3USD default-account capacity calculation overflowed; no user pull was submitted".into(),
+                )
+            })?;
+            if balance < required {
+                return Err(ProtocolError::GenericError(format!(
+                    "3USD default account lacks fee capacity (balance {balance}, required {required}); no user pull was submitted"
+                )));
+            }
+            mutate_state(|state| -> Result<(), ProtocolError> {
+                let journal = state.three_usd_reserve_ingress_journals.get_mut(key)
+                    .ok_or_else(|| ProtocolError::GenericError(
+                        "3USD admission journal disappeared during capacity check".into(),
+                    ))?;
+                if journal.request.ledger != three_usd_ledger
+                    || !matches!(&journal.phase, IngressPhase::AdmissionPending)
+                {
+                    return Err(ProtocolError::GenericError(
+                        "3USD admission changed during capacity check; no user pull was submitted".into(),
+                    ));
+                }
+                journal.refund_fee_reserved_e8s = Some(
+                    journal.refund_fee_reserved_e8s.unwrap_or(0).max(fee),
+                );
+                Ok(())
+            })?;
+        }
+        rumi_protocol_backend::management::transfer_3usd_to_reserves(
+            key.clone(),
+            rumi_protocol_backend::state::ThreeUsdReserveIngressRequest {
+                icusd_debt_covered_e8s,
+                three_usd_amount_e8s,
+                ledger: three_usd_ledger,
+            },
+        )
+        .await
+        .map_err(ProtocolError::GenericError)?
+    } else {
+        rumi_protocol_backend::management::transfer_3usd_to_reserves_legacy(
+            three_usd_ledger,
+            caller,
+            three_usd_amount_e8s,
+        )
+        .await
+        .map_err(|error| ProtocolError::GenericError(format!(
+            "Failed to pull 3USD from stability pool: {error:?}"
+        )))?
+    };
 
     // Wave-8d LIQ-004 Phase 2: build the writedown proof from the just-
     // produced transfer block. Vault binding is set here at construction
@@ -7232,25 +8007,54 @@ async fn stability_pool_liquidate_with_reserves(
     // verifier checks the on-chain block's accounts and amount match.
     let proof = rumi_protocol_backend::icrc3_proof::SpWritedownProof {
         block_index: transfer_block_index,
-        ledger_kind: rumi_protocol_backend::icrc3_proof::SpProofLedger::ThreePoolTransfer,
+        ledger_kind: if ingress_key.is_some() {
+            rumi_protocol_backend::icrc3_proof::SpProofLedger::ThreePoolTransferDefault
+        } else {
+            rumi_protocol_backend::icrc3_proof::SpProofLedger::ThreePoolTransfer
+        },
         vault_id_memo: vault_id,
     };
 
-    // 3USD is now in our reserves subaccount, so write down debt and release collateral.
+    // CL07: hold only the isolated feature Wasm after its real V2 ICRC-2 pull
+    // has committed and before the writedown helper reads current collateral
+    // price/CR. The result flows through the ordinary post-pull refund branch.
+    #[cfg(feature = "cl07-recovered-vault-after-pull-test-gate")]
+    let cl07_gate_result = if ingress_key.is_some() {
+        cl07_recovered_vault_after_pull_test_gate().await
+    } else {
+        Ok(())
+    };
+    #[cfg(not(feature = "cl07-recovered-vault-after-pull-test-gate"))]
+    let cl07_gate_result: Result<(), ProtocolError> = Ok(());
+
+    // 3USD is now in the backend default account, so write down debt and release collateral.
     // Wave-4 ICC-002: if `liquidate_vault_debt_already_burned` returns Err after the
     // pull above succeeded (vault closed mid-flight, paused, debt hit zero, etc.),
     // the 3USD is stranded in our reserves subaccount and the SP's bookkeeping never
     // got a chance to mark it consumed. Refund it so the SP's ledger balance and
     // bookkeeping stay in sync.
-    match rumi_protocol_backend::vault::liquidate_vault_debt_already_burned(
-        vault_id,
-        icusd_debt_covered_e8s,
-        caller,
-        Some(three_usd_amount_e8s),
-        proof,
-    )
-    .await
-    {
+    let liquidation = match cl07_gate_result {
+        Err(error) => Err(error),
+        Ok(()) => if let Some(key) = ingress_key.as_ref() {
+            rumi_protocol_backend::vault::liquidate_vault_debt_already_burned_v2(
+                vault_id,
+                icusd_debt_covered_e8s,
+                caller,
+                Some(three_usd_amount_e8s),
+                proof.clone(),
+                key.clone(),
+            ).await
+        } else {
+            rumi_protocol_backend::vault::liquidate_vault_debt_already_burned(
+                vault_id,
+                icusd_debt_covered_e8s,
+                caller,
+                Some(three_usd_amount_e8s),
+                proof.clone(),
+            ).await
+        }
+    };
+    match liquidation {
         Ok(success) => {
             // VER-002 (audit 2026-06-05): the full `three_usd_amount_e8s` was
             // pulled above, but the writedown is capped to the vault's current
@@ -7275,18 +8079,335 @@ async fn stability_pool_liquidate_with_reserves(
                         icusd_debt_covered_e8s,
                         excess
                     );
-                    refund_3usd_to_stability_pool(three_usd_ledger, caller, excess, vault_id).await;
+                    if let Some(key) = ingress_key.as_ref() {
+                        if let Err(error) = refund_3usd_for_reserve_ingress(
+                            key,
+                            three_usd_ledger,
+                            excess,
+                        )
+                        .await
+                        {
+                            return Err(ProtocolError::GenericError(format!(
+                                "3USD liquidation committed but its excess refund child could not be durably linked: {error}"
+                            )));
+                        }
+                    } else {
+                        refund_3usd_to_stability_pool(
+                            three_usd_ledger,
+                            caller,
+                            excess,
+                            vault_id,
+                            Some(rumi_protocol_backend::management::protocol_3usd_reserves_subaccount()),
+                        )
+                        .await;
+                    }
+                }
+            }
+            // A refund child (when needed) is now durable and linked to this
+            // parent before the absorbed result can short-circuit a retry.
+            if let Some(key) = ingress_key.as_ref() {
+                let stored_result = rumi_protocol_backend::state::ThreeUsdReserveIngressResult {
+                    success: success.success,
+                    vault_id: success.vault_id,
+                    liquidated_debt: success.liquidated_debt,
+                    collateral_received: success.collateral_received,
+                    collateral_type: success.collateral_type.clone(),
+                    block_index: success.block_index,
+                    fee: success.fee,
+                    collateral_price_e8s: success.collateral_price_e8s,
+                };
+                if let Err(error) = rumi_protocol_backend::management::record_three_usd_reserve_ingress_absorbed(
+                    key,
+                    transfer_block_index,
+                    stored_result,
+                ) {
+                    log!(INFO,
+                        "[stability_pool_liquidate_with_reserves_v2] CRITICAL: absorbed vault {} but could not persist reserve ingress result: {}",
+                        vault_id, error
+                    );
+                    return Err(ProtocolError::GenericError(
+                        "V2 liquidation committed, but the parent saga receipt is held; retry the same absorb ID to recover it".into(),
+                    ));
                 }
             }
             Ok(success)
         }
         Err(liq_error) => {
-            refund_3usd_to_stability_pool(three_usd_ledger, caller, three_usd_amount_e8s, vault_id)
+            let error_text = format!("{liq_error:?}");
+            if let Some(key) = ingress_key.as_ref() {
+                // An error after a same-canister async boundary is not proof
+                // that accounting did not commit. Consult the atomic proof
+                // result before choosing a full refund; consumed-without-result
+                // is held for reconciliation.
+                match rumi_protocol_backend::vault::replay_committed_three_usd_reserve_absorb_result(
+                    caller,
+                    vault_id,
+                    icusd_debt_covered_e8s,
+                    Some(three_usd_amount_e8s),
+                    &proof,
+                ) {
+                    Ok(Some(success)) => {
+                        let realized_3usd = if icusd_debt_covered_e8s == 0 {
+                            0
+                        } else {
+                            ((three_usd_amount_e8s as u128)
+                                .saturating_mul(success.liquidated_debt as u128)
+                                / icusd_debt_covered_e8s as u128) as u64
+                        };
+                        let excess = three_usd_amount_e8s.saturating_sub(realized_3usd);
+                        if excess > 0 {
+                            refund_3usd_for_reserve_ingress(key, three_usd_ledger, excess)
+                                .await
+                                .map_err(|error| ProtocolError::GenericError(format!(
+                                    "V2 proof result committed despite liquidation error; proportional refund is held: {error}"
+                                )))?;
+                        }
+                        rumi_protocol_backend::management::record_three_usd_reserve_ingress_absorbed(
+                            key,
+                            transfer_block_index,
+                            rumi_protocol_backend::state::ThreeUsdReserveIngressResult {
+                                success: success.success,
+                                vault_id: success.vault_id,
+                                liquidated_debt: success.liquidated_debt,
+                                collateral_received: success.collateral_received,
+                                collateral_type: success.collateral_type.clone(),
+                                block_index: success.block_index,
+                                fee: success.fee,
+                                collateral_price_e8s: success.collateral_price_e8s,
+                            },
+                        )
+                        .map_err(|error| ProtocolError::GenericError(format!(
+                            "V2 proof result committed despite liquidation error; parent terminalization is held: {error}"
+                        )))?;
+                        return Ok(success);
+                    }
+                    Ok(None) => {}
+                    Err(reconcile_error) => {
+                        return Err(ProtocolError::GenericError(format!(
+                            "V2 liquidation returned {error_text}, and its proof outcome is held for reconciliation: {reconcile_error:?}"
+                        )));
+                    }
+                }
+                if let Err(refund_error) = refund_3usd_for_reserve_ingress(
+                    key,
+                    three_usd_ledger,
+                    three_usd_amount_e8s,
+                )
+                .await
+                {
+                    return Err(ProtocolError::GenericError(format!(
+                        "3USD liquidation failed and its refund child could not be durably linked: {refund_error}"
+                    )));
+                }
+                if let Err(journal_error) =
+                    rumi_protocol_backend::management::record_three_usd_reserve_ingress_failed(
+                        key,
+                        transfer_block_index,
+                        error_text,
+                    )
+                {
+                    log!(INFO,
+                        "[stability_pool_liquidate_with_reserves_v2] CRITICAL: could not persist failed reserve ingress for vault {}: {}",
+                        vault_id, journal_error
+                    );
+                }
+            } else {
+                refund_3usd_to_stability_pool(
+                    three_usd_ledger,
+                    caller,
+                    three_usd_amount_e8s,
+                    vault_id,
+                    Some(rumi_protocol_backend::management::protocol_3usd_reserves_subaccount()),
+                )
                 .await;
+            }
             Err(liq_error)
         }
     }
 }
+
+fn three_usd_ingress_refund_tuple_matches(
+    key: &rumi_protocol_backend::state::ThreeUsdReserveIngressKey,
+    child: &rumi_protocol_backend::state::ThreeUsdReserveIngressRefund,
+    ledger: Principal,
+    tuple: &rumi_protocol_backend::state::ThreeUsdRefundTransferTuple,
+) -> bool {
+    tuple.source_owner == ic_cdk::id()
+        && tuple.source_subaccount.is_none()
+        && tuple.destination.owner == key.stability_pool
+        && tuple.destination.subaccount.is_none()
+        && (tuple.amount_e8s == child.gross_amount_e8s
+            || tuple.amount_e8s.checked_add(tuple.fee_e8s) == Some(child.gross_amount_e8s))
+        && rumi_protocol_backend::management::nonce_to_memo(child.op_nonce).0.as_slice()
+            == tuple.memo.as_slice()
+        && tuple.created_at_time_ns
+            == rumi_protocol_backend::management::nonce_to_created_at_time(child.op_nonce)
+        && ledger != Principal::anonymous()
+}
+
+/// Check the durable evidence for one linked V2 refund. Missing queue rows are
+/// terminal only when the parent retains the exact tuple and verified block.
+fn three_usd_ingress_refund_is_settled(
+    key: &rumi_protocol_backend::state::ThreeUsdReserveIngressKey,
+    ledger: Principal,
+    child: &rumi_protocol_backend::state::ThreeUsdReserveIngressRefund,
+) -> Result<bool, String> {
+    use rumi_protocol_backend::state::ThreeUsdRefundDispatchState as Dispatch;
+    read_state(|state| {
+        let parent = state.three_usd_reserve_ingress_journals.get(key)
+            .ok_or_else(|| "reserve ingress parent disappeared while checking its refund".to_string())?;
+        if parent.request.ledger != ledger {
+            return Err("refund ledger does not match the reserve ingress parent".into());
+        }
+        let stored_child = parent.refund.as_ref()
+            .ok_or_else(|| "reserve ingress parent has no linked refund child".to_string())?;
+        if stored_child.op_nonce != child.op_nonce
+            || stored_child.gross_amount_e8s != child.gross_amount_e8s
+            || stored_child.source_subaccount.is_some()
+            || child.source_subaccount.is_some()
+        {
+            return Err("linked V2 refund child identity changed".into());
+        }
+        let pending = state.pending_3usd_refunds.get(&child.op_nonce);
+        let dispatch = state.pending_3usd_refund_journals.get(&child.op_nonce);
+        if let Some(receipt) = stored_child.settled_receipt.as_ref() {
+            if pending.is_some() || dispatch.is_some() {
+                return Err("settled V2 refund still has a pending queue row or dispatch journal".into());
+            }
+            if !three_usd_ingress_refund_tuple_matches(key, child, ledger, &receipt.tuple) {
+                return Err("persisted V2 refund receipt tuple does not match its parent child".into());
+            }
+            return Ok(true);
+        }
+        let Some(pending) = pending else {
+            return Err("linked V2 refund queue row is missing without a verified receipt".into());
+        };
+        if pending.stability_pool != key.stability_pool
+            || pending.ledger != ledger
+            || pending.amount_e8s != child.gross_amount_e8s
+            || pending.vault_id != key.vault_id
+            || pending.op_nonce != child.op_nonce
+            || pending.parent_absorb_id != Some(key.absorb_id)
+        {
+            return Err("pending V2 refund row does not match its parent child".into());
+        }
+        match dispatch {
+            Some(Dispatch::NeverDispatchedDefault { gross_amount_e8s })
+            | Some(Dispatch::UnpayableDefault { gross_amount_e8s, .. })
+                if *gross_amount_e8s == child.gross_amount_e8s => {}
+            Some(Dispatch::SubmittedOrUnknown { tuple })
+                if three_usd_ingress_refund_tuple_matches(key, child, ledger, tuple) => {}
+            _ => return Err("pending V2 refund dispatch identity is missing or inconsistent".into()),
+        }
+        Ok(false)
+    })
+}
+
+/// Atomically link a V2 ingress to its refund child and queue the exact source
+/// version before dispatch or terminalizing the parent saga. Retries reuse the
+/// same child nonce. An absent child row is success only after its verified
+/// tuple and block index have been committed to the parent journal.
+async fn refund_3usd_for_reserve_ingress(
+    key: &rumi_protocol_backend::state::ThreeUsdReserveIngressKey,
+    three_usd_ledger: Principal,
+    amount_e8s: u64,
+) -> Result<(), String> {
+    use rumi_protocol_backend::state::{
+        ThreeUsdRefundDispatchState as Dispatch, ThreeUsdReserveIngressPhase as IngressPhase,
+        ThreeUsdReserveIngressRefund,
+    };
+
+    let child = mutate_state(|state| -> Result<ThreeUsdReserveIngressRefund, String> {
+        let existing = state
+            .three_usd_reserve_ingress_journals
+            .get(key)
+            .ok_or_else(|| "reserve ingress journal is missing before refund child creation".to_string())?;
+        if !matches!(
+            &existing.phase,
+            IngressPhase::TransferConfirmed { .. }
+                | IngressPhase::Absorbed { .. }
+                | IngressPhase::FailedAfterTransfer { .. }
+        ) {
+            return Err("reserve ingress is not transfer-confirmed before refund creation".into());
+        }
+        if let Some(refund) = existing.refund.as_ref() {
+            if refund.gross_amount_e8s != amount_e8s || refund.source_subaccount.is_some() {
+                return Err("reserve ingress refund child was reused with different amount or source".into());
+            }
+            if let Some(pending) = state.pending_3usd_refunds.get(&refund.op_nonce) {
+                if pending.stability_pool != key.stability_pool
+                    || pending.ledger != three_usd_ledger
+                    || pending.amount_e8s != amount_e8s
+                    || pending.vault_id != key.vault_id
+                    || pending.op_nonce != refund.op_nonce
+                    || pending.parent_absorb_id != Some(key.absorb_id)
+                    || !matches!(
+                        state.pending_3usd_refund_journals.get(&refund.op_nonce),
+                        Some(Dispatch::NeverDispatchedDefault { gross_amount_e8s })
+                            if *gross_amount_e8s == amount_e8s
+                    ) && !matches!(
+                        state.pending_3usd_refund_journals.get(&refund.op_nonce),
+                        Some(Dispatch::UnpayableDefault { gross_amount_e8s, .. })
+                            if *gross_amount_e8s == amount_e8s
+                    ) && !matches!(
+                        state.pending_3usd_refund_journals.get(&refund.op_nonce),
+                        Some(Dispatch::SubmittedOrUnknown { tuple })
+                            if three_usd_ingress_refund_tuple_matches(key, refund, three_usd_ledger, tuple)
+                    )
+                {
+                    return Err("persisted reserve refund child does not match its parent".into());
+                }
+            }
+            return Ok(refund.clone());
+        }
+
+        if amount_e8s == 0 || three_usd_ledger == Principal::anonymous() {
+            return Err("invalid V2 3USD refund child".into());
+        }
+        let op_nonce = state.next_op_nonce();
+        let refund = ThreeUsdReserveIngressRefund {
+            op_nonce,
+            gross_amount_e8s: amount_e8s,
+            source_subaccount: None,
+            settled_receipt: None,
+        };
+        state.pending_3usd_refunds.insert(
+            op_nonce,
+            rumi_protocol_backend::state::PendingThreeUsdRefund {
+                stability_pool: key.stability_pool,
+                ledger: three_usd_ledger,
+                amount_e8s,
+                vault_id: key.vault_id,
+                retry_count: 0,
+                op_nonce,
+                parent_absorb_id: Some(key.absorb_id),
+            },
+        );
+        state.pending_3usd_refund_journals.insert(
+            op_nonce,
+            Dispatch::NeverDispatchedDefault {
+                gross_amount_e8s: amount_e8s,
+            },
+        );
+        state
+            .three_usd_reserve_ingress_journals
+            .get_mut(key)
+            .expect("parent journal was checked above")
+            .refund = Some(refund.clone());
+        Ok(refund)
+    })?;
+
+    if three_usd_ingress_refund_is_settled(key, three_usd_ledger, &child)? {
+        return Ok(());
+    }
+    rumi_protocol_backend::dispatch_pending_3usd_refund(child.op_nonce).await;
+    if three_usd_ingress_refund_is_settled(key, three_usd_ledger, &child)? {
+        Ok(())
+    } else {
+        Err("exact V2 refund receipt remains pending; retry the same parent absorb ID".into())
+    }
+}
+
 
 /// Refund a previously pulled 3USD amount from the protocol's reserves
 /// subaccount back to the stability pool. Used by `stability_pool_liquidate_with_reserves`
@@ -7303,6 +8424,7 @@ async fn refund_3usd_to_stability_pool(
     sp_caller: Principal,
     amount_e8s: u64,
     vault_id: u64,
+    _source_subaccount: Option<[u8; 32]>,
 ) {
     use ic_canister_log::log;
     use rumi_protocol_backend::logs::INFO;
@@ -7415,6 +8537,7 @@ fn enqueue_pending_3usd_refund(
                 vault_id,
                 retry_count: 0,
                 op_nonce,
+                parent_absorb_id: None,
             },
         );
     });
@@ -8268,6 +9391,15 @@ async fn recover_pending_transfer(vault_id: u64) -> Result<bool, ProtocolError> 
                 .map(|t| ("excess", t))
         }
     });
+
+    if transfer_info.as_ref().is_some_and(|(source, transfer)| {
+        *source == "margin"
+            && read_state(|state| state.three_usd_reserve_payout_parents.contains_key(&transfer.op_nonce))
+    }) {
+        return Err(ProtocolError::TemporarilyUnavailable(
+            "This collateral payout belongs to a receipt-backed 3USD reserve operation and is retried from its persisted tuple.".into(),
+        ));
+    }
 
     if let Some((source, transfer)) = transfer_info {
         // Look up per-collateral config for ledger and fee; fall back to global ICP defaults

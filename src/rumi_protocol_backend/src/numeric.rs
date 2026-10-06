@@ -515,6 +515,25 @@ pub fn icusd_to_collateral_amount(icusd_value: ICUSD, price_usd: Decimal, decima
     raw_amount.to_u64().unwrap_or(0)
 }
 
+/// Checked form for paths that have already accepted an external payment.
+/// Invalid prices, decimal ranges, arithmetic overflow, and raw amounts that
+/// cannot be represented all fail closed instead of silently becoming zero.
+pub fn try_icusd_to_collateral_amount(
+    icusd_value: ICUSD,
+    price_usd: Decimal,
+    decimals: u8,
+) -> Option<u64> {
+    if price_usd <= Decimal::ZERO {
+        return None;
+    }
+    let scale = 10u64.checked_pow(u32::from(decimals))?;
+    let usd_value = Decimal::from(icusd_value.to_u64())
+        .checked_div(Decimal::from(E8S))?;
+    let whole_tokens = usd_value.checked_div(price_usd)?;
+    let raw_amount = whole_tokens.checked_mul(Decimal::from_u64(scale)?)?;
+    raw_amount.to_u64()
+}
+
 impl<T> fmt::Display for Amount<T> {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(fmt, "{}", self.0)
