@@ -385,6 +385,7 @@ export type ThreePoolError = {
   { 'InvariantNotConverged' : null } |
   { 'InsufficientLiquidity' : null } |
   { 'TransferFailed' : { 'token' : string, 'reason' : string } } |
+  { 'PendingClaimCapacityReached' : null } |
   { 'SlippageExceeded' : null } |
   { 'ClaimNotFound' : null } |
   { 'PoolEmpty' : null } |

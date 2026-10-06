@@ -415,3 +415,172 @@ fn receipt_swap_persists_claim_when_input_is_too_small_for_refund_fee() {
     );
     assert!(!after_recovery.iter().any(|entry| entry.id == claim.id));
 }
+
+#[test]
+fn full_claim_store_rejects_new_liquidity_without_moving_tokens_or_dropping_claim() {
+    let env = setup(0);
+    let cap: Result<(), ThreePoolError> = update(
+        &env.pic,
+        env.pool,
+        env.admin,
+        "test_set_pending_claim_limit",
+        encode_one(1u64).unwrap(),
+    );
+    cap.expect("admin should set the test claim limit");
+
+    let first_id: u64 = update(
+        &env.pic,
+        env.pool,
+        env.admin,
+        "test_insert_pending_claim",
+        encode_args((0u8, 777u128)).unwrap(),
+    );
+    let before = [
+        balance(&env, env.ledgers[0], env.user),
+        balance(&env, env.ledgers[1], env.user),
+        balance(&env, env.ledgers[2], env.user),
+    ];
+
+    let rejected: Result<Nat, ThreePoolError> = update(
+        &env.pic,
+        env.pool,
+        env.user,
+        "add_liquidity",
+        encode_args((vec![1_000_000u128; 3], 0u128)).unwrap(),
+    );
+    assert!(matches!(
+        rejected,
+        Err(ThreePoolError::PendingClaimCapacityReached)
+    ));
+    assert_eq!(
+        [
+            balance(&env, env.ledgers[0], env.user),
+            balance(&env, env.ledgers[1], env.user),
+            balance(&env, env.ledgers[2], env.user),
+        ],
+        before,
+        "capacity rejection must happen before any input transfer"
+    );
+
+    let claims: Vec<ThreePoolPendingClaim> = query(
+        &env.pic,
+        env.pool,
+        "get_pending_claims",
+        encode_args((0u64, 100u64)).unwrap(),
+    );
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].id, first_id);
+    assert_eq!(claims[0].amount, 777);
+}
+
+#[test]
+fn proportional_withdrawal_reserves_all_three_claim_slots_before_lp_burn() {
+    let env = setup(0);
+    let cap: Result<(), ThreePoolError> = update(
+        &env.pic,
+        env.pool,
+        env.admin,
+        "test_set_pending_claim_limit",
+        encode_one(3u64).unwrap(),
+    );
+    cap.expect("admin should set the test claim limit");
+    let first_id: u64 = update(
+        &env.pic,
+        env.pool,
+        env.admin,
+        "test_insert_pending_claim",
+        encode_args((0u8, 777u128)).unwrap(),
+    );
+    let lp_before: u128 = query(
+        &env.pic,
+        env.pool,
+        "get_lp_balance",
+        encode_one(env.user).unwrap(),
+    );
+
+    let rejected: Result<Vec<u128>, ThreePoolError> = update(
+        &env.pic,
+        env.pool,
+        env.user,
+        "remove_liquidity",
+        encode_args((lp_before, vec![0u128; 3])).unwrap(),
+    );
+    assert!(matches!(
+        rejected,
+        Err(ThreePoolError::PendingClaimCapacityReached)
+    ));
+    let lp_after: u128 = query(
+        &env.pic,
+        env.pool,
+        "get_lp_balance",
+        encode_one(env.user).unwrap(),
+    );
+    assert_eq!(lp_after, lp_before, "LP shares must remain unburned");
+
+    let claims: Vec<ThreePoolPendingClaim> = query(
+        &env.pic,
+        env.pool,
+        "get_pending_claims",
+        encode_args((0u64, 100u64)).unwrap(),
+    );
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].id, first_id);
+    assert_eq!(claims[0].amount, 777);
+}
+
+#[test]
+fn full_claim_store_rejects_new_liquidity_without_moving_tokens_or_dropping_claim() {
+    let env = setup(0);
+    let cap: Result<(), ThreePoolError> = update(
+        &env.pic,
+        env.pool,
+        env.admin,
+        "test_set_pending_claim_limit",
+        encode_one(1u64).unwrap(),
+    );
+    cap.expect("admin should set the test claim limit");
+
+    let first_id: u64 = update(
+        &env.pic,
+        env.pool,
+        env.admin,
+        "test_insert_pending_claim",
+        encode_args((0u8, 777u128)).unwrap(),
+    );
+    let before = [
+        balance(&env, env.ledgers[0], env.user),
+        balance(&env, env.ledgers[1], env.user),
+        balance(&env, env.ledgers[2], env.user),
+    ];
+
+    let rejected: Result<Nat, ThreePoolError> = update(
+        &env.pic,
+        env.pool,
+        env.user,
+        "add_liquidity",
+        encode_args((vec![1_000_000u128; 3], 0u128)).unwrap(),
+    );
+    assert!(matches!(
+        rejected,
+        Err(ThreePoolError::PendingClaimCapacityReached)
+    ));
+    assert_eq!(
+        [
+            balance(&env, env.ledgers[0], env.user),
+            balance(&env, env.ledgers[1], env.user),
+            balance(&env, env.ledgers[2], env.user),
+        ],
+        before,
+        "capacity rejection must happen before any input transfer"
+    );
+
+    let claims: Vec<ThreePoolPendingClaim> = query(
+        &env.pic,
+        env.pool,
+        "get_pending_claims",
+        encode_args((0u64, 100u64)).unwrap(),
+    );
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].id, first_id);
+    assert_eq!(claims[0].amount, 777);
+}

@@ -882,6 +882,119 @@ fn stale_cached_fee_badfee_refresh_preserves_amm_protocol_fee_claim() {
     assert!(paid_a > 20_000, "restored token-A fee claim was not paid: {paid_a}");
 }
 
+#[test]
+fn full_claim_store_rejects_new_liquidity_without_moving_tokens_or_dropping_claim() {
+    let env = setup_flaky();
+    let pool_id = create_pool(&env);
+    add_initial_liquidity(&env, &pool_id, 10_000_000_000_000);
+
+    let cap = env
+        .pic
+        .update_call(
+            env.amm_id,
+            env.admin,
+            "test_set_pending_claim_limit",
+            encode_one(1u64).unwrap(),
+        )
+        .expect("set test claim limit failed");
+    let _: () = decode_ok(cap);
+
+    let insert = env
+        .pic
+        .update_call(
+            env.amm_id,
+            env.admin,
+            "test_insert_pending_claim",
+            encode_args((pool_id.clone(), 777u128)).unwrap(),
+        )
+        .expect("insert test claim failed");
+    let first_id: u64 = match insert {
+        WasmResult::Reply(bytes) => decode_one::<Result<u64, AmmError>>(&bytes)
+            .expect("decode inserted claim")
+            .expect("claim insertion should fit under the cap"),
+        WasmResult::Reject(message) => panic!("claim insertion rejected: {message}"),
+    };
+
+    let before_a = get_flaky_balance(&env, env.token_a_id, env.user, None);
+    let before_b = get_flaky_balance(&env, env.token_b_id, env.user, None);
+    let rejected = env
+        .pic
+        .update_call(
+            env.amm_id,
+            env.user,
+            "add_liquidity",
+            encode_args((pool_id, 1_000_000u128, 1_000_000u128, 0u128)).unwrap(),
+        )
+        .expect("add_liquidity call failed");
+    let result: Result<Nat, AmmError> = match rejected {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode add_liquidity result"),
+        WasmResult::Reject(message) => panic!("add_liquidity rejected: {message}"),
+    };
+    assert!(matches!(result, Err(AmmError::PendingClaimCapacityReached)));
+    assert_eq!(get_flaky_balance(&env, env.token_a_id, env.user, None), before_a);
+    assert_eq!(get_flaky_balance(&env, env.token_b_id, env.user, None), before_b);
+
+    let claims = pending_claims(&env);
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].id, first_id);
+    assert_eq!(claims[0].amount, 777);
+}
+
+#[test]
+fn two_leg_withdrawal_reserves_all_claim_slots_before_lp_burn() {
+    let env = setup_flaky();
+    let pool_id = create_pool(&env);
+    add_initial_liquidity(&env, &pool_id, 10_000_000_000_000);
+
+    let cap = env
+        .pic
+        .update_call(
+            env.amm_id,
+            env.admin,
+            "test_set_pending_claim_limit",
+            encode_one(2u64).unwrap(),
+        )
+        .expect("set test claim limit failed");
+    let _: () = decode_ok(cap);
+    let insert = env
+        .pic
+        .update_call(
+            env.amm_id,
+            env.admin,
+            "test_insert_pending_claim",
+            encode_args((pool_id.clone(), 777u128)).unwrap(),
+        )
+        .expect("insert test claim failed");
+    let first_id: u64 = match insert {
+        WasmResult::Reply(bytes) => decode_one::<Result<u64, AmmError>>(&bytes)
+            .expect("decode inserted claim")
+            .expect("claim insertion should fit under the cap"),
+        WasmResult::Reject(message) => panic!("claim insertion rejected: {message}"),
+    };
+    let lp_before = get_user_lp_balance(&env, &pool_id);
+
+    let rejected = env
+        .pic
+        .update_call(
+            env.amm_id,
+            env.user,
+            "remove_liquidity",
+            encode_args((pool_id.clone(), lp_before, 0u128, 0u128)).unwrap(),
+        )
+        .expect("remove_liquidity call failed");
+    let result: Result<(Nat, Nat), AmmError> = match rejected {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode remove_liquidity result"),
+        WasmResult::Reject(message) => panic!("remove_liquidity rejected: {message}"),
+    };
+    assert!(matches!(result, Err(AmmError::PendingClaimCapacityReached)));
+    assert_eq!(get_user_lp_balance(&env, &pool_id), lp_before, "LP shares must remain unburned");
+
+    let claims = pending_claims(&env);
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].id, first_id);
+    assert_eq!(claims[0].amount, 777);
+}
+
 // ════════════════════════════════════════════════════════════════════════
 // Test: slippage (`min_amount_out`) is enforced against the NET amount the
 // taker actually receives (gross output minus the ledger fee), not the gross

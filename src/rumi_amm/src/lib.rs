@@ -4,7 +4,7 @@ use ic_canister_log::log;
 use ic_canisters_http_types::{HttpRequest, HttpResponse, HttpResponseBuilder};
 use serde::Deserialize;
 use sha2::{Sha256, Digest};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub mod types;
@@ -32,6 +32,9 @@ use crate::logs::INFO;
 
 thread_local! {
     static POOL_LOCKS: RefCell<BTreeSet<PoolId>> = RefCell::new(BTreeSet::new());
+    static RESERVED_PENDING_CLAIM_SLOTS: Cell<usize> = const { Cell::new(0) };
+    #[cfg(feature = "test_endpoints")]
+    static TEST_PENDING_CLAIM_LIMIT: Cell<Option<usize>> = const { Cell::new(None) };
 }
 
 pub(crate) struct PoolGuard {
@@ -552,6 +555,7 @@ pub(crate) fn make_pool_id(token_a: Principal, token_b: Principal) -> PoolId {
 
 /// Record a failed outbound transfer as a pending claim so the user can retry.
 fn record_pending_claim(
+    slots: &mut PendingClaimSlots,
     pool_id: &PoolId,
     claimant: Principal,
     token: Principal,
@@ -559,11 +563,8 @@ fn record_pending_claim(
     amount: u128,
     reason: &str,
 ) -> u64 {
+    slots.consume_one();
     mutate_state(|s| {
-        if s.pending_claims.len() >= state::MAX_PENDING_CLAIMS {
-            log!(INFO, "WARN: pending_claims at capacity ({}). Dropping oldest claim.", state::MAX_PENDING_CLAIMS);
-            s.pending_claims.remove(0);
-        }
         let id = s.next_claim_id;
         s.next_claim_id += 1;
         s.pending_claims.push(PendingClaim {
@@ -580,6 +581,62 @@ fn record_pending_claim(
             id, claimant, amount, token, pool_id);
         id
     })
+}
+
+fn pending_claim_limit() -> usize {
+    #[cfg(feature = "test_endpoints")]
+    if let Some(limit) = TEST_PENDING_CLAIM_LIMIT.with(Cell::get) {
+        return limit;
+    }
+    state::MAX_PENDING_CLAIMS
+}
+
+/// Capacity reservation held over any await that may turn accepted value into
+/// a pending claim. Reservations are global because claims span all pools.
+struct PendingClaimSlots {
+    remaining: usize,
+}
+
+impl PendingClaimSlots {
+    fn reserve(slots: usize) -> Result<Self, AmmError> {
+        let accepted = RESERVED_PENDING_CLAIM_SLOTS.with(|reserved| {
+            let current = reserved.get();
+            let Some(total) = read_state(|s| s.pending_claims.len())
+                .checked_add(current)
+                .and_then(|n| n.checked_add(slots))
+            else {
+                return false;
+            };
+            if total > pending_claim_limit() {
+                return false;
+            }
+            reserved.set(current + slots);
+            true
+        });
+        if !accepted {
+            return Err(AmmError::PendingClaimCapacityReached);
+        }
+        Ok(Self { remaining: slots })
+    }
+
+    /// A pending claim being paid is temporarily removed from the vector.
+    /// Keep its occupied slot reserved so another pool cannot consume it.
+    fn hold_existing() -> Self {
+        RESERVED_PENDING_CLAIM_SLOTS.with(|reserved| reserved.set(reserved.get() + 1));
+        Self { remaining: 1 }
+    }
+
+    fn consume_one(&mut self) {
+        assert!(self.remaining > 0, "pending claim inserted without reserved capacity");
+        self.remaining -= 1;
+        RESERVED_PENDING_CLAIM_SLOTS.with(|reserved| reserved.set(reserved.get() - 1));
+    }
+}
+
+impl Drop for PendingClaimSlots {
+    fn drop(&mut self) {
+        RESERVED_PENDING_CLAIM_SLOTS.with(|reserved| reserved.set(reserved.get() - self.remaining));
+    }
 }
 
 /// Receive a reward donation from the protocol backend. The caller is
@@ -773,6 +830,18 @@ pub fn get_pending_rewards(pool_id: PoolId, principal: Principal) -> Nat {
 async fn claim_pending(claim_id: u64) -> Result<(), AmmError> {
     let caller = ic_cdk::caller();
 
+    let pool_id = read_state(|s| {
+        s.pending_claims
+            .iter()
+            .find(|claim| claim.id == claim_id)
+            .map(|claim| claim.pool_id.clone())
+    })
+    .ok_or(AmmError::ClaimNotFound)?;
+    let _pool_guard = PoolGuard::new(pool_id)?;
+    // The existing record occupies this slot while temporarily absent from
+    // `pending_claims`, preventing another pool from reserving it meanwhile.
+    let _claim_slot = PendingClaimSlots::hold_existing();
+
     // Atomically find and remove the claim from state (prevents double-claim).
     let claim = mutate_state(|s| {
         let idx = s.pending_claims
@@ -833,6 +902,41 @@ async fn claim_pending(claim_id: u64) -> Result<(), AmmError> {
 #[query]
 fn get_pending_claims() -> Vec<PendingClaim> {
     read_state(|s| s.pending_claims.clone())
+}
+
+#[cfg(feature = "test_endpoints")]
+#[update]
+fn test_set_pending_claim_limit(limit: u64) -> Result<(), AmmError> {
+    caller_is_admin()?;
+    let limit = usize::try_from(limit).map_err(|_| AmmError::PendingClaimCapacityReached)?;
+    let occupied = read_state(|s| s.pending_claims.len())
+        .saturating_add(RESERVED_PENDING_CLAIM_SLOTS.with(Cell::get));
+    if limit < occupied || limit > state::MAX_PENDING_CLAIMS {
+        return Err(AmmError::PendingClaimCapacityReached);
+    }
+    TEST_PENDING_CLAIM_LIMIT.with(|test_limit| test_limit.set(Some(limit)));
+    Ok(())
+}
+
+#[cfg(feature = "test_endpoints")]
+#[update]
+fn test_insert_pending_claim(pool_id: PoolId, amount: u128) -> Result<u64, AmmError> {
+    caller_is_admin()?;
+    let _pool_guard = PoolGuard::new(pool_id.clone())?;
+    let (token, subaccount) = read_state(|s| {
+        let pool = s.pools.get(&pool_id).ok_or(AmmError::PoolNotFound)?;
+        Ok::<_, AmmError>((pool.token_a, pool.subaccount_a))
+    })?;
+    let mut slots = PendingClaimSlots::reserve(1)?;
+    Ok(record_pending_claim(
+        &mut slots,
+        &pool_id,
+        ic_cdk::caller(),
+        token,
+        subaccount,
+        amount,
+        "test-injected claim",
+    ))
 }
 
 // ─── Core AMM ───
@@ -901,6 +1005,10 @@ async fn swap(
         });
     }
 
+    // If output and subsequent input refund both fail, the accepted input
+    // requires one durable claim slot. Reserve before pulling any tokens.
+    let mut claim_slots = PendingClaimSlots::reserve(1)?;
+
     // Pull input tokens from user
     transfer_from_user(ledger_in, caller, sub_in, amount_in)
         .await
@@ -952,7 +1060,7 @@ async fn swap(
             if let Err(refund_err) = transfer_to_user(ledger_in, sub_in, caller, amount_in).await {
                 log!(INFO, "CRITICAL: swap output failed AND input refund failed for {}: {}. \
                      Recording pending claim for {} of {} tokens.", pool_id, refund_err, amount_in, ledger_in);
-                record_pending_claim(&pool_id, caller, ledger_in, sub_in, amount_in, &format!(
+                record_pending_claim(&mut claim_slots, &pool_id, caller, ledger_in, sub_in, amount_in, &format!(
                     "Swap output transfer failed, then refund failed: {}", refund_err
                 ));
             }
@@ -1026,6 +1134,9 @@ async fn add_liquidity(
         });
     }
 
+    // If token B pull fails and token A refund also fails, preserve one claim.
+    let mut claim_slots = PendingClaimSlots::reserve(1)?;
+
     // Pull both tokens from user.
     // If token_b transfer fails after token_a succeeded, refund token_a.
     transfer_from_user(token_a, caller, sub_a, amount_a)
@@ -1040,7 +1151,7 @@ async fn add_liquidity(
         if let Err(refund_err) = transfer_to_user(token_a, sub_a, caller, amount_a).await {
             log!(INFO, "CRITICAL: token_b transfer failed AND token_a refund failed: {}. \
                  Recording pending claim for {} of token_a in pool {}.", refund_err, amount_a, pool_id);
-            record_pending_claim(&pool_id, caller, token_a, sub_a, amount_a, &format!(
+            record_pending_claim(&mut claim_slots, &pool_id, caller, token_a, sub_a, amount_a, &format!(
                 "add_liquidity token_b failed, then token_a refund failed: {}", refund_err
             ));
         }
@@ -1199,6 +1310,9 @@ async fn remove_liquidity(
         });
     }
 
+    let claim_slots_needed = usize::from(amount_a > 0) + usize::from(amount_b > 0);
+    let mut claim_slots = PendingClaimSlots::reserve(claim_slots_needed)?;
+
     // Burn LP shares and update reserves FIRST (optimistic),
     // then transfer tokens. This ensures the protocol never overpays
     // if a transfer fails mid-way.
@@ -1252,7 +1366,7 @@ async fn remove_liquidity(
     if amount_a > 0 {
         if let Err(reason) = transfer_to_user(token_a, sub_a, caller, amount_a).await {
             log!(INFO, "WARN: remove_liquidity transfer_a failed for {}: {}. Recording pending claim.", pool_id, reason);
-            record_pending_claim(&pool_id, caller, token_a, sub_a, amount_a, &format!(
+            record_pending_claim(&mut claim_slots, &pool_id, caller, token_a, sub_a, amount_a, &format!(
                 "remove_liquidity transfer_a failed: {}", reason
             ));
             transfer_errors.push(format!("token_a: {}", reason));
@@ -1262,7 +1376,7 @@ async fn remove_liquidity(
     if amount_b > 0 {
         if let Err(reason) = transfer_to_user(token_b, sub_b, caller, amount_b).await {
             log!(INFO, "WARN: remove_liquidity transfer_b failed for {}: {}. Recording pending claim.", pool_id, reason);
-            record_pending_claim(&pool_id, caller, token_b, sub_b, amount_b, &format!(
+            record_pending_claim(&mut claim_slots, &pool_id, caller, token_b, sub_b, amount_b, &format!(
                 "remove_liquidity transfer_b failed: {}", reason
             ));
             transfer_errors.push(format!("token_b: {}", reason));

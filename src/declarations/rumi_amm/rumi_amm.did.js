@@ -31,6 +31,7 @@ export const idlFactory = ({ IDL }) => {
     'MaintenanceMode' : IDL.Null,
     'BelowMinClaim' : IDL.Record({ 'min' : IDL.Nat, 'claimable' : IDL.Nat }),
     'TransferFailed' : IDL.Record({ 'token' : IDL.Text, 'reason' : IDL.Text }),
+    'PendingClaimCapacityReached' : IDL.Null,
     'ClaimNotFound' : IDL.Null,
     'RewardLedgerTransferFailed' : IDL.Record({ 'reason' : IDL.Text }),
   });

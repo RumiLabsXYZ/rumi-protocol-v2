@@ -76,6 +76,7 @@ export type AmmError = {
   { 'MaintenanceMode' : null } |
   { 'BelowMinClaim' : { 'min' : bigint, 'claimable' : bigint } } |
   { 'TransferFailed' : { 'token' : string, 'reason' : string } } |
+  { 'PendingClaimCapacityReached' : null } |
   { 'ClaimNotFound' : null } |
   { 'RewardLedgerTransferFailed' : { 'reason' : string } };
 export interface AmmEventsByPrincipalQuery {

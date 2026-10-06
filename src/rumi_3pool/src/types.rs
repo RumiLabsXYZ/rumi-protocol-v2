@@ -405,6 +405,8 @@ pub enum ThreePoolError {
     /// should retry. Audit fence B-01 (Wave 14a): prevents two concurrent
     /// callers from pricing against the same pre-state across an `await`.
     PoolLocked,
+    /// Pending-claim storage is full; no input transfer or LP debit was made.
+    PendingClaimCapacityReached,
     /// No pending claim exists with the requested id (already resolved, or
     /// never recorded). Audit 2026-06-05 (3P-01/02/03): pending-claim recovery.
     ClaimNotFound,

@@ -190,6 +190,7 @@ type AmmError = variant {
   FeeBpsOutOfRange;
   MaintenanceMode;
   ClaimNotFound;
+  PendingClaimCapacityReached;
   PoolBusy;
   DuplicateNonce;
   NoLiquidity;
