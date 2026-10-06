@@ -1678,7 +1678,11 @@ fn replay_with_journal_and_nonce_time(
                 state.cleanup_if_drained(vault_id);
                 // Track 3USD reserves from stability pool liquidations
                 if let Some(reserves_e8s) = three_usd_reserves_e8s {
-                    state.protocol_3usd_reserves += reserves_e8s;
+                    state.protocol_3usd_reserves = state.protocol_3usd_reserves
+                        .checked_add(reserves_e8s)
+                        .ok_or_else(|| ReplayLogError::InconsistentLog(
+                            format!("3USD reserve total overflows at public event {legacy_event_count}"),
+                        ))?;
                 }
             },
             Event::RedistributeVault { vault_id, .. } => state.redistribute_vault(vault_id),

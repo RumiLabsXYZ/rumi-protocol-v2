@@ -1250,6 +1250,23 @@ fn realized_three_usd_for_applied_debt(
         / requested_debt_e8s as u128) as u64
 }
 
+fn preflight_three_usd_reserve_credit(
+    existing_reserves_e8s: u64,
+    gross_three_usd_e8s: Option<u64>,
+    requested_debt_e8s: u64,
+    applied_debt_e8s: u64,
+) -> Result<Option<u64>, ProtocolError> {
+    let credit = gross_three_usd_e8s.map(|gross| {
+        realized_three_usd_for_applied_debt(gross, requested_debt_e8s, applied_debt_e8s)
+    });
+    if credit.is_some_and(|amount| existing_reserves_e8s.checked_add(amount).is_none()) {
+        return Err(ProtocolError::GenericError(
+            "3USD reserve accounting would overflow; ingress retained for exact refund".into(),
+        ));
+    }
+    Ok(credit)
+}
+
 fn stored_three_usd_absorb_matches(
     stored: &crate::state::StoredThreeUsdReserveAbsorbResult,
     caller: Principal,
@@ -1496,6 +1513,19 @@ mod three_usd_reserve_value_tests {
     fn applied_debt_records_only_its_proportional_reserve_value() {
         assert_eq!(realized_three_usd_for_applied_debt(100, 100, 50), 50);
         assert_eq!(realized_three_usd_for_applied_debt(100, 0, 50), 0);
+    }
+
+    #[test]
+    fn reserve_overflow_is_rejected_before_proof_or_debt_commit() {
+        assert!(preflight_three_usd_reserve_credit(u64::MAX - 4, Some(10), 10, 5).is_err());
+        assert_eq!(
+            preflight_three_usd_reserve_credit(u64::MAX - 5, Some(10), 10, 5).unwrap(),
+            Some(5),
+        );
+        assert_eq!(
+            preflight_three_usd_reserve_credit(u64::MAX, None, 10, 5).unwrap(),
+            None,
+        );
     }
 
     #[test]
@@ -9015,6 +9045,26 @@ async fn liquidate_vault_debt_already_burned_inner(
                 ));
             }
         }
+        // A pulled 3USD ingress must reach the typed failure/refund path if
+        // reserve accounting cannot represent its realized credit. Check
+        // before consuming the proof or changing debt: returning Err after a
+        // state mutation would not roll those mutations back.
+        let prospective_debt_applied = s.vault_id_to_vaults.get(&vault_id)
+            .map(|live| max_liquidatable_debt.min(live.borrowed_icusd_amount))
+            .unwrap_or(max_liquidatable_debt);
+        let prospective_event_debt = if proof.ledger_kind
+            == crate::icrc3_proof::SpProofLedger::ThreePoolTransferDefault
+        {
+            prospective_debt_applied
+        } else {
+            max_liquidatable_debt
+        };
+        let reserve_realized_prechecked = preflight_three_usd_reserve_credit(
+            s.protocol_3usd_reserves,
+            three_usd_received_e8s,
+            icusd_burned_e8s,
+            prospective_event_debt.to_u64(),
+        )?;
         if !s.consumed_writedown_proofs.insert(proof_key) {
             return Err(ProtocolError::GenericError(format!(
                 "SP writedown proof replay rejected: ({:?}, block {}) was consumed while verifying",
@@ -9107,13 +9157,7 @@ async fn liquidate_vault_debt_already_burned_inner(
         // Commit the applied fee obligation with the proof consumption and
         // accounting event; native-XRP developer claims are pinned by exact id.
         // AR-B-001/BK-001 (audit 2026-06-09): applied payout, replay-exact.
-        let reserve_realized_e8s = three_usd_received_e8s.map(|gross| {
-            realized_three_usd_for_applied_debt(
-                gross,
-                icusd_burned_e8s,
-                event_debt.to_u64(),
-            )
-        });
+        let reserve_realized_e8s = reserve_realized_prechecked;
         let event = crate::event::Event::PartialLiquidateVault {
             vault_id,
             liquidator_payment: event_debt,
@@ -9132,7 +9176,9 @@ async fn liquidate_vault_debt_already_burned_inner(
 
         // Track 3USD reserves at runtime (also persisted via event replay)
         if let Some(three_usd_e8s) = reserve_realized_e8s {
-            s.protocol_3usd_reserves += three_usd_e8s;
+            s.protocol_3usd_reserves = s.protocol_3usd_reserves
+                .checked_add(three_usd_e8s)
+                .expect("3USD reserve capacity was checked before debt commit");
         }
 
         let mut nonce = s.next_op_nonce();
