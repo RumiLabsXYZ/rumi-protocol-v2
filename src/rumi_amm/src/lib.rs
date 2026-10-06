@@ -654,8 +654,15 @@ fn record_pending_claim(
             reason: reason.to_string(),
             created_at: ic_cdk::api::time() / 1_000_000_000,
         });
-        log!(INFO, "Pending claim #{} recorded: {} owes {} of token {} (pool {})",
-            id, claimant, amount, token, pool_id);
+        log!(
+            INFO,
+            "Pending claim #{} recorded: {} owes {} of token {} (pool {})",
+            id,
+            claimant,
+            amount,
+            token,
+            pool_id
+        );
         id
     })
 }
@@ -740,7 +747,10 @@ impl PendingClaimSlots {
     }
 
     fn consume_one(&mut self) {
-        assert!(self.remaining > 0, "pending claim inserted without reserved capacity");
+        assert!(
+            self.remaining > 0,
+            "pending claim inserted without reserved capacity"
+        );
         self.remaining -= 1;
         RESERVED_PENDING_CLAIM_SLOTS.with(|reserved| reserved.set(reserved.get() - 1));
     }
@@ -835,6 +845,25 @@ fn sort_and_reject_duplicate_block_ids(
         return Err("ICRC-3 direct/archive responses overlap block IDs; cursor held".to_string());
     }
     Ok(())
+}
+
+/// No AMM ledger currently has a source-and-module-hash-pinned history profile
+/// that proves an absent transaction from its archive schema. Keep this empty
+/// until a ledger-specific profile verifies every identity field and archive
+/// coverage rule used by `block_matches_exact_receipt`.
+fn ledger_has_verified_absence_profile(_ledger: Principal) -> bool {
+    false
+}
+
+fn require_verified_absence_profile(ledger: Principal) -> Result<(), String> {
+    if ledger_has_verified_absence_profile(ledger) {
+        Ok(())
+    } else {
+        Err(format!(
+            "ledger {} has no verified AMM receipt-history profile; absence cannot authorize reprice",
+            ledger
+        ))
+    }
 }
 
 /// Drop a staged request only after source proves that no external value moved.
@@ -1625,6 +1654,7 @@ async fn scan_exact_transfer_receipt(
     use icrc_ledger_types::icrc3::blocks::{GetBlocksRequest, GetBlocksResult};
     if let Some(tip) = frozen_tip {
         if cursor >= tip {
+            require_verified_absence_profile(ledger)?;
             return Ok((None, cursor, tip));
         }
     }
@@ -1650,6 +1680,7 @@ async fn scan_exact_transfer_receipt(
     let tip = receipt_scan_tip(frozen_tip, log_length)?;
     let end = checked_receipt_scan_page_end(cursor, tip)?;
     if cursor >= tip {
+        require_verified_absence_profile(ledger)?;
         return Ok((None, cursor, tip));
     }
     let mut blocks = std::mem::take(&mut response.blocks);
@@ -1695,6 +1726,9 @@ async fn scan_exact_transfer_receipt(
             "ICRC-3 response did not cover requested block {}; cursor held",
             next
         ));
+    }
+    if end >= tip {
+        require_verified_absence_profile(ledger)?;
     }
     Ok((None, end, tip))
 }
@@ -2269,6 +2303,7 @@ fn test_insert_pending_claim(pool_id: PoolId, amount: u128) -> Result<u64, AmmEr
         amount,
         "test-injected claim",
     ))
+}
 
 #[query]
 fn get_pending_amm_payouts() -> Vec<AmmPayoutAttempt> {
@@ -4263,6 +4298,16 @@ mod amm_receipt_tests {
         assert_eq!(receipt_scan_tip(Some(65), 96).unwrap(), 65);
         assert!(receipt_scan_tip(Some(65), 64).is_err());
         assert!(checked_receipt_scan_page_end(66, 65).is_err());
+    }
+
+    #[test]
+    fn unverified_ledger_absence_never_authorizes_identity_rotation() {
+        let three_usd = Principal::from_text(THREEPOOL).unwrap();
+        let icp = Principal::from_text("ryjl3-tyaaa-aaaaa-aaaba-cai").unwrap();
+        assert!(!ledger_has_verified_absence_profile(three_usd));
+        assert!(!ledger_has_verified_absence_profile(icp));
+        assert!(require_verified_absence_profile(three_usd).is_err());
+        assert!(require_verified_absence_profile(icp).is_err());
     }
 
     #[test]
