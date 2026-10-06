@@ -606,6 +606,11 @@ pub async fn withdraw(token_ledger: Principal, amount: u64) -> Result<(), Stabil
         return Err(StabilityPoolError::EmergencyPaused);
     }
 
+    // Hold the shared balance-operation admission guard across fee/balance
+    // queries and the transfer await. A liquidation cannot start after the
+    // initial policy check but before this withdrawal reaches the ledger.
+    let _balance_async_guard = crate::pool_guard::PoolBalanceAsyncGuard::new()?;
+
     // The ledger debits `transfer_amount + fee` from the pool. Query the live
     // fee first so a max withdrawal drains the user's recorded position without
     // overdrawing the pool ledger account.
@@ -630,8 +635,6 @@ pub async fn withdraw(token_ledger: Principal, amount: u64) -> Result<(), Stabil
     if let Some(msg) = correction_msg {
         log!(INFO, "Withdrawal reconciled ledger shortfall: {}", msg);
     }
-    let _balance_async_guard = crate::pool_guard::PoolBalanceAsyncGuard::new();
-
     // User receives amount minus fee; pool pays amount total (transfer + fee)
     let transfer_amount = withdrawal_amount - ledger_fee;
     log!(
@@ -1277,7 +1280,7 @@ pub async fn claim_pending_refund(refund_id: u64) -> Result<u64, StabilityPoolEr
         return Err(StabilityPoolError::SystemBusy);
     }
     let _refund_guard = PendingRefundClaimGuard::new(refund_id)?;
-    let _balance_async_guard = crate::pool_guard::PoolBalanceAsyncGuard::new();
+    let _balance_async_guard = crate::pool_guard::PoolBalanceAsyncGuard::new()?;
     let caller = ic_cdk::api::caller();
 
     let refund = read_state(|s| {

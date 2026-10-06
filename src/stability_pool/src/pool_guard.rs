@@ -39,7 +39,9 @@ impl SpLiquidationGuard {
     pub fn new() -> Result<Self, StabilityPoolError> {
         LIQUIDATION_ACTIVE.with(|f| {
             let mut held = f.borrow_mut();
-            if *held {
+            let balance_async_in_flight =
+                BALANCE_ASYNC_IN_FLIGHT.with(|active| *active.borrow() > 0);
+            if *held || balance_async_in_flight {
                 return Err(StabilityPoolError::SystemBusy);
             }
             *held = true;
@@ -66,14 +68,20 @@ pub struct PoolBalanceAsyncGuard;
 
 impl PoolBalanceAsyncGuard {
     /// Mark a deduct-before-transfer balance operation as in flight across an
-    /// outbound ledger await. SP chain absorb must not start in this window:
-    /// rollback may need to restore stable balances if the ledger rejects.
-    pub fn new() -> Self {
-        BALANCE_ASYNC_IN_FLIGHT.with(|f| {
-            let mut count = f.borrow_mut();
-            *count = count.saturating_add(1);
-        });
-        Self
+    /// outbound ledger await. Acquisition is synchronous with liquidation
+    /// lock acquisition, so neither side can pass a stale check and start while
+    /// the other owns the shared pool balance.
+    pub fn new() -> Result<Self, StabilityPoolError> {
+        LIQUIDATION_ACTIVE.with(|liquidation| {
+            if *liquidation.borrow() {
+                return Err(StabilityPoolError::SystemBusy);
+            }
+            BALANCE_ASYNC_IN_FLIGHT.with(|active| {
+                let mut count = active.borrow_mut();
+                *count = count.saturating_add(1);
+                Ok(Self)
+            })
+        })
     }
 }
 
@@ -171,10 +179,10 @@ mod tests {
     #[test]
     fn pool_balance_async_guard_tracks_nested_inflight_operations() {
         assert!(!balance_async_in_flight());
-        let g1 = PoolBalanceAsyncGuard::new();
+        let g1 = PoolBalanceAsyncGuard::new().expect("first balance operation starts");
         assert!(balance_async_in_flight());
         {
-            let _g2 = PoolBalanceAsyncGuard::new();
+            let _g2 = PoolBalanceAsyncGuard::new().expect("nested balance operation allowed");
             assert!(balance_async_in_flight());
         }
         assert!(
@@ -183,6 +191,25 @@ mod tests {
         );
         drop(g1);
         assert!(!balance_async_in_flight());
+    }
+
+    #[test]
+    fn liquidation_and_balance_async_guards_exclude_each_other_in_both_orders() {
+        let balance_guard =
+            PoolBalanceAsyncGuard::new().expect("balance operation should acquire first");
+        assert!(
+            SpLiquidationGuard::new().is_err(),
+            "liquidation must not start while a ledger balance operation is in flight"
+        );
+        drop(balance_guard);
+
+        let liquidation_guard = SpLiquidationGuard::new().expect("liquidation should acquire");
+        assert!(
+            PoolBalanceAsyncGuard::new().is_err(),
+            "balance operation must not start while liquidation owns the pool"
+        );
+        drop(liquidation_guard);
+        assert!(PoolBalanceAsyncGuard::new().is_ok());
     }
 
     #[test]

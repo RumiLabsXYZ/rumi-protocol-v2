@@ -10854,6 +10854,36 @@ mod tests {
     }
 
     #[test]
+    fn sp_burn_refund_map_decodes_empty_when_missing_from_old_snapshot() {
+        let state = test_state();
+        let mut buf = Vec::new();
+        ciborium::ser::into_writer(&state, &mut buf).unwrap();
+
+        let value: ciborium::Value = ciborium::de::from_reader(buf.as_slice()).unwrap();
+        if let ciborium::Value::Map(mut entries) = value {
+            let original_len = entries.len();
+            entries.retain(|(key, _)| {
+                !matches!(key, ciborium::Value::Text(key) if key == "sp_burn_refunds_by_proof")
+            });
+            assert_eq!(
+                entries.len(),
+                original_len - 1,
+                "snapshot fixture must contain the CL08 field being removed",
+            );
+
+            let mut modified = Vec::new();
+            ciborium::ser::into_writer(&ciborium::Value::Map(entries), &mut modified).unwrap();
+            let restored: State = ciborium::de::from_reader(modified.as_slice())
+                .expect("pre-CL08 backend snapshot must decode");
+            assert!(restored.sp_burn_refunds_by_proof.is_empty());
+            assert_eq!(restored.mode, state.mode);
+            assert_eq!(restored.developer_principal, state.developer_principal);
+        } else {
+            panic!("expected CBOR map");
+        }
+    }
+
+    #[test]
     fn price_setter_auth_allows_developer_anywhere_and_pusher_only_in_scope() {
         let dev = Principal::from_slice(&[1; 29]);
         let pusher = Principal::from_slice(&[2; 29]);

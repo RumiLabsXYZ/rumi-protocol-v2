@@ -2407,7 +2407,8 @@ mod tests {
     #[test]
     fn in_flight_balance_async_blocks_chain_absorb_start() {
         assert!(ensure_no_pool_balance_async_in_flight().is_ok());
-        let guard = crate::pool_guard::PoolBalanceAsyncGuard::new();
+        let guard = crate::pool_guard::PoolBalanceAsyncGuard::new()
+            .expect("balance async operation should acquire without liquidation");
         assert!(
             matches!(
                 ensure_no_pool_balance_async_in_flight(),
