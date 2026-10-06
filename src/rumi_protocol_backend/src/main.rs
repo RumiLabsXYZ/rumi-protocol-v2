@@ -1816,6 +1816,21 @@ fn evm_owns_vault(s: &State, vault_id: u64, v: &VerifiedIntent) -> bool {
         .unwrap_or(false)
 }
 
+// CL-12 scarcity hold: signed EVM opens remain closed until an economic
+// scarcity policy exists for the finite, permanent custody-path registry.
+// Keep this explicit default-off admission check ahead of nonce/id mutation.
+const EVM_OPEN_ADMISSION_ENABLED: bool = false;
+
+fn ensure_evm_open_admission_enabled() -> Result<(), ProtocolError> {
+    if EVM_OPEN_ADMISSION_ENABLED {
+        Ok(())
+    } else {
+        Err(ProtocolError::TemporarilyUnavailable(
+            "EVM vault opens are held pending an implemented scarcity policy".into(),
+        ))
+    }
+}
+
 /// EVM-signed `Open` (async — derives the per-vault custody address via tECDSA).
 ///
 /// Saga/TOCTOU: the nonce is consumed + the per-owner cap checked + the vault id
@@ -1830,6 +1845,11 @@ async fn open_chain_vault_evm(
     signature: Vec<u8>,
 ) -> Result<u64, ProtocolError> {
     use rumi_protocol_backend::chains::evm::eip712::IntentAction;
+    // Hold anonymous EVM opens before nonce consumption, vault-id reservation,
+    // signature recovery, custody derivation, or vault insertion. Existing
+    // policy predicates below remain authoritative if a reviewed scarcity
+    // policy enables admission.
+    ensure_evm_open_admission_enabled()?;
     let v = verify_intent_ctx(&intent, &signature, IntentAction::Open)?;
     let pre_await_now_ns = ic_cdk::api::time();
     // Pre-await atomic: enforce the authoritative mainnet public gate before
@@ -14048,11 +14068,22 @@ mod chain_vault_param_tests {
 /// consumption and again after the custody-derivation await.
 #[cfg(test)]
 mod evm_open_public_gate_tests {
-    use super::{replace_state, verify_intent_ctx, State};
+    use super::{ensure_evm_open_admission_enabled, replace_state, verify_intent_ctx, State};
     use rumi_protocol_backend::chains::config::{ChainConfigV3, ChainId, ChainStatus, GasStrategy};
     use rumi_protocol_backend::chains::evm::eip712::{IntentAction, VaultIntent};
 
     const CFX_MAINNET: ChainId = ChainId(1030);
+
+    #[test]
+    fn public_evm_open_admission_is_explicitly_default_off() {
+        let error = ensure_evm_open_admission_enabled()
+            .expect_err("no anonymous EVM open is admitted without a scarcity policy");
+        assert!(matches!(
+            error,
+            super::ProtocolError::TemporarilyUnavailable(ref reason)
+                if reason.contains("scarcity policy")
+        ));
+    }
 
     fn registered_chain_config() -> ChainConfigV3 {
         ChainConfigV3 {

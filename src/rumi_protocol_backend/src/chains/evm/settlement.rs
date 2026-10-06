@@ -233,8 +233,9 @@ async fn recredit_and_fail_chain_collateral_payout(
 
 /// Pick the next op to act on without additional submit-time filters. Enforces
 /// one-in-flight-per-queue: if ANY op is `Inflight`, only that op (action
-/// `Confirm`) is actionable; otherwise the lowest-op_id `Queued` op (action
-/// `Submit`) is returned.
+/// `Confirm`) is actionable; otherwise the first queued op in drain order
+/// (action `Submit`) is returned. A queued op that defers is rotated to the
+/// tail after its attempt so it cannot monopolize every settlement tick.
 pub fn select_next_op(q: &SettlementQueueV1) -> Option<(u64, OpAction)> {
     select_next_op_with_submit_filter(q, |_, _| false)
 }
@@ -243,9 +244,9 @@ pub fn select_next_op(q: &SettlementQueueV1) -> Option<(u64, OpAction)> {
 /// `submit_blocked(id, op)` is true as temporarily non-actionable. Inflight ops
 /// are never skipped: one-in-flight-per-queue remains the first rule.
 ///
-/// `pending` is a `BTreeMap<u64, SettlementOp>`, so iteration is op_id-ascending
-/// and the drain stays FIFO among actionable queued ops. Returns `None` when
-/// nothing is actionable.
+/// Queued selection follows `drain_order`, preserving enqueue order except for
+/// deferred work rotated to the tail. Older decoded queues with incomplete
+/// order vectors fall back to pending-map order for omitted ids.
 pub fn select_next_op_with_submit_filter<F>(
     q: &SettlementQueueV1,
     mut submit_blocked: F,
@@ -258,7 +259,18 @@ where
             return Some((id, OpAction::Confirm));
         }
     }
-    for (&id, op) in q.pending.iter() {
+    let mut ordered_ids: Vec<u64> = q.drain_order.iter().copied().collect();
+    let mut ordered_members: std::collections::BTreeSet<u64> =
+        ordered_ids.iter().copied().collect();
+    for &id in q.pending.keys() {
+        if ordered_members.insert(id) {
+            ordered_ids.push(id);
+        }
+    }
+    for id in ordered_ids {
+        let Some(op) = q.pending.get(&id) else {
+            continue;
+        };
         if matches!(op.status, SettlementOpStatus::Queued) && !submit_blocked(id, op) {
             // Increment 3: LiquidationSwap ops are now actionable (submit_op routes
             // them through the dedicated swap path). The Inc-2 skip is removed.
@@ -266,6 +278,35 @@ where
         }
     }
     None
+}
+
+/// Rotate only a still-Queued operation after its attempt. Inflight operations
+/// remain first because their nonce/outcome must be reconciled before any new
+/// settlement is submitted.
+pub(crate) fn rotate_queued_op_to_tail(q: &mut SettlementQueueV1, op_id: u64) {
+    if !q
+        .pending
+        .get(&op_id)
+        .is_some_and(|op| matches!(op.status, SettlementOpStatus::Queued))
+    {
+        return;
+    }
+
+    let mut normalized = std::collections::VecDeque::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for &id in &q.drain_order {
+        if q.pending.contains_key(&id) && seen.insert(id) {
+            normalized.push_back(id);
+        }
+    }
+    for &id in q.pending.keys() {
+        if seen.insert(id) {
+            normalized.push_back(id);
+        }
+    }
+    normalized.retain(|id| *id != op_id);
+    normalized.push_back(op_id);
+    q.drain_order = normalized;
 }
 
 /// On a confirmed on-chain mint: move `pending_mint_e8s` into `debt_e8s`, flip
@@ -1028,6 +1069,15 @@ pub async fn run_settlement(chain: ChainId) {
         OpAction::Submit => submit_op(chain, op_id, op).await,
         OpAction::Confirm => confirm_op(chain, op_id, op).await,
     }
+
+    // A failed-to-submit/deferred item stays Queued. Move it behind peers so
+    // one poison head cannot consume every bounded timer tick. Inflight work is
+    // deliberately not rotated or skipped; its nonce must be reconciled first.
+    mutate_state(|s| {
+        if let Some(q) = s.multi_chain.settlement_queues.get_mut(&chain) {
+            rotate_queued_op_to_tail(q, op_id);
+        }
+    });
 
     // Reap terminal (Succeeded/Failed) ops so `pending` does not grow
     // monotonically (Task-10 review follow-up). Live ops are untouched, so the

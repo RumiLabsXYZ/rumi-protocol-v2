@@ -1,7 +1,7 @@
 use super::settlement::{
     claim_liquidation_swap_submit_in_state, confirm_interest_mint_in_state, confirm_mint_in_state,
     ensure_liquidation_swap_submit_still_allowed_in_state, exact_native_transfer_is_funded,
-    fundable_withdrawal_value, requires_public_mint_gate, select_next_op,
+    fundable_withdrawal_value, requires_public_mint_gate, rotate_queued_op_to_tail, select_next_op,
     select_next_op_with_submit_filter, ClaimLiquidationSwapSubmitError,
     LiquidationSwapSubmitSnapshot, OpAction,
 };
@@ -164,6 +164,140 @@ fn select_next_op_filter_skips_blocked_queued_without_starving_later_allowed_ops
         Some((oid, OpAction::Submit)) => assert_eq!(oid, allowed_id),
         other => panic!("expected later allowed op to submit, got {other:?}"),
     }
+}
+
+#[test]
+fn deferred_queued_head_rotates_behind_peers_but_inflight_nonce_stays_first() {
+    let mut q = crate::chains::settlement_queue::SettlementQueueV1::default();
+    let first = q
+        .enqueue(SettlementOp::new(
+            SettlementOpKind::Mint {
+                recipient: "0xr".into(),
+                amount_e8s: 10,
+                vault_id: 1,
+            },
+            "deferred-head".into(),
+            0,
+        ))
+        .unwrap();
+    let peer = q
+        .enqueue(SettlementOp::new(
+            SettlementOpKind::ChainCollateralPayout {
+                recipient: "0x0000000000000000000000000000000000000abc".into(),
+                amount_e18: 1,
+                vault_id: 2,
+                claimant: Principal::anonymous(),
+            },
+            "peer".into(),
+            0,
+        ))
+        .unwrap();
+
+    rotate_queued_op_to_tail(&mut q, first);
+    assert_eq!(
+        q.drain_order.iter().copied().collect::<Vec<_>>(),
+        vec![peer, first]
+    );
+    assert_eq!(select_next_op(&q), Some((peer, OpAction::Submit)));
+
+    q.pending.get_mut(&first).unwrap().mark_inflight(1);
+    rotate_queued_op_to_tail(&mut q, peer);
+    assert_eq!(select_next_op(&q), Some((first, OpAction::Confirm)));
+    assert_eq!(
+        q.drain_order.iter().copied().collect::<Vec<_>>(),
+        vec![first, peer]
+    );
+}
+
+#[test]
+fn deferred_rotation_repairs_legacy_incomplete_order_without_dropping_pending_ops() {
+    let mut q = crate::chains::settlement_queue::SettlementQueueV1::default();
+    let first = q
+        .enqueue(SettlementOp::new(
+            SettlementOpKind::Mint {
+                recipient: "0xr".into(),
+                amount_e8s: 10,
+                vault_id: 1,
+            },
+            "first".into(),
+            0,
+        ))
+        .unwrap();
+    let peer = q
+        .enqueue(SettlementOp::new(
+            SettlementOpKind::ChainCollateralPayout {
+                recipient: "0x0000000000000000000000000000000000000abc".into(),
+                amount_e18: 1,
+                vault_id: 2,
+                claimant: Principal::anonymous(),
+            },
+            "peer".into(),
+            0,
+        ))
+        .unwrap();
+    q.drain_order.clear();
+    q.drain_order.push_back(first);
+
+    rotate_queued_op_to_tail(&mut q, first);
+    assert_eq!(
+        q.drain_order.iter().copied().collect::<Vec<_>>(),
+        vec![peer, first]
+    );
+    assert_eq!(select_next_op(&q), Some((peer, OpAction::Submit)));
+}
+
+#[test]
+fn selector_skips_duplicate_and_stale_order_ids_and_appends_omitted_pending_ops() {
+    let mut q = crate::chains::settlement_queue::SettlementQueueV1::default();
+    let first = q
+        .enqueue(SettlementOp::new(
+            SettlementOpKind::Mint {
+                recipient: "0xr".into(),
+                amount_e8s: 10,
+                vault_id: 1,
+            },
+            "first".into(),
+            0,
+        ))
+        .unwrap();
+    let ordered = q
+        .enqueue(SettlementOp::new(
+            SettlementOpKind::ChainCollateralPayout {
+                recipient: "0x0000000000000000000000000000000000000abc".into(),
+                amount_e18: 1,
+                vault_id: 2,
+                claimant: Principal::anonymous(),
+            },
+            "ordered".into(),
+            0,
+        ))
+        .unwrap();
+    let omitted = q
+        .enqueue(SettlementOp::new(
+            SettlementOpKind::ChainCollateralPayout {
+                recipient: "0x0000000000000000000000000000000000000def".into(),
+                amount_e18: 1,
+                vault_id: 3,
+                claimant: Principal::anonymous(),
+            },
+            "omitted".into(),
+            0,
+        ))
+        .unwrap();
+
+    q.drain_order.clear();
+    q.drain_order.push_back(ordered);
+    q.drain_order.push_back(ordered);
+    q.drain_order.push_back(u64::MAX);
+
+    assert_eq!(
+        select_next_op_with_submit_filter(&q, |id, _| id != first),
+        Some((first, OpAction::Submit))
+    );
+    assert_eq!(
+        select_next_op_with_submit_filter(&q, |id, _| id != omitted),
+        Some((omitted, OpAction::Submit))
+    );
 }
 
 fn liquidation_config() -> ChainLiquidationConfigV1 {
