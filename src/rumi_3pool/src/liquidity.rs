@@ -31,6 +31,22 @@ pub struct RemoveOneCoinOutcome {
     pub is_rebalancing: bool,
 }
 
+/// Preflight the LP owner and pool-supply debit at the synchronous commit
+/// point, after any external await that may have changed the owner's balance.
+pub(crate) fn preflight_lp_burn(
+    owner_lp: u128,
+    lp_total_supply: u128,
+    lp_burn: u128,
+) -> Result<(u128, u128), ThreePoolError> {
+    let next_owner_lp = owner_lp
+        .checked_sub(lp_burn)
+        .ok_or(ThreePoolError::InsufficientLiquidity)?;
+    let next_lp_supply = lp_total_supply
+        .checked_sub(lp_burn)
+        .ok_or(ThreePoolError::InsufficientLiquidity)?;
+    Ok((next_owner_lp, next_lp_supply))
+}
+
 /// Calculate LP tokens to mint for a deposit using the dynamic fee curve.
 ///
 /// The imbalance fee applies per-token to the non-proportional portion of the
@@ -261,6 +277,17 @@ pub fn calc_remove_one_coin(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cl_01_commit_preflight_rejects_lp_transferred_during_fee_await() {
+        let burn = 100_000_000u128;
+        let supply = 1_000_000_000;
+        assert_eq!(preflight_lp_burn(burn, supply, burn).unwrap(), (0, supply - burn));
+        assert!(matches!(
+            preflight_lp_burn(0, supply, burn),
+            Err(ThreePoolError::InsufficientLiquidity)
+        ));
+    }
 
     // Standard test setup: 1M of each token
     fn test_balances() -> [u128; 3] {

@@ -25,7 +25,9 @@ use crate::types::*;
 use crate::state::{mutate_state, read_state, ThreePoolState};
 use crate::math::{get_a, virtual_price};
 use crate::swap::calc_swap_output;
-use crate::liquidity::{calc_add_liquidity, calc_remove_liquidity, calc_remove_one_coin};
+use crate::liquidity::{
+    calc_add_liquidity, calc_remove_liquidity, calc_remove_one_coin, preflight_lp_burn,
+};
 use crate::transfers::{transfer_from_user, transfer_to_user};
 use crate::logs::INFO;
 
@@ -921,21 +923,32 @@ pub async fn remove_liquidity(
         }
     }
 
-    // 5. Deduct LP first (deduct-before-transfer pattern)
-    mutate_state(|s| {
+    // 5. Deduct LP first (deduct-before-transfer pattern). `ledger_fee` may
+    //    have yielded to the ledger, during which the caller can transfer LP
+    //    tokens without acquiring the pool lock. Re-read and checked-subtract
+    //    inside the synchronous mutation so the stale pre-await balance cannot
+    //    create wrapped/phantom LP.
+    mutate_state(|s| -> Result<(), ThreePoolError> {
         let cur = storage::lp_balance_get(&caller);
-        storage::lp_balance_set(caller, cur - lp_burn);
-        s.lp_total_supply -= lp_burn;
+        let (owner_after, supply_after) =
+            preflight_lp_burn(cur, s.lp_total_supply, lp_burn)?;
+        let mut balances_after = s.balances;
         for k in 0..3 {
-            s.balances[k] -= amounts[k];
+            balances_after[k] = balances_after[k]
+                .checked_sub(amounts[k])
+                .ok_or(ThreePoolError::InsufficientLiquidity)?;
         }
+        storage::lp_balance_set(caller, owner_after);
+        s.lp_total_supply = supply_after;
+        s.balances = balances_after;
         // Log burn block for ICRC-3 index
         s.log_block(Icrc3Transaction::Burn {
             from: caller,
             amount: lp_burn,
             from_subaccount: None,
         });
-    });
+        Ok(())
+    })?;
 
     // 6. Transfer each non-zero amount to user.
     //
@@ -1070,26 +1083,42 @@ pub async fn remove_one_coin(
         return Err(ThreePoolError::SlippageExceeded);
     }
 
-    // 5. Deduct LP and balance first
-    let admin_fee_share = fee * (admin_fee_bps as u128) / 10_000;
-
+    // 5. Deduct LP and balance first. The fee lookup above may have yielded,
+    //    so the caller's LP balance must be re-read and checked at the actual
+    //    synchronous debit boundary (LP transfers do not take PoolGuard).
     // The pool sends `amount` to the user and reserves `admin_fee_share` for
     // admin withdrawal. The LP-fee portion stays inside `s.balances[idx]` so
     // virtual_price grows for remaining LPs. Subtracting `amount + fee` would
     // double-deduct the LP fee.
-    mutate_state(|s| {
+    mutate_state(|s| -> Result<(), ThreePoolError> {
         let cur = storage::lp_balance_get(&caller);
-        storage::lp_balance_set(caller, cur - lp_burn);
-        s.lp_total_supply -= lp_burn;
-        s.balances[idx] -= amount + admin_fee_share;
-        s.admin_fees[idx] += admin_fee_share;
+        let (owner_after, supply_after) =
+            preflight_lp_burn(cur, s.lp_total_supply, lp_burn)?;
+        let admin_fee_share = fee
+            .checked_mul(admin_fee_bps as u128)
+            .ok_or(ThreePoolError::MathOverflow)?
+            / 10_000;
+        let pool_debit = amount
+            .checked_add(admin_fee_share)
+            .ok_or(ThreePoolError::MathOverflow)?;
+        let balance_after = s.balances[idx]
+            .checked_sub(pool_debit)
+            .ok_or(ThreePoolError::InsufficientLiquidity)?;
+        let admin_fee_after = s.admin_fees[idx]
+            .checked_add(admin_fee_share)
+            .ok_or(ThreePoolError::MathOverflow)?;
+        storage::lp_balance_set(caller, owner_after);
+        s.lp_total_supply = supply_after;
+        s.balances[idx] = balance_after;
+        s.admin_fees[idx] = admin_fee_after;
         // Log burn block for ICRC-3 index
         s.log_block(Icrc3Transaction::Burn {
             from: caller,
             amount: lp_burn,
             from_subaccount: None,
         });
-    });
+        Ok(())
+    })?;
 
     // 6. Transfer to user.
     //
@@ -2721,6 +2750,15 @@ pub fn icrc3_supported_block_types() -> Vec<icrc3::SupportedBlockType> {
 #[query]
 pub fn test_get_raw_block(id: u64) -> Option<types::Icrc3Block> {
     storage::blocks::get(id)
+}
+
+/// Test-only, one-shot HTTP barrier before an uncached ledger-fee call. The
+/// CL-01 PocketIC regression releases it only after an LP transfer executes.
+#[cfg(any(feature = "test_endpoints", test))]
+#[update]
+pub fn test_gate_next_fee_lookup() {
+    assert_eq!(ic_cdk::api::caller(), read_state(|s| s.config.admin), "admin only");
+    transfers::gate_next_fee_lookup();
 }
 
 /// Test-only: clear the ICRC-3 hash cache. Used by tests to simulate the
