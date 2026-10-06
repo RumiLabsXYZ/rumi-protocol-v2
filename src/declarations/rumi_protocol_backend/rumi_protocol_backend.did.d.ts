@@ -1107,6 +1107,14 @@ export interface PendingLiquidationV1 {
   'debt_to_clear_e8s' : bigint,
   'collateral_reserved_native' : bigint,
 }
+export interface PendingStabilityPoolInterestNotification {
+  'source_mint_block' : bigint,
+  'receipt_protocol_version' : [] | [number],
+  'amount_e8s' : bigint,
+  'pool_principal' : Principal,
+  'collateral_type' : Principal,
+  'token_ledger' : Principal,
+}
 export interface PendingThreeUsdRefund {
   'retry_count' : number,
   'vault_id' : bigint,
@@ -1794,6 +1802,11 @@ export interface _SERVICE {
   'get_pending_stability_pool_interest_notification_count' : ActorMethod<
     [],
     bigint
+  >,
+  'get_pending_stability_pool_interest_notifications' : ActorMethod<
+    [[] | [bigint], bigint],
+    { 'Ok' : Array<PendingStabilityPoolInterestNotification> } |
+      { 'Err' : ProtocolError }
   >,
   'get_price_pusher_allowed' : ActorMethod<[], Array<[number, string]>>,
   'get_price_pusher_principal' : ActorMethod<[], [] | [Principal]>,

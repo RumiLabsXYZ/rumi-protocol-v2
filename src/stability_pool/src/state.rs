@@ -11,6 +11,21 @@ pub const ICUSD_TRANSFER_FEE_E8S: u64 = 100_000;
 pub const CK_STABLE_TRANSFER_FEE_E6: u64 = 10_000;
 pub const THREE_USD_TRANSFER_FEE: u64 = 0;
 
+/// Maximum number of source mint receipts retained for interest distribution.
+/// Receipts outside the exact replay window fail closed instead of being credited again.
+pub const MAX_PROCESSED_INTEREST_MINT_BLOCKS: usize = 10_000;
+/// Maximum lifetime source receipts retained for unallocated-interest forwards.
+/// At capacity, new receipts remain pending at the backend for reconciliation.
+pub const MAX_UNALLOCATED_INTEREST_MINT_RECEIPTS: usize = 10_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InterestMintReceiptStatus {
+    New,
+    Duplicate,
+    PendingForward(u64),
+    OutsideReplayWindow,
+}
+
 pub fn known_stablecoin_transfer_fee(symbol: &str, decimals: u8) -> Option<u64> {
     match (symbol, decimals) {
         ("icUSD", 8) => Some(ICUSD_TRANSFER_FEE_E8S),
@@ -132,6 +147,10 @@ pub struct StabilityPoolState {
         Option<BTreeMap<u64, UnallocatedInterestForwardBatch>>,
     #[serde(default)]
     pub next_unallocated_interest_forward_batch_id: Option<u64>,
+    /// O(log n) source mint receipt lookup for forward batches. Missing means
+    /// an old/oversized snapshot could not be indexed and must fail closed.
+    #[serde(default)]
+    pub unallocated_interest_mint_index: Option<BTreeMap<u64, u64>>,
     pub is_initialized: bool,
     /// Event log for deposits, withdrawals, claims, interest.
     /// `Option` for backward-compatible upgrade (deserializes as None from old state).
@@ -154,6 +173,12 @@ pub struct StabilityPoolState {
     /// upgrades so Duplicate can only complete the matching transfer once.
     #[serde(default)]
     pub pending_deposit_intents: Option<BTreeMap<Principal, PendingDepositIntent>>,
+    /// Recent source-ledger mint blocks already allocated to eligible SP depositors.
+    #[serde(default)]
+    pub processed_interest_mint_blocks: Option<BTreeSet<u64>>,
+    /// Highest processed mint block used to bound replay protection memory.
+    #[serde(default)]
+    pub processed_interest_mint_block_high_watermark: Option<u64>,
 }
 
 impl Default for StabilityPoolState {
@@ -190,6 +215,7 @@ impl Default for StabilityPoolState {
             interest_treasury: None,
             unallocated_interest_forward_batches: Some(BTreeMap::new()),
             next_unallocated_interest_forward_batch_id: Some(0),
+            unallocated_interest_mint_index: Some(BTreeMap::new()),
             is_initialized: false,
             pool_events: Some(Vec::new()),
             next_event_id: Some(0),
@@ -197,6 +223,8 @@ impl Default for StabilityPoolState {
             next_pending_refund_id: Some(0),
             last_deposit_transfer_created_at: None,
             pending_deposit_intents: Some(BTreeMap::new()),
+            processed_interest_mint_blocks: Some(BTreeSet::new()),
+            processed_interest_mint_block_high_watermark: None,
         }
     }
 }
@@ -289,25 +317,27 @@ impl StabilityPoolState {
         amount: u64,
         now: u64,
     ) -> Result<u64, StabilityPoolError> {
-        if let Some(existing) =
-            self.unallocated_interest_forward_batches
-                .as_ref()
-                .and_then(|batches| {
-                    batches.iter().find_map(|(id, batch)| {
-                        batch
-                            .source_mint_blocks
-                            .contains(&source_mint_block)
-                            .then_some(*id)
-                    })
-                })
-        {
-            return Ok(existing);
+        let index = self.unallocated_interest_mint_index.as_ref()
+            .ok_or(StabilityPoolError::SystemBusy)?;
+        if let Some(existing) = index.get(&source_mint_block) {
+            return Ok(*existing);
+        }
+        if index.len() >= MAX_UNALLOCATED_INTEREST_MINT_RECEIPTS {
+            return Err(StabilityPoolError::SystemBusy);
         }
         let treasury = self.interest_treasury;
         let batches = self
             .unallocated_interest_forward_batches
             .get_or_insert_with(BTreeMap::new);
-        if let Some((id, batch)) = batches.iter_mut().find(|(_, batch)| {
+        // The lifetime receipt index caps historical source IDs at the same
+        // bound, so this coalescing search can never walk unbounded history.
+        if batches.len() > MAX_UNALLOCATED_INTEREST_MINT_RECEIPTS {
+            return Err(StabilityPoolError::SystemBusy);
+        }
+        if let Some((id, batch)) = batches
+            .iter_mut()
+            .take(MAX_UNALLOCATED_INTEREST_MINT_RECEIPTS)
+            .find(|(_, batch)| {
             batch.token_ledger == token_ledger
                 && batch.treasury == treasury
                 && batch.transfer_block_index.is_none()
@@ -315,9 +345,14 @@ impl StabilityPoolState {
                 // has made no ledger call; keep accumulating that dust.
                 && (batch.fee.is_none() || batch.gross_amount <= batch.fee.unwrap_or(0))
                 && batch.source_mint_blocks.len() < 1_000
-        }) {
+            })
+        {
             batch.source_mint_blocks.push(source_mint_block);
             batch.gross_amount = batch.gross_amount.saturating_add(amount);
+            self.unallocated_interest_mint_index
+                .as_mut()
+                .expect("checked receipt index above")
+                .insert(source_mint_block, *id);
             return Ok(*id);
         }
         let id = self.next_unallocated_interest_forward_batch_id.unwrap_or(0);
@@ -338,7 +373,37 @@ impl StabilityPoolState {
                 last_error: None,
             },
         );
+        self.unallocated_interest_mint_index
+            .as_mut()
+            .expect("checked receipt index above")
+            .insert(source_mint_block, id);
         Ok(id)
+    }
+
+    /// Rebuilds the new source-receipt index once after upgrading a snapshot
+    /// written before the index existed. Work is bounded by the maximum index
+    /// capacity; oversized history disables new receipt acceptance safely.
+    pub fn initialize_unallocated_interest_mint_index(&mut self) {
+        if self.unallocated_interest_mint_index.is_some() {
+            return;
+        }
+        let mut index = BTreeMap::new();
+        if let Some(batches) = &self.unallocated_interest_forward_batches {
+            if batches.len() > MAX_UNALLOCATED_INTEREST_MINT_RECEIPTS {
+                self.unallocated_interest_mint_index = None;
+                return;
+            }
+            for (batch_id, batch) in batches {
+                for source_mint_block in &batch.source_mint_blocks {
+                    index.insert(*source_mint_block, *batch_id);
+                    if index.len() > MAX_UNALLOCATED_INTEREST_MINT_RECEIPTS {
+                        self.unallocated_interest_mint_index = None;
+                        return;
+                    }
+                }
+            }
+        }
+        self.unallocated_interest_mint_index = Some(index);
     }
 
     pub fn unallocated_interest_forward_batch(
@@ -913,6 +978,54 @@ impl StabilityPoolState {
                     .map(|ct| self.position_opted_in_for(pos, ct))
                     .unwrap_or(true)
         })
+    }
+
+    pub fn interest_mint_receipt_status(
+        &self,
+        source_mint_block: u64,
+    ) -> InterestMintReceiptStatus {
+        if let Some(index) = self.unallocated_interest_mint_index.as_ref() {
+            if let Some(batch_id) = index.get(&source_mint_block) {
+                return InterestMintReceiptStatus::PendingForward(*batch_id);
+            }
+        }
+        if self.processed_interest_mint_blocks.as_ref()
+            .is_some_and(|blocks| blocks.contains(&source_mint_block))
+        {
+            return InterestMintReceiptStatus::Duplicate;
+        }
+        if self.unallocated_interest_mint_index.is_none() {
+            return InterestMintReceiptStatus::OutsideReplayWindow;
+        }
+        if let Some(high) = self.processed_interest_mint_block_high_watermark {
+            let floor = high.saturating_sub(MAX_PROCESSED_INTEREST_MINT_BLOCKS as u64 - 1);
+            if source_mint_block < floor {
+                return InterestMintReceiptStatus::OutsideReplayWindow;
+            }
+        }
+        InterestMintReceiptStatus::New
+    }
+
+    /// Atomically records a newly accepted source mint receipt. Caller must
+    /// persist this in the same state mutation as applying the distribution.
+    pub fn record_interest_mint_receipt(
+        &mut self,
+        source_mint_block: u64,
+    ) -> InterestMintReceiptStatus {
+        match self.interest_mint_receipt_status(source_mint_block) {
+            InterestMintReceiptStatus::New => {}
+            status => return status,
+        }
+        let blocks = self.processed_interest_mint_blocks.get_or_insert_with(BTreeSet::new);
+        blocks.insert(source_mint_block);
+        let high = self.processed_interest_mint_block_high_watermark
+            .map_or(source_mint_block, |previous| previous.max(source_mint_block));
+        self.processed_interest_mint_block_high_watermark = Some(high);
+        let floor = high.saturating_sub(MAX_PROCESSED_INTEREST_MINT_BLOCKS as u64 - 1);
+        while blocks.first().is_some_and(|oldest| *oldest < floor) {
+            if let Some(oldest) = blocks.first().copied() { blocks.remove(&oldest); }
+        }
+        InterestMintReceiptStatus::New
     }
 
     pub fn process_withdrawal(
@@ -3114,6 +3227,7 @@ impl From<StabilityPoolStateV1> for StabilityPoolState {
             interest_treasury: None,
             unallocated_interest_forward_batches: Some(BTreeMap::new()),
             next_unallocated_interest_forward_batch_id: Some(0),
+            unallocated_interest_mint_index: Some(BTreeMap::new()),
             is_initialized: v1.is_initialized,
             pool_events: v1.pool_events,
             next_event_id: v1.next_event_id,
@@ -3121,6 +3235,8 @@ impl From<StabilityPoolStateV1> for StabilityPoolState {
             next_pending_refund_id: Some(0),
             last_deposit_transfer_created_at: None,
             pending_deposit_intents: Some(BTreeMap::new()),
+            processed_interest_mint_blocks: Some(BTreeSet::new()),
+            processed_interest_mint_block_high_watermark: None,
         }
     }
 }
@@ -5693,6 +5809,33 @@ mod tests {
     }
 
     #[test]
+    fn interest_mint_receipt_prevents_duplicate_distribution_and_bounds_replay() {
+        let mut state = test_state();
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
+        let apply_notification = |state: &mut StabilityPoolState, block| {
+            if state.record_interest_mint_receipt(block) == InterestMintReceiptStatus::New {
+                state.distribute_interest_revenue(icusd_ledger(), 10_00000000, None);
+            }
+        };
+
+        apply_notification(&mut state, 55);
+        apply_notification(&mut state, 55);
+        assert_eq!(state.deposits[&user_a()].stablecoin_balances[&icusd_ledger()], 110_00000000);
+        assert_eq!(state.total_interest_received_e8s, Some(10_00000000));
+
+        let bytes = Encode!(&state).expect("encode state");
+        let mut restored = try_decode_state(&bytes).expect("decode state after upgrade");
+        assert_eq!(restored.interest_mint_receipt_status(55), InterestMintReceiptStatus::Duplicate);
+        apply_notification(&mut restored, 55);
+        assert_eq!(restored.deposits[&user_a()].stablecoin_balances[&icusd_ledger()], 110_00000000);
+        assert_eq!(restored.total_interest_received_e8s, Some(10_00000000));
+
+        let high = 55 + MAX_PROCESSED_INTEREST_MINT_BLOCKS as u64;
+        assert_eq!(restored.record_interest_mint_receipt(high), InterestMintReceiptStatus::New);
+        assert_eq!(restored.interest_mint_receipt_status(55), InterestMintReceiptStatus::OutsideReplayWindow);
+    }
+
+    #[test]
     fn user_interest_eligibility_matches_native_opt_in_policy() {
         let mut state = test_state();
         add_deposit_direct(&mut state, user_a(), icusd_ledger(), 100_00000000);
@@ -5990,6 +6133,34 @@ mod tests {
     }
 
     #[test]
+    fn cl10_forward_receipt_index_rebuilds_for_old_batches_and_caps_new_history() {
+        let mut state = test_state();
+        let batch = state
+            .queue_unallocated_interest_forward_at(44, icusd_ledger(), 50, 1)
+            .expect("queue receipt");
+        state.unallocated_interest_mint_index = None;
+        assert_eq!(
+            state.interest_mint_receipt_status(44),
+            InterestMintReceiptStatus::OutsideReplayWindow,
+            "missing index fails closed before migration",
+        );
+        state.initialize_unallocated_interest_mint_index();
+        assert_eq!(
+            state.interest_mint_receipt_status(44),
+            InterestMintReceiptStatus::PendingForward(batch),
+            "upgrade migration restores O(log n) lookup",
+        );
+
+        let mut full = test_state();
+        let index = full.unallocated_interest_mint_index.as_mut().unwrap();
+        index.extend((0..MAX_UNALLOCATED_INTEREST_MINT_RECEIPTS as u64).map(|block| (block, 0)));
+        assert!(matches!(
+            full.queue_unallocated_interest_forward_at(20_000, icusd_ledger(), 1, 2),
+            Err(StabilityPoolError::SystemBusy),
+        ), "bounded receipt history holds new backend notifications at capacity");
+    }
+
+    #[test]
     fn ic_s_001_pending_refund_cap_drops_oldest() {
         let mut state = test_state();
         for i in 0..MAX_PENDING_REFUNDS {
@@ -6065,6 +6236,7 @@ mod tests {
             "pending refunds must start empty after a v1 upgrade",
         );
         assert_eq!(decoded.next_pending_refund_id.unwrap_or(0), 0);
+        assert!(decoded.unallocated_interest_mint_index.unwrap_or_default().is_empty());
         assert!(decoded.last_deposit_transfer_created_at.is_none());
         assert!(decoded
             .pending_deposit_intents

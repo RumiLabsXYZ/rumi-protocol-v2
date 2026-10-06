@@ -9,6 +9,8 @@
 use candid::{CandidType, Deserialize, Principal};
 use ic_canister_log::log;
 use serde::Serialize;
+use std::cell::RefCell;
+use std::collections::BTreeSet;
 
 use crate::logs::INFO;
 use crate::management;
@@ -45,6 +47,47 @@ pub enum AssetType {
 enum StabilityPoolInterestNotificationResult {
     Ok,
     Err(candid::IDLValue),
+}
+
+type InterestNotificationKey = (Principal, Principal, u64);
+
+thread_local! {
+    /// Prevents the inline post-mint delivery and timer flush from issuing the
+    /// same inter-canister notification concurrently in one backend instance.
+    static IN_FLIGHT_INTEREST_NOTIFICATIONS: RefCell<BTreeSet<InterestNotificationKey>> =
+        RefCell::new(BTreeSet::new());
+}
+
+struct InterestNotificationGuard(InterestNotificationKey);
+
+fn has_receipt_safe_delivery_protocol(
+    notification: &crate::state::PendingStabilityPoolInterestNotification,
+) -> bool {
+    notification.receipt_protocol_version == Some(1)
+}
+
+fn notification_delivery_acknowledged(
+    notification: &crate::state::PendingStabilityPoolInterestNotification,
+    delivered: bool,
+) -> bool {
+    delivered && has_receipt_safe_delivery_protocol(notification)
+}
+
+impl InterestNotificationGuard {
+    fn try_new(key: InterestNotificationKey) -> Option<Self> {
+        IN_FLIGHT_INTEREST_NOTIFICATIONS.with(|in_flight| {
+            let inserted = in_flight.borrow_mut().insert(key);
+            inserted.then(|| Self(key))
+        })
+    }
+}
+
+impl Drop for InterestNotificationGuard {
+    fn drop(&mut self) {
+        IN_FLIGHT_INTEREST_NOTIFICATIONS.with(|in_flight| {
+            in_flight.borrow_mut().remove(&self.0);
+        });
+    }
 }
 
 /// Mirrors `rumi_treasury::types::DepositArgs`.
@@ -285,6 +328,7 @@ pub async fn mint_interest_to_stability_pool(
                 amount_e8s: interest_share.to_u64(),
                 collateral_type,
                 source_mint_block: block_index,
+                receipt_protocol_version: Some(1),
             };
             // Persist BEFORE the await. A failed call must be retried as a
             // notification, never by minting a second copy of the interest.
@@ -292,7 +336,10 @@ pub async fn mint_interest_to_stability_pool(
                 s.pending_stability_pool_interest_notifications
                     .insert(block_index, notification.clone());
             });
-            if deliver_stability_pool_interest_notification(&notification).await {
+            if notification_delivery_acknowledged(
+                &notification,
+                deliver_stability_pool_interest_notification(&notification).await,
+            ) {
                 crate::state::mutate_state(|s| {
                     s.pending_stability_pool_interest_notifications
                         .remove(&block_index);
@@ -315,6 +362,24 @@ pub async fn mint_interest_to_stability_pool(
 async fn deliver_stability_pool_interest_notification(
     notification: &crate::state::PendingStabilityPoolInterestNotification,
 ) -> bool {
+    if !has_receipt_safe_delivery_protocol(notification) {
+        log!(
+            INFO,
+            "[treasury] holding pre-receipt Stability Pool interest notification {} for operator reconciliation",
+            notification.source_mint_block,
+        );
+        return false;
+    }
+    let key = (
+        notification.pool_principal,
+        notification.token_ledger,
+        notification.source_mint_block,
+    );
+    let Some(_guard) = InterestNotificationGuard::try_new(key) else {
+        // Leave the durable row untouched. The active delivery or a later
+        // timer tick will resolve this receipt.
+        return false;
+    };
     let result: Result<(StabilityPoolInterestNotificationResult,), _> = ic_cdk::call(
         notification.pool_principal,
         "receive_interest_revenue_v2",
@@ -349,6 +414,54 @@ async fn deliver_stability_pool_interest_notification(
     }
 }
 
+#[cfg(test)]
+mod interest_notification_guard_tests {
+    use super::{
+        has_receipt_safe_delivery_protocol, notification_delivery_acknowledged,
+        InterestNotificationGuard,
+    };
+    use candid::Principal;
+
+    #[test]
+    fn inline_and_timer_delivery_share_one_in_flight_receipt() {
+        let key = (Principal::from_slice(&[1]), Principal::from_slice(&[2]), 77);
+        let inline = InterestNotificationGuard::try_new(key).expect("first delivery acquires");
+        assert!(InterestNotificationGuard::try_new(key).is_none());
+        drop(inline);
+        assert!(InterestNotificationGuard::try_new(key).is_some());
+    }
+
+    #[test]
+    fn legacy_outbox_rows_remain_held_until_operator_reconciliation() {
+        use std::collections::BTreeMap;
+
+        let legacy = crate::state::PendingStabilityPoolInterestNotification {
+            pool_principal: Principal::from_slice(&[1]),
+            token_ledger: Principal::from_slice(&[2]),
+            amount_e8s: 99,
+            collateral_type: Principal::from_slice(&[3]),
+            source_mint_block: 44,
+            receipt_protocol_version: None,
+        };
+        let current = crate::state::PendingStabilityPoolInterestNotification {
+            receipt_protocol_version: Some(1),
+            ..legacy.clone()
+        };
+        assert!(!has_receipt_safe_delivery_protocol(&legacy));
+        assert!(has_receipt_safe_delivery_protocol(&current));
+        assert!(
+            !notification_delivery_acknowledged(&legacy, true),
+            "a legacy acknowledgement can never remove a potentially already-applied row",
+        );
+        let mut pending = BTreeMap::from([(legacy.source_mint_block, legacy.clone())]);
+        if notification_delivery_acknowledged(&legacy, false) {
+            pending.remove(&legacy.source_mint_block);
+        }
+        assert!(pending.contains_key(&legacy.source_mint_block), "upgrade leaves the legacy outbox row held");
+        assert_eq!(legacy.source_mint_block, 44, "held row retains its source receipt for inspection");
+    }
+}
+
 /// Retry post-mint notifications. The SP's v2 receipt key makes this safe if
 /// a prior call committed but its response was lost.
 pub async fn flush_pending_stability_pool_interest_notifications() {
@@ -359,7 +472,10 @@ pub async fn flush_pending_stability_pool_interest_notifications() {
             .collect()
     });
     for notification in pending {
-        if deliver_stability_pool_interest_notification(&notification).await {
+        if notification_delivery_acknowledged(
+            &notification,
+            deliver_stability_pool_interest_notification(&notification).await,
+        ) {
             crate::state::mutate_state(|s| {
                 s.pending_stability_pool_interest_notifications
                     .remove(&notification.source_mint_block);

@@ -982,6 +982,90 @@ fn same_round_closed_3usd_route_does_not_alias_ordinary_deposit_pull() {
     );
 }
 
+/// Backend inline delivery and its timer retry can overlap or replay after a
+/// lost response. The source mint block must credit interest once and survive
+/// an SP upgrade so the same backend receipt remains acknowledged without a
+/// second depositor credit.
+#[test]
+fn test_interest_v2_duplicate_receipt_is_idempotent_across_upgrade() {
+    let env = setup_test_env();
+    let deposit_amount = 100_00000000u64;
+    let deposit = env.pic.update_call(
+        env.sp_id,
+        env.test_user,
+        "deposit",
+        encode_args((env.icusd_ledger, deposit_amount)).unwrap(),
+    ).expect("deposit call");
+    match deposit {
+        WasmResult::Reply(bytes) => decode_one::<Result<(), StabilityPoolError>>(&bytes)
+            .unwrap().expect("deposit succeeds"),
+        WasmResult::Reject(message) => panic!("deposit rejected: {message}"),
+    }
+
+    let event_count_before = match env.pic.query_call(env.sp_id, Principal::anonymous(), "get_pool_event_count", encode_args(()).unwrap()).unwrap() {
+        WasmResult::Reply(bytes) => decode_one::<u64>(&bytes).unwrap(),
+        WasmResult::Reject(message) => panic!("event count query rejected: {message}"),
+    };
+
+    let notification = || encode_args((env.icusd_ledger, 10_00000000u64, None::<Principal>, 42u64)).unwrap();
+    for _ in 0..2 {
+        let result = env.pic.update_call(env.sp_id, env.protocol_id, "receive_interest_revenue_v2", notification())
+            .expect("interest notification call");
+        match result {
+            WasmResult::Reply(bytes) => decode_one::<Result<(), StabilityPoolError>>(&bytes)
+                .unwrap().expect("notification acknowledged"),
+            WasmResult::Reject(message) => panic!("notification rejected: {message}"),
+        }
+    }
+
+    let legacy = env.pic.update_call(
+        env.sp_id,
+        env.protocol_id,
+        "receive_interest_revenue",
+        encode_args((env.icusd_ledger, 20_00000000u64, None::<Principal>)).unwrap(),
+    ).expect("legacy interest notification call");
+    match legacy {
+        WasmResult::Reply(bytes) => assert!(matches!(
+            decode_one::<Result<(), StabilityPoolError>>(&bytes).unwrap(),
+            Err(StabilityPoolError::SystemBusy),
+        ), "legacy endpoint must fail closed without a source mint block"),
+        WasmResult::Reject(message) => panic!("legacy interest notification rejected: {message}"),
+    }
+    let credited = get_user_position(&env.pic, env.sp_id, env.test_user).unwrap();
+    assert_eq!(*credited.stablecoin_balances.iter().find(|(ledger, _)| **ledger == env.icusd_ledger).unwrap().1, deposit_amount + 10_00000000);
+    assert_eq!(credited.total_interest_earned_e8s, 10_00000000);
+    let event_count_after = match env.pic.query_call(env.sp_id, Principal::anonymous(), "get_pool_event_count", encode_args(()).unwrap()).unwrap() {
+        WasmResult::Reply(bytes) => decode_one::<u64>(&bytes).unwrap(),
+        WasmResult::Reject(message) => panic!("event count query rejected: {message}"),
+    };
+    assert_eq!(event_count_after, event_count_before + 1, "one source receipt emits one interest event");
+
+    let wasm = stability_pool_wasm();
+    let upgrade_args = StabilityPoolInitArgs {
+        protocol_canister_id: env.protocol_id,
+        authorized_admins: vec![env.admin],
+    };
+    env.pic.upgrade_canister(env.sp_id, wasm, encode_one(upgrade_args).unwrap(), None)
+        .expect("upgrade stability pool");
+    let replay = env.pic.update_call(env.sp_id, env.protocol_id, "receive_interest_revenue_v2", notification())
+        .expect("post-upgrade replay call");
+    match replay {
+        WasmResult::Reply(bytes) => decode_one::<Result<(), StabilityPoolError>>(&bytes)
+            .unwrap().expect("replay acknowledged"),
+        WasmResult::Reject(message) => panic!("replay rejected: {message}"),
+    }
+    let after_upgrade = get_user_position(&env.pic, env.sp_id, env.test_user).unwrap();
+    assert_eq!(*after_upgrade.stablecoin_balances.iter().find(|(ledger, _)| **ledger == env.icusd_ledger).unwrap().1, deposit_amount + 10_00000000);
+    assert_eq!(after_upgrade.total_interest_earned_e8s, 10_00000000);
+    let status = get_pool_status(&env.pic, env.sp_id);
+    assert_eq!(status.total_interest_received_e8s, 10_00000000);
+    let event_count_after_upgrade = match env.pic.query_call(env.sp_id, Principal::anonymous(), "get_pool_event_count", encode_args(()).unwrap()).unwrap() {
+        WasmResult::Reply(bytes) => decode_one::<u64>(&bytes).unwrap(),
+        WasmResult::Reject(message) => panic!("event count query rejected: {message}"),
+    };
+    assert_eq!(event_count_after_upgrade, event_count_after);
+}
+
 /// Reconciliation observability: after a clean deposit, the pool's tracked
 /// aggregate matches its live ledger balance, `get_ledger_reconciliation`
 /// reports it healthy, and the endpoint is admin-gated.

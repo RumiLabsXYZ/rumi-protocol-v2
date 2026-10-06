@@ -935,6 +935,14 @@ type PendingThreeUsdRefund = record {
   op_nonce : nat;
   stability_pool : principal;
 };
+type PendingStabilityPoolInterestNotification = record {
+  pool_principal : principal;
+  token_ledger : principal;
+  amount_e8s : nat64;
+  collateral_type : principal;
+  source_mint_block : nat64;
+  receipt_protocol_version : opt nat8;
+};
 type PerCollateralRateCurve = record {
   markers : vec record { float64; float64 };
   base_rate : float64;
@@ -1531,6 +1539,10 @@ service : (ProtocolArg) -> {
   get_pending_amm1_donations_count : () -> (nat64) query;
   get_pending_chain_burn_aging : () -> (vec PendingChainBurnAging) query;
   get_pending_stability_pool_interest_notification_count : () -> (nat64) query;
+  get_pending_stability_pool_interest_notifications : (opt nat64, nat64) -> (variant {
+      Ok : vec PendingStabilityPoolInterestNotification;
+      Err : ProtocolError;
+    }) query;
   get_price_pusher_allowed : () -> (vec record { nat32; text }) query;
   get_price_pusher_principal : () -> (opt principal) query;
   get_protocol_3usd_reserves : () -> (nat64) query;
