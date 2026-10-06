@@ -505,14 +505,29 @@ pub fn collateral_to_whole_tokens(amount: u64, decimals: u8) -> Decimal {
 /// Given a USD value (as ICUSD e8s), a price per whole token, and decimals,
 /// returns the raw token amount in native precision.
 /// Example: 10 icUSD at $5/token with 8 decimals = 2 * 10^8 = 200_000_000 raw units.
-pub fn icusd_to_collateral_amount(icusd_value: ICUSD, price_usd: Decimal, decimals: u8) -> u64 {
-    if price_usd.is_zero() {
-        return 0;
+/// Returns `None` when the conversion is undefined or the raw amount cannot be
+/// represented as a `u64`. Financial decision points must use this checked
+/// form rather than interpreting an overflow as zero collateral.
+pub fn try_icusd_to_collateral_amount(
+    icusd_value: ICUSD,
+    price_usd: Decimal,
+    decimals: u8,
+) -> Option<u64> {
+    if price_usd <= Decimal::ZERO {
+        return None;
     }
+    let raw_unit_scale = 10u64.checked_pow(u32::from(decimals))?;
     let usd_value = Decimal::from(icusd_value.to_u64()) / dec!(100_000_000);
     let whole_tokens = usd_value / price_usd;
-    let raw_amount = whole_tokens * Decimal::from(10u64.pow(decimals as u32));
-    raw_amount.to_u64().unwrap_or(0)
+    let raw_amount = whole_tokens * Decimal::from(raw_unit_scale);
+    raw_amount.to_u64()
+}
+
+/// Compatibility wrapper for historical callers whose zero fallback is part
+/// of existing replay/redemption behavior. New financial decisions should use
+/// `try_icusd_to_collateral_amount` and handle failure explicitly.
+pub fn icusd_to_collateral_amount(icusd_value: ICUSD, price_usd: Decimal, decimals: u8) -> u64 {
+    try_icusd_to_collateral_amount(icusd_value, price_usd, decimals).unwrap_or(0)
 }
 
 /// Checked form for paths that have already accepted an external payment.

@@ -3623,8 +3623,16 @@ fn xrp_sp_absorb_sizing(
     }
 
     let liquidation_amount = ICUSD::new(expected_icusd_burn_e8s);
-    let collateral_raw =
-        crate::numeric::icusd_to_collateral_amount(liquidation_amount, price, cfg.decimals);
+    let collateral_raw = crate::numeric::try_icusd_to_collateral_amount(
+        liquidation_amount,
+        price,
+        cfg.decimals,
+    )
+    .ok_or_else(|| {
+        ProtocolError::GenericError(
+            "Cannot size native-XRP absorb collateral: conversion is unrepresentable".to_string(),
+        )
+    })?;
     let collateral_with_bonus =
         ICP::from(collateral_raw) * state.get_liquidation_bonus_for(&vault.collateral_type);
     let total_to_seize = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
@@ -7151,11 +7159,17 @@ pub async fn withdraw_partial_collateral(vault_id: u64, amount: u64) -> Result<u
             }
         });
         let min_collateral_value: ICUSD = vault.borrowed_icusd_amount * min_ratio;
-        let min_collateral_raw = crate::numeric::icusd_to_collateral_amount(
+        let min_collateral_raw = crate::numeric::try_icusd_to_collateral_amount(
             min_collateral_value,
             collateral_price,
             config_decimals,
-        );
+        )
+        .ok_or_else(|| {
+            ProtocolError::GenericError(
+                "Cannot safely calculate the minimum collateral required for this debt."
+                    .to_string(),
+            )
+        })?;
         let min_collateral = ICP::from(min_collateral_raw);
 
         if vault_collateral <= min_collateral {
@@ -7753,6 +7767,13 @@ pub async fn liquidate_vault_partial(
         });
     }
 
+    if collateral_to_liquidator == ICP::new(0) || total_to_seize == ICP::new(0) {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(
+            "Liquidation would produce no collateral payout".to_string(),
+        ));
+    }
+
     log!(INFO,
         "[liquidate_vault_partial] Vault #{}: liquidating {} icUSD (max: {}), getting {} ICP collateral (protocol fee: {} ICP)",
         vault_id,
@@ -8115,11 +8136,15 @@ pub async fn liquidate_vault_partial_with_stable(
 
                     let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
                     let protocol_share = s.get_liquidation_protocol_share();
-                    let collateral_raw = crate::numeric::icusd_to_collateral_amount(
+                    let collateral_raw = crate::numeric::try_icusd_to_collateral_amount(
                         actual_liquidation_amount,
                         price,
                         decimals,
-                    );
+                    )
+                    .ok_or_else(|| {
+                        "Cannot safely size liquidation collateral: conversion is unrepresentable"
+                            .to_string()
+                    })?;
                     let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
                     let total_to_seize =
                         collateral_with_bonus.min(ICP::from(vault.collateral_amount));
@@ -8166,6 +8191,13 @@ pub async fn liquidate_vault_partial_with_stable(
         return Err(ProtocolError::AmountTooLow {
             minimum_amount: read_state(|s| s.min_icusd_amount).to_u64(),
         });
+    }
+
+    if collateral_to_liquidator == ICP::new(0) || total_to_seize == ICP::new(0) {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(
+            "Liquidation would produce no collateral payout".to_string(),
+        ));
     }
 
     log!(INFO,
@@ -8456,6 +8488,54 @@ pub async fn liquidate_vault_partial_with_stable(
         stable_pulled_e6s: Some(total_pull_e6s), // SP-110: base + repay-fee surcharge
         xrp_claim_id,
     })
+}
+
+fn already_burned_liquidation_seizure(
+    debt: ICUSD,
+    price: Decimal,
+    decimals: u8,
+    liq_bonus: Ratio,
+    protocol_share: Ratio,
+    vault_collateral: u64,
+) -> (ICP, u64) {
+    match crate::numeric::try_icusd_to_collateral_amount(debt, price, decimals) {
+        Some(collateral_raw) => {
+            let total_to_seize =
+                (ICP::from(collateral_raw) * liq_bonus).min(ICP::from(vault_collateral));
+            let bonus_portion = total_to_seize.to_u64().saturating_sub(collateral_raw);
+            let protocol_cut = (rust_decimal::Decimal::from(bonus_portion) * protocol_share.0)
+                .to_u64()
+                .unwrap_or(0);
+            (total_to_seize, protocol_cut)
+        }
+        // icUSD has already been burned by the Stability Pool. An
+        // unrepresentable theoretical seize therefore consumes all
+        // collateral rather than rejecting the write-down or converting the
+        // overflow into a zero-collateral seizure.
+        None => (ICP::from(vault_collateral), 0),
+    }
+}
+
+#[cfg(test)]
+mod cl16_already_burned_seizure_tests {
+    use super::already_burned_liquidation_seizure;
+    use crate::numeric::{ICP, ICUSD, Ratio};
+    use rust_decimal_macros::dec;
+
+    #[test]
+    fn unrepresentable_already_burned_seizure_clamps_to_all_vault_collateral() {
+        let available = 42_000_000u64;
+        let (seized, protocol_cut) = already_burned_liquidation_seizure(
+            ICUSD::new(100_000_000), // 1 icUSD
+            dec!(0.05),
+            18,
+            Ratio::from(dec!(1.15)),
+            Ratio::from(dec!(0.10)),
+            available,
+        );
+        assert_eq!(seized, ICP::new(available));
+        assert_eq!(protocol_cut, 0, "overflow clamp carries no bonus fee");
+    }
 }
 
 /// Liquidate a vault when the debt has already been covered externally.
@@ -8814,20 +8894,14 @@ async fn liquidate_vault_debt_already_burned_inner(
                     let protocol_share = s.get_liquidation_protocol_share();
                     let minimum_liquidation_ratio =
                         s.get_min_liquidation_ratio_for(&vault.collateral_type);
-                    let collateral_raw = crate::numeric::icusd_to_collateral_amount(
+                    let (total_to_seize, protocol_cut) = already_burned_liquidation_seizure(
                         actual_liquidation_amount,
                         price,
                         decimals,
+                        liq_bonus,
+                        protocol_share,
+                        vault.collateral_amount,
                     );
-                    let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
-                    let total_to_seize =
-                        collateral_with_bonus.min(ICP::from(vault.collateral_amount));
-
-                    let bonus_portion = total_to_seize.to_u64().saturating_sub(collateral_raw);
-                    let protocol_cut = (rust_decimal::Decimal::from(bonus_portion)
-                        * protocol_share.0)
-                        .to_u64()
-                        .unwrap_or(0);
                     let collateral_to_liquidator =
                         ICP::from(total_to_seize.to_u64() - protocol_cut);
 
@@ -9436,13 +9510,28 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         protocol_cut,
         excess_collateral,
         is_partial_liquidation,
+        collateral_conversion_succeeded,
     ) = read_state(|s| {
         let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
         let protocol_share = s.get_liquidation_protocol_share();
         let debt = s.effective_liquidation_amount(&vault, collateral_price_usd, None);
         let is_partial = debt < vault.borrowed_icusd_amount;
-        let collateral_raw =
-            crate::numeric::icusd_to_collateral_amount(debt, collateral_price, config_decimals);
+        let collateral_raw = crate::numeric::try_icusd_to_collateral_amount(
+            debt,
+            collateral_price,
+            config_decimals,
+        );
+        let Some(collateral_raw) = collateral_raw else {
+            return (
+                debt,
+                ICP::new(0),
+                ICP::new(0),
+                0,
+                ICP::new(0),
+                is_partial,
+                false,
+            );
+        };
         let total_to_seize = (ICP::from(collateral_raw) * liq_bonus).min(vault_collateral);
         // Split: protocol gets a share of the bonus portion (liquidator's profit)
         let bonus_portion = total_to_seize.to_u64().saturating_sub(collateral_raw);
@@ -9465,8 +9554,24 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
             protocol_cut,
             excess,
             is_partial,
+            true,
         )
     });
+
+    if !collateral_conversion_succeeded {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(
+            "Cannot safely size liquidation collateral: conversion is unrepresentable".to_string(),
+        ));
+    }
+    if debt_amount > ICUSD::new(0)
+        && (collateral_to_liquidator == ICP::new(0) || total_to_seize == ICP::new(0))
+    {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(
+            "Liquidation would produce no collateral payout".to_string(),
+        ));
+    }
 
     log!(INFO,
         "[liquidate_vault] Vault #{}: debt_to_repay={} icUSD, liquidator gets {} ICP (protocol fee: {} ICP), excess={} ICP, partial={}",
@@ -9539,8 +9644,13 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
         // the liquidator, even if an admin setter (e.g.
         // `set_dust_liquidation_threshold`) landed during the await.
         // liquidate_vault returns the interest share of the debt reduction.
-        let interest_share =
-            s.liquidate_vault(vault_id, mode, collateral_price_usd, Some(debt_amount));
+        let interest_share = s.liquidate_vault_with_pinned_seize(
+            vault_id,
+            mode,
+            collateral_price_usd,
+            Some(debt_amount),
+            total_to_seize.to_u64(),
+        );
 
         // Wave-10 LIQ-008: append the gross debt cleared to the rolling-
         // window log for the mass-liquidation circuit breaker.
@@ -9588,6 +9698,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
             liquidator: Some(caller),
             timestamp: Some(ic_cdk::api::time()),
             repay_amount: Some(debt_amount),
+            collateral_seized_raw: Some(total_to_seize.to_u64()),
         };
         crate::storage::record_event(&event);
 
@@ -10289,11 +10400,17 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
             s.get_liquidation_protocol_share(),
         )
     });
-    let collateral_raw = crate::numeric::icusd_to_collateral_amount(
+    let collateral_raw = crate::numeric::try_icusd_to_collateral_amount(
         liquidator_payment,
         collateral_price,
         config_decimals,
     );
+    let Some(collateral_raw) = collateral_raw else {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(
+            "Cannot safely size liquidation collateral: conversion is unrepresentable".to_string(),
+        ));
+    };
     let icp_with_bonus = ICP::from(collateral_raw) * liq_bonus;
     let total_to_seize = icp_with_bonus.min(ICP::from(vault.collateral_amount));
 
@@ -10303,6 +10420,13 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         .to_u64()
         .unwrap_or(0);
     let collateral_to_liquidator = ICP::from(total_to_seize.to_u64() - protocol_cut);
+
+    if collateral_to_liquidator == ICP::new(0) || total_to_seize == ICP::new(0) {
+        guard_principal.fail();
+        return Err(ProtocolError::GenericError(
+            "Liquidation would produce no collateral payout".to_string(),
+        ));
+    }
 
     log!(INFO,
         "[partial_liquidate_vault] Vault #{}: liquidator pays {} icUSD, gets {} ICP (protocol fee: {} ICP, bonus: {})",

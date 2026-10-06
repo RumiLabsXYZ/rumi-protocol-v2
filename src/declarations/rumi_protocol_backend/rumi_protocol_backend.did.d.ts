@@ -948,6 +948,7 @@ export type Event = { 'set_borrowing_fee' : { 'rate' : string } } |
       'repay_amount' : [] | [bigint],
       'timestamp' : [] | [bigint],
       'liquidator' : [] | [Principal],
+      'collateral_seized_raw' : [] | [bigint],
     }
   } |
   {

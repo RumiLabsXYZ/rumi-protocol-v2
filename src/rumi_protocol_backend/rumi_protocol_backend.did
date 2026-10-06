@@ -787,6 +787,7 @@ type Event = variant {
     repay_amount : opt nat64;
     timestamp : opt nat64;
     liquidator : opt principal;
+    collateral_seized_raw : opt nat64;
   };
   set_collateral_borrow_threshold : record {
     borrow_threshold_ratio : text;

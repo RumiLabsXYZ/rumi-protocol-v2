@@ -11252,6 +11252,11 @@ async fn bot_claim_liquidation_inner(
                         vault.collateral_type
                     ))
                 })?;
+            if collateral_to_seize == ICP::new(0) {
+                return Err(ProtocolError::GenericError(
+                    "Bot liquidation would produce no collateral payout".to_string(),
+                ));
+            }
 
             Ok((
                 collateral_price_usd,
@@ -12731,6 +12736,11 @@ async fn dev_force_bot_liquidate(vault_id: u64) -> Result<BotLiquidationResult, 
             let liq_bonus = s.get_liquidation_bonus_for(&vault.collateral_type);
             let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
             let collateral_to_seize = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
+            if collateral_to_seize == ICP::new(0) {
+                return Err(ProtocolError::GenericError(
+                    "Bot liquidation would produce no collateral payout".to_string(),
+                ));
+            }
 
             Ok::<_, ProtocolError>((
                 collateral_price_usd,
@@ -12900,6 +12910,11 @@ async fn dev_force_partial_bot_liquidate(
             ))?;
             let collateral_with_bonus = ICP::from(collateral_raw) * liq_bonus;
             let collateral_to_seize = collateral_with_bonus.min(ICP::from(vault.collateral_amount));
+            if collateral_to_seize == ICP::new(0) {
+                return Err(ProtocolError::GenericError(
+                    "Bot liquidation would produce no collateral payout".to_string(),
+                ));
+            }
 
             Ok::<_, ProtocolError>((
                 collateral_price_usd,

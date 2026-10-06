@@ -999,6 +999,7 @@ export const idlFactory = ({ IDL }) => {
       'repay_amount' : IDL.Opt(IDL.Nat64),
       'timestamp' : IDL.Opt(IDL.Nat64),
       'liquidator' : IDL.Opt(IDL.Principal),
+      'collateral_seized_raw' : IDL.Opt(IDL.Nat64),
     }),
     'set_collateral_borrow_threshold' : IDL.Record({
       'borrow_threshold_ratio' : IDL.Text,

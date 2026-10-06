@@ -6273,6 +6273,37 @@ impl State {
         collateral_price: UsdIcp,
         repay_amount: Option<ICUSD>,
     ) -> ICUSD {
+        self.liquidate_vault_inner(vault_id, mode, collateral_price, repay_amount, None)
+    }
+
+    /// Apply a live liquidation using the exact collateral seizure computed
+    /// before the external icUSD pull. This prevents a price/bonus change
+    /// during the await from changing the collateral amount after payment.
+    pub fn liquidate_vault_with_pinned_seize(
+        &mut self,
+        vault_id: u64,
+        mode: Mode,
+        collateral_price: UsdIcp,
+        repay_amount: Option<ICUSD>,
+        collateral_seized_raw: u64,
+    ) -> ICUSD {
+        self.liquidate_vault_inner(
+            vault_id,
+            mode,
+            collateral_price,
+            repay_amount,
+            Some(collateral_seized_raw),
+        )
+    }
+
+    fn liquidate_vault_inner(
+        &mut self,
+        vault_id: u64,
+        mode: Mode,
+        collateral_price: UsdIcp,
+        repay_amount: Option<ICUSD>,
+        pinned_collateral_seized: Option<u64>,
+    ) -> ICUSD {
         // ASYNC-002 defense-in-depth: never trap on a missing vault. The
         // vault-level `vault::liquidate_vault` now presence-checks and refunds
         // the liquidator before reaching here, but a concurrent liquidation
@@ -6315,9 +6346,15 @@ impl State {
 
             // Collateral seized = icusd_to_collateral_amount(repay_amount * bonus)
             let repay_with_bonus: ICUSD = repay_amount * liq_bonus;
-            let collateral_seized =
-                crate::numeric::icusd_to_collateral_amount(repay_with_bonus, price, decimals)
-                    .min(vault.collateral_amount);
+            // Live paid liquidations pass the exact pre-await seizure to
+            // avoid recomputing it from mutable price/bonus configuration.
+            // The no-pin path retains historical replay behavior.
+            let collateral_seized = pinned_collateral_seized
+                .map(|amount| amount.min(vault.collateral_amount))
+                .unwrap_or_else(|| {
+                    crate::numeric::icusd_to_collateral_amount(repay_with_bonus, price, decimals)
+                        .min(vault.collateral_amount)
+                });
 
             let interest_share = match self.vault_id_to_vaults.get_mut(&vault_id) {
                 Some(vault) => {
@@ -11605,6 +11642,52 @@ mod tests {
             state.vault_id_to_vaults.get(&901).is_none(),
             "the vault must be fully (not over-) liquidated: the pinned amount is capped down to the live debt, which triggers a full close"
         );
+    }
+
+    #[test]
+    fn liq001_post_await_price_change_cannot_recompute_paid_seizure() {
+        // The live endpoint sizes collateral before pulling icUSD. A later
+        // oracle/bonus change must not cause the applied seizure to diverge.
+        let mut state = test_state();
+        let ct = Principal::from_slice(b"liq001-18d-overflow");
+        let bonus = Ratio::from(dec!(1.15));
+        liq0xx_collateral(
+            &mut state,
+            ct,
+            Ratio::from(dec!(1.34)),
+            Ratio::from(dec!(1.50)),
+            bonus,
+            5.0,
+        );
+        state.collateral_configs.get_mut(&ct).unwrap().decimals = 18;
+        state.open_vault(liq0xx_vault(902, ct, u64::MAX, 200_000_000));
+
+        let repaid = ICUSD::new(180_000_000);
+        let pinned_seizure = crate::numeric::try_icusd_to_collateral_amount(
+            repaid * bonus,
+            dec!(5.0),
+            18,
+        )
+        .expect("pre-await collateral amount is representable");
+        assert!(pinned_seizure > 0);
+        state.collateral_configs.get_mut(&ct).unwrap().last_price = Some(0.05);
+        assert_eq!(
+            crate::numeric::try_icusd_to_collateral_amount(repaid * bonus, dec!(0.05), 18),
+            None,
+            "premise: 2.07 icUSD at $0.05 and 18 decimals exceeds u64"
+        );
+
+        state.liquidate_vault_with_pinned_seize(
+            902,
+            Mode::GeneralAvailability,
+            UsdIcp::from(dec!(0.05)),
+            Some(repaid),
+            pinned_seizure,
+        );
+
+        let remaining = state.vault_id_to_vaults.get(&902).unwrap();
+        assert_eq!(remaining.borrowed_icusd_amount, ICUSD::new(20_000_000));
+        assert_eq!(remaining.collateral_amount, u64::MAX - pinned_seizure);
     }
 
     // ─────────────────────────────────────────────────────────────────

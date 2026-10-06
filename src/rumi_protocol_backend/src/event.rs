@@ -125,6 +125,12 @@ pub enum Event {
         /// the GA-mode full-debt case (an explicit pin, not an inferred one).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         repay_amount: Option<ICUSD>,
+        /// Exact collateral seized by a live liquidation, pinned alongside
+        /// `repay_amount` so replay cannot recompute against an oracle or
+        /// liquidation-bonus change that occurred during the ledger await.
+        /// Absent in historical events; those retain legacy replay behavior.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        collateral_seized_raw: Option<u64>,
     },
 
     #[serde(rename = "partial_liquidate_vault")]
@@ -1630,6 +1636,7 @@ fn replay_with_journal_and_nonce_time(
                 mode,
                 icp_rate,
                 repay_amount,
+                collateral_seized_raw,
                 ..
             } => {
                 // LIQ-0XX (review finding 2): `repay_amount` is `None` for
@@ -1637,7 +1644,16 @@ fn replay_with_journal_and_nonce_time(
                 // recorded after this field existed — `State::liquidate_vault`
                 // reproduces the exact pre-fix decision for the `None` case,
                 // so replay matches on-chain history in both cases.
-                let _ = state.liquidate_vault(vault_id, mode, icp_rate, repay_amount);
+                let _ = match collateral_seized_raw {
+                    Some(collateral_seized_raw) => state.liquidate_vault_with_pinned_seize(
+                        vault_id,
+                        mode,
+                        icp_rate,
+                        repay_amount,
+                        collateral_seized_raw,
+                    ),
+                    None => state.liquidate_vault(vault_id, mode, icp_rate, repay_amount),
+                };
             },
             Event::PartialLiquidateVault {
                 vault_id,
@@ -2402,6 +2418,7 @@ pub fn record_liquidate_vault(
         liquidator: None,
         timestamp: Some(now()),
         repay_amount,
+        collateral_seized_raw: None,
     });
     let _ = state.liquidate_vault(vault_id, mode, collateral_price, repay_amount);
 }
@@ -3899,6 +3916,7 @@ mod filter_tests {
             liquidator: Some(liquidator),
             timestamp: Some(ts),
             repay_amount: None,
+            collateral_seized_raw: None,
         }
     }
 
@@ -5111,5 +5129,130 @@ mod payout_operation_replay_tests {
         .expect("snapshot path should not replay the journal");
         assert_eq!(restored.pending_margin_transfers.len(), 1);
         assert_eq!(restored.pending_margin_transfers[&operation_id].owner, owner);
+    }
+}
+
+#[cfg(test)]
+mod liquidation_event_pin_tests {
+    use super::*;
+    use crate::numeric::UsdIcp;
+    use rust_decimal::Decimal;
+
+    #[derive(Serialize)]
+    enum PreCollateralPinEvent {
+        #[serde(rename = "liquidate_vault")]
+        LiquidateVault {
+            vault_id: u64,
+            mode: Mode,
+            icp_rate: UsdIcp,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            liquidator: Option<Principal>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            timestamp: Option<u64>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            repay_amount: Option<ICUSD>,
+        },
+    }
+
+    fn principal(seed: u8) -> Principal {
+        Principal::self_authenticating([seed; 32])
+    }
+
+    #[test]
+    fn historical_liquidation_event_decodes_without_new_collateral_pin() {
+        let old = PreCollateralPinEvent::LiquidateVault {
+            vault_id: 12,
+            mode: Mode::GeneralAvailability,
+            icp_rate: UsdIcp::from(Decimal::new(5, 2)),
+            liquidator: Some(principal(1)),
+            timestamp: Some(100),
+            repay_amount: Some(ICUSD::new(50_000_000)),
+        };
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&old, &mut bytes).expect("serialize pre-pin event fixture");
+        let decoded: Event = ciborium::de::from_reader(bytes.as_slice())
+            .expect("pre-pin event must decode with the new optional field defaulted");
+        match decoded {
+            Event::LiquidateVault {
+                repay_amount,
+                collateral_seized_raw,
+                ..
+            } => {
+                assert_eq!(repay_amount, Some(ICUSD::new(50_000_000)));
+                assert_eq!(collateral_seized_raw, None);
+            }
+            other => panic!("expected liquidation event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replay_applies_new_exact_collateral_pin_after_price_change() {
+        let args = InitArg {
+            xrc_principal: principal(20),
+            icusd_ledger_principal: principal(21),
+            icp_ledger_principal: principal(22),
+            fee_e8s: 0,
+            developer_principal: principal(23),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        };
+        let mut configured = State::from(args.clone());
+        let ct = args.icp_ledger_principal;
+        let mut config = configured.collateral_configs.get(&ct).unwrap().clone();
+        config.decimals = 18;
+        config.last_price = Some(0.05);
+        configured.collateral_configs.insert(ct, config.clone());
+
+        let repaid = ICUSD::new(180_000_000);
+        let bonus = configured.get_liquidation_bonus_for(&ct);
+        let pinned_seizure = crate::numeric::try_icusd_to_collateral_amount(
+            repaid * bonus,
+            Decimal::new(5, 0),
+            18,
+        )
+        .expect("pre-await collateral amount is representable");
+        assert_eq!(
+            crate::numeric::try_icusd_to_collateral_amount(repaid * bonus, Decimal::new(5, 2), 18),
+            None,
+            "2.07 icUSD at $0.05 and 18 decimals exceeds u64"
+        );
+
+        let vault = crate::vault::Vault {
+            owner: principal(24),
+            vault_id: 12,
+            collateral_amount: u64::MAX,
+            collateral_type: ct,
+            borrowed_icusd_amount: ICUSD::new(200_000_000),
+            last_accrual_time: 0,
+            accrued_interest: ICUSD::new(0),
+            bot_processing: false,
+        };
+        let events = vec![
+            Event::Init(args),
+            Event::UpdateCollateralConfig {
+                collateral_type: ct,
+                config,
+            },
+            Event::OpenVault {
+                vault,
+                block_index: 0,
+                timestamp: Some(1),
+            },
+            Event::LiquidateVault {
+                vault_id: 12,
+                mode: Mode::GeneralAvailability,
+                icp_rate: UsdIcp::from(Decimal::new(5, 2)),
+                liquidator: Some(principal(1)),
+                timestamp: Some(2),
+                repay_amount: Some(repaid),
+                collateral_seized_raw: Some(pinned_seizure),
+            },
+        ];
+        let replayed = replay(events.into_iter()).expect("liquidation replay succeeds");
+        let remaining = replayed.vault_id_to_vaults.get(&12).unwrap();
+        assert_eq!(remaining.borrowed_icusd_amount, ICUSD::new(20_000_000));
+        assert_eq!(remaining.collateral_amount, u64::MAX - pinned_seizure);
     }
 }
