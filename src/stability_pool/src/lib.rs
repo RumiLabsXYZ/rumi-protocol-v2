@@ -87,6 +87,7 @@ fn pre_upgrade() {
 fn post_upgrade(_args: StabilityPoolInitArgs) {
     state::load_from_stable_memory();
     let (indexed, retained) = mutate_state(|s| {
+        s.reconcile_pending_deposit_attempts_after_upgrade();
         s.initialize_unallocated_interest_mint_index();
         (
             s.unallocated_interest_mint_index.is_some(),

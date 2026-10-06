@@ -664,8 +664,13 @@ pub struct PendingDepositIntent {
     /// lets a later retry finalize locally without another ledger call.
     #[serde(default)]
     pub transfer_block_index: Option<u64>,
-    /// Once a retry or ambiguous outcome is observed, a later rejection cannot
-    /// safely prove that an earlier dispatch had no effect.
+    /// Number of same-intent ledger dispatches still awaiting a reply. Missing
+    /// means the snapshot predates attempt tracking and must be treated as
+    /// ambiguous during upgrade recovery.
+    #[serde(default)]
+    pub in_flight_attempts: Option<u32>,
+    /// Once an ambiguous reply or interrupted pre-upgrade dispatch is observed,
+    /// a later rejection cannot prove that every earlier dispatch had no effect.
     pub ambiguous_seen: bool,
 }
 

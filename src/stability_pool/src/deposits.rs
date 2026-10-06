@@ -520,7 +520,7 @@ pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), Stabili
             });
             if !cleared {
                 return Err(StabilityPoolError::LedgerTransferFailed {
-                    reason: "deposit outcome unresolved after an earlier ambiguous dispatch"
+                    reason: "deposit intent retained because another dispatch is in flight or an earlier outcome was ambiguous"
                         .to_string(),
                 });
             }
@@ -536,15 +536,12 @@ pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), Stabili
             // expires, exact ICRC-3 receipt reconciliation is still required;
             // this narrow change deliberately fails closed in that case.
             mutate_state(|s| {
-                if s.deposit_intent_matches(caller, token_ledger, amount, transfer_timestamp) {
-                    if let Some(intent) = s
-                        .pending_deposit_intents
-                        .as_mut()
-                        .and_then(|intents| intents.get_mut(&caller))
-                    {
-                        intent.ambiguous_seen = true;
-                    }
-                }
+                s.mark_deposit_intent_ambiguous(
+                    caller,
+                    token_ledger,
+                    amount,
+                    transfer_timestamp,
+                )
             });
             log!(INFO, "Transfer failed: {:?}", transfer_error);
             Err(StabilityPoolError::LedgerTransferFailed {
@@ -554,15 +551,12 @@ pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), Stabili
         }
         Err(call_error) => {
             mutate_state(|s| {
-                if s.deposit_intent_matches(caller, token_ledger, amount, transfer_timestamp) {
-                    if let Some(intent) = s
-                        .pending_deposit_intents
-                        .as_mut()
-                        .and_then(|intents| intents.get_mut(&caller))
-                    {
-                        intent.ambiguous_seen = true;
-                    }
-                }
+                s.mark_deposit_intent_ambiguous(
+                    caller,
+                    token_ledger,
+                    amount,
+                    transfer_timestamp,
+                )
             });
             log!(INFO, "Inter-canister call failed: {:?}", call_error);
             Err(StabilityPoolError::InterCanisterCallFailed {

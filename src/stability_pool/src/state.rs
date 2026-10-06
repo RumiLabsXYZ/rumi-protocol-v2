@@ -724,7 +724,17 @@ impl StabilityPoolState {
             if intent.token_ledger != token_ledger || intent.amount != amount {
                 return Err(());
             }
-            intent.ambiguous_seen = true;
+            match intent.in_flight_attempts {
+                Some(attempts) => {
+                    intent.in_flight_attempts = Some(attempts.checked_add(1).ok_or(())?);
+                }
+                // An old snapshot cannot distinguish an in-flight call from a
+                // lost reply. Keep that uncertainty permanently fail-closed.
+                None => {
+                    intent.ambiguous_seen = true;
+                    intent.in_flight_attempts = Some(1);
+                }
+            }
             return Ok(intent.transfer_created_at_time_ns);
         }
 
@@ -738,6 +748,7 @@ impl StabilityPoolState {
                     amount,
                     transfer_created_at_time_ns: timestamp,
                     transfer_block_index: None,
+                    in_flight_attempts: Some(1),
                     ambiguous_seen: false,
                 },
             );
@@ -821,11 +832,22 @@ impl StabilityPoolState {
         {
             return false;
         }
+        if let Some(attempts) = intent.in_flight_attempts.as_mut() {
+            if *attempts > 0 {
+                *attempts -= 1;
+            }
+        } else {
+            // Receipt identity proves the transfer, but absent attempt metadata
+            // still reflects a pre-migration unresolved call.
+            intent.ambiguous_seen = true;
+        }
         intent.transfer_block_index = Some(block_index);
         true
     }
 
-    /// Clear only an unambiguous attempt with a definitive ledger rejection.
+    /// Finish one dispatch with a definitive no-effect reply. Clear the intent
+    /// only after every concurrent dispatch has also returned no-effect and no
+    /// prior dispatch had an ambiguous outcome.
     pub fn clear_deposit_intent_after_no_effect(
         &mut self,
         caller: Principal,
@@ -833,12 +855,28 @@ impl StabilityPoolState {
         amount: u64,
         timestamp: u64,
     ) -> bool {
-        if !self.deposit_intent_matches(caller, token_ledger, amount, timestamp)
-            || self
-                .pending_deposit_intents
-                .as_ref()
-                .and_then(|intents| intents.get(&caller))
-                .map_or(true, |intent| intent.ambiguous_seen)
+        if !self.deposit_intent_matches(caller, token_ledger, amount, timestamp) {
+            return false;
+        }
+        let Some(intent) = self
+            .pending_deposit_intents
+            .as_mut()
+            .and_then(|intents| intents.get_mut(&caller))
+        else {
+            return false;
+        };
+        match intent.in_flight_attempts.as_mut() {
+            Some(attempts) if *attempts > 0 => *attempts -= 1,
+            _ => {
+                // A callback without a matching tracked dispatch cannot prove
+                // that every earlier transfer attempt had no effect.
+                intent.ambiguous_seen = true;
+                return false;
+            }
+        }
+        if intent.ambiguous_seen
+            || intent.transfer_block_index.is_some()
+            || intent.in_flight_attempts != Some(0)
         {
             return false;
         }
@@ -847,6 +885,53 @@ impl StabilityPoolState {
             .expect("pending deposit map initialized")
             .remove(&caller);
         true
+    }
+
+    /// Record a transport or otherwise ambiguous reply, finishing exactly one
+    /// dispatch while retaining the intent for an exact-identity retry.
+    pub fn mark_deposit_intent_ambiguous(
+        &mut self,
+        caller: Principal,
+        token_ledger: Principal,
+        amount: u64,
+        timestamp: u64,
+    ) {
+        let Some(intent) = self
+            .pending_deposit_intents
+            .as_mut()
+            .and_then(|intents| intents.get_mut(&caller))
+        else {
+            return;
+        };
+        if intent.token_ledger != token_ledger
+            || intent.amount != amount
+            || intent.transfer_created_at_time_ns != timestamp
+        {
+            return;
+        }
+        intent.ambiguous_seen = true;
+        if let Some(attempts) = intent.in_flight_attempts.as_mut() {
+            if *attempts > 0 {
+                *attempts -= 1;
+            }
+        }
+    }
+
+    /// Resolve dispatches interrupted by upgrade. Their ledger outcomes are
+    /// unknown even if the old snapshot did not record an ambiguity flag.
+    pub fn reconcile_pending_deposit_attempts_after_upgrade(&mut self) {
+        let Some(intents) = self.pending_deposit_intents.as_mut() else {
+            return;
+        };
+        for intent in intents.values_mut() {
+            match intent.in_flight_attempts {
+                Some(0) => {}
+                Some(_) | None => {
+                    intent.in_flight_attempts = Some(0);
+                    intent.ambiguous_seen = true;
+                }
+            }
+        }
     }
 
     pub fn add_deposit(&mut self, user: Principal, token_ledger: Principal, amount: u64) {
@@ -3433,7 +3518,28 @@ mod tests {
             .unwrap();
 
         assert_eq!(retry_timestamp, first_timestamp);
+        assert_eq!(
+            state.pending_deposit_intents.as_ref().unwrap()[&user_a()].in_flight_attempts,
+            Some(2),
+        );
+        assert!(!state.pending_deposit_intents.as_ref().unwrap()[&user_a()].ambiguous_seen);
         assert!(state.record_deposit_receipt(user_a(), icusd_ledger(), amount, first_timestamp, 7,));
+        assert_eq!(
+            state.pending_deposit_intents.as_ref().unwrap()[&user_a()].in_flight_attempts,
+            Some(1),
+            "one ledger response must finish only its own dispatch",
+        );
+        assert!(!state.clear_deposit_intent_after_no_effect(
+            user_a(),
+            icusd_ledger(),
+            amount,
+            retry_timestamp,
+        ));
+        assert_eq!(
+            state.pending_deposit_intents.as_ref().unwrap()[&user_a()].transfer_block_index,
+            Some(7),
+            "a no-effect callback cannot erase a receipt already proven by its peer",
+        );
         assert!(state.complete_deposit_intent(
             user_a(),
             icusd_ledger(),
@@ -3461,6 +3567,143 @@ mod tests {
             .begin_deposit_intent(user_a(), icusd_ledger(), amount, 1_000)
             .unwrap();
         assert!(next_timestamp > first_timestamp);
+    }
+
+    #[test]
+    fn concurrent_definitive_deposit_failures_clear_only_after_both_replies() {
+        let mut state = StabilityPoolState::default();
+        let caller = user_a();
+        let ledger = icusd_ledger();
+        let amount = 25_000_000;
+        let first_timestamp = state
+            .begin_deposit_intent(caller, ledger, amount, 1_000)
+            .unwrap();
+        let second_timestamp = state
+            .begin_deposit_intent(caller, ledger, amount, 1_000)
+            .unwrap();
+        assert_eq!(first_timestamp, second_timestamp);
+
+        assert!(!state.clear_deposit_intent_after_no_effect(
+            caller,
+            ledger,
+            amount,
+            first_timestamp,
+        ));
+        assert_eq!(
+            state.pending_deposit_intents.as_ref().unwrap()[&caller].in_flight_attempts,
+            Some(1),
+            "first definitive reply cannot clear while its peer is outstanding",
+        );
+        assert!(state
+            .begin_deposit_intent(caller, ledger, amount + 1, 1_000)
+            .is_err());
+
+        assert!(state.clear_deposit_intent_after_no_effect(
+            caller,
+            ledger,
+            amount,
+            second_timestamp,
+        ));
+        assert!(state.pending_deposit_intents.as_ref().unwrap().is_empty());
+        let next_timestamp = state
+            .begin_deposit_intent(caller, ledger, amount + 1, 1_000)
+            .expect("a fresh request is admitted after all attempts proved no effect");
+        assert!(next_timestamp > first_timestamp);
+    }
+
+    #[test]
+    fn ambiguous_and_definitive_deposit_replies_keep_exact_intent_for_receipt_retry() {
+        let mut state = StabilityPoolState::default();
+        let caller = user_a();
+        let ledger = icusd_ledger();
+        let amount = 25_000_000;
+        let timestamp = state
+            .begin_deposit_intent(caller, ledger, amount, 1_000)
+            .unwrap();
+        assert_eq!(
+            state.begin_deposit_intent(caller, ledger, amount, 1_000),
+            Ok(timestamp),
+        );
+
+        state.mark_deposit_intent_ambiguous(caller, ledger, amount, timestamp);
+        assert!(!state.clear_deposit_intent_after_no_effect(
+            caller,
+            ledger,
+            amount,
+            timestamp,
+        ));
+        let retained = &state.pending_deposit_intents.as_ref().unwrap()[&caller];
+        assert_eq!(retained.in_flight_attempts, Some(0));
+        assert!(retained.ambiguous_seen);
+
+        assert!(state
+            .begin_deposit_intent(caller, ledger, amount + 1, 1_000)
+            .is_err());
+        assert_eq!(
+            state.begin_deposit_intent(caller, ledger, amount, 2_000),
+            Ok(timestamp),
+            "an exact retry must reuse the original ledger identity",
+        );
+        assert!(state.record_deposit_receipt(caller, ledger, amount, timestamp, 17));
+        assert!(state.complete_deposit_intent(caller, ledger, amount, timestamp, 3_000));
+        assert!(!state.complete_deposit_intent(caller, ledger, amount, timestamp, 3_001));
+        assert_eq!(state.deposits[&caller].stablecoin_balances[&ledger], amount);
+        assert_eq!(state.total_stablecoin_balances[&ledger], amount);
+        assert_eq!(state.pool_events.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn upgrade_marks_unresolved_and_pre_counter_deposit_intents_ambiguous() {
+        #[derive(CandidType)]
+        struct PendingDepositIntentBeforeAttemptCounter {
+            token_ledger: Principal,
+            amount: u64,
+            transfer_created_at_time_ns: u64,
+            transfer_block_index: Option<u64>,
+            ambiguous_seen: bool,
+        }
+
+        let old = PendingDepositIntentBeforeAttemptCounter {
+            token_ledger: icusd_ledger(),
+            amount: 25_000_000,
+            transfer_created_at_time_ns: 1_000,
+            transfer_block_index: None,
+            ambiguous_seen: false,
+        };
+        let bytes = Encode!(&old).unwrap();
+        let decoded: PendingDepositIntent =
+            Decode!(&bytes, PendingDepositIntent).expect("pre-counter intent still decodes");
+        assert_eq!(decoded.in_flight_attempts, None);
+
+        let mut state = StabilityPoolState::default();
+        state
+            .pending_deposit_intents
+            .as_mut()
+            .unwrap()
+            .insert(user_a(), decoded);
+        // Also model a candidate snapshot taken while a tracked dispatch was
+        // awaiting its ledger reply.
+        state
+            .begin_deposit_intent(user_b(), icusd_ledger(), 25_000_000, 1_000)
+            .unwrap();
+        state.reconcile_pending_deposit_attempts_after_upgrade();
+
+        for caller in [user_a(), user_b()] {
+            let intent = &state.pending_deposit_intents.as_ref().unwrap()[&caller];
+            assert_eq!(intent.in_flight_attempts, Some(0));
+            assert!(intent.ambiguous_seen);
+        }
+        assert!(!state.clear_deposit_intent_after_no_effect(
+            user_a(),
+            icusd_ledger(),
+            25_000_000,
+            1_000,
+        ));
+        assert!(state
+            .pending_deposit_intents
+            .as_ref()
+            .unwrap()
+            .contains_key(&user_a()));
     }
 
     #[test]
