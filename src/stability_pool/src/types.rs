@@ -652,6 +652,23 @@ pub struct UserStabilityPosition {
     pub total_interest_earned_e8s: u64,
 }
 
+/// Exact ICRC-2 deposit identity retained while its transfer outcome is
+/// unresolved. `caller` is the key in the state map; the remaining fields plus
+/// the fixed pool-owned transfer arguments identify the ledger request.
+#[derive(CandidType, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingDepositIntent {
+    pub token_ledger: Principal,
+    pub amount: u64,
+    pub transfer_created_at_time_ns: u64,
+    /// Ledger receipt captured from an `Ok` or exact `Duplicate` reply. It
+    /// lets a later retry finalize locally without another ledger call.
+    #[serde(default)]
+    pub transfer_block_index: Option<u64>,
+    /// Once a retry or ambiguous outcome is observed, a later rejection cannot
+    /// safely prove that an earlier dispatch had no effect.
+    pub ambiguous_seen: bool,
+}
+
 // ──────────────────────────────────────────────────────────────
 // Error types
 // ──────────────────────────────────────────────────────────────

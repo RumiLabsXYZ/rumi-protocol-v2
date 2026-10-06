@@ -698,6 +698,140 @@ fn test_direct_icusd_deposit() {
     assert_eq!(status.total_deposits_e8s, deposit_amount);
 }
 
+/// Concurrent identical calls share one persisted transfer intent. The ledger
+/// may accept the transfer once and return Duplicate for the other dispatch,
+/// but the pool must credit only the one physical transfer.
+#[test]
+fn same_round_identical_deposits_do_not_double_credit_one_transfer() {
+    let env = setup_test_env();
+    let amount = 100_00000000u64;
+    let first = env.pic.submit_call(
+        env.sp_id,
+        env.test_user,
+        "deposit",
+        encode_args((env.icusd_ledger, amount)).unwrap(),
+    ).expect("first deposit submission failed");
+    let second = env.pic.submit_call(
+        env.sp_id,
+        env.test_user,
+        "deposit",
+        encode_args((env.icusd_ledger, amount)).unwrap(),
+    ).expect("second deposit submission failed");
+
+    for call in [first, second] {
+        let result = env.pic.await_call(call)
+            .expect("deposit call execution failed");
+        match result {
+            WasmResult::Reply(bytes) => {
+                let result = decode_one::<Result<(), StabilityPoolError>>(&bytes)
+                    .expect("decode deposit");
+                assert!(
+                    result.is_ok() || matches!(&result, Err(StabilityPoolError::SystemBusy)),
+                    "unexpected deposit result: {result:?}",
+                );
+            }
+            WasmResult::Reject(message) => panic!("deposit rejected: {message}"),
+        }
+    }
+
+    let position = get_user_position(&env.pic, env.sp_id, env.test_user)
+        .expect("depositor position should exist");
+    assert_eq!(
+        position.stablecoin_balances.get(&env.icusd_ledger).copied(),
+        Some(amount),
+    );
+
+    let pool_balance = env.pic.query_call(
+        env.icusd_ledger,
+        Principal::anonymous(),
+        "icrc1_balance_of",
+        encode_one(Account { owner: env.sp_id, subaccount: None }).unwrap(),
+    ).expect("ledger balance query failed");
+    let pool_balance = match pool_balance {
+        WasmResult::Reply(bytes) => decode_one::<candid::Nat>(&bytes)
+            .expect("decode ledger balance"),
+        WasmResult::Reject(message) => panic!("ledger balance query rejected: {message}"),
+    };
+    assert_eq!(pool_balance, candid::Nat::from(amount));
+}
+
+/// Ordinary deposits and deposit_as_3usd must share transfer timestamps. If
+/// their identical same-round ICRC-2 pulls alias, deposit_as_3usd can route the
+/// one physical pull through 3pool while the ordinary path credits it again.
+#[test]
+fn same_round_deposit_and_deposit_as_3usd_use_distinct_pulls() {
+    let env = setup_test_env();
+    register_stablecoin(&env.pic, env.sp_id, env.admin, StablecoinConfig {
+        ledger_id: env.pool_id,
+        symbol: "3USD".to_string(),
+        decimals: 8,
+        priority: 0,
+        is_active: true,
+        transfer_fee: Some(0),
+        is_lp_token: Some(true),
+        underlying_pool: Some(env.pool_id),
+    });
+    let amount = 100_00000000u64;
+
+    // Queue both paths before driving their responses. PocketIC may schedule
+    // either ledger pull first; both must complete from distinct transfers.
+    let routed = env.pic.submit_call(
+        env.sp_id,
+        env.test_user,
+        "deposit_as_3usd",
+        encode_args((env.icusd_ledger, amount)).unwrap(),
+    ).expect("deposit_as_3usd submission failed");
+    let ordinary = env.pic.submit_call(
+        env.sp_id,
+        env.test_user,
+        "deposit",
+        encode_args((env.icusd_ledger, amount)).unwrap(),
+    ).expect("ordinary deposit submission failed");
+
+    let routed_result = env.pic.await_call(routed)
+        .expect("deposit_as_3usd execution failed");
+    let lp_minted = match routed_result {
+        WasmResult::Reply(bytes) => decode_one::<Result<u64, StabilityPoolError>>(&bytes)
+            .expect("decode deposit_as_3usd")
+            .expect("deposit_as_3usd failed"),
+        WasmResult::Reject(message) => panic!("deposit_as_3usd rejected: {message}"),
+    };
+    assert!(lp_minted > 0);
+
+    let ordinary_result = env.pic.await_call(ordinary)
+        .expect("ordinary deposit execution failed");
+    match ordinary_result {
+        WasmResult::Reply(bytes) => decode_one::<Result<(), StabilityPoolError>>(&bytes)
+            .expect("decode ordinary deposit")
+            .expect("ordinary deposit failed"),
+        WasmResult::Reject(message) => panic!("ordinary deposit rejected: {message}"),
+    }
+
+    let position = get_user_position(&env.pic, env.sp_id, env.test_user)
+        .expect("depositor position should exist");
+    assert_eq!(
+        position.stablecoin_balances.get(&env.icusd_ledger).copied(),
+        Some(amount),
+        "the ordinary position must have a separately funded pull",
+    );
+    assert_eq!(
+        position.stablecoin_balances.get(&env.pool_id).copied(),
+        Some(lp_minted),
+        "the routed position must match LP actually minted",
+    );
+
+    let physical_input_balance = ledger_balance(&env.pic, env.icusd_ledger, env.sp_id);
+    assert_eq!(
+        physical_input_balance,
+        u128::from(amount),
+        "one pull funds 3pool and the distinct pull funds the ordinary position",
+    );
+    assert_eq!(
+        query_3pool_lp_balance(&env.pic, env.pool_id, env.sp_id),
+        u128::from(lp_minted),
+    );
+}
+
 /// Reconciliation observability: after a clean deposit, the pool's tracked
 /// aggregate matches its live ledger balance, `get_ledger_reconciliation`
 /// reports it healthy, and the endpoint is admin-gated.

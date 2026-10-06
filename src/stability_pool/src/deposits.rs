@@ -24,23 +24,93 @@ thread_local! {
     static LEDGER_FEES: RefCell<HashMap<Principal, u64>> = RefCell::new(HashMap::new());
 }
 
-fn record_deposit_credit_after_async(
+fn complete_deposit_credit_after_async(
     caller: Principal,
     token_ledger: Principal,
     amount: u64,
+    timestamp: u64,
 ) -> Result<(), StabilityPoolError> {
     crate::ensure_pool_balance_mutation_allowed()?;
+    complete_deposit_credit_after_async_at(
+        caller,
+        token_ledger,
+        amount,
+        timestamp,
+        ic_cdk::api::time(),
+    )
+}
+
+fn complete_deposit_credit_after_async_at(
+    caller: Principal,
+    token_ledger: Principal,
+    amount: u64,
+    timestamp: u64,
+    now_ns: u64,
+) -> Result<(), StabilityPoolError> {
+    crate::ensure_pool_balance_mutation_allowed()?;
+    // A retry may receive Duplicate after an earlier concurrent callback has
+    // already completed this exact intent. In that case, leave the credited
+    // balance and event untouched.
     mutate_state(|s| {
-        s.add_deposit(caller, token_ledger, amount);
-        s.push_event(
+        s.complete_deposit_intent(
             caller,
-            PoolEventType::Deposit {
-                token_ledger,
-                amount,
-            },
-        );
+            token_ledger,
+            amount,
+            timestamp,
+            now_ns,
+        )
     });
     Ok(())
+}
+
+fn complete_saved_deposit_receipt_before_admission(
+    caller: Principal,
+    token_ledger: Principal,
+    amount: u64,
+    now_ns: u64,
+) -> Result<Option<()>, StabilityPoolError> {
+    let receipt = read_state(|s| {
+        s.pending_deposit_intents
+            .as_ref()
+            .and_then(|intents| intents.get(&caller))
+            .filter(|intent| intent.token_ledger == token_ledger && intent.amount == amount)
+            .and_then(|intent| {
+                intent
+                    .transfer_block_index
+                    .map(|_| intent.transfer_created_at_time_ns)
+            })
+    });
+    let Some(timestamp) = receipt else {
+        return Ok(None);
+    };
+
+    // A recorded ledger receipt proves the pull already happened. Finalize
+    // that exact credit before applying admission policy to a new deposit,
+    // while still respecting accounting guards.
+    crate::ensure_pool_balance_mutation_allowed()?;
+    let completed = mutate_state(|s| {
+        s.complete_deposit_intent(caller, token_ledger, amount, timestamp, now_ns)
+    });
+    if completed {
+        Ok(Some(()))
+    } else {
+        Err(StabilityPoolError::SystemBusy)
+    }
+}
+
+fn pending_deposit_admission_error(
+    error: StabilityPoolError,
+    pending_without_receipt: bool,
+) -> StabilityPoolError {
+    if pending_without_receipt {
+        StabilityPoolError::LedgerTransferFailed {
+            reason: format!(
+                "pending deposit has no saved receipt; admission policy now rejects retry ({error:?}); exact ledger reconciliation required"
+            ),
+        }
+    } else {
+        error
+    }
 }
 
 fn record_deposit_as_3usd_credit_after_async(
@@ -266,30 +336,60 @@ pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), Stabili
     }
     let caller = ic_cdk::api::caller();
 
+    if complete_saved_deposit_receipt_before_admission(
+        caller,
+        token_ledger,
+        amount,
+        ic_cdk::api::time(),
+    )?
+    .is_some()
+    {
+        return Ok(());
+    }
+
+    let pending_without_receipt = read_state(|s| {
+        s.pending_deposit_intents
+            .as_ref()
+            .and_then(|intents| intents.get(&caller))
+            .is_some_and(|intent| {
+                intent.token_ledger == token_ledger
+                    && intent.amount == amount
+                    && intent.transfer_block_index.is_none()
+            })
+    });
     // Validate token is accepted
-    let config = read_state(|s| s.get_stablecoin_config(&token_ledger).cloned()).ok_or(
-        StabilityPoolError::TokenNotAccepted {
+    let config = read_state(|s| s.get_stablecoin_config(&token_ledger).cloned())
+        .ok_or(StabilityPoolError::TokenNotAccepted {
             ledger: token_ledger,
-        },
-    )?;
+        })
+        .map_err(|error| pending_deposit_admission_error(error, pending_without_receipt))?;
 
     if !config.is_active {
-        return Err(StabilityPoolError::TokenNotActive {
-            ledger: token_ledger,
-        });
+        return Err(pending_deposit_admission_error(
+            StabilityPoolError::TokenNotActive {
+                ledger: token_ledger,
+            },
+            pending_without_receipt,
+        ));
     }
 
     // Validate minimum deposit (normalize to e8s for comparison)
     let amount_e8s = normalize_to_e8s(amount, config.decimals);
     let min_deposit = read_state(|s| s.configuration.min_deposit_e8s);
     if amount_e8s < min_deposit {
-        return Err(StabilityPoolError::AmountTooLow {
-            minimum_e8s: min_deposit,
-        });
+        return Err(pending_deposit_admission_error(
+            StabilityPoolError::AmountTooLow {
+                minimum_e8s: min_deposit,
+            },
+            pending_without_receipt,
+        ));
     }
 
     if read_state(|s| s.configuration.emergency_pause) {
-        return Err(StabilityPoolError::EmergencyPaused);
+        return Err(pending_deposit_admission_error(
+            StabilityPoolError::EmergencyPaused,
+            pending_without_receipt,
+        ));
     }
 
     log!(
@@ -300,6 +400,29 @@ pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), Stabili
         token_ledger,
         caller
     );
+
+    // Persist the exact transfer identity before dispatch. Same-caller retries
+    // reuse this identity; a distinct request gets a strictly newer timestamp.
+    let (transfer_timestamp, prior_receipt) = mutate_state(|s| {
+        let timestamp =
+            s.begin_deposit_intent(caller, token_ledger, amount, ic_cdk::api::time())?;
+        let receipt = s
+            .pending_deposit_intents
+            .as_ref()
+            .and_then(|intents| intents.get(&caller))
+            .and_then(|intent| intent.transfer_block_index);
+        Ok::<_, ()>((timestamp, receipt))
+    })
+    .map_err(|_| StabilityPoolError::SystemBusy)?;
+
+    if prior_receipt.is_some() {
+        return complete_deposit_credit_after_async(
+            caller,
+            token_ledger,
+            amount,
+            transfer_timestamp,
+        );
+    }
 
     // ICRC-2 transfer_from: pull tokens from user to pool canister
     let transfer_args = TransferFromArgs {
@@ -314,7 +437,7 @@ pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), Stabili
         amount: amount.into(),
         fee: None,
         memo: None,
-        created_at_time: Some(ic_cdk::api::time()),
+        created_at_time: Some(transfer_timestamp),
         spender_subaccount: None,
     };
 
@@ -324,47 +447,123 @@ pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), Stabili
     match result {
         Ok((Ok(block_index),)) => {
             log!(INFO, "Transfer succeeded, block: {}", block_index);
-            if let Err(error) = record_deposit_credit_after_async(caller, token_ledger, amount) {
-                refund_user(
+            let block_index: u64 =
+                block_index
+                    .0
+                    .try_into()
+                    .map_err(|_| StabilityPoolError::LedgerTransferFailed {
+                        reason: "deposit transfer block index exceeds u64; intent retained"
+                            .to_string(),
+                    })?;
+            let recorded = mutate_state(|s| {
+                s.record_deposit_receipt(
                     caller,
                     token_ledger,
                     amount,
-                    "deposit: pool balance mutation blocked after transfer",
+                    transfer_timestamp,
+                    block_index,
                 )
-                .await;
-                return Err(error);
+            });
+            if !recorded {
+                return Err(StabilityPoolError::SystemBusy);
             }
+            complete_deposit_credit_after_async(caller, token_ledger, amount, transfer_timestamp)?;
             log!(INFO, "Deposit recorded for {}", caller);
             Ok(())
         }
-        // Audit Wave-3 (ICRC-003): Duplicate from the ledger means the
-        // previous transfer landed; the tokens are already in the pool.
-        // Credit the deposit and treat as success.
+        // Duplicate is success only for the exact persisted intent. Completion
+        // removes that intent atomically, so concurrent replies cannot credit
+        // this one ledger transfer twice.
         Ok((Err(TransferFromError::Duplicate { duplicate_of }),)) => {
             log!(
                 INFO,
-                "Deposit transfer Duplicate (block {}); previous attempt landed, crediting deposit",
+                "Deposit transfer Duplicate (block {}); completing exact pending intent",
                 duplicate_of
             );
-            if let Err(error) = record_deposit_credit_after_async(caller, token_ledger, amount) {
-                refund_user(
+            let block_index: u64 = duplicate_of.0.try_into().map_err(|_| {
+                StabilityPoolError::LedgerTransferFailed {
+                    reason: "duplicate deposit block index exceeds u64; intent retained"
+                        .to_string(),
+                }
+            })?;
+            let recorded = mutate_state(|s| {
+                s.record_deposit_receipt(
                     caller,
                     token_ledger,
                     amount,
-                    "deposit: pool balance mutation blocked after duplicate transfer",
+                    transfer_timestamp,
+                    block_index,
                 )
-                .await;
-                return Err(error);
+            });
+            if !recorded {
+                return Err(StabilityPoolError::SystemBusy);
             }
-            Ok(())
+            complete_deposit_credit_after_async(caller, token_ledger, amount, transfer_timestamp)
         }
-        Ok((Err(transfer_error),)) => {
+        Ok((Err(transfer_error),))
+            if matches!(
+                &transfer_error,
+                TransferFromError::BadFee { .. }
+                    | TransferFromError::BadBurn { .. }
+                    | TransferFromError::InsufficientFunds { .. }
+                    | TransferFromError::InsufficientAllowance { .. }
+                    | TransferFromError::CreatedInFuture { .. }
+            ) =>
+        {
+            let cleared = mutate_state(|s| {
+                s.clear_deposit_intent_after_no_effect(
+                    caller,
+                    token_ledger,
+                    amount,
+                    transfer_timestamp,
+                )
+            });
+            if !cleared {
+                return Err(StabilityPoolError::LedgerTransferFailed {
+                    reason: "deposit outcome unresolved after an earlier ambiguous dispatch"
+                        .to_string(),
+                });
+            }
             log!(INFO, "Transfer failed: {:?}", transfer_error);
             Err(StabilityPoolError::LedgerTransferFailed {
                 reason: format!("{:?}", transfer_error),
             })
         }
+        Ok((Err(transfer_error),)) => {
+            // TooOld, TemporarilyUnavailable, and GenericError do not prove
+            // whether a prior dispatch committed. Keep the identity for retry.
+            // If every reply was lost until the ledger's duplicate window
+            // expires, exact ICRC-3 receipt reconciliation is still required;
+            // this narrow change deliberately fails closed in that case.
+            mutate_state(|s| {
+                if s.deposit_intent_matches(caller, token_ledger, amount, transfer_timestamp) {
+                    if let Some(intent) = s
+                        .pending_deposit_intents
+                        .as_mut()
+                        .and_then(|intents| intents.get_mut(&caller))
+                    {
+                        intent.ambiguous_seen = true;
+                    }
+                }
+            });
+            log!(INFO, "Transfer failed: {:?}", transfer_error);
+            Err(StabilityPoolError::LedgerTransferFailed {
+                reason: "deposit outcome unresolved; original transfer identity retained"
+                    .to_string(),
+            })
+        }
         Err(call_error) => {
+            mutate_state(|s| {
+                if s.deposit_intent_matches(caller, token_ledger, amount, transfer_timestamp) {
+                    if let Some(intent) = s
+                        .pending_deposit_intents
+                        .as_mut()
+                        .and_then(|intents| intents.get_mut(&caller))
+                    {
+                        intent.ambiguous_seen = true;
+                    }
+                }
+            });
             log!(INFO, "Inter-canister call failed: {:?}", call_error);
             Err(StabilityPoolError::InterCanisterCallFailed {
                 target: format!("{}", token_ledger),
@@ -798,6 +997,14 @@ pub async fn deposit_as_3usd(
         token_ledger
     );
 
+    // Share the timestamp allocator with ordinary deposits. Otherwise these
+    // distinct workflows can submit identical ICRC-2 arguments in one IC time
+    // round and have one physical pull satisfy both accounting paths.
+    let transfer_timestamp = mutate_state(|s| {
+        s.reserve_deposit_transfer_timestamp(ic_cdk::api::time())
+    })
+    .map_err(|_| StabilityPoolError::SystemBusy)?;
+
     // Step 1: Pull tokens from user
     let transfer_args = TransferFromArgs {
         from: Account {
@@ -811,7 +1018,7 @@ pub async fn deposit_as_3usd(
         amount: amount.into(),
         fee: None,
         memo: None,
-        created_at_time: Some(ic_cdk::api::time()),
+        created_at_time: Some(transfer_timestamp),
         spender_subaccount: None,
     };
 
@@ -1188,11 +1395,22 @@ mod tests {
     }
 
     #[test]
-    fn post_await_deposit_credit_rechecks_pending_chain_absorbs() {
+    fn post_transfer_system_busy_keeps_receipt_for_local_retry() {
         crate::state::replace_state(crate::state::StabilityPoolState::default());
-        mutate_state(|s| s.put_pending_chain_absorb(pending_intent()).unwrap());
-
-        let result = record_deposit_credit_after_async(principal(1), principal(10), 50_00000000);
+        mutate_state(|s| {
+            s.deposits.insert(principal(1), DepositPosition::new(0));
+            s.begin_deposit_intent(principal(1), principal(10), 50_00000000, 1)
+                .unwrap();
+            assert!(s.record_deposit_receipt(principal(1), principal(10), 50_00000000, 1, 9,));
+            s.put_pending_chain_absorb(pending_intent()).unwrap();
+        });
+        let result = complete_deposit_credit_after_async_at(
+            principal(1),
+            principal(10),
+            50_00000000,
+            1,
+            2,
+        );
 
         assert!(
             matches!(result, Err(StabilityPoolError::SystemBusy)),
@@ -1207,7 +1425,99 @@ mod tests {
             0,
             "blocked post-await credit must not mutate the SP denominator",
         );
+        assert_eq!(
+            read_state(|s| s
+                .pending_deposit_intents
+                .as_ref()
+                .and_then(|intents| intents.get(&principal(1)))
+                .and_then(|intent| intent.transfer_block_index)),
+            Some(9),
+            "verified ledger receipt must survive the post-transfer guard",
+        );
+        mutate_state(|s| {
+            s.take_pending_chain_absorb(77).expect("remove test guard");
+        });
+        complete_deposit_credit_after_async_at(
+            principal(1),
+            principal(10),
+            50_00000000,
+            1,
+            3,
+        )
+            .expect("retry finalizes from the saved receipt");
+        assert_eq!(
+            read_state(|s| s.total_stablecoin_balances.get(&principal(10)).copied()),
+            Some(50_00000000),
+        );
+        assert!(read_state(|s| s
+            .pending_deposit_intents
+            .as_ref()
+            .map_or(true, |intents| intents.is_empty())));
         crate::state::replace_state(crate::state::StabilityPoolState::default());
+    }
+
+    #[test]
+    fn saved_receipt_completes_even_after_deposit_policy_changes() {
+        crate::state::replace_state(crate::state::StabilityPoolState::default());
+        mutate_state(|s| {
+            let user = principal(1);
+            let ledger = principal(10);
+            s.deposits.insert(user, DepositPosition::new(0));
+            s.stablecoin_registry.insert(
+                ledger,
+                StablecoinConfig {
+                    ledger_id: ledger,
+                    symbol: "TEST".to_string(),
+                    decimals: 8,
+                    priority: 1,
+                    is_active: false,
+                    transfer_fee: None,
+                    is_lp_token: None,
+                    underlying_pool: None,
+                },
+            );
+            s.configuration.min_deposit_e8s = 90_00000000;
+            s.configuration.emergency_pause = true;
+            s.begin_deposit_intent(user, ledger, 50_00000000, 1)
+                .unwrap();
+            assert!(s.record_deposit_receipt(user, ledger, 50_00000000, 1, 9));
+        });
+
+        assert!(matches!(
+            complete_saved_deposit_receipt_before_admission(
+                principal(1),
+                principal(10),
+                50_00000000,
+                2,
+            ),
+            Ok(Some(()))
+        ), "a proven transfer must complete despite changed admission policy");
+        assert_eq!(
+            read_state(|s| s.total_stablecoin_balances.get(&principal(10)).copied()),
+            Some(50_00000000),
+        );
+        assert!(read_state(|s| s
+            .pending_deposit_intents
+            .as_ref()
+            .map_or(true, |intents| intents.is_empty())));
+        crate::state::replace_state(crate::state::StabilityPoolState::default());
+    }
+
+    #[test]
+    fn blocked_admission_with_unreceipted_intent_requires_reconciliation() {
+        let error = pending_deposit_admission_error(
+            StabilityPoolError::EmergencyPaused,
+            true,
+        );
+        assert!(matches!(
+            error,
+            StabilityPoolError::LedgerTransferFailed { reason }
+                if reason.contains("exact ledger reconciliation required")
+        ));
+        assert!(matches!(
+            pending_deposit_admission_error(StabilityPoolError::EmergencyPaused, false),
+            StabilityPoolError::EmergencyPaused
+        ));
     }
 
     #[test]

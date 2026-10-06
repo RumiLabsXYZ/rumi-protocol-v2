@@ -146,6 +146,14 @@ pub struct StabilityPoolState {
     pub pending_refunds: Option<BTreeMap<u64, PendingRefund>>,
     #[serde(default)]
     pub next_pending_refund_id: Option<u64>,
+    /// Monotonic ICRC-2 `created_at_time` allocator for deposits. This avoids
+    /// identical same-round requests aliasing at the ledger.
+    #[serde(default)]
+    pub last_deposit_transfer_created_at: Option<u64>,
+    /// Exact caller-scoped deposit requests retained across lost replies and
+    /// upgrades so Duplicate can only complete the matching transfer once.
+    #[serde(default)]
+    pub pending_deposit_intents: Option<BTreeMap<Principal, PendingDepositIntent>>,
 }
 
 impl Default for StabilityPoolState {
@@ -187,6 +195,8 @@ impl Default for StabilityPoolState {
             next_event_id: Some(0),
             pending_refunds: Some(BTreeMap::new()),
             next_pending_refund_id: Some(0),
+            last_deposit_transfer_created_at: None,
+            pending_deposit_intents: Some(BTreeMap::new()),
         }
     }
 }
@@ -617,6 +627,162 @@ impl StabilityPoolState {
     }
 
     // ─── Deposits ───
+
+    /// Reserve a globally unique ICRC-2 transfer timestamp across every
+    /// Stability Pool pull workflow. Separate deposit entry points must share
+    /// this allocator so identical calls in one IC time round cannot alias at
+    /// the ledger.
+    pub fn reserve_deposit_transfer_timestamp(&mut self, now_ns: u64) -> Result<u64, ()> {
+        let timestamp = match self.last_deposit_transfer_created_at {
+            Some(last) if now_ns <= last => last.checked_add(1).ok_or(())?,
+            _ => now_ns,
+        };
+        self.last_deposit_transfer_created_at = Some(timestamp);
+        Ok(timestamp)
+    }
+
+    /// Begin or replay a caller's exact pending ICRC-2 deposit. Distinct terms
+    /// cannot replace an unresolved pull. The timestamp remains unique even
+    /// when multiple calls observe the same IC time round.
+    pub fn begin_deposit_intent(
+        &mut self,
+        caller: Principal,
+        token_ledger: Principal,
+        amount: u64,
+        now_ns: u64,
+    ) -> Result<u64, ()> {
+        if let Some(intent) = self
+            .pending_deposit_intents
+            .as_mut()
+            .and_then(|intents| intents.get_mut(&caller))
+        {
+            if intent.token_ledger != token_ledger || intent.amount != amount {
+                return Err(());
+            }
+            intent.ambiguous_seen = true;
+            return Ok(intent.transfer_created_at_time_ns);
+        }
+
+        let timestamp = self.reserve_deposit_transfer_timestamp(now_ns)?;
+        self.pending_deposit_intents
+            .get_or_insert_with(BTreeMap::new)
+            .insert(
+                caller,
+                PendingDepositIntent {
+                    token_ledger,
+                    amount,
+                    transfer_created_at_time_ns: timestamp,
+                    transfer_block_index: None,
+                    ambiguous_seen: false,
+                },
+            );
+        Ok(timestamp)
+    }
+
+    pub fn deposit_intent_matches(
+        &self,
+        caller: Principal,
+        token_ledger: Principal,
+        amount: u64,
+        timestamp: u64,
+    ) -> bool {
+        self.pending_deposit_intents
+            .as_ref()
+            .and_then(|intents| intents.get(&caller))
+            .is_some_and(|intent| {
+                intent.token_ledger == token_ledger
+                    && intent.amount == amount
+                    && intent.transfer_created_at_time_ns == timestamp
+            })
+    }
+
+    /// Credit the exact pull once. False means another callback already
+    /// completed it or the supplied transfer identity is stale.
+    pub fn complete_deposit_intent(
+        &mut self,
+        caller: Principal,
+        token_ledger: Principal,
+        amount: u64,
+        timestamp: u64,
+        now_ns: u64,
+    ) -> bool {
+        if !self.deposit_intent_matches(caller, token_ledger, amount, timestamp)
+            || self
+                .pending_deposit_intents
+                .as_ref()
+                .and_then(|intents| intents.get(&caller))
+                .and_then(|intent| intent.transfer_block_index)
+                .is_none()
+        {
+            return false;
+        }
+        self.add_deposit(caller, token_ledger, amount);
+        self.pending_deposit_intents
+            .as_mut()
+            .expect("pending deposit map initialized")
+            .remove(&caller);
+        self.push_event_at(
+            caller,
+            PoolEventType::Deposit {
+                token_ledger,
+                amount,
+            },
+            now_ns,
+        );
+        true
+    }
+
+    pub fn record_deposit_receipt(
+        &mut self,
+        caller: Principal,
+        token_ledger: Principal,
+        amount: u64,
+        timestamp: u64,
+        block_index: u64,
+    ) -> bool {
+        let Some(intent) = self
+            .pending_deposit_intents
+            .as_mut()
+            .and_then(|intents| intents.get_mut(&caller))
+        else {
+            return false;
+        };
+        if intent.token_ledger != token_ledger
+            || intent.amount != amount
+            || intent.transfer_created_at_time_ns != timestamp
+            || intent
+                .transfer_block_index
+                .is_some_and(|existing| existing != block_index)
+        {
+            return false;
+        }
+        intent.transfer_block_index = Some(block_index);
+        true
+    }
+
+    /// Clear only an unambiguous attempt with a definitive ledger rejection.
+    pub fn clear_deposit_intent_after_no_effect(
+        &mut self,
+        caller: Principal,
+        token_ledger: Principal,
+        amount: u64,
+        timestamp: u64,
+    ) -> bool {
+        if !self.deposit_intent_matches(caller, token_ledger, amount, timestamp)
+            || self
+                .pending_deposit_intents
+                .as_ref()
+                .and_then(|intents| intents.get(&caller))
+                .map_or(true, |intent| intent.ambiguous_seen)
+        {
+            return false;
+        }
+        self.pending_deposit_intents
+            .as_mut()
+            .expect("pending deposit map initialized")
+            .remove(&caller);
+        true
+    }
 
     pub fn add_deposit(&mut self, user: Principal, token_ledger: Principal, amount: u64) {
         let position = self
@@ -2953,6 +3119,8 @@ impl From<StabilityPoolStateV1> for StabilityPoolState {
             next_event_id: v1.next_event_id,
             pending_refunds: Some(BTreeMap::new()),
             next_pending_refund_id: Some(0),
+            last_deposit_transfer_created_at: None,
+            pending_deposit_intents: Some(BTreeMap::new()),
         }
     }
 }
@@ -3134,6 +3302,67 @@ mod tests {
         });
 
         state
+    }
+
+    #[test]
+    fn same_round_identical_deposit_callbacks_credit_one_transfer_once() {
+        let mut state = StabilityPoolState::default();
+        let amount = 25_000_000;
+        add_deposit_direct(&mut state, user_a(), icusd_ledger(), 0);
+        let first_timestamp = state
+            .begin_deposit_intent(user_a(), icusd_ledger(), amount, 1_000)
+            .unwrap();
+        let retry_timestamp = state
+            .begin_deposit_intent(user_a(), icusd_ledger(), amount, 1_000)
+            .unwrap();
+
+        assert_eq!(retry_timestamp, first_timestamp);
+        assert!(state.record_deposit_receipt(user_a(), icusd_ledger(), amount, first_timestamp, 7,));
+        assert!(state.complete_deposit_intent(
+            user_a(),
+            icusd_ledger(),
+            amount,
+            first_timestamp,
+            2_000,
+        ));
+        assert!(!state.complete_deposit_intent(
+            user_a(),
+            icusd_ledger(),
+            amount,
+            retry_timestamp,
+            2_001,
+        ));
+        assert_eq!(
+            state.deposits[&user_a()].stablecoin_balances[&icusd_ledger()],
+            amount,
+        );
+        assert_eq!(state.total_stablecoin_balances[&icusd_ledger()], amount);
+        assert_eq!(state.pool_events.as_ref().unwrap().len(), 1);
+
+        // Once the receipt is finalized, another identical request in the
+        // same IC time round receives a fresh transfer identity.
+        let next_timestamp = state
+            .begin_deposit_intent(user_a(), icusd_ledger(), amount, 1_000)
+            .unwrap();
+        assert!(next_timestamp > first_timestamp);
+    }
+
+    #[test]
+    fn ordinary_and_convenience_deposits_share_timestamp_allocator() {
+        let mut state = StabilityPoolState::default();
+        let caller = user_a();
+        let ledger = icusd_ledger();
+        let ordinary = state
+            .begin_deposit_intent(caller, ledger, 25_000_000, 1_000)
+            .unwrap();
+        let convenience = state.reserve_deposit_transfer_timestamp(1_000).unwrap();
+        let next_ordinary = state
+            .begin_deposit_intent(user_b(), ledger, 25_000_000, 1_000)
+            .unwrap();
+
+        assert!(ordinary < convenience);
+        assert!(convenience < next_ordinary);
+        assert_eq!(state.last_deposit_transfer_created_at, Some(next_ordinary));
     }
 
     #[test]
@@ -5836,6 +6065,12 @@ mod tests {
             "pending refunds must start empty after a v1 upgrade",
         );
         assert_eq!(decoded.next_pending_refund_id.unwrap_or(0), 0);
+        assert!(decoded.last_deposit_transfer_created_at.is_none());
+        assert!(decoded
+            .pending_deposit_intents
+            .clone()
+            .unwrap_or_default()
+            .is_empty());
     }
 
     #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
