@@ -15,10 +15,9 @@ use crate::GuardError;
 use crate::PendingMarginTransfer;
 use crate::DEBUG;
 use crate::{
-    mutate_state, read_state, ProtocolError, RedeemQuotedRequest, RedemptionError,
-    PreparedRedemptionOffer, RedemptionOfferRefreshError, RedemptionPayoutStatus,
-    RedemptionPreview, RedemptionQueue, RedemptionQueueEntry, RedemptionQuote,
-    RedemptionResult,
+    mutate_state, read_state, PreparedRedemptionOffer, ProtocolError, RedeemQuotedRequest,
+    RedemptionError, RedemptionOfferRefreshError, RedemptionPayoutStatus, RedemptionPreview,
+    RedemptionQueue, RedemptionQueueEntry, RedemptionQuote, RedemptionResult,
     StabilityPoolLiquidationResult, StableTokenType, SuccessWithFee, VaultArgWithToken,
     DUST_THRESHOLD,
 };
@@ -30,8 +29,8 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::cell::RefCell;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 /// One ten-minute maximum-age contract shared by quote display, ranking refresh,
 /// and pre/post-pull verification. This matches XRC's existing hard ceiling.
@@ -39,8 +38,7 @@ const REDEMPTION_PRICE_MAX_AGE_NS: u64 = 10 * 60 * 1_000_000_000;
 pub(crate) const MAX_REDEMPTION_PRICE_CANDIDATES: usize = 64;
 const MAX_REDEMPTION_OFFER_REFRESH_PASSES: usize = 2;
 const MAX_LST_EXTERNAL_CALLS_PER_REFRESH: usize = 2;
-const MAX_REDEMPTION_OFFER_REFRESH_TARGETS_PER_PASS: usize =
-    MAX_REDEMPTION_PRICE_CANDIDATES + 1; // one off-set ICP source dependency
+const MAX_REDEMPTION_OFFER_REFRESH_TARGETS_PER_PASS: usize = MAX_REDEMPTION_PRICE_CANDIDATES + 1; // one off-set ICP source dependency
 const REDEMPTION_OFFER_REFRESH_COOLDOWN_NS: u64 = 300 * 1_000_000_000;
 const REDEMPTION_OFFER_REFRESH_LEASE_NS: u64 = 300 * 1_000_000_000;
 // Deliberately loose upper bound: two passes over at most 64 candidates plus
@@ -50,13 +48,13 @@ const REDEMPTION_OFFER_REFRESH_LEASE_NS: u64 = 300 * 1_000_000_000;
 // even when it is both a candidate and an LST dependency. `fetch_icp_rate`
 // couples at most 64 LSTs, each with the same two-call ceiling. This is 518
 // calls maximum.
-const MAX_REDEMPTION_OFFER_EXTERNAL_CALLS: usize =
-    (MAX_REDEMPTION_OFFER_REFRESH_PASSES * MAX_REDEMPTION_OFFER_REFRESH_TARGETS_PER_PASS
-        * MAX_LST_EXTERNAL_CALLS_PER_REFRESH)
-        + MAX_REDEMPTION_OFFER_REFRESH_PASSES
-        + (MAX_REDEMPTION_OFFER_REFRESH_PASSES
-            * MAX_REDEMPTION_PRICE_CANDIDATES
-            * MAX_LST_EXTERNAL_CALLS_PER_REFRESH);
+const MAX_REDEMPTION_OFFER_EXTERNAL_CALLS: usize = (MAX_REDEMPTION_OFFER_REFRESH_PASSES
+    * MAX_REDEMPTION_OFFER_REFRESH_TARGETS_PER_PASS
+    * MAX_LST_EXTERNAL_CALLS_PER_REFRESH)
+    + MAX_REDEMPTION_OFFER_REFRESH_PASSES
+    + (MAX_REDEMPTION_OFFER_REFRESH_PASSES
+        * MAX_REDEMPTION_PRICE_CANDIDATES
+        * MAX_LST_EXTERNAL_CALLS_PER_REFRESH);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct RedemptionOfferRefreshGateState {
@@ -66,10 +64,7 @@ struct RedemptionOfferRefreshGateState {
 }
 
 impl RedemptionOfferRefreshGateState {
-    fn try_acquire(
-        &mut self,
-        now_ns: u64,
-    ) -> Result<u64, RedemptionOfferRefreshError> {
+    fn try_acquire(&mut self, now_ns: u64) -> Result<u64, RedemptionOfferRefreshError> {
         if let Some((_, started_at_ns)) = self.in_flight {
             let elapsed = now_ns.saturating_sub(started_at_ns);
             if now_ns < started_at_ns || elapsed < REDEMPTION_OFFER_REFRESH_LEASE_NS {
@@ -114,11 +109,7 @@ struct RedemptionOfferRefreshGuard(u64);
 
 impl RedemptionOfferRefreshGuard {
     fn try_acquire(now_ns: u64) -> Result<Self, RedemptionOfferRefreshError> {
-        REDEMPTION_OFFER_REFRESH_GATE.with(|gate| {
-            gate.borrow_mut()
-                .try_acquire(now_ns)
-                .map(Self)
-        })
+        REDEMPTION_OFFER_REFRESH_GATE.with(|gate| gate.borrow_mut().try_acquire(now_ns).map(Self))
     }
 }
 
@@ -129,11 +120,8 @@ impl Drop for RedemptionOfferRefreshGuard {
 }
 
 fn redemption_offer_refresh_cooldown_remaining(now_ns: u64) -> u64 {
-    REDEMPTION_OFFER_REFRESH_GATE.with(|gate| {
-        gate.borrow()
-            .cooldown_until_ns
-            .saturating_sub(now_ns)
-    })
+    REDEMPTION_OFFER_REFRESH_GATE
+        .with(|gate| gate.borrow().cooldown_until_ns.saturating_sub(now_ns))
 }
 
 /// Fee inputs frozen for one read-only queue calculation. The elapsed-hour
@@ -232,9 +220,9 @@ fn redemption_candidate_prices_are_fresh(
     candidates: &[Principal],
     now: u64,
 ) -> bool {
-    candidates
-        .iter()
-        .all(|collateral_type| redemption_candidate_price_is_valid(state, collateral_type, now, true))
+    candidates.iter().all(|collateral_type| {
+        redemption_candidate_price_is_valid(state, collateral_type, now, true)
+    })
 }
 
 fn stale_redemption_candidate_types(
@@ -381,15 +369,11 @@ fn legacy_redemption_run_for_request(
     } else {
         requested_collateral_type
     };
-    let run = state
-        .redemption_runs()
-        .into_iter()
-        .next()
-        .ok_or_else(|| {
-            ProtocolError::TemporarilyUnavailable(
-                "No eligible collateral vaults are available for redemption.".to_string(),
-            )
-        })?;
+    let run = state.redemption_runs().into_iter().next().ok_or_else(|| {
+        ProtocolError::TemporarilyUnavailable(
+            "No eligible collateral vaults are available for redemption.".to_string(),
+        )
+    })?;
     if run.collateral_type != requested_collateral_type {
         let requested_symbol = state
             .get_collateral_config(&requested_collateral_type)
@@ -424,15 +408,11 @@ fn legacy_reserve_spillover_run(
     if spillover_e8s == 0 {
         return Ok(None);
     }
-    let run = state
-        .redemption_runs()
-        .into_iter()
-        .next()
-        .ok_or_else(|| {
-            ProtocolError::TemporarilyUnavailable(
-                "No eligible collateral vaults are available for reserve spillover.".to_string(),
-            )
-        })?;
+    let run = state.redemption_runs().into_iter().next().ok_or_else(|| {
+        ProtocolError::TemporarilyUnavailable(
+            "No eligible collateral vaults are available for reserve spillover.".to_string(),
+        )
+    })?;
     validate_legacy_reserve_spillover_asset(state, &run)?;
     Ok(Some(run))
 }
@@ -655,8 +635,8 @@ async fn refresh_redemption_candidate_prices() -> Result<(), ProtocolError> {
 /// cached ICP and do not recursively fetch ICP. Unlike
 /// `refresh_redemption_candidate_prices`, this helper is only used by the
 /// public no-funds offer endpoint.
-async fn refresh_stale_redemption_candidates_for_offer(
-) -> Result<(), RedemptionOfferRefreshError> {
+async fn refresh_stale_redemption_candidates_for_offer() -> Result<(), RedemptionOfferRefreshError>
+{
     refresh_stale_redemption_candidates_for_offer_with(
         || ic_cdk::api::time(),
         |now| read_state(|state| redemption_offer_price_refresh_snapshot(state, now)),
@@ -683,8 +663,7 @@ where
     Now: FnMut() -> u64,
     Snapshot: FnMut(u64) -> RedemptionOfferPriceRefreshSnapshot,
     Refresh: FnMut(Principal) -> RefreshFuture,
-    RefreshFuture:
-        std::future::Future<Output = Result<(), RedemptionOfferRefreshError>>,
+    RefreshFuture: std::future::Future<Output = Result<(), RedemptionOfferRefreshError>>,
 {
     for _ in 0..MAX_REDEMPTION_OFFER_REFRESH_PASSES {
         let current = snapshot(now());
@@ -746,8 +725,8 @@ fn build_redemption_queue_and_quote(
             .expect("fee snapshot prepared for every redemption run");
         let simulation = redemption_simulation_plan(state, run);
         let max_input = max_input_for_run_with(state, run, fee_snapshot, &simulation);
-        let max_net = net_for_run_input(state, run, max_input, fee_snapshot, &simulation)
-            .unwrap_or(0);
+        let max_net =
+            net_for_run_input(state, run, max_input, fee_snapshot, &simulation).unwrap_or(0);
         if index == 0 {
             quote_result = Some(if ranking_complete {
                 quote_for_redemption_run(
@@ -879,7 +858,8 @@ fn prepared_offer_from_current_state(
     let (queue, quote) = build_redemption_queue_and_quote(state, now, amount_e8s, false);
     if !queue.ranking_fresh {
         return Err(RedemptionOfferRefreshError::RefreshUnavailable {
-            message: "The complete collateral ranking is no longer fresh; refresh the offer again.".to_string(),
+            message: "The complete collateral ranking is no longer fresh; refresh the offer again."
+                .to_string(),
             retry_after_ns,
         });
     }
@@ -1026,8 +1006,7 @@ pub fn get_redemption_quote(amount_e8s: u64) -> Result<RedemptionQuote, Redempti
 pub fn get_redemption_preview(amount_e8s: u64) -> RedemptionPreview {
     let now = ic_cdk::api::time();
     read_state(|state| {
-        let (queue, estimate) =
-            build_redemption_queue_and_quote(state, now, amount_e8s, true);
+        let (queue, estimate) = build_redemption_queue_and_quote(state, now, amount_e8s, true);
         RedemptionPreview { queue, estimate }
     })
 }
@@ -1152,7 +1131,9 @@ fn simulated_collateral_total_raw(redemptions: &[crate::event::VaultRedemption])
     u64::try_from(total).ok()
 }
 
-fn redemption_record_error_to_protocol(error: crate::event::RedemptionRecordError) -> RedemptionError {
+fn redemption_record_error_to_protocol(
+    error: crate::event::RedemptionRecordError,
+) -> RedemptionError {
     match error {
         crate::event::RedemptionRecordError::PayoutUnrepresentable => {
             RedemptionError::RedemptionQuoteUnavailable(
@@ -1372,14 +1353,14 @@ pub async fn verify_and_record_three_usd_reserve_payout(
         }
         if let Some(receipt) = payout.receipt.as_ref() {
             if receipt.block_index == block_index && receipt.tuple == payout.tuple
-                && !state.pending_margin_transfers.contains_key(&(key.vault_id, key.stability_pool))
+                && !state.pending_margin_transfers.contains_key(&op_nonce)
             {
                 return Ok(Some((key, payout.tuple.clone(), None)));
             }
             return Err("linked V2 payout already has a different retained receipt".into());
         }
         let transfer = state.pending_margin_transfers
-            .get(&(key.vault_id, key.stability_pool)).copied()
+            .get(&op_nonce).copied()
             .ok_or_else(|| "linked V2 payout has neither a receipt nor a pending transfer".to_string())?;
         if transfer.op_nonce != op_nonce
             || transfer.owner != key.stability_pool
@@ -1431,7 +1412,7 @@ pub async fn verify_and_record_three_usd_reserve_payout(
     let receipt = ThreeUsdReserveIngressPayoutReceipt { block_index, tuple };
     Ok(Some(mutate_state(|state| {
         let exact = state.pending_margin_transfers
-            .get(&(key.vault_id, key.stability_pool)) == Some(&transfer)
+            .get(&op_nonce) == Some(&transfer)
             && state.three_usd_reserve_payout_parents.get(&op_nonce) == Some(&key)
             && state.three_usd_reserve_ingress_journals.get(&key)
                 .and_then(|journal| journal.payout.as_ref())
@@ -1444,8 +1425,9 @@ pub async fn verify_and_record_three_usd_reserve_payout(
         } else {
             return false;
         }
-        crate::event::record_margin_transfer(
-            state, key.vault_id, key.stability_pool, block_index,
+        crate::event::record_pending_payout_settled(
+            state, op_nonce, crate::event::PendingPayoutKind::Margin,
+            key.vault_id, block_index,
         );
         true
     })))
@@ -1458,7 +1440,7 @@ pub async fn process_pending_three_usd_reserve_payouts() {
         state.three_usd_reserve_payout_parents.iter().filter_map(|(nonce, key)| {
             let tuple = state.three_usd_reserve_ingress_journals.get(key)?
                 .payout.as_ref()?.tuple.clone();
-            let transfer = state.pending_margin_transfers.get(&(key.vault_id, key.stability_pool))?;
+            let transfer = state.pending_margin_transfers.get(nonce)?;
             (tuple.op_nonce == *nonce && transfer.op_nonce == *nonce)
                 .then_some((*nonce, tuple))
         }).collect::<Vec<_>>()
@@ -1997,8 +1979,7 @@ pub async fn redeem_reserves(
         let refreshed = refresh_redemption_candidate_prices().await;
         let still_representable = refreshed.is_ok()
             && read_state(|state| {
-                let Some(run) =
-                    current_legacy_reserve_run_for_snapshot(state, expected_snapshot)
+                let Some(run) = current_legacy_reserve_run_for_snapshot(state, expected_snapshot)
                 else {
                     return false;
                 };
@@ -2134,8 +2115,7 @@ pub async fn redeem_reserves(
             // Stable and treasury ledger calls have awaited. Compare the full
             // pre-pull snapshot before the synchronous event mutation. If any
             // part changed, do not seize and refund only the spillover tail.
-            let Some(expected_snapshot) = &spillover_plan
-            else {
+            let Some(expected_snapshot) = &spillover_plan else {
                 return reserve_spillover_snapshot_mismatch_refund(
                     spillover_e8s,
                     rmr,
@@ -2176,7 +2156,7 @@ pub async fn redeem_reserves(
                     spillover_e8s,
                     rmr,
                     raw_spillover_refund_budget_e8s,
-                )
+                );
             };
             let current_price = UsdIcp::from(price_decimal);
 
@@ -2209,7 +2189,7 @@ pub async fn redeem_reserves(
                     spillover_e8s,
                     rmr,
                     raw_spillover_refund_budget_e8s,
-                )
+                );
             }
 
             let outcome = match crate::event::record_redemption_on_vault_run(
@@ -2272,12 +2252,8 @@ pub async fn redeem_reserves(
     };
     if refund_e8s > 0 {
         let refund_nonce = mutate_state(|s| s.next_op_nonce());
-        match management::transfer_icusd_with_nonce(
-            ICUSD::from(refund_e8s),
-            caller,
-            refund_nonce,
-        )
-        .await
+        match management::transfer_icusd_with_nonce(ICUSD::from(refund_e8s), caller, refund_nonce)
+            .await
         {
             Ok(refund_block) => {
                 log!(
@@ -2407,8 +2383,7 @@ pub async fn redeem_collateral(
     // Fail closed on a stale price for the collateral actually being seized
     // (VER-001 ceiling applies inside ensure_fresh_price_for).
     refresh_redemption_candidate_prices().await?;
-    let pre_pull_run =
-        read_state(|s| legacy_redemption_run_for_request(s, collateral_type))?;
+    let pre_pull_run = read_state(|s| legacy_redemption_run_for_request(s, collateral_type))?;
     let pre_pull_snapshot = RedemptionRunSnapshot::capture(&pre_pull_run);
     let redeem_ct = pre_pull_run.collateral_type;
     let collateral_price = Decimal::from_f64_retain(pre_pull_run.price_usd).ok_or(
@@ -2493,8 +2468,7 @@ pub async fn redeem_collateral(
                 )
                 .await);
             };
-            if let Some(error) = redemption_run_snapshot_error(&pre_pull_snapshot, &post_pull_run)
-            {
+            if let Some(error) = redemption_run_snapshot_error(&pre_pull_snapshot, &post_pull_run) {
                 return Err(refund_rejected_quoted_redemption(
                     caller,
                     icusd_amount.to_u64(),
@@ -2571,7 +2545,9 @@ pub async fn redeem_collateral(
                     &run_vault_ids,
                     None,
                 )
-                .map_err(|error| legacy_redemption_error(redemption_record_error_to_protocol(error)))?;
+                .map_err(|error| {
+                    legacy_redemption_error(redemption_record_error_to_protocol(error))
+                })?;
 
                 crate::record_per_collateral_redemption_fee(
                     s,
@@ -3440,6 +3416,8 @@ pub(crate) fn record_xrp_claim(
 /// `custody_owner` is the SOURCE vault's owner (its threshold key controls the
 /// custody address), captured while the vault is in hand — safe even when
 /// cleanup_if_drained removes the vault immediately after.
+type PendingPayoutRef = (crate::event::PendingPayoutKind, u128);
+
 fn queue_collateral_payout(
     s: &mut crate::state::State,
     vault_id: u64,
@@ -3449,6 +3427,7 @@ fn queue_collateral_payout(
     collateral_type: Principal,
     op_nonce: u128,
     now_ns: u64,
+    immediate_payouts: &mut Vec<PendingPayoutRef>,
 ) -> Option<u64> {
     let is_xrp = s
         .get_collateral_config(&collateral_type)
@@ -3464,17 +3443,31 @@ fn queue_collateral_payout(
             now_ns,
         ))
     } else {
-        s.pending_margin_transfers.insert(
-            (vault_id, recipient),
-            PendingMarginTransfer {
-                owner: recipient,
-                margin,
-                collateral_type,
-                retry_count: 0,
-                op_nonce,
-                min_net_collateral_raw: None,
-            },
+        let (ledger, fee) = s
+            .get_collateral_config(&collateral_type)
+            .map(|config| (config.ledger_canister_id, config.ledger_fee))
+            .unwrap_or((s.icp_ledger_principal, s.icp_ledger_fee.to_u64()));
+        let transfer_amount_raw = margin.to_u64().saturating_sub(fee);
+        let transfer = PendingMarginTransfer {
+            vault_id,
+            owner: recipient,
+            margin,
+            collateral_type,
+            retry_count: 0,
+            op_nonce,
+            ledger: Some(ledger),
+            transfer_amount_raw: Some(transfer_amount_raw),
+            held_for_manual_retry: transfer_amount_raw == 0,
+            reconciliation_required: transfer_amount_raw == 0,
+            min_net_collateral_raw: None,
+        };
+        crate::event::record_pending_payout_queued(
+            s,
+            op_nonce,
+            crate::event::PendingPayoutKind::Margin,
+            transfer,
         );
+        immediate_payouts.push((crate::event::PendingPayoutKind::Margin, op_nonce));
         None
     }
 }
@@ -3763,10 +3756,7 @@ fn ensure_no_active_xrp_sp_absorb_preflight(
     Ok(())
 }
 
-fn reject_active_xrp_sp_absorb_preflight(
-    vault_id: u64,
-    now_ns: u64,
-) -> Result<(), ProtocolError> {
+fn reject_active_xrp_sp_absorb_preflight(vault_id: u64, now_ns: u64) -> Result<(), ProtocolError> {
     read_state(|s| ensure_no_active_xrp_sp_absorb_preflight(s, vault_id, now_ns))
 }
 
@@ -4618,7 +4608,13 @@ pub async fn settle_xrp_claim_with_tag(
     destination: String,
     destination_tag: Option<u32>,
 ) -> Result<String, ProtocolError> {
-    settle_xrp_claim_as(ic_cdk::api::caller(), claim_id, destination, destination_tag).await
+    settle_xrp_claim_as(
+        ic_cdk::api::caller(),
+        claim_id,
+        destination,
+        destination_tag,
+    )
+    .await
 }
 
 /// Settlement body with an explicit acting claimant. The claimant entry points
@@ -7756,6 +7752,7 @@ pub async fn liquidate_vault_partial(
     };
 
     // Step 3: Update protocol state (partial liquidation)
+    let mut immediate_payouts = Vec::new();
     let (interest_share, xrp_claim_id) = mutate_state(|s| {
         // Compute proportional interest share before reducing debt
         let interest_share = if let Some(vault) = s.vault_id_to_vaults.get(&vault_id) {
@@ -7862,6 +7859,7 @@ pub async fn liquidate_vault_partial(
             vault.collateral_type,
             nonce,
             ic_cdk::api::time(),
+            &mut immediate_payouts,
         );
 
         // Shared drain rule (see state::cleanup_if_drained): remove the vault
@@ -7924,7 +7922,7 @@ pub async fn liquidate_vault_partial(
     }
 
     // Step 4: Process transfer (same as complete liquidation)
-    match try_process_pending_transfers_immediate(vault_id).await {
+    match try_process_pending_transfers_immediate(&immediate_payouts).await {
         Ok(processed_count) => {
             log!(
                 INFO,
@@ -7934,7 +7932,7 @@ pub async fn liquidate_vault_partial(
         }
         Err(e) => {
             log!(INFO, "[liquidate_vault_partial] Immediate processing failed: {}. Transfers will be retried via timer", e);
-            schedule_transfer_retry(vault_id, 0);
+            schedule_transfer_retry(vault_id, immediate_payouts.clone(), 0);
         }
     }
 
@@ -8184,6 +8182,7 @@ pub async fn liquidate_vault_partial_with_stable(
         };
 
     // Step 3: Update protocol state (partial liquidation)
+    let mut immediate_payouts = Vec::new();
     let (interest_share, xrp_claim_id) = mutate_state(|s| {
         // Compute proportional interest share before reducing debt
         let interest_share = if let Some(vault) = s.vault_id_to_vaults.get(&vault_id) {
@@ -8283,6 +8282,7 @@ pub async fn liquidate_vault_partial_with_stable(
             vault.collateral_type,
             nonce,
             ic_cdk::api::time(),
+            &mut immediate_payouts,
         );
 
         // Shared drain rule (see state::cleanup_if_drained): remove the vault
@@ -8371,7 +8371,7 @@ pub async fn liquidate_vault_partial_with_stable(
     }
 
     // Step 4: Process transfer
-    match try_process_pending_transfers_immediate(vault_id).await {
+    match try_process_pending_transfers_immediate(&immediate_payouts).await {
         Ok(processed_count) => {
             log!(
                 INFO,
@@ -8381,7 +8381,7 @@ pub async fn liquidate_vault_partial_with_stable(
         }
         Err(e) => {
             log!(INFO, "[liquidate_vault_stable] Immediate processing failed: {}. Transfers will be retried via timer", e);
-            schedule_transfer_retry(vault_id, 0);
+            schedule_transfer_retry(vault_id, immediate_payouts.clone(), 0);
         }
     }
 
@@ -8897,6 +8897,7 @@ async fn liquidate_vault_debt_already_burned_inner(
     // The icUSD supply has already been reduced by `icusd_burned_e8s`.
 
     // Step 3: Update protocol state (partial liquidation)
+    let mut immediate_payouts = Vec::new();
     let (interest_share, committed_result) = match mutate_state(|s| -> Result<
         (ICUSD, StabilityPoolLiquidationResult),
         ProtocolError,
@@ -8922,7 +8923,9 @@ async fn liquidate_vault_debt_already_burned_inner(
                     "V2 reserve payout parent is not the registered Stability Pool operation".into(),
                 ));
             }
-            if s.pending_margin_transfers.contains_key(&(vault_id, caller)) {
+            if s.pending_margin_transfers.values().any(|row| {
+                row.vault_id == vault_id && row.owner == caller
+            }) {
                 return Err(ProtocolError::GenericError(
                     "V2 reserve payout cannot replace an existing margin obligation".into(),
                 ));
@@ -9145,9 +9148,10 @@ async fn liquidate_vault_debt_already_burned_inner(
             vault.collateral_type,
             nonce,
             ic_cdk::api::time(),
+            &mut immediate_payouts,
         );
         if let Some((key, ledger, fee, proof_kind, collateral_type, gross, net)) = v2_payout_binding {
-            let row = s.pending_margin_transfers.get(&(key.vault_id, key.stability_pool))
+            let row = s.pending_margin_transfers.get(&nonce)
                 .expect("validated non-XRP V2 payout configuration must enqueue a margin transfer");
             assert!(row.op_nonce == nonce
                 && row.owner == key.stability_pool
@@ -9263,7 +9267,7 @@ async fn liquidate_vault_debt_already_burned_inner(
     // independently and cannot change the committed amounts.
 
     // Step 4: Process collateral transfer to stability pool
-    match try_process_pending_transfers_immediate(vault_id).await {
+    match try_process_pending_transfers_immediate(&immediate_payouts).await {
         Ok(processed_count) => {
             log!(
                 INFO,
@@ -9277,7 +9281,7 @@ async fn liquidate_vault_debt_already_burned_inner(
                 "[liquidate_vault_debt_burned] Immediate processing failed: {}. Retrying via timer",
                 e
             );
-            schedule_transfer_retry(vault_id, 0);
+            schedule_transfer_retry(vault_id, immediate_payouts.clone(), 0);
         }
     }
 
@@ -9452,6 +9456,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
     // our pre-await read and the icUSD pull above. Detect it BEFORE any
     // irreversible state work and refund the liquidator (None branch below)
     // instead of trapping inside s.liquidate_vault()'s vault lookup.
+    let mut immediate_payouts = Vec::new();
     let (interest_share, xrp_claim_id) = match mutate_state(|s| {
         if !s.vault_id_to_vaults.contains_key(&vault_id) {
             return None;
@@ -9551,6 +9556,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
             vault.collateral_type,
             liquidator_nonce,
             ic_cdk::api::time(),
+            &mut immediate_payouts,
         );
 
         // Create pending transfer for excess collateral to vault owner (if any)
@@ -9576,17 +9582,31 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
                 );
             } else {
                 let excess_nonce = s.next_op_nonce();
-                s.pending_excess_transfers.insert(
-                    (vault_id, vault.owner),
-                    PendingMarginTransfer {
-                        owner: vault.owner,
-                        margin: excess_pay,
-                        collateral_type: vault.collateral_type,
-                        retry_count: 0,
-                        op_nonce: excess_nonce,
-                        min_net_collateral_raw: None,
-                    },
+                let (ledger, fee) = s
+                    .get_collateral_config(&vault.collateral_type)
+                    .map(|config| (config.ledger_canister_id, config.ledger_fee))
+                    .unwrap_or((s.icp_ledger_principal, s.icp_ledger_fee.to_u64()));
+                let transfer_amount_raw = excess_pay.to_u64().saturating_sub(fee);
+                let transfer = PendingMarginTransfer {
+                    vault_id,
+                    owner: vault.owner,
+                    margin: excess_pay,
+                    collateral_type: vault.collateral_type,
+                    retry_count: 0,
+                    op_nonce: excess_nonce,
+                    ledger: Some(ledger),
+                    transfer_amount_raw: Some(transfer_amount_raw),
+                    held_for_manual_retry: transfer_amount_raw == 0,
+                    reconciliation_required: transfer_amount_raw == 0,
+                    min_net_collateral_raw: None,
+                };
+                crate::event::record_pending_payout_queued(
+                    s,
+                    excess_nonce,
+                    crate::event::PendingPayoutKind::Excess,
+                    transfer,
                 );
+                immediate_payouts.push((crate::event::PendingPayoutKind::Excess, excess_nonce));
             }
         }
 
@@ -9698,7 +9718,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
     );
 
     // Try to process transfers immediately
-    match try_process_pending_transfers_immediate(vault_id).await {
+    match try_process_pending_transfers_immediate(&immediate_payouts).await {
         Ok(processed_count) => {
             log!(
                 INFO,
@@ -9710,7 +9730,7 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
             log!(INFO, "[liquidate_vault] Immediate processing failed: {}. Transfers will be retried via timer", e);
 
             // Schedule retry with exponential backoff
-            schedule_transfer_retry(vault_id, 0);
+            schedule_transfer_retry(vault_id, immediate_payouts.clone(), 0);
         }
     }
 
@@ -9760,48 +9780,54 @@ pub async fn liquidate_vault(vault_id: u64) -> Result<SuccessWithFee, ProtocolEr
 }
 
 // Helper function to attempt immediate transfer processing
-async fn try_process_pending_transfers_immediate(vault_id: u64) -> Result<u32, String> {
+async fn try_process_pending_transfers_immediate(
+    operation_ids: &[PendingPayoutRef],
+) -> Result<u32, String> {
     let mut processed_count = 0;
 
-    // Wave-4 LIQ-001: collect every pending margin/excess entry whose key matches
-    // this vault_id. Concurrent liquidators on the same vault each have their own
-    // (vault_id, owner) key, so we iterate rather than do a single point lookup.
+    // Process only operation ids created by this liquidation. The background
+    // timer handles other queued obligations without an unbounded vault scan.
     let transfers_to_process = read_state(|s| {
-        let mut transfers = Vec::new();
-
-        for ((vid, owner), transfer) in s.pending_margin_transfers.iter() {
-            if *vid == vault_id {
-                transfers.push(("margin", *vid, *owner, transfer.clone()));
-            }
-        }
-
-        for ((vid, owner), transfer) in s.pending_excess_transfers.iter() {
-            if *vid == vault_id {
-                transfers.push(("excess", *vid, *owner, transfer.clone()));
-            }
-        }
-
-        transfers
+        operation_ids
+            .iter()
+            .filter_map(|(kind, operation_id)| {
+                let transfer = match kind {
+                    crate::event::PendingPayoutKind::Margin => {
+                        s.pending_margin_transfers.get(operation_id)
+                    }
+                    crate::event::PendingPayoutKind::Excess => {
+                        s.pending_excess_transfers.get(operation_id)
+                    }
+                }?;
+                Some((*kind, *operation_id, *transfer))
+            })
+            .collect::<Vec<_>>()
     });
 
     // Process each transfer
-    for (transfer_type, transfer_vault_id, transfer_owner, transfer) in transfers_to_process {
+    for (kind, operation_id, transfer) in transfers_to_process {
         // A V2 3USD absorb has a persisted exact payout tuple linked to the
         // committed debt write-down. Never reprice it through the legacy
         // margin path, and never remove its queue row on a transfer reply
         // alone; retain the obligation until the exact receipt is verified.
         let v2_payout = read_state(|state| {
-            let key = state.three_usd_reserve_payout_parents.get(&transfer.op_nonce)?;
-            let payout = state.three_usd_reserve_ingress_journals
-                .get(key)?.payout.as_ref()?;
-            (payout.tuple.op_nonce == transfer.op_nonce).then(|| payout.tuple.clone())
+            state.three_usd_reserve_payout_parents.get(&operation_id).map(|key| {
+                state.three_usd_reserve_ingress_journals.get(key)
+                    .and_then(|journal| journal.payout.as_ref())
+                    .map(|payout| payout.tuple.clone())
+            })
         });
-        if let Some(tuple) = v2_payout {
-            if transfer_type != "margin"
+        if let Some(v2_payout) = v2_payout {
+            let Some(tuple) = v2_payout else {
+                log!(INFO, "[immediate_transfer] Holding V2 reserve payout {} because its pinned tuple is missing", operation_id);
+                continue;
+            };
+            if kind != crate::event::PendingPayoutKind::Margin
+                || tuple.op_nonce != operation_id
                 || tuple.ledger == Principal::anonymous()
                 || tuple.source.owner != ic_cdk::id()
                 || tuple.source.subaccount.is_some()
-                || tuple.destination.owner != transfer_owner
+                || tuple.destination.owner != transfer.owner
                 || tuple.destination.subaccount.is_some()
                 || tuple.gross_amount_e8s != transfer.margin.to_u64()
                 || tuple.collateral_type != transfer.collateral_type
@@ -9832,50 +9858,45 @@ async fn try_process_pending_transfers_immediate(vault_id: u64) -> Result<u32, S
             }
             continue;
         }
+        if transfer.held_for_manual_retry || transfer.reconciliation_required {
+            continue;
+        }
         // Note: native-XRP collateral never reaches this ICRC processor — it is
         // converted to an XrpClaim at the moment of liquidation/withdrawal (see
         // `queue_collateral_payout`), so a NativeXrp `collateral_type` cannot appear
         // in pending_margin_transfers / pending_excess_transfers.
-        // Look up per-collateral ledger fee and canister ID
-        let (ledger_fee, ledger_canister_id) =
-            read_state(
-                |s| match s.get_collateral_config(&transfer.collateral_type) {
-                    Some(config) => (ICP::from(config.ledger_fee), config.ledger_canister_id),
-                    None => (s.icp_ledger_fee, s.icp_ledger_principal),
-                },
-            );
-
-        if transfer.margin <= ledger_fee {
-            log!(INFO, "[immediate_transfer] Skipping {} transfer {} owner {} - margin {} <= fee {}, removing",
-                transfer_type, transfer_vault_id, transfer_owner, transfer.margin.to_u64(), ledger_fee.to_u64());
-            mutate_state(|s| {
-                let key = (transfer_vault_id, transfer_owner);
-                match transfer_type {
-                    "margin" => {
-                        s.pending_margin_transfers.remove(&key);
-                    }
-                    "excess" => {
-                        s.pending_excess_transfers.remove(&key);
-                    }
-                    _ => {}
+        let (ledger_canister_id, transfer_amount) =
+            match (transfer.ledger, transfer.transfer_amount_raw) {
+                (Some(ledger), Some(amount)) if transfer.op_nonce != 0 && amount > 0 => {
+                    (ledger, amount)
                 }
-            });
-            processed_count += 1;
-            continue;
-        }
-        let transfer_amount = transfer.margin - ledger_fee;
+                _ => {
+                    mutate_state(|s| {
+                        let map = match kind {
+                            crate::event::PendingPayoutKind::Margin => {
+                                &mut s.pending_margin_transfers
+                            }
+                            _ => &mut s.pending_excess_transfers,
+                        };
+                        if let Some(p) = map.get_mut(&operation_id) {
+                            crate::event::record_pending_payout_held(operation_id, kind, p, true);
+                        }
+                    });
+                    continue;
+                }
+            };
 
         log!(
             INFO,
-            "[immediate_transfer] Processing {} transfer {} of {} collateral to {}",
-            transfer_type,
-            transfer_vault_id,
-            transfer_amount.to_u64(),
+            "[immediate_transfer] Processing {:?} transfer {} of {} collateral to {}",
+            kind,
+            transfer.vault_id,
+            transfer_amount,
             transfer.owner
         );
 
         match management::transfer_collateral_with_nonce(
-            transfer_amount.to_u64(),
+            transfer_amount,
             transfer.owner,
             ledger_canister_id,
             transfer.op_nonce,
@@ -9886,23 +9907,19 @@ async fn try_process_pending_transfers_immediate(vault_id: u64) -> Result<u32, S
                 log!(
                     INFO,
                     "[immediate_transfer] Transfer {} owner {} successful, block: {}",
-                    transfer_vault_id,
-                    transfer_owner,
+                    transfer.vault_id,
+                    transfer.owner,
                     block_index
                 );
 
-                // Remove from the appropriate pending map
                 mutate_state(|s| {
-                    let key = (transfer_vault_id, transfer_owner);
-                    match transfer_type {
-                        "margin" => {
-                            s.pending_margin_transfers.remove(&key);
-                        }
-                        "excess" => {
-                            s.pending_excess_transfers.remove(&key);
-                        }
-                        _ => {}
-                    }
+                    crate::event::record_pending_payout_settled(
+                        s,
+                        operation_id,
+                        kind,
+                        transfer.vault_id,
+                        block_index,
+                    )
                 });
 
                 processed_count += 1;
@@ -9911,12 +9928,29 @@ async fn try_process_pending_transfers_immediate(vault_id: u64) -> Result<u32, S
                 log!(
                     INFO,
                     "[immediate_transfer] Transfer {} owner {} failed: {}. Will retry later",
-                    transfer_vault_id,
-                    transfer_owner,
+                    transfer.vault_id,
+                    transfer.owner,
                     error
                 );
-                // Leave in pending transfers for retry
-                return Err(format!("Transfer {} failed: {}", transfer_vault_id, error));
+                if matches!(
+                    &error,
+                    icrc_ledger_types::icrc1::transfer::TransferError::TooOld
+                        | icrc_ledger_types::icrc1::transfer::TransferError::BadFee { .. }
+                ) {
+                    mutate_state(|s| {
+                        let map = match kind {
+                            crate::event::PendingPayoutKind::Margin => {
+                                &mut s.pending_margin_transfers
+                            }
+                            _ => &mut s.pending_excess_transfers,
+                        };
+                        if let Some(p) = map.get_mut(&operation_id) {
+                            crate::event::record_pending_payout_held(operation_id, kind, p, true);
+                        }
+                    });
+                }
+                // Leave retryable failures pending.
+                return Err(format!("Transfer {} failed: {}", transfer.vault_id, error));
             }
         }
     }
@@ -9925,7 +9959,11 @@ async fn try_process_pending_transfers_immediate(vault_id: u64) -> Result<u32, S
 }
 
 // Helper function to schedule transfer retries with exponential backoff
-fn schedule_transfer_retry(vault_id: u64, retry_count: u32) {
+fn schedule_transfer_retry(
+    vault_id: u64,
+    operation_ids: Vec<PendingPayoutRef>,
+    retry_count: u32,
+) {
     let max_retries = 5;
     if retry_count >= max_retries {
         log!(
@@ -9956,7 +9994,7 @@ fn schedule_transfer_retry(vault_id: u64, retry_count: u32) {
                 vault_id
             );
 
-            match try_process_pending_transfers_immediate(vault_id).await {
+            match try_process_pending_transfers_immediate(&operation_ids).await {
                 Ok(processed) => {
                     log!(
                         INFO,
@@ -9971,7 +10009,7 @@ fn schedule_transfer_retry(vault_id: u64, retry_count: u32) {
                         "[retry_scheduler] Retry #{} failed, scheduling next retry",
                         retry_count + 1
                     );
-                    schedule_transfer_retry(vault_id, retry_count + 1);
+                    schedule_transfer_retry(vault_id, operation_ids, retry_count + 1);
                 }
             }
         })
@@ -10249,6 +10287,7 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
     };
 
     // Step 5: Update protocol state ATOMICALLY
+    let mut immediate_payouts = Vec::new();
     let (interest_share, xrp_claim_id) = mutate_state(|s| {
         // Compute proportional interest share before reducing debt
         let interest_share = if let Some(vault) = s.vault_id_to_vaults.get(&arg.vault_id) {
@@ -10345,6 +10384,7 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
             vault.collateral_type,
             nonce,
             ic_cdk::api::time(),
+            &mut immediate_payouts,
         );
 
         // Shared drain rule (see state::cleanup_if_drained): remove the vault
@@ -10411,7 +10451,7 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         "[partial_liquidate_vault] Attempting immediate transfer processing..."
     );
 
-    match try_process_pending_transfers_immediate(arg.vault_id).await {
+    match try_process_pending_transfers_immediate(&immediate_payouts).await {
         Ok(processed_count) => {
             log!(
                 INFO,
@@ -10421,7 +10461,7 @@ pub async fn partial_liquidate_vault(arg: VaultArg) -> Result<SuccessWithFee, Pr
         }
         Err(e) => {
             log!(INFO, "[partial_liquidate_vault] Immediate processing failed: {}. Transfers will be retried via timer", e);
-            schedule_transfer_retry(arg.vault_id, 0);
+            schedule_transfer_retry(arg.vault_id, immediate_payouts.clone(), 0);
         }
     }
 
@@ -10720,10 +10760,17 @@ mod xrp_sp_absorb_contract_tests {
             "an active reservation must block vault operations"
         );
 
-        let released =
-            stability_pool_release_xrp_absorb_preflight_in_state(&mut state, sp(), VAULT_ID, 100 * E8)
-                .expect("registered SP may release its own unburned reservation");
-        assert!(released, "release must report that a reservation was cleared");
+        let released = stability_pool_release_xrp_absorb_preflight_in_state(
+            &mut state,
+            sp(),
+            VAULT_ID,
+            100 * E8,
+        )
+        .expect("registered SP may release its own unburned reservation");
+        assert!(
+            released,
+            "release must report that a reservation was cleared"
+        );
         assert!(state.sp_xrp_absorb_preflights.is_empty());
         assert!(
             ensure_no_active_xrp_sp_absorb_preflight(&state, VAULT_ID, 20).is_ok(),
@@ -10755,8 +10802,13 @@ mod xrp_sp_absorb_contract_tests {
             .expect("preflight reservation");
 
         let not_sp = principal(0x77);
-        stability_pool_release_xrp_absorb_preflight_in_state(&mut state, not_sp, VAULT_ID, 100 * E8)
-            .expect_err("only the registered stability pool may release a reservation");
+        stability_pool_release_xrp_absorb_preflight_in_state(
+            &mut state,
+            not_sp,
+            VAULT_ID,
+            100 * E8,
+        )
+        .expect_err("only the registered stability pool may release a reservation");
         assert!(
             state.sp_xrp_absorb_preflights.contains_key(&VAULT_ID),
             "a rejected release must not clear the reservation"
@@ -10811,8 +10863,7 @@ mod xrp_sp_absorb_contract_tests {
             "missing claim must use the settled-or-unknown wording the sweep keys off: {missing:?}"
         );
 
-        state.xrp_claims.get_mut(&9).unwrap().quarantine_reason =
-            Some("diverged".to_string());
+        state.xrp_claims.get_mut(&9).unwrap().quarantine_reason = Some("diverged".to_string());
         let quarantined = validate_sp_settle_xrp_claim_in_state(&state, sp(), 9, depositor);
         assert!(
             format!("{quarantined:?}").contains("quarantined"),
@@ -10838,7 +10889,11 @@ mod xrp_sp_absorb_contract_tests {
         if let Some(cfg) = state.collateral_configs.get_mut(&xrp) {
             cfg.last_price = Some(1.30);
         }
-        let vault = state.vault_id_to_vaults.get(&VAULT_ID).expect("vault").clone();
+        let vault = state
+            .vault_id_to_vaults
+            .get(&VAULT_ID)
+            .expect("vault")
+            .clone();
         let dummy = UsdIcp::from(Decimal::ZERO);
 
         // The generic cap is a strict partial here — the pre-fix dispatch value.
@@ -10874,7 +10929,10 @@ mod xrp_sp_absorb_contract_tests {
             20,
         )
         .expect("automated dispatch amount must be accepted by the preflight");
-        assert_eq!(preflight.icusd_burn_e8s, vault.borrowed_icusd_amount.to_u64());
+        assert_eq!(
+            preflight.icusd_burn_e8s,
+            vault.borrowed_icusd_amount.to_u64()
+        );
     }
 
     #[test]
@@ -11223,10 +11281,13 @@ mod xrp_sp_absorb_contract_tests {
             .unwrap()
             .collateral_amount = 60_000_000;
 
-        assert!(
-            stability_pool_liquidate_xrp_vault_in_state(&mut state, sp(), valid_request(44), 20)
-                .is_err()
-        );
+        assert!(stability_pool_liquidate_xrp_vault_in_state(
+            &mut state,
+            sp(),
+            valid_request(44),
+            20
+        )
+        .is_err());
         assert!(state.xrp_claims.is_empty());
         assert_eq!(state.next_xrp_claim_id, 0);
         assert!(state.sp_xrp_absorb_results_by_proof.is_empty());
@@ -11261,10 +11322,13 @@ mod xrp_sp_absorb_contract_tests {
             .unwrap()
             .borrowed_icusd_amount = ICUSD::new(50 * E8);
 
-        assert!(
-            stability_pool_liquidate_xrp_vault_in_state(&mut state, sp(), valid_request(44), 20)
-                .is_err()
-        );
+        assert!(stability_pool_liquidate_xrp_vault_in_state(
+            &mut state,
+            sp(),
+            valid_request(44),
+            20
+        )
+        .is_err());
         assert!(state.xrp_claims.is_empty());
         assert_eq!(state.next_xrp_claim_id, 0);
         assert!(state.sp_xrp_absorb_results_by_proof.is_empty());
@@ -11343,7 +11407,11 @@ mod xrp_sp_absorb_contract_tests {
             .expect("exact replay returns cached result");
         assert_eq!(replay, first);
         assert_eq!(state.xrp_claims, claims_after_first);
-        assert_eq!(state.xrp_claims.len(), 3, "replay must not re-mint the dev claim");
+        assert_eq!(
+            state.xrp_claims.len(),
+            3,
+            "replay must not re-mint the dev claim"
+        );
         assert_eq!(state.next_xrp_claim_id, 3);
     }
 
@@ -11522,10 +11590,7 @@ mod redemption_ranking_completeness_tests {
         let candidates: Vec<_> = (0..65).map(|i| Principal::from_slice(&[i])).collect();
         let first_64: Vec<_> = candidates.iter().take(64).copied().collect();
         assert!(redemption_ranking_is_complete(
-            &first_64,
-            &first_64,
-            true,
-            64,
+            &first_64, &first_64, true, 64,
         ));
         assert!(!redemption_ranking_is_complete(
             &candidates,
@@ -11594,19 +11659,16 @@ mod redemption_ranking_completeness_tests {
 #[cfg(test)]
 mod redemption_await_boundary_tests {
     use super::{
-        current_fresh_legacy_reserve_run_for_snapshot,
-        current_legacy_reserve_run_for_snapshot, legacy_redemption_run_for_request,
         build_redemption_queue_and_quote, cached_redemption_offer_is_fresh,
-        prepared_offer_from_current_state, stale_redemption_candidate_types,
-        redemption_offer_price_refresh_snapshot,
-        refresh_stale_redemption_candidates_for_offer_with,
-        RedemptionOfferRefreshGateState, REDEMPTION_OFFER_REFRESH_COOLDOWN_NS,
-        REDEMPTION_OFFER_REFRESH_LEASE_NS,
-        legacy_reserve_spillover_run, persist_rejected_redemption_refund,
-        redemption_raw_refund, redemption_ranking_is_fresh,
-        redemption_run_snapshot_error, reserve_spillover_raw_refund_budget,
-        redemption_tail_raw_refund, reserve_spillover_snapshot_mismatch_refund,
-        reserve_post_settlement_raw_refund, RedemptionRunSnapshot, Vault,
+        current_fresh_legacy_reserve_run_for_snapshot, current_legacy_reserve_run_for_snapshot,
+        legacy_redemption_run_for_request, legacy_reserve_spillover_run,
+        persist_rejected_redemption_refund, prepared_offer_from_current_state,
+        redemption_offer_price_refresh_snapshot, redemption_ranking_is_fresh,
+        redemption_raw_refund, redemption_run_snapshot_error, redemption_tail_raw_refund,
+        refresh_stale_redemption_candidates_for_offer_with, reserve_post_settlement_raw_refund,
+        reserve_spillover_raw_refund_budget, reserve_spillover_snapshot_mismatch_refund,
+        stale_redemption_candidate_types, RedemptionOfferRefreshGateState, RedemptionRunSnapshot,
+        Vault, REDEMPTION_OFFER_REFRESH_COOLDOWN_NS, REDEMPTION_OFFER_REFRESH_LEASE_NS,
         REDEMPTION_PRICE_MAX_AGE_NS,
     };
     use crate::numeric::{Ratio, ICUSD};
@@ -11731,8 +11793,14 @@ mod redemption_await_boundary_tests {
         assert!(message.contains("review a new quote"));
         assert_eq!(vault_balances(&state), before_balances);
         assert_eq!(state.pending_refunds.len(), before_pending_refunds);
-        assert_eq!(state.pending_redemption_transfer.len(), before_pending_payouts);
-        assert_eq!(state.collateral_configs[&xaut].current_base_rate, before_base_rate);
+        assert_eq!(
+            state.pending_redemption_transfer.len(),
+            before_pending_payouts
+        );
+        assert_eq!(
+            state.collateral_configs[&xaut].current_base_rate,
+            before_base_rate
+        );
 
         assert_eq!(
             legacy_redemption_run_for_request(&state, xaut)
@@ -11814,7 +11882,10 @@ mod redemption_await_boundary_tests {
         assert_eq!(new_first.collateral_type, xaut);
         assert!(current_legacy_reserve_run_for_snapshot(&state, &snapshot).is_none());
         let rmr = Ratio::from(dec!(0.9));
-        assert_eq!(reserve_spillover_snapshot_mismatch_refund(700, rmr, 777), 777);
+        assert_eq!(
+            reserve_spillover_snapshot_mismatch_refund(700, rmr, 777),
+            777
+        );
         assert_eq!(vault_balances(&state), before);
         assert!(state.pending_redemption_transfer.is_empty());
     }
@@ -11831,12 +11902,10 @@ mod redemption_await_boundary_tests {
             &state.redemption_runs(),
             boundary_now
         ));
-        assert!(current_fresh_legacy_reserve_run_for_snapshot(
-            &state,
-            &snapshot,
-            boundary_now
-        )
-        .is_some());
+        assert!(
+            current_fresh_legacy_reserve_run_for_snapshot(&state, &snapshot, boundary_now)
+                .is_some()
+        );
 
         // Both prices and the selected IDs remain identical, but the stable
         // transfer crossed the ten-minute cache-age limit before seizure.
@@ -11849,12 +11918,9 @@ mod redemption_await_boundary_tests {
             &state.redemption_runs(),
             stale_now
         ));
-        assert!(current_fresh_legacy_reserve_run_for_snapshot(
-            &state,
-            &snapshot,
-            stale_now
-        )
-        .is_none());
+        assert!(
+            current_fresh_legacy_reserve_run_for_snapshot(&state, &snapshot, stale_now).is_none()
+        );
 
         // A future competitor timestamp also makes the complete ordering
         // unavailable, even though the selected ICP quote itself is unchanged.
@@ -11936,9 +12002,7 @@ mod redemption_await_boundary_tests {
         assert_eq!(outcome.consumed.to_u64(), 40_095_000);
         assert_eq!(outcome.margin.to_u64(), 40_095_000);
         assert_eq!(
-            state.vault_id_to_vaults[&1]
-                .borrowed_icusd_amount
-                .to_u64(),
+            state.vault_id_to_vaults[&1].borrowed_icusd_amount.to_u64(),
             0,
             "the selected-run execution really retires the fixture vault debt"
         );
@@ -11974,10 +12038,10 @@ mod redemption_await_boundary_tests {
         // Independent oracle: stable payout plus committed native fee/debt is
         // 81,000,000 effective e8s; / .9 consumes the full 90,000,000 raw
         // post-reserve-fee budget exactly once.
-        let raw_native_leg =
-            (rust_decimal::Decimal::from(vault_fee.to_u64() + consumed.to_u64()) / rmr.0)
-                .to_u64()
-                .unwrap();
+        let raw_native_leg = (rust_decimal::Decimal::from(vault_fee.to_u64() + consumed.to_u64())
+            / rmr.0)
+            .to_u64()
+            .unwrap();
         assert_eq!(raw_native_leg, 45_000_000);
         let stable_raw_leg = (Decimal::from(available_for_user * 100) / rmr.0)
             .ceil()
@@ -11994,14 +12058,9 @@ mod redemption_await_boundary_tests {
         let stable_raw_budget = reserve_spillover_raw_refund_budget(90_000_000, 405_000, rmr);
         assert_eq!(stable_raw_budget, 45_000_000);
         assert_eq!(
-            redemption_tail_raw_refund(
-                Decimal::from(40_500_000),
-                rmr,
-                stable_raw_budget
-            ),
+            redemption_tail_raw_refund(Decimal::from(40_500_000), rmr, stable_raw_budget),
             45_000_000
         );
-
     }
 
     #[test]
@@ -12032,8 +12091,7 @@ mod redemption_await_boundary_tests {
         let spillover_e8s = (net_after_reserve_fee * rmr).to_u64();
         assert_eq!(spillover_e8s, 81_000_000);
         let raw_budget = net_after_reserve_fee.to_u64();
-        let raw_budget_after_stable =
-            reserve_spillover_raw_refund_budget(raw_budget, 0, rmr);
+        let raw_budget_after_stable = reserve_spillover_raw_refund_budget(raw_budget, 0, rmr);
         assert_eq!(raw_budget_after_stable, 90_000_000);
 
         // Pin both fee bounds to 1% so the actual recorder is independent of
@@ -12060,9 +12118,7 @@ mod redemption_await_boundary_tests {
         .unwrap();
         assert_eq!(outcome.consumed.to_u64(), 40_095_000);
         assert_eq!(
-            state.vault_id_to_vaults[&1]
-                .borrowed_icusd_amount
-                .to_u64(),
+            state.vault_id_to_vaults[&1].borrowed_icusd_amount.to_u64(),
             0
         );
         let [crate::event::Event::RedemptionOnVaults {
@@ -12084,11 +12140,11 @@ mod redemption_await_boundary_tests {
         // Independent oracle: V + C = 40,905,000 effective e8s;
         // ceil(40,905,000 / .9) = 45,450,000 raw, leaving 44,550,000.
         assert_eq!(refund_raw, 44_550_000);
-        let native_raw_spent =
-            (Decimal::from(vault_fee.to_u64() + outcome.consumed.to_u64()) / rmr.0)
-                .ceil()
-                .to_u64()
-                .unwrap();
+        let native_raw_spent = (Decimal::from(vault_fee.to_u64() + outcome.consumed.to_u64())
+            / rmr.0)
+            .ceil()
+            .to_u64()
+            .unwrap();
         assert_eq!(native_raw_spent, 45_450_000);
         assert_eq!(
             reserve_fee.to_u64() + refund_raw + native_raw_spent,
@@ -12174,7 +12230,8 @@ mod redemption_await_boundary_tests {
         let reserve_fee = ICUSD::from(input_e8s) * state.reserve_redemption_fee;
         let net_after_reserve_fee = ICUSD::from(input_e8s) - reserve_fee;
         let spillover_e8s = (net_after_reserve_fee * rmr).to_u64();
-        let raw_budget = reserve_spillover_raw_refund_budget(net_after_reserve_fee.to_u64(), 0, rmr);
+        let raw_budget =
+            reserve_spillover_raw_refund_budget(net_after_reserve_fee.to_u64(), 0, rmr);
         let planned_vault_fee = ICUSD::from(spillover_e8s) * Ratio::from(dec!(0.01));
         assert_eq!(planned_vault_fee.to_u64(), 810_000);
         let effective_spillover = ICUSD::from(spillover_e8s) - planned_vault_fee;
@@ -12203,20 +12260,17 @@ mod redemption_await_boundary_tests {
         ));
         assert_eq!(vault_balances(&state), before);
         assert_eq!(state.pending_redemption_transfer.len(), before_pending);
-        assert_eq!(state.collateral_configs[&icp].current_base_rate, before_base_rate);
+        assert_eq!(
+            state.collateral_configs[&icp].current_base_rate,
+            before_base_rate
+        );
         assert!(persisted_events.is_empty());
 
         // The recorder failed before committing the native fee. Preserve the
         // settled reserve fee, refund the entire effective spillover tail, and
         // do not subtract the locally calculated but uncommitted 1% fee.
         assert_eq!(
-            reserve_post_settlement_raw_refund(
-                net_after_reserve_fee.to_u64(),
-                0,
-                0,
-                0,
-                rmr,
-            ),
+            reserve_post_settlement_raw_refund(net_after_reserve_fee.to_u64(), 0, 0, 0, rmr,),
             90_000_000
         );
         assert_eq!(
@@ -12296,11 +12350,7 @@ mod redemption_await_boundary_tests {
     #[test]
     fn incomplete_cached_ranking_does_not_invent_an_advisory_quote() {
         let (mut state, _icp, xaut) = redemption_state(120_000_000);
-        state
-            .collateral_configs
-            .get_mut(&xaut)
-            .unwrap()
-            .last_price = None;
+        state.collateral_configs.get_mut(&xaut).unwrap().last_price = None;
         let (queue, estimate) = build_redemption_queue_and_quote(&state, 10, E8, true);
         assert!(!queue.ranking_fresh);
         assert_eq!(queue.entries.len(), 1);
@@ -12387,22 +12437,28 @@ mod redemption_await_boundary_tests {
         assert!(quote.net_collateral_raw > 0);
         assert_eq!(vault_balances(&state), before_vaults);
         assert_eq!(state.pending_refunds.len(), before_pending_refunds);
-        assert_eq!(state.pending_redemption_transfer.len(), before_pending_payouts);
+        assert_eq!(
+            state.pending_redemption_transfer.len(),
+            before_pending_payouts
+        );
         assert_eq!(state.total_borrowed_icusd_amount(), before_debt);
 
         let refresh_calls = std::cell::Cell::new(0usize);
-        let refresh_result = futures::executor::block_on(
-            refresh_stale_redemption_candidates_for_offer_with(
+        let refresh_result =
+            futures::executor::block_on(refresh_stale_redemption_candidates_for_offer_with(
                 || now,
                 |at| redemption_offer_price_refresh_snapshot(&state, at),
                 |_| {
                     refresh_calls.set(refresh_calls.get() + 1);
                     std::future::ready(Ok::<(), crate::RedemptionOfferRefreshError>(()))
                 },
-            ),
-        );
+            ));
         assert!(refresh_result.is_ok());
-        assert_eq!(refresh_calls.get(), 0, "all-fresh cache bypasses oracle work");
+        assert_eq!(
+            refresh_calls.get(),
+            0,
+            "all-fresh cache bypasses oracle work"
+        );
     }
 
     #[test]
@@ -12422,8 +12478,7 @@ mod redemption_await_boundary_tests {
             "the fresh ICP competitor must not cause an unnecessary oracle call"
         );
         assert_eq!(
-            super::MAX_REDEMPTION_OFFER_REFRESH_PASSES
-                * super::MAX_REDEMPTION_PRICE_CANDIDATES,
+            super::MAX_REDEMPTION_OFFER_REFRESH_PASSES * super::MAX_REDEMPTION_PRICE_CANDIDATES,
             128,
             "the offer refresh loop has two passes over at most 64 candidates"
         );
@@ -12461,8 +12516,8 @@ mod redemption_await_boundary_tests {
         // ICP also simulates the existing LST coupling publication.
         let state = Rc::new(RefCell::new(initial_state));
         let requested = Rc::new(RefCell::new(Vec::new()));
-        let result = futures::executor::block_on(
-            refresh_stale_redemption_candidates_for_offer_with(
+        let result =
+            futures::executor::block_on(refresh_stale_redemption_candidates_for_offer_with(
                 || now,
                 {
                     let state = Rc::clone(&state);
@@ -12501,14 +12556,19 @@ mod redemption_await_boundary_tests {
                         }
                     }
                 },
-            ),
+            ));
+        assert!(
+            result.is_ok(),
+            "a fresh accepted dependency permits the offer"
         );
-        assert!(result.is_ok(), "a fresh accepted dependency permits the offer");
         assert_eq!(*requested.borrow(), vec![icp, nicp]);
 
         let state = state.borrow();
         assert_eq!(state.last_icp_timestamp, Some(now));
-        assert_eq!(state.collateral_configs[&nicp].last_price_timestamp, Some(now));
+        assert_eq!(
+            state.collateral_configs[&nicp].last_price_timestamp,
+            Some(now)
+        );
         let (queue, quote) = build_redemption_queue_and_quote(&state, now, E8, false);
         assert!(queue.ranking_fresh);
         assert_eq!(queue.entries.len(), 1);
@@ -12551,8 +12611,8 @@ mod redemption_await_boundary_tests {
     fn failed_icp_dependency_refresh_returns_no_stale_offer() {
         let (state, icp, _nicp) = stale_lst_only_redemption_state();
         let now = 1_000_000_000_000;
-        let result = futures::executor::block_on(
-            refresh_stale_redemption_candidates_for_offer_with(
+        let result =
+            futures::executor::block_on(refresh_stale_redemption_candidates_for_offer_with(
                 || now,
                 |at| redemption_offer_price_refresh_snapshot(&state, at),
                 move |collateral_type| {
@@ -12564,8 +12624,7 @@ mod redemption_await_boundary_tests {
                         },
                     ))
                 },
-            ),
-        );
+            ));
         assert!(matches!(
             result,
             Err(crate::RedemptionOfferRefreshError::RefreshUnavailable {

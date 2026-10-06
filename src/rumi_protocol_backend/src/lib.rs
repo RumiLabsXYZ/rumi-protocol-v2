@@ -582,10 +582,16 @@ pub struct PreparedRedemptionOffer {
 pub enum RedemptionOfferRefreshError {
     /// Another bounded candidate refresh is in flight. `retry_after_ns` is a
     /// duration, not an absolute timestamp.
-    RefreshInProgress { retry_after_ns: u64 },
+    RefreshInProgress {
+        retry_after_ns: u64,
+    },
     /// A previous stale-price batch is still in its global cooldown.
-    RefreshCooldown { retry_after_ns: u64 },
-    CandidateLimitExceeded { max_candidates: u64 },
+    RefreshCooldown {
+        retry_after_ns: u64,
+    },
+    CandidateLimitExceeded {
+        max_candidates: u64,
+    },
     RefreshUnavailable {
         message: String,
         retry_after_ns: u64,
@@ -1058,9 +1064,7 @@ pub enum RedemptionError {
     /// A truthful vault-collateral redemption quote could not be produced.
     RedemptionQuoteUnavailable(String),
     /// Requested input exceeds the first globally ordered collateral run.
-    RedemptionCapacityExceeded {
-        max_input_icusd_e8s: u64,
-    },
+    RedemptionCapacityExceeded { max_input_icusd_e8s: u64 },
     /// The globally first collateral changed after the quote was observed.
     RedemptionPriorityChanged {
         expected: Principal,
@@ -1413,9 +1417,8 @@ pub async fn check_vaults() {
         // for the unconditional `prune_recovered_routing_state` call;
         // re-used here for the cascade decisions.
 
-        let (bot_canister, pool_canister) = read_state(|s| {
-            (s.liquidation_bot_principal, s.stability_pool_canister)
-        });
+        let (bot_canister, pool_canister) =
+            read_state(|s| (s.liquidation_bot_principal, s.stability_pool_canister));
 
         let mut for_bot: Vec<LiquidatableVaultInfo> = Vec::new();
         let mut for_pool: Vec<LiquidatableVaultInfo> = Vec::new();
@@ -1576,12 +1579,7 @@ pub fn compute_collateral_ratio(vault: &Vault, _rate: UsdIcp, state: &state::Sta
     margin_value / vault.borrowed_icusd_amount
 }
 
-/// Drop a single pending-transfer entry from its owning map. Wave-4 ICC-005:
-/// after LIQ-001's `(vault_id, owner)` re-keying, every pending entry has a
-/// unique key, so abandon-paths are uniform across margin / excess / redemption.
-/// This helper exists to make that uniformity legible (and to stop callers
-/// from ever drifting back to `retain` over a vault_id range, which would
-/// over-remove sibling liquidators' entries).
+/// Remove a single pending-transfer row by its operation id.
 fn drop_pending<K: std::cmp::Ord>(
     map: &mut std::collections::BTreeMap<K, crate::state::PendingMarginTransfer>,
     key: &K,
@@ -1986,13 +1984,11 @@ pub async fn process_pending_transfer() {
     // Process pending margin transfers
     //
     // Wave-3 + Wave-4 cleanup contract:
-    //   * Success: `record_margin_transfer` writes a MarginTransfer event AND
-    //     removes the entry by `(vault_id, owner)` (event.rs).
-    //   * Skipped (margin <= fee): `drop_pending` drops the entry inline.
-    //   * Abandon (>= MAX_PENDING_RETRIES): `drop_pending` drops the entry inline.
-    //   * BadFee: refresh fee cache, do NOT drop. The next tick retries.
-    // Excess and redemption loops follow the same contract; redemption uses
-    // its own event recorder with the same removal semantics.
+    //   * Success/hold/rearm are event-sourced by operation id.
+    //   * Retry-cap and ambiguous outcomes remain queued; they are never dropped.
+    //   * TooOld/BadFee: keep pinned args and hold for reconciliation rather
+    //     than changing the dedup tuple or silently retrying ambiguously.
+    // Redemption remains on its separate legacy queue and is outside CL14.
     let pending_transfers = read_state(|s| {
         // Log for visibility
         if !s.pending_margin_transfers.is_empty() {
@@ -2008,34 +2004,34 @@ pub async fn process_pending_transfer() {
             .filter(|(_, margin_transfer)| {
                 !s.three_usd_reserve_payout_parents.contains_key(&margin_transfer.op_nonce)
             })
-            .map(|(key, margin_transfer)| (*key, *margin_transfer))
-            .collect::<Vec<((u64, candid::Principal), PendingMarginTransfer)>>()
+            .map(|(id, margin_transfer)| (*id, *margin_transfer))
+            .collect::<Vec<(u128, PendingMarginTransfer)>>()
     });
-    for (key, transfer) in pending_transfers {
-        let (vault_id, _key_owner) = key;
-        // Look up per-collateral config for ledger and fee; fall back to global ICP defaults
-        let (ledger, transfer_fee) =
-            read_state(
-                |s| match s.get_collateral_config(&transfer.collateral_type) {
-                    Some(config) => (config.ledger_canister_id, ICP::from(config.ledger_fee)),
-                    None => (s.icp_ledger_principal, s.icp_ledger_fee),
-                },
-            );
-
-        if transfer.margin <= transfer_fee {
-            log!(
-                INFO,
-                "[transfering_margins] Skipping vault {} owner {} - margin {} <= fee {}, removing",
-                vault_id,
-                transfer.owner,
-                transfer.margin,
-                transfer_fee
-            );
-            mutate_state(|s| drop_pending(&mut s.pending_margin_transfers, &key));
+    for (operation_id, transfer) in pending_transfers {
+        let vault_id = transfer.vault_id;
+        if transfer.held_for_manual_retry || transfer.reconciliation_required {
             continue;
         }
+        let (ledger, amount) = match (transfer.ledger, transfer.transfer_amount_raw) {
+            (Some(ledger), Some(amount)) if transfer.op_nonce != 0 && amount > 0 => {
+                (ledger, amount)
+            }
+            _ => {
+                mutate_state(|s| {
+                    if let Some(p) = s.pending_margin_transfers.get_mut(&operation_id) {
+                        crate::event::record_pending_payout_held(
+                            operation_id,
+                            crate::event::PendingPayoutKind::Margin,
+                            p,
+                            true,
+                        );
+                    }
+                });
+                continue;
+            }
+        };
         match crate::management::transfer_collateral_with_nonce(
-            (transfer.margin - transfer_fee).to_u64(),
+            amount,
             transfer.owner,
             ledger,
             transfer.op_nonce,
@@ -2051,7 +2047,13 @@ pub async fn process_pending_transfer() {
                     ledger
                 );
                 mutate_state(|s| {
-                    crate::event::record_margin_transfer(s, vault_id, transfer.owner, block_index)
+                    crate::event::record_pending_payout_settled(
+                        s,
+                        operation_id,
+                        crate::event::PendingPayoutKind::Margin,
+                        vault_id,
+                        block_index,
+                    )
                 });
             }
             Err(error) => {
@@ -2065,40 +2067,23 @@ pub async fn process_pending_transfer() {
                     error
                 );
 
-                // If there was a transfer fee error, update the fee in collateral config
-                if let TransferError::BadFee { expected_fee } = error {
-                    log!(
-                        INFO,
-                        "[transfering_margins] Updating transfer fee to: {:?}",
-                        expected_fee
-                    );
+                // A changed fee would change the transfer arguments under the
+                // same nonce. Keep the exact row held for reconciliation.
+                if matches!(&error, TransferError::TooOld | TransferError::BadFee { .. }) {
                     mutate_state(|s| {
-                        let expected_fee_u64: u64 = expected_fee
-                            .0
-                            .try_into()
-                            .expect("failed to convert Nat to u64");
-                        if let Some(config) = s.get_collateral_config_mut(&transfer.collateral_type)
-                        {
-                            config.ledger_fee = expected_fee_u64;
-                        }
-                        // Also update global icp_ledger_fee if this is the ICP collateral
-                        let icp_ct = s.icp_collateral_type();
-                        let resolved_ct =
-                            if transfer.collateral_type == candid::Principal::anonymous() {
-                                icp_ct
-                            } else {
-                                transfer.collateral_type
-                            };
-                        if resolved_ct == icp_ct {
-                            s.icp_ledger_fee = ICP::from(expected_fee_u64);
+                        if let Some(p) = s.pending_margin_transfers.get_mut(&operation_id) {
+                            crate::event::record_pending_payout_held(
+                                operation_id,
+                                crate::event::PendingPayoutKind::Margin,
+                                p,
+                                true,
+                            );
                         }
                     });
-
-                    // After updating the fee, we should retry this transfer next time
                 } else {
                     // Increment retry count; abandon after MAX_PENDING_RETRIES
                     let retries = mutate_state(|s| {
-                        if let Some(t) = s.pending_margin_transfers.get_mut(&key) {
+                        if let Some(t) = s.pending_margin_transfers.get_mut(&operation_id) {
                             t.retry_count = t.retry_count.saturating_add(1);
                             t.retry_count
                         } else {
@@ -2111,9 +2096,18 @@ pub async fn process_pending_transfer() {
                              after {} retries. Owner: {}, amount: {}. Use recover_pending_transfer to retry manually.",
                             vault_id, retries, transfer.owner, transfer.margin
                         );
-                        mutate_state(|s| drop_pending(&mut s.pending_margin_transfers, &key));
+                        mutate_state(|s| {
+                            if let Some(t) = s.pending_margin_transfers.get_mut(&operation_id) {
+                                crate::event::record_pending_payout_held(
+                                    operation_id,
+                                    crate::event::PendingPayoutKind::Margin,
+                                    t,
+                                    false,
+                                );
+                            }
+                        });
                     } else {
-                        log!(INFO, "[transfering_margins] Will retry transfer for vault {} owner {} (attempt {}/{})",
+                    log!(INFO, "[transfering_margins] Will retry pinned transfer for vault {} owner {} (attempt {}/{})",
                             vault_id, transfer.owner, retries, MAX_PENDING_RETRIES);
                     }
                 }
@@ -2125,41 +2119,42 @@ pub async fn process_pending_transfer() {
     let pending_excess = read_state(|s| {
         s.pending_excess_transfers
             .iter()
-            .map(|(key, transfer)| (*key, *transfer))
-            .collect::<Vec<((u64, candid::Principal), PendingMarginTransfer)>>()
+            .map(|(id, transfer)| (*id, *transfer))
+            .collect::<Vec<(u128, PendingMarginTransfer)>>()
     });
 
-    for (key, transfer) in pending_excess {
-        let (vault_id, _key_owner) = key;
-        let (ledger, transfer_fee) =
-            read_state(
-                |s| match s.get_collateral_config(&transfer.collateral_type) {
-                    Some(config) => (config.ledger_canister_id, ICP::from(config.ledger_fee)),
-                    None => (s.icp_ledger_principal, s.icp_ledger_fee),
-                },
-            );
-
-        if transfer.margin <= transfer_fee {
-            log!(
-                INFO,
-                "[transfering_excess] Skipping vault {} owner {} - margin {} <= fee {}, removing",
-                vault_id,
-                transfer.owner,
-                transfer.margin,
-                transfer_fee
-            );
-            mutate_state(|s| drop_pending(&mut s.pending_excess_transfers, &key));
+    for (operation_id, transfer) in pending_excess {
+        let vault_id = transfer.vault_id;
+        if transfer.held_for_manual_retry || transfer.reconciliation_required {
             continue;
         }
+        let (ledger, amount) = match (transfer.ledger, transfer.transfer_amount_raw) {
+            (Some(ledger), Some(amount)) if transfer.op_nonce != 0 && amount > 0 => {
+                (ledger, amount)
+            }
+            _ => {
+                mutate_state(|s| {
+                    if let Some(p) = s.pending_excess_transfers.get_mut(&operation_id) {
+                        crate::event::record_pending_payout_held(
+                            operation_id,
+                            crate::event::PendingPayoutKind::Excess,
+                            p,
+                            true,
+                        );
+                    }
+                });
+                continue;
+            }
+        };
         match crate::management::transfer_collateral_with_nonce(
-            (transfer.margin - transfer_fee).to_u64(),
+            amount,
             transfer.owner,
             ledger,
             transfer.op_nonce,
         )
         .await
         {
-            Ok(_block_index) => {
+            Ok(block_index) => {
                 log!(
                     INFO,
                     "[transfering_excess] successfully transferred excess collateral: {} to {} via ledger {}",
@@ -2167,7 +2162,15 @@ pub async fn process_pending_transfer() {
                     transfer.owner,
                     ledger
                 );
-                mutate_state(|s| drop_pending(&mut s.pending_excess_transfers, &key));
+                mutate_state(|s| {
+                    crate::event::record_pending_payout_settled(
+                        s,
+                        operation_id,
+                        crate::event::PendingPayoutKind::Excess,
+                        vault_id,
+                        block_index,
+                    )
+                });
             }
             Err(error) => {
                 log!(
@@ -2178,36 +2181,20 @@ pub async fn process_pending_transfer() {
                     ledger,
                     error
                 );
-                if let TransferError::BadFee { expected_fee } = error {
-                    log!(
-                        INFO,
-                        "[transfering_excess] Updating transfer fee to: {:?}",
-                        expected_fee
-                    );
+                if matches!(&error, TransferError::TooOld | TransferError::BadFee { .. }) {
                     mutate_state(|s| {
-                        let expected_fee_u64: u64 = expected_fee
-                            .0
-                            .try_into()
-                            .expect("failed to convert Nat to u64");
-                        if let Some(config) = s.get_collateral_config_mut(&transfer.collateral_type)
-                        {
-                            config.ledger_fee = expected_fee_u64;
-                        }
-                        let icp_ct = s.icp_collateral_type();
-                        let resolved_ct =
-                            if transfer.collateral_type == candid::Principal::anonymous() {
-                                icp_ct
-                            } else {
-                                transfer.collateral_type
-                            };
-                        if resolved_ct == icp_ct {
-                            s.icp_ledger_fee = ICP::from(expected_fee_u64);
+                        if let Some(p) = s.pending_excess_transfers.get_mut(&operation_id) {
+                            crate::event::record_pending_payout_held(
+                                operation_id,
+                                crate::event::PendingPayoutKind::Excess,
+                                p,
+                                true,
+                            );
                         }
                     });
-                    // Don't increment retry counter on BadFee — refresh fee, retry next tick.
                 } else {
                     let retries = mutate_state(|s| {
-                        if let Some(t) = s.pending_excess_transfers.get_mut(&key) {
+                        if let Some(t) = s.pending_excess_transfers.get_mut(&operation_id) {
                             t.retry_count = t.retry_count.saturating_add(1);
                             t.retry_count
                         } else {
@@ -2220,7 +2207,16 @@ pub async fn process_pending_transfer() {
                              after {} retries. Owner: {}, amount: {}. Use recover_pending_transfer to retry manually.",
                             vault_id, retries, transfer.owner, transfer.margin
                         );
-                        mutate_state(|s| drop_pending(&mut s.pending_excess_transfers, &key));
+                        mutate_state(|s| {
+                            if let Some(t) = s.pending_excess_transfers.get_mut(&operation_id) {
+                                crate::event::record_pending_payout_held(
+                                    operation_id,
+                                    crate::event::PendingPayoutKind::Excess,
+                                    t,
+                                    false,
+                                );
+                            }
+                        });
                     }
                 }
             }

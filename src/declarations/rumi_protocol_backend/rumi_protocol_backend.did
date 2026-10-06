@@ -958,6 +958,27 @@ type PendingLiquidationV1 = record {
   debt_to_clear_e8s : nat;
   collateral_reserved_native : nat;
 };
+type PendingPayoutCursor = record {
+  kind : PendingPayoutQueueKind;
+  operation_id : nat;
+};
+type PendingPayoutPage = record {
+  next_cursor : opt PendingPayoutCursor;
+  items : vec PendingPayoutView;
+};
+type PendingPayoutQueueKind = variant { Margin; Excess };
+type PendingPayoutView = record {
+  retry_count : nat8;
+  kind : PendingPayoutQueueKind;
+  recipient : principal;
+  operation_id : nat;
+  vault_id : nat64;
+  amount_raw : opt nat64;
+  reconciliation_required : bool;
+  ledger : opt principal;
+  op_nonce : nat;
+  held_for_manual_retry : bool;
+};
 type PendingThreeUsdRefund = record {
   retry_count : nat8;
   vault_id : nat64;
@@ -1578,6 +1599,9 @@ service : (ProtocolArg) -> {
   get_pending_3usd_refunds : () -> (vec PendingThreeUsdRefund) query;
   get_pending_amm1_donations_count : () -> (nat64) query;
   get_pending_chain_burn_aging : () -> (vec PendingChainBurnAging) query;
+  get_pending_payout : (nat, PendingPayoutQueueKind) -> (
+      opt PendingPayoutView,
+    ) query;
   get_pending_stability_pool_interest_notification_count : () -> (nat64) query;
   get_pending_stability_pool_interest_notifications : (opt nat64, nat64) -> (variant {
       Ok : vec PendingStabilityPoolInterestNotification;
@@ -1643,6 +1667,9 @@ service : (ProtocolArg) -> {
   liquidate_vault_partial_with_stable : (VaultArgWithToken) -> (Result_4);
   list_chain_vaults : (nat32) -> (vec ChainVaultV1) query;
   list_chain_vaults_page : (nat32, opt nat64, nat16) -> (ChainVaultPage) query;
+  list_pending_payouts : (opt PendingPayoutCursor, nat16) -> (
+      PendingPayoutPage,
+    ) query;
   open_chain_vault : (nat32, nat, nat, text) -> (Result_1);
   open_chain_vault_evm : (VaultIntent, blob) -> (Result_1);
   open_solana_vault : (nat, nat, text) -> (Result_13);
@@ -1655,6 +1682,7 @@ service : (ProtocolArg) -> {
   prepare_redemption_offer : (nat64) -> (Result_16);
   provide_liquidity : (nat64) -> (Result_1);
   reconcile_chain_supply : (nat32) -> (Result_17);
+  recover_pending_payout : (nat, PendingPayoutQueueKind) -> (Result_18);
   recover_pending_transfer : (nat64) -> (Result_18);
   recover_stuck_chain_vault : (nat32, nat64) -> (Result);
   redeem_collateral : (principal, nat64) -> (Result_4);

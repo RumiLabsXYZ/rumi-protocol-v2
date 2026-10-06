@@ -173,11 +173,8 @@ impl RedemptionSimulationPlan {
                 }
                 let actual_share = share.min(vault_debt);
                 let debt_to_deduct = ICUSD::new(actual_share as u64);
-                let collateral_to_deduct = crate::numeric::icusd_to_collateral_amount(
-                    debt_to_deduct,
-                    price,
-                    decimals,
-                );
+                let collateral_to_deduct =
+                    crate::numeric::icusd_to_collateral_amount(debt_to_deduct, price, decimals);
                 let vault = &mut vaults[*index];
                 let actual_collateral = collateral_to_deduct.min(vault.collateral);
                 vault.debt = vault.debt.saturating_sub(actual_share as u64);
@@ -1441,8 +1438,10 @@ impl Default for Mode {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize, Copy)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize, Copy, candid::CandidType)]
 pub struct PendingMarginTransfer {
+    #[serde(default)]
+    pub vault_id: u64,
     pub owner: Principal,
     pub margin: ICP,
     /// Which collateral ledger to transfer on. Defaults to ICP (via Principal::anonymous()
@@ -1460,6 +1459,19 @@ pub struct PendingMarginTransfer {
     /// without dedup, matching prior behaviour, no regression).
     #[serde(default)]
     pub op_nonce: u128,
+    /// Exact ledger and net amount pinned when the payout was created. Missing
+    /// on pre-CL14 snapshots; those rows must be reconciled, never retried with
+    /// values reconstructed from current fee configuration.
+    #[serde(default)]
+    pub ledger: Option<Principal>,
+    #[serde(default)]
+    pub transfer_amount_raw: Option<u64>,
+    /// Retry-cap holds are safe to rearm only when exact args and nonce exist.
+    #[serde(default)]
+    pub held_for_manual_retry: bool,
+    /// True when the ledger outcome/identity is ambiguous (legacy or TooOld).
+    #[serde(default)]
+    pub reconciliation_required: bool,
     /// Minimum net collateral the user consented to receive for a redemption.
     /// Absent on older snapshots/events, which preserves their prior behavior.
     #[serde(default)]
@@ -1791,39 +1803,79 @@ thread_local! {
     static __STATE: RefCell<Option<State>> = RefCell::default();
 }
 
-// Wave-4 LIQ-001: pending_margin_transfers and pending_excess_transfers are keyed
-// by (VaultId, Principal) so concurrent liquidators on the same vault each have
-// their own pending entry. Legacy snapshots (BTreeMap<VaultId, _>) are accepted
-// transparently via this Visitor and re-keyed using the entry's `owner`.
+// CL14: new payout rows are keyed by operation id. Queue kind is part of the
+// public identity (margin/excess/redemption), while separate maps remain in the
+// stable schema. Legacy tuple/vault keys are preserved under a queue id and held
+// until their exact ledger arguments can be reconciled.
 //
-// We can't use `#[serde(untagged)]` here because ciborium's untagged-enum
-// dispatch doesn't reliably distinguish a CBOR map with integer keys from one
-// with array keys when both variants are themselves maps. Instead, we drive a
-// Visitor over MapAccess and decide per-entry: each key is deserialized as
-// `EitherKey`, which is a small two-variant enum that ciborium *does* handle
-// cleanly via deserialize_any (integer vs. array).
+// Decode the historic tuple/vault keys and modern u128 operation keys
+// explicitly. Serde's untagged-enum content buffer does not preserve CBOR
+// bignum integers as u128, so a derive here would reject production nonces.
 fn deserialize_pending_keyed<'de, D>(
     d: D,
-) -> Result<BTreeMap<(VaultId, Principal), PendingMarginTransfer>, D::Error>
+) -> Result<BTreeMap<u128, PendingMarginTransfer>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     use std::fmt;
 
-    #[derive(serde::Deserialize)]
-    #[serde(untagged)]
     enum EitherKey {
-        New((VaultId, Principal)),
-        Legacy(VaultId),
+        Operation(u128),
+        Pair((VaultId, Principal)),
+    }
+
+    impl<'de> serde::Deserialize<'de> for EitherKey {
+        fn deserialize<D2>(deserializer: D2) -> Result<Self, D2::Error>
+        where
+            D2: serde::Deserializer<'de>,
+        {
+            struct KeyVisitor;
+            impl<'de> serde::de::Visitor<'de> for KeyVisitor {
+                type Value = EitherKey;
+
+                fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                    f.write_str("a u128 operation id, legacy vault id, or (vault id, principal) tuple")
+                }
+
+                fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+                    Ok(EitherKey::Operation(value as u128))
+                }
+
+                fn visit_u128<E>(self, value: u128) -> Result<Self::Value, E> {
+                    Ok(EitherKey::Operation(value))
+                }
+
+                fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
+                    u64::try_from(value)
+                        .map(|id| EitherKey::Operation(id as u128))
+                        .map_err(|_| E::custom("pending payout keys cannot be negative"))
+                }
+
+                fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+                where
+                    A: serde::de::SeqAccess<'de>,
+                {
+                    let vault_id = seq.next_element::<VaultId>()?
+                        .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
+                    let owner = seq.next_element::<Principal>()?
+                        .ok_or_else(|| serde::de::Error::invalid_length(1, &self))?;
+                    if seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                        return Err(serde::de::Error::invalid_length(3, &self));
+                    }
+                    Ok(EitherKey::Pair((vault_id, owner)))
+                }
+            }
+            deserializer.deserialize_any(KeyVisitor)
+        }
     }
 
     struct V;
     impl<'de> serde::de::Visitor<'de> for V {
-        type Value = BTreeMap<(VaultId, Principal), PendingMarginTransfer>;
+        type Value = BTreeMap<u128, PendingMarginTransfer>;
 
         fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
             f.write_str(
-                "a map of pending margin transfers (legacy u64 keys or new (u64, Principal) keys)",
+                "a map of pending payouts keyed by operation id, legacy (vault, principal), or vault id",
             )
         }
 
@@ -1831,14 +1883,68 @@ where
         where
             A: serde::de::MapAccess<'de>,
         {
-            let mut out = BTreeMap::new();
+            let mut entries = Vec::new();
             while let Some(key) = map.next_key::<EitherKey>()? {
-                let value: PendingMarginTransfer = map.next_value()?;
-                let final_key = match key {
-                    EitherKey::New(t) => t,
-                    EitherKey::Legacy(vault_id) => (vault_id, value.owner),
+                entries.push((key, map.next_value::<PendingMarginTransfer>()?));
+            }
+            let mut out = BTreeMap::new();
+            let mut legacy = Vec::new();
+            for (key, mut value) in entries {
+                match key {
+                    // New integer keys self-identify by matching their persisted nonce.
+                    // New operation IDs include the production timestamp in
+                    // their upper 64 bits. Treat every u64-range key as a
+                    // possible legacy vault id even when its value happens to
+                    // equal the key; low-ID ambiguity must fail closed.
+                    EitherKey::Operation(id)
+                        if id > u64::MAX as u128 && id == value.op_nonce =>
+                    {
+                        if out.insert(id, value).is_some() {
+                            return Err(serde::de::Error::custom("duplicate pending payout id"));
+                        }
+                    }
+                    EitherKey::Operation(id) => {
+                        if let Ok(vault_id) = VaultId::try_from(id) {
+                            legacy.push((vault_id, value));
+                        } else {
+                            value.held_for_manual_retry = true;
+                            value.reconciliation_required = true;
+                            if out.insert(id, value).is_some() {
+                                return Err(serde::de::Error::custom(
+                                    "duplicate pending payout id",
+                                ));
+                            }
+                        }
+                    }
+                    // CBOR integer keys in the u64 range may be old vault IDs.
+                    // Never infer a modern identity from matching value fields.
+                    EitherKey::Pair((vault_id, _)) => {
+                        legacy.push((vault_id, value));
+                    }
+                }
+            }
+            let mut synthetic = u128::MAX;
+            for (vault_id, mut value) in legacy {
+                value.held_for_manual_retry = true;
+                value.reconciliation_required = true;
+                let id = if value.op_nonce != 0 && !out.contains_key(&value.op_nonce) {
+                    value.op_nonce
+                } else {
+                    while out.contains_key(&synthetic) {
+                        synthetic = synthetic.checked_sub(1).ok_or_else(|| {
+                            serde::de::Error::custom("pending payout migration id space exhausted")
+                        })?;
+                    }
+                    let id = synthetic;
+                    synthetic = synthetic.checked_sub(1).ok_or_else(|| {
+                        serde::de::Error::custom("pending payout migration id space exhausted")
+                    })?;
+                    id
                 };
-                out.insert(final_key, value);
+                // The source vault is retained in the value. Never treat a synthetic
+                // queue id as the ledger's deduplication nonce.
+                value.vault_id = vault_id;
+                out.insert(id, value);
             }
             Ok(out)
         }
@@ -1857,9 +1963,9 @@ pub struct State {
     pub vault_id_to_vaults: BTreeMap<u64, Vault>,
     pub principal_to_vault_ids: BTreeMap<Principal, BTreeSet<u64>>,
     #[serde(deserialize_with = "deserialize_pending_keyed")]
-    pub pending_margin_transfers: BTreeMap<(VaultId, Principal), PendingMarginTransfer>,
+    pub pending_margin_transfers: BTreeMap<u128, PendingMarginTransfer>,
     #[serde(deserialize_with = "deserialize_pending_keyed")]
-    pub pending_excess_transfers: BTreeMap<(VaultId, Principal), PendingMarginTransfer>,
+    pub pending_excess_transfers: BTreeMap<u128, PendingMarginTransfer>,
     pub pending_redemption_transfer: BTreeMap<u64, PendingMarginTransfer>,
     /// Wave-4 ICC-007: durable refund queue for `redeem_reserves` failures,
     /// keyed by the burn icUSD block index. Empty for pre-Wave-4 snapshots.
@@ -3508,6 +3614,14 @@ impl State {
         let counter = self.op_nonce_counter;
         self.op_nonce_counter = self.op_nonce_counter.wrapping_add(1);
         ((now as u128) << 64) | (counter as u128)
+    }
+
+    /// Keep the monotonic counter ahead of operation nonces restored by event
+    /// replay or snapshot migration. The timestamp remains part of the ledger
+    /// dedup tuple; this only avoids allocating the same nonce within a tick.
+    pub fn observe_op_nonce(&mut self, nonce: u128) {
+        let counter = nonce as u64;
+        self.op_nonce_counter = self.op_nonce_counter.max(counter.saturating_add(1));
     }
 
     pub fn increment_vault_id(&mut self) -> u64 {
@@ -8226,8 +8340,7 @@ mod tests {
         // tests below — so this test pins the amount explicitly, exactly as
         // `vault::liquidate_vault` now does pre-await.)
         let vault_before = state.vault_id_to_vaults.get(&10).cloned().unwrap();
-        let expected_repay =
-            state.compute_partial_liquidation_cap(&vault_before, collateral_price);
+        let expected_repay = state.compute_partial_liquidation_cap(&vault_before, collateral_price);
         assert!(
             expected_repay > ICUSD::new(0) && expected_repay < vault_before.borrowed_icusd_amount,
             "premise: this vault's CR must yield a genuine partial cap under the new unified logic"
@@ -8243,8 +8356,12 @@ mod tests {
         .to_u64()
         .unwrap_or(0);
 
-        let interest_share =
-            state.liquidate_vault(10, Mode::GeneralAvailability, collateral_price, Some(pinned));
+        let interest_share = state.liquidate_vault(
+            10,
+            Mode::GeneralAvailability,
+            collateral_price,
+            Some(pinned),
+        );
         assert_eq!(
             interest_share.0, expected_interest_share,
             "partial liquidation should return the proportional interest share"
@@ -8427,7 +8544,11 @@ mod tests {
         let icp_ct = state.icp_collateral_type();
         // The redemption planner now requires a configured price to rank the
         // candidate set; keep this legacy water-fill regression non-vacuous.
-        state.collateral_configs.get_mut(&icp_ct).unwrap().last_price = Some(5.0);
+        state
+            .collateral_configs
+            .get_mut(&icp_ct)
+            .unwrap()
+            .last_price = Some(5.0);
         state.open_vault(audit_vault(1, icp_ct, 500_000_000, 300_000_000));
         state.open_vault(audit_vault(2, icp_ct, 800_000_000, 500_000_000));
         state.vault_id_to_vaults.get_mut(&1).unwrap().bot_processing = true;
@@ -8458,7 +8579,11 @@ mod tests {
         let icp_ct = state.icp_collateral_type();
         // Ranking candidates need a configured price; otherwise no run is
         // eligible and the lock assertion would pass without exercising it.
-        state.collateral_configs.get_mut(&icp_ct).unwrap().last_price = Some(5.0);
+        state
+            .collateral_configs
+            .get_mut(&icp_ct)
+            .unwrap()
+            .last_price = Some(5.0);
         state.open_vault(audit_vault(1, icp_ct, 500_000_000, 300_000_000));
         state.open_vault(audit_vault(2, icp_ct, 800_000_000, 500_000_000));
 
@@ -8483,7 +8608,11 @@ mod tests {
         // the claim is oversized.
         let mut state = test_state();
         let icp_ct = state.icp_collateral_type();
-        state.collateral_configs.get_mut(&icp_ct).unwrap().last_price = Some(5.0);
+        state
+            .collateral_configs
+            .get_mut(&icp_ct)
+            .unwrap()
+            .last_price = Some(5.0);
         state.open_vault(audit_vault(1, icp_ct, 500_000_000, 300_000_000));
 
         let price = UsdIcp::from(rust_decimal_macros::dec!(5.0));
@@ -10005,11 +10134,16 @@ mod tests {
     #[test]
     fn pending_margin_transfer_minimum_defaults_and_round_trips() {
         let transfer = PendingMarginTransfer {
+            vault_id: 0,
             owner: Principal::anonymous(),
             margin: ICP::new(123),
             collateral_type: Principal::anonymous(),
             retry_count: 1,
             op_nonce: 42,
+            ledger: None,
+            transfer_amount_raw: None,
+            held_for_manual_retry: false,
+            reconciliation_required: false,
             min_net_collateral_raw: Some(100),
         };
         let mut encoded = Vec::new();
@@ -10476,7 +10610,6 @@ mod tests {
         let borrow_threshold = state.get_min_collateral_ratio_for(&icp);
         assert!(base >= borrow_threshold);
     }
-
 
     // ─────────────────────────────────────────────────────────────────
     // LIQ-0XX: small-position-liquidation fix.
@@ -11213,10 +11346,9 @@ mod tests {
         // Replay the legacy event (repay_amount = None).
         state.liquidate_vault(vault_id, Mode::Recovery, collateral_price, None);
 
-        let remaining = state
-            .vault_id_to_vaults
-            .get(&vault_id)
-            .expect("legacy Recovery-mode replay should partially liquidate, not close, this vault");
+        let remaining = state.vault_id_to_vaults.get(&vault_id).expect(
+            "legacy Recovery-mode replay should partially liquidate, not close, this vault",
+        );
         let cr_after = compute_collateral_ratio(remaining, collateral_price, &state);
         assert!(
             (cr_after.to_f64() - 1.55).abs() < 0.01,

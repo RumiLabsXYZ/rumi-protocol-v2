@@ -27,8 +27,8 @@ use rumi_protocol_backend::{
     CollateralInterestInfo, CollateralSnapshot, CollateralTotals, EventTypeFilter,
     EventsByPrincipalPagedResponse, Fees, ForwardFilteredEventsResponse, GetEventsArg,
     GetEventsFilteredResponse, GetSnapshotsArg, InterestSplitArg, PerCollateralRateCurve,
-    ProtocolArg, ProtocolError, ProtocolSnapshot, ProtocolStatus, RedeemQuotedRequest,
-    PreparedRedemptionOffer, RedemptionError, RedemptionOfferRefreshError, RedemptionPreview,
+    PreparedRedemptionOffer, ProtocolArg, ProtocolError, ProtocolSnapshot, ProtocolStatus,
+    RedeemQuotedRequest, RedemptionError, RedemptionOfferRefreshError, RedemptionPreview,
     RedemptionQueue, RedemptionQuote, RedemptionResult, ReserveBalance, ReserveRedemptionResult,
     StabilityPoolLiquidationResult, StableTokenType, SuccessWithFee, SupplyAudit, SupplyAuditEntry,
     VaultArgWithToken, VaultHistoryPagedResponse, VaultsPageResponse, XrpSpAbsorbPreflight,
@@ -67,6 +67,172 @@ pub struct PendingIcusdRefundView {
     pub held_for_manual_retry: bool,
 }
 
+#[derive(
+    CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingPayoutQueueKind {
+    Margin,
+    Excess,
+}
+
+#[derive(
+    CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize,
+)]
+pub struct PendingPayoutCursor {
+    pub operation_id: u128,
+    pub kind: PendingPayoutQueueKind,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PendingPayoutView {
+    pub operation_id: u128,
+    pub kind: PendingPayoutQueueKind,
+    pub vault_id: u64,
+    pub recipient: Principal,
+    pub ledger: Option<Principal>,
+    pub amount_raw: Option<u64>,
+    pub op_nonce: u128,
+    pub retry_count: u8,
+    pub held_for_manual_retry: bool,
+    pub reconciliation_required: bool,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PendingPayoutPage {
+    pub items: Vec<PendingPayoutView>,
+    pub next_cursor: Option<PendingPayoutCursor>,
+}
+
+const MAX_PENDING_PAYOUT_PAGE_SIZE: u16 = 100;
+const MAX_PENDING_PAYOUT_SCAN_PER_QUEUE: usize = 256;
+
+fn pending_payout_view(
+    kind: PendingPayoutQueueKind,
+    operation_id: u128,
+    payout: &rumi_protocol_backend::state::PendingMarginTransfer,
+) -> PendingPayoutView {
+    PendingPayoutView {
+        operation_id,
+        kind,
+        vault_id: payout.vault_id,
+        recipient: payout.owner,
+        ledger: payout.ledger,
+        amount_raw: payout.transfer_amount_raw,
+        op_nonce: payout.op_nonce,
+        retry_count: payout.retry_count,
+        held_for_manual_retry: payout.held_for_manual_retry,
+        reconciliation_required: payout.reconciliation_required,
+    }
+}
+
+fn pending_payout_page_in_state(
+    state: &State,
+    caller: Principal,
+    cursor: Option<PendingPayoutCursor>,
+    limit: u16,
+) -> PendingPayoutPage {
+    let limit = limit.clamp(1, MAX_PENDING_PAYOUT_PAGE_SIZE) as usize;
+    let after = cursor.unwrap_or(PendingPayoutCursor {
+        operation_id: 0,
+        kind: PendingPayoutQueueKind::Margin,
+    });
+    let mut candidates: Vec<(
+        PendingPayoutCursor,
+        rumi_protocol_backend::state::PendingMarginTransfer,
+    )> = Vec::new();
+    let mut has_more = false;
+    for (kind, map) in [
+        (
+            PendingPayoutQueueKind::Margin,
+            &state.pending_margin_transfers,
+        ),
+        (
+            PendingPayoutQueueKind::Excess,
+            &state.pending_excess_transfers,
+        ),
+    ] {
+        let rows: Vec<_> = map
+            .range(after.operation_id..)
+            .take(MAX_PENDING_PAYOUT_SCAN_PER_QUEUE + 1)
+            .map(|(id, payout)| (*id, *payout))
+            .collect();
+        has_more |= rows.len() > MAX_PENDING_PAYOUT_SCAN_PER_QUEUE;
+        candidates.extend(rows.into_iter().take(MAX_PENDING_PAYOUT_SCAN_PER_QUEUE).map(
+            |(id, payout)| {
+                (
+                    PendingPayoutCursor {
+                        operation_id: id,
+                        kind,
+                    },
+                    payout,
+                )
+            },
+        ));
+    }
+    candidates.sort_by_key(|(key, _)| *key);
+    let mut items = Vec::new();
+    let mut last_scanned = None;
+    let mut candidates = candidates.into_iter();
+    while let Some((key, payout)) = candidates.next() {
+        if key <= after {
+            continue;
+        }
+        last_scanned = Some(key);
+        if payout.owner == caller {
+            items.push(pending_payout_view(key.kind, key.operation_id, &payout));
+            if items.len() == limit {
+                let has_next = has_more
+                    || candidates.any(|(next_key, next_payout)| {
+                        next_key > key && next_payout.owner == caller
+                    });
+                return PendingPayoutPage {
+                    items,
+                    next_cursor: has_next.then_some(key),
+                };
+            }
+        }
+    }
+    PendingPayoutPage {
+        items,
+        next_cursor: if has_more { last_scanned } else { None },
+    }
+}
+
+fn pending_payout_ids_for_legacy_recovery(
+    state: &State,
+    caller: Principal,
+    vault_id: u64,
+) -> (Vec<(u128, PendingPayoutQueueKind)>, bool) {
+    let margin: Vec<_> = state
+        .pending_margin_transfers
+        .iter()
+        .take(MAX_PENDING_PAYOUT_SCAN_PER_QUEUE + 1)
+        .collect();
+    let excess: Vec<_> = state
+        .pending_excess_transfers
+        .iter()
+        .take(MAX_PENDING_PAYOUT_SCAN_PER_QUEUE + 1)
+        .collect();
+    let truncated = margin.len() > MAX_PENDING_PAYOUT_SCAN_PER_QUEUE
+        || excess.len() > MAX_PENDING_PAYOUT_SCAN_PER_QUEUE;
+    let matches = margin
+        .into_iter()
+        .take(MAX_PENDING_PAYOUT_SCAN_PER_QUEUE)
+        .filter(|(_, payout)| payout.vault_id == vault_id && payout.owner == caller)
+        .map(|(id, _)| (*id, PendingPayoutQueueKind::Margin))
+        .chain(
+            excess
+                .into_iter()
+                .take(MAX_PENDING_PAYOUT_SCAN_PER_QUEUE)
+                .filter(|(_, payout)| payout.vault_id == vault_id && payout.owner == caller)
+                .map(|(id, _)| (*id, PendingPayoutQueueKind::Excess)),
+        )
+        .take(2)
+        .collect();
+    (matches, truncated)
+}
+
 fn pending_refund_visible_to(claim_owner: Principal, caller: Principal) -> bool {
     claim_owner == caller
 }
@@ -82,14 +248,18 @@ fn ok_or_die(result: Result<(), String>) {
 /// Checks that Elliptic Core Canister state is internally consistent.
 #[cfg(feature = "self_check")]
 fn check_invariants() -> Result<(), String> {
-    use rumi_protocol_backend::event::replay;
+    use rumi_protocol_backend::event::restore_snapshot_or_replay;
 
     read_state(|s| {
         s.check_invariants()?;
 
         let events: Vec<_> = rumi_protocol_backend::storage::events().collect();
-        let recovered_state = replay(events.clone().into_iter())
-            .unwrap_or_else(|e| panic!("failed to replay log {:?}: {:?}", events, e));
+        let recovered_state = restore_snapshot_or_replay(
+            None,
+            events.clone().into_iter(),
+            rumi_protocol_backend::storage::pending_payout_events(),
+        )
+        .unwrap_or_else(|e| panic!("failed to replay log {:?}: {:?}", events, e));
 
         recovered_state.check_invariants()?;
 
@@ -774,8 +944,8 @@ fn pre_upgrade() {
 
 #[post_upgrade]
 fn post_upgrade(arg: ProtocolArg) {
-    use rumi_protocol_backend::event::replay;
-    use rumi_protocol_backend::storage::{count_events, events, record_event};
+    use rumi_protocol_backend::event::restore_snapshot_or_replay;
+    use rumi_protocol_backend::storage::{count_events, events, pending_payout_events, record_event};
 
     let start = ic_cdk::api::instruction_counter();
 
@@ -790,8 +960,10 @@ fn post_upgrade(arg: ProtocolArg) {
     };
 
     // Try to restore from stable memory (fast path, no drift)
-    let mut state = match rumi_protocol_backend::storage::load_state_from_stable() {
-        Some(mut state) => {
+    let snapshot = rumi_protocol_backend::storage::load_state_from_stable();
+    let has_snapshot = snapshot.is_some();
+    let mut state = match restore_snapshot_or_replay(snapshot, events(), pending_payout_events()) {
+        Ok(mut state) if has_snapshot => {
             log!(
                 INFO,
                 "[upgrade]: restored state from stable memory (skipped event replay of {} events)",
@@ -802,19 +974,17 @@ fn post_upgrade(arg: ProtocolArg) {
             state.upgrade(upgrade_args);
             state
         }
-        None => {
+        Ok(state) => {
             // Fallback: replay events (first upgrade after this change, or recovery)
             log!(
                 INFO,
                 "[upgrade]: no stable state found, replaying {} events",
                 count_events()
             );
-            replay(events()).unwrap_or_else(|e| {
-                ic_cdk::trap(&format!(
-                    "[upgrade]: failed to replay the event log: {:?}",
-                    e
-                ))
-            })
+            state
+        }
+        Err(e) => {
+            ic_cdk::trap(&format!("[upgrade]: failed to replay the event log: {:?}", e))
         }
     };
     // CL11: any chain marked Public by the staged rollout is closed before
@@ -903,40 +1073,35 @@ fn post_upgrade(arg: ProtocolArg) {
         }
     });
 
-    // Wave-3 migration: backfill op_nonce on pending transfers carried over from
-    // pre-Wave-3 snapshots so their retries get ledger-side dedup. Without this,
-    // legacy entries stay at op_nonce: 0 (TooOld at the ledger) and never finish.
-    //
-    // Wave-4 LIQ-001: pending_margin_transfers and pending_excess_transfers are now
-    // keyed by (vault_id, owner). Legacy entries from pre-Wave-4 snapshots are
-    // re-keyed transparently by `state::deserialize_pending_keyed`, so by the time
-    // this block runs they already have tuple keys.
+    // CL14: never synthesize retry arguments for old payout rows. A nonce alone
+    // does not identify the ledger or exact transfer amount; pin-less rows stay
+    // visible and held for evidence-based reconciliation. Redemption migration
+    // retains its older behavior because that queue has a separate stable key.
     mutate_state(|s| {
-        let mut backfilled = 0u64;
-        let margin_keys: Vec<(u64, candid::Principal)> = s
+        let mut held = 0u64;
+        let mut redemption_backfilled = 0u64;
+        let restored_nonces: Vec<u128> = s
             .pending_margin_transfers
-            .iter()
-            .filter(|(_, t)| t.op_nonce == 0)
-            .map(|(k, _)| *k)
+            .values()
+            .chain(s.pending_excess_transfers.values())
+            .map(|payout| payout.op_nonce)
+            .filter(|nonce| *nonce != 0)
             .collect();
-        for k in margin_keys {
-            let nonce = s.next_op_nonce();
-            if let Some(t) = s.pending_margin_transfers.get_mut(&k) {
-                t.op_nonce = nonce;
-                backfilled += 1;
-            }
+        for nonce in restored_nonces {
+            s.observe_op_nonce(nonce);
         }
-        let excess_keys: Vec<(u64, candid::Principal)> = s
-            .pending_excess_transfers
-            .iter()
-            .filter(|(_, t)| t.op_nonce == 0)
-            .map(|(k, _)| *k)
-            .collect();
-        for k in excess_keys {
-            let nonce = s.next_op_nonce();
-            if let Some(t) = s.pending_excess_transfers.get_mut(&k) {
-                t.op_nonce = nonce;
-                backfilled += 1;
+        for payout in s
+            .pending_margin_transfers
+            .values_mut()
+            .chain(s.pending_excess_transfers.values_mut())
+        {
+            if payout.op_nonce == 0
+                || payout.ledger.is_none()
+                || payout.transfer_amount_raw.is_none()
+            {
+                payout.held_for_manual_retry = true;
+                payout.reconciliation_required = true;
+                held += 1;
             }
         }
         let redemption_ids: Vec<u64> = s
@@ -949,15 +1114,18 @@ fn post_upgrade(arg: ProtocolArg) {
             let nonce = s.next_op_nonce();
             if let Some(t) = s.pending_redemption_transfer.get_mut(&id) {
                 t.op_nonce = nonce;
-                backfilled += 1;
+                redemption_backfilled += 1;
             }
         }
-        if backfilled > 0 {
+        if held > 0 {
             log!(
                 INFO,
-                "[upgrade]: backfilled op_nonce on {} legacy pending transfers (Wave-3 migration)",
-                backfilled
+                "[upgrade]: held {} legacy payouts lacking pinned retry arguments for reconciliation",
+                held
             );
+        }
+        if redemption_backfilled > 0 {
+            log!(INFO, "[upgrade]: backfilled {} legacy redemption operation nonces", redemption_backfilled);
         }
     });
 
@@ -5808,11 +5976,7 @@ const FORWARD_FILTERED_MAX_SCAN: u64 = 2000;
 /// wasm target. Returning `None` means the requested window would end beyond
 /// `usize::MAX`; callers must leave the cursor unchanged rather than advance
 /// to a position they cannot seek to on wasm32.
-fn bounded_forward_event_cursor(
-    start: u64,
-    scan: u64,
-    count: u64,
-) -> Option<(u64, bool)> {
+fn bounded_forward_event_cursor(start: u64, scan: u64, count: u64) -> Option<(u64, bool)> {
     let start_usize = usize::try_from(start).ok()?;
     if start >= count {
         return Some((count, true));
@@ -5837,8 +6001,7 @@ fn scan_events_forward_filtered<I: Iterator<Item = Event>>(
     types_set: Option<&std::collections::HashSet<EventTypeFilter>>,
 ) -> ForwardFilteredEventsResponse {
     let scan = max_scan.min(FORWARD_FILTERED_MAX_SCAN);
-    let Some((next_start, reached_end)) = bounded_forward_event_cursor(start, scan, count)
-    else {
+    let Some((next_start, reached_end)) = bounded_forward_event_cursor(start, scan, count) else {
         return ForwardFilteredEventsResponse {
             events: Vec::new(),
             next_start: start,
@@ -6017,9 +6180,7 @@ fn get_events_by_principal_paged(
     let total_events = rumi_protocol_backend::storage::count_events();
     let scan_length = scan_length.min(MAX_EVENTS_BY_PRINCIPAL_SCAN);
     let bounded_cursor = bounded_forward_event_cursor(scan_start, scan_length, total_events);
-    let scan_end = bounded_cursor
-        .map(|(next, _)| next)
-        .unwrap_or(scan_start);
+    let scan_end = bounded_cursor.map(|(next, _)| next).unwrap_or(scan_start);
 
     let mut events_page: Vec<(u64, Event)> = Vec::new();
     if scan_start < total_events && scan_length > 0 {
@@ -7408,7 +7569,7 @@ fn get_three_usd_reserve_ingress_v2_status(
                         let receipt = payout.receipt.as_ref()?;
                         read_state(|state| {
                             (state.three_usd_reserve_payout_parents.get(&payout.tuple.op_nonce) == Some(&key)
-                                && !state.pending_margin_transfers.contains_key(&(key.vault_id, key.stability_pool))
+                                && !state.pending_margin_transfers.contains_key(&payout.tuple.op_nonce)
                                 && receipt.tuple == payout.tuple
                                 && payout.tuple.op_nonce != 0
                                 && payout.tuple.source.owner == ic_cdk::id()
@@ -9374,101 +9535,177 @@ fn http_request(req: HttpRequest) -> HttpResponse {
 #[update]
 async fn recover_pending_transfer(vault_id: u64) -> Result<bool, ProtocolError> {
     let caller = ic_cdk::caller();
-    // ASYNC-003: serialize per-caller so two concurrent manual recoveries cannot
-    // both pay out the same pending entry (the entry is only removed AFTER the
-    // await below). Defense-in-depth on top of the nonce-dedup fix.
     let _guard =
         rumi_protocol_backend::guard::GuardPrincipal::new(caller, "recover_pending_transfer")?;
-
-    // Wave-4 LIQ-001: pending_margin_transfers and pending_excess_transfers are
-    // keyed by (vault_id, owner). Look up the entry that belongs to the caller.
-    let key = (vault_id, caller);
-    let transfer_info = read_state(|s| {
-        if let Some(t) = s.pending_margin_transfers.get(&key).cloned() {
-            Some(("margin", t))
-        } else {
-            s.pending_excess_transfers
-                .get(&key)
-                .cloned()
-                .map(|t| ("excess", t))
-        }
-    });
-
-    if transfer_info.as_ref().is_some_and(|(source, transfer)| {
-        *source == "margin"
-            && read_state(|state| state.three_usd_reserve_payout_parents.contains_key(&transfer.op_nonce))
-    }) {
-        return Err(ProtocolError::TemporarilyUnavailable(
-            "This collateral payout belongs to a receipt-backed 3USD reserve operation and is retried from its persisted tuple.".into(),
+    let (matches, truncated) =
+        read_state(|s| pending_payout_ids_for_legacy_recovery(s, caller, vault_id));
+    if truncated {
+        return Err(ProtocolError::GenericError(
+            "Pending queue scan is bounded; use list_pending_payouts and recover_pending_payout with the exact typed operation id".to_string(),
         ));
     }
+    match matches.as_slice() {
+        [(id, kind)] => recover_pending_payout_for_caller(*id, *kind, caller).await,
+        [] => Err(ProtocolError::GenericError("No pending payout found for this vault".to_string())),
+        _ => Err(ProtocolError::GenericError("Multiple payouts match this vault; use list_pending_payouts and recover_pending_payout with the exact typed operation id".to_string())),
+    }
+}
 
-    if let Some((source, transfer)) = transfer_info {
-        // Look up per-collateral config for ledger and fee; fall back to global ICP defaults
-        let (ledger, transfer_fee) =
-            read_state(
-                |s| match s.get_collateral_config(&transfer.collateral_type) {
-                    Some(config) => (config.ledger_canister_id, ICP::from(config.ledger_fee)),
-                    None => (s.icp_ledger_principal, s.icp_ledger_fee),
-                },
-            );
+#[candid_method(query)]
+#[query]
+fn get_pending_payout(
+    operation_id: u128,
+    kind: PendingPayoutQueueKind,
+) -> Option<PendingPayoutView> {
+    let caller = ic_cdk::caller();
+    read_state(|s| {
+        let payout = match kind {
+            PendingPayoutQueueKind::Margin => s.pending_margin_transfers.get(&operation_id),
+            PendingPayoutQueueKind::Excess => s.pending_excess_transfers.get(&operation_id),
+        }?;
+        (payout.owner == caller).then(|| pending_payout_view(kind, operation_id, payout))
+    })
+}
 
-        if transfer.margin <= transfer_fee {
-            // Margin too small to cover fee — clean it up
-            mutate_state(|s| match source {
-                "margin" => {
-                    s.pending_margin_transfers.remove(&key);
-                }
-                _ => {
-                    s.pending_excess_transfers.remove(&key);
-                }
-            });
+#[candid_method(query)]
+#[query]
+fn list_pending_payouts(cursor: Option<PendingPayoutCursor>, limit: u16) -> PendingPayoutPage {
+    let caller = ic_cdk::caller();
+    read_state(|s| pending_payout_page_in_state(s, caller, cursor, limit))
+}
+
+#[candid_method(update)]
+#[update]
+async fn recover_pending_payout(
+    operation_id: u128,
+    kind: PendingPayoutQueueKind,
+) -> Result<bool, ProtocolError> {
+    let caller = ic_cdk::caller();
+    let _guard =
+        rumi_protocol_backend::guard::GuardPrincipal::new(caller, "recover_pending_payout")?;
+    recover_pending_payout_for_caller(operation_id, kind, caller).await
+}
+
+async fn recover_pending_payout_for_caller(
+    operation_id: u128,
+    kind: PendingPayoutQueueKind,
+    caller: Principal,
+) -> Result<bool, ProtocolError> {
+    let transfer = read_state(|s| match kind {
+        PendingPayoutQueueKind::Margin => s.pending_margin_transfers.get(&operation_id).copied(),
+        PendingPayoutQueueKind::Excess => s.pending_excess_transfers.get(&operation_id).copied(),
+    })
+    .ok_or_else(|| {
+        ProtocolError::GenericError("No payout found for this typed operation id".to_string())
+    })?;
+    if transfer.owner != caller {
+        return Err(ProtocolError::GenericError(
+            "Payout belongs to another principal".to_string(),
+        ));
+    }
+    if read_state(|s| s.three_usd_reserve_payout_parents.contains_key(&operation_id)) {
+        if kind != PendingPayoutQueueKind::Margin {
             return Err(ProtocolError::GenericError(
-                "Pending transfer margin is too small to cover the ledger fee".to_string(),
+                "Linked V2 reserve payout has an invalid queue kind".to_string(),
             ));
         }
-
-        // ASYNC-003: pay with the entry's PERSISTED op_nonce (not a fresh one) so
-        // this manual recovery shares the ledger dedup tuple (created_at_time +
-        // memo) with process_pending_transfer's timer retry. transfer_idempotent
-        // converts the ledger's Duplicate response to Ok, so a concurrent timer
-        // retry and this manual recovery can never double-pay the owner.
-        let result = management::transfer_collateral_with_nonce(
-            (transfer.margin - transfer_fee).to_u64(),
-            transfer.owner,
-            ledger,
-            transfer.op_nonce,
-        )
-        .await;
-
-        match result {
-            Ok(block_index) => {
-                mutate_state(|s| match source {
-                    "margin" => {
-                        event::record_margin_transfer(s, vault_id, caller, block_index);
-                    }
-                    _ => {
-                        s.pending_excess_transfers.remove(&key);
+        // The V2 debt commit pins an exact collateral tuple and requires its
+        // ledger receipt. The ordinary recovery path must never dispatch a
+        // different tuple or clear the queue merely from a transfer reply.
+        rumi_protocol_backend::vault::process_pending_three_usd_reserve_payouts().await;
+        return Ok(read_state(|s| !s.pending_margin_transfers.contains_key(&operation_id)));
+    }
+    if transfer.reconciliation_required || transfer.op_nonce == 0 {
+        return Err(ProtocolError::GenericError(
+            "Payout requires evidence-based reconciliation; retry is disabled".to_string(),
+        ));
+    }
+    let (ledger, amount) = match (transfer.ledger, transfer.transfer_amount_raw) {
+        (Some(ledger), Some(amount)) if amount > 0 => (ledger, amount),
+        _ => {
+            return Err(ProtocolError::GenericError(
+                "Payout arguments were not pinned; reconciliation is required".to_string(),
+            ))
+        }
+    };
+    if transfer.held_for_manual_retry {
+        mutate_state(|s| {
+            let payout = match kind {
+                PendingPayoutQueueKind::Margin => s.pending_margin_transfers.get_mut(&operation_id),
+                PendingPayoutQueueKind::Excess => s.pending_excess_transfers.get_mut(&operation_id),
+            };
+            if let Some(payout) = payout {
+                event::record_pending_payout_rearmed(
+                    operation_id,
+                    match kind {
+                        PendingPayoutQueueKind::Margin => event::PendingPayoutKind::Margin,
+                        PendingPayoutQueueKind::Excess => event::PendingPayoutKind::Excess,
+                    },
+                    payout,
+                );
+            }
+        });
+    }
+    match management::transfer_collateral_with_nonce(
+        amount,
+        transfer.owner,
+        ledger,
+        transfer.op_nonce,
+    )
+    .await
+    {
+        Ok(block_index) => {
+            mutate_state(|s| {
+                event::record_pending_payout_settled(
+                    s,
+                    operation_id,
+                    match kind {
+                        PendingPayoutQueueKind::Margin => event::PendingPayoutKind::Margin,
+                        PendingPayoutQueueKind::Excess => event::PendingPayoutKind::Excess,
+                    },
+                    transfer.vault_id,
+                    block_index,
+                )
+            });
+            Ok(true)
+        }
+        Err(error) => {
+            if matches!(
+                &error,
+                icrc_ledger_types::icrc1::transfer::TransferError::TooOld
+                    | icrc_ledger_types::icrc1::transfer::TransferError::BadFee { .. }
+            ) {
+                mutate_state(|s| {
+                    let payout = match kind {
+                        PendingPayoutQueueKind::Margin => {
+                            s.pending_margin_transfers.get_mut(&operation_id)
+                        }
+                        PendingPayoutQueueKind::Excess => {
+                            s.pending_excess_transfers.get_mut(&operation_id)
+                        }
+                    };
+                    if let Some(payout) = payout {
+                        event::record_pending_payout_held(
+                            operation_id,
+                            match kind {
+                                PendingPayoutQueueKind::Margin => event::PendingPayoutKind::Margin,
+                                PendingPayoutQueueKind::Excess => event::PendingPayoutKind::Excess,
+                            },
+                            payout,
+                            true,
+                        );
                     }
                 });
-                Ok(true)
             }
-            Err(error) => {
-                log!(
-                    DEBUG,
-                    "[recover_pending_transfer] failed to transfer margin: {}, via ledger: {}, with error: {}",
-                    transfer.margin,
-                    ledger,
-                    error
-                );
-                Err(ProtocolError::TransferError(error))
-            }
+            log!(
+                DEBUG,
+                "[recover_pending_payout] operation {} failed via ledger {}: {}",
+                operation_id,
+                ledger,
+                error
+            );
+            Err(ProtocolError::TransferError(error))
         }
-    } else {
-        // No pending transfer found for this caller + vault
-        Err(ProtocolError::GenericError(
-            "No pending transfer found for this vault".to_string(),
-        ))
     }
 }
 
@@ -15977,7 +16214,6 @@ async fn register_icrc_collateral_token(
     arg: rumi_protocol_backend::AddCollateralArg,
     exact_risk_parameters: Option<IcrcCollateralRiskParameters>,
 ) -> Result<(), ProtocolError> {
-
     // Check it doesn't already exist
     let already_exists = read_state(|s| s.collateral_configs.contains_key(&arg.ledger_canister_id));
     if already_exists {
@@ -16046,8 +16282,7 @@ async fn register_icrc_collateral_token(
             interest_rate_apr: Ratio::from_f64(arg.interest_rate_apr),
             redemption_fee_floor: Ratio::from_f64(arg.redemption_fee_floor.unwrap_or(0.005)),
             redemption_fee_ceiling: Ratio::from_f64(arg.redemption_fee_ceiling.unwrap_or(0.05)),
-            recovery_target_cr: borrow_threshold_ratio
-                * read_state(|s| s.recovery_cr_multiplier),
+            recovery_target_cr: borrow_threshold_ratio * read_state(|s| s.recovery_cr_multiplier),
             recovery_borrowing_fee: None,
             recovery_interest_rate_apr: None,
             healthy_cr: None,
@@ -18178,6 +18413,13 @@ service : {
     candid::export_service!();
 
     let new_interface = __export_service();
+    let pre_cl14_did = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/rumi_protocol_backend_pre_cl14.did");
+    service_compatible(
+        CandidSource::Text(&new_interface),
+        CandidSource::File(pre_cl14_did.as_path()),
+    )
+    .expect("public Candid responses, including get_events Event variants, must remain decodable by pre-CL14 clients");
     service_compatible(
         CandidSource::Text(&new_interface),
         CandidSource::Text(LEGACY_REDEMPTION_SERVICE),
@@ -18668,7 +18910,7 @@ mod inc6_settlement_proof_context_tests {
     }
 
     #[test]
-    fn settlement_proof_ids_are_sorted_and_domain_separated() {
+fn settlement_proof_ids_are_sorted_and_domain_separated() {
         let mut s = State::default();
         let pending_a = SettlementProofRecord {
             proof_id: "pending:a".into(),
@@ -18710,5 +18952,80 @@ mod inc6_settlement_proof_context_tests {
         let ids = settlement_proof_ids_from_state(&s);
         assert_eq!(ids.pending, vec!["pending:a", "pending:b"]);
         assert_eq!(ids.reserve, vec!["reserve:a"]);
+}
+}
+
+#[cfg(test)]
+mod pending_payout_page_tests {
+    use super::{
+        pending_payout_ids_for_legacy_recovery, pending_payout_page_in_state,
+        PendingPayoutCursor, PendingPayoutQueueKind, MAX_PENDING_PAYOUT_SCAN_PER_QUEUE,
+    };
+    use rumi_protocol_backend::numeric::ICP;
+    use rumi_protocol_backend::state::{PendingMarginTransfer, State};
+    use candid::Principal;
+
+    fn payout(owner: Principal, vault_id: u64) -> PendingMarginTransfer {
+        PendingMarginTransfer {
+            vault_id,
+            owner,
+            margin: ICP::new(100_000),
+            collateral_type: Principal::anonymous(),
+            retry_count: 0,
+            op_nonce: vault_id as u128,
+            ledger: Some(Principal::from_slice(&[9])),
+            transfer_amount_raw: Some(90_000),
+            held_for_manual_retry: true,
+            reconciliation_required: false,
+            min_net_collateral_raw: None,
+        }
+    }
+
+    #[test]
+    fn payout_page_filters_by_owner_and_cursors_across_typed_queues() {
+        let caller = Principal::from_slice(&[1]);
+        let other = Principal::from_slice(&[2]);
+        let mut state = State::default();
+        state.pending_margin_transfers.insert(10, payout(caller, 10));
+        state.pending_margin_transfers.insert(20, payout(other, 20));
+        state.pending_excess_transfers.insert(15, payout(caller, 15));
+
+        let first = pending_payout_page_in_state(&state, caller, None, 1);
+        assert_eq!(first.items.len(), 1);
+        assert_eq!(first.items[0].operation_id, 10);
+        assert_eq!(first.items[0].kind, PendingPayoutQueueKind::Margin);
+        assert_eq!(first.next_cursor, Some(PendingPayoutCursor {
+            operation_id: 10,
+            kind: PendingPayoutQueueKind::Margin,
+        }));
+
+        let second = pending_payout_page_in_state(&state, caller, first.next_cursor, 1);
+        assert_eq!(second.items.len(), 1);
+        assert_eq!(second.items[0].operation_id, 15);
+        assert_eq!(second.items[0].kind, PendingPayoutQueueKind::Excess);
+        assert_eq!(second.items[0].ledger, Some(Principal::from_slice(&[9])));
+        assert_eq!(second.items[0].amount_raw, Some(90_000));
+        assert_eq!(second.next_cursor, None);
+    }
+
+    #[test]
+    fn legacy_vault_recovery_refuses_a_truncated_scan() {
+        let caller = Principal::from_slice(&[1]);
+        let other = Principal::from_slice(&[2]);
+        let mut state = State::default();
+        for operation_id in 1..=(MAX_PENDING_PAYOUT_SCAN_PER_QUEUE as u128) {
+            state
+                .pending_margin_transfers
+                .insert(operation_id, payout(other, operation_id as u64));
+        }
+        state.pending_margin_transfers.insert(
+            (MAX_PENDING_PAYOUT_SCAN_PER_QUEUE as u128) + 1,
+            payout(caller, 999),
+        );
+
+        let (matches, truncated) =
+            pending_payout_ids_for_legacy_recovery(&state, caller, 999);
+        assert!(matches.is_empty());
+        assert!(truncated, "compatibility recovery must not claim no payout when its bounded scan is incomplete");
     }
 }

@@ -15,43 +15,12 @@ type AddCollateralArg = record {
   interest_rate_apr : float64;
   liquidation_ratio : float64;
 };
-type BotClaimNoEffectProof = record {
-  request_id : nat64;
-  transfer_digest : blob;
-  vault_id : nat64;
-};
-type BotClaimTransferReceipt = record {
-  to : Account;
-  return_account : Account;
-  block_index : nat64;
-  from : Account;
-  memo : blob;
-  fee_e8s : nat64;
-  amount_e8s : nat64;
-  ledger : principal;
-  created_at_time : nat64;
-};
-type BotPartialPaymentLockEvidence = record {
-  ledger : principal;
-  vault_id : nat64;
-  claim_timestamp : nat64;
-  payment_memo : blob;
-  payment_block_index : nat64;
-  total_amount_e6 : nat64;
-  aggregate_complete : bool;
-};
 type BotLiquidationResult = record {
   collateral_amount : nat64;
-  claim_timestamp : opt nat64;
   collateral_price_e8s : nat64;
-  payment_memo : opt blob;
   vault_id : nat64;
-  claim_transfer : opt BotClaimTransferReceipt;
   debt_covered : nat64;
 };
-type BotClaimPartialPaymentAmountResult = variant { Ok : opt nat64; Err : ProtocolError };
-type BotClaimPartialPaymentEvidenceResult = variant { Ok : opt BotPartialPaymentLockEvidence; Err : ProtocolError };
-type BotClaimNoEffectResult = variant { Ok : opt BotClaimNoEffectProof; Err : ProtocolError };
 type BotStatsResponse = record {
   total_debt_covered_e8s : nat64;
   budget_remaining_e8s : nat64;
@@ -958,27 +927,6 @@ type PendingLiquidationV1 = record {
   debt_to_clear_e8s : nat;
   collateral_reserved_native : nat;
 };
-type PendingPayoutCursor = record {
-  kind : PendingPayoutQueueKind;
-  operation_id : nat;
-};
-type PendingPayoutPage = record {
-  next_cursor : opt PendingPayoutCursor;
-  items : vec PendingPayoutView;
-};
-type PendingPayoutQueueKind = variant { Margin; Excess };
-type PendingPayoutView = record {
-  retry_count : nat8;
-  kind : PendingPayoutQueueKind;
-  recipient : principal;
-  operation_id : nat;
-  vault_id : nat64;
-  amount_raw : opt nat64;
-  reconciliation_required : bool;
-  ledger : opt principal;
-  op_nonce : nat;
-  held_for_manual_retry : bool;
-};
 type PendingThreeUsdRefund = record {
   retry_count : nat8;
   vault_id : nat64;
@@ -986,14 +934,6 @@ type PendingThreeUsdRefund = record {
   ledger : principal;
   op_nonce : nat;
   stability_pool : principal;
-};
-type PendingStabilityPoolInterestNotification = record {
-  pool_principal : principal;
-  token_ledger : principal;
-  amount_e8s : nat64;
-  collateral_type : principal;
-  source_mint_block : nat64;
-  receipt_protocol_version : opt nat8;
 };
 type PerCollateralRateCurve = record {
   markers : vec record { float64; float64 };
@@ -1489,18 +1429,9 @@ service : (ProtocolArg) -> {
   backfill_collateral_symbols : () -> (Result_3);
   borrow_chain_vault_evm : (VaultIntent, blob) -> (Result);
   borrow_from_vault : (VaultArg) -> (Result_4);
-  acknowledge_bot_claim_no_effect : (nat64, nat64, blob) -> (Result);
-  bot_acknowledge_claim_cancellation : (nat64, nat64) -> (Result);
   bot_cancel_liquidation : (nat64) -> (Result);
-  bot_cancel_liquidation_with_generation : (nat64, nat64, nat64, nat64, nat64) -> (Result);
   bot_claim_liquidation : (nat64) -> (Result_5);
-  bot_claim_liquidation_with_request_id : (nat64, nat64) -> (Result_5);
-  bot_claim_partial_payment_amount : (nat64, nat64) -> (BotClaimPartialPaymentAmountResult);
-  bot_claim_partial_payment_block_evidence : (nat64, nat64, nat64) -> (BotClaimPartialPaymentEvidenceResult);
-  bot_claim_request_no_effect : (nat64, nat64) -> (BotClaimNoEffectResult);
   bot_confirm_liquidation : (nat64) -> (Result);
-  bot_confirm_liquidation_with_payment : (nat64, nat64, nat64) -> (Result);
-  bot_confirm_liquidation_with_payments : (nat64, nat64, vec nat64) -> (Result);
   cancel_xrp_pending_open : (nat64) -> (Result);
   chain_has_active_settlement_op : (nat32) -> (bool) query;
   claim_chain_collateral : (nat64, principal, nat, text) -> (Result_1);
@@ -1599,14 +1530,7 @@ service : (ProtocolArg) -> {
   get_pending_3usd_refunds : () -> (vec PendingThreeUsdRefund) query;
   get_pending_amm1_donations_count : () -> (nat64) query;
   get_pending_chain_burn_aging : () -> (vec PendingChainBurnAging) query;
-  get_pending_payout : (nat, PendingPayoutQueueKind) -> (
-      opt PendingPayoutView,
-    ) query;
   get_pending_stability_pool_interest_notification_count : () -> (nat64) query;
-  get_pending_stability_pool_interest_notifications : (opt nat64, nat64) -> (variant {
-      Ok : vec PendingStabilityPoolInterestNotification;
-      Err : ProtocolError;
-    }) query;
   get_price_pusher_allowed : () -> (vec record { nat32; text }) query;
   get_price_pusher_principal : () -> (opt principal) query;
   get_protocol_3usd_reserves : () -> (nat64) query;
@@ -1667,9 +1591,6 @@ service : (ProtocolArg) -> {
   liquidate_vault_partial_with_stable : (VaultArgWithToken) -> (Result_4);
   list_chain_vaults : (nat32) -> (vec ChainVaultV1) query;
   list_chain_vaults_page : (nat32, opt nat64, nat16) -> (ChainVaultPage) query;
-  list_pending_payouts : (opt PendingPayoutCursor, nat16) -> (
-      PendingPayoutPage,
-    ) query;
   open_chain_vault : (nat32, nat, nat, text) -> (Result_1);
   open_chain_vault_evm : (VaultIntent, blob) -> (Result_1);
   open_solana_vault : (nat, nat, text) -> (Result_13);
@@ -1682,7 +1603,6 @@ service : (ProtocolArg) -> {
   prepare_redemption_offer : (nat64) -> (Result_16);
   provide_liquidity : (nat64) -> (Result_1);
   reconcile_chain_supply : (nat32) -> (Result_17);
-  recover_pending_payout : (nat, PendingPayoutQueueKind) -> (Result_18);
   recover_pending_transfer : (nat64) -> (Result_18);
   recover_stuck_chain_vault : (nat32, nat64) -> (Result);
   redeem_collateral : (principal, nat64) -> (Result_4);

@@ -1,4 +1,4 @@
-use crate::event::Event;
+use crate::event::{Event, PendingPayoutEvent, PendingPayoutJournalEntry};
 use ic_stable_structures::{
     log::{Log as StableLog, NoSuchEntry},
     memory_manager::{MemoryId, MemoryManager, VirtualMemory},
@@ -27,6 +27,8 @@ const BOT_CLAIM_REQUEST_ID_FLOOR_USED_MEMORY_ID: MemoryId = MemoryId::new(16);
 // Sticky marker for V2 reserve-ingress obligations that cannot be rebuilt by
 // replaying the event log if the stable State snapshot is missing.
 const THREE_USD_RESERVE_INGRESS_V2_USED_MEMORY_ID: MemoryId = MemoryId::new(15);
+const PAYOUT_JOURNAL_INDEX_MEMORY_ID: MemoryId = MemoryId::new(7);
+const PAYOUT_JOURNAL_DATA_MEMORY_ID: MemoryId = MemoryId::new(8);
 
 type VMem = VirtualMemory<DefaultMemoryImpl>;
 type EventLog = StableLog<Vec<u8>, VMem, VMem>;
@@ -34,6 +36,7 @@ type SnapshotLog = StableLog<Vec<u8>, VMem, VMem>;
 type TimestampLog = StableLog<u64, VMem, VMem>;
 type BotClaimRequestIdFloorUsedMarker = ic_stable_structures::Cell<u64, VMem>;
 type ThreeUsdReserveIngressV2UsedMarker = ic_stable_structures::StableCell<u64, VMem>;
+type PayoutJournalLog = StableLog<Vec<u8>, VMem, VMem>;
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> = RefCell::new(
@@ -83,6 +86,12 @@ thread_local! {
                 m.borrow().get(THREE_USD_RESERVE_INGRESS_V2_USED_MEMORY_ID), 0
             ).expect("failed to init 3USD reserve-ingress V2 marker")
         ));
+    /// Private payout lifecycle journal, separate from the public Event stream.
+    static PAYOUT_JOURNAL: RefCell<PayoutJournalLog> = MEMORY_MANAGER
+        .with(|m| RefCell::new(StableLog::init(
+            m.borrow().get(PAYOUT_JOURNAL_INDEX_MEMORY_ID),
+             m.borrow().get(PAYOUT_JOURNAL_DATA_MEMORY_ID),
+         ).expect("failed to initialize payout journal")));
 }
 
 /// Sticky marker prevents event replay from resetting the durable bot request-ID floor.
@@ -163,8 +172,11 @@ pub fn count_events() -> u64 {
 /// every set_*, admin_*). The two logs always grow in lock-step from this
 /// point forward — index N in EVENTS aligns with index N in EVENT_TIMESTAMPS.
 pub fn record_event(event: &Event) {
+    record_event_with_timestamp(event, ic_cdk::api::time());
+}
+
+fn record_event_with_timestamp(event: &Event, now: u64) {
     let bytes = encode_event(event);
-    let now = ic_cdk::api::time();
     EVENTS.with(|events| {
         events
             .borrow()
@@ -176,6 +188,51 @@ pub fn record_event(event: &Event) {
             .append(&now)
             .expect("failed to append to the event timestamp log");
     });
+}
+
+/// Append one private payout transition after the current public-event prefix.
+/// Stable log writes and the caller's in-memory state mutation happen in one
+/// update message, so a trap rolls the complete operation back.
+pub fn record_pending_payout_event(event: &PendingPayoutEvent) {
+    let entry = PendingPayoutJournalEntry {
+        after_legacy_event_count: count_events(),
+        event: event.clone(),
+    };
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(&entry, &mut bytes)
+        .expect("failed to encode pending payout journal entry");
+    PAYOUT_JOURNAL.with(|log| {
+        log.borrow()
+            .append(&bytes)
+            .expect("failed to append pending payout journal entry")
+    });
+}
+
+pub struct PendingPayoutJournalIterator {
+    buf: Vec<u8>,
+    pos: u64,
+}
+
+impl Iterator for PendingPayoutJournalIterator {
+    type Item = PendingPayoutJournalEntry;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        PAYOUT_JOURNAL.with(|log| {
+            let log = log.borrow();
+            match log.read_entry(self.pos, &mut self.buf) {
+                Ok(()) => {
+                    self.pos = self.pos.saturating_add(1);
+                    Some(ciborium::de::from_reader(&self.buf[..])
+                        .expect("failed to decode pending payout journal entry"))
+                }
+                Err(NoSuchEntry) => None,
+            }
+        })
+    }
+}
+
+pub fn pending_payout_events() -> PendingPayoutJournalIterator {
+    PendingPayoutJournalIterator { buf: Vec::new(), pos: 0 }
 }
 
 /// Returns the recording-time timestamp for the event at the given **event-log
@@ -358,6 +415,64 @@ pub fn snapshots() -> SnapshotIterator {
 
 pub fn count_snapshots() -> u64 {
     SNAPSHOTS.with(|log| log.borrow().len())
+}
+
+#[cfg(test)]
+mod payout_journal_tests {
+    use super::*;
+    use crate::{event::{PendingPayoutEvent, PendingPayoutKind}, numeric::ICP, InitArg};
+    use candid::Principal;
+
+    #[test]
+    fn private_payout_journal_does_not_change_legacy_public_event_stream() {
+        let init = InitArg {
+            xrc_principal: Principal::anonymous(),
+            icusd_ledger_principal: Principal::anonymous(),
+            icp_ledger_principal: Principal::anonymous(),
+            fee_e8s: 0,
+            developer_principal: Principal::anonymous(),
+            treasury_principal: None,
+            stability_pool_principal: None,
+            ckusdt_ledger_principal: None,
+            ckusdc_ledger_principal: None,
+        };
+        let before_public_count = count_events();
+        record_event_with_timestamp(&Event::Init(init), 1);
+        let after_legacy_event_count = count_events();
+        let operation_id = (1u128 << 64) | 7;
+        let transfer = crate::state::PendingMarginTransfer {
+            vault_id: 7,
+            owner: Principal::anonymous(),
+            margin: ICP::new(100_000),
+            collateral_type: Principal::anonymous(),
+            retry_count: 0,
+            op_nonce: operation_id,
+            ledger: Some(Principal::anonymous()),
+            transfer_amount_raw: Some(90_000),
+            held_for_manual_retry: false,
+            reconciliation_required: false,
+            min_net_collateral_raw: None,
+        };
+        record_pending_payout_event(&PendingPayoutEvent::Queued {
+            operation_id,
+            kind: PendingPayoutKind::Margin,
+            transfer,
+            timestamp: 1,
+        });
+
+        let public_events: Vec<_> = events().collect();
+        assert_eq!(public_events.len() as u64, after_legacy_event_count);
+        assert_eq!(after_legacy_event_count, before_public_count + 1);
+        assert!(matches!(public_events.get(before_public_count as usize), Some(Event::Init(_))));
+        let response_bytes = candid::encode_one(&public_events).expect("encode get_events response");
+        let decoded_response: Vec<Event> = candid::decode_one(&response_bytes)
+            .expect("decode get_events response using the unchanged public Event type");
+        assert_eq!(decoded_response, public_events);
+        let private_events: Vec<_> = pending_payout_events().collect();
+        let last = private_events.last().expect("payout journal entry persisted");
+        assert_eq!(last.after_legacy_event_count, after_legacy_event_count);
+        assert!(matches!(&last.event, PendingPayoutEvent::Queued { operation_id: id, .. } if *id == operation_id));
+    }
 }
 
 pub struct SnapshotIterator {
