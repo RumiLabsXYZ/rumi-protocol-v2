@@ -2720,7 +2720,9 @@ impl State {
                 ))
             }
         };
-        if current_time.saturating_sub(last_icp_timestamp) > TEN_MINS_NANOS {
+        if last_icp_timestamp > current_time
+            || current_time - last_icp_timestamp > TEN_MINS_NANOS
+        {
             return Err(ProtocolError::TemporarilyUnavailable(
                 "Last known ICP price too old".to_string(),
             ));
