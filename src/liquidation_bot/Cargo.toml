@@ -7,6 +7,9 @@ edition = "2021"
 path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
+[features]
+test_endpoints = []
+
 [dependencies]
 candid = "0.10.6"
 ic-stable-structures = "0.6.5"
@@ -18,3 +21,6 @@ ic-cdk-macros = "0.8.3"
 ic-canister-log = { git = "https://github.com/Rumi-Protocol/ic", rev = "fc278709" }
 icrc-ledger-types = { git = "https://github.com/Rumi-Protocol/ic", rev = "fc278709" }
 rumi_cycle_manager = { path = "../rumi_cycle_manager" }
+
+[dev-dependencies]
+candid_parser = "0.1"

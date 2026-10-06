@@ -22,11 +22,47 @@ export interface AddCollateralArg {
   'interest_rate_apr' : number,
   'liquidation_ratio' : number,
 }
+export interface BotClaimNoEffectProof {
+  'request_id' : bigint,
+  'transfer_digest' : Uint8Array | number[],
+  'vault_id' : bigint,
+}
+export type BotClaimNoEffectResult = { 'Ok' : [] | [BotClaimNoEffectProof] } |
+  { 'Err' : ProtocolError };
+export type BotClaimPartialPaymentAmountResult = { 'Ok' : [] | [bigint] } |
+  { 'Err' : ProtocolError };
+export type BotClaimPartialPaymentEvidenceResult = {
+    'Ok' : [] | [BotPartialPaymentLockEvidence]
+  } |
+  { 'Err' : ProtocolError };
+export interface BotClaimTransferReceipt {
+  'to' : Account,
+  'return_account' : Account,
+  'block_index' : bigint,
+  'from' : Account,
+  'memo' : Uint8Array | number[],
+  'fee_e8s' : bigint,
+  'amount_e8s' : bigint,
+  'ledger' : Principal,
+  'created_at_time' : bigint,
+}
 export interface BotLiquidationResult {
   'collateral_amount' : bigint,
+  'claim_timestamp' : [] | [bigint],
   'collateral_price_e8s' : bigint,
+  'payment_memo' : [] | [Uint8Array | number[]],
   'vault_id' : bigint,
+  'claim_transfer' : [] | [BotClaimTransferReceipt],
   'debt_covered' : bigint,
+}
+export interface BotPartialPaymentLockEvidence {
+  'claim_timestamp' : bigint,
+  'payment_memo' : Uint8Array | number[],
+  'vault_id' : bigint,
+  'payment_block_index' : bigint,
+  'ledger' : Principal,
+  'total_amount_e6' : bigint,
+  'aggregate_complete' : boolean,
 }
 export interface BotStatsResponse {
   'total_debt_covered_e8s' : bigint,
@@ -1636,6 +1672,10 @@ export interface XrpVaultOpenInfo {
   'vault_id' : bigint,
 }
 export interface _SERVICE {
+  'acknowledge_bot_claim_no_effect' : ActorMethod<
+    [bigint, bigint, Uint8Array | number[]],
+    Result
+  >,
   'add_collateral_token' : ActorMethod<[AddCollateralArg], Result>,
   'add_margin_to_vault' : ActorMethod<[VaultArg], Result_1>,
   'add_margin_with_deposit' : ActorMethod<[bigint], Result_1>,
@@ -1658,9 +1698,38 @@ export interface _SERVICE {
     Result
   >,
   'borrow_from_vault' : ActorMethod<[VaultArg], Result_4>,
+  'bot_acknowledge_claim_cancellation' : ActorMethod<[bigint, bigint], Result>,
   'bot_cancel_liquidation' : ActorMethod<[bigint], Result>,
+  'bot_cancel_liquidation_with_generation' : ActorMethod<
+    [bigint, bigint, bigint, bigint, bigint],
+    Result
+  >,
   'bot_claim_liquidation' : ActorMethod<[bigint], Result_5>,
+  'bot_claim_liquidation_with_request_id' : ActorMethod<
+    [bigint, bigint],
+    Result_5
+  >,
+  'bot_claim_partial_payment_amount' : ActorMethod<
+    [bigint, bigint],
+    BotClaimPartialPaymentAmountResult
+  >,
+  'bot_claim_partial_payment_block_evidence' : ActorMethod<
+    [bigint, bigint, bigint],
+    BotClaimPartialPaymentEvidenceResult
+  >,
+  'bot_claim_request_no_effect' : ActorMethod<
+    [bigint, bigint],
+    BotClaimNoEffectResult
+  >,
   'bot_confirm_liquidation' : ActorMethod<[bigint], Result>,
+  'bot_confirm_liquidation_with_payment' : ActorMethod<
+    [bigint, bigint, bigint],
+    Result
+  >,
+  'bot_confirm_liquidation_with_payments' : ActorMethod<
+    [bigint, bigint, BigUint64Array | bigint[]],
+    Result
+  >,
   'cancel_xrp_pending_open' : ActorMethod<[bigint], Result>,
   'chain_has_active_settlement_op' : ActorMethod<[number], boolean>,
   'claim_chain_collateral' : ActorMethod<

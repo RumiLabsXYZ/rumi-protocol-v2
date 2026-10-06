@@ -8,6 +8,9 @@
 
 use candid::{CandidType, Deserialize, Principal};
 use ic_canister_log::log;
+use icrc_ledger_types::icrc1::account::Account;
+use icrc_ledger_types::icrc3::archive::QueryArchiveFn;
+
 use serde::Serialize;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -16,6 +19,214 @@ use crate::logs::INFO;
 use crate::management;
 use crate::numeric::ICUSD;
 use crate::state::read_state;
+
+// Native ICP's legacy `query_blocks` interface encodes accounts as 32-byte
+// AccountIdentifiers. These wire types intentionally match that ledger ABI.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct NativeIcpTokens { e8s: u64 }
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct NativeIcpTimestamp { timestamp_nanos: u64 }
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct NativeIcpGetBlocksArgs { start: u64, length: u64 }
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct NativeIcpTransaction {
+    memo: u64,
+    icrc1_memo: Option<Vec<u8>>,
+    operation: Option<NativeIcpOperation>,
+    created_at_time: NativeIcpTimestamp,
+}
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct NativeIcpBlock {
+    parent_hash: Option<Vec<u8>>,
+    transaction: NativeIcpTransaction,
+    timestamp: NativeIcpTimestamp,
+}
+#[derive(CandidType, Deserialize, Clone, Debug)]
+enum NativeIcpOperation {
+    Burn { from: Vec<u8>, spender: Option<Vec<u8>>, amount: NativeIcpTokens },
+    Mint { to: Vec<u8>, amount: NativeIcpTokens },
+    Transfer { from: Vec<u8>, to: Vec<u8>, spender: Option<Vec<u8>>, amount: NativeIcpTokens, fee: NativeIcpTokens },
+    Approve { from: Vec<u8>, spender: Vec<u8>, allowance_e8s: i128, allowance: NativeIcpTokens, expected_allowance: Option<NativeIcpTokens>, fee: NativeIcpTokens, expires_at: Option<NativeIcpTimestamp> },
+}
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct NativeIcpBlockRange { blocks: Vec<NativeIcpBlock> }
+#[derive(CandidType, Deserialize, Clone, Debug)]
+enum NativeIcpQueryArchiveError {
+    BadFirstBlockIndex { requested_index: u64, first_valid_index: u64 },
+    Other { error_code: u64, error_message: String },
+}
+type NativeIcpQueryArchiveResult = Result<NativeIcpBlockRange, NativeIcpQueryArchiveError>;
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct NativeIcpArchivedBlocksRange {
+    start: u64,
+    length: u64,
+    callback: QueryArchiveFn<NativeIcpGetBlocksArgs, NativeIcpQueryArchiveResult>,
+}
+#[derive(CandidType, Deserialize, Clone, Debug)]
+struct NativeIcpQueryBlocksResponse {
+    chain_length: u64,
+    certificate: Option<Vec<u8>>,
+    blocks: Vec<NativeIcpBlock>,
+    first_block_index: u64,
+    archived_blocks: Vec<NativeIcpArchivedBlocksRange>,
+}
+
+
+/// Verify a native ICP transfer against its exact persisted tuple. The caller
+/// supplies the pinned ledger, accounts, amount, fee, memo, timestamp, and block.
+pub async fn verify_native_icp_transfer_receipt(
+    ledger: Principal,
+    source: Principal,
+    destination: Principal,
+    amount: u64,
+    fee: u64,
+    memo: &[u8],
+    created_at_time: u64,
+    block_index: u64,
+) -> Result<(), String> {
+    let block = fetch_native_icp_block(ledger, block_index).await?;
+    validate_native_icp_transfer_block(
+        &block, ledger, source, destination, amount, fee, memo, created_at_time,
+    ).await
+}
+
+
+async fn fetch_native_icp_block(ledger: Principal, block_index: u64) -> Result<NativeIcpBlock, String> {
+    let request = NativeIcpGetBlocksArgs { start: block_index, length: 1 };
+    let (response,): (NativeIcpQueryBlocksResponse,) = ic_cdk::call(
+        ledger, "query_blocks", (request.clone(),),
+    ).await.map_err(|(code, message)| format!("native ICP query_blocks failed: {code:?} {message}"))?;
+    if response.blocks.len() > 1 {
+        return Err(format!("native ICP ledger returned multiple direct blocks for {block_index}"));
+    }
+
+    if let Some(offset) = block_index.checked_sub(response.first_block_index)
+        .and_then(|offset| usize::try_from(offset).ok())
+        .filter(|offset| *offset < response.blocks.len())
+    {
+        return Ok(response.blocks[offset].clone());
+    }
+
+    let mut covering = response.archived_blocks.iter().filter(|archive| {
+        archive.length > 0 && archive.start <= block_index
+            && archive.start.checked_add(archive.length).is_some_and(|end| block_index < end)
+    });
+    let archive = covering.next()
+        .ok_or_else(|| format!("native ICP ledger returned no block/archive descriptor for {block_index}"))?;
+    if covering.next().is_some() {
+        return Err(format!("native ICP ledger returned overlapping archive descriptors for {block_index}"));
+    }
+    let (result,): (NativeIcpQueryArchiveResult,) = ic_cdk::call(
+        archive.callback.canister_id,
+        &archive.callback.method,
+        (request,),
+    ).await.map_err(|(code, message)| format!("native ICP archive call failed: {code:?} {message}"))?;
+    match result {
+        Ok(range) if range.blocks.len() == 1 => Ok(range.blocks.into_iter().next().expect("one native ICP block")),
+        Ok(_) => Err("native ICP archive did not return exactly one requested block".into()),
+        Err(error) => Err(format!("native ICP archive rejected block lookup: {error:?}")),
+    }
+}
+
+async fn validate_native_icp_transfer_block(
+    block: &NativeIcpBlock,
+    ledger: Principal,
+    source: Principal,
+    destination: Principal,
+    amount: u64,
+    fee: u64,
+    memo: &[u8],
+    created_at_time: u64,
+) -> Result<(), String> {
+    let operation = block.transaction.operation.as_ref().ok_or("native ICP block operation is missing")?;
+    let NativeIcpOperation::Transfer { from, to, spender, amount: block_amount, fee: block_fee } = operation else {
+        return Err("native ICP block operation is not Transfer".into());
+    };
+    if spender.is_some() {
+        return Err("native ICP transfer block unexpectedly names a spender".into());
+    }
+    if from.len() != 32 || to.len() != 32 {
+        return Err("native ICP block account identifier is not 32 bytes".into());
+    }
+    let (sender_id,): (Vec<u8>,) = ic_cdk::call(
+        ledger,
+        "account_identifier",
+        (Account { owner: source, subaccount: None },),
+    ).await.map_err(|(code, message)| format!("native ICP sender account_identifier failed: {code:?} {message}"))?;
+    let (destination_id,): (Vec<u8>,) = ic_cdk::call(
+        ledger,
+        "account_identifier",
+        (Account { owner: destination, subaccount: None },),
+    ).await.map_err(|(code, message)| format!("native ICP destination account_identifier failed: {code:?} {message}"))?;
+    if sender_id.len() != 32 || destination_id.len() != 32 || *from != sender_id || *to != destination_id {
+        return Err("native ICP block source or destination account identifier differs from pinned tuple".into());
+    }
+    if block_amount.e8s != amount || block_fee.e8s != fee
+        || block.transaction.icrc1_memo.as_deref() != Some(memo)
+        || block.transaction.created_at_time.timestamp_nanos != created_at_time
+    {
+        return Err("native ICP block amount, fee, ICRC-1 memo, or created_at_time differs from pinned tuple".into());
+    }
+    Ok(())
+}
+
+
+/// Minimal native-ICP history projection for backend bot-cancel recovery.
+/// Kept beside the wire decoder so cancellation uses the same legacy
+/// `query_blocks` and archive ABI as Treasury's existing exact-receipt code.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NativeIcpCancelHistoryBlock {
+    Transfer {
+        from: Vec<u8>,
+        to: Vec<u8>,
+        spender: Option<Vec<u8>>,
+        amount_e8s: u64,
+        fee_e8s: u64,
+        icrc1_memo: Option<Vec<u8>>,
+        created_at_time_nanos: u64,
+    },
+    Other,
+}
+
+pub async fn native_icp_cancel_history_length(ledger: Principal) -> Result<u64, String> {
+    let request = NativeIcpGetBlocksArgs { start: 0, length: 0 };
+    let (response,): (NativeIcpQueryBlocksResponse,) = ic_cdk::call(
+        ledger, "query_blocks", (request,),
+    ).await.map_err(|(code, message)| {
+        format!("native ICP query_blocks head request failed: {code:?} {message}")
+    })?;
+    Ok(response.chain_length)
+}
+
+pub async fn native_icp_cancel_history_block(
+    ledger: Principal,
+    block_index: u64,
+) -> Result<NativeIcpCancelHistoryBlock, String> {
+    let block = fetch_native_icp_block(ledger, block_index).await?;
+    let operation = block.transaction.operation.ok_or("native ICP block operation is missing")?;
+    match operation {
+        NativeIcpOperation::Transfer { from, to, spender, amount, fee } => {
+            if from.len() != 32 || to.len() != 32
+                || spender.as_ref().is_some_and(|id| id.len() != 32)
+            {
+                return Err("native ICP transfer contains malformed account identifiers".into());
+            }
+            Ok(NativeIcpCancelHistoryBlock::Transfer {
+                from,
+                to,
+                spender,
+                amount_e8s: amount.e8s,
+                fee_e8s: fee.e8s,
+                icrc1_memo: block.transaction.icrc1_memo,
+                created_at_time_nanos: block.transaction.created_at_time.timestamp_nanos,
+            })
+        }
+        NativeIcpOperation::Burn { .. }
+        | NativeIcpOperation::Mint { .. }
+        | NativeIcpOperation::Approve { .. } => Ok(NativeIcpCancelHistoryBlock::Other),
+    }
+}
+
 
 // ---------------------------------------------------------------------------
 // Mirror types matching rumi_treasury::types (can't depend on cdylib crate)

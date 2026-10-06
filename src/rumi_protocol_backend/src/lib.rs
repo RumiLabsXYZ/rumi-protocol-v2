@@ -36,6 +36,8 @@ fn redemption_transfer_meets_minimum(
         .unwrap_or(true)
 }
 
+pub mod bot_payment;
+pub mod bot_claim_return;
 pub mod chains;
 pub mod dashboard;
 pub mod event;
@@ -86,6 +88,23 @@ pub const DUST_THRESHOLD: ICUSD = ICUSD::new(100); // 0.000001 icUSD - dust thre
 pub const RECOVERY_COLLATERAL_RATIO: Ratio = Ratio::new(dec!(1.5)); // 150%
 pub const MINIMUM_COLLATERAL_RATIO: Ratio = Ratio::new(dec!(1.33)); // 133%
 /// Default protocol share of liquidator's bonus profit (3%).
+/// Unique escrow account for a bot claim's returned-collateral receipt.
+pub fn bot_claim_return_subaccount(vault_id: u64, claim_timestamp: u64) -> [u8; 32] {
+    let mut subaccount = [0u8; 32];
+    subaccount[..8].copy_from_slice(&vault_id.to_be_bytes());
+    subaccount[8..16].copy_from_slice(&claim_timestamp.to_be_bytes());
+    subaccount[16..24].copy_from_slice(b"BOTRET01");
+    subaccount
+}
+
+/// Isolated ckUSDC source account for one bot claim generation.
+pub fn bot_claim_payment_subaccount(vault_id: u64, claim_timestamp: u64) -> [u8; 32] {
+    let mut subaccount = [0u8; 32];
+    subaccount[..16].copy_from_slice(b"RUMI-CLAIM-PAY01");
+    subaccount[16..24].copy_from_slice(&vault_id.to_be_bytes());
+    subaccount[24..32].copy_from_slice(&claim_timestamp.to_be_bytes());
+    subaccount
+}
 pub const DEFAULT_LIQUIDATION_PROTOCOL_SHARE: Ratio = Ratio::new(dec!(0.03));
 
 /// Wave-9c DOS-005: default alert band (in basis points) above each
@@ -1061,24 +1080,18 @@ pub fn record_per_collateral_redemption_fee(
 }
 
 pub async fn check_vaults() {
-    // Auto-cancel bot claims that have been pending too long (10 minutes).
-    // This prevents vaults from being permanently locked if the bot crashes.
-    //
-    // Wave-11 BOT-001: gate the auto-cancel on the protocol's collateral
-    // balance having returned to (>=) `claim.collateral_amount - ledger_fee`.
-    // Without this, a CLAIM → SWAP-ok → TRANSFER-fail → admin-AFK-10min
-    // sequence would clear the claim while the bot still holds the
-    // collateral, leaving the vault permanently underwater. Mirrors the
-    // subaccount + fee derivation used by `bot_cancel_liquidation`. On a
-    // shortfall we leave the claim in place and emit
-    // `BotClaimReconciliationNeeded` so admin can reconcile manually.
-    //
-    // The guard re-emits the event on every tick the gate fires (no
-    // per-claim "already emitted" flag, since a state-shape change is
-    // out of scope for this wave). The explorer can group by `vault_id`
-    // to dedupe; operator action is unchanged regardless of count.
+    // Expired bot claims are deliberately retained for reconciliation.
+    // `check_vaults` does not infer return from the pooled backend balance:
+    // that balance cannot prove which claim's collateral was returned.
+    // Reconciliation events are rate-limited per vault in stable state.
     const BOT_CLAIM_TIMEOUT_NS: u64 = 600_000_000_000; // 10 minutes
     let now = ic_cdk::api::time();
+    mutate_state(|s| {
+        let active_claims: std::collections::BTreeSet<u64> =
+            s.bot_claims.keys().copied().collect();
+        s.bot_claim_reconciliation_last_emitted
+            .retain(|vault_id, _| active_claims.contains(vault_id));
+    });
 
     let expired_claims: Vec<(u64, crate::state::BotClaim)> = read_state(|s| {
         s.bot_claims
@@ -1088,87 +1101,15 @@ pub async fn check_vaults() {
             .collect()
     });
 
-    let backend_id = ic_cdk::id();
     for (vault_id, claim) in &expired_claims {
-        let required = read_state(|s| {
-            let fee = s
-                .get_collateral_config(&claim.collateral_type)
-                .map(|c| c.ledger_fee)
-                .unwrap_or(0);
-            claim.collateral_amount.saturating_sub(fee)
-        });
-
-        let balance_result: Result<(candid::Nat,), _> = ic_cdk::call(
-            claim.collateral_type,
-            "icrc1_balance_of",
-            (icrc_ledger_types::icrc1::account::Account {
-                owner: backend_id,
-                subaccount: None,
-            },),
-        )
-        .await;
-
-        let observed = match balance_result {
-            Ok((bal,)) => bal.0.to_u64().unwrap_or(0),
-            Err((code, msg)) => {
-                log!(
-                    INFO,
-                    "[BOT-001] auto-cancel balance query failed for vault #{}: {:?} {}; deferring this tick",
-                    vault_id,
-                    code,
-                    msg
-                );
-                continue;
-            }
-        };
-
-        if observed < required {
-            log!(
-                INFO,
-                "[BOT-001] auto-cancel skipped for vault #{}: balance {} < required {} (collateral_amount {})",
-                vault_id,
-                observed,
-                required,
-                claim.collateral_amount
-            );
-            mutate_state(|s| {
-                // TOCTOU re-check: between collecting expired_claims and
-                // awaiting the balance query, the bot may have called
-                // `bot_cancel_liquidation` itself and cleared the claim.
-                // Avoid emitting a misleading reconciliation event for a
-                // vault that no longer needs reconciliation.
-                if !s.bot_claims.contains_key(vault_id) {
-                    return;
-                }
-                crate::event::record_bot_claim_reconciliation_needed(
-                    s, *vault_id, observed, required,
-                );
-            });
-            continue;
-        }
-
-        log!(
-            INFO,
-            "[check_vaults] Auto-cancelling stuck bot claim for vault #{} (claimed {}s ago, balance {} >= required {})",
-            vault_id,
-            (now - claim.claimed_at) / 1_000_000_000,
-            observed,
-            required
-        );
-
+        let required = read_state(|s| s.get_collateral_config(&claim.collateral_type)
+            .map(|c| c.ledger_fee).unwrap_or(0));
         mutate_state(|s| {
-            // TOCTOU re-check: skip the budget restore if the claim was
-            // already cleared during the await window (e.g., bot raced us
-            // by calling `bot_cancel_liquidation`). Without this guard the
-            // budget would be double-credited.
-            if !s.bot_claims.contains_key(vault_id) {
-                return;
+            if s.bot_claims.get(vault_id) == Some(claim) {
+                crate::event::record_bot_claim_reconciliation_needed(
+                    s, *vault_id, 0, claim.collateral_amount.saturating_sub(required),
+                );
             }
-            if let Some(vault) = s.vault_id_to_vaults.get_mut(vault_id) {
-                vault.bot_processing = false;
-            }
-            s.bot_budget_remaining_e8s += claim.debt_amount;
-            s.bot_claims.remove(vault_id);
         });
     }
 

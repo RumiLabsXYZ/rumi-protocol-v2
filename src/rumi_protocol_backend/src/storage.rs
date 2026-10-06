@@ -23,11 +23,13 @@ const STATE_MEMORY_ID: MemoryId = MemoryId::new(4);
 // which matches today's behaviour.
 const EVENT_TS_INDEX_MEMORY_ID: MemoryId = MemoryId::new(5);
 const EVENT_TS_DATA_MEMORY_ID: MemoryId = MemoryId::new(6);
+const BOT_CLAIM_REQUEST_ID_FLOOR_USED_MEMORY_ID: MemoryId = MemoryId::new(16);
 
 type VMem = VirtualMemory<DefaultMemoryImpl>;
 type EventLog = StableLog<Vec<u8>, VMem, VMem>;
 type SnapshotLog = StableLog<Vec<u8>, VMem, VMem>;
 type TimestampLog = StableLog<u64, VMem, VMem>;
+type BotClaimRequestIdFloorUsedMarker = ic_stable_structures::Cell<u64, VMem>;
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> = RefCell::new(
@@ -69,6 +71,13 @@ thread_local! {
                   ).expect("failed to initialize event timestamp log")
               )
         );
+    static BOT_CLAIM_REQUEST_ID_FLOOR_USED: RefCell<BotClaimRequestIdFloorUsedMarker> = MEMORY_MANAGER
+        .with(|m| RefCell::new(BotClaimRequestIdFloorUsedMarker::init(m.borrow().get(BOT_CLAIM_REQUEST_ID_FLOOR_USED_MEMORY_ID), 0).expect("failed to init bot claim request-ID floor marker")));
+}
+
+/// Sticky marker prevents event replay from resetting the durable bot request-ID floor.
+pub fn mark_bot_claim_request_id_floor_used() -> Result<(), String> {
+    BOT_CLAIM_REQUEST_ID_FLOOR_USED.with(|marker| marker.borrow_mut().set(1).map(|_| ()).map_err(|error| format!("failed to persist bot claim request-ID floor marker: {error:?}")))
 }
 
 pub struct EventIterator {

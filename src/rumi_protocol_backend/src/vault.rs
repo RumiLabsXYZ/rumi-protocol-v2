@@ -1442,6 +1442,14 @@ pub struct Vault {
     pub bot_processing: bool,
 }
 
+/// Current backend state stores collateral only in the canister's default
+/// ledger account. Bot claim and cancellation paths pin that same source in
+/// their exact transfer tuple; there is no per-vault ICRC source variant to
+/// fall back from in this schema.
+pub fn require_supported_icrc_collateral_source(_vault: &Vault) -> Result<(), crate::ProtocolError> {
+    Ok(())
+}
+
 impl Vault {
     /// Compute the vault's health score: CR / liquidation_ratio.
     /// A score of 1.0 means the vault is at its liquidation threshold.

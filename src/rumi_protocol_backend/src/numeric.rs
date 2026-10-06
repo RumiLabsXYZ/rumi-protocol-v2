@@ -19,6 +19,20 @@ const ICUSD_DEC: u64 = 100_000_000;
 /// Nanoseconds in a 365-day year. Used for interest accrual.
 pub const NANOS_PER_YEAR: u64 = 365 * 24 * 60 * 60 * 1_000_000_000;
 
+/// Exact floor of proportional accrued interest, without Decimal overflow.
+pub fn proportional_interest_share(repaid_e8s: u64, accrued_e8s: u64, debt_e8s: u64) -> u64 {
+    if debt_e8s == 0 || accrued_e8s == 0 || repaid_e8s == 0 { return 0; }
+    let share = u128::from(repaid_e8s) * u128::from(accrued_e8s) / u128::from(debt_e8s);
+    share.min(u128::from(accrued_e8s)) as u64
+}
+
+pub fn try_icusd_to_collateral_amount(icusd_value: ICUSD, price_usd: Decimal, decimals: u8) -> Option<u64> {
+    if price_usd <= Decimal::ZERO { return None; }
+    let usd_value = Decimal::from(icusd_value.to_u64()) / dec!(100_000_000);
+    let scale = 10u64.checked_pow(decimals as u32)?;
+    usd_value.checked_div(price_usd)?.checked_mul(Decimal::from(scale))?.to_u64()
+}
+
 
 #[derive(PartialEq, Eq, Debug, Ord, PartialOrd, Clone, Copy)]
 pub struct Amount<T>(pub Decimal, pub PhantomData<T>);

@@ -16,11 +16,13 @@ export const idlFactory = ({ IDL }) => {
     'three_pool_principal' : IDL.Opt(IDL.Principal),
   });
   const BotInitArgs = IDL.Record({ 'config' : BotConfig });
+  const Result = IDL.Variant({ 'Ok' : IDL.Null, 'Err' : IDL.Text });
   const SwapResult = IDL.Record({
     'ckusdc_received_e6' : IDL.Nat64,
     'effective_price_e8s' : IDL.Nat64,
   });
-  const TestSwapResult = IDL.Variant({ 'Ok' : SwapResult, 'Err' : IDL.Text });
+  const Result_1 = IDL.Variant({ 'Ok' : SwapResult, 'Err' : IDL.Text });
+  const Result_2 = IDL.Variant({ 'Ok' : IDL.Nat64, 'Err' : IDL.Text });
   const CycleManagerMetric = IDL.Record({
     'key' : IDL.Text,
     'value' : IDL.Nat,
@@ -60,20 +62,49 @@ export const idlFactory = ({ IDL }) => {
     'TransferFailed' : IDL.Null,
     'Completed' : IDL.Null,
   });
+  const IcpTreasuryBonusState = IDL.Variant({
+    'Paid' : IDL.Null,
+    'Prepared' : IDL.Null,
+    'Quarantined' : IDL.Null,
+  });
+  const Account = IDL.Record({
+    'owner' : IDL.Principal,
+    'subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+  });
+  const TransferArg = IDL.Record({
+    'to' : Account,
+    'fee' : IDL.Opt(IDL.Nat),
+    'memo' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'from_subaccount' : IDL.Opt(IDL.Vec(IDL.Nat8)),
+    'created_at_time' : IDL.Opt(IDL.Nat64),
+    'amount' : IDL.Nat,
+  });
+  const IcpTreasuryBonusTransfer = IDL.Record({
+    'block_index' : IDL.Opt(IDL.Nat64),
+    'args' : TransferArg,
+    'from' : Account,
+    'ledger' : IDL.Principal,
+  });
   const LiquidationRecordV1 = IDL.Record({
     'id' : IDL.Nat64,
+    'ckusdc_payment_block_index' : IDL.Opt(IDL.Nat64),
+    'claim_timestamp' : IDL.Opt(IDL.Nat64),
     'status' : LiquidationStatus,
+    'payment_memo' : IDL.Opt(IDL.Vec(IDL.Nat8)),
     'ckusdc_transferred_e6' : IDL.Nat64,
     'oracle_price_e8s' : IDL.Nat64,
     'ckusdc_received_e6' : IDL.Nat64,
     'error_message' : IDL.Opt(IDL.Text),
+    'icp_treasury_bonus_state' : IDL.Opt(IcpTreasuryBonusState),
     'icp_to_treasury_e8s' : IDL.Nat64,
     'collateral_claimed_e8s' : IDL.Nat64,
+    'icp_treasury_transfer' : IDL.Opt(IcpTreasuryBonusTransfer),
     'vault_id' : IDL.Nat64,
     'slippage_bps' : IDL.Int32,
     'timestamp' : IDL.Nat64,
     'confirm_retry_count' : IDL.Nat8,
     'debt_to_cover_e8s' : IDL.Nat64,
+    'ckusdc_payment_amount_e6' : IDL.Opt(IDL.Nat64),
     'effective_price_e8s' : IDL.Nat64,
     'icp_swapped_e8s' : IDL.Nat64,
   });
@@ -90,15 +121,28 @@ export const idlFactory = ({ IDL }) => {
   });
   return IDL.Service({
     'admin_approve_pool' : IDL.Func([], [], []),
+    'admin_recover_ckusdc_shortfall' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64],
+        [Result],
+        [],
+      ),
     'admin_refresh_fees' : IDL.Func([], [IDL.Nat64, IDL.Nat64], []),
+    'admin_requeue_pending_bot_claim' : IDL.Func([IDL.Nat64], [Result], []),
     'admin_resolve_pool_ordering' : IDL.Func([], [], []),
+    'admin_retry_claim_return' : IDL.Func([IDL.Nat64], [Result], []),
     'admin_retry_stuck_claim' : IDL.Func([IDL.Nat64], [], []),
+    'admin_submit_paused_claim_ckusdc_payment' : IDL.Func(
+        [IDL.Nat64],
+        [Result],
+        [],
+      ),
     'admin_sweep_ckusdc' : IDL.Func(
         [IDL.Principal, IDL.Opt(IDL.Nat64)],
         [],
         [],
       ),
-    'admin_test_swap' : IDL.Func([IDL.Nat64], [TestSwapResult], []),
+    'admin_test_swap' : IDL.Func([IDL.Nat64], [Result_1], []),
+    'backend_claim_request_id_floor' : IDL.Func([], [Result_2], []),
     'cycle_manager_metrics' : IDL.Func(
         [],
         [IDL.Vec(CycleManagerMetric)],
@@ -126,6 +170,11 @@ export const idlFactory = ({ IDL }) => {
     'get_liquidations' : IDL.Func(
         [IDL.Nat64, IDL.Nat64],
         [IDL.Vec(LiquidationRecordVersioned)],
+        ['query'],
+      ),
+    'get_paused_claim_ckusdc_payment_account' : IDL.Func(
+        [IDL.Nat64],
+        [IDL.Opt(Account)],
         ['query'],
       ),
     'get_stuck_liquidations' : IDL.Func(

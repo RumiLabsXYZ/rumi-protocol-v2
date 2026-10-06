@@ -7,6 +7,8 @@ pub type Mem = VirtualMemory<DefaultMemoryImpl>;
 pub const MEM_ID_CONFIG: MemoryId = MemoryId::new(0);
 pub const MEM_ID_HISTORY: MemoryId = MemoryId::new(1);
 pub const MEM_ID_NEXT_ID: MemoryId = MemoryId::new(2);
+/// New isolated region for idempotent backend claim intents; IDs 0-2 are in use.
+pub const MEM_ID_CLAIM_INTENTS: MemoryId = MemoryId::new(3);
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<Option<MemoryManager<DefaultMemoryImpl>>> =

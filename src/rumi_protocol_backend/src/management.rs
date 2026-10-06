@@ -1510,6 +1510,47 @@ pub async fn transfer_collateral_with_nonce(
     .await
 }
 
+/// Dispatch one exact ICRC-1 collateral tuple for bot claims and claim
+/// cancellation. Every argument is supplied by a durable caller journal;
+/// this helper never generates a replacement nonce, memo, or timestamp.
+pub async fn transfer_collateral_with_exact_tuple(
+    ledger: Principal,
+    from: Account,
+    to: Account,
+    amount: u64,
+    fee: u64,
+    memo: Vec<u8>,
+    created_at_time: u64,
+) -> Result<u64, TransferError> {
+    let args = TransferArg {
+        from_subaccount: from.subaccount,
+        to,
+        amount: Nat::from(amount),
+        fee: Some(Nat::from(fee)),
+        memo: Some(Memo::from(memo)),
+        created_at_time: Some(created_at_time),
+    };
+    let result: Result<(Result<Nat, TransferError>,), _> =
+        ic_cdk::call(ledger, "icrc1_transfer", (args,)).await;
+    match result {
+        Ok((Ok(block_index),)) => block_index.0.to_u64().ok_or(TransferError::GenericError {
+            error_code: Nat::from(0u8),
+            message: "ledger block index exceeds u64".into(),
+        }),
+        Ok((Err(TransferError::Duplicate { duplicate_of }),)) => {
+            duplicate_of.0.to_u64().ok_or(TransferError::GenericError {
+                error_code: Nat::from(0u8),
+                message: "duplicate ledger block index exceeds u64".into(),
+            })
+        }
+        Ok((Err(error),)) => Err(error),
+        Err((code, message)) => Err(TransferError::GenericError {
+            error_code: Nat::from(code as u64),
+            message,
+        }),
+    }
+}
+
 /// Generic collateral transfer_from: pull tokens from a user into the protocol canister.
 /// The `ledger` parameter is the ICRC-1 ledger canister ID of the collateral token.
 pub async fn transfer_collateral_from(amount: u64, from: Principal, ledger: Principal) -> Result<u64, TransferFromError> {

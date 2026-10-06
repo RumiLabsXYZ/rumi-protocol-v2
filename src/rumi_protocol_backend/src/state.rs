@@ -528,7 +528,7 @@ impl CollateralStatus {
 }
 
 /// Tracks a bot's pending liquidation claim on a vault.
-#[derive(candid::CandidType, Clone, Debug, serde::Deserialize, Serialize)]
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
 pub struct BotClaim {
     /// Vault ID being liquidated
     pub vault_id: u64,
@@ -542,6 +542,196 @@ pub struct BotClaim {
     pub claimed_at: u64,
     /// Collateral price at time of claim (for event logging)
     pub collateral_price_e8s: u64,
+    /// Unique ckUSDC payment memo for claims created after payment-proof
+    /// enforcement. `None` is retained only for claims decoded from legacy
+    /// snapshots and can be reconciled only with a ledger timestamp.
+    #[serde(default)]
+    pub payment_memo: Option<Vec<u8>>,
+    /// Exact request that created this claim. Legacy claims remain unbound.
+    #[serde(default)]
+    pub request_id: Option<u64>,
+    /// Principal that initiated the exact request; legacy claims remain unbound.
+    #[serde(default)]
+    pub claiming_bot: Option<Principal>,
+    /// Exact ledger receipt for the outbound collateral transfer. Missing on
+    /// pre-upgrade claims; those claims cannot authorize cancellation.
+    #[serde(default)]
+    pub claim_transfer: Option<BotClaimTransferReceipt>,
+    /// Generation-specific ckUSDC source account authorized for this claim.
+    /// Missing on legacy claims, which remain held for payment recovery.
+    #[serde(default)]
+    pub claim_payment_subaccount: Option<Vec<u8>>,
+}
+
+#[derive(candid::CandidType, Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct BotClaimTransferReceipt {
+    pub ledger: Principal,
+    pub block_index: u64,
+    pub from: icrc_ledger_types::icrc1::account::Account,
+    pub to: icrc_ledger_types::icrc1::account::Account,
+    pub amount_e8s: u64,
+    pub fee_e8s: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time: u64,
+    pub return_account: icrc_ledger_types::icrc1::account::Account,
+}
+
+/// Exact collateral transfer identity reserved before a bot claim's first
+/// ledger call. `attempt_count` is incremented before each dispatch; once a
+/// dispatch has been attempted, ambiguous errors must retain this tuple.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct PendingBotClaimTransfer {
+    pub vault_id: u64,
+    pub collateral_amount: u64,
+    pub debt_amount: u64,
+    pub collateral_type: Principal,
+    pub bot_principal: Principal,
+    /// Stable client request identity, absent only for legacy callers/state.
+    #[serde(default)]
+    pub request_id: Option<u64>,
+    pub transfer_from: icrc_ledger_types::icrc1::account::Account,
+    pub transfer_to: icrc_ledger_types::icrc1::account::Account,
+    pub transfer_amount: u64,
+    pub transfer_fee: u64,
+    pub transfer_memo: Vec<u8>,
+    pub transfer_created_at_time: u64,
+    pub claimed_at: u64,
+    pub collateral_price_e8s: u64,
+    pub payment_memo: Vec<u8>,
+    pub attempt_count: u32,
+}
+
+/// Durable proof that one exact first-dispatch ledger rejection had no effect.
+/// The complete pending tuple is retained for audit; the digest is computed
+/// from explicit, versioned fields so future serde layout changes do not
+/// change the acknowledgement identity.
+#[derive(Clone, Debug, serde::Deserialize, Serialize, PartialEq, Eq)]
+pub struct BotClaimNoEffectTombstone {
+    pub bot_principal: Principal,
+    pub vault_id: u64,
+    pub request_id: u64,
+    pub transfer_digest: Vec<u8>,
+    pub transfer: PendingBotClaimTransfer,
+}
+
+#[derive(candid::CandidType, Clone, Debug, serde::Deserialize, Serialize, PartialEq, Eq)]
+pub struct BotClaimNoEffectProof {
+    pub vault_id: u64,
+    pub request_id: u64,
+    pub transfer_digest: Vec<u8>,
+}
+
+/// Exact consolidation identity and retry/absence-proof state for one bot
+/// claim generation. Empty journal rows are created only when this version
+/// promotes a new claim; an old claim with no row is deliberately held.
+#[derive(Clone, Debug, serde::Deserialize, Serialize, PartialEq, Eq)]
+pub struct BotClaimCancelJournal {
+    pub claim: BotClaim,
+    /// Exact bot-to-backend claim-generation return receipt authenticated
+    /// before the backend consolidates the isolated return account.
+    #[serde(default)]
+    pub return_block_index: Option<u64>,
+    #[serde(default)]
+    pub return_created_at_time: Option<u64>,
+    /// Ledger fee pinned by the bot's exact return tuple. This also funds the
+    /// backend consolidation fee so the full claim collateral is restored.
+    #[serde(default)]
+    pub return_fee_e8s: Option<u64>,
+    /// Only journals created by this version can bind an exact fee-buffered
+    /// return block. Missing on migrated/legacy rows, which remain held.
+    #[serde(default)]
+    pub return_fee_recovery_enabled: bool,
+    pub transfer: Option<BotClaimCancelTransfer>,
+    pub history_scan: Option<BotClaimCancelHistoryScan>,
+    pub completed_block_index: Option<u64>,
+    pub attempts: Vec<BotClaimCancelAttempt>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct BotClaimReturnBlockReceipt {
+    pub ledger: Principal,
+    pub block_index: u64,
+    pub created_at_time: u64,
+    #[serde(default)]
+    pub fee_e8s: u64,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Serialize, PartialEq, Eq)]
+pub struct BotClaimCancelTransfer {
+    pub ledger: Principal,
+    pub from: icrc_ledger_types::icrc1::account::Account,
+    pub to: icrc_ledger_types::icrc1::account::Account,
+    pub amount: u64,
+    pub fee: u64,
+    /// Exact source balance this tuple is permitted to consume.
+    #[serde(default)]
+    pub source_balance: u64,
+    pub memo: Vec<u8>,
+    pub created_at_time: u64,
+    /// Lowest ledger block index at which this first dispatch could appear.
+    pub history_start_index: u64,
+    pub attempted: bool,
+    /// Number of dispatches persisted before awaiting this tuple.
+    #[serde(default)]
+    pub dispatch_count: u32,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Serialize, PartialEq, Eq)]
+pub struct BotClaimCancelHistoryScan {
+    pub transfer: BotClaimCancelTransfer,
+    pub snapshot_log_length: u64,
+    pub next_index: u64,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Serialize, PartialEq, Eq)]
+pub struct BotClaimCancelAttempt {
+    pub transfer: BotClaimCancelTransfer,
+    pub evidence: BotClaimCancelAttemptEvidence,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, Serialize, PartialEq, Eq)]
+pub enum BotClaimCancelAttemptEvidence {
+    /// Complete immutable prefix [history_start_index, log_length) contained
+    /// no matching transfer, and the original tuple had returned TooOld.
+    HistoryAbsent { through_log_length: u64 },
+    /// Ledger returned a typed BadFee, which guarantees this exact tuple had
+    /// no effect. The expected fee is retained to build a new tuple later.
+    BadFee { expected_fee: u64 },
+}
+
+/// Durable receipt for a ckUSDC payment already consumed by one bot claim.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct BotPaymentReceipt {
+    pub caller: Principal,
+    pub vault_id: u64,
+    pub claim_timestamp: u64,
+    pub payment_memo: Option<Vec<u8>>,
+    /// All ledger block indexes in the exact aggregate set represented by
+    /// this receipt. Empty on snapshots written before aggregate recovery.
+    #[serde(default)]
+    pub payment_block_indexes: Vec<u64>,
+    /// Verified sum in ckUSDC e6s for the represented set.
+    #[serde(default)]
+    pub total_amount_e6: u64,
+    /// False means a verified short payment is durably locked to this claim.
+    /// Such a claim cannot be canceled until a future exact refund proof path
+    /// is implemented; top-up confirmation may extend the locked set.
+    #[serde(default = "legacy_bot_payment_receipt_complete")]
+    pub aggregate_complete: bool,
+}
+
+fn legacy_bot_payment_receipt_complete() -> bool { true }
+
+/// Immutable, amount-bearing confirmation for one settled claim generation.
+/// The exact canonical block set is retained for reply-loss idempotency.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, Serialize)]
+pub struct BotPaymentAggregateReceipt {
+    pub caller: Principal,
+    pub vault_id: u64,
+    pub claim_timestamp: u64,
+    pub payment_memo: Option<Vec<u8>>,
+    pub payment_block_indexes: Vec<u64>,
+    pub total_amount_e6: u64,
 }
 
 /// Asset class for XRC price queries (mirrors ic_xrc_types::AssetClass but with serde support).
@@ -1730,6 +1920,66 @@ pub struct State {
     /// Active bot claims — tracks collateral transferred to bot but not yet confirmed.
     /// Key = vault_id. Auto-cancelled after `BOT_CLAIM_TIMEOUT_NS`.
     pub bot_claims: BTreeMap<u64, BotClaim>,
+    /// the periodic check_vaults worker from emitting the same alert each tick.
+    #[serde(default)]
+    pub bot_claim_reconciliation_last_emitted: BTreeMap<u64, (u64, u64)>,
+    /// Exclusive next request ID accepted from each enrolled bot principal.
+    /// Missing principals are unenrolled and cannot create fresh with-ID
+    /// claims. Retained across bot rotation so a returning principal cannot
+    /// replay IDs consumed before it was replaced.
+    #[serde(default)]
+    pub bot_claim_request_id_floors: BTreeMap<Principal, u64>,
+    /// Exact first-dispatch no-effect receipts remain until the bot durably
+    /// records and acknowledges them. Keyed by bot principal and request ID.
+    #[serde(default)]
+    pub bot_claim_no_effect_tombstones: BTreeMap<(Principal, u64), BotClaimNoEffectTombstone>,
+    /// Per-vault high-water for return-subaccount generations. Missing legacy
+    /// history is safe because pre-upgrade generations used raw IC time; new
+    /// generations are allocated strictly above both that time and this mark.
+    #[serde(default)]
+    pub bot_claim_generation_high_water: BTreeMap<u64, u64>,
+    /// Claim generations admitted under bounded payment-receipt capacity.
+    /// Missing entries identify pre-upgrade claims, whose already-dispatched
+    /// payments must remain settleable even if they exceed the new bound.
+    #[serde(default)]
+    pub bot_claim_payment_capacity_reservations: BTreeSet<(u64, u64)>,
+    /// Journal rows are established only alongside claims created by the
+    /// current code. Missing rows on upgraded legacy claims remain fail-closed.
+    #[serde(default)]
+    pub bot_claim_cancel_journals: BTreeMap<u64, BotClaimCancelJournal>,
+    /// Verified cancellation receipts remain until the bot explicitly records
+    /// the generation ACK. A full map backpressures new cancellations.
+    #[serde(default)]
+    pub completed_bot_claim_cancellations: BTreeMap<(u64, u64), u64>,
+    /// Bounded idempotency tombstones for cancellation ACKs, keyed by
+    /// (claim generation, vault ID).
+    #[serde(default)]
+    pub acknowledged_bot_claim_cancellations: BTreeMap<(u64, u64), u64>,
+    /// Exact collateral-return blocks reserved against replay until the bot
+    /// acknowledges the matching completed cancellation generation.
+    #[serde(default)]
+    pub consumed_bot_claim_return_blocks: BTreeMap<(Principal, u64), (u64, u64)>,
+    /// Verified return proof retained until cancellation ACK, keyed by the
+    /// exact claim generation for idempotent lost-reply recovery.
+    #[serde(default)]
+    pub bot_claim_return_block_receipts: BTreeMap<(u64, u64), BotClaimReturnBlockReceipt>,
+    /// Claims whose exact collateral transfer was reserved but not yet
+    /// acknowledged. Kept separate from BotClaim because no collateral receipt
+    /// is established until the fixed ledger tuple returns success/Duplicate.
+    #[serde(default)]
+    pub pending_bot_claim_transfers: BTreeMap<u64, PendingBotClaimTransfer>,
+    /// Monotonic nonce used to generate globally unique bot payment memos.
+    #[serde(default)]
+    pub bot_claim_payment_nonce: u64,
+    /// ckUSDC block receipts consumed by bot liquidations, keyed by
+    /// `(configured ledger principal, block index)` to prevent cross-vault
+    /// and cross-generation replay.
+    #[serde(default)]
+    pub consumed_bot_payment_blocks: BTreeMap<(Principal, u64), BotPaymentReceipt>,
+    /// Immutable settlement receipts keyed by (bot, vault, claim generation).
+    #[serde(default)]
+    pub bot_payment_aggregate_receipts: BTreeMap<(Principal, u64, u64), BotPaymentAggregateReceipt>,
+
 
     /// Monotonic counter for ICRC transfer idempotency nonces (audit Wave-3).
     /// Combined with `ic_cdk::api::time()` in `next_op_nonce` to mint a u128
@@ -2151,6 +2401,7 @@ impl Default for State {
             pending_margin_transfers: BTreeMap::new(),
             pending_excess_transfers: BTreeMap::new(),
             pending_redemption_transfer: BTreeMap::new(),
+            bot_claim_reconciliation_last_emitted: BTreeMap::new(),
             pending_refunds: BTreeMap::new(),
             pending_3usd_refunds: BTreeMap::new(),
             mode: Mode::default(),
@@ -2256,6 +2507,19 @@ impl Default for State {
             bot_pending_vaults: BTreeMap::new(),
             sp_attempted_vaults: BTreeSet::new(),
             bot_claims: BTreeMap::new(),
+            bot_claim_request_id_floors: BTreeMap::new(),
+            bot_claim_no_effect_tombstones: BTreeMap::new(),
+            bot_claim_generation_high_water: BTreeMap::new(),
+            bot_claim_payment_capacity_reservations: BTreeSet::new(),
+            bot_claim_cancel_journals: BTreeMap::new(),
+            completed_bot_claim_cancellations: BTreeMap::new(),
+            acknowledged_bot_claim_cancellations: BTreeMap::new(),
+            consumed_bot_claim_return_blocks: BTreeMap::new(),
+            bot_claim_return_block_receipts: BTreeMap::new(),
+            pending_bot_claim_transfers: BTreeMap::new(),
+            bot_claim_payment_nonce: 0,
+            consumed_bot_payment_blocks: BTreeMap::new(),
+            bot_payment_aggregate_receipts: BTreeMap::new(),
             op_nonce_counter: 0,
             pending_outlier_prices: BTreeMap::new(),
             liquidation_frozen: false,
@@ -2308,6 +2572,7 @@ impl From<InitArg> for State {
             price_pusher_allowed: std::collections::BTreeSet::new(),
             principal_to_vault_ids: BTreeMap::new(),
             pending_redemption_transfer: BTreeMap::new(),
+            bot_claim_reconciliation_last_emitted: BTreeMap::new(),
             pending_refunds: BTreeMap::new(),
             pending_3usd_refunds: BTreeMap::new(),
             vault_id_to_vaults: BTreeMap::new(),
@@ -2533,6 +2798,19 @@ impl From<InitArg> for State {
             bot_pending_vaults: BTreeMap::new(),
             sp_attempted_vaults: BTreeSet::new(),
             bot_claims: BTreeMap::new(),
+            bot_claim_request_id_floors: BTreeMap::new(),
+            bot_claim_no_effect_tombstones: BTreeMap::new(),
+            bot_claim_generation_high_water: BTreeMap::new(),
+            bot_claim_payment_capacity_reservations: BTreeSet::new(),
+            bot_claim_cancel_journals: BTreeMap::new(),
+            completed_bot_claim_cancellations: BTreeMap::new(),
+            acknowledged_bot_claim_cancellations: BTreeMap::new(),
+            consumed_bot_claim_return_blocks: BTreeMap::new(),
+            bot_claim_return_block_receipts: BTreeMap::new(),
+            pending_bot_claim_transfers: BTreeMap::new(),
+            bot_claim_payment_nonce: 0,
+            consumed_bot_payment_blocks: BTreeMap::new(),
+            bot_payment_aggregate_receipts: BTreeMap::new(),
             op_nonce_counter: 0,
             pending_outlier_prices: BTreeMap::new(),
             liquidation_frozen: false,
