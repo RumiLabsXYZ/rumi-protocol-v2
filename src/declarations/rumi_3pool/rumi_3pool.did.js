@@ -82,6 +82,11 @@ export const idlFactory = ({ IDL }) => {
     'Unresolved' : IDL.Null,
     'Submitted' : IDL.Null,
   });
+  const AbsenceScanV1 = IDL.Record({
+    'fixed_tip' : IDL.Nat,
+    'cursor' : IDL.Nat,
+    'generation' : IDL.Nat32,
+  });
   const SwapTransferV1 = IDL.Record({
     'to' : Account,
     'fee' : IDL.Nat,
@@ -89,9 +94,16 @@ export const idlFactory = ({ IDL }) => {
     'block_index' : IDL.Opt(IDL.Nat),
     'from' : Account,
     'memo' : IDL.Vec(IDL.Nat8),
+    'dispatch_count' : IDL.Opt(IDL.Nat32),
+    'generation' : IDL.Opt(IDL.Nat32),
+    'too_old_after_ambiguity' : IDL.Opt(IDL.Bool),
+    'history_start' : IDL.Opt(IDL.Nat),
     'ledger' : IDL.Principal,
+    'retired_identity_hash' : IDL.Opt(IDL.Vec(IDL.Nat8)),
     'created_at_time' : IDL.Nat64,
     'amount' : IDL.Nat,
+    'absence_scan' : IDL.Opt(AbsenceScanV1),
+    'ready_to_dispatch' : IDL.Opt(IDL.Bool),
   });
   const IngressReceiptV1 = IDL.Record({
     'status' : IngressStatusV1,
@@ -118,6 +130,50 @@ export const idlFactory = ({ IDL }) => {
   const IngressReceiptResultV1 = IDL.Variant({
     'Ok' : IngressReceiptV1,
     'Err' : IngressReceiptErrorV1,
+  });
+  const SwapReceiptStatusV1 = IDL.Variant({
+    'InputSubmitted' : IDL.Null,
+    'Failed' : IDL.Null,
+    'OutputSubmitted' : IDL.Null,
+    'Refunded' : IDL.Null,
+    'Prepared' : IDL.Null,
+    'Unresolved' : IDL.Null,
+    'RefundSubmitted' : IDL.Null,
+    'Completed' : IDL.Null,
+  });
+  const SwapRequestV1 = IDL.Record({
+    'i' : IDL.Nat8,
+    'j' : IDL.Nat8,
+    'dx' : IDL.Nat,
+    'min_dy' : IDL.Nat,
+    'intent_id' : IDL.Vec(IDL.Nat8),
+  });
+  const SwapReceiptV1 = IDL.Record({
+    'status' : SwapReceiptStatusV1,
+    'output' : IDL.Opt(SwapTransferV1),
+    'gross_output' : IDL.Opt(IDL.Nat),
+    'owner' : IDL.Principal,
+    'request' : SwapRequestV1,
+    'error' : IDL.Opt(IDL.Text),
+    'version' : IDL.Nat16,
+    'input' : IDL.Opt(SwapTransferV1),
+    'pool_fee' : IDL.Opt(IDL.Nat),
+    'refund' : IDL.Opt(SwapTransferV1),
+  });
+  const SwapReceiptErrorV1 = IDL.Variant({
+    'CapacityExceeded' : IDL.Null,
+    'IntentConflict' : IDL.Null,
+    'ProofUnavailable' : IDL.Null,
+    'PoolLocked' : IDL.Null,
+    'StaleIntentSequence' : IDL.Null,
+    'Unauthorized' : IDL.Null,
+    'ProofMismatch' : IDL.Null,
+    'InvalidRequest' : IDL.Null,
+    'InvalidIntentId' : IDL.Null,
+  });
+  const SwapReceiptResultV1 = IDL.Variant({
+    'Ok' : SwapReceiptV1,
+    'Err' : SwapReceiptErrorV1,
   });
   const AuthorizedRedeemAndBurnArgs = IDL.Record({
     'token_amount' : IDL.Nat,
@@ -326,35 +382,6 @@ export const idlFactory = ({ IDL }) => {
     'caller' : IDL.Principal,
     'amount_in' : IDL.Nat,
     'token_out' : IDL.Nat8,
-  });
-  const SwapReceiptStatusV1 = IDL.Variant({
-    'InputSubmitted' : IDL.Null,
-    'Failed' : IDL.Null,
-    'OutputSubmitted' : IDL.Null,
-    'Refunded' : IDL.Null,
-    'Prepared' : IDL.Null,
-    'Unresolved' : IDL.Null,
-    'RefundSubmitted' : IDL.Null,
-    'Completed' : IDL.Null,
-  });
-  const SwapRequestV1 = IDL.Record({
-    'i' : IDL.Nat8,
-    'j' : IDL.Nat8,
-    'dx' : IDL.Nat,
-    'min_dy' : IDL.Nat,
-    'intent_id' : IDL.Vec(IDL.Nat8),
-  });
-  const SwapReceiptV1 = IDL.Record({
-    'status' : SwapReceiptStatusV1,
-    'output' : IDL.Opt(SwapTransferV1),
-    'gross_output' : IDL.Opt(IDL.Nat),
-    'owner' : IDL.Principal,
-    'request' : SwapRequestV1,
-    'error' : IDL.Opt(IDL.Text),
-    'version' : IDL.Nat16,
-    'input' : IDL.Opt(SwapTransferV1),
-    'pool_fee' : IDL.Opt(IDL.Nat),
-    'refund' : IDL.Opt(SwapTransferV1),
   });
   const VirtualPricePoint = IDL.Record({
     'virtual_price' : IDL.Nat,
@@ -570,21 +597,6 @@ export const idlFactory = ({ IDL }) => {
     'Ok' : IDL.Null,
     'Err' : ClaimProofErrorV1,
   });
-  const SwapReceiptErrorV1 = IDL.Variant({
-    'CapacityExceeded' : IDL.Null,
-    'IntentConflict' : IDL.Null,
-    'ProofUnavailable' : IDL.Null,
-    'PoolLocked' : IDL.Null,
-    'StaleIntentSequence' : IDL.Null,
-    'Unauthorized' : IDL.Null,
-    'ProofMismatch' : IDL.Null,
-    'InvalidRequest' : IDL.Null,
-    'InvalidIntentId' : IDL.Null,
-  });
-  const SwapReceiptResultV1 = IDL.Variant({
-    'Ok' : SwapReceiptV1,
-    'Err' : SwapReceiptErrorV1,
-  });
   const SwapReceiptClientResultV1 = IDL.Variant({
     'Ok' : IDL.Null,
     'Err' : SwapReceiptErrorV1,
@@ -603,6 +615,16 @@ export const idlFactory = ({ IDL }) => {
     'add_liquidity_with_receipt_v1' : IDL.Func(
         [IDL.Vec(IDL.Nat8), IDL.Vec(IDL.Nat), IDL.Nat],
         [IngressReceiptResultV1],
+        [],
+      ),
+    'advance_ingress_absence_scan_v1' : IDL.Func(
+        [IDL.Vec(IDL.Nat8), IDL.Nat8],
+        [IngressReceiptResultV1],
+        [],
+      ),
+    'advance_swap_absence_scan_v1' : IDL.Func(
+        [IDL.Vec(IDL.Nat8), IDL.Nat8],
+        [SwapReceiptResultV1],
         [],
       ),
     'authorized_redeem_and_burn' : IDL.Func(

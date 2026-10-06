@@ -314,13 +314,13 @@ pub fn deploy_pool_with_liquidity_fee_and_swaps(
         .update_call(
             pool_id,
             user,
-            "add_liquidity",
-            encode_args((add_liq_amounts, 0u128)).unwrap(),
+            "add_liquidity_with_receipt_v1",
+            encode_args((vec![1u8; 32], add_liq_amounts, 0u128)).unwrap(),
         )
         .expect("add_liquidity failed");
     if let WasmResult::Reply(bytes) = res {
-        let r: Result<candid::Nat, ThreePoolError> = decode_one(&bytes).unwrap();
-        r.expect("add_liquidity err");
+        let r: Result<rumi_3pool::receipts::IngressReceiptV1, rumi_3pool::receipts::IngressReceiptErrorV1> = decode_one(&bytes).unwrap();
+        r.expect("add_liquidity_with_receipt_v1 err");
     }
 
     let harness = ThreePoolHarness {

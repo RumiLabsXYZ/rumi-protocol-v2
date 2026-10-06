@@ -595,6 +595,11 @@ type SwapTransferStatusV1 = variant {
   Unresolved;
   Submitted;
 };
+type AbsenceScanV1 = record {
+  fixed_tip : nat;
+  cursor : nat;
+  generation : nat32;
+};
 type SwapTransferV1 = record {
   to : Account;
   fee : nat;
@@ -602,6 +607,13 @@ type SwapTransferV1 = record {
   block_index : opt nat;
   from : Account;
   memo : blob;
+  dispatch_count : opt nat32;
+  generation : opt nat32;
+  too_old_after_ambiguity : opt bool;
+  ready_to_dispatch : opt bool;
+  history_start : opt nat;
+  absence_scan : opt AbsenceScanV1;
+  retired_identity_hash : opt blob;
   ledger : principal;
   created_at_time : nat64;
   amount : nat;
@@ -613,6 +625,8 @@ service : (ThreePoolInitArgs) -> {
   get_ingress_receipt_v1 : (blob) -> (opt IngressReceiptV1) query;
   get_next_intent_sequence_v1 : () -> (opt nat64) query;
   get_swap_receipt_v1 : (blob) -> (opt SwapReceiptV1) query;
+  advance_swap_absence_scan_v1 : (blob, nat8) -> (SwapReceiptResultV1);
+  advance_ingress_absence_scan_v1 : (blob, nat8) -> (IngressReceiptResultV1);
   is_swap_receipt_client_v1 : (principal) -> (bool) query;
   reconcile_ingress_pull_v1 : (blob, nat8, nat) -> (IngressReceiptResultV1);
   reconcile_pending_claim_v1 : (nat64, nat) -> (ClaimProofResultV1);

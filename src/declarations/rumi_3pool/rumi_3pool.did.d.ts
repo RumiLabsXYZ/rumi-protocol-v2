@@ -2,6 +2,11 @@ import type { Principal } from '@dfinity/principal';
 import type { ActorMethod } from '@dfinity/agent';
 import type { IDL } from '@dfinity/candid';
 
+export interface AbsenceScanV1 {
+  'fixed_tip' : bigint,
+  'cursor' : bigint,
+  'generation' : number,
+}
 export interface Account {
   'owner' : Principal,
   'subaccount' : [] | [Uint8Array | number[]],
@@ -395,9 +400,16 @@ export interface SwapTransferV1 {
   'block_index' : [] | [bigint],
   'from' : Account,
   'memo' : Uint8Array | number[],
+  'dispatch_count' : [] | [number],
+  'generation' : [] | [number],
+  'too_old_after_ambiguity' : [] | [boolean],
+  'history_start' : [] | [bigint],
   'ledger' : Principal,
+  'retired_identity_hash' : [] | [Uint8Array | number[]],
   'created_at_time' : bigint,
   'amount' : bigint,
+  'absence_scan' : [] | [AbsenceScanV1],
+  'ready_to_dispatch' : [] | [boolean],
 }
 export type ThreePoolAdminAction = { 'SetAdminFee' : { 'fee_bps' : bigint } } |
   { 'RampA' : { 'future_a_time' : bigint, 'future_a' : bigint } } |
@@ -535,6 +547,14 @@ export interface _SERVICE {
   'add_liquidity_with_receipt_v1' : ActorMethod<
     [Uint8Array | number[], Array<bigint>, bigint],
     IngressReceiptResultV1
+  >,
+  'advance_ingress_absence_scan_v1' : ActorMethod<
+    [Uint8Array | number[], number],
+    IngressReceiptResultV1
+  >,
+  'advance_swap_absence_scan_v1' : ActorMethod<
+    [Uint8Array | number[], number],
+    SwapReceiptResultV1
   >,
   'authorized_redeem_and_burn' : ActorMethod<
     [AuthorizedRedeemAndBurnArgs],

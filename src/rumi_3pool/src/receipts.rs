@@ -73,6 +73,12 @@ pub enum SwapTransferStatusV1 {
     SkippedDust,
 }
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AbsenceScanV1 {
+    pub fixed_tip: Nat,
+    pub cursor: Nat,
+    pub generation: u32,
+}
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SwapTransferV1 {
     pub ledger: Principal,
     pub from: Account,
@@ -84,6 +90,27 @@ pub struct SwapTransferV1 {
     pub memo: Vec<u8>,
     pub block_index: Option<Nat>,
     pub status: SwapTransferStatusV1,
+    /// Ledger log length observed before this generation's first dispatch.
+    #[serde(default)]
+    pub history_start: Option<Nat>,
+    /// Durable cursor for a fixed-tip, archive-complete absence scan.
+    #[serde(default)]
+    pub absence_scan: Option<AbsenceScanV1>,
+    #[serde(default)]
+    pub generation: Option<u32>,
+    /// Number of calls persisted before dispatch for this exact tuple.
+    #[serde(default)]
+    pub dispatch_count: Option<u32>,
+    /// Set only after an ambiguous generation was retried and received TooOld.
+    #[serde(default)]
+    pub too_old_after_ambiguity: Option<bool>,
+    /// Hash-chain tombstone for retired exact transfer tuples.
+    #[serde(default)]
+    pub retired_identity_hash: Option<Vec<u8>>,
+    /// Complete absence proof retired the preceding tuple and authorized this
+    /// generation for its first dispatch; it has not yet had an ambiguous try.
+    #[serde(default)]
+    pub ready_to_dispatch: Option<bool>,
 }
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SwapReceiptV1 {
@@ -264,6 +291,50 @@ pub fn reserve(
 pub fn fenced() -> bool {
     storage::SWAP_RECEIPT_FENCE.with(|c| *c.borrow().get() != 0) || outstanding_receipt_work()
 }
+
+/// A receipt continuation may enter the pool only when it is the sole active
+/// stable receipt. This is the narrow exception that lets the operation which
+/// raised the fence resume without unlocking unrelated reserve mutations.
+pub(crate) fn is_only_active_receipt(owner: Principal, intent_id: &[u8]) -> bool {
+    let mut active_count = 0usize;
+    let mut matches = false;
+    storage::SWAP_RECEIPTS.with(|map| {
+        for (_, receipt) in map.borrow().iter() {
+            if swap_receipt_fence_active(&receipt) {
+                active_count += 1;
+                matches |= receipt.owner == owner && receipt.request.intent_id == intent_id;
+            }
+        }
+    });
+    storage::INGRESS_RECEIPTS.with(|map| {
+        for (_, receipt) in map.borrow().iter() {
+            if ingress_receipt_fence_active(&receipt) {
+                active_count += 1;
+                matches |= receipt.owner == owner && receipt.intent_id == intent_id;
+            }
+        }
+    });
+    active_count == 1 && matches
+}
+
+fn swap_receipt_fence_active(receipt: &SwapReceiptV1) -> bool {
+    !matches!(receipt.status, SwapReceiptStatusV1::Completed | SwapReceiptStatusV1::Refunded | SwapReceiptStatusV1::Failed)
+        || [&receipt.input, &receipt.output, &receipt.refund].into_iter().flatten().any(|leg| {
+            matches!(leg.status, SwapTransferStatusV1::Submitted | SwapTransferStatusV1::Unresolved)
+        })
+        || (receipt.status == SwapReceiptStatusV1::Failed
+            && receipt.input.as_ref().map(|leg| leg.status == SwapTransferStatusV1::Confirmed).unwrap_or(false)
+            && !receipt.output.as_ref().map(|leg| leg.status == SwapTransferStatusV1::Confirmed).unwrap_or(false)
+            && !receipt.refund.as_ref().map(|leg| leg.status == SwapTransferStatusV1::Confirmed).unwrap_or(false))
+}
+
+fn ingress_receipt_fence_active(receipt: &IngressReceiptV1) -> bool {
+    !matches!(receipt.status, IngressStatusV1::Completed | IngressStatusV1::Failed)
+        || receipt.pulls.iter().any(|leg| matches!(leg.status, SwapTransferStatusV1::Submitted | SwapTransferStatusV1::Unresolved))
+        || (receipt.status == IngressStatusV1::Failed
+            && receipt.pulls.iter().any(|leg| leg.status == SwapTransferStatusV1::Confirmed))
+}
+
 pub(crate) fn set_fence(active: bool) {
     // The fence is shared by all receipt-backed operations. Clearing it from
     // one completed row must not unlock the pool while another row still has
@@ -278,23 +349,9 @@ pub(crate) fn set_fence(active: bool) {
 
 fn outstanding_receipt_work() -> bool {
     storage::SWAP_RECEIPTS.with(|m| {
-        m.borrow().iter().any(|(_, receipt)| {
-            !matches!(receipt.status, SwapReceiptStatusV1::Completed | SwapReceiptStatusV1::Refunded | SwapReceiptStatusV1::Failed)
-                || [&receipt.input, &receipt.output, &receipt.refund].into_iter().flatten().any(|leg| {
-                    matches!(leg.status, SwapTransferStatusV1::Submitted | SwapTransferStatusV1::Unresolved)
-                })
-                || (receipt.status == SwapReceiptStatusV1::Failed
-                    && receipt.input.as_ref().map(|leg| leg.status == SwapTransferStatusV1::Confirmed).unwrap_or(false)
-                    && !receipt.output.as_ref().map(|leg| leg.status == SwapTransferStatusV1::Confirmed).unwrap_or(false)
-                    && !receipt.refund.as_ref().map(|leg| leg.status == SwapTransferStatusV1::Confirmed).unwrap_or(false))
-        })
+        m.borrow().iter().any(|(_, receipt)| swap_receipt_fence_active(&receipt))
     }) || storage::INGRESS_RECEIPTS.with(|m| {
-        m.borrow().iter().any(|(_, receipt)| {
-            !matches!(receipt.status, IngressStatusV1::Completed | IngressStatusV1::Failed)
-                || receipt.pulls.iter().any(|leg| matches!(leg.status, SwapTransferStatusV1::Submitted | SwapTransferStatusV1::Unresolved))
-                || (receipt.status == IngressStatusV1::Failed
-                    && receipt.pulls.iter().any(|leg| leg.status == SwapTransferStatusV1::Confirmed))
-        })
+        m.borrow().iter().any(|(_, receipt)| ingress_receipt_fence_active(&receipt))
     })
 }
 pub fn fail(receipt: &mut SwapReceiptV1, reason: String, unresolved: bool) {
@@ -335,8 +392,18 @@ pub fn transfer_intent(
         memo: digest.finalize().to_vec(),
         block_index: None,
         status: SwapTransferStatusV1::Submitted,
+        history_start: None,
+        absence_scan: None,
+        generation: Some(0),
+        dispatch_count: Some(0),
+        too_old_after_ambiguity: Some(false),
+        retired_identity_hash: None,
+        ready_to_dispatch: None,
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransferFailureClass { ProvenNoEffect, Ambiguous, TooOld }
 
 pub fn ingress_transfer_intent(
     owner: Principal,
@@ -362,6 +429,13 @@ pub fn ingress_transfer_intent(
         memo: digest.finalize().to_vec(),
         block_index: None,
         status: SwapTransferStatusV1::Submitted,
+        history_start: None,
+        absence_scan: None,
+        generation: Some(0),
+        dispatch_count: Some(0),
+        too_old_after_ambiguity: Some(false),
+        retired_identity_hash: None,
+        ready_to_dispatch: None,
     }
 }
 
@@ -378,6 +452,15 @@ pub async fn matches_ledger_block(
     pull: bool,
 ) -> Result<bool, String> {
     use crate::icrc3::{GetBlocksArgs, GetBlocksResult};
+    // Never turn a caller-supplied principal into a proof source. The exact
+    // ledger is persisted in the obligation, and it must still be one of the
+    // pool's configured token ledgers before making either the main-ledger
+    // or archive callback call.
+    if ledger != expected.ledger
+        || !crate::state::read_state(|s| s.config.tokens.iter().any(|token| token.ledger_id == ledger))
+    {
+        return Err("proof ledger is not the persisted configured token ledger".to_string());
+    }
     let index: u64 = block_index.0.clone().try_into().map_err(|_| "block index exceeds u64".to_string())?;
     let args = vec![GetBlocksArgs { start: Nat::from(index), length: Nat::from(1u8) }];
     let response: (GetBlocksResult,) = ic_cdk::call(ledger, "icrc3_get_blocks", (args.clone(),))
@@ -402,6 +485,174 @@ pub async fn matches_ledger_block(
         }
     }
     Ok(false)
+}
+
+/// A bounded result for one contiguous part of a fixed-tip history scan.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AbsencePage {
+    Match(Nat),
+    Continue(Nat),
+    Complete,
+}
+
+/// Read the authoritative log length from the configured ledger. An empty
+/// ICRC-3 request returns `log_length` without transferring block data.
+pub async fn ledger_log_length(ledger: Principal) -> Result<Nat, String> {
+    use crate::icrc3::{GetBlocksResult};
+    if !configured_token_ledger(ledger) { return Err("ledger is not configured for this pool".into()); }
+    let response: (GetBlocksResult,) = ic_cdk::call(ledger, "icrc3_get_blocks", (Vec::<crate::icrc3::GetBlocksArgs>::new(),))
+        .await.map_err(|(code, message)| format!("ledger tip query rejected: {code:?}: {message}"))?;
+    Ok(response.0.log_length)
+}
+
+fn configured_token_ledger(ledger: Principal) -> bool {
+    crate::state::read_state(|s| s.config.tokens.iter().any(|token| token.ledger_id == ledger))
+}
+
+fn has_reviewed_ledger_lineage(ledger: Principal) -> bool {
+    // Runtime admission is bound to the configured principal. These profiles
+    // are the source/module-hash pairs independently checked for this release:
+    // icUSD uses the Rumi-pinned `fc278709` source (live hash cb0c3233...);
+    // ckUSDT and ckUSDC use official DFINITY `ledger-suite-icrc-2026-03-09`
+    // source `cf41372e3d4dc1accfe2c09a7969f8bddc729dc1` (live hash
+    // 390e2237...bda4c56). The production V1 admission gate remains closed
+    // until final artifact/review checks; unknown principals stay held.
+    [
+        "t6bor-paaaa-aaaap-qrd5q-cai",
+        "cngnf-vqaaa-aaaar-qag4q-cai",
+        "xevnm-gaaaa-aaaar-qafnq-cai",
+    ].into_iter().filter_map(|text| Principal::from_text(text).ok()).any(|id| id == ledger)
+}
+
+/// Scan at most 100 consecutive ledger indexes. Missing, duplicate, extra,
+/// overlapping, or uncovered indexes are errors; callers must keep the fence
+/// held and retry from the saved cursor. Archive callbacks are called exactly
+/// as advertised by the configured ledger.
+pub async fn scan_absence_page(
+    transfer: &SwapTransferV1,
+    scan: &AbsenceScanV1,
+    pull: bool,
+) -> Result<AbsencePage, String> {
+    use crate::icrc3::{GetBlocksArgs, GetBlocksResult};
+    if !cfg!(feature = "test_endpoints") && !has_reviewed_ledger_lineage(transfer.ledger) {
+        return Err("absence recovery is not enabled for this ledger implementation".into());
+    }
+    if !configured_token_ledger(transfer.ledger) { return Err("ledger is not configured for this pool".into()); }
+    let start: u64 = scan.cursor.0.clone().try_into().map_err(|_| "scan cursor exceeds u64".to_string())?;
+    let tip: u64 = scan.fixed_tip.0.clone().try_into().map_err(|_| "scan tip exceeds u64".to_string())?;
+    if start > tip { return Err("scan cursor exceeds fixed tip".into()); }
+    if start == tip { return Ok(AbsencePage::Complete); }
+    let end = start.saturating_add(100).min(tip);
+    let length = end - start;
+    let args = vec![GetBlocksArgs { start: Nat::from(start), length: Nat::from(length) }];
+    let main: (GetBlocksResult,) = ic_cdk::call(transfer.ledger, "icrc3_get_blocks", (args,))
+        .await.map_err(|(code, message)| format!("ledger scan rejected: {code:?}: {message}"))?;
+    let observed_tip: u64 = main.0.log_length.0.clone().try_into().map_err(|_| "ledger log length exceeds u64".to_string())?;
+    if observed_tip < tip { return Err("ledger log length regressed below fixed tip".into()); }
+
+    let mut found = std::collections::BTreeMap::<u64, Icrc3Value>::new();
+    for block in main.0.blocks {
+        let id: u64 = block.id.0.try_into().map_err(|_| "ledger block id exceeds u64".to_string())?;
+        if id < start || id >= end || found.insert(id, block.block).is_some() {
+            return Err("ledger returned a duplicate or out-of-range block".into());
+        }
+    }
+    let mut archive_coverage = std::collections::BTreeSet::<u64>::new();
+    if main.0.archived_blocks.len() > 100 {
+        return Err("ledger advertised more than 100 archive callbacks for one scan page".into());
+    }
+    for archive in main.0.archived_blocks {
+        let mut requested = Vec::new();
+        for arg in &archive.args {
+            let a: u64 = arg.start.0.clone().try_into().map_err(|_| "archive start exceeds u64".to_string())?;
+            let n: u64 = arg.length.0.clone().try_into().map_err(|_| "archive length exceeds u64".to_string())?;
+            let a_end = a.checked_add(n).ok_or("archive range overflow")?;
+            if n == 0 || a < start || a_end > end { return Err("archive range escapes requested page".into()); }
+            for id in a..a_end {
+                if found.contains_key(&id) || !archive_coverage.insert(id) {
+                    return Err("overlapping or duplicate archive coverage".into());
+                }
+            }
+            requested.push(arg.clone());
+        }
+        let archived: (GetBlocksResult,) = ic_cdk::call(
+            archive.callback.canister_id,
+            &archive.callback.method,
+            (requested,),
+        ).await.map_err(|(code, message)| format!("archive scan rejected: {code:?}: {message}"))?;
+        if !archived.0.archived_blocks.is_empty() { return Err("nested archive response unsupported".into()); }
+        for block in archived.0.blocks {
+            let id: u64 = block.id.0.try_into().map_err(|_| "archive block id exceeds u64".to_string())?;
+            if !archive_coverage.contains(&id) || found.insert(id, block.block).is_some() {
+                return Err("archive returned an unrequested or duplicate block".into());
+            }
+        }
+    }
+    validate_exact_page_ids(start, end, &found.keys().copied().collect::<Vec<_>>())?;
+    for (id, block) in found {
+        validate_scannable_block(&block)?;
+        if block_matches_transfer(&block, transfer, pull, ic_cdk::id()) {
+            return Ok(AbsencePage::Match(Nat::from(id)));
+        }
+    }
+    if end == tip { Ok(AbsencePage::Complete) } else { Ok(AbsencePage::Continue(Nat::from(end))) }
+}
+
+fn validate_exact_page_ids(start: u64, end: u64, ids: &[u64]) -> Result<(), String> {
+    if end < start || ids.len() as u64 != end - start {
+        return Err("ledger/archive response does not completely cover requested page".into());
+    }
+    let mut sorted = ids.to_vec();
+    sorted.sort_unstable();
+    if sorted.iter().enumerate().any(|(offset, id)| *id != start + offset as u64) {
+        return Err("ledger/archive response contains a gap or duplicate block id".into());
+    }
+    Ok(())
+}
+
+/// Validate that a block is an understood transaction variant with enough
+/// structure to prove it is not the persisted transfer. Unknown variants or
+/// malformed transfer records must stop an absence proof, never count as a
+/// non-match.
+fn validate_scannable_block(block: &Icrc3Value) -> Result<(), String> {
+    fn field<'a>(value: &'a Icrc3Value, name: &str) -> Option<&'a Icrc3Value> {
+        match value { Icrc3Value::Map(fields) => fields.iter().find(|(key, _)| key == name).map(|(_, value)| value), _ => None }
+    }
+    fn is_nat(value: Option<&Icrc3Value>) -> bool { matches!(value, Some(Icrc3Value::Nat(_))) }
+    fn is_blob(value: Option<&Icrc3Value>) -> bool { matches!(value, Some(Icrc3Value::Blob(_))) }
+    fn optional_nat(value: Option<&Icrc3Value>) -> bool { value.is_none() || is_nat(value) }
+    fn optional_blob(value: Option<&Icrc3Value>) -> bool { value.is_none() || is_blob(value) }
+    fn is_account(value: Option<&Icrc3Value>) -> bool {
+        matches!(value, Some(Icrc3Value::Array(parts)) if (1..=2).contains(&parts.len()) && matches!(parts.first(), Some(Icrc3Value::Blob(_))) && parts.get(1).map(|v| matches!(v, Icrc3Value::Blob(bytes) if bytes.len() == 32)).unwrap_or(true))
+    }
+    if !matches!(block, Icrc3Value::Map(_)) { return Err("unsupported non-map ledger block".into()); }
+    let tx = field(block, "tx").ok_or("ledger block lacks transaction")?;
+    let btype = match field(block, "btype") {
+        Some(Icrc3Value::Text(value)) => Some(value.as_str()),
+        None => None,
+        _ => return Err("ledger block btype has an unsupported type".into()),
+    };
+    let op = match field(tx, "op") { Some(Icrc3Value::Text(value)) => value.as_str(), _ => return Err("ledger block lacks transaction op".into()) };
+    match (btype, op) {
+        (None, "xfer") | (Some("1xfer"), "xfer") | (Some("2xfer"), "xfer") => {
+            if !is_account(field(tx, "from")) || !is_account(field(tx, "to"))
+                || !is_nat(field(tx, "amt")) || !optional_nat(field(tx, "fee").or_else(|| field(block, "fee")))
+                || !optional_nat(field(tx, "ts")) || !optional_blob(field(tx, "memo"))
+                || (btype == Some("2xfer") && !is_account(field(tx, "spender")))
+            { return Err("malformed transfer block cannot support absence proof".into()); }
+        }
+        (None, "mint") | (Some("1mint"), "mint") => {
+            if !is_account(field(tx, "to")) || !is_nat(field(tx, "amt")) { return Err("malformed mint block".into()); }
+        }
+        (None, "burn") | (Some("1burn"), "burn") => {
+            if !is_account(field(tx, "from")) || !is_nat(field(tx, "amt")) { return Err("malformed burn block".into()); }
+        }
+        (None, "approve") | (Some("2approve"), "approve") => {
+            if !is_account(field(tx, "from")) || !is_account(field(tx, "spender")) || !is_nat(field(tx, "amt")) { return Err("malformed approve block".into()); }
+        }
+        _ => return Err("unknown or inconsistent ledger block type".into()),
+    }
+    Ok(())
 }
 
 fn block_matches_transfer(
@@ -447,7 +698,7 @@ fn block_matches_transfer(
         && created_at == expected.created_at_time as u128 && memo == expected.memo.as_slice()
 }
 
-pub async fn execute(transfer: &SwapTransferV1, pull: bool) -> Result<Nat, (bool, String)> {
+pub async fn execute(transfer: &SwapTransferV1, pull: bool) -> Result<Nat, (TransferFailureClass, String)> {
     use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
     use icrc_ledger_types::icrc2::transfer_from::{TransferFromArgs, TransferFromError};
     if pull {
@@ -465,8 +716,8 @@ pub async fn execute(transfer: &SwapTransferV1, pull: bool) -> Result<Nat, (bool
         match result {
             Ok((Ok(id),)) => Ok(id),
             Ok((Err(TransferFromError::Duplicate { duplicate_of }),)) => Ok(duplicate_of),
-            Ok((Err(e),)) => Err((transfer_from_error_is_ambiguous(&e, false), format!("{e:?}"))),
-            Err(e) => Err((true, format!("{e:?}"))),
+            Ok((Err(e),)) => Err((classify_transfer_from_error(&e), format!("{e:?}"))),
+            Err(e) => Err((TransferFailureClass::Ambiguous, format!("{e:?}"))),
         }
     } else {
         let args = TransferArg {
@@ -482,20 +733,34 @@ pub async fn execute(transfer: &SwapTransferV1, pull: bool) -> Result<Nat, (bool
         match result {
             Ok((Ok(id),)) => Ok(id),
             Ok((Err(TransferError::Duplicate { duplicate_of }),)) => Ok(duplicate_of),
-            Ok((Err(e),)) => Err((transfer_error_is_ambiguous(&e, false), format!("{e:?}"))),
-            Err(e) => Err((true, format!("{e:?}"))),
+            Ok((Err(e),)) => Err((classify_transfer_error(&e), format!("{e:?}"))),
+            Err(e) => Err((TransferFailureClass::Ambiguous, format!("{e:?}"))),
         }
     }
 }
 
 fn transfer_error_is_ambiguous(error: &TransferError, prior_ambiguous: bool) -> bool {
-    prior_ambiguous || matches!(error,
-        TransferError::TooOld | TransferError::GenericError { .. } | TransferError::TemporarilyUnavailable)
+    prior_ambiguous || matches!(classify_transfer_error(error), TransferFailureClass::Ambiguous | TransferFailureClass::TooOld)
 }
 
 fn transfer_from_error_is_ambiguous(error: &TransferFromError, prior_ambiguous: bool) -> bool {
-    prior_ambiguous || matches!(error,
-        TransferFromError::TooOld | TransferFromError::GenericError { .. } | TransferFromError::TemporarilyUnavailable)
+    prior_ambiguous || matches!(classify_transfer_from_error(error), TransferFailureClass::Ambiguous | TransferFailureClass::TooOld)
+}
+
+fn classify_transfer_error(error: &TransferError) -> TransferFailureClass {
+    match error {
+        TransferError::TooOld => TransferFailureClass::TooOld,
+        TransferError::GenericError { .. } | TransferError::TemporarilyUnavailable => TransferFailureClass::Ambiguous,
+        _ => TransferFailureClass::ProvenNoEffect,
+    }
+}
+
+fn classify_transfer_from_error(error: &TransferFromError) -> TransferFailureClass {
+    match error {
+        TransferFromError::TooOld => TransferFailureClass::TooOld,
+        TransferFromError::GenericError { .. } | TransferFromError::TemporarilyUnavailable => TransferFailureClass::Ambiguous,
+        _ => TransferFailureClass::ProvenNoEffect,
+    }
 }
 
 pub async fn run_leg(
@@ -508,7 +773,7 @@ pub async fn run_leg(
         1 => &receipt.output,
         _ => &receipt.refund,
     };
-    let (transfer, prior_ambiguous) = if let Some(saved) = existing {
+    let (mut transfer, prior_ambiguous) = if let Some(saved) = existing {
         if saved.ledger != proposed.ledger || saved.from != proposed.from || saved.to != proposed.to
             || saved.amount != proposed.amount || saved.fee != proposed.fee
         {
@@ -520,11 +785,21 @@ pub async fn run_leg(
         if saved.status == SwapTransferStatusV1::Rejected {
             return Err((false, "saved leg has a typed no-effect rejection".to_string()));
         }
-        let prior_ambiguous = matches!(saved.status, SwapTransferStatusV1::Submitted | SwapTransferStatusV1::Unresolved);
+        let prior_ambiguous = !saved.ready_to_dispatch.unwrap_or(false)
+            && matches!(saved.status, SwapTransferStatusV1::Submitted | SwapTransferStatusV1::Unresolved);
         (saved.clone(), prior_ambiguous)
     } else {
         (proposed, false)
     };
+    if transfer.history_start.is_none() {
+        let history_start = match ledger_log_length(transfer.ledger).await {
+            Ok(length) => length,
+            Err(error) => return Err((true, error)),
+        };
+        transfer.history_start = Some(history_start);
+    }
+    transfer.ready_to_dispatch = None;
+    transfer.dispatch_count = Some(transfer.dispatch_count.unwrap_or(0).saturating_add(1));
     receipt.status = match leg {
         0 => SwapReceiptStatusV1::InputSubmitted,
         1 => SwapReceiptStatusV1::OutputSubmitted,
@@ -548,20 +823,103 @@ pub async fn run_leg(
             recorded.block_index = Some(id.clone());
             recorded.status = SwapTransferStatusV1::Confirmed;
         }
-        Err((ambiguous, _)) => {
-            let effective_ambiguous = *ambiguous || prior_ambiguous;
+        Err((class, _)) => {
+            let effective_ambiguous = prior_ambiguous
+                || matches!(class, TransferFailureClass::Ambiguous | TransferFailureClass::TooOld);
             recorded.status = if effective_ambiguous {
                 SwapTransferStatusV1::Unresolved
             } else {
                 SwapTransferStatusV1::Rejected
+            };
+            if *class == TransferFailureClass::TooOld && transfer.dispatch_count.unwrap_or(0) > 1 {
+                recorded.too_old_after_ambiguity = Some(true);
             }
         }
     }
     save(receipt);
     match result {
         Ok(_) => Ok(()),
-        Err((ambiguous, reason)) => Err((ambiguous || prior_ambiguous, reason)),
+        Err((class, reason)) => Err((
+            prior_ambiguous || matches!(class, TransferFailureClass::Ambiguous | TransferFailureClass::TooOld),
+            reason,
+        )),
     }
+}
+
+/// Begin a fixed-tip absence scan only after a later exact retry of this
+/// transfer generation received typed TooOld following a prior dispatch.
+pub async fn begin_absence_scan(transfer: &SwapTransferV1) -> Result<AbsenceScanV1, String> {
+    if transfer.too_old_after_ambiguity != Some(true) || transfer.dispatch_count.unwrap_or(0) < 2
+        || transfer.status != SwapTransferStatusV1::Unresolved
+    {
+        return Err("transfer has no eligible TooOld-after-ambiguity proof".into());
+    }
+    // Legacy receipt rows have no pre-dispatch cursor. A genesis fallback is
+    // safe but may be expensive; page limits keep each update bounded and any
+    // archive gap leaves the obligation held.
+    let baseline = transfer.history_start.clone().unwrap_or_else(|| Nat::from(0u8));
+    let fixed_tip = ledger_log_length(transfer.ledger).await?;
+    if fixed_tip < baseline { return Err("ledger log length predates the pre-dispatch baseline".into()); }
+    Ok(AbsenceScanV1 { fixed_tip, cursor: baseline, generation: transfer.generation.unwrap_or(0) })
+}
+
+/// Retire an absent exact tuple only after a complete fixed-tip scan. The
+/// chained hash preserves a compact permanent record of each prior identity.
+pub fn rotate_absent_identity(transfer: &mut SwapTransferV1, fixed_tip: Nat) -> Result<(), String> {
+    rotate_absent_identity_at(transfer, fixed_tip, ic_cdk::api::time())
+}
+
+fn rotate_absent_identity_at(transfer: &mut SwapTransferV1, fixed_tip: Nat, now: u64) -> Result<(), String> {
+    let completed_scan = transfer.absence_scan.as_ref().ok_or("transfer lacks a completed absence scan")?;
+    let prior_generation = transfer.generation.unwrap_or(0);
+    if transfer.too_old_after_ambiguity != Some(true)
+        || completed_scan.fixed_tip != fixed_tip
+        || completed_scan.cursor != fixed_tip
+        || completed_scan.generation != prior_generation
+    {
+        return Err("absence scan is not complete for the current transfer generation".into());
+    }
+    let next_generation = prior_generation.checked_add(1).ok_or("transfer generation exhausted")?;
+    let old_time = transfer.created_at_time;
+    let next_time = now.max(old_time.checked_add(1).ok_or("transfer timestamp exhausted")?);
+    let identity = transfer_identity_hash(transfer);
+    let mut retired = Sha256::new();
+    retired.update(b"rumi-3pool-retired-transfer-chain-v1");
+    if let Some(previous) = transfer.retired_identity_hash.as_ref() { retired.update(previous); }
+    retired.update(identity);
+    let retired_hash = retired.finalize().to_vec();
+    let mut memo = Sha256::new();
+    memo.update(b"rumi-3pool-transfer-generation-v1");
+    memo.update(&retired_hash);
+    memo.update(next_generation.to_be_bytes());
+    memo.update(next_time.to_be_bytes());
+    transfer.memo = memo.finalize().to_vec();
+    transfer.created_at_time = next_time;
+    transfer.generation = Some(next_generation);
+    transfer.retired_identity_hash = Some(retired_hash);
+    transfer.history_start = Some(fixed_tip.clone());
+    transfer.absence_scan = None;
+    transfer.too_old_after_ambiguity = Some(false);
+    transfer.dispatch_count = Some(0);
+    transfer.block_index = None;
+    transfer.status = SwapTransferStatusV1::Unresolved;
+    transfer.ready_to_dispatch = Some(true);
+    Ok(())
+}
+
+fn transfer_identity_hash(transfer: &SwapTransferV1) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(b"rumi-3pool-transfer-identity-v1");
+    hash.update(transfer.ledger.as_slice());
+    hash.update(transfer.from.owner.as_slice());
+    hash.update(transfer.from.subaccount.as_ref().map(|bytes| bytes.as_slice()).unwrap_or(&[]));
+    hash.update(transfer.to.owner.as_slice());
+    hash.update(transfer.to.subaccount.as_ref().map(|bytes| bytes.as_slice()).unwrap_or(&[]));
+    hash.update(transfer.amount.to_be_bytes());
+    hash.update(transfer.fee.to_be_bytes());
+    hash.update(transfer.created_at_time.to_be_bytes());
+    hash.update(&transfer.memo);
+    hash.finalize().into()
 }
 
 #[cfg(test)]
@@ -587,11 +945,16 @@ mod tests {
             memo: vec![8; 32],
             block_index: None,
             status: SwapTransferStatusV1::Unresolved,
+            history_start: None, absence_scan: None, generation: Some(0),
+            dispatch_count: Some(0),
+            too_old_after_ambiguity: Some(false), retired_identity_hash: None,
+            ready_to_dispatch: None,
         };
         let account = |p: Principal| Icrc3Value::Array(vec![Icrc3Value::Blob(p.as_slice().to_vec())]);
         let block = Icrc3Value::Map(vec![
             ("btype".into(), Icrc3Value::Text("1xfer".into())),
             ("tx".into(), Icrc3Value::Map(vec![
+                ("op".into(), Icrc3Value::Text("xfer".into())),
                 ("amt".into(), Icrc3Value::Nat(Nat::from(900u16))),
                 ("fee".into(), Icrc3Value::Nat(Nat::from(10u8))),
                 ("from".into(), account(pool)),
@@ -604,6 +967,120 @@ mod tests {
         let mut wrong = expected.clone();
         wrong.amount += 1;
         assert!(!block_matches_transfer(&block, &wrong, false, pool));
+        assert!(validate_scannable_block(&block).is_ok());
+        let mut btype_less_xfer = block.clone();
+        if let Icrc3Value::Map(fields) = &mut btype_less_xfer {
+            fields.retain(|(key, _)| key != "btype");
+        }
+        assert!(validate_scannable_block(&btype_less_xfer).is_ok());
+        assert!(block_matches_transfer(&btype_less_xfer, &expected, false, pool));
+        let btype_less_mint = Icrc3Value::Map(vec![
+            ("tx".into(), Icrc3Value::Map(vec![
+                ("op".into(), Icrc3Value::Text("mint".into())),
+                ("to".into(), account(user)),
+                ("amt".into(), Icrc3Value::Nat(Nat::from(5u8))),
+            ])),
+        ]);
+        assert!(validate_scannable_block(&btype_less_mint).is_ok());
+        let unknown = Icrc3Value::Map(vec![
+            ("btype".into(), Icrc3Value::Text("9future".into())),
+            ("tx".into(), Icrc3Value::Map(vec![("op".into(), Icrc3Value::Text("future".into()))])),
+        ]);
+        assert!(validate_scannable_block(&unknown).is_err());
+        let no_optional_fields = Icrc3Value::Map(vec![
+            ("btype".into(), Icrc3Value::Text("1xfer".into())),
+            ("tx".into(), Icrc3Value::Map(vec![
+                ("op".into(), Icrc3Value::Text("xfer".into())),
+                ("from".into(), account(pool)),
+                ("to".into(), account(user)),
+                ("amt".into(), Icrc3Value::Nat(Nat::from(1u8))),
+            ])),
+        ]);
+        assert!(validate_scannable_block(&no_optional_fields).is_ok());
+        let mut malformed = block;
+        if let Icrc3Value::Map(fields) = &mut malformed {
+            if let Some((_, Icrc3Value::Map(tx))) = fields.iter_mut().find(|(key, _)| key == "tx") {
+                tx.iter_mut().find(|(key, _)| key == "memo").unwrap().1 = Icrc3Value::Nat(Nat::from(1u8));
+            }
+        }
+        assert!(validate_scannable_block(&malformed).is_err());
+    }
+
+    #[test]
+    fn newly_optional_receipt_fields_decode_legacy_transfer_rows() {
+        #[derive(CandidType)]
+        struct OldTransfer {
+            ledger: Principal,
+            from: Account,
+            to: Account,
+            amount: u128,
+            fee: u128,
+            created_at_time: u64,
+            memo: Vec<u8>,
+            block_index: Option<Nat>,
+            status: SwapTransferStatusV1,
+        }
+        let old = OldTransfer {
+            ledger: Principal::management_canister(),
+            from: Account { owner: Principal::anonymous(), subaccount: None },
+            to: Account { owner: Principal::management_canister(), subaccount: None },
+            amount: 1,
+            fee: 2,
+            created_at_time: 3,
+            memo: vec![4],
+            block_index: None,
+            status: SwapTransferStatusV1::Unresolved,
+        };
+        let encoded = candid::encode_one(old).unwrap();
+        let decoded: SwapTransferV1 = candid::decode_one(&encoded).unwrap();
+        assert_eq!(decoded.generation, None);
+        assert_eq!(decoded.dispatch_count, None);
+        assert_eq!(decoded.too_old_after_ambiguity, None);
+        assert_eq!(decoded.history_start, None);
+        assert_eq!(decoded.absence_scan, None);
+    }
+
+    #[test]
+    fn completed_absence_rotation_keeps_tombstone_and_changes_exact_dedup_tuple() {
+        let mut transfer = SwapTransferV1 {
+            ledger: Principal::management_canister(),
+            from: Account { owner: Principal::anonymous(), subaccount: None },
+            to: Account { owner: Principal::self_authenticating(b"to"), subaccount: None },
+            amount: 11,
+            fee: 2,
+            created_at_time: 50,
+            memo: vec![5; 32],
+            block_index: None,
+            status: SwapTransferStatusV1::Unresolved,
+            history_start: Some(Nat::from(9u8)),
+            absence_scan: Some(AbsenceScanV1 { fixed_tip: Nat::from(20u8), cursor: Nat::from(20u8), generation: 0 }),
+            generation: Some(0),
+            dispatch_count: Some(2),
+            too_old_after_ambiguity: Some(true),
+            retired_identity_hash: None,
+            ready_to_dispatch: None,
+        };
+        let old_time = transfer.created_at_time;
+        let old_memo = transfer.memo.clone();
+        rotate_absent_identity_at(&mut transfer, Nat::from(20u8), 40).unwrap();
+        assert_eq!(transfer.status, SwapTransferStatusV1::Unresolved);
+        assert_eq!(transfer.ready_to_dispatch, Some(true));
+        assert_eq!(transfer.generation, Some(1));
+        assert_eq!(transfer.created_at_time, old_time + 1);
+        assert_ne!(transfer.memo, old_memo);
+        assert!(transfer.retired_identity_hash.is_some());
+        assert_eq!(transfer.history_start, Some(Nat::from(20u8)));
+        assert_eq!(transfer.dispatch_count, Some(0));
+        assert_eq!(transfer.too_old_after_ambiguity, Some(false));
+        assert_eq!(transfer.absence_scan, None);
+    }
+
+    #[test]
+    fn absence_page_requires_exact_contiguous_unique_ids() {
+        assert!(validate_exact_page_ids(10, 13, &[10, 11, 12]).is_ok());
+        assert!(validate_exact_page_ids(10, 13, &[10, 12]).is_err());
+        assert!(validate_exact_page_ids(10, 13, &[10, 11, 11]).is_err());
+        assert!(validate_exact_page_ids(10, 13, &[10, 11, 13]).is_err());
     }
 
     #[test]
@@ -622,6 +1099,10 @@ mod tests {
             memo: vec![9; 32],
             block_index: None,
             status: SwapTransferStatusV1::Unresolved,
+            history_start: None, absence_scan: None, generation: Some(0),
+            dispatch_count: Some(0),
+            too_old_after_ambiguity: Some(false), retired_identity_hash: None,
+            ready_to_dispatch: None,
         };
         let account = |owner: Principal, subaccount: [u8; 32]| Icrc3Value::Array(vec![
             Icrc3Value::Blob(owner.as_slice().to_vec()),
@@ -652,6 +1133,46 @@ mod tests {
             ("tx".into(), wrong_spender),
         ]);
         assert!(!block_matches_transfer(&wrong_block, &expected, true, pool));
+    }
+
+    #[test]
+    fn payout_receipt_matches_net_ledger_amount_not_claim_debit() {
+        let pool = Principal::self_authenticating(b"payout-pool");
+        let claimant = Principal::self_authenticating(b"payout-user");
+        let claim_debit = 910u128;
+        let fee = 10u128;
+        let expected = SwapTransferV1 {
+            ledger: Principal::management_canister(),
+            from: Account { owner: pool, subaccount: None },
+            to: Account { owner: claimant, subaccount: None },
+            amount: claim_debit.checked_sub(fee).unwrap(),
+            fee,
+            created_at_time: 55,
+            memo: vec![6; 32],
+            block_index: None,
+            status: SwapTransferStatusV1::Unresolved,
+            history_start: None, absence_scan: None, generation: Some(0),
+            dispatch_count: Some(0), too_old_after_ambiguity: Some(false), retired_identity_hash: None,
+            ready_to_dispatch: None,
+        };
+        let account = |principal: Principal| Icrc3Value::Array(vec![
+            Icrc3Value::Blob(principal.as_slice().to_vec()),
+        ]);
+        let block = Icrc3Value::Map(vec![
+            ("btype".into(), Icrc3Value::Text("1xfer".into())),
+            ("tx".into(), Icrc3Value::Map(vec![
+                ("amt".into(), Icrc3Value::Nat(Nat::from(900u16))),
+                ("fee".into(), Icrc3Value::Nat(Nat::from(10u8))),
+                ("from".into(), account(pool)),
+                ("to".into(), account(claimant)),
+                ("memo".into(), Icrc3Value::Blob(vec![6; 32])),
+                ("ts".into(), Icrc3Value::Nat(Nat::from(55u8))),
+            ])),
+        ]);
+        assert!(block_matches_transfer(&block, &expected, false, pool));
+        let mut wrong_gross = expected;
+        wrong_gross.amount = claim_debit;
+        assert!(!block_matches_transfer(&block, &wrong_gross, false, pool));
     }
 
     #[test]
@@ -754,6 +1275,10 @@ mod tests {
             memo: vec![1; 32],
             block_index: Some(Nat::from(42u64)),
             status: SwapTransferStatusV1::Confirmed,
+            history_start: None, absence_scan: None, generation: Some(0),
+            dispatch_count: Some(0),
+            too_old_after_ambiguity: Some(false), retired_identity_hash: None,
+            ready_to_dispatch: None,
         });
         save(&r);
         assert_eq!(get(owner, &r.request.intent_id), Some(r.clone()));

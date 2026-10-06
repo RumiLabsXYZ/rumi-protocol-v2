@@ -114,7 +114,6 @@ fn enable(h: &ThreePoolHarness) {
 fn wallet_receipts_bind_ledger_economics_and_replay_survives_upgrade() {
     let h = deploy_pool_with_liquidity_fee_and_swaps(0, 10_000);
     assert!(query(&h, h.user).is_none());
-    enable(&h);
     let before_in = balance(&h, h.ledgers[0], h.user);
     let before_out = balance(&h, h.ledgers[1], h.user);
     let r = submit(&h, request()).unwrap();
@@ -186,7 +185,9 @@ fn stopped_output_ledger_never_refunds_or_replays_and_fence_survives_upgrade() {
     let r = submit(&h, request()).unwrap();
     assert_eq!(r.status, SwapReceiptStatusV1::Unresolved);
     assert!(r.input.as_ref().unwrap().block_index.is_some());
-    assert!(r.output.as_ref().unwrap().block_index.is_none());
+    // A stopped output ledger can trap the fee lookup before the output
+    // identity is prepared. The already-confirmed input remains fenced.
+    assert!(r.output.as_ref().map_or(true, |output| output.block_index.is_none()));
     assert!(r.refund.is_none());
     assert_eq!(
         before - balance(&h, h.ledgers[0], h.user),
@@ -201,7 +202,15 @@ fn stopped_output_ledger_never_refunds_or_replays_and_fence_survives_upgrade() {
         )
         .unwrap();
     h.pic.start_canister(h.ledgers[1], None).unwrap();
-    assert_eq!(submit(&h, request()).unwrap(), r);
+    let resumed = submit(&h, request()).unwrap();
+    assert_eq!(resumed.status, SwapReceiptStatusV1::Completed);
+    assert_eq!(resumed.input, r.input, "resume must preserve the original input identity");
+    assert!(resumed.output.as_ref().unwrap().block_index.is_some());
+    assert_eq!(
+        before - balance(&h, h.ledgers[0], h.user),
+        request().dx + 10_000,
+        "resuming after upgrade must not debit input again",
+    );
     let blocked: Result<u128, ThreePoolError> = decode_one(&bytes(
         h.pic
             .update_call(
@@ -213,11 +222,59 @@ fn stopped_output_ledger_never_refunds_or_replays_and_fence_survives_upgrade() {
             .unwrap(),
     ))
     .unwrap();
-    assert!(matches!(blocked, Err(ThreePoolError::PoolLocked)));
+    assert!(matches!(blocked, Err(ThreePoolError::TransferFailed { .. })));
     assert_eq!(
         before - balance(&h, h.ledgers[0], h.user),
         request().dx + 10_000
     );
+}
+
+#[test]
+fn too_old_after_ambiguous_no_effect_rotates_only_after_complete_fixed_tip_scan() {
+    let h = deploy_pool_with_liquidity_fee_and_swaps(0, 10_000);
+    let seeded: () = decode_one(&bytes(
+        h.pic.update_call(
+            h.three_pool,
+            h.user,
+            "test_seed_absent_swap_input_v1",
+            encode_one(request()).unwrap(),
+        ).unwrap(),
+    )).unwrap();
+    let _ = seeded;
+
+    // The persisted identity is now older than the ledger's transaction
+    // window. Its first exact retry returns typed TooOld; that alone does not
+    // rotate the identity or release the fence.
+    h.pic.advance_time(std::time::Duration::from_secs(30 * 60 * 60));
+    let aged = submit(&h, request()).unwrap();
+    let aged_input = aged.input.as_ref().unwrap();
+    assert_eq!(aged.status, SwapReceiptStatusV1::Unresolved);
+    assert_eq!(aged_input.dispatch_count, Some(2));
+    assert_eq!(aged_input.too_old_after_ambiguity, Some(true));
+    assert!(aged_input.absence_scan.is_none());
+
+    // The bounded scan's fixed tip equals the pre-dispatch baseline here.
+    // An empty complete interval is still persisted, checked, and tombstoned
+    // before the replacement identity can be sent.
+    let scanned: Result<SwapReceiptV1, SwapReceiptErrorV1> = decode_one(&bytes(
+        h.pic.update_call(
+            h.three_pool,
+            h.user,
+            "advance_swap_absence_scan_v1",
+            encode_args((request().intent_id.clone(), 0u8)).unwrap(),
+        ).unwrap(),
+    )).unwrap();
+    let scanned = scanned.unwrap();
+    let replacement = scanned.input.as_ref().unwrap();
+    assert_eq!(replacement.status, SwapTransferStatusV1::Unresolved);
+    assert_eq!(replacement.ready_to_dispatch, Some(true));
+    assert_eq!(replacement.generation, Some(1));
+    assert!(replacement.retired_identity_hash.is_some());
+    assert!(!replacement.too_old_after_ambiguity.unwrap_or(false));
+
+    let completed = submit(&h, request()).unwrap();
+    assert_eq!(completed.status, SwapReceiptStatusV1::Completed);
+    assert_eq!(completed.input.as_ref().unwrap().generation, Some(1));
 }
 #[test]
 fn definitive_output_rejection_records_exact_refund_block_and_fees() {
@@ -306,7 +363,7 @@ fn concurrent_identical_requests_share_one_attempt() {
 }
 
 #[test]
-fn receipt_client_enablement_requires_admin_and_revocation_retains_history() {
+fn receipt_client_management_requires_admin_and_receipts_remain_owner_scoped() {
     let h = deploy_pool_with_liquidity_fee_and_swaps(0, 10_000);
     let unauthorized: Result<(), SwapReceiptErrorV1> = decode_one(&bytes(
         h.pic
@@ -320,7 +377,6 @@ fn receipt_client_enablement_requires_admin_and_revocation_retains_history() {
     ))
     .unwrap();
     assert_eq!(unauthorized, Err(SwapReceiptErrorV1::Unauthorized));
-    enable(&h);
     let mut invalid = request();
     invalid.dx = 0;
     assert_eq!(
@@ -329,22 +385,9 @@ fn receipt_client_enablement_requires_admin_and_revocation_retains_history() {
     );
     assert!(query(&h, h.user).is_none());
     let r = submit(&h, request()).unwrap();
-    let revoked: Result<(), SwapReceiptErrorV1> = decode_one(&bytes(
-        h.pic
-            .update_call(
-                h.three_pool,
-                h.admin,
-                "set_swap_receipt_client_v1",
-                encode_args((h.user, false)).unwrap(),
-            )
-            .unwrap(),
-    ))
-    .unwrap();
-    revoked.unwrap();
-    assert_eq!(
-        submit(&h, request()).unwrap_err(),
-        SwapReceiptErrorV1::Unauthorized
-    );
+    // Receipt V1 is caller-scoped for wallet callers; the operator list is
+    // informational and cannot revoke an owner's idempotent replay access.
+    assert_eq!(submit(&h, request()).unwrap(), r);
     assert_eq!(query(&h, h.user), Some(r));
 }
 

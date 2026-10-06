@@ -395,7 +395,21 @@ async fn dispatch_ingress_pulls(
             continue;
         }
         receipt.status = receipts::IngressStatusV1::Pulling;
+        if receipt.pulls[index].history_start.is_none() {
+            match receipts::ledger_log_length(receipt.pulls[index].ledger).await {
+                Ok(length) => receipt.pulls[index].history_start = Some(length),
+                Err(reason) => {
+                    receipt.status = receipts::IngressStatusV1::Unresolved;
+                    receipt.error = Some(reason.chars().take(512).collect());
+                    receipts::save_ingress(receipt);
+                    receipts::set_fence(true);
+                    return Err(receipt.error.clone().unwrap_or_default());
+                }
+            }
+        }
         receipt.pulls[index].status = receipts::SwapTransferStatusV1::Submitted;
+        receipts::save_ingress(receipt);
+        receipt.pulls[index].dispatch_count = Some(receipt.pulls[index].dispatch_count.unwrap_or(0).saturating_add(1));
         receipts::save_ingress(receipt);
         match receipts::execute(&receipt.pulls[index], true).await {
             Ok(block) => {
@@ -404,7 +418,14 @@ async fn dispatch_ingress_pulls(
                 receipt.error = None;
                 receipts::save_ingress(receipt);
             }
-            Err((ambiguous, reason)) => {
+            Err((class, reason)) => {
+                let prior_dispatch = receipt.pulls[index].dispatch_count.unwrap_or(0) > 1;
+                receipt.pulls[index].too_old_after_ambiguity =
+                    Some(class == receipts::TransferFailureClass::TooOld && prior_dispatch);
+                let ambiguous = prior_dispatch || matches!(
+                    class,
+                    receipts::TransferFailureClass::Ambiguous | receipts::TransferFailureClass::TooOld
+                );
                 receipt.pulls[index].status = if ambiguous {
                     receipts::SwapTransferStatusV1::Unresolved
                 } else {
@@ -592,16 +613,26 @@ pub async fn reconcile_pending_claim_v1(claim_id: u64, block_index: candid::Nat)
         | Some(transfers::PendingPayoutState::Ambiguous(attempt)) => attempt,
         _ => return Err(ClaimProofErrorV1::LegacyIdentityUnavailable),
     };
+    let sent_amount = claim.amount.checked_sub(attempt.fee)
+        .filter(|amount| *amount > 0)
+        .ok_or(ClaimProofErrorV1::LegacyIdentityUnavailable)?;
     let transfer = receipts::SwapTransferV1 {
         ledger: claim.ledger,
         from: icrc_ledger_types::icrc1::account::Account { owner: ic_cdk::id(), subaccount: None },
         to: icrc_ledger_types::icrc1::account::Account { owner: claim.claimant, subaccount: None },
-        amount: claim.amount,
+        amount: sent_amount,
         fee: attempt.fee,
         created_at_time: attempt.created_at_time,
         memo: attempt.memo,
         block_index: None,
         status: receipts::SwapTransferStatusV1::Unresolved,
+        history_start: None,
+        absence_scan: None,
+        generation: Some(0),
+        dispatch_count: Some(0),
+        too_old_after_ambiguity: Some(false),
+        retired_identity_hash: None,
+        ready_to_dispatch: None,
     };
     let matches = receipts::matches_ledger_block(claim.ledger, &block_index, &transfer, false).await
         .map_err(|_| ClaimProofErrorV1::ProofUnavailable)?;
@@ -714,8 +745,9 @@ pub async fn reconcile_swap_leg_v1(
     leg: u8,
     block_index: candid::Nat,
 ) -> Result<SwapReceiptV1, SwapReceiptErrorV1> {
-    let _pool_guard = pool_guard::PoolGuard::new().map_err(|_| SwapReceiptErrorV1::PoolLocked)?;
     let caller = ic_cdk::caller();
+    let _pool_guard = pool_guard::PoolGuard::new_for_receipt(caller, &intent_id)
+        .map_err(|_| SwapReceiptErrorV1::PoolLocked)?;
     let mut receipt = receipts::get(caller, &intent_id).ok_or(SwapReceiptErrorV1::InvalidIntentId)?;
     if leg > 2 { return Err(SwapReceiptErrorV1::InvalidRequest); }
     let slot = match leg { 0 => &mut receipt.input, 1 => &mut receipt.output, _ => &mut receipt.refund };
@@ -737,6 +769,55 @@ pub async fn reconcile_swap_leg_v1(
     Ok(receipt)
 }
 
+/// Continue one bounded, archive-complete absence page for an aged ambiguous
+/// swap leg. A complete absence rotates the transfer identity; it does not
+/// dispatch the replacement in the same call.
+#[update]
+pub async fn advance_swap_absence_scan_v1(
+    intent_id: Vec<u8>,
+    leg: u8,
+) -> Result<SwapReceiptV1, SwapReceiptErrorV1> {
+    let caller = ic_cdk::caller();
+    let _pool_guard = pool_guard::PoolGuard::new_for_receipt(caller, &intent_id)
+        .map_err(|_| SwapReceiptErrorV1::PoolLocked)?;
+    let mut receipt = receipts::get(caller, &intent_id).ok_or(SwapReceiptErrorV1::InvalidIntentId)?;
+    if leg > 2 { return Err(SwapReceiptErrorV1::InvalidRequest); }
+    let current = match leg { 0 => &receipt.input, 1 => &receipt.output, _ => &receipt.refund }
+        .as_ref().ok_or(SwapReceiptErrorV1::ProofMismatch)?.clone();
+    let scan = match current.absence_scan.clone() {
+        Some(scan) if scan.generation == current.generation.unwrap_or(0) => scan,
+        Some(_) => return Err(SwapReceiptErrorV1::ProofMismatch),
+        None => receipts::begin_absence_scan(&current).await.map_err(|_| SwapReceiptErrorV1::ProofUnavailable)?,
+    };
+    if current.absence_scan.is_none() {
+        let slot = match leg { 0 => &mut receipt.input, 1 => &mut receipt.output, _ => &mut receipt.refund };
+        slot.as_mut().ok_or(SwapReceiptErrorV1::ProofMismatch)?.absence_scan = Some(scan.clone());
+        receipts::save(&receipt);
+    }
+    let page = receipts::scan_absence_page(&current, &scan, leg == 0).await
+        .map_err(|_| SwapReceiptErrorV1::ProofUnavailable)?;
+    let slot = match leg { 0 => &mut receipt.input, 1 => &mut receipt.output, _ => &mut receipt.refund };
+    let transfer = slot.as_mut().ok_or(SwapReceiptErrorV1::ProofMismatch)?;
+    match page {
+        receipts::AbsencePage::Match(block) => {
+            transfer.status = receipts::SwapTransferStatusV1::Confirmed;
+            transfer.block_index = Some(block);
+            transfer.absence_scan = None;
+        }
+        receipts::AbsencePage::Continue(cursor) => {
+            let mut scan = scan;
+            scan.cursor = cursor;
+            transfer.absence_scan = Some(scan);
+        }
+        receipts::AbsencePage::Complete => {
+            receipts::rotate_absent_identity(transfer, scan.fixed_tip)
+                .map_err(|_| SwapReceiptErrorV1::ProofUnavailable)?;
+        }
+    }
+    receipts::save(&receipt);
+    Ok(receipt)
+}
+
 async fn swap_inner(
     i: u8,
     j: u8,
@@ -752,7 +833,11 @@ async fn swap_inner(
     // 2. Acquire the pool lock BEFORE reading balances so a concurrent
     //    caller cannot price against stale pre-swap state. Released on
     //    Drop (Ok, Err, or trap). Audit fence B-01.
-    let _pool_guard = pool_guard::PoolGuard::new()?;
+    let _pool_guard = if let Some(r) = receipt.as_deref() {
+        pool_guard::PoolGuard::new_for_receipt(r.owner, &r.request.intent_id)?
+    } else {
+        pool_guard::PoolGuard::new()?
+    };
 
     let i_idx = i as usize;
     let j_idx = j as usize;
@@ -1043,7 +1128,11 @@ pub async fn add_liquidity_with_receipt_v1(
     let request = IngressRequestV1::AddLiquidity { amounts, min_lp };
     let existing = receipts::get_ingress(caller, &intent_id);
     if receipts::fenced() && existing.is_none() { return Err(IngressReceiptErrorV1::PoolLocked); }
-    let _pool_guard = pool_guard::PoolGuard::new().map_err(|_| IngressReceiptErrorV1::PoolLocked)?;
+    let _pool_guard = if existing.is_some() && receipts::fenced() {
+        pool_guard::PoolGuard::new_for_receipt(caller, &intent_id)
+    } else {
+        pool_guard::PoolGuard::new()
+    }.map_err(|_| IngressReceiptErrorV1::PoolLocked)?;
     if read_state(|s| s.is_paused) { return Err(IngressReceiptErrorV1::PoolLocked); }
 
     let (mut receipt, fresh) = receipts::reserve_ingress(caller, intent_id, request)?;
@@ -1143,8 +1232,9 @@ pub async fn reconcile_ingress_pull_v1(
     pull_index: u8,
     block_index: candid::Nat,
 ) -> Result<IngressReceiptV1, IngressReceiptErrorV1> {
-    let _pool_guard = pool_guard::PoolGuard::new().map_err(|_| IngressReceiptErrorV1::PoolLocked)?;
     let caller = ic_cdk::caller();
+    let _pool_guard = pool_guard::PoolGuard::new_for_receipt(caller, &intent_id)
+        .map_err(|_| IngressReceiptErrorV1::PoolLocked)?;
     let mut receipt = receipts::get_ingress(caller, &intent_id).ok_or(IngressReceiptErrorV1::InvalidIntentId)?;
     let transfer = receipt.pulls.get_mut(pull_index as usize).ok_or(IngressReceiptErrorV1::InvalidRequest)?;
     if transfer.status == receipts::SwapTransferStatusV1::Confirmed {
@@ -1159,6 +1249,46 @@ pub async fn reconcile_ingress_pull_v1(
     if !matches { return Err(IngressReceiptErrorV1::ProofMismatch); }
     transfer.status = receipts::SwapTransferStatusV1::Confirmed;
     transfer.block_index = Some(block_index);
+    receipts::save_ingress(&receipt);
+    Ok(receipt)
+}
+
+#[update]
+pub async fn advance_ingress_absence_scan_v1(
+    intent_id: Vec<u8>,
+    pull_index: u8,
+) -> Result<IngressReceiptV1, IngressReceiptErrorV1> {
+    let caller = ic_cdk::caller();
+    let _pool_guard = pool_guard::PoolGuard::new_for_receipt(caller, &intent_id)
+        .map_err(|_| IngressReceiptErrorV1::PoolLocked)?;
+    let mut receipt = receipts::get_ingress(caller, &intent_id).ok_or(IngressReceiptErrorV1::InvalidIntentId)?;
+    let current = receipt.pulls.get(pull_index as usize).ok_or(IngressReceiptErrorV1::InvalidRequest)?.clone();
+    let scan = match current.absence_scan.clone() {
+        Some(scan) if scan.generation == current.generation.unwrap_or(0) => scan,
+        Some(_) => return Err(IngressReceiptErrorV1::ProofMismatch),
+        None => receipts::begin_absence_scan(&current).await.map_err(|_| IngressReceiptErrorV1::ProofUnavailable)?,
+    };
+    if current.absence_scan.is_none() {
+        receipt.pulls[pull_index as usize].absence_scan = Some(scan.clone());
+        receipts::save_ingress(&receipt);
+    }
+    let page = receipts::scan_absence_page(&current, &scan, true).await
+        .map_err(|_| IngressReceiptErrorV1::ProofUnavailable)?;
+    let transfer = receipt.pulls.get_mut(pull_index as usize).ok_or(IngressReceiptErrorV1::InvalidRequest)?;
+    match page {
+        receipts::AbsencePage::Match(block) => {
+            transfer.status = receipts::SwapTransferStatusV1::Confirmed;
+            transfer.block_index = Some(block);
+            transfer.absence_scan = None;
+        }
+        receipts::AbsencePage::Continue(cursor) => {
+            let mut scan = scan;
+            scan.cursor = cursor;
+            transfer.absence_scan = Some(scan);
+        }
+        receipts::AbsencePage::Complete => receipts::rotate_absent_identity(transfer, scan.fixed_tip)
+            .map_err(|_| IngressReceiptErrorV1::ProofUnavailable)?,
+    }
     receipts::save_ingress(&receipt);
     Ok(receipt)
 }
@@ -1672,7 +1802,11 @@ pub async fn donate_with_receipt_v1(
     let request = IngressRequestV1::Donate { token_index, amount };
     let existing = receipts::get_ingress(caller, &intent_id);
     if receipts::fenced() && existing.is_none() { return Err(IngressReceiptErrorV1::PoolLocked); }
-    let _pool_guard = pool_guard::PoolGuard::new().map_err(|_| IngressReceiptErrorV1::PoolLocked)?;
+    let _pool_guard = if existing.is_some() && receipts::fenced() {
+        pool_guard::PoolGuard::new_for_receipt(caller, &intent_id)
+    } else {
+        pool_guard::PoolGuard::new()
+    }.map_err(|_| IngressReceiptErrorV1::PoolLocked)?;
     if read_state(|s| s.is_paused || s.lp_total_supply == 0) {
         return Err(IngressReceiptErrorV1::InvalidRequest);
     }
@@ -3407,6 +3541,31 @@ pub fn test_get_raw_block(id: u64) -> Option<types::Icrc3Block> {
 pub fn test_gate_next_fee_lookup() {
     assert_eq!(ic_cdk::api::caller(), read_state(|s| s.config.admin), "admin only");
     transfers::gate_next_fee_lookup();
+}
+
+/// Seed an aged, never-dispatched input identity for the fixed-tip absence
+/// recovery PocketIC regression. This endpoint is omitted from production
+/// Wasm/Candid and can only create a receipt for its authenticated caller.
+#[cfg(feature = "test_endpoints")]
+#[update]
+pub async fn test_seed_absent_swap_input_v1(request: SwapRequestV1) {
+    let caller = ic_cdk::caller();
+    assert_ne!(caller, Principal::anonymous(), "anonymous caller");
+    let (mut receipt, _) = receipts::reserve(caller, request.clone()).expect("valid test request");
+    let ledger = read_state(|s| s.config.tokens[request.i as usize].ledger_id);
+    let fee = transfers::ledger_fee(ledger).await;
+    let history_start = receipts::ledger_log_length(ledger).await.expect("ledger tip");
+    let mut transfer = receipts::transfer_intent(
+        &receipt, 0, ledger, caller, ic_cdk::id(), request.dx, fee,
+    );
+    transfer.created_at_time = ic_cdk::api::time().saturating_sub(90_000_000_000_000);
+    transfer.history_start = Some(history_start);
+    transfer.dispatch_count = Some(1);
+    transfer.status = receipts::SwapTransferStatusV1::Unresolved;
+    receipt.input = Some(transfer);
+    receipt.status = SwapReceiptStatusV1::Unresolved;
+    receipts::save(&receipt);
+    receipts::set_fence(true);
 }
 
 /// Test-only: clear the ICRC-3 hash cache. Used by tests to simulate the

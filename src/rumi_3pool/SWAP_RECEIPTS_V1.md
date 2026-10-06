@@ -6,14 +6,26 @@ fails closed before pulling tokens. Wallet callers may use the receipt method
 without admin allowlisting; anonymous callers are rejected.
 
 The receipt-backed swap, add-liquidity, and donation ingress methods currently
-return `PoolLocked` in production builds. Their full paths compile only for the
-`test_endpoints` PocketIC fixture while recovery is incomplete. Candidate-index
-ICRC-3 reconciliation proves a matching transfer when present, but absence at
-one index is not evidence that an aged ambiguous transfer never committed.
-Production admission remains disabled until a bounded fixed-tip scan can prove
-complete contiguous main-log/archive coverage and safely retire the old tuple.
-This is an explicit availability blocker; do not describe V1 ingress as ready
-for rollout.
+return `PoolLocked` in production builds. Their full paths are available only
+to the `test_endpoints` PocketIC fixture while recovery is independently
+validated. Candidate-index ICRC-3 reconciliation proves a matching transfer
+when present; an aged ambiguous tuple can also be advanced through an update
+endpoint that scans at most 100 contiguous indexes per call to one fixed log
+tip, resolving every advertised archive range and rejecting gaps, duplicates,
+unknown block types, or malformed transfer fields. A complete negative scan
+retains a hash-chain tombstone and rotates the exact transfer timestamp/memo;
+it does not dispatch the replacement in the same call.
+
+That recovery path is still not a production admission decision. Reviewed
+source/module-hash profiles cover icUSD (`t6bor-paaaa-aaaap-qrd5q-cai`, pinned
+Rumi source `fc278709`), ckUSDT (`cngnf-vqaaa-aaaar-qag4q-cai`), and ckUSDC
+(`xevnm-gaaaa-aaaar-qafnq-cai`); the latter two match the official DFINITY
+`ledger-suite-icrc-2026-03-09` source commit
+`cf41372e3d4dc1accfe2c09a7969f8bddc729dc1`. The scan allowlist is principal
+based and the canister does not attest a ledger's live module hash at runtime.
+Production V1 ingress remains explicitly disabled until the source-matched
+PocketIC/archive matrix and independent review pass and the ledger-specific
+trust gate is resolved. Do not describe V1 ingress as ready for rollout.
 
 A receipt request binds an exactly 32-byte `intent_id`, input/output coin
 indices, input amount `dx`, and net minimum received `min_dy`. IDs are scoped to
@@ -57,12 +69,13 @@ rejection permits a refund; failed or uncertain refunds retain the fence. No
 uncertain submission is automatically retried or compensated.
 
 A callback trap or upgrade may retain a Submitted receipt. Such a receipt is
-unresolved evidence, never permission to replay. The stable fence is also
-derived from all active stable swap/ingress rows, so a stale or reset heap flag
-cannot unlock reserve mutations. Exact positive ICRC-3 block evidence can be
-attached through reconciliation methods in test builds; unsupported ledgers
-and any operation without a matching positive block remain held. There is no
-absence-based recovery yet.
+unresolved evidence, never permission to replay automatically. The stable
+fence is derived from all active stable swap/ingress rows, so a reset heap flag
+cannot unlock reserve mutations. Exact positive ICRC-3 evidence and the
+fixed-tip absence scan are caller-driven update methods. Unsupported ledgers,
+archive gaps, unknown block encodings, and scans that have not reached the
+persisted fixed tip remain held. Legacy rows without a pre-dispatch cursor
+scan from genesis, one bounded page at a time.
 
 `get_swap_receipt_v1` is caller-scoped. Canister consumers should use a replicated
 inter-canister call for authoritative observation. An off-chain ordinary query
