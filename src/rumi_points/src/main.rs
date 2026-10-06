@@ -48,6 +48,10 @@ fn pre_upgrade() {
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
     state::restore_from_stable_or_trap();
+    // Fence old public-seed schedules synchronously before either timer or
+    // update ingress can resume. Active/expired legacy windows remain intact
+    // for admin review; a nonexpired unopened epoch waits for secure reseeding.
+    epoch::prepare_legacy_state_after_upgrade(ic_cdk::api::time());
     // Timers do not survive upgrades: re-register both from the persisted config.
     poll::setup_poll_timer();
     epoch::setup_epoch_timer();
@@ -165,7 +169,15 @@ fn cycle_manager_metrics() -> Vec<rumi_cycle_manager::CycleManagerMetric> {
 /// be demonstrated before event ingestion (Phase 2/3) exists.
 #[ic_cdk::update]
 fn register_test_principal(principal: Principal) -> Result<(), PointsError> {
-    state::register_test_principal(ic_cdk::caller(), principal, ic_cdk::api::time())
+    let caller = ic_cdk::caller();
+    if !state::is_admin(caller) {
+        return Err(PointsError::Unauthorized);
+    }
+    // This test-only ingress mutates the registered set. Hold the same guard as
+    // poll writers so it cannot race close finalization across raw_rand.
+    let guard = state::try_poll_guard()
+        .unwrap_or_else(|| ic_cdk::trap("polling or epoch transition is active; retry shortly"));
+    state::register_test_principal(caller, principal, ic_cdk::api::time(), guard)
 }
 
 #[ic_cdk::update]
@@ -217,8 +229,8 @@ async fn admin_rebuild_3pool_recorded() -> Result<u64, String> {
     if !state::is_admin(ic_cdk::caller()) {
         return Err("unauthorized".to_string());
     }
-    let _guard = state::PollGuard::new()
-        .ok_or_else(|| "a poll is in flight; retry shortly".to_string())?;
+    let _guard = state::try_poll_guard()
+        .ok_or_else(|| "polling or epoch state transition is active; retry shortly".to_string())?;
     let canister = state::get_source_canister(SourceId::ThreePool.tag())
         .ok_or_else(|| "3pool source canister not configured".to_string())?;
     let cursor = state::get_cursor(SourceId::ThreePool.tag());

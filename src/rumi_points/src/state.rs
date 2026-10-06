@@ -490,6 +490,10 @@ pub fn init_state(args: Option<InitArgs>, caller: Principal) {
     let snapshot_seed = SnapshotSeedSingleton {
         pending_commit: args.snapshot_seed_commit.unwrap_or([0u8; 32]),
         current_seed: None,
+        current_entropy: None,
+        legacy_reseed_pending: false,
+        legacy_transition_held: false,
+        secure_seed_chain_v1: true,
     };
     let state = State {
         admin,
@@ -594,6 +598,7 @@ pub fn register_test_principal(
     caller: Principal,
     principal: Principal,
     now_ns: u64,
+    _guard: PollGuard,
 ) -> Result<(), PointsError> {
     require_admin(caller)?;
     // Phase 1 test enrollment uses a fixed placeholder action; real ingestion
@@ -873,6 +878,8 @@ pub fn epoch_status() -> EpochStatus {
         open_epoch: s.open_epoch.clone(),
         revealed_seed_count: revealed_seed_count(),
         snapshot_seed_committed: s.snapshot_seed.is_committed(),
+        legacy_transition_held: s.snapshot_seed.legacy_transition_held,
+        legacy_reseed_pending: s.snapshot_seed.legacy_reseed_pending,
     })
 }
 
@@ -1004,6 +1011,55 @@ impl PollGuard {
             }
         })
     }
+}
+
+/// Polls cannot write point state once an epoch close or legacy reseed has
+/// started. The check and guard acquisition are synchronous, so a close either
+/// observes an active poll and waits, or the poll observes the persisted cutoff.
+pub fn try_poll_guard() -> Option<PollGuard> {
+    if with_state(|s| {
+        s.snapshot_seed.legacy_reseed_pending
+            || s.snapshot_seed.legacy_transition_held
+            || s.open_epoch
+                .as_ref()
+                .map_or(false, |open| open.close_started)
+    }) {
+        None
+    } else {
+        PollGuard::new()
+    }
+}
+
+pub fn legacy_reseed_pending() -> bool {
+    with_state(|s| s.snapshot_seed.legacy_reseed_pending)
+}
+
+pub fn legacy_transition_held() -> bool {
+    with_state(|s| s.snapshot_seed.legacy_transition_held)
+}
+
+pub fn set_legacy_transition_held(held: bool) {
+    with_state_mut(|s| s.snapshot_seed.legacy_transition_held = held);
+}
+
+pub fn current_epoch_entropy() -> Option<[u8; 32]> {
+    with_state(|s| s.snapshot_seed.current_entropy)
+}
+
+pub fn secure_seed_chain_v1() -> bool {
+    with_state(|s| s.snapshot_seed.secure_seed_chain_v1)
+}
+
+pub fn set_legacy_reseed_pending(pending: bool) {
+    with_state_mut(|s| s.snapshot_seed.legacy_reseed_pending = pending);
+}
+
+pub fn install_reseeded_epoch_seed(seed: [u8; 32], entropy: [u8; 32]) {
+    with_state_mut(|s| {
+        s.snapshot_seed.current_seed = Some(seed);
+        s.snapshot_seed.current_entropy = Some(entropy);
+        s.snapshot_seed.pending_commit = crate::snapshot_seed::commitment(&seed);
+    });
 }
 
 impl Drop for PollGuard {
@@ -1794,12 +1850,12 @@ mod tests {
         let p = tp(11);
 
         assert_eq!(
-            register_test_principal(tp(8), p, 1),
+            register_test_principal(tp(8), p, 1, PollGuard::new().unwrap()),
             Err(PointsError::Unauthorized)
         );
         assert!(!is_registered(&p));
 
-        assert_eq!(register_test_principal(admin, p, 1), Ok(()));
+        assert_eq!(register_test_principal(admin, p, 1, PollGuard::new().unwrap()), Ok(()));
         assert!(is_registered(&p));
     }
 
@@ -2005,6 +2061,10 @@ mod tests {
             snapshot_seed: SnapshotSeedSingleton {
                 pending_commit: [7u8; 32],
                 current_seed: Some([8u8; 32]),
+                current_entropy: None,
+                legacy_reseed_pending: false,
+                legacy_transition_held: false,
+                secure_seed_chain_v1: false,
             },
         };
         let mut bytes = Vec::new();
@@ -2514,6 +2574,83 @@ mod tests {
     }
 
     #[test]
+    fn epoch_close_cutoff_blocks_poll_writes_across_entropy_wait() {
+        init_default(tp(99));
+        let active_poll = try_poll_guard().expect("poll begins before close cutoff");
+        assert!(PollGuard::new().is_none(), "close waits for active poll");
+        drop(active_poll);
+
+        let mut open = open_epoch_bounds(1, 100, 200);
+        open.close_started = true;
+        set_open_epoch(Some(open));
+        let close_waiting_on_entropy = PollGuard::new().expect("close holds poll guard");
+        assert!(try_poll_guard().is_none(), "the update wrapper cannot acquire its required write guard after close cutoff");
+        assert!(!is_registered(&tp(12)));
+        assert!(
+            try_poll_guard().is_none(),
+            "admin trigger_poll cannot acquire a write path while close awaits raw_rand"
+        );
+        drop(close_waiting_on_entropy);
+        assert!(
+            try_poll_guard().is_none(),
+            "persisted close cutoff still blocks polls before close commits"
+        );
+
+        set_open_epoch(None);
+        assert!(
+            try_poll_guard().is_some(),
+            "polling resumes after close commits"
+        );
+    }
+
+    #[test]
+    fn held_active_legacy_epoch_is_durable_visible_and_blocks_poll_writes() {
+        init_default(tp(99));
+        with_state_mut(|s| s.current_epoch_index = 1);
+        let mut legacy_open = open_epoch_bounds(1, 100, 200);
+        legacy_open.a_cursor = Some(tp(1));
+        legacy_open.a_complete = true;
+        legacy_open.b_cursor = Some(tp(2));
+        legacy_open.b_complete = false;
+        set_open_epoch(Some(legacy_open.clone()));
+        set_legacy_transition_held(true);
+        assert!(epoch_status().legacy_transition_held);
+        assert_eq!(epoch_status().current_epoch_index, 1);
+        assert_eq!(epoch_status().open_epoch, Some(legacy_open.clone()));
+        assert!(
+            try_poll_guard().is_none(),
+            "held reward history must not accept automatic poll mutations"
+        );
+
+        // The hold lives in stable State, so the existing V1 state migration
+        // path must preserve it across serialization/reopen.
+        let snapshot = with_state(|s| s.clone());
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&StoredState::V3(snapshot), &mut bytes).unwrap();
+        let decoded = decode_stored_state(&bytes).expect("current snapshot must decode");
+        assert!(decoded.snapshot_seed.legacy_transition_held);
+        assert_eq!(decoded.current_epoch_index, 1);
+        assert_eq!(decoded.open_epoch, Some(legacy_open));
+        assert!(epoch_status().legacy_transition_held);
+        assert!(try_poll_guard().is_none());
+    }
+
+    #[test]
+    fn expired_unopened_epoch_hold_preserves_index_and_has_no_open_reward_row() {
+        init_default(tp(99));
+        with_state_mut(|s| s.current_epoch_index = 4);
+        set_legacy_transition_held(true);
+
+        let status = epoch_status();
+        assert!(status.legacy_transition_held);
+        assert_eq!(status.current_epoch_index, 4);
+        assert!(status.open_epoch.is_none());
+        assert_eq!(epoch_history(0, u64::MAX).len(), 0);
+        assert_eq!(revealed_seed_count(), 0);
+        assert!(try_poll_guard().is_none());
+    }
+
+    #[test]
     fn recorded_3pool_composition_reads_active_deposits() {
         init_default(tp(99));
         let p = tp(80);
@@ -2532,6 +2669,7 @@ mod tests {
             snapshot_time_a_ns: i,
             snapshot_time_b_ns: i + 1,
             revealed_at_ns: i + 2,
+            derivation_entropy: None,
         };
         append_revealed_seed(r(0));
         append_revealed_seed(r(1));
