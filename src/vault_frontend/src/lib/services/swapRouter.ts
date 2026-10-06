@@ -658,7 +658,7 @@ export async function executeRoute(
 
   if (AMM1_ROUTING_PAUSED) {
     const winner = route.providerQuote?.provider ?? route.hopProviderQuote?.provider;
-    if (winner === 'rumi_amm' || route.type === 'stable_to_icp' || route.type === 'icp_to_stable') {
+    if (winner === 'rumi_amm') {
       throw new Error('AMM1 routing is currently paused. Please refresh the quote and try again.');
     }
   }
@@ -1078,10 +1078,15 @@ async function executeStableToIcpOisy(
   });
   if (r2 && 'Err' in r2) throw new Error(`3USD approval failed: ${JSON.stringify(r2.Err)}`);
 
-  // Step 3: AMM swap (use estimated 3USD amount — slippage protection via minOutput)
-  const r4 = await ammActor.swap(poolId, Principal.fromText(THREEPOOL_ID), threeUsdEstimate, icpMinOutput);
-  if ('Err' in r4) throw new Error(`AMM swap failed: ${JSON.stringify(r4.Err)}`);
-  return r4.Ok.amount_out;
+  // Step 3: 3pool deposit (mints 3USD into caller's account)
+  const r3 = await threeUsdLedger.add_liquidity(amounts, threeUsdMinOutput);
+  if ('Err' in r3) throw new Error(`3pool deposit failed: ${JSON.stringify(r3.Err)}`);
+
+  // Step 4: AMM swap (use estimated 3USD amount — slippage protection via minOutput)
+  const r4 = await ammService.swapWithPreapprovedActor(
+    ammActor, wallet.principal, poolId, Principal.fromText(THREEPOOL_ID), r3.Ok, icpMinOutput,
+  );
+  return r4.amount_out;
 }
 
 /**
@@ -1144,14 +1149,15 @@ async function executeIcpToStableOisy(
   if (r1 && 'Err' in r1) throw new Error(`ICP approval failed: ${JSON.stringify(r1.Err)}`);
 
   // Step 2: AMM swap ICP → 3USD
-  const r2 = await ammActor.swap(poolId, Principal.fromText(ICP_LEDGER_ID), amountIn, threeUsdMinOutput);
-  if ('Err' in r2) throw new Error(`AMM swap failed: ${JSON.stringify(r2.Err)}`);
+  const r2 = await ammService.swapWithPreapprovedActor(
+    ammActor, wallet.principal, poolId, Principal.fromText(ICP_LEDGER_ID), amountIn, threeUsdMinOutput,
+  );
 
   // Step 3: 3pool redeem 3USD → stablecoin (no approval: burns caller's LP tokens).
   // Burn the NET 3USD the AMM actually paid out (gross - ledger_fee). Burning the
   // gross threeUsdEstimate would exceed the caller's balance and trip
   // remove_one_coin's InsufficientLiquidity check (or silently eat prior 3USD dust).
-  const r3 = await poolActor.remove_one_coin(threeUsdNetEstimate, to.threePoolIndex, stableMinOutput);
+  const r3 = await poolActor.remove_one_coin(r2.amount_out_net, to.threePoolIndex, stableMinOutput);
   if ('Err' in r3) throw new Error(`3pool redeem failed: ${JSON.stringify(r3.Err)}`);
   return r3.Ok;
 }

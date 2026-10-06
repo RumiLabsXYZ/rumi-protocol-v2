@@ -102,6 +102,80 @@ pub async fn transfer_from_user(
     }
 }
 
+#[derive(Debug)]
+pub enum IngressTransferError {
+    NoEffect(String),
+    TooOld,
+    Ambiguous(String),
+}
+
+pub fn invalidate_ledger_fee(ledger: Principal) {
+    LEDGER_FEES.with(|cache| {
+        cache.borrow_mut().remove(&ledger);
+    });
+}
+
+/// Submit an already-journaled ingress leg. The caller must persist the full
+/// `AmmIngressLeg` before entering this function and retain it until a block is
+/// confirmed; no fresh timestamp or memo is generated here.
+pub async fn transfer_from_user_exact(
+    leg: &crate::types::AmmIngressLeg,
+) -> Result<u64, IngressTransferError> {
+    let args = TransferFromArgs {
+        spender_subaccount: None,
+        from: Account {
+            owner: leg.from,
+            subaccount: None,
+        },
+        to: Account {
+            owner: ic_cdk::id(),
+            subaccount: Some(leg.to_subaccount),
+        },
+        amount: candid::Nat::from(leg.amount),
+        fee: None,
+        memo: Some(icrc_ledger_types::icrc1::transfer::Memo(
+            serde_bytes::ByteBuf::from(leg.memo.clone()),
+        )),
+        created_at_time: Some(leg.created_at_time),
+    };
+    let result: Result<(Result<candid::Nat, TransferFromError>,), _> =
+        ic_cdk::call(leg.ledger, "icrc2_transfer_from", (args,)).await;
+    match result {
+        Ok((Ok(block),)) => block.0.try_into().map_err(|_| {
+            IngressTransferError::Ambiguous("ledger block index exceeds u64".to_string())
+        }),
+        Ok((Err(TransferFromError::Duplicate { duplicate_of }),)) => {
+            duplicate_of.0.try_into().map_err(|_| {
+                IngressTransferError::Ambiguous("duplicate block index exceeds u64".to_string())
+            })
+        }
+        Ok((Err(TransferFromError::TooOld),)) => Err(IngressTransferError::TooOld),
+        Ok((Err(TransferFromError::BadFee { expected_fee }),)) => Err(
+            IngressTransferError::NoEffect(format!("BadFee expected {}", expected_fee)),
+        ),
+        Ok((Err(TransferFromError::BadBurn { min_burn_amount }),)) => Err(
+            IngressTransferError::NoEffect(format!("BadBurn minimum {}", min_burn_amount)),
+        ),
+        Ok((Err(TransferFromError::InsufficientFunds { balance }),)) => Err(
+            IngressTransferError::NoEffect(format!("InsufficientFunds balance {}", balance)),
+        ),
+        Ok((Err(TransferFromError::InsufficientAllowance { allowance }),)) => Err(
+            IngressTransferError::NoEffect(format!("InsufficientAllowance {}", allowance)),
+        ),
+        Ok((Err(TransferFromError::CreatedInFuture { ledger_time }),)) => Err(
+            IngressTransferError::NoEffect(format!("CreatedInFuture ledger time {}", ledger_time)),
+        ),
+        Ok((Err(error),)) => Err(IngressTransferError::Ambiguous(format!(
+            "icrc2_transfer_from error: {:?}",
+            error
+        ))),
+        Err((code, message)) => Err(IngressTransferError::Ambiguous(format!(
+            "icrc2_transfer_from call failed: {:?} - {}",
+            code, message
+        ))),
+    }
+}
+
 /// Transfer tokens FROM a pool's subaccount TO a user.
 ///
 /// The ICRC-1 ledger debits `sent + fee` from the source subaccount but credits

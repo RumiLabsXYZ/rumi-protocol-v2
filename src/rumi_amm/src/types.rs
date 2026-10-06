@@ -131,6 +131,113 @@ pub struct PendingClaim {
     pub created_at: u64,
 }
 
+/// Durable exact identity for an AMM ICRC-1 payout. The row is persisted before
+/// any ledger await and remains live until success is confirmed or an exact
+/// receipt is proved. Retrying must reuse every field in `TransferArg`.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AmmPayoutAttempt {
+    pub id: u64,
+    pub operation_id: u64,
+    pub pool_id: PoolId,
+    pub claimant: Principal,
+    pub ledger: Principal,
+    pub subaccount: [u8; 32],
+    pub gross_amount: u128,
+    pub send_amount: Option<u128>,
+    pub fee: Option<u128>,
+    pub memo: Vec<u8>,
+    pub created_at_time: u64,
+    #[serde(default)]
+    pub attempt_generation: u32,
+    #[serde(default)]
+    pub dispatch_count: u32,
+    pub phase: AmmPayoutPhase,
+    pub receipt_scan_cursor: u64,
+    pub receipt_scan_end: Option<u64>,
+    pub last_error: Option<String>,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AmmPayoutPhase {
+    Staged,
+    AwaitingFee,
+    Ready,
+    Submitted,
+    HeldUnknown,
+    HeldTooOld,
+    ReadyForReprice,
+    LegacyUnknown,
+}
+
+/// Durable caller request identity for methods that first pull user tokens.
+/// A request row is installed before the first ICRC-2 call, so reply loss or a
+/// callback trap cannot turn a retry into a second pull under a fresh identity.
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AmmIngressOperation {
+    pub id: u64,
+    pub caller: Principal,
+    pub request_id: [u8; 32],
+    pub pool_id: PoolId,
+    pub kind: AmmIngressKind,
+    pub legs: Vec<AmmIngressLeg>,
+    pub payout_ids: Vec<u64>,
+    pub confirmed_payout_ids: Vec<u64>,
+    pub computed_values: Vec<u128>,
+    pub phase: AmmIngressPhase,
+    pub result: Option<Vec<u8>>,
+    pub last_error: Option<String>,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AmmIngressKind {
+    Swap {
+        token_in: Principal,
+        amount_in: u128,
+        min_amount_out: u128,
+    },
+    AddLiquidity {
+        amount_a: u128,
+        amount_b: u128,
+        min_lp_shares: u128,
+    },
+    RemoveLiquidity {
+        lp_shares: u128,
+        min_amount_a: u128,
+        min_amount_b: u128,
+    },
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AmmIngressLeg {
+    pub ledger: Principal,
+    pub from: Principal,
+    pub to_subaccount: [u8; 32],
+    pub amount: u128,
+    pub memo: Vec<u8>,
+    pub created_at_time: u64,
+    #[serde(default)]
+    pub attempt_generation: u32,
+    /// Number of durable dispatch intents written before ICRC-2 awaits. A
+    /// later typed rejection cannot erase uncertainty from an earlier lost reply.
+    #[serde(default)]
+    pub dispatch_count: u32,
+    pub block_index: Option<u64>,
+    pub receipt_scan_cursor: u64,
+    pub receipt_scan_end: Option<u64>,
+}
+
+#[derive(CandidType, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AmmIngressPhase {
+    Prepared,
+    Pulling { leg_index: u32 },
+    Pulled,
+    Settling,
+    Complete,
+    HeldTooOld { leg_index: u32 },
+    HeldUnknown { leg_index: u32 },
+    Rejected { leg_index: u32 },
+}
+
 // ─── Swap Events ───
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
@@ -172,17 +279,48 @@ pub struct AmmLiquidityEvent {
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
 pub enum AmmAdminAction {
-    CreatePool { pool_id: PoolId, token_a: Principal, token_b: Principal, fee_bps: u16 },
-    SetFee { pool_id: PoolId, fee_bps: u16 },
-    SetProtocolFee { pool_id: PoolId, protocol_fee_bps: u16 },
-    WithdrawProtocolFees { pool_id: PoolId, amount_a: u128, amount_b: u128 },
-    PausePool { pool_id: PoolId },
-    UnpausePool { pool_id: PoolId },
-    SetPoolCreationOpen { open: bool },
-    SetMaintenanceMode { enabled: bool },
-    ClaimPending { claim_id: u64, claimant: Principal, amount: u128 },
-    ResolvePendingClaim { claim_id: u64 },
-    SetProtocolBackendPrincipal { backend: Principal },
+    CreatePool {
+        pool_id: PoolId,
+        token_a: Principal,
+        token_b: Principal,
+        fee_bps: u16,
+    },
+    SetFee {
+        pool_id: PoolId,
+        fee_bps: u16,
+    },
+    SetProtocolFee {
+        pool_id: PoolId,
+        protocol_fee_bps: u16,
+    },
+    WithdrawProtocolFees {
+        pool_id: PoolId,
+        amount_a: u128,
+        amount_b: u128,
+    },
+    PausePool {
+        pool_id: PoolId,
+    },
+    UnpausePool {
+        pool_id: PoolId,
+    },
+    SetPoolCreationOpen {
+        open: bool,
+    },
+    SetMaintenanceMode {
+        enabled: bool,
+    },
+    ClaimPending {
+        claim_id: u64,
+        claimant: Principal,
+        amount: u128,
+    },
+    ResolvePendingClaim {
+        claim_id: u64,
+    },
+    SetProtocolBackendPrincipal {
+        backend: Principal,
+    },
     AdminBurnSubaccount {
         ledger: Principal,
         subaccount_hex: String,
@@ -209,8 +347,8 @@ pub struct HolderEntry {
 
 #[derive(CandidType, Clone, Debug, Serialize, Deserialize)]
 pub struct HolderSnapshot {
-    pub token: String,           // "icUSD" or "3USD"
-    pub timestamp: u64,          // nanoseconds
+    pub token: String,  // "icUSD" or "3USD"
+    pub timestamp: u64, // nanoseconds
     pub holder_count: u64,
     pub total_supply: u128,
     pub top_holders: Vec<HolderEntry>, // top 50

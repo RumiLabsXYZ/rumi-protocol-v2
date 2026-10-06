@@ -1,11 +1,11 @@
+use candid::{CandidType, Decode, Encode, Principal};
+use ic_canister_log::log;
+use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use candid::{CandidType, Principal, Decode, Encode};
-use ic_canister_log::log;
-use serde::{Serialize, Deserialize};
 
-use crate::types::*;
 use crate::logs::INFO;
+use crate::types::*;
 
 // ─── Event log caps ───
 // Prevents unbounded heap growth that could brick the canister by causing
@@ -17,6 +17,10 @@ pub const MAX_LIQUIDITY_EVENTS: usize = 50_000;
 pub const MAX_ADMIN_EVENTS: usize = 10_000;
 pub const MAX_HOLDER_SNAPSHOTS: usize = 1_000; // ~500 days at 2/day
 pub const MAX_PENDING_CLAIMS: usize = 1_000;
+/// Permanent per-principal high-water rows prevent old V2 request IDs from
+/// becoming replayable after successful settlement. New principals fail closed
+/// when this bounded replay-defense table is full.
+pub const MAX_INGRESS_OPERATIONS: usize = 10_000;
 pub const MAX_REWARD_EVENTS: usize = 50_000;
 pub const MAX_CLAIM_EVENTS: usize = 50_000;
 /// Historical compatibility constant. Donation receipt identities are no
@@ -47,6 +51,19 @@ pub struct AmmState {
     pub pending_claims: Vec<PendingClaim>,
     #[serde(default)]
     pub next_claim_id: u64,
+    /// Exact, lossless outbound obligations. Unlike legacy `pending_claims`,
+    /// these contain the original ledger transfer identity and are never
+    /// evicted to make room for a new payout.
+    #[serde(default)]
+    pub pending_payouts: Vec<AmmPayoutAttempt>,
+    #[serde(default)]
+    pub next_payout_id: u64,
+    /// Active/completed V2 requests are retained by caller until superseded by
+    /// a strictly newer request id, preventing a lost reply from pulling twice.
+    #[serde(default)]
+    pub ingress_operations: Vec<AmmIngressOperation>,
+    #[serde(default)]
+    pub next_operation_id: u64,
     #[serde(default)]
     pub swap_events: Vec<AmmSwapEvent>,
     #[serde(default)]
@@ -87,6 +104,10 @@ impl Default for AmmState {
             maintenance_mode: false,
             pending_claims: Vec::new(),
             next_claim_id: 0,
+            pending_payouts: Vec::new(),
+            next_payout_id: 0,
+            ingress_operations: Vec::new(),
+            next_operation_id: 0,
             swap_events: Vec::new(),
             next_swap_event_id: 0,
             liquidity_events: Vec::new(),
@@ -109,7 +130,16 @@ impl AmmState {
         self.admin = args.admin;
     }
 
-    pub fn record_swap_event(&mut self, caller: Principal, pool_id: PoolId, token_in: Principal, amount_in: u128, token_out: Principal, amount_out: u128, fee: u128) {
+    pub fn record_swap_event(
+        &mut self,
+        caller: Principal,
+        pool_id: PoolId,
+        token_in: Principal,
+        amount_in: u128,
+        token_out: Principal,
+        amount_out: u128,
+        fee: u128,
+    ) {
         if self.swap_events.len() >= MAX_SWAP_EVENTS {
             self.swap_events.remove(0);
         }
@@ -193,12 +223,7 @@ impl AmmState {
         self.next_reward_event_id += 1;
     }
 
-    pub fn record_claim_event(
-        &mut self,
-        pool_id: PoolId,
-        claimant: Principal,
-        amount: u128,
-    ) {
+    pub fn record_claim_event(&mut self, pool_id: PoolId, claimant: Principal, amount: u128) {
         if self.claim_events.len() >= MAX_CLAIM_EVENTS {
             self.claim_events.remove(0);
         }
@@ -360,6 +385,10 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
             maintenance_mode: v5.maintenance_mode,
             pending_claims: v5.pending_claims,
             next_claim_id: v5.next_claim_id,
+            pending_payouts: Vec::new(),
+            next_payout_id: 0,
+            ingress_operations: Vec::new(),
+            next_operation_id: 0,
             swap_events: v5.swap_events,
             next_swap_event_id: v5.next_swap_event_id,
             liquidity_events: v5.liquidity_events,
@@ -383,6 +412,10 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
             maintenance_mode: v4.maintenance_mode,
             pending_claims: v4.pending_claims,
             next_claim_id: v4.next_claim_id,
+            pending_payouts: Vec::new(),
+            next_payout_id: 0,
+            ingress_operations: Vec::new(),
+            next_operation_id: 0,
             swap_events: Vec::new(),
             next_swap_event_id: 0,
             liquidity_events: Vec::new(),
@@ -406,6 +439,10 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
             maintenance_mode: v3.maintenance_mode,
             pending_claims: Vec::new(),
             next_claim_id: 0,
+            pending_payouts: Vec::new(),
+            next_payout_id: 0,
+            ingress_operations: Vec::new(),
+            next_operation_id: 0,
             swap_events: Vec::new(),
             next_swap_event_id: 0,
             liquidity_events: Vec::new(),
@@ -429,6 +466,10 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
             maintenance_mode: false,
             pending_claims: Vec::new(),
             next_claim_id: 0,
+            pending_payouts: Vec::new(),
+            next_payout_id: 0,
+            ingress_operations: Vec::new(),
+            next_operation_id: 0,
             swap_events: Vec::new(),
             next_swap_event_id: 0,
             liquidity_events: Vec::new(),
@@ -452,6 +493,10 @@ pub fn try_decode_state(bytes: &[u8]) -> Option<AmmState> {
             maintenance_mode: false,
             pending_claims: Vec::new(),
             next_claim_id: 0,
+            pending_payouts: Vec::new(),
+            next_payout_id: 0,
+            ingress_operations: Vec::new(),
+            next_operation_id: 0,
             swap_events: Vec::new(),
             next_swap_event_id: 0,
             liquidity_events: Vec::new(),
@@ -521,4 +566,46 @@ pub fn load_from_stable_memory() {
         "AMM post_upgrade: stable state did not decode under any known schema version \
          (current, V5, V4, V3, V2, V1); refusing to wipe live pools — see CRITICAL log",
     );
+}
+
+#[cfg(test)]
+mod payout_state_migration_tests {
+    use super::*;
+
+    #[test]
+    fn pre_v6_v5_snapshot_migrates_with_empty_journals_and_preserved_state() {
+        let admin = Principal::self_authenticating(b"v5 admin");
+        let backend = Principal::self_authenticating(b"v5 backend");
+        let old = AmmStateV5 {
+            admin,
+            pools: BTreeMap::new(),
+            pool_creation_open: true,
+            maintenance_mode: false,
+            pending_claims: Vec::new(),
+            next_claim_id: 17,
+            swap_events: Vec::new(),
+            next_swap_event_id: 23,
+            liquidity_events: Vec::new(),
+            next_liquidity_event_id: 29,
+            admin_events: Vec::new(),
+            next_admin_event_id: 31,
+            holder_snapshots: Vec::new(),
+            reward_events: Vec::new(),
+            next_reward_event_id: 37,
+            claim_events: Vec::new(),
+            next_claim_event_id: 41,
+            protocol_backend_principal: Some(backend),
+            tvl_samples: Vec::new(),
+        };
+        let bytes = Encode!(&old).expect("encode exact pre-candidate V5 snapshot");
+        let migrated = try_decode_state(&bytes).expect("V5 state remains decodable");
+        assert_eq!(migrated.admin, admin);
+        assert_eq!(migrated.protocol_backend_principal, Some(backend));
+        assert_eq!(migrated.next_claim_id, 17);
+        assert_eq!(migrated.next_swap_event_id, 23);
+        assert!(migrated.pending_payouts.is_empty());
+        assert_eq!(migrated.next_payout_id, 0);
+        assert!(migrated.ingress_operations.is_empty());
+        assert_eq!(migrated.next_operation_id, 0);
+    }
 }

@@ -30,9 +30,50 @@ export interface SwapResult {
   fee: bigint;
 }
 
+export interface SwapPayoutResult extends SwapResult {
+  /** Exact output credited after the AMM's pinned ICRC-1 payout fee. */
+  amount_out_net: bigint;
+}
+
 // ── Analytics window variants (mirrors Candid AmmStatsWindow) ──
 
 export type AmmStatsWindow = 'Hour' | 'Day' | 'Week' | 'Month' | 'All';
+
+type AmmIntent = { id: Uint8Array; fingerprint: string };
+
+function ammIntentFingerprint(kind: string, args: unknown[]): string {
+  return JSON.stringify([kind, ...args.map(value => typeof value === 'bigint' ? value.toString() : value)]);
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function hexToBytes(hex: string): Uint8Array | null {
+  if (!/^[0-9a-f]{64}$/i.test(hex)) return null;
+  return Uint8Array.from(hex.match(/.{2}/g)!, byte => parseInt(byte, 16));
+}
+
+function onChainFingerprint(operation: any): string | null {
+  if (!operation?.kind || !operation.pool_id) return null;
+  if ('Swap' in operation.kind) {
+    const x = operation.kind.Swap;
+    return ammIntentFingerprint('swap', [operation.pool_id, x.token_in.toText(), BigInt(x.amount_in), BigInt(x.min_amount_out)]);
+  }
+  if ('AddLiquidity' in operation.kind) {
+    const x = operation.kind.AddLiquidity;
+    return ammIntentFingerprint('add', [operation.pool_id, BigInt(x.amount_a), BigInt(x.amount_b), BigInt(x.min_lp_shares)]);
+  }
+  if ('RemoveLiquidity' in operation.kind) {
+    const x = operation.kind.RemoveLiquidity;
+    return ammIntentFingerprint('remove', [operation.pool_id, BigInt(x.lp_shares), BigInt(x.min_amount_a), BigInt(x.min_amount_b)]);
+  }
+  return null;
+}
+
+function unwrapCandidOpt<T>(value: any): T | null {
+  return Array.isArray(value) ? ((value[0] as T | undefined) ?? null) : ((value as T | undefined) ?? null);
+}
 
 function windowToVariant(window: AmmStatsWindow): Record<string, null> {
   return { [window]: null };
@@ -189,6 +230,91 @@ export function formatTokenAmount(amount: bigint, decimals: number): string {
 const AMM_CANISTER_ID = CANISTER_IDS.RUMI_AMM;
 
 class AmmService {
+  async swapWithPreapprovedActor(
+    actor: any,
+    principal: Principal,
+    poolId: string,
+    tokenIn: Principal,
+    amountIn: bigint,
+    minAmountOut: bigint,
+  ): Promise<SwapPayoutResult> {
+    const fingerprint = ammIntentFingerprint('swap', [poolId, tokenIn.toText(), amountIn, minAmountOut]);
+    const requestId = await this.resolveIntentId(actor, principal, fingerprint);
+    const result = await actor.swap_v2(requestId, poolId, tokenIn, amountIn, minAmountOut);
+    if ('Err' in result) {
+      await this.clearTerminalIntent(actor, principal, fingerprint);
+      throw new Error(this.formatError(result.Err));
+    }
+    const operation = unwrapCandidOpt<any>(await actor.get_my_amm_operation());
+    const fee = operation?.computed_values?.[3] !== undefined ? BigInt(operation.computed_values[3]) : 0n;
+    const payoutResult = { ...result.Ok, amount_out_net: result.Ok.amount_out > fee ? result.Ok.amount_out - fee : 0n };
+    this.clearIntentId(principal, fingerprint);
+    return payoutResult;
+  }
+
+  private async resolveIntentId(actor: any, principal: Principal, fingerprint: string): Promise<Uint8Array> {
+    const storageKey = `rumi-amm-v2:${principal.toText()}`;
+    let cached: { fingerprint: string; id: string } | null = null;
+    try {
+      const raw = localStorage.getItem(storageKey);
+      if (raw) cached = JSON.parse(raw);
+    } catch {
+      throw new Error('AMM retry identity storage is unavailable; refusing a request that could not be safely resumed');
+    }
+    const pending = unwrapCandidOpt<any>(await actor.get_my_amm_operation());
+    const pendingId = pending ? Uint8Array.from(pending.request_id) : null;
+    const complete = pending?.phase && 'Complete' in pending.phase;
+
+    if (pending && !complete) {
+      const exact = onChainFingerprint(pending);
+      if (exact !== fingerprint) {
+        throw new Error('A prior AMM operation is unresolved. Resume it with its original arguments before starting another operation.');
+      }
+      const id = pendingId!;
+      try { localStorage.setItem(storageKey, JSON.stringify({ fingerprint, id: bytesToHex(id) })); }
+      catch { throw new Error('Could not persist the AMM retry identity; refusing to proceed'); }
+      return id;
+    }
+
+    if (cached?.fingerprint === fingerprint) {
+      const id = hexToBytes(cached.id);
+      if (id && pendingId && bytesToHex(id) === bytesToHex(pendingId) && onChainFingerprint(pending) === fingerprint) return id;
+    }
+
+    let previous = 0n;
+    if (pendingId?.length === 32) {
+      for (const byte of pendingId.slice(0, 8)) previous = (previous << 8n) | BigInt(byte);
+    }
+    if (previous >= 0xffffffffffffffffn) throw new Error('AMM request identity space is exhausted for this wallet');
+    const id = new Uint8Array(32);
+    let sequence = previous + 1n;
+    for (let i = 7; i >= 0; i--) { id[i] = Number(sequence & 0xffn); sequence >>= 8n; }
+    crypto.getRandomValues(id.subarray(8));
+    try { localStorage.setItem(storageKey, JSON.stringify({ fingerprint, id: bytesToHex(id) })); }
+    catch { throw new Error('Could not persist the AMM retry identity; refusing to proceed'); }
+    return id;
+  }
+
+  private clearIntentId(principal: Principal, fingerprint: string): void {
+    const key = `rumi-amm-v2:${principal.toText()}`;
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw && JSON.parse(raw).fingerprint === fingerprint) localStorage.removeItem(key);
+    } catch { /* Keep the durable request ID if browser storage is unreadable. */ }
+  }
+
+  private async clearTerminalIntent(actor: any, principal: Principal, fingerprint: string): Promise<void> {
+    try {
+      const op = unwrapCandidOpt<any>(await actor.get_my_amm_operation());
+      if (op?.phase && 'Complete' in op.phase) {
+        const error = op.last_error;
+        if ((Array.isArray(error) && error.length > 0) || (typeof error === 'string' && error.length > 0)) {
+          this.clearIntentId(principal, fingerprint);
+        }
+      }
+    } catch { /* retain the identity if terminal state cannot be confirmed */ }
+  }
+
   private _anonAgent: HttpAgent | null = null;
 
   private async getQueryActor(): Promise<any> {
@@ -205,6 +331,48 @@ class AmmService {
       agent: this._anonAgent,
       canisterId: AMM_CANISTER_ID,
     });
+  }
+
+  async getMyAmmOperation(): Promise<any | null> {
+    const wallet = get(walletStore);
+    if (!wallet.isConnected || !wallet.principal) throw new Error('Wallet not connected');
+    const actor = await walletStore.getActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm) as any;
+    const operation = await actor.get_my_amm_operation();
+    return unwrapCandidOpt<any>(operation);
+  }
+
+  async reconcileMyAmmIngress(requestId: Uint8Array): Promise<boolean> {
+    const wallet = get(walletStore);
+    if (!wallet.isConnected || !wallet.principal) throw new Error('Wallet not connected');
+    const actor = await walletStore.getActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm) as any;
+    const result = await actor.reconcile_amm_ingress(requestId);
+    if ('Err' in result) throw new Error(this.formatError(result.Err));
+    return result.Ok;
+  }
+
+  async getMyPendingAmmPayouts(): Promise<any[]> {
+    const wallet = get(walletStore);
+    if (!wallet.isConnected || !wallet.principal) throw new Error('Wallet not connected');
+    const actor = await walletStore.getActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm) as any;
+    return await actor.get_pending_amm_payouts();
+  }
+
+  async retryAmmPayout(payoutId: bigint): Promise<bigint> {
+    const wallet = get(walletStore);
+    if (!wallet.isConnected || !wallet.principal) throw new Error('Wallet not connected');
+    const actor = await walletStore.getActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm) as any;
+    const result = await actor.retry_amm_payout(payoutId);
+    if ('Err' in result) throw new Error(this.formatError(result.Err));
+    return result.Ok;
+  }
+
+  async reconcileAmmPayout(payoutId: bigint): Promise<boolean> {
+    const wallet = get(walletStore);
+    if (!wallet.isConnected || !wallet.principal) throw new Error('Wallet not connected');
+    const actor = await walletStore.getActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm) as any;
+    const result = await actor.reconcile_amm_payout(payoutId);
+    if ('Err' in result) throw new Error(this.formatError(result.Err));
+    return result.Ok;
   }
 
   // ── Queries (anonymous) ──
@@ -329,6 +497,7 @@ class AmmService {
   ): Promise<SwapResult> {
     const wallet = get(walletStore);
     if (!wallet.isConnected) throw new Error('Wallet not connected');
+    if (!wallet.principal) throw new Error('Connected wallet principal is unavailable');
 
     const oisyDetected = isOisyWallet();
     const approveAmt = await approvalAmount(amountIn, inputToken);
@@ -351,8 +520,14 @@ class AmmService {
       }
 
       // 2) AMM swap (second Oisy consent screen).
-      const swapResult = await ammActor.swap(poolId, tokenIn, amountIn, minAmountOut);
-      if ('Err' in swapResult) throw new Error(this.formatError(swapResult.Err));
+      const fingerprint = ammIntentFingerprint('swap', [poolId, tokenIn.toText(), amountIn, minAmountOut]);
+      const requestId = await this.resolveIntentId(ammActor, wallet.principal, fingerprint);
+      const swapResult = await ammActor.swap_v2(requestId, poolId, tokenIn, amountIn, minAmountOut);
+      if ('Err' in swapResult) {
+        await this.clearTerminalIntent(ammActor, wallet.principal, fingerprint);
+        throw new Error(this.formatError(swapResult.Err));
+      }
+      this.clearIntentId(wallet.principal, fingerprint);
       return swapResult.Ok;
     } else {
       const ledgerActor = await walletStore.getActor(inputToken.ledgerId, CONFIG.icusd_ledgerIDL) as any;
@@ -370,8 +545,14 @@ class AmmService {
       await new Promise(r => setTimeout(r, 2000));
 
       const ammActor = await walletStore.getActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm) as any;
-      const result = await ammActor.swap(poolId, tokenIn, amountIn, minAmountOut);
-      if ('Err' in result) throw new Error(this.formatError(result.Err));
+      const fingerprint = ammIntentFingerprint('swap', [poolId, tokenIn.toText(), amountIn, minAmountOut]);
+      const requestId = await this.resolveIntentId(ammActor, wallet.principal, fingerprint);
+      const result = await ammActor.swap_v2(requestId, poolId, tokenIn, amountIn, minAmountOut);
+      if ('Err' in result) {
+        await this.clearTerminalIntent(ammActor, wallet.principal, fingerprint);
+        throw new Error(this.formatError(result.Err));
+      }
+      this.clearIntentId(wallet.principal, fingerprint);
       return result.Ok;
     }
   }
@@ -386,6 +567,7 @@ class AmmService {
   ): Promise<bigint> {
     const wallet = get(walletStore);
     if (!wallet.isConnected) throw new Error('Wallet not connected');
+    if (!wallet.principal) throw new Error('Connected wallet principal is unavailable');
 
     const oisyDetected = isOisyWallet();
 
@@ -431,8 +613,14 @@ class AmmService {
 
       // 3) add_liquidity (final consent screen).
       const ammActor = createOisyActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm, signerAgent);
-      const addResult = await ammActor.add_liquidity(poolId, amountA, amountB, minLpShares);
-      if ('Err' in addResult) throw new Error(this.formatError(addResult.Err));
+      const fingerprint = ammIntentFingerprint('add', [poolId, amountA, amountB, minLpShares]);
+      const requestId = await this.resolveIntentId(ammActor, wallet.principal, fingerprint);
+      const addResult = await ammActor.add_liquidity_v2(requestId, poolId, amountA, amountB, minLpShares);
+      if ('Err' in addResult) {
+        await this.clearTerminalIntent(ammActor, wallet.principal, fingerprint);
+        throw new Error(this.formatError(addResult.Err));
+      }
+      this.clearIntentId(wallet.principal, fingerprint);
       return addResult.Ok;
     } else {
       const spender = { owner: Principal.fromText(AMM_CANISTER_ID), subaccount: [] };
@@ -460,8 +648,14 @@ class AmmService {
       }
 
       const ammActor = await walletStore.getActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm) as any;
-      const result = await ammActor.add_liquidity(poolId, amountA, amountB, minLpShares);
-      if ('Err' in result) throw new Error(this.formatError(result.Err));
+      const fingerprint = ammIntentFingerprint('add', [poolId, amountA, amountB, minLpShares]);
+      const requestId = await this.resolveIntentId(ammActor, wallet.principal, fingerprint);
+      const result = await ammActor.add_liquidity_v2(requestId, poolId, amountA, amountB, minLpShares);
+      if ('Err' in result) {
+        await this.clearTerminalIntent(ammActor, wallet.principal, fingerprint);
+        throw new Error(this.formatError(result.Err));
+      }
+      this.clearIntentId(wallet.principal, fingerprint);
       return result.Ok;
     }
   }
@@ -474,10 +668,17 @@ class AmmService {
   ): Promise<{ amountA: bigint; amountB: bigint }> {
     const wallet = get(walletStore);
     if (!wallet.isConnected) throw new Error('Wallet not connected');
+    if (!wallet.principal) throw new Error('Connected wallet principal is unavailable');
 
     const ammActor = await walletStore.getActor(AMM_CANISTER_ID, canisterIDLs.rumi_amm) as any;
-    const result = await ammActor.remove_liquidity(poolId, lpShares, minAmountA, minAmountB);
-    if ('Err' in result) throw new Error(this.formatError(result.Err));
+    const fingerprint = ammIntentFingerprint('remove', [poolId, lpShares, minAmountA, minAmountB]);
+    const requestId = await this.resolveIntentId(ammActor, wallet.principal, fingerprint);
+    const result = await ammActor.remove_liquidity_v2(requestId, poolId, lpShares, minAmountA, minAmountB);
+    if ('Err' in result) {
+      await this.clearTerminalIntent(ammActor, wallet.principal, fingerprint);
+      throw new Error(this.formatError(result.Err));
+    }
+    this.clearIntentId(wallet.principal, fingerprint);
     const [amountA, amountB] = result.Ok;
     return { amountA, amountB };
   }
