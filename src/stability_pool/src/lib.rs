@@ -86,6 +86,21 @@ fn pre_upgrade() {
 #[post_upgrade]
 fn post_upgrade(_args: StabilityPoolInitArgs) {
     state::load_from_stable_memory();
+    let (indexed, retained) = mutate_state(|s| {
+        s.initialize_unallocated_interest_mint_index();
+        (
+            s.unallocated_interest_mint_index.is_some(),
+            s.unallocated_interest_mint_index.as_ref().map(BTreeMap::len).unwrap_or(0),
+        )
+    });
+    if !indexed {
+        log!(
+            INFO,
+            "CL-10 migration: legacy unallocated-interest receipt history exceeds the bounded index; new notifications will remain pending for reconciliation"
+        );
+    } else {
+        log!(INFO, "CL-10 migration: indexed {} retained unallocated-interest receipts", retained);
+    }
     log!(
         INFO,
         "Stability Pool post-upgrade: state restored. {} depositors, {} liquidations",
@@ -570,60 +585,29 @@ pub fn get_chain_absorb_auto_status() -> ChainAbsorbAutoStatus {
 
 // ─── Interest Revenue ───
 
-/// Receive interest revenue from the protocol backend and distribute pro-rata to depositors.
-/// Only callable by the protocol canister.
+/// Legacy notification entry point retained for Candid compatibility.
 ///
-/// `collateral_type` identifies which collateral's vault generated the interest.
-/// Depositors who opted out of that collateral are excluded from the distribution.
-/// The parameter is optional for backward compatibility with older backend versions.
+/// It cannot safely credit interest because it has no source mint block for
+/// replay protection. The backend must use `receive_interest_revenue_v2`.
 #[update]
 pub fn receive_interest_revenue(
-    token_ledger: Principal,
-    amount: u64,
-    collateral_type: Option<Principal>,
+    _token_ledger: Principal,
+    _amount: u64,
+    _collateral_type: Option<Principal>,
 ) -> Result<(), StabilityPoolError> {
     let caller = ic_cdk::api::caller();
     let expected = read_state(|s| s.protocol_canister_id);
     if caller != expected {
         return Err(StabilityPoolError::Unauthorized);
     }
-    ensure_pool_balance_mutation_allowed()?;
-
-    if read_state(|s| s.configuration.emergency_pause) {
-        return Err(StabilityPoolError::EmergencyPaused);
-    }
-
-    if !read_state(|s| s.stablecoin_registry.contains_key(&token_ledger)) {
-        return Err(StabilityPoolError::TokenNotAccepted {
-            ledger: token_ledger,
-        });
-    }
-
-    mutate_state(|s| {
-        s.distribute_interest_revenue(token_ledger, amount, collateral_type);
-        s.push_event(
-            caller,
-            PoolEventType::InterestReceived {
-                token_ledger,
-                amount,
-            },
-        );
-    });
-
-    log!(
-        INFO,
-        "Distributed {} interest for token {} (collateral: {:?}) from backend",
-        amount,
-        token_ledger,
-        collateral_type
-    );
-    Ok(())
+    Err(StabilityPoolError::SystemBusy)
 }
 
 /// V2 interest notification carries the backend mint block, which supplies a
 /// durable source receipt for the no-eligible-recipient treasury route. The
-/// legacy V1 method above remains available during rollout but deliberately
-/// retains its original distribution-only behavior because it lacks that key.
+/// legacy V1 method above remains signature-compatible but fails closed because
+/// it lacks that key. The backend must use V2 before interest notifications
+/// can be acknowledged by this pool.
 #[update]
 pub async fn receive_interest_revenue_v2(
     token_ledger: Principal,
@@ -646,18 +630,34 @@ pub async fn receive_interest_revenue_v2(
         });
     }
 
+    match read_state(|s| s.interest_mint_receipt_status(source_mint_block)) {
+        state::InterestMintReceiptStatus::PendingForward(batch_id) => {
+            return process_unallocated_interest_forward(batch_id).await;
+        }
+        state::InterestMintReceiptStatus::Duplicate => return Ok(()),
+        state::InterestMintReceiptStatus::OutsideReplayWindow => {
+            // Keep the backend's durable notification pending. A stale receipt
+            // must never be acknowledged as a new distribution.
+            return Err(StabilityPoolError::SystemBusy);
+        }
+        state::InterestMintReceiptStatus::New => {}
+    }
+
     if read_state(|s| s.has_eligible_interest_recipient(collateral_type.as_ref())) {
-        mutate_state(|s| {
-            s.distribute_interest_revenue(token_ledger, amount, collateral_type);
-            s.push_event(
-                caller,
-                PoolEventType::InterestReceived {
-                    token_ledger,
-                    amount,
-                },
-            );
-        });
-        return Ok(());
+        return match mutate_state(|s| {
+            match s.record_interest_mint_receipt(source_mint_block) {
+                state::InterestMintReceiptStatus::New => {
+                    s.distribute_interest_revenue(token_ledger, amount, collateral_type);
+                    s.push_event(caller, PoolEventType::InterestReceived { token_ledger, amount });
+                    Ok(())
+                }
+                state::InterestMintReceiptStatus::Duplicate => Ok(()),
+                _ => Err(StabilityPoolError::SystemBusy),
+            }
+        }) {
+            Ok(()) => Ok(()),
+            Err(error) => Err(error),
+        };
     }
 
     let batch_id = mutate_state(|s| {

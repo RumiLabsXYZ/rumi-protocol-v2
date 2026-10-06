@@ -1088,6 +1088,14 @@ export const idlFactory = ({ IDL }) => {
     'chain_id' : IDL.Nat32,
     'oldest_reference_ns' : IDL.Opt(IDL.Nat64),
   });
+  const PendingStabilityPoolInterestNotification = IDL.Record({
+    'source_mint_block' : IDL.Nat64,
+    'receipt_protocol_version' : IDL.Opt(IDL.Nat8),
+    'amount_e8s' : IDL.Nat64,
+    'pool_principal' : IDL.Principal,
+    'collateral_type' : IDL.Principal,
+    'token_ledger' : IDL.Principal,
+  });
   const ProtocolConfig = IDL.Record({
     'global_rate_curve' : IDL.Vec(IDL.Tuple(IDL.Float64, IDL.Float64)),
     'bot_budget_remaining_e8s' : IDL.Nat64,
@@ -1852,6 +1860,16 @@ export const idlFactory = ({ IDL }) => {
     'get_pending_stability_pool_interest_notification_count' : IDL.Func(
         [],
         [IDL.Nat64],
+        ['query'],
+      ),
+    'get_pending_stability_pool_interest_notifications' : IDL.Func(
+        [IDL.Opt(IDL.Nat64), IDL.Nat64],
+        [
+          IDL.Variant({
+            'Ok' : IDL.Vec(PendingStabilityPoolInterestNotification),
+            'Err' : ProtocolError,
+          }),
+        ],
         ['query'],
       ),
     'get_price_pusher_allowed' : IDL.Func(

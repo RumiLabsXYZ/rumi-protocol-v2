@@ -11792,6 +11792,62 @@ fn get_pending_stability_pool_interest_notification_count() -> u64 {
     read_state(|s| s.pending_stability_pool_interest_notifications.len() as u64)
 }
 
+fn can_inspect_held_interest_notifications(caller: Principal, developer: Principal) -> bool {
+    caller != Principal::anonymous()
+        && developer != Principal::anonymous()
+        && caller == developer
+}
+
+/// Page durable pool-interest notifications so operators can inspect legacy
+/// rows held across the receipt-protocol upgrade. Rows with no
+/// `receipt_protocol_version` are never auto-delivered.
+#[candid_method(query)]
+#[query]
+fn get_pending_stability_pool_interest_notifications(
+    start_after_mint_block: Option<u64>,
+    limit: u64,
+) -> Result<Vec<rumi_protocol_backend::state::PendingStabilityPoolInterestNotification>, ProtocolError> {
+    let caller = ic_cdk::api::caller();
+    if !read_state(|s| can_inspect_held_interest_notifications(caller, s.developer_principal)) {
+        return Err(ProtocolError::GenericError(
+            "Only the developer principal can inspect held interest notifications".into(),
+        ));
+    }
+    use std::ops::Bound::{Excluded, Included, Unbounded};
+    let lower = start_after_mint_block.map_or(Included(0), Excluded);
+    Ok(read_state(|s| {
+        s.pending_stability_pool_interest_notifications
+            .range((lower, Unbounded))
+            .take(limit.min(100) as usize)
+            .map(|(_, row)| row.clone())
+            .collect()
+    }))
+}
+
+#[cfg(test)]
+mod pending_stability_pool_interest_notification_query_tests {
+    use super::can_inspect_held_interest_notifications;
+    use candid::Principal;
+
+    #[test]
+    fn held_interest_rows_are_not_visible_to_anonymous_callers_or_developers() {
+        let developer = Principal::from_slice(&[1]);
+        assert!(can_inspect_held_interest_notifications(developer, developer));
+        assert!(!can_inspect_held_interest_notifications(
+            Principal::anonymous(),
+            developer,
+        ));
+        assert!(!can_inspect_held_interest_notifications(
+            Principal::anonymous(),
+            Principal::anonymous(),
+        ));
+        assert!(!can_inspect_held_interest_notifications(
+            Principal::from_slice(&[2]),
+            developer,
+        ));
+    }
+}
+
 /// Get the effective recovery target CR (threshold × multiplier)
 #[candid_method(query)]
 #[query]
