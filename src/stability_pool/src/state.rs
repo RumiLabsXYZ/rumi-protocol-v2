@@ -146,6 +146,9 @@ pub struct StabilityPoolState {
     pub pending_refunds: Option<BTreeMap<u64, PendingRefund>>,
     #[serde(default)]
     pub next_pending_refund_id: Option<u64>,
+    /// Monotonic ICRC-2 `created_at_time` allocator for deposit pulls.
+    #[serde(default)]
+    pub last_deposit_transfer_created_at: Option<u64>,
 }
 
 impl Default for StabilityPoolState {
@@ -187,6 +190,7 @@ impl Default for StabilityPoolState {
             next_event_id: Some(0),
             pending_refunds: Some(BTreeMap::new()),
             next_pending_refund_id: Some(0),
+            last_deposit_transfer_created_at: None,
         }
     }
 }
@@ -206,6 +210,16 @@ pub const MAX_COMPLETED_CFX_CLAIM_PAYOUT_RECOVERIES: usize = 10_000;
 pub const MAX_XRP_SP_PAYOUT_ALLOCATIONS: usize = 500;
 
 impl StabilityPoolState {
+    /// Reserve a unique timestamp for a new ICRC-2 deposit pull.
+    pub fn reserve_deposit_transfer_timestamp(&mut self, now_ns: u64) -> Result<u64, ()> {
+        let timestamp = match self.last_deposit_transfer_created_at {
+            Some(last) if now_ns <= last => last.checked_add(1).ok_or(())?,
+            _ => now_ns,
+        };
+        self.last_deposit_transfer_created_at = Some(timestamp);
+        Ok(timestamp)
+    }
+
     pub fn initialize(&mut self, args: StabilityPoolInitArgs) {
         self.protocol_canister_id = args.protocol_canister_id;
         self.configuration.authorized_admins = args.authorized_admins;
@@ -2953,6 +2967,7 @@ impl From<StabilityPoolStateV1> for StabilityPoolState {
             next_event_id: v1.next_event_id,
             pending_refunds: Some(BTreeMap::new()),
             next_pending_refund_id: Some(0),
+            last_deposit_transfer_created_at: None,
         }
     }
 }
@@ -3037,6 +3052,18 @@ pub fn load_from_stable_memory() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deposit_transfer_timestamps_are_unique_within_a_round_and_persisted() {
+        let mut state = StabilityPoolState::default();
+        assert_eq!(state.reserve_deposit_transfer_timestamp(10).unwrap(), 10);
+        assert_eq!(state.reserve_deposit_transfer_timestamp(10).unwrap(), 11);
+        assert_eq!(state.reserve_deposit_transfer_timestamp(9).unwrap(), 12);
+        assert_eq!(state.last_deposit_transfer_created_at, Some(12));
+        assert_eq!(state.reserve_deposit_transfer_timestamp(13).unwrap(), 13);
+        state.last_deposit_transfer_created_at = Some(u64::MAX);
+        assert!(state.reserve_deposit_transfer_timestamp(u64::MAX).is_err());
+    }
     use std::collections::BTreeMap;
 
     // Deterministic test principals

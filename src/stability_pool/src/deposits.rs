@@ -301,6 +301,11 @@ pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), Stabili
         caller
     );
 
+    // Give each fresh pull a durable unique ICRC-2 dedup identity.
+    let transfer_created_at_time =
+        mutate_state(|s| s.reserve_deposit_transfer_timestamp(ic_cdk::api::time()))
+            .map_err(|_| StabilityPoolError::SystemBusy)?;
+
     // ICRC-2 transfer_from: pull tokens from user to pool canister
     let transfer_args = TransferFromArgs {
         from: Account {
@@ -314,7 +319,7 @@ pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), Stabili
         amount: amount.into(),
         fee: None,
         memo: None,
-        created_at_time: Some(ic_cdk::api::time()),
+        created_at_time: Some(transfer_created_at_time),
         spender_subaccount: None,
     };
 
@@ -337,26 +342,17 @@ pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), Stabili
             log!(INFO, "Deposit recorded for {}", caller);
             Ok(())
         }
-        // Audit Wave-3 (ICRC-003): Duplicate from the ledger means the
-        // previous transfer landed; the tokens are already in the pool.
-        // Credit the deposit and treat as success.
+        // This fresh attempt has a unique timestamp; Duplicate does not prove
+        // this request's pull landed and cannot authorize credit.
         Ok((Err(TransferFromError::Duplicate { duplicate_of }),)) => {
             log!(
                 INFO,
-                "Deposit transfer Duplicate (block {}); previous attempt landed, crediting deposit",
+                "Deposit transfer Duplicate (block {}); fresh attempt not credited",
                 duplicate_of
             );
-            if let Err(error) = record_deposit_credit_after_async(caller, token_ledger, amount) {
-                refund_user(
-                    caller,
-                    token_ledger,
-                    amount,
-                    "deposit: pool balance mutation blocked after duplicate transfer",
-                )
-                .await;
-                return Err(error);
-            }
-            Ok(())
+            Err(StabilityPoolError::LedgerTransferFailed {
+                reason: format!("Duplicate {{ duplicate_of: {} }}", duplicate_of),
+            })
         }
         Ok((Err(transfer_error),)) => {
             log!(INFO, "Transfer failed: {:?}", transfer_error);
@@ -798,6 +794,11 @@ pub async fn deposit_as_3usd(
         token_ledger
     );
 
+    // Share the persisted allocator across both deposit routes.
+    let transfer_created_at_time =
+        mutate_state(|s| s.reserve_deposit_transfer_timestamp(ic_cdk::api::time()))
+            .map_err(|_| StabilityPoolError::SystemBusy)?;
+
     // Step 1: Pull tokens from user
     let transfer_args = TransferFromArgs {
         from: Account {
@@ -811,7 +812,7 @@ pub async fn deposit_as_3usd(
         amount: amount.into(),
         fee: None,
         memo: None,
-        created_at_time: Some(ic_cdk::api::time()),
+        created_at_time: Some(transfer_created_at_time),
         spender_subaccount: None,
     };
 

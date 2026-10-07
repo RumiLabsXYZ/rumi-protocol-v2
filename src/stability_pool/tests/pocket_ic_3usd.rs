@@ -1222,3 +1222,55 @@ fn test_mixed_deposit_balances() {
     let sp_lp = query_3pool_lp_balance(&env.pic, env.pool_id, env.sp_id);
     assert_eq!(sp_lp, lp_minted as u128, "3pool LP balance should match");
 }
+
+#[test]
+fn same_round_identical_deposits_use_distinct_transfer_identities() {
+    let env = setup_test_env();
+    let amount = 100_00000000u64;
+    let first = env.pic.submit_call(env.sp_id, env.test_user, "deposit",
+        encode_args((env.icusd_ledger, amount)).unwrap()).expect("first submission");
+    let second = env.pic.submit_call(env.sp_id, env.test_user, "deposit",
+        encode_args((env.icusd_ledger, amount)).unwrap()).expect("second submission");
+    for call in [first, second] {
+        match env.pic.await_call(call).expect("deposit execution") {
+            WasmResult::Reply(bytes) => decode_one::<Result<(), StabilityPoolError>>(&bytes)
+                .expect("decode deposit").expect("unique pull succeeds"),
+            WasmResult::Reject(message) => panic!("deposit rejected: {message}"),
+        }
+    }
+    let position = get_user_position(&env.pic, env.sp_id, env.test_user).unwrap();
+    assert_eq!(position.stablecoin_balances.get(&env.icusd_ledger).copied(), Some(2 * amount));
+    match env.pic.query_call(env.icusd_ledger, Principal::anonymous(), "icrc1_balance_of",
+        encode_one(Account { owner: env.sp_id, subaccount: None }).unwrap()).expect("balance query") {
+        WasmResult::Reply(bytes) => assert_eq!(decode_one::<candid::Nat>(&bytes).unwrap(), candid::Nat::from(2 * amount)),
+        WasmResult::Reject(message) => panic!("balance query rejected: {message}"),
+    }
+}
+
+#[test]
+fn same_round_ordinary_and_convenience_deposits_use_distinct_pulls() {
+    let env = setup_test_env();
+    register_stablecoin(&env.pic, env.sp_id, env.admin, StablecoinConfig {
+        ledger_id: env.pool_id, symbol: "3USD".to_string(), decimals: 8, priority: 0,
+        is_active: true, transfer_fee: Some(0), is_lp_token: Some(true),
+        underlying_pool: Some(env.pool_id),
+    });
+    let amount = 100_00000000u64;
+    let routed = env.pic.submit_call(env.sp_id, env.test_user, "deposit_as_3usd",
+        encode_args((env.icusd_ledger, amount)).unwrap()).expect("routed submission");
+    let ordinary = env.pic.submit_call(env.sp_id, env.test_user, "deposit",
+        encode_args((env.icusd_ledger, amount)).unwrap()).expect("ordinary submission");
+    let lp_minted = match env.pic.await_call(routed).expect("routed execution") {
+        WasmResult::Reply(bytes) => decode_one::<Result<u64, StabilityPoolError>>(&bytes)
+            .expect("decode routed").expect("routed pull succeeds"),
+        WasmResult::Reject(message) => panic!("routed deposit rejected: {message}"),
+    };
+    match env.pic.await_call(ordinary).expect("ordinary execution") {
+        WasmResult::Reply(bytes) => decode_one::<Result<(), StabilityPoolError>>(&bytes)
+            .expect("decode ordinary").expect("ordinary pull succeeds"),
+        WasmResult::Reject(message) => panic!("ordinary deposit rejected: {message}"),
+    }
+    let position = get_user_position(&env.pic, env.sp_id, env.test_user).unwrap();
+    assert_eq!(position.stablecoin_balances.get(&env.icusd_ledger).copied(), Some(amount));
+    assert_eq!(position.stablecoin_balances.get(&env.pool_id).copied(), Some(lp_minted));
+}
