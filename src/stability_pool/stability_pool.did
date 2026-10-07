@@ -282,6 +282,23 @@ type PendingRefund = record {
   protocol_fee_reserved : opt nat64;
 };
 
+type PendingDepositIntent = record {
+  token_ledger : principal;
+  amount : nat64;
+  transfer_created_at_time_ns : nat64;
+  transfer_block_index : opt nat64;
+  in_flight_attempts : opt nat32;
+  ambiguous_seen : bool;
+  too_old_rejected : opt bool;
+  history_scan_cursor : opt nat64;
+  history_scan_tip : opt nat64;
+  reconciliation_in_progress : opt bool;
+  reconciliation_generation : opt nat64;
+  reconciliation_started_at_ns : opt nat64;
+  reconciliation_next_allowed_at_ns : opt nat64;
+  attempt_no : opt nat32;
+};
+
 type OutboundPayoutKind = variant { Withdraw; CollateralClaim };
 type PendingOutboundPayoutStatus = record {
   ledger : principal;
@@ -477,6 +494,8 @@ service : (StabilityPoolInitArgs) -> {
 
   // ── Deposit / Withdraw / Claim ──
   deposit : (principal, nat64) -> (variant { Ok; Err : StabilityPoolError });
+  reconcile_pending_deposit : (nat64) -> (variant { Ok; Err : StabilityPoolError });
+  reconcile_pending_deposit_history : () -> (variant { Ok; Err : StabilityPoolError });
   withdraw : (principal, nat64) -> (variant { Ok; Err : StabilityPoolError });
   deposit_as_3usd : (principal, nat64) -> (variant { Ok : nat64; Err : StabilityPoolError });
   claim_collateral : (principal) -> (variant { Ok : nat64; Err : StabilityPoolError });
@@ -558,6 +577,7 @@ service : (StabilityPoolInitArgs) -> {
   get_pool_event_count : () -> (nat64) query;
   list_depositor_principals : () -> (vec principal) query;
   get_pending_refunds : (opt principal) -> (vec PendingRefund) query;
+  get_pending_deposit_intent : () -> (opt PendingDepositIntent) query;
   get_pending_outbound_payouts : () -> (vec PendingOutboundPayoutStatus) query;
   get_sp_liquidation_v2_status : (nat64) -> (opt SpLiquidationV2LocalStatus) query;
   get_pending_unallocated_interest_forwards : () -> (vec UnallocatedInterestForwardBatch) query;

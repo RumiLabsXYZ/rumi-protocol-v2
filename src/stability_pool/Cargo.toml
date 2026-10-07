@@ -11,6 +11,7 @@ crate-type = ["cdylib", "rlib"]
 default = []
 # Explicitly opt-in only for source-matched PocketIC admission tests.
 test-three-usd-reserve-ingress-v2-admission = []
+test_endpoints = []
 
 [dependencies]
 candid = { version = "0.10.6", features = ["value"] }

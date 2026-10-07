@@ -701,6 +701,156 @@ fn legacy_points_upgrade_preserves_open_state_and_holds_expired_window() {
     }
 }
 
+/// Exercise the live-observed partially captured epoch shape against the
+/// hash-pinned pre-randomness Wasm: epoch 18 is open, snapshot A is complete,
+/// snapshot B is pending, and the driver remains enabled. The epoch is built
+/// through the legacy public/admin API rather than by editing stable memory.
+///
+/// Run after building the legacy Wasm from commit
+/// `5a20bd6a1b724dec10778630dcff1570c175b7da` and the current default Wasm:
+/// `RUMI_POINTS_LEGACY_WASM=/path/to/legacy.wasm POCKET_IC_BIN=/path/to/pocket-ic \
+///   cargo test -p rumi_points --test pocket_ic_ingest \
+///   legacy_points_upgrade_holds_epoch_18_between_snapshots -- --ignored`
+#[test]
+#[ignore = "requires a default rumi_points Wasm built from pre-randomness commit 5a20bd6"]
+fn legacy_points_upgrade_holds_epoch_18_between_snapshots() {
+    let legacy_path = std::env::var_os("RUMI_POINTS_LEGACY_WASM")
+        .expect("set RUMI_POINTS_LEGACY_WASM to the Wasm built from commit 5a20bd6");
+    let legacy_wasm = std::fs::read(&legacy_path)
+        .unwrap_or_else(|e| panic!("failed to read legacy Wasm at {:?}: {e}", legacy_path));
+    assert!(!legacy_wasm.is_empty(), "legacy Wasm must not be empty");
+    assert_eq!(
+        format!("{:x}", Sha256::digest(&legacy_wasm)),
+        "d3fc3919ab50d75f245c2ad9539fb5c83a8da38a25c22d36b8f97e82ba0a3fbc",
+        "expected the default Wasm built from pre-randomness commit 5a20bd6 with the pinned toolchain/dependencies"
+    );
+
+    let pic = PocketIcBuilder::new().with_application_subnet().build();
+    let season_start_ns = 1_700_000_000_000_000_000;
+    set_time_ns(&pic, season_start_ns);
+    let rp = install_legacy_points(
+        &pic,
+        &legacy_wasm,
+        season_start_ns,
+        1_800_000_000_000_000_000,
+    );
+    let registered = Principal::from_slice(&[79; 10]);
+    admin_ok(
+        &pic,
+        rp,
+        "register_test_principal",
+        Encode!(&registered).unwrap(),
+    );
+    let mock = install_mock(&pic);
+    set_all_sources(&pic, rp, mock);
+    set_vault_debt(&pic, mock, registered, 100_000_000);
+    start_season_ok(&pic, rp, SEASON_SEED);
+
+    // Advance through the actual legacy epoch driver. Each action is a
+    // separate force tick so no cursor or epoch transition is synthesized.
+    for expected_epoch in 0..18 {
+        let open = epoch_status(&pic, rp)
+            .open_epoch
+            .expect("legacy driver should have an open epoch");
+        assert_eq!(open.epoch_index, expected_epoch);
+        set_time_ns(&pic, open.snapshot_a_ns);
+        force_tick(&pic, rp);
+        let after_a = epoch_status(&pic, rp).open_epoch.unwrap();
+        assert!(
+            after_a.a_complete,
+            "snapshot A completes for epoch {expected_epoch}"
+        );
+
+        set_time_ns(&pic, after_a.snapshot_b_ns);
+        force_tick(&pic, rp);
+        let after_b = epoch_status(&pic, rp).open_epoch.unwrap();
+        assert!(
+            after_b.b_complete,
+            "snapshot B completes for epoch {expected_epoch}"
+        );
+
+        set_time_ns(&pic, after_b.epoch_end_ns);
+        force_tick(&pic, rp);
+        if expected_epoch < 17 {
+            // Closing an epoch leaves the next one unopened until its scheduled
+            // start; the following iteration's explicit force tick opens it.
+            let next_start = after_b.epoch_end_ns;
+            set_time_ns(&pic, next_start);
+            force_tick(&pic, rp);
+        }
+    }
+
+    // The loop closes epoch 17; one more scheduled driver action opens 18.
+    force_tick(&pic, rp);
+    let before = epoch_status(&pic, rp);
+    assert!(before.driver_enabled);
+    assert_eq!(before.current_epoch_index, 18);
+    let before_open = before.open_epoch.expect("epoch 18 is open");
+    assert_eq!(before_open.epoch_index, 18);
+    assert!(!before_open.a_complete, "snapshot A has not fired yet");
+    assert!(!before_open.b_complete, "snapshot B is pending");
+    let reward_before = total_points(&pic, rp, registered);
+    assert!(reward_before > 0, "prior completed epochs accrued rewards");
+
+    // Complete A for epoch 18, while leaving B pending, using the legacy API.
+    set_time_ns(&pic, before_open.snapshot_a_ns);
+    force_tick(&pic, rp);
+    let partially_captured = epoch_status(&pic, rp);
+    assert_eq!(partially_captured.current_epoch_index, 18);
+    let partial_open = partially_captured.open_epoch.unwrap();
+    assert!(partial_open.a_complete);
+    assert!(!partial_open.b_complete);
+    let partial_reward = total_points(&pic, rp, registered);
+
+    pic.upgrade_canister(rp, RUMI_POINTS_WASM.to_vec(), Vec::new(), None)
+        .expect("upgrade populated legacy epoch 18 to current Wasm");
+
+    let after = held_epoch_status(&pic, rp);
+    assert!(after.driver_enabled);
+    assert!(
+        after.legacy_transition_held,
+        "partially captured legacy epoch pauses for review"
+    );
+    assert!(!after.legacy_reseed_pending);
+    assert_eq!(after.current_epoch_index, 18);
+    assert_eq!(after.open_epoch, Some(partial_open.clone()));
+    assert_eq!(total_points(&pic, rp, registered), partial_reward);
+    assert_eq!(partial_reward, reward_before);
+
+    // The installed mock would advance the backend ingest cursor and register
+    // its synthetic caller if poll fencing failed.
+    assert_eq!(source_cursor(&pic, rp, 0), 0);
+    assert_eq!(trigger_poll_count(&pic, rp), 0);
+    assert_eq!(source_cursor(&pic, rp, 0), 0);
+    assert!(!is_registered(&pic, rp, synthetic_caller()));
+
+    // Let the persisted timer become due after snapshot B, then exercise the
+    // admin force path. Both must leave the legacy epoch and reward state fixed.
+    set_time_ns(&pic, partial_open.snapshot_b_ns);
+    pic.advance_time(Duration::from_secs(301));
+    pic.tick();
+    admin_ok(&pic, rp, "force_epoch_tick", Encode!().unwrap());
+    let after_drivers = held_epoch_status(&pic, rp);
+    assert!(after_drivers.legacy_transition_held);
+    assert_eq!(after_drivers.current_epoch_index, 18);
+    assert_eq!(after_drivers.open_epoch, Some(partial_open.clone()));
+    assert_eq!(total_points(&pic, rp, registered), partial_reward);
+    assert_eq!(source_cursor(&pic, rp, 0), 0);
+
+    // Repeat the real upgrade to prove the review marker remains durable.
+    pic.upgrade_canister(rp, RUMI_POINTS_WASM.to_vec(), Vec::new(), None)
+        .expect("second current Wasm upgrade should preserve the review hold");
+    let after_second_upgrade = held_epoch_status(&pic, rp);
+    assert!(after_second_upgrade.legacy_transition_held);
+    assert!(after_second_upgrade.driver_enabled);
+    assert!(!after_second_upgrade.legacy_reseed_pending);
+    assert_eq!(after_second_upgrade.current_epoch_index, 18);
+    assert_eq!(after_second_upgrade.open_epoch, Some(partial_open));
+    admin_ok(&pic, rp, "force_epoch_tick", Encode!().unwrap());
+    assert_eq!(total_points(&pic, rp, registered), partial_reward);
+    assert_eq!(source_cursor(&pic, rp, 0), 0);
+}
+
 fn nat_to_u128(n: &candid::Nat) -> u128 {
     n.to_string()
         .chars()

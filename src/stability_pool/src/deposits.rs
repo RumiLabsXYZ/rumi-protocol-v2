@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 /// keeps the pool solvent rather than risking an over-send.
 const DEFAULT_LEDGER_FEE: u64 = 10_000;
 const MAX_PENDING_REFUND_HISTORY_BLOCKS_PER_CALL: u64 = 64;
+const MAX_PENDING_DEPOSIT_HISTORY_BLOCKS_PER_CALL: u64 = 64;
 
 thread_local! {
     /// Per-ledger transfer-fee cache for transfer/refund math, populated lazily from
@@ -111,6 +112,87 @@ fn complete_saved_deposit_receipt_before_admission(
     } else {
         Err(StabilityPoolError::SystemBusy)
     }
+}
+
+fn validate_pending_deposit_block(
+    caller: Principal,
+    pool: Principal,
+    intent: &PendingDepositIntent,
+    block: &rumi_protocol_backend::icrc3_proof::DecodedBlock,
+) -> Result<(), String> {
+    if !matches!(block.btype.as_deref(), Some("2xfer") | None)
+        || (block.btype.is_none() && block.spender.is_none())
+        || (block.op != "xfer" && block.op != "transfer")
+        || !block.from.as_ref().is_some_and(|actual| {
+            rumi_protocol_backend::icrc3_proof::accounts_match(
+                actual,
+                &Account {
+                    owner: caller,
+                    subaccount: None,
+                },
+            )
+        })
+        || !block.to.as_ref().is_some_and(|actual| {
+            rumi_protocol_backend::icrc3_proof::accounts_match(
+                actual,
+                &Account {
+                    owner: pool,
+                    subaccount: None,
+                },
+            )
+        })
+        || !block.spender.as_ref().is_some_and(|actual| {
+            rumi_protocol_backend::icrc3_proof::accounts_match(
+                actual,
+                &Account {
+                    owner: pool,
+                    subaccount: None,
+                },
+            )
+        })
+        || block.amount != u128::from(intent.amount)
+        || block.memo.is_some()
+        || block.created_at_time != Some(intent.transfer_created_at_time_ns)
+        || block.expected_allowance.is_some()
+        || block.expires_at.is_some()
+    {
+        return Err(
+            "ICRC-3 block does not prove this exact fee-unspecified transfer_from intent".into(),
+        );
+    }
+    // The persisted ICRC-2 argument intentionally used fee=None, so the
+    // ledger chose the fee. decode_block rejects conflicting tx/top-level fee
+    // evidence; do not substitute today's fee for the historical ledger value.
+    Ok(())
+}
+
+fn pending_deposit_block_identity_may_match(
+    caller: Principal,
+    pool: Principal,
+    intent: &PendingDepositIntent,
+    block: &rumi_protocol_backend::icrc3_proof::DecodedBlock,
+) -> bool {
+    (block.op == "xfer" || block.op == "transfer")
+        && block.from.as_ref().is_some_and(|actual| {
+            rumi_protocol_backend::icrc3_proof::accounts_match(
+                actual,
+                &Account {
+                    owner: caller,
+                    subaccount: None,
+                },
+            )
+        })
+        && block.to.as_ref().is_some_and(|actual| {
+            rumi_protocol_backend::icrc3_proof::accounts_match(
+                actual,
+                &Account {
+                    owner: pool,
+                    subaccount: None,
+                },
+            )
+        })
+        && block.amount == u128::from(intent.amount)
+        && block.created_at_time == Some(intent.transfer_created_at_time_ns)
 }
 
 fn pending_deposit_admission_error(
@@ -587,6 +669,20 @@ pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), Stabili
                     && intent.transfer_block_index.is_none()
             })
     });
+    if read_state(|s| {
+        s.pending_deposit_intents
+            .as_ref()
+            .and_then(|intents| intents.get(&caller))
+            .is_some_and(|intent| {
+                intent.token_ledger == token_ledger
+                    && intent.amount == amount
+                    && intent.too_old_rejected == Some(true)
+            })
+    }) {
+        return Err(StabilityPoolError::LedgerTransferFailed {
+            reason: "this exact deposit identity was rejected as TooOld; reconcile its receipt or complete its history scan before retrying".into(),
+        });
+    }
     // Validate token is accepted
     let config = read_state(|s| s.get_stablecoin_config(&token_ledger).cloned())
         .ok_or(StabilityPoolError::TokenNotAccepted {
@@ -643,7 +739,9 @@ pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), Stabili
             .and_then(|intent| intent.transfer_block_index);
         Ok::<_, ()>((timestamp, receipt))
     })
-    .map_err(|_| StabilityPoolError::SystemBusy)?;
+    .map_err(|_| StabilityPoolError::LedgerTransferFailed {
+        reason: "a pending deposit identity is fenced for reconciliation".into(),
+    })?;
 
     if prior_receipt.is_some() {
         return complete_deposit_credit_after_async(
@@ -759,12 +857,22 @@ pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), Stabili
                 reason: format!("{:?}", transfer_error),
             })
         }
+        Ok((Err(TransferFromError::TooOld),)) => {
+            let marked = mutate_state(|s| {
+                s.mark_deposit_intent_too_old(caller, token_ledger, amount, transfer_timestamp)
+            });
+            Err(StabilityPoolError::LedgerTransferFailed {
+                reason: if marked {
+                    "the exact deposit identity was rejected as TooOld; it remains held until exact receipt or complete archive-aware history reconciliation".into()
+                } else {
+                    "the ledger returned TooOld but the exact deposit intent could not be marked; it remains held".into()
+                },
+            })
+        }
         Ok((Err(transfer_error),)) => {
-            // TooOld, TemporarilyUnavailable, and GenericError do not prove
-            // whether a prior dispatch committed. Keep the identity for retry.
-            // If every reply was lost until the ledger's duplicate window
-            // expires, exact ICRC-3 receipt reconciliation is still required;
-            // this narrow change deliberately fails closed in that case.
+            // TemporarilyUnavailable and GenericError do not prove whether
+            // this or a prior dispatch committed. Keep the identity for exact
+            // retry or positive ICRC-3 receipt reconciliation.
             mutate_state(|s| {
                 s.mark_deposit_intent_ambiguous(caller, token_ledger, amount, transfer_timestamp)
             });
@@ -785,6 +893,192 @@ pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), Stabili
             })
         }
     }
+}
+
+fn commit_reconciled_deposit(
+    caller: Principal,
+    intent: &PendingDepositIntent,
+    block_index: u64,
+    reconciliation_generation: u64,
+) -> Result<(), StabilityPoolError> {
+    crate::ensure_pool_balance_mutation_allowed_for_ledger(intent.token_ledger)?;
+    let now_ns = ic_cdk::api::time();
+    let completed = mutate_state(|state| {
+        state.complete_reconciled_deposit(
+            caller,
+            intent.token_ledger,
+            intent.amount,
+            intent.transfer_created_at_time_ns,
+            block_index,
+            now_ns,
+            reconciliation_generation,
+        )
+    });
+    if completed {
+        Ok(())
+    } else {
+        Err(StabilityPoolError::LedgerTransferFailed {
+            reason: "exact deposit receipt verified but the pending intent changed; deposit remains held".into(),
+        })
+    }
+}
+
+/// Complete a user's exact ambiguous deposit only after an archive-aware
+/// ICRC-3 block proves the persisted ICRC-2 transfer_from tuple.
+pub async fn reconcile_pending_deposit(block_index: u64) -> Result<(), StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    let intent = mutate_state(|state| {
+        state.claim_pending_deposit_reconciliation(caller, ic_cdk::api::time())
+    })
+    .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+        reason: reason.into(),
+    })?;
+    let reconciliation_generation = intent.reconciliation_generation.ok_or_else(|| {
+        StabilityPoolError::LedgerTransferFailed {
+            reason: "deposit reconciliation generation is missing".into(),
+        }
+    })?;
+    let result = async {
+        let block =
+            rumi_protocol_backend::icrc3_proof::fetch_icrc3_block(intent.token_ledger, block_index)
+                .await
+                .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+                    reason: format!(
+                        "deposit receipt history is incomplete; intent remains held: {reason}"
+                    ),
+                })?;
+        validate_pending_deposit_block(caller, ic_cdk::id(), &intent, &block).map_err(
+            |reason| StabilityPoolError::LedgerTransferFailed {
+                reason: format!("block is not the exact pending deposit: {reason}"),
+            },
+        )?;
+        commit_reconciled_deposit(caller, &intent, block_index, reconciliation_generation)
+    }
+    .await;
+    if result.is_err() {
+        mutate_state(|state| {
+            state.release_deposit_history_scan(
+                caller,
+                reconciliation_generation,
+                ic_cdk::api::time(),
+            )
+        });
+    }
+    result
+}
+
+/// Scan the caller's fixed ICRC-3 log prefix in bounded archive-aware pages
+/// after an exact TooOld response. A matching transfer is credited once; a
+/// new transfer identity is admitted only after every block below the pinned
+/// tip is fetched and proves absence.
+pub async fn reconcile_pending_deposit_history() -> Result<(), StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() {
+        return Err(StabilityPoolError::Unauthorized);
+    }
+    let intent =
+        mutate_state(|state| state.claim_deposit_history_scan(caller, ic_cdk::api::time()))
+            .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+                reason: reason.into(),
+            })?;
+    let reconciliation_generation = intent.reconciliation_generation.unwrap_or_default();
+    let result = reconcile_pending_deposit_history_page(caller, intent).await;
+    if result.is_err() {
+        mutate_state(|state| {
+            state.release_deposit_history_scan(
+                caller,
+                reconciliation_generation,
+                ic_cdk::api::time(),
+            )
+        });
+    }
+    result
+}
+
+async fn reconcile_pending_deposit_history_page(
+    caller: Principal,
+    mut intent: PendingDepositIntent,
+) -> Result<(), StabilityPoolError> {
+    let reconciliation_generation = intent.reconciliation_generation.ok_or_else(|| {
+        StabilityPoolError::LedgerTransferFailed {
+            reason: "deposit reconciliation generation is missing; intent remains held".into(),
+        }
+    })?;
+    if intent.history_scan_cursor.is_none() && intent.history_scan_tip.is_none() {
+        let tip = rumi_protocol_backend::icrc3_proof::icrc3_log_length(intent.token_ledger)
+            .await
+            .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+                reason: format!(
+                    "could not establish deposit history tip; intent remains held: {reason}"
+                ),
+            })?;
+        intent = mutate_state(|state| {
+            state.start_deposit_history_scan(caller, tip, reconciliation_generation)
+        })
+        .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+            reason: format!("could not persist deposit history scan: {reason}"),
+        })?;
+    }
+    let cursor =
+        intent
+            .history_scan_cursor
+            .ok_or_else(|| StabilityPoolError::LedgerTransferFailed {
+                reason: "deposit history scan cursor is missing; intent remains held".into(),
+            })?;
+    let tip = intent
+        .history_scan_tip
+        .ok_or_else(|| StabilityPoolError::LedgerTransferFailed {
+            reason: "deposit history scan tip is missing; intent remains held".into(),
+        })?;
+    if cursor > tip {
+        return Err(StabilityPoolError::LedgerTransferFailed {
+            reason: "deposit history cursor exceeds its fixed tip; intent remains held".into(),
+        });
+    }
+    let end = cursor
+        .saturating_add(MAX_PENDING_DEPOSIT_HISTORY_BLOCKS_PER_CALL)
+        .min(tip);
+    for index in cursor..end {
+        let block =
+            rumi_protocol_backend::icrc3_proof::fetch_icrc3_block(intent.token_ledger, index)
+                .await
+                .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+                    reason: format!(
+                "deposit history is incomplete at block {index}; intent remains held: {reason}"
+            ),
+                })?;
+        if validate_pending_deposit_block(caller, ic_cdk::id(), &intent, &block).is_ok() {
+            return commit_reconciled_deposit(caller, &intent, index, reconciliation_generation);
+        }
+        if pending_deposit_block_identity_may_match(caller, ic_cdk::id(), &intent, &block) {
+            return Err(StabilityPoolError::LedgerTransferFailed {
+                reason: format!("deposit-like ledger block {index} conflicts with the persisted transfer tuple; intent remains held"),
+            });
+        }
+    }
+    mutate_state(|state| {
+        state.advance_deposit_history_scan(
+            caller,
+            cursor,
+            tip,
+            end,
+            ic_cdk::api::time(),
+            reconciliation_generation,
+        )
+    })
+    .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+        reason: format!("could not persist deposit history scan progress: {reason}"),
+    })?;
+    if end == tip {
+        mutate_state(|state| state.rotate_deposit_after_no_effect(caller, ic_cdk::api::time()))
+            .map_err(|reason| StabilityPoolError::LedgerTransferFailed {
+                reason: format!("complete archive-aware deposit history proves no effect; intent remains held: {reason}"),
+            })?;
+    }
+    Ok(())
 }
 
 /// Withdraw a stablecoin from the pool (only unconsumed balances).
@@ -2155,6 +2449,57 @@ mod tests {
             pending_deposit_admission_error(StabilityPoolError::EmergencyPaused, false),
             StabilityPoolError::EmergencyPaused
         ));
+    }
+
+    #[test]
+    fn pending_deposit_receipt_binds_transfer_from_tuple_and_fee_none_semantics() {
+        let caller = principal(1);
+        let pool = principal(2);
+        let intent = PendingDepositIntent {
+            token_ledger: principal(10),
+            amount: 50_000_000,
+            transfer_created_at_time_ns: 123,
+            transfer_block_index: None,
+            in_flight_attempts: Some(0),
+            ambiguous_seen: true,
+            too_old_rejected: None,
+            history_scan_cursor: None,
+            history_scan_tip: None,
+            reconciliation_in_progress: Some(false),
+            reconciliation_generation: Some(0),
+            reconciliation_started_at_ns: None,
+            reconciliation_next_allowed_at_ns: None,
+            attempt_no: Some(0),
+        };
+        let account = |owner| Account {
+            owner,
+            subaccount: None,
+        };
+        let block = rumi_protocol_backend::icrc3_proof::DecodedBlock {
+            btype: Some("2xfer".into()),
+            op: "transfer".into(),
+            from: Some(account(caller)),
+            to: Some(account(pool)),
+            spender: Some(account(pool)),
+            amount: u128::from(intent.amount),
+            transaction_fee: Some(10_000),
+            fee: Some(10_000),
+            memo: None,
+            created_at_time: Some(intent.transfer_created_at_time_ns),
+            expected_allowance: None,
+            expires_at: None,
+        };
+
+        assert!(validate_pending_deposit_block(caller, pool, &intent, &block).is_ok());
+        let mut wrong_spender = block.clone();
+        wrong_spender.spender = Some(account(principal(3)));
+        assert!(validate_pending_deposit_block(caller, pool, &intent, &wrong_spender).is_err());
+        let mut wrong_timestamp = block.clone();
+        wrong_timestamp.created_at_time = Some(124);
+        assert!(validate_pending_deposit_block(caller, pool, &intent, &wrong_timestamp).is_err());
+        let mut unexpected_memo = block;
+        unexpected_memo.memo = Some(vec![9]);
+        assert!(validate_pending_deposit_block(caller, pool, &intent, &unexpected_memo).is_err());
     }
 
     #[test]

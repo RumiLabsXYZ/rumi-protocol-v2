@@ -839,6 +839,83 @@ pub async fn deposit(token_ledger: Principal, amount: u64) -> Result<(), Stabili
     crate::deposits::deposit(token_ledger, amount).await
 }
 
+/// Test-only seam for exercising an unresolved dispatched deposit against the
+/// official ledger. Production Wasm and the public Candid service omit it.
+#[cfg(feature = "test_endpoints")]
+#[update]
+pub fn test_seed_unresolved_deposit_intent(
+    token_ledger: Principal,
+    amount: u64,
+    created_at_override: Option<u64>,
+) -> Result<u64, StabilityPoolError> {
+    let caller = ic_cdk::api::caller();
+    let timestamp = mutate_state(|state| {
+        state.begin_deposit_intent(caller, token_ledger, amount, ic_cdk::api::time())
+    })
+    .map_err(|_| StabilityPoolError::LedgerTransferFailed {
+        reason: "could not seed test deposit intent".to_string(),
+    })?;
+    if let Some(created_at_time_ns) = created_at_override {
+        mutate_state(|state| {
+            if let Some(intent) = state
+                .pending_deposit_intents
+                .as_mut()
+                .and_then(|intents| intents.get_mut(&caller))
+            {
+                intent.transfer_created_at_time_ns = created_at_time_ns;
+            }
+        });
+        Ok(created_at_time_ns)
+    } else {
+        Ok(timestamp)
+    }
+}
+
+/// Test-only counterpart of the production typed-TooOld journal update.
+#[cfg(feature = "test_endpoints")]
+#[update]
+pub fn test_mark_deposit_intent_too_old(
+    token_ledger: Principal,
+    amount: u64,
+    transfer_created_at_time_ns: u64,
+) -> bool {
+    mutate_state(|state| {
+        state.mark_deposit_intent_too_old(
+            ic_cdk::api::caller(),
+            token_ledger,
+            amount,
+            transfer_created_at_time_ns,
+        )
+    })
+}
+
+/// Return only the caller's unresolved deposit identity and recovery progress.
+#[query]
+pub fn get_pending_deposit_intent() -> Option<PendingDepositIntent> {
+    let caller = ic_cdk::api::caller();
+    if caller == Principal::anonymous() {
+        return None;
+    }
+    read_state(|state| {
+        state
+            .pending_deposit_intents
+            .as_ref()
+            .and_then(|intents| intents.get(&caller).cloned())
+    })
+}
+
+/// Attach an exact ICRC-3 transfer_from receipt to the caller's pending deposit.
+#[update]
+pub async fn reconcile_pending_deposit(block_index: u64) -> Result<(), StabilityPoolError> {
+    crate::deposits::reconcile_pending_deposit(block_index).await
+}
+
+/// Scan one bounded page of the caller's ledger history after typed TooOld.
+#[update]
+pub async fn reconcile_pending_deposit_history() -> Result<(), StabilityPoolError> {
+    crate::deposits::reconcile_pending_deposit_history().await
+}
+
 #[update]
 pub async fn withdraw(token_ledger: Principal, amount: u64) -> Result<(), StabilityPoolError> {
     crate::deposits::withdraw(token_ledger, amount).await

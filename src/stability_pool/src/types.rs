@@ -709,6 +709,32 @@ pub struct PendingDepositIntent {
     /// Once an ambiguous reply or interrupted pre-upgrade dispatch is observed,
     /// a later rejection cannot prove that every earlier dispatch had no effect.
     pub ambiguous_seen: bool,
+    /// True only after the configured ledger returned typed TooOld for this
+    /// exact persisted transfer_from identity. Once set, normal deposit retries
+    /// are fenced until exact receipt or complete history reconciliation.
+    #[serde(default)]
+    pub too_old_rejected: Option<bool>,
+    /// Cursor and fixed ICRC-3 log tip for bounded, archive-aware no-effect
+    /// scans. The range is [cursor, tip).
+    #[serde(default)]
+    pub history_scan_cursor: Option<u64>,
+    #[serde(default)]
+    pub history_scan_tip: Option<u64>,
+    /// Persistent lease preventing concurrent archive scans for this intent.
+    /// Upgrade recovery clears it so a bounded scan can resume.
+    #[serde(default)]
+    pub reconciliation_in_progress: Option<bool>,
+    #[serde(default)]
+    pub reconciliation_generation: Option<u64>,
+    #[serde(default)]
+    pub reconciliation_started_at_ns: Option<u64>,
+    /// Earliest IC time at which another proof request may start. Negative
+    /// block probes and each history page set a finite cooldown.
+    #[serde(default)]
+    pub reconciliation_next_allowed_at_ns: Option<u64>,
+    /// Number of fresh identities admitted after complete no-effect scans.
+    #[serde(default)]
+    pub attempt_no: Option<u32>,
 }
 
 /// Exact outbound ICRC-1 payout retained while the ledger outcome is unknown.

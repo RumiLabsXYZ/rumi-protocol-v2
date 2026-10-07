@@ -1023,6 +1023,9 @@ impl StabilityPoolState {
             if intent.token_ledger != token_ledger || intent.amount != amount {
                 return Err(());
             }
+            if intent.too_old_rejected == Some(true) {
+                return Err(());
+            }
             match intent.in_flight_attempts {
                 Some(attempts) => {
                     intent.in_flight_attempts = Some(attempts.checked_add(1).ok_or(())?);
@@ -1049,6 +1052,14 @@ impl StabilityPoolState {
                     transfer_block_index: None,
                     in_flight_attempts: Some(1),
                     ambiguous_seen: false,
+                    too_old_rejected: None,
+                    history_scan_cursor: None,
+                    history_scan_tip: None,
+                    reconciliation_in_progress: Some(false),
+                    reconciliation_generation: Some(0),
+                    reconciliation_started_at_ns: None,
+                    reconciliation_next_allowed_at_ns: None,
+                    attempt_no: Some(0),
                 },
             );
         Ok(timestamp)
@@ -1144,6 +1155,54 @@ impl StabilityPoolState {
         true
     }
 
+    /// Commit an authenticated ICRC-3 receipt and credit the exact intent in
+    /// one state mutation. Positive proof is sufficient even while a callback
+    /// remains in flight: removing the row fences any late callback. Unlike a
+    /// ledger callback this does not decrement the in-flight counter.
+    pub fn complete_reconciled_deposit(
+        &mut self,
+        caller: Principal,
+        token_ledger: Principal,
+        amount: u64,
+        timestamp: u64,
+        block_index: u64,
+        now_ns: u64,
+        reconciliation_generation: u64,
+    ) -> bool {
+        let Some(intent) = self
+            .pending_deposit_intents
+            .as_mut()
+            .and_then(|intents| intents.get(&caller))
+        else {
+            return false;
+        };
+        if intent.token_ledger != token_ledger
+            || intent.amount != amount
+            || intent.transfer_created_at_time_ns != timestamp
+            || intent.reconciliation_in_progress != Some(true)
+            || intent.reconciliation_generation != Some(reconciliation_generation)
+            || intent
+                .transfer_block_index
+                .is_some_and(|existing| existing != block_index)
+        {
+            return false;
+        }
+        self.add_deposit_at(caller, token_ledger, amount, now_ns);
+        self.pending_deposit_intents
+            .as_mut()
+            .expect("pending deposit map initialized")
+            .remove(&caller);
+        self.push_event_at(
+            caller,
+            PoolEventType::Deposit {
+                token_ledger,
+                amount,
+            },
+            now_ns,
+        );
+        true
+    }
+
     /// Finish one dispatch with a definitive no-effect reply. Clear the intent
     /// only after every concurrent dispatch has also returned no-effect and no
     /// prior dispatch had an ambiguous outcome.
@@ -1216,6 +1275,260 @@ impl StabilityPoolState {
         }
     }
 
+    /// Mark the exact persisted deposit identity after a typed ledger TooOld
+    /// result. TooOld rejects this dispatch, but does not establish whether an
+    /// earlier ambiguous dispatch committed, so identity rotation still
+    /// requires a complete history scan.
+    pub fn mark_deposit_intent_too_old(
+        &mut self,
+        caller: Principal,
+        token_ledger: Principal,
+        amount: u64,
+        timestamp: u64,
+    ) -> bool {
+        let Some(intent) = self
+            .pending_deposit_intents
+            .as_mut()
+            .and_then(|intents| intents.get_mut(&caller))
+        else {
+            return false;
+        };
+        if intent.token_ledger != token_ledger
+            || intent.amount != amount
+            || intent.transfer_created_at_time_ns != timestamp
+            || intent.transfer_block_index.is_some()
+        {
+            return false;
+        }
+        intent.ambiguous_seen = true;
+        intent.too_old_rejected = Some(true);
+        intent.history_scan_cursor = None;
+        intent.history_scan_tip = None;
+        if let Some(attempts) = intent.in_flight_attempts.as_mut() {
+            if *attempts > 0 {
+                *attempts -= 1;
+            }
+        }
+        true
+    }
+
+    pub fn start_deposit_history_scan(
+        &mut self,
+        caller: Principal,
+        log_length: u64,
+        reconciliation_generation: u64,
+    ) -> Result<PendingDepositIntent, &'static str> {
+        let intent = self
+            .pending_deposit_intents
+            .as_mut()
+            .and_then(|intents| intents.get_mut(&caller))
+            .ok_or("pending deposit intent not found")?;
+        if intent.too_old_rejected != Some(true) {
+            return Err("history scan requires a typed TooOld response for this deposit");
+        }
+        if intent.reconciliation_in_progress != Some(true)
+            || intent.reconciliation_generation != Some(reconciliation_generation)
+        {
+            return Err("deposit history scan lease is not held");
+        }
+        if intent.in_flight_attempts != Some(0) || intent.transfer_block_index.is_some() {
+            return Err("deposit dispatches or a saved receipt remain unresolved");
+        }
+        match (intent.history_scan_cursor, intent.history_scan_tip) {
+            (None, None) => {
+                intent.history_scan_cursor = Some(0);
+                intent.history_scan_tip = Some(log_length);
+            }
+            (Some(_), Some(tip)) if tip == log_length => {}
+            (Some(_), Some(_)) => return Err("deposit history scan tip changed"),
+            _ => return Err("deposit history scan journal is incomplete"),
+        }
+        Ok(intent.clone())
+    }
+
+    /// Reserve one scan page before any inter-canister await so concurrent
+    /// requests cannot duplicate archive fetch work for the same cursor.
+    pub fn claim_deposit_history_scan(
+        &mut self,
+        caller: Principal,
+        now_ns: u64,
+    ) -> Result<PendingDepositIntent, &'static str> {
+        let intent = self
+            .pending_deposit_intents
+            .as_mut()
+            .and_then(|intents| intents.get_mut(&caller))
+            .ok_or("pending deposit intent not found")?;
+        if intent.too_old_rejected != Some(true) {
+            return Err("history scan requires a typed TooOld response for this deposit");
+        }
+        if intent.in_flight_attempts != Some(0) || intent.transfer_block_index.is_some() {
+            return Err("deposit dispatches or a saved receipt remain unresolved");
+        }
+        if intent.reconciliation_in_progress == Some(true)
+            && intent
+                .reconciliation_started_at_ns
+                .is_some_and(|started| now_ns.saturating_sub(started) < 900_000_000_000)
+        {
+            return Err("deposit history scan already in progress");
+        }
+        if intent
+            .reconciliation_next_allowed_at_ns
+            .is_some_and(|next| now_ns < next)
+        {
+            return Err("deposit proof reconciliation cooldown is active");
+        }
+        intent.reconciliation_generation = Some(
+            intent
+                .reconciliation_generation
+                .unwrap_or(0)
+                .checked_add(1)
+                .ok_or("deposit reconciliation generation exhausted")?,
+        );
+        intent.reconciliation_in_progress = Some(true);
+        intent.reconciliation_started_at_ns = Some(now_ns);
+        Ok(intent.clone())
+    }
+
+    /// Claim exact positive-proof reconciliation, including while an original
+    /// transfer callback remains in flight. The shared per-intent lease also
+    /// bounds concurrent arbitrary block-index probes to one archive fetch.
+    pub fn claim_pending_deposit_reconciliation(
+        &mut self,
+        caller: Principal,
+        now_ns: u64,
+    ) -> Result<PendingDepositIntent, &'static str> {
+        let intent = self
+            .pending_deposit_intents
+            .as_mut()
+            .and_then(|intents| intents.get_mut(&caller))
+            .ok_or("pending deposit intent not found")?;
+        if intent.reconciliation_in_progress == Some(true)
+            && intent
+                .reconciliation_started_at_ns
+                .is_some_and(|started| now_ns.saturating_sub(started) < 900_000_000_000)
+        {
+            return Err("pending deposit proof reconciliation already in progress");
+        }
+        if intent
+            .reconciliation_next_allowed_at_ns
+            .is_some_and(|next| now_ns < next)
+        {
+            return Err("deposit proof reconciliation cooldown is active");
+        }
+        intent.reconciliation_generation = Some(
+            intent
+                .reconciliation_generation
+                .unwrap_or(0)
+                .checked_add(1)
+                .ok_or("deposit reconciliation generation exhausted")?,
+        );
+        intent.reconciliation_in_progress = Some(true);
+        intent.reconciliation_started_at_ns = Some(now_ns);
+        Ok(intent.clone())
+    }
+
+    pub fn release_deposit_history_scan(
+        &mut self,
+        caller: Principal,
+        reconciliation_generation: u64,
+        now_ns: u64,
+    ) {
+        if let Some(intent) = self
+            .pending_deposit_intents
+            .as_mut()
+            .and_then(|intents| intents.get_mut(&caller))
+        {
+            if intent.reconciliation_generation != Some(reconciliation_generation)
+                || intent.reconciliation_in_progress != Some(true)
+            {
+                return;
+            }
+            intent.reconciliation_in_progress = Some(false);
+            intent.reconciliation_started_at_ns = None;
+            intent.reconciliation_next_allowed_at_ns = Some(now_ns.saturating_add(5_000_000_000));
+        }
+    }
+
+    pub fn advance_deposit_history_scan(
+        &mut self,
+        caller: Principal,
+        expected_cursor: u64,
+        fixed_tip: u64,
+        next_cursor: u64,
+        now_ns: u64,
+        reconciliation_generation: u64,
+    ) -> Result<PendingDepositIntent, &'static str> {
+        let intent = self
+            .pending_deposit_intents
+            .as_mut()
+            .and_then(|intents| intents.get_mut(&caller))
+            .ok_or("pending deposit intent not found")?;
+        if intent.too_old_rejected != Some(true)
+            || intent.in_flight_attempts != Some(0)
+            || intent.history_scan_cursor != Some(expected_cursor)
+            || intent.history_scan_tip != Some(fixed_tip)
+            || intent.reconciliation_in_progress != Some(true)
+            || intent.reconciliation_generation != Some(reconciliation_generation)
+            || next_cursor < expected_cursor
+            || next_cursor > fixed_tip
+        {
+            return Err("deposit history scan state changed or range is invalid");
+        }
+        intent.history_scan_cursor = Some(next_cursor);
+        intent.reconciliation_in_progress = Some(false);
+        intent.reconciliation_started_at_ns = None;
+        intent.reconciliation_next_allowed_at_ns = Some(now_ns.saturating_add(5_000_000_000));
+        Ok(intent.clone())
+    }
+
+    /// Rotate an identity only after a typed TooOld response and a complete
+    /// fixed-tip archive-aware scan prove there is no matching transfer block.
+    pub fn rotate_deposit_after_no_effect(
+        &mut self,
+        caller: Principal,
+        now_ns: u64,
+    ) -> Result<PendingDepositIntent, &'static str> {
+        let current = self
+            .pending_deposit_intents
+            .as_ref()
+            .and_then(|intents| intents.get(&caller))
+            .ok_or("pending deposit intent not found")?;
+        if current.too_old_rejected != Some(true)
+            || current.in_flight_attempts != Some(0)
+            || current.transfer_block_index.is_some()
+            || current.reconciliation_in_progress == Some(true)
+            || current.history_scan_cursor != current.history_scan_tip
+            || current.history_scan_tip.is_none()
+        {
+            return Err("fresh deposit identity requires a complete no-effect history proof");
+        }
+        let next_attempt = current
+            .attempt_no
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or("pending deposit attempt counter exhausted")?;
+        let timestamp = self
+            .reserve_deposit_transfer_timestamp(now_ns)
+            .map_err(|_| "deposit timestamp allocator exhausted")?;
+        let intent = self
+            .pending_deposit_intents
+            .as_mut()
+            .and_then(|intents| intents.get_mut(&caller))
+            .ok_or("pending deposit intent changed")?;
+        intent.transfer_created_at_time_ns = timestamp;
+        intent.transfer_block_index = None;
+        intent.in_flight_attempts = Some(0);
+        intent.ambiguous_seen = false;
+        intent.too_old_rejected = None;
+        intent.history_scan_cursor = None;
+        intent.history_scan_tip = None;
+        intent.reconciliation_in_progress = Some(false);
+        intent.reconciliation_started_at_ns = None;
+        intent.reconciliation_next_allowed_at_ns = None;
+        intent.attempt_no = Some(next_attempt);
+        Ok(intent.clone())
+    }
+
     /// Resolve dispatches interrupted by upgrade. Their ledger outcomes are
     /// unknown even if the old snapshot did not record an ambiguity flag.
     pub fn reconcile_pending_deposit_attempts_after_upgrade(&mut self) {
@@ -1223,6 +1536,14 @@ impl StabilityPoolState {
             return;
         };
         for intent in intents.values_mut() {
+            intent.reconciliation_in_progress = Some(false);
+            intent.reconciliation_generation = Some(
+                intent
+                    .reconciliation_generation
+                    .unwrap_or(0)
+                    .saturating_add(1),
+            );
+            intent.reconciliation_started_at_ns = None;
             match intent.in_flight_attempts {
                 Some(0) => {}
                 Some(_) | None => {
@@ -7042,6 +7363,166 @@ mod tests {
             .begin_deposit_intent(user_a(), icusd_ledger(), amount, 1_000)
             .unwrap();
         assert!(next_timestamp > first_timestamp);
+    }
+
+    #[test]
+    fn too_old_deposit_identity_stays_fenced_until_fixed_tip_absence_proof_completes() {
+        let mut state = StabilityPoolState::default();
+        let caller = user_a();
+        let ledger = icusd_ledger();
+        let amount = 25_000_000;
+        let original = state
+            .begin_deposit_intent(caller, ledger, amount, 1_000)
+            .unwrap();
+        state
+            .begin_deposit_intent(caller, ledger, amount, 1_000)
+            .unwrap();
+
+        assert!(state.mark_deposit_intent_too_old(caller, ledger, amount, original));
+        assert_eq!(
+            state.pending_deposit_intents.as_ref().unwrap()[&caller].in_flight_attempts,
+            Some(1),
+            "the other exact-identity dispatch must still be accounted for"
+        );
+        assert!(state.start_deposit_history_scan(caller, 130, 0).is_err());
+        state.mark_deposit_intent_ambiguous(caller, ledger, amount, original);
+        assert_eq!(
+            state.pending_deposit_intents.as_ref().unwrap()[&caller].too_old_rejected,
+            Some(true)
+        );
+        assert!(state
+            .begin_deposit_intent(caller, ledger, amount, 2_000)
+            .is_err());
+        let scan = state.claim_deposit_history_scan(caller, 1_000).unwrap();
+        let generation = scan.reconciliation_generation.unwrap();
+        assert!(state.claim_deposit_history_scan(caller, 1_000).is_err());
+        assert!(state
+            .start_deposit_history_scan(caller, 130, generation)
+            .is_ok());
+        assert!(state
+            .advance_deposit_history_scan(caller, 0, 130, 64, 1_000, generation)
+            .is_ok());
+        assert!(state.rotate_deposit_after_no_effect(caller, 2_000).is_err());
+
+        let scan = state
+            .claim_deposit_history_scan(caller, 5_000_001_000)
+            .unwrap();
+        let generation = scan.reconciliation_generation.unwrap();
+        assert!(state
+            .advance_deposit_history_scan(caller, 64, 130, 130, 5_000_001_000, generation)
+            .is_ok());
+        let rotated = state
+            .rotate_deposit_after_no_effect(caller, 2_000)
+            .expect("only a complete fixed-tip scan may rotate identity");
+        assert!(rotated.transfer_created_at_time_ns > original);
+        assert_eq!(rotated.amount, amount);
+        assert_eq!(rotated.token_ledger, ledger);
+        assert_eq!(rotated.attempt_no, Some(1));
+        assert_eq!(rotated.in_flight_attempts, Some(0));
+        assert_eq!(rotated.too_old_rejected, None);
+        assert_eq!(rotated.history_scan_cursor, None);
+        assert_eq!(rotated.history_scan_tip, None);
+        assert_eq!(
+            state.begin_deposit_intent(caller, ledger, amount, 2_001),
+            Ok(rotated.transfer_created_at_time_ns),
+            "the next dispatch uses the one newly authorized identity"
+        );
+    }
+
+    #[test]
+    fn reconciled_deposit_receipt_does_not_consume_a_dispatch_or_credit_twice() {
+        let mut state = StabilityPoolState::default();
+        let caller = user_a();
+        let ledger = icusd_ledger();
+        let amount = 25_000_000;
+        let timestamp = state
+            .begin_deposit_intent(caller, ledger, amount, 1_000)
+            .unwrap();
+        assert_eq!(
+            state.pending_deposit_intents.as_ref().unwrap()[&caller].in_flight_attempts,
+            Some(1)
+        );
+        let claim = state
+            .claim_pending_deposit_reconciliation(caller, 1_000)
+            .unwrap();
+        assert!(state
+            .claim_pending_deposit_reconciliation(caller, 1_000)
+            .is_err());
+        assert!(state.complete_reconciled_deposit(
+            caller,
+            ledger,
+            amount,
+            timestamp,
+            7,
+            2_000,
+            claim.reconciliation_generation.unwrap(),
+        ));
+        assert!(
+            !state.record_deposit_receipt(caller, ledger, amount, timestamp, 7),
+            "a late callback is fenced by the completed intent's removal"
+        );
+        assert!(!state.complete_deposit_intent(caller, ledger, amount, timestamp, 2_001));
+        assert_eq!(state.total_stablecoin_balances[&ledger], amount);
+        assert_eq!(state.pool_events.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn stale_reconciliation_generation_cannot_release_or_commit_new_lease() {
+        let mut state = StabilityPoolState::default();
+        let caller = user_a();
+        let ledger = icusd_ledger();
+        let amount = 25_000_000;
+        let timestamp = state
+            .begin_deposit_intent(caller, ledger, amount, 1_000)
+            .unwrap();
+        let old_claim = state
+            .claim_pending_deposit_reconciliation(caller, 1_000)
+            .unwrap();
+        let old_generation = old_claim.reconciliation_generation.unwrap();
+
+        let reclaimed = state
+            .claim_pending_deposit_reconciliation(caller, 900_000_001_000)
+            .unwrap();
+        let reclaimed_generation = reclaimed.reconciliation_generation.unwrap();
+        assert!(reclaimed_generation > old_generation);
+        state.release_deposit_history_scan(caller, old_generation, 900_000_002_000);
+        assert_eq!(
+            state.pending_deposit_intents.as_ref().unwrap()[&caller].reconciliation_in_progress,
+            Some(true),
+            "an expired future cannot release the reclaimed lease"
+        );
+
+        state.reconcile_pending_deposit_attempts_after_upgrade();
+        let new_claim = state
+            .claim_pending_deposit_reconciliation(caller, 900_000_003_000)
+            .unwrap();
+        let new_generation = new_claim.reconciliation_generation.unwrap();
+        assert!(new_generation > reclaimed_generation);
+        state.release_deposit_history_scan(caller, reclaimed_generation, 900_000_004_000);
+        assert_eq!(
+            state.pending_deposit_intents.as_ref().unwrap()[&caller].reconciliation_in_progress,
+            Some(true),
+            "a stale future cannot release the newer lease"
+        );
+        assert!(!state.complete_reconciled_deposit(
+            caller,
+            ledger,
+            amount,
+            timestamp,
+            7,
+            900_000_005_000,
+            old_generation,
+        ));
+        state.release_deposit_history_scan(caller, new_generation, 900_000_006_000);
+        assert!(
+            state
+                .claim_pending_deposit_reconciliation(caller, 900_000_006_000)
+                .is_err(),
+            "wrong-proof cooldown remains active"
+        );
+        assert!(state
+            .claim_pending_deposit_reconciliation(caller, 905_000_006_000)
+            .is_ok());
     }
 
     #[test]

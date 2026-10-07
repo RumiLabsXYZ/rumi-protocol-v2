@@ -1,6 +1,7 @@
 use candid::{decode_one, encode_args, encode_one, CandidType, Deserialize, Principal};
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
+use icrc_ledger_types::icrc2::transfer_from::{TransferFromArgs, TransferFromError};
 use icrc_ledger_types::icrc3::blocks::{GetBlocksRequest, GetBlocksResult};
 use icrc_ledger_types::icrc2::approve::ApproveArgs;
 use pocket_ic::{PocketIcBuilder, WasmResult};
@@ -826,6 +827,277 @@ fn test_direct_icusd_deposit() {
     let status = get_pool_status(&env.pic, env.sp_id);
     assert_eq!(status.total_depositors, 1);
     assert_eq!(status.total_deposits_e8s, deposit_amount);
+}
+
+fn setup_deposit_recovery_env() -> TestEnv {
+    let pic = PocketIcBuilder::new().with_application_subnet().build();
+    let minting_account = Principal::self_authenticating(&[100, 100, 100]);
+    let test_user = Principal::self_authenticating(&[1, 2, 3, 4]);
+    let admin = Principal::self_authenticating(&[5, 6, 7, 8]);
+    let protocol_id = Principal::self_authenticating(&[9, 10, 11, 12]);
+    let icusd_ledger = pic.create_canister();
+    pic.add_cycles(icusd_ledger, 2_000_000_000_000);
+    let init_args = LedgerInitArgs {
+        minting_account: Account { owner: minting_account, subaccount: None },
+        fee_collector_account: None,
+        transfer_fee: candid::Nat::from(0u64),
+        decimals: Some(8),
+        max_memo_length: Some(32),
+        token_name: "icUSD".to_string(),
+        token_symbol: "icUSD".to_string(),
+        metadata: vec![],
+        initial_balances: vec![(
+            Account { owner: test_user, subaccount: None },
+            candid::Nat::from(1_000_000_000_000_000u128),
+        )],
+        feature_flags: Some(FeatureFlags { icrc2: true }),
+        maximum_number_of_accounts: None,
+        accounts_overflow_trim_quantity: None,
+        archive_options: ArchiveOptions {
+            num_blocks_to_archive: 2000,
+            trigger_threshold: 1000,
+            controller_id: admin,
+            max_transactions_per_response: None,
+            max_message_size_bytes: None,
+            cycles_for_archive_creation: None,
+            node_max_memory_size_bytes: None,
+            more_controller_ids: None,
+        },
+    };
+    pic.install_canister(
+        icusd_ledger,
+        icrc1_ledger_wasm(),
+        encode_args((LedgerArg::Init(init_args),)).unwrap(),
+        None,
+    );
+    let sp_id = pic.create_canister();
+    pic.add_cycles(sp_id, 2_000_000_000_000);
+    pic.install_canister(
+        sp_id,
+        stability_pool_wasm(),
+        encode_one(StabilityPoolInitArgs { protocol_canister_id: protocol_id, authorized_admins: vec![admin] }).unwrap(),
+        None,
+    );
+    approve(&pic, icusd_ledger, test_user, sp_id, u128::MAX);
+    register_stablecoin(&pic, sp_id, admin, StablecoinConfig {
+        ledger_id: icusd_ledger,
+        symbol: "icUSD".to_string(),
+        decimals: 8,
+        priority: 1,
+        is_active: true,
+        transfer_fee: Some(0),
+        is_lp_token: None,
+        underlying_pool: None,
+    });
+    TestEnv {
+        pic,
+        admin,
+        test_user,
+        minting_account,
+        icusd_ledger,
+        ckusdt_ledger: Principal::anonymous(),
+        ckusdc_ledger: Principal::anonymous(),
+        pool_id: Principal::anonymous(),
+        sp_id,
+        protocol_id,
+    }
+}
+
+/// Recover an official-ledger transfer after its callback outcome was lost.
+#[test]
+fn official_ledger_simulated_lost_callback_reconciles_receipt_once() {
+    let env = setup_deposit_recovery_env();
+    let amount = 100_00000000u64;
+    let seeded = env.pic.update_call(
+        env.sp_id,
+        env.test_user,
+        "test_seed_unresolved_deposit_intent",
+        encode_args((env.icusd_ledger, amount, None::<u64>)).unwrap(),
+    ).expect("seed test-only ambiguous intent");
+    let timestamp = match seeded {
+        WasmResult::Reply(bytes) => decode_one::<Result<u64, StabilityPoolError>>(&bytes)
+            .expect("decode intent seed").expect("seed ambiguous intent"),
+        WasmResult::Reject(message) => panic!("intent seed rejected: {message}"),
+    };
+    let transfer = env.pic.update_call(
+        env.icusd_ledger,
+        env.sp_id,
+        "icrc2_transfer_from",
+        encode_one(TransferFromArgs {
+            spender_subaccount: None,
+            from: Account { owner: env.test_user, subaccount: None },
+            to: Account { owner: env.sp_id, subaccount: None },
+            amount: candid::Nat::from(amount),
+            fee: None,
+            memo: None,
+            created_at_time: Some(timestamp),
+        }).unwrap(),
+    ).expect("execute official transfer_from");
+    let actual_block = match transfer {
+        WasmResult::Reply(bytes) => decode_one::<Result<candid::Nat, TransferFromError>>(&bytes)
+            .expect("decode official transfer_from").expect("official transfer succeeds"),
+        WasmResult::Reject(message) => panic!("official transfer_from rejected: {message}"),
+    };
+    let block_index: u64 = actual_block.0.try_into().expect("block index fits u64");
+    assert_eq!(ledger_balance(&env.pic, env.icusd_ledger, env.sp_id), amount as u128);
+
+    let pending = env.pic.query_call(
+        env.sp_id,
+        env.test_user,
+        "get_pending_deposit_intent",
+        encode_args(()).unwrap(),
+    ).expect("query pending deposit");
+    let pending: Option<PendingDepositIntent> = match pending {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode pending intent"),
+        WasmResult::Reject(message) => panic!("pending intent query rejected: {message}"),
+    };
+    let pending = pending.expect("exact ambiguous intent remains pending");
+    assert_eq!(pending.token_ledger, env.icusd_ledger);
+    assert_eq!(pending.amount, amount);
+    assert!(!pending.ambiguous_seen);
+    assert_eq!(pending.in_flight_attempts, Some(1));
+    assert_eq!(pending.transfer_created_at_time_ns, timestamp);
+
+    let response = env.pic.query_call(
+        env.icusd_ledger,
+        Principal::anonymous(),
+        "icrc3_get_blocks",
+        encode_args((vec![GetBlocksRequest { start: block_index.into(), length: candid::Nat::from(1u64) }],)).unwrap(),
+    ).expect("query official ICRC-3 block");
+    let blocks: GetBlocksResult = match response {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode official ICRC-3 response"),
+        WasmResult::Reject(message) => panic!("ICRC-3 query rejected: {message}"),
+    };
+    let ledger_block = blocks.blocks.iter().find(|block| block.id == candid::Nat::from(block_index))
+        .expect("official ledger contains committed block");
+    let decoded = rumi_protocol_backend::icrc3_proof::decode_block(&ledger_block.block)
+        .expect("decode committed transfer_from block");
+    assert_eq!(decoded.op, "xfer");
+    assert_eq!(decoded.amount, u128::from(amount));
+    assert_eq!(decoded.created_at_time, Some(pending.transfer_created_at_time_ns));
+    assert_eq!(decoded.from.as_ref().unwrap().owner, env.test_user);
+    assert_eq!(decoded.to.as_ref().unwrap().owner, env.sp_id);
+    assert_eq!(decoded.spender.as_ref().unwrap().owner, env.sp_id);
+    assert!(matches!(decoded.transaction_fee, None | Some(0)));
+
+    let result = env.pic.update_call(
+        env.sp_id,
+        env.test_user,
+        "reconcile_pending_deposit",
+        encode_one(block_index).unwrap(),
+    ).expect("submit positive reconciliation");
+    match result {
+        WasmResult::Reply(bytes) => decode_one::<Result<(), StabilityPoolError>>(&bytes)
+            .expect("decode reconciliation").expect("exact receipt credits deposit"),
+        WasmResult::Reject(message) => panic!("reconciliation rejected: {message}"),
+    }
+    let position = get_user_position(&env.pic, env.sp_id, env.test_user).expect("position");
+    assert_eq!(position.stablecoin_balances.get(&env.icusd_ledger).copied(), Some(amount));
+    assert_eq!(get_pool_status(&env.pic, env.sp_id).total_deposits_e8s, amount);
+    let replay = env.pic.update_call(
+        env.sp_id,
+        env.test_user,
+        "reconcile_pending_deposit",
+        encode_one(block_index).unwrap(),
+    ).expect("submit reconciliation replay");
+    if let WasmResult::Reply(bytes) = replay {
+        let _: Result<(), StabilityPoolError> = decode_one(&bytes).expect("decode replay");
+    }
+    assert_eq!(get_pool_status(&env.pic, env.sp_id).total_deposits_e8s, amount);
+}
+
+/// The official ledger returns TooOld again for the exact expired identity;
+/// the complete archive-aware prefix then permits a fresh identity.
+#[test]
+fn official_ledger_too_old_and_complete_absence_scan_rotate_identity() {
+    let env = setup_deposit_recovery_env();
+    let amount = 100_00000000u64;
+    let old_timestamp = 1u64;
+    let seeded = env.pic.update_call(
+        env.sp_id,
+        env.test_user,
+        "test_seed_unresolved_deposit_intent",
+        encode_args((env.icusd_ledger, amount, Some(old_timestamp))).unwrap(),
+    ).expect("seed old exact identity");
+    match seeded {
+        WasmResult::Reply(bytes) => assert_eq!(
+            decode_one::<Result<u64, StabilityPoolError>>(&bytes)
+                .expect("decode old intent seed").expect("seed old identity"),
+            old_timestamp,
+        ),
+        WasmResult::Reject(message) => panic!("old intent seed rejected: {message}"),
+    }
+    let log_length_before = icrc3_log_length(&env.pic, env.icusd_ledger);
+    let user_balance_before = ledger_balance(&env.pic, env.icusd_ledger, env.test_user);
+    let pool_balance_before = ledger_balance(&env.pic, env.icusd_ledger, env.sp_id);
+    let args = TransferFromArgs {
+        spender_subaccount: None,
+        from: Account { owner: env.test_user, subaccount: None },
+        to: Account { owner: env.sp_id, subaccount: None },
+        amount: candid::Nat::from(amount),
+        fee: None,
+        memo: None,
+        created_at_time: Some(old_timestamp),
+    };
+    for _ in 0..2 {
+        let result = env.pic.update_call(
+            env.icusd_ledger,
+            env.sp_id,
+            "icrc2_transfer_from",
+            encode_one(args.clone()).unwrap(),
+        ).expect("call official old transfer_from");
+        match result {
+            WasmResult::Reply(bytes) => match decode_one::<Result<candid::Nat, TransferFromError>>(&bytes)
+                .expect("decode old transfer_from")
+            {
+                Err(TransferFromError::TooOld) => {},
+                other => panic!("same expired transfer identity was not TooOld: {other:?}"),
+            },
+            WasmResult::Reject(message) => panic!("old transfer_from rejected: {message}"),
+        }
+    }
+    assert_eq!(icrc3_log_length(&env.pic, env.icusd_ledger), log_length_before);
+    assert_eq!(ledger_balance(&env.pic, env.icusd_ledger, env.test_user), user_balance_before);
+    assert_eq!(ledger_balance(&env.pic, env.icusd_ledger, env.sp_id), pool_balance_before);
+
+    let marked = env.pic.update_call(
+        env.sp_id,
+        env.test_user,
+        "test_mark_deposit_intent_too_old",
+        encode_args((env.icusd_ledger, amount, old_timestamp)).unwrap(),
+    ).expect("persist the observed typed TooOld result");
+    match marked {
+        WasmResult::Reply(bytes) => assert!(decode_one::<bool>(&bytes).expect("decode typed marker")),
+        WasmResult::Reject(message) => panic!("typed TooOld marker rejected: {message}"),
+    }
+    let scanned = env.pic.update_call(
+        env.sp_id,
+        env.test_user,
+        "reconcile_pending_deposit_history",
+        encode_args(()).unwrap(),
+    ).expect("run complete archive-aware absence scan");
+    match scanned {
+        WasmResult::Reply(bytes) => decode_one::<Result<(), StabilityPoolError>>(&bytes)
+            .expect("decode absence scan").expect("complete history scan proves absence"),
+        WasmResult::Reject(message) => panic!("absence scan rejected: {message}"),
+    }
+    let pending = env.pic.query_call(
+        env.sp_id,
+        env.test_user,
+        "get_pending_deposit_intent",
+        encode_args(()).unwrap(),
+    ).expect("query rotated deposit identity");
+    let pending: Option<PendingDepositIntent> = match pending {
+        WasmResult::Reply(bytes) => decode_one(&bytes).expect("decode rotated intent"),
+        WasmResult::Reject(message) => panic!("rotated intent query rejected: {message}"),
+    };
+    let pending = pending.expect("no-effect scan retains a fresh retry identity");
+    assert_ne!(pending.transfer_created_at_time_ns, old_timestamp);
+    assert_eq!(pending.attempt_no, Some(1));
+    assert_eq!(pending.in_flight_attempts, Some(0));
+    assert_eq!(pending.too_old_rejected, None);
+    assert_eq!(ledger_balance(&env.pic, env.icusd_ledger, env.test_user), user_balance_before);
+    assert_eq!(ledger_balance(&env.pic, env.icusd_ledger, env.sp_id), pool_balance_before);
 }
 
 /// Concurrent identical calls share one persisted transfer intent. The ledger
