@@ -20,7 +20,9 @@
 mod common;
 
 use candid::{decode_one, encode_args, encode_one, Nat, Principal};
-use common::{deploy_pool_with_liquidity_and_swaps, three_pool_wasm, ThreePoolHarness};
+use common::{
+    deploy_pool_with_liquidity_and_swaps, three_pool_test_endpoints_wasm, ThreePoolHarness,
+};
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
 use icrc_ledger_types::icrc2::approve::{ApproveArgs, ApproveError};
@@ -245,7 +247,7 @@ fn cl01_legacy_heap_upgrade_preserves_lp_then_rechecks_concurrent_transfer() {
     h.pic
         .upgrade_canister(
             legacy_pool,
-            three_pool_wasm(),
+            three_pool_test_endpoints_wasm(),
             encode_args(()).unwrap(),
             None,
         )

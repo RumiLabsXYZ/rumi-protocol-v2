@@ -12,7 +12,9 @@
 mod common;
 
 use candid::{decode_one, encode_args, encode_one, Nat, Principal};
-use common::{deploy_pool_with_liquidity_and_swaps, three_pool_wasm, ThreePoolHarness};
+use common::{
+    deploy_pool_with_liquidity_and_swaps, three_pool_test_endpoints_wasm, ThreePoolHarness,
+};
 use icrc_ledger_types::{
     icrc1::{
         account::Account,
@@ -311,7 +313,12 @@ fn predecessor_stable_balances_allowances_and_blocks_survive_account_upgrade() {
     );
 
     h.pic
-        .upgrade_canister(pool, three_pool_wasm(), encode_args(()).unwrap(), None)
+        .upgrade_canister(
+            pool,
+            three_pool_test_endpoints_wasm(),
+            encode_args(()).unwrap(),
+            None,
+        )
         .expect("upgrade predecessor stable maps");
 
     assert_eq!(

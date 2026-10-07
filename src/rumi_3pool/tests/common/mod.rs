@@ -70,11 +70,18 @@ pub fn icrc1_ledger_wasm() -> Vec<u8> {
 }
 
 pub fn three_pool_wasm() -> Vec<u8> {
-    // Both integration_test.rs and icrc3_hash_cache.rs include the same
-    // WASM file. Build with `--features test_endpoints` if you need the
-    // test_get_raw_block endpoint exposed (icrc3_hash_cache.rs needs it;
-    // integration_test.rs doesn't but the endpoint being present is harmless).
+    // Canonical production fixture. It must be built without test_endpoints;
+    // production-guard tests use this artifact to verify gated ingress.
     include_bytes!("../../../../target/wasm32-unknown-unknown/release/rumi_3pool.wasm").to_vec()
+}
+
+pub fn three_pool_test_endpoints_wasm() -> Vec<u8> {
+    // Kept separate from the canonical production artifact so receipt and
+    // test-only endpoint coverage cannot silently change production fixtures.
+    include_bytes!(
+        "../../../../target/wasm32-unknown-unknown/release/rumi_3pool_test_endpoints.wasm"
+    )
+    .to_vec()
 }
 
 // ─── Harness ───
@@ -165,7 +172,11 @@ struct LedgerSpec {
 /// Returns a harness with at least `n_swaps` + a handful of LP-token mint
 /// blocks in the ICRC-3 log.
 pub fn deploy_pool_with_liquidity_and_swaps(n_swaps: u64) -> ThreePoolHarness {
-    deploy_pool_with_liquidity_fee_and_swaps(n_swaps, 0)
+    deploy_pool_with_liquidity_and_swaps_test_endpoints(n_swaps)
+}
+
+pub fn deploy_pool_with_liquidity_and_swaps_test_endpoints(n_swaps: u64) -> ThreePoolHarness {
+    deploy_pool_with_archive_cycles_test_endpoints(n_swaps, 0, None)
 }
 
 /// Same as `deploy_pool_with_liquidity_and_swaps` but with a configurable
@@ -175,13 +186,25 @@ pub fn deploy_pool_with_liquidity_fee_and_swaps(
     n_swaps: u64,
     transfer_fee: u128,
 ) -> ThreePoolHarness {
-    deploy_pool_with_archive_cycles(n_swaps, transfer_fee, None)
+    deploy_pool_with_archive_cycles_test_endpoints(n_swaps, transfer_fee, None)
 }
 
 /// Deploy the standard harness with explicit cycles forwarded when the ledger
 /// creates an archive canister. Most tests leave this unset; archive-history
 /// tests opt in so PocketIC's archive canister creation is funded.
 pub fn deploy_pool_with_archive_cycles(
+    n_swaps: u64,
+    transfer_fee: u128,
+    cycles_for_archive_creation: Option<u64>,
+) -> ThreePoolHarness {
+    deploy_pool_with_archive_cycles_test_endpoints(
+        n_swaps,
+        transfer_fee,
+        cycles_for_archive_creation,
+    )
+}
+
+pub fn deploy_pool_with_archive_cycles_test_endpoints(
     n_swaps: u64,
     transfer_fee: u128,
     cycles_for_archive_creation: Option<u64>,
@@ -286,7 +309,7 @@ pub fn deploy_pool_with_archive_cycles(
     pic.add_cycles(pool_id, 2_000_000_000_000);
     pic.install_canister(
         pool_id,
-        three_pool_wasm(),
+        three_pool_test_endpoints_wasm(),
         encode_one(pool_init_args).unwrap(),
         None,
     );

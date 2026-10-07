@@ -4,8 +4,8 @@
 mod common;
 use candid::{decode_one, encode_args, encode_one, Nat, Principal};
 use common::{
-    deploy_pool_with_archive_cycles, deploy_pool_with_liquidity_fee_and_swaps, three_pool_wasm,
-    ThreePoolHarness,
+    deploy_pool_with_archive_cycles, deploy_pool_with_liquidity_fee_and_swaps,
+    three_pool_test_endpoints_wasm, ThreePoolHarness,
 };
 use icrc_ledger_types::icrc1::account::Account;
 use icrc_ledger_types::icrc1::transfer::{TransferArg, TransferError};
@@ -167,7 +167,7 @@ fn wallet_receipts_bind_ledger_economics_and_replay_survives_upgrade() {
     h.pic
         .upgrade_canister(
             h.three_pool,
-            three_pool_wasm(),
+            three_pool_test_endpoints_wasm(),
             encode_args(()).unwrap(),
             None,
         )
@@ -199,7 +199,7 @@ fn stopped_output_ledger_never_refunds_or_replays_and_fence_survives_upgrade() {
     h.pic
         .upgrade_canister(
             h.three_pool,
-            three_pool_wasm(),
+            three_pool_test_endpoints_wasm(),
             encode_args(()).unwrap(),
             None,
         )
@@ -402,7 +402,7 @@ fn archived_nonmatching_history_is_scanned_and_cursor_survives_upgrade() {
     h.pic
         .upgrade_canister(
             h.three_pool,
-            three_pool_wasm(),
+            three_pool_test_endpoints_wasm(),
             encode_args(()).unwrap(),
             None,
         )
